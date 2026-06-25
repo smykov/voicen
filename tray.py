@@ -17,7 +17,7 @@ class TrayController:
 
     def create_icon(self, on_exit: Callable[[], None]) -> pystray.Icon:
         menu = pystray.Menu(
-            pystray.MenuItem("Транскрибатор", None, enabled=False),
+            pystray.MenuItem("Transcribator On Tray (ToT)", None, enabled=False),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Settings", self._open_settings),
             pystray.MenuItem("Exit", lambda: on_exit()),
@@ -25,7 +25,7 @@ class TrayController:
         self._icon = pystray.Icon(
             "voicen",
             get_icon(AppState.IDLE),
-            "Транскрибатор — Ctrl+Space to record",
+            "Transcribator On Tray — Ctrl+Space to record",
             menu=menu,
         )
         return self._icon
