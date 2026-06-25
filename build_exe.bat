@@ -11,13 +11,13 @@ if %errorlevel% neq 0 (
 
 echo.
 echo Building with PyInstaller...
-pyinstaller --onefile --windowed --name "WhisperTranscribe" --hidden-import pyperclip --noconfirm main.py
+pyinstaller --onefile --windowed --name "voicen" --hidden-import pyperclip --noconfirm main.py
 if %errorlevel% neq 0 (
     echo PyInstaller failed
     exit /b %errorlevel%
 )
 
 echo.
-echo Done! EXE at dist\WhisperTranscribe.exe
+echo     Done! EXE at dist\voicen.exe
 echo.
-echo To run: dist\WhisperTranscribe.exe
+echo To run: dist\voicen.exe

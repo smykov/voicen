@@ -1,0 +1,12 @@
+{
+  "api_url": "http://10.10.10.110:8000/v1/audio/transcriptions",
+  "api_key": "your-api-key",
+  "language": "ru",
+  "model": "large-v3",
+  "sample_rate": 16000,
+  "channels": 1,
+  "transcription_timeout": 120,
+  "auto_paste": true,
+  "save_history": true,
+  "auto_start": false
+}

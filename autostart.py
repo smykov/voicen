@@ -5,7 +5,7 @@ import sys
 
 logger = logging.getLogger(__name__)
 
-_SHORTCUT_NAME = "WhisperTranscribe.lnk"
+_SHORTCUT_NAME = "voicen.lnk"
 
 
 def _startup_dir() -> str:

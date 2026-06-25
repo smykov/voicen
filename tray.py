@@ -17,15 +17,15 @@ class TrayController:
 
     def create_icon(self, on_exit: Callable[[], None]) -> pystray.Icon:
         menu = pystray.Menu(
-            pystray.MenuItem("Whisper Transcribe", None, enabled=False),
+            pystray.MenuItem("Транскрибатор", None, enabled=False),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Settings", self._open_settings),
             pystray.MenuItem("Exit", lambda: on_exit()),
         )
         self._icon = pystray.Icon(
-            "whisper-transcribe",
+            "voicen",
             get_icon(AppState.IDLE),
-            "Whisper Transcribe — Ctrl+Space to record",
+            "Транскрибатор — Ctrl+Space to record",
             menu=menu,
         )
         return self._icon
