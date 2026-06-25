@@ -47,7 +47,7 @@ class SettingsWindow:
 
     def _run(self) -> None:
         self._root = tk.Tk()
-        self._root.title("ToT — Settings")
+        self._root.title("TiT — Settings")
         self._root.resizable(False, False)
         self._root.protocol("WM_DELETE_WINDOW", self._close)
 

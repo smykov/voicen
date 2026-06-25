@@ -1,4 +1,4 @@
-# Transcribator On Tray (ToT)
+# Transcriber In Tray (TiT)
 
 Голосовая транскрибация через GPU-кластер. Запись по Ctrl+Space, автоматическое копирование в буфер и вставка в активное поле.
 
