@@ -1,14 +1,14 @@
 # Contract: installer, uninstaller, CI jobs and release
 
-Interfaces seen from outside the app: command-line switches, files, CI job names and their pass/fail conditions. Items marked **confirm on Windows** are Tauri/NSIS behaviour proven by the first Windows task (research.md).
+Interfaces seen from outside the app: command-line switches, files, CI job names and their pass/fail conditions. The `windows` job smoke step asserts `voicen.exe`, `uninstall.exe` and `Voicen.lnk` at the paths below (prints `found <name> at <path>` or fails with `<name> not found at <path>`). Items marked **confirm on Windows** are Tauri/NSIS behaviour proven by the first Windows task (research.md).
 
 ## Installer (`Voicen_<version>_x64-setup.exe`, Tauri NSIS bundler)
 
 | Aspect | Contract | Spec |
 |---|---|---|
 | Install mode | `bundle.windows.nsis.installMode = "currentUser"` (exists); no UAC prompt | FR-018 |
-| Install dir | `%LOCALAPPDATA%\Voicen` (Tauri default — **confirm on Windows**) | R9 |
-| Shortcut | Start-menu shortcut with AppUserModelID = `identifier` (`dev.voicen.app`) — **confirm on Windows** | FR-018 |
+| Install dir | `%LOCALAPPDATA%\Voicen` (Tauri default; `voicen.exe` there asserted by the smoke step since T-002, confirmed by the first green run after the owner's push) | R9 |
+| Shortcut | Start-menu shortcut with AppUserModelID = `identifier` (`dev.voicen.app`); `Voicen.lnk` under `%APPDATA%\Microsoft\Windows\Start Menu\Programs` asserted by the smoke step since T-002, confirmed by the first green run (AppUserModelID not asserted by CI) | FR-018 |
 | Bundled resources | `THIRD-PARTY-NOTICES.txt`, Silero VAD model (path from 001) | FR-020 |
 | Not bundled | whisper models, PDB | FR-020, R5 |
 | Languages | `languages = ["English", "Russian"]`, `displayLanguageSelector = false` | FR-025 |

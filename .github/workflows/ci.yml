@@ -49,9 +49,16 @@ jobs:
         run: |
           $setup = Get-ChildItem target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
           Start-Process $setup.FullName -ArgumentList '/S' -Wait
-          $exe = Get-ChildItem (Join-Path $env:LOCALAPPDATA 'Voicen') -Filter voicen.exe -Recurse | Select-Object -First 1
-          if (-not $exe) { throw "voicen.exe not found after install" }
-          $proc = Start-Process $exe.FullName -PassThru
+          $exe = Join-Path $env:LOCALAPPDATA 'Voicen\voicen.exe'
+          $uninstaller = Join-Path $env:LOCALAPPDATA 'Voicen\uninstall.exe'
+          $shortcut = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Voicen.lnk'
+          $missing = @()
+          foreach ($p in @(@('voicen.exe', $exe), @('uninstall.exe', $uninstaller), @('Voicen.lnk', $shortcut))) {
+            if (Test-Path -LiteralPath $p[1] -PathType Leaf) { Write-Output "found $($p[0]) at $($p[1])" }
+            else { $missing += "$($p[0]) not found at $($p[1])" }
+          }
+          if ($missing) { throw ($missing -join '; ') }
+          $proc = Start-Process -FilePath $exe -PassThru
           $log = Join-Path $env:LOCALAPPDATA 'Voicen\logs\voicen.log'
           $expected = "($env:VOICEN_COMMIT) started"
           $found = $false

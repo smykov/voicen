@@ -11,7 +11,7 @@ Release 1 of Voicen: a Windows 10/11 dictation tool, public on GitHub Releases, 
 
 | Stage | Scope (FR-NN) | Done when | Target date | Status |
 |---|---|---|---|---|
-| 0 — Skeleton | FR-18 | `make check` green; Windows CI builds, installs and launches the app with the commit in its log | 2026-10-02 (CI: after the GitHub repo exists) | in progress |
+| 0 — Skeleton | FR-18 | `make check` green; Windows CI builds, installs and launches the app with the commit in its log | 2026-10-02 (repo `smykov/voicen` exists, decisions #14; CI run 37035261228 on df52798 green for `gate` and `windows`) | in progress |
 | 1 — Dictation via API | FR-01, FR-02, FR-03, FR-04, FR-05, FR-06, FR-10, FR-11, FR-12, FR-20, FR-21, FR-22, FR-24, FR-25, FR-13 (engine part) | hotkey → API transcript pasted into Notepad on the owner's PC; failures notified and retryable | OQ-01 | not started |
 | 2 — Local engines | FR-07, FR-08, FR-17, FR-28 | offline dictation with a downloaded `small` model; local server works | OQ-01 | not started |
 | 3 — Post-processing and robustness | FR-09, FR-23, FR-26, FR-27, FR-14, FR-29 | LLM step with fallback; ordering; sleep/resume and mic changes survive | OQ-01 | not started |
