@@ -5,7 +5,7 @@
      Write only what the owner said or approved. A guess is marked "working assumption" in section 10;
      an unknown goes to docs/open-questions.md. IDs (FR-NN, NFR-NN) are never reused. -->
 
-Version: 3 · Status: draft · Approved by the owner: — · Roast: round 2 NOT_READY (on v2), remaining High closed by the owner (`docs/requirements.reviews/`)
+Version: 3 · Status: approved · Approved by the owner: 2026-10-02 · Roast: round 2 NOT_READY (on v2), remaining High closed by the owner (`docs/requirements.reviews/`)
 Source: owner's brief in the /teamwright:init call (2026-10-02, Russian), interview rounds 1–3 (2026-10-02), roast round 1–2 answers (2026-10-02)
 
 Pointers: `(brief)` — the owner's brief; `(iN)` — interview round N; `(r1#N)`, `(r2#N)` — roast round 1/2 finding N, accepted by the owner.
