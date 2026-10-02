@@ -5,7 +5,21 @@ import ts from "typescript-eslint";
 import svelteConfig from "./svelte.config.js";
 
 export default ts.config(
-  { ignores: ["build/", ".svelte-kit/", "src-tauri/", "target/", "test-results/", "playwright-report/"] },
+  {
+    ignores: [
+      "build/",
+      ".svelte-kit/",
+      "src-tauri/",
+      "target/",
+      "test-results/",
+      "playwright-report/",
+      ".teamwright/",
+      ".serena/",
+      ".claude/",
+      "scripts/",
+      "docs/",
+    ],
+  },
   js.configs.recommended,
   ...ts.configs.recommended,
   ...svelte.configs.recommended,
