@@ -23,7 +23,7 @@ Technical approach (see [research.md](research.md)):
 - Shell: `tauri` 2, `tauri-plugin-single-instance`, `cpal`, `windows` (Win32 + WinRT toasts).
 - Dev: `wiremock` + `tokio` (mock OpenAI-compatible server).
 
-**Storage**: No persistent store of its own. Settings are read through a trait owned by 004. The API key is read from Credential Manager through a trait. The pending recording is one temporary WAV under `<data dir>/tmp/audio/`; in-flight audio stays in memory.
+**Storage**: No persistent store of its own. Settings are read as a projection of 004's `SettingsService::snapshot()`. The API key is read through 004's `CredentialStore` (`KeySlot::TranscriptionApi`); its one Windows implementation is 004 T016. The pending recording is one temporary WAV under `<data dir>/tmp/audio/`; in-flight audio stays in memory.
 
 **Testing**:
 - `cargo test -p voicen-core` in the `voicen-rust:1.99` image: fakes for every platform trait, plus wiremock for HTTP.
@@ -114,8 +114,7 @@ crates/voicen-core/
 ├── src/
 │   ├── lib.rs
 │   ├── platform.rs          # traits: AudioSource, Clipboard, Paster, Notifier, Indicator,
-│   │                        #   CredentialStore, TempAudioStore, Clock, SettingsSource
-│   ├── settings.rs          # DictationSettings read model + defaults (FR-21 values)
+│   │                        #   TempAudioStore, Clock, SettingsSource (+ DictationSettings, a projection of 004's Settings)
 │   ├── timeouts.rs          # Timeouts — single source (FR-24)
 │   ├── messages.rs          # MessageKey, FailureReason → key
 │   ├── events.rs            # DictationEvent (log allowlist), PipelineObserver
@@ -156,7 +155,6 @@ src-tauri/src/
 │   ├── toast.rs             # WinRT toast + Retry activation
 │   ├── tray.rs              # icons per state, menu, error-clear on open
 │   ├── overlay.rs           # create/destroy no-activate overlay window
-│   └── credentials.rs       # CredReadW
 └── tests/                   # Windows-only integration tests (test window, injected WAV)
 
 src/

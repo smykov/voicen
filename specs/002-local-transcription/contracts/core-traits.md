@@ -1,6 +1,6 @@
 # Contract: Core interfaces (voicen-core)
 
-Rust signatures are the contract's shape; exact generic/async spelling follows 001's `Engine` trait once it exists. Types prefixed `001::` are owned by `001-dictation-via-api` and only consumed here.
+Rust signatures are the contract's shape; exact generic/async spelling follows 001's `Engine` trait once it exists. Types prefixed `001::` are owned by `001-dictation-via-api` and only consumed here. `CredentialStore`, `KeySlot`, `Secret`, `Settings` and `DownloadedModels` are owned by `004-settings-and-first-run` (decisions #21).
 
 ## SpeechModel — implemented by `crates/voicen-whisper` (real) and core tests (fake)
 
@@ -23,6 +23,7 @@ Guarantees: no panics on bad input (errors are `EngineError::Load(reason)` / `En
 
 ```rust
 pub struct ModelStore { /* models dir, catalog */ }
+// implements 004's `DownloadedModels { is_downloaded(id), list() }` (trait defined by 004; decisions #21)
 impl ModelStore {
     pub fn new(models_dir: PathBuf) -> Self;            // dir from the shell's single data-dir resolver
     pub fn cleanup_at_start(&self) -> io::Result<()>;   // deletes *.part
@@ -89,7 +90,7 @@ impl 001::Engine for BuiltinEngine {
 ## Local server — configuration of `001::OpenAiCompatClient`
 
 ```rust
-pub fn local_server_endpoint(cfg: &LocalServerConfig, secrets: &dyn 001::CredentialStore)
+pub fn local_server_endpoint(cfg: &LocalServerConfig, secrets: &dyn CredentialStore /* 004, KeySlot::LocalServer */)
     -> 001::Endpoint;   // base_url, model: Option, key: Option, timeouts { connect: 5 s, request: 60 s }
 ```
 

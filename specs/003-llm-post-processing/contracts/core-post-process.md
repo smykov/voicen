@@ -43,7 +43,7 @@ The pipeline constructor takes `Arc<dyn PostProcessor>`. Tests inject a fake. Th
 
 ```rust
 pub const STARTER_PROMPT: &str = "…";                          // data-model, single source
-pub fn defaults() -> PostProcessingSettings;                     // used by 004's defaults()
+pub fn defaults() -> PostProcessingSettings;                     // created by 004 (T068); used by 004's defaults()
 pub fn validate(s: &PostProcessingSettings) -> Vec<FieldError>;  // used by 004's validator
 impl PostProcessOutcome {
     pub fn final_text<'a>(&'a self, raw: &'a str) -> &'a str;
@@ -59,4 +59,4 @@ impl PostProcessOutcome {
 | 001 | `openai::Client` | method `chat_completion(&self, base_url, model, key: Option<&Secret>, messages, total: Duration) -> Result<String, Failure>` using the same connector, base-URL joining and connect timeout |
 | 001 | `Notice` | variant `PostProcessingSkipped(SkipReason)` |
 | 004 | `Settings` | field `post_processing: PostProcessingSettings` |
-| 004 | `SecretStore` / `KeySlot` | slot `PostProcessing` |
+| 004 | `CredentialStore` / `KeySlot` | slot `PostProcessing` |

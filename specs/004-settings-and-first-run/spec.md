@@ -136,7 +136,7 @@ A user who enters an `http://` base URL on a non-local host is warned that the A
 
 ### Edge Cases
 
-- **Settings file unreadable** (corrupt JSON, unknown schema version): backed up as `settings.json.bad-<timestamp>`, defaults applied as on a first run, settings open on the Engine tab, notification "settings could not be read and were reset"; stored keys untouched (Clarification Q4).
+- **Settings file unreadable** (corrupt JSON, unknown schema version): backed up as `settings.json.bad-<timestamp>`, defaults applied as on a first run, settings open on the Engine tab, notification "settings could not be read and were reset"; stored keys untouched (Clarification Q4). If the file cannot be moved aside or read for an I/O reason: defaults in memory only, file never written or moved, saves refused with a notice until restart, credential store untouched (FR-010).
 - **Settings file cannot be written** (disk full, permission): save is refused with "cannot save settings: <reason>", the in-memory settings, hotkey, autostart and keys stay as they were before the save.
 - **Save interrupted** (crash or power loss during save): the previous settings file stays intact; a partially written file is never read as the settings (write to a temporary file, then replace).
 - **Credential Manager unavailable or write refused**: save refused, key field highlighted, the key is never stored in the settings file or anywhere else (req NFR-04).
@@ -192,7 +192,7 @@ A user who enters an `http://` base URL on a non-local host is warned that the A
   - start with Windows: the logon entry is created or removed before Save reports success;
   - UI language: immediately in the open windows, the tray menu, the overlay and every later notification.
 - **FR-009** (req FR-13): Saved settings MUST persist across app restarts and be the settings loaded at the next start; a save MUST never leave a partially written settings file (the previous file stays valid until the new one is complete).
-- **FR-010** (req FR-13, FR-21; Clarification Q4): When the settings file exists but cannot be read, the system MUST keep it as a timestamped backup, start with the defaults of FR-005 (opening settings on the Engine tab), notify "settings could not be read and were reset", and leave stored keys untouched.
+- **FR-010** (req FR-13, FR-21; Clarification Q4): When the settings file exists but cannot be read, the system MUST keep it as a timestamped backup, start with the defaults of FR-005 (opening settings on the Engine tab), notify "settings could not be read and were reset", and leave stored keys untouched. If the file cannot be moved aside, or a read fails with an I/O error other than not-found (locked, no permission), the system MUST run on the defaults in memory, MUST NOT write or move the file, MUST refuse saves with a notice until restart, and MUST NOT touch the credential store (decisions #19).
 
 **Language**
 

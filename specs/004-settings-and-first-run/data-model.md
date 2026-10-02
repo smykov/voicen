@@ -20,21 +20,21 @@ All types live in `crates/voicen-core` (module `settings`, `secrets`, `i18n`) un
 | `hotkey` | string, canonical (`Ctrl+Alt+Space`) | `Ctrl+Alt+Space` | ≥ 1 modifier, one key from the set of R-6, no `Esc`; registrable | `recording.hotkey` | FR-13, FR-05, FR-22 |
 | `mode` | `hold` \| `toggle` | `hold` | — | `recording.mode` | FR-13, FR-02 |
 | `auto_paste` | bool | `true` | — | `output.auto_paste` | FR-13, FR-10 |
-| `post_processing` | `PostProcessingSettings` (003 data-model) | 003's defaults: off, `""`, `""`, starter prompt | 003's `validate()` when enabled | `post_processing.*` | FR-13, FR-09 |
+| `post_processing` | `PostProcessingSettings` (defined in core by 004; fields per 003 data-model) | its `defaults()`: off, `""`, `""`, starter prompt | 003's `validate()` when enabled | `post_processing.*` | FR-13, FR-09 |
 | `history.enabled` | bool | `true` | — | `history.enabled` | FR-13, FR-16 |
 | `history.size` | u32 | `20` | whole number 1–100 | `history.size` | FR-13, FR-16 |
 | `start_with_windows` | bool | `false` | applied in save (R-3); failure refuses | `general.start_with_windows` | FR-19 |
 | `ui_language` | `en` \| `ru` | `resolve_ui_language(os_tag)` | — | `general.ui_language` | FR-15, FR-21 |
 
 Rules:
-- `Settings` has **no key field**; it derives `Serialize`/`Deserialize`; every field has `#[serde(default)]` so older files load (R-2).
+- `Settings` has **no key field**; it derives `Serialize`/`Deserialize`; the container has `#[serde(default)]` built from `defaults()` (not the field type's `Default`), so a missing field takes its value from `defaults()` and older files load (R-2).
 - Fields of engines (and post-processing) that are not selected are kept and not validated.
 - Normalization before validation and storage: URLs trimmed and one trailing `/` removed; models trimmed.
-- `defaults(os_tag)` is the one function that builds the defaults; it calls 003's post-processing defaults function.
+- `defaults(os_tag)` is the one function that builds the defaults; it calls `post_process::settings::defaults()` (data type created by 004's foundational phase; 003 adds only `validate()`) and `resolve_ui_language` (`i18n.rs`, teamwright T-005).
 
 ## KeySlot and Secret (never persisted in the settings file)
 
-- `KeySlot`: `TranscriptionApi` (target `Voicen/transcription-api`), `LocalServer` (`Voicen/local-server`), `PostProcessing` (`Voicen/post-processing`).
+- Defined by 004 in core and used by 001–003 (decisions #21). `KeySlot`: `TranscriptionApi` (target `Voicen/transcription-api`), `LocalServer` (`Voicen/local-server`), `PostProcessing` (`Voicen/post-processing`).
 - `Secret(String)`: no `Serialize`; `Debug`/`Display` print `***`; zeroed on drop.
 - `KeyEdit` (per slot, in a save or test request): `Untouched` | `Replace(Secret)` | `Clear`. Validation of `engine = api` requires `Replace` or (`Untouched` and the slot holds a key).
 - `KeyPresence`: `{transcription_api: bool, local_server: bool, post_processing: bool}` — the only key information sent to a window.
@@ -58,7 +58,7 @@ Validate ──errors──▶ Refused
    │ok
 HotkeyPrepared? ──fail──▶ Refused(hotkey.unavailable)
    │
-AutostartApplied? ──fail──▶ undo hotkey ▶ Refused(autostart.failed)
+AutostartApplied? (US5 only; skipped before) ──fail──▶ undo hotkey ▶ Refused(autostart.failed)
    │
 KeysApplied ──fail──▶ undo keys so far, autostart, hotkey ▶ Refused(key.store_failed)
    │
@@ -69,7 +69,7 @@ Committed (old hotkey released, snapshot swapped, subscribers notified) ▶ Save
 
 ## LoadOutcome (startup)
 
-`Loaded(Settings)` | `FirstRun(Settings)` (no file; defaults written) | `Reset { settings, backup_file_name }` (unreadable file moved aside; defaults written). `FirstRun` and `Reset` open the settings window on the Engine tab; `Reset` also notifies `notice.settings_reset`. The decision is the pure function `startup_action(outcome, launched_by_autostart)`: `OpenSettings(Engine)` for `FirstRun`/`Reset`, `TrayOnly` for `Loaded`, regardless of `--autostart` (spec US5-3); the startup hotkey-failure branch is 001's.
+`Loaded(Settings)` | `FirstRun(Settings)` (no file; defaults written) | `Reset { settings, backup_file_name }` (unreadable file moved aside; defaults written) | `Unavailable(Settings)` (the file cannot be moved aside, or a read fails with an I/O error other than not-found: defaults in memory; the file is never written or moved; `save` is refused with a notice until restart; the credential store is not touched — decisions #19). `startup_action` for `Unavailable` is `OpenSettings(Engine)` as for `Reset`, with a notice. `FirstRun` and `Reset` open the settings window on the Engine tab; `Reset` also notifies `notice.settings_reset`. The decision is the pure function `startup_action(outcome, launched_by_autostart)`: `OpenSettings(Engine)` for `FirstRun`/`Reset`, `TrayOnly` for `Loaded`, regardless of `--autostart` (spec US5-3); the startup hotkey-failure branch is 001's.
 
 ## ConnectionTestRequest / ConnectionTestResult
 
@@ -85,8 +85,8 @@ Committed (old hotkey released, snapshot swapped, subscribers notified) ▶ Save
 ## Hotkey
 
 - `Hotkey { ctrl, alt, shift, win, key: HotkeyKey }`; canonical string form; `HotkeyKey` closed set (research R-6).
-- `HotkeyRegistrar` (implemented by 001): `prepare(Hotkey, Mode) -> Result<Prepared, Unavailable>`, `commit(Prepared)`, `abort(Prepared)`.
+- `HotkeyRegistrar` (trait defined by 004 with a fake; implemented by 001): `prepare(Hotkey, Mode) -> Result<Prepared, Unavailable>`, `commit(Prepared)`, `abort(Prepared)`.
 
 ## Autostart
 
-- `Autostart`: `is_enabled() -> Result<bool>`, `set(bool) -> Result<(), AutostartError>`. Windows value `HKCU\…\Run\Voicen = "<exe>" --autostart`.
+- `Autostart` (trait, save step and reconcile added by US5, tasks T056–T058): `is_enabled() -> Result<bool>`, `set(bool) -> Result<(), AutostartError>`. Windows value `HKCU\…\Run\Voicen = "<exe>" --autostart`.

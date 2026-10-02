@@ -43,8 +43,8 @@ description: "Task list for feature 001 — dictation via an OpenAI-compatible A
 - [ ] T007 [P] Red test + implement `MessageKey`, `MessageParams` and the catalogs `i18n/en.json`, `i18n/ru.json` with every key and text of contracts/messages.md; the test fails if any key lacks a non-empty en or ru text, in `crates/voicen-core/src/messages.rs`. Catalog location agreed with 004: `i18n/` at the repository root [core] [req FR-15 (spec FR-034)]
 - [ ] T008 [P] Red test + implement `DictationEvent` (only the fields of data-model.md "DictationEvent") and the `PipelineObserver` trait, plus a recording fake, in `crates/voicen-core/src/events.rs` [core] [req FR-20, NFR-04 (spec FR-033)]
 - [ ] T009 [P] Red test + implement `AudioBuffer` (16 kHz mono i16), mix-down + resample with `rubato` (48 kHz stereo → 16 kHz mono length ±1 sample per 10 ms), and WAV encoding (RIFF PCM 16-bit, 16 000 Hz, mono; 10 min ≈ 19.2 MB) in `crates/voicen-core/src/audio/{mod,resample,wav}.rs` [core] [req FR-06, decisions #1]
-- [ ] T010 Define the platform traits of contracts/core-traits.md (`AudioSource`, `Clipboard`, `Paster`, `Notifier`, `Indicator`, `CredentialStore`, `TempAudioStore`, `SettingsSource`, `Clock`) in `crates/voicen-core/src/platform.rs`, with recording fakes in `crates/voicen-core/tests/support/fakes.rs` [core] [req NFR-11]
-- [ ] T011 [P] Red test + implement `DictationSettings` (fields and defaults per data-model.md: hotkey Ctrl+Alt+Space, mode hold, auto-paste on, language auto, engine none) and the JSON-file `SettingsSource` (unknown fields ignored; missing file → defaults), with a test through the real loader (P-013), in `crates/voicen-core/src/settings.rs` [core] [req FR-21 defaults, FR-13 (read only)]
+- [ ] T010 Define the platform traits of contracts/core-traits.md (`AudioSource`, `Clipboard`, `Paster`, `Notifier`, `Indicator`, `TempAudioStore`, `SettingsSource`, `Clock`; `CredentialStore` is 004's trait in `voicen_core::secrets`, not redefined here — decisions #21) in `crates/voicen-core/src/platform.rs`, with recording fakes in `crates/voicen-core/tests/support/fakes.rs` [core] [req NFR-11]
+- [ ] T011 [P] Red test + implement `DictationSettings` (fields per data-model.md) as a projection of 004's `SettingsService::snapshot()` (`SettingsSource` = `From<&Settings>`; no file, no loader, no own defaults — decisions #21), with a test that a snapshot built from 004's `defaults()` projects to hotkey Ctrl+Alt+Space, mode hold, auto-paste on, language auto, engine none and that a saved value reaches the projection (P-013), in `crates/voicen-core/src/platform.rs` [core] [req FR-21 defaults, FR-13 (read only)] — needs 004 T007/T022
 - [ ] T012 [P] Red test + implement the `IndicatorState` machine: TrayState priority "HotkeyError > Recording > Error > Idle"; OverlayState `Recording` / `Processing` (≥ 1 job unreleased and no recording) / `Message` 3 s / `Hidden` — in `crates/voicen-core/src/indicator.rs` [core] [req FR-04, FR-25 (spec FR-008, FR-028)]
 
 **Checkpoint**: Foundation ready — user story implementation can begin.
@@ -67,7 +67,7 @@ description: "Task list for feature 001 — dictation via an OpenAI-compatible A
 
 ### Implementation for User Story 1
 
-- [ ] T018 [P] [US1] Implement the `Engine` trait, `TranscribeRequest`, `SecretString` (Debug/Display print `***`) and `OpenAiCompatibleEngine` (blocking reqwest, connect timeout + whole-request timeout from `Timeouts`, body cap 1 MiB) in `crates/voicen-core/src/engine/{mod,openai}.rs`; make T013 green [core] [req FR-06, FR-24, NFR-04, NFR-11]
+- [ ] T018 [P] [US1] Implement the `Engine` trait, `TranscribeRequest` and `OpenAiCompatibleEngine` (the key is 004's `Secret`, `Debug`/`Display` print `***`; no `SecretString`, decisions #21) (blocking reqwest, connect timeout + whole-request timeout from `Timeouts`, body cap 1 MiB) in `crates/voicen-core/src/engine/{mod,openai}.rs`; make T013 green [core] [req FR-06, FR-24, NFR-04, NFR-11]
 - [ ] T019 [P] [US1] Implement `RecordingController` hold mode ("min hold 0.3 s (hold mode only)") in `crates/voicen-core/src/recording.rs`; make T014 green [core] [req FR-02]
 - [ ] T020 [P] [US1] Implement the `SpeechDetector` trait, `EnergyDetector` (research R-5 constants, pinned by fixtures), `SpeechGate` with fallback, and `SileroDetector` (feature `silero`, bundled ggml model path from the shell) in `crates/voicen-core/src/vad/{mod,energy,silero}.rs`; make T015 green [core, win-ci] [req FR-12]
 - [ ] T021 [P] [US1] Implement the `PostProcessor` trait and `PassThrough` in `crates/voicen-core/src/postprocess.rs`, called between engine and delivery [core] [req FR-09 (integration point; spec FR-021)]
@@ -77,7 +77,7 @@ description: "Task list for feature 001 — dictation via an OpenAI-compatible A
 - [ ] T025 [P] [US1] Implement the clipboard write with `CF_UNICODETEXT` + `ExcludeClipboardContentFromMonitorProcessing`, `CanIncludeInClipboardHistory`=0, `CanUploadToCloudClipboard`=0 and an open retry of 10 × 20 ms in `src-tauri/src/win/clipboard.rs`; Windows test reads the formats back in `src-tauri/tests/clipboard.rs` [win-ci] [req FR-10]
 - [ ] T026 [P] [US1] Implement the paster (root-owner start window, integrity-level comparison, modifier wait ≤ 1 s, one-batch SendInput Ctrl+V) in `src-tauri/src/win/paste.rs`; Windows test pastes into a test-window edit control and refuses a window that is not in front, in `src-tauri/tests/paste.rs` [win-ci] [req FR-10, NFR-08]
 - [ ] T027 [US1] Implement the hotkey thread: hidden top-level window, `RegisterHotKey` + `MOD_NOREPEAT`, hold-release polling 10 ms, menu-mask key `0xE8` on press, start-window capture at press, in `src-tauri/src/win/hotkey.rs`; Windows test: a synthetic Ctrl+Alt+Space into a test window produces no `WM_CHAR` and no menu activation, in `src-tauri/tests/hotkey.rs` [win-ci] [req FR-02, FR-10 (spec FR-014)]
-- [ ] T028 [P] [US1] Implement `CredentialStore` with `CredReadW` (the target name documented in the task, and later in 004's contract) in `src-tauri/src/win/credentials.rs` [win-ci] [req NFR-04]
+- [ ] T028 ~~removed~~ — see decisions #21 (one Credential Manager implementation: 004 T016, `src-tauri/src/credentials.rs`)
 - [ ] T029 [US1] Wire the app in `src-tauri/src/lib.rs` and `src-tauri/src/win/tray.rs`: no window at start; tray with idle/recording icons; menu Settings, Open logs folder, Exit (History hidden until 005, Retry hidden without pending); `tauri-plugin-single-instance` opens settings; remove the default main window from `src-tauri/tauri.conf.json`. Red Windows tests first in `src-tauri/tests/startup.rs`: after launch the foreground window is unchanged and no Voicen window is visible; a second launch exits without a second process and signals the first (settings-open request recorded) [win-ci, owner] [req FR-01]
 - [ ] T030 [P] [US1] Red UI tests: the overlay renders recording (m:ss), processing, message (3 s, en/ru text from the catalog) and hidden from `overlay://state` payloads and from the `overlay_ready` reply (contracts/ipc.md), in `src/lib/overlay/state.test.ts` and `e2e/overlay.spec.ts` [ui] [req FR-04, FR-25]
 - [ ] T031 [US1] Implement the overlay route and store in `src/routes/overlay/+page.svelte` and `src/lib/overlay/state.ts`; make T030 green [ui] [req FR-04]
@@ -165,7 +165,7 @@ description: "Task list for feature 001 — dictation via an OpenAI-compatible A
 
   In `crates/voicen-core/src/hotkey.rs` [core] [req FR-05, FR-25, FR-26]
 - [ ] T048 [US4] Implement `HotkeyRegistration` and its `Pipeline` wiring (`on_hotkey_registration`, open-settings request) in `crates/voicen-core/src/hotkey.rs` and `pipeline.rs`; make T047 green [core] [req FR-05, FR-26]
-- [ ] T049 [US4] Implement the `set_hotkey` IPC command (register the new binding before unregistering the old; contracts/ipc.md) in `src-tauri/src/lib.rs` + `src-tauri/src/win/hotkey.rs` [win-ci] [req FR-05 (spec FR-012)]
+- [ ] T049 [US4] Implement the `set_hotkey` IPC command (register the new binding before unregistering the old; contracts/ipc.md) in `src-tauri/src/lib.rs` + `src-tauri/src/win/hotkey.rs`, and implement 004's `HotkeyRegistrar` (`prepare`/`commit`/`abort`, defined by 004 T067) there so a refused save keeps the old hotkey (decisions #21) [win-ci] [req FR-05 (spec FR-012)]
 - [ ] T050 [US4] Handle `WM_POWERBROADCAST` (suspend → `on_suspend`; resume → re-register), `WM_WTSSESSION_CHANGE` (unlock → re-register) and `TaskbarCreated` (re-add the tray icon) in `src-tauri/src/win/hotkey.rs` and `tray.rs`. Windows tests: a helper process pre-registers Ctrl+Alt+Space → start-up error state; simulated resume and TaskbarCreated messages → re-registration and the tray present. In `src-tauri/tests/hotkey_lifecycle.rs` [win-ci, owner (SC-006)] [req FR-05, FR-26, FR-25]
 
 ---
@@ -221,7 +221,7 @@ description: "Task list for feature 001 — dictation via an OpenAI-compatible A
 ### Phase Dependencies
 
 - Setup (T001–T005): T001 blocks T002/T003. T004 and T005 are independent.
-- Foundational (T006–T012): after T002. Blocks all stories.
+- Foundational (T006–T012): after T002. Blocks all stories. The dependency direction is 001 → 004's traits (`CredentialStore`, `Settings`/`SettingsService`, `HotkeyRegistrar`, 004 T004–T009, T067): 001 reads keys and settings through them and implements `HotkeyRegistrar`; 004 does not wait for 001 (decisions #21).
 - US1 (Phase 3): after Foundational. The MVP.
 - US2 (Phase 4): after US1's `Pipeline` (T023) and engine (T018).
 - US3 and US4: after US1 (`recording.rs`, `hotkey.rs` shell thread T027); independent of each other and of US2.
@@ -242,7 +242,7 @@ description: "Task list for feature 001 — dictation via an OpenAI-compatible A
 
 - T003, T004, T005 in parallel after T001.
 - T006–T009, T011, T012 in parallel (separate files); T010 next to them.
-- US1 tests T013–T016 in parallel; implementation T018–T022 in parallel; shell adapters T024–T026, T028 in parallel.
+- US1 tests T013–T016 in parallel; implementation T018–T022 in parallel; shell adapters T024–T026 in parallel.
 - After US1: US3, US4 and US6 in parallel with US2.
 
 ## Parallel Example: User Story 1
@@ -252,7 +252,7 @@ T013 openai_client request-shape tests   | T014 recording hold tests
 T015 speech gate tests                   | T016 delivery decision tests
 then
 T018 engine | T019 recording | T020 vad | T021 postprocess | T022 delivery
-T024 capture | T025 clipboard | T026 paste | T028 credentials   (shell, Windows CI)
+T024 capture | T025 clipboard | T026 paste   (shell, Windows CI)
 ```
 
 ## Implementation Strategy
@@ -293,7 +293,7 @@ US1 → US2 (P1 complete) → US3 + US4 (P2) → US5 + US6 (P3) → Polish (SC-0
 | NFR-08 | T026, T059 |
 | Integration: FR-09 | T021 |
 | Integration: FR-20 | T008, T056, T057 |
-| Supporting: FR-15, FR-21, NFR-04, NFR-11, NFR-12 | T007; T011, T014; T018, T028, T056; T010, T023; T001–T004 |
+| Supporting: FR-15, FR-21, NFR-04, NFR-11, NFR-12 | T007; T011, T014; T018, 004 T016, T056; T010, T023; T001–T004 |
 
 ## Notes
 

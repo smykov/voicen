@@ -140,7 +140,7 @@ description: "Task list for LLM post-processing (003)"
 
   — req FR-13, FR-21 — FR-011 — L
 - [ ] T023 [P] [US3] Write a red secrets and logging test in `crates/voicen-core/tests/post_process_secrets.rs`:
-  - it runs success plus every failure mode of T013 with a log capture and a fake `SecretStore`;
+  - it runs success plus every failure mode of T013 with a log capture and a fake `CredentialStore` (004's);
   - the mock error bodies echo the transcript and the key;
   - the captured log, the `Debug` output of every outcome and notice, and the saved settings file contain none of: key, prompt, raw text, reply, error body (SC-005);
   - each dictation yields exactly one `post_process outcome=… duration_ms=…` line.
@@ -152,8 +152,8 @@ description: "Task list for LLM post-processing (003)"
 
 ### Implementation for User Story 3
 
-- [ ] T025 [US3] Implement `PostProcessingSettings`, `STARTER_PROMPT` (exact text from data-model.md), `defaults()` and `validate()` in `crates/voicen-core/src/post_process/settings.rs`. Wire them into 004's `Settings` (`post_processing` section), its single defaults function and its validator (makes T022 and T024 green) — req FR-13, FR-21 — FR-010, FR-011 — L
-- [ ] T026 [US3] Read the key from 004's `SecretStore` slot `KeySlot::PostProcessing` when taking the snapshot, treating a missing entry or read error as no key. Emit the one allowlisted log line per post-processed dictation through 006's logger target (makes T023 green) — req NFR-04, FR-20 — FR-012, FR-014 — L
+- [ ] T025 [US3] Implement `validate()` only in `crates/voicen-core/src/post_process/settings.rs`; `PostProcessingSettings`, `STARTER_PROMPT` (exact text from data-model.md) and `defaults()` are created there by 004's foundational phase (004 T068, decisions #21). Wire `validate()` into 004's validator (makes T022 and T024 green) — req FR-13, FR-21 — FR-010, FR-011 — L
+- [ ] T026 [US3] Read the key from 004's `CredentialStore` with `KeySlot::PostProcessing` when taking the snapshot, treating a missing entry or read error as no key. Emit the one allowlisted log line per post-processed dictation through 006's logger target (makes T023 green) — req NFR-04, FR-20 — FR-012, FR-014 — L
 - [ ] T027 [P] [US3] Add the `settings.post_processing.privacy_note` text (en/ru, `contracts/ipc.md`) to 004's Post-processing tab in `src/routes/settings/`. Add a Playwright test in `e2e/post-processing.spec.ts` with mocked `get_settings` that checks:
   - the tab shows "off" and the starter prompt;
   - the privacy note is visible;
@@ -186,7 +186,7 @@ description: "Task list for LLM post-processing (003)"
 - **Foundational (Phase 2)** depends on Setup, and blocks every story.
 - **US1 (Phase 3)** depends on Phase 2. It is the MVP.
 - **US2 (Phase 4)** depends on Phase 2. T017 builds on T011 (the same file, `chat.rs`), so US2's implementation follows US1's. US2's tests (T013–T016) can be written alongside US1.
-- **US3 (Phase 5)** depends on Phase 2 and on 004's `Settings`, `SecretStore` and Post-processing tab. T019 and T027 need 004's catalog and tab.
+- **US3 (Phase 5)** depends on Phase 2 and on 004's `Settings`, `CredentialStore`, the `post_process::settings` data type (004 T068) and the Post-processing tab; the direction is 003 → 004 (decisions #21). T019 and T027 need 004's catalog and tab.
 - **Polish (Phase 6)** comes after the stories it documents.
 
 ### Within Each User Story

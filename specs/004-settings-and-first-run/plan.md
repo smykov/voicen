@@ -6,15 +6,15 @@
 
 ## Summary
 
-The settings model and everything that changes it live in `voicen-core`: one `Settings` type with one defaults function, a validator that returns all field errors at once, a `SettingsService` that loads (first run / loaded / reset of an unreadable file), saves as one all-or-nothing transaction (validate → two-phase hotkey → autostart → keys → atomic file write → commit, with undo in reverse on failure), and publishes snapshots to subscribers so every setting applies without restart. Keys go only through a `CredentialStore` trait (Windows Credential Manager in the shell) and travel as a redacted `Secret`; the settings type has no key field. A single English/Russian message catalog (two JSON files) serves both Rust (tray, notifications) and the UI, with gate tests for parity. Test connection reuses 001's transcription client with a bundled 1 s clip. The shell adds the Windows implementations (Credential Manager, `HKCU\…\Run` autostart, OS display language), the IPC commands and events, the single on-demand settings window and the startup flow. The UI adds the six-tab settings route with draft/dirty handling, field highlighting, key presence, Test connection, the http warning and live language switching, verified with Playwright against a mocked IPC.
+The settings model and everything that changes it live in `voicen-core`: one `Settings` type with one defaults function, a validator that returns all field errors at once, a `SettingsService` that loads (first run / loaded / reset of an unreadable file), saves as one all-or-nothing transaction (validate → two-phase hotkey → autostart (step added by US5) → keys → atomic file write → commit, with undo in reverse on failure), and publishes snapshots (an `Arc<Settings>` plus a std `mpsc` channel per subscriber) to subscribers so every setting applies without restart. Keys go only through a `CredentialStore` trait (Windows Credential Manager in the shell) and travel as a redacted `Secret`; the settings type has no key field. A single English/Russian message catalog (two JSON files) serves both Rust (tray, notifications) and the UI, with gate tests for parity. Test connection reuses 001's transcription client with a bundled 1 s clip. The shell adds the Windows implementations (Credential Manager, `HKCU\…\Run` autostart, OS display language), the IPC commands and events, the single on-demand settings window and the startup flow. The UI adds the six-tab settings route with draft/dirty handling, field highlighting, key presence, Test connection, the http warning and live language switching, verified with Playwright against a mocked IPC.
 
 ## Technical Context
 
 **Language/Version**: Rust 1.99 (edition 2021) for `voicen-core` and `src-tauri`; TypeScript + Svelte 5 (SvelteKit static SPA) for the UI.
 
-**Primary Dependencies**: core — `serde`/`serde_json`, `url` (already pulled in by `reqwest`), `tokio::sync::watch`, `zeroize`; shell — `windows` crate (`Win32_Security_Credentials`, `Win32_System_Registry`, `Win32_Globalization`), Tauri 2 window/event APIs; UI — `@tauri-apps/api` (core invoke, event, window). 001's OpenAI-compatible client and timeouts module. No new runtime i18n library (research R-7).
+**Primary Dependencies**: core — `serde`/`serde_json`, `url` and `zeroize` (direct dependencies, consented by decisions #17), std `mpsc` for `subscribe` (no tokio in core, decisions #22); shell — `windows` crate (`Win32_Security_Credentials`, `Win32_System_Registry`, `Win32_Globalization`), Tauri 2 window/event APIs; UI — `@tauri-apps/api` (core invoke, event, window). 001's OpenAI-compatible client and timeouts module. No new runtime i18n library (research R-7).
 
-**Storage**: `%LOCALAPPDATA%\Voicen\settings.json` (data dir resolved once by the shell, P-010), atomic write via temp file + rename; unreadable files moved to `settings.json.bad-<UTC>`. Keys only in Windows Credential Manager, slots `Voicen/transcription-api`, `Voicen/local-server`, `Voicen/post-processing`. Autostart in `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\Voicen`.
+**Storage**: `%LOCALAPPDATA%\Voicen\settings.json` (data dir resolved once by the shell, P-010), atomic write via temp file + rename; unreadable files moved to `settings.json.bad-<UTC>`; a file that cannot be moved aside or read for an I/O reason is never written or moved (spec FR-010, decisions #19). Keys only in Windows Credential Manager, slots `Voicen/transcription-api`, `Voicen/local-server`, `Voicen/post-processing`. Autostart in `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\Voicen`.
 
 **Testing**: `cargo test -p voicen-core` in `voicen-rust:1.99` (fakes for credential store, settings file, autostart, hotkey registrar, downloaded models, clock; mock HTTP server for Test connection; log capture for leak checks); `cargo test --workspace` on the Windows CI runner (Credential Manager, registry, OS language, install smoke); vitest + Playwright with mocked IPC for the UI.
 
@@ -68,7 +68,7 @@ specs/004-settings-and-first-run/
 ├── data-model.md        # Phase 1
 ├── quickstart.md        # Phase 1
 ├── contracts/
-│   ├── core-traits.md   # CredentialStore, SettingsFile, Autostart, SettingsService, ConnectionTester, i18n, consumed interfaces
+│   ├── core-traits.md   # CredentialStore, SettingsFile, Autostart, SettingsService, HotkeyRegistrar, DownloadedModels, ConnectionTester, i18n, consumed interfaces
 │   └── ipc.md           # Tauri commands, events and the settings window
 ├── checklists/
 └── tasks.md             # Phase 2 (/speckit-tasks)
@@ -93,7 +93,8 @@ crates/voicen-core/src/
 ├── secrets.rs                    # KeySlot, Secret, KeyEdit, CredentialStore trait
 ├── autostart.rs                  # Autostart trait
 ├── connection_test.rs            # ConnectionTester over 001's client
-├── i18n.rs                       # catalog embed, text(), MESSAGE_IDS, resolve_ui_language
+├── i18n.rs                       # catalog embed, text(), MESSAGE_IDS, resolve_ui_language — delivered by the catalog task (teamwright T-005), consumed here (decisions #21)
+├── post_process/settings.rs      # PostProcessingSettings, STARTER_PROMPT, defaults() — data type created here, 003 adds validate() (decisions #21)
 ├── assets/test-clip.wav          # bundled 1 s clip for Test connection
 └── (unit tests in each module; crates/voicen-core/tests/settings_*.rs)
 
@@ -125,7 +126,7 @@ e2e/settings-*.spec.ts            # first run, save/refusal, keys, language, tes
 
 ## Notes for other features
 
-- 001 must expose a two-phase `HotkeyRegistrar` and call `dictation_gate` before opening the microphone; its tray "Settings", second-instance and startup hotkey-failure paths call `settings_window::open(tab, field)`.
+- 004 defines `HotkeyRegistrar` and `DownloadedModels` (with fakes) in core; 001 implements `HotkeyRegistrar`, 002's `ModelStore` implements `DownloadedModels` (decisions #21). 001 calls `dictation_gate` before opening the microphone; its tray "Settings", second-instance and startup hotkey-failure paths call `settings_window::open(tab, field)`.
 - The current `tauri.conf.json` opens a main window at start; the tray-only start (req FR-01) removes it (001), and the first-run path opens the `settings` window instead (this feature).
 - 005 subscribes to `SettingsService::subscribe()` for history on/off and size changes.
 

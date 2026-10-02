@@ -47,7 +47,7 @@ Key observable outcomes:
 
 ## 3. Owner's manual check (Windows 11 PC)
 
-Settings until 004 lands: `%LOCALAPPDATA%\Voicen\settings.json` with `{"engine":"api","api_base_url":"https://api.openai.com/v1","api_model":"whisper-1"}`; the key goes in Credential Manager (the target name is given in the task that builds `credentials.rs`).
+Settings until 004 lands: `%LOCALAPPDATA%\Voicen\settings.json` with `{"engine":"api","api_base_url":"https://api.openai.com/v1","api_model":"whisper-1"}`; the key goes in Credential Manager (target `Voicen/transcription-api`, written by 004's `CredentialStore`).
 
 1. Focus Notepad, hold Ctrl+Alt+Space for 4 s and speak, then release. The text appears in Notepad, Win+V does not list it, the overlay showed recording then processing, and Notepad kept focus.
 2. Switch to toggle mode in the settings file. Press, speak 10 s, press: the text appears. Press, speak, Esc: nothing. Esc with no recording reaches Notepad.

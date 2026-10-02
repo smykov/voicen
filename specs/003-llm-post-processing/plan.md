@@ -16,7 +16,7 @@ Optional LLM post-processing (req FR-09, FR-24; constraints NFR-04, NFR-05, NFR-
 
 **Primary Dependencies**: `reqwest` (shared client from 001), `tokio` (`time::timeout`), `serde`/`serde_json`; test-only: the mock OpenAI-compatible server chosen in 001 (proposed `wiremock`, see research R8). There are no new runtime crates beyond 001's, and all are MIT-compatible (NFR-12).
 
-**Storage**: Settings file owned by 004 (`post_processing` section, no key). Windows Credential Manager slot `PostProcessing` through 004's `SecretStore`.
+**Storage**: Settings file owned by 004 (`post_processing` section, no key). Windows Credential Manager slot `PostProcessing` through 004's `CredentialStore` (`KeySlot::PostProcessing`).
 
 **Testing**: `cargo test -p voicen-core` in Docker (fakes and mock server); vitest and Playwright with mocked IPC for the UI parts; Windows CI `cargo test --workspace` for the shell wiring.
 
@@ -50,7 +50,7 @@ Post-design re-check (after Phase 1): PASS, with no violations, so Complexity Tr
 |---|---|---|---|
 | FR-09 (success and failure branch) | core: `ChatPostProcessor` vs mock server; pipeline with fakes | shell wiring builds; notifier test from 001 | real endpoint and unreachable endpoint, per release |
 | FR-24 (post-processing 15 s, connect 5 s) | core: scaled timeouts, real 15 s test, defaults test | — | — |
-| NFR-04 | core: fake `SecretStore`, log capture, settings-file scan | Credential Manager slot round trip (004) | log file inspected once per release |
+| NFR-04 | core: fake `CredentialStore`, log capture, settings-file scan | Credential Manager slot round trip (004) | log file inspected once per release |
 | NFR-05 | core: zero requests when off; UI: privacy note (Playwright) | — | — |
 | NFR-11 | core: pipeline built with a fake `PostProcessor`; diff touches no recording, engine or delivery code | — | architecture review |
 
@@ -67,7 +67,8 @@ Details: [research.md](research.md) R9.
   - the mock OpenAI-compatible server for tests.
 - **004-settings-and-first-run**:
   - the `Settings` model with defaults, validation and persistence;
-  - `SecretStore` with `KeySlot`;
+  - `CredentialStore`, `KeySlot` and `Secret` (defined by 004; decisions #21);
+  - the data type `PostProcessingSettings`, `STARTER_PROMPT` and `defaults()` (created by 004's foundational phase; 003 adds `validate()` and wiring);
   - the message catalog (en/ru);
   - the Post-processing tab with its fields.
 
@@ -99,7 +100,7 @@ crates/voicen-core/src/
 ├── post_process/
 │   ├── mod.rs           # PostProcessor trait, PostProcessOutcome, SkipReason, final_text, log_fields
 │   ├── chat.rs          # ChatPostProcessor: request build, reply parse, classify (R4)
-│   └── settings.rs      # PostProcessingSettings, STARTER_PROMPT, defaults(), validate()
+│   └── settings.rs      # validate() and wiring; the data type, STARTER_PROMPT and defaults() are created by 004 (decisions #21)
 ├── openai.rs            # (001) + chat_completion()
 ├── timeouts.rs          # (001) + post_processing: 15 s
 ├── pipeline.rs          # (001) stage uses Arc<dyn PostProcessor>; notice + log line

@@ -43,7 +43,7 @@ The stack is fixed by `docs/requirements.md` §9 (Tauri 2, Rust 1.99, `reqwest`,
 ## R5. Secrets and logging
 
 - **Decision**:
-  - **Key storage and reading.** The key is read for each dictation through the credential-store trait *(from 001/004: `SecretStore`, slot `KeySlot::PostProcessing`)* and held as `Secret`, a newtype whose `Debug` and `Display` print `***`. A read error or missing entry is treated as no key (spec Edge Cases).
+  - **Key storage and reading.** The key is read for each dictation through the credential-store trait *(from 004: `CredentialStore`, `KeySlot::PostProcessing`)* and held as `Secret`, a newtype whose `Debug` and `Display` print `***`. A read error or missing entry is treated as no key (spec Edge Cases).
   - **Error values.** `Failure` and `SkipReason` hold no body, no key, no prompt and no transcript.
   - **Log line.** There is exactly one, built from an allowlist of fields: `post_process outcome=applied|skipped reason=<code> duration_ms=<n>`.
   - **Redirects.** The key goes only to the configured endpoint (FR-012). The shared client keeps reqwest's default redirect policy, which drops `Authorization` on a cross-host redirect. A test pins this behaviour (T023).
@@ -77,7 +77,7 @@ The stack is fixed by `docs/requirements.md` §9 (Tauri 2, Rust 1.99, `reqwest`,
 | FR-09 failure branch (every reason → raw delivered + notice) | core: one test per reason against the mock server; pipeline test that raw text reaches delivery and a `PostProcessingSkipped` notice is raised | toast, tray error state: Windows integration test on the notifier from 001 | the toast and overlay text seen once per release |
 | FR-24 (5 s connect, 15 s total) | core: scaled timeouts and one real 15 s test; defaults test | — | — |
 | FR-23 interaction (ordering with a slow post-processor) | core: pipeline ordering test with a fake post-processor that delays | — | — |
-| NFR-04 (key only in the credential store, never logged) | core: fake `SecretStore`; log-capture test over success and every failure mode; settings-file scan | Credential Manager round trip for slot `PostProcessing` (owned by 004's Windows test) | — |
+| NFR-04 (key only in the credential store, never logged) | core: fake `CredentialStore`; log-capture test over success and every failure mode; settings-file scan | Credential Manager round trip for slot `PostProcessing` (owned by 004's Windows test) | — |
 | NFR-05 (off → no network call) | core: mock server receives zero requests with post-processing off; UI: privacy note shown in the section (Playwright, mocked IPC) | — | — |
 | NFR-11 (one optional step, no change to recording, engine or delivery) | core: the pipeline is built with a fake `PostProcessor`; review checks the diff touches no recording, engine or delivery file | — | architecture review |
 | Settings defaults, validation, live apply (FR-13 part) | core: defaults and validation functions; UI: Playwright on the Post-processing tab (004's page) with mocked IPC | — | — |

@@ -51,7 +51,7 @@
 
 ### Implementation
 
-- [ ] T014 [US1] Implement ModelStore (`new`, `cleanup_at_start`, `states`, `path_if_downloaded`) in `crates/voicen-core/src/local_models/store.rs`. The models dir is passed in from the shell's single data-dir resolver (P-010) {req FR-08, FR-28}
+- [ ] T014 [US1] Implement ModelStore (`new`, `cleanup_at_start`, `states`, `path_if_downloaded`; implements 004's `DownloadedModels` trait, defined by 004 T067, decisions #21) in `crates/voicen-core/src/local_models/store.rs`. The models dir is passed in from the shell's single data-dir resolver (P-010) {req FR-08, FR-28}
 - [ ] T015 [US1] Implement the Downloader in `crates/voicen-core/src/local_models/download.rs` (research R-2, R-3): stream to `.part` while hashing incrementally; check size and hash; rename atomically; delete `.part` on every other path; use timeouts `CONNECT` and `DOWNLOAD_NO_DATA` from the shared module; cancellation token; single active slot; `DiskSpace` trait check {req FR-08, FR-24}
 - [ ] T016 [US1] Implement the shell side in `src-tauri/src/local_models.rs`: IPC commands `local_models_list`, `local_model_download`, `local_model_cancel_download`; events `local-model://progress` and `local-model://state` (contracts/ipc.md); `DiskSpace` via `GetDiskFreeSpaceExW`; `cleanup_at_start` on app start. Register them in `src-tauri/src/lib.rs` (Windows CI) {req FR-08}
 - [ ] T017 [US1] Implement `src/lib/local-models/localModels.ts` (typed invoke/listen wrapper) with a unit test `src/lib/local-models/localModels.test.ts`, and `src/lib/local-models/LocalModelList.svelte` (hosted by 004's engine tab) making T013 pass; reasons shown as message keys {req FR-08, FR-15}
@@ -118,7 +118,7 @@
 
 ### Implementation
 
-- [ ] T030 [US3] Implement `local_server_endpoint` in `crates/voicen-core/src/engines/local_server.rs`: 001's client configured from `LocalServerConfig` with model `Option<String>` ("empty → None → not sent"), key `Option<SecretRef>` in the target `Voicen/local-server`, and timeouts connect 5 s / request 60 s. No new HTTP code (P-011). If 001's client lacks optional model, optional key, a per-endpoint timeout or the port in "cannot reach", extend 001's client in its own module, not here {req FR-17, FR-24, NFR-04}
+- [ ] T030 [US3] Implement `local_server_endpoint` in `crates/voicen-core/src/engines/local_server.rs`: 001's client configured from `LocalServerConfig` with model `Option<String>` ("empty → None → not sent"), key read through 004's `CredentialStore` with `KeySlot::LocalServer` (`Option<Secret>`), and timeouts connect 5 s / request 60 s. No new HTTP code (P-011). If 001's client lacks optional model, optional key, a per-endpoint timeout or the port in "cannot reach", extend 001's client in its own module, not here {req FR-17, FR-24, NFR-04}
 - [ ] T031 [US3] Register the local-server engine in the engine factory in `src-tauri/src/lib.rs` (the factory comes from 001); the `local-server` key slot uses Credential Manager (Windows CI test) {req FR-17, NFR-04}
 
 **Checkpoint**: local-server dictation works and fails correctly (spec SC-006).
@@ -169,7 +169,7 @@
 - **US4 (T032–T035)** depends on T014 (store) and T024 (residency).
 - **Polish (T036–T040)** comes after the stories it touches. T040 comes last.
 - Within each story, the tests come before the implementation, and the core comes before the shell and the UI.
-- External: 001 (engine trait, client, timeouts, FailureReason, pipeline, logging, credentials) is needed before T006–T008, T020, T025, T028 and T030. 004 (settings window host, settings store, key UI, i18n) is needed before T017, T027, T029, T031 and T037.
+- External: 001 (engine trait, client, timeouts, FailureReason, pipeline, logging) is needed before T006–T008, T020, T025, T028 and T030. 004 (settings window host, `Settings`/`SettingsService`, `CredentialStore`, `DownloadedModels` trait, key UI, i18n) is needed before T017, T027, T029, T031 and T037; the direction is 002 → 004's traits, and `ModelStore` implements `DownloadedModels` (decisions #21).
 
 ## Parallel examples
 

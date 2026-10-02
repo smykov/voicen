@@ -72,7 +72,7 @@ Rule: never `prewarm` at app start; deletion of the loaded model while `active >
 |---|---|---|
 | `base_url` | URL string | required when engine = local server; valid http/https URL (004 validates, req FR-13) |
 | `model` | `Option<String>` | trimmed; empty → `None` → not sent |
-| `key` | `Option<SecretRef>` | credential target `Voicen/local-server`; the value is never in settings |
+| `key` | none in settings | the key is read through 004's `CredentialStore` with `KeySlot::LocalServer` (target `Voicen/local-server`) as `Option<Secret>`; the value is never in settings |
 
 Timeouts are not settings: connect 5 s, transcription 60 s from the shared timeouts module.
 

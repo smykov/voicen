@@ -52,7 +52,7 @@ The stack is fixed by `docs/requirements.md` §9. This file decides only HOW to 
 
 ## R-9 Secrets in the client (P-009)
 
-- **Decision**: The key is held in a `SecretString` newtype with no `Display`/`Debug` output beyond `***`. It is read from `CredentialStore` per request (so a retry picks up a fixed key, Clarification 4) and dropped after use. reqwest's own logging is not enabled, and the app's log subscriber filters `reqwest`/`hyper` to `warn` without request details. Error values carry only `FailureReason` (code, host, status), never the body, the URL query or headers. A test feeds a key and a transcript into every failure path and asserts that neither string appears in any `DictationEvent` or error `Display`.
+- **Decision**: The key is held in 004's `Secret` type (decisions #21) with no `Display`/`Debug` output beyond `***`. It is read from `CredentialStore` per request (so a retry picks up a fixed key, Clarification 4) and dropped after use. reqwest's own logging is not enabled, and the app's log subscriber filters `reqwest`/`hyper` to `warn` without request details. Error values carry only `FailureReason` (code, host, status), never the body, the URL query or headers. A test feeds a key and a transcript into every failure path and asserts that neither string appears in any `DictationEvent` or error `Display`.
 
 ## R-10 Pipeline concurrency and ordering
 

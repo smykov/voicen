@@ -19,7 +19,7 @@ pub struct TranscribeRequest {
 }
 ```
 
-`OpenAiCompatibleEngine::new(base_url, model, key: Option<SecretString>, client_cfg)` implements `Engine` (contract: [openai-transcription.md](openai-transcription.md)). 002 reuses it for the local server with `Timeouts::local_server`.
+`OpenAiCompatibleEngine::new(base_url, model, key: Option<Secret>, client_cfg)` implements `Engine` (contract: [openai-transcription.md](openai-transcription.md)). 002 reuses it for the local server with `Timeouts::local_server`.
 
 `EngineFactory: Fn(&DictationSettings, &dyn CredentialStore) -> Result<Box<dyn Engine>, FailureReason>`. It is called per job, so a retry uses the current settings and key (Clarification 4).
 
@@ -82,10 +82,9 @@ pub trait Indicator: Send + Sync {
     fn set_overlay(&self, state: &OverlayState);           // shell forwards it as the IPC event
 }
 
-pub trait CredentialStore: Send + Sync {
-    /// Reads the transcription API key (NFR-04). None = no key stored.
-    fn transcription_api_key(&self) -> Result<Option<SecretString>, CredentialError>;
-}
+// CredentialStore, KeySlot and Secret are defined by 004 (`voicen_core::secrets`, decisions #21); 001 only reads:
+//   store.read(KeySlot::TranscriptionApi) -> Result<Option<Secret>, CredentialError>   // None = no key stored (NFR-04)
+// The Windows implementation is 004 T016; there is no second one.
 
 pub trait TempAudioStore: Send + Sync {
     fn put_pending(&self, id: PendingId, audio: &AudioBuffer) -> std::io::Result<()>;
@@ -95,7 +94,7 @@ pub trait TempAudioStore: Send + Sync {
 }
 
 pub trait SettingsSource: Send + Sync {
-    fn dictation_settings(&self) -> DictationSettings;     // 004 owns the persistent implementation
+    fn dictation_settings(&self) -> DictationSettings;     // projection of 004's SettingsService::snapshot(); no file, no loader, no own defaults (decisions #21)
 }
 
 pub trait Clock: Send + Sync { fn now(&self) -> Instant; }
