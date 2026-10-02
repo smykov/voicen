@@ -1,0 +1,40 @@
+# Contract: user-visible messages of this feature (FR-034)
+
+Stable keys with English and Russian texts. `{x}` marks a parameter. The catalog location is proposed in research R-14 and must agree with 004. A test asserts that every key below exists in both languages.
+
+| Key | en | ru | Where |
+|---|---|---|---|
+| `failure.invalid_api_key` | Invalid API key | Неверный API-ключ | toast + overlay |
+| `failure.network_unavailable` | Network unavailable | Сеть недоступна | toast + overlay |
+| `failure.cannot_reach` | Cannot reach {host} | Не удаётся подключиться к {host} | toast + overlay |
+| `failure.timeout` | The server did not answer in time | Сервер не ответил вовремя | toast + overlay |
+| `failure.server_error` | Server error (HTTP {status}) | Ошибка сервера (HTTP {status}) | toast + overlay |
+| `failure.unexpected_response` | Unexpected response from the server | Неожиданный ответ сервера | toast + overlay |
+| `failure.clipboard_unavailable` | Clipboard unavailable | Буфер обмена недоступен | toast + overlay |
+| `failure.microphone_unavailable` | Microphone unavailable: {reason} | Микрофон недоступен: {reason} | toast + overlay |
+| `failure.hotkey_unavailable` | Hotkey unavailable | Сочетание клавиш недоступно | toast + overlay + settings |
+| `mic_reason.no_device` | no input device | нет устройства ввода | parameter |
+| `mic_reason.access_denied` | access denied in Windows privacy settings | доступ запрещён в настройках конфиденциальности Windows | parameter |
+| `mic_reason.busy` | the device is busy | устройство занято | parameter |
+| `mic_reason.other` | the device could not be opened | не удалось открыть устройство | parameter |
+| `action.retry` | Retry | Повторить | toast button |
+| `notice.no_speech` | No speech detected | Речь не распознана | toast + overlay |
+| `notice.max_length` | Maximum length reached | Достигнута максимальная длительность | toast + overlay |
+| `notice.copied` | Copied to clipboard | Скопировано в буфер обмена | toast + overlay |
+| `notice.copied_paste_manually` | Copied — paste manually | Скопировано — вставьте вручную | toast + overlay |
+| `notice.mic_fallback` | Using {device} | Используется {device} | toast |
+| `notice.choose_engine` | Choose a transcription engine | Выберите движок распознавания | toast |
+| `notice.hotkey_failed_startup` | Hotkey {hotkey} could not be registered — choose another one | Не удалось зарегистрировать {hotkey} — выберите другое сочетание | toast |
+| `overlay.recording` | Recording {elapsed} | Запись {elapsed} | overlay |
+| `overlay.processing` | Transcribing… | Распознавание… | overlay |
+| `tray.settings` | Settings | Настройки | tray menu |
+| `tray.history` | History | История | tray menu |
+| `tray.open_logs` | Open logs folder | Открыть папку журналов | tray menu |
+| `tray.retry_last` | Retry last failed dictation | Повторить последнюю неудачную диктовку | tray menu |
+| `tray.exit` | Exit | Выход | tray menu |
+| `tray.tooltip.idle` | Voicen | Voicen | tray tooltip |
+| `tray.tooltip.recording` | Voicen — recording | Voicen — запись | tray tooltip |
+| `tray.tooltip.error` | Voicen — last dictation failed | Voicen — последняя диктовка не удалась | tray tooltip |
+| `tray.tooltip.hotkey_error` | Voicen — hotkey not registered | Voicen — сочетание клавиш не зарегистрировано | tray tooltip |
+
+The failure toasts for retryable reasons carry the `action.retry` button. The requirement text "network unavailable — Retry" (req FR-11) is rendered as the `failure.network_unavailable` text plus the Retry button.
