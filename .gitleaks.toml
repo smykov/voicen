@@ -1,0 +1,35 @@
+# .gitleaks.toml — secret-scan config used by scripts/hooks/pre-commit and CI.
+# Starts from the gitleaks default ruleset and adds a few generic rules.
+# Docs: https://github.com/gitleaks/gitleaks#configuration
+
+title = "teamwright project secrets"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "generic-secret-assignment"
+description = "PASSWORD= / SECRET= / TOKEN= / API_KEY= with a literal value"
+regex = '''(?i)\b[a-z0-9_]*(password|passwd|secret|token|api_?key|private_key)[a-z0-9_]*["']?\s*[:=]\s*["']?([^\s"'#,;$<{]{8,})'''
+secretGroup = 2
+entropy = 3.0
+keywords = ["password", "passwd", "secret", "token", "api_key", "apikey", "private_key"]
+
+[[rules]]
+id = "url-embedded-credentials"
+description = "Credentials embedded in a connection URL"
+regex = '''\b[a-z][a-z0-9+.-]*://[^/\s:@]+:([^/\s:@]{6,})@'''
+secretGroup = 1
+keywords = ["://"]
+
+[allowlist]
+description = "Placeholders and non-secret files"
+paths = [
+  '''(^|/)\.env\.(example|sample|template)$''',
+  '''(^|/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|poetry\.lock|go\.sum)$''',
+]
+regexes = [
+  '''(?i)(changeme|change_me|example|placeholder|dummy|redacted|your[_-][a-z_]+)''',
+  '''<[^>]+>''',
+  '''\$\{?[A-Z_][A-Z0-9_]*\}?''',
+]

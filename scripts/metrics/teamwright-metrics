@@ -1,0 +1,1597 @@
+#!/usr/bin/env python3
+"""teamwright-metrics - process metrics from git history and hook journals.
+
+Principle: every number comes from something the agents cannot edit after the fact
+(commits, task-transition commits, review records in git, hook journals). Nothing
+is taken from an agent's report. Each number is printed with its source and n; a
+missing source prints "no data", never 0.
+
+Usage (from the repository root, or with --repo):
+
+    teamwright-metrics                          Markdown report for the whole history
+    teamwright-metrics --json                   same data as JSON
+    teamwright-metrics --since 2026-01-01 --until 2026-06-30
+    teamwright-metrics --split-date 2026-04-01  every metric before / after + delta
+    teamwright-metrics --transition-regex '^\\s*status:\\s*(?P<ids><ID>)\\s+(?P<from>\\w+)\\s*->\\s*(?P<to>\\w+)'
+    teamwright-metrics --status-aliases aliases.json --logs old-logs/
+    teamwright-metrics --task-id-regex 'S\\d+-\\d+' --sprint-from-id '^S(\\d+)-' --debug
+
+Sources:
+  1. git log                -> commits, agent co-authorship, fixes, reverts, recurrence
+  2. task-transition lines  -> cycle time, rework, review rounds, escalations
+     (default `chore(task): T-042 NEEDS_REVIEW→CODE_COMPLETE`, parsed tolerantly:
+     several ids, `->`, missing from, words around; parse coverage is reported)
+     plus docs/tasks/<ID>.md and docs/tasks/<ID>.reviews/<n>.md as committed in git
+  3. .teamwright/logs/*.jsonl (journal.sh) -> outcomes, declared vs actual review,
+     permission denials, tool calls per session
+
+Options may also come from a JSON file (--config, or .teamwright/metrics.json in the
+repository): keys are the long option names with underscores. Command-line wins.
+See docs/process/metrics.md for what each metric means and its known biases.
+Python 3 standard library only.
+"""
+import argparse
+import bisect
+import datetime as dt
+import json
+import os
+import re
+import subprocess
+import sys
+from collections import Counter, defaultdict
+
+NO_DATA = "no data"
+UTC = dt.timezone.utc
+
+# ---------------------------------------------------------------- defaults
+
+DEFAULT_FIX_RE = r"^(fix|bugfix|hotfix)(\(|:|!)|\bfix(es|ed)?\b"   # same as patch-guard
+DEFAULT_REVERT_RE = r"^revert\b"
+# Paths that count for nothing in areas, churn and recurrence: task records, docs and
+# planning files (any Markdown/reStructuredText/AsciiDoc: SPRINT.md, TODO.md, ...) and
+# lockfiles. A fix that touches only these has no area and is left out of recurrence.
+DEFAULT_EXCLUDE_RE = (r"^docs/|(^|/)[^/]*\.(md|mdx|markdown|rst|adoc)$|"
+                      r"(^|/)(package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml|"
+                      r"bun\.lockb?|poetry\.lock|uv\.lock|Pipfile\.lock|Cargo\.lock|go\.sum|"
+                      r"composer\.lock|Gemfile\.lock|mix\.lock|pubspec\.lock|packages\.lock\.json)$")
+# A one-line change (+1 -1) to a package manifest is a version bump that rides along with
+# every change (release tooling, per-service versions): it is not an area of the fix.
+DEFAULT_VERSION_BUMP_RE = (r"(^|/)(package\.json|pyproject\.toml|Cargo\.toml|setup\.cfg|"
+                           r"pubspec\.yaml|Chart\.yaml|composer\.json|[^/]*\.csproj|"
+                           r"[^/]*\.gemspec|VERSION|version\.txt)$")
+DEFAULT_TASK_ID_RE = r"[A-Z][A-Z0-9]*-\d+"
+# Default transition parser, tolerant of hand-written ledger subjects. <ID> expands to
+# --task-id-regex. Matches anywhere in a line (subject or body), any number per line:
+#   T-42 NEEDS_REVIEW→CODE_COMPLETE      T-1, T-2 TODO -> IN_PROGRESS
+#   REVIEW T-7 NEEDS_REVIEW → DONE      T-9 → NEEDS_REVIEW (no from)    T-3 wip -> done
+# Named groups: ids (one or more ids), to, optional from. Arrows: → -> =>.
+# Upper-case statuses of 3+ letters are always accepted; other spellings only when they
+# normalize (via --status-aliases) to a known status, so "T-1 foo -> bar" is not a transition.
+DEFAULT_TRANSITION_RE = (r"(?<![\w-])(?P<ids><ID>(?:[ \t]*(?:[,&+/]|\band\b)?[ \t]*<ID>)*)"
+                         r"[ \t]*:?[ \t]*(?:(?P<from>[A-Za-z][A-Za-z_]*)[ \t]*)?"
+                         r"(?:→|->|=>)[ \t]*(?P<to>[A-Za-z][A-Za-z_]*)\b")
+# Subjects of task-transition ("ledger") commits: chore(task):, docs(sprint3):, ...
+# They are the candidates for parse coverage and are left out of the git shares.
+DEFAULT_LEDGER_RE = r"^\w+\((?:tasks?|sprint)\w*\)!?:"
+KNOWN_STATUSES = {"TODO", "ANALYSIS", "IN_PROGRESS", "NEEDS_REVIEW", "CODE_COMPLETE", "DEPLOYED",
+                  "VERIFY", "VERIFIED", "VERIFY_FAIL", "DONE", "BLOCKED", "DEFERRED"}
+# Agent families: label=regex, matched case-insensitively against the whole
+# Co-Authored-By value (name and e-mail). Written to avoid humans named Claude/Devin.
+DEFAULT_AGENTS = [
+    "claude=anthropic|\\bclaude\\b[\\s-]*(code|opus|sonnet|haiku|fable|instant|\\d)",
+    "copilot=copilot",
+    "cursor=cursoragent|cursor agent|@cursor\\.(com|sh)",
+    "codex=\\bcodex\\b|openai|chatgpt",
+    "gemini=gemini|google-labs-jules",
+    "devin=devin-ai|devin\\[bot\\]|\\bdevin ai\\b",
+    "aider=\\baider\\b",
+    "junie=\\bjunie\\b",
+]
+DEFAULT_REVIEWER_RE = r"^code-reviewer$"
+DEFAULT_CLAIM_FIELDS = ["review_claimed", "claimed_review", "reviewed", "review_done"]
+# A claim-field value that claims a review: boolean true / 1, or a string matching this.
+DEFAULT_CLAIM_VALUE_RE = r"^(true|yes|y|1)$|\breviewer\b"
+
+START = {"ANALYSIS", "IN_PROGRESS"}
+LATE = {"NEEDS_REVIEW", "CODE_COMPLETE", "DEPLOYED", "VERIFIED", "VERIFY_FAIL"}
+REWORK_FROM = {"NEEDS_REVIEW", "CODE_COMPLETE", "DEPLOYED", "VERIFIED", "VERIFY_FAIL", "VERIFY"}
+REWORK_TO = {"IN_PROGRESS", "ANALYSIS"}
+
+
+# ---------------------------------------------------------------- helpers
+
+def die(msg, code=2):
+    print("teamwright-metrics: " + msg, file=sys.stderr)
+    sys.exit(code)
+
+
+def parse_day(s, name):
+    if not s:
+        return None
+    try:
+        return dt.datetime.strptime(s, "%Y-%m-%d").replace(tzinfo=UTC)
+    except ValueError:
+        die("%s must be YYYY-MM-DD, got %r" % (name, s))
+
+
+def parse_ts(v):
+    """ISO-8601 string or epoch seconds/milliseconds -> aware UTC datetime, or None."""
+    if v is None or v == "":
+        return None
+    if isinstance(v, (int, float)):
+        x = float(v)
+        if x > 1e11:
+            x /= 1000.0
+        try:
+            return dt.datetime.fromtimestamp(x, UTC)
+        except (OverflowError, OSError, ValueError):
+            return None
+    s = str(v).strip()
+    if re.fullmatch(r"\d+(\.\d+)?", s):
+        return parse_ts(float(s))
+    s = s.replace("Z", "+00:00").replace(" ", "T", 1)
+    s = re.sub(r"(\.\d{6})\d+", r"\1", s)
+    try:
+        d = dt.datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    if d.tzinfo is None:
+        d = d.replace(tzinfo=UTC)
+    return d.astimezone(UTC)
+
+
+def month(d):
+    return d.strftime("%Y-%m")
+
+
+def quantile(values, q):
+    """Linear-interpolated quantile (q in 0..1) of a non-empty list."""
+    xs = sorted(values)
+    if not xs:
+        return None
+    pos = (len(xs) - 1) * q
+    lo = int(pos)
+    hi = min(lo + 1, len(xs) - 1)
+    return xs[lo] + (xs[hi] - xs[lo]) * (pos - lo)
+
+
+def days_between(a, b):
+    return (b - a).total_seconds() / 86400.0
+
+
+# A metric value: always carries its n and source. value None means "no data".
+def share(num, den, source):
+    return {"kind": "share", "value": (num / den) if den else None,
+            "num": num, "n": den, "source": source}
+
+
+def count(v, source, n=None):
+    return {"kind": "count", "value": v, "n": n, "source": source}
+
+
+def number(v, n, source, kind="number"):
+    return {"kind": kind, "value": v, "n": n, "source": source}
+
+
+def nodata(source, kind="count", reason=None):
+    d = {"kind": kind, "value": None, "n": 0, "source": source}
+    if reason:
+        d["reason"] = reason
+    return d
+
+
+def load_aliases(path):
+    if not path:
+        return {}
+    try:
+        text = open(path, encoding="utf-8").read()
+    except OSError as e:
+        die("cannot read status aliases: %s" % e)
+    try:
+        data = json.loads(text)
+        if not isinstance(data, dict):
+            raise ValueError
+    except ValueError:
+        data = {}
+        for line in text.splitlines():
+            line = line.split("#", 1)[0].strip()
+            if "=" in line:
+                k, v = line.split("=", 1)
+                data[k.strip()] = v.strip()
+    return {norm_status(k): norm_status(v) for k, v in data.items()}
+
+
+def norm_status(s):
+    return re.sub(r"[\s-]+", "_", (s or "").strip()).upper()
+
+
+# ---------------------------------------------------------------- git source
+
+def git(repo, *args, check=True):
+    try:
+        p = subprocess.run(["git", "-C", repo] + list(args), stdout=subprocess.PIPE,
+                           stderr=subprocess.PIPE)
+    except OSError as e:
+        die("git not available: %s" % e)
+    if check and p.returncode != 0:
+        die("git %s failed: %s" % (" ".join(args[:2]),
+                                   p.stderr.decode("utf-8", "replace").strip()))
+    return p.stdout.decode("utf-8", "replace") if p.returncode == 0 else None
+
+
+def load_commits(opt):
+    fmt = "%x1e%H%x1f%aI%x1f%P%x1f%B%x1f"
+    args = ["log", "--numstat", "--no-renames", "--format=" + fmt]
+    if not opt.merges:
+        args.append("--no-merges")
+    if opt.until:
+        args.append("--until=" + (opt.until_dt + dt.timedelta(seconds=-1)).isoformat())
+    args.append(opt.rev)
+    out = git(opt.repo, *args, check=False)
+    if out is None:
+        return None
+    commits = []
+    for chunk in out.split("\x1e"):
+        if not chunk.strip():
+            continue
+        parts = chunk.split("\x1f", 4)
+        if len(parts) < 5:
+            continue
+        sha, date, parents, body, rest = parts
+        d = parse_ts(date)
+        if d is None:
+            continue
+        files = []
+        for line in rest.splitlines():
+            f = line.split("\t", 2)
+            if len(f) == 3:
+                a = int(f[0]) if f[0].isdigit() else 0
+                r = int(f[1]) if f[1].isdigit() else 0
+                files.append((f[2], a, r))
+        body = body.strip("\n")
+        commits.append({"sha": sha, "date": d, "month": month(d), "body": body,
+                        "subject": body.split("\n", 1)[0], "merge": len(parents.split()) > 1,
+                        "files": files})
+    commits.reverse()                  # git log is newest first: ties keep commit order
+    commits.sort(key=lambda c: c["date"])
+    return commits
+
+
+def normalize_model(name, aliases):
+    for rx, label in aliases:
+        if rx.search(name):
+            return label
+    s = name.lower()
+    s = re.sub(r"<[^>]*>", " ", s)
+    s = re.sub(r"\([^)]*\)|\[[^\]]*\]", " ", s)
+    s = re.sub(r"[-_/,:]", " ", s)
+    toks = [t for t in s.split()
+            if not re.fullmatch(r"v?\d+(\.\d+)*[a-z]?|\d{6,8}|latest|preview|noreply|bot", t)]
+    return " ".join(toks) or name.strip().lower()
+
+
+def classify_commits(commits, opt):
+    agents = []
+    for spec in opt.agent:
+        if "=" not in spec:
+            die("--agent expects label=regex, got %r" % spec)
+        label, rx = spec.split("=", 1)
+        agents.append((label.strip(), re.compile(rx, re.I)))
+    aliases = []
+    for spec in opt.model_alias:
+        if "=" not in spec:
+            die("--model-alias expects regex=name, got %r" % spec)
+        rx, label = spec.rsplit("=", 1)
+        aliases.append((re.compile(rx, re.I), label.strip()))
+    fix_re = re.compile(opt.fix_regex, re.I)
+    rev_re = re.compile(opt.revert_regex, re.I)
+    excl = re.compile(opt.exclude_regex) if opt.exclude_regex else None
+    bump = re.compile(opt.version_bump_regex) if opt.version_bump_regex else None
+    ledger = re.compile(opt.ledger_regex, re.I) if opt.ledger_regex else None
+    id_rx = re.compile(opt.task_id_regex)
+    trailer = re.compile(r"(?im)^[ \t]*co-authored-by:[ \t]*(.+?)[ \t]*$")
+    for c in commits:
+        c["ledger"] = bool(ledger and ledger.search(c["subject"]))
+        c["agents"], c["models"] = [], []
+        for val in trailer.findall(c["body"]):
+            for label, rx in agents:
+                if rx.search(val):
+                    c["agents"].append(label)
+                    c["models"].append(normalize_model(val, aliases))
+                    break
+        c["revert"] = bool(rev_re.search(c["subject"])) or "This reverts commit" in c["body"]
+        c["fix"] = (not c["revert"]) and (not c["ledger"]) and bool(fix_re.search(c["subject"]))
+        ids = {m.group(0) for m in id_rx.finditer(c["subject"])} if c["fix"] else set()
+        if opt.refix_ids == "single" and len(ids) != 1:
+            ids = set()                    # only unambiguous one-task fix commits
+        c["fix_tasks"] = ids
+        c["areas"] = set()
+        c["area_churn"] = Counter()
+        for path, a, r in c["files"]:
+            if excl and excl.search(path):
+                continue
+            if bump and a == 1 and r == 1 and bump.search(path):
+                continue
+            ar = area_of(path, opt)
+            c["areas"].add(ar)
+            c["area_churn"][ar] += a + r
+    # recurrence over the whole loaded history (so the look-back reaches before --since)
+    last_fix = {}
+    look = dt.timedelta(days=opt.recurrence_days)
+    for c in commits:
+        if not c["fix"]:
+            continue
+        if not c["areas"]:
+            c["recurrent"] = None
+            continue
+        c["recurrent"] = any(a in last_fix and c["date"] - last_fix[a] <= look
+                             for a in c["areas"])
+        for a in c["areas"]:
+            last_fix[a] = c["date"]
+
+
+def area_of(path, opt):
+    if opt.area == "file":
+        return path
+    d = os.path.dirname(path)
+    if not d:
+        return path            # a root-level file is its own area, never "."
+    if opt.area_depth:
+        d = "/".join(d.split("/")[:opt.area_depth])
+    return d
+
+
+def git_period_summary(cs, opt, src, breaks):
+    n = len(cs)
+    work = [c for c in cs if not c["ledger"]]          # shares exclude ledger commits
+    w = len(work)
+    months = sorted({c["month"] for c in cs})
+    fixes = [c for c in work if c["fix"]]
+    rec = [c for c in fixes if c.get("recurrent") is not None]
+    wsrc = src + ", ledger commits excluded"
+    agent = share(sum(1 for c in work if c["agents"]), w,
+                  wsrc + " - Co-Authored-By matching an agent pattern")
+    covered = [c for c in work if not in_breaks(c["date"], breaks)]
+    if len(covered) < w:
+        # a trailer-coverage break falls in this period: the share mixes weeks where agents
+        # signed their commits with weeks where nobody did, so its level means nothing
+        agent = dict(agent, raw_value=agent["value"], value=None, unreliable=True,
+                     reason="trailer-coverage break in this period (%d of %d commits)" % (
+                         w - len(covered), w))
+    out = {
+        "commits": count(n, src, n),
+        "ledger_commits": count(n - w, src + " - subject matches --ledger-regex", n),
+        "active_months": count(len(months), src, n),
+        "commits_per_active_month": number(round(n / len(months), 1) if months else None,
+                                           len(months), src),
+        "agent_coauthored_share": agent,
+        "fix_share": share(len(fixes), w, wsrc + " - subject matches --fix-regex"),
+        "revert_share": share(sum(1 for c in work if c["revert"]), w, wsrc + " - revert commits"),
+        "recurrence_rate": share(sum(1 for c in rec if c["recurrent"]), len(rec),
+                                 src + " - fix commits touching an area fixed in the previous "
+                                 "%d days" % opt.recurrence_days),
+        "recurring_areas": count(len(recurring_areas(cs, opt)), src + " - areas with >= %d fixes "
+                                 "within %d days" % (opt.min_fixes, opt.window), len(fixes)),
+        "tasks_fixed_again": refix_share(fixes, opt, src),
+    }
+    if breaks:
+        out["agent_coauthored_share_covered"] = share(
+            sum(1 for c in covered if c["agents"]), len(covered),
+            wsrc + " - weeks outside trailer-coverage breaks only")
+    if not n:
+        for k in out:
+            out[k]["value"] = None
+    return out
+
+
+def refix_share(fixes, opt, src):
+    """Tasks whose fix commits (subject naming the task id; --refix-ids single: naming only
+    that id) fall on days at least --refix-days apart: the task-level "patched again"
+    signal, independent of files and area granularity."""
+    days = defaultdict(set)
+    for c in fixes:
+        for tid in c["fix_tasks"]:
+            days[tid].add(c["date"].date())
+    again = sum(1 for ds in days.values() if (max(ds) - min(ds)).days >= opt.refix_days)
+    return share(again, len(days), src + " - tasks named in fix subjects%s, fixed on days "
+                 ">= %d apart (of tasks with a fix)" % (
+                     " (alone)" if opt.refix_ids == "single" else "", opt.refix_days))
+
+
+def in_breaks(d, breaks):
+    return any(a <= d < b for a, b in breaks)
+
+
+def trailer_breaks(commits, opt):
+    """Detect weeks where agents stopped signing commits (a settings change, a squash
+    policy), so the agent share falls without the work changing. Per ISO week (weeks with
+    >= --trailer-min-commits work commits), a week is low when its trailer share is below
+    --trailer-break-ratio x the median of the previous 4 non-low weeks (baseline >= 30%).
+    Two consecutive low weeks - or low weeks up to the end of history - form a break; it
+    ends at the first week that recovers. Returns [(start, end_exclusive, info)]."""
+    weeks = defaultdict(lambda: [0, 0])
+    for c in commits:
+        if c["ledger"]:
+            continue
+        y, wk, _ = c["date"].isocalendar()
+        weeks[(y, wk)][0] += 1
+        weeks[(y, wk)][1] += 1 if c["agents"] else 0
+    keys = [k for k in sorted(weeks) if weeks[k][0] >= opt.trailer_min_commits]
+    base_hist, low = [], {}
+    for k in keys:
+        n, a = weeks[k]
+        sh = a / n
+        base = quantile(base_hist[-4:], .5) if base_hist else None
+        if base is not None and base >= 0.3 and sh < opt.trailer_break_ratio * base:
+            low[k] = (sh, base, n)
+        else:
+            base_hist.append(sh)
+    runs, cur = [], []
+    for k in keys:
+        if k in low:
+            cur.append(k)
+        else:
+            if len(cur) >= 2:
+                runs.append((cur, False))
+            cur = []
+    if cur:
+        runs.append((cur, True))
+    out = []
+    for run, to_end in runs:
+        start = dt.datetime.fromisocalendar(run[0][0], run[0][1], 1).replace(tzinfo=UTC)
+        end = (dt.datetime.fromisocalendar(run[-1][0], run[-1][1], 1).replace(tzinfo=UTC)
+               + dt.timedelta(days=7))
+        if to_end:
+            end = dt.datetime.max.replace(tzinfo=UTC)
+        out.append((start, end, {
+            "from": start.strftime("%Y-%m-%d"),
+            "to": None if to_end else (end - dt.timedelta(days=1)).strftime("%Y-%m-%d"),
+            "weeks": len(run), "baseline_share": round(low[run[0]][1], 3),
+            "share_in_break": round(sum(weeks[k][1] for k in run) / sum(weeks[k][0] for k in run), 3),
+            "commits_in_low_weeks": sum(weeks[k][0] for k in run)}))
+    return out
+
+
+def recurring_areas(cs, opt):
+    by_area = defaultdict(list)
+    for c in cs:
+        if c["fix"]:
+            for a in c["areas"]:
+                by_area[a].append(c["date"])
+    res = []
+    win = dt.timedelta(days=opt.window)
+    for a, ds in by_area.items():
+        ds.sort()
+        best, j = 0, 0
+        best_span = (ds[0], ds[0])
+        for i in range(len(ds)):
+            while ds[i] - ds[j] > win:
+                j += 1
+            if i - j + 1 > best:
+                best, best_span = i - j + 1, (ds[j], ds[i])
+        if best >= opt.min_fixes:
+            res.append({"area": a, "fixes_in_window": best, "fixes_total": len(ds),
+                        "window_start": best_span[0].strftime("%Y-%m-%d"),
+                        "window_end": best_span[1].strftime("%Y-%m-%d")})
+    res.sort(key=lambda r: (-r["fixes_in_window"], -r["fixes_total"], r["area"]))
+    return res
+
+
+def hotspots(cs, opt):
+    churn, fixes, commits = Counter(), Counter(), Counter()
+    for c in cs:
+        for a, v in c["area_churn"].items():
+            churn[a] += v
+            commits[a] += 1
+        if c["fix"]:
+            for a in c["areas"]:
+                fixes[a] += 1
+    rows = [{"area": a, "churn": churn[a], "fixes": fixes[a], "commits": commits[a],
+             "score": churn[a] * fixes[a]} for a in fixes]
+    rows.sort(key=lambda r: (-r["score"], -r["fixes"], r["area"]))
+    return rows[:opt.top]
+
+
+def git_section(opt, periods):
+    commits = load_commits(opt)
+    src = "git log %s%s" % (opt.rev, "" if opt.merges else " --no-merges")
+    if commits is None:
+        return {"status": NO_DATA, "reason": "not a git repository or no commits", "source": src}
+    classify_commits(commits, opt)
+    brk = trailer_breaks(commits, opt)
+    breaks = [(a, b) for a, b, _ in brk]
+    in_range = [c for c in commits if in_period(c["date"], opt.since_dt, opt.until_dt)]
+    if not in_range:
+        return {"status": NO_DATA, "reason": "no commits in the selected range", "source": src,
+                "_commits": commits}
+    monthly = []
+    by_month = defaultdict(list)
+    for c in in_range:
+        by_month[c["month"]].append(c)
+    for m in sorted(by_month):
+        cs = by_month[m]
+        work = [c for c in cs if not c["ledger"]]
+        fixes = [c for c in work if c["fix"]]
+        rec = [c for c in fixes if c.get("recurrent") is not None]
+        monthly.append({
+            "month": m, "commits": len(cs), "work_commits": len(work),
+            "agent_coauthored": sum(1 for c in work if c["agents"]),
+            "trailer_break": any(in_breaks(c["date"], breaks) for c in work),
+            "fixes": len(fixes), "reverts": sum(1 for c in work if c["revert"]),
+            "recurrent_fixes": sum(1 for c in rec if c["recurrent"]),
+            "fixes_with_area": len(rec),
+        })
+    fam, models = Counter(), Counter()
+    for c in in_range:
+        for a in set(c["agents"]):
+            fam[a] += 1
+        for mo in set(c["models"]):
+            models[mo] += 1
+    summary = {}
+    for name, a, b in periods:
+        cs = [c for c in in_range if in_period(c["date"], a, b)]
+        summary[name] = git_period_summary(cs, opt, src, breaks)
+    return {"source": src, "n_commits": len(in_range), "summary": summary, "monthly": monthly,
+            "agent_families": dict(fam.most_common()), "agent_models": dict(models.most_common()),
+            "trailer_breaks": [info for _, _, info in brk],
+            "recurring_areas": recurring_areas(in_range, opt), "hotspots": hotspots(in_range, opt),
+            "params": {"area": opt.area, "area_depth": opt.area_depth, "window_days": opt.window,
+                       "min_fixes": opt.min_fixes, "recurrence_days": opt.recurrence_days,
+                       "fix_regex": opt.fix_regex, "exclude_regex": opt.exclude_regex,
+                       "version_bump_regex": opt.version_bump_regex,
+                       "ledger_regex": opt.ledger_regex, "refix_days": opt.refix_days,
+                       "refix_ids": opt.refix_ids,
+                       "trailer_break_ratio": opt.trailer_break_ratio,
+                       "trailer_min_commits": opt.trailer_min_commits},
+            "_commits": commits}
+
+
+def in_period(d, a, b):
+    return (a is None or d >= a) and (b is None or d < b)
+
+
+# ---------------------------------------------------------------- tasks source
+
+def read_blobs(repo, rev, paths):
+    """{path: text} for paths at rev, via one git cat-file --batch call."""
+    if not paths:
+        return {}
+    inp = "".join("%s:%s\n" % (rev, p) for p in paths).encode()
+    p = subprocess.run(["git", "-C", repo, "cat-file", "--batch"], input=inp,
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    data, out, i = p.stdout, {}, 0
+    for path in paths:
+        nl = data.find(b"\n", i)
+        if nl < 0:
+            break
+        header = data[i:nl].split()
+        i = nl + 1
+        if len(header) == 3 and header[1] == b"blob":
+            size = int(header[2])
+            out[path] = data[i:i + size].decode("utf-8", "replace")
+            i += size + 1
+    return out
+
+
+def front_value(text, key):
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return ""
+    for line in lines[1:]:
+        if line.strip() == "---":
+            break
+        m = re.match(r"^%s:\s*(.*)$" % re.escape(key), line)
+        if m:
+            return m.group(1).split("#", 1)[0].strip().strip("'\"")
+    return ""
+
+
+def task_records(opt, id_re):
+    """Committed task and review records (at --rev), or None when there are none."""
+    tdir = opt.tasks_dir.strip("/")
+    out = git(opt.repo, "ls-tree", "-r", "--name-only", opt.rev, "--", tdir, check=False)
+    if not out:
+        return None
+    tasks, reviews = {}, defaultdict(list)
+    rx_task = re.compile(r"^%s/(%s)\.md$" % (re.escape(tdir), id_re))
+    rx_rev = re.compile(r"^%s/(%s)\.reviews/(\d+)\.md$" % (re.escape(tdir), id_re))
+    for p in out.splitlines():
+        m = rx_task.match(p)
+        if m:
+            tasks[m.group(1)] = p
+            continue
+        m = rx_rev.match(p)
+        if m:
+            reviews[m.group(1)].append(p)
+    if not tasks and not reviews:
+        return None
+    blobs = read_blobs(opt.repo, opt.rev, list(tasks.values()) + [p for v in reviews.values()
+                                                                    for p in v])
+    created = {}
+    log = git(opt.repo, "log", "--diff-filter=A", "--no-renames", "--format=%x1e%aI",
+              "--name-only", opt.rev, "--", tdir, check=False) or ""
+    for chunk in log.split("\x1e"):
+        lines = [x for x in chunk.strip().splitlines() if x.strip()]
+        if not lines:
+            continue
+        d = parse_ts(lines[0])
+        for p in lines[1:]:
+            m = rx_task.match(p.strip())
+            if m and d and (m.group(1) not in created or d < created[m.group(1)]):
+                created[m.group(1)] = d
+    return {
+        "sprint": {t: front_value(blobs.get(p, ""), "sprint") for t, p in tasks.items()},
+        "created": created,
+        "reviews": {t: [norm_status(front_value(blobs.get(p, ""), "verdict")) for p in
+                        sorted(ps, key=lambda x: int(re.search(r"(\d+)\.md$", x).group(1)))]
+                    for t, ps in reviews.items()},
+        "n_task_files": len(tasks),
+        "has_review_dirs": bool(reviews),
+    }
+
+
+ARROW_RE = re.compile(r"→|->|=>")
+
+
+def parse_transitions(commits, opt, aliases):
+    id_re = opt.task_id_regex
+    try:
+        rx = re.compile(opt.transition_regex.replace("<ID>", "(?:%s)" % id_re), re.M)
+    except re.error as e:
+        die("--transition-regex does not compile: %s" % e)
+    if "to" not in rx.groupindex or not ({"ids", "id"} & set(rx.groupindex)):
+        die("--transition-regex needs named groups (?P<ids>...) (or id) and (?P<to>...)")
+    idg = "ids" if "ids" in rx.groupindex else "id"
+    id_rx = re.compile(id_re)
+    tolerant = opt.transition_regex == DEFAULT_TRANSITION_RE
+    known = KNOWN_STATUSES | set(aliases) | set(aliases.values())
+    ledger = re.compile(opt.ledger_regex, re.I) if opt.ledger_regex else None
+    sprint_rx = re.compile(opt.sprint_regex) if opt.sprint_regex else None
+    events, sprints = [], {}
+    cov = {"ledger_commits": 0, "ledger_with_transition": 0, "commits_with_transition": 0,
+           "transitions": 0, "ledger_with_arrow_unparsed": 0, "unmatched": []}
+
+    def status_ok(raw):
+        # tolerant default only: SHOUTED words of 3+ letters, or anything that maps to a
+        # known status; "T-1 foo -> bar" is prose, not a transition
+        if not tolerant:
+            return True
+        return (raw.isupper() and len(raw) >= 3) or aliases.get(norm_status(raw),
+                                                               norm_status(raw)) in known
+
+    for order, c in enumerate(commits):
+        found = []
+        is_ledger = bool(ledger and ledger.search(c["subject"]))
+        matches = [m for m in rx.finditer(c["body"]) if status_ok(m.group("to"))]
+        if tolerant and is_ledger and not matches:
+            matches = [m for m in clause_matches(c["body"], id_rx) if status_ok(m.group("to"))]
+        for m in matches:
+            raw_to = m.group("to")
+            raw_fr = m.group("from") if "from" in rx.groupindex and m.group("from") else ""
+            if raw_fr and not status_ok(raw_fr):
+                raw_fr = ""
+            to, fr = norm_status(raw_to), norm_status(raw_fr)
+            to, fr = aliases.get(to, to), aliases.get(fr, fr)
+            for im in id_rx.finditer(m.group(idg) or ""):
+                tid = im.group(0)
+                found.append(tid)
+                events.append({"task": tid, "from": fr, "to": to, "date": c["date"],
+                               "order": order, "sha": c["sha"]})
+        cov["ledger_commits"] += is_ledger
+        if found:
+            cov["commits_with_transition"] += 1
+            cov["ledger_with_transition"] += is_ledger
+            cov["transitions"] += len(found)
+        elif is_ledger:
+            arrow = bool(ARROW_RE.search(c["body"]) and id_rx.search(c["body"]))
+            cov["ledger_with_arrow_unparsed"] += arrow
+            cov["unmatched"].append((arrow, c["date"].strftime("%Y-%m-%d"), c["subject"][:160]))
+        if sprint_rx and found:
+            sm = sprint_rx.search(c["body"])
+            if sm:
+                label = sm.group(1) if sm.groups() else sm.group(0)
+                for tid in found:
+                    sprints.setdefault(tid, label)
+    # unmatched sample: subjects with an arrow first (likely parser misses), newest first
+    um = sorted(cov["unmatched"], key=lambda u: u[1], reverse=True)
+    um.sort(key=lambda u: not u[0])                     # stable: arrow first, then by date
+    cov["unmatched"] = [{"date": d, "has_arrow": a, "subject": subj} for a, d, subj in um]
+    return events, sprints, cov
+
+
+CLAUSE_ARROW_RE = re.compile(r"(?:(?P<from>[A-Za-z][A-Za-z_]*)[ \t]*)?(?:→|->|=>)[ \t]*"
+                             r"(?P<to>[A-Za-z][A-Za-z_]*)\b")
+
+
+class _Clause(object):
+    """Match-like object for clause attribution (groups ids / from / to)."""
+
+    def __init__(self, ids, fr, to):
+        self.g = {"ids": ids, "id": ids, "from": fr, "to": to}
+
+    def group(self, k):
+        return self.g.get(k)
+
+
+def clause_matches(body, id_rx):
+    """Fallback for ledger commits the regex could not read: 'T-7 review done -> DONE',
+    'T-1+T-2 analysis (root found) → NEEDS_REVIEW'. An arrow with a status is attributed
+    to the task ids written before it in the same clause (clauses split on ; · | and line
+    ends); an arrow with no id before it in its clause is skipped."""
+    out = []
+    for line in body.splitlines():
+        start = 0
+        for m in CLAUSE_ARROW_RE.finditer(line):
+            seg_start = max(start, *(line.rfind(sep, 0, m.start()) + 1 for sep in ";·|"))
+            ids = " ".join(x.group(0) for x in id_rx.finditer(line, seg_start, m.start()))
+            start = m.end()
+            if ids:
+                out.append(_Clause(ids, m.group("from") or "", m.group("to")))
+    return out
+
+
+def sprint_from_id(tid, rx):
+    m = rx.search(tid)
+    if not m:
+        return None
+    return m.group(1) if m.groups() else m.group(0)
+
+
+def build_tasks(events, records):
+    # "reached review" = entered NEEDS_REVIEW, when the history uses that status at all;
+    # otherwise (another convention) any status from review onwards
+    has_review = any(e["to"] == "NEEDS_REVIEW" or e["from"] == "NEEDS_REVIEW" for e in events)
+    by = defaultdict(list)
+    for e in events:
+        by[e["task"]].append(e)
+    tasks = {}
+    for tid, evs in by.items():
+        evs.sort(key=lambda e: (e["date"], e["order"]))
+        prev = ""
+        for e in evs:                  # "T-7 → DONE": from = the task's previous status
+            if not e["from"] and prev:
+                e["from"], e["from_inferred"] = prev, True
+            prev = e["to"]
+        first = evs[0]["date"]
+        if records and tid in records["created"]:
+            first = min(first, records["created"][tid])
+        started = next((e["date"] for e in evs if e["to"] in START or e["from"] == "TODO"), None)
+        done = None
+        if evs[-1]["to"] == "DONE":
+            done = evs[-1]["date"]
+        if has_review:
+            reached = any(e["to"] == "NEEDS_REVIEW" or e["from"] == "NEEDS_REVIEW" for e in evs)
+        else:
+            reached = any(e["to"] in LATE or e["from"] in LATE or e["to"] == "DONE" for e in evs)
+        rework = [e for e in evs if e["from"] in REWORK_FROM and e["to"] in REWORK_TO]
+        tasks[tid] = {
+            "first_seen": first, "started": started, "done": done, "last": evs[-1]["date"],
+            "reached_review": reached, "rework_events": len(rework),
+            "review_rounds_transitions": max(sum(1 for e in evs if e["to"] == "NEEDS_REVIEW"),
+                                             sum(1 for e in evs if e["from"] == "NEEDS_REVIEW")),
+            "approved": any(e["to"] == "CODE_COMPLETE" for e in evs),
+            "approved_at": next((e["date"] for e in evs if e["to"] == "CODE_COMPLETE"), None),
+            "escalations": sum(1 for e in evs if e["from"] == "NEEDS_REVIEW" and e["to"] == "BLOCKED"),
+            "recurrence_rejects": sum(1 for e in evs if e["from"] == "NEEDS_REVIEW"
+                                      and e["to"] == "DEFERRED"),
+            "verify_fails": sum(1 for e in evs if e["to"] == "VERIFY_FAIL"),
+            "final": evs[-1]["to"],
+        }
+    return tasks
+
+
+def task_period_summary(ts, evs, records, src, rev_src):
+    """ts: {id: task} belonging to the period; evs: transition events in the period."""
+    n = len(ts)
+    cyc = [days_between(t["started"], t["done"]) for t in ts.values() if t["started"] and t["done"]]
+    lead = [days_between(t["first_seen"], t["done"]) for t in ts.values() if t["done"]]
+    reviewed = [t for t in ts.values() if t["reached_review"]]
+    out = {
+        "tasks_seen": count(n, src, n),
+        "tasks_done": count(sum(1 for t in ts.values() if t["done"]), src, n),
+        "cycle_days_median": number(round(quantile(cyc, .5), 2) if cyc else None, len(cyc),
+                                    src + " - first ANALYSIS/IN_PROGRESS -> last DONE", "days"),
+        "cycle_days_p75": number(round(quantile(cyc, .75), 2) if cyc else None, len(cyc),
+                                 src + " - first ANALYSIS/IN_PROGRESS -> last DONE", "days"),
+        "lead_days_median": number(round(quantile(lead, .5), 2) if lead else None, len(lead),
+                                   src + " - first seen -> last DONE", "days"),
+        "lead_days_p75": number(round(quantile(lead, .75), 2) if lead else None, len(lead),
+                                src + " - first seen -> last DONE", "days"),
+        "rework_rate": share(sum(1 for t in reviewed if t["rework_events"]), len(reviewed),
+                             src + " - tasks sent back from review/verify to IN_PROGRESS/ANALYSIS"),
+        "escalations": count(sum(1 for e in evs if e["from"] == "NEEDS_REVIEW"
+                                 and e["to"] == "BLOCKED"), src + " - NEEDS_REVIEW -> BLOCKED",
+                             len(evs)),
+        "recurrence_rejects": count(sum(1 for e in evs if e["from"] == "NEEDS_REVIEW"
+                                        and e["to"] == "DEFERRED"),
+                                    src + " - NEEDS_REVIEW -> DEFERRED", len(evs)),
+        "verify_failures": count(sum(1 for e in evs if e["to"] == "VERIFY_FAIL"),
+                                 src + " - -> VERIFY_FAIL", len(evs)),
+    }
+    if records and records["has_review_dirs"]:
+        rounds = [len(records["reviews"].get(t, [])) for t, x in ts.items() if x["reached_review"]]
+        out["review_rounds_mean"] = number(round(sum(rounds) / len(rounds), 2) if rounds else None,
+                                           len(rounds), rev_src + " (tasks that reached review)")
+        appr = [t for t, x in ts.items() if x["approved"]]
+        out["approved_without_review_record"] = share(
+            sum(1 for t in appr if not records["reviews"].get(t)), len(appr),
+            rev_src + " vs -> CODE_COMPLETE transitions")
+        out["escalate_verdicts"] = count(sum(v.count("ESCALATE") for t, v in
+                                             records["reviews"].items() if t in ts),
+                                         rev_src + " - verdict ESCALATE", len(rounds))
+    else:
+        rounds = [x["review_rounds_transitions"] for x in reviewed]
+        out["review_rounds_mean"] = number(round(sum(rounds) / len(rounds), 2) if rounds else None,
+                                           len(rounds), src + " - entries into NEEDS_REVIEW "
+                                           "(no review records in git)")
+    if not n:
+        for k in out:
+            out[k]["value"] = None
+    return out
+
+
+def task_section(opt, periods, commits):
+    src = "task-transition commits (%s)" % ("default convention" if opt.transition_regex ==
+                                             DEFAULT_TRANSITION_RE else "--transition-regex")
+    if not commits:
+        return {"status": NO_DATA, "reason": "no git history", "source": src}
+    aliases = load_aliases(opt.status_aliases)
+    events, sprint_by_commit, cov = parse_transitions(commits, opt, aliases)
+    in_rng = [c for c in commits if in_period(c["date"], opt.since_dt, opt.until_dt)]
+    if len(in_rng) != len(commits):
+        _, _, cov = parse_transitions(in_rng, opt, aliases)     # coverage for the range only
+    coverage = {k: v for k, v in cov.items() if k != "unmatched"}
+    coverage["regex"] = "default (tolerant)" if opt.transition_regex == DEFAULT_TRANSITION_RE \
+        else "--transition-regex"
+    if opt.debug:
+        coverage["unmatched_sample"] = cov["unmatched"][:opt.debug_sample]
+    records = task_records(opt, opt.task_id_regex)
+    rev_src = "%s/<ID>.reviews/<n>.md at %s" % (opt.tasks_dir.strip("/"), opt.rev)
+    if not events:
+        return {"status": NO_DATA, "reason": "no task-transition lines matched", "source": src,
+                "parse_coverage": coverage}
+    tasks = build_tasks(events, records)
+    rng = lambda d: in_period(d, opt.since_dt, opt.until_dt)   # noqa: E731
+    if opt.task_period == "start":      # cohort: the period in which the task started
+        key_date = lambda t: t["started"] or t["first_seen"]    # noqa: E731
+    else:                               # the period of its last DONE (or last transition)
+        key_date = lambda t: t["done"] or t["last"]             # noqa: E731
+    in_range = {k: t for k, t in tasks.items() if rng(key_date(t))}
+    evs_range = [e for e in events if rng(e["date"])]
+    monthly = defaultdict(lambda: {"created": 0, "done": 0, "rework_events": 0})
+    for t in tasks.values():
+        if rng(t["first_seen"]):
+            monthly[month(t["first_seen"])]["created"] += 1
+        if t["done"] and rng(t["done"]):
+            monthly[month(t["done"])]["done"] += 1
+    for e in evs_range:
+        if e["from"] in REWORK_FROM and e["to"] in REWORK_TO:
+            monthly[month(e["date"])]["rework_events"] += 1
+    summary = {}
+    for name, a, b in periods:
+        ts = {k: t for k, t in in_range.items() if in_period(key_date(t), a, b)}
+        ev = [e for e in evs_range if in_period(e["date"], a, b)]
+        summary[name] = task_period_summary(ts, ev, records, src, rev_src)
+    # sprint: task record field first, else --sprint-from-id, else --sprint-regex
+    sprint_src, sprint_of = None, {}
+    if records and any(records["sprint"].values()):
+        sprint_of = {t: s for t, s in records["sprint"].items() if s}
+        sprint_src = "%s/<ID>.md front matter `sprint:`" % opt.tasks_dir.strip("/")
+    elif opt.sprint_from_id:
+        srx = re.compile(opt.sprint_from_id)
+        sprint_of = {t: sprint_from_id(t, srx) for t in tasks}
+        sprint_of = {t: v for t, v in sprint_of.items() if v}
+        sprint_src = "--sprint-from-id over task ids (tasks seen in transitions)"
+    if not sprint_of and sprint_by_commit:
+        sprint_of, sprint_src = sprint_by_commit, "--sprint-regex over transition commits"
+    sprints = None
+    if sprint_of:
+        agg = defaultdict(lambda: {"tasks": 0, "done": 0, "reworked": 0})
+        for tid, t in in_range.items():
+            s = sprint_of.get(tid)
+            if s is None:
+                continue
+            agg[s]["tasks"] += 1
+            agg[s]["done"] += 1 if t["done"] else 0
+            agg[s]["reworked"] += 1 if t["rework_events"] else 0
+        sprints = {"source": sprint_src, "n_tasks_with_sprint": sum(v["tasks"] for v in agg.values()),
+                   "rows": [dict(sprint=k, **v) for k, v in sorted(agg.items(), key=lambda kv: sprint_key(kv[0]))]}
+    return {"source": src, "n_events": len(evs_range), "n_tasks": len(in_range),
+            "parse_coverage": coverage, "task_period": opt.task_period,
+            "review_source": rev_src if records and records["has_review_dirs"] else None,
+            "summary": summary,
+            "monthly": [dict(month=m, **v) for m, v in sorted(monthly.items())],
+            "sprints": sprints if sprints else {"status": NO_DATA,
+                                                "reason": "no `sprint:` field in task records, no "
+                                                          "--sprint-from-id or --sprint-regex match"},
+            "_tasks": tasks}
+
+
+def sprint_key(s):
+    m = re.search(r"\d+", s)
+    return (int(m.group(0)) if m else 1 << 30, s)
+
+
+# ---------------------------------------------------------------- journal source
+
+def iter_json(text):
+    """Yield dict objects from JSONL, concatenated or pretty-printed JSON, or arrays."""
+    dec = json.JSONDecoder()
+    i, n, bad = 0, len(text), 0
+    while i < n:
+        while i < n and text[i] in " \t\r\n,":
+            i += 1
+        if i >= n:
+            break
+        try:
+            obj, i = dec.raw_decode(text, i)
+        except ValueError:
+            bad += 1
+            nl = text.find("\n", i)
+            i = n if nl < 0 else nl + 1
+            continue
+        items = obj if isinstance(obj, list) else [obj]
+        for o in items:
+            if isinstance(o, dict):
+                yield o
+    if bad:
+        yield {"__bad__": bad}
+
+
+EVENT_ALIASES = {"pretooluse": "pre", "posttooluse": "post", "posttoolusefailure": "failure",
+                 "permissiondenied": "PermissionDenied", "permissionrequest": "PermissionRequest",
+                 "stop": "Stop", "subagentstop": "SubagentStop"}
+
+
+def pick(rec, *keys):
+    for k in keys:
+        v = rec.get(k)
+        if v not in (None, ""):
+            return v
+    return ""
+
+
+def norm_record(r):
+    ev = str(pick(r, "event", "hook_event_name", "type"))
+    ev = EVENT_ALIASES.get(ev.lower(), ev)
+    return {"ts": parse_ts(pick(r, "ts", "timestamp", "time")),
+            "session": str(pick(r, "session_id", "sessionId", "session")),
+            "agent_id": str(pick(r, "agent_id", "agentId")),
+            "agent_type": str(pick(r, "agent_type", "agentType")),
+            "tool": str(pick(r, "tool", "tool_name", "toolName")),
+            "detail": str(pick(r, "detail")),
+            "subagent_type": str(pick(r, "subagent_type", "subagentType")),
+            "task_ids": r.get("task_ids") if isinstance(r.get("task_ids"), list) else [],
+            "event": ev, "outcome": r.get("outcome"), "raw": r}
+
+
+def load_journal(opt):
+    paths = opt.logs or [os.path.join(opt.repo, ".teamwright", "logs")]
+    files = []
+    for p in paths:
+        if os.path.isdir(p):
+            files += sorted(os.path.join(p, f) for f in os.listdir(p)   # dotfiles = tool state
+                            if f.endswith((".jsonl", ".json", ".ndjson")) and not f.startswith("."))
+        elif os.path.isfile(p):
+            files.append(p)
+    recs, bad = [], 0
+    for f in files:
+        try:
+            text = open(f, encoding="utf-8", errors="replace").read()
+        except OSError:
+            continue
+        for o in iter_json(text):
+            if "__bad__" in o:
+                bad += o["__bad__"]
+            else:
+                recs.append(norm_record(o))
+    return files, recs, bad
+
+
+def claims_review(v, rx):
+    if v is True or (isinstance(v, (int, float)) and not isinstance(v, bool) and v == 1):
+        return True
+    return isinstance(v, str) and bool(rx.search(v.strip()))
+
+
+def join_claims_by_time(recs, opt):
+    """Journals whose outcome/claim records carry no usable session id (a fixed label, or
+    none) are attached to the tool-call session that ended nearest to the record, within
+    --claim-window minutes. 'auto' does this only when no outcome/claim record shares a
+    session id with any tool call and they carry at most one distinct session value (a
+    fixed label or none). Returns the join mode actually used."""
+    fields = set(opt.review_claim_field)
+    tool_sess = defaultdict(list)
+    for r in recs:
+        if r["tool"] and r["session"] and r["ts"]:
+            tool_sess[r["session"]].append(r["ts"])
+    claimish = [r for r in recs if r["outcome"] is not None or fields & set(r["raw"])]
+    if opt.claim_join == "session" or not claimish or not tool_sess:
+        return "session"
+    if opt.claim_join == "auto" and (any(r["session"] in tool_sess for r in claimish) or
+                                     len({r["session"] for r in claimish if r["session"]}) > 1):
+        return "session"
+    ends = sorted((max(ts), s) for s, ts in tool_sess.items())
+    keys = [e[0] for e in ends]
+    win = dt.timedelta(minutes=opt.claim_window)
+    for r in claimish:
+        if r["session"] in tool_sess and opt.claim_join == "auto":
+            continue
+        r["session"] = ""
+        if not r["ts"]:
+            continue
+        i = bisect.bisect_left(keys, r["ts"])
+        best = None
+        for j in (i - 1, i):
+            if 0 <= j < len(ends) and abs(ends[j][0] - r["ts"]) <= win:
+                if best is None or abs(ends[j][0] - r["ts"]) < abs(best[0] - r["ts"]):
+                    best = ends[j]
+        if best:
+            r["session"] = best[1]
+    return "time (+/- %d min of a tool session's last call)" % opt.claim_window
+
+
+def journal_period_summary(recs, opt, tasks, src, typed_since=None):
+    rv = re.compile(opt.reviewer_agent_regex, re.I)
+    sessions = defaultdict(list)
+    for r in recs:
+        if r["session"]:
+            sessions[r["session"]].append(r)
+    n_s = len(sessions)
+    has_pre = any(r["event"] == "pre" for r in recs)
+    calls = [r for r in recs if (r["event"] == "pre" if has_pre else
+                                 (r["tool"] and r["event"] not in
+                                  ("PermissionDenied", "PermissionRequest", "post", "failure")))]
+    calls_per = Counter(r["session"] for r in calls if r["session"])
+    per_session = [calls_per.get(s, 0) for s in sessions]
+    stops = [r for r in recs if r["outcome"] is not None and
+             (r["event"] == "Stop" or (r["event"] != "SubagentStop" and not r["agent_id"]))]
+
+    def runtime_stop(r):
+        # SubagentStop of the runtime's own helper agents: no type, no tool calls
+        return not r["agent_type"] and r["raw"].get("tool_calls") == 0
+    all_sub = [r for r in recs if r["outcome"] is not None and r["event"] == "SubagentStop"]
+    sub_stops = [r for r in all_sub if not runtime_stop(r)]
+    # a session's outcome is its LAST Stop: earlier turns may end while a role runs in the
+    # background (`waiting`), which is not a session without an outcome
+    last_stop = {}
+    for r in sorted((r for r in stops if r["session"]), key=lambda r: r["ts"].timestamp() if r["ts"] else float("-inf")):
+        last_stop[r["session"]] = r
+    gates = [r for r in recs if r["event"] == "gate"]
+    denied = [r for r in recs if r["event"] != "gate" and (
+              r["event"] == "PermissionDenied" or
+              str(r["raw"].get("decision", "")).lower() in ("deny", "denied") or
+              r["raw"].get("denied") is True)]
+    requests = [r for r in recs if r["event"] == "PermissionRequest"]
+    # heuristic: pre without post/failure (deny-rule refusals, interrupted calls)
+    bal = Counter()
+    for r in recs:
+        k = (r["session"], r["agent_id"], r["tool"], r["detail"])
+        if r["event"] == "pre":
+            bal[k] += 1
+        elif r["event"] in ("post", "failure"):
+            bal[k] -= 1
+    unmatched = Counter()
+    for (s, a, tool, d), v in bal.items():
+        if v > 0:
+            unmatched[tool] += v
+
+    def is_spawn(r):
+        return (r["tool"] in ("Agent", "Task") and r["event"] in ("pre", "")
+                and bool(rv.search(r["subagent_type"] or r["detail"])))
+
+    actual = {s for s, rs in sessions.items()
+              if any(is_spawn(r) or rv.search(r["agent_type"] or "\x00") for r in rs)}
+    any_sub = {s for s, rs in sessions.items()
+               if any((r["tool"] in ("Agent", "Task") and r["event"] in ("pre", "")) or
+                      r["agent_id"] for r in rs)}
+    claim_fields = opt.review_claim_field
+    crx = re.compile(opt.review_claim_regex, re.I)
+    claimed = {s for s, rs in sessions.items()
+               if any(claims_review(r["raw"].get(f), crx) for r in rs for f in claim_fields)}
+    out = {
+        "sessions": count(n_s if recs else None, src + " - distinct session_id", len(recs)),
+        "tool_calls": count(len(calls) if recs else None, src + " - `pre` tool events", len(calls)),
+        "tool_calls_per_session_median": number(quantile(per_session, .5) if per_session else None,
+                                                len(per_session), src),
+        "tool_calls_per_session_p75": number(quantile(per_session, .75) if per_session else None,
+                                             len(per_session), src),
+        "tool_calls_per_session_max": number(max(per_session) if per_session else None,
+                                             len(per_session), src),
+        "sessions_without_outcome": share(
+            sum(1 for r in last_stop.values() if str(r["outcome"]) in ("none", "", "waiting")),
+            len(last_stop), src + " - last Stop of each session: outcome none, or still waiting "
+                                  "on a background agent"),
+        "gate_warnings": count(sum(1 for r in gates if r["raw"].get("decision") == "warn")
+                               if recs else None, src + " - gates.jsonl, gate-first warnings", len(recs)),
+        "gate_denials": count(sum(1 for r in gates if r["raw"].get("decision") == "deny")
+                              if recs else None, src + " - gates.jsonl, denials", len(recs)),
+        "sessions_with_reviewer_evidence": share(len(actual), n_s, src + " - reviewer spawn or "
+                                                 "reviewer agent_type in the session"),
+        "permission_denials": count(len(denied) if recs else None,
+                                    src + " - PermissionDenied (auto-mode denials)", len(recs)),
+        "permission_requests": count(len(requests) if recs else None,
+                                     src + " - PermissionRequest", len(recs)),
+    }
+    if claimed:
+        out["claimed_review_with_evidence"] = share(len(claimed & actual), len(claimed),
+                                                    src + " - sessions with a review-claim field "
+                                                    "(%s)" % "/".join(claim_fields))
+        out["claimed_review_with_any_subagent"] = share(
+            len(claimed & any_sub), len(claimed),
+            src + " - upper bound: any subagent spawned (for journals that do not record the "
+                  "subagent type)")
+    else:
+        out["claimed_review_with_evidence"] = nodata(src + " - no review-claim field in records "
+                                                     "(%s)" % "/".join(claim_fields), "share")
+        out["claimed_review_with_any_subagent"] = nodata(src + " - no review claims", "share")
+    if typed_since is not None:
+        # before typed_since the journal saw subagent calls but not their type: counting
+        # those sessions as "no reviewer" would be a false zero, so they are left out
+        first = {s: min((r["ts"] for r in rs if r["ts"]), default=None) for s, rs in sessions.items()}
+        old = {s for s, t in first.items() if t is None or t < typed_since}
+        why = "sessions before %s left out: subagent type not journaled" % (
+            typed_since.strftime("%Y-%m-%d"))
+        out["sessions_with_reviewer_evidence"] = share(
+            len(actual - old), n_s - len(old),
+            out["sessions_with_reviewer_evidence"]["source"] + " - " + why)
+        if claimed:
+            out["claimed_review_with_evidence"] = share(
+                len((claimed - old) & actual), len(claimed - old),
+                out["claimed_review_with_evidence"]["source"] + " - " + why)
+    if tasks is not None:
+        tss = [r["ts"] for r in recs if r["ts"]]
+        if tss:
+            lo, hi = min(tss), max(tss)
+            spawned = set()
+            for r in recs:
+                if is_spawn(r):
+                    spawned.update(r["task_ids"])
+            approved = [t for t, x in tasks.items() if x["approved_at"] and lo <= x["approved_at"] <= hi]
+            if any(r["task_ids"] for r in recs):
+                out["approvals_with_reviewer_spawn"] = share(
+                    sum(1 for t in approved if t in spawned), len(approved),
+                    "-> CODE_COMPLETE transitions inside the journal's time span vs journaled "
+                    "reviewer spawns naming the task")
+            else:           # a journal that never records task ids cannot show a match
+                out["approvals_with_reviewer_spawn"] = nodata(
+                    "journal records carry no task_ids", "share")
+        else:
+            out["approvals_with_reviewer_spawn"] = nodata(
+                "journal records carry no timestamps" if recs else "no journal records in period",
+                "share")
+    else:
+        out["approvals_with_reviewer_spawn"] = nodata("no task transitions to compare with", "share")
+    if not recs:
+        for k in out:
+            out[k]["value"] = None
+    breakdown = {
+        "outcomes": dict(Counter(str(r["outcome"]) for r in stops).most_common()),
+        "subagent_outcomes": dict(Counter(str(r["outcome"]) for r in sub_stops).most_common()),
+        "denials_by_tool": dict(Counter(r["tool"] or "?" for r in denied).most_common()),
+        "unmatched_pre_by_tool": dict(unmatched.most_common()),
+        "calls_by_tool": dict(Counter(r["tool"] or "?" for r in calls).most_common(opt.top)),
+        "gate_decisions": dict(Counter("%s %s" % (r["raw"].get("gate") or "?", r["raw"].get("decision") or "?")
+                                       for r in gates).most_common()),
+        "n_stop_records": len(stops), "n_subagent_stop_records": len(sub_stops),
+        "n_runtime_subagent_stops": len(all_sub) - len(sub_stops),
+    }
+    return out, breakdown
+
+
+def journal_section(opt, periods, tasks):
+    files, recs, bad = load_journal(opt)
+    src = "hook journal"
+    if not files:
+        return {"status": NO_DATA, "reason": "no journal files found (default .teamwright/logs/; "
+                                             "use --logs)", "source": src}
+    if not recs:
+        return {"status": NO_DATA, "reason": "journal files contain no JSON records",
+                "source": src, "files": [os.path.basename(f) for f in files]}
+    in_range = [r for r in recs if r["ts"] is None or in_period(r["ts"], opt.since_dt, opt.until_dt)]
+    join = join_claims_by_time(in_range, opt)
+    # journals that started recording the subagent type late: from when is "no reviewer" real?
+    spawns = [r for r in in_range if r["tool"] in ("Agent", "Task") and r["event"] in ("pre", "")
+              and r["ts"]]
+    typed = [r["ts"] for r in spawns if r["subagent_type"] or r["detail"]]
+    untyped = [r["ts"] for r in spawns if not (r["subagent_type"] or r["detail"])]
+    typed_since = None
+    if untyped and not any(r["agent_type"] for r in in_range):
+        typed_since = min(typed) if typed else dt.datetime.max.replace(tzinfo=UTC)
+        if typed and min(untyped) >= typed_since:
+            typed_since = None
+    # a session belongs to the period of its first timestamp
+    first = {}
+    for r in in_range:
+        if r["ts"] and r["session"] and (r["session"] not in first or r["ts"] < first[r["session"]]):
+            first[r["session"]] = r["ts"]
+    summary, breakdown = {}, {}
+    for name, a, b in periods:
+        if a is None and b is None:
+            rs = in_range
+        else:
+            rs = [r for r in in_range if (first.get(r["session"]) or r["ts"]) and
+                  in_period(first.get(r["session"]) or r["ts"], a, b)]
+        summary[name], breakdown[name] = journal_period_summary(rs, opt, tasks, src, typed_since)
+    return {"source": src, "files": [os.path.basename(f) for f in files],
+            "n_records": len(in_range), "unparsed_fragments": bad, "claim_join": join,
+            "subagent_type_since": typed_since.strftime("%Y-%m-%d") if typed_since and
+            typed_since.year < 9999 else ("never" if typed_since else None),
+            "records_without_ts": sum(1 for r in in_range if r["ts"] is None),
+            "summary": summary, "breakdown": breakdown}
+
+
+# ---------------------------------------------------------------- rendering
+
+def fmt(m):
+    if isinstance(m, dict) and m.get("unreliable"):
+        raw = dict(m, value=m.get("raw_value"), unreliable=False)
+        return "unreliable (raw %s)" % fmt(raw)
+    if not isinstance(m, dict) or m.get("value") is None:
+        return NO_DATA
+    v, k = m["value"], m["kind"]
+    if k == "share":
+        return "%.1f%% (%d/%d)" % (100 * v, m["num"], m["n"])
+    if k == "days":
+        return "%s d (n=%d)" % (fmtnum(v), m["n"])
+    if k == "count":
+        return "%d" % v
+    return "%s (n=%d)" % (fmtnum(v), m["n"])
+
+
+def fmtnum(v):
+    return ("%.2f" % v).rstrip("0").rstrip(".") if isinstance(v, float) else str(v)
+
+
+def delta(a, b):
+    if (a or {}).get("unreliable") or (b or {}).get("unreliable"):
+        return "unreliable"
+    if not a or not b or a.get("value") is None or b.get("value") is None:
+        return NO_DATA
+    d = b["value"] - a["value"]
+    if a["kind"] == "share":
+        return "%+.1f pp" % (100 * d)
+    if a["kind"] == "days":
+        return "%+.2f d" % d
+    if a["kind"] == "count":
+        return "%+d" % d
+    return "%+.2f" % d
+
+
+def summary_table(summary, periods, labels):
+    names = [p[0] for p in periods]
+    head = "| Metric | " + " | ".join(names) + (" | Δ (after − before)" if len(names) == 2 else "") \
+           + " | Source |"
+    lines = [head, "|" + "---|" * (len(names) + (3 if len(names) == 2 else 2))]
+    first = summary[names[0]]
+    for key in first:
+        cells = [fmt(summary[n].get(key)) for n in names]
+        if len(names) == 2:
+            cells.append(delta(summary[names[0]].get(key), summary[names[1]].get(key)))
+        src = next((summary[n][key].get("source", "") for n in names
+                    if summary[n].get(key, {}).get("value") is not None),
+                   first[key].get("source", ""))
+        why = next((summary[n][key]["reason"] for n in names
+                    if summary[n].get(key, {}).get("unreliable")), None)
+        if why:
+            src += " - UNRELIABLE: %s" % why
+        lines.append("| %s | %s | %s |" % (labels.get(key, key.replace("_", " ")),
+                                           " | ".join(cells), src))
+    return lines
+
+
+def pct(num, den):
+    return "%.1f%% (%d/%d)" % (100.0 * num / den, num, den) if den else NO_DATA
+
+
+def render_md(rep, periods):
+    L = ["# Process metrics - %s" % rep["repo"], ""]
+    L.append("Generated %s. Range: %s .. %s%s." % (
+        rep["generated"], rep["params"]["since"] or "start", rep["params"]["until"] or "now",
+        ("; split at %s" % rep["params"]["split_date"]) if rep["params"]["split_date"] else ""))
+    L.append("")
+    L.append("Every number comes from git history or hook journals, never from an agent's "
+             "report. Cells show the value with its n; `no data` means the source is missing, "
+             "not zero. Meanings and biases: `docs/process/metrics.md`.")
+    L.append("")
+
+    g = rep["git"]
+    L += ["## 1. Git history", ""]
+    if g.get("status") == NO_DATA:
+        L += ["%s - %s. Source: %s." % (NO_DATA, g["reason"], g["source"]), ""]
+    else:
+        L += ["Source: `%s`, %d commits in range; area = %s%s; excluded paths: `%s`." % (
+            g["source"], g["n_commits"], g["params"]["area"],
+            (" (depth %d)" % g["params"]["area_depth"]) if g["params"]["area_depth"] else "",
+            g["params"]["exclude_regex"] or "none"), ""]
+        for b in g["trailer_breaks"]:
+            L += ["> **Warning - trailer-coverage break from %s to %s** (%d weeks, %d commits): "
+                  "the agent co-authored share fell from a baseline of %.0f%% to %.0f%%. That is "
+                  "what a settings change or a squash policy looks like, not less agent work. "
+                  "The agent share is marked unreliable for any period that overlaps it; the "
+                  "row \"weeks with trailer coverage\" leaves those weeks out." % (
+                      b["from"], b["to"] or "the end of history", b["weeks"],
+                      b["commits_in_low_weeks"], 100 * b["baseline_share"],
+                      100 * b["share_in_break"]), ""]
+        L += summary_table(g["summary"], periods, {
+            "agent_coauthored_share": "agent co-authored commits",
+            "agent_coauthored_share_covered": "agent co-authored (weeks with trailer coverage)",
+            "recurrence_rate": "recurrence rate (fixes)",
+            "tasks_fixed_again": "tasks fixed again",
+        }) + [""]
+        L += ["### Per month", "",
+              "| Month | Commits | Agent co-authored | Fix commits | Reverts | Recurrence rate |",
+              "|---|---|---|---|---|---|"]
+        for r in g["monthly"]:
+            L.append("| %s | %d | %s%s | %s | %d | %s |" % (
+                r["month"], r["commits"], pct(r["agent_coauthored"], r["work_commits"]),
+                " (coverage break)" if r["trailer_break"] else "",
+                pct(r["fixes"], r["work_commits"]), r["reverts"],
+                pct(r["recurrent_fixes"], r["fixes_with_area"])))
+        L += ["", "Shares are over work commits (ledger commits, subject matching `%s`, left "
+              "out). Recurrence rate: fix commits touching an area that had a fix in the previous "
+              "%d days / fix commits with at least one counted file." % (
+                  g["params"]["ledger_regex"], g["params"]["recurrence_days"]), ""]
+        L += ["### Agent co-authors", ""]
+        if g["agent_models"]:
+            L += ["| Agent family | Commits |", "|---|---|"]
+            L += ["| %s | %d |" % row for row in g["agent_families"].items()]
+            L += ["", "| Normalized co-author | Commits |", "|---|---|"]
+            L += ["| %s | %d |" % row for row in g["agent_models"].items()]
+        else:
+            L.append("No Co-Authored-By trailer matched an agent pattern (n=%d commits). Either no "
+                     "agent commits, or agents commit without the trailer - check before reading "
+                     "this as zero." % g["n_commits"])
+        L += ["", "### Recurring areas (>= %d fix commits within %d days)" % (
+            g["params"]["min_fixes"], g["params"]["window_days"]), ""]
+        if g["recurring_areas"]:
+            L += ["| Area | Fixes in window | Window | Fixes total |", "|---|---|---|---|"]
+            for r in g["recurring_areas"][:rep["params"]["top"]]:
+                L.append("| `%s` | %d | %s .. %s | %d |" % (r["area"], r["fixes_in_window"],
+                                                         r["window_start"], r["window_end"],
+                                                         r["fixes_total"]))
+        else:
+            L.append("None found (n=%d fix commits)." % sum(r["fixes"] for r in g["monthly"]))
+        L += ["", "### Hotspots (churn × fix commits)", ""]
+        if g["hotspots"]:
+            L += ["| Area | Churn (lines) | Fix commits | Commits | Score |", "|---|---|---|---|---|"]
+            for r in g["hotspots"]:
+                L.append("| `%s` | %d | %d | %d | %d |" % (r["area"], r["churn"], r["fixes"],
+                                                        r["commits"], r["score"]))
+        else:
+            L.append("No area received a fix commit.")
+        L.append("")
+
+    t = rep["tasks"]
+    L += ["## 2. Task lifecycle", ""]
+    if t.get("status") == NO_DATA:
+        L += ["%s - %s. Source: %s." % (NO_DATA, t["reason"], t["source"]), ""]
+        if t.get("parse_coverage"):
+            L += coverage_lines(t["parse_coverage"])
+    else:
+        L += ["Source: %s - %d transitions, %d tasks in range (a task belongs to the period of "
+              "its last DONE, or of its last transition if not done)%s." % (
+                  t["source"], t["n_events"], t["n_tasks"],
+                  ("; review rounds from `%s`" % t["review_source"]) if t["review_source"] else
+                  "; review rounds from transitions (no review records committed)"), ""]
+        L += coverage_lines(t["parse_coverage"])
+        if t["task_period"] == "start":
+            L += ["Tasks are grouped by the period they started in (`--task-period start`).", ""]
+        L += summary_table(t["summary"], periods, {
+            "cycle_days_median": "cycle time, median", "cycle_days_p75": "cycle time, p75",
+            "lead_days_median": "lead time, median", "lead_days_p75": "lead time, p75",
+            "rework_rate": "rework rate",
+        }) + [""]
+        L += ["### Per month", "", "| Month | Tasks created | Tasks done | Rework events |",
+              "|---|---|---|---|"]
+        for r in t["monthly"]:
+            L.append("| %s | %d | %d | %d |" % (r["month"], r["created"], r["done"],
+                                               r["rework_events"]))
+        L += ["", "### Per sprint", ""]
+        sp = t["sprints"]
+        if sp.get("status") == NO_DATA:
+            L.append("%s - %s." % (NO_DATA, sp["reason"]))
+        else:
+            L += ["Source: %s (n=%d tasks)." % (sp["source"], sp["n_tasks_with_sprint"]), "",
+                  "| Sprint | Tasks | Done | Reworked |", "|---|---|---|---|"]
+            for r in sp["rows"]:
+                L.append("| %s | %d | %d | %d |" % (r["sprint"], r["tasks"], r["done"], r["reworked"]))
+        L.append("")
+
+    j = rep["journal"]
+    L += ["## 3. Hook journals", ""]
+    if j.get("status") == NO_DATA:
+        L += ["%s - %s." % (NO_DATA, j["reason"]), ""]
+    else:
+        L += ["Source: %s - files %s, %d records, claims joined to sessions by %s%s%s%s." % (
+            j["source"], ", ".join("`%s`" % f for f in j["files"]), j["n_records"], j["claim_join"],
+            ("; subagent type journaled only from %s (earlier sessions left out of reviewer "
+             "evidence)" % j["subagent_type_since"]) if j.get("subagent_type_since") else "",
+            (", %d unparsed fragments skipped" % j["unparsed_fragments"]) if j["unparsed_fragments"] else "",
+            (", %d records without timestamp (not split by period)" % j["records_without_ts"])
+            if j["records_without_ts"] else ""), ""]
+        L += summary_table(j["summary"], periods, {
+            "claimed_review_with_evidence": "sessions claiming review: with reviewer evidence",
+            "claimed_review_with_any_subagent": "sessions claiming review: any subagent (upper bound)",
+            "approvals_with_reviewer_spawn": "approvals (-> CODE_COMPLETE) with a journaled reviewer spawn",
+        }) + [""]
+        for name, _, _ in periods:
+            b = j["breakdown"][name]
+            L += ["### Breakdown - %s" % name, ""]
+            L.append("- Session outcomes (Stop, n=%d): %s" % (b["n_stop_records"], kv(b["outcomes"])))
+            L.append("- Subagent outcomes (SubagentStop, n=%d; %d runtime helper stops without "
+                     "type or tool calls left out): %s" % (b["n_subagent_stop_records"],
+                                                           b.get("n_runtime_subagent_stops", 0),
+                                                           kv(b["subagent_outcomes"])))
+            L.append("- Gate decisions: %s" % kv(b.get("gate_decisions", {})))
+            L.append("- Permission denials by tool: %s" % kv(b["denials_by_tool"]))
+            L.append("- `pre` without `post`/`failure` by tool (heuristic: deny-rule refusals or "
+                     "interrupted calls): %s" % kv(b["unmatched_pre_by_tool"]))
+            L.append("- Tool calls by tool (top %d): %s" % (rep["params"]["top"], kv(b["calls_by_tool"])))
+            L.append("")
+    return "\n".join(L).rstrip() + "\n"
+
+
+def coverage_lines(cv):
+    L = ["Parse coverage (%s regex): %s of ledger commits carry at least one parsed transition; "
+         "%d transitions from %d commits; %d ledger commits contain an arrow and a task id but "
+         "parsed nothing%s." % (
+             cv["regex"], pct(cv["ledger_with_transition"], cv["ledger_commits"]),
+             cv["transitions"], cv["commits_with_transition"], cv["ledger_with_arrow_unparsed"],
+             "" if "unmatched_sample" in cv else " (`--debug` lists them)"), ""]
+    if cv.get("unmatched_sample"):
+        L += ["Unmatched ledger subjects (sample, arrow first):", ""]
+        L += ["- %s %s`%s`" % (u["date"], "(arrow) " if u["has_arrow"] else "",
+                               u["subject"].replace("`", "'")) for u in cv["unmatched_sample"]]
+        L.append("")
+    return L
+
+
+def kv(d):
+    return ", ".join("%s %s" % (k, v) for k, v in d.items()) if d else NO_DATA
+
+
+# ---------------------------------------------------------------- CLI
+
+DEFAULTS = {
+    "repo": ".", "rev": "HEAD", "since": None, "until": None, "split_date": None,
+    "merges": False, "agent": DEFAULT_AGENTS, "model_alias": [], "fix_regex": DEFAULT_FIX_RE,
+    "revert_regex": DEFAULT_REVERT_RE, "exclude_regex": DEFAULT_EXCLUDE_RE, "area": "file",
+    "area_depth": 0, "min_fixes": 3, "window": 30, "recurrence_days": 30, "top": 10,
+    "refix_days": 2, "refix_ids": "all", "trailer_break_ratio": 0.5, "trailer_min_commits": 10,
+    "ledger_regex": DEFAULT_LEDGER_RE, "version_bump_regex": DEFAULT_VERSION_BUMP_RE,
+    "transition_regex": DEFAULT_TRANSITION_RE, "task_id_regex": DEFAULT_TASK_ID_RE,
+    "status_aliases": None, "tasks_dir": "docs/tasks", "sprint_regex": None,
+    "sprint_from_id": None, "task_period": "end", "logs": [],
+    "reviewer_agent_regex": DEFAULT_REVIEWER_RE, "review_claim_field": DEFAULT_CLAIM_FIELDS,
+    "review_claim_regex": DEFAULT_CLAIM_VALUE_RE, "claim_join": "auto", "claim_window": 10,
+    "json": False, "output": None, "config": None, "debug": False, "debug_sample": 20,
+}
+
+
+def parse_args(argv):
+    p = argparse.ArgumentParser(prog="teamwright-metrics", description=__doc__.split("\n")[0],
+                                epilog="See docs/process/metrics.md.")
+    a = p.add_argument
+    a("--repo", help="repository path (default .)")
+    a("--rev", help="revision to read history and records from (default HEAD)")
+    a("--config", help="JSON options file (default <repo>/.teamwright/metrics.json if present)")
+    a("--since", help="YYYY-MM-DD, inclusive")
+    a("--until", help="YYYY-MM-DD, inclusive")
+    a("--split-date", help="YYYY-MM-DD: report before / after this day and the delta")
+    a("--merges", action="store_true", default=None, help="count merge commits too")
+    a("--agent", action="append", help="agent family label=regex (repeatable; replaces defaults)")
+    a("--model-alias", action="append", help="regex=name to normalize co-author names (repeatable)")
+    a("--fix-regex", help="subject regex for fix commits (case-insensitive)")
+    a("--revert-regex", help="subject regex for revert commits")
+    a("--exclude-regex", help="paths ignored for areas, churn and recurrence ('' = none)")
+    a("--area", choices=["dir", "file"], help="area granularity (default file)")
+    a("--area-depth", type=int, help="with --area dir: truncate to N components (0 = full)")
+    a("--version-bump-regex", help="manifests whose +1 -1 changes are version bumps, not areas "
+                                   "('' = none)")
+    a("--ledger-regex", help="subject regex of task-transition commits, left out of the git "
+                             "shares and used for parse coverage ('' = none)")
+    a("--refix-days", type=int, help="days between a task's first and last fix commit that make "
+                                     "it 'fixed again' (2)")
+    a("--refix-ids", choices=["all", "single"], help="credit a fix commit to every task id in "
+      "its subject (all, default) or only to commits naming one id (single)")
+    a("--trailer-break-ratio", type=float, help="a week is a trailer-coverage drop below this "
+                                                 "x baseline agent share (0.5)")
+    a("--trailer-min-commits", type=int, help="work commits a week needs to enter trailer-break "
+                                              "detection (10)")
+    a("--min-fixes", type=int, help="fix commits in --window days that make an area recurring (3)")
+    a("--window", type=int, help="window in days for recurring areas (30)")
+    a("--recurrence-days", type=int, help="look-back in days for the recurrence rate (30)")
+    a("--top", type=int, help="rows in top lists (10)")
+    a("--transition-regex", help="regex with groups ids|id, to, optional from; <ID> expands to "
+                                 "--task-id-regex")
+    a("--task-id-regex", help="task id regex (default %s)" % DEFAULT_TASK_ID_RE)
+    a("--status-aliases", help="JSON {alias: STATUS} or lines ALIAS=STATUS")
+    a("--tasks-dir", help="task records directory (default docs/tasks)")
+    a("--sprint-regex", help="regex over transition commits; group 1 = sprint label")
+    a("--sprint-from-id", help="regex over the task id; group 1 = sprint label (e.g. "
+                               "'^S(\\d+)-' makes S4-12 sprint 4)")
+    a("--task-period", choices=["end", "start"], help="period a task belongs to: its last DONE "
+                                                      "(end, default) or its start (cohort)")
+    a("--logs", action="append", help="journal file or directory (repeatable; default "
+                                      "<repo>/.teamwright/logs)")
+    a("--reviewer-agent-regex", help="subagent/agent type that counts as a reviewer")
+    a("--review-claim-field", action="append", help="record field that claims a review (repeatable)")
+    a("--review-claim-regex", help="claim-field string values that count as a claim "
+                                   "(default %s)" % DEFAULT_CLAIM_VALUE_RE)
+    a("--claim-join", choices=["auto", "session", "time"], help="how claim/outcome records "
+      "find their session: by session id, or by time for journals without one (auto)")
+    a("--claim-window", type=int, help="minutes for --claim-join time (10)")
+    a("--json", action="store_true", default=None, help="print JSON instead of Markdown")
+    a("--output", "-o", help="write to a file instead of stdout")
+    a("--debug", action="store_true", default=None, help="add a sample of unparsed ledger "
+                                                          "subjects to the report")
+    a("--debug-sample", type=int, help="size of that sample (20)")
+    ns = p.parse_args(argv)
+    repo = ns.repo or "."
+    cfg_path = ns.config or os.path.join(repo, ".teamwright", "metrics.json")
+    cfg = {}
+    if ns.config or os.path.isfile(cfg_path):
+        try:
+            cfg = json.load(open(cfg_path, encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            die("cannot read config %s: %s" % (os.path.basename(cfg_path), e))
+        unknown = set(cfg) - set(DEFAULTS)
+        if unknown:
+            die("unknown config keys: %s" % ", ".join(sorted(unknown)))
+    for k, dv in DEFAULTS.items():
+        v = getattr(ns, k, None)
+        if v is None:
+            v = cfg.get(k, dv)
+        if isinstance(dv, list) and isinstance(v, str):
+            v = [v]
+        setattr(ns, k, v)
+    ns.since_dt = parse_day(ns.since, "--since")
+    ns.until_dt = parse_day(ns.until, "--until")
+    if ns.until_dt:
+        ns.until_dt += dt.timedelta(days=1)       # inclusive day
+    ns.split_dt = parse_day(ns.split_date, "--split-date")
+    for k in ("fix_regex", "revert_regex", "exclude_regex", "task_id_regex", "sprint_regex",
+              "reviewer_agent_regex", "ledger_regex", "version_bump_regex", "sprint_from_id", "review_claim_regex"):
+        try:
+            re.compile(getattr(ns, k) or "")
+        except re.error as e:
+            die("--%s does not compile: %s" % (k.replace("_", "-"), e))
+    return ns
+
+
+def main(argv=None):
+    opt = parse_args(sys.argv[1:] if argv is None else argv)
+    if git(opt.repo, "rev-parse", "--git-dir", check=False) is None:
+        die("%s is not a git repository" % opt.repo)
+    if opt.split_dt:
+        periods = [("before", opt.since_dt, opt.split_dt), ("after", opt.split_dt, opt.until_dt)]
+    else:
+        periods = [("all", opt.since_dt, opt.until_dt)]
+    top = (git(opt.repo, "rev-parse", "--show-toplevel", check=False) or opt.repo).strip()
+    g = git_section(opt, periods)
+    commits = g.pop("_commits", None)
+    t = task_section(opt, periods, commits)
+    tasks = t.pop("_tasks", None)
+    j = journal_section(opt, periods, tasks)
+    rep = {
+        "repo": os.path.basename(os.path.abspath(top)),
+        "generated": dt.datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "params": {"since": opt.since, "until": opt.until, "split_date": opt.split_date,
+                   "rev": opt.rev, "top": opt.top},
+        "periods": [{"name": n, "from": a.strftime("%Y-%m-%d") if a else None,
+                     "to_exclusive": b.strftime("%Y-%m-%d") if b else None} for n, a, b in periods],
+        "git": g, "tasks": t, "journal": j,
+    }
+    text = (json.dumps(rep, indent=2, ensure_ascii=False, default=str) + "\n") if opt.json \
+        else render_md(rep, periods)
+    if opt.output:
+        with open(opt.output, "w", encoding="utf-8") as fh:
+            fh.write(text)
+    else:
+        sys.stdout.write(text)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

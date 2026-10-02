@@ -1,0 +1,41 @@
+# teamwright project config. Schema: docs/process/plugin.md.
+version: 1
+process_version: 1.0.0
+mode: gate-first
+areas:
+  - name: core
+    source_dirs: [crates/voicen-core/src, src-tauri/src]
+    runner: docker
+    image: "voicen-rust:1.99"        # built from docker/rust.Dockerfile (official rust:1.99-bookworm + cmake, clang); `make core-image`
+    cache: ["/usr/local/cargo/registry", "/usr/local/cargo/git"]
+    test_command: "cargo test -p voicen-core"
+    lint_command: "cargo fmt --check -p voicen-core && cargo clippy -p voicen-core --all-targets -- -D warnings"
+    api_test_command: ""
+    e2e_ui_command: ""
+    stack: "Rust 1.99 (edition 2021): platform-independent core library; the Tauri 2 shell in src-tauri is built and tested on the Windows CI runner"
+    test_framework: "cargo test (unit tests in #[cfg(test)] modules, integration tests in crates/voicen-core/tests)"
+    test_dirs: [crates/voicen-core/src, crates/voicen-core/tests]
+    test_helpers: "trait fakes for platform services (audio source, clipboard, input, credentials); a mock OpenAI-compatible HTTP server for engine tests"
+    conventions: "rustfmt defaults; clippy -D warnings; Windows-only code behind #[cfg(windows)] in src-tauri or behind traits in core; no unwrap() in non-test code paths that handle user input or I/O"
+  - name: ui
+    source_dirs: [src]
+    runner: host
+    test_command: "pnpm test"
+    lint_command: "pnpm lint"
+    api_test_command: ""
+    e2e_ui_command: "pnpm e2e"
+    stack: "TypeScript, Svelte 5, SvelteKit (adapter-static, SPA), Vite; Tauri IPC via @tauri-apps/api"
+    test_framework: "Vitest (unit, src/**/*.test.ts); Playwright Chromium against the built UI with a mocked Tauri IPC (e2e/)"
+    test_dirs: [src, e2e]
+    test_helpers: "e2e: page.addInitScript defines window.__TAURI_INTERNALS__.invoke to mock Rust commands"
+    conventions: "Svelte 5 runes; svelte-check --fail-on-warnings; eslint (typescript-eslint, eslint-plugin-svelte); all user-visible strings go through the i18n layer once it exists (FR-15)"
+gate_command: "make check"
+version_check: "the start log line `voicen <version> (<commit>) started` in %LOCALAPPDATA%\\Voicen\\logs\\voicen.log (checked by the Windows CI smoke step), and the UI build info `Voicen <version> (<commit>)`"
+verify_environments: "local (Linux host: make check, UI in Chromium with mocked IPC); windows-ci (GitHub Actions windows-latest: build, silent install, launch, log check); owner's Windows PC (real microphone, hotkey, paste — manual)"
+tools:
+  spec: spec-kit
+  context: serena
+  docs: context7
+  ui_verify: playwright
+  api_verify: project-runner
+language: en

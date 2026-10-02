@@ -1,0 +1,28 @@
+{
+  "fix_regex": "^(fix|bugfix|hotfix)(\\(|:|!)|\\bfix(es|ed)?\\b",
+  "exclude_regex": "^docs/|(^|/)[^/]*\\.(md|mdx|markdown|rst|adoc)$|(^|/)(package-lock\\.json|yarn\\.lock|pnpm-lock\\.yaml|go\\.sum)$",
+  "version_bump_regex": "(^|/)(package\\.json|pyproject\\.toml|Cargo\\.toml)$",
+  "area": "file",
+  "area_depth": 0,
+  "min_fixes": 3,
+  "window": 30,
+  "recurrence_days": 30,
+  "refix_days": 2,
+  "refix_ids": "all",
+  "trailer_break_ratio": 0.5,
+  "trailer_min_commits": 10,
+  "model_alias": [
+    "claude.*opus=claude opus",
+    "claude.*sonnet=claude sonnet"
+  ],
+  "ledger_regex": "^\\w+\\((?:tasks?|sprint)\\w*\\)!?:",
+  "task_id_regex": "[A-Z][A-Z0-9]*-\\d+",
+  "tasks_dir": "docs/tasks",
+  "sprint_regex": null,
+  "sprint_from_id": null,
+  "task_period": "end",
+  "status_aliases": null,
+  "reviewer_agent_regex": "^code-reviewer$",
+  "claim_join": "auto",
+  "claim_window": 10
+}

@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+# tw-run — run one command of an area the way its config says: on the host or in the
+# area's container image (the same image CI uses). Tier T1 (tooling, not a gate).
+#
+#   scripts/tw-run <area> -- <cmd> [args...]
+#   scripts/tw-run <area> -- '<shell string>' [args...]     (args are appended)
+#
+# WHY. An agent that cannot find a toolchain on the host skips the check and files a
+# "run it on a machine with X" task, while CI already runs the same check in a
+# container. One wrapper, configured per area, gives every agent and every gate the
+# CI toolchain without installing anything on the host.
+#
+# Config (.teamwright/config.yml, areas[]):
+#   runner: host | docker      default host
+#   image:  "<image:tag>"      required for docker; prefer the image CI already uses
+#   workdir: <dir>             repo-relative directory the command runs in (default: root)
+#   cache:  [<dir>, ...]       persistent caches for docker: a relative dir lives in the
+#                              container's $HOME (kept in .teamwright/cache/<area>/home),
+#                              an absolute dir gets its own .teamwright/cache/<area>/ dir
+#
+# Docker: docker run --rm -u $(id -u):$(id -g) -v <root>:/work -w /work/<workdir>
+#   -e HOME=/tw-home -v <cache>:/tw-home <image> sh -c '<cmd> "$@"' sh <args>
+# Files the command writes belong to the caller (no chown). Exit code = the command's.
+# Not runnable: 127 when docker (or the image's shell) is missing, 2 on a usage or
+# config error.
+#
+# Environment: TEAMWRIGHT_ROOT (project root), TEAMWRIGHT_CONFIG (config file),
+# TW_DOCKER (docker-compatible binary, e.g. podman), TW_RUN_PRINT=1 (print the
+# command instead of running it), TW_DOCKER_ARGS (extra `docker run` arguments).
+set -uo pipefail
+
+die() { echo "tw-run: $*" >&2; exit 2; }
+[ $# -ge 1 ] || die "usage: scripts/tw-run <area> -- <cmd> [args...]"
+AREA="$1"; shift
+[ "${1:-}" = "--" ] && shift
+[ $# -ge 1 ] || die "no command given for area '$AREA'"
+
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -n "${TEAMWRIGHT_ROOT:-}" ]; then ROOT="$TEAMWRIGHT_ROOT"
+elif [ -d "$here/../.teamwright" ]; then ROOT="$(cd "$here/.." && pwd)"
+else ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"; fi
+CFG="${TEAMWRIGHT_CONFIG:-$ROOT/.teamwright/config.yml}"
+CONFIG_PY="$ROOT/scripts/hooks/_config.py"
+[ -f "$CONFIG_PY" ] || CONFIG_PY="$here/hooks/_config.py"
+command -v python3 >/dev/null 2>&1 || die "python3 is required to read $CFG"
+[ -f "$CONFIG_PY" ] || die "scripts/hooks/_config.py not found"
+
+# runner, image, workdir, cache... as NUL-separated fields
+IFS= read -r -d '' _tw_py <<'PY' || true
+import os, sys
+sys.dont_write_bytecode = True
+sys.path.insert(0, os.path.dirname(sys.argv[1]))
+import _config
+try:
+    cfg = _config.parse_yaml(open(sys.argv[2], encoding="utf-8").read())
+except (OSError, ValueError) as e:
+    sys.stderr.write("tw-run: cannot read %s: %s\n" % (sys.argv[2], e)); sys.exit(2)
+area = next((a for a in cfg.get("areas") or [] if isinstance(a, dict) and a.get("name") == sys.argv[3]), None)
+if area is None:
+    sys.stderr.write("tw-run: no area %r in %s\n" % (sys.argv[3], sys.argv[2])); sys.exit(2)
+cache = area.get("cache") or []
+if isinstance(cache, str):
+    cache = [cache]
+out = [str(area.get("runner") or "host"), str(area.get("image") or ""),
+       str(area.get("workdir") or "").strip("/")] + [str(c) for c in cache]
+sys.stdout.write("".join(x + "\0" for x in out))
+PY
+fields=()
+while IFS= read -r -d '' f; do fields+=("$f"); done < <(
+  python3 -c "$_tw_py" "$CONFIG_PY" "$CFG" "$AREA"
+) || exit 2
+[ "${#fields[@]}" -ge 3 ] || exit 2
+RUNNER="${fields[0]}"; IMAGE="${fields[1]}"; WORKDIR="${fields[2]}"
+CACHE=("${fields[@]:3}")
+case "$WORKDIR" in *..*) die "workdir must stay inside the project: $WORKDIR" ;; esac
+
+script="$1 \"\$@\""
+shift
+run() {
+  if [ "${TW_RUN_PRINT:-}" = 1 ]; then printf '%q ' "$@"; echo; exit 0; fi
+  "$@"
+}
+
+case "$RUNNER" in
+  host)
+    cd "$ROOT/${WORKDIR:-.}" 2>/dev/null || die "workdir not found: $WORKDIR"
+    run sh -c "$script" sh "$@" ;;
+  docker)
+    [ -n "$IMAGE" ] || die "area '$AREA': runner docker needs image"
+    DOCKER="${TW_DOCKER:-docker}"
+    if [ "${TW_RUN_PRINT:-}" != 1 ] && ! command -v "$DOCKER" >/dev/null 2>&1; then
+      echo "tw-run: $DOCKER not found - not runnable (install Docker or set runner: host)" >&2
+      exit 127
+    fi
+    c="$ROOT/.teamwright/cache/$AREA"
+    mkdir -p "$c/home" 2>/dev/null || true
+    args=(run --rm -u "$(id -u):$(id -g)" -v "$ROOT:/work" -w "/work${WORKDIR:+/$WORKDIR}"
+          -e HOME=/tw-home -v "$c/home:/tw-home")
+    for d in ${CACHE[@]+"${CACHE[@]}"}; do
+      case "$d" in
+        /*) h="$c/$(printf '%s' "$d" | tr -c 'A-Za-z0-9._-' '_')"
+            mkdir -p "$h" 2>/dev/null || true
+            args+=(-v "$h:$d") ;;
+        *) mkdir -p "$c/home/$d" 2>/dev/null || true ;;   # lives in the persisted $HOME
+      esac
+    done
+    [ -t 0 ] && [ -t 1 ] && args+=(-it)
+    # shellcheck disable=SC2206
+    [ -n "${TW_DOCKER_ARGS:-}" ] && args+=(${TW_DOCKER_ARGS})
+    run "$DOCKER" "${args[@]}" "$IMAGE" sh -c "$script" sh "$@" ;;
+  *) die "area '$AREA': unknown runner '$RUNNER' (host | docker)" ;;
+esac

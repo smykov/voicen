@@ -1,0 +1,179 @@
+#!/usr/bin/env bash
+# pre-commit — git hook: secret scan + forbidden files. Tier T3.
+#
+# WHY. Agents copy config values, tokens from logs and local settings into files
+# without noticing; once pushed, a secret must be rotated, not just deleted.
+#
+# 1. Forbidden files: `.env`, `.env.*` (except .env.example/.sample/.template)
+#    and `*.local.json` (machine-local settings, often with tokens) are refused.
+# 2. Secrets: gitleaks (if installed) on the staged changes, using .gitleaks.toml
+#    when present; otherwise a built-in regex fallback over ADDED lines.
+#
+# 3. CLAUDE.md size budget (P-014): warning only, see claude-md-budget.sh.
+#
+#    Fallback findings are classified: `secret-like` (high) blocks; `test-fixture`
+#    (test paths), `docs-example` (Markdown, docs/, examples/) and `config-placeholder`
+#    (local-dev defaults: localhost, example, changeme, compose files, *.example) are
+#    reported as notes and do not block. A known token format (private key, cloud or
+#    platform token) is always high unless the line marks it as an example/fake.
+# False positive: put `teamwright:allow-secret` (or `gitleaks:allow`) on the line.
+# Deliberate bypass (human, rare): git commit --no-verify — and say why in review.
+# Tests: TEAMWRIGHT_NO_GITLEAKS=1 forces the fallback scanner; --scan-stdin scans
+# any unified diff given on stdin (used by `make scan` without gitleaks).
+set -uo pipefail
+# Built-in fallback scanner: reads a unified diff on stdin, checks ADDED lines.
+scan_diff() {
+  IFS= read -r -d '' _tw_py <<'PY' || true
+import re, sys
+RULES = [
+    ("private-key", r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY( BLOCK)?-----"),
+    ("aws-access-key", r"\b(AKIA|ASIA)[0-9A-Z]{16}\b"),
+    ("github-token", r"\b(gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{60,})\b"),
+    ("gitlab-token", r"\bglpat-[A-Za-z0-9_-]{20,}\b"),
+    ("slack-token", r"\bxox[abposr]-[A-Za-z0-9-]{10,}\b"),
+    ("google-api-key", r"\bAIza[0-9A-Za-z_-]{35}\b"),
+    ("stripe-key", r"\b[sr]k_live_[0-9A-Za-z]{20,}\b"),
+    ("llm-api-key", r"\bsk-(ant-|proj-)?[A-Za-z0-9_-]{32,}\b"),
+    ("telegram-bot-token", r"\b\d{8,10}:AA[A-Za-z0-9_-]{33}\b"),
+    ("jwt", r"\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"),
+    ("url-credentials", r"\b[a-z][a-z0-9+.-]*://[^/\s:@]+:([^/\s:@]{6,})@"),
+    # NAME = value  (any case), or "NAME": "value" / NAME: 'value' (quoted value only)
+    ("secret-assignment",
+     r"(?i)\b\w*(PASSWORD|PASSWD|SECRET|TOKEN|API_?KEY|PRIVATE_KEY)\w*\s*=\s*[\"']?([^\s\"'#,;]{8,})"),
+    ("secret-assignment",
+     r"(?i)\b\w*(PASSWORD|PASSWD|SECRET|TOKEN|API_?KEY|PRIVATE_KEY)\w*[\"']?\s*:\s*[\"']([^\s\"']{8,})[\"']"),
+]
+PLACEHOLDER = re.compile(r"(?i)^(<.*>|\$\{?.*|\{\{.*|x{6,}|\*{6,}|changeme|change_me|example.*|"
+                         r"placeholder|dummy|redacted|your[_-].*|none|null|true|false|"
+                         r"process\.env.*|os\.environ.*|getenv.*|env\(.*)$")
+def literal(val, before):
+    """True when the assigned value looks like a literal, not code or a placeholder."""
+    if PLACEHOLDER.match(val) or re.search(r"[()\[\]]", val):
+        return False
+    quoted = before in ("'", '"')
+    if not quoted and re.match(r"^[A-Za-z_][\w]*(\.[A-Za-z_]\w*)+$", val):
+        return False          # attribute reference: settings.db_password
+    if not quoted and re.match(r"^[a-z_][a-z0-9_]*$", val):
+        return False          # plain variable name: password = new_password
+    return True
+
+STRONG = {"private-key", "aws-access-key", "github-token", "gitlab-token", "slack-token",
+          "google-api-key", "stripe-key", "llm-api-key", "telegram-bot-token"}
+TEST_PATH = re.compile(r"(^|/)(tests?|spec|specs|__tests__|__mocks__|mocks?|fixtures?|testdata|"
+                       r"test_data|integration_test|e2e|cypress|playwright)/|(^|/)(test_[^/]*|"
+                       r"[^/]*[._-](test|spec|mock|fixture)s?\.[^/]+)$", re.I)
+DOCS_PATH = re.compile(r"(^|/)(docs?|examples?|samples?)/|\.(md|mdx|rst|adoc)$|(^|/)README[^/]*$", re.I)
+SAMPLE_FILE = re.compile(r"(^|/)([^/]*\.(example|sample|template|dist|tmpl)(\.[^/]*)?|"
+                         r"\.env\.(example|sample|template)|(docker-)?compose[^/]*\.ya?ml)$", re.I)
+FAKE_LINE = re.compile(r"(?i)example|fake|dummy|placeholder|not[-_ ]a[-_ ]real|redacted")
+DEV_VALUE = re.compile(r"(?i)localhost|127\.0\.0\.1|0\.0\.0\.0|host\.docker\.internal|example|sample|"
+                       r"dummy|fake|changeme|change_me|placeholder|secret123|password123|"
+                       r"^(postgres|root|admin|user|test|dev|guest|pass|password|secret)$")
+def classify(path, rule, body, match):
+    """secret-like (blocks) | test-fixture | docs-example | config-placeholder."""
+    if rule in STRONG and not FAKE_LINE.search(body):
+        return "secret-like"
+    if TEST_PATH.search(path):
+        return "test-fixture"
+    if DOCS_PATH.search(path):
+        return "docs-example"
+    if SAMPLE_FILE.search(path) or FAKE_LINE.search(body):
+        return "config-placeholder"
+    if rule in ("url-credentials", "secret-assignment"):
+        val = re.search(r"://[^/\s:@]+:([^/\s:@]+)@", match) if rule == "url-credentials" else \
+            re.search(r"[=:]\s*[\"']?([^\s\"'#,;]+)", match)
+        if DEV_VALUE.search(body) or (val and DEV_VALUE.search(val.group(1))):
+            return "config-placeholder"
+    return "secret-like"
+
+# Hunk bodies are counted from the @@ header, so an added line that itself starts
+# with "++ " (shown as "+++ ...") is content, not a file header.
+found, cur, ln, rem_old, rem_new = [], None, 0, 0, 0
+for line in sys.stdin:
+    line = line.rstrip("\n")
+    if rem_old <= 0 and rem_new <= 0:
+        if line.startswith("+++ "):
+            p = line[4:].strip()
+            cur = p[2:] if p.startswith("b/") else p
+            continue
+        m = re.match(r"^@@ -\d+(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", line)
+        if m:
+            rem_old = int(m.group(1)) if m.group(1) is not None else 1
+            ln = int(m.group(2))
+            rem_new = int(m.group(3)) if m.group(3) is not None else 1
+        continue
+    if line.startswith("\\"):
+        continue                      # "\ No newline at end of file"
+    if line.startswith("-"):
+        rem_old -= 1; continue
+    if not line.startswith("+"):
+        rem_old -= 1; rem_new -= 1; ln += 1; continue
+    rem_new -= 1
+    body = line[1:]
+    if "teamwright:allow-secret" in body or "gitleaks:allow" in body:
+        ln += 1; continue
+    for name, rx in RULES:
+        mm = re.search(rx, body)
+        if not mm:
+            continue
+        if name == "secret-assignment" and not literal(mm.group(2), body[mm.start(2) - 1:mm.start(2)]):
+            continue
+        if name == "url-credentials" and PLACEHOLDER.match(mm.group(1)):
+            continue
+        found.append((cur, ln, name, classify(cur or "", name, body, mm.group(0))))
+        break
+    ln += 1
+high = [x for x in found if x[3] == "secret-like"]
+for f, n, name, cls in found:
+    if cls != "secret-like":
+        print("pre-commit: note - [%s] at %s:%d looks like %s (not blocking)" % (name, f, n, cls),
+              file=sys.stderr)
+for f, n, name, cls in high:
+    print("pre-commit: possible secret [%s] at %s:%d" % (name, f, n), file=sys.stderr)
+if high:
+    print("  Remove it (use env vars / a secret store). False positive: add "
+          "'teamwright:allow-secret' on that line.", file=sys.stderr)
+    sys.exit(1)
+PY
+  python3 -c "$_tw_py"
+}
+
+# Reusable by CI / make scan:  git diff ... | scripts/hooks/pre-commit --scan-stdin
+if [ "${1:-}" = "--scan-stdin" ]; then scan_diff; exit $?; fi
+
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
+cd "$ROOT" || exit 0
+fail=0
+
+# ---- 1. forbidden files ------------------------------------------------------
+while IFS= read -r f; do
+  [ -z "$f" ] && continue
+  base="${f##*/}"
+  case "$base" in
+    .env.example|.env.sample|.env.template) continue ;;
+    .env|.env.*|*.local.json)
+      echo "pre-commit: REFUSED - '$f' is a local/secret file and must not be committed." >&2
+      echo "  Unstage it (git rm --cached '$f') and add it to .gitignore." >&2
+      fail=1 ;;
+  esac
+done < <(git diff --cached --name-only --diff-filter=ACMR)
+
+# ---- 2. secret scan ----------------------------------------------------------
+if [ -z "${TEAMWRIGHT_NO_GITLEAKS:-}" ] && command -v gitleaks >/dev/null 2>&1; then
+  cfg=()
+  [ -f .gitleaks.toml ] && cfg=(--config .gitleaks.toml)
+  if gitleaks help git >/dev/null 2>&1; then
+    gitleaks git --pre-commit --staged --redact --no-banner ${cfg[@]+"${cfg[@]}"} >&2 || fail=1
+  else
+    gitleaks protect --staged --redact --no-banner ${cfg[@]+"${cfg[@]}"} >&2 || fail=1
+  fi
+elif command -v python3 >/dev/null 2>&1; then
+  git diff --cached --unified=0 --no-color --no-ext-diff --diff-filter=ACMR | scan_diff || fail=1
+else
+  echo "pre-commit: warning - neither gitleaks nor python3 found; secret scan skipped." >&2
+fi
+
+# ---- 3. CLAUDE.md budget (warning, never blocks) ----------------------------
+bash "$(dirname "${BASH_SOURCE[0]}")/claude-md-budget.sh" || true
+
+exit "$fail"

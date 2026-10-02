@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+# pre-push — git hook: pause switch + DRAIN rule. Tier T3.
+#
+# 1. PAUSE. While a file named TEAMWRIGHT_PAUSE exists at the repo root (or at
+#    $TEAMWRIGHT_PAUSE_FILE), every push is refused. Stopping an agent by asking it
+#    to stop is racy: a self-continuing session can push in the window before it is
+#    halted. The hook is a hard boundary that does not depend on the model.
+# 2. DRAIN. A task's code may leave the machine only when the task is approved:
+#    status CODE_COMPLETE, DEPLOYED, VERIFIED or DONE at the pushed revision
+#    ($TEAMWRIGHT_PUSH_STATUSES). Any other status (TODO, ANALYSIS, IN_PROGRESS,
+#    NEEDS_REVIEW, DEFERRED, BLOCKED, VERIFY_FAIL, ...) refuses the push unless the
+#    task carries `tail_code: ratified` (the owner accepts shipping it as is).
+#    Blocking only NEEDS_REVIEW let through code sent back after REQUEST_CHANGES
+#    (task IN_PROGRESS again) and patches left in DEFERRED tasks.
+#
+#    ATTRIBUTION (one owner per commit, conservative):
+#      * a commit touching only docs/tasks/** is bookkeeping (task records, review
+#        records) and belongs to no task - creating a TODO task must not dirty the tail;
+#      * otherwise the owner is the first task id in the message (subject, then
+#        body) that has a docs/tasks/<ID>.md at the pushed revision; failing that,
+#        the first task record the commit changes; ids without a record are ignored;
+#      * a commit with no known task id is not attributed.
+#
+# Human override, one-off: TEAMWRIGHT_ALLOW_PUSH=1 git push ...
+set -uo pipefail
+
+[ "${TEAMWRIGHT_ALLOW_PUSH:-}" = "1" ] && exit 0
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
+REMOTE="${1:-origin}"
+PAUSE="${TEAMWRIGHT_PAUSE_FILE:-$ROOT/TEAMWRIGHT_PAUSE}"
+ZERO="0000000000000000000000000000000000000000"
+
+if [ -e "$PAUSE" ]; then
+  echo "pre-push: REFUSED - team is paused ($PAUSE exists). Work stays local." >&2
+  echo "  Remove the file to resume, or (human only) TEAMWRIGHT_ALLOW_PUSH=1 git push" >&2
+  exit 1
+fi
+
+command -v python3 >/dev/null 2>&1 || exit 0
+export TEAMWRIGHT_HOOKS_DIR="$HERE"   # task id pattern: $TEAMWRIGHT_TASK_ID_RE (see _task.py)
+export TEAMWRIGHT_PUSH_STATUSES="${TEAMWRIGHT_PUSH_STATUSES:-CODE_COMPLETE DEPLOYED VERIFIED DONE}"
+blocked=""
+while read -r _lref lsha _rref rsha; do
+  [ -z "${lsha:-}" ] && continue
+  case "$lsha" in *[!0]*) ;; *) continue ;; esac          # branch deletion
+  if [ -z "${rsha:-}" ] || [ "$rsha" = "$ZERO" ] || ! git cat-file -e "$rsha" 2>/dev/null; then
+    range=("$lsha" --not "--remotes=$REMOTE")
+  else
+    range=("$rsha..$lsha")
+  fi
+  IFS= read -r -d '' _tw_py <<'PY' || true
+import os, re, subprocess, sys
+sys.dont_write_bytecode = True
+sys.path.insert(0, os.environ["TEAMWRIGHT_HOOKS_DIR"])
+import _task as task
+
+def git(*a):
+    return subprocess.run(("git",) + a, capture_output=True, text=True).stdout
+
+lsha = os.environ["LSHA"]
+id_re = re.compile(r"\b" + task.TASK_ID + r"\b")
+approved = set(os.environ["TEAMWRIGHT_PUSH_STATUSES"].split())
+records = {}
+
+def record(tid):
+    if tid not in records:
+        r = subprocess.run(("git", "show", "%s:docs/tasks/%s.md" % (lsha, tid)),
+                           capture_output=True, text=True)
+        records[tid] = task.parse(r.stdout) if r.returncode == 0 else None
+    return records[tid]
+
+owners = {}
+for sha in sys.stdin.read().split():
+    files = [f for f in git("show", "--format=", "--name-only", sha).splitlines() if f]
+    if files and all(f.startswith("docs/tasks/") for f in files):
+        continue  # bookkeeping: task / review records only
+    owner = None
+    for tid in id_re.findall(git("log", "-1", "--format=%B", sha)):
+        if record(tid) is not None:
+            owner = tid
+            break
+    if owner is None:
+        for f in files:
+            m = re.match(r"^docs/tasks/([^/]+)\.md$", f)
+            if m and record(m.group(1)) is not None:
+                owner = m.group(1)
+                break
+    if owner:
+        owners.setdefault(owner, sha[:8])
+for tid, sha in sorted(owners.items()):
+    rec = record(tid)
+    st = task.status(rec)
+    if st in approved or (rec.get("tail_code") or "").split()[:1] == ["ratified"]:
+        continue
+    print("%s=%s(%s)" % (tid, st or "<none>", sha))
+PY
+  out="$(git rev-list "${range[@]}" 2>/dev/null | LSHA="$lsha" python3 -c "$_tw_py")"
+  blocked="$blocked${out:+ $out}"
+done
+
+if [ -n "$blocked" ]; then
+  echo "pre-push: REFUSED (DRAIN rule) - code of tasks not approved for delivery in the unpushed commits:" >&2
+  for b in $blocked; do echo "    $b" >&2; done
+  echo "  Push only when every task owning code in the tail is: $TEAMWRIGHT_PUSH_STATUSES." >&2
+  echo "  Owner decision to ship anyway: \`tail_code: ratified\` in the task record." >&2
+  echo "  Human override, one-off: TEAMWRIGHT_ALLOW_PUSH=1 git push" >&2
+  exit 1
+fi
+exit 0
