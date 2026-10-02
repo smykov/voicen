@@ -24,3 +24,6 @@ vite.config.ts.timestamp-*
 .teamwright/config.next.yml
 TEAMWRIGHT_PAUSE
 *.local.json
+
+# Serena project config: rewritten by each Serena version (decision #16)
+.serena/project.yml
