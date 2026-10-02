@@ -29,8 +29,9 @@ impl ModelStore {
     pub fn cleanup_at_start(&self) -> io::Result<()>;   // deletes *.part
     pub fn states(&self) -> Vec<(ModelId, LocalModelState)>; // disk-derived: Downloaded iff final file with catalog size
     pub fn path_if_downloaded(&self, id: ModelId) -> Option<PathBuf>;
-    pub fn delete(&self, id: ModelId, residency: &ModelResidency, settings: &mut dyn 001::SettingsStore)
+    pub fn delete(&self, id: ModelId, residency: &ModelResidency, settings: &SettingsService /* 004 */)
         -> Result<(), DeleteError>;                     // DeleteError::{InUse, NotDownloaded, Io(reason)}
+    // Clearing the selection (reset engine) goes through `SettingsService::save` (decisions #21).
 }
 ```
 
