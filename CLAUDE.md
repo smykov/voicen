@@ -16,55 +16,50 @@ This repository follows the teamwright process: start with `AGENTS.md` (roles, s
 
 ## Project
 
-<One paragraph: what the system does, for whom, main components.>
+Voicen — a Windows desktop dictation tool: a global hotkey records the microphone, the audio is transcribed (OpenAI-compatible API, built-in whisper.cpp, or a local OpenAI-compatible server), optionally post-processed by an LLM, then copied to the clipboard and pasted into the focused input field. Public open-source (MIT). Requirements: `docs/requirements.md` (approved v3).
 
-**Stack:** <languages, frameworks, datastore, runtime>
+**Stack:** Tauri 2; Rust 1.99 core library (`crates/voicen-core`) and Windows shell (`src-tauri`); UI in TypeScript + Svelte 5 (SvelteKit static, Vite); NSIS per-user installer. Target: Windows 10/11 x64. Dev host: Linux.
 
 ## Where things live
 
 | Path | What |
 |---|---|
-| `<src dir>/` | <application code> |
-| `<tests dir>/` | <tests> |
+| `crates/voicen-core/` | Platform-independent core (area `core`): engines, pipeline, settings, VAD gate, build info |
+| `src-tauri/` | Tauri shell: tray, hotkey, capture, clipboard, paste, IPC commands — Windows-only, built and tested only in Windows CI |
+| `src/` | Web UI (area `ui`); unit tests `src/**/*.test.ts` |
+| `e2e/` | Playwright UI tests, Tauri IPC mocked via `window.__TAURI_INTERNALS__` |
+| `docker/rust.Dockerfile` | Toolchain image `voicen-rust:1.99` for area `core` (`make core-image`) |
+| `.github/workflows/ci.yml` | Linux gate + Windows build / silent install / smoke (= "deployed") |
 | `docs/plan.md` | Stages and what is in each |
-| `docs/requirements.md` | What must be true (FR-NN) |
+| `docs/requirements.md` | What must be true (FR-NN, NFR-NN) |
 | `docs/architecture.md` | Components, data flow, boundaries |
 | `docs/decisions.md` | Append-only decision log |
 | `docs/decisions/<area>.md` | Why an area is shaped the way it is: invariants and the defects behind them |
 | `docs/open-questions.md` | Unresolved questions (OQ-NN) |
 | `docs/failures.md` | What broke, why, which rule it produced (F-NNN) |
 | `docs/tasks/` | One file per task (T-NNN); `<ID>.reviews/` review records, `<ID>.verify/` verification records |
-| `<specs dir>/` | Specs and plans for large work (spec tool: `.teamwright/config.yml` → `tools.spec`); tasks link them via `design_ref` |
+| `specs/` | Spec Kit feature specs, plans, tasks; tasks link them via `design_ref` |
 | `docs/sprints/` | One file per sprint |
 | `PRINCIPLES.md` | Engineering principles with enforcement tiers |
 
-### Decision index — open the file for the area **before** you edit it
-
-| File | What it decides |
-|---|---|
-| [`docs/decisions/<area>.md`](docs/decisions/<area>.md) | <one line: the invariants it holds> |
-
 ## What you must know before opening any file
 
-Each line has a defect behind it. Listed here because the cost is paid before anyone thinks to open a file.
-
-- **<Invariant 1, imperative.>** <One sentence why.> Defect: F-NNN · details: `docs/decisions/<area>.md`
-- **<Function X is not to be rewritten without an invariant and owner sign-off.>** <It was rewritten and reverted N times.> Defect: F-NNN
-- **<New config values must be passed into the runtime, not only added to the config file.>** Defect: F-NNN
-- **<Secrets: which ones exist, where they must never appear.>** Defect: F-NNN
+- **Windows-only code lives in `src-tauri` or behind a trait in `voicen-core`.** The local gate builds only `voicen-core` on Linux; anything Windows-specific is proven only by the Windows CI job (decisions #5).
+- **Rust runs only in Docker** (`scripts/tw-run core -- ...`); there is no host toolchain. Rebuild the image with `make core-image` after changing `docker/rust.Dockerfile`.
+- **Never log transcript text, audio or API keys** (FR-20, NFR-04). Keys live in Windows Credential Manager only.
 
 ## Commands
 
 ```sh
-<setup command>
-<gate command>          # e.g. make test — must be green before NEEDS_REVIEW
-<single test command>
-<run locally command>
-<api test command>      # API tests against a running service (surface: api)
-<e2e ui command>        # end-to-end UI run with the configured runner (tools.ui_verify)
+pnpm install && make core-image                 # setup
+make check                                      # gate — must be green before NEEDS_REVIEW
+scripts/tw-run core -- cargo test -p voicen-core <filter>   # single core test
+pnpm test -- <file>                             # single UI unit test
+pnpm dev                                        # UI in a browser (no Rust side; IPC calls fail)
+pnpm e2e                                        # UI end-to-end (Playwright, Chromium, mocked IPC)
 ```
 
-Gotchas: <e.g. suites that must not run concurrently; services that must be up first>.
+Gotchas: the app itself (`pnpm tauri dev/build`) runs only on Windows; on Linux verify the UI with mocked IPC and core with fakes.
 
 ## Rules
 

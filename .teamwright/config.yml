@@ -1,7 +1,7 @@
 # teamwright project config. Schema: docs/process/plugin.md.
 version: 1
 process_version: 1.0.0
-mode: gate-first
+mode: enforce
 areas:
   - name: core
     source_dirs: [crates/voicen-core/src, src-tauri/src]
