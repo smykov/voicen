@@ -90,7 +90,7 @@ impl SettingsService {
 - `subscribe`: unbounded std channel; no initial value (call `subscribe` then `snapshot`); exactly one message per `Saved`, after the file is written; none on `Refused`. `SettingsService: Send + Sync`.
 - Invariant: after `save` returns `Refused`, `snapshot()`, the file, the registered hotkey, the autostart entry and every key slot equal their values before the call (double-failure exception in research R-3).
 - Autostart: the autostart step and `reconcile_autostart` were added by T-014 (US5, tasks T056–T058).
-- Invariant: `Saved` is returned only after the new hotkey is registered, the old released, the autostart entry matches the saved `start_with_windows`, keys are stored and the file is written.
+- Invariant: `Saved` is returned only after the new hotkey is registered, the old released, when `start_with_windows` changes `Autostart::set(new)` has succeeded (an unchanged value is not re-applied by save; `reconcile_autostart` at start brings the Run value in line, a failure there is logged by T-008), keys are stored and the file is written.
 
 ### Pure functions
 
