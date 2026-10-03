@@ -4,21 +4,19 @@
 //     --bundle target/licenses/npm-bundled.json --manual licenses/manual.json \
 //     [--require <package>]...
 //
-// Exit 0: every component accepted. Exit 1: license failures, each named on stderr.
+// Exit 0: every component accepted. Exit 1: license failures, each named on stderr,
+// including bundle modules or assets attributed to no package (fail closed, bundle.mjs).
 // Exit 2: cannot check (missing or empty bundle list, unreadable about.toml or manual list,
 // a bundled package without package.json, a --require'd package absent from the bundle).
 import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { readAcceptedList } from "./accepted.mjs";
-import { loadBundleList, readPackageLicense } from "./bundle.mjs";
-import { satisfies } from "./spdx.mjs";
-
-/** Values that say "no license" rather than naming one. */
-const NO_LICENSE = new Set(["UNLICENSED", "UNKNOWN"]);
+import { describeUnattributed, loadBundleList, readPackageLicense, splitBundleList } from "./bundle.mjs";
+import { NO_LICENSE, satisfies } from "./spdx.mjs";
 
 /**
  * Every component whose license does not satisfy `accepted`, in input order.
- * reason: "missing" (absent, empty, UNLICENSED, UNKNOWN) | "not-accepted".
+ * reason: "missing" (absent, empty, or a NO_LICENSE value of spdx.mjs) | "not-accepted".
  * @param {{ name: string, version?: string, license?: string | null }[]} components
  * @param {string[]} accepted
  * @returns {{ name: string, version?: string, license: string | null, reason: "missing" | "not-accepted" }[]}
@@ -98,20 +96,21 @@ function describe(/** @type {string} */ kind, /** @type {ReturnType<typeof check
  * @returns {number} exit code
  */
 export function main(argv) {
-  let accepted, bundled, manual;
+  let accepted, bundled, unattributed, manual;
   try {
     const args = parseArgs(argv, ["about", "bundle", "manual", "require"]);
     for (const k of ["about", "bundle", "manual"]) {
       if (!args[k]) throw new Error(`missing --${k}`);
     }
     accepted = readAcceptedList(readFileSync(args.about[0], "utf8"));
-    const list = loadBundleList(args.bundle[0]);
+    const list = splitBundleList(loadBundleList(args.bundle[0]));
     for (const want of args.require ?? []) {
-      if (!list.some((p) => p.name === want)) {
+      if (!list.packages.some((p) => p.name === want)) {
         throw new Error(`bundle list ${args.bundle[0]} does not contain ${want}: the client build did not record the bundled packages`);
       }
     }
-    bundled = list.map((p) => readPackageLicense(p.dir));
+    bundled = list.packages.map((p) => readPackageLicense(p.dir));
+    unattributed = list.unattributed;
     manual = loadManualList(args.manual[0]);
   } catch (e) {
     console.error(`licenses-check: cannot check npm and manual licenses: ${e instanceof Error ? e.message : e}`);
@@ -119,6 +118,9 @@ export function main(argv) {
   }
 
   const failures = [
+    ...unattributed.map(
+      (u) => `licenses-check: FAIL bundle ${describeUnattributed(u)} is in the client bundle but is neither project source nor a file of an npm package, so its license cannot be checked; attribute it in scripts/licenses/bundle.mjs or keep it out of the bundle`,
+    ),
     ...checkComponents(bundled, accepted).map((f) => describe("npm", f)),
     ...checkComponents(manual, accepted).map((f) => describe("manual", f)),
   ];

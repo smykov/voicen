@@ -7,12 +7,13 @@
 //
 // Deterministic: no dates, no machine paths, LF line endings, sorted input. Manual-list
 // `text` paths are relative to the current directory (the repository root under make).
-// Exit 0: written. Exit 2: an input is missing or a package has no license text.
+// Exit 0: written. Exit 2: an input is missing, a package has no license text, or the
+// bundle list holds a module or asset attributed to no package (it cannot be listed).
 // It does not judge licenses; check.mjs and cargo-about do.
 import { readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { loadBundleList, readPackageLicense } from "./bundle.mjs";
+import { describeUnattributed, loadBundleList, readPackageLicense, splitBundleList } from "./bundle.mjs";
 import { loadManualList, parseArgs } from "./check.mjs";
 
 const RULE = "=".repeat(80);
@@ -123,9 +124,13 @@ export function main(argv) {
     } catch (e) {
       throw new Error(`cannot read the cargo-about output ${args.rust[0]}: ${e instanceof Error ? e.message : e}`);
     }
+    const { packages, unattributed } = splitBundleList(loadBundleList(args.bundle[0]));
+    if (unattributed.length > 0) {
+      throw new Error(`the client bundle holds what no npm package accounts for, so it cannot be listed: ${unattributed.map(describeUnattributed).join(", ")} (see make licenses-check)`);
+    }
     const text = renderNotices({
       rustText,
-      bundle: loadBundleList(args.bundle[0]),
+      bundle: packages,
       manual: loadManualList(args.manual[0]),
     });
     writeFileSync(args.out[0], text);

@@ -7,8 +7,11 @@
 // A term is satisfied when its text ("id" or "id WITH exception") is one of the accepted
 // entries, compared as a whole: no prefix, family or "-or-later" matching.
 
-/** Never satisfied, whatever the list says: they mean "no license given". */
-const NO_LICENSE = new Set(["UNLICENSED", "UNKNOWN", "NONE", "NOASSERTION"]);
+/**
+ * Never satisfied, whatever the list says: they mean "no license given". The one set of
+ * such values; check.mjs reports them as reason "missing".
+ */
+export const NO_LICENSE = new Set(["UNLICENSED", "UNKNOWN", "NONE", "NOASSERTION"]);
 const OPERATORS = new Set(["AND", "OR", "WITH"]);
 const ID = /^[A-Za-z0-9][A-Za-z0-9.-]*\+?$|^(DocumentRef-[A-Za-z0-9.-]+:)?LicenseRef-[A-Za-z0-9.-]+$/;
 

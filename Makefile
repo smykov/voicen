@@ -40,9 +40,10 @@ licenses-fixture:
 licenses-rust:
 	scripts/licenses/rust.sh
 
-# Client build; its Vite plugin writes $(LICENSES_DIR)/npm-bundled.json.
+# Client build; its Vite plugin writes $(LICENSES_DIR)/npm-bundled.json. The previous list
+# is deleted first, so a build that records nothing cannot pass on a stale list.
 licenses-bundle:
-	scripts/tw-run ui -- pnpm build
+	scripts/tw-run ui -- 'rm -f $(LICENSES_DIR)/npm-bundled.json && pnpm build'
 
 # npm packages of the client bundle and the hand-kept list, against about.toml.
 # --require svelte: the bundle list must hold the Svelte runtime, or the plugin saw nothing.

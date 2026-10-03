@@ -93,3 +93,18 @@ test("the committed notices do not list the project's own workspace crates", () 
   });
   assert.deepEqual(listed, [], `workspace crates (${names.join(", ")}) are listed in THIRD-PARTY-NOTICES.txt`);
 });
+
+// Review round 1, finding 1 (added by the developer): what the check fails on cannot be
+// listed either, so `make licenses` alone never writes notices that miss bundled code.
+test("notices.mjs exits 2, naming it, when the bundle list holds an unattributed module", (t) => {
+  const root = tmp(t);
+  const p = fakePackage(root, { name: "fake-ok-lib", version: "1.0.0", license: "MIT", files: { LICENSE: "x" } });
+  writeFileSync(join(root, "bundle.json"), JSON.stringify([p, { unattributed: "\0virtual:example-icons/star.js", kind: "module" }]));
+  writeFileSync(join(root, "manual.json"), "[]");
+  writeFileSync(join(root, "rust.txt"), "Rust part\n");
+  const out = join(root, "NOTICES.txt");
+  const NOTICES = fileURLToPath(new URL("./notices.mjs", import.meta.url));
+  const r = spawnSync(process.execPath, [NOTICES, "--rust", join(root, "rust.txt"), "--bundle", join(root, "bundle.json"), "--manual", join(root, "manual.json"), "--out", out], { encoding: "utf8" });
+  assert.equal(r.status, 2, r.stderr);
+  assert.ok(r.stderr.includes("virtual:example-icons/star.js"), r.stderr);
+});

@@ -2,13 +2,19 @@
   Rust section of THIRD-PARTY-NOTICES.txt (T-027), rendered by cargo-about from about.toml.
   Plain text, so every value is in triple braces (no HTML escaping). No paths are printed:
   source_path is machine-specific. scripts/licenses/notices.mjs adds the other sections.
+  Crates without a source (path crates: the workspace's own, voicen and voicen-core) are
+  checked by cargo-about like any other but are not third-party, so they are not listed
+  (T-027 review round 1). Third-party code is never vendored as a path crate (see
+  docs/decisions/licenses.md).
 -}}
 {{#each licenses}}
 --------------------------------------------------------------------------------
 {{{name}}} ({{{id}}})
 Used by:
 {{#each used_by}}
+{{#if crate.source}}
   - {{{crate.name}}} {{{crate.version}}}{{#if crate.repository}} <{{{crate.repository}}}>{{/if}}
+{{/if}}
 {{/each}}
 
 {{{text}}}
