@@ -108,7 +108,7 @@ src-tauri/src/
 
 src/lib/i18n/
 ├── index.ts                      # t(), language store, imports $i18n catalogs
-└── i18n.test.ts                  # every t() literal id exists in both catalogs
+└── i18n.test.ts                  # conformance fixture, catalog parity, t(); unknown literal ids fail svelte-check (MessageId = keyof typeof en)
 src/lib/settings/
 ├── settingsApi.ts                # IPC wrapper
 ├── draft.ts                      # draft/dirty, KeyEdit state, error mapping

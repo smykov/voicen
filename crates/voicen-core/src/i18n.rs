@@ -8,13 +8,15 @@
 //! - Lookup: the text in the requested language if non-empty, else the English
 //!   text if non-empty, else the id itself.
 //! - Placeholders: `{name}` with `name` matching `[a-z][a-z0-9_]*`; no escaping.
-//!   Any other `{` or `}` is a stray brace (rendered as is, reported by
-//!   [`Catalog::parity_problems`]).
+//!   Any other `{` or `}` is a stray brace (rendered as is, reported by the
+//!   test-only check `Catalog::parity_problems`).
 //! - Rendering: one left-to-right pass. A placeholder with an argument is replaced
 //!   by the value inserted literally (never re-expanded); a placeholder without an
 //!   argument stays verbatim; extra arguments are ignored.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
+#[cfg(test)]
+use std::collections::BTreeSet;
 use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
@@ -81,29 +83,34 @@ messages! {
 }
 
 /// Both catalogs (en, ru) as parsed flat id -> text maps.
+///
+/// Crate-private: `Catalog::text` takes a `&str` id, so outside this crate catalog
+/// text is rendered only through [`text`], which takes a [`MessageId`].
 #[derive(Debug, Default)]
-pub struct Catalog {
+pub(crate) struct Catalog {
     en: BTreeMap<String, String>,
     ru: BTreeMap<String, String>,
 }
 
 /// A catalog file that is not a flat JSON object of strings.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CatalogError {
+pub(crate) struct CatalogError {
     /// Which file is broken.
     pub lang: UiLanguage,
     pub message: String,
 }
 
-/// One invariant violation, naming the offending id.
+/// One invariant violation, naming the offending id (test-only check).
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CatalogProblem {
+struct CatalogProblem {
     pub id: String,
     pub kind: ProblemKind,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ProblemKind {
+enum ProblemKind {
     /// The id is absent from this language's catalog.
     Missing(UiLanguage),
     /// The id's text is empty in this language's catalog.
@@ -114,13 +121,14 @@ pub enum ProblemKind {
     StrayBrace(UiLanguage),
 }
 
+#[cfg(test)]
 const LANGS: [UiLanguage; 2] = [UiLanguage::En, UiLanguage::Ru];
 
 impl Catalog {
     /// Parse the two catalogs. Lenient about content (empty texts, missing ids are
     /// allowed here and reported by `parity_problems`); rejects anything that is not
     /// a flat JSON object of strings.
-    pub fn from_json(en: &str, ru: &str) -> Result<Catalog, CatalogError> {
+    pub(crate) fn from_json(en: &str, ru: &str) -> Result<Catalog, CatalogError> {
         Ok(Catalog {
             en: parse_flat(UiLanguage::En, en)?,
             ru: parse_flat(UiLanguage::Ru, ru)?,
@@ -128,7 +136,7 @@ impl Catalog {
     }
 
     /// The single lookup + render rule (see `i18n/conformance.json`).
-    pub fn text(&self, lang: UiLanguage, id: &str, args: &[(&str, &str)]) -> String {
+    pub(crate) fn text(&self, lang: UiLanguage, id: &str, args: &[(&str, &str)]) -> String {
         let found = self
             .non_empty(lang, id)
             .or_else(|| self.non_empty(UiLanguage::En, id));
@@ -140,7 +148,8 @@ impl Catalog {
 
     /// Invariant (1): same id set, non-empty texts, same placeholder set per id,
     /// no stray braces.
-    pub fn parity_problems(&self) -> Vec<CatalogProblem> {
+    #[cfg(test)]
+    fn parity_problems(&self) -> Vec<CatalogProblem> {
         let ids: BTreeSet<&str> = self
             .en
             .keys()
@@ -179,7 +188,8 @@ impl Catalog {
     }
 
     /// Ids of `ids` absent from either catalog (kind `Missing(lang)`).
-    pub fn missing_ids(&self, ids: &[MessageId]) -> Vec<CatalogProblem> {
+    #[cfg(test)]
+    fn missing_ids(&self, ids: &[MessageId]) -> Vec<CatalogProblem> {
         ids.iter()
             .flat_map(|id| {
                 LANGS
@@ -277,6 +287,7 @@ fn placeholder_name_len(rest: &[u8]) -> Option<usize> {
     (rest.get(len) == Some(&b'}')).then_some(len)
 }
 
+#[cfg(test)]
 fn placeholder_names(text: &str) -> BTreeSet<&str> {
     tokens(text)
         .into_iter()
@@ -312,8 +323,8 @@ const EMBEDDED_RU: &str = include_str!("../../../i18n/ru.json");
 ///
 /// Private on purpose: the only public way to render embedded text is [`text`],
 /// which takes a [`MessageId`], so every Rust id goes through [`MESSAGE_IDS`]
-/// (invariant 3). `Catalog::text` takes a `&str` id and must not be reachable on
-/// this catalog from outside the module.
+/// (invariant 3). `Catalog::text` takes a `&str` id, so neither this accessor nor
+/// `Catalog` itself (crate-private) is reachable from another crate.
 ///
 /// The files are compiled in. The test `catalog_parity_holds_for_the_real_catalogs`
 /// parses the same files and fails if they do not parse. If parsing failed anyway,
