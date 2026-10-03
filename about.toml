@@ -24,9 +24,10 @@ accepted = [
 ]
 
 # Only what ships: the Windows target's normal dependency graph.
-# Keys to verify against the pinned cargo-about version (context7 was not available to the
-# test writer): `targets`, `ignore-build-dependencies`, `ignore-dev-dependencies`, and the
-# key that disables clearlydefined.io lookups (investigation: `no-clearly-defined`).
+# Keys checked against cargo-about 0.9.2 (src/licenses/config.rs): `targets`,
+# `ignore-build-dependencies`, `ignore-dev-dependencies`. There is no clearlydefined.io key:
+# 0.8.0 removed those lookups, and any other top-level key is read as a per-crate table.
+# scripts/licenses/rust.sh runs `generate --frozen`, so nothing is fetched at check time.
 targets = ["x86_64-pc-windows-msvc"]
 ignore-build-dependencies = true
 ignore-dev-dependencies = true

@@ -57,9 +57,10 @@ scripts/tw-run core -- cargo test -p voicen-core <filter>   # single core test
 pnpm test -- <file>                             # single UI unit test
 pnpm dev                                        # UI in a browser (no Rust side; IPC calls fail)
 pnpm e2e                                        # UI end-to-end (Playwright, Chromium, mocked IPC)
+make licenses                                   # regenerate THIRD-PARTY-NOTICES.txt; commit it whenever dependencies change (make check fails when stale)
 ```
 
-Gotchas: the app itself (`pnpm tauri dev/build`) runs only on Windows; on Linux verify the UI with mocked IPC and core with fakes.
+Gotchas: the app itself (`pnpm tauri dev/build`) runs only on Windows; on Linux verify the UI with mocked IPC and core with fakes. The gate's license check needs crates.io access; offline it says "cannot run" (not a license failure), see `docs/decisions/licenses.md`.
 
 ## Rules
 

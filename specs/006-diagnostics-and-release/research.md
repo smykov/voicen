@@ -77,6 +77,8 @@ Phase 0 of [plan.md](plan.md). The stack is fixed by `docs/requirements.md` §9 
 
 ## R13 — License check and third-party notices
 
+> Superseded in part (T-027): the accepted list is decided by #9 + #24 (kept in `about.toml`), not by the proposal below; npm is read from the client bundle, not `pnpm licenses --prod`; the manual list is `licenses/manual.json`; NSIS uses zlib compression (#29). See `docs/decisions/licenses.md`.
+
 - **Decision**:
   - **Rust**: `cargo-about` with `about.toml` listing the accepted SPDX licenses and `targets = ["x86_64-pc-windows-msvc"]` (the shipped target, evaluated on Linux). `cargo about generate` fails on a crate whose license is not accepted or cannot be determined (FR-031) and renders the notices from a Handlebars template (FR-032). Installed into the `voicen-rust:1.99` image (`cargo install cargo-about --locked`) — an install needing the owner's consent.
   - **npm**: `pnpm licenses list --prod --json` (built into pnpm, no new dependency) parsed by `scripts/check-npm-licenses.mjs`, which reads the accepted list from `about.toml` (one list — P-010) and appends the npm section to the notices.

@@ -21,6 +21,18 @@ jobs:
       - run: pnpm exec playwright install --with-deps chromium
       - name: Build the core toolchain image
         run: make core-image
+      # Cargo registry of scripts/tw-run core (config.yml cache /usr/local/cargo/registry,
+      # mounted from .teamwright/cache/core/_usr_local_cargo_registry). index + cache hold
+      # the downloaded .crate files; cargo re-extracts src offline. Saves the crates.io
+      # download of the license check (T-027, decision #24 D3).
+      - name: Cache the cargo registry of the core image
+        uses: actions/cache@v6
+        with:
+          path: |
+            .teamwright/cache/core/_usr_local_cargo_registry/index
+            .teamwright/cache/core/_usr_local_cargo_registry/cache
+          key: cargo-registry-core-${{ hashFiles('Cargo.lock', 'licenses/fixtures/gpl/Cargo.lock') }}
+          restore-keys: cargo-registry-core-
       - run: make check
 
   windows:

@@ -48,5 +48,5 @@ On failure of the start-line check the job prints the log if it exists (nothing 
 | Script | Contract |
 |---|---|
 | `scripts/check-version.sh [<expected>]` | exits non-zero when the versions in `Cargo.toml` (workspace), `package.json` (and `tauri.conf.json` if it still has one) differ from each other or from `<expected>`; prints both values |
-| `scripts/check-npm-licenses.mjs` | reads the accepted list from `about.toml`; fails naming each package with an unaccepted/unknown license; `--notices` prints the npm section |
+| `scripts/licenses/check.mjs`, `notices.mjs` | read the accepted list from `about.toml`; check the npm packages of the client bundle (written by the Vite plugin) and `licenses/manual.json`; fail naming each component with an unaccepted/unknown license; `notices.mjs` renders `THIRD-PARTY-NOTICES.txt` (decisions #24, #29) |
 | `make licenses` / `make licenses-check` | regenerate `THIRD-PARTY-NOTICES.txt` / fail if regeneration differs from the committed file or any license is unaccepted |

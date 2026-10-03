@@ -1,0 +1,38 @@
+[
+  {
+    "name": "whisper.cpp / ggml",
+    "license": "MIT",
+    "url": "https://github.com/ggml-org/whisper.cpp",
+    "note": "C/C++ library compiled into Voicen through whisper-rs-sys (the crate license covers only its Rust code).",
+    "text": "licenses/texts/whisper.cpp-MIT.txt"
+  },
+  {
+    "name": "Silero VAD model (ggml conversion)",
+    "license": "MIT",
+    "url": "https://github.com/snakers4/silero-vad",
+    "note": "Voice activity model, bundled in the installer.",
+    "text": "licenses/texts/silero-vad-MIT.txt"
+  },
+  {
+    "name": "Whisper ggml models (OpenAI Whisper weights)",
+    "license": "MIT",
+    "url": "https://huggingface.co/ggerganov/whisper.cpp",
+    "note": "Not bundled: downloaded at run time when the user picks a local model.",
+    "text": "licenses/texts/openai-whisper-MIT.txt"
+  },
+  {
+    "name": "NSIS (Nullsoft Scriptable Install System)",
+    "license": "Zlib",
+    "url": "https://nsis.sourceforge.io",
+    "note": "Installer only: the installer stub with its zlib compression module (bundle.windows.nsis.compression \"zlib\", decision #29) and its plug-ins.",
+    "text": "licenses/texts/nsis-COPYING.txt"
+  },
+  {
+    "name": "nsis_tauri_utils (NSIS plug-in)",
+    "version": "0.5.3",
+    "license": "MIT OR Apache-2.0",
+    "url": "https://github.com/tauri-apps/nsis-tauri-utils",
+    "note": "Installer only: plug-in DLL the Tauri NSIS bundler embeds in the installer.",
+    "text": "licenses/texts/nsis-tauri-utils-MIT.txt"
+  }
+]

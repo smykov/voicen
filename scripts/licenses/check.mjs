@@ -1,12 +1,20 @@
 // License check for the npm bundle and the hand-kept list (T-027).
 //
 //   node scripts/licenses/check.mjs --about about.toml \
-//     --bundle target/licenses/npm-bundled.json --manual licenses/manual.json
+//     --bundle target/licenses/npm-bundled.json --manual licenses/manual.json \
+//     [--require <package>]...
 //
 // Exit 0: every component accepted. Exit 1: license failures, each named on stderr.
-// Exit 2: cannot check (missing or empty bundle list, unreadable about.toml or manual list).
-// Stub: the developer implements it; the tests in check.test.mjs define the contract.
+// Exit 2: cannot check (missing or empty bundle list, unreadable about.toml or manual list,
+// a bundled package without package.json, a --require'd package absent from the bundle).
+import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
+import { readAcceptedList } from "./accepted.mjs";
+import { loadBundleList, readPackageLicense } from "./bundle.mjs";
+import { satisfies } from "./spdx.mjs";
+
+/** Values that say "no license" rather than naming one. */
+const NO_LICENSE = new Set(["UNLICENSED", "UNKNOWN"]);
 
 /**
  * Every component whose license does not satisfy `accepted`, in input order.
@@ -16,9 +24,23 @@ import { pathToFileURL } from "node:url";
  * @returns {{ name: string, version?: string, license: string | null, reason: "missing" | "not-accepted" }[]}
  */
 export function checkComponents(components, accepted) {
-  void components;
-  void accepted;
-  throw new Error("not implemented (T-027)");
+  /** @type {{ name: string, version?: string, license: string | null, reason: "missing" | "not-accepted" }[]} */
+  const failures = [];
+  for (const c of components) {
+    const license = typeof c.license === "string" ? c.license : null;
+    /** @type {"missing" | "not-accepted" | null} */
+    let reason = null;
+    if (license === null || license.trim() === "" || NO_LICENSE.has(license.trim())) reason = "missing";
+    else if (!satisfies(license, accepted)) reason = "not-accepted";
+    if (reason === null) continue;
+    failures.push({
+      name: c.name,
+      ...(c.version !== undefined ? { version: c.version } : {}),
+      license,
+      reason,
+    });
+  }
+  return failures;
 }
 
 /**
@@ -28,8 +50,47 @@ export function checkComponents(components, accepted) {
  * @returns {{ name: string, version?: string, license: string | null }[]}
  */
 export function loadManualList(file) {
-  void file;
-  throw new Error("not implemented (T-027)");
+  let data;
+  try {
+    data = JSON.parse(readFileSync(file, "utf8"));
+  } catch (e) {
+    throw new Error(`cannot read the manual list ${file}: ${e instanceof Error ? e.message : e}`);
+  }
+  if (!Array.isArray(data)) throw new Error(`manual list ${file} is not a JSON array`);
+  for (const entry of data) {
+    if (!entry || typeof entry.name !== "string" || entry.name.trim() === "") {
+      throw new Error(`manual list ${file}: an entry has no name: ${JSON.stringify(entry)}`);
+    }
+  }
+  return data;
+}
+
+/**
+ * Parses `--key value` pairs; repeated keys collect into an array.
+ * @param {string[]} argv
+ * @param {string[]} known
+ * @returns {Record<string, string[]>}
+ */
+export function parseArgs(argv, known) {
+  /** @type {Record<string, string[]>} */
+  const args = {};
+  for (let i = 0; i < argv.length; i += 2) {
+    const key = argv[i]?.replace(/^--/, "");
+    const value = argv[i + 1];
+    if (!argv[i]?.startsWith("--") || !known.includes(key) || value === undefined) {
+      throw new Error(`bad argument ${JSON.stringify(argv[i])}; expected ${known.map((k) => `--${k} <value>`).join(" ")}`);
+    }
+    (args[key] ??= []).push(value);
+  }
+  return args;
+}
+
+/** One line per failure, naming the component, its version and what is wrong. */
+function describe(/** @type {string} */ kind, /** @type {ReturnType<typeof checkComponents>[number]} */ f) {
+  const what = f.version ? `${f.name}@${f.version}` : f.name;
+  return f.reason === "missing"
+    ? `licenses-check: FAIL ${kind} ${what}: no license (${f.license === null ? "none given" : JSON.stringify(f.license)})`
+    : `licenses-check: FAIL ${kind} ${what}: license ${f.license} is not in the accepted list (about.toml)`;
 }
 
 /**
@@ -37,8 +98,37 @@ export function loadManualList(file) {
  * @returns {number} exit code
  */
 export function main(argv) {
-  void argv;
-  throw new Error("not implemented (T-027)");
+  let accepted, bundled, manual;
+  try {
+    const args = parseArgs(argv, ["about", "bundle", "manual", "require"]);
+    for (const k of ["about", "bundle", "manual"]) {
+      if (!args[k]) throw new Error(`missing --${k}`);
+    }
+    accepted = readAcceptedList(readFileSync(args.about[0], "utf8"));
+    const list = loadBundleList(args.bundle[0]);
+    for (const want of args.require ?? []) {
+      if (!list.some((p) => p.name === want)) {
+        throw new Error(`bundle list ${args.bundle[0]} does not contain ${want}: the client build did not record the bundled packages`);
+      }
+    }
+    bundled = list.map((p) => readPackageLicense(p.dir));
+    manual = loadManualList(args.manual[0]);
+  } catch (e) {
+    console.error(`licenses-check: cannot check npm and manual licenses: ${e instanceof Error ? e.message : e}`);
+    return 2;
+  }
+
+  const failures = [
+    ...checkComponents(bundled, accepted).map((f) => describe("npm", f)),
+    ...checkComponents(manual, accepted).map((f) => describe("manual", f)),
+  ];
+  for (const line of failures) console.error(line);
+  if (failures.length > 0) {
+    console.error(`licenses-check: ${failures.length} component(s) outside the accepted list; an exception is an owner decision (docs/decisions.md), never an about.toml edit alone`);
+    return 1;
+  }
+  console.log(`licenses-check: ok: ${bundled.length} bundled npm package(s) and ${manual.length} manual entr(y/ies) accepted`);
+  return 0;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

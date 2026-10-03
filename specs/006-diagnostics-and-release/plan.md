@@ -132,8 +132,8 @@ src-tauri/
 
 src/lib/about/About.svelte (+ about.ts, about.test.ts)
 e2e/about.spec.ts
-about.toml, about.hbs, licenses/manual.toml, THIRD-PARTY-NOTICES.txt
-scripts/check-version.sh, scripts/check-npm-licenses.mjs
+about.toml, about.hbs, licenses/manual.json, THIRD-PARTY-NOTICES.txt
+scripts/check-version.sh, scripts/licenses/
 .github/workflows/ci.yml, .github/release-notes.md
 docker/rust.Dockerfile       # + cargo-about (consent)
 Makefile                     # + licenses, licenses-check, version-check in check

@@ -1,9 +1,9 @@
 # The gate: every area's checks, each through scripts/tw-run in the area's toolchain.
 .PHONY: check check-core check-ui core-image \
-	licenses licenses-check licenses-unit licenses-fixture licenses-rust licenses-npm \
-	licenses-generate licenses-stale
+	licenses licenses-check licenses-unit licenses-fixture licenses-rust licenses-bundle \
+	licenses-npm licenses-generate licenses-stale
 
-check: check-core check-ui
+check: check-core check-ui licenses-check
 
 check-core:
 	scripts/tw-run core -- 'cargo fmt --check -p voicen-core && cargo clippy -p voicen-core --all-targets -- -D warnings'
@@ -19,14 +19,14 @@ core-image:
 	docker build -t voicen-rust:1.99 -f docker/rust.Dockerfile docker
 
 # --- Licenses (T-027, decisions #9 #24) -------------------------------------------------
-# One accepted list: about.toml `accepted`. Rust: cargo-about (Windows target only).
+# One accepted list: about.toml `accepted`. Rust: cargo-about 0.9.2 (Windows target only).
 # npm: the packages of the client bundle (target/licenses/npm-bundled.json, written by the
 # Vite build) plus licenses/manual.json, checked by scripts/licenses/check.mjs.
-# Needs crates.io access; without it the check must say it cannot run (decision #24 D3).
+# Needs crates.io access; without it the check says it cannot run (exit 3), not a license
+# failure (decision #24 D3).
 LICENSES_DIR := target/licenses
 
-# wired into `check` by the T-027 implementation (red until then)
-licenses-check: licenses-unit licenses-fixture licenses-stale
+licenses-check: licenses-unit licenses-fixture licenses-rust licenses-npm licenses-stale
 
 # Unit tests of the npm/manual checker.
 licenses-unit:
@@ -36,19 +36,24 @@ licenses-unit:
 licenses-fixture:
 	scripts/licenses/fixture-check.sh
 
-# Rust crates of the workspace, Windows target, against about.toml.
+# Rust crates of the workspace, Windows target, against about.toml; writes rust.txt.
 licenses-rust:
-	mkdir -p $(LICENSES_DIR)
-	scripts/tw-run core -- cargo about generate --fail -c about.toml -o $(LICENSES_DIR)/rust.txt about.hbs
+	scripts/licenses/rust.sh
+
+# Client build; its Vite plugin writes $(LICENSES_DIR)/npm-bundled.json.
+licenses-bundle:
+	scripts/tw-run ui -- pnpm build
 
 # npm packages of the client bundle and the hand-kept list, against about.toml.
-licenses-npm:
-	scripts/tw-run ui -- pnpm build
+# --require svelte: the bundle list must hold the Svelte runtime, or the plugin saw nothing.
+licenses-npm: licenses-bundle
 	scripts/tw-run ui -- node scripts/licenses/check.mjs --about about.toml \
-		--bundle $(LICENSES_DIR)/npm-bundled.json --manual licenses/manual.json
+		--bundle $(LICENSES_DIR)/npm-bundled.json --manual licenses/manual.json --require svelte
 
-# Notices generated into target/licenses (both targets below use it).
-licenses-generate: licenses-rust licenses-npm
+# Notices generated into target/licenses (both targets below use it). cargo-about renders
+# the Rust part only when every crate is accepted; npm and manual entries are listed
+# whatever their license (licenses-npm judges them), so a notice is never dropped.
+licenses-generate: licenses-rust licenses-bundle
 	scripts/tw-run ui -- node scripts/licenses/notices.mjs --rust $(LICENSES_DIR)/rust.txt \
 		--bundle $(LICENSES_DIR)/npm-bundled.json --manual licenses/manual.json \
 		--out $(LICENSES_DIR)/THIRD-PARTY-NOTICES.txt

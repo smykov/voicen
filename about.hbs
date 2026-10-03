@@ -1,0 +1,16 @@
+{{!-
+  Rust section of THIRD-PARTY-NOTICES.txt (T-027), rendered by cargo-about from about.toml.
+  Plain text, so every value is in triple braces (no HTML escaping). No paths are printed:
+  source_path is machine-specific. scripts/licenses/notices.mjs adds the other sections.
+-}}
+{{#each licenses}}
+--------------------------------------------------------------------------------
+{{{name}}} ({{{id}}})
+Used by:
+{{#each used_by}}
+  - {{{crate.name}}} {{{crate.version}}}{{#if crate.repository}} <{{{crate.repository}}}>{{/if}}
+{{/each}}
+
+{{{text}}}
+
+{{/each}}

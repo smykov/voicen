@@ -134,7 +134,7 @@ A `const` in `voicen-core` (value owned by 004's key-slot naming, e.g. `Voicen/`
 
 | Field | Source |
 |---|---|
-| name, version | Cargo metadata / pnpm / `licenses/manual.toml` |
+| name, version | Cargo metadata / pnpm / `licenses/manual.json` |
 | license (SPDX) | same |
 | license text | cargo-about / package files / manual |
 | origin | `crate` / `npm` / `native` / `model` |
