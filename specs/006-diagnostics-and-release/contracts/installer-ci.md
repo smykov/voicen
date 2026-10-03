@@ -7,8 +7,8 @@ Interfaces seen from outside the app: command-line switches, files, CI job names
 | Aspect | Contract | Spec |
 |---|---|---|
 | Install mode | `bundle.windows.nsis.installMode = "currentUser"` (exists); no UAC prompt | FR-018 |
-| Install dir | `%LOCALAPPDATA%\Voicen` (Tauri default) — **confirm on Windows** — asserted by the `windows` smoke step since T-002; recorded as observed by T-029 after the first green run (`voicen.exe` there) | R9 |
-| Shortcut | Start-menu shortcut with AppUserModelID = `identifier` (`dev.voicen.app`); `Voicen.lnk` under `%APPDATA%\Microsoft\Windows\Start Menu\Programs` — **confirm on Windows** — asserted by the `windows` smoke step since T-002; recorded as observed by T-029 after the first green run (AppUserModelID not asserted by CI) | FR-018 |
+| Install dir | `%LOCALAPPDATA%\Voicen` (Tauri default) — observed in run 37044674209 (commit 0e73b52), `voicen.exe` there; recorded by `docs/tasks/T-029.md` | R9 |
+| Shortcut | Start-menu shortcut with AppUserModelID = `identifier` (`dev.voicen.app`); `Voicen.lnk` under `%APPDATA%\Microsoft\Windows\Start Menu\Programs` — path observed in run 37044674209 (commit 0e73b52), recorded by `docs/tasks/T-029.md` (AppUserModelID not asserted by CI, unconfirmed) | FR-018 |
 | Bundled resources | `THIRD-PARTY-NOTICES.txt`, Silero VAD model (path from 001) | FR-020 |
 | Not bundled | whisper models, PDB | FR-020, R5 |
 | Languages | `languages = ["English", "Russian"]`, `displayLanguageSelector = false` | FR-025 |
@@ -16,7 +16,7 @@ Interfaces seen from outside the app: command-line switches, files, CI job names
 | Size | sum of installed files ≤ 100 MB (measured before first launch) | FR-019 |
 | Hook | `NSIS_HOOK_PREINSTALL`: write `logs\installer-ended` | FR-013(b) |
 
-## Uninstaller (`%LOCALAPPDATA%\Voicen\uninstall.exe` — **confirm on Windows** — asserted by the `windows` smoke step since T-002; recorded as observed by T-029 after the first green run)
+## Uninstaller (`%LOCALAPPDATA%\Voicen\uninstall.exe` — observed in run 37044674209 (commit 0e73b52), recorded by `docs/tasks/T-029.md`)
 
 | Invocation | Data folder | Credentials | Autostart | Spec |
 |---|---|---|---|---|

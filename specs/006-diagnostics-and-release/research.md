@@ -53,7 +53,7 @@ Phase 0 of [plan.md](plan.md). The stack is fixed by `docs/requirements.md` §9 
 
 ## R9 — Install directory
 
-- **Decision**: Keep the Tauri NSIS `currentUser` default install location, `%LOCALAPPDATA%\Voicen` (the `windows` smoke step asserts `%LOCALAPPDATA%\Voicen\voicen.exe` since T-002) — **confirm on Windows** — asserted by the `windows` smoke step since T-002; recorded as observed by T-029 after the first green run (run id recorded by T-029 from T-002's verify record). Program files and data then share a folder: "no" on uninstall removes only the files the installer wrote (NSIS removes its own file list) and keeps the data; "yes" additionally removes the whole folder. CI measures the installed size right after install, before first launch, so no data is counted.
+- **Decision**: Keep the Tauri NSIS `currentUser` default install location, `%LOCALAPPDATA%\Voicen` (the `windows` smoke step asserts `%LOCALAPPDATA%\Voicen\voicen.exe` since T-002) — observed in run 37044674209 (commit 0e73b52), recorded by `docs/tasks/T-029.md`: `found voicen.exe at C:\Users\runneradmin\AppData\Local\Voicen\voicen.exe` (`%LOCALAPPDATA%\Voicen\voicen.exe`). Program files and data then share a folder: "no" on uninstall removes only the files the installer wrote (NSIS removes its own file list) and keeps the data; "yes" additionally removes the whole folder. CI measures the installed size right after install, before first launch, so no data is counted.
 - **Alternative (owner decision, see plan)**: install to `%LOCALAPPDATA%\Programs\Voicen` (the Windows convention for per-user programs), keeping data and program apart. It needs a custom NSIS template or install-dir override, which Tauri supports but costs maintenance on every Tauri upgrade. Not chosen for release 1; raised as a finding.
 
 ## R10 — Uninstaller question, credential removal, upgrade
@@ -68,7 +68,7 @@ Phase 0 of [plan.md](plan.md). The stack is fixed by `docs/requirements.md` §9 
 
 ## R11 — Start-menu shortcut and toast identity
 
-- **Decision**: The Tauri NSIS installer creates the Start-menu shortcut and sets its AppUserModelID to the bundle identifier `dev.voicen.app`; 001's toast code uses the same identifier (P-010: `tauri.conf.json` `identifier` is the source; the shell reads it from the Tauri config at runtime). **confirm on Windows** (shortcut `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Voicen.lnk`) — asserted by the `windows` smoke step since T-002; recorded as observed by T-029 after the first green run (run id recorded by T-029 from T-002's verify record); the AppUserModelID is not asserted by CI; the owner's manual check confirms a toast appears after a fresh install (001's verification).
+- **Decision**: The Tauri NSIS installer creates the Start-menu shortcut and sets its AppUserModelID to the bundle identifier `dev.voicen.app`; 001's toast code uses the same identifier (P-010: `tauri.conf.json` `identifier` is the source; the shell reads it from the Tauri config at runtime). shortcut `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Voicen.lnk` — observed in run 37044674209 (commit 0e73b52), recorded by `docs/tasks/T-029.md`: `found Voicen.lnk at C:\Users\runneradmin\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Voicen.lnk`; the AppUserModelID is still unconfirmed: is not asserted by CI; the owner's manual check confirms a toast appears after a fresh install (001's verification).
 
 ## R12 — Version single source and release job
 
@@ -94,7 +94,7 @@ Phase 0 of [plan.md](plan.md). The stack is fixed by `docs/requirements.md` §9 
   4. reinstall the same installer silently → user data (log file) still present (FR-024);
   5. create a test credential with `cmdkey /generic:<prefix>ci-test /user:ci /pass:ci`; silent uninstall with `/KEEPDATA` → data folder and credential still present; reinstall; silent uninstall without switches → `%LOCALAPPDATA%\Voicen` absent, `cmdkey /list` shows no `<prefix>` entry (FR-021, FR-022);
   6. upload installer and `voicen.pdb` (zipped) as artifacts named with the commit.
-  The uninstaller path is `%LOCALAPPDATA%\Voicen\uninstall.exe` — **confirm on Windows** — asserted by the `windows` smoke step since T-002; recorded as observed by T-029 after the first green run (run id recorded by T-029 from T-002's verify record).
+  The uninstaller path is `%LOCALAPPDATA%\Voicen\uninstall.exe` — observed in run 37044674209 (commit 0e73b52), recorded by `docs/tasks/T-029.md`: `found uninstall.exe at C:\Users\runneradmin\AppData\Local\Voicen\uninstall.exe`.
 - **PRs from forks**: the job runs without secrets (none needed); the release job never runs for PRs.
 
 ## R15 — GitHub repository (prerequisite)
@@ -130,4 +130,9 @@ Observed in run 37035261228 (commit df52798):
 - log path `%LOCALAPPDATA%\Voicen\logs\voicen.log`;
 - start log line `voicen 0.1.0 (df52798) started`.
 
-**Confirm on Windows** (not yet observed): the install dir `%LOCALAPPDATA%\Voicen\voicen.exe`, `%LOCALAPPDATA%\Voicen\uninstall.exe` and the Start-menu shortcut `Voicen.lnk`. The `windows` smoke step asserts them since T-002 (prints `found <name> at <path>` or throws `<name> not found at <path>`); T-029 records them as observed after the first green run (run id recorded by T-029 from T-002's verify record). Until then they are template predictions, not observations.
+Observed in run 37044674209 (commit 0e73b52), recorded by `docs/tasks/T-029.md`; the `windows` smoke step prints `found <name> at <path>` or throws `<name> not found at <path>`:
+- `found voicen.exe at C:\Users\runneradmin\AppData\Local\Voicen\voicen.exe` (`%LOCALAPPDATA%\Voicen\voicen.exe`);
+- `found uninstall.exe at C:\Users\runneradmin\AppData\Local\Voicen\uninstall.exe` (`%LOCALAPPDATA%\Voicen\uninstall.exe`);
+- `found Voicen.lnk at C:\Users\runneradmin\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Voicen.lnk` (`%APPDATA%\Microsoft\Windows\Start Menu\Programs\Voicen.lnk`).
+
+Not confirmed: the AppUserModelID of `Voicen.lnk` (CI does not assert it). Job: https://github.com/smykov/voicen/actions/runs/37044674209/job/110963827740
