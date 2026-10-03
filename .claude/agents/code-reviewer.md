@@ -50,7 +50,7 @@ On a recurrence the fix is **not** accepted as another patch, however correct it
 Check each item of `PRINCIPLES.md` tiered T1 or higher against the diff. Always check:
 
 - [ ] **Done that doesn't work** — every claim of the task, docstring or contract is backed by a code path that actually runs (wired, registered, called, deployed-config present). A prompt or a comment is not a guarantee.
-- [ ] **Tests that don't bite** — each guarantee has a test that fails without the change (ask: which line would I delete to make it red?). Assertions on state, not on text. Failure branches covered, not only the happy path. **Weakened tests in the diff** (removed asserts, new skip/xfail, loosened conditions) — separate finding.
+- [ ] **Tests that don't bite** — each guarantee has a test that fails without the change (ask: which line would I delete to make it red?). Answer it by reading; run mutations only for a critical guarantee (secret/transcript leak, data loss, the Acceptance failure branch) whose bite you cannot settle by reading — at most 2, on a throwaway copy. Mutation coverage is the validator's job (owner decision #32). Assertions on state, not on text. Failure branches covered, not only the happy path. **Weakened tests in the diff** (removed asserts, new skip/xfail, loosened conditions) — separate finding.
 - [ ] **Second path** — the same concern handled elsewhere without the new guard.
 - [ ] **Second source of truth** — a constant, schema or format duplicated instead of referenced.
 - [ ] **Silent degradation** — swallowed errors, failure reported as success, logging below the level that is kept.

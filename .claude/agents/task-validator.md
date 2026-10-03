@@ -86,13 +86,13 @@ verifier: task-validator
 1. **Split the task into checkable claims**: files, behaviour, limits, what must fail and how, the invariant.
 2. **Evidence per claim**: `file:line`, the test that proves it (name), command output, or a verify record. Missing → not done. Partial → say so.
 3. **Gate**: run `make check` yourself, full set for the touched area. A regression in old tests → FAIL.
-4. **Mutations (3–6), on a throwaway copy only.** Make the copy first and never mutate the working tree:
+4. **Mutations (1–3), critical guarantees only, on a throwaway copy only** (owner decision #32). Mutate only what would cause real harm if unprotected: a key, transcript or audio reaching a file, log or window (NFR-04, FR-20); lost or overwritten user data; the Acceptance failure branch; the task's stated invariant. Do not mutate wording, doc comments, list shapes, ordering, or anything already killed in a review record for the same commit. Make the copy first and never mutate the working tree:
    ```sh
    copy="$(mktemp -d)/tree"
    cp -a . "$copy"            # includes uncommitted changes
    # or, if everything is committed:  git worktree add --detach "$copy" HEAD
    ```
-   In the copy, for each key guarantee, break the implementation in the smallest way that should violate it (invert the condition, drop the guard, skip the write, return early, remove the new branch) and run the relevant tests there. Each mutation must turn at least one test red. Undo a mutation by re-copying the file from the working tree into the copy, or by discarding the copy — **never** with `git stash`, `git checkout`, `git restore`, `git clean` or `git reset`, in the copy or in the working tree. A surviving mutation → FAIL: "guarantee X is not protected by a test". When done, discard the copy (`git worktree remove <path>` for a worktree) and confirm `git status` of the working tree is exactly what you received, apart from your records.
+   In the copy, for each critical guarantee, break the implementation in the smallest way that should violate it (invert the condition, drop the guard, skip the write, return early, remove the new branch) and run the relevant tests there. Each mutation must turn at least one test red. Undo a mutation by re-copying the file from the working tree into the copy, or by discarding the copy — **never** with `git stash`, `git checkout`, `git restore`, `git clean` or `git reset`, in the copy or in the working tree. A surviving mutation → FAIL: "guarantee X is not protected by a test". When done, discard the copy (`git worktree remove <path>` for a worktree) and confirm `git status` of the working tree is exactly what you received, apart from your records.
 5. **Review**: the latest review record says `verdict: APPROVE` (or the task is explicitly marked `review: skipped:trivial`). Otherwise → FAIL.
 6. **Docs**: contract, data model and quickstart commands match the code. Drift → FAIL.
 7. **Owner-only items**: real accounts, licences, physical devices, production secrets, the owner's servers, paid services → `NEEDS_OWNER` with the exact action needed. Not PASS, not FAIL.
