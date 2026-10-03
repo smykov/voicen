@@ -4,7 +4,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -68,4 +68,28 @@ test("check.mjs --require: a bundle list without the required package cannot che
   assert.match(missing.stderr, /svelte/);
   const present = spawnSync(process.execPath, [CHECK, ...args, "--require", "fake-ok-lib"], { encoding: "utf8" });
   assert.equal(present.status, 0, present.stderr);
+});
+
+// Review round 1, finding 3: the project's own crates are not third-party. They stay in the
+// cargo-about check but are not listed in the committed notices. The names come from the
+// workspace manifests, so a new member is covered without editing this test.
+test("the committed notices do not list the project's own workspace crates", () => {
+  const root = fileURLToPath(new URL("../../", import.meta.url));
+  const workspace = readFileSync(join(root, "Cargo.toml"), "utf8");
+  const members = workspace.match(/^members\s*=\s*\[([^\]]*)\]/m);
+  assert.ok(members, "Cargo.toml has a [workspace] members list");
+  const names = [...members[1].matchAll(/"([^"]+)"/g)].map(([, dir]) => {
+    const manifest = readFileSync(join(root, dir, "Cargo.toml"), "utf8");
+    const pkg = manifest.slice(manifest.indexOf("[package]")).match(/^name\s*=\s*"([^"]+)"/m);
+    assert.ok(manifest.includes("[package]") && pkg, `${dir}/Cargo.toml has a [package] name`);
+    return pkg[1];
+  });
+  assert.ok(names.length >= 2, `workspace members found: ${names.join(", ")}`);
+  const text = readFileSync(join(root, "THIRD-PARTY-NOTICES.txt"), "utf8");
+  const listed = names.flatMap((name) => {
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    // "<name> <version>" as a whole crate name: not part of a longer name such as voicen-core.
+    return text.split("\n").filter((line) => new RegExp(`(^|[^\\w-])${escaped} \\d+\\.\\d+\\.\\d+`).test(line));
+  });
+  assert.deepEqual(listed, [], `workspace crates (${names.join(", ")}) are listed in THIRD-PARTY-NOTICES.txt`);
 });

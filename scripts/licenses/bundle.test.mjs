@@ -53,10 +53,10 @@ test("a NUL-prefixed virtual id wrapping a node_modules file maps to that packag
   );
 });
 
-test("purely virtual ids and project sources map to no package", () => {
+// Review round 1, finding 1: virtual ids no longer "map to no package" silently. Whether
+// one is attributed (Vite's helpers -> vite) or fails the check is pinned in plugin.test.mjs.
+test("project sources map to no package", () => {
   for (const id of [
-    "\0vite/preload-helper.js",
-    "\0commonjsHelpers.js",
     "/work/voicen/src/routes/+page.svelte",
     "/work/voicen/.svelte-kit/generated/client/app.js",
     "/work/voicen/src/lib/node_modules_helper.ts",
@@ -66,14 +66,13 @@ test("purely virtual ids and project sources map to no package", () => {
   }
 });
 
-test("packagesFromModuleIds: one entry per package dir, non-packages dropped, sorted by name", () => {
+test("packagesFromModuleIds: one entry per package dir, project sources dropped, sorted by name", () => {
   const svelte = `${NM}/.pnpm/svelte@5.57.1/node_modules/svelte`;
   const kit = `${NM}/.pnpm/@sveltejs+kit@2.70.3/node_modules/@sveltejs/kit`;
   const clsxA = `${NM}/.pnpm/clsx@2.1.1/node_modules/clsx`;
   const clsxB = `${NM}/.pnpm/clsx@1.2.1/node_modules/clsx`;
   const ids = [
     `${svelte}/src/index-client.js`,
-    "\0vite/preload-helper.js",
     `${kit}/src/runtime/client/entry.js`,
     `${svelte}/src/internal/client/index.js`,
     "/work/voicen/src/routes/+page.svelte",

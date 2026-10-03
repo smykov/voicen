@@ -53,6 +53,19 @@ test("a missing or UNLICENSED license fails with reason missing", () => {
   ]);
 });
 
+// Review round 1, finding 4: one "no license" set (spdx.mjs) for the evaluator and the
+// report, so NONE and NOASSERTION are reported as "no license", not as "not accepted".
+test("NONE and NOASSERTION are reported as no license (reason missing), like UNLICENSED", () => {
+  const failures = checkComponents([
+    { name: "spdx-none", version: "1.0.0", license: "NONE" },
+    { name: "spdx-noassertion", version: "1.0.0", license: "NOASSERTION" },
+  ], ACCEPTED);
+  assert.deepEqual(failures.map((f) => [f.name, f.reason]), [
+    ["spdx-none", "missing"],
+    ["spdx-noassertion", "missing"],
+  ]);
+});
+
 test("MIT OR GPL-3.0 passes, MIT AND GPL-3.0 fails", () => {
   const failures = checkComponents([
     { name: "either", version: "1.0.0", license: "MIT OR GPL-3.0" },
