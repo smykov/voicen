@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { t } from "$lib/i18n";
 
 /** Version and commit of the running build (FR-18), as returned by the `get_build_info` command. */
 export interface BuildInfo {
@@ -7,7 +8,7 @@ export interface BuildInfo {
 }
 
 export function formatBuildInfo(info: BuildInfo): string {
-  return `Voicen ${info.version} (${info.commit})`;
+  return t("app.build_info", { version: info.version, commit: info.commit });
 }
 
 export function loadBuildInfo(): Promise<BuildInfo> {

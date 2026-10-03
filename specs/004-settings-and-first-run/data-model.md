@@ -79,8 +79,10 @@ Committed (old hotkey released, snapshot swapped, subscribers notified) ▶ Save
 ## Message catalog
 
 - Files `i18n/en.json`, `i18n/ru.json`: `{ "<message id>": "<text with {placeholders}>" }`.
-- Invariants (gate): same id set in both; same placeholder names per id; every id used in Rust and in `src/**` exists.
-- `UiLanguage`: `en` | `ru`. `resolve_ui_language(Option<&str>)`: primary subtag `ru` (case-insensitive) → `ru`, else `en`.
+- Invariants (gate, T-005 tests only): flat string map; same id set in both; every text non-empty; same placeholder names per id; no brace outside a placeholder `{[a-z][a-z0-9_]*}`; every Rust `MessageId` (`MESSAGE_IDS`) exists in both; in the UI a literal id in `t()` is checked by `svelte-check` (`MessageId = keyof typeof en`).
+- Rendering: one pass, values inserted literally, missing argument stays `{name}`, extra arguments ignored; lookup lang → `en` → the id. Pinned by `i18n/conformance.json`, run by core and UI tests.
+- Ids are added to both files together; Rust-originated ids are also declared with `messages!` in `i18n.rs`.
+- `UiLanguage`: `en` | `ru`. `resolve_ui_language(Option<&str>)`: primary subtag (before the first `-` or `_`) `ru` in any ASCII case → `ru`, else (including `None` and empty) `en`. The UI gets its language from `settings.ui_language` and starts with `en`.
 
 ## Hotkey
 

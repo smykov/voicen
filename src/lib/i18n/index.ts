@@ -1,10 +1,11 @@
 // English/Russian message catalog for the UI (FR-15, T-005).
 //
-// STUB written by the test writer: the public surface below exists only so the
-// tests type-check. Every body throws; the implementation replaces them and
-// removes the eslint-disable below (it exists only for the stub's unused params).
-/* eslint-disable @typescript-eslint/no-unused-vars -- T-005 stub, removed by the implementation */
+// The catalog lives at the repo root (`i18n/`, alias `$i18n`) and is shared with
+// `voicen_core::i18n`; `text()` here and Rust `Catalog::text` follow one rule,
+// pinned by `i18n/conformance.json`.
 import en from "$i18n/en.json";
+import ru from "$i18n/ru.json";
+import { currentLanguage, setCurrentLanguage } from "./language.svelte";
 
 /** UI language; the same tags as `voicen_core::i18n::UiLanguage`. */
 export type UiLanguage = "en" | "ru";
@@ -31,25 +32,63 @@ export interface CatalogProblem {
   lang: UiLanguage;
 }
 
+const LANGUAGES: readonly UiLanguage[] = ["en", "ru"];
+
+/** `{name}` with `name` matching `[a-z][a-z0-9_]*`; no escaping. */
+const PLACEHOLDER = /\{([a-z][a-z0-9_]*)\}/g;
+
+const realCatalog: Catalog = { en, ru };
+
+/** The text of `id` in `messages` if it is a non-empty string, else undefined. */
+function nonEmpty(messages: Messages, id: string): string | undefined {
+  if (!Object.hasOwn(messages, id)) return undefined;
+  const value = messages[id];
+  return typeof value === "string" && value !== "" ? value : undefined;
+}
+
 /**
  * The single lookup + render rule, the same as Rust `Catalog::text`
  * (pinned by `i18n/conformance.json`).
+ *
+ * Lookup: the `lang` text if non-empty, else the `en` text if non-empty, else `id`.
+ * Render: one left-to-right pass over the template; each placeholder with an
+ * argument is replaced by the value inserted literally (the replacer function's
+ * return value is never read as a `$&`-style pattern) and never re-expanded; a
+ * placeholder without an argument stays verbatim; extra arguments are ignored.
  */
-export function text(_catalog: Catalog, _lang: UiLanguage, _id: string, _args: MessageArgs = {}): string {
-  throw new Error("T-005: not implemented");
+export function text(catalog: Catalog, lang: UiLanguage, id: string, args: MessageArgs = {}): string {
+  const template = nonEmpty(catalog[lang], id) ?? nonEmpty(catalog.en, id);
+  if (template === undefined) return id;
+  return template.replace(PLACEHOLDER, (placeholder: string, name: string) =>
+    Object.hasOwn(args, name) ? args[name] : placeholder,
+  );
 }
 
 /** Ids missing from either catalog or with an empty text there. */
-export function catalogProblems(_catalog: Catalog): CatalogProblem[] {
-  throw new Error("T-005: not implemented");
+export function catalogProblems(catalog: Catalog): CatalogProblem[] {
+  const ids = new Set([...Object.keys(catalog.en), ...Object.keys(catalog.ru)]);
+  const problems: CatalogProblem[] = [];
+  for (const id of ids) {
+    for (const lang of LANGUAGES) {
+      if (!Object.hasOwn(catalog[lang], id)) {
+        problems.push({ id, kind: "missing", lang });
+      } else if (nonEmpty(catalog[lang], id) === undefined) {
+        problems.push({ id, kind: "empty", lang });
+      }
+    }
+  }
+  return problems;
 }
 
 /** Set the language `t()` renders in; the UI starts with `en`. */
-export function setLanguage(_lang: UiLanguage): void {
-  throw new Error("T-005: not implemented");
+export function setLanguage(lang: UiLanguage): void {
+  setCurrentLanguage(lang);
 }
 
-/** Render a message from the real catalog in the current language. */
-export function t(_id: MessageId, _args: MessageArgs = {}): string {
-  throw new Error("T-005: not implemented");
+/**
+ * Render a message from the real catalog in the current language.
+ * Called in a Svelte template or effect, it re-runs when the language changes.
+ */
+export function t(id: MessageId, args: MessageArgs = {}): string {
+  return text(realCatalog, currentLanguage(), id, args);
 }

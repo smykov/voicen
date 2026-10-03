@@ -153,7 +153,7 @@
 ## Phase 7: Polish & cross-cutting
 
 - [ ] T036 [P] Add logging of download, delete, load and unload events with the model id only, and the local-server URL as host:port only, in `crates/voicen-core/src/local_models/*.rs`, with a log-redaction test in `crates/voicen-core/tests/local_logging.rs`: no text, audio, key or URL userinfo {req FR-20, NFR-04, NFR-05, spec FR-024}
-- [ ] T037 [P] Add en/ru texts for every message key this feature adds in 004's catalog files `i18n/en.json`, `i18n/ru.json` (coordinate with 004), with a test that both locales have every key {req FR-15, spec FR-025}
+- [ ] T037 [P] Add en/ru texts for every message key this feature adds in the one catalog `i18n/en.json`, `i18n/ru.json` (teamwright T-005; Rust-originated ids also declared with `messages!`); no own parity test, T-005's tests check both locales {req FR-15, spec FR-025}
 - [ ] T038 [P] Update `docs/architecture.md` (the `voicen-whisper` crate, the model residency, the models dir, the local-server key slot) and `docs/decisions/core.md` (the in-process whisper and native-abort risk, research R-8) in the same commit as the code they describe {req NFR-11, NFR-07}
 - [ ] T039 [P] Add whisper.cpp (MIT), whisper-rs, the ggml model licence (MIT, from `ggerganov/whisper.cpp`) and `sha2` to the third-party licence list owned by 006 (its file, e.g. the NFR-12 licence list in the repository root, as 006 defines it) {req NFR-12}
 - [ ] T040 Run `specs/002-local-transcription/quickstart.md` §1–§3 and record evidence; prepare the owner's manual checklist from quickstart §4: offline dictation, NFR-01 warm benchmark with `small`, RAM drop after 10 min, speaches, delete {req FR-07, FR-08, FR-17, FR-28, NFR-01, NFR-03}

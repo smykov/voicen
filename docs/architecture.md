@@ -46,6 +46,8 @@ flowchart LR
 | version and commit | `voicen_core::build_info()` | About, start log line, CI smoke |
 | data directory `%LOCALAPPDATA%\Voicen` | shell (one function) | logs, settings, history, models |
 | timeouts (FR-24) | `voicen-core` | engines, post-processing |
+| user-visible text | `i18n/{en,ru}.json` via `voicen_core::i18n` and `$lib/i18n` | shell, UI |
+| UI language | `SettingsView.settings.ui_language` (default from `resolve_ui_language`, T-004); the UI never derives it | UI, shell text |
 
 ## Environments
 

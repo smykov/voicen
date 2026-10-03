@@ -1,6 +1,6 @@
 # Contract: user-visible messages of this feature (FR-034)
 
-Stable keys with English and Russian texts. `{x}` marks a parameter. The catalog location is proposed in research R-14 and must agree with 004. A test asserts that every key below exists in both languages.
+Stable keys with English and Russian texts. `{x}` marks a parameter. The catalog is the one `i18n/en.json`, `i18n/ru.json` at the repository root (teamwright T-005, decisions #13); add these keys there. `MessageKey` maps to `voicen_core::i18n::MessageId`. Parity (every key in both languages, non-empty, same placeholders) is checked only by T-005's tests.
 
 | Key | en | ru | Where |
 |---|---|---|---|

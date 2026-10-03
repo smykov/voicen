@@ -1,8 +1,21 @@
 //! English/Russian message catalog shared by the shell and the UI (FR-15, T-005).
 //!
-//! STUB written by the test writer: the public surface below exists only so the
-//! tests compile. Every body is `todo!()`; every `#[allow]` here is for the stub and
-//! is removed by the implementation.
+//! The catalog lives at the repository root (`i18n/en.json`, `i18n/ru.json`,
+//! decision #13): two flat JSON maps of id -> text. This module is the only Rust
+//! code that parses, looks up and renders them; the UI (`src/lib/i18n`) follows the
+//! same rule, and both are pinned by the shared fixture `i18n/conformance.json`.
+//!
+//! - Lookup: the text in the requested language if non-empty, else the English
+//!   text if non-empty, else the id itself.
+//! - Placeholders: `{name}` with `name` matching `[a-z][a-z0-9_]*`; no escaping.
+//!   Any other `{` or `}` is a stray brace (rendered as is, reported by
+//!   [`Catalog::parity_problems`]).
+//! - Rendering: one left-to-right pass. A placeholder with an argument is replaced
+//!   by the value inserted literally (never re-expanded); a placeholder without an
+//!   argument stays verbatim; extra arguments are ignored.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
 
@@ -15,17 +28,43 @@ pub enum UiLanguage {
 }
 
 /// An id of a message that originates in Rust (shell text or ids sent over IPC).
+///
+/// Constructed only by the [`messages!`] declaration below, so every Rust id is
+/// listed in [`MESSAGE_IDS`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // stub: field is read by the implementation
 pub struct MessageId(&'static str);
 
-/// Every `MessageId` declared in this module (generated from the same declaration).
-pub const MESSAGE_IDS: &[MessageId] = &[];
+/// Declares `MessageId` constants and generates `MESSAGE_IDS` from the same list,
+/// so a Rust id cannot exist without being checked against both catalogs.
+///
+/// ```text
+/// messages! {
+///     /// Tray menu item.
+///     TRAY_EXIT = "tray.exit",
+/// }
+/// ```
+macro_rules! messages {
+    ($($(#[$meta:meta])* $name:ident = $id:literal),* $(,)?) => {
+        $(
+            $(#[$meta])*
+            pub const $name: MessageId = MessageId($id);
+        )*
+
+        /// Every `MessageId` declared in this module (generated from the same
+        /// declaration).
+        pub const MESSAGE_IDS: &[MessageId] = &[$($name),*];
+    };
+}
+
+// Rust-originated ids. Each one must exist in both i18n/en.json and i18n/ru.json
+// (test `message_ids_exist_in_both_catalogs`). None yet.
+messages! {}
 
 /// Both catalogs (en, ru) as parsed flat id -> text maps.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Catalog {
-    _stub: (),
+    en: BTreeMap<String, String>,
+    ru: BTreeMap<String, String>,
 }
 
 /// A catalog file that is not a flat JSON object of strings.
@@ -55,44 +94,227 @@ pub enum ProblemKind {
     StrayBrace(UiLanguage),
 }
 
+const LANGS: [UiLanguage; 2] = [UiLanguage::En, UiLanguage::Ru];
+
 impl Catalog {
     /// Parse the two catalogs. Lenient about content (empty texts, missing ids are
     /// allowed here and reported by `parity_problems`); rejects anything that is not
     /// a flat JSON object of strings.
-    pub fn from_json(_en: &str, _ru: &str) -> Result<Catalog, CatalogError> {
-        todo!("T-005: Catalog::from_json")
+    pub fn from_json(en: &str, ru: &str) -> Result<Catalog, CatalogError> {
+        Ok(Catalog {
+            en: parse_flat(UiLanguage::En, en)?,
+            ru: parse_flat(UiLanguage::Ru, ru)?,
+        })
     }
 
     /// The single lookup + render rule (see `i18n/conformance.json`).
-    pub fn text(&self, _lang: UiLanguage, _id: &str, _args: &[(&str, &str)]) -> String {
-        todo!("T-005: Catalog::text")
+    pub fn text(&self, lang: UiLanguage, id: &str, args: &[(&str, &str)]) -> String {
+        let found = self
+            .non_empty(lang, id)
+            .or_else(|| self.non_empty(UiLanguage::En, id));
+        match found {
+            Some(template) => render(template, args),
+            None => id.to_string(),
+        }
     }
 
     /// Invariant (1): same id set, non-empty texts, same placeholder set per id,
     /// no stray braces.
     pub fn parity_problems(&self) -> Vec<CatalogProblem> {
-        todo!("T-005: Catalog::parity_problems")
+        let ids: BTreeSet<&str> = self
+            .en
+            .keys()
+            .chain(self.ru.keys())
+            .map(String::as_str)
+            .collect();
+        let mut problems = Vec::new();
+        for id in ids {
+            let mut report = |kind| {
+                problems.push(CatalogProblem {
+                    id: id.to_string(),
+                    kind,
+                })
+            };
+            for lang in LANGS {
+                match self.map(lang).get(id) {
+                    None => report(ProblemKind::Missing(lang)),
+                    Some(text) if text.is_empty() => report(ProblemKind::Empty(lang)),
+                    Some(text) => {
+                        if tokens(text).iter().any(|t| matches!(t, Token::Stray(_))) {
+                            report(ProblemKind::StrayBrace(lang));
+                        }
+                    }
+                }
+            }
+            if let (Some(en), Some(ru)) = (
+                self.non_empty(UiLanguage::En, id),
+                self.non_empty(UiLanguage::Ru, id),
+            ) {
+                if placeholder_names(en) != placeholder_names(ru) {
+                    report(ProblemKind::PlaceholdersDiffer);
+                }
+            }
+        }
+        problems
     }
 
     /// Ids of `ids` absent from either catalog (kind `Missing(lang)`).
-    pub fn missing_ids(&self, _ids: &[MessageId]) -> Vec<CatalogProblem> {
-        todo!("T-005: Catalog::missing_ids")
+    pub fn missing_ids(&self, ids: &[MessageId]) -> Vec<CatalogProblem> {
+        ids.iter()
+            .flat_map(|id| {
+                LANGS
+                    .into_iter()
+                    .filter(|lang| !self.map(*lang).contains_key(id.0))
+                    .map(|lang| CatalogProblem {
+                        id: id.0.to_string(),
+                        kind: ProblemKind::Missing(lang),
+                    })
+            })
+            .collect()
+    }
+
+    fn map(&self, lang: UiLanguage) -> &BTreeMap<String, String> {
+        match lang {
+            UiLanguage::En => &self.en,
+            UiLanguage::Ru => &self.ru,
+        }
+    }
+
+    fn non_empty(&self, lang: UiLanguage, id: &str) -> Option<&str> {
+        self.map(lang)
+            .get(id)
+            .map(String::as_str)
+            .filter(|t| !t.is_empty())
     }
 }
 
+fn parse_flat(lang: UiLanguage, json: &str) -> Result<BTreeMap<String, String>, CatalogError> {
+    serde_json::from_str(json).map_err(|e| CatalogError {
+        lang,
+        message: e.to_string(),
+    })
+}
+
+/// One piece of a catalog text.
+#[derive(Debug, PartialEq, Eq)]
+enum Token<'a> {
+    /// Plain text, rendered as is.
+    Literal(&'a str),
+    /// `{name}`; holds `name`.
+    Placeholder(&'a str),
+    /// A `{` or `}` that is not part of a placeholder; rendered as is.
+    Stray(&'a str),
+}
+
+/// Split `text` into literals, placeholders and stray braces in one left-to-right
+/// scan. All delimiters are ASCII, so every slice falls on a char boundary.
+fn tokens(text: &str) -> Vec<Token<'_>> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::new();
+    let mut literal_start = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        let brace = bytes[i];
+        if brace != b'{' && brace != b'}' {
+            i += 1;
+            continue;
+        }
+        if literal_start < i {
+            out.push(Token::Literal(&text[literal_start..i]));
+        }
+        let name_len = if brace == b'{' {
+            placeholder_name_len(&bytes[i + 1..])
+        } else {
+            None
+        };
+        match name_len {
+            Some(len) => {
+                out.push(Token::Placeholder(&text[i + 1..i + 1 + len]));
+                i += len + 2;
+            }
+            None => {
+                out.push(Token::Stray(&text[i..i + 1]));
+                i += 1;
+            }
+        }
+        literal_start = i;
+    }
+    if literal_start < bytes.len() {
+        out.push(Token::Literal(&text[literal_start..]));
+    }
+    out
+}
+
+/// Length of `name` if `rest` starts with `name}` and `name` is `[a-z][a-z0-9_]*`.
+fn placeholder_name_len(rest: &[u8]) -> Option<usize> {
+    if !rest.first()?.is_ascii_lowercase() {
+        return None;
+    }
+    let len = 1 + rest[1..]
+        .iter()
+        .take_while(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || **b == b'_')
+        .count();
+    (rest.get(len) == Some(&b'}')).then_some(len)
+}
+
+fn placeholder_names(text: &str) -> BTreeSet<&str> {
+    tokens(text)
+        .into_iter()
+        .filter_map(|t| match t {
+            Token::Placeholder(name) => Some(name),
+            _ => None,
+        })
+        .collect()
+}
+
+fn render(template: &str, args: &[(&str, &str)]) -> String {
+    let mut out = String::with_capacity(template.len());
+    for token in tokens(template) {
+        match token {
+            Token::Literal(s) | Token::Stray(s) => out.push_str(s),
+            Token::Placeholder(name) => match args.iter().find(|(k, _)| *k == name) {
+                Some((_, value)) => out.push_str(value),
+                None => {
+                    out.push('{');
+                    out.push_str(name);
+                    out.push('}');
+                }
+            },
+        }
+    }
+    out
+}
+
+const EMBEDDED_EN: &str = include_str!("../../../i18n/en.json");
+const EMBEDDED_RU: &str = include_str!("../../../i18n/ru.json");
+
 /// The catalog embedded from `i18n/en.json` and `i18n/ru.json`, parsed once.
+///
+/// The files are compiled in, so a parse failure is a build-time defect, caught by
+/// the test `catalog_parity_holds_for_the_real_catalogs`. At run time it does not
+/// panic: the catalog is then empty and every message renders as its id.
 pub fn embedded() -> &'static Catalog {
-    todo!("T-005: embedded catalog")
+    static CATALOG: OnceLock<Catalog> = OnceLock::new();
+    CATALOG.get_or_init(|| Catalog::from_json(EMBEDDED_EN, EMBEDDED_RU).unwrap_or_default())
 }
 
 /// Render a Rust-originated message from the embedded catalog.
-pub fn text(_lang: UiLanguage, _id: MessageId, _args: &[(&str, &str)]) -> String {
-    todo!("T-005: text")
+pub fn text(lang: UiLanguage, id: MessageId, args: &[(&str, &str)]) -> String {
+    embedded().text(lang, id.0, args)
 }
 
 /// OS language tag -> UI language: primary subtag `ru` (any ASCII case) -> Ru, else En.
-pub fn resolve_ui_language(_os_tag: Option<&str>) -> UiLanguage {
-    todo!("T-005: resolve_ui_language")
+///
+/// The primary subtag is the text before the first `-` or `_`.
+pub fn resolve_ui_language(os_tag: Option<&str>) -> UiLanguage {
+    let primary = os_tag
+        .and_then(|tag| tag.split(['-', '_']).next())
+        .unwrap_or("");
+    if primary.eq_ignore_ascii_case("ru") {
+        UiLanguage::Ru
+    } else {
+        UiLanguage::En
+    }
 }
 
 #[cfg(test)]

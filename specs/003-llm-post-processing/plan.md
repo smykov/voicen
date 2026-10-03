@@ -110,7 +110,7 @@ crates/voicen-core/tests/
 
 src-tauri/src/           # install ChatPostProcessor when building the pipeline; map notice to toast (001's mapper)
 
-src/lib/i18n/{en,ru}.*   # (004 catalog) + notice.post_processing_skipped.*, settings.post_processing.privacy_note
+i18n/{en,ru}.json        # (the one catalog at the repo root, teamwright T-005, decisions #13) + notice.post_processing_skipped.*, settings.post_processing.privacy_note
 src/routes/settings/…    # (004 Post-processing tab) + privacy note
 e2e/post-processing.spec.ts  # tab defaults, validation, privacy note, skipped notice text (mocked IPC)
 ```
