@@ -2,8 +2,9 @@ use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 
-use tauri::{Builder, Runtime};
+use tauri::{App, Builder, Context, Runtime};
 use voicen_core::secrets::CredentialStore;
+use voicen_core::settings::service::SettingsService;
 use voicen_core::BuildInfo;
 
 #[cfg(windows)]
@@ -25,6 +26,22 @@ pub fn commands<R: Runtime>(builder: Builder<R>) -> Builder<R> {
         settings_ipc::settings_save,
         settings_ipc::settings_speech_languages
     ])
+}
+
+/// The one app wiring, shared by `run()` and the tests (T-030 J4): registers
+/// [`commands`], manages `service`, builds the app with `context`, and starts the
+/// `settings://changed` bridge on the built app's handle. tauri 2.12.1 runs
+/// `.setup()` only from `run` / `run_iteration`, never from `build()`, so the bridge
+/// starts here, after `build()`; `run()` then only calls `.run(…)` on the result.
+pub fn build_app<R: Runtime>(
+    builder: Builder<R>,
+    context: Context<R>,
+    service: Arc<SettingsService>,
+) -> tauri::Result<App<R>> {
+    // RED STUB: registers and manages, but never starts the change bridge
+    // (`settings_ipc::spawn_change_bridge`), so `saved_emits_changed_once_refused_emits_nothing`
+    // fails until the developer implements it and switches `run()` to it.
+    commands(builder).manage(service).build(context)
 }
 
 /// Writes the start line with version and commit into `dir/voicen.log` (FR-18); a

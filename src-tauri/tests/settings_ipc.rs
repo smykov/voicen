@@ -1,6 +1,8 @@
 //! T-030: the settings IPC (contracts/ipc.md) over the shell's one construction path
-//! (`load_settings`) and the one command registration (`commands`), through Tauri's
-//! mock runtime (`tauri::test`). Windows CI only (decision #5).
+//! (`load_settings`) and the one app wiring (`build_app`: commands, managed service,
+//! change bridge) that `run()` uses too, through Tauri's mock runtime (`tauri::test`).
+//! The tests never start the bridge or manage the service themselves (J4). Windows CI
+//! only (decision #5).
 //!
 //! Each test gets its own `TempDir` as the data dir; the CI runner's real
 //! `%LOCALAPPDATA%\Voicen` is never written (it must stay clean for the install
@@ -24,7 +26,7 @@ use voicen_core::settings::file::SETTINGS_FILE;
 use voicen_core::settings::service::{SaveOutcome, SaveRequest, SettingsService};
 use voicen_core::settings::{defaults, EngineKind, LoadOutcome, Settings, WHISPER_ISO_639_1};
 use voicen_core::test_support::TempDir;
-use voicen_lib::settings_ipc::{load_settings, spawn_change_bridge};
+use voicen_lib::settings_ipc::load_settings;
 
 /// Obviously fake key; must never leave the credential store.
 const CANARY: &str = "sk-test-CANARY-7f3a-not-a-real-key";
@@ -34,17 +36,15 @@ const QUIET: Duration = Duration::from_secs(1);
 /// How long an expected event is waited for.
 const EVENT_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// The mock app with the release command set and the service managed, and a
-/// webview labelled like the settings window.
+/// The mock app built by the release wiring (`build_app`: commands, managed service,
+/// change bridge), and a webview labelled like the settings window.
 struct Harness {
     app: App<MockRuntime>,
     webview: WebviewWindow<MockRuntime>,
 }
 
 fn harness(service: &Arc<SettingsService>) -> Harness {
-    let app = voicen_lib::commands(mock_builder())
-        .manage(service.clone())
-        .build(mock_context(noop_assets()))
+    let app = voicen_lib::build_app(mock_builder(), mock_context(noop_assets()), service.clone())
         .expect("mock app builds");
     let webview = WebviewWindowBuilder::new(&app, "settings", Default::default())
         .build()
@@ -233,15 +233,15 @@ fn save_twice_replaces_settings_json() {
 
 #[test]
 fn saved_emits_changed_once_refused_emits_nothing() {
-    // Acceptance 3, J3. Bite: no bridge; an emit inside settings_save as well as the
-    // bridge (two events); an event on Refused; a payload other than view(); a save
-    // that does not come through settings_save not reaching the windows.
+    // Acceptance 3, J3, J4. Bite: build_app (the wiring run() uses) not starting the
+    // bridge; an emit inside settings_save as well as the bridge (two events); an
+    // event on Refused; a payload other than view(); a save that does not come
+    // through settings_save not reaching the windows.
     let dir = TempDir::new();
     let store = fake_store(FakeCredentialStore::new());
     let (service, _) = load_settings(dir.path().to_path_buf(), as_port(&store), None);
     let h = harness(&service);
     let events = h.changed_events();
-    spawn_change_bridge(h.app.handle().clone(), service.clone());
 
     // Saved through IPC: exactly one event, equal to the view.
     let outcome = h.save(&edited(42), [untouched(), untouched(), untouched()]);
@@ -301,7 +301,6 @@ fn key_store_write_refused_is_key_store_failed_and_nothing_written() {
     let before_entries = entries(dir.path());
     let h = harness(&service);
     let events = h.changed_events();
-    spawn_change_bridge(h.app.handle().clone(), service.clone());
 
     let outcome = h.save(&edited(42), [replace(CANARY), untouched(), untouched()]);
 
@@ -380,7 +379,6 @@ fn canary_key_never_in_data_dir_or_log() {
     let (service, _) = load_settings(dir.path().to_path_buf(), store, None);
     let h = harness(&service);
     let events = h.changed_events();
-    spawn_change_bridge(h.app.handle().clone(), service.clone());
 
     let mut settings = edited(42);
     settings.engine = EngineKind::Api;
@@ -440,7 +438,7 @@ fn speech_languages_is_core_list() {
         .invoke("settings_speech_languages", json!({}))
         .unwrap_or_else(|e| panic!("settings_speech_languages rejected: {e}"));
 
-    assert_eq!(languages, json!(WHISPER_ISO_639_1));
+    assert_eq!(languages, json!(WHISPER_ISO_639_1.to_vec()));
     assert_eq!(languages.as_array().map(Vec::len), Some(97));
 }
 
