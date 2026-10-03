@@ -54,7 +54,11 @@ jobs:
         shell: bash
         run: echo "VOICEN_COMMIT=$(git rev-parse --short=7 HEAD)" >> "$GITHUB_ENV"
       - run: pnpm install --frozen-lockfile
-      - run: cargo test --workspace
+      # The shell's build script (tauri-build static VC runtime) puts a stub msvcrt.lib on its
+      # search path; cargo gives every build script's search dirs (native_dirs) to every doctest
+      # of the same invocation, so other crates' doctests must not share a run with `voicen` (T-033, F-001).
+      - run: cargo test --workspace --exclude voicen
+      - run: cargo test -p voicen
       - run: pnpm tauri build
       - name: Install silently, launch, check the start log line carries the commit
         shell: pwsh

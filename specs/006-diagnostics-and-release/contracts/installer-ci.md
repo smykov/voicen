@@ -38,7 +38,7 @@ Autostart value: the `HKCU\…\Run` value name is the constant owned by 004 (FR-
 | Job | Runs on | Trigger | Must pass | Spec |
 |---|---|---|---|---|
 | `gate` | ubuntu-24.04 | push `main`, tags `v*`, PRs | `make check` (incl. `licenses-check`, `version-check`) | FR-031, FR-032 |
-| `windows` | windows-latest | same, after `gate` | `cargo test --workspace` (incl. `crash_probe` tests); `pnpm tauri build`; size ≤ 100 MB; silent install; launch → `(<commit>) started` within 30 s; kill → relaunch → `previous session ended abnormally` + one `abnormal_end` crash file; reinstall keeps data; `/S /KEEPDATA` keeps data + test credential; `/S` removes folder + credential; artifacts `voicen-installer-<commit>`, `voicen-symbols-<commit>` | FR-019, FR-021, FR-022, FR-024, FR-027, FR-028 |
+| `windows` | windows-latest | same, after `gate` | `cargo test --workspace --exclude voicen`, then `cargo test -p voicen` (the shell in its own invocation, F-001) (incl. `crash_probe` tests); `pnpm tauri build`; size ≤ 100 MB; silent install; launch → `(<commit>) started` within 30 s; kill → relaunch → `previous session ended abnormally` + one `abnormal_end` crash file; reinstall keeps data; `/S /KEEPDATA` keeps data + test credential; `/S` removes folder + credential; artifacts `voicen-installer-<commit>`, `voicen-symbols-<commit>` | FR-019, FR-021, FR-022, FR-024, FR-027, FR-028 |
 | `release` | ubuntu-24.04 | tags `v*` only, after `gate` + `windows` | version check; release does not exist; `gh release create` with installer, `SHA256SUMS.txt`, symbols zip, notes | FR-029, FR-030 |
 
 On failure of the start-line check the job prints the log if it exists (nothing if the log file is absent), then fails.
