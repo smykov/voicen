@@ -237,6 +237,13 @@ impl FieldId {
     }
 }
 
+/// On the wire a field is its dotted id ([`FieldId::as_str`]), the one spelling.
+impl Serialize for FieldId {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
 /// Why a field was refused; each maps to message id `error.<code>`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ErrorCode {
@@ -282,7 +289,16 @@ impl ErrorCode {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// On the wire a code is [`ErrorCode::as_str`], the one spelling.
+impl Serialize for ErrorCode {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+/// On the wire: `{"field": "<FieldId::as_str>", "code": "<ErrorCode::as_str>"}`; the
+/// UI shows message `error.<code>` on the field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 pub struct FieldError {
     pub field: FieldId,
     pub code: ErrorCode,

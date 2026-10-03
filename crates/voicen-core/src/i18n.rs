@@ -34,12 +34,11 @@ pub enum UiLanguage {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MessageId(&'static str);
 
-// T-030 RED STUB (test-writer): only here so `message_id_serializes_as_id` compiles
-// and fails on its assertion. The developer replaces it: a MessageId goes on the
-// wire as its id string (T-030 Investigation, "Settled design" item 2).
+/// On the wire (IPC) a `MessageId` is its catalog id string (`"settings.write_failed"`);
+/// the UI renders it with its own `t(id)`.
 impl Serialize for MessageId {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str("T-030 stub: MessageId wire form")
+        serializer.serialize_str(self.0)
     }
 }
 

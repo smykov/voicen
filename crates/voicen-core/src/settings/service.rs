@@ -5,7 +5,7 @@
 use std::io;
 use std::sync::{mpsc, Arc, Mutex, PoisonError, RwLock};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use super::file::SettingsFile;
 use super::url::normalize_base_url;
@@ -30,6 +30,11 @@ pub struct SettingsDeps {
 }
 
 /// A save from the settings window: the whole draft plus one edit per key slot.
+///
+/// Wire form (UI -> shell, `settings_save { request }`):
+/// `{"settings": Settings, "keys": KeyEdits}`. Any deserialize error is one fixed
+/// text (`invalid save request: ...`): the request carries keys, and serde's own
+/// messages quote the input (T-030 J1).
 #[derive(Debug)]
 pub struct SaveRequest {
     pub settings: Settings,
@@ -50,8 +55,24 @@ pub enum WarningCode {
     EndpointInsecure,
 }
 
+impl WarningCode {
+    /// The wire code (`endpoint.insecure`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            WarningCode::EndpointInsecure => "endpoint.insecure",
+        }
+    }
+}
+
+impl Serialize for WarningCode {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
 /// A non-blocking remark on a saved field (filled by T-015; always empty here).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Wire form: `{"field": "<FieldId>", "code": "endpoint.insecure"}`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct Warning {
     pub field: FieldId,
     pub code: WarningCode,
@@ -78,9 +99,37 @@ impl FormError {
     }
 }
 
+/// Wire form: `{"kind": "write_failed" | "settings_unavailable" |
+/// "partially_restored", "message": "<MessageId>"}`, plus `"not_restored": [FieldId]`
+/// on `partially_restored` only. `message` is [`FormError::message_id`], the one
+/// mapping.
+impl Serialize for FormError {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let (kind, not_restored) = match self {
+            FormError::WriteFailed => ("write_failed", None),
+            FormError::SettingsUnavailable => ("settings_unavailable", None),
+            FormError::PartiallyRestored { not_restored } => {
+                ("partially_restored", Some(not_restored))
+            }
+        };
+        let len = if not_restored.is_some() { 3 } else { 2 };
+        let mut state = serializer.serialize_struct("FormError", len)?;
+        state.serialize_field("kind", kind)?;
+        state.serialize_field("message", &self.message_id())?;
+        if let Some(fields) = not_restored {
+            state.serialize_field("not_restored", fields)?;
+        }
+        state.end()
+    }
+}
+
+/// Wire form (externally tagged, contracts/ipc.md):
+/// `{"Saved": {"view": SettingsView, "warnings": [Warning]}}` or
+/// `{"Refused": {"errors": [FieldError], "form_error": FormError | null}}`.
 // One value per save, never stored in bulk: the size difference does not matter.
 #[allow(clippy::large_enum_variant)]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum SaveOutcome {
     Saved {
         view: SettingsView,
@@ -92,22 +141,25 @@ pub enum SaveOutcome {
     },
 }
 
-// T-030 RED STUB (test-writer): only here so the wire-form tests (and the shell's
-// `settings_save` command) compile and fail on their assertions. The developer
-// replaces both impls with the settled wire form (T-030 Investigation, "Settled
-// design" item 2; contracts/ipc.md).
-impl<'de> serde::Deserialize<'de> for SaveRequest {
-    fn deserialize<D: serde::Deserializer<'de>>(_deserializer: D) -> Result<Self, D::Error> {
-        Err(serde::de::Error::custom(
-            "T-030 stub: SaveRequest wire form",
-        ))
-    }
+/// The fixed deserialize error of [`SaveRequest`].
+const SAVE_REQUEST_WIRE_ERROR: &str =
+    "invalid save request: expected {\"settings\": Settings, \"keys\": KeyEdits}";
+
+#[derive(Deserialize)]
+struct SaveRequestWire {
+    settings: Settings,
+    keys: KeyEdits,
 }
 
-// T-030 RED STUB (test-writer): see the SaveRequest stub above.
-impl Serialize for SaveOutcome {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str("T-030 stub: SaveOutcome wire form")
+impl<'de> Deserialize<'de> for SaveRequest {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        match SaveRequestWire::deserialize(deserializer) {
+            Ok(wire) => Ok(SaveRequest {
+                settings: wire.settings,
+                keys: wire.keys,
+            }),
+            Err(_) => Err(serde::de::Error::custom(SAVE_REQUEST_WIRE_ERROR)),
+        }
     }
 }
 

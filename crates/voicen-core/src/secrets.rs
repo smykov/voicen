@@ -22,7 +22,7 @@
 
 use std::fmt;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// One credential slot; each maps to one Windows Credential Manager target.
@@ -121,19 +121,70 @@ impl KeyEdits {
     }
 }
 
-// T-030 RED STUB (test-writer): only here so the wire-form tests compile and fail on
-// their assertions. The developer replaces both impls with the settled wire form
-// (T-030 Investigation, "Settled design" item 2).
-impl<'de> serde::Deserialize<'de> for KeyEdit {
-    fn deserialize<D: serde::Deserializer<'de>>(_deserializer: D) -> Result<Self, D::Error> {
-        Err(serde::de::Error::custom("T-030 stub: KeyEdit wire form"))
+// ---- IPC wire form, UI -> shell (contracts/ipc.md; T-030 J1) ----
+//
+// Tauri puts the serde error of a command argument into the IPC rejection the window
+// receives, and serde's own messages quote the input (`unknown variant `sk-...``,
+// `invalid type: string "sk-..."`; serde_json raises the latter itself, whatever the
+// visitor). So every key-bearing type below deserializes through a private wire
+// helper and replaces any error with a fixed text: no error ever contains input.
+
+/// The fixed deserialize error of [`Secret`].
+const SECRET_WIRE_ERROR: &str = "invalid key: expected a string";
+/// The fixed deserialize error of [`KeyEdit`].
+const KEY_EDIT_WIRE_ERROR: &str =
+    r#"invalid key edit: expected "Untouched", "Clear" or {"Replace": <string>}"#;
+/// The fixed deserialize error of [`KeyEdits`].
+const KEY_EDITS_WIRE_ERROR: &str = "invalid key edits: expected transcription_api, \
+     local_server and post_processing, each a key edit";
+
+/// A key arrives as a JSON string, unchanged (trimming is the service's rule, #30).
+/// There is still no `Serialize`: a key only ever travels UI -> shell.
+impl<'de> Deserialize<'de> for Secret {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        String::deserialize(deserializer)
+            .map(Secret)
+            .map_err(|_| serde::de::Error::custom(SECRET_WIRE_ERROR))
     }
 }
 
-// T-030 RED STUB (test-writer): see the KeyEdit stub above.
-impl<'de> serde::Deserialize<'de> for KeyEdits {
-    fn deserialize<D: serde::Deserializer<'de>>(_deserializer: D) -> Result<Self, D::Error> {
-        Err(serde::de::Error::custom("T-030 stub: KeyEdits wire form"))
+/// `"Untouched"`, `"Clear"` or `{"Replace": "<key>"}` (externally tagged).
+#[derive(Deserialize)]
+enum KeyEditWire {
+    Untouched,
+    Replace(Secret),
+    Clear,
+}
+
+impl<'de> Deserialize<'de> for KeyEdit {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        match KeyEditWire::deserialize(deserializer) {
+            Ok(KeyEditWire::Untouched) => Ok(KeyEdit::Untouched),
+            Ok(KeyEditWire::Replace(secret)) => Ok(KeyEdit::Replace(secret)),
+            Ok(KeyEditWire::Clear) => Ok(KeyEdit::Clear),
+            Err(_) => Err(serde::de::Error::custom(KEY_EDIT_WIRE_ERROR)),
+        }
+    }
+}
+
+/// All three slots are required; unknown fields are ignored.
+#[derive(Deserialize)]
+struct KeyEditsWire {
+    transcription_api: KeyEdit,
+    local_server: KeyEdit,
+    post_processing: KeyEdit,
+}
+
+impl<'de> Deserialize<'de> for KeyEdits {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        match KeyEditsWire::deserialize(deserializer) {
+            Ok(wire) => Ok(KeyEdits {
+                transcription_api: wire.transcription_api,
+                local_server: wire.local_server,
+                post_processing: wire.post_processing,
+            }),
+            Err(_) => Err(serde::de::Error::custom(KEY_EDITS_WIRE_ERROR)),
+        }
     }
 }
 

@@ -1,8 +1,8 @@
 # Settings and keys (core types and pure rules)
 
-**Code:** `crates/voicen-core/src/{secrets,hotkey_registrar,models}.rs`, `src/settings/{mod,url,validate,gate,hotkey}.rs`, `src/post_process/settings.rs` (T-003); `src/settings/{file,service}.rs`, `src/clock.rs`, `src/test_support.rs` (T-032) · **Tests that pin it:** `settings::tests::{missing_fields_take_defaults, settings_json_has_no_key_field}`, `secrets::tests::{key_slot_target_names, key_edits_debug_never_shows_a_key, key_presence_is_per_slot_and_serializes_only_booleans}` and the `compile_fail` doctest in `secrets.rs`, `settings::hotkey::tests::{rejects_non_canonical_text, parse_then_format_is_identity_for_every_accepted_string, rejects_invalid_strings}`; `settings::file::tests`, `settings::service::tests`, `clock::tests::utc_compact_table` and `tests/settings_apply.rs` (T-032; per invariant below)
+**Code:** `crates/voicen-core/src/{secrets,hotkey_registrar,models}.rs`, `src/settings/{mod,url,validate,gate,hotkey}.rs`, `src/post_process/settings.rs` (T-003); `src/settings/{file,service}.rs`, `src/clock.rs`, `src/test_support.rs` (T-032); `src-tauri/src/{credentials,paths,locale,settings_ipc,lib}.rs` (T-030) · **Tests that pin it:** `settings::tests::{missing_fields_take_defaults, settings_json_has_no_key_field}`, `secrets::tests::{key_slot_target_names, key_edits_debug_never_shows_a_key, key_presence_is_per_slot_and_serializes_only_booleans}` and the `compile_fail` doctest in `secrets.rs`, `settings::hotkey::tests::{rejects_non_canonical_text, parse_then_format_is_identity_for_every_accepted_string, rejects_invalid_strings}`; `settings::file::tests`, `settings::service::tests`, `clock::tests::utc_compact_table` and `tests/settings_apply.rs` (T-032; per invariant below); the wire-form tests `settings::service::tests::save_outcome_wire_form`, `secrets::tests::{key_edits_deserialize_wire_form, key_edit_deserialize_error_never_echoes_input}`, `i18n::tests::message_id_serializes_as_id` and, on Windows CI, `src-tauri/tests/{credentials,settings_ipc}.rs` (T-030)
 
-Tasks: T-003, T-032. Contract: `specs/004-settings-and-first-run/{data-model.md,contracts/core-traits.md}`. Decisions: #17, #19, #21, #22, #23, #25, #26, #27, #28, #30, #31, #33.
+Tasks: T-003, T-032, T-030. Contract: `specs/004-settings-and-first-run/{data-model.md,contracts/core-traits.md}`. Decisions: #5, #17, #19, #21, #22, #23, #25, #26, #27, #28, #30, #31, #33, #34.
 
 ## Invariants
 
@@ -11,7 +11,8 @@ Tasks: T-003, T-032. Contract: `specs/004-settings-and-first-run/{data-model.md,
 - **Defect that produced it:** none yet (found in planning, T-003). Specs 001–003 each planned their own key port (`CredentialStore`/`SecretString`, `SecretStore`, `SecretRef`) and their own Credential Manager impl beside spec 004's, so a key could travel through several unreviewed paths (P-010, P-011); decision #20.
 - **What breaks if you violate it:** an API key in `settings.json`, a `SettingsView`, a log or a debug print (NFR-04, FR-20).
 - **Where it is enforced:** `Settings` has no key field; `Secret` has no `Serialize` (compile-fail doctest), prints `***` and is zeroed on drop; windows get only `KeyPresence` booleans; one port `secrets::CredentialStore` over `KeySlot`; only `SettingsService` (T-032) writes or deletes, and it serializes only `Settings` (`settings::service::tests::save_never_writes_key_bytes`: a marker key in all three slots is absent from every file in the data directory, the `Saved` view and `view()`).
-- **Don't:** add a key field to `Settings`, derive `Serialize` on `Secret`, or declare a second key trait in a feature.
+- **Shell part (J1, T-030):** a key moves only UI → `settings_save` → `SettingsService` → `CredentialStore`. Tauri puts a command argument's serde error into the rejection the window receives, and serde's own messages quote the input (``unknown variant `sk-...` ``; serde_json raises `invalid type: string "..."` itself, whatever the visitor), so `Secret`, `KeyEdit`, `KeyEdits` and `SaveRequest` deserialize through private derived helpers and replace every error with a fixed text (`key_edit_deserialize_error_never_echoes_input`). `credentials::WinCredentialStore` is the only code that calls Credential Manager, the release store uses exactly `KeySlot::target_name()`, and a credential failure is returned, never stored elsewhere (`src-tauri/tests/credentials.rs`, `settings_ipc.rs::{key_store_write_refused_is_key_store_failed_and_nothing_written, canary_key_never_in_data_dir_or_log}`, Windows CI).
+- **Don't:** add a key field to `Settings`, derive `Serialize` on `Secret`, derive `Deserialize` on a key-bearing type (or format the input into its error), or declare a second key trait in a feature.
 
 ### Defaults come from one function, and the serde default is container-level
 
@@ -83,6 +84,16 @@ Tasks: T-003, T-032. Contract: `specs/004-settings-and-first-run/{data-model.md,
 - **Where it is enforced:** the commit swaps `RwLock<Arc<Settings>>` and sends the new `Arc` to every live `mpsc` sender under the save lock, pruning dropped receivers. Tests: `tests/settings_apply.rs::{subscriber_receives_snapshot_after_saved, refused_save_sends_nothing, earlier_snapshot_unchanged, dropped_receiver_does_not_fail_save}`.
 - **Don't:** mutate the settings behind a handed-out `Arc`, publish before `write_atomic`, or fail a save because a receiver was dropped.
 
+### One data directory, one service construction, one change event (J2–J4, T-030)
+
+- **Defect that produced it:** none yet (planned in T-030). Before it, `log_dir()` was the only `%LOCALAPPDATA%` resolver, nothing built the service in the app, and a second consumer of the data dir would have added a second resolver (P-010).
+- **What breaks if you violate it:** logs and settings in different folders; a release app wired differently from the tested one; a window that misses a save made outside `settings_save` (FR-28's "deleted model → engine none"), or gets two events for one save (P-011).
+- **Where it is enforced:**
+  - J2: `src-tauri` `paths::data_dir()` is the only resolver (`%LOCALAPPDATA%\Voicen`, temp-dir fallback); `log_dir()` derives from it, and `settings.json` is reached only through `FsSettingsFile::new(data_dir)` inside `SettingsService`. Test: `data_dir_is_localappdata_voicen_and_logs_live_under_it` (Windows CI).
+  - J3: `settings://changed` is emitted only by `settings_ipc::spawn_change_bridge`, a `subscribe()` consumer; core's I6 gives exactly one message per `Saved` and none per `Refused`. Test: `saved_emits_changed_once_refused_emits_nothing` (Windows CI, includes a save that does not come through IPC).
+  - J4: `run()` and the shell tests build the service through `settings_ipc::load_settings` and register commands through `commands(builder)`; they differ only in the credential store and data dir. `test-fakes` and `tauri/test` are dev-dependencies only: `cargo tree -p voicen --target x86_64-pc-windows-msvc -e normal,features | grep -c 'test-fakes\|"test"'` is 0.
+- **Don't:** resolve `%LOCALAPPDATA%` anywhere else, open `settings.json` outside `SettingsService`, emit `settings://changed` from a command, or construct `SettingsDeps` a second time in the shell.
+
 ## Rejected approaches
 
 | Approach | Why rejected | Ref |
@@ -93,6 +104,8 @@ Tasks: T-003, T-032. Contract: `specs/004-settings-and-first-run/{data-model.md,
 | `tokio::sync::watch` for `subscribe` | no tokio in core | decisions #22 |
 | Plain `fs::rename` into the backup name | replaces an existing `to` on Unix and Windows, so it overwrites an earlier backup | T-032 investigation, hypothesis 5 |
 | `chrono` for the backup suffix | allowed by #9, but one format string does not need a crate in the core build | T-032 investigation, design 5 |
+| Wire DTOs in the shell | the contract would be tested only on Windows and every field/code string spelled twice (P-010) | T-030 investigation, option B |
+| Emit `settings://changed` inside `settings_save` | saves from other callers (model deletion, later tray toggles) would never reach the windows (P-011) | T-030 investigation, option C |
 
 ## Open
 

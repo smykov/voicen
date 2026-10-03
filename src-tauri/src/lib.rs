@@ -1,12 +1,11 @@
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+use std::sync::Arc;
 
 use tauri::{Builder, Runtime};
+use voicen_core::secrets::CredentialStore;
 use voicen_core::BuildInfo;
 
-// T-030 RED SKELETON (test-writer): the modules below carry the signatures settled by
-// the T-030 Investigation, with stub bodies, so src-tauri/tests compile. The developer
-// replaces every stub (marked "RED STUB").
 #[cfg(windows)]
 pub mod credentials;
 pub mod locale;
@@ -28,16 +27,6 @@ pub fn commands<R: Runtime>(builder: Builder<R>) -> Builder<R> {
     ])
 }
 
-/// `%LOCALAPPDATA%\Voicen\logs` (FR-20); the system temp dir when LOCALAPPDATA is not set.
-// T-030: moves onto `paths::data_dir()` (Investigation item 5).
-fn log_dir() -> PathBuf {
-    std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("Voicen")
-        .join("logs")
-}
-
 /// Writes the start line with version and commit into `dir/voicen.log` (FR-18); a
 /// failure never stops the app.
 pub fn log_start(dir: &Path) {
@@ -54,13 +43,38 @@ pub fn log_start(dir: &Path) {
     }
 }
 
+/// The release key store: Credential Manager, the only one (NFR-04; no fallback).
+#[cfg(windows)]
+fn release_credentials() -> Arc<dyn CredentialStore> {
+    Arc::new(credentials::WinCredentialStore::new())
+}
+
+#[cfg(not(windows))]
+fn release_credentials() -> Arc<dyn CredentialStore> {
+    compile_error!(
+        "the Voicen app runs on Windows only: its key store is Credential Manager \
+         (NFR-04, decisions #5); there is no other key storage"
+    )
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    log_start(&log_dir());
-    // T-030 RED SKELETON: the service (settings_ipc::load_settings over
-    // paths::data_dir() and WinCredentialStore::new()) is not managed yet, and the
-    // change bridge is not started in `.setup()`.
+    log_start(&paths::log_dir());
+    let os_language = locale::os_language();
+    // The load outcome drives the startup executor (open the settings window on
+    // FirstRun/Reset, the reset notice): T-004 consumes it.
+    let (service, _load_outcome) = settings_ipc::load_settings(
+        paths::data_dir(),
+        release_credentials(),
+        os_language.as_deref(),
+    );
+    let bridged = service.clone();
     commands(tauri::Builder::default())
+        .manage(service)
+        .setup(move |app| {
+            settings_ipc::spawn_change_bridge(app.handle().clone(), bridged);
+            Ok(())
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

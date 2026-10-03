@@ -37,7 +37,7 @@ Rules:
 
 - Defined by 004 in core and used by 001–003 (decisions #21). `KeySlot`: `TranscriptionApi` (target `Voicen/transcription-api`), `LocalServer` (`Voicen/local-server`), `PostProcessing` (`Voicen/post-processing`).
 - Key FieldIds (decisions #25a), for `key.required` and `key.store_failed`: `engine.api.key`, `engine.local_server.key`, `post_processing.key`. They name inputs, not `Settings` fields.
-- `Secret(String)`: no `Serialize`; `Debug`/`Display` print `***`; zeroed on drop.
+- `Secret(String)`: no `Serialize`; `Deserialize` from a JSON string (UI → shell only, error text fixed, T-030); `Debug`/`Display` print `***`; zeroed on drop.
 - `KeyEdit` (per slot, in a save or test request): `Untouched` | `Replace(Secret)` | `Clear`. Validation of `engine = api` requires `Replace` or (`Untouched` and the slot holds a key). An empty or whitespace `Replace` is `key.required` for the API key only; optional slots (local server, post-processing) accept it and it is never stored (#27(1), #28(b)). An empty-after-trim `Replace` that is not a `key.required` error (optional slots; the API slot while another engine is selected) is treated as `Untouched`: never written, the stored key stays; only `Clear` deletes a key (#30; T-032 owns the rule and its test).
 - `KeyPresence`: `{transcription_api: bool, local_server: bool, post_processing: bool}` — the only key information sent to a window.
 
@@ -48,6 +48,7 @@ Rules:
 ## SaveRequest / SaveOutcome
 
 - `SaveRequest { settings: Settings, keys: {transcription_api: KeyEdit, local_server: KeyEdit, post_processing: KeyEdit} }`.
+- JSON form of every type in this section (externally tagged enums, ids as their dotted strings, `FormError` as `{kind, message, not_restored?}`): [contracts/ipc.md › Wire form](contracts/ipc.md#wire-form-serde-impls-in-voicen_core-pinned-by-core-tests-on-the-linux-gate) (T-030).
 - `SaveOutcome`:
   - `Saved { view: SettingsView, warnings: [Warning] }` — `Warning { field: FieldId, code: "endpoint.insecure" }`.
   - `Refused { errors: [FieldError], form_error: Option<FormError> }` — nothing changed, except after a failed undo (below).

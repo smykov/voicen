@@ -60,7 +60,7 @@ jobs:
       - run: cargo test --workspace --exclude voicen
       - run: cargo test -p voicen
       - run: pnpm tauri build
-      - name: Install silently, launch, check the start log line carries the commit
+      - name: Install silently, launch, check the start log line and the first-run settings.json
         shell: pwsh
         run: |
           $setup = Get-ChildItem target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
@@ -76,15 +76,23 @@ jobs:
           if ($missing) { throw ($missing -join '; ') }
           $proc = Start-Process -FilePath $exe -PassThru
           $log = Join-Path $env:LOCALAPPDATA 'Voicen\logs\voicen.log'
+          # First launch writes the defaults through SettingsService (T-030, decision #34).
+          $settings = Join-Path $env:LOCALAPPDATA 'Voicen\settings.json'
           $expected = "($env:VOICEN_COMMIT) started"
           $found = $false
-          for ($i = 0; $i -lt 30 -and -not $found; $i++) {
+          $hasSettings = $false
+          for ($i = 0; $i -lt 30 -and -not ($found -and $hasSettings); $i++) {
             Start-Sleep -Seconds 1
             $found = (Test-Path $log) -and (Select-String -Path $log -SimpleMatch $expected -Quiet)
+            $hasSettings = Test-Path -LiteralPath $settings -PathType Leaf
           }
           Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
           if (-not $found) { if (Test-Path $log) { Get-Content $log }; throw "start log line with commit $env:VOICEN_COMMIT not found" }
           Get-Content $log
+          if (-not $hasSettings) { throw "settings.json not found at $settings after the first launch" }
+          $engine = (Get-Content -LiteralPath $settings -Raw | ConvertFrom-Json).engine
+          if ($engine -ne 'none') { throw "first-run settings.json has engine '$engine', expected 'none'" }
+          Write-Output "found settings.json at $settings with engine = none"
       - uses: actions/upload-artifact@v4
         with:
           name: voicen-installer-${{ env.VOICEN_COMMIT }}

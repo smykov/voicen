@@ -12,6 +12,8 @@ Built surface (T-003): `secrets::{KeySlot (all(), target_name()), Secret (new, e
 
 Built surface (T-032): `settings::file::{SettingsFile, FsSettingsFile (new(dir)), SETTINGS_FILE}`; `settings::service::{SettingsService (load_or_init, snapshot, subscribe, view, save), SettingsDeps { file, credentials, hotkeys, local_models, clock }, SaveRequest { settings, keys: KeyEdits }, SaveOutcome { Saved { view, warnings }, Refused { errors, form_error: Option<FormError> } }, FormError (message_id()), SettingsView, Warning { field, code: WarningCode::EndpointInsecure }}`; `settings::url::normalize_base_url`; `clock::{Clock, SystemClock, utc_compact}`; fakes `settings::file::{FakeSettingsFile, FileCall}`, `clock::FakeClock` and `test_support::TempDir` behind `test-fakes`.
 
+Built surface (T-030): the IPC wire form as serde impls ([ipc.md › Wire form](ipc.md)) — `Deserialize` for `secrets::{Secret, KeyEdit, KeyEdits}` and `settings::service::SaveRequest` (every error a fixed text that never quotes the input); `Serialize` for `SaveOutcome` (externally tagged), `FormError` (`{kind, message, not_restored?}`), `Warning`, `WarningCode (as_str)`, `FieldError`, `FieldId` and `ErrorCode` (as their `as_str()`), `i18n::MessageId` (its id string). `Secret` still has no `Serialize`. Shell (`src-tauri`, Windows only): `credentials::WinCredentialStore` (the `CredentialStore` impl below), `paths::{data_dir, log_dir}`, `locale::{os_language, first_language_tag}`, `settings_ipc::{load_settings, spawn_change_bridge, settings_get, settings_save, settings_speech_languages, SETTINGS_CHANGED}`, `commands(builder)`.
+
 ### `CredentialStore` (req NFR-04; spec FR-014–FR-016)
 
 ```rust
@@ -21,7 +23,7 @@ pub trait CredentialStore: Send + Sync {
     fn delete(&self, slot: KeySlot) -> Result<(), CredentialError>; // absent = Ok
 }
 ```
-- Windows impl in `src-tauri` (Credential Manager, research R-1) — the only one (tasks T016; decisions #21). Used by 001 (`KeySlot::TranscriptionApi`), 002 (`KeySlot::LocalServer`) and 003 (`KeySlot::PostProcessing`) to read keys; only `SettingsService` writes or deletes.
+- Windows impl in `src-tauri` (Credential Manager, research R-1) — the only one (tasks T016; decisions #21). Built by T-030 as `credentials::WinCredentialStore`: generic credential, `CRED_PERSIST_LOCAL_MACHINE`, user name `voicen`, the key's UTF-8 bytes as the blob; absent target → `read` `Ok(None)`, `delete` `Ok(())`; a blob that is not UTF-8 → `CredentialError { os_code: 13 }` (`ERROR_INVALID_DATA`); other failures carry the Win32 code. Target = prefix + `target_name()`: `new()` (release) has an empty prefix, `with_target_prefix(p)` exists for tests that must not touch the user's entries; both run the same three calls. Used by 001 (`KeySlot::TranscriptionApi`), 002 (`KeySlot::LocalServer`) and 003 (`KeySlot::PostProcessing`) to read keys; only `SettingsService` writes or deletes.
 - `KeySlot` targets: `TranscriptionApi` → `Voicen/transcription-api`, `LocalServer` → `Voicen/local-server`, `PostProcessing` → `Voicen/post-processing` (`KeySlot::target_name()`, the only place the strings exist; the Windows impl uses it).
 - `Secret`: `Debug` and `Display` print `***`; no `Serialize` (compile-fail doctest in `secrets.rs`); the buffer is zeroed on drop (`zeroize`); `expose()` is only for the credential store and the HTTP client.
 - Fake: `secrets::FakeCredentialStore` (feature `test-fakes`) records calls per slot and injects failures per op and slot.
@@ -118,7 +120,7 @@ pub struct Catalog;                   // public for tests and fixtures: Catalog:
 ```
 - The embedded catalog (`include_str!` of `i18n/{en,ru}.json`) is reached only through `text(lang, MessageId, args)`; the accessor `embedded()` is private to the module, so the `&str` `Catalog::text` is not reachable on it from outside. `catalog_parity_holds_for_the_real_catalogs` pins that the real files parse. If parsing failed anyway, the catalog would be empty and every message would render as its id, without a panic; that fallback itself is not tested.
 - `text(lang, MessageId, args)` replaces the earlier `id: &str` signature (T-005, P-014): a Rust id exists only as a `MessageId` constant declared with `messages!`, so every id is in `MESSAGE_IDS` by construction, and a test checks each entry exists in both catalogs.
-- `MessageId` has no `Serialize` yet; the first consumer that sends an id over IPC adds it.
+- `MessageId` serializes as its id string (`"settings.write_failed"`; T-030, `FormError.message` over IPC).
 - Lookup order: text of `lang` if non-empty, else the `en` text, else the id itself.
 - Placeholder grammar: `{name}` with `name` matching `[a-z][a-z0-9_]*`. Rendering is one left-to-right pass: a known placeholder is replaced by its argument value inserted literally (never re-expanded), a placeholder with no argument stays verbatim, extra arguments are ignored. There is no escaping: any `{` or `}` that is not part of a valid placeholder fails the parity check.
 - The UI renders with the same rule (`$lib/i18n`); `i18n/conformance.json` is the shared fixture both test suites run.

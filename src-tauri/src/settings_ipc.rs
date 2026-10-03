@@ -2,19 +2,34 @@
 //! settings service, the commands `settings_get` / `settings_save` /
 //! `settings_speech_languages`, and the `settings://changed` bridge.
 //!
-//! T-030 RED SKELETON (test-writer): signatures settled by the T-030 Investigation
-//! (items 3, 4, 6); the bodies are stubs the developer replaces. Every stub returns a
-//! wrong value or panics with `todo!`, never a right one.
+//! - J1: a key moves only UI -> `settings_save` -> `SettingsService` ->
+//!   `CredentialStore`; no response or event carries one (`SettingsView` has presence
+//!   only, `SaveRequest`'s deserialize errors are fixed texts).
+//! - J3: `settings://changed` is emitted only by the subscribe bridge, so every
+//!   `Saved`, from any caller, gives exactly one event and a `Refused` none.
+//! - J4: the release app and the tests build the service through [`load_settings`]
+//!   and differ only in the injected credential store and data dir.
+//!
+//! Nothing here logs: no key, transcript or base URL can reach the log from this
+//! module (docs/decisions/settings.md).
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
-use tauri::{AppHandle, Runtime, State};
-use voicen_core::secrets::{CredentialStore, KeyPresence};
+use tauri::{AppHandle, Emitter, Runtime, State};
+use voicen_core::clock::SystemClock;
+use voicen_core::hotkey_registrar::{HotkeyRegistrar, Prepared, Unavailable};
+use voicen_core::models::DownloadedModels;
+use voicen_core::secrets::CredentialStore;
+use voicen_core::settings::file::FsSettingsFile;
+use voicen_core::settings::hotkey::Hotkey;
 use voicen_core::settings::service::{
-    FormError, SaveOutcome, SaveRequest, SettingsService, SettingsView,
+    SaveOutcome, SaveRequest, SettingsDeps, SettingsService, SettingsView,
 };
-use voicen_core::settings::{defaults, LoadOutcome};
+use voicen_core::settings::{LoadOutcome, Mode, WHISPER_ISO_639_1};
+
+/// The event every window listens to; payload `SettingsView` (contracts/ipc.md).
+pub const SETTINGS_CHANGED: &str = "settings://changed";
 
 /// Builds the service the release app and the tests share (J4): `FsSettingsFile`
 /// over `data_dir`, the given credential store, the interim `NoDownloadedModels`
@@ -24,48 +39,88 @@ pub fn load_settings(
     credentials: Arc<dyn CredentialStore>,
     os_language: Option<&str>,
 ) -> (Arc<SettingsService>, LoadOutcome) {
-    // RED STUB
-    let _ = (data_dir, credentials, os_language);
-    todo!("T-030: SettingsDeps + SettingsService::load_or_init")
+    let deps = SettingsDeps {
+        file: Arc::new(FsSettingsFile::new(data_dir)),
+        credentials,
+        hotkeys: Arc::new(InterimHotkeyRegistrar),
+        local_models: Arc::new(NoDownloadedModels),
+        clock: Arc::new(SystemClock),
+    };
+    let (service, outcome) = SettingsService::load_or_init(deps, os_language);
+    (Arc::new(service), outcome)
 }
 
 /// Subscribes to the service and emits `settings://changed` with `service.view()`
 /// for every received snapshot (J3). Started in `.setup()`.
+///
+/// The subscription is taken before this returns, so no `Saved` after the call is
+/// missed. The bridge thread holds the service weakly and ends when the service is
+/// dropped. An emit error is ignored: it never turns a `Saved` into a failure.
 pub fn spawn_change_bridge<R: Runtime>(app: AppHandle<R>, service: Arc<SettingsService>) {
-    // RED STUB: emits nothing.
-    let _ = (app, service);
+    let changes = service.subscribe();
+    let service: Weak<SettingsService> = Arc::downgrade(&service);
+    let spawned = std::thread::Builder::new()
+        .name("settings-changed".into())
+        .spawn(move || {
+            for _snapshot in changes {
+                let Some(service) = service.upgrade() else {
+                    break;
+                };
+                let _ = app.emit(SETTINGS_CHANGED, service.view());
+            }
+        });
+    if let Err(err) = spawned {
+        eprintln!("cannot start the settings change bridge: {err}");
+    }
 }
 
 /// `settings_get` → `SettingsView` (keys as presence only).
 #[tauri::command]
 pub fn settings_get(service: State<'_, Arc<SettingsService>>) -> SettingsView {
-    // RED STUB: not the service's view.
-    let _ = service;
-    SettingsView {
-        settings: defaults(None),
-        keys: KeyPresence::default(),
-        first_run: false,
-        reset_notice: false,
-    }
+    service.view()
 }
 
-/// `settings_save { request }` → `SaveOutcome`; off the main thread.
+/// `settings_save { request }` → `SaveOutcome`. Runs off the main thread: a save
+/// is up to nine credential calls and a file write.
 #[tauri::command(async)]
 pub fn settings_save(
     service: State<'_, Arc<SettingsService>>,
     request: SaveRequest,
 ) -> SaveOutcome {
-    // RED STUB: never calls the service.
-    let _ = (service, request);
-    SaveOutcome::Refused {
-        errors: Vec::new(),
-        form_error: Some(FormError::SettingsUnavailable),
-    }
+    service.save(request)
 }
 
 /// `settings_speech_languages` → core's `WHISPER_ISO_639_1`, in core order (#30).
 #[tauri::command]
 pub fn settings_speech_languages() -> Vec<&'static str> {
-    // RED STUB
-    Vec::new()
+    WHISPER_ISO_639_1.to_vec()
+}
+
+/// Interim until T-016 (002's `ModelStore`): no built-in model is downloaded, which
+/// is the true state while models cannot be downloaded (`builtin_local` →
+/// `model.not_downloaded`).
+struct NoDownloadedModels;
+
+impl DownloadedModels for NoDownloadedModels {
+    fn is_downloaded(&self, _id: &str) -> bool {
+        false
+    }
+
+    fn list(&self) -> Vec<String> {
+        Vec::new()
+    }
+}
+
+/// Interim until T-006 (the real registrar): fails closed. `SettingsService` does
+/// not call it before T-010 adds the hotkey save step.
+struct InterimHotkeyRegistrar;
+
+impl HotkeyRegistrar for InterimHotkeyRegistrar {
+    fn prepare(&self, _hotkey: Hotkey, _mode: Mode) -> Result<Prepared, Unavailable> {
+        Err(Unavailable)
+    }
+
+    fn commit(&self, _prepared: Prepared) {}
+
+    fn abort(&self, _prepared: Prepared) {}
 }
