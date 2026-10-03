@@ -1,0 +1,185 @@
+{
+  "_format": "Shared rendering fixture for Rust voicen_core::i18n (Catalog::from_json + text) and the UI t()/render. Each case is self-contained: `en` and `ru` are its own flat catalogs (id -> text, not the real i18n/en.json and i18n/ru.json), `lang` is the UI language ('en' | 'ru'), `id` the message id, `args` the named arguments (name -> value), `expected` the exact rendered string. Rule: lang text if non-empty, else en text, else the id; placeholders {[a-z][a-z0-9_]*} are replaced in a single pass, argument values are inserted literally and never re-expanded; a placeholder without an argument stays verbatim; extra arguments are ignored.",
+  "cases": [
+    {
+      "name": "plain text",
+      "en": { "m": "Hello" },
+      "ru": { "m": "Привет" },
+      "lang": "en",
+      "id": "m",
+      "args": {},
+      "expected": "Hello"
+    },
+    {
+      "name": "one placeholder",
+      "en": { "m": "Hello, {name}!" },
+      "ru": { "m": "Привет, {name}!" },
+      "lang": "en",
+      "id": "m",
+      "args": { "name": "Ada" },
+      "expected": "Hello, Ada!"
+    },
+    {
+      "name": "two placeholders",
+      "en": { "m": "{count} of {total} done" },
+      "ru": { "m": "Готово {count} из {total}" },
+      "lang": "en",
+      "id": "m",
+      "args": { "count": "3", "total": "7" },
+      "expected": "3 of 7 done"
+    },
+    {
+      "name": "repeated placeholder",
+      "en": { "m": "{word} and {word} again" },
+      "ru": { "m": "{word} и снова {word}" },
+      "lang": "en",
+      "id": "m",
+      "args": { "word": "echo" },
+      "expected": "echo and echo again"
+    },
+    {
+      "name": "adjacent placeholders",
+      "en": { "m": "{a}{b}" },
+      "ru": { "m": "{a}{b}" },
+      "lang": "en",
+      "id": "m",
+      "args": { "a": "1", "b": "2" },
+      "expected": "12"
+    },
+    {
+      "name": "missing argument kept verbatim",
+      "en": { "m": "Hello, {name} from {place}" },
+      "ru": { "m": "Привет, {name} из {place}" },
+      "lang": "en",
+      "id": "m",
+      "args": { "name": "Ada" },
+      "expected": "Hello, Ada from {place}"
+    },
+    {
+      "name": "extra argument ignored",
+      "en": { "m": "Hello, {name}" },
+      "ru": { "m": "Привет, {name}" },
+      "lang": "en",
+      "id": "m",
+      "args": { "name": "Ada", "unused": "zzz" },
+      "expected": "Hello, Ada"
+    },
+    {
+      "name": "value containing a later placeholder is not re-expanded",
+      "en": { "m": "{first} then {second}" },
+      "ru": { "m": "{first} затем {second}" },
+      "lang": "en",
+      "id": "m",
+      "args": { "first": "{second}", "second": "B" },
+      "expected": "{second} then B"
+    },
+    {
+      "name": "value containing an earlier placeholder is not re-expanded",
+      "en": { "m": "{first} then {second}" },
+      "ru": { "m": "{first} затем {second}" },
+      "lang": "en",
+      "id": "m",
+      "args": { "first": "A", "second": "{first}" },
+      "expected": "A then {first}"
+    },
+    {
+      "name": "value containing its own placeholder is not re-expanded",
+      "en": { "m": "Using {device}" },
+      "ru": { "m": "Используется {device}" },
+      "lang": "en",
+      "id": "m",
+      "args": { "device": "{device}" },
+      "expected": "Using {device}"
+    },
+    {
+      "name": "value with $& inserted literally",
+      "en": { "m": "Using {device}" },
+      "ru": { "m": "Используется {device}" },
+      "lang": "en",
+      "id": "m",
+      "args": { "device": "Mic $& 1" },
+      "expected": "Using Mic $& 1"
+    },
+    {
+      "name": "value with $' inserted literally",
+      "en": { "m": "Using {device} now" },
+      "ru": { "m": "Используется {device} сейчас" },
+      "lang": "en",
+      "id": "m",
+      "args": { "device": "Mic $' 1" },
+      "expected": "Using Mic $' 1 now"
+    },
+    {
+      "name": "value with $$, $` and $1 inserted literally",
+      "en": { "m": "[{v}]" },
+      "ru": { "m": "[{v}]" },
+      "lang": "en",
+      "id": "m",
+      "args": { "v": "$$ $` $1 $<v>" },
+      "expected": "[$$ $` $1 $<v>]"
+    },
+    {
+      "name": "Cyrillic text and values",
+      "en": { "m": "Hello, {name}! All is {state}." },
+      "ru": { "m": "Привет, {name}! Всё {state}." },
+      "lang": "ru",
+      "id": "m",
+      "args": { "name": "Мир", "state": "хорошо" },
+      "expected": "Привет, Мир! Всё хорошо."
+    },
+    {
+      "name": "empty argument value",
+      "en": { "m": "[{name}]" },
+      "ru": { "m": "[{name}]" },
+      "lang": "en",
+      "id": "m",
+      "args": { "name": "" },
+      "expected": "[]"
+    },
+    {
+      "name": "ru empty falls back to en",
+      "en": { "m": "Hello, {name}" },
+      "ru": { "m": "" },
+      "lang": "ru",
+      "id": "m",
+      "args": { "name": "Ada" },
+      "expected": "Hello, Ada"
+    },
+    {
+      "name": "ru missing falls back to en",
+      "en": { "m": "Hello, {name}" },
+      "ru": {},
+      "lang": "ru",
+      "id": "m",
+      "args": { "name": "Ada" },
+      "expected": "Hello, Ada"
+    },
+    {
+      "name": "en empty renders the id",
+      "en": { "m": "" },
+      "ru": { "m": "Привет" },
+      "lang": "en",
+      "id": "m",
+      "args": {},
+      "expected": "m"
+    },
+    {
+      "name": "unknown id renders the id (en)",
+      "en": { "m": "Hello" },
+      "ru": { "m": "Привет" },
+      "lang": "en",
+      "id": "no.such.id",
+      "args": {},
+      "expected": "no.such.id"
+    },
+    {
+      "name": "unknown id renders the id (ru)",
+      "en": { "m": "Hello" },
+      "ru": { "m": "Привет" },
+      "lang": "ru",
+      "id": "no.such.id",
+      "args": { "name": "Ada" },
+      "expected": "no.such.id"
+    }
+  ]
+}

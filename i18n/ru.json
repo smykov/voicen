@@ -1,0 +1,4 @@
+{
+  "app.build_info": "Voicen {version} ({commit})",
+  "app.build_info_error": "Не удалось прочитать сведения о сборке: {reason}"
+}
