@@ -12,6 +12,11 @@ const config = {
     adapter: adapter({
       fallback: "index.html",
     }),
+    // The message catalog lives at the repo root, shared with voicen-core (decisions #13).
+    // The only definition of this alias: Vite, Vitest and tsconfig get it from SvelteKit.
+    alias: {
+      $i18n: "i18n",
+    },
   },
 };
 
