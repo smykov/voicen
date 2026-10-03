@@ -18,8 +18,8 @@ fn get_build_info() -> BuildInfo {
     voicen_core::build_info()
 }
 
-/// The one command registration, shared by `run()` and the tests (T-030 J4).
-pub fn commands<R: Runtime>(builder: Builder<R>) -> Builder<R> {
+/// The command registration; reached only through [`build_app`] (T-030 J4).
+fn commands<R: Runtime>(builder: Builder<R>) -> Builder<R> {
     builder.invoke_handler(tauri::generate_handler![
         get_build_info,
         settings_ipc::settings_get,
@@ -29,7 +29,7 @@ pub fn commands<R: Runtime>(builder: Builder<R>) -> Builder<R> {
 }
 
 /// The one app wiring, shared by `run()` and the tests (T-030 J4): registers
-/// [`commands`], manages `service`, builds the app with `context`, and starts the
+/// `commands`, manages `service`, builds the app with `context`, and starts the
 /// `settings://changed` bridge on the built app's handle. tauri 2.12.1 runs
 /// `.setup()` only from `run` / `run_iteration`, never from `build()`, so the bridge
 /// starts here, after `build()`; `run()` then only calls `.run(…)` on the result.
@@ -38,10 +38,9 @@ pub fn build_app<R: Runtime>(
     context: Context<R>,
     service: Arc<SettingsService>,
 ) -> tauri::Result<App<R>> {
-    // RED STUB: registers and manages, but never starts the change bridge
-    // (`settings_ipc::spawn_change_bridge`), so `saved_emits_changed_once_refused_emits_nothing`
-    // fails until the developer implements it and switches `run()` to it.
-    commands(builder).manage(service).build(context)
+    let app = commands(builder).manage(service.clone()).build(context)?;
+    settings_ipc::spawn_change_bridge(app.handle().clone(), service);
+    Ok(app)
 }
 
 /// Writes the start line with version and commit into `dir/voicen.log` (FR-18); a
@@ -85,13 +84,11 @@ pub fn run() {
         release_credentials(),
         os_language.as_deref(),
     );
-    let bridged = service.clone();
-    commands(tauri::Builder::default())
-        .manage(service)
-        .setup(move |app| {
-            settings_ipc::spawn_change_bridge(app.handle().clone(), bridged);
-            Ok(())
-        })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+    build_app(
+        tauri::Builder::default(),
+        tauri::generate_context!(),
+        service,
+    )
+    .expect("error while building tauri application")
+    .run(|_, _| {});
 }

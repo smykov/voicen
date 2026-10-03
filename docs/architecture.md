@@ -37,7 +37,7 @@ flowchart LR
 |---|---|---|
 | `Engine` trait in `voicen-core` | adding a provider | recording and delivery code do not change (NFR-11) |
 | Platform traits (audio source, clipboard, input, credentials) | Windows vs tests | core tests run on Linux with fakes; Windows impls only in `src-tauri` |
-| IPC commands | UI ↔ Rust | the UI never calls Windows APIs; e2e mocks exactly these commands; one registration `commands(builder)` in `src-tauri/src/lib.rs` shared by `run()` and the shell tests; the wire form of the settings types is serde impls in `voicen-core` (spec 004 contracts/ipc.md › Wire form; T-030) |
+| IPC commands | UI ↔ Rust | the UI never calls Windows APIs; e2e mocks exactly these commands; one app wiring `build_app(builder, context, service)` in `src-tauri/src/lib.rs` (commands, managed settings service, change bridge) shared by `run()` and the shell tests; the wire form of the settings types is serde impls in `voicen-core` (spec 004 contracts/ipc.md › Wire form; T-030) |
 
 ## Cross-cutting values (single source of truth, P-010)
 

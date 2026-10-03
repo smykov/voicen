@@ -10,8 +10,11 @@
 //! - J4: the release app and the tests build the service through [`load_settings`]
 //!   and differ only in the injected credential store and data dir.
 //!
-//! Nothing here logs: no key, transcript or base URL can reach the log from this
-//! module (docs/decisions/settings.md).
+//! The only output here is one `eprintln!` in [`spawn_change_bridge`] when the OS
+//! refuses to start its thread: a fixed text plus the `std::io::Error`, to stderr
+//! (which goes nowhere in a windowed release build until T-008's log exists). No
+//! key, transcript, settings value or base URL is printed or logged from this module
+//! (docs/decisions/settings.md).
 
 use std::path::PathBuf;
 use std::sync::{Arc, Weak};
@@ -51,11 +54,13 @@ pub fn load_settings(
 }
 
 /// Subscribes to the service and emits `settings://changed` with `service.view()`
-/// for every received snapshot (J3). Started in `.setup()`.
+/// for every received snapshot (J3). Started by `build_app` right after `build()`.
 ///
 /// The subscription is taken before this returns, so no `Saved` after the call is
-/// missed. The bridge thread holds the service weakly and ends when the service is
-/// dropped. An emit error is ignored: it never turns a `Saved` into a failure.
+/// missed. The thread holds the service only weakly, but the `AppHandle` it owns
+/// keeps the managed service alive, so in practice the thread lives as long as the
+/// app (the process). An emit error is ignored: it never turns a `Saved` into a
+/// failure. A failed thread spawn prints one line to stderr (see the module doc).
 pub fn spawn_change_bridge<R: Runtime>(app: AppHandle<R>, service: Arc<SettingsService>) {
     let changes = service.subscribe();
     let service: Weak<SettingsService> = Arc::downgrade(&service);
