@@ -84,7 +84,7 @@ The stack is fixed by `docs/requirements.md` §9. This file decides only HOW to 
 
 ## R-14 Messages and languages
 
-- **Decision**: The core exposes `MessageKey` (an enum) plus parameters, and never formats text. Texts live in one catalog per language. Location (agreed with 004): `i18n/en.json`, `i18n/ru.json`, consumed by the UI through an import and by the shell (toasts, tray) through `include_str!` + serde. The language is resolved in one place (004 owns that resolver; until it lands, the shell uses `en`). The texts this feature adds are listed in contracts/messages.md. A core test checks that every `MessageKey` has a non-empty text in both catalogs.
+- **Decision**: The core exposes `MessageKey` (an enum) plus parameters, and never formats text. Texts live in one catalog per language. Location (agreed with 004): `i18n/en.json`, `i18n/ru.json`, consumed by the UI through an import and by the shell (toasts, tray) through `include_str!` + serde. The language is resolved in one place (004 owns that resolver; until it lands, the shell uses `en`). The texts this feature adds are listed in contracts/messages.md. Completeness is checked by T-005's parity tests and the `messages!` macro (every id exists in both catalogs), not by a feature-owned test.
 - **Rationale**: P-010 (one source of message text). Toasts are produced in Rust, so a UI-only catalog would not do.
 - **Open**: The location must agree with 004's i18n design (an owner/coordination item in plan.md).
 

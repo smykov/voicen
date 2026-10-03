@@ -200,7 +200,7 @@ T013 classification tests (post_process_chat.rs)
 T014 real 15 s timeout test (post_process_timeout.rs)
 T015 skipped → raw + notice pipeline tests
 T016 ordering test
-T019 catalog keys (src/lib/i18n)   ← ui area, independent of core
+T019 catalog keys (root i18n/, decision #13)   ← ui area, independent of core
 ```
 
 ## Implementation Strategy

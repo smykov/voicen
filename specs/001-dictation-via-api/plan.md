@@ -83,7 +83,7 @@ Post-design re-check (after data-model.md and contracts/): still PASS. There is 
 | FR-030, FR-031 (FR-27) | Fallback/notify-once state machine; device-lost → process captured | — | Injected source reports device lost | USB unplug |
 | FR-032 (NFR-06) | Temp audio store: delete on success, exit, stale at start | — | Temp dir empty after exit | — |
 | FR-033 (FR-20, NFR-01) | Events carry only allowlisted fields; a redaction test with key/text in the inputs | — | Start smoke reads one timing line | Benchmark (SC-001) |
-| FR-034 (FR-15) | Every `MessageKey` has en and ru texts | Catalog loads in the UI | — | — |
+| FR-034 (FR-15) | Every `MessageKey` has en and ru texts | Catalog loads in the UI (covered by T-005 parity tests and `messages!`) | — | — |
 
 ## Project Structure
 

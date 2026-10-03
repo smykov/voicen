@@ -180,6 +180,24 @@
       "id": "no.such.id",
       "args": { "name": "Ada" },
       "expected": "no.such.id"
+    },
+    {
+      "name": "placeholder named like a prototype key without an argument kept verbatim",
+      "en": { "m": "[{constructor}]" },
+      "ru": { "m": "[{constructor}]" },
+      "lang": "en",
+      "id": "m",
+      "args": {},
+      "expected": "[{constructor}]"
+    },
+    {
+      "name": "unknown id named like a prototype key renders the id",
+      "en": { "m": "Hello" },
+      "ru": { "m": "Привет" },
+      "lang": "en",
+      "id": "constructor",
+      "args": {},
+      "expected": "constructor"
     }
   ]
 }

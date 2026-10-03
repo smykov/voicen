@@ -290,10 +290,16 @@ const EMBEDDED_RU: &str = include_str!("../../../i18n/ru.json");
 
 /// The catalog embedded from `i18n/en.json` and `i18n/ru.json`, parsed once.
 ///
-/// The files are compiled in, so a parse failure is a build-time defect, caught by
-/// the test `catalog_parity_holds_for_the_real_catalogs`. At run time it does not
-/// panic: the catalog is then empty and every message renders as its id.
-pub fn embedded() -> &'static Catalog {
+/// Private on purpose: the only public way to render embedded text is [`text`],
+/// which takes a [`MessageId`], so every Rust id goes through [`MESSAGE_IDS`]
+/// (invariant 3). `Catalog::text` takes a `&str` id and must not be reachable on
+/// this catalog from outside the module.
+///
+/// The files are compiled in. The test `catalog_parity_holds_for_the_real_catalogs`
+/// parses the same files and fails if they do not parse. If parsing failed anyway,
+/// this function would not panic: the catalog would be empty and every message
+/// would render as its id. That fallback itself is not covered by a test.
+fn embedded() -> &'static Catalog {
     static CATALOG: OnceLock<Catalog> = OnceLock::new();
     CATALOG.get_or_init(|| Catalog::from_json(EMBEDDED_EN, EMBEDDED_RU).unwrap_or_default())
 }
