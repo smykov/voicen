@@ -235,6 +235,10 @@ pub enum ErrorCode {
     HistorySizeRange,
     AutostartFailed,
     KeyStoreFailed,
+    /// A base URL with userinfo (`user:pass@`), decision #27(2).
+    UrlCredentials,
+    /// `speech_language` not `null` and not a Whisper ISO 639-1 code, decision #27(3).
+    LanguageUnsupported,
 }
 
 impl ErrorCode {
@@ -253,6 +257,8 @@ impl ErrorCode {
             ErrorCode::HistorySizeRange => "history.size_range",
             ErrorCode::AutostartFailed => "autostart.failed",
             ErrorCode::KeyStoreFailed => "key.store_failed",
+            ErrorCode::UrlCredentials => "url.credentials",
+            ErrorCode::LanguageUnsupported => "language.unsupported",
         }
     }
 }
@@ -574,62 +580,182 @@ mod tests {
         assert_eq!(json["schema_version"], json!(1));
     }
 
+    /// Every `FieldId`, once. Kept complete by `expected_field_id`'s exhaustive
+    /// match (a new variant does not compile until it has a row) and by the count.
+    const ALL_FIELD_IDS: [FieldId; 21] = [
+        FieldId::EngineKind,
+        FieldId::EngineApiBaseUrl,
+        FieldId::EngineApiModel,
+        FieldId::EngineApiKey,
+        FieldId::EngineLocalServerBaseUrl,
+        FieldId::EngineLocalServerModel,
+        FieldId::EngineLocalServerKey,
+        FieldId::EngineBuiltinLocalModelId,
+        FieldId::EngineSpeechLanguage,
+        FieldId::RecordingMicrophone,
+        FieldId::RecordingHotkey,
+        FieldId::RecordingMode,
+        FieldId::OutputAutoPaste,
+        FieldId::PostProcessingBaseUrl,
+        FieldId::PostProcessingModel,
+        FieldId::PostProcessingPrompt,
+        FieldId::PostProcessingKey,
+        FieldId::HistoryEnabled,
+        FieldId::HistorySize,
+        FieldId::GeneralStartWithWindows,
+        FieldId::GeneralUiLanguage,
+    ];
+
+    /// The data-model string of each FieldId. No wildcard: a variant added to
+    /// `FieldId` fails to compile here until its contract string is written down.
+    fn expected_field_id(id: FieldId) -> &'static str {
+        match id {
+            FieldId::EngineKind => "engine.kind",
+            FieldId::EngineApiBaseUrl => "engine.api.base_url",
+            FieldId::EngineApiModel => "engine.api.model",
+            FieldId::EngineApiKey => "engine.api.key",
+            FieldId::EngineLocalServerBaseUrl => "engine.local_server.base_url",
+            FieldId::EngineLocalServerModel => "engine.local_server.model",
+            FieldId::EngineLocalServerKey => "engine.local_server.key",
+            FieldId::EngineBuiltinLocalModelId => "engine.builtin_local.model_id",
+            FieldId::EngineSpeechLanguage => "engine.speech_language",
+            FieldId::RecordingMicrophone => "recording.microphone",
+            FieldId::RecordingHotkey => "recording.hotkey",
+            FieldId::RecordingMode => "recording.mode",
+            FieldId::OutputAutoPaste => "output.auto_paste",
+            FieldId::PostProcessingBaseUrl => "post_processing.base_url",
+            FieldId::PostProcessingModel => "post_processing.model",
+            FieldId::PostProcessingPrompt => "post_processing.prompt",
+            FieldId::PostProcessingKey => "post_processing.key",
+            FieldId::HistoryEnabled => "history.enabled",
+            FieldId::HistorySize => "history.size",
+            FieldId::GeneralStartWithWindows => "general.start_with_windows",
+            FieldId::GeneralUiLanguage => "general.ui_language",
+        }
+    }
+
     #[test]
     fn field_ids_match_data_model() {
-        // Bite: a FieldId string that differs from data-model.md (UI highlight, logs).
-        let table = [
-            (FieldId::EngineKind, "engine.kind"),
-            (FieldId::EngineApiBaseUrl, "engine.api.base_url"),
-            (FieldId::EngineApiModel, "engine.api.model"),
-            (FieldId::EngineApiKey, "engine.api.key"),
-            (
-                FieldId::EngineLocalServerBaseUrl,
-                "engine.local_server.base_url",
-            ),
-            (FieldId::EngineLocalServerModel, "engine.local_server.model"),
-            (
-                FieldId::EngineBuiltinLocalModelId,
-                "engine.builtin_local.model_id",
-            ),
-            (FieldId::EngineSpeechLanguage, "engine.speech_language"),
-            (FieldId::RecordingMicrophone, "recording.microphone"),
-            (FieldId::RecordingHotkey, "recording.hotkey"),
-            (FieldId::RecordingMode, "recording.mode"),
-            (FieldId::OutputAutoPaste, "output.auto_paste"),
-            (FieldId::PostProcessingBaseUrl, "post_processing.base_url"),
-            (FieldId::PostProcessingModel, "post_processing.model"),
-            (FieldId::PostProcessingPrompt, "post_processing.prompt"),
-            (FieldId::HistoryEnabled, "history.enabled"),
-            (FieldId::HistorySize, "history.size"),
-            (
-                FieldId::GeneralStartWithWindows,
-                "general.start_with_windows",
-            ),
-            (FieldId::GeneralUiLanguage, "general.ui_language"),
-        ];
-        for (id, text) in table {
-            assert_eq!(id.as_str(), text, "{id:?}");
+        // Bite: a FieldId string that differs from data-model.md (UI highlight, logs),
+        // including the key inputs of #25(a) (`engine.api.key`,
+        // `engine.local_server.key`, `post_processing.key`).
+        for id in ALL_FIELD_IDS {
+            assert_eq!(id.as_str(), expected_field_id(id), "{id:?}");
+        }
+        // Each variant listed once, and no two share a string.
+        let ids: std::collections::HashSet<_> = ALL_FIELD_IDS.into_iter().collect();
+        assert_eq!(ids.len(), ALL_FIELD_IDS.len(), "a FieldId listed twice");
+        let texts: std::collections::HashSet<_> =
+            ALL_FIELD_IDS.iter().map(|id| id.as_str()).collect();
+        assert_eq!(
+            texts.len(),
+            ALL_FIELD_IDS.len(),
+            "two FieldIds share a string"
+        );
+    }
+
+    /// Every `ErrorCode`, once (see `ALL_FIELD_IDS`).
+    const ALL_ERROR_CODES: [ErrorCode; 14] = [
+        ErrorCode::Required,
+        ErrorCode::UrlMalformed,
+        ErrorCode::KeyRequired,
+        ErrorCode::ModelNotDownloaded,
+        ErrorCode::HotkeyNoModifier,
+        ErrorCode::HotkeyNoKey,
+        ErrorCode::HotkeyEscReserved,
+        ErrorCode::HotkeyInvalid,
+        ErrorCode::HotkeyUnavailable,
+        ErrorCode::HistorySizeRange,
+        ErrorCode::AutostartFailed,
+        ErrorCode::KeyStoreFailed,
+        ErrorCode::UrlCredentials,
+        ErrorCode::LanguageUnsupported,
+    ];
+
+    /// The data-model code of each ErrorCode. No wildcard (see `expected_field_id`).
+    fn expected_error_code(code: ErrorCode) -> &'static str {
+        match code {
+            ErrorCode::Required => "required",
+            ErrorCode::UrlMalformed => "url.malformed",
+            ErrorCode::KeyRequired => "key.required",
+            ErrorCode::ModelNotDownloaded => "model.not_downloaded",
+            ErrorCode::HotkeyNoModifier => "hotkey.no_modifier",
+            ErrorCode::HotkeyNoKey => "hotkey.no_key",
+            ErrorCode::HotkeyEscReserved => "hotkey.esc_reserved",
+            ErrorCode::HotkeyInvalid => "hotkey.invalid",
+            ErrorCode::HotkeyUnavailable => "hotkey.unavailable",
+            ErrorCode::HistorySizeRange => "history.size_range",
+            ErrorCode::AutostartFailed => "autostart.failed",
+            ErrorCode::KeyStoreFailed => "key.store_failed",
+            ErrorCode::UrlCredentials => "url.credentials",
+            ErrorCode::LanguageUnsupported => "language.unsupported",
         }
     }
 
     #[test]
     fn error_codes_match_data_model() {
-        // Bite: a code string that differs from data-model.md (message id error.<code>).
-        let table = [
-            (ErrorCode::Required, "required"),
-            (ErrorCode::UrlMalformed, "url.malformed"),
-            (ErrorCode::KeyRequired, "key.required"),
-            (ErrorCode::ModelNotDownloaded, "model.not_downloaded"),
-            (ErrorCode::HotkeyNoModifier, "hotkey.no_modifier"),
-            (ErrorCode::HotkeyNoKey, "hotkey.no_key"),
-            (ErrorCode::HotkeyEscReserved, "hotkey.esc_reserved"),
-            (ErrorCode::HotkeyUnavailable, "hotkey.unavailable"),
-            (ErrorCode::HistorySizeRange, "history.size_range"),
-            (ErrorCode::AutostartFailed, "autostart.failed"),
-            (ErrorCode::KeyStoreFailed, "key.store_failed"),
-        ];
-        for (code, text) in table {
-            assert_eq!(code.as_str(), text, "{code:?}");
+        // Bite: a code string that differs from data-model.md / decisions #25(c), #27
+        // (message id error.<code>), `hotkey.invalid` included.
+        for code in ALL_ERROR_CODES {
+            assert_eq!(code.as_str(), expected_error_code(code), "{code:?}");
         }
+        let codes: std::collections::HashSet<_> = ALL_ERROR_CODES.into_iter().collect();
+        assert_eq!(
+            codes.len(),
+            ALL_ERROR_CODES.len(),
+            "an ErrorCode listed twice"
+        );
+        let texts: std::collections::HashSet<_> =
+            ALL_ERROR_CODES.iter().map(|c| c.as_str()).collect();
+        assert_eq!(
+            texts.len(),
+            ALL_ERROR_CODES.len(),
+            "two codes share a string"
+        );
+    }
+
+    #[test]
+    fn schema_version_0_loads() {
+        // data-model: only `> 1` is rejected; `0` loads and keeps its value.
+        // Bite: (M9) `version > SCHEMA_VERSION` -> `version != SCHEMA_VERSION`.
+        let mut full = serde_json::to_value(sample(EngineKind::Api)).expect("serializes");
+        full["schema_version"] = json!(0);
+        let loaded: Settings = serde_json::from_value(full).expect("schema_version 0 loads");
+        assert_eq!(loaded.schema_version, 0);
+        let mut expected = sample(EngineKind::Api);
+        expected.schema_version = 0;
+        assert_eq!(loaded, expected);
+        assert_eq!(parse(r#"{"schema_version":0}"#).schema_version, 0);
+    }
+
+    #[test]
+    fn partial_microphone_object_is_unreadable() {
+        // A `microphone` object missing `id` or `name` fails to parse, so T-032's
+        // loader treats the file as unreadable (spec Clarification Q4: backup +
+        // defaults). There is no default device to fill a partial object from.
+        // Bite: `#[serde(default)]` (or a container default) on `Microphone`.
+        let mut full = serde_json::to_value(sample(EngineKind::Api)).expect("serializes");
+        for partial in [
+            json!({"id": "x"}),
+            json!({"name": "Test Microphone (fake)"}),
+            json!({}),
+        ] {
+            full["microphone"] = partial.clone();
+            assert!(
+                serde_json::from_value::<Settings>(full.clone()).is_err(),
+                "microphone {partial} must not load"
+            );
+        }
+        assert!(serde_json::from_str::<Settings>(r#"{"microphone":{"id":"x"}}"#).is_err());
+        // Whole object and null both load.
+        full["microphone"] = json!({"id": "x", "name": "y"});
+        assert!(serde_json::from_value::<Settings>(full.clone()).is_ok());
+        full["microphone"] = Value::Null;
+        assert_eq!(
+            serde_json::from_value::<Settings>(full)
+                .expect("null loads")
+                .microphone,
+            None
+        );
     }
 }

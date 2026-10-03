@@ -475,4 +475,209 @@ mod tests {
         );
         assert_eq!(errors.len(), 5, "duplicates: {errors:?}");
     }
+
+    // ---- Decision #27 (T-003 review round 1) ----
+
+    /// Every two-letter (ISO 639-1) code of the Whisper language list: `LANGUAGES`
+    /// in openai/whisper `whisper/tokenizer.py` at commit 86098128c0b4 (the list
+    /// whisper.cpp copies), 97 codes. Left out: the three-letter `haw` and `yue`
+    /// (not ISO 639-1, so refused by #27(3)) and `jw` (Whisper's Javanese; ISO 639-1
+    /// says `jv`), which this test does not pin either way.
+    const WHISPER_ISO_639_1: [&str; 97] = [
+        "en", "zh", "de", "es", "ru", "ko", "fr", "ja", "pt", "tr", "pl", "ca", "nl", "ar", "sv",
+        "it", "id", "hi", "fi", "vi", "he", "uk", "el", "ms", "cs", "ro", "da", "hu", "ta", "no",
+        "th", "ur", "hr", "bg", "lt", "la", "mi", "ml", "cy", "sk", "te", "fa", "lv", "bn", "sr",
+        "az", "sl", "kn", "et", "mk", "br", "eu", "is", "hy", "ne", "mn", "bs", "kk", "sq", "sw",
+        "gl", "mr", "pa", "si", "km", "sn", "yo", "so", "af", "oc", "ka", "be", "tg", "sd", "gu",
+        "am", "yi", "lo", "uz", "fo", "ht", "ps", "tk", "nn", "mt", "sa", "lb", "my", "bo", "tl",
+        "mg", "as", "tt", "ln", "ha", "ba", "su",
+    ];
+
+    /// The FieldId of `speech_language`. Decision #27(3) names it
+    /// `recording.speech_language`; data-model.md, the existing `FieldId` and the
+    /// spec (Engine tab) say `engine.speech_language`. This uses the existing one;
+    /// the contradiction is reported to the orchestrator.
+    const SPEECH_LANGUAGE: FieldId = FieldId::EngineSpeechLanguage;
+
+    fn replace(key: &str) -> KeyEdit {
+        KeyEdit::Replace(Secret::new(key))
+    }
+
+    #[test]
+    fn api_empty_or_whitespace_replace_is_key_required() {
+        // #27(1): `Replace` with an empty or whitespace-only key is not an entered
+        // key -> `key.required` on `engine.api.key`, with or without a stored key
+        // (removing a key is the explicit `Clear`). Bite: `Replace(_) => true` in
+        // `has_key_after_save` (today's behaviour, Was #26).
+        let s = sample(EngineKind::Api);
+        for raw in ["", " ", "\t", " \n\t ", "\u{3000}"] {
+            for presence in [KeyPresence::default(), api_key_stored()] {
+                let edits = KeyEdits {
+                    transcription_api: replace(raw),
+                    ..KeyEdits::default()
+                };
+                assert_eq!(
+                    run(&s, &edits, presence, &[]),
+                    vec![FieldError {
+                        field: FieldId::EngineApiKey,
+                        code: ErrorCode::KeyRequired,
+                    }],
+                    "{raw:?}, stored = {}",
+                    presence.transcription_api
+                );
+            }
+        }
+        // A non-empty key around spaces is still a key entered now.
+        let edits = KeyEdits {
+            transcription_api: replace("  sk-test-padded  "),
+            ..KeyEdits::default()
+        };
+        assert_eq!(run(&s, &edits, KeyPresence::default(), &[]), vec![]);
+    }
+
+    #[test]
+    fn optional_key_slots_accept_an_empty_replace() {
+        // The local-server key (002 FR-017) and the post-processing key (003 FR-011)
+        // are optional: an empty `Replace` there behaves like no key, not like an
+        // error (#27(1) read with the optional slots; what the save step stores for
+        // it is T-032's). An empty `Replace` in another slot never makes the API
+        // key look missing either.
+        // Bite: the #27(1) empty-key rule applied to every slot instead of the
+        // required one.
+        for raw in ["", "   "] {
+            let edits = KeyEdits {
+                local_server: replace(raw),
+                post_processing: replace(raw),
+                ..KeyEdits::default()
+            };
+            for presence in [
+                KeyPresence::default(),
+                KeyPresence {
+                    transcription_api: false,
+                    local_server: true,
+                    post_processing: true,
+                },
+            ] {
+                // Local server selected, post-processing on with valid fields.
+                let s = sample(EngineKind::LocalServer);
+                assert!(s.post_processing.enabled);
+                assert_eq!(run(&s, &edits, presence, &[]), vec![], "{raw:?}");
+            }
+            // API selected with a stored API key: the other slots' empty edits do
+            // not matter.
+            let s = sample(EngineKind::Api);
+            assert_eq!(run(&s, &edits, api_key_stored(), &[]), vec![], "{raw:?}");
+        }
+    }
+
+    /// Base URLs with userinfo; fake credentials, documentation hosts only.
+    const WITH_USERINFO: [&str; 5] = [
+        "https://user:pass@api.example.com/v1", // teamwright:allow-secret (fake test value)
+        "http://user@api.example.com",
+        "https://:fake-pass@api.example.com/v1", // teamwright:allow-secret (fake test value)
+        "http://user:fake@192.0.2.10:8000/v1",   // teamwright:allow-secret (fake test value)
+        "  https://user:pass@api.example.com/v1/  ", // teamwright:allow-secret (fake test value)
+    ];
+
+    #[test]
+    fn api_base_url_with_credentials_refused() {
+        // #27(2): userinfo in a base URL is a second path for key bytes into the
+        // settings file -> `url.credentials` on the field, exactly. Bite: no
+        // `username()`/`password()` check (today: accepted).
+        for raw in WITH_USERINFO {
+            let (mut s, edits, presence) = api_ok();
+            s.api.base_url = raw.into();
+            assert_eq!(
+                pairs(&run(&s, &edits, presence, &[])),
+                vec![("engine.api.base_url", "url.credentials")],
+                "{raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn local_server_base_url_with_credentials_refused() {
+        // #27(2), the same rule for the local-server base URL.
+        for raw in WITH_USERINFO {
+            let mut s = sample(EngineKind::LocalServer);
+            s.local_server.base_url = raw.into();
+            assert_eq!(
+                pairs(&run(&s, &no_keys(), KeyPresence::default(), &[])),
+                vec![("engine.local_server.base_url", "url.credentials")],
+                "{raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn base_url_with_query_accepted() {
+        // #27(2): a query string is allowed (Azure-style `?api-version=`).
+        // Bite: a credentials rule that refuses any URL with a query.
+        let raw = "https://api.example.com/v1?api-version=2024-06-01";
+        let (mut s, edits, presence) = api_ok();
+        s.api.base_url = raw.into();
+        assert_eq!(run(&s, &edits, presence, &[]), vec![]);
+        let mut s = sample(EngineKind::LocalServer);
+        s.local_server.base_url = "http://192.0.2.10:8000/v1?mode=fast".into();
+        assert_eq!(run(&s, &no_keys(), KeyPresence::default(), &[]), vec![]);
+    }
+
+    #[test]
+    fn speech_language_null_or_whisper_code_accepted() {
+        // #27(3): `null` is auto-detect; every two-letter Whisper code is accepted,
+        // for every engine that transcribes. Bite: a hand-written subset (e.g. only
+        // the UI languages) or a case-folded comparison gone wrong.
+        assert_eq!(WHISPER_ISO_639_1.len(), 97);
+        for engine in [
+            EngineKind::Api,
+            EngineKind::LocalServer,
+            EngineKind::BuiltinLocal,
+        ] {
+            let mut s = sample(engine);
+            s.speech_language = None;
+            assert_eq!(
+                run(&s, &no_keys(), api_key_stored(), &["base"]),
+                vec![],
+                "{engine:?} null"
+            );
+            for code in WHISPER_ISO_639_1 {
+                let mut s = sample(engine);
+                s.speech_language = Some(code.into());
+                assert_eq!(
+                    run(&s, &no_keys(), api_key_stored(), &["base"]),
+                    vec![],
+                    "{engine:?} {code}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn speech_language_outside_whisper_list_refused() {
+        // #27(3): anything but `null` or a two-letter Whisper code ->
+        // `language.unsupported` on the speech-language field, exactly. Bite: no
+        // check (today), a length-only check (`xx`), a case-insensitive match (`RU`),
+        // accepting the ISO 639-2 or BCP 47 form (`rus`, `en-US`), or trimming.
+        for raw in [
+            "xx", "zz", "rus", "RU", "Ru", "", " ", "en-US", "en_US", "ru ", " de", "haw", "yue",
+            "english", "auto",
+        ] {
+            for engine in [
+                EngineKind::Api,
+                EngineKind::LocalServer,
+                EngineKind::BuiltinLocal,
+            ] {
+                let mut s = sample(engine);
+                s.speech_language = Some(raw.into());
+                assert_eq!(
+                    run(&s, &no_keys(), api_key_stored(), &["base"]),
+                    vec![FieldError {
+                        field: SPEECH_LANGUAGE,
+                        code: ErrorCode::LanguageUnsupported,
+                    }],
+                    "{engine:?} {raw:?}"
+                );
+            }
+        }
+    }
 }

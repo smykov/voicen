@@ -46,8 +46,19 @@ mod tests {
     #[test]
     fn check_base_url_table() {
         // Accepted, with the normalized text (spec T029). Bite: no trim, no
-        // trailing-slash strip, or stripping more than one `/`.
+        // trailing-slash strip, or stripping more than one `/` (R-8 strips exactly
+        // one: `strip_suffix('/')` -> `trim_end_matches('/')` turns the `//` rows red).
         let accepted = [
+            ("http://x//", "http://x/"),
+            (
+                "https://api.example.com/v1//",
+                "https://api.example.com/v1/",
+            ),
+            // A query string is kept (decision #27(2)): Azure-style endpoints.
+            (
+                "https://api.example.com/v1?api-version=2024-06-01",
+                "https://api.example.com/v1?api-version=2024-06-01",
+            ),
             ("http://localhost:8000/v1", "http://localhost:8000/v1"),
             ("https://api.openai.com/v1", "https://api.openai.com/v1"),
             ("  https://api.openai.com/v1  ", "https://api.openai.com/v1"),
@@ -89,12 +100,15 @@ mod tests {
 
     #[test]
     fn normalized_url_is_stable() {
-        // Property: normalizing a normalized URL changes nothing (save then reload
-        // yields the same text).
+        // Property, for inputs without a double trailing slash: normalizing a
+        // normalized URL changes nothing (save then reload yields the same text).
+        // Not true for `…//`: R-8 strips one `/` per pass, so `https://x/v1//` ->
+        // `https://x/v1/` -> `https://x/v1` (pinned in `check_base_url_table`).
         for raw in [
             " https://api.openai.com/v1/ ",
             "http://localhost:8000/v1",
             "https://api.example.com/",
+            "https://api.example.com/v1?api-version=2024-06-01",
         ] {
             let once = check_base_url(raw).expect("accepted");
             let twice = check_base_url(once.as_str()).expect("still accepted");

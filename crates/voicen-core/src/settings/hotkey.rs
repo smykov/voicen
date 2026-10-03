@@ -457,7 +457,8 @@ mod tests {
 
     #[test]
     fn rejects_invalid_strings() {
-        // Bite: a lenient parser (unknown keys, two keys, empty parts, repeats).
+        // Bite: a lenient parser (unknown keys, two keys, empty parts, repeats), or a
+        // structural error reported with another code than `Invalid` (#25(c)).
         for text in [
             "",
             "+",
@@ -474,7 +475,137 @@ mod tests {
             "Ctrl+AA",
             "Ctrl+Hyper+A",
         ] {
-            assert!(parse_hotkey(text).is_err(), "{text:?} must be rejected");
+            assert_eq!(parse_hotkey(text), Err(HotkeyError::Invalid), "{text:?}");
         }
+    }
+
+    #[test]
+    fn rejects_non_canonical_text() {
+        // Canonical text only (decision #26; data-model › Hotkey): one spelling per
+        // hotkey in the file, the UI and the logs (P-010). Each row below names a
+        // valid hotkey in a non-canonical spelling, so it is `Invalid`, never another
+        // code and never accepted.
+        // Bites: (M1) `last >= rank` -> `last == rank` (out-of-order accepted);
+        // (M2) case-insensitive modifier match; (M3) case-insensitive key match;
+        // trimming parts or the whole string.
+        for text in [
+            // Modifiers out of the order Ctrl, Alt, Shift, Win.
+            "Alt+Ctrl+A",
+            "Shift+Ctrl+A",
+            "Win+Alt+A",
+            "Win+Ctrl+A",
+            "Shift+Alt+A",
+            "Win+Shift+Space",
+            "Ctrl+Win+Alt+Space",
+            "Ctrl+Alt+Win+Shift+F24",
+            // Modifier case.
+            "ctrl+A",
+            "CTRL+A",
+            "ctrl+Alt+Space",
+            "Ctrl+ALT+Space",
+            "Ctrl+alt+Space",
+            "SHIFT+F9",
+            "win+Z",
+            // Key case.
+            "Ctrl+a",
+            "Ctrl+space",
+            "Ctrl+SPACE",
+            "Ctrl+f5",
+            "Ctrl+num0",
+            "Ctrl+NUM0",
+            "Ctrl+pageup",
+            "Ctrl+up",
+            // Whitespace anywhere.
+            "Ctrl + A",
+            " Ctrl+A",
+            "Ctrl+A ",
+            "Ctrl+ A",
+            "Ctrl +A",
+            "Ctrl+Alt+Space\n",
+            "\tCtrl+Alt+Space",
+            "Ctrl+Page Up",
+        ] {
+            assert_eq!(parse_hotkey(text), Err(HotkeyError::Invalid), "{text:?}");
+        }
+    }
+
+    /// Every ordered selection of distinct modifiers (none included), by name.
+    fn modifier_sequences() -> Vec<Vec<&'static str>> {
+        let mut out = vec![Vec::new()];
+        let mut frontier: Vec<Vec<&'static str>> = vec![Vec::new()];
+        for _ in 0..MODIFIERS_IN_TEST.len() {
+            let mut next = Vec::new();
+            for seq in &frontier {
+                for m in MODIFIERS_IN_TEST {
+                    if !seq.contains(&m) {
+                        let mut longer = seq.clone();
+                        longer.push(m);
+                        next.push(longer);
+                    }
+                }
+            }
+            out.extend(next.iter().cloned());
+            frontier = next;
+        }
+        out
+    }
+
+    /// The modifier names as the spec writes them (data-model › Hotkey), not taken
+    /// from the module under test.
+    const MODIFIERS_IN_TEST: [&str; 4] = ["Ctrl", "Alt", "Shift", "Win"];
+
+    #[test]
+    fn parse_then_format_is_identity_for_every_accepted_string() {
+        // Property (data-model › Hotkey): for every string `s` the parser accepts,
+        // `parse_hotkey(s)?.to_string() == s`. Candidates: every ordered modifier
+        // selection (all 65 orders, empty included) x every key name of the closed
+        // set plus `Esc`, each in seven spellings (as written, all lower, all upper,
+        // modifiers lower, key lower, ` + ` separator, surrounding spaces).
+        // Bites: M1 (out-of-order accepted), M2 (case-insensitive modifiers),
+        // M3 (case-insensitive keys), any trim. Each makes a non-canonical candidate
+        // parse, and its formatted text differs from it.
+        let key_names: Vec<String> = HotkeyKey::all()
+            .iter()
+            .map(|&k| {
+                let text = hk(true, false, false, false, k).to_string();
+                text["Ctrl+".len()..].to_string()
+            })
+            .chain(["Esc".to_string()])
+            .collect();
+        let sequences = modifier_sequences();
+        assert_eq!(sequences.len(), 1 + 4 + 12 + 24 + 24);
+
+        let mut accepted = std::collections::BTreeSet::new();
+        let mut candidates = 0usize;
+        for seq in &sequences {
+            for key in &key_names {
+                let mods_lower: Vec<String> = seq.iter().map(|m| m.to_lowercase()).collect();
+                let canonical_order: Vec<String> = seq.iter().map(|m| m.to_string()).collect();
+                let join = |mods: &[String], key: &str, sep: &str| {
+                    let mut parts: Vec<String> = mods.to_vec();
+                    parts.push(key.to_string());
+                    parts.join(sep)
+                };
+                let plain = join(&canonical_order, key, "+");
+                for text in [
+                    plain.clone(),
+                    plain.to_lowercase(),
+                    plain.to_uppercase(),
+                    join(&mods_lower, key, "+"),
+                    join(&canonical_order, &key.to_lowercase(), "+"),
+                    join(&canonical_order, key, " + "),
+                    format!(" {plain} "),
+                ] {
+                    candidates += 1;
+                    if let Ok(h) = parse_hotkey(&text) {
+                        assert_eq!(h.to_string(), text, "accepted {text:?} is not canonical");
+                        accepted.insert(text);
+                    }
+                }
+            }
+        }
+        assert!(candidates > 30_000, "{candidates} candidates");
+        // Exactly one accepted spelling per hotkey: 82 keys x 15 modifier sets.
+        assert_eq!(accepted.len(), HotkeyKey::all().len() * 15);
     }
 }
