@@ -3,10 +3,13 @@ use std::path::Path;
 use std::sync::Arc;
 
 use tauri::{App, Builder, Context, Runtime};
+use voicen_core::autostart::Autostart;
 use voicen_core::secrets::CredentialStore;
 use voicen_core::settings::service::SettingsService;
 use voicen_core::BuildInfo;
 
+#[cfg(windows)]
+pub mod autostart;
 #[cfg(windows)]
 pub mod credentials;
 pub mod locale;
@@ -73,6 +76,17 @@ fn release_credentials() -> Arc<dyn CredentialStore> {
     )
 }
 
+/// The release logon start entry: the HKCU Run value `Voicen` (T-014).
+#[cfg(windows)]
+fn release_autostart() -> Arc<dyn Autostart> {
+    Arc::new(autostart::WinAutostart::new())
+}
+
+#[cfg(not(windows))]
+fn release_autostart() -> Arc<dyn Autostart> {
+    compile_error!("the Voicen app runs on Windows only: autostart is the HKCU Run value")
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     log_start(&paths::log_dir());
@@ -82,6 +96,7 @@ pub fn run() {
     let (service, _load_outcome) = settings_ipc::load_settings(
         paths::data_dir(),
         release_credentials(),
+        release_autostart(),
         os_language.as_deref(),
     );
     build_app(

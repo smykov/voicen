@@ -1,5 +1,6 @@
 //! Platform-independent core of Voicen.
 
+pub mod autostart;
 pub mod build_info;
 pub mod clock;
 pub mod hotkey_registrar;

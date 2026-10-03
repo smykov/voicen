@@ -17,6 +17,7 @@ use tauri::ipc::{CallbackFn, InvokeBody};
 use tauri::test::{get_ipc_response, mock_builder, mock_context, noop_assets, MockRuntime};
 use tauri::webview::InvokeRequest;
 use tauri::{App, Listener, WebviewWindow, WebviewWindowBuilder};
+use voicen_core::autostart::{Autostart, FakeAutostart};
 use voicen_core::i18n::UiLanguage;
 use voicen_core::secrets::{
     CredentialCall, CredentialError, CredentialOp, CredentialStore, FakeCredentialStore, KeyEdits,
@@ -152,6 +153,11 @@ fn read_settings_file(dir: &Path) -> Settings {
     serde_json::from_slice(&bytes).expect("settings.json parses")
 }
 
+/// T-014: an absent autostart entry that is never the real Run value.
+fn no_autostart() -> Arc<dyn Autostart> {
+    Arc::new(FakeAutostart::new())
+}
+
 fn fake_store(store: FakeCredentialStore) -> Arc<FakeCredentialStore> {
     Arc::new(store)
 }
@@ -170,7 +176,12 @@ fn get_returns_presence_only() {
             .with_key(KeySlot::TranscriptionApi, CANARY)
             .with_key(KeySlot::PostProcessing, CANARY),
     );
-    let (service, outcome) = load_settings(dir.path().to_path_buf(), as_port(&store), None);
+    let (service, outcome) = load_settings(
+        dir.path().to_path_buf(),
+        as_port(&store),
+        no_autostart(),
+        None,
+    );
     assert_eq!(outcome, LoadOutcome::FirstRun(defaults(None)));
     let h = harness(&service);
 
@@ -203,7 +214,12 @@ fn save_twice_replaces_settings_json() {
     // load_settings reading another directory than the one it wrote.
     let dir = TempDir::new();
     let store = fake_store(FakeCredentialStore::new());
-    let (service, _) = load_settings(dir.path().to_path_buf(), as_port(&store), None);
+    let (service, _) = load_settings(
+        dir.path().to_path_buf(),
+        as_port(&store),
+        no_autostart(),
+        None,
+    );
     assert!(
         dir.path().join(SETTINGS_FILE).is_file(),
         "first run wrote no settings.json"
@@ -227,7 +243,12 @@ fn save_twice_replaces_settings_json() {
     drop(h);
     drop(service);
 
-    let (_, outcome) = load_settings(dir.path().to_path_buf(), as_port(&store), None);
+    let (_, outcome) = load_settings(
+        dir.path().to_path_buf(),
+        as_port(&store),
+        no_autostart(),
+        None,
+    );
     assert_eq!(outcome, LoadOutcome::Loaded(edited(43)));
 }
 
@@ -239,7 +260,12 @@ fn saved_emits_changed_once_refused_emits_nothing() {
     // through settings_save not reaching the windows.
     let dir = TempDir::new();
     let store = fake_store(FakeCredentialStore::new());
-    let (service, _) = load_settings(dir.path().to_path_buf(), as_port(&store), None);
+    let (service, _) = load_settings(
+        dir.path().to_path_buf(),
+        as_port(&store),
+        no_autostart(),
+        None,
+    );
     let h = harness(&service);
     let events = h.changed_events();
 
@@ -296,7 +322,12 @@ fn key_store_write_refused_is_key_store_failed_and_nothing_written() {
         KeySlot::TranscriptionApi,
         CredentialError { os_code: 5 },
     );
-    let (service, _) = load_settings(dir.path().to_path_buf(), as_port(&store), None);
+    let (service, _) = load_settings(
+        dir.path().to_path_buf(),
+        as_port(&store),
+        no_autostart(),
+        None,
+    );
     let before_bytes = std::fs::read(dir.path().join(SETTINGS_FILE)).expect("first-run file");
     let before_entries = entries(dir.path());
     let h = harness(&service);
@@ -376,7 +407,7 @@ fn canary_key_never_in_data_dir_or_log() {
     voicen_lib::log_start(&log_dir);
     let store: Arc<dyn CredentialStore> =
         Arc::new(WinCredentialStore::with_target_prefix(prefix.clone()));
-    let (service, _) = load_settings(dir.path().to_path_buf(), store, None);
+    let (service, _) = load_settings(dir.path().to_path_buf(), store, no_autostart(), None);
     let h = harness(&service);
     let events = h.changed_events();
 
@@ -431,7 +462,12 @@ fn speech_languages_is_core_list() {
     // Decision #30. Bite: a list re-spelled in the shell, re-ordered, or filtered.
     let dir = TempDir::new();
     let store = fake_store(FakeCredentialStore::new());
-    let (service, _) = load_settings(dir.path().to_path_buf(), as_port(&store), None);
+    let (service, _) = load_settings(
+        dir.path().to_path_buf(),
+        as_port(&store),
+        no_autostart(),
+        None,
+    );
     let h = harness(&service);
 
     let languages = h
@@ -448,8 +484,12 @@ fn first_run_with_russian_os_language_writes_ru() {
     // the OS language (defaults(None) = en written on Russian Windows).
     let dir = TempDir::new();
     let store = fake_store(FakeCredentialStore::new());
-    let (service, outcome) =
-        load_settings(dir.path().to_path_buf(), as_port(&store), Some("ru-RU"));
+    let (service, outcome) = load_settings(
+        dir.path().to_path_buf(),
+        as_port(&store),
+        no_autostart(),
+        Some("ru-RU"),
+    );
 
     assert_eq!(outcome, LoadOutcome::FirstRun(defaults(Some("ru-RU"))));
     assert_eq!(service.snapshot().ui_language, UiLanguage::Ru);

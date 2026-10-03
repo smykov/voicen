@@ -15,7 +15,8 @@ url = "2"
 zeroize = "1"
 
 [features]
-# Public test fakes (FakeCredentialStore, FakeHotkeyRegistrar, FakeDownloadedModels)
+# Public test fakes (FakeCredentialStore, FakeHotkeyRegistrar, FakeDownloadedModels,
+# FakeAutostart)
 # for this crate's integration tests and for other crates' tests (decision #23 N4).
 # Never enabled in a release build.
 test-fakes = []

@@ -11,6 +11,7 @@ use super::file::SettingsFile;
 use super::url::normalize_base_url;
 use super::validate::{validate, KeyEditsWithPresence};
 use super::{defaults, ErrorCode, FieldError, FieldId, LoadOutcome, Settings, SCHEMA_VERSION};
+use crate::autostart::{Autostart, ReconcileAction};
 use crate::clock::{utc_compact, Clock};
 use crate::hotkey_registrar::HotkeyRegistrar;
 use crate::i18n::{
@@ -23,6 +24,8 @@ use crate::secrets::{CredentialStore, KeyEdit, KeyEdits, KeyPresence, KeySlot, S
 pub struct SettingsDeps {
     pub file: Arc<dyn SettingsFile>,
     pub credentials: Arc<dyn CredentialStore>,
+    /// The logon start entry (T-014): the save step and `reconcile_autostart`.
+    pub autostart: Arc<dyn Autostart>,
     /// Held but not called until T-010 adds the hotkey step.
     pub hotkeys: Arc<dyn HotkeyRegistrar>,
     pub local_models: Arc<dyn DownloadedModels>,
@@ -357,6 +360,15 @@ impl SettingsService {
         }
     }
 
+    /// Makes the logon start entry match the snapshot (R-5), under the save lock;
+    /// never touches the file or the credential store. `Unavailable` → `None` with
+    /// no call; on → `set(true)` → `Written`; off → `is_enabled()`: absent →
+    /// `None`, present → `set(false)` → `Removed`; any error → `Failed`.
+    pub fn reconcile_autostart(&self) -> ReconcileAction {
+        // RED STUB (T-014 test-writer): the developer replaces this.
+        ReconcileAction::Failed
+    }
+
     fn view_with(&self, settings: Settings, keys: KeyPresence) -> SettingsView {
         SettingsView {
             settings,
@@ -489,6 +501,7 @@ fn encode(settings: &Settings) -> io::Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::autostart::{AutostartCall, AutostartError, FakeAutostart};
     use crate::clock::FakeClock;
     use crate::hotkey_registrar::FakeHotkeyRegistrar;
     use crate::i18n::MESSAGE_IDS;
@@ -527,22 +540,31 @@ mod tests {
     struct World {
         file: Arc<FakeSettingsFile>,
         creds: Arc<FakeCredentialStore>,
+        autostart: Arc<FakeAutostart>,
         hotkeys: Arc<FakeHotkeyRegistrar>,
     }
 
     impl World {
+        /// The autostart entry starts absent; see [`World::with_autostart`].
         fn new(file: FakeSettingsFile, creds: FakeCredentialStore) -> World {
             World {
                 file: Arc::new(file),
                 creds: Arc::new(creds),
+                autostart: Arc::new(FakeAutostart::new()),
                 hotkeys: Arc::new(FakeHotkeyRegistrar::new()),
             }
+        }
+
+        fn with_autostart(mut self, autostart: FakeAutostart) -> World {
+            self.autostart = Arc::new(autostart);
+            self
         }
 
         fn deps(&self) -> SettingsDeps {
             SettingsDeps {
                 file: self.file.clone(),
                 credentials: self.creds.clone(),
+                autostart: self.autostart.clone(),
                 hotkeys: self.hotkeys.clone(),
                 local_models: Arc::new(FakeDownloadedModels::new(&["base"])),
                 clock: Arc::new(FakeClock::at(t0())),
@@ -559,6 +581,7 @@ mod tests {
         SettingsDeps {
             file: Arc::new(FsSettingsFile::new(dir.path().to_path_buf())),
             credentials: creds.clone(),
+            autostart: Arc::new(FakeAutostart::new()),
             hotkeys: Arc::new(FakeHotkeyRegistrar::new()),
             local_models: Arc::new(FakeDownloadedModels::new(&["base"])),
             clock: Arc::new(FakeClock::at(t0())),
@@ -953,6 +976,12 @@ mod tests {
         assert_eq!(world.file.calls(), vec![FileCall::Read]);
         assert!(world.creds.calls().is_empty(), "{:?}", world.creds.calls());
         assert!(world.hotkeys.calls().is_empty());
+        // T-014: the first request turns autostart on (defaults: off); no call.
+        assert!(
+            world.autostart.calls().is_empty(),
+            "{:?}",
+            world.autostart.calls()
+        );
         assert!(Arc::ptr_eq(&before, &service.snapshot()));
         assert_eq!(*service.snapshot(), defaults(OS));
         assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
@@ -1588,6 +1617,681 @@ mod tests {
                 not_restored: vec![FieldId::EngineApiKey, FieldId::EngineLocalServerKey],
             })
         );
+    }
+
+    // ---- T-014: autostart step of save, and reconcile_autostart ----------------
+
+    /// A fake OS error code (no meaning): ERROR_ACCESS_DENIED.
+    const RUN_ERR: AutostartError = AutostartError { os_code: 5 };
+
+    fn with_start(mut s: Settings, on: bool) -> Settings {
+        s.start_with_windows = on;
+        s
+    }
+
+    /// One state-changing call on any dependency, in the order the service made it.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Step {
+        Key(CredentialOp, KeySlot),
+        Autostart(bool),
+        WriteFile,
+    }
+
+    type Journal = Arc<Mutex<Vec<Step>>>;
+
+    fn note(journal: &Journal, step: Step) {
+        journal
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(step);
+    }
+
+    fn steps(journal: &Journal) -> Vec<Step> {
+        journal
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Delegates to the World's fake and notes every change in one shared journal,
+    /// so an order across dependencies (keys vs. autostart vs. file) is visible.
+    struct JournaledCreds(Arc<FakeCredentialStore>, Journal);
+
+    impl CredentialStore for JournaledCreds {
+        fn read(&self, slot: KeySlot) -> Result<Option<Secret>, CredentialError> {
+            self.0.read(slot)
+        }
+        fn write(&self, slot: KeySlot, secret: &Secret) -> Result<(), CredentialError> {
+            note(&self.1, Step::Key(CredentialOp::Write, slot));
+            self.0.write(slot, secret)
+        }
+        fn delete(&self, slot: KeySlot) -> Result<(), CredentialError> {
+            note(&self.1, Step::Key(CredentialOp::Delete, slot));
+            self.0.delete(slot)
+        }
+    }
+
+    struct JournaledAutostart(Arc<FakeAutostart>, Journal);
+
+    impl Autostart for JournaledAutostart {
+        fn is_enabled(&self) -> Result<bool, AutostartError> {
+            self.0.is_enabled()
+        }
+        fn set(&self, enabled: bool) -> Result<(), AutostartError> {
+            note(&self.1, Step::Autostart(enabled));
+            self.0.set(enabled)
+        }
+    }
+
+    struct JournaledFile(Arc<FakeSettingsFile>, Journal);
+
+    impl SettingsFile for JournaledFile {
+        fn read(&self) -> io::Result<Option<Vec<u8>>> {
+            self.0.read()
+        }
+        fn write_atomic(&self, bytes: &[u8]) -> io::Result<()> {
+            note(&self.1, Step::WriteFile);
+            self.0.write_atomic(bytes)
+        }
+        fn move_aside(&self, suffix: &str) -> io::Result<String> {
+            self.0.move_aside(suffix)
+        }
+    }
+
+    impl World {
+        /// `load` with every changing call noted in one journal.
+        fn load_journaled(&self) -> (SettingsService, Journal) {
+            let journal: Journal = Arc::new(Mutex::new(Vec::new()));
+            let mut deps = self.deps();
+            deps.file = Arc::new(JournaledFile(self.file.clone(), journal.clone()));
+            deps.credentials = Arc::new(JournaledCreds(self.creds.clone(), journal.clone()));
+            deps.autostart = Arc::new(JournaledAutostart(self.autostart.clone(), journal.clone()));
+            let (service, _) = SettingsService::load_or_init(deps, OS);
+            (service, journal)
+        }
+    }
+
+    #[test]
+    fn autostart_failure_refuses_and_changes_nothing() {
+        // Acceptance failure branch (Q1): the Run value cannot be written → the save
+        // is refused as a whole, old state kept. Bite: the autostart step missing
+        // (Saved), placed after the keys or the file (a key or the file changed), the
+        // error on another field or code, or the snapshot swapped / published.
+        let on_disk = with_start(sample(EngineKind::None), false);
+        let bytes = json(&on_disk);
+        let world = World::new(
+            FakeSettingsFile::with_bytes(&bytes),
+            FakeCredentialStore::new().with_key(API, "sk-test-old-api"),
+        );
+        world.autostart.fail_set(true, RUN_ERR);
+        let (service, _) = world.load();
+        let rx = service.subscribe();
+        let before = service.snapshot();
+
+        let mut draft = with_start(sample(EngineKind::None), true);
+        draft.history.size = 42;
+        let keys = KeyEdits {
+            transcription_api: replace("sk-test-new-api"),
+            local_server: replace("sk-test-new-local"),
+            post_processing: KeyEdit::Clear,
+        };
+        assert_eq!(
+            service.save(req(draft, keys)),
+            SaveOutcome::Refused {
+                errors: vec![field_error(
+                    FieldId::GeneralStartWithWindows,
+                    ErrorCode::AutostartFailed
+                )],
+                form_error: None,
+            }
+        );
+
+        assert_eq!(world.autostart.calls(), vec![AutostartCall::Set(true)]);
+        assert!(!world.autostart.is_on(), "Run value written anyway");
+        assert!(
+            changes(&world.creds).is_empty(),
+            "{:?}",
+            changes(&world.creds)
+        );
+        assert_eq!(
+            stored(&world.creds),
+            [Some("sk-test-old-api".to_string()), None, None]
+        );
+        assert_eq!(world.file.calls(), vec![FileCall::Read], "file touched");
+        assert_eq!(world.file.bytes(), Some(bytes));
+        assert!(Arc::ptr_eq(&before, &service.snapshot()));
+        assert_eq!(*service.snapshot(), on_disk);
+        assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+
+        // The other direction: removing the value fails.
+        let on_disk = with_start(sample(EngineKind::None), true);
+        let bytes = json(&on_disk);
+        let world = World::new(
+            FakeSettingsFile::with_bytes(&bytes),
+            FakeCredentialStore::new(),
+        )
+        .with_autostart(FakeAutostart::enabled());
+        world.autostart.fail_set(false, RUN_ERR);
+        let (service, _) = world.load();
+        let before = service.snapshot();
+        let (errors, form) = expect_refused(service.save(req(
+            with_start(sample(EngineKind::None), false),
+            all_keys(|| replace("sk-test-new")),
+        )));
+        assert_eq!(
+            errors,
+            vec![field_error(
+                FieldId::GeneralStartWithWindows,
+                ErrorCode::AutostartFailed
+            )]
+        );
+        assert_eq!(form, None);
+        assert_eq!(world.autostart.calls(), vec![AutostartCall::Set(false)]);
+        assert!(world.autostart.is_on());
+        assert!(changes(&world.creds).is_empty());
+        assert_eq!(world.file.calls(), vec![FileCall::Read]);
+        assert_eq!(world.file.bytes(), Some(bytes));
+        assert!(Arc::ptr_eq(&before, &service.snapshot()));
+    }
+
+    #[test]
+    fn autostart_applied_only_when_changed() {
+        // T056 "applied only when changed", against the snapshot. Bite: the step
+        // skipped (Saved with the Run value unchanged), run on every save (an
+        // unrelated save refused while the Run key is unwritable), compared with the
+        // wrong side (draft vs. draft), or run before validate.
+        let world = World::new(
+            FakeSettingsFile::with_bytes(&json(&with_start(sample(EngineKind::None), false))),
+            FakeCredentialStore::new(),
+        );
+        let (service, _) = world.load();
+
+        // off → on: one set(true), and the value is in force when Saved returns.
+        let view = expect_saved(service.save(req(
+            with_start(sample(EngineKind::None), true),
+            KeyEdits::default(),
+        )));
+        assert!(view.settings.start_with_windows);
+        assert_eq!(world.autostart.calls(), vec![AutostartCall::Set(true)]);
+        assert!(world.autostart.is_on());
+        assert!(parse(&world.file.bytes().expect("written")).start_with_windows);
+
+        // on → on with another change: no call, even when the Run key is unwritable.
+        world.autostart.fail_set(true, RUN_ERR);
+        world.autostart.fail_set(false, RUN_ERR);
+        world.autostart.fail_is_enabled(RUN_ERR);
+        let mut draft = with_start(sample(EngineKind::None), true);
+        draft.history.size = 42;
+        expect_saved(service.save(req(draft.clone(), KeyEdits::default())));
+        assert_eq!(*service.snapshot(), draft);
+        assert_eq!(world.autostart.calls(), vec![AutostartCall::Set(true)]);
+        world.autostart.clear_failures();
+
+        // An invalid draft that would turn it off: refused by validate, no call.
+        let mut invalid = with_start(sample(EngineKind::None), false);
+        invalid.history.size = 0;
+        let (errors, _) = expect_refused(service.save(req(invalid, KeyEdits::default())));
+        assert_eq!(
+            errors,
+            vec![field_error(
+                FieldId::HistorySize,
+                ErrorCode::HistorySizeRange
+            )]
+        );
+        assert_eq!(world.autostart.calls(), vec![AutostartCall::Set(true)]);
+        assert!(world.autostart.is_on());
+
+        // on → off: one set(false).
+        expect_saved(service.save(req(
+            with_start(sample(EngineKind::None), false),
+            KeyEdits::default(),
+        )));
+        assert_eq!(
+            world.autostart.calls(),
+            vec![AutostartCall::Set(true), AutostartCall::Set(false)]
+        );
+        assert!(!world.autostart.is_on());
+        assert!(!service.snapshot().start_with_windows);
+    }
+
+    #[test]
+    fn autostart_step_runs_before_the_keys_and_the_file() {
+        // R-3 step 3: after validate and the hotkey placeholder, before the keys,
+        // the file last. Bite: the autostart step moved after the keys or after
+        // write_atomic (then a Run-key failure would have to undo more).
+        let world = World::new(
+            FakeSettingsFile::with_bytes(&json(&with_start(sample(EngineKind::None), false))),
+            FakeCredentialStore::new(),
+        );
+        let (service, journal) = world.load_journaled();
+        let keys = KeyEdits {
+            transcription_api: replace("sk-test-new-api"),
+            ..KeyEdits::default()
+        };
+        expect_saved(service.save(req(with_start(sample(EngineKind::None), true), keys)));
+        assert_eq!(
+            steps(&journal),
+            vec![
+                Step::Autostart(true),
+                Step::Key(CredentialOp::Write, API),
+                Step::WriteFile,
+            ]
+        );
+    }
+
+    #[test]
+    fn key_failure_restores_autostart() {
+        // I2 with the autostart step: a later key failure undoes it. Bite: the
+        // autostart undo missing (Run value left on after Refused), undone before
+        // the keys, or undone with the new value.
+        let world = World::new(
+            FakeSettingsFile::with_bytes(&json(&with_start(sample(EngineKind::None), false))),
+            FakeCredentialStore::new(),
+        );
+        world.creds.fail(CredentialOp::Write, LOCAL, STORE_ERR);
+        let (service, journal) = world.load_journaled();
+        let before = service.snapshot();
+
+        let keys = KeyEdits {
+            transcription_api: replace("sk-test-new-api"),
+            local_server: replace("sk-test-new-local"),
+            post_processing: KeyEdit::Untouched,
+        };
+        let (errors, form) =
+            expect_refused(service.save(req(with_start(sample(EngineKind::None), true), keys)));
+        assert_eq!(
+            errors,
+            vec![field_error(
+                FieldId::EngineLocalServerKey,
+                ErrorCode::KeyStoreFailed
+            )]
+        );
+        assert_eq!(form, None);
+        assert_eq!(
+            world.autostart.calls(),
+            vec![AutostartCall::Set(true), AutostartCall::Set(false)]
+        );
+        assert!(!world.autostart.is_on(), "Run value left on");
+        assert_eq!(
+            steps(&journal),
+            vec![
+                Step::Autostart(true),
+                Step::Key(CredentialOp::Write, API),
+                Step::Key(CredentialOp::Write, LOCAL),
+                // Undo, in reverse: keys, then autostart.
+                Step::Key(CredentialOp::Delete, API),
+                Step::Autostart(false),
+            ]
+        );
+        assert_eq!(stored(&world.creds), [None, None, None]);
+        assert_eq!(world.file.calls(), vec![FileCall::Read]);
+        assert!(Arc::ptr_eq(&before, &service.snapshot()));
+    }
+
+    #[test]
+    fn file_write_failure_restores_keys_then_autostart() {
+        // I2: a file write failure undoes the keys in reverse slot order, then the
+        // autostart step. Bite: the autostart undo missing or done first, or
+        // WriteFailed replaced although every undo succeeded.
+        let on_disk = with_start(sample(EngineKind::None), true);
+        let bytes = json(&on_disk);
+        let world = World::new(
+            FakeSettingsFile::with_bytes(&bytes),
+            FakeCredentialStore::new().with_key(API, "sk-test-old-api"),
+        )
+        .with_autostart(FakeAutostart::enabled());
+        let (service, journal) = world.load_journaled();
+        let rx = service.subscribe();
+        let before = service.snapshot();
+        world.file.fail_write(io::ErrorKind::Other);
+
+        let keys = KeyEdits {
+            transcription_api: replace("sk-test-new-api"),
+            local_server: KeyEdit::Untouched,
+            post_processing: replace("sk-test-new-pp"),
+        };
+        let (errors, form) =
+            expect_refused(service.save(req(with_start(sample(EngineKind::None), false), keys)));
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(form, Some(FormError::WriteFailed));
+        assert_eq!(
+            steps(&journal),
+            vec![
+                Step::Autostart(false),
+                Step::Key(CredentialOp::Write, API),
+                Step::Key(CredentialOp::Write, PP),
+                Step::WriteFile,
+                // Undo, in reverse: keys, then autostart.
+                Step::Key(CredentialOp::Delete, PP),
+                Step::Key(CredentialOp::Write, API),
+                Step::Autostart(true),
+            ]
+        );
+        assert!(world.autostart.is_on(), "Run value left removed");
+        assert_eq!(
+            stored(&world.creds),
+            [Some("sk-test-old-api".to_string()), None, None]
+        );
+        assert_eq!(world.file.bytes(), Some(bytes));
+        assert!(Arc::ptr_eq(&before, &service.snapshot()));
+        assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[test]
+    fn autostart_undo_failure_reports_partially_restored() {
+        // R-3 double failure: a failed autostart undo is named in not_restored, in
+        // step order (autostart before the key fields). Bite: the failed undo hidden
+        // (plain key.store_failed / WriteFailed), the field missing or after the
+        // keys, or the key undo skipped after the autostart undo fails.
+
+        // (a) A key failure; the autostart undo fails.
+        let world = World::new(
+            FakeSettingsFile::with_bytes(&json(&with_start(sample(EngineKind::None), false))),
+            FakeCredentialStore::new(),
+        );
+        world.creds.fail(CredentialOp::Write, LOCAL, STORE_ERR);
+        world.autostart.fail_set(false, RUN_ERR);
+        let (service, _) = world.load();
+        let keys = KeyEdits {
+            local_server: replace("sk-test-new-local"),
+            ..KeyEdits::default()
+        };
+        let (errors, form) =
+            expect_refused(service.save(req(with_start(sample(EngineKind::None), true), keys)));
+        assert_eq!(
+            errors,
+            vec![field_error(
+                FieldId::EngineLocalServerKey,
+                ErrorCode::KeyStoreFailed
+            )]
+        );
+        assert_eq!(
+            form,
+            Some(FormError::PartiallyRestored {
+                not_restored: vec![FieldId::GeneralStartWithWindows],
+            })
+        );
+        assert_eq!(
+            world.autostart.calls(),
+            vec![AutostartCall::Set(true), AutostartCall::Set(false)]
+        );
+        // The one documented leftover (R-3).
+        assert!(world.autostart.is_on());
+
+        // (b) A file write failure; only the autostart undo fails: PartiallyRestored
+        // replaces WriteFailed.
+        let world = World::new(
+            FakeSettingsFile::with_bytes(&json(&with_start(sample(EngineKind::None), false))),
+            FakeCredentialStore::new(),
+        );
+        world.autostart.fail_set(false, RUN_ERR);
+        let (service, _) = world.load();
+        world.file.fail_write(io::ErrorKind::Other);
+        let (errors, form) = expect_refused(service.save(req(
+            with_start(sample(EngineKind::None), true),
+            KeyEdits::default(),
+        )));
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(
+            form,
+            Some(FormError::PartiallyRestored {
+                not_restored: vec![FieldId::GeneralStartWithWindows],
+            })
+        );
+
+        // (c) A file write failure; the API key undo and the autostart undo both
+        // fail: every undo is tried, fields in step order.
+        let world = World::new(
+            FakeSettingsFile::with_bytes(&json(&with_start(sample(EngineKind::None), false))),
+            FakeCredentialStore::new(),
+        );
+        world.creds.fail(CredentialOp::Delete, API, STORE_ERR);
+        world.autostart.fail_set(false, RUN_ERR);
+        let (service, journal) = world.load_journaled();
+        world.file.fail_write(io::ErrorKind::Other);
+        let keys = KeyEdits {
+            transcription_api: replace("sk-test-new-api"),
+            ..KeyEdits::default()
+        };
+        let (errors, form) =
+            expect_refused(service.save(req(with_start(sample(EngineKind::None), true), keys)));
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(
+            form,
+            Some(FormError::PartiallyRestored {
+                not_restored: vec![FieldId::GeneralStartWithWindows, FieldId::EngineApiKey],
+            })
+        );
+        assert_eq!(
+            steps(&journal),
+            vec![
+                Step::Autostart(true),
+                Step::Key(CredentialOp::Write, API),
+                Step::WriteFile,
+                Step::Key(CredentialOp::Delete, API),
+                Step::Autostart(false),
+            ]
+        );
+    }
+
+    /// The file and credential calls after a load, for "reconcile touched neither".
+    #[track_caller]
+    fn assert_reconcile_touched_nothing_else(world: &World, after_load: &[FileCall]) {
+        assert_eq!(world.file.calls(), after_load, "reconcile touched the file");
+        assert!(
+            world.creds.calls().is_empty(),
+            "reconcile called the credential store: {:?}",
+            world.creds.calls()
+        );
+    }
+
+    #[test]
+    fn reconcile_autostart_on_writes_the_entry() {
+        // R-5: snapshot on → set(true) whether or not the entry exists (refreshes a
+        // stale path) → Written. Bite: set(true) skipped when is_enabled says
+        // present, a wrong action, or the file / store touched.
+        for present in [false, true] {
+            let fake = if present {
+                FakeAutostart::enabled()
+            } else {
+                FakeAutostart::new()
+            };
+            let world = World::new(
+                FakeSettingsFile::with_bytes(&json(&with_start(sample(EngineKind::None), true))),
+                FakeCredentialStore::new(),
+            )
+            .with_autostart(fake);
+            let (service, _) = world.load();
+
+            assert_eq!(
+                service.reconcile_autostart(),
+                ReconcileAction::Written,
+                "present={present}"
+            );
+            assert!(
+                world.autostart.calls().contains(&AutostartCall::Set(true)),
+                "present={present}: {:?}",
+                world.autostart.calls()
+            );
+            assert!(
+                !world.autostart.calls().contains(&AutostartCall::Set(false)),
+                "present={present}: {:?}",
+                world.autostart.calls()
+            );
+            assert!(world.autostart.is_on(), "present={present}");
+            assert_reconcile_touched_nothing_else(&world, &[FileCall::Read]);
+        }
+    }
+
+    #[test]
+    fn reconcile_autostart_off_removes_a_present_entry() {
+        // R-5: snapshot off + entry present → set(false) → Removed. Bite: the
+        // leftover kept, or removed without asking is_enabled first.
+        let world = World::new(
+            FakeSettingsFile::with_bytes(&json(&with_start(sample(EngineKind::None), false))),
+            FakeCredentialStore::new(),
+        )
+        .with_autostart(FakeAutostart::enabled());
+        let (service, _) = world.load();
+
+        assert_eq!(service.reconcile_autostart(), ReconcileAction::Removed);
+        assert_eq!(
+            world.autostart.calls(),
+            vec![AutostartCall::IsEnabled, AutostartCall::Set(false)]
+        );
+        assert!(!world.autostart.is_on());
+        assert_reconcile_touched_nothing_else(&world, &[FileCall::Read]);
+    }
+
+    #[test]
+    fn reconcile_autostart_off_and_absent_is_none_without_a_write() {
+        // Default-off users: one read, no OS write (Investigation: "is_enabled read
+        // only"). Bite: an unconditional set(false), or a wrong action.
+        let world = World::new(
+            FakeSettingsFile::with_bytes(&json(&with_start(sample(EngineKind::None), false))),
+            FakeCredentialStore::new(),
+        );
+        let (service, _) = world.load();
+
+        assert_eq!(service.reconcile_autostart(), ReconcileAction::None);
+        assert_eq!(world.autostart.calls(), vec![AutostartCall::IsEnabled]);
+        assert!(!world.autostart.is_on());
+        assert_reconcile_touched_nothing_else(&world, &[FileCall::Read]);
+    }
+
+    #[test]
+    fn reconcile_autostart_while_unavailable_makes_no_call() {
+        // #19 by analogy: the in-memory defaults say off; acting on them would
+        // delete the entry of a user whose real file merely could not be read.
+        // Bite: reconcile run from the defaults (set(false) on a present entry) or
+        // even an is_enabled read.
+        let world = World::new(
+            FakeSettingsFile::with_bytes(&json(&with_start(sample(EngineKind::None), true))),
+            FakeCredentialStore::new(),
+        )
+        .with_autostart(FakeAutostart::enabled());
+        world.file.fail_read(io::ErrorKind::PermissionDenied);
+        let (service, outcome) = world.load();
+        assert_eq!(outcome, LoadOutcome::Unavailable(defaults(OS)));
+
+        assert_eq!(service.reconcile_autostart(), ReconcileAction::None);
+        assert!(
+            world.autostart.calls().is_empty(),
+            "{:?}",
+            world.autostart.calls()
+        );
+        assert!(world.autostart.is_on(), "entry removed while Unavailable");
+        assert_reconcile_touched_nothing_else(&world, &[FileCall::Read]);
+    }
+
+    #[test]
+    fn reconcile_autostart_errors_are_failed() {
+        // R-11: any Autostart error → Failed, nothing else done. Bite: an error
+        // swallowed into Written / Removed / None, or set(false) after a failed
+        // is_enabled.
+        // on + set(true) fails.
+        let world = World::new(
+            FakeSettingsFile::with_bytes(&json(&with_start(sample(EngineKind::None), true))),
+            FakeCredentialStore::new(),
+        );
+        world.autostart.fail_set(true, RUN_ERR);
+        let (service, _) = world.load();
+        assert_eq!(service.reconcile_autostart(), ReconcileAction::Failed);
+        assert!(world.autostart.calls().contains(&AutostartCall::Set(true)));
+        assert!(!world.autostart.is_on());
+        assert_reconcile_touched_nothing_else(&world, &[FileCall::Read]);
+
+        // off + present + set(false) fails.
+        let world = World::new(
+            FakeSettingsFile::with_bytes(&json(&with_start(sample(EngineKind::None), false))),
+            FakeCredentialStore::new(),
+        )
+        .with_autostart(FakeAutostart::enabled());
+        world.autostart.fail_set(false, RUN_ERR);
+        let (service, _) = world.load();
+        assert_eq!(service.reconcile_autostart(), ReconcileAction::Failed);
+        assert_eq!(
+            world.autostart.calls(),
+            vec![AutostartCall::IsEnabled, AutostartCall::Set(false)]
+        );
+        assert!(world.autostart.is_on());
+
+        // off + is_enabled fails: no set at all.
+        let world = World::new(
+            FakeSettingsFile::with_bytes(&json(&with_start(sample(EngineKind::None), false))),
+            FakeCredentialStore::new(),
+        )
+        .with_autostart(FakeAutostart::enabled());
+        world.autostart.fail_is_enabled(RUN_ERR);
+        let (service, _) = world.load();
+        assert_eq!(service.reconcile_autostart(), ReconcileAction::Failed);
+        assert_eq!(world.autostart.calls(), vec![AutostartCall::IsEnabled]);
+        assert!(world.autostart.is_on());
+        assert_reconcile_touched_nothing_else(&world, &[FileCall::Read]);
+    }
+
+    #[test]
+    fn reconcile_autostart_first_run_and_reset_remove_a_leftover() {
+        // R-3/R-5: FirstRun and Reset reconcile from the defaults (off), matching
+        // the settings window. Bite: reconcile skipped for FirstRun / Reset like
+        // for Unavailable, or run before the defaults are in the snapshot.
+        // FirstRun.
+        let world = World::new(FakeSettingsFile::new(), FakeCredentialStore::new())
+            .with_autostart(FakeAutostart::enabled());
+        let (service, outcome) = world.load();
+        assert_eq!(outcome, LoadOutcome::FirstRun(defaults(OS)));
+        assert_eq!(service.reconcile_autostart(), ReconcileAction::Removed);
+        assert!(!world.autostart.is_on());
+        assert_eq!(
+            world.autostart.calls(),
+            vec![AutostartCall::IsEnabled, AutostartCall::Set(false)]
+        );
+        assert_reconcile_touched_nothing_else(&world, &[FileCall::Read, FileCall::WriteAtomic]);
+
+        // Reset.
+        let world = World::new(
+            FakeSettingsFile::with_bytes(b"{not json"),
+            FakeCredentialStore::new(),
+        )
+        .with_autostart(FakeAutostart::enabled());
+        let (service, outcome) = world.load();
+        assert!(matches!(outcome, LoadOutcome::Reset { .. }), "{outcome:?}");
+        assert_eq!(service.reconcile_autostart(), ReconcileAction::Removed);
+        assert!(!world.autostart.is_on());
+        assert_reconcile_touched_nothing_else(
+            &world,
+            &[
+                FileCall::Read,
+                FileCall::MoveAside(SUFFIX.to_string()),
+                FileCall::WriteAtomic,
+            ],
+        );
+    }
+
+    #[test]
+    fn reconcile_autostart_follows_the_saved_snapshot() {
+        // Reconcile reads the snapshot in force, not the load-time file. Bite: the
+        // value cached at load used instead of snapshot().
+        let world = World::new(
+            FakeSettingsFile::with_bytes(&json(&with_start(sample(EngineKind::None), true))),
+            FakeCredentialStore::new(),
+        )
+        .with_autostart(FakeAutostart::enabled());
+        let (service, _) = world.load();
+        expect_saved(service.save(req(
+            with_start(sample(EngineKind::None), false),
+            KeyEdits::default(),
+        )));
+        // The entry comes back behind the service's back (e.g. a stale value).
+        world.autostart.set(true).expect("fake set");
+        let before = world.autostart.calls().len();
+
+        assert_eq!(service.reconcile_autostart(), ReconcileAction::Removed);
+        assert_eq!(
+            world.autostart.calls()[before..],
+            [AutostartCall::IsEnabled, AutostartCall::Set(false)]
+        );
+        assert!(!world.autostart.is_on());
     }
 
     #[test]

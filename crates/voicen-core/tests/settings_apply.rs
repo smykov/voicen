@@ -7,6 +7,7 @@ use std::sync::mpsc::TryRecvError;
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
+use voicen_core::autostart::FakeAutostart;
 use voicen_core::clock::FakeClock;
 use voicen_core::hotkey_registrar::FakeHotkeyRegistrar;
 use voicen_core::i18n::UiLanguage;
@@ -27,6 +28,7 @@ fn deps(file: Arc<dyn SettingsFile>, creds: Arc<FakeCredentialStore>) -> Setting
     SettingsDeps {
         file,
         credentials: creds,
+        autostart: Arc::new(FakeAutostart::new()),
         hotkeys: Arc::new(FakeHotkeyRegistrar::new()),
         local_models: Arc::new(FakeDownloadedModels::new(&["base"])),
         clock: Arc::new(FakeClock::at(

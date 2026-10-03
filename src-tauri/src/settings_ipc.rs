@@ -20,6 +20,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Weak};
 
 use tauri::{AppHandle, Emitter, Runtime, State};
+use voicen_core::autostart::Autostart;
 use voicen_core::clock::SystemClock;
 use voicen_core::hotkey_registrar::{HotkeyRegistrar, Prepared, Unavailable};
 use voicen_core::models::DownloadedModels;
@@ -35,21 +36,25 @@ use voicen_core::settings::{LoadOutcome, Mode, WHISPER_ISO_639_1};
 pub const SETTINGS_CHANGED: &str = "settings://changed";
 
 /// Builds the service the release app and the tests share (J4): `FsSettingsFile`
-/// over `data_dir`, the given credential store, the interim `NoDownloadedModels`
-/// and fail-closed `HotkeyRegistrar`, `SystemClock`; then `load_or_init`.
+/// over `data_dir`, the given credential store and autostart entry, the interim
+/// `NoDownloadedModels` and fail-closed `HotkeyRegistrar`, `SystemClock`; then
+/// `load_or_init`, then `reconcile_autostart` (T-014, R-5).
 pub fn load_settings(
     data_dir: PathBuf,
     credentials: Arc<dyn CredentialStore>,
+    autostart: Arc<dyn Autostart>,
     os_language: Option<&str>,
 ) -> (Arc<SettingsService>, LoadOutcome) {
     let deps = SettingsDeps {
         file: Arc::new(FsSettingsFile::new(data_dir)),
         credentials,
+        autostart,
         hotkeys: Arc::new(InterimHotkeyRegistrar),
         local_models: Arc::new(NoDownloadedModels),
         clock: Arc::new(SystemClock),
     };
     let (service, outcome) = SettingsService::load_or_init(deps, os_language);
+    // RED STUB (T-014 test-writer): reconcile_autostart is not called yet.
     (Arc::new(service), outcome)
 }
 

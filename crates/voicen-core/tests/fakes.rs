@@ -1,6 +1,7 @@
 //! The public test fakes (feature `test-fakes`, decision #23 N4), used from outside
 //! the crate the way T-032's and T-030's tests will use them.
 
+use voicen_core::autostart::{Autostart, AutostartCall, AutostartError, FakeAutostart};
 use voicen_core::hotkey_registrar::{
     FakeHotkeyRegistrar, HotkeyRegistrar, RegistrarCall, Unavailable,
 };
@@ -247,6 +248,50 @@ fn traits_are_object_safe_and_shareable() {
     assert_send_sync::<dyn CredentialStore>();
     assert_send_sync::<dyn HotkeyRegistrar>();
     assert_send_sync::<dyn DownloadedModels>();
+    assert_send_sync::<dyn Autostart>();
     let _shared: Vec<std::sync::Arc<dyn CredentialStore>> =
         vec![std::sync::Arc::new(FakeCredentialStore::new())];
+}
+
+#[test]
+fn fake_autostart_records_calls_and_fails_per_value() {
+    // The fake the T-014 service tests rely on. Bite: a call not recorded, a
+    // failed set changing the state, or a failure injected for one value hitting
+    // the other.
+    let fake = FakeAutostart::new();
+    assert!(!fake.is_on());
+    assert_eq!(fake.is_enabled(), Ok(false));
+    fake.set(true).expect("set(true)");
+    assert!(fake.is_on());
+
+    let err = AutostartError { os_code: 5 };
+    fake.fail_set(false, err);
+    assert_eq!(fake.set(false), Err(err));
+    assert!(fake.is_on(), "a failed set changed the state");
+    fake.set(true).expect("set(true) still succeeds");
+
+    fake.fail_is_enabled(err);
+    assert_eq!(fake.is_enabled(), Err(err));
+    fake.clear_failures();
+    fake.set(false).expect("cleared");
+    assert!(!fake.is_on());
+
+    assert_eq!(
+        fake.calls(),
+        vec![
+            AutostartCall::IsEnabled,
+            AutostartCall::Set(true),
+            AutostartCall::Set(false),
+            AutostartCall::Set(true),
+            AutostartCall::IsEnabled,
+            AutostartCall::Set(false),
+        ]
+    );
+
+    let on = FakeAutostart::enabled();
+    assert!(on.is_on());
+    assert!(on.calls().is_empty(), "enabled() recorded a call");
+    on.fail_set(true, err);
+    on.set(false)
+        .expect("set(false) unaffected by fail_set(true)");
 }
