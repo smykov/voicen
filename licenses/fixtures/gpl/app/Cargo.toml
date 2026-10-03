@@ -1,0 +1,9 @@
+[package]
+name = "licenses-fixture-app"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+gpl-fixture = { path = "../gpl-fixture" }
+nolicense-fixture = { path = "../nolicense-fixture" }

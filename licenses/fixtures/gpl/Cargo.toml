@@ -1,0 +1,9 @@
+# Red-by-design fixture (T-027): `make licenses-check` runs cargo-about with the real
+# about.toml on this workspace and requires it to FAIL naming gpl-fixture and
+# nolicense-fixture (scripts/licenses/fixture-check.sh). Its own [workspace], so the
+# root workspace never includes it; path-only crates, so it needs no network.
+# Do not mark the crates `publish = false`: a `private = { ignore = true }` setting in
+# about.toml would then skip them and the guard would pass for the wrong reason.
+[workspace]
+members = ["app", "gpl-fixture", "nolicense-fixture"]
+resolver = "2"

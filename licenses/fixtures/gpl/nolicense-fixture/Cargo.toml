@@ -1,0 +1,5 @@
+# No `license`, no `license-file`, and no LICENSE file in this directory, on purpose.
+[package]
+name = "nolicense-fixture"
+version = "0.1.0"
+edition = "2021"

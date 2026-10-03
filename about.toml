@@ -1,0 +1,32 @@
+# cargo-about configuration and the ONE accepted-license list of the project (T-027).
+# The list is decision #9 plus the five licenses decision #24 added. It is read by
+# cargo-about (Rust crates) and by scripts/licenses/accepted.mjs (npm bundle and
+# licenses/manual.json). Changing it is an owner decision: add a docs/decisions.md row
+# first, never edit the list alone (P-010).
+accepted = [
+    # decision #9
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "MPL-2.0",
+    "Unlicense",
+    "CC0-1.0",
+    # decision #24
+    "Apache-2.0 WITH LLVM-exception",
+    "0BSD",
+    "BSL-1.0",
+    "Unicode-DFS-2016",
+    "CDLA-Permissive-2.0",
+]
+
+# Only what ships: the Windows target's normal dependency graph.
+# Keys to verify against the pinned cargo-about version (context7 was not available to the
+# test writer): `targets`, `ignore-build-dependencies`, `ignore-dev-dependencies`, and the
+# key that disables clearlydefined.io lookups (investigation: `no-clearly-defined`).
+targets = ["x86_64-pc-windows-msvc"]
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
