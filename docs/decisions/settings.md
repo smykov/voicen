@@ -1,8 +1,8 @@
 # Settings and keys (core types and pure rules)
 
-**Code:** `crates/voicen-core/src/{secrets,hotkey_registrar,models}.rs`, `src/settings/{mod,url,validate,gate,hotkey}.rs`, `src/post_process/settings.rs` (T-003); `SettingsFile` and `SettingsService` are added by T-032 · **Tests that pin it:** `settings::tests::{missing_fields_take_defaults, settings_json_has_no_key_field}`, `secrets::tests::{key_slot_target_names, key_edits_debug_never_shows_a_key, key_presence_is_per_slot_and_serializes_only_booleans}` and the `compile_fail` doctest in `secrets.rs`, `settings::hotkey::{rejects_non_canonical_text, parse_then_format_is_identity_for_every_accepted_string, rejects_invalid_strings}`
+**Code:** `crates/voicen-core/src/{secrets,hotkey_registrar,models}.rs`, `src/settings/{mod,url,validate,gate,hotkey}.rs`, `src/post_process/settings.rs` (T-003); `SettingsFile` and `SettingsService` are added by T-032 · **Tests that pin it:** `settings::tests::{missing_fields_take_defaults, settings_json_has_no_key_field}`, `secrets::tests::{key_slot_target_names, key_edits_debug_never_shows_a_key, key_presence_is_per_slot_and_serializes_only_booleans}` and the `compile_fail` doctest in `secrets.rs`, `settings::hotkey::tests::{rejects_non_canonical_text, parse_then_format_is_identity_for_every_accepted_string, rejects_invalid_strings}`
 
-Tasks: T-003, T-032. Contract: `specs/004-settings-and-first-run/{data-model.md,contracts/core-traits.md}`. Decisions: #17, #21, #23, #25, #26, #27, #28, #30.
+Tasks: T-003, T-032. Contract: `specs/004-settings-and-first-run/{data-model.md,contracts/core-traits.md}`. Decisions: #17, #21, #23, #25, #26, #27, #28, #30, #31.
 
 ## Invariants
 
@@ -31,7 +31,7 @@ Tasks: T-003, T-032. Contract: `specs/004-settings-and-first-run/{data-model.md,
 
 - **Defect that produced it:** none yet (found in T-003 review of the contract, decisions #25, #26). The first contract added numpad operator keys that research R-6 does not contain.
 - **What breaks if you violate it:** two spellings of one hotkey in the file, UI and logs (P-010), or a key the shell cannot map to a virtual-key code.
-- **Where it is enforced:** `settings::hotkey::parse_hotkey` accepts the canonical text only (exact case, order `Ctrl`, `Alt`, `Shift`, `Win`, each once, key last) from the closed 82-key set; the rest is `hotkey.invalid`; `rejects_non_canonical_text`, `parse_then_format_is_identity_for_every_accepted_string`, `rejects_invalid_strings` (all in `settings::hotkey`).
+- **Where it is enforced:** `settings::hotkey::parse_hotkey` accepts the canonical text only (exact case, order `Ctrl`, `Alt`, `Shift`, `Win`, each once, key last) from the closed 82-key set; the rest is `hotkey.invalid`; `rejects_non_canonical_text`, `parse_then_format_is_identity_for_every_accepted_string`, `rejects_invalid_strings` (all in `settings::hotkey::tests`).
 - **Don't:** accept lowercase or reordered input and normalize it, or add keys outside R-6 without changing the research and the spec.
 
 ### A base URL never carries userinfo
