@@ -426,4 +426,33 @@ mod tests {
             b"{bad 1"
         );
     }
+
+    #[test]
+    fn move_aside_rename_failure_removes_reservation() {
+        // core-traits.md (move_aside): a failed rename is Err with settings.json in
+        // place, and the empty reservation is removed. Bite: the
+        // `remove_file(&target)` after a failed rename dropped (an empty
+        // settings.json.bad-<UTC> left behind, using up one of the ten names), the
+        // error swallowed, or the next candidate tried after a rename error.
+        // No settings.json: the reservation succeeds, the rename fails (NotFound).
+        let dir = TempDir::new();
+        let file = FsSettingsFile::new(dir.path().to_path_buf());
+        let err = file
+            .move_aside("S")
+            .expect_err("nothing to move: the rename fails");
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+        assert!(entries(dir.path()).is_empty(), "{:?}", entries(dir.path()));
+
+        // The base name already taken: only the reservation (-1) goes; the
+        // existing backup is kept as it was.
+        let base = format!("{SETTINGS_FILE}.bad-S");
+        fs::write(dir.path().join(&base), b"marker older backup").expect("seed backup");
+        file.move_aside("S")
+            .expect_err("nothing to move: the rename fails");
+        assert_eq!(entries(dir.path()), vec![base.clone()]);
+        assert_eq!(
+            fs::read(dir.path().join(&base)).expect("older backup kept"),
+            b"marker older backup"
+        );
+    }
 }

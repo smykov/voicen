@@ -1050,6 +1050,70 @@ mod tests {
     }
 
     #[test]
+    fn clear_deletes_and_saved_view_reports_absent() {
+        // AC4 "only Clear deletes" on the success path, and the Saved view's
+        // presence taken from the applied edits (core-traits.md). Bite: the Delete
+        // step reported as present (`.map(|()| true)` at the KeyStep::Delete arm),
+        // the delete skipped, a sibling slot touched, or view() reading stale
+        // presence.
+        let old = [
+            (API, "sk-test-old-api"),
+            (LOCAL, "sk-test-old-local"),
+            (PP, "sk-test-old-pp"),
+        ];
+        for slot in KeySlot::all() {
+            let world = World::new(
+                FakeSettingsFile::with_bytes(&json(&sample(EngineKind::None))),
+                FakeCredentialStore::new()
+                    .with_key(old[0].0, old[0].1)
+                    .with_key(old[1].0, old[1].1)
+                    .with_key(old[2].0, old[2].1),
+            );
+            let (service, _) = world.load();
+
+            let mut keys = KeyEdits::default();
+            match slot {
+                KeySlot::TranscriptionApi => keys.transcription_api = KeyEdit::Clear,
+                KeySlot::LocalServer => keys.local_server = KeyEdit::Clear,
+                KeySlot::PostProcessing => keys.post_processing = KeyEdit::Clear,
+            }
+            let mut draft = sample(EngineKind::None);
+            draft.history.size = 42;
+            let saved = expect_saved(service.save(req(draft.clone(), keys)));
+
+            let expected_stored: Vec<Option<String>> = old
+                .iter()
+                .map(|(s, key)| (*s != slot).then(|| key.to_string()))
+                .collect();
+            assert_eq!(stored(&world.creds).to_vec(), expected_stored, "{slot:?}");
+            assert_eq!(
+                changes(&world.creds),
+                vec![call(CredentialOp::Delete, slot)],
+                "{slot:?}"
+            );
+
+            let expected_presence = KeyPresence {
+                transcription_api: slot != API,
+                local_server: slot != LOCAL,
+                post_processing: slot != PP,
+            };
+            assert_eq!(saved.keys, expected_presence, "{slot:?}: Saved view");
+            assert_eq!(saved.settings, draft, "{slot:?}");
+            assert_eq!(
+                service.view().keys,
+                expected_presence,
+                "{slot:?}: later view()"
+            );
+            assert_eq!(*service.snapshot(), draft, "{slot:?}");
+            assert_eq!(
+                parse(&world.file.bytes().expect("file written")),
+                draft,
+                "{slot:?}"
+            );
+        }
+    }
+
+    #[test]
     fn save_stores_normalized_values() {
         // Bite: normalize skipped, applied only to the selected engine or only to
         // valid URLs, stripping more than one `/`, schema_version 0 written back as
@@ -1374,6 +1438,84 @@ mod tests {
                 call(CredentialOp::Delete, PP),
                 call(CredentialOp::Write, API),
             ]
+        );
+    }
+
+    #[test]
+    fn partially_restored_lists_fields_in_slot_order() {
+        // The doc of `undo` and FormError::PartiallyRestored: the key fields still
+        // changed, in slot order. The undo runs in reverse, so two failing undos
+        // come out reversed. Bite: `not_restored.reverse()` removed, or the undo
+        // stopping at its first error (the second field would be missing).
+        // A file write failure; the undos of API and PP fail, LOCAL's succeeds.
+        let bytes = json(&sample(EngineKind::None));
+        let world = World::new(
+            FakeSettingsFile::with_bytes(&bytes),
+            FakeCredentialStore::new(),
+        );
+        world.creds.fail(CredentialOp::Delete, API, STORE_ERR);
+        world.creds.fail(CredentialOp::Delete, PP, STORE_ERR);
+        let (service, _) = world.load();
+        world.file.fail_write(io::ErrorKind::Other);
+
+        let keys = KeyEdits {
+            transcription_api: replace("sk-test-new-api"),
+            local_server: replace("sk-test-new-local"),
+            post_processing: replace("sk-test-new-pp"),
+        };
+        let (errors, form) = expect_refused(service.save(req(sample(EngineKind::None), keys)));
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(
+            form,
+            Some(FormError::PartiallyRestored {
+                not_restored: vec![FieldId::EngineApiKey, FieldId::PostProcessingKey],
+            })
+        );
+        assert_eq!(
+            changes(&world.creds),
+            vec![
+                call(CredentialOp::Write, API),
+                call(CredentialOp::Write, LOCAL),
+                call(CredentialOp::Write, PP),
+                // Undo, in reverse; every step tried.
+                call(CredentialOp::Delete, PP),
+                call(CredentialOp::Delete, LOCAL),
+                call(CredentialOp::Delete, API),
+            ]
+        );
+        assert_eq!(
+            stored(&world.creds),
+            [
+                Some("sk-test-new-api".to_string()),
+                None,
+                Some("sk-test-new-pp".to_string()),
+            ]
+        );
+        assert_eq!(world.file.bytes(), Some(bytes));
+
+        // A key failure on PP; the undos of API and LOCAL both fail.
+        let world = World::new(
+            FakeSettingsFile::with_bytes(&json(&sample(EngineKind::None))),
+            FakeCredentialStore::new(),
+        );
+        world.creds.fail(CredentialOp::Write, PP, STORE_ERR);
+        world.creds.fail(CredentialOp::Delete, API, STORE_ERR);
+        world.creds.fail(CredentialOp::Delete, LOCAL, STORE_ERR);
+        let (service, _) = world.load();
+        let keys = all_keys(|| replace("sk-test-new"));
+        let (errors, form) = expect_refused(service.save(req(sample(EngineKind::None), keys)));
+        assert_eq!(
+            errors,
+            vec![field_error(
+                FieldId::PostProcessingKey,
+                ErrorCode::KeyStoreFailed
+            )]
+        );
+        assert_eq!(
+            form,
+            Some(FormError::PartiallyRestored {
+                not_restored: vec![FieldId::EngineApiKey, FieldId::EngineLocalServerKey],
+            })
         );
     }
 
