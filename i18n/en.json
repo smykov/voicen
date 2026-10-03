@@ -1,4 +1,5 @@
 {
   "app.build_info": "Voicen {version} ({commit})",
-  "app.build_info_error": "Cannot read build info: {reason}"
+  "app.build_info_error": "Cannot read build info: {reason}",
+  "notice.choose_engine": "Choose a transcription engine in Settings to start dictating."
 }

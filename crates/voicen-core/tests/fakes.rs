@@ -1,0 +1,252 @@
+//! The public test fakes (feature `test-fakes`, decision #23 N4), used from outside
+//! the crate the way T-032's and T-030's tests will use them.
+
+use voicen_core::hotkey_registrar::{
+    FakeHotkeyRegistrar, HotkeyRegistrar, RegistrarCall, Unavailable,
+};
+use voicen_core::models::{DownloadedModels, FakeDownloadedModels};
+use voicen_core::secrets::{
+    CredentialCall, CredentialError, CredentialOp, CredentialStore, FakeCredentialStore, KeySlot,
+    Secret,
+};
+use voicen_core::settings::hotkey::{Hotkey, HotkeyKey};
+use voicen_core::settings::Mode;
+
+fn call(op: CredentialOp, slot: KeySlot) -> CredentialCall {
+    CredentialCall { op, slot }
+}
+
+fn read_value(store: &dyn CredentialStore, slot: KeySlot) -> Option<String> {
+    store
+        .read(slot)
+        .expect("read succeeds")
+        .map(|s| s.expose().to_string())
+}
+
+#[test]
+fn fake_credential_store_records_calls_per_slot() {
+    // Bite: a call not recorded, recorded under another slot, or out of order.
+    let store = FakeCredentialStore::new();
+    store
+        .write(KeySlot::TranscriptionApi, &Secret::new("sk-test-api"))
+        .expect("write");
+    let _ = store.read(KeySlot::LocalServer).expect("read");
+    store.delete(KeySlot::PostProcessing).expect("delete");
+    let _ = store.read(KeySlot::TranscriptionApi).expect("read");
+    assert_eq!(
+        store.calls(),
+        vec![
+            call(CredentialOp::Write, KeySlot::TranscriptionApi),
+            call(CredentialOp::Read, KeySlot::LocalServer),
+            call(CredentialOp::Delete, KeySlot::PostProcessing),
+            call(CredentialOp::Read, KeySlot::TranscriptionApi),
+        ]
+    );
+}
+
+#[test]
+fn fake_credential_store_keeps_slots_apart() {
+    // Bite: one shared value for all slots; delete of one slot touching another.
+    let store = FakeCredentialStore::new()
+        .with_key(KeySlot::TranscriptionApi, "sk-test-api")
+        .with_key(KeySlot::LocalServer, "sk-test-local");
+    assert!(store.calls().is_empty(), "with_key is not a recorded call");
+
+    store
+        .write(KeySlot::PostProcessing, &Secret::new("sk-test-pp"))
+        .expect("write");
+    assert_eq!(
+        read_value(&store, KeySlot::TranscriptionApi).as_deref(),
+        Some("sk-test-api")
+    );
+    assert_eq!(
+        read_value(&store, KeySlot::LocalServer).as_deref(),
+        Some("sk-test-local")
+    );
+    assert_eq!(
+        read_value(&store, KeySlot::PostProcessing).as_deref(),
+        Some("sk-test-pp")
+    );
+
+    store.delete(KeySlot::LocalServer).expect("delete");
+    assert_eq!(read_value(&store, KeySlot::LocalServer), None);
+    assert_eq!(store.stored(KeySlot::LocalServer), None);
+    assert_eq!(
+        store.stored(KeySlot::TranscriptionApi).as_deref(),
+        Some("sk-test-api")
+    );
+
+    // Deleting an absent key is Ok (contract).
+    store
+        .delete(KeySlot::LocalServer)
+        .expect("absent delete is Ok");
+
+    // Overwrite replaces the value.
+    store
+        .write(KeySlot::TranscriptionApi, &Secret::new("sk-test-api-2"))
+        .expect("write");
+    assert_eq!(
+        store.stored(KeySlot::TranscriptionApi).as_deref(),
+        Some("sk-test-api-2")
+    );
+}
+
+#[test]
+fn fake_credential_store_injected_failures() {
+    // Bite: the failure ignored, applied to another slot or op, or changing the slot.
+    let store = FakeCredentialStore::new().with_key(KeySlot::LocalServer, "sk-test-old");
+    let err = CredentialError { os_code: 1312 };
+    store.fail(CredentialOp::Write, KeySlot::LocalServer, err);
+    store.fail(CredentialOp::Delete, KeySlot::PostProcessing, err);
+    store.fail(CredentialOp::Read, KeySlot::TranscriptionApi, err);
+
+    assert_eq!(
+        store.write(KeySlot::LocalServer, &Secret::new("sk-test-new")),
+        Err(err)
+    );
+    assert_eq!(
+        store.stored(KeySlot::LocalServer).as_deref(),
+        Some("sk-test-old")
+    );
+    // Persistent until cleared.
+    assert_eq!(
+        store.write(KeySlot::LocalServer, &Secret::new("sk-test-new")),
+        Err(err)
+    );
+    assert_eq!(store.delete(KeySlot::PostProcessing), Err(err));
+    assert!(matches!(store.read(KeySlot::TranscriptionApi), Err(e) if e == err));
+
+    // Other ops on the same slot, and the same op on other slots, still work.
+    assert_eq!(
+        read_value(&store, KeySlot::LocalServer).as_deref(),
+        Some("sk-test-old")
+    );
+    store
+        .write(KeySlot::PostProcessing, &Secret::new("sk-test-pp"))
+        .expect("write on another slot");
+    store
+        .delete(KeySlot::LocalServer)
+        .expect("delete on the failing slot");
+
+    // Failed calls are recorded too.
+    let calls = store.calls();
+    assert_eq!(calls.len(), 7, "{calls:?}");
+    assert_eq!(calls[0], call(CredentialOp::Write, KeySlot::LocalServer));
+
+    store.clear_failures();
+    store
+        .write(KeySlot::LocalServer, &Secret::new("sk-test-new"))
+        .expect("write after clear");
+    assert_eq!(
+        store.stored(KeySlot::LocalServer).as_deref(),
+        Some("sk-test-new")
+    );
+}
+
+fn hotkey(key: HotkeyKey) -> Hotkey {
+    Hotkey {
+        ctrl: true,
+        alt: true,
+        shift: false,
+        win: false,
+        key,
+    }
+}
+
+#[test]
+fn fake_hotkey_registrar_two_phase_with_call_log() {
+    // Bite: commit not making the hotkey active, abort changing it, calls not logged.
+    let registrar = FakeHotkeyRegistrar::new();
+    assert_eq!(registrar.active(), None);
+
+    let first = registrar
+        .prepare(hotkey(HotkeyKey::Space), Mode::Hold)
+        .expect("prepare");
+    assert_eq!(first.hotkey, hotkey(HotkeyKey::Space));
+    assert_eq!(first.mode, Mode::Hold);
+    assert_eq!(registrar.active(), None, "prepare alone does not activate");
+    registrar.commit(first);
+    assert_eq!(
+        registrar.active(),
+        Some((hotkey(HotkeyKey::Space), Mode::Hold))
+    );
+
+    let second = registrar
+        .prepare(hotkey(HotkeyKey::F9), Mode::Toggle)
+        .expect("prepare");
+    registrar.abort(second);
+    assert_eq!(
+        registrar.active(),
+        Some((hotkey(HotkeyKey::Space), Mode::Hold)),
+        "abort keeps the old hotkey"
+    );
+
+    assert_eq!(
+        registrar.calls(),
+        vec![
+            RegistrarCall::Prepare(hotkey(HotkeyKey::Space), Mode::Hold),
+            RegistrarCall::Commit(hotkey(HotkeyKey::Space)),
+            RegistrarCall::Prepare(hotkey(HotkeyKey::F9), Mode::Toggle),
+            RegistrarCall::Abort(hotkey(HotkeyKey::F9)),
+        ]
+    );
+}
+
+#[test]
+fn fake_hotkey_registrar_injected_prepare_failure() {
+    // Bite: the injected failure ignored, or a failed prepare changing the active key.
+    let registrar = FakeHotkeyRegistrar::new();
+    let ok = registrar
+        .prepare(hotkey(HotkeyKey::Space), Mode::Hold)
+        .expect("prepare");
+    registrar.commit(ok);
+
+    registrar.fail_prepare(true);
+    assert_eq!(
+        registrar.prepare(hotkey(HotkeyKey::A), Mode::Toggle),
+        Err(Unavailable)
+    );
+    assert_eq!(
+        registrar.active(),
+        Some((hotkey(HotkeyKey::Space), Mode::Hold))
+    );
+    assert_eq!(
+        registrar.calls().last(),
+        Some(&RegistrarCall::Prepare(hotkey(HotkeyKey::A), Mode::Toggle)),
+        "a failed prepare is recorded"
+    );
+
+    registrar.fail_prepare(false);
+    assert!(registrar
+        .prepare(hotkey(HotkeyKey::A), Mode::Toggle)
+        .is_ok());
+}
+
+#[test]
+fn fake_downloaded_models_reports_only_its_ids() {
+    // Bite: is_downloaded true for an unknown id, or list() not the given ids.
+    let models = FakeDownloadedModels::new(&["base", "small"]);
+    assert!(models.is_downloaded("base"));
+    assert!(models.is_downloaded("small"));
+    assert!(!models.is_downloaded("tiny"));
+    assert!(!models.is_downloaded(""));
+    assert!(!models.is_downloaded("Base"), "ids are exact strings");
+    let mut list = models.list();
+    list.sort();
+    assert_eq!(list, vec!["base".to_string(), "small".to_string()]);
+
+    let empty = FakeDownloadedModels::new(&[]);
+    assert!(!empty.is_downloaded("base"));
+    assert!(empty.list().is_empty());
+}
+
+#[test]
+fn traits_are_object_safe_and_shareable() {
+    // SettingsDeps holds them as Arc<dyn Trait> across threads (contracts/core-traits.md).
+    fn assert_send_sync<T: Send + Sync + ?Sized>() {}
+    assert_send_sync::<dyn CredentialStore>();
+    assert_send_sync::<dyn HotkeyRegistrar>();
+    assert_send_sync::<dyn DownloadedModels>();
+    let _shared: Vec<std::sync::Arc<dyn CredentialStore>> =
+        vec![std::sync::Arc::new(FakeCredentialStore::new())];
+}

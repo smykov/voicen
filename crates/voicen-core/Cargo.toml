@@ -9,3 +9,14 @@ rust-version.workspace = true
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+[features]
+# Public test fakes (FakeCredentialStore, FakeHotkeyRegistrar, FakeDownloadedModels)
+# for this crate's integration tests and for other crates' tests (decision #23 N4).
+# Never enabled in a release build.
+test-fakes = []
+
+[dev-dependencies]
+# Self dev-dependency: switches `test-fakes` on for this crate's own tests
+# (unit, integration and doc tests), so `tests/*.rs` can use the public fakes.
+voicen-core = { path = ".", features = ["test-fakes"] }

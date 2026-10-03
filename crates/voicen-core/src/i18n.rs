@@ -57,8 +57,11 @@ macro_rules! messages {
 }
 
 // Rust-originated ids. Each one must exist in both i18n/en.json and i18n/ru.json
-// (test `message_ids_exist_in_both_catalogs`). None yet.
-messages! {}
+// (test `message_ids_exist_in_both_catalogs`).
+messages! {
+    /// Hotkey pressed while engine = none (spec 004 FR-007; `settings::gate::blocked_actions`).
+    NOTICE_CHOOSE_ENGINE = "notice.choose_engine",
+}
 
 /// Both catalogs (en, ru) as parsed flat id -> text maps.
 #[derive(Debug, Default)]
