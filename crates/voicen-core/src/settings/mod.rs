@@ -10,8 +10,10 @@
 //! `ui_language` loads the language of `defaults(None)` (`en`); release-1 files
 //! always contain the field.
 
+pub mod file;
 pub mod gate;
 pub mod hotkey;
+pub mod service;
 pub mod url;
 pub mod validate;
 
