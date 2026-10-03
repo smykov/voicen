@@ -47,6 +47,10 @@ flowchart LR
 | data directory `%LOCALAPPDATA%\Voicen` | shell (one function) | logs, settings, history, models |
 | timeouts (FR-24) | `voicen-core` | engines, post-processing |
 | user-visible text | `i18n/{en,ru}.json` via `voicen_core::i18n` and `$lib/i18n` | shell, UI |
+| settings defaults | `voicen_core::settings::defaults(os_tag)` (container-level serde default; one source) | `Settings` deserialization, first run, reset, UI |
+| API keys | `voicen_core::secrets::CredentialStore` by `KeySlot`; the file and `SettingsView` never hold a key | engines and post-processing (read), settings save (write, delete) |
+| base-URL rule | `voicen_core::settings::url::check_base_url` | validation, connection test, engines |
+| hotkey grammar | `voicen_core::settings::hotkey` (`parse_hotkey`, canonical text only) | validation, UI capture, registrar |
 | UI language | `SettingsView.settings.ui_language` (default from `resolve_ui_language`, T-004); the UI never derives it | UI, shell text |
 
 ## Environments

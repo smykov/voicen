@@ -5,7 +5,13 @@
 //! one modifier, exactly one key, never `Esc` (reserved for cancel, FR-22). Whether a
 //! valid hotkey can be registered is the registrar's question, not the grammar's.
 //!
-//! STUB (T-003 red tests): every body is `todo!()`; the developer implements them.
+//! Key names (decision #25): letters `A`–`Z`, digits `0`–`9`, `F1`–`F24`, `Space`,
+//! `Insert`, `Delete`, `Home`, `End`, `PageUp`, `PageDown`, the arrows `Up`, `Down`,
+//! `Left`, `Right`, `Pause`, and numpad digits `Num0`–`Num9`.
+//!
+//! Parsing accepts the canonical text only (exact case, modifiers in canonical
+//! order, each once, the key last), so every accepted string is its own canonical
+//! form: `parse_hotkey(s)?.to_string() == s`.
 
 use std::fmt;
 
@@ -99,9 +105,120 @@ pub enum HotkeyKey {
 impl HotkeyKey {
     /// Every key of the closed set, once.
     pub fn all() -> &'static [HotkeyKey] {
-        todo!("T-003: HotkeyKey::all")
+        &ALL_KEYS
+    }
+
+    /// The key's text in the canonical hotkey string.
+    fn name(self) -> &'static str {
+        use HotkeyKey::*;
+        match self {
+            A => "A",
+            B => "B",
+            C => "C",
+            D => "D",
+            E => "E",
+            F => "F",
+            G => "G",
+            H => "H",
+            I => "I",
+            J => "J",
+            K => "K",
+            L => "L",
+            M => "M",
+            N => "N",
+            O => "O",
+            P => "P",
+            Q => "Q",
+            R => "R",
+            S => "S",
+            T => "T",
+            U => "U",
+            V => "V",
+            W => "W",
+            X => "X",
+            Y => "Y",
+            Z => "Z",
+            Digit0 => "0",
+            Digit1 => "1",
+            Digit2 => "2",
+            Digit3 => "3",
+            Digit4 => "4",
+            Digit5 => "5",
+            Digit6 => "6",
+            Digit7 => "7",
+            Digit8 => "8",
+            Digit9 => "9",
+            F1 => "F1",
+            F2 => "F2",
+            F3 => "F3",
+            F4 => "F4",
+            F5 => "F5",
+            F6 => "F6",
+            F7 => "F7",
+            F8 => "F8",
+            F9 => "F9",
+            F10 => "F10",
+            F11 => "F11",
+            F12 => "F12",
+            F13 => "F13",
+            F14 => "F14",
+            F15 => "F15",
+            F16 => "F16",
+            F17 => "F17",
+            F18 => "F18",
+            F19 => "F19",
+            F20 => "F20",
+            F21 => "F21",
+            F22 => "F22",
+            F23 => "F23",
+            F24 => "F24",
+            Space => "Space",
+            Insert => "Insert",
+            Delete => "Delete",
+            Home => "Home",
+            End => "End",
+            PageUp => "PageUp",
+            PageDown => "PageDown",
+            ArrowUp => "Up",
+            ArrowDown => "Down",
+            ArrowLeft => "Left",
+            ArrowRight => "Right",
+            Pause => "Pause",
+            Numpad0 => "Num0",
+            Numpad1 => "Num1",
+            Numpad2 => "Num2",
+            Numpad3 => "Num3",
+            Numpad4 => "Num4",
+            Numpad5 => "Num5",
+            Numpad6 => "Num6",
+            Numpad7 => "Num7",
+            Numpad8 => "Num8",
+            Numpad9 => "Num9",
+        }
+    }
+
+    fn from_name(name: &str) -> Option<HotkeyKey> {
+        ALL_KEYS.iter().copied().find(|key| key.name() == name)
     }
 }
+
+const ALL_KEYS: [HotkeyKey; 82] = {
+    use HotkeyKey::*;
+    [
+        A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T, U, V, W, X, Y, Z, Digit0,
+        Digit1, Digit2, Digit3, Digit4, Digit5, Digit6, Digit7, Digit8, Digit9, F1, F2, F3, F4, F5,
+        F6, F7, F8, F9, F10, F11, F12, F13, F14, F15, F16, F17, F18, F19, F20, F21, F22, F23, F24,
+        Space, Insert, Delete, Home, End, PageUp, PageDown, ArrowUp, ArrowDown, ArrowLeft,
+        ArrowRight, Pause, Numpad0, Numpad1, Numpad2, Numpad3, Numpad4, Numpad5, Numpad6, Numpad7,
+        Numpad8, Numpad9,
+    ]
+};
+
+/// Modifier names in canonical order; the index is the rank.
+const MODIFIERS: [&str; 4] = ["Ctrl", "Alt", "Shift", "Win"];
+
+/// Spellings of the cancel key; never a hotkey key (FR-22).
+const ESC_NAMES: [&str; 2] = ["Esc", "Escape"];
 
 /// A hotkey: modifiers + one key. `Display` writes the canonical text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -114,9 +231,12 @@ pub struct Hotkey {
 }
 
 impl fmt::Display for Hotkey {
-    #[allow(unused_variables)] // STUB: body is todo!()
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        todo!("T-003: Hotkey Display (canonical format)")
+        let flags = [self.ctrl, self.alt, self.shift, self.win];
+        for (name, _) in MODIFIERS.iter().zip(flags).filter(|(_, on)| *on) {
+            write!(f, "{name}+")?;
+        }
+        f.write_str(self.key.name())
     }
 }
 
@@ -130,13 +250,67 @@ pub enum HotkeyError {
     /// `Esc` used as the key (code `hotkey.esc_reserved`).
     EscReserved,
     /// Anything else the grammar does not accept: unknown token, a second key, a
-    /// repeated modifier, an empty part.
+    /// repeated or out-of-order modifier, an empty part (code `hotkey.invalid`).
     Invalid,
 }
 
-#[allow(unused_variables)] // STUB: body is todo!()
+enum Token {
+    Modifier(usize),
+    Esc,
+    Key(HotkeyKey),
+}
+
+fn token(part: &str) -> Option<Token> {
+    if let Some(rank) = MODIFIERS.iter().position(|&m| m == part) {
+        Some(Token::Modifier(rank))
+    } else if ESC_NAMES.contains(&part) {
+        Some(Token::Esc)
+    } else {
+        HotkeyKey::from_name(part).map(Token::Key)
+    }
+}
+
+/// Parses the canonical text (see the module docs). Structural errors (unknown
+/// token, empty part, a part after the key, a repeated or out-of-order modifier)
+/// are [`HotkeyError::Invalid`]; otherwise a missing key, `Esc` as the key and a
+/// missing modifier are reported in that order.
 pub fn parse_hotkey(s: &str) -> Result<Hotkey, HotkeyError> {
-    todo!("T-003: parse_hotkey")
+    let mut modifiers = [false; 4];
+    let mut last_rank: Option<usize> = None;
+    // `Some(None)` is `Esc`: a key position taken by the reserved cancel key.
+    let mut key: Option<Option<HotkeyKey>> = None;
+    for part in s.split('+') {
+        if key.is_some() {
+            return Err(HotkeyError::Invalid);
+        }
+        match token(part).ok_or(HotkeyError::Invalid)? {
+            Token::Modifier(rank) => {
+                if last_rank.is_some_and(|last| last >= rank) {
+                    return Err(HotkeyError::Invalid);
+                }
+                modifiers[rank] = true;
+                last_rank = Some(rank);
+            }
+            Token::Esc => key = Some(None),
+            Token::Key(k) => key = Some(Some(k)),
+        }
+    }
+    let key = match key {
+        None => return Err(HotkeyError::NoKey),
+        Some(None) => return Err(HotkeyError::EscReserved),
+        Some(Some(key)) => key,
+    };
+    if last_rank.is_none() {
+        return Err(HotkeyError::NoModifier);
+    }
+    let [ctrl, alt, shift, win] = modifiers;
+    Ok(Hotkey {
+        ctrl,
+        alt,
+        shift,
+        win,
+        key,
+    })
 }
 
 #[cfg(test)]

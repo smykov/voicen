@@ -1,20 +1,15 @@
 //! The one base-URL rule for the API, the local server and post-processing
 //! (research R-8; spec 004 FR-004).
-//!
-//! STUB (T-003 red tests): every body is `todo!()`; the developer implements them.
 
 /// A base URL that passed [`check_base_url`]: trimmed, one trailing `/` removed,
 /// scheme `http`/`https`, non-empty host.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NormalizedUrl(
-    // STUB: the developer chooses the representation.
-    #[allow(dead_code)] String,
-);
+pub struct NormalizedUrl(String);
 
 impl NormalizedUrl {
     /// The normalized text, as stored in the settings.
     pub fn as_str(&self) -> &str {
-        todo!("T-003: NormalizedUrl::as_str")
+        &self.0
     }
 }
 
@@ -26,9 +21,22 @@ pub enum UrlError {
     Malformed,
 }
 
-#[allow(unused_variables)] // STUB: body is todo!()
+/// Trims whitespace and strips one trailing `/`, then requires the result to parse
+/// (with the `url` crate, as the HTTP client does) as an absolute `http`/`https`
+/// URL with a non-empty host. The text itself is kept as entered otherwise.
 pub fn check_base_url(raw: &str) -> Result<NormalizedUrl, UrlError> {
-    todo!("T-003: check_base_url")
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(UrlError::Empty);
+    }
+    let text = trimmed.strip_suffix('/').unwrap_or(trimmed);
+    let parsed = url::Url::parse(text).map_err(|_| UrlError::Malformed)?;
+    let scheme_ok = matches!(parsed.scheme(), "http" | "https");
+    let host_ok = parsed.host_str().is_some_and(|host| !host.is_empty());
+    if !(scheme_ok && host_ok) {
+        return Err(UrlError::Malformed);
+    }
+    Ok(NormalizedUrl(text.to_string()))
 }
 
 #[cfg(test)]

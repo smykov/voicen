@@ -1,10 +1,9 @@
 //! Startup and dictation gate: pure decisions the shell executes
 //! (spec 004 FR-005..FR-007, FR-010, US5-3; decision #19).
-//!
-//! STUB (T-003 red tests): every body is `todo!()`; the developer implements them.
 
+use super::EngineKind;
 use super::{LoadOutcome, Settings};
-use crate::i18n::MessageId;
+use crate::i18n::{MessageId, NOTICE_CHOOSE_ENGINE};
 
 /// Why dictation cannot start.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,20 +37,35 @@ pub enum StartupAction {
     TrayOnly,
 }
 
-/// Called by the hotkey handler before the microphone is opened.
-#[allow(unused_variables)] // STUB: body is todo!()
+/// Called by the hotkey handler before the microphone is opened. Only engine
+/// `none` blocks; whether a configured engine works is the pipeline's question.
 pub fn dictation_gate(s: &Settings) -> Result<(), Blocked> {
-    todo!("T-003: dictation_gate")
+    match s.engine {
+        EngineKind::None => Err(Blocked::NoEngine),
+        EngineKind::Api | EngineKind::BuiltinLocal | EngineKind::LocalServer => Ok(()),
+    }
 }
 
-#[allow(unused_variables)] // STUB: body is todo!()
+/// What the shell does, in order, when dictation is blocked.
 pub fn blocked_actions(b: Blocked) -> Vec<ShellAction> {
-    todo!("T-003: blocked_actions")
+    match b {
+        Blocked::NoEngine => vec![
+            ShellAction::Notify(NOTICE_CHOOSE_ENGINE),
+            ShellAction::OpenSettings(SettingsTab::Engine),
+        ],
+    }
 }
 
-#[allow(unused_variables)] // STUB: body is todo!()
-pub fn startup_action(o: &LoadOutcome, launched_by_autostart: bool) -> StartupAction {
-    todo!("T-003: startup_action")
+/// Startup decision: the settings window on the Engine tab unless the settings were
+/// loaded from an existing file. `launched_by_autostart` does not change it
+/// (spec US5-3); the shell adds the reset or unavailable notice.
+pub fn startup_action(o: &LoadOutcome, _launched_by_autostart: bool) -> StartupAction {
+    match o {
+        LoadOutcome::Loaded(_) => StartupAction::TrayOnly,
+        LoadOutcome::FirstRun(_) | LoadOutcome::Reset { .. } | LoadOutcome::Unavailable(_) => {
+            StartupAction::OpenSettings(SettingsTab::Engine)
+        }
+    }
 }
 
 #[cfg(test)]

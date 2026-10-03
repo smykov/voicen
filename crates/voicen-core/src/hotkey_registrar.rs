@@ -3,8 +3,6 @@
 //! Defined here, implemented by the shell (001, T-006). The settings save
 //! `prepare`s the new hotkey, then `commit`s it (releasing the old one) or `abort`s
 //! it, so a refused save keeps the old hotkey (FR-05).
-//!
-//! STUB (T-003 red tests): every body is `todo!()`; the developer implements them.
 
 use crate::settings::hotkey::Hotkey;
 use crate::settings::Mode;
@@ -39,6 +37,15 @@ pub enum RegistrarCall {
     Abort(Hotkey),
 }
 
+#[cfg(any(test, feature = "test-fakes"))]
+#[derive(Default)]
+struct FakeRegistrarState {
+    calls: Vec<RegistrarCall>,
+    fail_prepare: bool,
+    active: Option<(Hotkey, Mode)>,
+    next_token: u64,
+}
+
 /// In-memory [`HotkeyRegistrar`] with a call log and an injectable `prepare` failure.
 ///
 /// - Every call is recorded in [`calls`](Self::calls), failed ones included.
@@ -49,42 +56,59 @@ pub enum RegistrarCall {
 #[cfg(any(test, feature = "test-fakes"))]
 #[derive(Default)]
 pub struct FakeHotkeyRegistrar {
-    // STUB: the developer chooses the state.
-    _state: (),
+    state: std::sync::Mutex<FakeRegistrarState>,
 }
 
 #[cfg(any(test, feature = "test-fakes"))]
-#[allow(unused_variables)] // STUB: bodies are todo!()
 impl FakeHotkeyRegistrar {
     pub fn new() -> FakeHotkeyRegistrar {
-        todo!("T-003: FakeHotkeyRegistrar::new")
+        FakeHotkeyRegistrar::default()
     }
 
     pub fn fail_prepare(&self, fail: bool) {
-        todo!("T-003: FakeHotkeyRegistrar::fail_prepare")
+        self.lock().fail_prepare = fail;
     }
 
     pub fn calls(&self) -> Vec<RegistrarCall> {
-        todo!("T-003: FakeHotkeyRegistrar::calls")
+        self.lock().calls.clone()
     }
 
     pub fn active(&self) -> Option<(Hotkey, Mode)> {
-        todo!("T-003: FakeHotkeyRegistrar::active")
+        self.lock().active
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, FakeRegistrarState> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
 #[cfg(any(test, feature = "test-fakes"))]
-#[allow(unused_variables)] // STUB: bodies are todo!()
 impl HotkeyRegistrar for FakeHotkeyRegistrar {
     fn prepare(&self, hotkey: Hotkey, mode: Mode) -> Result<Prepared, Unavailable> {
-        todo!("T-003: FakeHotkeyRegistrar::prepare")
+        let mut state = self.lock();
+        state.calls.push(RegistrarCall::Prepare(hotkey, mode));
+        if state.fail_prepare {
+            return Err(Unavailable);
+        }
+        state.next_token += 1;
+        Ok(Prepared {
+            hotkey,
+            mode,
+            token: state.next_token,
+        })
     }
 
     fn commit(&self, prepared: Prepared) {
-        todo!("T-003: FakeHotkeyRegistrar::commit")
+        let mut state = self.lock();
+        state.calls.push(RegistrarCall::Commit(prepared.hotkey));
+        state.active = Some((prepared.hotkey, prepared.mode));
     }
 
     fn abort(&self, prepared: Prepared) {
-        todo!("T-003: FakeHotkeyRegistrar::abort")
+        self.lock()
+            .calls
+            .push(RegistrarCall::Abort(prepared.hotkey));
     }
 }

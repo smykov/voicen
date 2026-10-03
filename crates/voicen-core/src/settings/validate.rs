@@ -4,12 +4,15 @@
 //! (Clarification Q2). Post-processing rules (003's `validate`) are added by
 //! T-020/T-021; `hotkey.unavailable`, `autostart.failed` and `key.store_failed`
 //! come from the save steps (T-010, T-014, T-032), not from here.
-//!
-//! STUB (T-003 red tests): every body is `todo!()`; the developer implements them.
 
-use super::{FieldError, Settings};
+use super::hotkey::{parse_hotkey, HotkeyError};
+use super::url::{check_base_url, UrlError};
+use super::{EngineKind, ErrorCode, FieldError, FieldId, Settings};
 use crate::models::DownloadedModels;
-use crate::secrets::{KeyEdits, KeyPresence};
+use crate::secrets::{KeyEdit, KeyEdits, KeyPresence, KeySlot};
+
+/// Valid values of `history.size` (FR-16).
+const HISTORY_SIZE: std::ops::RangeInclusive<u32> = 1..=100;
 
 /// The key edits of a save request and which slots hold a key now.
 #[derive(Debug, Clone, Copy)]
@@ -18,14 +21,86 @@ pub struct KeyEditsWithPresence<'a> {
     pub presence: KeyPresence,
 }
 
+impl KeyEditsWithPresence<'_> {
+    /// Whether `slot` holds a key once the save is applied: a key entered now, or an
+    /// untouched slot that holds one.
+    fn has_key_after_save(&self, slot: KeySlot) -> bool {
+        match self.edits.get(slot) {
+            KeyEdit::Replace(_) => true,
+            KeyEdit::Untouched => self.presence.get(slot),
+            KeyEdit::Clear => false,
+        }
+    }
+}
+
 /// Every field error of `s`, all at once (empty = valid).
-#[allow(unused_variables)] // STUB: body is todo!()
 pub fn validate(
     s: &Settings,
     keys: &KeyEditsWithPresence<'_>,
     models: &dyn DownloadedModels,
 ) -> Vec<FieldError> {
-    todo!("T-003: validate")
+    let mut errors = Vec::new();
+    let mut refuse = |field, code| errors.push(FieldError { field, code });
+
+    match s.engine {
+        EngineKind::None => {}
+        EngineKind::Api => {
+            if let Err(code) = base_url_rule(&s.api.base_url) {
+                refuse(FieldId::EngineApiBaseUrl, code);
+            }
+            if s.api.model.trim().is_empty() {
+                refuse(FieldId::EngineApiModel, ErrorCode::Required);
+            }
+            if !keys.has_key_after_save(KeySlot::TranscriptionApi) {
+                refuse(FieldId::EngineApiKey, ErrorCode::KeyRequired);
+            }
+        }
+        EngineKind::LocalServer => {
+            if let Err(code) = base_url_rule(&s.local_server.base_url) {
+                refuse(FieldId::EngineLocalServerBaseUrl, code);
+            }
+        }
+        EngineKind::BuiltinLocal => {
+            let downloaded = s
+                .builtin_local
+                .model_id
+                .as_deref()
+                .is_some_and(|id| models.is_downloaded(id));
+            if !downloaded {
+                refuse(
+                    FieldId::EngineBuiltinLocalModelId,
+                    ErrorCode::ModelNotDownloaded,
+                );
+            }
+        }
+    }
+
+    if let Err(e) = parse_hotkey(&s.hotkey) {
+        refuse(FieldId::RecordingHotkey, hotkey_code(e));
+    }
+
+    if !HISTORY_SIZE.contains(&s.history.size) {
+        refuse(FieldId::HistorySize, ErrorCode::HistorySizeRange);
+    }
+
+    errors
+}
+
+fn base_url_rule(raw: &str) -> Result<(), ErrorCode> {
+    match check_base_url(raw) {
+        Ok(_) => Ok(()),
+        Err(UrlError::Empty) => Err(ErrorCode::Required),
+        Err(UrlError::Malformed) => Err(ErrorCode::UrlMalformed),
+    }
+}
+
+fn hotkey_code(e: HotkeyError) -> ErrorCode {
+    match e {
+        HotkeyError::NoModifier => ErrorCode::HotkeyNoModifier,
+        HotkeyError::NoKey => ErrorCode::HotkeyNoKey,
+        HotkeyError::EscReserved => ErrorCode::HotkeyEscReserved,
+        HotkeyError::Invalid => ErrorCode::HotkeyInvalid,
+    }
 }
 
 #[cfg(test)]
@@ -295,21 +370,19 @@ mod tests {
                 "{raw:?}"
             );
         }
-        // Property: no string the grammar rejects passes validation.
+        // Every other grammar error is `hotkey.invalid` (decision #25(c)): empty part,
+        // unknown key, two keys, out-of-range key; non-canonical text too (#26).
+        // Bite: `HotkeyError::Invalid` mapped to any of the three codes above.
         for raw in ["", "Ctrl+Tab", "Ctrl+A+B", "Ctrl+F25", "ctrl alt space"] {
             let (mut s, edits, presence) = api_ok();
             s.hotkey = raw.into();
-            let errors = run(&s, &edits, presence, &[]);
-            assert_eq!(errors.len(), 1, "{raw:?}: {errors:?}");
-            assert_eq!(errors[0].field, FieldId::RecordingHotkey, "{raw:?}");
-            assert!(
-                matches!(
-                    errors[0].code,
-                    ErrorCode::HotkeyNoModifier
-                        | ErrorCode::HotkeyNoKey
-                        | ErrorCode::HotkeyEscReserved
-                ),
-                "{raw:?}: {errors:?}"
+            assert_eq!(
+                run(&s, &edits, presence, &[]),
+                vec![FieldError {
+                    field: FieldId::RecordingHotkey,
+                    code: ErrorCode::HotkeyInvalid,
+                }],
+                "{raw:?}"
             );
         }
     }

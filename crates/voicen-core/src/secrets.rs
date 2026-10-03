@@ -19,10 +19,11 @@
 //!     assert_serialize(settings);
 //! }
 //! ```
-//!
-//! STUB (T-003 red tests): every body is `todo!()`; the developer implements them.
 
 use std::fmt;
+
+use serde::Serialize;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// One credential slot; each maps to one Windows Credential Manager target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -38,44 +39,55 @@ pub enum KeySlot {
 impl KeySlot {
     /// Every slot, once.
     pub fn all() -> [KeySlot; 3] {
-        todo!("T-003: KeySlot::all")
+        [
+            KeySlot::TranscriptionApi,
+            KeySlot::LocalServer,
+            KeySlot::PostProcessing,
+        ]
     }
 
     /// Credential Manager target name (`Voicen/...`).
     pub fn target_name(self) -> &'static str {
-        todo!("T-003: KeySlot::target_name")
+        match self {
+            KeySlot::TranscriptionApi => "Voicen/transcription-api",
+            KeySlot::LocalServer => "Voicen/local-server",
+            KeySlot::PostProcessing => "Voicen/post-processing",
+        }
     }
 }
 
-/// A key value. `Debug` and `Display` print `***`; no `Serialize`; zeroed on drop.
-pub struct Secret(
-    // STUB: read by the implementation of `expose`.
-    #[allow(dead_code)] String,
-);
+/// A key value. `Debug` and `Display` print `***`; no `Serialize`; the buffer is
+/// zeroed on drop.
+pub struct Secret(String);
 
 impl Secret {
-    #[allow(unused_variables)] // STUB: body is todo!()
     pub fn new(value: impl Into<String>) -> Secret {
-        todo!("T-003: Secret::new")
+        Secret(value.into())
     }
 
     /// The key itself; only for the credential store and the HTTP client.
     pub fn expose(&self) -> &str {
-        todo!("T-003: Secret::expose")
+        &self.0
     }
 }
 
+impl Drop for Secret {
+    fn drop(&mut self) {
+        self.0.zeroize();
+    }
+}
+
+impl ZeroizeOnDrop for Secret {}
+
 impl fmt::Debug for Secret {
-    #[allow(unused_variables)] // STUB: body is todo!()
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        todo!("T-003: Secret Debug")
+        f.write_str("***")
     }
 }
 
 impl fmt::Display for Secret {
-    #[allow(unused_variables)] // STUB: body is todo!()
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        todo!("T-003: Secret Display")
+        f.write_str("***")
     }
 }
 
@@ -100,14 +112,17 @@ pub struct KeyEdits {
 }
 
 impl KeyEdits {
-    #[allow(unused_variables)] // STUB: body is todo!()
     pub fn get(&self, slot: KeySlot) -> &KeyEdit {
-        todo!("T-003: KeyEdits::get")
+        match slot {
+            KeySlot::TranscriptionApi => &self.transcription_api,
+            KeySlot::LocalServer => &self.local_server,
+            KeySlot::PostProcessing => &self.post_processing,
+        }
     }
 }
 
 /// Which slots hold a key: the only key information sent to a window.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
 pub struct KeyPresence {
     pub transcription_api: bool,
     pub local_server: bool,
@@ -115,17 +130,12 @@ pub struct KeyPresence {
 }
 
 impl KeyPresence {
-    #[allow(unused_variables)] // STUB: body is todo!()
     pub fn get(&self, slot: KeySlot) -> bool {
-        todo!("T-003: KeyPresence::get")
-    }
-}
-
-// STUB: replace with `#[derive(Serialize)]` (field names as in data-model.md).
-impl serde::Serialize for KeyPresence {
-    #[allow(unused_variables)] // STUB: body is todo!()
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        todo!("T-003: KeyPresence Serialize")
+        match slot {
+            KeySlot::TranscriptionApi => self.transcription_api,
+            KeySlot::LocalServer => self.local_server,
+            KeySlot::PostProcessing => self.post_processing,
+        }
     }
 }
 
@@ -160,6 +170,14 @@ pub struct CredentialCall {
     pub slot: KeySlot,
 }
 
+#[cfg(any(test, feature = "test-fakes"))]
+#[derive(Default)]
+struct FakeCredentialState {
+    slots: std::collections::BTreeMap<KeySlot, Secret>,
+    calls: Vec<CredentialCall>,
+    failures: std::collections::HashMap<(CredentialOp, KeySlot), CredentialError>,
+}
+
 /// In-memory [`CredentialStore`] with a call log and injectable failures.
 ///
 /// - Every trait call is recorded in [`calls`](Self::calls), failed ones included.
@@ -170,55 +188,88 @@ pub struct CredentialCall {
 #[cfg(any(test, feature = "test-fakes"))]
 #[derive(Default)]
 pub struct FakeCredentialStore {
-    // STUB: the developer chooses the state (e.g. a Mutex over slots, log, failures).
-    _state: (),
+    state: std::sync::Mutex<FakeCredentialState>,
 }
 
 #[cfg(any(test, feature = "test-fakes"))]
-#[allow(unused_variables)] // STUB: bodies are todo!()
 impl FakeCredentialStore {
     pub fn new() -> FakeCredentialStore {
-        todo!("T-003: FakeCredentialStore::new")
+        FakeCredentialStore::default()
     }
 
     /// Pre-load a slot (not recorded as a call).
-    pub fn with_key(self, slot: KeySlot, value: &str) -> FakeCredentialStore {
-        todo!("T-003: FakeCredentialStore::with_key")
+    pub fn with_key(mut self, slot: KeySlot, value: &str) -> FakeCredentialStore {
+        self.state
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .slots
+            .insert(slot, Secret::new(value));
+        self
     }
 
     /// The key currently in a slot (not recorded as a call).
     pub fn stored(&self, slot: KeySlot) -> Option<String> {
-        todo!("T-003: FakeCredentialStore::stored")
+        self.lock()
+            .slots
+            .get(&slot)
+            .map(|secret| secret.expose().to_string())
     }
 
     /// Every trait call so far, in order.
     pub fn calls(&self) -> Vec<CredentialCall> {
-        todo!("T-003: FakeCredentialStore::calls")
+        self.lock().calls.clone()
     }
 
     /// Every later `op` on `slot` fails with `error`.
     pub fn fail(&self, op: CredentialOp, slot: KeySlot, error: CredentialError) {
-        todo!("T-003: FakeCredentialStore::fail")
+        self.lock().failures.insert((op, slot), error);
     }
 
     pub fn clear_failures(&self) {
-        todo!("T-003: FakeCredentialStore::clear_failures")
+        self.lock().failures.clear();
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, FakeCredentialState> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Records the call; returns the guard, or the injected failure.
+    fn begin(
+        &self,
+        op: CredentialOp,
+        slot: KeySlot,
+    ) -> Result<std::sync::MutexGuard<'_, FakeCredentialState>, CredentialError> {
+        let mut state = self.lock();
+        state.calls.push(CredentialCall { op, slot });
+        match state.failures.get(&(op, slot)) {
+            Some(&error) => Err(error),
+            None => Ok(state),
+        }
     }
 }
 
 #[cfg(any(test, feature = "test-fakes"))]
-#[allow(unused_variables)] // STUB: bodies are todo!()
 impl CredentialStore for FakeCredentialStore {
     fn read(&self, slot: KeySlot) -> Result<Option<Secret>, CredentialError> {
-        todo!("T-003: FakeCredentialStore::read")
+        let state = self.begin(CredentialOp::Read, slot)?;
+        Ok(state
+            .slots
+            .get(&slot)
+            .map(|secret| Secret::new(secret.expose())))
     }
 
     fn write(&self, slot: KeySlot, secret: &Secret) -> Result<(), CredentialError> {
-        todo!("T-003: FakeCredentialStore::write")
+        let mut state = self.begin(CredentialOp::Write, slot)?;
+        state.slots.insert(slot, Secret::new(secret.expose()));
+        Ok(())
     }
 
     fn delete(&self, slot: KeySlot) -> Result<(), CredentialError> {
-        todo!("T-003: FakeCredentialStore::delete")
+        let mut state = self.begin(CredentialOp::Delete, slot)?;
+        state.slots.remove(&slot);
+        Ok(())
     }
 }
 

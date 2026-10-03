@@ -6,21 +6,26 @@
 //! logic are T-032's; [`LoadOutcome`] is defined here because the startup gate
 //! ([`gate::startup_action`]) decides on it.
 //!
-//! STUB (T-003 red tests): every body is `todo!()`; the developer implements them.
+//! A container default cannot know the OS language, so a file without
+//! `ui_language` loads the language of `defaults(None)` (`en`); release-1 files
+//! always contain the field.
 
 pub mod gate;
 pub mod hotkey;
 pub mod url;
 pub mod validate;
 
-use crate::i18n::UiLanguage;
-use crate::post_process::settings::PostProcessingSettings;
+use serde::{Deserialize, Deserializer, Serialize};
+
+use crate::i18n::{resolve_ui_language, UiLanguage};
+use crate::post_process::settings::{self as post_process_settings, PostProcessingSettings};
 
 /// Current (and only known) `schema_version`; a greater one is rejected.
 pub const SCHEMA_VERSION: u32 = 1;
 
 /// Selected transcription engine; serialized `none` | `api` | `builtin_local` | `local_server`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum EngineKind {
     None,
     Api,
@@ -29,44 +34,54 @@ pub enum EngineKind {
 }
 
 /// Recording mode; serialized `hold` | `toggle`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Mode {
     Hold,
     Toggle,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default = "default_api")]
 pub struct ApiSettings {
     pub base_url: String,
     pub model: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default = "default_local_server")]
 pub struct LocalServerSettings {
     pub base_url: String,
     pub model: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default = "default_builtin_local")]
 pub struct BuiltinLocalSettings {
     pub model_id: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A selected microphone. Both fields are required: the default is no microphone
+/// at all (`null`), so there is no default to fill a partial object from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Microphone {
     pub id: String,
     pub name: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default = "default_history")]
 pub struct HistorySettings {
     pub enabled: bool,
     pub size: u32,
 }
 
 /// Every persisted setting (data-model.md › Settings). No key field.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default = "default_settings")]
 pub struct Settings {
+    /// Never above [`SCHEMA_VERSION`]: a newer file is rejected, not half-read.
+    #[serde(deserialize_with = "deserialize_schema_version")]
     pub schema_version: u32,
     pub engine: EngineKind,
     pub api: ApiSettings,
@@ -84,26 +99,65 @@ pub struct Settings {
     pub ui_language: UiLanguage,
 }
 
-// STUB: replace with derives (snake_case names, container-level default from
-// `defaults`, `schema_version` > 1 rejected) — data-model.md, research R-2.
-impl serde::Serialize for Settings {
-    #[allow(unused_variables)] // STUB: body is todo!()
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        todo!("T-003: Settings Serialize")
+fn deserialize_schema_version<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u32, D::Error> {
+    let version = u32::deserialize(deserializer)?;
+    if version > SCHEMA_VERSION {
+        return Err(serde::de::Error::custom(format_args!(
+            "unsupported schema_version {version} (known: {SCHEMA_VERSION})"
+        )));
     }
-}
-
-impl<'de> serde::Deserialize<'de> for Settings {
-    #[allow(unused_variables)] // STUB: body is todo!()
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Settings, D::Error> {
-        todo!("T-003: Settings Deserialize")
-    }
+    Ok(version)
 }
 
 /// The one source of defaults (FR-21 v4, spec 004 FR-005).
-#[allow(unused_variables)] // STUB: body is todo!()
 pub fn defaults(os_tag: Option<&str>) -> Settings {
-    todo!("T-003: settings::defaults")
+    Settings {
+        schema_version: SCHEMA_VERSION,
+        engine: EngineKind::None,
+        api: ApiSettings {
+            base_url: "https://api.openai.com/v1".to_string(),
+            model: "whisper-1".to_string(),
+        },
+        local_server: LocalServerSettings {
+            base_url: "http://localhost:8000/v1".to_string(),
+            model: String::new(),
+        },
+        builtin_local: BuiltinLocalSettings { model_id: None },
+        speech_language: None,
+        microphone: None,
+        hotkey: "Ctrl+Alt+Space".to_string(),
+        mode: Mode::Hold,
+        auto_paste: true,
+        post_processing: post_process_settings::defaults(),
+        history: HistorySettings {
+            enabled: true,
+            size: 20,
+        },
+        start_with_windows: false,
+        ui_language: resolve_ui_language(os_tag),
+    }
+}
+
+// Container defaults for serde: each one is a part of `defaults(None)`, so there is
+// one source of default values.
+fn default_settings() -> Settings {
+    defaults(None)
+}
+
+fn default_api() -> ApiSettings {
+    defaults(None).api
+}
+
+fn default_local_server() -> LocalServerSettings {
+    defaults(None).local_server
+}
+
+fn default_builtin_local() -> BuiltinLocalSettings {
+    defaults(None).builtin_local
+}
+
+fn default_history() -> HistorySettings {
+    defaults(None).history
 }
 
 /// A field as named in validation errors, the UI highlight and log lines.
@@ -116,6 +170,8 @@ pub enum FieldId {
     EngineApiKey,
     EngineLocalServerBaseUrl,
     EngineLocalServerModel,
+    /// The local-server key input (not persisted).
+    EngineLocalServerKey,
     EngineBuiltinLocalModelId,
     EngineSpeechLanguage,
     RecordingMicrophone,
@@ -125,6 +181,8 @@ pub enum FieldId {
     PostProcessingBaseUrl,
     PostProcessingModel,
     PostProcessingPrompt,
+    /// The post-processing key input (not persisted).
+    PostProcessingKey,
     HistoryEnabled,
     HistorySize,
     GeneralStartWithWindows,
@@ -134,7 +192,29 @@ pub enum FieldId {
 impl FieldId {
     /// The dotted id (`engine.api.base_url`).
     pub fn as_str(self) -> &'static str {
-        todo!("T-003: FieldId::as_str")
+        match self {
+            FieldId::EngineKind => "engine.kind",
+            FieldId::EngineApiBaseUrl => "engine.api.base_url",
+            FieldId::EngineApiModel => "engine.api.model",
+            FieldId::EngineApiKey => "engine.api.key",
+            FieldId::EngineLocalServerBaseUrl => "engine.local_server.base_url",
+            FieldId::EngineLocalServerModel => "engine.local_server.model",
+            FieldId::EngineLocalServerKey => "engine.local_server.key",
+            FieldId::EngineBuiltinLocalModelId => "engine.builtin_local.model_id",
+            FieldId::EngineSpeechLanguage => "engine.speech_language",
+            FieldId::RecordingMicrophone => "recording.microphone",
+            FieldId::RecordingHotkey => "recording.hotkey",
+            FieldId::RecordingMode => "recording.mode",
+            FieldId::OutputAutoPaste => "output.auto_paste",
+            FieldId::PostProcessingBaseUrl => "post_processing.base_url",
+            FieldId::PostProcessingModel => "post_processing.model",
+            FieldId::PostProcessingPrompt => "post_processing.prompt",
+            FieldId::PostProcessingKey => "post_processing.key",
+            FieldId::HistoryEnabled => "history.enabled",
+            FieldId::HistorySize => "history.size",
+            FieldId::GeneralStartWithWindows => "general.start_with_windows",
+            FieldId::GeneralUiLanguage => "general.ui_language",
+        }
     }
 }
 
@@ -148,6 +228,9 @@ pub enum ErrorCode {
     HotkeyNoModifier,
     HotkeyNoKey,
     HotkeyEscReserved,
+    /// Any other hotkey grammar error: unknown token, a second key, an empty part,
+    /// a repeated or out-of-order modifier (decision #25).
+    HotkeyInvalid,
     HotkeyUnavailable,
     HistorySizeRange,
     AutostartFailed,
@@ -157,7 +240,20 @@ pub enum ErrorCode {
 impl ErrorCode {
     /// The wire code (`url.malformed`).
     pub fn as_str(self) -> &'static str {
-        todo!("T-003: ErrorCode::as_str")
+        match self {
+            ErrorCode::Required => "required",
+            ErrorCode::UrlMalformed => "url.malformed",
+            ErrorCode::KeyRequired => "key.required",
+            ErrorCode::ModelNotDownloaded => "model.not_downloaded",
+            ErrorCode::HotkeyNoModifier => "hotkey.no_modifier",
+            ErrorCode::HotkeyNoKey => "hotkey.no_key",
+            ErrorCode::HotkeyEscReserved => "hotkey.esc_reserved",
+            ErrorCode::HotkeyInvalid => "hotkey.invalid",
+            ErrorCode::HotkeyUnavailable => "hotkey.unavailable",
+            ErrorCode::HistorySizeRange => "history.size_range",
+            ErrorCode::AutostartFailed => "autostart.failed",
+            ErrorCode::KeyStoreFailed => "key.store_failed",
+        }
     }
 }
 
