@@ -3639,6 +3639,7 @@ dependencies = [
  "tauri",
  "tauri-build",
  "voicen-core",
+ "windows",
 ]
 
 [[package]]

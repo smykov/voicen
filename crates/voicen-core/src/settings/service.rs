@@ -92,6 +92,25 @@ pub enum SaveOutcome {
     },
 }
 
+// T-030 RED STUB (test-writer): only here so the wire-form tests (and the shell's
+// `settings_save` command) compile and fail on their assertions. The developer
+// replaces both impls with the settled wire form (T-030 Investigation, "Settled
+// design" item 2; contracts/ipc.md).
+impl<'de> serde::Deserialize<'de> for SaveRequest {
+    fn deserialize<D: serde::Deserializer<'de>>(_deserializer: D) -> Result<Self, D::Error> {
+        Err(serde::de::Error::custom(
+            "T-030 stub: SaveRequest wire form",
+        ))
+    }
+}
+
+// T-030 RED STUB (test-writer): see the SaveRequest stub above.
+impl Serialize for SaveOutcome {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str("T-030 stub: SaveOutcome wire form")
+    }
+}
+
 /// The one reader and writer of `settings.json` and the one writer of keys.
 ///
 /// - `save` is all-or-nothing (R-3): nothing is changed before the service is known
@@ -1545,5 +1564,213 @@ mod tests {
             );
             assert!(MESSAGE_IDS.contains(&message), "{id} not in MESSAGE_IDS");
         }
+    }
+
+    // ---- T-030: IPC wire form, shell -> UI (contracts/ipc.md, data-model.md) ----
+
+    const IPC_MD: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../specs/004-settings-and-first-run/contracts/ipc.md"
+    ));
+
+    /// JSON text without the whitespace outside string literals.
+    fn minify(json: &str) -> String {
+        let mut out = String::with_capacity(json.len());
+        let (mut in_string, mut escaped) = (false, false);
+        for c in json.chars() {
+            if in_string {
+                out.push(c);
+                if escaped {
+                    escaped = false;
+                } else if c == '\\' {
+                    escaped = true;
+                } else if c == '"' {
+                    in_string = false;
+                }
+            } else if c == '"' {
+                in_string = true;
+                out.push(c);
+            } else if !c.is_whitespace() {
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    /// The first ```json block under the ipc.md heading of the refused example,
+    /// minified.
+    fn ipc_refused_example() -> String {
+        let (_, after) = IPC_MD
+            .split_once("## Example (`settings_save` refused")
+            .expect("ipc.md lost its refused example heading");
+        let (_, block) = after
+            .split_once("```json")
+            .expect("ipc.md refused example has no json block");
+        let (block, _) = block
+            .split_once("```")
+            .expect("ipc.md refused example block is not closed");
+        minify(block)
+    }
+
+    fn wire(outcome: &SaveOutcome) -> serde_json::Value {
+        serde_json::to_value(outcome).expect("SaveOutcome serializes")
+    }
+
+    #[test]
+    fn save_outcome_wire_form() {
+        // Bite: SaveOutcome not externally tagged, a field renamed or reordered,
+        // FieldId/ErrorCode derived (`"EngineApiBaseUrl"`) instead of as_str(),
+        // FormError without `message` or with `not_restored` on every kind, a
+        // Warning code other than `endpoint.insecure`.
+
+        // 1. The ipc.md example, byte for byte.
+        let refused = SaveOutcome::Refused {
+            errors: vec![
+                field_error(FieldId::EngineApiBaseUrl, ErrorCode::UrlMalformed),
+                field_error(FieldId::HistorySize, ErrorCode::HistorySizeRange),
+            ],
+            form_error: None,
+        };
+        let example = ipc_refused_example();
+        assert!(example.starts_with(r#"{"Refused":"#), "example: {example}");
+        assert_eq!(
+            serde_json::to_string(&refused).expect("SaveOutcome serializes"),
+            example
+        );
+
+        // 2. Saved, with a warning; the view is SettingsView's own form.
+        let view = SettingsView {
+            settings: sample(EngineKind::Api),
+            keys: KeyPresence {
+                transcription_api: true,
+                local_server: false,
+                post_processing: true,
+            },
+            first_run: false,
+            reset_notice: true,
+        };
+        let saved = SaveOutcome::Saved {
+            view: view.clone(),
+            warnings: vec![Warning {
+                field: FieldId::EngineApiBaseUrl,
+                code: WarningCode::EndpointInsecure,
+            }],
+        };
+        assert_eq!(
+            wire(&saved),
+            serde_json::json!({ "Saved": {
+                "view": serde_json::to_value(&view).expect("view serializes"),
+                "warnings": [ { "field": "engine.api.base_url", "code": "endpoint.insecure" } ],
+            } })
+        );
+        let no_warnings = SaveOutcome::Saved {
+            view: view.clone(),
+            warnings: vec![],
+        };
+        assert_eq!(
+            wire(&no_warnings)["Saved"]["warnings"],
+            serde_json::json!([])
+        );
+
+        // 3. Each FormError: kind + its message id; not_restored only on
+        //    partially_restored.
+        let table = [
+            (
+                FormError::WriteFailed,
+                serde_json::json!({ "kind": "write_failed", "message": "settings.write_failed" }),
+            ),
+            (
+                FormError::SettingsUnavailable,
+                serde_json::json!({
+                    "kind": "settings_unavailable",
+                    "message": "notice.settings_unavailable"
+                }),
+            ),
+            (
+                FormError::PartiallyRestored {
+                    not_restored: vec![FieldId::EngineApiKey, FieldId::PostProcessingKey],
+                },
+                serde_json::json!({
+                    "kind": "partially_restored",
+                    "message": "settings.partially_restored",
+                    "not_restored": ["engine.api.key", "post_processing.key"]
+                }),
+            ),
+        ];
+        for (form_error, expected) in table {
+            let errors = vec![field_error(
+                FieldId::EngineApiKey,
+                ErrorCode::KeyStoreFailed,
+            )];
+            let outcome = SaveOutcome::Refused {
+                errors,
+                form_error: Some(form_error.clone()),
+            };
+            assert_eq!(
+                wire(&outcome),
+                serde_json::json!({ "Refused": {
+                    "errors": [ { "field": "engine.api.key", "code": "key.store_failed" } ],
+                    "form_error": expected,
+                } }),
+                "{form_error:?}"
+            );
+        }
+
+        // 4. Every FieldId and every ErrorCode goes on the wire as its as_str().
+        let fields = [
+            FieldId::EngineKind,
+            FieldId::EngineApiBaseUrl,
+            FieldId::EngineApiModel,
+            FieldId::EngineApiKey,
+            FieldId::EngineLocalServerBaseUrl,
+            FieldId::EngineLocalServerModel,
+            FieldId::EngineLocalServerKey,
+            FieldId::EngineBuiltinLocalModelId,
+            FieldId::EngineSpeechLanguage,
+            FieldId::RecordingMicrophone,
+            FieldId::RecordingHotkey,
+            FieldId::RecordingMode,
+            FieldId::OutputAutoPaste,
+            FieldId::PostProcessingBaseUrl,
+            FieldId::PostProcessingModel,
+            FieldId::PostProcessingPrompt,
+            FieldId::PostProcessingKey,
+            FieldId::HistoryEnabled,
+            FieldId::HistorySize,
+            FieldId::GeneralStartWithWindows,
+            FieldId::GeneralUiLanguage,
+        ];
+        let codes = [
+            ErrorCode::Required,
+            ErrorCode::UrlMalformed,
+            ErrorCode::KeyRequired,
+            ErrorCode::ModelNotDownloaded,
+            ErrorCode::HotkeyNoModifier,
+            ErrorCode::HotkeyNoKey,
+            ErrorCode::HotkeyEscReserved,
+            ErrorCode::HotkeyInvalid,
+            ErrorCode::HotkeyUnavailable,
+            ErrorCode::HistorySizeRange,
+            ErrorCode::AutostartFailed,
+            ErrorCode::KeyStoreFailed,
+            ErrorCode::UrlCredentials,
+            ErrorCode::LanguageUnsupported,
+        ];
+        let errors: Vec<FieldError> = fields
+            .iter()
+            .map(|&f| field_error(f, ErrorCode::Required))
+            .chain(codes.iter().map(|&c| field_error(FieldId::EngineKind, c)))
+            .collect();
+        let expected: Vec<serde_json::Value> = errors
+            .iter()
+            .map(|e| serde_json::json!({ "field": e.field.as_str(), "code": e.code.as_str() }))
+            .collect();
+        assert_eq!(
+            wire(&SaveOutcome::Refused {
+                errors,
+                form_error: None
+            }),
+            serde_json::json!({ "Refused": { "errors": expected, "form_error": null } })
+        );
     }
 }

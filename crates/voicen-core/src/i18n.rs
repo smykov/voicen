@@ -34,6 +34,15 @@ pub enum UiLanguage {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MessageId(&'static str);
 
+// T-030 RED STUB (test-writer): only here so `message_id_serializes_as_id` compiles
+// and fails on its assertion. The developer replaces it: a MessageId goes on the
+// wire as its id string (T-030 Investigation, "Settled design" item 2).
+impl Serialize for MessageId {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str("T-030 stub: MessageId wire form")
+    }
+}
+
 /// Declares `MessageId` constants and generates `MESSAGE_IDS` from the same list,
 /// so a Rust id cannot exist without being checked against both catalogs.
 ///
@@ -562,6 +571,24 @@ mod tests {
         );
         let problems = embedded().parity_problems();
         assert!(problems.is_empty(), "embedded catalog: {problems:?}");
+    }
+
+    #[test]
+    fn message_id_serializes_as_id() {
+        // Bite: MessageId serialized as a struct ({"0":..}/{"id":..}), as a
+        // placeholder, or as its Debug form (`MessageId("...")`). The UI renders
+        // FormError.message with t(id), so the wire value must be the catalog id.
+        assert_eq!(
+            serde_json::to_string(&SETTINGS_WRITE_FAILED).expect("MessageId serializes"),
+            r#""settings.write_failed""#
+        );
+        for id in MESSAGE_IDS {
+            assert_eq!(
+                serde_json::to_value(id).expect("MessageId serializes"),
+                serde_json::Value::String(id.0.to_string()),
+                "{id:?}"
+            );
+        }
     }
 
     #[test]

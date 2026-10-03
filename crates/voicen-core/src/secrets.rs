@@ -121,6 +121,22 @@ impl KeyEdits {
     }
 }
 
+// T-030 RED STUB (test-writer): only here so the wire-form tests compile and fail on
+// their assertions. The developer replaces both impls with the settled wire form
+// (T-030 Investigation, "Settled design" item 2).
+impl<'de> serde::Deserialize<'de> for KeyEdit {
+    fn deserialize<D: serde::Deserializer<'de>>(_deserializer: D) -> Result<Self, D::Error> {
+        Err(serde::de::Error::custom("T-030 stub: KeyEdit wire form"))
+    }
+}
+
+// T-030 RED STUB (test-writer): see the KeyEdit stub above.
+impl<'de> serde::Deserialize<'de> for KeyEdits {
+    fn deserialize<D: serde::Deserializer<'de>>(_deserializer: D) -> Result<Self, D::Error> {
+        Err(serde::de::Error::custom("T-030 stub: KeyEdits wire form"))
+    }
+}
+
 /// Which slots hold a key: the only key information sent to a window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
 pub struct KeyPresence {
@@ -369,6 +385,182 @@ mod tests {
                 "post_processing": true
             })
         );
+    }
+
+    // ---- T-030: IPC wire form, UI -> shell (contracts/ipc.md, data-model.md) ----
+
+    /// `{"transcription_api":<a>,"local_server":<b>,"post_processing":<c>}`.
+    fn key_edits_json(api: &str, local: &str, pp: &str) -> String {
+        format!(r#"{{"transcription_api":{api},"local_server":{local},"post_processing":{pp}}}"#)
+    }
+
+    fn replace_json(key: &str) -> String {
+        serde_json::to_string(&serde_json::json!({ "Replace": key })).expect("json")
+    }
+
+    #[track_caller]
+    fn expect_replace(edit: &KeyEdit, key: &str) {
+        match edit {
+            KeyEdit::Replace(secret) => assert_eq!(secret.expose(), key),
+            other => panic!("expected Replace, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn key_edits_deserialize_wire_form() {
+        // Bite: a variant spelled or tagged differently ("clear", {"Clear":null}
+        // only, adjacently tagged), Replace not carrying its string, slots swapped,
+        // or a missing slot defaulting to Untouched instead of being refused.
+
+        // Each variant, in each slot (rotated so a swapped slot shows).
+        let key = "sk-test-wire-0000-not-a-real-key";
+        let r = replace_json(key);
+        let rotations = [
+            [r.as_str(), r#""Clear""#, r#""Untouched""#],
+            [r#""Untouched""#, r.as_str(), r#""Clear""#],
+            [r#""Clear""#, r#""Untouched""#, r.as_str()],
+        ];
+        for [api, local, pp] in rotations {
+            let json = key_edits_json(api, local, pp);
+            let edits: KeyEdits = serde_json::from_str(&json)
+                .unwrap_or_else(|e| panic!("valid key edits refused ({e}): {json}"));
+            for (slot, wire) in KeySlot::all().into_iter().zip([api, local, pp]) {
+                let edit = edits.get(slot);
+                match wire {
+                    r#""Clear""# => assert!(matches!(edit, KeyEdit::Clear), "{slot:?}: {edit:?}"),
+                    r#""Untouched""# => {
+                        assert!(matches!(edit, KeyEdit::Untouched), "{slot:?}: {edit:?}")
+                    }
+                    _ => expect_replace(edit, key),
+                }
+            }
+        }
+
+        // The key crosses the wire unchanged: trimming is the service's rule (#30).
+        for raw in ["  sk-test-padded  ", "", "sk-test-ключ-не-настоящий"] {
+            let edit: KeyEdit = serde_json::from_str(&replace_json(raw))
+                .unwrap_or_else(|e| panic!("Replace {raw:?} refused: {e}"));
+            expect_replace(&edit, raw);
+        }
+
+        // All three slots are required: a missing one is an error, not Untouched.
+        let present = [
+            ("transcription_api", r#""Untouched""#),
+            ("local_server", r#""Untouched""#),
+            ("post_processing", r#""Untouched""#),
+        ];
+        for missing in present.iter().map(|(name, _)| *name) {
+            let fields: Vec<String> = present
+                .iter()
+                .filter(|(name, _)| *name != missing)
+                .map(|(name, value)| format!(r#""{name}":{value}"#))
+                .collect();
+            let json = format!("{{{}}}", fields.join(","));
+            assert!(
+                serde_json::from_str::<KeyEdits>(&json).is_err(),
+                "a request without {missing} was accepted: {json}"
+            );
+        }
+
+        // The whole save request (ipc.md: settings_save { request: SaveRequest }).
+        let settings = crate::settings::defaults(Some("ru-RU"));
+        let json = format!(
+            r#"{{"settings":{},"keys":{}}}"#,
+            serde_json::to_string(&settings).expect("settings serialize"),
+            key_edits_json(r#""Clear""#, &r, r#""Untouched""#)
+        );
+        let request: crate::settings::service::SaveRequest = serde_json::from_str(&json)
+            .unwrap_or_else(|e| panic!("valid save request refused ({e}): {json}"));
+        assert_eq!(request.settings, settings);
+        assert!(matches!(request.keys.transcription_api, KeyEdit::Clear));
+        expect_replace(&request.keys.local_server, key);
+        assert!(matches!(request.keys.post_processing, KeyEdit::Untouched));
+    }
+
+    #[test]
+    fn key_edit_deserialize_error_never_echoes_input() {
+        // Property (J1): no deserialize error of a key-bearing type contains any part
+        // of the input key. Tauri puts the serde error text of the `request` argument
+        // into the IPC rejection (tauri 2.12.1 error.rs:59), i.e. into the window.
+        // Bite: a derived Deserialize for KeyEdit (`unknown variant `sk-...``,
+        // `invalid type: string "sk-...", expected unit`), or a hand-written one that
+        // formats the input into its error.
+        let bad_edits = [
+            format!(r#""{CANARY}""#),                     // key typed as a unit variant
+            format!(r#"{{"{CANARY}":"x"}}"#),             // key as the variant name
+            format!(r#"{{"{CANARY}":null}}"#),            // same, no content
+            format!(r#"{{"Clear":"{CANARY}"}}"#),         // unit variant with content
+            format!(r#"{{"Untouched":"{CANARY}"}}"#),     // same
+            format!(r#"{{"Replace":["{CANARY}"]}}"#),     // wrong inner type: sequence
+            format!(r#"{{"Replace":{{"{CANARY}":1}}}}"#), // wrong inner type: map
+            format!(r#"{{"Replace":"{CANARY}","x":1}}"#), // two entries
+            format!(r#"["Replace","{CANARY}"]"#),         // sequence form
+            format!(r#"{{"tag":"Replace","value":"{CANARY}"}}"#), // adjacently tagged form
+            format!(r#""{CANARY}"#),                      // truncated string
+        ];
+
+        #[track_caller]
+        fn assert_no_echo(what: &str, input: &str, err: &str) {
+            assert!(
+                !err.contains(CANARY) && !err.contains("CANARY"),
+                "{what} error echoes the key: {err:?} (input {input})"
+            );
+        }
+
+        // Positive control: the same deserializer accepts the valid forms, so an
+        // impl that refuses everything does not pass this test.
+        for valid in [r#""Untouched""#, r#""Clear""#, &replace_json(CANARY)] {
+            assert!(
+                serde_json::from_str::<KeyEdit>(valid).is_ok(),
+                "valid KeyEdit refused: {valid}"
+            );
+        }
+
+        let settings = serde_json::to_string(&crate::settings::defaults(None)).expect("json");
+        for bad in &bad_edits {
+            // KeyEdit itself: refused, with the fixed text only.
+            let err = serde_json::from_str::<KeyEdit>(bad)
+                .expect_err(&format!("malformed KeyEdit accepted: {bad}"))
+                .to_string();
+            assert_no_echo("KeyEdit", bad, &err);
+            assert!(
+                err.starts_with("invalid key edit"),
+                "KeyEdit error is not the fixed text: {err:?}"
+            );
+
+            // Inside KeyEdits and inside the SaveRequest Tauri deserializes, in every
+            // slot: still refused, still without the key.
+            for slot in 0..3 {
+                let mut slots = [r#""Untouched""#; 3];
+                slots[slot] = bad.as_str();
+                let keys = key_edits_json(slots[0], slots[1], slots[2]);
+                let err = serde_json::from_str::<KeyEdits>(&keys)
+                    .err()
+                    .unwrap_or_else(|| panic!("malformed KeyEdits accepted (slot {slot})"))
+                    .to_string();
+                assert_no_echo("KeyEdits", &keys, &err);
+
+                let request = format!(r#"{{"settings":{settings},"keys":{keys}}}"#);
+                let err = serde_json::from_str::<crate::settings::service::SaveRequest>(&request)
+                    .err()
+                    .unwrap_or_else(|| panic!("malformed SaveRequest accepted (slot {slot})"))
+                    .to_string();
+                assert_no_echo("SaveRequest", &request, &err);
+            }
+        }
+
+        // A key typed where a slot name belongs: ignored or refused, never echoed
+        // (`unknown field `sk-...`` if the struct denied unknown fields).
+        let extra = format!(
+            r#"{{"transcription_api":"Untouched","local_server":"Untouched","post_processing":"Untouched","{CANARY}":"Clear"}}"#
+        );
+        if let Err(err) = serde_json::from_str::<KeyEdits>(&extra) {
+            assert_no_echo("KeyEdits", &extra, &err.to_string());
+        }
+        let request = format!(r#"{{"settings":{settings},"keys":{extra},"{CANARY}":1}}"#);
+        if let Err(err) = serde_json::from_str::<crate::settings::service::SaveRequest>(&request) {
+            assert_no_echo("SaveRequest", &request, &err.to_string());
+        }
     }
 
     #[test]
