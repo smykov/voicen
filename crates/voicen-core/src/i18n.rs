@@ -61,6 +61,15 @@ macro_rules! messages {
 messages! {
     /// Hotkey pressed while engine = none (spec 004 FR-007; `settings::gate::blocked_actions`).
     NOTICE_CHOOSE_ENGINE = "notice.choose_engine",
+    /// A save refused because the settings could not be read at startup (decision
+    /// #19; `settings::service::FormError::SettingsUnavailable`).
+    NOTICE_SETTINGS_UNAVAILABLE = "notice.settings_unavailable",
+    /// A save refused because `settings.json` could not be written; everything was
+    /// restored (`FormError::WriteFailed`).
+    SETTINGS_WRITE_FAILED = "settings.write_failed",
+    /// A refused save whose undo failed for some keys; the UI highlights the key
+    /// fields named in `FormError::PartiallyRestored` (R-3).
+    SETTINGS_PARTIALLY_RESTORED = "settings.partially_restored",
 }
 
 /// Both catalogs (en, ru) as parsed flat id -> text maps.

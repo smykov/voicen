@@ -25,16 +25,23 @@ pub enum UrlError {
     Credentials,
 }
 
-/// Trims whitespace and strips one trailing `/`, then requires the result to parse
+/// The one storage form of a base URL, valid or not: whitespace trimmed, then one
+/// trailing `/` stripped. The settings service stores every base URL in this form
+/// (spec 004 data-model "normalize before store"); [`check_base_url`] checks it.
+pub fn normalize_base_url(raw: &str) -> &str {
+    let trimmed = raw.trim();
+    trimmed.strip_suffix('/').unwrap_or(trimmed)
+}
+
+/// Normalizes with [`normalize_base_url`], then requires the result to parse
 /// (with the `url` crate, as the HTTP client does) as an absolute `http`/`https`
 /// URL with a non-empty host and no userinfo (neither a username nor a password).
 /// The text itself is kept as entered otherwise.
 pub fn check_base_url(raw: &str) -> Result<NormalizedUrl, UrlError> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
+    if raw.trim().is_empty() {
         return Err(UrlError::Empty);
     }
-    let text = trimmed.strip_suffix('/').unwrap_or(trimmed);
+    let text = normalize_base_url(raw);
     let parsed = url::Url::parse(text).map_err(|_| UrlError::Malformed)?;
     let scheme_ok = matches!(parsed.scheme(), "http" | "https");
     let host_ok = parsed.host_str().is_some_and(|host| !host.is_empty());

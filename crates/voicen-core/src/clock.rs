@@ -1,20 +1,53 @@
 //! The one wall-clock port of the core (P-011): the settings backup suffix (T-032),
 //! history (005) and the connection tester (R-9) read the time through [`Clock`].
 
-use std::time::SystemTime;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Wall-clock time source.
 pub trait Clock: Send + Sync {
     fn now(&self) -> SystemTime;
 }
 
+/// The operating system's wall clock.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now(&self) -> SystemTime {
+        SystemTime::now()
+    }
+}
+
 /// `t` in UTC as `yyyyMMdd-HHmmss` (the `<UTC>` of `settings.json.bad-<UTC>`).
-/// A time before the Unix epoch gives the epoch. Std only (no date crate).
+/// A time before the Unix epoch gives the epoch; the sub-second part is dropped.
+/// Std only (no date crate).
 pub fn utc_compact(t: SystemTime) -> String {
-    // T-032 skeleton (test-writer): not implemented; the red test
-    // `clock::tests::utc_compact_table` fails on this value.
-    let _ = t;
-    String::new()
+    let secs = t.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    let days = secs / 86_400;
+    let rem = secs % 86_400;
+    let (year, month, day) = civil_from_days(days);
+    format!(
+        "{year:04}{month:02}{day:02}-{:02}{:02}{:02}",
+        rem / 3_600,
+        rem % 3_600 / 60,
+        rem % 60
+    )
+}
+
+/// Days since 1970-01-01 -> proleptic Gregorian (year, month, day): the
+/// days-from-civil inverse (H. Hinnant, "chrono-Compatible Low-Level Date
+/// Algorithms"), for non-negative day counts only.
+fn civil_from_days(days: u64) -> (u64, u64, u64) {
+    let z = days + 719_468; // days since 0000-03-01
+    let era = z / 146_097;
+    let doe = z - era * 146_097; // [0, 146096]
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365], from March 1
+    let mp = (5 * doy + 2) / 153; // [0, 11], March = 0
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + u64::from(month <= 2);
+    (year, month, day)
 }
 
 /// A [`Clock`] that returns a fixed time, changeable with [`set`](Self::set).

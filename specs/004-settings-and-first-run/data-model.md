@@ -50,7 +50,8 @@ Rules:
 - `SaveRequest { settings: Settings, keys: {transcription_api: KeyEdit, local_server: KeyEdit, post_processing: KeyEdit} }`.
 - `SaveOutcome`:
   - `Saved { view: SettingsView, warnings: [Warning] }` — `Warning { field: FieldId, code: "endpoint.insecure" }`.
-  - `Refused { errors: [FieldError], form_error: Option<MessageRef> }` — nothing changed (or, after a double failure, `form_error = settings.partially_restored` naming the step).
+  - `Refused { errors: [FieldError], form_error: Option<FormError> }` — nothing changed, except after a failed undo (below).
+  - `FormError` (a refusal not tied to one field; T-032): `WriteFailed` (message `settings.write_failed`; the file could not be written, everything restored) | `SettingsUnavailable` (`notice.settings_unavailable`; every save while `Unavailable`, decisions #19) | `PartiallyRestored { not_restored: [FieldId] }` (`settings.partially_restored`; an undo failed: exactly these key fields differ from before the save, research R-3). `PartiallyRestored` replaces `WriteFailed` and sits beside a `key.store_failed` field error. The step is named by field ids, so the catalog texts have no placeholders.
 - `FieldError { field: FieldId, code }` with codes: `required`, `url.malformed`, `key.required`, `model.not_downloaded`, `hotkey.no_modifier`, `hotkey.no_key`, `hotkey.esc_reserved`, `hotkey.invalid` (any other grammar error: unknown token, second key, empty part, repeated or out-of-order modifier; decisions #25c), `hotkey.unavailable`, `url.credentials`, `language.unsupported`, `history.size_range`, `autostart.failed`, `key.store_failed`, plus 003's post-processing codes. Each code maps to one message id `error.<code>`.
 
 ### Save state machine (research R-3)
@@ -64,10 +65,12 @@ AutostartApplied? (US5 only; skipped before) ──fail──▶ undo hotkey ▶
    │
 KeysApplied ──fail──▶ undo keys so far, autostart, hotkey ▶ Refused(key.store_failed)
    │
-FileWritten ──fail──▶ undo keys, autostart, hotkey ▶ Refused(form: settings.write_failed)
+FileWritten ──fail──▶ undo keys, autostart, hotkey ▶ Refused(form: WriteFailed)
    │
 Committed (old hotkey released, snapshot swapped, subscribers notified) ▶ Saved(warnings)
 ```
+
+As built by T-032 (`settings::service`): before `Validate`, a service that loaded as `Unavailable` returns `Refused(form: SettingsUnavailable)` without calling any dependency; then the draft is normalized and the three key slots are read (old values for the undo, presence for `validate`; a read error → `Refused(key.store_failed)` on that slot, nothing written). `validate` sees the raw key edits. Keys are applied in `KeySlot::all()` order: an empty-after-trim `Replace` is `Untouched` (#30), a non-empty one is stored trimmed (decisions #33(a)). Undo walks the completed key steps in reverse (old key → write, no old key → delete) and goes on after an undo error; any failed undo makes `form_error = PartiallyRestored`. One lock serializes saves, publish included. The hotkey step is a no-op until T-010; there is no autostart step until T-014.
 
 ## LoadOutcome (startup)
 

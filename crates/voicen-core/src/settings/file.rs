@@ -1,7 +1,8 @@
 //! The settings file (research R-2; spec 004 FR-009, FR-010;
 //! contracts/core-traits.md#settingsfile). Only `SettingsService` uses it.
 
-use std::io;
+use std::fs;
+use std::io::{self, Write};
 use std::path::PathBuf;
 
 /// The settings file name inside the data directory (the one place it exists).
@@ -28,28 +29,95 @@ impl FsSettingsFile {
     }
 }
 
-// T-032 skeleton (test-writer): every method fails with `Unsupported` until the
-// developer implements R-2; the red tests in `settings::file::tests` and the
-// service tests on a temp dir fail on this error.
-fn not_implemented(what: &str) -> io::Error {
-    io::Error::new(
-        io::ErrorKind::Unsupported,
-        format!("T-032: FsSettingsFile::{what} not implemented"),
-    )
+/// Where a new file is written before it is renamed over [`SETTINGS_FILE`].
+const TMP_FILE: &str = "settings.json.tmp";
+/// Prefix of a backup of an unreadable file: `settings.json.bad-<suffix>`.
+const BACKUP_PREFIX: &str = "settings.json.bad-";
+/// Extra backup names tried after `<suffix>` is taken: `-1` … `-9`.
+const BACKUP_RETRIES: u32 = 9;
+
+impl FsSettingsFile {
+    fn settings_path(&self) -> PathBuf {
+        self.dir.join(SETTINGS_FILE)
+    }
+
+    fn tmp_path(&self) -> PathBuf {
+        self.dir.join(TMP_FILE)
+    }
+
+    fn write_tmp_and_rename(&self, bytes: &[u8]) -> io::Result<()> {
+        fs::create_dir_all(&self.dir)?;
+        let mut tmp = fs::File::create(self.tmp_path())?;
+        tmp.write_all(bytes)?;
+        tmp.sync_all()?;
+        drop(tmp);
+        fs::rename(self.tmp_path(), self.settings_path())
+    }
+
+    /// Reserves `name` by creating it empty with `create_new` (atomic, never
+    /// replaces a file), then renames the settings file over the reservation.
+    /// `Ok(false)` = the name is taken.
+    fn move_into(&self, name: &str) -> io::Result<bool> {
+        let target = self.dir.join(name);
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&target)
+        {
+            Ok(reserved) => drop(reserved),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Ok(false),
+            Err(e) => return Err(e),
+        }
+        if let Err(e) = fs::rename(self.settings_path(), &target) {
+            // Best effort: the reservation is empty and ours; settings.json stays.
+            let _ = fs::remove_file(&target);
+            return Err(e);
+        }
+        Ok(true)
+    }
 }
 
 impl SettingsFile for FsSettingsFile {
+    /// A leftover `.tmp` (a crash before its rename) is deleted first and never
+    /// read. `NotFound` (no file, or no directory yet) is `Ok(None)`; any other
+    /// error is passed through.
     fn read(&self) -> io::Result<Option<Vec<u8>>> {
-        let _ = &self.dir;
-        Err(not_implemented("read"))
+        let _ = fs::remove_file(self.tmp_path());
+        match fs::read(self.settings_path()) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 
-    fn write_atomic(&self, _bytes: &[u8]) -> io::Result<()> {
-        Err(not_implemented("write_atomic"))
+    /// Creates the directory if needed, writes and syncs `settings.json.tmp`, then
+    /// renames it over `settings.json`. On failure the `.tmp` is removed (best
+    /// effort) and `settings.json` keeps its previous bytes.
+    fn write_atomic(&self, bytes: &[u8]) -> io::Result<()> {
+        let result = self.write_tmp_and_rename(bytes);
+        if result.is_err() {
+            let _ = fs::remove_file(self.tmp_path());
+        }
+        result
     }
 
-    fn move_aside(&self, _suffix: &str) -> io::Result<String> {
-        Err(not_implemented("move_aside"))
+    /// Tries `settings.json.bad-<suffix>`, then `-1` … `-9`; a name is used only
+    /// when `create_new` can reserve it, so no existing file is ever replaced. All
+    /// ten taken → `Err(AlreadyExists)`; a failed rename → `Err`, with
+    /// `settings.json` left in place.
+    fn move_aside(&self, suffix: &str) -> io::Result<String> {
+        let base = format!("{BACKUP_PREFIX}{suffix}");
+        let candidates = std::iter::once(base.clone())
+            .chain((1..=BACKUP_RETRIES).map(|n| format!("{base}-{n}")));
+        for name in candidates {
+            if self.move_into(&name)? {
+                return Ok(name);
+            }
+        }
+        Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "every settings backup name is taken",
+        ))
     }
 }
 
@@ -180,9 +248,9 @@ impl SettingsFile for FakeSettingsFile {
         if state.bytes.is_none() {
             return Err(injected(io::ErrorKind::NotFound));
         }
-        let base = format!("{SETTINGS_FILE}.bad-{suffix}");
+        let base = format!("{BACKUP_PREFIX}{suffix}");
         let name = std::iter::once(base.clone())
-            .chain((1..=9).map(|n| format!("{base}-{n}")))
+            .chain((1..=BACKUP_RETRIES).map(|n| format!("{base}-{n}")))
             .find(|name| !state.backups.contains_key(name))
             .ok_or_else(|| injected(io::ErrorKind::AlreadyExists))?;
         let bytes = state.bytes.take().unwrap_or_default();

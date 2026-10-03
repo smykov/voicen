@@ -2,17 +2,22 @@
 //! reverse undo, and live apply through std `mpsc` subscribers (research R-2, R-3,
 //! R-4; decisions #19, #22, #23 N5, #30, #33; contracts/core-traits.md#settingsservice).
 
-use std::sync::{mpsc, Arc, PoisonError, RwLock};
+use std::io;
+use std::sync::{mpsc, Arc, Mutex, PoisonError, RwLock};
 
 use serde::Serialize;
 
 use super::file::SettingsFile;
-use super::{defaults, FieldError, FieldId, LoadOutcome, Settings};
-use crate::clock::Clock;
+use super::url::normalize_base_url;
+use super::validate::{validate, KeyEditsWithPresence};
+use super::{defaults, ErrorCode, FieldError, FieldId, LoadOutcome, Settings, SCHEMA_VERSION};
+use crate::clock::{utc_compact, Clock};
 use crate::hotkey_registrar::HotkeyRegistrar;
-use crate::i18n::MessageId;
+use crate::i18n::{
+    MessageId, NOTICE_SETTINGS_UNAVAILABLE, SETTINGS_PARTIALLY_RESTORED, SETTINGS_WRITE_FAILED,
+};
 use crate::models::DownloadedModels;
-use crate::secrets::{CredentialStore, KeyEdits, KeyPresence};
+use crate::secrets::{CredentialStore, KeyEdit, KeyEdits, KeyPresence, KeySlot, Secret};
 
 /// Everything the service talks to.
 pub struct SettingsDeps {
@@ -65,9 +70,11 @@ pub enum FormError {
 
 impl FormError {
     pub fn message_id(&self) -> MessageId {
-        // T-032 skeleton (test-writer): wrong on purpose until the ids are declared;
-        // red test `settings::service::tests::form_error_message_ids`.
-        crate::i18n::NOTICE_CHOOSE_ENGINE
+        match self {
+            FormError::WriteFailed => SETTINGS_WRITE_FAILED,
+            FormError::SettingsUnavailable => NOTICE_SETTINGS_UNAVAILABLE,
+            FormError::PartiallyRestored { .. } => SETTINGS_PARTIALLY_RESTORED,
+        }
     }
 }
 
@@ -85,25 +92,81 @@ pub enum SaveOutcome {
     },
 }
 
+/// The one reader and writer of `settings.json` and the one writer of keys.
+///
+/// - `save` is all-or-nothing (R-3): nothing is changed before the service is known
+///   to be available and the draft is normalized and valid; keys are changed next,
+///   the file last, and a failure undoes the completed key steps in reverse.
+/// - A snapshot handed out is never changed: a `Saved` swaps in a new `Arc`.
+/// - While `Unavailable` (decision #19) no save, `view` or later call touches the
+///   file or the credential store.
 pub struct SettingsService {
     current: RwLock<Arc<Settings>>,
-    #[allow(dead_code)] // T-032 skeleton: used by the implementation.
     deps: SettingsDeps,
+    load: LoadState,
+    /// Serializes saves for the whole transaction, publish included.
+    save_lock: Mutex<()>,
+    subscribers: Mutex<Vec<mpsc::Sender<Arc<Settings>>>>,
 }
 
-// T-032 skeleton (test-writer): the bodies below do nothing (no file, no key, no
-// publish) and report `Loaded(defaults)` / `Refused { [], None }`, so the red tests
-// fail on their assertions. The developer replaces every body.
+/// What the load found; fixed for the life of the service.
+#[derive(Debug, Clone, Copy)]
+struct LoadState {
+    unavailable: bool,
+    first_run: bool,
+    reset_notice: bool,
+}
+
+/// What the key step does with one slot once a blank `Replace` is set aside.
+enum KeyStep<'a> {
+    Keep,
+    Store(&'a str),
+    Delete,
+}
+
 impl SettingsService {
+    /// Reads the file once and decides the [`LoadOutcome`]; never calls the
+    /// credential store. FirstRun and Reset write the defaults; if that write fails
+    /// the outcome stays and the next save writes the file (decision #23 N5).
     pub fn load_or_init(deps: SettingsDeps, os_language: Option<&str>) -> (Self, LoadOutcome) {
-        let settings = defaults(os_language);
+        let (outcome, write_defaults) = match deps.file.read() {
+            Err(_) => (LoadOutcome::Unavailable(defaults(os_language)), false),
+            Ok(None) => (LoadOutcome::FirstRun(defaults(os_language)), true),
+            Ok(Some(bytes)) => match serde_json::from_slice::<Settings>(&bytes) {
+                Ok(settings) => (LoadOutcome::Loaded(settings), false),
+                Err(_) => match deps.file.move_aside(&utc_compact(deps.clock.now())) {
+                    Ok(backup_file_name) => (
+                        LoadOutcome::Reset {
+                            settings: defaults(os_language),
+                            backup_file_name,
+                        },
+                        true,
+                    ),
+                    Err(_) => (LoadOutcome::Unavailable(defaults(os_language)), false),
+                },
+            },
+        };
+        let (settings, load) = match &outcome {
+            LoadOutcome::Loaded(s) => (s, LoadState::new(false, false, false)),
+            LoadOutcome::FirstRun(s) => (s, LoadState::new(false, true, false)),
+            LoadOutcome::Reset { settings, .. } => (settings, LoadState::new(false, false, true)),
+            LoadOutcome::Unavailable(s) => (s, LoadState::new(true, false, false)),
+        };
+        if write_defaults {
+            // N5: a failure keeps the outcome; every save writes the whole file.
+            let _ = encode(settings).and_then(|bytes| deps.file.write_atomic(&bytes));
+        }
         let service = SettingsService {
             current: RwLock::new(Arc::new(settings.clone())),
             deps,
+            load,
+            save_lock: Mutex::new(()),
+            subscribers: Mutex::new(Vec::new()),
         };
-        (service, LoadOutcome::Loaded(settings))
+        (service, outcome)
     }
 
+    /// The settings in force now. The value behind the `Arc` never changes.
     pub fn snapshot(&self) -> Arc<Settings> {
         self.current
             .read()
@@ -111,27 +174,245 @@ impl SettingsService {
             .clone()
     }
 
+    /// A channel that receives the new snapshot after each `Saved`, and nothing
+    /// else (no initial value: call `subscribe` then `snapshot`). A dropped
+    /// receiver is pruned at the next publish.
     pub fn subscribe(&self) -> mpsc::Receiver<Arc<Settings>> {
-        let (_tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::channel();
+        self.subscribers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(tx);
         rx
     }
 
+    /// What a window shows. Key presence is read from the credential store (a read
+    /// error counts as absent); while `Unavailable` every key is reported absent
+    /// and the store is not called (decision #33(b)).
     pub fn view(&self) -> SettingsView {
-        SettingsView {
-            settings: (*self.snapshot()).clone(),
-            keys: KeyPresence::default(),
-            first_run: false,
-            reset_notice: false,
+        let keys = if self.load.unavailable {
+            KeyPresence::default()
+        } else {
+            self.read_presence()
+        };
+        self.view_with((*self.snapshot()).clone(), keys)
+    }
+
+    /// The save transaction (R-3; data-model save state machine).
+    pub fn save(&self, req: SaveRequest) -> SaveOutcome {
+        // (0) Decision #19: no dependency is called while Unavailable.
+        if self.load.unavailable {
+            return refused(Vec::new(), Some(FormError::SettingsUnavailable));
+        }
+        let _guard = self
+            .save_lock
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+
+        // (1) Normalize before validate and store.
+        let settings = normalize(req.settings);
+
+        // (2) The old keys: kept for the undo, and the presence `validate` needs.
+        let mut old: Vec<(KeySlot, Option<Secret>)> = Vec::with_capacity(3);
+        for slot in KeySlot::all() {
+            match self.deps.credentials.read(slot) {
+                Ok(value) => old.push((slot, value)),
+                Err(_) => return refused(vec![key_store_failed(slot)], None),
+            }
+        }
+        let presence =
+            presence_of(|slot| old.iter().any(|(s, value)| *s == slot && value.is_some()));
+
+        // (3) Validate on the raw edits: a blank API `Replace` is still
+        // `key.required` (#27(1)).
+        let errors = validate(
+            &settings,
+            &KeyEditsWithPresence {
+                edits: &req.keys,
+                presence,
+            },
+            self.deps.local_models.as_ref(),
+        );
+        if !errors.is_empty() {
+            return refused(errors, None);
+        }
+
+        // (4) Hotkey step: none until T-010 (prepare / abort / commit go here).
+
+        // (5) Keys, in slot order; each completed step is kept for the undo.
+        let mut done: Vec<(KeySlot, Option<Secret>)> = Vec::new();
+        let mut presence_after = presence;
+        for (slot, old_value) in old {
+            let result = match key_step(&req.keys, slot) {
+                KeyStep::Keep => continue,
+                KeyStep::Store(key) => self
+                    .deps
+                    .credentials
+                    .write(slot, &Secret::new(key))
+                    .map(|()| true),
+                KeyStep::Delete => self.deps.credentials.delete(slot).map(|()| false),
+            };
+            match result {
+                Ok(present) => {
+                    set_presence(&mut presence_after, slot, present);
+                    done.push((slot, old_value));
+                }
+                Err(_) => {
+                    let form_error = self.undo(done).map(partially_restored);
+                    return refused(vec![key_store_failed(slot)], form_error);
+                }
+            }
+        }
+
+        // (6) The file: tmp + sync + rename, or the old file stays (I3).
+        let written = encode(&settings).and_then(|bytes| self.deps.file.write_atomic(&bytes));
+        if written.is_err() {
+            let form_error = self
+                .undo(done)
+                .map_or(FormError::WriteFailed, partially_restored);
+            return refused(Vec::new(), Some(form_error));
+        }
+
+        // (7) Commit: swap the snapshot, then publish to every live subscriber.
+        let snapshot = Arc::new(settings);
+        *self.current.write().unwrap_or_else(PoisonError::into_inner) = snapshot.clone();
+        self.subscribers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retain(|tx| tx.send(snapshot.clone()).is_ok());
+        SaveOutcome::Saved {
+            view: self.view_with((*snapshot).clone(), presence_after),
+            warnings: Vec::new(),
         }
     }
 
-    pub fn save(&self, req: SaveRequest) -> SaveOutcome {
-        let _ = req;
-        SaveOutcome::Refused {
-            errors: Vec::new(),
-            form_error: None,
+    fn view_with(&self, settings: Settings, keys: KeyPresence) -> SettingsView {
+        SettingsView {
+            settings,
+            keys,
+            first_run: self.load.first_run,
+            reset_notice: self.load.reset_notice,
         }
     }
+
+    fn read_presence(&self) -> KeyPresence {
+        presence_of(|slot| matches!(self.deps.credentials.read(slot), Ok(Some(_))))
+    }
+
+    /// Restores the completed key steps in reverse order and goes on after a
+    /// failure. `None` = all restored; otherwise the key fields still changed, in
+    /// slot order.
+    fn undo(&self, done: Vec<(KeySlot, Option<Secret>)>) -> Option<Vec<FieldId>> {
+        let mut not_restored = Vec::new();
+        for (slot, old_value) in done.into_iter().rev() {
+            let restored = match &old_value {
+                Some(key) => self.deps.credentials.write(slot, key),
+                None => self.deps.credentials.delete(slot),
+            };
+            if restored.is_err() {
+                not_restored.push(key_field(slot));
+            }
+        }
+        if not_restored.is_empty() {
+            None
+        } else {
+            not_restored.reverse();
+            Some(not_restored)
+        }
+    }
+}
+
+impl LoadState {
+    fn new(unavailable: bool, first_run: bool, reset_notice: bool) -> LoadState {
+        LoadState {
+            unavailable,
+            first_run,
+            reset_notice,
+        }
+    }
+}
+
+/// Spec 004 data-model "normalize before store": every base URL through
+/// [`normalize_base_url`] and every model name trimmed, selected engine or not
+/// and valid or not; `schema_version` set to the current one. The hotkey,
+/// `speech_language`, the prompt and the microphone are kept as entered.
+fn normalize(mut s: Settings) -> Settings {
+    s.schema_version = SCHEMA_VERSION;
+    for url in [
+        &mut s.api.base_url,
+        &mut s.local_server.base_url,
+        &mut s.post_processing.base_url,
+    ] {
+        let normalized = normalize_base_url(url).to_string();
+        *url = normalized;
+    }
+    for model in [
+        &mut s.api.model,
+        &mut s.local_server.model,
+        &mut s.post_processing.model,
+    ] {
+        let trimmed = model.trim().to_string();
+        *model = trimmed;
+    }
+    s
+}
+
+/// The effective edit of a slot: a `Replace` that is empty after `trim()` keeps
+/// the stored key (decision #30); any other `Replace` is stored trimmed (#33(a)).
+fn key_step(edits: &KeyEdits, slot: KeySlot) -> KeyStep<'_> {
+    match edits.get(slot) {
+        KeyEdit::Untouched => KeyStep::Keep,
+        KeyEdit::Clear => KeyStep::Delete,
+        KeyEdit::Replace(key) => match key.expose().trim() {
+            "" => KeyStep::Keep,
+            trimmed => KeyStep::Store(trimmed),
+        },
+    }
+}
+
+/// The input field of a key slot (`engine.api.key`, ...).
+fn key_field(slot: KeySlot) -> FieldId {
+    match slot {
+        KeySlot::TranscriptionApi => FieldId::EngineApiKey,
+        KeySlot::LocalServer => FieldId::EngineLocalServerKey,
+        KeySlot::PostProcessing => FieldId::PostProcessingKey,
+    }
+}
+
+fn key_store_failed(slot: KeySlot) -> FieldError {
+    FieldError {
+        field: key_field(slot),
+        code: ErrorCode::KeyStoreFailed,
+    }
+}
+
+fn partially_restored(not_restored: Vec<FieldId>) -> FormError {
+    FormError::PartiallyRestored { not_restored }
+}
+
+fn presence_of(mut has_key: impl FnMut(KeySlot) -> bool) -> KeyPresence {
+    KeyPresence {
+        transcription_api: has_key(KeySlot::TranscriptionApi),
+        local_server: has_key(KeySlot::LocalServer),
+        post_processing: has_key(KeySlot::PostProcessing),
+    }
+}
+
+fn set_presence(presence: &mut KeyPresence, slot: KeySlot, present: bool) {
+    match slot {
+        KeySlot::TranscriptionApi => presence.transcription_api = present,
+        KeySlot::LocalServer => presence.local_server = present,
+        KeySlot::PostProcessing => presence.post_processing = present,
+    }
+}
+
+fn refused(errors: Vec<FieldError>, form_error: Option<FormError>) -> SaveOutcome {
+    SaveOutcome::Refused { errors, form_error }
+}
+
+/// The file form of the settings (`Settings` has no key field, I1).
+fn encode(settings: &Settings) -> io::Result<Vec<u8>> {
+    serde_json::to_vec_pretty(settings).map_err(io::Error::from)
 }
 
 #[cfg(test)]

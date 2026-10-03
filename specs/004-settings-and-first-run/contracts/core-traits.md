@@ -6,9 +6,11 @@ Rust signatures are indicative; names and semantics are the contract. Types are 
 
 004 defines in `voicen_core` every trait and data type shared with 001–003 (decisions #21): `secrets` (`KeySlot`, `Secret`, `KeyEdit`, `KeyPresence`, `CredentialStore`), `settings` (`Settings`, `FieldId`, `defaults()`, `SettingsService`), `HotkeyRegistrar` and `DownloadedModels` (both with fakes) and the data type `post_process::settings::{PostProcessingSettings, STARTER_PROMPT, defaults()}`. 001, 002 and 003 implement or read them; none declares its own key or settings port.
 
-Split (decisions #23): **T-003** built the types and pure rules — modules `secrets`, `settings` (`mod`, `url`, `validate`, `gate`, `hotkey`), `post_process::settings`, `hotkey_registrar`, `models` (all at `voicen_core::…`). **T-032** builds `SettingsFile` (`settings/file.rs`) and `SettingsService` with `SettingsDeps`, `Clock`, `SaveRequest`/`SaveOutcome`/`SettingsView`, `subscribe` and live apply (`settings/service.rs`). The sections below on those items are not yet in code.
+Split (decisions #23): **T-003** built the types and pure rules — modules `secrets`, `settings` (`mod`, `url`, `validate`, `gate`, `hotkey`), `post_process::settings`, `hotkey_registrar`, `models` (all at `voicen_core::…`). **T-032** built `SettingsFile` (`settings/file.rs`), `SettingsService` with `SettingsDeps`, `SaveRequest`/`SaveOutcome`/`FormError`/`SettingsView`, `subscribe` and the core part of live apply (`settings/service.rs`), and the wall clock `clock::Clock` (crate root, `clock.rs`, shared with 005 and the connection tester, P-011). Not yet in code: `Autostart` and `reconcile_autostart` (T-014), the hotkey save step (T-010), the `autostart` and `log` deps, `is_insecure_remote` and warnings (T-015), `ConnectionTester`.
 
 Built surface (T-003): `secrets::{KeySlot (all(), target_name()), Secret (new, expose), KeyEdit, KeyEdits (get(slot)), KeyPresence (get(slot)), CredentialStore, CredentialError { os_code }}`; `settings::{Settings, defaults, WHISPER_ISO_639_1, FieldId (as_str), ErrorCode (as_str), FieldError, LoadOutcome, EngineKind, Mode}`; `settings::url::{check_base_url, NormalizedUrl, UrlError}`; `settings::validate::{validate, KeyEditsWithPresence}`; `settings::gate::{dictation_gate, blocked_actions, startup_action, Blocked, ShellAction, StartupAction, SettingsTab}`; `settings::hotkey::{Hotkey, HotkeyKey, HotkeyError, parse_hotkey}`; `hotkey_registrar::{HotkeyRegistrar, Prepared, Unavailable}`; `models::DownloadedModels`.
+
+Built surface (T-032): `settings::file::{SettingsFile, FsSettingsFile (new(dir)), SETTINGS_FILE}`; `settings::service::{SettingsService (load_or_init, snapshot, subscribe, view, save), SettingsDeps { file, credentials, hotkeys, local_models, clock }, SaveRequest { settings, keys: KeyEdits }, SaveOutcome { Saved { view, warnings }, Refused { errors, form_error: Option<FormError> } }, FormError (message_id()), SettingsView, Warning { field, code: WarningCode::EndpointInsecure }}`; `settings::url::normalize_base_url`; `clock::{Clock, SystemClock, utc_compact}`; fakes `settings::file::{FakeSettingsFile, FileCall}`, `clock::FakeClock` and `test_support::TempDir` behind `test-fakes`.
 
 ### `CredentialStore` (req NFR-04; spec FR-014–FR-016)
 
@@ -34,7 +36,19 @@ pub trait SettingsFile: Send + Sync {
     fn move_aside(&self, suffix: &str) -> io::Result<String>; // returns the backup file name
 }
 ```
-- Real impl over a directory with `std::fs` (platform-independent, lives in core); fake with injectable failures.
+- Real impl `FsSettingsFile::new(dir)` over a directory with `std::fs` (platform-independent, lives in core); the shell passes the data directory (T-030). `SETTINGS_FILE = "settings.json"` is the only place the name exists.
+- `read`: first removes a leftover `settings.json.tmp` (best effort; a `.tmp` is never parsed); `NotFound` (no file or no directory) → `Ok(None)`; any other error → `Err` (a directory at `settings.json` included).
+- `write_atomic`: `create_dir_all(dir)`, write and `sync_all` `settings.json.tmp`, rename it over `settings.json`; on failure the `.tmp` is removed (best effort) and `settings.json` keeps its old bytes. No directory fsync (R-2 does not ask for one).
+- `move_aside(suffix)`: tries `settings.json.bad-<suffix>`, then `-1` … `-9`. Each name is reserved with `OpenOptions::create_new` (atomic, fails with `AlreadyExists`; `fs::rename` alone would replace an earlier backup), then `settings.json` is renamed over the empty reservation. A failed rename removes the reservation and returns `Err` with `settings.json` in place; all ten names taken → `Err(AlreadyExists)`. The service passes `utc_compact(clock.now())` (`yyyyMMdd-HHmmss`, UTC).
+- Fake `FakeSettingsFile` (feature `test-fakes`): bytes in memory, call log (`FileCall::{Read, WriteAtomic, MoveAside(suffix)}`), injectable `read`/`write_atomic`/`move_aside` failures of any `io::ErrorKind`, the backups made.
+
+### `Clock` (P-011)
+
+```rust
+pub trait Clock: Send + Sync { fn now(&self) -> SystemTime; }   // voicen_core::clock
+pub fn utc_compact(t: SystemTime) -> String;                     // yyyyMMdd-HHmmss in UTC; before the epoch → the epoch; std only
+```
+- `SystemClock` is the real one; `FakeClock::at(t)` / `set(t)` behind `test-fakes`. The one wall-clock port of the core: the backup suffix, history (005) and the connection tester (R-9) read the time through it.
 
 ### `Autostart` (req FR-19; spec FR-019)
 
@@ -58,7 +72,11 @@ impl SettingsService {
 }
 ```
 - `load_or_init` and the file: if the file cannot be moved aside (`move_aside` fails), or a read fails with an I/O error other than not-found, the outcome is `LoadOutcome::Unavailable` — defaults in memory, the file is never written or moved, `save` returns `Refused` with a notice until restart, and the credential store is not touched (spec FR-010, decisions #19).
-- `SettingsDeps { file, credentials, autostart, hotkeys: Arc<dyn HotkeyRegistrar>, local_models: Arc<dyn DownloadedModels>, clock, log }`.
+- `SettingsDeps { file, credentials, autostart, hotkeys: Arc<dyn HotkeyRegistrar>, local_models: Arc<dyn DownloadedModels>, clock, log }`. Built by T-032 without `autostart` (T-014) and `log` (T-008); `hotkeys` is held and not called until T-010.
+- `load_or_init`: `read` `Err` → `Unavailable`; `None` → `FirstRun` (defaults written); parses → `Loaded` (not validated, not rewritten); does not parse → `move_aside(utc_compact(clock.now()))`: `Ok(name)` → `Reset { backup_file_name: name }` (defaults written), `Err` → `Unavailable`. A failed defaults write keeps `FirstRun`/`Reset`; the next save writes the whole file (decisions #23 N5). No branch calls the credential store.
+- `save` order: `Unavailable` → `Refused { [], SettingsUnavailable }` with no dependency called; normalize; read the three key slots (a read error → `key.store_failed` on that slot); `validate` on the raw key edits; hotkey step (none until T-010); keys in `KeySlot::all()` order (an empty-after-trim `Replace` is `Untouched`, #30; a non-empty one is stored trimmed, #33(a)); `write_atomic`; commit (swap the `Arc`, send it to every live subscriber, prune dropped ones). A failure undoes the completed key steps in reverse and continues after an undo error; a failed undo gives `FormError::PartiallyRestored { not_restored }` naming exactly the key fields that differ. One lock serializes saves.
+- `view`: `first_run` / `reset_notice` reflect the load outcome for the life of the service; `keys` comes from three credential reads (a read error counts as absent), except while `Unavailable`, when every key is reported absent and the store is not called (decisions #33(b)). After `Saved`, the view's presence comes from the reads and the applied edits, with no extra call.
+- `subscribe`: unbounded std channel; no initial value (call `subscribe` then `snapshot`); exactly one message per `Saved`, after the file is written; none on `Refused`. `SettingsService: Send + Sync`.
 - Invariant: after `save` returns `Refused`, `snapshot()`, the file, the registered hotkey, the autostart entry and every key slot equal their values before the call (double-failure exception in research R-3).
 - Autostart: the autostart step and `reconcile_autostart` are added by US5 (tasks T056–T058); before that the save has no autostart step.
 - Invariant: `Saved` is returned only after the new hotkey is registered, the old released, the autostart entry matches (once US5 lands), keys are stored and the file is written.
@@ -69,6 +87,7 @@ impl SettingsService {
 pub fn defaults(os_language: Option<&str>) -> Settings;                 // the one source of defaults
 pub fn validate(s: &Settings, keys: &KeyEditsWithPresence<'_>, models: &dyn DownloadedModels) -> Vec<FieldError>;   // settings::validate; KeyEditsWithPresence { edits: &KeyEdits, presence: KeyPresence }
 pub fn check_base_url(raw: &str) -> Result<NormalizedUrl, UrlError>;   // UrlError: Empty (required), Malformed (url.malformed), Credentials (url.credentials, userinfo; decision #27(2))
+pub fn normalize_base_url(raw: &str) -> &str;                           // settings::url; trim + strip one trailing `/`; the storage form of every base URL, valid or not; check_base_url uses it
 pub fn is_insecure_remote(url: &NormalizedUrl) -> bool;
 pub const WHISPER_ISO_639_1: [&str; 97];                                  // settings::; the one language list (Whisper LANGUAGES minus jw, haw, yue); validate() gives language.unsupported for anything else
 pub fn resolve_ui_language(os_tag: Option<&str>) -> UiLanguage;   // lives in i18n.rs (teamwright T-005); defaults() calls it; the only place an OS tag becomes a language (the UI never derives one)
