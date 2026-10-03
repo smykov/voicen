@@ -34,8 +34,12 @@ pub enum ReconcileAction {
 impl ReconcileAction {
     /// `none` | `written` | `removed` | `failed`.
     pub fn as_str(self) -> &'static str {
-        // RED STUB (T-014 test-writer): the developer replaces this.
-        ""
+        match self {
+            ReconcileAction::None => "none",
+            ReconcileAction::Written => "written",
+            ReconcileAction::Removed => "removed",
+            ReconcileAction::Failed => "failed",
+        }
     }
 }
 

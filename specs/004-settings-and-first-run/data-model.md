@@ -52,7 +52,7 @@ Rules:
 - `SaveOutcome`:
   - `Saved { view: SettingsView, warnings: [Warning] }` — `Warning { field: FieldId, code: "endpoint.insecure" }`.
   - `Refused { errors: [FieldError], form_error: Option<FormError> }` — nothing changed, except after a failed undo (below).
-  - `FormError` (a refusal not tied to one field; T-032): `WriteFailed` (message `settings.write_failed`; the file could not be written, everything restored) | `SettingsUnavailable` (`notice.settings_unavailable`; every save while `Unavailable`, decisions #19) | `PartiallyRestored { not_restored: [FieldId] }` (`settings.partially_restored`; an undo failed: exactly these key fields differ from before the save, research R-3). `PartiallyRestored` replaces `WriteFailed` and sits beside a `key.store_failed` field error. The step is named by field ids, so the catalog texts have no placeholders.
+  - `FormError` (a refusal not tied to one field; T-032): `WriteFailed` (message `settings.write_failed`; the file could not be written, everything restored) | `SettingsUnavailable` (`notice.settings_unavailable`; every save while `Unavailable`, decisions #19) | `PartiallyRestored { not_restored: [FieldId] }` (`settings.partially_restored`; an undo failed: exactly these fields differ from before the save, research R-3 — `general.start_with_windows` (a failed autostart undo, T-014) and/or key fields, in step order: autostart first, then the keys in slot order). `PartiallyRestored` replaces `WriteFailed` and sits beside a `key.store_failed` field error. The step is named by field ids, so the catalog texts have no placeholders.
 - `FieldError { field: FieldId, code }` with codes: `required`, `url.malformed`, `key.required`, `model.not_downloaded`, `hotkey.no_modifier`, `hotkey.no_key`, `hotkey.esc_reserved`, `hotkey.invalid` (any other grammar error: unknown token, second key, empty part, repeated or out-of-order modifier; decisions #25c), `hotkey.unavailable`, `url.credentials`, `language.unsupported`, `history.size_range`, `autostart.failed`, `key.store_failed`, plus 003's post-processing codes. Each code maps to one message id `error.<code>`.
 
 ### Save state machine (research R-3)
@@ -62,7 +62,7 @@ Validate ──errors──▶ Refused
    │ok
 HotkeyPrepared? ──fail──▶ Refused(hotkey.unavailable)
    │
-AutostartApplied? (US5 only; skipped before) ──fail──▶ undo hotkey ▶ Refused(autostart.failed)
+AutostartApplied? (only when start_with_windows changed) ──fail──▶ undo hotkey ▶ Refused(autostart.failed)
    │
 KeysApplied ──fail──▶ undo keys so far, autostart, hotkey ▶ Refused(key.store_failed)
    │
@@ -71,7 +71,9 @@ FileWritten ──fail──▶ undo keys, autostart, hotkey ▶ Refused(form: W
 Committed (old hotkey released, snapshot swapped, subscribers notified) ▶ Saved(warnings)
 ```
 
-As built by T-032 (`settings::service`): before `Validate`, a service that loaded as `Unavailable` returns `Refused(form: SettingsUnavailable)` without calling any dependency; then the draft is normalized and the three key slots are read (old values for the undo, presence for `validate`; a read error → `Refused(key.store_failed)` on that slot, nothing written). `validate` sees the raw key edits. Keys are applied in `KeySlot::all()` order: an empty-after-trim `Replace` is `Untouched` (#30), a non-empty one is stored trimmed (decisions #33(a)). Undo walks the completed key steps in reverse (old key → write, no old key → delete) and goes on after an undo error; any failed undo makes `form_error = PartiallyRestored`. One lock serializes saves, publish included. The hotkey step is a no-op until T-010; there is no autostart step until T-014.
+As built by T-032 (`settings::service`): before `Validate`, a service that loaded as `Unavailable` returns `Refused(form: SettingsUnavailable)` without calling any dependency; then the draft is normalized and the three key slots are read (old values for the undo, presence for `validate`; a read error → `Refused(key.store_failed)` on that slot, nothing written). `validate` sees the raw key edits. Keys are applied in `KeySlot::all()` order: an empty-after-trim `Replace` is `Untouched` (#30), a non-empty one is stored trimmed (decisions #33(a)). Undo walks the completed key steps in reverse (old key → write, no old key → delete) and goes on after an undo error; any failed undo makes `form_error = PartiallyRestored`. One lock serializes saves, publish included. The hotkey step is a no-op until T-010.
+
+Autostart step (T-014): after the hotkey placeholder and before the keys, and only when the normalized draft's `start_with_windows` differs from the snapshot in force (read under the save lock); `Autostart::set(new)`. A failure returns `Refused { [general.start_with_windows: autostart.failed], form_error: None }` with no key, file or snapshot changed. The undo runs after the key undo (keys in reverse slot order, then `set(old)`); a failed autostart undo puts `general.start_with_windows` first in `PartiallyRestored.not_restored`. While `Unavailable` no `Autostart` call is made.
 
 ## LoadOutcome (startup)
 
@@ -98,4 +100,5 @@ As built by T-032 (`settings::service`): before `Validate`, a service that loade
 
 ## Autostart
 
-- `Autostart` (trait, save step and reconcile added by US5, tasks T056–T058): `is_enabled() -> Result<bool>`, `set(bool) -> Result<(), AutostartError>`. Windows value `HKCU\…\Run\Voicen = "<exe>" --autostart`.
+- `Autostart` (trait, save step and reconcile built by T-014, tasks T056–T058): `is_enabled() -> Result<bool>`, `set(bool) -> Result<(), AutostartError>`. Windows value `HKCU\…\Run\Voicen = "<exe>" --autostart` (`REG_SZ`, quoted current exe path); the value name is the shell constant `RUN_VALUE_NAME`, which 006's uninstaller deletes.
+- `ReconcileAction`: `None` | `Written` | `Removed` | `Failed` (`as_str`: `none`/`written`/`removed`/`failed`, R-11). `reconcile_autostart` at start: `Unavailable` → `None` with no call; on → `set(true)` → `Written`; off → present ? `set(false)` → `Removed` : `None`; any error → `Failed`. Runs inside `load_settings`, after `load_or_init`.

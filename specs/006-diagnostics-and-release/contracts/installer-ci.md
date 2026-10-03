@@ -31,17 +31,17 @@ Failure texts: EN "Saved keys could not be removed. Remove the entries starting 
 
 `voicen.exe --purge-credentials`: exit 0 = all entries with the prefix removed (or none existed); 2 = at least one failed. No window, no log, no marker.
 
-Autostart value: the `HKCU\…\Run` value name is the constant owned by 004 (FR-19); the hook deletes that value unconditionally (FR-023).
+Autostart value: the `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` value name is the constant owned by 004 (FR-19): `src-tauri` `autostart::RUN_VALUE_NAME` = `Voicen` (T-014). The hook deletes that value (the literal `Voicen`, kept equal to `RUN_VALUE_NAME`) unconditionally (FR-023); an absent value is not an error.
 
 ## CI (`.github/workflows/ci.yml`)
 
 | Job | Runs on | Trigger | Must pass | Spec |
 |---|---|---|---|---|
 | `gate` | ubuntu-24.04 | push `main`, tags `v*`, PRs | `make check` (incl. `licenses-check`, `version-check`) | FR-031, FR-032 |
-| `windows` | windows-latest | same, after `gate` | `cargo test --workspace --exclude voicen`, then `cargo test -p voicen` (the shell in its own invocation, F-001) (incl. `crash_probe` tests); `pnpm tauri build`; size ≤ 100 MB; silent install; launch → `(<commit>) started` and `%LOCALAPPDATA%\Voicen\settings.json` (parses, `engine` = `none`; spec 004 T028's settings half, T-030) within 30 s; kill → relaunch → `previous session ended abnormally` + one `abnormal_end` crash file; reinstall keeps data; `/S /KEEPDATA` keeps data + test credential; `/S` removes folder + credential; artifacts `voicen-installer-<commit>`, `voicen-symbols-<commit>` | FR-019, FR-021, FR-022, FR-024, FR-027, FR-028 |
+| `windows` | windows-latest | same, after `gate` | `cargo test --workspace --exclude voicen`, then `cargo test -p voicen` (the shell in its own invocation, F-001) (incl. `crash_probe` tests); `pnpm tauri build`; size ≤ 100 MB; silent install; launch → `(<commit>) started` and `%LOCALAPPDATA%\Voicen\settings.json` (parses, `engine` = `none`; spec 004 T028's settings half, T-030) and a leftover `HKCU\…\Run\Voicen` value seeded before the launch removed (default off; T-014) within 30 s; then `start_with_windows` set to `true` in `settings.json` and `voicen.exe --autostart` launched → the Run value `Voicen` equals `"%LOCALAPPDATA%\Voicen\voicen.exe" --autostart` within 30 s, set back to `false` and relaunched → the value absent within 30 s (T-014 reconcile at start); kill → relaunch → `previous session ended abnormally` + one `abnormal_end` crash file; reinstall keeps data; `/S /KEEPDATA` keeps data + test credential; `/S` removes folder + credential; artifacts `voicen-installer-<commit>`, `voicen-symbols-<commit>` | FR-019, FR-021, FR-022, FR-024, FR-027, FR-028 |
 | `release` | ubuntu-24.04 | tags `v*` only, after `gate` + `windows` | version check; release does not exist; `gh release create` with installer, `SHA256SUMS.txt`, symbols zip, notes | FR-029, FR-030 |
 
-On failure of the start-line check the job prints the log if it exists (nothing if the log file is absent), then fails. A missing first-run `settings.json` fails with `settings.json not found at <path> after the first launch`, another engine with `first-run settings.json has engine '<value>', expected 'none'`; on success the step prints `found settings.json at <path> with engine = none`.
+On failure of the start-line check the job prints the log if it exists (nothing if the log file is absent), then fails. A missing first-run `settings.json` fails with `settings.json not found at <path> after the first launch`, another engine with `first-run settings.json has engine '<value>', expected 'none'`; on success the step prints `found settings.json at <path> with engine = none`. A Run value still present after the first launch fails with `the leftover HKCU Run value Voicen is still present after the first launch (start_with_windows off)`; the on/off step fails with `HKCU Run value Voicen is '<value>', expected '<command>'` or `HKCU Run value Voicen still present ('<value>') with start_with_windows off` (T-014).
 
 ## Scripts
 

@@ -60,7 +60,7 @@ jobs:
       - run: cargo test --workspace --exclude voicen
       - run: cargo test -p voicen
       - run: pnpm tauri build
-      - name: Install silently, launch, check the start log line and the first-run settings.json
+      - name: Install silently, launch, check the start log line, the first-run settings.json and the Run value
         shell: pwsh
         run: |
           $setup = Get-ChildItem target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
@@ -74,6 +74,10 @@ jobs:
             else { $missing += "$($p[0]) not found at $($p[1])" }
           }
           if ($missing) { throw ($missing -join '; ') }
+          # T-014: a leftover Run value (e.g. from an older install) must be removed by the
+          # reconcile at first launch, whose defaults say start_with_windows = off.
+          $run = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+          New-ItemProperty -Path $run -Name 'Voicen' -PropertyType String -Value '"C:\stale\voicen.exe" --autostart' -Force | Out-Null
           $proc = Start-Process -FilePath $exe -PassThru
           $log = Join-Path $env:LOCALAPPDATA 'Voicen\logs\voicen.log'
           # First launch writes the defaults through SettingsService (T-030, decision #34).
@@ -81,10 +85,12 @@ jobs:
           $expected = "($env:VOICEN_COMMIT) started"
           $found = $false
           $hasSettings = $false
-          for ($i = 0; $i -lt 30 -and -not ($found -and $hasSettings); $i++) {
+          $runGone = $false
+          for ($i = 0; $i -lt 30 -and -not ($found -and $hasSettings -and $runGone); $i++) {
             Start-Sleep -Seconds 1
             $found = (Test-Path $log) -and (Select-String -Path $log -SimpleMatch $expected -Quiet)
             $hasSettings = Test-Path -LiteralPath $settings -PathType Leaf
+            $runGone = $null -eq (Get-ItemProperty -Path $run -Name 'Voicen' -ErrorAction SilentlyContinue)
           }
           Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
           if (-not $found) { if (Test-Path $log) { Get-Content $log }; throw "start log line with commit $env:VOICEN_COMMIT not found" }
@@ -93,6 +99,38 @@ jobs:
           $engine = (Get-Content -LiteralPath $settings -Raw | ConvertFrom-Json).engine
           if ($engine -ne 'none') { throw "first-run settings.json has engine '$engine', expected 'none'" }
           Write-Output "found settings.json at $settings with engine = none"
+          if (-not $runGone) { throw "the leftover HKCU Run value Voicen is still present after the first launch (start_with_windows off)" }
+          Write-Output "no HKCU Run value Voicen after the first launch"
+      - name: Start with Windows on writes the Run value, off removes it (T-014 reconcile at start)
+        shell: pwsh
+        run: |
+          $exe = Join-Path $env:LOCALAPPDATA 'Voicen\voicen.exe'
+          $settings = Join-Path $env:LOCALAPPDATA 'Voicen\settings.json'
+          $run = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+          $expected = '"' + $exe + '" --autostart'
+          function Set-StartWithWindows([string]$from, [string]$to) {
+            $text = [System.IO.File]::ReadAllText($settings)
+            $next = $text -replace ('"start_with_windows":\s*' + $from), ('"start_with_windows": ' + $to)
+            if ($next -eq $text) { throw "settings.json has no start_with_windows = $from" }
+            [System.IO.File]::WriteAllText($settings, $next)
+          }
+          function Get-RunValue { (Get-ItemProperty -Path $run -Name 'Voicen' -ErrorAction SilentlyContinue).Voicen }
+          # On: launched as the Run value would launch it; reconcile writes the current command.
+          Set-StartWithWindows 'false' 'true'
+          $proc = Start-Process -FilePath $exe -ArgumentList '--autostart' -PassThru
+          $value = $null
+          for ($i = 0; $i -lt 30 -and $value -ne $expected; $i++) { Start-Sleep -Seconds 1; $value = Get-RunValue }
+          Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+          if ($value -ne $expected) { throw "HKCU Run value Voicen is '$value', expected '$expected'" }
+          Write-Output "HKCU Run value Voicen = $value"
+          # Off again: reconcile removes it.
+          Set-StartWithWindows 'true' 'false'
+          $proc = Start-Process -FilePath $exe -PassThru
+          $value = Get-RunValue
+          for ($i = 0; $i -lt 30 -and $null -ne $value; $i++) { Start-Sleep -Seconds 1; $value = Get-RunValue }
+          Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+          if ($null -ne $value) { throw "HKCU Run value Voicen still present ('$value') with start_with_windows off" }
+          Write-Output "no HKCU Run value Voicen with start_with_windows off"
       - uses: actions/upload-artifact@v4
         with:
           name: voicen-installer-${{ env.VOICEN_COMMIT }}

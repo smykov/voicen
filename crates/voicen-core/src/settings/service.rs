@@ -88,7 +88,8 @@ pub enum FormError {
     WriteFailed,
     /// The service is `Unavailable` (decision #19): every save is refused.
     SettingsUnavailable,
-    /// An undo failed: exactly these key fields differ from before the save.
+    /// An undo failed: exactly these fields (`general.start_with_windows` and/or key
+    /// fields, in step order) differ from before the save.
     PartiallyRestored { not_restored: Vec<FieldId> },
 }
 
@@ -169,8 +170,9 @@ impl<'de> Deserialize<'de> for SaveRequest {
 /// The one reader and writer of `settings.json` and the one writer of keys.
 ///
 /// - `save` is all-or-nothing (R-3): nothing is changed before the service is known
-///   to be available and the draft is normalized and valid; keys are changed next,
-///   the file last, and a failure undoes the completed key steps in reverse.
+///   to be available and the draft is normalized and valid; the autostart entry is
+///   changed next (only when `start_with_windows` changes), then the keys, the file
+///   last, and a failure undoes the completed steps in reverse.
 /// - A snapshot handed out is never changed: a `Saved` swaps in a new `Arc`.
 /// - While `Unavailable` (decision #19) no save, `view` or later call touches the
 ///   file or the credential store.
@@ -313,7 +315,27 @@ impl SettingsService {
 
         // (4) Hotkey step: none until T-010 (prepare / abort / commit go here).
 
-        // (5) Keys, in slot order; each completed step is kept for the undo.
+        // (5) Autostart (T-014, R-3 step 3): only when the value differs from the
+        // snapshot in force; a failure refuses before any key or the file is touched
+        // (T-010's prepared hotkey is aborted here once it exists).
+        let old_start = self.snapshot().start_with_windows;
+        let new_start = settings.start_with_windows;
+        let autostart_done = if new_start != old_start {
+            if self.deps.autostart.set(new_start).is_err() {
+                return refused(
+                    vec![FieldError {
+                        field: FieldId::GeneralStartWithWindows,
+                        code: ErrorCode::AutostartFailed,
+                    }],
+                    None,
+                );
+            }
+            Some(old_start)
+        } else {
+            None
+        };
+
+        // (6) Keys, in slot order; each completed step is kept for the undo.
         let mut done: Vec<(KeySlot, Option<Secret>)> = Vec::new();
         let mut presence_after = presence;
         for (slot, old_value) in old {
@@ -332,22 +354,22 @@ impl SettingsService {
                     done.push((slot, old_value));
                 }
                 Err(_) => {
-                    let form_error = self.undo(done).map(partially_restored);
+                    let form_error = self.undo(autostart_done, done).map(partially_restored);
                     return refused(vec![key_store_failed(slot)], form_error);
                 }
             }
         }
 
-        // (6) The file: tmp + sync + rename, or the old file stays (I3).
+        // (7) The file: tmp + sync + rename, or the old file stays (I3).
         let written = encode(&settings).and_then(|bytes| self.deps.file.write_atomic(&bytes));
         if written.is_err() {
             let form_error = self
-                .undo(done)
+                .undo(autostart_done, done)
                 .map_or(FormError::WriteFailed, partially_restored);
             return refused(Vec::new(), Some(form_error));
         }
 
-        // (7) Commit: swap the snapshot, then publish to every live subscriber.
+        // (8) Commit: swap the snapshot, then publish to every live subscriber.
         let snapshot = Arc::new(settings);
         *self.current.write().unwrap_or_else(PoisonError::into_inner) = snapshot.clone();
         self.subscribers
@@ -365,8 +387,28 @@ impl SettingsService {
     /// no call; on → `set(true)` → `Written`; off → `is_enabled()`: absent →
     /// `None`, present → `set(false)` → `Removed`; any error → `Failed`.
     pub fn reconcile_autostart(&self) -> ReconcileAction {
-        // RED STUB (T-014 test-writer): the developer replaces this.
-        ReconcileAction::Failed
+        if self.load.unavailable {
+            return ReconcileAction::None;
+        }
+        let _guard = self
+            .save_lock
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let autostart = self.deps.autostart.as_ref();
+        if self.snapshot().start_with_windows {
+            return match autostart.set(true) {
+                Ok(()) => ReconcileAction::Written,
+                Err(_) => ReconcileAction::Failed,
+            };
+        }
+        match autostart.is_enabled() {
+            Ok(false) => ReconcileAction::None,
+            Ok(true) => match autostart.set(false) {
+                Ok(()) => ReconcileAction::Removed,
+                Err(_) => ReconcileAction::Failed,
+            },
+            Err(_) => ReconcileAction::Failed,
+        }
     }
 
     fn view_with(&self, settings: Settings, keys: KeyPresence) -> SettingsView {
@@ -382,24 +424,35 @@ impl SettingsService {
         presence_of(|slot| matches!(self.deps.credentials.read(slot), Ok(Some(_))))
     }
 
-    /// Restores the completed key steps in reverse order and goes on after a
-    /// failure. `None` = all restored; otherwise the key fields still changed, in
-    /// slot order.
-    fn undo(&self, done: Vec<(KeySlot, Option<Secret>)>) -> Option<Vec<FieldId>> {
-        let mut not_restored = Vec::new();
+    /// Undoes the completed steps in reverse: the key steps in reverse slot order,
+    /// then the autostart step (`autostart_done` = the value before the save), and
+    /// goes on after a failure. `None` = all restored; otherwise the fields still
+    /// changed, in step order (autostart, then the keys in slot order).
+    fn undo(
+        &self,
+        autostart_done: Option<bool>,
+        done: Vec<(KeySlot, Option<Secret>)>,
+    ) -> Option<Vec<FieldId>> {
+        let mut keys_not_restored = Vec::new();
         for (slot, old_value) in done.into_iter().rev() {
             let restored = match &old_value {
                 Some(key) => self.deps.credentials.write(slot, key),
                 None => self.deps.credentials.delete(slot),
             };
             if restored.is_err() {
-                not_restored.push(key_field(slot));
+                keys_not_restored.push(key_field(slot));
             }
         }
+        let mut not_restored = Vec::new();
+        if let Some(old_start) = autostart_done {
+            if self.deps.autostart.set(old_start).is_err() {
+                not_restored.push(FieldId::GeneralStartWithWindows);
+            }
+        }
+        not_restored.extend(keys_not_restored.into_iter().rev());
         if not_restored.is_empty() {
             None
         } else {
-            not_restored.reverse();
             Some(not_restored)
         }
     }

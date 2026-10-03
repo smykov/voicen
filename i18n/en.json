@@ -3,6 +3,6 @@
   "app.build_info_error": "Cannot read build info: {reason}",
   "notice.choose_engine": "Choose a transcription engine in Settings to start dictating.",
   "notice.settings_unavailable": "Settings could not be read, so Voicen is using the defaults and cannot save changes. Check access to the settings folder and restart Voicen.",
-  "settings.partially_restored": "The settings were not saved, and some API keys could not be restored to their previous values. Check the highlighted key fields.",
+  "settings.partially_restored": "The settings were not saved, and some settings could not be restored to their previous values. Check the highlighted fields.",
   "settings.write_failed": "The settings could not be saved: the settings file could not be written. Nothing was changed."
 }

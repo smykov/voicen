@@ -8,7 +8,8 @@
 //! - J3: `settings://changed` is emitted only by the subscribe bridge, so every
 //!   `Saved`, from any caller, gives exactly one event and a `Refused` none.
 //! - J4: the release app and the tests build the service through [`load_settings`]
-//!   and differ only in the injected credential store and data dir.
+//!   and differ only in the injected credential store, autostart entry and data
+//!   dir; it reconciles the autostart entry right after the load (T-014).
 //!
 //! The only output here is one `eprintln!` in [`spawn_change_bridge`] when the OS
 //! refuses to start its thread: a fixed text plus the `std::io::Error`, to stderr
@@ -54,7 +55,9 @@ pub fn load_settings(
         clock: Arc::new(SystemClock),
     };
     let (service, outcome) = SettingsService::load_or_init(deps, os_language);
-    // RED STUB (T-014 test-writer): reconcile_autostart is not called yet.
+    // R-5: the Run value follows the saved setting (no call while Unavailable). The
+    // action is for T-008's start log (R-11); nothing else depends on it.
+    let _reconciled = service.reconcile_autostart();
     (Arc::new(service), outcome)
 }
 
