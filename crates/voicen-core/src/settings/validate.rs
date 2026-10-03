@@ -1,13 +1,14 @@
 //! Save-time validation: one rule per line of spec 004 FR-004 (core part).
 //!
-//! Pure: no I/O, no side effects. Only the selected engine is validated
-//! (Clarification Q2). Post-processing rules (003's `validate`) are added by
-//! T-020/T-021; `hotkey.unavailable`, `autostart.failed` and `key.store_failed`
+//! Pure: no I/O, no side effects. Of the per-engine fields, only the selected
+//! engine's are validated (Clarification Q2); `speech_language`, the hotkey and the
+//! history size are checked for every engine. Post-processing rules (003's
+//! `validate`) are added by T-020/T-021; `hotkey.unavailable`, `autostart.failed` and `key.store_failed`
 //! come from the save steps (T-010, T-014, T-032), not from here.
 
 use super::hotkey::{parse_hotkey, HotkeyError};
 use super::url::{check_base_url, UrlError};
-use super::{EngineKind, ErrorCode, FieldError, FieldId, Settings};
+use super::{EngineKind, ErrorCode, FieldError, FieldId, Settings, WHISPER_ISO_639_1};
 use crate::models::DownloadedModels;
 use crate::secrets::{KeyEdit, KeyEdits, KeyPresence, KeySlot};
 
@@ -23,10 +24,11 @@ pub struct KeyEditsWithPresence<'a> {
 
 impl KeyEditsWithPresence<'_> {
     /// Whether `slot` holds a key once the save is applied: a key entered now, or an
-    /// untouched slot that holds one.
+    /// untouched slot that holds one. A `Replace` that is empty after `trim()` is not
+    /// an entered key (decision #27(1)); removing a key is the explicit `Clear`.
     fn has_key_after_save(&self, slot: KeySlot) -> bool {
         match self.edits.get(slot) {
-            KeyEdit::Replace(_) => true,
+            KeyEdit::Replace(key) => !key.expose().trim().is_empty(),
             KeyEdit::Untouched => self.presence.get(slot),
             KeyEdit::Clear => false,
         }
@@ -75,6 +77,16 @@ pub fn validate(
         }
     }
 
+    // Not a field of one engine, so checked whatever engine is selected.
+    if let Some(code) = s.speech_language.as_deref() {
+        if !WHISPER_ISO_639_1.contains(&code) {
+            refuse(
+                FieldId::EngineSpeechLanguage,
+                ErrorCode::LanguageUnsupported,
+            );
+        }
+    }
+
     if let Err(e) = parse_hotkey(&s.hotkey) {
         refuse(FieldId::RecordingHotkey, hotkey_code(e));
     }
@@ -91,6 +103,7 @@ fn base_url_rule(raw: &str) -> Result<(), ErrorCode> {
         Ok(_) => Ok(()),
         Err(UrlError::Empty) => Err(ErrorCode::Required),
         Err(UrlError::Malformed) => Err(ErrorCode::UrlMalformed),
+        Err(UrlError::Credentials) => Err(ErrorCode::UrlCredentials),
     }
 }
 
@@ -477,21 +490,6 @@ mod tests {
     }
 
     // ---- Decision #27 (T-003 review round 1) ----
-
-    /// Every two-letter (ISO 639-1) code of the Whisper language list: `LANGUAGES`
-    /// in openai/whisper `whisper/tokenizer.py` at commit 86098128c0b4 (the list
-    /// whisper.cpp copies), 97 codes. Left out: the three-letter `haw` and `yue`
-    /// (not ISO 639-1, so refused by #27(3)) and `jw` (Whisper's Javanese; ISO 639-1
-    /// says `jv`), which this test does not pin either way.
-    const WHISPER_ISO_639_1: [&str; 97] = [
-        "en", "zh", "de", "es", "ru", "ko", "fr", "ja", "pt", "tr", "pl", "ca", "nl", "ar", "sv",
-        "it", "id", "hi", "fi", "vi", "he", "uk", "el", "ms", "cs", "ro", "da", "hu", "ta", "no",
-        "th", "ur", "hr", "bg", "lt", "la", "mi", "ml", "cy", "sk", "te", "fa", "lv", "bn", "sr",
-        "az", "sl", "kn", "et", "mk", "br", "eu", "is", "hy", "ne", "mn", "bs", "kk", "sq", "sw",
-        "gl", "mr", "pa", "si", "km", "sn", "yo", "so", "af", "oc", "ka", "be", "tg", "sd", "gu",
-        "am", "yi", "lo", "uz", "fo", "ht", "ps", "tk", "nn", "mt", "sa", "lb", "my", "bo", "tl",
-        "mg", "as", "tt", "ln", "ha", "ba", "su",
-    ];
 
     /// The FieldId of `speech_language`. Decision #27(3) names it
     /// `recording.speech_language`; data-model.md, the existing `FieldId` and the

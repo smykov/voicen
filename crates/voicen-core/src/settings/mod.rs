@@ -23,6 +23,22 @@ use crate::post_process::settings::{self as post_process_settings, PostProcessin
 /// Current (and only known) `schema_version`; a greater one is rejected.
 pub const SCHEMA_VERSION: u32 = 1;
 
+/// The accepted values of `speech_language` besides `null` (decisions #27(3), #28):
+/// every two-letter (ISO 639-1) code of the Whisper language list, `LANGUAGES` in
+/// openai/whisper `whisper/tokenizer.py` at commit 86098128c0b4 (the list
+/// whisper.cpp copies), 97 codes. Left out: the three-letter `haw` and `yue` (not
+/// ISO 639-1) and Whisper's Javanese `jw` (ISO 639-1 says `jv`). Compared exactly:
+/// case-sensitive, no trimming.
+pub const WHISPER_ISO_639_1: [&str; 97] = [
+    "en", "zh", "de", "es", "ru", "ko", "fr", "ja", "pt", "tr", "pl", "ca", "nl", "ar", "sv", "it",
+    "id", "hi", "fi", "vi", "he", "uk", "el", "ms", "cs", "ro", "da", "hu", "ta", "no", "th", "ur",
+    "hr", "bg", "lt", "la", "mi", "ml", "cy", "sk", "te", "fa", "lv", "bn", "sr", "az", "sl", "kn",
+    "et", "mk", "br", "eu", "is", "hy", "ne", "mn", "bs", "kk", "sq", "sw", "gl", "mr", "pa", "si",
+    "km", "sn", "yo", "so", "af", "oc", "ka", "be", "tg", "sd", "gu", "am", "yi", "lo", "uz", "fo",
+    "ht", "ps", "tk", "nn", "mt", "sa", "lb", "my", "bo", "tl", "mg", "as", "tt", "ln", "ha", "ba",
+    "su",
+];
+
 /// Selected transcription engine; serialized `none` | `api` | `builtin_local` | `local_server`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -87,6 +103,7 @@ pub struct Settings {
     pub api: ApiSettings,
     pub local_server: LocalServerSettings,
     pub builtin_local: BuiltinLocalSettings,
+    /// `null` (auto-detect) or one of [`WHISPER_ISO_639_1`]; checked by `validate`.
     pub speech_language: Option<String>,
     pub microphone: Option<Microphone>,
     /// Canonical hotkey text (`Ctrl+Alt+Space`); checked by `validate`.

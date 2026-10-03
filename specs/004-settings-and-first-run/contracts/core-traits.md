@@ -68,8 +68,9 @@ impl SettingsService {
 ```rust
 pub fn defaults(os_language: Option<&str>) -> Settings;                 // the one source of defaults
 pub fn validate(s: &Settings, keys: &KeyEditsWithPresence<'_>, models: &dyn DownloadedModels) -> Vec<FieldError>;   // settings::validate; KeyEditsWithPresence { edits: &KeyEdits, presence: KeyPresence }
-pub fn check_base_url(raw: &str) -> Result<NormalizedUrl, UrlError>;
+pub fn check_base_url(raw: &str) -> Result<NormalizedUrl, UrlError>;   // UrlError: Empty (required), Malformed (url.malformed), Credentials (url.credentials, userinfo; decision #27(2))
 pub fn is_insecure_remote(url: &NormalizedUrl) -> bool;
+pub const WHISPER_ISO_639_1: &[&str];                                   // settings::; the one language list (Whisper LANGUAGES minus jw, haw, yue); validate() gives language.unsupported for anything else
 pub fn resolve_ui_language(os_tag: Option<&str>) -> UiLanguage;   // lives in i18n.rs (teamwright T-005); defaults() calls it; the only place an OS tag becomes a language (the UI never derives one)
 pub fn dictation_gate(s: &Settings) -> Result<(), Blocked>;            // Blocked::NoEngine
 pub fn blocked_actions(b: Blocked) -> Vec<ShellAction>;                 // [Notify(choose_engine), OpenSettings(Engine)]

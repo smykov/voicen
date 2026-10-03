@@ -2,7 +2,7 @@
 //! (research R-8; spec 004 FR-004).
 
 /// A base URL that passed [`check_base_url`]: trimmed, one trailing `/` removed,
-/// scheme `http`/`https`, non-empty host.
+/// scheme `http`/`https`, non-empty host, no userinfo.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NormalizedUrl(String);
 
@@ -19,11 +19,16 @@ pub enum UrlError {
     Empty,
     /// Not an absolute `http`/`https` URL with a host (field code `url.malformed`).
     Malformed,
+    /// A well-formed URL with userinfo: a non-empty username or password
+    /// (`user:pass@`), field code `url.credentials` (decision #27(2)). Key bytes
+    /// must not reach the settings file through a URL. A query string is allowed.
+    Credentials,
 }
 
 /// Trims whitespace and strips one trailing `/`, then requires the result to parse
 /// (with the `url` crate, as the HTTP client does) as an absolute `http`/`https`
-/// URL with a non-empty host. The text itself is kept as entered otherwise.
+/// URL with a non-empty host and no userinfo (neither a username nor a password).
+/// The text itself is kept as entered otherwise.
 pub fn check_base_url(raw: &str) -> Result<NormalizedUrl, UrlError> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -35,6 +40,11 @@ pub fn check_base_url(raw: &str) -> Result<NormalizedUrl, UrlError> {
     let host_ok = parsed.host_str().is_some_and(|host| !host.is_empty());
     if !(scheme_ok && host_ok) {
         return Err(UrlError::Malformed);
+    }
+    let has_userinfo =
+        !parsed.username().is_empty() || parsed.password().is_some_and(|p| !p.is_empty());
+    if has_userinfo {
+        return Err(UrlError::Credentials);
     }
     Ok(NormalizedUrl(text.to_string()))
 }
