@@ -173,8 +173,9 @@ A user who enters an `http://` base URL on a non-local host is warned that the A
 - **FR-002** (req FR-13): The settings window MUST open from the tray (owned by 001), on first run (FR-005), when the hotkey is pressed with engine = none (FR-007), and on the FR-05 startup branch (owned by 001) on a requested tab/field, when a second instance is launched (001 FR-002), and from the "no local model" notification action (002 FR-011) on the Engine tab; a request while it is open brings the existing window to front on that tab.
 - **FR-003** (req FR-13): Changes MUST be applied only by an explicit Save. A save is all-or-nothing: either every changed setting is validated, applied and persisted, or nothing changes and the reasons are shown on the fields concerned (Clarification Q1).
 - **FR-004** (req FR-13): Save MUST be refused, with the offending fields highlighted and a reason per field, when:
-  - engine = API and the base URL is empty, malformed (not an absolute `http`/`https` URL with a host), the model is empty, or no API key is stored or entered;
-  - engine = local server and the base URL is empty or malformed (model and key are optional, 002 FR-017);
+  - engine = API and the base URL is empty, malformed (not an absolute `http`/`https` URL with a host), or carries userinfo (`user:pass@`, `url.credentials`), the model is empty, or no API key is stored or entered;
+  - engine = local server and the base URL is empty, malformed or carries userinfo (`url.credentials`) (model and key are optional, 002 FR-017);
+  - the speech language is neither auto nor a code of the supported list (`language.unsupported`, any engine);
   - engine = built-in local and no downloaded model is selected;
   - post-processing is on and its endpoint is empty or malformed, its model is empty, or its prompt is empty;
   - the hotkey has no modifier (Ctrl, Alt, Shift, Win), has no non-modifier key, or uses Esc;
@@ -249,7 +250,7 @@ A user who enters an `http://` base URL on a non-local host is warned that the A
 - "Local host" for FR-29 means loopback only; private LAN addresses (e.g. `192.168.x.x`) get the warning because keys do travel unencrypted on the LAN.
 - History size N is limited to 1–100 (requirements give only the default 20); 005 may narrow it.
 - Post-processing is off by default (requirements give no default; it needs an endpoint). Its endpoint/model/prompt defaults are 003's.
-- The speech-language list is the set of languages the Whisper models support, plus "auto-detect".
+- The speech-language list is the set of languages the Whisper models support that have an ISO 639-1 code, plus "auto-detect": Whisper's `jw` (ISO: `jv`), Hawaiian (`haw`) and Cantonese (`yue`) are excluded, so Javanese is not offered (decisions #27, #28).
 - The first-run defaults are persisted immediately, so closing the first-run window without choosing an engine leaves engine = none and the next start is tray-only.
 - The UI language is stored explicitly (en/ru) on first run, not as "follow the OS".
 - The local-server model has no default because local servers name models differently; it is optional, and when empty the request carries no model (002 Clarification, FR-017).

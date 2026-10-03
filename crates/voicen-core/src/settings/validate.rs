@@ -491,11 +491,19 @@ mod tests {
 
     // ---- Decision #27 (T-003 review round 1) ----
 
-    /// The FieldId of `speech_language`. Decision #27(3) names it
-    /// `recording.speech_language`; data-model.md, the existing `FieldId` and the
-    /// spec (Engine tab) say `engine.speech_language`. This uses the existing one;
-    /// the contradiction is reported to the orchestrator.
+    /// The FieldId of `speech_language`: `engine.speech_language`, per decision
+    /// #28(a) (data-model.md and the spec's Engine tab; #27(3)'s
+    /// `recording.speech_language` was a drafting slip).
     const SPEECH_LANGUAGE: FieldId = FieldId::EngineSpeechLanguage;
+
+    /// Every engine, `none` included: `speech_language` is not a field of one
+    /// engine, so it is checked whatever engine is selected (#28, data-model.md).
+    const EVERY_ENGINE: [EngineKind; 4] = [
+        EngineKind::None,
+        EngineKind::Api,
+        EngineKind::LocalServer,
+        EngineKind::BuiltinLocal,
+    ];
 
     fn replace(key: &str) -> KeyEdit {
         KeyEdit::Replace(Secret::new(key))
@@ -622,15 +630,11 @@ mod tests {
 
     #[test]
     fn speech_language_null_or_whisper_code_accepted() {
-        // #27(3): `null` is auto-detect; every two-letter Whisper code is accepted,
-        // for every engine that transcribes. Bite: a hand-written subset (e.g. only
-        // the UI languages) or a case-folded comparison gone wrong.
-        assert_eq!(WHISPER_ISO_639_1.len(), 97);
-        for engine in [
-            EngineKind::Api,
-            EngineKind::LocalServer,
-            EngineKind::BuiltinLocal,
-        ] {
+        // #27(3), #28: `null` is auto-detect; every two-letter Whisper code is
+        // accepted, for every engine, `none` included. Bite: a hand-written subset
+        // (e.g. only the UI languages) or a case-folded comparison gone wrong. The
+        // list's own shape is pinned by `whisper_list_is_unique_two_letter_lowercase`.
+        for engine in EVERY_ENGINE {
             let mut s = sample(engine);
             s.speech_language = None;
             assert_eq!(
@@ -652,19 +656,17 @@ mod tests {
 
     #[test]
     fn speech_language_outside_whisper_list_refused() {
-        // #27(3): anything but `null` or a two-letter Whisper code ->
-        // `language.unsupported` on the speech-language field, exactly. Bite: no
-        // check (today), a length-only check (`xx`), a case-insensitive match (`RU`),
-        // accepting the ISO 639-2 or BCP 47 form (`rus`, `en-US`), or trimming.
+        // #27(3), #28: anything but `null` or a two-letter Whisper code ->
+        // `language.unsupported` on the speech-language field, exactly, for every
+        // engine, `none` included. Bite: no check, a length-only check (`xx`), a
+        // case-insensitive match (`RU`), accepting the ISO 639-2 or BCP 47 form
+        // (`rus`, `en-US`), trimming, or skipping the check when engine = `none`
+        // (M12).
         for raw in [
             "xx", "zz", "rus", "RU", "Ru", "", " ", "en-US", "en_US", "ru ", " de", "haw", "yue",
             "english", "auto",
         ] {
-            for engine in [
-                EngineKind::Api,
-                EngineKind::LocalServer,
-                EngineKind::BuiltinLocal,
-            ] {
+            for engine in EVERY_ENGINE {
                 let mut s = sample(engine);
                 s.speech_language = Some(raw.into());
                 assert_eq!(

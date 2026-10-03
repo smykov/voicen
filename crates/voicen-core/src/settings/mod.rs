@@ -597,8 +597,10 @@ mod tests {
         assert_eq!(json["schema_version"], json!(1));
     }
 
-    /// Every `FieldId`, once. Kept complete by `expected_field_id`'s exhaustive
-    /// match (a new variant does not compile until it has a row) and by the count.
+    /// Every `FieldId`, once (`field_ids_match_data_model` refuses a variant listed
+    /// twice). Completeness is by hand: `expected_field_id`'s exhaustive match makes
+    /// a new variant's contract string compile-required, but nothing here fails if
+    /// the variant is missing from this table (the length is part of the type).
     const ALL_FIELD_IDS: [FieldId; 21] = [
         FieldId::EngineKind,
         FieldId::EngineApiBaseUrl,
@@ -651,6 +653,14 @@ mod tests {
         }
     }
 
+    /// A data-model wire string: dot-separated segments, each `[a-z][a-z_]*`.
+    fn is_wire_name(s: &str) -> bool {
+        s.split('.').all(|seg| {
+            seg.starts_with(|c: char| c.is_ascii_lowercase())
+                && seg.chars().all(|c| c.is_ascii_lowercase() || c == '_')
+        })
+    }
+
     #[test]
     fn field_ids_match_data_model() {
         // Bite: a FieldId string that differs from data-model.md (UI highlight, logs),
@@ -658,6 +668,7 @@ mod tests {
         // `engine.local_server.key`, `post_processing.key`).
         for id in ALL_FIELD_IDS {
             assert_eq!(id.as_str(), expected_field_id(id), "{id:?}");
+            assert!(is_wire_name(id.as_str()), "{id:?}: {:?}", id.as_str());
         }
         // Each variant listed once, and no two share a string.
         let ids: std::collections::HashSet<_> = ALL_FIELD_IDS.into_iter().collect();
@@ -671,7 +682,7 @@ mod tests {
         );
     }
 
-    /// Every `ErrorCode`, once (see `ALL_FIELD_IDS`).
+    /// Every `ErrorCode`, once; completeness by hand (see `ALL_FIELD_IDS`).
     const ALL_ERROR_CODES: [ErrorCode; 14] = [
         ErrorCode::Required,
         ErrorCode::UrlMalformed,
@@ -715,6 +726,7 @@ mod tests {
         // (message id error.<code>), `hotkey.invalid` included.
         for code in ALL_ERROR_CODES {
             assert_eq!(code.as_str(), expected_error_code(code), "{code:?}");
+            assert!(is_wire_name(code.as_str()), "{code:?}: {:?}", code.as_str());
         }
         let codes: std::collections::HashSet<_> = ALL_ERROR_CODES.into_iter().collect();
         assert_eq!(
@@ -729,6 +741,32 @@ mod tests {
             ALL_ERROR_CODES.len(),
             "two codes share a string"
         );
+    }
+
+    #[test]
+    fn whisper_list_is_unique_two_letter_lowercase() {
+        // The one speech-language list (#27(3), #28): each entry exactly two ASCII
+        // lowercase letters (ISO 639-1 form, compared case-sensitively by
+        // `validate`), no entry twice, and none of the Whisper codes left out on
+        // purpose (`jw`: ISO 639-1 says `jv`; `haw`, `yue`: not ISO 639-1). The
+        // length is fixed by the array type, so it is not asserted.
+        // Bite: an entry typed in upper case (`"SU"`), with a space or a third
+        // letter, a typo that duplicates another entry (`"su"` -> `"sw"`), or `jw`
+        // put back.
+        let mut seen = std::collections::HashSet::new();
+        for code in WHISPER_ISO_639_1.iter() {
+            assert!(
+                code.len() == 2 && code.bytes().all(|b| b.is_ascii_lowercase()),
+                "{code:?} is not two ASCII lowercase letters"
+            );
+            assert!(seen.insert(*code), "{code:?} listed twice");
+        }
+        for left_out in ["jw", "haw", "yue"] {
+            assert!(
+                !WHISPER_ISO_639_1.contains(&left_out),
+                "{left_out:?} must not be listed"
+            );
+        }
     }
 
     #[test]

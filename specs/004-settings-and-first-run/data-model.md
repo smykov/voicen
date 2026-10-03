@@ -10,13 +10,13 @@ All types live in `crates/voicen-core` (module `settings`, `secrets`, `i18n`) un
 |---|---|---|---|---|---|
 | `schema_version` | u32 | `1` | `> 1` (newer than known) → file unreadable (research R-2); `0` loads | — | FR-13 |
 | `engine` | `none` \| `api` \| `builtin_local` \| `local_server` | `none` | — | `engine.kind` | FR-13, FR-21 |
-| `api.base_url` | string | `https://api.openai.com/v1` | engine = api: non-empty, valid URL (R-8); userinfo refused with `url.credentials`; a query string is allowed but never logged (#27(2)) | `engine.api.base_url` | FR-13 |
+| `api.base_url` | string | `https://api.openai.com/v1` | engine = api: non-empty, valid URL (R-8); userinfo refused with `url.credentials`; a query string is allowed and stored as typed (#27(2)); the promise that it is never logged is owned by T-008 (#30), not enforced yet | `engine.api.base_url` | FR-13 |
 | `api.model` | string | `whisper-1` | engine = api: non-empty after trim | `engine.api.model` | FR-13 |
-| `local_server.base_url` | string | `http://localhost:8000/v1` | engine = local_server: non-empty, valid URL; userinfo refused with `url.credentials`; a query string is allowed but never logged (#27(2)) | `engine.local_server.base_url` | FR-13, FR-17 |
+| `local_server.base_url` | string | `http://localhost:8000/v1` | engine = local_server: non-empty, valid URL; userinfo refused with `url.credentials`; a query string is allowed and stored as typed (#27(2)); the promise that it is never logged is owned by T-008 (#30), not enforced yet | `engine.local_server.base_url` | FR-13, FR-17 |
 | `local_server.model` | string | `""` | optional (002 FR-017) | `engine.local_server.model` | FR-13 |
 | `builtin_local.model_id` | string \| null | `null` | engine = builtin_local: non-null and downloaded (from 002's `ModelStore`) | `engine.builtin_local.model_id` | FR-13, FR-07 |
 | `speech_language` | string \| null | `null` (auto-detect) | `null` (auto) or exactly a two-letter code of `voicen_core::settings::WHISPER_ISO_639_1` (Whisper `LANGUAGES` minus `jw`, `haw`, `yue`), case-sensitive, checked for every engine | `engine.speech_language` | FR-13 |
-| `microphone` | `{id, name}` \| null | `null` (Windows default) | — (a missing device is not an error, req FR-27) | `recording.microphone` | FR-13 |
+| `microphone` | `{id, name}` \| null | `null` (Windows default) | — (a missing device is not an error, req FR-27); a partial object (only `id` or only `name`) makes the file unreadable (Q4 rule) | `recording.microphone` | FR-13 |
 | `hotkey` | string, canonical (`Ctrl+Alt+Space`) | `Ctrl+Alt+Space` | canonical text only (see Hotkey); ≥ 1 modifier, one key from the set of R-6, no `Esc`; registrable | `recording.hotkey` | FR-13, FR-05, FR-22 |
 | `mode` | `hold` \| `toggle` | `hold` | — | `recording.mode` | FR-13, FR-02 |
 | `auto_paste` | bool | `true` | — | `output.auto_paste` | FR-13, FR-10 |
@@ -38,7 +38,7 @@ Rules:
 - Defined by 004 in core and used by 001–003 (decisions #21). `KeySlot`: `TranscriptionApi` (target `Voicen/transcription-api`), `LocalServer` (`Voicen/local-server`), `PostProcessing` (`Voicen/post-processing`).
 - Key FieldIds (decisions #25a), for `key.required` and `key.store_failed`: `engine.api.key`, `engine.local_server.key`, `post_processing.key`. They name inputs, not `Settings` fields.
 - `Secret(String)`: no `Serialize`; `Debug`/`Display` print `***`; zeroed on drop.
-- `KeyEdit` (per slot, in a save or test request): `Untouched` | `Replace(Secret)` | `Clear`. Validation of `engine = api` requires `Replace` or (`Untouched` and the slot holds a key). an empty or whitespace `Replace` is `key.required` for the API key only; optional slots (local server, post-processing) accept it and it is never stored (#27(1), #28(b)).
+- `KeyEdit` (per slot, in a save or test request): `Untouched` | `Replace(Secret)` | `Clear`. Validation of `engine = api` requires `Replace` or (`Untouched` and the slot holds a key). An empty or whitespace `Replace` is `key.required` for the API key only; optional slots (local server, post-processing) accept it and it is never stored (#27(1), #28(b)). An empty-after-trim `Replace` that is not a `key.required` error (optional slots; the API slot while another engine is selected) is treated as `Untouched`: never written, the stored key stays; only `Clear` deletes a key (#30; T-032 owns the rule and its test).
 - `KeyPresence`: `{transcription_api: bool, local_server: bool, post_processing: bool}` — the only key information sent to a window.
 
 ## SettingsView (what a window receives)

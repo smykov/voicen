@@ -8,7 +8,7 @@ Rust signatures are indicative; names and semantics are the contract. Types are 
 
 Split (decisions #23): **T-003** built the types and pure rules — modules `secrets`, `settings` (`mod`, `url`, `validate`, `gate`, `hotkey`), `post_process::settings`, `hotkey_registrar`, `models` (all at `voicen_core::…`). **T-032** builds `SettingsFile` (`settings/file.rs`) and `SettingsService` with `SettingsDeps`, `Clock`, `SaveRequest`/`SaveOutcome`/`SettingsView`, `subscribe` and live apply (`settings/service.rs`). The sections below on those items are not yet in code.
 
-Built surface (T-003): `secrets::{KeySlot (all(), target_name()), Secret (new, expose), KeyEdit, KeyEdits (get(slot)), KeyPresence (get(slot)), CredentialStore, CredentialError { os_code }}`; `settings::{Settings, defaults, FieldId (as_str), ErrorCode (as_str), FieldError, LoadOutcome, EngineKind, Mode}`; `settings::url::{check_base_url, NormalizedUrl, UrlError}`; `settings::validate::{validate, KeyEditsWithPresence}`; `settings::gate::{dictation_gate, blocked_actions, startup_action, Blocked, ShellAction, StartupAction, SettingsTab}`; `settings::hotkey::{Hotkey, HotkeyKey, HotkeyError, parse_hotkey}`; `hotkey_registrar::{HotkeyRegistrar, Prepared, Unavailable}`; `models::DownloadedModels`.
+Built surface (T-003): `secrets::{KeySlot (all(), target_name()), Secret (new, expose), KeyEdit, KeyEdits (get(slot)), KeyPresence (get(slot)), CredentialStore, CredentialError { os_code }}`; `settings::{Settings, defaults, WHISPER_ISO_639_1, FieldId (as_str), ErrorCode (as_str), FieldError, LoadOutcome, EngineKind, Mode}`; `settings::url::{check_base_url, NormalizedUrl, UrlError}`; `settings::validate::{validate, KeyEditsWithPresence}`; `settings::gate::{dictation_gate, blocked_actions, startup_action, Blocked, ShellAction, StartupAction, SettingsTab}`; `settings::hotkey::{Hotkey, HotkeyKey, HotkeyError, parse_hotkey}`; `hotkey_registrar::{HotkeyRegistrar, Prepared, Unavailable}`; `models::DownloadedModels`.
 
 ### `CredentialStore` (req NFR-04; spec FR-014–FR-016)
 
@@ -70,7 +70,7 @@ pub fn defaults(os_language: Option<&str>) -> Settings;                 // the o
 pub fn validate(s: &Settings, keys: &KeyEditsWithPresence<'_>, models: &dyn DownloadedModels) -> Vec<FieldError>;   // settings::validate; KeyEditsWithPresence { edits: &KeyEdits, presence: KeyPresence }
 pub fn check_base_url(raw: &str) -> Result<NormalizedUrl, UrlError>;   // UrlError: Empty (required), Malformed (url.malformed), Credentials (url.credentials, userinfo; decision #27(2))
 pub fn is_insecure_remote(url: &NormalizedUrl) -> bool;
-pub const WHISPER_ISO_639_1: &[&str];                                   // settings::; the one language list (Whisper LANGUAGES minus jw, haw, yue); validate() gives language.unsupported for anything else
+pub const WHISPER_ISO_639_1: [&str; 97];                                  // settings::; the one language list (Whisper LANGUAGES minus jw, haw, yue); validate() gives language.unsupported for anything else
 pub fn resolve_ui_language(os_tag: Option<&str>) -> UiLanguage;   // lives in i18n.rs (teamwright T-005); defaults() calls it; the only place an OS tag becomes a language (the UI never derives one)
 pub fn dictation_gate(s: &Settings) -> Result<(), Blocked>;            // Blocked::NoEngine
 pub fn blocked_actions(b: Blocked) -> Vec<ShellAction>;                 // [Notify(choose_engine), OpenSettings(Engine)]
