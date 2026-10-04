@@ -1,12 +1,15 @@
-//! Shared helpers of `tests/local_download.rs` and `tests/local_store.rs` (T-016):
-//! the fake model, test catalog entries, a fake disk probe and a raw-TCP mock
-//! model server.
+//! Shared helpers of `tests/local_download.rs`, `tests/local_download_refused.rs`
+//! and `tests/local_store.rs` (T-016): the fake model, test catalog entries, a fake
+//! disk probe and a raw-TCP mock model server; the download harness is in
+//! [`download`].
 //!
 //! The fake model is 65 600 bytes (~64 KiB; size + 1 % is a whole number). Its
 //! SHA-256 was computed once on the host with `sha256sum` over the same byte
 //! formula and is hard-coded: the tests do not hash (no `sha2` dependency; the
 //! owner question of decision #49). Fake data only: 127.0.0.1, `SECRETQ`.
 #![allow(dead_code)]
+
+pub mod download;
 
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
@@ -152,7 +155,8 @@ impl Server {
     }
 
     /// Serves on `port` (after a refused-port phase). Panics if the port was taken
-    /// in between (a test-environment race, not a product failure).
+    /// in between (a test-environment race, not a product failure). Used only by
+    /// `tests/local_download_refused.rs`, whose process binds no other port.
     pub fn start_on(port: u16, plan: Vec<Serve>) -> Server {
         let listener = TcpListener::bind(("127.0.0.1", port)).expect("re-bind the refused port");
         Server::on(listener, plan)
@@ -186,12 +190,6 @@ impl Server {
 
 pub fn url_for(port: u16, file: &str) -> String {
     format!("http://127.0.0.1:{port}/{URL_PATH_MARK}/{file}?download=true&sig={QUERY_SECRET}")
-}
-
-/// A loopback port with nothing listening (bound, read, released).
-pub fn refused_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind 127.0.0.1:0");
-    listener.local_addr().expect("local addr").port()
 }
 
 /// Reads the request head (a GET has no body).

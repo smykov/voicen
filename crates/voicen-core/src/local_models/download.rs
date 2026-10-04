@@ -481,11 +481,9 @@ fn hex_eq(digest: &[u8], pinned: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::{BTreeMap, BTreeSet};
+    use crate::i18n::{text, UiLanguage, MESSAGE_IDS};
+    use std::collections::BTreeSet;
     use std::time::Duration;
-
-    const EN_JSON: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../i18n/en.json"));
-    const RU_JSON: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../i18n/ru.json"));
 
     /// One value of every variant. `exhaustive` below stops compiling when a
     /// variant is added, so this list cannot silently fall behind.
@@ -495,7 +493,7 @@ mod tests {
             DownloadFailure::ChecksumMismatch,
             DownloadFailure::NotEnoughDiskSpace { needed: 66_256 },
             DownloadFailure::SourceUnreachable {
-                host: "127.0.0.1:9".to_string(),
+                host: "models.example.com:8443".to_string(),
             },
             DownloadFailure::DiskError,
             DownloadFailure::HttpStatus { code: 404 },
@@ -514,27 +512,42 @@ mod tests {
         }
     }
 
-    fn placeholders(text: &str) -> BTreeSet<String> {
-        let mut out = BTreeSet::new();
-        let mut rest = text;
-        while let Some(open) = rest.find('{') {
-            let after = &rest[open + 1..];
-            match after.find('}') {
-                Some(close) => {
-                    let name = &after[..close];
-                    if !name.is_empty()
-                        && name
-                            .bytes()
-                            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
-                    {
-                        out.insert(name.to_string());
-                    }
-                    rest = &after[close + 1..];
-                }
-                None => break,
-            }
+    /// (message id, en text, ru text) per variant, with the params of
+    /// `every_failure` filled in. The texts are T-016's `download.*` catalog
+    /// entries; T-045 owns the `needed` formatting (and so those two texts).
+    fn expected(f: &DownloadFailure) -> (&'static str, &'static str, &'static str) {
+        match f {
+            DownloadFailure::DownloadInterrupted => (
+                "download.interrupted",
+                "The download was interrupted. Check the connection and try again.",
+                "Загрузка прервалась. Проверьте подключение и попробуйте снова.",
+            ),
+            DownloadFailure::ChecksumMismatch => (
+                "download.checksum_mismatch",
+                "The downloaded file is damaged (checksum mismatch). Try again.",
+                "Скачанный файл повреждён (контрольная сумма не совпадает). Попробуйте снова.",
+            ),
+            DownloadFailure::NotEnoughDiskSpace { .. } => (
+                "download.not_enough_disk_space",
+                "Not enough free disk space. The model needs 66256 bytes.",
+                "Недостаточно места на диске. Для модели нужно 66256 байт.",
+            ),
+            DownloadFailure::SourceUnreachable { .. } => (
+                "download.source_unreachable",
+                "Cannot reach models.example.com:8443",
+                "Не удаётся подключиться к models.example.com:8443",
+            ),
+            DownloadFailure::DiskError => (
+                "download.disk_error",
+                "The model file could not be written to the disk.",
+                "Не удалось записать файл модели на диск.",
+            ),
+            DownloadFailure::HttpStatus { .. } => (
+                "download.http_status",
+                "The download failed (HTTP 404).",
+                "Не удалось скачать модель (HTTP 404).",
+            ),
         }
-        out
     }
 
     #[test]
@@ -554,39 +567,36 @@ mod tests {
     }
 
     #[test]
-    fn every_download_failure_has_en_and_ru_text_with_its_placeholders() {
-        // T-016 Acceptance (en/ru message ids). Bite: a variant without its own id, an
-        // id missing or empty in i18n/en.json or i18n/ru.json (the UI would show the
-        // raw id), two variants sharing one id, a param the text does not use or a
-        // placeholder no param fills (`needed`, `host`, `code`).
-        let en: BTreeMap<String, String> = serde_json::from_str(EN_JSON).expect("en.json");
-        let ru: BTreeMap<String, String> = serde_json::from_str(RU_JSON).expect("ru.json");
-        let mut problems = Vec::new();
+    fn message_ids_per_download_failure() {
+        // The failure.rs `message_ids_per_reason` pattern (docs/decisions/i18n.md:
+        // completeness and parity stay in i18n::tests). Each variant has its own
+        // `download.*` id declared with messages! (so `message_ids_exist_in_both_catalogs`
+        // covers it), and that id renders the expected en and ru text with the
+        // variant's params. Bite: a shared or wrong id, an id not in MESSAGE_IDS, a
+        // missing catalog entry (text() falls back to the id), `needed`/`host`/`code`
+        // not passed or under another name (the placeholder stays unfilled).
+        let mut wrong = Vec::new();
         let mut ids = BTreeSet::new();
         for f in every_failure() {
-            let id = match serde_json::to_value(f.message_id()) {
-                Ok(serde_json::Value::String(id)) => id,
-                other => panic!("{f:?}: message id did not serialize to a string: {other:?}"),
-            };
-            ids.insert(id.clone());
-            let params: BTreeSet<String> = f
-                .message_params()
-                .into_iter()
-                .map(|(name, _)| name.to_string())
-                .collect();
-            for (lang, map) in [("en", &en), ("ru", &ru)] {
-                match map.get(&id).filter(|t| !t.trim().is_empty()) {
-                    None => problems.push(format!("{} -> {id}: no {lang} text", f.code())),
-                    Some(t) if placeholders(t) != params => problems.push(format!(
-                        "{} -> {id} ({lang}): placeholders {:?} != params {params:?}",
-                        f.code(),
-                        placeholders(t)
-                    )),
-                    Some(_) => {}
+            let (id, en, ru) = expected(&f);
+            let got_id = serde_json::to_value(f.message_id()).unwrap_or_default();
+            if got_id != serde_json::Value::String(id.to_string()) {
+                wrong.push(format!("{f:?}: message id {got_id}, expected {id:?}"));
+            }
+            ids.insert(got_id.to_string());
+            if !MESSAGE_IDS.contains(&f.message_id()) {
+                wrong.push(format!("{f:?}: message id not declared with messages!"));
+            }
+            let params = f.message_params();
+            let args: Vec<(&str, &str)> = params.iter().map(|(k, v)| (*k, v.as_str())).collect();
+            for (lang, want) in [(UiLanguage::En, en), (UiLanguage::Ru, ru)] {
+                let got = text(lang, f.message_id(), &args);
+                if got != want {
+                    wrong.push(format!("{f:?} {lang:?}: {got:?}, expected {want:?}"));
                 }
             }
         }
-        assert!(problems.is_empty(), "{problems:#?}");
+        assert!(wrong.is_empty(), "\n{}", wrong.join("\n"));
         assert_eq!(
             ids.len(),
             every_failure().len(),

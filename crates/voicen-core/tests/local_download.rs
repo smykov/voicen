@@ -5,216 +5,28 @@
 //! Every test injects a catalog entry for the fake ~64 KiB model (tests/common) and
 //! millisecond timeouts. The downloader runs on its own std thread; the tests call
 //! it from plain `#[test]` threads (no tokio runtime: the blocking reqwest client
-//! panics inside one, T-040). The event callback snapshots the models dir at each
-//! event, so "`.part` removed before the end event" is checked at the moment the
-//! event is emitted, not afterwards.
+//! panics inside one, T-040). The harness (tests/common/download.rs) snapshots the
+//! models dir at each event, so "`.part` removed before the end event" is checked
+//! at the moment the event is emitted, not afterwards.
+//!
+//! The refused-port case is in `tests/local_download_refused.rs`, its own process
+//! (T-016 review round 1 #1).
 
 mod common;
 
-use std::path::{Path, PathBuf};
-use std::sync::mpsc::{channel, Receiver, RecvTimeoutError};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use common::{
-    catalog, dir_entries, entry, model_bytes, refused_port, url_for, FakeDisk, Serve, Server,
-    NEEDED, QUERY_SECRET, SIZE, URL_PATH_MARK,
+use common::download::{
+    assert_no_url_in, assert_retry_succeeds, assert_verified_file_only, events, fixture,
+    fixture_with, Events, Fixture, Seen, FILE, PART,
 };
-use voicen_core::local_models::catalog::{CatalogEntry, ModelId};
-use voicen_core::local_models::download::{
-    DiskSpace, DownloadError, DownloadEvent, DownloadFailure, Downloader,
-};
-use voicen_core::local_models::store::ModelStore;
+use common::{dir_entries, entry, model_bytes, FakeDisk, Serve, Server, NEEDED, SIZE};
+use voicen_core::local_models::catalog::ModelId;
+use voicen_core::local_models::download::{DownloadError, DownloadEvent, DownloadFailure};
 use voicen_core::models::DownloadedModels;
 use voicen_core::secrets::{KeyEdits, KeyPresence};
 use voicen_core::settings::validate::{validate, KeyEditsWithPresence};
 use voicen_core::settings::{defaults, EngineKind, ErrorCode, FieldId};
-use voicen_core::test_support::TempDir;
-use voicen_core::timeouts::Timeouts;
-
-const FILE: &str = "ggml-base.bin";
-const PART: &str = "ggml-base.bin.part";
-/// Long enough for any local end event; a hang fails the test instead of the run.
-const END_WAIT: Duration = Duration::from_secs(10);
-
-// ---- harness ------------------------------------------------------------------
-
-/// One event as seen by the callback at the moment it was emitted.
-#[derive(Debug, Clone)]
-struct Seen {
-    event: DownloadEvent,
-    /// Names in the models dir at that moment.
-    dir: Vec<String>,
-    at: Instant,
-}
-
-impl Seen {
-    fn is_end(&self) -> bool {
-        !matches!(self.event, DownloadEvent::Progress { .. })
-    }
-}
-
-struct Events {
-    rx: Receiver<Seen>,
-    seen: Vec<Seen>,
-}
-
-impl Events {
-    /// Blocks until an end event (`Finished` / `Failed` / `Cancelled`); returns it.
-    fn wait_end(&mut self) -> Seen {
-        let deadline = Instant::now() + END_WAIT;
-        loop {
-            let left = deadline.saturating_duration_since(Instant::now());
-            match self.rx.recv_timeout(left) {
-                Ok(s) => {
-                    self.seen.push(s.clone());
-                    if s.is_end() {
-                        return s;
-                    }
-                }
-                Err(RecvTimeoutError::Timeout) => {
-                    panic!("no end event within {END_WAIT:?}; seen: {:?}", self.seen)
-                }
-                Err(RecvTimeoutError::Disconnected) => {
-                    panic!(
-                        "event callback dropped without an end event; seen: {:?}",
-                        self.seen
-                    )
-                }
-            }
-        }
-    }
-
-    /// Blocks until the first `Progress` (the transfer has started).
-    fn wait_progress(&mut self) -> Seen {
-        match self.rx.recv_timeout(END_WAIT) {
-            Ok(s) => {
-                self.seen.push(s.clone());
-                assert!(!s.is_end(), "ended before any progress: {:?}", self.seen);
-                s
-            }
-            Err(e) => panic!(
-                "no progress within {END_WAIT:?} ({e:?}); seen: {:?}",
-                self.seen
-            ),
-        }
-    }
-
-    /// Collects whatever arrives within `d` (to prove nothing more comes).
-    fn drain_for(&mut self, d: Duration) -> Vec<Seen> {
-        let deadline = Instant::now() + d;
-        let mut more = Vec::new();
-        while let Ok(s) = self
-            .rx
-            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-        {
-            self.seen.push(s.clone());
-            more.push(s);
-        }
-        more
-    }
-
-    fn progress(&self) -> Vec<(u64, u64)> {
-        self.seen
-            .iter()
-            .filter_map(|s| match s.event {
-                DownloadEvent::Progress {
-                    received, total, ..
-                } => Some((received, total)),
-                _ => None,
-            })
-            .collect()
-    }
-}
-
-/// The callback for `start`, and the receiving side.
-fn events(models_dir: &Path) -> (impl Fn(DownloadEvent) + Send + 'static, Events) {
-    let (tx, rx) = channel();
-    let dir = models_dir.to_path_buf();
-    let callback = move |event: DownloadEvent| {
-        let _ = tx.send(Seen {
-            event,
-            dir: dir_entries(&dir),
-            at: Instant::now(),
-        });
-    };
-    (
-        callback,
-        Events {
-            rx,
-            seen: Vec::new(),
-        },
-    )
-}
-
-struct Fixture {
-    _tmp: TempDir,
-    models: PathBuf,
-    store: Arc<ModelStore>,
-    disk: Arc<FakeDisk>,
-    dl: Downloader,
-}
-
-impl Fixture {
-    fn final_path(&self) -> PathBuf {
-        self.models.join(FILE)
-    }
-
-    fn start(&self, id: ModelId) -> Result<Events, DownloadError> {
-        let (cb, ev) = events(&self.models);
-        self.dl.start(id, cb).map(|()| ev)
-    }
-}
-
-fn timeouts(no_data: Duration) -> Timeouts {
-    Timeouts {
-        connect: Duration::from_secs(2),
-        download_no_data: no_data,
-        ..Timeouts::default()
-    }
-}
-
-/// A models dir (created) with `entries`, a disk with plenty of room.
-fn fixture_with(entries: Vec<CatalogEntry>, disk: Arc<FakeDisk>, no_data: Duration) -> Fixture {
-    let tmp = TempDir::new();
-    let models = tmp.path().join("models");
-    std::fs::create_dir(&models).expect("create models dir");
-    let store = Arc::new(ModelStore::new(models.clone(), catalog(entries)));
-    let probe: Arc<dyn DiskSpace> = disk.clone();
-    let dl = Downloader::new(Arc::clone(&store), probe, timeouts(no_data));
-    Fixture {
-        _tmp: tmp,
-        models,
-        store,
-        disk,
-        dl,
-    }
-}
-
-/// `base` served by `server`.
-fn fixture(server: &Server, no_data: Duration) -> Fixture {
-    fixture_with(
-        vec![entry(ModelId::Base, FILE, &server.url(FILE))],
-        FakeDisk::with_available(10 * NEEDED),
-        no_data,
-    )
-}
-
-/// The final file holds exactly the fake model, and nothing else is in the dir.
-fn assert_verified_file_only(f: &Fixture, label: &str) {
-    let got = std::fs::read(f.final_path())
-        .unwrap_or_else(|e| panic!("{label}: final file missing: {e}"));
-    assert!(
-        got == model_bytes(),
-        "{label}: final file bytes differ ({} bytes)",
-        got.len()
-    );
-    assert_eq!(
-        dir_entries(&f.models),
-        vec![FILE.to_string()],
-        "{label}: models dir"
-    );
-}
 
 /// Settings validation accepts `builtin_local` with `base` through `store`.
 fn validation_accepts_base(store: &dyn DownloadedModels) -> bool {
@@ -229,34 +41,6 @@ fn validation_accepts_base(store: &dyn DownloadedModels) -> bool {
     !validate(&s, &keys, store).iter().any(|e| {
         e.field == FieldId::EngineBuiltinLocalModelId && e.code == ErrorCode::ModelNotDownloaded
     })
-}
-
-/// No event, reason or Debug text carries the URL's query or path (T-040: reqwest
-/// errors contain the URL).
-fn assert_no_url_in(seen: &[Seen], label: &str) {
-    for s in seen {
-        let text = format!("{:?}", s.event);
-        assert!(
-            !text.contains(QUERY_SECRET) && !text.contains(URL_PATH_MARK) && !text.contains("http"),
-            "{label}: event carries the URL: {text}"
-        );
-    }
-}
-
-/// A retry right after the end event succeeds and leaves only the verified file.
-fn assert_retry_succeeds(f: &Fixture, label: &str) {
-    let mut ev = f
-        .start(ModelId::Base)
-        .unwrap_or_else(|e| panic!("{label}: retry refused right after the end event: {e:?}"));
-    let end = ev.wait_end();
-    assert_eq!(
-        end.event,
-        DownloadEvent::Finished { id: ModelId::Base },
-        "{label}: retry did not finish; seen {:?}",
-        ev.seen
-    );
-    assert_verified_file_only(f, &format!("{label} (retry)"));
-    assert!(f.store.is_downloaded("base"), "{label}: store after retry");
 }
 
 /// The failure branch (Acceptance line 2): `Failed{reason}` with `reason` as
@@ -399,30 +183,30 @@ fn one_altered_byte_fails_checksum_mismatch_then_retry_succeeds() {
 }
 
 #[test]
-fn short_complete_body_fails_then_retry_succeeds() {
+fn short_complete_body_fails_interrupted_then_retry_succeeds() {
     // A clean end 100 bytes short of the catalog size (a consistent Content-Length).
-    // Bite: trusting the server's length instead of the catalog size.
+    // contracts/core-traits.md: fewer bytes than the catalog size is a cut body ->
+    // DownloadInterrupted (retry is the user's remedy), not ChecksumMismatch.
+    // Bite: trusting the server's length instead of the catalog size; the short end
+    // reported as ChecksumMismatch (hashing a short file instead of stopping at the
+    // byte count).
     let server = Server::start(vec![Serve::Short]);
     let f = fixture(&server, Duration::from_secs(2));
     fails_then_retry_succeeds("short body", &f, |r| {
-        matches!(
-            r,
-            DownloadFailure::DownloadInterrupted | DownloadFailure::ChecksumMismatch
-        )
+        *r == DownloadFailure::DownloadInterrupted
     });
 }
 
 #[test]
-fn overlong_body_fails_then_retry_succeeds() {
-    // The model plus one byte. Bite: stopping at the catalog size and accepting a
-    // body that is not the pinned file, or hashing only the first SIZE bytes.
+fn overlong_body_fails_checksum_mismatch_then_retry_succeeds() {
+    // The model plus one byte. contracts/core-traits.md: a body longer than the
+    // catalog size is ChecksumMismatch (it cannot be the pinned file). Bite:
+    // stopping at the catalog size and accepting a body that is not the pinned file,
+    // hashing only the first SIZE bytes, the overrun reported as DownloadInterrupted.
     let server = Server::start(vec![Serve::Long]);
     let f = fixture(&server, Duration::from_secs(2));
     fails_then_retry_succeeds("overlong body", &f, |r| {
-        matches!(
-            r,
-            DownloadFailure::DownloadInterrupted | DownloadFailure::ChecksumMismatch
-        )
+        *r == DownloadFailure::ChecksumMismatch
     });
 }
 
@@ -485,33 +269,9 @@ fn no_response_headers_within_no_data_fails_then_retry_succeeds() {
     );
 }
 
-#[test]
-fn refused_port_fails_source_unreachable_with_host_port_then_retry_succeeds() {
-    // Nothing listens; then a server comes up on the same port. Bite: another
-    // reason, the host without the port, the whole URL (path, query) in the reason.
-    let port = refused_port();
-    let f = fixture_with(
-        vec![entry(ModelId::Base, FILE, &url_for(port, FILE))],
-        FakeDisk::with_available(10 * NEEDED),
-        Duration::from_secs(2),
-    );
-    let mut ev = f.start(ModelId::Base).expect("start");
-    let end = ev.wait_end();
-    assert_eq!(
-        end.event,
-        DownloadEvent::Failed {
-            id: ModelId::Base,
-            reason: DownloadFailure::SourceUnreachable {
-                host: format!("127.0.0.1:{port}")
-            }
-        }
-    );
-    assert!(end.dir.is_empty(), "models dir at Failed: {:?}", end.dir);
-    assert_no_url_in(&ev.seen, "refused");
-
-    let _server = Server::start_on(port, vec![]);
-    assert_retry_succeeds(&f, "refused");
-}
+// The refused-port case lives in its own binary, `tests/local_download_refused.rs`:
+// a released port cannot stay free while the parallel tests here bind 127.0.0.1:0
+// (T-016 review round 1 #1).
 
 #[test]
 fn part_file_that_cannot_be_created_fails_disk_error_then_retry_succeeds() {
@@ -545,16 +305,21 @@ fn part_file_that_cannot_be_created_fails_disk_error_then_retry_succeeds() {
 
 #[test]
 fn trickle_longer_than_no_data_succeeds_and_stall_fails() {
-    // T-016 Investigation "Recommended" first test. A chunk every 60 ms for ~1 s with
-    // no_data = 150 ms must finish: the no-data timeout is per read, not a total.
-    // The same no_data fails a stall. Bite: RequestBuilder::timeout(no_data) (a
-    // total timeout ends the trickle at ~150 ms), no timeout at all (the stall
+    // T-016 Investigation "Recommended" first test. A chunk every 50 ms for ~1.6 s
+    // with no_data = 400 ms must finish: the no-data timeout is per read, not a
+    // total. The same no_data fails a stall. Bite: RequestBuilder::timeout(no_data)
+    // (a total timeout ends the trickle at ~400 ms), no timeout at all (the stall
     // half hangs for the 3 s hold), progress only at the end, a temp name other than
     // `<file>.part` (cleanup_at_start would miss it).
-    let no_data = Duration::from_millis(150);
+    //
+    // Margins: each gap leaves 350 ms of scheduling slack below no_data, and the
+    // whole trickle lasts 4x no_data. The earlier 60 ms / 150 ms pair left 90 ms,
+    // and a loaded host stretched one gap past 150 ms (2 failures in 50 runs,
+    // T-016 review round 1 loop).
+    let no_data = Duration::from_millis(400);
     let server = Server::start(vec![Serve::Trickle {
-        chunk: 4_000,
-        every: Duration::from_millis(60),
+        chunk: 2_000,
+        every: Duration::from_millis(50),
     }]);
     let f = fixture(&server, no_data);
     let started = Instant::now();
@@ -574,8 +339,8 @@ fn trickle_longer_than_no_data_succeeds_and_stall_fails() {
         ev.seen
     );
     assert!(
-        took >= Duration::from_millis(800),
-        "the trickle took {took:?}; it must outlast no_data many times over"
+        took >= 3 * no_data,
+        "the trickle took {took:?}; it must outlast no_data several times over"
     );
     let n = ev.progress().len();
     assert!(
@@ -811,7 +576,43 @@ fn disk_probe_error_lets_the_download_proceed() {
     assert_verified_file_only(&f, "probe error");
 }
 
-// ---- already downloaded / wrong-size file -----------------------------------
+// ---- already downloaded / not in catalog / wrong-size file -------------------
+
+#[test]
+fn model_missing_from_the_catalog_is_refused_without_a_request_or_event() {
+    // contracts/core-traits.md DownloadError::NotInCatalog: the injected catalog has
+    // only `base`; `start(tiny)` refuses before any request, emits no event, writes
+    // nothing and leaves the downloader idle (a `base` download still starts).
+    // Bite: another refusal (or none: a request to some URL, a panic on the missing
+    // entry), the active slot taken before the catalog check (Busy afterwards).
+    let server = Server::start(vec![]);
+    let f = fixture(&server, Duration::from_secs(2));
+    let (cb, mut ev) = events(&f.models);
+    assert_eq!(
+        f.dl.start(ModelId::Tiny, cb).err(),
+        Some(DownloadError::NotInCatalog)
+    );
+    let more = ev.drain_for(Duration::from_millis(300));
+    assert!(more.is_empty(), "events after a refused start: {more:?}");
+    assert_eq!(server.accepts(), 0, "a request was sent");
+    assert!(
+        dir_entries(&f.models).is_empty(),
+        "models dir {:?}",
+        dir_entries(&f.models)
+    );
+    assert!(
+        !f.dl.cancel(ModelId::Tiny),
+        "cancel(tiny) after the refusal"
+    );
+    let mut ev = f
+        .start(ModelId::Base)
+        .expect("the refusal left the downloader busy");
+    assert_eq!(
+        ev.wait_end().event,
+        DownloadEvent::Finished { id: ModelId::Base }
+    );
+    assert_eq!(server.accepts(), 1, "requests: only the base download");
+}
 
 #[test]
 fn already_downloaded_model_is_refused_without_a_request() {
