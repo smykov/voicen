@@ -1,0 +1,12 @@
+# Fixture shell dir for scripts/ci/shell-test-layout.test.sh; never built.
+# T-038 review round 2, finding 1 (a): the header ["l'i'b"] names a table `l'i'b`, which cargo 1.99
+# ignores; there is no real [lib] table, so the implicit lib has doctests on. Read from the raw line,
+# with the comment cut at the first # and spaces, quotes and brackets deleted, it was lib.
+[package]
+name = "shell-layout-fixture"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+["l'i'b"]
+doctest = false

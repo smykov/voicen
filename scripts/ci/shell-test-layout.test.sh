@@ -185,6 +185,22 @@ check ok-cargo-strings-and-comments   0 "ok:"                                   
 # (ii) No backslash inside a quoted key or a table header: an escape can spell path or bin.
 check v-cargo-escaped-key             1 "v-cargo-escaped-key/Cargo.toml:14:"             # (c) [lib] "path" = "../outside/lib.rs"
 check v-cargo-escaped-header          1 "v-cargo-escaped-header/Cargo.toml:15:"          # (c) [["bin"]] path = "../outside/main.rs"
+# (iii) A line starting with [ that the header pattern does not read is refused (rule H;
+# review round 2, finding 2): otherwise the tracker stays in the previous table.
+check v-cargo-unreadable-header       1 "v-cargo-unreadable-header/Cargo.toml:19:"       # [[bin]] name = "voicen", then path = "../outside/main.rs"
+# T-038 review round 2, finding 1: a whitelist, not more shapes. (a) The table name is read
+# from the string-aware scan, and a quoted key that names the table may hold bare-key
+# characters only ([A-Za-z0-9_-]), so quoting is exactly bare. Each header below names a table
+# cargo 1.99 ignores, so the lib keeps doctests on; read from the raw line it was lib.
+check v-cargo-header-quoted-space     1 "v-cargo-header-quoted-space/Cargo.toml:11:"     # ["li b"]   / doctest = false, no real [lib]
+check v-cargo-header-quoted-hash      1 "v-cargo-header-quoted-hash/Cargo.toml:11:"      # ["lib#x"]  / doctest = false, no real [lib]
+check v-cargo-header-quoted-quote     1 "v-cargo-header-quoted-quote/Cargo.toml:11:"     # ["l'i'b"]  / doctest = false, no real [lib]
+check v-cargo-header-quoted-bracket   1 "v-cargo-header-quoted-bracket/Cargo.toml:11:"   # ["l]i[b"]  / doctest = false, no real [lib]
+check v-cargo-header-real-lib-then-fake 1 "v-cargo-header-real-lib-then-fake/Cargo.toml:15:" # [lib] without the pin, then ["li b"] / doctest = false
+# (b) Code (strings blanked, comment cut) holds printable ASCII and tab only: a UTF-8 BOM, or
+# any invisible prefix, cannot hide a header or a key.
+check v-cargo-bom-bin                 1 "v-cargo-bom-bin/Cargo.toml:1:"                  # BOM [[bin]] / path = "../outside/main.rs", cargo strips the BOM
+check ok-cargo-quoted-header-keys     0 "ok:"                                            # ["lib"] is [lib]; 'cfg(all(.., target_arch = "x86_64"))' target key; non-ASCII in strings, keys and comments
 
 # Cannot run: exit 3.
 check does-not-exist            3 "cannot run"

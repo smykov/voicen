@@ -1,0 +1,20 @@
+# Fixture shell dir for scripts/ci/shell-test-layout.test.sh; never built.
+# T-038 review round 2, finding 2: a line starting with [ that the header pattern does not read
+# (code after the header). Not refused, the tracker would stay in [dependencies] and miss the
+# [[bin]] path below it. cargo rejects the line; the guard must refuse it too (rule H).
+[package]
+name = "shell-layout-fixture"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "shell_layout_fixture_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+doctest = false
+
+[dependencies]
+serde = "1"
+
+[[bin]] name = "voicen"
+path = "../outside/main.rs"

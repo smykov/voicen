@@ -1,0 +1,24 @@
+# Fixture shell dir for scripts/ci/shell-test-layout.test.sh; never built.
+# T-038 review round 2, finding 1: what the whitelist must still let through. A quoted header
+# key holding bare-key characters only reads as the bare key (["lib"] is [lib], so the pin
+# below counts); a quoted key that is not the table name, such as the cfg of a target table,
+# may hold other characters; non-ASCII text in strings and comments is not code.
+# Non-ASCII in a full-line comment: Voicen — диктовка, 音声入力, ✓.
+[package]
+name = "shell-layout-fixture"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Voicen — диктовка в любое поле ✓"   # non-ASCII after code: «комментарий»
+x-literal = 'C:\Пользователи\voicen'
+
+["lib"]
+name = "shell_layout_fixture_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+doctest = false   # 'lib' quoted with bare-key characters only
+
+[package.metadata.'voicen-lit']
+"ключ" = "значение"
+
+[target.'cfg(all(windows, target_arch = "x86_64"))'.dependencies]
+windows-sys = "0.59"
