@@ -9,14 +9,19 @@
 //! [`PipelineObserver`] and through the returned [`JobReport`].
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant};
 
-use crate::engine::{engine_for, Engine};
-use crate::events::PipelineObserver;
+use crate::audio::AudioBuffer;
+use crate::delivery::deliver;
+use crate::engine::{engine_for, Engine, TranscribeRequest};
+use crate::events::{DictationEvent, OutcomeCode, PipelineObserver, WarningCode};
 use crate::failure::FailureReason;
-use crate::platform::{Clipboard, Paster, PendingId, StartWindow, TempAudioStore};
-use crate::post_process::PostProcessor;
-use crate::recording::{FinishedRecording, JobEnd};
+use crate::i18n;
+use crate::platform::{Clipboard, ClipboardError, Paster, PendingId, StartWindow, TempAudioStore};
+use crate::post_process::{PostProcessed, PostProcessor};
+use crate::recording::{FinishedRecording, JobEnd, RecordingId};
 use crate::secrets::CredentialStore;
 use crate::settings::Settings;
 use crate::timeouts::Timeouts;
@@ -58,33 +63,88 @@ pub struct JobReport {
 
 /// The job sequencer. `Send + Sync`, shared by the job threads.
 pub struct Pipeline {
-    // Skeleton (T-001 red tests): the fields are read by the implementation.
-    #[allow(dead_code)]
     deps: PipelineDeps,
-    #[allow(dead_code)]
+    /// The one source of every request's durations (FR-24).
     timeouts: Timeouts,
-    #[allow(dead_code)]
     factory: Box<EngineFactory>,
+    /// `JobFinished.seq`, taken at `run_job` entry (T-011 moves it to the stop).
+    last_seq: AtomicU64,
+    /// The last [`PendingId`] handed out; ids are never reused.
+    last_pending_id: AtomicU64,
+    /// The one pending recording (data-model "PendingRecording": at most one).
+    pending: Mutex<Option<PendingRecording>>,
+}
+
+/// The pending slot's entry; its audio is in the [`TempAudioStore`] under `id`.
+/// T-007 adds the start window when retry reads it.
+#[derive(Debug, Clone)]
+struct PendingRecording {
+    id: PendingId,
+    reason: FailureReason,
+}
+
+/// One job's inputs, borrowed from the recording (T-007 adds a second
+/// constructor, from the pending slot, into the same `process` -> `release`).
+struct Job<'a> {
+    recording: RecordingId,
+    audio: &'a AudioBuffer,
+    start_window: Option<&'a StartWindow>,
+    settings: &'a Settings,
+    stopped_at: Instant,
+    seq: u64,
+}
+
+/// What `process` decided, before anything is delivered or kept.
+enum Outcome {
+    /// A non-blank post-processed text.
+    Text(PostProcessed),
+    NoSpeech,
+    Failed(FailureReason),
+}
+
+/// The result of `process`, handed to `release` (T-011 queues it in between).
+struct JobOutcome {
+    outcome: Outcome,
+    /// `Engine::kind()` of the engine that was built, if any.
+    engine: Option<&'static str>,
+    /// When the outcome was known; used only for event durations.
+    at: Instant,
+}
+
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+fn millis(d: Duration) -> u64 {
+    u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
+}
+
+/// Nothing to deliver: empty or whitespace only.
+fn is_blank(text: &str) -> bool {
+    text.trim().is_empty()
 }
 
 impl Pipeline {
-    /// The production pipeline: [`Timeouts::default()`] and [`engine_for`].
-    pub fn new(deps: PipelineDeps) -> Pipeline {
+    fn build(deps: PipelineDeps, timeouts: Timeouts) -> Pipeline {
         Pipeline {
             deps,
-            timeouts: Timeouts::default(),
+            timeouts,
             factory: Box::new(engine_for),
+            last_seq: AtomicU64::new(0),
+            last_pending_id: AtomicU64::new(0),
+            pending: Mutex::new(None),
         }
+    }
+
+    /// The production pipeline: [`Timeouts::default()`] and [`engine_for`].
+    pub fn new(deps: PipelineDeps) -> Pipeline {
+        Pipeline::build(deps, Timeouts::default())
     }
 
     /// Test durations (milliseconds) instead of the FR-24 defaults.
     #[cfg(any(test, feature = "test-fakes"))]
     pub fn with_timeouts(deps: PipelineDeps, timeouts: Timeouts) -> Pipeline {
-        Pipeline {
-            deps,
-            timeouts,
-            factory: Box::new(engine_for),
-        }
+        Pipeline::build(deps, timeouts)
     }
 
     /// Replaces the engine factory (T-017's `BuiltinLocal` wrapper; test fakes).
@@ -94,20 +154,181 @@ impl Pipeline {
 
     /// Runs one job to its end. Blocking: call it on a plain std thread, never
     /// inside a tokio runtime.
+    ///
+    /// Speech gate, then (speech only) the engine from the factory with the
+    /// recording's settings snapshot, then the post-processor, then delivery: the
+    /// clipboard is written only for a non-blank text, and Ctrl+V only per
+    /// [`deliver`]'s table. A retryable failure keeps the audio as the one pending
+    /// recording. Events, in order: `Warning{vad_fallback}` (once per gate),
+    /// `SpeechGate`, `JobFinished` (after the clipboard write), `Delivered`.
     pub fn run_job(&self, rec: FinishedRecording<PressContext>) -> JobReport {
-        // Skeleton (T-001 red tests): not implemented yet.
-        let _ = rec;
-        JobReport {
-            end: JobEnd::Failed(FailureReason::UnexpectedResponse),
-            pending: None,
-        }
+        let ctx = rec.ctx();
+        let job = Job {
+            recording: rec.id(),
+            audio: rec.audio(),
+            start_window: ctx.start_window.as_ref(),
+            settings: &ctx.settings,
+            stopped_at: rec.stopped_at(),
+            seq: self
+                .last_seq
+                .fetch_add(1, Ordering::Relaxed)
+                .wrapping_add(1),
+        };
+        let done = self.process(&job);
+        self.release(&job, done)
     }
 
     /// The pending recording and its last reason (T-006/T-007: tray
     /// `retry_available`, the toast's retry id).
     pub fn pending(&self) -> Option<(PendingId, FailureReason)> {
-        // Skeleton (T-001 red tests): not implemented yet.
-        None
+        lock(&self.pending)
+            .as_ref()
+            .map(|p| (p.id, p.reason.clone()))
+    }
+
+    fn emit(&self, e: DictationEvent) {
+        self.deps.observer.event(&e);
+    }
+
+    /// Gate, engine, post-processor. No side effects besides the `Warning` and
+    /// `SpeechGate` events: no clipboard, paste or pending slot.
+    fn process(&self, job: &Job<'_>) -> JobOutcome {
+        let decision = self.deps.gate.decide(job.audio);
+        if decision.fallback_warning {
+            self.emit(DictationEvent::Warning {
+                code: WarningCode::VadFallback,
+            });
+        }
+        self.emit(DictationEvent::SpeechGate {
+            recording: job.recording,
+            detector: decision.detector,
+            speech: decision.speech,
+        });
+        if !decision.speech {
+            return JobOutcome {
+                outcome: Outcome::NoSpeech,
+                engine: None,
+                at: Instant::now(),
+            };
+        }
+
+        let engine = match (self.factory)(job.settings, &*self.deps.credentials) {
+            Ok(engine) => engine,
+            Err(reason) => {
+                return JobOutcome {
+                    outcome: Outcome::Failed(reason),
+                    engine: None,
+                    at: Instant::now(),
+                }
+            }
+        };
+        let request = TranscribeRequest {
+            language: job.settings.speech_language.clone(),
+            timeouts: self.timeouts,
+        };
+        let outcome = match engine.transcribe(job.audio, &request) {
+            Err(reason) => Outcome::Failed(reason),
+            Ok(text) if is_blank(&text) => Outcome::NoSpeech,
+            Ok(text) => {
+                let processed = self.deps.post_processor.process(text, job.settings);
+                if is_blank(&processed.text) {
+                    Outcome::NoSpeech
+                } else {
+                    Outcome::Text(processed)
+                }
+            }
+        };
+        JobOutcome {
+            outcome,
+            engine: Some(engine.kind()),
+            at: Instant::now(),
+        }
+    }
+
+    /// Clipboard, paste, pending slot, `JobFinished` / `Delivered`.
+    fn release(&self, job: &Job<'_>, done: JobOutcome) -> JobReport {
+        let stop_to_text_ms = millis(done.at.saturating_duration_since(job.stopped_at));
+        let finished =
+            |outcome: OutcomeCode, failure: Option<&FailureReason>| DictationEvent::JobFinished {
+                seq: job.seq,
+                engine: done.engine,
+                stop_to_text_ms,
+                outcome,
+                failure: failure.map(FailureReason::code),
+                http_status: match failure {
+                    Some(FailureReason::ServerError { status }) => Some(*status),
+                    _ => None,
+                },
+            };
+        let reason = match done.outcome {
+            Outcome::NoSpeech => {
+                self.emit(finished(OutcomeCode::NoSpeech, None));
+                return JobReport {
+                    end: JobEnd::Notice(i18n::NOTICE_NO_SPEECH),
+                    pending: None,
+                };
+            }
+            Outcome::Failed(reason) => reason,
+            Outcome::Text(processed) => {
+                match deliver(
+                    &processed.text,
+                    job.settings.auto_paste,
+                    job.start_window,
+                    &*self.deps.clipboard,
+                    &*self.deps.paster,
+                ) {
+                    Ok(result) => {
+                        self.emit(finished(OutcomeCode::Text, None));
+                        self.emit(DictationEvent::Delivered {
+                            seq: job.seq,
+                            text_to_paste_ms: millis(done.at.elapsed()),
+                            result,
+                        });
+                        // Until T-020 decides how notices combine: the delivery
+                        // notice, else the post-processor's.
+                        return JobReport {
+                            end: JobEnd::Delivered {
+                                notice: result.notice().or(processed.notice),
+                            },
+                            pending: None,
+                        };
+                    }
+                    Err(ClipboardError) => FailureReason::ClipboardUnavailable,
+                }
+            }
+        };
+
+        self.emit(finished(OutcomeCode::Failed, Some(&reason)));
+        let pending = if reason.retryable() {
+            self.keep_pending(job.audio, &reason)
+        } else {
+            None
+        };
+        JobReport {
+            end: JobEnd::Failed(reason),
+            pending,
+        }
+    }
+
+    /// Stores the audio under a new id, makes it the one pending recording (or
+    /// none, if storing failed), and deletes the audio it replaced either way.
+    fn keep_pending(&self, audio: &AudioBuffer, reason: &FailureReason) -> Option<PendingId> {
+        let id = PendingId(
+            self.last_pending_id
+                .fetch_add(1, Ordering::Relaxed)
+                .wrapping_add(1),
+        );
+        let stored = self.deps.temp_audio.put_pending(id, audio).is_ok();
+        let entry = stored.then(|| PendingRecording {
+            id,
+            reason: reason.clone(),
+        });
+        let older = std::mem::replace(&mut *lock(&self.pending), entry);
+        if let Some(older) = older {
+            // Errors are ignored: the start/exit delete_all (T-007) removes leftovers.
+            let _ = self.deps.temp_audio.delete_pending(older.id);
+        }
+        stored.then_some(id)
     }
 }
 

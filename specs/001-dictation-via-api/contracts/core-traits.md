@@ -57,16 +57,18 @@ pub struct GateDecision { pub speech: bool, pub detector: &'static str, pub fall
 
 ## PostProcessor (FR-021; 003 implements)
 
+In `voicen_core::post_process` (the module that already holds 003's settings type; T-001):
+
 ```rust
 pub trait PostProcessor: Send + Sync {
     /// Returns the text to deliver. Must not fail the dictation: on its own failure it returns
     /// the input text plus a notice (003 defines the notice).
-    fn process(&self, text: String, settings: &DictationSettings) -> PostProcessed;
+    fn process(&self, text: String, settings: &Settings) -> PostProcessed;   // the job's snapshot
 }
-pub struct PostProcessed { pub text: String, pub notice: Option<MessageKey> }
+pub struct PostProcessed { pub text: String, pub notice: Option<MessageId> }
 ```
 
-`PassThrough` returns `PostProcessed{ text, notice: None }`.
+`PassThrough` returns `PostProcessed{ text, notice: None }` (the text unchanged, not trimmed). The pipeline calls it only for a non-blank engine text; a blank result is `NoSpeech`. T-020 widens the arguments (credentials, timeouts) and decides how its notice combines with a delivery notice (`JobEnd::Delivered` has one slot; until then the delivery notice wins, else the post-processor's).
 
 ## Platform traits (implemented in `src-tauri/src/win/*`, faked in tests)
 
@@ -103,6 +105,12 @@ pub trait Indicator: Send + Sync {
     fn set_overlay(&self, state: &OverlayState);           // shell forwards it as the IPC event
 }
 
+// Clipboard, Paster, TempAudioStore: `voicen_core::platform` (T-001), with public fakes
+// (FakeClipboard, FakePaster, FakeTempAudioStore; feature `test-fakes`). ClipboardError and
+// PasteError are unit structs (no OS text, P-009).
+pub struct StartWindow { pub handle: WindowRef /* opaque HWND */, pub process_id: u32, pub elevated: bool }
+pub struct PendingId(/* u64, monotonic per Pipeline, never reused */);
+
 // CredentialStore, KeySlot and Secret are defined by 004 (`voicen_core::secrets`, decisions #21); 001 only reads:
 //   store.read(KeySlot::TranscriptionApi) -> Result<Option<Secret>, CredentialError>   // None = no key stored (NFR-04)
 // The Windows implementation is 004 T016; there is no second one.
@@ -114,16 +122,48 @@ pub trait TempAudioStore: Send + Sync {
     fn delete_all(&self) -> std::io::Result<()>;           // at start and on exit (FR-032)
 }
 
-pub trait SettingsSource: Send + Sync {
-    fn dictation_settings(&self) -> DictationSettings;     // projection of 004's SettingsService::snapshot(); no file, no loader, no own defaults (decisions #21)
-}
-
-pub trait PipelineObserver: Send + Sync {
-    fn event(&self, e: &DictationEvent);                   // 006 writes these to the log file
+pub trait PipelineObserver: Send + Sync {                 // voicen_core::events; fake: RecordingObserver
+    fn event(&self, e: &DictationEvent);                   // T-008 writes these to the log file
 }
 ```
 
+There is no `SettingsSource` and no `DictationSettings` projection (decision #47 (1)): a job carries the `Arc<Settings>` snapshot taken at press in its `PressContext`. `AudioSource` is built with T-006, `Notifier` and `Indicator` with T-006/T-007.
+
 ## Pipeline API (called by the shell)
+
+Built (T-001, `voicen_core::pipeline`, decisions #43, #47): the job sequencer.
+
+```rust
+pub struct PressContext { pub start_window: Option<StartWindow>, pub settings: Arc<Settings> }   // the controller's C, taken at press
+pub struct PipelineDeps {
+    pub gate: SpeechGate,
+    pub credentials: Arc<dyn CredentialStore>,             // the SettingsService's instance
+    pub clipboard: Arc<dyn Clipboard>, pub paster: Arc<dyn Paster>,
+    pub temp_audio: Arc<dyn TempAudioStore>, pub observer: Arc<dyn PipelineObserver>,
+    pub post_processor: Arc<dyn PostProcessor>,
+}
+pub type EngineFactory = dyn Fn(&Settings, &dyn CredentialStore) -> Result<Box<dyn Engine>, FailureReason> + Send + Sync;
+pub struct JobReport { pub end: JobEnd, pub pending: Option<PendingId> }
+
+impl Pipeline {                                            // Send + Sync
+    pub fn new(deps: PipelineDeps) -> Pipeline;            // Timeouts::default(), engine_for
+    #[cfg(any(test, feature = "test-fakes"))]
+    pub fn with_timeouts(deps: PipelineDeps, timeouts: Timeouts) -> Pipeline;
+    pub fn with_engine_factory(self, factory: Box<EngineFactory>) -> Pipeline;   // T-017; test fakes
+    pub fn run_job(&self, rec: FinishedRecording<PressContext>) -> JobReport;    // blocking; plain std thread, never in a tokio runtime
+    pub fn pending(&self) -> Option<(PendingId, FailureReason)>;                 // tray retry_available, toast retry id
+}
+```
+
+`run_job` is the only path a finished recording takes. The shell reads `rec.id()` first and then calls `controller.job_finished(id, report.end, at)`. Inside, two private halves (T-011 puts the delivery queue between them):
+
+- `process`: `gate.decide(audio)` → (speech only) `factory(&settings, &*credentials)` → `transcribe(audio, &TranscribeRequest{ language: settings.speech_language, timeouts })` with the pipeline's one `Timeouts` → `post_processor.process`. No speech, a blank engine text or a blank post-processed text is `NoSpeech`; without speech there is no factory call, no credential read and no request.
+- `release`: a text goes through `delivery::deliver` (clipboard first, then data-model "DeliveryDecision", `MODIFIER_WAIT` = 1 s); a clipboard error is `Failed(ClipboardUnavailable)`. A retryable failure stores the audio under a new `PendingId`, swaps the one pending slot to it (or to nothing, if the store failed) and deletes the audio it replaced (decision #47 (4)); `Text` and `NoSpeech` leave the slot as it is.
+- Events, only on the one observer and in this order: `Warning{vad_fallback}` (when `GateDecision.fallback_warning`), `SpeechGate`, `JobFinished` (after the clipboard write), `Delivered` (only for a delivered text).
+
+`JobEnd` mapping: `Pasted` → `Delivered{notice: None}`, `CopiedOnly` → `Delivered{notice.copied}`, `CopyManual` → `Delivered{notice.copied_paste_manually}`, `NoSpeech` → `Notice(notice.no_speech)`, `Failed(r)` → `Failed(r)`.
+
+Target (T-006, T-007, T-009; not built): whether a core facade wraps the controller and the pipeline with the calls below.
 
 ```rust
 impl Pipeline {
@@ -140,7 +180,7 @@ impl Pipeline {
 
 The shell implements the hotkey thread (research R-1, R-2, R-17) and turns OS messages into these calls. Every decision — what to record, discard, send, deliver or show — is taken inside `Pipeline`.
 
-There is no clock port in this feature. Every `Instant` is the instant of the caller's event: the hotkey thread stamps the press and the release when the OS message arrives, so worker or lock delay never counts in the 0.3 s hold. `voicen_core::clock::Clock` (wall time, used by `SettingsService`) is unchanged (T-042).
+There is no clock port in this feature. Every `Instant` is the instant of the caller's event: the hotkey thread stamps the press and the release when the OS message arrives, so worker or lock delay never counts in the 0.3 s hold. `run_job` reads `std::time::Instant::now()` only for the two event durations (`stop_to_text_ms` from the recording's `stopped_at`, `text_to_paste_ms`), never for a decision (decision #47 (2)). `voicen_core::clock::Clock` (wall time, used by `SettingsService`) is unchanged (T-042).
 
 ## RecordingController and IndicatorState (`voicen_core::recording`, T-042)
 

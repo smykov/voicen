@@ -27,13 +27,8 @@ pub trait PostProcessor: Send + Sync {
 pub struct PassThrough;
 
 impl PostProcessor for PassThrough {
-    fn process(&self, text: String, settings: &Settings) -> PostProcessed {
-        // Skeleton (T-001 red tests): not implemented yet.
-        let _ = (text, settings);
-        PostProcessed {
-            text: String::new(),
-            notice: None,
-        }
+    fn process(&self, text: String, _settings: &Settings) -> PostProcessed {
+        PostProcessed { text, notice: None }
     }
 }
 

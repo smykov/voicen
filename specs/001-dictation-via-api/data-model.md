@@ -4,7 +4,7 @@ All entities live in `voicen-core` and are in-memory unless stated otherwise. Na
 
 ## DictationSettings (read model; owned by 004)
 
-A snapshot read from `SettingsSource` at each recording start and each retry (Clarification 4).
+Built as the `Arc<Settings>` snapshot of 004's `SettingsService::snapshot()`, taken at press and carried in the recording's `PressContext` (decision #47 (1), T-001); a retry takes a new snapshot at the click (T-007). There is no `DictationSettings` type and no `SettingsSource`: the table below names the `Settings` fields a job reads (Clarification 4).
 
 | Field | Type | Rule |
 |---|---|---|
@@ -84,9 +84,11 @@ Validation:
 
 `JobOutcome`:
 
-- `Text(String)` — final text after post-processing
-- `NoSpeech` — the gate found no speech, or the engine returned empty text
+- `Text(String)` — final text after post-processing, not blank
+- `NoSpeech` — the gate found no speech, the engine returned empty text, or the post-processed text is blank
 - `Failed(FailureReason)`
+
+Built (T-001): `Pipeline::run_job(FinishedRecording<PressContext>) -> JobReport { end: JobEnd, pending: Option<PendingId> }`; the job view is private, `seq` is taken at `run_job` entry until T-011 moves it to the stop, and `origin: Retry` comes with T-007.
 
 ## DeliveryQueue
 
@@ -97,18 +99,19 @@ Validation:
 
 ## DeliveryDecision (for a released `Text`)
 
-Inputs: `auto_paste`, modifiers released within 1 s, foreground == start window, `start_window.elevated`.
+Inputs: `auto_paste`, modifiers released within 1 s, foreground == start window, `start_window.elevated`, the `send_ctrl_v` result.
 
 | Condition (first match) | Result | Message |
 |---|---|---|
-| clipboard write fails | `Failed(ClipboardUnavailable)` → pending | "clipboard unavailable" |
-| auto_paste = off | `CopiedOnly` | "copied to clipboard" |
-| modifiers still held after 1 s | `CopiedOnly` | "copied — paste manually" |
-| start window not in front / closed | `CopiedOnly` | "copied — paste manually" |
-| start window elevated | `CopiedOnly` | "copied — paste manually" |
+| clipboard write fails | `Failed(ClipboardUnavailable)` → pending, no paster call | `failure.clipboard_unavailable` |
+| auto_paste = off | `CopiedOnly`, no paster call | `notice.copied` |
+| no start window, or start window elevated | `CopyManual`, no wait | `notice.copied_paste_manually` |
+| modifiers still held after 1 s | `CopyManual` | `notice.copied_paste_manually` |
+| start window not in front / closed | `CopyManual` | `notice.copied_paste_manually` |
+| `send_ctrl_v` returns an error (decision #47 (3)) | `CopyManual` (the text is in the clipboard) | `notice.copied_paste_manually` |
 | otherwise | `Pasted` | (none) |
 
-The clipboard is always written first, with the history-exclusion formats (FR-022).
+The clipboard is always written first, with the history-exclusion formats (FR-022), and only for a non-blank text. The static conditions (no window, elevated) are checked before the 1 s wait, and the front check right before Ctrl+V; every `CopyManual` row has the same result, so the order changes only what waits. Built as `voicen_core::delivery::deliver` (T-001), `MODIFIER_WAIT` = 1 s.
 
 ## PendingRecording
 
@@ -122,6 +125,8 @@ The clipboard is always written first, with the history-exclusion formats (FR-02
 Rules (NFR-06, FR-026, FR-027):
 
 - At most one exists. A newer `Failed` replaces it, and the old file is deleted. `Text`/`NoSpeech` outcomes of other jobs do not touch it.
+- If storing the newer recording's audio fails, there is no pending recording and the older one is still deleted (decision #47 (4)): the tray never offers a dictation older than the last failure reported.
+- Built in T-001: one slot in `Pipeline` (id and reason; the start window comes with T-007's retry), `Pipeline::pending()`; the audio goes through `TempAudioStore::put_pending`/`delete_pending`.
 - Retry: if no pending recording exists or the id is stale, nothing happens. Otherwise a `DictationJob{origin: Retry}` is created with the current settings.
   - On `Text`: deliver, then delete the pending recording.
   - On `Failed`: report again, and update the reason (same audio).
@@ -146,7 +151,7 @@ Rules (NFR-06, FR-026, FR-027):
 
 Retryable (creates a pending recording): every code from `InvalidApiKey` through `ClipboardUnavailable`.
 
-In code: `voicen_core::failure::FailureReason` with `code()` (the Code column without fields), `message_id()` and `message_params()` (`host`, `status`; `reason` for `MicrophoneUnavailable`, the cause's `mic_reason.*` id, which the Rust `i18n::text` renders in the message's language). Every transport failure is mapped by the one `failure::classify` (order in [contracts/openai-transcription.md](contracts/openai-transcription.md)); a transport reason is built only from the status, the classification flags and `host[:port]`, never from a `reqwest::Error`, a URL, a body or a key. `MicrophoneUnavailable{cause}` is built only from the closed `recording::MicCause` set (`NoDevice`, `AccessDenied`, `Busy`, `Other`), never from the OS error text of a `CaptureError`. T-040 has the first eight variants; `ClipboardUnavailable` comes with T-001, `MicrophoneUnavailable`/`HotkeyUnavailable` with T-042/T-006.
+In code: `voicen_core::failure::FailureReason` with `code()` (the Code column without fields), `message_id()` and `message_params()` (`host`, `status`; `reason` for `MicrophoneUnavailable`, the cause's `mic_reason.*` id, which the Rust `i18n::text` renders in the message's language). Every transport failure is mapped by the one `failure::classify` (order in [contracts/openai-transcription.md](contracts/openai-transcription.md)); a transport reason is built only from the status, the classification flags and `host[:port]`, never from a `reqwest::Error`, a URL, a body or a key. `MicrophoneUnavailable{cause}` is built only from the closed `recording::MicCause` set (`NoDevice`, `AccessDenied`, `Busy`, `Other`), never from the OS error text of a `CaptureError`. T-040 has the first eight variants; `ClipboardUnavailable` and `retryable()` (an exhaustive match) since T-001, `MicrophoneUnavailable` since T-042, `HotkeyUnavailable` with T-006.
 
 ## IndicatorState
 
@@ -185,3 +190,5 @@ Inputs: the selected `DeviceId`, and the device list at recording start.
 | `Warning` | code (`vad_fallback`, `esc_unavailable`, `toast_failed`) |
 
 No event type has a field that can hold transcript text, audio, a URL query, a header or a key. This is enforced by the types, plus a redaction test.
+
+As built (`voicen_core::events`, T-001): `DictationEvent` is `Copy` (so no `String`, `Vec`, `Secret` or `FailureReason` field can exist); fields are integers, bools, `&'static str` codes and small enums (`RecordingId`, `DeviceKind`, `RecordingEnd`, `OutcomeCode`, `DeliveryResult`, `WarningCode`). `JobFinished { seq, engine: Option<&'static str> /* None: no engine built */, stop_to_text_ms, outcome, failure: Option<&'static str> /* FailureReason::code() */, http_status: Option<u16> /* ServerError only; 401/403 are not carried */ }`, emitted after the clipboard write (a clipboard failure is logged as `failed`/`ClipboardUnavailable` with no `Delivered`). `Delivered { seq, text_to_paste_ms, result }`. Per job the order is `[Warning]`, `SpeechGate`, `JobFinished`, `[Delivered]`, all from `Pipeline::run_job` on one `PipelineObserver`; T-006 emits `RecordingStarted`/`RecordingEnded` on the same observer.

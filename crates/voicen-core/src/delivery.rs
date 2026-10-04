@@ -9,7 +9,7 @@
 
 use std::time::Duration;
 
-use crate::i18n::MessageId;
+use crate::i18n::{self, MessageId};
 use crate::platform::{Clipboard, ClipboardError, Paster, StartWindow};
 
 /// How long the paste waits for Shift/Ctrl/Alt/Win to be released (data-model
@@ -30,15 +30,21 @@ pub enum DeliveryResult {
 impl DeliveryResult {
     /// The `Delivered` event's result code: `pasted` / `copied_only` / `copy_manual`.
     pub fn code(self) -> &'static str {
-        // Skeleton (T-001 red tests): not implemented yet.
-        ""
+        match self {
+            DeliveryResult::Pasted => "pasted",
+            DeliveryResult::CopiedOnly => "copied_only",
+            DeliveryResult::CopyManual => "copy_manual",
+        }
     }
 
     /// The notice of `JobEnd::Delivered`: none, `notice.copied`,
     /// `notice.copied_paste_manually`.
     pub fn notice(self) -> Option<MessageId> {
-        // Skeleton (T-001 red tests): not implemented yet.
-        None
+        match self {
+            DeliveryResult::Pasted => None,
+            DeliveryResult::CopiedOnly => Some(i18n::NOTICE_COPIED),
+            DeliveryResult::CopyManual => Some(i18n::NOTICE_COPIED_PASTE_MANUALLY),
+        }
     }
 }
 
@@ -51,9 +57,27 @@ pub fn deliver(
     clipboard: &dyn Clipboard,
     paster: &dyn Paster,
 ) -> Result<DeliveryResult, ClipboardError> {
-    // Skeleton (T-001 red tests): not implemented yet.
-    let _ = (text, auto_paste, start_window, clipboard, paster);
-    Ok(DeliveryResult::Pasted)
+    clipboard.set_text_excluded_from_history(text)?;
+    if !auto_paste {
+        return Ok(DeliveryResult::CopiedOnly);
+    }
+    Ok(paste(start_window, paster))
+}
+
+/// The paste half of the table, for a text already in the clipboard with
+/// auto-paste on. Static conditions first (nothing waits for a window that cannot
+/// be pasted into), then the wait, then the front check right before sending.
+fn paste(start_window: Option<&StartWindow>, paster: &dyn Paster) -> DeliveryResult {
+    let Some(window) = start_window.filter(|w| !w.elevated) else {
+        return DeliveryResult::CopyManual;
+    };
+    if !paster.wait_modifiers_released(MODIFIER_WAIT) || !paster.is_in_front(window) {
+        return DeliveryResult::CopyManual;
+    }
+    match paster.send_ctrl_v() {
+        Ok(()) => DeliveryResult::Pasted,
+        Err(_) => DeliveryResult::CopyManual,
+    }
 }
 
 #[cfg(test)]

@@ -110,8 +110,18 @@ impl FailureReason {
     /// "Retryable": every reason from `InvalidApiKey` through
     /// `ClipboardUnavailable`; not `MicrophoneUnavailable`).
     pub fn retryable(&self) -> bool {
-        // Skeleton (T-001 red tests): not implemented yet.
-        false
+        match self {
+            FailureReason::InvalidApiKey
+            | FailureReason::NetworkUnavailable
+            | FailureReason::CannotReach { .. }
+            | FailureReason::Timeout
+            | FailureReason::ServerError { .. }
+            | FailureReason::UnexpectedResponse
+            | FailureReason::KeyStoreUnavailable
+            | FailureReason::EngineNotConfigured
+            | FailureReason::ClipboardUnavailable => true,
+            FailureReason::MicrophoneUnavailable { .. } => false,
+        }
     }
 }
 
