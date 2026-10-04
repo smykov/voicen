@@ -11,11 +11,15 @@
   //   writes a select back only on the user's change), so a saved model that is not
   //   downloaded stays in the draft and core refuses the save on the field (U2).
   // - Download / Retry are disabled while a row downloads or a download invoke is
-  //   pending (I4).
+  //   pending (I4). The invoke counts as pending until the re-list issued after it has
+  //   settled, failed re-list included: core is already downloading when the command
+  //   returns, and only that re-list shows it.
   // - Texts (I5): names by nameKey, reasons by messageKey with `reasonArgs`, labels by
   //   UI-only ids; every byte count through `formatSize`. A refused download, a rejection
   //   that is not a FailureReason and a rejected list are shown in the section; a
-  //   rejection's own text never is.
+  //   rejection's own text never is. A failed row's reason is rendered inside a
+  //   polite live region that stays mounted with the row, so a row turning failed
+  //   changes the text of an existing region (announced), not a new one.
   import { onMount } from "svelte";
   import { t, type MessageId } from "$lib/i18n";
   import { currentLanguage } from "$lib/i18n/language.svelte";
@@ -52,7 +56,10 @@
 
   let models = $state.raw<ModelsState>(emptyModels());
   let downloadPending = $state(false);
-  /** The newest list request (or a listener) failed: `error.ipc_unavailable`, no rows until a list succeeds. */
+  /**
+   * The newest list request (or a listener) failed: `error.ipc_unavailable`. No rows
+   * until the first list succeeds; a failed re-list keeps the rows (they still take events).
+   */
   let ipcListFailed = $state(false);
   /** The last download invoke's rejection: a contract refusal, or any other failure (`ipc`). */
   let refusal = $state.raw<{ kind: "refused"; reason: FailureReason } | { kind: "ipc" } | null>(null);
@@ -81,15 +88,18 @@
     refusal = null;
     downloadPending = true;
     try {
-      await downloadLocalModel(id);
-    } catch (error) {
-      const reason = asFailureReason(error);
-      refusal = reason === null ? { kind: "ipc" } : { kind: "refused", reason };
+      try {
+        await downloadLocalModel(id);
+      } catch (error) {
+        const reason = asFailureReason(error);
+        refusal = reason === null ? { kind: "ipc" } : { kind: "refused", reason };
+      }
+      // The command emits nothing: the list shows whether the download started. Until
+      // it has settled the invoke is still pending (I4); refresh never rejects.
+      await refresh();
     } finally {
       downloadPending = false;
     }
-    // The command emits nothing: the list shows whether the download started.
-    await refresh();
   }
 
   async function cancel(id: ModelId): Promise<void> {
@@ -195,9 +205,6 @@
               >{t("local_models.cancel")}</button
             >
           {:else if row.state.kind === "failed"}
-            <p class="model-reason" data-testid="local-model-reason" aria-live="polite">
-              {t(row.state.reason.messageKey, reasonArgs(row.state.reason, currentLanguage()))}
-            </p>
             <button type="button" data-testid="local-model-retry" disabled={blocked} onclick={() => download(row.id)}
               >{t("local_models.retry")}</button
             >
@@ -208,6 +215,16 @@
           {:else}
             <span class="model-downloaded">{t("local_models.downloaded")}</span>
           {/if}
+
+          <!-- Mounted with the row, so a reason appearing is a change inside an existing
+               polite region. Not an alert: it arrives asynchronously. -->
+          <div class="model-status" aria-live="polite">
+            {#if row.state.kind === "failed"}
+              <p class="model-reason" data-testid="local-model-reason">
+                {t(row.state.reason.messageKey, reasonArgs(row.state.reason, currentLanguage()))}
+              </p>
+            {/if}
+          </div>
         </li>
       {/each}
     </ul>
@@ -238,6 +255,7 @@
   .model-head {
     display: flex;
     flex: 1 1 100%;
+    order: -2;
     align-items: baseline;
     gap: 0.5rem;
   }
@@ -261,8 +279,18 @@
     font-size: 0.8em;
   }
 
-  .model-reason {
+  .model-status {
+    /* Shown under the head, above the row's buttons. */
     flex: 1 1 100%;
+    order: -1;
+  }
+
+  .model-status:empty {
+    /* An empty region takes no space; cancel the row gap it would add. */
+    margin-top: -0.5rem;
+  }
+
+  .model-reason {
     margin: 0;
     color: #b00020;
     font-size: 0.9em;
