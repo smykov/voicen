@@ -134,3 +134,16 @@ test("emit reaches listeners until they unlisten; other commands reject", async 
     err: "unexpected command settings_test_connection",
   });
 });
+
+test("plugin:window|destroy is recorded and returns null; plugin:window|close rejects (not granted)", async ({ page }) => {
+  // T-039: tauri's onCloseRequested destroys the window on every close it does not
+  // prevent (window.js 2.12.1, onCloseRequested -> destroy -> plugin:window|destroy
+  // { label }); close() is not in the settings capability, so the mock refuses it.
+  expect(await invokeInPage(page, "plugin:window|destroy", { label: "settings" })).toEqual({ ok: null });
+  expect(await calls(page, "plugin:window|destroy")).toEqual([
+    { cmd: "plugin:window|destroy", args: { label: "settings" } },
+  ]);
+  expect(await invokeInPage(page, "plugin:window|close", { label: "settings" })).toEqual({
+    err: "unexpected command plugin:window|close",
+  });
+});

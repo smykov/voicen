@@ -785,6 +785,31 @@ mod tests {
     }
 
     #[test]
+    fn every_field_id_has_label_text() {
+        // Bite: any FieldId core can name (a FieldError, FormError.not_restored) without
+        // a non-empty `settings.field_label.<FieldId>` in i18n/en.json or i18n/ru.json;
+        // the settings window lists a not-restored field it does not render by that
+        // label (T-039 (L)), and would show the raw id (text() falls back to it).
+        // The fields are core's one hand-kept list, `FieldId::ALL` (completeness by
+        // hand, next to the enum; settings/mod.rs), as for `error.<code>` above.
+        use crate::settings::FieldId;
+        let c = catalog(EN_JSON, RU_JSON);
+        let mut missing = Vec::new();
+        for field in FieldId::ALL {
+            let id = format!("settings.field_label.{}", field.as_str());
+            for lang in LANGS {
+                if own_text(&c, lang, &id).is_none() {
+                    missing.push(format!("{id} ({lang:?})"));
+                }
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "settings.field_label.<FieldId> without text: {missing:?}"
+        );
+    }
+
+    #[test]
     fn settings_window_message_ids_exist() {
         // T-004 owns two more ids. `notice.settings_reset` (the window's reset banner,
         // and T-006's toast) is a Rust id, so it is declared with messages! and lands

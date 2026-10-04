@@ -237,6 +237,40 @@ impl FieldId {
     }
 }
 
+/// The one list of every `FieldId`, for tests (`tests::field_ids_match_data_model`,
+/// `i18n::tests::every_field_id_has_label_text`).
+///
+/// Completeness is kept by hand, as for `ErrorCode::ALL`: a variant added to `FieldId`
+/// must be added here as well. The wildcard-free matches (`as_str`, the tests'
+/// `expected_field_id`) force a new match arm, not an entry in this list (the length is
+/// part of the type); `field_ids_match_data_model` checks that no entry is listed twice.
+#[cfg(test)]
+impl FieldId {
+    pub(crate) const ALL: [FieldId; 21] = [
+        FieldId::EngineKind,
+        FieldId::EngineApiBaseUrl,
+        FieldId::EngineApiModel,
+        FieldId::EngineApiKey,
+        FieldId::EngineLocalServerBaseUrl,
+        FieldId::EngineLocalServerModel,
+        FieldId::EngineLocalServerKey,
+        FieldId::EngineBuiltinLocalModelId,
+        FieldId::EngineSpeechLanguage,
+        FieldId::RecordingMicrophone,
+        FieldId::RecordingHotkey,
+        FieldId::RecordingMode,
+        FieldId::OutputAutoPaste,
+        FieldId::PostProcessingBaseUrl,
+        FieldId::PostProcessingModel,
+        FieldId::PostProcessingPrompt,
+        FieldId::PostProcessingKey,
+        FieldId::HistoryEnabled,
+        FieldId::HistorySize,
+        FieldId::GeneralStartWithWindows,
+        FieldId::GeneralUiLanguage,
+    ];
+}
+
 /// On the wire a field is its dotted id ([`FieldId::as_str`]), the one spelling.
 impl Serialize for FieldId {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
@@ -642,34 +676,6 @@ mod tests {
         assert_eq!(json["schema_version"], json!(1));
     }
 
-    /// Every `FieldId`, once (`field_ids_match_data_model` refuses a variant listed
-    /// twice). Completeness is by hand: `expected_field_id`'s exhaustive match makes
-    /// a new variant's contract string compile-required, but nothing here fails if
-    /// the variant is missing from this table (the length is part of the type).
-    const ALL_FIELD_IDS: [FieldId; 21] = [
-        FieldId::EngineKind,
-        FieldId::EngineApiBaseUrl,
-        FieldId::EngineApiModel,
-        FieldId::EngineApiKey,
-        FieldId::EngineLocalServerBaseUrl,
-        FieldId::EngineLocalServerModel,
-        FieldId::EngineLocalServerKey,
-        FieldId::EngineBuiltinLocalModelId,
-        FieldId::EngineSpeechLanguage,
-        FieldId::RecordingMicrophone,
-        FieldId::RecordingHotkey,
-        FieldId::RecordingMode,
-        FieldId::OutputAutoPaste,
-        FieldId::PostProcessingBaseUrl,
-        FieldId::PostProcessingModel,
-        FieldId::PostProcessingPrompt,
-        FieldId::PostProcessingKey,
-        FieldId::HistoryEnabled,
-        FieldId::HistorySize,
-        FieldId::GeneralStartWithWindows,
-        FieldId::GeneralUiLanguage,
-    ];
-
     /// The data-model string of each FieldId. No wildcard: a variant added to
     /// `FieldId` fails to compile here until its contract string is written down.
     fn expected_field_id(id: FieldId) -> &'static str {
@@ -711,18 +717,18 @@ mod tests {
         // Bite: a FieldId string that differs from data-model.md (UI highlight, logs),
         // including the key inputs of #25(a) (`engine.api.key`,
         // `engine.local_server.key`, `post_processing.key`).
-        for id in ALL_FIELD_IDS {
+        for id in FieldId::ALL {
             assert_eq!(id.as_str(), expected_field_id(id), "{id:?}");
             assert!(is_wire_name(id.as_str()), "{id:?}: {:?}", id.as_str());
         }
         // Each variant listed once, and no two share a string.
-        let ids: std::collections::HashSet<_> = ALL_FIELD_IDS.into_iter().collect();
-        assert_eq!(ids.len(), ALL_FIELD_IDS.len(), "a FieldId listed twice");
+        let ids: std::collections::HashSet<_> = FieldId::ALL.into_iter().collect();
+        assert_eq!(ids.len(), FieldId::ALL.len(), "a FieldId listed twice");
         let texts: std::collections::HashSet<_> =
-            ALL_FIELD_IDS.iter().map(|id| id.as_str()).collect();
+            FieldId::ALL.iter().map(|id| id.as_str()).collect();
         assert_eq!(
             texts.len(),
-            ALL_FIELD_IDS.len(),
+            FieldId::ALL.len(),
             "two FieldIds share a string"
         );
     }

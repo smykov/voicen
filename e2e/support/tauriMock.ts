@@ -19,6 +19,10 @@
 // - `plugin:event|listen` / `plugin:event|unlisten` keep the handler ids registered by
 //   `transformCallback`, so `listen()` from @tauri-apps/api works and `emit()` reaches it.
 // - `get_build_info` answers for the build-info page.
+// - `plugin:window|destroy { label }` is recorded and returns null: the settings window's
+//   capability grants destroy (src-tauri/capabilities/default.json), and tauri's
+//   onCloseRequested calls it on every close it does not prevent (T-039).
+//   `plugin:window|close` is not granted and rejects like any other command.
 // - Any other command rejects, so a call outside the contract fails the test.
 //
 // The init script must be self-contained (it is serialized into the page), so it cannot
@@ -196,6 +200,8 @@ export async function installTauriMock(page: Page, options: MockOptions = {}): P
           setTimeout(() => emit("settings://changed", view, "mock"), 0);
           return { Saved: { view: clone(view), warnings: [] } };
         }
+        case "plugin:window|destroy":
+          return null;
         case "get_build_info":
           if (init.buildInfo === null) break;
           if ("reject" in init.buildInfo) throw new Error(init.buildInfo.reject);
@@ -282,6 +288,14 @@ export async function emit(page: Page, event: string, payload: unknown): Promise
     ([name, data]) => (window as unknown as MockWindow).__VOICEN_MOCK__.emit(name, data),
     [event, payload] as const,
   );
+}
+
+/**
+ * The user closes the window: the shell emits `tauri://close-requested` (payload null),
+ * as tauri does when a JS listener for it exists (T-039 Investigation, Close).
+ */
+export async function requestClose(page: Page): Promise<void> {
+  await emit(page, "tauri://close-requested", null);
 }
 
 /** The next `settings_save` returns `outcome` (and changes nothing). */
