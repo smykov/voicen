@@ -43,7 +43,7 @@ Rules:
 
 ## SettingsView (what a window receives)
 
-`{ settings: Settings, keys: KeyPresence, first_run: bool, reset_notice: bool }`. Sent by `settings_get` and the `settings://changed` event. Never contains a key.
+`{ settings: Settings, keys: KeyPresence, first_run: bool, reset_notice: bool, unavailable: bool }`. Sent by `settings_get` and the `settings://changed` event. Never contains a key. `unavailable` is true only after an `Unavailable` load (then every key is reported absent and every save is refused with `SettingsUnavailable`); the window shows `notice.settings_unavailable` when it opens (decision #38 Q4, T-004).
 
 ## SaveRequest / SaveOutcome
 

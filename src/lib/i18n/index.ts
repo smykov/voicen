@@ -92,3 +92,12 @@ export function setLanguage(lang: UiLanguage): void {
 export function t(id: MessageId, args: MessageArgs = {}): string {
   return text(realCatalog, currentLanguage(), id, args);
 }
+
+/**
+ * `t` for an id that arrives at run time (`FormError.message`, `error.<code>` of a
+ * `FieldError`), so it cannot be a `MessageId` literal. Same rule as `t`: an id with
+ * no text renders as the id (core tests keep every such id in both catalogs).
+ */
+export function tWire(id: string, args: MessageArgs = {}): string {
+  return text(realCatalog, currentLanguage(), id, args);
+}

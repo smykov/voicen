@@ -74,6 +74,10 @@ messages! {
     /// A save refused because the settings could not be read at startup (decision
     /// #19; `settings::service::FormError::SettingsUnavailable`).
     NOTICE_SETTINGS_UNAVAILABLE = "notice.settings_unavailable",
+    /// The settings file could not be read and was moved aside; the defaults are in
+    /// use (`LoadOutcome::Reset`). Shown by the settings window from
+    /// `SettingsView.reset_notice` and by T-006's notifier.
+    NOTICE_SETTINGS_RESET = "notice.settings_reset",
     /// A save refused because `settings.json` could not be written; everything was
     /// restored (`FormError::WriteFailed`).
     SETTINGS_WRITE_FAILED = "settings.write_failed",

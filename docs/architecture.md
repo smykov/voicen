@@ -29,7 +29,7 @@ flowchart LR
 |---|---|---|---|
 | `voicen-core` (area `core`) | pipeline, engines behind one trait, VAD gate, settings model, history, pending recording, timeouts, build info | settings, history, local models, pending audio (via storage traits) | HTTP endpoints; platform services through traits |
 | `src-tauri` shell | Windows services: hotkey, capture (cpal), clipboard, paste, Credential Manager, tray, toasts, autostart, logs; IPC commands | logs, crash files | `voicen-core`, Windows APIs, UI |
-| UI (area `ui`) | settings, first run, history, overlay, About | none (state comes over IPC) | shell via IPC |
+| UI (area `ui`) | settings, first run, history, overlay, About; the settings window is the route `/settings` (`src/lib/settings/`: `settingsApi.ts` holds the only settings `invoke`/`listen` calls, `draft.ts` the draft; every `SettingsView` goes through `applyView`, refusals come from core and show as `error.<code>` on the field, the UI holds no defaults, rules or language list; T-004) | none (state comes over IPC) | shell via IPC |
 
 ## Seams
 

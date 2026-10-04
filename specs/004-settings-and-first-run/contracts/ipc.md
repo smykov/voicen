@@ -6,7 +6,7 @@ The UI calls only these commands and listens only to these events for this featu
 
 | Command | Args | Returns | Notes |
 |---|---|---|---|
-| `settings_get` | — | `SettingsView` | current saved settings + key presence + first-run/reset flags |
+| `settings_get` | — | `SettingsView` | current saved settings + key presence + first-run/reset/unavailable flags |
 | `settings_save` | `{ request: SaveRequest }` | `SaveOutcome` | all-or-nothing; `KeyEdit.Replace` carries the typed key once, UI → shell only |
 | `settings_speech_languages` | — | `string[]` | core's `WHISPER_ISO_639_1` in core order (97 codes, #30); the speech-language picker's list, never re-spelled in the UI (T-030) |
 | `settings_test_connection` | `{ request: ConnectionTestRequest }` | `ConnectionTestResult` | never changes settings or keys; at most one in flight per window (UI disables the button) |
@@ -24,7 +24,7 @@ Built (T-030): `settings_get`, `settings_save` (runs off the main thread), `sett
 | `SaveRequest` | UI → shell | `{ "settings": Settings, "keys": KeyEdits }` |
 | `KeyEdits` | UI → shell | `{ "transcription_api": KeyEdit, "local_server": KeyEdit, "post_processing": KeyEdit }`; all three required, unknown fields ignored |
 | `KeyEdit` | UI → shell | `"Untouched"` \| `"Clear"` \| `{ "Replace": "<key>" }` (the key unchanged; the service trims it) |
-| `SettingsView` | shell → UI | `{ "settings": Settings, "keys": { "transcription_api": bool, "local_server": bool, "post_processing": bool }, "first_run": bool, "reset_notice": bool }` |
+| `SettingsView` | shell → UI | `{ "settings": Settings, "keys": { "transcription_api": bool, "local_server": bool, "post_processing": bool }, "first_run": bool, "reset_notice": bool, "unavailable": bool }`; `unavailable` only after an `Unavailable` load (decision #38 Q4, T-004) |
 | `SaveOutcome` | shell → UI | `{ "Saved": { "view": SettingsView, "warnings": [Warning] } }` \| `{ "Refused": { "errors": [FieldError], "form_error": FormError \| null } }` |
 | `FieldError` | shell → UI | `{ "field": FieldId, "code": ErrorCode }`; the UI shows `error.<code>` |
 | `Warning` | shell → UI | `{ "field": FieldId, "code": "endpoint.insecure" }` |

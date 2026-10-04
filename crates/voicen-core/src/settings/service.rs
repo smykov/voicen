@@ -45,12 +45,16 @@ pub struct SaveRequest {
 }
 
 /// What a window receives. Never contains a key.
+///
+/// `unavailable` is true only when the load was `Unavailable` (decision #19): the
+/// window shows `notice.settings_unavailable` when it opens (decision #38).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SettingsView {
     pub settings: Settings,
     pub keys: KeyPresence,
     pub first_run: bool,
     pub reset_notice: bool,
+    pub unavailable: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -417,6 +421,7 @@ impl SettingsService {
             keys,
             first_run: self.load.first_run,
             reset_notice: self.load.reset_notice,
+            unavailable: self.load.unavailable,
         }
     }
 
@@ -2457,6 +2462,7 @@ mod tests {
             },
             first_run: false,
             reset_notice: true,
+            unavailable: false,
         };
         let saved = SaveOutcome::Saved {
             view: view.clone(),
