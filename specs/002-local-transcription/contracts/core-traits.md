@@ -51,7 +51,7 @@ pub enum DownloadEvent { Progress { id: ModelId, received: u64, total: u64 },
 // Not 001's `FailureReason` (decision #49): its `retryable` is transcription semantics.
 // Codes (contracts/ipc.md) via `code()`, en/ru text via `message_id()` + `message_params()`
 // (`download.*` ids); never carries the URL, a reqwest error or OS text.
-pub enum DownloadFailure { DownloadInterrupted,              // download_interrupted (cut body, drop, no data for download_no_data)
+pub enum DownloadFailure { DownloadInterrupted,              // download_interrupted (cut body, or any body shorter than the catalog size; drop; no data for download_no_data)
                            ChecksumMismatch,                 // checksum_mismatch (also a body longer than the catalog size)
                            NotEnoughDiskSpace { needed: u64 }, // not_enough_disk_space{needed}
                            SourceUnreachable { host: String }, // source_unreachable{host}: host[:port] only
@@ -64,12 +64,15 @@ impl Downloader {
     pub fn start(&self, id: ModelId, events: impl Fn(DownloadEvent) + Send + 'static)
         -> Result<(), DownloadError>;   // DownloadError::{Busy, AlreadyDownloaded, NotEnoughDiskSpace{needed},
                                         //   NotInCatalog, CannotStart}; a refusal sends no request, emits no event
+                                        //   and leaves no active slot. NotInCatalog: `id` is not in the store's
+                                        //   catalog (never with the production catalog, which lists every ModelId);
+                                        //   CannotStart: the OS refused the worker thread. Wire codes: T-044 (ipc.md)
     pub fn cancel(&self, id: ModelId) -> bool;
 }
 pub struct ProgressThrottle;            // should_emit(now: Instant): first chunk at once, then ≥ 250 ms apart
 ```
 
-Guarantees: synchronous — the download runs on its own std thread with blocking reqwest, no tokio (decisions #22, #42); the no-data timeout is `ClientBuilder::timeout(download_no_data)` (each body read and the header wait) plus `connect_timeout(connect)`, never a total timeout; progress ≥ 1/s while data arrives, ≤ 4/s; final file appears only after the byte count equals the catalog size and the SHA-256 matches (rename of `<file>.part`); every other end closes and deletes `.part` before its end event, and the active slot is cleared before the end event; a cancel takes effect when the current read returns (≤ `download_no_data`) and ends `Cancelled`, not `Failed`; disk check = catalog size + 1 %, a probe error lets the download proceed; Retry is `start` again.
+Guarantees: synchronous — the download runs on its own std thread with blocking reqwest, no tokio (decisions #22, #42); the no-data timeout is `ClientBuilder::timeout(download_no_data)` (each body read and the header wait) plus `connect_timeout(connect)`, never a total timeout; progress ≥ 1/s while data arrives, ≤ 4/s; final file appears only after the byte count equals the catalog size and the SHA-256 matches (rename of `<file>.part`); every other end closes `.part` and tries to delete it before its end event (best effort: a failed removal is ignored and the end event is still emitted; the leftover `.part` is never read as a model, the next `start` truncates it and `ModelStore::cleanup_at_start` removes it at the next app start; logging the failed removal waits for T-008), and the active slot is cleared before the end event; a cancel takes effect when the current read returns (≤ `download_no_data`) and ends `Cancelled`, not `Failed`; disk check = catalog size + 1 %, a probe error lets the download proceed; Retry is `start` again.
 
 ## ModelResidency
 

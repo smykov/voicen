@@ -16,15 +16,7 @@ Entities from spec §Key Entities, with fields, validation and state transitions
 
 Validation (unit test): exactly 5 entries; unique ids and file names; exactly one recommended; all URLs share the pinned commit.
 
-Pinned values (T-016, `catalog::MODELS`): commit `5359861c739e955e79d9a303bcbc70fb988958b1` of `ggerganov/whisper.cpp`; sizes and SHA-256 from its LFS metadata (source: research R-6).
-
-| id | size_bytes | sha256 |
-|---|---|---|
-| `tiny` | 77 691 713 | `be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21` |
-| `base` | 147 951 465 | `60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe` |
-| `small` | 487 601 967 | `1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b` |
-| `medium-q5_0` | 539 212 467 | `19fea4b380c3a618ec4723c3eef2eb785ffba0d0538cf43f8f235e7b3b34220f` |
-| `large-v3-turbo-q5_0` | 574 041 195 | `394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2` |
+Pinned values (T-016): commit `5359861c739e955e79d9a303bcbc70fb988958b1` of `ggerganov/whisper.cpp`; sizes and SHA-256 from its LFS metadata (source: research R-6). The values live only in `catalog::MODELS` (`crates/voicen-core/src/local_models/catalog.rs`, P-010); they are not copied here.
 
 ## LocalModelState (per model, runtime)
 
@@ -39,6 +31,7 @@ Downloaded ──delete refused (in use) / remove error──▶ Downloaded   (e
 (start) ──final file exists with catalog size──▶ Downloaded; else NotDownloaded; *.part deleted
 ```
 
+- "`.part` deleted" on `Failed` and cancel is best effort (contracts/core-traits.md "Downloader"): a failed removal is ignored, the leftover is never read as a model, and the next download or the next app start removes it.
 - `Failed` is what spec FR-004 calls "shown as not downloaded with the reason": the UI renders it as not downloaded, with the reason and a Retry action; it is never selectable.
 - Persisted only as files on disk. `Downloading` and `Failed` live in memory and are lost on restart (a restart shows `NotDownloaded`; spec FR-008).
 - `Failed.reason`: `DownloadFailure` (`voicen_core::local_models::download`; a separate type, not 001's `FailureReason`, decision #49), with the wire codes `download_interrupted`, `checksum_mismatch`, `not_enough_disk_space{needed}`, `source_unreachable{host}` (`host[:port]` only), `disk_error`, `http_status{code}` and message ids `download.*` (en/ru). It never carries the URL.

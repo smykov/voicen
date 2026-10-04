@@ -38,6 +38,8 @@ interface FailureReason { code: string; messageKey: string; params?: Record<stri
 
 Retry = `local_model_download` again.
 
+Core's `DownloadError::NotInCatalog` and `DownloadError::CannotStart` (contracts/core-traits.md "Downloader") have no wire code yet; T-044 maps them and adds them to this table.
+
 ## Events (shell → UI)
 
 | Event | Payload | When |

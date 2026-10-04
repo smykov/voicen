@@ -8,8 +8,9 @@
 //! a total request timeout: a slow but steady download longer than
 //! `download_no_data` must succeed. Bytes go to `<file>.part` and into a streamed
 //! SHA-256; only a byte count equal to the catalog size and the pinned digest lead
-//! to the rename to the final name. Every other end removes `<file>.part` before
-//! the end event. At most one download runs at a time.
+//! to the rename to the final name. Every other end tries to remove
+//! `<file>.part` before the end event (best effort, see `remove_part`). At most
+//! one download runs at a time.
 
 use std::fs::File;
 use std::io::{self, Read, Write};
@@ -129,7 +130,8 @@ impl DownloadFailure {
 }
 
 /// What a running download reports. Exactly one of `Finished`, `Failed`,
-/// `Cancelled` ends it, and only after `<file>.part` is gone (renamed or removed).
+/// `Cancelled` ends it, and only after `<file>.part` was renamed or its removal
+/// was attempted (a failed removal is ignored, see `remove_part`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DownloadEvent {
     /// At least 1/s and at most 4/s while data arrives.
@@ -216,7 +218,7 @@ pub struct Downloader {
     disk: Arc<dyn DiskSpace>,
     timeouts: Timeouts,
     /// The single active slot (R-2): `Some` from `start` until the worker has
-    /// removed or renamed the `.part`, cleared before the end event.
+    /// renamed the `.part` or attempted its removal, cleared before the end event.
     active: Slot,
 }
 
@@ -233,9 +235,10 @@ impl Downloader {
     }
 
     /// Starts downloading `id` on a new std thread. Refuses with `Busy` while
-    /// another download runs, `AlreadyDownloaded`, or `NotEnoughDiskSpace` (a probe
-    /// error lets the download proceed, R-9); a refusal sends no request and emits
-    /// no event. Retry = `start` again.
+    /// another download runs, `NotInCatalog`, `AlreadyDownloaded`,
+    /// `NotEnoughDiskSpace` (a probe error lets the download proceed, R-9), or
+    /// `CannotStart` when the thread cannot be spawned; a refusal sends no
+    /// request, emits no event and leaves no active slot. Retry = `start` again.
     pub fn start(
         &self,
         id: ModelId,
@@ -345,8 +348,8 @@ struct Job {
 const CHUNK: usize = 64 * 1024;
 
 impl Job {
-    /// Runs the transfer, settles the `.part` (renamed or removed), clears the
-    /// active slot, then emits exactly one end event.
+    /// Runs the transfer, settles the `.part` (renamed, or removal attempted),
+    /// clears the active slot, then emits exactly one end event.
     fn run(self, guard: SlotGuard, events: impl Fn(DownloadEvent)) {
         let id = self.entry.id;
         let part = self.store.part_path(self.entry);
@@ -462,8 +465,13 @@ impl Job {
     }
 }
 
-/// Removes an unfinished download. A missing file is fine; any other error is
-/// ignored (nothing else can be done; `cleanup_at_start` retries at next start).
+/// Removes an unfinished download, best effort. A missing file is fine; any
+/// other error is ignored and the end event is still emitted: the leftover
+/// `.part` is never read as a model (the store looks only at the final name),
+/// the next `start` truncates it and `ModelStore::cleanup_at_start` removes it at
+/// the next app start. Reporting `DiskError` instead would turn a user's cancel
+/// into a retry reason. Open item: log the failed removal once T-008 provides
+/// logging.
 fn remove_part(part: &Path) {
     let _ = std::fs::remove_file(part);
 }
