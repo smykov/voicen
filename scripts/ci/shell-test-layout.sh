@@ -3,33 +3,17 @@
 # src-tauri/build.rs gives the Windows link configuration of the release exe to the bin and,
 # through rustc-link-arg-tests, to every src-tauri/tests/*.rs integration test. No cargo
 # selector reaches the other test-exe kinds of the voicen package without also reaching the
-# bin, so those kinds must contain no tests. Lib doctests are off (`[lib] doctest = false` in
-# src-tauri/Cargo.toml); a doc code block would then be skipped silently instead of run, so
-# it is refused too. This check fails when any of the following is present:
+# bin, so those kinds must contain no tests, and the lib doctest kind stays off. Doc comments
+# are not read (T-038, decision #41): a doc block becomes an exe only through the two cargo
+# switches pinned in steps 3 and 4. This check fails when any of the following is present:
 #   1. under src-tauri/src, read by a lexer (scripts/ci/shell-test-layout.awk) that drops
-#      plain comments and string/char literals, so text inside them never counts:
+#      every comment (doc comments included) and string/char literals, so text inside them
+#      never counts:
 #      - a test attribute anywhere on a line, with any whitespace or line breaks inside it:
 #        #[test], # [test], #[<path>::test], #[test_case(..)] (any attribute whose name
 #        starts with `test`), also as an attribute argument of cfg_attr;
 #      - a cfg or cfg_attr predicate naming `test`, on one line or split across lines:
 #        #[cfg(test)], #![cfg(test)], #[cfg(all(windows, test))], #[cfg_attr(test, ..)];
-#      - a doc code block in any doc form (/// and //! lines, /** */ and /*! */ blocks,
-#        #[doc = "..."] / #![doc = "..."] strings), by a coarse fail-closed rule (decision
-#        #39; no CommonMark list, quote or paragraph context is modelled). Doc lines are
-#        prepared as rustc and rustdoc prepare them (block comment margins, decoded string
-#        escapes, an escaped CR as a line break) and unindented by the smallest leading
-#        whitespace of any doc line in the shell (one less for #[doc] strings: rustdoc
-#        unindents an item's outer and inner docs together, by at least that much). Then,
-#        outside a ```text block, it refuses: any line indented 4+ columns (also a list
-#        continuation, a lazy paragraph continuation or a quoted paragraph continuation,
-#        which rustdoc may not read as code); any list or quote marker (`>`, `-` `*` `+`,
-#        `N.` `N)`) followed by 4+ columns or a tab; any fence other than ```text (or
-#        ~~~text); a ```text fence after a marker; any raw HTML block line (an HTML block
-#        can swallow a fence). A ```text block ends at its closing fence, at a line
-#        indented less than its opening fence, or at a line of the other doc form; a
-#        fence-like line indented 4+ inside it is refused. Authors: write doc examples as
-#        ```text and indent continuations by fewer than 4 columns;
-#      - #[doc = <anything but a string literal>], e.g. include_str!(..), concat!(..);
 #      - a block comment, string or attribute left open at the end of a file;
 #      - a source rustc compiles from outside the scanned files: #[path = ..] (also inside
 #        cfg_attr), the token `include` anywhere in code (include!, renamed by `use`,
@@ -37,26 +21,43 @@
 #        under src-tauri/src;
 #   2. src-tauri/benches, src-tauri/examples, or [[bench]] / [[example]] in
 #      src-tauri/Cargo.toml: bench and example exes;
-#   3. a line-start `path` key (bare or quoted) under a [lib], [[bin]], [[test]], [[bench]]
-#      or [[example]] header in src-tauri/Cargo.toml (a target file the scan does not
-#      read); `path` in dependency tables and inline `{ path = .. }` pass.
-# Not caught (outside what a source scan can see): tests a proc macro generates from an
-# attribute with another name; doc text built at compile time other than via #[doc = ..];
-# a dependency's macro that expands to include!; a target path set other than by a
-# line-start `path` key under a target header (e.g. a root-level dotted `lib.path` or an
-# inline `bin = [{ path = .. }]`).
+#   3. in src-tauri/Cargo.toml (raw lines, table headers tracked):
+#      - a line-start `path` key (bare or quoted) under a [lib], [[bin]], [[test]], [[bench]]
+#        or [[example]] header (a target file the scan does not read); `path` in dependency
+#        tables and inline `{ path = .. }` pass;
+#      - no line `doctest = false` (spaces and a trailing comment allowed) in the [lib] table,
+#        or no [lib] table: plain `cargo test` would build the lib doctests;
+#      - any other line containing `doctest` that is not a full-line `#` comment (`true`, a
+#        quoted or dotted key, an inline table, the key under another table);
+#      - `"""` or `'''` anywhere: a multi-line string could fake a [lib] header for the line
+#        tracker;
+#   4. `--doc` or `rustdoc` in a *.yml / *.yaml file of the workflows dir: `cargo test --doc`
+#      and `cargo rustdoc -- --test` build the lib doctests whatever `doctest` says (cargo 1.99
+#      unit_generator.rs:425-440).
+# Not caught (outside what a raw scan can see): tests a proc macro generates from an
+# attribute with another name; a dependency's macro that expands to include!; a target path
+# set other than by a line-start `path` key under a target header (e.g. a root-level dotted
+# `lib.path` or an inline `bin = [{ path = .. }]`); a workflow that reaches `--doc` through a
+# script or a .cargo alias. Each is loud on the Windows job, not silent.
 # Host bash, find, sort, grep and awk; no toolchain.
 #
-# Usage: scripts/ci/shell-test-layout.sh [shell-dir]   (default: src-tauri)
-# Exit 0: layout ok. Exit 1: a violation (listed). Exit 3: cannot run (shell dir missing,
-# find, sort, grep or awk error); never reported as a pass.
+# Usage: scripts/ci/shell-test-layout.sh [shell-dir [workflows-dir]]
+#        (defaults: src-tauri, .github/workflows)
+# Exit 0: layout ok. Exit 1: a violation (listed). Exit 3: cannot run (shell dir or workflows
+# dir missing, find, sort, grep or awk error); never reported as a pass.
 set -uo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$root" || exit 3
 shell="${1:-src-tauri}"
+workflows="${2:-.github/workflows}"
 scan=scripts/ci/shell-test-layout.awk
 if [ ! -d "$shell/src" ] || [ ! -f "$shell/Cargo.toml" ]; then
   echo "shell-test-layout: cannot run: $shell/src or $shell/Cargo.toml not found" >&2
+  exit 3
+fi
+# A workflows dir that cannot be listed would hide a --doc step: never a pass.
+if [ ! -d "$workflows" ] || [ ! -r "$workflows" ] || [ ! -x "$workflows" ]; then
+  echo "shell-test-layout: cannot run: workflows dir $workflows not found or not readable" >&2
   exit 3
 fi
 
@@ -72,7 +73,7 @@ add() {
   done <<<"$2"
 }
 
-# 1. Test attributes, cfg(test) predicates and doc code blocks under src (one awk lexer).
+# 1. Test attributes, cfg(test) predicates and outside sources under src (one awk lexer).
 # A path with a newline splits into names that do not exist, so awk fails: still exit 3.
 # Symlinks are refused rather than followed: find -L would skip a dangling link silently
 # and walk a linked dir outside src.
@@ -98,29 +99,62 @@ hits="$(grep -nE '^[[:space:]]*\[\[[[:space:]]*(bench|example)[[:space:]]*\]\]' 
 [ $? -le 1 ] || cannot_run "grep failed on $shell/Cargo.toml"
 add "a bench or example target: its exe is not configured by build.rs" "$hits" "$shell/Cargo.toml:"
 
-# 3. Target paths: a line-start `path` key (bare or quoted) under a [lib], [[bin]], [[test]],
-# [[bench]] or [[example]] header (spaces and quotes allowed inside the brackets). A line
-# counts as a header only when it is one, so a value line starting with `[` keeps the
+# 3. src-tauri/Cargo.toml, raw lines with table-header tracking, in one awk. Each finding is
+# tagged with its rule: P target path, D a doctest line other than the pin, M a multi-line
+# string, L a [lib] table without the pin, N no [lib] table.
+# A line counts as a header only when it is one, so a value line starting with `[` keeps the
 # table; dependency tables (`[dependencies.x]`, `[target.'cfg(..)'.dev-dependencies.x]`) pass.
+# Target paths: a line-start `path` key (bare or quoted) under a [lib], [[bin]], [[test]],
+# [[bench]] or [[example]] header (spaces and quotes allowed inside the brackets).
+# The doctest pin: the line `doctest = false` inside [lib]. Any other line naming `doctest`
+# that is not a full-line comment is refused, and so is any `"""` or `'''`, since a
+# multi-line string could hold a fake [lib] header and pin.
 hits="$(LC_ALL=C awk '
   BEGIN { key = "([A-Za-z0-9_-]+|\"[^\"]*\"|\047[^\047]*\047)"
-          hdr = "^[ \t]*\\[\\[?[ \t]*" key "([ \t]*\\.[ \t]*" key ")*[ \t]*\\]\\]?[ \t]*(#.*)?$" }
+          hdr = "^[ \t]*\\[\\[?[ \t]*" key "([ \t]*\\.[ \t]*" key ")*[ \t]*\\]\\]?[ \t]*(#.*)?$"
+          pin = "^[ \t]*doctest[ \t]*=[ \t]*false[ \t]*(#.*)?$" }
   { sub(/\r$/, "") }
+  index($0, "\"\"\"") || index($0, "\047\047\047") { print "M" FNR ":" $0 }
   $0 ~ hdr { t = $0; sub(/#.*/, "", t); gsub(/[][ \t"\047]/, "", t)
-             target = (t == "lib" || t == "bin" || t == "test" || t == "bench" || t == "example"); next }
-  target && /^[ \t]*("path"|\047path\047|path)[ \t]*=/ { print FNR ":" $0 }
+             target = (t == "lib" || t == "bin" || t == "test" || t == "bench" || t == "example")
+             inlib = (t == "lib"); if (inlib) { libs++; libline = FNR; libtext = $0 }; next }
+  target && /^[ \t]*("path"|\047path\047|path)[ \t]*=/ { print "P" FNR ":" $0 }
+  /doctest/ && !/^[ \t]*#/ { if (inlib && $0 ~ pin) pinned = 1; else print "D" FNR ":" $0 }
+  END { if (!libs) print "N"; else if (!pinned) print "L" libline ":" libtext }
 ' "$shell/Cargo.toml")" || cannot_run "awk failed on $shell/Cargo.toml"
-add "a target path under [lib], [[bin]], [[test]], [[bench]] or [[example]]: rustc compiles a file the guard does not scan; keep the default src/lib.rs, src/main.rs and tests/<name>.rs, without a path key" "$hits" "$shell/Cargo.toml:"
+cargo="$shell/Cargo.toml"
+while IFS= read -r hit; do
+  case "$hit" in
+    P*) add "a target path under [lib], [[bin]], [[test]], [[bench]] or [[example]]: rustc compiles a file the guard does not scan; keep the default src/lib.rs, src/main.rs and tests/<name>.rs, without a path key" "${hit#P}" "$cargo:" ;;
+    D*) add "a doctest key other than the line \`doctest = false\` in [lib]: keep exactly that one line" "${hit#D}" "$cargo:" ;;
+    M*) add "a multi-line string: it could hide or fake a [lib] header; write the value on one line" "${hit#M}" "$cargo:" ;;
+    L*) add "[lib] has no line \`doctest = false\`: plain cargo test would build the lib doctests, an exe build.rs does not configure" "${hit#L}" "$cargo:" ;;
+    N) add "no [lib] table with \`doctest = false\`: the lib (src/lib.rs) keeps doctests on, an exe build.rs does not configure" "$cargo: no [lib] table" ;;
+  esac
+done <<<"$hits"
+
+# 4. The workflows dir: `--doc` or `rustdoc` (cargo test --doc, cargo rustdoc -- --test)
+# builds the lib doctests even with `doctest = false`. GitHub reads *.yml and *.yaml at the
+# top of the dir; an empty dir has nothing to scan. /dev/null makes grep name the file even
+# when there is only one. grep: 0 = hits, 1 = none, 2 = error.
+shopt -s nullglob
+wfiles=("$workflows"/*.yml "$workflows"/*.yaml)
+shopt -u nullglob
+if [ "${#wfiles[@]}" -gt 0 ]; then
+  hits="$(grep -nE -e '--doc([^A-Za-z0-9_-]|$)|rustdoc' -- "${wfiles[@]}" /dev/null)"
+  [ $? -le 1 ] || cannot_run "grep failed on $workflows"
+  add "--doc or rustdoc builds the lib doctests whatever [lib] doctest says, an exe build.rs does not configure; test the shell with cargo test -p voicen only" "$hits"
+fi
 
 if [ -n "$found" ]; then
   {
     echo "shell-test-layout: FAIL: shell tests belong only in $shell/tests/*.rs (or, for platform-independent logic, in crates/voicen-core)."
     echo "Only integration tests get the release exe's Windows link configuration from $shell/build.rs;"
     echo "any other test exe of the voicen package links or starts only partly on Windows CI (F-001, F-002)."
-    echo "Lib doctests are off ([lib] doctest = false), so a doc code block would be skipped, not run: write examples as \`\`\`text."
+    echo "Lib doctests stay off: [lib] doctest = false in $shell/Cargo.toml, and no --doc or rustdoc in $workflows."
     echo "Why and what to do instead: docs/decisions/ci-toolchain.md"
     printf '%s' "$found"
   } >&2
   exit 1
 fi
-echo "shell-test-layout: ok: no tests in $shell/src (no test attributes, no doc code blocks), no sources outside it, no benches or examples"
+echo "shell-test-layout: ok: no tests in $shell/src (no test attributes or cfg(test)), no sources outside it, no benches or examples, [lib] doctest = false, no --doc or rustdoc in $workflows"

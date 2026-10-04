@@ -12,9 +12,9 @@ rust-version.workspace = true
 # This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
 name = "voicen_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
-# No lib doctest exe: build.rs cannot give it the release exe's Windows link configuration
-# (T-035, docs/decisions/ci-toolchain.md). make check also refuses doc code blocks here,
-# since they would be skipped silently.
+# No lib doctest exe, which build.rs cannot give the release exe's Windows link configuration
+# (T-035, T-038, docs/decisions/ci-toolchain.md); cargo test --doc ignores this key, so make
+# check refuses removing it and any --doc or rustdoc in .github/workflows. Doc blocks are not checked.
 doctest = false
 
 [build-dependencies]

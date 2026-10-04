@@ -1,8 +1,8 @@
 # CI toolchain: Windows test executables of the shell
 
-**Code:** `src-tauri/build.rs`, `src-tauri/windows-app-manifest.xml`, `src-tauri/Cargo.toml` (`[lib] doctest = false`), `.github/workflows/ci.yml` (windows job, the two `cargo test` steps), `scripts/ci/shell-test-layout.sh` with its lexer `scripts/ci/shell-test-layout.awk` (Makefile `check-shell-layout`, part of `make check`) · **Tests that pin it:** the windows job's `cargo test -p voicen` run of every `src-tauri/tests/*.rs` exe; `make check-shell-layout`; `make check-shell-layout-fixtures` (`scripts/ci/shell-test-layout.test.sh` on the fixture shell dirs in `scripts/ci/fixtures/shell-test-layout/`)
+**Code:** `src-tauri/build.rs`, `src-tauri/windows-app-manifest.xml`, `src-tauri/Cargo.toml` (`[lib] doctest = false`), `.github/workflows/ci.yml` (windows job, the two `cargo test` steps; no `--doc`), `scripts/ci/shell-test-layout.sh` with its lexer `scripts/ci/shell-test-layout.awk` (Makefile `check-shell-layout`, part of `make check`) · **Tests that pin it:** the windows job's `cargo test -p voicen` run of every `src-tauri/tests/*.rs` exe; `make check-shell-layout`; `make check-shell-layout-fixtures` (`scripts/ci/shell-test-layout.test.sh` on the fixture shell dirs in `scripts/ci/fixtures/shell-test-layout/`)
 
-Tasks: T-033 (F-001), T-030 and T-035 (F-002), T-036 (guard hardening). Class `ci-toolchain` in `docs/failures.md`. Decisions: #5 (the shell is built and tested only on the Windows runner).
+Tasks: T-033 (F-001), T-030 and T-035 (F-002), T-036 (guard hardening, its doc scanner superseded), T-038 (F-003: doc scan dropped, doctest switches pinned). Classes `ci-toolchain` and `guard-model` in `docs/failures.md`. Decisions: #5 (the shell is built and tested only on the Windows runner), #37 (corrected by #41), #41 (supersedes #39).
 
 ## Why this area exists
 
@@ -27,46 +27,43 @@ cargo's link-arg scopes are a closed set (cargo rust-1.99.0 `src/compiler/custom
   - `src-tauri/windows-app-manifest.xml` is a copy of tauri-build 2.7.1's `src/windows-app-manifest.xml`: the same elements, attributes and values (one `dependentAssembly`, `Microsoft.Windows.Common-Controls` 6.0.0.0, `processorArchitecture="*"`, `publicKeyToken="6595b64144ccf1df"`, `language="*"`). Only whitespace and comments differ. The comments sit inside the root element, never before it:
     - one names the source file and version;
     - one on the `publicKeyToken` line carries `teamwright:allow-secret`, because the commit secret scan reads `…Token="<16 hex>"` as a secret (it is the public key token of the Windows assembly; `docs/process/gates.md` › Secret scan, false-positive exit). That marker is why the copy cannot be byte-identical.
-  - `src-tauri/Cargo.toml` sets `[lib] doctest = false`, so cargo builds no lib doctest exe at all. With it, a doc code block in `src-tauri/src` is not run but skipped silently, so the check below still refuses every one.
-  - `make check` runs `scripts/ci/shell-test-layout.sh` on the host (bash, find, sort, grep, awk; no toolchain). It fails, naming this file, when the package could produce a test exe that `build.rs` does not configure, or a doc code block that would be skipped. Under `src-tauri/src` it reads each file with a small lexer (`scripts/ci/shell-test-layout.awk`) that drops plain comments and string, raw-string and char literals, so text inside them never counts. It refuses:
+  - `src-tauri/Cargo.toml` sets `[lib] doctest = false`, so plain `cargo test` builds no lib doctest exe. `cargo test --doc` (and `cargo rustdoc … -- --test`) ignores the key and builds the lib doctests anyway (cargo rust-1.99.0 `src/ops/cargo_compile/unit_generator.rs:425-440`; plain `cargo test` checks `doctested()` at `:397-410`). So both switches are pinned: the key by step 3 of the check below, the invocation by its step 4. Bins and `tests/*.rs` never get doctests, whatever their `doctest` key says (`src/workspace/manifest.rs:1018-1025`).
+  - `make check` runs `scripts/ci/shell-test-layout.sh` on the host (bash, find, sort, grep, awk; no toolchain). It fails, naming this file, when the package could produce a test exe that `build.rs` does not configure. Under `src-tauri/src` it reads each file with a small lexer (`scripts/ci/shell-test-layout.awk`) that drops every comment (doc comments included) and string, raw-string and char literals, so text inside them never counts. Doc comments are not checked at all (T-038, decisions #41). It refuses:
     - a test attribute anywhere on a line, with any whitespace or line breaks inside it: `#[test]`, `# [test]`, `#[<path>::test]`, `#[test_case(…)]` (any attribute whose name starts with `test`), also as an attribute argument of `cfg_attr` (`#[cfg_attr(windows, test)]`);
     - a `cfg` or `cfg_attr` predicate naming `test`, on one line or split across lines: `#[cfg(test)]`, `#![cfg(test)]`, `#[cfg(all(windows, test))]`, `#[cfg_attr(test, …)]`;
-    - a doc code block in any doc form (`///` and `//!` lines, `/** */` and `/*! */` blocks, `#[doc = "…"]` and `#![doc = "…"]` strings), by a coarse fail-closed rule (decisions #39). The guard models no CommonMark list, quote or paragraph context. It prepares each doc line as rustc and rustdoc do:
-      - block comment margins are removed as rustc's `beautify_doc_string` removes them;
-      - `#[doc = "…"]` escapes are decoded (a fence can be spelled `\x60\x60\x60`), and an escaped CR is a line break;
-      - lines are unindented by the smallest leading whitespace of any doc line in the shell (one less on `#[doc]` strings). rustdoc unindents an item's outer and inner docs together (for `mod foo;` they sit in two files), so a per-block minimum could undercut it. In `src-tauri` every doc line starts `/// ` or `//! `, so this is 1.
-
-      Then, outside a ```` ```text ```` block, it refuses:
-      - every line indented 4+ columns. This includes list continuations, lazy paragraph continuations and quoted paragraph continuations that rustdoc reads as text (fail-closed); the message says so ("it continues a list item or a paragraph only in contexts the guard does not model");
-      - every list or quote marker (`>`, `-` / `*` / `+`, `N.` / `N)`) followed by 4+ columns or a tab, then text. CommonMark makes 5+ columns an indented code block; 4 columns and a tab are refused too, because the guard computes neither tab stops nor the optional space after `>`. This also refuses a quoted paragraph continuation aligned with spaces (`>           it is …`);
-      - every fence other than ```` ```text ```` (or `~~~text`), and a ```` ```text ```` fence after a list or quote marker (rustdoc ends it with the item or quote);
-      - every raw HTML block line (`<div>`, `</p>`, `<!--`, `<?`; autolinks such as `<https://…>` pass): an HTML block can swallow a ```` ```text ```` fence and leave the lines after it as code.
-
-      A ```` ```text ```` block ends at its closing fence (indented below 4 columns), at a line indented less than its opening fence (rustdoc may have closed it with its list item), or at a line of the other doc form. A fence-like line indented 4+ columns inside it is refused;
-    - `#[doc = …]` with anything but a string literal (`include_str!(…)`, `concat!(…)`);
     - a block comment, string or attribute left open at the end of a file;
     - a source rustc compiles from outside the scanned files:
       - `#[path = …]`, also as a `cfg_attr` argument;
-      - the token `include` anywhere in code, outside comments, strings and doc text: `include!`, a rename (`use core::include as pull;`) and `r#include!`. An identifier named `include` is refused too (fail-closed; the message says to rename it). Identifiers that only contain it (`included`, `include_count`) and `include_str!` / `include_bytes!` pass;
+      - the token `include` anywhere in code, outside comments and strings: `include!`, a rename (`use core::include as pull;`) and `r#include!`. An identifier named `include` is refused too (fail-closed; the message says to rename it). Identifiers that only contain it (`included`, `include_count`) and `include_str!` / `include_bytes!` pass;
       - any symlink under `src-tauri/src`. It is refused, not followed: `find -L` would skip a dangling link silently and walk a linked dir outside `src`;
       - a line-start `path` key (bare or quoted) under a `[lib]`, `[[bin]]`, `[[test]]`, `[[bench]]` or `[[example]]` header of `src-tauri/Cargo.toml` (spaces and quotes inside the brackets allowed). `path` in dependency tables (`[dependencies.x]`, `[target.'cfg(windows)'.dev-dependencies.x]`) and inline `{ path = … }` pass;
-    - `src-tauri/benches`, `src-tauri/examples`, or `[[bench]]` / `[[example]]` in `src-tauri/Cargo.toml`.
+    - `src-tauri/benches`, `src-tauri/examples`, or `[[bench]]` / `[[example]]` in `src-tauri/Cargo.toml`;
+    - in `src-tauri/Cargo.toml` (raw lines, with the same table-header tracking): no line `doctest = false` (spaces and a trailing comment allowed) in the `[lib]` table, or no `[lib]` table; any other line containing `doctest` that is not a full-line `#` comment (`true`, a quoted or dotted key, an inline `lib = { … }`, the key under another table); and `"""` or `'''` anywhere, because a multi-line string could fake a `[lib]` header for the line tracker;
+    - `--doc` or `rustdoc` in a `*.yml` / `*.yaml` file of `.github/workflows` (the check's second argument). A missing workflows dir is "cannot run"; an empty one passes.
 
-    Not caught, because a source scan cannot see them:
+    Not caught, because a raw scan cannot see them (each is loud on the Windows job, not silent):
     - tests that a proc macro generates from an attribute with another name;
-    - doc text built at compile time other than through `#[doc = …]`;
-    - a dependency's macro that expands to `include!` (for example an `include_proto!`-style macro). A test it pulls in still reaches the lib test exe, which is loud on the Windows job;
-    - a target path set other than by a line-start `path` key under a target header, for example a root-level dotted `lib.path = …` or an inline `bin = [{ path = … }]`.
+    - a dependency's macro that expands to `include!` (for example an `include_proto!`-style macro). A test it pulls in still reaches the lib test exe;
+    - a target path set other than by a line-start `path` key under a target header, for example a root-level dotted `lib.path = …` or an inline `bin = [{ path = … }]`;
+    - a workflow that reaches `--doc` through a script or a `.cargo` alias. A doctest exe that fails to link or start fails the step.
 
-    A `find`, `sort`, `grep` or `awk` error is "cannot run" (exit 3), never a pass. `make check-shell-layout-fixtures` pins the shapes above: each fixture shell dir must give its documented exit code (0, 1 or 3). Not yet pinned by a fixture (checked by throwaway probes against rustdoc 1.99 in T-036 review round 1): the shell-wide unindent bound and the one-less bound on `#[doc]` strings, decoded `\x`/`\u` escapes and the escaped CR, the `beautify_doc_string` margins, the raw HTML refusal, and the end of a ```` ```text ```` block at a dedent, at the other doc form or at a fence-like line indented 4+.
-- **Rule for shell test authors:** put shell tests in `src-tauri/tests/<name>.rs`. They need no per-file setup; the manifest reaches every one of them. Put platform-independent logic and its unit tests in `crates/voicen-core`. Write examples in shell doc comments as ```` ```text ````, with the fences on their own lines (not after a list or quote marker); lib doctests are off, so any other code block would never run. Indent every continuation line by fewer than 4 columns after `/// ` (2 for `- `, 3 for `1. `), put one space after a list or quote marker, and write no raw HTML. Keep every shell source a regular file under `src-tauri/src`, reached without `#[path]`, `include` or a Cargo target `path`. If a new exe kind is really needed, extend `build.rs`, this file and the check together in one reviewed change.
+    A `find`, `sort`, `grep` or `awk` error is "cannot run" (exit 3), never a pass. `make check-shell-layout-fixtures` pins the shapes above: each fixture shell dir must give its documented exit code (0, 1 or 3). `ok-doc-text` holds the sources of the 25 doc-shape fixtures and the b8b0b81 probes that T-038 dropped, plus code-looking text in every doc form, and must pass.
+- **Rule for shell test authors:** put shell tests in `src-tauri/tests/<name>.rs`. They need no per-file setup; the manifest reaches every one of them. Put platform-independent logic and its unit tests in `crates/voicen-core`. Keep every shell source a regular file under `src-tauri/src`, reached without `#[path]`, `include` or a Cargo target `path`. Write examples in shell doc comments as ```` ```text ````: lib doctests never run, so a ```` ```rust ```` block would only look tested. This is a style rule (T1), not checked. If a new exe kind is really needed, extend `build.rs`, this file and the check together in one reviewed change.
 - **Don't:**
-  - add `#[cfg(test)]` modules or doctests in `src-tauri/src`;
-  - remove `doctest = false` from `[lib]` in `src-tauri/Cargo.toml`;
+  - add `#[cfg(test)]` modules or test attributes in `src-tauri/src`;
+  - remove `doctest = false` from `[lib]` in `src-tauri/Cargo.toml`, or add another `doctest` key;
+  - pass `--doc` or run `rustdoc --test` for `voicen` (in a workflow, a script or an alias);
   - emit the manifest with `cargo:rustc-link-arg` (it reaches the bin too and duplicates its `RT_MANIFEST`) or drop the `-tests` scope;
   - edit `windows-app-manifest.xml`, or upgrade tauri-build, without comparing the copy's elements and values with the new tauri-build's file;
   - upgrade tauri-build, tauri-winres or embed-resource without checking the shell's build-script output on the Windows runner (`target/*/build/voicen-*/output`). Every bins-only line there (`cargo:rustc-link-arg-bins=…`, `cargo:rustc-link-arg-bin=voicen=…`, and any output that moved from all targets to bins) must be mirrored to `cargo:rustc-link-arg-tests` in `build.rs`, or the integration tests silently miss it again. Today the only such output is the Common-Controls manifest;
   - add `/WX` to the test link args (upstream does, for its own workspace; here it would turn any unrelated test-link warning into an error, T-030).
+
+### A doc block never becomes a Windows test exe
+
+- **Defect that produced it:** F-003. The guard's doc-block scan (T-035, T-036) re-implemented rustc's doc desugaring, rustdoc's unindent and CommonMark in awk, and each review round found shapes it passed.
+- **What breaks if you violate it:** a doctest exe links the shell with the partial build-script configuration (the F-001/F-002 mechanism). It turns red only on the Windows job, after review.
+- **Where it is enforced:** the doctest switches are pinned: `[lib] doctest = false` (step 3 of `scripts/ci/shell-test-layout.sh`) and no `--doc` / `rustdoc` in `.github/workflows` (step 4), with their fixtures. Doc text itself is never read.
+- **Don't:** bring back a check that decides on how rustdoc would read doc text (see Rejected approaches).
 
 ### Other packages' tests never share a cargo invocation with `voicen` on Windows
 
@@ -94,6 +91,9 @@ cargo's link-arg scopes are a closed set (cargo rust-1.99.0 `src/compiler/custom
 | Track CommonMark list context in the guard so 4-column list continuations pass | each mis-modelled clause is a silent pass (content column W = marker width + 1..4 spaces; W+4 is code, below W closes the item; thematic breaks, ordered markers other than 1 and empty items cannot interrupt a paragraph; quotes nest the same way), against a two-line note telling the author to indent by the marker width | T-036 |
 | Model paragraph state in the guard, so a 4-column line right after paragraph text passes as a lazy continuation | T-036 review 1 #1: the lazy pass was granted after lines that leave no paragraph open (`> Note` / `>`, an empty item, `---`, a setext underline, `***`), and rustdoc 1.99 ran each of them as a doctest. Third round in a row with a missed shape; replaced by the coarse rule (any 4+ column line, any marker followed by 4+ columns) | T-036 r1, decisions #39 |
 | A per-block minimum for rustdoc's unindent | rustdoc unindents all doc fragments of an item together: outer docs on `mod foo;` and `//!` docs in `foo.rs`, and `#[doc]` strings mixed with `///` (one less). A per-block minimum removed more than rustdoc did, and a 4-column line passed (probe, rustdoc 1.99) | T-036 r1 |
+| Model rustdoc's Markdown in awk: fences, indented blocks, list and quote containers, then rustc's and rustdoc's doc preparation under a coarse 4-column rule | every unmodelled clause of three foreign parsers is a silent pass; four consecutive steps found new shapes (T-035 cdfa9ac, T-036 b3f3cac, the #39 rule, b8b0b81). The hazard has two switches that raw text can pin instead | T-038, F-003, decisions #39, #41 |
+| (a′) A raw-text fail-closed doc rule (no unindent or Markdown model) | still needs fence open/close state (an HTML block or an unclosed ```` ```text ```` turns a later bare fence into an opening one), or a ban on every fence, tab, 4+ space run, `/** */` and `#[doc]`; no need once the switches are pinned, since no doc text reaches an exe | T-038 |
+| rustdoc's own parser in the core image (`rustdoc --test` on the shell) | must expand the shell crate with tauri, which needs tauri's Linux deps (webkit2gtk) the gate never builds (decisions #5); JSON doctest extraction is unstable; it would protect only doc style | T-038 option (c) |
 | `embed_resource::compile_for_tests` | would need a direct build-dependency (owner consent, decisions #9); kept only as the fallback if `/MANIFESTINPUT` fails to link | T-035 fallback |
 
 ## Open
