@@ -15,7 +15,8 @@ use crate::i18n::{self, MessageId};
 /// One failure of a transcription job. T-001 adds the delivery and capture reasons.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum FailureReason {
-    /// HTTP 401 / 403.
+    /// HTTP 401 / 403; or a stored key that cannot be sent (`Bearer <key>` fails
+    /// HTTP header value validation), in which case no request is sent.
     #[error("invalid API key")]
     InvalidApiKey,
     /// DNS failure; OS "network unreachable" / "host unreachable".
@@ -94,6 +95,10 @@ impl FailureReason {
 pub enum TransportError {
     /// The HTTP client could not be built.
     Setup,
+    /// The stored key cannot be an `Authorization` header value (`Bearer <key>`
+    /// fails `HeaderValue` validation: a control byte other than tab, or DEL).
+    /// Detected before the client or the request is built; nothing is sent.
+    UnusableKey,
     /// A non-2xx status.
     Status(u16),
     /// The request failed before a response: reqwest's `is_dns` / `is_connect` /
@@ -113,7 +118,7 @@ pub enum TransportError {
 /// The one mapping from a transport failure to a reason. `host` is the base URL's
 /// `host[:port]`.
 ///
-/// Order (T-040 Investigation): status; DNS or OS network/host unreachable ->
+/// Order (T-040 Investigation): status, or an unusable key -> `InvalidApiKey`; DNS or OS network/host unreachable ->
 /// `NetworkUnavailable`; connect (refused, connect timeout, TLS) -> `CannotReach`;
 /// timeout -> `Timeout`; body errors -> `UnexpectedResponse`. A DNS failure is
 /// also `is_connect`, so DNS is checked first.
@@ -125,7 +130,9 @@ pub fn classify(err: &TransportError, host: &str) -> FailureReason {
         host: host.to_string(),
     };
     match *err {
-        TransportError::Status(401 | 403) => FailureReason::InvalidApiKey,
+        TransportError::Status(401 | 403) | TransportError::UnusableKey => {
+            FailureReason::InvalidApiKey
+        }
         TransportError::Status(status) => FailureReason::ServerError { status },
         TransportError::Send { dns, io, .. }
             if dns
@@ -185,6 +192,11 @@ mod tests {
             (
                 "403",
                 TransportError::Status(403),
+                FailureReason::InvalidApiKey,
+            ),
+            (
+                "key fails header value validation",
+                TransportError::UnusableKey,
                 FailureReason::InvalidApiKey,
             ),
             (

@@ -17,7 +17,8 @@ response_format = json
 
 - `base_url_trimmed` is the configured base URL with trailing `/` removed. For example, `https://api.openai.com/v1/` and `https://api.openai.com/v1` give the same path.
 - URL join (`engine::openai::transcription_url`): on the parsed base URL, never by string concatenation or `Url::join`: one empty trailing path segment is dropped, then `audio`, `transcriptions` are appended (`path_segments_mut().pop_if_empty().extend(["audio", "transcriptions"])`). The base URL's query string is kept after the path (decision #27(2)): `https://api.example.com/v1?api-version=2024-06-01` → `https://api.example.com/v1/audio/transcriptions?api-version=2024-06-01`; a root base gives `/audio/transcriptions`.
-- Size: ≤ 19.2 MB at the 10-minute cap (decisions #1). The multipart body is encoded into one buffer before sending (not streamed): reqwest's blocking client reports a failed connect of a streamed body as a body-channel error without its connect flag.
+- `Authorization`: one rule for a usable key: the text `Bearer <key>` passes `HeaderValue` validation (http 1.5: no control byte other than tab, no DEL). A key that fails it is `InvalidApiKey`, checked before the client or the request is built, so no request is sent (`TransportError::UnusableKey`); never `CannotReach`. The same rule covers non-ASCII keys: their UTF-8 bytes pass it and are sent as given, and the server's 401/403 gives `InvalidApiKey`. The value is marked sensitive.
+- Size: ≤ 19.2 MB at the 10-minute cap (decisions #1). The multipart body is encoded into one buffer before sending (not streamed): reqwest's blocking client reports a failed connect of a streamed body as a body-channel error without its connect flag. The buffer is reserved once from the WAV length plus 1 KiB of framing and the text parts, so it is never regrown; the WAV moves into the form without a copy. Transient peak per call: the audio, the WAV and the body, about 3 × 19.2 MB at the cap.
 - Timeouts (`Timeouts`, the single source, read from the `TranscribeRequest` of each call): connect 5 s (`connect_timeout` of the client, built per call); the whole request, connect to the last body byte, 30 s (API) / 60 s (local server, 002) as the per-request timeout (Clarification 1).
 - The client is reqwest's blocking client (decision #42): `transcribe` must not run inside a tokio runtime.
 
@@ -28,7 +29,7 @@ response_format = json
 | 2xx, JSON object with string `text`, non-empty after trim | `Ok(text)` (the text is not trimmed beyond what the server sent, except the leading/trailing whitespace) |
 | 2xx, `text` empty / whitespace | `Ok("")` → pipeline `NoSpeech` |
 | 2xx, body not JSON, `text` missing or not a string, body > 1 MiB, invalid UTF-8, connection reset while reading | `Err(UnexpectedResponse)` |
-| 401, 403 | `Err(InvalidApiKey)` |
+| 401, 403; or a key that fails the `Authorization` rule (no request sent) | `Err(InvalidApiKey)` |
 | any other non-2xx (e.g. 400, 404, 413, 429, 500, 503) | `Err(ServerError{status})` |
 | DNS failure; OS "network unreachable" / "host unreachable" | `Err(NetworkUnavailable)` |
 | connection refused; connect not established in 5 s | `Err(CannotReach{host})` (`host[:port]` of the base URL) |
@@ -36,7 +37,7 @@ response_format = json
 
 Classification (`failure::classify`, one mapping for every transport failure; T-040 Investigation probe, reqwest 0.13.5), first match:
 
-1. HTTP status: 401/403 → `InvalidApiKey`; any other non-2xx → `ServerError{status}`. The error body is not read.
+1. HTTP status: 401/403 → `InvalidApiKey`; any other non-2xx → `ServerError{status}`. The error body is not read. A key that fails the `Authorization` rule above → `InvalidApiKey` (no request).
 2. DNS failure (`is_dns`), or `NetworkUnreachable`/`HostUnreachable` as the first `io::ErrorKind` in the error's source chain → `NetworkUnavailable`. Checked before 3, because a DNS failure is also `is_connect`.
 3. `is_connect` (refused, connect timeout, TLS handshake), or the HTTP client cannot be built → `CannotReach{host}`. Checked before 4, because a connect timeout is also `is_timeout`.
 4. `is_timeout` → `Timeout`; also a body read that stalls past the deadline (the blocking reader's `io::Error` wraps a `reqwest::Error` with `is_timeout`).
@@ -53,4 +54,5 @@ One test per row above, plus:
 - the trailing-slash path
 - no `language` part for auto
 - no `Authorization` header without a key
+- a key with an inner control character (`\n`, `\r`, NUL, `\x01`, DEL) is `InvalidApiKey` and no request reaches the server, directly and through `engine_for`
 - a key and a transcript placed in the mock response never appear in `FailureReason`'s `Display`/`Debug` or in any `DictationEvent`

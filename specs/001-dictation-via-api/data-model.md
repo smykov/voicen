@@ -132,7 +132,7 @@ Rules (NFR-06, FR-026, FR-027):
 
 | Code | Message key | Source |
 |---|---|---|
-| `InvalidApiKey` | `failure.invalid_api_key` | HTTP 401/403 |
+| `InvalidApiKey` | `failure.invalid_api_key` | HTTP 401/403; or the stored key cannot be sent: `Bearer <key>` fails HTTP header value validation (a control byte other than tab, or DEL), checked before the request is built, so nothing is sent. A non-ASCII key passes that rule and is sent as UTF-8; the server's 401/403 decides |
 | `NetworkUnavailable` | `failure.network_unavailable` | DNS failure, network/host unreachable |
 | `CannotReach{host}` | `failure.cannot_reach` | connection refused, connect timeout, TLS handshake failure, HTTP client setup; `host` = the base URL's `host[:port]` (port only when not the scheme default) |
 | `Timeout` | `failure.timeout` | the whole request (connect to last body byte) exceeded its `Timeouts` duration (API 30 s), including a stall mid-body |

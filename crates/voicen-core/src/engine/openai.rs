@@ -4,7 +4,9 @@
 //!
 //! `POST {base}/audio/transcriptions`, multipart `file` (`audio.wav`, `audio/wav`),
 //! `model`, `language` (omitted for auto), `response_format=json`;
-//! `Authorization: Bearer <key>` only when a key is stored. The URL is joined on the
+//! `Authorization: Bearer <key>` only when a key is stored; a key whose
+//! `Bearer <key>` text fails `HeaderValue` validation is `InvalidApiKey` with no
+//! request sent ([`TransportError::UnusableKey`]). The URL is joined on the
 //! parsed base URL, so a query string (decision #27(2)) survives. The blocking
 //! client is built per call from `TranscribeRequest::timeouts` (connect and
 //! whole-request). The body is read through a 1 MiB cap. Every failure goes
@@ -15,7 +17,8 @@ use std::error::Error as _;
 use std::io::Read;
 
 use reqwest::blocking::{multipart, Client};
-use reqwest::header::CONTENT_TYPE;
+use reqwest::header::{HeaderValue, AUTHORIZATION, CONTENT_TYPE};
+use zeroize::Zeroizing;
 
 use super::{Engine, TranscribeRequest};
 use crate::audio::{wav, AudioBuffer};
@@ -25,6 +28,10 @@ use crate::settings::url::NormalizedUrl;
 
 /// Largest accepted response body (contract: "body > 1 MiB" -> `UnexpectedResponse`).
 const MAX_BODY: u64 = 1024 * 1024;
+
+/// Room for the multipart framing around the WAV and the text parts: four part
+/// headers with a 67-character boundary and the closing boundary are under 1 KiB.
+const MULTIPART_OVERHEAD: usize = 1024;
 
 /// The OpenAI-compatible engine for one base URL, model and optional key.
 pub struct OpenAiCompatibleEngine {
@@ -56,12 +63,19 @@ impl OpenAiCompatibleEngine {
     /// failed connect as the body channel's `Disconnected` error when the connect
     /// fails first (no `is_connect` flag: a refused port would classify as
     /// `UnexpectedResponse`). A buffered body has no such channel.
+    ///
+    /// The buffer is sized once from the WAV length ([`body_capacity`]), so reading
+    /// the form never regrows it. The WAV moves into the form without a copy; the
+    /// transient peak per call is the audio, the WAV and this body (about
+    /// 3 x 19.2 MB at the 10-minute cap).
     fn multipart_body(
         &self,
         audio: &AudioBuffer,
         req: &TranscribeRequest,
     ) -> Option<(String, Vec<u8>)> {
-        let file = multipart::Part::bytes(wav::encode(audio))
+        let wav = wav::encode(audio);
+        let capacity = body_capacity(wav.len(), &self.model, req.language.as_deref());
+        let file = multipart::Part::bytes(wav)
             .file_name("audio.wav")
             .mime_str("audio/wav")
             .ok()?;
@@ -73,9 +87,25 @@ impl OpenAiCompatibleEngine {
         }
         let form = form.text("response_format", "json");
         let content_type = format!("multipart/form-data; boundary={}", form.boundary());
-        let mut body = Vec::new();
+        let mut body = Vec::with_capacity(capacity);
         form.into_reader().read_to_end(&mut body).ok()?;
         Some((content_type, body))
+    }
+
+    /// The `Authorization` value for the stored key: `None` without a key (or with
+    /// an empty one). The one rule for a usable key: `Bearer <key>` passes
+    /// `HeaderValue` validation (http 1.5: no control byte other than tab, no DEL);
+    /// otherwise [`TransportError::UnusableKey`]. Bytes of a non-ASCII key pass that
+    /// rule and are sent as UTF-8; the server's 401/403 then gives `InvalidApiKey`.
+    /// The value is marked sensitive (not printed by `Debug`, not HPACK-indexed).
+    fn authorization(&self) -> Result<Option<HeaderValue>, TransportError> {
+        let Some(key) = self.key.as_ref().filter(|k| !k.expose().is_empty()) else {
+            return Ok(None);
+        };
+        let text = Zeroizing::new(format!("Bearer {}", key.expose()));
+        let mut value = HeaderValue::from_str(&text).map_err(|_| TransportError::UnusableKey)?;
+        value.set_sensitive(true);
+        Ok(Some(value))
     }
 
     /// Sends the request and reads the body; every failure as a [`TransportError`].
@@ -85,6 +115,8 @@ impl OpenAiCompatibleEngine {
         audio: &AudioBuffer,
         req: &TranscribeRequest,
     ) -> Result<String, TransportError> {
+        // The key is checked before anything is built or sent.
+        let authorization = self.authorization()?;
         let client = Client::builder()
             .connect_timeout(req.timeouts.connect)
             .build()
@@ -98,8 +130,8 @@ impl OpenAiCompatibleEngine {
             .timeout(req.timeouts.api_transcription)
             .header(CONTENT_TYPE, content_type)
             .body(body);
-        if let Some(key) = self.key.as_ref().filter(|k| !k.expose().is_empty()) {
-            request = request.bearer_auth(key.expose());
+        if let Some(value) = authorization {
+            request = request.header(AUTHORIZATION, value);
         }
         let response = request.send().map_err(|e| send_error(&e))?;
         let status = response.status();
@@ -183,6 +215,15 @@ fn body_error(e: &std::io::Error) -> TransportError {
     TransportError::BodyRead { timeout }
 }
 
+/// The multipart buffer size for a WAV of `wav_len` bytes: the WAV, the text parts
+/// and [`MULTIPART_OVERHEAD`] for the framing.
+fn body_capacity(wav_len: usize, model: &str, language: Option<&str>) -> usize {
+    wav_len
+        .saturating_add(model.len())
+        .saturating_add(language.map_or(0, str::len))
+        .saturating_add(MULTIPART_OVERHEAD)
+}
+
 /// `{base}/audio/transcriptions` with the base's query kept: one empty trailing
 /// path segment dropped, then `audio`, `transcriptions` appended. `None` only for
 /// a cannot-be-a-base URL (never `http`/`https`).
@@ -261,6 +302,63 @@ mod tests {
             joined(normalized.as_str()).as_deref(),
             Some("https://api.example.com/v1/audio/transcriptions")
         );
+    }
+
+    fn engine(key: Option<&str>) -> OpenAiCompatibleEngine {
+        let base = match crate::settings::url::check_base_url("https://api.example.com/v1") {
+            Ok(u) => u,
+            Err(e) => panic!("accepted by the URL rule: {e:?}"),
+        };
+        OpenAiCompatibleEngine::new(base, "whisper-1", key.map(Secret::new))
+    }
+
+    #[test]
+    fn multipart_body_is_sized_once_from_the_wav() {
+        // Review 1 #5: the buffer is reserved from the WAV length and never regrown
+        // while the form is read. Bite: `Vec::new()` (doubling growth leaves a
+        // different capacity) or an overhead too small for the framing (regrowth).
+        let audio = AudioBuffer::from_16k_mono(vec![0; 16_000 * 10]);
+        for language in [None, Some("de")] {
+            let req = TranscribeRequest {
+                language: language.map(str::to_string),
+                timeouts: crate::timeouts::Timeouts::default(),
+            };
+            let engine = engine(None);
+            let Some((_, body)) = engine.multipart_body(&audio, &req) else {
+                panic!("the body is encoded");
+            };
+            let expected = body_capacity(wav::encode(&audio).len(), "whisper-1", language);
+            assert_eq!(body.capacity(), expected, "language {language:?}");
+            assert!(body.len() <= expected);
+        }
+    }
+
+    #[test]
+    fn authorization_is_the_header_value_rule() {
+        // Review 1 #4: one rule, `Bearer <key>` passes `HeaderValue` validation.
+        // Tab and non-ASCII bytes pass it (sent as given); other control bytes and
+        // DEL do not. No key or an empty key: no header. Bite: a hand-made list
+        // (refusing tab or non-ASCII), or the value not marked sensitive.
+        assert!(matches!(engine(None).authorization(), Ok(None)));
+        assert!(matches!(engine(Some("")).authorization(), Ok(None)));
+        for key in ["sk-test-ok", "sk-test-a\tb", "sk-test-\u{e9}"] {
+            match engine(Some(key)).authorization() {
+                Ok(Some(value)) => {
+                    assert!(value.is_sensitive(), "{key:?}");
+                    assert_eq!(value.as_bytes(), format!("Bearer {key}").as_bytes());
+                }
+                other => panic!("{key:?}: {other:?}"),
+            }
+        }
+        for key in ["sk-test-a\nb", "sk-test-a\u{0}b", "sk-test-a\u{7f}b"] {
+            assert!(
+                matches!(
+                    engine(Some(key)).authorization(),
+                    Err(TransportError::UnusableKey)
+                ),
+                "{key:?}"
+            );
+        }
     }
 
     #[test]
