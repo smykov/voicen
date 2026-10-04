@@ -300,10 +300,11 @@
     <div class="actions">
       <button type="button" data-testid="settings-save" disabled={saving} onclick={save}>{t("settings.save")}</button>
       {#if saved}
-        <!-- Polite: a warning is not an alert; the summary names no field and no text (W). -->
+        <!-- Polite: a warning is not an alert; the summary names no field and no text (W).
+             The separating space is inside the expression: Svelte trims whitespace at the
+             start of a block body. -->
         <p role="status">
-          {t("settings.saved")}{#if hasWarnings}
-            {t("settings.saved_with_warnings")}{/if}
+          {t("settings.saved")}{#if hasWarnings}{` ${t("settings.saved_with_warnings")}`}{/if}
         </p>
       {/if}
     </div>
