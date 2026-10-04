@@ -18,7 +18,10 @@
 // - the row's actions are buttons inside the row: `local-model-download` (state
 //   not_downloaded), `local-model-retry` (failed, never anywhere else), `local-model-cancel`
 //   (downloading); a downloaded row has none of them. While any row is downloading or a
-//   download invoke is pending, every Download / Retry button is disabled (I4);
+//   download invoke is pending, every Download / Retry button is disabled (I4), and the
+//   invoke counts as pending until the re-list issued after it has settled (review r1 #3);
+// - the command emits nothing: after a download invoke resolves, the rows follow a
+//   re-list of `local_models_list` (no event needed to show `downloading`, review r1 #1);
 // - a downloading row shows a `role="progressbar"` and, as text, formatSize(received),
 //   formatSize(total) and the whole percentage ("25%" in en);
 // - a failed row shows its reason in test id `local-model-reason` (inside the row; not
@@ -36,9 +39,11 @@ import { readFileSync } from "node:fs";
 import { expect, test, type Page } from "@playwright/test";
 import {
   calls,
+  emitted,
   failedState,
   failureReason,
   firstRunView,
+  holdLists,
   installTauriMock,
   listeners,
   localModelProgress,
@@ -48,6 +53,7 @@ import {
   modelsWith,
   queueDownloadRejection,
   queueSaveOutcome,
+  releaseDownload,
   releaseList,
   storedModels,
   type LocalModelView,
@@ -455,5 +461,111 @@ test("a download already running when the window opens shows its progress and Ca
   await expect(action(page, "base", "cancel")).toBeEnabled();
   for (const other of otherDownloads(page, "base")) await expect(other).toBeDisabled();
   expect(await calls(page, "local_model_download")).toEqual([]);
+  expect(errors).toEqual([]);
+});
+
+// ---- Review round 1: the re-list after the invoke, and the pending invoke (I2, I4) -------
+
+/** Every Download / Retry button the rows show now (whatever their states). */
+function downloadOrRetry(page: Page) {
+  return section(page).locator('[data-testid="local-model-download"], [data-testid="local-model-retry"]');
+}
+
+async function expectAllDownloadOrRetry(page: Page, state: "disabled" | "enabled", count: number): Promise<void> {
+  const buttons = downloadOrRetry(page);
+  await expect(buttons).toHaveCount(count);
+  for (let i = 0; i < count; i++) {
+    if (state === "disabled") await expect(buttons.nth(i), `Download/Retry #${i}`).toBeDisabled();
+    else await expect(buttons.nth(i), `Download/Retry #${i}`).toBeEnabled();
+  }
+}
+
+test("Download with no event after the click: the re-list alone shows base downloading (0 kB of 141 MB) with Cancel, and every other Download is disabled", async ({ page }) => {
+  // Review r1 #1 (M2): the command emits nothing; the first progress can be 30 s away.
+  const errors = pageErrors(page);
+  await openLoaded(page);
+
+  await action(page, "base", "download").click();
+  await expect.poll(() => downloadCalls(page)).toEqual([{ id: "base" }]);
+  const base = row(page, "base");
+  await expect(base).toHaveAttribute("data-state", "downloading");
+  await expect(base.getByRole("progressbar")).toBeVisible();
+  await expect(base).toContainText("0 kB");
+  await expect(base).toContainText("141 MB");
+  await expect(action(page, "base", "cancel")).toBeEnabled();
+  await expect(action(page, "base", "download")).toHaveCount(0);
+  for (const other of otherDownloads(page, "base")) await expect(other).toBeDisabled();
+  // No event was involved.
+  expect(await emitted(page, LOCAL_MODEL_EVENTS.progress)).toEqual([]);
+  expect(await emitted(page, LOCAL_MODEL_EVENTS.state)).toEqual([]);
+  expect(errors).toEqual([]);
+});
+
+test("failure branch: Retry on a failed row with no event after the click: the re-list alone removes the old reason and Retry and shows downloading", async ({ page }) => {
+  // Review r1 #1 (M2): "Retry starts the download again" must show before any progress.
+  const errors = pageErrors(page);
+  await openLoaded(page, localView(), { localModels: modelsWith("base", failedState("checksum_mismatch")) });
+  await expect(row(page, "base").getByTestId("local-model-reason")).toHaveText(en("download.checksum_mismatch"));
+
+  await action(page, "base", "retry").click();
+  await expect.poll(() => downloadCalls(page)).toEqual([{ id: "base" }]);
+  const base = row(page, "base");
+  await expect(base).toHaveAttribute("data-state", "downloading");
+  await expect(base.getByTestId("local-model-reason")).toHaveCount(0);
+  await expect(action(page, "base", "retry")).toHaveCount(0);
+  await expect(action(page, "base", "cancel")).toBeEnabled();
+  await expect(section(page)).not.toContainText(en("download.checksum_mismatch"));
+  expect(await emitted(page, LOCAL_MODEL_EVENTS.progress)).toEqual([]);
+  expect(await emitted(page, LOCAL_MODEL_EVENTS.state)).toEqual([]);
+  expect(errors).toEqual([]);
+});
+
+test("while a download invoke is pending, every Download and Retry button is disabled, though no row is downloading yet", async ({ page }) => {
+  // Review r1 #2 (M1): I4's "or a local_model_download invoke is pending".
+  const errors = pageErrors(page);
+  await openLoaded(page, localView(), {
+    holdDownload: true,
+    localModels: modelsWith("tiny", failedState("download_interrupted")),
+  });
+  await expectAllDownloadOrRetry(page, "enabled", 5);
+
+  await action(page, "base", "download").click();
+  await expect.poll(() => downloadCalls(page)).toEqual([{ id: "base" }]);
+  // Held: core has not answered, so no row has changed; only the pending invoke blocks.
+  await expect(row(page, "base")).toHaveAttribute("data-state", "not_downloaded");
+  await expect(row(page, "tiny")).toHaveAttribute("data-state", "failed");
+  await expectAllDownloadOrRetry(page, "disabled", 5);
+  expect(await downloadCalls(page)).toEqual([{ id: "base" }]);
+
+  await releaseDownload(page);
+  await expect(row(page, "base")).toHaveAttribute("data-state", "downloading");
+  await expectAllDownloadOrRetry(page, "disabled", 4);
+  expect(await downloadCalls(page)).toEqual([{ id: "base" }]);
+  expect(errors).toEqual([]);
+});
+
+test("the Download and Retry buttons stay disabled after the invoke resolves until the re-list after it has settled, also while that re-list is held", async ({ page }) => {
+  // Review r1 #3: core set Downloading before the command returned; until the re-list
+  // shows it, the rows still say not_downloaded, so only the pending flag blocks.
+  const errors = pageErrors(page);
+  await openLoaded(page, localView(), {
+    holdDownload: true,
+    localModels: modelsWith("tiny", failedState("download_interrupted")),
+  });
+  const listsBefore = (await calls(page, "local_models_list")).length;
+  await holdLists(page);
+
+  await action(page, "base", "download").click();
+  await expect.poll(() => downloadCalls(page)).toEqual([{ id: "base" }]);
+  await releaseDownload(page);
+  // The invoke resolved and its re-list was issued (and is held).
+  await expect.poll(async () => (await calls(page, "local_models_list")).length).toBe(listsBefore + 1);
+  await expect(row(page, "base")).toHaveAttribute("data-state", "not_downloaded");
+  await expectAllDownloadOrRetry(page, "disabled", 5);
+
+  await releaseList(page);
+  await expect(row(page, "base")).toHaveAttribute("data-state", "downloading");
+  await expectAllDownloadOrRetry(page, "disabled", 4);
+  expect(await downloadCalls(page)).toEqual([{ id: "base" }]);
   expect(errors).toEqual([]);
 });

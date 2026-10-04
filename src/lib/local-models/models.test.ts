@@ -6,7 +6,9 @@
 //   nothing (I2: nothing else sets a row's state).
 // - The list/event sequencer (I2): the rows shown are the newest issued
 //   `local_models_list` response, overlaid in arrival order by every event received since
-//   that request was issued. An older response is dropped, whenever it arrives.
+//   that request was issued. An older response is dropped, whenever it arrives. A failed
+//   list (`listFailed`) is reported only when it is the newest; it keeps the rows, and an
+//   older one failing does not disturb the newer request's events (review r1 #4).
 // - `selectable` (I3): exactly the downloaded rows, in catalog order.
 // - `downloadBlocked` (I4): true while any row is downloading or a download invoke is
 //   pending.
@@ -29,6 +31,7 @@ import {
   emptyModels,
   eventReceived,
   formatSize,
+  listFailed,
   listReceived,
   listRequested,
   reasonArgs,
@@ -148,6 +151,12 @@ function sequencer() {
     respond: (request: number, rows: LocalModelView[]) => {
       state = listReceived(state, request, rows);
     },
+    /** The request rejects; returns whether it was the newest (the caller shows the failure). */
+    fail: (request: number): boolean => {
+      const failed = listFailed(state, request);
+      state = failed.state;
+      return failed.newest;
+    },
     event: (event: LocalModelEvent) => {
       state = eventReceived(state, event);
     },
@@ -234,6 +243,45 @@ describe("list and event ordering (I2)", () => {
     expect(stateOf(s.rows(), "small")).toEqual(DOWNLOADED);
   });
 
+  it("listFailed: an older request failing while a newer one is pending is not the newest and keeps the newer request's events", () => {
+    const s = sequencer();
+    s.respond(s.request(), firstRun());
+    const older = s.request();
+    const newer = s.request();
+    s.event(stateEvent("base", failed("checksum_mismatch")));
+
+    expect(s.fail(older)).toBe(false);
+    // The rows shown are untouched by the older failure.
+    expect(stateOf(s.rows(), "base")).toEqual(failed("checksum_mismatch"));
+    // The newer response is still taken (tiny finished before its snapshot), and the
+    // event received since it was issued is replayed over it.
+    s.respond(newer, listWith({ tiny: DOWNLOADED }));
+    expect(stateOf(s.rows(), "tiny")).toEqual(DOWNLOADED);
+    expect(stateOf(s.rows(), "base")).toEqual(failed("checksum_mismatch"));
+  });
+
+  it("listFailed: the newest request failing is the newest, keeps the rows, and later events still apply", () => {
+    const s = sequencer();
+    s.respond(s.request(), listWith({ tiny: DOWNLOADED }));
+    const newest = s.request();
+    s.event(progress("base", 4096));
+
+    expect(s.fail(newest)).toBe(true);
+    expect(stateOf(s.rows(), "tiny")).toEqual(DOWNLOADED);
+    expect(stateOf(s.rows(), "base")).toEqual({ kind: "downloading", received: 4096, total: sizeOf("base") });
+
+    s.event(stateEvent("base", DOWNLOADED));
+    expect(stateOf(s.rows(), "base")).toEqual(DOWNLOADED);
+    expect(stateOf(s.rows(), "tiny")).toEqual(DOWNLOADED);
+  });
+
+  it("listFailed: the first and only list failing is the newest and leaves no rows", () => {
+    const s = sequencer();
+    const first = s.request();
+    expect(s.fail(first)).toBe(true);
+    expect(s.rows()).toBeNull();
+  });
+
   it("the replayed events are those since the newest request, not since an older one", () => {
     const s = sequencer();
     const older = s.request();
@@ -318,6 +366,30 @@ describe("formatSize", () => {
     expect(norm(formatSize(1_048_576, "en"))).toBe("1 MB");
     expect(norm(formatSize(1_048_576, "ru"))).toBe("1 МБ");
   });
+
+  // Unit edges (review r1 #5), compared exactly: Intl groups thousands (en ",", ru
+  // U+00A0 NO-BREAK SPACE) and puts a plain space before the unit. The unit is chosen by
+  // the rounded value: one that rounds to 1024 moves to the next unit.
+  const NBSP = "\u00a0";
+  const EDGES: [number, string, string, string][] = [
+    // bytes, what it is, en, ru
+    [1_047_552, "1023 KiB", "1,023 kB", `1${NBSP}023 кБ`],
+    [1_048_063, "1023.499 KiB (just below the MB edge)", "1,023 kB", `1${NBSP}023 кБ`],
+    [1_048_064, "1023.5 KiB (rounds to 1024 KiB)", "1 MB", "1 МБ"],
+    [1_048_575, "1 MiB - 1 B", "1 MB", "1 МБ"],
+    [1_048_576, "1 MiB", "1 MB", "1 МБ"],
+    [1_073_217_535, "1023.499 MiB (just below the GB edge)", "1,023 MB", `1${NBSP}023 МБ`],
+    [1_073_217_536, "1023.5 MiB (rounds to 1024 MiB)", "1.0 GB", "1,0 ГБ"],
+    [1_073_741_823, "1 GiB - 1 B", "1.0 GB", "1,0 ГБ"],
+    [1_073_741_824, "1 GiB", "1.0 GB", "1,0 ГБ"],
+  ];
+
+  for (const [bytes, what, en, ru] of EDGES) {
+    it(`unit edge: ${bytes} B (${what}) is "${en}" / "${ru}"`, () => {
+      expect(formatSize(bytes, "en")).toBe(en);
+      expect(formatSize(bytes, "ru")).toBe(ru);
+    });
+  }
 
   it("from 1 GB with one decimal, the decimal separator of the UI language", () => {
     expect(norm(formatSize(1_610_612_736, "en"))).toBe("1.5 GB");

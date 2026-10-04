@@ -12,6 +12,7 @@ import {
   installTauriMock,
   failedState,
   failureReason,
+  holdLists,
   listeners,
   localModelProgress,
   localModelsFirstRun,
@@ -20,6 +21,7 @@ import {
   modelsWith,
   queueDownloadRejection,
   queueSaveOutcome,
+  releaseDownload,
   releaseList,
   releaseListen,
   releaseSettingsGet,
@@ -297,16 +299,35 @@ test("a queued download rejection is thrown as is and changes nothing; the queue
   expect(await calls(page, "local_model_download")).toHaveLength(3);
 });
 
-test("local_model_cancel_download: a downloading row returns true, becomes not_downloaded, then state not_downloaded is emitted; otherwise false", async ({ page }) => {
-  await listenInPage(page, LOCAL_MODEL_EVENTS.state);
+test("local_model_cancel_download: a downloading row returns true and stays downloading until the download thread emits state not_downloaded, when the list changes; otherwise false", async ({ page }) => {
+  // T-045 review r1 #8: core keeps Downloading until the download thread records the
+  // cancel (service.rs `record`, Cancelled), then emits.
   expect(await invokeInPage(page, "local_model_cancel_download", { id: "base" })).toEqual({ ok: false });
   await invokeInPage(page, "local_model_download", { id: "base" });
+  const base = localModelsFirstRun().find((m) => m.id === "base")!;
+  const downloading = { kind: "downloading", received: 0, total: base.sizeBytes };
 
-  expect(await invokeInPage(page, "local_model_cancel_download", { id: "base" })).toEqual({ ok: true });
-  expect((await storedModels(page)).find((m) => m.id === "base")!.state).toEqual({ kind: "not_downloaded" });
-  await expect.poll(async () => (await received(page)).map((e) => e.payload)).toEqual([
-    { id: "base", state: { kind: "not_downloaded" } },
+  // In one page task: the answer, the listed state right after it returns, and (from a
+  // listener) the listed state when the event is delivered.
+  const observed = await page.evaluate(async (stateEvent) => {
+    type Mock = { state: { models: { id: string; state: unknown }[] } };
+    const w = window as unknown as { __TAURI_INTERNALS__: Internals; __VOICEN_MOCK__: Mock; __atEmit?: unknown[] };
+    const listed = () => JSON.parse(JSON.stringify(w.__VOICEN_MOCK__.state.models.find((m) => m.id === "base")!.state));
+    w.__atEmit = [];
+    const handler = w.__TAURI_INTERNALS__.transformCallback((e) =>
+      w.__atEmit!.push({ payload: (e as { payload: unknown }).payload, listed: listed() }),
+    );
+    await w.__TAURI_INTERNALS__.invoke("plugin:event|listen", { event: stateEvent, target: { kind: "Any" }, handler });
+    const answer = await w.__TAURI_INTERNALS__.invoke("local_model_cancel_download", { id: "base" });
+    return { answer, afterReturn: listed(), emittedYet: w.__atEmit.length };
+  }, LOCAL_MODEL_EVENTS.state);
+  expect(observed).toEqual({ answer: true, afterReturn: downloading, emittedYet: 0 });
+
+  const atEmit = () => page.evaluate(() => (window as unknown as { __atEmit: unknown[] }).__atEmit);
+  await expect.poll(atEmit).toEqual([
+    { payload: { id: "base", state: { kind: "not_downloaded" } }, listed: { kind: "not_downloaded" } },
   ]);
+  expect((await storedModels(page)).find((m) => m.id === "base")!.state).toEqual({ kind: "not_downloaded" });
   expect(await invokeInPage(page, "local_model_cancel_download", { id: "base" })).toEqual({ ok: false });
   expect(await invokeInPage(page, "local_model_cancel_download", { id: "ggml-fake-unknown" })).toEqual({ ok: false });
   expect((await calls(page, "local_model_cancel_download")).map((c) => c.args)).toEqual([
@@ -372,4 +393,55 @@ test("listRejection makes local_models_list reject with its text (recorded)", as
   await page.goto("/");
   expect(await invokeInPage(page, "local_models_list")).toEqual({ err: "list refused (fake)" });
   expect(await calls(page, "local_models_list")).toHaveLength(1);
+});
+
+test("holdDownload keeps local_model_download in flight and not yet run (no row changes) until releaseDownload; later calls run at once", async ({ context }) => {
+  // T-045 review r1 #2: a test can see the UI while a download invoke is pending.
+  const page = await context.newPage();
+  await installTauriMock(page, { holdDownload: true });
+  await page.goto("/");
+  await queueDownloadRejection(page, failureReason("download_busy"));
+  await page.evaluate(() => {
+    const w = window as unknown as { __TAURI_INTERNALS__: Internals; __first?: unknown; __second?: unknown };
+    void w.__TAURI_INTERNALS__
+      .invoke("local_model_download", { id: "base" })
+      .then((v) => (w.__first = { ok: v }), (e) => (w.__first = { err: e }));
+    void w.__TAURI_INTERNALS__
+      .invoke("local_model_download", { id: "small" })
+      .then((v) => (w.__second = { ok: v }), (e) => (w.__second = { err: e }));
+  });
+  await expect.poll(async () => (await calls(page, "local_model_download")).length).toBe(2);
+  const answers = () =>
+    page.evaluate(() => {
+      const w = window as unknown as { __first?: unknown; __second?: unknown };
+      return [w.__first ?? null, w.__second ?? null];
+    });
+  expect(await answers()).toEqual([null, null]);
+  // Not run yet: no row changed, the scripted rejection is still queued.
+  expect(await storedModels(page)).toEqual(localModelsFirstRun());
+
+  await releaseDownload(page);
+  // Run in call order: the first takes the scripted rejection, the second starts.
+  await expect.poll(answers).toEqual([{ err: failureReason("download_busy") }, { ok: null }]);
+  const models = await storedModels(page);
+  expect(models.find((m) => m.id === "base")!.state).toEqual({ kind: "not_downloaded" });
+  const small = models.find((m) => m.id === "small")!;
+  expect(small.state).toEqual({ kind: "downloading", received: 0, total: small.sizeBytes });
+  expect(await invokeInPage(page, "local_model_download", { id: "tiny" })).toEqual({ ok: null });
+});
+
+test("holdLists starts holding local_models_list mid-test, each answered with its call-time copy at releaseList", async ({ page }) => {
+  expect(await invokeInPage(page, "local_models_list")).toEqual({ ok: localModelsFirstRun() });
+  await holdLists(page);
+  await page.evaluate(() => {
+    const w = window as unknown as { __TAURI_INTERNALS__: Internals; __held?: unknown };
+    void w.__TAURI_INTERNALS__.invoke("local_models_list", {}).then((v) => (w.__held = v));
+  });
+  await expect.poll(async () => (await calls(page, "local_models_list")).length).toBe(2);
+  const held = () => page.evaluate(() => (window as unknown as { __held?: unknown }).__held);
+  expect(await held()).toBeUndefined();
+  await localModelState(page, "base", { kind: "downloaded" });
+  await releaseList(page);
+  await expect.poll(held).toEqual(localModelsFirstRun());
+  expect(await invokeInPage(page, "local_models_list")).toEqual({ ok: modelsWith("base", { kind: "downloaded" }) });
 });

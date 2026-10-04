@@ -38,7 +38,8 @@
 //   - `local_models_list` returns a copy of it, taken when the call is made. With
 //     `holdList`, every call stays in flight (recorded, its copy already taken) until
 //     `releaseList()`, so a test can change the list or emit events before the (then
-//     stale) response arrives; with `listRejection` it rejects with that text;
+//     stale) response arrives; `holdLists(page)` starts the same holding mid-test (for a
+//     re-list after a download); with `listRejection` it rejects with that text;
 //   - `local_model_download { id }` records the call, then rejects with the next queued
 //     `FailureReason` (`queueDownloadRejection`; any payload, for a non-contract
 //     rejection too) and changes nothing, or sets the row to `downloading
@@ -46,10 +47,15 @@
 //     emits nothing; progress and the end state come from the download thread, which a
 //     test plays with `localModelProgress` / `localModelState`). The mock never
 //     validates (busy, already downloaded, disk space): a refusal is always scripted
-//     (decision #38);
-//   - `local_model_cancel_download { id }` returns true for a downloading row, sets it
-//     to `not_downloaded` and, after returning, emits `local-model://state` with
-//     `not_downloaded` (as the download thread does); otherwise it returns false;
+//     (decision #38). With `holdDownload`, every call is recorded at once and stays in
+//     flight until `releaseDownload()`; only then does it run (the scripted rejection or
+//     the state change above), so while it is held no row has changed (a pending invoke);
+//     the calls after the release run at once;
+//   - `local_model_cancel_download { id }` returns true for a downloading row and false
+//     otherwise. As in core, the row stays `downloading` when the command returns: the
+//     download thread records the cancel later, so the listed state becomes
+//     `not_downloaded` only at the `local-model://state { not_downloaded }` emit, which
+//     comes after the command returned (T-045 review r1 #8);
 //   - `localModelProgress(page, id, received)` and `localModelState(page, id, state)`
 //     update the list first, then emit, as core does (so a list after an event agrees
 //     with it).
@@ -215,6 +221,8 @@ export interface MockOptions {
   localModels?: LocalModelView[];
   /** Keep every `local_models_list` in flight until `releaseList` (recorded at once). */
   holdList?: boolean;
+  /** Keep every `local_model_download` in flight, not yet run, until `releaseDownload` (recorded at once). */
+  holdDownload?: boolean;
   /** `local_models_list` rejects with this text (recorded); the command cannot run. */
   listRejection?: string;
 }
@@ -230,6 +238,7 @@ interface InitArg {
   holdListen: string[];
   localModels: LocalModelView[];
   holdList: boolean;
+  holdDownload: boolean;
   listRejection: string | null;
   modelEvents: { progress: string; state: string };
 }
@@ -247,6 +256,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}): P
     holdListen: options.holdListen ?? [],
     localModels: options.localModels ?? localModelsFirstRun(),
     holdList: options.holdList ?? false,
+    holdDownload: options.holdDownload ?? false,
     listRejection: options.listRejection ?? null,
     modelEvents: { ...modelsFixture.event_names },
   };
@@ -275,6 +285,8 @@ export async function installTauriMock(page: Page, options: MockOptions = {}): P
       downloadRejections: [] as unknown[],
       holdingList: init.holdList,
       heldList: [] as (() => void)[],
+      holdingDownload: init.holdDownload,
+      heldDownload: [] as (() => void)[],
     };
 
     function setModelState(id: string, modelState: unknown): void {
@@ -362,6 +374,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}): P
           return snapshot;
         }
         case "local_model_download": {
+          if (state.holdingDownload) await new Promise<void>((resolve) => state.heldDownload.push(resolve));
           if (state.downloadRejections.length > 0) throw clone(state.downloadRejections.shift());
           const row = state.models.find((model) => model.id === args.id);
           if (row) row.state = { kind: "downloading", received: 0, total: row.sizeBytes };
@@ -374,9 +387,12 @@ export async function installTauriMock(page: Page, options: MockOptions = {}): P
             row !== undefined && (row.state as { kind?: unknown } | null)?.kind === "downloading";
           if (!running) return false;
           const cancelled = { kind: "not_downloaded" };
-          setModelState(id, cancelled);
-          // The download thread emits after the cancel returned.
-          setTimeout(() => emit(init.modelEvents.state, { id, state: cancelled }, "mock"), 0);
+          // The download thread records the cancel after the command returned: the listed
+          // state changes there, then the event is emitted (core service.rs `record`).
+          setTimeout(() => {
+            setModelState(id, cancelled);
+            emit(init.modelEvents.state, { id, state: cancelled }, "mock");
+          }, 0);
           return true;
         }
         case "plugin:window|destroy":
@@ -426,6 +442,13 @@ export async function installTauriMock(page: Page, options: MockOptions = {}): P
         state.holdingList = false;
         for (const resolve of state.heldList.splice(0)) resolve();
       },
+      holdLists: () => {
+        state.holdingList = true;
+      },
+      releaseDownload: () => {
+        state.holdingDownload = false;
+        for (const resolve of state.heldDownload.splice(0)) resolve();
+      },
       queueDownloadRejection: (payload: unknown) => state.downloadRejections.push(clone(payload)),
       progress: (id: string, received: number) => {
         const row = state.models.find((model) => model.id === id);
@@ -461,6 +484,8 @@ interface MockHandle {
   releaseGet: () => void;
   releaseListen: () => void;
   releaseList: () => void;
+  holdLists: () => void;
+  releaseDownload: () => void;
   queueDownloadRejection: (payload: unknown) => void;
   progress: (id: string, received: number) => void;
   modelState: (id: string, state: ModelState) => void;
@@ -555,6 +580,16 @@ export async function storedModels(page: Page): Promise<LocalModelView[]> {
 /** Answers every held `local_models_list` with the copy taken at its call, and stops holding. */
 export async function releaseList(page: Page): Promise<void> {
   await page.evaluate(() => (window as unknown as MockWindow).__VOICEN_MOCK__.releaseList());
+}
+
+/** From now on each `local_models_list` stays in flight until `releaseList` (its copy taken at the call). */
+export async function holdLists(page: Page): Promise<void> {
+  await page.evaluate(() => (window as unknown as MockWindow).__VOICEN_MOCK__.holdLists());
+}
+
+/** Runs every held `local_model_download` (see `holdDownload`), answers it, and stops holding. */
+export async function releaseDownload(page: Page): Promise<void> {
+  await page.evaluate(() => (window as unknown as MockWindow).__VOICEN_MOCK__.releaseDownload());
 }
 
 /**
