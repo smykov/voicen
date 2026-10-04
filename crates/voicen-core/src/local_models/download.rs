@@ -239,6 +239,11 @@ impl Downloader {
     /// `NotEnoughDiskSpace` (a probe error lets the download proceed, R-9), or
     /// `CannotStart` when the thread cannot be spawned; a refusal sends no
     /// request, emits no event and leaves no active slot. Retry = `start` again.
+    ///
+    /// `events` is called only on the download thread, never on the caller's thread
+    /// and never before `start` returns on it: `LocalModels::download` holds its
+    /// state lock across this call, and the callback takes that lock, so a call here
+    /// would deadlock it.
     pub fn start(
         &self,
         id: ModelId,
@@ -365,6 +370,10 @@ impl Job {
         if !matches!(end, End::Finished) {
             remove_part(&part);
         }
+        // The slot is free before the end event, so a new `start` of the same model
+        // can begin in the short gap before this event is handled; the coordinator
+        // then briefly shows this download's end state over the new one until the
+        // new download's first progress event (accepted, docs/decisions/model-download.md).
         guard.release();
         events(match end {
             End::Finished => DownloadEvent::Finished { id },

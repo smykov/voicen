@@ -47,12 +47,15 @@ Tasks: T-016 (core half), T-044 (coordinator and shell half). Contract: `specs/0
 
 - **What breaks if you violate it:** during a download or after a failure the list shows `not_downloaded` and loses the progress or the failure reason.
 - **Where it is enforced:** `LocalModels::list` takes the transient `Downloading`/`Failed` entry before the disk state. `Failed` keeps its reason until a retry; a new `open` forgets it. Test `local_models_service`.
-- **Don't:** derive the list from `ModelStore::states()` alone.
+- **Exception (T-044 review round 1 #1):** a `Failed` never hides a disk `Downloaded`. If the final file appears outside a download (a manual copy, a second instance), `list` shows `Downloaded` and drops the stale `Failed`; an `already_downloaded` refusal drops it too instead of restoring it. Otherwise the list says `failed`, Retry is refused, and `settings_save` accepts the model through the same store. Test `a_failed_never_hides_a_model_downloaded_on_disk_and_a_retry_does_not_bring_it_back`.
+- **Don't:** derive the list from `ModelStore::states()` alone, or let a transient `Failed` win over a disk `Downloaded`.
 
 ### Events are emitted after the state update, with no lock held (T-044)
 
 - **What breaks if you violate it:** events out of order, a list after an event that disagrees with it, or a deadlock (`emit` runs Rust `listen_any` handlers inline, and a handler that invokes a command takes the lock again).
 - **Where it is enforced:** every `local-model://` event comes only from the download thread's callback: update the transient map, release the lock, then emit. `LocalModels::download` holds the map lock across `start`, since core never calls the callback inside `start`, and restores the previous state on `Err`. The command itself emits nothing. Events go to the settings window only (`emit_to`); "only the settings window may listen" rests on decision #45's capability.
+- **Relies on:** `Downloader::start` never calls `events` on the caller's thread (stated in its doc); a call there would deadlock `download` on its own lock.
+- **Accepted gap (T-044 review round 1 #2):** `Job::run` frees the slot (`guard.release()`) before its end event, so a new `download` of the same model can start before the old end event is recorded. The old end state then overwrites the new `Downloading` (and its state event reaches the UI after the new start) until the new download's first progress event. If the new download already finished, a late `Failed` is hidden by the disk `Downloaded` rule above. The gap is a few statements long, the UI offers Retry only after the end event, and it cannot be tested deterministically; a per-start token that ignores superseded events is the fix if it ever matters.
 - **Don't:** emit inside the lock, or emit from the command.
 
 ### Every refusal maps to a contract code (T-044)

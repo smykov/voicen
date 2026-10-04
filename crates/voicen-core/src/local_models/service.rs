@@ -139,22 +139,49 @@ impl LocalModels {
     }
 
     /// Every catalog model in catalog order: the in-memory `Downloading` / `Failed`
-    /// state where one exists, otherwise the disk state.
+    /// state where one exists, otherwise the disk state. A `Failed` never hides a
+    /// model the disk says is downloaded (the store settings validation reads): the
+    /// view is `Downloaded` and the stale `Failed` is dropped.
     pub fn list(&self) -> Vec<LocalModelView> {
         let transient = lock(&self.transient).clone();
-        self.store
+        let mut stale = Vec::new();
+        let views = self
+            .store
             .catalog()
             .iter()
             .zip(self.store.states())
-            .map(|(entry, (id, disk_state))| LocalModelView {
-                id,
-                name_key: name_key(id),
-                size_bytes: entry.size_bytes,
-                recommended: entry.recommended,
-                state: transient.get(&id).cloned().unwrap_or(disk_state),
-                loaded: false,
+            .map(|(entry, (id, disk_state))| {
+                let state = match transient.get(&id) {
+                    Some(failed @ LocalModelState::Failed { .. })
+                        if disk_state == LocalModelState::Downloaded =>
+                    {
+                        stale.push((id, failed.clone()));
+                        disk_state
+                    }
+                    Some(state) => state.clone(),
+                    None => disk_state,
+                };
+                LocalModelView {
+                    id,
+                    name_key: name_key(id),
+                    size_bytes: entry.size_bytes,
+                    recommended: entry.recommended,
+                    state,
+                    loaded: false,
+                }
             })
-            .collect()
+            .collect();
+        if !stale.is_empty() {
+            let mut current = lock(&self.transient);
+            for (id, failed) in stale {
+                // Only the entry read above: a download started meanwhile keeps its
+                // `Downloading`.
+                if current.get(&id) == Some(&failed) {
+                    current.remove(&id);
+                }
+            }
+        }
+        views
     }
 
     /// `local_model_download { id }`. A refusal changes no state and never calls
@@ -181,9 +208,14 @@ impl LocalModels {
         match self.downloader.start(id, callback) {
             Ok(()) => Ok(()),
             Err(error) => {
+                // A refusal keeps the earlier state (a `Failed` keeps its reason),
+                // except `AlreadyDownloaded`: the disk has the model, so an earlier
+                // `Failed` is stale and is dropped.
                 match previous {
-                    Some(state) => transient.insert(id, state),
-                    None => transient.remove(&id),
+                    Some(state) if error != DownloadError::AlreadyDownloaded => {
+                        transient.insert(id, state)
+                    }
+                    _ => transient.remove(&id),
                 };
                 Err(ReasonView::from(&error))
             }
