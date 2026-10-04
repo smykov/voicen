@@ -170,7 +170,7 @@ check v-cargo-multiline-literal     1 "v-cargo-multiline-literal/Cargo.toml:9:" 
 # `rustdoc`, which build lib doctests whatever `doctest` says (cargo 1.99 unit_generator.rs:425-440).
 check v-workflow-doc                1 "v-workflow-doc/workflows/ci.yml:16:"          # cargo test -p voicen --doc
 check v-workflow-rustdoc            1 "v-workflow-rustdoc/workflows/release.yaml:14:" # cargo rustdoc -p voicen -- --test, in a *.yaml file
-# T-038 review round 1, finding 1: the Cargo.toml line tracker sees exactly TOML's lines.
+# T-038 review rounds 1-2, finding 1: the Cargo.toml line tracker accepts only a whitelist grammar.
 # (i) Every non-comment line is self-contained: [ ] and { } balance once single-line strings
 # and then the comment are removed, so no array or inline table element can pose as a header.
 check v-cargo-array-fake-lib          1 "v-cargo-array-fake-lib/Cargo.toml:10:"          # (a) x = [ / ["lib"] / ], doctest = false, no real [lib]
