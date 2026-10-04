@@ -10,9 +10,11 @@
 #![allow(dead_code)]
 
 pub mod download;
+#[cfg(test)]
+mod refused_addr_tests;
 
 use std::io::{self, Read, Write};
-use std::net::{Shutdown, TcpListener, TcpStream};
+use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -186,6 +188,14 @@ impl Server {
     pub fn accepts(&self) -> usize {
         self.accepts.load(Ordering::SeqCst)
     }
+}
+
+/// The one loopback address a test may expect to be refused (T-047, decision #53):
+/// a fixed port below the OS ephemeral range, so no `bind(0)` or `connect()` of a
+/// sibling test can be handed it, probed as refused at each use. Never a port that
+/// was bound and released. Tests: `refused_addr_tests.rs`.
+pub fn refused_addr() -> SocketAddr {
+    todo!("T-047: common::refused_addr")
 }
 
 pub fn url_for(port: u16, file: &str) -> String {
