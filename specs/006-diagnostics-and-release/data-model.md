@@ -72,10 +72,10 @@ Feature extensions: 001 contributes the `DictationRecord` fields and `ErrorArea`
 
 | Attribute | Rule |
 |---|---|
-| active file | `logs/voicen.log` |
-| roll | at ≥ 2 MB or local date change → `voicen-YYYYMMDD-HHMMSS.log` |
-| retention | at start and after each roll: delete rolled files older than 7 days, then oldest rolled while total `voicen*.log` > 10 MB; never the active file |
-| notify signal | `LogsUnwritable{reason}` at most once per process |
+| active file | `logs/voicen.log`, never larger than 2 MiB (`roll_bytes`) |
+| roll | before a line would make the active file larger than 2 MiB, or at the local date change → `voicen-YYYYMMDD-HHMMSS.log` (local time of the roll; `-1`, `-2`, … when the name is taken) |
+| retention | at start and after each roll: delete rolled `voicen-*.log` files older than 7 days (by modification time), then the oldest rolled files while the rolled files total more than 10 MiB − 2 MiB = 8 MiB (`total_bytes − roll_bytes`); never the active file or any other file. Rolled ≤ 8 MiB plus active ≤ 2 MiB keeps the whole set ≤ 10 MiB at every moment (T-008: the earlier wording, "delete while total `voicen*.log` > 10 MB" after a roll, let the rolled files keep 10 MB and the active file grow to 2 MB on top, 12 MB on disk) |
+| notify signal | `LogsUnwritable{reason}` at most once per `Log`, the one log of the process |
 
 ## SessionMarker (`logs/session.marker`)
 

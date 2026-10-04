@@ -48,8 +48,7 @@ pub struct RecordingId(u64);
 impl RecordingId {
     /// The number behind the id (T-008: the `rec=` of a dictation log line).
     pub fn get(self) -> u64 {
-        // Skeleton (T-008 red tests): not implemented yet.
-        todo!("T-008: RecordingId::get")
+        self.0
     }
 }
 

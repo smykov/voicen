@@ -1,6 +1,6 @@
 # voicen-core test network
 
-**Code:** `crates/voicen-core/tests/common/mod.rs` (`refused_addr()`, `REFUSAL_BUDGET`, `refused_timeouts()`), `crates/voicen-core/tests/common/refused_addr_tests.rs`, users: `tests/api_pipeline.rs`, `tests/openai_client.rs`, `tests/local_download_refused.rs`, `.github/workflows/ci.yml` (windows job, `--no-fail-fast`) · **Tests that pin it:** `refused_addr_tests::*` (port below the ephemeral range, loopback IPv4, refused by a connect probe within `REFUSAL_BUDGET / 2`, `refused_timeouts_leave_the_refusal_room_on_every_deadline`)
+**Code:** `crates/voicen-core/tests/common/mod.rs` (`refused_addr()`, `REFUSAL_BUDGET`, `refused_timeouts()`), `crates/voicen-core/tests/common/refused_addr_tests.rs`, users: `tests/api_pipeline.rs`, `tests/openai_client.rs`, `tests/diag_pipeline.rs` (T-008's redaction run; includes `refused_addr_tests.rs` and its refused scenario uses `refused_timeouts()`), `tests/local_download_refused.rs`, `.github/workflows/ci.yml` (windows job, `--no-fail-fast`) · **Tests that pin it:** `refused_addr_tests::*` (port below the ephemeral range, loopback IPv4, refused by a connect probe within `REFUSAL_BUDGET / 2`, `refused_timeouts_leave_the_refusal_room_on_every_deadline`)
 
 Tasks: T-016, T-047 (F-004), T-048 (F-005). Classes `test-port-race` and `windows-refused-connect-timing` in `docs/failures.md`. Decisions: #53, #56.
 

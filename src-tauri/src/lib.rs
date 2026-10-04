@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use tauri::{App, Builder, Context, RunEvent, Runtime};
 use voicen_core::autostart::Autostart;
-use voicen_core::diag::Log;
+use voicen_core::diag::{Log, LogEvent, WarningKind};
 use voicen_core::local_models::catalog::MODELS;
 use voicen_core::local_models::download::DiskSpace;
 use voicen_core::local_models::service::LocalModels;
@@ -41,10 +41,11 @@ fn commands<R: Runtime>(builder: Builder<R>) -> Builder<R> {
 }
 
 /// The one app wiring, shared by `run()` and the tests (T-030 J4): registers
-/// `commands`, manages `service` and `local_models`, builds the app with `context`,
-/// and starts the `settings://changed` bridge on the built app's handle. tauri 2.12.1 runs
-/// `.setup()` only from `run` / `run_iteration`, never from `build()`, so the bridge
-/// starts here, after `build()`; `run()` then only calls `.run(…)` on the result.
+/// `commands`, manages `service`, `local_models` and `log`, builds the app with
+/// `context`, and starts the `settings://changed` bridge on the built app's handle.
+/// tauri 2.12.1 runs `.setup()` only from `run` / `run_iteration`, never from
+/// `build()`, so the bridge starts here, after `build()`; `run()` then only calls
+/// `.run(…)` on the result.
 ///
 /// `local_models` is the one coordinator behind the local-model commands (T-044);
 /// its store is the one `run()` passed to `settings_ipc::load_settings`.
@@ -58,13 +59,12 @@ pub fn build_app<R: Runtime>(
     local_models: Arc<LocalModels>,
     log: Arc<Log>,
 ) -> tauri::Result<App<R>> {
-    // Skeleton (T-008 red tests): the log is not managed or used yet.
-    let _ = log;
     let app = commands(builder)
         .manage(service.clone())
         .manage(local_models)
+        .manage(log.clone())
         .build(context)?;
-    settings_ipc::spawn_change_bridge(app.handle().clone(), service);
+    settings_ipc::spawn_change_bridge(app.handle().clone(), service, &log);
     Ok(app)
 }
 
@@ -118,10 +118,20 @@ fn release_launched_by_autostart() -> bool {
     )
 }
 
+/// The OS code of a tauri error that is an I/O error; `None` otherwise (the text
+/// of a tauri error is never logged).
+fn io_os_code(err: &tauri::Error) -> Option<i32> {
+    match err {
+        tauri::Error::Io(io) => io.raw_os_error(),
+        _ => None,
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // Skeleton (T-008 red tests): the one log, Started first (diag::start); the
-    // stderr lines below become typed warnings on it.
+    // The one log (T-008), Started first; every later diagnostic is a typed line on
+    // it. The unwritable callback is T-054's one-time notice; until then the log
+    // only degrades.
     let log = diag::start(paths::log_dir(), Box::new(|_| {}));
     // The one LocalModels (T-044): its `.part` cleanup runs inside `open`, before
     // any list or settings validation reads the models dir.
@@ -131,10 +141,13 @@ pub fn run() {
         Timeouts::default(),
         MODELS,
     );
-    if cleanup.is_err() {
-        // Fixed text, no error detail (no path or OS text; the #45 interim until
-        // T-008's log). The app runs on; the leftover is never read as a model.
-        eprintln!("cannot remove unfinished model downloads at start");
+    if let Err(err) = cleanup {
+        // The kind and the OS code only, no path or OS text (#45). The app runs on;
+        // the leftover is never read as a model.
+        log.write(LogEvent::Warning {
+            kind: WarningKind::ModelsCleanupFailed,
+            os_code: err.raw_os_error(),
+        });
     }
     let local_models = Arc::new(local_models);
     let os_language = locale::os_language();
@@ -147,6 +160,7 @@ pub fn run() {
         &log,
     );
     let launched_by_autostart = release_launched_by_autostart();
+    let window_log = Arc::clone(&log);
     build_app(
         tauri::Builder::default(),
         tauri::generate_context!(),
@@ -158,10 +172,13 @@ pub fn run() {
     .run(move |app, event| {
         // The one startup window decision (S1): Ready fires once.
         if let RunEvent::Ready = event {
-            if settings_window::on_ready(app, &load_outcome, launched_by_autostart).is_err() {
-                // Fixed text, no error detail (decision #45; the #38 interim until
-                // T-006's tray and T-008's log).
-                eprintln!("cannot open the settings window at start");
+            if let Err(err) = settings_window::on_ready(app, &load_outcome, launched_by_autostart) {
+                // The kind and, for an I/O error, the OS code only (decision #45);
+                // the user-facing path is T-006's tray.
+                window_log.write(LogEvent::Warning {
+                    kind: WarningKind::SettingsWindowFailed,
+                    os_code: io_os_code(&err),
+                });
             }
         }
     });

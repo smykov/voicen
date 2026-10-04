@@ -61,7 +61,7 @@ jobs:
       - run: cargo test --workspace --exclude voicen --no-fail-fast
       - run: cargo test -p voicen --no-fail-fast
       - run: pnpm tauri build
-      - name: Install silently, launch, check the start log line, the first-run settings.json, the Run value and the settings window
+      - name: Install silently, launch, check the start, settings-load and reconcile log lines, the first-run settings.json, the Run value and the settings window
         shell: pwsh
         run: |
           . ./scripts/ci/visible-windows.ps1
@@ -81,11 +81,21 @@ jobs:
           $run = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
           New-ItemProperty -Path $run -Name 'Voicen' -PropertyType String -Value '"C:\stale\voicen.exe" --autostart' -Force | Out-Null
           $proc = Start-Process -FilePath $exe -PassThru
-          $log = Join-Path $env:LOCALAPPDATA 'Voicen\logs\voicen.log'
+          # T-008: voicen.log plus any rolled voicen-*.log (a run crossing local midnight
+          # rolls the file). The app keeps voicen.log open; Select-String and Get-Content
+          # read it with shared access.
+          $logs = Join-Path $env:LOCALAPPDATA 'Voicen\logs\voicen*.log'
+          function Test-LogLine([string]$text) { (Test-Path $logs) -and (@(Select-String -Path $logs -SimpleMatch $text).Count -gt 0) }
           # First launch writes the defaults through SettingsService (T-030, decision #34).
           $settings = Join-Path $env:LOCALAPPDATA 'Voicen\settings.json'
           $expected = "($env:VOICEN_COMMIT) started"
+          # T-008 (spec 004 R-11): load_settings logs the load outcome, then the reconcile
+          # action; a first run with the leftover Run value is first_run, then removed.
+          $loadLine = 'settings load outcome=first_run'
+          $reconcileLine = 'autostart reconcile action=removed'
           $found = $false
+          $loaded = $false
+          $reconciled = $false
           $hasSettings = $false
           $runGone = $false
           # T-037 (S1): FirstRun opens the settings window: exactly one shown window, titled
@@ -94,9 +104,11 @@ jobs:
           # Process.MainWindowHandle cannot tell (scripts/ci/visible-windows.ps1).
           $win = $false
           $seen = 'no process'
-          for ($i = 0; $i -lt 30 -and -not ($found -and $hasSettings -and $runGone -and $win); $i++) {
+          for ($i = 0; $i -lt 30 -and -not ($found -and $loaded -and $reconciled -and $hasSettings -and $runGone -and $win); $i++) {
             Start-Sleep -Seconds 1
-            $found = (Test-Path $log) -and (Select-String -Path $log -SimpleMatch $expected -Quiet)
+            $found = Test-LogLine $expected
+            $loaded = Test-LogLine $loadLine
+            $reconciled = Test-LogLine $reconcileLine
             $hasSettings = Test-Path -LiteralPath $settings -PathType Leaf
             $runGone = $null -eq (Get-ItemProperty -Path $run -Name 'Voicen' -ErrorAction SilentlyContinue)
             if ($proc.HasExited) { $seen = 'process exited'; $win = $false; continue }
@@ -105,8 +117,11 @@ jobs:
             $win = $shown.Count -eq 1 -and $shown[0].Title -ceq 'Voicen'
           }
           Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
-          if (-not $found) { if (Test-Path $log) { Get-Content $log }; throw "start log line with commit $env:VOICEN_COMMIT not found" }
-          Get-Content $log
+          if (-not $found) { if (Test-Path $logs) { Get-Content $logs }; throw "start log line with commit $env:VOICEN_COMMIT not found" }
+          Get-Content $logs
+          if (-not $loaded) { throw "log line '$loadLine' not found after the first launch" }
+          if (-not $reconciled) { throw "log line '$reconcileLine' not found after the first launch" }
+          Write-Output "found the start, '$loadLine' and '$reconcileLine' log lines"
           if (-not $hasSettings) { throw "settings.json not found at $settings after the first launch" }
           $engine = (Get-Content -LiteralPath $settings -Raw | ConvertFrom-Json).engine
           if ($engine -ne 'none') { throw "first-run settings.json has engine '$engine', expected 'none'" }
@@ -151,7 +166,8 @@ jobs:
           . ./scripts/ci/visible-windows.ps1
           $exe = Join-Path $env:LOCALAPPDATA 'Voicen\voicen.exe'
           $settings = Join-Path $env:LOCALAPPDATA 'Voicen\settings.json'
-          $log = Join-Path $env:LOCALAPPDATA 'Voicen\logs\voicen.log'
+          # voicen.log plus rolled voicen-*.log: a run crossing local midnight rolls the file (T-008).
+          $log = Join-Path $env:LOCALAPPDATA 'Voicen\logs\voicen*.log'
           $expected = "($env:VOICEN_COMMIT) started"
           if (-not (Test-Path -LiteralPath $settings -PathType Leaf)) { throw "settings.json not found at $settings before the loaded launch" }
           function Get-StartCount { if (Test-Path $log) { @(Select-String -Path $log -SimpleMatch $expected).Count } else { 0 } }
@@ -178,7 +194,8 @@ jobs:
         shell: pwsh
         run: |
           $exe = Join-Path $env:LOCALAPPDATA 'Voicen\voicen.exe'
-          $log = Join-Path $env:LOCALAPPDATA 'Voicen\logs\voicen.log'
+          # voicen.log plus rolled voicen-*.log: a run crossing local midnight rolls the file (T-008).
+          $log = Join-Path $env:LOCALAPPDATA 'Voicen\logs\voicen*.log'
           $models = Join-Path $env:LOCALAPPDATA 'Voicen\models'
           $part = Join-Path $models 'ggml-base.bin.part'
           $expected = "($env:VOICEN_COMMIT) started"

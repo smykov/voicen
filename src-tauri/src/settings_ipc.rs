@@ -11,11 +11,12 @@
 //!   and differ only in the injected credential store, autostart entry and data
 //!   dir; it reconciles the autostart entry right after the load (T-014).
 //!
-//! The only output here is one `eprintln!` in [`spawn_change_bridge`] when the OS
-//! refuses to start its thread: a fixed text plus the `std::io::Error`, to stderr
-//! (which goes nowhere in a windowed release build until T-008's log exists). No
-//! key, transcript, settings value or base URL is printed or logged from this module
-//! (docs/decisions/settings.md).
+//! The only output here goes to the one log as typed lines (T-008, spec 004 R-11):
+//! the load outcome and the reconcile action from [`load_settings`], one save line
+//! per [`settings_save`] (outcome, field ids and codes), and a `change_bridge_failed`
+//! warning with the OS code when [`spawn_change_bridge`] cannot start its thread. No
+//! key, transcript, settings value or base URL can reach a line: the events have no
+//! field for one (docs/decisions/settings.md, docs/decisions/diagnostics-log.md).
 
 use std::path::PathBuf;
 use std::sync::{Arc, Weak};
@@ -23,7 +24,7 @@ use std::sync::{Arc, Weak};
 use tauri::{AppHandle, Emitter, Runtime, State};
 use voicen_core::autostart::Autostart;
 use voicen_core::clock::SystemClock;
-use voicen_core::diag::Log;
+use voicen_core::diag::{Log, LogEvent, WarningKind};
 use voicen_core::hotkey_registrar::{HotkeyRegistrar, Prepared, Unavailable};
 use voicen_core::local_models::store::ModelStore;
 use voicen_core::secrets::CredentialStore;
@@ -47,7 +48,8 @@ pub const SETTINGS_CHANGED: &str = "settings://changed";
 ///
 /// `log` is the one log (`diag::start`, T-008): after the load it gets the
 /// `settings load outcome=..` line, after the reconcile the `autostart reconcile
-/// action=..` line (spec 004 R-11), so a start writes Started, then these two.
+/// action=..` line (spec 004 R-11), so a start writes Started, then these two. No
+/// value of the outcome (settings, backup file name) reaches the log.
 pub fn load_settings(
     data_dir: PathBuf,
     credentials: Arc<dyn CredentialStore>,
@@ -56,8 +58,6 @@ pub fn load_settings(
     os_language: Option<&str>,
     log: &Log,
 ) -> (Arc<SettingsService>, LoadOutcome) {
-    // Skeleton (T-008 red tests): the load and reconcile lines are not written yet.
-    let _ = log;
     let deps = SettingsDeps {
         file: Arc::new(FsSettingsFile::new(data_dir)),
         credentials,
@@ -67,9 +67,10 @@ pub fn load_settings(
         clock: Arc::new(SystemClock),
     };
     let (service, outcome) = SettingsService::load_or_init(deps, os_language);
+    log.write(LogEvent::settings_load(&outcome));
     // R-5: the Run value follows the saved setting (no call while Unavailable). The
-    // action is for T-008's start log (R-11); nothing else depends on it.
-    let _reconciled = service.reconcile_autostart();
+    // action goes to the start log (R-11); nothing else depends on it.
+    log.write(LogEvent::AutostartReconcile(service.reconcile_autostart()));
     (Arc::new(service), outcome)
 }
 
@@ -80,8 +81,13 @@ pub fn load_settings(
 /// missed. The thread holds the service only weakly, but the `AppHandle` it owns
 /// keeps the managed service alive, so in practice the thread lives as long as the
 /// app (the process). An emit error is ignored: it never turns a `Saved` into a
-/// failure. A failed thread spawn prints one line to stderr (see the module doc).
-pub fn spawn_change_bridge<R: Runtime>(app: AppHandle<R>, service: Arc<SettingsService>) {
+/// failure. A failed thread spawn writes one `change_bridge_failed` warning with the
+/// OS code to `log` (never the error text).
+pub fn spawn_change_bridge<R: Runtime>(
+    app: AppHandle<R>,
+    service: Arc<SettingsService>,
+    log: &Log,
+) {
     let changes = service.subscribe();
     let service: Weak<SettingsService> = Arc::downgrade(&service);
     let spawned = std::thread::Builder::new()
@@ -95,7 +101,10 @@ pub fn spawn_change_bridge<R: Runtime>(app: AppHandle<R>, service: Arc<SettingsS
             }
         });
     if let Err(err) = spawned {
-        eprintln!("cannot start the settings change bridge: {err}");
+        log.write(LogEvent::Warning {
+            kind: WarningKind::ChangeBridgeFailed,
+            os_code: err.raw_os_error(),
+        });
     }
 }
 
@@ -106,13 +115,17 @@ pub fn settings_get(service: State<'_, Arc<SettingsService>>) -> SettingsView {
 }
 
 /// `settings_save { request }` → `SaveOutcome`. Runs off the main thread: a save
-/// is up to nine credential calls and a file write.
+/// is up to nine credential calls and a file write. Every outcome writes one
+/// `settings save` line to the managed log (T-008; field ids and codes only).
 #[tauri::command(async)]
 pub fn settings_save(
     service: State<'_, Arc<SettingsService>>,
+    log: State<'_, Arc<Log>>,
     request: SaveRequest,
 ) -> SaveOutcome {
-    service.save(request)
+    let outcome = service.save(request);
+    log.write(LogEvent::settings_save(&outcome));
+    outcome
 }
 
 /// `settings_speech_languages` → core's `WHISPER_ISO_639_1`, in core order (#30).

@@ -151,6 +151,16 @@ pub enum FormError {
 }
 
 impl FormError {
+    /// The wire kind (`write_failed` | `settings_unavailable` | `partially_restored`),
+    /// the one spelling of the wire form and the log's `form_error=` (T-008).
+    pub fn kind(&self) -> &'static str {
+        match self {
+            FormError::WriteFailed => "write_failed",
+            FormError::SettingsUnavailable => "settings_unavailable",
+            FormError::PartiallyRestored { .. } => "partially_restored",
+        }
+    }
+
     pub fn message_id(&self) -> MessageId {
         match self {
             FormError::WriteFailed => SETTINGS_WRITE_FAILED,
@@ -167,16 +177,13 @@ impl FormError {
 impl Serialize for FormError {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
-        let (kind, not_restored) = match self {
-            FormError::WriteFailed => ("write_failed", None),
-            FormError::SettingsUnavailable => ("settings_unavailable", None),
-            FormError::PartiallyRestored { not_restored } => {
-                ("partially_restored", Some(not_restored))
-            }
+        let not_restored = match self {
+            FormError::WriteFailed | FormError::SettingsUnavailable => None,
+            FormError::PartiallyRestored { not_restored } => Some(not_restored),
         };
         let len = if not_restored.is_some() { 3 } else { 2 };
         let mut state = serializer.serialize_struct("FormError", len)?;
-        state.serialize_field("kind", kind)?;
+        state.serialize_field("kind", self.kind())?;
         state.serialize_field("message", &self.message_id())?;
         if let Some(fields) = not_restored {
             state.serialize_field("not_restored", fields)?;

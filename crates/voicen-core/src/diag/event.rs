@@ -37,17 +37,26 @@ impl LogEvent {
     /// The load line of `outcome`; the backup file name and the settings are
     /// dropped.
     pub fn settings_load(outcome: &LoadOutcome) -> LogEvent {
-        // Skeleton (T-008 red tests): not implemented yet.
-        let _ = outcome;
-        todo!("T-008: LogEvent::settings_load")
+        LogEvent::SettingsLoad(match outcome {
+            LoadOutcome::Loaded(_) => LoadKind::Loaded,
+            LoadOutcome::FirstRun(_) => LoadKind::FirstRun,
+            LoadOutcome::Reset { .. } => LoadKind::Reset,
+            LoadOutcome::Unavailable(_) => LoadKind::Unavailable,
+        })
     }
 
     /// The save line of `outcome`; the view (settings values, key presence) is
     /// dropped, only warnings, field errors and the form error are kept.
     pub fn settings_save(outcome: &SaveOutcome) -> LogEvent {
-        // Skeleton (T-008 red tests): not implemented yet.
-        let _ = outcome;
-        todo!("T-008: LogEvent::settings_save")
+        LogEvent::SettingsSave(match outcome {
+            SaveOutcome::Saved { view: _, warnings } => SaveLine::Saved {
+                warnings: warnings.clone(),
+            },
+            SaveOutcome::Refused { errors, form_error } => SaveLine::Refused {
+                errors: errors.clone(),
+                form_error: form_error.clone(),
+            },
+        })
     }
 }
 
@@ -133,10 +142,15 @@ pub enum EngineTag {
 }
 
 impl EngineTag {
+    /// Exact match on the whole string; anything else (a near miss, an injected
+    /// `key=value`, the empty string) is `Other`.
     pub fn from_kind(kind: &str) -> EngineTag {
-        // Skeleton (T-008 red tests): not implemented yet.
-        let _ = kind;
-        todo!("T-008: EngineTag::from_kind")
+        match kind {
+            "api" => EngineTag::Api,
+            "builtin" => EngineTag::Builtin,
+            "local_server" => EngineTag::LocalServer,
+            _ => EngineTag::Other,
+        }
     }
 }
 
@@ -149,10 +163,13 @@ pub enum DetectorTag {
 }
 
 impl DetectorTag {
+    /// Exact match on the whole string; anything else is `Other`.
     pub fn from_name(name: &str) -> DetectorTag {
-        // Skeleton (T-008 red tests): not implemented yet.
-        let _ = name;
-        todo!("T-008: DetectorTag::from_name")
+        match name {
+            "silero" => DetectorTag::Silero,
+            "energy" => DetectorTag::Energy,
+            _ => DetectorTag::Other,
+        }
     }
 }
 
@@ -173,9 +190,22 @@ pub enum FailureTag {
 }
 
 impl FailureTag {
+    /// Exact match on `FailureReason::code()`'s spellings; anything else is
+    /// `Other`. `tests/diag_format.rs` pins one tag per reason, so a new reason or
+    /// a renamed code fails there instead of logging `other`.
     pub fn from_code(code: &str) -> FailureTag {
-        // Skeleton (T-008 red tests): not implemented yet.
-        let _ = code;
-        todo!("T-008: FailureTag::from_code")
+        match code {
+            "InvalidApiKey" => FailureTag::InvalidApiKey,
+            "NetworkUnavailable" => FailureTag::NetworkUnavailable,
+            "CannotReach" => FailureTag::CannotReach,
+            "Timeout" => FailureTag::Timeout,
+            "ServerError" => FailureTag::ServerError,
+            "UnexpectedResponse" => FailureTag::UnexpectedResponse,
+            "KeyStoreUnavailable" => FailureTag::KeyStoreUnavailable,
+            "EngineNotConfigured" => FailureTag::EngineNotConfigured,
+            "ClipboardUnavailable" => FailureTag::ClipboardUnavailable,
+            "MicrophoneUnavailable" => FailureTag::MicrophoneUnavailable,
+            _ => FailureTag::Other,
+        }
     }
 }

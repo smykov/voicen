@@ -39,8 +39,8 @@ Tasks: T-003, T-032, T-030, T-014, T-004 (`SettingsView.unavailable`, the e2e wi
 
 - **Defect that produced it:** none yet (found in T-003 review round 1, decision #27(2)). A base URL such as `https://user:secret@host/v1` is well-formed, so it passed `url.malformed` and would have been stored in `settings.json` and sent to logs and windows.
 - **What breaks if you violate it:** key bytes in the settings file, a `SettingsView` or a log line, bypassing the credential store (NFR-04, FR-20). Limit: this closes `user:pass@` only. A query string is allowed (#27(2)) and stored as typed, so a key placed in a query would be stored in `settings.json`.
-- **Where it is enforced:** `settings::url::check_base_url` returns `UrlError::Credentials` for a non-empty username or password, and `validate` maps it to `url.credentials`; a query string is allowed and stored as typed. "Never logged" is not enforced yet: T-008 owns it through the log allowlist (#30).
-- **Don't:** accept userinfo in a base URL, strip it silently, or log a base URL with its query (until T-008 lands, no code path may log a base URL at all).
+- **Where it is enforced:** `settings::url::check_base_url` returns `UrlError::Credentials` for a non-empty username or password, and `validate` maps it to `url.credentials`; a query string is allowed and stored as typed. "Never logged" is the log's typed allowlist (T-008, #30): no `LogEvent` has a field for a URL, host or settings value; the settings lines carry the outcome, field ids and codes only (`diag::LogEvent::settings_load` / `settings_save`, pinned by `tests/settings_log.rs` and the redaction run `tests/diag_pipeline.rs`; docs/decisions/diagnostics-log.md).
+- **Don't:** accept userinfo in a base URL, strip it silently, or log a base URL in any form (no `LogEvent` field may hold one; T-008).
 
 ### One language list
 

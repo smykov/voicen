@@ -27,10 +27,11 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 # Credential Manager (T-030, spec 004 T016), the OS UI language (spec 004 T049),
-# the HKCU Run value (T-014, spec 004 T057) and the models dir free space (T-044).
+# the HKCU Run value (T-014, spec 004 T057), the models dir free space (T-044) and
+# the local UTC offset of the log's timestamps (T-008, Win32_System_Time).
 # Already in Cargo.lock via tao/wry (0.62.2): feature flags only, no new crate (#9).
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Security_Credentials", "Win32_Globalization", "Win32_System_Registry", "Win32_Storage_FileSystem"] }
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Security_Credentials", "Win32_Globalization", "Win32_System_Registry", "Win32_Storage_FileSystem", "Win32_System_Time"] }
 
 # Test-only (T-030 J4): never in the release dependency graph.
 [dev-dependencies]

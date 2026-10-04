@@ -45,8 +45,9 @@ pub fn utc_compact(t: SystemTime) -> String {
 
 /// Days since 1970-01-01 -> proleptic Gregorian (year, month, day): the
 /// days-from-civil inverse (H. Hinnant, "chrono-Compatible Low-Level Date
-/// Algorithms"), for non-negative day counts only.
-fn civil_from_days(days: u64) -> (u64, u64, u64) {
+/// Algorithms"), for non-negative day counts only. Also the date math of the log's
+/// local timestamps (`diag::format`, T-008).
+pub(crate) fn civil_from_days(days: u64) -> (u64, u64, u64) {
     let z = days + 719_468; // days since 0000-03-01
     let era = z / 146_097;
     let doe = z - era * 146_097; // [0, 146096]

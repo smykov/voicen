@@ -83,7 +83,7 @@ The stack is fixed by `docs/requirements.md` §9 (Tauri 2, Rust 1.99, `windows` 
 
 ## R-11 Logging without values (req FR-20, NFR-04; spec FR-021)
 
-- **Decision**: Settings log lines carry an allowlist of fields only: `settings load outcome=<loaded|first_run|reset>`, `settings save outcome=<ok|refused|failed> changed=<field ids> errors=<field ids:codes> warnings=<codes>`, `settings test_connection result=<ok|cannot_reach|invalid_key|timeout|http_<n>|unexpected> latency_ms=<n>`, `autostart reconcile action=<none|written|removed|failed>`. No values, no URLs, no hosts. Log writing itself is 006's.
+- **Decision**: Settings log lines carry an allowlist of fields only: `settings load outcome=<loaded|first_run|reset>`, `settings save outcome=<ok|refused|failed> changed=<field ids> errors=<field ids:codes> warnings=<codes>`, `settings test_connection result=<ok|cannot_reach|invalid_key|timeout|http_<n>|unexpected> latency_ms=<n>`, `autostart reconcile action=<none|written|removed|failed>`. No values, no URLs, no hosts. Log writing itself is 006's. *(T-008, decision #64: `changed=<field ids>` is not logged, `SaveOutcome` has no changed list; the save line is `outcome=<ok|refused|failed> [warnings=<field id:code,…>] [errors=<field id:code,…>] [form_error=<kind>] [not_restored=<field ids>]`, with `failed` for `write_failed` / `partially_restored`; the load outcome also has `unavailable`; `test_connection` is not logged yet.)*
 - **Rationale**: P-009 — the line format is the allowlist; field ids are the same strings as in `FieldError`.
 - **Alternatives**: structured logging of the settings struct with redaction (one forgotten field leaks the prompt or a URL with credentials).
 
