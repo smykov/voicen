@@ -193,13 +193,14 @@
     };
     (async () => {
       try {
-        // Listen first, so a save from elsewhere between the two calls is not lost.
+        // Every listener before settings_get: a save from elsewhere in between is not
+        // lost; a focus request sent while the page loads waits for the draft (the
+        // focus effect) and replaces the URL's; and no draft is ever editable without
+        // the close guard. While the draft is null onClose prevents nothing.
         keep(await onSettingsChanged(receive));
-        receive(await getSettings());
-        // The URL's request is pending in focusRequest already; this is the open page's.
         keep(await onFocusRequest((request) => requestFocus(request.tab, request.field)));
-        // Until this listener exists the shell does not prevent the close (nothing to lose).
         keep(await onCloseRequested(onClose));
+        receive(await getSettings());
       } catch {
         ipcFailed = true;
       }

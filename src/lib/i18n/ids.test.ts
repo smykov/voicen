@@ -30,7 +30,7 @@ function typeLevelOnly(): void {
   // @ts-expect-error -- a string-typed renderer would render the raw id "settings.typo"
   i18n.tWire("settings.typo");
 
-  // T-039 (red until text moves to render.ts and is no longer re-exported).
+  // The shared lookup + render rule is internal to the module, not a public renderer.
   // @ts-expect-error -- text() takes any string id; it is internal to the i18n module
   i18n.text({ en: {}, ru: {} }, "en", "settings.typo");
 
