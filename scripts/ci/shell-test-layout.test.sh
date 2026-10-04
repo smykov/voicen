@@ -2,7 +2,9 @@
 # T-035 guard of the guard (review round 1, findings 1 and 2): scripts/ci/shell-test-layout.sh
 # must give the documented exit code on every committed fixture shell dir under
 # scripts/ci/fixtures/shell-test-layout/<case>/ (each mimics src-tauri: src/, Cargo.toml,
-# optional tests/, benches/, examples/). Without this, a weakened regex or awk branch keeps
+# optional tests/, benches/, examples/, and workflows/ standing in for .github/workflows).
+# The guard gets the case's workflows/ as its 2nd argument, or an empty dir when the case has
+# none, so the real .github/workflows never decides a case. Without this, a weakened regex or awk branch keeps
 # `make check` green, because the real src-tauri has no violation to catch.
 #
 #   ok-*  allowed shapes: exit 0, and the guard prints "ok:".
@@ -13,6 +15,13 @@
 # match) and runs the real tool otherwise, so the guard gets past the earlier scans and
 # reaches that scan's own error branch.
 # Every fixture dir must appear in the table below, so a case cannot be dropped silently.
+#
+# T-038 (rca, supersedes decision #39): the guard no longer reads doc comments; it pins the
+# two cargo switches that can turn a doc block into an exe instead ([lib] doctest = false in
+# Cargo.toml, no --doc / rustdoc in the workflows). The 25 doc-shape fixture dirs of T-035/T-036
+# were removed on purpose, as a contract change and not a weakened case: their sources and
+# the b8b0b81 probes live on in ok-doc-text, which must pass, and every remaining Cargo.toml
+# carries the pinned `doctest = false` so each case passes or fails for its own reason only.
 #
 # Usage: scripts/ci/shell-test-layout.test.sh
 # Exit 0: every case as expected. Exit 1: a case differs (listed). Exit 3: cannot run.
@@ -46,18 +55,30 @@ selective find-rs find "*'*.rs'*"
 # or an awk reading Cargo.toml (the source lexer reads only *.rs files).
 selective cargo-path grep "*Cargo.toml*path*|*path*Cargo.toml*"
 selective cargo-path awk "*Cargo.toml*"
+# workflow-grep: only the scan of the workflows dir fails: its arguments name the dir, and no
+# other call of the guard does on the case it runs on (ok-current-shape: no `workflows` in
+# its shell path).
+selective workflow-grep grep "*workflows*"
 
 failed=0
 passed=0
 declare -A seen=()
-# check <case-or-path> <expected exit> <substring the output must contain> [failing tool] [dir]
+# Workflows dir for a case without workflows/: empty, so a clean case passes the workflow scan.
+no_workflows="$shims/no-workflows"
+mkdir -p "$no_workflows" || { echo "shell-test-layout.test: cannot run: mkdir $no_workflows failed" >&2; exit 3; }
+# check <case-or-path> <expected exit> <substring the output must contain> [failing tool] [dir] [workflows]
 # dir: run the guard on this shell dir instead of $fx/<case> (a prepared copy of the case).
+# workflows: the guard's 2nd argument; default <dir>/workflows if it exists, else an empty dir.
 check() {
-  local case="$1" want="$2" needle="$3" tool="${4:-}" dir="${5:-$fx/$1}" out got path_env
+  local case="$1" want="$2" needle="$3" tool="${4:-}" dir="${5:-$fx/$1}" wf="${6:-}" out got path_env
   seen["$case"]=1
+  if [ -z "$wf" ]; then
+    wf="$no_workflows"
+    [ -d "$dir/workflows" ] && wf="$dir/workflows"
+  fi
   path_env="$PATH"
   [ -n "$tool" ] && path_env="$shims/$tool:$PATH"
-  out="$(PATH="$path_env" "$guard" "$dir" 2>&1)"
+  out="$(PATH="$path_env" "$guard" "$dir" "$wf" 2>&1)"
   got=$?
   local label="$case${tool:+ (failing $tool)}"
   if [ "$got" -ne "$want" ]; then
@@ -75,8 +96,8 @@ check() {
 }
 
 # Allowed: exit 0.
-check ok-current-shape          0 "ok:"   # cfg(windows), cfg(not(windows)), tauri::command, cfg_attr(mobile, ...), tests/*.rs with #[test]
-check ok-text-fence             0 "ok:"   # ```text in /// and //!
+check ok-current-shape          0 "ok:"   # cfg(windows), cfg(not(windows)), tauri::command, cfg_attr(mobile, ...), tests/*.rs with #[test]; doctest comments, `  doctest = false   # ..`; workflows/ci.yml mirror
+check ok-doc-text               0 "ok:"   # T-038: every removed doc-shape fixture and b8b0b81 probe, code-looking text in ///, //!, /** */, /*! */, #[doc = ..], #![doc = include_str!(..)]
 check ok-feature-test           0 "ok:"   # cfg(feature = "test"), cfg_attr(feature = "test", ...)
 check ok-quad-slash             0 "ok:"   # //// fence and indented block: plain comment
 check ok-plain-comment-attr     0 "ok:"   # // #[test], // #[cfg(test)], trailing // comment naming them
@@ -91,35 +112,18 @@ check v-test-attr               1 "v-test-attr/src/lib.rs"
 check v-test-attr-indented      1 "v-test-attr-indented/src/lib.rs"
 check v-path-test-attr          1 "v-path-test-attr/src/lib.rs"
 check v-test-case-attr          1 "v-test-case-attr/src/lib.rs"
-check v-fence-bare              1 "v-fence-bare/src/lib.rs"
-check v-fence-rust              1 "v-fence-rust/src/lib.rs"
-check v-fence-tilde             1 "v-fence-tilde/src/lib.rs"
-check v-inner-doc-fence         1 "v-inner-doc-fence/src/lib.rs"
-check v-doc-include-str         1 "v-doc-include-str/src/lib.rs"
 check v-benches-dir             1 "v-benches-dir/benches"
 check v-examples-dir            1 "v-examples-dir/examples"
 check v-bench-target            1 "v-bench-target/Cargo.toml"
 check v-example-target          1 "v-example-target/Cargo.toml"
-# Review round 1, finding 1: shapes rustdoc/rustc accept that the guard must also refuse.
-check v-doc-indented-block       1 "v-doc-indented-block/src/lib.rs"        # (a) 4-space block after a blank ///
-check v-inner-doc-indented-block 1 "v-inner-doc-indented-block/src/lib.rs"  # (a) same in //!
-check v-block-doc-fence          1 "v-block-doc-fence/src/lib.rs"           # (b) fence in /** */
-check v-block-inner-doc-fence    1 "v-block-inner-doc-fence/src/lib.rs"     # (b) fence in /*! */
-check v-doc-attr-fence           1 "v-doc-attr-fence/src/lib.rs"            # (c) #[doc = "```"]
+# Review round 1, finding 1 (d), (e): attribute shapes rustc accepts that the guard must also refuse.
 check v-cfg-test-multiline       1 "v-cfg-test-multiline/src/lib.rs"        # (d) #[cfg(\n test\n)]
 check v-cfg-all-test-multiline   1 "v-cfg-all-test-multiline/src/lib.rs"    # (d) #[cfg(all(\n windows,\n test\n))]
 check v-test-after-code          1 "v-test-after-code/src/lib.rs"           # (e) mod t { #[test] fn a() {} }
 check v-cfg-test-after-code      1 "v-cfg-test-after-code/src/lib.rs"       # (e) code; #[cfg(test)] mod t {}
 check v-test-hash-space          1 "v-test-hash-space/src/lib.rs"           # (e) # [test]: rustc allows space after #
 
-# T-036 (T-035 review round 2). (1) Doc list and quote shapes. A list continuation or nested
-# list at 4+ columns is not a doctest, but it stays refused (the guard tracks no list
-# context) with a message saying how to indent it; a list or quote marker followed by 5+
-# columns starts an indented code block inside the item or quote: a doctest.
-check v-doc-list-continuation     1 "continues a list item"                      # P1 + P2: the note names the list case
-check ok-doc-list-continuation    0 "ok:"                                        # continuations at 2 / 3 columns, nested list at 2
-check v-doc-list-marker-code      1 "v-doc-list-marker-code/src/lib.rs:3:"       # P3: `-     code`
-check v-doc-quote-code            1 "v-doc-quote-code/src/lib.rs:3:"             # P4: `>     code`
+# T-036 (T-035 review round 2). (1) Doc list and quote shapes: removed by T-038 (header).
 # (2) Lexer states: each case changes exit code when its lexer branch is deleted.
 check ok-literals                 0 "ok:"                                        # strings, escapes, raw/byte/c-raw strings, chars, lifetimes, nested and /*** comments
 check v-char-quote-cfg-test       1 "v-char-quote-cfg-test/src/lib.rs:2:"        # '"' must not open a string that hides #[cfg(test)]
@@ -136,25 +140,8 @@ mkdir -p "$copies" && cp -R "$fx/v-symlink-src" "$copies/" && ln -s ../other/t.r
   || { echo "shell-test-layout.test: cannot run: could not prepare the symlink case in $copies" >&2; exit 3; }
 check v-symlink-src               1 "v-symlink-src/src/s.rs" "" "$copies/v-symlink-src"  # src/s.rs -> ../other/t.rs
 
-# T-036 review round 1, under decision #39 (coarse fail-closed rule): no lazy-continuation
-# or list modelling; every doc line indented 4+ columns (after rustdoc's unindent by the
-# block minimum) is refused, and so is a container marker followed by 4+ columns or a tab.
-# Finding 1: shapes rustdoc 1.99 runs as doctests that the paragraph model passed.
-check v-doc-quote-lazy              1 "v-doc-quote-lazy/src/lib.rs:4:"              # (a) `> Note` / `>` / 4 columns
-check v-doc-quote-empty-code        1 "v-doc-quote-empty-code/src/lib.rs:3:"        # (b) `>` alone / 4 columns
-check v-doc-empty-item-code         1 "v-doc-empty-item-code/src/lib.rs:3:"         # (c) empty `-` item / 6 columns
-check v-doc-empty-ordered-item-code 1 "v-doc-empty-ordered-item-code/src/lib.rs:3:" # (d) empty `1.` item / 7 columns
-check v-doc-thematic-break-code     1 "v-doc-thematic-break-code/src/lib.rs:5:"     # (e) `---` / 4 columns
-check v-doc-setext-code             1 "v-doc-setext-code/src/lib.rs:4:"             # (f) `Usage` / `=====` / 4 columns
-check v-doc-star-break-code         1 "v-doc-star-break-code/src/lib.rs:4:"         # (g) text / `***` / 4 columns
-check v-doc-indented-no-space       1 "v-doc-indented-no-space/src/lib.rs:4:"       # `///text` block: unindent by 0, so 4 spaces are code
-# Deliberate contract change by #39, not a weakened case: T-035's ok-doc-lazy-continuation
-# (a 4+ column line right after paragraph text, a lazy continuation for rustdoc) is now a
-# violation; the author rule is to indent continuations by fewer than 4 columns
-# (ok-doc-list-continuation above still passes).
-check v-doc-lazy-continuation       1 "v-doc-lazy-continuation/src/lib.rs:2:"
-# Finding 4: a marker followed by a tab (rustdoc 1.99 runs `-<TAB><TAB>x` as a doctest).
-check v-doc-list-marker-tab         1 "v-doc-list-marker-tab/src/lib.rs:2:"
+# T-036 review round 1. Findings 1 and 4 (doc shapes under decision #39): removed by T-038,
+# folded into ok-doc-text (header).
 # Finding 2 (+4, 6): the `include` token anywhere in code, not only before `!`; identifiers
 # that merely contain it, include_str!/include_bytes!, comments, strings and docs pass.
 check v-include-renamed             1 "v-include-renamed/src/lib.rs:1:"             # use core::include as pull; pull!(..)
@@ -169,20 +156,38 @@ check v-lib-path-after-dependency   1 "v-lib-path-after-dependency/Cargo.toml:14
 check v-bin-path-target             1 "v-bin-path-target/Cargo.toml:10:"             # [[bin]] path = ..
 check v-test-target-path            1 "v-test-target-path/Cargo.toml:12:"            # [[test]] path = "tests/x.rs"
 
+# T-038: the doctest switches. (1) src-tauri/Cargo.toml: the [lib] table holds the line
+# `doctest = false` (any spaces, a trailing comment allowed; ok-current-shape), no other
+# non-comment line names `doctest`, and no multi-line string can fake a table header.
+check v-doctest-missing             1 "v-doctest-missing/Cargo.toml"                 # [lib] without the key: cargo test runs lib doctests
+check v-doctest-true                1 "v-doctest-true/Cargo.toml:12:"                # [lib] doctest = true
+check v-doctest-no-lib-table        1 "v-doctest-no-lib-table/Cargo.toml"            # no [lib]: the implicit src/lib.rs lib has doctests on
+check v-doctest-other-table         1 "v-doctest-other-table/Cargo.toml"             # doctest = false under [[bin]], [lib] has none
+check v-doctest-extra-key           1 "v-doctest-extra-key/Cargo.toml:17:"           # [lib] pinned, plus "doctest" = true under [[test]]
+check v-cargo-multiline-string      1 "v-cargo-multiline-string/Cargo.toml:9:"       # description = """ [lib] doctest = false """, no real [lib]
+check v-cargo-multiline-literal     1 "v-cargo-multiline-literal/Cargo.toml:9:"      # same with ''' (literal string)
+# (2) The workflows dir (2nd argument; .github/workflows by default): no `--doc` and no
+# `rustdoc`, which build lib doctests whatever `doctest` says (cargo 1.99 unit_generator.rs:425-440).
+check v-workflow-doc                1 "v-workflow-doc/workflows/ci.yml:16:"          # cargo test -p voicen --doc
+check v-workflow-rustdoc            1 "v-workflow-rustdoc/workflows/release.yaml:14:" # cargo rustdoc -p voicen -- --test, in a *.yaml file
+
 # Cannot run: exit 3.
 check does-not-exist            3 "cannot run"
 check c-no-src                  3 "cannot run"
 check c-no-cargo-toml           3 "cannot run"
 check ok-current-shape          3 "cannot run" awk
 check ok-current-shape          3 "cannot run" grep
-check c-find-fails-fence        3 "cannot run" find   # a find error must not skip the doc scan (the fixture holds a fence)
+check c-find-fails-cfg-test     3 "cannot run" find   # a find error must not skip the source scan (the fixture holds #[cfg(test)])
+# T-038: a missing workflows dir cannot be scanned, so it is never a pass (the shell is clean).
+check c-no-workflows-dir        3 "cannot run" "" "$fx/c-no-workflows-dir" "$fx/c-no-workflows-dir/workflows"
 # Review round 1, finding 7: the always-failing shims stop at the first find (symlinks) and
 # the first grep (benches); these reach the later calls' own error branches.
 # The needle is the shim's own message: it appears only if the guard got past the earlier
 # calls (run by the real tool) and made the matching call; exit 3 shows that call's error
 # branch fails closed (without it: an empty list, so exit 0).
-check c-find-fails-fence        3 "find: simulated failure (find-rs)" find-rs  # the *.rs find, after the symlink find
+check c-find-fails-cfg-test     3 "find: simulated failure (find-rs)" find-rs  # the *.rs find, after the symlink find
 check ok-current-shape          3 "simulated failure (cargo-path)" cargo-path  # the Cargo.toml path scan, after the bench grep
+check ok-current-shape          3 "simulated failure (workflow-grep)" workflow-grep  # T-038: the workflows scan, after the Cargo.toml scans
 
 # Every committed fixture dir is in the table.
 for d in "$fx"/*/; do

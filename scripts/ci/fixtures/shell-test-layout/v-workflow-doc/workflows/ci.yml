@@ -1,0 +1,17 @@
+# Fixture workflows dir for scripts/ci/shell-test-layout.test.sh (T-038): the doc flag of
+# cargo test (line 16) builds the lib doctests even with `[lib] doctest = false` (cargo 1.99 unit_generator.rs:425-440).
+name: CI
+on:
+  push:
+    branches: [main]
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      # The shell's build script (tauri-build static VC runtime) puts a stub msvcrt.lib on its
+      # search path; cargo gives every build script's search dirs (native_dirs) to every doctest
+      # of the same invocation, so other crates' doctests must not share a run with `voicen` (T-033, F-001).
+      - run: cargo test --workspace --exclude voicen
+      - run: cargo test -p voicen --doc
+      - run: pnpm tauri build

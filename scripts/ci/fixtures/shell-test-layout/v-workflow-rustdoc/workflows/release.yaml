@@ -1,0 +1,14 @@
+# Fixture workflows dir for scripts/ci/shell-test-layout.test.sh (T-038): cargo's doc-test
+# subcommand with --test (line 14) runs the lib's doc blocks as tests whatever the
+# manifest says. A *.yaml file, so the workflow scan must read both extensions.
+name: Release
+on:
+  push:
+    tags: ["v*"]
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: cargo test -p voicen
+      - run: cargo rustdoc -p voicen -- --test

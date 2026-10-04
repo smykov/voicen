@@ -8,3 +8,4 @@ publish = false
 [lib]
 name = "shell_layout_fixture_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
+doctest = false

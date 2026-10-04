@@ -8,6 +8,11 @@ publish = false
 [lib]
 name = "shell_layout_fixture_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
+# Mirrors src-tauri/Cargo.toml: full-line comments that name the key pass (T-038).
+# No lib doctest exe: build.rs cannot give it the release exe's Windows link configuration
+# (T-035, docs/decisions/ci-toolchain.md). make check refuses removing this doctest key;
+# doc blocks are not checked.
+  doctest = false   # make check refuses removing this key
 
 [dependencies]
 tauri = { version = "2", features = [] }

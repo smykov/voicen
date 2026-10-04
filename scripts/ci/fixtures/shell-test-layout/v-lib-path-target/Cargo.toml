@@ -9,3 +9,4 @@ publish = false
 name = "shell_layout_fixture_lib"
 path = "other/lib.rs"
 crate-type = ["staticlib", "cdylib", "rlib"]
+doctest = false

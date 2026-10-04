@@ -12,3 +12,4 @@ path = "../crates/voicen-core"
 [ lib ]
 name = "shell_layout_fixture_lib"
 path = 'other/lib.rs'
+doctest = false

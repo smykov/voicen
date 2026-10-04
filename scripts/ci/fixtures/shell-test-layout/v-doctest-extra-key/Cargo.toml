@@ -1,0 +1,17 @@
+# Fixture shell dir for scripts/ci/shell-test-layout.test.sh; never built.
+# T-038: [lib] doctest = false is there, but another non-comment line names the key (a quoted
+[package]
+name = "shell-layout-fixture"
+version = "0.0.0"
+edition = "2021"
+publish = false
+# key under [[test]]): any doctest key outside the one pinned line is refused.
+
+[lib]
+name = "shell_layout_fixture_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+doctest = false
+
+[[test]]
+name = "settings_ipc"
+"doctest" = true

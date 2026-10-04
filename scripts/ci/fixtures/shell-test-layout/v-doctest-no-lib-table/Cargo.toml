@@ -1,0 +1,10 @@
+# Fixture shell dir for scripts/ci/shell-test-layout.test.sh; never built.
+# T-038: no [lib] table: the implicit lib (src/lib.rs) has doctests on.
+[package]
+name = "shell-layout-fixture"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+tauri = { version = "2", features = [] }

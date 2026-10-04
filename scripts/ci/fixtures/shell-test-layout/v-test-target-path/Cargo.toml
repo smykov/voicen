@@ -10,3 +10,7 @@ publish = false
 [[test]]
 name = "x"
 path = "tests/x.rs"
+
+[lib]
+name = "shell_layout_fixture_lib"
+doctest = false

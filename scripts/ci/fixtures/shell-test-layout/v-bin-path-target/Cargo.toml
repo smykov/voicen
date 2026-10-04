@@ -8,3 +8,7 @@ publish = false
 [[bin]]
 name = "voicen"
 path = "other/main.rs"
+
+[lib]
+name = "shell_layout_fixture_lib"
+doctest = false

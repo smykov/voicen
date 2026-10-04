@@ -1,0 +1,12 @@
+# Fixture shell dir for scripts/ci/shell-test-layout.test.sh; never built.
+# T-038: an allowed shell (doctest pinned); only the workflows dir decides this case.
+[package]
+name = "shell-layout-fixture"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "shell_layout_fixture_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+doctest = false
