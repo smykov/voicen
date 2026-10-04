@@ -212,13 +212,15 @@
     };
     (async () => {
       try {
-        // Every listener before settings_get: a save from elsewhere in between is not
-        // lost; a focus request sent while the page loads waits for the draft (the
-        // focus effect) and replaces the URL's; and no draft is ever editable without
-        // the close guard. While the draft is null onClose prevents nothing.
+        // The close guard first, then every other listener, all before settings_get.
+        // Only settings://changed and settings_get build a draft, and both come after
+        // the guard, so no draft is ever editable without it (D; while the draft is
+        // null onClose prevents nothing). A save from elsewhere before settings_get is
+        // not lost, and a focus request sent while the page loads waits for the draft
+        // (the focus effect) and replaces the URL's.
+        keep(await onCloseRequested(onClose));
         keep(await onSettingsChanged(receive));
         keep(await onFocusRequest((request) => requestFocus(request.tab, request.field)));
-        keep(await onCloseRequested(onClose));
         receive(await getSettings());
       } catch {
         ipcFailed = true;

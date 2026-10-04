@@ -1,5 +1,6 @@
 <script lang="ts">
-  // Engine tab: the engine, its URL / model / key, and the speech language. The
+  // Engine tab: the engine, its URL / model / key (or, for builtin_local, the model
+  // select and the model list of BuiltinLocal.svelte), and the speech language. The
   // language list is core's (settings_speech_languages); names come from
   // Intl.DisplayNames in the UI language.
   import { currentLanguage } from "$lib/i18n/language.svelte";
@@ -8,6 +9,7 @@
   import { controlId, describedBy } from "../fields";
   import FieldMessage from "../FieldMessage.svelte";
   import KeyField from "../KeyField.svelte";
+  import BuiltinLocal from "$lib/local-models/BuiltinLocal.svelte";
 
   let {
     draft = $bindable(),
@@ -103,12 +105,9 @@
   </div>
   <KeyField bind:draft {warnings} slot="local_server" field="engine.local_server.key" />
 {:else if draft.settings.engine === "builtin_local"}
-  <div class="field">
-    <p class="hint">{t("settings.builtin_local.pending")}</p>
-    <!-- No [data-field] control here (T-013): a warning of this field is listed at form
-         level (L), so it is not rendered here too. -->
-    <FieldMessage errors={draft.errors} warnings={{}} field="engine.builtin_local.model_id" />
-  </div>
+  <!-- The model select and the model list (spec 002, T-045): mounted only while the
+       engine is builtin_local, so only then is local_models_list called. -->
+  <BuiltinLocal bind:draft {warnings} />
 {/if}
 
 <div class="field">

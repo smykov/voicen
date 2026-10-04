@@ -15,14 +15,15 @@ type ModelState =
 
 interface LocalModelView {
   id: ModelId;
-  nameKey: string;          // i18n key
+  nameKey: MessageId;       // i18n key (local_model.name.<id>)
   sizeBytes: number;
   recommended: boolean;     // true only for 'small'
   state: ModelState;
   loaded: boolean;          // currently in memory
 }
 
-interface FailureReason { code: string; messageKey: string; params?: Record<string, string | number> }
+interface FailureReason { code: string; messageKey: MessageId; params?: Record<string, string> }
+// param values are strings on the wire; `needed` is a byte count the UI formats (formatSize)
 // codes added by this feature: download_interrupted, checksum_mismatch, not_enough_disk_space{needed},
 // source_unreachable{host}, disk_error, http_status{code}, model_in_use, delete_failed, no_local_model,
 // and for a refused download: download_busy, already_downloaded, not_in_catalog, download_cannot_start (T-044)
@@ -57,7 +58,8 @@ Serialized by serde impls in `voicen-core` (`local_models::service`); `e2e/fixtu
 
 - `LocalModelView` fields: `id`, `nameKey` (= `local_model.name.<id>`, en/ru in `i18n/`), `sizeBytes`, `recommended`, `state`, `loaded` (always `false` until T-017's residency).
 - `ModelState`: `{ "kind": "not_downloaded" | "downloading" | "downloaded" | "failed" }`, plus `received` and `total` for `downloading`, `reason` for `failed`.
-- `FailureReason`: `code`, `messageKey`, and `params` only when there are any; param values are strings (`{ "needed": "66256" }`, `{ "code": "503" }`, `{ "host": "huggingface.co" }`).
+- `FailureReason`: `code`, `messageKey`, and `params` only when there are any; param values are strings (`{ "needed": "66256" }`, `{ "code": "503" }`, `{ "host": "huggingface.co" }`). `needed` is a byte count: the UI shows it only through its one size formatter, in the UI language, and the catalog texts carry no unit (T-045, decision #58; `docs/decisions/i18n.md`).
+- The TS declaration of this wire is `src/lib/local-models/localModelsApi.ts` (the one IPC module of this contract; the e2e mock re-exports it).
 - `Downloading` and `Failed` are in memory only: a restart lists them as `not_downloaded`. `failed` stays until a retry.
 
 ## Events (shell → UI)

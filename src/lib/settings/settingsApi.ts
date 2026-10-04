@@ -1,8 +1,10 @@
 // The settings IPC as the window sees it (spec 004 contracts/ipc.md, T-004).
 //
-// Wire types are the serde forms of voicen_core (contracts/ipc.md › Wire form); this
-// module holds the only invoke/listen/window calls of the settings window. The window
-// never builds a SettingsView itself: every one it shows comes from here (U1).
+// Wire types are the serde forms of voicen_core (contracts/ipc.md › Wire form). One IPC
+// module per contract (settings-ui.md › C): this module holds every invoke/listen/window
+// call of spec 004's contract; spec 002's local-model calls live in
+// src/lib/local-models/localModelsApi.ts and the build info in src/lib/buildInfo.ts.
+// The window never builds a SettingsView itself: every one it shows comes from here (U1).
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow, type CloseRequestedEvent } from "@tauri-apps/api/window";
