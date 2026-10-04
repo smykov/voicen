@@ -133,6 +133,31 @@ fn delivered(seq: u64, text_to_paste_ms: u64, result: DeliveryResult) -> Dictati
     }
 }
 
+fn capture_failed(recording: RecordingId, cause: MicCause) -> DictationEvent {
+    DictationEvent::CaptureFailed { recording, cause }
+}
+
+/// Every `MicCause` with its log literal; a new cause fails to compile here.
+fn every_mic_cause() -> Vec<(MicCause, &'static str)> {
+    let all = [
+        MicCause::NoDevice,
+        MicCause::AccessDenied,
+        MicCause::Busy,
+        MicCause::Other,
+    ];
+    all.into_iter()
+        .map(|c| {
+            let literal = match c {
+                MicCause::NoDevice => "no_device",
+                MicCause::AccessDenied => "access_denied",
+                MicCause::Busy => "busy",
+                MicCause::Other => "other",
+            };
+            (c, literal)
+        })
+        .collect()
+}
+
 fn s(v: u64) -> String {
     v.to_string()
 }
@@ -276,6 +301,97 @@ fn too_short_recording_is_one_line_at_recording_ended() {
             ("press_to_frame_ms", s(30)),
             ("duration_ms", s(120)),
         ])
+    );
+}
+
+#[test]
+fn a_capture_failure_at_press_is_one_warn_line_with_the_mic_literal() {
+    // T-051: a capture that cannot open at press emits only CaptureFailed (no
+    // RecordingStarted / RecordingEnded, no job), so CaptureFailed itself closes
+    // the recording's line: outcome=capture_failed and the cause through the
+    // closed microphone table, WARN. Bite: no line for a failed press (the record
+    // waits for a JobFinished that never comes), the cause Debug-formatted
+    // ("AccessDenied"), a second line (a warning beside the dictation line), the
+    // line at INFO.
+    let f = fixture();
+    let causes = every_mic_cause();
+    let rec = ids(causes.len());
+    for ((cause, _), id) in causes.iter().zip(&rec) {
+        f.feed(&[capture_failed(*id, *cause)]);
+    }
+    assert_eq!(f.lines().len(), causes.len(), "{:#?}", f.lines());
+    let lines = f.dictations();
+    assert_eq!(lines.len(), causes.len(), "{lines:#?}");
+    for (line, ((cause, literal), id)) in lines.iter().zip(causes.iter().zip(&rec)) {
+        assert_eq!(line.level, "WARN", "{cause:?}: {}", line.raw);
+        assert_eq!(
+            line.pairs,
+            pairs(&[
+                ("rec", s(id.get())),
+                ("outcome", "capture_failed".to_string()),
+                ("mic", literal.to_string()),
+            ]),
+            "{cause:?}: {}",
+            line.raw
+        );
+    }
+}
+
+#[test]
+fn a_capture_failure_at_stop_closes_the_open_record_in_one_line() {
+    // T-051: a capture that fails at stop comes after the release's
+    // RecordingStarted (only if a frame arrived) and RecordingEnded{Released},
+    // and no job follows. CaptureFailed closes that recording's open record: one
+    // line with its own timings, joined by RecordingId (b has no first frame and
+    // ends between a's events). Bite: a line built from an empty record (timings
+    // lost), the line joined to the last RecordingStarted, no line (the record
+    // waits for a JobFinished), the record left open after its line (a later
+    // event of that id would carry its timings again).
+    let f = fixture();
+    let [a, b] = ids(2)[..] else { unreachable!() };
+    f.feed(&[
+        started(a, 41),
+        ended(b, 1_500, RecordingEnd::Released),
+        ended(a, 2_000, RecordingEnd::Released),
+        capture_failed(a, MicCause::Busy),
+        capture_failed(b, MicCause::Other),
+    ]);
+    assert_eq!(f.lines().len(), 2, "{:#?}", f.lines());
+    let lines = f.dictations();
+    assert_eq!(lines.len(), 2, "{lines:#?}");
+    assert_eq!(lines[0].level, "WARN", "{}", lines[0].raw);
+    assert_eq!(
+        lines[0].pairs,
+        pairs(&[
+            ("rec", s(a.get())),
+            ("outcome", "capture_failed".to_string()),
+            ("mic", "busy".to_string()),
+            ("press_to_frame_ms", s(41)),
+            ("duration_ms", s(2_000)),
+        ])
+    );
+    assert_eq!(
+        lines[1].pairs,
+        pairs(&[
+            ("rec", s(b.get())),
+            ("outcome", "capture_failed".to_string()),
+            ("mic", "other".to_string()),
+            ("duration_ms", s(1_500)),
+        ])
+    );
+
+    // Probe: a stray event of a after its line starts from an empty record.
+    f.feed(&[finished(9, a, None, 5, OutcomeCode::NoSpeech, None, None)]);
+    let lines = f.dictations();
+    assert_eq!(lines.len(), 3, "{lines:#?}");
+    assert_eq!(
+        lines[2].pairs,
+        pairs(&[
+            ("rec", s(a.get())),
+            ("outcome", "no_speech".to_string()),
+            ("stop_to_text_ms", s(5)),
+        ]),
+        "a's record stayed open after its capture_failed line"
     );
 }
 
@@ -592,7 +708,7 @@ fn every_dictation_event_with_planted_strings_gives_closed_lines() {
         leak("planted_lower_snake"),
         leak("energy\r\nPLANTED=1"),
     ];
-    let rec = ids(40);
+    let rec = ids(48);
     let mut next = rec.iter().copied();
     let mut take = || next.next().expect("enough ids");
     let mut planted_recs = BTreeSet::new();
@@ -641,6 +757,20 @@ fn every_dictation_event_with_planted_strings_gives_closed_lines() {
             delivered(seq, 9, result),
         ]);
     }
+    // Every capture failure (T-051), at press (CaptureFailed alone) and at stop
+    // (after RecordingStarted / RecordingEnded{Released}).
+    let mut capture_recs = BTreeSet::new();
+    for (cause, _) in every_mic_cause() {
+        let at_press = take();
+        let at_stop = take();
+        capture_recs.extend([at_press.get().to_string(), at_stop.get().to_string()]);
+        emitted.extend([
+            capture_failed(at_press, cause),
+            started(at_stop, 8),
+            ended(at_stop, 800, RecordingEnd::Released),
+            capture_failed(at_stop, cause),
+        ]);
+    }
     // A Delivered with no JobFinished, a JobFinished repeated for a closed
     // record, a recording that never ends, and every warning.
     let first = rec[0];
@@ -677,20 +807,32 @@ fn every_dictation_event_with_planted_strings_gives_closed_lines() {
             DictationEvent::JobFinished { .. } => 3,
             DictationEvent::Delivered { .. } => 4,
             DictationEvent::Warning { .. } => 5,
+            DictationEvent::CaptureFailed { .. } => 6,
         });
         f.obs.event(e);
     }
-    assert_eq!(seen.len(), 6, "every DictationEvent variant was fed");
+    assert_eq!(seen.len(), 7, "every DictationEvent variant was fed");
 
     // Every line passes the grammar and the closed sets (dictation_lines checks
     // each one on the way).
     let dictations = dictation_lines(&f.lines());
-    // 3 planted x 4 outcomes x 2 devices, 3 too-short, 3 results.
+    // 3 planted x 4 outcomes x 2 devices, 3 too-short, 3 results, 4 causes x
+    // (press, stop).
     assert!(
-        dictations.len() >= 3 * 4 * 2 + 3 + 3,
+        dictations.len() >= 3 * 4 * 2 + 3 + 3 + 4 * 2,
         "{} dictation lines",
         dictations.len()
     );
+    // One capture_failed line per capture failure, each with its mic literal.
+    let capture_lines: Vec<&Line> = dictations
+        .iter()
+        .filter(|l| l.get("rec").is_some_and(|r| capture_recs.contains(r)))
+        .collect();
+    assert_eq!(capture_lines.len(), 4 * 2, "{capture_lines:#?}");
+    for l in &capture_lines {
+        assert_eq!(l.get("outcome"), Some("capture_failed"), "{}", l.raw);
+        assert!(l.get("mic").is_some(), "{}", l.raw);
+    }
     let mut checked = 0;
     for l in &dictations {
         if l.get("rec").is_some_and(|r| planted_recs.contains(r)) {

@@ -392,7 +392,15 @@ pub fn parsed(raw: &str) -> Line {
 pub const ENGINES: &[&str] = &["api", "builtin", "local_server", "other"];
 pub const DETECTORS: &[&str] = &["silero", "energy", "other"];
 pub const RESULTS: &[&str] = &["pasted", "copied_only", "copy_manual"];
-pub const DICTATION_OUTCOMES: &[&str] = &["delivered", "failed", "no_speech", "too_short"];
+pub const DICTATION_OUTCOMES: &[&str] = &[
+    "delivered",
+    "failed",
+    "no_speech",
+    "too_short",
+    "capture_failed",
+];
+/// The diag microphone table: one literal per `MicCause` (T-051).
+pub const MIC_CAUSES: &[&str] = &["no_device", "access_denied", "busy", "other"];
 /// The diag failure table: one literal per `FailureReason` plus `other`.
 pub const FAILURES: &[&str] = &[
     "invalid_api_key",
@@ -493,6 +501,7 @@ pub fn check_closed(line: &Line) -> Result<(), String> {
             ("dictation", "result") => one_of(k, v, RESULTS)?,
             ("dictation", "failure") => one_of(k, v, FAILURES)?,
             ("dictation", "detector") => one_of(k, v, DETECTORS)?,
+            ("dictation", "mic") => one_of(k, v, MIC_CAUSES)?,
             ("warning", "kind") => one_of(k, v, WARNING_KINDS)?,
             ("warning", "os_code") => check(signed(v), k, v)?,
             ("settings load", "outcome") => one_of(k, v, LOAD_OUTCOMES)?,
@@ -522,6 +531,12 @@ pub fn check_closed(line: &Line) -> Result<(), String> {
         }
         if line.get("http_status").is_some() && outcome != "failed" {
             return Err(format!("http_status= only on failed lines: {:?}", line.raw));
+        }
+        if (outcome == "capture_failed") != line.get("mic").is_some() {
+            return Err(format!(
+                "mic= exactly on capture_failed lines: {:?}",
+                line.raw
+            ));
         }
     }
     Ok(())

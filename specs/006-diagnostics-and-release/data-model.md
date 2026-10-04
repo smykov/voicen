@@ -29,7 +29,7 @@ T-008 shipped the variants marked "T-008". Their fields hold only integers, clos
 | Variant | Fields | Level | Status |
 |---|---|---|---|
 | `Started` | `build: BuildInfo`, `pid: u32` | INFO | T-008, without `os`. `os: OsVersion` comes later, with the session work |
-| `Dictation` | `DictationLine` (below) | INFO (delivered, no_speech, too_short) / WARN (failed) | T-008 |
+| `Dictation` | `DictationLine` (below) | INFO (delivered, no_speech, too_short) / WARN (failed, capture_failed) | T-008, T-051 |
 | `Warning` | `kind: WarningKind`, `os_code: Option<i32>`. Kinds in T-008: `vad_fallback`, `esc_unavailable`, `toast_failed` (the pipeline's `WarningCode`s), `models_cleanup_failed`, `settings_window_failed`, `change_bridge_failed`. Later features add kinds (e.g. notification or history write failures) | WARN | T-008 |
 | `SettingsLoad` | `LoadKind`: `loaded` / `first_run` / `reset` / `unavailable` (from `LoadOutcome`, without the settings or the backup name) | INFO / WARN (reset, unavailable) | T-008 (spec 004 R-11) |
 | `SettingsSave` | `SaveLine`: `ok` with warnings, or `refused` / `failed` with field ids + codes, the form error and `not_restored` field ids; no values (from `SaveOutcome`) | INFO / WARN (failed) | T-008 (spec 004 R-11; no `changed=` list) |
@@ -60,7 +60,7 @@ T-008 shipped `DictationLine`, which `LogObserver` aggregates per `RecordingId` 
 |---|---|---|---|
 | `recording` | `u64` (`RecordingId::get()`) | every event of the recording | T-008 |
 | `engine` | `Option<EngineTag>`: `api` / `builtin` / `local_server` / `other` (`EngineTag::from_kind`) | `JobFinished.engine` (absent when no engine was built) | T-008 |
-| `outcome` | `Delivered(DeliveryResult)` (`pasted` / `copied_only` / `copy_manual`), `Failed{failure: FailureTag, http_status: Option<u16>}`, `NoSpeech`, `TooShort` | `Delivered`, `JobFinished`, `RecordingEnded{TooShort}` | T-008 |
+| `outcome` | `Delivered(DeliveryResult)` (`pasted` / `copied_only` / `copy_manual`), `Failed{failure: FailureTag, http_status: Option<u16>}`, `NoSpeech`, `TooShort`, `CaptureFailed{cause: MicCause}` (`no_device` / `access_denied` / `busy` / `other`, written `outcome=capture_failed mic=<cause>`) | `Delivered`, `JobFinished`, `RecordingEnded{TooShort}`, `CaptureFailed` | T-008; `CaptureFailed` T-051 |
 | `detector` | `Option<DetectorTag>`: `silero` / `energy` / `other` | `SpeechGate.detector` | T-008 |
 | `press_to_frame_ms` | `Option<u64>` | `RecordingStarted` (emitted by T-006's worker) | T-008 |
 | `duration_ms` | `Option<u64>` | `RecordingEnded` | T-008 (Q2: FR-20's three timings plus the duration) |

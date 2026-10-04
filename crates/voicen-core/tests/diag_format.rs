@@ -12,8 +12,8 @@ mod diag_support;
 use std::collections::BTreeSet;
 
 use diag_support::{
-    at, check_closed, pairs, parse, parse_ts, parsed, DETECTORS, ENGINES, FAILURES, NOON_UTC,
-    WARNING_KINDS,
+    at, check_closed, pairs, parse, parse_ts, parsed, DETECTORS, DICTATION_OUTCOMES, ENGINES,
+    FAILURES, MIC_CAUSES, NOON_UTC, WARNING_KINDS,
 };
 use voicen_core::autostart::ReconcileAction;
 use voicen_core::delivery::DeliveryResult;
@@ -145,6 +145,27 @@ fn all_failure_tags() -> Vec<(FailureTag, &'static str)> {
         })
         .collect();
     assert_eq!(seen.len(), 11, "every FailureTag once");
+    all
+}
+
+/// Every `MicCause` with its literal (the diag microphone table, T-051).
+fn all_mic_causes() -> Vec<(MicCause, &'static str)> {
+    let all = vec![
+        (MicCause::NoDevice, "no_device"),
+        (MicCause::AccessDenied, "access_denied"),
+        (MicCause::Busy, "busy"),
+        (MicCause::Other, "other"),
+    ];
+    let seen: BTreeSet<usize> = all
+        .iter()
+        .map(|(c, _)| match c {
+            MicCause::NoDevice => 0,
+            MicCause::AccessDenied => 1,
+            MicCause::Busy => 2,
+            MicCause::Other => 3,
+        })
+        .collect();
+    assert_eq!(seen.len(), 4, "every MicCause once");
     all
 }
 
@@ -297,6 +318,9 @@ fn every_event() -> Vec<LogEvent> {
                 http_status,
             });
         }
+    }
+    for (cause, _) in all_mic_causes() {
+        outcomes.push(DictationOutcome::CaptureFailed { cause });
     }
     let mut engines: Vec<Option<EngineTag>> = all_engine_tags().into_iter().map(Some).collect();
     engines.push(None);
@@ -776,6 +800,49 @@ fn dictation_line_keys_per_outcome() {
         );
         assert_eq!(parsed(&raw).get("result"), Some(literal), "{raw}");
     }
+}
+
+#[test]
+fn capture_failed_line_has_the_mic_literal_at_warn() {
+    // T-051: a capture failure (DictationEvent::CaptureFailed) is a dictation line
+    // `outcome=capture_failed mic=<cause>`, WARN like a failed job, the cause
+    // through the closed microphone table, no failure= / result= / http_status=.
+    // Bite: the cause Debug-formatted ("AccessDenied"), two causes on one
+    // literal, the line at INFO, the cause written as failure=microphone_unavailable.
+    let mut literals = BTreeSet::new();
+    for (cause, literal) in all_mic_causes() {
+        let raw = format_line(
+            at(NOON_UTC, 0),
+            0,
+            &LogEvent::Dictation(DictationLine {
+                recording: 11,
+                engine: None,
+                outcome: DictationOutcome::CaptureFailed { cause },
+                detector: None,
+                press_to_frame_ms: Some(41),
+                duration_ms: Some(2_000),
+                stop_to_text_ms: None,
+                text_to_paste_ms: None,
+            }),
+        );
+        let l = parsed(&raw);
+        assert_eq!(l.head, "dictation", "{raw}");
+        assert_eq!(l.level, "WARN", "{cause:?}: {raw}");
+        assert_eq!(
+            l.pairs,
+            pairs(&[
+                ("rec", "11".to_string()),
+                ("outcome", "capture_failed".to_string()),
+                ("mic", literal.to_string()),
+                ("press_to_frame_ms", "41".to_string()),
+                ("duration_ms", "2000".to_string()),
+            ]),
+            "{cause:?}: {raw}"
+        );
+        assert!(literals.insert(literal), "{literal} used twice");
+    }
+    assert_eq!(MIC_CAUSES.len(), all_mic_causes().len());
+    assert!(DICTATION_OUTCOMES.contains(&"capture_failed"));
 }
 
 #[test]

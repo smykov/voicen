@@ -3,7 +3,9 @@
 //!
 //! Closing rules: `Delivered` for a text outcome (it follows `JobFinished{Text}`,
 //! joined by `seq`); `JobFinished` for no-speech or failed; `RecordingEnded{TooShort}`
-//! for a discarded recording. A pipeline `Warning` is its own line at once.
+//! for a discarded recording; `CaptureFailed` for a capture that failed at press
+//! (its only event) or at stop (after `RecordingStarted` / `RecordingEnded`, no
+//! job follows). A pipeline `Warning` is its own line at once.
 //!
 //! Every match over the event types is exhaustive: a new `DictationEvent`,
 //! `OutcomeCode`, `RecordingEnd` or `WarningCode` variant does not compile until
@@ -174,6 +176,13 @@ impl Open {
                     Some(text_to_paste_ms),
                 ))
             }
+            // At press it is the recording's only event; at stop it follows
+            // RecordingStarted / RecordingEnded{Released} and no job comes.
+            DictationEvent::CaptureFailed { recording, cause } => Some(self.close(recording).line(
+                recording,
+                DictationOutcome::CaptureFailed { cause },
+                None,
+            )),
             DictationEvent::Warning { code } => Some(LogEvent::Warning {
                 kind: match code {
                     WarningCode::VadFallback => WarningKind::VadFallback,

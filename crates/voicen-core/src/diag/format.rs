@@ -1,13 +1,15 @@
 //! The one line formatter (T-008): `<local time with offset> <LEVEL> <message>`.
 //!
 //! Total over [`LogEvent`]; every value is an integer, a literal from this
-//! module's tables (or a closed `as_str`/`code` match of the crate: settings field
+//! module's tables (engine, detector, failure, microphone cause, warning kind,
+//! load outcome), a closed `as_str`/`code` match of the crate (settings field
 //! ids and codes, `ReconcileAction`, `DeliveryResult`, `FormError::kind`), or
 //! `BuildInfo`. Std only (the date math of `clock.rs`).
 //!
 //! ```text
 //! 2026-10-04T23:59:00.123+02:00 INFO voicen 0.1.0 (abc1234) started pid=4242
 //! 2026-10-04T23:59:04.020+02:00 INFO dictation rec=0 engine=api outcome=delivered result=pasted detector=energy press_to_frame_ms=41 duration_ms=3000 stop_to_text_ms=812 text_to_paste_ms=95
+//! 2026-10-04T23:59:04.500+02:00 WARN dictation rec=1 outcome=capture_failed mic=access_denied
 //! 2026-10-04T23:59:05.000+02:00 WARN warning kind=vad_fallback
 //! 2026-10-04T23:59:06.000+02:00 INFO settings save outcome=ok warnings=engine.api.base_url:endpoint.insecure
 //! ```
@@ -24,6 +26,7 @@ use super::event::{
 use crate::autostart::ReconcileAction;
 use crate::build_info::BuildInfo;
 use crate::clock::civil_from_days;
+use crate::recording::MicCause;
 use crate::settings::service::FormError;
 
 /// The widest offset written: UTC±14:00, the range of real time zones.
@@ -117,7 +120,7 @@ fn level(event: &LogEvent) -> &'static str {
     match event {
         LogEvent::Started { .. } | LogEvent::LogsRecovered => INFO,
         LogEvent::Dictation(line) => match line.outcome {
-            DictationOutcome::Failed { .. } => WARN,
+            DictationOutcome::Failed { .. } | DictationOutcome::CaptureFailed { .. } => WARN,
             DictationOutcome::Delivered(_)
             | DictationOutcome::NoSpeech
             | DictationOutcome::TooShort => INFO,
@@ -205,6 +208,10 @@ fn write_dictation(out: &mut String, line: &DictationLine) {
         }
         DictationOutcome::NoSpeech => pair(out, "outcome", "no_speech"),
         DictationOutcome::TooShort => pair(out, "outcome", "too_short"),
+        DictationOutcome::CaptureFailed { cause } => {
+            pair(out, "outcome", "capture_failed");
+            pair(out, "mic", mic(*cause));
+        }
     }
     if let Some(tag) = detector_tag {
         pair(out, "detector", detector(*tag));
@@ -343,6 +350,17 @@ fn failure(tag: FailureTag) -> &'static str {
         FailureTag::ClipboardUnavailable => "clipboard_unavailable",
         FailureTag::MicrophoneUnavailable => "microphone_unavailable",
         FailureTag::Other => "other",
+    }
+}
+
+/// `MicCause` (already closed, no OS text) to its literal; `Other` is `other`,
+/// like the other tables' unknown value.
+fn mic(cause: MicCause) -> &'static str {
+    match cause {
+        MicCause::NoDevice => "no_device",
+        MicCause::AccessDenied => "access_denied",
+        MicCause::Busy => "busy",
+        MicCause::Other => "other",
     }
 }
 

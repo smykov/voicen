@@ -7,6 +7,7 @@
 use crate::autostart::ReconcileAction;
 use crate::build_info::BuildInfo;
 use crate::delivery::DeliveryResult;
+use crate::recording::MicCause;
 use crate::settings::service::{FormError, SaveOutcome, Warning};
 use crate::settings::{FieldError, LoadOutcome};
 
@@ -129,6 +130,11 @@ pub enum DictationOutcome {
     },
     NoSpeech,
     TooShort,
+    /// The capture failed at press or at stop (`DictationEvent::CaptureFailed`,
+    /// T-051); only the closed `MicCause`, which carries no OS text.
+    CaptureFailed {
+        cause: MicCause,
+    },
 }
 
 /// `Engine::kind()` through the table: `api`, `builtin`, `local_server`, else
