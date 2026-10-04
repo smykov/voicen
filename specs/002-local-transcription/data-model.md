@@ -33,7 +33,7 @@ Downloaded ──delete refused (in use) / remove error──▶ Downloaded   (e
 
 - "`.part` deleted" on `Failed` and cancel is best effort (contracts/core-traits.md "Downloader"): a failed removal is ignored, the leftover is never read as a model, and the next download or the next app start removes it.
 - `Failed` is what spec FR-004 calls "shown as not downloaded with the reason": the UI renders it as not downloaded, with the reason and a Retry action; it is never selectable.
-- Persisted only as files on disk. `Downloading` and `Failed` live in memory and are lost on restart (a restart shows `NotDownloaded`; spec FR-008).
+- Persisted only as files on disk. `Downloading` and `Failed` live in memory (in the one coordinator `voicen_core::local_models::service::LocalModels`, T-044) and are lost on restart (a restart shows `NotDownloaded`; spec FR-008). A refused start keeps the state it had (a `Failed` keeps its reason).
 - `Failed.reason`: `DownloadFailure` (`voicen_core::local_models::download`; a separate type, not 001's `FailureReason`, decision #49), with the wire codes `download_interrupted`, `checksum_mismatch`, `not_enough_disk_space{needed}`, `source_unreachable{host}` (`host[:port]` only), `disk_error`, `http_status{code}` and message ids `download.*` (en/ru). It never carries the URL.
 - A file with the final name but the wrong size is treated as not downloaded (spec edge case) and is not deleted automatically (the user can re-download, which overwrites it via rename).
 

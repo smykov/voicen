@@ -16,16 +16,18 @@
 //! The shell (`src-tauri/src/local_models.rs`) is an adapter: it parses nothing,
 //! delegates the commands here and emits each event to the settings window.
 
+use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
+use serde::ser::{SerializeMap, SerializeStruct};
 use serde::Serialize;
 
 use super::catalog::{CatalogEntry, ModelId};
-use super::download::{DiskSpace, DownloadError, DownloadFailure};
+use super::download::{DiskSpace, DownloadError, DownloadEvent, DownloadFailure, Downloader};
 use super::store::{LocalModelState, ModelStore};
-use crate::i18n::MessageId;
+use crate::i18n::{self, MessageId};
 use crate::timeouts::Timeouts;
 
 /// `local-model://progress`, payload `{ id, received, total }`.
@@ -73,15 +75,40 @@ pub enum LocalModelEvent {
 impl LocalModelEvent {
     /// [`PROGRESS_EVENT`] or [`STATE_EVENT`].
     pub fn name(&self) -> &'static str {
-        // Skeleton (T-044 red tests): not implemented yet.
-        todo!("T-044: LocalModelEvent::name")
+        match self {
+            LocalModelEvent::Progress { .. } => PROGRESS_EVENT,
+            LocalModelEvent::State { .. } => STATE_EVENT,
+        }
     }
+}
+
+/// `local_model.name.<id>`: the declared message id of a model's display name.
+fn name_key(id: ModelId) -> MessageId {
+    match id {
+        ModelId::Tiny => i18n::LOCAL_MODEL_NAME_TINY,
+        ModelId::Base => i18n::LOCAL_MODEL_NAME_BASE,
+        ModelId::Small => i18n::LOCAL_MODEL_NAME_SMALL,
+        ModelId::MediumQ5_0 => i18n::LOCAL_MODEL_NAME_MEDIUM_Q5_0,
+        ModelId::LargeV3TurboQ5_0 => i18n::LOCAL_MODEL_NAME_LARGE_V3_TURBO_Q5_0,
+    }
+}
+
+/// The in-memory `Downloading` / `Failed` states by model; a model without an entry
+/// shows its disk state.
+type Transient = Arc<Mutex<HashMap<ModelId, LocalModelState>>>;
+
+fn lock(
+    transient: &Mutex<HashMap<ModelId, LocalModelState>>,
+) -> MutexGuard<'_, HashMap<ModelId, LocalModelState>> {
+    transient.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// The coordinator: the store, the one downloader and the in-memory
 /// `Downloading` / `Failed` states (lost on restart, spec FR-008).
 pub struct LocalModels {
     store: Arc<ModelStore>,
+    downloader: Downloader,
+    transient: Transient,
 }
 
 impl LocalModels {
@@ -95,9 +122,15 @@ impl LocalModels {
         timeouts: Timeouts,
         catalog: &'static [CatalogEntry],
     ) -> (LocalModels, io::Result<()>) {
-        // Skeleton (T-044 red tests): not implemented yet.
-        let _ = (models_dir, disk, timeouts, catalog);
-        todo!("T-044: LocalModels::open")
+        let store = Arc::new(ModelStore::new(models_dir, catalog));
+        let cleanup = store.cleanup_at_start();
+        let downloader = Downloader::new(Arc::clone(&store), disk, timeouts);
+        let models = LocalModels {
+            store,
+            downloader,
+            transient: Arc::new(Mutex::new(HashMap::new())),
+        };
+        (models, cleanup)
     }
 
     /// The one store (settings validation, every command, later T-017 / T-019).
@@ -108,8 +141,20 @@ impl LocalModels {
     /// Every catalog model in catalog order: the in-memory `Downloading` / `Failed`
     /// state where one exists, otherwise the disk state.
     pub fn list(&self) -> Vec<LocalModelView> {
-        // Skeleton (T-044 red tests): not implemented yet.
-        todo!("T-044: LocalModels::list")
+        let transient = lock(&self.transient).clone();
+        self.store
+            .catalog()
+            .iter()
+            .zip(self.store.states())
+            .map(|(entry, (id, disk_state))| LocalModelView {
+                id,
+                name_key: name_key(id),
+                size_bytes: entry.size_bytes,
+                recommended: entry.recommended,
+                state: transient.get(&id).cloned().unwrap_or(disk_state),
+                loaded: false,
+            })
+            .collect()
     }
 
     /// `local_model_download { id }`. A refusal changes no state and never calls
@@ -119,77 +164,216 @@ impl LocalModels {
         id: &str,
         emit: impl Fn(LocalModelEvent) + Send + 'static,
     ) -> Result<(), ReasonView> {
-        // Skeleton (T-044 red tests): not implemented yet.
-        let _ = (id, emit);
-        todo!("T-044: LocalModels::download")
+        let Some(id) = ModelId::parse(id) else {
+            return Err(ReasonView::from(&DownloadError::NotInCatalog));
+        };
+        // Held across `start`: the download thread's first callback waits for the
+        // `Downloading` set here (core never calls the callback inside `start`).
+        let mut transient = lock(&self.transient);
+        let total = self.store.entry(id).map_or(0, |entry| entry.size_bytes);
+        let previous = transient.insert(id, LocalModelState::Downloading { received: 0, total });
+        let shared = Arc::clone(&self.transient);
+        let callback = move |event: DownloadEvent| {
+            let event = record(&shared, event);
+            // No lock is held here: `emit` may call `list` (or a command) itself.
+            emit(event);
+        };
+        match self.downloader.start(id, callback) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                match previous {
+                    Some(state) => transient.insert(id, state),
+                    None => transient.remove(&id),
+                };
+                Err(ReasonView::from(&error))
+            }
+        }
     }
 
     /// `local_model_cancel_download { id }`: true if a download of `id` was
     /// running; an unknown id is `false`.
     pub fn cancel(&self, id: &str) -> bool {
-        // Skeleton (T-044 red tests): not implemented yet.
-        let _ = id;
-        todo!("T-044: LocalModels::cancel")
+        ModelId::parse(id).is_some_and(|id| self.downloader.cancel(id))
     }
 }
 
+/// Updates the in-memory state for `event` (under the lock, released on return)
+/// and returns the event for the settings window.
+fn record(
+    transient: &Mutex<HashMap<ModelId, LocalModelState>>,
+    event: DownloadEvent,
+) -> LocalModelEvent {
+    let mut states = lock(transient);
+    match event {
+        DownloadEvent::Progress {
+            id,
+            received,
+            total,
+        } => {
+            states.insert(id, LocalModelState::Downloading { received, total });
+            LocalModelEvent::Progress {
+                id,
+                received,
+                total,
+            }
+        }
+        DownloadEvent::Finished { id } => {
+            states.remove(&id);
+            LocalModelEvent::State {
+                id,
+                state: LocalModelState::Downloaded,
+            }
+        }
+        DownloadEvent::Failed { id, reason } => {
+            let state = LocalModelState::Failed { reason };
+            states.insert(id, state.clone());
+            LocalModelEvent::State { id, state }
+        }
+        DownloadEvent::Cancelled { id } => {
+            states.remove(&id);
+            LocalModelEvent::State {
+                id,
+                state: LocalModelState::NotDownloaded,
+            }
+        }
+    }
+}
+
+/// The one refusal mapping (contracts/ipc.md command errors). `NotEnoughDiskSpace`
+/// reuses the failure's code, message and `needed` param.
 impl From<&DownloadError> for ReasonView {
     fn from(error: &DownloadError) -> ReasonView {
-        // Skeleton (T-044 red tests): not implemented yet.
-        let _ = error;
-        todo!("T-044: ReasonView from DownloadError")
+        let (code, message_key) = match error {
+            DownloadError::NotEnoughDiskSpace { needed } => {
+                return ReasonView::from(&DownloadFailure::NotEnoughDiskSpace { needed: *needed })
+            }
+            DownloadError::Busy => ("download_busy", i18n::DOWNLOAD_BUSY),
+            DownloadError::AlreadyDownloaded => {
+                ("already_downloaded", i18n::DOWNLOAD_ALREADY_DOWNLOADED)
+            }
+            DownloadError::NotInCatalog => ("not_in_catalog", i18n::DOWNLOAD_NOT_IN_CATALOG),
+            DownloadError::CannotStart => ("download_cannot_start", i18n::DOWNLOAD_CANNOT_START),
+        };
+        ReasonView {
+            code,
+            message_key,
+            params: Vec::new(),
+        }
     }
 }
 
+/// `DownloadFailure`'s own `code` / `message_id` / `message_params` (one mapping).
 impl From<&DownloadFailure> for ReasonView {
     fn from(failure: &DownloadFailure) -> ReasonView {
-        // Skeleton (T-044 red tests): not implemented yet.
-        let _ = failure;
-        todo!("T-044: ReasonView from DownloadFailure")
+        ReasonView {
+            code: failure.code(),
+            message_key: failure.message_id(),
+            params: failure.message_params(),
+        }
     }
 }
 
 /// The stable string (`ModelId::as_str`).
 impl Serialize for ModelId {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        // Skeleton (T-044 red tests): not implemented yet.
-        let _ = serializer;
-        todo!("T-044: ModelId wire")
+        serializer.serialize_str(self.as_str())
     }
 }
 
 /// contracts/ipc.md `ModelState`: `{ kind, ... }`.
 impl Serialize for LocalModelState {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        // Skeleton (T-044 red tests): not implemented yet.
-        let _ = serializer;
-        todo!("T-044: ModelState wire")
+        match self {
+            LocalModelState::NotDownloaded => {
+                let mut s = serializer.serialize_struct("ModelState", 1)?;
+                s.serialize_field("kind", "not_downloaded")?;
+                s.end()
+            }
+            LocalModelState::Downloading { received, total } => {
+                let mut s = serializer.serialize_struct("ModelState", 3)?;
+                s.serialize_field("kind", "downloading")?;
+                s.serialize_field("received", received)?;
+                s.serialize_field("total", total)?;
+                s.end()
+            }
+            LocalModelState::Downloaded => {
+                let mut s = serializer.serialize_struct("ModelState", 1)?;
+                s.serialize_field("kind", "downloaded")?;
+                s.end()
+            }
+            LocalModelState::Failed { reason } => {
+                let mut s = serializer.serialize_struct("ModelState", 2)?;
+                s.serialize_field("kind", "failed")?;
+                s.serialize_field("reason", &ReasonView::from(reason))?;
+                s.end()
+            }
+        }
     }
 }
 
 /// contracts/ipc.md `LocalModelView` (`nameKey`, `sizeBytes`).
 impl Serialize for LocalModelView {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        // Skeleton (T-044 red tests): not implemented yet.
-        let _ = serializer;
-        todo!("T-044: LocalModelView wire")
+        let mut s = serializer.serialize_struct("LocalModelView", 6)?;
+        s.serialize_field("id", &self.id)?;
+        s.serialize_field("nameKey", &self.name_key)?;
+        s.serialize_field("sizeBytes", &self.size_bytes)?;
+        s.serialize_field("recommended", &self.recommended)?;
+        s.serialize_field("state", &self.state)?;
+        s.serialize_field("loaded", &self.loaded)?;
+        s.end()
+    }
+}
+
+/// `params` as a JSON object of strings, in the order given.
+struct Params<'a>(&'a [(&'static str, String)]);
+
+impl Serialize for Params<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut map = serializer.serialize_map(Some(self.0.len()))?;
+        for (name, value) in self.0 {
+            map.serialize_entry(name, value)?;
+        }
+        map.end()
     }
 }
 
 /// contracts/ipc.md `FailureReason`: `params` omitted when empty.
 impl Serialize for ReasonView {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        // Skeleton (T-044 red tests): not implemented yet.
-        let _ = serializer;
-        todo!("T-044: FailureReason wire")
+        let mut s = serializer.serialize_struct("FailureReason", 3)?;
+        s.serialize_field("code", self.code)?;
+        s.serialize_field("messageKey", &self.message_key)?;
+        if self.params.is_empty() {
+            s.skip_field("params")?;
+        } else {
+            s.serialize_field("params", &Params(&self.params))?;
+        }
+        s.end()
     }
 }
 
 /// The event payload only (the name is [`LocalModelEvent::name`]).
 impl Serialize for LocalModelEvent {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        // Skeleton (T-044 red tests): not implemented yet.
-        let _ = serializer;
-        todo!("T-044: LocalModelEvent payload")
+        match self {
+            LocalModelEvent::Progress {
+                id,
+                received,
+                total,
+            } => {
+                let mut s = serializer.serialize_struct("LocalModelProgress", 3)?;
+                s.serialize_field("id", id)?;
+                s.serialize_field("received", received)?;
+                s.serialize_field("total", total)?;
+                s.end()
+            }
+            LocalModelEvent::State { id, state } => {
+                let mut s = serializer.serialize_struct("LocalModelStateEvent", 2)?;
+                s.serialize_field("id", id)?;
+                s.serialize_field("state", state)?;
+                s.end()
+            }
+        }
     }
 }

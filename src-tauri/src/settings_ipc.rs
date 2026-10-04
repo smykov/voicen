@@ -25,7 +25,6 @@ use voicen_core::autostart::Autostart;
 use voicen_core::clock::SystemClock;
 use voicen_core::hotkey_registrar::{HotkeyRegistrar, Prepared, Unavailable};
 use voicen_core::local_models::store::ModelStore;
-use voicen_core::models::DownloadedModels;
 use voicen_core::secrets::CredentialStore;
 use voicen_core::settings::file::FsSettingsFile;
 use voicen_core::settings::hotkey::Hotkey;
@@ -38,8 +37,8 @@ use voicen_core::settings::{LoadOutcome, Mode, WHISPER_ISO_639_1};
 pub const SETTINGS_CHANGED: &str = "settings://changed";
 
 /// Builds the service the release app and the tests share (J4): `FsSettingsFile`
-/// over `data_dir`, the given credential store and autostart entry, the interim
-/// `NoDownloadedModels` and fail-closed `HotkeyRegistrar`, `SystemClock`; then
+/// over `data_dir`, the given credential store, autostart entry and models store,
+/// the interim fail-closed `HotkeyRegistrar`, `SystemClock`; then
 /// `load_or_init`, then `reconcile_autostart` (T-014, R-5).
 ///
 /// `local_models` is the store of the one `LocalModels` (`LocalModels::store`,
@@ -51,14 +50,12 @@ pub fn load_settings(
     local_models: Arc<ModelStore>,
     os_language: Option<&str>,
 ) -> (Arc<SettingsService>, LoadOutcome) {
-    // Skeleton (T-044 red tests): the store is not wired yet.
-    let _ = local_models;
     let deps = SettingsDeps {
         file: Arc::new(FsSettingsFile::new(data_dir)),
         credentials,
         autostart,
         hotkeys: Arc::new(InterimHotkeyRegistrar),
-        local_models: Arc::new(NoDownloadedModels),
+        local_models,
         clock: Arc::new(SystemClock),
     };
     let (service, outcome) = SettingsService::load_or_init(deps, os_language);
@@ -114,21 +111,6 @@ pub fn settings_save(
 #[tauri::command]
 pub fn settings_speech_languages() -> Vec<&'static str> {
     WHISPER_ISO_639_1.to_vec()
-}
-
-/// Interim until T-016 (002's `ModelStore`): no built-in model is downloaded, which
-/// is the true state while models cannot be downloaded (`builtin_local` →
-/// `model.not_downloaded`).
-struct NoDownloadedModels;
-
-impl DownloadedModels for NoDownloadedModels {
-    fn is_downloaded(&self, _id: &str) -> bool {
-        false
-    }
-
-    fn list(&self) -> Vec<String> {
-        Vec::new()
-    }
 }
 
 /// Interim until T-006 (the real registrar): fails closed. `SettingsService` does

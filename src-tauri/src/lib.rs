@@ -4,9 +4,12 @@ use std::sync::Arc;
 
 use tauri::{App, Builder, Context, RunEvent, Runtime};
 use voicen_core::autostart::Autostart;
+use voicen_core::local_models::catalog::MODELS;
+use voicen_core::local_models::download::DiskSpace;
 use voicen_core::local_models::service::LocalModels;
 use voicen_core::secrets::CredentialStore;
 use voicen_core::settings::service::SettingsService;
+use voicen_core::timeouts::Timeouts;
 use voicen_core::BuildInfo;
 
 #[cfg(windows)]
@@ -30,13 +33,16 @@ fn commands<R: Runtime>(builder: Builder<R>) -> Builder<R> {
         get_build_info,
         settings_ipc::settings_get,
         settings_ipc::settings_save,
-        settings_ipc::settings_speech_languages
+        settings_ipc::settings_speech_languages,
+        local_models::local_models_list,
+        local_models::local_model_download,
+        local_models::local_model_cancel_download
     ])
 }
 
 /// The one app wiring, shared by `run()` and the tests (T-030 J4): registers
-/// `commands`, manages `service`, builds the app with `context`, and starts the
-/// `settings://changed` bridge on the built app's handle. tauri 2.12.1 runs
+/// `commands`, manages `service` and `local_models`, builds the app with `context`,
+/// and starts the `settings://changed` bridge on the built app's handle. tauri 2.12.1 runs
 /// `.setup()` only from `run` / `run_iteration`, never from `build()`, so the bridge
 /// starts here, after `build()`; `run()` then only calls `.run(…)` on the result.
 ///
@@ -48,9 +54,10 @@ pub fn build_app<R: Runtime>(
     service: Arc<SettingsService>,
     local_models: Arc<LocalModels>,
 ) -> tauri::Result<App<R>> {
-    // Skeleton (T-044 red tests): the coordinator is not managed yet.
-    let _ = local_models;
-    let app = commands(builder).manage(service.clone()).build(context)?;
+    let app = commands(builder)
+        .manage(service.clone())
+        .manage(local_models)
+        .build(context)?;
     settings_ipc::spawn_change_bridge(app.handle().clone(), service);
     Ok(app)
 }
@@ -96,6 +103,17 @@ fn release_autostart() -> Arc<dyn Autostart> {
     compile_error!("the Voicen app runs on Windows only: autostart is the HKCU Run value")
 }
 
+/// The release free-space probe of the models dir: `GetDiskFreeSpaceExW` (T-044).
+#[cfg(windows)]
+fn release_disk_space() -> Arc<dyn DiskSpace> {
+    Arc::new(local_models::WinDiskSpace)
+}
+
+#[cfg(not(windows))]
+fn release_disk_space() -> Arc<dyn DiskSpace> {
+    compile_error!("the Voicen app runs on Windows only: the disk probe is GetDiskFreeSpaceExW")
+}
+
 /// `true` when the Run value started this process (`--autostart`, T-014).
 #[cfg(windows)]
 fn release_launched_by_autostart() -> bool {
@@ -113,10 +131,20 @@ fn release_launched_by_autostart() -> bool {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     log_start(&paths::log_dir());
-    // Skeleton (T-044 red tests): run() opens the one LocalModels here, over
-    // paths::models_dir() and local_models::WinDiskSpace (one fixed stderr line for
-    // a cleanup error).
-    let local_models: Arc<LocalModels> = todo!("T-044: LocalModels::open in run()");
+    // The one LocalModels (T-044): its `.part` cleanup runs inside `open`, before
+    // any list or settings validation reads the models dir.
+    let (local_models, cleanup) = LocalModels::open(
+        paths::models_dir(),
+        release_disk_space(),
+        Timeouts::default(),
+        MODELS,
+    );
+    if cleanup.is_err() {
+        // Fixed text, no error detail (no path or OS text; the #45 interim until
+        // T-008's log). The app runs on; the leftover is never read as a model.
+        eprintln!("cannot remove unfinished model downloads at start");
+    }
+    let local_models = Arc::new(local_models);
     let os_language = locale::os_language();
     let (service, load_outcome) = settings_ipc::load_settings(
         paths::data_dir(),

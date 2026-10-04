@@ -57,9 +57,9 @@ jobs:
       # The shell's build script (tauri-build static VC runtime) puts a stub msvcrt.lib on its
       # search path; cargo gives every build script's search dirs (native_dirs) to every doctest
       # of the same invocation, so other crates' doctests must not share a run with `voicen` (T-033, F-001).
-      # --no-fail-fast: one red test binary must not hide the others; the step still fails at the end (T-048).
+      # --no-fail-fast: one red test binary must not hide the others; the step still fails at the end (T-048, T-044).
       - run: cargo test --workspace --exclude voicen --no-fail-fast
-      - run: cargo test -p voicen
+      - run: cargo test -p voicen --no-fail-fast
       - run: pnpm tauri build
       - name: Install silently, launch, check the start log line, the first-run settings.json, the Run value and the settings window
         shell: pwsh
@@ -174,6 +174,33 @@ jobs:
           Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
           if ($shown) { throw "a window is shown on a launch with a loaded settings.json ($shown)" }
           Write-Output "no shown window for 10 s after the start line of a launch with a loaded settings.json"
+      - name: A .part left by an earlier run is deleted at start (T-044 LocalModels::open in run())
+        shell: pwsh
+        run: |
+          $exe = Join-Path $env:LOCALAPPDATA 'Voicen\voicen.exe'
+          $log = Join-Path $env:LOCALAPPDATA 'Voicen\logs\voicen.log'
+          $models = Join-Path $env:LOCALAPPDATA 'Voicen\models'
+          $part = Join-Path $models 'ggml-base.bin.part'
+          $expected = "($env:VOICEN_COMMIT) started"
+          New-Item -ItemType Directory -Force -Path $models | Out-Null
+          [System.IO.File]::WriteAllBytes($part, [byte[]]::new(1024))
+          if (-not (Test-Path -LiteralPath $part -PathType Leaf)) { throw "could not place $part before the launch" }
+          Write-Output "placed a stale $part"
+          function Get-StartCount { if (Test-Path $log) { @(Select-String -Path $log -SimpleMatch $expected).Count } else { 0 } }
+          $before = Get-StartCount
+          $proc = Start-Process -FilePath $exe -PassThru
+          $started = $false
+          for ($i = 0; $i -lt 30 -and -not $started; $i++) { Start-Sleep -Seconds 1; $started = (Get-StartCount) -gt $before }
+          # run() writes the start line, then opens the one LocalModels, whose cleanup deletes every *.part.
+          $gone = $false
+          for ($i = 0; $i -lt 10 -and $started -and -not $gone; $i++) {
+            $gone = -not (Test-Path -LiteralPath $part)
+            if (-not $gone) { Start-Sleep -Seconds 1 }
+          }
+          Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+          if (-not $started) { throw "start log line with commit $env:VOICEN_COMMIT not written by the launch with a stale .part" }
+          if (-not $gone) { throw "$part is still present after the start line (cleanup_at_start not run at start)" }
+          Write-Output "the stale $part is gone after the start line"
       - uses: actions/upload-artifact@v4
         with:
           name: voicen-installer-${{ env.VOICEN_COMMIT }}

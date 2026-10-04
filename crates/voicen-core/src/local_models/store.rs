@@ -16,7 +16,8 @@ use crate::models::DownloadedModels;
 
 /// A model's state as the UI shows it. The store reports only `NotDownloaded`
 /// and `Downloaded` (disk-derived); `Downloading` and `Failed` live in memory in
-/// the shell and are lost on restart (spec FR-008).
+/// the coordinator ([`LocalModels`](super::service::LocalModels)) and are lost on
+/// restart (spec FR-008).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LocalModelState {
     NotDownloaded,

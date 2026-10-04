@@ -1,5 +1,5 @@
 //! The one data-directory resolver (T-030 J2, P-010; architecture.md: "shell (one
-//! function)"). Logs and settings (later history, models) derive from it.
+//! function)"). Logs, settings and the built-in models (later history) derive from it.
 
 use std::path::PathBuf;
 
@@ -19,6 +19,5 @@ pub fn log_dir() -> PathBuf {
 /// `data_dir()\models`: the built-in models (T-044, spec 002; the one models-dir
 /// resolver, P-010).
 pub fn models_dir() -> PathBuf {
-    // Skeleton (T-044 red tests): not implemented yet.
-    todo!("T-044: paths::models_dir")
+    data_dir().join("models")
 }
