@@ -1,14 +1,19 @@
 # The gate: every area's checks, each through scripts/tw-run in the area's toolchain.
-.PHONY: check check-shell-layout check-core check-ui core-image \
+.PHONY: check check-shell-layout check-shell-layout-fixtures check-core check-ui core-image \
 	licenses licenses-check licenses-unit licenses-fixture licenses-rust licenses-bundle \
 	licenses-npm licenses-generate licenses-stale
 
-check: check-shell-layout check-core check-ui licenses-check
+check: check-shell-layout check-shell-layout-fixtures check-core check-ui licenses-check
 
 # Shell tests only in src-tauri/tests/*.rs: no test attributes or doctests in src-tauri/src,
 # no benches or examples (T-035, F-002; docs/decisions/ci-toolchain.md). Host grep/awk.
 check-shell-layout:
 	scripts/ci/shell-test-layout.sh
+
+# Guard: the layout check must give its documented exit code on every fixture shell dir in
+# scripts/ci/fixtures/shell-test-layout/ (0 allowed, 1 violation, 3 cannot run). Host bash.
+check-shell-layout-fixtures:
+	scripts/ci/shell-test-layout.test.sh
 
 check-core:
 	scripts/tw-run core -- 'cargo fmt --check -p voicen-core && cargo clippy -p voicen-core --all-targets -- -D warnings'
