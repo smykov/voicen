@@ -74,6 +74,21 @@ pub struct ProgressThrottle;            // should_emit(now: Instant): first chun
 
 Guarantees: synchronous — the download runs on its own std thread with blocking reqwest, no tokio (decisions #22, #42); the no-data timeout is `ClientBuilder::timeout(download_no_data)` (each body read and the header wait) plus `connect_timeout(connect)`, never a total timeout; progress ≥ 1/s while data arrives, ≤ 4/s; final file appears only after the byte count equals the catalog size and the SHA-256 matches (rename of `<file>.part`); every other end closes `.part` and tries to delete it before its end event (best effort: a failed removal is ignored and the end event is still emitted; the leftover `.part` is never read as a model, the next `start` truncates it and `ModelStore::cleanup_at_start` removes it at the next app start; logging the failed removal waits for T-008), and the active slot is cleared before the end event; a cancel takes effect when the current read returns (≤ `download_no_data`) and ends `Cancelled`, not `Failed`; disk check = catalog size + 1 %, a probe error lets the download proceed; Retry is `start` again.
 
+## LocalModels (coordinator, T-044)
+
+```rust
+// voicen_core::local_models::service. The one place the shell talks to; platform-free, proven by the Linux gate.
+impl LocalModels {
+    pub fn open(models_dir, disk: Arc<dyn DiskSpace>, timeouts, catalog) -> (LocalModels, io::Result<()>); // cleanup_at_start runs before it returns; its result is the 2nd element
+    pub fn list(&self) -> Vec<LocalModelView>;          // catalog order; disk state merged with the in-memory Downloading/Failed state
+    pub fn download(&self, id: &str, emit: impl Fn(LocalModelEvent) + Send + 'static) -> Result<(), ReasonView>;
+    pub fn cancel(&self, id: &str) -> bool;             // unknown id or nothing running: false
+    pub fn store(&self) -> Arc<ModelStore>;             // the one store, also SettingsDeps.local_models
+}
+```
+
+Wire types (`LocalModelView`, `ReasonView`, `LocalModelEvent`), codes, message ids and the error-to-code mapping: `contracts/ipc.md` (not repeated here). Invariants: `docs/decisions/model-download.md`.
+
 ## ModelResidency
 
 ```rust
