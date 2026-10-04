@@ -61,8 +61,12 @@ pub struct JobReport {
     pub pending: Option<PendingId>,
 }
 
-/// The job sequencer. `Send + Sync`: jobs may run on several threads at once;
-/// the pending slot changes only under its one lock (see `keep_pending`).
+/// The job sequencer. `Send + Sync`, but `release` (and so `run_job`, until
+/// T-011 splits it) must run on one thread at a time: `deliver` (clipboard
+/// write, modifier wait, Ctrl+V) is not serialized across jobs, so concurrent
+/// jobs could paste one transcript into another job's window (research R-10:
+/// one delivery thread). `process` may run concurrently. The slot lock in
+/// `keep_pending` is an extra safeguard, not permission for concurrent jobs.
 pub struct Pipeline {
     deps: PipelineDeps,
     /// The one source of every request's durations (FR-24).
@@ -314,12 +318,10 @@ impl Pipeline {
     /// Stores the audio under a new id, makes it the one pending recording (or
     /// none, if storing failed), and deletes the audio it replaced either way.
     ///
-    /// The id, the store write and the swap happen under the slot lock, so with
-    /// concurrent failing jobs the slot always holds the audio of the last job to
-    /// take the lock, and a job reports only an id it put in the slot itself (a
-    /// later job may replace it, as any newer failure does). The replaced audio is
-    /// deleted after the lock is released: its id has left the slot and is never
-    /// handed out again.
+    /// The id, the store write and the swap happen under the slot lock as a
+    /// safeguard; it is not a concurrency guarantee (`release` runs on one thread
+    /// at a time, see [`Pipeline`]). The replaced audio is deleted after the lock
+    /// is released: its id has left the slot and is never handed out again.
     fn keep_pending(&self, audio: &AudioBuffer, reason: &FailureReason) -> Option<PendingId> {
         let (stored, older) = {
             let mut slot = lock(&self.pending);
