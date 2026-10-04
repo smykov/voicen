@@ -1,9 +1,14 @@
 # The gate: every area's checks, each through scripts/tw-run in the area's toolchain.
-.PHONY: check check-core check-ui core-image \
+.PHONY: check check-shell-layout check-core check-ui core-image \
 	licenses licenses-check licenses-unit licenses-fixture licenses-rust licenses-bundle \
 	licenses-npm licenses-generate licenses-stale
 
-check: check-core check-ui licenses-check
+check: check-shell-layout check-core check-ui licenses-check
+
+# Shell tests only in src-tauri/tests/*.rs: no test attributes or doctests in src-tauri/src,
+# no benches or examples (T-035, F-002; docs/decisions/ci-toolchain.md). Host grep/awk.
+check-shell-layout:
+	scripts/ci/shell-test-layout.sh
 
 check-core:
 	scripts/tw-run core -- 'cargo fmt --check -p voicen-core && cargo clippy -p voicen-core --all-targets -- -D warnings'

@@ -1,0 +1,17 @@
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <!-- Copy of tauri-build 2.7.1 src/windows-app-manifest.xml (the manifest tauri-build embeds
+       into the release bin), for the integration-test exes (src-tauri/build.rs, T-035, F-002).
+       Same elements, attributes and values; only whitespace and these comments differ.
+       Compare it with tauri-build's file on every tauri-build upgrade
+       (docs/decisions/ci-toolchain.md). -->
+  <dependency>
+    <dependentAssembly>
+      <assemblyIdentity
+        type="win32"
+        name="Microsoft.Windows.Common-Controls"
+        version="6.0.0.0"
+        processorArchitecture="*"
+        publicKeyToken="6595b64144ccf1df" language="*" /><!-- public key token of the Windows assembly, not a secret: teamwright:allow-secret -->
+    </dependentAssembly>
+  </dependency>
+</assembly>

@@ -8,6 +8,7 @@
 | ID | Date | What broke | Why (root cause) | Rule it produced | Principle | Tasks |
 |---|---|---|---|---|---|---|
 | F-001 | 2026-10-03 | Windows CI red since T-003: voicen-core doctest secrets.rs:16 fails to link (LNK4003 on target/debug/build/voicen-*/out/msvcrt.lib, LNK1120 CRT symbols); tauri build, install and smoke never ran | tauri-build's static VC runtime puts a stub msvcrt.lib on the shell's link search path; cargo passes all build scripts' search dirs to every doctest of one invocation, but only the own package's link-args (cargo rust-1.99.0 cargo_test.rs:231, build_runner/mod.rs:301-312) | On the Windows job the shell package is tested in its own cargo invocation; every other crate runs with --exclude voicen (ci.yml comment) | — | T-033 |
+| F-002 | 2026-10-03 | Windows CI red at f2e239b (T-030): src-tauri/tests/settings_ipc.rs exe exits 0xc0000139 STATUS_ENTRYPOINT_NOT_FOUND before any test; tauri build, install and smoke skipped | tauri-build scopes its link outputs for the app bin: the Common-Controls v6 manifest reaches bin targets only (embed-resource rustc-link-arg-bins; cargo custom_build.rs:266-277), so integration-test exes bind comctl32 v5.82 and muda's TaskDialogIndirect import (tauri default feature common-controls-v6) has no entry point. Same class mechanism as F-001: each test-exe kind gets a different subset of the shell's build-script outputs | src-tauri/build.rs gives every integration test the same manifest (rustc-link-arg-tests /MANIFEST:EMBED /MANIFESTINPUT, windows-msvc only); shell tests with tests live only in src-tauri/tests, checked in make check (docs/decisions/ci-toolchain.md) | — | T-030, T-035 |
 
 ## Classes
 
@@ -15,4 +16,4 @@
 
 | Class | Entries | Count | Current tier |
 |---|---|---|---|
-| ci-toolchain | F-001 | 1 | T1 |
+| ci-toolchain | F-001, F-002 | 2 | T3 (make check: shell test layout; Windows job) |
