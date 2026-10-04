@@ -1,7 +1,8 @@
-//! Shared helpers of `tests/local_download.rs`, `tests/local_download_refused.rs`
-//! and `tests/local_store.rs` (T-016): the fake model, test catalog entries, a fake
-//! disk probe and a raw-TCP mock model server; the download harness is in
-//! [`download`].
+//! Shared helpers of the voicen-core test binaries: for `tests/local_download.rs`,
+//! `tests/local_download_refused.rs` and `tests/local_store.rs` (T-016) the fake
+//! model, test catalog entries, a fake disk probe and a raw-TCP mock model server
+//! (the download harness is in [`download`]); for `tests/openai_client.rs` and
+//! `tests/api_pipeline.rs` the refused address [`refused_addr`] (T-047).
 //!
 //! The fake model is 65 600 bytes (~64 KiB; size + 1 % is a whole number). Its
 //! SHA-256 was computed once on the host with `sha256sum` over the same byte
@@ -191,11 +192,29 @@ impl Server {
 }
 
 /// The one loopback address a test may expect to be refused (T-047, decision #53):
-/// a fixed port below the OS ephemeral range, so no `bind(0)` or `connect()` of a
-/// sibling test can be handed it, probed as refused at each use. Never a port that
-/// was bound and released. Tests: `refused_addr_tests.rs`.
+/// `127.0.0.1:1`.
+///
+/// Invariant: never a port that was bound and released. Port 1 lies below the OS
+/// ephemeral range (Linux `ip_local_port_range`, 32768–60999 by default; Windows
+/// dynamic range, 49152–65535 by default), so no `bind(0)` or `connect()` of a
+/// sibling test in the same process can be handed it. That nothing listens there
+/// is checked at each call: a plain connect must be refused, otherwise this panics
+/// (a test-environment problem, reported loudly instead of a flaky result).
+/// Tests: `refused_addr_tests.rs`.
 pub fn refused_addr() -> SocketAddr {
-    todo!("T-047: common::refused_addr")
+    let addr = SocketAddr::from(([127, 0, 0, 1], 1));
+    match TcpStream::connect_timeout(&addr, Duration::from_secs(5)) {
+        Ok(_) => panic!(
+            "refused_addr: something listens on {addr}; the refused-port tests need \
+             nothing listening there (T-047, decision #53)"
+        ),
+        Err(e) if e.kind() == io::ErrorKind::ConnectionRefused => addr,
+        Err(e) => panic!(
+            "refused_addr: a connect probe to {addr} was not refused ({:?}: {e}); \
+             the refused-port tests need an immediate refusal (T-047, decision #53)",
+            e.kind()
+        ),
+    }
 }
 
 pub fn url_for(port: u16, file: &str) -> String {

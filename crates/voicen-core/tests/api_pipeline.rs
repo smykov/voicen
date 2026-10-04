@@ -7,10 +7,12 @@
 //! because the blocking reqwest client panics inside a tokio runtime context
 //! (T-040). Fake data only: 127.0.0.1, 192.0.2.1 (RFC 5737), `sk-test-SECRET`.
 
-use std::net::TcpListener;
+mod common;
+
 use std::sync::Arc;
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
+use common::refused_addr;
 use serde_json::json;
 use voicen_core::audio::{wav, AudioBuffer};
 use voicen_core::autostart::FakeAutostart;
@@ -224,12 +226,6 @@ async fn received(server: &MockServer) -> Vec<wiremock::Request> {
         .received_requests()
         .await
         .expect("request recording is on")
-}
-
-/// A loopback port with nothing listening (bound, read, released).
-fn refused_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind 127.0.0.1:0");
-    listener.local_addr().expect("local addr").port()
 }
 
 fn header<'a>(r: &'a wiremock::Request, name: &str) -> Option<&'a str> {
@@ -733,17 +729,17 @@ fn refused_host_is_cannot_reach() {
     // Acceptance 4 "unreachable host": a refused loopback port is CannotReach
     // with host:port, at once, with the production pipeline. Bite: the error
     // turned into another reason, the whole URL as host, nothing kept pending.
-    let port = refused_port();
+    let addr = refused_addr();
     let mut h = harness();
     let rec = h.record(
         fixtures::speech_3s(),
-        Arc::new(api_settings(&format!("http://127.0.0.1:{port}/v1"))),
+        Arc::new(api_settings(&format!("http://{addr}/v1"))),
     );
     let (report, took) = h.run(rec);
     assert_eq!(
         report.end,
         JobEnd::Failed(FailureReason::CannotReach {
-            host: format!("127.0.0.1:{port}")
+            host: addr.to_string()
         })
     );
     assert!(took < Duration::from_secs(2), "took {took:?}");
@@ -1009,7 +1005,7 @@ async fn no_event_or_failure_carries_key_query_or_transcript() {
     .await;
     let slow = server_with(ok_text(TRANSCRIPT).set_delay(Duration::from_secs(5))).await;
     let with_query = |base: &str| format!("{base}?api-version={QUERY_SECRET}");
-    let refused = format!("http://127.0.0.1:{}/v1", refused_port());
+    let refused = format!("http://{}/v1", refused_addr());
     let ms = Timeouts {
         connect: Duration::from_secs(2),
         api_transcription: Duration::from_millis(300),

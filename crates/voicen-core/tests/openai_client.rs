@@ -6,10 +6,13 @@
 //! context (T-001 Investigation (e)). Fake data only: 127.0.0.1, `.invalid`
 //! (RFC 6761), `sk-test-SECRET`.
 
+mod common;
+
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::time::{Duration, Instant};
 
+use common::refused_addr;
 use serde_json::json;
 use voicen_core::audio::{wav, AudioBuffer};
 use voicen_core::engine::openai::OpenAiCompatibleEngine;
@@ -196,12 +199,6 @@ fn text_body_of_len(total: usize) -> (Vec<u8>, String) {
     let body = [prefix.as_slice(), text.as_bytes(), suffix.as_slice()].concat();
     assert_eq!(body.len(), total);
     (body, text)
-}
-
-/// A loopback port with nothing listening (bound, read, released).
-fn refused_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind 127.0.0.1:0");
-    listener.local_addr().expect("local addr").port()
 }
 
 /// Reads one HTTP request (headers + Content-Length or chunked body).
@@ -469,15 +466,15 @@ async fn delay_past_ms_timeout_is_timeout() {
 fn refused_loopback_port_is_cannot_reach_host_port() {
     // Connection refused -> CannotReach with the base URL's host:port.
     // Bite: NetworkUnavailable for a refused port, the whole URL as `host`.
-    let port = refused_port();
+    let addr = refused_addr();
     let got = transcribe(
-        api_engine(&format!("http://127.0.0.1:{port}/v1"), Some(KEY)),
+        api_engine(&format!("http://{addr}/v1"), Some(KEY)),
         req(None),
     );
     assert_eq!(
         got,
         Err(FailureReason::CannotReach {
-            host: format!("127.0.0.1:{port}")
+            host: addr.to_string()
         })
     );
 }
@@ -656,10 +653,10 @@ async fn no_failure_contains_query_key_or_transcript() {
         outcomes.push((name.to_string(), got, expected));
     }
 
-    let port = refused_port();
+    let addr = refused_addr();
     let got = transcribe(
         api_engine(
-            &format!("http://127.0.0.1:{port}/v1?api-version={QUERY_SECRET}"),
+            &format!("http://{addr}/v1?api-version={QUERY_SECRET}"),
             Some(KEY),
         ),
         req(None),
@@ -668,7 +665,7 @@ async fn no_failure_contains_query_key_or_transcript() {
         "refused".to_string(),
         got,
         FailureReason::CannotReach {
-            host: format!("127.0.0.1:{port}"),
+            host: addr.to_string(),
         },
     ));
 
