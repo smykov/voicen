@@ -32,9 +32,10 @@ use crate::vad::SpeechGate;
 pub type EngineFactory =
     dyn Fn(&Settings, &dyn CredentialStore) -> Result<Box<dyn Engine>, FailureReason> + Send + Sync;
 
-/// The recording controller's context `C`, taken at press (T-006:
-/// `Paster::capture_start_window`, `SettingsService::snapshot`), so the job uses
-/// the settings in force when the recording started (Clarification 4).
+/// The recording controller's context `C`, taken at press by the dictation
+/// session (`Paster::capture_start_window`, `SettingsService::snapshot`; T-051),
+/// so the job uses the settings in force when the recording started
+/// (Clarification 4).
 #[derive(Debug, Clone)]
 pub struct PressContext {
     pub start_window: Option<StartWindow>,
@@ -67,6 +68,8 @@ pub struct JobReport {
 /// jobs could paste one transcript into another job's window (research R-10:
 /// one delivery thread). `process` may run concurrently. The slot lock in
 /// `keep_pending` is an extra safeguard, not permission for concurrent jobs.
+/// In the app the one caller is the dictation session's FIFO worker, which owns
+/// the pipeline (`crate::dictation`, T-051, decision #48).
 pub struct Pipeline {
     deps: PipelineDeps,
     /// The one source of every request's durations (FR-24).
@@ -183,8 +186,10 @@ impl Pipeline {
         self.release(&job, done)
     }
 
-    /// The pending recording and its last reason (T-006/T-007: tray
-    /// `retry_available`, the toast's retry id).
+    /// The pending recording and its last reason (tray `retry_available`, read
+    /// by the dictation session's worker after each job, T-051; T-007: the toast's
+    /// retry id). It takes the slot lock, which `keep_pending` holds across
+    /// `put_pending`: call it on the job thread, not on an input thread.
     pub fn pending(&self) -> Option<(PendingId, FailureReason)> {
         lock(&self.pending)
             .as_ref()

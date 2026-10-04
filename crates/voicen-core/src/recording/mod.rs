@@ -20,8 +20,9 @@
 //! 3 s, and not at all if they have passed. A press drops the message (it is
 //! not shown again); a later failure or notice replaces it.
 //!
-//! The shell calls `settings::gate::dictation_gate` before [`press`]; the engine =
-//! none check is not repeated here.
+//! The dictation session (`crate::dictation`, T-051) calls
+//! `settings::gate::dictation_gate` before [`press`]; the engine = none check is not
+//! repeated here.
 //!
 //! [`press`]: RecordingController::press
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
@@ -133,6 +134,21 @@ impl<C> Release<C> {
             Release::Ignored => None,
         }
     }
+
+    /// The hold the release decided on (the `duration_ms` of `RecordingEnded`):
+    /// release instant minus press instant, saturating at zero, for `Stop` and
+    /// `Discarded`; `None` for `Ignored`.
+    pub fn held(&self) -> Option<Duration> {
+        match self {
+            Release::Stop(ticket) => Some(
+                ticket
+                    .stopped_at
+                    .saturating_duration_since(ticket.started_at),
+            ),
+            Release::Discarded { held, .. } => Some(*held),
+            Release::Ignored => None,
+        }
+    }
 }
 
 /// The right to finish one recording. Not `Clone`; built only by the controller.
@@ -194,9 +210,10 @@ struct Live<C> {
 }
 
 /// Hold-mode recording controller. `C` is opaque context taken at press and
-/// returned with the recording (T-006 passes the start window).
+/// returned with the recording (the session passes `pipeline::PressContext`).
 ///
-/// Methods take `&mut self` and run no threads; the shell serialises the calls.
+/// Methods take `&mut self` and run no threads; the dictation session serialises
+/// the calls under its one lock (T-051).
 #[derive(Debug)]
 pub struct RecordingController<C> {
     live: Option<Live<C>>,
@@ -206,6 +223,9 @@ pub struct RecordingController<C> {
     /// Tray `Error`: the last job or capture failed; cleared by a delivery or the
     /// tray menu.
     error: bool,
+    /// Tray `HotkeyError`: the last hotkey registration failed; cleared only by a
+    /// successful one.
+    hotkey_error: bool,
     message: Option<ShownMessage>,
     indicator: IndicatorState,
 }
@@ -223,6 +243,7 @@ impl<C> RecordingController<C> {
             next_id: 0,
             queued: BTreeSet::new(),
             error: false,
+            hotkey_error: false,
             message: None,
             indicator: IndicatorState::default(),
         };
@@ -362,30 +383,28 @@ impl<C> RecordingController<C> {
     /// The hotkey registration result (T-051): `false` sets tray `HotkeyError`
     /// (above every other tray state); only `true` clears it (FR-011, FR-028;
     /// data-model "HotkeyError is cleared only by a successful registration").
-    ///
-    /// SKELETON (T-051 red tests): not implemented yet.
+    /// Nothing else changes (tray `Error` and a message whose 3 s have not passed
+    /// stay).
     pub fn hotkey_registration(&mut self, registered: bool, at: Instant) {
-        let _ = (registered, at);
-        todo!("T-051: RecordingController::hotkey_registration")
+        self.expire(at);
+        self.hotkey_error = !registered;
+        self.refresh();
     }
 
     /// A notice raised outside a job (T-051, T-006 Q8 -> decision #64; for
     /// example `notice.choose_engine` when engine = none blocks a press): the
     /// message for 3 s from `at`, tray unchanged, by the same rule as
     /// `JobEnd::Notice`.
-    ///
-    /// SKELETON (T-051 red tests): not implemented yet.
     pub fn notice(&mut self, id: MessageId, at: Instant) {
-        let _ = (id, at);
-        todo!("T-051: RecordingController::notice")
+        self.expire(at);
+        self.show(id, Vec::new(), at);
+        self.refresh();
     }
 
     /// The id of the recording that is on, if any (T-051: the session asks this
     /// instead of keeping its own flag, P-010).
-    ///
-    /// SKELETON (T-051 red tests): not implemented yet.
     pub fn live_id(&self) -> Option<RecordingId> {
-        todo!("T-051: RecordingController::live_id")
+        self.live.as_ref().map(|l| l.id)
     }
 
     /// Timer callback: expires the overlay message (at exactly its `until`).
@@ -428,8 +447,7 @@ impl<C> RecordingController<C> {
     /// Re-derive the indicator from the state; every mutating method ends here.
     fn refresh(&mut self) {
         self.indicator = IndicatorState::derive(&IndicatorInputs {
-            // No input sets it yet: T-006 adds the hotkey-registration input.
-            hotkey_error: false,
+            hotkey_error: self.hotkey_error,
             recording: self.live.is_some(),
             error: self.error,
             message: self.message.clone(),

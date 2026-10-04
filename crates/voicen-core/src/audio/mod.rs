@@ -60,18 +60,8 @@ impl AudioBuffer {
         if rate == 0 {
             return Err(AudioError::ZeroRate);
         }
-        if channels == 0 {
-            return Err(AudioError::ZeroChannels);
-        }
-        let channels = usize::from(channels);
-        if !samples.len().is_multiple_of(channels) {
-            return Err(AudioError::RaggedFrames);
-        }
-        let scale = 1.0 / channels as f32;
-        let mono: Vec<f32> = samples
-            .chunks_exact(channels)
-            .map(|frame| frame.iter().sum::<f32>() * scale)
-            .collect();
+        let mut mono = Vec::new();
+        mix_to_mono(samples, channels, &mut mono)?;
         let mono = if rate == SAMPLE_RATE {
             mono
         } else {
@@ -86,6 +76,27 @@ impl AudioBuffer {
     pub fn samples(&self) -> &[i16] {
         &self.samples
     }
+}
+
+/// The one mix-down rule: interleaved `f32` frames with `channels` channels,
+/// each frame's channels averaged, appended to `out` as mono. Used by
+/// [`AudioBuffer::from_frames`] and by the dictation session's capture sink, which
+/// mixes down as frames arrive (T-051). On an error nothing is appended.
+pub fn mix_to_mono(samples: &[f32], channels: u16, out: &mut Vec<f32>) -> Result<(), AudioError> {
+    if channels == 0 {
+        return Err(AudioError::ZeroChannels);
+    }
+    let channels = usize::from(channels);
+    if !samples.len().is_multiple_of(channels) {
+        return Err(AudioError::RaggedFrames);
+    }
+    let scale = 1.0 / channels as f32;
+    out.extend(
+        samples
+            .chunks_exact(channels)
+            .map(|frame| frame.iter().sum::<f32>() * scale),
+    );
+    Ok(())
 }
 
 /// `[-1.0, 1.0]` to `i16` full scale, rounded; out-of-range values (and the

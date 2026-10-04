@@ -4,10 +4,116 @@
 //! crate here, so the Linux gate proves the tables; T-006 cross-checks them
 //! against the `windows::Win32::…` constants on Windows CI.
 //!
-//! SKELETON (T-051 red tests): bodies are placeholders for the developer.
+//! The values were read from the pinned `windows` 0.62.2 source
+//! (`Win32/UI/Input/KeyboardAndMouse/mod.rs`: `MOD_*`, `VK_*`;
+//! `Win32/System/SystemServices/mod.rs`: `SECURITY_MANDATORY_*_RID`).
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
-use crate::settings::hotkey::Hotkey;
+use crate::settings::hotkey::{Hotkey, HotkeyKey};
+
+const MOD_ALT: u32 = 0x0001;
+const MOD_CONTROL: u32 = 0x0002;
+const MOD_SHIFT: u32 = 0x0004;
+const MOD_WIN: u32 = 0x0008;
+/// Auto-repeat of a held hotkey sends no further `WM_HOTKEY` (R-1).
+const MOD_NOREPEAT: u32 = 0x4000;
+
+const VK_SHIFT: u16 = 0x10;
+const VK_CONTROL: u16 = 0x11;
+/// Alt.
+const VK_MENU: u16 = 0x12;
+/// There is no generic Win virtual key: the left and the right one.
+const VK_LWIN: u16 = 0x5B;
+const VK_RWIN: u16 = 0x5C;
+
+/// The virtual-key code of a key of the closed set.
+fn vk(key: HotkeyKey) -> u16 {
+    use HotkeyKey::*;
+    match key {
+        A => 0x41,
+        B => 0x42,
+        C => 0x43,
+        D => 0x44,
+        E => 0x45,
+        F => 0x46,
+        G => 0x47,
+        H => 0x48,
+        I => 0x49,
+        J => 0x4A,
+        K => 0x4B,
+        L => 0x4C,
+        M => 0x4D,
+        N => 0x4E,
+        O => 0x4F,
+        P => 0x50,
+        Q => 0x51,
+        R => 0x52,
+        S => 0x53,
+        T => 0x54,
+        U => 0x55,
+        V => 0x56,
+        W => 0x57,
+        X => 0x58,
+        Y => 0x59,
+        Z => 0x5A,
+        Digit0 => 0x30,
+        Digit1 => 0x31,
+        Digit2 => 0x32,
+        Digit3 => 0x33,
+        Digit4 => 0x34,
+        Digit5 => 0x35,
+        Digit6 => 0x36,
+        Digit7 => 0x37,
+        Digit8 => 0x38,
+        Digit9 => 0x39,
+        F1 => 0x70,
+        F2 => 0x71,
+        F3 => 0x72,
+        F4 => 0x73,
+        F5 => 0x74,
+        F6 => 0x75,
+        F7 => 0x76,
+        F8 => 0x77,
+        F9 => 0x78,
+        F10 => 0x79,
+        F11 => 0x7A,
+        F12 => 0x7B,
+        F13 => 0x7C,
+        F14 => 0x7D,
+        F15 => 0x7E,
+        F16 => 0x7F,
+        F17 => 0x80,
+        F18 => 0x81,
+        F19 => 0x82,
+        F20 => 0x83,
+        F21 => 0x84,
+        F22 => 0x85,
+        F23 => 0x86,
+        F24 => 0x87,
+        Space => 0x20,
+        PageUp => 0x21,
+        PageDown => 0x22,
+        End => 0x23,
+        Home => 0x24,
+        ArrowLeft => 0x25,
+        ArrowUp => 0x26,
+        ArrowRight => 0x27,
+        ArrowDown => 0x28,
+        Insert => 0x2D,
+        Delete => 0x2E,
+        Pause => 0x13,
+        Numpad0 => 0x60,
+        Numpad1 => 0x61,
+        Numpad2 => 0x62,
+        Numpad3 => 0x63,
+        Numpad4 => 0x64,
+        Numpad5 => 0x65,
+        Numpad6 => 0x66,
+        Numpad7 => 0x67,
+        Numpad8 => 0x68,
+        Numpad9 => 0x69,
+    }
+}
 
 /// What `RegisterHotKey` and the release poll need for one hotkey.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -23,15 +129,34 @@ pub struct HotkeyCodes {
 
 /// The `RegisterHotKey` modifiers, the key's VK and the poll groups of `h`.
 pub fn hotkey_codes(h: &Hotkey) -> HotkeyCodes {
-    let _ = h;
-    todo!("T-051: win32_data::hotkey_codes")
+    let key = vk(h.key);
+    let mut modifiers = MOD_NOREPEAT;
+    let mut poll = Vec::with_capacity(5);
+    for (pressed, bit, group) in [
+        (h.ctrl, MOD_CONTROL, &[VK_CONTROL][..]),
+        (h.alt, MOD_ALT, &[VK_MENU][..]),
+        (h.shift, MOD_SHIFT, &[VK_SHIFT][..]),
+        (h.win, MOD_WIN, &[VK_LWIN, VK_RWIN][..]),
+    ] {
+        if pressed {
+            modifiers |= bit;
+            poll.push(group.to_vec());
+        }
+    }
+    poll.push(vec![key]);
+    HotkeyCodes {
+        modifiers,
+        vk: key,
+        poll,
+    }
 }
 
 /// Hold-mode release (R-1: the first key found up counts as the release): true
-/// when any group of `poll` has no virtual key down.
+/// when any group of `poll` has no virtual key down. [`hotkey_codes`] always
+/// gives at least the key's group; an empty `poll` is never released.
 pub fn released(poll: &[Vec<u16>], is_down: impl Fn(u16) -> bool) -> bool {
-    let _ = (poll, is_down);
-    todo!("T-051: win32_data::released")
+    poll.iter()
+        .any(|group| !group.iter().any(|&vk| is_down(vk)))
 }
 
 /// A mandatory integrity level RID (`SECURITY_MANDATORY_*_RID`).
@@ -40,9 +165,14 @@ pub struct IntegrityLevel(pub u32);
 
 /// R-12 / data-model "StartWindow.elevated": the target runs above our integrity
 /// level, or either level is unknown (then paste is unsafe: copy only).
+///
+/// UIPI compares the RIDs, so `MEDIUM_PLUS` (0x2100) is above `MEDIUM` (0x2000).
+/// An unknown own level is treated like an unknown target (T-051 analysis Q4).
 pub fn target_elevated(own: Option<IntegrityLevel>, target: Option<IntegrityLevel>) -> bool {
-    let _ = (own, target);
-    todo!("T-051: win32_data::target_elevated")
+    match (own, target) {
+        (Some(own), Some(target)) => target > own,
+        _ => true,
+    }
 }
 
 #[cfg(test)]

@@ -445,6 +445,68 @@ impl TempAudioStore for BlockingStore {
     }
 }
 
+/// A microphone whose captures deliver the scripted chunks at once and whose
+/// `stop`, for a capture started while `block_stop` is on, signals `entered` and
+/// then waits for `go` (bounded by `BUDGET`): it holds a release between the
+/// controller's release and its finish.
+struct BlockingStopSource {
+    chunks: Mutex<Vec<FrameChunk>>,
+    block_stop: AtomicBool,
+    entered: Mutex<mpsc::Sender<()>>,
+    go: Arc<Mutex<mpsc::Receiver<()>>>,
+}
+
+impl BlockingStopSource {
+    fn new() -> (
+        Arc<BlockingStopSource>,
+        mpsc::Receiver<()>,
+        mpsc::Sender<()>,
+    ) {
+        let (entered_tx, entered) = mpsc::channel();
+        let (go, go_rx) = mpsc::channel();
+        let source = Arc::new(BlockingStopSource {
+            chunks: Mutex::new(Vec::new()),
+            block_stop: AtomicBool::new(false),
+            entered: Mutex::new(entered_tx),
+            go: Arc::new(Mutex::new(go_rx)),
+        });
+        (source, entered, go)
+    }
+}
+
+/// Where a held `stop` reports that it began, and what it waits for.
+type StopGate = (mpsc::Sender<()>, Arc<Mutex<mpsc::Receiver<()>>>);
+
+struct BlockingStopCapture {
+    gate: Option<StopGate>,
+}
+
+impl voicen_core::platform::CaptureHandle for BlockingStopCapture {
+    fn stop(self: Box<Self>) -> Result<(), CaptureError> {
+        if let Some((entered, go)) = &self.gate {
+            let _ = entered.send(());
+            let _ = lock(go).recv_timeout(BUDGET);
+        }
+        Ok(())
+    }
+}
+
+impl AudioSource for BlockingStopSource {
+    fn start(
+        &self,
+        sink: Arc<dyn FrameSink>,
+    ) -> Result<Box<dyn voicen_core::platform::CaptureHandle>, CaptureError> {
+        for c in lock(&self.chunks).iter() {
+            sink.frames(&c.samples, c.rate, c.channels, c.at);
+        }
+        let gate = self
+            .block_stop
+            .load(Ordering::SeqCst)
+            .then(|| (lock(&self.entered).clone(), Arc::clone(&self.go)));
+        Ok(Box::new(BlockingStopCapture { gate }))
+    }
+}
+
 // ---- the rig ---------------------------------------------------------------------
 
 /// Ports a test replaces in the default rig.
@@ -456,6 +518,8 @@ struct Custom {
     ui: Option<Arc<Sequence>>,
     /// The pending-audio store.
     store: Option<Arc<BlockingStore>>,
+    /// The microphone (default: the rig's `FakeAudioSource`).
+    audio: Option<Arc<dyn AudioSource>>,
 }
 
 struct Rig {
@@ -519,6 +583,10 @@ impl Rig {
             Some(b) => b.clone(),
             None => store.clone(),
         };
+        let audio_port: Arc<dyn AudioSource> = match &custom.audio {
+            Some(a) => a.clone(),
+            None => audio.clone(),
+        };
         let session = DictationSession::start(SessionDeps {
             pipeline: PipelineDeps {
                 gate: energy_gate(),
@@ -530,7 +598,7 @@ impl Rig {
                 post_processor: Arc::new(PassThrough),
             },
             engine_factory: Some(engine_factory(&engine, reply)),
-            audio: audio.clone(),
+            audio: audio_port,
             indicator: indicator_port,
             requests: requests_port,
             settings: settings.clone(),
@@ -875,6 +943,73 @@ fn press_during_a_slow_job_starts_recording_at_once() {
         out.texts()
     );
     assert_eq!(out.texts(), vec!["A", "B"]);
+}
+
+#[test]
+fn a_job_ending_while_the_next_stop_is_in_flight_does_not_flash_hidden() {
+    // Added by the developer (T-051 Notes (1): no Hidden between Recording and
+    // Processing; invariant (3)). A's job ends while B's release is between the
+    // controller's release and its finish (B's capture is stopping): the
+    // controller then shows neither B nor B's job, so a publish of that interim
+    // state would hide the overlay and create it again. The overlay goes A:
+    // Recording, Processing; B: Recording, Processing; Hidden. Bite: the worker
+    // (or the timer) publishing while a stop is in flight ([.., Recording,
+    // Hidden, Processing, Hidden]).
+    let [a, b, _] = three_recordings();
+    let g = gated(48_000, &[(48_000, "A"), (32_000, "B")]);
+    let (source, stop_entered, stop_go) = BlockingStopSource::new();
+    let rig = Rig::with(
+        api_settings(),
+        g.reply,
+        Custom {
+            audio: Some(source.clone()),
+            ..Custom::default()
+        },
+    );
+    let t0 = past();
+    *lock(&source.chunks) = vec![FrameChunk::from_buffer(&a, t0 + FIRST_FRAME)];
+    rig.session.hotkey_pressed(t0);
+    rig.session.hotkey_released(t0 + ms(3000));
+    assert!(
+        g.entered.recv_timeout(BUDGET).is_ok(),
+        "A's job never reached the engine"
+    );
+
+    let tb = t0 + ms(4000);
+    *lock(&source.chunks) = vec![FrameChunk::from_buffer(&b, tb + FIRST_FRAME)];
+    source.block_stop.store(true, Ordering::SeqCst);
+    rig.session.hotkey_pressed(tb);
+    let session = &rig.session;
+    thread::scope(|s| {
+        let releasing = s.spawn(move || session.hotkey_released(tb + ms(2000)));
+        assert!(
+            stop_entered.recv_timeout(BUDGET).is_ok(),
+            "B's capture was never stopped"
+        );
+        g.go.send(()).expect("A's engine is waiting");
+        assert!(
+            eventually(|| rig.clipboard.texts() == vec!["A".to_string()]),
+            "A was not delivered: {:?}",
+            rig.clipboard.texts()
+        );
+        // Room for the worker to end A's job (job_finished) while B still stops.
+        thread::sleep(ms(200));
+        stop_go.send(()).expect("B's stop is waiting");
+        releasing.join().expect("B's release must not panic");
+    });
+    rig.wait_jobs(2);
+
+    assert_eq!(rig.clipboard.texts(), vec!["A", "B"]);
+    assert_eq!(
+        rig.indicator.overlays(),
+        vec![
+            OverlayState::Recording,
+            OverlayState::Processing,
+            OverlayState::Recording,
+            OverlayState::Processing,
+            OverlayState::Hidden,
+        ]
+    );
 }
 
 // ---- Acceptance 2: failure branches ----------------------------------------------------

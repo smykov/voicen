@@ -73,11 +73,22 @@ pub struct PostProcessed { pub text: String, pub notice: Option<MessageId> }
 ## Platform traits (implemented in `src-tauri/src/win/*`, faked in tests)
 
 ```rust
+// Capture (built in T-051, `voicen_core::platform`; the default input device — T-012 adds
+// `list_devices`, a device argument and device loss through the sink, FR-031).
 pub trait AudioSource: Send + Sync {
-    fn list_devices(&self) -> Result<Vec<DeviceInfo>, CaptureError>;   // DeviceInfo { id, name, is_default }
-    /// Opens the device and starts capture; frames are delivered to `sink` until the returned
-    /// handle is dropped. A device loss is reported through `sink.on_end(DeviceLost)`.
-    fn start(&self, device: &DeviceId, sink: Box<dyn FrameSink>) -> Result<CaptureHandle, CaptureError>;
+    /// Opens the device and starts delivering frames to `sink`.
+    fn start(&self, sink: Arc<dyn FrameSink>) -> Result<Box<dyn CaptureHandle>, CaptureError>;
+}
+pub trait FrameSink: Send + Sync {
+    /// Called on the adapter's audio thread; must not block. Interleaved f32 in [-1, 1];
+    /// `at` is stamped by the adapter in its callback (the first one gives
+    /// `RecordingStarted.hotkey_to_first_frame_ms`).
+    fn frames(&self, interleaved: &[f32], rate: u32, channels: u16, at: Instant);
+}
+pub trait CaptureHandle: Send {
+    /// Once `stop` returns, or the handle is dropped, the sink is called no more and the
+    /// device is closed (NFR-02).
+    fn stop(self: Box<Self>) -> Result<(), CaptureError>;
 }
 pub enum CaptureError { NoDevice, AccessDenied, DeviceBusy, Other(String /* OS error code text, no audio */) }   // voicen_core::recording::CaptureError (T-042)
 
@@ -100,9 +111,16 @@ pub trait Notifier: Send + Sync {
     fn notify(&self, key: MessageKey, params: &MessageParams, retry: Option<PendingId>);
 }
 
-pub trait Indicator: Send + Sync {
+pub trait Indicator: Send + Sync {                        // built in T-051, `voicen_core::platform`
     fn set_tray(&self, state: TrayState, retry_available: bool);
     fn set_overlay(&self, state: &OverlayState);           // shell forwards it as the IPC event
+}
+// Called only by the dictation session, from inside its lock, once per change; an
+// implementation must not block on another thread and must never call back into the session
+// (T-052 / T-053 hop to the main thread with a non-waiting emit or run_on_main_thread).
+
+pub trait ShellRequests: Send + Sync {                    // built in T-051, `voicen_core::platform`
+    fn open_settings(&self, tab: SettingsTab);            // the OpenSettings of `blocked_actions`; T-055 adds the field focus
 }
 
 // Clipboard, Paster, TempAudioStore: `voicen_core::platform` (T-001), with public fakes
@@ -127,9 +145,9 @@ pub trait PipelineObserver: Send + Sync {                 // voicen_core::events
 }
 ```
 
-There is no `SettingsSource` and no `DictationSettings` projection (decision #47 (1)): a job carries the `Arc<Settings>` snapshot taken at press in its `PressContext`. `AudioSource` is built with T-006, `Notifier` and `Indicator` with T-006/T-007.
+There is no `SettingsSource` and no `DictationSettings` projection (decision #47 (1)): a job carries the `Arc<Settings>` snapshot taken at press in its `PressContext`. `AudioSource` (with `FrameSink` and `CaptureHandle`), `Indicator` and `ShellRequests` are built in core (T-051) with public fakes (`FakeAudioSource` + `FrameChunk`, `FakeIndicator` + `IndicatorCall`, `FakeShellRequests` + `ShellRequestCall`; feature `test-fakes`) and `test_support::realtime::RealtimeSource` (frames from an `AudioBuffer` or PCM16 WAV bytes, pushed in 10 ms chunks paced by real time, silence after the data); their Windows implementations come with T-006 (capture), T-052 (tray) and T-053 (overlay). `Notifier` comes with T-007.
 
-## Pipeline API (called by the shell)
+## Pipeline API (called by the dictation session)
 
 Built (T-001, `voicen_core::pipeline`, decisions #43, #47): the job sequencer.
 
@@ -151,54 +169,71 @@ impl Pipeline {                                            // Send + Sync
     pub fn with_timeouts(deps: PipelineDeps, timeouts: Timeouts) -> Pipeline;
     pub fn with_engine_factory(self, factory: Box<EngineFactory>) -> Pipeline;   // T-017; test fakes
     pub fn run_job(&self, rec: FinishedRecording<PressContext>) -> JobReport;    // blocking; plain std thread, never in a tokio runtime
-    pub fn pending(&self) -> Option<(PendingId, FailureReason)>;                 // tray retry_available, toast retry id
+    pub fn pending(&self) -> Option<(PendingId, FailureReason)>;                 // tray retry_available (read on the job thread only), toast retry id
 }
 ```
 
-`run_job` is the only path a finished recording takes. The shell reads `rec.id()` first and then calls `controller.job_finished(id, report.end, at)`. Inside, two private halves (T-011 puts the delivery queue between them):
+`run_job` is the only path a finished recording takes. The dictation session's worker reads `rec.id()` first and then calls `controller.job_finished(id, report.end, at)`. Inside, two private halves (T-011 puts the delivery queue between them):
 
 - `process`: `gate.decide(audio)` → (speech only) `factory(&settings, &*credentials)` → `transcribe(audio, &TranscribeRequest{ language: settings.speech_language, timeouts })` with the pipeline's one `Timeouts` → `post_processor.process`. No speech, a blank engine text or a blank post-processed text is `NoSpeech`; without speech there is no factory call, no credential read and no request.
-- `release`: a text goes through `delivery::deliver` (clipboard first, then data-model "DeliveryDecision", `MODIFIER_WAIT` = 1 s); a clipboard error is `Failed(ClipboardUnavailable)`. A retryable failure stores the audio under a new `PendingId`, swaps the one pending slot to it (or to nothing, if the store failed) and deletes the audio it replaced (decision #47 (4)); id, store write and swap happen under the slot's one lock as an extra safeguard (the replaced audio is deleted after the lock is released); `Text` and `NoSpeech` leave the slot as it is. `release`, and so `run_job` until T-011 splits it, must run on one thread at a time: `deliver` (clipboard write → modifier wait ≤ 1 s → Ctrl+V) is not serialized across jobs, so concurrent jobs could paste one transcript into another's window (research R-10: one delivery thread; T-006 runs `run_job` on one FIFO worker). `process` may run concurrently (R-10 workers). The slot lock does not make concurrent jobs supported.
+- `release`: a text goes through `delivery::deliver` (clipboard first, then data-model "DeliveryDecision", `MODIFIER_WAIT` = 1 s); a clipboard error is `Failed(ClipboardUnavailable)`. A retryable failure stores the audio under a new `PendingId`, swaps the one pending slot to it (or to nothing, if the store failed) and deletes the audio it replaced (decision #47 (4)); id, store write and swap happen under the slot's one lock as an extra safeguard (the replaced audio is deleted after the lock is released); `Text` and `NoSpeech` leave the slot as it is. `release`, and so `run_job` until T-011 splits it, must run on one thread at a time: `deliver` (clipboard write → modifier wait ≤ 1 s → Ctrl+V) is not serialized across jobs, so concurrent jobs could paste one transcript into another's window (research R-10: one delivery thread; the dictation session runs `run_job` on its one FIFO worker, T-051). `process` may run concurrently (R-10 workers). The slot lock does not make concurrent jobs supported.
 - Events, only on the one observer and in this order: `Warning{vad_fallback}` (when `GateDecision.fallback_warning`), `SpeechGate`, `JobFinished` (after the clipboard write), `Delivered` (only for a delivered text).
 
 `JobEnd` mapping: `Pasted` → `Delivered{notice: None}`, `CopiedOnly` → `Delivered{notice.copied}`, `CopyManual` → `Delivered{notice.copied_paste_manually}`, `NoSpeech` → `Notice(notice.no_speech)`, `Failed(r)` → `Failed(r)`.
 
-Target (T-006, T-007, T-009; not built): whether a core facade wraps the controller and the pipeline with the calls below.
+## Dictation session (`voicen_core::dictation`, T-051, decision #64)
+
+Built: the platform-free owner that turns hotkey events into a delivered dictation; the shell's adapters stamp instants and carry out requests, they decide nothing.
 
 ```rust
-impl Pipeline {
-    pub fn on_hotkey_pressed(&self, at: Instant, start_window: Option<StartWindow>);
-    pub fn on_hotkey_released(&self, at: Instant);         // hold mode only
-    pub fn on_escape(&self);
-    pub fn on_suspend(&self);                              // stop + process (spec edge case)
-    pub fn on_tray_menu_opened(&self);                     // clears TrayState::Error
-    pub fn retry(&self, id: Option<PendingId>);            // None = tray "Retry last failed dictation"
-    pub fn on_hotkey_registration(&self, result: Result<(), HotkeyError>, phase: RegistrationPhase);
-    pub fn shutdown(&self);                                // drop in-flight results, delete temp audio
+pub struct SessionDeps {
+    pub pipeline: PipelineDeps,                            // the session builds its one Pipeline from it
+    pub engine_factory: Option<Box<EngineFactory>>,       // None: engine_for
+    pub audio: Arc<dyn AudioSource>,
+    pub indicator: Arc<dyn Indicator>,
+    pub requests: Arc<dyn ShellRequests>,
+    pub settings: Arc<SettingsService>,                    // snapshot() at each press (P-013)
 }
+impl DictationSession {                                    // Send + Sync; inputs take &self and the caller's instant
+    pub fn start(deps: SessionDeps) -> io::Result<DictationSession>;   // spawns the worker and the timer; Err: the spawn error's kind
+    pub fn hotkey_pressed(&self, at: Instant);
+    pub fn hotkey_released(&self, at: Instant);
+    pub fn tray_menu_opened(&self, at: Instant);
+    pub fn hotkey_registration(&self, registered: bool, at: Instant);
+}
+impl Drop for DictationSession { /* the job in flight finishes, queued recordings are dropped, threads joined */ }
 ```
 
-The shell implements the hotkey thread (research R-1, R-2, R-17) and turns OS messages into these calls. Every decision — what to record, discard, send, deliver or show — is taken inside `Pipeline`.
+- **Press.** Under the session lock: while a recording is on (`live_id()`), nothing runs (no gate, no start window, no capture). Otherwise `snapshot()` is gated with `dictation_gate`; when blocked, `blocked_actions` run in order: `Notify(id)` → `controller.notice(id, at)` (overlay message, tray unchanged), `OpenSettings(tab)` → `requests.open_settings(tab)` after the lock is released. Else `PressContext { start_window: paster.capture_start_window(), settings }` goes to `press`, and `audio.start(sink)` opens the capture; a start error → `capture_failed` and `CaptureFailed { recording, cause }`. The indicator is published only once the start result is known, so a failed capture never shows a recording state. `Settings.mode` is not read: toggle behaves as hold until T-009 (decision #63).
+- **Release.** `release` under the lock; `CaptureHandle::stop` outside it, before the input returns (device closed, NFR-02). Then `RecordingStarted` (only if a frame arrived: first frame instant − press instant, `device: Selected`) and `RecordingEnded` (`Release::end()`, `Release::held()`). For a stop the frames become audio on the caller's thread (mixed down to mono as they arrive, `audio::mix_to_mono`; `AudioBuffer::from_frames` at the stop; a format change within one capture or unconvertible frames → `CaptureError::Other` with a fixed text), then `finish` and the push onto the FIFO happen in one critical section, so queue order = finish order; releases are serialised, so that is also recording order. `finish(Err)` → `CaptureFailed`.
+- **Worker.** One std thread owns the `Pipeline` and is the only caller of `run_job` and `job_finished` (decision #48): `run_job` with no lock held, then `pending().is_some()` (the slot itself, read on the only thread that changes it) as `retry_available`, then `job_finished(id, report.end, Instant::now())` and publish under the lock.
+- **Timer.** One std thread calls `tick(now)` once `now >= next_deadline()`, and re-reads the deadline after every change.
+- **Publication.** `(indicator.tray, retry_available)` and `indicator.overlay` reach the `Indicator` port from inside the session lock, right after the controller call that changed them, only when they differ from what was last sent; nothing at start. Between a stop's `release` and its `finish` nothing is sent (from any thread): the `finish` sends what changed meanwhile, so the overlay goes Recording → Processing, never through Hidden.
+- The shell implements the hotkey thread (research R-1, R-2, R-17) and turns OS messages into these calls. The `RegisterHotKey` modifiers and virtual key, the release poll groups and rule, and the "target is elevated" rule come from `voicen_core::win32_data` (pure data: `hotkey_codes`, `released`, `target_elevated` over `IntegrityLevel` RIDs; T-051), which T-006 cross-checks against the `windows` crate constants on Windows CI.
+- Later inputs go through the same session: Esc, 10-minute maximum and toggle (T-009), Retry and toasts (T-007), registrar results at start and on save (T-055), device choice and device loss (T-012), a shutdown that does not wait for the job in flight (T-052), the delivery queue that replaces the worker (T-011).
 
-There is no clock port in this feature. Every `Instant` is the instant of the caller's event: the hotkey thread stamps the press and the release when the OS message arrives, so worker or lock delay never counts in the 0.3 s hold. `run_job` reads `std::time::Instant::now()` only for the two event durations (`stop_to_text_ms` from the recording's `stopped_at`, `text_to_paste_ms`), never for a decision (decision #47 (2)). `voicen_core::clock::Clock` (wall time, used by `SettingsService`) is unchanged (T-042).
+There is no clock port in this feature. Every `Instant` is the instant of the caller's event: the hotkey thread stamps the press and the release when the OS message arrives, so worker or lock delay never counts in the 0.3 s hold. `run_job` reads `std::time::Instant::now()` only for the two event durations (`stop_to_text_ms` from the recording's `stopped_at`, `text_to_paste_ms`), never for a decision (decision #47 (2)). The session's worker is the caller of `job_finished`, so it stamps the job-end instant (`Instant::now()` when `run_job` returned); the session's timer passes `Instant::now()` to `tick` once the deadline is reached. `voicen_core::clock::Clock` (wall time, used by `SettingsService`) is unchanged (T-042).
 
 ## RecordingController and IndicatorState (`voicen_core::recording`, T-042)
 
-Hold mode. Sans-IO: no threads, no capture, no clock; `&mut self`, the shell serialises the calls. The controller is the only place that decides a recording starts or ends, the only constructor of a `FinishedRecording`, and the only owner of `IndicatorState`.
+Hold mode. Sans-IO: no threads, no capture, no clock; `&mut self`, the dictation session serialises the calls under its lock (T-051). The controller is the only place that decides a recording starts or ends, the only constructor of a `FinishedRecording`, and the only owner of `IndicatorState`.
 
 ```rust
 pub const MIN_HOLD: Duration;            // 300 ms; a hold of exactly 300 ms is kept
 pub const MESSAGE_DURATION: Duration;    // 3 s
 
-impl<C> RecordingController<C> {         // C: opaque press context, returned with the recording (T-006: StartWindow)
+impl<C> RecordingController<C> {         // C: opaque press context, returned with the recording (the session: PressContext)
     pub fn press(&mut self, at: Instant, ctx: C) -> Press;        // Start(RecordingId) | Ignored (auto-repeat while recording)
-    pub fn release(&mut self, at: Instant) -> Release<C>;         // Stop(StopTicket<C>) | Discarded{id, held} | Ignored; idle on return; .end(): Released | TooShort | None
+    pub fn release(&mut self, at: Instant) -> Release<C>;         // Stop(StopTicket<C>) | Discarded{id, held} | Ignored; idle on return; .end(): Released | TooShort | None; .held(): the hold for Stop and Discarded
     pub fn capture_failed(&mut self, id: RecordingId, err: CaptureError, at: Instant)
         -> Option<FailureReason>;                                 // live id: idle + MicrophoneUnavailable{cause}; stale id: None
     pub fn finish(&mut self, ticket: StopTicket<C>, audio: Result<AudioBuffer, CaptureError>, at: Instant)
         -> Result<FinishedRecording<C>, FailureReason>;           // Ok queues the job; Err: MicrophoneUnavailable{cause}
     pub fn job_finished(&mut self, id: RecordingId, end: JobEnd, at: Instant);
     pub fn tray_menu_opened(&mut self, at: Instant);              // clears tray Error
+    pub fn hotkey_registration(&mut self, registered: bool, at: Instant);   // false: tray HotkeyError; only true clears it (T-051)
+    pub fn notice(&mut self, id: MessageId, at: Instant);         // a message for 3 s, tray unchanged (JobEnd::Notice's rule; T-051)
+    pub fn live_id(&self) -> Option<RecordingId>;                 // the recording that is on (T-051)
     pub fn tick(&mut self, at: Instant);                          // expires the message at its `until`
     pub fn next_deadline(&self) -> Option<Instant>;               // when the shell's timer calls tick
     pub fn indicator(&self) -> &IndicatorState;                   // { tray: TrayState, overlay: OverlayState }
@@ -211,5 +246,5 @@ pub enum MicCause { NoDevice, AccessDenied, Busy, Other }       // CaptureError 
 - `capture_failed` (live id) and `finish(Err)` show the `failure.microphone_unavailable` message for 3 s and set tray `Error`; the caller still gets the reason for its toast and event. `MicrophoneUnavailable` is not retryable.
 - A message lasts 3 s from the event that raised it. A message raised during a live recording (for example `finish(Err)` of the previous recording, FR-029) is not shown while the recording is on; after its release it is shown for the rest of its 3 s, and not at all if they have passed.
 - A job counts from `finish(Ok)` until `job_finished` for its id; an unknown or repeated id changes nothing. `Delivered` clears tray `Error` and shows its notice if any; `Notice` shows a message; `Failed` shows the reason's message and sets tray `Error`.
-- Tray priority `HotkeyError > Recording > Error > Idle`; overlay priority `Recording > Message > Processing (≥ 1 queued job) > Hidden`. A press drops the message; it is not shown again. No input sets `HotkeyError` yet (T-006 adds hotkey registration).
-- The controller emits no events: T-006/T-001 build `RecordingStarted`/`RecordingEnded` from the returned id, instants and `end` (`Release::end()`: `TooShort` for a discard, the ticket's `Released` for a stop, the same value as `FinishedRecording::end`). T-009 (toggle, 10-minute maximum, Esc) and T-006 (device lost, suspend) add inputs and `RecordingEnd` variants to the same controller. The engine = none check stays in `settings::gate::dictation_gate`, which the shell calls before `press`.
+- Tray priority `HotkeyError > Recording > Error > Idle`; overlay priority `Recording > Message > Processing (≥ 1 queued job) > Hidden`. A press drops the message; it is not shown again. `hotkey_registration(false, at)` sets `HotkeyError`; only `hotkey_registration(true, at)` clears it (a delivery, the tray menu or a tick do not), and it changes nothing else.
+- The controller emits no events: the dictation session builds `RecordingStarted`/`RecordingEnded`/`CaptureFailed` from the returned id, instants, `end` and `held` (`Release::end()`: `TooShort` for a discard, the ticket's `Released` for a stop, the same value as `FinishedRecording::end`). T-009 (toggle, 10-minute maximum, Esc) and T-006 (device lost, suspend) add inputs and `RecordingEnd` variants to the same controller. The engine = none check stays in `settings::gate::dictation_gate`, which the dictation session calls before `press`.

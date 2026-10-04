@@ -32,6 +32,7 @@ The API key is not part of the snapshot. It is read from `CredentialStore` per r
 - change: register the new binding → success: `Active(new)`, unregister the old one; failure: stay `Active(old)`, report "hotkey unavailable" (FR-012)
 - resume/unlock: re-register → failure → `Failed` (FR-013)
 - `Failed` → `Active` only after a successful registration; the hotkey error clears only then (FR-028)
+- Each result reaches core as `DictationSession::hotkey_registration(registered, at)` → `RecordingController::hotkey_registration` (tray `HotkeyError`; T-051)
 
 ## Recording (RecordingController state machine)
 
@@ -48,7 +49,7 @@ States and transitions (one recording at a time):
 
 ```text
 Idle --press [engine ≠ None, device opens]--> Recording
-Idle --press [engine = None]--> Idle + notice "choose a transcription engine" + open settings
+Idle --press [engine = None]--> Idle + notice "choose a transcription engine" on the overlay for 3 s, then open settings on the Engine tab
 Idle --press [device fails]--> Idle + failure "microphone unavailable: <reason>"   (no recording state)
 Recording --press (hold: auto-repeat)--> Recording            (ignored)
 Recording --release (hold) [held < 0.3 s]--> Idle (TooShort, silent discard)
@@ -63,6 +64,20 @@ Validation:
 - min hold 0.3 s (hold mode only)
 - max 10 min (both modes)
 - Esc is registered on entering `Recording` and unregistered on leaving it. If Esc registration fails, the recording continues and a warning event is emitted.
+
+## DictationSession (T-051)
+
+The one runtime owner of the transitions above (`voicen_core::dictation::DictationSession`; contract in [contracts/core-traits.md](contracts/core-traits.md) "Dictation session"). It holds, behind one lock:
+
+| Part | Rule |
+|---|---|
+| `RecordingController<PressContext>` | every decision; the only source of `IndicatorState` and of "is a recording on" (`live_id`) |
+| live capture | the open `CaptureHandle` of the live recording, its press instant and its frame sink (mono samples, the first frame's format and instant); taken out at release, stopped before the release returns |
+| FIFO queue | `FinishedRecording`s pushed in the critical section of their `finish`, so queue order = finish order = recording order |
+| `retry_available` | `Pipeline::pending().is_some()`, read by the worker right after each `run_job` |
+| last published | the `(tray, retry_available)` and overlay last given to the `Indicator`; a value is sent only when it differs |
+
+One worker thread owns the `Pipeline` (the only caller of `run_job` and `job_finished`); one timer thread calls `tick` at `next_deadline`. The snapshot and the start window are taken once, at the press that starts the recording. A press whose capture cannot open publishes no recording state. Between a stop's `release` and its `finish` nothing is published, so the overlay goes `Recording` → `Processing` without `Hidden` in between. Dropping the session lets the job in flight finish, drops queued recordings and joins both threads.
 
 ## StartWindow
 
@@ -158,11 +173,11 @@ In code: `voicen_core::failure::FailureReason` with `code()` (the Code column wi
 - `TrayState`: `Idle` \| `Recording` \| `Error` \| `HotkeyError`.
   - Priority: `HotkeyError` > `Recording` > `Error` > `Idle`.
   - `Error` is cleared by the next successful delivery (any `JobEnd::Delivered`: `Pasted`, `CopiedOnly` or `CopyManual`; FR-25 "until the next successful dictation") or by opening the tray menu.
-  - `HotkeyError` is cleared only by a successful registration.
+  - `HotkeyError` is set by a failed registration and cleared only by a successful one (`RecordingController::hotkey_registration`, T-051).
 - `OverlayState`: `Hidden` \| `Recording` \| `Processing` \| `Message{key, params, until}`.
   - `Recording` while a recording is on.
   - `Processing` while ≥ 1 job is not yet released and no recording is on (Clarification 5).
-  - `Message` for 3 s after any failure or notice. A new recording pre-empts the message display, and the message is not re-shown.
+  - `Message` for 3 s after any failure or notice (a job's, a capture failure, or a notice outside a job such as `notice.choose_engine`). A new recording pre-empts the message display, and the message is not re-shown. A message raised during a live recording (for example the previous recording's capture failing at its stop, FR-029) is not shown while the recording is on; after its release it is shown for the rest of its 3 s, and not at all if they have passed.
   - `Hidden` otherwise; the overlay window is destroyed.
 
 ## MicrophoneChoice
@@ -188,7 +203,8 @@ Inputs: the selected `DeviceId`, and the device list at recording start.
 | `JobFinished` | seq, `engine` (kind name), `stop_to_text_ms`, outcome code (`text`/`no_speech`/`failed`), failure code, HTTP status |
 | `Delivered` | seq, `text_to_paste_ms`, result (`pasted`/`copied_only`/`copy_manual`) |
 | `Warning` | code (`vad_fallback`, `esc_unavailable`, `toast_failed`) |
+| `CaptureFailed` | recording id, `cause` (`no_device`/`access_denied`/`busy`/`other`; the closed `MicCause`, never OS text) — the capture could not open at press, or failed at stop |
 
 No event type has a field that can hold transcript text, audio, a URL query, a header or a key. This is enforced by the types, plus a redaction test.
 
-As built (`voicen_core::events`, T-001): `DictationEvent` is `Copy` (so no `String`, `Vec`, `Secret` or `FailureReason` field can exist); fields are integers, bools, `&'static str` codes and small enums (`RecordingId`, `DeviceKind`, `RecordingEnd`, `OutcomeCode`, `DeliveryResult`, `WarningCode`). `JobFinished { seq, engine: Option<&'static str> /* None: no engine built */, stop_to_text_ms, outcome, failure: Option<&'static str> /* FailureReason::code() */, http_status: Option<u16> /* ServerError only; 401/403 are not carried */ }`, emitted after the clipboard write (a clipboard failure is logged as `failed`/`ClipboardUnavailable` with no `Delivered`). `Delivered { seq, text_to_paste_ms, result }`. Per job the order is `[Warning]`, `SpeechGate`, `JobFinished`, `[Delivered]`, all from `Pipeline::run_job` on one `PipelineObserver`; T-006 emits `RecordingStarted`/`RecordingEnded` on the same observer.
+As built (`voicen_core::events`, T-001): `DictationEvent` is `Copy` (so no `String`, `Vec`, `Secret` or `FailureReason` field can exist); fields are integers, bools, `&'static str` codes and small enums (`RecordingId`, `DeviceKind`, `RecordingEnd`, `OutcomeCode`, `DeliveryResult`, `WarningCode`). `JobFinished { seq, engine: Option<&'static str> /* None: no engine built */, stop_to_text_ms, outcome, failure: Option<&'static str> /* FailureReason::code() */, http_status: Option<u16> /* ServerError only; 401/403 are not carried */ }`, emitted after the clipboard write (a clipboard failure is logged as `failed`/`ClipboardUnavailable` with no `Delivered`). `Delivered { seq, text_to_paste_ms, result }`. Per job the order is `[Warning]`, `SpeechGate`, `JobFinished`, `[Delivered]`, all from `Pipeline::run_job` on one `PipelineObserver`. The dictation session (T-051) emits on the same observer (it takes it from `PipelineDeps`): at the release, `RecordingStarted` (only if a frame arrived; first frame instant − press instant) and `RecordingEnded` (`duration_ms` = the hold, `end`), both before the recording's job is queued; `CaptureFailed { recording, cause }` for a capture that failed at press (then no `RecordingStarted`/`RecordingEnded`: no recording state) or at stop. `CaptureFailed` keeps the event `Copy`.

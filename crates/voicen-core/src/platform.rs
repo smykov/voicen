@@ -1,9 +1,12 @@
 //! Platform ports the pipeline delivers through (spec 001 T010,
 //! contracts/core-traits.md "Platform traits", T-001).
 //!
-//! The Windows implementations live in `src-tauri` (T-006: clipboard and paste;
-//! T-007: the file-system audio store). Errors carry no OS text (P-009). The
-//! public fakes (feature `test-fakes`, decision #23 N4) sit next to the traits.
+//! The Windows implementations live in `src-tauri` (T-006: capture, clipboard and
+//! paste; T-007: the file-system audio store; T-052/T-053: the tray and the
+//! overlay behind `Indicator`). The capture, indicator and shell-request ports are
+//! called only by the dictation session (`crate::dictation`, T-051). Errors carry
+//! no OS text (P-009). The public fakes (feature `test-fakes`, decision #23 N4)
+//! sit next to the traits.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
 use std::sync::Arc;

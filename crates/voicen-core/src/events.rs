@@ -5,8 +5,8 @@
 //! `Secret` or a `FailureReason`, so no event can carry transcript text, audio, a
 //! URL query, a header or a key. Only `Pipeline::run_job` emits the job events
 //! (`Warning`, `SpeechGate`, `JobFinished`, `Delivered`), on one
-//! [`PipelineObserver`]; T-006 emits `RecordingStarted` / `RecordingEnded` on the
-//! same observer.
+//! [`PipelineObserver`]; the dictation session (`crate::dictation`, T-051) emits
+//! `RecordingStarted` / `RecordingEnded` / `CaptureFailed` on the same observer.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
 use crate::delivery::DeliveryResult;
