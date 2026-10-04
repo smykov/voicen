@@ -5,19 +5,30 @@
 //! starts or ends and the only constructor of a [`FinishedRecording`]. It is
 //! sans-IO: no threads, no capture, no clock. Every instant comes from the
 //! caller's event (the hotkey thread stamps press and release), so worker or lock
-//! delay never counts in the 0.3 s hold. It owns the [`IndicatorState`].
+//! delay never counts in the 0.3 s hold. It owns the [`IndicatorState`]: the
+//! indicator changes only inside controller methods.
 //!
-//! SKELETON (T-042 red tests): bodies are placeholders for the developer.
+//! One press yields at most one [`FinishedRecording`]: `release` hands out a
+//! [`StopTicket`] (not `Clone`, built only here) and goes idle at once, and
+//! `finish` consumes the ticket. A hold under [`MIN_HOLD`], a capture error or a
+//! stale id yields none.
+//!
+//! The shell calls `settings::gate::dictation_gate` before [`press`]; the engine =
+//! none check is not repeated here.
+//!
+//! [`press`]: RecordingController::press
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
 pub mod indicator;
 
+use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
 use crate::audio::AudioBuffer;
 use crate::failure::FailureReason;
+use crate::i18n::{self, MessageId};
 
-use indicator::IndicatorInputs;
+use indicator::{IndicatorInputs, ShownMessage};
 pub use indicator::{IndicatorState, JobEnd, OverlayState, TrayState, MESSAGE_DURATION};
 
 /// A hold shorter than this is discarded silently (FR-02); exactly 300 ms is kept.
@@ -51,6 +62,28 @@ pub enum MicCause {
     AccessDenied,
     Busy,
     Other,
+}
+
+impl MicCause {
+    /// The cause of a capture error. `Other`'s OS text is dropped here (P-009).
+    pub fn of(err: &CaptureError) -> MicCause {
+        match err {
+            CaptureError::NoDevice => MicCause::NoDevice,
+            CaptureError::AccessDenied => MicCause::AccessDenied,
+            CaptureError::DeviceBusy => MicCause::Busy,
+            CaptureError::Other(_) => MicCause::Other,
+        }
+    }
+
+    /// The `mic_reason.*` text, the `{reason}` of `failure.microphone_unavailable`.
+    pub fn message_id(self) -> MessageId {
+        match self {
+            MicCause::NoDevice => i18n::MIC_REASON_NO_DEVICE,
+            MicCause::AccessDenied => i18n::MIC_REASON_ACCESS_DENIED,
+            MicCause::Busy => i18n::MIC_REASON_BUSY,
+            MicCause::Other => i18n::MIC_REASON_OTHER,
+        }
+    }
 }
 
 /// Result of [`RecordingController::press`].
@@ -108,9 +141,11 @@ impl<C> FinishedRecording<C> {
     pub fn ctx(&self) -> &C {
         &self.ctx
     }
+    /// The press instant.
     pub fn started_at(&self) -> Instant {
         self.started_at
     }
+    /// The release instant (not the instant the capture finished stopping).
     pub fn stopped_at(&self) -> Instant {
         self.stopped_at
     }
@@ -119,13 +154,29 @@ impl<C> FinishedRecording<C> {
     }
 }
 
+/// The recording that is on.
+#[derive(Debug)]
+struct Live<C> {
+    id: RecordingId,
+    ctx: C,
+    started_at: Instant,
+}
+
 /// Hold-mode recording controller. `C` is opaque context taken at press and
 /// returned with the recording (T-006 passes the start window).
+///
+/// Methods take `&mut self` and run no threads; the shell serialises the calls.
 #[derive(Debug)]
 pub struct RecordingController<C> {
-    inputs: IndicatorInputs,
+    live: Option<Live<C>>,
+    next_id: u64,
+    /// Recordings handed to a job (counted at `finish(Ok)`) whose job has not ended.
+    queued: BTreeSet<RecordingId>,
+    /// Tray `Error`: the last job or capture failed; cleared by a delivery or the
+    /// tray menu.
+    error: bool,
+    message: Option<ShownMessage>,
     indicator: IndicatorState,
-    _ctx: std::marker::PhantomData<C>,
 }
 
 impl<C> Default for RecordingController<C> {
@@ -136,44 +187,81 @@ impl<C> Default for RecordingController<C> {
 
 impl<C> RecordingController<C> {
     pub fn new() -> Self {
-        let inputs = IndicatorInputs {
-            hotkey_error: false,
-            recording: false,
+        let mut c = RecordingController {
+            live: None,
+            next_id: 0,
+            queued: BTreeSet::new(),
             error: false,
             message: None,
-            queued_jobs: 0,
+            indicator: IndicatorState::default(),
         };
-        RecordingController {
-            indicator: IndicatorState::derive(&inputs),
-            inputs,
-            _ctx: std::marker::PhantomData,
-        }
+        c.refresh();
+        c
     }
 
-    /// Hotkey pressed at `at` (after `settings::gate::dictation_gate`).
+    /// Hotkey pressed at `at` (after `settings::gate::dictation_gate`). From idle
+    /// it starts a recording and drops any overlay message (not re-shown); while
+    /// recording it is hotkey auto-repeat and ignored.
     pub fn press(&mut self, at: Instant, ctx: C) -> Press {
-        let _ = (at, ctx);
-        Press::Ignored
+        if self.live.is_some() {
+            return Press::Ignored;
+        }
+        let id = RecordingId(self.next_id);
+        self.next_id = self.next_id.saturating_add(1);
+        self.live = Some(Live {
+            id,
+            ctx,
+            started_at: at,
+        });
+        self.message = None;
+        self.refresh();
+        Press::Start(id)
     }
 
-    /// Hotkey released at `at`. The controller is idle once this returns.
+    /// Hotkey released at `at`. The controller is idle once this returns. The
+    /// hold is measured between the two event instants, saturating at zero (a
+    /// release stamped before its press is a zero hold).
     pub fn release(&mut self, at: Instant) -> Release<C> {
-        let _ = at;
-        Release::Ignored
+        let Some(live) = self.live.take() else {
+            return Release::Ignored;
+        };
+        self.expire(at);
+        self.refresh();
+        let held = at.saturating_duration_since(live.started_at);
+        if held < MIN_HOLD {
+            return Release::Discarded { id: live.id, held };
+        }
+        Release::Stop(StopTicket {
+            id: live.id,
+            ctx: live.ctx,
+            started_at: live.started_at,
+            stopped_at: at,
+        })
     }
 
-    /// The capture for `id` could not be opened or failed before release.
+    /// The capture for `id` could not be opened or failed before release. For the
+    /// live id: idle, the "microphone unavailable" message for 3 s and tray
+    /// `Error`, and the reason is returned. A stale id returns `None` and changes
+    /// nothing.
     pub fn capture_failed(
         &mut self,
         id: RecordingId,
         err: CaptureError,
         at: Instant,
     ) -> Option<FailureReason> {
-        let _ = (id, err, at);
-        None
+        if self.live.as_ref().map(|l| l.id) != Some(id) {
+            return None;
+        }
+        self.live = None;
+        let reason = mic_unavailable(&err);
+        self.fail(&reason, at);
+        Some(reason)
     }
 
-    /// The capture for `ticket` stopped with `audio`.
+    /// The capture for `ticket` stopped with `audio`. `Ok` queues a job for the
+    /// recording (overlay `Processing` until [`job_finished`](Self::job_finished));
+    /// `Err` queues nothing and shows the failure like
+    /// [`capture_failed`](Self::capture_failed).
     pub fn finish(
         &mut self,
         ticket: StopTicket<C>,
@@ -186,33 +274,111 @@ impl<C> RecordingController<C> {
             started_at,
             stopped_at,
         } = ticket;
-        let _ = (id, ctx, started_at, stopped_at, audio, at);
-        Err(FailureReason::EngineNotConfigured)
+        self.expire(at);
+        match audio {
+            Ok(audio) => {
+                self.queued.insert(id);
+                self.refresh();
+                Ok(FinishedRecording {
+                    id,
+                    audio,
+                    ctx,
+                    started_at,
+                    stopped_at,
+                    end: RecordingEnd::Released,
+                })
+            }
+            Err(err) => {
+                let reason = mic_unavailable(&err);
+                self.fail(&reason, at);
+                Err(reason)
+            }
+        }
     }
 
-    /// The job of recording `id` ended.
+    /// The job of recording `id` ended. An id with no queued job (unknown, or
+    /// already ended) changes nothing.
     pub fn job_finished(&mut self, id: RecordingId, end: JobEnd, at: Instant) {
-        let _ = (id, end, at);
+        if !self.queued.remove(&id) {
+            return;
+        }
+        self.expire(at);
+        match end {
+            JobEnd::Delivered { notice } => {
+                self.error = false;
+                if let Some(notice) = notice {
+                    self.show(notice, Vec::new(), at);
+                }
+            }
+            JobEnd::Notice(notice) => self.show(notice, Vec::new(), at),
+            JobEnd::Failed(reason) => {
+                self.error = true;
+                self.show(reason.message_id(), reason.message_params(), at);
+            }
+        }
+        self.refresh();
     }
 
     /// The tray menu was opened: clears tray `Error`.
     pub fn tray_menu_opened(&mut self, at: Instant) {
-        let _ = at;
+        self.expire(at);
+        self.error = false;
+        self.refresh();
     }
 
-    /// Timer callback: expires the overlay message.
+    /// Timer callback: expires the overlay message (at exactly its `until`).
     pub fn tick(&mut self, at: Instant) {
-        let _ = at;
+        self.expire(at);
+        self.refresh();
     }
 
     /// When the shell's timer should call [`tick`](Self::tick) next.
     pub fn next_deadline(&self) -> Option<Instant> {
-        let _ = &self.inputs;
-        None
+        self.message.as_ref().map(|m| m.until)
     }
 
     pub fn indicator(&self) -> &IndicatorState {
         &self.indicator
+    }
+
+    /// Show `reason` for 3 s and set tray `Error`.
+    fn fail(&mut self, reason: &FailureReason, at: Instant) {
+        self.expire(at);
+        self.error = true;
+        self.show(reason.message_id(), reason.message_params(), at);
+        self.refresh();
+    }
+
+    fn show(&mut self, id: MessageId, params: Vec<(&'static str, String)>, at: Instant) {
+        self.message = Some(ShownMessage {
+            id,
+            params,
+            until: at + MESSAGE_DURATION,
+        });
+    }
+
+    fn expire(&mut self, at: Instant) {
+        if self.message.as_ref().is_some_and(|m| at >= m.until) {
+            self.message = None;
+        }
+    }
+
+    /// Re-derive the indicator from the state; every mutating method ends here.
+    fn refresh(&mut self) {
+        self.indicator = IndicatorState::derive(&IndicatorInputs {
+            // No input sets it yet: T-006 adds the hotkey-registration input.
+            hotkey_error: false,
+            recording: self.live.is_some(),
+            error: self.error,
+            message: self.message.clone(),
+            queued_jobs: self.queued.len(),
+        });
+    }
+}
+
+fn mic_unavailable(err: &CaptureError) -> FailureReason {
+    FailureReason::MicrophoneUnavailable {
+        cause: MicCause::of(err),
     }
 }
 

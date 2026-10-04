@@ -2,10 +2,10 @@
 //! data-model "FailureReason", decision #44).
 //!
 //! A [`FailureReason`] is built only from an HTTP status, the transport
-//! classification flags ([`TransportError`]) and the base URL's `host[:port]`;
-//! never from a `reqwest::Error`, a URL, a response body or a key (P-009). So
-//! neither its `Display` nor its `Debug` can carry a URL query, a key or a
-//! transcript.
+//! classification flags ([`TransportError`]) and the base URL's `host[:port]`, or
+//! from the closed microphone cause ([`MicCause`]); never from a `reqwest::Error`,
+//! a URL, a response body, a key or OS error text (P-009). So neither its
+//! `Display` nor its `Debug` can carry a URL query, a key or a transcript.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
 use std::io::ErrorKind;
@@ -13,7 +13,7 @@ use std::io::ErrorKind;
 use crate::i18n::{self, MessageId};
 use crate::recording::MicCause;
 
-/// One failure of a transcription job. T-001 adds the delivery and capture reasons.
+/// One failure of a transcription job. T-001 adds the delivery reasons.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum FailureReason {
     /// HTTP 401 / 403; or a stored key that cannot be sent (`Bearer <key>` fails
@@ -44,7 +44,7 @@ pub enum FailureReason {
     #[error("the transcription engine is not set up")]
     EngineNotConfigured,
     /// The microphone could not be opened or failed (T-042). Not retryable.
-    /// SKELETON (T-042 red tests): code, message id and params are placeholders.
+    /// Carries only the closed cause, never the OS error text.
     #[error("microphone unavailable")]
     MicrophoneUnavailable { cause: MicCause },
 }
@@ -61,7 +61,7 @@ impl FailureReason {
             FailureReason::UnexpectedResponse => "UnexpectedResponse",
             FailureReason::KeyStoreUnavailable => "KeyStoreUnavailable",
             FailureReason::EngineNotConfigured => "EngineNotConfigured",
-            FailureReason::MicrophoneUnavailable { .. } => "",
+            FailureReason::MicrophoneUnavailable { .. } => "MicrophoneUnavailable",
         }
     }
 
@@ -76,23 +76,27 @@ impl FailureReason {
             FailureReason::UnexpectedResponse => i18n::FAILURE_UNEXPECTED_RESPONSE,
             FailureReason::KeyStoreUnavailable => i18n::FAILURE_KEY_STORE_UNAVAILABLE,
             FailureReason::EngineNotConfigured => i18n::FAILURE_ENGINE_NOT_CONFIGURED,
-            FailureReason::MicrophoneUnavailable { .. } => i18n::FAILURE_ENGINE_NOT_CONFIGURED,
+            FailureReason::MicrophoneUnavailable { .. } => i18n::FAILURE_MICROPHONE_UNAVAILABLE,
         }
     }
 
     /// Placeholder values for [`message_id`](Self::message_id): `host` for
-    /// `CannotReach`, `status` for `ServerError`, none otherwise.
+    /// `CannotReach`, `status` for `ServerError`, `reason` for
+    /// `MicrophoneUnavailable` (the cause's `mic_reason.*` id, which
+    /// [`i18n::text`] renders in the same language), none otherwise.
     pub fn message_params(&self) -> Vec<(&'static str, String)> {
         match self {
             FailureReason::CannotReach { host } => vec![("host", host.clone())],
             FailureReason::ServerError { status } => vec![("status", status.to_string())],
+            FailureReason::MicrophoneUnavailable { cause } => {
+                vec![("reason", cause.message_id().nested_arg())]
+            }
             FailureReason::InvalidApiKey
             | FailureReason::NetworkUnavailable
             | FailureReason::Timeout
             | FailureReason::UnexpectedResponse
             | FailureReason::KeyStoreUnavailable
-            | FailureReason::EngineNotConfigured
-            | FailureReason::MicrophoneUnavailable { .. } => Vec::new(),
+            | FailureReason::EngineNotConfigured => Vec::new(),
         }
     }
 }

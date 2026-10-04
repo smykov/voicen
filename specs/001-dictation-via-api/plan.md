@@ -114,7 +114,7 @@ crates/voicen-core/
 ├── src/
 │   ├── lib.rs
 │   ├── platform.rs          # traits: AudioSource, Clipboard, Paster, Notifier, Indicator,
-│   │                        #   TempAudioStore, Clock, SettingsSource (+ DictationSettings, a projection of 004's Settings)
+│   │                        #   TempAudioStore, SettingsSource (+ DictationSettings, a projection of 004's Settings); no clock port (T-042)
 │   ├── timeouts.rs          # Timeouts — single source (FR-24)
 │   ├── messages.rs          # MessageKey, FailureReason → key
 │   ├── events.rs            # DictationEvent (log allowlist), PipelineObserver
@@ -122,7 +122,9 @@ crates/voicen-core/
 │   │   ├── mod.rs           # AudioBuffer (16 kHz mono i16)
 │   │   ├── resample.rs      # device rate/channels → 16 kHz mono
 │   │   └── wav.rs           # WAV encoding
-│   ├── recording.rs         # RecordingController state machine (hold/toggle/min/max/Esc)
+│   ├── recording/
+│   │   ├── mod.rs           # RecordingController state machine (hold/toggle/min/max/Esc; T-042 hold)
+│   │   └── indicator.rs     # IndicatorState: tray + overlay, owned by RecordingController
 │   ├── hotkey.rs            # HotkeyRegistration state (active/failed, re-register)
 │   ├── microphone.rs        # device choice, fallback, notify-once
 │   ├── vad/
@@ -137,7 +139,6 @@ crates/voicen-core/
 │   ├── delivery.rs          # DeliveryDecision (paste / copy-only / manual)
 │   ├── queue.rs             # DeliveryQueue (recording order)
 │   ├── pending.rs           # PendingRecording (at most one)
-│   ├── indicator.rs         # IndicatorState: tray + overlay state machine
 │   └── pipeline.rs          # Dictation orchestrator: ties the above together
 └── tests/
     ├── fixtures/            # speech/silence/cough/keyboard WAV (MIT-compatible)

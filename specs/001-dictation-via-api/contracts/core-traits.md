@@ -77,7 +77,7 @@ pub trait AudioSource: Send + Sync {
     /// handle is dropped. A device loss is reported through `sink.on_end(DeviceLost)`.
     fn start(&self, device: &DeviceId, sink: Box<dyn FrameSink>) -> Result<CaptureHandle, CaptureError>;
 }
-pub enum CaptureError { NoDevice, AccessDenied, DeviceBusy, Other(String /* OS error code text, no audio */) }
+pub enum CaptureError { NoDevice, AccessDenied, DeviceBusy, Other(String /* OS error code text, no audio */) }   // voicen_core::recording::CaptureError (T-042)
 
 pub trait Clipboard: Send + Sync {
     /// Writes text with the history/cloud exclusion formats (FR-022). Retries internally.
@@ -118,8 +118,6 @@ pub trait SettingsSource: Send + Sync {
     fn dictation_settings(&self) -> DictationSettings;     // projection of 004's SettingsService::snapshot(); no file, no loader, no own defaults (decisions #21)
 }
 
-pub trait Clock: Send + Sync { fn now(&self) -> Instant; }
-
 pub trait PipelineObserver: Send + Sync {
     fn event(&self, e: &DictationEvent);                   // 006 writes these to the log file
 }
@@ -141,3 +139,36 @@ impl Pipeline {
 ```
 
 The shell implements the hotkey thread (research R-1, R-2, R-17) and turns OS messages into these calls. Every decision — what to record, discard, send, deliver or show — is taken inside `Pipeline`.
+
+There is no clock port in this feature. Every `Instant` is the instant of the caller's event: the hotkey thread stamps the press and the release when the OS message arrives, so worker or lock delay never counts in the 0.3 s hold. `voicen_core::clock::Clock` (wall time, used by `SettingsService`) is unchanged (T-042).
+
+## RecordingController and IndicatorState (`voicen_core::recording`, T-042)
+
+Hold mode. Sans-IO: no threads, no capture, no clock; `&mut self`, the shell serialises the calls. The controller is the only place that decides a recording starts or ends, the only constructor of a `FinishedRecording`, and the only owner of `IndicatorState`.
+
+```rust
+pub const MIN_HOLD: Duration;            // 300 ms; a hold of exactly 300 ms is kept
+pub const MESSAGE_DURATION: Duration;    // 3 s
+
+impl<C> RecordingController<C> {         // C: opaque press context, returned with the recording (T-006: StartWindow)
+    pub fn press(&mut self, at: Instant, ctx: C) -> Press;        // Start(RecordingId) | Ignored (auto-repeat while recording)
+    pub fn release(&mut self, at: Instant) -> Release<C>;         // Stop(StopTicket<C>) | Discarded{id, held} | Ignored; idle on return
+    pub fn capture_failed(&mut self, id: RecordingId, err: CaptureError, at: Instant)
+        -> Option<FailureReason>;                                 // live id: idle + MicrophoneUnavailable{cause}; stale id: None
+    pub fn finish(&mut self, ticket: StopTicket<C>, audio: Result<AudioBuffer, CaptureError>, at: Instant)
+        -> Result<FinishedRecording<C>, FailureReason>;           // Ok queues the job; Err: MicrophoneUnavailable{cause}
+    pub fn job_finished(&mut self, id: RecordingId, end: JobEnd, at: Instant);
+    pub fn tray_menu_opened(&mut self, at: Instant);              // clears tray Error
+    pub fn tick(&mut self, at: Instant);                          // expires the message at its `until`
+    pub fn next_deadline(&self) -> Option<Instant>;               // when the shell's timer calls tick
+    pub fn indicator(&self) -> &IndicatorState;                   // { tray: TrayState, overlay: OverlayState }
+}
+pub enum JobEnd { Delivered { notice: Option<MessageId> }, Notice(MessageId), Failed(FailureReason) }
+pub enum MicCause { NoDevice, AccessDenied, Busy, Other }       // CaptureError without the OS text
+```
+
+- `StopTicket` is not `Clone` and has a private constructor; `finish` consumes it. So one press yields at most one `FinishedRecording` (`end = Released`, `started_at` = press instant, `stopped_at` = release instant), and none for a hold under `MIN_HOLD` (measured with `saturating_duration_since`), a capture error, or a stale id. A press is accepted again as soon as `release` returns (FR-029).
+- `capture_failed` (live id) and `finish(Err)` show the `failure.microphone_unavailable` message for 3 s and set tray `Error`; the caller still gets the reason for its toast and event. `MicrophoneUnavailable` is not retryable.
+- A job counts from `finish(Ok)` until `job_finished` for its id; an unknown or repeated id changes nothing. `Delivered` clears tray `Error` and shows its notice if any; `Notice` shows a message; `Failed` shows the reason's message and sets tray `Error`.
+- Tray priority `HotkeyError > Recording > Error > Idle`; overlay priority `Recording > Message > Processing (≥ 1 queued job) > Hidden`. A press drops the message; it is not shown again. No input sets `HotkeyError` yet (T-006 adds hotkey registration).
+- The controller emits no events: T-006/T-001 build `RecordingStarted`/`RecordingEnded` from the returned id, instants and `end`. T-009 (toggle, 10-minute maximum, Esc) and T-006 (device lost, suspend) add inputs and `RecordingEnd` variants to the same controller. The engine = none check stays in `settings::gate::dictation_gate`, which the shell calls before `press`.

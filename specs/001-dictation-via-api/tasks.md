@@ -43,9 +43,9 @@ description: "Task list for feature 001 — dictation via an OpenAI-compatible A
 - [ ] T007 [P] Add every key and text of contracts/messages.md to the one catalog `i18n/en.json`, `i18n/ru.json` (created by teamwright T-005); `MessageKey` maps to `voicen_core::i18n::MessageId` (declared with `messages!`) and `MessageParams` to its `args`. No own catalog files and no own completeness test: parity is checked only by T-005's tests [core] [req FR-15 (spec FR-034)]
 - [ ] T008 [P] Red test + implement `DictationEvent` (only the fields of data-model.md "DictationEvent") and the `PipelineObserver` trait, plus a recording fake, in `crates/voicen-core/src/events.rs` [core] [req FR-20, NFR-04 (spec FR-033)]
 - [ ] T009 [P] Red test + implement `AudioBuffer` (16 kHz mono i16), mix-down + resample with `rubato` (48 kHz stereo → 16 kHz mono length ±1 sample per 10 ms), and WAV encoding (RIFF PCM 16-bit, 16 000 Hz, mono; 10 min ≈ 19.2 MB) in `crates/voicen-core/src/audio/{mod,resample,wav}.rs` [core] [req FR-06, decisions #1]
-- [ ] T010 Define the platform traits of contracts/core-traits.md (`AudioSource`, `Clipboard`, `Paster`, `Notifier`, `Indicator`, `TempAudioStore`, `SettingsSource`, `Clock`; `CredentialStore` is 004's trait in `voicen_core::secrets`, not redefined here — decisions #21) in `crates/voicen-core/src/platform.rs`, with recording fakes in `crates/voicen-core/tests/support/fakes.rs` [core] [req NFR-11]
+- [ ] T010 Define the platform traits of contracts/core-traits.md (`AudioSource`, `Clipboard`, `Paster`, `Notifier`, `Indicator`, `TempAudioStore`, `SettingsSource`; no `Clock` port, instants come from the caller (teamwright T-042); `CredentialStore` is 004's trait in `voicen_core::secrets`, not redefined here — decisions #21) in `crates/voicen-core/src/platform.rs`, with recording fakes in `crates/voicen-core/tests/support/fakes.rs` [core] [req NFR-11]
 - [ ] T011 [P] Red test + implement `DictationSettings` (fields per data-model.md) as a projection of 004's `SettingsService::snapshot()` (`SettingsSource` = `From<&Settings>`; no file, no loader, no own defaults — decisions #21), with a test that a snapshot built from 004's `defaults()` projects to hotkey Ctrl+Alt+Space, mode hold, auto-paste on, language auto, engine none and that a saved value reaches the projection (P-013), in `crates/voicen-core/src/platform.rs` [core] [req FR-21 defaults, FR-13 (read only)] — needs 004 T007/T022
-- [ ] T012 [P] Red test + implement the `IndicatorState` machine: TrayState priority "HotkeyError > Recording > Error > Idle"; OverlayState `Recording` / `Processing` (≥ 1 job unreleased and no recording) / `Message` 3 s / `Hidden` — in `crates/voicen-core/src/indicator.rs` [core] [req FR-04, FR-25 (spec FR-008, FR-028)]
+- [ ] T012 [P] Red test + implement the `IndicatorState` machine: TrayState priority "HotkeyError > Recording > Error > Idle"; OverlayState `Recording` / `Processing` (≥ 1 job unreleased and no recording) / `Message` 3 s / `Hidden` — in `crates/voicen-core/src/recording/indicator.rs`, owned by `RecordingController` (teamwright T-042) [core] [req FR-04, FR-25 (spec FR-008, FR-028)]
 
 **Checkpoint**: Foundation ready — user story implementation can begin.
 
@@ -60,7 +60,7 @@ description: "Task list for feature 001 — dictation via an OpenAI-compatible A
 ### Tests for User Story 1 (write first, must fail)
 
 - [ ] T013 [P] [US1] Red tests: request shape per contracts/openai-transcription.md — path `<base>/audio/transcriptions` with and without a trailing `/`; multipart `file` (audio/wav), `model`, `response_format=json`; no `language` part for auto; no `Authorization` header without a key; 200 `{"text":"hello"}` → `Ok("hello")`; 200 empty text → `Ok("")`. In `crates/voicen-core/tests/openai_client.rs` [core] [req FR-06]
-- [ ] T014 [P] [US1] Red tests for hold mode in `RecordingController`: a 4 s hold → one job with ~4 s audio; a hold < 0.3 s → discarded, no job, no notification; auto-repeat presses ignored; releasing any key of the combination ends it; engine = none → no recording, `notice.choose_engine` and open settings. In `crates/voicen-core/src/recording.rs` (unit tests) [core] [req FR-02, FR-21 failure branch]
+- [ ] T014 [P] [US1] Red tests for hold mode in `RecordingController`: a 4 s hold → one job with ~4 s audio; a hold < 0.3 s → discarded, no job, no notification; auto-repeat presses ignored; releasing any key of the combination ends it; engine = none → no recording, `notice.choose_engine` and open settings: decided by `settings::gate::dictation_gate` before `press`, wired by teamwright T-006. In `crates/voicen-core/src/recording/mod.rs` (unit tests, teamwright T-042) [core] [req FR-02, FR-21 failure branch]
 - [ ] T015 [P] [US1] Red tests for the speech gate: silence, cough and keyboard fixtures → `NoSpeech` (no engine call, no clipboard write, `notice.no_speech`); the speech fixture → engine called; primary detector fails to load → energy detector used and one `Warning{vad_fallback}`. In `crates/voicen-core/src/vad/mod.rs` tests, plus `crates/voicen-core/tests/vad_fixtures.rs` (feature `silero`) [core, win-ci] [req FR-12]
 - [ ] T016 [P] [US1] Red tests for the `DeliveryDecision` table of data-model.md: the clipboard is always written first; auto-paste off → `CopiedOnly` + `notice.copied`; modifiers still held after 1 s → copy-only + `notice.copied_paste_manually`; start window not in front or closed → same; elevated → same; otherwise `Pasted`. In `crates/voicen-core/src/delivery.rs` [core] [req FR-10]
 - [ ] T017 [US1] Red end-to-end core test: fake source (speech fixture) + wiremock 200 → the clipboard fake gets the text, the paster fake gets Ctrl+V for the recorded start window, the indicator goes Recording → Processing → Hidden, and the observer gets `RecordingStarted`/`JobFinished`/`Delivered`. In `crates/voicen-core/tests/pipeline.rs` [core] [req FR-02, FR-04, FR-06, FR-10, FR-12]
@@ -68,7 +68,7 @@ description: "Task list for feature 001 — dictation via an OpenAI-compatible A
 ### Implementation for User Story 1
 
 - [ ] T018 [P] [US1] Implement the `Engine` trait, `TranscribeRequest` and `OpenAiCompatibleEngine` (the key is 004's `Secret`, `Debug`/`Display` print `***`; no `SecretString`, decisions #21) (blocking reqwest, connect timeout + whole-request timeout from `Timeouts`, body cap 1 MiB) in `crates/voicen-core/src/engine/{mod,openai}.rs`; make T013 green [core] [req FR-06, FR-24, NFR-04, NFR-11]
-- [ ] T019 [P] [US1] Implement `RecordingController` hold mode ("min hold 0.3 s (hold mode only)") in `crates/voicen-core/src/recording.rs`; make T014 green [core] [req FR-02]
+- [ ] T019 [P] [US1] Implement `RecordingController` hold mode ("min hold 0.3 s (hold mode only)") in `crates/voicen-core/src/recording/mod.rs` (teamwright T-042); make T014 green [core] [req FR-02]
 - [ ] T020 [P] [US1] Implement the `SpeechDetector` trait, `EnergyDetector` (research R-5 constants, pinned by fixtures), `SpeechGate` with fallback, and `SileroDetector` (feature `silero`, bundled ggml model path from the shell) in `crates/voicen-core/src/vad/{mod,energy,silero}.rs`; make T015 green [core, win-ci] [req FR-12]
 - [ ] T021 [P] [US1] Implement the `PostProcessor` trait and `PassThrough` in `crates/voicen-core/src/postprocess.rs`, called between engine and delivery [core] [req FR-09 (integration point; spec FR-021)]
 - [ ] T022 [P] [US1] Implement `DeliveryDecision` in `crates/voicen-core/src/delivery.rs`; make T016 green [core] [req FR-10]
@@ -138,7 +138,7 @@ description: "Task list for feature 001 — dictation via an OpenAI-compatible A
 
 **Independent Test**: Core state-machine tests with a fake clock; [win-ci] Esc registration test; [owner] quickstart §3 step 2.
 
-- [ ] T044 [P] [US3] Red tests in `crates/voicen-core/src/recording.rs`:
+- [ ] T044 [P] [US3] Red tests in `crates/voicen-core/src/recording/mod.rs`:
   - toggle press → press = one job
   - "max 10 min (both modes)" → job + `notice.max_length`
   - Esc → `Cancelled`, nothing sent, indicator off
@@ -146,7 +146,7 @@ description: "Task list for feature 001 — dictation via an OpenAI-compatible A
   - Esc claim failure → recording continues + `Warning{esc_unavailable}`
 
   [core] [req FR-03, FR-22]
-- [ ] T045 [US3] Implement toggle mode, the max-length timer and Esc handling in `crates/voicen-core/src/recording.rs`; make T044 green [core] [req FR-03, FR-22]
+- [ ] T045 [US3] Implement toggle mode, the max-length timer and Esc handling in `crates/voicen-core/src/recording/mod.rs`; make T044 green [core] [req FR-03, FR-22]
 - [ ] T046 [US3] Register Esc (`RegisterHotKey(VK_ESCAPE)`) only while recording, in `src-tauri/src/win/hotkey.rs`; Windows test: Esc while recording discards; Esc while idle reaches the test window, in `src-tauri/tests/hotkey.rs` [win-ci, owner] [req FR-22]
 
 ---
@@ -224,7 +224,7 @@ description: "Task list for feature 001 — dictation via an OpenAI-compatible A
 - Foundational (T006–T012): after T002. Blocks all stories. The dependency direction is 001 → 004's traits (`CredentialStore`, `Settings`/`SettingsService`, `HotkeyRegistrar`, 004 T004–T009, T067): 001 reads keys and settings through them and implements `HotkeyRegistrar`; 004 does not wait for 001 (decisions #21).
 - US1 (Phase 3): after Foundational. The MVP.
 - US2 (Phase 4): after US1's `Pipeline` (T023) and engine (T018).
-- US3 and US4: after US1 (`recording.rs`, `hotkey.rs` shell thread T027); independent of each other and of US2.
+- US3 and US4: after US1 (`recording/`, `hotkey.rs` shell thread T027); independent of each other and of US2.
 - US5: after US2 (failure and pending outcomes take part in the order).
 - US6: after US1 (capture T024).
 - Polish: after the stories it measures; T058 travels with each code task.

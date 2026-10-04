@@ -39,7 +39,7 @@ The API key is not part of the snapshot. It is read from `CredentialStore` per r
 |---|---|
 | id | `RecordingId` (monotonic) |
 | start_window | `StartWindow` |
-| started_at | `Instant` (from the `Clock` trait) |
+| started_at | `Instant` (from the caller's event: the hotkey thread stamps the press; no clock port, T-042) |
 | device | `DeviceId` used (selected or fallback) |
 | samples | `AudioBuffer` (accumulating; finalised to 16 kHz mono i16) |
 | end | `RecordingEnd` = `Released` \| `Toggled` \| `MaxLength` \| `DeviceLost` \| `Suspended` \| `Cancelled` \| `TooShort` |

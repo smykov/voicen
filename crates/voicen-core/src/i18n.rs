@@ -13,6 +13,13 @@
 //! - Rendering: one left-to-right pass. A placeholder with an argument is replaced
 //!   by the value inserted literally (never re-expanded); a placeholder without an
 //!   argument stays verbatim; extra arguments are ignored.
+//! - Nested ids (Rust [`text`] only): an argument whose value is the id of a
+//!   message declared in the `nested:` group of [`messages!`] (`mic_reason.*`) is
+//!   first replaced by that message's text in the same language, rendered without
+//!   arguments, one level deep. Any other value, including the id of a message
+//!   outside that group, is inserted as is. So a lang-independent parameter such
+//!   as `FailureReason::message_params`'s `reason` renders in the user's
+//!   language, and no `&str` id outside [`MESSAGE_IDS`] is ever looked up.
 
 use std::collections::BTreeMap;
 #[cfg(test)]
@@ -47,22 +54,42 @@ impl Serialize for MessageId {
 /// Declares `MessageId` constants and generates `MESSAGE_IDS` from the same list,
 /// so a Rust id cannot exist without being checked against both catalogs.
 ///
+/// Ids after `nested:` are texts used as an argument value of another message
+/// (see the module docs); they are in `MESSAGE_IDS` too, and `NESTED_IDS` is
+/// generated from that group.
+///
 /// ```text
 /// messages! {
 ///     /// Tray menu item.
 ///     TRAY_EXIT = "tray.exit",
+///     ;
+///     nested:
+///     /// `{reason}` of `failure.microphone_unavailable`.
+///     MIC_REASON_BUSY = "mic_reason.busy",
 /// }
 /// ```
 macro_rules! messages {
-    ($($(#[$meta:meta])* $name:ident = $id:literal),* $(,)?) => {
+    (
+        $($(#[$meta:meta])* $name:ident = $id:literal),* $(,)?
+        ;
+        nested: $($(#[$nmeta:meta])* $nname:ident = $nid:literal),* $(,)?
+    ) => {
         $(
             $(#[$meta])*
             pub const $name: MessageId = MessageId($id);
         )*
+        $(
+            $(#[$nmeta])*
+            pub const $nname: MessageId = MessageId($nid);
+        )*
 
         /// Every `MessageId` declared in this module (generated from the same
         /// declaration).
-        pub const MESSAGE_IDS: &[MessageId] = &[$($name),*];
+        pub const MESSAGE_IDS: &[MessageId] = &[$($name,)* $($nname),*];
+
+        /// The ids [`text`] resolves when they arrive as an argument value
+        /// (the `nested:` group of the same declaration).
+        const NESTED_IDS: &[MessageId] = &[$($nname),*];
     };
 }
 
@@ -100,6 +127,27 @@ messages! {
     FAILURE_KEY_STORE_UNAVAILABLE = "failure.key_store_unavailable",
     /// `FailureReason::EngineNotConfigured` (no engine for the settings; decision #44).
     FAILURE_ENGINE_NOT_CONFIGURED = "failure.engine_not_configured",
+    /// `FailureReason::MicrophoneUnavailable` (T-042); placeholder `{reason}` = a
+    /// `mic_reason.*` id, rendered in the same language.
+    FAILURE_MICROPHONE_UNAVAILABLE = "failure.microphone_unavailable",
+    ;
+    nested:
+    /// `MicCause::NoDevice`.
+    MIC_REASON_NO_DEVICE = "mic_reason.no_device",
+    /// `MicCause::AccessDenied`.
+    MIC_REASON_ACCESS_DENIED = "mic_reason.access_denied",
+    /// `MicCause::Busy`.
+    MIC_REASON_BUSY = "mic_reason.busy",
+    /// `MicCause::Other`.
+    MIC_REASON_OTHER = "mic_reason.other",
+}
+
+impl MessageId {
+    /// This id as an argument value of another message; [`text`] renders it in
+    /// the same language when the id is in the `nested:` group of [`messages!`].
+    pub(crate) fn nested_arg(self) -> String {
+        self.0.to_string()
+    }
 }
 
 /// Both catalogs (en, ru) as parsed flat id -> text maps.
@@ -355,9 +403,30 @@ fn embedded() -> &'static Catalog {
     CATALOG.get_or_init(|| Catalog::from_json(EMBEDDED_EN, EMBEDDED_RU).unwrap_or_default())
 }
 
-/// Render a Rust-originated message from the embedded catalog.
+/// Render a Rust-originated message from the embedded catalog. An argument value
+/// that is a nested id (`mic_reason.*`) is rendered as that message's text in
+/// `lang` first (module docs).
 pub fn text(lang: UiLanguage, id: MessageId, args: &[(&str, &str)]) -> String {
-    embedded().text(lang, id.0, args)
+    render_with_nested(embedded(), lang, id, args)
+}
+
+fn render_with_nested(
+    catalog: &Catalog,
+    lang: UiLanguage,
+    id: MessageId,
+    args: &[(&str, &str)],
+) -> String {
+    let resolved: Vec<(&str, String)> = args
+        .iter()
+        .map(
+            |(name, value)| match NESTED_IDS.iter().find(|n| n.0 == *value) {
+                Some(nested) => (*name, catalog.text(lang, nested.0, &[])),
+                None => (*name, (*value).to_string()),
+            },
+        )
+        .collect();
+    let resolved: Vec<(&str, &str)> = resolved.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    catalog.text(lang, id.0, &resolved)
 }
 
 /// OS language tag -> UI language: primary subtag `ru` (any ASCII case) -> Ru, else En.
@@ -469,6 +538,30 @@ mod tests {
             ),
             "Voicen 1.2.3 (abc1234)"
         );
+    }
+
+    #[test]
+    fn nested_id_arguments_render_in_the_same_language_and_nothing_else_resolves() {
+        // T-042: `{reason}` carries a `mic_reason.*` id (lang-independent params);
+        // text() renders it in the requested language. Bite: the raw id rendered,
+        // the nested text taken from English for ru, any declared id (or any
+        // catalog key) resolved, which would reopen the `&str` id path.
+        let c = catalog(
+            r#"{"m":"Mic: {reason}","mic_reason.busy":"busy {x}","failure.timeout":"T"}"#,
+            r#"{"m":"Мик: {reason}","mic_reason.busy":"занято {x}","failure.timeout":"Т"}"#,
+        );
+        let m = MessageId("m");
+        let rows = [
+            (UiLanguage::En, "mic_reason.busy", "Mic: busy {x}"),
+            (UiLanguage::Ru, "mic_reason.busy", "Мик: занято {x}"),
+            (UiLanguage::En, "failure.timeout", "Mic: failure.timeout"),
+            (UiLanguage::Ru, "disk", "Мик: disk"),
+        ];
+        for (lang, value, want) in rows {
+            let got = render_with_nested(&c, lang, m, &[("reason", value), ("x", "X")]);
+            assert_eq!(got, want, "{lang:?} {value:?}");
+        }
+        assert!(NESTED_IDS.iter().all(|n| MESSAGE_IDS.contains(n)));
     }
 
     // ---- AC2: OS language -> UI language, in one place ---------------------------

@@ -4,8 +4,6 @@
 //! Owned by [`RecordingController`](super::RecordingController): it changes only
 //! inside controller methods, from controller transitions and `job_finished`
 //! outcomes. No clock is read here; every instant comes from the caller's event.
-//!
-//! SKELETON (T-042 red tests): bodies are placeholders for the developer.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
 use std::time::{Duration, Instant};
@@ -87,8 +85,29 @@ pub(crate) struct IndicatorInputs {
 impl IndicatorState {
     /// The indicator for `inputs`, by the two priority orders.
     pub(crate) fn derive(inputs: &IndicatorInputs) -> IndicatorState {
-        let _ = inputs;
-        IndicatorState::default()
+        let tray = if inputs.hotkey_error {
+            TrayState::HotkeyError
+        } else if inputs.recording {
+            TrayState::Recording
+        } else if inputs.error {
+            TrayState::Error
+        } else {
+            TrayState::Idle
+        };
+        let overlay = if inputs.recording {
+            OverlayState::Recording
+        } else if let Some(m) = &inputs.message {
+            OverlayState::Message {
+                id: m.id,
+                params: m.params.clone(),
+                until: m.until,
+            }
+        } else if inputs.queued_jobs > 0 {
+            OverlayState::Processing
+        } else {
+            OverlayState::Hidden
+        };
+        IndicatorState { tray, overlay }
     }
 }
 
