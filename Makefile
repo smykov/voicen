@@ -26,12 +26,14 @@ check-core:
 	scripts/tw-run core -- cargo test -p voicen-core
 
 # Windows-target type check of the shell on Linux (T-056, decisions #63;
-# docs/decisions/ci-toolchain.md). First the lib and bin with the release features, then the
-# test crates (every src-tauri/tests/*.rs and the lib/bin unit-test crates) with the
-# dev-dependency features: --tests alone would check the lib with test-fakes on and pass a
-# release-only error. cargo check never links and builds no doctest; linking, starting and
-# running the shell stay the windows job's. Needs the gnu target and mingw gcc baked into the
-# core image (docker/rust.Dockerfile; `make core-image`).
+# docs/decisions/ci-toolchain.md). First the lib and bin with the release feature set in the
+# dev profile (no dev-dependency features, tauri without custom-protocol: not what
+# `pnpm tauri build` compiles, so its production context and cfg(dev) / debug_assertions code
+# stay the windows job's), then the test crates (every src-tauri/tests/*.rs and the lib/bin
+# unit-test crates) with the dev-dependency features: --tests alone would check the lib with
+# test-fakes on and pass a release-only error. cargo check never links and builds no doctest;
+# linking, starting and running the shell stay the windows job's. Needs the gnu target and
+# mingw gcc baked into the core image (docker/rust.Dockerfile; `make core-image`).
 check-shell-windows:
 	scripts/tw-run core -- 'cargo check -p voicen --target x86_64-pc-windows-gnu && cargo check -p voicen --target x86_64-pc-windows-gnu --tests'
 

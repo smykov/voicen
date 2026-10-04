@@ -45,7 +45,7 @@ Tasks: T-008 (narrowed by decision #64: the one-time notice and the tray "Open l
 - The active file is held open by the one `Log` (read + append; std's shared read / write / delete) and closed before the roll's rename. The install smoke reads it while the app runs with `Select-String` / `Get-Content`, which open with shared read-write access; a reader that denies shared writes would fail to open it.
 - A reader can block the roll. The rename needs every other open handle on `voicen.log` to share delete. A reader that shares read and write but not delete (.NET `FileShare.ReadWrite`: a tail with `Get-Content -Wait`, a log viewer) makes it fail with a sharing violation. The log then goes Degraded, `on_unwritable` gets `Other(Some(32))` (if it was not called before), and lines are dropped. A reopen every `reopen_every` (60 s) tries the roll again, and lines are written again once the reader closes. This follows from the code (T-008 review round 1 #4) and has not been observed on Windows. T-054 decides whether its notice treats this as "not writable" or whether the roll is retried without degrading (Open).
 - The UTC offset is `SystemTimeToTzSpecificLocalTime` with the active time zone (`windows` feature `Win32_System_Time`, no new crate); UTC when the conversion fails. The log clamps it to ±14:00 and whole minutes.
-- Shell code is first compiled on the Windows job (decisions #5) until T-056's type-check exists.
+- Shell code is type-checked on Linux for `x86_64-pc-windows-gnu` by `make check-shell-windows` (T-056). It is first built, linked and run on the Windows job (decisions #5, #66; `docs/decisions/ci-toolchain.md`).
 
 ## Rejected approaches
 
@@ -60,7 +60,6 @@ Tasks: T-008 (narrowed by decision #64: the one-time notice and the tray "Open l
 ## Open
 
 - T-054: the one-time `notice.logs_unwritable` from `on_unwritable`, the tray "Open logs folder", the ACL-denied folder proof on Windows. T-054 also decides whether a sharing violation on the roll's rename (Windows notes) is a "not writable" notice reason, or is retried on the next write without degrading.
-- T-056: the Windows type-check of the shell.
 - Proposed T3 guard (T-008 analysis, no task yet): `make check` fails when `Cargo.lock` names a logger backend.
 - The failed `.part` removal inside `Downloader` is not logged (core has no log port there; release-2 follow-up, T-008 Q5).
 - T-052 (single instance, decision #64): `Log::open` and `Started` (`diag::start`) must come after the single-instance check, so only the primary process opens the log. Otherwise a second process writes a `started` line into the primary's `voicen.log`. On a roll it could also rename the file the primary still holds open, and the primary's handle would then follow the renamed file past `roll_bytes`, which breaks the 10 MiB bound. The note is in `docs/tasks/T-052.md`.
