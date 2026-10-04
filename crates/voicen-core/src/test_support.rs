@@ -1,6 +1,8 @@
 //! Test helpers shared by this crate's tests and other crates' tests (feature
 //! `test-fakes`; never in a release build).
 
+pub mod fixtures;
+
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 

@@ -15,5 +15,6 @@ pub mod settings;
 #[cfg(any(test, feature = "test-fakes"))]
 pub mod test_support;
 pub mod timeouts;
+pub mod vad;
 
 pub use build_info::{build_info, BuildInfo};
