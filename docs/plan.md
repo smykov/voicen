@@ -17,6 +17,8 @@ Release 1 of Voicen: a Windows 10/11 dictation tool, public on GitHub Releases, 
 | 3 — Post-processing and robustness | FR-09, FR-23, FR-26, FR-27, FR-14, FR-29 | LLM step with fallback; ordering; sleep/resume and mic changes survive | OQ-01 | not started |
 | 4 — Release polish | FR-15, FR-16, FR-19, NFR-01..NFR-12 checks | installer in GitHub Releases; NFR-01 benchmark and NFR-08 checklist pass | OQ-01 | not started |
 
+**Minimum release 1 (decision #62, 2026-10-04):** release 1 ships stage 1 (dictation via API) plus the part of stage 4 needed to publish it — the critical path is T-006 (tray, hotkey, capture, paste), T-007 (failure feedback, retry), T-008 (log), T-025 (installer), T-026 (GitHub Releases), T-028 (owner's release checks, API path), all P1. Stages 2 and 3 (local engines, post-processing, history, robustness extras) move to release 2 (their tasks are P3); the local-model work already done (T-016, T-044, T-045) stays in the code.
+
 ## Out of scope (for now)
 
 - macOS and Linux builds — requirements §3 no-gos.
