@@ -1,10 +1,21 @@
 # Settings window (UI)
 
-**Code:** `src/routes/settings/+page.svelte`, `src/lib/settings/{draft,settingsApi,fields}.ts`, `src/lib/settings/{FieldMessage,KeyField,HotkeyField}.svelte`, `src/lib/settings/tabs/*.svelte`, the IPC mock `e2e/support/tauriMock.ts` (T-004) · **Tests that pin it:** `e2e/settings-first-run.spec.ts` (every case; per invariant below), `e2e/tauri-mock.spec.ts` (the mock's own contract), `src/lib/settings/draft.test.ts`, `src/lib/i18n/ids.test.ts` (type-level, run by svelte-check), core `i18n::tests::every_error_code_has_catalog_text` and `settings::service::tests::{e2e_settings_wire_fixture_matches_core, settings_view_wire_form_carries_unavailable}`
+**Code:** `src/routes/settings/+page.svelte`, `src/lib/settings/{draft,settingsApi,fields}.ts`, `src/lib/settings/{FieldMessage,KeyField,HotkeyField}.svelte`, `src/lib/settings/tabs/*.svelte`, the IPC mock `e2e/support/tauriMock.ts` (T-004); the window lifecycle `src-tauri/src/settings_window.rs`, its call in `run()` (`src-tauri/src/lib.rs`), `src-tauri/tauri.conf.json` (`app.windows`), `src-tauri/capabilities/default.json`, core `SettingsTab::as_str` (T-037) · **Tests that pin it:** `e2e/settings-first-run.spec.ts` (every case; per invariant below), `e2e/tauri-mock.spec.ts` (the mock's own contract), `src/lib/settings/draft.test.ts`, `src/lib/i18n/ids.test.ts` (type-level, run by svelte-check), core `i18n::tests::every_error_code_has_catalog_text` and `settings::service::tests::{e2e_settings_wire_fixture_matches_core, settings_view_wire_form_carries_unavailable}`; for S1 `src-tauri/tests/settings_window.rs` (Windows CI), core `settings::gate::tests::{settings_tab_tokens_are_the_ipc_contract, settings_tab_tokens_are_distinct_url_safe_words}` and the install smoke's window checks in `.github/workflows/ci.yml`
 
-Task: T-004. Contract: `specs/004-settings-and-first-run/contracts/ipc.md` (commands, wire form, FieldId, errors). Decisions: #30, #38. Core side: `docs/decisions/settings.md`; message ids: `docs/decisions/i18n.md`. Tabs added later (T-013, T-016, T-021, T-034) live in this route and keep these invariants.
+Tasks: T-004, T-037 (S1). Contract: `specs/004-settings-and-first-run/contracts/ipc.md` (commands, wire form, FieldId, errors). Decisions: #30, #38, #45. Core side: `docs/decisions/settings.md`; message ids: `docs/decisions/i18n.md`. Tabs added later (T-013, T-016, T-021, T-034) live in this route and keep these invariants.
 
 ## Invariants
+
+### S1 — One settings window, one constructor, one startup decision
+
+- **Defect that produced it:** none in the failure log (found in analysis, T-037). The shell computed the load outcome and dropped it, and tauri built the static `main` window from `tauri.conf.json` on every start, whatever the outcome, so a Loaded start showed a window and the capability belonged to a label the settings page never had.
+- **What breaks if you violate it:** a second settings window (two drafts of one settings file), a window on every start including logon autostart, a page whose `listen` / close is refused by the ACL, or a startup rule decided in the shell beside core's `startup_action`.
+- **Where it is enforced:**
+  - `settings_window::open(app, tab, field)` is the only code that builds the window labelled `settings`. If it exists, `open` unminimizes, shows and focuses it, leaves its URL unchanged and emits `settings://focus {tab, field?}` to it (field omitted when `None`); otherwise it builds it at `settings?tab=<token>[&field=<FieldId>]`, title `Voicen`. Both tokens are closed `[a-z_.]` sets (`SettingsTab::as_str`, `FieldId::as_str`), so the URL needs no encoding.
+  - `settings_window::on_ready(app, &outcome, launched_by_autostart)` carries out `startup_action` and decides nothing else. `run()` calls it once, on `RunEvent::Ready`, with `autostart::launched_by_autostart(args_os())`; a failed open prints one fixed stderr line (decision #45, the #38 interim until T-006 / T-008).
+  - `tauri.conf.json` has `app.windows: []`. The one capability is granted to label `settings` only, with exactly `core:event:allow-listen`, `core:event:allow-unlisten`, `core:window:allow-destroy` (decision #45).
+  - Tests: `src-tauri/tests/settings_window.rs` (FirstRun / Reset / Unavailable → one window at `tab=engine`; Loaded → none; a second `open` → one window, one focus event; tauri's own parse of the config and its real ACL), core `gate::tests::settings_tab_tokens_*`, and the install smoke (first launch → a visible window titled `Voicen`; a Loaded launch → none for 10 s), which is the only proof that `run()` calls `on_ready`.
+- **Don't:** build a `settings` webview anywhere but `open` in shell code (test harnesses may), put a window back into `tauri.conf.json`, decide the startup window from the outcome in the shell, spell a tab token outside `SettingsTab::as_str`, grant `core:default` or another label in the capability, or navigate the open window instead of emitting `settings://focus`.
 
 ### U1 — The window derives nothing: every value comes from a SettingsView
 
@@ -47,6 +58,7 @@ Task: T-004. Contract: `specs/004-settings-and-first-run/contracts/ipc.md` (comm
 |---|---|---|
 | `tWire(id: string)` to render ids that arrive over IPC | a `string`-typed renderer beside `t(id: MessageId)`: an unknown literal id compiles and renders as the raw id (i18n.md) | T-004 review r1 #1 |
 | Validating in the mock or in the UI before `settings_save` | a second copy of core rules (P-010) | decision #38 |
+| Keeping the config window (`create: false`) and showing it at start, or building the window in `setup()` | a second construction path beside `open`; `setup()` never runs from `build_app` or the shell tests | T-037 analysis (options B, C) |
 | Wire types declared again in the e2e mock | two TS declarations of one wire; the mock re-exports `settingsApi.ts` | T-004 review r1 #8 |
 
 ## Open

@@ -24,10 +24,17 @@ pub enum SettingsTab {
 }
 
 impl SettingsTab {
-    /// The tab token of contracts/ipc.md (`settings?tab=<token>`, `settings://focus`).
-    /// RED STUB (T-037): the developer replaces it with a wildcard-free match.
+    /// The tab token of contracts/ipc.md (`settings?tab=<token>`, `settings://focus`):
+    /// a closed set of `[a-z_]+` words, so it goes into the window URL unencoded.
     pub fn as_str(self) -> &'static str {
-        ""
+        match self {
+            SettingsTab::Engine => "engine",
+            SettingsTab::Recording => "recording",
+            SettingsTab::Output => "output",
+            SettingsTab::PostProcessing => "post_processing",
+            SettingsTab::History => "history",
+            SettingsTab::General => "general",
+        }
     }
 }
 

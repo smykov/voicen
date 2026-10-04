@@ -2,7 +2,7 @@ use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 
-use tauri::{App, Builder, Context, Runtime};
+use tauri::{App, Builder, Context, RunEvent, Runtime};
 use voicen_core::autostart::Autostart;
 use voicen_core::secrets::CredentialStore;
 use voicen_core::settings::service::SettingsService;
@@ -88,23 +88,45 @@ fn release_autostart() -> Arc<dyn Autostart> {
     compile_error!("the Voicen app runs on Windows only: autostart is the HKCU Run value")
 }
 
+/// `true` when the Run value started this process (`--autostart`, T-014).
+#[cfg(windows)]
+fn release_launched_by_autostart() -> bool {
+    autostart::launched_by_autostart(std::env::args_os())
+}
+
+#[cfg(not(windows))]
+fn release_launched_by_autostart() -> bool {
+    compile_error!(
+        "the Voicen app runs on Windows only: the autostart flag comes from the HKCU \
+         Run value"
+    )
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     log_start(&paths::log_dir());
     let os_language = locale::os_language();
-    // The load outcome drives the startup executor (open the settings window on
-    // FirstRun/Reset, the reset notice): T-004 consumes it.
-    let (service, _load_outcome) = settings_ipc::load_settings(
+    let (service, load_outcome) = settings_ipc::load_settings(
         paths::data_dir(),
         release_credentials(),
         release_autostart(),
         os_language.as_deref(),
     );
+    let launched_by_autostart = release_launched_by_autostart();
     build_app(
         tauri::Builder::default(),
         tauri::generate_context!(),
         service,
     )
     .expect("error while building tauri application")
-    .run(|_, _| {});
+    .run(move |app, event| {
+        // The one startup window decision (S1): Ready fires once.
+        if let RunEvent::Ready = event {
+            if settings_window::on_ready(app, &load_outcome, launched_by_autostart).is_err() {
+                // Fixed text, no error detail (decision #45; the #38 interim until
+                // T-006's tray and T-008's log).
+                eprintln!("cannot open the settings window at start");
+            }
+        }
+    });
 }

@@ -36,11 +36,12 @@ Built (T-030): `settings_get`, `settings_save` (runs off the main thread), `sett
 | Event | Payload | When |
 |---|---|---|
 | `settings://changed` | `SettingsView` (`SettingsService::view()`) | after every `Saved`, from any caller, exactly once; never after a `Refused`. Emitted only by the shell's subscribe bridge (`settings_ipc::spawn_change_bridge`, T-030), not by `settings_save`. All open windows re-render, and switch language if `ui_language` changed. After a startup reset no event is sent (no window exists yet); the window reads `reset_notice` through `settings_get` |
-| `settings://focus` | `{ tab: "engine"\|"recording"\|"output"\|"post_processing"\|"history"\|"general", field?: FieldId }` | the settings window is requested while already open (spec FR-002) |
+| `settings://focus` | `{ tab: "engine"\|"recording"\|"output"\|"post_processing"\|"history"\|"general", field?: FieldId }`; `tab` is `SettingsTab::as_str`, `field` is omitted (not `null`) when absent | the settings window is requested while already open (spec FR-002): emitted to label `settings` only by `settings_window::open`, once per such request, never on the open that creates the window (T-037) |
 
 ## Window
 
-- Label `settings`, URL `settings?tab=<tab>[&field=<FieldId>]`, single instance, created on demand and destroyed on close.
+- Label `settings`, URL `settings?tab=<tab>[&field=<FieldId>]`, single instance, created on demand and destroyed on close. Created only by `src-tauri` `settings_window::open(app, tab, field)` (title `Voicen`, 800 × 600); a call while it exists unminimizes, shows and focuses it, leaves its URL unchanged and emits `settings://focus`. At start the shell opens it only when `startup_action` says so (FirstRun, Reset, Unavailable → tab `engine`; Loaded → none), through `settings_window::on_ready` on `RunEvent::Ready`. `tauri.conf.json` declares no window (T-037).
+- Capability (`src-tauri/capabilities/default.json`, label `settings` only; decision #45): `core:event:allow-listen`, `core:event:allow-unlisten`, `core:window:allow-destroy`. Every other `plugin:*` command is refused; the app commands above are not ACL-checked.
 - Close request: the UI calls `onCloseRequested`; with unsaved changes it prevents the close and shows the discard dialog; otherwise the window closes.
 
 ## Example (`settings_save` refused at validation: all field errors at once; OS steps are not attempted)
