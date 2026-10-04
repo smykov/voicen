@@ -3,13 +3,17 @@
   // language list is core's (settings_speech_languages); names come from
   // Intl.DisplayNames in the UI language.
   import { currentLanguage } from "$lib/i18n/language.svelte";
-  import { t } from "$lib/i18n";
+  import { t, type MessageId } from "$lib/i18n";
   import type { Draft } from "../draft";
-  import { controlId, errorId } from "../fields";
+  import { controlId, describedBy } from "../fields";
   import FieldMessage from "../FieldMessage.svelte";
   import KeyField from "../KeyField.svelte";
 
-  let { draft = $bindable(), languages }: { draft: Draft; languages: readonly string[] } = $props();
+  let {
+    draft = $bindable(),
+    warnings,
+    languages,
+  }: { draft: Draft; warnings: Record<string, MessageId>; languages: readonly string[] } = $props();
 
   const AUTO = "auto";
 
@@ -25,7 +29,7 @@
   }
 
   function described(field: string): string | undefined {
-    return draft.errors[field] ? errorId(field) : undefined;
+    return describedBy(field, draft.errors, warnings);
   }
 </script>
 
@@ -43,7 +47,7 @@
     <option value="builtin_local">{t("settings.engine.builtin_local")}</option>
     <option value="local_server">{t("settings.engine.local_server")}</option>
   </select>
-  <FieldMessage errors={draft.errors} field="engine.kind" />
+  <FieldMessage errors={draft.errors} {warnings} field="engine.kind" />
 </div>
 
 {#if draft.settings.engine === "api"}
@@ -57,7 +61,7 @@
       aria-invalid={invalid("engine.api.base_url")}
       aria-describedby={described("engine.api.base_url")}
     />
-    <FieldMessage errors={draft.errors} field="engine.api.base_url" />
+    <FieldMessage errors={draft.errors} {warnings} field="engine.api.base_url" />
   </div>
   <div class="field">
     <label for={controlId("engine.api.model")}>{t("settings.field.model")}</label>
@@ -69,9 +73,9 @@
       aria-invalid={invalid("engine.api.model")}
       aria-describedby={described("engine.api.model")}
     />
-    <FieldMessage errors={draft.errors} field="engine.api.model" />
+    <FieldMessage errors={draft.errors} {warnings} field="engine.api.model" />
   </div>
-  <KeyField bind:draft slot="transcription_api" field="engine.api.key" />
+  <KeyField bind:draft {warnings} slot="transcription_api" field="engine.api.key" />
 {:else if draft.settings.engine === "local_server"}
   <div class="field">
     <label for={controlId("engine.local_server.base_url")}>{t("settings.field.base_url")}</label>
@@ -83,7 +87,7 @@
       aria-invalid={invalid("engine.local_server.base_url")}
       aria-describedby={described("engine.local_server.base_url")}
     />
-    <FieldMessage errors={draft.errors} field="engine.local_server.base_url" />
+    <FieldMessage errors={draft.errors} {warnings} field="engine.local_server.base_url" />
   </div>
   <div class="field">
     <label for={controlId("engine.local_server.model")}>{t("settings.field.model")}</label>
@@ -95,13 +99,15 @@
       aria-invalid={invalid("engine.local_server.model")}
       aria-describedby={described("engine.local_server.model")}
     />
-    <FieldMessage errors={draft.errors} field="engine.local_server.model" />
+    <FieldMessage errors={draft.errors} {warnings} field="engine.local_server.model" />
   </div>
-  <KeyField bind:draft slot="local_server" field="engine.local_server.key" />
+  <KeyField bind:draft {warnings} slot="local_server" field="engine.local_server.key" />
 {:else if draft.settings.engine === "builtin_local"}
   <div class="field">
     <p class="hint">{t("settings.builtin_local.pending")}</p>
-    <FieldMessage errors={draft.errors} field="engine.builtin_local.model_id" />
+    <!-- No [data-field] control here (T-013): a warning of this field is listed at form
+         level (L), so it is not rendered here too. -->
+    <FieldMessage errors={draft.errors} warnings={{}} field="engine.builtin_local.model_id" />
   </div>
 {/if}
 
@@ -122,5 +128,5 @@
       <option value={language.code}>{language.name}</option>
     {/each}
   </select>
-  <FieldMessage errors={draft.errors} field="engine.speech_language" />
+  <FieldMessage errors={draft.errors} {warnings} field="engine.speech_language" />
 </div>

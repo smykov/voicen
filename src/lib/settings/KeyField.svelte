@@ -2,13 +2,18 @@
   // A key input (U3): type=password, empty at start, presence shown as text only.
   // Typing sets Replace, emptying the input sets Untouched again, the button sets
   // Clear; a Saved resets the slot to Untouched, which empties the input.
-  import { t } from "$lib/i18n";
+  import { t, type MessageId } from "$lib/i18n";
   import { clearKey, resetKey, typeKey, type Draft } from "./draft";
-  import { controlId, errorId } from "./fields";
+  import { controlId, describedBy } from "./fields";
   import FieldMessage from "./FieldMessage.svelte";
   import type { KeySlot } from "./settingsApi";
 
-  let { draft = $bindable(), slot, field }: { draft: Draft; slot: KeySlot; field: string } = $props();
+  let {
+    draft = $bindable(),
+    warnings,
+    slot,
+    field,
+  }: { draft: Draft; warnings: Record<string, MessageId>; slot: KeySlot; field: string } = $props();
 
   const edit = $derived(draft.keys[slot]);
   const typed = $derived(typeof edit === "object" ? edit.Replace : "");
@@ -31,7 +36,7 @@
     value={typed}
     oninput={onInput}
     aria-invalid={draft.errors[field] ? "true" : undefined}
-    aria-describedby={draft.errors[field] ? errorId(field) : undefined}
+    aria-describedby={describedBy(field, draft.errors, warnings)}
   />
   {#if edit === "Clear"}
     <p class="hint">{t("settings.key.cleared")}</p>
@@ -39,5 +44,5 @@
     <p class="hint">{t("settings.key.saved")}</p>
     <button type="button" onclick={() => (draft = clearKey(draft, slot))}>{t("settings.key.clear")}</button>
   {/if}
-  <FieldMessage errors={draft.errors} {field} />
+  <FieldMessage errors={draft.errors} {warnings} {field} />
 </div>

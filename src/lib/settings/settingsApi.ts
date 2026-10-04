@@ -68,9 +68,17 @@ export interface FormError {
   not_restored?: string[];
 }
 
+/**
+ * A note on a saved field (`Saved.warnings`); never a refusal. `field` is a FieldId,
+ * `code` a WarningCode (dotted string), and `message` the Rust `MessageId` core maps the
+ * code to (`WarningCode::message_id`), typed `MessageId` here and rendered with `t` as
+ * given: core decides which value warns and with which text (decision #52;
+ * `message_ids_exist_in_both_catalogs` guarantees the text in both catalogs).
+ */
 export interface Warning {
   field: string;
   code: string;
+  message: MessageId;
 }
 
 export type SaveOutcome =

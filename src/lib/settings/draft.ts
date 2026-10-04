@@ -12,7 +12,17 @@
 //   `NOT_RESTORED_ID`.
 // - U3: a typed key lives only in `keys` until the next Saved, which resets every
 //   slot to "Untouched"; a view carries presence only.
-import type { FieldError, FormError, KeyEdit, KeySlot, SaveOutcome, SaveRequest, Settings, SettingsView } from "./settingsApi";
+import type {
+  FieldError,
+  FormError,
+  KeyEdit,
+  KeySlot,
+  SaveOutcome,
+  SaveRequest,
+  Settings,
+  SettingsView,
+  Warning,
+} from "./settingsApi";
 import { KEY_SLOTS } from "./settingsApi";
 import type { MessageId } from "../i18n";
 
@@ -144,6 +154,21 @@ export function errorsByField(errors: readonly FieldError[]): Record<string, Mes
   const byField: Record<string, MessageId> = {};
   for (const { field, code } of errors) {
     if (!Object.hasOwn(byField, field)) byField[field] = errorMessageId(code);
+  }
+  return byField;
+}
+
+/**
+ * FieldId -> the warning's own `message`, as core sent it; the first warning of a field
+ * wins. No id is built from the code and no URL rule is applied here: core decides which
+ * field warns and with which text (decision #52). The page keeps the result of the last
+ * Saved outcome beside `saved`, never in the Draft: the settings://changed echo of the
+ * same save rebuilds the Draft (`applyView` -> `draftFromView`) and would drop it.
+ */
+export function warningsByField(warnings: readonly Warning[]): Record<string, MessageId> {
+  const byField: Record<string, MessageId> = {};
+  for (const { field, message } of warnings) {
+    if (!Object.hasOwn(byField, field)) byField[field] = message;
   }
   return byField;
 }

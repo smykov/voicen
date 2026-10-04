@@ -12,6 +12,12 @@
   // the window closes only through destroy, after an in-page discard prompt when the
   // draft is dirty (D); a not_restored field with no control on the page is named in the
   // form-level message by its label, `settings.field_label.<FieldId>` (L).
+  //
+  // T-015 (decision #52): the warnings of the last Saved outcome are rendered as core
+  // sent them (no URL, scheme or host rule here) and kept in page state beside `saved`,
+  // not in the Draft (the settings://changed echo of the save rebuilds the Draft). A
+  // warning shows next to its field's control; a field with no control on the page is
+  // listed at form level by its label (L). A warning never blocks or changes a save.
   import { onMount } from "svelte";
   import { page } from "$app/state";
   import { setLanguage, t, type MessageId } from "$lib/i18n";
@@ -22,6 +28,7 @@
     fieldLabelId,
     isDirty,
     saveRequest,
+    warningsByField,
     type Draft,
   } from "$lib/settings/draft";
   import {
@@ -62,6 +69,8 @@
   let tab = $state<Tab>(tabOf(page.url.searchParams.get("tab")));
   let saving = $state(false);
   let saved = $state(false);
+  /** FieldId -> message id of the last Saved outcome's warnings (`warningsByField`). */
+  let warnings = $state<Record<string, MessageId>>({});
   let ipcFailed = $state(false);
   /** The panel element: the controls on the page are the `[data-field]` elements in it. */
   let panel = $state<HTMLElement | undefined>();
@@ -113,6 +122,9 @@
     observer.observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: ["data-field"] });
     return () => observer.disconnect();
   });
+
+  /** The warnings whose field has no control on the page, listed at form level (L). */
+  const unrenderedWarnings = $derived(Object.entries(warnings).filter(([field]) => !renderedFields.includes(field)));
 
   /** The not_restored fields of the form error with no control on the page (L). */
   const unrenderedNotRestored = $derived(
@@ -171,11 +183,13 @@
     if (draft === null || saving) return;
     saving = true;
     saved = false;
+    warnings = {};
     ipcFailed = false;
     try {
       const outcome = await saveSettings(saveRequest(draft));
       draft = applyOutcome(draft, outcome);
       saved = "Saved" in outcome;
+      if ("Saved" in outcome) warnings = warningsByField(outcome.Saved.warnings);
     } catch {
       // The rejection text is never shown (contracts/ipc.md "Errors"); the draft stays.
       ipcFailed = true;
@@ -265,15 +279,15 @@
     <div class="panel" id="settings-panel" role="tabpanel" aria-labelledby={`tab-${tab}`} bind:this={panel}>
       <fieldset disabled={saving}>
         {#if tab === "engine"}
-          <Engine bind:draft {languages} />
+          <Engine bind:draft {warnings} {languages} />
         {:else if tab === "recording"}
-          <Recording bind:draft />
+          <Recording bind:draft {warnings} />
         {:else if tab === "output"}
-          <Output bind:draft />
+          <Output bind:draft {warnings} />
         {:else if tab === "history"}
-          <History bind:draft />
+          <History bind:draft {warnings} />
         {:else}
-          <General bind:draft />
+          <General bind:draft {warnings} />
         {/if}
       </fieldset>
     </div>
@@ -284,6 +298,16 @@
         <p role="status">{t("settings.saved")}</p>
       {/if}
     </div>
+
+    {#if unrenderedWarnings.length > 0}
+      <div class="message warning" data-testid="settings-warnings">
+        <ul>
+          {#each unrenderedWarnings as [field, message] (field)}
+            <li><strong>{t(fieldLabelId(field))}</strong> {t(message)}</li>
+          {/each}
+        </ul>
+      </div>
+    {/if}
   {/if}
 </main>
 
@@ -388,6 +412,16 @@
 
   .message.notice {
     background: #fff4d6;
+  }
+
+  .message.warning {
+    margin-top: 1rem;
+    background: #fff4d6;
+  }
+
+  .message.warning ul {
+    margin: 0;
+    padding-left: 1.25rem;
   }
 
   .backdrop {

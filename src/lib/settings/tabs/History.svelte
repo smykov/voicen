@@ -2,12 +2,12 @@
   // History tab: on/off and how many entries to keep. The range is core's rule
   // (history.size_range); the input only has to produce a whole number for the wire.
   import { untrack } from "svelte";
-  import { t } from "$lib/i18n";
+  import { t, type MessageId } from "$lib/i18n";
   import type { Draft } from "../draft";
-  import { controlId, errorId } from "../fields";
+  import { controlId, describedBy } from "../fields";
   import FieldMessage from "../FieldMessage.svelte";
 
-  let { draft = $bindable() }: { draft: Draft } = $props();
+  let { draft = $bindable(), warnings }: { draft: Draft; warnings: Record<string, MessageId> } = $props();
   const enabled = "history.enabled";
   const size = "history.size";
 
@@ -44,10 +44,10 @@
     data-field={enabled}
     bind:checked={draft.settings.history.enabled}
     aria-invalid={draft.errors[enabled] ? "true" : undefined}
-    aria-describedby={draft.errors[enabled] ? errorId(enabled) : undefined}
+    aria-describedby={describedBy(enabled, draft.errors, warnings)}
   />
   <label for={controlId(enabled)}>{t("settings.field.history_enabled")}</label>
-  <FieldMessage errors={draft.errors} field={enabled} />
+  <FieldMessage errors={draft.errors} {warnings} field={enabled} />
 </div>
 
 <div class="field">
@@ -60,7 +60,7 @@
     value={entry ?? ""}
     oninput={onSizeInput}
     aria-invalid={draft.errors[size] ? "true" : undefined}
-    aria-describedby={draft.errors[size] ? errorId(size) : undefined}
+    aria-describedby={describedBy(size, draft.errors, warnings)}
   />
-  <FieldMessage errors={draft.errors} field={size} />
+  <FieldMessage errors={draft.errors} {warnings} field={size} />
 </div>
