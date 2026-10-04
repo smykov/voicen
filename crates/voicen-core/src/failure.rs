@@ -11,6 +11,7 @@
 use std::io::ErrorKind;
 
 use crate::i18n::{self, MessageId};
+use crate::recording::MicCause;
 
 /// One failure of a transcription job. T-001 adds the delivery and capture reasons.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -42,6 +43,10 @@ pub enum FailureReason {
     /// The selected engine cannot be built from the current settings (decision #44).
     #[error("the transcription engine is not set up")]
     EngineNotConfigured,
+    /// The microphone could not be opened or failed (T-042). Not retryable.
+    /// SKELETON (T-042 red tests): code, message id and params are placeholders.
+    #[error("microphone unavailable")]
+    MicrophoneUnavailable { cause: MicCause },
 }
 
 impl FailureReason {
@@ -56,6 +61,7 @@ impl FailureReason {
             FailureReason::UnexpectedResponse => "UnexpectedResponse",
             FailureReason::KeyStoreUnavailable => "KeyStoreUnavailable",
             FailureReason::EngineNotConfigured => "EngineNotConfigured",
+            FailureReason::MicrophoneUnavailable { .. } => "",
         }
     }
 
@@ -70,6 +76,7 @@ impl FailureReason {
             FailureReason::UnexpectedResponse => i18n::FAILURE_UNEXPECTED_RESPONSE,
             FailureReason::KeyStoreUnavailable => i18n::FAILURE_KEY_STORE_UNAVAILABLE,
             FailureReason::EngineNotConfigured => i18n::FAILURE_ENGINE_NOT_CONFIGURED,
+            FailureReason::MicrophoneUnavailable { .. } => i18n::FAILURE_ENGINE_NOT_CONFIGURED,
         }
     }
 
@@ -84,7 +91,8 @@ impl FailureReason {
             | FailureReason::Timeout
             | FailureReason::UnexpectedResponse
             | FailureReason::KeyStoreUnavailable
-            | FailureReason::EngineNotConfigured => Vec::new(),
+            | FailureReason::EngineNotConfigured
+            | FailureReason::MicrophoneUnavailable { .. } => Vec::new(),
         }
     }
 }
@@ -325,6 +333,9 @@ mod tests {
             FailureReason::UnexpectedResponse,
             FailureReason::KeyStoreUnavailable,
             FailureReason::EngineNotConfigured,
+            FailureReason::MicrophoneUnavailable {
+                cause: MicCause::NoDevice,
+            },
         ];
         for r in &all {
             match r {
@@ -335,7 +346,8 @@ mod tests {
                 | FailureReason::ServerError { .. }
                 | FailureReason::UnexpectedResponse
                 | FailureReason::KeyStoreUnavailable
-                | FailureReason::EngineNotConfigured => {}
+                | FailureReason::EngineNotConfigured
+                | FailureReason::MicrophoneUnavailable { .. } => {}
             }
         }
         all
@@ -394,6 +406,14 @@ mod tests {
                 "The transcription engine is not set up. Check the Engine settings.",
                 "Движок распознавания не настроен. Проверьте настройки движка.",
             ),
+            // contracts/messages.md: `failure.microphone_unavailable` with
+            // `{reason}` = the `mic_reason.*` text of the cause (NoDevice here).
+            FailureReason::MicrophoneUnavailable { .. } => (
+                "MicrophoneUnavailable",
+                "failure.microphone_unavailable",
+                "Microphone unavailable: no input device",
+                "Микрофон недоступен: нет устройства ввода",
+            ),
         }
     }
 
@@ -439,5 +459,47 @@ mod tests {
         unique.dedup();
         assert_eq!(unique.len(), codes.len(), "codes not distinct: {codes:?}");
         assert!(codes.iter().all(|c| !c.is_empty()), "empty code: {codes:?}");
+    }
+
+    #[test]
+    fn microphone_unavailable_renders_each_cause() {
+        // contracts/messages.md: "Microphone unavailable: {reason}" with the
+        // closed `mic_reason.*` set, in en and ru, one text per cause. Bite: one
+        // reason text for every cause, the reason left as a raw placeholder or an
+        // id, a cause rendered in the wrong language.
+        let rows = [
+            (
+                MicCause::NoDevice,
+                "no input device",
+                "нет устройства ввода",
+            ),
+            (
+                MicCause::AccessDenied,
+                "access denied in Windows privacy settings",
+                "доступ запрещён в настройках конфиденциальности Windows",
+            ),
+            (MicCause::Busy, "the device is busy", "устройство занято"),
+            (
+                MicCause::Other,
+                "the device could not be opened",
+                "не удалось открыть устройство",
+            ),
+        ];
+        let mut wrong = Vec::new();
+        for (cause, en, ru) in rows {
+            let r = FailureReason::MicrophoneUnavailable { cause };
+            let params = r.message_params();
+            let args: Vec<(&str, &str)> = params.iter().map(|(k, v)| (*k, v.as_str())).collect();
+            for (lang, want) in [
+                (UiLanguage::En, format!("Microphone unavailable: {en}")),
+                (UiLanguage::Ru, format!("Микрофон недоступен: {ru}")),
+            ] {
+                let got = text(lang, r.message_id(), &args);
+                if got != want {
+                    wrong.push(format!("{cause:?} {lang:?}: {got:?}, expected {want:?}"));
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "\n{}", wrong.join("\n"));
     }
 }

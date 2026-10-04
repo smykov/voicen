@@ -10,6 +10,7 @@ pub mod hotkey_registrar;
 pub mod i18n;
 pub mod models;
 pub mod post_process;
+pub mod recording;
 pub mod secrets;
 pub mod settings;
 #[cfg(any(test, feature = "test-fakes"))]
