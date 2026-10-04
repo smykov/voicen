@@ -2,7 +2,11 @@
 //! `tests/local_download_refused.rs` and `tests/local_store.rs` (T-016) the fake
 //! model, test catalog entries, a fake disk probe and a raw-TCP mock model server
 //! (the download harness is in [`download`]); for `tests/openai_client.rs` and
-//! `tests/api_pipeline.rs` the refused address [`refused_addr`] (T-047).
+//! `tests/api_pipeline.rs` the refused address [`refused_addr`] (T-047). The
+//! checks of [`refused_addr`] (`common/refused_addr_tests.rs`) are not a module of
+//! `common`: only those two binaries include them (T-047 review 1 #3), so a binary
+//! that does not use the helper, `tests/local_download_refused.rs` above all, runs
+//! none of its connect probes.
 //!
 //! The fake model is 65 600 bytes (~64 KiB; size + 1 % is a whole number). Its
 //! SHA-256 was computed once on the host with `sha256sum` over the same byte
@@ -11,8 +15,6 @@
 #![allow(dead_code)]
 
 pub mod download;
-#[cfg(test)]
-mod refused_addr_tests;
 
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
@@ -200,7 +202,8 @@ impl Server {
 /// sibling test in the same process can be handed it. That nothing listens there
 /// is checked at each call: a plain connect must be refused, otherwise this panics
 /// (a test-environment problem, reported loudly instead of a flaky result).
-/// Tests: `refused_addr_tests.rs`.
+/// Tests: `refused_addr_tests.rs`, included by `tests/openai_client.rs` and
+/// `tests/api_pipeline.rs`.
 pub fn refused_addr() -> SocketAddr {
     let addr = SocketAddr::from(([127, 0, 0, 1], 1));
     match TcpStream::connect_timeout(&addr, Duration::from_secs(5)) {

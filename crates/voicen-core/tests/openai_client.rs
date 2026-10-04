@@ -7,6 +7,9 @@
 //! (RFC 6761), `sk-test-SECRET`.
 
 mod common;
+/// The checks of `common::refused_addr()`, in each binary that calls it (T-047).
+#[path = "common/refused_addr_tests.rs"]
+mod refused_addr_tests;
 
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};

@@ -10,7 +10,11 @@
 //! server counted an extra request (1 failure in 37 runs). Cargo runs test binaries
 //! one after another, each in its own process, so here no sibling test binds a
 //! port. Keep exactly one test in this file: a second test that binds a port would
-//! bring the race back.
+//! bring the race back. The same holds for tests pulled in from `tests/common`:
+//! its module has no tests, and the `refused_addr()` checks
+//! (`common/refused_addr_tests.rs`, whose connect probes take a source port) are
+//! included only by the binaries that call that helper, never here (T-047 review
+//! 1 #3). So this one test is the only test of this process.
 
 mod common;
 

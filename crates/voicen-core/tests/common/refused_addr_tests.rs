@@ -1,16 +1,19 @@
 //! T-047 (decision #53): [`refused_addr`] can never be handed to another socket
 //! of the test process, and nothing listens on it.
 //!
-//! These run in every test binary that compiles `tests/common`, so each binary
-//! that uses the helper checks it in its own process. They bind no port (the
-//! connect probe only takes a source port for an instant), so they keep the
-//! "no other port bind" rule of `tests/local_download_refused.rs`.
+//! Not a module of `tests/common`: each binary that calls [`refused_addr`]
+//! (`tests/openai_client.rs`, `tests/api_pipeline.rs`) includes this file with
+//! `#[path]`, so the helper is checked in the process that relies on it, and a
+//! binary that does not use it runs none of these connect probes (each probe takes
+//! an ephemeral source port for an instant; T-047 review 1 #3). Keep it out of
+//! `tests/local_download_refused.rs`, whose refused phase needs a process that
+//! takes no other port.
 
 use std::io::ErrorKind;
 use std::net::{Ipv4Addr, TcpStream};
 use std::time::Duration;
 
-use super::refused_addr;
+use crate::common::refused_addr;
 
 /// Linux: the range `bind(0)` and `connect()` pick local ports from.
 const PORT_RANGE: &str = "/proc/sys/net/ipv4/ip_local_port_range";
@@ -31,18 +34,16 @@ fn refused_addr_port_is_below_the_ephemeral_range() {
     // The invariant itself: the OS never gives a port outside the ephemeral
     // range to a sibling's bind(0) (wiremock, partial_body_server) or to a
     // connect's source port. Bite: the bind-and-release helper (its port comes
-    // from inside the range by construction), port 0.
+    // from inside the range by construction), port 0. On Linux (the gate) the
+    // range must be readable: a check that silently did not run would be a green
+    // that proves nothing (T-047 review 1 #4). Other OSes (the Windows CI) have no
+    // such file and skip; the doc of `refused_addr()` covers their range.
     if !cfg!(target_os = "linux") {
         eprintln!("skipped: the ephemeral range is read from {PORT_RANGE} on Linux only");
         return;
     }
-    let low = match ephemeral_low_bound() {
-        Ok(low) => low,
-        Err(why) => {
-            eprintln!("skipped: no ephemeral range ({why})");
-            return;
-        }
-    };
+    let low = ephemeral_low_bound()
+        .unwrap_or_else(|why| panic!("cannot check the invariant on Linux: {why}"));
     let addr = refused_addr();
     assert_ne!(addr.port(), 0, "{addr}: port 0 is not an address");
     assert!(

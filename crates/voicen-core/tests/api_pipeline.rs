@@ -8,6 +8,9 @@
 //! (T-040). Fake data only: 127.0.0.1, 192.0.2.1 (RFC 5737), `sk-test-SECRET`.
 
 mod common;
+/// The checks of `common::refused_addr()`, in each binary that calls it (T-047).
+#[path = "common/refused_addr_tests.rs"]
+mod refused_addr_tests;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant, UNIX_EPOCH};
@@ -742,7 +745,15 @@ fn refused_host_is_cannot_reach() {
             host: addr.to_string()
         })
     );
-    assert!(took < Duration::from_secs(2), "took {took:?}");
+    // "At once" = well before the connect timeout (FR-24: 5 s, the production
+    // pipeline here) and the 30 s total: a refusal is not waited out. The bound is
+    // the connect timeout minus 1 s, not a tighter one, because on windows-latest
+    // one refused loopback connect itself takes ~2.1 s (Windows retries the SYN
+    // after the RST; CI run 37183609259). Bite: a wait for the connect timeout or
+    // the total, a sleep/backoff of ~4 s before failing, and on Windows a second
+    // connect attempt (~2 x 2.1 s).
+    let at_once = Timeouts::default().connect - Duration::from_secs(1);
+    assert!(took < at_once, "took {took:?}, limit {at_once:?}");
     assert!(report.pending.is_some(), "{report:?}");
     assert_eq!(h.clipboard.texts(), Vec::<String>::new());
     assert_eq!(h.paster.calls(), vec![]);
