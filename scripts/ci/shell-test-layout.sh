@@ -40,6 +40,14 @@
 #      - a backslash in a quoted key (a string followed by = or .) or in a table header: an
 #        escape could spell path, lib or bin past the tracker;
 #      - a line starting with [ that the header pattern does not read;
+#      - a header of one key whose quoted name holds a character other than A-Z a-z 0-9 _ -
+#        (["li b"], ["lib#x"], ["l]i[b"] name tables other than lib); ["lib"] counts as [lib],
+#        and later keys of a dotted header ([target.'cfg(windows)'.dependencies]) may hold any;
+#      - a byte outside printable ASCII and tab in code (strings blanked, comment cut, the
+#        trailing \r of a CRLF line stripped): a UTF-8 BOM or an invisible space could hide a
+#        header or a key. Non-ASCII text inside strings and comments passes;
+#      The tracker does not parse TOML: it accepts only that whitelist grammar, and within it
+#      reads exactly the tables that a header opens (step 3 below says what that covers);
 #   4. `--doc` or `rustdoc` in a *.yml / *.yaml file of the workflows dir, for any package (the
 #      scan cannot tell which one a step selects): `cargo test --doc` and
 #      `cargo rustdoc -- --test` build the lib doctests whatever `doctest` says (cargo 1.99
@@ -47,8 +55,9 @@
 # Not caught (outside what a raw scan can see): tests a proc macro generates from an
 # attribute with another name; a dependency's macro that expands to include!; a target path
 # set other than by a line-start `path` key under a target header (e.g. a root-level dotted
-# `lib.path` or an inline `bin = [{ path = .. }]`); a workflow that reaches `--doc` through a
-# script or a .cargo alias. Each is loud on the Windows job, not silent.
+# `lib.path` or an inline `bin = [{ path = .. }]`: the tracker follows only tables a header
+# opens, not ones a dotted key or an inline table makes); a workflow that reaches `--doc`
+# through a script or a .cargo alias. Each is loud on the Windows job, not silent.
 # Host bash, find, sort, grep and awk; no toolchain.
 #
 # Usage: scripts/ci/shell-test-layout.sh [shell-dir [workflows-dir]]
@@ -111,25 +120,45 @@ add "a bench or example target: its exe is not configured by build.rs" "$hits" "
 
 # 3. src-tauri/Cargo.toml, raw lines with table-header tracking, in one awk. Each finding is
 # tagged with its rule: P target path, D a doctest line other than the pin, M a multi-line
-# string, B a line that is not self-contained, K a backslash in a quoted key or a header,
-# H a line starting with [ that is not a plain header, L a [lib] table without the pin, N no
-# [lib] table.
-# The tracker reads TOML's lines exactly only when every line is self-contained and every key
-# literal, so B, K, H and M make that so, fail-closed (T-038 review round 1, finding 1):
+# string, B a line that is not self-contained, C a byte outside printable ASCII and tab in
+# code, K a backslash in a quoted key or a header, H a line starting with [ that is not a plain
+# header, Q a one-key header whose quoted name holds other than bare-key characters, L a [lib]
+# table without the pin, N no [lib] table.
+# What the tracker guarantees (T-038 review rounds 1 and 2, finding 1): it does not parse
+# TOML. It accepts only a whitelist grammar and refuses every line outside it, fail-closed:
+# every line self-contained (B, M), its code (single-line strings blanked, the comment cut)
+# printable ASCII and tab (C), no backslash in a quoted key or a header (K), every line whose
+# code starts with [ a header of bare or quoted dotted keys (H), and a one-key header naming
+# its table bare or quoted with bare-key characters only (Q). In a manifest that passes, a line
+# is a table header exactly when TOML reads one, and a one-key header names exactly the table
+# TOML opens, so the [lib], [[bin]], [[test]], [[bench]] and [[example]] tables the tracker
+# follows are exactly the ones a header opens. Tables made by a dotted key or an inline table
+# (lib.path = .., bin = [{ .. }]) are not followed: see Not caught above.
 # - B: each line is scanned left to right; single-line basic strings ("..", with \" and \\
 #   escapes) and literal strings ('..', no escapes) are removed, then the comment from the
 #   first # left. The [ ] and { } left must nest and close on the line, and no string may be
 #   left open. So no element of a multi-line array or inline table can pose as a header (a
 #   fake [lib]) or end a target table early. The false positive: an array or inline table
 #   split over lines is refused although TOML accepts it; keep them on one line.
+# - C: after the trailing \r of a CRLF line is stripped, the code may hold only bytes 0x20-0x7E
+#   and tab. A UTF-8 BOM (which cargo strips) or an invisible space before [[bin]] or a key
+#   would keep the line from reading as a header or key. Non-ASCII in strings and comments is
+#   not code and passes. The false positive: a file saved with a BOM.
 # - K: a quoted key (a string followed by = or .) or a header line holding a backslash; an
 #   escape such as "p\u0061th" or [["b\u0069n"]] spells path or bin past the tracker.
-# - H: with B, a line starting with [ can only be a header, so one the header pattern does not
-#   read is refused rather than leaving the tracker in the previous table.
+# - H: with B and C, a line whose code starts with [ can only be a header, so one the header
+#   pattern does not read is refused rather than leaving the tracker in the previous table.
+# - Q: the table name is read from the scan, with each quoted key replaced by its content when
+#   that is bare-key characters only ([A-Za-z0-9_-]*) and by a marker otherwise. A one-key
+#   header holding the marker is refused: ["li b"], ["lib#x"], ["l'i'b"] or ["l]i[b"] names a
+#   table cargo ignores, which stripping quotes would read as lib. So quoting a one-key name
+#   changes nothing, and ["lib"] is [lib]. A dotted header never names a target table, so its
+#   keys may hold other characters ([target.'cfg(windows)'.dependencies]).
 # A line counts as a header only when it is one; dependency tables (`[dependencies.x]`,
 # `[target.'cfg(..)'.dev-dependencies.x]`) pass.
 # Target paths: a line-start `path` key (bare or quoted) under a [lib], [[bin]], [[test]],
-# [[bench]] or [[example]] header (spaces and quotes allowed inside the brackets).
+# [[bench]] or [[example]] header (spaces inside the brackets, and quotes around a bare-key
+# name, allowed).
 # The doctest pin: the line `doctest = false` inside [lib]. Any other line naming `doctest`
 # that is not a full-line comment is refused, and so is any `"""` or `'''`, since a
 # multi-line string could hold a fake [lib] header and pin.
@@ -139,11 +168,11 @@ hits="$(LC_ALL=C awk '
           pin = "^[ \t]*doctest[ \t]*=[ \t]*false[ \t]*(#.*)?$" }
   { sub(/\r$/, "") }
   index($0, "\"\"\"") || index($0, "\047\047\047") { print "M" FNR ":" $0 }
-  { code = ""; open = 0; esckey = 0; n = length($0); i = 1
+  { code = ""; name = ""; open = 0; esckey = 0; n = length($0); i = 1
     while (i <= n) {
       c = substr($0, i, 1)
       if (c == "#") break
-      if (c != "\"" && c != "\047") { code = code c; i++; continue }
+      if (c != "\"" && c != "\047") { code = code c; name = name c; i++; continue }
       q = c; str = ""; closed = 0; i++
       while (i <= n) {
         c = substr($0, i, 1)
@@ -156,6 +185,7 @@ hits="$(LC_ALL=C awk '
       after = substr($0, i); sub(/^[ \t]+/, "", after); c = substr(after, 1, 1)
       if (index(str, "\\") && (c == "=" || c == ".")) esckey = 1
       code = code " "
+      name = name (str ~ /^[A-Za-z0-9_-]*$/ ? str : "\"")
     }
     stack = ""; bad = open
     for (j = 1; j <= length(code) && !bad; j++) {
@@ -168,10 +198,12 @@ hits="$(LC_ALL=C awk '
       }
     }
     if (bad || stack != "") print "B" FNR ":" $0
+    if (code ~ /[^\t -~]/) print "C" FNR ":" $0
     header = (code ~ /^[ \t]*\[/)
     if (esckey || (header && index(substr($0, 1, i - 1), "\\"))) print "K" FNR ":" $0
     if (header && $0 !~ hdr) print "H" FNR ":" $0 }
-  $0 ~ hdr { t = $0; sub(/#.*/, "", t); gsub(/[][ \t"\047]/, "", t)
+  $0 ~ hdr { t = name; gsub(/[][ \t]/, "", t)
+             if (index(t, "\"") && !index(t, ".")) { print "Q" FNR ":" $0; t = "" }
              target = (t == "lib" || t == "bin" || t == "test" || t == "bench" || t == "example")
              inlib = (t == "lib"); if (inlib) { libs++; libline = FNR; libtext = $0 }; next }
   target && /^[ \t]*("path"|\047path\047|path)[ \t]*=/ { print "P" FNR ":" $0 }
@@ -186,6 +218,8 @@ while IFS= read -r hit; do
     M*) add "a multi-line string: it could hide or fake a [lib] header; write the value on one line" "${hit#M}" "$cargo:" ;;
     B*) add "a line that is not self-contained ([ ] or { } do not close on the line once single-line strings and the comment are removed, or a string is left open): an array or inline table split over lines can fake or hide a table header for the line tracker; keep arrays and inline tables on one line" "${hit#B}" "$cargo:" ;;
     K*) add "a backslash in a quoted key or a table header: an escape can spell path, lib or bin past the line tracker; write keys and headers without escapes" "${hit#K}" "$cargo:" ;;
+    Q*) add "a quoted table name holding characters other than A-Z a-z 0-9 _ -: it names a table other than the bare word it resembles (e.g. [\"li b\"] is not [lib]), so the line tracker cannot tell which table follows; write a one-key table name bare, or quoted with those characters only" "${hit#Q}" "$cargo:" ;;
+    C*) add "a byte outside printable ASCII and tab in code (outside strings and comments), such as a UTF-8 byte order mark or an invisible space: it can hide a table header or a key from the line tracker; save the file as plain UTF-8 without a BOM and keep non-ASCII text inside strings or comments" "${hit#C}" "$cargo:" ;;
     H*) add "a line starting with [ that is not a plain table header: the line tracker cannot tell which table follows; write [name] or [[name]] with bare or quoted dotted keys" "${hit#H}" "$cargo:" ;;
     L*) add "[lib] has no line \`doctest = false\`: plain cargo test would build the lib doctests, an exe build.rs does not configure" "${hit#L}" "$cargo:" ;;
     N) add "no [lib] table with \`doctest = false\`: the lib (src/lib.rs) keeps doctests on, an exe build.rs does not configure" "$cargo: no [lib] table" ;;
