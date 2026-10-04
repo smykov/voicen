@@ -3,5 +3,7 @@
 # aws-lc-sys (rustls -> aws-lc-rs, via reqwest in voicen-core) needs NASM on
 # x86_64-pc-windows-msvc. "1" uses the NASM objects shipped inside the crate
 # (builder/prebuilt-nasm/, no download); a NASM on PATH is still used when present.
-# No effect on the Linux gate (no NASM step there).
+# On the Linux gate it matters only for `make check-shell-windows` (x86_64-pc-windows-gnu,
+# no NASM in the image): aws-lc-sys uses the same shipped objects there (T-056). The
+# native Linux build has no NASM step.
 AWS_LC_SYS_PREBUILT_NASM = "1"

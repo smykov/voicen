@@ -1,9 +1,13 @@
 # The gate: every area's checks, each through scripts/tw-run in the area's toolchain.
-.PHONY: check check-shell-layout check-shell-layout-fixtures check-core check-ui core-image \
+.PHONY: check check-shell-layout check-shell-layout-fixtures check-core check-shell-windows \
+	check-ui core-image \
 	licenses licenses-check licenses-unit licenses-fixture licenses-rust licenses-bundle \
 	licenses-npm licenses-generate licenses-stale
 
-check: check-shell-layout check-shell-layout-fixtures check-core check-ui licenses-check
+# check-shell-windows after check-core: the shell depends on voicen-core, so a core error is
+# reported first by the faster native check-core, before the slower cross-target build.
+check: check-shell-layout check-shell-layout-fixtures check-core check-shell-windows check-ui \
+	licenses-check
 
 # Shell tests only in src-tauri/tests/*.rs: no test attributes in src-tauri/src, no benches or
 # examples, [lib] doctest = false kept and no --doc / rustdoc in .github/workflows (T-035, T-038,
@@ -20,6 +24,16 @@ check-shell-layout-fixtures:
 check-core:
 	scripts/tw-run core -- 'cargo fmt --check -p voicen-core && cargo clippy -p voicen-core --all-targets -- -D warnings'
 	scripts/tw-run core -- cargo test -p voicen-core
+
+# Windows-target type check of the shell on Linux (T-056, decisions #63;
+# docs/decisions/ci-toolchain.md). First the lib and bin with the release features, then the
+# test crates (every src-tauri/tests/*.rs and the lib/bin unit-test crates) with the
+# dev-dependency features: --tests alone would check the lib with test-fakes on and pass a
+# release-only error. cargo check never links and builds no doctest; linking, starting and
+# running the shell stay the windows job's. Needs the gnu target and mingw gcc baked into the
+# core image (docker/rust.Dockerfile; `make core-image`).
+check-shell-windows:
+	scripts/tw-run core -- 'cargo check -p voicen --target x86_64-pc-windows-gnu && cargo check -p voicen --target x86_64-pc-windows-gnu --tests'
 
 check-ui:
 	scripts/tw-run ui -- pnpm lint

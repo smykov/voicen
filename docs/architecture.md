@@ -79,7 +79,7 @@ flowchart LR
 
 | Env | Purpose | How deployed |
 |---|---|---|
-| local (Linux) | development, `make check` | core in `voicen-rust:1.99`, UI on host with mocked IPC |
+| local (Linux) | development, `make check` | core in `voicen-rust:1.99`; the shell only type-checked there for `x86_64-pc-windows-gnu` (`make check-shell-windows`: never linked or run; T-056, `docs/decisions/ci-toolchain.md`); UI on host with mocked IPC |
 | windows-ci | "deployed": build, silent install, launch, log check | GitHub Actions `windows-latest` (`.github/workflows/ci.yml`) |
 | owner's Windows PC | real mic, hotkey, paste; NFR-01/NFR-08; clean install in Windows Sandbox | installer artifact from CI |
 | GitHub Releases | users | `v*` tag (publishing step: sprint task) |

@@ -1,8 +1,8 @@
-# CI toolchain: Windows test executables of the shell
+# CI toolchain: Windows type check and test executables of the shell
 
-**Code:** `src-tauri/build.rs`, `src-tauri/windows-app-manifest.xml`, `src-tauri/Cargo.toml` (`[lib] doctest = false`), `.github/workflows/ci.yml` (windows job, the two `cargo test` steps; no `--doc`), `scripts/ci/shell-test-layout.sh` with its lexer `scripts/ci/shell-test-layout.awk` (Makefile `check-shell-layout`, part of `make check`) · **Tests that pin it:** the windows job's `cargo test -p voicen` run of every `src-tauri/tests/*.rs` exe; `make check-shell-layout`; `make check-shell-layout-fixtures` (`scripts/ci/shell-test-layout.test.sh` on the fixture shell dirs in `scripts/ci/fixtures/shell-test-layout/`)
+**Code:** `src-tauri/build.rs`, `src-tauri/windows-app-manifest.xml`, `src-tauri/Cargo.toml` (`[lib] doctest = false`), `.github/workflows/ci.yml` (windows job, the two `cargo test` steps; no `--doc`), `scripts/ci/shell-test-layout.sh` with its lexer `scripts/ci/shell-test-layout.awk` (Makefile `check-shell-layout`, part of `make check`), Makefile `check-shell-windows` (part of `make check`) with `docker/rust.Dockerfile` (mingw gcc and the `x86_64-pc-windows-gnu` target in the core image) · **Tests that pin it:** the windows job's `cargo test -p voicen` run of every `src-tauri/tests/*.rs` exe; `make check-shell-layout`; `make check-shell-layout-fixtures` (`scripts/ci/shell-test-layout.test.sh` on the fixture shell dirs in `scripts/ci/fixtures/shell-test-layout/`); `make check-shell-windows` (red on an image without the target; its failure branch was shown once in T-056)
 
-Tasks: T-033 (F-001), T-030 and T-035 (F-002), T-036 (guard hardening, its doc scanner superseded), T-038 (F-003: doc scan dropped, doctest switches pinned). Classes `ci-toolchain` and `guard-model` in `docs/failures.md`. Decisions: #5 (the shell is built and tested only on the Windows runner), #37 (corrected by #41), #41 (supersedes #39), #42 (B: nothing but blank lines and comments before the first `Cargo.toml` header).
+Tasks: T-033 (F-001), T-030 and T-035 (F-002), T-036 (guard hardening, its doc scanner superseded), T-038 (F-003: doc scan dropped, doctest switches pinned), T-056 (Windows-target type check of the shell on Linux). Classes `ci-toolchain` and `guard-model` in `docs/failures.md`. Decisions: #5 (the shell is built and tested only on the Windows runner; since T-056 it is also type-checked on Linux for windows-gnu), #37 (corrected by #41), #41 (supersedes #39), #42 (B: nothing but blank lines and comments before the first `Cargo.toml` header), #57 (the windows-gnu check left as an owner question), #63 (the owner ordered the spike).
 
 ## Why this area exists
 
@@ -15,6 +15,8 @@ Tasks: T-033 (F-001), T-030 and T-035 (F-002), T-036 (guard hardening, its doc s
 | Common-Controls v6 manifest (embed-resource) | `rustc-link-arg-bins` | bin targets only |
 
 cargo's link-arg scopes are a closed set (cargo rust-1.99.0 `src/compiler/custom_build.rs:266-277`): all, bins, tests (integration tests), benches, examples, cdylib. No selector reaches a lib unit-test exe, a bin unit-test exe or a lib doctest without also reaching the bin. Every other exe kind cargo links for the package gets only part of the configuration. On Windows that part either fails to link (F-001) or links and does not start (F-002). The shell is first linked in the windows job, after review (decisions #5), so each mismatch costs a red windows job that blocks every `deploys: true` task behind it.
+
+The shell also compiles only for Windows: every `release_*` fn in `src-tauri/src/lib.rs` is a `compile_error!` under `cfg(not(windows))`, and `tests/credentials.rs` and `tests/autostart.rs` are `#![cfg(windows)]`. Until T-056 a plain Windows-only compile error therefore also showed first in the windows job, at about 25 minutes per CI round. `make check` now type-checks the shell for `x86_64-pc-windows-gnu` (last invariant below). That target uses a different toolchain from the shipped `x86_64-pc-windows-msvc` one, so the Linux check covers types only. Linking and starting stay with the windows job.
 
 ## Invariants
 
@@ -87,6 +89,43 @@ cargo's link-arg scopes are a closed set (cargo rust-1.99.0 `src/compiler/custom
 - **Where it is enforced:** the windows test steps have no `continue-on-error`, `|| true` or `--no-run`.
 - **Don't:** add any of them to the windows test steps.
 
+### Every shell crate target type-checks for Windows in `make check`
+
+- **Need that produced it:** no defect, only detection latency (decisions #5, #57, #63; T-056). Before this check a compile error in shell code or in a shell test reached review and first showed in the windows job.
+- **What it covers:** every crate target the windows job builds for `voicen`, type-checked for `x86_64-pc-windows-gnu` with the feature set that build uses. It runs two invocations:
+  1. `cargo check -p voicen --target x86_64-pc-windows-gnu`: the lib and the bin with the release features and no dev-dependency features, as `pnpm tauri build` builds them;
+  2. the same with `--tests`: the lib and bin unit-test crates and every `src-tauri/tests/*.rs`, with the test features (`tauri/test`, `voicen-core/test-fakes` from `[dev-dependencies]`), as `cargo test -p voicen` builds them.
+
+  Both are needed:
+  - A type error that is only in a test file passes (1) and fails (2). T-056 probe P-F2, shown again in T-056 with `src-tauri/tests/credentials.rs`.
+  - Lib code that uses a `test-fakes`-only item (`voicen_core::secrets::FakeCredentialStore`) passes `--tests` and `--all-targets` and fails (1). With test targets selected, cargo unifies the dev-dependency features into the lib it checks (P-F3).
+- **What it does not cover:** the gnu toolchain is not the shipped msvc one, so the check proves types only.
+  - Nothing is linked, started or run. Link and start failures (the F-001 and F-002 class) stay with the windows job. The gnu build-script output has none of the msvc link configuration: no static-VC-runtime search dir, no `/NODEFAULTLIB`, and the test-manifest lines of `build.rs` are emitted for `windows` + `msvc` only. A gnu link or test build would therefore not stand in for those failures either.
+  - Code under `cfg(target_env = "msvc")` is not checked. Today no shell source or test uses `target_env` (only `build.rs` reads it), so the gnu and msvc checks see the same Rust code.
+  - aws-lc-sys's C code is compiled with mingw gcc and the shipped prebuilt NASM objects (`.cargo/config.toml`), not with cl.exe and `/MD`. The CRT question (Open, W2) stays with the windows job.
+  - A future dependency that cannot build for gnu would show as a red `check-shell-windows` with a green windows job. That needs a decision recorded here, not a workaround.
+- **What breaks if you violate it:** a compile error in shell code or a shell test reaches review and shows first in the windows job.
+- **Where it is enforced:**
+  - Makefile `check-shell-windows` runs both invocations, joined by `&&`, in one `scripts/tw-run core` call. It is a prerequisite of `check`, after `check-core`: the shell depends on voicen-core, so a core error is reported first by the faster native check.
+  - The `voicen-rust:1.99` image (`docker/rust.Dockerfile`) carries:
+    - `gcc-mingw-w64-x86-64-win32`. Even under `cargo check`, aws-lc-sys's build script compiles aws-lc with it. Its binutils dependency brings `x86_64-w64-mingw32-windres`, which tauri-build uses to compile the app resource.
+    - the rustup target `x86_64-pc-windows-gnu`. It is baked in because tw-run's containers are removed after each command, so adding it at run time would download it on every run.
+  - On an image without the target the step fails with `error[E0463]: can't find crate for 'core'` and the hint that the target may not be installed. The fix is `make core-image`.
+  - CI reaches the check through the gate job's existing `make core-image` and `make check`; `ci.yml` is unchanged.
+  - Debug `cargo check` builds tauri without `custom-protocol`, so `generate_context!` runs in dev mode and needs no built frontend (`build/`). tauri-build writes `src-tauri/gen/schemas/*.json`, which is gitignored.
+- **Cost (T-056, a 6-core Linux host):**
+  - The first run after an image change builds cold: 131 s here. The spike measured 214 s, and 372 s at load average 14-16. aws-lc-sys's C build is on the critical path, and nothing is shared with `check-core`.
+  - A warm no-op takes about 2 s, and 3 to 5 s after a shell edit.
+  - `target/` grows by about 1 GB (`target/x86_64-pc-windows-gnu` plus host build scripts and proc macros under `target/debug`), and the image from 2.96 GB to 3.6 GB on disk (725 MB to 861 MB compressed).
+  - The CI gate job does not cache `target/`, so it builds cold on every run. Its GitHub time is recorded at verify.
+- **Don't:**
+  - replace the two invocations with `--tests` alone or with `--all-targets` (P-F3: a release-only error passes);
+  - add `cargo build`, `cargo test`, `--no-run` or any other link step for the gnu target;
+  - pass `--doc` or run `rustdoc` for `voicen` here (invariants above; the layout check refuses both in workflows);
+  - add the target or mingw at run time, in the Makefile or in a script, instead of in the image;
+  - use the Windows-target expansion to bring back a check that reads doc text the way rustdoc would (F-003, Rejected approaches);
+  - silence a gnu-only build failure with a `cfg` or a feature switch without a decision recorded here.
+
 ## Rejected approaches
 
 | Approach | Why rejected | Ref |
@@ -102,10 +141,16 @@ cargo's link-arg scopes are a closed set (cargo rust-1.99.0 `src/compiler/custom
 | A per-block minimum for rustdoc's unindent | rustdoc unindents all doc fragments of an item together: outer docs on `mod foo;` and `//!` docs in `foo.rs`, and `#[doc]` strings mixed with `///` (one less). A per-block minimum removed more than rustdoc did, and a 4-column line passed (probe, rustdoc 1.99) | T-036 r1 |
 | Model rustdoc's Markdown in awk: fences, indented blocks, list and quote containers, then rustc's and rustdoc's doc preparation under a coarse 4-column rule | every unmodelled clause of three foreign parsers is a silent pass; four consecutive steps found new shapes (T-035 cdfa9ac, T-036 b3f3cac, the #39 rule, b8b0b81). The hazard has two switches that raw text can pin instead | T-038, F-003, decisions #39, #41 |
 | (a′) A raw-text fail-closed doc rule (no unindent or Markdown model) | still needs fence open/close state (an HTML block or an unclosed ```` ```text ```` turns a later bare fence into an opening one), or a ban on every fence, tab, 4+ space run, `/** */` and `#[doc]`; no need once the switches are pinned, since no doc text reaches an exe | T-038 |
-| rustdoc's own parser in the core image (`rustdoc --test` on the shell) | must expand the shell crate with tauri, which needs tauri's Linux deps (webkit2gtk) the gate never builds (decisions #5); JSON doctest extraction is unstable; it would protect only doc style | T-038 option (c) |
+| rustdoc's own parser in the core image (`rustdoc --test` on the shell) | must expand the shell crate with tauri, which needs tauri's Linux deps (webkit2gtk) the gate never builds (decisions #5); JSON doctest extraction is unstable; it would protect only doc style. Since T-056 the gate does expand the shell, for `x86_64-pc-windows-gnu`, so the "never builds" premise is stale. The other reasons and the F-003 rule (a guard never decides on a model of another tool's parser) still stand, and so does the rejection | T-038 option (c), T-056 |
+| `cargo check --tests` alone, or `--all-targets`, as the Windows type check | with test targets selected the lib is checked only with the dev-dependency features (`voicen-core/test-fakes`, `tauri/test`), so lib code that compiles only with `test-fakes` passes (P-F3) | T-056 |
+| A gnu link or test build on Linux (`cargo build`, `cargo test --no-run` for `x86_64-pc-windows-gnu`) | the gnu build-script output has none of the msvc link configuration, so it says nothing about F-001/F-002-class link and start failures, and it would need a linker setup | T-056 |
+| cargo-xwin for the msvc target | downloads the MSVC CRT and the Windows SDK under Microsoft's license terms; a type check does not need them | T-056 |
 | `embed_resource::compile_for_tests` | would need a direct build-dependency (owner consent, decisions #9); kept only as the fallback if `/MANIFESTINPUT` fails to link | T-035 fallback |
 
 ## Open
 
-- First C library in the shell binary (T-040, decision #44): reqwest's `rustls` feature brings aws-lc-rs/aws-lc-sys into voicen-core, so into `voicen.exe` and the Windows test exes. (W1) On x86_64-pc-windows-msvc aws-lc-sys needs NASM; the root `.cargo/config.toml` sets `[env] AWS_LC_SYS_PREBUILT_NASM = "1"` (objects shipped in the crate, no download; a NASM on PATH still wins; no effect on Linux). (W2) cc compiles aws-lc with `/MD` while tauri-build links the shell with the static VC runtime (`/NODEFAULTLIB:msvcrt.lib`, `libcmt.lib`); expected to resolve with LNK4217 warnings, unproven until the first Windows run after T-040. voicen-core's own test exes are not affected (tauri-build does not run for `cargo test --workspace --exclude voicen`). A failure on either is a `ci-toolchain` recurrence: an rca, with options reqwest `native-tls` under `cfg(windows)` (schannel, no C library) or `+crt-static`.
-- Detection latency: shell code reaches `CODE_COMPLETE` without ever being linked on Windows (decisions #5). An optional owner decision is drafted in `docs/tasks/T-035.md` › Investigation ("exit (c)"). It is not needed for the invariants above.
+- First C library in the shell binary (T-040, decision #44): reqwest's `rustls` feature brings aws-lc-rs/aws-lc-sys into voicen-core, so into `voicen.exe` and the Windows test exes. (W1) On x86_64-pc-windows-msvc aws-lc-sys needs NASM; the root `.cargo/config.toml` sets `[env] AWS_LC_SYS_PREBUILT_NASM = "1"` (objects shipped in the crate, no download; a NASM on PATH still wins; on Linux it matters only for the gnu build of `check-shell-windows`, which uses the same objects). (W2) cc compiles aws-lc with `/MD` while tauri-build links the shell with the static VC runtime (`/NODEFAULTLIB:msvcrt.lib`, `libcmt.lib`); expected to resolve with LNK4217 warnings, unproven until the first Windows run after T-040. voicen-core's own test exes are not affected (tauri-build does not run for `cargo test --workspace --exclude voicen`). A failure on either is a `ci-toolchain` recurrence: an rca, with options reqwest `native-tls` under `cfg(windows)` (schannel, no C library) or `+crt-static`.
+- Detection latency: since T-056 a compile error in the shell fails `make check`, but shell code still reaches `CODE_COMPLETE` without ever being linked on Windows (decisions #5). An optional owner decision is drafted in `docs/tasks/T-035.md` › Investigation ("exit (c)"). It is not needed for the invariants above.
+- Follow-ups of T-056, not needed for its invariant:
+  - The cold `check-shell-windows` time on the GitHub gate runner is not measured yet; the verify record holds it. A `target/` cache in the gate job would make it warm.
+  - Shell lint (T-056 option B, beyond decision #63): run `cargo clippy … -- -D warnings` instead of `cargo check` in both invocations, and add `cargo fmt --check -p voicen`. Both were clean in the spike. It is for the owner or orchestrator to decide.
