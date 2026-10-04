@@ -50,8 +50,15 @@ pub trait Clipboard: Send + Sync {
     fn set_text_excluded_from_history(&self, text: &str) -> Result<(), ClipboardError>;
 }
 
-/// Paste into the start window.
+/// Paste into the start window. The dictation session's worker calls the delivery
+/// methods (`wait_modifiers_released`, `is_in_front`, `send_ctrl_v`) with no
+/// session lock held.
 pub trait Paster: Send + Sync {
+    /// The window in front at a press. The session calls it with its lock held
+    /// (T-051): it must return promptly, must never call back into the session,
+    /// and must not wait for another call on this paster, which the worker may be
+    /// running (`wait_modifiers_released` waits up to `delivery::MODIFIER_WAIT`):
+    /// no one mutex held across the paster's methods.
     fn capture_start_window(&self) -> Option<StartWindow>;
     /// Waits at most `max_wait` for Shift/Ctrl/Alt/Win to be released; false if
     /// still held.
@@ -80,6 +87,11 @@ pub trait FrameSink: Send + Sync {
 
 /// One running capture. Once [`stop`](Self::stop) returns, or the handle is
 /// dropped, the sink is called no more and the device is closed (NFR-02).
+///
+/// The session calls `stop` with no session lock held, but it may drop a live
+/// handle with its lock held (the session's `Drop` while a recording is on):
+/// dropping must return promptly, must never call back into the session and must
+/// not wait for a thread that does (an audio callback reporting to the session).
 pub trait CaptureHandle: Send {
     fn stop(self: Box<Self>) -> Result<(), CaptureError>;
 }
@@ -87,7 +99,12 @@ pub trait CaptureHandle: Send {
 /// The microphone (T-051: the default input device; T-012 adds the device choice
 /// and device loss).
 pub trait AudioSource: Send + Sync {
-    /// Opens the device and starts delivering frames to `sink`.
+    /// Opens the device and starts delivering frames to `sink`. The session calls
+    /// it at a press with its lock held (T-051): it must return promptly (once the
+    /// device is open or has failed), must never call back into the session (an
+    /// error or device-loss path inside `start` included), and must not wait for
+    /// another call on this source or its handles, such as a `CaptureHandle::stop`
+    /// running on another thread.
     fn start(&self, sink: Arc<dyn FrameSink>) -> Result<Box<dyn CaptureHandle>, CaptureError>;
 }
 

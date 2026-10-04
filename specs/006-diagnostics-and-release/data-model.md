@@ -62,7 +62,7 @@ T-008 shipped `DictationLine`, which `LogObserver` aggregates per `RecordingId` 
 | `engine` | `Option<EngineTag>`: `api` / `builtin` / `local_server` / `other` (`EngineTag::from_kind`) | `JobFinished.engine` (absent when no engine was built) | T-008 |
 | `outcome` | `Delivered(DeliveryResult)` (`pasted` / `copied_only` / `copy_manual`), `Failed{failure: FailureTag, http_status: Option<u16>}`, `NoSpeech`, `TooShort`, `CaptureFailed{cause: MicCause}` (`no_device` / `access_denied` / `busy` / `other`, written `outcome=capture_failed mic=<cause>`) | `Delivered`, `JobFinished`, `RecordingEnded{TooShort}`, `CaptureFailed` | T-008; `CaptureFailed` T-051 |
 | `detector` | `Option<DetectorTag>`: `silero` / `energy` / `other` | `SpeechGate.detector` | T-008 |
-| `press_to_frame_ms` | `Option<u64>` | `RecordingStarted` (emitted by T-006's worker) | T-008 |
+| `press_to_frame_ms` | `Option<u64>` | `RecordingStarted` (emitted by the dictation session at the release, T-051) | T-008 |
 | `duration_ms` | `Option<u64>` | `RecordingEnded` | T-008 (Q2: FR-20's three timings plus the duration) |
 | `stop_to_text_ms` | `Option<u64>` | `JobFinished` | T-008 |
 | `text_to_paste_ms` | `Option<u64>` | `Delivered` | T-008 |

@@ -97,7 +97,8 @@ struct State {
     published_overlay: OverlayState,
     /// A stop is between its `release` and its `finish`: the controller shows
     /// neither the recording nor its job yet, so nothing is published until the
-    /// `finish` (at most one: the release path is serialised).
+    /// `finish` (at most one: the release path is serialised). Cleared by the
+    /// `finish`, or by [`StopInFlight`] if the release path panics before it.
     stopping: bool,
     shutdown: bool,
 }
@@ -153,6 +154,27 @@ impl Shared {
         if indicator.overlay != st.published_overlay {
             self.indicator.set_overlay(&indicator.overlay);
             st.published_overlay = indicator.overlay.clone();
+        }
+    }
+}
+
+/// Ends a stop's hold on publication (`State::stopping`) if the release path
+/// unwinds between the controller's release and the `finish` (a panicking
+/// `CaptureHandle::stop`, observer or conversion): on drop, while armed, it
+/// clears `stopping` and publishes what the controller shows. The `finish`
+/// disarms it in the same critical section. Declare it before any session-lock
+/// guard of the same scope, so that guard is released before this one locks.
+struct StopInFlight<'a> {
+    shared: &'a Shared,
+    armed: bool,
+}
+
+impl Drop for StopInFlight<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            let mut st = self.shared.lock();
+            st.stopping = false;
+            self.shared.publish(&mut st);
         }
     }
 }
@@ -293,10 +315,16 @@ impl DictationSession {
     /// once. For a stop, the frames become audio outside the lock and `finish`
     /// queues the job under it; no publication happens between the release and
     /// the `finish` (`State::stopping`), so the overlay goes Recording →
-    /// Processing with no Hidden in between.
+    /// Processing with no Hidden in between. If this path panics in between, the
+    /// panic reaches the caller and publication resumes at once (`StopInFlight`).
     pub fn hotkey_released(&self, at: Instant) {
         let shared = &*self.shared;
         let _order = lock(&shared.releasing);
+        // Before the lock guards below, so a panic releases them first.
+        let mut stop_in_flight = StopInFlight {
+            shared,
+            armed: false,
+        };
         let (release, id, capture) = {
             let mut st = shared.lock();
             let release = st.ctrl.release(at);
@@ -308,6 +336,7 @@ impl DictationSession {
             // A stop publishes at its `finish`; `publish` still wakes the timer,
             // whose deadline the release may have moved.
             st.stopping = matches!(release, Release::Stop(_));
+            stop_in_flight.armed = st.stopping;
             shared.publish(&mut st);
             let capture = st.capture.take().filter(|c| c.id == id);
             (release, id, capture)
@@ -354,6 +383,7 @@ impl DictationSession {
                 }
             }
             st.stopping = false;
+            stop_in_flight.armed = false;
             shared.publish(&mut st);
         }
         if let Some(cause) = cause {

@@ -90,6 +90,12 @@ pub trait CaptureHandle: Send {
     /// device is closed (NFR-02).
     fn stop(self: Box<Self>) -> Result<(), CaptureError>;
 }
+// `AudioSource::start` is called by the dictation session at a press, from inside its lock;
+// the session's `Drop` drops a live `CaptureHandle` inside it too (`stop` runs outside it).
+// So `start` and dropping a handle must return promptly, must never call back into the
+// session (an error or device-loss path included) and must not wait for another call on the
+// same source or its handles (a `stop` on another thread) or for a thread that calls the
+// session (an audio callback reporting to it).
 pub enum CaptureError { NoDevice, AccessDenied, DeviceBusy, Other(String /* OS error code text, no audio */) }   // voicen_core::recording::CaptureError (T-042)
 
 pub trait Clipboard: Send + Sync {
@@ -104,6 +110,12 @@ pub trait Paster: Send + Sync {
     fn is_in_front(&self, w: &StartWindow) -> bool;
     fn send_ctrl_v(&self) -> Result<(), PasteError>;
 }
+// `capture_start_window` is called by the dictation session at a press, from inside its lock;
+// the other three run on the session's worker during a delivery, with no lock held. So
+// `capture_start_window` must return promptly, must never call back into the session and
+// must not wait for another call on the same paster: no one mutex held across the methods,
+// or a press would wait up to `MODIFIER_WAIT` (1 s) behind the worker's modifier wait, and
+// the tray, the timer and job ends with it.
 
 pub trait Notifier: Send + Sync {
     /// Toast. `retry` is Some(pending_id) for retryable failures. A failure to show is not an error
@@ -204,11 +216,11 @@ impl DictationSession {                                    // Send + Sync; input
 impl Drop for DictationSession { /* the job in flight finishes, queued recordings are dropped, threads joined */ }
 ```
 
-- **Press.** Under the session lock: while a recording is on (`live_id()`), nothing runs (no gate, no start window, no capture). Otherwise `snapshot()` is gated with `dictation_gate`; when blocked, `blocked_actions` run in order: `Notify(id)` → `controller.notice(id, at)` (overlay message, tray unchanged), `OpenSettings(tab)` → `requests.open_settings(tab)` after the lock is released. Else `PressContext { start_window: paster.capture_start_window(), settings }` goes to `press`, and `audio.start(sink)` opens the capture; a start error → `capture_failed` and `CaptureFailed { recording, cause }`. The indicator is published only once the start result is known, so a failed capture never shows a recording state. `Settings.mode` is not read: toggle behaves as hold until T-009 (decision #63).
+- **Press.** Under the session lock: while a recording is on (`live_id()`), nothing runs (no gate, no start window, no capture). Otherwise `snapshot()` is gated with `dictation_gate`; when blocked, `blocked_actions` run in order: `Notify(id)` → `controller.notice(id, at)` (overlay message, tray unchanged), `OpenSettings(tab)` → `requests.open_settings(tab)` after the lock is released. Else `PressContext { start_window: paster.capture_start_window(), settings }` goes to `press`, and `audio.start(sink)` opens the capture; a start error → `capture_failed` and `CaptureFailed { recording, cause }`. The indicator is published only once the start result is known, so a failed capture never shows a recording state. Because the lock is held from `press` to the start result, `capture_start_window` and `AudioSource::start` (and, in `Drop`, dropping a live `CaptureHandle`) run under it: their implementations follow the rule stated with those traits in "Platform traits" (return promptly, never call the session, never wait for another call on the same port). `Settings.mode` is not read: toggle behaves as hold until T-009 (decision #63).
 - **Release.** `release` under the lock; `CaptureHandle::stop` outside it, before the input returns (device closed, NFR-02). Then `RecordingStarted` (only if a frame arrived: first frame instant − press instant, `device: Selected`) and `RecordingEnded` (`Release::end()`, `Release::held()`). For a stop the frames become audio on the caller's thread (mixed down to mono as they arrive, `audio::mix_to_mono`; `AudioBuffer::from_frames` at the stop; a format change within one capture or unconvertible frames → `CaptureError::Other` with a fixed text), then `finish` and the push onto the FIFO happen in one critical section, so queue order = finish order; releases are serialised, so that is also recording order. `finish(Err)` → `CaptureFailed`.
 - **Worker.** One std thread owns the `Pipeline` and is the only caller of `run_job` and `job_finished` (decision #48): `run_job` with no lock held, then `pending().is_some()` (the slot itself, read on the only thread that changes it) as `retry_available`, then `job_finished(id, report.end, Instant::now())` and publish under the lock.
 - **Timer.** One std thread calls `tick(now)` once `now >= next_deadline()`, and re-reads the deadline after every change.
-- **Publication.** `(indicator.tray, retry_available)` and `indicator.overlay` reach the `Indicator` port from inside the session lock, right after the controller call that changed them, only when they differ from what was last sent; nothing at start. Between a stop's `release` and its `finish` nothing is sent (from any thread): the `finish` sends what changed meanwhile, so the overlay goes Recording → Processing, never through Hidden.
+- **Publication.** `(indicator.tray, retry_available)` and `indicator.overlay` reach the `Indicator` port from inside the session lock, right after the controller call that changed them, only when they differ from what was last sent; nothing at start. Between a stop's `release` and its `finish` nothing is sent (from any thread): the `finish` sends what changed meanwhile, so the overlay goes Recording → Processing, never through Hidden. If the release path panics in between (an adapter's `stop`, the observer, the conversion), a drop guard ends that hold and publishes what the controller shows, and the panic reaches the caller.
 - The shell implements the hotkey thread (research R-1, R-2, R-17) and turns OS messages into these calls. The `RegisterHotKey` modifiers and virtual key, the release poll groups and rule, and the "target is elevated" rule come from `voicen_core::win32_data` (pure data: `hotkey_codes`, `released`, `target_elevated` over `IntegrityLevel` RIDs; T-051), which T-006 cross-checks against the `windows` crate constants on Windows CI.
 - Later inputs go through the same session: Esc, 10-minute maximum and toggle (T-009), Retry and toasts (T-007), registrar results at start and on save (T-055), device choice and device loss (T-012), a shutdown that does not wait for the job in flight (T-052), the delivery queue that replaces the worker (T-011).
 

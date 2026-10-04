@@ -19,6 +19,7 @@
 //! Fake data only: example.com, `sk-test-SECRET`.
 
 use std::collections::VecDeque;
+use std::panic::{self, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -504,6 +505,42 @@ impl AudioSource for BlockingStopSource {
             .load(Ordering::SeqCst)
             .then(|| (lock(&self.entered).clone(), Arc::clone(&self.go)));
         Ok(Box::new(BlockingStopCapture { gate }))
+    }
+}
+
+/// A microphone whose captures deliver the scripted chunks at once and whose
+/// `stop`, for a capture started while `panic_stop` is on, panics: an adapter bug
+/// on the release path, between the controller's release and its finish.
+#[derive(Default)]
+struct PanicOnStopSource {
+    chunks: Mutex<Vec<FrameChunk>>,
+    panic_stop: AtomicBool,
+}
+
+struct PanicOnStopCapture {
+    panic_stop: bool,
+}
+
+impl voicen_core::platform::CaptureHandle for PanicOnStopCapture {
+    fn stop(self: Box<Self>) -> Result<(), CaptureError> {
+        if self.panic_stop {
+            panic!("planted panic in the fake capture's stop");
+        }
+        Ok(())
+    }
+}
+
+impl AudioSource for PanicOnStopSource {
+    fn start(
+        &self,
+        sink: Arc<dyn FrameSink>,
+    ) -> Result<Box<dyn voicen_core::platform::CaptureHandle>, CaptureError> {
+        for c in lock(&self.chunks).iter() {
+            sink.frames(&c.samples, c.rate, c.channels, c.at);
+        }
+        Ok(Box::new(PanicOnStopCapture {
+            panic_stop: self.panic_stop.load(Ordering::SeqCst),
+        }))
     }
 }
 
@@ -1005,6 +1042,73 @@ fn a_job_ending_while_the_next_stop_is_in_flight_does_not_flash_hidden() {
         vec![
             OverlayState::Recording,
             OverlayState::Processing,
+            OverlayState::Recording,
+            OverlayState::Processing,
+            OverlayState::Hidden,
+        ]
+    );
+}
+
+#[test]
+fn a_panic_in_the_release_path_does_not_freeze_publication() {
+    // Added by the developer (T-051 review 1 #4b; invariant (3)). An adapter's
+    // `stop` panics between the controller's release and its finish, while that
+    // stop holds publication back. The panic reaches the caller (caught here, on
+    // the input thread). The session then publishes what the controller shows (no
+    // recording, no job: overlay Hidden, tray Idle); the next press publishes
+    // Recording and the next hold is delivered. Bite: the stop's hold on
+    // publication left in place by the panic (nothing published until a later
+    // stop's finish: [Recording] after the panic, no Recording at the next press).
+    let source = Arc::new(PanicOnStopSource::default());
+    let rig = Rig::with(
+        api_settings(),
+        always(TEXT),
+        Custom {
+            audio: Some(source.clone()),
+            ..Custom::default()
+        },
+    );
+    let speech = fixtures::speech_3s();
+    let t0 = past();
+    *lock(&source.chunks) = vec![FrameChunk::from_buffer(&speech, t0 + FIRST_FRAME)];
+    source.panic_stop.store(true, Ordering::SeqCst);
+    rig.session.hotkey_pressed(t0);
+    let released = panic::catch_unwind(AssertUnwindSafe(|| {
+        rig.session.hotkey_released(t0 + ms(3000))
+    }));
+    assert!(
+        released.is_err(),
+        "premise: the planted panic in stop reaches the caller"
+    );
+    assert_eq!(
+        rig.indicator.overlays(),
+        vec![OverlayState::Recording, OverlayState::Hidden],
+        "after the panicked stop"
+    );
+    assert_eq!(
+        rig.indicator.trays(),
+        vec![(TrayState::Recording, false), (TrayState::Idle, false)],
+        "after the panicked stop"
+    );
+
+    source.panic_stop.store(false, Ordering::SeqCst);
+    let t1 = t0 + ms(5000);
+    *lock(&source.chunks) = vec![FrameChunk::from_buffer(&speech, t1 + FIRST_FRAME)];
+    rig.session.hotkey_pressed(t1);
+    assert_eq!(
+        rig.indicator.overlays().last(),
+        Some(&OverlayState::Recording),
+        "the press after the panic published nothing: {:?}",
+        rig.indicator.calls()
+    );
+    rig.session.hotkey_released(t1 + ms(3000));
+    rig.wait_jobs(1);
+    assert_eq!(rig.clipboard.texts(), vec![TEXT.to_string()]);
+    assert_eq!(
+        rig.indicator.overlays(),
+        vec![
+            OverlayState::Recording,
+            OverlayState::Hidden,
             OverlayState::Recording,
             OverlayState::Processing,
             OverlayState::Hidden,

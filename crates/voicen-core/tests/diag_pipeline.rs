@@ -12,8 +12,9 @@
 //!
 //! The harness is a compact copy of api_pipeline's (recordings made through the
 //! real `RecordingController`, `run_job` on a plain std thread, wiremock on its
-//! own runtime); T-006's `RecordingStarted` / `RecordingEnded` are emitted on the
-//! same observer the way the capture worker will. Fake data only: 127.0.0.1,
+//! own runtime); `RecordingStarted` / `RecordingEnded` are emitted on the same
+//! observer the way the dictation session does (T-051: it emits them, and
+//! `CaptureFailed`, on `PipelineDeps.observer`). Fake data only: 127.0.0.1,
 //! `sk-test-SECRET`. The refused scenario uses `common::refused_addr()` and
 //! `common::refused_timeouts()` (F-004, F-005).
 
@@ -61,7 +62,7 @@ const KEY: &str = "sk-test-SECRET";
 const QUERY_SECRET: &str = "SECRETQ";
 const TRANSCRIPT: &str = "TRANSCRIPT-MARKER";
 const OS: Option<&str> = Some("en-US");
-/// T-006's press -> first frame and the hold, as the capture worker reports them.
+/// Press -> first frame and the hold, as the dictation session (T-051) reports them.
 const PRESS_TO_FRAME_MS: u64 = 37;
 const HOLD_MS: u64 = 3_000;
 
