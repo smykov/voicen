@@ -24,10 +24,12 @@ import {
   emit,
   emitted,
   firstRunView,
+  holdSaves,
   installTauriMock,
   listeners,
   queueSaveOutcome,
   queueSaveRejection,
+  releaseSave,
   storedView,
   type SaveRequest,
   type SettingsView,
@@ -328,4 +330,172 @@ test("with SettingsView.unavailable the window shows notice.settings_unavailable
   await openSettings(page, view);
   await expect(page.getByText(en("notice.settings_unavailable"))).toBeVisible();
   expect(await calls(page, "settings_save")).toEqual([]);
+});
+
+// ---- T-004 review r1 #3: PartiallyRestored names the fields left changed --------------
+
+/** A view after an earlier save: engine api with a stored API key (presence only). */
+function apiWithStoredKey(): SettingsView {
+  const view = firstRunView();
+  view.first_run = false;
+  view.settings.engine = "api";
+  view.keys.transcription_api = true;
+  return view;
+}
+
+test("a partially_restored refusal shows settings.partially_restored and highlights every not_restored field, not only the errors field", async ({ page }) => {
+  // Core's own case (settings/service.rs undo_failure_reports_partially_restored): the
+  // local-server key write fails, its undo of the API key fails, so the API key is the
+  // field actually left changed. U2: every refusal reaches the user on its field.
+  const view = apiWithStoredKey();
+  await openSettings(page, view);
+  await queueSaveOutcome(page, {
+    Refused: {
+      errors: [{ field: "engine.local_server.key", code: "key.store_failed" }],
+      form_error: {
+        kind: "partially_restored",
+        message: "settings.partially_restored",
+        not_restored: ["engine.api.key"],
+      },
+    },
+  });
+
+  await field(page, "engine.api.key").fill(FAKE_KEY);
+  await page.getByTestId("settings-save").click();
+  await onlySaveRequest(page);
+
+  await expect(page.getByRole("alert")).toContainText(en("settings.partially_restored"));
+
+  // The not_restored field is highlighted and described by a message (catalog text,
+  // never the raw FieldId).
+  const apiKey = field(page, "engine.api.key");
+  await expect(apiKey).toHaveAttribute("aria-invalid", "true");
+  await expect(apiKey).toHaveAccessibleDescription(/\S/);
+  await expect(apiKey).not.toHaveAccessibleDescription(/engine\.api\.key/);
+  // Fields named by neither list stay plain.
+  await expect(field(page, "engine.api.base_url")).not.toHaveAttribute("aria-invalid", "true");
+
+  // The errors field keeps its own error.<code> where it is rendered.
+  await field(page, "engine.kind").selectOption("local_server");
+  const localKey = field(page, "engine.local_server.key");
+  await expect(localKey).toHaveAttribute("aria-invalid", "true");
+  await expect(localKey).toHaveAccessibleDescription(escapeRegExp(en("error.key.store_failed")));
+
+  expect(await storedView(page)).toEqual(view);
+  expect(await emitted(page, "settings://changed")).toEqual([]);
+});
+
+// ---- T-004 review r1 #4: a stored key (U3, resetKey) ----------------------------------
+
+test("with a stored API key the key field shows settings.key.saved, stays empty and masked, and Save without typing sends Untouched", async ({ page }) => {
+  const view = apiWithStoredKey();
+  await openSettings(page, view);
+
+  const key = field(page, "engine.api.key");
+  await expect(key).toHaveAttribute("type", "password");
+  await expect(key).toHaveValue("");
+  await expect(page.getByText(en("settings.key.saved"))).toBeVisible();
+  await expect(page.getByRole("button", { name: en("settings.key.clear") })).toBeVisible();
+
+  await page.getByTestId("settings-save").click();
+  const request = await onlySaveRequest(page);
+  expect(request.keys).toEqual({
+    transcription_api: "Untouched",
+    local_server: "Untouched",
+    post_processing: "Untouched",
+  });
+
+  // The stored key is still there after the save, and still shown as present only.
+  expect((await storedView(page)).keys.transcription_api).toBe(true);
+  await expect(page.getByText(en("settings.key.saved"))).toBeVisible();
+  await expect(key).toHaveValue("");
+});
+
+test("with a stored API key, typing a key and emptying the field again sends Untouched, never a blank Replace", async ({ page }) => {
+  // resetKey: a blank Replace would reach core's validate as key.required for engine api
+  // despite the stored key (settings.md I5).
+  const view = apiWithStoredKey();
+  await openSettings(page, view);
+
+  const key = field(page, "engine.api.key");
+  await key.fill(FAKE_KEY);
+  await key.fill("");
+  await page.getByTestId("settings-save").click();
+
+  const request = await onlySaveRequest(page);
+  expect(request.keys.transcription_api).toBe("Untouched");
+  expect(JSON.stringify(request)).not.toContain(FAKE_KEY);
+  expect((await storedView(page)).keys.transcription_api).toBe(true);
+  expect(await inputValues(page)).not.toContain(FAKE_KEY);
+  await expect(page.locator("body")).not.toContainText(FAKE_KEY);
+});
+
+test("with a stored API key, Remove key then Save sends Clear and the key is no longer shown as saved", async ({ page }) => {
+  const view = apiWithStoredKey();
+  await openSettings(page, view);
+
+  await page.getByRole("button", { name: en("settings.key.clear") }).click();
+  await expect(page.getByText(en("settings.key.cleared"))).toBeVisible();
+  await page.getByTestId("settings-save").click();
+
+  const request = await onlySaveRequest(page);
+  expect(request.keys).toEqual({
+    transcription_api: "Clear",
+    local_server: "Untouched",
+    post_processing: "Untouched",
+  });
+  expect((await storedView(page)).keys.transcription_api).toBe(false);
+  await expect(page.getByText(en("settings.key.saved"))).toHaveCount(0);
+  await expect(page.getByRole("button", { name: en("settings.key.clear") })).toHaveCount(0);
+  await expect(field(page, "engine.api.key")).toHaveValue("");
+});
+
+// ---- T-004 review r1 #9, #10 (Low) ----------------------------------------------------
+
+test("clearing the history size and typing a digit gives that digit, not a leading 0", async ({ page }) => {
+  await openSettings(page, firstRunView());
+  await tab(page, "history").click();
+  const size = field(page, "history.size");
+  await size.fill("");
+  await size.pressSequentially("5");
+  await expect(size).toHaveValue("5");
+
+  await page.getByTestId("settings-save").click();
+  expect((await onlySaveRequest(page)).settings.history.size).toBe(5);
+});
+
+test("an edit made while a save is in flight is not lost when Saved arrives", async ({ page }) => {
+  // Either the panel is not editable while saving, or the Saved branch keeps the edits
+  // made after the request; silently replacing them is the defect.
+  const view = firstRunView();
+  await openSettings(page, view);
+  await tab(page, "history").click();
+  const size = field(page, "history.size");
+  await size.fill("30");
+
+  await holdSaves(page);
+  await page.getByTestId("settings-save").click();
+  expect((await onlySaveRequest(page)).settings.history.size).toBe(30);
+
+  if (!(await size.isEditable())) {
+    // Locked while saving: nothing can be lost; it unlocks with the saved value.
+    await releaseSave(page);
+    await expect(size).toBeEditable();
+    await expect(size).toHaveValue("30");
+    return;
+  }
+
+  await size.fill("40");
+  await releaseSave(page);
+  // The mock emits settings://changed only after the Saved outcome was delivered (a
+  // later macrotask), so once it is recorded the window has applied the Saved.
+  await expect.poll(async () => (await emitted(page, "settings://changed")).length).toBe(1);
+  expect((await storedView(page)).settings.history.size).toBe(30);
+  await expect(size).toHaveValue("40");
+
+  // The kept edit is still a pending change: the next Save sends it.
+  await page.getByTestId("settings-save").click();
+  await expect.poll(async () => (await calls(page, "settings_save")).length).toBe(2);
+  const second = (await calls(page, "settings_save"))[1].args as { request: SaveRequest };
+  expect(second.request.settings.history.size).toBe(40);
 });

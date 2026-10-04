@@ -14,6 +14,8 @@
 //     bridge does (after the save returns, never on a refusal).
 //   The mock never validates: a refusal is always scripted, so it holds no copy of core
 //   rules (P-010, decision #38).
+//   After `holdSaves()`, each `settings_save` stays in flight (recorded, not answered)
+//   until `releaseSave()`, so a test can act while a save is pending (T-004 r1 #10).
 // - `plugin:event|listen` / `plugin:event|unlisten` keep the handler ids registered by
 //   `transformCallback`, so `listen()` from @tauri-apps/api works and `emit()` reaches it.
 // - `get_build_info` answers for the build-info page.
@@ -158,6 +160,8 @@ export async function installTauriMock(page: Page, options: MockOptions = {}): P
       listeners: new Map<string, number[]>(),
       callbacks: new Map<number, Handler>(),
       nextId: 1,
+      holding: false,
+      held: [] as (() => void)[],
     };
 
     function transformCallback(callback?: Handler, once = false): number {
@@ -212,6 +216,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}): P
         case "settings_speech_languages":
           return clone(state.speechLanguages);
         case "settings_save": {
+          if (state.holding) await new Promise<void>((resolve) => state.held.push(resolve));
           const next = state.scripted.shift();
           if (next && "reject" in next) throw clone(next.reject);
           if (next) return clone(next.outcome);
@@ -252,6 +257,13 @@ export async function installTauriMock(page: Page, options: MockOptions = {}): P
       state,
       emit: (event: string, payload: unknown) => emit(event, payload, "test"),
       queue: (item: Scripted) => state.scripted.push(item),
+      hold: () => {
+        state.holding = true;
+      },
+      release: () => {
+        state.holding = false;
+        for (const resolve of state.held.splice(0)) resolve();
+      },
     };
   }, arg);
 }
@@ -269,6 +281,8 @@ interface MockHandle {
   };
   emit: (event: string, payload: unknown) => void;
   queue: (item: { outcome: unknown } | { reject: unknown }) => void;
+  hold: () => void;
+  release: () => void;
 }
 
 type MockWindow = { __VOICEN_MOCK__: MockHandle };
@@ -320,4 +334,14 @@ export async function queueSaveRejection(page: Page, payload: unknown): Promise<
     (value) => (window as unknown as MockWindow).__VOICEN_MOCK__.queue({ reject: value }),
     payload,
   );
+}
+
+/** From now on each `settings_save` stays in flight until `releaseSave` (recorded at once). */
+export async function holdSaves(page: Page): Promise<void> {
+  await page.evaluate(() => (window as unknown as MockWindow).__VOICEN_MOCK__.hold());
+}
+
+/** Answers every held `settings_save` and stops holding. */
+export async function releaseSave(page: Page): Promise<void> {
+  await page.evaluate(() => (window as unknown as MockWindow).__VOICEN_MOCK__.release());
 }

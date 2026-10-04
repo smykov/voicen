@@ -26,6 +26,8 @@
 // The view data is core's real first-run view (e2e/fixtures/settings-wire.json, kept
 // in sync by the core test e2e_settings_wire_fixture_matches_core).
 import { describe, expect, it } from "vitest";
+import enCatalog from "../../../i18n/en.json";
+import ruCatalog from "../../../i18n/ru.json";
 import wire from "../../../e2e/fixtures/settings-wire.json";
 import {
   applyOutcome,
@@ -35,6 +37,7 @@ import {
   errorMessageId,
   errorsByField,
   isDirty,
+  resetKey,
   saveRequest,
   typeKey,
 } from "./draft";
@@ -253,5 +256,98 @@ describe("error ids", () => {
     for (const code of ["required", "hotkey.unavailable", "language.unsupported", "future.code_added_later"]) {
       expect(errorMessageId(code)).toBe(`error.${code}`);
     }
+  });
+});
+
+// ---- T-004 review r1 #4: resetKey (characterization) ----------------------------------
+
+describe("resetKey", () => {
+  it("typing a key and emptying the field again leaves the slot Untouched: no blank Replace is ever sent", () => {
+    // Bite: KeyField always calling typeKey (an emptied field -> { Replace: "" }, which
+    // core's validate reads as key.required for engine api despite a stored key).
+    const view = savedElsewhere(); // engine api, a stored API key
+    let d = draftFromView(view);
+    d = typeKey(d, "transcription_api", FAKE_KEY);
+    d = resetKey(d, "transcription_api");
+    expect(d.keys).toEqual(UNTOUCHED);
+    expect(isDirty(d)).toBe(false);
+    expect(saveRequest(d).keys.transcription_api).toBe("Untouched");
+    expect(JSON.stringify(d)).not.toContain(FAKE_KEY);
+  });
+
+  it("resetKey after Clear keeps the stored key (Untouched), and touches no other slot", () => {
+    let d = clearKey(draftFromView(savedElsewhere()), "transcription_api");
+    d = typeKey(d, "local_server", FAKE_KEY);
+    d = resetKey(d, "transcription_api");
+    expect(d.keys).toEqual({ ...UNTOUCHED, local_server: { Replace: FAKE_KEY } });
+  });
+});
+
+// ---- T-004 review r1 #3: PartiallyRestored -> every not_restored field highlighted -----
+
+/** The id is a catalog id with a non-empty text in both languages. */
+function expectCatalogId(id: string | undefined): void {
+  expect(id, "a highlighted field needs a message id").toBeDefined();
+  const en = enCatalog as Record<string, string>;
+  const ru = ruCatalog as Record<string, string>;
+  expect(typeof en[id!] === "string" && en[id!] !== "", `i18n/en.json has no text for ${id}`).toBe(true);
+  expect(typeof ru[id!] === "string" && ru[id!] !== "", `i18n/ru.json has no text for ${id}`).toBe(true);
+}
+
+describe("applyOutcome with partially_restored", () => {
+  it("highlights each not_restored field (core's case: the error is on the local-server key, the API key is left changed)", () => {
+    // Bite: applyOutcome mapping only `errors` (the field left changed is not highlighted,
+    // while the alert says "check the highlighted fields").
+    let d = draftFromView(savedElsewhere());
+    d = typeKey(d, "transcription_api", FAKE_KEY);
+    d = applyOutcome(d, {
+      Refused: {
+        errors: [{ field: "engine.local_server.key", code: "key.store_failed" }],
+        form_error: {
+          kind: "partially_restored",
+          message: "settings.partially_restored",
+          not_restored: ["engine.api.key"],
+        },
+      },
+    });
+    expect(d.errors["engine.local_server.key"]).toBe("error.key.store_failed");
+    expectCatalogId(d.errors["engine.api.key"]);
+    expect(Object.keys(d.errors).sort()).toEqual(["engine.api.key", "engine.local_server.key"]);
+    expect(d.formError?.not_restored).toEqual(["engine.api.key"]);
+    // The draft and its key edit are kept, as for any refusal.
+    expect(d.keys.transcription_api).toEqual({ Replace: FAKE_KEY });
+  });
+
+  it("highlights every not_restored field when there is no field error (a file write whose undo failed)", () => {
+    const d = applyOutcome(draftFromView(savedElsewhere()), {
+      Refused: {
+        errors: [],
+        form_error: {
+          kind: "partially_restored",
+          message: "settings.partially_restored",
+          not_restored: ["engine.api.key", "engine.local_server.key", "general.start_with_windows"],
+        },
+      },
+    });
+    expect(Object.keys(d.errors).sort()).toEqual([
+      "engine.api.key",
+      "engine.local_server.key",
+      "general.start_with_windows",
+    ]);
+    for (const field of Object.keys(d.errors)) expectCatalogId(d.errors[field]);
+  });
+
+  it("the next outcome drops the not_restored highlights (Refused without form error, or Saved)", () => {
+    const partial: SaveOutcome = {
+      Refused: {
+        errors: [],
+        form_error: { kind: "partially_restored", message: "settings.partially_restored", not_restored: ["engine.api.key"] },
+      },
+    };
+    let d = applyOutcome(draftFromView(savedElsewhere()), partial);
+    d = applyOutcome(d, { Refused: { errors: [{ field: "history.size", code: "history.size_range" }], form_error: null } });
+    expect(d.errors).toEqual({ "history.size": "error.history.size_range" });
+    d = applyOutcome(applyOutcome(d, partial), { Saved: { view: savedElsewhere(), warnings: [] } });
+    expect(d.errors).toEqual({});
   });
 });
