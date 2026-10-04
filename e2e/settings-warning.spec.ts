@@ -75,6 +75,15 @@ function exactly(s: string): RegExp {
   return new RegExp(`^\\s*${escapeRegExp(s).source}\\s*$`);
 }
 
+/**
+ * The whole text is exactly the sentences `first` then `second`, separated by whitespace
+ * (a space or a line break of the markup, which assistive technology reads as a space).
+ * Bite: the two sentences run together ("Settings saved.Review ...", T-015 r2 #1).
+ */
+function sentences(first: string, second: string): RegExp {
+  return new RegExp(`^\\s*${escapeRegExp(first).source}\\s+${escapeRegExp(second).source}\\s*$`);
+}
+
 const WARNING_ID = "settings.warning.endpoint_insecure";
 const SUMMARY_ID = "settings.saved_with_warnings";
 const API_URL = "engine.api.base_url";
@@ -235,6 +244,8 @@ test("with ui_language switched to ru, the warning and Saved are shown in Russia
   await page.getByTestId("settings-save").click();
 
   await expect(savedStatus(page, ru("settings.saved"))).toBeVisible();
+  // The status announces the save and the summary in Russian, as two separated sentences.
+  await expect(savedStatus(page, ru("settings.saved"))).toHaveText(sentences(ru("settings.saved"), ru(SUMMARY_ID)));
   expect(ru(WARNING_ID)).not.toBe(en(WARNING_ID));
   await expectFieldWarning(page, API_URL, ru(WARNING_ID));
   await expect(page.getByText(en(WARNING_ID))).toHaveCount(0);
@@ -420,6 +431,8 @@ test("a Saved with a field warning is announced politely: the Saved status also 
   await expect(status).not.toHaveText(exactly(en("settings.saved")));
   // ... namely the summary, from the catalog, in a polite region (never an alert).
   await expect(status).toContainText(en(SUMMARY_ID));
+  // ... and the whole status is the two sentences, separated (review round 2 #1).
+  await expect(status).toHaveText(sentences(en("settings.saved"), en(SUMMARY_ID)));
   expect(ru(SUMMARY_ID)).not.toBe(en(SUMMARY_ID));
   await expect(status).not.toHaveAttribute("aria-live", /assertive|off/);
   await expect(page.getByRole("alert")).toHaveCount(0);
@@ -463,6 +476,7 @@ test("a Saved whose only warning has no control on the page (form-level) is anno
   await expect(status).toHaveCount(1);
   await expect(status).not.toHaveText(exactly(en("settings.saved")));
   await expect(status).toContainText(en(SUMMARY_ID));
+  await expect(status).toHaveText(sentences(en("settings.saved"), en(SUMMARY_ID)));
   await expect(status).not.toContainText(en(WARNING_ID));
   await expect(status).not.toHaveAttribute("aria-live", /assertive|off/);
   await expect(page.getByRole("alert")).toHaveCount(0);
