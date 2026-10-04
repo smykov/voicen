@@ -1,0 +1,12 @@
+# Fixture shell dir for scripts/ci/shell-test-layout.test.sh; never built.
+# T-036 review 1 #3: a `path` key under [[test]] is refused under #39, like under [lib],
+# [[bin]], [[bench]] and [[example]]; a [[test]] in tests/ needs no path.
+[package]
+name = "shell-layout-fixture"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[[test]]
+name = "x"
+path = "tests/x.rs"

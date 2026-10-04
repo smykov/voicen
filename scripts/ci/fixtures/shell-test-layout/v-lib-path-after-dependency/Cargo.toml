@@ -1,0 +1,14 @@
+# Fixture shell dir for scripts/ci/shell-test-layout.test.sh; never built.
+# A dependency table first, then a spaced [ lib ] header: the table tracking must switch.
+[package]
+name = "shell-layout-fixture"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies.voicen-core]
+path = "../crates/voicen-core"
+
+[ lib ]
+name = "shell_layout_fixture_lib"
+path = 'other/lib.rs'

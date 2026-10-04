@@ -8,7 +8,10 @@
 #   ok-*  allowed shapes: exit 0, and the guard prints "ok:".
 #   v-*   one violation each: exit 1, and the guard's listing names the offending path.
 #   c-*   cannot run: exit 3, and the guard says "cannot run" (never a pass).
-# Tool errors are simulated with a PATH shim (an awk, grep or find that exits non-zero).
+# Tool errors are simulated with a PATH shim: an awk, grep or find that always exits
+# non-zero, or a selective one that fails only on the call of one scan (its arguments
+# match) and runs the real tool otherwise, so the guard gets past the earlier scans and
+# reaches that scan's own error branch.
 # Every fixture dir must appear in the table below, so a case cannot be dropped silently.
 #
 # Usage: scripts/ci/shell-test-layout.test.sh
@@ -27,6 +30,22 @@ for tool in awk grep find; do
   printf '#!/bin/sh\necho "%s: simulated failure" >&2\nexit 2\n' "$tool" >"$shims/$tool/$tool"
   chmod +x "$shims/$tool/$tool"
 done
+# selective <shim-dir> <tool> <case pattern on "$*">: fail when the arguments match, else exec the real tool.
+selective() {
+  local real
+  real="$(command -v "$2")" || { echo "shell-test-layout.test: cannot run: $2 not found" >&2; exit 3; }
+  mkdir -p "$shims/$1"
+  printf '#!/bin/sh\ncase "$*" in %s) echo "%s: simulated failure (%s)" >&2; exit 2;; esac\nexec "%s" "$@"\n' \
+    "$3" "$2" "$1" "$real" >"$shims/$1/$2"
+  chmod +x "$shims/$1/$2"
+}
+# find-rs: only the `-name '*.rs'` file scan fails; the symlink scan before it runs.
+selective find-rs find "*'*.rs'*"
+# cargo-path: only the Cargo.toml target-path scan fails, whichever tool reads it: a grep
+# whose arguments name Cargo.toml and `path` (the bench/example grep names neither key),
+# or an awk reading Cargo.toml (the source lexer reads only *.rs files).
+selective cargo-path grep "*Cargo.toml*path*|*path*Cargo.toml*"
+selective cargo-path awk "*Cargo.toml*"
 
 failed=0
 passed=0
@@ -61,7 +80,6 @@ check ok-text-fence             0 "ok:"   # ```text in /// and //!
 check ok-feature-test           0 "ok:"   # cfg(feature = "test"), cfg_attr(feature = "test", ...)
 check ok-quad-slash             0 "ok:"   # //// fence and indented block: plain comment
 check ok-plain-comment-attr     0 "ok:"   # // #[test], // #[cfg(test)], trailing // comment naming them
-check ok-doc-lazy-continuation  0 "ok:"   # indented /// line with no blank doc line before it: paragraph, not code
 
 # Violations: exit 1, the listing names the offending file.
 check v-cfg-test                1 "v-cfg-test/src/lib.rs"
@@ -118,6 +136,39 @@ mkdir -p "$copies" && cp -R "$fx/v-symlink-src" "$copies/" && ln -s ../other/t.r
   || { echo "shell-test-layout.test: cannot run: could not prepare the symlink case in $copies" >&2; exit 3; }
 check v-symlink-src               1 "v-symlink-src/src/s.rs" "" "$copies/v-symlink-src"  # src/s.rs -> ../other/t.rs
 
+# T-036 review round 1, under decision #39 (coarse fail-closed rule): no lazy-continuation
+# or list modelling; every doc line indented 4+ columns (after rustdoc's unindent by the
+# block minimum) is refused, and so is a container marker followed by 4+ columns or a tab.
+# Finding 1: shapes rustdoc 1.99 runs as doctests that the paragraph model passed.
+check v-doc-quote-lazy              1 "v-doc-quote-lazy/src/lib.rs:4:"              # (a) `> Note` / `>` / 4 columns
+check v-doc-quote-empty-code        1 "v-doc-quote-empty-code/src/lib.rs:3:"        # (b) `>` alone / 4 columns
+check v-doc-empty-item-code         1 "v-doc-empty-item-code/src/lib.rs:3:"         # (c) empty `-` item / 6 columns
+check v-doc-empty-ordered-item-code 1 "v-doc-empty-ordered-item-code/src/lib.rs:3:" # (d) empty `1.` item / 7 columns
+check v-doc-thematic-break-code     1 "v-doc-thematic-break-code/src/lib.rs:5:"     # (e) `---` / 4 columns
+check v-doc-setext-code             1 "v-doc-setext-code/src/lib.rs:4:"             # (f) `Usage` / `=====` / 4 columns
+check v-doc-star-break-code         1 "v-doc-star-break-code/src/lib.rs:4:"         # (g) text / `***` / 4 columns
+check v-doc-indented-no-space       1 "v-doc-indented-no-space/src/lib.rs:4:"       # `///text` block: unindent by 0, so 4 spaces are code
+# Deliberate contract change by #39, not a weakened case: T-035's ok-doc-lazy-continuation
+# (a 4+ column line right after paragraph text, a lazy continuation for rustdoc) is now a
+# violation; the author rule is to indent continuations by fewer than 4 columns
+# (ok-doc-list-continuation above still passes).
+check v-doc-lazy-continuation       1 "v-doc-lazy-continuation/src/lib.rs:2:"
+# Finding 4: a marker followed by a tab (rustdoc 1.99 runs `-<TAB><TAB>x` as a doctest).
+check v-doc-list-marker-tab         1 "v-doc-list-marker-tab/src/lib.rs:2:"
+# Finding 2 (+4, 6): the `include` token anywhere in code, not only before `!`; identifiers
+# that merely contain it, include_str!/include_bytes!, comments, strings and docs pass.
+check v-include-renamed             1 "v-include-renamed/src/lib.rs:1:"             # use core::include as pull; pull!(..)
+check v-include-eol                 1 "v-include-eol/src/lib.rs:2:"                 # `include` / `!(..)` on the next line
+check v-include-raw-ident           1 "v-include-raw-ident/src/lib.rs:3:"           # r#include!(..): rustc 1.99 runs the outside test
+check ok-include-substring          0 "ok:"                                          # included, include_count, INCLUDE_ALL, include_str!
+# Finding 3 (+4): Cargo.toml `path` is refused only under [lib], [[bin]], [[test]],
+# [[bench]], [[example]] (table-header tracking); dependency tables pass.
+check ok-dependency-table-path      0 "ok:"                                          # [dependencies.x] / [dev-dependencies.x] / target deps
+check v-lib-quoted-path             1 "v-lib-quoted-path/Cargo.toml:10:"             # [lib] "path" = ..
+check v-lib-path-after-dependency   1 "v-lib-path-after-dependency/Cargo.toml:14:"   # [dependencies.x] path, then [ lib ] path = '..'
+check v-bin-path-target             1 "v-bin-path-target/Cargo.toml:10:"             # [[bin]] path = ..
+check v-test-target-path            1 "v-test-target-path/Cargo.toml:12:"            # [[test]] path = "tests/x.rs"
+
 # Cannot run: exit 3.
 check does-not-exist            3 "cannot run"
 check c-no-src                  3 "cannot run"
@@ -125,6 +176,13 @@ check c-no-cargo-toml           3 "cannot run"
 check ok-current-shape          3 "cannot run" awk
 check ok-current-shape          3 "cannot run" grep
 check c-find-fails-fence        3 "cannot run" find   # a find error must not skip the doc scan (the fixture holds a fence)
+# Review round 1, finding 7: the always-failing shims stop at the first find (symlinks) and
+# the first grep (benches); these reach the later calls' own error branches.
+# The needle is the shim's own message: it appears only if the guard got past the earlier
+# calls (run by the real tool) and made the matching call; exit 3 shows that call's error
+# branch fails closed (without it: an empty list, so exit 0).
+check c-find-fails-fence        3 "find: simulated failure (find-rs)" find-rs  # the *.rs find, after the symlink find
+check ok-current-shape          3 "simulated failure (cargo-path)" cargo-path  # the Cargo.toml path scan, after the bench grep
 
 # Every committed fixture dir is in the table.
 for d in "$fx"/*/; do
