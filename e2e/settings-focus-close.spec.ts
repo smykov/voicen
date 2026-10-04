@@ -16,6 +16,12 @@
 //   the window closes only through `plugin:window|destroy { label: "settings" }`;
 // - labels: a field of `not_restored` with no control on the page is named in the
 //   form-level message by the text of `settings.field_label.<FieldId>`.
+//
+// T-045 adds (locator contract of e2e/local-models.spec.ts): with engine builtin_local
+// the Engine tab renders `<select data-field="engine.builtin_local.model_id">` whose
+// options are the downloaded models (R round trip for builtin_local); and the close guard
+// is registered before any listener that can build a draft (D: a `settings://changed`
+// arriving while the guard's listen is pending builds no editable draft).
 import { readFileSync } from "node:fs";
 import { expect, test, type Page } from "@playwright/test";
 import {
@@ -24,7 +30,9 @@ import {
   firstRunView,
   installTauriMock,
   listeners,
+  modelsWith,
   queueSaveOutcome,
+  releaseListen,
   releaseSettingsGet,
   requestClose,
   type MockOptions,
@@ -383,6 +391,44 @@ test("failure branch: a rejected settings://focus listen never leaves an editabl
   expect(errors).toEqual([]);
 });
 
+test("failure branch: a settings://changed arriving before the close guard is registered never leaves an editable draft without the guard", async ({ page }) => {
+  // T-039 review r2 Low 1 / T-045 (settings-ui.md D): the page registered
+  // settings://changed (and settings://focus) before tauri://close-requested, so a save
+  // from elsewhere arriving while the guard's listen was pending built an editable draft
+  // with no guard. Hold that listen and send the event in the gap.
+  const errors = pageErrors(page);
+  await installTauriMock(page, { holdListen: ["tauri://close-requested"] });
+  await page.goto("/settings");
+  await expect
+    .poll(async () =>
+      (await calls(page, "plugin:event|listen")).some(
+        (call) => (call.args as { event?: string }).event === "tauri://close-requested",
+      ),
+    )
+    .toBe(true);
+  expect(await listeners(page, "tauri://close-requested")).toBe(0);
+
+  // A save from another window: core's view, edited.
+  const view = firstRunView();
+  view.first_run = false;
+  view.settings.history.size = 7;
+  await emit(page, "settings://changed", view);
+  await settle(page);
+
+  const controls = await page.locator("[data-field]").count();
+  const guards = await listeners(page, "tauri://close-requested");
+  expect(
+    controls === 0 || guards > 0,
+    `${controls} controls rendered with ${guards} tauri://close-requested listeners: an editable draft must be close-guarded`,
+  ).toBe(true);
+
+  // Once the guard is registered the page loads as usual, guarded.
+  await releaseListen(page);
+  await expect(field(page, "engine.kind")).toBeVisible();
+  expect(await listeners(page, "tauri://close-requested")).toBeGreaterThan(0);
+  expect(errors).toEqual([]);
+});
+
 // ---- (R) Every field rendered from the view and sent back unchanged ---------------------
 
 /**
@@ -449,11 +495,24 @@ function unchangedLeaves(def: unknown, mine: unknown, path = ""): string[] {
 const NON_DEFAULT_LOCAL_SERVER: Settings = { ...structuredClone(NON_DEFAULT), engine: "local_server" };
 
 /**
+ * NON_DEFAULT with engine builtin_local and a catalog model (T-045), so the Engine tab
+ * renders the engine.builtin_local.model_id select. Same spread rule as above.
+ */
+const NON_DEFAULT_BUILTIN_LOCAL: Settings = {
+  ...structuredClone(NON_DEFAULT),
+  engine: "builtin_local",
+  builtin_local: { model_id: "base" },
+};
+
+type RoundTripEngine = "api" | "local_server" | "builtin_local";
+
+/**
  * What the control of each FieldId shows for `settings`: the wire value (a string for
  * inputs and selects, a boolean for checkboxes); key inputs are always empty (U3). A
  * control the page renders that is not listed here fails the test: add it here.
  */
-function shownFor(settings: Settings): Record<string, string | boolean> {
+function shownFor(settings: Settings, offered: readonly string[] = []): Record<string, string | boolean> {
+  const modelId = settings.builtin_local.model_id;
   return {
     "engine.kind": settings.engine,
     "engine.api.base_url": settings.api.base_url,
@@ -462,6 +521,9 @@ function shownFor(settings: Settings): Record<string, string | boolean> {
     "engine.local_server.base_url": settings.local_server.base_url,
     "engine.local_server.model": settings.local_server.model,
     "engine.local_server.key": "",
+    // The select offers only downloaded models (I3); a saved model it does not offer
+    // selects no option (value "") and stays in the draft.
+    "engine.builtin_local.model_id": modelId !== null && offered.includes(modelId) ? modelId : "",
     "engine.speech_language": settings.speech_language ?? "auto",
     "recording.hotkey": settings.hotkey,
     "recording.mode": settings.mode,
@@ -472,16 +534,14 @@ function shownFor(settings: Settings): Record<string, string | boolean> {
   };
 }
 
-/** The controls each release-1 tab must render for engine api or local_server. */
-function tabFieldsFor(engine: "api" | "local_server"): Record<string, string[]> {
+/** The controls each release-1 tab must render for engine api, local_server or builtin_local. */
+function tabFieldsFor(engine: RoundTripEngine): Record<string, string[]> {
+  const engineFields =
+    engine === "builtin_local"
+      ? ["engine.builtin_local.model_id"]
+      : [`engine.${engine}.base_url`, `engine.${engine}.model`, `engine.${engine}.key`];
   return {
-    engine: [
-      "engine.kind",
-      `engine.${engine}.base_url`,
-      `engine.${engine}.model`,
-      `engine.${engine}.key`,
-      "engine.speech_language",
-    ],
+    engine: ["engine.kind", ...engineFields, "engine.speech_language"],
     recording: ["recording.hotkey", "recording.mode"],
     output: ["output.auto_paste"],
     history: ["history.enabled", "history.size"],
@@ -509,8 +569,17 @@ async function expectTabShowsView(
   }
 }
 
-/** Acceptance 3 for `settings` (engine api or local_server): visit every tab, then an untouched Save. */
-async function expectRoundTrip(page: Page, settings: Settings, engine: "api" | "local_server"): Promise<void> {
+/**
+ * Acceptance 3 for `settings`: visit every tab, then an untouched Save. For engine
+ * builtin_local, `localModels` is what local_models_list returns and `offered` the model
+ * ids the select must offer.
+ */
+async function expectRoundTrip(
+  page: Page,
+  settings: Settings,
+  engine: RoundTripEngine,
+  models: { localModels?: MockOptions["localModels"]; offered?: string[] } = {},
+): Promise<void> {
   const errors = pageErrors(page);
   expect(settings.engine).toBe(engine);
   const core = firstRunView().settings;
@@ -526,10 +595,10 @@ async function expectRoundTrip(page: Page, settings: Settings, engine: "api" | "
     reset_notice: false,
     unavailable: false,
   };
-  await open(page, "/settings", view);
+  await open(page, "/settings", view, { localModels: models.localModels });
 
   const tabFields = tabFieldsFor(engine);
-  const shown = shownFor(settings);
+  const shown = shownFor(settings, models.offered);
   for (const name of ["engine", "recording", "output", "history", "general", "engine"]) {
     await expectTabShowsView(page, name, tabFields, shown);
   }
@@ -549,6 +618,19 @@ test("every field of the release-1 tabs is rendered from the view and an untouch
 
 test("engine local_server: the engine.local_server base URL, model and key controls show the view and an untouched Save sends the view's settings unchanged with every key Untouched", async ({ page }) => {
   await expectRoundTrip(page, NON_DEFAULT_LOCAL_SERVER, "local_server");
+});
+
+test("engine builtin_local with the saved model downloaded: the model select shows it and an untouched Save sends the view's settings unchanged with every key Untouched", async ({ page }) => {
+  await expectRoundTrip(page, NON_DEFAULT_BUILTIN_LOCAL, "builtin_local", {
+    localModels: modelsWith("base", { kind: "downloaded" }),
+    offered: ["base"],
+  });
+});
+
+test("engine builtin_local with the saved model not downloaded: the select offers no model and an untouched Save still sends the saved model_id unchanged", async ({ page }) => {
+  // R + I3: the option vanishing never rewrites the draft; core refuses the save
+  // (model.not_downloaded), which the UI does not pre-empt.
+  await expectRoundTrip(page, NON_DEFAULT_BUILTIN_LOCAL, "builtin_local", { offered: [] });
 });
 
 // ---- (L) A not-restored field without a control is named by its label --------------------

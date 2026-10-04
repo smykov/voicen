@@ -531,7 +531,9 @@ mod tests {
 
     /// (message id, en text, ru text) per variant, with the params of
     /// `every_failure` filled in. The texts are T-016's `download.*` catalog
-    /// entries; T-045 owns the `needed` formatting (and so those two texts).
+    /// entries. `{needed}` is rendered as given (a byte count here): the UI formats
+    /// it with `formatSize` before rendering (T-045, decision #58), so the texts
+    /// carry no unit of their own.
     fn expected(f: &DownloadFailure) -> (&'static str, &'static str, &'static str) {
         match f {
             DownloadFailure::DownloadInterrupted => (
@@ -546,8 +548,8 @@ mod tests {
             ),
             DownloadFailure::NotEnoughDiskSpace { .. } => (
                 "download.not_enough_disk_space",
-                "Not enough free disk space. The model needs 66256 bytes.",
-                "Недостаточно места на диске. Для модели нужно 66256 байт.",
+                "Not enough free disk space: 66256 needed.",
+                "Недостаточно места на диске: нужно 66256.",
             ),
             DownloadFailure::SourceUnreachable { .. } => (
                 "download.source_unreachable",

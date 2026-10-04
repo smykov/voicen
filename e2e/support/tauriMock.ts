@@ -25,9 +25,34 @@
 //   `plugin:window|close` is not granted and rejects like any other command.
 //   With `destroy: { reject }` destroy is recorded and then rejects with that text (the
 //   shell refused or failed to destroy the window; T-039 r1 #3).
-// - Failure and timing options (T-039 r1 #4): `holdSettingsGet` keeps the first
-//   `settings_get` in flight (recorded, not answered) until `releaseSettingsGet()`;
-//   `rejectListen` names events whose `plugin:event|listen` rejects (nothing registered).
+// - Failure and timing options (T-039 r1 #4): `holdSettingsGet` keeps every
+//   `settings_get` in flight (recorded, not answered) until `releaseSettingsGet()`, and
+//   the calls after the release are answered at once;
+//   `rejectListen` names events whose `plugin:event|listen` rejects (nothing registered);
+//   `holdListen` (T-045, rule D) names events whose `plugin:event|listen` stays in flight
+//   (recorded, no handler registered) until `releaseListen()`, which registers the held
+//   handlers and then answers them; later listens of those events are answered at once.
+// - Local models (spec 002 contracts/ipc.md, T-045). The mock keeps one models list
+//   (option `localModels`, default: core's `list_first_run` of
+//   e2e/fixtures/local-models-wire.json):
+//   - `local_models_list` returns a copy of it, taken when the call is made. With
+//     `holdList`, every call stays in flight (recorded, its copy already taken) until
+//     `releaseList()`, so a test can change the list or emit events before the (then
+//     stale) response arrives; with `listRejection` it rejects with that text;
+//   - `local_model_download { id }` records the call, then rejects with the next queued
+//     `FailureReason` (`queueDownloadRejection`; any payload, for a non-contract
+//     rejection too) and changes nothing, or sets the row to `downloading
+//     { received: 0, total: sizeBytes }` and returns null. It emits nothing (the command
+//     emits nothing; progress and the end state come from the download thread, which a
+//     test plays with `localModelProgress` / `localModelState`). The mock never
+//     validates (busy, already downloaded, disk space): a refusal is always scripted
+//     (decision #38);
+//   - `local_model_cancel_download { id }` returns true for a downloading row, sets it
+//     to `not_downloaded` and, after returning, emits `local-model://state` with
+//     `not_downloaded` (as the download thread does); otherwise it returns false;
+//   - `localModelProgress(page, id, received)` and `localModelState(page, id, state)`
+//     update the list first, then emit, as core does (so a list after an event agrees
+//     with it).
 // - Any other command rejects, so a call outside the contract fails the test.
 //
 // The init script must be self-contained (it is serialized into the page), so it cannot
@@ -40,6 +65,7 @@ import type { Page } from "@playwright/test";
 // the mock re-exports it, so a wire change is made in one TS file (T-004 r1 #8).
 
 import type { SaveOutcome, SettingsView } from "../../src/lib/settings/settingsApi";
+import type { FailureReason, LocalModelView, ModelState } from "../../src/lib/local-models/localModelsApi";
 export type {
   EngineKind,
   FieldError,
@@ -52,6 +78,15 @@ export type {
   SettingsView,
   Warning,
 } from "../../src/lib/settings/settingsApi";
+// The local-model wire (spec 002) is declared once, in the window's localModelsApi.ts.
+export type {
+  FailureReason,
+  LocalModelProgress,
+  LocalModelStateChange,
+  LocalModelView,
+  ModelId,
+  ModelState,
+} from "../../src/lib/local-models/localModelsApi";
 
 export interface BuildInfo {
   version: string;
@@ -102,6 +137,61 @@ export function coreSpeechLanguages(): string[] {
   return [...fixture.speech_languages];
 }
 
+// ---- Core-checked local-model data (e2e/fixtures/local-models-wire.json, T-044) -------
+
+/** The `ReasonView` codes the fixture holds (DownloadFailure and DownloadError). */
+export type ReasonCode =
+  | "download_interrupted"
+  | "checksum_mismatch"
+  | "not_enough_disk_space"
+  | "source_unreachable"
+  | "disk_error"
+  | "http_status"
+  | "download_busy"
+  | "already_downloaded"
+  | "not_in_catalog"
+  | "download_cannot_start";
+
+interface LocalModelsFixture {
+  event_names: { progress: string; state: string };
+  list_first_run: LocalModelView[];
+  states: Record<"not_downloaded" | "downloading" | "downloaded" | "failed", ModelState>;
+  reasons: Record<ReasonCode, FailureReason>;
+}
+
+const modelsFixture = JSON.parse(
+  readFileSync(new URL("../fixtures/local-models-wire.json", import.meta.url), "utf8"),
+) as LocalModelsFixture;
+
+/** Core's event names: `local-model://progress` and `local-model://state`. */
+export const LOCAL_MODEL_EVENTS: Readonly<{ progress: string; state: string }> = Object.freeze({
+  ...modelsFixture.event_names,
+});
+
+/** Core's `local_models_list` before any download: five rows, catalog order, all not_downloaded. */
+export function localModelsFirstRun(): LocalModelView[] {
+  return structuredClone(modelsFixture.list_first_run);
+}
+
+/** Core's `ReasonView` for `code` (a fresh copy). */
+export function failureReason(code: ReasonCode): FailureReason {
+  return structuredClone(modelsFixture.reasons[code]);
+}
+
+/** A `failed` state with core's reason for `code`. */
+export function failedState(code: ReasonCode): ModelState {
+  return { kind: "failed", reason: failureReason(code) } as ModelState;
+}
+
+/** `localModelsFirstRun()` with the row `id` in `state` (an unknown id fails here, by name). */
+export function modelsWith(id: string, state: ModelState): LocalModelView[] {
+  const list = localModelsFirstRun();
+  const row = list.find((model) => model.id === id);
+  if (row === undefined) throw new Error(`local-models-wire.json has no model ${id}`);
+  row.state = structuredClone(state);
+  return list;
+}
+
 // ---- Install -------------------------------------------------------------------
 
 export interface MockOptions {
@@ -119,6 +209,14 @@ export interface MockOptions {
   holdSettingsGet?: boolean;
   /** Events whose `plugin:event|listen` rejects; no handler is registered for them. */
   rejectListen?: string[];
+  /** Events whose `plugin:event|listen` stays in flight, unregistered, until `releaseListen`. */
+  holdListen?: string[];
+  /** What `local_models_list` returns; default: `localModelsFirstRun()`. */
+  localModels?: LocalModelView[];
+  /** Keep every `local_models_list` in flight until `releaseList` (recorded at once). */
+  holdList?: boolean;
+  /** `local_models_list` rejects with this text (recorded); the command cannot run. */
+  listRejection?: string;
 }
 
 interface InitArg {
@@ -129,6 +227,11 @@ interface InitArg {
   destroy: { reject: string } | null;
   holdSettingsGet: boolean;
   rejectListen: string[];
+  holdListen: string[];
+  localModels: LocalModelView[];
+  holdList: boolean;
+  listRejection: string | null;
+  modelEvents: { progress: string; state: string };
 }
 
 /** Installs the mock as an init script; call before `page.goto`. */
@@ -141,6 +244,11 @@ export async function installTauriMock(page: Page, options: MockOptions = {}): P
     destroy: options.destroy ?? null,
     holdSettingsGet: options.holdSettingsGet ?? false,
     rejectListen: options.rejectListen ?? [],
+    holdListen: options.holdListen ?? [],
+    localModels: options.localModels ?? localModelsFirstRun(),
+    holdList: options.holdList ?? false,
+    listRejection: options.listRejection ?? null,
+    modelEvents: { ...modelsFixture.event_names },
   };
   await page.addInitScript((init: InitArg) => {
     type Handler = (data: unknown) => void;
@@ -161,7 +269,18 @@ export async function installTauriMock(page: Page, options: MockOptions = {}): P
       held: [] as (() => void)[],
       holdingGet: init.holdSettingsGet,
       heldGet: [] as (() => void)[],
+      holdingListen: [...init.holdListen],
+      heldListen: [] as (() => void)[],
+      models: clone(init.localModels) as { id: string; sizeBytes: number; state: unknown }[],
+      downloadRejections: [] as unknown[],
+      holdingList: init.holdList,
+      heldList: [] as (() => void)[],
     };
+
+    function setModelState(id: string, modelState: unknown): void {
+      const row = state.models.find((model) => model.id === id);
+      if (row) row.state = clone(modelState);
+    }
 
     function transformCallback(callback?: Handler, once = false): number {
       const id = state.nextId++;
@@ -200,6 +319,9 @@ export async function installTauriMock(page: Page, options: MockOptions = {}): P
           const event = args.event as string;
           const handler = args.handler as number;
           if (init.rejectListen.includes(event)) throw new Error(`listen ${event} refused`);
+          if (state.holdingListen.includes(event)) {
+            await new Promise<void>((resolve) => state.heldListen.push(resolve));
+          }
           const list = state.listeners.get(event) ?? [];
           list.push(handler);
           state.listeners.set(event, list);
@@ -232,6 +354,30 @@ export async function installTauriMock(page: Page, options: MockOptions = {}): P
           // The bridge emits from another thread, after the save returned.
           setTimeout(() => emit("settings://changed", view, "mock"), 0);
           return { Saved: { view: clone(view), warnings: [] } };
+        }
+        case "local_models_list": {
+          if (init.listRejection !== null) throw new Error(init.listRejection);
+          const snapshot = clone(state.models);
+          if (state.holdingList) await new Promise<void>((resolve) => state.heldList.push(resolve));
+          return snapshot;
+        }
+        case "local_model_download": {
+          if (state.downloadRejections.length > 0) throw clone(state.downloadRejections.shift());
+          const row = state.models.find((model) => model.id === args.id);
+          if (row) row.state = { kind: "downloading", received: 0, total: row.sizeBytes };
+          return null;
+        }
+        case "local_model_cancel_download": {
+          const id = args.id as string;
+          const row = state.models.find((model) => model.id === id);
+          const running =
+            row !== undefined && (row.state as { kind?: unknown } | null)?.kind === "downloading";
+          if (!running) return false;
+          const cancelled = { kind: "not_downloaded" };
+          setModelState(id, cancelled);
+          // The download thread emits after the cancel returned.
+          setTimeout(() => emit(init.modelEvents.state, { id, state: cancelled }, "mock"), 0);
+          return true;
         }
         case "plugin:window|destroy":
           if (init.destroy !== null) throw new Error(init.destroy.reject);
@@ -272,6 +418,26 @@ export async function installTauriMock(page: Page, options: MockOptions = {}): P
         state.holdingGet = false;
         for (const resolve of state.heldGet.splice(0)) resolve();
       },
+      releaseListen: () => {
+        state.holdingListen = [];
+        for (const resolve of state.heldListen.splice(0)) resolve();
+      },
+      releaseList: () => {
+        state.holdingList = false;
+        for (const resolve of state.heldList.splice(0)) resolve();
+      },
+      queueDownloadRejection: (payload: unknown) => state.downloadRejections.push(clone(payload)),
+      progress: (id: string, received: number) => {
+        const row = state.models.find((model) => model.id === id);
+        if (!row) throw new Error(`no local model ${id}`);
+        row.state = { kind: "downloading", received, total: row.sizeBytes };
+        emit(init.modelEvents.progress, { id, received, total: row.sizeBytes }, "test");
+      },
+      modelState: (id: string, modelState: unknown) => {
+        if (!state.models.some((model) => model.id === id)) throw new Error(`no local model ${id}`);
+        setModelState(id, modelState);
+        emit(init.modelEvents.state, { id, state: modelState }, "test");
+      },
     };
   }, arg);
 }
@@ -286,12 +452,18 @@ interface MockHandle {
     calls: RecordedCall[];
     emitted: EmittedEvent[];
     listeners: Map<string, number[]>;
+    models: LocalModelView[];
   };
   emit: (event: string, payload: unknown) => void;
   queue: (item: { outcome: unknown } | { reject: unknown }) => void;
   hold: () => void;
   release: () => void;
   releaseGet: () => void;
+  releaseListen: () => void;
+  releaseList: () => void;
+  queueDownloadRejection: (payload: unknown) => void;
+  progress: (id: string, received: number) => void;
+  modelState: (id: string, state: ModelState) => void;
 }
 
 type MockWindow = { __VOICEN_MOCK__: MockHandle };
@@ -366,4 +538,52 @@ export async function releaseSave(page: Page): Promise<void> {
 /** Answers every held `settings_get` and stops holding (see `holdSettingsGet`). */
 export async function releaseSettingsGet(page: Page): Promise<void> {
   await page.evaluate(() => (window as unknown as MockWindow).__VOICEN_MOCK__.releaseGet());
+}
+
+/** Registers every held `plugin:event|listen` (see `holdListen`), answers it, and stops holding. */
+export async function releaseListen(page: Page): Promise<void> {
+  await page.evaluate(() => (window as unknown as MockWindow).__VOICEN_MOCK__.releaseListen());
+}
+
+// ---- Local models (spec 002, T-045) ----------------------------------------------
+
+/** The models list the mock holds now (what the next `local_models_list` returns). */
+export async function storedModels(page: Page): Promise<LocalModelView[]> {
+  return page.evaluate(() => (window as unknown as MockWindow).__VOICEN_MOCK__.state.models);
+}
+
+/** Answers every held `local_models_list` with the copy taken at its call, and stops holding. */
+export async function releaseList(page: Page): Promise<void> {
+  await page.evaluate(() => (window as unknown as MockWindow).__VOICEN_MOCK__.releaseList());
+}
+
+/**
+ * The next `local_model_download` rejects with `payload` and changes nothing: a
+ * `FailureReason` for a contract refusal (`failureReason(code)`), anything else for a
+ * failure of the invoke itself.
+ */
+export async function queueDownloadRejection(page: Page, payload: unknown): Promise<void> {
+  await page.evaluate(
+    (value) => (window as unknown as MockWindow).__VOICEN_MOCK__.queueDownloadRejection(value),
+    payload,
+  );
+}
+
+/**
+ * The download thread reports progress: the row becomes `downloading { received,
+ * total: sizeBytes }`, then `local-model://progress { id, received, total }` is emitted.
+ */
+export async function localModelProgress(page: Page, id: string, received: number): Promise<void> {
+  await page.evaluate(
+    ([model, bytes]) => (window as unknown as MockWindow).__VOICEN_MOCK__.progress(model, bytes),
+    [id, received] as const,
+  );
+}
+
+/** A state transition: the row takes `state`, then `local-model://state { id, state }` is emitted. */
+export async function localModelState(page: Page, id: string, state: ModelState): Promise<void> {
+  await page.evaluate(
+    ([model, next]) => (window as unknown as MockWindow).__VOICEN_MOCK__.modelState(model, next),
+    [id, state] as const,
+  );
 }
