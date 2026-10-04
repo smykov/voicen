@@ -21,6 +21,10 @@ pub struct Timeouts {
     pub post_processing: Duration,
     /// Built-in whisper.cpp transcription (decision #7: 120 s).
     pub builtin: Duration,
+    /// Model download: the longest wait for the next body bytes (or the response
+    /// headers), a per-read timeout, never a total one (spec 002 Clarification 5:
+    /// 30 s; decision #49).
+    pub download_no_data: Duration,
 }
 
 impl Default for Timeouts {
@@ -31,6 +35,9 @@ impl Default for Timeouts {
             local_server: Duration::from_secs(60),
             post_processing: Duration::from_secs(15),
             builtin: Duration::from_secs(120),
+            // Skeleton (T-016 red tests): the production value is set by the
+            // implementation (test `download_no_data_default_is_30s`).
+            download_no_data: Duration::ZERO,
         }
     }
 }
@@ -58,5 +65,17 @@ mod tests {
             "post_processing"
         );
         assert_eq!(t.builtin, Duration::from_secs(120), "builtin");
+    }
+
+    #[test]
+    fn download_no_data_default_is_30s() {
+        // Spec 002 Clarification 5 (no data for 30 s fails the download), decision
+        // #49. Bite: the field left at another value, or set to a total-download
+        // duration such as 60 s / 120 s.
+        assert_eq!(
+            Timeouts::default().download_no_data,
+            Duration::from_secs(30),
+            "download_no_data"
+        );
     }
 }
