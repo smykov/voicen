@@ -8,6 +8,15 @@ pub trait Clock: Send + Sync {
     fn now(&self) -> SystemTime;
 }
 
+/// The local time zone's offset from UTC (T-008: log timestamps and the local
+/// date roll). The wall time itself still comes from [`Clock`]; this port only
+/// says how far local time is from UTC at an instant. The shell fills it from the
+/// Windows time-zone rules; tests use a fixed offset.
+pub trait LocalOffset: Send + Sync {
+    /// Seconds east of UTC in effect at `t` (UTC+02:00 -> 7200, UTC-03:30 -> -12600).
+    fn seconds_east(&self, t: SystemTime) -> i32;
+}
+
 /// The operating system's wall clock.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SystemClock;

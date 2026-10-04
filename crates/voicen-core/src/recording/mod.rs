@@ -45,6 +45,14 @@ pub const MIN_HOLD: Duration = Duration::from_millis(300);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RecordingId(u64);
 
+impl RecordingId {
+    /// The number behind the id (T-008: the `rec=` of a dictation log line).
+    pub fn get(self) -> u64 {
+        // Skeleton (T-008 red tests): not implemented yet.
+        todo!("T-008: RecordingId::get")
+    }
+}
+
 /// Why a recording ended, the `end` of `RecordingEnded` (data-model "Recording").
 /// T-009 and T-006 add the other variants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

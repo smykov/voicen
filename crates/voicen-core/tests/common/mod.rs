@@ -3,13 +3,14 @@
 //! model, test catalog entries, a fake disk probe and a raw-TCP mock model server,
 //! re-exported from `voicen_core::test_support::local_models` (one copy for the core
 //! and the shell tests since T-044, P-010; the download harness is in [`download`]);
-//! for `tests/openai_client.rs` and `tests/api_pipeline.rs` the refused address
-//! [`refused_addr`] (T-047); for every test that expects a refused connect the
+//! for `tests/openai_client.rs`, `tests/api_pipeline.rs` and `tests/diag_pipeline.rs`
+//! (T-008) the refused address [`refused_addr`] (T-047); for every test that
+//! expects a refused connect the
 //! deadlines [`refused_timeouts`], sized by [`REFUSAL_BUDGET`] (T-048). The
 //! refused-address rules stay here, not in `test_support`: they are core-test-only
 //! (docs/decisions/core-tests.md). The
 //! checks of [`refused_addr`] (`common/refused_addr_tests.rs`) are not a module of
-//! `common`: only those two binaries include them (T-047 review 1 #3), so a binary
+//! `common`: only the binaries that call it include them (T-047 review 1 #3), so a binary
 //! that does not use the helper, `tests/local_download_refused.rs` above all, runs
 //! none of its connect probes.
 #![allow(dead_code)]
@@ -64,8 +65,8 @@ pub fn refused_timeouts() -> Timeouts {
 /// is checked at each call: a plain connect (limit [`REFUSAL_BUDGET`]) must be
 /// refused, and within `REFUSAL_BUDGET / 2` (T-048), otherwise this panics (a
 /// test-environment problem, reported loudly instead of a flaky result).
-/// Tests: `refused_addr_tests.rs`, included by `tests/openai_client.rs` and
-/// `tests/api_pipeline.rs`.
+/// Tests: `refused_addr_tests.rs`, included by `tests/openai_client.rs`,
+/// `tests/api_pipeline.rs` and `tests/diag_pipeline.rs`.
 pub fn refused_addr() -> SocketAddr {
     let addr = SocketAddr::from(([127, 0, 0, 1], 1));
     let started = Instant::now();

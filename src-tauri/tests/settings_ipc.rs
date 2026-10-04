@@ -18,6 +18,7 @@ use tauri::test::{get_ipc_response, mock_builder, mock_context, noop_assets, Moc
 use tauri::webview::InvokeRequest;
 use tauri::{App, Listener, WebviewWindow, WebviewWindowBuilder};
 use voicen_core::autostart::{Autostart, FakeAutostart};
+use voicen_core::diag::Log;
 use voicen_core::i18n::UiLanguage;
 use voicen_core::local_models::catalog::MODELS;
 use voicen_core::local_models::service::LocalModels;
@@ -50,11 +51,18 @@ struct Harness {
 }
 
 fn harness(service: &Arc<SettingsService>) -> Harness {
+    harness_with_log(service, discard_log())
+}
+
+/// [`harness`] with the log `build_app` manages (T-008: `settings_save` writes its
+/// line there).
+fn harness_with_log(service: &Arc<SettingsService>, log: Arc<Log>) -> Harness {
     let app = voicen_lib::build_app(
         mock_builder(),
         mock_context(noop_assets()),
         service.clone(),
         idle_models(),
+        log,
     )
     .expect("mock app builds");
     let webview = WebviewWindowBuilder::new(&app, "settings", Default::default())
@@ -188,6 +196,15 @@ fn idle_models() -> Arc<LocalModels> {
     Arc::new(models)
 }
 
+/// T-008: the log handed to `load_settings` / `build_app` by tests that do not read
+/// it. Its folder lies under this test exe (a file), so it can never be created: the
+/// log stays degraded and writes nothing, neither in the data dir (whose file list
+/// several tests pin) nor in the runner's `%LOCALAPPDATA%`.
+fn discard_log() -> Arc<Log> {
+    let exe = std::env::current_exe().expect("current_exe");
+    voicen_lib::diag::start(exe.join("logs"), Box::new(|_| {}))
+}
+
 fn fake_store(store: FakeCredentialStore) -> Arc<FakeCredentialStore> {
     Arc::new(store)
 }
@@ -212,6 +229,7 @@ fn get_returns_presence_only() {
         no_autostart(),
         idle_store(dir.path()),
         None,
+        &discard_log(),
     );
     assert_eq!(outcome, LoadOutcome::FirstRun(defaults(None)));
     let h = harness(&service);
@@ -251,6 +269,7 @@ fn save_twice_replaces_settings_json() {
         no_autostart(),
         idle_store(dir.path()),
         None,
+        &discard_log(),
     );
     assert!(
         dir.path().join(SETTINGS_FILE).is_file(),
@@ -281,6 +300,7 @@ fn save_twice_replaces_settings_json() {
         no_autostart(),
         idle_store(dir.path()),
         None,
+        &discard_log(),
     );
     assert_eq!(outcome, LoadOutcome::Loaded(edited(43)));
 }
@@ -299,6 +319,7 @@ fn saved_emits_changed_once_refused_emits_nothing() {
         no_autostart(),
         idle_store(dir.path()),
         None,
+        &discard_log(),
     );
     let h = harness(&service);
     let events = h.changed_events();
@@ -362,6 +383,7 @@ fn key_store_write_refused_is_key_store_failed_and_nothing_written() {
         no_autostart(),
         idle_store(dir.path()),
         None,
+        &discard_log(),
     );
     let before_bytes = std::fs::read(dir.path().join(SETTINGS_FILE)).expect("first-run file");
     let before_entries = entries(dir.path());
@@ -439,7 +461,8 @@ fn canary_key_never_in_data_dir_or_log() {
 
     let dir = TempDir::new();
     let log_dir = dir.path().join("logs");
-    voicen_lib::log_start(&log_dir);
+    // T-008: the one log, as run() opens it (diag::start replaces log_start).
+    let log = voicen_lib::diag::start(log_dir.clone(), Box::new(|_| {}));
     let store: Arc<dyn CredentialStore> =
         Arc::new(WinCredentialStore::with_target_prefix(prefix.clone()));
     let (service, _) = load_settings(
@@ -448,8 +471,9 @@ fn canary_key_never_in_data_dir_or_log() {
         no_autostart(),
         idle_store(dir.path()),
         None,
+        &log,
     );
-    let h = harness(&service);
+    let h = harness_with_log(&service, log.clone());
     let events = h.changed_events();
 
     let mut settings = edited(42);
@@ -476,6 +500,16 @@ fn canary_key_never_in_data_dir_or_log() {
             .map(|s| s.expose().to_string());
         assert_eq!(key.as_deref(), Some(CANARY), "{slot:?}");
     }
+
+    // The log the scan below reads holds the save's own line (T-008): the save did
+    // go through the log, and the line carries the outcome only.
+    let log_text = std::fs::read_to_string(log_dir.join("voicen.log")).expect("voicen.log");
+    assert!(
+        log_text
+            .lines()
+            .any(|l| l.contains(" settings save outcome=ok")),
+        "no save line in the log:\n{log_text}"
+    );
 
     // ...and nowhere else.
     for text in [outcome.to_string(), event.to_string()] {
@@ -509,6 +543,7 @@ fn speech_languages_is_core_list() {
         no_autostart(),
         idle_store(dir.path()),
         None,
+        &discard_log(),
     );
     let h = harness(&service);
 
@@ -532,6 +567,7 @@ fn first_run_with_russian_os_language_writes_ru() {
         no_autostart(),
         idle_store(dir.path()),
         Some("ru-RU"),
+        &discard_log(),
     );
 
     assert_eq!(outcome, LoadOutcome::FirstRun(defaults(Some("ru-RU"))));

@@ -23,6 +23,7 @@ use std::sync::{Arc, Weak};
 use tauri::{AppHandle, Emitter, Runtime, State};
 use voicen_core::autostart::Autostart;
 use voicen_core::clock::SystemClock;
+use voicen_core::diag::Log;
 use voicen_core::hotkey_registrar::{HotkeyRegistrar, Prepared, Unavailable};
 use voicen_core::local_models::store::ModelStore;
 use voicen_core::secrets::CredentialStore;
@@ -43,13 +44,20 @@ pub const SETTINGS_CHANGED: &str = "settings://changed";
 ///
 /// `local_models` is the store of the one `LocalModels` (`LocalModels::store`,
 /// T-044): it becomes `SettingsDeps.local_models`.
+///
+/// `log` is the one log (`diag::start`, T-008): after the load it gets the
+/// `settings load outcome=..` line, after the reconcile the `autostart reconcile
+/// action=..` line (spec 004 R-11), so a start writes Started, then these two.
 pub fn load_settings(
     data_dir: PathBuf,
     credentials: Arc<dyn CredentialStore>,
     autostart: Arc<dyn Autostart>,
     local_models: Arc<ModelStore>,
     os_language: Option<&str>,
+    log: &Log,
 ) -> (Arc<SettingsService>, LoadOutcome) {
+    // Skeleton (T-008 red tests): the load and reconcile lines are not written yet.
+    let _ = log;
     let deps = SettingsDeps {
         file: Arc::new(FsSettingsFile::new(data_dir)),
         credentials,

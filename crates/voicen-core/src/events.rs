@@ -56,6 +56,9 @@ pub enum DictationEvent {
     },
     JobFinished {
         seq: u64,
+        /// The job's recording (T-008: the log joins a job to its recording's
+        /// `RecordingStarted` / `RecordingEnded` by this id, not by event order).
+        recording: RecordingId,
         /// `Engine::kind()`; `None` when no engine was built.
         engine: Option<&'static str>,
         /// From the recording's `stopped_at` to the outcome.

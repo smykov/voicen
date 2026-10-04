@@ -1,9 +1,8 @@
-use std::io::Write;
-use std::path::Path;
 use std::sync::Arc;
 
 use tauri::{App, Builder, Context, RunEvent, Runtime};
 use voicen_core::autostart::Autostart;
+use voicen_core::diag::Log;
 use voicen_core::local_models::catalog::MODELS;
 use voicen_core::local_models::download::DiskSpace;
 use voicen_core::local_models::service::LocalModels;
@@ -16,6 +15,7 @@ use voicen_core::BuildInfo;
 pub mod autostart;
 #[cfg(windows)]
 pub mod credentials;
+pub mod diag;
 pub mod local_models;
 pub mod locale;
 pub mod paths;
@@ -48,34 +48,24 @@ fn commands<R: Runtime>(builder: Builder<R>) -> Builder<R> {
 ///
 /// `local_models` is the one coordinator behind the local-model commands (T-044);
 /// its store is the one `run()` passed to `settings_ipc::load_settings`.
+///
+/// `log` is the one log (`diag::start`, T-008): managed for `settings_save` (the
+/// save line) and handed to the bridge (its spawn failure is a typed warning).
 pub fn build_app<R: Runtime>(
     builder: Builder<R>,
     context: Context<R>,
     service: Arc<SettingsService>,
     local_models: Arc<LocalModels>,
+    log: Arc<Log>,
 ) -> tauri::Result<App<R>> {
+    // Skeleton (T-008 red tests): the log is not managed or used yet.
+    let _ = log;
     let app = commands(builder)
         .manage(service.clone())
         .manage(local_models)
         .build(context)?;
     settings_ipc::spawn_change_bridge(app.handle().clone(), service);
     Ok(app)
-}
-
-/// Writes the start line with version and commit into `dir/voicen.log` (FR-18); a
-/// failure never stops the app.
-pub fn log_start(dir: &Path) {
-    let line = format!("voicen {} started\n", voicen_core::build_info());
-    let written = std::fs::create_dir_all(dir).and_then(|_| {
-        std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(dir.join("voicen.log"))
-            .and_then(|mut f| f.write_all(line.as_bytes()))
-    });
-    if let Err(err) = written {
-        eprintln!("cannot write log in {}: {err}", dir.display());
-    }
 }
 
 /// The release key store: Credential Manager, the only one (NFR-04; no fallback).
@@ -130,7 +120,9 @@ fn release_launched_by_autostart() -> bool {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    log_start(&paths::log_dir());
+    // Skeleton (T-008 red tests): the one log, Started first (diag::start); the
+    // stderr lines below become typed warnings on it.
+    let log = diag::start(paths::log_dir(), Box::new(|_| {}));
     // The one LocalModels (T-044): its `.part` cleanup runs inside `open`, before
     // any list or settings validation reads the models dir.
     let (local_models, cleanup) = LocalModels::open(
@@ -152,6 +144,7 @@ pub fn run() {
         release_autostart(),
         local_models.store(),
         os_language.as_deref(),
+        &log,
     );
     let launched_by_autostart = release_launched_by_autostart();
     build_app(
@@ -159,6 +152,7 @@ pub fn run() {
         tauri::generate_context!(),
         service,
         local_models,
+        Arc::clone(&log),
     )
     .expect("error while building tauri application")
     .run(move |app, event| {

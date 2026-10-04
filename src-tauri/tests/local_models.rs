@@ -28,6 +28,7 @@ use tauri::test::{get_ipc_response, mock_builder, mock_context, noop_assets, Moc
 use tauri::webview::InvokeRequest;
 use tauri::{App, Context, Listener, Manager, Url, WebviewWindow, WebviewWindowBuilder};
 use voicen_core::autostart::{Autostart, FakeAutostart};
+use voicen_core::diag::Log;
 use voicen_core::local_models::catalog::{CatalogEntry, MODELS};
 use voicen_core::local_models::download::DiskSpace;
 use voicen_core::local_models::service::LocalModels;
@@ -64,6 +65,15 @@ const IDS: [&str; 5] = [
 
 fn no_keys() -> Arc<dyn CredentialStore> {
     Arc::new(FakeCredentialStore::new())
+}
+
+/// T-008: the log handed to `load_settings` / `build_app` by tests that do not read
+/// it. Its folder lies under this test exe (a file), so it can never be created: the
+/// log stays degraded and writes nothing, neither in the data dir nor in the
+/// runner's `%LOCALAPPDATA%`.
+fn discard_log() -> Arc<Log> {
+    let exe = std::env::current_exe().expect("current_exe");
+    voicen_lib::diag::start(exe.join("logs"), Box::new(|_| {}))
 }
 
 fn no_autostart() -> Arc<dyn Autostart> {
@@ -120,12 +130,20 @@ fn world_with(plan: Vec<Serve>, disk: Arc<FakeDisk>, prepare: impl FnOnce(&Path)
         panic!("cleanup_at_start failed at open: {e}");
     }
     let models = Arc::new(models);
-    let (service, _) = load_settings(data, no_keys(), no_autostart(), models.store(), None);
+    let (service, _) = load_settings(
+        data,
+        no_keys(),
+        no_autostart(),
+        models.store(),
+        None,
+        &discard_log(),
+    );
     let app = voicen_lib::build_app(
         mock_builder(),
         mock_context(noop_assets()),
         service.clone(),
         models,
+        discard_log(),
     )
     .expect("mock app builds");
     let webview = WebviewWindowBuilder::new(&app, LABEL, Default::default())
@@ -616,9 +634,22 @@ fn local_model_commands_pass_the_real_acl_from_the_settings_window() {
     let probe: Arc<dyn DiskSpace> = FakeDisk::with_available(u64::MAX);
     let (models, _) = LocalModels::open(data.join("models"), probe, timeouts(), MODELS);
     let models = Arc::new(models);
-    let (service, _) = load_settings(data, no_keys(), no_autostart(), models.store(), None);
-    let app = voicen_lib::build_app(mock_builder(), release_context(), service, models)
-        .expect("mock app builds");
+    let (service, _) = load_settings(
+        data,
+        no_keys(),
+        no_autostart(),
+        models.store(),
+        None,
+        &discard_log(),
+    );
+    let app = voicen_lib::build_app(
+        mock_builder(),
+        release_context(),
+        service,
+        models,
+        discard_log(),
+    )
+    .expect("mock app builds");
     settings_window::open(app.handle(), SettingsTab::Engine, None).expect("open");
     let window = app
         .get_webview_window(LABEL)

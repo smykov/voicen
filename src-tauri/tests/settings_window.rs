@@ -28,6 +28,7 @@ use tauri::{
     App, Context, Listener, Manager, Url, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
 };
 use voicen_core::autostart::{Autostart, FakeAutostart};
+use voicen_core::diag::Log;
 use voicen_core::local_models::catalog::MODELS;
 use voicen_core::local_models::service::LocalModels;
 use voicen_core::local_models::store::ModelStore;
@@ -72,6 +73,15 @@ fn idle_models() -> Arc<LocalModels> {
     Arc::new(models)
 }
 
+/// T-008: the log handed to `load_settings` / `build_app` by tests that do not read
+/// it. Its folder lies under this test exe (a file), so it can never be created: the
+/// log stays degraded and writes nothing, neither in the data dir nor in the
+/// runner's `%LOCALAPPDATA%`.
+fn discard_log() -> Arc<Log> {
+    let exe = std::env::current_exe().expect("current_exe");
+    voicen_lib::diag::start(exe.join("logs"), Box::new(|_| {}))
+}
+
 fn load(dir: &Path) -> (Arc<SettingsService>, LoadOutcome) {
     load_settings(
         dir.to_path_buf(),
@@ -79,13 +89,20 @@ fn load(dir: &Path) -> (Arc<SettingsService>, LoadOutcome) {
         no_autostart(),
         idle_store(dir),
         None,
+        &discard_log(),
     )
 }
 
 /// The app as `run()` builds it (`build_app`), on the mock runtime with `context`.
 fn app_with(service: &Arc<SettingsService>, context: Context<MockRuntime>) -> App<MockRuntime> {
-    voicen_lib::build_app(mock_builder(), context, service.clone(), idle_models())
-        .expect("mock app builds")
+    voicen_lib::build_app(
+        mock_builder(),
+        context,
+        service.clone(),
+        idle_models(),
+        discard_log(),
+    )
+    .expect("mock app builds")
 }
 
 fn mock_app(service: &Arc<SettingsService>) -> App<MockRuntime> {

@@ -256,6 +256,8 @@ impl Pipeline {
         let finished =
             |outcome: OutcomeCode, failure: Option<&FailureReason>| DictationEvent::JobFinished {
                 seq: job.seq,
+                // Skeleton (T-008 red tests): the new field's only source.
+                recording: job.recording,
                 engine: done.engine,
                 stop_to_text_ms,
                 outcome,

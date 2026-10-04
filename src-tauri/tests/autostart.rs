@@ -20,6 +20,7 @@ use tauri::test::{get_ipc_response, mock_builder, mock_context, noop_assets, Moc
 use tauri::webview::InvokeRequest;
 use tauri::{App, WebviewWindow, WebviewWindowBuilder};
 use voicen_core::autostart::{Autostart, AutostartCall, AutostartError, FakeAutostart};
+use voicen_core::diag::Log;
 use voicen_core::local_models::catalog::MODELS;
 use voicen_core::local_models::service::LocalModels;
 use voicen_core::local_models::store::ModelStore;
@@ -225,6 +226,15 @@ fn idle_models() -> Arc<LocalModels> {
     Arc::new(models)
 }
 
+/// T-008: the log handed to `load_settings` / `build_app` by tests that do not read
+/// it. Its folder lies under this test exe (a file), so it can never be created: the
+/// log stays degraded and writes nothing, neither in the data dir nor in the
+/// runner's `%LOCALAPPDATA%`.
+fn discard_log() -> Arc<Log> {
+    let exe = std::env::current_exe().expect("current_exe");
+    voicen_lib::diag::start(exe.join("logs"), Box::new(|_| {}))
+}
+
 fn write_settings(dir: &TempDir, settings: &Settings) {
     let bytes = serde_json::to_vec_pretty(settings).expect("settings serialize");
     std::fs::write(dir.path().join(SETTINGS_FILE), bytes).expect("seed settings.json");
@@ -347,6 +357,7 @@ fn load_settings_writes_the_value_for_a_saved_on_setting() {
         value.port(),
         idle_store(dir.path()),
         None,
+        &discard_log(),
     );
     assert_eq!(outcome, LoadOutcome::Loaded(with_start(true)));
     assert_eq!(value.read(), Some(expected_value()));
@@ -367,6 +378,7 @@ fn load_settings_removes_the_value_for_a_saved_off_setting() {
         value.port(),
         idle_store(dir.path()),
         None,
+        &discard_log(),
     );
     assert_eq!(outcome, LoadOutcome::Loaded(with_start(false)));
     assert_eq!(value.read(), None);
@@ -386,6 +398,7 @@ fn load_settings_reconciles_through_the_injected_port() {
         fake.clone(),
         idle_store(dir.path()),
         None,
+        &discard_log(),
     );
     assert_eq!(outcome, LoadOutcome::FirstRun(defaults(None)));
     assert_eq!(
@@ -410,6 +423,7 @@ fn load_settings_makes_no_autostart_call_while_unavailable() {
         fake.clone(),
         idle_store(dir.path()),
         None,
+        &discard_log(),
     );
     assert!(
         matches!(outcome, LoadOutcome::Unavailable(_)),
@@ -432,6 +446,7 @@ fn harness(service: &Arc<SettingsService>) -> Harness {
         mock_context(noop_assets()),
         service.clone(),
         idle_models(),
+        discard_log(),
     )
     .expect("mock app builds");
     let webview = WebviewWindowBuilder::new(&app, "settings", Default::default())
@@ -482,6 +497,7 @@ fn settings_save_on_writes_the_value_and_off_removes_it() {
         value.port(),
         idle_store(dir.path()),
         None,
+        &discard_log(),
     );
     let h = harness(&service);
 
@@ -516,6 +532,7 @@ fn settings_save_with_a_refused_registry_write_is_autostart_failed() {
         fake.clone(),
         idle_store(dir.path()),
         None,
+        &discard_log(),
     );
     let before = std::fs::read(dir.path().join(SETTINGS_FILE)).expect("first run wrote");
     let h = harness(&service);

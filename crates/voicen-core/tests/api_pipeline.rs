@@ -397,6 +397,7 @@ async fn speech_is_transcribed_and_delivered_as_mock_text() {
             speech: true,
         }, DictationEvent::JobFinished {
             seq,
+            recording: finished_recording,
             engine: Some("api"),
             stop_to_text_ms,
             outcome: OutcomeCode::Text,
@@ -408,6 +409,9 @@ async fn speech_is_transcribed_and_delivered_as_mock_text() {
             ..
         }] => {
             assert_eq!(*recording, id);
+            // T-008: JobFinished names its own recording, so the log can join
+            // it to RecordingStarted/Ended without relying on event order.
+            assert_eq!(*finished_recording, id);
             assert_eq!(delivered_seq, seq);
             assert!(
                 (1_000..60_000).contains(stop_to_text_ms),

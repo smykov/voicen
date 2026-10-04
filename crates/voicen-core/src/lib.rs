@@ -5,6 +5,7 @@ pub mod autostart;
 pub mod build_info;
 pub mod clock;
 pub mod delivery;
+pub mod diag;
 pub mod engine;
 pub mod events;
 pub mod failure;

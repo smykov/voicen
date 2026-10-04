@@ -3,7 +3,8 @@
 //! deadlines of a refused case, [`refused_timeouts`], leave the refusal room.
 //!
 //! Not a module of `tests/common`: each binary that calls [`refused_addr`]
-//! (`tests/openai_client.rs`, `tests/api_pipeline.rs`) includes this file with
+//! (`tests/openai_client.rs`, `tests/api_pipeline.rs`, `tests/diag_pipeline.rs`)
+//! includes this file with
 //! `#[path]`, so the helper is checked in the process that relies on it, and a
 //! binary that does not use it runs none of these connect probes (each probe takes
 //! an ephemeral source port for an instant; T-047 review 1 #3). Keep it out of
