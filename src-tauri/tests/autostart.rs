@@ -284,7 +284,7 @@ fn set_true_rewrites_a_stale_path() {
 #[test]
 fn release_names_are_pinned() {
     // 006's uninstaller hook deletes the same literal; the Run value passes the
-    // argument T-004's startup executor reads. Bite: any constant changed.
+    // argument `settings_window::on_ready` (T-037) reads. Bite: any constant changed.
     assert_eq!(RUN_VALUE_NAME, "Voicen");
     assert_eq!(AUTOSTART_ARG, "--autostart");
     assert_eq!(RUN_SUBKEY, RUN);

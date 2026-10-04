@@ -34,7 +34,7 @@ pub const AUTOSTART_ARG: &str = "--autostart";
 pub const RUN_SUBKEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 
 /// `true` when the process was started by the Run value (`--autostart` among the
-/// arguments). T-004's startup executor passes it to `startup_action`.
+/// arguments). `settings_window::on_ready` (T-037) passes it to `startup_action`.
 pub fn launched_by_autostart<I, S>(args: I) -> bool
 where
     I: IntoIterator<Item = S>,

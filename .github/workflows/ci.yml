@@ -63,6 +63,7 @@ jobs:
       - name: Install silently, launch, check the start log line, the first-run settings.json, the Run value and the settings window
         shell: pwsh
         run: |
+          . ./scripts/ci/visible-windows.ps1
           $setup = Get-ChildItem target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
           Start-Process $setup.FullName -ArgumentList '/S' -Wait
           $exe = Join-Path $env:LOCALAPPDATA 'Voicen\voicen.exe'
@@ -86,10 +87,10 @@ jobs:
           $found = $false
           $hasSettings = $false
           $runGone = $false
-          # T-037 (S1): FirstRun opens the settings window. A fresh Get-Process each poll:
-          # a Process object caches its main-window state. MainWindowHandle is a visible,
-          # unowned top-level window of this process (tao's event window is not visible;
-          # WebView2's windows are child windows or belong to msedgewebview2.exe).
+          # T-037 (S1): FirstRun opens the settings window: exactly one shown window, titled
+          # Voicen. Shown = visible, unowned, top-level, not a tool window and not tao's
+          # event-target window, which every tauri process has with WS_VISIBLE set, so
+          # Process.MainWindowHandle cannot tell (scripts/ci/visible-windows.ps1).
           $win = $false
           $seen = 'no process'
           for ($i = 0; $i -lt 30 -and -not ($found -and $hasSettings -and $runGone -and $win); $i++) {
@@ -97,9 +98,10 @@ jobs:
             $found = (Test-Path $log) -and (Select-String -Path $log -SimpleMatch $expected -Quiet)
             $hasSettings = Test-Path -LiteralPath $settings -PathType Leaf
             $runGone = $null -eq (Get-ItemProperty -Path $run -Name 'Voicen' -ErrorAction SilentlyContinue)
-            $p = Get-Process -Id $proc.Id -ErrorAction SilentlyContinue
-            if ($p) { $seen = "MainWindowHandle $($p.MainWindowHandle), title '$($p.MainWindowTitle)'" }
-            $win = [bool]($p -and $p.MainWindowHandle -ne 0 -and $p.MainWindowTitle -eq 'Voicen')
+            if ($proc.HasExited) { $seen = 'process exited'; $win = $false; continue }
+            $shown = Get-ShownWindows $proc.Id
+            $seen = Format-ShownWindows $shown
+            $win = $shown.Count -eq 1 -and $shown[0].Title -ceq 'Voicen'
           }
           Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
           if (-not $found) { if (Test-Path $log) { Get-Content $log }; throw "start log line with commit $env:VOICEN_COMMIT not found" }
@@ -110,8 +112,8 @@ jobs:
           Write-Output "found settings.json at $settings with engine = none"
           if (-not $runGone) { throw "the leftover HKCU Run value Voicen is still present after the first launch (start_with_windows off)" }
           Write-Output "no HKCU Run value Voicen after the first launch"
-          if (-not $win) { throw "no visible Voicen window after the first launch (last seen: $seen)" }
-          Write-Output "a visible top-level window titled Voicen after the first launch"
+          if (-not $win) { throw "not exactly one shown window titled Voicen after the first launch (last seen: $seen)" }
+          Write-Output "exactly one shown window after the first launch: $seen"
       - name: Start with Windows on writes the Run value, off removes it (T-014 reconcile at start)
         shell: pwsh
         run: |
@@ -145,6 +147,7 @@ jobs:
       - name: A launch with a loaded settings.json shows no window (T-037 startup executor)
         shell: pwsh
         run: |
+          . ./scripts/ci/visible-windows.ps1
           $exe = Join-Path $env:LOCALAPPDATA 'Voicen\voicen.exe'
           $settings = Join-Path $env:LOCALAPPDATA 'Voicen\settings.json'
           $log = Join-Path $env:LOCALAPPDATA 'Voicen\logs\voicen.log'
@@ -159,16 +162,17 @@ jobs:
           $started = $false
           for ($i = 0; $i -lt 30 -and -not $started; $i++) { Start-Sleep -Seconds 1; $started = (Get-StartCount) -gt $before }
           if (-not $started) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue; throw "start log line with commit $env:VOICEN_COMMIT not written by the loaded launch" }
+          # Same predicate as the first launch (scripts/ci/visible-windows.ps1): zero shown windows.
           $shown = $null
           for ($i = 0; $i -lt 10 -and -not $shown; $i++) {
             Start-Sleep -Seconds 1
-            $p = Get-Process -Id $proc.Id -ErrorAction SilentlyContinue
-            if (-not $p) { throw "voicen.exe exited during the loaded launch (expected it to keep running with no window)" }
-            if ($p.MainWindowHandle -ne 0) { $shown = "MainWindowHandle $($p.MainWindowHandle), title '$($p.MainWindowTitle)'" }
+            if ($proc.HasExited) { throw "voicen.exe exited during the loaded launch (expected it to keep running with no window)" }
+            $windows = Get-ShownWindows $proc.Id
+            if ($windows.Count -gt 0) { $shown = Format-ShownWindows $windows }
           }
           Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
-          if ($shown) { throw "a window is visible on a launch with a loaded settings.json ($shown)" }
-          Write-Output "no visible window for 10 s after the start line of a launch with a loaded settings.json"
+          if ($shown) { throw "a window is shown on a launch with a loaded settings.json ($shown)" }
+          Write-Output "no shown window for 10 s after the start line of a launch with a loaded settings.json"
       - uses: actions/upload-artifact@v4
         with:
           name: voicen-installer-${{ env.VOICEN_COMMIT }}
