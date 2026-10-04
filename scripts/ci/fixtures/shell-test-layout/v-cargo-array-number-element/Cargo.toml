@@ -1,0 +1,19 @@
+# Fixture shell dir for scripts/ci/shell-test-layout.test.sh; never built.
+# T-038 review round 1, finding 1 (b): the same with a last element [1], which a header
+# pattern taking bare keys also reads as a table header.
+[package]
+name = "shell-layout-fixture"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "voicen"
+x-note = [
+  [1]
+]
+path = "../outside/main.rs"
+
+[lib]
+name = "shell_layout_fixture_lib"
+doctest = false

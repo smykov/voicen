@@ -1,0 +1,18 @@
+# Fixture shell dir for scripts/ci/shell-test-layout.test.sh; never built.
+# T-038 review round 1, finding 1: the false positive the one-line rule brings, on purpose
+# (fail-closed): the long windows features array of src-tauri/Cargo.toml split over lines.
+[package]
+name = "shell-layout-fixture"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "shell_layout_fixture_lib"
+doctest = false
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+  "Win32_Foundation",
+  "Win32_Security_Credentials",
+] }

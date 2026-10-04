@@ -1,4 +1,4 @@
-//! T-038 (decision supersedes #39): doc comments are never read as code, and not read for
+//! T-038 (decision #41 supersedes #39): doc comments are never read as code, and not read for
 //! anything else. Each sibling module holds the source of a removed T-035/T-036 doc fixture
 //! or a b8b0b81 probe, shapes rustdoc 1.99 reads as code blocks; with `[lib] doctest = false`
 //! pinned and no `--doc` in the workflows none of them becomes an executable, so all pass.

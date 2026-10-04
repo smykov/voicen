@@ -1,0 +1,22 @@
+# Fixture shell dir for scripts/ci/shell-test-layout.test.sh; never built.
+# T-038 review round 1, finding 1: brackets, braces, # and backslashes inside single-line
+# strings, and brackets in comments, do not count: strings are removed first (escapes in
+# basic strings, none in literal strings), then the comment. A comment like [lib or { passes.
+[package]
+name = "shell-layout-fixture"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Voicen: dictate [into] any {input} field, say \"[\" or \\ then go"
+keywords = ["c#", "dictation"]   # trailing comment with [ and } in it
+x-windows-dir = 'C:\voicen\'
+x-pairs = ['{', "}", ']', "["]
+
+[lib]
+name = "shell_layout_fixture_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]   # see [lib docs {
+doctest = false
+
+# A quoted key or header part without a backslash passes; a backslash in a value passes.
+[package.metadata."voicen-fixture"]
+"key.with.dots" = "C:\\voicen"

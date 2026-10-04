@@ -14,8 +14,20 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 # doc blocks are not checked.
   doctest = false   # make check refuses removing this key
 
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+# T-038 review round 1, finding 1: single-line arrays and inline tables, nested on one line
+# as in src-tauri/Cargo.toml, pass the one-line-per-value rule.
 [dependencies]
+voicen-core = { path = "../crates/voicen-core" }
 tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Security_Credentials", "Win32_Globalization", "Win32_System_Registry"] }
 
 [dev-dependencies]
+voicen-core = { path = "../crates/voicen-core", features = ["test-fakes"] }
 tauri = { version = "2", features = ["test"] }

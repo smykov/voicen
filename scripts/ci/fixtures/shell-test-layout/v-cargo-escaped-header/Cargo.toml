@@ -1,6 +1,6 @@
 # Fixture shell dir for scripts/ci/shell-test-layout.test.sh; never built.
-# T-038: [lib] doctest = false is there, but another non-comment line names the key (a quoted
-# key under [[test]]): any doctest key outside the one pinned line is refused.
+# T-038 review round 1, finding 1 (c): an escape in a table header, [["b\u0069n"]]: cargo
+# 1.99 reads it as [[bin]], with the bin path ../outside/main.rs.
 [package]
 name = "shell-layout-fixture"
 version = "0.0.0"
@@ -12,6 +12,6 @@ name = "shell_layout_fixture_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 doctest = false
 
-[[test]]
-name = "settings_ipc"
-"doctest" = true
+[["b\u0069n"]]
+name = "voicen"
+path = "../outside/main.rs"

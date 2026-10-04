@@ -1,0 +1,18 @@
+# Fixture shell dir for scripts/ci/shell-test-layout.test.sh; never built.
+# T-038 review round 1, finding 1 (b): inside [lib], a multi-line array whose element
+# ["dependencies"] looks like a header ends the [lib] table for a line-based reader, so the
+# path key after it passes; TOML keeps it in [lib] and cargo 1.99 compiles ../outside/lib.rs.
+[package]
+name = "shell-layout-fixture"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "shell_layout_fixture_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+doctest = false
+x-note = [
+  ["dependencies"]
+]
+path = "../outside/lib.rs"

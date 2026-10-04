@@ -1,11 +1,11 @@
 # Fixture shell dir for scripts/ci/shell-test-layout.test.sh; never built.
 # T-038: a multi-line basic string fakes a [lib] table with doctest = false for a line-based
+# reader; there is no real [lib] table, so the implicit lib has doctests on.
 [package]
 name = "shell-layout-fixture"
 version = "0.0.0"
 edition = "2021"
 publish = false
-# reader; there is no real [lib] table, so the implicit lib has doctests on.
 description = """
 [lib]
 doctest = false

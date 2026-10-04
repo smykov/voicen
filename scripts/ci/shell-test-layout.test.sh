@@ -170,6 +170,21 @@ check v-cargo-multiline-literal     1 "v-cargo-multiline-literal/Cargo.toml:9:" 
 # `rustdoc`, which build lib doctests whatever `doctest` says (cargo 1.99 unit_generator.rs:425-440).
 check v-workflow-doc                1 "v-workflow-doc/workflows/ci.yml:16:"          # cargo test -p voicen --doc
 check v-workflow-rustdoc            1 "v-workflow-rustdoc/workflows/release.yaml:14:" # cargo rustdoc -p voicen -- --test, in a *.yaml file
+# T-038 review round 1, finding 1: the Cargo.toml line tracker sees exactly TOML's lines.
+# (i) Every non-comment line is self-contained: [ ] and { } balance once single-line strings
+# and then the comment are removed, so no array or inline table element can pose as a header.
+check v-cargo-array-fake-lib          1 "v-cargo-array-fake-lib/Cargo.toml:10:"          # (a) x = [ / ["lib"] / ], doctest = false, no real [lib]
+check v-cargo-array-leaves-lib        1 "v-cargo-array-leaves-lib/Cargo.toml:15:"        # (b) in [lib]: x = [ / ["dependencies"] / ], then path = "../outside/lib.rs"
+check v-cargo-array-number-element    1 "v-cargo-array-number-element/Cargo.toml:12:"    # (b) in [[bin]]: last element [1], then path
+check v-cargo-array-string-bracket    1 "v-cargo-array-string-bracket/Cargo.toml:13:"    # x = [ "]",  : the ] in a string does not close
+check v-cargo-array-comment-bracket   1 "v-cargo-array-comment-bracket/Cargo.toml:13:"   # x = [ # ]   : the ] in a comment does not close
+check v-cargo-multiline-inline-table  1 "v-cargo-multiline-inline-table/Cargo.toml:15:"  # y = { / z = 1 }
+check v-cargo-split-array             1 "v-cargo-split-array/Cargo.toml:15:"             # the real windows features array split over lines: refused on purpose
+check v-cargo-split-array             1 "keep arrays and inline tables on one line"      # the message says what to do (review round 1, finding 1)
+check ok-cargo-strings-and-comments   0 "ok:"                                            # [ ] { } # \ in single-line strings, [ { in comments, quoted keys without \
+# (ii) No backslash inside a quoted key or a table header: an escape can spell path or bin.
+check v-cargo-escaped-key             1 "v-cargo-escaped-key/Cargo.toml:14:"             # (c) [lib] "path" = "../outside/lib.rs"
+check v-cargo-escaped-header          1 "v-cargo-escaped-header/Cargo.toml:15:"          # (c) [["bin"]] path = "../outside/main.rs"
 
 # Cannot run: exit 3.
 check does-not-exist            3 "cannot run"
