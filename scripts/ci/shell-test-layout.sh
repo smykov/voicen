@@ -14,28 +14,37 @@
 #      - a cfg or cfg_attr predicate naming `test`, on one line or split across lines:
 #        #[cfg(test)], #![cfg(test)], #[cfg(all(windows, test))], #[cfg_attr(test, ..)];
 #      - a doc code block in any doc form (/// and //! lines, /** */ and /*! */ blocks,
-#        #[doc = "..."] / #![doc = "..."] strings): a ``` or ~~~ fence (also after a list or
-#        quote marker) other than ```text, or an indented (4+ columns) block, i.e. an
-#        indented doc line after a blank doc line, a heading, a fence or the start of the
-#        docs (an indented line right after paragraph text is a lazy continuation and passes);
-#        List context is not tracked: a list continuation or nested list indented 4+
-#        columns after a blank doc line is refused too (its note says to indent it by the
-#        marker width: 2 for `- `, 3 for `1. `); a list or quote marker followed by 5+
-#        columns or a tab, then text, is an indented code block inside the item or quote
-#        (a tab is refused fail-closed: the guard does not compute CommonMark tab stops,
-#        under which `-<TAB>x` is only 3 columns);
+#        #[doc = "..."] / #![doc = "..."] strings), by a coarse fail-closed rule (decision
+#        #39; no CommonMark list, quote or paragraph context is modelled). Doc lines are
+#        prepared as rustc and rustdoc prepare them (block comment margins, decoded string
+#        escapes, an escaped CR as a line break) and unindented by the smallest leading
+#        whitespace of any doc line in the shell (one less for #[doc] strings: rustdoc
+#        unindents an item's outer and inner docs together, by at least that much). Then,
+#        outside a ```text block, it refuses: any line indented 4+ columns (also a list
+#        continuation, a lazy paragraph continuation or a quoted paragraph continuation,
+#        which rustdoc may not read as code); any list or quote marker (`>`, `-` `*` `+`,
+#        `N.` `N)`) followed by 4+ columns or a tab; any fence other than ```text (or
+#        ~~~text); a ```text fence after a marker; any raw HTML block line (an HTML block
+#        can swallow a fence). A ```text block ends at its closing fence, at a line
+#        indented less than its opening fence, or at a line of the other doc form; a
+#        fence-like line indented 4+ inside it is refused. Authors: write doc examples as
+#        ```text and indent continuations by fewer than 4 columns;
 #      - #[doc = <anything but a string literal>], e.g. include_str!(..), concat!(..);
 #      - a block comment, string or attribute left open at the end of a file;
 #      - a source rustc compiles from outside the scanned files: #[path = ..] (also inside
-#        cfg_attr), an `include` token followed by `!` (also `include` ending a line), and
-#        any symlink under src-tauri/src;
+#        cfg_attr), the token `include` anywhere in code (include!, renamed by `use`,
+#        r#include; also an identifier named `include`, fail-closed), and any symlink
+#        under src-tauri/src;
 #   2. src-tauri/benches, src-tauri/examples, or [[bench]] / [[example]] in
 #      src-tauri/Cargo.toml: bench and example exes;
-#   3. a line-start `path =` key in src-tauri/Cargo.toml (a [lib] or [[bin]] target file
-#      the scan does not read; an inline dependency `{ path = .. }` is not at line start).
+#   3. a line-start `path` key (bare or quoted) under a [lib], [[bin]], [[test]], [[bench]]
+#      or [[example]] header in src-tauri/Cargo.toml (a target file the scan does not
+#      read); `path` in dependency tables and inline `{ path = .. }` pass.
 # Not caught (outside what a source scan can see): tests a proc macro generates from an
-# attribute with another name, doc text built at compile time other than via #[doc = ..],
-# and a target path set other than by a line-start `path` key (e.g. a dotted `lib.path`).
+# attribute with another name; doc text built at compile time other than via #[doc = ..];
+# a dependency's macro that expands to include!; a target path set other than by a
+# line-start `path` key under a target header (e.g. a root-level dotted `lib.path` or an
+# inline `bin = [{ path = .. }]`).
 # Host bash, find, sort, grep and awk; no toolchain.
 #
 # Usage: scripts/ci/shell-test-layout.sh [shell-dir]   (default: src-tauri)
@@ -89,10 +98,19 @@ hits="$(grep -nE '^[[:space:]]*\[\[[[:space:]]*(bench|example)[[:space:]]*\]\]' 
 [ $? -le 1 ] || cannot_run "grep failed on $shell/Cargo.toml"
 add "a bench or example target: its exe is not configured by build.rs" "$hits" "$shell/Cargo.toml:"
 
-# 3. Target paths: a lib or bin file elsewhere than the scanned src files.
-hits="$(grep -nE "^[[:space:]]*[\"']?path[\"']?[[:space:]]*=" "$shell/Cargo.toml")"
-[ $? -le 1 ] || cannot_run "grep failed on $shell/Cargo.toml"
-add "a target path: rustc compiles a file the guard does not scan; keep the default src/lib.rs and src/main.rs" "$hits" "$shell/Cargo.toml:"
+# 3. Target paths: a line-start `path` key (bare or quoted) under a [lib], [[bin]], [[test]],
+# [[bench]] or [[example]] header (spaces and quotes allowed inside the brackets). A line
+# counts as a header only when it is one, so a value line starting with `[` keeps the
+# table; dependency tables (`[dependencies.x]`, `[target.'cfg(..)'.dev-dependencies.x]`) pass.
+hits="$(LC_ALL=C awk '
+  BEGIN { key = "([A-Za-z0-9_-]+|\"[^\"]*\"|\047[^\047]*\047)"
+          hdr = "^[ \t]*\\[\\[?[ \t]*" key "([ \t]*\\.[ \t]*" key ")*[ \t]*\\]\\]?[ \t]*(#.*)?$" }
+  { sub(/\r$/, "") }
+  $0 ~ hdr { t = $0; sub(/#.*/, "", t); gsub(/[][ \t"\047]/, "", t)
+             target = (t == "lib" || t == "bin" || t == "test" || t == "bench" || t == "example"); next }
+  target && /^[ \t]*("path"|\047path\047|path)[ \t]*=/ { print FNR ":" $0 }
+' "$shell/Cargo.toml")" || cannot_run "awk failed on $shell/Cargo.toml"
+add "a target path under [lib], [[bin]], [[test]], [[bench]] or [[example]]: rustc compiles a file the guard does not scan; keep the default src/lib.rs, src/main.rs and tests/<name>.rs, without a path key" "$hits" "$shell/Cargo.toml:"
 
 if [ -n "$found" ]; then
   {
