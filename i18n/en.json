@@ -95,6 +95,7 @@
   "settings.partially_restored": "The settings were not saved, and some settings could not be restored to their previous values. Check the highlighted fields.",
   "settings.save": "Save",
   "settings.saved": "Settings saved.",
+  "settings.saved_with_warnings": "Review the warnings on this page.",
   "settings.speech_language.auto": "Detect automatically",
   "settings.tab.engine": "Engine",
   "settings.tab.general": "General",

@@ -17,7 +17,9 @@
   // sent them (no URL, scheme or host rule here) and kept in page state beside `saved`,
   // not in the Draft (the settings://changed echo of the save rebuilds the Draft). A
   // warning shows next to its field's control; a field with no control on the page is
-  // listed at form level by its label (L). A warning never blocks or changes a save.
+  // listed at form level by its label (L). The polite "Saved" status adds a one-line
+  // summary (`settings.saved_with_warnings`) when there is any. A warning never blocks or
+  // changes a save.
   import { onMount } from "svelte";
   import { page } from "$app/state";
   import { setLanguage, t, type MessageId } from "$lib/i18n";
@@ -122,6 +124,9 @@
     observer.observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: ["data-field"] });
     return () => observer.disconnect();
   });
+
+  /** The last Saved had a warning (field-level or form-level): the Saved status says so. */
+  const hasWarnings = $derived(Object.keys(warnings).length > 0);
 
   /** The warnings whose field has no control on the page, listed at form level (L). */
   const unrenderedWarnings = $derived(Object.entries(warnings).filter(([field]) => !renderedFields.includes(field)));
@@ -295,7 +300,11 @@
     <div class="actions">
       <button type="button" data-testid="settings-save" disabled={saving} onclick={save}>{t("settings.save")}</button>
       {#if saved}
-        <p role="status">{t("settings.saved")}</p>
+        <!-- Polite: a warning is not an alert; the summary names no field and no text (W). -->
+        <p role="status">
+          {t("settings.saved")}{#if hasWarnings}
+            {t("settings.saved_with_warnings")}{/if}
+        </p>
       {/if}
     </div>
 

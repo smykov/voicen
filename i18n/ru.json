@@ -95,6 +95,7 @@
   "settings.partially_restored": "Настройки не сохранены, и некоторые из них не удалось вернуть к прежним значениям. Проверьте выделенные поля.",
   "settings.save": "Сохранить",
   "settings.saved": "Настройки сохранены.",
+  "settings.saved_with_warnings": "Проверьте предупреждения на этой странице.",
   "settings.speech_language.auto": "Определять автоматически",
   "settings.tab.engine": "Движок",
   "settings.tab.general": "Общие",
