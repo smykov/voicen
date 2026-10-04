@@ -39,7 +39,13 @@ cargo's link-arg scopes are a closed set (cargo rust-1.99.0 `src/compiler/custom
       - a line-start `path` key (bare or quoted) under a `[lib]`, `[[bin]]`, `[[test]]`, `[[bench]]` or `[[example]]` header of `src-tauri/Cargo.toml` (spaces and quotes inside the brackets allowed). `path` in dependency tables (`[dependencies.x]`, `[target.'cfg(windows)'.dev-dependencies.x]`) and inline `{ path = … }` pass;
     - `src-tauri/benches`, `src-tauri/examples`, or `[[bench]]` / `[[example]]` in `src-tauri/Cargo.toml`;
     - in `src-tauri/Cargo.toml` (raw lines, with the same table-header tracking): no line `doctest = false` (spaces and a trailing comment allowed) in the `[lib]` table, or no `[lib]` table; any other line containing `doctest` that is not a full-line `#` comment (`true`, a quoted or dotted key, an inline `lib = { … }`, the key under another table); and `"""` or `'''` anywhere, because a multi-line string could fake a `[lib]` header for the line tracker;
-    - `--doc` or `rustdoc` in a `*.yml` / `*.yaml` file of `.github/workflows` (the check's second argument). A missing workflows dir is "cannot run"; an empty one passes.
+    - in `src-tauri/Cargo.toml`, every line the tracker could misread, so that it reads exactly TOML's lines and keys (T-038 review round 1, finding 1):
+      - a line that is not self-contained. Single-line basic strings (with `\"` and `\\` escapes) and literal strings (no escapes) are removed, then the comment; the `[`/`]` and `{`/`}` left must nest and close on the line, and no string may be left open. Otherwise an element of a multi-line array or inline table (`["lib"]`, `["dependencies"]`, `[1]`) would pose as a header: a fake `[lib]` with a fake pin, or the end of a target table before a `path` key. The message says "keep arrays and inline tables on one line";
+      - a backslash in a quoted key (a basic or literal string followed by `=` or `.`, also inside an inline table) or anywhere in a table header before its comment: an escape such as `"p\u0061th"` or `[["b\u0069n"]]` spells `path` or `bin` past the tracker;
+      - a line starting with `[` that the header pattern does not read (bare or quoted dotted keys in `[…]` or `[[…]]`): with every line self-contained it can only be a header, and the tracker must not stay in the previous table;
+    - `--doc` or `rustdoc` in a `*.yml` / `*.yaml` file of `.github/workflows` (the check's second argument), for every package, because a raw scan cannot tell which package a step selects (voicen-core's doctests run in `cargo test --workspace --exclude voicen`). A missing workflows dir is "cannot run"; an empty one passes.
+
+    Fail-closed false positives, on purpose: an array or inline table split over lines (for example the long `windows = { … features = [ … ] }` dependency line) is refused although TOML and cargo accept it, and so is a backslash in a quoted key that would be harmless. Keep arrays and inline tables on one line and keys without escapes.
 
     Not caught, because a raw scan cannot see them (each is loud on the Windows job, not silent):
     - tests that a proc macro generates from an attribute with another name;
@@ -52,7 +58,8 @@ cargo's link-arg scopes are a closed set (cargo rust-1.99.0 `src/compiler/custom
 - **Don't:**
   - add `#[cfg(test)]` modules or test attributes in `src-tauri/src`;
   - remove `doctest = false` from `[lib]` in `src-tauri/Cargo.toml`, or add another `doctest` key;
-  - pass `--doc` or run `rustdoc --test` for `voicen` (in a workflow, a script or an alias);
+  - pass `--doc` or run `rustdoc --test` for `voicen` (in a workflow, a script or an alias), or put `--doc` / `rustdoc` in any workflow step (the check refuses it for every package);
+  - split an array or inline table of `src-tauri/Cargo.toml` over lines, or write an escape in a quoted key or a table header;
   - emit the manifest with `cargo:rustc-link-arg` (it reaches the bin too and duplicates its `RT_MANIFEST`) or drop the `-tests` scope;
   - edit `windows-app-manifest.xml`, or upgrade tauri-build, without comparing the copy's elements and values with the new tauri-build's file;
   - upgrade tauri-build, tauri-winres or embed-resource without checking the shell's build-script output on the Windows runner (`target/*/build/voicen-*/output`). Every bins-only line there (`cargo:rustc-link-arg-bins=…`, `cargo:rustc-link-arg-bin=voicen=…`, and any output that moved from all targets to bins) must be mirrored to `cargo:rustc-link-arg-tests` in `build.rs`, or the integration tests silently miss it again. Today the only such output is the Common-Controls manifest;
