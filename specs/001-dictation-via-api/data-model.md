@@ -146,7 +146,7 @@ Rules (NFR-06, FR-026, FR-027):
 
 Retryable (creates a pending recording): every code from `InvalidApiKey` through `ClipboardUnavailable`.
 
-In code: `voicen_core::failure::FailureReason` with `code()` (the Code column without fields), `message_id()` and `message_params()` (`host`, `status`). Every transport failure is mapped by the one `failure::classify` (order in [contracts/openai-transcription.md](contracts/openai-transcription.md)); a reason is built only from the status, the classification flags and `host[:port]`, never from a `reqwest::Error`, a URL, a body or a key. T-040 has the first eight variants; `ClipboardUnavailable` comes with T-001, `MicrophoneUnavailable`/`HotkeyUnavailable` with T-042/T-006.
+In code: `voicen_core::failure::FailureReason` with `code()` (the Code column without fields), `message_id()` and `message_params()` (`host`, `status`; `reason` for `MicrophoneUnavailable`, the cause's `mic_reason.*` id, which the Rust `i18n::text` renders in the message's language). Every transport failure is mapped by the one `failure::classify` (order in [contracts/openai-transcription.md](contracts/openai-transcription.md)); a transport reason is built only from the status, the classification flags and `host[:port]`, never from a `reqwest::Error`, a URL, a body or a key. `MicrophoneUnavailable{cause}` is built only from the closed `recording::MicCause` set (`NoDevice`, `AccessDenied`, `Busy`, `Other`), never from the OS error text of a `CaptureError`. T-040 has the first eight variants; `ClipboardUnavailable` comes with T-001, `MicrophoneUnavailable`/`HotkeyUnavailable` with T-042/T-006.
 
 ## IndicatorState
 

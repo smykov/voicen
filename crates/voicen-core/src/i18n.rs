@@ -2,8 +2,13 @@
 //!
 //! The catalog lives at the repository root (`i18n/en.json`, `i18n/ru.json`,
 //! decision #13): two flat JSON maps of id -> text. This module is the only Rust
-//! code that parses, looks up and renders them; the UI (`src/lib/i18n`) follows the
-//! same rule, and both are pinned by the shared fixture `i18n/conformance.json`.
+//! code that parses, looks up and renders them. Lookup and rendering
+//! (`Catalog::text` / `render`) follow the same rule as the UI's `lookup + render`
+//! in `src/lib/i18n`; the shared fixture `i18n/conformance.json` pins that rule in
+//! both suites. The embedded [`text`] adds one Rust-only step on top, nested-id
+//! resolution (below): the fixture has no case for it and the UI's `t()` does not
+//! resolve nested ids, so params carrying a nested id render the same only in the
+//! shell (whether the UI mirrors it is T-006's decision).
 //!
 //! - Lookup: the text in the requested language if non-empty, else the English
 //!   text if non-empty, else the id itself.

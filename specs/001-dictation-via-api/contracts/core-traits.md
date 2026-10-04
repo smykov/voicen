@@ -152,7 +152,7 @@ pub const MESSAGE_DURATION: Duration;    // 3 s
 
 impl<C> RecordingController<C> {         // C: opaque press context, returned with the recording (T-006: StartWindow)
     pub fn press(&mut self, at: Instant, ctx: C) -> Press;        // Start(RecordingId) | Ignored (auto-repeat while recording)
-    pub fn release(&mut self, at: Instant) -> Release<C>;         // Stop(StopTicket<C>) | Discarded{id, held} | Ignored; idle on return
+    pub fn release(&mut self, at: Instant) -> Release<C>;         // Stop(StopTicket<C>) | Discarded{id, held} | Ignored; idle on return; .end(): Released | TooShort | None
     pub fn capture_failed(&mut self, id: RecordingId, err: CaptureError, at: Instant)
         -> Option<FailureReason>;                                 // live id: idle + MicrophoneUnavailable{cause}; stale id: None
     pub fn finish(&mut self, ticket: StopTicket<C>, audio: Result<AudioBuffer, CaptureError>, at: Instant)
@@ -169,6 +169,7 @@ pub enum MicCause { NoDevice, AccessDenied, Busy, Other }       // CaptureError 
 
 - `StopTicket` is not `Clone` and has a private constructor; `finish` consumes it. So one press yields at most one `FinishedRecording` (`end = Released`, `started_at` = press instant, `stopped_at` = release instant), and none for a hold under `MIN_HOLD` (measured with `saturating_duration_since`), a capture error, or a stale id. A press is accepted again as soon as `release` returns (FR-029).
 - `capture_failed` (live id) and `finish(Err)` show the `failure.microphone_unavailable` message for 3 s and set tray `Error`; the caller still gets the reason for its toast and event. `MicrophoneUnavailable` is not retryable.
+- A message lasts 3 s from the event that raised it. A message raised during a live recording (for example `finish(Err)` of the previous recording, FR-029) is not shown while the recording is on; after its release it is shown for the rest of its 3 s, and not at all if they have passed.
 - A job counts from `finish(Ok)` until `job_finished` for its id; an unknown or repeated id changes nothing. `Delivered` clears tray `Error` and shows its notice if any; `Notice` shows a message; `Failed` shows the reason's message and sets tray `Error`.
 - Tray priority `HotkeyError > Recording > Error > Idle`; overlay priority `Recording > Message > Processing (≥ 1 queued job) > Hidden`. A press drops the message; it is not shown again. No input sets `HotkeyError` yet (T-006 adds hotkey registration).
-- The controller emits no events: T-006/T-001 build `RecordingStarted`/`RecordingEnded` from the returned id, instants and `end`. T-009 (toggle, 10-minute maximum, Esc) and T-006 (device lost, suspend) add inputs and `RecordingEnd` variants to the same controller. The engine = none check stays in `settings::gate::dictation_gate`, which the shell calls before `press`.
+- The controller emits no events: T-006/T-001 build `RecordingStarted`/`RecordingEnded` from the returned id, instants and `end` (`Release::end()`: `TooShort` for a discard, the ticket's `Released` for a stop, the same value as `FinishedRecording::end`). T-009 (toggle, 10-minute maximum, Esc) and T-006 (device lost, suspend) add inputs and `RecordingEnd` variants to the same controller. The engine = none check stays in `settings::gate::dictation_gate`, which the shell calls before `press`.

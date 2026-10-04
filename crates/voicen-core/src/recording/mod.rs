@@ -13,6 +13,13 @@
 //! `finish` consumes the ticket. A hold under [`MIN_HOLD`], a capture error or a
 //! stale id yields none.
 //!
+//! The overlay message of a failure or notice lasts 3 s from the event that
+//! raised it ([`MESSAGE_DURATION`]). A message raised during a live recording
+//! (for example `finish(Err)` of the previous recording, FR-029) is not shown
+//! while the recording is on; after its release it is shown for the rest of its
+//! 3 s, and not at all if they have passed. A press drops the message (it is
+//! not shown again); a later failure or notice replaces it.
+//!
 //! The shell calls `settings::gate::dictation_gate` before [`press`]; the engine =
 //! none check is not repeated here.
 //!
@@ -38,10 +45,13 @@ pub const MIN_HOLD: Duration = Duration::from_millis(300);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RecordingId(u64);
 
-/// Why a recording ended. T-009 and T-006 add the other variants.
+/// Why a recording ended, the `end` of `RecordingEnded` (data-model "Recording").
+/// T-009 and T-006 add the other variants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecordingEnd {
+    /// Hold released after at least [`MIN_HOLD`].
     Released,
+    /// Hold released before [`MIN_HOLD`]: [`Release::Discarded`], nothing sent.
     TooShort,
 }
 
@@ -105,6 +115,19 @@ pub enum Release<C> {
     Ignored,
 }
 
+impl<C> Release<C> {
+    /// How the recording ended: the ticket's end for `Stop` (`Released`; the same
+    /// value comes back as [`FinishedRecording::end`]), `TooShort` for `Discarded`,
+    /// `None` for `Ignored` (no recording).
+    pub fn end(&self) -> Option<RecordingEnd> {
+        match self {
+            Release::Stop(ticket) => Some(ticket.end),
+            Release::Discarded { .. } => Some(RecordingEnd::TooShort),
+            Release::Ignored => None,
+        }
+    }
+}
+
 /// The right to finish one recording. Not `Clone`; built only by the controller.
 #[derive(Debug)]
 pub struct StopTicket<C> {
@@ -112,6 +135,7 @@ pub struct StopTicket<C> {
     ctx: C,
     started_at: Instant,
     stopped_at: Instant,
+    end: RecordingEnd,
 }
 
 impl<C> StopTicket<C> {
@@ -236,6 +260,7 @@ impl<C> RecordingController<C> {
             ctx: live.ctx,
             started_at: live.started_at,
             stopped_at: at,
+            end: RecordingEnd::Released,
         })
     }
 
@@ -273,6 +298,7 @@ impl<C> RecordingController<C> {
             ctx,
             started_at,
             stopped_at,
+            end,
         } = ticket;
         self.expire(at);
         match audio {
@@ -285,7 +311,7 @@ impl<C> RecordingController<C> {
                     ctx,
                     started_at,
                     stopped_at,
-                    end: RecordingEnd::Released,
+                    end,
                 })
             }
             Err(err) => {
@@ -1111,5 +1137,32 @@ mod tests {
             other => panic!("expected Discarded, got {other:?}"),
         }
         assert_eq!(c.indicator(), &idle());
+    }
+
+    #[test]
+    fn release_end_is_too_short_for_a_discard_and_released_for_a_stop() {
+        // The `end` T-006 puts into `RecordingEnded` comes from core for every
+        // release outcome (data-model "Recording": a hold under 0.3 s ends
+        // `TooShort`). Bite: `TooShort` produced nowhere, `Stop`'s end differing
+        // from the finished recording's, or an end for an ignored release.
+        let t0 = Instant::now();
+        let mut c = RecordingController::<Ctx>::new();
+        assert_eq!(c.release(t0).end(), None, "release without press");
+
+        start(&mut c, t0, "short");
+        let short = c.release(t0 + ms(299));
+        assert!(matches!(short, Release::Discarded { .. }), "{short:?}");
+        assert_eq!(short.end(), Some(RecordingEnd::TooShort));
+
+        start(&mut c, t0 + ms(1000), "kept");
+        let kept = c.release(t0 + ms(1300));
+        assert_eq!(kept.end(), Some(RecordingEnd::Released));
+        let Release::Stop(ticket) = kept else {
+            panic!("expected Stop, got {kept:?}");
+        };
+        match c.finish(ticket, Ok(audio()), t0 + ms(1400)) {
+            Ok(f) => assert_eq!(f.end(), RecordingEnd::Released),
+            Err(e) => panic!("finish: {e:?}"),
+        }
     }
 }
