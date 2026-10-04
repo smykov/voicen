@@ -20,4 +20,4 @@
 |---|---|---|---|
 | ci-toolchain | F-001, F-002 | 2 | T3 (make check: shell test layout; Windows job) |
 | guard-model | F-003 | 1 | T3 (fixtures: make check-shell-layout-fixtures) |
-| test-port-race | F-004 | 1 | T2 (`common::refused_addr()` probes at each use); no grep guard (decisions #53) |
+| test-port-race | F-004 | 1 | T1 (review only, via F-004 and decisions #53; `common::refused_addr()` probe only checks nothing listens on port 1, not the rule; no grep guard) |
