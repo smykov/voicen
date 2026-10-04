@@ -16,6 +16,16 @@ Entities from spec §Key Entities, with fields, validation and state transitions
 
 Validation (unit test): exactly 5 entries; unique ids and file names; exactly one recommended; all URLs share the pinned commit.
 
+Pinned values (T-016, `catalog::MODELS`): commit `5359861c739e955e79d9a303bcbc70fb988958b1` of `ggerganov/whisper.cpp`; sizes and SHA-256 from its LFS metadata (source: research R-6).
+
+| id | size_bytes | sha256 |
+|---|---|---|
+| `tiny` | 77 691 713 | `be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21` |
+| `base` | 147 951 465 | `60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe` |
+| `small` | 487 601 967 | `1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b` |
+| `medium-q5_0` | 539 212 467 | `19fea4b380c3a618ec4723c3eef2eb785ffba0d0538cf43f8f235e7b3b34220f` |
+| `large-v3-turbo-q5_0` | 574 041 195 | `394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2` |
+
 ## LocalModelState (per model, runtime)
 
 ```text
@@ -31,7 +41,7 @@ Downloaded ──delete refused (in use) / remove error──▶ Downloaded   (e
 
 - `Failed` is what spec FR-004 calls "shown as not downloaded with the reason": the UI renders it as not downloaded, with the reason and a Retry action; it is never selectable.
 - Persisted only as files on disk. `Downloading` and `Failed` live in memory and are lost on restart (a restart shows `NotDownloaded`; spec FR-008).
-- `Failed.reason`: `FailureReason` code + message key (001's type, extended with `download_interrupted`, `checksum_mismatch`, `not_enough_disk_space{needed}`, `source_unreachable{host}`, `disk_error`, `http_status{code}`).
+- `Failed.reason`: `DownloadFailure` (`voicen_core::local_models::download`; a separate type, not 001's `FailureReason`, decision #49), with the wire codes `download_interrupted`, `checksum_mismatch`, `not_enough_disk_space{needed}`, `source_unreachable{host}` (`host[:port]` only), `disk_error`, `http_status{code}` and message ids `download.*` (en/ru). It never carries the URL.
 - A file with the final name but the wrong size is treated as not downloaded (spec edge case) and is not deleted automatically (the user can re-download, which overwrites it via rename).
 
 ## Download (runtime, at most one)
@@ -42,7 +52,7 @@ Downloaded ──delete refused (in use) / remove error──▶ Downloaded   (e
 | `received` | `u64` | monotonic |
 | `total` | `u64` | catalog size |
 | `cancel` | cancellation token | |
-| `last_data_at` | instant | no-data timeout 30 s (`timeouts::DOWNLOAD_NO_DATA`) |
+| no-data timeout | `Duration` | `Timeouts::download_no_data` (30 s): reqwest's per-read timeout (`ClientBuilder::timeout`), restarted by each read; also bounds the wait for the response headers. No total timeout. |
 
 ## LoadedModel / ModelResidency (runtime, at most one loaded)
 

@@ -183,7 +183,7 @@ impl Engine for OpenAiCompatibleEngine {
 /// The classification flags of a send error: reqwest's flags and the first
 /// `io::ErrorKind` in the source chain. Nothing of the error's text is kept (its
 /// `Display` contains the URL, query included).
-fn send_error(e: &reqwest::Error) -> TransportError {
+pub(crate) fn send_error(e: &reqwest::Error) -> TransportError {
     if e.is_builder() {
         return TransportError::Setup;
     }
@@ -207,7 +207,7 @@ fn send_error(e: &reqwest::Error) -> TransportError {
 /// A body read error: the blocking reader wraps the `reqwest::Error` in an
 /// `io::Error`; its timeout flag tells a stall past the deadline from a reset or an
 /// early close.
-fn body_error(e: &std::io::Error) -> TransportError {
+pub(crate) fn body_error(e: &std::io::Error) -> TransportError {
     let timeout = e.kind() == std::io::ErrorKind::TimedOut
         || e.get_ref()
             .and_then(|inner| inner.downcast_ref::<reqwest::Error>())

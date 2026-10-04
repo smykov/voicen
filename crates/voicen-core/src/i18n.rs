@@ -143,6 +143,21 @@ messages! {
     NOTICE_COPIED = "notice.copied",
     /// Delivered but not pasted (`DeliveryResult::CopyManual`, T-001).
     NOTICE_COPIED_PASTE_MANUALLY = "notice.copied_paste_manually",
+    /// `DownloadFailure::DownloadInterrupted` (body cut, connection dropped, or no
+    /// data for `Timeouts::download_no_data`; T-016).
+    DOWNLOAD_INTERRUPTED = "download.interrupted",
+    /// `DownloadFailure::ChecksumMismatch` (all bytes arrived, SHA-256 not the
+    /// pinned one).
+    DOWNLOAD_CHECKSUM_MISMATCH = "download.checksum_mismatch",
+    /// `DownloadFailure::NotEnoughDiskSpace`; placeholder `{needed}` = bytes.
+    DOWNLOAD_NOT_ENOUGH_DISK_SPACE = "download.not_enough_disk_space",
+    /// `DownloadFailure::SourceUnreachable`; placeholder `{host}` = `host[:port]`.
+    DOWNLOAD_SOURCE_UNREACHABLE = "download.source_unreachable",
+    /// `DownloadFailure::DiskError` (the `.part` file could not be created,
+    /// written or renamed).
+    DOWNLOAD_DISK_ERROR = "download.disk_error",
+    /// `DownloadFailure::HttpStatus`; placeholder `{code}` = the HTTP status.
+    DOWNLOAD_HTTP_STATUS = "download.http_status",
     ;
     nested:
     /// `MicCause::NoDevice`.

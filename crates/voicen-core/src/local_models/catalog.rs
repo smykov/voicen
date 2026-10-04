@@ -28,15 +28,18 @@ impl ModelId {
 
     /// `tiny` | `base` | `small` | `medium-q5_0` | `large-v3-turbo-q5_0`.
     pub fn as_str(self) -> &'static str {
-        // Skeleton (T-016 red tests): not implemented yet.
-        todo!("T-016: ModelId::as_str")
+        match self {
+            ModelId::Tiny => "tiny",
+            ModelId::Base => "base",
+            ModelId::Small => "small",
+            ModelId::MediumQ5_0 => "medium-q5_0",
+            ModelId::LargeV3TurboQ5_0 => "large-v3-turbo-q5_0",
+        }
     }
 
     /// The inverse of [`as_str`](Self::as_str); any other string is `None`.
     pub fn parse(s: &str) -> Option<ModelId> {
-        // Skeleton (T-016 red tests): not implemented yet.
-        let _ = s;
-        todo!("T-016: ModelId::parse")
+        ModelId::ALL.into_iter().find(|id| id.as_str() == s)
     }
 }
 
@@ -59,9 +62,59 @@ pub struct CatalogEntry {
 }
 
 /// The production catalog, in [`ModelId::ALL`] order.
-// Skeleton (T-016 red tests): the pinned commit, sizes and SHA-256 values are read
-// from the Hugging Face LFS metadata by the implementing task (R-6, decision #49).
-pub const MODELS: &[CatalogEntry] = &[];
+///
+/// Source (R-6, decision #49): the Git LFS metadata of the public Hugging Face
+/// repository `ggerganov/whisper.cpp` at commit
+/// `5359861c739e955e79d9a303bcbc70fb988958b1` (the `main` revision on 2026-10-04,
+/// last modified 2024-10-29), read on 2026-10-04 from
+/// `https://huggingface.co/api/models/ggerganov/whisper.cpp/tree/<commit>`
+/// (`lfs.oid`, `lfs.size`) and cross-checked against each LFS pointer
+/// (`https://huggingface.co/ggerganov/whisper.cpp/raw/<commit>/<file>`: `oid sha256:`,
+/// `size`); for `tiny` also against the `X-Linked-Size` / `X-Linked-ETag` headers of
+/// the resolve URL. Metadata only: the files were not downloaded (decision #49;
+/// T-017's CI fetch of `tiny` through this downloader checks the hash end to end).
+pub const MODELS: &[CatalogEntry] = &[
+    CatalogEntry {
+        id: ModelId::Tiny,
+        file_name: "ggml-tiny.bin",
+        url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-tiny.bin",
+        size_bytes: 77_691_713,
+        sha256: "be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21",
+        recommended: false,
+    },
+    CatalogEntry {
+        id: ModelId::Base,
+        file_name: "ggml-base.bin",
+        url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-base.bin",
+        size_bytes: 147_951_465,
+        sha256: "60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe",
+        recommended: false,
+    },
+    CatalogEntry {
+        id: ModelId::Small,
+        file_name: "ggml-small.bin",
+        url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-small.bin",
+        size_bytes: 487_601_967,
+        sha256: "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b",
+        recommended: true,
+    },
+    CatalogEntry {
+        id: ModelId::MediumQ5_0,
+        file_name: "ggml-medium-q5_0.bin",
+        url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-medium-q5_0.bin",
+        size_bytes: 539_212_467,
+        sha256: "19fea4b380c3a618ec4723c3eef2eb785ffba0d0538cf43f8f235e7b3b34220f",
+        recommended: false,
+    },
+    CatalogEntry {
+        id: ModelId::LargeV3TurboQ5_0,
+        file_name: "ggml-large-v3-turbo-q5_0.bin",
+        url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-large-v3-turbo-q5_0.bin",
+        size_bytes: 574_041_195,
+        sha256: "394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2",
+        recommended: false,
+    },
+];
 
 #[cfg(test)]
 mod tests {

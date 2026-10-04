@@ -22,7 +22,7 @@ Note: the docs tool (context7) was unavailable during planning, so exact whisper
 
 ## R-3 Timeouts
 
-- **Decision**: All values come from 001's shared timeouts module (req FR-24; 001 spec FR-018; architecture "timeouts resolved in voicen-core"). This feature adds two named values there: `LOCAL_SERVER_TRANSCRIPTION = 60 s` (req FR-24) and `DOWNLOAD_NO_DATA = 30 s` (spec Clarification 5). Download uses `CONNECT = 5 s` and no total timeout (large files on slow links); the no-data timeout is a per-chunk `tokio::time::timeout` around each read. Built-in engine: no timeout (requirements define none; Findings for the owner).
+- **Decision**: All values come from 001's shared timeouts module (req FR-24; 001 spec FR-018; architecture "timeouts resolved in voicen-core"). This feature adds two named values there: `LOCAL_SERVER_TRANSCRIPTION = 60 s` (req FR-24) and `DOWNLOAD_NO_DATA = 30 s` (spec Clarification 5). Download uses `CONNECT = 5 s` and no total timeout (large files on slow links); the no-data timeout is a per-chunk `tokio::time::timeout` around each read. *Superseded by decision #49 (T-016)*: the downloader is synchronous (decisions #22, #42), so the no-data timeout is reqwest's blocking per-read timeout, `ClientBuilder::timeout(Timeouts::download_no_data)`, which also bounds the wait for the headers; never `RequestBuilder::timeout`, which is a total timeout. The values are fields of the one `Timeouts` struct. Built-in engine: no timeout (requirements define none; Findings for the owner).
 - **Testability**: the timeouts struct is injected into the downloader and the client so tests use 100 ms values against a mock server that stalls.
 
 ## R-4 Model residency and the idle timer
@@ -43,6 +43,7 @@ Note: the docs tool (context7) was unavailable during planning, so exact whisper
 - **How the values are obtained**: in the implementing task, from the Hugging Face repository's LFS metadata at the chosen commit (the LFS pointer's `oid sha256` and `size`), then cross-checked by downloading each file once and hashing it. The values are written into the code by hand with the commit in a comment; a core test asserts the table shape (five entries, unique ids, 64-hex hashes, exactly one recommended, all URLs share the pinned commit).
 - **Rationale**: pinning a commit keeps hashes valid if upstream files change (spec Assumptions).
 - **Not done here**: the actual hash values — they must not be guessed.
+- **Done in T-016 (decision #49)**: pinned commit `5359861c739e955e79d9a303bcbc70fb988958b1` (the `main` revision of `ggerganov/whisper.cpp` on 2026-10-04, last modified 2024-10-29). Sizes and SHA-256 values were read on 2026-10-04 from `https://huggingface.co/api/models/ggerganov/whisper.cpp/tree/<commit>` (`lfs.oid`, `lfs.size`). Each was cross-checked against its LFS pointer at `https://huggingface.co/ggerganov/whisper.cpp/raw/<commit>/<file>`. For `tiny` they were also checked against the `X-Linked-Size` / `X-Linked-ETag` headers of the resolve URL. The values are in data-model "LocalModelSpec" and `crates/voicen-core/src/local_models/catalog.rs`. Metadata only, per decision #49: the cross-check by downloading each file is replaced by T-017's CI fetch of `tiny` through the app's own downloader.
 
 ## R-7 Local-server engine = 001's client with another config
 

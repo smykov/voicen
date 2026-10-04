@@ -1,6 +1,12 @@
 {
   "app.build_info": "Voicen {version} ({commit})",
   "app.build_info_error": "Cannot read build info: {reason}",
+  "download.checksum_mismatch": "The downloaded file is damaged (checksum mismatch). Try again.",
+  "download.disk_error": "The model file could not be written to the disk.",
+  "download.http_status": "The download failed (HTTP {code}).",
+  "download.interrupted": "The download was interrupted. Check the connection and try again.",
+  "download.not_enough_disk_space": "Not enough free disk space. The model needs {needed} bytes.",
+  "download.source_unreachable": "Cannot reach {host}",
   "error.autostart.failed": "Voicen could not change the Windows startup setting. Nothing was saved.",
   "error.history.size_range": "Enter a whole number from 1 to 100.",
   "error.hotkey.esc_reserved": "Esc is reserved for cancelling a recording. Choose another key.",

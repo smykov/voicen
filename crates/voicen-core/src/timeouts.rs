@@ -35,9 +35,7 @@ impl Default for Timeouts {
             local_server: Duration::from_secs(60),
             post_processing: Duration::from_secs(15),
             builtin: Duration::from_secs(120),
-            // Skeleton (T-016 red tests): the production value is set by the
-            // implementation (test `download_no_data_default_is_30s`).
-            download_no_data: Duration::ZERO,
+            download_no_data: Duration::from_secs(30),
         }
     }
 }

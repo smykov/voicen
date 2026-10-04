@@ -1,6 +1,12 @@
 {
   "app.build_info": "Voicen {version} ({commit})",
   "app.build_info_error": "Не удалось прочитать сведения о сборке: {reason}",
+  "download.checksum_mismatch": "Скачанный файл повреждён (контрольная сумма не совпадает). Попробуйте снова.",
+  "download.disk_error": "Не удалось записать файл модели на диск.",
+  "download.http_status": "Не удалось скачать модель (HTTP {code}).",
+  "download.interrupted": "Загрузка прервалась. Проверьте подключение и попробуйте снова.",
+  "download.not_enough_disk_space": "Недостаточно места на диске. Для модели нужно {needed} байт.",
+  "download.source_unreachable": "Не удаётся подключиться к {host}",
   "error.autostart.failed": "Не удалось изменить запуск вместе с Windows. Ничего не сохранено.",
   "error.history.size_range": "Введите целое число от 1 до 100.",
   "error.hotkey.esc_reserved": "Esc зарезервирована для отмены записи. Выберите другую клавишу.",

@@ -25,8 +25,9 @@ Guarantees: no panics on bad input (errors are `EngineError::Load(reason)` / `En
 pub struct ModelStore { /* models dir, catalog */ }
 // implements 004's `DownloadedModels { is_downloaded(id), list() }` (trait defined by 004; decisions #21)
 impl ModelStore {
-    pub fn new(models_dir: PathBuf) -> Self;            // dir from the shell's single data-dir resolver
-    pub fn cleanup_at_start(&self) -> io::Result<()>;   // deletes *.part
+    pub fn new(models_dir: PathBuf, catalog: &'static [CatalogEntry]) -> Self; // dir from the shell's single data-dir resolver;
+                                                        // catalog = `catalog::MODELS` in production, a test entry in tests (T-016)
+    pub fn cleanup_at_start(&self) -> io::Result<()>;   // deletes every *.part (all tried, first error returned); missing dir = Ok
     pub fn states(&self) -> Vec<(ModelId, LocalModelState)>; // disk-derived: Downloaded iff final file with catalog size
     pub fn path_if_downloaded(&self, id: ModelId) -> Option<PathBuf>;
     pub fn delete(&self, id: ModelId, residency: &ModelResidency, settings: &SettingsService /* 004 */)
@@ -44,18 +45,31 @@ pub trait DiskSpace: Send + Sync { fn available_bytes(&self, dir: &Path) -> io::
 
 pub enum DownloadEvent { Progress { id: ModelId, received: u64, total: u64 },
                          Finished { id: ModelId },
-                         Failed { id: ModelId, reason: 001::FailureReason },
+                         Failed { id: ModelId, reason: DownloadFailure },
                          Cancelled { id: ModelId } }
 
-pub struct Downloader { /* http client, timeouts, disk probe, store */ }
+// Not 001's `FailureReason` (decision #49): its `retryable` is transcription semantics.
+// Codes (contracts/ipc.md) via `code()`, en/ru text via `message_id()` + `message_params()`
+// (`download.*` ids); never carries the URL, a reqwest error or OS text.
+pub enum DownloadFailure { DownloadInterrupted,              // download_interrupted (cut body, drop, no data for download_no_data)
+                           ChecksumMismatch,                 // checksum_mismatch (also a body longer than the catalog size)
+                           NotEnoughDiskSpace { needed: u64 }, // not_enough_disk_space{needed}
+                           SourceUnreachable { host: String }, // source_unreachable{host}: host[:port] only
+                           DiskError,                        // disk_error
+                           HttpStatus { code: u16 } }        // http_status{code}
+
+pub struct Downloader { /* store, disk probe, timeouts, one active slot */ }
 impl Downloader {
+    pub fn new(store: Arc<ModelStore>, disk: Arc<dyn DiskSpace>, timeouts: Timeouts) -> Self;
     pub fn start(&self, id: ModelId, events: impl Fn(DownloadEvent) + Send + 'static)
-        -> Result<(), DownloadError>;                   // DownloadError::{Busy, AlreadyDownloaded, NotEnoughDiskSpace{needed}}
+        -> Result<(), DownloadError>;   // DownloadError::{Busy, AlreadyDownloaded, NotEnoughDiskSpace{needed},
+                                        //   NotInCatalog, CannotStart}; a refusal sends no request, emits no event
     pub fn cancel(&self, id: ModelId) -> bool;
 }
+pub struct ProgressThrottle;            // should_emit(now: Instant): first chunk at once, then ≥ 250 ms apart
 ```
 
-Guarantees: progress ≥ 1/s while data arrives, ≤ 4/s; final file appears only after size and SHA-256 match (atomic rename); every non-success path deletes `.part`; Retry is `start` again.
+Guarantees: synchronous — the download runs on its own std thread with blocking reqwest, no tokio (decisions #22, #42); the no-data timeout is `ClientBuilder::timeout(download_no_data)` (each body read and the header wait) plus `connect_timeout(connect)`, never a total timeout; progress ≥ 1/s while data arrives, ≤ 4/s; final file appears only after the byte count equals the catalog size and the SHA-256 matches (rename of `<file>.part`); every other end closes and deletes `.part` before its end event, and the active slot is cleared before the end event; a cancel takes effect when the current read returns (≤ `download_no_data`) and ends `Cancelled`, not `Failed`; disk check = catalog size + 1 %, a probe error lets the download proceed; Retry is `start` again.
 
 ## ModelResidency
 
@@ -99,9 +113,11 @@ Required of 001's client: optional model (omit the form field), optional key (om
 
 ## Timeouts (shared module, owned by 001, extended here)
 
+Implemented as fields of 001's one `voicen_core::timeouts::Timeouts` struct (`Timeouts::default()` holds the production values), not as consts: `connect`, `local_server`, `download_no_data` (T-016, decision #49).
+
 ```rust
-pub const CONNECT: Duration = 5 s;                       // req FR-24
-pub const LOCAL_SERVER_TRANSCRIPTION: Duration = 60 s;   // req FR-24
-pub const DOWNLOAD_NO_DATA: Duration = 30 s;             // spec Clarification 5
+pub const CONNECT: Duration = 5 s;                       // req FR-24 — `Timeouts::connect`
+pub const LOCAL_SERVER_TRANSCRIPTION: Duration = 60 s;   // req FR-24 — `Timeouts::local_server`
+pub const DOWNLOAD_NO_DATA: Duration = 30 s;             // spec Clarification 5 — `Timeouts::download_no_data` (per read)
 pub const MODEL_IDLE_UNLOAD: Duration = 600 s;           // req NFR-03
 ```

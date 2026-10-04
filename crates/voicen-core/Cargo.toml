@@ -19,6 +19,8 @@ reqwest = { version = "0.13", default-features = false, features = ["blocking", 
 # Capture rate -> 16 kHz resampling (T-040; rubato 5 needs Rust 1.87, decision #44).
 rubato = "5"
 thiserror = "2"
+# Streamed SHA-256 of a downloaded model (T-016; consented in decision #50).
+sha2 = "0.10"
 
 [features]
 # Public test fakes (FakeCredentialStore, FakeHotkeyRegistrar, FakeDownloadedModels,
