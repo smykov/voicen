@@ -1,5 +1,6 @@
 //! T-047 (decision #53): [`refused_addr`] can never be handed to another socket
-//! of the test process, and nothing listens on it.
+//! of the test process, and nothing listens on it. T-048 (decision #56): the
+//! deadlines of a refused case, [`refused_timeouts`], leave the refusal room.
 //!
 //! Not a module of `tests/common`: each binary that calls [`refused_addr`]
 //! (`tests/openai_client.rs`, `tests/api_pipeline.rs`) includes this file with
@@ -11,9 +12,9 @@
 
 use std::io::ErrorKind;
 use std::net::{Ipv4Addr, TcpStream};
-use std::time::Duration;
 
-use crate::common::refused_addr;
+use crate::common::{refused_addr, refused_timeouts, REFUSAL_BUDGET};
+use voicen_core::timeouts::Timeouts;
 
 /// Linux: the range `bind(0)` and `connect()` pick local ports from.
 const PORT_RANGE: &str = "/proc/sys/net/ipv4/ip_local_port_range";
@@ -55,11 +56,12 @@ fn refused_addr_port_is_below_the_ephemeral_range() {
 
 #[test]
 fn refused_addr_is_refused_by_a_connect_probe() {
-    // Nothing listens there: a plain connect is refused at once, not accepted and
-    // not timed out. Bite: a held listener's address, an unroutable address
-    // (TimedOut), a non-loopback address.
+    // Nothing listens there: a plain connect is refused, not accepted and not
+    // timed out (immediately on Linux, after ~2.17 s on windows-latest; T-048).
+    // Bite: a held listener's address, an unroutable address (TimedOut), a
+    // non-loopback address.
     let addr = refused_addr();
-    match TcpStream::connect_timeout(&addr, Duration::from_secs(5)) {
+    match TcpStream::connect_timeout(&addr, REFUSAL_BUDGET) {
         Ok(_) => panic!("{addr}: something listens there"),
         Err(e) => assert_eq!(e.kind(), ErrorKind::ConnectionRefused, "{addr}: {e}"),
     }
@@ -71,4 +73,36 @@ fn refused_addr_is_ipv4_loopback() {
     // request must never leave the machine. Bite: 0.0.0.0, [::1], a LAN address.
     let addr = refused_addr();
     assert_eq!(addr.ip(), Ipv4Addr::LOCALHOST, "{addr}");
+}
+
+#[test]
+fn refused_timeouts_leave_the_refusal_room_on_every_deadline() {
+    // T-048 (decision #56): on a refused path the refusal, not a timer, must end
+    // the connect. The connect limit is the whole budget, which `refused_addr()`
+    // checks is twice the measured refusal time; every whole-request and no-data
+    // deadline is twice that again, so it cannot fire before the connect ends.
+    // The destructuring is exhaustive on purpose: a new deadline in `Timeouts`
+    // does not compile here until it is sized for the refusal. Bite: any of them
+    // left at a test value below the budget (the leak test's 300 ms total, the
+    // download harness's 2 s connect / no-data), or the probe budget not tied to
+    // these deadlines.
+    let Timeouts {
+        connect,
+        api_transcription,
+        local_server,
+        post_processing,
+        builtin,
+        download_no_data,
+    } = refused_timeouts();
+    assert_eq!(connect, REFUSAL_BUDGET, "connect");
+    for (name, total) in [
+        ("api_transcription", api_transcription),
+        ("local_server", local_server),
+        ("post_processing", post_processing),
+        ("download_no_data", download_no_data),
+    ] {
+        assert_eq!(total, 2 * REFUSAL_BUDGET, "{name}");
+    }
+    // Not a network deadline: whisper.cpp runs in-process.
+    assert_eq!(builtin, Timeouts::default().builtin, "builtin");
 }

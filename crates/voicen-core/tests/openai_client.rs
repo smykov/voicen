@@ -15,7 +15,7 @@ use std::io::{Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::time::{Duration, Instant};
 
-use common::refused_addr;
+use common::{refused_addr, refused_timeouts};
 use serde_json::json;
 use voicen_core::audio::{wav, AudioBuffer};
 use voicen_core::engine::openai::OpenAiCompatibleEngine;
@@ -54,6 +54,15 @@ fn req(language: Option<&str>) -> TranscribeRequest {
     TranscribeRequest {
         language: language.map(str::to_string),
         timeouts: timeouts(),
+    }
+}
+
+/// A request for a refused address: deadlines that let the refusal itself end
+/// the connect, also on Windows (~2.17 s there; T-048, decision #56).
+fn req_refused() -> TranscribeRequest {
+    TranscribeRequest {
+        language: None,
+        timeouts: refused_timeouts(),
     }
 }
 
@@ -469,10 +478,12 @@ async fn delay_past_ms_timeout_is_timeout() {
 fn refused_loopback_port_is_cannot_reach_host_port() {
     // Connection refused -> CannotReach with the base URL's host:port.
     // Bite: NetworkUnavailable for a refused port, the whole URL as `host`.
+    // `req_refused()`: with the 2 s connect of `req(None)` the connect timeout,
+    // not the refusal, ended this connect on Windows (T-048).
     let addr = refused_addr();
     let got = transcribe(
         api_engine(&format!("http://{addr}/v1"), Some(KEY)),
-        req(None),
+        req_refused(),
     );
     assert_eq!(
         got,
@@ -662,7 +673,7 @@ async fn no_failure_contains_query_key_or_transcript() {
             &format!("http://{addr}/v1?api-version={QUERY_SECRET}"),
             Some(KEY),
         ),
-        req(None),
+        req_refused(),
     );
     outcomes.push((
         "refused".to_string(),

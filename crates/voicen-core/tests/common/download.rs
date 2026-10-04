@@ -164,12 +164,23 @@ pub fn timeouts(no_data: Duration) -> Timeouts {
 
 /// A models dir (created) with `entries`, a disk with plenty of room.
 pub fn fixture_with(entries: Vec<CatalogEntry>, disk: Arc<FakeDisk>, no_data: Duration) -> Fixture {
+    fixture_with_timeouts(entries, disk, timeouts(no_data))
+}
+
+/// [`fixture_with`] under the given deadlines. A refused-port test passes
+/// `super::refused_timeouts()`: the 2 s connect and no-data of [`timeouts`] are
+/// below a refused connect's ~2.17 s on windows-latest (T-048).
+pub fn fixture_with_timeouts(
+    entries: Vec<CatalogEntry>,
+    disk: Arc<FakeDisk>,
+    timeouts: Timeouts,
+) -> Fixture {
     let tmp = TempDir::new();
     let models = tmp.path().join("models");
     std::fs::create_dir(&models).expect("create models dir");
     let store = Arc::new(ModelStore::new(models.clone(), catalog(entries)));
     let probe: Arc<dyn DiskSpace> = disk.clone();
-    let dl = Downloader::new(Arc::clone(&store), probe, timeouts(no_data));
+    let dl = Downloader::new(Arc::clone(&store), probe, timeouts);
     Fixture {
         _tmp: tmp,
         models,

@@ -15,7 +15,7 @@ mod refused_addr_tests;
 use std::sync::Arc;
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
-use common::refused_addr;
+use common::{refused_addr, refused_timeouts, REFUSAL_BUDGET};
 use serde_json::json;
 use voicen_core::audio::{wav, AudioBuffer};
 use voicen_core::autostart::FakeAutostart;
@@ -752,7 +752,17 @@ fn refused_host_is_cannot_reach() {
     // after the RST; CI run 37183609259). Bite: a wait for the connect timeout or
     // the total, a sleep/backoff of ~4 s before failing, and on Windows a second
     // connect attempt (~2 x 2.1 s).
+    // The bound stays tied to the production connect timeout, not to
+    // REFUSAL_BUDGET (equal today, 5 s), so "a wait for the connect timeout" keeps
+    // biting if the test budget ever grows. It must still leave room for the one
+    // refusal that `refused_addr()` accepted (within REFUSAL_BUDGET / 2; T-048).
     let at_once = Timeouts::default().connect - Duration::from_secs(1);
+    assert!(
+        REFUSAL_BUDGET / 2 < at_once,
+        "the bound {at_once:?} leaves no room for a refusal the probe accepts \
+         (up to {:?})",
+        REFUSAL_BUDGET / 2
+    );
     assert!(took < at_once, "took {took:?}, limit {at_once:?}");
     assert!(report.pending.is_some(), "{report:?}");
     assert_eq!(h.clipboard.texts(), Vec::<String>::new());
@@ -1022,15 +1032,21 @@ async fn no_event_or_failure_carries_key_query_or_transcript() {
         api_transcription: Duration::from_millis(300),
         ..Timeouts::default()
     };
+    // The refused scenario must not run under `ms`: on windows-latest the refusal
+    // takes ~2.17 s, so the 300 ms total would fire first and end it `Timeout`
+    // (T-048, CI run 37204170764). The "timeout" scenario keeps `ms` against the
+    // slow server.
+    let refused_t = refused_timeouts();
 
-    // (label, base URL, auto_paste, clipboard fails, expected end)
-    let scenarios: Vec<(&str, String, bool, bool, JobEnd)> = vec![
+    // (label, base URL, auto_paste, clipboard fails, expected end, timeouts)
+    let scenarios: Vec<(&str, String, bool, bool, JobEnd, Timeouts)> = vec![
         (
             "pasted",
             with_query(&base(&ok)),
             true,
             false,
             JobEnd::Delivered { notice: None },
+            ms,
         ),
         (
             "copied only",
@@ -1040,6 +1056,7 @@ async fn no_event_or_failure_carries_key_query_or_transcript() {
             JobEnd::Delivered {
                 notice: Some(i18n::NOTICE_COPIED),
             },
+            ms,
         ),
         (
             "clipboard fails",
@@ -1047,6 +1064,7 @@ async fn no_event_or_failure_carries_key_query_or_transcript() {
             true,
             true,
             JobEnd::Failed(FailureReason::ClipboardUnavailable),
+            ms,
         ),
         (
             "401",
@@ -1054,6 +1072,7 @@ async fn no_event_or_failure_carries_key_query_or_transcript() {
             true,
             false,
             JobEnd::Failed(FailureReason::InvalidApiKey),
+            ms,
         ),
         (
             "500",
@@ -1061,6 +1080,7 @@ async fn no_event_or_failure_carries_key_query_or_transcript() {
             true,
             false,
             JobEnd::Failed(FailureReason::ServerError { status: 500 }),
+            ms,
         ),
         (
             "bad body",
@@ -1068,6 +1088,7 @@ async fn no_event_or_failure_carries_key_query_or_transcript() {
             true,
             false,
             JobEnd::Failed(FailureReason::UnexpectedResponse),
+            ms,
         ),
         (
             "timeout",
@@ -1075,6 +1096,7 @@ async fn no_event_or_failure_carries_key_query_or_transcript() {
             true,
             false,
             JobEnd::Failed(FailureReason::Timeout),
+            ms,
         ),
         (
             "refused",
@@ -1087,14 +1109,15 @@ async fn no_event_or_failure_carries_key_query_or_transcript() {
                     .trim_end_matches("/v1")
                     .to_string(),
             }),
+            refused_t,
         ),
     ];
 
     let mut texts: Vec<String> = Vec::new();
     let mut ends = Vec::new();
     let mut clipboard_texts = Vec::new();
-    for (label, base_url, auto_paste, clipboard_fails, want) in scenarios {
-        let mut h = harness_with(energy_gate(), Some(ms), creds_with_key());
+    for (label, base_url, auto_paste, clipboard_fails, want, t) in scenarios {
+        let mut h = harness_with(energy_gate(), Some(t), creds_with_key());
         h.clipboard.set_fail(clipboard_fails);
         let mut s = api_settings(&base_url);
         s.auto_paste = auto_paste;

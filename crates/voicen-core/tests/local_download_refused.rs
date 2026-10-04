@@ -19,10 +19,9 @@
 mod common;
 
 use std::net::TcpListener;
-use std::time::Duration;
 
-use common::download::{assert_no_url_in, assert_retry_succeeds, fixture_with, FILE};
-use common::{entry, url_for, FakeDisk, Server, NEEDED};
+use common::download::{assert_no_url_in, assert_retry_succeeds, fixture_with_timeouts, FILE};
+use common::{entry, refused_timeouts, url_for, FakeDisk, Server, NEEDED};
 use voicen_core::local_models::catalog::ModelId;
 use voicen_core::local_models::download::{DownloadEvent, DownloadFailure};
 
@@ -37,11 +36,15 @@ fn refused_port() -> u16 {
 fn refused_port_fails_source_unreachable_with_host_port_then_retry_succeeds() {
     // Nothing listens; then a server comes up on the same port. Bite: another
     // reason, the host without the port, the whole URL (path, query) in the reason.
+    // `refused_timeouts()`: a refused connect takes ~2.17 s on windows-latest, so
+    // the harness's 2 s connect and no-data (a blocking whole-send deadline, set
+    // first) would end it `DownloadInterrupted` there (T-048). Its connect probe
+    // (`refused_addr()`) is not run here: this process binds no other port.
     let port = refused_port();
-    let f = fixture_with(
+    let f = fixture_with_timeouts(
         vec![entry(ModelId::Base, FILE, &url_for(port, FILE))],
         FakeDisk::with_available(10 * NEEDED),
-        Duration::from_secs(2),
+        refused_timeouts(),
     );
     let mut ev = f.start(ModelId::Base).expect("start");
     let end = ev.wait_end();
