@@ -624,4 +624,107 @@ mod tests {
             "MESSAGE_IDS not in i18n/*.json: {missing:?}"
         );
     }
+
+    // ---- T-004: every refusal reaches the user in the user's language (U2) --------
+
+    /// Every `ErrorCode`, once. The match in [`every_error_code_has_catalog_text`]
+    /// has no wildcard, so a variant added later (T-010, T-014, T-020, T-021) does
+    /// not compile until it is listed here, and then the test needs its texts.
+    const ALL_ERROR_CODES: [crate::settings::ErrorCode; 14] = {
+        use crate::settings::ErrorCode::*;
+        [
+            Required,
+            UrlMalformed,
+            KeyRequired,
+            ModelNotDownloaded,
+            HotkeyNoModifier,
+            HotkeyNoKey,
+            HotkeyEscReserved,
+            HotkeyInvalid,
+            HotkeyUnavailable,
+            HistorySizeRange,
+            AutostartFailed,
+            KeyStoreFailed,
+            UrlCredentials,
+            LanguageUnsupported,
+        ]
+    };
+
+    /// The non-empty text of `id` in `lang`, straight from the catalog map (no
+    /// fallback to English or to the id, which `text` would apply).
+    fn own_text<'a>(c: &'a Catalog, lang: UiLanguage, id: &str) -> Option<&'a str> {
+        let map = match lang {
+            UiLanguage::En => &c.en,
+            UiLanguage::Ru => &c.ru,
+        };
+        map.get(id).map(String::as_str).filter(|t| !t.is_empty())
+    }
+
+    #[test]
+    fn every_error_code_has_catalog_text() {
+        // Bite: any ErrorCode core can return without a non-empty `error.<code>` in
+        // i18n/en.json or i18n/ru.json; the UI would show the raw id (text() falls
+        // back to it). T-004 Acceptance; spec T044.
+        use crate::settings::ErrorCode;
+        for code in ALL_ERROR_CODES {
+            // No wildcard: a new variant is a compile error here (see ALL_ERROR_CODES).
+            match code {
+                ErrorCode::Required
+                | ErrorCode::UrlMalformed
+                | ErrorCode::KeyRequired
+                | ErrorCode::ModelNotDownloaded
+                | ErrorCode::HotkeyNoModifier
+                | ErrorCode::HotkeyNoKey
+                | ErrorCode::HotkeyEscReserved
+                | ErrorCode::HotkeyInvalid
+                | ErrorCode::HotkeyUnavailable
+                | ErrorCode::HistorySizeRange
+                | ErrorCode::AutostartFailed
+                | ErrorCode::KeyStoreFailed
+                | ErrorCode::UrlCredentials
+                | ErrorCode::LanguageUnsupported => {}
+            }
+        }
+        let distinct: BTreeSet<&str> = ALL_ERROR_CODES.iter().map(|c| c.as_str()).collect();
+        assert_eq!(
+            distinct.len(),
+            ALL_ERROR_CODES.len(),
+            "an ErrorCode listed twice"
+        );
+
+        let c = catalog(EN_JSON, RU_JSON);
+        let mut missing = Vec::new();
+        for code in ALL_ERROR_CODES {
+            let id = format!("error.{}", code.as_str());
+            for lang in LANGS {
+                if own_text(&c, lang, &id).is_none() {
+                    missing.push(format!("{id} ({lang:?})"));
+                }
+            }
+        }
+        assert!(missing.is_empty(), "error.<code> without text: {missing:?}");
+    }
+
+    #[test]
+    fn settings_window_message_ids_exist() {
+        // T-004 owns two more ids. `notice.settings_reset` (the window's reset banner,
+        // and T-006's toast) is a Rust id, so it is declared with messages! and lands
+        // in MESSAGE_IDS; `error.ipc_unavailable` is UI-only (a rejected invoke,
+        // contracts/ipc.md "Errors"). Bite: either id missing or empty in a catalog,
+        // or `notice.settings_reset` not declared in messages!.
+        assert!(
+            MESSAGE_IDS.iter().any(|m| m.0 == "notice.settings_reset"),
+            "notice.settings_reset is not declared in messages!"
+        );
+        let c = catalog(EN_JSON, RU_JSON);
+        let mut missing = Vec::new();
+        for id in ["notice.settings_reset", "error.ipc_unavailable"] {
+            for lang in LANGS {
+                if own_text(&c, lang, id).is_none() {
+                    missing.push(format!("{id} ({lang:?})"));
+                }
+            }
+        }
+        assert!(missing.is_empty(), "ids without text: {missing:?}");
+    }
 }

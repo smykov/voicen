@@ -2582,4 +2582,96 @@ mod tests {
             serde_json::json!({ "Refused": { "errors": expected, "form_error": null } })
         );
     }
+
+    // ---- T-004: SettingsView.unavailable and the e2e wire fixture ------------------
+
+    /// The view of a fresh load over `file`, as the JSON a window receives.
+    fn view_wire(file: FakeSettingsFile, os: Option<&str>) -> (serde_json::Value, LoadOutcome) {
+        let world = World::new(file, FakeCredentialStore::new());
+        let (service, outcome) = SettingsService::load_or_init(world.deps(), os);
+        (
+            serde_json::to_value(service.view()).expect("SettingsView serializes"),
+            outcome,
+        )
+    }
+
+    #[test]
+    fn settings_view_wire_form_carries_unavailable() {
+        // Decision #38 (Q4): the window shows notice.settings_unavailable when it
+        // opens, so the view says whether the service is Unavailable; the wire field
+        // is `unavailable: bool`, beside first_run / reset_notice (contracts/ipc.md
+        // SettingsView). Bite: the field missing, renamed, always false, or true on
+        // another outcome.
+        let unreadable = FakeSettingsFile::new();
+        unreadable.fail_read(io::ErrorKind::PermissionDenied);
+        let cases = [
+            ("unavailable", unreadable, true),
+            ("first_run", FakeSettingsFile::new(), false),
+            (
+                "loaded",
+                FakeSettingsFile::with_bytes(&json(&sample(EngineKind::Api))),
+                false,
+            ),
+            ("reset", FakeSettingsFile::with_bytes(b"{not json"), false),
+        ];
+        for (name, file, unavailable) in cases {
+            let (view, outcome) = view_wire(file, OS);
+            assert_eq!(
+                view["unavailable"],
+                serde_json::Value::Bool(unavailable),
+                "{name}: {outcome:?} -> {view}"
+            );
+            let mut keys: Vec<&str> = view
+                .as_object()
+                .expect("view is an object")
+                .keys()
+                .map(String::as_str)
+                .collect();
+            keys.sort_unstable();
+            assert_eq!(
+                keys,
+                [
+                    "first_run",
+                    "keys",
+                    "reset_notice",
+                    "settings",
+                    "unavailable"
+                ],
+                "{name}"
+            );
+        }
+    }
+
+    /// The e2e fixture: the first-run view and the speech-language list, so the
+    /// Playwright mock serves core's real values (T-004 Investigation 6, option A3).
+    const E2E_WIRE_FIXTURE: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../e2e/fixtures/settings-wire.json"
+    ));
+
+    #[test]
+    fn e2e_settings_wire_fixture_matches_core() {
+        // P-010: the e2e mock holds no hand copy of the defaults or the language list.
+        // `first_run_view` is SettingsService::view() after a first run with no OS
+        // language (ui_language en) and no keys; `speech_languages` is
+        // WHISPER_ISO_639_1 in core order (what settings_speech_languages returns).
+        // Bite: a default changed in defaults(), a field added to or renamed in
+        // SettingsView/Settings, or a code added, removed or reordered in the list,
+        // without regenerating e2e/fixtures/settings-wire.json.
+        let fixture: serde_json::Value =
+            serde_json::from_str(E2E_WIRE_FIXTURE).expect("settings-wire.json is valid JSON");
+        let (view, outcome) = view_wire(FakeSettingsFile::new(), None);
+        assert!(matches!(outcome, LoadOutcome::FirstRun(_)), "{outcome:?}");
+        assert_eq!(
+            fixture["first_run_view"],
+            view,
+            "e2e/fixtures/settings-wire.json first_run_view differs from core; core says:\n{}",
+            serde_json::to_string_pretty(&view).expect("view serializes")
+        );
+        assert_eq!(
+            fixture["speech_languages"],
+            serde_json::json!(crate::settings::WHISPER_ISO_639_1.as_slice()),
+            "e2e/fixtures/settings-wire.json speech_languages differs from WHISPER_ISO_639_1"
+        );
+    }
 }
