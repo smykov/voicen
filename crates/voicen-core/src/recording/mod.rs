@@ -444,6 +444,17 @@ mod tests {
         }
     }
 
+    /// The "microphone unavailable" overlay for a failure at `at`, with the
+    /// `reason` param spelled as the catalog id (contracts/messages.md), not
+    /// derived from the code under test.
+    fn mic_message(reason_id: &str, at: Instant) -> OverlayState {
+        message(
+            i18n::FAILURE_MICROPHONE_UNAVAILABLE,
+            vec![("reason", reason_id.to_string())],
+            at,
+        )
+    }
+
     // ---- AC1: hold length ------------------------------------------------------
 
     #[test]
@@ -854,28 +865,46 @@ mod tests {
         // data-model "Idle --press [device fails]--> Idle + failure": for the live
         // id the controller goes idle with MicrophoneUnavailable{cause}; no job is
         // queued, the later key release is Ignored, and the next press starts a new
-        // recording. Bite: capture_failed returning None for the live id, the
-        // controller left Recording, a job counted.
+        // recording. Indicator (core-traits.md:171): tray Error, overlay
+        // failure.microphone_unavailable with reason = mic_reason.access_denied
+        // until the failure instant + 3 s, and the timer at that instant. Bite:
+        // capture_failed returning None for the live id, the controller left
+        // Recording, a job counted, `self.fail(&reason, at)` deleted from
+        // capture_failed (indicator Idle/Hidden, no deadline), a wrong reason param
+        // or `until` taken from the press instant.
         let t0 = Instant::now();
         let mut c = RecordingController::<Ctx>::new();
         let id = start(&mut c, t0, "w");
-        let got = c.capture_failed(id, CaptureError::AccessDenied, t0 + ms(20));
+        let tf = t0 + ms(20);
+        let got = c.capture_failed(id, CaptureError::AccessDenied, tf);
         assert_eq!(
             got,
             Some(FailureReason::MicrophoneUnavailable {
                 cause: MicCause::AccessDenied,
             })
         );
-        assert_ne!(c.indicator().tray, TrayState::Recording, "tray");
-        assert!(
-            !matches!(
-                c.indicator().overlay,
-                OverlayState::Recording | OverlayState::Processing
-            ),
-            "overlay {:?}: no recording, no job",
-            c.indicator().overlay
+        assert_eq!(
+            c.indicator(),
+            &IndicatorState {
+                tray: TrayState::Error,
+                overlay: mic_message("mic_reason.access_denied", tf),
+            },
+            "after capture_failed"
+        );
+        assert_eq!(
+            c.next_deadline(),
+            Some(tf + Duration::from_secs(3)),
+            "timer at the message expiry"
         );
         assert!(matches!(c.release(t0 + ms(800)), Release::Ignored));
+        assert_eq!(
+            c.indicator(),
+            &IndicatorState {
+                tray: TrayState::Error,
+                overlay: mic_message("mic_reason.access_denied", tf),
+            },
+            "the stray release changes nothing"
+        );
         let next = start(&mut c, t0 + ms(1000), "w");
         assert_ne!(next, id);
     }
@@ -951,12 +980,18 @@ mod tests {
         // The stream failed while stopping: Err(MicrophoneUnavailable{cause}), no
         // FinishedRecording, nothing queued; the controller is usable. Bite: an
         // empty FinishedRecording built from an Err, a job counted before the
-        // audio is known.
+        // audio is known. Indicator (core-traits.md:171): tray Error, overlay
+        // failure.microphone_unavailable with reason = mic_reason.busy until the
+        // finish instant + 3 s (not the release instant), timer at that instant.
+        // Bite: `self.fail(&reason, at)` deleted from finish's Err arm (indicator
+        // Idle/Hidden, no deadline), a wrong reason param, `until` from
+        // stopped_at.
         let t0 = Instant::now();
         let mut c = RecordingController::<Ctx>::new();
         start(&mut c, t0, "w");
         let ticket = stop(&mut c, t0 + ms(1000));
-        match c.finish(ticket, Err(CaptureError::DeviceBusy), t0 + ms(1010)) {
+        let tf = t0 + ms(1010);
+        match c.finish(ticket, Err(CaptureError::DeviceBusy), tf) {
             Err(r) => assert_eq!(
                 r,
                 FailureReason::MicrophoneUnavailable {
@@ -965,10 +1000,98 @@ mod tests {
             ),
             Ok(f) => panic!("expected Err, got {f:?}"),
         }
-        assert_ne!(c.indicator().overlay, OverlayState::Processing, "no job");
-        assert_ne!(c.indicator().tray, TrayState::Recording);
+        assert_eq!(
+            c.indicator(),
+            &IndicatorState {
+                tray: TrayState::Error,
+                overlay: mic_message("mic_reason.busy", tf),
+            },
+            "after finish(Err): no job, the failure shown"
+        );
+        assert_eq!(
+            c.next_deadline(),
+            Some(tf + Duration::from_secs(3)),
+            "timer at the message expiry"
+        );
         let f = record(&mut c, t0 + ms(2000), ms(500));
         assert_eq!(f.end(), RecordingEnd::Released);
+    }
+
+    #[test]
+    fn finish_err_while_next_recording_is_live_keeps_recording_then_tray_error() {
+        // FR-029 makes this order possible: A released, B pressed, then A's stream
+        // fails while stopping. The failure must not pre-empt the live recording
+        // (tray and overlay stay Recording, by the two priority orders); the press
+        // came before the failure, so it does not drop this message
+        // (core-traits.md:173 drops a message only on press). After B's release
+        // the tray is Error, and the message shows for what is left of its 3 s
+        // (until = A's failure instant + 3 s); at that instant it expires and tray
+        // Error stays. Bite: `self.fail(&reason, at)` deleted from finish's Err arm
+        // (tray Idle after B's release), Error checked before Recording (tray
+        // Error during B), Message over Recording, B's live state ended by A's
+        // failure, `until` restarted at B's release.
+        let t0 = Instant::now();
+        let mut c = RecordingController::<Ctx>::new();
+        let a = start(&mut c, t0, "a");
+        let ticket_a = stop(&mut c, t0 + ms(1000));
+        let b = start(&mut c, t0 + ms(1100), "b");
+        assert_ne!(a, b);
+        let tf = t0 + ms(1200);
+        match c.finish(ticket_a, Err(CaptureError::NoDevice), tf) {
+            Err(r) => assert_eq!(
+                r,
+                FailureReason::MicrophoneUnavailable {
+                    cause: MicCause::NoDevice,
+                }
+            ),
+            Ok(f) => panic!("expected Err, got {f:?}"),
+        }
+        assert_eq!(
+            c.indicator(),
+            &IndicatorState {
+                tray: TrayState::Recording,
+                overlay: OverlayState::Recording,
+            },
+            "B still recording after A's capture failed"
+        );
+
+        // B is released inside the message's 3 s and stops normally.
+        let ticket_b = stop(&mut c, t0 + ms(2000));
+        assert_eq!(ticket_b.id(), b, "A's failure did not end B");
+        assert_eq!(
+            c.indicator(),
+            &IndicatorState {
+                tray: TrayState::Error,
+                overlay: mic_message("mic_reason.no_device", tf),
+            },
+            "after B's release"
+        );
+        assert_eq!(c.next_deadline(), Some(tf + Duration::from_secs(3)));
+
+        c.tick(tf + Duration::from_secs(3));
+        assert_eq!(
+            c.indicator(),
+            &IndicatorState {
+                tray: TrayState::Error,
+                overlay: OverlayState::Hidden,
+            },
+            "message expired, tray Error stays"
+        );
+        assert_eq!(c.next_deadline(), None);
+
+        let fb = match c.finish(ticket_b, Ok(audio()), tf + ms(3100)) {
+            Ok(f) => f,
+            Err(e) => panic!("finish b: {e:?}"),
+        };
+        assert_eq!(fb.id(), b);
+        assert_eq!(
+            c.indicator(),
+            &IndicatorState {
+                tray: TrayState::Error,
+                overlay: OverlayState::Processing,
+            },
+            "B's job queued, Error until a delivery"
+        );
     }
 
     #[test]
