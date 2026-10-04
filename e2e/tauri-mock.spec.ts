@@ -12,6 +12,7 @@ import {
   installTauriMock,
   listeners,
   queueSaveOutcome,
+  releaseSettingsGet,
   storedView,
   type SaveOutcome,
   type SaveRequest,
@@ -146,4 +147,49 @@ test("plugin:window|destroy is recorded and returns null; plugin:window|close re
   expect(await invokeInPage(page, "plugin:window|close", { label: "settings" })).toEqual({
     err: "unexpected command plugin:window|close",
   });
+});
+
+// T-039 r1 #3/#4 options. Each runs on a fresh page of the test's context, so only this
+// test's mock is installed (the beforeEach mock is page-level, on the `page` fixture).
+
+test("destroy: { reject } records plugin:window|destroy and rejects with its text", async ({ context }) => {
+  const page = await context.newPage();
+  await installTauriMock(page, { destroy: { reject: "destroy refused (fake)" } });
+  await page.goto("/");
+  expect(await invokeInPage(page, "plugin:window|destroy", { label: "settings" })).toEqual({
+    err: "destroy refused (fake)",
+  });
+  expect(await calls(page, "plugin:window|destroy")).toEqual([
+    { cmd: "plugin:window|destroy", args: { label: "settings" } },
+  ]);
+});
+
+test("holdSettingsGet keeps settings_get in flight (recorded) until releaseSettingsGet", async ({ context }) => {
+  const page = await context.newPage();
+  await installTauriMock(page, { holdSettingsGet: true });
+  await page.goto("/");
+  await page.evaluate(() => {
+    const w = window as unknown as { __TAURI_INTERNALS__: Internals; __got?: unknown };
+    void w.__TAURI_INTERNALS__.invoke("settings_get", {}).then((v) => (w.__got = v));
+  });
+  await expect.poll(async () => (await calls(page, "settings_get")).length).toBe(1);
+  const pending = () => page.evaluate(() => (window as unknown as { __got?: unknown }).__got);
+  expect(await pending()).toBeUndefined();
+  await releaseSettingsGet(page);
+  await expect.poll(pending).toEqual(firstRunView());
+});
+
+test("rejectListen makes listen of the named event reject and register nothing; other events still listen", async ({ context }) => {
+  const page = await context.newPage();
+  await installTauriMock(page, { rejectListen: ["settings://focus"] });
+  await page.goto("/");
+  const result = await invokeInPage(page, "plugin:event|listen", {
+    event: "settings://focus",
+    target: { kind: "Any" },
+    handler: 1,
+  });
+  expect(result).toEqual({ err: "listen settings://focus refused" });
+  expect(await listeners(page, "settings://focus")).toBe(0);
+  await listenInPage(page, "settings://changed");
+  expect(await listeners(page, "settings://changed")).toBe(1);
 });

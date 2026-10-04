@@ -23,6 +23,11 @@
 //   capability grants destroy (src-tauri/capabilities/default.json), and tauri's
 //   onCloseRequested calls it on every close it does not prevent (T-039).
 //   `plugin:window|close` is not granted and rejects like any other command.
+//   With `destroy: { reject }` destroy is recorded and then rejects with that text (the
+//   shell refused or failed to destroy the window; T-039 r1 #3).
+// - Failure and timing options (T-039 r1 #4): `holdSettingsGet` keeps the first
+//   `settings_get` in flight (recorded, not answered) until `releaseSettingsGet()`;
+//   `rejectListen` names events whose `plugin:event|listen` rejects (nothing registered).
 // - Any other command rejects, so a call outside the contract fails the test.
 //
 // The init script must be self-contained (it is serialized into the page), so it cannot
@@ -96,6 +101,12 @@ export interface MockOptions {
   saveOutcomes?: SaveOutcome[];
   /** `get_build_info`: a value, or `{ reject }` to make it reject with that text. */
   buildInfo?: BuildInfo | { reject: string };
+  /** `plugin:window|destroy`: `{ reject }` makes it reject with that text (still recorded). */
+  destroy?: { reject: string };
+  /** Keep `settings_get` in flight until `releaseSettingsGet` (recorded at once). */
+  holdSettingsGet?: boolean;
+  /** Events whose `plugin:event|listen` rejects; no handler is registered for them. */
+  rejectListen?: string[];
 }
 
 interface InitArg {
@@ -103,6 +114,9 @@ interface InitArg {
   speechLanguages: string[];
   saveOutcomes: SaveOutcome[];
   buildInfo: BuildInfo | { reject: string } | null;
+  destroy: { reject: string } | null;
+  holdSettingsGet: boolean;
+  rejectListen: string[];
 }
 
 /** Installs the mock as an init script; call before `page.goto`. */
@@ -112,6 +126,9 @@ export async function installTauriMock(page: Page, options: MockOptions = {}): P
     speechLanguages: options.speechLanguages ?? coreSpeechLanguages(),
     saveOutcomes: options.saveOutcomes ?? [],
     buildInfo: options.buildInfo ?? null,
+    destroy: options.destroy ?? null,
+    holdSettingsGet: options.holdSettingsGet ?? false,
+    rejectListen: options.rejectListen ?? [],
   };
   await page.addInitScript((init: InitArg) => {
     type Handler = (data: unknown) => void;
@@ -130,6 +147,8 @@ export async function installTauriMock(page: Page, options: MockOptions = {}): P
       nextId: 1,
       holding: false,
       held: [] as (() => void)[],
+      holdingGet: init.holdSettingsGet,
+      heldGet: [] as (() => void)[],
     };
 
     function transformCallback(callback?: Handler, once = false): number {
@@ -168,6 +187,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}): P
         case "plugin:event|listen": {
           const event = args.event as string;
           const handler = args.handler as number;
+          if (init.rejectListen.includes(event)) throw new Error(`listen ${event} refused`);
           const list = state.listeners.get(event) ?? [];
           list.push(handler);
           state.listeners.set(event, list);
@@ -180,6 +200,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}): P
           return null;
         }
         case "settings_get":
+          if (state.holdingGet) await new Promise<void>((resolve) => state.heldGet.push(resolve));
           return clone(state.view);
         case "settings_speech_languages":
           return clone(state.speechLanguages);
@@ -201,6 +222,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}): P
           return { Saved: { view: clone(view), warnings: [] } };
         }
         case "plugin:window|destroy":
+          if (init.destroy !== null) throw new Error(init.destroy.reject);
           return null;
         case "get_build_info":
           if (init.buildInfo === null) break;
@@ -234,6 +256,10 @@ export async function installTauriMock(page: Page, options: MockOptions = {}): P
         state.holding = false;
         for (const resolve of state.held.splice(0)) resolve();
       },
+      releaseGet: () => {
+        state.holdingGet = false;
+        for (const resolve of state.heldGet.splice(0)) resolve();
+      },
     };
   }, arg);
 }
@@ -253,6 +279,7 @@ interface MockHandle {
   queue: (item: { outcome: unknown } | { reject: unknown }) => void;
   hold: () => void;
   release: () => void;
+  releaseGet: () => void;
 }
 
 type MockWindow = { __VOICEN_MOCK__: MockHandle };
@@ -322,4 +349,9 @@ export async function holdSaves(page: Page): Promise<void> {
 /** Answers every held `settings_save` and stops holding. */
 export async function releaseSave(page: Page): Promise<void> {
   await page.evaluate(() => (window as unknown as MockWindow).__VOICEN_MOCK__.release());
+}
+
+/** Answers every held `settings_get` and stops holding (see `holdSettingsGet`). */
+export async function releaseSettingsGet(page: Page): Promise<void> {
+  await page.evaluate(() => (window as unknown as MockWindow).__VOICEN_MOCK__.releaseGet());
 }

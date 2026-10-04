@@ -25,7 +25,9 @@ import {
   installTauriMock,
   listeners,
   queueSaveOutcome,
+  releaseSettingsGet,
   requestClose,
+  type MockOptions,
   type SaveRequest,
   type Settings,
   type SettingsView,
@@ -55,8 +57,13 @@ function pageErrors(page: Page): Error[] {
   return errors;
 }
 
-async function open(page: Page, path: string, view: SettingsView = firstRunView()): Promise<void> {
-  await installTauriMock(page, { view });
+async function open(
+  page: Page,
+  path: string,
+  view: SettingsView = firstRunView(),
+  options: Omit<MockOptions, "view"> = {},
+): Promise<void> {
+  await installTauriMock(page, { ...options, view });
   await page.goto(path);
   await expect(page.getByRole("tab", { selected: true })).toBeVisible();
 }
@@ -178,11 +185,31 @@ test("tab post_processing (no page tab yet) selects Engine, from the URL and fro
   expect(errors).toEqual([]);
 });
 
+test("a settings://focus sent while settings_get is still pending is honoured once the draft loads, and replaces the URL's request", async ({ page }) => {
+  // T-039 r1 #4a: settings_window::open emits settings://focus instead of loading a URL
+  // whenever the window exists, including while its page is still loading
+  // (src-tauri/src/settings_window.rs). The page must listen before the draft arrives.
+  const errors = pageErrors(page);
+  await installTauriMock(page, { holdSettingsGet: true });
+  await page.goto("/settings?tab=recording&field=recording.hotkey");
+  await expect.poll(async () => (await calls(page, "settings_get")).length).toBe(1);
+  await waitForListener(page, "settings://focus");
+  // Still loading: no draft, so no tabs and no controls yet.
+  await expect(page.getByRole("tab")).toHaveCount(0);
+
+  await emit(page, "settings://focus", { tab: "history", field: "history.size" });
+  await releaseSettingsGet(page);
+
+  await expect(tab(page, "history")).toHaveAttribute("aria-selected", "true");
+  await expect(field(page, "history.size")).toBeFocused();
+  expect(errors).toEqual([]);
+});
+
 // ---- (D) Discard prompt on close --------------------------------------------------------
 
 /** Opens the page, waits for the close listener, and makes the draft dirty (history size 33). */
-async function openDirty(page: Page): Promise<void> {
-  await open(page, "/settings");
+async function openDirty(page: Page, options: Omit<MockOptions, "view"> = {}): Promise<void> {
+  await open(page, "/settings", firstRunView(), options);
   await waitForListener(page, "tauri://close-requested");
   await tab(page, "history").click();
   await field(page, "history.size").fill("33");
@@ -282,6 +309,80 @@ test("a draft edited back to its saved value is clean and closes without asking"
   expect(errors).toEqual([]);
 });
 
+test("failure branch: discard with a failing destroy closes the dialog, shows error.ipc_unavailable, keeps the draft, and a later close asks again", async ({ page }) => {
+  // T-039 r1 #3 (settings-ui.md D): the window cannot do better than report and stay.
+  const errors = pageErrors(page);
+  await openDirty(page, { destroy: { reject: "destroy failed (fake)" } });
+  await requestClose(page);
+  const dialog = page.getByRole("alertdialog");
+  await expect(dialog).toBeVisible();
+
+  await dialog.getByTestId("settings-discard-confirm").click();
+  await expect(page.getByRole("alertdialog")).toHaveCount(0);
+  const alert = page.getByRole("alert");
+  await expect(alert).toContainText(en("error.ipc_unavailable"));
+  // The rejection text is never shown.
+  await expect(alert).not.toContainText("destroy failed (fake)");
+  expect(await calls(page, "plugin:window|destroy")).toEqual([
+    { cmd: "plugin:window|destroy", args: { label: "settings" } },
+  ]);
+  // The draft is kept and still editable (the page is not left inert).
+  await expect(field(page, "history.size")).toHaveValue("33");
+  await field(page, "history.size").fill("34");
+  await expect(field(page, "history.size")).toHaveValue("34");
+  expect(await calls(page, "settings_save")).toEqual([]);
+
+  // Still dirty: a later close asks again instead of closing.
+  await requestClose(page);
+  await expect(page.getByRole("alertdialog")).toBeVisible();
+  await settle(page);
+  expect(await calls(page, "plugin:window|destroy")).toHaveLength(1);
+  expect(errors).toEqual([]);
+});
+
+test("Escape in the discard dialog keeps editing: the dialog closes, the edit is kept, nothing is destroyed", async ({ page }) => {
+  const errors = pageErrors(page);
+  await openDirty(page);
+  await requestClose(page);
+  const dialog = page.getByRole("alertdialog");
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByTestId("settings-discard-keep")).toBeFocused();
+
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("alertdialog")).toHaveCount(0);
+  await expect(field(page, "history.size")).toHaveValue("33");
+  await settle(page);
+  expect(await calls(page, "plugin:window|destroy")).toEqual([]);
+
+  // The page is usable again and the kept edit is what Save sends.
+  await page.getByTestId("settings-save").click();
+  await expect.poll(async () => (await calls(page, "settings_save")).length).toBe(1);
+  const [save] = await calls(page, "settings_save");
+  expect((save.args as { request: SaveRequest }).request.settings.history.size).toBe(33);
+  expect(await calls(page, "plugin:window|destroy")).toEqual([]);
+  expect(errors).toEqual([]);
+});
+
+test("failure branch: a rejected settings://focus listen never leaves an editable draft without the close guard", async ({ page }) => {
+  // T-039 r1 #4b: the close guard is the data-loss path, so a failure of the (optional)
+  // focus listener must not skip it. Either the draft does not load at all, or the
+  // close-requested listener exists whenever a control can be edited.
+  const errors = pageErrors(page);
+  await installTauriMock(page, { rejectListen: ["settings://focus"] });
+  await page.goto("/settings");
+  // The listen failure is reported; once shown, the page's listener setup has finished.
+  await expect(page.getByRole("alert")).toContainText(en("error.ipc_unavailable"));
+  await settle(page);
+
+  const controls = await page.locator("[data-field]").count();
+  const guards = await listeners(page, "tauri://close-requested");
+  expect(
+    controls === 0 || guards > 0,
+    `${controls} controls rendered with ${guards} tauri://close-requested listeners: an editable draft must be close-guarded`,
+  ).toBe(true);
+  expect(errors).toEqual([]);
+});
+
 // ---- (R) Every field rendered from the view and sent back unchanged ---------------------
 
 /**
@@ -341,61 +442,85 @@ function unchangedLeaves(def: unknown, mine: unknown, path = ""): string[] {
 }
 
 /**
- * What the control of each FieldId shows for NON_DEFAULT: the wire value (a string for
+ * NON_DEFAULT with engine local_server (T-039 r1 #2), so the Engine tab renders the
+ * engine.local_server.* controls. The spread is safe here: NON_DEFAULT itself is the
+ * full typed literal, and the runtime shape and non-default checks run on this one too.
+ */
+const NON_DEFAULT_LOCAL_SERVER: Settings = { ...structuredClone(NON_DEFAULT), engine: "local_server" };
+
+/**
+ * What the control of each FieldId shows for `settings`: the wire value (a string for
  * inputs and selects, a boolean for checkboxes); key inputs are always empty (U3). A
  * control the page renders that is not listed here fails the test: add it here.
  */
-const SHOWN: Record<string, string | boolean> = {
-  "engine.kind": NON_DEFAULT.engine,
-  "engine.api.base_url": NON_DEFAULT.api.base_url,
-  "engine.api.model": NON_DEFAULT.api.model,
-  "engine.api.key": "",
-  "engine.local_server.base_url": NON_DEFAULT.local_server.base_url,
-  "engine.local_server.model": NON_DEFAULT.local_server.model,
-  "engine.local_server.key": "",
-  "engine.speech_language": NON_DEFAULT.speech_language ?? "auto",
-  "recording.hotkey": NON_DEFAULT.hotkey,
-  "recording.mode": NON_DEFAULT.mode,
-  "output.auto_paste": NON_DEFAULT.auto_paste,
-  "history.enabled": NON_DEFAULT.history.enabled,
-  "history.size": String(NON_DEFAULT.history.size),
-  "general.ui_language": NON_DEFAULT.ui_language,
-};
+function shownFor(settings: Settings): Record<string, string | boolean> {
+  return {
+    "engine.kind": settings.engine,
+    "engine.api.base_url": settings.api.base_url,
+    "engine.api.model": settings.api.model,
+    "engine.api.key": "",
+    "engine.local_server.base_url": settings.local_server.base_url,
+    "engine.local_server.model": settings.local_server.model,
+    "engine.local_server.key": "",
+    "engine.speech_language": settings.speech_language ?? "auto",
+    "recording.hotkey": settings.hotkey,
+    "recording.mode": settings.mode,
+    "output.auto_paste": settings.auto_paste,
+    "history.enabled": settings.history.enabled,
+    "history.size": String(settings.history.size),
+    "general.ui_language": settings.ui_language,
+  };
+}
 
-/** The controls each release-1 tab must render for NON_DEFAULT (engine api). */
-const TAB_FIELDS: Record<string, string[]> = {
-  engine: ["engine.kind", "engine.api.base_url", "engine.api.model", "engine.api.key", "engine.speech_language"],
-  recording: ["recording.hotkey", "recording.mode"],
-  output: ["output.auto_paste"],
-  history: ["history.enabled", "history.size"],
-  general: ["general.ui_language"],
-};
+/** The controls each release-1 tab must render for engine api or local_server. */
+function tabFieldsFor(engine: "api" | "local_server"): Record<string, string[]> {
+  return {
+    engine: [
+      "engine.kind",
+      `engine.${engine}.base_url`,
+      `engine.${engine}.model`,
+      `engine.${engine}.key`,
+      "engine.speech_language",
+    ],
+    recording: ["recording.hotkey", "recording.mode"],
+    output: ["output.auto_paste"],
+    history: ["history.enabled", "history.size"],
+    general: ["general.ui_language"],
+  };
+}
 
-async function expectTabShowsView(page: Page, name: string): Promise<void> {
+async function expectTabShowsView(
+  page: Page,
+  name: string,
+  tabFields: Record<string, string[]>,
+  shown: Record<string, string | boolean>,
+): Promise<void> {
   await tab(page, name).click();
   await expect(tab(page, name)).toHaveAttribute("aria-selected", "true");
-  for (const id of TAB_FIELDS[name]) await expect(field(page, id), `${name}: ${id} rendered`).toHaveCount(1);
+  for (const id of tabFields[name]) await expect(field(page, id), `${name}: ${id} rendered`).toHaveCount(1);
   const rendered = await page
     .locator("[data-field]")
     .evaluateAll((els) => els.map((e) => (e as HTMLElement).dataset.field ?? ""));
   for (const id of rendered) {
-    expect(Object.hasOwn(SHOWN, id), `${name}: control ${id} is rendered but this test does not know its value`).toBe(true);
-    const shown = SHOWN[id];
-    if (typeof shown === "boolean") await expect(field(page, id), `${name}: ${id}`).toBeChecked({ checked: shown });
-    else await expect(field(page, id), `${name}: ${id}`).toHaveValue(shown);
+    expect(Object.hasOwn(shown, id), `${name}: control ${id} is rendered but this test does not know its value`).toBe(true);
+    const value = shown[id];
+    if (typeof value === "boolean") await expect(field(page, id), `${name}: ${id}`).toBeChecked({ checked: value });
+    else await expect(field(page, id), `${name}: ${id}`).toHaveValue(value);
   }
 }
 
-test("every field of the release-1 tabs is rendered from the view and an untouched Save sends the view's settings unchanged with every key Untouched", async ({ page }) => {
+/** Acceptance 3 for `settings` (engine api or local_server): visit every tab, then an untouched Save. */
+async function expectRoundTrip(page: Page, settings: Settings, engine: "api" | "local_server"): Promise<void> {
   const errors = pageErrors(page);
+  expect(settings.engine).toBe(engine);
   const core = firstRunView().settings;
-  expect(shapeDiff(core, NON_DEFAULT), "NON_DEFAULT has core's Settings keys").toEqual([]);
-  expect(unchangedLeaves(core, NON_DEFAULT), "every leaf but schema_version differs from core's defaults").toEqual([
+  expect(shapeDiff(core, settings), "the literal has core's Settings keys").toEqual([]);
+  expect(unchangedLeaves(core, settings), "every leaf but schema_version differs from core's defaults").toEqual([
     "schema_version",
   ]);
 
   const view: SettingsView = {
-    settings: NON_DEFAULT,
+    settings,
     keys: { transcription_api: true, local_server: true, post_processing: true },
     first_run: false,
     reset_notice: false,
@@ -403,8 +528,10 @@ test("every field of the release-1 tabs is rendered from the view and an untouch
   };
   await open(page, "/settings", view);
 
+  const tabFields = tabFieldsFor(engine);
+  const shown = shownFor(settings);
   for (const name of ["engine", "recording", "output", "history", "general", "engine"]) {
-    await expectTabShowsView(page, name);
+    await expectTabShowsView(page, name, tabFields, shown);
   }
 
   await page.getByTestId("settings-save").click();
@@ -414,6 +541,14 @@ test("every field of the release-1 tabs is rendered from the view and an untouch
   expect(request.settings).toEqual(view.settings);
   expect(request.keys).toEqual({ transcription_api: "Untouched", local_server: "Untouched", post_processing: "Untouched" });
   expect(errors).toEqual([]);
+}
+
+test("every field of the release-1 tabs is rendered from the view and an untouched Save sends the view's settings unchanged with every key Untouched", async ({ page }) => {
+  await expectRoundTrip(page, NON_DEFAULT, "api");
+});
+
+test("engine local_server: the engine.local_server base URL, model and key controls show the view and an untouched Save sends the view's settings unchanged with every key Untouched", async ({ page }) => {
+  await expectRoundTrip(page, NON_DEFAULT_LOCAL_SERVER, "local_server");
 });
 
 // ---- (L) A not-restored field without a control is named by its label --------------------
@@ -448,5 +583,54 @@ test("a partially_restored refusal naming engine.api.key while engine is local_s
   // By label, never by the raw FieldId.
   await expect(alert).not.toContainText("engine.api.key");
   await expect(alert).not.toContainText("general.start_with_windows");
+  expect(errors).toEqual([]);
+});
+
+test("a partially_restored refusal lists by label only the not_restored fields with no control on the page, and the list follows the controls the current tab renders", async ({ page }) => {
+  // T-039 r1 #1 (invariant L): engine.api.key has a control on the Engine tab (engine
+  // api), general.start_with_windows has none anywhere (until T-034).
+  const errors = pageErrors(page);
+  const view = apiView();
+  view.keys.transcription_api = true;
+  await open(page, "/settings", view);
+  await expect(field(page, "engine.api.key")).toBeVisible();
+  await queueSaveOutcome(page, {
+    Refused: {
+      errors: [{ field: "engine.local_server.key", code: "key.store_failed" }],
+      form_error: {
+        kind: "partially_restored",
+        message: "settings.partially_restored",
+        not_restored: ["engine.api.key", "general.start_with_windows"],
+      },
+    },
+  });
+
+  await page.getByTestId("settings-save").click();
+  const alert = page.getByRole("alert");
+  await expect(alert).toContainText(en("settings.partially_restored"));
+  const listed = alert.getByRole("listitem");
+  const apiKeyLabel = en("settings.field_label.engine.api.key");
+  const startLabel = en("settings.field_label.general.start_with_windows");
+
+  // Engine tab: the API key has its control, so only start-with-Windows is listed; the
+  // control keeps its field-level highlight.
+  await expect(listed).toHaveText([startLabel]);
+  await expect(alert).not.toContainText(apiKeyLabel);
+  await expect(field(page, "engine.api.key")).toHaveAttribute("aria-invalid", "true");
+
+  // Recording tab: the API key control is gone, so its label joins the list.
+  await tab(page, "recording").click();
+  await expect(field(page, "engine.api.key")).toHaveCount(0);
+  await expect(listed).toHaveText([apiKeyLabel, startLabel]);
+
+  // Back on Engine: the control is rendered again and leaves the list.
+  await tab(page, "engine").click();
+  await expect(field(page, "engine.api.key")).toHaveAttribute("aria-invalid", "true");
+  await expect(listed).toHaveText([startLabel]);
+
+  // Same tab, another engine: the API key control is unmounted, so it is listed again.
+  await field(page, "engine.kind").selectOption("local_server");
+  await expect(field(page, "engine.api.key")).toHaveCount(0);
+  await expect(listed).toHaveText([apiKeyLabel, startLabel]);
   expect(errors).toEqual([]);
 });
