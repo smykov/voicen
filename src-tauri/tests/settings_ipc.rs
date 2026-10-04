@@ -19,6 +19,9 @@ use tauri::webview::InvokeRequest;
 use tauri::{App, Listener, WebviewWindow, WebviewWindowBuilder};
 use voicen_core::autostart::{Autostart, FakeAutostart};
 use voicen_core::i18n::UiLanguage;
+use voicen_core::local_models::catalog::MODELS;
+use voicen_core::local_models::service::LocalModels;
+use voicen_core::local_models::store::ModelStore;
 use voicen_core::secrets::{
     CredentialCall, CredentialError, CredentialOp, CredentialStore, FakeCredentialStore, KeyEdits,
     KeySlot,
@@ -26,7 +29,9 @@ use voicen_core::secrets::{
 use voicen_core::settings::file::SETTINGS_FILE;
 use voicen_core::settings::service::{SaveOutcome, SaveRequest, SettingsService};
 use voicen_core::settings::{defaults, EngineKind, LoadOutcome, Settings, WHISPER_ISO_639_1};
+use voicen_core::test_support::local_models::FakeDisk;
 use voicen_core::test_support::TempDir;
+use voicen_core::timeouts::Timeouts;
 use voicen_lib::settings_ipc::load_settings;
 
 /// Obviously fake key; must never leave the credential store.
@@ -45,8 +50,13 @@ struct Harness {
 }
 
 fn harness(service: &Arc<SettingsService>) -> Harness {
-    let app = voicen_lib::build_app(mock_builder(), mock_context(noop_assets()), service.clone())
-        .expect("mock app builds");
+    let app = voicen_lib::build_app(
+        mock_builder(),
+        mock_context(noop_assets()),
+        service.clone(),
+        idle_models(),
+    )
+    .expect("mock app builds");
     let webview = WebviewWindowBuilder::new(&app, "settings", Default::default())
         .build()
         .expect("mock webview builds");
@@ -158,6 +168,26 @@ fn no_autostart() -> Arc<dyn Autostart> {
     Arc::new(FakeAutostart::new())
 }
 
+/// T-044: the store `load_settings` takes. No model is downloaded in these tests,
+/// and `ModelStore::new` creates nothing, so the data dir keeps only its own files.
+fn idle_store(data_dir: &Path) -> Arc<ModelStore> {
+    Arc::new(ModelStore::new(data_dir.join("models"), MODELS))
+}
+
+/// T-044: the one `LocalModels` that `build_app` manages; these tests never
+/// download. Its models dir lies under a throwaway dir that is removed at once, so
+/// it is never created.
+fn idle_models() -> Arc<LocalModels> {
+    let (models, cleanup) = LocalModels::open(
+        TempDir::new().path().join("models"),
+        FakeDisk::with_available(u64::MAX),
+        Timeouts::default(),
+        MODELS,
+    );
+    cleanup.expect("cleanup over a missing models dir");
+    Arc::new(models)
+}
+
 fn fake_store(store: FakeCredentialStore) -> Arc<FakeCredentialStore> {
     Arc::new(store)
 }
@@ -180,6 +210,7 @@ fn get_returns_presence_only() {
         dir.path().to_path_buf(),
         as_port(&store),
         no_autostart(),
+        idle_store(dir.path()),
         None,
     );
     assert_eq!(outcome, LoadOutcome::FirstRun(defaults(None)));
@@ -218,6 +249,7 @@ fn save_twice_replaces_settings_json() {
         dir.path().to_path_buf(),
         as_port(&store),
         no_autostart(),
+        idle_store(dir.path()),
         None,
     );
     assert!(
@@ -247,6 +279,7 @@ fn save_twice_replaces_settings_json() {
         dir.path().to_path_buf(),
         as_port(&store),
         no_autostart(),
+        idle_store(dir.path()),
         None,
     );
     assert_eq!(outcome, LoadOutcome::Loaded(edited(43)));
@@ -264,6 +297,7 @@ fn saved_emits_changed_once_refused_emits_nothing() {
         dir.path().to_path_buf(),
         as_port(&store),
         no_autostart(),
+        idle_store(dir.path()),
         None,
     );
     let h = harness(&service);
@@ -326,6 +360,7 @@ fn key_store_write_refused_is_key_store_failed_and_nothing_written() {
         dir.path().to_path_buf(),
         as_port(&store),
         no_autostart(),
+        idle_store(dir.path()),
         None,
     );
     let before_bytes = std::fs::read(dir.path().join(SETTINGS_FILE)).expect("first-run file");
@@ -407,7 +442,13 @@ fn canary_key_never_in_data_dir_or_log() {
     voicen_lib::log_start(&log_dir);
     let store: Arc<dyn CredentialStore> =
         Arc::new(WinCredentialStore::with_target_prefix(prefix.clone()));
-    let (service, _) = load_settings(dir.path().to_path_buf(), store, no_autostart(), None);
+    let (service, _) = load_settings(
+        dir.path().to_path_buf(),
+        store,
+        no_autostart(),
+        idle_store(dir.path()),
+        None,
+    );
     let h = harness(&service);
     let events = h.changed_events();
 
@@ -466,6 +507,7 @@ fn speech_languages_is_core_list() {
         dir.path().to_path_buf(),
         as_port(&store),
         no_autostart(),
+        idle_store(dir.path()),
         None,
     );
     let h = harness(&service);
@@ -488,6 +530,7 @@ fn first_run_with_russian_os_language_writes_ru() {
         dir.path().to_path_buf(),
         as_port(&store),
         no_autostart(),
+        idle_store(dir.path()),
         Some("ru-RU"),
     );
 

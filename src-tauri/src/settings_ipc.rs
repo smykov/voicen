@@ -24,6 +24,7 @@ use tauri::{AppHandle, Emitter, Runtime, State};
 use voicen_core::autostart::Autostart;
 use voicen_core::clock::SystemClock;
 use voicen_core::hotkey_registrar::{HotkeyRegistrar, Prepared, Unavailable};
+use voicen_core::local_models::store::ModelStore;
 use voicen_core::models::DownloadedModels;
 use voicen_core::secrets::CredentialStore;
 use voicen_core::settings::file::FsSettingsFile;
@@ -40,12 +41,18 @@ pub const SETTINGS_CHANGED: &str = "settings://changed";
 /// over `data_dir`, the given credential store and autostart entry, the interim
 /// `NoDownloadedModels` and fail-closed `HotkeyRegistrar`, `SystemClock`; then
 /// `load_or_init`, then `reconcile_autostart` (T-014, R-5).
+///
+/// `local_models` is the store of the one `LocalModels` (`LocalModels::store`,
+/// T-044): it becomes `SettingsDeps.local_models`.
 pub fn load_settings(
     data_dir: PathBuf,
     credentials: Arc<dyn CredentialStore>,
     autostart: Arc<dyn Autostart>,
+    local_models: Arc<ModelStore>,
     os_language: Option<&str>,
 ) -> (Arc<SettingsService>, LoadOutcome) {
+    // Skeleton (T-044 red tests): the store is not wired yet.
+    let _ = local_models;
     let deps = SettingsDeps {
         file: Arc::new(FsSettingsFile::new(data_dir)),
         credentials,

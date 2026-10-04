@@ -28,12 +28,17 @@ use tauri::{
     App, Context, Listener, Manager, Url, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
 };
 use voicen_core::autostart::{Autostart, FakeAutostart};
+use voicen_core::local_models::catalog::MODELS;
+use voicen_core::local_models::service::LocalModels;
+use voicen_core::local_models::store::ModelStore;
 use voicen_core::secrets::{CredentialStore, FakeCredentialStore};
 use voicen_core::settings::file::SETTINGS_FILE;
 use voicen_core::settings::gate::SettingsTab;
 use voicen_core::settings::service::SettingsService;
 use voicen_core::settings::{FieldId, LoadOutcome};
+use voicen_core::test_support::local_models::FakeDisk;
 use voicen_core::test_support::TempDir;
+use voicen_core::timeouts::Timeouts;
 use voicen_lib::settings_ipc::load_settings;
 use voicen_lib::settings_window::{self, LABEL};
 
@@ -47,13 +52,40 @@ fn no_autostart() -> Arc<dyn Autostart> {
     Arc::new(FakeAutostart::new())
 }
 
+/// T-044: the store `load_settings` takes. No model is downloaded in these tests,
+/// and `ModelStore::new` creates nothing, so the data dir keeps only its own files.
+fn idle_store(data_dir: &Path) -> Arc<ModelStore> {
+    Arc::new(ModelStore::new(data_dir.join("models"), MODELS))
+}
+
+/// T-044: the one `LocalModels` that `build_app` manages; these tests never
+/// download. Its models dir lies under a throwaway dir that is removed at once, so
+/// it is never created.
+fn idle_models() -> Arc<LocalModels> {
+    let (models, cleanup) = LocalModels::open(
+        TempDir::new().path().join("models"),
+        FakeDisk::with_available(u64::MAX),
+        Timeouts::default(),
+        MODELS,
+    );
+    cleanup.expect("cleanup over a missing models dir");
+    Arc::new(models)
+}
+
 fn load(dir: &Path) -> (Arc<SettingsService>, LoadOutcome) {
-    load_settings(dir.to_path_buf(), no_keys(), no_autostart(), None)
+    load_settings(
+        dir.to_path_buf(),
+        no_keys(),
+        no_autostart(),
+        idle_store(dir),
+        None,
+    )
 }
 
 /// The app as `run()` builds it (`build_app`), on the mock runtime with `context`.
 fn app_with(service: &Arc<SettingsService>, context: Context<MockRuntime>) -> App<MockRuntime> {
-    voicen_lib::build_app(mock_builder(), context, service.clone()).expect("mock app builds")
+    voicen_lib::build_app(mock_builder(), context, service.clone(), idle_models())
+        .expect("mock app builds")
 }
 
 fn mock_app(service: &Arc<SettingsService>) -> App<MockRuntime> {

@@ -15,3 +15,10 @@ pub fn data_dir() -> PathBuf {
 pub fn log_dir() -> PathBuf {
     data_dir().join("logs")
 }
+
+/// `data_dir()\models`: the built-in models (T-044, spec 002; the one models-dir
+/// resolver, P-010).
+pub fn models_dir() -> PathBuf {
+    // Skeleton (T-044 red tests): not implemented yet.
+    todo!("T-044: paths::models_dir")
+}

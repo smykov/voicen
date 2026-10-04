@@ -1,0 +1,143 @@
+{
+  "_format": "Core-checked wire data of the local-model IPC (specs/002 contracts/ipc.md) for the Playwright IPC mock (T-045), the same pattern as settings-wire.json (T-004 option A3). event_names = voicen_core::local_models::service::{PROGRESS_EVENT, STATE_EVENT}; list_first_run = serde_json of LocalModels::list() over the production catalog MODELS and an empty models dir (what local_models_list returns before any download); states = serde_json of LocalModelState: not_downloaded, downloading {received 32800, total 65600}, downloaded, failed with ChecksumMismatch; events = serde_json of LocalModelEvent payloads: progress {base, 32800, 65600} and state {base, downloaded}; reasons = serde_json of ReasonView, keyed by code: from DownloadFailure (download_interrupted, checksum_mismatch, not_enough_disk_space {needed 66256}, source_unreachable {host huggingface.co}, disk_error, http_status {code 503}) and from DownloadError (download_busy, already_downloaded, not_enough_disk_space {needed 66256}, not_in_catalog, download_cannot_start). Kept in sync by the core test tests/local_models_service.rs e2e_local_models_wire_fixture_matches_core: when it fails, copy the value it prints. Never edit by hand to make an e2e test pass.",
+  "event_names": {
+    "progress": "local-model://progress",
+    "state": "local-model://state"
+  },
+  "list_first_run": [
+    {
+      "id": "tiny",
+      "nameKey": "local_model.name.tiny",
+      "sizeBytes": 77691713,
+      "recommended": false,
+      "state": {
+        "kind": "not_downloaded"
+      },
+      "loaded": false
+    },
+    {
+      "id": "base",
+      "nameKey": "local_model.name.base",
+      "sizeBytes": 147951465,
+      "recommended": false,
+      "state": {
+        "kind": "not_downloaded"
+      },
+      "loaded": false
+    },
+    {
+      "id": "small",
+      "nameKey": "local_model.name.small",
+      "sizeBytes": 487601967,
+      "recommended": true,
+      "state": {
+        "kind": "not_downloaded"
+      },
+      "loaded": false
+    },
+    {
+      "id": "medium-q5_0",
+      "nameKey": "local_model.name.medium-q5_0",
+      "sizeBytes": 539212467,
+      "recommended": false,
+      "state": {
+        "kind": "not_downloaded"
+      },
+      "loaded": false
+    },
+    {
+      "id": "large-v3-turbo-q5_0",
+      "nameKey": "local_model.name.large-v3-turbo-q5_0",
+      "sizeBytes": 574041195,
+      "recommended": false,
+      "state": {
+        "kind": "not_downloaded"
+      },
+      "loaded": false
+    }
+  ],
+  "states": {
+    "not_downloaded": {
+      "kind": "not_downloaded"
+    },
+    "downloading": {
+      "kind": "downloading",
+      "received": 32800,
+      "total": 65600
+    },
+    "downloaded": {
+      "kind": "downloaded"
+    },
+    "failed": {
+      "kind": "failed",
+      "reason": {
+        "code": "checksum_mismatch",
+        "messageKey": "download.checksum_mismatch"
+      }
+    }
+  },
+  "events": {
+    "progress": {
+      "id": "base",
+      "received": 32800,
+      "total": 65600
+    },
+    "state": {
+      "id": "base",
+      "state": {
+        "kind": "downloaded"
+      }
+    }
+  },
+  "reasons": {
+    "download_interrupted": {
+      "code": "download_interrupted",
+      "messageKey": "download.interrupted"
+    },
+    "checksum_mismatch": {
+      "code": "checksum_mismatch",
+      "messageKey": "download.checksum_mismatch"
+    },
+    "not_enough_disk_space": {
+      "code": "not_enough_disk_space",
+      "messageKey": "download.not_enough_disk_space",
+      "params": {
+        "needed": "66256"
+      }
+    },
+    "source_unreachable": {
+      "code": "source_unreachable",
+      "messageKey": "download.source_unreachable",
+      "params": {
+        "host": "huggingface.co"
+      }
+    },
+    "disk_error": {
+      "code": "disk_error",
+      "messageKey": "download.disk_error"
+    },
+    "http_status": {
+      "code": "http_status",
+      "messageKey": "download.http_status",
+      "params": {
+        "code": "503"
+      }
+    },
+    "download_busy": {
+      "code": "download_busy",
+      "messageKey": "download.busy"
+    },
+    "already_downloaded": {
+      "code": "already_downloaded",
+      "messageKey": "download.already_downloaded"
+    },
+    "not_in_catalog": {
+      "code": "not_in_catalog",
+      "messageKey": "download.not_in_catalog"
+    },
+    "download_cannot_start": {
+      "code": "download_cannot_start",
+      "messageKey": "download.cannot_start"
+    }
+  }
+}

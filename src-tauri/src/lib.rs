@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use tauri::{App, Builder, Context, RunEvent, Runtime};
 use voicen_core::autostart::Autostart;
+use voicen_core::local_models::service::LocalModels;
 use voicen_core::secrets::CredentialStore;
 use voicen_core::settings::service::SettingsService;
 use voicen_core::BuildInfo;
@@ -12,6 +13,7 @@ use voicen_core::BuildInfo;
 pub mod autostart;
 #[cfg(windows)]
 pub mod credentials;
+pub mod local_models;
 pub mod locale;
 pub mod paths;
 pub mod settings_ipc;
@@ -37,11 +39,17 @@ fn commands<R: Runtime>(builder: Builder<R>) -> Builder<R> {
 /// `settings://changed` bridge on the built app's handle. tauri 2.12.1 runs
 /// `.setup()` only from `run` / `run_iteration`, never from `build()`, so the bridge
 /// starts here, after `build()`; `run()` then only calls `.run(…)` on the result.
+///
+/// `local_models` is the one coordinator behind the local-model commands (T-044);
+/// its store is the one `run()` passed to `settings_ipc::load_settings`.
 pub fn build_app<R: Runtime>(
     builder: Builder<R>,
     context: Context<R>,
     service: Arc<SettingsService>,
+    local_models: Arc<LocalModels>,
 ) -> tauri::Result<App<R>> {
+    // Skeleton (T-044 red tests): the coordinator is not managed yet.
+    let _ = local_models;
     let app = commands(builder).manage(service.clone()).build(context)?;
     settings_ipc::spawn_change_bridge(app.handle().clone(), service);
     Ok(app)
@@ -105,11 +113,16 @@ fn release_launched_by_autostart() -> bool {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     log_start(&paths::log_dir());
+    // Skeleton (T-044 red tests): run() opens the one LocalModels here, over
+    // paths::models_dir() and local_models::WinDiskSpace (one fixed stderr line for
+    // a cleanup error).
+    let local_models: Arc<LocalModels> = todo!("T-044: LocalModels::open in run()");
     let os_language = locale::os_language();
     let (service, load_outcome) = settings_ipc::load_settings(
         paths::data_dir(),
         release_credentials(),
         release_autostart(),
+        local_models.store(),
         os_language.as_deref(),
     );
     let launched_by_autostart = release_launched_by_autostart();
@@ -117,6 +130,7 @@ pub fn run() {
         tauri::Builder::default(),
         tauri::generate_context!(),
         service,
+        local_models,
     )
     .expect("error while building tauri application")
     .run(move |app, event| {

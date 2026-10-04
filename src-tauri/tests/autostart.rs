@@ -10,6 +10,7 @@
 //! contents are read back with raw `RegQueryValueExW`.
 #![cfg(windows)]
 
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -19,11 +20,16 @@ use tauri::test::{get_ipc_response, mock_builder, mock_context, noop_assets, Moc
 use tauri::webview::InvokeRequest;
 use tauri::{App, WebviewWindow, WebviewWindowBuilder};
 use voicen_core::autostart::{Autostart, AutostartCall, AutostartError, FakeAutostart};
+use voicen_core::local_models::catalog::MODELS;
+use voicen_core::local_models::service::LocalModels;
+use voicen_core::local_models::store::ModelStore;
 use voicen_core::secrets::{CredentialStore, FakeCredentialStore};
 use voicen_core::settings::file::SETTINGS_FILE;
 use voicen_core::settings::service::SettingsService;
 use voicen_core::settings::{defaults, LoadOutcome, Settings};
+use voicen_core::test_support::local_models::FakeDisk;
 use voicen_core::test_support::TempDir;
+use voicen_core::timeouts::Timeouts;
 use voicen_lib::autostart::{
     launched_by_autostart, WinAutostart, AUTOSTART_ARG, RUN_SUBKEY, RUN_VALUE_NAME,
 };
@@ -199,6 +205,26 @@ fn no_keys() -> Arc<dyn CredentialStore> {
     Arc::new(FakeCredentialStore::new())
 }
 
+/// T-044: the store `load_settings` takes. No model is downloaded in these tests,
+/// and `ModelStore::new` creates nothing, so the data dir keeps only its own files.
+fn idle_store(data_dir: &Path) -> Arc<ModelStore> {
+    Arc::new(ModelStore::new(data_dir.join("models"), MODELS))
+}
+
+/// T-044: the one `LocalModels` that `build_app` manages; these tests never
+/// download. Its models dir lies under a throwaway dir that is removed at once, so
+/// it is never created.
+fn idle_models() -> Arc<LocalModels> {
+    let (models, cleanup) = LocalModels::open(
+        TempDir::new().path().join("models"),
+        FakeDisk::with_available(u64::MAX),
+        Timeouts::default(),
+        MODELS,
+    );
+    cleanup.expect("cleanup over a missing models dir");
+    Arc::new(models)
+}
+
 fn write_settings(dir: &TempDir, settings: &Settings) {
     let bytes = serde_json::to_vec_pretty(settings).expect("settings serialize");
     std::fs::write(dir.path().join(SETTINGS_FILE), bytes).expect("seed settings.json");
@@ -315,8 +341,13 @@ fn load_settings_writes_the_value_for_a_saved_on_setting() {
     let dir = TempDir::new();
     write_settings(&dir, &with_start(true));
 
-    let (_service, outcome) =
-        load_settings(dir.path().to_path_buf(), no_keys(), value.port(), None);
+    let (_service, outcome) = load_settings(
+        dir.path().to_path_buf(),
+        no_keys(),
+        value.port(),
+        idle_store(dir.path()),
+        None,
+    );
     assert_eq!(outcome, LoadOutcome::Loaded(with_start(true)));
     assert_eq!(value.read(), Some(expected_value()));
 }
@@ -330,8 +361,13 @@ fn load_settings_removes_the_value_for_a_saved_off_setting() {
     let dir = TempDir::new();
     write_settings(&dir, &with_start(false));
 
-    let (_service, outcome) =
-        load_settings(dir.path().to_path_buf(), no_keys(), value.port(), None);
+    let (_service, outcome) = load_settings(
+        dir.path().to_path_buf(),
+        no_keys(),
+        value.port(),
+        idle_store(dir.path()),
+        None,
+    );
     assert_eq!(outcome, LoadOutcome::Loaded(with_start(false)));
     assert_eq!(value.read(), None);
 }
@@ -344,8 +380,13 @@ fn load_settings_reconciles_through_the_injected_port() {
     // on another Autostart than the injected one.
     let dir = TempDir::new();
     let fake = Arc::new(FakeAutostart::enabled());
-    let (_service, outcome) =
-        load_settings(dir.path().to_path_buf(), no_keys(), fake.clone(), None);
+    let (_service, outcome) = load_settings(
+        dir.path().to_path_buf(),
+        no_keys(),
+        fake.clone(),
+        idle_store(dir.path()),
+        None,
+    );
     assert_eq!(outcome, LoadOutcome::FirstRun(defaults(None)));
     assert_eq!(
         fake.calls(),
@@ -363,8 +404,13 @@ fn load_settings_makes_no_autostart_call_while_unavailable() {
     let dir = TempDir::new();
     std::fs::create_dir(dir.path().join(SETTINGS_FILE)).expect("dir at settings.json");
     let fake = Arc::new(FakeAutostart::enabled());
-    let (_service, outcome) =
-        load_settings(dir.path().to_path_buf(), no_keys(), fake.clone(), None);
+    let (_service, outcome) = load_settings(
+        dir.path().to_path_buf(),
+        no_keys(),
+        fake.clone(),
+        idle_store(dir.path()),
+        None,
+    );
     assert!(
         matches!(outcome, LoadOutcome::Unavailable(_)),
         "{outcome:?}"
@@ -381,8 +427,13 @@ struct Harness {
 }
 
 fn harness(service: &Arc<SettingsService>) -> Harness {
-    let app = voicen_lib::build_app(mock_builder(), mock_context(noop_assets()), service.clone())
-        .expect("mock app builds");
+    let app = voicen_lib::build_app(
+        mock_builder(),
+        mock_context(noop_assets()),
+        service.clone(),
+        idle_models(),
+    )
+    .expect("mock app builds");
     let webview = WebviewWindowBuilder::new(&app, "settings", Default::default())
         .build()
         .expect("mock webview builds");
@@ -425,7 +476,13 @@ fn settings_save_on_writes_the_value_and_off_removes_it() {
     // service built without the injected Autostart.
     let value = TestValue::new();
     let dir = TempDir::new();
-    let (service, _) = load_settings(dir.path().to_path_buf(), no_keys(), value.port(), None);
+    let (service, _) = load_settings(
+        dir.path().to_path_buf(),
+        no_keys(),
+        value.port(),
+        idle_store(dir.path()),
+        None,
+    );
     let h = harness(&service);
 
     let on = h.save(&with_start(true));
@@ -453,7 +510,13 @@ fn settings_save_with_a_refused_registry_write_is_autostart_failed() {
     let dir = TempDir::new();
     let fake = Arc::new(FakeAutostart::new());
     fake.fail_set(true, AutostartError { os_code: 5 });
-    let (service, _) = load_settings(dir.path().to_path_buf(), no_keys(), fake.clone(), None);
+    let (service, _) = load_settings(
+        dir.path().to_path_buf(),
+        no_keys(),
+        fake.clone(),
+        idle_store(dir.path()),
+        None,
+    );
     let before = std::fs::read(dir.path().join(SETTINGS_FILE)).expect("first run wrote");
     let h = harness(&service);
 

@@ -9,8 +9,10 @@
 //! before the end event (best effort: a failed removal is ignored; the leftover
 //! is never read as a model, the next start truncates it and
 //! [`store::ModelStore::cleanup_at_start`] removes it). [`store::ModelStore`] is the one `DownloadedModels` the settings
-//! validation, the IPC list and the engine read.
+//! validation, the IPC list and the engine read. [`service::LocalModels`] is the
+//! coordinator the shell's commands and events go through (T-044, decision #57).
 
 pub mod catalog;
 pub mod download;
+pub mod service;
 pub mod store;

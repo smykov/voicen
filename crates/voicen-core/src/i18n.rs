@@ -161,6 +161,27 @@ messages! {
     DOWNLOAD_DISK_ERROR = "download.disk_error",
     /// `DownloadFailure::HttpStatus`; placeholder `{code}` = the HTTP status.
     DOWNLOAD_HTTP_STATUS = "download.http_status",
+    /// `DownloadError::Busy`, wire code `download_busy`: another download runs
+    /// (T-044).
+    DOWNLOAD_BUSY = "download.busy",
+    /// `DownloadError::AlreadyDownloaded`, wire code `already_downloaded` (T-044).
+    DOWNLOAD_ALREADY_DOWNLOADED = "download.already_downloaded",
+    /// `DownloadError::NotInCatalog` or an id string `ModelId::parse` rejects, wire
+    /// code `not_in_catalog` (T-044).
+    DOWNLOAD_NOT_IN_CATALOG = "download.not_in_catalog",
+    /// `DownloadError::CannotStart` (the OS refused the download thread), wire code
+    /// `download_cannot_start` (T-044).
+    DOWNLOAD_CANNOT_START = "download.cannot_start",
+    /// `LocalModelView.nameKey` of `tiny` (T-044).
+    LOCAL_MODEL_NAME_TINY = "local_model.name.tiny",
+    /// `LocalModelView.nameKey` of `base` (T-044).
+    LOCAL_MODEL_NAME_BASE = "local_model.name.base",
+    /// `LocalModelView.nameKey` of `small` (T-044).
+    LOCAL_MODEL_NAME_SMALL = "local_model.name.small",
+    /// `LocalModelView.nameKey` of `medium-q5_0` (T-044).
+    LOCAL_MODEL_NAME_MEDIUM_Q5_0 = "local_model.name.medium-q5_0",
+    /// `LocalModelView.nameKey` of `large-v3-turbo-q5_0` (T-044).
+    LOCAL_MODEL_NAME_LARGE_V3_TURBO_Q5_0 = "local_model.name.large-v3-turbo-q5_0",
     ;
     nested:
     /// `MicCause::NoDevice`.

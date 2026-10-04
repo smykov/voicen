@@ -2,6 +2,7 @@
 //! `test-fakes`; never in a release build).
 
 pub mod fixtures;
+pub mod local_models;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
