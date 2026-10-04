@@ -1,0 +1,16 @@
+# Fixture shell dir for scripts/ci/shell-test-layout.test.sh; never built.
+# T-038 review round 3, finding 1 (decision #42 B): a root-level line before the first header
+# can make a target table without any header, so only blank lines and comments may precede it.
+# The rule refuses any key there, not only target names: stable cargo has no root-level key.
+x = 1
+
+[package]
+name = "shell-layout-fixture"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "shell_layout_fixture_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+doctest = false

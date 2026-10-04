@@ -1,0 +1,16 @@
+"bin" = [{ name = "voicen", path = "../outside/main.rs" }]
+# Fixture shell dir for scripts/ci/shell-test-layout.test.sh; never built.
+# T-038 review round 3, finding 1 (decision #42 B): a root-level line before the first header
+# can make a target table without any header, so only blank lines and comments may precede it.
+# The quoted key is the same key as bare bin (probe n); here it is line 1, with nothing before it.
+
+[package]
+name = "shell-layout-fixture"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "shell_layout_fixture_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+doctest = false

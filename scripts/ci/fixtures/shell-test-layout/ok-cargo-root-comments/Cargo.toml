@@ -1,0 +1,21 @@
+# Fixture shell dir for scripts/ci/shell-test-layout.test.sh; never built.
+
+# T-038 review round 3 (decision #42 B): before the first header only blank lines and comments
+# pass, and a comment may hold [ ] { } = and quotes: bin = [{ path = "../outside/main.rs" }]
+   # an indented comment: x = 1
+	
+#[[bin]] path = "../outside/main.rs"
+#[lib]
+    
+# "bin" = [{ name = "voicen" }]   # a second # in a comment
+
+[package]
+name = "shell-layout-fixture"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "shell_layout_fixture_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+doctest = false

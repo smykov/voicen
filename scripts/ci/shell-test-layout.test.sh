@@ -201,6 +201,17 @@ check v-cargo-header-real-lib-then-fake 1 "v-cargo-header-real-lib-then-fake/Car
 # any invisible prefix, cannot hide a header or a key.
 check v-cargo-bom-bin                 1 "v-cargo-bom-bin/Cargo.toml:1:"                  # BOM [[bin]] / path = "../outside/main.rs", cargo strips the BOM
 check ok-cargo-quoted-header-keys     0 "ok:"                                            # ["lib"] is [lib]; 'cfg(all(.., target_arch = "x86_64"))' target key; non-ASCII in strings, keys and comments
+# T-038 review round 3, finding 1 (decision #42 B): before the first header only blank lines
+# and comments. A root-level line there can make a target table with no header at all (an
+# inline array of tables), which cargo 1.99 builds; stable cargo has no root-level key, so any
+# key there is refused, not only the target names.
+check v-cargo-root-inline-bin         1 "v-cargo-root-inline-bin/Cargo.toml:5:"          # bin = [{ name = "voicen", path = "../outside/main.rs" }] (probe g)
+check v-cargo-root-inline-bin-quoted  1 "v-cargo-root-inline-bin-quoted/Cargo.toml:1:"   # "bin" = [{ .. }] on line 1, comments after it (probe n)
+check v-cargo-root-inline-example     1 "v-cargo-root-inline-example/Cargo.toml:5:"      # example = [{ .., test = true }]: plain cargo test runs it (probe h)
+check v-cargo-root-inline-bench       1 "v-cargo-root-inline-bench/Cargo.toml:5:"        # bench = [{ .., test = true }] (probe i)
+check v-cargo-root-inline-test        1 "v-cargo-root-inline-test/Cargo.toml:5:"         # test = [{ .., path = "../outside/t.rs" }] (probe j)
+check v-cargo-root-plain-key          1 "v-cargo-root-plain-key/Cargo.toml:5:"           # x = 1: no target name, no path, still refused
+check ok-cargo-root-comments          0 "ok:"                                            # blank, whitespace-only (tab, spaces) and comment lines holding [ ] { } = " before [package]
 
 # Cannot run: exit 3.
 check does-not-exist            3 "cannot run"
