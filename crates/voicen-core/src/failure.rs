@@ -257,6 +257,21 @@ mod tests {
                 send(false, false, true, None),
                 FailureReason::Timeout,
             ),
+            // Contract openai-transcription.md › Classification 5: a send error with
+            // none of the flags (closed before a response, protocol error) is
+            // UnexpectedResponse, also with an io kind that is not a network one.
+            // Bite: the flagless Send arm mapped to Timeout or CannotReach, or
+            // ConnectionReset treated as a network/connect kind.
+            (
+                "send, no flags, no io kind",
+                send(false, false, false, None),
+                FailureReason::UnexpectedResponse,
+            ),
+            (
+                "send, no flags, io ConnectionReset",
+                send(false, false, false, Some(ErrorKind::ConnectionReset)),
+                FailureReason::UnexpectedResponse,
+            ),
             (
                 "stall mid-body",
                 TransportError::BodyRead { timeout: true },

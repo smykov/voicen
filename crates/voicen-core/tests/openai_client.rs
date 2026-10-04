@@ -725,3 +725,72 @@ async fn no_failure_contains_query_key_or_transcript() {
     }
     assert!(wrong.is_empty(), "\n{}", wrong.join("\n"));
 }
+
+// ---- Review round 1 finding 4: an unusable stored key --------------------------
+
+/// Keys with an inner control character that no HTTP header value may carry
+/// (fake values). Tab is a legal header byte, so it is not among them.
+const UNUSABLE_KEYS: [&str; 5] = [
+    "sk-test-a\nb",
+    "sk-test-a\rb",
+    "sk-test-a\u{0}b",
+    "sk-test-a\u{1}b",
+    "sk-test-a\u{7f}b",
+];
+
+#[tokio::test]
+async fn key_with_inner_control_char_is_invalid_api_key_and_sends_nothing() {
+    // Review 1 #4: a stored key with an inner control character cannot become an
+    // `Authorization` header. The user must be told the key is the problem
+    // (InvalidApiKey), not that the server is unreachable (today the header build
+    // error is a builder error -> Setup -> CannotReach{host}); and no request may
+    // reach the server (no request without the key's header, no retry without it).
+    // Bite: the header-build failure classified as Setup/CannotReach; the bad key
+    // silently dropped (the request then goes out without Authorization and gets
+    // Ok, or reaches the server at all).
+    let mut wrong = Vec::new();
+    for key in UNUSABLE_KEYS {
+        let server = server_with(ok_text("hello")).await;
+        let got = transcribe(
+            api_engine(&format!("{}/v1", server.uri()), Some(key)),
+            req(None),
+        );
+        if got != Err(FailureReason::InvalidApiKey) {
+            wrong.push(format!("{key:?}: {got:?}, expected Err(InvalidApiKey)"));
+        }
+        let sent = server
+            .received_requests()
+            .await
+            .expect("request recording is on")
+            .len();
+        if sent != 0 {
+            wrong.push(format!("{key:?}: {sent} request(s) reached the server"));
+        }
+    }
+    assert!(wrong.is_empty(), "\n{}", wrong.join("\n"));
+}
+
+#[tokio::test]
+async fn engine_for_stored_key_with_control_char_is_invalid_api_key_and_sends_nothing() {
+    // The same guarantee on the path the user hits: the key comes from the
+    // credential store through `engine_for`. Either the factory refuses with
+    // InvalidApiKey, or its engine's `transcribe` does; never CannotReach, never a
+    // request. Bite: as above, for a fix placed only where `engine_for` does not
+    // reach it.
+    let server = server_with(ok_text("hello")).await;
+    let mut settings = defaults(None);
+    settings.engine = EngineKind::Api;
+    settings.api.base_url = format!("{}/v1", server.uri());
+    let creds = FakeCredentialStore::new().with_key(KeySlot::TranscriptionApi, "sk-test-a\nb");
+    let got = match engine_for(&settings, &creds) {
+        Ok(engine) => transcribe(engine, req(None)),
+        Err(e) => Err(e),
+    };
+    assert_eq!(got, Err(FailureReason::InvalidApiKey));
+    let sent = server
+        .received_requests()
+        .await
+        .expect("request recording is on")
+        .len();
+    assert_eq!(sent, 0, "a request reached the server");
+}
