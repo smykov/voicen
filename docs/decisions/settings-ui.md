@@ -1,8 +1,8 @@
 # Settings window (UI)
 
-**Code:** `src/routes/settings/+page.svelte`, `src/lib/settings/{draft,settingsApi,fields}.ts`, `src/lib/settings/{FieldMessage,KeyField,HotkeyField}.svelte`, `src/lib/settings/tabs/*.svelte`, the IPC mock `e2e/support/tauriMock.ts` (T-004); the window lifecycle `src-tauri/src/settings_window.rs`, its call in `run()` (`src-tauri/src/lib.rs`), `src-tauri/tauri.conf.json` (`app.windows`), `src-tauri/capabilities/default.json`, core `SettingsTab::as_str` (T-037) · **Tests that pin it:** `e2e/settings-first-run.spec.ts` (every case; per invariant below), `e2e/tauri-mock.spec.ts` (the mock's own contract), `src/lib/settings/draft.test.ts`, `src/lib/i18n/ids.test.ts` (type-level, run by svelte-check), core `i18n::tests::every_error_code_has_catalog_text` and `settings::service::tests::{e2e_settings_wire_fixture_matches_core, settings_view_wire_form_carries_unavailable}`; for S1 `src-tauri/tests/settings_window.rs` (Windows CI), core `settings::gate::tests::{settings_tab_tokens_are_the_ipc_contract, settings_tab_tokens_are_distinct_url_safe_words}` and the install smoke's window checks in `.github/workflows/ci.yml`
+**Code:** `src/routes/settings/+page.svelte`, `src/lib/settings/{draft,settingsApi,fields}.ts`, `src/lib/settings/{FieldMessage,KeyField,HotkeyField}.svelte`, `src/lib/settings/tabs/*.svelte`, the IPC mock `e2e/support/tauriMock.ts` (T-004); the window lifecycle `src-tauri/src/settings_window.rs`, its call in `run()` (`src-tauri/src/lib.rs`), `src-tauri/tauri.conf.json` (`app.windows`), `src-tauri/capabilities/default.json`, core `SettingsTab::as_str` (T-037) · **Tests that pin it:** `e2e/settings-first-run.spec.ts` (every case; per invariant below), `e2e/settings-focus-close.spec.ts` (F, D, R, L; T-039), `e2e/tauri-mock.spec.ts` (the mock's own contract), `src/lib/settings/draft.test.ts`, `src/lib/i18n/ids.test.ts` (type-level, run by svelte-check), core `i18n::tests::{every_error_code_has_catalog_text, every_field_id_has_label_text}` and `settings::service::tests::{e2e_settings_wire_fixture_matches_core, settings_view_wire_form_carries_unavailable}`; for S1 `src-tauri/tests/settings_window.rs` (Windows CI), core `settings::gate::tests::{settings_tab_tokens_are_the_ipc_contract, settings_tab_tokens_are_distinct_url_safe_words}` and the install smoke's window checks in `.github/workflows/ci.yml`
 
-Tasks: T-004, T-037 (S1). Contract: `specs/004-settings-and-first-run/contracts/ipc.md` (commands, wire form, FieldId, errors). Decisions: #30, #38, #45. Core side: `docs/decisions/settings.md`; message ids: `docs/decisions/i18n.md`. Tabs added later (T-013, T-016, T-021, T-034) live in this route and keep these invariants.
+Tasks: T-004, T-037 (S1), T-039 (F, D, R, L). Contract: `specs/004-settings-and-first-run/contracts/ipc.md` (commands, wire form, FieldId, errors). Decisions: #30, #38, #45. Core side: `docs/decisions/settings.md`; message ids: `docs/decisions/i18n.md`. Tabs added later (T-013, T-016, T-021, T-034) live in this route and keep these invariants.
 
 ## Invariants
 
@@ -52,6 +52,34 @@ Tasks: T-004, T-037 (S1). Contract: `specs/004-settings-and-first-run/contracts/
 - **Where it is enforced:** `tabs/History.svelte` keeps the typed entry. The draft holds the wire number, which is `0` for an entry that is not an unsigned whole number. Core refuses `0` with `history.size_range`, and the range is core's rule only. Test: "clearing the history size and typing a digit gives that digit, not a leading 0".
 - **Don't:** use a coercing `bind:value` accessor on a number input.
 
+### F — A focus request selects one tab by one rule and focuses an exact match only
+
+- **Defect that produced it:** none in the failure log (need, T-039). The page read only `?tab=`, so `?field=` and `settings://focus` (sent by `settings_window::open`, S1) reached nothing.
+- **What breaks if you violate it:** the shell asks for a field and the user sees another tab, a field on another tab gets "focused" through a FieldId → tab rule beside the shell's, or a malformed `field` throws in a selector.
+- **Where it is enforced:** `+page.svelte`. `tabOf(tab)` is the one rule for the URL and the event: the requested tab if the page has it, else Engine. `?field=` on load and `settings://focus {tab, field?}` (`onFocusRequest` in `settingsApi.ts`) set the tab and a pending request; an `$effect`, which runs after the DOM update and once the draft and panel exist, focuses the panel's `[data-field]` element whose `dataset.field` equals the field exactly. No match focuses nothing and shows nothing. Tests: the five (F) cases of `settings-focus-close.spec.ts` (URL, event twice, a field on another tab, selector syntax, `post_processing` → Engine).
+- **Don't:** derive a tab from the FieldId prefix, build a selector from `field`, match by `controlId` (it maps `.` and `-` alike), or show an error for an unmatched field.
+
+### D — The window closes only through destroy, after a prompt when the draft is dirty
+
+- **Defect that produced it:** none in the failure log (need, T-039). tauri prevents the native close whenever a JS `tauri://close-requested` listener exists, and `onCloseRequested` destroys the window after the handler unless `preventDefault()` ran before it returned (@tauri-apps/api 2.12.1).
+- **What breaks if you violate it:** unsaved edits are lost without a question, or the window can no longer be closed (a throwing handler, a `close()` that re-emits close-requested and is not granted).
+- **Where it is enforced:** `onCloseRequested` and `destroyWindow` in `settingsApi.ts` (the window's only IPC module); the handler in `+page.svelte` calls `preventDefault()` synchronously when `isDirty(draft)` and shows the in-page `role="alertdialog"` (keep editing: nothing changes; discard: `destroyWindow()`, on failure `error.ipc_unavailable`). A clean or not-yet-loaded draft is not prevented; the handler never throws. The close listener is registered after `settings_get`, so before it exists the shell does not prevent the close. While the prompt is open the page is `inert`; Escape keeps editing. The mock records `plugin:window|destroy` and rejects `plugin:window|close`, as the ACL does. Tests: the (D) cases of `settings-focus-close.spec.ts`; `tauri-mock.spec.ts` › destroy / close.
+- **Don't:** call `close()`, prevent after an `await`, add tauri's dialog plugin for the prompt (not a dependency, not granted; owner default Q2), or prevent a clean close.
+
+### R — Untouched, Save sends the view back unchanged
+
+- **Defect that produced it:** none in the failure log (need, T-039, spec 004 T036): nothing pinned that a control does not rewrite its value on mount or on a tab switch.
+- **What breaks if you violate it:** opening the window and saving changes a setting the user never touched.
+- **Where it is enforced:** `saveRequest` copies the draft; every control binds to its draft value. Test: the (R) case of `settings-focus-close.spec.ts` (a full non-default `Settings` literal, key shape checked against core's fixture, all five tabs visited, `request.settings` deep-equal to the view and every key `Untouched`).
+- **Don't:** normalize a value in a control (`$effect.pre`, a select whose options are not loaded yet) so that it writes to the draft without a user edit.
+
+### L — A field is named by one rule, `settings.field_label.<FieldId>`
+
+- **Defect that produced it:** T-004 review round 2 (Low 1): a `not_restored` field without a control on the page (`engine.api.key` while another engine is selected, `general.start_with_windows` until T-034) was not named anywhere; the control labels are shared across fields and cannot name one.
+- **What breaks if you violate it:** the user is told to check fields they cannot see, or sees a raw FieldId.
+- **Where it is enforced:** `fieldLabelId(field)` in `draft.ts` (the second documented cast, i18n.md), backed by core `every_field_id_has_label_text` over `FieldId::ALL` (kept complete by hand, next to the enum). The form-level message lists by `t(fieldLabelId(f))` each `not_restored` field with no `[data-field]` control in the panel; the panel's controls are collected by a `MutationObserver`, so whatever decides to render a control (tab, engine, a later tab) needs no list here. A field with a control keeps its field-level message (U2). Test: the (L) case of `settings-focus-close.spec.ts`.
+- **Don't:** keep a TS FieldId → label table, show the raw FieldId, or list a field that has a control on the page.
+
 ## Rejected approaches
 
 | Approach | Why rejected | Ref |
@@ -60,7 +88,10 @@ Tasks: T-004, T-037 (S1). Contract: `specs/004-settings-and-first-run/contracts/
 | Validating in the mock or in the UI before `settings_save` | a second copy of core rules (P-010) | decision #38 |
 | Keeping the config window (`create: false`) and showing it at start, or building the window in `setup()` | a second construction path beside `open`; `setup()` never runs from `build_app` or the shell tests | T-037 analysis (options B, C) |
 | Wire types declared again in the e2e mock | two TS declarations of one wire; the mock re-exports `settingsApi.ts` | T-004 review r1 #8 |
+| Taking the focus tab from the FieldId prefix | a second tab rule beside the shell's `SettingsTab` (U1) | T-039 analysis |
+| A hand-kept TS FieldId → label table | a second copy of the enum (P-010); the label id is built by rule and checked by core | T-039 analysis |
+| tauri's dialog plugin for the discard prompt | not a dependency and not granted; an in-page `alertdialog` needs neither | T-039 Q2 |
 
 ## Open
 
-- A `not_restored` field is highlighted only where its control is rendered. Examples: `engine.api.key` while another engine is selected, and `general.start_with_windows` until T-034 adds its control. In those cases the form message alone tells the user. Listing such fields by label in the form message would need a FieldId → label map (no owner yet).
+- None. (Closed by T-039: a `not_restored` field without a control on the page is listed by label in the form message, invariant L.)

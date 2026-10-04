@@ -150,10 +150,21 @@ export function errorsByField(errors: readonly FieldError[]): Record<string, Mes
 
 /**
  * The catalog id of an ErrorCode: `error.<code>`, for any code (no list of codes in
- * the UI). The one cast from a wire string to `MessageId` in the UI: core's
- * `every_error_code_has_catalog_text` guarantees that `error.<code>` has a text in
- * both catalogs for every `ErrorCode` it can send (docs/decisions/i18n.md).
+ * the UI). One of the two casts from a wire string to `MessageId` in the UI (the other
+ * is `fieldLabelId`): core's `every_error_code_has_catalog_text` guarantees that
+ * `error.<code>` has a text in both catalogs for every `ErrorCode` it can send
+ * (docs/decisions/i18n.md).
  */
 export function errorMessageId(code: string): MessageId {
   return `error.${code}` as MessageId;
+}
+
+/**
+ * The catalog id of a FieldId's label: `settings.field_label.<FieldId>`, for any field
+ * (no FieldId -> label table in the UI). The second documented cast from a wire string
+ * to `MessageId`: core's `every_field_id_has_label_text` guarantees that the id has a
+ * text in both catalogs for every `FieldId` it can send (docs/decisions/i18n.md).
+ */
+export function fieldLabelId(field: string): MessageId {
+  return `settings.field_label.${field}` as MessageId;
 }

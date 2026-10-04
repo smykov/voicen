@@ -4,7 +4,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import conformance from "$i18n/conformance.json";
 import en from "$i18n/en.json";
 import ru from "$i18n/ru.json";
-import { catalogProblems, text, type Catalog, type UiLanguage } from "./index";
+import { catalogProblems, type Catalog, type UiLanguage } from "./index";
+import { text } from "./render";
 
 /** Format: the `_format` key of `i18n/conformance.json`. */
 interface ConformanceCase {

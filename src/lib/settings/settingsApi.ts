@@ -1,10 +1,11 @@
 // The settings IPC as the window sees it (spec 004 contracts/ipc.md, T-004).
 //
 // Wire types are the serde forms of voicen_core (contracts/ipc.md › Wire form); this
-// module holds the only invoke/listen calls of the settings window. The window never
-// builds a SettingsView itself: every one it shows comes from here (U1).
+// module holds the only invoke/listen/window calls of the settings window. The window
+// never builds a SettingsView itself: every one it shows comes from here (U1).
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { getCurrentWindow, type CloseRequestedEvent } from "@tauri-apps/api/window";
 // Relative, not `$lib`: e2e/support/tauriMock.ts imports these wire types too.
 import type { MessageId, UiLanguage } from "../i18n";
 
@@ -94,4 +95,37 @@ export function speechLanguages(): Promise<string[]> {
 /** `settings://changed`: the view after every save, from any window. */
 export function onSettingsChanged(handler: (view: SettingsView) => void): Promise<UnlistenFn> {
   return listen<SettingsView>("settings://changed", (event) => handler(event.payload));
+}
+
+/**
+ * `settings://focus {tab, field?}`: the shell asks the open window to show `tab` and
+ * focus the control of `field` (settings_window::open; contracts/ipc.md). `tab` is a
+ * `SettingsTab` token and `field` a FieldId, both as the shell sent them.
+ */
+export interface FocusRequest {
+  tab: string;
+  field?: string;
+}
+
+/** `settings://focus`: a focus request on the open window (see `FocusRequest`). */
+export function onFocusRequest(handler: (request: FocusRequest) => void): Promise<UnlistenFn> {
+  return listen<FocusRequest>("settings://focus", (event) => handler(event.payload));
+}
+
+/**
+ * `tauri://close-requested` on this window. tauri destroys the window after `handler`
+ * returns unless it called `event.preventDefault()` first (@tauri-apps/api 2.12.1
+ * `onCloseRequested`), so a handler that keeps the window must prevent synchronously,
+ * and must not throw (a throwing handler leaves the window impossible to close).
+ */
+export function onCloseRequested(handler: (event: CloseRequestedEvent) => void): Promise<UnlistenFn> {
+  return getCurrentWindow().onCloseRequested(handler);
+}
+
+/**
+ * Close this window for good (`plugin:window|destroy`, granted to label `settings`).
+ * The window never calls `close()`: it re-emits close-requested and is not granted.
+ */
+export function destroyWindow(): Promise<void> {
+  return getCurrentWindow().destroy();
 }
