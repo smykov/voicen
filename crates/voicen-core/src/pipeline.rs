@@ -61,7 +61,8 @@ pub struct JobReport {
     pub pending: Option<PendingId>,
 }
 
-/// The job sequencer. `Send + Sync`, shared by the job threads.
+/// The job sequencer. `Send + Sync`: jobs may run on several threads at once;
+/// the pending slot changes only under its one lock (see `keep_pending`).
 pub struct Pipeline {
     deps: PipelineDeps,
     /// The one source of every request's durations (FR-24).
@@ -312,23 +313,38 @@ impl Pipeline {
 
     /// Stores the audio under a new id, makes it the one pending recording (or
     /// none, if storing failed), and deletes the audio it replaced either way.
+    ///
+    /// The id, the store write and the swap happen under the slot lock, so with
+    /// concurrent failing jobs the slot always holds the audio of the last job to
+    /// take the lock, and a job reports only an id it put in the slot itself (a
+    /// later job may replace it, as any newer failure does). The replaced audio is
+    /// deleted after the lock is released: its id has left the slot and is never
+    /// handed out again.
     fn keep_pending(&self, audio: &AudioBuffer, reason: &FailureReason) -> Option<PendingId> {
-        let id = PendingId(
-            self.last_pending_id
-                .fetch_add(1, Ordering::Relaxed)
-                .wrapping_add(1),
-        );
-        let stored = self.deps.temp_audio.put_pending(id, audio).is_ok();
-        let entry = stored.then(|| PendingRecording {
-            id,
-            reason: reason.clone(),
-        });
-        let older = std::mem::replace(&mut *lock(&self.pending), entry);
+        let (stored, older) = {
+            let mut slot = lock(&self.pending);
+            let id = PendingId(
+                self.last_pending_id
+                    .fetch_add(1, Ordering::Relaxed)
+                    .wrapping_add(1),
+            );
+            let stored = self
+                .deps
+                .temp_audio
+                .put_pending(id, audio)
+                .is_ok()
+                .then_some(id);
+            let entry = stored.map(|id| PendingRecording {
+                id,
+                reason: reason.clone(),
+            });
+            (stored, std::mem::replace(&mut *slot, entry))
+        };
         if let Some(older) = older {
             // Errors are ignored: the start/exit delete_all (T-007) removes leftovers.
             let _ = self.deps.temp_audio.delete_pending(older.id);
         }
-        stored.then_some(id)
+        stored
     }
 }
 

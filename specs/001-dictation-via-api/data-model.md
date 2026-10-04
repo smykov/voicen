@@ -157,7 +157,7 @@ In code: `voicen_core::failure::FailureReason` with `code()` (the Code column wi
 
 - `TrayState`: `Idle` \| `Recording` \| `Error` \| `HotkeyError`.
   - Priority: `HotkeyError` > `Recording` > `Error` > `Idle`.
-  - `Error` is cleared by the next successful delivery (`Pasted` or `CopiedOnly`) or by opening the tray menu.
+  - `Error` is cleared by the next successful delivery (any `JobEnd::Delivered`: `Pasted`, `CopiedOnly` or `CopyManual`; FR-25 "until the next successful dictation") or by opening the tray menu.
   - `HotkeyError` is cleared only by a successful registration.
 - `OverlayState`: `Hidden` \| `Recording` \| `Processing` \| `Message{key, params, until}`.
   - `Recording` while a recording is on.

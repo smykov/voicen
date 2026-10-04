@@ -68,7 +68,7 @@ pub trait PostProcessor: Send + Sync {
 pub struct PostProcessed { pub text: String, pub notice: Option<MessageId> }
 ```
 
-`PassThrough` returns `PostProcessed{ text, notice: None }` (the text unchanged, not trimmed). The pipeline calls it only for a non-blank engine text; a blank result is `NoSpeech`. T-020 widens the arguments (credentials, timeouts) and decides how its notice combines with a delivery notice (`JobEnd::Delivered` has one slot; until then the delivery notice wins, else the post-processor's).
+`PassThrough` returns `PostProcessed{ text, notice: None }` (the text unchanged, not trimmed). The pipeline calls it only for a non-blank engine text; a blank result is `NoSpeech`. T-020 widens the arguments (credentials, timeouts) and decides how its notice combines with a delivery notice (`JobEnd::Delivered` has one slot; until then the delivery notice wins, else the post-processor's; this interim rule is untested, since no post-processor produces a notice before T-020, which decides it and pins it with a test).
 
 ## Platform traits (implemented in `src-tauri/src/win/*`, faked in tests)
 
@@ -158,7 +158,7 @@ impl Pipeline {                                            // Send + Sync
 `run_job` is the only path a finished recording takes. The shell reads `rec.id()` first and then calls `controller.job_finished(id, report.end, at)`. Inside, two private halves (T-011 puts the delivery queue between them):
 
 - `process`: `gate.decide(audio)` → (speech only) `factory(&settings, &*credentials)` → `transcribe(audio, &TranscribeRequest{ language: settings.speech_language, timeouts })` with the pipeline's one `Timeouts` → `post_processor.process`. No speech, a blank engine text or a blank post-processed text is `NoSpeech`; without speech there is no factory call, no credential read and no request.
-- `release`: a text goes through `delivery::deliver` (clipboard first, then data-model "DeliveryDecision", `MODIFIER_WAIT` = 1 s); a clipboard error is `Failed(ClipboardUnavailable)`. A retryable failure stores the audio under a new `PendingId`, swaps the one pending slot to it (or to nothing, if the store failed) and deletes the audio it replaced (decision #47 (4)); `Text` and `NoSpeech` leave the slot as it is.
+- `release`: a text goes through `delivery::deliver` (clipboard first, then data-model "DeliveryDecision", `MODIFIER_WAIT` = 1 s); a clipboard error is `Failed(ClipboardUnavailable)`. A retryable failure stores the audio under a new `PendingId`, swaps the one pending slot to it (or to nothing, if the store failed) and deletes the audio it replaced (decision #47 (4)); id, store write and swap happen under the slot's one lock, so concurrent failing jobs leave the audio of the last one to take the lock in the slot, and a job reports only an id it put there itself (the replaced audio is deleted after the lock is released); `Text` and `NoSpeech` leave the slot as it is.
 - Events, only on the one observer and in this order: `Warning{vad_fallback}` (when `GateDecision.fallback_warning`), `SpeechGate`, `JobFinished` (after the clipboard write), `Delivered` (only for a delivered text).
 
 `JobEnd` mapping: `Pasted` → `Delivered{notice: None}`, `CopiedOnly` → `Delivered{notice.copied}`, `CopyManual` → `Delivered{notice.copied_paste_manually}`, `NoSpeech` → `Notice(notice.no_speech)`, `Failed(r)` → `Failed(r)`.
