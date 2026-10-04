@@ -645,7 +645,9 @@ fn a_refused_start_changes_no_state_and_emits_nothing() {
     // Failed keeps its reason, the running model stays Downloading. Bite: the
     // transient Downloading set before start and not undone on Err, a Failed
     // dropped by a refused retry (the list then disagrees with the last event), a
-    // refusal reported through emit.
+    // refusal reported through emit. This holds for busy, not_enough_disk_space,
+    // not_in_catalog and download_cannot_start; already_downloaded is the one
+    // exception (a_failed_never_hides_a_model_downloaded_on_disk_...).
     let w = world(vec![Serve::Status(500), trickle()]);
     let mut first = start(&w, "base");
     first.wait_state();
@@ -711,6 +713,58 @@ fn already_downloaded_is_refused_with_its_code() {
         LocalModelState::Downloaded
     );
     assert_eq!(w.server.accepts(), 0);
+}
+
+#[test]
+fn a_failed_never_hides_a_model_downloaded_on_disk_and_a_retry_does_not_bring_it_back() {
+    // Review round 1 #1. Invariant: an in-memory Failed never masks a disk
+    // Downloaded, so list() agrees with store().is_downloaded (settings validation,
+    // the same Arc). The one exception to "a refused start keeps the state it had"
+    // is AlreadyDownloaded: the refusal itself says the disk has the model. The
+    // final file appears outside a download (a manual copy, a second instance).
+    // Bite: list() preferring a transient Failed over the disk Downloaded, or the
+    // Err branch of download() restoring the Failed after already_downloaded.
+    let w = world(vec![Serve::Altered]);
+    let mut first = start(&w, "base");
+    let end = first.wait_state();
+    let failed = LocalModelState::Failed {
+        reason: DownloadFailure::ChecksumMismatch,
+    };
+    assert_eq!(
+        end.event,
+        LocalModelEvent::State {
+            id: ModelId::Base,
+            state: failed,
+        },
+        "precondition: the download failed"
+    );
+
+    put(&w.dir, &final_name(ModelId::Base), &model_bytes());
+    assert!(
+        w.models.store().is_downloaded("base"),
+        "precondition: the store (settings validation) sees the copied model"
+    );
+
+    let mut expected = all_not_downloaded();
+    expected[1].1 = LocalModelState::Downloaded;
+    assert_eq!(
+        states(&w.models),
+        expected,
+        "list() after the file appeared disagrees with store().is_downloaded"
+    );
+
+    let got = refused(&w, "base");
+    assert_eq!(
+        got,
+        reason("already_downloaded", i18n::DOWNLOAD_ALREADY_DOWNLOADED, &[])
+    );
+    assert_eq!(
+        states(&w.models),
+        expected,
+        "list() after the already_downloaded refusal"
+    );
+    assert!(w.models.store().is_downloaded("base"));
+    assert_eq!(w.server.accepts(), 1, "the refused retry sent a request");
 }
 
 #[test]
