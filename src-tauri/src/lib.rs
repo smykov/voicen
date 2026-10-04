@@ -15,6 +15,7 @@ pub mod credentials;
 pub mod locale;
 pub mod paths;
 pub mod settings_ipc;
+pub mod settings_window;
 
 #[tauri::command]
 fn get_build_info() -> BuildInfo {
