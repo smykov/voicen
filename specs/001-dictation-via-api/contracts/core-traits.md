@@ -42,7 +42,18 @@ pub trait SpeechDetector: Send + Sync {
 }
 ```
 
-`SpeechGate::new(primary: Result<Box<dyn SpeechDetector>, VadError>, fallback: EnergyDetector)`. If `primary` is `Err`, or returns `Err` at run time, the gate uses the fallback and emits `Warning{vad_fallback}` once.
+```rust
+#[non_exhaustive]
+pub enum VadError { Unavailable, Failed }   // static Display texts: no path, no audio
+
+impl SpeechGate {
+    pub fn new(primary: Result<Box<dyn SpeechDetector>, VadError>, fallback: EnergyDetector) -> SpeechGate;
+    pub fn decide(&self, audio: &AudioBuffer) -> GateDecision;   // infallible; Send + Sync, shared by job workers
+}
+pub struct GateDecision { pub speech: bool, pub detector: &'static str, pub fallback_warning: bool }
+```
+
+`decide` returns the primary's `Ok(answer)` with the primary's name. If `primary` is `Err`, or returns `Err` at run time, that recording and every later one is decided by the fallback (`detector: "energy"`); the runtime error latches, and the primary is never called again on that gate. A primary error is never treated as speech. Exactly one decision per gate carries `fallback_warning: true` (an atomic swap, so also under concurrent workers). The gate emits nothing: the pipeline (T-001 `run_job`) turns the decision into the `SpeechGate` event and, on `fallback_warning`, the one `Warning{vad_fallback}`. `EnergyDetector` is infallible (`detect(&AudioBuffer) -> bool`; its `contains_speech` is always `Ok`); its rule is research.md R-5.
 
 ## PostProcessor (FR-021; 003 implements)
 

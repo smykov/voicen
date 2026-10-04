@@ -2,15 +2,28 @@
 //! detector on Linux (spec 001 R-5, extended by T-041 with a clamped noise floor
 //! and a minimum run of loud frames).
 //!
-//! RED SKELETON (T-041 test-writer): `detect`, `analyse` and the trait impl are
-//! stubs that return wrong values on purpose. Pinned rule (T-041 Investigation):
-//! 30 ms frames (480 samples, trailing partial frame dropped); RMS level in dBFS
-//! (all-zero frame = -inf); floor = 10th percentile of frame levels clamped to
-//! [-70, -40] dBFS; loud = level >= floor + 12 dB; only runs of >= 3 loud frames
-//! count; speech = counted frames >= 10 (300 ms).
+//! Rule (T-041 Investigation): 30 ms frames (480 samples, trailing partial frame
+//! dropped); RMS level in dBFS (all-zero frame = -inf); floor = 10th percentile of
+//! frame levels clamped to [-70, -40] dBFS; loud = level >= floor + 12 dB; only
+//! runs of >= 3 loud frames count; speech = counted frames >= 10 (300 ms).
 
 use super::{SpeechDetector, VadError};
 use crate::audio::AudioBuffer;
+
+/// 30 ms at 16 kHz.
+const FRAME_SAMPLES: usize = 480;
+/// Lower clamp of the noise floor (digital zero would otherwise give -inf).
+const FLOOR_MIN_DB: f64 = -70.0;
+/// Upper clamp of the noise floor (an utterance without pauses).
+const FLOOR_MAX_DB: f64 = -40.0;
+/// A frame is loud at this margin above the floor.
+const LOUD_MARGIN_DB: f64 = 12.0;
+/// Minimum run of consecutive loud frames that counts (90 ms).
+const MIN_RUN_FRAMES: usize = 3;
+/// Counted frames needed for speech (300 ms).
+const MIN_SPEECH_FRAMES: usize = 10;
+/// Percentile of the frame levels taken as the noise floor.
+const FLOOR_PERCENTILE: usize = 10;
 
 /// The energy detector. Infallible.
 #[derive(Debug, Clone, Copy, Default)]
@@ -25,21 +38,18 @@ impl EnergyDetector {
 
     /// True when the recording contains speech by the energy rule.
     pub fn detect(&self, audio: &AudioBuffer) -> bool {
-        // Stub (T-041 red): lets everything through.
-        let _ = analyse(audio.samples());
-        true
+        analyse(audio.samples()).counted >= MIN_SPEECH_FRAMES
     }
 }
 
 impl SpeechDetector for EnergyDetector {
     fn name(&self) -> &'static str {
-        // Stub (T-041 red).
-        ""
+        "energy"
     }
 
-    fn contains_speech(&self, _audio: &AudioBuffer) -> Result<bool, VadError> {
-        // Stub (T-041 red): the energy detector never fails.
-        Err(VadError::Failed)
+    /// Always `Ok`: the energy detector never fails.
+    fn contains_speech(&self, audio: &AudioBuffer) -> Result<bool, VadError> {
+        Ok(self.detect(audio))
     }
 }
 
@@ -58,15 +68,69 @@ pub(crate) struct EnergyAnalysis {
     pub(crate) counted: usize,
 }
 
+/// RMS level of one frame in dBFS (full scale = 32768); an all-zero frame is
+/// `-inf`, never NaN. Squares are summed in `i64`, so `i16::MIN` cannot overflow.
+fn frame_level_db(frame: &[i16; FRAME_SAMPLES]) -> f64 {
+    let sum_sq: i64 = frame
+        .iter()
+        .map(|&s| {
+            let s = i64::from(s);
+            s * s
+        })
+        .sum();
+    let mean_sq = sum_sq as f64 / FRAME_SAMPLES as f64;
+    let rms = mean_sq.sqrt() / 32768.0;
+    20.0 * rms.log10()
+}
+
+/// The clamped noise floor: the 10th percentile (nearest rank) of the levels.
+/// No levels clamps to the lower bound.
+fn noise_floor_db(levels: &[f64]) -> f64 {
+    let mut sorted = levels.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    let rank = (sorted.len() * FLOOR_PERCENTILE).div_ceil(100);
+    let raw = sorted
+        .get(rank.saturating_sub(1))
+        .copied()
+        .unwrap_or(f64::NEG_INFINITY);
+    raw.clamp(FLOOR_MIN_DB, FLOOR_MAX_DB)
+}
+
 /// The energy rule's view of 16 kHz mono samples. Never panics.
 pub(crate) fn analyse(samples: &[i16]) -> EnergyAnalysis {
-    // Stub (T-041 red).
-    let _ = samples;
+    // Full frames only: the trailing partial frame is dropped.
+    let (frames, _partial) = samples.as_chunks::<FRAME_SAMPLES>();
+    let levels: Vec<f64> = frames.iter().map(frame_level_db).collect();
+    let floor_db = noise_floor_db(&levels);
+    let threshold = floor_db + LOUD_MARGIN_DB;
+
+    let mut loud = 0;
+    let mut longest_run = 0;
+    let mut counted = 0;
+    let mut run = 0;
+    // A trailing quiet sentinel closes the last run.
+    for is_loud in levels
+        .iter()
+        .map(|&l| l >= threshold)
+        .chain(std::iter::once(false))
+    {
+        if is_loud {
+            loud += 1;
+            run += 1;
+        } else {
+            longest_run = longest_run.max(run);
+            if run >= MIN_RUN_FRAMES {
+                counted += run;
+            }
+            run = 0;
+        }
+    }
+
     EnergyAnalysis {
-        floor_db: 0.0,
-        loud: 0,
-        longest_run: 0,
-        counted: 0,
+        floor_db,
+        loud,
+        longest_run,
+        counted,
     }
 }
 

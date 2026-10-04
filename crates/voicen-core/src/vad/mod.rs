@@ -1,15 +1,17 @@
 //! Speech gate (FR-12, spec 001 R-5, contracts/core-traits.md "SpeechDetector",
 //! T-041).
 //!
-//! RED SKELETON (T-041 test-writer): the shapes below are the contract the tests
-//! compile against; the bodies are stubs that return wrong values on purpose.
-//! The developer replaces the bodies (and may reshape the private fields).
+//! [`SpeechGate::decide`] is the one place a speech decision over a recording is
+//! made. It is infallible: the primary detector's answer, or the
+//! [`EnergyDetector`]'s when the primary is unavailable or has failed once (latched
+//! for the gate's lifetime). The gate emits nothing; the caller turns
+//! [`GateDecision`] into events.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
 pub mod energy;
 
 use std::fmt;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::audio::AudioBuffer;
 
@@ -35,9 +37,11 @@ pub enum VadError {
 }
 
 impl fmt::Display for VadError {
-    fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Stub (T-041 red): no text.
-        Ok(())
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            VadError::Unavailable => "speech detector unavailable",
+            VadError::Failed => "speech detector failed",
+        })
     }
 }
 
@@ -77,19 +81,32 @@ impl SpeechGate {
 
     /// Infallible: the primary's answer, or the fallback's when the primary is
     /// unavailable or has failed once (latched for the gate's lifetime).
+    ///
+    /// A primary error is never treated as speech: that recording is decided by the
+    /// fallback, and the primary is not called again. Exactly one decision per gate
+    /// carries `fallback_warning`, even when several workers decide at once.
     pub fn decide(&self, audio: &AudioBuffer) -> GateDecision {
-        // Stub (T-041 red): lets everything through, names no detector, never warns.
-        let _ = (
-            &self.primary,
-            &self.fallback,
-            &self.primary_failed,
-            &self.warned,
-            audio,
-        );
+        if !self.primary_failed.load(Ordering::Acquire) {
+            match &self.primary {
+                Some(primary) => match primary.contains_speech(audio) {
+                    Ok(speech) => {
+                        return GateDecision {
+                            speech,
+                            detector: primary.name(),
+                            fallback_warning: false,
+                        }
+                    }
+                    Err(_) => self.primary_failed.store(true, Ordering::Release),
+                },
+                // Not reachable through `new` (no primary means it was an Err), but
+                // the latch keeps the two fields consistent anyway.
+                None => self.primary_failed.store(true, Ordering::Release),
+            }
+        }
         GateDecision {
-            speech: true,
-            detector: "",
-            fallback_warning: false,
+            speech: self.fallback.detect(audio),
+            detector: SpeechDetector::name(&self.fallback),
+            fallback_warning: !self.warned.swap(true, Ordering::AcqRel),
         }
     }
 }
