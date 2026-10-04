@@ -12,10 +12,17 @@
 #   attribute: test attribute (name `test*`, any path) or a cfg/cfg_attr predicate naming
 #              `test`; cfg_attr's attribute arguments are checked the same way;
 #              `doc = <not a string literal>` (include_str!, concat!, a macro variable);
+#              `path = ...` (a #[path] module: a file outside the scanned set);
+#   code:      an `include` token followed by `!` (include!: a file outside the scanned
+#              set), also `include` at the end of a line (the `!` may follow; fail-closed);
 #   doc block: a fenced code block (``` or ~~~, also after a list or quote marker) other
 #              than ```text; an indented (4+ columns) code block, i.e. an indented line
 #              after a blank doc line, a heading, a fence or the block start (an indented
-#              line right after paragraph text is a lazy continuation, not code).
+#              line right after paragraph text is a lazy continuation, not code). List
+#              context is not tracked: a list continuation or nested list at 4+ columns is
+#              refused too, with a note to indent it by the marker width; a list or quote
+#              marker followed by 5+ columns or a tab, then text (an indented code block
+#              inside the item or quote; a tab is refused without computing tab stops).
 # Text the lexer cannot close (block comment, string, attribute) is a finding too.
 
 BEGIN { SO = "\001"; SE = "\002"; DO = "\003"; nstr = 0 }
@@ -139,6 +146,8 @@ function scan(f,    k, ln, n, i, c, j, idx, amode, adepth, abuf, aline, ainner) 
   amode = 0  # 0 code, 1 after `#` (and `!`), 2 inside `[...]`
   for (k = 1; k <= m; k++) {
     ln = C[k]; n = length(ln); i = 1
+    if (ln ~ /(^|[^A-Za-z0-9_])include[ \t\f\v]*(!|$)/)
+      report(f, k, L[k], "include!: rustc compiles a file the guard does not scan; keep the code in a module under src")
     while (i <= n) {
       c = substr(ln, i, 1)
       if (amode == 2) {
@@ -193,6 +202,8 @@ function check_attr(f, t, ln, inner, outer,    shown, args, np, q, v, idx, kind,
       report(f, ln, shown, "cfg_attr predicate naming test: code for a unit-test exe")
     for (q = 2; q <= np; q++) { v = parts[q]; gsub(/^ | $/, "", v); check_attr(f, v, ln, inner, shown) }
   }
+  if (t ~ /^path ?=/)
+    report(f, ln, shown, "#[path] module: rustc compiles a file the guard does not scan; keep modules under src without #[path]")
   if (t ~ /^doc ?=/) {
     v = t; sub(/^doc ?= ?/, "", v)
     kind = inner ? "inner" : "outer"
@@ -260,6 +271,23 @@ function frag(f, text, kind, ln, isblock, isattr,    q, r, a, b, z, star) {
   }
 }
 
+# 1 when a container marker on doc line t (indented below 4 columns) is followed by 5+
+# columns or a tab and then text: CommonMark puts the content at marker width + 1 and
+# reads the rest, indented 4+ further, as an indented code block. Markers: `>` (space
+# optional after it), `-` `*` `+` and `N.` `N)` (space required after them).
+function marker_code(t,    u, w) {
+  u = t; sub(/^ */, "", u)
+  while (match(u, /^(>|[-*+]|[0-9]+[.)])/)) {
+    w = substr(u, 1, 1); u = substr(u, RLENGTH + 1)
+    match(u, /^[ \t]*/)
+    if (RLENGTH == 0 && w != ">") return 0  # `-x`, `1.5`: no list marker
+    w = substr(u, 1, RLENGTH); u = substr(u, RLENGTH + 1)
+    if (u == "") return 0
+    if (index(w, "\t") > 0 || length(w) >= 5) return 1
+  }
+  return 0
+}
+
 function strip_container(u) {
   sub(/^[ \t]*(>[ \t]*|([-*+]|[0-9]+[.)])[ \t]+)*/, "", u)
   return u
@@ -286,12 +314,16 @@ function flush(f,    r, t, u, minind, ind, prev, infence, inind, fc, fl, info) {
     match(t, /^ */); ind = RLENGTH
     if (ind >= 4) {
       if (prev == "start" || prev == "blank" || prev == "heading" || prev == "fence" || prev == "code") {
-        if (!inind) report(f, BN[r], t, "indented doc code block: a doctest")
+        if (!inind) report(f, BN[r], t, "indented doc code block: a doctest; rustdoc reads it as a code block unless it continues a list item: indent list continuations and nested lists by the marker width (2 for `- `, 3 for `1. `) or write the example as ```text")
         inind = 1; prev = "code"; continue
       }
       inind = 0; prev = "text"; continue  # lazy continuation of a paragraph
     }
     inind = 0
+    if (marker_code(t)) {
+      report(f, BN[r], t, "list or quote marker followed by 5+ columns or a tab: an indented doc code block, a doctest; put one space after the marker")
+      inind = 1; prev = "code"; continue
+    }
     u = strip_container(t)
     if (match(u, /^(```+|~~~+)/)) {
       fc = substr(u, 1, 1); fl = RLENGTH; info = substr(u, RLENGTH + 1)
