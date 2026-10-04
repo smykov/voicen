@@ -78,7 +78,7 @@ cargo's link-arg scopes are a closed set (cargo rust-1.99.0 `src/compiler/custom
 
 - **Defect that produced it:** F-001. From T-003 to T-033 a voicen-core doctest failed to link on windows-latest (LNK4003 on `target/debug/build/voicen-*/out/msvcrt.lib`, then LNK1120). cargo gives every build script's search dirs to every doctest of one invocation, but only the doctest's own package's link args (cargo rust-1.99.0 `cargo_test.rs:231`, `build_runner/mod.rs:301-312`).
 - **What breaks if you violate it:** other crates' doctests link against the stub `msvcrt.lib` without the matching CRT args and fail to link.
-- **Where it is enforced:** `.github/workflows/ci.yml`, windows job: `cargo test --workspace --exclude voicen`, then `cargo test -p voicen` (the comment above the two steps). The reviewer checks it.
+- **Where it is enforced:** `.github/workflows/ci.yml`, windows job: `cargo test --workspace --exclude voicen --no-fail-fast` (so one red test binary does not hide the others; the step still exits non-zero, T-048), then `cargo test -p voicen` (the comment above the two steps). The reviewer checks it.
 - **Don't:** merge the two steps back into `cargo test --workspace`.
 
 ### A test exe that cannot start turns the windows job red

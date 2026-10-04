@@ -12,6 +12,6 @@ jobs:
       # The shell's build script (tauri-build static VC runtime) puts a stub msvcrt.lib on its
       # search path; cargo gives every build script's search dirs (native_dirs) to every doctest
       # of the same invocation, so other crates' doctests must not share a run with `voicen` (T-033, F-001).
-      - run: cargo test --workspace --exclude voicen
+      - run: cargo test --workspace --exclude voicen --no-fail-fast
       - run: cargo test -p voicen
       - run: pnpm tauri build
