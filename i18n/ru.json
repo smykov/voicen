@@ -102,5 +102,6 @@
   "settings.tab.output": "Вывод",
   "settings.tab.recording": "Запись",
   "settings.title": "Настройки",
+  "settings.warning.endpoint_insecure": "Адрес использует http:// на нелокальном хосте: ключ API передаётся без шифрования.",
   "settings.write_failed": "Не удалось сохранить настройки: файл настроек не записан. Ничего не изменено."
 }

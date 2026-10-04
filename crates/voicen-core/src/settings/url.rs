@@ -62,8 +62,21 @@ pub fn check_base_url(raw: &str) -> Result<NormalizedUrl, UrlError> {
 /// spec 004 FR-020, FR-29, decision #52). `https` is never insecure. Decided on
 /// the host the HTTP client connects to, never on the text.
 pub fn is_insecure_remote(url: &NormalizedUrl) -> bool {
-    let _ = url;
-    todo!("T-015: is_insecure_remote")
+    // A `NormalizedUrl` is only built by `check_base_url`, which parsed this very
+    // text with the same parser; a parse failure cannot happen, and there is then
+    // no scheme to call `http`.
+    let Ok(parsed) = url::Url::parse(url.as_str()) else {
+        return false;
+    };
+    // The `url` crate lower-cases the scheme and a special URL's domain, and
+    // decodes IPv4 shorthand (`127.1`, `0x7f.1`, `2130706433`) into `Ipv4`.
+    let loopback = match parsed.host() {
+        Some(url::Host::Domain(domain)) => domain == "localhost",
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip == std::net::Ipv6Addr::LOCALHOST,
+        None => false,
+    };
+    parsed.scheme() == "http" && !loopback
 }
 
 #[cfg(test)]

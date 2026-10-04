@@ -102,5 +102,6 @@
   "settings.tab.output": "Output",
   "settings.tab.recording": "Recording",
   "settings.title": "Settings",
+  "settings.warning.endpoint_insecure": "This address uses http:// on a non-local host: the API key is sent unencrypted.",
   "settings.write_failed": "The settings could not be saved: the settings file could not be written. Nothing was changed."
 }

@@ -27,7 +27,7 @@ Built (T-030): `settings_get`, `settings_save` (runs off the main thread), `sett
 | `SettingsView` | shell → UI | `{ "settings": Settings, "keys": { "transcription_api": bool, "local_server": bool, "post_processing": bool }, "first_run": bool, "reset_notice": bool, "unavailable": bool }`; `unavailable` only after an `Unavailable` load (decision #38 Q4, T-004) |
 | `SaveOutcome` | shell → UI | `{ "Saved": { "view": SettingsView, "warnings": [Warning] } }` \| `{ "Refused": { "errors": [FieldError], "form_error": FormError \| null } }` |
 | `FieldError` | shell → UI | `{ "field": FieldId, "code": ErrorCode }`; the UI shows `error.<code>` |
-| `Warning` | shell → UI | `{ "field": FieldId, "code": "endpoint.insecure" }` |
+| `Warning` | shell → UI | `{ "field": FieldId, "code": "endpoint.insecure", "message": MessageId }`; `message` is `WarningCode::message_id()` (`settings.warning.endpoint_insecure`); listed in `Saved.warnings` by core's `save_warnings`, never in `Refused`; the UI renders `t(message)` and holds no URL rule (T-015, decision #52) |
 | `FormError` | shell → UI | `{ "kind": "write_failed" \| "settings_unavailable" \| "partially_restored", "message": MessageId, "not_restored"?: [FieldId] }`; `not_restored` only on `partially_restored`; `message` is `FormError::message_id()` (`settings.write_failed`, `notice.settings_unavailable`, `settings.partially_restored`) |
 | `FieldId` / `ErrorCode` / `MessageId` | shell → UI | the dotted string (`"engine.api.base_url"`, `"url.malformed"`, `"settings.write_failed"`): `as_str()` / the catalog id, the one spelling |
 

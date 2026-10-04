@@ -8,14 +8,17 @@ use std::sync::{mpsc, Arc, Mutex, PoisonError, RwLock};
 use serde::{Deserialize, Serialize};
 
 use super::file::SettingsFile;
-use super::url::normalize_base_url;
+use super::url::{check_base_url, is_insecure_remote, normalize_base_url};
 use super::validate::{validate, KeyEditsWithPresence};
-use super::{defaults, ErrorCode, FieldError, FieldId, LoadOutcome, Settings, SCHEMA_VERSION};
+use super::{
+    defaults, EngineKind, ErrorCode, FieldError, FieldId, LoadOutcome, Settings, SCHEMA_VERSION,
+};
 use crate::autostart::{Autostart, ReconcileAction};
 use crate::clock::{utc_compact, Clock};
 use crate::hotkey_registrar::HotkeyRegistrar;
 use crate::i18n::{
-    MessageId, NOTICE_SETTINGS_UNAVAILABLE, SETTINGS_PARTIALLY_RESTORED, SETTINGS_WRITE_FAILED,
+    MessageId, NOTICE_SETTINGS_UNAVAILABLE, SETTINGS_PARTIALLY_RESTORED,
+    SETTINGS_WARNING_ENDPOINT_INSECURE, SETTINGS_WRITE_FAILED,
 };
 use crate::models::DownloadedModels;
 use crate::secrets::{CredentialStore, KeyEdit, KeyEdits, KeyPresence, KeySlot, Secret};
@@ -69,6 +72,13 @@ impl WarningCode {
             WarningCode::EndpointInsecure => "endpoint.insecure",
         }
     }
+
+    /// The catalog id the UI renders for this code (the one mapping; decision #52).
+    pub fn message_id(self) -> MessageId {
+        match self {
+            WarningCode::EndpointInsecure => SETTINGS_WARNING_ENDPOINT_INSECURE,
+        }
+    }
 }
 
 impl Serialize for WarningCode {
@@ -77,12 +87,55 @@ impl Serialize for WarningCode {
     }
 }
 
-/// A non-blocking remark on a saved field (filled by T-015; always empty here).
-/// Wire form: `{"field": "<FieldId>", "code": "endpoint.insecure"}`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+/// A non-blocking remark on a saved field, listed in `SaveOutcome::Saved` by
+/// [`save_warnings`] (T-015). It never refuses or changes a save.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Warning {
     pub field: FieldId,
     pub code: WarningCode,
+}
+
+/// Wire form: `{"field": "<FieldId>", "code": "endpoint.insecure", "message":
+/// "<MessageId>"}`. `message` is [`WarningCode::message_id`], the one mapping.
+impl Serialize for Warning {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("Warning", 3)?;
+        state.serialize_field("field", &self.field)?;
+        state.serialize_field("code", &self.code)?;
+        state.serialize_field("message", &self.code.message_id())?;
+        state.end()
+    }
+}
+
+/// The warnings of a save of `settings` (already normalized): one
+/// `endpoint.insecure` per base URL in use that passes [`check_base_url`] and is
+/// [`is_insecure_remote`]. In use: the selected engine's base URL (`api` or
+/// `local_server`; no other engine has one) and `post_processing.base_url` while
+/// `post_processing.enabled`. A URL that fails `check_base_url` gets no warning
+/// (refusing it is validation's job). Engine field first, then post-processing.
+pub fn save_warnings(settings: &Settings) -> Vec<Warning> {
+    let engine_url = match settings.engine {
+        EngineKind::Api => Some((FieldId::EngineApiBaseUrl, settings.api.base_url.as_str())),
+        EngineKind::LocalServer => Some((
+            FieldId::EngineLocalServerBaseUrl,
+            settings.local_server.base_url.as_str(),
+        )),
+        EngineKind::None | EngineKind::BuiltinLocal => None,
+    };
+    let post_processing_url = settings.post_processing.enabled.then_some((
+        FieldId::PostProcessingBaseUrl,
+        settings.post_processing.base_url.as_str(),
+    ));
+    engine_url
+        .into_iter()
+        .chain(post_processing_url)
+        .filter(|(_, raw)| check_base_url(raw).is_ok_and(|url| is_insecure_remote(&url)))
+        .map(|(field, _)| Warning {
+            field,
+            code: WarningCode::EndpointInsecure,
+        })
+        .collect()
 }
 
 /// A refusal that is not tied to one field.
@@ -373,7 +426,9 @@ impl SettingsService {
             return refused(Vec::new(), Some(form_error));
         }
 
-        // (8) Commit: swap the snapshot, then publish to every live subscriber.
+        // (8) Commit: swap the snapshot, then publish to every live subscriber. The
+        // warnings are decided here, once, over what was saved (T-015).
+        let warnings = save_warnings(&settings);
         let snapshot = Arc::new(settings);
         *self.current.write().unwrap_or_else(PoisonError::into_inner) = snapshot.clone();
         self.subscribers
@@ -382,7 +437,7 @@ impl SettingsService {
             .retain(|tx| tx.send(snapshot.clone()).is_ok());
         SaveOutcome::Saved {
             view: self.view_with((*snapshot).clone(), presence_after),
-            warnings: Vec::new(),
+            warnings,
         }
     }
 
