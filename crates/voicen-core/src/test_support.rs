@@ -3,6 +3,7 @@
 
 pub mod fixtures;
 pub mod local_models;
+pub mod realtime;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};

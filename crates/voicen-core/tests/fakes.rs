@@ -1,15 +1,25 @@
 //! The public test fakes (feature `test-fakes`, decision #23 N4), used from outside
 //! the crate the way T-032's and T-030's tests will use them.
 
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
+
+use voicen_core::audio::AudioBuffer;
 use voicen_core::autostart::{Autostart, AutostartCall, AutostartError, FakeAutostart};
 use voicen_core::hotkey_registrar::{
     FakeHotkeyRegistrar, HotkeyRegistrar, RegistrarCall, Unavailable,
 };
 use voicen_core::models::{DownloadedModels, FakeDownloadedModels};
+use voicen_core::platform::{
+    AudioSource, FakeAudioSource, FakeIndicator, FakeShellRequests, FrameChunk, FrameSink,
+    Indicator, IndicatorCall, ShellRequestCall, ShellRequests,
+};
+use voicen_core::recording::{CaptureError, OverlayState, TrayState};
 use voicen_core::secrets::{
     CredentialCall, CredentialError, CredentialOp, CredentialStore, FakeCredentialStore, KeySlot,
     Secret,
 };
+use voicen_core::settings::gate::SettingsTab;
 use voicen_core::settings::hotkey::{Hotkey, HotkeyKey};
 use voicen_core::settings::Mode;
 
@@ -294,4 +304,126 @@ fn fake_autostart_records_calls_and_fails_per_value() {
     on.fail_set(true, err);
     on.set(false)
         .expect("set(false) unaffected by fail_set(true)");
+}
+
+/// One `frames` call: samples, rate, channels, instant.
+type FramesCall = (Vec<f32>, u32, u16, Instant);
+
+/// Keeps every `frames` call.
+#[derive(Default)]
+struct LogSink {
+    calls: Mutex<Vec<FramesCall>>,
+}
+
+impl FrameSink for LogSink {
+    fn frames(&self, interleaved: &[f32], rate: u32, channels: u16, at: Instant) {
+        self.calls
+            .lock()
+            .expect("lock")
+            .push((interleaved.to_vec(), rate, channels, at));
+    }
+}
+
+#[test]
+fn fake_audio_source_delivers_before_stop_and_counts_open_handles() {
+    // The fake the T-051 session tests rely on (T-051 analysis "Fakes"). Bite:
+    // chunks arriving after stop returned, a handle not closed by stop, by drop or
+    // by a failing stop, a failed start counted as open or not counted as a call.
+    let source = FakeAudioSource::new();
+    let sink = Arc::new(LogSink::default());
+    let at = Instant::now();
+    let chunk = FrameChunk {
+        samples: vec![0.5, -0.5, 0.25, -0.25],
+        rate: 48_000,
+        channels: 2,
+        at,
+    };
+    source.set_chunks(vec![chunk.clone(), chunk.clone()]);
+    assert_eq!(source.open_handles(), 0);
+
+    let handle = source.start(sink.clone()).expect("start");
+    assert_eq!(source.open_handles(), 1);
+    assert_eq!(handle.stop(), Ok(()));
+    assert_eq!(source.open_handles(), 0);
+    let calls = sink.calls.lock().expect("lock").clone();
+    assert_eq!(
+        calls,
+        vec![
+            (chunk.samples.clone(), 48_000, 2, at),
+            (chunk.samples.clone(), 48_000, 2, at)
+        ],
+        "every chunk delivered, in order, before stop returned"
+    );
+
+    let handle = source.start(sink.clone()).expect("start");
+    assert_eq!(source.open_handles(), 1);
+    drop(handle);
+    assert_eq!(source.open_handles(), 0, "drop closes");
+
+    source.set_stop_error(Some(CaptureError::DeviceBusy));
+    let handle = source.start(sink.clone()).expect("start");
+    assert_eq!(handle.stop(), Err(CaptureError::DeviceBusy));
+    assert_eq!(source.open_handles(), 0, "a failing stop still closes");
+
+    source.set_start_error(Some(CaptureError::AccessDenied));
+    assert!(matches!(
+        source.start(sink.clone()),
+        Err(CaptureError::AccessDenied)
+    ));
+    assert_eq!(source.open_handles(), 0);
+    assert_eq!(source.start_calls(), 4);
+}
+
+#[test]
+fn frame_chunk_from_buffer_is_16k_mono_scaled_to_unit_range() {
+    // Bite: a wrong scale (the session's audio would change level), another rate.
+    let at = Instant::now();
+    let chunk = FrameChunk::from_buffer(&AudioBuffer::from_16k_mono(vec![16_384, -32_768, 0]), at);
+    assert_eq!(chunk.samples, vec![0.5, -1.0, 0.0]);
+    assert_eq!((chunk.rate, chunk.channels, chunk.at), (16_000, 1, at));
+}
+
+#[test]
+fn fake_indicator_and_shell_requests_record_in_order() {
+    // Bite: a call not recorded, the per-port views mixing the two ports.
+    let indicator = FakeIndicator::new();
+    indicator.set_tray(TrayState::Recording, false);
+    indicator.set_overlay(&OverlayState::Recording);
+    indicator.set_tray(TrayState::Error, true);
+    assert_eq!(
+        indicator.calls(),
+        vec![
+            IndicatorCall::Tray(TrayState::Recording, false),
+            IndicatorCall::Overlay(OverlayState::Recording),
+            IndicatorCall::Tray(TrayState::Error, true),
+        ]
+    );
+    assert_eq!(
+        indicator.trays(),
+        vec![(TrayState::Recording, false), (TrayState::Error, true)]
+    );
+    assert_eq!(indicator.overlays(), vec![OverlayState::Recording]);
+    let timed = indicator.timed_calls();
+    assert!(timed.windows(2).all(|w| w[0].0 <= w[1].0));
+
+    let requests = FakeShellRequests::new();
+    requests.open_settings(SettingsTab::Engine);
+    requests.open_settings(SettingsTab::General);
+    assert_eq!(
+        requests.calls(),
+        vec![
+            ShellRequestCall::OpenSettings(SettingsTab::Engine),
+            ShellRequestCall::OpenSettings(SettingsTab::General),
+        ]
+    );
+}
+
+#[test]
+fn session_ports_are_object_safe_and_shareable() {
+    // The session holds them as Arc<dyn Trait> across threads.
+    fn assert_send_sync<T: Send + Sync + ?Sized>() {}
+    assert_send_sync::<dyn AudioSource>();
+    assert_send_sync::<dyn FrameSink>();
+    assert_send_sync::<dyn Indicator>();
+    assert_send_sync::<dyn ShellRequests>();
 }

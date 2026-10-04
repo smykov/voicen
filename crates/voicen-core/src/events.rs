@@ -10,7 +10,7 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
 use crate::delivery::DeliveryResult;
-use crate::recording::{RecordingEnd, RecordingId};
+use crate::recording::{MicCause, RecordingEnd, RecordingId};
 
 /// Which device a recording used (data-model `RecordingStarted`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,6 +76,13 @@ pub enum DictationEvent {
     },
     Warning {
         code: WarningCode,
+    },
+    /// The capture of `recording` failed: at press (`RecordingController::capture_failed`)
+    /// or at stop (`finish(Err)`). Only the closed [`MicCause`], never OS text (P-009).
+    /// Emitted by the dictation session (T-051).
+    CaptureFailed {
+        recording: RecordingId,
+        cause: MicCause,
     },
 }
 

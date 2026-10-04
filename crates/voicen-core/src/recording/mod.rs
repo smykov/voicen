@@ -359,6 +359,35 @@ impl<C> RecordingController<C> {
         self.refresh();
     }
 
+    /// The hotkey registration result (T-051): `false` sets tray `HotkeyError`
+    /// (above every other tray state); only `true` clears it (FR-011, FR-028;
+    /// data-model "HotkeyError is cleared only by a successful registration").
+    ///
+    /// SKELETON (T-051 red tests): not implemented yet.
+    pub fn hotkey_registration(&mut self, registered: bool, at: Instant) {
+        let _ = (registered, at);
+        todo!("T-051: RecordingController::hotkey_registration")
+    }
+
+    /// A notice raised outside a job (T-051, T-006 Q8 -> decision #64; for
+    /// example `notice.choose_engine` when engine = none blocks a press): the
+    /// message for 3 s from `at`, tray unchanged, by the same rule as
+    /// `JobEnd::Notice`.
+    ///
+    /// SKELETON (T-051 red tests): not implemented yet.
+    pub fn notice(&mut self, id: MessageId, at: Instant) {
+        let _ = (id, at);
+        todo!("T-051: RecordingController::notice")
+    }
+
+    /// The id of the recording that is on, if any (T-051: the session asks this
+    /// instead of keeping its own flag, P-010).
+    ///
+    /// SKELETON (T-051 red tests): not implemented yet.
+    pub fn live_id(&self) -> Option<RecordingId> {
+        todo!("T-051: RecordingController::live_id")
+    }
+
     /// Timer callback: expires the overlay message (at exactly its `until`).
     pub fn tick(&mut self, at: Instant) {
         self.expire(at);
@@ -1171,5 +1200,246 @@ mod tests {
             Ok(f) => assert_eq!(f.end(), RecordingEnd::Released),
             Err(e) => panic!("finish: {e:?}"),
         }
+    }
+
+    // ---- T-051: hotkey registration, notice, live id ------------------------------
+
+    #[test]
+    fn failed_hotkey_registration_is_tray_hotkey_error_above_every_state_until_registered() {
+        // T-051 row 20 (FR-011/FR-028; data-model "IndicatorState": HotkeyError >
+        // Recording > Error > Idle, cleared only by a successful registration).
+        // registration(false) shows HotkeyError while idle, while recording (the
+        // overlay still says Recording) and over tray Error; it survives a
+        // Delivered job, the tray menu and a tick; registration(true) brings back
+        // the tray the other inputs give. Bite: the hard-coded `hotkey_error:
+        // false` in `refresh` kept, the flag cleared by a delivery, by
+        // `tray_menu_opened` or by `tick`, HotkeyError below Recording.
+        let t0 = Instant::now();
+        let mut c = RecordingController::<Ctx>::new();
+        c.hotkey_registration(false, t0);
+        assert_eq!(
+            c.indicator(),
+            &IndicatorState {
+                tray: TrayState::HotkeyError,
+                overlay: OverlayState::Hidden,
+            },
+            "idle"
+        );
+
+        let a = start(&mut c, t0 + ms(100), "a");
+        assert_eq!(
+            c.indicator(),
+            &IndicatorState {
+                tray: TrayState::HotkeyError,
+                overlay: OverlayState::Recording,
+            },
+            "while recording"
+        );
+        let ticket = stop(&mut c, t0 + ms(1100));
+        assert!(c.finish(ticket, Ok(audio()), t0 + ms(1110)).is_ok());
+        c.job_finished(a, JobEnd::Failed(FailureReason::Timeout), t0 + ms(2000));
+        assert_eq!(c.indicator().tray, TrayState::HotkeyError, "over Error");
+
+        let b = record(&mut c, t0 + ms(6000), ms(1000)).id();
+        c.job_finished(b, JobEnd::Delivered { notice: None }, t0 + ms(8000));
+        assert_eq!(
+            c.indicator().tray,
+            TrayState::HotkeyError,
+            "kept through a delivery"
+        );
+        c.tray_menu_opened(t0 + ms(8100));
+        assert_eq!(
+            c.indicator().tray,
+            TrayState::HotkeyError,
+            "kept through the tray menu"
+        );
+        c.tick(t0 + ms(20_000));
+        assert_eq!(
+            c.indicator().tray,
+            TrayState::HotkeyError,
+            "kept through tick"
+        );
+
+        c.hotkey_registration(true, t0 + ms(21_000));
+        assert_eq!(
+            c.indicator(),
+            &idle(),
+            "cleared by a successful registration"
+        );
+    }
+
+    #[test]
+    fn successful_registration_clears_only_hotkey_error() {
+        // T-051 row 20: registration(true) is not a delivery and not the tray
+        // menu, so tray Error and its message stay; during a recording the tray
+        // goes back to Recording; a repeated true changes nothing. Bite:
+        // registration(true) clearing `error`, setting the tray to Idle directly
+        // instead of re-deriving it, or dropping the message.
+        let t0 = Instant::now();
+        let mut c = RecordingController::<Ctx>::new();
+        let a = record(&mut c, t0, ms(1000)).id();
+        let tf = t0 + ms(2000);
+        c.job_finished(a, JobEnd::Failed(FailureReason::Timeout), tf);
+        c.hotkey_registration(false, tf + ms(100));
+        assert_eq!(c.indicator().tray, TrayState::HotkeyError);
+        c.hotkey_registration(true, tf + ms(200));
+        let after_failure = IndicatorState {
+            tray: TrayState::Error,
+            overlay: message(i18n::FAILURE_TIMEOUT, vec![], tf),
+        };
+        assert_eq!(c.indicator(), &after_failure, "Error and its message stay");
+        c.hotkey_registration(true, tf + ms(300));
+        assert_eq!(c.indicator(), &after_failure, "a repeated true is a no-op");
+
+        start(&mut c, t0 + ms(6000), "b");
+        c.hotkey_registration(false, t0 + ms(6100));
+        assert_eq!(c.indicator().tray, TrayState::HotkeyError);
+        c.hotkey_registration(true, t0 + ms(6200));
+        assert_eq!(
+            c.indicator(),
+            &IndicatorState {
+                tray: TrayState::Recording,
+                overlay: OverlayState::Recording,
+            },
+            "the live recording shows again"
+        );
+    }
+
+    #[test]
+    fn notice_shows_message_for_3s_and_leaves_the_tray() {
+        // T-051 row 21 (T-006 Q8 -> #64): notice(id, at) follows JobEnd::Notice's
+        // rule without a job: overlay Message{id, no params, at + 3 s}, the timer
+        // at that instant, tray unchanged (Idle stays Idle, Error stays Error),
+        // expired by a tick at exactly + 3 s; a later notice replaces an earlier
+        // failure message. Bite: tray Error set by a notice, Error cleared by it,
+        // no message, `until` not at + 3 s, no deadline.
+        let t0 = Instant::now();
+        let mut c = RecordingController::<Ctx>::new();
+        c.notice(i18n::NOTICE_CHOOSE_ENGINE, t0);
+        assert_eq!(
+            c.indicator(),
+            &IndicatorState {
+                tray: TrayState::Idle,
+                overlay: message(i18n::NOTICE_CHOOSE_ENGINE, vec![], t0),
+            },
+            "idle"
+        );
+        assert_eq!(c.next_deadline(), Some(t0 + Duration::from_secs(3)));
+        c.tick(t0 + ms(2999));
+        assert_eq!(
+            c.indicator().overlay,
+            message(i18n::NOTICE_CHOOSE_ENGINE, vec![], t0),
+            "tick before expiry"
+        );
+        c.tick(t0 + ms(3000));
+        assert_eq!(c.indicator(), &idle(), "expired at exactly 3 s");
+        assert_eq!(c.next_deadline(), None);
+
+        let a = record(&mut c, t0 + ms(4000), ms(1000)).id();
+        c.job_finished(a, JobEnd::Failed(FailureReason::Timeout), t0 + ms(6000));
+        let tn = t0 + ms(7000);
+        c.notice(i18n::NOTICE_CHOOSE_ENGINE, tn);
+        assert_eq!(
+            c.indicator(),
+            &IndicatorState {
+                tray: TrayState::Error,
+                overlay: message(i18n::NOTICE_CHOOSE_ENGINE, vec![], tn),
+            },
+            "replaces the failure message, tray Error kept"
+        );
+        assert_eq!(c.next_deadline(), Some(tn + Duration::from_secs(3)));
+    }
+
+    #[test]
+    fn notice_raised_while_recording_shows_after_release_for_the_rest_of_its_3s() {
+        // T-051 row 21: the module rule for a message raised during a live
+        // recording holds for a notice: hidden behind Recording, shown after the
+        // release until its own `until` (not restarted at the release), and not
+        // shown at all once its 3 s passed during the recording. Bite: `until`
+        // restarted at release, the notice shown over Recording, the notice
+        // dropped by the release, an expired notice shown.
+        let t0 = Instant::now();
+        let mut c = RecordingController::<Ctx>::new();
+        start(&mut c, t0, "w");
+        let tn = t0 + ms(100);
+        c.notice(NOTICE, tn);
+        assert_eq!(
+            c.indicator(),
+            &IndicatorState {
+                tray: TrayState::Recording,
+                overlay: OverlayState::Recording,
+            },
+            "hidden behind the recording"
+        );
+        assert!(matches!(c.release(t0 + ms(200)), Release::Discarded { .. }));
+        assert_eq!(
+            c.indicator(),
+            &IndicatorState {
+                tray: TrayState::Idle,
+                overlay: message(NOTICE, vec![], tn),
+            },
+            "shown after the release until the notice instant + 3 s"
+        );
+        assert_eq!(c.next_deadline(), Some(tn + Duration::from_secs(3)));
+
+        start(&mut c, t0 + ms(10_000), "w");
+        c.notice(NOTICE, t0 + ms(10_100));
+        let _ticket = stop(&mut c, t0 + ms(13_100));
+        assert_eq!(
+            c.indicator(),
+            &idle(),
+            "its 3 s passed during the recording"
+        );
+        assert_eq!(c.next_deadline(), None);
+    }
+
+    #[test]
+    fn press_drops_a_notice_and_it_is_not_reshown() {
+        // T-051 row 21: "a press drops it" holds for a notice like for any
+        // message. Bite: the notice kept across the press and shown again after a
+        // short (discarded) hold that ends within its 3 s.
+        let t0 = Instant::now();
+        let mut c = RecordingController::<Ctx>::new();
+        c.notice(NOTICE, t0);
+        start(&mut c, t0 + ms(500), "w");
+        assert_eq!(c.indicator().overlay, OverlayState::Recording);
+        assert!(matches!(c.release(t0 + ms(600)), Release::Discarded { .. }));
+        assert_eq!(c.indicator(), &idle());
+        assert_eq!(c.next_deadline(), None);
+    }
+
+    #[test]
+    fn live_id_is_the_recording_on_and_none_otherwise() {
+        // T-051 (P-010): the session asks the controller whether a recording is
+        // on instead of keeping a second flag. None while idle; Some(id) with the
+        // id press returned, kept through auto-repeat; None once release returned
+        // (Stop and Discard) and after capture_failed. Bite: live_id always None,
+        // the next id instead of the live one, Some after the release or after a
+        // capture failure.
+        let t0 = Instant::now();
+        let mut c = RecordingController::<Ctx>::new();
+        assert_eq!(c.live_id(), None, "new controller");
+        let a = start(&mut c, t0, "a");
+        assert_eq!(c.live_id(), Some(a), "after press");
+        assert_eq!(c.press(t0 + ms(30), "repeat"), Press::Ignored);
+        assert_eq!(c.live_id(), Some(a), "after auto-repeat");
+        let _ticket = stop(&mut c, t0 + ms(1000));
+        assert_eq!(c.live_id(), None, "after Stop");
+
+        let b = start(&mut c, t0 + ms(1100), "b");
+        assert_ne!(a, b);
+        assert_eq!(c.live_id(), Some(b));
+        assert!(matches!(
+            c.release(t0 + ms(1200)),
+            Release::Discarded { .. }
+        ));
+        assert_eq!(c.live_id(), None, "after Discard");
+
+        let d = start(&mut c, t0 + ms(2000), "d");
+        assert_eq!(c.live_id(), Some(d));
+        assert!(c
+            .capture_failed(d, CaptureError::AccessDenied, t0 + ms(2010))
+            .is_some());
+        assert_eq!(c.live_id(), None, "after capture_failed");
     }
 }
