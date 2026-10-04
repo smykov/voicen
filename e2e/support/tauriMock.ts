@@ -50,6 +50,7 @@ export type {
   SaveRequest,
   Settings,
   SettingsView,
+  Warning,
 } from "../../src/lib/settings/settingsApi";
 
 export interface BuildInfo {
@@ -74,6 +75,8 @@ export interface EmittedEvent {
 interface WireFixture {
   first_run_view: SettingsView;
   speech_languages: string[];
+  /** Core's Saved outcome of an engine-api save with base URL http://example.com/v1 (T-015). */
+  saved_insecure_api: SaveOutcome;
 }
 
 const fixture = JSON.parse(
@@ -83,6 +86,15 @@ const fixture = JSON.parse(
 /** Core's first-run view: `defaults(None)`, no keys, `first_run: true` (a fresh copy). */
 export function firstRunView(): SettingsView {
   return structuredClone(fixture.first_run_view);
+}
+
+/**
+ * Core's `SaveOutcome` for a save, over the first run, of engine api with base URL
+ * `http://example.com/v1` and a new API key: a Saved with one `endpoint.insecure`
+ * warning on `engine.api.base_url` (T-015; a fresh copy, for `queueSaveOutcome`).
+ */
+export function savedInsecureApi(): Extract<SaveOutcome, { Saved: unknown }> {
+  return structuredClone(fixture.saved_insecure_api) as Extract<SaveOutcome, { Saved: unknown }>;
 }
 
 /** Core's `WHISPER_ISO_639_1` in core order (a fresh copy). */

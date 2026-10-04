@@ -14,11 +14,13 @@
 //   casts, `errorMessageId(code)` -> `error.<code>` (core's
 //   every_error_code_has_catalog_text) and `fieldLabelId(field)` ->
 //   `settings.field_label.<FieldId>` (core's every_field_id_has_label_text).
+// - `Warning.message` (T-015, decision #52) is a catalog id typed `MessageId` at the
+//   boundary, like `FormError.message`, not any string.
 //
 // The vitest run only proves the file loads; the bodies are never executed.
 import { describe, expect, it } from "vitest";
 import * as i18n from "./index";
-import type { FormError } from "../settings/settingsApi";
+import type { FormError, Warning } from "../settings/settingsApi";
 
 /** Type-checked, never called. */
 function typeLevelOnly(): void {
@@ -38,6 +40,11 @@ function typeLevelOnly(): void {
   // @ts-expect-error -- "settings.typo" is not a MessageId
   const formError: FormError = { kind: "write_failed", message: "settings.typo" };
   void formError;
+
+  // Warning.message is a catalog id, not any string.
+  // @ts-expect-error -- "settings.typo" is not a MessageId
+  const warning: Warning = { field: "engine.api.base_url", code: "endpoint.insecure", message: "settings.typo" };
+  void warning;
 }
 
 describe("message-id types (checked by svelte-check)", () => {

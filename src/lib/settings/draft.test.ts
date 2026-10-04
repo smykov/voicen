@@ -40,8 +40,9 @@ import {
   resetKey,
   saveRequest,
   typeKey,
+  warningsByField,
 } from "./draft";
-import type { SaveOutcome, SettingsView } from "./settingsApi";
+import type { SaveOutcome, SettingsView, Warning } from "./settingsApi";
 
 const FAKE_KEY = "sk-test-FAKE-1111-not-a-real-key";
 
@@ -349,5 +350,84 @@ describe("applyOutcome with partially_restored", () => {
     expect(d.errors).toEqual({ "history.size": "error.history.size_range" });
     d = applyOutcome(applyOutcome(d, partial), { Saved: { view: savedElsewhere(), warnings: [] } });
     expect(d.errors).toEqual({});
+  });
+});
+
+// ---- T-015: warnings of a Saved outcome (decision #52) ---------------------------------
+//
+// API pinned here for src/lib/settings/draft.ts:
+//
+//   warningsByField(warnings: readonly Warning[]): Record<string, MessageId>
+//     // FieldId -> the warning's own `message` (a core MessageId, typed at the wire
+//     // boundary: Warning.message: MessageId); the first warning of a field wins.
+//
+// Core decides which URL warns (settings::url::is_insecure_remote); the UI only maps
+// what it is given, and keeps the warnings in page state, outside the Draft.
+
+type SavedOutcome = Extract<SaveOutcome, { Saved: unknown }>;
+
+/** Core's Saved outcome of an engine-api save of http://example.com/v1 (a fresh copy). */
+function savedInsecureApi(): SavedOutcome {
+  return structuredClone(wire.saved_insecure_api) as unknown as SavedOutcome;
+}
+
+describe("warningsByField (T-015)", () => {
+  it("maps core's warning to its field with the message id as given; no warnings -> {}", () => {
+    // Bite: a missing warningsByField, or one keyed by code instead of field.
+    expect(warningsByField(savedInsecureApi().Saved.warnings)).toEqual({
+      "engine.api.base_url": "settings.warning.endpoint_insecure",
+    });
+    expect(warningsByField([])).toEqual({});
+  });
+
+  it("uses each warning's message, never an id built from its code (no list of warning codes in the UI)", () => {
+    // Bite: `warning.<code>` / `settings.warning.<code>` built in the UI, or a code ->
+    // id table: a code added later, or a message core maps differently, must render as sent.
+    const warnings = [
+      { field: "post_processing.base_url", code: "future.code_added_later", message: "settings.warning.endpoint_insecure" },
+      { field: "engine.local_server.base_url", code: "endpoint.insecure", message: "settings.saved" },
+    ] as unknown as Warning[];
+    expect(warningsByField(warnings)).toEqual({
+      "post_processing.base_url": "settings.warning.endpoint_insecure",
+      "engine.local_server.base_url": "settings.saved",
+    });
+  });
+
+  it("the first warning of a field wins; every field keeps its own", () => {
+    const warnings = [
+      { field: "engine.api.base_url", code: "endpoint.insecure", message: "settings.warning.endpoint_insecure" },
+      { field: "post_processing.base_url", code: "endpoint.insecure", message: "settings.warning.endpoint_insecure" },
+      { field: "engine.api.base_url", code: "endpoint.insecure", message: "settings.saved" },
+    ] as unknown as Warning[];
+    expect(warningsByField(warnings)).toEqual({
+      "engine.api.base_url": "settings.warning.endpoint_insecure",
+      "post_processing.base_url": "settings.warning.endpoint_insecure",
+    });
+  });
+
+  it("every warning message core sends has a text in both catalogs (en and ru differ)", () => {
+    // Bite: the catalog text of settings.warning.endpoint_insecure missing in en or ru.
+    for (const { message } of savedInsecureApi().Saved.warnings) {
+      expectCatalogId(message);
+      const en = enCatalog as Record<string, string>;
+      const ru = ruCatalog as Record<string, string>;
+      expect(ru[message]).not.toBe(en[message]);
+    }
+  });
+});
+
+describe("Saved warnings stay out of the Draft (T-015, characterization)", () => {
+  it("applyOutcome on a Saved with warnings gives exactly the clean draft of its view", () => {
+    // Pins today's behaviour: the Draft carries no warnings, because the
+    // settings://changed echo of the same save goes through applyView -> draftFromView
+    // and would wipe them; the page keeps them beside `saved` instead.
+    const outcome = savedInsecureApi();
+    expect(outcome.Saved.warnings).toHaveLength(1);
+    let d = typeKey(draftFromView(firstRun()), "transcription_api", FAKE_KEY);
+    d = applyOutcome(d, outcome);
+    expect(d).toEqual(draftFromView(outcome.Saved.view));
+    expect(Object.keys(d).sort()).toEqual(["baseline", "errors", "formError", "keys", "settings"]);
+    // The echo of the save leaves the same clean draft.
+    expect(applyView(d, outcome.Saved.view)).toEqual(draftFromView(outcome.Saved.view));
   });
 });
