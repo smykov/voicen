@@ -291,34 +291,80 @@ mod tests {
         }
     }
 
-    /// `threads` workers start together on one shared gate and each makes
-    /// `per_thread` decisions on `audio`.
-    fn decide_concurrently(
-        gate: &SpeechGate,
-        audio: &AudioBuffer,
-        threads: usize,
-        per_thread: usize,
-    ) -> Vec<GateDecision> {
-        let start = Barrier::new(threads);
-        std::thread::scope(|s| {
-            let handles: Vec<_> = (0..threads)
+    /// Fresh gates per round in the concurrency tests: enough rounds that a
+    /// non-atomic warning flag is caught in practice, not by luck (review 1 #2).
+    const ROUNDS: usize = 400;
+    /// Workers racing on each fresh gate.
+    const WORKERS: usize = 8;
+
+    /// For each gate from `make_gate` (one per round), `WORKERS` threads make one
+    /// decision each on an empty buffer, so the decision is instant. A `Barrier`
+    /// starts the workers together; each round then begins at a spinning
+    /// rendezvous (an arrival counter), which releases all workers within
+    /// nanoseconds of each other, where a blocking barrier wakes them one by one
+    /// over microseconds, wider than a load-then-store window. Returns the
+    /// decisions grouped per gate.
+    fn race_on_fresh_gates(make_gate: impl Fn() -> SpeechGate) -> Vec<Vec<GateDecision>> {
+        let empty = AudioBuffer::from_16k_mono(vec![]);
+        let gates: Vec<SpeechGate> = (0..ROUNDS).map(|_| make_gate()).collect();
+        let start = Barrier::new(WORKERS);
+        let arrived = AtomicUsize::new(0);
+        let per_worker: Vec<Vec<GateDecision>> = std::thread::scope(|s| {
+            let handles: Vec<_> = (0..WORKERS)
                 .map(|_| {
                     s.spawn(|| {
                         start.wait();
-                        (0..per_thread)
-                            .map(|_| gate.decide(audio))
+                        gates
+                            .iter()
+                            .enumerate()
+                            .map(|(round, gate)| {
+                                arrived.fetch_add(1, Ordering::SeqCst);
+                                let all_in = WORKERS * (round + 1);
+                                let mut spins = 0u32;
+                                while arrived.load(Ordering::SeqCst) < all_in {
+                                    spins = spins.wrapping_add(1);
+                                    if spins.is_multiple_of(1024) {
+                                        // Fewer cores than workers: let the others in.
+                                        std::thread::yield_now();
+                                    } else {
+                                        std::hint::spin_loop();
+                                    }
+                                }
+                                gate.decide(&empty)
+                            })
                             .collect::<Vec<_>>()
                     })
                 })
                 .collect();
             handles
                 .into_iter()
-                .flat_map(|h| match h.join() {
+                .map(|h| match h.join() {
                     Ok(d) => d,
                     Err(_) => panic!("a decide() call panicked"),
                 })
                 .collect()
-        })
+        });
+        (0..ROUNDS)
+            .map(|round| {
+                per_worker
+                    .iter()
+                    .filter_map(|decisions| decisions.get(round).copied())
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn assert_one_warning_per_gate(per_gate: &[Vec<GateDecision>]) {
+        assert_eq!(per_gate.len(), ROUNDS);
+        for (round, got) in per_gate.iter().enumerate() {
+            assert_eq!(got.len(), WORKERS, "round {round}");
+            let warnings = got.iter().filter(|d| d.fallback_warning).count();
+            assert_eq!(warnings, 1, "round {round}: warnings on one gate, {got:?}");
+            assert!(
+                got.iter().all(|d| d.detector == "energy" && !d.speech),
+                "round {round}: {got:?}"
+            );
+        }
     }
 
     #[test]
@@ -326,23 +372,27 @@ mod tests {
         // R-10 runs jobs on several workers through one gate: exactly one decision
         // carries the warning however the calls interleave. Bite: a load-then-store
         // flag instead of one atomic swap (two workers both see "not warned").
-        let gate = SpeechGate::new(Err(VadError::Unavailable), EnergyDetector::new());
-        let got = decide_concurrently(&gate, &fixtures::silence_3s(), 8, 4);
-        assert_eq!(got.len(), 32);
-        assert_eq!(got.iter().filter(|d| d.fallback_warning).count(), 1);
-        assert!(got.iter().all(|d| d.detector == "energy" && !d.speech));
+        // Measured 2026-10-04 with ROUNDS fresh gates of WORKERS threads each, the
+        // mutant failed this test in 50/50 runs (6 CPUs), 20/20 (2 CPUs) and 10/10
+        // under the full parallel lib suite. It cannot bite on a single CPU, where
+        // the workers never truly overlap (0/10); the sequential tests above still
+        // pin "first fallback decision only" there.
+        let per_gate = race_on_fresh_gates(|| {
+            SpeechGate::new(Err(VadError::Unavailable), EnergyDetector::new())
+        });
+        assert_one_warning_per_gate(&per_gate);
     }
 
     #[test]
     fn one_warning_across_threads_when_primary_fails_at_run_time() {
         // Several workers may call the failing primary before the latch is seen;
-        // still exactly one warning, and every decision is the energy detector's.
-        let (primary, _) = fake(vec![], Err(VadError::Failed));
-        let gate = SpeechGate::new(Ok(primary), EnergyDetector::new());
-        let got = decide_concurrently(&gate, &fixtures::silence_3s(), 8, 4);
-        assert_eq!(got.len(), 32);
-        assert_eq!(got.iter().filter(|d| d.fallback_warning).count(), 1);
-        assert!(got.iter().all(|d| d.detector == "energy" && !d.speech));
+        // still exactly one warning per gate, and every decision is the energy
+        // detector's. Bite: as above (load-then-store mutant: 20/20 runs, 6 CPUs).
+        let per_gate = race_on_fresh_gates(|| {
+            let (primary, _) = fake(vec![], Err(VadError::Failed));
+            SpeechGate::new(Ok(primary), EnergyDetector::new())
+        });
+        assert_one_warning_per_gate(&per_gate);
     }
 
     #[test]

@@ -347,6 +347,119 @@ mod tests {
         assert!(energy(&audio));
     }
 
+    /// `zeros` digital-zero frames followed by [`segments`] over the -60 dBFS floor.
+    fn zeros_then(zeros: usize, seed: u64, parts: &[(usize, Option<f64>)]) -> AudioBuffer {
+        let mut samples = vec![0i16; zeros * FRAME];
+        samples.extend(quantize(&segments(seed, parts)));
+        AudioBuffer::from_16k_mono(samples)
+    }
+
+    /// Level of every full frame, in order.
+    fn frame_levels(audio: &AudioBuffer) -> Vec<f64> {
+        let (frames, _) = audio.samples().as_chunks::<FRAME_SAMPLES>();
+        frames.iter().map(frame_level_db).collect()
+    }
+
+    /// A 500 Hz tone level (dBFS) that, added to the -60 dBFS noise, gives frames at
+    /// `target_dbfs` (powers add).
+    fn tone_for_frame_level(target_dbfs: f64) -> f64 {
+        10.0 * (10f64.powf(target_dbfs / 10.0) - 10f64.powf(-60.0 / 10.0)).log10()
+    }
+
+    /// The tone sits about 8.6 dB above the -60 noise: loud over a -70 floor, not
+    /// loud over a -60 floor. Tone frames 20, the rest noise after the zero frames.
+    const PERCENTILE_TONE: Option<f64> = Some(-52.0);
+
+    /// Asserts the percentile pair over `n` frames: `k_floor` zero frames put the
+    /// nearest-rank 10th percentile on the last zero frame (floor -70, speech),
+    /// one fewer puts it on the quietest noise frame (floor ~ -60, not speech).
+    fn assert_percentile_pair(n: usize, k_floor: usize, seed: u64) {
+        let tone = 20;
+        for (k, want_speech) in [(k_floor, true), (k_floor - 1, false)] {
+            let audio = zeros_then(k, seed, &[(n - k - tone, None), (tone, PERCENTILE_TONE)]);
+            let levels = frame_levels(&audio);
+            assert_eq!(levels.len(), n, "premise: N = {n}");
+            assert_eq!(
+                levels.iter().filter(|l| l.is_infinite()).count(),
+                k,
+                "premise: exactly {k} digital-zero frames"
+            );
+            let tone_levels = levels.get(n - tone..).unwrap_or_default();
+            assert!(
+                tone_levels.iter().all(|l| (-58.0..=-50.0).contains(l)),
+                "premise: tone frames between -70+12 and -60+12, got {tone_levels:?}"
+            );
+            let a = analyse(audio.samples());
+            if want_speech {
+                assert!(
+                    close(a.floor_db, -70.0) && a.loud == tone && a.counted == tone,
+                    "N={n}, K={k}: 10th percentile is a zero frame (floor -70), the \
+                     tone is loud, got {a:?}"
+                );
+            } else {
+                assert!(
+                    (-61.0..=-59.5).contains(&a.floor_db) && a.loud == 0,
+                    "N={n}, K={k}: 10th percentile is the quietest noise frame \
+                     (floor ~ -60), nothing loud, got {a:?}"
+                );
+            }
+            assert_eq!(energy(&audio), want_speech, "N={n}, K={k}");
+        }
+    }
+
+    #[test]
+    fn noise_floor_is_exactly_the_tenth_percentile_nearest_rank_of_100_frames() {
+        // Rank ceil(0.1 * 100) = 10. A few very quiet outlier frames (9 of 100) must
+        // not pull the floor down; 10 of them are the 10th percentile. Bite: the
+        // minimum (0th), 1st, 5th or 9th percentile (9 zeros -> floor -70 ->
+        // speech), or the 11th (10 zeros -> floor ~ -60 -> not speech).
+        assert_percentile_pair(100, 10, 21);
+    }
+
+    #[test]
+    fn noise_floor_rank_rounds_up_for_95_frames() {
+        // Rank ceil(0.1 * 95) = ceil(9.5) = 10, not floor(9.5) = 9. Bite: rounding
+        // the rank down (9 zeros would then give floor -70 and speech).
+        assert_percentile_pair(95, 10, 22);
+    }
+
+    #[test]
+    fn loud_margin_is_twelve_db_to_within_half_a_db() {
+        // Tone frames at floor + 11.5 dB are not loud, at floor + 12.5 dB are, both
+        // measured against the floor analyse() reports for this layout. The noise is
+        // the same seed in every buffer and the 20 tone frames sit above all 80 noise
+        // frames, so the floor (a noise frame) does not depend on the tone level: a
+        // reference with a clearly loud tone gives it. Bite: a margin of 11 (the
+        // 11.5 buffer turns loud) or 13 dB (the 12.5 buffer turns quiet).
+        let layout = |tone: f64| [(60, None), (20, Some(tone)), (20, None)];
+        let reference = buffer(23, &layout(-46.0));
+        let floor = analyse(reference.samples()).floor_db;
+        assert!(
+            (-61.0..=-59.5).contains(&floor),
+            "premise: floor of the noise ~ -60, got {floor}"
+        );
+        for (offset, want_loud) in [(11.5, false), (12.5, true)] {
+            let audio = buffer(23, &layout(tone_for_frame_level(floor + offset)));
+            let a = analyse(audio.samples());
+            assert!(
+                close(a.floor_db, floor),
+                "premise: the tone frames do not move the floor, got {a:?} vs {floor}"
+            );
+            let tone_levels = frame_levels(&audio);
+            let tone_levels = tone_levels.get(60..80).unwrap_or_default();
+            assert!(
+                tone_levels
+                    .iter()
+                    .all(|l| (l - (floor + offset)).abs() < 0.3),
+                "premise: every tone frame within 0.3 dB of floor + {offset}, got \
+                 {tone_levels:?} over floor {floor}"
+            );
+            let want = if want_loud { (20, 20) } else { (0, 0) };
+            assert_eq!((a.loud, a.counted), want, "floor + {offset} dB: {a:?}");
+            assert_eq!(energy(&audio), want_loud, "floor + {offset} dB");
+        }
+    }
+
     #[test]
     fn trailing_partial_frame_is_dropped() {
         // 9 full loud frames + 479 loud samples: a padded or short last frame would
