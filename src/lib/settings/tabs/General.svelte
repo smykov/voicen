@@ -1,7 +1,8 @@
 <script lang="ts">
-  // General tab: the interface language. It takes effect when saved (the window
-  // renders in the saved view's ui_language). Start with Windows is T-034's.
-  import { t } from "$lib/i18n";
+  // General tab: the interface language, one option per `LANGUAGES` entry (the one
+  // list in the UI). It takes effect when saved (the window renders in the saved
+  // view's ui_language). Start with Windows is T-034's.
+  import { LANGUAGES, t } from "$lib/i18n";
   import type { Draft } from "../draft";
   import { controlId, errorId } from "../fields";
   import FieldMessage from "../FieldMessage.svelte";
@@ -19,8 +20,9 @@
     aria-invalid={draft.errors[uiLanguage] ? "true" : undefined}
     aria-describedby={draft.errors[uiLanguage] ? errorId(uiLanguage) : undefined}
   >
-    <option value="en">{t("settings.language.en")}</option>
-    <option value="ru">{t("settings.language.ru")}</option>
+    {#each LANGUAGES as lang (lang)}
+      <option value={lang}>{t(`settings.language.${lang}`)}</option>
+    {/each}
   </select>
   <FieldMessage errors={draft.errors} field={uiLanguage} />
 </div>

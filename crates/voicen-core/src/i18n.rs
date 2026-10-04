@@ -631,29 +631,6 @@ mod tests {
 
     // ---- T-004: every refusal reaches the user in the user's language (U2) --------
 
-    /// Every `ErrorCode`, once. The match in [`every_error_code_has_catalog_text`]
-    /// has no wildcard, so a variant added later (T-010, T-014, T-020, T-021) does
-    /// not compile until it is listed here, and then the test needs its texts.
-    const ALL_ERROR_CODES: [crate::settings::ErrorCode; 14] = {
-        use crate::settings::ErrorCode::*;
-        [
-            Required,
-            UrlMalformed,
-            KeyRequired,
-            ModelNotDownloaded,
-            HotkeyNoModifier,
-            HotkeyNoKey,
-            HotkeyEscReserved,
-            HotkeyInvalid,
-            HotkeyUnavailable,
-            HistorySizeRange,
-            AutostartFailed,
-            KeyStoreFailed,
-            UrlCredentials,
-            LanguageUnsupported,
-        ]
-    };
-
     /// The non-empty text of `id` in `lang`, straight from the catalog map (no
     /// fallback to English or to the id, which `text` would apply).
     fn own_text<'a>(c: &'a Catalog, lang: UiLanguage, id: &str) -> Option<&'a str> {
@@ -669,36 +646,12 @@ mod tests {
         // Bite: any ErrorCode core can return without a non-empty `error.<code>` in
         // i18n/en.json or i18n/ru.json; the UI would show the raw id (text() falls
         // back to it). T-004 Acceptance; spec T044.
+        // The codes are core's one hand-kept list, `ErrorCode::ALL` (completeness by
+        // hand, next to the enum; settings/mod.rs).
         use crate::settings::ErrorCode;
-        for code in ALL_ERROR_CODES {
-            // No wildcard: a new variant is a compile error here (see ALL_ERROR_CODES).
-            match code {
-                ErrorCode::Required
-                | ErrorCode::UrlMalformed
-                | ErrorCode::KeyRequired
-                | ErrorCode::ModelNotDownloaded
-                | ErrorCode::HotkeyNoModifier
-                | ErrorCode::HotkeyNoKey
-                | ErrorCode::HotkeyEscReserved
-                | ErrorCode::HotkeyInvalid
-                | ErrorCode::HotkeyUnavailable
-                | ErrorCode::HistorySizeRange
-                | ErrorCode::AutostartFailed
-                | ErrorCode::KeyStoreFailed
-                | ErrorCode::UrlCredentials
-                | ErrorCode::LanguageUnsupported => {}
-            }
-        }
-        let distinct: BTreeSet<&str> = ALL_ERROR_CODES.iter().map(|c| c.as_str()).collect();
-        assert_eq!(
-            distinct.len(),
-            ALL_ERROR_CODES.len(),
-            "an ErrorCode listed twice"
-        );
-
         let c = catalog(EN_JSON, RU_JSON);
         let mut missing = Vec::new();
-        for code in ALL_ERROR_CODES {
+        for code in ErrorCode::ALL {
             let id = format!("error.{}", code.as_str());
             for lang in LANGS {
                 if own_text(&c, lang, &id).is_none() {

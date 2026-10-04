@@ -289,6 +289,33 @@ impl ErrorCode {
     }
 }
 
+/// The one list of every `ErrorCode`, for tests (`tests::error_codes_match_data_model`,
+/// `i18n::tests::every_error_code_has_catalog_text`).
+///
+/// Completeness is kept by hand: a variant added to `ErrorCode` must be added here as
+/// well. The wildcard-free matches (`as_str`, the tests' `expected_error_code`) force a
+/// new match arm, not an entry in this list; `error_codes_match_data_model` checks that
+/// no entry is listed twice.
+#[cfg(test)]
+impl ErrorCode {
+    pub(crate) const ALL: [ErrorCode; 14] = [
+        ErrorCode::Required,
+        ErrorCode::UrlMalformed,
+        ErrorCode::KeyRequired,
+        ErrorCode::ModelNotDownloaded,
+        ErrorCode::HotkeyNoModifier,
+        ErrorCode::HotkeyNoKey,
+        ErrorCode::HotkeyEscReserved,
+        ErrorCode::HotkeyInvalid,
+        ErrorCode::HotkeyUnavailable,
+        ErrorCode::HistorySizeRange,
+        ErrorCode::AutostartFailed,
+        ErrorCode::KeyStoreFailed,
+        ErrorCode::UrlCredentials,
+        ErrorCode::LanguageUnsupported,
+    ];
+}
+
 /// On the wire a code is [`ErrorCode::as_str`], the one spelling.
 impl Serialize for ErrorCode {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
@@ -700,24 +727,6 @@ mod tests {
         );
     }
 
-    /// Every `ErrorCode`, once; completeness by hand (see `ALL_FIELD_IDS`).
-    const ALL_ERROR_CODES: [ErrorCode; 14] = [
-        ErrorCode::Required,
-        ErrorCode::UrlMalformed,
-        ErrorCode::KeyRequired,
-        ErrorCode::ModelNotDownloaded,
-        ErrorCode::HotkeyNoModifier,
-        ErrorCode::HotkeyNoKey,
-        ErrorCode::HotkeyEscReserved,
-        ErrorCode::HotkeyInvalid,
-        ErrorCode::HotkeyUnavailable,
-        ErrorCode::HistorySizeRange,
-        ErrorCode::AutostartFailed,
-        ErrorCode::KeyStoreFailed,
-        ErrorCode::UrlCredentials,
-        ErrorCode::LanguageUnsupported,
-    ];
-
     /// The data-model code of each ErrorCode. No wildcard (see `expected_field_id`).
     fn expected_error_code(code: ErrorCode) -> &'static str {
         match code {
@@ -742,21 +751,21 @@ mod tests {
     fn error_codes_match_data_model() {
         // Bite: a code string that differs from data-model.md / decisions #25(c), #27
         // (message id error.<code>), `hotkey.invalid` included.
-        for code in ALL_ERROR_CODES {
+        for code in ErrorCode::ALL {
             assert_eq!(code.as_str(), expected_error_code(code), "{code:?}");
             assert!(is_wire_name(code.as_str()), "{code:?}: {:?}", code.as_str());
         }
-        let codes: std::collections::HashSet<_> = ALL_ERROR_CODES.into_iter().collect();
+        let codes: std::collections::HashSet<_> = ErrorCode::ALL.into_iter().collect();
         assert_eq!(
             codes.len(),
-            ALL_ERROR_CODES.len(),
+            ErrorCode::ALL.len(),
             "an ErrorCode listed twice"
         );
         let texts: std::collections::HashSet<_> =
-            ALL_ERROR_CODES.iter().map(|c| c.as_str()).collect();
+            ErrorCode::ALL.iter().map(|c| c.as_str()).collect();
         assert_eq!(
             texts.len(),
-            ALL_ERROR_CODES.len(),
+            ErrorCode::ALL.len(),
             "two codes share a string"
         );
     }

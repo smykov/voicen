@@ -5,6 +5,8 @@
 // builds a SettingsView itself: every one it shows comes from here (U1).
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+// Relative, not `$lib`: e2e/support/tauriMock.ts imports these wire types too.
+import type { MessageId, UiLanguage } from "../i18n";
 
 export type EngineKind = "none" | "api" | "builtin_local" | "local_server";
 
@@ -23,7 +25,7 @@ export interface Settings {
   post_processing: { enabled: boolean; base_url: string; model: string; prompt: string };
   history: { enabled: boolean; size: number };
   start_with_windows: boolean;
-  ui_language: "en" | "ru";
+  ui_language: UiLanguage;
 }
 
 export type KeySlot = "transcription_api" | "local_server" | "post_processing";
@@ -54,10 +56,14 @@ export interface FieldError {
   code: string;
 }
 
-/** A refusal not tied to one field; `message` is a catalog id. */
+/**
+ * A refusal not tied to one field. `message` is a Rust `MessageId` (declared with
+ * `messages!`), so it is typed `MessageId` here and rendered with `t`: core's
+ * `message_ids_exist_in_both_catalogs` guarantees its text in both catalogs.
+ */
 export interface FormError {
   kind: "write_failed" | "settings_unavailable" | "partially_restored";
-  message: string;
+  message: MessageId;
   not_restored?: string[];
 }
 

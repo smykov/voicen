@@ -33,6 +33,7 @@
   "settings.field.key": "Ключ API",
   "settings.field.mode": "Режим записи",
   "settings.field.model": "Модель",
+  "settings.field.not_restored": "Это значение не удалось вернуть к тому, каким оно было до сохранения. Проверьте его и сохраните ещё раз.",
   "settings.field.speech_language": "Язык речи",
   "settings.field.ui_language": "Язык интерфейса",
   "settings.hotkey.hint": "Щёлкните поле и нажмите новое сочетание.",

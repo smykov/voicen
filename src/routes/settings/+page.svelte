@@ -1,12 +1,14 @@
 <script lang="ts">
-  // The settings window (spec 004, T-004). It renders only what the shell sends:
-  // every SettingsView (settings_get, a Saved outcome, settings://changed) reaches the
-  // draft through draft.applyView / draft.applyOutcome, and the UI language is always
-  // the saved view's ui_language (U1). Refusals come from core and are shown on their
-  // fields (U2); a typed key lives only in the draft until the next Saved (U3).
+  // The settings window (spec 004, T-004; docs/decisions/settings-ui.md). It renders
+  // only what the shell sends: every SettingsView (settings_get, a Saved outcome,
+  // settings://changed) reaches the draft through draft.applyView / draft.applyOutcome,
+  // and the UI language is always the saved view's ui_language (U1). Refusals come
+  // from core and are shown on their fields (U2); a typed key lives only in the draft
+  // until the next Saved (U3). While a save is in flight the fields are disabled, so no
+  // edit can be made that the Saved draft would replace.
   import { onMount } from "svelte";
   import { page } from "$app/state";
-  import { setLanguage, t, tWire, type MessageId } from "$lib/i18n";
+  import { setLanguage, t, type MessageId } from "$lib/i18n";
   import { applyOutcome, applyView, draftFromView, saveRequest, type Draft } from "$lib/settings/draft";
   import {
     getSettings,
@@ -103,7 +105,7 @@
         <p>{t("error.ipc_unavailable")}</p>
       {/if}
       {#if draft?.formError}
-        <p>{tWire(draft.formError.message)}</p>
+        <p>{t(draft.formError.message)}</p>
       {/if}
     </div>
   {/if}
@@ -132,17 +134,19 @@
     </div>
 
     <div class="panel" id="settings-panel" role="tabpanel" aria-labelledby={`tab-${tab}`}>
-      {#if tab === "engine"}
-        <Engine bind:draft {languages} />
-      {:else if tab === "recording"}
-        <Recording bind:draft />
-      {:else if tab === "output"}
-        <Output bind:draft />
-      {:else if tab === "history"}
-        <History bind:draft />
-      {:else}
-        <General bind:draft />
-      {/if}
+      <fieldset disabled={saving}>
+        {#if tab === "engine"}
+          <Engine bind:draft {languages} />
+        {:else if tab === "recording"}
+          <Recording bind:draft />
+        {:else if tab === "output"}
+          <Output bind:draft />
+        {:else if tab === "history"}
+          <History bind:draft />
+        {:else}
+          <General bind:draft />
+        {/if}
+      </fieldset>
     </div>
 
     <div class="actions">
@@ -187,6 +191,13 @@
 
   .panel {
     padding: 1rem 0;
+  }
+
+  .panel fieldset {
+    border: none;
+    margin: 0;
+    padding: 0;
+    min-width: 0;
   }
 
   .panel :global(.field) {

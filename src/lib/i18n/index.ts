@@ -32,7 +32,8 @@ export interface CatalogProblem {
   lang: UiLanguage;
 }
 
-const LANGUAGES: readonly UiLanguage[] = ["en", "ru"];
+/** Every UI language, in display order; the one list of them in the UI. */
+export const LANGUAGES: readonly UiLanguage[] = ["en", "ru"];
 
 /** `{name}` with `name` matching `[a-z][a-z0-9_]*`; no escaping. */
 const PLACEHOLDER = /\{([a-z][a-z0-9_]*)\}/g;
@@ -86,18 +87,12 @@ export function setLanguage(lang: UiLanguage): void {
 }
 
 /**
- * Render a message from the real catalog in the current language.
+ * Render a message from the real catalog in the current language: the only renderer
+ * of a catalog id in the UI. An id that arrives over IPC is typed `MessageId` at the
+ * wire boundary (`FormError.message`) or built by `errorMessageId` (`error.<code>`);
+ * there is no `string`-typed renderer (docs/decisions/i18n.md).
  * Called in a Svelte template or effect, it re-runs when the language changes.
  */
 export function t(id: MessageId, args: MessageArgs = {}): string {
-  return text(realCatalog, currentLanguage(), id, args);
-}
-
-/**
- * `t` for an id that arrives at run time (`FormError.message`, `error.<code>` of a
- * `FieldError`), so it cannot be a `MessageId` literal. Same rule as `t`: an id with
- * no text renders as the id (core tests keep every such id in both catalogs).
- */
-export function tWire(id: string, args: MessageArgs = {}): string {
   return text(realCatalog, currentLanguage(), id, args);
 }

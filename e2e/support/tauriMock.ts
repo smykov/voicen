@@ -27,57 +27,21 @@ import { readFileSync } from "node:fs";
 import type { Page } from "@playwright/test";
 
 // ---- Wire types (contracts/ipc.md › Wire form; serde of voicen_core) -------------
+// The one TS declaration of the wire is the window's own (src/lib/settings/settingsApi.ts);
+// the mock re-exports it, so a wire change is made in one TS file (T-004 r1 #8).
 
-export type EngineKind = "none" | "api" | "builtin_local" | "local_server";
-
-export interface Settings {
-  schema_version: number;
-  engine: EngineKind;
-  api: { base_url: string; model: string };
-  local_server: { base_url: string; model: string };
-  builtin_local: { model_id: string | null };
-  speech_language: string | null;
-  microphone: { id: string; name: string } | null;
-  hotkey: string;
-  mode: "hold" | "toggle";
-  auto_paste: boolean;
-  post_processing: { enabled: boolean; base_url: string; model: string; prompt: string };
-  history: { enabled: boolean; size: number };
-  start_with_windows: boolean;
-  ui_language: "en" | "ru";
-}
-
-export type KeySlot = "transcription_api" | "local_server" | "post_processing";
-
-export interface SettingsView {
-  settings: Settings;
-  keys: Record<KeySlot, boolean>;
-  first_run: boolean;
-  reset_notice: boolean;
-  unavailable: boolean;
-}
-
-export type KeyEdit = "Untouched" | "Clear" | { Replace: string };
-
-export interface SaveRequest {
-  settings: Settings;
-  keys: Record<KeySlot, KeyEdit>;
-}
-
-export interface FieldError {
-  field: string;
-  code: string;
-}
-
-export interface FormError {
-  kind: "write_failed" | "settings_unavailable" | "partially_restored";
-  message: string;
-  not_restored?: string[];
-}
-
-export type SaveOutcome =
-  | { Saved: { view: SettingsView; warnings: { field: string; code: string }[] } }
-  | { Refused: { errors: FieldError[]; form_error: FormError | null } };
+import type { SaveOutcome, SettingsView } from "../../src/lib/settings/settingsApi";
+export type {
+  EngineKind,
+  FieldError,
+  FormError,
+  KeyEdit,
+  KeySlot,
+  SaveOutcome,
+  SaveRequest,
+  Settings,
+  SettingsView,
+} from "../../src/lib/settings/settingsApi";
 
 export interface BuildInfo {
   version: string;
