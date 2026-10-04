@@ -20,7 +20,17 @@
 //   such warning the element is absent or has no list item;
 // - the warnings are those of the last Saved outcome, kept outside the Draft: the
 //   `settings://changed` echo of that save (which rebuilds the draft) keeps them; the
-//   next save's outcome replaces them (a Saved with no warnings shows none).
+//   next save's outcome replaces them (a Saved with no warnings shows none);
+// - they are cleared when the next save starts, so a save that ends in `Refused` or in a
+//   rejected invoke leaves no warning: no text, nothing in the control's accessible
+//   description, no `settings-warnings` list item (W; T-015 review round 1 #1);
+// - a Saved with at least one warning (field-level or form-level) is announced politely:
+//   the existing "Saved" status region (`role="status"`, never `role="alert"` or
+//   aria-live other than polite) holds, after `t(settings.saved)`, the one-line summary
+//   `t(settings.saved_with_warnings)` (a UI-only MessageId in en/ru); the per-field
+//   warning text stays where it is and is not repeated in the status (it is on the page
+//   exactly once); after a Saved without warnings the status reads `t(settings.saved)`
+//   only (T-015 review round 1 #3).
 import { readFileSync } from "node:fs";
 import { expect, test, type Page } from "@playwright/test";
 import {
@@ -30,6 +40,7 @@ import {
   installTauriMock,
   listeners,
   queueSaveOutcome,
+  queueSaveRejection,
   savedInsecureApi,
   type SaveRequest,
   type SettingsView,
@@ -59,7 +70,13 @@ function escapeRegExp(s: string): RegExp {
   return new RegExp(s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
 }
 
+/** The whole text is exactly `s` (surrounding whitespace aside). */
+function exactly(s: string): RegExp {
+  return new RegExp(`^\\s*${escapeRegExp(s).source}\\s*$`);
+}
+
 const WARNING_ID = "settings.warning.endpoint_insecure";
+const SUMMARY_ID = "settings.saved_with_warnings";
 const API_URL = "engine.api.base_url";
 const PP_URL = "post_processing.base_url";
 
@@ -304,5 +321,150 @@ test("the next save clears old warnings: a Saved without warnings removes the fi
   await expect(page.getByText(en(WARNING_ID))).toHaveCount(0);
   await expect(field(page, API_URL)).not.toHaveAccessibleDescription(escapeRegExp(en(WARNING_ID)));
   await expect(formWarnings(page)).toHaveCount(0);
+  expect(errors).toEqual([]);
+});
+
+// ---- W: cleared when a save starts (review round 1 #1) --------------------------------
+
+/** A Saved with two warnings: engine.api.base_url (has a control) and post_processing.base_url (none). */
+function savedTwoWarnings(): ReturnType<typeof savedInsecureApi> {
+  const outcome = savedInsecureApi();
+  outcome.Saved.view.settings.post_processing.enabled = true;
+  outcome.Saved.view.settings.post_processing.base_url = "http://192.0.2.10/v1";
+  outcome.Saved.warnings.push({ ...outcome.Saved.warnings[0], field: PP_URL });
+  return outcome;
+}
+
+/** The user saves with core's two warnings; both are shown (field-level and form-level). */
+async function saveWithWarnings(page: Page): Promise<void> {
+  await queueSaveOutcome(page, savedTwoWarnings());
+  await saveInsecureApi(page);
+  await expect(savedStatus(page, en("settings.saved"))).toBeVisible();
+  await expect(field(page, API_URL)).toHaveAccessibleDescription(escapeRegExp(en(WARNING_ID)));
+  await expect(formWarnings(page)).toHaveCount(1);
+  await expect(formWarnings(page).first()).toContainText(en(WARNING_ID));
+  // Once beside the control, once in the form-level list.
+  await expect(page.getByText(en(WARNING_ID))).toHaveCount(2);
+}
+
+/** No warning of any kind is on the page: no text, no accessible description, no list item, no summary. */
+async function expectNoWarnings(page: Page): Promise<void> {
+  const text = en(WARNING_ID);
+  await expect(page.getByText(text)).toHaveCount(0);
+  await expect(field(page, API_URL)).not.toHaveAccessibleDescription(escapeRegExp(text));
+  await expect(formWarnings(page)).toHaveCount(0);
+  // The summary of #3, once it exists in the catalog, is gone too.
+  const summary = EN[SUMMARY_ID];
+  if (typeof summary === "string" && summary !== "") {
+    await expect(page.getByText(summary)).toHaveCount(0);
+  }
+}
+
+test("a save refused by core after a save with warnings shows no warning: the warnings are cleared when the next save starts", async ({ page }) => {
+  // Bite: `warnings = {}` at the start of save() removed (a Refused never reaches the
+  // `warnings = warningsByField(...)` of a Saved, so the old warnings would stay).
+  const errors = pageErrors(page);
+  await open(page);
+  await saveWithWarnings(page);
+
+  await queueSaveOutcome(page, {
+    Refused: { errors: [{ field: "engine.api.model", code: "required" }], form_error: null },
+  });
+  await field(page, "engine.api.model").fill("");
+  await page.getByTestId("settings-save").click();
+  await lastSaveRequest(page, 2);
+
+  // The refusal is rendered (the second save has finished) ...
+  const model = field(page, "engine.api.model");
+  await expect(model).toHaveAttribute("aria-invalid", "true");
+  await expect(model).toHaveAccessibleDescription(escapeRegExp(en("error.required")));
+  await expect(savedStatus(page, en("settings.saved"))).toHaveCount(0);
+  // ... and no warning of the earlier Saved is left anywhere.
+  await settle(page);
+  await expectNoWarnings(page);
+  expect(errors).toEqual([]);
+});
+
+test("a rejected save after a save with warnings shows no warning: the warnings are cleared when the next save starts", async ({ page }) => {
+  // Bite: as above, for the catch branch (a rejected invoke sets no outcome at all).
+  const errors = pageErrors(page);
+  await open(page);
+  await saveWithWarnings(page);
+
+  await queueSaveRejection(page, { code: "ipc.unavailable", detail: "canary-rejection-text-0015" });
+  await page.getByTestId("settings-save").click();
+  await lastSaveRequest(page, 2);
+
+  await expect(page.getByRole("alert")).toContainText(en("error.ipc_unavailable"));
+  await expect(page.locator("main")).not.toContainText("canary-rejection-text-0015");
+  await expect(savedStatus(page, en("settings.saved"))).toHaveCount(0);
+  await settle(page);
+  await expectNoWarnings(page);
+  expect(errors).toEqual([]);
+});
+
+// ---- The warning is announced politely (review round 1 #3) ----------------------------
+
+test("a Saved with a field warning is announced politely: the Saved status also holds the settings.saved_with_warnings summary, and a later Saved without warnings says only Saved", async ({ page }) => {
+  // Bite: no summary in the status region (today: the warning is reachable only by
+  // focusing the field, never announced), or a summary kept after a Saved with none.
+  const errors = pageErrors(page);
+  await open(page);
+  await queueSaveOutcome(page, savedInsecureApi());
+  await saveInsecureApi(page);
+
+  const status = savedStatus(page, en("settings.saved"));
+  await expect(status).toHaveCount(1);
+  await expect(status).toBeVisible();
+  // More than the bare "Saved" is announced ...
+  await expect(status).not.toHaveText(exactly(en("settings.saved")));
+  // ... namely the summary, from the catalog, in a polite region (never an alert).
+  await expect(status).toContainText(en(SUMMARY_ID));
+  expect(ru(SUMMARY_ID)).not.toBe(en(SUMMARY_ID));
+  await expect(status).not.toHaveAttribute("aria-live", /assertive|off/);
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  // The per-field text is not repeated in the status: it stays once, beside the control.
+  await expect(status).not.toContainText(en(WARNING_ID));
+  await expectFieldWarning(page, API_URL, en(WARNING_ID));
+
+  // The user switches to https and saves; the unscripted mock returns a Saved with no
+  // warnings: the status says "Saved" and nothing else.
+  await field(page, API_URL).fill("https://example.com/v1");
+  await page.getByTestId("settings-save").click();
+  await lastSaveRequest(page, 2);
+  await expect(savedStatus(page, en("settings.saved"))).toHaveText(exactly(en("settings.saved")));
+  await expectNoWarnings(page);
+  expect(errors).toEqual([]);
+});
+
+test("a Saved whose only warning has no control on the page (form-level) is announced by the same summary in the Saved status", async ({ page }) => {
+  // Bite: a summary derived from the field-level warnings only (rendered controls), so a
+  // warning listed at form level is again silent.
+  const errors = pageErrors(page);
+  await open(page);
+  const outcome = savedInsecureApi();
+  outcome.Saved.view.settings.post_processing.enabled = true;
+  outcome.Saved.view.settings.post_processing.base_url = "http://192.0.2.10/v1";
+  outcome.Saved.view.settings.api.base_url = "https://example.com/v1";
+  outcome.Saved.warnings = [{ ...outcome.Saved.warnings[0], field: PP_URL }];
+  await queueSaveOutcome(page, outcome);
+
+  await field(page, "engine.kind").selectOption("api");
+  await field(page, API_URL).fill("https://example.com/v1");
+  await page.getByTestId("settings-save").click();
+  await lastSaveRequest(page, 1);
+
+  // The warning is listed at form level only.
+  await expect(formWarnings(page)).toHaveCount(1);
+  await expect(formWarnings(page).first()).toContainText(en(WARNING_ID));
+  await expect(field(page, API_URL)).not.toHaveAccessibleDescription(escapeRegExp(en(WARNING_ID)));
+
+  const status = savedStatus(page, en("settings.saved"));
+  await expect(status).toHaveCount(1);
+  await expect(status).not.toHaveText(exactly(en("settings.saved")));
+  await expect(status).toContainText(en(SUMMARY_ID));
+  await expect(status).not.toContainText(en(WARNING_ID));
+  await expect(status).not.toHaveAttribute("aria-live", /assertive|off/);
+  await expect(page.getByRole("alert")).toHaveCount(0);
   expect(errors).toEqual([]);
 });
