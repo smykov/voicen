@@ -1,6 +1,6 @@
 # CI toolchain: Windows test executables of the shell
 
-**Code:** `src-tauri/build.rs`, `src-tauri/windows-app-manifest.xml`, `.github/workflows/ci.yml` (windows job, the two `cargo test` steps), `scripts/ci/shell-test-layout.sh` (Makefile `check-shell-layout`, part of `make check`) · **Tests that pin it:** the windows job's `cargo test -p voicen` run of every `src-tauri/tests/*.rs` exe; `make check-shell-layout`
+**Code:** `src-tauri/build.rs`, `src-tauri/windows-app-manifest.xml`, `src-tauri/Cargo.toml` (`[lib] doctest = false`), `.github/workflows/ci.yml` (windows job, the two `cargo test` steps), `scripts/ci/shell-test-layout.sh` with its lexer `scripts/ci/shell-test-layout.awk` (Makefile `check-shell-layout`, part of `make check`) · **Tests that pin it:** the windows job's `cargo test -p voicen` run of every `src-tauri/tests/*.rs` exe; `make check-shell-layout`; `make check-shell-layout-fixtures` (`scripts/ci/shell-test-layout.test.sh` on the fixture shell dirs in `scripts/ci/fixtures/shell-test-layout/`)
 
 Tasks: T-033 (F-001), T-030 and T-035 (F-002). Class `ci-toolchain` in `docs/failures.md`. Decisions: #5 (the shell is built and tested only on the Windows runner).
 
@@ -27,17 +27,23 @@ cargo's link-arg scopes are a closed set (cargo rust-1.99.0 `src/compiler/custom
   - `src-tauri/windows-app-manifest.xml` is a copy of tauri-build 2.7.1's `src/windows-app-manifest.xml`: the same elements, attributes and values (one `dependentAssembly`, `Microsoft.Windows.Common-Controls` 6.0.0.0, `processorArchitecture="*"`, `publicKeyToken="6595b64144ccf1df"`, `language="*"`). Only whitespace and comments differ. The comments sit inside the root element, never before it:
     - one names the source file and version;
     - one on the `publicKeyToken` line carries `teamwright:allow-secret`, because the commit secret scan reads `…Token="<16 hex>"` as a secret (it is the public key token of the Windows assembly; `docs/process/gates.md` › Secret scan, false-positive exit). That marker is why the copy cannot be byte-identical.
-  - `make check` runs `scripts/ci/shell-test-layout.sh` on the host (grep and awk, no toolchain). It fails, naming this file, when the package could produce a test exe that `build.rs` does not configure:
-    - a test attribute under `src-tauri/src`: `#[test]`, `#[<path>::test]`, any attribute whose name starts with `test`, or a `cfg`/`cfg_attr` predicate naming `test` (`#[cfg(test)]`, `#![cfg(test)]`, `#[cfg(all(test, …))]`);
-    - a `///` or `//!` code fence under `src-tauri/src` other than ```` ```text ````, or `#[doc = include_str!(…)]`;
+  - `src-tauri/Cargo.toml` sets `[lib] doctest = false`, so cargo builds no lib doctest exe at all. With it, a doc code block in `src-tauri/src` is not run but skipped silently, so the check below still refuses every one.
+  - `make check` runs `scripts/ci/shell-test-layout.sh` on the host (bash, find, sort, grep, awk; no toolchain). It fails, naming this file, when the package could produce a test exe that `build.rs` does not configure, or a doc code block that would be skipped. Under `src-tauri/src` it reads each file with a small lexer (`scripts/ci/shell-test-layout.awk`) that drops plain comments and string, raw-string and char literals, so text inside them never counts. It refuses:
+    - a test attribute anywhere on a line, with any whitespace or line breaks inside it: `#[test]`, `# [test]`, `#[<path>::test]`, `#[test_case(…)]` (any attribute whose name starts with `test`), also as an attribute argument of `cfg_attr` (`#[cfg_attr(windows, test)]`);
+    - a `cfg` or `cfg_attr` predicate naming `test`, on one line or split across lines: `#[cfg(test)]`, `#![cfg(test)]`, `#[cfg(all(windows, test))]`, `#[cfg_attr(test, …)]`;
+    - a doc code block in any doc form (`///` and `//!` lines, `/** */` and `/*! */` blocks, `#[doc = "…"]` and `#![doc = "…"]` strings): a ```` ``` ```` or `~~~` fence (also after a list or quote marker) other than ```` ```text ````, or an indented block of 4+ columns, that is an indented doc line after a blank doc line, a heading, a fence or the start of the docs. An indented line right after paragraph text is a lazy continuation and passes;
+    - `#[doc = …]` with anything but a string literal (`include_str!(…)`, `concat!(…)`);
+    - a block comment, string or attribute left open at the end of a file;
     - `src-tauri/benches`, `src-tauri/examples`, or `[[bench]]` / `[[example]]` in `src-tauri/Cargo.toml`.
 
-    A grep or awk error is "cannot run" (exit 3), never a pass.
-- **Rule for shell test authors:** put shell tests in `src-tauri/tests/<name>.rs`. They need no per-file setup; the manifest reaches every one of them. Put platform-independent logic and its unit tests in `crates/voicen-core`. Write examples in shell doc comments as ```` ```text ````. If a new exe kind is really needed, extend `build.rs`, this file and the check together in one reviewed change.
+    Not caught, because a source scan cannot see them: tests that a proc macro generates from an attribute with another name. A `find`, `sort`, `grep` or `awk` error is "cannot run" (exit 3), never a pass. `make check-shell-layout-fixtures` pins every shape above: each fixture shell dir must give its documented exit code (0, 1 or 3).
+- **Rule for shell test authors:** put shell tests in `src-tauri/tests/<name>.rs`. They need no per-file setup; the manifest reaches every one of them. Put platform-independent logic and its unit tests in `crates/voicen-core`. Write examples in shell doc comments as ```` ```text ````; lib doctests are off, so any other code block would never run. If a new exe kind is really needed, extend `build.rs`, this file and the check together in one reviewed change.
 - **Don't:**
   - add `#[cfg(test)]` modules or doctests in `src-tauri/src`;
+  - remove `doctest = false` from `[lib]` in `src-tauri/Cargo.toml`;
   - emit the manifest with `cargo:rustc-link-arg` (it reaches the bin too and duplicates its `RT_MANIFEST`) or drop the `-tests` scope;
   - edit `windows-app-manifest.xml`, or upgrade tauri-build, without comparing the copy's elements and values with the new tauri-build's file;
+  - upgrade tauri-build, tauri-winres or embed-resource without checking the shell's build-script output on the Windows runner (`target/*/build/voicen-*/output`). Every bins-only line there (`cargo:rustc-link-arg-bins=…`, `cargo:rustc-link-arg-bin=voicen=…`, and any output that moved from all targets to bins) must be mirrored to `cargo:rustc-link-arg-tests` in `build.rs`, or the integration tests silently miss it again. Today the only such output is the Common-Controls manifest;
   - add `/WX` to the test link args (upstream does, for its own workspace; here it would turn any unrelated test-link warning into an error, T-030).
 
 ### Other packages' tests never share a cargo invocation with `voicen` on Windows

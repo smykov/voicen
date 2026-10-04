@@ -6,7 +6,8 @@
 check: check-shell-layout check-shell-layout-fixtures check-core check-ui licenses-check
 
 # Shell tests only in src-tauri/tests/*.rs: no test attributes or doctests in src-tauri/src,
-# no benches or examples (T-035, F-002; docs/decisions/ci-toolchain.md). Host grep/awk.
+# no benches or examples (T-035, F-002; docs/decisions/ci-toolchain.md). Host bash/grep and an
+# awk lexer (scripts/ci/shell-test-layout.awk).
 check-shell-layout:
 	scripts/ci/shell-test-layout.sh
 
