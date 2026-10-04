@@ -1,0 +1,367 @@
+//! Why a transcription failed, as the user and the log see it (spec 001 T038,
+//! data-model "FailureReason", decision #44).
+//!
+//! A [`FailureReason`] is built only from an HTTP status, the transport
+//! classification flags ([`TransportError`]) and the base URL's `host[:port]`;
+//! never from a `reqwest::Error`, a URL, a response body or a key (P-009). So
+//! neither its `Display` nor its `Debug` can carry a URL query, a key or a
+//! transcript.
+#![deny(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
+
+use crate::i18n::MessageId;
+
+/// One failure of a transcription job. T-001 adds the delivery and capture reasons.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum FailureReason {
+    /// HTTP 401 / 403.
+    #[error("invalid API key")]
+    InvalidApiKey,
+    /// DNS failure; OS "network unreachable" / "host unreachable".
+    #[error("network unavailable")]
+    NetworkUnavailable,
+    /// Connection refused, connect timeout, TLS handshake failure, client setup.
+    /// `host` is the base URL's `host[:port]` (explicit port only).
+    #[error("cannot reach {host}")]
+    CannotReach { host: String },
+    /// The whole request exceeded its `Timeouts` duration.
+    #[error("the server did not answer in time")]
+    Timeout,
+    /// Any other non-2xx status.
+    #[error("server error (HTTP {status})")]
+    ServerError { status: u16 },
+    /// A 2xx body that is not `{"text": "<string>"}`, larger than 1 MiB, not
+    /// UTF-8, or cut off while reading.
+    #[error("unexpected response from the server")]
+    UnexpectedResponse,
+    /// The key could not be read from the credential store (decision #44).
+    #[error("the API key could not be read")]
+    KeyStoreUnavailable,
+    /// The selected engine cannot be built from the current settings (decision #44).
+    #[error("the transcription engine is not set up")]
+    EngineNotConfigured,
+}
+
+impl FailureReason {
+    /// Stable code for events and logs (data-model "Code" column).
+    pub fn code(&self) -> &'static str {
+        // T-040 skeleton: wrong on purpose until implemented (red tests first).
+        ""
+    }
+
+    /// The catalog message (`failure.*`).
+    pub fn message_id(&self) -> MessageId {
+        // T-040 skeleton: wrong on purpose until implemented (red tests first).
+        crate::i18n::NOTICE_CHOOSE_ENGINE
+    }
+
+    /// Placeholder values for [`message_id`](Self::message_id): `host` for
+    /// `CannotReach`, `status` for `ServerError`, none otherwise.
+    pub fn message_params(&self) -> Vec<(&'static str, String)> {
+        // T-040 skeleton: wrong on purpose until implemented (red tests first).
+        Vec::new()
+    }
+}
+
+/// What went wrong in the transport, reduced to the facts the classification uses
+/// (the reqwest adapter in `engine::openai` fills it; no URL, no body, no message).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TransportError {
+    /// The HTTP client could not be built.
+    Setup,
+    /// A non-2xx status.
+    Status(u16),
+    /// The request failed before a response: reqwest's `is_dns` / `is_connect` /
+    /// `is_timeout` flags, and the first `std::io::ErrorKind` in the source chain.
+    Send {
+        dns: bool,
+        connect: bool,
+        timeout: bool,
+        io: Option<std::io::ErrorKind>,
+    },
+    /// Reading a 2xx body failed (stall past the timeout, or a reset / early close).
+    BodyRead { timeout: bool },
+    /// A 2xx body that is not the expected JSON, over 1 MiB, or not UTF-8.
+    BadBody,
+}
+
+/// The one mapping from a transport failure to a reason. `host` is the base URL's
+/// `host[:port]`.
+///
+/// Order (T-040 Investigation): status; DNS or OS network/host unreachable ->
+/// `NetworkUnavailable`; connect (refused, connect timeout, TLS) -> `CannotReach`;
+/// timeout -> `Timeout`; body errors -> `UnexpectedResponse`. A DNS failure is
+/// also `is_connect`, so DNS is checked first.
+pub fn classify(err: &TransportError, host: &str) -> FailureReason {
+    // T-040 skeleton: wrong on purpose until implemented (red tests first).
+    let _ = (err, host);
+    FailureReason::UnexpectedResponse
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::i18n::{text, UiLanguage, MESSAGE_IDS};
+    use std::io::ErrorKind;
+
+    const HOST: &str = "api.example.com:8443";
+
+    fn send(dns: bool, connect: bool, timeout: bool, io: Option<ErrorKind>) -> TransportError {
+        TransportError::Send {
+            dns,
+            connect,
+            timeout,
+            io,
+        }
+    }
+
+    fn cannot_reach() -> FailureReason {
+        FailureReason::CannotReach {
+            host: HOST.to_string(),
+        }
+    }
+
+    #[test]
+    fn classify_table() {
+        // Rows from the T-040 Investigation probe (reqwest 0.13.5 flags) and
+        // contracts/openai-transcription.md. Bite: checking is_connect before
+        // is_dns turns the `.invalid` row (dns AND connect) into CannotReach;
+        // checking is_timeout before is_connect turns the connect-timeout row into
+        // Timeout; a body-read timeout mapped to UnexpectedResponse breaks FR-24.
+        let rows: Vec<(&str, TransportError, FailureReason)> = vec![
+            (
+                "401",
+                TransportError::Status(401),
+                FailureReason::InvalidApiKey,
+            ),
+            (
+                "403",
+                TransportError::Status(403),
+                FailureReason::InvalidApiKey,
+            ),
+            (
+                "400",
+                TransportError::Status(400),
+                FailureReason::ServerError { status: 400 },
+            ),
+            (
+                "404",
+                TransportError::Status(404),
+                FailureReason::ServerError { status: 404 },
+            ),
+            (
+                "413",
+                TransportError::Status(413),
+                FailureReason::ServerError { status: 413 },
+            ),
+            (
+                "429",
+                TransportError::Status(429),
+                FailureReason::ServerError { status: 429 },
+            ),
+            (
+                "500",
+                TransportError::Status(500),
+                FailureReason::ServerError { status: 500 },
+            ),
+            (
+                "503",
+                TransportError::Status(503),
+                FailureReason::ServerError { status: 503 },
+            ),
+            (
+                "nohost.invalid: dns + connect",
+                send(true, true, false, None),
+                FailureReason::NetworkUnavailable,
+            ),
+            (
+                "dns only",
+                send(true, false, false, None),
+                FailureReason::NetworkUnavailable,
+            ),
+            (
+                "connect + io NetworkUnreachable",
+                send(false, true, false, Some(ErrorKind::NetworkUnreachable)),
+                FailureReason::NetworkUnavailable,
+            ),
+            (
+                "connect + io HostUnreachable",
+                send(false, true, false, Some(ErrorKind::HostUnreachable)),
+                FailureReason::NetworkUnavailable,
+            ),
+            (
+                "refused 127.0.0.1:9: connect + io ConnectionRefused",
+                send(false, true, false, Some(ErrorKind::ConnectionRefused)),
+                cannot_reach(),
+            ),
+            (
+                "192.0.2.1 connect_timeout: connect + timeout",
+                send(false, true, true, None),
+                cannot_reach(),
+            ),
+            (
+                "connect, no io kind (TLS handshake)",
+                send(false, true, false, None),
+                cannot_reach(),
+            ),
+            (
+                "silent listener: timeout only",
+                send(false, false, true, None),
+                FailureReason::Timeout,
+            ),
+            (
+                "stall mid-body",
+                TransportError::BodyRead { timeout: true },
+                FailureReason::Timeout,
+            ),
+            (
+                "reset mid-body",
+                TransportError::BodyRead { timeout: false },
+                FailureReason::UnexpectedResponse,
+            ),
+            (
+                "bad body",
+                TransportError::BadBody,
+                FailureReason::UnexpectedResponse,
+            ),
+            ("client setup", TransportError::Setup, cannot_reach()),
+        ];
+        let mut wrong = Vec::new();
+        for (name, err, expected) in rows {
+            let got = classify(&err, HOST);
+            if got != expected {
+                wrong.push(format!("{name}: {err:?} -> {got:?}, expected {expected:?}"));
+            }
+        }
+        assert!(wrong.is_empty(), "misclassified:\n{}", wrong.join("\n"));
+    }
+
+    /// Every variant once. The exhaustive match makes a new variant a compile error
+    /// here until it is added to this list (and so to `message_ids_per_reason`).
+    fn every_reason() -> Vec<FailureReason> {
+        let all = vec![
+            FailureReason::InvalidApiKey,
+            FailureReason::NetworkUnavailable,
+            FailureReason::CannotReach {
+                host: HOST.to_string(),
+            },
+            FailureReason::Timeout,
+            FailureReason::ServerError { status: 503 },
+            FailureReason::UnexpectedResponse,
+            FailureReason::KeyStoreUnavailable,
+            FailureReason::EngineNotConfigured,
+        ];
+        for r in &all {
+            match r {
+                FailureReason::InvalidApiKey
+                | FailureReason::NetworkUnavailable
+                | FailureReason::CannotReach { .. }
+                | FailureReason::Timeout
+                | FailureReason::ServerError { .. }
+                | FailureReason::UnexpectedResponse
+                | FailureReason::KeyStoreUnavailable
+                | FailureReason::EngineNotConfigured => {}
+            }
+        }
+        all
+    }
+
+    /// (code, message id, en text, ru text) per reason: data-model "FailureReason",
+    /// contracts/messages.md, and the T-040 Investigation texts for the two
+    /// decision-#44 reasons. Params as in `every_reason`.
+    fn expected(r: &FailureReason) -> (&'static str, &'static str, &'static str, &'static str) {
+        match r {
+            FailureReason::InvalidApiKey => (
+                "InvalidApiKey",
+                "failure.invalid_api_key",
+                "Invalid API key",
+                "Неверный API-ключ",
+            ),
+            FailureReason::NetworkUnavailable => (
+                "NetworkUnavailable",
+                "failure.network_unavailable",
+                "Network unavailable",
+                "Сеть недоступна",
+            ),
+            FailureReason::CannotReach { .. } => (
+                "CannotReach",
+                "failure.cannot_reach",
+                "Cannot reach api.example.com:8443",
+                "Не удаётся подключиться к api.example.com:8443",
+            ),
+            FailureReason::Timeout => (
+                "Timeout",
+                "failure.timeout",
+                "The server did not answer in time",
+                "Сервер не ответил вовремя",
+            ),
+            FailureReason::ServerError { .. } => (
+                "ServerError",
+                "failure.server_error",
+                "Server error (HTTP 503)",
+                "Ошибка сервера (HTTP 503)",
+            ),
+            FailureReason::UnexpectedResponse => (
+                "UnexpectedResponse",
+                "failure.unexpected_response",
+                "Unexpected response from the server",
+                "Неожиданный ответ сервера",
+            ),
+            FailureReason::KeyStoreUnavailable => (
+                "KeyStoreUnavailable",
+                "failure.key_store_unavailable",
+                "The API key could not be read from Windows Credential Manager.",
+                "Не удалось прочитать API-ключ из диспетчера учётных данных Windows.",
+            ),
+            FailureReason::EngineNotConfigured => (
+                "EngineNotConfigured",
+                "failure.engine_not_configured",
+                "The transcription engine is not set up. Check the Engine settings.",
+                "Движок распознавания не настроен. Проверьте настройки движка.",
+            ),
+        }
+    }
+
+    #[test]
+    fn message_ids_per_reason() {
+        // Each reason has its stable code, its own `failure.*` id declared with
+        // messages! (so `message_ids_exist_in_both_catalogs` covers it), and that
+        // id renders the contract text in en and ru with the reason's params.
+        // Bite: a shared/wrong id, an id not in MESSAGE_IDS, a missing catalog
+        // entry (text() falls back to the id), `host`/`status` not passed.
+        let mut wrong = Vec::new();
+        for r in every_reason() {
+            let (code, id, en, ru) = expected(&r);
+            if r.code() != code {
+                wrong.push(format!("{r:?}: code {:?}, expected {code:?}", r.code()));
+            }
+            let got_id = serde_json::to_value(r.message_id()).unwrap_or_default();
+            if got_id != serde_json::Value::String(id.to_string()) {
+                wrong.push(format!("{r:?}: message id {got_id}, expected {id:?}"));
+            }
+            if !MESSAGE_IDS.contains(&r.message_id()) {
+                wrong.push(format!("{r:?}: message id not declared with messages!"));
+            }
+            let params = r.message_params();
+            let args: Vec<(&str, &str)> = params.iter().map(|(k, v)| (*k, v.as_str())).collect();
+            for (lang, want) in [(UiLanguage::En, en), (UiLanguage::Ru, ru)] {
+                let got = text(lang, r.message_id(), &args);
+                if got != want {
+                    wrong.push(format!("{r:?} {lang:?}: {got:?}, expected {want:?}"));
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "\n{}", wrong.join("\n"));
+    }
+
+    #[test]
+    fn codes_are_distinct() {
+        // Codes are what T-001's JobFinished event carries; two reasons with one
+        // code cannot be told apart in the log. Bite: a shared fallback code.
+        let codes: Vec<&str> = every_reason().iter().map(FailureReason::code).collect();
+        let mut unique = codes.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), codes.len(), "codes not distinct: {codes:?}");
+        assert!(codes.iter().all(|c| !c.is_empty()), "empty code: {codes:?}");
+    }
+}

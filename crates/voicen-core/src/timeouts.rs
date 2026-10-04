@@ -1,0 +1,63 @@
+//! The one source of network and engine durations (FR-24; spec 001 T006).
+//!
+//! `Timeouts::default()` is the only constructor with production values; tests
+//! override single fields with milliseconds
+//! (`Timeouts { api_transcription: Duration::from_millis(300), ..Timeouts::default() }`).
+//! The engine stores no `Duration` of its own: it reads them from the
+//! `TranscribeRequest` of each call.
+
+use std::time::Duration;
+
+/// Durations per role (data-model "Timeouts").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Timeouts {
+    /// TCP/TLS connect, every HTTP role (FR-24: 5 s).
+    pub connect: Duration,
+    /// The whole API transcription request, connect to last body byte (FR-24: 30 s).
+    pub api_transcription: Duration,
+    /// The whole local-server transcription request (spec 002: 60 s).
+    pub local_server: Duration,
+    /// The whole post-processing request (spec 003: 15 s).
+    pub post_processing: Duration,
+    /// Built-in whisper.cpp transcription (decision #7: 120 s).
+    pub builtin: Duration,
+}
+
+impl Default for Timeouts {
+    fn default() -> Timeouts {
+        // T-040 skeleton: wrong on purpose until implemented (red tests first).
+        Timeouts {
+            connect: Duration::ZERO,
+            api_transcription: Duration::ZERO,
+            local_server: Duration::ZERO,
+            post_processing: Duration::ZERO,
+            builtin: Duration::ZERO,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn defaults_are_fr24() {
+        // FR-24 (connect 5 s, API 30 s), spec 002 (local server 60 s), spec 003
+        // (post-processing 15 s), decision #7 (built-in 120 s). Bite: any value
+        // changed, or two roles swapped.
+        let t = Timeouts::default();
+        assert_eq!(t.connect, Duration::from_secs(5), "connect");
+        assert_eq!(
+            t.api_transcription,
+            Duration::from_secs(30),
+            "api_transcription"
+        );
+        assert_eq!(t.local_server, Duration::from_secs(60), "local_server");
+        assert_eq!(
+            t.post_processing,
+            Duration::from_secs(15),
+            "post_processing"
+        );
+        assert_eq!(t.builtin, Duration::from_secs(120), "builtin");
+    }
+}

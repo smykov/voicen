@@ -13,6 +13,12 @@ serde_json = "1"
 url = "2"
 # `Secret` zeroed on drop (data-model; decision #17).
 zeroize = "1"
+# OpenAI-compatible transcription client: blocking (decision #42, OQ-05 (a)),
+# multipart upload, rustls with the platform verifier, system proxy (T-040, #44).
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "multipart", "rustls", "system-proxy"] }
+# Capture rate -> 16 kHz resampling (T-040; rubato 5 needs Rust 1.87, decision #44).
+rubato = "5"
+thiserror = "2"
 
 [features]
 # Public test fakes (FakeCredentialStore, FakeHotkeyRegistrar, FakeDownloadedModels,
@@ -25,3 +31,6 @@ test-fakes = []
 # Self dev-dependency: switches `test-fakes` on for this crate's own tests
 # (unit, integration and doc tests), so `tests/*.rs` can use the public fakes.
 voicen-core = { path = ".", features = ["test-fakes"] }
+# Mock OpenAI-compatible server for tests/openai_client.rs (T-040).
+tokio = { version = "1", features = ["macros", "rt"] }
+wiremock = "0.6"

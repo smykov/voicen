@@ -1,0 +1,175 @@
+//! Transcription engines (spec 001 T018, contracts/core-traits.md "Engine",
+//! decisions #42, #44).
+//!
+//! Engines are synchronous (OQ-05 (a)): `transcribe` blocks its thread and must not
+//! run inside a tokio runtime (the blocking reqwest client panics there).
+//! [`engine_for`] is the one factory, called per job so a retry uses the current
+//! settings and key (Clarification 4).
+#![deny(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
+
+pub mod openai;
+
+use crate::audio::AudioBuffer;
+use crate::failure::FailureReason;
+use crate::secrets::CredentialStore;
+use crate::settings::Settings;
+use crate::timeouts::Timeouts;
+
+/// A transcription engine (NFR-11; shared with specs 002 and 003).
+pub trait Engine: Send + Sync {
+    /// Short stable name for logs: "api" (later "builtin", "local_server").
+    fn kind(&self) -> &'static str;
+    /// Transcribe 16 kHz mono audio. Empty or whitespace-only text is `Ok("")`.
+    /// Never panics on server or engine data.
+    fn transcribe(
+        &self,
+        audio: &AudioBuffer,
+        req: &TranscribeRequest,
+    ) -> Result<String, FailureReason>;
+}
+
+/// Per-call input besides the audio.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TranscribeRequest {
+    /// ISO 639-1 code (`Settings::speech_language`); `None` = auto, the field is omitted.
+    pub language: Option<String>,
+    /// The only source of the request's durations.
+    pub timeouts: Timeouts,
+}
+
+/// The engine for the current settings, or why there is none. Total: no panic and
+/// no request for any settings state.
+///
+/// - `Api`: `check_base_url(api.base_url)` (else `EngineNotConfigured`, no key
+///   read) -> `creds.read(TranscriptionApi)` once (`Err` -> `KeyStoreUnavailable`;
+///   `Ok(None)` = no `Authorization` header) -> [`openai::OpenAiCompatibleEngine`].
+/// - `BuiltinLocal` (built by the shell, T-017), `LocalServer` (until T-018),
+///   `None`: `EngineNotConfigured`, no key read.
+pub fn engine_for(
+    settings: &Settings,
+    creds: &dyn CredentialStore,
+) -> Result<Box<dyn Engine>, FailureReason> {
+    // T-040 skeleton: wrong on purpose until implemented (red tests first).
+    let _ = (settings, creds);
+    Err(FailureReason::Timeout)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::secrets::{
+        CredentialCall, CredentialError, CredentialOp, FakeCredentialStore, KeySlot,
+    };
+    use crate::settings::{defaults, EngineKind};
+
+    const KEY: &str = "sk-test-SECRET";
+
+    fn api_settings(base_url: &str) -> Settings {
+        let mut s = defaults(None);
+        s.engine = EngineKind::Api;
+        s.api.base_url = base_url.to_string();
+        s
+    }
+
+    fn reason(result: Result<Box<dyn Engine>, FailureReason>) -> Option<FailureReason> {
+        result.err()
+    }
+
+    fn read_api() -> CredentialCall {
+        CredentialCall {
+            op: CredentialOp::Read,
+            slot: KeySlot::TranscriptionApi,
+        }
+    }
+
+    #[test]
+    fn key_store_error_is_key_store_unavailable() {
+        // Decision #44 (1): a credential read error gives the retryable
+        // KeyStoreUnavailable and no engine, so no request can be sent; the key is
+        // read once, not retried. Bite: treating Err like Ok(None) (an engine
+        // without a key would send a request and get 401 -> InvalidApiKey).
+        let creds = FakeCredentialStore::new().with_key(KeySlot::TranscriptionApi, KEY);
+        creds.fail(
+            CredentialOp::Read,
+            KeySlot::TranscriptionApi,
+            CredentialError { os_code: 1312 },
+        );
+        let got = reason(engine_for(
+            &api_settings("https://api.example.com/v1"),
+            &creds,
+        ));
+        assert_eq!(got, Some(FailureReason::KeyStoreUnavailable));
+        assert_eq!(creds.calls(), vec![read_api()]);
+    }
+
+    #[test]
+    fn unbuilt_or_unset_engine_is_engine_not_configured() {
+        // Decision #44 (2): BuiltinLocal (shell, T-017), LocalServer (until T-018)
+        // and None give EngineNotConfigured without reading any key. Bite: a panic
+        // / todo!() arm, an API engine built for another kind, or a key read first.
+        for kind in [
+            EngineKind::BuiltinLocal,
+            EngineKind::LocalServer,
+            EngineKind::None,
+        ] {
+            let creds = FakeCredentialStore::new()
+                .with_key(KeySlot::TranscriptionApi, KEY)
+                .with_key(KeySlot::LocalServer, KEY);
+            let mut s = api_settings("https://api.example.com/v1");
+            s.engine = kind;
+            let got = reason(engine_for(&s, &creds));
+            assert_eq!(got, Some(FailureReason::EngineNotConfigured), "{kind:?}");
+            assert_eq!(creds.calls(), vec![], "{kind:?}: no credential call");
+        }
+    }
+
+    #[test]
+    fn bad_stored_base_url_is_engine_not_configured() {
+        // A hand-edited settings file reaches dictation (load_or_init accepts any
+        // string; check_base_url runs only at save). The factory applies the one
+        // URL rule first, so a bad URL gives EngineNotConfigured and the key is
+        // never read (no key sent to a userinfo URL). Bite: no check_base_url in
+        // the factory, or the key read before it.
+        for bad in [
+            "",
+            "   ",
+            "not a url",
+            "ftp://api.example.com/v1",
+            "https://",
+            "https://user:pass@api.example.com/v1",
+            "https://user@api.example.com/v1",
+        ] {
+            let creds = FakeCredentialStore::new().with_key(KeySlot::TranscriptionApi, KEY);
+            let got = reason(engine_for(&api_settings(bad), &creds));
+            assert_eq!(got, Some(FailureReason::EngineNotConfigured), "{bad:?}");
+            assert_eq!(creds.calls(), vec![], "{bad:?}: no credential call");
+        }
+    }
+
+    #[test]
+    fn api_engine_reads_transcription_slot_once() {
+        // Bite: reading another slot, reading twice, or not building the engine.
+        let creds = FakeCredentialStore::new().with_key(KeySlot::TranscriptionApi, KEY);
+        match engine_for(
+            &api_settings("https://api.example.com/v1?api-version=2024-06-01"),
+            &creds,
+        ) {
+            Ok(engine) => assert_eq!(engine.kind(), "api"),
+            Err(e) => panic!("API engine expected, got {e:?}"),
+        }
+        assert_eq!(creds.calls(), vec![read_api()]);
+    }
+
+    #[test]
+    fn api_engine_without_stored_key_is_built() {
+        // Ok(None) is "no key stored": the engine is built and sends no
+        // Authorization header (the server's 401 then gives InvalidApiKey).
+        // Bite: Ok(None) turned into KeyStoreUnavailable / EngineNotConfigured.
+        let creds = FakeCredentialStore::new();
+        match engine_for(&api_settings("https://api.example.com/v1"), &creds) {
+            Ok(engine) => assert_eq!(engine.kind(), "api"),
+            Err(e) => panic!("API engine expected, got {e:?}"),
+        }
+        assert_eq!(creds.calls(), vec![read_api()]);
+    }
+}
