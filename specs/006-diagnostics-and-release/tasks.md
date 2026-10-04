@@ -6,6 +6,8 @@
 
 **Conversion**: these tasks become teamwright tasks (`docs/tasks/T-NNN.md`, `design_ref: specs/006-diagnostics-and-release/tasks.md#<ID>`); `/speckit-implement` is not used. Each task names its spec requirements as `spec FR-0NN` and the source requirements as `req FR-NN` / `req NFR-NN` / `req §9`. Area: `core` = `crates/voicen-core` (Linux host), `shell` = `src-tauri` (Windows CI only), `ui` = `src/`, `e2e/`, `ci` = `.github/`, `scripts/`, `Makefile`, `docker/`, installer config. **Owner** marks a step only the owner may do (repository creation, push, tag, installs needing consent).
 
+> Superseded in part (T-008, decision #64): T003's `chrono`, T006/T007's `WallClock`, `HostName` and `ModelName`, T016's `retain_now` and `RetentionDeleted`, T015's "total of `voicen*.log` > 10 MiB" retention, and T019/T020's "one `LogEvent` per callback" over a `DictationRecord` do not apply. The shipped shapes are in contracts/core-diag.md "Clock", "Log" and "Pipeline observer": `clock::Clock` + `clock::LocalOffset`; retention inside `open` and each roll, against `total_bytes − roll_bytes`; one line per recording, joined by `RecordingId`. T-054 takes the notice and the tray item of T021.
+
 ## Format: `[ID] [P?] [Story] Description`
 
 - **[P]**: can run in parallel (different files, no dependency on an incomplete task)

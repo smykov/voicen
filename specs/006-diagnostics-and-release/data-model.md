@@ -24,40 +24,51 @@ Display: `<version> (<commit>)`. Consumers: About, start line, crash files, sess
 
 An enum; each variant has only typed fields. No variant has a `String` that can be set from transcript, prompt, request/response bodies, headers, URLs or library error text.
 
-| Variant | Fields | Level |
+T-008 shipped the variants marked "T-008". Their fields hold only integers, closed enums of the crate and `BuildInfo`; there is no `String`, `&str`, path, `io::Error` or `FailureReason` (`crates/voicen-core/src/diag/event.rs`, contracts/core-diag.md "Log"). The rows marked "later" are the plan for later tasks. Each of them arrives as a new variant under the same rules.
+
+| Variant | Fields | Level | Status |
+|---|---|---|---|
+| `Started` | `build: BuildInfo`, `pid: u32` | INFO | T-008, without `os`. `os: OsVersion` comes later, with the session work |
+| `Dictation` | `DictationLine` (below) | INFO (delivered, no_speech, too_short) / WARN (failed) | T-008 |
+| `Warning` | `kind: WarningKind`, `os_code: Option<i32>`. Kinds in T-008: `vad_fallback`, `esc_unavailable`, `toast_failed` (the pipeline's `WarningCode`s), `models_cleanup_failed`, `settings_window_failed`, `change_bridge_failed`. Later features add kinds (e.g. notification or history write failures) | WARN | T-008 |
+| `SettingsLoad` | `LoadKind`: `loaded` / `first_run` / `reset` / `unavailable` (from `LoadOutcome`, without the settings or the backup name) | INFO / WARN (reset, unavailable) | T-008 (spec 004 R-11) |
+| `SettingsSave` | `SaveLine`: `ok` with warnings, or `refused` / `failed` with field ids + codes, the form error and `not_restored` field ids; no values (from `SaveOutcome`) | INFO / WARN (failed) | T-008 (spec 004 R-11; no `changed=` list) |
+| `AutostartReconcile` | `ReconcileAction`: `none` / `written` / `removed` / `failed` | INFO / WARN (failed) | T-008 (spec 004 R-11) |
+| `LogsRecovered` | — | INFO | T-008 |
+| `PreviousSession` | `outcome: Clean \| Crashed{crash_file: FileName} \| EndedByInstaller \| EndedAbnormally{crash_file: Option<FileName>}` | INFO / WARN | later (session marker) |
+| `Error` | `area: ErrorArea`, `category: ErrorCategory`, `http_status: Option<u16>`, `os_code: Option<i32>` (no `host`: see below) | ERROR / WARN | later |
+| `CrashFileWritten` | `file: FileName`, `kind: CrashKind` | ERROR | later (crash files) |
+| `RetentionDeleted` | `logs: u32`, `crash_files: u32` | INFO | later, if wanted (T-008 retention writes no line) |
+| `Exited` | `reason: TrayExit \| SessionEnd` | INFO | later (session marker) |
+
+Bounded string newtypes (constructed only through validating constructors). None exists after T-008:
+
+| Newtype | Constraint | Status |
 |---|---|---|
-| `Started` | `build: BuildInfo`, `os: OsVersion`, `pid: u32` | INFO |
-| `PreviousSession` | `outcome: Clean \| Crashed{crash_file: FileName} \| EndedByInstaller \| EndedAbnormally{crash_file: Option<FileName>}` | INFO / WARN |
-| `Dictation` | `record: DictationRecord` | INFO (delivered) / WARN (failed) |
-| `Error` | `area: ErrorArea`, `category: ErrorCategory`, `http_status: Option<u16>`, `host: Option<HostName>`, `os_code: Option<i32>` | ERROR / WARN |
-| `Warning` | `kind: WarningKind` (e.g. `VadFallbackToEnergy`, `NotificationFailed`, `HistoryWriteFailed`) , `os_code: Option<i32>` | WARN |
-| `LogsRecovered` | — | INFO |
-| `CrashFileWritten` | `file: FileName`, `kind: CrashKind` | ERROR |
-| `RetentionDeleted` | `logs: u32`, `crash_files: u32` | INFO |
-| `Exited` | `reason: TrayExit \| SessionEnd` | INFO |
+| `HostName` | host part of a URL only (no scheme, user-info, path, query); ≤ 253 chars; built from the configured URL, never from error text | not built. T-008 logs no host (Q1 default, decision #64). Adding one is a new decision |
+| `ModelName` | ≤ 128 chars, printable, no whitespace control chars; quoted in output | not built. T-008 logs no model name (Q1 default, decision #64). Adding one is a new decision |
+| `FileName` | a file name inside the data folder (no directories) | later (crash files, session) |
+| `OsVersion` | `major.minor.build` digits only | later (`Started`, crash files) |
 
-Bounded string newtypes (constructed only through validating constructors):
+Feature extensions: 001 contributes outcome and failure values through its events (`DictationEvent`, `FailureReason::code()` via `FailureTag`); 002 adds `local: Option<Cold|Warm>`, `load_ms` (002 data-model); 003/005 add warning kinds. Adding a variant or field is the only way to log something new — reviewed under P-009.
 
-| Newtype | Constraint |
-|---|---|
-| `HostName` | host part of a URL only (no scheme, user-info, path, query); ≤ 253 chars; built from the configured URL, never from error text |
-| `ModelName` | ≤ 128 chars, printable, no whitespace control chars; quoted in output |
-| `FileName` | a file name inside `AppPaths::root` (no directories) |
-| `OsVersion` | `major.minor.build` digits only |
+## DictationLine (was "DictationRecord"; assembled by `LogObserver` from 001's events — spec FR-005)
 
-Feature extensions: 001 contributes the `DictationRecord` fields and `ErrorArea`/`ErrorCategory` values it needs; 002 adds `local: Option<Cold|Warm>`, `load_ms` (002 data-model); 003/005 add warning kinds. Adding a variant or field is the only way to log something new — reviewed under P-009.
+T-008 shipped `DictationLine`, which `LogObserver` aggregates per `RecordingId` from the pipeline's `DictationEvent`s (contracts/core-diag.md "Pipeline observer"). There is no `DictationRecord` value from the pipeline and no `dictation_finished` callback. A field whose event did not come is `None`, and its key is left out of the line (never `0`).
 
-## DictationRecord (fields supplied by 001's pipeline — spec FR-005)
-
-| Field | Type | Note |
-|---|---|---|
-| `engine` | `EngineKind` (`api` / `builtin` / `local_server`) | |
-| `model` | `Option<ModelName>` | |
-| `outcome` | `Delivered{pasted: bool}` / `Failed{category}` / `Discarded{reason}` | categories from 001's failure classification |
-| `press_to_frame_ms` | `Option<u32>` | absent if no audio frame |
-| `stop_to_text_ms` | `Option<u32>` | absent if no text |
-| `text_to_paste_ms` | `Option<u32>` | absent if not pasted |
-| `post_processing` | `Option<Applied \| Skipped{category}>` | 003 |
+| Field | Type | Source event | Status |
+|---|---|---|---|
+| `recording` | `u64` (`RecordingId::get()`) | every event of the recording | T-008 |
+| `engine` | `Option<EngineTag>`: `api` / `builtin` / `local_server` / `other` (`EngineTag::from_kind`) | `JobFinished.engine` (absent when no engine was built) | T-008 |
+| `outcome` | `Delivered(DeliveryResult)` (`pasted` / `copied_only` / `copy_manual`), `Failed{failure: FailureTag, http_status: Option<u16>}`, `NoSpeech`, `TooShort` | `Delivered`, `JobFinished`, `RecordingEnded{TooShort}` | T-008 |
+| `detector` | `Option<DetectorTag>`: `silero` / `energy` / `other` | `SpeechGate.detector` | T-008 |
+| `press_to_frame_ms` | `Option<u64>` | `RecordingStarted` (emitted by T-006's worker) | T-008 |
+| `duration_ms` | `Option<u64>` | `RecordingEnded` | T-008 (Q2: FR-20's three timings plus the duration) |
+| `stop_to_text_ms` | `Option<u64>` | `JobFinished` | T-008 |
+| `text_to_paste_ms` | `Option<u64>` | `Delivered` | T-008 |
+| `model` | — | — | not logged (T-008 Q1, decision #64; no `ModelName`) |
+| `post_processing` | `Option<Applied \| Skipped{category}>` | 003 | later |
+| `local`, `load_ms` | see 002 data-model | 002 | later |
 
 ## LogWriter state
 

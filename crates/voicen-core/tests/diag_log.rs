@@ -549,30 +549,27 @@ fn a_full_disk_degrades_with_one_disk_full_callback() {
         Err(std::io::ErrorKind::StorageFull),
         "precondition: /dev/full refuses writes with StorageFull"
     );
-    // The clock stays on today's UTC date (01:00 plus at most 100 x 61 s): the
-    // link and /dev/full (created at container start) carry today's date, so no
-    // date roll moves the link away.
-    let now = SystemTime::now();
-    let today = now
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs() / DAY * DAY);
-    let dev_full_day = std::fs::metadata("/dev/full")
-        .and_then(|m| m.modified())
-        .map(utc_compact)
-        .map(|s| s[..8].to_string());
-    assert_eq!(
-        dev_full_day.ok(),
-        Some(utc_compact(now)[..8].to_string()),
-        "precondition: /dev/full was created today (UTC); re-run in a fresh container"
-    );
-
     let tmp = TempDir::new();
     let logs = tmp.path().join("logs");
     std::fs::create_dir_all(&logs).expect("logs dir");
     std::os::unix::fs::symlink("/dev/full", logs.join(ACTIVE)).expect("symlink");
-    let (log, clock, seen) = open_log(&logs, at(today + 3_600, 0), 0, LogConfig::default());
+    // The fake clock runs on the UTC date of the modification time the log itself
+    // sees through the link (/dev/full's), from 01:00 to at most 01:00 + 100 x 61 s
+    // on that date, offset 0. Whatever that time is (container start, host boot)
+    // and whatever today's date is, the log's day never differs from the file's,
+    // so no date roll can move the link away and every write after the first is
+    // a reopen plus a failed write.
+    let file_day = std::fs::metadata(logs.join(ACTIVE))
+        .and_then(|m| m.modified())
+        .expect("modification time of the linked /dev/full")
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("/dev/full modified after the epoch")
+        .as_secs()
+        / DAY
+        * DAY;
+    let (log, clock, seen) = open_log(&logs, at(file_day + 3_600, 0), 0, LogConfig::default());
     for i in 0..100u64 {
-        clock.set(at(today + 3_600 + 61 * i, 0));
+        clock.set(at(file_day + 3_600 + 61 * i, 0));
         log.write(short(i));
     }
     assert_eq!(seen.count(), 1, "exactly one callback over 100 writes");

@@ -174,7 +174,8 @@ pub fn run() {
         if let RunEvent::Ready = event {
             if let Err(err) = settings_window::on_ready(app, &load_outcome, launched_by_autostart) {
                 // The kind and, for an I/O error, the OS code only (decision #45);
-                // the user-facing path is T-006's tray.
+                // the user-facing path (the one-time notice, the tray "Open logs
+                // folder") is T-054's (decision #64).
                 window_log.write(LogEvent::Warning {
                     kind: WarningKind::SettingsWindowFailed,
                     os_code: io_os_code(&err),

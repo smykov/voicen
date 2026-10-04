@@ -17,6 +17,8 @@ Technical approach (see [research.md](research.md)):
 
 ## Technical Context
 
+> Superseded in part (T-008): core gets no `chrono`, `WallClock`, `diag/clock.rs`, `HostName` or `ModelName`. Time comes from the existing `clock::Clock` plus a `clock::LocalOffset` port that the shell fills with the `windows` crate. No host or model name is logged (decision #64). The log's shipped API is in contracts/core-diag.md, and the session marker and crash files reuse the same time ports.
+
 **Language/Version**: Rust 1.99 (edition 2021) for `voicen-core` and `src-tauri`; TypeScript + Svelte 5 for About; NSIS script for the installer hooks; PowerShell and bash in CI.
 
 **Primary Dependencies**:
@@ -62,7 +64,7 @@ Post-design re-check (after data-model.md and contracts/): still PASS. No comple
 | FR-002, FR-033 (FR-18, NFR-12) | — | About shows `Voicen v (c)`; build-info error; open errors; buttons call commands | notices resource present in install dir | About in the installed app; notices open in Notepad |
 | FR-003, FR-004 (FR-20, FR-18) | start line first, format, timestamp with offset, no interleaving | — | smoke grep `(<commit>) started` | — |
 | FR-005, FR-006 (FR-20, NFR-01/02) | `LogObserver` maps a record to one line; absent timings omitted | — | — (timing values are 001's) | NFR-01 benchmark from the log |
-| FR-007 (FR-20, NFR-04, NFR-06) | redaction test with planted text/key; `HostName::from_url` | — | smoke log grepped for the planted CI test credential value: 0 | — |
+| FR-007 (FR-20, NFR-04, NFR-06) | redaction test with planted text/key (no host or model name is logged: T-008 Q1, decision #64) | — | smoke log grepped for the planted CI test credential value: 0 | — |
 | FR-008 (FR-20) | roll at 2 MB / date; 7 days; 10 MB; crash files untouched | — | — | — |
 | FR-009 (FR-20 failure) | degraded mode, once-per-session signal, silent recovery | — | logs dir made read-only (ACL) → app runs, one notice | — |
 | FR-010 (NFR-05) | diag module has no network dependency (review + `cargo tree` check) | — | — | — |

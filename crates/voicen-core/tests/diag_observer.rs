@@ -417,6 +417,137 @@ fn a_job_without_recording_events_still_gets_its_line() {
     );
 }
 
+/// The documented bound on open records and on text jobs awaiting `Delivered`
+/// (`observer.rs` `MAX_OPEN`, docs/decisions/diagnostics-log.md).
+const OPEN_BOUND: usize = 64;
+/// Recordings opened past the bound in the two tests below.
+const PAST_BOUND: usize = 36;
+
+#[test]
+fn open_records_are_bounded_and_the_oldest_lose_their_timings_without_a_line() {
+    // The open-record map is bounded (64): a record that never closes (a job that
+    // never runs, a press without a later event) must not grow memory for the
+    // life of the tray process. 100 recordings start and none closes; the oldest
+    // 36 are dropped without a line. Each recording is then closed by its job,
+    // newest first (a closed record never re-opens one that is still held), so
+    // every line shows whether its record survived: exactly the 64 newest keep
+    // press_to_frame_ms (the map held 64, never more and never fewer), the 36
+    // oldest have only what their job carries (a_job_without_recording_events_
+    // still_gets_its_line). Bite: no eviction (all 100 keep their timing), a
+    // bound other than 64, the newest evicted instead of the oldest, a line
+    // written at eviction.
+    let f = fixture();
+    let rec = ids(OPEN_BOUND + PAST_BOUND);
+    for (i, id) in rec.iter().enumerate() {
+        f.obs.event(&started(*id, 1_000 + i as u64));
+    }
+    assert_eq!(f.lines(), Vec::<String>::new(), "eviction writes no line");
+
+    for (i, id) in rec.iter().enumerate().rev() {
+        f.obs.event(&finished(
+            i as u64 + 1,
+            *id,
+            None,
+            7,
+            OutcomeCode::NoSpeech,
+            None,
+            None,
+        ));
+    }
+    let lines = f.dictations();
+    assert_eq!(
+        lines.len(),
+        rec.len(),
+        "one line per closed job: {lines:#?}"
+    );
+    let kept: Vec<u64> = lines
+        .iter()
+        .filter(|l| l.get("press_to_frame_ms").is_some())
+        .filter_map(|l| l.get("rec").and_then(|r| r.parse().ok()))
+        .collect();
+    assert_eq!(kept.len(), OPEN_BOUND, "records held at once: {kept:?}");
+    for (i, id) in rec.iter().enumerate() {
+        let line = lines
+            .iter()
+            .find(|l| l.get("rec") == Some(s(id.get()).as_str()))
+            .unwrap_or_else(|| panic!("no line for {id:?}"));
+        if i < PAST_BOUND {
+            assert_eq!(
+                line.pairs,
+                pairs(&[
+                    ("rec", s(id.get())),
+                    ("outcome", "no_speech".to_string()),
+                    ("stop_to_text_ms", s(7)),
+                ]),
+                "recording {i} is among the oldest and was evicted"
+            );
+        } else {
+            assert_eq!(
+                line.pairs,
+                pairs(&[
+                    ("rec", s(id.get())),
+                    ("outcome", "no_speech".to_string()),
+                    ("press_to_frame_ms", s(1_000 + i as u64)),
+                    ("stop_to_text_ms", s(7)),
+                ]),
+                "recording {i} is among the {OPEN_BOUND} newest and kept its record"
+            );
+        }
+    }
+}
+
+#[test]
+fn text_jobs_awaiting_delivery_are_bounded_and_the_oldest_get_no_line() {
+    // The map of text jobs waiting for their Delivered is bounded (64): a
+    // Delivered that never comes must not grow memory. 100 text jobs finish and
+    // none is delivered; then every seq is delivered, newest first. Exactly the
+    // 64 newest get their line, with their own record (engine, stop_to_text_ms);
+    // the 36 oldest were dropped without a line, and their late Delivered writes
+    // none. Bite: no eviction in the awaiting map (100 lines), a bound other than
+    // 64, the newest evicted instead of the oldest, a line written at eviction.
+    let f = fixture();
+    let rec = ids(OPEN_BOUND + PAST_BOUND);
+    for (i, id) in rec.iter().enumerate() {
+        f.obs.event(&finished(
+            i as u64 + 1,
+            *id,
+            Some("api"),
+            500 + i as u64,
+            OutcomeCode::Text,
+            None,
+            None,
+        ));
+    }
+    assert_eq!(f.lines(), Vec::<String>::new(), "eviction writes no line");
+
+    for i in (0..rec.len()).rev() {
+        f.obs
+            .event(&delivered(i as u64 + 1, 9, DeliveryResult::Pasted));
+    }
+    let lines = f.dictations();
+    assert_eq!(
+        lines.len(),
+        OPEN_BOUND,
+        "only the {OPEN_BOUND} newest text jobs were still awaiting delivery: {lines:#?}"
+    );
+    for (line, i) in lines.iter().zip((PAST_BOUND..rec.len()).rev()) {
+        let id = rec[i];
+        assert_eq!(
+            line.pairs,
+            pairs(&[
+                ("rec", s(id.get())),
+                ("engine", "api".to_string()),
+                ("outcome", "delivered".to_string()),
+                ("result", "pasted".to_string()),
+                ("stop_to_text_ms", s(500 + i as u64)),
+                ("text_to_paste_ms", s(9)),
+            ]),
+            "seq {} (the newest are delivered first)",
+            i + 1
+        );
+    }
+}
+
 #[test]
 fn a_pipeline_warning_is_its_own_line_at_once() {
     // Warning events (vad_fallback, esc_unavailable, toast_failed) are not part
