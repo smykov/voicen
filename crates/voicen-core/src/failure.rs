@@ -43,6 +43,9 @@ pub enum FailureReason {
     /// The selected engine cannot be built from the current settings (decision #44).
     #[error("the transcription engine is not set up")]
     EngineNotConfigured,
+    /// The clipboard could not be written (T-001). Retryable: the recording is kept.
+    #[error("clipboard unavailable")]
+    ClipboardUnavailable,
     /// The microphone could not be opened or failed (T-042). Not retryable.
     /// Carries only the closed cause, never the OS error text.
     #[error("microphone unavailable")]
@@ -61,6 +64,7 @@ impl FailureReason {
             FailureReason::UnexpectedResponse => "UnexpectedResponse",
             FailureReason::KeyStoreUnavailable => "KeyStoreUnavailable",
             FailureReason::EngineNotConfigured => "EngineNotConfigured",
+            FailureReason::ClipboardUnavailable => "ClipboardUnavailable",
             FailureReason::MicrophoneUnavailable { .. } => "MicrophoneUnavailable",
         }
     }
@@ -76,6 +80,7 @@ impl FailureReason {
             FailureReason::UnexpectedResponse => i18n::FAILURE_UNEXPECTED_RESPONSE,
             FailureReason::KeyStoreUnavailable => i18n::FAILURE_KEY_STORE_UNAVAILABLE,
             FailureReason::EngineNotConfigured => i18n::FAILURE_ENGINE_NOT_CONFIGURED,
+            FailureReason::ClipboardUnavailable => i18n::FAILURE_CLIPBOARD_UNAVAILABLE,
             FailureReason::MicrophoneUnavailable { .. } => i18n::FAILURE_MICROPHONE_UNAVAILABLE,
         }
     }
@@ -96,8 +101,17 @@ impl FailureReason {
             | FailureReason::Timeout
             | FailureReason::UnexpectedResponse
             | FailureReason::KeyStoreUnavailable
-            | FailureReason::EngineNotConfigured => Vec::new(),
+            | FailureReason::EngineNotConfigured
+            | FailureReason::ClipboardUnavailable => Vec::new(),
         }
+    }
+
+    /// Whether the failed recording is kept as the pending recording (data-model
+    /// "Retryable": every reason from `InvalidApiKey` through
+    /// `ClipboardUnavailable`; not `MicrophoneUnavailable`).
+    pub fn retryable(&self) -> bool {
+        // Skeleton (T-001 red tests): not implemented yet.
+        false
     }
 }
 
@@ -337,6 +351,7 @@ mod tests {
             FailureReason::UnexpectedResponse,
             FailureReason::KeyStoreUnavailable,
             FailureReason::EngineNotConfigured,
+            FailureReason::ClipboardUnavailable,
             FailureReason::MicrophoneUnavailable {
                 cause: MicCause::NoDevice,
             },
@@ -351,6 +366,7 @@ mod tests {
                 | FailureReason::UnexpectedResponse
                 | FailureReason::KeyStoreUnavailable
                 | FailureReason::EngineNotConfigured
+                | FailureReason::ClipboardUnavailable
                 | FailureReason::MicrophoneUnavailable { .. } => {}
             }
         }
@@ -410,6 +426,13 @@ mod tests {
                 "The transcription engine is not set up. Check the Engine settings.",
                 "Движок распознавания не настроен. Проверьте настройки движка.",
             ),
+            // contracts/messages.md (T-001).
+            FailureReason::ClipboardUnavailable => (
+                "ClipboardUnavailable",
+                "failure.clipboard_unavailable",
+                "Clipboard unavailable",
+                "Буфер обмена недоступен",
+            ),
             // contracts/messages.md: `failure.microphone_unavailable` with
             // `{reason}` = the `mic_reason.*` text of the cause (NoDevice here).
             FailureReason::MicrophoneUnavailable { .. } => (
@@ -448,6 +471,37 @@ mod tests {
                 if got != want {
                     wrong.push(format!("{r:?} {lang:?}: {got:?}, expected {want:?}"));
                 }
+            }
+        }
+        assert!(wrong.is_empty(), "\n{}", wrong.join("\n"));
+    }
+
+    #[test]
+    fn retryable_table() {
+        // data-model "FailureReason": every code from InvalidApiKey through
+        // ClipboardUnavailable creates a pending recording; MicrophoneUnavailable
+        // does not (no audio to retry). Written against every_reason, so a new
+        // variant needs a row here. Bite: a constant answer, ClipboardUnavailable
+        // or the decision-#44 reasons left out, MicrophoneUnavailable kept.
+        let mut wrong = Vec::new();
+        for r in every_reason() {
+            let want = match r {
+                FailureReason::InvalidApiKey
+                | FailureReason::NetworkUnavailable
+                | FailureReason::CannotReach { .. }
+                | FailureReason::Timeout
+                | FailureReason::ServerError { .. }
+                | FailureReason::UnexpectedResponse
+                | FailureReason::KeyStoreUnavailable
+                | FailureReason::EngineNotConfigured
+                | FailureReason::ClipboardUnavailable => true,
+                FailureReason::MicrophoneUnavailable { .. } => false,
+            };
+            if r.retryable() != want {
+                wrong.push(format!(
+                    "{r:?}: retryable {}, expected {want}",
+                    r.retryable()
+                ));
             }
         }
         assert!(wrong.is_empty(), "\n{}", wrong.join("\n"));

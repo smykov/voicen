@@ -135,6 +135,14 @@ messages! {
     /// `FailureReason::MicrophoneUnavailable` (T-042); placeholder `{reason}` = a
     /// `mic_reason.*` id, rendered in the same language.
     FAILURE_MICROPHONE_UNAVAILABLE = "failure.microphone_unavailable",
+    /// `FailureReason::ClipboardUnavailable` (the clipboard write failed; T-001).
+    FAILURE_CLIPBOARD_UNAVAILABLE = "failure.clipboard_unavailable",
+    /// A job without speech (`JobEnd::Notice`, T-001).
+    NOTICE_NO_SPEECH = "notice.no_speech",
+    /// Delivered with auto-paste off (`DeliveryResult::CopiedOnly`, T-001).
+    NOTICE_COPIED = "notice.copied",
+    /// Delivered but not pasted (`DeliveryResult::CopyManual`, T-001).
+    NOTICE_COPIED_PASTE_MANUALLY = "notice.copied_paste_manually",
     ;
     nested:
     /// `MicCause::NoDevice`.
