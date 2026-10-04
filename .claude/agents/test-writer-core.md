@@ -21,7 +21,7 @@ Process: `AGENTS.md`, `docs/process/lifecycle.md`, `PRINCIPLES.md`; a hook refus
 | Test dirs | crates/voicen-core/src, crates/voicen-core/tests |
 | Run tests | `scripts/tw-run core -- cargo test -p voicen-core` |
 | Fixtures / helpers | trait fakes for platform services (audio source, clipboard, input, credentials); a mock OpenAI-compatible HTTP server for engine tests |
-| API tests (running service) | `n/a` |
+| API tests (running service) | `scripts/tw-run core -- cargo test -p voicen-core --test api_pipeline --test openai_client` |
 | End-to-end UI tests | `n/a` — runner and its conventions: Tools › ui_verify |
 
 Run these commands exactly as written: they are rendered as `scripts/tw-run <area> -- <cmd>`, which runs on the host or, for an area with `runner: docker`, in the same container image as CI. Never call the bare tool instead, and never install a toolchain to get around the runner. A command that does not run (missing image, toolchain, device) is reported to the orchestrator as "not runnable" with the error; changing the config is the orchestrator's job (`.teamwright/config.next.yml` + `apply --config`), never yours.

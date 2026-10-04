@@ -6,7 +6,7 @@
   ".claude/agents/requirements-reviewer.md": "26f273cc5ff7d254c6d79ed00d85ef2406558db72ca5e1a69c91f36a753c79ca",
   ".claude/agents/task-validator.md": "9139a8d12a390328ff35286623229d5ac44d5e10c1735be2bca9a1c6048b851c",
   ".claude/agents/technical-writer.md": "5a2f5c4a0b6c2a29ea9a1771e1121b00f6f038bc33047138e7e3528610678ee1",
-  ".claude/agents/test-writer-core.md": "6389949cc4e2952193d0cb51c3c257efd8ad90735fc00b85b6bd5a9a4bb24041",
+  ".claude/agents/test-writer-core.md": "0fb884de91db1fc31623bf475dce0f33a56e339ed8a68b1cc45f0990353c8b46",
   ".claude/agents/test-writer-ui.md": "7511d76975cee60c163161ea0d1328bdd193f66bda8e229c9ec0339d78fd9a5d",
   ".claude/commands/arch-review.md": "22a5e7ea9250c3d1e1831eb06e4fc01326c6f0403bd12d73e400368be8274110",
   ".gitleaks.toml": "435ec187e9d984ba396b03571b129b8513942a3bd829db46fb94953582db86a6",

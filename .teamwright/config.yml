@@ -10,7 +10,7 @@ areas:
     cache: ["/usr/local/cargo/registry", "/usr/local/cargo/git"]
     test_command: "cargo test -p voicen-core"
     lint_command: "cargo fmt --check -p voicen-core && cargo clippy -p voicen-core --all-targets -- -D warnings"
-    api_test_command: ""
+    api_test_command: "cargo test -p voicen-core --test api_pipeline --test openai_client"
     e2e_ui_command: ""
     stack: "Rust 1.99 (edition 2021): platform-independent core library; the Tauri 2 shell in src-tauri is built and tested on the Windows CI runner"
     test_framework: "cargo test (unit tests in #[cfg(test)] modules, integration tests in crates/voicen-core/tests)"
