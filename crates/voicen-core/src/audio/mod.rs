@@ -10,14 +10,24 @@
 pub mod resample;
 pub mod wav;
 
+use std::fmt;
+
 /// The one sample rate of an [`AudioBuffer`].
 pub const SAMPLE_RATE: u32 = 16_000;
 
 /// 16 kHz mono signed 16-bit samples.
-// T-040 skeleton: the derived Debug prints the samples (red: audio must not reach a log).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct AudioBuffer {
     samples: Vec<i16>,
+}
+
+/// The length only: audio never reaches a log (FR-20, NFR-04).
+impl fmt::Debug for AudioBuffer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AudioBuffer")
+            .field("samples_len", &self.samples.len())
+            .finish()
+    }
 }
 
 /// Captured frames that cannot be converted. Never a panic.
@@ -29,6 +39,8 @@ pub enum AudioError {
     ZeroChannels,
     /// The interleaved sample count is not a multiple of the channel count.
     RaggedFrames,
+    /// The resampler refused the input (not expected once the rate is above 0).
+    Resample,
 }
 
 impl AudioBuffer {
@@ -45,15 +57,42 @@ impl AudioBuffer {
         rate: u32,
         channels: u16,
     ) -> Result<AudioBuffer, AudioError> {
-        // T-040 skeleton: wrong on purpose until implemented (red tests first).
-        let _ = (samples, rate, channels);
-        Err(AudioError::ZeroRate)
+        if rate == 0 {
+            return Err(AudioError::ZeroRate);
+        }
+        if channels == 0 {
+            return Err(AudioError::ZeroChannels);
+        }
+        let channels = usize::from(channels);
+        if !samples.len().is_multiple_of(channels) {
+            return Err(AudioError::RaggedFrames);
+        }
+        let scale = 1.0 / channels as f32;
+        let mono: Vec<f32> = samples
+            .chunks_exact(channels)
+            .map(|frame| frame.iter().sum::<f32>() * scale)
+            .collect();
+        let mono = if rate == SAMPLE_RATE {
+            mono
+        } else {
+            resample::mono_to_16k(&mono, rate).map_err(|_| AudioError::Resample)?
+        };
+        Ok(AudioBuffer {
+            samples: mono.into_iter().map(to_i16).collect(),
+        })
     }
 
     /// The 16 kHz mono samples.
     pub fn samples(&self) -> &[i16] {
         &self.samples
     }
+}
+
+/// `[-1.0, 1.0]` to `i16` full scale, rounded; out-of-range values (and the
+/// resampler's overshoot) saturate instead of wrapping; NaN becomes 0.
+fn to_i16(v: f32) -> i16 {
+    // `as` from f32 saturates at the i16 bounds and maps NaN to 0.
+    (v * f32::from(i16::MAX)).round() as i16
 }
 
 #[cfg(test)]

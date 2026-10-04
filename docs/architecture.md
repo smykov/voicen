@@ -35,7 +35,7 @@ flowchart LR
 
 | Seam | Concern | Guard / invariant |
 |---|---|---|
-| `Engine` trait in `voicen-core` | adding a provider | recording and delivery code do not change (NFR-11) |
+| `Engine` trait in `voicen-core` | adding a provider | recording and delivery code do not change (NFR-11); the one total factory `voicen_core::engine::engine_for(&Settings, &dyn CredentialStore)` (per job; a non-API kind or a stored base URL failing `check_base_url` → `EngineNotConfigured` without a key read, a key-store error → `KeyStoreUnavailable`; decision #44); every OpenAI-compatible request is built and sent only by `engine::openai::OpenAiCompatibleEngine::transcribe` (blocking reqwest, URL joined on the parsed base URL keeping its query, body capped at 1 MiB) and every transport failure goes through `failure::classify` to a `FailureReason` that never holds a URL, body or key (T-040) |
 | Platform traits (audio source, clipboard, input, credentials) | Windows vs tests | core tests run on Linux with fakes; Windows impls only in `src-tauri` |
 | IPC commands | UI ↔ Rust | the UI never calls Windows APIs; e2e mocks exactly these commands; one app wiring `build_app(builder, context, service)` in `src-tauri/src/lib.rs` (commands, managed settings service, change bridge) shared by `run()` and the shell tests; the wire form of the settings types is serde impls in `voicen-core` (spec 004 contracts/ipc.md › Wire form; T-030) |
 
@@ -45,7 +45,8 @@ flowchart LR
 |---|---|---|
 | version and commit | `voicen_core::build_info()` | About, start log line, CI smoke |
 | data directory `%LOCALAPPDATA%\Voicen` | `src-tauri` `paths::data_dir()` (temp dir + `Voicen` when `LOCALAPPDATA` is unset; T-030) | logs (`paths::log_dir()` = `data_dir()\logs`), settings (`FsSettingsFile::new(data_dir)` inside `settings_ipc::load_settings`), later history, models |
-| timeouts (FR-24) | `voicen-core` | engines, post-processing |
+| timeouts (FR-24) | `voicen_core::timeouts::Timeouts::default()` (connect 5 s, API 30 s, local server 60 s, post-processing 15 s, built-in 120 s); engines read them from each `TranscribeRequest` and store none | engines, post-processing |
+| audio sent to engines | `voicen_core::audio::AudioBuffer` (16 kHz mono i16 only: `from_16k_mono`, or `from_frames` = channel average + rubato resampling); `audio::wav::encode` writes the upload WAV; `Debug` prints no samples | capture (T-042), engines, pending recording |
 | user-visible text | `i18n/{en,ru}.json` via `voicen_core::i18n` and `$lib/i18n` | shell, UI |
 | settings defaults | `voicen_core::settings::defaults(os_tag)` (container-level serde default; one source) | `Settings` deserialization, first run, reset, UI |
 | API keys | `voicen_core::secrets::CredentialStore` by `KeySlot`; the only impl is `src-tauri` `credentials::WinCredentialStore` (Credential Manager, targets = `KeySlot::target_name()`; T-030); the file, `SettingsView`, events, IPC errors and logs never hold a key | engines and post-processing (read), settings save (write, delete) |

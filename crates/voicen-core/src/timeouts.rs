@@ -25,13 +25,12 @@ pub struct Timeouts {
 
 impl Default for Timeouts {
     fn default() -> Timeouts {
-        // T-040 skeleton: wrong on purpose until implemented (red tests first).
         Timeouts {
-            connect: Duration::ZERO,
-            api_transcription: Duration::ZERO,
-            local_server: Duration::ZERO,
-            post_processing: Duration::ZERO,
-            builtin: Duration::ZERO,
+            connect: Duration::from_secs(5),
+            api_transcription: Duration::from_secs(30),
+            local_server: Duration::from_secs(60),
+            post_processing: Duration::from_secs(15),
+            builtin: Duration::from_secs(120),
         }
     }
 }

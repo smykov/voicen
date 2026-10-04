@@ -134,15 +134,19 @@ Rules (NFR-06, FR-026, FR-027):
 |---|---|---|
 | `InvalidApiKey` | `failure.invalid_api_key` | HTTP 401/403 |
 | `NetworkUnavailable` | `failure.network_unavailable` | DNS failure, network/host unreachable |
-| `CannotReach{host}` | `failure.cannot_reach` | connection refused, connect timeout |
-| `Timeout` | `failure.timeout` | 30 s total exceeded |
+| `CannotReach{host}` | `failure.cannot_reach` | connection refused, connect timeout, TLS handshake failure, HTTP client setup; `host` = the base URL's `host[:port]` (port only when not the scheme default) |
+| `Timeout` | `failure.timeout` | the whole request (connect to last body byte) exceeded its `Timeouts` duration (API 30 s), including a stall mid-body |
 | `ServerError{status}` | `failure.server_error` | any other non-2xx (413, 429, 5xx, …) |
-| `UnexpectedResponse` | `failure.unexpected_response` | unparsable / missing `text` / > 1 MiB / reset mid-body |
+| `UnexpectedResponse` | `failure.unexpected_response` | 2xx body unparsable / not an object / missing or non-string `text` / > 1 MiB / invalid UTF-8 / reset or closed mid-body |
+| `KeyStoreUnavailable` | `failure.key_store_unavailable` | `CredentialStore::read` returned an error; `engine_for` returns it before any engine exists, so no request is sent (decision #44) |
+| `EngineNotConfigured` | `failure.engine_not_configured` | `engine_for` cannot build an engine from the settings: `BuiltinLocal` (built by the shell, T-017), `LocalServer` (until T-018), `None`, or a stored base URL that fails `check_base_url`; no key is read (decision #44) |
 | `ClipboardUnavailable` | `failure.clipboard_unavailable` | clipboard open failed after retries |
 | `MicrophoneUnavailable{cause}` | `failure.microphone_unavailable` | no device, access denied, open error — not retryable, no pending |
 | `HotkeyUnavailable` | `failure.hotkey_unavailable` | registration failed — not retryable |
 
 Retryable (creates a pending recording): every code from `InvalidApiKey` through `ClipboardUnavailable`.
+
+In code: `voicen_core::failure::FailureReason` with `code()` (the Code column without fields), `message_id()` and `message_params()` (`host`, `status`). Every transport failure is mapped by the one `failure::classify` (order in [contracts/openai-transcription.md](contracts/openai-transcription.md)); a reason is built only from the status, the classification flags and `host[:port]`, never from a `reqwest::Error`, a URL, a body or a key. T-040 has the first eight variants; `ClipboardUnavailable` comes with T-001, `MicrophoneUnavailable`/`HotkeyUnavailable` with T-042/T-006.
 
 ## IndicatorState
 

@@ -11,15 +11,22 @@
 //! through `failure::classify`; no `reqwest::Error`, URL or body reaches a
 //! `FailureReason`.
 
+use std::error::Error as _;
+use std::io::Read;
+
+use reqwest::blocking::{multipart, Client};
+use reqwest::header::CONTENT_TYPE;
+
 use super::{Engine, TranscribeRequest};
-use crate::audio::AudioBuffer;
-use crate::failure::FailureReason;
+use crate::audio::{wav, AudioBuffer};
+use crate::failure::{classify, FailureReason, TransportError};
 use crate::secrets::Secret;
 use crate::settings::url::NormalizedUrl;
 
+/// Largest accepted response body (contract: "body > 1 MiB" -> `UnexpectedResponse`).
+const MAX_BODY: u64 = 1024 * 1024;
+
 /// The OpenAI-compatible engine for one base URL, model and optional key.
-// T-040 skeleton: fields unused until implemented.
-#[allow(dead_code)]
 pub struct OpenAiCompatibleEngine {
     base_url: NormalizedUrl,
     model: String,
@@ -27,8 +34,8 @@ pub struct OpenAiCompatibleEngine {
 }
 
 impl OpenAiCompatibleEngine {
-    /// `base_url` passed `check_base_url` (the one URL rule); `key: None` sends no
-    /// `Authorization` header.
+    /// `base_url` passed `check_base_url` (the one URL rule); `key: None` (or an
+    /// empty key) sends no `Authorization` header.
     pub fn new(
         base_url: NormalizedUrl,
         model: impl Into<String>,
@@ -40,12 +47,90 @@ impl OpenAiCompatibleEngine {
             key,
         }
     }
+
+    /// The multipart body of the contract (`file`, `model`, `language` only when
+    /// set, `response_format=json`) and its `Content-Type`.
+    ///
+    /// Encoded into one buffer instead of `RequestBuilder::multipart`: reqwest's
+    /// blocking client streams a multipart reader through a channel and reports a
+    /// failed connect as the body channel's `Disconnected` error when the connect
+    /// fails first (no `is_connect` flag: a refused port would classify as
+    /// `UnexpectedResponse`). A buffered body has no such channel.
+    fn multipart_body(
+        &self,
+        audio: &AudioBuffer,
+        req: &TranscribeRequest,
+    ) -> Option<(String, Vec<u8>)> {
+        let file = multipart::Part::bytes(wav::encode(audio))
+            .file_name("audio.wav")
+            .mime_str("audio/wav")
+            .ok()?;
+        let mut form = multipart::Form::new()
+            .part("file", file)
+            .text("model", self.model.clone());
+        if let Some(language) = &req.language {
+            form = form.text("language", language.clone());
+        }
+        let form = form.text("response_format", "json");
+        let content_type = format!("multipart/form-data; boundary={}", form.boundary());
+        let mut body = Vec::new();
+        form.into_reader().read_to_end(&mut body).ok()?;
+        Some((content_type, body))
+    }
+
+    /// Sends the request and reads the body; every failure as a [`TransportError`].
+    fn send(
+        &self,
+        url: url::Url,
+        audio: &AudioBuffer,
+        req: &TranscribeRequest,
+    ) -> Result<String, TransportError> {
+        let client = Client::builder()
+            .connect_timeout(req.timeouts.connect)
+            .build()
+            .map_err(|_| TransportError::Setup)?;
+        let (content_type, body) = self
+            .multipart_body(audio, req)
+            .ok_or(TransportError::Setup)?;
+        // The per-request timeout covers connect to the last body byte (FR-24).
+        let mut request = client
+            .post(url)
+            .timeout(req.timeouts.api_transcription)
+            .header(CONTENT_TYPE, content_type)
+            .body(body);
+        if let Some(key) = self.key.as_ref().filter(|k| !k.expose().is_empty()) {
+            request = request.bearer_auth(key.expose());
+        }
+        let response = request.send().map_err(|e| send_error(&e))?;
+        let status = response.status();
+        if !status.is_success() {
+            // The error body is never read (P-009).
+            return Err(TransportError::Status(status.as_u16()));
+        }
+        let mut body = Vec::new();
+        response
+            .take(MAX_BODY + 1)
+            .read_to_end(&mut body)
+            .map_err(|e| body_error(&e))?;
+        if !u64::try_from(body.len()).is_ok_and(|len| len <= MAX_BODY) {
+            return Err(TransportError::BadBody);
+        }
+        // An object with a string `text`; other fields are ignored. (A derived struct
+        // would also accept a JSON array whose first element is a string.)
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&body).map_err(|_| TransportError::BadBody)?;
+        let text = parsed
+            .as_object()
+            .and_then(|object| object.get("text"))
+            .and_then(serde_json::Value::as_str)
+            .ok_or(TransportError::BadBody)?;
+        Ok(text.trim().to_string())
+    }
 }
 
 impl Engine for OpenAiCompatibleEngine {
     fn kind(&self) -> &'static str {
-        // T-040 skeleton: wrong on purpose until implemented (red tests first).
-        ""
+        "api"
     }
 
     fn transcribe(
@@ -53,31 +138,71 @@ impl Engine for OpenAiCompatibleEngine {
         audio: &AudioBuffer,
         req: &TranscribeRequest,
     ) -> Result<String, FailureReason> {
-        // T-040 skeleton: wrong on purpose until implemented (red tests first).
-        let _ = (audio, req);
-        Err(FailureReason::EngineNotConfigured)
+        // `check_base_url` parsed this text already; a failure here means the engine
+        // cannot be built from what it was given.
+        let base = url::Url::parse(self.base_url.as_str())
+            .map_err(|_| FailureReason::EngineNotConfigured)?;
+        let url = transcription_url(&base).ok_or(FailureReason::EngineNotConfigured)?;
+        self.send(url, audio, req)
+            .map_err(|e| classify(&e, &host_port(&base)))
     }
+}
+
+/// The classification flags of a send error: reqwest's flags and the first
+/// `io::ErrorKind` in the source chain. Nothing of the error's text is kept (its
+/// `Display` contains the URL, query included).
+fn send_error(e: &reqwest::Error) -> TransportError {
+    if e.is_builder() {
+        return TransportError::Setup;
+    }
+    let mut io = None;
+    let mut source = e.source();
+    while let Some(err) = source {
+        if let Some(io_err) = err.downcast_ref::<std::io::Error>() {
+            io = Some(io_err.kind());
+            break;
+        }
+        source = err.source();
+    }
+    TransportError::Send {
+        dns: e.is_dns(),
+        connect: e.is_connect(),
+        timeout: e.is_timeout(),
+        io,
+    }
+}
+
+/// A body read error: the blocking reader wraps the `reqwest::Error` in an
+/// `io::Error`; its timeout flag tells a stall past the deadline from a reset or an
+/// early close.
+fn body_error(e: &std::io::Error) -> TransportError {
+    let timeout = e.kind() == std::io::ErrorKind::TimedOut
+        || e.get_ref()
+            .and_then(|inner| inner.downcast_ref::<reqwest::Error>())
+            .is_some_and(reqwest::Error::is_timeout);
+    TransportError::BodyRead { timeout }
 }
 
 /// `{base}/audio/transcriptions` with the base's query kept: one empty trailing
 /// path segment dropped, then `audio`, `transcriptions` appended. `None` only for
 /// a cannot-be-a-base URL (never `http`/`https`).
-// T-040 skeleton: unused until implemented.
-#[allow(dead_code)]
 pub(crate) fn transcription_url(base: &url::Url) -> Option<url::Url> {
-    // T-040 skeleton: wrong on purpose until implemented (red tests first).
-    let _ = base;
-    None
+    let mut url = base.clone();
+    url.path_segments_mut()
+        .ok()?
+        .pop_if_empty()
+        .extend(["audio", "transcriptions"]);
+    Some(url)
 }
 
 /// The `host[:port]` shown in `CannotReach`: the host, plus the port only when the
 /// URL names a non-default one. No scheme, userinfo, path or query.
-// T-040 skeleton: unused until implemented.
-#[allow(dead_code)]
 pub(crate) fn host_port(base: &url::Url) -> String {
-    // T-040 skeleton: wrong on purpose until implemented (red tests first).
-    let _ = base;
-    String::new()
+    let host = base.host_str().unwrap_or_default();
+    match base.port() {
+        Some(port) => format!("{host}:{port}"),
+        None => host.to_string(),
+    }
 }
 
 #[cfg(test)]

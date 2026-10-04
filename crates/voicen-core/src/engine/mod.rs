@@ -11,8 +11,9 @@ pub mod openai;
 
 use crate::audio::AudioBuffer;
 use crate::failure::FailureReason;
-use crate::secrets::CredentialStore;
-use crate::settings::Settings;
+use crate::secrets::{CredentialStore, KeySlot};
+use crate::settings::url::check_base_url;
+use crate::settings::{EngineKind, Settings};
 use crate::timeouts::Timeouts;
 
 /// A transcription engine (NFR-11; shared with specs 002 and 003).
@@ -49,9 +50,23 @@ pub fn engine_for(
     settings: &Settings,
     creds: &dyn CredentialStore,
 ) -> Result<Box<dyn Engine>, FailureReason> {
-    // T-040 skeleton: wrong on purpose until implemented (red tests first).
-    let _ = (settings, creds);
-    Err(FailureReason::Timeout)
+    match settings.engine {
+        EngineKind::Api => {
+            let base_url = check_base_url(&settings.api.base_url)
+                .map_err(|_| FailureReason::EngineNotConfigured)?;
+            let key = creds
+                .read(KeySlot::TranscriptionApi)
+                .map_err(|_| FailureReason::KeyStoreUnavailable)?;
+            Ok(Box::new(openai::OpenAiCompatibleEngine::new(
+                base_url,
+                settings.api.model.clone(),
+                key,
+            )))
+        }
+        EngineKind::BuiltinLocal | EngineKind::LocalServer | EngineKind::None => {
+            Err(FailureReason::EngineNotConfigured)
+        }
+    }
 }
 
 #[cfg(test)]

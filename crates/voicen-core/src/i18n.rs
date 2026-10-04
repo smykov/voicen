@@ -84,6 +84,22 @@ messages! {
     /// A refused save whose undo failed for some keys; the UI highlights the key
     /// fields named in `FormError::PartiallyRestored` (R-3).
     SETTINGS_PARTIALLY_RESTORED = "settings.partially_restored",
+    /// `FailureReason::InvalidApiKey` (HTTP 401/403).
+    FAILURE_INVALID_API_KEY = "failure.invalid_api_key", // a catalog id, not a key: teamwright:allow-secret
+    /// `FailureReason::NetworkUnavailable` (DNS failure, network/host unreachable).
+    FAILURE_NETWORK_UNAVAILABLE = "failure.network_unavailable",
+    /// `FailureReason::CannotReach`; placeholder `{host}` = `host[:port]`.
+    FAILURE_CANNOT_REACH = "failure.cannot_reach",
+    /// `FailureReason::Timeout` (the whole request exceeded its duration).
+    FAILURE_TIMEOUT = "failure.timeout",
+    /// `FailureReason::ServerError`; placeholder `{status}` = the HTTP status.
+    FAILURE_SERVER_ERROR = "failure.server_error",
+    /// `FailureReason::UnexpectedResponse` (bad, oversized or cut-off body).
+    FAILURE_UNEXPECTED_RESPONSE = "failure.unexpected_response",
+    /// `FailureReason::KeyStoreUnavailable` (credential read failed; decision #44).
+    FAILURE_KEY_STORE_UNAVAILABLE = "failure.key_store_unavailable",
+    /// `FailureReason::EngineNotConfigured` (no engine for the settings; decision #44).
+    FAILURE_ENGINE_NOT_CONFIGURED = "failure.engine_not_configured",
 }
 
 /// Both catalogs (en, ru) as parsed flat id -> text maps.

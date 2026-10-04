@@ -8,7 +8,9 @@
 //! transcript.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
-use crate::i18n::MessageId;
+use std::io::ErrorKind;
+
+use crate::i18n::{self, MessageId};
 
 /// One failure of a transcription job. T-001 adds the delivery and capture reasons.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -44,21 +46,45 @@ pub enum FailureReason {
 impl FailureReason {
     /// Stable code for events and logs (data-model "Code" column).
     pub fn code(&self) -> &'static str {
-        // T-040 skeleton: wrong on purpose until implemented (red tests first).
-        ""
+        match self {
+            FailureReason::InvalidApiKey => "InvalidApiKey",
+            FailureReason::NetworkUnavailable => "NetworkUnavailable",
+            FailureReason::CannotReach { .. } => "CannotReach",
+            FailureReason::Timeout => "Timeout",
+            FailureReason::ServerError { .. } => "ServerError",
+            FailureReason::UnexpectedResponse => "UnexpectedResponse",
+            FailureReason::KeyStoreUnavailable => "KeyStoreUnavailable",
+            FailureReason::EngineNotConfigured => "EngineNotConfigured",
+        }
     }
 
     /// The catalog message (`failure.*`).
     pub fn message_id(&self) -> MessageId {
-        // T-040 skeleton: wrong on purpose until implemented (red tests first).
-        crate::i18n::NOTICE_CHOOSE_ENGINE
+        match self {
+            FailureReason::InvalidApiKey => i18n::FAILURE_INVALID_API_KEY,
+            FailureReason::NetworkUnavailable => i18n::FAILURE_NETWORK_UNAVAILABLE,
+            FailureReason::CannotReach { .. } => i18n::FAILURE_CANNOT_REACH,
+            FailureReason::Timeout => i18n::FAILURE_TIMEOUT,
+            FailureReason::ServerError { .. } => i18n::FAILURE_SERVER_ERROR,
+            FailureReason::UnexpectedResponse => i18n::FAILURE_UNEXPECTED_RESPONSE,
+            FailureReason::KeyStoreUnavailable => i18n::FAILURE_KEY_STORE_UNAVAILABLE,
+            FailureReason::EngineNotConfigured => i18n::FAILURE_ENGINE_NOT_CONFIGURED,
+        }
     }
 
     /// Placeholder values for [`message_id`](Self::message_id): `host` for
     /// `CannotReach`, `status` for `ServerError`, none otherwise.
     pub fn message_params(&self) -> Vec<(&'static str, String)> {
-        // T-040 skeleton: wrong on purpose until implemented (red tests first).
-        Vec::new()
+        match self {
+            FailureReason::CannotReach { host } => vec![("host", host.clone())],
+            FailureReason::ServerError { status } => vec![("status", status.to_string())],
+            FailureReason::InvalidApiKey
+            | FailureReason::NetworkUnavailable
+            | FailureReason::Timeout
+            | FailureReason::UnexpectedResponse
+            | FailureReason::KeyStoreUnavailable
+            | FailureReason::EngineNotConfigured => Vec::new(),
+        }
     }
 }
 
@@ -91,10 +117,33 @@ pub enum TransportError {
 /// `NetworkUnavailable`; connect (refused, connect timeout, TLS) -> `CannotReach`;
 /// timeout -> `Timeout`; body errors -> `UnexpectedResponse`. A DNS failure is
 /// also `is_connect`, so DNS is checked first.
+///
+/// A send error with none of the flags (the connection closed before a response,
+/// a protocol error) is `UnexpectedResponse`.
 pub fn classify(err: &TransportError, host: &str) -> FailureReason {
-    // T-040 skeleton: wrong on purpose until implemented (red tests first).
-    let _ = (err, host);
-    FailureReason::UnexpectedResponse
+    let cannot_reach = || FailureReason::CannotReach {
+        host: host.to_string(),
+    };
+    match *err {
+        TransportError::Status(401 | 403) => FailureReason::InvalidApiKey,
+        TransportError::Status(status) => FailureReason::ServerError { status },
+        TransportError::Send { dns, io, .. }
+            if dns
+                || matches!(
+                    io,
+                    Some(ErrorKind::NetworkUnreachable | ErrorKind::HostUnreachable)
+                ) =>
+        {
+            FailureReason::NetworkUnavailable
+        }
+        TransportError::Send { connect: true, .. } | TransportError::Setup => cannot_reach(),
+        TransportError::Send { timeout: true, .. } | TransportError::BodyRead { timeout: true } => {
+            FailureReason::Timeout
+        }
+        TransportError::Send { .. }
+        | TransportError::BodyRead { timeout: false }
+        | TransportError::BadBody => FailureReason::UnexpectedResponse,
+    }
 }
 
 #[cfg(test)]

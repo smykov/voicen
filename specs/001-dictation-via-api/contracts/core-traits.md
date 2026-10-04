@@ -14,14 +14,24 @@ pub trait Engine: Send + Sync {
 }
 
 pub struct TranscribeRequest {
-    pub language: Language,          // Auto → field omitted
-    pub timeouts: Timeouts,          // single source, timeouts.rs
+    pub language: Option<String>,    // Settings::speech_language; None = auto → field omitted
+    pub timeouts: Timeouts,          // single source, timeouts.rs; the engine stores no Duration
 }
 ```
 
-`OpenAiCompatibleEngine::new(base_url, model, key: Option<Secret>, client_cfg)` implements `Engine` (contract: [openai-transcription.md](openai-transcription.md)). 002 reuses it for the local server with `Timeouts::local_server`.
+`OpenAiCompatibleEngine::new(base_url: NormalizedUrl, model, key: Option<Secret>)` implements `Engine` (contract: [openai-transcription.md](openai-transcription.md)); it builds its blocking client per call from `req.timeouts`. 002 reuses it for the local server with `Timeouts::local_server`.
 
-`EngineFactory: Fn(&DictationSettings, &dyn CredentialStore) -> Result<Box<dyn Engine>, FailureReason>`. It is called per job, so a retry uses the current settings and key (Clarification 4).
+The factory is one total function in core (T-040, decision #44):
+
+```rust
+pub fn engine_for(settings: &Settings, creds: &dyn CredentialStore)
+    -> Result<Box<dyn Engine>, FailureReason>;
+```
+
+It takes 004's `Settings` snapshot (`engine`, `api.base_url`, `api.model`; no `DictationSettings` projection) and is called per job, so a retry uses the current settings and key (Clarification 4). It never panics and sends no request:
+
+- `Api`: `check_base_url(api.base_url)` (else `EngineNotConfigured`, no key read) → `creds.read(KeySlot::TranscriptionApi)` once (`Err` → `KeyStoreUnavailable`; `Ok(None)` → no `Authorization` header) → `OpenAiCompatibleEngine`.
+- `BuiltinLocal`, `LocalServer`, `None`: `EngineNotConfigured`, no key read. T-018 adds the `LocalServer` arm here (002's "register in src-tauri factory" becomes this arm); T-017 wraps `engine_for` in the shell for `BuiltinLocal` (no whisper in core, decision #12).
 
 ## SpeechDetector
 

@@ -10,6 +10,8 @@ Stable keys with English and Russian texts. `{x}` marks a parameter. The catalog
 | `failure.timeout` | The server did not answer in time | Сервер не ответил вовремя | toast + overlay |
 | `failure.server_error` | Server error (HTTP {status}) | Ошибка сервера (HTTP {status}) | toast + overlay |
 | `failure.unexpected_response` | Unexpected response from the server | Неожиданный ответ сервера | toast + overlay |
+| `failure.key_store_unavailable` | The API key could not be read from Windows Credential Manager. | Не удалось прочитать API-ключ из диспетчера учётных данных Windows. | toast + overlay (decision #44) |
+| `failure.engine_not_configured` | The transcription engine is not set up. Check the Engine settings. | Движок распознавания не настроен. Проверьте настройки движка. | toast + overlay (decision #44) |
 | `failure.clipboard_unavailable` | Clipboard unavailable | Буфер обмена недоступен | toast + overlay |
 | `failure.microphone_unavailable` | Microphone unavailable: {reason} | Микрофон недоступен: {reason} | toast + overlay |
 | `failure.hotkey_unavailable` | Hotkey unavailable | Сочетание клавиш недоступно | toast + overlay + settings |
@@ -38,3 +40,5 @@ Stable keys with English and Russian texts. `{x}` marks a parameter. The catalog
 | `tray.tooltip.hotkey_error` | Voicen — hotkey not registered | Voicen — сочетание клавиш не зарегистрировано | tray tooltip |
 
 The failure toasts for retryable reasons carry the `action.retry` button. The requirement text "network unavailable — Retry" (req FR-11) is rendered as the `failure.network_unavailable` text plus the Retry button.
+
+In the catalog and declared with `messages!` (`voicen_core::i18n`, `FailureReason::message_id`) since T-040: `failure.invalid_api_key`, `failure.network_unavailable`, `failure.cannot_reach`, `failure.timeout`, `failure.server_error`, `failure.unexpected_response`, `failure.key_store_unavailable`, `failure.engine_not_configured`. The other keys are added by the tasks that first use them.

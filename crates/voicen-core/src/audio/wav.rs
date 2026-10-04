@@ -2,13 +2,37 @@
 //! 1 channel, written by hand (`hound` is not consented; decision #9). Ten minutes
 //! are about 19.2 MB (decisions #1).
 
-use super::AudioBuffer;
+use super::{AudioBuffer, SAMPLE_RATE};
+
+/// Bytes per sample (16-bit) and per frame (mono).
+const BLOCK_ALIGN: u16 = 2;
 
 /// The complete WAV file: a 44-byte header, then the samples.
+///
+/// The RIFF sizes are 32-bit; a buffer above 4 GiB (far beyond the 10-minute cap)
+/// gets saturated sizes instead of a panic.
 pub fn encode(audio: &AudioBuffer) -> Vec<u8> {
-    // T-040 skeleton: wrong on purpose until implemented (red tests first).
-    let _ = audio;
-    Vec::new()
+    let samples = audio.samples();
+    let data_len = samples.len().saturating_mul(usize::from(BLOCK_ALIGN));
+    let data_size = u32::try_from(data_len).unwrap_or(u32::MAX);
+    let mut out = Vec::with_capacity(44usize.saturating_add(data_len));
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&data_size.saturating_add(36).to_le_bytes());
+    out.extend_from_slice(b"WAVE");
+    out.extend_from_slice(b"fmt ");
+    out.extend_from_slice(&16u32.to_le_bytes()); // fmt chunk size
+    out.extend_from_slice(&1u16.to_le_bytes()); // WAVE_FORMAT_PCM
+    out.extend_from_slice(&1u16.to_le_bytes()); // mono
+    out.extend_from_slice(&SAMPLE_RATE.to_le_bytes());
+    out.extend_from_slice(&(SAMPLE_RATE * u32::from(BLOCK_ALIGN)).to_le_bytes()); // byte rate
+    out.extend_from_slice(&BLOCK_ALIGN.to_le_bytes());
+    out.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&data_size.to_le_bytes());
+    for sample in samples {
+        out.extend_from_slice(&sample.to_le_bytes());
+    }
+    out
 }
 
 #[cfg(test)]
