@@ -116,6 +116,9 @@ messages! {
     /// A refused save whose undo failed for some keys; the UI highlights the key
     /// fields named in `FormError::PartiallyRestored` (R-3).
     SETTINGS_PARTIALLY_RESTORED = "settings.partially_restored",
+    /// A saved base URL in use is `http` on a non-loopback host: the key travels
+    /// unencrypted (`WarningCode::EndpointInsecure`, T-015; decision #52).
+    SETTINGS_WARNING_ENDPOINT_INSECURE = "settings.warning.endpoint_insecure",
     /// `FailureReason::InvalidApiKey` (HTTP 401/403).
     FAILURE_INVALID_API_KEY = "failure.invalid_api_key", // a catalog id, not a key: teamwright:allow-secret
     /// `FailureReason::NetworkUnavailable` (DNS failure, network/host unreachable).

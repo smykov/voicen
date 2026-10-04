@@ -56,6 +56,16 @@ pub fn check_base_url(raw: &str) -> Result<NormalizedUrl, UrlError> {
     Ok(NormalizedUrl(text.to_string()))
 }
 
+/// True exactly when `url` would send its traffic (and the API key) unencrypted
+/// to another machine: scheme `http` and a `url`-crate host that is not loopback
+/// (loopback = `Domain("localhost")`, `Ipv4` in 127.0.0.0/8, `Ipv6` == `::1`;
+/// spec 004 FR-020, FR-29, decision #52). `https` is never insecure. Decided on
+/// the host the HTTP client connects to, never on the text.
+pub fn is_insecure_remote(url: &NormalizedUrl) -> bool {
+    let _ = url;
+    todo!("T-015: is_insecure_remote")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -131,5 +141,67 @@ mod tests {
             let twice = check_base_url(once.as_str()).expect("still accepted");
             assert_eq!(once, twice, "{raw:?}");
         }
+    }
+
+    /// A [`NormalizedUrl`] built the one way the service builds it.
+    #[track_caller]
+    fn normalized(raw: &str) -> NormalizedUrl {
+        check_base_url(raw).unwrap_or_else(|e| panic!("{raw:?} must pass check_base_url: {e:?}"))
+    }
+
+    #[test]
+    fn is_insecure_remote_table() {
+        // T-015 / decision #52: http + a non-loopback host of the `url` crate warns;
+        // loopback is the spec's closed list (localhost any case, 127.0.0.0/8, ::1)
+        // over the parsed host, never over the text.
+        // Bite: `scheme == "http"` alone (every loopback row turns red); a text
+        // prefix/contains check on "localhost"/"127." (`localhost.`, `foo.localhost`,
+        // `127.0.0.1.nip.io` red, and the shorthand IPv4 rows `0x7f.1`/`2130706433`
+        // red); `Ipv4Addr::is_loopback` replaced by `== 127.0.0.1` (`127.1.2.3` red);
+        // `to_ipv4()`/`is_unspecified` counted as loopback (`[::ffff:127.0.0.1]`,
+        // `0.0.0.0`, `[::]` red); https treated like http (`https://example.com` red).
+        let insecure = [
+            "http://example.com/v1",
+            "HTTP://EXAMPLE.COM/v1",
+            "http://192.168.1.5:8000/v1",
+            "http://192.0.2.10:8000/v1",
+            "http://0.0.0.0:8000",
+            "http://[::]:8000",
+            "http://[::ffff:127.0.0.1]",
+            "http://localhost./v1",
+            "http://foo.localhost:8000",
+            "http://127.0.0.1.nip.io/v1",
+        ];
+        let not_insecure = [
+            "http://LOCALHOST:8000/v1",
+            "http://localhost",
+            "http://LocalHost:8000/v1",
+            "http://127.0.0.1",
+            "http://127.1.2.3",
+            "http://127.255.255.254:8080/v1",
+            "http://0x7f.1/v1",
+            "http://2130706433:8000",
+            "http://[::1]:8000/v1",
+            "http://[0:0:0:0:0:0:0:1]",
+            "https://example.com",
+            "https://example.com/v1",
+            "https://192.168.1.5:8000/v1",
+            "https://0.0.0.0:8000",
+            "https://[::ffff:127.0.0.1]",
+            "https://localhost.:8443",
+            "https://localhost:8443/v1",
+        ];
+        let mut wrong = Vec::new();
+        for (raw, expected) in insecure
+            .iter()
+            .map(|r| (*r, true))
+            .chain(not_insecure.iter().map(|r| (*r, false)))
+        {
+            let got = is_insecure_remote(&normalized(raw));
+            if got != expected {
+                wrong.push(format!("{raw:?}: expected {expected}, got {got}"));
+            }
+        }
+        assert!(wrong.is_empty(), "is_insecure_remote wrong for: {wrong:#?}");
     }
 }

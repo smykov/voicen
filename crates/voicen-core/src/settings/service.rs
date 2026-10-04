@@ -706,17 +706,28 @@ mod tests {
         names
     }
 
+    /// A `Saved` whose warnings are exactly `expected` (order-insensitive; T-015).
     #[track_caller]
-    fn expect_saved(outcome: SaveOutcome) -> SettingsView {
+    fn expect_saved(outcome: SaveOutcome, expected: &[Warning]) -> SettingsView {
         match outcome {
             SaveOutcome::Saved { view, warnings } => {
-                assert!(
-                    warnings.is_empty(),
-                    "no warnings before T-015: {warnings:?}"
-                );
+                let key = |w: &Warning| (w.field.as_str(), w.code.as_str());
+                let mut got = warnings.clone();
+                got.sort_by_key(key);
+                let mut want = expected.to_vec();
+                want.sort_by_key(key);
+                assert_eq!(got, want, "Saved warnings");
                 view
             }
             other => panic!("expected Saved, got {other:?}"),
+        }
+    }
+
+    /// The one warning T-015 defines, on `field`.
+    fn insecure(field: FieldId) -> Warning {
+        Warning {
+            field,
+            code: WarningCode::EndpointInsecure,
         }
     }
 
@@ -957,7 +968,10 @@ mod tests {
         );
         assert_eq!(world.file.bytes(), None);
         world.file.clear_failures();
-        expect_saved(service.save(req(sample(EngineKind::None), KeyEdits::default())));
+        expect_saved(
+            service.save(req(sample(EngineKind::None), KeyEdits::default())),
+            &[],
+        );
         assert_eq!(
             parse(&world.file.bytes().expect("written by the save")),
             sample(EngineKind::None)
@@ -985,7 +999,10 @@ mod tests {
         assert_eq!(world.file.bytes(), None);
         assert!(service.view().reset_notice);
         world.file.clear_failures();
-        expect_saved(service.save(req(sample(EngineKind::None), KeyEdits::default())));
+        expect_saved(
+            service.save(req(sample(EngineKind::None), KeyEdits::default())),
+            &[],
+        );
         assert_eq!(
             parse(&world.file.bytes().expect("written by the save")),
             sample(EngineKind::None)
@@ -1098,7 +1115,7 @@ mod tests {
             local_server: replace(marks[1].1),
             post_processing: replace(marks[2].1),
         };
-        let view = expect_saved(service.save(req(sample(EngineKind::Api), keys)));
+        let view = expect_saved(service.save(req(sample(EngineKind::Api), keys)), &[]);
 
         // The keys did go to the store (otherwise the property is vacuous).
         for (slot, mark) in marks {
@@ -1137,7 +1154,7 @@ mod tests {
             local_server: replace("\tsk-test-trim-local "),
             post_processing: replace("\u{3000}sk-test-trim-pp\r\n"),
         };
-        expect_saved(service.save(req(sample(EngineKind::Api), keys)));
+        expect_saved(service.save(req(sample(EngineKind::Api), keys)), &[]);
         assert_eq!(
             stored(&world.creds),
             [
@@ -1169,7 +1186,10 @@ mod tests {
         for blank in ["", "   ", "\n\t \u{3000}"] {
             let mut draft = sample(EngineKind::None);
             draft.history.size = 42;
-            let view = expect_saved(service.save(req(draft.clone(), all_keys(|| replace(blank)))));
+            let view = expect_saved(
+                service.save(req(draft.clone(), all_keys(|| replace(blank)))),
+                &[],
+            );
             assert_eq!(
                 view.keys,
                 KeyPresence {
@@ -1237,7 +1257,7 @@ mod tests {
             }
             let mut draft = sample(EngineKind::None);
             draft.history.size = 42;
-            let saved = expect_saved(service.save(req(draft.clone(), keys)));
+            let saved = expect_saved(service.save(req(draft.clone(), keys)), &[]);
 
             let expected_stored: Vec<Option<String>> = old
                 .iter()
@@ -1310,10 +1330,195 @@ mod tests {
             transcription_api: replace("sk-test-api"),
             ..KeyEdits::default()
         };
-        let view = expect_saved(service.save(req(draft, keys)));
+        let view = expect_saved(service.save(req(draft, keys)), &[]);
         assert_eq!(view.settings, expected);
         assert_eq!(*service.snapshot(), expected);
         assert_eq!(parse(&world.file.bytes().expect("file written")), expected);
+    }
+
+    // ---- T-015: endpoint.insecure warnings on save -------------------------------
+
+    /// A save over a fresh first-run service with an API key in the store (so an
+    /// `api` engine passes validation); returns the outcome and the world.
+    fn save_with_api_key(draft: Settings) -> (SaveOutcome, World, SettingsService) {
+        let world = World::new(
+            FakeSettingsFile::new(),
+            FakeCredentialStore::new().with_key(API, "sk-test-fake-api"),
+        );
+        let (service, _) = world.load();
+        let outcome = service.save(req(draft, KeyEdits::default()));
+        (outcome, world, service)
+    }
+
+    #[test]
+    fn save_warns_on_http_remote_api_endpoint_and_still_saves() {
+        // FR-29 / spec 004 US6-1 / decision #52: engine api + http://example.com/v1
+        // saves (file written, snapshot swapped) and returns exactly one warning
+        // {engine.api.base_url, endpoint.insecure, settings.warning.endpoint_insecure}.
+        // Bite: `warnings: Vec::new()` in step (8); the warning turned into a refusal;
+        // the warning on another field; `message` missing from the wire.
+        let mut draft = sample(EngineKind::Api);
+        draft.api.base_url = " http://example.com/v1/ ".into();
+        draft.post_processing.enabled = false;
+        let mut expected = normalize(draft.clone());
+        expected.api.base_url = "http://example.com/v1".into();
+
+        let (outcome, world, service) = save_with_api_key(draft);
+        let wire_warnings = match &outcome {
+            SaveOutcome::Saved { warnings, .. } => {
+                serde_json::to_value(warnings).expect("warnings serialize")
+            }
+            other => panic!("expected Saved, got {other:?}"),
+        };
+        let view = expect_saved(outcome, &[insecure(FieldId::EngineApiBaseUrl)]);
+
+        assert_eq!(view.settings, expected);
+        assert_eq!(*service.snapshot(), expected);
+        assert_eq!(parse(&world.file.bytes().expect("file written")), expected);
+        assert_eq!(
+            wire_warnings,
+            serde_json::json!([{
+                "field": "engine.api.base_url",
+                "code": "endpoint.insecure",
+                "message": "settings.warning.endpoint_insecure",
+            }])
+        );
+    }
+
+    #[test]
+    fn save_warns_on_http_remote_local_server_endpoint() {
+        // US6-1 for the other engine URL: the field is the selected engine's own.
+        // Bite: the field hard-coded to engine.api.base_url, or only the api URL
+        // checked. sample's local server is http://192.0.2.10:8000/v1.
+        let mut draft = sample(EngineKind::LocalServer);
+        draft.post_processing.enabled = false;
+        let world = World::new(FakeSettingsFile::new(), FakeCredentialStore::new());
+        let (service, _) = world.load();
+        expect_saved(
+            service.save(req(draft, KeyEdits::default())),
+            &[insecure(FieldId::EngineLocalServerBaseUrl)],
+        );
+    }
+
+    #[test]
+    fn save_does_not_warn_on_loopback_local_server() {
+        // Acceptance failure branch: http on loopback (any letter case, 127.0.0.0/8,
+        // ::1) is local, so no warning. Bite: `scheme == "http"` alone as the rule,
+        // or a case-sensitive "localhost" text compare.
+        for url in [
+            "http://LOCALHOST:8000/v1",
+            "http://localhost:8000/v1/",
+            "http://127.0.0.1",
+            "http://127.1.2.3:9000/v1",
+            "http://[::1]",
+            "http://[::1]:8000/v1",
+        ] {
+            let mut draft = sample(EngineKind::LocalServer);
+            draft.local_server.base_url = url.into();
+            draft.post_processing.enabled = false;
+            let world = World::new(FakeSettingsFile::new(), FakeCredentialStore::new());
+            let (service, _) = world.load();
+            let view = expect_saved(service.save(req(draft, KeyEdits::default())), &[]);
+            assert_eq!(view.settings.local_server.base_url, normalize_base_url(url));
+        }
+    }
+
+    #[test]
+    fn save_ignores_http_remote_url_of_an_engine_not_in_use() {
+        // US6-1: only URLs in use warn. engine api over https, a stale
+        // http://192.0.2.10 local-server URL and an http post-processing URL with
+        // post-processing off stay quiet. Bite: every stored base URL checked
+        // regardless of engine / `post_processing.enabled`.
+        let mut draft = sample(EngineKind::Api);
+        draft.local_server.base_url = "http://192.0.2.10:8000/v1".into();
+        draft.post_processing.enabled = false;
+        draft.post_processing.base_url = "http://llm.example.com/v1".into();
+        let (outcome, _, _) = save_with_api_key(draft);
+        expect_saved(outcome, &[]);
+
+        // engine none: no engine URL is in use at all.
+        let mut draft = sample(EngineKind::None);
+        draft.api.base_url = "http://example.com/v1".into();
+        draft.post_processing.enabled = false;
+        let (outcome, _, _) = save_with_api_key(draft);
+        expect_saved(outcome, &[]);
+    }
+
+    #[test]
+    fn save_warns_on_http_remote_post_processing_endpoint_only_while_enabled() {
+        // The post-processing URL is in use while `post_processing.enabled`
+        // (decision #52), whatever engine is selected. Bite: post_processing.base_url
+        // never checked, or checked with post-processing off.
+        for engine in [EngineKind::Api, EngineKind::None] {
+            let mut on = sample(engine);
+            on.post_processing.enabled = true;
+            on.post_processing.base_url = "http://llm.example.com/v1".into();
+            let (outcome, _, _) = save_with_api_key(on.clone());
+            expect_saved(outcome, &[insecure(FieldId::PostProcessingBaseUrl)]);
+
+            let mut off = on;
+            off.post_processing.enabled = false;
+            let (outcome, _, _) = save_with_api_key(off);
+            expect_saved(outcome, &[]);
+        }
+    }
+
+    #[test]
+    fn save_lists_every_insecure_url_in_use() {
+        // Two URLs in use, both http remote -> two warnings. Bite: the first hit
+        // returned alone.
+        let mut draft = sample(EngineKind::Api);
+        draft.api.base_url = "http://192.0.2.20/v1".into();
+        draft.post_processing.enabled = true;
+        draft.post_processing.base_url = "http://198.51.100.7:8080/v1".into();
+        let (outcome, _, _) = save_with_api_key(draft);
+        expect_saved(
+            outcome,
+            &[
+                insecure(FieldId::EngineApiBaseUrl),
+                insecure(FieldId::PostProcessingBaseUrl),
+            ],
+        );
+    }
+
+    #[test]
+    fn save_gives_no_warning_for_an_unchecked_post_processing_url() {
+        // Investigation 4: core does not validate post_processing.base_url yet
+        // (T-020/T-021), so a malformed or empty one is saved; it gets no warning
+        // (only a URL that passes check_base_url is classified) and the save must
+        // not panic. Bite: `check_base_url(..).unwrap()`/`expect` before
+        // is_insecure_remote, or a text test like `starts_with("http://")` warning
+        // on `http//…`.
+        for url in [
+            "",
+            "http//llm.example.com",
+            "llm.example.com/v1",
+            "ftp://llm.example.com",
+        ] {
+            let mut draft = sample(EngineKind::Api);
+            draft.post_processing.enabled = true;
+            draft.post_processing.base_url = url.into();
+            let (outcome, _, _) = save_with_api_key(draft);
+            expect_saved(outcome, &[]);
+        }
+    }
+
+    #[test]
+    fn refused_save_carries_no_warning_and_writes_nothing() {
+        // The warning never replaces or masks a refusal: an http remote api URL with
+        // a missing key is Refused{key.required} (no Saved, no file).
+        let mut draft = sample(EngineKind::Api);
+        draft.api.base_url = "http://example.com/v1".into();
+        let world = World::new(FakeSettingsFile::new(), FakeCredentialStore::new());
+        let (service, _) = world.load();
+        let written_before = world.file.bytes();
+        let (errors, form_error) = expect_refused(service.save(req(draft, KeyEdits::default())));
+        assert_eq!(
+            errors,
+            vec![field_error(FieldId::EngineApiKey, ErrorCode::KeyRequired)]
+        );
+        assert_eq!(form_error, None);
+        assert_eq!(world.file.bytes(), written_before);
     }
 
     // ---- save: failure branches and undo ----------------------------------------
@@ -1865,10 +2070,13 @@ mod tests {
         let (service, _) = world.load();
 
         // off → on: one set(true), and the value is in force when Saved returns.
-        let view = expect_saved(service.save(req(
-            with_start(sample(EngineKind::None), true),
-            KeyEdits::default(),
-        )));
+        let view = expect_saved(
+            service.save(req(
+                with_start(sample(EngineKind::None), true),
+                KeyEdits::default(),
+            )),
+            &[],
+        );
         assert!(view.settings.start_with_windows);
         assert_eq!(world.autostart.calls(), vec![AutostartCall::Set(true)]);
         assert!(world.autostart.is_on());
@@ -1880,7 +2088,7 @@ mod tests {
         world.autostart.fail_is_enabled(RUN_ERR);
         let mut draft = with_start(sample(EngineKind::None), true);
         draft.history.size = 42;
-        expect_saved(service.save(req(draft.clone(), KeyEdits::default())));
+        expect_saved(service.save(req(draft.clone(), KeyEdits::default())), &[]);
         assert_eq!(*service.snapshot(), draft);
         assert_eq!(world.autostart.calls(), vec![AutostartCall::Set(true)]);
         world.autostart.clear_failures();
@@ -1900,10 +2108,13 @@ mod tests {
         assert!(world.autostart.is_on());
 
         // on → off: one set(false).
-        expect_saved(service.save(req(
-            with_start(sample(EngineKind::None), false),
-            KeyEdits::default(),
-        )));
+        expect_saved(
+            service.save(req(
+                with_start(sample(EngineKind::None), false),
+                KeyEdits::default(),
+            )),
+            &[],
+        );
         assert_eq!(
             world.autostart.calls(),
             vec![AutostartCall::Set(true), AutostartCall::Set(false)]
@@ -1926,7 +2137,10 @@ mod tests {
             transcription_api: replace("sk-test-new-api"),
             ..KeyEdits::default()
         };
-        expect_saved(service.save(req(with_start(sample(EngineKind::None), true), keys)));
+        expect_saved(
+            service.save(req(with_start(sample(EngineKind::None), true), keys)),
+            &[],
+        );
         assert_eq!(
             steps(&journal),
             vec![
@@ -2336,10 +2550,13 @@ mod tests {
         )
         .with_autostart(FakeAutostart::enabled());
         let (service, _) = world.load();
-        expect_saved(service.save(req(
-            with_start(sample(EngineKind::None), false),
-            KeyEdits::default(),
-        )));
+        expect_saved(
+            service.save(req(
+                with_start(sample(EngineKind::None), false),
+                KeyEdits::default(),
+            )),
+            &[],
+        );
         // The entry comes back behind the service's back (e.g. a stale value).
         world.autostart.set(true).expect("fake set");
         let before = world.autostart.calls().len();
@@ -2430,6 +2647,14 @@ mod tests {
         serde_json::to_value(outcome).expect("SaveOutcome serializes")
     }
 
+    fn wire_str(id: &MessageId) -> String {
+        serde_json::to_value(id)
+            .expect("MessageId serializes")
+            .as_str()
+            .expect("MessageId is a string")
+            .to_string()
+    }
+
     #[test]
     fn save_outcome_wire_form() {
         // Bite: SaveOutcome not externally tagged, a field renamed or reordered,
@@ -2471,12 +2696,26 @@ mod tests {
                 code: WarningCode::EndpointInsecure,
             }],
         };
+        // T-015 / decision #52: a Warning carries its catalog id (`message`, the
+        // FormError precedent), so the UI renders t(message) with no cast or rule.
         assert_eq!(
             wire(&saved),
             serde_json::json!({ "Saved": {
                 "view": serde_json::to_value(&view).expect("view serializes"),
-                "warnings": [ { "field": "engine.api.base_url", "code": "endpoint.insecure" } ],
+                "warnings": [ {
+                    "field": "engine.api.base_url",
+                    "code": "endpoint.insecure",
+                    "message": "settings.warning.endpoint_insecure",
+                } ],
             } })
+        );
+        // The message is a declared MessageId (so the catalog completeness test
+        // covers it), not a string built from the code.
+        assert!(
+            MESSAGE_IDS
+                .iter()
+                .any(|id| wire_str(id) == "settings.warning.endpoint_insecure"),
+            "settings.warning.endpoint_insecure is not declared in messages!"
         );
         let no_warnings = SaveOutcome::Saved {
             view: view.clone(),
@@ -2678,6 +2917,36 @@ mod tests {
             fixture["speech_languages"],
             serde_json::json!(crate::settings::WHISPER_ISO_639_1.as_slice()),
             "e2e/fixtures/settings-wire.json speech_languages differs from WHISPER_ISO_639_1"
+        );
+    }
+
+    #[test]
+    fn e2e_settings_wire_fixture_saved_insecure_outcome_matches_core() {
+        // T-015: the Playwright warning scenario scripts core's real Saved-with-warning
+        // outcome (P-010: no hand-written SaveOutcome in e2e). `saved_insecure_api`
+        // is the wire of a save, over a first run with no OS language and no keys, of
+        // defaults(None) with engine api, api.base_url `http://example.com/v1` and a
+        // new API key. Bite: Saved without the warning, a Warning field renamed or
+        // `message` missing, or the view shape changed, without regenerating
+        // e2e/fixtures/settings-wire.json.
+        let fixture: serde_json::Value =
+            serde_json::from_str(E2E_WIRE_FIXTURE).expect("settings-wire.json is valid JSON");
+        let world = World::new(FakeSettingsFile::new(), FakeCredentialStore::new());
+        let (service, outcome) = SettingsService::load_or_init(world.deps(), None);
+        assert!(matches!(outcome, LoadOutcome::FirstRun(_)), "{outcome:?}");
+        let mut draft = defaults(None);
+        draft.engine = EngineKind::Api;
+        draft.api.base_url = "http://example.com/v1".into();
+        let keys = KeyEdits {
+            transcription_api: replace("sk-test-fake-e2e"),
+            ..KeyEdits::default()
+        };
+        let saved = wire(&service.save(req(draft, keys)));
+        assert_eq!(
+            fixture["saved_insecure_api"],
+            saved,
+            "e2e/fixtures/settings-wire.json saved_insecure_api differs from core; core says:\n{}",
+            serde_json::to_string_pretty(&saved).expect("outcome serializes")
         );
     }
 }
