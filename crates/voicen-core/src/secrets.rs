@@ -56,6 +56,41 @@ impl KeySlot {
     }
 }
 
+/// Every Credential Manager target the app writes starts with this (FR-022): the
+/// namespace `voicen.exe --purge-credentials` empties (T-061).
+///
+/// T-061 red-test skeleton: value and use in [`KeySlot::target_name`] are the
+/// developer's.
+pub const CREDENTIAL_TARGET_PREFIX: &str = "";
+
+/// One Credential Manager entry found by a purge: its target name and credential
+/// type (`CRED_TYPE`), never its blob.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CredentialEntry {
+    pub target: String,
+    pub kind: u32,
+}
+
+/// The part of the credential store a purge needs (T-061): enumerate by prefix and
+/// remove one entry. The Windows impl (`CredEnumerateW` / `CredDeleteW`) lives in
+/// `src-tauri` (`win::purge`).
+pub trait CredentialNamespace {
+    /// Every entry whose target starts with `prefix`.
+    fn list(&self, prefix: &str) -> Result<Vec<CredentialEntry>, CredentialError>;
+    /// Deletes `entry` (its own target and type).
+    fn remove(&self, entry: &CredentialEntry) -> Result<(), CredentialError>;
+}
+
+/// Removes every entry whose target starts with `store_prefix` +
+/// [`CREDENTIAL_TARGET_PREFIX`]; the process exit code: 0 = all removed or none
+/// existed, 2 = at least one failed (contracts/installer-ci.md).
+///
+/// T-061 red-test skeleton: the body is the developer's.
+pub fn purge_credentials(namespace: &dyn CredentialNamespace, store_prefix: &str) -> i32 {
+    let _ = (namespace, store_prefix);
+    todo!("T-061: purge_credentials")
+}
+
 /// A key value. `Debug` and `Display` print `***`; no `Serialize`; the buffer is
 /// zeroed on drop.
 pub struct Secret(String);
@@ -619,5 +654,314 @@ mod tests {
         // The error type can only carry an OS code: its Debug is the code alone.
         let err = CredentialError { os_code: 1168 };
         assert_eq!(format!("{err:?}"), "CredentialError { os_code: 1168 }");
+    }
+
+    // ---- T-061: the credential namespace and the purge policy ----
+    // (contracts/installer-ci.md: exit 0 = every entry with the prefix removed or none
+    // existed, 2 = at least one failed; FR-021, FR-022.)
+
+    #[test]
+    fn every_slot_target_starts_with_prefix() {
+        // Bite: CREDENTIAL_TARGET_PREFIX missing or renamed (the uninstaller would purge
+        // another namespace), or a slot whose target is outside it (its key would
+        // survive an uninstall).
+        assert_eq!(CREDENTIAL_TARGET_PREFIX, "Voicen/");
+        let mut suffixes = std::collections::HashSet::new();
+        for slot in KeySlot::all() {
+            let target = slot.target_name();
+            let suffix = target
+                .strip_prefix(CREDENTIAL_TARGET_PREFIX)
+                .unwrap_or_else(|| panic!("{slot:?} target {target:?} outside the prefix"));
+            assert!(!suffix.is_empty(), "{slot:?} target is the bare prefix");
+            assert!(suffixes.insert(suffix), "{slot:?} shares its target");
+        }
+    }
+
+    /// `ERROR_NOT_FOUND`.
+    const NOT_FOUND: i32 = 1168;
+    /// `ERROR_ACCESS_DENIED`: a delete or an enumeration that really failed.
+    const ACCESS_DENIED: i32 = 5;
+    /// `CRED_TYPE_GENERIC`, `CRED_TYPE_DOMAIN_PASSWORD`.
+    const GENERIC: u32 = 1;
+    const DOMAIN_PASSWORD: u32 = 2;
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum NsCall {
+        List(String),
+        Remove(CredentialEntry),
+    }
+
+    /// In-memory Credential Manager: entries (with a blob the purge never sees), a call
+    /// log, injectable failures, and `widen`: targets every `list` also returns
+    /// whatever the prefix (a filter wider than asked, e.g. case-insensitive).
+    #[derive(Default)]
+    struct FakeNamespace {
+        entries: std::cell::RefCell<Vec<(CredentialEntry, String)>>,
+        widen: Vec<String>,
+        list_error: Option<CredentialError>,
+        remove_errors: std::collections::HashMap<String, CredentialError>,
+        calls: std::cell::RefCell<Vec<NsCall>>,
+    }
+
+    impl FakeNamespace {
+        fn with(entries: &[(&str, u32)]) -> FakeNamespace {
+            let fake = FakeNamespace::default();
+            for &(target, kind) in entries {
+                fake.entries.borrow_mut().push((
+                    CredentialEntry {
+                        target: target.to_string(),
+                        kind,
+                    },
+                    CANARY.to_string(),
+                ));
+            }
+            fake
+        }
+
+        /// Targets still present, in insertion order.
+        fn remaining(&self) -> Vec<String> {
+            self.entries
+                .borrow()
+                .iter()
+                .map(|(entry, _)| entry.target.clone())
+                .collect()
+        }
+
+        fn calls(&self) -> Vec<NsCall> {
+            self.calls.borrow().clone()
+        }
+
+        fn removed_targets(&self) -> Vec<String> {
+            self.calls()
+                .into_iter()
+                .filter_map(|call| match call {
+                    NsCall::Remove(entry) => Some(entry.target),
+                    NsCall::List(_) => None,
+                })
+                .collect()
+        }
+
+        fn list_prefixes(&self) -> Vec<String> {
+            self.calls()
+                .into_iter()
+                .filter_map(|call| match call {
+                    NsCall::List(prefix) => Some(prefix),
+                    NsCall::Remove(_) => None,
+                })
+                .collect()
+        }
+    }
+
+    impl CredentialNamespace for FakeNamespace {
+        fn list(&self, prefix: &str) -> Result<Vec<CredentialEntry>, CredentialError> {
+            self.calls
+                .borrow_mut()
+                .push(NsCall::List(prefix.to_string()));
+            if let Some(error) = self.list_error {
+                return Err(error);
+            }
+            Ok(self
+                .entries
+                .borrow()
+                .iter()
+                .filter(|(entry, _)| {
+                    entry.target.starts_with(prefix) || self.widen.contains(&entry.target)
+                })
+                .map(|(entry, _)| entry.clone())
+                .collect())
+        }
+
+        /// Like `CredDeleteW`: the target with that type, else `ERROR_NOT_FOUND`.
+        fn remove(&self, entry: &CredentialEntry) -> Result<(), CredentialError> {
+            self.calls.borrow_mut().push(NsCall::Remove(entry.clone()));
+            if let Some(&error) = self.remove_errors.get(&entry.target) {
+                return Err(error);
+            }
+            let mut entries = self.entries.borrow_mut();
+            match entries.iter().position(|(e, _)| e == entry) {
+                Some(index) => {
+                    entries.remove(index);
+                    Ok(())
+                }
+                None => Err(CredentialError { os_code: NOT_FOUND }),
+            }
+        }
+    }
+
+    #[test]
+    fn purge_removes_every_prefixed_entry_and_returns_0() {
+        // Bite: a purge per KeySlot instead of the enumeration (the old-version entry
+        // stays), deleting with a fixed CRED_TYPE_GENERIC (the domain entry stays),
+        // listing with another prefix, or an exit code other than 0.
+        let fake = FakeNamespace::with(&[
+            ("Voicen/transcription-api", GENERIC),
+            ("VoicenOther/keep", GENERIC),
+            ("Voicen/local-server", GENERIC),
+            ("Voicen/post-processing", GENERIC),
+            ("voicen-test-1/Voicen/transcription-api", GENERIC),
+            ("Voicen/slot-of-an-older-version", DOMAIN_PASSWORD),
+        ]);
+        assert_eq!(purge_credentials(&fake, ""), 0);
+        assert_eq!(
+            fake.remaining(),
+            ["VoicenOther/keep", "voicen-test-1/Voicen/transcription-api"]
+        );
+        assert_eq!(fake.list_prefixes(), ["Voicen/"]);
+        // Each entry deleted once, with its own type.
+        for call in fake.calls() {
+            if let NsCall::Remove(entry) = call {
+                let expected = if entry.target == "Voicen/slot-of-an-older-version" {
+                    DOMAIN_PASSWORD
+                } else {
+                    GENERIC
+                };
+                assert_eq!(entry.kind, expected, "{entry:?}");
+            }
+        }
+        let mut removed = fake.removed_targets();
+        removed.sort();
+        assert_eq!(
+            removed,
+            [
+                "Voicen/local-server",
+                "Voicen/post-processing",
+                "Voicen/slot-of-an-older-version",
+                "Voicen/transcription-api"
+            ]
+        );
+    }
+
+    #[test]
+    fn purge_under_a_store_prefix_touches_only_that_namespace() {
+        // The tests' store prefix (WinCredentialStore::with_target_prefix): the purge
+        // composes store prefix + CREDENTIAL_TARGET_PREFIX. Bite: the store prefix
+        // ignored (the user's real Voicen/ entries deleted by a test) or appended
+        // instead of prepended.
+        let fake = FakeNamespace::with(&[
+            ("voicen-test-1/Voicen/transcription-api", GENERIC),
+            ("Voicen/transcription-api", GENERIC),
+            ("voicen-test-1/Voicen/post-processing", GENERIC),
+            ("voicen-test-2/Voicen/transcription-api", GENERIC),
+            ("voicen-test-1/VoicenOther/keep", GENERIC),
+        ]);
+        assert_eq!(purge_credentials(&fake, "voicen-test-1/"), 0);
+        assert_eq!(
+            fake.remaining(),
+            [
+                "Voicen/transcription-api",
+                "voicen-test-2/Voicen/transcription-api",
+                "voicen-test-1/VoicenOther/keep"
+            ]
+        );
+        assert_eq!(fake.list_prefixes(), ["voicen-test-1/Voicen/"]);
+    }
+
+    #[test]
+    fn purge_with_nothing_to_remove_returns_0() {
+        // Empty namespace, and an enumeration that reports ERROR_NOT_FOUND (what
+        // CredEnumerateW does when nothing matches). Bite: "nothing found" mapped to
+        // 2, so an uninstall without saved keys reports a failure.
+        let empty = FakeNamespace::with(&[("VoicenOther/keep", GENERIC)]);
+        assert_eq!(purge_credentials(&empty, ""), 0);
+        assert_eq!(empty.removed_targets(), Vec::<String>::new());
+        assert_eq!(empty.remaining(), ["VoicenOther/keep"]);
+        assert_eq!(empty.list_prefixes(), ["Voicen/"]);
+
+        let not_found = FakeNamespace {
+            list_error: Some(CredentialError { os_code: NOT_FOUND }),
+            ..FakeNamespace::default()
+        };
+        assert_eq!(purge_credentials(&not_found, ""), 0);
+        assert_eq!(not_found.removed_targets(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn purge_continues_after_a_failed_delete_and_returns_2() {
+        // Failure branch: one delete fails (first, middle, last). Bite: stopping at the
+        // first failure (the later entries stay), swallowing the error (exit 0), or
+        // retrying / touching the failed entry otherwise.
+        let targets = ["Voicen/a", "Voicen/b", "Voicen/c"];
+        for failing in targets {
+            let mut fake = FakeNamespace::with(&[
+                (targets[0], GENERIC),
+                (targets[1], GENERIC),
+                ("VoicenOther/keep", GENERIC),
+                (targets[2], GENERIC),
+            ]);
+            fake.remove_errors.insert(
+                failing.to_string(),
+                CredentialError {
+                    os_code: ACCESS_DENIED,
+                },
+            );
+            assert_eq!(purge_credentials(&fake, ""), 2, "failing {failing}");
+            let mut remaining = fake.remaining();
+            remaining.sort();
+            let mut expected = [failing, "VoicenOther/keep"];
+            expected.sort();
+            assert_eq!(
+                remaining, expected,
+                "failing {failing}: the others must still be removed"
+            );
+            let mut tried = fake.removed_targets();
+            tried.sort();
+            assert_eq!(tried, targets, "failing {failing}: every entry tried once");
+        }
+    }
+
+    #[test]
+    fn purge_list_error_returns_2_and_removes_nothing() {
+        // Failure branch: the enumeration itself fails (not ERROR_NOT_FOUND). Bite:
+        // the error treated as "nothing there" (exit 0 while keys remain).
+        let fake = FakeNamespace {
+            list_error: Some(CredentialError {
+                os_code: ACCESS_DENIED,
+            }),
+            ..FakeNamespace::with(&[("Voicen/transcription-api", GENERIC)])
+        };
+        assert_eq!(purge_credentials(&fake, ""), 2);
+        assert_eq!(fake.removed_targets(), Vec::<String>::new());
+        assert_eq!(fake.remaining(), ["Voicen/transcription-api"]);
+    }
+
+    #[test]
+    fn purge_never_removes_an_entry_outside_the_prefix_even_if_listed() {
+        // Defence in depth: the enumeration filter (wildcards, case) must never widen
+        // the scope. Bite: deleting whatever list returns without re-checking
+        // starts_with(store prefix + CREDENTIAL_TARGET_PREFIX).
+        let fake = FakeNamespace {
+            widen: vec![
+                "VoicenOther/keep".to_string(),
+                "Voicen".to_string(),
+                "x/Voicen/keep".to_string(),
+                "Voicen/x".to_string(),
+            ],
+            ..FakeNamespace::with(&[
+                ("VoicenOther/keep", GENERIC),
+                ("Voicen", GENERIC),
+                ("x/Voicen/keep", GENERIC),
+                ("t/Voicen/a", GENERIC),
+                ("Voicen/x", GENERIC),
+            ])
+        };
+        assert_eq!(purge_credentials(&fake, "t/"), 0);
+        assert_eq!(
+            fake.remaining(),
+            ["VoicenOther/keep", "Voicen", "x/Voicen/keep", "Voicen/x"]
+        );
+        assert_eq!(fake.removed_targets(), ["t/Voicen/a"]);
+    }
+
+    #[test]
+    fn purge_counts_a_target_gone_before_its_delete_as_removed() {
+        // An entry deleted between the enumeration and its delete (ERROR_NOT_FOUND)
+        // is gone, which is what the purge wants. Bite: every delete error mapped to 2.
+        let mut fake = FakeNamespace::with(&[("Voicen/a", GENERIC), ("Voicen/b", GENERIC)]);
+        fake.remove_errors.insert(
+            "Voicen/a".to_string(),
+            CredentialError { os_code: NOT_FOUND },
+        );
+        assert_eq!(purge_credentials(&fake, ""), 0);
+        assert!(!fake.remaining().contains(&"Voicen/b".to_string()));
     }
 }

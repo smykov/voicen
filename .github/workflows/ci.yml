@@ -390,6 +390,43 @@ jobs:
           if (-not $restored) { throw "a launch while the settings window was minimised left it minimised" }
           if (-not $sameWindow) { throw "not the same one window after the third launch (seen: $seen)" }
           Write-Output "third launch: exit 0, the one window un-minimised: $seen"
+      - name: The installed voicen.exe --purge-credentials removes every Voicen/ entry, keeps the others, exits 0 with no output and no app start (T-061)
+        shell: pwsh
+        run: |
+          $exe = Join-Path $env:LOCALAPPDATA 'Voicen\voicen.exe'
+          # voicen.log plus rolled voicen-*.log (T-008).
+          $log = Join-Path $env:LOCALAPPDATA 'Voicen\logs\voicen*.log'
+          $fake = 'sk-test-ci-purge-0000-not-a-real-key'
+          $gone = @('Voicen/ci-purge-a', 'Voicen/ci-purge-b')
+          $kept = 'VoicenOther/ci-keep'
+          # No Voicen running: without the branch a running primary would take the call
+          # through single-instance and exit 0 (a false green).
+          Get-Process -Name voicen -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+          Start-Sleep -Seconds 2
+          if (@(Get-Process -Name voicen -ErrorAction SilentlyContinue).Count -ne 0) { throw "premise: a voicen process is still running" }
+          function Test-Cred([string]$target) { (cmdkey "/list:$target" | Out-String) -match [regex]::Escape("Target: LegacyGeneric:target=$target") }
+          function Remove-All { foreach ($t in $gone + $kept) { cmdkey "/delete:$t" | Out-Null } }
+          foreach ($t in $gone + $kept) { cmdkey "/generic:$t" /user:voicen "/pass:$fake" | Out-Null; if (-not (Test-Cred $t)) { Remove-All; throw "premise: could not plant $t" } }
+          function Get-LogState { @(Get-ChildItem -Path $log -ErrorAction SilentlyContinue | ForEach-Object { "$($_.Name)|$($_.Length)|$($_.LastWriteTimeUtc.Ticks)" }) -join ';' }
+          function Invoke-Purge([string]$tag) {
+            $out = Join-Path $env:RUNNER_TEMP "purge-$tag.out"; $err = Join-Path $env:RUNNER_TEMP "purge-$tag.err"
+            $logBefore = Get-LogState
+            $p = Start-Process -FilePath $exe -ArgumentList '--purge-credentials' -PassThru -RedirectStandardOutput $out -RedirectStandardError $err
+            $null = $p.Handle
+            # Without the branch the app starts, stays in the tray and never exits.
+            if (-not $p.WaitForExit(15000)) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue; Remove-All; throw "--purge-credentials ($tag) did not exit within 15 s (the app started)" }
+            if ($p.ExitCode -ne 0) { Remove-All; throw "--purge-credentials ($tag) exited with $($p.ExitCode), expected 0" }
+            foreach ($f in @($out, $err)) { $text = Get-Content -LiteralPath $f -Raw -ErrorAction SilentlyContinue; if ($text) { Remove-All; throw "--purge-credentials ($tag) wrote output to $f (contains the fake key: $($text.Contains($fake)))" } }
+            if ((Get-LogState) -ne $logBefore) { Remove-All; throw "--purge-credentials ($tag) touched the log files" }
+          }
+          Invoke-Purge 'first'
+          foreach ($t in $gone) { if (Test-Cred $t) { Remove-All; throw "$t is still in Credential Manager after the purge" } }
+          if (-not (Test-Cred $kept)) { Remove-All; throw "$kept (outside Voicen/) was deleted by the purge" }
+          # Nothing left under the prefix: still exit 0.
+          Invoke-Purge 'second'
+          if (-not (Test-Cred $kept)) { Remove-All; throw "$kept was deleted by the second purge" }
+          Remove-All
+          Write-Output "--purge-credentials: exit 0 twice within 15 s, Voicen/ci-purge-a and -b gone, $kept kept, no output, log files unchanged"
       - uses: actions/upload-artifact@v4
         with:
           name: voicen-installer-${{ env.VOICEN_COMMIT }}

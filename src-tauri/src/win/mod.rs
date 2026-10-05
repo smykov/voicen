@@ -8,6 +8,7 @@ pub mod capture;
 pub mod clipboard;
 pub mod hotkey;
 pub mod paste;
+pub mod purge;
 
 use windows::Win32::Foundation::WIN32_ERROR;
 
