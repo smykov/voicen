@@ -174,7 +174,7 @@ In code: `voicen_core::failure::FailureReason` with `code()` (the Code column wi
   - Priority: `HotkeyError` > `Recording` > `Error` > `Idle`.
   - `Error` is cleared by the next successful delivery (any `JobEnd::Delivered`: `Pasted`, `CopiedOnly` or `CopyManual`; FR-25 "until the next successful dictation") or by opening the tray menu.
   - `HotkeyError` is set by a failed registration and cleared only by a successful one (`RecordingController::hotkey_registration`, T-051).
-- `OverlayState`: `Hidden` \| `Recording` \| `Processing` \| `Message{key, params, until}`.
+- `OverlayState`: `Hidden` \| `Recording` \| `Processing` \| `Message{id, params, until}`.
   - `Recording` while a recording is on.
   - `Processing` while ≥ 1 job is not yet released and no recording is on (Clarification 5).
   - `Message` for 3 s after any failure or notice (a job's, a capture failure, or a notice outside a job such as `notice.choose_engine`). A new recording pre-empts the message display, and the message is not re-shown. A message raised during a live recording (for example the previous recording's capture failing at its stop, FR-029) is not shown while the recording is on; after its release it is shown for the rest of its 3 s, and not at all if they have passed.

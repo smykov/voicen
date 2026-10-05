@@ -27,7 +27,7 @@ Built only by core `voicen_core::overlay::overlay_payload(&OverlayState, UiLangu
 
 ## Command `overlay_ready` (overlay → shell)
 
-`invoke("overlay_ready") → OverlayPayload`. Returns the current state, so a freshly created webview does not miss the first event. Its `elapsedMs` counts from when the shell received the Recording state, so a webview that loads late still shows the true m:ss.
+`invoke("overlay_ready") → OverlayPayload`. Returns the current state, so a freshly created webview does not miss the first event. Its `elapsedMs` counts from when the shell received the Recording state, so a webview that loads late still shows the true m:ss. The page registers its `overlay://state` listener first and invokes `overlay_ready` only after that, so no change emitted between the two is lost.
 
 ## Command `open_settings` (existing settings window, owned by 004)
 

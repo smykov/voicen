@@ -79,6 +79,7 @@ The stack is fixed by `docs/requirements.md` §9. This file decides only HOW to 
 ## R-13 Overlay window that never takes focus
 
 - **Decision**: The shell creates the overlay `WebviewWindow` on demand: label `overlay`, route `/overlay`, `decorations(false)`, `transparent(true)`, `always_on_top(true)`, `skip_taskbar(true)`, `focused(false)`, `resizable(false)`, `shadow(false)`. It is created hidden. Before it is shown, the HWND gets `WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT` and is shown with `ShowWindow(SW_SHOWNOACTIVATE)`. `set_ignore_cursor_events(true)` makes it click-through. Position: bottom-centre of the work area of the monitor that holds the start window, 48 px above the taskbar (spec CHK010 left open; this default can change without affecting the requirements). The window is destroyed when the indicator state becomes hidden (NFR-03). The overlay is driven by one event (contracts/ipc.md). The webview's creation latency (~100–300 ms) does not delay capture, because capture starts first.
+- **Built by**: the window, its show sequence and the thread that drives it are T-057's; this entry is the design until that task lands. The payload and the page (T-053) are in contracts/ipc.md.
 - **Confirm on Windows CI**: after the overlay is shown, `GetForegroundWindow()` still equals the test window, and the test window receives no `WM_KILLFOCUS`.
 - **Alternatives**: A native layered window drawn with GDI (no webview cost, but a second UI technology and no Playwright check); keeping the overlay alive while hidden (it breaks NFR-03).
 
