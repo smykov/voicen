@@ -61,6 +61,8 @@
   "notice.no_speech": "No speech detected",
   "notice.settings_reset": "The settings file could not be read, so it was set aside and the defaults are in use. Choose a transcription engine to continue.",
   "notice.settings_unavailable": "Settings could not be read, so Voicen is using the defaults and cannot save changes. Check access to the settings folder and restart Voicen.",
+  "overlay.processing": "Transcribing…",
+  "overlay.recording": "Recording {elapsed}",
   "settings.discard.confirm": "Discard changes",
   "settings.discard.keep": "Keep editing",
   "settings.discard.message": "Your changes have not been saved. If you close the window now, they will be lost.",

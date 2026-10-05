@@ -19,11 +19,16 @@ import {
   localModelState,
   LOCAL_MODEL_EVENTS,
   modelsWith,
+  OVERLAY_STATE_EVENT,
+  overlayNothingYet,
+  overlayState,
+  overlayWire,
   queueDownloadRejection,
   queueSaveOutcome,
   releaseDownload,
   releaseList,
   releaseListen,
+  releaseOverlayReady,
   releaseSettingsGet,
   storedModels,
   storedView,
@@ -444,4 +449,53 @@ test("holdLists starts holding local_models_list mid-test, each answered with it
   await releaseList(page);
   await expect.poll(held).toEqual(localModelsFirstRun());
   expect(await invokeInPage(page, "local_models_list")).toEqual({ ok: modelsWith("base", { kind: "downloaded" }) });
+});
+
+// ---- Overlay (spec 001 contracts/ipc.md, T-053) ---------------------------------------
+
+test("overlay_ready answers core's hidden payload numbered 0 by default; overlayState emits overlay://state", async ({ page }) => {
+  expect(overlayNothingYet()).toEqual({ ...overlayWire("hidden_en"), seq: 0 });
+  expect(await invokeInPage(page, "overlay_ready")).toEqual({ ok: overlayNothingYet() });
+  expect(await calls(page, "overlay_ready")).toEqual([{ cmd: "overlay_ready", args: {} }]);
+
+  const id = await listenInPage(page, OVERLAY_STATE_EVENT);
+  const payload = overlayWire("message_microphone_access_denied_ru");
+  await overlayState(page, payload);
+  expect(await received(page)).toEqual([{ event: "overlay://state", id, payload }]);
+  expect(await emitted(page, OVERLAY_STATE_EVENT)).toEqual([{ event: "overlay://state", payload, source: "test" }]);
+});
+
+test("overlay_ready answers the overlayReady option; windowLabel is the label tauri reports (default settings)", async ({ context, page }) => {
+  const label = (p: Page) =>
+    p.evaluate(() => {
+      const w = window as unknown as {
+        __TAURI_INTERNALS__: { metadata: { currentWindow: { label: string }; currentWebview: { windowLabel: string; label: string } } };
+      };
+      const { currentWindow, currentWebview } = w.__TAURI_INTERNALS__.metadata;
+      return [currentWindow.label, currentWebview.windowLabel, currentWebview.label];
+    });
+  expect(await label(page)).toEqual(["settings", "settings", "settings"]);
+
+  const overlayPage = await context.newPage();
+  await installTauriMock(overlayPage, { overlayReady: overlayWire("recording_ru"), windowLabel: "overlay" });
+  await overlayPage.goto("/");
+  expect(await invokeInPage(overlayPage, "overlay_ready")).toEqual({ ok: overlayWire("recording_ru") });
+  expect(await label(overlayPage)).toEqual(["overlay", "overlay", "overlay"]);
+});
+
+test("holdOverlayReady keeps overlay_ready in flight (recorded) until releaseOverlayReady; later calls are answered at once", async ({ context }) => {
+  const page = await context.newPage();
+  await installTauriMock(page, { overlayReady: overlayWire("processing_en"), holdOverlayReady: true });
+  await page.goto("/");
+  await page.evaluate(() => {
+    const w = window as unknown as { __TAURI_INTERNALS__: Internals; __reply?: unknown };
+    void w.__TAURI_INTERNALS__.invoke("overlay_ready", {}).then((v) => (w.__reply = v));
+  });
+  await expect.poll(async () => (await calls(page, "overlay_ready")).length).toBe(1);
+  const reply = () => page.evaluate(() => (window as unknown as { __reply?: unknown }).__reply);
+  expect(await reply()).toBeUndefined();
+
+  await releaseOverlayReady(page);
+  await expect.poll(reply).toEqual(overlayWire("processing_en"));
+  expect(await invokeInPage(page, "overlay_ready")).toEqual({ ok: overlayWire("processing_en") });
 });

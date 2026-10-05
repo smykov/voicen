@@ -59,6 +59,17 @@
 //   - `localModelProgress(page, id, received)` and `localModelState(page, id, state)`
 //     update the list first, then emit, as core does (so a list after an event agrees
 //     with it).
+// - Overlay (spec 001 contracts/ipc.md, T-053). Payloads are core's
+//   (e2e/fixtures/overlay-wire.json, `overlayWire(key)`):
+//   - `overlay_ready` returns the `overlayReady` option (default: core's hidden payload
+//     numbered 0, older than every fixture payload, so it hides nothing a test emits).
+//     The reply is taken when the call is made; with `holdOverlayReady` every call stays
+//     in flight (recorded) until `releaseOverlayReady()`, so a test can emit a newer
+//     event before the (then older) reply arrives; later calls are answered at once;
+//   - `overlayState(page, payload)` emits `overlay://state` (`OVERLAY_STATE_EVENT`) as
+//     the shell does;
+//   - `windowLabel` is the label tauri reports for the current window (default
+//     `settings`; the overlay page runs in the window labelled `overlay`).
 // - Any other command rejects, so a call outside the contract fails the test.
 //
 // The init script must be self-contained (it is serialized into the page), so it cannot
@@ -72,6 +83,7 @@ import type { Page } from "@playwright/test";
 
 import type { SaveOutcome, SettingsView } from "../../src/lib/settings/settingsApi";
 import type { FailureReason, LocalModelView, ModelState } from "../../src/lib/local-models/localModelsApi";
+import type { OverlayPayload } from "../../src/lib/overlay/overlayApi";
 export type {
   EngineKind,
   FieldError,
@@ -93,6 +105,8 @@ export type {
   ModelId,
   ModelState,
 } from "../../src/lib/local-models/localModelsApi";
+// The overlay wire (spec 001) is declared once, in the overlay page's overlayApi.ts.
+export type { OverlayPayload, OverlayView } from "../../src/lib/overlay/overlayApi";
 
 export interface BuildInfo {
   version: string;
@@ -198,6 +212,40 @@ export function modelsWith(id: string, state: ModelState): LocalModelView[] {
   return list;
 }
 
+// ---- Core-checked overlay data (e2e/fixtures/overlay-wire.json, T-053) ------------------
+
+/** The payloads the fixture holds: seq 1-5 in en, 6-10 in ru, in that order. */
+export type OverlayWireKey =
+  | "recording_en"
+  | "processing_en"
+  | "message_no_speech_en"
+  | "message_microphone_access_denied_en"
+  | "hidden_en"
+  | "recording_ru"
+  | "processing_ru"
+  | "message_no_speech_ru"
+  | "message_microphone_access_denied_ru"
+  | "hidden_ru";
+
+const overlayFixture = JSON.parse(
+  readFileSync(new URL("../fixtures/overlay-wire.json", import.meta.url), "utf8"),
+) as Partial<Record<OverlayWireKey, OverlayPayload>>;
+
+/** contracts/ipc.md: the event the shell emits to the window labelled `overlay`. */
+export const OVERLAY_STATE_EVENT = "overlay://state";
+
+/** Core's payload `key` (a fresh copy); a key the fixture lacks fails here, by name. */
+export function overlayWire(key: OverlayWireKey): OverlayPayload {
+  const value = overlayFixture[key];
+  if (value === undefined) throw new Error(`overlay-wire.json has no ${key}`);
+  return structuredClone(value);
+}
+
+/** The default `overlay_ready` reply: core's hidden payload numbered 0 (nothing shown yet). */
+export function overlayNothingYet(): OverlayPayload {
+  return { ...overlayWire("hidden_en"), seq: 0 };
+}
+
 // ---- Install -------------------------------------------------------------------
 
 export interface MockOptions {
@@ -225,6 +273,12 @@ export interface MockOptions {
   holdDownload?: boolean;
   /** `local_models_list` rejects with this text (recorded); the command cannot run. */
   listRejection?: string;
+  /** What `overlay_ready` returns; default: `overlayNothingYet()`. */
+  overlayReady?: OverlayPayload;
+  /** Keep every `overlay_ready` in flight until `releaseOverlayReady` (recorded at once, reply taken then). */
+  holdOverlayReady?: boolean;
+  /** The label of the current window as tauri reports it; default `settings`. */
+  windowLabel?: string;
 }
 
 interface InitArg {
@@ -241,6 +295,9 @@ interface InitArg {
   holdDownload: boolean;
   listRejection: string | null;
   modelEvents: { progress: string; state: string };
+  overlayReady: OverlayPayload;
+  holdOverlayReady: boolean;
+  windowLabel: string;
 }
 
 /** Installs the mock as an init script; call before `page.goto`. */
@@ -259,6 +316,9 @@ export async function installTauriMock(page: Page, options: MockOptions = {}): P
     holdDownload: options.holdDownload ?? false,
     listRejection: options.listRejection ?? null,
     modelEvents: { ...modelsFixture.event_names },
+    overlayReady: options.overlayReady ?? overlayNothingYet(),
+    holdOverlayReady: options.holdOverlayReady ?? false,
+    windowLabel: options.windowLabel ?? "settings",
   };
   await page.addInitScript((init: InitArg) => {
     type Handler = (data: unknown) => void;
@@ -287,6 +347,8 @@ export async function installTauriMock(page: Page, options: MockOptions = {}): P
       heldList: [] as (() => void)[],
       holdingDownload: init.holdDownload,
       heldDownload: [] as (() => void)[],
+      holdingReady: init.holdOverlayReady,
+      heldReady: [] as (() => void)[],
     };
 
     function setModelState(id: string, modelState: unknown): void {
@@ -395,6 +457,12 @@ export async function installTauriMock(page: Page, options: MockOptions = {}): P
           }, 0);
           return true;
         }
+        case "overlay_ready": {
+          // The reply is the state when the shell ran the command; a hold only delays it.
+          const reply = clone(init.overlayReady);
+          if (state.holdingReady) await new Promise<void>((resolve) => state.heldReady.push(resolve));
+          return reply;
+        }
         case "plugin:window|destroy":
           if (init.destroy !== null) throw new Error(init.destroy.reject);
           return null;
@@ -412,8 +480,8 @@ export async function installTauriMock(page: Page, options: MockOptions = {}): P
       transformCallback,
       unregisterCallback,
       metadata: {
-        currentWindow: { label: "settings" },
-        currentWebview: { windowLabel: "settings", label: "settings" },
+        currentWindow: { label: init.windowLabel },
+        currentWebview: { windowLabel: init.windowLabel, label: init.windowLabel },
       },
     };
     w.__TAURI_EVENT_PLUGIN_INTERNALS__ = {
@@ -450,6 +518,10 @@ export async function installTauriMock(page: Page, options: MockOptions = {}): P
         for (const resolve of state.heldDownload.splice(0)) resolve();
       },
       queueDownloadRejection: (payload: unknown) => state.downloadRejections.push(clone(payload)),
+      releaseOverlayReady: () => {
+        state.holdingReady = false;
+        for (const resolve of state.heldReady.splice(0)) resolve();
+      },
       progress: (id: string, received: number) => {
         const row = state.models.find((model) => model.id === id);
         if (!row) throw new Error(`no local model ${id}`);
@@ -487,6 +559,7 @@ interface MockHandle {
   holdLists: () => void;
   releaseDownload: () => void;
   queueDownloadRejection: (payload: unknown) => void;
+  releaseOverlayReady: () => void;
   progress: (id: string, received: number) => void;
   modelState: (id: string, state: ModelState) => void;
 }
@@ -621,4 +694,16 @@ export async function localModelState(page: Page, id: string, state: ModelState)
     ([model, next]) => (window as unknown as MockWindow).__VOICEN_MOCK__.modelState(model, next),
     [id, state] as const,
   );
+}
+
+// ---- Overlay (spec 001, T-053) -----------------------------------------------------
+
+/** The shell sends `payload` to the overlay: `overlay://state` reaches every registered handler. */
+export async function overlayState(page: Page, payload: OverlayPayload): Promise<void> {
+  await emit(page, OVERLAY_STATE_EVENT, payload);
+}
+
+/** Answers every held `overlay_ready` with the reply taken at its call, and stops holding. */
+export async function releaseOverlayReady(page: Page): Promise<void> {
+  await page.evaluate(() => (window as unknown as MockWindow).__VOICEN_MOCK__.releaseOverlayReady());
 }
