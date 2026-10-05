@@ -55,24 +55,50 @@ fn the_text_is_written_with_the_three_history_exclusion_formats() {
 
 #[test]
 fn a_briefly_held_clipboard_is_retried() {
-    // T-006 row 9 (R-11: OpenClipboard with up to 10 x 20 ms retries): another thread
-    // holds the clipboard open for 60 ms when the write starts; the write still
-    // succeeds. Bite: a single OpenClipboard attempt (Err while held).
+    // T-006 row 9 (R-11: OpenClipboard with up to 10 x 20 ms retries, ~180-200 ms):
+    // another thread holds the clipboard open for 120 ms; the write starts while it is
+    // still held, succeeds, and took at least the part of the hold that was left when it
+    // started (it really waited across the hold). The hold ends no earlier than
+    // `asked + HOLD` (the holder opens after `asked` and holds HOLD from then), so the
+    // hold left at the write's start is at least `asked + HOLD - write_start`. If the
+    // runner was so slow that less than MIN_LEFT was left, that is a named precondition
+    // failure, not a pass (review 1 finding #2). Bite: a single OpenClipboard attempt
+    // (Err while held), too few or too short retries (Err before the holder lets go).
+    const HOLD: Duration = Duration::from_millis(120);
+    const MIN_LEFT: Duration = Duration::from_millis(60);
+    const TICK: Duration = Duration::from_millis(5);
     let _serial = serial();
     put_text("before the held write");
     let clipboard = WinClipboard::new();
 
-    let holder = ClipboardHolder::hold(Duration::from_millis(60));
+    let asked = Instant::now();
+    let holder = ClipboardHolder::hold(HOLD);
     let refused = try_open_clipboard().is_none();
     precondition(
         "clipboard",
         refused,
         "OpenClipboard succeeded while another thread held the clipboard open",
     );
+    let write_start = Instant::now();
+    let left = (asked + HOLD).saturating_duration_since(write_start);
+    precondition(
+        "clipboard",
+        left >= MIN_LEFT,
+        format!(
+            "the hold was (nearly) over before the write started: at most {left:?} of \
+             {HOLD:?} left, need {MIN_LEFT:?} (runner too slow for this test)"
+        ),
+    );
     let result = clipboard.set_text_excluded_from_history("written after a short hold");
+    let took = write_start.elapsed();
     holder.release();
 
-    assert_eq!(result, Ok(()), "a clipboard held for 60 ms");
+    assert_eq!(result, Ok(()), "a clipboard held for {HOLD:?}");
+    assert!(
+        took + TICK >= left,
+        "the write took {took:?} but the clipboard was held for at least {left:?} more \
+         when it started: it did not wait across the hold"
+    );
     assert_eq!(
         clipboard_text().as_deref(),
         Some("written after a short hold")

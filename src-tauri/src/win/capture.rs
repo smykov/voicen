@@ -119,6 +119,19 @@ fn open(sink: Arc<dyn FrameSink>) -> Result<Stream, CaptureError> {
     Ok(stream)
 }
 
+/// Runs `opener` on its own thread and waits for its result at most `budget`
+/// (invariants 2 and 3): its error as is; a timeout, a failure to start the thread or
+/// an opener that ended without a result (a panic) -> `Other` with a fixed literal; a
+/// value produced after the timeout is dropped on the opener thread at once, never
+/// handed out. `CpalSource::start` uses it with `OPEN_BUDGET` and `open(sink)`.
+pub fn open_bounded<T: Send + 'static>(
+    budget: Duration,
+    opener: impl FnOnce() -> Result<T, CaptureError> + Send + 'static,
+) -> Result<T, CaptureError> {
+    let _ = (budget, opener);
+    todo!("T-006 review 1")
+}
+
 impl AudioSource for CpalSource {
     fn start(&self, sink: Arc<dyn FrameSink>) -> Result<Box<dyn CaptureHandle>, CaptureError> {
         let (opened, result) = mpsc::channel::<Result<Stream, CaptureError>>();
