@@ -22,7 +22,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 voicen-core = { path = "../crates/voicen-core" }
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["tray-icon"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
@@ -37,3 +37,9 @@ windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Security_Cr
 [dev-dependencies]
 voicen-core = { path = "../crates/voicen-core", features = ["test-fakes"] }
 tauri = { version = "2", features = ["test"] }
+
+# Test-only (T-052): the tray tests dispatch the test thread's window messages while they wait
+# (tray-icon's setters SendMessageW to the tray window the mock runtime builds on that thread).
+# The same crate and version as above: a feature flag, no new crate (#9).
+[target.'cfg(windows)'.dev-dependencies]
+windows = { version = "0.62", features = ["Win32_UI_WindowsAndMessaging"] }

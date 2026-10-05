@@ -15,17 +15,31 @@
 //!
 //! Each test gets its own `TempDir` as the data dir; the CI runner's real
 //! `%LOCALAPPDATA%\Voicen` is never written. No keys are used.
+//!
+//! T-052 (invariant 2): at runtime `open` runs only on the one opener thread;
+//! `on_ready` and every other caller post with `settings_window::request` and get a
+//! `Receipt`, which only tests wait on (a Windows-sized budget, F-005). tauri's own
+//! emit already serializes Rust listeners (a second concurrent emit is queued and
+//! delivered by the first emitter's thread, tauri 2.12.1 event/listener.rs:208-233),
+//! so a focus count cannot tell an opener from callers running `open` themselves;
+//! these tests decide on which thread `open` ran (a probe plugin's `on_window_ready`
+//! runs inline on the building thread in the mock) and on whether `request` returns
+//! while its open is held.
 
 use std::collections::BTreeSet;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::mpsc;
+use std::sync::{Arc, Barrier, Condvar, Mutex, PoisonError};
+use std::thread::{self, ThreadId};
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use tauri::ipc::{CallbackFn, InvokeBody};
+use tauri::plugin::TauriPlugin;
 use tauri::test::{get_ipc_response, mock_builder, mock_context, noop_assets, MockRuntime};
 use tauri::webview::InvokeRequest;
 use tauri::{
-    App, Context, Listener, Manager, Url, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
+    App, Builder, Context, Listener, Manager, Url, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
 };
 use voicen_core::autostart::{Autostart, FakeAutostart};
 use voicen_core::diag::Log;
@@ -41,9 +55,26 @@ use voicen_core::test_support::local_models::FakeDisk;
 use voicen_core::test_support::TempDir;
 use voicen_core::timeouts::Timeouts;
 use voicen_lib::settings_ipc::load_settings;
-use voicen_lib::settings_window::{self, LABEL};
+use voicen_lib::settings_window::{self, OpenTarget, Receipt, LABEL};
 
 const FOCUS: &str = "settings://focus";
+
+/// How long a test waits for the opener thread (Windows-sized, F-005).
+const BUDGET: Duration = Duration::from_secs(10);
+
+/// A held probe gives up after this, so a failing test cannot hang the exe.
+const HOLD_LIMIT: Duration = Duration::from_secs(30);
+
+/// `request` must return well within this while its open is held.
+const RETURNS_AT_ONCE: Duration = Duration::from_secs(2);
+
+/// Waits for the opener to run `receipt` and returns the open's result.
+#[track_caller]
+fn ran(receipt: Receipt) -> tauri::Result<()> {
+    receipt
+        .wait_timeout(BUDGET)
+        .unwrap_or_else(|| panic!("the opener did not run the request within {BUDGET:?}"))
+}
 
 fn no_keys() -> Arc<dyn CredentialStore> {
     Arc::new(FakeCredentialStore::new())
@@ -227,7 +258,10 @@ fn first_run_opens_one_settings_window_at_tab_engine() {
         labels(&app)
     );
 
-    settings_window::on_ready(app.handle(), &outcome, false).expect("on_ready");
+    // T-052: on_ready posts to the opener and returns the request's receipt.
+    let receipt = settings_window::on_ready(app.handle(), &outcome, false)
+        .expect("FirstRun posts an open request");
+    ran(receipt).expect("open");
 
     assert_one_settings_window(&app, &[("tab", "engine")]);
 }
@@ -240,7 +274,9 @@ fn first_run_launched_by_autostart_still_opens_the_window() {
     let (service, outcome) = load(dir.path());
     let app = mock_app(&service);
 
-    settings_window::on_ready(app.handle(), &outcome, true).expect("on_ready");
+    let receipt = settings_window::on_ready(app.handle(), &outcome, true)
+        .expect("FirstRun posts an open request");
+    ran(receipt).expect("open");
 
     assert_one_settings_window(&app, &[("tab", "engine")]);
 }
@@ -255,7 +291,9 @@ fn reset_opens_one_settings_window_at_tab_engine() {
     assert!(matches!(outcome, LoadOutcome::Reset { .. }), "{outcome:?}");
     let app = mock_app(&service);
 
-    settings_window::on_ready(app.handle(), &outcome, false).expect("on_ready");
+    let receipt = settings_window::on_ready(app.handle(), &outcome, false)
+        .expect("Reset posts an open request");
+    ran(receipt).expect("open");
 
     assert_one_settings_window(&app, &[("tab", "engine")]);
 }
@@ -274,7 +312,11 @@ fn loaded_opens_no_window() {
 
     for autostart in [false, true] {
         let app = mock_app(&service);
-        settings_window::on_ready(app.handle(), &outcome, autostart).expect("on_ready");
+        // T-052: TrayOnly posts nothing, so there is no receipt to wait on.
+        assert!(
+            settings_window::on_ready(app.handle(), &outcome, autostart).is_none(),
+            "autostart {autostart}: TrayOnly posted an open request"
+        );
         assert!(
             labels(&app).is_empty(),
             "autostart {autostart}: windows {:?}",
@@ -299,7 +341,9 @@ fn unavailable_opens_the_window_and_no_save_succeeds() {
     );
     let app = mock_app(&service);
 
-    settings_window::on_ready(app.handle(), &outcome, false).expect("on_ready");
+    let receipt = settings_window::on_ready(app.handle(), &outcome, false)
+        .expect("Unavailable posts an open request");
+    ran(receipt).expect("open");
 
     assert_one_settings_window(&app, &[("tab", "engine")]);
     let window = settings_window(&app);
@@ -422,6 +466,363 @@ fn open_puts_each_tab_token_in_the_url() {
         let (_dir, app) = fresh_app();
         settings_window::open(app.handle(), tab, None).expect("open");
         assert_one_settings_window(&app, &[("tab", token)]);
+    }
+}
+
+// ---- request(): the one opener thread (T-052 invariant 2) ---------------------
+
+/// A one-shot hold: the first `enter` blocks until `release` (or `HOLD_LIMIT`, so a
+/// failing test cannot hang); later entries pass. Counts the entries.
+#[derive(Default)]
+struct Hold {
+    state: Mutex<HoldState>,
+    changed: Condvar,
+}
+
+#[derive(Default)]
+struct HoldState {
+    entries: usize,
+    released: bool,
+}
+
+impl Hold {
+    fn enter(&self) {
+        let mut st = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        st.entries += 1;
+        self.changed.notify_all();
+        if st.entries == 1 {
+            let _held = self
+                .changed
+                .wait_timeout_while(st, HOLD_LIMIT, |s| !s.released)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+
+    fn entries(&self) -> usize {
+        self.state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entries
+    }
+
+    /// Waits until at least `n` entries happened; false after `BUDGET`.
+    fn wait_entries(&self, n: usize) -> bool {
+        let st = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let (st, _) = self
+            .changed
+            .wait_timeout_while(st, BUDGET, |s| s.entries < n)
+            .unwrap_or_else(PoisonError::into_inner);
+        st.entries >= n
+    }
+
+    fn release(&self) {
+        self.state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .released = true;
+        self.changed.notify_all();
+    }
+}
+
+/// Releases the hold when the test ends, also by a failed assertion.
+struct ReleaseOnDrop(Arc<Hold>);
+
+impl Drop for ReleaseOnDrop {
+    fn drop(&mut self) {
+        self.0.release();
+    }
+}
+
+/// `(thread, label)` of every window the app created, in order.
+type Creations = Arc<Mutex<Vec<(ThreadId, String)>>>;
+
+/// A plugin whose `on_window_ready` records the thread and label of each window
+/// creation and then enters `hold` (if any). tauri runs the hook right after the
+/// window is inserted into the manager, through `run_on_main_thread`, which the
+/// mock runs inline on the building thread while the loop is not running
+/// (manager/window.rs:116-131, mock_runtime.rs:84-96).
+fn creation_probe(creations: &Creations, hold: Option<Arc<Hold>>) -> TauriPlugin<MockRuntime> {
+    let creations = Arc::clone(creations);
+    tauri::plugin::Builder::new("t052-window-probe")
+        .on_window_ready(move |window| {
+            creations
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push((thread::current().id(), window.label().to_string()));
+            if let Some(hold) = &hold {
+                hold.enter();
+            }
+        })
+        .build()
+}
+
+/// The app as `run()` builds it, over `builder`, logging to `logs`.
+fn app_on(
+    builder: Builder<MockRuntime>,
+    service: &Arc<SettingsService>,
+    logs: &Path,
+) -> App<MockRuntime> {
+    voicen_lib::build_app(
+        builder,
+        mock_context(noop_assets()),
+        service.clone(),
+        idle_models(),
+        voicen_lib::diag::start(logs.to_path_buf(), Box::new(|_| {})),
+    )
+    .expect("mock app builds")
+}
+
+/// `(thread, payload)` of every `settings://focus`, in order.
+fn focus_threads(app: &App<MockRuntime>) -> Arc<Mutex<Vec<(ThreadId, Value)>>> {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let sink = events.clone();
+    app.listen_any(FOCUS, move |event| {
+        let payload = serde_json::from_str(event.payload()).expect("focus payload is JSON");
+        sink.lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push((thread::current().id(), payload));
+    });
+    events
+}
+
+/// The lines of `logs/voicen.log` that name `settings_window_failed`.
+fn failed_open_lines(logs: &Path) -> Vec<String> {
+    let text = std::fs::read_to_string(logs.join("voicen.log"))
+        .unwrap_or_else(|e| panic!("read {}: {e}", logs.join("voicen.log").display()));
+    text.lines()
+        .filter(|l| l.contains("settings_window_failed"))
+        .map(str::to_string)
+        .collect()
+}
+
+#[test]
+fn open_runs_on_one_thread_that_is_no_callers_thread() {
+    // T-052 invariant 2: every request is run by the one opener thread, so no two
+    // runs of `open` overlap (the label check and the insert bracket the window
+    // creation, manager/window.rs:70-72 and :116-117: two concurrent opens can both
+    // pass the check). One request from the test thread creates the window; three
+    // threads behind a barrier then post one each. The creation and the three focus
+    // emits all ran on one thread, which is none of the callers'. Bite: `request`
+    // calling `open` on the caller's thread (the creation on the test thread, the
+    // focus emits on the posters), or a thread per request (several threads).
+    let dir = TempDir::new();
+    let (service, _) = load(dir.path());
+    let creations: Creations = Arc::default();
+    let app = app_on(
+        mock_builder().plugin(creation_probe(&creations, None)),
+        &service,
+        &dir.path().join("logs"),
+    );
+    let focus = focus_threads(&app);
+    let test_thread = thread::current().id();
+
+    ran(settings_window::request(
+        app.handle(),
+        OpenTarget::Tab(SettingsTab::Engine, None),
+    ))
+    .expect("first open");
+
+    let barrier = Arc::new(Barrier::new(3));
+    let posters: Vec<_> = [
+        SettingsTab::Recording,
+        SettingsTab::Output,
+        SettingsTab::General,
+    ]
+    .into_iter()
+    .map(|tab| {
+        let handle = app.handle().clone();
+        let barrier = Arc::clone(&barrier);
+        thread::spawn(move || {
+            barrier.wait();
+            let receipt = settings_window::request(&handle, OpenTarget::Tab(tab, None));
+            (thread::current().id(), receipt)
+        })
+    })
+    .collect();
+    let mut poster_threads = Vec::new();
+    for poster in posters {
+        let (id, receipt) = poster.join().expect("a poster thread panicked");
+        poster_threads.push(id);
+        ran(receipt).expect("a later request");
+    }
+
+    assert_one_settings_window(&app, &[("tab", "engine")]);
+    let creations = creations
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone();
+    let focus = focus.lock().unwrap_or_else(PoisonError::into_inner).clone();
+    assert_eq!(
+        creations
+            .iter()
+            .map(|(_, l)| l.as_str())
+            .collect::<Vec<_>>(),
+        vec![LABEL],
+        "window creations"
+    );
+    assert_eq!(focus.len(), 3, "focus events: {focus:?}");
+    let threads: BTreeSet<String> = creations
+        .iter()
+        .map(|(t, _)| format!("{t:?}"))
+        .chain(focus.iter().map(|(t, _)| format!("{t:?}")))
+        .collect();
+    assert_eq!(
+        threads.len(),
+        1,
+        "open ran on more than one thread: {threads:?}"
+    );
+    let opener = creations[0].0;
+    assert_ne!(opener, test_thread, "open ran on the calling (test) thread");
+    assert!(
+        !poster_threads.contains(&opener),
+        "open ran on a posting thread"
+    );
+}
+
+#[test]
+fn request_returns_while_its_open_is_held() {
+    // T-052 invariant 2: callers post and never wait. The opener is held inside the
+    // window creation (the probe's hook); the caller's `request` has already
+    // returned its receipt, and a second `request` from another thread returns at
+    // once while the first is still held. After the release both run, in order:
+    // one window, one focus event for the second. Bite: `request` running `open`
+    // itself (its caller blocked inside the creation, no receipt), or waiting for
+    // the opener to finish the previous request.
+    let dir = TempDir::new();
+    let (service, _) = load(dir.path());
+    let creations: Creations = Arc::default();
+    let hold = Arc::new(Hold::default());
+    let _release = ReleaseOnDrop(Arc::clone(&hold));
+    let app = app_on(
+        mock_builder().plugin(creation_probe(&creations, Some(Arc::clone(&hold)))),
+        &service,
+        &dir.path().join("logs"),
+    );
+    let focus = focus_events(&app);
+
+    let (tx, rx) = mpsc::channel();
+    let handle = app.handle().clone();
+    thread::spawn(move || {
+        let receipt = settings_window::request(&handle, OpenTarget::Tab(SettingsTab::Engine, None));
+        let _ = tx.send(receipt);
+    });
+    assert!(
+        hold.wait_entries(1),
+        "the window creation did not start within {BUDGET:?}"
+    );
+    let first = rx
+        .recv_timeout(RETURNS_AT_ONCE)
+        .expect("request did not return while its own open was held: it ran open itself");
+
+    let started = Instant::now();
+    let second =
+        settings_window::request(app.handle(), OpenTarget::Tab(SettingsTab::General, None));
+    let took = started.elapsed();
+    assert!(
+        took < RETURNS_AT_ONCE,
+        "request waited {took:?} for the busy opener"
+    );
+    assert_eq!(
+        hold.entries(),
+        1,
+        "a second creation started during the hold"
+    );
+
+    hold.release();
+    ran(first).expect("the held open");
+    ran(second).expect("the open posted during the hold");
+    assert_one_settings_window(&app, &[("tab", "engine")]);
+    assert_eq!(taken(&focus), vec![json!({ "tab": "general" })]);
+}
+
+#[test]
+fn eight_concurrent_requests_leave_one_window_and_no_failure() {
+    // T-052 Acceptance (failure branch): concurrent requests from non-main threads
+    // leave exactly one settings window: one creation, a focus event for each other
+    // request, every receipt Ok (no "already exists"), and no
+    // `settings_window_failed` line in the log. Bite: requests racing on the build
+    // path (two creations, a WebviewLabelAlreadyExists error, a failed-open line).
+    let dir = TempDir::new();
+    let (service, _) = load(dir.path());
+    let logs = dir.path().join("logs");
+    let creations: Creations = Arc::default();
+    let app = app_on(
+        mock_builder().plugin(creation_probe(&creations, None)),
+        &service,
+        &logs,
+    );
+    let focus = focus_events(&app);
+
+    let barrier = Arc::new(Barrier::new(8));
+    let posters: Vec<_> = (0..8)
+        .map(|_| {
+            let handle = app.handle().clone();
+            let barrier = Arc::clone(&barrier);
+            thread::spawn(move || {
+                barrier.wait();
+                settings_window::request(&handle, OpenTarget::Tab(SettingsTab::General, None))
+            })
+        })
+        .collect();
+    let receipts: Vec<Receipt> = posters
+        .into_iter()
+        .map(|p| p.join().expect("a poster thread panicked"))
+        .collect();
+    for (i, receipt) in receipts.into_iter().enumerate() {
+        if let Err(err) = ran(receipt) {
+            panic!("request {i} failed: {err}");
+        }
+    }
+
+    assert_one_settings_window(&app, &[("tab", "general")]);
+    assert_eq!(
+        creations
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len(),
+        1,
+        "window creations"
+    );
+    assert_eq!(taken(&focus), vec![json!({ "tab": "general" }); 7]);
+    assert_eq!(failed_open_lines(&logs), Vec::<String>::new());
+}
+
+#[test]
+fn requests_run_in_the_order_they_were_posted() {
+    // T-052 design 2: the opener is a FIFO. Four requests posted back to back from
+    // one thread, only the last one waited on: by then the earlier ones have run, in
+    // posting order (the first created the window, the next two emitted their focus
+    // events in order), and `Front` emitted nothing and left the URL as it was
+    // (OQ-11 Q2 default). Bite: requests run out of order (a thread per request),
+    // the last receipt resolving before the earlier requests ran, or `Front`
+    // switching the tab.
+    let dir = TempDir::new();
+    let (service, _) = load(dir.path());
+    let app = app_on(mock_builder(), &service, &dir.path().join("logs"));
+    let focus = focus_events(&app);
+
+    let first = settings_window::request(app.handle(), OpenTarget::Tab(SettingsTab::Engine, None));
+    let second = settings_window::request(
+        app.handle(),
+        OpenTarget::Tab(SettingsTab::Recording, Some(FieldId::RecordingHotkey)),
+    );
+    let third = settings_window::request(app.handle(), OpenTarget::Tab(SettingsTab::General, None));
+    let last = settings_window::request(app.handle(), OpenTarget::Front);
+    ran(last).expect("Front");
+
+    assert_eq!(
+        taken(&focus),
+        vec![
+            json!({ "tab": "recording", "field": "recording.hotkey" }),
+            json!({ "tab": "general" }),
+        ]
+    );
+    assert_one_settings_window(&app, &[("tab", "engine")]);
+    for (name, receipt) in [("first", first), ("second", second), ("third", third)] {
+        match receipt.wait_timeout(Duration::ZERO) {
+            Some(result) => result.unwrap_or_else(|e| panic!("{name}: {e}")),
+            None => panic!("{name} had not run when the later request's receipt resolved"),
+        }
     }
 }
 

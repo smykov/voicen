@@ -81,6 +81,8 @@ jobs:
           $run = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
           New-ItemProperty -Path $run -Name 'Voicen' -PropertyType String -Value '"C:\stale\voicen.exe" --autostart' -Force | Out-Null
           $proc = Start-Process -FilePath $exe -PassThru
+          # T-052: keeps ExitCode readable once the process has exited.
+          $null = $proc.Handle
           # T-008: voicen.log plus any rolled voicen-*.log (a run crossing local midnight
           # rolls the file). The app keeps voicen.log open; Select-String and Get-Content
           # read it with shared access.
@@ -116,6 +118,34 @@ jobs:
             $seen = Format-ShownWindows $shown
             $win = $shown.Count -eq 1 -and $shown[0].Title -ceq 'Voicen'
           }
+          # T-052: run() builds the tray (tray-icon's hidden 'tray_icon_app' window of this process),
+          # and closing the first-run window keeps the app running (prevent_exit for
+          # ExitRequested { code: None } while the tray exists; the #38 interim ends). Raw facts only
+          # (F-003): window class, HasExited, the shown windows.
+          $tray = $false
+          $traySeen = 'not checked (no first-run window)'
+          $closedAlive = $false
+          $closeSeen = 'not tried (no first-run window)'
+          if ($win -and -not $proc.HasExited) {
+            for ($i = 0; $i -lt 30 -and -not $tray; $i++) {
+              $all = Get-AllWindows $proc.Id
+              $traySeen = Format-AllWindows $all
+              $tray = @($all | Where-Object { $_.Class -ceq 'tray_icon_app' }).Count -ge 1
+              if (-not $tray) { Start-Sleep -Seconds 1 }
+            }
+            Send-Close $shown[0].Handle
+            # Bounded: the process must stay for 10 s, and the window must be gone by then.
+            $closedAlive = $true
+            $gone = $false
+            for ($i = 0; $i -lt 10; $i++) {
+              Start-Sleep -Seconds 1
+              if ($proc.HasExited) { $closedAlive = $false; $closeSeen = "process exited (code $($proc.ExitCode))"; break }
+              $left = Get-ShownWindows $proc.Id
+              $gone = $left.Count -eq 0
+              $closeSeen = "alive, shown windows: $(Format-ShownWindows $left)"
+            }
+            if ($closedAlive -and -not $gone) { $closedAlive = $false; $closeSeen = "the settings window did not close ($closeSeen)" }
+          }
           Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
           if (-not $found) { if (Test-Path $logs) { Get-Content $logs }; throw "start log line with commit $env:VOICEN_COMMIT not found" }
           Get-Content $logs
@@ -130,6 +160,10 @@ jobs:
           Write-Output "no HKCU Run value Voicen after the first launch"
           if (-not $win) { throw "not exactly one shown window titled Voicen after the first launch (last seen: $seen)" }
           Write-Output "exactly one shown window after the first launch: $seen"
+          if (-not $tray) { throw "no 'tray_icon_app' window of voicen.exe after the first launch (windows: $traySeen)" }
+          Write-Output "found the tray window after the first launch"
+          if (-not $closedAlive) { throw "closing the first-run settings window did not leave the app running with no shown window: $closeSeen" }
+          Write-Output "WM_CLOSE to the first-run settings window: $closeSeen, for 10 s"
       - name: Start with Windows on writes the Run value, off removes it (T-014 reconcile at start)
         shell: pwsh
         run: |
@@ -218,6 +252,85 @@ jobs:
           if (-not $started) { throw "start log line with commit $env:VOICEN_COMMIT not written by the launch with a stale .part" }
           if (-not $gone) { throw "$part is still present after the start line (cleanup_at_start not run at start)" }
           Write-Output "the stale $part is gone after the start line"
+      - name: A second launch opens the one settings window and exits, touching none of the primary's files (T-052 single instance)
+        shell: pwsh
+        run: |
+          . ./scripts/ci/visible-windows.ps1
+          $exe = Join-Path $env:LOCALAPPDATA 'Voicen\voicen.exe'
+          $settings = Join-Path $env:LOCALAPPDATA 'Voicen\settings.json'
+          # voicen.log plus rolled voicen-*.log: a run crossing local midnight rolls the file (T-008).
+          $log = Join-Path $env:LOCALAPPDATA 'Voicen\logs\voicen*.log'
+          $models = Join-Path $env:LOCALAPPDATA 'Voicen\models'
+          $part = Join-Path $models 'ggml-base.bin.part'
+          $loadLine = 'settings load outcome=loaded'
+          if (-not (Test-Path -LiteralPath $settings -PathType Leaf)) { throw "settings.json not found at $settings before the single-instance check" }
+          function Get-LineCount([string]$text) { if (Test-Path $log) { @(Select-String -Path $log -SimpleMatch $text).Count } else { 0 } }
+          # The Started line of one pid ("... started pid=<pid>" at the end of the line). Counted right
+          # after Start-Process as well: the child writes it only after tauri's build(), so a line with
+          # the same pid from before is a pid reused from an earlier step.
+          function Get-StartCountOf([int]$id) { if (Test-Path $log) { @(Select-String -Path $log -Pattern "started pid=$id(\D|$)").Count } else { 0 } }
+          $primary = $null; $second = $null; $third = $null
+          function Stop-All { foreach ($p in @($primary, $second, $third)) { if ($p) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue } } }
+          # The primary: a Loaded launch (no window). run() is build (the plugin decides), then the
+          # log, the .part cleanup and the settings load, so a .part planted after its load line is
+          # deleted by no one but a second process that ran the startup side effects.
+          $loadsBefore = Get-LineCount $loadLine
+          $primary = Start-Process -FilePath $exe -PassThru
+          $null = $primary.Handle
+          $primaryBefore = Get-StartCountOf $primary.Id
+          $ready = $false
+          for ($i = 0; $i -lt 30 -and -not $ready; $i++) { Start-Sleep -Seconds 1; $ready = ((Get-StartCountOf $primary.Id) -gt $primaryBefore) -and ((Get-LineCount $loadLine) -gt $loadsBefore) }
+          if (-not $ready) { Stop-All; throw "the primary (pid $($primary.Id)) did not write its start and load lines" }
+          $tray = $false
+          for ($i = 0; $i -lt 30 -and -not $tray; $i++) { $tray = @(Get-AllWindows $primary.Id | Where-Object { $_.Class -ceq 'tray_icon_app' }).Count -ge 1; if (-not $tray) { Start-Sleep -Seconds 1 } }
+          if (-not $tray) { $all = Format-AllWindows (Get-AllWindows $primary.Id); Stop-All; throw "no 'tray_icon_app' window of the primary (windows: $all)" }
+          New-Item -ItemType Directory -Force -Path $models | Out-Null
+          [System.IO.File]::WriteAllBytes($part, [byte[]]::new(1024))
+          if (-not (Test-Path -LiteralPath $part -PathType Leaf)) { Stop-All; throw "could not place $part" }
+          # Second launch (no --autostart): it exits 0 inside build() (the plugin hands argv to the
+          # primary), writes no start line, deletes no .part; the primary opens the settings window.
+          $second = Start-Process -FilePath $exe -PassThru
+          $null = $second.Handle
+          $secondBefore = Get-StartCountOf $second.Id
+          if (-not $second.WaitForExit(30000)) { Stop-All; throw "the second launch (pid $($second.Id)) did not exit within 30 s (no single instance)" }
+          if ($second.ExitCode -ne 0) { Stop-All; throw "the second launch exited with code $($second.ExitCode), expected 0" }
+          $win = $null
+          $seen = 'none'
+          for ($i = 0; $i -lt 30 -and -not $win; $i++) {
+            Start-Sleep -Seconds 1
+            if ($primary.HasExited) { break }
+            $shown = Get-ShownWindows $primary.Id
+            $seen = Format-ShownWindows $shown
+            if ($shown.Count -eq 1 -and $shown[0].Title -ceq 'Voicen') { $win = $shown[0] }
+          }
+          $secondLines = (Get-StartCountOf $second.Id) - $secondBefore
+          $primaryLines = (Get-StartCountOf $primary.Id) - $primaryBefore
+          $partKept = Test-Path -LiteralPath $part -PathType Leaf
+          if ($primary.HasExited) { Stop-All; throw "the primary exited after the second launch" }
+          if ($secondLines -ne 0) { Stop-All; throw "the second launch (pid $($second.Id)) wrote $secondLines start line(s) into the primary's log" }
+          if ($primaryLines -ne 1) { Stop-All; throw "the primary's start line occurs $primaryLines times for this launch, expected 1" }
+          if (-not $partKept) { Stop-All; throw "the second launch deleted the primary's $part" }
+          if (-not $win) { Stop-All; throw "the second launch did not bring up exactly one shown window titled Voicen (last seen: $seen)" }
+          Write-Output "second launch: exit 0, no start line of its own, the .part kept, one shown window: $seen"
+          # Minimised, the one window comes back on a third launch (OQ-11 Q2 default: front, same window).
+          Invoke-Minimize $win.Handle
+          $iconic = $false
+          for ($i = 0; $i -lt 10 -and -not $iconic; $i++) { Start-Sleep -Milliseconds 500; $iconic = Test-Iconic $win.Handle }
+          if (-not $iconic) { Stop-All; throw "premise: the settings window did not minimise" }
+          $third = Start-Process -FilePath $exe -PassThru
+          $null = $third.Handle
+          if (-not $third.WaitForExit(30000)) { Stop-All; throw "the third launch (pid $($third.Id)) did not exit within 30 s" }
+          if ($third.ExitCode -ne 0) { Stop-All; throw "the third launch exited with code $($third.ExitCode), expected 0" }
+          $restored = $false
+          for ($i = 0; $i -lt 20 -and -not $restored; $i++) { Start-Sleep -Milliseconds 500; $restored = -not (Test-Iconic $win.Handle) }
+          $shown = Get-ShownWindows $primary.Id
+          $seen = Format-ShownWindows $shown
+          $sameWindow = $shown.Count -eq 1 -and $shown[0].Handle -eq $win.Handle
+          Stop-All
+          Remove-Item -LiteralPath $part -Force -ErrorAction SilentlyContinue
+          if (-not $restored) { throw "a launch while the settings window was minimised left it minimised" }
+          if (-not $sameWindow) { throw "not the same one window after the third launch (seen: $seen)" }
+          Write-Output "third launch: exit 0, the one window un-minimised: $seen"
       - uses: actions/upload-artifact@v4
         with:
           name: voicen-installer-${{ env.VOICEN_COMMIT }}

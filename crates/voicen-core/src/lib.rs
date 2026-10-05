@@ -24,6 +24,7 @@ pub mod settings;
 #[cfg(any(test, feature = "test-fakes"))]
 pub mod test_support;
 pub mod timeouts;
+pub mod tray;
 pub mod vad;
 pub mod win32_data;
 

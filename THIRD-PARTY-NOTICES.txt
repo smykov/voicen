@@ -3191,6 +3191,7 @@ SOFTWARE.
 MIT License (MIT)
 Used by:
   - muda 0.20.0 <https://github.com/tauri-apps/muda>
+  - tray-icon 0.25.1 <https://github.com/tauri-apps/tray-icon>
 
 MIT License
 

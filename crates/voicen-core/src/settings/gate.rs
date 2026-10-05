@@ -52,6 +52,26 @@ pub enum StartupAction {
     TrayOnly,
 }
 
+/// What the running instance does when a second launch reaches it (spec 001 FR-002,
+/// spec 004 FR-019; T-052, OQ-11 Q2 default). The second process itself exits
+/// inside tauri's `build()` and does nothing else (T-052 invariant 1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SecondLaunchAction {
+    /// The settings window to the front on the tab it shows (unminimized, shown,
+    /// focused, no tab switch), or opened on Engine when none is open.
+    FrontSettings,
+    /// Nothing: a logon start (`--autostart`) opens no window.
+    TrayOnly,
+}
+
+/// The second-launch decision, from whether the second process was started by the
+/// Run value. Pure.
+pub fn second_launch_action(launched_by_autostart: bool) -> SecondLaunchAction {
+    // Skeleton (T-052 red tests): not implemented yet.
+    let _ = launched_by_autostart;
+    todo!("T-052: second_launch_action")
+}
+
 /// Called by the hotkey handler before the microphone is opened. Only engine
 /// `none` blocks; whether a configured engine works is the pipeline's question.
 pub fn dictation_gate(s: &Settings) -> Result<(), Blocked> {
@@ -203,6 +223,20 @@ mod tests {
             tokens.len(),
             "tokens not distinct: {tokens:?}"
         );
+    }
+
+    #[test]
+    fn second_launch_action_table() {
+        // T-052 red-test table row 2 (spec 001 FR-002: a second launch brings the
+        // settings window to the front; spec 004 FR-019: a logon start opens no
+        // window). Bite: a second launch with `--autostart` opening a window (the
+        // Run value firing while the app already runs, e.g. after a sign-out
+        // without exit), or a plain second launch ignored.
+        assert_eq!(
+            second_launch_action(false),
+            SecondLaunchAction::FrontSettings
+        );
+        assert_eq!(second_launch_action(true), SecondLaunchAction::TrayOnly);
     }
 
     #[test]

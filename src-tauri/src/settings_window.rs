@@ -6,10 +6,20 @@
 //! out `startup_action(outcome, launched_by_autostart)` and decides nothing itself.
 //! `run()` calls it on `RunEvent::Ready`; the tests call it directly.
 //!
+//! T-052 invariant 2: at runtime `open` runs only on the one opener thread
+//! ("settings-window"). Every caller (the startup executor, the tray "Settings"
+//! item, the second-instance callback, T-006's session requests) posts with
+//! [`request`] and never waits; tauri's label check is not atomic with the window
+//! creation, so two concurrent `open`s could otherwise build two windows. Only
+//! tests wait, on the [`Receipt`].
+//!
 //! The URL is `settings?tab=<token>[&field=<FieldId>]`. Both tokens come from closed
 //! sets of `[a-z_.]` words (`SettingsTab::as_str`, `FieldId::as_str`), so they are
 //! put into the URL unencoded. `tauri.conf.json` declares no window, and the
 //! capability in `capabilities/default.json` is granted to [`LABEL`] only.
+
+use std::sync::mpsc;
+use std::time::Duration;
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, Runtime, WebviewUrl, WebviewWindowBuilder};
@@ -71,15 +81,63 @@ pub fn open<R: Runtime>(
         .map(|_| ())
 }
 
+/// Where a [`request`] points the window (contracts/ipc.md "Window").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenTarget {
+    /// [`open`] on `tab` and `field`: an open window is brought forward and gets
+    /// `settings://focus {tab, field?}` (the startup executor; T-006's
+    /// `ShellRequests::open_settings`).
+    Tab(SettingsTab, Option<FieldId>),
+    /// The open window to the front on the tab it shows (unminimized, shown,
+    /// focused; no `settings://focus`), or [`open`] on Engine when none is open: the
+    /// tray "Settings" item and a second launch (OQ-11 Q2 default).
+    Front,
+}
+
+/// One posted [`request`]. Runtime callers drop it; tests wait on it.
+pub struct Receipt {
+    done: mpsc::Receiver<tauri::Result<()>>,
+}
+
+impl Receipt {
+    /// Waits at most `timeout` for the opener thread to run the request: `Some(Ok)`
+    /// once the window is open or fronted, `Some(Err)` with the open's error (also
+    /// written to the log as one `warning kind=settings_window_failed` line), `None`
+    /// if it has not run by then.
+    pub fn wait_timeout(self, timeout: Duration) -> Option<tauri::Result<()>> {
+        // Skeleton (T-052 red tests): not implemented yet.
+        let _ = (self.done, timeout);
+        todo!("T-052: Receipt::wait_timeout")
+    }
+}
+
+/// Posts `target` to the one opener thread and returns at once. The opener runs the
+/// requests one at a time, in the order they were posted (FIFO), so no two runs of
+/// [`open`] overlap; a failed one writes `warning kind=settings_window_failed`
+/// (`os_code=` for an I/O error) and the next request runs as usual. Never waits for
+/// the opener or the main thread, so it may be called from any thread, the main
+/// thread and window procedures included.
+pub fn request<R: Runtime>(app: &AppHandle<R>, target: OpenTarget) -> Receipt {
+    // Skeleton (T-052 red tests): not implemented yet.
+    let _ = (app, target);
+    todo!("T-052: settings_window::request")
+}
+
 /// The startup executor: carries out `startup_action(outcome, launched_by_autostart)`,
-/// that is [`open`] on the decided tab with no field, or nothing for `TrayOnly`.
+/// that is a [`request`] for [`OpenTarget::Tab`] on the decided tab with no field
+/// (its receipt returned), or nothing for `TrayOnly` (`None`: nothing is posted).
 pub fn on_ready<R: Runtime>(
     app: &AppHandle<R>,
     outcome: &LoadOutcome,
     launched_by_autostart: bool,
-) -> tauri::Result<()> {
-    match startup_action(outcome, launched_by_autostart) {
-        StartupAction::OpenSettings(tab) => open(app, tab, None),
-        StartupAction::TrayOnly => Ok(()),
-    }
+) -> Option<Receipt> {
+    // Skeleton (T-052 red tests): not implemented yet.
+    let _ = (
+        app,
+        outcome,
+        launched_by_autostart,
+        startup_action,
+        StartupAction::TrayOnly,
+    );
+    todo!("T-052: on_ready through the opener")
 }
