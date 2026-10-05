@@ -37,7 +37,7 @@ Before T-059 nothing had observed any of this on the runner. The install smoke r
 ### The probe reports; it never fails because a capability is missing
 
 - **Defect that produced it:** none. It is what keeps the facts flowing: a probe that went red on a missing capability would hide the other facts, and invite `continue-on-error`.
-- **What breaks if you violate it:** the facts stop, or the step turns green with no facts. Two ways to the second: output captured without `--no-capture`, or `--ignored` on a test that is not ignored, which runs zero tests.
+- **What breaks if you violate it:** the facts stop, or the step turns green with no facts. The way to the second: `--ignored` on a test that is not ignored, which runs zero tests (the end-line check catches it). The probe writes its lines to stdout directly (`io::stdout().lock()`), which libtest's capture does not intercept (it covers only `print!`-family output; measured on libtest 1.99, T-059 review 1 #2), so `--no-capture` is belt-and-braces: it keeps any future `print!`/`eprint!` live.
 - **Where it is enforced:**
   - `runner_probe.rs`:
     - every fact is exactly one line, printed by the main thread, which makes no Win32 call;
@@ -53,7 +53,7 @@ Before T-059 nothing had observed any of this on the runner. The install smoke r
 - **Don't:**
   - add a capability assertion to the probe;
   - run it inside the normal `cargo test -p voicen` step (captured, and run twice with its own step);
-  - drop `#[ignore]`, `--ignored` or `--no-capture`, or spell it `--nocapture` (deprecated in libtest 1.99);
+  - drop `#[ignore]` or `--ignored`, drop `--no-capture` (kept for `print!`-family output), or spell it `--nocapture` (deprecated in libtest 1.99);
   - print fact lines from a probe thread;
   - wait without a bound (`GetMessageW`, an unbounded loop);
   - give the step `continue-on-error`;
@@ -79,12 +79,12 @@ runner-probe: end(facts=N)
 ```
 
 - The detail is `k=v` pairs joined by `,`. Any character of a key or value outside `A-Za-z0-9_.:-` is printed as `_`.
-- OS codes are printed as `err=0xHHHHHHHH` (`windows::core::Error::code()`). Every `ok` line carries the measured `ms`.
+- OS codes are printed as `err=0xHHHHHHHH` (`windows::core::Error::code()`). The `ok` lines of the six window-thread facts (`foreground` … `async_keys`) carry a measured `ms`; the session-thread facts carry none, and `foreground_lock`'s `ms` is the system setting (`SPI_GETFOREGROUNDLOCKTIMEOUT`), not a time.
 - Status:
 
 | Status | Meaning |
 |---|---|
-| `ok` | the capability was observed (with the measured `ms`) |
+| `ok` | the capability was observed (window-thread facts with the measured `ms`) |
 | `denied` | the API reported failure |
 | `lost` | the API reported success, but the effect was not observed within `WAIT` |
 | `absent` | an object was not found |
@@ -98,13 +98,13 @@ runner-probe: end(facts=N)
 | `station` | `name` (`UOI_NAME` of `GetProcessWindowStation()`), `visible` (`UOI_FLAGS` & `WSF_VISIBLE`); on failure `step=get\|name\|flags` and `err` |
 | `desktop` | `thread` (`UOI_NAME` of `GetThreadDesktop(GetCurrentThreadId())`) or `thread_err`; `input` (`UOI_NAME` of `OpenInputDesktop(0, false, DESKTOP_READOBJECTS)`) or `input_err` |
 | `foreground_lock` | `ms` (`SPI_GETFOREGROUNDLOCKTIMEOUT`) or `err` |
-| `taskbar` | `FindWindowW("Shell_TrayWnd", NULL)`: `ok`, or `absent` (with `err` when the lookup set a nonzero code) |
+| `taskbar` | `FindWindowW("Shell_TrayWnd", NULL)`: `ok`, or `absent` (with `err`, the thread's last error after the lookup, when nonzero: it is not cleared before `FindWindowW`, so it may be stale from an earlier call; the status is right) |
 | `foreground` | `ms` (from `SetForegroundWindow` until `GetForegroundWindow()` is the probe window); `before` (class of the window in front before the probe window existed, `none`); `created_fg` (in front right after creation); `set` (`SetForegroundWindow`'s BOOL); `focus` (`GetFocus()`: `self`, `none` or a class); `now` (class in front, when not `ok`). `lost` = `set=1` but never in front; `denied` = `set=0` |
 | `sendinput` | `ms` (to `WM_KEYDOWN` `VK_A` at the window); `inserted`; `keydown`; `char` (the `WM_CHAR` code `TranslateMessage` made, hex, or `none`); `text_len_before`, `text_len` (the EDIT's text length); `fg` (the window was in front at `SendInput`); `err` when 0 inserted |
 | `clipboard` | `ms`, `open_tries` (`OpenClipboard(window)`); on failure `step` = `open`, `empty`, `alloc`, `lock`, `unlock` or `set` (`denied`), or `reopen`, `get`, `read_lock` or `compare` (`lost`, after a successful `SetClipboardData`), with `err` or `read_len` |
 | `clipboard_null_owner` | the same with `OpenClipboard(NULL)` (T-006 design 3's open point) |
-| `hotkey` | `RegisterHotKey(window, Ctrl+Alt+Space, MOD_NOREPEAT)` and one `SendInput` of Ctrl↓ Alt↓ Space↓: `ms` (to `WM_HOTKEY` with the probe's id), `inserted`; `lost` adds `wm_hotkey=0`; `denied` has `step=register` (0x80070581 = 1409: another process holds the combination) or `step=sendinput`, with `err`; `fg` |
-| `async_keys` | `GetAsyncKeyState` of Ctrl, Alt, Space while held and after the release (0xE8 down/up, Space↑ Alt↑ Ctrl↑): `ms` (slowest key read down), `up_ms` (slowest read up), `down` / `up` (`ctrl:1.alt:1.space:1`), `released` (inserted count of the 5-event release batch), `inserted` when `lost`, `err` when `denied`, `fg` (`GetAsyncKeyState` may read 0 while another process's thread is in front) |
+| `hotkey` | `RegisterHotKey(window, Ctrl+Alt+Space, MOD_NOREPEAT)` and one `SendInput` of Ctrl↓ Alt↓ Space↓: `ms` (to `WM_HOTKEY` with the probe's id), `inserted`; `lost` adds `wm_hotkey=0`; `denied` has `step=register` (0x80070581 = 1409: another process holds the combination) or `step=sendinput`, with `err`; `fg`. When `RegisterHotKey` fails the Ctrl+Alt+Space press is still sent (review ruling, T-059 review 1 #6): it reaches whoever holds the combination, and that holder may swallow Space for `async_keys` |
+| `async_keys` | `GetAsyncKeyState` of Ctrl, Alt, Space while held and after the release (0xE8 down/up, Space↑ Alt↑ Ctrl↑): `ms` (slowest key read down), `up_ms` (slowest read up), `down` / `up` (`ctrl:1.alt:1.space:1`), `released` (inserted count of the 5-event release batch), `inserted` when `lost`, `err` when `denied`, `fg` (`GetAsyncKeyState` may read 0 while another process's thread is in front). Sent also when the `hotkey` registration failed: see `hotkey` |
 
 ## Consequences per outcome
 
@@ -126,10 +126,34 @@ T-052's `lifecycle.rs` (real Wry, `any_thread`, `run_return`) needs none of thes
 
 ## Observed runs
 
-Pending the first run. Run A is the windows job of the first push carrying T-059. A technical-writer commit naming T-059 records its lines here with the run id. That push's own run is run B, which re-checks them. The verify record checks this table against both runs.
+Run A is recorded below (T-059 technical-writer commit). The push that carries this commit gives run B, which must re-check it; the verify record checks this table against both runs.
 
 | Run id | Date | Commit | `image` | Fact lines (verbatim, in order) |
 |---|---|---|---|---|
+| A: 37255557467 (windows job 111593430791) | 2026-10-05 | 2e414bf | `os=win25-vs2026`, `version=20260925.250.1` | see below |
+| B | pending | | | |
+
+Run A lines (`gh run view 37255557467 --job 111593430791 --log`, step "Runner capability probe", checked 2026-10-05):
+
+```text
+runner-probe: image=ok(os=win25-vs2026,version=20260925.250.1)
+runner-probe: session=ok(id=2,console=2,remote=0)
+runner-probe: station=ok(name=WinSta0,visible=1)
+runner-probe: desktop=ok(thread=Default,input=Default)
+runner-probe: foreground_lock=ok(ms=2147483647)
+runner-probe: taskbar=ok
+runner-probe: foreground=ok(ms=2,before=CASCADIA_HOSTING_WINDOW_CLASS,created_fg=1,set=1,focus=self)
+runner-probe: sendinput=ok(ms=23,inserted=2,keydown=1,char=0x61,text_len_before=19,text_len=20,fg=1)
+runner-probe: clipboard=ok(ms=2,open_tries=1)
+runner-probe: clipboard_null_owner=ok(ms=0,open_tries=1)
+runner-probe: hotkey=ok(ms=1,inserted=3,fg=1)
+runner-probe: async_keys=ok(ms=1,up_ms=0,down=ctrl:1.alt:1.space:1,up=ctrl:1.alt:1.space:1,released=5,fg=1)
+runner-probe: end(facts=12)
+```
+
+Reading of run A: every capability is `ok`. The probe ran in interactive session 2 (console 2, not remote) on `WinSta0` with input desktop `Default`; a Windows Terminal window (`CASCADIA_HOSTING_WINDOW_CLASS`) was in front before the probe window; the probe window became foreground in 2 ms and focus was `self`; the injected `A` reached the EDIT (`WM_KEYDOWN`, `WM_CHAR` 0x61, text 19 to 20 characters); both clipboard variants worked on the first open; the hotkey fired in 1 ms; `GetAsyncKeyState` saw all three keys down and up. `foreground_lock` 2147483647 is the raw setting value; no test depends on it.
+
+Consequence today (the table above applied to run A alone): foreground, `SendInput`, `RegisterHotKey` / `WM_HOTKEY`, `GetAsyncKeyState`, clipboard and notification area (`taskbar`) are all `ok`, so the Acceptance lines in the "stays on Windows CI" column may be asserted on CI: T-006 tests 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 15, 18, 19 and smoke 24 (T-006 Acceptance line 1 and line 3's "start window replaced"), T-057 Acceptance line 1 (target in front, no `WM_KILLFOCUS`), and T-052 test 8 (`rect().is_some()`). Rule: per the invariant a capability counts only when `ok` in every recorded run, at least A and B. Until run B (the next CI run, the push of this commit) shows the same facts, no test may rely on them and the Acceptance lines are not reworded. A fact that differs in run B counts as missing.
 
 ## Rejected approaches
 
