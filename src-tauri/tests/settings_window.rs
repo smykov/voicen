@@ -826,6 +826,48 @@ fn requests_run_in_the_order_they_were_posted() {
     }
 }
 
+#[test]
+fn a_panicking_request_is_logged_without_an_os_code_reported_and_the_next_request_runs() {
+    // T-006 (from T-052 review round 2 #9; orchestrator decision on Refresh 2: a
+    // test-only injection seam): the opener runs each request under `catch_unwind`. A
+    // request that panics writes one `warning kind=settings_window_failed` line without
+    // `os_code`, its receipt reports `Some(Err(FailedToReceiveMessage))` (not completed),
+    // and the next request runs as usual on the same opener (the window opens on its
+    // tab). The panic is planted through `request_with`, never through a tauri hook (a
+    // panicking listener or window hook poisons tauri's own mutexes). Bite: no
+    // `catch_unwind` (the opener thread dies: the next receipt is never answered), a panic
+    // logged with a code or not at all, the panicking receipt left hanging.
+    let dir = TempDir::new();
+    let (service, _) = load(dir.path());
+    let logs = dir.path().join("logs");
+    let app = app_on(mock_builder(), &service, &logs);
+
+    let panicked = settings_window::request_with(
+        app.handle(),
+        Box::new(|_| panic!("T-006 planted panic inside an opener request")),
+    );
+    match panicked.wait_timeout(BUDGET) {
+        Some(Err(tauri::Error::FailedToReceiveMessage)) => {}
+        Some(Err(other)) => panic!("the panicking request reported {other}"),
+        Some(Ok(())) => panic!("the panicking request reported success"),
+        None => panic!("the panicking request was not answered within {BUDGET:?}"),
+    }
+
+    ran(settings_window::request(
+        app.handle(),
+        OpenTarget::Tab(SettingsTab::Output, None),
+    ))
+    .expect("the request after the panic");
+    assert_one_settings_window(&app, &[("tab", "output")]);
+    let lines = failed_open_lines(&logs);
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(
+        !lines[0].contains("os_code="),
+        "a panic logged with an OS code: {}",
+        lines[0]
+    );
+}
+
 // ---- config and capability (tauri's own parse and ACL) --------------------------
 
 /// The release context (tauri.conf.json and the capabilities as tauri-build resolved

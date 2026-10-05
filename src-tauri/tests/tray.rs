@@ -59,8 +59,13 @@ use voicen_core::vad::{EnergyDetector, SpeechDetector, SpeechGate};
 use voicen_lib::settings_ipc::load_settings;
 use voicen_lib::settings_window::{self, OpenTarget, LABEL};
 use voicen_lib::tray::{self, Applied, TrayPart, TRAY_ID};
+use windows::core::BOOL;
+use windows::Win32::Foundation::{HWND, LPARAM};
+use windows::Win32::System::Threading::GetCurrentThreadId;
+use windows::Win32::UI::Shell::{Shell_NotifyIconW, NIM_DELETE, NOTIFYICONDATAW};
 use windows::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, PeekMessageW, TranslateMessage, MSG, PM_REMOVE,
+    DispatchMessageW, EnumThreadWindows, GetClassNameW, PeekMessageW, TranslateMessage, MSG,
+    PM_REMOVE,
 };
 
 /// How long a test waits for an asynchronous change (Windows-sized, F-005).
@@ -207,8 +212,12 @@ impl Rig {
 /// The app as `run()` builds it (`build_app`) over a fresh data dir whose first run
 /// resolves the UI language from `os_language`.
 fn rig(os_language: Option<&str>) -> Rig {
+    rig_with_log(os_language, discard_log())
+}
+
+/// [`rig`] writing its log to `log` (T-006: a test that reads the tray's warnings).
+fn rig_with_log(os_language: Option<&str>, log: Arc<Log>) -> Rig {
     let dir = TempDir::new();
-    let log = discard_log();
     let (service, _) = load_settings(
         dir.path().to_path_buf(),
         no_keys(),
@@ -717,6 +726,117 @@ fn an_unknown_menu_id_does_nothing() {
         rig.applied(),
         Some(expected(TrayState::Idle, false, UiLanguage::En)),
         "an unknown id changed the tray"
+    );
+}
+
+// ---- T-006: the applied record follows only setters that succeeded --------------
+
+/// Collects the `tray_icon_app` windows (tray-icon's window class) of the enumerated
+/// thread into the `Vec<isize>` behind `lparam`.
+unsafe extern "system" fn collect_tray_windows(hwnd: HWND, lparam: LPARAM) -> BOOL {
+    let mut buf = [0u16; 64];
+    // SAFETY: `buf` is writable; GetClassNameW sends no message.
+    let len = unsafe { GetClassNameW(hwnd, &mut buf) };
+    let class = String::from_utf16_lossy(&buf[..usize::try_from(len).unwrap_or(0).min(buf.len())]);
+    if class == "tray_icon_app" {
+        // SAFETY: `lparam` is the `&mut Vec<isize>` of `remove_tray_icons`, alive for the
+        // whole synchronous enumeration.
+        unsafe { (*(lparam.0 as *mut Vec<isize>)).push(hwnd.0 as isize) };
+    }
+    BOOL(1)
+}
+
+/// Deletes from the notification area every icon of this thread's tray-icon windows
+/// (`Shell_NotifyIconW(NIM_DELETE)` for each id tray-icon may have given: its counter is
+/// per process and small). tray-icon's own window and data stay; only the shell forgets
+/// the icon, so a later `NIM_MODIFY` (`set_icon`, `set_tooltip`) fails. Returns how many
+/// icons the shell removed.
+fn remove_tray_icons() -> usize {
+    let mut windows: Vec<isize> = Vec::new();
+    // SAFETY: the callback only reads class names and pushes into `windows`, which
+    // outlives this synchronous call.
+    let _ = unsafe {
+        EnumThreadWindows(
+            GetCurrentThreadId(),
+            Some(collect_tray_windows),
+            LPARAM(&mut windows as *mut Vec<isize> as isize),
+        )
+    };
+    let mut removed = 0;
+    for hwnd in windows {
+        for id in 0..=256u32 {
+            let nid = NOTIFYICONDATAW {
+                cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
+                hWnd: HWND(hwnd as *mut std::ffi::c_void),
+                uID: id,
+                ..Default::default()
+            };
+            // SAFETY: a valid NOTIFYICONDATAW naming one icon of a window of this thread.
+            if unsafe { Shell_NotifyIconW(NIM_DELETE, &nid) }.as_bool() {
+                removed += 1;
+            }
+        }
+    }
+    removed
+}
+
+/// The `warning kind=tray_failed` lines of `<logs>/voicen.log`.
+fn tray_failed_lines(logs: &Path) -> usize {
+    std::fs::read_to_string(logs.join("voicen.log"))
+        .map(|t| {
+            t.lines()
+                .filter(|l| l.split_whitespace().any(|w| w == "kind=tray_failed"))
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+#[test]
+fn a_failed_icon_and_tooltip_setter_leaves_the_applied_icon_and_tooltip_unchanged() {
+    // T-006 (from T-052 validation 1, F1; orchestrator decision on Refresh 2): `Applied`
+    // records the icon and the tooltip only from a setter that returned Ok (tauri 2.12.1
+    // has no getter to read them back). The shell's icon is removed from the notification
+    // area (as Explorer would lose it), so `set_icon` and `set_tooltip` fail on the next
+    // render; the render writes `tray_failed`, and `Applied.icon` / `.tooltip` still show
+    // the Idle icon and tooltip that are on screen, not Recording's. Together with
+    // `each_state_and_retry_flag_reaches_the_tray_with_its_icon_tooltip_and_menu` this
+    // makes deleting either setter call red. Bite: `Applied.icon` / `.tooltip` written
+    // from core's table whatever the setter returned (the code at T-052's commit).
+    let _serial = serial();
+    let dir = TempDir::new();
+    let logs = dir.path().join("logs");
+    let rig = rig_with_log(
+        None,
+        voicen_lib::diag::start(logs.clone(), Box::new(|_| {})),
+    );
+    assert_eq!(
+        rig.applied(),
+        Some(expected(TrayState::Idle, false, UiLanguage::En)),
+        "premise"
+    );
+    let removed = remove_tray_icons();
+    assert!(
+        removed >= 1,
+        "runner precondition `taskbar` (docs/decisions/windows-ci-runner.md, ok in runs A \
+         and B): no tray icon of this thread could be removed from the notification area"
+    );
+
+    rig.part().set_tray(TrayState::Recording, false);
+
+    assert!(
+        eventually(|| tray_failed_lines(&logs) >= 1),
+        "premise: no tray_failed line after rendering Recording on a removed icon"
+    );
+    let applied = rig.applied().expect("the applied record");
+    assert_eq!(
+        applied.icon,
+        table::icon(TrayState::Idle),
+        "Applied.icon recorded from a failed set_icon"
+    );
+    assert_eq!(
+        applied.tooltip,
+        i18n::text(UiLanguage::En, table::tooltip(TrayState::Idle), &[]),
+        "Applied.tooltip recorded from a failed set_tooltip"
     );
 }
 

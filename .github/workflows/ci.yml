@@ -224,6 +224,46 @@ jobs:
           Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
           if ($shown) { throw "a window is shown on a launch with a loaded settings.json ($shown)" }
           Write-Output "no shown window for 10 s after the start line of a launch with a loaded settings.json"
+      # T-006 red-test row 24: run() starts the hotkey thread. Decided on the raw Win32 result of this
+      # step's own RegisterHotKey of the settings' default hotkey (Ctrl+Alt+Space, MOD_NOREPEAT; F-003):
+      # free before the launch, refused with 1409 (ERROR_HOTKEY_ALREADY_REGISTERED) while the app runs,
+      # free again after it was stopped. Every wait polls against a Windows-sized budget (F-005).
+      - name: The running app holds the dictation hotkey, and frees it when it ends (T-006 run() wiring)
+        shell: pwsh
+        run: |
+          Add-Type -Namespace T006 -Name Hotkey -MemberDefinition @'
+          [DllImport("user32.dll", SetLastError = true)] public static extern bool RegisterHotKey(IntPtr hWnd, int id, uint fsModifiers, uint vk);
+          [DllImport("user32.dll", SetLastError = true)] public static extern bool UnregisterHotKey(IntPtr hWnd, int id);
+          '@
+          # 0 when this thread could register Ctrl+Alt+Space (then it is freed at once), else the Win32 error.
+          function Test-Hotkey {
+            if ([T006.Hotkey]::RegisterHotKey([IntPtr]::Zero, 0x0A06, 0x4003, 0x20)) { [void][T006.Hotkey]::UnregisterHotKey([IntPtr]::Zero, 0x0A06); return 0 }
+            return [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+          }
+          $exe = Join-Path $env:LOCALAPPDATA 'Voicen\voicen.exe'
+          # voicen.log plus rolled voicen-*.log: a run crossing local midnight rolls the file (T-008).
+          $log = Join-Path $env:LOCALAPPDATA 'Voicen\logs\voicen*.log'
+          $expected = "($env:VOICEN_COMMIT) started"
+          $before = Test-Hotkey
+          if ($before -ne 0) { throw "premise: Ctrl+Alt+Space is not free before the launch (RegisterHotKey error $before)" }
+          function Get-StartCount { if (Test-Path $log) { @(Select-String -Path $log -SimpleMatch $expected).Count } else { 0 } }
+          $starts = Get-StartCount
+          $proc = Start-Process -FilePath $exe -PassThru
+          $started = $false
+          for ($i = 0; $i -lt 30 -and -not $started; $i++) { Start-Sleep -Seconds 1; $started = (Get-StartCount) -gt $starts }
+          if (-not $started) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue; throw "start log line with commit $env:VOICEN_COMMIT not written by the launch" }
+          $held = 0
+          for ($i = 0; $i -lt 30 -and $held -ne 1409; $i++) {
+            if ($proc.HasExited) { throw "voicen.exe exited before it held the hotkey (exit code $($proc.ExitCode))" }
+            $held = Test-Hotkey
+            if ($held -ne 1409) { Start-Sleep -Milliseconds 500 }
+          }
+          Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+          if ($held -ne 1409) { throw "the running app does not hold Ctrl+Alt+Space within 15 s of its start line (last RegisterHotKey result: $held, expected error 1409)" }
+          $freed = -1
+          for ($i = 0; $i -lt 30 -and $freed -ne 0; $i++) { Start-Sleep -Milliseconds 500; $freed = Test-Hotkey }
+          if ($freed -ne 0) { throw "Ctrl+Alt+Space is still taken 15 s after the app was stopped (RegisterHotKey error $freed)" }
+          Write-Output "the running app held Ctrl+Alt+Space (RegisterHotKey error 1409) and freed it when stopped"
       - name: A .part left by an earlier run is deleted at start (T-044 LocalModels::open in run())
         shell: pwsh
         run: |

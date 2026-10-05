@@ -159,6 +159,20 @@ pub fn released(poll: &[Vec<u16>], is_down: impl Fn(u16) -> bool) -> bool {
         .any(|group| !group.iter().any(|&vk| is_down(vk)))
 }
 
+/// The unassigned virtual key the hotkey thread sends (down, then up) on each
+/// `WM_HOTKEY` before calling the session, so the user's later Alt release opens no
+/// menu in the focused window (research R-2; T-006). Not a key of the closed set
+/// and not a modifier.
+pub fn menu_mask_vk() -> u16 {
+    todo!("T-006: the menu-mask virtual key (R-2)")
+}
+
+/// The virtual keys `Paster::wait_modifiers_released` polls (data-model
+/// "DeliveryDecision": Shift, Ctrl, Alt and both Win keys; T-006).
+pub fn modifier_wait_keys() -> &'static [u16] {
+    todo!("T-006: the modifier-wait key set")
+}
+
 /// A mandatory integrity level RID (`SECURITY_MANDATORY_*_RID`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct IntegrityLevel(pub u32);
@@ -471,6 +485,52 @@ mod tests {
             }
             assert!(wrong.is_empty(), "{h}:\n{}", wrong.join("\n"));
         }
+    }
+
+    #[test]
+    fn menu_mask_key_is_0xe8_and_no_key_or_modifier_of_the_set() {
+        // T-006 red-test row 1 (R-2): the key the hotkey thread injects to keep Alt's
+        // release from opening a menu is the unassigned VK 0xE8 (windows 0.62.2
+        // names no VK_* for it). It must be none of the 82 keys of the closed set
+        // (else it would press a real key in the focused app) and none of the
+        // modifiers (else it would itself start or end a hold). Bite: the constant
+        // missing, set to a real key (0x20 Space, 0x12 Alt) or to 0 (SendInput
+        // ignores VK 0, so the menu opens).
+        let mask = menu_mask_vk();
+        assert_eq!(mask, 0xE8, "menu-mask VK");
+        let mut collisions: Vec<String> = VK_TABLE
+            .iter()
+            .filter(|(_, vk)| *vk == mask)
+            .map(|(key, vk)| format!("{key:?} ({vk:#04x})"))
+            .collect();
+        for modifier in [VK_SHIFT, VK_CONTROL, VK_MENU, VK_LWIN, VK_RWIN] {
+            if modifier == mask {
+                collisions.push(format!("modifier {modifier:#04x}"));
+            }
+        }
+        assert!(collisions.is_empty(), "mask collides: {collisions:?}");
+    }
+
+    #[test]
+    fn modifier_wait_keys_are_exactly_shift_ctrl_alt_and_both_win_keys() {
+        // T-006 red-test row 1 (data-model "DeliveryDecision", FR-010): the paste
+        // waits until Shift, Ctrl, Alt and both Win keys are up, whatever the
+        // hotkey. The set is exactly {0x10, 0x11, 0x12, 0x5B, 0x5C}, each once.
+        // Bite: only the hotkey's own modifiers, VK_LWIN without VK_RWIN (a right
+        // Win key held turns Ctrl+V into Win+Ctrl+V), a key of the closed set in
+        // the set (the wait never ends while it is held), a duplicate.
+        let keys = modifier_wait_keys();
+        let mut sorted = keys.to_vec();
+        sorted.sort_unstable();
+        assert_eq!(
+            sorted,
+            vec![VK_SHIFT, VK_CONTROL, VK_MENU, VK_LWIN, VK_RWIN],
+            "modifier-wait set {keys:x?}"
+        );
+        assert!(
+            !keys.contains(&menu_mask_vk()),
+            "the mask key is in the wait set"
+        );
     }
 
     #[test]

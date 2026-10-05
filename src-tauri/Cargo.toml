@@ -33,10 +33,15 @@ tauri-plugin-single-instance = "2.5"
 # the HKCU Run value (T-014, spec 004 T057), the models dir free space (T-044) and
 # the local UTC offset of the log's timestamps (T-008, Win32_System_Time) and the runner
 # probe (T-059, tests/runner_probe.rs: window, keyboard, clipboard, session and desktop;
-# declared even where tao already enables them, so this one list names everything used).
+# declared even where tao already enables them, so this one list names everything used),
+# and the dictation adapters (T-006, src/win/: hotkey window and SendInput, clipboard formats,
+# the start window's process and its integrity level through Win32_Security).
 # Already in Cargo.lock via tao/wry (0.62.2): feature flags only, no new crate (#9).
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Security_Credentials", "Win32_Globalization", "Win32_System_Registry", "Win32_Storage_FileSystem", "Win32_System_Time", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_System_Ole", "Win32_System_Threading", "Win32_System_StationsAndDesktops", "Win32_System_RemoteDesktop"] }
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Credentials", "Win32_Globalization", "Win32_System_Registry", "Win32_Storage_FileSystem", "Win32_System_Time", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_System_Ole", "Win32_System_Threading", "Win32_System_StationsAndDesktops", "Win32_System_RemoteDesktop"] }
+# The microphone (T-006, src/win/capture.rs; consented by #9): the Windows default input device
+# over WASAPI. Its windows ^0.62 is the lock's 0.62.2, so no second windows version.
+cpal = "0.18"
 
 # Test-only (T-030 J4): never in the release dependency graph.
 [dev-dependencies]
@@ -46,5 +51,9 @@ tauri = { version = "2", features = ["test"] }
 # Test-only (T-052): the tray tests dispatch the test thread's window messages while they wait
 # (tray-icon's setters SendMessageW to the tray window the mock runtime builds on that thread).
 # The same crate and version as above: a feature flag, no new crate (#9).
+# T-006: tests/tray.rs deletes the tray's notification-area icon (Shell_NotifyIconW, Win32_UI_Shell)
+# so a setter fails; tests/capture.rs builds cpal errors for the capture error map. Same crates and
+# versions as above: feature flags only.
 [target.'cfg(windows)'.dev-dependencies]
-windows = { version = "0.62", features = ["Win32_UI_WindowsAndMessaging"] }
+windows = { version = "0.62", features = ["Win32_UI_WindowsAndMessaging", "Win32_UI_Shell"] }
+cpal = "0.18"

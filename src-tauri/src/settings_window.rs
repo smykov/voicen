@@ -228,6 +228,21 @@ pub fn request<R: Runtime>(app: &AppHandle<R>, target: OpenTarget) -> Receipt {
     Receipt { done: receipt }
 }
 
+/// Test-only injection seam (T-006, from T-052 review round 2 #9): posts `run` to
+/// the one opener thread as one more request, run like [`request`]'s jobs (in
+/// posting order, under the same `catch_unwind`, a failure or a panic logged the
+/// same way). It lets a test drive the opener's panic branch without a panicking
+/// tauri hook (a panicking focus listener or window hook poisons tauri's own
+/// mutexes). No runtime caller.
+#[doc(hidden)]
+pub fn request_with<R: Runtime>(
+    app: &AppHandle<R>,
+    run: Box<dyn FnOnce(&AppHandle<R>) -> tauri::Result<()> + Send>,
+) -> Receipt {
+    let _ = (app, run);
+    todo!("T-006: the opener's test injection seam")
+}
+
 /// The startup executor: carries out `startup_action(outcome, launched_by_autostart)`,
 /// that is a [`request`] for [`OpenTarget::Tab`] on the decided tab with no field
 /// (its receipt returned), or nothing for `TrayOnly` (`None`: nothing is posted).

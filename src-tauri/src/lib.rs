@@ -17,12 +17,15 @@ pub mod autostart;
 #[cfg(windows)]
 pub mod credentials;
 pub mod diag;
+pub mod dictation;
 pub mod local_models;
 pub mod locale;
 pub mod paths;
 pub mod settings_ipc;
 pub mod settings_window;
 pub mod tray;
+#[cfg(windows)]
+pub mod win;
 
 #[tauri::command]
 fn get_build_info() -> BuildInfo {

@@ -83,7 +83,7 @@ pub enum SaveLine {
 }
 
 /// The kinds of a `Warning` line: the pipeline's `WarningCode`s and the shell's
-/// start, settings-window and tray failures.
+/// start, settings-window, tray, hotkey and dictation-start failures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WarningKind {
     /// `events::WarningCode::VadFallback`.
@@ -107,6 +107,15 @@ pub enum WarningKind {
     /// The tray's UI-language follower thread could not be started (T-052); the
     /// tray menu keeps its start language until restart.
     TrayFollowerFailed,
+    /// The hotkey thread or its hidden window could not be started (T-006); no
+    /// hotkey works in this run.
+    HotkeyThreadFailed,
+    /// `RegisterHotKey` refused the hotkey (T-006); the OS code says why (1409:
+    /// another program holds the combination).
+    HotkeyRegisterFailed,
+    /// The dictation session could not be started (T-006); the app runs on
+    /// without dictation.
+    DictationStartFailed,
 }
 
 /// One dictation: the engine, the outcome and the FR-20 timings plus the
