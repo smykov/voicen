@@ -682,6 +682,121 @@ fn hidden_then_recording_at_once_leaves_exactly_one_visible_overlay() {
 }
 
 #[derive(Debug, Default)]
+struct GoneReport {
+    first_shown: bool,
+    /// The window destroyed from outside the overlay thread was gone and its label
+    /// freed.
+    outside_gone: bool,
+    /// After the newer shown state: exactly the label's window, visible, for SETTLE.
+    one_after_newer: bool,
+    shown_after_newer: Vec<(isize, String)>,
+    /// Hidden then destroys that window (the reducer owns it; not stuck Destroying).
+    hidden_gone: bool,
+    /// And Recording after it shows one again.
+    one_after_hidden_and_recording: bool,
+    new_warnings: Vec<String>,
+    log: Vec<String>,
+}
+
+#[test]
+fn an_overlay_destroyed_from_outside_is_rebuilt_by_a_newer_shown_state() {
+    // T-057 review 1 findings 1 and 2 (FR-04): the overlay can go without a Hidden
+    // (Alt+Tab then Alt+F4; here `destroy()` from the driver thread). Its Destroyed
+    // is one the reducer did not ask for. Then a newer shown state is published at
+    // once (it may reach the overlay thread in the same wake as that Destroyed):
+    // exactly one visible overlay window follows and stays; Hidden then destroys it
+    // and Recording shows one again; no warning is logged. Bite: the shell keeping
+    // the stale handle / the reducer staying Live (the newer state an Emit to a gone
+    // window: no overlay; the next Hidden a Destroy that waits forever), or the
+    // newest state handed to the reducer before the Destroyed (no overlay until the
+    // next state).
+    let _serial = serial();
+    let _watchdog = watchdog("an_overlay_destroyed_from_outside_is_rebuilt_by_a_newer_shown_state");
+    let dir = TempDir::new();
+    let (app, outcome) = wry_app(dir.path());
+    let logs_of = dir.path().to_path_buf();
+
+    let (code, report) = run_with_driver(app, outcome, move |handle| {
+        let indicator = ShellIndicator::new(&handle);
+        let mut report = GoneReport::default();
+        let one_visible = |handle: &AppHandle<Wry>| {
+            let shown = shown_windows(&[]);
+            shown.len() == 1 && overlay_hwnd(handle) == Some(shown[0].0)
+        };
+        indicator.set_overlay(&OverlayState::Recording);
+        report.first_shown = poll(BUDGET, || overlay_hwnd(&handle).is_some_and(is_visible));
+        if !report.first_shown {
+            report.log = logged(&logs_of);
+            return report;
+        }
+        let warnings_before = warnings(&logged(&logs_of)).len();
+        let old = overlay_hwnd(&handle).unwrap_or(0);
+        if let Some(window) = handle.get_webview_window(LABEL) {
+            let _ = window.destroy();
+        }
+        report.outside_gone = poll(BUDGET, || {
+            !is_window(old) && handle.get_webview_window(LABEL).is_none()
+        });
+        // At once: the overlay thread may see the Destroyed and this state together.
+        indicator.set_overlay(&OverlayState::Processing);
+        report.one_after_newer =
+            poll(BUDGET, || one_visible(&handle)) && holds_for(SETTLE, || one_visible(&handle));
+        report.shown_after_newer = shown_windows(&[]);
+        if report.one_after_newer {
+            let rebuilt = overlay_hwnd(&handle).unwrap_or(0);
+            indicator.set_overlay(&OverlayState::Hidden);
+            report.hidden_gone = poll(BUDGET, || {
+                !is_window(rebuilt) && handle.get_webview_window(LABEL).is_none()
+            });
+            indicator.set_overlay(&OverlayState::Recording);
+            report.one_after_hidden_and_recording =
+                poll(BUDGET, || one_visible(&handle)) && holds_for(SETTLE, || one_visible(&handle));
+        }
+        let lines = logged(&logs_of);
+        report.new_warnings = warnings(&lines)
+            .get(warnings_before..)
+            .map(<[_]>::to_vec)
+            .unwrap_or_default();
+        report.log = lines;
+        report
+    });
+
+    assert!(
+        report.first_shown,
+        "Recording showed no visible `{LABEL}` window within {BUDGET:?}; the app's log: \
+         {:#?}",
+        report.log
+    );
+    assert!(
+        report.outside_gone,
+        "premise: `destroy()` from outside did not remove the overlay within {BUDGET:?}: \
+         {report:#?}"
+    );
+    assert!(
+        report.one_after_newer,
+        "after the overlay was destroyed from outside, a newer Processing left the shown \
+         windows {:?} (want exactly the `{LABEL}` window, for {SETTLE:?}); the app's log: \
+         {:#?}",
+        report.shown_after_newer, report.log
+    );
+    assert!(
+        report.hidden_gone,
+        "Hidden did not destroy the rebuilt overlay within {BUDGET:?}: {report:#?}"
+    );
+    assert!(
+        report.one_after_hidden_and_recording,
+        "Recording after Hidden showed no single overlay (the lifecycle is stuck): \
+         {report:#?}"
+    );
+    assert!(
+        report.new_warnings.is_empty(),
+        "the app logged warnings after the overlay was destroyed from outside: {:#?}",
+        report.new_warnings
+    );
+    assert_eq!(code, 0, "run_return code after end_loop(0)");
+}
+
+#[derive(Debug, Default)]
 struct BlockedReport {
     main_blocked: bool,
     set_overlay_took: Duration,
