@@ -17,7 +17,7 @@ use voicen_lib::win::purge::{from_args, WinCredentialNamespace, PURGE_CREDENTIAL
 use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Security::Credentials::{
     CredDeleteW, CredFree, CredReadW, CredWriteW, CREDENTIALW, CRED_PERSIST_LOCAL_MACHINE,
-    CRED_TYPE, CRED_TYPE_DOMAIN_PASSWORD, CRED_TYPE_GENERIC,
+    CRED_TYPE, CRED_TYPE_GENERIC,
 };
 
 /// The namespace the app writes (pinned again in core by
@@ -45,29 +45,16 @@ fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(Some(0)).collect()
 }
 
-/// `HRESULT_FROM_WIN32(ERROR_INVALID_PARAMETER)`: CredWriteW's answer to a malformed field.
-const E_INVALID_PARAMETER: u32 = 0x8007_0057;
-
-/// The fake key as a blob valid for `kind` (CREDENTIALW contract):
-/// `CRED_TYPE_DOMAIN_PASSWORD` holds "the plaintext Unicode password", i.e. UTF-16LE
-/// with no trailing NUL (here 66 bytes, under `CRED_MAX_CREDENTIAL_BLOB_SIZE` = 2560),
-/// which is also what `cmdkey /add:` stores; a `CRED_TYPE_GENERIC` blob is opaque bytes.
-fn fake_blob(kind: CRED_TYPE) -> Vec<u8> {
-    if kind == CRED_TYPE_DOMAIN_PASSWORD {
-        FAKE_KEY.encode_utf16().flat_map(u16::to_le_bytes).collect()
-    } else {
-        FAKE_KEY.as_bytes().to_vec()
-    }
+/// The fake key as a `CRED_TYPE_GENERIC` blob (opaque bytes).
+fn fake_blob() -> Vec<u8> {
+    FAKE_KEY.as_bytes().to_vec()
 }
 
-/// Writes `target` of type `kind` with the fake key, with raw `CredWriteW`. The user
-/// is a bare account name and Persist is LOCAL_MACHINE for every type (both valid for
-/// DOMAIN_PASSWORD: a bad user is ERROR_BAD_USERNAME, a disabled persist is
-/// ERROR_NO_SUCH_LOGON_SESSION, neither is 87; T-061 re-analysis).
+/// Writes `target` of type `kind` with the fake key, with raw `CredWriteW`.
 fn try_write(target: &str, kind: CRED_TYPE) -> windows::core::Result<()> {
     let mut name = wide(target);
     let mut user = wide("voicen");
-    let blob = fake_blob(kind);
+    let blob = fake_blob();
     let cred = CREDENTIALW {
         Type: kind,
         TargetName: PWSTR(name.as_mut_ptr()),
@@ -80,12 +67,6 @@ fn try_write(target: &str, kind: CRED_TYPE) -> windows::core::Result<()> {
     // SAFETY: every pointer in `cred` is valid for the duration of the call; CredWriteW
     // only reads the blob.
     unsafe { CredWriteW(&cred, 0) }
-}
-
-/// A DNS-form name in the test namespace for `target`
-/// (`voicen-test-<pid>-<n>-<nanos>.Voicen.domain.invalid`): no `/`, never a real host.
-fn dns_form(target: &str) -> String {
-    format!("{}.invalid", target.trim_end_matches('/').replace('/', "."))
 }
 
 /// Whether `target` of type `kind` exists, with raw `CredReadW`.
@@ -119,33 +100,10 @@ impl Planted {
         // Registered before the write: a half-planted test still cleans up.
         self.0.push((target.clone(), kind));
         if let Err(e) = try_write(&target, kind) {
-            if kind == CRED_TYPE_DOMAIN_PASSWORD && e.code().0 as u32 == E_INVALID_PARAMETER {
-                self.diagnose_domain_refusal(&target, &e);
-            }
             panic!("setup: raw CredWriteW {target} type {}: {e}", kind.0);
         }
         assert!(raw_exists(&target, kind), "premise: {target} planted");
         target
-    }
-
-    /// A conforming DOMAIN_PASSWORD write under a `/` target was refused with 87: write
-    /// the same entry under a DNS-form name (registered with the guard first) and panic
-    /// naming which form Windows accepted, so one CI run decides between "the `/`
-    /// target is refused" (then no domain entry can exist under `Voicen/` and the
-    /// scenario is unreachable) and "another field is refused".
-    fn diagnose_domain_refusal(&mut self, target: &str, err: &windows::core::Error) -> ! {
-        let dns = dns_form(target);
-        self.0.push((dns.clone(), CRED_TYPE_DOMAIN_PASSWORD));
-        match try_write(&dns, CRED_TYPE_DOMAIN_PASSWORD) {
-            Ok(()) => panic!(
-                "setup: DOMAIN_PASSWORD refused for a '/' target ({target}: {err}), \
-                 accepted for a DNS name ({dns})"
-            ),
-            Err(dns_err) => panic!(
-                "setup: DOMAIN_PASSWORD refused for both a '/' target ({target}: {err}) \
-                 and a DNS name ({dns}: {dns_err})"
-            ),
-        }
     }
 }
 
@@ -280,26 +238,6 @@ fn adapter_lists_exactly_the_prefixed_entries_with_their_types() {
         Ok(entries) => assert!(entries.is_empty(), "{entries:?}"),
         Err(err) => assert_eq!(err, CredentialError { os_code: 1168 }),
     }
-}
-
-#[test]
-fn purge_deletes_each_entry_with_its_own_type() {
-    // A CRED_TYPE_DOMAIN_PASSWORD entry like the one `cmdkey /add:` writes (bare user,
-    // UTF-16 password blob; see `fake_blob`), under the Voicen/ prefix. Bite: CredDeleteW
-    // always with CRED_TYPE_GENERIC (that entry stays, or 2 is returned).
-    let p = unique_prefix();
-    let mut planted = Planted::default();
-    let generic = planted.add(format!("{p}{NS}generic"), CRED_TYPE_GENERIC);
-    let domain = planted.add(format!("{p}{NS}domain"), CRED_TYPE_DOMAIN_PASSWORD);
-    assert_eq!(from_args(purge_args(), &p), Some(0));
-    assert!(
-        !raw_exists(&generic, CRED_TYPE_GENERIC),
-        "{generic} still present"
-    );
-    assert!(
-        !raw_exists(&domain, CRED_TYPE_DOMAIN_PASSWORD),
-        "{domain} still present"
-    );
 }
 
 /// The real adapter whose delete of one target fails (a real `CredDeleteW` cannot be

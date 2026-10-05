@@ -821,16 +821,19 @@ mod tests {
 
     #[test]
     fn purge_removes_every_prefixed_entry_and_returns_0() {
-        // Bite: a purge per KeySlot instead of the enumeration (the old-version entry
-        // stays), deleting with a fixed CRED_TYPE_GENERIC (the domain entry stays),
-        // listing with another prefix, or an exit code other than 0.
+        // `Voicen/entry-of-a-non-generic-type` is not a KeySlot target and not of the
+        // GENERIC type the app writes: no Voicen version wrote one, but anything under
+        // the prefix that Credential Manager lists is removed, whatever its type.
+        // Bite: a purge per KeySlot instead of the enumeration (that entry stays),
+        // deleting with a fixed CRED_TYPE_GENERIC (that entry stays), listing with
+        // another prefix, or an exit code other than 0.
         let fake = FakeNamespace::with(&[
             ("Voicen/transcription-api", GENERIC),
             ("VoicenOther/keep", GENERIC),
             ("Voicen/local-server", GENERIC),
             ("Voicen/post-processing", GENERIC),
             ("voicen-test-1/Voicen/transcription-api", GENERIC),
-            ("Voicen/slot-of-an-older-version", DOMAIN_PASSWORD),
+            ("Voicen/entry-of-a-non-generic-type", DOMAIN_PASSWORD),
         ]);
         assert_eq!(purge_credentials(&fake, ""), 0);
         assert_eq!(
@@ -841,7 +844,7 @@ mod tests {
         // Each entry deleted once, with its own type.
         for call in fake.calls() {
             if let NsCall::Remove(entry) = call {
-                let expected = if entry.target == "Voicen/slot-of-an-older-version" {
+                let expected = if entry.target == "Voicen/entry-of-a-non-generic-type" {
                     DOMAIN_PASSWORD
                 } else {
                     GENERIC
@@ -854,9 +857,9 @@ mod tests {
         assert_eq!(
             removed,
             [
+                "Voicen/entry-of-a-non-generic-type",
                 "Voicen/local-server",
                 "Voicen/post-processing",
-                "Voicen/slot-of-an-older-version",
                 "Voicen/transcription-api"
             ]
         );
