@@ -19,18 +19,21 @@
 //! always has that window, visible).
 #![cfg(windows)]
 
+use std::io::Read;
+use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
-use std::sync::{Arc, Barrier};
+use std::sync::{Arc, Barrier, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use windows::core::w;
 use windows::Win32::Foundation::{CloseHandle, HWND, WAIT_OBJECT_0};
 use windows::Win32::System::Threading::{
-    OpenProcess, WaitForSingleObject, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+    OpenProcess, WaitForSingleObject, CREATE_NO_WINDOW, PROCESS_QUERY_LIMITED_INFORMATION,
+    PROCESS_SYNCHRONIZE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DestroyWindow, DispatchMessageW, PeekMessageW, TranslateMessage, MSG,
@@ -162,6 +165,10 @@ struct PwshOutput {
 #[derive(Debug)]
 struct PwshStall {
     budget: Duration,
+    /// How long the call waited for its turn (`PWSH_TURN`, invariant 2) before the
+    /// child was spawned; not part of `elapsed`.
+    waited: Duration,
+    /// From the spawn (after the turn was taken) to the child killed and waited for.
     elapsed: Duration,
     /// The name of the last stage marker the child wrote to stderr (the first token of
     /// the last line that starts with `stage:`, e.g. `stage:up`); `None` when it wrote
@@ -184,9 +191,86 @@ enum PwshError {
 impl std::fmt::Display for PwshError {
     /// A stall prints "pwsh stalled", the elapsed time, the budget, the last stage and
     /// the captured stdout and stderr (invariant 3).
-    fn fmt(&self, _f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        todo!("T-057 VERIFY_FAIL 2 option A: report a stall with its stage and output")
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PwshError::Spawn(err) => write!(f, "pwsh could not be started: {err}"),
+            PwshError::Stalled(stall) => write!(
+                f,
+                "pwsh stalled: killed after {:?} (budget {:?}); last stage: {}; \
+                 stdout so far: {:?}; stderr so far: {:?}",
+                stall.elapsed,
+                stall.budget,
+                stall.stage.as_deref().unwrap_or("none"),
+                stall.stdout,
+                stall.stderr
+            ),
+        }
     }
+}
+
+/// One pwsh child at a time in this test binary (invariant 2). Held for the whole run,
+/// from spawn to the last byte read. A panic while it is held (none is expected: the
+/// helper returns errors) must not fail every later run, so a poisoned lock is taken
+/// over.
+static PWSH_TURN: Mutex<()> = Mutex::new(());
+
+/// How often the helper polls the child for its exit.
+const PWSH_POLL: Duration = Duration::from_millis(50);
+
+/// How long the helper waits for its reader threads once the child is gone. Bounded so
+/// that a grandchild holding the pipes cannot hold the helper; what was read so far is
+/// returned either way.
+const READER_GRACE: Duration = Duration::from_secs(5);
+
+/// A reader thread and the buffer it appends to.
+type Reader = (Arc<Mutex<Vec<u8>>>, JoinHandle<()>);
+
+/// Reads `source` to its end on a thread, appending to the returned buffer as bytes
+/// arrive (so a caller that stops waiting still has everything read so far).
+fn spawn_reader<R: Read + Send + 'static>(mut source: R) -> Reader {
+    let buffer = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&buffer);
+    let handle = thread::spawn(move || {
+        let mut chunk = [0u8; 4096];
+        loop {
+            match source.read(&mut chunk) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => sink
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .extend_from_slice(&chunk[..n]),
+            }
+        }
+    });
+    (buffer, handle)
+}
+
+/// Waits up to `READER_GRACE` for both readers, then returns what each has read.
+fn drain(readers: [Reader; 2]) -> (String, String) {
+    let deadline = Instant::now() + READER_GRACE;
+    while readers.iter().any(|(_, h)| !h.is_finished()) && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    let [out, err] = readers.map(|(buffer, handle)| {
+        if handle.is_finished() {
+            let _ = handle.join();
+        }
+        let bytes = buffer.lock().unwrap_or_else(|e| e.into_inner());
+        String::from_utf8_lossy(&bytes).into_owned()
+    });
+    (out, err)
+}
+
+/// The name of the last stage marker on `stderr`: the first token of the last line that
+/// starts with `stage:`.
+fn last_stage(stderr: &str) -> Option<String> {
+    stderr
+        .lines()
+        .rev()
+        .map(str::trim_start)
+        .find(|l| l.starts_with("stage:"))
+        .and_then(|l| l.split_whitespace().next())
+        .map(str::to_owned)
 }
 
 /// Runs `pwsh -NoProfile -NonInteractive -Command <command>`, the only external process
@@ -195,33 +279,61 @@ impl std::fmt::Display for PwshError {
 /// for the whole run); stdout and stderr read on threads; when `budget` runs out the
 /// child is killed and waited for and `Err(PwshError::Stalled)` carries the elapsed
 /// time, the last stage marker and the output read so far.
-///
-/// SKELETON (test-writer): the body is today's `shown_by_smoke` behaviour unchanged
-/// (inherited stdin, no flags, no lock, on timeout a panic that drops the output and
-/// leaves the child running); the developer replaces it.
 fn run_pwsh(command: &str, budget: Duration) -> Result<PwshOutput, PwshError> {
-    let child = Command::new("pwsh")
+    let called = Instant::now();
+    let _turn = PWSH_TURN.lock().unwrap_or_else(|e| e.into_inner());
+    let waited = called.elapsed();
+    let started = Instant::now();
+    let mut child = Command::new("pwsh")
         .args(["-NoProfile", "-NonInteractive", "-Command", command])
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .creation_flags(CREATE_NO_WINDOW.0)
         .spawn()
         .map_err(|err| PwshError::Spawn(err.to_string()))?;
-    let started = Instant::now();
-    let (tx, rx) = mpsc::channel();
-    thread::spawn(move || {
-        let _ = tx.send(child.wait_with_output());
-    });
-    let output = match rx.recv_timeout(budget) {
-        Ok(Ok(output)) => output,
-        Ok(Err(err)) => panic!("pwsh failed to run: {err}"),
-        Err(_) => panic!("pwsh did not finish within {budget:?}"),
+    let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(PwshError::Spawn(
+            "pwsh started without piped stdout and stderr".into(),
+        ));
     };
-    Ok(PwshOutput {
-        status: output.status,
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        elapsed: started.elapsed(),
-    })
+    let readers = [spawn_reader(stdout), spawn_reader(stderr)];
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if started.elapsed() < budget => thread::sleep(PWSH_POLL),
+            // Out of budget, or the child can no longer be polled: either way it is
+            // killed and waited for, never left running.
+            Ok(None) | Err(_) => break None,
+        }
+    };
+    match status {
+        Some(status) => {
+            let (stdout, stderr) = drain(readers);
+            Ok(PwshOutput {
+                status,
+                stdout,
+                stderr,
+                elapsed: started.elapsed(),
+            })
+        }
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            let elapsed = started.elapsed();
+            let (stdout, stderr) = drain(readers);
+            Err(PwshError::Stalled(PwshStall {
+                budget,
+                waited,
+                elapsed,
+                stage: last_stage(&stderr),
+                stdout,
+                stderr,
+            }))
+        }
+    }
 }
 
 /// The `-Command` string the predicate tests run: dot-source the smoke's script, call
@@ -229,11 +341,14 @@ fn run_pwsh(command: &str, budget: Duration) -> Result<PwshOutput, PwshError> {
 /// 3 adds stage markers on stderr, each `<name> <[Environment]::TickCount64>`:
 /// `stage:up` before the dot-source, `stage:loaded` after it (Add-Type done),
 /// `stage:enumerated` after `Get-ShownWindows`.
-///
-/// SKELETON (test-writer): today's string, without the markers.
 fn predicate_command(pid: u32) -> String {
     format!(
-        "$ErrorActionPreference = 'Stop'; . '{}'; $s = Get-ShownWindows {}; \
+        "$ErrorActionPreference = 'Stop'; \
+         [Console]::Error.WriteLine('stage:up ' + [Environment]::TickCount64); \
+         . '{}'; \
+         [Console]::Error.WriteLine('stage:loaded ' + [Environment]::TickCount64); \
+         $s = Get-ShownWindows {}; \
+         [Console]::Error.WriteLine('stage:enumerated ' + [Environment]::TickCount64); \
          foreach ($w in $s) {{ [Console]::Out.WriteLine($w.Handle.ToInt64()) }}; \
          [Console]::Out.WriteLine('end')",
         script().display(),
@@ -357,18 +472,21 @@ fn stalling_command(markers: &[&str]) -> String {
 }
 
 /// Runs `stalling_command(markers)` with `STALL_BUDGET` and checks the stall exit of
-/// invariant 3: an `Err` within budget + slack carrying the stdout and stderr read so
-/// far, a Display that names the stall, its stage and both outputs, and a child that
-/// is no longer running. Returns the stall.
+/// invariant 3: an `Err` within budget + slack of its turn carrying the stdout and
+/// stderr read so far, a Display that names the stall, its stage and both outputs, and
+/// a child that is no longer running. Returns the stall.
+///
+/// The helper's own time is measured from outside minus the time it waited for its
+/// turn (invariant 2: the stall tests run in parallel threads of one binary, so one of
+/// them waits a whole stall of the other for the lock). `waited` is reported by the
+/// helper and pinned from both sides: `outside - waited <= budget + slack` (no
+/// blocking on readers or the child past the budget) and `waited + elapsed <= outside`
+/// (an honest wait; an inflated one would hide that blocking).
 #[track_caller]
 fn stall_of(markers: &[&str]) -> PwshStall {
     let started = Instant::now();
     let result = run_pwsh(&stalling_command(markers), STALL_BUDGET);
-    let elapsed = started.elapsed();
-    assert!(
-        elapsed <= STALL_BUDGET + STALL_SLACK,
-        "a stalled pwsh held the helper for {elapsed:?} (budget {STALL_BUDGET:?})"
-    );
+    let outside = started.elapsed();
     let err = match result {
         Ok(output) => panic!("a ten-minute sleep ended within {STALL_BUDGET:?}: {output:?}"),
         Err(err) => err,
@@ -378,6 +496,20 @@ fn stall_of(markers: &[&str]) -> PwshStall {
         PwshError::Stalled(stall) => stall,
         PwshError::Spawn(err) => panic!("precondition `pwsh` on PATH does not hold: {err}"),
     };
+    assert!(
+        stall.waited + stall.elapsed <= outside,
+        "the stall reports a wait of {:?} and {:?} after it, more than the {outside:?} the \
+         call took",
+        stall.waited,
+        stall.elapsed
+    );
+    let held = outside.saturating_sub(stall.waited);
+    assert!(
+        held <= STALL_BUDGET + STALL_SLACK,
+        "a stalled pwsh held the helper for {held:?} after its turn (budget \
+         {STALL_BUDGET:?}, waited {:?} for the turn)",
+        stall.waited
+    );
     assert!(
         stall.elapsed >= STALL_BUDGET && stall.elapsed <= STALL_BUDGET + STALL_SLACK,
         "the stall reports {:?}, not the time it waited (budget {STALL_BUDGET:?})",

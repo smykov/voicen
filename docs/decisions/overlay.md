@@ -40,7 +40,7 @@ The overlay shows exactly the session's published `OverlayState`, never activate
 
 - **Defect that produced it:** F-003 (a smoke that decides on a guess instead of raw window facts). The predicate dropped `WS_EX_TOOLWINDOW` windows, so an overlay shown at start would have passed.
 - **What breaks if you violate it:** a stray window at start goes unnoticed.
-- **Where it is enforced:** `scripts/ci/visible-windows.ps1` `Get-ShownWindows` excludes only the class `Tao Thread Event Target`. Test: `smoke_predicate.rs::a_visible_unowned_tool_window_counts_as_shown`; the smoke's loaded-launch step.
+- **Where it is enforced:** `scripts/ci/visible-windows.ps1` `Get-ShownWindows` excludes only the class `Tao Thread Event Target`. Test: `smoke_predicate.rs::a_visible_unowned_tool_window_counts_as_shown`; the smoke's loaded-launch step. The test runs the script through `run_pwsh` (bounded, one at a time, stall reported with its `stage:` marker; F-006).
 - **Don't:** add an "it is our overlay" exception by class or title.
 
 ### Last window and exit
