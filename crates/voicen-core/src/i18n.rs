@@ -8,7 +8,8 @@
 //! both suites. The embedded [`text`] adds one Rust-only step on top, nested-id
 //! resolution (below): the fixture has no case for it and the UI's `t()` does not
 //! resolve nested ids, so params carrying a nested id render the same only in the
-//! shell (whether the UI mirrors it is T-006's decision).
+//! shell. The UI does not mirror it: such a message crosses IPC as text rendered
+//! here (the overlay: [`crate::overlay::overlay_payload`]; decision #64).
 //!
 //! - Lookup: the text in the requested language if non-empty, else the English
 //!   text if non-empty, else the id itself.

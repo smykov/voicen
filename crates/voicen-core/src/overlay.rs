@@ -27,9 +27,10 @@
 
 use std::time::Duration;
 
+use serde::ser::SerializeStruct;
 use serde::Serialize;
 
-use crate::i18n::UiLanguage;
+use crate::i18n::{self, UiLanguage};
 use crate::recording::OverlayState;
 
 /// What the overlay page shows (the `state` of [`OverlayPayload`]).
@@ -64,17 +65,70 @@ pub fn overlay_payload(
     seq: u64,
     elapsed: Duration,
 ) -> OverlayPayload {
-    // Skeleton (T-053 red tests): not implemented yet.
-    let _ = (state, lang, seq, elapsed);
-    todo!("T-053: overlay_payload")
+    let view = match state {
+        OverlayState::Hidden => OverlayView::Hidden,
+        OverlayState::Recording => OverlayView::Recording {
+            // Saturates instead of wrapping: u64 milliseconds is ~584 million years.
+            elapsed_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+        },
+        OverlayState::Processing => OverlayView::Processing,
+        // `until` stays in core: the session's timer expires the message.
+        OverlayState::Message { id, params, .. } => {
+            let args: Vec<(&str, &str)> = params
+                .iter()
+                .map(|(name, value)| (*name, value.as_str()))
+                .collect();
+            OverlayView::Message {
+                text: i18n::text(lang, *id, &args),
+            }
+        }
+    };
+    OverlayPayload {
+        seq,
+        lang,
+        state: view,
+    }
 }
 
-/// contracts/ipc.md `OverlayPayload` (module docs: the wire form).
+/// contracts/ipc.md `OverlayPayload`: `{ seq, lang, state }` (module docs: the wire
+/// form).
 impl Serialize for OverlayPayload {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        // Skeleton (T-053 red tests): not implemented yet.
-        let _ = serializer;
-        todo!("T-053: OverlayPayload wire")
+        let mut s = serializer.serialize_struct("OverlayPayload", 3)?;
+        s.serialize_field("seq", &self.seq)?;
+        s.serialize_field("lang", &self.lang)?;
+        s.serialize_field("state", &self.state)?;
+        s.end()
+    }
+}
+
+/// contracts/ipc.md `OverlayState`: `{ kind, ... }`, camelCase fields.
+impl Serialize for OverlayView {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            OverlayView::Recording { elapsed_ms } => {
+                let mut s = serializer.serialize_struct("OverlayState", 2)?;
+                s.serialize_field("kind", "recording")?;
+                s.serialize_field("elapsedMs", elapsed_ms)?;
+                s.end()
+            }
+            OverlayView::Processing => {
+                let mut s = serializer.serialize_struct("OverlayState", 1)?;
+                s.serialize_field("kind", "processing")?;
+                s.end()
+            }
+            OverlayView::Message { text } => {
+                let mut s = serializer.serialize_struct("OverlayState", 2)?;
+                s.serialize_field("kind", "message")?;
+                s.serialize_field("text", text)?;
+                s.end()
+            }
+            OverlayView::Hidden => {
+                let mut s = serializer.serialize_struct("OverlayState", 1)?;
+                s.serialize_field("kind", "hidden")?;
+                s.end()
+            }
+        }
     }
 }
 

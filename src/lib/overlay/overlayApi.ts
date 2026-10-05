@@ -3,11 +3,11 @@
 // One IPC module per contract (settings-ui.md › C): this module holds the only
 // listen/invoke calls of the overlay page and the one TS declaration of its wire (the
 // serde form of voicen_core::overlay::OverlayPayload, pinned by
-// e2e/fixtures/overlay-wire.json); the e2e mock re-exports these types.
-//
-// Skeleton (T-053 red tests): the wire types are the contract; the two calls are not
-// implemented yet.
-import type { UnlistenFn } from "@tauri-apps/api/event";
+// e2e/fixtures/overlay-wire.json); the e2e mock re-exports these types. Nothing here
+// decides what is shown: the seq rule and the elapsed time are state.ts's, every
+// expiry is core's.
+import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 // Relative, not `$lib`: e2e/support/tauriMock.ts imports these wire types too.
 import type { UiLanguage } from "../i18n";
 
@@ -31,13 +31,18 @@ export interface OverlayPayload {
   state: OverlayView;
 }
 
+/** contracts/ipc.md: the event the shell emits to the window labelled `overlay`. */
+const STATE_EVENT = "overlay://state";
+
 /** `overlay://state`: every change of the overlay state, emitted to the window labelled `overlay`. */
 export function onOverlayState(handler: (payload: OverlayPayload) => void): Promise<UnlistenFn> {
-  void handler;
-  throw new Error("T-053: onOverlayState is not implemented");
+  return listen<OverlayPayload>(STATE_EVENT, (event) => handler(event.payload));
 }
 
-/** `overlay_ready`: the current state, so a webview that loads late misses nothing. */
+/**
+ * `overlay_ready`: the current state, so a webview that loads late misses nothing.
+ * Invoke it only once the `overlay://state` listener is registered.
+ */
 export function overlayReady(): Promise<OverlayPayload> {
-  throw new Error("T-053: overlayReady is not implemented");
+  return invoke<OverlayPayload>("overlay_ready");
 }

@@ -4,21 +4,30 @@ The overlay is display-only (no buttons, never focused). Only the shell drives i
 
 ## Event `overlay://state` (shell → overlay webview)
 
-Emitted to the window labelled `overlay` on every change of `OverlayState`, and once right after the window has loaded (in reply to `overlay_ready`).
+Emitted to the window labelled `overlay` on every change of `OverlayState`. The same payload is the reply to `overlay_ready`.
 
 ```ts
-type OverlayStatePayload =
-  | { kind: "recording"; elapsedMs: number }            // elapsed is shown as m:ss
-  | { kind: "processing"; pending: number }             // pending = jobs not yet released
-  | { kind: "message"; key: MessageKey; params: Record<string, string>; durationMs: 3000; severity: "error" | "info" }
-  | { kind: "hidden" };                                 // the shell destroys the window after this
+type OverlayPayload = {
+  seq: number;          // the shell's number for this state, in the controller's order; higher = newer
+  lang: "en" | "ru";    // the UI language the text is rendered in; the page calls setLanguage(lang)
+  state: OverlayState;
+};
+type OverlayState =
+  | { kind: "recording"; elapsedMs: number }   // time since the shell received this Recording; shown as m:ss
+  | { kind: "processing" }
+  | { kind: "message"; text: string }          // full text, rendered by Rust in `lang`
+  | { kind: "hidden" };                        // the shell destroys the window after this
 ```
 
-`MessageKey` values and texts: [messages.md](messages.md). The overlay formats the text from the catalog in the current UI language.
+Built only by core `voicen_core::overlay::overlay_payload(&OverlayState, UiLanguage, seq, elapsed)`, serialized by its serde impl (T-053), pinned for the e2e mock by `e2e/fixtures/overlay-wire.json` (core test `e2e_overlay_wire_fixture_matches_core`).
+
+- **Text is rendered in Rust.** A message's text is `voicen_core::i18n::text(lang, id, params)`, so a nested `mic_reason.*` argument is already resolved in the same language (decision #64). The page shows `text` as given. No message id, params, severity, duration or expiry reach the wire. The page renders only its own UI-only ids, `overlay.recording` (`{elapsed}` = m:ss) and `overlay.processing`, with `t` in `lang`. Catalog texts: [messages.md](messages.md).
+- **Ordering.** The `overlay_ready` reply and an event can arrive in either order. The page applies a payload only if its `seq` is higher than the one it shows.
+- **No UI timer.** Core expires every message (3 s, or what is left of it after a release) and publishes the next state. The page changes nothing on its own; only the elapsed m:ss ticks.
 
 ## Command `overlay_ready` (overlay → shell)
 
-`invoke("overlay_ready") → OverlayStatePayload`. Returns the current state, so a freshly created webview does not miss the first event.
+`invoke("overlay_ready") → OverlayPayload`. Returns the current state, so a freshly created webview does not miss the first event. Its `elapsedMs` counts from when the shell received the Recording state, so a webview that loads late still shows the true m:ss.
 
 ## Command `open_settings` (existing settings window, owned by 004)
 
