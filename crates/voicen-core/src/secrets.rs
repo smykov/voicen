@@ -25,6 +25,14 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
+/// The literal behind [`CREDENTIAL_TARGET_PREFIX`], as a macro so the slot targets
+/// can be built from it with `concat!` (one source of truth).
+macro_rules! credential_target_prefix {
+    () => {
+        "Voicen/"
+    };
+}
+
 /// One credential slot; each maps to one Windows Credential Manager target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum KeySlot {
@@ -46,22 +54,21 @@ impl KeySlot {
         ]
     }
 
-    /// Credential Manager target name (`Voicen/...`).
+    /// Credential Manager target name: [`CREDENTIAL_TARGET_PREFIX`] + the slot's
+    /// suffix (`Voicen/...`).
     pub fn target_name(self) -> &'static str {
         match self {
-            KeySlot::TranscriptionApi => "Voicen/transcription-api",
-            KeySlot::LocalServer => "Voicen/local-server",
-            KeySlot::PostProcessing => "Voicen/post-processing",
+            KeySlot::TranscriptionApi => concat!(credential_target_prefix!(), "transcription-api"),
+            KeySlot::LocalServer => concat!(credential_target_prefix!(), "local-server"),
+            KeySlot::PostProcessing => concat!(credential_target_prefix!(), "post-processing"),
         }
     }
 }
 
 /// Every Credential Manager target the app writes starts with this (FR-022): the
-/// namespace `voicen.exe --purge-credentials` empties (T-061).
-///
-/// T-061 red-test skeleton: value and use in [`KeySlot::target_name`] are the
-/// developer's.
-pub const CREDENTIAL_TARGET_PREFIX: &str = "";
+/// namespace `voicen.exe --purge-credentials` empties (T-061). Every
+/// [`KeySlot::target_name`] is built from it.
+pub const CREDENTIAL_TARGET_PREFIX: &str = credential_target_prefix!();
 
 /// One Credential Manager entry found by a purge: its target name and credential
 /// type (`CRED_TYPE`), never its blob.
@@ -85,11 +92,35 @@ pub trait CredentialNamespace {
 /// [`CREDENTIAL_TARGET_PREFIX`]; the process exit code: 0 = all removed or none
 /// existed, 2 = at least one failed (contracts/installer-ci.md).
 ///
-/// T-061 red-test skeleton: the body is the developer's.
+/// - A listed entry whose target does not start with the prefix is never removed
+///   (the enumeration filter cannot widen the scope).
+/// - Every entry is tried once, also after a failed one.
+/// - `ERROR_NOT_FOUND` from `list` means nothing to remove; from `remove`, the entry
+///   is already gone. Any other list failure removes nothing and returns 2.
+///
+/// Nothing is logged and no blob passes through here (NFR-04).
 pub fn purge_credentials(namespace: &dyn CredentialNamespace, store_prefix: &str) -> i32 {
-    let _ = (namespace, store_prefix);
-    todo!("T-061: purge_credentials")
+    const OK: i32 = 0;
+    const FAILED: i32 = 2;
+    let prefix = format!("{store_prefix}{CREDENTIAL_TARGET_PREFIX}");
+    let entries = match namespace.list(&prefix) {
+        Ok(entries) => entries,
+        Err(err) if err.os_code == ERROR_NOT_FOUND => return OK,
+        Err(_) => return FAILED,
+    };
+    let mut code = OK;
+    for entry in entries.iter().filter(|e| e.target.starts_with(&prefix)) {
+        match namespace.remove(entry) {
+            Ok(()) => {}
+            Err(err) if err.os_code == ERROR_NOT_FOUND => {}
+            Err(_) => code = FAILED,
+        }
+    }
+    code
 }
+
+/// Win32 `ERROR_NOT_FOUND`: the credential store's "no such entry".
+const ERROR_NOT_FOUND: i32 = 1168;
 
 /// A key value. `Debug` and `Display` print `***`; no `Serialize`; the buffer is
 /// zeroed on drop.
