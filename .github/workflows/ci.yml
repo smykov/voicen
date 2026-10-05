@@ -335,3 +335,25 @@ jobs:
         with:
           name: voicen-installer-${{ env.VOICEN_COMMIT }}
           path: target/release/bundle/nsis/*-setup.exe
+      # T-059: runner capability facts for later Windows CI tests (docs/decisions/windows-ci-runner.md).
+      # A missing capability is a result line, never a red step; red only when the probe is defective:
+      # its test fails (pipefail), there is not exactly one end line, or the number of well-formed fact
+      # lines (or of all runner-probe lines but the end line) differs from it. The test is #[ignore], so
+      # the cargo test -p voicen step above only starts its exe; --no-capture because libtest swallows
+      # what a passing test prints. Last and !cancelled(): a probe defect cannot skip the deploy steps,
+      # and the facts print even when an earlier step failed.
+      - name: Runner capability probe (T-059; facts only, a missing capability is a result; docs/decisions/windows-ci-runner.md)
+        if: ${{ !cancelled() }}
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          cargo test -p voicen --test runner_probe -- --ignored --no-capture --test-threads=1 | tee runner-probe.log
+          tr -d '\r' < runner-probe.log > runner-probe.lines
+          count() { awk -v re="$1" '$0 ~ re { n++ } END { print n + 0 }' runner-probe.lines; }
+          ends=$(count '^runner-probe: end[(]facts=[0-9]+[)]$')
+          if [ "$ends" != 1 ]; then echo "::error::runner probe: $ends end lines, expected exactly 1"; exit 1; fi
+          want=$(sed -nE 's/^runner-probe: end[(]facts=([0-9]+)[)]$/\1/p' runner-probe.lines)
+          facts=$(count '^runner-probe: [a-z_]+=(ok|denied|lost|absent|skipped|timeout)([(][^()]*[)])?$')
+          all=$(count '^runner-probe: ')
+          if [ "$facts" != "$want" ] || [ "$all" != "$((want + 1))" ]; then echo "::error::runner probe: $facts well-formed fact lines and $all runner-probe lines, the end line says facts=$want"; exit 1; fi
+          echo "runner probe: $facts fact lines, as the end line says"
