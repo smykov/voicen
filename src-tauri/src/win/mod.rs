@@ -8,3 +8,13 @@ pub mod capture;
 pub mod clipboard;
 pub mod hotkey;
 pub mod paste;
+
+use windows::Win32::Foundation::WIN32_ERROR;
+
+/// The Win32 code of a failed call (the HRESULT when it is not a Win32 one): the
+/// only part of an OS error a log line carries (#45; never its text).
+fn os_code(err: &windows::core::Error) -> i32 {
+    WIN32_ERROR::from_error(err)
+        .map(|code| code.0 as i32)
+        .unwrap_or(err.code().0)
+}

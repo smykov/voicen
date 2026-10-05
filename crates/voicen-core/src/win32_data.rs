@@ -159,18 +159,24 @@ pub fn released(poll: &[Vec<u16>], is_down: impl Fn(u16) -> bool) -> bool {
         .any(|group| !group.iter().any(|&vk| is_down(vk)))
 }
 
+/// VK 0xE8: unassigned by Windows (windows 0.62.2 names no `VK_*` for it).
+const MENU_MASK_VK: u16 = 0xE8;
+
+/// Shift, Ctrl, Alt, left Win, right Win.
+const MODIFIER_WAIT_KEYS: [u16; 5] = [VK_SHIFT, VK_CONTROL, VK_MENU, VK_LWIN, VK_RWIN];
+
 /// The unassigned virtual key the hotkey thread sends (down, then up) on each
 /// `WM_HOTKEY` before calling the session, so the user's later Alt release opens no
 /// menu in the focused window (research R-2; T-006). Not a key of the closed set
 /// and not a modifier.
 pub fn menu_mask_vk() -> u16 {
-    todo!("T-006: the menu-mask virtual key (R-2)")
+    MENU_MASK_VK
 }
 
 /// The virtual keys `Paster::wait_modifiers_released` polls (data-model
 /// "DeliveryDecision": Shift, Ctrl, Alt and both Win keys; T-006).
 pub fn modifier_wait_keys() -> &'static [u16] {
-    todo!("T-006: the modifier-wait key set")
+    &MODIFIER_WAIT_KEYS
 }
 
 /// A mandatory integrity level RID (`SECURITY_MANDATORY_*_RID`).

@@ -134,7 +134,7 @@ pub fn settings_speech_languages() -> Vec<&'static str> {
     WHISPER_ISO_639_1.to_vec()
 }
 
-/// Interim until T-006 (the real registrar): fails closed. `SettingsService` does
+/// Interim until T-055 (the real registrar): fails closed. `SettingsService` does
 /// not call it before T-010 adds the hotkey save step.
 struct InterimHotkeyRegistrar;
 

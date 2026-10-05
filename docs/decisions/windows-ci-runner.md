@@ -126,12 +126,12 @@ T-052's `lifecycle.rs` (real Wry, `any_thread`, `run_return`) needs none of thes
 
 ## Observed runs
 
-Run A is recorded below (T-059 technical-writer commit). The push that carries this commit gives run B, which must re-check it; the verify record checks this table against both runs.
+Run A is recorded below (T-059 technical-writer commit); run B re-checked it (T-059 validation 1). "Agree" means the same status and the same non-timing values for every fact; the `ms` and `up_ms` timings are not compared.
 
 | Run id | Date | Commit | `image` | Fact lines (verbatim, in order) |
 |---|---|---|---|---|
 | A: 37255557467 (windows job 111593430791) | 2026-10-05 | 2e414bf | `os=win25-vs2026`, `version=20260925.250.1` | see below |
-| B | pending | | | |
+| B: 37257516843 (windows job 111599179675) | 2026-10-05 | f647d45 | `os=win25-vs2026`, `version=20260925.250.1` | the same 12 facts, all `ok`; only the timings differ from run A (see "Reading of run B") |
 
 Run A lines (`gh run view 37255557467 --job 111593430791 --log`, step "Runner capability probe", checked 2026-10-05):
 
@@ -153,7 +153,27 @@ runner-probe: end(facts=12)
 
 Reading of run A: every capability is `ok`. The probe ran in interactive session 2 (console 2, not remote) on `WinSta0` with input desktop `Default`; a Windows Terminal window (`CASCADIA_HOSTING_WINDOW_CLASS`) was in front before the probe window; the probe window became foreground in 2 ms and focus was `self`; the injected `A` reached the EDIT (`WM_KEYDOWN`, `WM_CHAR` 0x61, text 19 to 20 characters); both clipboard variants worked on the first open; the hotkey fired in 1 ms; `GetAsyncKeyState` saw all three keys down and up. `foreground_lock` 2147483647 is the raw setting value; no test depends on it.
 
-Consequence today (the table above applied to run A alone): foreground, `SendInput`, `RegisterHotKey` / `WM_HOTKEY`, `GetAsyncKeyState`, clipboard and notification area (`taskbar`) are all `ok`, so the Acceptance lines in the "stays on Windows CI" column may be asserted on CI: T-006 tests 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 15, 18, 19 and smoke 24 (T-006 Acceptance line 1 and line 3's "start window replaced"), T-057 Acceptance line 1 (target in front, no `WM_KILLFOCUS`), and T-052 test 8 (`rect().is_some()`). Rule: per the invariant a capability counts only when `ok` in every recorded run, at least A and B. Until run B (the next CI run, the push of this commit) shows the same facts, no test may rely on them and the Acceptance lines are not reworded. A fact that differs in run B counts as missing.
+Reading of run B (`gh run view 37257516843 --job 111599179675 --log`, step "Runner capability probe", checked 2026-10-05): same image and same values as run A for every fact. Timings differ: `foreground` ms=4, `sendinput` ms=879 (A: 23), `hotkey` ms=1026 (A: 1), `async_keys` ms=1026 (A: 1), `clipboard` ms=1. Windows CI budgets for `SendInput`, `WM_HOTKEY` and `GetAsyncKeyState` are sized for about 1 s and more (waits of 3 s or more; holds timed from the observed press, not from `SendInput`; F-005).
+
+Run B lines (verbatim, same step):
+
+```text
+runner-probe: image=ok(os=win25-vs2026,version=20260925.250.1)
+runner-probe: session=ok(id=2,console=2,remote=0)
+runner-probe: station=ok(name=WinSta0,visible=1)
+runner-probe: desktop=ok(thread=Default,input=Default)
+runner-probe: foreground_lock=ok(ms=2147483647)
+runner-probe: taskbar=ok
+runner-probe: foreground=ok(ms=4,before=CASCADIA_HOSTING_WINDOW_CLASS,created_fg=1,set=1,focus=self)
+runner-probe: sendinput=ok(ms=879,inserted=2,keydown=1,char=0x61,text_len_before=19,text_len=20,fg=1)
+runner-probe: clipboard=ok(ms=1,open_tries=1)
+runner-probe: clipboard_null_owner=ok(ms=0,open_tries=1)
+runner-probe: hotkey=ok(ms=1026,inserted=3,fg=1)
+runner-probe: async_keys=ok(ms=1026,up_ms=0,down=ctrl:1.alt:1.space:1,up=ctrl:1.alt:1.space:1,released=5,fg=1)
+runner-probe: end(facts=12)
+```
+
+Consequence today (the table above applied to runs A and B): foreground, `SendInput`, `RegisterHotKey` / `WM_HOTKEY`, `GetAsyncKeyState`, clipboard and notification area (`taskbar`) are all `ok`, so the Acceptance lines in the "stays on Windows CI" column may be asserted on CI: T-006 tests 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 15, 18, 19 and smoke 24 (T-006 Acceptance line 1 and line 3's "start window replaced"), T-057 Acceptance line 1 (target in front, no `WM_KILLFOCUS`), and T-052 test 8 (`rect().is_some()`). Rule: per the invariant a capability counts only when `ok` in every recorded run, at least A and B. Runs A (37255557467, 2e414bf) and B (37257516843, job 111599179675, f647d45) agree on all 12 facts (same status and non-timing values, same image), so every capability counts as `ok` in every recorded run and the "stays on Windows CI" column applies: no Acceptance line moves to the owner for a probed capability (T-006 Q6 resolved). A fact that differs in a later run counts as missing.
 
 ## Rejected approaches
 
@@ -165,5 +185,5 @@ Consequence today (the table above applied to run A alone): foreground, `SendInp
 
 ## Open
 
-- `capture_endpoints` (`waveInGetNumDevs`, `Win32_Media_Audio`) is not probed: the orchestrator decided against it (T-059 Notes, Q1), because T-006's CI tests inject audio.
+- `capture_endpoints` (`waveInGetNumDevs`, `Win32_Media_Audio`) is not probed: the orchestrator decided against it (T-059 Notes, Q1), because T-006's CI tests inject audio. So no fact says the runner has a capture endpoint: T-006's default-device capture test (test 17: frames with rate and channels, none after `stop`; NFR-02, "the microphone opens on press only") is not a CI assertion and is the owner's manual check. The error map (test 16) stays in CI.
 - T-052's dev-only `[target.'cfg(windows)'.dev-dependencies] windows` line (`Win32_UI_WindowsAndMessaging`) duplicates a feature that the release line now declares; T-052's review decides whether it stays.

@@ -16,14 +16,24 @@
 use std::io;
 use std::sync::Arc;
 
-use tauri::{AppHandle, Runtime};
-use voicen_core::pipeline::EngineFactory;
-use voicen_core::platform::{AudioSource, Clipboard, Indicator, Paster, ShellRequests};
+use tauri::{AppHandle, Manager, Runtime};
+use voicen_core::audio::AudioBuffer;
+use voicen_core::diag::{Log, LogEvent, LogObserver, WarningKind};
+use voicen_core::dictation::{DictationSession, SessionDeps};
+use voicen_core::pipeline::{EngineFactory, PipelineDeps};
+use voicen_core::platform::{
+    AudioSource, Clipboard, Indicator, Paster, PendingId, ShellRequests, TempAudioStore,
+};
+use voicen_core::post_process::PassThrough;
 use voicen_core::recording::{OverlayState, TrayState};
 use voicen_core::secrets::CredentialStore;
 use voicen_core::settings::gate::SettingsTab;
+use voicen_core::settings::service::SettingsService;
+use voicen_core::vad::{EnergyDetector, SpeechGate, VadError};
 
-use crate::tray::TrayPart;
+use crate::settings_window::{self, OpenTarget};
+use crate::tray::{self, TrayPart};
+use crate::win::hotkey::HotkeyThread;
 
 /// What the tests replace; `run()` passes the Windows adapters.
 pub struct DictationPorts {
@@ -40,20 +50,112 @@ pub struct DictationPorts {
 /// The started dictation of an app: owns the hotkey thread. Dropping it stops the
 /// hotkey thread and frees the hotkey; the session stays managed by the app.
 pub struct DictationHandle {
-    _private: (),
+    _hotkey: HotkeyThread,
 }
 
 /// Builds the one dictation session of `app` over `ports`, manages it as
 /// `Arc<DictationSession>` and starts the hotkey thread for the hotkey of the
 /// settings snapshot. Needs the managed `Arc<SettingsService>` and `Arc<Log>`
 /// (`assemble`'s wiring). `Err` when the session or the hotkey thread could not be
-/// started.
+/// started, or when the app already has a session (then nothing is started): a
+/// failed session start (or a second one) writes `dictation_start_failed`, a failed
+/// hotkey thread `hotkey_thread_failed`.
 pub fn start_dictation<R: Runtime>(
     app: &AppHandle<R>,
     ports: DictationPorts,
 ) -> io::Result<DictationHandle> {
-    let _ = (app, ports);
-    todo!("T-006: start_dictation")
+    let log = app
+        .try_state::<Arc<Log>>()
+        .map(|log| Arc::clone(&log))
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "the app manages no log"))?;
+    let failed = |err: io::Error| {
+        log.write(LogEvent::Warning {
+            kind: WarningKind::DictationStartFailed,
+            os_code: err.raw_os_error(),
+        });
+        err
+    };
+    let service = app
+        .try_state::<Arc<SettingsService>>()
+        .map(|service| Arc::clone(&service))
+        .ok_or_else(|| {
+            failed(io::Error::new(
+                io::ErrorKind::NotFound,
+                "the app manages no settings service",
+            ))
+        })?;
+    if app.try_state::<Arc<DictationSession>>().is_some() {
+        return Err(failed(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "the app already has a dictation session",
+        )));
+    }
+    let DictationPorts {
+        audio,
+        clipboard,
+        paster,
+        engine_factory,
+        indicator,
+        credentials,
+    } = ports;
+    let session = DictationSession::start(SessionDeps {
+        pipeline: PipelineDeps {
+            // Release 1 has no Silero (#62, T-043): the energy detector decides and
+            // the first decision writes the one `vad_fallback` line (FR-016).
+            gate: SpeechGate::new(Err(VadError::Unavailable), EnergyDetector::new()),
+            credentials,
+            clipboard,
+            paster,
+            temp_audio: Arc::new(NoPendingAudio),
+            observer: Arc::new(LogObserver::new(Arc::clone(&log))),
+            post_processor: Arc::new(PassThrough),
+        },
+        engine_factory,
+        audio,
+        indicator,
+        requests: Arc::new(SettingsRequests::new(app)),
+        settings: Arc::clone(&service),
+    })
+    .map_err(failed)?;
+    let session = Arc::new(session);
+    if !app.manage(Arc::clone(&session)) {
+        return Err(failed(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "the app already has a dictation session",
+        )));
+    }
+    let hotkey = service.snapshot().hotkey.clone();
+    let hotkey = HotkeyThread::start(session, &hotkey, log)?;
+    Ok(DictationHandle { _hotkey: hotkey })
+}
+
+/// The interim pending-audio store (until T-007's file store): keeps nothing, so a
+/// failed dictation leaves no pending recording (T-001 Notes).
+struct NoPendingAudio;
+
+fn not_kept() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::Unsupported,
+        "no pending audio store until T-007",
+    )
+}
+
+impl TempAudioStore for NoPendingAudio {
+    fn put_pending(&self, _id: PendingId, _audio: &AudioBuffer) -> io::Result<()> {
+        Err(not_kept())
+    }
+
+    fn get_pending(&self, _id: PendingId) -> io::Result<AudioBuffer> {
+        Err(io::Error::from(io::ErrorKind::NotFound))
+    }
+
+    fn delete_pending(&self, _id: PendingId) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn delete_all(&self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 /// `run()`'s `Indicator`: the tray half to the tray part of the app, the overlay
@@ -65,20 +167,21 @@ pub struct ShellIndicator<R: Runtime> {
 impl<R: Runtime> ShellIndicator<R> {
     /// The indicator of `app`: its tray part (`tray::part`), if the tray was built.
     pub fn new(app: &AppHandle<R>) -> ShellIndicator<R> {
-        let _ = app;
-        todo!("T-006: ShellIndicator::new")
+        ShellIndicator {
+            tray: tray::part(app),
+        }
     }
 }
 
 impl<R: Runtime> Indicator for ShellIndicator<R> {
     fn set_tray(&self, state: TrayState, retry_available: bool) {
-        let _ = (&self.tray, state, retry_available);
-        todo!("T-006: ShellIndicator::set_tray")
+        if let Some(tray) = &self.tray {
+            tray.set_tray(state, retry_available);
+        }
     }
 
-    fn set_overlay(&self, state: &OverlayState) {
-        let _ = state;
-        todo!("T-006: ShellIndicator::set_overlay")
+    fn set_overlay(&self, _state: &OverlayState) {
+        // The overlay window is T-057's.
     }
 }
 
@@ -91,14 +194,12 @@ pub struct SettingsRequests<R: Runtime> {
 
 impl<R: Runtime> SettingsRequests<R> {
     pub fn new(app: &AppHandle<R>) -> SettingsRequests<R> {
-        let _ = app;
-        todo!("T-006: SettingsRequests::new")
+        SettingsRequests { app: app.clone() }
     }
 }
 
 impl<R: Runtime> ShellRequests for SettingsRequests<R> {
     fn open_settings(&self, tab: SettingsTab) {
-        let _ = (&self.app, tab);
-        todo!("T-006: SettingsRequests::open_settings")
+        let _ = settings_window::request(&self.app, OpenTarget::Tab(tab, None));
     }
 }

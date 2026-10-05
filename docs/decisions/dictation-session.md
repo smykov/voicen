@@ -70,6 +70,12 @@ Tasks: T-051 (split from T-006 by decision #64). Decisions: #47, #48, #63, #64. 
 - **Not on the app's exit path (T-052):** the shell keeps the session as managed state and the process ends by tao's `process::exit` after `RunEvent::Exit` (only the tray "Exit" item ends it, `docs/decisions/windows-shell.md`), so `Drop` never runs at app exit: an in-flight or queued dictation is dropped with the process (spec 001 spec.md:155, "exit while processing"). Deleting the pending audio on exit (FR-032) is T-007's, on `RunEvent::Exit`.
 - **Don't:** rely on dropping the sender alone; wait at app exit for the job in flight.
 
+### The port implementations (T-006) and the release-1 defaults the session runs with
+
+- `AudioSource`: `src-tauri/src/win/capture.rs` `CpalSource` (default input device, bounded open); `Clipboard`: `win/clipboard.rs` `WinClipboard`; `Paster`: `win/paste.rs` `WinPaster`; `Indicator`: `dictation.rs` `ShellIndicator` (tray half to `tray::TrayPart`, overlay half a no-op until T-057); `ShellRequests`: `dictation.rs` `SettingsRequests` (`settings_window::request(Tab(tab, None))`, receipt dropped). Their rules (bounds under the lock, no OS text, one wiring function): `docs/decisions/windows-shell.md`.
+- `TempAudioStore`: an interim `NoPendingAudio` in `dictation.rs` whose `put_pending` fails, so a failed dictation leaves no pending recording until T-007's file store replaces it (T-001 Notes).
+- Speech gate: `SpeechGate::new(Err(VadError::Unavailable), EnergyDetector::new())` in release 1 (no Silero, #62, T-043): the energy detector decides and the first decision writes one `vad_fallback` line per process (FR-016; T-006 Q3 default).
+
 ### Win32 facts come from `win32_data` only
 
 - **Defect that produced it:** none here (analysis hypothesis 2(d), P-010).
@@ -89,5 +95,5 @@ Tasks: T-051 (split from T-006 by decision #64). Decisions: #47, #48, #63, #64. 
 
 ## Open
 
-- Converting the frames runs on the hotkey thread at release (analysis Q6); T-006 measures it on Windows.
+- Converting the frames runs on the hotkey thread at release (analysis Q6); T-006 built the hotkey thread without measuring it (the optional 30 s / 48 kHz stereo timing was not done): still open, measure on Windows before a converter thread is decided.
 - If `run_job` ever panicked, the worker would end: later recordings are dropped at the queue and the overlay stays Processing. `run_job` is written not to panic (no `unwrap` on engine or server data); no restart is built.

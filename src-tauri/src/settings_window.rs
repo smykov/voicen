@@ -140,11 +140,22 @@ impl Receipt {
     }
 }
 
+/// A [`request_with`] run.
+type Run<R> = Box<dyn FnOnce(&AppHandle<R>) -> tauri::Result<()> + Send>;
+
+/// What one request runs on the opener thread.
+enum Work<R: Runtime> {
+    /// [`request`]: open or front the window.
+    Target(OpenTarget),
+    /// [`request_with`] (tests only): the given run.
+    Run(Run<R>),
+}
+
 /// One request on the opener's queue. The handle travels with the request, so the
 /// opener thread holds no app handle of its own between requests.
 struct Job<R: Runtime> {
     app: AppHandle<R>,
-    target: OpenTarget,
+    work: Work<R>,
     done: mpsc::Sender<tauri::Result<()>>,
 }
 
@@ -171,10 +182,11 @@ pub(crate) fn start_opener<R: Runtime>(app: &AppHandle<R>, log: Arc<Log>) {
         .name("settings-window".into())
         .spawn(move || {
             for job in queue {
-                let Job { app, target, done } = job;
-                let run = std::panic::catch_unwind(AssertUnwindSafe(|| match target {
-                    OpenTarget::Tab(tab, field) => open(&app, tab, field),
-                    OpenTarget::Front => front(&app),
+                let Job { app, work, done } = job;
+                let run = std::panic::catch_unwind(AssertUnwindSafe(|| match work {
+                    Work::Target(OpenTarget::Tab(tab, field)) => open(&app, tab, field),
+                    Work::Target(OpenTarget::Front) => front(&app),
+                    Work::Run(run) => run(&app),
                 }));
                 // The kind and the OS code only, no error text (#45).
                 match run {
@@ -215,13 +227,18 @@ pub(crate) fn start_opener<R: Runtime>(app: &AppHandle<R>, log: Arc<Log>) {
 /// the opener or the main thread, so it may be called from any thread, the main
 /// thread and window procedures included.
 pub fn request<R: Runtime>(app: &AppHandle<R>, target: OpenTarget) -> Receipt {
+    post(app, Work::Target(target))
+}
+
+/// Posts `work` to the one opener thread of `app` and returns its receipt at once.
+fn post<R: Runtime>(app: &AppHandle<R>, work: Work<R>) -> Receipt {
     let (done, receipt) = mpsc::channel();
     if let Some(opener) = app.try_state::<Opener<R>>() {
         // A refused send drops the job and its sender: the receipt then reports that
         // the request cannot run.
         let _ = opener.jobs.send(Job {
             app: app.clone(),
-            target,
+            work,
             done,
         });
     }
@@ -239,8 +256,7 @@ pub fn request_with<R: Runtime>(
     app: &AppHandle<R>,
     run: Box<dyn FnOnce(&AppHandle<R>) -> tauri::Result<()> + Send>,
 ) -> Receipt {
-    let _ = (app, run);
-    todo!("T-006: the opener's test injection seam")
+    post(app, Work::Run(run))
 }
 
 /// The startup executor: carries out `startup_action(outcome, launched_by_autostart)`,

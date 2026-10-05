@@ -375,9 +375,9 @@ fn warning_kind(kind: WarningKind) -> &'static str {
         WarningKind::SettingsOpenerFailed => "settings_opener_failed",
         WarningKind::TrayFailed => "tray_failed",
         WarningKind::TrayFollowerFailed => "tray_follower_failed",
-        WarningKind::HotkeyThreadFailed => todo!("T-006: hotkey_thread_failed"),
-        WarningKind::HotkeyRegisterFailed => todo!("T-006: hotkey_register_failed"),
-        WarningKind::DictationStartFailed => todo!("T-006: dictation_start_failed"),
+        WarningKind::HotkeyThreadFailed => "hotkey_thread_failed",
+        WarningKind::HotkeyRegisterFailed => "hotkey_register_failed",
+        WarningKind::DictationStartFailed => "dictation_start_failed",
     }
 }
 

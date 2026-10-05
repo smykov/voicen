@@ -130,7 +130,7 @@ pub trait Indicator: Send + Sync {                        // built in T-051, `vo
 // Called only by the dictation session, from inside its lock, once per change; an
 // implementation must not block on another thread and must never call back into the session
 // (T-052 / T-053 hop to the main thread with a non-waiting emit or run_on_main_thread).
-// The tray half is `src-tauri` `tray::TrayPart::set_tray` (T-052; T-006's composite Indicator
+// The tray half is `src-tauri` `tray::TrayPart::set_tray` (T-052; T-006's `ShellIndicator` (`src-tauri/src/dictation.rs`; its overlay half is a no-op until T-057)
 // forwards to it): it stores the latest (state, retry_available) and posts one fire-and-forget
 // main-thread task that renders it with core's `voicen_core::tray` table; it never calls a
 // TrayIcon setter itself (those wait for the main thread). The tray's "menu opened" reaches
@@ -149,6 +149,11 @@ pub struct PendingId(/* u64, monotonic per Pipeline, never reused */);
 // CredentialStore, KeySlot and Secret are defined by 004 (`voicen_core::secrets`, decisions #21); 001 only reads:
 //   store.read(KeySlot::TranscriptionApi) -> Result<Option<Secret>, CredentialError>   // None = no key stored (NFR-04)
 // The Windows implementation is 004 T016; there is no second one.
+
+// Windows implementations (T-006, `src-tauri`, Windows CI only): AudioSource `win/capture.rs` `CpalSource`
+// (bounded open, `OPEN_BUDGET` 3 s), Clipboard `win/clipboard.rs` `WinClipboard`, Paster `win/paste.rs`
+// `WinPaster`, Indicator `dictation.rs` `ShellIndicator`, ShellRequests `dictation.rs` `SettingsRequests`;
+// `dictation::start_dictation` is the only builder of the session and the hotkey thread (`win/hotkey.rs`).
 
 pub trait TempAudioStore: Send + Sync {
     fn put_pending(&self, id: PendingId, audio: &AudioBuffer) -> std::io::Result<()>;

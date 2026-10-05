@@ -48,21 +48,25 @@ pub const TRAY_ID: &str = "voicen";
 const MENU_ON_LEFT_CLICK: bool = true;
 
 /// The view the last apply task rendered on the tray icon (its build counts as the
-/// first apply): what it asked the icon to show. Written by the task after the
-/// setters returned, also when one of them returned an error (one `tray_failed`
-/// warning); then the icon still shows an older state until the next change
-/// renders again, and tray-icon re-registers the icon after an Explorer restart
-/// (TaskbarCreated) with the last image and tooltip that were set successfully,
-/// which nothing re-applies. Written under a lock that is never held across a
-/// setter, so [`applied`] never waits for an apply in progress.
+/// first apply). Written by the task after the setters returned: `state`,
+/// `retry_available` and `lang` are what it asked the icon to show, also when a
+/// setter returned an error (one `tray_failed` warning); `icon` and `tooltip` are
+/// the last image and tooltip whose setter returned `Ok` (T-006; tauri 2.12.1 has no
+/// getter to read them back), and `menu` the last menu that was set. After a failed
+/// setter the icon still shows an older state until the next change renders again,
+/// and tray-icon re-registers the icon after an Explorer restart (TaskbarCreated)
+/// with the last image and tooltip that were set successfully, which nothing
+/// re-applies. Written under a lock that is never held across a setter, so
+/// [`applied`] never waits for an apply in progress.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Applied {
     pub state: TrayState,
     pub retry_available: bool,
     pub lang: UiLanguage,
-    /// `voicen_core::tray::icon(state)`: the image set on the icon.
+    /// `voicen_core::tray::icon(state)` of the last state whose `set_icon` returned
+    /// `Ok`: the image on the icon.
     pub icon: TrayIconKind,
-    /// The tooltip text set on the icon.
+    /// The tooltip text of the last `set_tooltip` that returned `Ok`.
     pub tooltip: String,
     /// The menu set on the icon, as `(item id, item text)` read back from its
     /// items, top to bottom.
@@ -162,13 +166,21 @@ impl<R: Runtime> Shared<R> {
             failure.get_or_insert(io_os_code(&err));
         };
         let kind = table::icon(view.state);
-        if let Err(err) = icon.set_icon(Some(image(kind))) {
-            note(err);
-        }
+        let set_kind = match icon.set_icon(Some(image(kind))) {
+            Ok(()) => Some(kind),
+            Err(err) => {
+                note(err);
+                None
+            }
+        };
         let tooltip = i18n::text(view.lang, table::tooltip(view.state), &[]);
-        if let Err(err) = icon.set_tooltip(Some(&tooltip)) {
-            note(err);
-        }
+        let set_tooltip = match icon.set_tooltip(Some(&tooltip)) {
+            Ok(()) => Some(tooltip),
+            Err(err) => {
+                note(err);
+                None
+            }
+        };
         let key = (view.lang, view.retry_available);
         let previous_key = *lock(&self.menu_key);
         let new_menu = if key == previous_key {
@@ -196,8 +208,12 @@ impl<R: Runtime> Shared<R> {
             applied.state = view.state;
             applied.retry_available = view.retry_available;
             applied.lang = view.lang;
-            applied.icon = kind;
-            applied.tooltip = tooltip;
+            if let Some(kind) = set_kind {
+                applied.icon = kind;
+            }
+            if let Some(tooltip) = set_tooltip {
+                applied.tooltip = tooltip;
+            }
             if let Some(items) = new_menu {
                 applied.menu = items;
             }

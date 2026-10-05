@@ -120,8 +120,9 @@ pub fn assemble<R: Runtime>(
 
 /// Everything that needs the startup side effects' results, on the built app (on
 /// the thread that built it): the managed state, the `settings://changed` bridge,
-/// the settings opener thread and the tray with its language follower. T-006 adds
-/// the dictation session after this, so the tray exists when it first publishes.
+/// the settings opener thread and the tray with its language follower. `run()`
+/// starts the dictation session after this (`dictation::start_dictation`, T-006),
+/// so the tray exists when it first publishes.
 fn wire<R: Runtime>(app: &AppHandle<R>, parts: Parts) {
     let Parts {
         service,
@@ -219,13 +220,44 @@ fn release_launched_by_autostart() -> bool {
     )
 }
 
+/// The release dictation ports (T-006): the Windows default microphone, the
+/// clipboard, the paster, the engine of the settings (`engine::engine_for`), the
+/// tray through [`dictation::ShellIndicator`], and `credentials`, the
+/// `SettingsService`'s own key store.
+#[cfg(windows)]
+fn release_ports<R: Runtime>(
+    app: &AppHandle<R>,
+    credentials: Arc<dyn CredentialStore>,
+) -> dictation::DictationPorts {
+    dictation::DictationPorts {
+        audio: Arc::new(win::capture::CpalSource::new()),
+        clipboard: Arc::new(win::clipboard::WinClipboard::new()),
+        paster: Arc::new(win::paste::WinPaster::new()),
+        engine_factory: None,
+        indicator: Arc::new(dictation::ShellIndicator::new(app)),
+        credentials,
+    }
+}
+
+#[cfg(not(windows))]
+fn release_ports<R: Runtime>(
+    _app: &AppHandle<R>,
+    _credentials: Arc<dyn CredentialStore>,
+) -> dictation::DictationPorts {
+    compile_error!(
+        "the Voicen app runs on Windows only: the hotkey, microphone, clipboard and paste \
+         are Win32 adapters"
+    )
+}
+
 /// The startup side effects of the primary, in this order (T-052 invariant 1:
 /// `assemble` calls this only after tauri's `build()`, so a second instance, which
 /// exits inside the single-instance plugin's setup, never runs it): the one log
 /// (`Started` first), the one `LocalModels` (its `.part` cleanup), the settings
 /// load (a first run writes `settings.json`; the Run value is reconciled). Returns
-/// the parts and the load outcome for `Ready`.
-fn release_parts() -> (Parts, LoadOutcome) {
+/// the parts, the load outcome for `Ready` and the one key store, the instance the
+/// `SettingsService` was given, for the dictation session (T-006 invariant 5).
+fn release_parts() -> (Parts, LoadOutcome, Arc<dyn CredentialStore>) {
     // The one log (T-008), Started first; every later diagnostic is a typed line on
     // it. The unwritable callback is T-054's one-time notice; until then the log
     // only degrades.
@@ -248,21 +280,27 @@ fn release_parts() -> (Parts, LoadOutcome) {
     }
     let local_models = Arc::new(local_models);
     let os_language = locale::os_language();
+    let credentials = release_credentials();
     let (service, load_outcome) = settings_ipc::load_settings(
         paths::data_dir(),
-        release_credentials(),
+        Arc::clone(&credentials),
         release_autostart(),
         local_models.store(),
         os_language.as_deref(),
         &log,
     );
-    (Parts::new(service, local_models, log), load_outcome)
+    (
+        Parts::new(service, local_models, log),
+        load_outcome,
+        credentials,
+    )
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let launched_by_autostart = release_launched_by_autostart();
     let mut load_outcome = None;
+    let mut credentials = None;
     // The single-instance plugin is registered first and only here (never in
     // `build_app` or a test: its second-instance path calls `process::exit(0)`
     // inside `build()`). Its setup decides inside `build()`, before `release_parts`.
@@ -271,11 +309,24 @@ pub fn run() {
             let _ = tray::on_second_instance(app, argv, cwd);
         }));
     let app = assemble(builder, tauri::generate_context!(), || {
-        let (parts, outcome) = release_parts();
+        let (parts, outcome, store) = release_parts();
         load_outcome = Some(outcome);
+        credentials = Some(store);
         parts
     })
     .expect("error while building tauri application");
     let load_outcome = load_outcome.expect("assemble returned the app, so it ran the parts");
-    app.run(move |app, event| on_run_event(app, event, &load_outcome, launched_by_autostart));
+    let credentials = credentials.expect("assemble returned the app, so it ran the parts");
+    // The dictation session and the hotkey thread, after the tray exists and before
+    // the loop runs; only a primary gets here (a second instance exited inside
+    // `build()`). A failed start is logged where it failed (`dictation_start_failed`,
+    // `hotkey_thread_failed`) and the app runs on without dictation (T-055/T-054 own
+    // any notice). The handle lives as long as the loop: the hotkey stays registered
+    // until the process ends.
+    let ports = release_ports(app.handle(), credentials);
+    let dictation = dictation::start_dictation(app.handle(), ports).ok();
+    app.run(move |app, event| {
+        let _dictation = &dictation;
+        on_run_event(app, event, &load_outcome, launched_by_autostart)
+    });
 }
