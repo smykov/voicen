@@ -15,6 +15,8 @@
 #      $TEAMWRIGHT_TASK) is not IN_PROGRESS or has an incomplete analysis.
 #   3. A Bash command that rewrites a task status in docs/tasks/ (sed -i, >, tee…):
 #      status changes must go through Edit/Write so the gates can see them.
+#      Appending (>>, tee -a) is allowed: it lands after the front matter, where
+#      `status:` is never read, so a note cannot change the task's state.
 #
 # ACTIVE TASK (PostToolUse): after an edit of docs/tasks/<ID>.md lands, the gate
 #   writes <ID> to .teamwright/current-task when the task is IN_PROGRESS, and clears
@@ -107,7 +109,8 @@ if io.event(data) != "PreToolUse":
 if tool == "Bash":
     cmd = ti.get("command") or ""
     if "docs/tasks/" in cmd and re.search(r"status", cmd) and re.search(
-            r"(sed\s+(-[a-zA-Z]*i|--in-place)|perl\s+-[a-zA-Z]*i|>\s*\S*docs/tasks/|\btee\b)", cmd):
+            r"(sed\s+(-[a-zA-Z]*i|--in-place)|perl\s+-[a-zA-Z]*i|(?<!>)>(?!>)\s*\S*docs/tasks/"
+            r"|\btee\b(?!\s+(-a|--append)\b))", cmd):
         io.deny("ANALYSIS GATE: task status must be changed with Edit/Write on "
                 "docs/tasks/<ID>.md, not through the shell - otherwise the analysis and "
                 "review gates cannot see the transition.", "analysis-gate")

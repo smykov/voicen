@@ -1,0 +1,145 @@
+#!/usr/bin/env python3
+"""tw-req - everything the project says about one requirement, by id (stdlib only, read-only).
+
+Agents assembled a requirement by reading docs/requirements.md, every spec and the task
+records whole: an FR-NN row in a table is not a symbol any index finds. This prints, for
+one or more ids (FR-03, NFR-02, OQ-05, ...):
+
+  * the line or table row in docs/requirements.md that defines it (plus its continuation),
+  * every section of a spec or doc that names it (specs/**, openspec/**, docs/**/*.md
+    except task records): heading path and the section text, trimmed,
+  * every task record that names it: id, status, title,
+  * its row in docs/open-questions.md, for an OQ id.
+
+  scripts/tw-req FR-03 [NFR-01 ...] [--max-lines 40] [--json]
+"""
+import argparse
+import json
+import os
+import re
+import sys
+
+ROOTS = ("specs", "openspec", "docs")
+SKIP = ("docs/tasks/", "docs/process/", "docs/process-reviews/")
+
+
+def read(path):
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            return fh.read()
+    except OSError:
+        return ""
+
+
+def id_re(rid):
+    return re.compile(r"(?<![A-Za-z0-9-])" + re.escape(rid) + r"(?![0-9])")
+
+
+def definition(text, rid):
+    """The first line naming the id in the requirements document - a table row or a list
+    item / paragraph - plus following lines until a blank line or the next row/item."""
+    lines = text.splitlines()
+    rx = id_re(rid)
+    for i, line in enumerate(lines):
+        if rx.search(line):
+            out = [line]
+            for nxt in lines[i + 1:]:
+                if not nxt.strip() or nxt.lstrip().startswith(("|", "#", "- ", "* ")) or rx.search(nxt):
+                    break
+                out.append(nxt)
+            return "\n".join(out)
+    return ""
+
+
+def sections(text, rid, max_lines):
+    """[(heading path, section text)] for sections whose own text names the id."""
+    rx = id_re(rid)
+    out, path, buf = [], [], []
+
+    def flush():
+        body = "\n".join(buf).strip()
+        if body and rx.search(body):
+            lines = body.splitlines()
+            more = len(lines) - max_lines
+            out.append((" › ".join(h for _, h in path) or "(top)",
+                        "\n".join(lines[:max_lines]) + ("\n… (%d more lines)" % more if more > 0 else "")))
+
+    for line in text.splitlines():
+        m = re.match(r"^(#{1,6})\s+(.*)", line)
+        if m:
+            flush()
+            buf = []
+            level = len(m.group(1))
+            path = [(lv, h) for lv, h in path if lv < level] + [(level, m.group(2).strip())]
+            continue
+        buf.append(line)
+    flush()
+    return out
+
+
+def task_line(path):
+    text = read(path)
+    m = re.search(r"^status:\s*(\S+)", text, re.M)
+    t = re.search(r"^title:\s*(.+)$", text, re.M)
+    return (m.group(1) if m else "?", t.group(1).strip().strip("'\"") if t else "")
+
+
+def collect(root, rid, max_lines):
+    res = {"id": rid, "definition": "", "sections": [], "tasks": [], "open_question": ""}
+    req = os.path.join(root, "docs", "requirements.md")
+    res["definition"] = definition(read(req), rid)
+    rx = id_re(rid)
+    for top in ROOTS:
+        base = os.path.join(root, top)
+        for dirpath, dirs, files in os.walk(base):
+            dirs[:] = sorted(d for d in dirs if not d.startswith("."))
+            for f in sorted(files):
+                if not f.endswith(".md"):
+                    continue
+                p = os.path.join(dirpath, f)
+                rel = os.path.relpath(p, root).replace(os.sep, "/")
+                if rel.startswith(SKIP) or rel == "docs/requirements.md":
+                    continue
+                for head, body in sections(read(p), rid, max_lines):
+                    res["sections"].append({"file": rel, "section": head, "text": body})
+    tdir = os.path.join(root, "docs", "tasks")
+    if os.path.isdir(tdir):
+        for f in sorted(os.listdir(tdir)):
+            if f.endswith(".md") and not f.startswith("_") and rx.search(read(os.path.join(tdir, f))):
+                st, title = task_line(os.path.join(tdir, f))
+                res["tasks"].append({"task": f[:-3], "status": st, "title": title})
+    if rid.startswith("OQ-"):
+        for line in read(os.path.join(root, "docs", "open-questions.md")).splitlines():
+            cells = [c.strip() for c in line.strip().strip("|").split("|")]
+            if cells and cells[0] == rid:
+                res["open_question"] = line.strip()
+    return res
+
+
+def human(r):
+    out = ["## %s" % r["id"], "", "Defined in docs/requirements.md:" if r["definition"] else
+           "Not found in docs/requirements.md.", r["definition"] or ""]
+    if r["open_question"]:
+        out += ["", "docs/open-questions.md:", r["open_question"]]
+    for s in r["sections"]:
+        out += ["", "### %s — %s" % (s["file"], s["section"]), s["text"]]
+    out += ["", "Tasks: " + ("; ".join("%s %s — %s" % (t["task"], t["status"], t["title"]) for t in r["tasks"])
+                             or "none")]
+    return "\n".join(out)
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    ap.add_argument("ids", nargs="+", help="FR-03, NFR-01, OQ-05, ...")
+    ap.add_argument("--project", default=None, help="project root (default: the git top level or cwd)")
+    ap.add_argument("--max-lines", type=int, default=40, help="lines per section (default 40)")
+    ap.add_argument("--json", action="store_true")
+    args = ap.parse_args(argv)
+    root = args.project or os.popen("git rev-parse --show-toplevel 2>/dev/null").read().strip() or os.getcwd()
+    res = [collect(root, i.strip().upper(), args.max_lines) for i in args.ids]
+    print(json.dumps(res, indent=2, ensure_ascii=False) if args.json else "\n\n".join(human(r) for r in res))
+    return 0 if any(r["definition"] or r["sections"] or r["tasks"] for r in res) else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

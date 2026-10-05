@@ -32,6 +32,10 @@
 #      orchestrator); who wrote the approval does.
 #   3. A review record with verdict REJECT_RECURRENCE that does not link an
 #      existing `type: rca` task via `rca_task:`.
+#   6. With `process.review.blocking` set in .teamwright/config.yml: an APPROVE whose
+#      `## Findings` table holds a blocking row (severity at or above the threshold,
+#      Critical, or an always-blocking category), or a REQUEST_CHANGES with none.
+#      Without the key, findings are not checked (behaviour before settings existed).
 #   4. Any verdict outside the four above; and, after 2 rounds of REQUEST_CHANGES in
 #      a row, any verdict but ESCALATE or REJECT_RECURRENCE for the third record -
 #      neither another send-back nor an APPROVE of the third attempt. Rounds are
@@ -68,6 +72,10 @@ try:
     import _hookio as io, _task as task
 except Exception:
     sys.exit(0)
+try:
+    import _config
+except Exception:
+    _config = None
 
 VERDICTS = ("APPROVE", "REQUEST_CHANGES", "REJECT_RECURRENCE", "ESCALATE")
 try:
@@ -200,6 +208,27 @@ if m and rel.startswith("docs/tasks/"):
         io.deny("REVIEW GATE: verdict REJECT_RECURRENCE without a linked rca task "
                 "(rca_task: %r does not point to an existing docs/tasks/<ID>.md with "
                 "`type: rca`). %s" % (rv.get("rca_task", ""), RCA_MSG), "review-gate")
+    proc = _config.read_process(os.path.join(root, _config.CONFIG)) if _config and hasattr(_config, "read_process") else None
+    if proc and "review.blocking" in proc["explicit"] and verdict in ("APPROVE", "REQUEST_CHANGES"):
+        # 6. the verdict must match the findings table under the owner's threshold
+        th = proc["review"]["blocking"]
+        rows = task.findings(after) if hasattr(task, "findings") else []
+        bad_sev = sorted({sv for sv, _ in rows if sv.lower() not in ("critical", "high", "medium", "low")})
+        if bad_sev:
+            io.deny("REVIEW GATE: findings need Severity Critical | High | Medium | Low (got %s)."
+                    % ", ".join(bad_sev), "review-gate")
+        blocking = [(sv, c) for sv, c in rows if _config.severity_blocks(sv, c, th)]
+        if verdict == "APPROVE" and blocking:
+            io.deny("REVIEW GATE: APPROVE with %d blocking finding(s) (%s) under threshold %r: "
+                    "a finding at or above the threshold, Critical, or of category %s returns "
+                    "the task - write REQUEST_CHANGES." % (
+                        len(blocking), ", ".join("%s/%s" % (sv, c or "-") for sv, c in blocking), th,
+                        "/".join(_config.ALWAYS_BLOCKING)), "review-gate")
+        if verdict == "REQUEST_CHANGES" and not blocking:
+            io.deny("REVIEW GATE: REQUEST_CHANGES without a blocking finding under threshold "
+                    "%r (process.review.blocking): findings below it are follow-ups, not a "
+                    "send-back - write APPROVE and keep them in the table. A finding that must "
+                    "return the task needs its real severity." % th, "review-gate")
     prior_rc = changes_in_a_row([rec for r, rec in task.review_rounds(root, tid) if r < n])
     if verdict not in ("ESCALATE", "REJECT_RECURRENCE") and prior_rc >= ESCALATE_AFTER:
         io.deny("REVIEW GATE: %s already has %d review round(s) with REQUEST_CHANGES in a "

@@ -29,6 +29,7 @@ Run these commands exactly as written: they are rendered as `scripts/tw-run <are
 
 - **Gather context with the configured tools** (the Tools section below; no hook depends on them): the context tool before plain text search, the docs tool — or the pinned version's own docs — before any package API. Never rely on memory for signatures, defaults or deprecations.
 - **An empty result is not proof of absence**, whatever the tool. Say where and how you looked.
+- **Requirements and specs by id, not by reading whole files:** `scripts/tw-req FR-03` (also `NFR-…`, `OQ-…`) prints the requirement's row, every spec or doc section that names it and the tasks that cite it. Read a whole document only when the id is not enough. Point at code by symbol (`Module::function`), not `file:line` — line numbers go stale and become docs drift.
 
 <!-- teamwright:tools:begin -->
 ## Tools
@@ -48,6 +49,7 @@ Configured by teamwright from `.teamwright/config.yml` (spec=spec-kit, context=s
 
 - **Before reading files to understand code, ask Serena.** `get_symbols_overview` for a file's structure; `find_symbol` for a definition (pass `relative_path` to scope it, `include_body: true` only for the symbol you need); `find_referencing_symbols` for every caller of a seam; `find_implementations` / `find_declaration` for interfaces.
 - **Who uses it for what:** investigator — every path that handles the concern (hypothesis "a second path"); developer — callers of the seam before changing it; test-writer — the seam's public surface; reviewer — call sites and sibling paths of every changed symbol.
+- **Documents** (`docs/`, specs): `get_symbols_overview` on the file lists its headings; read only the section you need (`find_symbol` with the heading name, or the line range it reports). A requirement id: `scripts/tw-req <ID>`.
 - **Text search** (`search_for_pattern`, or grep) is for strings, config keys, SQL, templates and files the language server does not parse; use it too when a symbol tool returns nothing or times out.
 - **An empty result is not proof of absence** — an unindexed file, an unsupported language or a dynamic call also return nothing. Say which tool and scope you used.
 - **Stale index** (results miss code you can see): tell the orchestrator to run `serena project index`; meanwhile fall back to grep and say so.

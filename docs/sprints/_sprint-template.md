@@ -16,7 +16,7 @@
 |---|---|---|---|---|
 | T-NNN | <...> | feature | P2 | <...> |
 
-Batches: 1 task by default, at most 3 — only P2/P3 tasks with no blockers; a red gate fails the whole batch.
+Tasks per pass: `process.batch` in `.teamwright/config.yml` (`/teamwright:settings`); a red gate stops the pass.
 
 ## Forks (owner decisions needed)
 

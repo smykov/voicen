@@ -75,6 +75,10 @@ tail_code: ""
 - [ ] Failure branch: <input that reproduces the defect / edge case> → <expected>, verified by <data / log>
 - [ ] Test that fails without the change: `<test name>`
 
+## Tests
+
+<test-writer: guarantee → test; bite check — each deliberately wrong implementation and the test that caught it.>
+
 ## Investigation
 
 <problem-investigator: evidence and reasoning behind the analysis block.>

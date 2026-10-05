@@ -166,6 +166,34 @@ def review_rounds(root, tid):
     return _rounds(root, tid, ".reviews")
 
 
+
+def findings(text):
+    """[(severity, category)] from the first table under `## Findings` of a review record
+    that has a Severity column (Category optional); rows without a severity are skipped."""
+    out, cols, inside = [], None, False
+    for line in text.splitlines():
+        if line.startswith("## "):
+            if inside and cols:
+                break
+            inside = line[3:].strip().lower().startswith("findings")
+            cols = None
+            continue
+        if not inside or not line.strip().startswith("|"):
+            continue
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if cols is None:
+            low = [c.lower() for c in cells]
+            if "severity" in low:
+                cols = (low.index("severity"), low.index("category") if "category" in low else None)
+            continue
+        if all(set(c) <= set("-: ") for c in cells):
+            continue
+        sev = cells[cols[0]] if cols[0] < len(cells) else ""
+        if sev:
+            cat = cells[cols[1]] if cols[1] is not None and cols[1] < len(cells) else ""
+            out.append((sev, cat))
+    return out
+
 def read(path):
     if path == "-":
         return sys.stdin.read()

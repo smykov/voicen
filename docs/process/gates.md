@@ -124,6 +124,8 @@ root cause cost a full review round; the same seam was reopened five times in a 
    If no active task is declared, this check does nothing.
 3. A shell command that rewrites a task status in `docs/tasks/` (`sed -i`, `perl -i`,
    `>`, `tee`) — status changes must go through Edit/Write so the gates see them.
+   Appending (`>>`, `tee -a`) is allowed: it lands after the front matter, where `status:`
+   is never read, so a note cannot change the task's state.
 
 **Deliberate exits** (all stay visible in the task file)
 
@@ -138,7 +140,9 @@ root cause cost a full review round; the same seam was reopened five times in a 
 **Active task.** The gate keeps `.teamwright/current-task` itself: on `PostToolUse` (the
 edit has landed) it writes the task id when the task is `IN_PROGRESS` and clears the
 file when that task leaves `IN_PROGRESS`. A denied or failed edit never changes it.
-One active task per working tree: parallel sessions need separate worktrees.
+One active task per working tree: parallel sessions need separate worktrees — which is
+how `/teamwright:parallel` runs tasks at the same time (one worktree on `tw/<ID>` and one
+session per task; each has its own active task, journal and ledgers).
 
 Configuration: `TEAMWRIGHT_ANALYSIS_FIELDS`, `TEAMWRIGHT_RCA_FIELDS`,
 `TEAMWRIGHT_CODE_STATUSES`, `TEAMWRIGHT_NONCODE_RE` ([environment](#environment-variables)).
@@ -195,6 +199,15 @@ rca_task: T-050             # required with REJECT_RECURRENCE
    `VERIFY_FAIL`, or after the owner's decision on an escalation, starts a new count.
    Deny messages quote the counted rounds.
 5. Shell commands that write review records or the `.teamwright/` ledgers and journal.
+6. With `process.review.blocking` set in `.teamwright/config.yml` (the owner's threshold,
+   `low` | `medium` | `high`): an `APPROVE` whose `## Findings` table holds a blocking
+   row, or a `REQUEST_CHANGES` with none. A row blocks when its Severity is at or above
+   the threshold, when it is Critical, or when its Category is `secret-leak`,
+   `security`, `weakened-test`, `done-not-working` or `recurrence` — at any threshold.
+   Severities other than Critical | High | Medium | Low are refused. Rows below the
+   threshold are follow-ups: the task is approved and the flow collects them into one
+   `review-follow-up` task per sprint. Without the key nothing here is checked (every
+   finding may send the task back, as before settings existed).
 
 **Human review.** A person reviewing outside Claude Code writes the record with
 `reviewer: human:<name>` and commits it. The gate accepts that record only when no agent
@@ -352,7 +365,8 @@ allowlist with an invariant" while the diff added another list of phrases. Self-
 does not catch sincere mistakes; a mechanical check does.
 
 **What it does.** Scans added lines of the staged diff (tests, docs and data files
-excluded) for *patch signatures*: recogniser/allowlist constants (`*_RE =`,
+excluded, and files the commit creates — a list in a new file is its content, not one
+more case) for *patch signatures*: recogniser/allowlist constants (`*_RE =`,
 `*_ALLOWLIST =` …) and bare string list items. If the file's area already has
 `PG_PRIOR_FIXES` (2) or more commits from the last `PG_LOOKBACK_DAYS` (90; `0` = whole
 history) whose subject looks like a fix, it prints a pointed warning; everywhere else a
@@ -403,7 +417,8 @@ was stopped. Asking a model to stop is racy; a hook is not.
 
 **What it blocks**
 
-- Any push while `TEAMWRIGHT_PAUSE` exists at the repo root (or `$TEAMWRIGHT_PAUSE_FILE`).
+- Any push while `TEAMWRIGHT_PAUSE` exists at the repo root (or `$TEAMWRIGHT_PAUSE_FILE`),
+  `wip/*` branches included.
 - A push whose unpushed commits carry code of a task that is not approved for delivery
   at the pushed revision. Approved: `CODE_COMPLETE`, `DEPLOYED`, `VERIFIED`, `DONE`
   (`$TEAMWRIGHT_PUSH_STATUSES`). Everything else — `TODO`, `ANALYSIS`, `IN_PROGRESS`,
@@ -412,11 +427,19 @@ was stopped. Asking a model to stop is racy; a hook is not.
 
 **Attribution** (one owner per commit):
 
-- A commit that touches only `docs/tasks/**` (task and review records) belongs to no
-  task — opening a `TODO` task must not dirty the tail.
+- A commit that touches only `docs/**` or the spec tool's directories (`specs/**`,
+  `openspec/**`) — task and review records, specs, decisions — belongs to no task: it
+  ships no code, so opening a `TODO` task or recording a decision must not dirty the
+  tail (`$TEAMWRIGHT_DOC_PATHS_RE`).
 - Otherwise the owner is the first task id in the message that has a
   `docs/tasks/<ID>.md`; failing that, the first task record the commit changes. Ids
   without a record are skipped; a commit with no known id is not attributed.
+
+**WIP branches — CI only, not a delivery.** A push to a remote branch matching
+`$TEAMWRIGHT_WIP_REFS_RE` (default `^refs/heads/wip/`) skips the DRAIN check and changes
+no status: it runs CI for tests the host cannot run (`areas[].ci_workflow`), so red and
+green are seen before review. Commits that exist on the remote only in wip branches are
+still undelivered: the DRAIN range of a later push ignores wip branches.
 
 **Deliberate exits:** `tail_code: ratified` in the task record (owner's decision, stays
 in history); human, one-off: `TEAMWRIGHT_ALLOW_PUSH=1 git push`.
@@ -464,6 +487,20 @@ prints a warning, when `CLAUDE.md` exceeds `TEAMWRIGHT_CLAUDE_MD_MAX_KB` (defaul
 set in `.claude/settings.json` → `env`). Fix: move decisions to
 `docs/decisions/<area>.md`, verbatim, in a separate commit.
 
+## Session check
+
+`scripts/hooks/session-check.sh` · T2 (reports, never blocks)
+
+**Incident it prevents.** A repository cloned on a second machine had the gates and
+the tasks but no plugin and no git hooks: `/teamwright:flow` was unknown, commits ran
+without the secret scan, and nothing said why.
+
+On `SessionStart` it checks that `core.hooksPath` is `scripts/hooks` and that the plugin
+recorded in `.teamwright/installed.json` (`@kit`) is installed for this project at that
+version (Claude Code's plugin registry; a registry it cannot read is skipped). Anything
+missing goes to the owner (`systemMessage`) and to the agent's context, with the
+commands that fix it. `TEAMWRIGHT_SESSION_CHECK=0` turns it off.
+
 ---
 
 ## Environment variables
@@ -486,9 +523,12 @@ guard's variables. Unset means the default.
 | `TEAMWRIGHT_GATE_LOG` | Claude Code gates | a file that gets one plain line per warning or denial: time, gate, `WARN`/`DENY`, first line of the reason (off) |
 | `TEAMWRIGHT_PAUSE_FILE` | `pre-push`, router | pause file (`TEAMWRIGHT_PAUSE` at the repository root) |
 | `TEAMWRIGHT_PUSH_STATUSES` | `pre-push` | statuses whose code may be pushed (`CODE_COMPLETE DEPLOYED VERIFIED DONE`) |
+| `TEAMWRIGHT_DOC_PATHS_RE` | `pre-push` | commits touching only these paths belong to no task (`^(docs\|specs\|openspec)/`) |
+| `TEAMWRIGHT_WIP_REFS_RE` | `pre-push` | remote refs that are CI-only pushes, not deliveries (`^refs/heads/wip/`) |
 | `TEAMWRIGHT_ALLOW_PUSH=1` | `pre-push` | one-off human override of DRAIN |
 | `PATCH_GUARD=off` | patch guard | one-off human override |
 | `TEAMWRIGHT_CLAUDE_MD_MAX_KB` | CLAUDE.md budget | warning threshold in KB (`40`, set in `.claude/settings.json` → `env`) |
+| `TEAMWRIGHT_SESSION_CHECK` | session check | `0` turns it off (on) |
 | `TEAMWRIGHT_ROOT`, `TEAMWRIGHT_CONFIG` | `scripts/tw-run` | another project root or config file |
 | `TEAMWRIGHT_OWNER=1` | installer (in the kit) | owner override outside Claude Code; ignored when `CLAUDECODE` is set |
 

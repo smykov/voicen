@@ -30,6 +30,7 @@ Run these commands exactly as written: they are rendered as `scripts/tw-run <are
 
 - **Gather context with the configured tools** (the Tools section below; no hook depends on them): the context tool before plain text search, the docs tool — or the pinned version's own docs — before any package API. Never rely on memory for signatures, defaults or deprecations.
 - **An empty result is not proof of absence**, whatever the tool. Say where and how you looked.
+- **Requirements and specs by id, not by reading whole files:** `scripts/tw-req FR-03` (also `NFR-…`, `OQ-…`) prints the requirement's row, every spec or doc section that names it and the tasks that cite it. Read a whole document only when the id is not enough. Point at code by symbol (`Module::function`), not `file:line` — line numbers go stale and become docs drift.
 
 <!-- teamwright:tools:begin -->
 ## Tools
@@ -49,6 +50,7 @@ Configured by teamwright from `.teamwright/config.yml` (spec=spec-kit, context=s
 
 - **Before reading files to understand code, ask Serena.** `get_symbols_overview` for a file's structure; `find_symbol` for a definition (pass `relative_path` to scope it, `include_body: true` only for the symbol you need); `find_referencing_symbols` for every caller of a seam; `find_implementations` / `find_declaration` for interfaces.
 - **Who uses it for what:** investigator — every path that handles the concern (hypothesis "a second path"); developer — callers of the seam before changing it; test-writer — the seam's public surface; reviewer — call sites and sibling paths of every changed symbol.
+- **Documents** (`docs/`, specs): `get_symbols_overview` on the file lists its headings; read only the section you need (`find_symbol` with the heading name, or the line range it reports). A requirement id: `scripts/tw-req <ID>`.
 - **Text search** (`search_for_pattern`, or grep) is for strings, config keys, SQL, templates and files the language server does not parse; use it too when a symbol tool returns nothing or times out.
 - **An empty result is not proof of absence** — an unindexed file, an unsupported language or a dynamic call also return nothing. Say which tool and scope you used.
 - **Stale index** (results miss code you can see): tell the orchestrator to run `serena project index`; meanwhile fall back to grep and say so.
@@ -108,11 +110,19 @@ Verification (VERIFY session) runs committed tests against the running system; i
 1. No tests around the seam yet → characterization tests first (Rules). Then list tests: guarantee → test, happy path + failure branches; plus the end-to-end test per `surface`.
 2. Write them using existing fixtures.
 3. Run `scripts/tw-run core -- cargo test -p voicen-core <files>`: they must fail on missing behaviour or on the assertion — not on a typo, import or fixture error.
-4. Lint the tests.
+4. **Bite check — before the developer, not at review.** Red alone does not prove a test bites: a test that is red because nothing exists yet can still pass a lazy implementation. In a throwaway worktree, write **2–3 deliberately wrong implementations** of the seam — the cheapest ones that a weak reading of the task would accept: return a constant or the happy-path value, skip the side effect (no write, no message, no log), handle only the first case, swallow the error — and run the tests against each. Every wrong implementation must leave at least one test red; one that turns everything green means the tests do not pin the guarantee: strengthen them and repeat. For a bug or characterization test, mutate the existing code instead (invert the condition, drop the guard). One script, cleaned up whatever happens:
+   ```sh
+   copy="$(mktemp -d)"
+   trap 'git worktree remove --force "$copy/tree"; rmdir "$copy"' EXIT
+   git worktree add --detach "$copy/tree" HEAD
+   # copy your uncommitted test files in, write a wrong implementation, run the tests there
+   ```
+   Write the result into the task record body under `## Tests` (never the front matter): one line per wrong implementation — what it did, which test went red. The reviewer reads it.
+5. Lint the tests.
 
 ## Limits
 
-- No implementation code, not even stubs to make tests compile.
+- No implementation code in the working tree, not even stubs to make tests compile. The wrong implementations of the bite check live only in the throwaway worktree and die with it.
 - Never weaken an existing test; a contradiction with the contract → report it.
 - Do not commit or spawn agents.
 
@@ -125,4 +135,5 @@ Tests: <file::test — guarantee it proves>
 Not covered: <what, why> | none
 E2E (surface <api|ui|both|none>): <file::test — Acceptance line> | not run: <why>
 Red run: N failed — reason: <missing behaviour X | assertion Y>
+Bite check: <wrong implementation — test that caught it>; … | survived: <wrong implementation> → tests strengthened
 ```

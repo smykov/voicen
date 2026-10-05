@@ -26,9 +26,14 @@ rca_task: ""
 
 ## Findings
 
-| # | Severity | Where (file:line) | Finding | Required change |
-|---|----------|-------------------|---------|-----------------|
-| 1 | | | | |
+<!-- Severity: Critical | High | Medium | Low. Category: one of the names in code-reviewer.md
+     (correctness, docs-drift, toothless-test, ...). The review gate reads these two columns:
+     with `process.review.blocking` set, REQUEST_CHANGES needs a blocking row and APPROVE
+     must have none. Rows below the threshold are follow-ups. -->
+
+| # | Severity | Category | Where (file:line) | Finding | Required change |
+|---|----------|----------|-------------------|---------|-----------------|
+| 1 | | | | | |
 
 ## Verdict rationale
 

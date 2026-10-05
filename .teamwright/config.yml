@@ -39,3 +39,14 @@ tools:
   ui_verify: playwright
   api_verify: project-runner
 language: en
+process:
+  review:
+    blocking: medium
+  batch:
+    max_tasks: 3
+    by_priority:
+      P1: 2
+    parallel: 2
+  autonomy:
+    start: auto
+    continue: true

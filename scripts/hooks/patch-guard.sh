@@ -10,7 +10,9 @@
 #   * patch signature added in an area with >= PG_PRIOR_FIXES fix commits within the
 #     last PG_LOOKBACK_DAYS days (default 90; 0 = whole history) -> warning by
 #     default (PG_MODE=warn); a BLOCK only when the project opts in with PG_MODE=block;
-#   * patch signature added anywhere else -> warning.
+#   * patch signature added anywhere else -> warning;
+#   * a file the commit creates is not inspected: a list in a new file is the file's
+#     content, not "one more case" bolted onto code that was already there.
 #   Area = the file's directory (PG_AREA=dir) or the file itself (PG_AREA=file);
 #   a file at the repository root is always its own area, never ".".
 #
@@ -102,12 +104,15 @@ try:
 except Exception:
     pass
 hits = {}   # file -> [(sig, line)]
-cur = None
+cur, new_file = None, False
 for line in git("diff", "--cached", "--unified=0", "--no-color", "--no-ext-diff").splitlines():
+    if line.startswith("--- "):
+        new_file = line[4:].strip() == "/dev/null"
+        continue
     if line.startswith("+++ "):
         p = line[4:].strip()
         cur = p[2:] if p.startswith("b/") else None
-        if cur and (exclude.search(cur) or cur in installed):
+        if cur and (new_file or exclude.search(cur) or cur in installed):
             cur = None
         continue
     if cur and line.startswith("+") and not line.startswith("+++"):

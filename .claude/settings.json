@@ -31,6 +31,10 @@
           {
             "type": "command",
             "command": "bash \"$CLAUDE_PROJECT_DIR/scripts/hooks/claude-md-budget.sh\" --session-start"
+          },
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/scripts/hooks/session-check.sh\""
           }
         ]
       }
@@ -136,5 +140,13 @@
         ]
       }
     ]
+  },
+  "extraKnownMarketplaces": {
+    "teamwright": {
+      "source": {
+        "source": "github",
+        "repo": "smykov/teamwright"
+      }
+    }
   }
 }
