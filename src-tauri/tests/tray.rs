@@ -407,11 +407,19 @@ fn the_tray_exists_after_build_idle_in_the_settings_language() {
             Some(expected(TrayState::Idle, false, lang)),
             "{lang:?}"
         );
-        // Probe for the first Windows run (no assertion): Shell_NotifyIconGetRect is
-        // Some only when the shell knows the icon, i.e. the runner has a
+        // T-057 (T-052 validation F2): Shell_NotifyIconGetRect is Some only when the
+        // shell knows the icon. The runner has a notification area (fact `taskbar`,
+        // ok in runs A and B, docs/decisions/windows-ci-runner.md), so a None here is
+        // an icon the shell never got. Bite: a tray built but never added to the
         // notification area.
         let rect = rig.tray_icon().rect();
-        eprintln!("probe: tray icon rect on this runner: {rect:?}");
+        assert!(
+            matches!(rect, Ok(Some(_))),
+            "{lang:?}: the shell knows no rect for the tray icon (Shell_NotifyIconGetRect); \
+             runner fact `taskbar` is ok in runs A and B (docs/decisions/windows-ci-runner.md), \
+             so either the icon was not added or the runner image changed (then this \
+             Acceptance moves to the owner): {rect:?}"
+        );
     }
 }
 

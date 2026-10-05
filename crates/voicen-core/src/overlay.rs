@@ -132,6 +132,445 @@ impl Serialize for OverlayView {
     }
 }
 
+// ---- window lifecycle (T-057) -------------------------------------------------------
+//
+// RED-TEST SKELETON (T-057): types and signatures only, every decision is `todo!()`.
+// The developer replaces the bodies (and the fields); the tests in `lifecycle_tests`
+// below pin the behaviour.
+
+/// Where the shell's one overlay window is in its life (T-057 invariant 2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowPhase {
+    /// No window, and none is being destroyed: a build may start.
+    Absent,
+    /// A window exists (it was built and not asked to go).
+    Live,
+    /// `Destroy` was issued; the window's own `Destroyed` event has not come yet, so
+    /// tauri still holds its label (a build now fails with `WindowLabelAlreadyExists`).
+    Destroying,
+}
+
+/// What the overlay thread does next (T-057 invariant 2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowAction {
+    /// Build the window and show the state numbered `seq` in it.
+    Build(u64),
+    /// Emit the state numbered `seq` to the live window.
+    Emit(u64),
+    /// Destroy the live window.
+    Destroy,
+    /// Nothing to do now.
+    Nothing,
+}
+
+/// The platform-free overlay window lifecycle (T-057): fed the newest published
+/// state (with the shell's `seq`) and the window's own `Destroyed`, it answers the
+/// one window operation to run. It builds only when no window exists and none is
+/// being destroyed, destroys on `Hidden`, emits only newer states to a live window,
+/// and never emits to a window being destroyed. A failed build goes back to no
+/// window and is retried only on a newer state. Pure.
+#[derive(Debug, Clone)]
+pub struct OverlayLifecycle {
+    phase: WindowPhase,
+}
+
+impl Default for OverlayLifecycle {
+    fn default() -> Self {
+        OverlayLifecycle::new()
+    }
+}
+
+impl OverlayLifecycle {
+    /// No window, nothing wanted yet.
+    pub fn new() -> OverlayLifecycle {
+        OverlayLifecycle {
+            phase: WindowPhase::Absent,
+        }
+    }
+
+    /// The window's phase after the last answer.
+    pub fn phase(&self) -> WindowPhase {
+        self.phase
+    }
+
+    /// The newest published `state`, numbered `seq` (higher = newer; a `seq` not
+    /// newer than one already seen is stale).
+    pub fn on_state(&mut self, _seq: u64, _state: &OverlayState) -> WindowAction {
+        todo!("T-057: overlay window lifecycle reducer")
+    }
+
+    /// The window's own `Destroyed` event (tauri has freed the label).
+    pub fn on_destroyed(&mut self) -> WindowAction {
+        todo!("T-057: overlay window lifecycle reducer")
+    }
+
+    /// The last `Build` returned an error: no window exists.
+    pub fn on_build_failed(&mut self) -> WindowAction {
+        todo!("T-057: overlay window lifecycle reducer")
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    //! T-057 Acceptance 2 (core half; analysis red-test table row 1): the overlay
+    //! window lifecycle reducer. State change and `Destroyed` in; `Build`, `Emit`,
+    //! `Destroy` out. The window "world" in the property test is a model of tauri's
+    //! (a label is free only after `Destroyed`), never the code under test.
+
+    use std::time::{Duration, Instant};
+
+    use super::*;
+    use crate::i18n;
+
+    fn message() -> OverlayState {
+        OverlayState::Message {
+            id: i18n::NOTICE_NO_SPEECH,
+            params: Vec::new(),
+            until: Instant::now() + Duration::from_secs(3),
+        }
+    }
+
+    fn shown_states() -> Vec<OverlayState> {
+        vec![OverlayState::Recording, OverlayState::Processing, message()]
+    }
+
+    /// A reducer with a live window showing `seq` (built from Recording).
+    fn live(seq: u64) -> OverlayLifecycle {
+        let mut r = OverlayLifecycle::new();
+        assert_eq!(
+            r.on_state(seq, &OverlayState::Recording),
+            WindowAction::Build(seq),
+            "premise: the first shown state builds"
+        );
+        r
+    }
+
+    #[test]
+    fn a_shown_state_with_no_window_builds_it() {
+        // Every non-Hidden kind builds the window when none exists, for its own seq.
+        // Bite: Build only for Recording, or a Build that carries another seq.
+        for (i, state) in shown_states().iter().enumerate() {
+            let seq = 10 + i as u64;
+            let mut r = OverlayLifecycle::new();
+            assert_eq!(
+                r.on_state(seq, state),
+                WindowAction::Build(seq),
+                "{state:?}"
+            );
+            assert_eq!(r.phase(), WindowPhase::Live, "{state:?}");
+        }
+    }
+
+    #[test]
+    fn hidden_with_no_window_does_nothing() {
+        // NFR-03: no window exists while Hidden; Hidden with none is not a Destroy.
+        // Bite: Destroy or Build on Hidden regardless of the phase.
+        let mut r = OverlayLifecycle::new();
+        assert_eq!(r.on_state(1, &OverlayState::Hidden), WindowAction::Nothing);
+        assert_eq!(r.phase(), WindowPhase::Absent);
+    }
+
+    #[test]
+    fn hidden_on_a_live_window_destroys_it() {
+        // Invariant 3: Hidden destroys the window (no hide, no Emit of Hidden).
+        // Bite: Hidden emitted to the live window instead of destroying it.
+        let mut r = live(1);
+        assert_eq!(r.on_state(2, &OverlayState::Hidden), WindowAction::Destroy);
+        assert_eq!(r.phase(), WindowPhase::Destroying);
+    }
+
+    #[test]
+    fn hidden_then_recording_while_destroying_builds_only_after_destroyed() {
+        // Acceptance 2 (failure branch): a sub-0.3 s tap then a new press gives
+        // Recording -> Hidden -> Recording. The rebuild waits for the old window's
+        // Destroyed (tauri frees the label only then, manager/window.rs:70-71), and
+        // then builds exactly once, for the newest seq. Bite: a Build while
+        // Destroying (the "label already exists" error), or a Destroyed that forgets
+        // the state wanted meanwhile.
+        let mut r = live(1);
+        assert_eq!(r.on_state(2, &OverlayState::Hidden), WindowAction::Destroy);
+        assert_eq!(
+            r.on_state(3, &OverlayState::Recording),
+            WindowAction::Nothing,
+            "a build before Destroyed"
+        );
+        assert_eq!(r.phase(), WindowPhase::Destroying);
+        assert_eq!(r.on_destroyed(), WindowAction::Build(3));
+        assert_eq!(r.phase(), WindowPhase::Live);
+        // Exactly one build: the same seq again is nothing.
+        assert_eq!(
+            r.on_state(3, &OverlayState::Recording),
+            WindowAction::Nothing,
+            "a second build or emit of the seq the build already showed"
+        );
+    }
+
+    #[test]
+    fn a_state_change_while_destroying_emits_nothing() {
+        // Invariant 2: nothing is sent to a window being destroyed; the newest state
+        // waits for Destroyed. Bite: Emit while Destroying.
+        let mut r = live(1);
+        assert_eq!(r.on_state(2, &OverlayState::Hidden), WindowAction::Destroy);
+        for (i, state) in shown_states().iter().enumerate() {
+            assert_eq!(
+                r.on_state(3 + i as u64, state),
+                WindowAction::Nothing,
+                "{state:?} while Destroying"
+            );
+        }
+        assert_eq!(r.phase(), WindowPhase::Destroying);
+        let last = 3 + shown_states().len() as u64 - 1;
+        assert_eq!(r.on_destroyed(), WindowAction::Build(last));
+    }
+
+    #[test]
+    fn recording_hidden_recording_coalesced_on_a_live_window_emits_and_never_destroys() {
+        // The mailbox keeps only the newest state: Recording(2), Hidden(3),
+        // Recording(4) published before the thread woke reach the reducer as
+        // Recording(4). The live window stays and gets seq 4. Bite: a Destroy (or
+        // rebuild) for a Hidden the reducer never saw, or an Emit of an older seq.
+        let mut r = live(1);
+        assert_eq!(
+            r.on_state(4, &OverlayState::Recording),
+            WindowAction::Emit(4)
+        );
+        assert_eq!(r.phase(), WindowPhase::Live);
+    }
+
+    #[test]
+    fn each_newer_shown_state_on_a_live_window_is_emitted_with_its_seq() {
+        // Acceptance 1: Recording -> Processing -> Message reach the one live
+        // window as emits (no rebuild, no destroy). Bite: a Build or Destroy per
+        // state change, or a constant seq.
+        let mut r = live(1);
+        assert_eq!(
+            r.on_state(2, &OverlayState::Processing),
+            WindowAction::Emit(2)
+        );
+        assert_eq!(r.on_state(3, &message()), WindowAction::Emit(3));
+        assert_eq!(
+            r.on_state(7, &OverlayState::Recording),
+            WindowAction::Emit(7)
+        );
+        assert_eq!(r.phase(), WindowPhase::Live);
+    }
+
+    #[test]
+    fn a_stale_or_repeated_seq_changes_nothing() {
+        // The page keeps the highest seq (contracts/ipc.md); the thread may be woken
+        // with no newer state (a Destroyed, a spurious wake). A seq not newer than
+        // the last seen is no Emit, and a stale Hidden destroys nothing. Bite: no
+        // seq check (re-emit on every wake), or a stale Hidden acted on.
+        let mut r = live(1);
+        assert_eq!(
+            r.on_state(5, &OverlayState::Processing),
+            WindowAction::Emit(5)
+        );
+        assert_eq!(
+            r.on_state(5, &OverlayState::Processing),
+            WindowAction::Nothing
+        );
+        assert_eq!(
+            r.on_state(4, &OverlayState::Recording),
+            WindowAction::Nothing
+        );
+        assert_eq!(r.on_state(3, &OverlayState::Hidden), WindowAction::Nothing);
+        assert_eq!(r.phase(), WindowPhase::Live);
+        // And a stale shown state never builds once Hidden destroyed the window.
+        assert_eq!(r.on_state(6, &OverlayState::Hidden), WindowAction::Destroy);
+        assert_eq!(r.on_destroyed(), WindowAction::Nothing);
+        assert_eq!(
+            r.on_state(5, &OverlayState::Recording),
+            WindowAction::Nothing
+        );
+        assert_eq!(r.phase(), WindowPhase::Absent);
+    }
+
+    #[test]
+    fn destroyed_with_hidden_still_wanted_builds_nothing() {
+        // NFR-03: after Hidden the window stays gone. Bite: Destroyed always
+        // rebuilding.
+        let mut r = live(1);
+        assert_eq!(r.on_state(2, &OverlayState::Hidden), WindowAction::Destroy);
+        assert_eq!(r.on_destroyed(), WindowAction::Nothing);
+        assert_eq!(r.phase(), WindowPhase::Absent);
+    }
+
+    #[test]
+    fn a_failed_build_returns_to_no_window_and_retries_only_on_a_newer_state() {
+        // Analysis design: a Build error moves back to no window; retry only on the
+        // next state change, never in a loop. Bite: phase left Live after a failed
+        // build (no rebuild ever), or a retry on the same seq (a build loop).
+        let mut r = live(1);
+        assert_eq!(r.on_build_failed(), WindowAction::Nothing);
+        assert_eq!(r.phase(), WindowPhase::Absent);
+        assert_eq!(
+            r.on_state(1, &OverlayState::Recording),
+            WindowAction::Nothing,
+            "a retry of the failed seq"
+        );
+        assert_eq!(
+            r.on_state(2, &OverlayState::Processing),
+            WindowAction::Build(2)
+        );
+        assert_eq!(r.phase(), WindowPhase::Live);
+    }
+
+    /// xorshift64*: a fixed-seed generator (no new crate), so a failure replays.
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 >> 12;
+            self.0 ^= self.0 << 25;
+            self.0 ^= self.0 >> 27;
+            self.0.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        }
+
+        fn below(&mut self, n: u64) -> u64 {
+            self.next() % n
+        }
+    }
+
+    /// tauri's side of the window, as the shell sees it: a label exists from a
+    /// Build until that window's Destroyed, which comes some time after Destroy.
+    #[derive(Debug, Default)]
+    struct World {
+        exists: bool,
+        destroy_pending: bool,
+        /// The seq the window shows (set by Build and Emit).
+        showing: Option<u64>,
+        builds: u32,
+    }
+
+    impl World {
+        /// Applies `action`, panicking on any operation tauri would refuse or the
+        /// invariant forbids. `newest` is the newest seq the reducer was given.
+        fn apply(&mut self, action: WindowAction, newest: u64, trace: &[String]) {
+            match action {
+                WindowAction::Build(seq) => {
+                    assert!(
+                        !self.exists,
+                        "Build while the label is still taken (no Destroyed since the \
+                         last Build): {trace:#?}"
+                    );
+                    assert!(seq <= newest, "Build of an unseen seq {seq}: {trace:#?}");
+                    self.exists = true;
+                    self.showing = Some(seq);
+                    self.builds += 1;
+                }
+                WindowAction::Emit(seq) => {
+                    assert!(
+                        self.exists && !self.destroy_pending,
+                        "Emit to no live window: {trace:#?}"
+                    );
+                    assert!(
+                        self.showing.is_some_and(|s| seq > s) && seq <= newest,
+                        "Emit of seq {seq} not newer than the shown {:?} (newest {newest}): \
+                         {trace:#?}",
+                        self.showing
+                    );
+                    self.showing = Some(seq);
+                }
+                WindowAction::Destroy => {
+                    assert!(
+                        self.exists && !self.destroy_pending,
+                        "Destroy of no live window: {trace:#?}"
+                    );
+                    self.destroy_pending = true;
+                }
+                WindowAction::Nothing => {}
+            }
+        }
+
+        /// The window's Destroyed, if a Destroy is outstanding.
+        fn destroyed(&mut self) -> bool {
+            if !self.destroy_pending {
+                return false;
+            }
+            self.exists = false;
+            self.destroy_pending = false;
+            self.showing = None;
+            true
+        }
+    }
+
+    fn state_of(kind: u64) -> OverlayState {
+        match kind {
+            0 => OverlayState::Hidden,
+            1 => OverlayState::Recording,
+            2 => OverlayState::Processing,
+            _ => message(),
+        }
+    }
+
+    #[test]
+    fn any_sequence_never_builds_over_a_taken_label_and_settles_to_the_newest_state() {
+        // The invariant, not the known cases: for 2000 random interleavings of new
+        // states (Hidden about half the time) and Destroyed events (delivered at a
+        // random later point, as the Wry loop does), no Build is issued while the
+        // label is taken, no Emit or Destroy reaches a window that is not live, every
+        // Emit is newer than what the window shows, and once every Destroyed has
+        // arrived the window exists exactly when the newest state is not Hidden and
+        // then shows the newest seq. Bite: any of the single-case shortcuts above.
+        let mut rng = Rng(0x7057_0057_0000_0001);
+        for run in 0..2000u32 {
+            let mut r = OverlayLifecycle::new();
+            let mut world = World::default();
+            let mut trace: Vec<String> = Vec::new();
+            let mut seq = 0u64;
+            let mut newest_hidden = true;
+            let steps = 1 + rng.below(24);
+            for _ in 0..steps {
+                if world.destroy_pending && rng.below(3) == 0 {
+                    world.destroyed();
+                    let action = r.on_destroyed();
+                    trace.push(format!("Destroyed -> {action:?}"));
+                    world.apply(action, seq, &trace);
+                } else {
+                    seq += 1;
+                    let kind = if rng.below(2) == 0 {
+                        0
+                    } else {
+                        1 + rng.below(3)
+                    };
+                    let state = state_of(kind);
+                    newest_hidden = kind == 0;
+                    let action = r.on_state(seq, &state);
+                    trace.push(format!("{seq} {state:?} -> {action:?}"));
+                    world.apply(action, seq, &trace);
+                }
+            }
+            // Settle: the outstanding Destroyed arrives.
+            if world.destroyed() {
+                let action = r.on_destroyed();
+                trace.push(format!("Destroyed (settle) -> {action:?}"));
+                world.apply(action, seq, &trace);
+            }
+            assert!(
+                !world.destroy_pending,
+                "run {run}: a Destroy issued after the window's Destroyed: {trace:#?}"
+            );
+            assert_eq!(
+                world.exists, !newest_hidden,
+                "run {run}: settled with window={} for a newest state hidden={newest_hidden}: \
+                 {trace:#?}",
+                world.exists
+            );
+            if world.exists {
+                assert_eq!(
+                    world.showing,
+                    Some(seq),
+                    "run {run}: the settled window does not show the newest seq: {trace:#?}"
+                );
+                assert_eq!(r.phase(), WindowPhase::Live, "run {run}: {trace:#?}");
+            } else {
+                assert_eq!(r.phase(), WindowPhase::Absent, "run {run}: {trace:#?}");
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! T-053 Acceptance 2 and 3 (core half; red-test table rows 1 and 2 of the

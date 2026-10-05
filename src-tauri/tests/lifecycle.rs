@@ -34,13 +34,15 @@ use voicen_core::diag::Log;
 use voicen_core::local_models::catalog::MODELS;
 use voicen_core::local_models::service::LocalModels;
 use voicen_core::local_models::store::ModelStore;
-use voicen_core::recording::TrayState;
+use voicen_core::platform::Indicator;
+use voicen_core::recording::{OverlayState, TrayState};
 use voicen_core::secrets::{CredentialStore, FakeCredentialStore};
 use voicen_core::settings::LoadOutcome;
 use voicen_core::test_support::local_models::FakeDisk;
 use voicen_core::test_support::TempDir;
 use voicen_core::timeouts::Timeouts;
 use voicen_core::tray::TrayAction;
+use voicen_lib::dictation::ShellIndicator;
 use voicen_lib::settings_ipc::load_settings;
 use voicen_lib::settings_window::LABEL;
 use voicen_lib::tray::{self, TRAY_ID};
@@ -326,6 +328,151 @@ fn destroying_the_last_window_keeps_the_app_running() {
          (ExitRequested {{ code: None }} not prevented): {report:?}"
     );
     assert_eq!(code, 0, "run_return code after end_loop(0)");
+}
+
+/// The overlay window's label (spec 001 contracts/ipc.md; T-057).
+const OVERLAY: &str = "overlay";
+
+#[derive(Debug, Default)]
+struct OverlayCloseReport {
+    tray: bool,
+    shown: bool,
+    gone: bool,
+    alive_at_once: bool,
+    alive_later: bool,
+    log: Vec<String>,
+}
+
+#[test]
+fn destroying_the_overlay_as_the_last_window_keeps_the_app_while_the_tray_exists() {
+    // T-057 analysis fact 5 and red-test table row 6: on a loaded start the overlay
+    // is the app's only window, so Hidden destroying it raises
+    // ExitRequested { code: None } (runtime-wry lib.rs:4256-4270). With the tray the
+    // app keeps running: a main-thread round trip still answers, at once and a second
+    // later. Red until the overlay exists (no window is built). Bite: the overlay
+    // window destroyed without the guard of `on_run_event` applying (a second exit
+    // rule), or the overlay never built.
+    let _serial = serial();
+    let _watchdog =
+        watchdog("destroying_the_overlay_as_the_last_window_keeps_the_app_while_the_tray_exists");
+    let dir = TempDir::new();
+    let (app, outcome) = wry_app(dir.path(), Start::Loaded);
+    let logs_of = dir.path().to_path_buf();
+
+    let (code, report) = run_with_driver(app, outcome, move |handle| {
+        let indicator = ShellIndicator::new(&handle);
+        let mut report = OverlayCloseReport {
+            tray: handle.tray_by_id(TRAY_ID).is_some(),
+            ..OverlayCloseReport::default()
+        };
+        indicator.set_overlay(&OverlayState::Recording);
+        report.shown = poll(BUDGET, || handle.get_webview_window(OVERLAY).is_some());
+        if report.shown {
+            indicator.set_overlay(&OverlayState::Hidden);
+            report.gone = poll(BUDGET, || handle.get_webview_window(OVERLAY).is_none());
+            report.alive_at_once = main_round_trip(&handle);
+            thread::sleep(Duration::from_secs(1));
+            report.alive_later = main_round_trip(&handle);
+        } else {
+            report.log = logged(&logs_of);
+        }
+        end_loop(&handle, 0);
+        report
+    });
+
+    let report = report.expect("the driver sent no report");
+    assert!(report.tray, "premise: the tray exists: {report:?}");
+    assert!(
+        report.shown,
+        "Recording built no `{OVERLAY}` window within {BUDGET:?}: {report:#?}"
+    );
+    assert!(
+        report.gone,
+        "premise: Hidden destroyed the overlay: {report:?}"
+    );
+    assert!(
+        report.alive_at_once && report.alive_later,
+        "the app ended when the overlay, its last window, was destroyed while the tray \
+         exists (ExitRequested {{ code: None }} not prevented): {report:?}"
+    );
+    assert_eq!(code, 0, "run_return code after end_loop(0)");
+}
+
+#[derive(Debug, Default)]
+struct NoTrayReport {
+    opened: bool,
+    tray_removed: bool,
+    destroyed: bool,
+    /// A main-thread round trip failed within `BUDGET` after the destroy: the loop
+    /// ended by itself.
+    ended: bool,
+}
+
+#[test]
+fn without_the_tray_destroying_the_last_window_ends_the_app() {
+    // T-052 validation F3, T-057 Q1 (default: keep the guard as it is): the branch
+    // "no tray -> do not prevent exit" of `on_run_event`. Without a tray there is no
+    // other way to end the process, so destroying the last window ends the loop by
+    // itself (ExitRequested { code: None } passes): `run_return` returns before the
+    // fallback ends it with code 70. Characterization (green before T-057; it must
+    // stay green): the window is the first-run settings window, which exists today.
+    // Bite: `prevent_exit` applied whatever the tray (the loop runs on until the
+    // fallback), e.g. an "it was the overlay" exception that also catches this path.
+    let _serial = serial();
+    let _watchdog = watchdog("without_the_tray_destroying_the_last_window_ends_the_app");
+    let dir = TempDir::new();
+    let (app, outcome) = wry_app(dir.path(), Start::FirstRun);
+
+    let (code, report) = run_with_driver(app, outcome, move |handle| {
+        let mut report = NoTrayReport {
+            opened: poll(BUDGET, || handle.get_webview_window(LABEL).is_some()),
+            ..NoTrayReport::default()
+        };
+        // The fallback ends a loop that is still running; on an ended loop its task
+        // never runs.
+        let fallback = handle.clone();
+        thread::spawn(move || {
+            thread::sleep(BUDGET * 2);
+            end_loop(&fallback, FALLBACK_CODE);
+        });
+        if !report.opened {
+            return report;
+        }
+        // Removed (and the removed icon dropped) on the main thread, where tauri's
+        // tray calls run.
+        let (removed_tx, removed_rx) = mpsc::channel();
+        let inner = handle.clone();
+        let _ = handle.run_on_main_thread(move || {
+            let removed = inner.remove_tray_by_id(TRAY_ID);
+            let _ = removed_tx.send(removed.is_some());
+        });
+        report.tray_removed = removed_rx.recv_timeout(BUDGET).unwrap_or(false)
+            && handle.tray_by_id(TRAY_ID).is_none();
+        if !report.tray_removed {
+            return report;
+        }
+        report.destroyed = handle
+            .get_webview_window(LABEL)
+            .is_some_and(|w| w.destroy().is_ok());
+        report.ended = poll(BUDGET, || !main_round_trip(&handle));
+        report
+    });
+
+    let report = report.expect("the driver sent no report");
+    assert!(
+        report.opened && report.tray_removed && report.destroyed,
+        "premise: the settings window opened, the tray was removed and the window \
+         destroyed: {report:?}"
+    );
+    assert!(
+        report.ended,
+        "without a tray the loop still answered {BUDGET:?} after its last window was \
+         destroyed (ExitRequested {{ code: None }} prevented): {report:?}"
+    );
+    assert_ne!(
+        code, FALLBACK_CODE,
+        "run_return code {FALLBACK_CODE}: the loop ran on until the fallback ended it"
+    );
 }
 
 #[derive(Debug, Default)]

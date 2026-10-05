@@ -1,7 +1,8 @@
 //! Shared helpers of T-006's Windows CI tests (`hotkey.rs`, `clipboard.rs`, `paste.rs`,
 //! `dictation_e2e.rs`, `delivery.rs`): test windows on their own thread, injected keys,
 //! clipboard read-back, the loud runner preconditions, a fixed-text test engine and the
-//! app rig over `build_app` + `start_dictation`.
+//! app rig over `build_app` + `start_dictation`. T-057's `overlay.rs` adds the focus-loss
+//! record of a test window ([`TestWindow::focus_losses`]).
 //!
 //! Runner capabilities: every helper that needs one asserts it through [`precondition`],
 //! which names the capability and `docs/decisions/windows-ci-runner.md` (all `ok` in runs A
@@ -62,9 +63,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CallWindowProcW, CreateWindowExW, DestroyWindow, DispatchMessageW, GetClassNameW,
     GetForegroundWindow, GetWindowTextW, PeekMessageW, SetForegroundWindow, SetWindowLongPtrW,
     TranslateMessage, CW_USEDEFAULT, GWLP_WNDPROC, HWND_MESSAGE, MSG, PM_REMOVE, SC_KEYMENU,
-    WINDOW_EX_STYLE, WINDOW_STYLE, WM_CHAR, WM_ENTERMENULOOP, WM_INITMENU, WM_KEYDOWN, WM_KEYUP,
-    WM_PASTE, WM_SYSCHAR, WM_SYSCOMMAND, WM_SYSKEYDOWN, WM_SYSKEYUP, WNDPROC, WS_CAPTION,
-    WS_OVERLAPPEDWINDOW, WS_POPUP, WS_VISIBLE,
+    WA_INACTIVE, WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE, WM_CHAR, WM_ENTERMENULOOP,
+    WM_INITMENU, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS, WM_NCACTIVATE, WM_PASTE, WM_SYSCHAR,
+    WM_SYSCOMMAND, WM_SYSKEYDOWN, WM_SYSKEYUP, WNDPROC, WS_CAPTION, WS_OVERLAPPEDWINDOW, WS_POPUP,
+    WS_VISIBLE,
 };
 
 /// The shortest wait for anything the runner does (run B: ~1 s for `SendInput` and
@@ -352,6 +354,22 @@ const RECORDED: [u32; 10] = [
 /// `(hwnd, message, wParam)` of every recorded message of every test window.
 static RECORD: Mutex<Vec<(isize, u32, usize)>> = Mutex::new(Vec::new());
 
+/// T-057: `(hwnd, message, wParam)` of every focus or activation loss of every test
+/// window (`WM_KILLFOCUS`; `WM_ACTIVATE` with `WA_INACTIVE`; `WM_NCACTIVATE` drawn
+/// inactive). Kept apart from [`RECORD`], which `bring_to_front` clears and the key
+/// tests read whole.
+static FOCUS_LOST: Mutex<Vec<(isize, u32, usize)>> = Mutex::new(Vec::new());
+
+/// True for a message that tells a window it lost the keyboard focus or activation.
+fn is_focus_loss(msg: u32, wparam: usize) -> bool {
+    match msg {
+        WM_KILLFOCUS => true,
+        WM_ACTIVATE => (wparam & 0xFFFF) as u32 == WA_INACTIVE,
+        WM_NCACTIVATE => wparam == 0,
+        _ => false,
+    }
+}
+
 /// The EDIT class's own window procedure (the same for every EDIT window).
 static ORIGINAL: AtomicIsize = AtomicIsize::new(0);
 
@@ -365,6 +383,9 @@ unsafe extern "system" fn recorder(
 ) -> LRESULT {
     if RECORDED.contains(&msg) {
         lock(&RECORD).push((hwnd.0 as isize, msg, wparam.0));
+    }
+    if is_focus_loss(msg, wparam.0) {
+        lock(&FOCUS_LOST).push((hwnd.0 as isize, msg, wparam.0));
     }
     if msg == WM_SYSCOMMAND && (wparam.0 & 0xFFF0) == SC_KEYMENU as usize {
         return LRESULT(0);
@@ -445,6 +466,18 @@ impl TestWindow {
     pub fn messages(&self) -> Vec<(u32, usize)> {
         let me = self.hwnds[0];
         lock(&RECORD)
+            .iter()
+            .filter(|(h, _, _)| *h == me)
+            .map(|&(_, m, w)| (m, w))
+            .collect()
+    }
+
+    /// T-057: every focus or activation loss of the top-level window so far, in order
+    /// (`(message, wParam)`; see [`FOCUS_LOST`]). A test takes the length after
+    /// [`TestWindow::front`] and reads only what came later.
+    pub fn focus_losses(&self) -> Vec<(u32, usize)> {
+        let me = self.hwnds[0];
+        lock(&FOCUS_LOST)
             .iter()
             .filter(|(h, _, _)| *h == me)
             .map(|&(_, m, w)| (m, w))
