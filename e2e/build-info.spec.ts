@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test } from "./support/boot";
 import { calls, installTauriMock } from "./support/tauriMock";
 
 // The Tauri IPC is mocked (e2e/support/tauriMock.ts): the web UI runs in Chromium

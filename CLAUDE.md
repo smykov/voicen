@@ -27,7 +27,7 @@ Voicen — a Windows desktop dictation tool: a global hotkey records the microph
 | `crates/voicen-core/` | Platform-independent core (area `core`): engines, pipeline, settings, VAD gate, build info |
 | `src-tauri/` | Tauri shell: tray, hotkey, capture, clipboard, paste, IPC commands — Windows-only, built and tested only in Windows CI |
 | `src/` | Web UI (area `ui`); unit tests `src/**/*.test.ts` |
-| `e2e/` | Playwright UI tests, Tauri IPC mocked via `window.__TAURI_INTERNALS__` |
+| `e2e/` | Playwright UI tests, Tauri IPC mocked via `window.__TAURI_INTERNALS__`; specs import `test`/`expect` from `e2e/support/boot` (boot fixture); each run builds and serves privately (`docs/decisions/ui-e2e.md`) |
 | `docker/rust.Dockerfile` | Toolchain image `voicen-rust:1.99` for area `core` (`make core-image`) |
 | `.github/workflows/ci.yml` | Linux gate + Windows build / silent install / smoke (= "deployed") |
 | `docs/plan.md` | Stages and what is in each |

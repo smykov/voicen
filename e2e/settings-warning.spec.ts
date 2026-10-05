@@ -32,7 +32,8 @@
 //   exactly once); after a Saved without warnings the status reads `t(settings.saved)`
 //   only (T-015 review round 1 #3).
 import { readFileSync } from "node:fs";
-import { expect, test, type Page } from "@playwright/test";
+import type { Page } from "@playwright/test";
+import { expect, test } from "./support/boot";
 import {
   calls,
   emit,

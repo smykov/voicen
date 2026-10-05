@@ -36,7 +36,8 @@
 //   id; `bind:value` on the draft's model_id; it carries aria-invalid / aria-describedby
 //   like every control (U2).
 import { readFileSync } from "node:fs";
-import { expect, test, type Page } from "@playwright/test";
+import type { Page } from "@playwright/test";
+import { expect, test } from "./support/boot";
 import {
   calls,
   emitted,

@@ -17,7 +17,8 @@
 // - form-level messages (form_error, a rejected invoke) are in a `role="alert"`;
 // - the Save button has test id `settings-save`.
 import { readFileSync } from "node:fs";
-import { expect, test, type Page } from "@playwright/test";
+import type { Page } from "@playwright/test";
+import { expect, test } from "./support/boot";
 import {
   calls,
   coreSpeechLanguages,

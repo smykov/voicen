@@ -23,7 +23,8 @@
 // is registered before any listener that can build a draft (D: a `settings://changed`
 // arriving while the guard's listen is pending builds no editable draft).
 import { readFileSync } from "node:fs";
-import { expect, test, type Page } from "@playwright/test";
+import type { Page } from "@playwright/test";
+import { expect, test } from "./support/boot";
 import {
   calls,
   emit,

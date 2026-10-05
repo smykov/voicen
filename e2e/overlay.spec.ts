@@ -31,7 +31,8 @@
 // loaded (so waiting in an assertion does not move the page's time), `runFor` to
 // advance it and fire every due timer.
 import { readFileSync } from "node:fs";
-import { expect, test, type Page } from "@playwright/test";
+import type { Page } from "@playwright/test";
+import { expect, test } from "./support/boot";
 import {
   calls,
   emitted,

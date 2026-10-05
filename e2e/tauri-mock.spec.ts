@@ -3,7 +3,8 @@
 // @tauri-apps/api 2.12.1 does it: listen() = invoke("plugin:event|listen",
 // { event, target, handler: transformCallback(cb) }), unlisten = unregisterListener +
 // invoke("plugin:event|unlisten", { event, eventId }) (node_modules/@tauri-apps/api/event.js).
-import { expect, test, type Page } from "@playwright/test";
+import type { Page } from "@playwright/test";
+import { expect, test } from "./support/boot";
 import {
   calls,
   emit,
