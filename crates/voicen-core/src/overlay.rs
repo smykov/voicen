@@ -169,12 +169,17 @@ pub enum WindowAction {
 /// The rule is one comparison of what is wanted (the newest seq seen and whether
 /// its state is `Hidden`) with the phase: a state whose seq is not newer than the
 /// newest seen changes nothing; while `Destroying` only the wanted state is
-/// recorded, and `Destroyed` decides again from it.
+/// recorded, and `Destroyed` decides again from it. Every window is numbered with a
+/// generation; a `Destroyed` counts only for the current window's generation.
+/// [`on_wake`](Self::on_wake) is the one rule; `on_state` and `on_destroyed` are
+/// a wake with only a state or only the current window's `Destroyed`.
 #[derive(Debug, Clone)]
 pub struct OverlayLifecycle {
     phase: WindowPhase,
     /// The newest `(seq, is_hidden)` seen; `None` before the first state.
     wanted: Option<(u64, bool)>,
+    /// The generation of the last `Build` (0 before any).
+    generation: u64,
 }
 
 impl Default for OverlayLifecycle {
@@ -189,6 +194,7 @@ impl OverlayLifecycle {
         OverlayLifecycle {
             phase: WindowPhase::Absent,
             wanted: None,
+            generation: 0,
         }
     }
 
@@ -200,50 +206,17 @@ impl OverlayLifecycle {
     /// The newest published `state`, numbered `seq` (higher = newer; a `seq` not
     /// newer than one already seen is stale and changes nothing).
     pub fn on_state(&mut self, seq: u64, state: &OverlayState) -> WindowAction {
-        if self.wanted.is_some_and(|(seen, _)| seq <= seen) {
-            return WindowAction::Nothing;
-        }
-        let hidden = matches!(state, OverlayState::Hidden);
-        self.wanted = Some((seq, hidden));
-        match (self.phase, hidden) {
-            (WindowPhase::Absent, true) => WindowAction::Nothing,
-            (WindowPhase::Absent, false) => {
-                self.phase = WindowPhase::Live;
-                WindowAction::Build(seq)
-            }
-            (WindowPhase::Live, true) => {
-                self.phase = WindowPhase::Destroying;
-                WindowAction::Destroy
-            }
-            (WindowPhase::Live, false) => WindowAction::Emit(seq),
-            // The label is still taken: the newest wanted state waits for Destroyed.
-            (WindowPhase::Destroying, _) => WindowAction::Nothing,
-        }
+        self.on_wake(&[], Some((seq, state)))
     }
 
-    /// The window's own `Destroyed` event (tauri has freed the label). After a
-    /// `Destroy` it builds the window again when the newest wanted state is shown.
-    /// A `Destroyed` the reducer did not ask for (the window went by itself, e.g.
-    /// at exit) leaves no window and is rebuilt only on a newer state, like a
-    /// failed build; one with no window is ignored.
+    /// The current window's own `Destroyed` event (tauri has freed the label).
+    /// After a `Destroy` it builds the window again when the newest wanted state is
+    /// shown. A `Destroyed` the reducer did not ask for (the window went by itself,
+    /// e.g. Alt+F4 or exit) leaves no window and is rebuilt only on a newer state,
+    /// like a failed build; one with no window is ignored.
     pub fn on_destroyed(&mut self) -> WindowAction {
-        match self.phase {
-            WindowPhase::Absent => WindowAction::Nothing,
-            WindowPhase::Live => {
-                self.phase = WindowPhase::Absent;
-                WindowAction::Nothing
-            }
-            WindowPhase::Destroying => match self.wanted {
-                Some((seq, false)) => {
-                    self.phase = WindowPhase::Live;
-                    WindowAction::Build(seq)
-                }
-                _ => {
-                    self.phase = WindowPhase::Absent;
-                    WindowAction::Nothing
-                }
-            },
-        }
+        let current = self.generation;
+        self.on_wake(&[current], None)
     }
 
     /// The last `Build` returned an error: no window exists. Nothing is retried
@@ -255,30 +228,61 @@ impl OverlayLifecycle {
         WindowAction::Nothing
     }
 
-    /// The generation of the window the last `Build` asked for: every `Build` this
-    /// reducer returns (from any method) gets a new, higher generation. The shell
-    /// tags the window it builds with it, and its `Destroyed` listener posts it back
-    /// (review 1 finding 3). Skeleton (T-057 review round 1 red tests): not
-    /// implemented yet.
+    /// The generation of the window the last `Build` asked for (0 before any):
+    /// every `Build` this reducer returns (from any method) gets a new, higher
+    /// generation. The shell tags the window it builds with it, and its `Destroyed`
+    /// listener posts it back (review 1 finding 3).
     pub fn generation(&self) -> u64 {
-        todo!("T-057 review 1 finding 3: window generation")
+        self.generation
     }
 
     /// One wake of the overlay thread: the `Destroyed` events that arrived (each with
     /// the generation its window was built with) and the newest published state,
-    /// if one came. A `Destroyed` whose generation is not the current window's is
-    /// stale and ignored (finding 3). The answer does not depend on the order the
-    /// two arrived in (finding 2): the current window's `Destroyed` is applied
-    /// before the state, so a window gone by itself plus a newer shown state builds
-    /// that state. Returns the one window operation to run. Skeleton (T-057 review
-    /// round 1 red tests): not implemented yet.
+    /// if one came. A `Destroyed` whose generation is not the current window's (or
+    /// that comes when no window exists) is stale and ignored (finding 3); the
+    /// current window's counts once however often it is posted. The answer does not
+    /// depend on the order the two arrived in (finding 2): the current window's
+    /// `Destroyed` is applied before the state, so a window gone by itself plus a
+    /// newer shown state builds that state, and a requested `Destroyed` plus a newer
+    /// state builds once, for the newer state. Returns the one window operation to
+    /// run.
     pub fn on_wake(
         &mut self,
         destroyed: &[u64],
         newest: Option<(u64, &OverlayState)>,
     ) -> WindowAction {
-        let _ = (destroyed, newest);
-        todo!("T-057 review 1 findings 2 and 3: one wake")
+        // 1. The current window's Destroyed: the label is free.
+        let gone = self.phase != WindowPhase::Absent && destroyed.contains(&self.generation);
+        // A requested destroy that completed decides again from the wanted state; a
+        // window gone by itself is rebuilt only for a newer state.
+        let rebuild_wanted = gone && self.phase == WindowPhase::Destroying;
+        if gone {
+            self.phase = WindowPhase::Absent;
+        }
+        // 2. The state, if newer than any seen.
+        let newer = match newest {
+            Some((seq, state)) if self.wanted.is_none_or(|(seen, _)| seq > seen) => {
+                self.wanted = Some((seq, matches!(state, OverlayState::Hidden)));
+                true
+            }
+            _ => false,
+        };
+        // 3. One action from the phase and what is wanted.
+        match (self.phase, self.wanted) {
+            (WindowPhase::Absent, Some((seq, false))) if newer || rebuild_wanted => {
+                self.phase = WindowPhase::Live;
+                self.generation += 1;
+                WindowAction::Build(seq)
+            }
+            (WindowPhase::Live, Some((_, true))) if newer => {
+                self.phase = WindowPhase::Destroying;
+                WindowAction::Destroy
+            }
+            (WindowPhase::Live, Some((seq, false))) if newer => WindowAction::Emit(seq),
+            // Nothing new; or the label is still taken (Destroying): the newest wanted
+            // state waits for Destroyed.
+            _ => WindowAction::Nothing,
+        }
     }
 }
 

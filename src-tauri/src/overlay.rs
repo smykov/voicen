@@ -12,6 +12,10 @@
 //!   The thread follows core's `OverlayLifecycle`: it builds a window only when none
 //!   exists and none is being destroyed, and learns "destroyed" from the window's own
 //!   `Destroyed` event, which tauri delivers after it freed the label (invariant 2).
+//!   Each window is tagged with the reducer's build generation and its `Destroyed`
+//!   posts it; one wake hands all `Destroyed` and the newest state to `on_wake`
+//!   together, so a stale `Destroyed` is ignored and the order they arrived in does
+//!   not matter.
 //! - The window is built visible with `focused(false)` and `focusable(false)`, so
 //!   tao's creation shows it with `SW_SHOWNOACTIVATE` after all its styles
 //!   (`WS_EX_NOACTIVATE`, `WS_EX_TOPMOST`) are set. Nothing calls `show`, `set_focus`
@@ -74,8 +78,9 @@ struct Mailbox {
     newest: Option<Entry>,
     /// The seq of the last published state (0: none yet).
     last_seq: u64,
-    /// `Destroyed` events of the overlay window not yet handed to the reducer.
-    destroyed: u32,
+    /// `Destroyed` events of overlay windows not yet handed to the reducer, each the
+    /// generation its window was built with (review 1 finding 3).
+    destroyed: Vec<u64>,
     /// Something changed since the thread last looked.
     woken: bool,
 }
@@ -109,19 +114,20 @@ impl Shared {
         self.wake.notify_one();
     }
 
-    /// Records one `Destroyed` of the overlay window and wakes the thread.
-    fn destroyed(&self) {
+    /// Records one `Destroyed` of the overlay window built with `generation` and
+    /// wakes the thread.
+    fn destroyed(&self, generation: u64) {
         {
             let mut mailbox = self.lock();
-            mailbox.destroyed = mailbox.destroyed.saturating_add(1);
+            mailbox.destroyed.push(generation);
             mailbox.woken = true;
         }
         self.wake.notify_one();
     }
 
-    /// Waits until woken; returns the `Destroyed` count since the last call and a
-    /// copy of the newest state.
-    fn wait(&self) -> (u32, Option<Entry>) {
+    /// Waits until woken; returns the generations of the `Destroyed` events since
+    /// the last call and a copy of the newest state.
+    fn wait(&self) -> (Vec<u64>, Option<Entry>) {
         let mut mailbox = self.lock();
         while !mailbox.woken {
             mailbox = self
@@ -210,8 +216,9 @@ pub(crate) fn start<R: Runtime>(app: &AppHandle<R>, service: Arc<SettingsService
     }
 }
 
-/// The overlay thread: waits for a change, hands the newest state and every
-/// `Destroyed` to the reducer and runs the answers. Never ends (the process ends it).
+/// The overlay thread: waits for a change, hands every `Destroyed` (with its
+/// window's generation) and the newest state to the reducer in one wake and runs
+/// the one answer. Never ends (the process ends it).
 fn run<R: Runtime>(
     app: AppHandle<R>,
     shared: Arc<Shared>,
@@ -229,24 +236,25 @@ fn run<R: Runtime>(
     };
     loop {
         let (destroyed, newest) = thread.shared.wait();
+        // The current window's Destroyed (requested, or the window went by itself,
+        // e.g. Alt+F4 or exit): its handle is stale. A Destroyed of an older
+        // generation is not this window's; the reducer ignores it too.
+        if thread.lifecycle.phase() != WindowPhase::Absent
+            && destroyed.contains(&thread.lifecycle.generation())
+        {
+            thread.window = None;
+        }
+        let action = thread
+            .lifecycle
+            .on_wake(&destroyed, newest.as_ref().map(|e| (e.seq, &e.state)));
+        // The reducer keeps only the newest seq it was given; `current` is that
+        // entry, so a `Build(seq)` (now or after a later Destroyed) renders it.
         if let Some(entry) = newest {
-            let action = thread.lifecycle.on_state(entry.seq, &entry.state);
-            // The reducer keeps only the newest seq it was given; `current` is that
-            // entry, so a later `Build(seq)` after Destroyed renders this state.
             if thread.current.as_ref().is_none_or(|c| entry.seq > c.seq) {
                 thread.current = Some(entry);
             }
-            thread.execute(action);
         }
-        for _ in 0..destroyed {
-            // A Destroyed the reducer did not ask for (the window went by itself,
-            // e.g. at exit): its handle is stale.
-            if thread.lifecycle.phase() == WindowPhase::Live {
-                thread.window = None;
-            }
-            let action = thread.lifecycle.on_destroyed();
-            thread.execute(action);
-        }
+        thread.execute(action);
     }
 }
 
@@ -311,12 +319,13 @@ impl<R: Runtime> OverlayThread<R> {
                 };
                 if let Some(os_code) = failed {
                     self.warn(os_code);
-                    // A window that is already gone posts no Destroyed: hand the
-                    // reducer one, so the next shown state can build again. One that
-                    // still exists stays until its own Destroyed (the warning is the
-                    // trace).
+                    // A window that is already gone may post no Destroyed: hand the
+                    // reducer one for this window's generation, so the next shown
+                    // state can build again (a late real one for the same generation
+                    // is ignored once the reducer moved on). One that still exists
+                    // stays until its own Destroyed (the warning is the trace).
                     if self.app.get_webview_window(LABEL).is_none() {
-                        self.shared.destroyed();
+                        self.shared.destroyed(self.lifecycle.generation());
                     } else {
                         self.window = window;
                     }
@@ -331,8 +340,9 @@ impl<R: Runtime> OverlayThread<R> {
     }
 
     /// Builds the window visible and non-activating, registers its `Destroyed`
-    /// listener and emits the current state to it (a page that is not listening yet
-    /// catches up through `overlay_ready`).
+    /// listener (which posts the reducer's generation for this build) and emits the
+    /// current state to it (a page that is not listening yet catches up through
+    /// `overlay_ready`).
     fn build(&self) -> tauri::Result<WebviewWindow<R>> {
         let mut builder = WebviewWindowBuilder::new(&self.app, LABEL, WebviewUrl::App(URL.into()))
             .title(TITLE)
@@ -351,9 +361,10 @@ impl<R: Runtime> OverlayThread<R> {
         }
         let window = builder.build()?;
         let shared = Arc::clone(&self.shared);
+        let generation = self.lifecycle.generation();
         window.on_window_event(move |event| {
             if let WindowEvent::Destroyed = event {
-                shared.destroyed();
+                shared.destroyed(generation);
             }
         });
         // A failed first emit is written like any emit failure; the page still
