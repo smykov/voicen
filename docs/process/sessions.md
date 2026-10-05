@@ -67,7 +67,7 @@ A session that ends without an outcome is a defect in the process — the next s
 |---|---|
 | **Default: 1 task per session** | One task, one diff, one review — the cheapest thing to get right |
 | **Maximum 3 tasks per batch** | Beyond that the diff stops being reviewable and seams start to interact |
-| **Only low-priority tasks (`P2`/`P3`) with no blockers** | Nothing in `depends_on` open, `blocked_on` empty, no other task waiting on it. `P0`/`P1` and tasks others wait on always go alone |
+| **Only low-priority tasks (`P2`/`P3`) with no blockers** | Nothing in `depends_on` open, `blocked_on` empty, no other task waiting on it. `P0`/`P1` and tasks others wait on always go alone — **project override (decision #71):** up to two `P1` tasks may run in parallel when their seams share no file, each in its own git worktree with its own gate run, review and push |
 | **A red gate fails the whole batch** | The batch shares one gate run; no task in it moves to `NEEDS_REVIEW` until all are green |
 | Group by seam and deploy unit | One push ships the batch; mixing units smears it across pipelines |
 | Each task keeps its own acceptance, commit line, status and review record | Batching shares execution, not accountability |

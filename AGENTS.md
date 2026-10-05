@@ -45,7 +45,7 @@ Why these roles and how they hand over: `docs/process/roles.md`.
 
 Every session ends with an outcome: `barrier | idle | escalate | interrupted`; hooks journal tool calls and outcomes into `.teamwright/logs/`. Details: `docs/process/sessions.md` §2.
 
-Batch size: 1 task by default, at most 3, and only `P2`/`P3` tasks with no blockers; a red gate fails the whole batch.
+Batch size: 1 task by default, at most 3, and only `P2`/`P3` tasks with no blockers; a red gate fails the whole batch. Project override (decision #71): up to two `P1` tasks in parallel when their seams share no file, each in its own worktree.
 
 ## Where tasks come from
 

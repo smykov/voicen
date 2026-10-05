@@ -77,8 +77,8 @@ Each finding: severity, category, `file:line`, what is wrong, impact, what to do
 
 | Verdict | When | Next status |
 |---|---|---|
-| `APPROVE` | no Critical/High; Medium fixed or justified | `CODE_COMPLETE` |
-| `REQUEST_CHANGES` | Critical/High, or unjustified Medium — any finding at all that needs a code change | `IN_PROGRESS` |
+| `APPROVE` | no Critical/High; Medium fixed or justified; Low findings never block — list them under "Follow-ups (non-blocking)" for the orchestrator to note in the task (decision #70) | `CODE_COMPLETE` |
+| `REQUEST_CHANGES` | Critical/High, or unjustified Medium that needs a code change (Low alone is never a send-back, decision #70) | `IN_PROGRESS` |
 | `REJECT_RECURRENCE` | recurrence detected (section 1) | original task `DEFERRED` with `absorbed_by: <rca id>` — never `BLOCKED` |
 | `ESCALATE` | this is the 3rd round after two `REQUEST_CHANGES` in a row, or the fix needs a decision above the task | `BLOCKED` with `blocked_on: owner decision — <question>` |
 
