@@ -20,6 +20,7 @@ pub mod diag;
 pub mod dictation;
 pub mod local_models;
 pub mod locale;
+pub mod overlay;
 pub mod paths;
 pub mod settings_ipc;
 pub mod settings_window;
@@ -41,15 +42,16 @@ fn commands<R: Runtime>(builder: Builder<R>) -> Builder<R> {
         settings_ipc::settings_speech_languages,
         local_models::local_models_list,
         local_models::local_model_download,
-        local_models::local_model_cancel_download
+        local_models::local_model_cancel_download,
+        overlay::overlay_ready
     ])
 }
 
 /// The one app wiring of the tests (T-030 J4): [`assemble`] with `service`,
 /// `local_models` and `log` as the parts, so the tests get exactly what `run()`
 /// gets after its startup side effects: the commands, the managed state, the
-/// `settings://changed` bridge, the settings opener thread, the tray and its
-/// language follower. tauri 2.12.1 runs `.setup()` only from `run` /
+/// `settings://changed` bridge, the settings opener thread, the overlay thread, the
+/// tray and its language follower. tauri 2.12.1 runs `.setup()` only from `run` /
 /// `run_iteration`, never from `build()`, so all of it starts after `build()`.
 ///
 /// `local_models` is the one coordinator behind the local-model commands (T-044);
@@ -101,7 +103,8 @@ impl Parts {
 /// returns from it), only then calls `parts()` (the startup side effects: log,
 /// `.part` cleanup, settings load, Run-value reconcile), and wires the result:
 /// manages `service`, `local_models` and `log`, starts the `settings://changed`
-/// bridge, the settings opener thread (`settings_window::request`), the tray
+/// bridge, the settings opener thread (`settings_window::request`), the overlay
+/// thread with its mailbox (`overlay::part`, `overlay_ready`), the tray
 /// (`tray`, built in code, never from `tauri.conf.json`) and its language follower.
 /// A `build()` error is returned and `parts` is never called.
 ///
@@ -120,7 +123,8 @@ pub fn assemble<R: Runtime>(
 
 /// Everything that needs the startup side effects' results, on the built app (on
 /// the thread that built it): the managed state, the `settings://changed` bridge,
-/// the settings opener thread and the tray with its language follower. `run()`
+/// the settings opener thread, the overlay thread and the tray with its language
+/// follower. `run()`
 /// starts the dictation session after this (`dictation::start_dictation`, T-006),
 /// so the tray exists when it first publishes.
 fn wire<R: Runtime>(app: &AppHandle<R>, parts: Parts) {
@@ -134,6 +138,7 @@ fn wire<R: Runtime>(app: &AppHandle<R>, parts: Parts) {
     app.manage(Arc::clone(&log));
     settings_ipc::spawn_change_bridge(app.clone(), Arc::clone(&service), &log);
     settings_window::start_opener(app, Arc::clone(&log));
+    overlay::start(app, Arc::clone(&service), Arc::clone(&log));
     tray::install(app, &service, &log);
 }
 
@@ -142,7 +147,8 @@ fn wire<R: Runtime>(app: &AppHandle<R>, parts: Parts) {
 ///   (the opener carries it out and logs a failed open);
 /// - `ExitRequested { code: None }` (in tauri 2.12.1 only the last window's
 ///   `Destroyed`) while the tray exists: `prevent_exit`, so closing the settings
-///   window keeps the app; `ExitRequested { code: Some(_) }` (`AppHandle::exit`, the
+///   window, or the overlay's destroy on `Hidden` (T-057), keeps the app;
+///   `ExitRequested { code: Some(_) }` (`AppHandle::exit`, the
 ///   tray "Exit" item) passes, and without a tray nothing is prevented;
 /// - everything else: nothing.
 pub fn on_run_event<R: Runtime>(
@@ -222,7 +228,7 @@ fn release_launched_by_autostart() -> bool {
 
 /// The release dictation ports (T-006): the Windows default microphone, the
 /// clipboard, the paster, the engine of the settings (`engine::engine_for`), the
-/// tray through [`dictation::ShellIndicator`], and `credentials`, the
+/// tray and the overlay through [`dictation::ShellIndicator`], and `credentials`, the
 /// `SettingsService`'s own key store.
 #[cfg(windows)]
 fn release_ports<R: Runtime>(

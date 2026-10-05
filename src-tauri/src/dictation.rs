@@ -10,8 +10,10 @@
 //! only in the ports.
 //!
 //! [`ShellIndicator`] is `run()`'s `Indicator`: the tray half forwards to the
-//! tray's `TrayPart` (nothing when the tray was not built), the overlay half does
-//! nothing until T-057. Both only store and post.
+//! tray's `TrayPart` (nothing when the tray was not built), the overlay half to the
+//! overlay's `OverlayPart` (T-057: the newest state into the overlay mailbox, then
+//! the overlay thread builds, emits or destroys the window). Both only store and
+//! post.
 
 use std::io;
 use std::sync::Arc;
@@ -31,6 +33,7 @@ use voicen_core::settings::gate::SettingsTab;
 use voicen_core::settings::service::SettingsService;
 use voicen_core::vad::{EnergyDetector, SpeechGate, VadError};
 
+use crate::overlay::{self, OverlayPart};
 use crate::settings_window::{self, OpenTarget};
 use crate::tray::{self, TrayPart};
 use crate::win::hotkey::HotkeyThread;
@@ -159,16 +162,19 @@ impl TempAudioStore for NoPendingAudio {
 }
 
 /// `run()`'s `Indicator`: the tray half to the tray part of the app, the overlay
-/// half a no-op until T-057.
+/// half to its overlay part (T-057). Neither waits for another thread.
 pub struct ShellIndicator<R: Runtime> {
     tray: Option<TrayPart<R>>,
+    overlay: Option<OverlayPart>,
 }
 
 impl<R: Runtime> ShellIndicator<R> {
-    /// The indicator of `app`: its tray part (`tray::part`), if the tray was built.
+    /// The indicator of `app`: its tray part (`tray::part`), if the tray was built,
+    /// and its overlay part (`overlay::part`), if `assemble` wired the app.
     pub fn new(app: &AppHandle<R>) -> ShellIndicator<R> {
         ShellIndicator {
             tray: tray::part(app),
+            overlay: overlay::part(app),
         }
     }
 }
@@ -180,8 +186,10 @@ impl<R: Runtime> Indicator for ShellIndicator<R> {
         }
     }
 
-    fn set_overlay(&self, _state: &OverlayState) {
-        // The overlay window is T-057's.
+    fn set_overlay(&self, state: &OverlayState) {
+        if let Some(overlay) = &self.overlay {
+            overlay.set_overlay(state);
+        }
     }
 }
 

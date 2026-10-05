@@ -101,8 +101,8 @@ jobs:
           $hasSettings = $false
           $runGone = $false
           # T-037 (S1): FirstRun opens the settings window: exactly one shown window, titled
-          # Voicen. Shown = visible, unowned, top-level, not a tool window and not tao's
-          # event-target window, which every tauri process has with WS_VISIBLE set, so
+          # Voicen. Shown = visible, unowned, top-level and not tao's event-target window (tool
+          # windows count, T-057), which every tauri process has with WS_VISIBLE set, so
           # Process.MainWindowHandle cannot tell (scripts/ci/visible-windows.ps1).
           $win = $false
           $seen = 'no process'
@@ -305,18 +305,26 @@ jobs:
           $loadLine = 'settings load outcome=loaded'
           if (-not (Test-Path -LiteralPath $settings -PathType Leaf)) { throw "settings.json not found at $settings before the single-instance check" }
           function Get-LineCount([string]$text) { if (Test-Path $log) { @(Select-String -Path $log -SimpleMatch $text).Count } else { 0 } }
-          # The line count of every log file, taken before a Start-Process (T-052 review round 1 #5): a
-          # baseline counted after the start could absorb a start line the child writes at once, which
-          # is the very line the second-launch check looks for.
-          function Get-LogMark { $m = @{}; foreach ($f in @(Get-ChildItem -Path $log -ErrorAction SilentlyContinue)) { $m[$f.FullName] = @(Get-Content -LiteralPath $f.FullName).Count }; $m }
-          # The Started lines of one pid ("... started pid=<pid>" at the end of the line) written since
-          # $mark: in each log file only the lines past its count in $mark (every line of a file that is
-          # new since then, e.g. after a roll).
+          # The set of every Started line ("... started pid=<pid>", each with its timestamp) over all log
+          # files, taken before a Start-Process (T-052 review round 1 #5: a baseline taken after the
+          # start could absorb a start line the child writes at once). Keyed by line, not by file
+          # (T-057): a roll renames voicen.log to voicen-<stamp>.log (T-008), which keeps its lines, so
+          # a per-file line count would skip the new voicen.log's first lines and recount the renamed
+          # file from line 0.
+          function Get-LogMark {
+            $m = [System.Collections.Generic.HashSet[string]]::new()
+            foreach ($f in @(Get-ChildItem -Path $log -ErrorAction SilentlyContinue)) {
+              foreach ($l in @(Get-Content -LiteralPath $f.FullName | Select-String -SimpleMatch 'started pid=')) { [void]$m.Add($l.Line) }
+            }
+            , $m
+          }
+          # The Started lines of one pid ("... started pid=<pid>" at the end of the line) in any log file
+          # that are not in $mark: the ones written since the mark, whatever file they are in now (a
+          # retention delete of an old file only removes lines, so it cannot add to the count).
           function Get-StartCountSince($mark, [int]$id) {
             $n = 0
             foreach ($f in @(Get-ChildItem -Path $log -ErrorAction SilentlyContinue)) {
-              $skip = if ($mark.ContainsKey($f.FullName)) { $mark[$f.FullName] } else { 0 }
-              $n += @(Get-Content -LiteralPath $f.FullName | Select-Object -Skip $skip | Select-String -Pattern "started pid=$id(\D|$)").Count
+              foreach ($l in @(Get-Content -LiteralPath $f.FullName | Select-String -Pattern "started pid=$id(\D|$)")) { if (-not $mark.Contains($l.Line)) { $n++ } }
             }
             $n
           }

@@ -428,6 +428,7 @@ pub const WARNING_KINDS: &[&str] = &[
     "hotkey_thread_failed",
     "hotkey_register_failed",
     "dictation_start_failed",
+    "overlay_failed",
 ];
 pub const LOAD_OUTCOMES: &[&str] = &["loaded", "first_run", "reset", "unavailable"];
 pub const SAVE_OUTCOMES: &[&str] = &["ok", "refused", "failed"];

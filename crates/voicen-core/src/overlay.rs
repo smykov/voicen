@@ -133,10 +133,6 @@ impl Serialize for OverlayView {
 }
 
 // ---- window lifecycle (T-057) -------------------------------------------------------
-//
-// RED-TEST SKELETON (T-057): types and signatures only, every decision is `todo!()`.
-// The developer replaces the bodies (and the fields); the tests in `lifecycle_tests`
-// below pin the behaviour.
 
 /// Where the shell's one overlay window is in its life (T-057 invariant 2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -169,9 +165,16 @@ pub enum WindowAction {
 /// being destroyed, destroys on `Hidden`, emits only newer states to a live window,
 /// and never emits to a window being destroyed. A failed build goes back to no
 /// window and is retried only on a newer state. Pure.
+///
+/// The rule is one comparison of what is wanted (the newest seq seen and whether
+/// its state is `Hidden`) with the phase: a state whose seq is not newer than the
+/// newest seen changes nothing; while `Destroying` only the wanted state is
+/// recorded, and `Destroyed` decides again from it.
 #[derive(Debug, Clone)]
 pub struct OverlayLifecycle {
     phase: WindowPhase,
+    /// The newest `(seq, is_hidden)` seen; `None` before the first state.
+    wanted: Option<(u64, bool)>,
 }
 
 impl Default for OverlayLifecycle {
@@ -185,6 +188,7 @@ impl OverlayLifecycle {
     pub fn new() -> OverlayLifecycle {
         OverlayLifecycle {
             phase: WindowPhase::Absent,
+            wanted: None,
         }
     }
 
@@ -194,19 +198,61 @@ impl OverlayLifecycle {
     }
 
     /// The newest published `state`, numbered `seq` (higher = newer; a `seq` not
-    /// newer than one already seen is stale).
-    pub fn on_state(&mut self, _seq: u64, _state: &OverlayState) -> WindowAction {
-        todo!("T-057: overlay window lifecycle reducer")
+    /// newer than one already seen is stale and changes nothing).
+    pub fn on_state(&mut self, seq: u64, state: &OverlayState) -> WindowAction {
+        if self.wanted.is_some_and(|(seen, _)| seq <= seen) {
+            return WindowAction::Nothing;
+        }
+        let hidden = matches!(state, OverlayState::Hidden);
+        self.wanted = Some((seq, hidden));
+        match (self.phase, hidden) {
+            (WindowPhase::Absent, true) => WindowAction::Nothing,
+            (WindowPhase::Absent, false) => {
+                self.phase = WindowPhase::Live;
+                WindowAction::Build(seq)
+            }
+            (WindowPhase::Live, true) => {
+                self.phase = WindowPhase::Destroying;
+                WindowAction::Destroy
+            }
+            (WindowPhase::Live, false) => WindowAction::Emit(seq),
+            // The label is still taken: the newest wanted state waits for Destroyed.
+            (WindowPhase::Destroying, _) => WindowAction::Nothing,
+        }
     }
 
-    /// The window's own `Destroyed` event (tauri has freed the label).
+    /// The window's own `Destroyed` event (tauri has freed the label). After a
+    /// `Destroy` it builds the window again when the newest wanted state is shown.
+    /// A `Destroyed` the reducer did not ask for (the window went by itself, e.g.
+    /// at exit) leaves no window and is rebuilt only on a newer state, like a
+    /// failed build; one with no window is ignored.
     pub fn on_destroyed(&mut self) -> WindowAction {
-        todo!("T-057: overlay window lifecycle reducer")
+        match self.phase {
+            WindowPhase::Absent => WindowAction::Nothing,
+            WindowPhase::Live => {
+                self.phase = WindowPhase::Absent;
+                WindowAction::Nothing
+            }
+            WindowPhase::Destroying => match self.wanted {
+                Some((seq, false)) => {
+                    self.phase = WindowPhase::Live;
+                    WindowAction::Build(seq)
+                }
+                _ => {
+                    self.phase = WindowPhase::Absent;
+                    WindowAction::Nothing
+                }
+            },
+        }
     }
 
-    /// The last `Build` returned an error: no window exists.
+    /// The last `Build` returned an error: no window exists. Nothing is retried
+    /// until a newer state comes (never a build loop).
     pub fn on_build_failed(&mut self) -> WindowAction {
-        todo!("T-057: overlay window lifecycle reducer")
+        if self.phase == WindowPhase::Live {
+            self.phase = WindowPhase::Absent;
+        }
+        WindowAction::Nothing
     }
 }
 

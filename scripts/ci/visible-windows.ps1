@@ -3,8 +3,10 @@
 # decide on the same predicate). Windows only; pwsh.
 #
 # A shown window is a top-level window of the process that is visible (IsWindowVisible), has no
-# owner (GetWindow GW_OWNER), is not a tool window (WS_EX_TOOLWINDOW) and is not of the class
-# "Tao Thread Event Target". That last window exists in every tauri process: tao 0.37.1
+# owner (GetWindow GW_OWNER) and is not of the class "Tao Thread Event Target". Tool windows
+# (WS_EX_TOOLWINDOW) count (T-057, F-003: the predicate decides on raw window facts, so an overlay
+# or any other tool window shown at start fails the smoke; no exception by class or title other
+# than tao's own window). That one window exists in every tauri process: tao 0.37.1
 # (src/platform_impl/windows/event_loop.rs:629-687) creates it top-level and unowned, with
 # WS_EX_TOOLWINDOW | WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE, and then sets
 # WS_VISIBLE | WS_POPUP, so IsWindowVisible is true for it and Process.MainWindowHandle may
@@ -13,7 +15,7 @@
 # Get-ShownWindows -ProcessId <pid> returns objects with Handle, Class and Title (empty when none).
 # Format-ShownWindows formats them for a log line.
 #
-# T-052 (raw facts only, F-003; the Shown rule above is unchanged): Get-AllWindows -ProcessId <pid>
+# T-052 (raw facts only, F-003): Get-AllWindows -ProcessId <pid>
 # returns every top-level window of the process (Handle, Class, Title, Visible), so a step can
 # find tray-icon's hidden 'tray_icon_app' window; Test-Iconic, Invoke-Minimize and Send-Close
 # (WM_CLOSE, posted) act on one HWND.
@@ -43,7 +45,6 @@ public static class VoicenWindows {
   [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
   [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr hWnd);
   [DllImport("user32.dll")] static extern IntPtr GetWindow(IntPtr hWnd, uint cmd);
-  [DllImport("user32.dll")] static extern int GetWindowLongW(IntPtr hWnd, int index);
   [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassNameW(IntPtr hWnd, StringBuilder name, int max);
   [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetWindowTextW(IntPtr hWnd, StringBuilder text, int max);
   [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hWnd);
@@ -52,8 +53,6 @@ public static class VoicenWindows {
   public const int SW_MINIMIZE = 6;
   public const uint WM_CLOSE = 0x0010;
   const uint GW_OWNER = 4;
-  const int GWL_EXSTYLE = -20;
-  const int WS_EX_TOOLWINDOW = 0x80;
   const string TaoEventTarget = "Tao Thread Event Target";
 
   public static VoicenShownWindow[] Shown(uint pid) {
@@ -62,7 +61,6 @@ public static class VoicenWindows {
       uint owner;
       GetWindowThreadProcessId(hWnd, out owner);
       if (owner != pid || !IsWindowVisible(hWnd) || GetWindow(hWnd, GW_OWNER) != IntPtr.Zero) return true;
-      if ((GetWindowLongW(hWnd, GWL_EXSTYLE) & WS_EX_TOOLWINDOW) != 0) return true;
       var cls = new StringBuilder(256);
       GetClassNameW(hWnd, cls, cls.Capacity);
       if (cls.ToString() == TaoEventTarget) return true;

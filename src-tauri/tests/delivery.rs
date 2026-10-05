@@ -15,8 +15,8 @@
 //! - the session is managed as `Arc<DictationSession>` and `ShellIndicator` forwards the
 //!   tray half to the tray (row 23).
 //!
-//! The visible notice reaches the screen only with T-057 (overlay) or T-007 (toast), so the
-//! notice is asserted on the `Indicator` port (T-006 Q6). Windows CI only (decision #5).
+//! The notice is asserted on the `Indicator` port (T-006 Q6): the overlay window that
+//! shows it is `tests/overlay.rs`'s (T-057), the toast T-007's. Windows CI only (decision #5).
 //! Runner capabilities (docs/decisions/windows-ci-runner.md): `foreground_again`
 //! (re-measured by the probe in every job) and `clipboard` (`ok` in runs A and B), rows
 //! 19-21, asserted loudly by `win32_support`; rows 22
@@ -390,8 +390,8 @@ fn the_session_is_managed_and_the_shell_indicator_drives_the_tray() {
     // `Arc<DictationSession>`): `build_app` manages no session; after `start_dictation`
     // one is managed. `ShellIndicator` (run()'s Indicator) forwards the tray half to the
     // app's tray: a refused capture through the session turns the tray to Error, and a
-    // direct `set_tray` reaches it too; the overlay half changes nothing on the tray
-    // (a no-op until T-057). Bite: the session not managed (the tray menu cannot clear
+    // direct `set_tray` reaches it too; the overlay half (to the overlay thread, T-057)
+    // changes nothing on the tray. Bite: the session not managed (the tray menu cannot clear
     // Error), ShellIndicator dropping the tray half.
     let _serial = serial();
     // A taken hotkey would put the tray in HotkeyError, which outranks Error.

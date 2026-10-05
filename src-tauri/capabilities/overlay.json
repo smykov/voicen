@@ -1,0 +1,12 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "overlay",
+  "description": "Capability for the overlay window (label `overlay`, created and destroyed only by the overlay thread, src-tauri/src/overlay.rs): listen to and stop listening to overlay://state. Nothing else: the page never shows, focuses, closes or destroys its window (T-057; least privilege, decision #45). The app command overlay_ready is not an ACL permission (T-049 scopes app commands).",
+  "windows": [
+    "overlay"
+  ],
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten"
+  ]
+}
