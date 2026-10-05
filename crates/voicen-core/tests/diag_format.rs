@@ -192,6 +192,9 @@ fn all_warning_kinds() -> Vec<(WarningKind, &'static str)> {
         (WarningKind::ModelsCleanupFailed, "models_cleanup_failed"),
         (WarningKind::SettingsWindowFailed, "settings_window_failed"),
         (WarningKind::ChangeBridgeFailed, "change_bridge_failed"),
+        (WarningKind::SettingsOpenerFailed, "settings_opener_failed"),
+        (WarningKind::TrayFailed, "tray_failed"),
+        (WarningKind::TrayFollowerFailed, "tray_follower_failed"),
     ];
     let seen: BTreeSet<usize> = all
         .iter()
@@ -202,9 +205,12 @@ fn all_warning_kinds() -> Vec<(WarningKind, &'static str)> {
             WarningKind::ModelsCleanupFailed => 3,
             WarningKind::SettingsWindowFailed => 4,
             WarningKind::ChangeBridgeFailed => 5,
+            WarningKind::SettingsOpenerFailed => 6,
+            WarningKind::TrayFailed => 7,
+            WarningKind::TrayFollowerFailed => 8,
         })
         .collect();
-    assert_eq!(seen.len(), 6, "every WarningKind once");
+    assert_eq!(seen.len(), 9, "every WarningKind once");
     all
 }
 

@@ -67,7 +67,8 @@ Tasks: T-051 (split from T-006 by decision #64). Decisions: #47, #48, #63, #64. 
 - **Defect that produced it:** none here (analysis Q3; core-traits "shutdown: drop in-flight results").
 - **What breaks if you violate it:** a detached worker keeps the ports alive after the session is gone, or queued recordings are transcribed and pasted after exit began (`mpsc` still hands out buffered items after the sender is dropped).
 - **Where it is enforced:** `Drop` sets `shutdown` and drops the sender under the lock, then joins; the worker checks `shutdown` after each `recv`. Test `drop_finishes_the_job_in_flight_drops_the_queued_one_and_joins_threads` (every port's `Arc` count back to 1).
-- **Don't:** rely on dropping the sender alone.
+- **Not on the app's exit path (T-052):** the shell keeps the session as managed state and the process ends by tao's `process::exit` after `RunEvent::Exit` (only the tray "Exit" item ends it, `docs/decisions/windows-shell.md`), so `Drop` never runs at app exit: an in-flight or queued dictation is dropped with the process (spec 001 spec.md:155, "exit while processing"). Deleting the pending audio on exit (FR-032) is T-007's, on `RunEvent::Exit`.
+- **Don't:** rely on dropping the sender alone; wait at app exit for the job in flight.
 
 ### Win32 facts come from `win32_data` only
 
@@ -89,5 +90,4 @@ Tasks: T-051 (split from T-006 by decision #64). Decisions: #47, #48, #63, #64. 
 ## Open
 
 - Converting the frames runs on the hotkey thread at release (analysis Q6); T-006 measures it on Windows.
-- A shutdown that does not wait for the job in flight, for app exit (analysis Q3): T-052.
 - If `run_job` ever panicked, the worker would end: later recordings are dropped at the queue and the overlay stays Processing. `run_job` is written not to panic (no `unwrap` on engine or server data); no restart is built.

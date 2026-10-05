@@ -83,7 +83,7 @@ pub enum SaveLine {
 }
 
 /// The kinds of a `Warning` line: the pipeline's `WarningCode`s and the shell's
-/// start and settings-window failures.
+/// start, settings-window and tray failures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WarningKind {
     /// `events::WarningCode::VadFallback`.
@@ -98,6 +98,15 @@ pub enum WarningKind {
     SettingsWindowFailed,
     /// The `settings://changed` bridge thread could not be started.
     ChangeBridgeFailed,
+    /// The settings window's opener thread could not be started (T-052); no
+    /// settings window can open in this run.
+    SettingsOpenerFailed,
+    /// The tray icon could not be built at start, or a state could not be applied
+    /// to it (T-052).
+    TrayFailed,
+    /// The tray's UI-language follower thread could not be started (T-052); the
+    /// tray menu keeps its start language until restart.
+    TrayFollowerFailed,
 }
 
 /// One dictation: the engine, the outcome and the FR-20 timings plus the

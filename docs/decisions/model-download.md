@@ -34,7 +34,7 @@ Tasks: T-016 (core half), T-044 (coordinator and shell half). Contract: `specs/0
 
 - **Defect that produced it:** none yet (found in T-044 analysis). The interim `NoDownloadedModels` always said "not downloaded", so every `builtin_local` save was refused.
 - **What breaks if you violate it:** a store that was never cleaned (stale `.part`), or two stores that disagree about what is downloaded.
-- **Where it is enforced:** `LocalModels::open(models_dir, disk, timeouts, catalog)` runs `cleanup_at_start` before it returns; `run()` builds it once from `paths::models_dir()`, the only resolver of the release models dir. Tests `local_models_service` (open deletes `*.part`), shell `local_models.rs`.
+- **Where it is enforced:** `LocalModels::open(models_dir, disk, timeouts, catalog)` runs `cleanup_at_start` before it returns; `run()` builds it once from `paths::models_dir()`, the only resolver of the release models dir, only after tauri's `build()` (so a second instance never deletes the primary's `.part`; T-052, `docs/decisions/windows-shell.md`). Tests `local_models_service` (open deletes `*.part`), shell `local_models.rs`.
 - **Don't:** build a `ModelStore` or `Downloader` elsewhere, or a second models-dir path.
 
 ### One `Arc<ModelStore>` is shared by settings validation and IPC (T-044)

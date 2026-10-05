@@ -4,7 +4,8 @@
 //! most one, and a call while it exists creates nothing, brings it forward and
 //! emits `settings://focus` to it. [`on_ready`] is the startup executor: it carries
 //! out `startup_action(outcome, launched_by_autostart)` and decides nothing itself.
-//! `run()` calls it on `RunEvent::Ready`; the tests call it directly.
+//! `run()`'s loop callback (`on_run_event`) calls it on `RunEvent::Ready`; the tests
+//! call it directly.
 //!
 //! T-052 invariant 2: at runtime `open` runs only on the one opener thread
 //! ("settings-window"). Every caller (the startup executor, the tray "Settings"
@@ -18,13 +19,19 @@
 //! put into the URL unencoded. `tauri.conf.json` declares no window, and the
 //! capability in `capabilities/default.json` is granted to [`LABEL`] only.
 
-use std::sync::mpsc;
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager, Runtime, WebviewUrl, WebviewWindowBuilder};
+use tauri::{
+    AppHandle, Emitter, Manager, Runtime, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
+};
+use voicen_core::diag::{Log, LogEvent, WarningKind};
 use voicen_core::settings::gate::{startup_action, SettingsTab, StartupAction};
 use voicen_core::settings::{FieldId, LoadOutcome};
+
+use crate::diag::io_os_code;
 
 /// The label of the one settings window; the capability is granted to it only.
 pub const LABEL: &str = "settings";
@@ -62,9 +69,7 @@ pub fn open<R: Runtime>(
     field: Option<FieldId>,
 ) -> tauri::Result<()> {
     if let Some(window) = app.get_webview_window(LABEL) {
-        window.unminimize()?;
-        window.show()?;
-        window.set_focus()?;
+        bring_forward(&window)?;
         return app.emit_to(
             LABEL,
             FOCUS_EVENT,
@@ -79,6 +84,23 @@ pub fn open<R: Runtime>(
         .inner_size(WIDTH, HEIGHT)
         .build()
         .map(|_| ())
+}
+
+/// Unminimizes, shows and focuses the open window (the first error is returned).
+fn bring_forward<R: Runtime>(window: &WebviewWindow<R>) -> tauri::Result<()> {
+    window.unminimize()?;
+    window.show()?;
+    window.set_focus()
+}
+
+/// [`OpenTarget::Front`]: the open window forward on the tab it shows (no
+/// `settings://focus`), or [`open`] on Engine when none is open. Runs on the opener
+/// thread only, so the window cannot appear between the check and `open`.
+fn front<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
+    match app.get_webview_window(LABEL) {
+        Some(window) => bring_forward(&window),
+        None => open(app, SettingsTab::Engine, None),
+    }
 }
 
 /// Where a [`request`] points the window (contracts/ipc.md "Window").
@@ -103,11 +125,67 @@ impl Receipt {
     /// Waits at most `timeout` for the opener thread to run the request: `Some(Ok)`
     /// once the window is open or fronted, `Some(Err)` with the open's error (also
     /// written to the log as one `warning kind=settings_window_failed` line), `None`
-    /// if it has not run by then.
+    /// if it has not run by then. A request that can never run (no opener thread:
+    /// the app was not wired by `assemble`, or the thread could not be started,
+    /// which was logged once as `settings_opener_failed`) is
+    /// `Some(Err(FailedToReceiveMessage))`.
     pub fn wait_timeout(self, timeout: Duration) -> Option<tauri::Result<()>> {
-        // Skeleton (T-052 red tests): not implemented yet.
-        let _ = (self.done, timeout);
-        todo!("T-052: Receipt::wait_timeout")
+        match self.done.recv_timeout(timeout) {
+            Ok(result) => Some(result),
+            Err(RecvTimeoutError::Timeout) => None,
+            Err(RecvTimeoutError::Disconnected) => Some(Err(tauri::Error::FailedToReceiveMessage)),
+        }
+    }
+}
+
+/// One request on the opener's queue. The handle travels with the request, so the
+/// opener thread holds no app handle of its own between requests.
+struct Job<R: Runtime> {
+    app: AppHandle<R>,
+    target: OpenTarget,
+    done: mpsc::Sender<tauri::Result<()>>,
+}
+
+/// The managed queue of the one opener thread of an app.
+struct Opener<R: Runtime> {
+    jobs: mpsc::Sender<Job<R>>,
+}
+
+/// Starts the one opener thread ("settings-window") of `app` and manages its queue.
+/// Called once, by `assemble`'s wiring, after tauri's `build()`. The thread runs the
+/// requests one at a time, in posting order, and writes a failed open to `log`; it
+/// ends when the app's queue is dropped. A failed spawn writes one
+/// `settings_opener_failed` warning (the OS code only); every later request then
+/// reports that it cannot run.
+pub(crate) fn start_opener<R: Runtime>(app: &AppHandle<R>, log: Arc<Log>) {
+    let (jobs, queue) = mpsc::channel::<Job<R>>();
+    let thread_log = Arc::clone(&log);
+    let spawned = std::thread::Builder::new()
+        .name("settings-window".into())
+        .spawn(move || {
+            for job in queue {
+                let result = match job.target {
+                    OpenTarget::Tab(tab, field) => open(&job.app, tab, field),
+                    OpenTarget::Front => front(&job.app),
+                };
+                if let Err(err) = &result {
+                    // The kind and the OS code only, no error text (#45).
+                    thread_log.write(LogEvent::Warning {
+                        kind: WarningKind::SettingsWindowFailed,
+                        os_code: io_os_code(err),
+                    });
+                }
+                let _ = job.done.send(result);
+            }
+        });
+    match spawned {
+        Ok(_) => {
+            app.manage(Opener { jobs });
+        }
+        Err(err) => log.write(LogEvent::Warning {
+            kind: WarningKind::SettingsOpenerFailed,
+            os_code: err.raw_os_error(),
+        }),
     }
 }
 
@@ -118,9 +196,17 @@ impl Receipt {
 /// the opener or the main thread, so it may be called from any thread, the main
 /// thread and window procedures included.
 pub fn request<R: Runtime>(app: &AppHandle<R>, target: OpenTarget) -> Receipt {
-    // Skeleton (T-052 red tests): not implemented yet.
-    let _ = (app, target);
-    todo!("T-052: settings_window::request")
+    let (done, receipt) = mpsc::channel();
+    if let Some(opener) = app.try_state::<Opener<R>>() {
+        // A refused send drops the job and its sender: the receipt then reports that
+        // the request cannot run.
+        let _ = opener.jobs.send(Job {
+            app: app.clone(),
+            target,
+            done,
+        });
+    }
+    Receipt { done: receipt }
 }
 
 /// The startup executor: carries out `startup_action(outcome, launched_by_autostart)`,
@@ -131,13 +217,8 @@ pub fn on_ready<R: Runtime>(
     outcome: &LoadOutcome,
     launched_by_autostart: bool,
 ) -> Option<Receipt> {
-    // Skeleton (T-052 red tests): not implemented yet.
-    let _ = (
-        app,
-        outcome,
-        launched_by_autostart,
-        startup_action,
-        StartupAction::TrayOnly,
-    );
-    todo!("T-052: on_ready through the opener")
+    match startup_action(outcome, launched_by_autostart) {
+        StartupAction::OpenSettings(tab) => Some(request(app, OpenTarget::Tab(tab, None))),
+        StartupAction::TrayOnly => None,
+    }
 }

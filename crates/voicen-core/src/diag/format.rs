@@ -372,6 +372,9 @@ fn warning_kind(kind: WarningKind) -> &'static str {
         WarningKind::ModelsCleanupFailed => "models_cleanup_failed",
         WarningKind::SettingsWindowFailed => "settings_window_failed",
         WarningKind::ChangeBridgeFailed => "change_bridge_failed",
+        WarningKind::SettingsOpenerFailed => "settings_opener_failed",
+        WarningKind::TrayFailed => "tray_failed",
+        WarningKind::TrayFollowerFailed => "tray_follower_failed",
     }
 }
 

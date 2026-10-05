@@ -183,6 +183,18 @@ messages! {
     LOCAL_MODEL_NAME_MEDIUM_Q5_0 = "local_model.name.medium-q5_0",
     /// `LocalModelView.nameKey` of `large-v3-turbo-q5_0` (T-044).
     LOCAL_MODEL_NAME_LARGE_V3_TURBO_Q5_0 = "local_model.name.large-v3-turbo-q5_0",
+    /// Tray menu item `TrayAction::OpenSettings` (T-052).
+    TRAY_SETTINGS = "tray.settings",
+    /// Tray menu item `TrayAction::Exit` (T-052).
+    TRAY_EXIT = "tray.exit",
+    /// Tray tooltip of `TrayState::Idle` (T-052).
+    TRAY_TOOLTIP_IDLE = "tray.tooltip.idle",
+    /// Tray tooltip of `TrayState::Recording` (T-052).
+    TRAY_TOOLTIP_RECORDING = "tray.tooltip.recording",
+    /// Tray tooltip of `TrayState::Error` (T-052).
+    TRAY_TOOLTIP_ERROR = "tray.tooltip.error",
+    /// Tray tooltip of `TrayState::HotkeyError` (T-052).
+    TRAY_TOOLTIP_HOTKEY_ERROR = "tray.tooltip.hotkey_error",
     ;
     nested:
     /// `MicCause::NoDevice`.

@@ -130,6 +130,11 @@ pub trait Indicator: Send + Sync {                        // built in T-051, `vo
 // Called only by the dictation session, from inside its lock, once per change; an
 // implementation must not block on another thread and must never call back into the session
 // (T-052 / T-053 hop to the main thread with a non-waiting emit or run_on_main_thread).
+// The tray half is `src-tauri` `tray::TrayPart::set_tray` (T-052; T-006's composite Indicator
+// forwards to it): it stores the latest (state, retry_available) and posts one fire-and-forget
+// main-thread task that renders it with core's `voicen_core::tray` table; it never calls a
+// TrayIcon setter itself (those wait for the main thread). The tray's "menu opened" reaches
+// `DictationSession::tray_menu_opened` from another thread, never from the main thread.
 
 pub trait ShellRequests: Send + Sync {                    // built in T-051, `voicen_core::platform`
     fn open_settings(&self, tab: SettingsTab);            // the OpenSettings of `blocked_actions`; T-055 adds the field focus
@@ -222,7 +227,7 @@ impl Drop for DictationSession { /* the job in flight finishes, queued recording
 - **Timer.** One std thread calls `tick(now)` once `now >= next_deadline()`, and re-reads the deadline after every change.
 - **Publication.** `(indicator.tray, retry_available)` and `indicator.overlay` reach the `Indicator` port from inside the session lock, right after the controller call that changed them, only when they differ from what was last sent; nothing at start. Between a stop's `release` and its `finish` nothing is sent (from any thread): the `finish` sends what changed meanwhile, so the overlay goes Recording → Processing, never through Hidden. If the release path panics in between (an adapter's `stop`, the observer, the conversion), a drop guard ends that hold and publishes what the controller shows, and the panic reaches the caller.
 - The shell implements the hotkey thread (research R-1, R-2, R-17) and turns OS messages into these calls. The `RegisterHotKey` modifiers and virtual key, the release poll groups and rule, and the "target is elevated" rule come from `voicen_core::win32_data` (pure data: `hotkey_codes`, `released`, `target_elevated` over `IntegrityLevel` RIDs; T-051), which T-006 cross-checks against the `windows` crate constants on Windows CI.
-- Later inputs go through the same session: Esc, 10-minute maximum and toggle (T-009), Retry and toasts (T-007), registrar results at start and on save (T-055), device choice and device loss (T-012), a shutdown that does not wait for the job in flight (T-052), the delivery queue that replaces the worker (T-011).
+- Later inputs go through the same session: Esc, 10-minute maximum and toggle (T-009), Retry and toasts (T-007), registrar results at start and on save (T-055), device choice and device loss (T-012), the delivery queue that replaces the worker (T-011). App exit does not go through the session (T-052, which settles T-051 Q3 for exit): the process ends by tao's `process::exit` after `RunEvent::Exit`, the session is never dropped, and in-flight and queued results are dropped with the process (spec.md edge case "app exit"); deleting the pending audio on exit is T-007's.
 
 There is no clock port in this feature. Every `Instant` is the instant of the caller's event: the hotkey thread stamps the press and the release when the OS message arrives, so worker or lock delay never counts in the 0.3 s hold. `run_job` reads `std::time::Instant::now()` only for the two event durations (`stop_to_text_ms` from the recording's `stopped_at`, `text_to_paste_ms`), never for a decision (decision #47 (2)). The session's worker is the caller of `job_finished`, so it stamps the job-end instant (`Instant::now()` when `run_job` returned); the session's timer passes `Instant::now()` to `tick` once the deadline is reached. `voicen_core::clock::Clock` (wall time, used by `SettingsService`) is unchanged (T-042).
 

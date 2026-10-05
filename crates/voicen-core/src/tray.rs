@@ -13,7 +13,7 @@
 //! `retry_available`); nothing here keeps state.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
-use crate::i18n::MessageId;
+use crate::i18n::{self, MessageId};
 use crate::recording::TrayState;
 
 /// An item of the tray menu. T-007 adds Retry (only while `retry_available`),
@@ -31,25 +31,29 @@ impl TrayAction {
     /// The menu item id (`MenuEvent.id`): a closed set of `[a-z_]+` words, one per
     /// action.
     pub fn as_str(self) -> &'static str {
-        // Skeleton (T-052 red tests): not implemented yet.
-        let _ = self;
-        todo!("T-052: TrayAction::as_str")
+        match self {
+            TrayAction::OpenSettings => "settings",
+            TrayAction::Exit => "exit",
+        }
     }
 
     /// The action whose [`as_str`](Self::as_str) is `id`; `None` for any other id.
     pub fn from_id(id: &str) -> Option<TrayAction> {
-        // Skeleton (T-052 red tests): not implemented yet.
-        let _ = id;
-        todo!("T-052: TrayAction::from_id")
+        ALL.into_iter().find(|action| action.as_str() == id)
     }
 
     /// The catalog id of the item's text (contracts/messages.md).
     pub fn label(self) -> MessageId {
-        // Skeleton (T-052 red tests): not implemented yet.
-        let _ = self;
-        todo!("T-052: TrayAction::label")
+        match self {
+            TrayAction::OpenSettings => i18n::TRAY_SETTINGS,
+            TrayAction::Exit => i18n::TRAY_EXIT,
+        }
     }
 }
+
+/// Every action, so [`TrayAction::from_id`] maps back exactly the ids
+/// [`TrayAction::as_str`] gives (a new variant is added here and to `as_str`).
+const ALL: [TrayAction; 2] = [TrayAction::OpenSettings, TrayAction::Exit];
 
 /// The four tray icons (OQ-11 Q1 default: the app icon plain, with a red dot, with
 /// an amber "!", with an amber "!" and a key mark). The shell embeds one image per
@@ -65,23 +69,30 @@ pub enum TrayIconKind {
 /// The menu items, top to bottom. `retry_available` is the session's (the pending
 /// slot, dictation-session.md); T-007 adds Retry while it is true. Pure.
 pub fn menu(retry_available: bool) -> Vec<TrayAction> {
-    // Skeleton (T-052 red tests): not implemented yet.
+    // T-007 inserts Retry before Exit while `retry_available`; until then both rows
+    // are the same.
     let _ = retry_available;
-    todo!("T-052: tray::menu")
+    vec![TrayAction::OpenSettings, TrayAction::Exit]
 }
 
 /// The catalog id of the tooltip `state` shows. Pure.
 pub fn tooltip(state: TrayState) -> MessageId {
-    // Skeleton (T-052 red tests): not implemented yet.
-    let _ = state;
-    todo!("T-052: tray::tooltip")
+    match state {
+        TrayState::Idle => i18n::TRAY_TOOLTIP_IDLE,
+        TrayState::Recording => i18n::TRAY_TOOLTIP_RECORDING,
+        TrayState::Error => i18n::TRAY_TOOLTIP_ERROR,
+        TrayState::HotkeyError => i18n::TRAY_TOOLTIP_HOTKEY_ERROR,
+    }
 }
 
 /// The icon `state` shows. Pure.
 pub fn icon(state: TrayState) -> TrayIconKind {
-    // Skeleton (T-052 red tests): not implemented yet.
-    let _ = state;
-    todo!("T-052: tray::icon")
+    match state {
+        TrayState::Idle => TrayIconKind::Idle,
+        TrayState::Recording => TrayIconKind::Recording,
+        TrayState::Error => TrayIconKind::Error,
+        TrayState::HotkeyError => TrayIconKind::HotkeyError,
+    }
 }
 
 #[cfg(test)]

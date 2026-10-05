@@ -36,6 +36,16 @@ pub fn start(logs_dir: PathBuf, on_unwritable: OnUnwritable) -> Arc<Log> {
     log
 }
 
+/// The OS code of a tauri error that is an I/O error; `None` otherwise. A warning
+/// line carries this code and the kind only: the text of a tauri error is never
+/// logged (#45).
+pub fn io_os_code(err: &tauri::Error) -> Option<i32> {
+    match err {
+        tauri::Error::Io(io) => io.raw_os_error(),
+        _ => None,
+    }
+}
+
 /// The offset of the active Windows time zone at an instant, daylight saving
 /// included; UTC (0) when the instant cannot be converted.
 struct OsLocalOffset;

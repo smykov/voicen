@@ -124,5 +124,11 @@
   "settings.tab.recording": "Запись",
   "settings.title": "Настройки",
   "settings.warning.endpoint_insecure": "Адрес использует http:// на нелокальном хосте: ключ API передаётся без шифрования.",
-  "settings.write_failed": "Не удалось сохранить настройки: файл настроек не записан. Ничего не изменено."
+  "settings.write_failed": "Не удалось сохранить настройки: файл настроек не записан. Ничего не изменено.",
+  "tray.exit": "Выход",
+  "tray.settings": "Настройки",
+  "tray.tooltip.error": "Voicen — последняя диктовка не удалась",
+  "tray.tooltip.hotkey_error": "Voicen — сочетание клавиш не зарегистрировано",
+  "tray.tooltip.idle": "Voicen",
+  "tray.tooltip.recording": "Voicen — запись"
 }

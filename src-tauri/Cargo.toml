@@ -25,6 +25,9 @@ voicen-core = { path = "../crates/voicen-core" }
 tauri = { version = "2", features = ["tray-icon"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Single instance (T-052): registered first and only by `run()`; its second-instance path
+# calls process::exit(0) inside tauri's build(), so no test registers it.
+tauri-plugin-single-instance = "2.5"
 
 # Credential Manager (T-030, spec 004 T016), the OS UI language (spec 004 T049),
 # the HKCU Run value (T-014, spec 004 T057), the models dir free space (T-044) and

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use tauri::{App, AppHandle, Builder, Context, RunEvent, Runtime};
+use tauri::{App, AppHandle, Builder, Context, Manager, RunEvent, Runtime};
 use voicen_core::autostart::Autostart;
 use voicen_core::diag::{Log, LogEvent, WarningKind};
 use voicen_core::local_models::catalog::MODELS;
@@ -29,7 +29,7 @@ fn get_build_info() -> BuildInfo {
     voicen_core::build_info()
 }
 
-/// The command registration; reached only through [`build_app`] (T-030 J4).
+/// The command registration; reached only through [`assemble`] (T-030 J4).
 fn commands<R: Runtime>(builder: Builder<R>) -> Builder<R> {
     builder.invoke_handler(tauri::generate_handler![
         get_build_info,
@@ -42,18 +42,19 @@ fn commands<R: Runtime>(builder: Builder<R>) -> Builder<R> {
     ])
 }
 
-/// The one app wiring, shared by `run()` and the tests (T-030 J4): registers
-/// `commands`, manages `service`, `local_models` and `log`, builds the app with
-/// `context`, and starts the `settings://changed` bridge on the built app's handle.
-/// tauri 2.12.1 runs `.setup()` only from `run` / `run_iteration`, never from
-/// `build()`, so the bridge starts here, after `build()`; `run()` then only calls
-/// `.run(…)` on the result.
+/// The one app wiring of the tests (T-030 J4): [`assemble`] with `service`,
+/// `local_models` and `log` as the parts, so the tests get exactly what `run()`
+/// gets after its startup side effects: the commands, the managed state, the
+/// `settings://changed` bridge, the settings opener thread, the tray and its
+/// language follower. tauri 2.12.1 runs `.setup()` only from `run` /
+/// `run_iteration`, never from `build()`, so all of it starts after `build()`.
 ///
 /// `local_models` is the one coordinator behind the local-model commands (T-044);
 /// its store is the one `run()` passed to `settings_ipc::load_settings`.
 ///
 /// `log` is the one log (`diag::start`, T-008): managed for `settings_save` (the
-/// save line) and handed to the bridge (its spawn failure is a typed warning).
+/// save line), handed to the bridge, the opener and the tray (their failures are
+/// typed warnings).
 pub fn build_app<R: Runtime>(
     builder: Builder<R>,
     context: Context<R>,
@@ -61,16 +62,9 @@ pub fn build_app<R: Runtime>(
     local_models: Arc<LocalModels>,
     log: Arc<Log>,
 ) -> tauri::Result<App<R>> {
-    // Skeleton (T-052 red tests): becomes `assemble(builder, context, move ||
-    // Parts::new(service, local_models, log))`, which also starts the settings
-    // opener, the tray and its language follower; the body below is unchanged.
-    let app = commands(builder)
-        .manage(service.clone())
-        .manage(local_models)
-        .manage(log.clone())
-        .build(context)?;
-    settings_ipc::spawn_change_bridge(app.handle().clone(), service, &log);
-    Ok(app)
+    assemble(builder, context, move || {
+        Parts::new(service, local_models, log)
+    })
 }
 
 /// What the startup side effects produce (T-052 invariant 1): the one log
@@ -116,9 +110,27 @@ pub fn assemble<R: Runtime>(
     context: Context<R>,
     parts: impl FnOnce() -> Parts,
 ) -> tauri::Result<App<R>> {
-    // Skeleton (T-052 red tests): not implemented yet.
-    let _ = (builder, context, parts);
-    todo!("T-052: assemble")
+    let app = commands(builder).build(context)?;
+    wire(app.handle(), parts());
+    Ok(app)
+}
+
+/// Everything that needs the startup side effects' results, on the built app (on
+/// the thread that built it): the managed state, the `settings://changed` bridge,
+/// the settings opener thread and the tray with its language follower. T-006 adds
+/// the dictation session after this, so the tray exists when it first publishes.
+fn wire<R: Runtime>(app: &AppHandle<R>, parts: Parts) {
+    let Parts {
+        service,
+        local_models,
+        log,
+    } = parts;
+    app.manage(Arc::clone(&service));
+    app.manage(local_models);
+    app.manage(Arc::clone(&log));
+    settings_ipc::spawn_change_bridge(app.clone(), Arc::clone(&service), &log);
+    settings_window::start_opener(app, Arc::clone(&log));
+    tray::install(app, &service, &log);
 }
 
 /// The run-loop callback of `run()` and the real-runtime tests (T-052 invariant 4):
@@ -135,10 +147,23 @@ pub fn on_run_event<R: Runtime>(
     outcome: &LoadOutcome,
     launched_by_autostart: bool,
 ) {
-    // Skeleton (T-052 red tests): not implemented yet. `io_os_code` moves with the
-    // failure line to the opener thread.
-    let _ = (app, event, outcome, launched_by_autostart, io_os_code);
-    todo!("T-052: on_run_event")
+    match event {
+        RunEvent::Ready => {
+            // A failed open is written by the opener thread
+            // (`settings_window_failed`). The user's way back is the tray "Settings"
+            // item or a second launch; the one-time notice is T-054's.
+            let _ = settings_window::on_ready(app, outcome, launched_by_autostart);
+        }
+        RunEvent::ExitRequested {
+            code: None, api, ..
+        } => {
+            // Without a tray there would be no way to end the process.
+            if app.tray_by_id(tray::TRAY_ID).is_some() {
+                api.prevent_exit();
+            }
+        }
+        _ => {}
+    }
 }
 
 /// The release key store: Credential Manager, the only one (NFR-04; no fallback).
@@ -191,17 +216,13 @@ fn release_launched_by_autostart() -> bool {
     )
 }
 
-/// The OS code of a tauri error that is an I/O error; `None` otherwise (the text
-/// of a tauri error is never logged).
-fn io_os_code(err: &tauri::Error) -> Option<i32> {
-    match err {
-        tauri::Error::Io(io) => io.raw_os_error(),
-        _ => None,
-    }
-}
-
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub fn run() {
+/// The startup side effects of the primary, in this order (T-052 invariant 1:
+/// `assemble` calls this only after tauri's `build()`, so a second instance, which
+/// exits inside the single-instance plugin's setup, never runs it): the one log
+/// (`Started` first), the one `LocalModels` (its `.part` cleanup), the settings
+/// load (a first run writes `settings.json`; the Run value is reconciled). Returns
+/// the parts and the load outcome for `Ready`.
+fn release_parts() -> (Parts, LoadOutcome) {
     // The one log (T-008), Started first; every later diagnostic is a typed line on
     // it. The unwritable callback is T-054's one-time notice; until then the log
     // only degrades.
@@ -232,17 +253,26 @@ pub fn run() {
         os_language.as_deref(),
         &log,
     );
+    (Parts::new(service, local_models, log), load_outcome)
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
     let launched_by_autostart = release_launched_by_autostart();
-    // Skeleton (T-052 red tests): `run()` becomes `assemble` with the single-instance
-    // plugin registered first and the startup side effects as its `parts`, then
-    // `.run(on_run_event)`.
-    build_app(
-        tauri::Builder::default(),
-        tauri::generate_context!(),
-        service,
-        local_models,
-        Arc::clone(&log),
-    )
-    .expect("error while building tauri application")
-    .run(move |app, event| on_run_event(app, event, &load_outcome, launched_by_autostart));
+    let mut load_outcome = None;
+    // The single-instance plugin is registered first and only here (never in
+    // `build_app` or a test: its second-instance path calls `process::exit(0)`
+    // inside `build()`). Its setup decides inside `build()`, before `release_parts`.
+    let builder =
+        tauri::Builder::default().plugin(tauri_plugin_single_instance::init(|app, argv, cwd| {
+            let _ = tray::on_second_instance(app, argv, cwd);
+        }));
+    let app = assemble(builder, tauri::generate_context!(), || {
+        let (parts, outcome) = release_parts();
+        load_outcome = Some(outcome);
+        parts
+    })
+    .expect("error while building tauri application");
+    let load_outcome = load_outcome.expect("assemble returned the app, so it ran the parts");
+    app.run(move |app, event| on_run_event(app, event, &load_outcome, launched_by_autostart));
 }

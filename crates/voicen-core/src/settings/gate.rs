@@ -67,9 +67,11 @@ pub enum SecondLaunchAction {
 /// The second-launch decision, from whether the second process was started by the
 /// Run value. Pure.
 pub fn second_launch_action(launched_by_autostart: bool) -> SecondLaunchAction {
-    // Skeleton (T-052 red tests): not implemented yet.
-    let _ = launched_by_autostart;
-    todo!("T-052: second_launch_action")
+    if launched_by_autostart {
+        SecondLaunchAction::TrayOnly
+    } else {
+        SecondLaunchAction::FrontSettings
+    }
 }
 
 /// Called by the hotkey handler before the microphone is opened. Only engine

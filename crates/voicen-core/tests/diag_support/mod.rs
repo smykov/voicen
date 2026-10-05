@@ -422,6 +422,9 @@ pub const WARNING_KINDS: &[&str] = &[
     "models_cleanup_failed",
     "settings_window_failed",
     "change_bridge_failed",
+    "settings_opener_failed",
+    "tray_failed",
+    "tray_follower_failed",
 ];
 pub const LOAD_OUTCOMES: &[&str] = &["loaded", "first_run", "reset", "unavailable"];
 pub const SAVE_OUTCOMES: &[&str] = &["ok", "refused", "failed"];
