@@ -19,6 +19,7 @@
 //! put into the URL unencoded. `tauri.conf.json` declares no window, and the
 //! capability in `capabilities/default.json` is granted to [`LABEL`] only.
 
+use std::panic::AssertUnwindSafe;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::Arc;
 use std::time::Duration;
@@ -127,7 +128,8 @@ impl Receipt {
     /// written to the log as one `warning kind=settings_window_failed` line), `None`
     /// if it has not run by then. A request that can never run (no opener thread:
     /// the app was not wired by `assemble`, or the thread could not be started,
-    /// which was logged once as `settings_opener_failed`) is
+    /// which was logged once as `settings_opener_failed`) or whose open panicked
+    /// (logged as `settings_window_failed` without an OS code) is
     /// `Some(Err(FailedToReceiveMessage))`.
     pub fn wait_timeout(self, timeout: Duration) -> Option<tauri::Result<()>> {
         match self.done.recv_timeout(timeout) {
@@ -154,7 +156,12 @@ struct Opener<R: Runtime> {
 /// Starts the one opener thread ("settings-window") of `app` and manages its queue.
 /// Called once, by `assemble`'s wiring, after tauri's `build()`. The thread runs the
 /// requests one at a time, in posting order, and writes a failed open to `log`; it
-/// ends when the app's queue is dropped. A failed spawn writes one
+/// ends when the app's queue is dropped. A panic inside one request (an unwinding
+/// build, as in the tests) is caught there: it writes `settings_window_failed`
+/// without an OS code, that request's receipt reports that it did not complete
+/// (`Some(Err(FailedToReceiveMessage))`) and the next request runs as usual. The
+/// release profile has `panic = "abort"`, so there a panic ends the process and can
+/// never leave a dead opener behind. A failed spawn writes one
 /// `settings_opener_failed` warning (the OS code only); every later request then
 /// reports that it cannot run.
 pub(crate) fn start_opener<R: Runtime>(app: &AppHandle<R>, log: Arc<Log>) {
@@ -164,18 +171,29 @@ pub(crate) fn start_opener<R: Runtime>(app: &AppHandle<R>, log: Arc<Log>) {
         .name("settings-window".into())
         .spawn(move || {
             for job in queue {
-                let result = match job.target {
-                    OpenTarget::Tab(tab, field) => open(&job.app, tab, field),
-                    OpenTarget::Front => front(&job.app),
-                };
-                if let Err(err) = &result {
-                    // The kind and the OS code only, no error text (#45).
-                    thread_log.write(LogEvent::Warning {
+                let Job { app, target, done } = job;
+                let run = std::panic::catch_unwind(AssertUnwindSafe(|| match target {
+                    OpenTarget::Tab(tab, field) => open(&app, tab, field),
+                    OpenTarget::Front => front(&app),
+                }));
+                // The kind and the OS code only, no error text (#45).
+                match run {
+                    Ok(result) => {
+                        if let Err(err) = &result {
+                            thread_log.write(LogEvent::Warning {
+                                kind: WarningKind::SettingsWindowFailed,
+                                os_code: io_os_code(err),
+                            });
+                        }
+                        let _ = done.send(result);
+                    }
+                    // `done` is dropped unanswered: the receipt reports the request
+                    // as not completed.
+                    Err(_panic) => thread_log.write(LogEvent::Warning {
                         kind: WarningKind::SettingsWindowFailed,
-                        os_code: io_os_code(err),
-                    });
+                        os_code: None,
+                    }),
                 }
-                let _ = job.done.send(result);
             }
         });
     match spawned {
@@ -192,7 +210,8 @@ pub(crate) fn start_opener<R: Runtime>(app: &AppHandle<R>, log: Arc<Log>) {
 /// Posts `target` to the one opener thread and returns at once. The opener runs the
 /// requests one at a time, in the order they were posted (FIFO), so no two runs of
 /// [`open`] overlap; a failed one writes `warning kind=settings_window_failed`
-/// (`os_code=` for an I/O error) and the next request runs as usual. Never waits for
+/// (`os_code=` for an I/O error) and the next request runs as usual, also after a
+/// panicking one where panics unwind (see `start_opener`). Never waits for
 /// the opener or the main thread, so it may be called from any thread, the main
 /// thread and window procedures included.
 pub fn request<R: Runtime>(app: &AppHandle<R>, target: OpenTarget) -> Receipt {

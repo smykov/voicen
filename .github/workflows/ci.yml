@@ -265,21 +265,32 @@ jobs:
           $loadLine = 'settings load outcome=loaded'
           if (-not (Test-Path -LiteralPath $settings -PathType Leaf)) { throw "settings.json not found at $settings before the single-instance check" }
           function Get-LineCount([string]$text) { if (Test-Path $log) { @(Select-String -Path $log -SimpleMatch $text).Count } else { 0 } }
-          # The Started line of one pid ("... started pid=<pid>" at the end of the line). Counted right
-          # after Start-Process as well: the child writes it only after tauri's build(), so a line with
-          # the same pid from before is a pid reused from an earlier step.
-          function Get-StartCountOf([int]$id) { if (Test-Path $log) { @(Select-String -Path $log -Pattern "started pid=$id(\D|$)").Count } else { 0 } }
+          # The line count of every log file, taken before a Start-Process (T-052 review round 1 #5): a
+          # baseline counted after the start could absorb a start line the child writes at once, which
+          # is the very line the second-launch check looks for.
+          function Get-LogMark { $m = @{}; foreach ($f in @(Get-ChildItem -Path $log -ErrorAction SilentlyContinue)) { $m[$f.FullName] = @(Get-Content -LiteralPath $f.FullName).Count }; $m }
+          # The Started lines of one pid ("... started pid=<pid>" at the end of the line) written since
+          # $mark: in each log file only the lines past its count in $mark (every line of a file that is
+          # new since then, e.g. after a roll).
+          function Get-StartCountSince($mark, [int]$id) {
+            $n = 0
+            foreach ($f in @(Get-ChildItem -Path $log -ErrorAction SilentlyContinue)) {
+              $skip = if ($mark.ContainsKey($f.FullName)) { $mark[$f.FullName] } else { 0 }
+              $n += @(Get-Content -LiteralPath $f.FullName | Select-Object -Skip $skip | Select-String -Pattern "started pid=$id(\D|$)").Count
+            }
+            $n
+          }
           $primary = $null; $second = $null; $third = $null
           function Stop-All { foreach ($p in @($primary, $second, $third)) { if ($p) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue } } }
           # The primary: a Loaded launch (no window). run() is build (the plugin decides), then the
           # log, the .part cleanup and the settings load, so a .part planted after its load line is
           # deleted by no one but a second process that ran the startup side effects.
           $loadsBefore = Get-LineCount $loadLine
+          $primaryMark = Get-LogMark
           $primary = Start-Process -FilePath $exe -PassThru
           $null = $primary.Handle
-          $primaryBefore = Get-StartCountOf $primary.Id
           $ready = $false
-          for ($i = 0; $i -lt 30 -and -not $ready; $i++) { Start-Sleep -Seconds 1; $ready = ((Get-StartCountOf $primary.Id) -gt $primaryBefore) -and ((Get-LineCount $loadLine) -gt $loadsBefore) }
+          for ($i = 0; $i -lt 30 -and -not $ready; $i++) { Start-Sleep -Seconds 1; $ready = ((Get-StartCountSince $primaryMark $primary.Id) -ge 1) -and ((Get-LineCount $loadLine) -gt $loadsBefore) }
           if (-not $ready) { Stop-All; throw "the primary (pid $($primary.Id)) did not write its start and load lines" }
           $tray = $false
           for ($i = 0; $i -lt 30 -and -not $tray; $i++) { $tray = @(Get-AllWindows $primary.Id | Where-Object { $_.Class -ceq 'tray_icon_app' }).Count -ge 1; if (-not $tray) { Start-Sleep -Seconds 1 } }
@@ -289,9 +300,9 @@ jobs:
           if (-not (Test-Path -LiteralPath $part -PathType Leaf)) { Stop-All; throw "could not place $part" }
           # Second launch (no --autostart): it exits 0 inside build() (the plugin hands argv to the
           # primary), writes no start line, deletes no .part; the primary opens the settings window.
+          $secondMark = Get-LogMark
           $second = Start-Process -FilePath $exe -PassThru
           $null = $second.Handle
-          $secondBefore = Get-StartCountOf $second.Id
           if (-not $second.WaitForExit(30000)) { Stop-All; throw "the second launch (pid $($second.Id)) did not exit within 30 s (no single instance)" }
           if ($second.ExitCode -ne 0) { Stop-All; throw "the second launch exited with code $($second.ExitCode), expected 0" }
           $win = $null
@@ -303,8 +314,8 @@ jobs:
             $seen = Format-ShownWindows $shown
             if ($shown.Count -eq 1 -and $shown[0].Title -ceq 'Voicen') { $win = $shown[0] }
           }
-          $secondLines = (Get-StartCountOf $second.Id) - $secondBefore
-          $primaryLines = (Get-StartCountOf $primary.Id) - $primaryBefore
+          $secondLines = Get-StartCountSince $secondMark $second.Id
+          $primaryLines = Get-StartCountSince $primaryMark $primary.Id
           $partKept = Test-Path -LiteralPath $part -PathType Leaf
           if ($primary.HasExited) { Stop-All; throw "the primary exited after the second launch" }
           if ($secondLines -ne 0) { Stop-All; throw "the second launch (pid $($second.Id)) wrote $secondLines start line(s) into the primary's log" }

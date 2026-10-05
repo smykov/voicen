@@ -15,6 +15,9 @@
 //!   instant and hands `DictationSession::tray_menu_opened` to another thread.
 //! - "Settings" posts `settings_window::request(Front)`; "Exit" calls
 //!   `AppHandle::exit(0)`, the only user exit.
+//! - Only tauri keeps the `TrayIcon` (in its resources), so tauri's exit cleanup
+//!   drops the last copy and tray-icon removes the icon from the notification
+//!   area; this module looks the icon up for each render.
 
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -44,10 +47,14 @@ pub const TRAY_ID: &str = "voicen";
 /// "menu opened" (P-010).
 const MENU_ON_LEFT_CLICK: bool = true;
 
-/// What the last apply task set on the tray icon (its build counts as the first
-/// apply). Written by the task after the setters returned (also when one of them
-/// returned an error, which writes one `tray_failed` warning), under a lock that is
-/// never held across a setter, so [`applied`] never waits for an apply in progress.
+/// The view the last apply task rendered on the tray icon (its build counts as the
+/// first apply): what it asked the icon to show. Written by the task after the
+/// setters returned, also when one of them returned an error (one `tray_failed`
+/// warning); then the icon still shows an older state until the next change
+/// renders again, and tray-icon re-registers the icon after an Explorer restart
+/// (TaskbarCreated) with the last image and tooltip that were set successfully,
+/// which nothing re-applies. Written under a lock that is never held across a
+/// setter, so [`applied`] never waits for an apply in progress.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Applied {
     pub state: TrayState,
@@ -79,10 +86,13 @@ struct Wanted {
     posted: bool,
 }
 
-/// The tray of one app: its icon, the wanted view and the apply record.
+/// The tray of one app: the wanted view and the apply record. It holds no
+/// `TrayIcon`: tray-icon removes the icon from the notification area only when its
+/// last copy is dropped, and tauri's exit cleanup drops only its own (resources
+/// table), so a copy kept here would leave the icon behind after Exit (review
+/// round 1 #1). Each render looks the icon up with `tray_by_id`.
 struct Shared<R: Runtime> {
     app: AppHandle<R>,
-    icon: TrayIcon<R>,
     log: Arc<Log>,
     wanted: Mutex<Wanted>,
     /// `(lang, retry_available)` of the menu on the icon; read and written by the
@@ -137,19 +147,26 @@ impl<R: Runtime> Shared<R> {
     }
 
     /// Sets the icon and the tooltip of `view`, and a new menu when its language or
-    /// `retry_available` changed, then records what was set. No lock is held across
-    /// a setter. The first failure writes one `tray_failed` warning (OS code only).
+    /// `retry_available` changed, then records the rendered view. Does nothing once
+    /// tauri no longer has the icon (after the exit cleanup). No lock is held across
+    /// a setter. The first failure writes one `tray_failed` warning: the kind, and
+    /// the OS code only for a `tauri::Error::Io` (tray-icon's own OS errors arrive as
+    /// `tauri::Error::Tray`, whose code the shell cannot reach without depending on
+    /// tray-icon, so they carry none).
     fn render(&self, view: View) {
+        let Some(icon) = self.app.tray_by_id(TRAY_ID) else {
+            return;
+        };
         let mut failure: Option<Option<i32>> = None;
         let mut note = |err: tauri::Error| {
             failure.get_or_insert(io_os_code(&err));
         };
         let kind = table::icon(view.state);
-        if let Err(err) = self.icon.set_icon(Some(image(kind))) {
+        if let Err(err) = icon.set_icon(Some(image(kind))) {
             note(err);
         }
         let tooltip = i18n::text(view.lang, table::tooltip(view.state), &[]);
-        if let Err(err) = self.icon.set_tooltip(Some(&tooltip)) {
+        if let Err(err) = icon.set_tooltip(Some(&tooltip)) {
             note(err);
         }
         let key = (view.lang, view.retry_available);
@@ -158,7 +175,7 @@ impl<R: Runtime> Shared<R> {
             None
         } else {
             match build_menu(&self.app, view.lang, view.retry_available) {
-                Ok((menu, items)) => match self.icon.set_menu(Some(menu)) {
+                Ok((menu, items)) => match icon.set_menu(Some(menu)) {
                     Ok(()) => {
                         *lock(&self.menu_key) = key;
                         Some(items)
@@ -242,8 +259,11 @@ fn build_menu<R: Runtime>(
 /// the follower's own `service.subscribe()`, so no saved language is missed. Then
 /// manages it (`part`, `applied`) and starts the language follower thread
 /// ("tray-language"), which acts only on a `ui_language` change. A failed build
-/// writes one `tray_failed` warning and leaves the app without a tray (so nothing
-/// is prevented at exit); a failed follower spawn writes `tray_follower_failed`.
+/// writes one `tray_failed` warning (the kind, and the OS code only for a
+/// `tauri::Error::Io`) and leaves the app without a tray, so nothing is prevented
+/// at exit; a failed follower spawn writes `tray_follower_failed`. The icon itself
+/// stays only in tauri's resources, so tauri's exit cleanup removes it from the
+/// notification area.
 pub(crate) fn install<R: Runtime>(app: &AppHandle<R>, service: &SettingsService, log: &Arc<Log>) {
     let changes = service.subscribe();
     let view = View {
@@ -251,8 +271,7 @@ pub(crate) fn install<R: Runtime>(app: &AppHandle<R>, service: &SettingsService,
         retry_available: false,
         lang: service.snapshot().ui_language,
     };
-    let built = build(app, view);
-    let (icon, applied) = match built {
+    let applied = match build(app, view) {
         Ok(built) => built,
         Err(err) => {
             log.write(LogEvent::Warning {
@@ -264,7 +283,6 @@ pub(crate) fn install<R: Runtime>(app: &AppHandle<R>, service: &SettingsService,
     };
     let shared = Arc::new(Shared {
         app: app.clone(),
-        icon,
         log: Arc::clone(log),
         wanted: Mutex::new(Wanted {
             view,
@@ -283,12 +301,14 @@ pub(crate) fn install<R: Runtime>(app: &AppHandle<R>, service: &SettingsService,
     }
 }
 
-/// The tray icon for `view` with its handlers, and the record of that first apply.
-fn build<R: Runtime>(app: &AppHandle<R>, view: View) -> tauri::Result<(TrayIcon<R>, Applied)> {
+/// Builds the tray icon for `view` with its handlers and returns the record of that
+/// first apply. The `TrayIcon` the builder returns is dropped here, on the building
+/// (main) thread: tauri's resources keep the only copy.
+fn build<R: Runtime>(app: &AppHandle<R>, view: View) -> tauri::Result<Applied> {
     let (menu, items) = build_menu(app, view.lang, view.retry_available)?;
     let kind = table::icon(view.state);
     let tooltip = i18n::text(view.lang, table::tooltip(view.state), &[]);
-    let icon = TrayIconBuilder::with_id(TRAY_ID)
+    TrayIconBuilder::with_id(TRAY_ID)
         .icon(image(kind))
         .tooltip(&tooltip)
         .menu(&menu)
@@ -296,17 +316,14 @@ fn build<R: Runtime>(app: &AppHandle<R>, view: View) -> tauri::Result<(TrayIcon<
         .on_menu_event(|app, event| on_menu_event(app, event))
         .on_tray_icon_event(|tray, event| on_tray_icon_event(tray, event))
         .build(app)?;
-    Ok((
-        icon,
-        Applied {
-            state: view.state,
-            retry_available: view.retry_available,
-            lang: view.lang,
-            icon: kind,
-            tooltip,
-            menu: items,
-        },
-    ))
+    Ok(Applied {
+        state: view.state,
+        retry_available: view.retry_available,
+        lang: view.lang,
+        icon: kind,
+        tooltip,
+        menu: items,
+    })
 }
 
 /// The language follower: one `SettingsService::subscribe()` of its own (decision

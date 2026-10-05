@@ -19,6 +19,7 @@
 //!   app's. Each test has its own `TempDir`; no keys are used.
 #![cfg(windows)]
 
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -43,6 +44,11 @@ use voicen_core::tray::TrayAction;
 use voicen_lib::settings_ipc::load_settings;
 use voicen_lib::settings_window::LABEL;
 use voicen_lib::tray::{self, TRAY_ID};
+use windows::core::BOOL;
+use windows::Win32::Foundation::{HWND, LPARAM};
+use windows::Win32::UI::WindowsAndMessaging::{
+    EnumWindows, GetClassNameW, GetWindowThreadProcessId, IsWindow,
+};
 
 /// A test identifier: WebView2's profile goes under it, not under the release one.
 const IDENTIFIER: &str = "dev.voicen.test.lifecycle";
@@ -369,10 +375,55 @@ fn set_tray_returns_while_the_main_thread_is_blocked() {
     assert_eq!(code, 0, "run_return code after end_loop(0)");
 }
 
+/// The class of tray-icon's hidden window (tray-icon 0.25.1 windows/mod.rs:100).
+/// tray-icon destroys that window, and deletes the notification-area icon, when the
+/// last copy of the icon is dropped (windows/mod.rs:313-325).
+const TRAY_WINDOW_CLASS: &str = "tray_icon_app";
+
+/// Every top-level window of this process with class `tray_icon_app` (hidden ones
+/// included), as raw handles (a raw fact, F-003).
+fn tray_windows() -> BTreeSet<isize> {
+    unsafe extern "system" fn collect(hwnd: HWND, found: LPARAM) -> BOOL {
+        let mut pid = 0u32;
+        // SAFETY: `pid` is a writable local; the call only reads the window's owner.
+        unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+        if pid == std::process::id() {
+            let mut buf = [0u16; 64];
+            // SAFETY: `buf` is writable; GetClassNameW sends no message.
+            let len = unsafe { GetClassNameW(hwnd, &mut buf) };
+            let len = usize::try_from(len).unwrap_or(0).min(buf.len());
+            if String::from_utf16_lossy(&buf[..len]) == TRAY_WINDOW_CLASS {
+                // SAFETY: `found` is the `Vec` that `tray_windows` passes, alive and
+                // not otherwise touched for the whole `EnumWindows` call.
+                unsafe { (*(found.0 as *mut Vec<isize>)).push(hwnd.0 as isize) };
+            }
+        }
+        BOOL::from(true)
+    }
+    let mut found: Vec<isize> = Vec::new();
+    // SAFETY: the callback writes only to `found`, and only during this call.
+    unsafe {
+        EnumWindows(
+            Some(collect),
+            LPARAM(&mut found as *mut Vec<isize> as isize),
+        )
+    }
+    .expect("EnumWindows");
+    found.into_iter().collect()
+}
+
+/// True while `raw` is a window handle.
+fn is_window(raw: isize) -> bool {
+    // SAFETY: IsWindow only checks the handle.
+    unsafe { IsWindow(Some(HWND(raw as *mut std::ffi::c_void))) }.as_bool()
+}
+
 #[derive(Debug, Default)]
 struct ExitReport {
     tray: bool,
     posted: bool,
+    /// The `tray_icon_app` windows of this process that appeared with this app.
+    tray_windows: Vec<isize>,
 }
 
 #[test]
@@ -381,15 +432,21 @@ fn the_tray_exit_item_ends_the_loop_with_code_0() {
     // on the main thread like a real menu event, ends the loop: `run_return`
     // returns 0 (`AppHandle::exit(0)` is ExitRequested { code: Some(0) }, never
     // prevented). If the loop still runs `BUDGET` later, a fallback ends it with
-    // code 70, which the test refuses. Bite: Exit not wired, a code other than 0,
-    // or `prevent_exit` applied to a programmatic exit (then the watchdog fires).
+    // code 70, which the test refuses. Once `run_return` has returned, the tray's
+    // hidden window is gone: tauri's exit cleanup dropped the last copy of the
+    // icon, so tray-icon deleted it from the notification area (review round 1 #1).
+    // Bite: Exit not wired, a code other than 0, `prevent_exit` applied to a
+    // programmatic exit (then the watchdog fires), or a `TrayIcon` copy kept past
+    // the cleanup (the icon stays in the notification area after Exit).
     let _serial = serial();
     let _watchdog = watchdog("the_tray_exit_item_ends_the_loop_with_code_0");
     let dir = TempDir::new();
+    let before = tray_windows();
     let (app, outcome) = wry_app(dir.path(), Start::Loaded);
 
-    let (code, report) = run_with_driver(app, outcome, |handle| {
+    let (code, report) = run_with_driver(app, outcome, move |handle| {
         let tray = handle.tray_by_id(TRAY_ID).is_some();
+        let tray_windows: Vec<isize> = tray_windows().difference(&before).copied().collect();
         let inner = handle.clone();
         let posted = handle
             .run_on_main_thread(move || {
@@ -406,7 +463,11 @@ fn the_tray_exit_item_ends_the_loop_with_code_0() {
             thread::sleep(BUDGET);
             end_loop(&fallback, FALLBACK_CODE);
         });
-        ExitReport { tray, posted }
+        ExitReport {
+            tray,
+            posted,
+            tray_windows,
+        }
     });
 
     let report = report.expect("the driver sent no report");
@@ -419,5 +480,21 @@ fn the_tray_exit_item_ends_the_loop_with_code_0() {
         code, 0,
         "run_return code after the tray Exit item ({FALLBACK_CODE} = the loop was still \
          running {BUDGET:?} later and the fallback ended it)"
+    );
+    assert!(
+        !report.tray_windows.is_empty(),
+        "premise: no `{TRAY_WINDOW_CLASS}` window of this process appeared with the app: \
+         {report:?}"
+    );
+    let left: Vec<isize> = report
+        .tray_windows
+        .iter()
+        .copied()
+        .filter(|&raw| is_window(raw))
+        .collect();
+    assert!(
+        left.is_empty(),
+        "`{TRAY_WINDOW_CLASS}` window(s) {left:?} still exist after the tray Exit: a copy of \
+         the icon outlived tauri's exit cleanup, so the icon stays in the notification area"
     );
 }

@@ -171,6 +171,7 @@ A user who enters an `http://` base URL on a non-local host is warned that the A
   - History tab: on/off, size N.
   - General tab: start with Windows, UI language (English / Russian).
 - **FR-002** (req FR-13): The settings window MUST open from the tray (owned by 001), on first run (FR-005), when the hotkey is pressed with engine = none (FR-007), and on the FR-05 startup branch (owned by 001) on a requested tab/field, when a second instance is launched (001 FR-002), and from the "no local model" notification action (002 FR-011) on the Engine tab; a request while it is open brings the existing window to front on that tab.
+  - Note (T-052, OQ-11 default): the tray "Settings" item and a second launch name no tab, so they bring an open window to front on the tab it shows (no tab switch) and open a closed one on the Engine tab (contracts/ipc.md "Window", `OpenTarget::Front`).
 - **FR-003** (req FR-13): Changes MUST be applied only by an explicit Save. A save is all-or-nothing: either every changed setting is validated, applied and persisted, or nothing changes and the reasons are shown on the fields concerned (Clarification Q1).
 - **FR-004** (req FR-13): Save MUST be refused, with the offending fields highlighted and a reason per field, when:
   - engine = API and the base URL is empty, malformed (not an absolute `http`/`https` URL with a host), or carries userinfo (`user:pass@`, `url.credentials`), the model is empty, or no API key is stored or entered;

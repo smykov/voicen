@@ -571,8 +571,12 @@ fn opening_the_menu_never_waits_for_the_session() {
     // once; after the release the press shows Error and the handed-over
     // `tray_menu_opened` then clears it. The handler is called from a helper thread
     // here so that a failing implementation (waiting for the lock) cannot deadlock
-    // this thread's message pump. Bite: `tray_menu_opened` called inline in the
-    // handler.
+    // this thread's message pump. The press is waited on until it has ended, so
+    // it has published Error under the lock before the handed-over call can take
+    // the lock; only then is Idle asserted (the tray starts Idle, so an earlier
+    // check would pass on the initial state; review round 1 #2). Bite:
+    // `tray_menu_opened` called inline in the handler, or the hand-over dropped
+    // while the session is busy (`try_lock`, no spawn).
     let _serial = serial();
     let rig = rig(None);
     select_local_server(&rig);
@@ -581,7 +585,7 @@ fn opening_the_menu_never_waits_for_the_session() {
     let session = start_session(&rig, mic.clone());
 
     let presser = Arc::clone(&session);
-    thread::spawn(move || presser.hotkey_pressed(Instant::now()));
+    let press = thread::spawn(move || presser.hotkey_pressed(Instant::now()));
     assert!(mic.wait_entered(), "premise: the press reached start");
 
     let (tx, rx) = mpsc::channel();
@@ -597,9 +601,14 @@ fn opening_the_menu_never_waits_for_the_session() {
         returned,
         "the menu-open handler waited for the session lock held by a press"
     );
+    // The press renders Error through this thread's tray window, so wait pumping.
+    assert!(
+        eventually(|| press.is_finished()),
+        "premise: the press did not end after the release"
+    );
     assert!(
         eventually(|| rig.state() == Some(TrayState::Idle)),
-        "the handed-over menu open did not reach the session: tray {:?}",
+        "the handed-over menu open did not reach the session after the press: tray {:?}",
         rig.state()
     );
 }
