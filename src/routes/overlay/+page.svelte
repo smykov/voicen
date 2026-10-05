@@ -7,7 +7,8 @@
   //   overlay_ready reply, through `apply` (the payload with the highest seq wins, in
   //   whatever order they arrive). The listener is registered first, then overlay_ready
   //   is invoked, so no change between the two is lost. A rejected listen or reply shows
-  //   nothing of its own.
+  //   nothing of its own, never the rejection text: after a rejected listen nothing more
+  //   is invoked; after a rejected reply the listener stays, so later events still show.
   // - A message is the text Rust rendered (nested mic_reason.* ids included), shown as
   //   given. The page renders only its own ids, overlay.recording and
   //   overlay.processing, with `t` in the payload's `lang` (the UI derives no language).
@@ -66,18 +67,20 @@
     let disposed = false;
     let unlisten: (() => void) | null = null;
     (async () => {
-      try {
-        const stop = await onOverlayState(receive);
-        if (disposed) {
-          stop();
-          return;
-        }
-        unlisten = stop;
-        const current = await overlayReady();
-        if (!disposed) receive(current);
-      } catch {
-        // Nothing is shown of its own: the page shows only what the shell sent.
+      // Only the two IPC calls are caught; nothing is shown of its own (the page shows
+      // only what the shell sent). An exception of the page's own code (`receive`) is not
+      // swallowed: it surfaces as an unhandled rejection.
+      const stop = await onOverlayState(receive).catch(() => null);
+      // No listener: a reply would show a state nothing can update, so stop here.
+      if (stop === null) return;
+      if (disposed) {
+        stop();
+        return;
       }
+      unlisten = stop;
+      // A rejected reply: the listener stays, so the shell's next change is shown.
+      const current = await overlayReady().catch(() => null);
+      if (current !== null && !disposed) receive(current);
     })();
     return () => {
       disposed = true;

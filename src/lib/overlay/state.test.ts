@@ -105,6 +105,11 @@ describe("stateAt (no expiry of its own)", () => {
     expect(stateAt(shown, 10_000 + 59_000)).toEqual({ kind: "recording", elapsedMs: 120_000 });
   });
 
+  it("a time before the arrival counts as the arrival: the elapsed time never drops below the payload's elapsedMs", () => {
+    const shown = apply(null, payload("recording_en"), 10_000); // elapsedMs 61 000
+    expect(stateAt(shown, 10_000 - 500)).toEqual({ kind: "recording", elapsedMs: 61_000 });
+  });
+
   it("a newer recording counts from its own elapsedMs and arrival, not the previous one's", () => {
     const first = apply(null, payload("recording_en"), 0); // seq 1, 61 000 ms
     const second = apply(first, payload("recording_ru"), 30_000); // seq 6, 5 000 ms

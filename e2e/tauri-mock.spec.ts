@@ -499,3 +499,33 @@ test("holdOverlayReady keeps overlay_ready in flight (recorded) until releaseOve
   await expect.poll(reply).toEqual(overlayWire("processing_en"));
   expect(await invokeInPage(page, "overlay_ready")).toEqual({ ok: overlayWire("processing_en") });
 });
+
+test("overlayReady: { reject } records every overlay_ready and rejects it with its text, after the hold if there is one", async ({ context }) => {
+  // T-053 r1 #1: the overlay page's rejected-reply branch.
+  const page = await context.newPage();
+  await installTauriMock(page, { overlayReady: { reject: "overlay_ready refused (fake)" } });
+  await page.goto("/");
+  expect(await invokeInPage(page, "overlay_ready")).toEqual({ err: "overlay_ready refused (fake)" });
+  expect(await invokeInPage(page, "overlay_ready")).toEqual({ err: "overlay_ready refused (fake)" });
+  expect(await calls(page, "overlay_ready")).toEqual([
+    { cmd: "overlay_ready", args: {} },
+    { cmd: "overlay_ready", args: {} },
+  ]);
+
+  const held = await context.newPage();
+  await installTauriMock(held, { overlayReady: { reject: "overlay_ready refused (fake)" }, holdOverlayReady: true });
+  await held.goto("/");
+  await held.evaluate(() => {
+    const w = window as unknown as { __TAURI_INTERNALS__: Internals; __answer?: unknown };
+    void w.__TAURI_INTERNALS__.invoke("overlay_ready", {}).then(
+      (v) => (w.__answer = { ok: v }),
+      (e: unknown) => (w.__answer = { err: e instanceof Error ? e.message : String(e) }),
+    );
+  });
+  await expect.poll(async () => (await calls(held, "overlay_ready")).length).toBe(1);
+  const answer = () => held.evaluate(() => (window as unknown as { __answer?: unknown }).__answer);
+  expect(await answer()).toBeUndefined();
+
+  await releaseOverlayReady(held);
+  await expect.poll(answer).toEqual({ err: "overlay_ready refused (fake)" });
+});

@@ -20,7 +20,11 @@
 //   payload's `text` as given;
 // - no expiry timer: the elapsed m:ss is redrawn at least once a second (it may lag the
 //   real elapsed time by up to a second, never lead it); nothing else changes without a
-//   payload.
+//   payload;
+// - a rejected IPC call shows nothing of its own, never the rejection text, and raises
+//   no page error (T-053 r1 #1): after a rejected listen the page invokes nothing more
+//   (overlay_ready only once the listener is registered); after a rejected overlay_ready
+//   the listener stays registered, so the shell's next change is shown.
 //
 // Time: Playwright's clock (@playwright/test 1.63.0; `Clock` in playwright-core
 // types/types.d.ts): `install` before the navigation, `pauseAt` once the page has
@@ -92,10 +96,21 @@ async function waitForReady(page: Page): Promise<void> {
     .toBe(1);
 }
 
+/**
+ * How far past the page's time `pauseClock` pauses. playwright-core 1.63.0 `pauseAt`
+ * throws "Cannot fast-forward to the past" if the page's flowing time has passed the
+ * target by then, so the margin is longer than a test may run (the 30 s default
+ * timeout): the real time between reading the page's time and the pause cannot reach
+ * it. The jump fires each pending timer at most once; every call comes before the
+ * first payload, when the page has no timer of its own (its only one redraws a shown
+ * recording).
+ */
+const PAUSE_AHEAD_MS = 60_000;
+
 /** Stops the page's clock: from now on the page's time moves only by `runFor`. */
 async function pauseClock(page: Page): Promise<void> {
   const now = await page.evaluate(() => Date.now());
-  await page.clock.pauseAt(now + 1_000);
+  await page.clock.pauseAt(now + PAUSE_AHEAD_MS);
 }
 
 /**
@@ -279,6 +294,65 @@ test("the overlay://state listener is registered before overlay_ready is invoked
     call.cmd === "plugin:event|listen" ? `listen ${(call.args as { event?: string }).event}` : call.cmd,
   );
   expect(order).toEqual([`listen ${OVERLAY_STATE_EVENT}`, "overlay_ready"]);
+  expect(errors).toEqual([]);
+});
+
+// ---- Failure branch: a rejected listen or reply shows nothing of its own (T-053 r1 #1) ----
+
+/** The recorded calls in order, a listen shown with its event. */
+async function callOrder(page: Page): Promise<string[]> {
+  return (await calls(page)).map((call) =>
+    call.cmd === "plugin:event|listen" ? `listen ${(call.args as { event?: string }).event}` : call.cmd,
+  );
+}
+
+test("failure branch: a rejected overlay://state listen shows nothing, raises no page error and never invokes overlay_ready", async ({ page }) => {
+  // ipc.md: overlay_ready only once the listener is registered. Without a listener a
+  // reply would show a state nothing can update, so the page stops there. The reply is
+  // one that would show, so invoking it anyway is visible too.
+  const errors = pageErrors(page);
+  await openOverlay(page, { rejectListen: [OVERLAY_STATE_EVENT], overlayReady: overlayWire("processing_en") });
+  await expect
+    .poll(async () => (await calls(page, "plugin:event|listen")).length, {
+      message: "the overlay page tries to listen to overlay://state",
+    })
+    .toBe(1);
+  await settle(page);
+  await settle(page);
+
+  await expectNothingShown(page);
+  // The mock's rejection text (e2e/support/tauriMock.ts `rejectListen`).
+  await expect(page.locator("body")).not.toContainText(`listen ${OVERLAY_STATE_EVENT} refused`);
+  expect(await listeners(page, OVERLAY_STATE_EVENT)).toBe(0);
+  expect(await callOrder(page), "no overlay_ready after a rejected listen").toEqual([`listen ${OVERLAY_STATE_EVENT}`]);
+  expect(errors).toEqual([]);
+});
+
+test("failure branch: a rejected overlay_ready shows nothing of its own, never the rejection text, and a later overlay://state event is still shown", async ({ page }) => {
+  const errors = pageErrors(page);
+  const rejection = "canary-overlay-ready-rejection-0053";
+  // Held, so the page is ready (listener registered, overlay_ready invoked) before the
+  // reply rejects.
+  await openOverlay(page, { overlayReady: { reject: rejection }, holdOverlayReady: true });
+  await waitForReady(page);
+  await releaseOverlayReady(page);
+  await settle(page);
+  await settle(page);
+
+  await expectNothingShown(page);
+  await expect(page.locator("body")).not.toContainText(rejection);
+
+  // The listener stays registered: the shell's next changes are shown.
+  expect(await listeners(page, OVERLAY_STATE_EVENT)).toBe(1);
+  await overlayState(page, overlayWire("processing_en")); // seq 2
+  await expectShows(page, "processing", en("overlay.processing"));
+  const message = overlayWire("message_no_speech_en"); // seq 3
+  await overlayState(page, message);
+  await expectShows(page, "message", messageText(message));
+  await expect(page.locator("body")).not.toContainText(rejection);
+
+  // Display only: its listener and the one reply; no unlisten.
+  expect(await callOrder(page)).toEqual([`listen ${OVERLAY_STATE_EVENT}`, "overlay_ready"]);
   expect(errors).toEqual([]);
 });
 

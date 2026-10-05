@@ -65,7 +65,9 @@
 //     numbered 0, older than every fixture payload, so it hides nothing a test emits).
 //     The reply is taken when the call is made; with `holdOverlayReady` every call stays
 //     in flight (recorded) until `releaseOverlayReady()`, so a test can emit a newer
-//     event before the (then older) reply arrives; later calls are answered at once;
+//     event before the (then older) reply arrives; later calls are answered at once.
+//     With `overlayReady: { reject }` every call is recorded and then rejects with that
+//     text (the shell could not answer; T-053 r1 #1), after the hold if there is one;
 //   - `overlayState(page, payload)` emits `overlay://state` (`OVERLAY_STATE_EVENT`) as
 //     the shell does;
 //   - `windowLabel` is the label tauri reports for the current window (default
@@ -273,8 +275,11 @@ export interface MockOptions {
   holdDownload?: boolean;
   /** `local_models_list` rejects with this text (recorded); the command cannot run. */
   listRejection?: string;
-  /** What `overlay_ready` returns; default: `overlayNothingYet()`. */
-  overlayReady?: OverlayPayload;
+  /**
+   * What `overlay_ready` returns, or `{ reject }` to make every call reject with that
+   * text (still recorded); default: `overlayNothingYet()`.
+   */
+  overlayReady?: OverlayPayload | { reject: string };
   /** Keep every `overlay_ready` in flight until `releaseOverlayReady` (recorded at once, reply taken then). */
   holdOverlayReady?: boolean;
   /** The label of the current window as tauri reports it; default `settings`. */
@@ -295,7 +300,7 @@ interface InitArg {
   holdDownload: boolean;
   listRejection: string | null;
   modelEvents: { progress: string; state: string };
-  overlayReady: OverlayPayload;
+  overlayReady: OverlayPayload | { reject: string };
   holdOverlayReady: boolean;
   windowLabel: string;
 }
@@ -458,9 +463,11 @@ export async function installTauriMock(page: Page, options: MockOptions = {}): P
           return true;
         }
         case "overlay_ready": {
-          // The reply is the state when the shell ran the command; a hold only delays it.
+          // The answer is the state when the shell ran the command (or its refusal); a
+          // hold only delays it.
           const reply = clone(init.overlayReady);
           if (state.holdingReady) await new Promise<void>((resolve) => state.heldReady.push(resolve));
+          if ("reject" in reply) throw new Error(reply.reject);
           return reply;
         }
         case "plugin:window|destroy":
