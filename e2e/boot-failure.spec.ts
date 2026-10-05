@@ -3,10 +3,12 @@
 // an unrelated assertion, and without retries.
 //
 // Contract for the boot fixture (implementation: e2e/support/boot.ts):
-// - it exports `test` and `expect`; its `test` overrides the `page` fixture, so every
-//   spec that uses `page` gets the boot check by importing `test` from "./support/boot"
-//   instead of "@playwright/test" (types such as `Page` may still come from there);
-// - while the test runs it records the page's failed requests (URL + failure errorText),
+// - it exports `test` and `expect`; every spec that uses `page` or `context` gets the
+//   boot check by importing `test` from "./support/boot" instead of "@playwright/test"
+//   (types such as `Page` may still come from there);
+// - it covers every page of the test's context: the `page` fixture's page and pages the
+//   test opens with `context.newPage()` (T-050 review 1 #1);
+// - while the test runs it records those pages' failed requests (URL + failure errorText),
 //   responses with status >= 500 (URL + status) and a renderer crash;
 // - a test during which any of those happened fails, even when its own assertions passed,
 //   and its error message names each of them; a healthy boot adds nothing.
@@ -188,21 +190,50 @@ test.describe("boot fixture reports the boot cause", () => {
     const o = outcome(map, "renderer crash, unrelated assertion");
     expectFailedWith(o, [/crash/i]);
   });
+
+  // T-050 review 1 #1: pages opened with context.newPage() are covered too.
+  test("an aborted page chunk on a context.newPage() page is reported with its URL and errorText", async ({
+    baseURL,
+  }, info) => {
+    const map = await innerRun(baseURL!, info.project.outputDir);
+    const o = outcome(map, "context.newPage: aborted page chunk, unrelated assertion");
+    expect(o.broken.length, "the scenario broke at least one page chunk").toBeGreaterThan(0);
+    expectFailedWith(o, [...o.broken, "net::ERR_INTERNET_DISCONNECTED"]);
+  });
+
+  test("a page chunk answering 500 on a context.newPage() page fails the test with its URL and status even when its assertions pass", async ({
+    baseURL,
+  }, info) => {
+    const map = await innerRun(baseURL!, info.project.outputDir);
+    const o = outcome(map, "context.newPage: page chunk answers 500, assertions that pass anyway");
+    expect(o.broken.length, "the scenario broke at least one page chunk").toBeGreaterThan(0);
+    expectFailedWith(o, [...o.broken, /\b500\b/]);
+  });
+
+  test("a renderer crash of a context.newPage() page is reported as a crash", async ({
+    baseURL,
+  }, info) => {
+    const map = await innerRun(baseURL!, info.project.outputDir);
+    const o = outcome(map, "context.newPage: renderer crash, unrelated assertion");
+    expectFailedWith(o, [/crash/i]);
+  });
 });
 
-// Every spec that uses the `page` fixture gets it from the boot fixture, so no page in the
-// suite can fail to boot silently (25 goto sites in 8 specs at T-050 analysis time).
-test("every spec that uses page imports test from ./support/boot", () => {
+// Every spec that uses the `page` or the `context` fixture (pages opened with
+// context.newPage(), T-050 review 1 #1) gets it from the boot fixture, so no page in the
+// suite can fail to boot silently (25 goto sites in 8 specs at T-050 analysis time, plus
+// 13 context.newPage() sites in tauri-mock.spec.ts).
+test("every spec that uses page or context imports test from ./support/boot", () => {
   const dir = "e2e";
   const offenders: string[] = [];
   for (const file of readdirSync(dir).filter((f) => f.endsWith(".spec.ts"))) {
     const src = readFileSync(join(dir, file), "utf8");
-    const usesPage = /\(\s*\{[^}]*\bpage\b[^}]*\}/.test(src);
+    const usesPage = /\(\s*\{[^}]*\b(?:page|context)\b[^}]*\}/.test(src);
     if (!usesPage) continue;
     const fromBoot = /import\s*\{[^}]*\btest\b[^}]*\}\s*from\s*["']\.\/support\/boot["']/.test(src);
     const fromPlaywright =
       /import\s*\{[^}]*(?<![\w.])test\b(?!\s*as)[^}]*\}\s*from\s*["']@playwright\/test["']/.test(src);
     if (!fromBoot || fromPlaywright) offenders.push(file);
   }
-  expect(offenders, "specs that use page without the boot fixture").toEqual([]);
+  expect(offenders, "specs that use page or context without the boot fixture").toEqual([]);
 });
