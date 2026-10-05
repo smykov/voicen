@@ -20,15 +20,18 @@
 #![cfg(windows)]
 
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
-use std::sync::Arc;
+use std::sync::{Arc, Barrier};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use windows::core::w;
-use windows::Win32::Foundation::HWND;
+use windows::Win32::Foundation::{CloseHandle, HWND, WAIT_OBJECT_0};
+use windows::Win32::System::Threading::{
+    OpenProcess, WaitForSingleObject, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DestroyWindow, DispatchMessageW, PeekMessageW, TranslateMessage, MSG,
     PM_REMOVE, WINDOW_EX_STYLE, WINDOW_STYLE, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
@@ -145,48 +148,123 @@ fn script() -> PathBuf {
         .join("visible-windows.ps1")
 }
 
+/// What a pwsh run that ended within its budget gives back.
+#[derive(Debug)]
+struct PwshOutput {
+    status: ExitStatus,
+    stdout: String,
+    stderr: String,
+    elapsed: Duration,
+}
+
+/// A pwsh run that did not end within its budget (T-057 VERIFY_FAIL 2, invariant 3):
+/// the helper killed the child and waited for it before returning this.
+#[derive(Debug)]
+struct PwshStall {
+    budget: Duration,
+    elapsed: Duration,
+    /// The name of the last stage marker the child wrote to stderr (the first token of
+    /// the last line that starts with `stage:`, e.g. `stage:up`); `None` when it wrote
+    /// none.
+    stage: Option<String>,
+    /// Everything read from the child's stdout and stderr until it was killed.
+    stdout: String,
+    stderr: String,
+}
+
+/// Why `run_pwsh` gives no output.
+#[derive(Debug)]
+enum PwshError {
+    /// `pwsh` could not be started (not on PATH).
+    Spawn(String),
+    /// It did not end within its budget (invariant 4: a pwsh stall, never a verdict).
+    Stalled(PwshStall),
+}
+
+impl std::fmt::Display for PwshError {
+    /// A stall prints "pwsh stalled", the elapsed time, the budget, the last stage and
+    /// the captured stdout and stderr (invariant 3).
+    fn fmt(&self, _f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        todo!("T-057 VERIFY_FAIL 2 option A: report a stall with its stage and output")
+    }
+}
+
+/// Runs `pwsh -NoProfile -NonInteractive -Command <command>`, the only external process
+/// a shell test starts. Invariant (T-057 VERIFY_FAIL 2 analysis): null stdin and
+/// CREATE_NO_WINDOW; one run at a time in this binary (a file-local static Mutex held
+/// for the whole run); stdout and stderr read on threads; when `budget` runs out the
+/// child is killed and waited for and `Err(PwshError::Stalled)` carries the elapsed
+/// time, the last stage marker and the output read so far.
+///
+/// SKELETON (test-writer): the body is today's `shown_by_smoke` behaviour unchanged
+/// (inherited stdin, no flags, no lock, on timeout a panic that drops the output and
+/// leaves the child running); the developer replaces it.
+fn run_pwsh(command: &str, budget: Duration) -> Result<PwshOutput, PwshError> {
+    let child = Command::new("pwsh")
+        .args(["-NoProfile", "-NonInteractive", "-Command", command])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| PwshError::Spawn(err.to_string()))?;
+    let started = Instant::now();
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let _ = tx.send(child.wait_with_output());
+    });
+    let output = match rx.recv_timeout(budget) {
+        Ok(Ok(output)) => output,
+        Ok(Err(err)) => panic!("pwsh failed to run: {err}"),
+        Err(_) => panic!("pwsh did not finish within {budget:?}"),
+    };
+    Ok(PwshOutput {
+        status: output.status,
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        elapsed: started.elapsed(),
+    })
+}
+
+/// The `-Command` string the predicate tests run: dot-source the smoke's script, call
+/// `Get-ShownWindows <pid>` once, print each handle and then `end` on stdout. Invariant
+/// 3 adds stage markers on stderr, each `<name> <[Environment]::TickCount64>`:
+/// `stage:up` before the dot-source, `stage:loaded` after it (Add-Type done),
+/// `stage:enumerated` after `Get-ShownWindows`.
+///
+/// SKELETON (test-writer): today's string, without the markers.
+fn predicate_command(pid: u32) -> String {
+    format!(
+        "$ErrorActionPreference = 'Stop'; . '{}'; $s = Get-ShownWindows {}; \
+         foreach ($w in $s) {{ [Console]::Out.WriteLine($w.Handle.ToInt64()) }}; \
+         [Console]::Out.WriteLine('end')",
+        script().display(),
+        pid
+    )
+}
+
 /// The handles `Get-ShownWindows <this pid>` returns, as the smoke's steps call it
 /// (dot-sourced script, one call).
 #[track_caller]
 fn shown_by_smoke() -> Vec<isize> {
     let path = script();
     assert!(path.is_file(), "premise: {} exists", path.display());
-    let command = format!(
-        "$ErrorActionPreference = 'Stop'; . '{}'; $s = Get-ShownWindows {}; \
-         foreach ($w in $s) {{ [Console]::Out.WriteLine($w.Handle.ToInt64()) }}; \
-         [Console]::Out.WriteLine('end')",
-        path.display(),
-        std::process::id()
-    );
-    let child = Command::new("pwsh")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &command])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn();
-    let child = match child {
-        Ok(child) => child,
-        Err(err) => panic!(
+    let output = match run_pwsh(&predicate_command(std::process::id()), PWSH_BUDGET) {
+        Ok(output) => output,
+        Err(PwshError::Spawn(err)) => panic!(
             "precondition `pwsh` does not hold: PowerShell 7 is not on PATH ({err}); the \
              windows-latest runner ships it and the install smoke runs under it"
         ),
+        Err(err) => panic!("{err}"),
     };
-    let started = Instant::now();
-    let (tx, rx) = mpsc::channel();
-    thread::spawn(move || {
-        let _ = tx.send(child.wait_with_output());
-    });
-    let output = match rx.recv_timeout(PWSH_BUDGET) {
-        Ok(Ok(output)) => output,
-        Ok(Err(err)) => panic!("pwsh failed to run: {err}"),
-        Err(_) => panic!("pwsh did not finish within {PWSH_BUDGET:?}"),
-    };
-    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let PwshOutput {
+        status,
+        stdout,
+        stderr,
+        elapsed,
+    } = output;
     assert!(
-        output.status.success() && stdout.lines().last() == Some("end"),
-        "premise: Get-ShownWindows ran ({:?} after {:?}); stdout: {stdout}; stderr: {stderr}",
-        output.status,
-        started.elapsed()
+        status.success() && stdout.lines().last() == Some("end"),
+        "premise: Get-ShownWindows ran ({status:?} after {elapsed:?}); stdout: {stdout}; \
+         stderr: {stderr}"
     );
     stdout
         .lines()
@@ -197,6 +275,148 @@ fn shown_by_smoke() -> Vec<isize> {
                 .unwrap_or_else(|e| panic!("not a handle `{l}`: {e}")) as isize
         })
         .collect()
+}
+
+/// `run_pwsh`, which must return; a premise failure otherwise.
+#[track_caller]
+fn ran(command: &str, budget: Duration) -> PwshOutput {
+    match run_pwsh(command, budget) {
+        Ok(output) => output,
+        Err(PwshError::Spawn(err)) => panic!("precondition `pwsh` on PATH does not hold: {err}"),
+        Err(PwshError::Stalled(stall)) => panic!("premise: pwsh ended in time: {stall:?}"),
+    }
+}
+
+/// The `name tick` lines on `stderr` whose name starts with `stage:`, in order.
+fn stage_lines(stderr: &str) -> Vec<(String, i64)> {
+    stderr
+        .lines()
+        .filter(|l| l.trim_start().starts_with("stage:"))
+        .map(|l| {
+            let mut parts = l.split_whitespace();
+            let name = parts.next().unwrap_or_default().to_owned();
+            let tick = parts
+                .next()
+                .and_then(|t| t.parse::<i64>().ok())
+                .unwrap_or_else(|| panic!("stage line `{l}` carries no TickCount64"));
+            (name, tick)
+        })
+        .collect()
+}
+
+/// The value of the `key value` line on `text`.
+#[track_caller]
+fn field<'a>(text: &'a str, key: &str) -> &'a str {
+    text.lines()
+        .find_map(|l| l.trim().strip_prefix(key).map(str::trim))
+        .unwrap_or_else(|| panic!("premise: no `{key}` line in: {text}"))
+}
+
+/// Whether process `pid` is still running (it may still exist as an exited object).
+fn process_running(pid: u32) -> bool {
+    // SAFETY: a query-only handle to a process id, closed below.
+    match unsafe {
+        OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+            false,
+            pid,
+        )
+    } {
+        Err(_) => false,
+        Ok(handle) => {
+            // SAFETY: the handle just opened; a zero timeout only polls.
+            let state = unsafe { WaitForSingleObject(handle, 0) };
+            // SAFETY: closes the handle opened above, once.
+            let _ = unsafe { CloseHandle(handle) };
+            state != WAIT_OBJECT_0
+        }
+    }
+}
+
+/// Budget of the stall tests: small, so a stall is seen quickly.
+const STALL_BUDGET: Duration = Duration::from_secs(15);
+/// How much later than its budget a stalled run may return (kill, wait, readers).
+const STALL_SLACK: Duration = Duration::from_secs(10);
+
+/// A command that reports its pid, writes `markers` to stderr (each with its tick) and
+/// a line to stdout, then sleeps for ten minutes.
+fn stalling_command(markers: &[&str]) -> String {
+    let mut command = String::from(
+        "[Console]::Error.WriteLine('pid ' + $PID); \
+         [Console]::Out.WriteLine('t057-out before the stall'); ",
+    );
+    for marker in markers {
+        command.push_str(&format!(
+            "[Console]::Error.WriteLine('{marker} ' + [Environment]::TickCount64); "
+        ));
+    }
+    command.push_str(
+        "[Console]::Error.WriteLine('t057-err before the stall'); Start-Sleep -Seconds 600",
+    );
+    command
+}
+
+/// Runs `stalling_command(markers)` with `STALL_BUDGET` and checks the stall exit of
+/// invariant 3: an `Err` within budget + slack carrying the stdout and stderr read so
+/// far, a Display that names the stall, its stage and both outputs, and a child that
+/// is no longer running. Returns the stall.
+#[track_caller]
+fn stall_of(markers: &[&str]) -> PwshStall {
+    let started = Instant::now();
+    let result = run_pwsh(&stalling_command(markers), STALL_BUDGET);
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed <= STALL_BUDGET + STALL_SLACK,
+        "a stalled pwsh held the helper for {elapsed:?} (budget {STALL_BUDGET:?})"
+    );
+    let err = match result {
+        Ok(output) => panic!("a ten-minute sleep ended within {STALL_BUDGET:?}: {output:?}"),
+        Err(err) => err,
+    };
+    let shown = format!("{err}");
+    let stall = match err {
+        PwshError::Stalled(stall) => stall,
+        PwshError::Spawn(err) => panic!("precondition `pwsh` on PATH does not hold: {err}"),
+    };
+    assert!(
+        stall.elapsed >= STALL_BUDGET && stall.elapsed <= STALL_BUDGET + STALL_SLACK,
+        "the stall reports {:?}, not the time it waited (budget {STALL_BUDGET:?})",
+        stall.elapsed
+    );
+    assert_eq!(
+        stall.budget, STALL_BUDGET,
+        "the stall reports another budget"
+    );
+    assert!(
+        stall.stderr.contains("t057-err before the stall"),
+        "the stall lost the child's stderr: {stall:?}"
+    );
+    assert!(
+        stall.stdout.contains("t057-out before the stall"),
+        "the stall lost the child's stdout: {stall:?}"
+    );
+    for needle in [
+        "stalled",
+        "t057-err before the stall",
+        "t057-out before the stall",
+    ]
+    .into_iter()
+    .chain(markers.last().copied())
+    {
+        assert!(
+            shown.contains(needle),
+            "the stall's message does not carry `{needle}`: {shown}"
+        );
+    }
+    let pid: u32 = field(&stall.stderr, "pid ")
+        .parse()
+        .unwrap_or_else(|e| panic!("premise: the child wrote its pid: {e}; {stall:?}"));
+    assert!(
+        !process_running(pid),
+        "the stalled pwsh (pid {pid}) still runs after the helper returned: it was not \
+         killed and waited for"
+    );
+    stall
 }
 
 fn plain() -> Spec {
@@ -277,5 +497,147 @@ fn hidden_and_owned_windows_are_not_shown_and_a_plain_one_is() {
     assert!(
         !shown.contains(&windows.hwnds[2]),
         "an owned window is shown: {shown:?}"
+    );
+}
+
+// --- T-057 VERIFY_FAIL 2 (run 37365491860): the pwsh child is bounded and observable ---
+//
+// Red today: `run_pwsh` is a skeleton with today's behaviour (inherited stdin, no
+// creation flags, no lock, a panic on timeout that drops the output and leaks the
+// child). Each test names the line whose removal turns it red again.
+
+#[test]
+fn a_stalled_pwsh_is_killed_and_reported_with_its_stage() {
+    // Invariant 3 and 4. Red today: the helper panics "pwsh did not finish within 15s"
+    // with no output, and the child keeps sleeping (holding this exe's pipes, as in run
+    // 37365491860). Bites: no kill (child still running; or the helper blocks on the
+    // reader threads past budget + slack), kill without reading what was written (no
+    // stderr / stdout), a panic instead of an Err, a stage left out of the message.
+    let stall = stall_of(&["stage:up"]);
+    assert_eq!(
+        stall.stage.as_deref(),
+        Some("stage:up"),
+        "the stall does not name the stage the child reached: {stall:?}"
+    );
+}
+
+#[test]
+fn a_stall_names_the_last_stage_reached_not_the_first() {
+    // Invariant 3 ("the last stage marker it reached"). Bites: the first `stage:` line
+    // taken instead of the last; the whole line (with its tick) kept as the name.
+    let stall = stall_of(&["stage:up", "stage:loaded"]);
+    assert_eq!(
+        stall.stage.as_deref(),
+        Some("stage:loaded"),
+        "the stall names another stage than the last one reached: {stall:?}"
+    );
+}
+
+#[test]
+fn the_predicate_run_reports_its_stages_in_order() {
+    // Invariant 3 on the real predicate: so the next stall says whether pwsh was still
+    // starting (stage:up), in Add-Type (no stage:loaded) or in Get-ShownWindows (no
+    // stage:enumerated): H1 vs H4 of the VERIFY_FAIL 2 analysis. The predicate's own
+    // stdout is unchanged (handles, then `end`). Red today: `predicate_command` writes
+    // no markers. Bites: a marker dropped or written to stdout (which `shown_by_smoke`
+    // parses as handles), markers without their tick.
+    let path = script();
+    assert!(path.is_file(), "premise: {} exists", path.display());
+    let output = ran(&predicate_command(std::process::id()), PWSH_BUDGET);
+    assert!(
+        output.status.success() && output.stdout.lines().last() == Some("end"),
+        "premise: Get-ShownWindows ran: {output:?}"
+    );
+    let stages = stage_lines(&output.stderr);
+    let names: Vec<&str> = stages.iter().map(|(name, _)| name.as_str()).collect();
+    assert_eq!(
+        names,
+        ["stage:up", "stage:loaded", "stage:enumerated"],
+        "the predicate's stage markers on stderr: {output:?}"
+    );
+    assert!(
+        stages.windows(2).all(|w| w[0].1 <= w[1].1),
+        "stage ticks go backwards: {stages:?}"
+    );
+    assert!(
+        !output.stdout.contains("stage:"),
+        "a stage marker went to stdout, which carries the handles: {output:?}"
+    );
+}
+
+#[test]
+fn concurrent_pwsh_runs_take_turns() {
+    // Invariant 2 (H4 removed: two pwsh never run at once in this binary). Two threads
+    // call the helper at the same moment; each child prints its start and end tick
+    // ([Environment]::TickCount64 is system-wide) around a 3 s sleep. Their intervals
+    // must not overlap. Red today: no lock, both children run together. Bites: no
+    // Mutex; a Mutex held only around spawn or only around the wait.
+    let command = "[Console]::Out.WriteLine('t0 ' + [Environment]::TickCount64); \
+                   Start-Sleep -Seconds 3; \
+                   [Console]::Out.WriteLine('t1 ' + [Environment]::TickCount64)";
+    let barrier = Arc::new(Barrier::new(2));
+    let runs: Vec<JoinHandle<(i64, i64)>> = (0..2)
+        .map(|_| {
+            let barrier = Arc::clone(&barrier);
+            thread::spawn(move || {
+                barrier.wait();
+                let output = ran(command, PWSH_BUDGET);
+                let tick = |key: &str| -> i64 {
+                    field(&output.stdout, key)
+                        .parse()
+                        .unwrap_or_else(|e| panic!("premise: tick `{key}`: {e}; {output:?}"))
+                };
+                (tick("t0 "), tick("t1 "))
+            })
+        })
+        .collect();
+    let spans: Vec<(i64, i64)> = runs
+        .into_iter()
+        .map(|run| run.join().expect("a pwsh run thread panicked"))
+        .collect();
+    let (a, b) = (spans[0], spans[1]);
+    assert!(
+        a.1 <= b.0 || b.1 <= a.0,
+        "two pwsh children ran at the same time: {a:?} and {b:?} (ms, TickCount64)"
+    );
+}
+
+#[test]
+fn the_pwsh_child_gets_a_null_stdin_and_no_console_window() {
+    // Invariant 1 (H2 removed, and no console of its own). The child reports its stdin
+    // handle's file type (NUL is FILE_TYPE_CHAR = 2 and not a console; an inherited
+    // runner pipe is FILE_TYPE_PIPE = 3, a console is char and a console) and its
+    // console window (none under CREATE_NO_WINDOW). Red today for stdin on the runner
+    // (inherited pipe). The console-window half is a guard: under the runner, which
+    // starts the step without a console window, it may hold already. Bites:
+    // Stdio::null() dropped (stdin inherited); creation_flags(CREATE_NO_WINDOW) dropped
+    // where this exe has a console window.
+    let command = "$q = [char]34; \
+         Add-Type -Namespace T057 -Name Std -MemberDefinition ( \
+           '[DllImport(' + $q + 'kernel32.dll' + $q + ')] public static extern IntPtr GetStdHandle(int n); ' + \
+           '[DllImport(' + $q + 'kernel32.dll' + $q + ')] public static extern uint GetFileType(IntPtr h); ' + \
+           '[DllImport(' + $q + 'kernel32.dll' + $q + ')] public static extern bool GetConsoleMode(IntPtr h, out uint m); ' + \
+           '[DllImport(' + $q + 'kernel32.dll' + $q + ')] public static extern IntPtr GetConsoleWindow();'); \
+         $h = [T057.Std]::GetStdHandle(-10); $m = [uint32]0; \
+         [Console]::Out.WriteLine('stdin_type ' + [T057.Std]::GetFileType($h)); \
+         [Console]::Out.WriteLine('stdin_console ' + [T057.Std]::GetConsoleMode($h, [ref]$m)); \
+         [Console]::Out.WriteLine('console_window ' + [T057.Std]::GetConsoleWindow().ToInt64())";
+    let output = ran(command, PWSH_BUDGET);
+    assert!(
+        output.status.success(),
+        "premise: the probe ran: {output:?}"
+    );
+    assert_eq!(
+        (
+            field(&output.stdout, "stdin_type "),
+            field(&output.stdout, "stdin_console ")
+        ),
+        ("2", "False"),
+        "the pwsh child's stdin is not the NUL device (file type 2, not a console): {output:?}"
+    );
+    assert_eq!(
+        field(&output.stdout, "console_window "),
+        "0",
+        "the pwsh child has a console window of its own: {output:?}"
     );
 }
