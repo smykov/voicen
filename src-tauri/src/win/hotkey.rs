@@ -7,7 +7,8 @@
 //! `GetAsyncKeyState` over the poll groups (`win32_data::released`) stamps the
 //! release and calls `hotkey_released`. Nothing else: no repeat count, no hold
 //! timing, no mode. Failures are typed warning lines (`hotkey_thread_failed`,
-//! `hotkey_register_failed` with the OS code).
+//! also when the release poll's `SetTimer` fails, and `hotkey_register_failed`, with
+//! the OS code).
 //!
 //! Lock contract: the thread holds no lock of its own across a session call. While
 //! `hotkey_pressed` opens the device the poll cannot run; a release meanwhile is
@@ -235,6 +236,14 @@ fn run(
                 if !polling {
                     // SAFETY: a window of this thread; no timer procedure (WM_TIMER).
                     polling = unsafe { SetTimer(Some(hwnd), POLL_TIMER_ID, POLL_MS, None) } != 0;
+                    if !polling {
+                        // No poll: the hold ends only at the next press (which retries
+                        // the timer), so the open microphone is at least on record.
+                        log.write(LogEvent::Warning {
+                            kind: WarningKind::HotkeyThreadFailed,
+                            os_code: Some(os_code(&windows::core::Error::from_thread())),
+                        });
+                    }
                 }
             }
             WM_TIMER if msg.wParam.0 == POLL_TIMER_ID => {

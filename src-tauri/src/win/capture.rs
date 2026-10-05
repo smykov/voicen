@@ -128,31 +128,29 @@ pub fn open_bounded<T: Send + 'static>(
     budget: Duration,
     opener: impl FnOnce() -> Result<T, CaptureError> + Send + 'static,
 ) -> Result<T, CaptureError> {
-    let _ = (budget, opener);
-    todo!("T-006 review 1")
+    let (opened, result) = mpsc::channel::<Result<T, CaptureError>>();
+    let spawned = thread::Builder::new()
+        .name("mic-open".into())
+        .spawn(move || {
+            // After a timeout the receiver is gone: the send fails and drops the value
+            // here, which (for a stream) closes the device at once (NFR-02). A panic
+            // drops the sender instead: the caller sees `Disconnected` at once.
+            let _ = opened.send(opener());
+        });
+    if spawned.is_err() {
+        return Err(CaptureError::Other(OPENER_FAILED.to_owned()));
+    }
+    match result.recv_timeout(budget) {
+        Ok(outcome) => outcome,
+        Err(RecvTimeoutError::Timeout) => Err(CaptureError::Other(OPEN_TIMED_OUT.to_owned())),
+        Err(RecvTimeoutError::Disconnected) => Err(CaptureError::Other(OPENER_ENDED.to_owned())),
+    }
 }
 
 impl AudioSource for CpalSource {
     fn start(&self, sink: Arc<dyn FrameSink>) -> Result<Box<dyn CaptureHandle>, CaptureError> {
-        let (opened, result) = mpsc::channel::<Result<Stream, CaptureError>>();
-        let spawned = thread::Builder::new()
-            .name("mic-open".into())
-            .spawn(move || {
-                // After a timeout the receiver is gone: the send fails and drops the
-                // stream here, which closes the device at once (NFR-02).
-                let _ = opened.send(open(sink));
-            });
-        if spawned.is_err() {
-            return Err(CaptureError::Other(OPENER_FAILED.to_owned()));
-        }
-        match result.recv_timeout(OPEN_BUDGET) {
-            Ok(Ok(stream)) => Ok(Box::new(CpalCapture { _stream: stream })),
-            Ok(Err(err)) => Err(err),
-            Err(RecvTimeoutError::Timeout) => Err(CaptureError::Other(OPEN_TIMED_OUT.to_owned())),
-            Err(RecvTimeoutError::Disconnected) => {
-                Err(CaptureError::Other(OPENER_ENDED.to_owned()))
-            }
-        }
+        let stream = open_bounded(OPEN_BUDGET, move || open(sink))?;
+        Ok(Box::new(CpalCapture { _stream: stream }))
     }
 }
 
