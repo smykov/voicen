@@ -1,0 +1,79 @@
+{
+  "_format": "Core-checked wire data of the overlay IPC (specs/001 contracts/ipc.md: the overlay://state event payload and the overlay_ready reply) for the Playwright IPC mock (T-053), the same pattern as settings-wire.json and local-models-wire.json. Each key is serde_json of voicen_core::overlay::overlay_payload(state, lang, seq, elapsed): recording_en = (Recording, en, 1, 61000 ms); processing_en = (Processing, en, 2); message_no_speech_en = (Message notice.no_speech, en, 3); message_microphone_access_denied_en = (Message failure.microphone_unavailable with reason mic_reason.access_denied, en, 4); hidden_en = (Hidden, en, 5); recording_ru = (Recording, ru, 6, 5000 ms); processing_ru = (Processing, ru, 7); message_no_speech_ru = (notice.no_speech, ru, 8); message_microphone_access_denied_ru = (failure.microphone_unavailable / mic_reason.access_denied, ru, 9); hidden_ru = (Hidden, ru, 10). Message text is rendered by Rust i18n::text in the payload's lang, nested mic_reason.* ids included. Kept in sync by the core test overlay::tests::e2e_overlay_wire_fixture_matches_core: when it fails, copy the value it prints. Never edit by hand to make an e2e test pass.",
+  "recording_en": {
+    "seq": 1,
+    "lang": "en",
+    "state": {
+      "kind": "recording",
+      "elapsedMs": 61000
+    }
+  },
+  "processing_en": {
+    "seq": 2,
+    "lang": "en",
+    "state": {
+      "kind": "processing"
+    }
+  },
+  "message_no_speech_en": {
+    "seq": 3,
+    "lang": "en",
+    "state": {
+      "kind": "message",
+      "text": "No speech detected"
+    }
+  },
+  "message_microphone_access_denied_en": {
+    "seq": 4,
+    "lang": "en",
+    "state": {
+      "kind": "message",
+      "text": "Microphone unavailable: access denied in Windows privacy settings"
+    }
+  },
+  "hidden_en": {
+    "seq": 5,
+    "lang": "en",
+    "state": {
+      "kind": "hidden"
+    }
+  },
+  "recording_ru": {
+    "seq": 6,
+    "lang": "ru",
+    "state": {
+      "kind": "recording",
+      "elapsedMs": 5000
+    }
+  },
+  "processing_ru": {
+    "seq": 7,
+    "lang": "ru",
+    "state": {
+      "kind": "processing"
+    }
+  },
+  "message_no_speech_ru": {
+    "seq": 8,
+    "lang": "ru",
+    "state": {
+      "kind": "message",
+      "text": "Речь не распознана"
+    }
+  },
+  "message_microphone_access_denied_ru": {
+    "seq": 9,
+    "lang": "ru",
+    "state": {
+      "kind": "message",
+      "text": "Микрофон недоступен: доступ запрещён в настройках конфиденциальности Windows"
+    }
+  },
+  "hidden_ru": {
+    "seq": 10,
+    "lang": "ru",
+    "state": {
+      "kind": "hidden"
+    }
+  }
+}
