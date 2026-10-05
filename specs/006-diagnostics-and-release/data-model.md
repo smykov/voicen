@@ -130,7 +130,7 @@ Retention: at start, delete files older than 30 days, then keep the 20 newest (b
 
 ## CredentialTargetPrefix
 
-A `const` in `voicen-core` (value owned by 004's key-slot naming, e.g. `Voicen/`); used by the app's credential store and by `--purge-credentials`.
+The `voicen_core::secrets::CREDENTIAL_TARGET_PREFIX` const (value `"Voicen/"`; owned by 004's key-slot naming); used by the app's credential store and by `--purge-credentials`.
 
 ## Release *(CI)*
 
