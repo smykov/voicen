@@ -30,9 +30,11 @@ Before T-059 nothing had observed any of this on the runner. The install smoke r
 - **Where it is enforced:**
   - The probe prints the facts in every windows job, so a runner image change shows in the log.
   - Review (T1): a Windows CI test that needs a capability cites this file's latest facts, and asserts the precondition with a message naming it. The probe forecasts and does not guarantee.
+- **Exception — a fact re-measured in every job** (orchestrator, 2026-10-05, T-006 Refresh 3): a probe fact may back a test precondition from its first run, because the probe step runs in every windows job and so re-measures it next to the tests that rely on it. Such a precondition fails loudly through `win32_support::precondition_rechecked`, whose message points at the same job's `runner-probe: <fact>=…` line instead of runs A and B. Today this applies to `foreground_again` only. Its consequence row applies as soon as a recorded run shows it missing.
 - **Don't:**
   - assert a capability in a Windows CI test because "it worked on my PC" or because a third party's run says so (runner-images issue 14049 is a forecast only);
-  - read a capability from the install smoke, which never reads foreground, focus, input, hotkeys or the clipboard.
+  - read a capability from the install smoke, which never reads foreground, focus, input, hotkeys or the clipboard;
+  - read `foreground` as "any window of the test exe can be brought to the front": it is measured on the exe's first window, which has foreground rights from its start. A later window needs the injected-Alt path of `foreground_again` (T-006 verify 1: paste.rs's later tests got `set=0` with Windows Terminal in front, `foreground_lock` being infinite).
 
 ### The probe reports; it never fails because a capability is missing
 
@@ -65,13 +67,14 @@ Before T-059 nothing had observed any of this on the runner. The install smoke r
   - one window thread owns a top-level window of the system `EDIT` class. There is no `RegisterClassW`, so no `Win32_Graphics_Gdi` is needed;
   - guards undo what the thread did, on every path: the key-ups (`Release`), the hotkey registration (`Hotkey`), emptying the clipboard (`ClipboardCleanup`) and `DestroyWindow` (`Window`), all on that thread;
   - Alt is released only after the unassigned virtual key 0xE8, so the release activates no menu (T-006 R-2);
+  - `foreground_again` destroys the first window (after emptying the clipboard), creates a second `EDIT` window on the same thread and destroys it the same way; its Alt key-up and the mask key are armed in a `Release` guard, and the probe waits until Alt reads up;
   - in the hotkey probe, keyboard messages are taken from the queue but not dispatched, because Alt+Space dispatched to the window could open its menu, a modal loop;
   - `CloseClipboard` runs on every path through the `Opened` guard. A block the clipboard took is never freed. `GlobalUnlock`'s `Err` with code 0 (the last unlock, windows-result 0.4.1) counts as success;
   - the clipboard holds only the fake text `voicen-probe-<pid>`.
 
 ## Line grammar
 
-One line per fact, in this order: `image`, `session`, `station`, `desktop`, `foreground_lock`, `taskbar` (session thread), then `foreground`, `sendinput`, `clipboard`, `clipboard_null_owner`, `hotkey`, `async_keys` (window thread). Then the end line.
+One line per fact, in this order: `image`, `session`, `station`, `desktop`, `foreground_lock`, `taskbar` (session thread), then `foreground`, `sendinput`, `clipboard`, `clipboard_null_owner`, `hotkey`, `async_keys`, `foreground_again` (window thread; `foreground_again` added by T-006 verify 1, so runs A and B have 12 lines and later runs 13). Then the end line.
 
 ```text
 ^runner-probe: (?<fact>[a-z_]+)=(?<status>ok|denied|lost|absent|skipped|timeout)(\((?<detail>[^()]*)\))?$
@@ -79,7 +82,7 @@ runner-probe: end(facts=N)
 ```
 
 - The detail is `k=v` pairs joined by `,`. Any character of a key or value outside `A-Za-z0-9_.:-` is printed as `_`.
-- OS codes are printed as `err=0xHHHHHHHH` (`windows::core::Error::code()`). The `ok` lines of the six window-thread facts (`foreground` … `async_keys`) carry a measured `ms`; the session-thread facts carry none, and `foreground_lock`'s `ms` is the system setting (`SPI_GETFOREGROUNDLOCKTIMEOUT`), not a time.
+- OS codes are printed as `err=0xHHHHHHHH` (`windows::core::Error::code()`). The `ok` lines of the seven window-thread facts (`foreground` … `foreground_again`) carry a measured `ms`; the session-thread facts carry none, and `foreground_lock`'s `ms` is the system setting (`SPI_GETFOREGROUNDLOCKTIMEOUT`), not a time.
 - Status:
 
 | Status | Meaning |
@@ -104,6 +107,7 @@ runner-probe: end(facts=N)
 | `clipboard` | `ms`, `open_tries` (`OpenClipboard(window)`); on failure `step` = `open`, `empty`, `alloc`, `lock`, `unlock` or `set` (`denied`), or `reopen`, `get`, `read_lock` or `compare` (`lost`, after a successful `SetClipboardData`), with `err` or `read_len` |
 | `clipboard_null_owner` | the same with `OpenClipboard(NULL)` (T-006 design 3's open point) |
 | `hotkey` | `RegisterHotKey(window, Ctrl+Alt+Space, MOD_NOREPEAT)` and one `SendInput` of Ctrl↓ Alt↓ Space↓: `ms` (to `WM_HOTKEY` with the probe's id), `inserted`; `lost` adds `wm_hotkey=0`; `denied` has `step=register` (0x80070581 = 1409: another process holds the combination) or `step=sendinput`, with `err`; `fg`. When `RegisterHotKey` fails the Ctrl+Alt+Space press is still sent (review ruling, T-059 review 1 #6): it reaches whoever holds the combination, and that holder may swallow Space for `async_keys` |
+| `foreground_again` | What a later test of the same exe meets: the first probe window is destroyed, then `back` (class in front after up to `WAIT`, `none`) and `back_other` (1 = a window of another process is in front, e.g. Windows Terminal); a second `EDIT` window is created (`created_fg`), Alt is injected and read down (`alt`), `SetForegroundWindow` (`set`), `ms` (from `SetForegroundWindow` until the second window is in front), `focus` (as for `foreground`), then 0xE8 down/up and Alt up (`released`, the inserted count of those 3 events); `now` when not `ok`. `lost` = `set=1` but never in front, `denied` = `set=0`, or `denied(step=sendinput,err=…)` when the Alt key-down was not inserted. This is the path `win32_support::bring_to_front` takes for every T-006 test window |
 | `async_keys` | `GetAsyncKeyState` of Ctrl, Alt, Space while held and after the release (0xE8 down/up, Space↑ Alt↑ Ctrl↑): `ms` (slowest key read down), `up_ms` (slowest read up), `down` / `up` (`ctrl:1.alt:1.space:1`), `released` (inserted count of the 5-event release batch), `inserted` when `lost`, `err` when `denied`, `fg` (`GetAsyncKeyState` may read 0 while another process's thread is in front). Sent also when the `hotkey` registration failed: see `hotkey` |
 
 ## Consequences per outcome
@@ -113,11 +117,12 @@ T-006 test numbers are those of the T-006 Refresh table. The orchestrator reword
 | Probe fact | `ok` in every recorded run → stays on Windows CI | missing (any status but `ok`, or different between runs) → |
 |---|---|---|
 | `foreground` (with `focus=self`) | T-006 tests 5, 11, 12, 13, 18, 19, which carry T-006 Acceptance line 1 and line 3's "start window replaced"; T-057 Acceptance line 1 (target in front, no `WM_KILLFOCUS`) | T-006: line 1 moves to the owner (owner step 2 already pastes into Notepad). Line 3's replaced/elevated branch stays on CI only through `delivery.rs` with a `Paster` wrapper (tests 20–22 unaffected); the real replacement is owner step 5. T-057 line 1: if `foreground.before` shows a window, CI asserts "`GetForegroundWindow()` unchanged through Recording, Processing and Message, and never the overlay", and `WM_KILLFOCUS` / "target stays foreground" move to the owner (line 3). With no window in front at all, line 1 is the owner's |
+| `foreground_again` (re-measured in every job: see the exception above) | every T-006 test that brings a test window to the front through `bring_to_front`: tests 3, 4, 5, 11, 12, 13, 14, 15, 18, 19, 20 (Acceptance line 1 and line 3's "start window replaced") | as the `foreground` row: line 1 moves to the owner (owner step 1 already pastes into Notepad); line 3's replaced/elevated branch stays on CI only through `delivery.rs` with a `Paster` wrapper; the real replacement is the owner's |
 | `sendinput` | T-006 tests 3, 4, 5, 12, 15, 18 | those move to the owner (steps 2 and 4; the design-4 risk). Tests that call session inputs directly (19–23) are unaffected |
 | `hotkey`: registration | T-006 tests 6, 7, smoke 24 | `denied(step=register,err=0x80070581)`: the tests take another combination through `win32_data` (product unchanged), recorded here. Any other code moves them to the owner |
 | `hotkey`: `WM_HOTKEY` from injected keys | T-006 tests 3, 4, 5, 18 | move to the owner (step 2) |
 | `async_keys` | T-006 tests 3, 4 (release poll), 15 (modifier wait) | move to the owner (steps 2 and 4) |
-| `clipboard` | T-006 tests 8, 9, 10, 12, 13, 18, 19; line 1's "clipboard holds it, excluded from history" | moves to the owner (Win+V in step 2) |
+| `clipboard` | T-006 tests 8, 9, 10, 12, 13, 18, 19; line 1's "clipboard holds it, excluded from history". Tests 9 and 10 also need a hold that refuses a second open: the test's `ClipboardHolder` opens with a message-only window of its own thread, like this fact (a NULL-owner hold did not refuse a second NULL open of the same process, T-006 verify 1), and each test asserts the refusal as a loud precondition before it writes; contention is not a probe fact | moves to the owner (Win+V in step 2) |
 | `clipboard_null_owner` | — (a design fact for T-006 design 3) | `WinClipboard` opens with its own hidden window instead of `None` |
 | `session` / `station` / `desktop` / `foreground_lock` / `image` | interpretation only: session 0, a station other than WinSta0, or an input desktop that is not the thread's predicts the rows above failing; `image` dates the facts | no line of its own; recorded |
 | `taskbar` | T-052 test 8 may assert `rect().is_some()` (today a captured eprintln in `tray.rs`, which never reaches the log) | T-052 shows the icon only through `tray_by_id` and the smoke's `tray_icon_app` window; the visible icon is the owner's |

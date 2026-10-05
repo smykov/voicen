@@ -118,10 +118,18 @@ fn idle_models() -> Arc<LocalModels> {
     Arc::new(models)
 }
 
-/// A degraded log under this test exe (a file), so it never writes anything.
-fn discard_log() -> Arc<Log> {
-    let exe = std::env::current_exe().expect("current_exe");
-    voicen_lib::diag::start(exe.join("logs"), Box::new(|_| {}))
+/// The app's log under the test's own dir (`<dir>/logs/voicen.log`), so a failure
+/// message can show what the app logged (the opener writes a failed open as
+/// `warning kind=settings_window_failed`; T-006 verify 1).
+fn test_log(dir: &Path) -> Arc<Log> {
+    voicen_lib::diag::start(dir.join("logs"), Box::new(|_| {}))
+}
+
+/// The lines the app logged under `dir` so far (none when nothing was written).
+fn logged(dir: &Path) -> Vec<String> {
+    std::fs::read_to_string(dir.join("logs").join("voicen.log"))
+        .map(|t| t.lines().map(str::to_string).collect())
+        .unwrap_or_default()
 }
 
 /// Which start the app makes.
@@ -149,7 +157,7 @@ fn load(dir: &Path, log: &Log) -> LoadOutcome {
 /// The app as `run()` builds it (`build_app`), on the real Wry runtime, allowed to
 /// run on this (libtest) thread, with its load outcome.
 fn wry_app(dir: &Path, start: Start) -> (App<Wry>, LoadOutcome) {
-    let log = discard_log();
+    let log = test_log(dir);
     if start == Start::Loaded {
         let first = load(dir, &log);
         assert!(
@@ -252,6 +260,9 @@ struct CloseReport {
     gone: bool,
     alive_at_once: bool,
     alive_later: bool,
+    /// The app's log when `opened` failed, read before the loop is ended (ending it
+    /// fails a build still waiting on it, which would log a failure of its own).
+    log_at_budget: Vec<String>,
 }
 
 #[test]
@@ -266,12 +277,16 @@ fn destroying_the_last_window_keeps_the_app_running() {
     let _watchdog = watchdog("destroying_the_last_window_keeps_the_app_running");
     let dir = TempDir::new();
     let (app, outcome) = wry_app(dir.path(), Start::FirstRun);
+    let logs_of = dir.path().to_path_buf();
 
-    let (code, report) = run_with_driver(app, outcome, |handle| {
+    let (code, report) = run_with_driver(app, outcome, move |handle| {
         let mut report = CloseReport {
             opened: poll(BUDGET, || handle.get_webview_window(LABEL).is_some()),
             ..CloseReport::default()
         };
+        if !report.opened {
+            report.log_at_budget = logged(&logs_of);
+        }
         if report.opened {
             report.destroyed = handle
                 .get_webview_window(LABEL)
@@ -286,9 +301,20 @@ fn destroying_the_last_window_keeps_the_app_running() {
     });
 
     let report = report.expect("the driver sent no report");
+    // A failed build leaves a `settings_window_failed` line; a build still running at
+    // the budget leaves none (T-006 verify 1: slow or failed WebView2 window build).
+    let lines = &report.log_at_budget;
+    let failed = lines.iter().any(|l| l.contains("settings_window_failed"));
     assert!(
         report.opened,
-        "Ready did not open the first-run settings window within {BUDGET:?}"
+        "Ready did not open the first-run settings window within {BUDGET:?}; {}; the app's \
+         log at the budget: {lines:#?}",
+        if !failed {
+            "the opener logged no failed open (the window build was still running, or was \
+             never asked for)"
+        } else {
+            "the opener logged a failed open (the window build failed)"
+        }
     );
     assert!(
         report.destroyed && report.gone,

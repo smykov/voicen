@@ -2,9 +2,11 @@
 //! R-12, spec 001 FR-009/FR-010, invariant 2) and its use by core's `delivery::deliver`
 //! with the real `WinClipboard`. Windows CI only (decision #5).
 //!
-//! Runner capabilities (docs/decisions/windows-ci-runner.md, `ok` in runs A and B):
-//! `foreground` (the test windows are brought to the front and checked), `sendinput` and
-//! `async_keys` (row 15), `clipboard`. Each is asserted loudly by `win32_support`. Every
+//! Runner capabilities (docs/decisions/windows-ci-runner.md): `foreground_again` (the test
+//! windows are brought to the front through the injected-Alt path, re-measured by the
+//! probe in every job; only the first window of a test exe has foreground rights without
+//! it, T-006 verify 1), `sendinput` and `async_keys` (row 15 and the Alt path),
+//! `clipboard` (`ok` in runs A and B). Each is asserted loudly by `win32_support`. Every
 //! wait is at least 3 s (run B: ~1 s for injected input).
 //!
 //! Red-test table rows 11 (start window = root owner, not elevated at our level), 12

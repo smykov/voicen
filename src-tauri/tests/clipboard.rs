@@ -4,7 +4,10 @@
 //! The clipboard is read back with the test's own `OpenClipboard` / `GetClipboardData`
 //! (`win32_support`), never through the adapter. Runner capability: `clipboard`
 //! (docs/decisions/windows-ci-runner.md, `ok` in runs A and B), asserted loudly by
-//! `open_clipboard`. Fake texts only.
+//! `open_clipboard`. Rows 9 and 10 hold the clipboard with `ClipboardHolder` (its own
+//! message-only window, not NULL: T-006 verify 1) and first assert that a second open is
+//! refused while it holds, so neither can pass on a hold that blocks nobody. Fake texts
+//! only.
 //!
 //! Red-test table rows 8 (text and the three exclusion formats), 9 (a briefly held
 //! clipboard is retried), 10 (held past the retries -> `ClipboardError`, nothing
@@ -118,6 +121,12 @@ fn a_clipboard_held_past_the_retries_is_a_clipboard_error_and_nothing_is_written
     let hold = Duration::from_secs(3);
 
     let holder = ClipboardHolder::hold(hold);
+    let refused = try_open_clipboard().is_none();
+    precondition(
+        "clipboard",
+        refused,
+        "OpenClipboard succeeded while another thread held the clipboard open",
+    );
     let started = Instant::now();
     let result = clipboard.set_text_excluded_from_history("must not be written");
     let took = started.elapsed();

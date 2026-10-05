@@ -3,10 +3,12 @@
 //! (`FakeAudioSource`, `FakeIndicator`, `FakeClipboard`, `FakePaster`) and a fixed-text
 //! test engine. Windows CI only (decision #5).
 //!
-//! Runner capabilities (docs/decisions/windows-ci-runner.md, all `ok` in runs A and B):
-//! `hotkey` (registration and `WM_HOTKEY` from injected keys), `sendinput`, `async_keys`,
-//! `foreground` (test 5). Each is asserted as a loud precondition by the helpers in
-//! `win32_support`. A hold is timed from the observed press (the fake's start count),
+//! Runner capabilities (docs/decisions/windows-ci-runner.md, `ok` in runs A and B):
+//! `hotkey` (registration and `WM_HOTKEY` from injected keys), `sendinput`, `async_keys`;
+//! and `foreground_again` (test 5; re-measured by the probe in every job): the window is
+//! brought to the front through an injected Alt, whose keys `bring_to_front` clears from
+//! the windows' message record before the test reads it. Each is asserted as a loud
+//! precondition by the helpers in `win32_support`. A hold is timed from the observed press (the fake's start count),
 //! never from `SendInput` (run B: ~1 s to `WM_HOTKEY`); every wait is at least 3 s.
 //!
 //! Red-test table rows (T-006 Investigation): 2 (win32_data equals the windows crate),

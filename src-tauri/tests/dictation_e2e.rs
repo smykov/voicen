@@ -6,9 +6,9 @@
 //! `api`, the real `WinClipboard` and `WinPaster`, `FakeIndicator`), the real hotkey
 //! thread and a synthetic Ctrl+Alt+Space hold. Windows CI only (decision #5).
 //!
-//! Runner capabilities (docs/decisions/windows-ci-runner.md, all `ok` in runs A and B):
-//! `foreground`, `sendinput`, `hotkey`, `async_keys`, `clipboard`; asserted loudly by
-//! `win32_support`. The hold is timed from the observed press (the indicator's
+//! Runner capabilities (docs/decisions/windows-ci-runner.md): `sendinput`, `hotkey`,
+//! `async_keys`, `clipboard` (`ok` in runs A and B) and `foreground_again` (re-measured by
+//! the probe in every job); asserted loudly by `win32_support`. The hold is timed from the observed press (the indicator's
 //! Recording), and every wait is at least 3 s (run B: ~1 s to `WM_HOTKEY`).
 //!
 //! Red-test table row 18. The data dir and the log are a `TempDir`; the key is fake; the

@@ -17,8 +17,9 @@
 //!
 //! The visible notice reaches the screen only with T-057 (overlay) or T-007 (toast), so the
 //! notice is asserted on the `Indicator` port (T-006 Q6). Windows CI only (decision #5).
-//! Runner capabilities (docs/decisions/windows-ci-runner.md, `ok` in runs A and B):
-//! `foreground` and `clipboard` (rows 19-21), asserted loudly by `win32_support`; rows 22
+//! Runner capabilities (docs/decisions/windows-ci-runner.md): `foreground_again`
+//! (re-measured by the probe in every job) and `clipboard` (`ok` in runs A and B), rows
+//! 19-21, asserted loudly by `win32_support`; rows 22
 //! and 23 need none (tauri's mock runtime). Fake key, fake texts, a `TempDir` per test.
 #![cfg(windows)]
 

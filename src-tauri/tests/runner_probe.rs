@@ -1,6 +1,7 @@
 //! T-059: runner capability probe. It prints one line per fact about what a cargo test exe can
 //! do on the Windows CI runner: the session and desktop it runs in, whether its own window
-//! becomes the foreground window, whether keys injected with `SendInput` reach that window, fire
+//! becomes the foreground window (and whether a later window does, through an injected Alt,
+//! once the first is gone), whether keys injected with `SendInput` reach that window, fire
 //! a `RegisterHotKey` hotkey and show in `GetAsyncKeyState`, and whether it can own the
 //! clipboard. Windows CI only (decision #5), and only through the windows job's last step, which
 //! runs it with `--ignored --no-capture --test-threads=1` and checks the end line against the
@@ -36,7 +37,7 @@ use windows::Win32::System::StationsAndDesktops::{
     OpenInputDesktop, DESKTOP_CONTROL_FLAGS, DESKTOP_READOBJECTS, UOI_FLAGS, UOI_NAME,
     USEROBJECTFLAGS,
 };
-use windows::Win32::System::Threading::GetCurrentThreadId;
+use windows::Win32::System::Threading::{GetCurrentProcessId, GetCurrentThreadId};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, GetFocus, RegisterHotKey, SendInput, UnregisterHotKey, INPUT, INPUT_0,
     INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, MOD_ALT, MOD_CONTROL,
@@ -44,10 +45,11 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DestroyWindow, DispatchMessageW, FindWindowW, GetClassNameW,
-    GetForegroundWindow, GetSystemMetrics, GetWindowTextLengthW, PeekMessageW, SetForegroundWindow,
-    SystemParametersInfoW, TranslateMessage, CW_USEDEFAULT, MSG, PM_REMOVE, SM_REMOTESESSION,
-    SPI_GETFOREGROUNDLOCKTIMEOUT, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WINDOW_EX_STYLE, WM_CHAR,
-    WM_HOTKEY, WM_KEYDOWN, WM_KEYFIRST, WM_KEYLAST, WSF_VISIBLE, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+    GetForegroundWindow, GetSystemMetrics, GetWindowTextLengthW, GetWindowThreadProcessId,
+    PeekMessageW, SetForegroundWindow, SystemParametersInfoW, TranslateMessage, CW_USEDEFAULT, MSG,
+    PM_REMOVE, SM_REMOTESESSION, SPI_GETFOREGROUNDLOCKTIMEOUT, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
+    WINDOW_EX_STYLE, WM_CHAR, WM_HOTKEY, WM_KEYDOWN, WM_KEYFIRST, WM_KEYLAST, WSF_VISIBLE,
+    WS_OVERLAPPEDWINDOW, WS_VISIBLE,
 };
 
 /// Budget of one observation (F-005: sized for Windows, not for the Linux gate).
@@ -85,6 +87,7 @@ const WINDOW_FACTS: &[&str] = &[
     "clipboard_null_owner",
     "hotkey",
     "async_keys",
+    "foreground_again",
 ];
 
 /// The probe's hotkey id (an application may use 0x0000..=0xBFFF).
@@ -711,7 +714,7 @@ fn window_facts(tx: &Sender<Fact>) {
     };
     let hwnd = window.0;
     // Dropped before `window`: the clipboard is emptied while its owner window still exists.
-    let _clipboard = ClipboardCleanup(hwnd);
+    let clipboard_cleanup = ClipboardCleanup(hwnd);
     send(foreground(hwnd, &before));
     send(sendinput(hwnd));
     send(clipboard("clipboard", Some(hwnd)));
@@ -719,6 +722,122 @@ fn window_facts(tx: &Sender<Fact>) {
     let (hotkey, async_keys) = hotkey_and_async_keys(hwnd);
     send(hotkey);
     send(async_keys);
+    // The first window goes, as an earlier test's window does in a test exe.
+    drop(clipboard_cleanup);
+    drop(window);
+    send(foreground_again());
+}
+
+/// The foreground window belongs to another process (not this probe).
+fn other_process_in_front() -> bool {
+    // SAFETY: no arguments.
+    let hwnd = unsafe { GetForegroundWindow() };
+    if hwnd.is_invalid() {
+        return false;
+    }
+    let mut pid = 0u32;
+    // SAFETY: `pid` is writable; the call sends no message.
+    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+    // SAFETY: no arguments.
+    pid != 0 && pid != unsafe { GetCurrentProcessId() }
+}
+
+/// What a later test of the same exe meets (T-006 verify 1): the probe's first window is
+/// destroyed and another process's window is back in front (`back`, `back_other`); then a
+/// new window of this process is brought forward the way `win32_support::bring_to_front`
+/// does it: Alt down (read down: `alt`), `SetForegroundWindow` (`set`), wait until it is in
+/// front (`ms`), then the mask key 0xE8 and Alt up (`released`). Keyboard messages are not
+/// dispatched (an Alt reaching the window could open its menu).
+fn foreground_again() -> Fact {
+    const NAME: &str = "foreground_again";
+    let back_other = poll(false, Instant::now(), |_| other_process_in_front()).is_some();
+    // SAFETY: no arguments.
+    let back = class_of(unsafe { GetForegroundWindow() });
+    // SAFETY: as in `window_facts`; `Window` destroys it on this thread.
+    let created = unsafe {
+        CreateWindowExW(
+            WINDOW_EX_STYLE(0),
+            w!("EDIT"),
+            w!("voicen runner probe again"),
+            WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+            CW_USEDEFAULT,
+            CW_USEDEFAULT,
+            480,
+            160,
+            None,
+            None,
+            None,
+            None,
+        )
+    };
+    let window = match created {
+        Ok(hwnd) => Window(hwnd),
+        Err(err) => {
+            return Fact::new(NAME, Status::Skipped)
+                .with("reason", "no_window")
+                .with("err", code(&err))
+                .with("back", back)
+                .with("back_other", bit(back_other));
+        }
+    };
+    let hwnd = window.0;
+    // SAFETY: no arguments.
+    let created_fg = unsafe { GetForegroundWindow() } == hwnd;
+    let mut release = Release::arm(vec![
+        key(VK_MASK, false),
+        key(VK_MASK, true),
+        key(VK_MENU, true),
+    ]);
+    // SAFETY: a valid INPUT slice and the size of one element.
+    let inserted = unsafe { SendInput(&[key(VK_MENU, false)], INPUT_SIZE) };
+    if inserted == 0 {
+        let err = last_err();
+        return Fact::new(NAME, Status::Denied)
+            .with("step", "sendinput")
+            .with("err", err)
+            .with("back", back)
+            .with("back_other", bit(back_other))
+            .with("created_fg", bit(created_fg));
+    }
+    let alt = poll(false, Instant::now(), |_| is_down(VK_MENU)).is_some();
+    let since = Instant::now();
+    // SAFETY: the probe's own live window.
+    let set = unsafe { SetForegroundWindow(hwnd) }.as_bool();
+    // SAFETY: no arguments.
+    let took = poll(false, since, |_| unsafe { GetForegroundWindow() } == hwnd);
+    // SAFETY: no arguments; the focus window of this thread's queue, if any.
+    let focus = unsafe { GetFocus() };
+    let focus = if focus == hwnd {
+        "self".to_owned()
+    } else {
+        class_of(focus)
+    };
+    // SAFETY: no arguments.
+    let now = class_of(unsafe { GetForegroundWindow() });
+    let released = release.send();
+    // No key stays down for whatever runs next.
+    poll(false, Instant::now(), |_| !is_down(VK_MENU));
+    let status = match (took, set) {
+        (Some(_), _) => Status::Ok,
+        (None, true) => Status::Lost,
+        (None, false) => Status::Denied,
+    };
+    let mut fact = Fact::new(NAME, status);
+    if let Some(took) = took {
+        fact = fact.with("ms", took);
+    }
+    fact = fact
+        .with("back", back)
+        .with("back_other", bit(back_other))
+        .with("created_fg", bit(created_fg))
+        .with("alt", bit(alt))
+        .with("set", bit(set))
+        .with("focus", focus)
+        .with("released", released);
+    if took.is_none() {
+        fact = fact.with("now", now);
+    }
+    fact
 }
 
 fn foreground(hwnd: HWND, before: &str) -> Fact {

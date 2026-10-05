@@ -5,7 +5,8 @@
 //!
 //! Runner capabilities: every helper that needs one asserts it through [`precondition`],
 //! which names the capability and `docs/decisions/windows-ci-runner.md` (all `ok` in runs A
-//! and B, T-059). Timing (F-005, T-006 Refresh 2): `SendInput` and `WM_HOTKEY` took ~1 s
+//! and B, T-059), or, for `foreground_again` (the probe re-measures it in every job), through
+//! [`precondition_rechecked`]. Timing (F-005, T-006 Refresh 2): `SendInput` and `WM_HOTKEY` took ~1 s
 //! in run B, so every observation waits at least [`WAIT`] (3 s), and holds are timed from
 //! the observed press, never from the `SendInput` call.
 //!
@@ -60,10 +61,10 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::WindowsAndMessaging::{
     CallWindowProcW, CreateWindowExW, DestroyWindow, DispatchMessageW, GetClassNameW,
     GetForegroundWindow, GetWindowTextW, PeekMessageW, SetForegroundWindow, SetWindowLongPtrW,
-    TranslateMessage, CW_USEDEFAULT, GWLP_WNDPROC, MSG, PM_REMOVE, SC_KEYMENU, WINDOW_EX_STYLE,
-    WM_CHAR, WM_ENTERMENULOOP, WM_INITMENU, WM_KEYDOWN, WM_KEYUP, WM_PASTE, WM_SYSCHAR,
-    WM_SYSCOMMAND, WM_SYSKEYDOWN, WM_SYSKEYUP, WNDPROC, WS_CAPTION, WS_OVERLAPPEDWINDOW, WS_POPUP,
-    WS_VISIBLE,
+    TranslateMessage, CW_USEDEFAULT, GWLP_WNDPROC, HWND_MESSAGE, MSG, PM_REMOVE, SC_KEYMENU,
+    WINDOW_EX_STYLE, WINDOW_STYLE, WM_CHAR, WM_ENTERMENULOOP, WM_INITMENU, WM_KEYDOWN, WM_KEYUP,
+    WM_PASTE, WM_SYSCHAR, WM_SYSCOMMAND, WM_SYSKEYDOWN, WM_SYSKEYUP, WNDPROC, WS_CAPTION,
+    WS_OVERLAPPEDWINDOW, WS_POPUP, WS_VISIBLE,
 };
 
 /// The shortest wait for anything the runner does (run B: ~1 s for `SendInput` and
@@ -125,6 +126,21 @@ pub fn precondition(capability: &str, holds: bool, detail: impl Display) {
         "runner precondition `{capability}` does not hold (docs/decisions/windows-ci-runner.md \
          records it ok in runs A and B; a change of the runner image moves this test's \
          Acceptance line to the owner): {detail}"
+    );
+}
+
+/// A runner fact the probe re-measures in every Windows CI job, used as a precondition
+/// from its first recorded run (the orchestrator's exception for `foreground_again`,
+/// docs/decisions/windows-ci-runner.md): the message points at the same job's probe line
+/// instead of runs A and B.
+#[track_caller]
+pub fn precondition_rechecked(fact: &str, holds: bool, detail: impl Display) {
+    assert!(
+        holds,
+        "runner precondition `{fact}` does not hold (docs/decisions/windows-ci-runner.md; \
+         re-measured by the probe step of this same job, line `runner-probe: {fact}=…`: \
+         not `ok` there means the runner changed and this test's Acceptance line moves to \
+         the owner; `ok` there means this test's path differs from the probe's): {detail}"
     );
 }
 
@@ -435,7 +451,8 @@ impl TestWindow {
             .collect()
     }
 
-    /// Brings the top-level window to the front (capability `foreground`).
+    /// Brings the top-level window to the front ([`bring_to_front`], fact
+    /// `foreground_again`).
     #[track_caller]
     pub fn front(&self) {
         bring_to_front(self.hwnd());
@@ -459,22 +476,57 @@ pub fn text_of(hwnd: HWND) -> String {
     String::from_utf16_lossy(&buf[..usize::try_from(len).unwrap_or(0).min(buf.len())])
 }
 
-/// `SetForegroundWindow(hwnd)` and wait until it is the foreground window.
+/// Brings `hwnd` to the front through the injected-Alt path and waits until it is the
+/// foreground window (runner fact `foreground_again`).
+///
+/// A process may set the foreground only while it has foreground rights. It has them for
+/// its first window (the probe's `foreground` fact, `created_fg=1`), but a test exe loses
+/// them once an earlier test's window is gone and another process's window (the runner's
+/// Windows Terminal) is back in front; `foreground_lock` is infinite on the runner, so they
+/// never come back by time (T-006 verify 1: paste.rs's later tests, `set=0`). An Alt key
+/// press re-enables `SetForegroundWindow` (LockSetForegroundWindow remarks). So: Alt down
+/// (read down), `SetForegroundWindow`, wait for the window in front, then the mask key 0xE8
+/// and Alt up (so the release opens no menu, T-006 R-2). These keys are test setup: once
+/// Alt's key-up has reached a test window, the record of every test window is cleared, so
+/// `hotkey.rs` never mistakes this path's Alt or mask key for the hotkey thread's.
 #[track_caller]
 pub fn bring_to_front(hwnd: HWND) {
+    let seen_before = lock(&RECORD).len();
+    let mut alt = Keys::press(&[VK_MENU]);
     // SAFETY: a live window of this process.
     let set = unsafe { SetForegroundWindow(hwnd) }.as_bool();
-    // SAFETY: no arguments.
-    let took = eventually(WAIT, || unsafe { GetForegroundWindow() } == hwnd);
+    let took = eventually(WAIT, || foreground() == hwnd);
+    let in_front = class_of(foreground());
+    let masked = send(&[key(VK_MASK, false), key(VK_MASK, true)]);
+    alt.release(&[VK_MENU]);
     precondition(
-        "foreground",
+        "sendinput",
+        masked == 2,
+        format!("SendInput inserted {masked} of 2 mask-key events"),
+    );
+    precondition_rechecked(
+        "foreground_again",
         took,
         format!(
-            "SetForegroundWindow returned {set} but the test window was not in front within \
-             {WAIT:?} (in front: {})",
-            class_of(foreground())
+            "with an injected Alt held (foreground rights, LockSetForegroundWindow remarks), \
+             SetForegroundWindow returned {set} but the test window was not in front within \
+             {WAIT:?} (in front: {in_front})"
         ),
     );
+    let alt_up = |m: &(isize, u32, usize)| {
+        (m.1 == WM_KEYUP || m.1 == WM_SYSKEYUP) && m.2 == usize::from(VK_MENU)
+    };
+    let reached = eventually(WAIT, || {
+        lock(&RECORD)
+            .get(seen_before..)
+            .is_some_and(|new| new.iter().any(alt_up))
+    });
+    assert!(
+        reached,
+        "premise: the Alt key-up of the foreground path did not reach a test window within \
+         {WAIT:?} although one is in front, so its keys cannot be told from a test's"
+    );
+    lock(&RECORD).clear();
 }
 
 pub fn foreground() -> HWND {
@@ -716,39 +768,104 @@ pub fn clipboard_text() -> Option<String> {
     read_clipboard().text
 }
 
-/// Another thread holds the clipboard open (`OpenClipboard(NULL)`) for `hold`, or until
+/// Another thread holds the clipboard open for `hold`, or until
 /// [`ClipboardHolder::release`]; [`ClipboardHolder::hold`] returns once it is open.
+///
+/// The holder opens the clipboard with a message-only window (`HWND_MESSAGE`) of its own
+/// thread, the way the probe's `clipboard` fact opens it with its window
+/// (docs/decisions/windows-ci-runner.md). Not `OpenClipboard(NULL)`: on the runner a
+/// NULL-owner hold did not refuse a second NULL open from another thread of the same
+/// process (T-006 verify 1, CI run 37280075413, clipboard.rs:77), so it never held the
+/// clipboard against `WinClipboard`, which opens with NULL. Each test still asserts that a
+/// second open is refused while held before it relies on the hold.
 pub struct ClipboardHolder {
     release: mpsc::Sender<()>,
     thread: Option<JoinHandle<()>>,
 }
 
+/// A message-only window of the calling thread (the system `STATIC` class: no class to
+/// register), the holder's clipboard owner.
+fn message_only_window() -> windows::core::Result<HWND> {
+    // SAFETY: the system STATIC class, static strings, the message-only parent; the
+    // holder thread destroys it on that thread.
+    unsafe {
+        CreateWindowExW(
+            WINDOW_EX_STYLE(0),
+            w!("STATIC"),
+            w!("voicen test clipboard holder"),
+            WINDOW_STYLE(0),
+            0,
+            0,
+            0,
+            0,
+            Some(HWND_MESSAGE),
+            None,
+            None,
+            None,
+        )
+    }
+}
+
 impl ClipboardHolder {
     #[track_caller]
     pub fn hold(hold: Duration) -> ClipboardHolder {
-        let (opened_tx, opened_rx) = mpsc::channel::<bool>();
+        let (opened_tx, opened_rx) = mpsc::channel::<Result<(), String>>();
         let (release, release_rx) = mpsc::channel::<()>();
         let thread = thread::spawn(move || {
+            let owner = match message_only_window() {
+                Ok(owner) => owner,
+                Err(err) => {
+                    let _ = opened_tx.send(Err(format!(
+                        "the holder's message-only window was not created: {err}"
+                    )));
+                    return;
+                }
+            };
             let mut opened = None;
             for _ in 0..20 {
-                opened = try_open_clipboard();
-                if opened.is_some() {
+                // SAFETY: the holder's own live window, on its thread.
+                if unsafe { OpenClipboard(Some(owner)) }.is_ok() {
+                    opened = Some(Opened);
                     break;
                 }
                 thread::sleep(Duration::from_millis(50));
             }
             let ok = opened.is_some();
-            let _ = opened_tx.send(ok);
+            let _ = opened_tx.send(if ok {
+                Ok(())
+            } else {
+                Err("OpenClipboard(holder window) refused 20 times over 1 s".to_owned())
+            });
             if ok {
-                let _ = release_rx.recv_timeout(hold);
+                // Pump the owner's thread while holding (the clipboard may send its
+                // owner messages), until released or `hold` has passed.
+                let until = Instant::now() + hold;
+                loop {
+                    pump();
+                    let left = until.saturating_duration_since(Instant::now());
+                    if left.is_zero() {
+                        break;
+                    }
+                    match release_rx.recv_timeout(left.min(Duration::from_millis(10))) {
+                        Err(mpsc::RecvTimeoutError::Timeout) => {}
+                        Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                    }
+                }
             }
             drop(opened);
+            // SAFETY: the window this thread created; destroyed once, after the close.
+            let _ = unsafe { DestroyWindow(owner) };
         });
-        let opened = opened_rx.recv_timeout(WAIT).unwrap_or(false);
+        let opened = opened_rx
+            .recv_timeout(WAIT)
+            .unwrap_or_else(|err| Err(format!("the holder thread did not answer: {err}")));
         precondition(
             "clipboard",
-            opened,
-            "the holder thread could not open the clipboard",
+            opened.is_ok(),
+            format!(
+                "the holder thread could not open the clipboard with its window: {}",
+                opened.as_ref().err().map_or("", String::as_str)
+            ),
         );
         ClipboardHolder {
             release,
