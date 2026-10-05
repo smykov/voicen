@@ -146,7 +146,8 @@ Guarantees: the hook never formats the panic payload; never panics (re-entry gua
 ## Credentials prefix
 
 ```rust
-pub const CREDENTIAL_TARGET_PREFIX: &str = /* value from 004's key-slot naming */;
+// in voicen_core::secrets (T-061), value "Voicen/"
+pub const CREDENTIAL_TARGET_PREFIX: &str = "Voicen/";
 ```
 
-Used by 004's credential store and by the shell's `--purge-credentials` (contracts/installer-ci.md).
+Lives in `voicen_core::secrets`, not in `diag`. Every `KeySlot::target_name` is built from it. Used by 004's credential store and by the shell's `--purge-credentials` (contracts/installer-ci.md); the purge policy is `voicen_core::secrets::purge_credentials`, the Win32 adapter `src-tauri/src/win/purge.rs` (`from_args`).

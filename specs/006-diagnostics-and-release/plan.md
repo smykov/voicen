@@ -118,7 +118,7 @@ crates/voicen-core/src/
     ├── observer.rs          # LogObserver: PipelineObserver (001) → LogEvent
     ├── session.rs           # SessionMarker, PreviousSession
     ├── crash.rs             # CrashContext, panic hook, render, retention
-    └── credentials.rs       # CREDENTIAL_TARGET_PREFIX (value from 004)
+    └── (CREDENTIAL_TARGET_PREFIX and purge_credentials live in secrets.rs, T-061)
 
 src-tauri/
 ├── src/lib.rs               # diag_start / diag_exit wiring; commands
