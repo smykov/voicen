@@ -72,6 +72,12 @@ Before T-059 nothing had observed any of this on the runner. The install smoke r
   - `CloseClipboard` runs on every path through the `Opened` guard. A block the clipboard took is never freed. `GlobalUnlock`'s `Err` with code 0 (the last unlock, windows-result 0.4.1) counts as success;
   - the clipboard holds only the fake text `voicen-probe-<pid>`.
 
+### A CI step plants and observes Credential Manager entries only through `scripts/ci/credentials.ps1`
+
+- **Defect that produced it:** T-061 verify 3 evidence, run 37444780779. The `--purge-credentials` step planted with `cmdkey /generic:` and decided "planted" from cmdkey's filtered `/list` text, with the exit code and output discarded. It failed with `premise: could not plant Voicen/ci-purge-a`, `voicen.exe` never ran, and the log could not say whether the write or the read-back failed (class `windows-premise-unchecked-on-host`).
+- **What breaks if you violate it:** a premise read from another tool's text, written with another writer than the product's, goes red or green for reasons outside the product (e.g. a stored TargetName the product's `CredEnumerateW "Voicen/*"` would not list).
+- **Where it is enforced:** `scripts/ci/credentials.ps1` (dot-sourced; `Add-VoicenCredential` = `CredWriteW` GENERIC, LOCAL_MACHINE, user `voicen`; `Test-VoicenCredential` = `CredReadW` GENERIC; `Get-VoicenCredentials` = `CredEnumerateW "<prefix>*"`; `Remove-VoicenCredential` = `CredDeleteW` GENERIC; every failed call throws with its Win32 error, `ERROR_NOT_FOUND` is "none" where the API means it). Make check `check-ci-credentials` (`scripts/ci/ci-credentials.test.sh` → `scripts/ci/ci-credentials.sh`) refuses `cmdkey` on a non-comment line of a workflow or `scripts/ci/*.ps1`, and a helper that does not declare the four calls. T-025's uninstall steps use the same helper.
+
 ## Line grammar
 
 One line per fact, in this order: `image`, `session`, `station`, `desktop`, `foreground_lock`, `taskbar` (session thread), then `foreground`, `sendinput`, `clipboard`, `clipboard_null_owner`, `hotkey`, `async_keys`, `foreground_again` (window thread; `foreground_again` added by T-006 verify 1, so runs A and B have 12 lines and later runs 13). Then the end line.

@@ -1,5 +1,6 @@
 # The gate: every area's checks, each through scripts/tw-run in the area's toolchain.
 .PHONY: check check-shell-layout check-shell-layout-fixtures check-helper-windows-fixtures check-core \
+	check-ci-credentials \
 	check-shell-windows \
 	check-ui core-image \
 	licenses licenses-check licenses-unit licenses-fixture licenses-rust licenses-bundle \
@@ -7,7 +8,7 @@
 
 # check-shell-windows after check-core: the shell depends on voicen-core, so a core error is
 # reported first by the faster native check-core, before the slower cross-target build.
-check: check-shell-layout check-shell-layout-fixtures check-helper-windows-fixtures check-core \
+check: check-shell-layout check-shell-layout-fixtures check-helper-windows-fixtures check-ci-credentials check-core \
 	check-shell-windows check-ui \
 	licenses-check
 
@@ -29,6 +30,12 @@ check-shell-layout-fixtures:
 # must read that one manifest. Host bash; the real-graph case reaches the core image.
 check-helper-windows-fixtures:
 	scripts/ci/helper-windows.test.sh
+
+# T-061: CI steps plant and observe Credential Manager entries only through
+# scripts/ci/credentials.ps1 (no cmdkey in the workflows or scripts/ci/*.ps1); the self-test
+# runs the tripwire scripts/ci/ci-credentials.sh on its cases and on the real repo. Host bash.
+check-ci-credentials:
+	scripts/ci/ci-credentials.test.sh
 
 check-core:
 	scripts/tw-run core -- 'cargo fmt --check -p voicen-core && cargo clippy -p voicen-core --all-targets -- -D warnings'

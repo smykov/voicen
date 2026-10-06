@@ -437,9 +437,29 @@ jobs:
           Get-Process -Name voicen -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
           Start-Sleep -Seconds 2
           if (@(Get-Process -Name voicen -ErrorAction SilentlyContinue).Count -ne 0) { throw "premise: a voicen process is still running" }
-          function Test-Cred([string]$target) { (cmdkey "/list:$target" | Out-String) -match [regex]::Escape("Target: LegacyGeneric:target=$target") }
-          function Remove-All { foreach ($t in $gone + $kept) { cmdkey "/delete:$t" | Out-Null } }
-          foreach ($t in $gone + $kept) { cmdkey "/generic:$t" /user:voicen "/pass:$fake" | Out-Null; if (-not (Test-Cred $t)) { Remove-All; throw "premise: could not plant $t" } }
+          # Plant, presence and cleanup through the product's own calls and type (CredWriteW /
+          # CredReadW / CredEnumerateW / CredDeleteW GENERIC; scripts/ci/credentials.ps1), never a
+          # second tool's text output: run 37444780779 could not tell a refused write from a missed
+          # list match (make check refuses that tool here, scripts/ci/ci-credentials.sh). Every failed
+          # call throws with its Win32 error.
+          . ./scripts/ci/credentials.ps1
+          function Test-Cred([string]$target) { Test-VoicenCredential -Target $target }
+          # Cleanup: a failed delete is printed (Write-Host) and counted; before a throw it never hides
+          # the reason of the throw, at the end a count above 0 is red.
+          function Remove-All { $failed = 0; foreach ($t in $gone + $kept) { try { Remove-VoicenCredential -Target $t } catch { $failed++; Write-Host "cleanup: $($_.Exception.Message)" } }; $failed }
+          function Format-Listed([string]$prefix) { (@(Get-VoicenCredentials -Prefix $prefix) | ForEach-Object { "$($_.Target) (type $($_.Type))" }) -join ', ' }
+          try {
+            foreach ($t in $gone + $kept) {
+              Add-VoicenCredential -Target $t -Secret $fake
+              if (-not (Test-Cred $t)) { throw "premise: $t was written (CredWriteW GENERIC ok) but CredReadW GENERIC does not find it" }
+            }
+            # The purge finds entries with CredEnumerateW "Voicen/*": both planted targets must be
+            # listed there as GENERIC, and the outsider must not be.
+            $listed = @(Get-VoicenCredentials -Prefix 'Voicen/')
+            foreach ($t in $gone) { if (@($listed | Where-Object { $_.Target -ceq $t -and $_.Type -eq 1 }).Count -ne 1) { throw "premise: CredEnumerateW 'Voicen/*' does not list $t as one GENERIC entry (listed: $(Format-Listed 'Voicen/'))" } }
+            if (@($listed | Where-Object { $_.Target -ceq $kept }).Count -ne 0) { throw "premise: CredEnumerateW 'Voicen/*' lists $kept, which is outside the prefix" }
+          } catch { [void](Remove-All); throw }
+          Write-Output "premise: $(($gone + $kept) -join ', ') planted and read back; CredEnumerateW 'Voicen/*' lists: $(Format-Listed 'Voicen/')"
           function Get-LogState { @(Get-ChildItem -Path $log -ErrorAction SilentlyContinue | ForEach-Object { "$($_.Name)|$($_.Length)|$($_.LastWriteTimeUtc.Ticks)" }) -join ';' }
           function Invoke-Purge([string]$tag) {
             $out = Join-Path $env:RUNNER_TEMP "purge-$tag.out"; $err = Join-Path $env:RUNNER_TEMP "purge-$tag.err"
@@ -447,18 +467,18 @@ jobs:
             $p = Start-Process -FilePath $exe -ArgumentList '--purge-credentials' -PassThru -RedirectStandardOutput $out -RedirectStandardError $err
             $null = $p.Handle
             # Without the branch the app starts, stays in the tray and never exits.
-            if (-not $p.WaitForExit(15000)) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue; Remove-All; throw "--purge-credentials ($tag) did not exit within 15 s (the app started)" }
-            if ($p.ExitCode -ne 0) { Remove-All; throw "--purge-credentials ($tag) exited with $($p.ExitCode), expected 0" }
-            foreach ($f in @($out, $err)) { $text = Get-Content -LiteralPath $f -Raw -ErrorAction SilentlyContinue; if ($text) { Remove-All; throw "--purge-credentials ($tag) wrote output to $f (contains the fake key: $($text.Contains($fake)))" } }
-            if ((Get-LogState) -ne $logBefore) { Remove-All; throw "--purge-credentials ($tag) touched the log files" }
+            if (-not $p.WaitForExit(15000)) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue; [void](Remove-All); throw "--purge-credentials ($tag) did not exit within 15 s (the app started)" }
+            if ($p.ExitCode -ne 0) { [void](Remove-All); throw "--purge-credentials ($tag) exited with $($p.ExitCode), expected 0" }
+            foreach ($f in @($out, $err)) { $text = Get-Content -LiteralPath $f -Raw -ErrorAction SilentlyContinue; if ($text) { [void](Remove-All); throw "--purge-credentials ($tag) wrote output to $f (contains the fake key: $($text.Contains($fake)))" } }
+            if ((Get-LogState) -ne $logBefore) { [void](Remove-All); throw "--purge-credentials ($tag) touched the log files" }
           }
           Invoke-Purge 'first'
-          foreach ($t in $gone) { if (Test-Cred $t) { Remove-All; throw "$t is still in Credential Manager after the purge" } }
-          if (-not (Test-Cred $kept)) { Remove-All; throw "$kept (outside Voicen/) was deleted by the purge" }
+          foreach ($t in $gone) { if (Test-Cred $t) { [void](Remove-All); throw "$t is still in Credential Manager after the purge" } }
+          if (-not (Test-Cred $kept)) { [void](Remove-All); throw "$kept (outside Voicen/) was deleted by the purge" }
           # Nothing left under the prefix: still exit 0.
           Invoke-Purge 'second'
-          if (-not (Test-Cred $kept)) { Remove-All; throw "$kept was deleted by the second purge" }
-          Remove-All
+          if (-not (Test-Cred $kept)) { [void](Remove-All); throw "$kept was deleted by the second purge" }
+          if ((Remove-All) -ne 0) { throw "cleanup: a CredDeleteW above failed (Win32 error printed)" }
           Write-Output "--purge-credentials: exit 0 twice within 15 s, Voicen/ci-purge-a and -b gone, $kept kept, no output, log files unchanged"
       - uses: actions/upload-artifact@v4
         with:
