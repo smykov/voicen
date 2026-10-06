@@ -27,7 +27,26 @@
 #       -> re-enters through scripts/tw-run ui (TW_DOCKER_ARGS) with `--network none` and the
 #          caller's CI passed through when set (tw-run passes no environment but HOME; CI drives
 #          forbidOnly and retries in playwright.config.ts); the image's own check above applies.
+#     BASE_URL set (non-empty) on the host -> exit 3 before any test and before any docker
+#       run; the message names BASE_URL (it would not reach the container: tw-run passes no
+#       caller environment, and localhost there is the container's own). Refused, never
+#       dropped silently (review 1 #3). Inside the image BASE_URL reaches Playwright unchanged.
 #     Never runs Playwright on the host.
+#   .docker-info fields are read independently: a missing driverVersion is reported as such
+#   (never as "@playwright/test is not installed"), and a missing dockerImageName with a
+#   matching driverVersion runs (review 1 #1).
+#
+# The Playwright config itself refuses to run outside the ui image (review 1 #2: `npx
+# playwright test`, `pnpm exec playwright test`, `BASE_URL=... npx playwright test` on the host
+# all load playwright.config.ts). Contract: the config starts only when BOTH
+#   - the environment variable VOICEN_UI_IMAGE is non-empty (set by docker/ui.Dockerfile ENV,
+#     so present in every container of the ui image, tw-run's included), and
+#   - a container marker file exists (/.dockerenv from docker, /run/.containerenv from podman),
+# so neither a host with /ms-playwright (review 1 #8) nor a host that exports the variable
+# counts as the image. Otherwise loading the config throws before any side effect (no
+# target/e2e run directory, no webServer), with a message naming `pnpm e2e`. The host cases
+# below run the real config with the real @playwright/test CLI (`test --list`) on this host;
+# the in-image half is e2e/host-guard.spec.ts.
 #
 # How: each case builds a scratch project root (this repo's scripts/, package.json,
 # pnpm-lock.yaml; a ui area config with runner docker and the image below; a node_modules with
@@ -69,13 +88,14 @@ cat >"$fakebin/playwright" <<'SH'
   printf 'container=%s\n' "${FAKE_IN_CONTAINER:-no}"
   printf 'argv:'; for a in "$@"; do printf ' %s' "$a"; done; printf '\n'
   printf 'CI=%s\n' "${CI-__unset__}"
+  printf 'BASE_URL=%s\n' "${BASE_URL-__unset__}"
 } >>"$FAKE_LOG/playwright.log"
 exit 0
 SH
 fake_cli_js='const fs = require("node:fs");
 const e = process.env;
 fs.appendFileSync(`${e.FAKE_LOG}/playwright.log`,
-  `container=${e.FAKE_IN_CONTAINER || "no"}\nargv: ${process.argv.slice(2).join(" ")}\nCI=${e.CI === undefined ? "__unset__" : e.CI}\n`);'
+  `container=${e.FAKE_IN_CONTAINER || "no"}\nargv: ${process.argv.slice(2).join(" ")}\nCI=${e.CI === undefined ? "__unset__" : e.CI}\nBASE_URL=${e.BASE_URL === undefined ? "__unset__" : e.BASE_URL}\n`);'
 
 # Fake pnpm: `pnpm [run] <script>` runs package.json's script with node_modules/.bin on PATH
 # (as pnpm does), `pnpm exec <bin>` and `pnpm <bin>` run node_modules/.bin/<bin>.
@@ -203,7 +223,8 @@ case_root=""
 log=""
 info=""
 
-# new_case <driverVersion or "-" for none>: a fresh scratch root, log dir and .docker-info.
+# new_case <driverVersion or "-" for none> [noname]: a fresh scratch root, log dir and
+# .docker-info; `noname` leaves dockerImageName out of the file.
 new_case() {
   n=$((n + 1))
   case_root="$tmp/case-$n/root"
@@ -212,13 +233,16 @@ new_case() {
   mkdir -p "$log" && cp -r "$base" "$case_root"
   if [ "$1" = "-" ]; then
     printf '{"dockerImageName":"mcr.microsoft.com/playwright:v%s-noble"}\n' "$version" >"$info"
+  elif [ "${2:-}" = noname ]; then
+    printf '{"driverVersion":"%s"}\n' "$1" >"$info"
   else
     printf '{"driverVersion":"%s","dockerImageName":"mcr.microsoft.com/playwright:v%s-noble"}\n' "$1" "$1" >"$info"
   fi
 }
 
 # entry <where: host|image> <CI value or "-" for unset> <images present> [args...]: runs
-# `pnpm e2e args` in the scratch root; sets $out and $got.
+# `pnpm e2e args` in the scratch root; sets $out and $got. $ENTRY_BASE_URL, when set, is the
+# caller's BASE_URL.
 out=""
 got=0
 entry() {
@@ -233,6 +257,7 @@ entry() {
     envs+=(VOICEN_E2E_DOCKER_INFO="$tmp/no-such-docker-info.json")
   fi
   [ "$ci" = "-" ] || envs+=(CI="$ci")
+  [ -n "${ENTRY_BASE_URL:-}" ] && envs+=(BASE_URL="$ENTRY_BASE_URL")
   mkdir -p "$log/host-home"
   out="$(cd "$case_root" && env -i "${envs[@]}" timeout 60 pnpm e2e "$@" 2>&1)"
   got=$?
@@ -269,14 +294,55 @@ entry host - "$image" --retries=0
 if [ "$got" -ne 3 ]; then fail "$c" "exit $got, want 3"
 elif ! no_test; then fail "$c" "Playwright was started"
 elif ! has "$other" || ! has "$version"; then fail "$c" "the message does not name both versions ($other, $version)"
-elif ! has "$image" && ! has "mcr.microsoft.com/playwright:v$other-noble"; then fail "$c" "the message does not name the image"
+elif ! has "$image"; then fail "$c" "the message does not name the ui area's image $image"
 else ok "$c"; fi
 
-c="host: image without a Playwright version (no driverVersion) -> exit 3 before any test"
+c="host: image without a Playwright version (no driverVersion) -> exit 3 before any test, names the image, the missing driverVersion and the lockfile version"
 new_case -
 entry host - "$image"
 if [ "$got" -ne 3 ]; then fail "$c" "exit $got, want 3"
 elif ! no_test; then fail "$c" "Playwright was started"
+elif has "not installed" || has "pnpm install"; then fail "$c" "the message blames node_modules/@playwright/test (pnpm install), but the image lacks driverVersion"
+elif ! has "$image"; then fail "$c" "the message does not name the ui area's image $image"
+elif ! has "driverVersion"; then fail "$c" "the message does not say the image's driverVersion is missing"
+elif ! has "$version"; then fail "$c" "the message does not name the lockfile's @playwright/test $version"
+else ok "$c"; fi
+
+c="image (tw-run ui -- pnpm e2e): no driverVersion -> exit 3 before any test, names the file's image, the missing driverVersion and the lockfile version"
+new_case -
+entry image - ""
+if [ "$got" -ne 3 ]; then fail "$c" "exit $got, want 3"
+elif ! no_test; then fail "$c" "Playwright was started"
+elif has "not installed" || has "pnpm install"; then fail "$c" "the message blames node_modules/@playwright/test (pnpm install), but the image lacks driverVersion"
+elif ! has "mcr.microsoft.com/playwright:v$version-noble"; then fail "$c" "the message does not name the file's dockerImageName"
+elif ! has "driverVersion"; then fail "$c" "the message does not say the image's driverVersion is missing"
+elif ! has "$version"; then fail "$c" "the message does not name the lockfile's @playwright/test $version"
+else ok "$c"; fi
+
+c="host: driverVersion matches, no dockerImageName -> runs in the image"
+new_case "$version" noname
+entry host - "$image" --grep t064-noname
+if [ "$got" -ne 0 ]; then fail "$c" "exit $got, want 0 (a valid image was refused)"
+elif [ ! -f "$log/playwright.log" ]; then fail "$c" "Playwright did not run"
+elif grep -q '^container=no' "$log/playwright.log"; then fail "$c" "Playwright ran on the host, not in the image"
+elif ! grep -qE '^argv: .*test .*--grep t064-noname' "$log/playwright.log"; then fail "$c" "Playwright did not get 'test' and the caller's arguments"
+else ok "$c"; fi
+
+c="image (tw-run ui -- pnpm e2e): driverVersion matches, no dockerImageName -> runs Playwright directly"
+new_case "$version" noname
+entry image - "" --grep t064-noname
+if [ "$got" -ne 0 ]; then fail "$c" "exit $got, want 0 (a valid image was refused)"
+elif [ -f "$log/docker.log" ]; then fail "$c" "docker was called from inside the image"
+elif ! grep -qE '^argv: .*test .*--grep t064-noname' "$log/playwright.log" 2>/dev/null; then fail "$c" "Playwright did not run with 'test' and the caller's arguments"
+else ok "$c"; fi
+
+c="host: BASE_URL set -> exit 3 before any test and any docker run, the message names BASE_URL (refused, not dropped)"
+new_case "$version"
+ENTRY_BASE_URL="http://localhost:4173" entry host - "$image"
+if [ "$got" -ne 3 ]; then fail "$c" "exit $got, want 3 (BASE_URL would be dropped silently on the way into the container)"
+elif ! no_test; then fail "$c" "Playwright was started"
+elif docker_ran; then fail "$c" "docker run was called although BASE_URL cannot reach the container"
+elif ! has "BASE_URL"; then fail "$c" "the message does not name BASE_URL"
 else ok "$c"; fi
 
 c="host: image present, version equal -> tests run in the image with --network none, args passed, CI reaches the config"
@@ -317,6 +383,57 @@ elif ! no_test; then fail "$c" "Playwright was started"
 elif [ -f "$log/docker.log" ]; then fail "$c" "docker was called from inside the image"
 elif ! has "$other" || ! has "$version"; then fail "$c" "the message does not name both versions ($other, $version)"
 else ok "$c"; fi
+
+c="image (characterization): BASE_URL set -> Playwright runs with BASE_URL unchanged"
+new_case "$version"
+ENTRY_BASE_URL="http://localhost:4173" entry image - ""
+if [ "$got" -ne 0 ]; then fail "$c" "exit $got, want 0"
+elif ! grep -qx 'BASE_URL=http://localhost:4173' "$log/playwright.log" 2>/dev/null; then fail "$c" "BASE_URL did not reach Playwright inside the image"
+else ok "$c"; fi
+
+# --- the real playwright.config.ts on this host (review 1 #2) ------------------------------
+# A bare `playwright test --list` with the real config and the real @playwright/test CLI, from
+# a scratch working directory (the config's target/e2e is relative to it). On the host the
+# config must throw before any side effect, naming `pnpm e2e`.
+cli="$root/node_modules/@playwright/test/cli.js"
+host_marker=""
+for m in /.dockerenv /run/.containerenv; do [ -e "$m" ] && host_marker="$m"; done
+# config_run <label> [VAR=value...]: sets $out, $got, $cwd; env is PATH/HOME plus the args.
+cwd=""
+config_run() {
+  local label="$1"
+  shift
+  n=$((n + 1))
+  cwd="$tmp/config-$n"
+  mkdir -p "$cwd/home"
+  out="$(cd "$cwd" && env -i PATH="$nodedir:/usr/local/bin:/usr/bin:/bin" HOME="$cwd/home" "$@" \
+    timeout 120 node "$cli" test --list -c "$root/playwright.config.ts" 2>&1)"
+  got=$?
+}
+config_refused() {
+  local c="$1"
+  if [ "$got" -eq 0 ]; then fail "$c" "exit 0: the config started on the host (it must refuse outside the ui image)"
+  elif [ -n "$(ls -A "$cwd/target/e2e" 2>/dev/null)" ]; then fail "$c" "the config made a run directory before refusing: $(ls "$cwd/target/e2e")"
+  elif ! has "pnpm e2e"; then fail "$c" "the refusal does not name 'pnpm e2e'"
+  else ok "$c"; fi
+}
+if [ ! -f "$cli" ]; then
+  echo "$name: cannot run: $cli not found (pnpm install)" >&2; exit 3
+elif [ -n "$host_marker" ]; then
+  echo "skip host config cases: this host has the container marker $host_marker (not a host)"
+else
+  c="host config: bare 'playwright test --list' with playwright.config.ts -> refused before any run directory, names pnpm e2e"
+  config_run "$c"
+  config_refused "$c"
+
+  c="host config: BASE_URL=... 'playwright test --list' -> refused too (an external server does not make the host the image)"
+  config_run "$c" BASE_URL=http://localhost:4173
+  config_refused "$c"
+
+  c="host config: VOICEN_UI_IMAGE exported on a host without a container marker -> refused (the variable alone is not the image)"
+  config_run "$c" VOICEN_UI_IMAGE=1
+  config_refused "$c"
+fi
 
 if [ "$failed" -gt 0 ]; then
   echo "$name: FAIL: $failed case(s) differ, $passed as expected; the e2e entry point does not hold its contract (T-064)" >&2
