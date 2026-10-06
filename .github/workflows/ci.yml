@@ -17,10 +17,14 @@ jobs:
       # install, lint, unit tests, licenses and the e2e run (its browser in a network namespace
       # of its own, --network none; T-064, decision #89). The e2e entry passes CI through.
       # Host node only for the host-side fixture tests (scripts/ci/e2e-entry.test.sh); no ui
-      # command runs on it.
+      # command runs on it. package-manager-cache: false because setup-node v5 otherwise
+      # auto-caches the package.json packageManager (pnpm) and runs `pnpm store path` on the
+      # host; this job has no host pnpm since T-064 (decision #89). Pinned by make check
+      # (check-setup-node-cache, T-068).
       - uses: actions/setup-node@v5
         with:
           node-version: "20.19"
+          package-manager-cache: false
       - name: Build the ui toolchain image
         run: make ui-image
       - run: scripts/tw-run ui -- pnpm install --frozen-lockfile
