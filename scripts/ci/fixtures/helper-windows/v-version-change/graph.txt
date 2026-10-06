@@ -1,0 +1,5 @@
+tao 0.38.0 crates/tao-0.38.0
+windows-sys 0.59.0 crates/windows-sys-0.59.0
+tray-icon 0.25.1 crates/tray-icon-0.25.1
+wry 0.57.0 crates/wry-0.57.0
+serde 1.0.0 crates/serde-1.0.0

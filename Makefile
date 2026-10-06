@@ -1,12 +1,14 @@
 # The gate: every area's checks, each through scripts/tw-run in the area's toolchain.
-.PHONY: check check-shell-layout check-shell-layout-fixtures check-core check-shell-windows \
+.PHONY: check check-shell-layout check-shell-layout-fixtures check-helper-windows-fixtures check-core \
+	check-shell-windows \
 	check-ui core-image \
 	licenses licenses-check licenses-unit licenses-fixture licenses-rust licenses-bundle \
 	licenses-npm licenses-generate licenses-stale
 
 # check-shell-windows after check-core: the shell depends on voicen-core, so a core error is
 # reported first by the faster native check-core, before the slower cross-target build.
-check: check-shell-layout check-shell-layout-fixtures check-core check-shell-windows check-ui \
+check: check-shell-layout check-shell-layout-fixtures check-helper-windows-fixtures check-core \
+	check-shell-windows check-ui \
 	licenses-check
 
 # Shell tests only in src-tauri/tests/*.rs: no test attributes in src-tauri/src, no benches or
@@ -20,6 +22,13 @@ check-shell-layout:
 # scripts/ci/fixtures/shell-test-layout/ (0 allowed, 1 violation, 3 cannot run). Host bash.
 check-shell-layout-fixtures:
 	scripts/ci/shell-test-layout.test.sh
+
+# T-065 (rca smoke-window-predicate): the helper-window tripwire scripts/ci/helper-windows.sh
+# must hold its contract on every fixture in scripts/ci/fixtures/helper-windows/ and on the
+# real Windows dependency graph with scripts/ci/helper-windows.txt, and the predicate's copies
+# must read that one manifest. Host bash; the real-graph case reaches the core image.
+check-helper-windows-fixtures:
+	scripts/ci/helper-windows.test.sh
 
 check-core:
 	scripts/tw-run core -- 'cargo fmt --check -p voicen-core && cargo clippy -p voicen-core --all-targets -- -D warnings'

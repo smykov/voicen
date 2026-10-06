@@ -1,0 +1,6 @@
+# Fixture manifest (T-065): <crate>@<version> | <verdict> | <class or -> | <source citation>
+tao@0.37.1 | visible-helper | Tao Thread Event Target | src/platform_impl/windows/event_loop.rs create_event_target_window
+windows-sys@0.59.0 | binding | - | src/Windows/Win32/UI/WindowsAndMessaging/mod.rs declaration only
+tray-icon@0.25.1 | hidden-helper | tray_icon_app | src/platform_impl/windows/mod.rs, never WS_VISIBLE
+
+wry@0.57.0 | child | - | src/webview2/mod.rs, WS_CHILD of the tao window

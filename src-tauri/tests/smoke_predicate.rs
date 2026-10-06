@@ -1174,3 +1174,338 @@ fn the_pwsh_child_gets_a_null_stdin_and_no_console_window() {
         "the pwsh child has a console window of its own: {output:?}"
     );
 }
+
+// --- T-065 (rca smoke-window-predicate): one helper-window manifest, and its census ---
+//
+// The helper list is no longer a literal in the script: `scripts/ci/helper-windows.txt`
+// (format pinned by `scripts/ci/helper-windows.test.sh`: `<crate>@<version> | <verdict> |
+// <class or -> | <citation>`, verdicts visible-helper, hidden-helper, child, binding;
+// `{identifier}` in a class is tauri.conf.json's identifier) is the one source. Contract of
+// the script these tests pin (T-065 analysis, seam):
+//   Get-ShownWindows -ProcessId <pid> [-Manifest <path>]   excludes a window only when its
+//     class is a visible-helper class of the manifest AND it has the four helper bits;
+//   Get-HelperDrift -ProcessId <pid> [-Manifest <path>]    the census: one object per drift,
+//     `Kind` 'unlisted' (a visible, unowned, top-level window with the four helper bits whose
+//     class is not a visible-helper class of the manifest) or 'stale' (a visible-helper class
+//     of the manifest with no such window), and `Class`;
+//   Format-HelperDrift <drift>                              a log line that says
+//     "helper list drift" and names each class.
+// Default manifest: `helper-windows.txt` next to the script. The test exe hosts none of
+// the real helpers, so every census test passes its own manifest (fake classes); the real
+// voicen.exe is censused by the install smoke in ci.yml (Windows CI only).
+
+mod helper_windows;
+
+/// A fake helper class listed as visible-helper in the test manifests.
+const LISTED_HELPER: &str = "Voicen Test Listed Helper";
+/// A fake helper-shaped class no manifest lists.
+const UNLISTED_HELPER: &str = "Voicen Test Unlisted Helper";
+/// A fake visible-helper class no test window has.
+const ABSENT_HELPER: &str = "Voicen Test Absent Helper";
+/// A fake class listed as hidden-helper.
+const HIDDEN_HELPER: &str = "Voicen Test Hidden Helper";
+
+/// A manifest file in the temp dir, removed on drop.
+struct TempManifest(PathBuf);
+
+impl TempManifest {
+    /// Writes `entries` (manifest lines) to a file named after `name` and this pid.
+    fn new(name: &str, entries: &[&str]) -> TempManifest {
+        let path = std::env::temp_dir().join(format!("t065-{}-{name}.txt", std::process::id()));
+        let mut text = String::from("# T-065 test manifest (fake classes)\n");
+        for e in entries {
+            text.push_str(e);
+            text.push('\n');
+        }
+        std::fs::write(&path, text)
+            .unwrap_or_else(|e| panic!("premise: {} is writable: {e}", path.display()));
+        TempManifest(path)
+    }
+}
+
+impl Drop for TempManifest {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// A path as a single-quoted PowerShell string.
+fn ps_quoted(path: &std::path::Path) -> String {
+    format!("'{}'", path.display().to_string().replace('\'', "''"))
+}
+
+/// The lines `<prefix>|...` of a successful pwsh run of `body` after dot-sourcing the
+/// script (stdout must end with `end`).
+#[track_caller]
+fn smoke_lines(body: &str) -> Vec<String> {
+    let path = script();
+    assert!(path.is_file(), "premise: {} exists", path.display());
+    let command = format!(
+        "$ErrorActionPreference = 'Stop'; . {}; {body}; [Console]::Out.WriteLine('end')",
+        ps_quoted(&path)
+    );
+    let output = ran(&command, PWSH_BUDGET);
+    assert!(
+        output.status.success() && output.stdout.lines().last() == Some("end"),
+        "the script did not run the T-065 functions (Get-ShownWindows -Manifest, \
+         Get-HelperDrift, Format-HelperDrift): {output:?}"
+    );
+    output
+        .stdout
+        .lines()
+        .filter(|l| *l != "end")
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The handles `Get-ShownWindows <this pid> -Manifest <manifest>` returns.
+#[track_caller]
+fn shown_with_manifest(manifest: &TempManifest) -> Vec<isize> {
+    smoke_lines(&format!(
+        "foreach ($w in (Get-ShownWindows -ProcessId {} -Manifest {})) \
+         {{ [Console]::Out.WriteLine('shown|' + $w.Handle.ToInt64()) }}",
+        std::process::id(),
+        ps_quoted(&manifest.0)
+    ))
+    .iter()
+    .filter_map(|l| l.strip_prefix("shown|"))
+    .map(|h| {
+        h.trim()
+            .parse::<i64>()
+            .unwrap_or_else(|e| panic!("not a handle `{h}`: {e}")) as isize
+    })
+    .collect()
+}
+
+/// The census of this process against `manifest`: `(kind, class)` per drift, and the
+/// `Format-HelperDrift` line.
+#[track_caller]
+fn census(manifest: &TempManifest) -> (Vec<(String, String)>, String) {
+    let lines = smoke_lines(&format!(
+        "$d = @(Get-HelperDrift -ProcessId {} -Manifest {}); \
+         foreach ($x in $d) {{ [Console]::Out.WriteLine('drift|' + $x.Kind + '|' + $x.Class) }}; \
+         [Console]::Out.WriteLine('format|' + (Format-HelperDrift $d))",
+        std::process::id(),
+        ps_quoted(&manifest.0)
+    ));
+    let drift = lines
+        .iter()
+        .filter_map(|l| l.strip_prefix("drift|"))
+        .map(|l| {
+            let (kind, class) = l
+                .split_once('|')
+                .unwrap_or_else(|| panic!("a drift line without kind|class: `{l}`"));
+            (kind.to_owned(), class.to_owned())
+        })
+        .collect();
+    let format = lines
+        .iter()
+        .find_map(|l| l.strip_prefix("format|"))
+        .unwrap_or_default()
+        .to_owned();
+    (drift, format)
+}
+
+/// A manifest entry line for a fake crate.
+fn entry(krate: &str, verdict: &str, class: &str) -> String {
+    format!("{krate}@0.0.1 | {verdict} | {class} | t065 fake test entry")
+}
+
+#[test]
+fn an_unlisted_visible_helper_shaped_window_is_reported_as_drift() {
+    // Analysis invariant, Windows half: a visible, unowned, top-level window with the four
+    // helper bits whose class is not on the manifest is reported by the census as
+    // 'unlisted', named by class, with "helper list drift" in the log line; it is still
+    // counted as shown (never excluded for its shape). A listed helper that exists is not
+    // reported, and a plain window is not a helper. Red today: no Get-HelperDrift, and
+    // Get-ShownWindows takes no manifest. Bites: a census that reports nothing; one that
+    // reports every helper-shaped window (the listed one too); one that excludes the
+    // unlisted helper from the shown set by shape.
+    let listed = entry("t065-listed", "visible-helper", LISTED_HELPER);
+    let manifest = TempManifest::new("unlisted", &[&listed]);
+    let (windows, _) = shown_with_premises(vec![
+        Spec::helper_shaped(LISTED_HELPER, None, HELPER_EX),
+        Spec::helper_shaped(UNLISTED_HELPER, None, HELPER_EX),
+    ]);
+    let (listed_h, unlisted_h) = (windows.hwnds[1], windows.hwnds[2]);
+    assert_has_helper_bits(listed_h, "listed fake helper");
+    assert_has_helper_bits(unlisted_h, "unlisted fake helper");
+    let (drift, format) = census(&manifest);
+    assert!(
+        drift.contains(&("unlisted".to_owned(), UNLISTED_HELPER.to_owned())),
+        "the census does not report the unlisted helper-shaped window '{UNLISTED_HELPER}' \
+         ({unlisted_h:#x}): {drift:?}"
+    );
+    assert!(
+        drift
+            .iter()
+            .all(|(_, class)| class != LISTED_HELPER && class != "Edit" && class != "EDIT"),
+        "the census reports a listed helper that exists, or a plain window: {drift:?}"
+    );
+    assert!(
+        format.contains("helper list drift") && format.contains(UNLISTED_HELPER),
+        "the census log line does not say 'helper list drift' and name the class: {format:?}"
+    );
+    let shown = shown_with_manifest(&manifest);
+    assert!(
+        shown.contains(&windows.hwnds[0]),
+        "premise: the plain window is shown with the test manifest: {shown:?}"
+    );
+    assert!(
+        shown.contains(&unlisted_h),
+        "the unlisted helper-shaped window ({unlisted_h:#x}) is not counted as shown: \
+         {shown:?}"
+    );
+    assert!(
+        !shown.contains(&listed_h),
+        "the helper listed in the given manifest ({listed_h:#x}) is counted as shown: the \
+         script does not read the manifest it is given: {shown:?}"
+    );
+}
+
+#[test]
+fn a_listed_visible_helper_that_is_absent_is_reported_as_stale() {
+    // Analysis invariant, other direction: a visible-helper class on the manifest with no
+    // such window in the process is reported as 'stale' (the verdict no longer matches the
+    // real window set). A listed helper that exists is not; hidden-helper, child and binding
+    // entries are never stale for being absent (they are not visible helpers). Red today:
+    // no Get-HelperDrift. Bites: a census that only looks at windows (never at the
+    // manifest); one that reports every manifest entry; one that treats hidden-helper
+    // entries as visible ones.
+    let lines = [
+        entry("t065-listed", "visible-helper", LISTED_HELPER),
+        entry("t065-absent", "visible-helper", ABSENT_HELPER),
+        entry("t065-hidden", "hidden-helper", HIDDEN_HELPER),
+        entry("t065-child", "child", "-"),
+        entry("t065-binding", "binding", "-"),
+    ];
+    let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+    let manifest = TempManifest::new("stale", &refs);
+    let (windows, _) =
+        shown_with_premises(vec![Spec::helper_shaped(LISTED_HELPER, None, HELPER_EX)]);
+    assert_has_helper_bits(windows.hwnds[1], "listed fake helper");
+    let (drift, format) = census(&manifest);
+    assert_eq!(
+        drift,
+        vec![("stale".to_owned(), ABSENT_HELPER.to_owned())],
+        "the census must report exactly the absent visible helper as stale"
+    );
+    assert!(
+        format.contains("helper list drift") && format.contains(ABSENT_HELPER),
+        "the census log line does not say 'helper list drift' and name the class: {format:?}"
+    );
+}
+
+#[test]
+fn a_hidden_helper_class_made_visible_is_drift_and_counts() {
+    // The next occurrence the analysis names (tray-icon's `tray_icon_app`, hidden today):
+    // a class the manifest lists as hidden-helper that turns up visible with the helper
+    // shape is drift ('unlisted': not a visible-helper entry) and is counted as shown, so
+    // the verdict must be reviewed. Red today: no census, no manifest. Bites: excluding
+    // every manifest class whatever its verdict.
+    let hidden = entry("t065-hidden", "hidden-helper", HIDDEN_HELPER);
+    let manifest = TempManifest::new("hidden", &[&hidden]);
+    let (windows, _) =
+        shown_with_premises(vec![Spec::helper_shaped(HIDDEN_HELPER, None, HELPER_EX)]);
+    let h = windows.hwnds[1];
+    assert_has_helper_bits(h, "hidden-helper class window");
+    let (drift, _) = census(&manifest);
+    assert!(
+        drift.contains(&("unlisted".to_owned(), HIDDEN_HELPER.to_owned())),
+        "a hidden-helper class shown visible is not reported as drift: {drift:?}"
+    );
+    let shown = shown_with_manifest(&manifest);
+    assert!(
+        shown.contains(&h),
+        "a hidden-helper class shown visible ({h:#x}) is excluded from the shown set: {shown:?}"
+    );
+}
+
+#[test]
+fn the_shown_rule_reads_the_manifest_it_is_given() {
+    // One source, script side: the helper classes come from the manifest, not from a literal
+    // in the script. The same helper-shaped window is excluded with a manifest that lists
+    // its class and counted with one that does not. Red today: Get-ShownWindows has no
+    // -Manifest (and a literal list). Bites: a literal list kept next to the manifest; a
+    // manifest read but the parameter ignored.
+    let with = entry("t065-listed", "visible-helper", LISTED_HELPER);
+    let other = entry("t065-other", "visible-helper", ABSENT_HELPER);
+    let listing = TempManifest::new("reads-listing", &[&with]);
+    let not_listing = TempManifest::new("reads-not-listing", &[&other]);
+    let (windows, _) =
+        shown_with_premises(vec![Spec::helper_shaped(LISTED_HELPER, None, HELPER_EX)]);
+    let h = windows.hwnds[1];
+    assert_has_helper_bits(h, "fake helper");
+    assert!(
+        !shown_with_manifest(&listing).contains(&h),
+        "a helper whose class the given manifest lists ({h:#x}) is counted"
+    );
+    assert!(
+        shown_with_manifest(&not_listing).contains(&h),
+        "a helper whose class the given manifest does not list ({h:#x}) is excluded: the \
+         script keeps a list of its own"
+    );
+}
+
+#[test]
+fn the_test_support_rule_agrees_with_the_smoke_script() {
+    // Acceptance 3 (one source): `helper_windows::is_helper` (the rule overlay.rs's
+    // `shown_windows` uses, read from scripts/ci/helper-windows.txt) and the script's
+    // default Get-ShownWindows decide the same for every window here: tao's and the
+    // plugin's helpers (excluded), tao's class without LAYERED, a click-through overlay
+    // and a fake unlisted helper (counted). Red today: no support module (overlay.rs keeps
+    // "tao class only, no bits"). Bites: the support module without the bit check (tao
+    // without LAYERED excluded), without the plugin entry, or by style alone (overlay
+    // excluded).
+    let (plugin_class, plugin_title) = single_instance_class_and_title();
+    let overlay = Spec {
+        class: Class::Own(TAURI_WINDOW.to_owned()),
+        title: Some(PROBE_TITLE.to_owned()),
+        ex: WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+        style: WS_POPUP | WS_VISIBLE,
+        rect: (40, 40, 320, 56),
+        owned: false,
+        restyle: None,
+        alpha: None,
+    };
+    let cases: Vec<(String, Spec)> = vec![
+        (
+            TAO_EVENT_TARGET.to_owned(),
+            Spec::helper_shaped(TAO_EVENT_TARGET, None, HELPER_EX),
+        ),
+        (
+            plugin_class.clone(),
+            Spec::helper_shaped(&plugin_class, Some(plugin_title), HELPER_EX),
+        ),
+        (
+            TAO_EVENT_TARGET.to_owned(),
+            Spec::helper_shaped(
+                TAO_EVENT_TARGET,
+                None,
+                WINDOW_EX_STYLE(HELPER_EX.0 & !WS_EX_LAYERED.0),
+            ),
+        ),
+        (TAURI_WINDOW.to_owned(), overlay),
+        (
+            UNLISTED_HELPER.to_owned(),
+            Spec::helper_shaped(UNLISTED_HELPER, None, HELPER_EX),
+        ),
+    ];
+    let (windows, shown) = shown_with_premises(cases.iter().map(|(_, s)| s.clone()).collect());
+    let expected_helper = [true, true, false, false, false];
+    for (i, ((class, _), want)) in cases.iter().zip(expected_helper).enumerate() {
+        let h = windows.hwnds[i + 1];
+        let ex = ex_style_of(h);
+        let by_support = helper_windows::is_helper(class, ex);
+        let by_script = !shown.contains(&h);
+        assert_eq!(
+            by_script, want,
+            "premise: the smoke script's verdict on '{class}' ({h:#x}, ex-style {ex:#x})"
+        );
+        assert_eq!(
+            by_support, by_script,
+            "helper_windows::is_helper and the smoke script disagree on '{class}' ({h:#x}, \
+             ex-style {ex:#x}): two sources of the rule"
+        );
+    }
+}
