@@ -14,9 +14,20 @@
 //! class or title cannot make the red test pass.
 //!
 //! Precondition: `pwsh` (PowerShell 7) on PATH, as on the windows-latest runner the
-//! smoke itself runs on. tao's event-target window (still excluded) needs a tauri
-//! process; the smoke's loaded-launch step pins that exclusion (a release voicen.exe
-//! always has that window, visible).
+//! smoke itself runs on.
+//!
+//! T-057 VERIFY_FAIL 3 (run 37419266451): the framework helper windows. tao 0.37.1
+//! (`event_loop.rs` `create_event_target_window`) and tauri-plugin-single-instance
+//! 2.5.2 (`platform_impl/windows.rs` `create_event_target_window`, class `{id}-sic`,
+//! title `{id}-siw`) each create one top-level, unowned window with
+//! `WS_EX_NOACTIVATE|WS_EX_TRANSPARENT|WS_EX_LAYERED|WS_EX_TOOLWINDOW`, `WS_OVERLAPPED`,
+//! 0,0,0,0, and then set `GWL_STYLE` to `WS_VISIBLE|WS_POPUP`. The tests below register
+//! those classes in this exe and create the windows with the same arguments (no tauri
+//! process, no plugin: its second-instance path calls `process::exit(0)`, T-052). The
+//! analysis invariant: a window is excluded only when its class is on the script's
+//! pinned helper list AND it has all four helper ex-style bits; never by style alone
+//! (a click-through overlay has LAYERED|TRANSPARENT), never by title. The set of helper
+//! windows a real voicen.exe has stays proven only by the install smoke.
 #![cfg(windows)]
 
 use std::io::Read;
@@ -29,28 +40,254 @@ use std::sync::{Arc, Barrier, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use windows::core::w;
-use windows::Win32::Foundation::{CloseHandle, HWND, WAIT_OBJECT_0};
+use windows::core::{w, PCWSTR};
+use windows::Win32::Foundation::{
+    CloseHandle, COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, WAIT_OBJECT_0, WPARAM,
+};
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::{
     OpenProcess, WaitForSingleObject, CREATE_NO_WINDOW, PROCESS_QUERY_LIMITED_INFORMATION,
     PROCESS_SYNCHRONIZE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DestroyWindow, DispatchMessageW, PeekMessageW, TranslateMessage, MSG,
-    PM_REMOVE, WINDOW_EX_STYLE, WINDOW_STYLE, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-    WS_OVERLAPPEDWINDOW, WS_POPUP, WS_VISIBLE,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetWindowLongPtrW,
+    IsWindowVisible, PeekMessageW, RegisterClassExW, SetLayeredWindowAttributes, SetWindowLongPtrW,
+    TranslateMessage, GWL_EXSTYLE, GWL_STYLE, LWA_ALPHA, MSG, PM_REMOVE, WINDOW_EX_STYLE,
+    WINDOW_STYLE, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    WS_EX_TRANSPARENT, WS_OVERLAPPED, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_VISIBLE,
 };
 
 /// How long pwsh may take (its `Add-Type` compiles C# on every start; F-005).
 const PWSH_BUDGET: Duration = Duration::from_secs(120);
 
-/// One window to create: extended style, style, and whether the first window of
-/// the set owns it.
-#[derive(Clone, Copy)]
+/// The window class of one test window.
+#[derive(Clone)]
+enum Class {
+    /// The system EDIT class, created with no instance handle (as before T-057 VF3).
+    Edit,
+    /// A class this exe registers (once per name, `DefWindowProcW`, this module's
+    /// instance handle, as the plugin and tao do) and creates the window with that
+    /// instance handle.
+    Own(String),
+}
+
+/// One window to create: class, title (`None`: a null title, as tao's), extended
+/// style, style, rect (x, y, width, height), whether the first window of the set owns
+/// it, the `GWL_STYLE` set after creation (`SetWindowLongPtrW`, as the plugin and tao
+/// do) and the alpha given by `SetLayeredWindowAttributes(LWA_ALPHA)` after creation.
+#[derive(Clone)]
 struct Spec {
+    class: Class,
+    title: Option<String>,
     ex: WINDOW_EX_STYLE,
     style: WINDOW_STYLE,
+    rect: (i32, i32, i32, i32),
     owned: bool,
+    restyle: Option<WINDOW_STYLE>,
+    alpha: Option<u8>,
+}
+
+/// The fake title of the probe windows that model no framework window.
+const PROBE_TITLE: &str = "t057 smoke predicate probe (fake)";
+
+impl Spec {
+    /// An EDIT window at 10,10 200x60 with the fake title (the shape of every window
+    /// before T-057 VERIFY_FAIL 3).
+    fn edit(ex: WINDOW_EX_STYLE, style: WINDOW_STYLE) -> Spec {
+        Spec {
+            class: Class::Edit,
+            title: Some(PROBE_TITLE.to_owned()),
+            ex,
+            style,
+            rect: (10, 10, 200, 60),
+            owned: false,
+            restyle: None,
+            alpha: None,
+        }
+    }
+
+    /// Owned by the first window of the set.
+    fn owned(self) -> Spec {
+        Spec {
+            owned: true,
+            ..self
+        }
+    }
+
+    /// A framework helper window exactly as tao 0.37.1 and tauri-plugin-single-instance
+    /// 2.5.2 create theirs: `ex` (the helper bits for the real shape), `WS_OVERLAPPED`,
+    /// 0,0,0,0, no parent, no menu, this module's instance, then
+    /// `SetWindowLongPtrW(GWL_STYLE, WS_VISIBLE|WS_POPUP)`.
+    fn helper_shaped(class: &str, title: Option<String>, ex: WINDOW_EX_STYLE) -> Spec {
+        Spec {
+            class: Class::Own(class.to_owned()),
+            title,
+            ex,
+            style: WS_OVERLAPPED,
+            rect: (0, 0, 0, 0),
+            owned: false,
+            restyle: Some(WS_VISIBLE | WS_POPUP),
+            alpha: None,
+        }
+    }
+}
+
+/// The four extended-style bits both framework helper windows are created with.
+const HELPER_EX: WINDOW_EX_STYLE = WINDOW_EX_STYLE(
+    WS_EX_NOACTIVATE.0 | WS_EX_TRANSPARENT.0 | WS_EX_LAYERED.0 | WS_EX_TOOLWINDOW.0,
+);
+
+/// tao 0.37.1's event-target window class (`event_loop.rs` `create_event_target_window`).
+const TAO_EVENT_TARGET: &str = "Tao Thread Event Target";
+
+/// The window class tauri-runtime-wry 2.12.1 gives every product window (`lib.rs`
+/// `window_classname("Tauri Window")`), the overlay included.
+const TAURI_WINDOW: &str = "Tauri Window";
+
+/// The app identifier, read from `src-tauri/tauri.conf.json` (not hard-coded, so a
+/// drift between the config and the script's pinned helper class fails a test).
+fn app_identifier() -> String {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tauri.conf.json");
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("premise: {} is readable: {e}", path.display()));
+    let config: serde_json::Value = serde_json::from_str(&text)
+        .unwrap_or_else(|e| panic!("premise: {} is JSON: {e}", path.display()));
+    config["identifier"]
+        .as_str()
+        .unwrap_or_else(|| panic!("premise: {} has a string `identifier`", path.display()))
+        .to_owned()
+}
+
+/// tauri-plugin-single-instance 2.5.2's helper class and title for this app
+/// (`platform_impl/windows.rs` `init`: `{id}-sic`, `{id}-siw`; no `semver` feature).
+fn single_instance_class_and_title() -> (String, String) {
+    let id = app_identifier();
+    (format!("{id}-sic"), format!("{id}-siw"))
+}
+
+/// A NUL-terminated UTF-16 copy of `s`.
+fn wide(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+/// The window procedure of every class this exe registers.
+unsafe extern "system" fn probe_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    // SAFETY: forwards the arguments the system passed in.
+    unsafe { DefWindowProcW(h, msg, wp, lp) }
+}
+
+/// Class names already registered by this exe (tests run in parallel threads and may
+/// share a class).
+static REGISTERED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// Registers `class` once in this process with `instance`.
+fn register_class(class: &str, instance: HINSTANCE) -> Result<(), String> {
+    let mut done = REGISTERED.lock().unwrap_or_else(|e| e.into_inner());
+    if done.iter().any(|c| c == class) {
+        return Ok(());
+    }
+    let name = wide(class);
+    let wc = WNDCLASSEXW {
+        cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+        lpfnWndProc: Some(probe_proc),
+        hInstance: instance,
+        lpszClassName: PCWSTR(name.as_ptr()),
+        ..Default::default()
+    };
+    // SAFETY: `wc` is fully initialised; `name` outlives the call (the system copies it).
+    if unsafe { RegisterClassExW(&wc) } == 0 {
+        return Err(format!(
+            "RegisterClassExW({class}): {}",
+            windows::core::Error::from_thread()
+        ));
+    }
+    done.push(class.to_owned());
+    Ok(())
+}
+
+fn hwnd(h: isize) -> HWND {
+    HWND(h as *mut core::ffi::c_void)
+}
+
+/// `IsWindowVisible` of a window of this process.
+fn is_visible(h: isize) -> bool {
+    // SAFETY: a query on a window handle of this process.
+    unsafe { IsWindowVisible(hwnd(h)) }.as_bool()
+}
+
+/// The extended style of a window of this process (`GWL_EXSTYLE`).
+fn ex_style_of(h: isize) -> u32 {
+    // SAFETY: a query on a window handle of this process.
+    unsafe { GetWindowLongPtrW(hwnd(h), GWL_EXSTYLE) as u32 }
+}
+
+/// Creates the window of `spec` on this thread (owner `owner`).
+fn create(spec: &Spec, owner: Option<HWND>) -> Result<HWND, String> {
+    let title = spec.title.as_deref().map(wide);
+    let title_ptr = title
+        .as_ref()
+        .map_or(PCWSTR::null(), |t| PCWSTR(t.as_ptr()));
+    let (x, y, cx, cy) = spec.rect;
+    let created = match &spec.class {
+        // SAFETY: the system EDIT class, a title that outlives the call, an owner (if
+        // any) of this thread.
+        Class::Edit => unsafe {
+            CreateWindowExW(
+                spec.ex,
+                w!("EDIT"),
+                title_ptr,
+                spec.style,
+                x,
+                y,
+                cx,
+                cy,
+                owner,
+                None,
+                None,
+                None,
+            )
+        },
+        Class::Own(class) => {
+            // SAFETY: the module handle of this exe (null name).
+            let instance: HINSTANCE = unsafe { GetModuleHandleW(PCWSTR::null()) }
+                .map_err(|e| format!("GetModuleHandleW: {e}"))?
+                .into();
+            register_class(class, instance)?;
+            let name = wide(class);
+            // SAFETY: a class registered above with this instance; name and title
+            // outlive the call; an owner (if any) of this thread.
+            unsafe {
+                CreateWindowExW(
+                    spec.ex,
+                    PCWSTR(name.as_ptr()),
+                    title_ptr,
+                    spec.style,
+                    x,
+                    y,
+                    cx,
+                    cy,
+                    owner,
+                    None,
+                    Some(instance),
+                    None,
+                )
+            }
+        }
+    };
+    let h = created.map_err(|err| format!("CreateWindowExW: {err}"))?;
+    if let Some(style) = spec.restyle {
+        // SAFETY: a window this thread just created.
+        unsafe { SetWindowLongPtrW(h, GWL_STYLE, style.0 as isize) };
+    }
+    if let Some(alpha) = spec.alpha {
+        // SAFETY: a layered window this thread just created.
+        if let Err(err) = unsafe { SetLayeredWindowAttributes(h, COLORREF(0), alpha, LWA_ALPHA) } {
+            // SAFETY: the window created above.
+            let _ = unsafe { DestroyWindow(h) };
+            return Err(format!("SetLayeredWindowAttributes: {err}"));
+        }
+    }
+    Ok(h)
 }
 
 /// Windows of `specs`, created and pumped on their own thread until dropped.
@@ -74,32 +311,14 @@ impl Windows {
                 } else {
                     None
                 };
-                // SAFETY: the system EDIT class, a static title, an owner (if any) of this
-                // thread.
-                let created = unsafe {
-                    CreateWindowExW(
-                        spec.ex,
-                        w!("EDIT"),
-                        w!("t057 smoke predicate probe (fake)"),
-                        spec.style,
-                        10,
-                        10,
-                        200,
-                        60,
-                        owner,
-                        None,
-                        None,
-                        None,
-                    )
-                };
-                match created {
+                match create(spec, owner) {
                     Ok(h) => made.push(h),
                     Err(err) => {
                         for h in made.iter().rev() {
                             // SAFETY: windows this thread created.
                             let _ = unsafe { DestroyWindow(*h) };
                         }
-                        let _ = tx.send(Err(format!("CreateWindowExW: {err}")));
+                        let _ = tx.send(Err(err));
                         return;
                     }
                 }
@@ -552,11 +771,7 @@ fn stall_of(markers: &[&str]) -> PwshStall {
 }
 
 fn plain() -> Spec {
-    Spec {
-        ex: WINDOW_EX_STYLE(0),
-        style: WS_OVERLAPPEDWINDOW | WS_VISIBLE,
-        owned: false,
-    }
+    Spec::edit(WINDOW_EX_STYLE(0), WS_OVERLAPPEDWINDOW | WS_VISIBLE)
 }
 
 #[test]
@@ -569,16 +784,11 @@ fn a_visible_unowned_tool_window_counts_as_shown() {
     // clause kept, or replaced by an exception keyed to a class or title.
     let windows = Windows::open(vec![
         plain(),
-        Spec {
-            ex: WS_EX_TOOLWINDOW,
-            style: WS_POPUP | WS_VISIBLE,
-            owned: false,
-        },
-        Spec {
-            ex: WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST,
-            style: WS_POPUP | WS_VISIBLE,
-            owned: false,
-        },
+        Spec::edit(WS_EX_TOOLWINDOW, WS_POPUP | WS_VISIBLE),
+        Spec::edit(
+            WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST,
+            WS_POPUP | WS_VISIBLE,
+        ),
     ]);
     let shown = shown_by_smoke();
     assert!(
@@ -605,16 +815,8 @@ fn hidden_and_owned_windows_are_not_shown_and_a_plain_one_is() {
     // clause (the visible or the owner test).
     let windows = Windows::open(vec![
         plain(),
-        Spec {
-            ex: WINDOW_EX_STYLE(0),
-            style: WS_OVERLAPPEDWINDOW,
-            owned: false,
-        },
-        Spec {
-            ex: WINDOW_EX_STYLE(0),
-            style: WS_POPUP | WS_VISIBLE,
-            owned: true,
-        },
+        Spec::edit(WINDOW_EX_STYLE(0), WS_OVERLAPPEDWINDOW),
+        Spec::edit(WINDOW_EX_STYLE(0), WS_POPUP | WS_VISIBLE).owned(),
     ]);
     let shown = shown_by_smoke();
     assert!(
@@ -630,6 +832,205 @@ fn hidden_and_owned_windows_are_not_shown_and_a_plain_one_is() {
         !shown.contains(&windows.hwnds[2]),
         "an owned window is shown: {shown:?}"
     );
+}
+
+// --- T-057 VERIFY_FAIL 3 (run 37419266451): framework helper windows ---
+//
+// Each test also opens a plain visible EDIT window and requires it shown: so a
+// predicate that returns nothing (wrong pid, broken script) cannot pass a "not shown"
+// assertion. Each window that must be counted or not counted is first checked
+// visible (`IsWindowVisible`) as a loud premise, and the helper-shaped ones also for
+// the four helper bits in `GWL_EXSTYLE`.
+
+/// Opens `plain()` followed by `specs`, checks the premises (every window of `specs`
+/// is visible; the plain one is shown) and returns the windows (index 0 the plain one,
+/// `i + 1` for `specs[i]`) and the handles the smoke predicate returns.
+#[track_caller]
+fn shown_with_premises(specs: Vec<Spec>) -> (Windows, Vec<isize>) {
+    let mut all = vec![plain()];
+    all.extend(specs);
+    let windows = Windows::open(all);
+    for (i, h) in windows.hwnds.iter().enumerate().skip(1) {
+        assert!(
+            is_visible(*h),
+            "premise: test window {i} ({h:#x}, ex-style {:#x}) is visible (IsWindowVisible)",
+            ex_style_of(*h)
+        );
+    }
+    let shown = shown_by_smoke();
+    assert!(
+        shown.contains(&windows.hwnds[0]),
+        "premise: the plain visible window is shown: {shown:?} of {:?}",
+        windows.hwnds
+    );
+    (windows, shown)
+}
+
+/// The premise that window `h` carries all four helper bits after creation.
+#[track_caller]
+fn assert_has_helper_bits(h: isize, what: &str) {
+    let ex = ex_style_of(h);
+    assert_eq!(
+        ex & HELPER_EX.0,
+        HELPER_EX.0,
+        "premise: the {what} ({h:#x}) kept the four helper ex-style bits: {ex:#x}"
+    );
+}
+
+#[test]
+fn the_single_instance_helper_window_is_not_shown() {
+    // VERIFY_FAIL 3, the step-12 failure of run 37419266451 ("class
+    // 'dev.voicen.app-sic', title 'dev.voicen.app-siw'" counted next to the settings
+    // window). The window is created with tauri-plugin-single-instance 2.5.2's exact
+    // arguments (class `{identifier}-sic` from tauri.conf.json, title `{identifier}-siw`,
+    // NOACTIVATE|TRANSPARENT|LAYERED|TOOLWINDOW, WS_OVERLAPPED, 0,0,0,0, then GWL_STYLE
+    // = WS_VISIBLE|WS_POPUP). Red today: visible-windows.ps1 excludes only tao's class.
+    // Bites: the plugin's class missing from the helper list, or a list entry that
+    // drifts from tauri.conf.json's identifier (e.g. a `semver` suffix or a renamed
+    // identifier), or the helper-bit check comparing against another mask.
+    let (class, title) = single_instance_class_and_title();
+    let (windows, shown) = shown_with_premises(vec![Spec::helper_shaped(
+        &class,
+        Some(title.clone()),
+        HELPER_EX,
+    )]);
+    let helper = windows.hwnds[1];
+    assert_has_helper_bits(helper, "single-instance helper window");
+    assert!(
+        !shown.contains(&helper),
+        "the smoke predicate counts tauri-plugin-single-instance's helper window (class \
+         '{class}', title '{title}', {helper:#x}) as shown: {shown:?}"
+    );
+}
+
+#[test]
+fn taos_event_target_window_is_not_shown() {
+    // Guard (green today; must stay green): tao 0.37.1's event-target window, created
+    // as tao creates it (class 'Tao Thread Event Target', null title, the four helper
+    // bits, WS_OVERLAPPED, 0,0,0,0, then GWL_STYLE = WS_VISIBLE|WS_POPUP), is not a
+    // shown window: it exists, visible, in every tauri process, so counting it fails
+    // every launch. Bites: tao's entry dropped from the helper list when the plugin's is
+    // added; a helper-bit mask that tao's window does not match.
+    let (windows, shown) =
+        shown_with_premises(vec![Spec::helper_shaped(TAO_EVENT_TARGET, None, HELPER_EX)]);
+    let helper = windows.hwnds[1];
+    assert_has_helper_bits(helper, "tao event-target window");
+    assert!(
+        !shown.contains(&helper),
+        "the smoke predicate counts tao's event-target window ({helper:#x}) as shown: \
+         {shown:?}"
+    );
+}
+
+/// For a helper class: a plain visible 200x60 popup of that class, and the exact
+/// helper shape with each one of the four helper bits left out. Each must be counted
+/// (invariant (b): all four bits, not some, not the class alone).
+#[track_caller]
+fn assert_helper_class_without_the_helper_bits_counts(class: &str, title: Option<String>) {
+    let mut specs = vec![Spec {
+        class: Class::Own(class.to_owned()),
+        title: title.clone(),
+        ex: WINDOW_EX_STYLE(0),
+        style: WS_POPUP | WS_VISIBLE,
+        rect: (10, 10, 200, 60),
+        owned: false,
+        restyle: None,
+        alpha: None,
+    }];
+    let dropped = [
+        WS_EX_NOACTIVATE,
+        WS_EX_TRANSPARENT,
+        WS_EX_LAYERED,
+        WS_EX_TOOLWINDOW,
+    ];
+    for bit in dropped {
+        specs.push(Spec::helper_shaped(
+            class,
+            title.clone(),
+            WINDOW_EX_STYLE(HELPER_EX.0 & !bit.0),
+        ));
+    }
+    let (windows, shown) = shown_with_premises(specs);
+    let plain_popup = windows.hwnds[1];
+    assert!(
+        shown.contains(&plain_popup),
+        "the smoke predicate hides a plain visible popup of class '{class}' \
+         ({plain_popup:#x}, ex-style {:#x}): it excludes by class alone; shown: {shown:?}",
+        ex_style_of(plain_popup)
+    );
+    for (i, bit) in dropped.iter().enumerate() {
+        let h = windows.hwnds[i + 2];
+        let ex = ex_style_of(h);
+        assert_eq!(
+            ex & bit.0,
+            0,
+            "premise: window {h:#x} of class '{class}' lacks ex bit {:#x}: {ex:#x}",
+            bit.0
+        );
+        assert!(
+            shown.contains(&h),
+            "the smoke predicate hides a helper-shaped window of class '{class}' without \
+             ex bit {:#x} ({h:#x}, ex-style {ex:#x}): it does not require all four helper \
+             bits; shown: {shown:?}",
+            bit.0
+        );
+    }
+}
+
+#[test]
+fn a_single_instance_class_window_without_the_helper_bits_counts() {
+    // Guard (green today; must stay green after the fix): invariant (b). A window of
+    // the plugin's class that is not of the plugin's non-rendering shape (a plain
+    // visible popup, or the helper shape missing any one of the four bits) is counted.
+    // Bites: a class-only exclusion (option D of the analysis); a check of some helper
+    // bits only (e.g. LAYERED|TRANSPARENT).
+    let (class, title) = single_instance_class_and_title();
+    assert_helper_class_without_the_helper_bits_counts(&class, Some(title));
+}
+
+#[test]
+fn a_tao_class_window_without_the_helper_bits_counts() {
+    // Invariant (b) for tao's list entry: "a listed class that changes shape counts
+    // again". Red today: visible-windows.ps1 excludes class 'Tao Thread Event Target'
+    // whatever its style. Bites: the helper-bit check applied to the plugin's entry but
+    // not to tao's; a check of some helper bits only.
+    assert_helper_class_without_the_helper_bits_counts(TAO_EVENT_TARGET, None);
+}
+
+#[test]
+fn a_click_through_overlay_window_counts() {
+    // Guard (green today; must stay green): an overlay made click-through the way tao
+    // 0.37.1 does it (`set_ignore_cursor_events(true)` adds exactly
+    // WS_EX_TRANSPARENT|WS_EX_LAYERED, window_state.rs IGNORE_CURSOR_EVENT), on top of
+    // the overlay's NOACTIVATE|TOPMOST|TOOLWINDOW, class 'Tauri Window' (every product
+    // window's), visible popup 320x56. It carries all four helper bits, so only the
+    // class keeps it counted (F-003; OQ-10 click-through follow-up). One with
+    // SetLayeredWindowAttributes(alpha 255) and one without (tao never calls it).
+    // Bites: a style-only exclusion (LAYERED|TRANSPARENT, the four helper bits, or
+    // "layered without layered attributes", option B); the WS_EX_TOOLWINDOW exclusion
+    // restored (option C).
+    let overlay = |alpha: Option<u8>| Spec {
+        class: Class::Own(TAURI_WINDOW.to_owned()),
+        title: Some(PROBE_TITLE.to_owned()),
+        ex: WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+        style: WS_POPUP | WS_VISIBLE,
+        rect: (40, 40, 320, 56),
+        owned: false,
+        restyle: None,
+        alpha,
+    };
+    let (windows, shown) = shown_with_premises(vec![overlay(Some(255)), overlay(None)]);
+    for (i, what) in [(1, "with alpha 255"), (2, "without layered attributes")] {
+        let h = windows.hwnds[i];
+        assert_has_helper_bits(h, "click-through overlay window");
+        assert!(
+            shown.contains(&h),
+            "the smoke predicate hides a visible click-through overlay window {what} \
+             (class '{TAURI_WINDOW}', {h:#x}, ex-style {:#x}): it excludes by style; \
+             shown: {shown:?}",
+            ex_style_of(h)
+        );
+    }
 }
 
 // --- T-057 VERIFY_FAIL 2 (run 37365491860): the pwsh child is bounded and observable ---

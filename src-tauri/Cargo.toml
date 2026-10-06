@@ -56,6 +56,8 @@ tauri = { version = "2", features = ["test"] }
 # T-006: tests/tray.rs deletes the tray's notification-area icon (Shell_NotifyIconW, Win32_UI_Shell)
 # so a setter fails; tests/capture.rs builds cpal errors for the capture error map. Same crates and
 # versions as above: feature flags only.
+# T-057 (VERIFY_FAIL 3): tests/smoke_predicate.rs registers window classes the way
+# tauri-plugin-single-instance and tao do (GetModuleHandleW, Win32_System_LibraryLoader).
 [target.'cfg(windows)'.dev-dependencies]
-windows = { version = "0.62", features = ["Win32_UI_WindowsAndMessaging", "Win32_UI_Shell"] }
+windows = { version = "0.62", features = ["Win32_UI_WindowsAndMessaging", "Win32_UI_Shell", "Win32_System_LibraryLoader"] }
 cpal = "0.18"
