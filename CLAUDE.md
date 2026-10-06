@@ -60,7 +60,7 @@ make check                                      # gate — must be green before 
 scripts/tw-run core -- cargo test -p voicen-core <filter>   # single core test
 pnpm test -- <file>                             # single UI unit test
 pnpm dev                                        # UI in a browser (no Rust side; IPC calls fail)
-pnpm e2e                                        # UI end-to-end (Playwright, Chromium, mocked IPC); runs in the ui container (Docker required), never on the host
+pnpm e2e                                        # UI end-to-end (Playwright, Chromium, mocked IPC); runs only through this entry, in the ui image (Docker required; `make ui-image` after a Dockerfile change). A bare `playwright test` on the host is refused; `BASE_URL` against a host server is unsupported
 make licenses                                   # regenerate THIRD-PARTY-NOTICES.txt; commit it whenever dependencies change (make check fails when stale)
 ```
 
