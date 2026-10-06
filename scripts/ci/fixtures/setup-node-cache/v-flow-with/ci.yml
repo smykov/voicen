@@ -1,0 +1,13 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/setup-node@v5
+        with: { node-version: "20.19", package-manager-cache: false }

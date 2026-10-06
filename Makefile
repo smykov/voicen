@@ -1,6 +1,6 @@
 # The gate: every area's checks, each through scripts/tw-run in the area's toolchain.
 .PHONY: check check-shell-layout check-shell-layout-fixtures check-helper-windows-fixtures check-core \
-	check-ci-credentials check-e2e-entry-fixtures \
+	check-ci-credentials check-setup-node-cache check-e2e-entry-fixtures \
 	check-shell-windows \
 	check-ui core-image ui-image \
 	licenses licenses-check licenses-unit licenses-fixture licenses-rust licenses-bundle \
@@ -8,7 +8,7 @@
 
 # check-shell-windows after check-core: the shell depends on voicen-core, so a core error is
 # reported first by the faster native check-core, before the slower cross-target build.
-check: check-shell-layout check-shell-layout-fixtures check-helper-windows-fixtures check-ci-credentials check-core \
+check: check-shell-layout check-shell-layout-fixtures check-helper-windows-fixtures check-ci-credentials check-setup-node-cache check-core \
 	check-shell-windows check-e2e-entry-fixtures check-ui \
 	licenses-check
 
@@ -36,6 +36,14 @@ check-helper-windows-fixtures:
 # runs the tripwire scripts/ci/ci-credentials.sh on its cases and on the real repo. Host bash.
 check-ci-credentials:
 	scripts/ci/ci-credentials.test.sh
+
+# T-068: no actions/setup-node step in .github/workflows needs pnpm on the host unless an
+# earlier step of its job runs pnpm/action-setup (setup-node v5 caches the package.json
+# packageManager by default; run 37498788064). The self-test runs the tripwire
+# scripts/ci/setup-node-cache.sh on scripts/ci/fixtures/setup-node-cache/ and the real repo.
+# Host bash and awk.
+check-setup-node-cache:
+	scripts/ci/setup-node-cache.test.sh
 
 # T-064: the ui e2e entry point (package.json scripts.e2e) runs Playwright only in the ui image
 # at the lockfile's @playwright/test version, with --network none and the caller's CI; a

@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  gate:
+    name: Gate (make check)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      # Host node only for the host-side fixture tests; no ui command runs on it.
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "20.19"
+      - name: Build the ui toolchain image
+        run: make ui-image
+      - run: make check
+
+  windows:
+    name: Windows build
+    needs: gate
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "20.19"
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
