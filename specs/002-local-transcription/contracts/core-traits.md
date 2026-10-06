@@ -120,14 +120,18 @@ impl 001::Engine for BuiltinEngine {
 - Load/transcribe error → `EngineFailure::Engine(reason)` → FR-11 path.
 - Reports `Warmth` into the dictation log record.
 
-## Local server — configuration of `001::OpenAiCompatClient`
+## Local server — configuration of 001's `OpenAiCompatibleEngine`
+
+Built only by 001's factory `engine_for`, `EngineKind::LocalServer` arm (T-018; 001 [contracts/core-traits.md](../../001-dictation-via-api/contracts/core-traits.md), decision #44); there is no separate `local_server_endpoint` function:
 
 ```rust
-pub fn local_server_endpoint(cfg: &LocalServerConfig, secrets: &dyn CredentialStore /* 004, KeySlot::LocalServer */)
-    -> 001::Endpoint;   // base_url, model: Option, key: Option, timeouts { connect: 5 s, request: 60 s }
+// engine_for, LocalServer arm:
+check_base_url(&settings.local_server.base_url)          // else EngineNotConfigured, no key read
+creds.read(KeySlot::LocalServer)                         // once; Err -> KeyStoreUnavailable
+OpenAiCompatibleEngine::local_server(base_url, model /* trimmed; None if empty */, key)
 ```
 
-Required of 001's client: optional model (omit the form field), optional key (omit `Authorization`), per-endpoint request timeout, "cannot reach <host:port>" reason.
+What 001's client provides for it: optional model (`None` omits the form field), optional key (none or empty omits `Authorization`), the per-endpoint request deadline (`Timeouts::local_server`, 60 s; connect 5 s) chosen by the endpoint role, `kind() == "local_server"`, and the "cannot reach <host:port>" reason.
 
 ## Timeouts (shared module, owned by 001, extended here)
 

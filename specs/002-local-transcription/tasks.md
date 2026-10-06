@@ -118,7 +118,7 @@
 
 ### Implementation
 
-- [ ] T030 [US3] Implement `local_server_endpoint` in `crates/voicen-core/src/engines/local_server.rs`: 001's client configured from `LocalServerConfig` with model `Option<String>` ("empty → None → not sent"), key read through 004's `CredentialStore` with `KeySlot::LocalServer` (`Option<Secret>`), and timeouts connect 5 s / request 60 s. No new HTTP code (P-011). If 001's client lacks optional model, optional key, a per-endpoint timeout or the port in "cannot reach", extend 001's client in its own module, not here {req FR-17, FR-24, NFR-04}
+- [ ] T030 [US3] Configure 001's client for the local server (T-018), in 001's own module `crates/voicen-core/src/engine/openai.rs` (no `engines/local_server.rs`, no new HTTP code, P-011): `OpenAiCompatibleEngine::local_server(base_url, model: Option<String>, key: Option<Secret>)` sets the endpoint role, which picks the request deadline (`Timeouts::local_server`, 60 s; connect 5 s) and `kind() == "local_server"`; `model: None` omits the part ("empty → None → not sent"); the key, read by `engine_for` from `KeySlot::LocalServer`, goes through the one `Authorization` rule; "cannot reach <host:port>" comes from the shared `host_port` {req FR-17, FR-24, NFR-04}
 - [ ] T031 [US3] Add the `LocalServer` arm to core `engine_for` in `crates/voicen-core/src/engine/mod.rs` (T-018; 001 contracts/core-traits.md, decision #44): the one total factory lives in core, there is no engine factory in `src-tauri`. The `local-server` key slot is read through `CredentialStore` (Credential Manager in the shell; Windows CI test) {req FR-17, NFR-04}
 
 **Checkpoint**: local-server dictation works and fails correctly (spec SC-006).

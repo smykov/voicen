@@ -1,9 +1,15 @@
 //! The one OpenAI-compatible transcription client
-//! (contracts/openai-transcription.md; reused by T-018 for the local server and by
-//! T-020's connection test).
+//! (contracts/openai-transcription.md) for both the transcription API and the
+//! local OpenAI-compatible server (T-018), and for T-020's connection test.
+//!
+//! The endpoint role is fixed at construction ([`OpenAiCompatibleEngine::new`] for
+//! the API, [`OpenAiCompatibleEngine::local_server`] for the local server) and
+//! picks the request deadline (`Timeouts::api_transcription` or
+//! `Timeouts::local_server`) and `kind()` (`"api"` or `"local_server"`).
 //!
 //! `POST {base}/audio/transcriptions`, multipart `file` (`audio.wav`, `audio/wav`),
-//! `model`, `language` (omitted for auto), `response_format=json`;
+//! `model` (omitted when the engine has none: an unset local-server model),
+//! `language` (omitted for auto), `response_format=json`;
 //! `Authorization: Bearer <key>` only when a key is stored; a key whose
 //! `Bearer <key>` text fails `HeaderValue` validation is `InvalidApiKey` with no
 //! request sent ([`TransportError::UnusableKey`]). The URL is joined on the
@@ -33,30 +39,62 @@ const MAX_BODY: u64 = 1024 * 1024;
 /// headers with a 67-character boundary and the closing boundary are under 1 KiB.
 const MULTIPART_OVERHEAD: usize = 1024;
 
-/// The OpenAI-compatible engine for one base URL, model and optional key.
+/// Which server the engine talks to; set once at construction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Endpoint {
+    /// The transcription API (`kind() == "api"`, `Timeouts::api_transcription`).
+    Api,
+    /// The local OpenAI-compatible server (`kind() == "local_server"`,
+    /// `Timeouts::local_server`).
+    LocalServer,
+}
+
+/// The OpenAI-compatible engine for one endpoint role, base URL, optional model
+/// and optional key.
 pub struct OpenAiCompatibleEngine {
+    endpoint: Endpoint,
     base_url: NormalizedUrl,
-    model: String,
+    model: Option<String>,
     key: Option<Secret>,
 }
 
 impl OpenAiCompatibleEngine {
-    /// `base_url` passed `check_base_url` (the one URL rule); `key: None` (or an
-    /// empty key) sends no `Authorization` header.
+    /// The transcription-API engine: `kind() == "api"`, request deadline
+    /// `Timeouts::api_transcription`, `model` always sent. `base_url` passed
+    /// `check_base_url` (the one URL rule); `key: None` (or an empty key) sends no
+    /// `Authorization` header.
     pub fn new(
         base_url: NormalizedUrl,
         model: impl Into<String>,
         key: Option<Secret>,
     ) -> OpenAiCompatibleEngine {
         OpenAiCompatibleEngine {
+            endpoint: Endpoint::Api,
             base_url,
-            model: model.into(),
+            model: Some(model.into()),
             key,
         }
     }
 
-    /// The multipart body of the contract (`file`, `model`, `language` only when
-    /// set, `response_format=json`) and its `Content-Type`.
+    /// The local-server engine: `kind() == "local_server"`, request deadline
+    /// `Timeouts::local_server`. `model: None` omits the `model` part; a `Some`
+    /// model is sent as given (the caller, [`super::engine_for`], trims it and
+    /// passes `None` for an empty one). Same URL and key rules as [`Self::new`].
+    pub fn local_server(
+        base_url: NormalizedUrl,
+        model: Option<String>,
+        key: Option<Secret>,
+    ) -> OpenAiCompatibleEngine {
+        OpenAiCompatibleEngine {
+            endpoint: Endpoint::LocalServer,
+            base_url,
+            model,
+            key,
+        }
+    }
+
+    /// The multipart body of the contract (`file`, `model` and `language` only
+    /// when set, `response_format=json`) and its `Content-Type`.
     ///
     /// Encoded into one buffer instead of `RequestBuilder::multipart`: reqwest's
     /// blocking client streams a multipart reader through a channel and reports a
@@ -74,14 +112,15 @@ impl OpenAiCompatibleEngine {
         req: &TranscribeRequest,
     ) -> Option<(String, Vec<u8>)> {
         let wav = wav::encode(audio);
-        let capacity = body_capacity(wav.len(), &self.model, req.language.as_deref());
+        let capacity = body_capacity(wav.len(), self.model.as_deref(), req.language.as_deref());
         let file = multipart::Part::bytes(wav)
             .file_name("audio.wav")
             .mime_str("audio/wav")
             .ok()?;
-        let mut form = multipart::Form::new()
-            .part("file", file)
-            .text("model", self.model.clone());
+        let mut form = multipart::Form::new().part("file", file);
+        if let Some(model) = &self.model {
+            form = form.text("model", model.clone());
+        }
         if let Some(language) = &req.language {
             form = form.text("language", language.clone());
         }
@@ -124,10 +163,15 @@ impl OpenAiCompatibleEngine {
         let (content_type, body) = self
             .multipart_body(audio, req)
             .ok_or(TransportError::Setup)?;
-        // The per-request timeout covers connect to the last body byte (FR-24).
+        // The per-request timeout covers connect to the last body byte (FR-24); the
+        // endpoint role picks which deadline.
+        let deadline = match self.endpoint {
+            Endpoint::Api => req.timeouts.api_transcription,
+            Endpoint::LocalServer => req.timeouts.local_server,
+        };
         let mut request = client
             .post(url)
-            .timeout(req.timeouts.api_transcription)
+            .timeout(deadline)
             .header(CONTENT_TYPE, content_type)
             .body(body);
         if let Some(value) = authorization {
@@ -162,7 +206,10 @@ impl OpenAiCompatibleEngine {
 
 impl Engine for OpenAiCompatibleEngine {
     fn kind(&self) -> &'static str {
-        "api"
+        match self.endpoint {
+            Endpoint::Api => "api",
+            Endpoint::LocalServer => "local_server",
+        }
     }
 
     fn transcribe(
@@ -217,9 +264,9 @@ pub(crate) fn body_error(e: &std::io::Error) -> TransportError {
 
 /// The multipart buffer size for a WAV of `wav_len` bytes: the WAV, the text parts
 /// and [`MULTIPART_OVERHEAD`] for the framing.
-fn body_capacity(wav_len: usize, model: &str, language: Option<&str>) -> usize {
+fn body_capacity(wav_len: usize, model: Option<&str>, language: Option<&str>) -> usize {
     wav_len
-        .saturating_add(model.len())
+        .saturating_add(model.map_or(0, str::len))
         .saturating_add(language.map_or(0, str::len))
         .saturating_add(MULTIPART_OVERHEAD)
 }
@@ -327,7 +374,7 @@ mod tests {
             let Some((_, body)) = engine.multipart_body(&audio, &req) else {
                 panic!("the body is encoded");
             };
-            let expected = body_capacity(wav::encode(&audio).len(), "whisper-1", language);
+            let expected = body_capacity(wav::encode(&audio).len(), Some("whisper-1"), language);
             assert_eq!(body.capacity(), expected, "language {language:?}");
             assert!(body.len() <= expected);
         }

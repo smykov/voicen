@@ -16,7 +16,7 @@ pnpm install && make core-image      # Linux dev host
 make check                                                          # full gate
 scripts/tw-run core -- cargo test -p voicen-core local_models       # catalog, store, download, residency
 scripts/tw-run core -- cargo test -p voicen-core engines::builtin   # built-in engine with fake SpeechModel
-scripts/tw-run core -- cargo test -p voicen-core engines::local_server
+scripts/tw-run core -- cargo test -p voicen-core --test local_server
 ```
 
 Expected:

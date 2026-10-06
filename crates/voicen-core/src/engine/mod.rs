@@ -4,7 +4,9 @@
 //! Engines are synchronous (OQ-05 (a)): `transcribe` blocks its thread and must not
 //! run inside a tokio runtime (the blocking reqwest client panics there).
 //! [`engine_for`] is the one factory, called per job so a retry uses the current
-//! settings and key (Clarification 4).
+//! settings and key (Clarification 4). The transcription API and the local
+//! OpenAI-compatible server (T-018) share [`openai::OpenAiCompatibleEngine`]; its
+//! endpoint role, fixed by the factory, picks the request deadline and `kind()`.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
 pub mod openai;
@@ -18,7 +20,7 @@ use crate::timeouts::Timeouts;
 
 /// A transcription engine (NFR-11; shared with specs 002 and 003).
 pub trait Engine: Send + Sync {
-    /// Short stable name for logs: "api" (later "builtin", "local_server").
+    /// Short stable name for logs: "api", "local_server" (later "builtin").
     fn kind(&self) -> &'static str;
     /// Transcribe 16 kHz mono audio. Empty or whitespace-only text is `Ok("")`.
     /// Never panics on server or engine data.
@@ -44,8 +46,13 @@ pub struct TranscribeRequest {
 /// - `Api`: `check_base_url(api.base_url)` (else `EngineNotConfigured`, no key
 ///   read) -> `creds.read(TranscriptionApi)` once (`Err` -> `KeyStoreUnavailable`;
 ///   `Ok(None)` = no `Authorization` header) -> [`openai::OpenAiCompatibleEngine`].
-/// - `BuiltinLocal` (built by the shell, T-017), `LocalServer` (until T-018),
-///   `None`: `EngineNotConfigured`, no key read.
+/// - `LocalServer`: `check_base_url(local_server.base_url)` (else
+///   `EngineNotConfigured`, no key read) -> `creds.read(LocalServer)` once (`Err`
+///   -> `KeyStoreUnavailable`; `Ok(None)` = no `Authorization` header) ->
+///   [`openai::OpenAiCompatibleEngine::local_server`] with the model trimmed, or
+///   no model (the part omitted) when it is empty or whitespace-only.
+/// - `BuiltinLocal` (built by the shell, T-017), `None`: `EngineNotConfigured`, no
+///   key read.
 pub fn engine_for(
     settings: &Settings,
     creds: &dyn CredentialStore,
@@ -63,9 +70,19 @@ pub fn engine_for(
                 key,
             )))
         }
-        EngineKind::BuiltinLocal | EngineKind::LocalServer | EngineKind::None => {
-            Err(FailureReason::EngineNotConfigured)
+        EngineKind::LocalServer => {
+            let base_url = check_base_url(&settings.local_server.base_url)
+                .map_err(|_| FailureReason::EngineNotConfigured)?;
+            let key = creds
+                .read(KeySlot::LocalServer)
+                .map_err(|_| FailureReason::KeyStoreUnavailable)?;
+            let model = settings.local_server.model.trim();
+            let model = (!model.is_empty()).then(|| model.to_string());
+            Ok(Box::new(openai::OpenAiCompatibleEngine::local_server(
+                base_url, model, key,
+            )))
         }
+        EngineKind::BuiltinLocal | EngineKind::None => Err(FailureReason::EngineNotConfigured),
     }
 }
 
