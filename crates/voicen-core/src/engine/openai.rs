@@ -380,4 +380,18 @@ mod tests {
             assert_eq!(host_port(&parsed(raw)), expected, "{raw}");
         }
     }
+
+    #[test]
+    fn default_local_server_url_names_localhost_8000() {
+        // Characterization (T-018 Acceptance 2, "cannot reach localhost:8000"): the
+        // default local-server URL passes the URL rule and its CannotReach host is
+        // `localhost:8000`. Bite: the default URL changed, or host_port dropping
+        // the explicit port.
+        let raw = crate::settings::defaults(None).local_server.base_url;
+        let base = match crate::settings::url::check_base_url(&raw) {
+            Ok(u) => u,
+            Err(e) => panic!("default local-server URL {raw:?} refused: {e:?}"),
+        };
+        assert_eq!(host_port(&parsed(base.as_str())), "localhost:8000");
+    }
 }

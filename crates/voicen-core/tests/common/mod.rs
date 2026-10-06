@@ -3,8 +3,8 @@
 //! model, test catalog entries, a fake disk probe and a raw-TCP mock model server,
 //! re-exported from `voicen_core::test_support::local_models` (one copy for the core
 //! and the shell tests since T-044, P-010; the download harness is in [`download`]);
-//! for `tests/openai_client.rs`, `tests/api_pipeline.rs` and `tests/diag_pipeline.rs`
-//! (T-008) the refused address [`refused_addr`] (T-047); for every test that
+//! for `tests/openai_client.rs`, `tests/api_pipeline.rs`, `tests/diag_pipeline.rs`
+//! (T-008) and `tests/local_server.rs` (T-018) the refused address [`refused_addr`] (T-047); for every test that
 //! expects a refused connect the
 //! deadlines [`refused_timeouts`], sized by [`REFUSAL_BUDGET`] (T-048). The
 //! refused-address rules stay here, not in `test_support`: they are core-test-only
@@ -66,7 +66,7 @@ pub fn refused_timeouts() -> Timeouts {
 /// refused, and within `REFUSAL_BUDGET / 2` (T-048), otherwise this panics (a
 /// test-environment problem, reported loudly instead of a flaky result).
 /// Tests: `refused_addr_tests.rs`, included by `tests/openai_client.rs`,
-/// `tests/api_pipeline.rs` and `tests/diag_pipeline.rs`.
+/// `tests/api_pipeline.rs`, `tests/diag_pipeline.rs` and `tests/local_server.rs`.
 pub fn refused_addr() -> SocketAddr {
     let addr = SocketAddr::from(([127, 0, 0, 1], 1));
     let started = Instant::now();

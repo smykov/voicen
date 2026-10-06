@@ -119,14 +119,11 @@ mod tests {
 
     #[test]
     fn unbuilt_or_unset_engine_is_engine_not_configured() {
-        // Decision #44 (2): BuiltinLocal (shell, T-017), LocalServer (until T-018)
-        // and None give EngineNotConfigured without reading any key. Bite: a panic
-        // / todo!() arm, an API engine built for another kind, or a key read first.
-        for kind in [
-            EngineKind::BuiltinLocal,
-            EngineKind::LocalServer,
-            EngineKind::None,
-        ] {
+        // Decision #44 (2): BuiltinLocal (shell, T-017) and None give
+        // EngineNotConfigured without reading any key (LocalServer is built since
+        // T-018: local_server_* below). Bite: a panic / todo!() arm, an API engine
+        // built for another kind, or a key read first.
+        for kind in [EngineKind::BuiltinLocal, EngineKind::None] {
             let creds = FakeCredentialStore::new()
                 .with_key(KeySlot::TranscriptionApi, KEY)
                 .with_key(KeySlot::LocalServer, KEY);
@@ -173,6 +170,95 @@ mod tests {
             Err(e) => panic!("API engine expected, got {e:?}"),
         }
         assert_eq!(creds.calls(), vec![read_api()]);
+    }
+
+    // ---- T-018: LocalServer ------------------------------------------------------
+
+    fn local_settings(base_url: &str) -> Settings {
+        let mut s = defaults(None);
+        s.engine = EngineKind::LocalServer;
+        s.local_server.base_url = base_url.to_string();
+        // The API section stays valid, so an arm that builds from it would succeed.
+        s.api.base_url = "https://api.example.com/v1".to_string();
+        s
+    }
+
+    fn read_local() -> CredentialCall {
+        CredentialCall {
+            op: CredentialOp::Read,
+            slot: KeySlot::LocalServer,
+        }
+    }
+
+    #[test]
+    fn local_server_engine_reads_only_local_server_slot_once() {
+        // T-018: engine = local server builds the OpenAI-compatible engine with
+        // kind "local_server" (diag EngineTag), reading only the `local-server`
+        // slot, once. Bite: the arm left at EngineNotConfigured, kind() "api", the
+        // API slot read, a second read.
+        let creds = FakeCredentialStore::new()
+            .with_key(KeySlot::TranscriptionApi, KEY)
+            .with_key(KeySlot::LocalServer, "sk-test-LOCAL");
+        match engine_for(&local_settings("http://localhost:8000/v1"), &creds) {
+            Ok(engine) => assert_eq!(engine.kind(), "local_server"),
+            Err(e) => panic!("local-server engine expected, got {e:?}"),
+        }
+        assert_eq!(creds.calls(), vec![read_local()]);
+    }
+
+    #[test]
+    fn local_server_default_settings_build_without_key_or_model() {
+        // The defaults (http://localhost:8000/v1, model "", no key) are a usable
+        // local-server configuration: the key and the model are optional (FR-13,
+        // decision #28(b)). Bite: Ok(None) or an empty model treated as
+        // EngineNotConfigured / KeyStoreUnavailable.
+        let mut s = defaults(None);
+        s.engine = EngineKind::LocalServer;
+        let creds = FakeCredentialStore::new();
+        match engine_for(&s, &creds) {
+            Ok(engine) => assert_eq!(engine.kind(), "local_server"),
+            Err(e) => panic!("local-server engine expected, got {e:?}"),
+        }
+        assert_eq!(creds.calls(), vec![read_local()]);
+    }
+
+    #[test]
+    fn local_server_key_store_error_is_key_store_unavailable() {
+        // Decision #44 (1) for the local slot: a read error is the retryable
+        // KeyStoreUnavailable, not "no key" (which would send an unauthenticated
+        // request). Read once. Bite: Err treated like Ok(None).
+        let creds = FakeCredentialStore::new().with_key(KeySlot::LocalServer, "sk-test-LOCAL");
+        creds.fail(
+            CredentialOp::Read,
+            KeySlot::LocalServer,
+            CredentialError { os_code: 1312 },
+        );
+        let got = reason(engine_for(
+            &local_settings("http://localhost:8000/v1"),
+            &creds,
+        ));
+        assert_eq!(got, Some(FailureReason::KeyStoreUnavailable));
+        assert_eq!(creds.calls(), vec![read_local()]);
+    }
+
+    #[test]
+    fn local_server_bad_stored_base_url_is_engine_not_configured() {
+        // The one URL rule applies to the stored local-server URL in the factory
+        // (a hand-edited file bypasses save): EngineNotConfigured, no key read.
+        // Bite: no check_base_url in the arm, the API URL checked instead, or the
+        // key read first.
+        for bad in [
+            "",
+            "   ",
+            "not a url",
+            "ftp://localhost:8000/v1",
+            "http://user:pass@localhost:8000/v1",
+        ] {
+            let creds = FakeCredentialStore::new().with_key(KeySlot::LocalServer, "sk-test-LOCAL");
+            let got = reason(engine_for(&local_settings(bad), &creds));
+            assert_eq!(got, Some(FailureReason::EngineNotConfigured), "{bad:?}");
+            assert_eq!(creds.calls(), vec![], "{bad:?}: no credential call");
+        }
     }
 
     #[test]
