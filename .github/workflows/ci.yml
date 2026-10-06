@@ -12,13 +12,18 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
-      - uses: pnpm/action-setup@v4
+      # The ui area runs in its toolchain image, the official Playwright image at the
+      # lockfile's @playwright/test version plus pnpm (docker/ui.Dockerfile), as locally: the
+      # install, lint, unit tests, licenses and the e2e run (its browser in a network namespace
+      # of its own, --network none; T-064, decision #89). The e2e entry passes CI through.
+      # Host node only for the host-side fixture tests (scripts/ci/e2e-entry.test.sh); no ui
+      # command runs on it.
       - uses: actions/setup-node@v5
         with:
           node-version: "20.19"
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm exec playwright install --with-deps chromium
+      - name: Build the ui toolchain image
+        run: make ui-image
+      - run: scripts/tw-run ui -- pnpm install --frozen-lockfile
       - name: Build the core toolchain image
         run: make core-image
       # Cargo registry of scripts/tw-run core (config.yml cache /usr/local/cargo/registry,

@@ -2,7 +2,7 @@
 .PHONY: check check-shell-layout check-shell-layout-fixtures check-helper-windows-fixtures check-core \
 	check-ci-credentials check-e2e-entry-fixtures \
 	check-shell-windows \
-	check-ui core-image \
+	check-ui core-image ui-image \
 	licenses licenses-check licenses-unit licenses-fixture licenses-rust licenses-bundle \
 	licenses-npm licenses-generate licenses-stale
 
@@ -61,14 +61,21 @@ check-core:
 check-shell-windows:
 	scripts/tw-run core -- 'cargo check -p voicen --target x86_64-pc-windows-gnu && cargo check -p voicen --target x86_64-pc-windows-gnu --tests'
 
+# The e2e step goes through the e2e entry (package.json scripts.e2e) on the host: it checks the
+# ui image is present and re-enters it through scripts/tw-run ui with --network none (T-064).
 check-ui:
 	scripts/tw-run ui -- pnpm lint
 	scripts/tw-run ui -- pnpm test
-	scripts/tw-run ui -- pnpm e2e
+	scripts/e2e.sh
 
 # Toolchain image of the `core` area (CI builds the same one).
 core-image:
 	docker build -t voicen-rust:1.99 -f docker/rust.Dockerfile docker
+
+# Toolchain image of the `ui` area: the official Playwright image at the lockfile's
+# @playwright/test version plus pnpm (docker/ui.Dockerfile; CI builds the same one, T-064).
+ui-image:
+	docker build -t voicen-ui:1.63.0 -f docker/ui.Dockerfile docker
 
 # --- Licenses (T-027, decisions #9 #24) -------------------------------------------------
 # One accepted list: about.toml `accepted`. Rust: cargo-about 0.9.2 (Windows target only).
@@ -80,9 +87,10 @@ LICENSES_DIR := target/licenses
 
 licenses-check: licenses-unit licenses-fixture licenses-rust licenses-npm licenses-stale
 
-# Unit tests of the npm/manual checker.
+# Unit tests of the npm/manual checker. The files are named: since Node 22 (the ui image has
+# Node 24) `node --test <dir>` runs the directory as a module instead of finding its tests.
 licenses-unit:
-	scripts/tw-run ui -- node --test scripts/licenses/
+	scripts/tw-run ui -- 'node --test scripts/licenses/*.test.mjs'
 
 # Guard: cargo-about with the real about.toml must reject licenses/fixtures/gpl.
 licenses-fixture:

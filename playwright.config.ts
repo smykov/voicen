@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readlinkSync, rmSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { defineConfig, devices } from "@playwright/test";
 
@@ -15,7 +15,24 @@ import { defineConfig, devices } from "@playwright/test";
 // The config is loaded by the runner and again by every worker: the runner picks the dir and
 // port and puts them in the environment, which the workers (and the webServer) inherit.
 // The runner removes its dir in global teardown; dirs of runs that died are swept here.
+// E1 across pid namespaces (T-064): runs in other containers of the ui image, or on the host,
+// share target/e2e through the mounted tree, and a pid means something only in its own pid
+// namespace. So a run dir is named run-<pid namespace inode>-<runner pid>-XXXXXX; the sweep
+// judges a dir of this namespace by its runner's liveness, and a dir of any other namespace
+// (or of the older run-<pid>-XXXXXX form, namespace unknown) only by age.
 const E2E_ROOT = resolve("target/e2e");
+// No e2e run lives this long; a younger dir of another pid namespace may be a live run.
+const FOREIGN_MAX_AGE_MS = 24 * 3600 * 1000;
+
+// The inode of this process's pid namespace ("pid:[4026531836]" -> "4026531836"); "0" when
+// it cannot be read (then every dir counts as another namespace's and is swept by age only).
+function pidNamespace(): string {
+  try {
+    return /^pid:\[(\d+)\]$/.exec(readlinkSync("/proc/self/ns/pid"))?.[1] ?? "0";
+  } catch {
+    return "0";
+  }
+}
 
 function isAlive(pid: number): boolean {
   try {
@@ -26,17 +43,30 @@ function isAlive(pid: number): boolean {
   }
 }
 
-// Directories of earlier runs whose runner process is gone (killed before its teardown).
-function sweepStaleRunDirs(): void {
+// Directories of earlier runs whose runner is gone (killed before its teardown).
+function sweepStaleRunDirs(ns: string): void {
   let entries: string[];
   try {
     entries = readdirSync(E2E_ROOT);
   } catch {
     return;
   }
+  const now = Date.now();
   for (const name of entries) {
-    const pid = Number(/^run-(\d+)-/.exec(name)?.[1]);
-    if (pid && !isAlive(pid)) rmSync(join(E2E_ROOT, name), { recursive: true, force: true });
+    if (!name.startsWith("run-")) continue;
+    const dir = join(E2E_ROOT, name);
+    const m = /^run-(\d+)-(\d+)-[^-]+$/.exec(name);
+    let stale: boolean;
+    if (m && m[1] === ns && ns !== "0") {
+      stale = !isAlive(Number(m[2]));
+    } else {
+      try {
+        stale = now - statSync(dir).mtimeMs > FOREIGN_MAX_AGE_MS;
+      } catch {
+        continue;
+      }
+    }
+    if (stale) rmSync(dir, { recursive: true, force: true });
   }
 }
 
@@ -52,9 +82,10 @@ function freePort(): number {
 
 function privateServer(): { port: number } {
   if (!process.env.VOICEN_E2E_OUT_DIR || !process.env.VOICEN_E2E_PORT) {
-    sweepStaleRunDirs();
+    const ns = pidNamespace();
+    sweepStaleRunDirs(ns);
     mkdirSync(E2E_ROOT, { recursive: true });
-    process.env.VOICEN_E2E_OUT_DIR = mkdtempSync(join(E2E_ROOT, `run-${process.pid}-`));
+    process.env.VOICEN_E2E_OUT_DIR = mkdtempSync(join(E2E_ROOT, `run-${ns}-${process.pid}-`));
     process.env.VOICEN_E2E_OUT_DIR_OWNER = String(process.pid);
     process.env.VOICEN_E2E_PORT = String(freePort());
   }

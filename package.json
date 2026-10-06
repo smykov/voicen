@@ -13,7 +13,7 @@
     "tauri": "tauri",
     "test": "vitest run",
     "lint": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --fail-on-warnings && eslint .",
-    "e2e": "playwright test"
+    "e2e": "scripts/e2e.sh"
   },
   "license": "MIT",
   "dependencies": {
