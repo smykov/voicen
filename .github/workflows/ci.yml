@@ -101,9 +101,11 @@ jobs:
           $hasSettings = $false
           $runGone = $false
           # T-037 (S1): FirstRun opens the settings window: exactly one shown window, titled
-          # Voicen. Shown = visible, unowned, top-level and not tao's event-target window (tool
-          # windows count, T-057), which every tauri process has with WS_VISIBLE set, so
-          # Process.MainWindowHandle cannot tell (scripts/ci/visible-windows.ps1).
+          # Voicen. Shown = visible, unowned, top-level and not a framework helper window (tool
+          # windows count, T-057). A helper is excluded only by class on the script's pinned list
+          # (tao's 'Tao Thread Event Target', single-instance's 'dev.voicen.app-sic') AND all four
+          # helper ex-style bits; both have WS_VISIBLE set, so Process.MainWindowHandle cannot
+          # tell (scripts/ci/visible-windows.ps1).
           $win = $false
           $seen = 'no process'
           for ($i = 0; $i -lt 30 -and -not ($found -and $loaded -and $reconciled -and $hasSettings -and $runGone -and $win); $i++) {
