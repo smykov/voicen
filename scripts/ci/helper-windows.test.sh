@@ -148,11 +148,46 @@ check c-crate-without-src     3 "cannot run"        # serde has no src/
 check c-no-product-class      3 "cannot run"        # no window_classname("...") literal in the graph: the product-class rule cannot run
 run "graph file missing" 3 "cannot run" --graph "$tmp/no-such-graph.txt" --manifest "$fx/ok-listed/manifest.txt"
 run "manifest missing"   3 "cannot run" --graph "$fx/ok-listed/graph.txt" --manifest "$tmp/no-such-manifest.txt"
-# A grep that fails must not read as "no package calls CreateWindowEx".
-mkdir -p "$tmp/grep-fails" && printf '#!/bin/sh\necho "grep: simulated failure" >&2\nexit 2\n' >"$tmp/grep-fails/grep" \
-  && chmod +x "$tmp/grep-fails/grep" || { echo "helper-windows.test: cannot run: could not write the grep shim" >&2; exit 3; }
+# A grep that fails must not read as "no package calls CreateWindowEx" or "no product class".
+# Each case reaches one grep-error branch of scan_one and asserts the line only that branch
+# prints (`grep failed on <dir> (<crate>@<version>)`), never the generic "cannot run" that the
+# missing-product-class exit also prints (T-065 validation 1: M5a-c survived that needle).
+# grep_shim <name> <pattern> <dir part>: a grep that fails (exit 2) when its arguments hold both
+# <pattern> and <dir part> ("" = any dir) and runs the real grep otherwise.
+real_grep="$(command -v grep)" || { echo "helper-windows.test: cannot run: grep not found" >&2; exit 3; }
+grep_shim() {
+  mkdir -p "$tmp/$1" && cat >"$tmp/$1/grep" <<SHIM && chmod +x "$tmp/$1/grep" \
+    || { echo "helper-windows.test: cannot run: could not write the grep shim $1" >&2; exit 3; }
+#!/bin/sh
+case "\$*" in
+  *'$2'*) case "\$*" in *'$3'*) echo "grep: simulated failure" >&2; exit 2 ;; esac ;;
+esac
+exec '$real_grep' "\$@"
+SHIM
+}
+ok_src="$root/$fx/ok-listed/crates"
+# Every grep fails: the first scan (tao's CreateWindowEx search) is the error named.
+grep_shim grep-fails "" ""
 GUARD_PATH="$tmp/grep-fails:$PATH"
-run "ok-listed (failing grep)" 3 "cannot run" --graph "$fx/ok-listed/graph.txt" --manifest "$fx/ok-listed/manifest.txt"
+run "ok-listed (failing grep)" 3 "cannot run: grep failed on $ok_src/tao-0.37.1/src (tao@0.37.1)" \
+  --graph "$fx/ok-listed/graph.txt" --manifest "$fx/ok-listed/manifest.txt"
+# Only tao's CreateWindowEx search fails: read as "no match", tao's entry would be stale (exit 1).
+grep_shim grep-fails-createwindowex CreateWindowEx /tao-0.37.1/src
+GUARD_PATH="$tmp/grep-fails-createwindowex:$PATH"
+run "ok-listed (CreateWindowEx grep fails on tao)" 3 "cannot run: grep failed on $ok_src/tao-0.37.1/src (tao@0.37.1)" \
+  --graph "$fx/ok-listed/graph.txt" --manifest "$fx/ok-listed/manifest.txt"
+# Only tao's window_classname search fails (tao has no such literal): read as "none", the
+# guard would pass (exit 0).
+grep_shim grep-fails-classname-tao window_classname /tao-0.37.1/src
+GUARD_PATH="$tmp/grep-fails-classname-tao:$PATH"
+run "ok-listed (window_classname grep fails on tao)" 3 "cannot run: grep failed on $ok_src/tao-0.37.1/src (tao@0.37.1)" \
+  --graph "$fx/ok-listed/graph.txt" --manifest "$fx/ok-listed/manifest.txt"
+# Only the runtime's window_classname search fails, the dir holding the product class.
+grep_shim grep-fails-classname-runtime window_classname /tauri-runtime-wry-2.12.1/src
+GUARD_PATH="$tmp/grep-fails-classname-runtime:$PATH"
+run "ok-listed (window_classname grep fails on tauri-runtime-wry)" 3 \
+  "cannot run: grep failed on $ok_src/tauri-runtime-wry-2.12.1/src (tauri-runtime-wry@2.12.1)" \
+  --graph "$fx/ok-listed/graph.txt" --manifest "$fx/ok-listed/manifest.txt"
 GUARD_PATH=""
 
 # Today's real graph with the committed manifest: green. Then the same graph with the
