@@ -1,7 +1,22 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readdirSync, readlinkSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readlinkSync, rmSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { defineConfig, devices } from "@playwright/test";
+
+// Playwright never runs on the host (T-064 review 1 #2, #8; docs/decisions/ui-e2e.md E3): every
+// invocation (`npx playwright test`, `pnpm exec playwright test`, `BASE_URL=... npx playwright
+// test`) loads this file, so it refuses to start outside the ui image before any side effect
+// (no run directory, no webServer). The ui image is recognised by BOTH its own variable
+// (docker/ui.Dockerfile ENV VOICEN_UI_IMAGE) and a container marker file; neither alone counts.
+if (
+  !process.env.VOICEN_UI_IMAGE ||
+  !(existsSync("/.dockerenv") || existsSync("/run/.containerenv"))
+) {
+  throw new Error(
+    "e2e runs only inside the ui image (VOICEN_UI_IMAGE set in a container); run `pnpm e2e`, " +
+      "which starts it in the image with a private network namespace (docs/decisions/ui-e2e.md E3)",
+  );
+}
 
 // The e2e run serves only a build it made itself, from a directory and on a port no other
 // process writes or binds (T-050, decisions #77):

@@ -19,7 +19,9 @@
 #   present -> re-enter through scripts/tw-run ui with TW_DOCKER_ARGS `--network none`, and
 #   `-e CI` only when the caller has CI (tw-run passes no environment but HOME; CI drives
 #   forbidOnly and retries in playwright.config.ts).
-# BASE_URL does not reach the container: inside it, localhost is the container's own.
+#   BASE_URL set on the host -> exit 3 before any docker call (it would not reach the
+#   container: inside it, localhost is the container's own). Inside the image BASE_URL reaches
+#   Playwright unchanged.
 # Exit 3: the run cannot start in the image (nothing was tested). Otherwise Playwright's code.
 set -uo pipefail
 
@@ -37,12 +39,15 @@ if [ -e "$info" ]; then
     const read = (p) => { try { return JSON.parse(fs.readFileSync(p, "utf8")); } catch { return {}; } };
     const i = read(process.argv[1]);
     const l = read(process.argv[2]);
-    process.stdout.write([i.driverVersion || "", i.dockerImageName || "", l.version || ""].join("\t"));
+    process.stdout.write([i.driverVersion || "", i.dockerImageName || "", l.version || ""].join("\x1f"));
   ' "$info" "$root/node_modules/@playwright/test/package.json")" \
     || stop "cannot read $info"
-  IFS=$'\t' read -r driver base lock <<<"$versions"
+  # Unit separator, not a whitespace IFS: whitespace IFS collapses empty fields, so a missing
+  # driverVersion would shift dockerImageName into it (review 1 #1).
+  IFS=$'\x1f' read -r driver base lock <<<"$versions"
   image="${VOICEN_E2E_IMAGE:-}"
-  shown="${image:+$image (}${base:-unknown base}${image:+)}"
+  if [ -n "$image" ] && [ -n "$base" ]; then shown="$image ($base)"
+  else shown="${image:-${base:-(unnamed image)}}"; fi
   [ -n "$lock" ] || stop "node_modules/@playwright/test is not installed (pnpm install); image $shown"
   [ -n "$driver" ] || stop "image $shown has no Playwright version in $info (driverVersion); it must be the Playwright image at the lockfile's @playwright/test $lock"
   [ "$driver" = "$lock" ] \
@@ -55,6 +60,10 @@ fi
 # --- on the host: the image must be present; re-enter through tw-run ui ------------------
 [ -z "${VOICEN_E2E_REENTERED:-}" ] \
   || stop "re-entered through scripts/tw-run ui but $info is missing: the ui area's image is not the Playwright image"
+# BASE_URL cannot reach the container (tw-run passes no caller environment, and localhost there
+# is the container's own): refused before any docker call, never dropped silently (review 1 #3).
+[ -z "${BASE_URL:-}" ] \
+  || stop "BASE_URL is set ($BASE_URL), but e2e runs only in the ui image with --network none, where it cannot reach a server outside the container; running against an external server is not supported: unset BASE_URL to test a private build"
 command -v python3 >/dev/null 2>&1 || stop "python3 is required to read the teamwright config"
 cfg="${TEAMWRIGHT_CONFIG:-$root/.teamwright/config.yml}"
 conf_py="$root/scripts/hooks/_config.py"
@@ -68,9 +77,9 @@ cfg = _config.parse_yaml(open(sys.argv[2], encoding="utf-8").read())
 a = next((a for a in cfg.get("areas") or [] if isinstance(a, dict) and a.get("name") == "ui"), None)
 if a is None:
     sys.exit(1)
-sys.stdout.write("%s\t%s" % (a.get("runner") or "host", a.get("image") or ""))
+sys.stdout.write("%s\x1f%s" % (a.get("runner") or "host", a.get("image") or ""))
 ' "$conf_py" "$cfg")" || stop "no ui area readable in $cfg"
-IFS=$'\t' read -r runner image <<<"$area"
+IFS=$'\x1f' read -r runner image <<<"$area"
 [ -n "$image" ] || stop "the ui area in $cfg names no image (the Playwright image, docker/ui.Dockerfile)"
 [ "$runner" = docker ] \
   || stop "the ui area in $cfg has runner '$runner'; e2e runs only in the image $image (runner: docker)"
