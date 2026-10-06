@@ -155,11 +155,11 @@ Rules (NFR-06, FR-026, FR-027):
 | `InvalidApiKey` | `failure.invalid_api_key` | HTTP 401/403; or the stored key cannot be sent: `Bearer <key>` fails HTTP header value validation (a control byte other than tab, or DEL), checked before the request is built, so nothing is sent. A non-ASCII key passes that rule and is sent as UTF-8; the server's 401/403 decides |
 | `NetworkUnavailable` | `failure.network_unavailable` | DNS failure, network/host unreachable |
 | `CannotReach{host}` | `failure.cannot_reach` | connection refused, connect timeout, TLS handshake failure, HTTP client setup; `host` = the base URL's `host[:port]` (port only when not the scheme default) |
-| `Timeout` | `failure.timeout` | the whole request (connect to last body byte) exceeded its `Timeouts` duration (API 30 s), including a stall mid-body |
+| `Timeout` | `failure.timeout` | the whole request (connect to last body byte) exceeded its `Timeouts` duration (API 30 s, local server 60 s), including a stall mid-body |
 | `ServerError{status}` | `failure.server_error` | any other non-2xx (413, 429, 5xx, …) |
 | `UnexpectedResponse` | `failure.unexpected_response` | 2xx body unparsable / not an object / missing or non-string `text` / > 1 MiB / invalid UTF-8 / reset or closed mid-body |
 | `KeyStoreUnavailable` | `failure.key_store_unavailable` | `CredentialStore::read` returned an error; `engine_for` returns it before any engine exists, so no request is sent (decision #44) |
-| `EngineNotConfigured` | `failure.engine_not_configured` | `engine_for` cannot build an engine from the settings: `BuiltinLocal` (built by the shell, T-017), `LocalServer` (until T-018), `None`, or a stored base URL that fails `check_base_url`; no key is read (decision #44) |
+| `EngineNotConfigured` | `failure.engine_not_configured` | `engine_for` cannot build an engine from the settings: `BuiltinLocal` (built by the shell, T-017), `None`, or a stored base URL that fails `check_base_url`; no key is read (decision #44) |
 | `ClipboardUnavailable` | `failure.clipboard_unavailable` | clipboard open failed after retries |
 | `MicrophoneUnavailable{cause}` | `failure.microphone_unavailable` | no device, access denied, open error — not retryable, no pending |
 | `HotkeyUnavailable` | `failure.hotkey_unavailable` | registration failed — not retryable |
