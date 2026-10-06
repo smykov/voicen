@@ -1,0 +1,29 @@
+# The helper-window manifest (T-065, rca smoke-window-predicate, F-008; docs/decisions/overlay.md §5).
+# The one source for "which framework windows of voicen.exe are helpers": read by the install
+# smoke's predicate and census (scripts/ci/visible-windows.ps1 Get-ShownWindows, Get-HelperDrift)
+# and by the shell tests (src-tauri/tests/helper_windows/mod.rs is_helper). Checked on the Linux
+# host by scripts/ci/helper-windows.sh (make check): every crate@version of the shell's Windows
+# dependency graph whose source mentions CreateWindowEx has exactly one entry here, and every entry
+# is such a crate. Checked on Windows CI by the census: every visible-helper class exists in the
+# real voicen.exe, and no visible, unowned, top-level window with the four helper ex-style bits
+# (LAYERED, TRANSPARENT, NOACTIVATE, TOOLWINDOW) has a class not listed as visible-helper.
+#
+# Format: <crate>@<version> | <verdict> | <class or -> | <source citation>
+# (no `|` inside a field). Verdicts:
+#   visible-helper  creates a top-level, unowned helper window with the four bits and makes it
+#                   WS_VISIBLE: excluded by the smoke only by this class AND the four bits;
+#   hidden-helper   creates a helper window of that shape that is never WS_VISIBLE: not excluded
+#                   (if it turns up visible it counts and the census reports it);
+#   child           creates only child windows (WS_CHILD of a product window): never top-level;
+#   binding         declares the Win32 function only (a bindings crate), creates no window.
+# {identifier} in a class is src-tauri/tauri.conf.json `identifier`.
+# A tripped check means: read the cited source of the new version, then change the entry (or add
+# one) in the same commit as the dependency change. Citations are paths inside the crate.
+
+tao@0.37.1 | visible-helper | Tao Thread Event Target | src/platform_impl/windows/event_loop.rs create_event_target_window (in every tauri process): CreateWindowExW with NOACTIVATE+TRANSPARENT+LAYERED+TOOLWINDOW, WS_OVERLAPPED, 0x0, no parent, then GWL_STYLE = WS_VISIBLE+WS_POPUP. Its other call, window.rs create_window, makes the product windows (class from the app, counted)
+tauri-plugin-single-instance@2.5.2 | visible-helper | {identifier}-sic | src/platform_impl/windows.rs init (class "{id}-sic", title "{id}-siw"; resolved without the semver feature, so no version suffix) and create_event_target_window: same four bits, WS_OVERLAPPED, 0x0, no parent, then GWL_STYLE = WS_VISIBLE+WS_POPUP
+tauri-runtime-wry@2.12.1 | child | - | src/undecorated_resizing.rs: TAURI_DRAG_RESIZE_BORDERS with WS_CHILD+WS_VISIBLE, parent = the undecorated product window
+tray-icon@0.25.1 | hidden-helper | tray_icon_app | src/platform_impl/windows/mod.rs TrayIcon::new: CreateWindowExW with the same four bits, WS_OVERLAPPED, CW_USEDEFAULT size, no parent; no WS_VISIBLE anywhere in src/ (one release away from a visible helper)
+windows@0.62.2 | binding | - | src/Windows/Win32/UI/WindowsAndMessaging/mod.rs: CreateWindowExA/W declarations only
+windows-sys@0.61.2 | binding | - | src/Windows/Win32/UI/WindowsAndMessaging/mod.rs: CreateWindowExA/W link declarations only
+wry@0.57.0 | child | - | src/webview2/mod.rs: the WRY_WEBVIEW container window with WS_CHILD+WS_CLIPCHILDREN, parent = the tao product window

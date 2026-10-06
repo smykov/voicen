@@ -8,8 +8,9 @@
 //! (and the first-launch step wants exactly the settings window), so "the smoke
 //! fails on a tool window shown at start" is exactly "`Get-ShownWindows` returns a
 //! visible, unowned, top-level tool window". F-003: the predicate decides on raw
-//! window facts (visible, owner, top-level, the class of tao's event-target window);
-//! no "it is our overlay" exception by class or title. The windows here are EDIT
+//! window facts (visible, owner, top-level, and for a framework helper its class on the
+//! helper-window manifest AND the four helper ex-style bits); no "it is our overlay"
+//! exception by class or title. The windows here are EDIT
 //! windows with an obviously fake title, so an exception keyed to the overlay's
 //! class or title cannot make the red test pass.
 //!
@@ -24,10 +25,13 @@
 //! 0,0,0,0, and then set `GWL_STYLE` to `WS_VISIBLE|WS_POPUP`. The tests below register
 //! those classes in this exe and create the windows with the same arguments (no tauri
 //! process, no plugin: its second-instance path calls `process::exit(0)`, T-052). The
-//! analysis invariant: a window is excluded only when its class is on the script's
-//! pinned helper list AND it has all four helper ex-style bits; never by style alone
-//! (a click-through overlay has LAYERED|TRANSPARENT), never by title. The set of helper
-//! windows a real voicen.exe has stays proven only by the install smoke.
+//! analysis invariant: a window is excluded only when its class is a visible-helper
+//! class of `scripts/ci/helper-windows.txt` (T-065; the script's list comes only from
+//! that manifest) AND it has all four helper ex-style bits; never by style alone (a
+//! click-through overlay has LAYERED|TRANSPARENT), never by title. The helper windows a
+//! real voicen.exe has are checked against the manifest by the install smoke's census
+//! (`Get-HelperDrift`, below), and the manifest against the dependency graph by
+//! `scripts/ci/helper-windows.sh` in make check.
 #![cfg(windows)]
 
 use std::io::Read;
@@ -36,7 +40,7 @@ use std::path::PathBuf;
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
-use std::sync::{Arc, Barrier, Mutex};
+use std::sync::{Arc, Barrier, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -290,16 +294,32 @@ fn create(spec: &Spec, owner: Option<HWND>) -> Result<HWND, String> {
     Ok(h)
 }
 
-/// Windows of `specs`, created and pumped on their own thread until dropped.
+/// One set of test windows at a time in this binary, held from before the first window
+/// is created until the last one is destroyed (`Windows::open` to `Windows`' drop).
+/// `cargo test` runs tests on parallel threads and the predicate and the census see every
+/// window of this process, so without it a census test would see the helper-shaped
+/// windows of another test (tao's class, the plugin's, the click-through overlay, the
+/// fake unlisted helper) and could not assert its drift exactly (T-065). `PWSH_TURN`
+/// serialises only the pwsh runs, not window lifetimes. Lock order: `WINDOWS_TURN` before
+/// `PWSH_TURN`, never the reverse. A panicking test drops its `Windows` while unwinding,
+/// so the lock is released; a poisoned lock is taken over.
+static WINDOWS_TURN: Mutex<()> = Mutex::new(());
+
+/// Windows of `specs`, created and pumped on their own thread until dropped. While it
+/// lives no other test of this binary has windows (`WINDOWS_TURN`).
 struct Windows {
     hwnds: Vec<isize>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
+    /// Released after `drop` has joined the thread (fields drop after `Drop::drop`), so
+    /// only once every window of this set is destroyed.
+    _turn: MutexGuard<'static, ()>,
 }
 
 impl Windows {
     #[track_caller]
     fn open(specs: Vec<Spec>) -> Windows {
+        let turn = WINDOWS_TURN.lock().unwrap_or_else(|e| e.into_inner());
         let (tx, rx) = mpsc::channel::<Result<Vec<isize>, String>>();
         let stop = Arc::new(AtomicBool::new(false));
         let stop_thread = Arc::clone(&stop);
@@ -349,6 +369,7 @@ impl Windows {
             hwnds,
             stop,
             thread: Some(thread),
+            _turn: turn,
         }
     }
 }
@@ -1192,7 +1213,9 @@ fn the_pwsh_child_gets_a_null_stdin_and_no_console_window() {
 //     "helper list drift" and names each class.
 // Default manifest: `helper-windows.txt` next to the script. The test exe hosts none of
 // the real helpers, so every census test passes its own manifest (fake classes); the real
-// voicen.exe is censused by the install smoke in ci.yml (Windows CI only).
+// voicen.exe is censused by the install smoke in ci.yml (Windows CI only). The census sees
+// every window of this process; `WINDOWS_TURN` (held by `Windows`) keeps other tests'
+// windows out of it, so a census test's drift is exactly that of its own windows.
 
 mod helper_windows;
 
@@ -1371,7 +1394,8 @@ fn a_listed_visible_helper_that_is_absent_is_reported_as_stale() {
     // entries are never stale for being absent (they are not visible helpers). Red today:
     // no Get-HelperDrift. Bites: a census that only looks at windows (never at the
     // manifest); one that reports every manifest entry; one that treats hidden-helper
-    // entries as visible ones.
+    // entries as visible ones. The exact assertion holds because `WINDOWS_TURN` keeps
+    // other tests' helper-shaped windows out of this process while the census runs.
     let lines = [
         entry("t065-listed", "visible-helper", LISTED_HELPER),
         entry("t065-absent", "visible-helper", ABSENT_HELPER),

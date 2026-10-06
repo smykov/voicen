@@ -31,6 +31,7 @@
 //! The app identifier is a test one; each test has its own `TempDir`; no keys.
 #![cfg(windows)]
 
+mod helper_windows;
 mod win32_support;
 
 use std::any::Any;
@@ -69,10 +70,6 @@ use windows::Win32::UI::WindowsAndMessaging::{
 /// The overlay window's label (spec 001 contracts/ipc.md: the page at `/overlay`
 /// in the window labelled `overlay`).
 const LABEL: &str = "overlay";
-
-/// tao's per-thread event-target window: top-level, unowned and WS_VISIBLE in every
-/// tauri process (scripts/ci/visible-windows.ps1 header), so never "an overlay".
-const TAO_EVENT_TARGET: &str = "Tao Thread Event Target";
 
 /// A test identifier: WebView2's profile goes under it, not under the release one.
 const IDENTIFIER: &str = "dev.voicen.test.overlay";
@@ -309,8 +306,11 @@ fn facts(raw: isize) -> Facts {
     }
 }
 
-/// Every visible, unowned, top-level window of this process but tao's event-target
-/// window and `except` (the install smoke's rule after T-057, tool windows counted).
+/// Every visible, unowned, top-level window of this process but `except` and the
+/// framework helper windows, decided by the install smoke's own rule
+/// (`helper_windows::is_helper`: a visible-helper class of
+/// `scripts/ci/helper-windows.txt` AND the four helper ex-style bits, T-065); tool
+/// windows count.
 fn shown_windows(except: &[isize]) -> Vec<(isize, String)> {
     unsafe extern "system" fn collect(hwnd: HWND, found: LPARAM) -> BOOL {
         let mut pid = 0u32;
@@ -340,7 +340,7 @@ fn shown_windows(except: &[isize]) -> Vec<(isize, String)> {
         .into_iter()
         .filter(|raw| !except.contains(raw))
         .map(|raw| (raw, class_of(to_hwnd(raw))))
-        .filter(|(_, class)| class != TAO_EVENT_TARGET)
+        .filter(|(raw, class)| !helper_windows::is_helper(class, ex_style(*raw)))
         .collect()
 }
 

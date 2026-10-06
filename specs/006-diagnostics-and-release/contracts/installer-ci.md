@@ -49,7 +49,7 @@ On failure of the start-line check the job prints the log if it exists (nothing 
 
 | Script | Contract |
 |---|---|
-| `scripts/ci/visible-windows.ps1` (pwsh, Windows; dot-sourced by the install smoke) | `Get-ShownWindows <pid>` returns the shown windows of the process (`Class`, `Title`): visible, unowned, top-level, not `WS_EX_TOOLWINDOW`, not class `Tao Thread Event Target` (user32 `EnumWindows`); `Format-ShownWindows` renders them for the log (T-037) |
+| `scripts/ci/visible-windows.ps1` (pwsh, Windows; dot-sourced by the install smoke) | `Get-ShownWindows <pid>` returns the shown windows of the process (`Class`, `Title`): visible, unowned, top-level, tool windows included; excluded only when its class is a `visible-helper` of `scripts/ci/helper-windows.txt` and its ex-style has all four helper bits (user32 `EnumWindows`; T-065, docs/decisions/overlay.md §5); `Get-HelperDrift` fails the smoke on an unlisted or stale helper; `Format-ShownWindows` renders them for the log (T-037) |
 | `scripts/check-version.sh [<expected>]` | exits non-zero when the versions in `Cargo.toml` (workspace), `package.json` (and `tauri.conf.json` if it still has one) differ from each other or from `<expected>`; prints both values |
 | `scripts/licenses/check.mjs`, `notices.mjs` | read the accepted list from `about.toml`; check the npm packages of the client bundle (written by the Vite plugin) and `licenses/manual.json`; fail naming each component with an unaccepted/unknown license; `notices.mjs` renders `THIRD-PARTY-NOTICES.txt` (decisions #24, #29) |
 | `make licenses` / `make licenses-check` | regenerate `THIRD-PARTY-NOTICES.txt` / fail if regeneration differs from the committed file or any license is unaccepted |

@@ -30,6 +30,7 @@ Voicen — a Windows desktop dictation tool: a global hotkey records the microph
 | `e2e/` | Playwright UI tests, Tauri IPC mocked via `window.__TAURI_INTERNALS__`; specs import `test`/`expect` from `e2e/support/boot` (boot fixture); each run builds and serves privately (`docs/decisions/ui-e2e.md`) |
 | `docker/rust.Dockerfile` | Toolchain image `voicen-rust:1.99` for area `core` (`make core-image`) |
 | `.github/workflows/ci.yml` | Linux gate + Windows build / silent install / smoke (= "deployed") |
+| `scripts/ci/helper-windows.txt` | Helper-window manifest: framework windows the install smoke does not count; read by the smoke predicate, the shell overlay tests and the `make check` tripwire (`docs/decisions/overlay.md` §5) |
 | `docs/plan.md` | Stages and what is in each |
 | `docs/requirements.md` | What must be true (FR-NN, NFR-NN) |
 | `docs/architecture.md` | Components, data flow, boundaries |

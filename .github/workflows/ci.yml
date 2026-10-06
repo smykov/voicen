@@ -102,10 +102,10 @@ jobs:
           $runGone = $false
           # T-037 (S1): FirstRun opens the settings window: exactly one shown window, titled
           # Voicen. Shown = visible, unowned, top-level and not a framework helper window (tool
-          # windows count, T-057). A helper is excluded only by class on the script's pinned list
-          # (tao's 'Tao Thread Event Target', single-instance's 'dev.voicen.app-sic') AND all four
-          # helper ex-style bits; both have WS_VISIBLE set, so Process.MainWindowHandle cannot
-          # tell (scripts/ci/visible-windows.ps1).
+          # windows count, T-057). A helper is excluded only by a visible-helper class of the
+          # manifest scripts/ci/helper-windows.txt AND all four helper ex-style bits; the listed
+          # helpers have WS_VISIBLE set, so Process.MainWindowHandle cannot tell
+          # (scripts/ci/visible-windows.ps1).
           $win = $false
           $seen = 'no process'
           for ($i = 0; $i -lt 30 -and -not ($found -and $loaded -and $reconciled -and $hasSettings -and $runGone -and $win); $i++) {
@@ -119,6 +119,17 @@ jobs:
             $shown = Get-ShownWindows $proc.Id
             $seen = Format-ShownWindows $shown
             $win = $shown.Count -eq 1 -and $shown[0].Title -ceq 'Voicen'
+          }
+          # T-065 census: the manifest's visible-helper verdicts against this voicen.exe, both
+          # ways (an unlisted helper-shaped window, a listed visible helper that is absent).
+          # Bounded retry: a helper created after the settings window gets a few seconds.
+          $drift = @()
+          if (-not $proc.HasExited) {
+            for ($i = 0; $i -lt 10; $i++) {
+              $drift = @(Get-HelperDrift $proc.Id)
+              if ($drift.Count -eq 0 -or $proc.HasExited) { break }
+              Start-Sleep -Seconds 1
+            }
           }
           # T-052: run() builds the tray (tray-icon's hidden 'tray_icon_app' window of this process),
           # and closing the first-run window keeps the app running (prevent_exit for
@@ -160,6 +171,10 @@ jobs:
           Write-Output "found settings.json at $settings with engine = none"
           if (-not $runGone) { throw "the leftover HKCU Run value Voicen is still present after the first launch (start_with_windows off)" }
           Write-Output "no HKCU Run value Voicen after the first launch"
+          # Before the window count: an unlisted helper also makes that count fail, and this
+          # names the cause (scripts/ci/helper-windows.txt, docs/decisions/overlay.md §5).
+          if ($drift.Count -gt 0) { throw "first launch: $(Format-HelperDrift $drift)" }
+          Write-Output "no helper list drift after the first launch"
           if (-not $win) { throw "not exactly one shown window titled Voicen after the first launch (last seen: $seen)" }
           Write-Output "exactly one shown window after the first launch: $seen"
           if (-not $tray) { throw "no 'tray_icon_app' window of voicen.exe after the first launch (windows: $traySeen)" }
@@ -223,7 +238,18 @@ jobs:
             $windows = Get-ShownWindows $proc.Id
             if ($windows.Count -gt 0) { $shown = Format-ShownWindows $windows }
           }
+          # T-065 census, as in the first launch: the manifest's visible-helper verdicts against
+          # this voicen.exe, both ways, before the shown-window count.
+          $drift = @()
+          for ($i = 0; $i -lt 10; $i++) {
+            if ($proc.HasExited) { throw "voicen.exe exited during the loaded launch (expected it to keep running with no window)" }
+            $drift = @(Get-HelperDrift $proc.Id)
+            if ($drift.Count -eq 0) { break }
+            Start-Sleep -Seconds 1
+          }
           Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+          if ($drift.Count -gt 0) { throw "loaded launch: $(Format-HelperDrift $drift)" }
+          Write-Output "no helper list drift on the loaded launch"
           if ($shown) { throw "a window is shown on a launch with a loaded settings.json ($shown)" }
           Write-Output "no shown window for 10 s after the start line of a launch with a loaded settings.json"
       # T-006 red-test row 24: run() starts the hotkey thread. Decided on the raw Win32 result of this
