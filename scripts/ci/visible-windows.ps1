@@ -22,7 +22,8 @@
 # Process.MainWindowHandle may return one (T-037 review 1 #1; T-057 VERIFY_FAIL 3). Nothing is
 # excluded by style alone (tao maps click-through to WS_EX_TRANSPARENT | WS_EX_LAYERED, so a
 # click-through overlay would drop out), by size or by title, and there is no exception for our
-# own windows: a product window (class "Tauri Window") never matches (a), a listed class that
+# own windows: a product window (class "Tauri Window") never matches (a) (make check refuses a
+# visible-helper entry whose class is a product window class), a listed class that
 # changes shape counts again, and a hidden-helper class that turns up visible counts. WebView2's
 # own windows are child windows or belong to msedgewebview2.exe.
 #
@@ -35,9 +36,13 @@
 # Kind 'unlisted' (a visible, unowned, top-level window with the four helper bits whose class is
 # not a visible-helper class of the manifest; it is counted as shown, never excluded for its
 # shape) or 'stale' (a visible-helper class of the manifest with no such window), with Class,
-# Title and ExStyle (0 for stale). Format-HelperDrift formats them as one "helper list drift" line.
-# The install smoke fails on any drift before it counts the shown windows, so a dependency change
-# that adds, removes or reshapes a helper is reported as what it is, not as a stray product window.
+# Title and ExStyle (0 for stale). Format-HelperDrift formats them as one "helper list drift" line;
+# an unlisted window's text names both possible causes: a new framework helper (an entry in
+# helper-windows.txt) or a product window shown at start (the F-003 defect, e.g. a click-through
+# overlay, whose class must never be listed; make check refuses a visible-helper entry with a
+# product window class, scripts/ci/helper-windows.sh). The install smoke fails on any drift before
+# it counts the shown windows, so a dependency change that adds, removes or reshapes a helper is
+# reported as what it is, not as a stray product window.
 #
 # T-052 (raw facts only, F-003): Get-AllWindows -ProcessId <pid>
 # returns every top-level window of the process (Handle, Class, Title, Visible), so a step can
@@ -158,7 +163,7 @@ function Get-VisibleHelperClasses([string]$Path) {
     $line = $raw.Trim()
     if ($line -eq '' -or $line.StartsWith('#')) { continue }
     $fields = $line.Split([char]'|')
-    if ($fields.Count -ne 4) { throw "helper-window manifest '$Path' line ${n}: want <crate>@<version> | <verdict> | <class or -> | <citation>" }
+    if ($fields.Count -ne 4) { throw "helper-window manifest '$Path' line ${n}: want <key> | <verdict> | <class or -> | <citation>" }
     $verdict = $fields[1].Trim()
     $class = $fields[2].Trim()
     if ($verdict -cne 'visible-helper' -and $verdict -cne 'hidden-helper' -and $verdict -cne 'child' -and $verdict -cne 'binding') {
@@ -209,9 +214,9 @@ function Format-HelperDrift($Drift) {
   if ($items.Count -eq 0) { return 'none' }
   $parts = $items | ForEach-Object {
     if ($_.Kind -ceq 'stale') { "stale: class '$($_.Class)' is a visible helper in the manifest, but the process has no visible, unowned, top-level window of that class with the four helper bits" }
-    else { "unlisted: class '$($_.Class)', title '$($_.Title)', ex-style 0x$(([uint32]$_.ExStyle).ToString('X8')) is visible, unowned, top-level with the four helper bits, and not a visible helper in the manifest" }
+    else { "unlisted: class '$($_.Class)', title '$($_.Title)', ex-style 0x$(([uint32]$_.ExStyle).ToString('X8')) is visible, unowned, top-level with the four helper bits, and not a visible helper in the manifest (counted as shown). Two causes: a new framework helper window (read the creating crate's source and add or fix its entry in scripts/ci/helper-windows.txt), or a product window shown at start, e.g. a click-through overlay (an F-003 defect: fix the product, never list a product window class as a helper)" }
   }
-  "helper list drift (scripts/ci/helper-windows.txt against the real window set; re-read the crate's source, fix the entry's verdict, docs/decisions/overlay.md §5): " + ($parts -join '; ')
+  "helper list drift (scripts/ci/helper-windows.txt against the real window set, docs/decisions/overlay.md §5): " + ($parts -join '; ')
 }
 
 function Format-ShownWindows($Windows) {

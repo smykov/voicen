@@ -123,8 +123,12 @@ jobs:
           # T-065 census: the manifest's visible-helper verdicts against this voicen.exe, both
           # ways (an unlisted helper-shaped window, a listed visible helper that is absent).
           # Bounded retry: a helper created after the settings window gets a few seconds.
+          # A census skipped because the process had exited says so; it never reads as "no drift"
+          # (the step still fails later on the window count or the close check).
           $drift = @()
+          $census = 'not run (the process exited before the census)'
           if (-not $proc.HasExited) {
+            $census = 'ran'
             for ($i = 0; $i -lt 10; $i++) {
               $drift = @(Get-HelperDrift $proc.Id)
               if ($drift.Count -eq 0 -or $proc.HasExited) { break }
@@ -174,7 +178,8 @@ jobs:
           # Before the window count: an unlisted helper also makes that count fail, and this
           # names the cause (scripts/ci/helper-windows.txt, docs/decisions/overlay.md §5).
           if ($drift.Count -gt 0) { throw "first launch: $(Format-HelperDrift $drift)" }
-          Write-Output "no helper list drift after the first launch"
+          if ($census -ceq 'ran') { Write-Output "no helper list drift after the first launch" }
+          else { Write-Output "helper list census after the first launch: $census" }
           if (-not $win) { throw "not exactly one shown window titled Voicen after the first launch (last seen: $seen)" }
           Write-Output "exactly one shown window after the first launch: $seen"
           if (-not $tray) { throw "no 'tray_icon_app' window of voicen.exe after the first launch (windows: $traySeen)" }

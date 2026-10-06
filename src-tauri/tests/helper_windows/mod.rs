@@ -54,7 +54,7 @@ fn visible_helper_classes() -> &'static [String] {
             let fields: Vec<&str> = line.split('|').map(str::trim).collect();
             let [_, verdict, class, _] = fields[..] else {
                 panic!(
-                    "{} line {}: want <crate>@<version> | <verdict> | <class or -> | \
+                    "{} line {}: want <crate>@<version>[<features>] | <verdict> | <class or -> | \
                      <citation>: {line}",
                     path.display(),
                     i + 1
