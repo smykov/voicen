@@ -29,6 +29,7 @@ Voicen — a Windows desktop dictation tool: a global hotkey records the microph
 | `src/` | Web UI (area `ui`); unit tests `src/**/*.test.ts` |
 | `e2e/` | Playwright UI tests, Tauri IPC mocked via `window.__TAURI_INTERNALS__`; specs import `test`/`expect` from `e2e/support/boot` (boot fixture); each run builds and serves privately (`docs/decisions/ui-e2e.md`) |
 | `docker/rust.Dockerfile` | Toolchain image `voicen-rust:1.99` for area `core` (`make core-image`) |
+| `docker/ui.Dockerfile` | Toolchain image `voicen-ui:1.63.0` for area `ui` (Node 24, pnpm, Playwright; `make ui-image`) |
 | `.github/workflows/ci.yml` | Linux gate + Windows build / silent install / smoke (= "deployed") |
 | `scripts/ci/helper-windows.txt` | Helper-window manifest: framework windows the install smoke does not count; read by the smoke predicate, the shell overlay tests and the `make check` tripwire (`docs/decisions/overlay.md` §5) |
 | `scripts/ci/credentials.ps1` | The only way a Windows CI step plants or observes Credential Manager entries (Win32 `CredWriteW`/`CredReadW`/`CredEnumerateW`/`CredDeleteW`); `make check` refuses `cmdkey` in workflows (`docs/decisions/windows-ci-runner.md`) |
@@ -54,12 +55,12 @@ Voicen — a Windows desktop dictation tool: a global hotkey records the microph
 ## Commands
 
 ```sh
-pnpm install && make core-image                 # setup
+pnpm install && make core-image && make ui-image  # setup
 make check                                      # gate — must be green before NEEDS_REVIEW
 scripts/tw-run core -- cargo test -p voicen-core <filter>   # single core test
 pnpm test -- <file>                             # single UI unit test
 pnpm dev                                        # UI in a browser (no Rust side; IPC calls fail)
-pnpm e2e                                        # UI end-to-end (Playwright, Chromium, mocked IPC)
+pnpm e2e                                        # UI end-to-end (Playwright, Chromium, mocked IPC); runs in the ui container (Docker required), never on the host
 make licenses                                   # regenerate THIRD-PARTY-NOTICES.txt; commit it whenever dependencies change (make check fails when stale)
 ```
 

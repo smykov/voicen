@@ -1,8 +1,8 @@
 # UI end-to-end runs (Playwright)
 
-**Code:** `playwright.config.ts`, `e2e/support/{boot,global-teardown}.ts`, the env-driven `kit.outDir` and adapter-static `pages` / `assets` in `svelte.config.js` · **Tests that pin it:** `e2e/boot-failure.spec.ts` (the boot fixture's contract and the structural check that every spec using `page` or `context` imports `test` / `expect` from `./support/boot`), `e2e/build-race.spec.ts`, `scripts/ci/e2e-build-race.sh` (reproduction, scenarios `build` and `foreign-port`; opt-in via `VOICEN_E2E_BUILD_RACE`)
+**Code:** `playwright.config.ts`, `e2e/support/{boot,global-teardown}.ts`, the env-driven `kit.outDir` and adapter-static `pages` / `assets` in `svelte.config.js` · **Tests that pin it:** `e2e/boot-failure.spec.ts` (the boot fixture's contract and the structural check that every spec using `page` or `context` imports `test` / `expect` from `./support/boot`), `e2e/build-race.spec.ts`, `scripts/ci/e2e-build-race.sh` (reproduction, scenarios `build` and `foreign-port`; opt-in via `VOICEN_E2E_BUILD_RACE`), `e2e/run-dirs.spec.ts`, `e2e/netns-probe.spec.ts`, `scripts/ci/e2e-entry.test.sh` (`make check-e2e-entry-fixtures`), `scripts/ci/e2e-net-churn.sh` (host only, needs Docker, about 6 min, not in `make check`). Entry and image: `scripts/e2e.sh`, `docker/ui.Dockerfile`
 
-Tasks: T-050. Decisions: #77. Open questions: OQ-13 (answered).
+Tasks: T-050, T-064. Decisions: #77, #89. Open questions: OQ-13 (answered).
 
 ## Invariants
 
@@ -10,7 +10,7 @@ Tasks: T-050. Decisions: #77. Open questions: OQ-13 (answered).
 
 - **Defect that produced it:** none in the failure log (T-050 analysis, class `e2e-boot-flake`). `vite preview` serves `.svelte-kit/output`, not `build/`, and every `pnpm build` in the tree starts by removing that directory. A preview under a concurrent build answered 500 for the rest of its life (a rejected server-node import is cached) or died on a missing chunk. Fixed port 4173 with `reuseExistingServer: !CI` also let a gate reuse, and lose, another tree's preview.
 - **What breaks if you violate it:** local gates fail at random in unrelated tests when a second `make check` or `pnpm build` runs in the same tree, or when a gate in another worktree reuses a foreign preview that holds different code.
-- **Where it is enforced:** `playwright.config.ts` makes a run-private directory `target/e2e/run-<pid>-XXXXXX` (`mkdtemp`) and a free port, and passes them as `VOICEN_E2E_OUT_DIR`, `VOICEN_E2E_OUT_DIR_OWNER`, `VOICEN_E2E_PORT` (the runner picks them, workers and the webServer inherit). The webServer is `pnpm build && pnpm preview --port <port> --strictPort`, `reuseExistingServer: false`. `svelte.config.js` moves `kit.outDir` and the adapter's `pages` / `assets` under that directory only when `VOICEN_E2E_OUT_DIR` is set; every other build (lint, unit tests, `tauri build`, licenses-bundle) keeps the defaults. `BASE_URL` is the only way to reuse a server, and then there is no webServer. The runner removes its directory in `globalTeardown`; directories of runs whose pid is gone are swept at the next start.
+- **Where it is enforced:** `playwright.config.ts` makes a run-private directory `target/e2e/run-<pid namespace inode>-<pid>-XXXXXX` (`mkdtemp`; the inode is `readlink /proc/self/ns/pid`) and a free port, and passes them as `VOICEN_E2E_OUT_DIR`, `VOICEN_E2E_OUT_DIR_OWNER`, `VOICEN_E2E_PORT` (the runner picks them, workers and the webServer inherit). The webServer is `pnpm build && pnpm preview --port <port> --strictPort`, `reuseExistingServer: false`. `svelte.config.js` moves `kit.outDir` and the adapter's `pages` / `assets` under that directory only when `VOICEN_E2E_OUT_DIR` is set; every other build (lint, unit tests, `tauri build`, licenses-bundle) keeps the defaults. `BASE_URL` is the only way to reuse a server, and then there is no webServer. The runner removes its directory in `globalTeardown`; at the next start the sweep removes a directory of this pid namespace whose pid is dead, and a directory of another namespace (or the legacy `run-<pid>-` name) only when it is older than 24 h; a live run of another namespace, such as the container's against the host's, is never swept.
 - **Don't:** add a fixed port or `reuseExistingServer: true`, point the e2e preview at `.svelte-kit` or `build/`, set `VOICEN_E2E_OUT_DIR` for any other build, or share one run directory between runs.
 
 ### E2 — Any page of a test's context that fails to boot fails its test with the cause
@@ -21,6 +21,13 @@ Tasks: T-050. Decisions: #77. Open questions: OQ-13 (answered).
 - **Intentional aborts:** the fixture never filters errorText (`net::ERR_ABORTED` included). A test that aborts a request on purpose, or navigates away with requests in flight, must scope that itself (e.g. a per-test expected-failure hook), never by a filter in the fixture.
 - **Don't:** import `test` from `@playwright/test` in a spec that uses `page` or `context`, open pages in a browser context the test creates itself (`browser.newContext()` is not covered), add retries (the cause is the report), or swallow failed requests in the fixture.
 
+### E3 — The e2e browser never shares the host network namespace
+
+- **Defect that produced it:** failure class `e2e-boot-flake`, M2 (F-010). Chromium in the host netns got `net::ERR_NETWORK_CHANGED` from other jobs' Docker network churn and failed page boots in local gates (T-015, T-039, T-061, T-065 validation records). T-050 measured 9/300 failures in the host netns against 0/200 in a private one. T-064's churn reproduction (`scripts/ci/e2e-net-churn.sh`, `--retries=0 --repeat-each=3`): before, host netns, 20 and 25 failed tests with 57 and 61 `ERR_NETWORK_CHANGED` lines (118 and 129 churn cycles); after, in the image with `--network none`, 0 failed, 360 passed, 0 such lines (118 cycles), run netns different from the host's.
+- **What breaks if you violate it:** local gates and validators fail at random at page boot, and the failure reads as a product bug.
+- **Where it is enforced:** the ui area runs in the project image `voicen-ui:1.63.0` (`docker/ui.Dockerfile`: the official Playwright `v1.63.0-noble` image plus pnpm 8.15.0; `make ui-image`; decisions #89). `pnpm e2e` is `scripts/e2e.sh`. On the host it checks `image inspect` (a missing image: exit 3 naming the image, it never pulls) and re-enters through `scripts/tw-run ui` with `--network none` (`-e CI` only when `CI` is set); it never runs Playwright on the host. In the image it compares the image's Playwright `driverVersion` with the lockfile's `@playwright/test` and exits 3 on a mismatch. The CI Gate job builds the same image (`make ui-image`) and runs the ui area in it. Pinned by `scripts/ci/e2e-entry.test.sh` and, on the host, by the `netns` check of `scripts/ci/e2e-net-churn.sh` (probe `e2e/netns-probe.spec.ts`, opted in by `target/e2e-netns-probe/enabled`).
+- **Don't:** run `playwright test` on the host, give the e2e container a network (drop `--network none`), pull the image implicitly from the entry, or add retries for `ERR_NETWORK_CHANGED`.
+
 ## Rejected approaches
 
 | Approach | Why rejected | Ref |
@@ -30,5 +37,5 @@ Tasks: T-050. Decisions: #77. Open questions: OQ-13 (answered).
 
 ## Open
 
-- M2, the host-network cause of every trace so far (Chromium in the host netns gets `net::ERR_NETWORK_CHANGED` from other jobs' Docker network churn; 9/300 failures in the host netns, 0/200 in a private one), is not fixed by E1. T-064 runs the ui e2e in the Playwright container (decisions #77). Until then the boot fixture names it, it does not prevent it.
+- M2, the host-network cause, is fixed by E3 (T-064).
 - Out of scope of T-050: the e2e build still writes the shared `target/licenses/npm-bundled.json` through the licenses Vite plugin, so two concurrent e2e builds in one tree write the same file. Not a served asset, so it cannot make a preview answer 500; not moved into the run directory.
