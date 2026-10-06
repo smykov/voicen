@@ -1,6 +1,6 @@
 ---
 name: developer-ui
-description: Implements a task in TypeScript, Svelte 5, SvelteKit (adapter-static, SPA), Vite; Tauri IPC via @tauri-apps/api once its analysis block exists and its red tests are written — makes the failing tests pass in the seam the analysis names, without weakening tests. Use for tasks in IN_PROGRESS. Copy this file per area (e.g. developer-frontend.md) and fill the placeholders. Never starts without an analysis block.
+description: Implements a task in TypeScript, Svelte 5, SvelteKit (adapter-static, SPA), Vite; Tauri IPC via @tauri-apps/api; Node 24 in the voicen-ui image once its analysis block exists and its red tests are written — makes the failing tests pass in the seam the analysis names, without weakening tests. Use for tasks in IN_PROGRESS. Copy this file per area (e.g. developer-frontend.md) and fill the placeholders. Never starts without an analysis block.
 tools: Read, Grep, Glob, Bash, Edit, Write
 # Model is chosen by task class, not by prompt text: the orchestrator routes a class of tasks to a role file.
 # Default opus. For a cheaper variant on isolated, well-specified work, copy this file (e.g. -light.md) with model: sonnet.
@@ -17,7 +17,7 @@ Process: `AGENTS.md`, `docs/process/lifecycle.md`, `PRINCIPLES.md`; a hook refus
 
 | Parameter | Value |
 |---|---|
-| Stack | TypeScript, Svelte 5, SvelteKit (adapter-static, SPA), Vite; Tauri IPC via @tauri-apps/api |
+| Stack | TypeScript, Svelte 5, SvelteKit (adapter-static, SPA), Vite; Tauri IPC via @tauri-apps/api; Node 24 in the voicen-ui image |
 | Source dirs | src |
 | Area gate | `make check` |
 | Lint / format | `scripts/tw-run ui -- pnpm lint` |

@@ -19,12 +19,13 @@ areas:
     conventions: "rustfmt defaults; clippy -D warnings; Windows-only code behind #[cfg(windows)] in src-tauri or behind traits in core; no unwrap() in non-test code paths that handle user input or I/O"
   - name: ui
     source_dirs: [src]
-    runner: host
+    runner: docker
+    image: "voicen-ui:1.63.0"        # built from docker/ui.Dockerfile (official mcr.microsoft.com/playwright:v1.63.0-noble + pnpm 8.15.0); `make ui-image`; decisions #89
     test_command: "pnpm test"
     lint_command: "pnpm lint"
     api_test_command: ""
     e2e_ui_command: "pnpm e2e"
-    stack: "TypeScript, Svelte 5, SvelteKit (adapter-static, SPA), Vite; Tauri IPC via @tauri-apps/api"
+    stack: "TypeScript, Svelte 5, SvelteKit (adapter-static, SPA), Vite; Tauri IPC via @tauri-apps/api; Node 24 in the voicen-ui image"
     test_framework: "Vitest (unit, src/**/*.test.ts); Playwright Chromium against the built UI with a mocked Tauri IPC (e2e/)"
     test_dirs: [src, e2e]
     test_helpers: "e2e: page.addInitScript defines window.__TAURI_INTERNALS__.invoke to mock Rust commands"
