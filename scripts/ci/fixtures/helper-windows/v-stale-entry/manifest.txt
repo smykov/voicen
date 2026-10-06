@@ -5,3 +5,4 @@ tray-icon@0.25.1 | hidden-helper | tray_icon_app | src/platform_impl/windows/mod
 
 wry@0.57.0 | child | - | src/webview2/mod.rs, WS_CHILD of the tao window
 gone@1.0.0 | visible-helper | gone helper | src/lib.rs (crate removed from the graph)
+tauri-runtime-wry@2.12.1 | child | - | src/undecorated_resizing.rs, WS_CHILD of the undecorated product window

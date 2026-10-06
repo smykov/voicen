@@ -1,0 +1,8 @@
+# T-065 review 1 #1: a graph line may carry the resolved features as a third token [f1,f2,...]
+tao 0.37.1 [x11,dbus,rwh_06] crates/tao-0.37.1
+windows-sys 0.59.0 crates/windows-sys-0.59.0
+tray-icon 0.25.1 [serde] crates/tray-icon-0.25.1
+wry 0.57.0 [] crates/wry-0.57.0
+serde 1.0.0 [derive,std] crates/serde-1.0.0
+tauri-runtime-wry 2.12.1 [common-controls-v6] crates/tauri-runtime-wry-2.12.1
+tauri-plugin-single-instance 2.5.2 [semver] crates/tauri-plugin-single-instance-2.5.2

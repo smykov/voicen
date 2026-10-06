@@ -4,3 +4,4 @@ windows-sys@0.59.0 | binding | - | src/Windows/Win32/UI/WindowsAndMessaging/mod.
 tray-icon@0.25.1 | hidden-helper | tray_icon_app | src/platform_impl/windows/mod.rs, never WS_VISIBLE
 
 wry@0.57.0 | maybe-child | - | src/webview2/mod.rs, WS_CHILD of the tao window
+tauri-runtime-wry@2.12.1 | child | - | src/undecorated_resizing.rs, WS_CHILD of the undecorated product window

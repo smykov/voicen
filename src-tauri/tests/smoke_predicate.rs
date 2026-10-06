@@ -1446,6 +1446,69 @@ fn a_hidden_helper_class_made_visible_is_drift_and_counts() {
 }
 
 #[test]
+fn an_unlisted_product_class_window_is_drift_that_names_both_causes() {
+    // T-065 review 1 #2 (F-003 direction). A click-through overlay shown at start (class
+    // 'Tauri Window', the product class of every tauri window; LAYERED|TRANSPARENT from
+    // tao's click-through plus the overlay's NOACTIVATE|TOPMOST|TOOLWINDOW) has the four
+    // helper bits, so the census reports it as 'unlisted' before the smoke counts windows.
+    // Contract chosen (review option 1; the host tripwire refuses the product class as a
+    // visible-helper entry, scripts/ci/helper-windows.test.sh v-product-class-*): the
+    // unlisted drift stays drift, and is still counted as shown, but its log line names
+    // both causes: a new framework helper (a manifest entry, helper-windows.txt) OR a
+    // product window shown at start, which is the F-003 defect and must never be listed.
+    // The census and the shown set are pinned as state; the log line is the deliverable
+    // of the finding (the advice the reader acts on). Red today: Format-HelperDrift says
+    // only "re-read the crate's source, fix the entry's verdict". Bites: a message that
+    // names the manifest cause only; one that drops the manifest cause; a census that
+    // exempts the product class (then the drift is empty); a predicate that excludes it.
+    let listed = entry("t065-listed", "visible-helper", LISTED_HELPER);
+    let manifest = TempManifest::new("product", &[&listed]);
+    let overlay = Spec {
+        class: Class::Own(TAURI_WINDOW.to_owned()),
+        title: Some(PROBE_TITLE.to_owned()),
+        ex: WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+        style: WS_POPUP | WS_VISIBLE,
+        rect: (40, 40, 320, 56),
+        owned: false,
+        restyle: None,
+        alpha: None,
+    };
+    let (windows, _) = shown_with_premises(vec![
+        overlay,
+        Spec::helper_shaped(LISTED_HELPER, None, HELPER_EX),
+    ]);
+    let h = windows.hwnds[1];
+    assert_has_helper_bits(h, "click-through overlay window");
+    let (drift, format) = census(&manifest);
+    assert!(
+        drift.contains(&("unlisted".to_owned(), TAURI_WINDOW.to_owned())),
+        "the census does not report the visible product-class window '{TAURI_WINDOW}' with \
+         the helper bits ({h:#x}) as unlisted drift: {drift:?}"
+    );
+    let line = format.to_lowercase();
+    assert!(
+        format.contains("helper list drift") && format.contains(TAURI_WINDOW),
+        "the census log line does not say 'helper list drift' and name the class: {format:?}"
+    );
+    assert!(
+        line.contains("product window") && format.contains("F-003"),
+        "the unlisted drift line names only the manifest cause: it must also say the window \
+         may be a product window shown at start (F-003, never to be listed): {format:?}"
+    );
+    assert!(
+        format.contains("helper-windows.txt") && line.contains("entry"),
+        "the unlisted drift line no longer names the other cause, a new framework helper \
+         that needs a manifest entry in helper-windows.txt: {format:?}"
+    );
+    let shown = shown_with_manifest(&manifest);
+    assert!(
+        shown.contains(&h),
+        "the product-class window with the helper bits ({h:#x}) is excluded from the shown \
+         set: {shown:?}"
+    );
+}
+
+#[test]
 fn the_shown_rule_reads_the_manifest_it_is_given() {
     // One source, script side: the helper classes come from the manifest, not from a literal
     // in the script. The same helper-shaped window is excluded with a manifest that lists

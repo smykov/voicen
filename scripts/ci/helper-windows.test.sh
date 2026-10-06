@@ -8,28 +8,56 @@
 #   scripts/ci/helper-windows.sh [--graph <file>] [--manifest <file>]
 #   --manifest  default scripts/ci/helper-windows.txt. One entry per line, `#` comments and
 #               blank lines ignored, fields separated by `|` and trimmed:
-#                 <crate>@<version> | <verdict> | <class or -> | <source citation>
+#                 <key> | <verdict> | <class or -> | <source citation>
 #               verdict: visible-helper | hidden-helper | child | binding; visible-helper and
 #               hidden-helper name a class (pattern, `{identifier}` = tauri.conf.json
 #               `identifier`), child and binding give `-`. Any other verdict, or a helper
 #               verdict with `-`, is a violation (exit 1).
+#               <key> (T-065 review 1 #1: a feature flip of a listed crate changes its windows
+#               without touching crate@version, e.g. tauri-plugin-single-instance's `semver`
+#               feature suffixes its `-sic` class):
+#                 visible-helper, hidden-helper, child: <crate>@<version> when the crate's
+#                   resolved feature set is empty, else <crate>@<version>[<f1>,<f2>,...] with
+#                   the features sorted bytewise (LC_ALL=C), comma separated, no spaces;
+#                 binding: <crate>@<version> only, whatever its features (a bindings crate
+#                   declares CreateWindowEx and creates no window under any feature; keying it
+#                   by features would trip on every Win32 feature src-tauri adds). A binding
+#                   entry with a feature list is malformed (exit 1).
+#               So a feature gained or lost by a non-binding crate shows as the new key
+#               unlisted and the old one stale (exit 1).
 #   --graph     default: the shell's Windows dependency graph (cargo metadata for
-#               x86_64-pc-windows-msvc, as check-shell-windows resolves it). A graph file has
-#               one line per package, `<name> <version> <package dir>` (whitespace separated;
-#               a relative dir is relative to the graph file's own directory).
-#   The guard greps each package's src/ (recursively, raw text: comments count) for
-#   `CreateWindowEx` and compares the set of <name>@<version> that match with the set of
-#   manifest entries:
-#     exit 0  sets equal; prints "ok:".
-#     exit 1  a matching package not in the manifest (unlisted; a version change shows as the
-#             new version unlisted and the old one stale), or a manifest entry that is not a
-#             matching package of the graph (stale: gone from the graph, or its src/ no longer
-#             mentions CreateWindowEx), or a malformed entry. The listing names each
-#             <crate>@<version>.
-#     exit 3  cannot run: graph or manifest missing, a package dir or its src/ missing, a
-#             grep/cargo/docker error. Never a pass.
+#               x86_64-pc-windows-msvc, as check-shell-windows resolves it; the features are
+#               `resolve.nodes[].features` of each package). A graph file has one line per
+#               package, `<name> <version> [<features>] <package dir>` (whitespace separated;
+#               the optional third token `[f1,f2,...]` is the resolved feature set in any
+#               order, absent or `[]` = none; a relative dir is relative to the graph file's
+#               own directory).
+#   The guard greps, recursively and as raw text (comments count), each package's src/ in
+#   --graph mode; in default mode each package's src/, or its whole package dir when a lib,
+#   proc-macro or bin target lies outside src/ (a crate with lib.rs at its root; review 1
+#   #3). It compares the set of keys of the packages that mention `CreateWindowEx` with the
+#   set of manifest keys.
+#   Product window class (T-065 review 1 #2, F-003): a visible-helper class is never the
+#   app's product window class. The product classes are the string literals passed as
+#   `window_classname("<class>")` in the scanned source of the graph's packages (today
+#   tauri-runtime-wry's WindowBuilderWrapper::new, "Tauri Window": every tauri window, the
+#   click-through overlay included). A visible-helper entry whose class ({identifier}
+#   resolved) equals one is a violation (exit 1, names the crate@version and the class). No
+#   such literal anywhere in the graph is "cannot run" (exit 3): the rule is never skipped
+#   because its input is missing.
+#     exit 0  sets equal and no product class listed as a visible helper; prints "ok:".
+#     exit 1  a matching package not in the manifest (unlisted; a version or feature change
+#             shows as the new key unlisted and the old one stale), or a manifest entry that
+#             is not a matching package of the graph (stale: gone from the graph, its source no
+#             longer mentions CreateWindowEx, or its features changed), or a malformed entry,
+#             or a product class listed as a visible helper. The listing names each key
+#             ("unlisted: <key>", "stale: <key> ...").
+#     exit 3  cannot run: graph or manifest missing, a package dir or its src/ missing, no
+#             product window class in the graph, a grep/cargo/docker error. Never a pass.
 #
-# Cases (fixture dirs hold graph.txt, manifest.txt and crates/<name>-<version>/src/...):
+# Cases (fixture dirs hold graph.txt, manifest.txt and crates/<name>-<version>/src/...; every
+# fixture graph holds tauri-runtime-wry with its `window_classname("...")` literal, the input of
+# the product-class rule):
 #   ok-*  every window-creating crate listed, every entry matched: exit 0.
 #   v-*   one drift each: exit 1, the listing names the crate@version.
 #   c-*   cannot run: exit 3, "cannot run".
@@ -89,6 +117,11 @@ check() {
 # Allowed: a visible helper, a hidden helper, a child-window crate and a binding crate, all
 # listed with their exact version; a crate without CreateWindowEx needs no entry.
 check ok-listed               0 "ok:"
+# T-065 review 1 #1: resolved features are part of the key. Graph features in any order, `[]` =
+# none; the manifest key lists them sorted.
+check ok-features             0 "ok:"
+# A binding crate is keyed by crate@version alone: its Win32 features change nothing.
+check ok-binding-features     0 "ok:"
 
 # Drift: exit 1, the listing names the crate@version.
 check v-unlisted-crate        1 "newhelper@0.1.0"   # a new crate calls CreateWindowExW (deep under src/), not listed
@@ -99,10 +132,20 @@ check v-no-longer-creates     1 "quiet@2.0.0"       # listed and in the graph, i
 check v-comment-mention       1 "mentions@0.3.0"    # CreateWindowExA only in a comment: raw text, any mention trips (errs loud)
 check v-unknown-verdict       1 "wry@0.57.0"        # verdict `maybe-child` is not one of the four
 check v-helper-without-class  1 "tao@0.37.1"        # visible-helper with class `-`: the census would have nothing to match
+# T-065 review 1 #1: a feature flip of a listed crate, same crate@version, is drift at its commit.
+check v-feature-change        1 "unlisted: tauri-plugin-single-instance@2.5.2[semver]"  # the plugin gains `semver` (suffixed -sic class) ...
+check v-feature-change        1 "stale: tauri-plugin-single-instance@2.5.2 "            # ... and its featureless entry is stale
+check v-feature-dropped       1 "tao@0.37.1[rwh_06]"                                     # the entry records a feature the graph no longer resolves
+check v-binding-with-features 1 "windows-sys@0.59.0"                                     # a binding entry carries no feature list
+# T-065 review 1 #2 (F-003): the product window class is never a visible helper.
+check v-product-class-helper  1 "tauri-runtime-wry@2.12.1"   # `Tauri Window` listed as visible-helper ...
+check v-product-class-helper  1 "Tauri Window"               # ... and the listing names the class
+check v-product-class-from-source 1 "Voicen Main Window"     # the product class comes from the runtime's window_classname("..."), not a literal in the guard
 
 # Cannot run: exit 3, never a pass.
 check c-missing-crate-dir     3 "cannot run"        # tray-icon's dir is gone: unscanned is not "does not call"
 check c-crate-without-src     3 "cannot run"        # serde has no src/
+check c-no-product-class      3 "cannot run"        # no window_classname("...") literal in the graph: the product-class rule cannot run
 run "graph file missing" 3 "cannot run" --graph "$tmp/no-such-graph.txt" --manifest "$fx/ok-listed/manifest.txt"
 run "manifest missing"   3 "cannot run" --graph "$fx/ok-listed/graph.txt" --manifest "$tmp/no-such-manifest.txt"
 # A grep that fails must not read as "no package calls CreateWindowEx".
@@ -121,6 +164,25 @@ if [ -f "$manifest" ]; then
   if [ -n "$tao_version" ]; then
     grep -v '^tao@' "$manifest" >"$tmp/manifest-without-tao.txt"
     run "real graph, manifest without tao" 1 "tao@$tao_version" --manifest "$tmp/manifest-without-tao.txt"
+    # T-065 review 1 #1: the default graph's keys carry resolve.nodes[].features. tao resolves
+    # with features in the shell's graph (dbus, rwh_06, x11 at 0.37.1), so its committed entry
+    # carries a feature list; the same manifest with that list dropped is drift naming tao.
+    if grep -qE '^tao@[^ |]*\[[^]]+\]' "$manifest"; then
+      sed -E 's/^(tao@[^ |[]*)\[[^]]*\]/\1/' "$manifest" >"$tmp/manifest-tao-no-features.txt"
+      run "real graph, manifest with tao's features dropped" 1 "tao@$tao_version" --manifest "$tmp/manifest-tao-no-features.txt"
+    else
+      echo "FAIL real graph: the tao entry of $manifest has no feature list (want tao@<version>[<features>]: tao resolves with features in the shell's Windows graph, resolve.nodes[].features of cargo metadata; T-065 review 1 #1)" >&2
+      failed=$((failed + 1))
+    fi
+    # T-065 review 1 #2: the default graph's product class (tauri-runtime-wry's
+    # window_classname literal) is read; listing it as a visible helper is refused.
+    if grep -qE '^tauri-runtime-wry@' "$manifest"; then
+      sed -E 's/^(tauri-runtime-wry@[^|]*)\|[^|]*\|[^|]*\|/\1| visible-helper | Tauri Window |/' "$manifest" >"$tmp/manifest-product-helper.txt"
+      run "real graph, product class listed as visible helper" 1 "Tauri Window" --manifest "$tmp/manifest-product-helper.txt"
+    else
+      echo "FAIL real graph: $manifest has no tauri-runtime-wry entry (it creates the drag-resize child windows of every undecorated tauri window)" >&2
+      failed=$((failed + 1))
+    fi
   else
     echo "FAIL real graph: $manifest has no tao@<version> entry (tao creates the event-target window in every tauri process)" >&2
     failed=$((failed + 1))

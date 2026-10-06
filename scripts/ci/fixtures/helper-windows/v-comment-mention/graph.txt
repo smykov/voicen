@@ -4,3 +4,4 @@ tray-icon 0.25.1 crates/tray-icon-0.25.1
 wry 0.57.0 crates/wry-0.57.0
 serde 1.0.0 crates/serde-1.0.0
 mentions 0.3.0 crates/mentions-0.3.0
+tauri-runtime-wry 2.12.1 crates/tauri-runtime-wry-2.12.1
