@@ -1,3 +1,4 @@
+# Temporary workaround, RCA: T-066 (Windows premise not checked on Windows before main).
 # T-061: Windows Credential Manager entries for the CI steps in .github/workflows/ci.yml,
 # through the same Win32 calls and type the product uses (src-tauri/src/credentials.rs
 # WinCredentialStore, src-tauri/src/win/purge.rs WinCredentialNamespace): CredWriteW,
@@ -17,7 +18,8 @@
 #                                                    the secret as UTF-8 bytes (like the product)
 #   Test-VoicenCredential -Target <t>                CredReadW GENERIC: $true / $false (1168)
 #   Get-VoicenCredentials -Prefix <p>                CredEnumerateW "<p>*" (the purge's own filter):
-#                                                    objects with Target and Type; none on 1168
+#                                                    objects with Target and Type, one per pipeline
+#                                                    item (wrap in @(...)); none on 1168
 #   Remove-VoicenCredential -Target <t>              CredDeleteW GENERIC; 1168 is fine (already gone)
 # Blobs are never read back or returned: the secret only goes in.
 
@@ -151,7 +153,9 @@ function Test-VoicenCredential {
 
 function Get-VoicenCredentials {
   param([Parameter(Mandatory = $true)][string]$Prefix)
-  , [VoicenCredentials]::List($Prefix)
+  # No leading comma: the entries go to the pipeline one by one, so a caller's @(...) is a flat
+  # array of entries for 0, 1 or many (T-061 review 5 #3).
+  [VoicenCredentials]::List($Prefix)
 }
 
 function Remove-VoicenCredential {

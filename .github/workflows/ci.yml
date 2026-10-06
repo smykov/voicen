@@ -426,6 +426,7 @@ jobs:
       - name: The installed voicen.exe --purge-credentials removes every Voicen/ entry, keeps the others, exits 0 with no output and no app start (T-061)
         shell: pwsh
         run: |
+          # Temporary workaround, RCA: T-066 (Windows premise not checked on Windows before main).
           $exe = Join-Path $env:LOCALAPPDATA 'Voicen\voicen.exe'
           # voicen.log plus rolled voicen-*.log (T-008).
           $log = Join-Path $env:LOCALAPPDATA 'Voicen\logs\voicen*.log'
