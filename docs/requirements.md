@@ -34,7 +34,7 @@ Pointers: `(brief)` — the owner's brief; `(iN)` — interview round N; `(r1#N)
 
 **First run (r1#4):** on first launch the settings window opens on the Engine tab with engine = none; the user picks an engine (enters a key or downloads a model) and can dictate immediately with the defaults (FR-21).
 
-Target date: see OQ-01.
+Target date: when ready (decisions #82).
 
 ## 3. Scope
 
@@ -59,7 +59,7 @@ Target date: see OQ-01.
 - Provider-specific APIs other than OpenAI-compatible (i2): the OpenAI-compatible client covers OpenAI, Groq and compatible local servers.
 - Storing audio in history (i3): history keeps text only.
 - Automatic fallback to another engine (i3: notification + retry was chosen, not fallback).
-- Code signing, auto-update, licensing (i1: public open-source, not a commercial product). See OQ-02 for SmartScreen.
+- Code signing, auto-update, licensing (i1: public open-source, not a commercial product). No signing in release 1, SmartScreen warning accepted (decisions #83).
 - Real-time streaming transcription while speaking.
 
 ## 4. Functional requirements
@@ -100,7 +100,7 @@ Target date: see OQ-01.
 
 | ID | Characteristic | Requirement (measurable) | How it is checked | Priority | Release |
 |---|---|---|---|---|---|
-| NFR-01 | Performance | Over a fixed set of 20 phrases of 5–15 s (committed to the repo), p90 stop → paste ≤ 3 s via the API engine (OpenAI `whisper-1` and Groq `whisper-large-v3-turbo`, both measured, on a ≥ 20 Mbit/s connection), and ≤ 10 s via the built-in local `small` model on the reference machine (OQ-03); without LLM post-processing (r1#1). Each listed API provider must meet p90 ≤ 3 s on its own; the local figure is measured warm (model loaded), the cold first dictation is logged but not counted (r2#6). | Benchmark run from the log timings (FR-20) on the owner's PC per release. | Must | 1 |
+| NFR-01 | Performance | Over a fixed set of 20 phrases of 5–15 s (committed to the repo), p90 stop → paste ≤ 3 s via the API engine (OpenAI `whisper-1` and Groq `whisper-large-v3-turbo`, both measured, on a ≥ 20 Mbit/s connection), and ≤ 10 s via the built-in local `small` model on the reference machine (the owner's Windows PC, decisions #84); without LLM post-processing (r1#1). Each listed API provider must meet p90 ≤ 3 s on its own; the local figure is measured warm (model loaded), the cold first dictation is logged but not counted (r2#6). | Benchmark run from the log timings (FR-20) on the owner's PC per release. | Must | 1 |
 | NFR-02 | Performance | The microphone is opened only on hotkey press (the Windows "microphone in use" indicator shows only while recording); hotkey press → capture start p95 ≤ 200 ms on a wired or USB microphone; Bluetooth headsets may lose the first ~0.5 s (accepted) (r1#11). | Automated timing test on the Windows runner with the injected audio source; manual check on the owner's PC. | Must | 1 |
 | NFR-03 | Resource use | Idle in tray with no local model loaded and no window open: CPU < 1 %, RAM ≤ 150 MB, counted as the sum of the private working set of the app process and its WebView2 child processes; the overlay and settings webviews are created on demand and destroyed when closed (r2#5). With the built-in engine selected, the model stays loaded after use and is unloaded after 10 min idle (r1#13). RAM while a model is loaded is not bounded; settings show each model's size (v4). | Measured on the reference machine; unit test of the unload timer. | Should | 1 |
 | NFR-04 | Security | API keys are stored in Windows Credential Manager (r1#23), never in plain-text config, logs or crash reports. | Unit test on storage; log redaction test; secret scanner in CI. | Must | 1 |
@@ -116,13 +116,13 @@ Target date: see OQ-01.
 ## 6. Constraints
 
 - **Platform:** Windows 10/11 x64 only in release 1 (i1).
-- **Distribution:** public open-source on GitHub under MIT (r1#20); installer in GitHub Releases; no code signing in release 1 (working assumption, OQ-02).
+- **Distribution:** public open-source on GitHub under MIT (r1#20); installer in GitHub Releases; no code signing in release 1 (decisions #83).
 - **Development host:** Linux (this machine). Windows-specific behaviour (global hotkey, input simulation, clipboard, tray) is built and tested on the GitHub Actions Windows runner; manual verification on a real Windows machine by the owner.
 - **Install policy (i2):** packages, toolchains, Docker images and MCP servers may be installed on the dev host and in CI, each only with the owner's explicit consent. CI: GitHub Actions, including the Windows runner.
 - **Host now has:** Node 20, pnpm, Python 3.12, uv, Docker, make, gcc, gh. No Rust, Go, .NET, CMake, Wine.
 - **Costs:** the user brings their own API keys; the project pays for nothing but free CI minutes.
 - **Team:** the owner + AI agents; manual Windows checks by the owner on their PC (r1#26).
-- **Deadline:** OQ-01. If the date turns out tight, cut first: FR-16, FR-14, FR-19, NFR-10, then the Russian UI of FR-15 (roast round 1, scope).
+- **Deadline:** when ready (decisions #82). If the date turns out tight, cut first: FR-16, FR-14, FR-19, NFR-10, then the Russian UI of FR-15 (roast round 1, scope).
 
 ## 7. Glossary and data
 
@@ -179,7 +179,7 @@ Target date: see OQ-01.
 | Whisper hallucinates text on silence/noise; a VAD gate before sending prevents pasting garbage. | confirmed (r1#2) | FR-12 |
 | Global hotkey via RegisterHotKey rather than a low-level keyboard hook where possible (lower antivirus heuristics, survives hook timeouts). | working assumption | FR-05, FR-26, OQ-02 |
 | API keys in Windows Credential Manager. | confirmed (r1#23) | NFR-04 |
-| No code signing; SmartScreen warning accepted in release 1. | working assumption → OQ-02 | NFR-09 |
+| No code signing; SmartScreen warning accepted in release 1. | decided (decisions #83) | NFR-09 |
 | Auto-paste into elevated (admin) windows is impossible from a non-elevated app; text stays in clipboard. | working assumption | FR-10 |
 | Pre-mortem: auto-paste unreliable in some apps (Electron, games, RDP) → users lose trust. | risk | FR-10, NFR-08 |
 | Pre-mortem: local engine too slow on CPU for `medium`/`large` → users think the app is broken. | risk; mitigated by showing a recommended model and progress | FR-07, NFR-01 |
@@ -189,4 +189,4 @@ Target date: see OQ-01.
 | Pre-mortem: Ctrl+Alt+V instead of Ctrl+V lands in the target because modifiers are still held. | risk; mitigated by FR-10 (wait for modifier release) | FR-10 |
 | Pre-mortem: unsigned installer flagged by SmartScreen/antivirus (keyboard hook + input simulation looks like a keylogger). | risk | NFR-09, OQ-02 |
 
-Open questions: OQ-01, OQ-02, OQ-03 (`docs/open-questions.md`); OQ-04 answered (10 min, r1#12).
+Open questions: none; OQ-01 → decisions #82, OQ-02 → #83, OQ-03 → #84, OQ-04 answered (10 min, r1#12).
