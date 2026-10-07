@@ -71,4 +71,4 @@ win and this file is corrected. Amendments: a commit that changes this file with
 `docs/decisions.md`; the owner decides. Versioning: MAJOR for a removed or redefined principle,
 MINOR for an added one, PATCH for wording. Every plan's Constitution Check lists principles I–V.
 
-**Version**: 1.1.0 | **Ratified**: 2026-10-02 | **Last Amended**: 2026-10-07
+**Version**: 1.1.1 | **Ratified**: 2026-10-02 | **Last Amended**: 2026-10-07
