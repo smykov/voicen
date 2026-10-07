@@ -1,0 +1,4 @@
+# Shell scripts keep LF on every checkout: the Windows CI job runs scripts/ci/telegram-send.sh
+# with Git Bash, and the runner's Git converts text files to CRLF (core.autocrlf), which bash
+# cannot run ($'\r': command not found). T-070.
+*.sh text eol=lf

@@ -548,11 +548,13 @@ jobs:
       # T-070 (decisions #93): the installer goes to the owner's Telegram chat on main and v* tags.
       # The premises run on every ref (wip included, P-016): red when there is not exactly one
       # *-setup.exe or its name lacks _<tauri.conf.json version>_; a file of 50 MB or more (Bot API
-      # upload limit) is a warning and send=false. The send step consumes only these outputs; its
-      # if: has no status function, so it never runs after a red step. The token reaches curl only
-      # as config on stdin (printf is a bash builtin: no argv, no file); no token -> one line, exit 0;
-      # a Telegram or network failure is a warning (curl exit code and API description), never red:
-      # the run stays the "deployed" evidence and the installer is in the artifact above. No set -x.
+      # upload limit) is a warning and send=false. The send is one script, scripts/ci/telegram-send.sh
+      # (contract in its header, host test scripts/ci/telegram-send.test.sh in make check): token and
+      # chat id reach curl only as config on stdin; no token -> one line, exit 0; a Telegram or network
+      # failure is a ::warning:: (curl exit code and API description), never red. The failure-branch
+      # step runs that script on every ref with an obviously fake token (Telegram refuses it, nothing
+      # reaches a chat); the main/v* step runs it with the secrets, consumes only the premise step's
+      # outputs, and its if: has no status function, so it never runs after a red step.
       - name: Installer for Telegram
         id: telegram-installer
         shell: bash
@@ -580,6 +582,26 @@ jobs:
             printf 'caption=%s\n' "$caption"
             printf 'send=%s\n' "$send"
           } >> "$GITHUB_OUTPUT"
+      - name: Telegram send failure branch (fake token, nothing reaches a chat)
+        timeout-minutes: 10
+        shell: bash
+        env:
+          INSTALLER: ${{ steps.telegram-installer.outputs.path }}
+          CAPTION: ${{ steps.telegram-installer.outputs.caption }}
+        run: |
+          fake='0:voicen-ci-example-fake-not-a-secret'
+          rc=0
+          out="$(TELEGRAM_BOT_TOKEN="$fake" TELEGRAM_CHAT_ID=1 bash scripts/ci/telegram-send.sh "$INSTALLER" "$CAPTION" 2>&1)" || rc=$?
+          sed 's/^/telegram-send: /' <<<"$out"
+          bad=0
+          if [ "$rc" != 0 ]; then echo "::error::telegram-send.sh exited $rc on a refused send, expected 0"; bad=1; fi
+          if ! grep -qE '^::warning::installer not sent to Telegram: curl exit code [1-9][0-9]*, API description: .+' <<<"$out" \
+            || grep -qE '^::warning::.*API description: none$' <<<"$out"; then
+            echo "::error::telegram-send.sh printed no ::warning:: with a non-zero curl exit code and Telegram's description"; bad=1
+          fi
+          if grep -qF -e "$fake" -e "${fake#*:}" <<<"$out"; then echo "::error::telegram-send.sh printed the (fake) token"; bad=1; fi
+          [ "$bad" = 0 ] || exit 1
+          echo "failure branch: exit 0, warning with Telegram's description, the fake token not printed"
       - name: Send the installer to Telegram (main and v* tags only)
         if: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && steps.telegram-installer.outputs.send == 'true' }}
         timeout-minutes: 10
@@ -589,23 +611,7 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           INSTALLER: ${{ steps.telegram-installer.outputs.path }}
           CAPTION: ${{ steps.telegram-installer.outputs.caption }}
-        run: |
-          if [ -z "${TELEGRAM_BOT_TOKEN:-}" ]; then
-            echo "no TELEGRAM_BOT_TOKEN: nothing is sent"
-            exit 0
-          fi
-          rc=0
-          response="$(printf 'url = "https://api.telegram.org/bot%s/sendDocument"' "$TELEGRAM_BOT_TOKEN" \
-            | curl -s --fail-with-body --max-time 300 -K - \
-              -F "chat_id=${TELEGRAM_CHAT_ID}" \
-              -F "document=@${INSTALLER}" \
-              -F "caption=${CAPTION}" 2>/dev/null)" || rc=$?
-          if [ "$rc" != 0 ]; then
-            description="$(printf '%s' "$response" | tr -d '\r\n' | sed -n 's/.*"description"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
-            echo "::warning::installer not sent to Telegram: curl exit code $rc, API description: ${description:-none}"
-            exit 0
-          fi
-          echo "installer sent to Telegram: $(basename "$INSTALLER")"
+        run: bash scripts/ci/telegram-send.sh "$INSTALLER" "$CAPTION"
       # T-059: runner capability facts for later Windows CI tests (docs/decisions/windows-ci-runner.md).
       # A missing capability is a result line, never a red step; red only when the probe is defective:
       # its test fails (pipefail), there is not exactly one end line, or the number of well-formed fact

@@ -1,6 +1,6 @@
 # The gate: every area's checks, each through scripts/tw-run in the area's toolchain.
 .PHONY: check check-shell-layout check-shell-layout-fixtures check-helper-windows-fixtures check-core \
-	check-ci-credentials check-setup-node-cache check-ci-wip check-e2e-entry-fixtures \
+	check-ci-credentials check-setup-node-cache check-ci-wip check-telegram-send check-e2e-entry-fixtures \
 	check-shell-windows \
 	check-ui core-image ui-image \
 	licenses licenses-check licenses-unit licenses-fixture licenses-rust licenses-bundle \
@@ -8,7 +8,7 @@
 
 # check-shell-windows after check-core: the shell depends on voicen-core, so a core error is
 # reported first by the faster native check-core, before the slower cross-target build.
-check: check-shell-layout check-shell-layout-fixtures check-helper-windows-fixtures check-ci-credentials check-setup-node-cache check-ci-wip check-core \
+check: check-shell-layout check-shell-layout-fixtures check-helper-windows-fixtures check-ci-credentials check-setup-node-cache check-ci-wip check-telegram-send check-core \
 	check-shell-windows check-e2e-entry-fixtures check-ui \
 	licenses-check
 
@@ -53,6 +53,13 @@ check-setup-node-cache:
 # scripts/ci/ci-wip.sh on scripts/ci/fixtures/ci-wip/ and the real repo. Host bash and awk.
 check-ci-wip:
 	scripts/ci/ci-wip.test.sh
+
+# T-070 (decisions #93): scripts/ci/telegram-send.sh, the one Telegram send path of ci.yml, keeps
+# the token and chat id out of curl's argv and its output, sends the caption as a form string,
+# and turns every failure into one ::warning:: line with exit 0. Stub curl on PATH, offline.
+# Host bash.
+check-telegram-send:
+	scripts/ci/telegram-send.test.sh
 
 # T-064: the ui e2e entry point (package.json scripts.e2e) runs Playwright only in the ui image
 # at the lockfile's @playwright/test version, with --network none and the caller's CI; a
