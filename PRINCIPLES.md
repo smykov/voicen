@@ -1,6 +1,6 @@
 # PRINCIPLES.md
 
-**Version:** 1.0.0 — bumped in a separate commit on every amendment, recorded in `docs/decisions.md` (major: removed or reversed · minor: added or moved up a tier · patch: wording). Amendments are owner decisions; see `docs/process/principles.md` §2a.
+**Version:** 1.1.0 — bumped in a separate commit on every amendment, recorded in `docs/decisions.md` (major: removed or reversed · minor: added or moved up a tier · patch: wording). Amendments are owner decisions; see `docs/process/principles.md` §2a.
 
 Engineering principles for this project. Each is enforced at a tier:
 **T0** written guidance · **T1** reviewer checklist · **T2** hook warns · **T3** hook/CI blocks.
@@ -86,6 +86,11 @@ Each **Why** names, in one generic sentence, the kind of incident that produced 
 - **Tier:** T1
 - **How checked:** every `rca` analysis names its exit — (a) code: invariant in one seam; (b) architecture: `/arch-review` → owner decision, a spec/plan through the project's spec tool when more than one seam or service changes; (c) process: amendment of this file in a separate commit with a version bump. (b) and (c) are owner decisions recorded in `docs/decisions.md`.
 
+### P-016 — A premise only CI can run is run on CI before review
+- **Why:** every red CI run on `main` here (10 of 10) was a premise that only CI could run (a Win32 contract, a runner tool, pwsh/C# the host cannot parse, link args, Windows timing, an action default), first executed by the delivery push, and each local fix was again first run on `main`. Origin: F-001, F-002, F-005, F-007, F-008, F-009, F-011 (class `ci-premise-unchecked-before-main`, rca T-066, decisions #90).
+- **Tier:** T1 + T2 (T3 pending kit feedback)
+- **How checked:** every task whose diff touches anything outside `docs/**` cites under `## Tests` a line `CI: <run url or id> @ <sha>`: a green run of the full CI workflow (Gate and Windows jobs) on `wip/<ID>` at the reviewed head commit, before `NEEDS_REVIEW → CODE_COMPLETE`. A red `wip` run returns the task before review. The code-reviewer refuses `APPROVE` without that line (T1); "proven by the next push to `main`" is never evidence. The orchestrator's `git push origin HEAD:wip/<ID>` is CI only, not a delivery (pre-push skips it; the branch is deleted at `CODE_COMPLETE`). T2: the flow pushes `wip/<ID>` for areas with `ci_workflow`, and `make check` fails when `ci.yml` stops triggering on `wip/**` or a cache save is not limited to `main`. T3 (the review gate requiring the run id) is pending kit feedback.
+
 ---
 
 ## Registry
@@ -107,3 +112,4 @@ Each **Why** names, in one generic sentence, the kind of incident that produced 
 | P-013 | Config must reach runtime | T1 | Accepted |
 | P-014 | Docs follow code; CLAUDE.md is a map | T1+T2 | Accepted |
 | P-015 | Recurrence resolved at its level (code / architecture / process) | T1 | Accepted |
+| P-016 | CI-only premise run on CI before review | T1+T2 | Accepted |
