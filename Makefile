@@ -1,6 +1,7 @@
 # The gate: every area's checks, each through scripts/tw-run in the area's toolchain.
 .PHONY: check check-shell-layout check-shell-layout-fixtures check-helper-windows-fixtures check-core \
-	check-ci-credentials check-setup-node-cache check-ci-wip check-telegram-send check-telegram-failure-branch check-e2e-entry-fixtures \
+	check-ci-credentials check-setup-node-cache check-ci-wip check-telegram-send check-telegram-failure-branch check-telegram-guard \
+	check-e2e-entry-fixtures \
 	check-shell-windows \
 	check-ui core-image ui-image \
 	licenses licenses-check licenses-unit licenses-fixture licenses-rust licenses-bundle \
@@ -8,7 +9,7 @@
 
 # check-shell-windows after check-core: the shell depends on voicen-core, so a core error is
 # reported first by the faster native check-core, before the slower cross-target build.
-check: check-shell-layout check-shell-layout-fixtures check-helper-windows-fixtures check-ci-credentials check-setup-node-cache check-ci-wip check-telegram-send check-telegram-failure-branch check-core \
+check: check-shell-layout check-shell-layout-fixtures check-helper-windows-fixtures check-ci-credentials check-setup-node-cache check-ci-wip check-telegram-send check-telegram-failure-branch check-telegram-guard check-core \
 	check-shell-windows check-e2e-entry-fixtures check-ui \
 	licenses-check
 
@@ -67,6 +68,14 @@ check-telegram-send:
 # Canned outputs, offline. Host bash.
 check-telegram-failure-branch:
 	scripts/ci/telegram-failure-branch.test.sh
+
+# T-070 (validation 1, M6): every ci.yml step that reads secrets.TELEGRAM_BOT_TOKEN or
+# secrets.TELEGRAM_CHAT_ID has an if: with github.event_name == 'push' and (main || v* tag) as
+# top-level && operands, no status function and no continue-on-error. The self-test runs the
+# tripwire scripts/ci/telegram-guard.sh on scripts/ci/fixtures/telegram-guard/ and the real
+# ci.yml (also with M6 applied). Host bash and awk.
+check-telegram-guard:
+	scripts/ci/telegram-guard.test.sh
 
 # T-064: the ui e2e entry point (package.json scripts.e2e) runs Playwright only in the ui image
 # at the lockfile's @playwright/test version, with --network none and the caller's CI; a
