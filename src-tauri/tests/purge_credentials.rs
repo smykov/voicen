@@ -172,6 +172,16 @@ struct Planted(Vec<(String, CRED_TYPE)>);
 
 impl Planted {
     fn add(&mut self, target: impl Into<String>, kind: CRED_TYPE) -> String {
+        self.add_with(target, kind, read_back)
+    }
+
+    /// `add` with the read-back injected, so a test can make it fail.
+    fn add_with(
+        &mut self,
+        target: impl Into<String>,
+        kind: CRED_TYPE,
+        read_back: impl Fn(&str, CRED_TYPE) -> windows::core::Result<()>,
+    ) -> String {
         let target = target.into();
         // Registered before the write: a half-planted test still cleans up.
         self.0.push((target.clone(), kind));
