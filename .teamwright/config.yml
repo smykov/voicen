@@ -9,6 +9,7 @@ areas:
     image: "voicen-rust:1.99"        # built from docker/rust.Dockerfile (official rust:1.99-bookworm + cmake, clang); `make core-image`
     cache: ["/usr/local/cargo/registry", "/usr/local/cargo/git"]
     test_command: "cargo test -p voicen-core"
+    ci_workflow: ci.yml
     lint_command: "cargo fmt --check -p voicen-core && cargo clippy -p voicen-core --all-targets -- -D warnings"
     api_test_command: "cargo test -p voicen-core --test api_pipeline --test openai_client"
     e2e_ui_command: ""
@@ -22,6 +23,7 @@ areas:
     runner: docker
     image: "voicen-ui:1.63.0"        # built from docker/ui.Dockerfile (official mcr.microsoft.com/playwright:v1.63.0-noble + pnpm 8.15.0); `make ui-image`; decisions #89
     test_command: "pnpm test"
+    ci_workflow: ci.yml
     lint_command: "pnpm lint"
     api_test_command: ""
     e2e_ui_command: "pnpm e2e"
