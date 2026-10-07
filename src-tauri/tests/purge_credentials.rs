@@ -415,6 +415,103 @@ fn read_back_of_a_never_written_target_names_its_win32_error() {
             "premise message lacks {needle:?}: {message}"
         );
     }
+    // T-069 validation 1 (M2): the codes must sit in the CredReadW part itself. For a
+    // never-written target the report-only CredEnumerateW look also prints
+    // `err HRESULT 0x80070490 (Win32 1168)`, so "1168 anywhere" survives a message
+    // that drops the CredReadW code.
+    // Bite: premise_failure without hresult_and_win32(err) after "CredReadW failed:".
+    let creadw_part = "CredReadW failed: HRESULT 0x80070490 (Win32 1168)";
+    assert!(
+        message.contains(creadw_part),
+        "premise message lacks {creadw_part:?}: {message}"
+    );
+}
+
+// T-069 validation 1 (M4): the seam that lets a test make a plant's read-back fail.
+//
+//   impl Planted {
+//       fn add_with(
+//           &mut self,
+//           target: impl Into<String>,
+//           kind: CRED_TYPE,
+//           read_back: impl Fn(&str, CRED_TYPE) -> windows::core::Result<()>,
+//       ) -> String
+//   }
+//
+// Same as `add` (register, raw CredWriteW, then the read-back; on a read-back error
+// panic with `premise_failure(target, kind, &err)`, no retry), with the read-back
+// injected. `add(target, kind)` is `add_with(target, kind, read_back)`.
+
+/// ERROR_ACCESS_DENIED: the code the fake read-back fails with (not 1168, so it can
+/// only come from the injected CredReadW error, never from the CredEnumerateW look).
+const ERROR_ACCESS_DENIED_WIN32: u32 = 5;
+
+#[test]
+fn a_plant_whose_read_back_fails_panics_with_the_credreadw_error() {
+    // Acceptance 2 (failure branch), at the call site: a plant that cannot be read
+    // back fails with the CredReadW error code in the message, and is still cleaned
+    // up. The write is real; only the read-back is faked (access denied).
+    // Bite: Planted::add's panic without premise_failure (the old
+    // "premise: <t> planted"), the read-back error ignored (no panic), the read-back
+    // called before the write or with another target/type, a retry, or the target
+    // registered for cleanup only after a successful read-back.
+    let _serial = serial();
+    let target = format!("{}{NS}read-back-denied", unique_prefix());
+    let denied = || {
+        windows::core::Error::from(windows::core::HRESULT::from_win32(
+            ERROR_ACCESS_DENIED_WIN32,
+        ))
+    };
+    let calls: std::cell::RefCell<Vec<(String, CRED_TYPE, bool)>> = Default::default();
+
+    let mut planted = Planted::default();
+    let outcome: std::thread::Result<String> =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            planted.add_with(target.clone(), CRED_TYPE_GENERIC, |t, k| {
+                // Was the real write already done when the read-back ran?
+                let written = read_back(t, k).is_ok();
+                calls.borrow_mut().push((t.to_string(), k, written));
+                Err(denied())
+            })
+        }));
+    let payload: Box<dyn std::any::Any + Send> = match outcome {
+        Ok(returned) => panic!("add_with returned {returned:?} after a failed read-back"),
+        Err(payload) => payload,
+    };
+    let message = payload
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
+        .expect("panic payload is a string");
+
+    assert_eq!(
+        *calls.borrow(),
+        vec![(target.clone(), CRED_TYPE_GENERIC, true)],
+        "read-back calls (target, type, written before it)"
+    );
+    for needle in [
+        "CredReadW failed: HRESULT 0x80070005 (Win32 5)",
+        target.as_str(),
+    ] {
+        assert!(
+            message.contains(needle),
+            "plant panic lacks {needle:?}: {message}"
+        );
+    }
+    // The whole message is premise_failure's, built while the plant is still there
+    // (the CredEnumerateW look sees it).
+    assert_eq!(
+        message,
+        premise_failure(&target, CRED_TYPE_GENERIC, &denied()),
+        "plant panic is not premise_failure"
+    );
+
+    drop(planted);
+    let r = read_back(&target, CRED_TYPE_GENERIC);
+    assert!(
+        is_not_found(&r),
+        "{target} left behind after the failed plant: read-back {r:?}"
+    );
 }
 
 #[test]
