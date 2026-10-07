@@ -367,6 +367,47 @@ async fn trailing_slash_base_url_gives_same_path() {
 }
 
 #[tokio::test]
+async fn full_endpoint_url_is_requested_as_is() {
+    // T-072, decision #96: an API base URL that already ends in
+    // `/audio/transcriptions` (trailing `/` or not, any ASCII case, with a query)
+    // is requested as is: exactly one POST at that path, nothing appended, the
+    // query kept, the text delivered. Bite: the unconditional append
+    // (`…/audio/transcriptions/audio/transcriptions`), an exact-case match (the
+    // mixed-case row doubles), a dropped query, the trailing `/` sent.
+    for (suffix, path, query) in [
+        ("/v1/audio/transcriptions", "/v1/audio/transcriptions", None),
+        (
+            "/v1/audio/transcriptions/",
+            "/v1/audio/transcriptions",
+            None,
+        ),
+        (
+            "/v1/audio/transcriptions//",
+            "/v1/audio/transcriptions",
+            None,
+        ),
+        (
+            "/v1/audio/transcriptions?api-version=2024-06-01",
+            "/v1/audio/transcriptions",
+            Some("api-version=2024-06-01"),
+        ),
+        ("/audio/transcriptions", "/audio/transcriptions", None),
+        ("/v1/Audio/Transcriptions", "/v1/Audio/Transcriptions", None),
+    ] {
+        let server = server_with(ok_text("hello")).await;
+        let got = transcribe(
+            api_engine(&format!("{}{suffix}", server.uri()), Some(KEY)),
+            req(None),
+        );
+        assert_eq!(got, Ok("hello".to_string()), "{suffix:?}");
+        let r = only_request(&server).await;
+        assert_eq!(r.method.as_str(), "POST", "{suffix:?}");
+        assert_eq!(r.url.path(), path, "{suffix:?}");
+        assert_eq!(r.url.query(), query, "{suffix:?}");
+    }
+}
+
+#[tokio::test]
 async fn text_is_trimmed_and_blank_text_is_ok_empty() {
     // Contract "Response": leading/trailing whitespace trimmed, inner kept; empty
     // or whitespace-only text is Ok("") (the pipeline's NoSpeech), not an error;

@@ -47,7 +47,7 @@ use voicen_core::settings::{defaults, EngineKind, Settings};
 use voicen_core::test_support::fixtures;
 use voicen_core::timeouts::Timeouts;
 use voicen_core::vad::{EnergyDetector, SpeechDetector, SpeechGate};
-use wiremock::matchers::any;
+use wiremock::matchers::{any, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 /// The key stored in the `local-server` slot.
@@ -593,4 +593,89 @@ async fn saved_local_server_settings_reach_the_next_job_without_restart() {
         part_text(&multipart(&requests[0]), "model").as_deref(),
         Some("whisper-local")
     );
+}
+
+// ---- T-072: a full endpoint URL (decision #96) -------------------------------------
+
+/// The endpoint the mock serves: POST at `/v1/audio/transcriptions` only; any
+/// other path gets wiremock's unmatched answer, 404 (a server with that one route).
+async fn endpoint_only_server(response: ResponseTemplate) -> MockServer {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/audio/transcriptions"))
+        .respond_with(response)
+        .mount(&server)
+        .await;
+    server
+}
+
+#[tokio::test]
+async fn full_endpoint_local_server_url_is_requested_as_is() {
+    // T-072, the owner's case (rec=4, http_status=404): the local-server URL set to
+    // the full endpoint `…/v1/audio/transcriptions` (as copied from another client),
+    // through `engine_for`. One POST at that path, nothing appended, the text
+    // delivered. Bite: the unconditional append (`…/audio/transcriptions/audio/
+    // transcriptions` -> the mock's 404 -> ServerError{404}); a fix only in the
+    // API arm or only in the UI (engine_for's LocalServer arm still doubles).
+    let server = endpoint_only_server(ok_text("hello full endpoint")).await;
+    for suffix in ["/v1/audio/transcriptions", "/v1/audio/transcriptions/"] {
+        let url = format!("{}{suffix}", server.uri());
+        let engine = local_engine(&local_settings(&url, ""), &creds(None));
+        assert_eq!(
+            transcribe(engine, req()),
+            Ok("hello full endpoint".to_string()),
+            "{suffix:?}"
+        );
+    }
+    let requests = received(&server).await;
+    let paths: Vec<&str> = requests.iter().map(|r| r.url.path()).collect();
+    assert_eq!(
+        paths,
+        vec!["/v1/audio/transcriptions", "/v1/audio/transcriptions"],
+        "one request per URL, each at the endpoint as typed"
+    );
+}
+
+#[tokio::test]
+async fn wrong_path_reports_server_404() {
+    // T-072 Acceptance, failure branch: a URL with a doubled path or any other
+    // wrong path still reaches the server at that path and reports its 404 as
+    // today, on the production pipeline: JobEnd::Failed(ServerError{404}), the
+    // recording kept as pending (retryable), nothing copied, the job tagged
+    // "local_server". The request goes to exactly the path the rule gives (the
+    // doubled URL as typed; `/v2` + `/audio/transcriptions`). Bite: a "repair"
+    // that strips repeated `/audio/transcriptions` pairs (the doubled row then
+    // succeeds at the mock's endpoint); a rewrite to a fixed `/v1` path (the `/v2`
+    // row succeeds); a 404 swallowed or mapped to another reason; the audio
+    // dropped; today's unconditional append (the doubled row's path quadruples).
+    for (suffix, requested) in [
+        (
+            "/v1/audio/transcriptions/audio/transcriptions",
+            "/v1/audio/transcriptions/audio/transcriptions",
+        ),
+        ("/v2", "/v2/audio/transcriptions"),
+    ] {
+        let server = endpoint_only_server(ok_text("must not be delivered")).await;
+        let mut h = harness(Arc::new(creds(None)), None);
+        let url = format!("{}{suffix}", server.uri());
+        let rec = h.record(fixtures::speech_3s(), Arc::new(local_settings(&url, "")));
+        let report = h.run(rec);
+        let reason = FailureReason::ServerError { status: 404 };
+        assert_eq!(report.end, JobEnd::Failed(reason.clone()), "{suffix:?}");
+        let Some(id) = report.pending else {
+            panic!("{suffix:?}: a server 404 keeps the recording: {report:?}")
+        };
+        assert_eq!(h.pipeline.pending(), Some((id, reason)), "{suffix:?}");
+        assert_eq!(
+            h.store.get_pending(id).expect("pending audio stored"),
+            fixtures::speech_3s(),
+            "{suffix:?}"
+        );
+        assert_eq!(h.clipboard.texts(), Vec::<String>::new(), "{suffix:?}");
+        assert_eq!(h.job_engines(), vec![Some("local_server")], "{suffix:?}");
+        assert_eq!(h.job_outcomes(), vec![OutcomeCode::Failed], "{suffix:?}");
+        let r = only_request(&server).await;
+        assert_eq!(r.method.as_str(), "POST", "{suffix:?}");
+        assert_eq!(r.url.path(), requested, "{suffix:?}");
+    }
 }

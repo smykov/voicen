@@ -351,6 +351,98 @@ mod tests {
         );
     }
 
+    #[test]
+    fn join_full_endpoint_kept() {
+        // T-072, decision #96: a URL whose last two path segments (after one empty
+        // trailing segment is dropped) are `audio`, `transcriptions` is requested as
+        // is, query kept, path in the case typed (segments compared ASCII
+        // case-insensitively, orchestrator note). A doubled path is kept too: the
+        // join never strips. Bite: the unconditional append (today), an exact-case
+        // match (the mixed-case rows double), a "normalize to base then append"
+        // (the doubled row loses a pair), a dropped query.
+        for (raw, expected) in [
+            (
+                "http://10.10.10.110:8000/v1/audio/transcriptions",
+                "http://10.10.10.110:8000/v1/audio/transcriptions",
+            ),
+            (
+                "https://api.example.com/v1/audio/transcriptions/",
+                "https://api.example.com/v1/audio/transcriptions",
+            ),
+            (
+                "https://api.example.com/audio/transcriptions",
+                "https://api.example.com/audio/transcriptions",
+            ),
+            (
+                "https://api.example.com/v1/audio/transcriptions?api-version=2024-06-01",
+                "https://api.example.com/v1/audio/transcriptions?api-version=2024-06-01",
+            ),
+            (
+                "https://api.example.com/v1/audio/transcriptions/?api-version=2024-06-01",
+                "https://api.example.com/v1/audio/transcriptions?api-version=2024-06-01",
+            ),
+            (
+                "https://api.example.com/openai/deployments/w/audio/transcriptions?api-version=2024-06-01",
+                "https://api.example.com/openai/deployments/w/audio/transcriptions?api-version=2024-06-01",
+            ),
+            (
+                "https://api.example.com/v1/Audio/Transcriptions",
+                "https://api.example.com/v1/Audio/Transcriptions",
+            ),
+            (
+                "https://api.example.com/v1/AUDIO/transcriptions",
+                "https://api.example.com/v1/AUDIO/transcriptions",
+            ),
+            (
+                "https://api.example.com/v1/audio/transcriptions/audio/transcriptions",
+                "https://api.example.com/v1/audio/transcriptions/audio/transcriptions",
+            ),
+        ] {
+            assert_eq!(joined(raw).as_deref(), Some(expected), "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn join_near_misses_append() {
+        // T-072: only the two whole last segments decide; anything else is a base
+        // and gets `audio`, `transcriptions` appended (query kept). Bite: a string
+        // `ends_with("transcriptions")` / `ends_with("audio/transcriptions")` test
+        // on the path text (the `transcriptions`, `xaudio`, `%2F` rows), a match on
+        // the last segment only, a match anywhere in the path (`/x` row).
+        for (raw, expected) in [
+            (
+                "https://api.example.com/v1/audio",
+                "https://api.example.com/v1/audio/audio/transcriptions",
+            ),
+            (
+                "https://api.example.com/v1/transcriptions",
+                "https://api.example.com/v1/transcriptions/audio/transcriptions",
+            ),
+            (
+                "https://api.example.com/v1/xaudio/transcriptions",
+                "https://api.example.com/v1/xaudio/transcriptions/audio/transcriptions",
+            ),
+            (
+                "https://api.example.com/v1/audio/transcriptions2",
+                "https://api.example.com/v1/audio/transcriptions2/audio/transcriptions",
+            ),
+            (
+                "https://api.example.com/v1/audio%2Ftranscriptions",
+                "https://api.example.com/v1/audio%2Ftranscriptions/audio/transcriptions",
+            ),
+            (
+                "https://api.example.com/audio/transcriptions/x",
+                "https://api.example.com/audio/transcriptions/x/audio/transcriptions",
+            ),
+            (
+                "https://api.example.com/v1/audio?api-version=2024-06-01",
+                "https://api.example.com/v1/audio/audio/transcriptions?api-version=2024-06-01",
+            ),
+        ] {
+            assert_eq!(joined(raw).as_deref(), Some(expected), "{raw:?}");
+        }
+    }
+
     fn engine(key: Option<&str>) -> OpenAiCompatibleEngine {
         let base = match crate::settings::url::check_base_url("https://api.example.com/v1") {
             Ok(u) => u,
