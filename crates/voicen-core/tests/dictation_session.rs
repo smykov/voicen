@@ -18,6 +18,8 @@
 //! threads is bounded by `BUDGET`, so a broken session fails instead of hanging.
 //! Fake data only: example.com, `sk-test-SECRET`.
 
+mod diag_support;
+
 use std::collections::VecDeque;
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -30,9 +32,12 @@ use voicen_core::audio::{wav, AudioBuffer};
 use voicen_core::autostart::FakeAutostart;
 use voicen_core::clock::FakeClock;
 use voicen_core::delivery::{DeliveryResult, MODIFIER_WAIT};
+use voicen_core::diag::{LogConfig, LogObserver};
 use voicen_core::dictation::{DictationSession, SessionDeps};
 use voicen_core::engine::{Engine, TranscribeRequest};
-use voicen_core::events::{DeviceKind, DictationEvent, OutcomeCode, RecordingObserver};
+use voicen_core::events::{
+    DeviceKind, DictationEvent, OutcomeCode, PipelineObserver, RecordingObserver,
+};
 use voicen_core::failure::FailureReason;
 use voicen_core::hotkey_registrar::FakeHotkeyRegistrar;
 use voicen_core::i18n;
@@ -53,8 +58,8 @@ use voicen_core::settings::file::FakeSettingsFile;
 use voicen_core::settings::gate::SettingsTab;
 use voicen_core::settings::service::{SaveOutcome, SaveRequest, SettingsDeps, SettingsService};
 use voicen_core::settings::{defaults, EngineKind, LoadOutcome, Mode, Settings};
-use voicen_core::test_support::fixtures;
 use voicen_core::test_support::realtime::{read_wav, RealtimeSource};
+use voicen_core::test_support::{fixtures, TempDir};
 use voicen_core::vad::{EnergyDetector, SpeechDetector, SpeechGate};
 
 const KEY: &str = "sk-test-SECRET";
@@ -557,6 +562,19 @@ struct Custom {
     store: Option<Arc<BlockingStore>>,
     /// The microphone (default: the rig's `FakeAudioSource`).
     audio: Option<Arc<dyn AudioSource>>,
+    /// A second observer fed every event next to the rig's `RecordingObserver`
+    /// (T-006 Refresh 5: a `diag::LogObserver` over a real `Log`).
+    also_observe: Option<Arc<dyn PipelineObserver>>,
+}
+
+/// Feeds every event to both observers, in order (the session takes one).
+struct Tee(Arc<RecordingObserver>, Arc<dyn PipelineObserver>);
+
+impl PipelineObserver for Tee {
+    fn event(&self, e: &DictationEvent) {
+        self.0.event(e);
+        self.1.event(e);
+    }
 }
 
 struct Rig {
@@ -597,6 +615,17 @@ impl Rig {
             matches!(&outcome, LoadOutcome::Loaded(s) if *s == settings),
             "premise: the settings load as given: {outcome:?}"
         );
+        Rig::over(service, creds, reply, custom)
+    }
+
+    /// A rig over a service the test built (e.g. a first run), with `creds` the
+    /// service's own credential store.
+    fn over(
+        service: SettingsService,
+        creds: Arc<FakeCredentialStore>,
+        reply: Reply,
+        custom: Custom,
+    ) -> Rig {
         let settings = Arc::new(service);
         let audio = Arc::new(FakeAudioSource::new());
         let indicator = Arc::new(FakeIndicator::new());
@@ -631,7 +660,10 @@ impl Rig {
                 clipboard: clipboard_port,
                 paster: paster_port,
                 temp_audio: store_port,
-                observer: observer.clone(),
+                observer: match &custom.also_observe {
+                    Some(other) => Arc::new(Tee(observer.clone(), other.clone())),
+                    None => observer.clone(),
+                },
                 post_processor: Arc::new(PassThrough),
             },
             engine_factory: Some(engine_factory(&engine, reply)),
@@ -1236,7 +1268,17 @@ fn engine_none_opens_no_capture_and_asks_for_the_engine_tab() {
         "the release did something"
     );
     assert_eq!(rig.audio.start_calls(), 0);
-    assert_eq!(rig.events(), vec![], "no event for a blocked press");
+    // T-006 Refresh 5 (changed contract; was "no event for a blocked press"): the
+    // press emits exactly one blocked event with its reason, the release none, so
+    // a blocked press leaves a trace in the log (the LogObserver writes it).
+    // Compared through Debug so this binary compiles before the variant exists
+    // (red on the assertion, not on the build): `DictationEvent::PressBlocked {
+    // reason: settings::gate::Blocked::NoEngine }`.
+    assert_eq!(
+        format!("{:?}", rig.events()),
+        "[PressBlocked { reason: NoEngine }]",
+        "exactly one blocked event for a blocked press, none for its release"
+    );
     assert_eq!(rig.engine.factory_calls(), 0);
 }
 
@@ -1937,6 +1979,165 @@ fn saved_settings_reach_the_next_press() {
     assert_eq!(rig.requests.calls().len(), 1, "blocked again");
     let engines: Vec<EngineKind> = rig.engine.settings().iter().map(|s| s.engine).collect();
     assert_eq!(engines, vec![EngineKind::Api]);
+}
+
+/// The exact line a blocked press writes (T-006 Refresh 5): WARN like the other
+/// dictations that did not happen, no `rec=` (a blocked press is not a
+/// recording), the reason through a closed table. The log clock is fixed at
+/// `NOON_UTC`, offset 0.
+const BLOCKED_LINE: &str =
+    "2026-10-04T12:00:00.000+00:00 WARN dictation outcome=blocked reason=no_engine";
+
+#[test]
+fn a_blocked_press_writes_one_log_line_and_takes_no_recording_number() {
+    // T-006 Refresh 5, red test 1 (invariant: every press that reaches the app
+    // leaves exactly one log line that says what happened to it). Engine none:
+    // each press writes exactly one `dictation outcome=blocked reason=no_engine`
+    // line through the release LogObserver (the only writer of dictation lines),
+    // at the press; its release writes nothing; no transcript, URL or key reaches
+    // the file. A blocked press takes no RecordingId: the first recording after
+    // it is still rec=0. Bite: no event for a blocked press (today: no line), one
+    // event per blocked action (notice + open settings: two lines), a line at the
+    // release too, a blocked event the observer maps to no line, a recording id
+    // taken for the blocked press (rec=2 below).
+    let tmp = TempDir::new();
+    let dir = tmp.path().join("logs");
+    let (log, _clock, _seen) = diag_support::open_log(
+        &dir,
+        diag_support::at(diag_support::NOON_UTC, 0),
+        0,
+        LogConfig::default(),
+    );
+    let log_observer: Arc<dyn PipelineObserver> = Arc::new(LogObserver::new(Arc::clone(&log)));
+    let mut s = api_settings();
+    s.engine = EngineKind::None;
+    let rig = Rig::with(
+        s,
+        always(TEXT),
+        Custom {
+            also_observe: Some(log_observer),
+            ..Custom::default()
+        },
+    );
+    let lines = || {
+        if dir.join(diag_support::ACTIVE).exists() {
+            diag_support::active_lines(&dir)
+        } else {
+            Vec::new()
+        }
+    };
+
+    let t0 = past();
+    rig.session.hotkey_pressed(t0);
+    assert_eq!(
+        lines(),
+        vec![BLOCKED_LINE.to_string()],
+        "after one blocked press"
+    );
+    rig.session.hotkey_released(t0 + ms(3000));
+    assert_eq!(
+        lines(),
+        vec![BLOCKED_LINE.to_string()],
+        "the release of a blocked press changed the log"
+    );
+    rig.session.hotkey_pressed(t0 + ms(4000));
+    rig.session.hotkey_released(t0 + ms(7000));
+    assert_eq!(
+        lines(),
+        vec![BLOCKED_LINE.to_string(); 2],
+        "exactly one line per blocked press"
+    );
+    assert_eq!(
+        rig.audio.start_calls(),
+        0,
+        "a blocked press opened the microphone"
+    );
+
+    rig.save(|s| s.engine = EngineKind::Api);
+    rig.hold(&fixtures::speech_3s(), t0 + ms(10_000), ms(3000));
+    rig.wait_jobs(1);
+    assert!(
+        eventually(|| lines().len() == 3),
+        "the hold after the save wrote no third line: {:#?}",
+        lines()
+    );
+    let all = lines();
+    for raw in &all {
+        // Grammar and closed value sets (diag_support), blocked lines included.
+        diag_support::closed(raw);
+        for secret in [KEY, TEXT, "example.com", "SECRET"] {
+            assert!(!raw.contains(secret), "{secret:?} reached the log: {raw}");
+        }
+    }
+    let hold = diag_support::closed(&all[2]);
+    assert_eq!(hold.head, "dictation", "{}", hold.raw);
+    assert_eq!(hold.get("outcome"), Some("delivered"), "{}", hold.raw);
+    assert_eq!(
+        hold.get("rec"),
+        Some("0"),
+        "a blocked press took a recording number: {}",
+        hold.raw
+    );
+}
+
+#[test]
+fn a_first_run_session_records_on_the_first_press_after_a_save() {
+    // T-006 Refresh 5, pin 2 (expected green; refutes H8 in core): a session over
+    // a FirstRun SettingsService (no file: engine none) is not different from a
+    // loaded one on the press path. `save(engine = local_server)` while the
+    // session runs, then the next hold opens the microphone exactly once, asks
+    // for no settings window and runs the job with the saved engine and URL.
+    // Bite: a snapshot cached at session start (or at the load outcome), a
+    // first-run flag on the press path, a restart needed for the save to apply.
+    let creds = Arc::new(FakeCredentialStore::new());
+    let (service, outcome) = SettingsService::load_or_init(
+        SettingsDeps {
+            file: Arc::new(FakeSettingsFile::new()),
+            credentials: creds.clone(),
+            autostart: Arc::new(FakeAutostart::new()),
+            hotkeys: Arc::new(FakeHotkeyRegistrar::new()),
+            local_models: Arc::new(FakeDownloadedModels::new(&["base"])),
+            clock: Arc::new(FakeClock::at(
+                UNIX_EPOCH + Duration::from_secs(1_709_251_199),
+            )),
+        },
+        OS,
+    );
+    assert_eq!(
+        outcome,
+        LoadOutcome::FirstRun(defaults(OS)),
+        "premise: a first run with the defaults"
+    );
+    assert_eq!(
+        defaults(OS).engine,
+        EngineKind::None,
+        "premise: engine none"
+    );
+    let rig = Rig::over(service, creds, always(TEXT), Custom::default());
+
+    rig.save(|s| {
+        s.engine = EngineKind::LocalServer;
+        s.local_server.base_url = "http://192.0.2.1:9/v1".to_string();
+    });
+    rig.hold(&fixtures::speech_3s(), past(), ms(3000));
+    assert_eq!(rig.audio.start_calls(), 1, "the first press after the save");
+    rig.wait_jobs(1);
+    assert_eq!(
+        rig.requests.calls(),
+        vec![],
+        "a settings window was asked for"
+    );
+    let used: Vec<(EngineKind, String)> = rig
+        .engine
+        .settings()
+        .iter()
+        .map(|s| (s.engine, s.local_server.base_url.clone()))
+        .collect();
+    assert_eq!(
+        used,
+        vec![(EngineKind::LocalServer, "http://192.0.2.1:9/v1".to_string())]
+    );
+    assert_eq!(rig.clipboard.texts(), vec![TEXT.to_string()]);
 }
 
 #[test]

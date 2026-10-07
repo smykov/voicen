@@ -541,6 +541,148 @@ jobs:
           if (-not (Test-Cred $kept)) { [void](Remove-All); throw "$kept was deleted by the second purge" }
           if ((Remove-All) -ne 0) { throw "cleanup: a Remove-VoicenCredential above failed (Win32 error printed)" }
           Write-Output "--purge-credentials: exit 0 twice within 15 s, Voicen/ci-purge-a and -b gone, $kept kept, no output, log files unchanged"
+      # T-006 Refresh 5 (red test 3b): the release press path on a loaded launch. settings.json is
+      # set to engine local_server at a refused loopback endpoint (127.0.0.1:1, the core tests'
+      # refused address, F-004; Windows answers the refusal after ~2 s, F-005), then a 3 s SendInput
+      # hold of Ctrl+Alt+Space (scripts/ci/hotkey-hold.ps1) must give exactly one new `dictation rec=`
+      # line within 75 s (any outcome: with no capture endpoint on the runner, never probed, it is
+      # `outcome=capture_failed mic=no_device` at the press; with one, a failed or no_speech job)
+      # and no blocked line, and voicen.exe must still run afterwards (a release-build abort on the
+      # press path, panic = "abort", ends the process). Raw facts only (F-003); settings.json is
+      # restored and every voicen.exe stopped on every path.
+      - name: A hotkey hold on a loaded launch writes exactly one dictation line and the app keeps running (T-006 release press path)
+        shell: pwsh
+        run: |
+          . ./scripts/ci/hotkey-hold.ps1
+          $exe = Join-Path $env:LOCALAPPDATA 'Voicen\voicen.exe'
+          $settings = Join-Path $env:LOCALAPPDATA 'Voicen\settings.json'
+          $log = Join-Path $env:LOCALAPPDATA 'Voicen\logs\voicen*.log'
+          $started = "($env:VOICEN_COMMIT) started"
+          $loadLine = 'settings load outcome=loaded'
+          $recLine = 'dictation rec='
+          $blockedLine = 'dictation outcome=blocked'
+          Stop-AllVoicen
+          if (-not (Test-Path -LiteralPath $settings -PathType Leaf)) { throw "premise: settings.json not found at $settings before the loaded hold" }
+          $free = Test-HotkeyFree
+          if ($free -ne 0) { throw "premise: Ctrl+Alt+Space is not free before the launch (RegisterHotKey error $free)" }
+          $original = [System.IO.File]::ReadAllBytes($settings)
+          $proc = $null
+          $hold = 'not sent'
+          $held = 0
+          try {
+            $json = [System.IO.File]::ReadAllText($settings) | ConvertFrom-Json
+            $json.engine = 'local_server'
+            $json.local_server.base_url = 'http://127.0.0.1:1/v1'
+            [System.IO.File]::WriteAllText($settings, ($json | ConvertTo-Json -Depth 20))
+            $startsBefore = (Get-VoicenLogLines $log $started).Count
+            $loadsBefore = (Get-VoicenLogLines $log $loadLine).Count
+            $recBefore = Get-VoicenLogLines $log $recLine
+            $blockedBefore = (Get-VoicenLogLines $log $blockedLine).Count
+            $proc = Start-Process -FilePath $exe -PassThru
+            $null = $proc.Handle
+            $ready = $false
+            for ($i = 0; $i -lt 30 -and -not $ready -and -not $proc.HasExited; $i++) {
+              Start-Sleep -Seconds 1
+              $ready = ((Get-VoicenLogLines $log $started).Count -gt $startsBefore) -and ((Get-VoicenLogLines $log $loadLine).Count -gt $loadsBefore)
+            }
+            if (-not $ready) { throw "the launch did not write its start line and '$loadLine' within 30 s (exited: $($proc.HasExited))" }
+            $held = Wait-HotkeyHeld $proc
+            if ($held -ne 1409) { throw "the running app does not hold Ctrl+Alt+Space within 15 s of its load line (last RegisterHotKey result: $held, exited: $($proc.HasExited))" }
+            $hold = Invoke-HotkeyHold -Seconds 3
+            Write-Output $hold
+            # Up to 75 s for the line (the local_server deadline is 60 s), then 5 s more so a second
+            # line for the same hold would be seen.
+            $seenAt = $null
+            $clock = [Diagnostics.Stopwatch]::StartNew()
+            while ($clock.Elapsed.TotalSeconds -lt 75 -and -not $seenAt) {
+              if ((Get-VoicenLogLines $log $recLine).Count -gt $recBefore.Count) { $seenAt = $clock.Elapsed.TotalSeconds; break }
+              if ($proc.HasExited) { break }
+              Start-Sleep -Milliseconds 500
+            }
+            if ($seenAt) { Start-Sleep -Seconds 5 }
+            $alive = -not $proc.HasExited
+            $exitInfo = if ($alive) { 'running' } else { "exited with code $($proc.ExitCode)" }
+            $recNew = @(Get-VoicenLogLines $log $recLine | Where-Object { $recBefore -notcontains $_ })
+            $blockedNew = (Get-VoicenLogLines $log $blockedLine).Count - $blockedBefore
+          } finally {
+            if ($proc) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue }
+            Stop-AllVoicen
+            [System.IO.File]::WriteAllBytes($settings, $original)
+          }
+          Write-Output "new dictation lines after the hold ($exitInfo):"
+          $recNew | ForEach-Object { Write-Output "  $_" }
+          if (-not $alive) { throw "voicen.exe did not survive the hold on a loaded launch: $exitInfo" }
+          if ($recNew.Count -ne 1) { throw "a 3 s hold on a loaded launch (engine local_server) gave $($recNew.Count) new 'dictation rec=' lines within 75 s, expected exactly 1" }
+          if ($blockedNew -ne 0) { throw "a hold with engine local_server wrote $blockedNew blocked line(s)" }
+          Write-Output "loaded launch: one hold, one dictation line after $([int]$seenAt) s, voicen.exe still running"
+      # T-006 Refresh 5 (red test 3a): a first launch (no settings.json, so engine none) blocks the
+      # press; the blocked press must leave exactly one `dictation outcome=blocked reason=no_engine`
+      # line (written at the press) and no `dictation rec=` line, and the app keeps running. Before
+      # T-006's fix a blocked press wrote nothing, so a press that arrived and one that never arrived
+      # looked the same in voicen.log (Investigation, Refresh 5). settings.json is moved aside for
+      # the launch and put back on every path.
+      - name: A hotkey hold on a first launch (engine none) writes exactly one blocked line (T-006 blocked press is logged)
+        shell: pwsh
+        run: |
+          . ./scripts/ci/hotkey-hold.ps1
+          $exe = Join-Path $env:LOCALAPPDATA 'Voicen\voicen.exe'
+          $settings = Join-Path $env:LOCALAPPDATA 'Voicen\settings.json'
+          $aside = Join-Path $env:RUNNER_TEMP 't006-settings.json'
+          $log = Join-Path $env:LOCALAPPDATA 'Voicen\logs\voicen*.log'
+          $started = "($env:VOICEN_COMMIT) started"
+          $loadLine = 'settings load outcome=first_run'
+          $recLine = 'dictation rec='
+          $blockedLine = 'dictation outcome=blocked reason=no_engine'
+          Stop-AllVoicen
+          if (-not (Test-Path -LiteralPath $settings -PathType Leaf)) { throw "premise: settings.json not found at $settings before the first-launch hold" }
+          $free = Test-HotkeyFree
+          if ($free -ne 0) { throw "premise: Ctrl+Alt+Space is not free before the launch (RegisterHotKey error $free)" }
+          Move-Item -LiteralPath $settings -Destination $aside -Force
+          $proc = $null
+          $hold = 'not sent'
+          try {
+            $startsBefore = (Get-VoicenLogLines $log $started).Count
+            $loadsBefore = (Get-VoicenLogLines $log $loadLine).Count
+            $recBefore = (Get-VoicenLogLines $log $recLine).Count
+            $blockedBefore = Get-VoicenLogLines $log $blockedLine
+            $proc = Start-Process -FilePath $exe -PassThru
+            $null = $proc.Handle
+            $ready = $false
+            for ($i = 0; $i -lt 30 -and -not $ready -and -not $proc.HasExited; $i++) {
+              Start-Sleep -Seconds 1
+              $ready = ((Get-VoicenLogLines $log $started).Count -gt $startsBefore) -and ((Get-VoicenLogLines $log $loadLine).Count -gt $loadsBefore)
+            }
+            if (-not $ready) { throw "the first launch did not write its start line and '$loadLine' within 30 s (exited: $($proc.HasExited))" }
+            $held = Wait-HotkeyHeld $proc
+            if ($held -ne 1409) { throw "the running app does not hold Ctrl+Alt+Space within 15 s of its load line (last RegisterHotKey result: $held, exited: $($proc.HasExited))" }
+            $hold = Invoke-HotkeyHold -Seconds 3
+            Write-Output $hold
+            # The blocked line is written at the press: 15 s from the release, then 5 s more so a
+            # second line for the same hold (a line per blocked action, a line at the release) would
+            # be seen.
+            $seenAt = $null
+            $clock = [Diagnostics.Stopwatch]::StartNew()
+            while ($clock.Elapsed.TotalSeconds -lt 15 -and -not $seenAt) {
+              if ((Get-VoicenLogLines $log $blockedLine).Count -gt $blockedBefore.Count) { $seenAt = $clock.Elapsed.TotalSeconds; break }
+              if ($proc.HasExited) { break }
+              Start-Sleep -Milliseconds 500
+            }
+            Start-Sleep -Seconds 5
+            $alive = -not $proc.HasExited
+            $exitInfo = if ($alive) { 'running' } else { "exited with code $($proc.ExitCode)" }
+            $blockedNew = @(Get-VoicenLogLines $log $blockedLine | Where-Object { $blockedBefore -notcontains $_ })
+            $recNew = (Get-VoicenLogLines $log $recLine).Count - $recBefore
+          } finally {
+            if ($proc) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue }
+            Stop-AllVoicen
+            Move-Item -LiteralPath $aside -Destination $settings -Force
+          }
+          Write-Output "new blocked lines after the hold ($exitInfo):"
+          $blockedNew | ForEach-Object { Write-Output "  $_" }
+          if (-not $alive) { throw "voicen.exe did not survive the hold on a first launch: $exitInfo" }
+          if ($blockedNew.Count -ne 1) { throw "a 3 s hold on a first launch (engine none) gave $($blockedNew.Count) new '$blockedLine' lines, expected exactly 1" }
+          if ($recNew -ne 0) { throw "a blocked hold wrote $recNew 'dictation rec=' line(s)" }
+          Write-Output "first launch: one blocked hold, one blocked line after $([int]$seenAt) s, no dictation rec= line, voicen.exe still running"
       - uses: actions/upload-artifact@v4
         with:
           name: voicen-installer-${{ env.VOICEN_COMMIT }}

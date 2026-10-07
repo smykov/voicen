@@ -398,7 +398,11 @@ pub const DICTATION_OUTCOMES: &[&str] = &[
     "no_speech",
     "too_short",
     "capture_failed",
+    "blocked",
 ];
+/// Why a press was blocked (T-006 Refresh 5): one literal per
+/// `settings::gate::Blocked`.
+pub const BLOCK_REASONS: &[&str] = &["no_engine"];
 /// The diag microphone table: one literal per `MicCause` (T-051).
 pub const MIC_CAUSES: &[&str] = &["no_device", "access_denied", "busy", "other"];
 /// The diag failure table: one literal per `FailureReason` plus `other`.
@@ -483,6 +487,8 @@ pub fn check_closed(line: &Line) -> Result<(), String> {
     };
     let required: &[&str] = match line.head.as_str() {
         "started" => &["pid"],
+        // A blocked press is not a recording: no `rec`, a `reason` instead.
+        "dictation" if line.get("outcome") == Some("blocked") => &["outcome", "reason"],
         "dictation" => &["rec", "outcome"],
         "warning" => &["kind"],
         "settings load" | "settings save" => &["outcome"],
@@ -510,6 +516,7 @@ pub fn check_closed(line: &Line) -> Result<(), String> {
             ("dictation", "failure") => one_of(k, v, FAILURES)?,
             ("dictation", "detector") => one_of(k, v, DETECTORS)?,
             ("dictation", "mic") => one_of(k, v, MIC_CAUSES)?,
+            ("dictation", "reason") => one_of(k, v, BLOCK_REASONS)?,
             ("warning", "kind") => one_of(k, v, WARNING_KINDS)?,
             ("warning", "os_code") => check(signed(v), k, v)?,
             ("settings load", "outcome") => one_of(k, v, LOAD_OUTCOMES)?,
@@ -539,6 +546,15 @@ pub fn check_closed(line: &Line) -> Result<(), String> {
         }
         if line.get("http_status").is_some() && outcome != "failed" {
             return Err(format!("http_status= only on failed lines: {:?}", line.raw));
+        }
+        if outcome == "blocked" && line.keys() != ["outcome", "reason"] {
+            return Err(format!(
+                "a blocked line has only outcome= and reason=: {:?}",
+                line.raw
+            ));
+        }
+        if (outcome == "blocked") != line.get("reason").is_some() {
+            return Err(format!("reason= exactly on blocked lines: {:?}", line.raw));
         }
         if (outcome == "capture_failed") != line.get("mic").is_some() {
             return Err(format!(
