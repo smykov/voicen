@@ -1,4 +1,4 @@
-# Temporary workaround, RCA: T-066 (Windows premise not checked on Windows before main).
+# The one Credential Manager helper of the CI steps: invariant in docs/decisions/windows-ci-runner.md, "A CI step plants and observes Credential Manager entries only through scripts/ci/credentials.ps1".
 # T-061: Windows Credential Manager entries for the CI steps in .github/workflows/ci.yml,
 # through the same Win32 calls and type the product uses (src-tauri/src/credentials.rs
 # WinCredentialStore, src-tauri/src/win/purge.rs WinCredentialNamespace): CredWriteW,
