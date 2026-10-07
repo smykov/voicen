@@ -545,6 +545,67 @@ jobs:
         with:
           name: voicen-installer-${{ env.VOICEN_COMMIT }}
           path: target/release/bundle/nsis/*-setup.exe
+      # T-070 (decisions #93): the installer goes to the owner's Telegram chat on main and v* tags.
+      # The premises run on every ref (wip included, P-016): red when there is not exactly one
+      # *-setup.exe or its name lacks _<tauri.conf.json version>_; a file of 50 MB or more (Bot API
+      # upload limit) is a warning and send=false. The send step consumes only these outputs; its
+      # if: has no status function, so it never runs after a red step. The token reaches curl only
+      # as config on stdin (printf is a bash builtin: no argv, no file); no token -> one line, exit 0;
+      # a Telegram or network failure is a warning (curl exit code and API description), never red:
+      # the run stays the "deployed" evidence and the installer is in the artifact above. No set -x.
+      - name: Installer for Telegram
+        id: telegram-installer
+        shell: bash
+        run: |
+          shopt -s nullglob
+          files=(target/release/bundle/nsis/*-setup.exe)
+          if [ "${#files[@]}" != 1 ]; then echo "::error::installer for Telegram: ${#files[@]} *-setup.exe files in target/release/bundle/nsis, expected exactly 1"; exit 1; fi
+          installer="${files[0]}"
+          version="$(sed -n 's/^[[:space:]]*"version":[[:space:]]*"\([^"]*\)".*/\1/p' src-tauri/tauri.conf.json | head -n 1)"
+          if [ -z "$version" ]; then echo "::error::installer for Telegram: no version in src-tauri/tauri.conf.json"; exit 1; fi
+          case "$(basename "$installer")" in
+            *"_${version}_"*) ;;
+            *) echo "::error::installer for Telegram: $(basename "$installer") does not contain _${version}_ (src-tauri/tauri.conf.json version)"; exit 1 ;;
+          esac
+          size=$(wc -c < "$installer" | tr -d '[:space:]')
+          limit=$((50 * 1024 * 1024))
+          send=true
+          if [ "$size" -ge "$limit" ]; then echo "::warning::installer for Telegram: $installer is $size bytes, the Bot API upload limit is $limit; it will not be sent"; send=false; fi
+          caption="Voicen ${version}, ${GITHUB_REF_NAME} @ ${VOICEN_COMMIT}, run ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          echo "installer: $installer ($size bytes, limit $limit, send=$send)"
+          echo "caption: $caption"
+          curl --version
+          {
+            printf 'path=%s\n' "$installer"
+            printf 'caption=%s\n' "$caption"
+            printf 'send=%s\n' "$send"
+          } >> "$GITHUB_OUTPUT"
+      - name: Send the installer to Telegram (main and v* tags only)
+        if: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && steps.telegram-installer.outputs.send == 'true' }}
+        timeout-minutes: 10
+        shell: bash
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          INSTALLER: ${{ steps.telegram-installer.outputs.path }}
+          CAPTION: ${{ steps.telegram-installer.outputs.caption }}
+        run: |
+          if [ -z "${TELEGRAM_BOT_TOKEN:-}" ]; then
+            echo "no TELEGRAM_BOT_TOKEN: nothing is sent"
+            exit 0
+          fi
+          rc=0
+          response="$(printf 'url = "https://api.telegram.org/bot%s/sendDocument"' "$TELEGRAM_BOT_TOKEN" \
+            | curl -s --fail-with-body --max-time 300 -K - \
+              -F "chat_id=${TELEGRAM_CHAT_ID}" \
+              -F "document=@${INSTALLER}" \
+              -F "caption=${CAPTION}" 2>/dev/null)" || rc=$?
+          if [ "$rc" != 0 ]; then
+            description="$(printf '%s' "$response" | tr -d '\r\n' | sed -n 's/.*"description"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+            echo "::warning::installer not sent to Telegram: curl exit code $rc, API description: ${description:-none}"
+            exit 0
+          fi
+          echo "installer sent to Telegram: $(basename "$INSTALLER")"
       # T-059: runner capability facts for later Windows CI tests (docs/decisions/windows-ci-runner.md).
       # A missing capability is a result line, never a red step; red only when the probe is defective:
       # its test fails (pipefail), there is not exactly one end line, or the number of well-formed fact
