@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # T-070 (decisions #93): send one installer to the owner's Telegram chat (Bot API sendDocument).
 # The one send path: the main/v* step of .github/workflows/ci.yml calls it with the repository
-# secrets, and the every-ref step "Telegram send failure branch" calls it with an obviously
-# fake token, so the failure branch and the no-leak guarantee run on every wip run (P-016).
+# secrets, and the step "Telegram send failure branch" (every ref but main and v* tags) calls it
+# with an obviously fake token, so the failure branch and the no-leak guarantee run on every wip
+# run (P-016); scripts/ci/telegram-failure-branch.sh judges that output.
 #
 # Contract:
 #   - The token and the chat id reach curl only as config on stdin (`printf` is a bash builtin,

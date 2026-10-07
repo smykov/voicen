@@ -1,6 +1,6 @@
 # The gate: every area's checks, each through scripts/tw-run in the area's toolchain.
 .PHONY: check check-shell-layout check-shell-layout-fixtures check-helper-windows-fixtures check-core \
-	check-ci-credentials check-setup-node-cache check-ci-wip check-telegram-send check-e2e-entry-fixtures \
+	check-ci-credentials check-setup-node-cache check-ci-wip check-telegram-send check-telegram-failure-branch check-e2e-entry-fixtures \
 	check-shell-windows \
 	check-ui core-image ui-image \
 	licenses licenses-check licenses-unit licenses-fixture licenses-rust licenses-bundle \
@@ -8,7 +8,7 @@
 
 # check-shell-windows after check-core: the shell depends on voicen-core, so a core error is
 # reported first by the faster native check-core, before the slower cross-target build.
-check: check-shell-layout check-shell-layout-fixtures check-helper-windows-fixtures check-ci-credentials check-setup-node-cache check-ci-wip check-telegram-send check-core \
+check: check-shell-layout check-shell-layout-fixtures check-helper-windows-fixtures check-ci-credentials check-setup-node-cache check-ci-wip check-telegram-send check-telegram-failure-branch check-core \
 	check-shell-windows check-e2e-entry-fixtures check-ui \
 	licenses-check
 
@@ -60,6 +60,13 @@ check-ci-wip:
 # Host bash.
 check-telegram-send:
 	scripts/ci/telegram-send.test.sh
+
+# T-070 (review 2 #1): scripts/ci/telegram-failure-branch.sh, the verdict of ci.yml's fake-token
+# failure-branch step (off main and v* tags), is red only on the send script's contract (exit
+# non-zero, no ::warning::, the fake token printed) and a warning when Telegram was not reached.
+# Canned outputs, offline. Host bash.
+check-telegram-failure-branch:
+	scripts/ci/telegram-failure-branch.test.sh
 
 # T-064: the ui e2e entry point (package.json scripts.e2e) runs Playwright only in the ui image
 # at the lockfile's @playwright/test version, with --network none and the caller's CI; a

@@ -552,9 +552,13 @@ jobs:
       # (contract in its header, host test scripts/ci/telegram-send.test.sh in make check): token and
       # chat id reach curl only as config on stdin; no token -> one line, exit 0; a Telegram or network
       # failure is a ::warning:: (curl exit code and API description), never red. The failure-branch
-      # step runs that script on every ref with an obviously fake token (Telegram refuses it, nothing
-      # reaches a chat); the main/v* step runs it with the secrets, consumes only the premise step's
-      # outputs, and its if: has no status function, so it never runs after a red step.
+      # step runs that script with an obviously fake token (Telegram refuses it, nothing reaches a
+      # chat) on every ref except main and v* tags (wip/** and pull requests, P-016) when send=true;
+      # scripts/ci/telegram-failure-branch.sh (host test in make check) judges it: red only when the
+      # script exits non-zero, prints no ::warning:: or prints the fake token; Telegram not reached
+      # (API description none) is a ::warning::, green. So no Telegram step can turn main or a tag
+      # red or skip the send. The main/v* step runs the script with the secrets, consumes only the
+      # premise step's outputs, and its if: has no status function, so it never runs after a red step.
       - name: Installer for Telegram
         id: telegram-installer
         shell: bash
@@ -583,6 +587,7 @@ jobs:
             printf 'send=%s\n' "$send"
           } >> "$GITHUB_OUTPUT"
       - name: Telegram send failure branch (fake token, nothing reaches a chat)
+        if: ${{ github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/tags/v') && steps.telegram-installer.outputs.send == 'true' }}
         timeout-minutes: 10
         shell: bash
         env:
@@ -593,15 +598,7 @@ jobs:
           rc=0
           out="$(TELEGRAM_BOT_TOKEN="$fake" TELEGRAM_CHAT_ID=1 bash scripts/ci/telegram-send.sh "$INSTALLER" "$CAPTION" 2>&1)" || rc=$?
           sed 's/^/telegram-send: /' <<<"$out"
-          bad=0
-          if [ "$rc" != 0 ]; then echo "::error::telegram-send.sh exited $rc on a refused send, expected 0"; bad=1; fi
-          if ! grep -qE '^::warning::installer not sent to Telegram: curl exit code [1-9][0-9]*, API description: .+' <<<"$out" \
-            || grep -qE '^::warning::.*API description: none$' <<<"$out"; then
-            echo "::error::telegram-send.sh printed no ::warning:: with a non-zero curl exit code and Telegram's description"; bad=1
-          fi
-          if grep -qF -e "$fake" -e "${fake#*:}" <<<"$out"; then echo "::error::telegram-send.sh printed the (fake) token"; bad=1; fi
-          [ "$bad" = 0 ] || exit 1
-          echo "failure branch: exit 0, warning with Telegram's description, the fake token not printed"
+          bash scripts/ci/telegram-failure-branch.sh "$rc" "$fake" <<<"$out"
       - name: Send the installer to Telegram (main and v* tags only)
         if: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && steps.telegram-installer.outputs.send == 'true' }}
         timeout-minutes: 10
