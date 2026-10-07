@@ -6,11 +6,13 @@
 //! URL query, a header or a key. Only `Pipeline::run_job` emits the job events
 //! (`Warning`, `SpeechGate`, `JobFinished`, `Delivered`), on one
 //! [`PipelineObserver`]; the dictation session (`crate::dictation`, T-051) emits
-//! `RecordingStarted` / `RecordingEnded` / `CaptureFailed` on the same observer.
+//! `RecordingStarted` / `RecordingEnded` / `CaptureFailed` / `PressBlocked` on the
+//! same observer.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
 use crate::delivery::DeliveryResult;
 use crate::recording::{MicCause, RecordingEnd, RecordingId};
+use crate::settings::gate::Blocked;
 
 /// Which device a recording used (data-model `RecordingStarted`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,6 +85,13 @@ pub enum DictationEvent {
     CaptureFailed {
         recording: RecordingId,
         cause: MicCause,
+    },
+    /// A press the dictation gate blocked (`settings::gate::dictation_gate`), one
+    /// per press, at the press (T-006): no recording, no `RecordingId`, nothing at
+    /// its release. Only the closed [`Blocked`] reason. Emitted by the dictation
+    /// session.
+    PressBlocked {
+        reason: Blocked,
     },
 }
 

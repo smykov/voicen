@@ -21,6 +21,7 @@ use voicen_core::diag::{LogConfig, LogObserver};
 use voicen_core::events::{DeviceKind, DictationEvent, OutcomeCode, PipelineObserver, WarningCode};
 use voicen_core::failure::FailureReason;
 use voicen_core::recording::{MicCause, Press, RecordingController, RecordingEnd, RecordingId};
+use voicen_core::settings::gate::Blocked;
 use voicen_core::test_support::TempDir;
 
 /// `n` distinct recording ids from the real controller (press, discarded release).
@@ -796,6 +797,9 @@ fn every_dictation_event_with_planted_strings_gives_closed_lines() {
         DictationEvent::Warning {
             code: WarningCode::ToastFailed,
         },
+        DictationEvent::PressBlocked {
+            reason: Blocked::NoEngine,
+        },
     ]);
 
     let mut seen = BTreeSet::new();
@@ -808,10 +812,11 @@ fn every_dictation_event_with_planted_strings_gives_closed_lines() {
             DictationEvent::Delivered { .. } => 4,
             DictationEvent::Warning { .. } => 5,
             DictationEvent::CaptureFailed { .. } => 6,
+            DictationEvent::PressBlocked { .. } => 7,
         });
         f.obs.event(e);
     }
-    assert_eq!(seen.len(), 7, "every DictationEvent variant was fed");
+    assert_eq!(seen.len(), 8, "every DictationEvent variant was fed");
 
     // Every line passes the grammar and the closed sets (dictation_lines checks
     // each one on the way).

@@ -8,6 +8,7 @@ use crate::autostart::ReconcileAction;
 use crate::build_info::BuildInfo;
 use crate::delivery::DeliveryResult;
 use crate::recording::MicCause;
+use crate::settings::gate::Blocked;
 use crate::settings::service::{FormError, SaveOutcome, Warning};
 use crate::settings::{FieldError, LoadOutcome};
 
@@ -19,6 +20,10 @@ pub enum LogEvent {
     Started { build: BuildInfo, pid: u32 },
     /// One dictation, written by [`LogObserver`](super::LogObserver).
     Dictation(DictationLine),
+    /// A hotkey press the dictation gate blocked (T-006):
+    /// `dictation outcome=blocked reason=<no_engine>`, written by
+    /// [`LogObserver`](super::LogObserver). Not a recording, so no `rec=`.
+    DictationBlocked { reason: Blocked },
     /// A warning with a closed kind and, where one exists, the OS error code.
     Warning {
         kind: WarningKind,

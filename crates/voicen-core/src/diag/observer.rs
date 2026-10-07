@@ -5,7 +5,8 @@
 //! joined by `seq`); `JobFinished` for no-speech or failed; `RecordingEnded{TooShort}`
 //! for a discarded recording; `CaptureFailed` for a capture that failed at press
 //! (its only event) or at stop (after `RecordingStarted` / `RecordingEnded`, no
-//! job follows). A pipeline `Warning` is its own line at once.
+//! job follows). A pipeline `Warning` and a blocked press (`PressBlocked`, no
+//! recording, T-006) are each their own line at once and touch no open record.
 //!
 //! Every match over the event types is exhaustive: a new `DictationEvent`,
 //! `OutcomeCode`, `RecordingEnd` or `WarningCode` variant does not compile until
@@ -183,6 +184,8 @@ impl Open {
                 DictationOutcome::CaptureFailed { cause },
                 None,
             )),
+            // Not a recording: its own line at once, no open record touched.
+            DictationEvent::PressBlocked { reason } => Some(LogEvent::DictationBlocked { reason }),
             DictationEvent::Warning { code } => Some(LogEvent::Warning {
                 kind: match code {
                     WarningCode::VadFallback => WarningKind::VadFallback,

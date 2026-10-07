@@ -243,14 +243,16 @@ impl DictationSession {
     ///
     /// While a recording is on this is auto-repeat: nothing runs. From idle, the
     /// settings snapshot is taken and gated; a blocked press shows the notice and
-    /// asks the shell to open settings, in `blocked_actions` order. Otherwise the
+    /// asks the shell to open settings, in `blocked_actions` order, and emits
+    /// exactly one `DictationEvent::PressBlocked` (one per press, not per action;
+    /// it takes no `RecordingId`, and its release does nothing). Otherwise the
     /// start window is taken, the controller starts the recording and the capture
     /// opens; the indicator is published only once the capture result is known,
     /// so a capture that fails never shows a recording state.
     pub fn hotkey_pressed(&self, at: Instant) {
         let shared = &*self.shared;
         let mut open_tabs: Vec<SettingsTab> = Vec::new();
-        let mut failed: Option<DictationEvent> = None;
+        let mut emitted: Option<DictationEvent> = None;
         {
             let mut st = shared.lock();
             if st.ctrl.live_id().is_some() {
@@ -259,6 +261,7 @@ impl DictationSession {
             let settings = shared.settings.snapshot();
             match dictation_gate(&settings) {
                 Err(blocked) => {
+                    emitted = Some(DictationEvent::PressBlocked { reason: blocked });
                     for action in blocked_actions(blocked) {
                         match action {
                             ShellAction::Notify(id) => {
@@ -288,7 +291,7 @@ impl DictationSession {
                             Err(err) => {
                                 let cause = MicCause::of(&err);
                                 if st.ctrl.capture_failed(id, err, at).is_some() {
-                                    failed = Some(DictationEvent::CaptureFailed {
+                                    emitted = Some(DictationEvent::CaptureFailed {
                                         recording: id,
                                         cause,
                                     });
@@ -300,7 +303,7 @@ impl DictationSession {
                 }
             }
         }
-        if let Some(e) = failed {
+        if let Some(e) = emitted {
             shared.emit(e);
         }
         for tab in open_tabs {

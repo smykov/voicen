@@ -10,6 +10,7 @@
 //! 2026-10-04T23:59:00.123+02:00 INFO voicen 0.1.0 (abc1234) started pid=4242
 //! 2026-10-04T23:59:04.020+02:00 INFO dictation rec=0 engine=api outcome=delivered result=pasted detector=energy press_to_frame_ms=41 duration_ms=3000 stop_to_text_ms=812 text_to_paste_ms=95
 //! 2026-10-04T23:59:04.500+02:00 WARN dictation rec=1 outcome=capture_failed mic=access_denied
+//! 2026-10-04T23:59:04.700+02:00 WARN dictation outcome=blocked reason=no_engine
 //! 2026-10-04T23:59:05.000+02:00 WARN warning kind=vad_fallback
 //! 2026-10-04T23:59:06.000+02:00 INFO settings save outcome=ok warnings=engine.api.base_url:endpoint.insecure
 //! ```
@@ -27,6 +28,7 @@ use crate::autostart::ReconcileAction;
 use crate::build_info::BuildInfo;
 use crate::clock::civil_from_days;
 use crate::recording::MicCause;
+use crate::settings::gate::Blocked;
 use crate::settings::service::FormError;
 
 /// The widest offset written: UTC±14:00, the range of real time zones.
@@ -125,7 +127,7 @@ fn level(event: &LogEvent) -> &'static str {
             | DictationOutcome::NoSpeech
             | DictationOutcome::TooShort => INFO,
         },
-        LogEvent::Warning { .. } => WARN,
+        LogEvent::DictationBlocked { .. } | LogEvent::Warning { .. } => WARN,
         LogEvent::SettingsLoad(kind) => match kind {
             LoadKind::Loaded | LoadKind::FirstRun => INFO,
             LoadKind::Reset | LoadKind::Unavailable => WARN,
@@ -155,6 +157,11 @@ fn write_message(out: &mut String, event: &LogEvent) {
             pair(out, "pid", pid);
         }
         LogEvent::Dictation(line) => write_dictation(out, line),
+        LogEvent::DictationBlocked { reason } => {
+            out.push_str("dictation");
+            pair(out, "outcome", "blocked");
+            pair(out, "reason", block_reason(*reason));
+        }
         LogEvent::Warning { kind, os_code } => {
             out.push_str("warning");
             pair(out, "kind", warning_kind(*kind));
@@ -361,6 +368,13 @@ fn mic(cause: MicCause) -> &'static str {
         MicCause::AccessDenied => "access_denied",
         MicCause::Busy => "busy",
         MicCause::Other => "other",
+    }
+}
+
+/// `settings::gate::Blocked` to its literal (one per variant).
+fn block_reason(reason: Blocked) -> &'static str {
+    match reason {
+        Blocked::NoEngine => "no_engine",
     }
 }
 

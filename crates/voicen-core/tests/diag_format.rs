@@ -25,6 +25,7 @@ use voicen_core::engine::engine_for;
 use voicen_core::failure::FailureReason;
 use voicen_core::recording::MicCause;
 use voicen_core::secrets::{FakeCredentialStore, KeySlot};
+use voicen_core::settings::gate::Blocked;
 use voicen_core::settings::service::{FormError, Warning, WarningCode as SettingsWarningCode};
 use voicen_core::settings::{defaults, EngineKind, ErrorCode, FieldError, FieldId};
 use voicen_core::vad::{EnergyDetector, SpeechDetector};
@@ -379,6 +380,9 @@ fn every_event() -> Vec<LogEvent> {
     for a in all_reconcile_actions() {
         all.push(LogEvent::AutostartReconcile(a));
     }
+    all.push(LogEvent::DictationBlocked {
+        reason: Blocked::NoEngine,
+    });
 
     let seen: BTreeSet<usize> = all
         .iter()
@@ -390,9 +394,10 @@ fn every_event() -> Vec<LogEvent> {
             LogEvent::SettingsSave(_) => 4,
             LogEvent::AutostartReconcile(_) => 5,
             LogEvent::LogsRecovered => 6,
+            LogEvent::DictationBlocked { .. } => 7,
         })
         .collect();
-    assert_eq!(seen.len(), 7, "every LogEvent variant is enumerated");
+    assert_eq!(seen.len(), 8, "every LogEvent variant is enumerated");
     all
 }
 
