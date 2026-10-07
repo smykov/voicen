@@ -1,0 +1,10 @@
+on:
+  push:
+    branches: [main, "wip/**"]
+jobs:
+  windows:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+      - name: Inline
+        run: echo "${{ secrets.TELEGRAM_BOT_TOKEN }}" > /dev/null
