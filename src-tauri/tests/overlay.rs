@@ -29,12 +29,22 @@
 //! never passes vacuously.
 //!
 //! The app identifier is a test one; each test has its own `TempDir`; no keys.
+//!
+//! T-067 (decisions #86; `docs/decisions/overlay.md` §3): the overlay is
+//! click-through (`WS_EX_TRANSPARENT | WS_EX_LAYERED`), out of Alt+Tab
+//! (`WS_EX_TOOLWINDOW`, no `WS_EX_APPWINDOW`, unowned top-level) and shown without
+//! activation. `Facts` carries these bits, so every overlay test checks the shape of
+//! every window it sees ([`shape_errors`]). The two T-067 tests that read the screen
+//! serve a test page (`DrawnPage`: an opaque body of [`PAGE_RGB`]) instead of the
+//! empty `noop_assets`, so "drawn" and "the click passes through painted content"
+//! are facts about pixels the WebView really painted.
 #![cfg(windows)]
 
 mod helper_windows;
 mod win32_support;
 
 use std::any::Any;
+use std::borrow::Cow;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -44,7 +54,8 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use tauri::test::{mock_context, noop_assets};
-use tauri::{App, AppHandle, Context, Manager, RunEvent, Wry};
+use tauri::utils::assets::{AssetKey, AssetsIter, CspHash};
+use tauri::{App, AppHandle, Assets, Context, Manager, RunEvent, Wry};
 use voicen_core::diag::Log;
 use voicen_core::i18n;
 use voicen_core::local_models::catalog::MODELS;
@@ -61,10 +72,15 @@ use voicen_lib::dictation::ShellIndicator;
 use voicen_lib::settings_ipc::load_settings;
 use win32_support::{class_of, foreground, Shape, TestWindow};
 use windows::core::BOOL;
-use windows::Win32::Foundation::{HWND, LPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, POINT, RECT};
+use windows::Win32::Graphics::Gdi::{
+    GetDC, GetPixel, GetSysColor, ReleaseDC, CLR_INVALID, COLOR_WINDOW,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetWindow, GetWindowLongPtrW, GetWindowThreadProcessId, IsWindow, IsWindowVisible,
-    GWL_EXSTYLE, GW_OWNER, WS_EX_NOACTIVATE, WS_EX_TOPMOST,
+    EnumWindows, GetAncestor, GetWindow, GetWindowLongPtrW, GetWindowRect,
+    GetWindowThreadProcessId, IsWindow, IsWindowVisible, SetWindowPos, WindowFromPoint, GA_ROOT,
+    GWL_EXSTYLE, GW_OWNER, SWP_NOACTIVATE, SWP_NOZORDER, WS_EX_APPWINDOW, WS_EX_LAYERED,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
 };
 
 /// The overlay window's label (spec 001 contracts/ipc.md: the page at `/overlay`
@@ -148,6 +164,52 @@ fn logged(dir: &Path) -> Vec<String> {
 /// settings.json (so `Ready` opens no settings window: the overlay is the only
 /// window the test makes the app show).
 fn wry_app(dir: &Path) -> (App<Wry>, LoadOutcome) {
+    wry_app_with(dir, mock_context(noop_assets()))
+}
+
+/// The colour of the test page's body (`DrawnPage`): far from every system window
+/// colour, so a pixel of it on screen is the overlay's paint and nothing else.
+const PAGE_RGB: (u8, u8, u8) = (32, 160, 64);
+
+/// T-067: an asset provider whose every `.html` key is one page with an opaque
+/// [`PAGE_RGB`] body (tauri's resolver tries `/overlay`, then `/overlay.html`), so the
+/// overlay window paints known pixels. The real pill page needs the built UI, which
+/// the shell tests do not have.
+struct DrawnPage;
+
+impl DrawnPage {
+    fn html() -> String {
+        let (r, g, b) = PAGE_RGB;
+        format!(
+            "<!doctype html><html><head><meta charset=\"utf-8\"></head>\
+             <body style=\"margin:0;width:100vw;height:100vh;background:rgb({r},{g},{b})\">\
+             </body></html>"
+        )
+    }
+}
+
+impl Assets<Wry> for DrawnPage {
+    fn get(&self, key: &AssetKey) -> Option<Cow<'_, [u8]>> {
+        key.as_ref()
+            .ends_with(".html")
+            .then(|| Cow::Owned(DrawnPage::html().into_bytes()))
+    }
+
+    fn iter(&self) -> Box<AssetsIter<'_>> {
+        Box::new(std::iter::empty())
+    }
+
+    fn csp_hashes(&self, _html_path: &AssetKey) -> Box<dyn Iterator<Item = CspHash<'_>> + '_> {
+        Box::new(std::iter::empty())
+    }
+}
+
+/// [`wry_app`] whose overlay page is [`DrawnPage`].
+fn wry_app_drawn(dir: &Path) -> (App<Wry>, LoadOutcome) {
+    wry_app_with(dir, mock_context(DrawnPage))
+}
+
+fn wry_app_with(dir: &Path, mut context: Context<Wry>) -> (App<Wry>, LoadOutcome) {
     let log = test_log(dir);
     let load = || {
         load_settings(
@@ -169,7 +231,6 @@ fn wry_app(dir: &Path) -> (App<Wry>, LoadOutcome) {
         matches!(outcome, LoadOutcome::Loaded(_)),
         "premise: {outcome:?}"
     );
-    let mut context: Context<Wry> = mock_context(noop_assets());
     context.config_mut().identifier = IDENTIFIER.to_string();
     let app = voicen_lib::build_app(
         tauri::Builder::default().any_thread(),
@@ -294,16 +355,148 @@ struct Facts {
     visible: bool,
     noactivate: bool,
     topmost: bool,
+    /// T-067: click-through needs both `WS_EX_TRANSPARENT` and `WS_EX_LAYERED`.
+    transparent: bool,
+    layered: bool,
+    /// T-067: out of Alt+Tab: `WS_EX_TOOLWINDOW` set and `WS_EX_APPWINDOW` clear (an
+    /// APPWINDOW tool window is listed again), unowned, top-level.
+    toolwindow: bool,
+    appwindow: bool,
+    owned: bool,
+    top_level: bool,
 }
 
 fn facts(raw: isize) -> Facts {
     let ex = ex_style(raw);
+    let hwnd = to_hwnd(raw);
     Facts {
         hwnd: raw,
         visible: is_visible(raw),
         noactivate: ex & WS_EX_NOACTIVATE.0 != 0,
         topmost: ex & WS_EX_TOPMOST.0 != 0,
+        transparent: ex & WS_EX_TRANSPARENT.0 != 0,
+        layered: ex & WS_EX_LAYERED.0 != 0,
+        toolwindow: ex & WS_EX_TOOLWINDOW.0 != 0,
+        appwindow: ex & WS_EX_APPWINDOW.0 != 0,
+        // SAFETY: both calls only read the window's relations; no message is sent.
+        owned: unsafe { GetWindow(hwnd, GW_OWNER) }.is_ok_and(|o| !o.is_invalid()),
+        top_level: unsafe { GetAncestor(hwnd, GA_ROOT) } == hwnd,
     }
+}
+
+/// What a shown overlay window lacks of its required shape (T-057 invariant 3 and
+/// T-067's invariant): non-activating, topmost, click-through, a tool window without
+/// APPWINDOW, unowned and top-level. Empty when the shape is whole.
+fn shape_errors(f: &Facts) -> Vec<&'static str> {
+    let mut missing = Vec::new();
+    if !f.noactivate {
+        missing.push("no WS_EX_NOACTIVATE");
+    }
+    if !f.topmost {
+        missing.push("no WS_EX_TOPMOST");
+    }
+    if !f.transparent {
+        missing.push("no WS_EX_TRANSPARENT (not click-through)");
+    }
+    if !f.layered {
+        missing.push("no WS_EX_LAYERED (not click-through)");
+    }
+    if !f.toolwindow {
+        missing.push("no WS_EX_TOOLWINDOW (listed in Alt+Tab)");
+    }
+    if f.appwindow {
+        missing.push("WS_EX_APPWINDOW set (listed in Alt+Tab and the taskbar)");
+    }
+    if f.owned {
+        missing.push("owned (the install smoke and these tests count unowned windows only)");
+    }
+    if !f.top_level {
+        missing.push("not top-level");
+    }
+    missing
+}
+
+/// The screen rectangle of `raw` (physical pixels: tao makes the process
+/// per-monitor DPI aware).
+fn window_rect(raw: isize) -> Option<RECT> {
+    let mut rect = RECT::default();
+    // SAFETY: `rect` is a writable local; a stale handle gives an error.
+    unsafe { GetWindowRect(to_hwnd(raw), &mut rect) }
+        .ok()
+        .map(|()| rect)
+}
+
+fn centre(rect: &RECT) -> POINT {
+    POINT {
+        x: rect.left / 2 + rect.right / 2,
+        y: rect.top / 2 + rect.bottom / 2,
+    }
+}
+
+fn contains(rect: &RECT, p: POINT) -> bool {
+    rect.left <= p.x && p.x < rect.right && rect.top <= p.y && p.y < rect.bottom
+}
+
+/// The top-level window a click at `p` would reach (`WindowFromPoint`, then its
+/// `GA_ROOT`: the WebView2 child windows count as the overlay), with its class.
+fn hit_root(p: POINT) -> (isize, String) {
+    // SAFETY: any point; the result is a handle or null.
+    let hit = unsafe { WindowFromPoint(p) };
+    // SAFETY: GetAncestor only reads the window tree.
+    let root = unsafe { GetAncestor(hit, GA_ROOT) };
+    (root.0 as isize, class_of(root))
+}
+
+/// Moves `target` (without activating it or changing its z-order) so it covers
+/// `over` with a margin: whatever is not the overlay at the overlay's area is then
+/// the target.
+fn cover(target: isize, over: &RECT) -> bool {
+    const MARGIN: i32 = 40;
+    // SAFETY: a live window of this process whose thread pumps; the flags keep the
+    // activation and the z-order.
+    unsafe {
+        SetWindowPos(
+            to_hwnd(target),
+            None,
+            over.left - MARGIN,
+            over.top - MARGIN,
+            over.right - over.left + 2 * MARGIN,
+            over.bottom - over.top + 2 * MARGIN,
+            SWP_NOACTIVATE | SWP_NOZORDER,
+        )
+    }
+    .is_ok()
+}
+
+/// The screen pixel at `p` as `(r, g, b)`; `None` when the screen cannot be read
+/// (`CLR_INVALID`).
+fn screen_pixel(p: POINT) -> Option<(u8, u8, u8)> {
+    // SAFETY: the screen DC, released below on this thread.
+    let dc = unsafe { GetDC(None) };
+    // SAFETY: a DC from GetDC; any point (outside gives CLR_INVALID).
+    let colour = unsafe { GetPixel(dc, p.x, p.y) };
+    // SAFETY: the DC GetDC returned on this thread.
+    unsafe { ReleaseDC(None, dc) };
+    (colour.0 != CLR_INVALID).then(|| rgb(colour.0))
+}
+
+/// A COLORREF (`0x00BBGGRR`) as `(r, g, b)`.
+fn rgb(colorref: u32) -> (u8, u8, u8) {
+    let [r, g, b, _] = colorref.to_le_bytes();
+    (r, g, b)
+}
+
+/// True when every channel of `a` is within `tolerance` of `b`'s.
+fn near(a: (u8, u8, u8), b: (u8, u8, u8), tolerance: u8) -> bool {
+    a.0.abs_diff(b.0) <= tolerance
+        && a.1.abs_diff(b.1) <= tolerance
+        && a.2.abs_diff(b.2) <= tolerance
+}
+
+/// The colour an EDIT window paints its empty client area with (the target).
+fn window_colour() -> (u8, u8, u8) {
+    // SAFETY: a valid system colour index.
+    rgb(unsafe { GetSysColor(COLOR_WINDOW) })
 }
 
 /// Every visible, unowned, top-level window of this process but `except` and the
@@ -528,6 +721,14 @@ fn recording_processing_and_message_show_the_overlay_while_the_target_keeps_the_
             "{}: the overlay has no WS_EX_TOPMOST (GWL_EXSTYLE): {step:?}",
             step.state
         );
+        // T-067: every shown state has the whole shape (click-through, out of
+        // Alt+Tab); `stable` below then holds it for SETTLE.
+        assert_eq!(
+            shape_errors(&step.facts),
+            Vec::<&str>::new(),
+            "{}: the shown overlay lacks its shape: {step:?}",
+            step.state
+        );
         assert!(
             step.stable,
             "{}: within {SETTLE:?} after it showed the overlay changed (hidden, rebuilt or \
@@ -672,6 +873,13 @@ fn hidden_then_recording_at_once_leaves_exactly_one_visible_overlay() {
         "the rebuilt overlay is not a visible WS_EX_NOACTIVATE window: {:?}",
         report.label_facts
     );
+    // T-067: a rebuild gets the same shape as the first build.
+    assert_eq!(
+        shape_errors(&report.label_facts),
+        Vec::<&str>::new(),
+        "the rebuilt overlay lacks its shape: {:?}",
+        report.label_facts
+    );
     assert!(
         report.new_warnings.is_empty(),
         "the app logged warnings during Hidden -> Recording (a failed overlay build, e.g. \
@@ -690,6 +898,8 @@ struct GoneReport {
     /// After the newer shown state: exactly the label's window, visible, for SETTLE.
     one_after_newer: bool,
     shown_after_newer: Vec<(isize, String)>,
+    /// T-067: the facts of the window rebuilt after the outside destroy.
+    rebuilt_facts: Facts,
     /// Hidden then destroys that window (the reducer owns it; not stuck Destroying).
     hidden_gone: bool,
     /// And Recording after it shows one again.
@@ -744,6 +954,7 @@ fn an_overlay_destroyed_from_outside_is_rebuilt_by_a_newer_shown_state() {
         report.shown_after_newer = shown_windows(&[]);
         if report.one_after_newer {
             let rebuilt = overlay_hwnd(&handle).unwrap_or(0);
+            report.rebuilt_facts = facts(rebuilt);
             indicator.set_overlay(&OverlayState::Hidden);
             report.hidden_gone = poll(BUDGET, || {
                 !is_window(rebuilt) && handle.get_webview_window(LABEL).is_none()
@@ -778,6 +989,13 @@ fn an_overlay_destroyed_from_outside_is_rebuilt_by_a_newer_shown_state() {
          windows {:?} (want exactly the `{LABEL}` window, for {SETTLE:?}); the app's log: \
          {:#?}",
         report.shown_after_newer, report.log
+    );
+    // T-067: the rebuild after an outside destroy gets the same shape.
+    assert_eq!(
+        shape_errors(&report.rebuilt_facts),
+        Vec::<&str>::new(),
+        "the overlay rebuilt after an outside destroy lacks its shape: {:?}",
+        report.rebuilt_facts
     );
     assert!(
         report.hidden_gone,
@@ -859,4 +1077,330 @@ fn set_overlay_returns_while_the_main_thread_is_blocked() {
         "the overlay did not show once the main thread was released: {report:?}"
     );
     assert_eq!(code, 0, "run_return code after end_loop(0)");
+}
+
+// ---- T-067: click-through, out of Alt+Tab, shown without activation ------------------
+
+#[derive(Debug, Default)]
+struct ClickThroughReport {
+    target: isize,
+    shown_within_budget: bool,
+    facts: Facts,
+    /// Every sample of the overlay's facts during `SETTLE` matched the first.
+    stable: bool,
+    overlay_rect: Option<RECT>,
+    centre: POINT,
+    /// The target was moved under the overlay and its rectangle holds the centre.
+    covered: bool,
+    /// The top-level window a click at the overlay's centre reaches, right after
+    /// the target covered it, with its class.
+    hit: (isize, String),
+    /// The click reached the target at every sample during `SETTLE`.
+    hit_stable: bool,
+    foreground_samples: u64,
+    foreground_away: Vec<(isize, String)>,
+    focus_losses: Vec<(u32, usize)>,
+    hidden_gone: bool,
+    log: Vec<String>,
+}
+
+#[test]
+fn the_overlay_is_click_through_out_of_alt_tab_and_shown_without_activation() {
+    // T-067 Acceptance 1, 2, 3 and 6 (decisions #86): with a target window in front,
+    // Recording shows the overlay with WS_EX_TRANSPARENT, WS_EX_LAYERED and
+    // WS_EX_TOOLWINDOW set, WS_EX_APPWINDOW clear (NOACTIVATE and TOPMOST kept),
+    // unowned and top-level (the Alt+Tab check by style: the switcher's list has no
+    // API); the target, moved under the overlay without activation, is what a click
+    // at the overlay's centre reaches (WindowFromPoint -> GA_ROOT), at every sample
+    // for SETTLE; the target stays the foreground window at every 5 ms sample and
+    // gets no focus/activation-loss message; the facts hold for SETTLE (no late
+    // rewrite). Bite: the T-057 build (visible through tao, no raw bits: red on every
+    // new bit, APPWINDOW and the hit test); APPWINDOW left set; LAYERED without
+    // TRANSPARENT (still hit); the bits written but the window shown with tauri
+    // `show()` / `set_ignore_cursor_events` (tao rewrites GWL_EXSTYLE from its flags,
+    // dropping TOOLWINDOW, and SW_SHOW activates); an owner window (Alt+Tab by
+    // owner, but the window stops counting as unowned).
+    let _serial = serial();
+    let _watchdog =
+        watchdog("the_overlay_is_click_through_out_of_alt_tab_and_shown_without_activation");
+    let dir = TempDir::new();
+    let (app, outcome) = wry_app_drawn(dir.path());
+    let logs_of = dir.path().to_path_buf();
+
+    let (code, report) = run_with_driver(app, outcome, move |handle| {
+        let target = TestWindow::open(Shape::TopLevel);
+        target.front();
+        let target_raw = target.hwnd().0 as isize;
+        let losses_before = target.focus_losses().len();
+        let sampler = ForegroundSampler::start(target_raw);
+        let indicator = ShellIndicator::new(&handle);
+        let mut report = ClickThroughReport {
+            target: target_raw,
+            ..ClickThroughReport::default()
+        };
+        indicator.set_overlay(&OverlayState::Recording);
+        report.shown_within_budget = poll(BUDGET, || {
+            overlay_hwnd(&handle).is_some_and(|raw| facts(raw).visible)
+        });
+        if let Some(raw) = overlay_hwnd(&handle).filter(|_| report.shown_within_budget) {
+            report.facts = facts(raw);
+            report.overlay_rect = window_rect(raw);
+            if let Some(rect) = report.overlay_rect {
+                report.centre = centre(&rect);
+                report.covered = cover(target_raw, &rect)
+                    && window_rect(target_raw).is_some_and(|t| contains(&t, report.centre));
+                report.hit = hit_root(report.centre);
+                let at = report.centre;
+                report.hit_stable = holds_for(SETTLE, || hit_root(at).0 == target_raw);
+            }
+            let first = report.facts;
+            report.stable = holds_for(SETTLE, || facts(raw) == first);
+        }
+        let (samples, away) = sampler.stop();
+        report.foreground_samples = samples;
+        report.foreground_away = away;
+        report.focus_losses = target
+            .focus_losses()
+            .get(losses_before..)
+            .map(<[_]>::to_vec)
+            .unwrap_or_default();
+        let last = report.facts.hwnd;
+        indicator.set_overlay(&OverlayState::Hidden);
+        report.hidden_gone = last != 0 && poll(BUDGET, || !is_window(last));
+        report.log = logged(&logs_of);
+        report
+    });
+
+    assert!(
+        report.shown_within_budget,
+        "Recording showed no visible `{LABEL}` window within {BUDGET:?}; the app's log: \
+         {:#?}",
+        report.log
+    );
+    assert_eq!(
+        shape_errors(&report.facts),
+        Vec::<&str>::new(),
+        "the shown overlay is not click-through / out of Alt+Tab: {:?}",
+        report.facts
+    );
+    assert!(
+        report.covered,
+        "premise: the target could not be moved under the overlay (overlay {:?}, centre \
+         {:?}): {report:#?}",
+        report.overlay_rect, report.centre
+    );
+    assert_eq!(
+        report.hit.0, report.target,
+        "a click at the overlay's centre {:?} reaches {:?}, not the target {:#x} under it \
+         (the overlay takes the click)",
+        report.centre, report.hit, report.target
+    );
+    assert!(
+        report.hit_stable,
+        "within {SETTLE:?} a click at the overlay's centre stopped reaching the target: \
+         {report:#?}"
+    );
+    assert!(
+        report.stable,
+        "within {SETTLE:?} after it showed the overlay changed (hidden, rebuilt or its \
+         styles rewritten): {report:#?}"
+    );
+    assert!(
+        report.foreground_samples > 0,
+        "premise: the foreground sampler ran: {report:#?}"
+    );
+    assert!(
+        report.foreground_away.is_empty(),
+        "the target lost the foreground while the overlay showed; in front instead: {:?} \
+         (target {:#x})",
+        report.foreground_away,
+        report.target
+    );
+    assert!(
+        report.focus_losses.is_empty(),
+        "the target got focus/activation-loss messages while the overlay showed \
+         ((message, wParam): 0x8 WM_KILLFOCUS, 0x6 WM_ACTIVATE, 0x86 WM_NCACTIVATE): {:?}",
+        report.focus_losses
+    );
+    assert!(
+        report.hidden_gone,
+        "Hidden did not destroy the click-through overlay within {BUDGET:?}: {report:#?}"
+    );
+    assert_eq!(code, 0, "run_return code after end_loop(0)");
+}
+
+#[derive(Debug, Default)]
+struct DrawnReport {
+    shown_within_budget: bool,
+    facts: Facts,
+    centre: POINT,
+    covered: bool,
+    /// The screen could be read (`GetPixel` gave no `CLR_INVALID`).
+    readable: bool,
+    /// The page's colour was on screen at the overlay's centre within `BUDGET`.
+    drawn: bool,
+    last_pixel: Option<(u8, u8, u8)>,
+    target_colour: (u8, u8, u8),
+    log: Vec<String>,
+}
+
+#[test]
+fn the_click_through_overlay_still_paints_its_page() {
+    // T-067 guard (analysis hypothesis 5): a WS_EX_LAYERED window may not be drawn at
+    // all without layered attributes. With the target window moved under the overlay,
+    // the screen pixel at the overlay's centre becomes the test page's colour
+    // (PAGE_RGB, opaque) within BUDGET, not the target's COLOR_WINDOW. Green with the
+    // T-057 build (not layered); must stay green with the click-through bits. Bite:
+    // LAYERED set and never composed (no SetLayeredWindowAttributes where the system
+    // needs it): the target shows through, the pixel is COLOR_WINDOW.
+    let _serial = serial();
+    let _watchdog = watchdog("the_click_through_overlay_still_paints_its_page");
+    let dir = TempDir::new();
+    let (app, outcome) = wry_app_drawn(dir.path());
+    let logs_of = dir.path().to_path_buf();
+
+    let (code, report) = run_with_driver(app, outcome, move |handle| {
+        let target = TestWindow::open(Shape::TopLevel);
+        target.front();
+        let target_raw = target.hwnd().0 as isize;
+        let indicator = ShellIndicator::new(&handle);
+        let mut report = DrawnReport {
+            target_colour: window_colour(),
+            ..DrawnReport::default()
+        };
+        indicator.set_overlay(&OverlayState::Recording);
+        report.shown_within_budget = poll(BUDGET, || {
+            overlay_hwnd(&handle).is_some_and(|raw| facts(raw).visible)
+        });
+        if let Some(raw) = overlay_hwnd(&handle).filter(|_| report.shown_within_budget) {
+            report.facts = facts(raw);
+            if let Some(rect) = window_rect(raw) {
+                report.centre = centre(&rect);
+                report.covered = cover(target_raw, &rect)
+                    && window_rect(target_raw).is_some_and(|t| contains(&t, report.centre));
+                let at = report.centre;
+                report.readable = true;
+                report.drawn = poll(BUDGET, || {
+                    let pixel = screen_pixel(at);
+                    report.readable &= pixel.is_some();
+                    report.last_pixel = pixel;
+                    pixel.is_some_and(|p| near(p, PAGE_RGB, 24))
+                });
+            }
+        }
+        let last = report.facts.hwnd;
+        indicator.set_overlay(&OverlayState::Hidden);
+        let _ = last != 0 && poll(BUDGET, || !is_window(last));
+        report.log = logged(&logs_of);
+        report
+    });
+
+    assert!(
+        report.shown_within_budget,
+        "Recording showed no visible `{LABEL}` window within {BUDGET:?}; the app's log: \
+         {:#?}",
+        report.log
+    );
+    assert!(
+        report.covered,
+        "premise: the target could not be moved under the overlay: {report:#?}"
+    );
+    assert!(
+        report.readable,
+        "premise: GetPixel on the screen DC returned CLR_INVALID (no readable interactive \
+         desktop; docs/decisions/windows-ci-runner.md `session`/`desktop` facts): \
+         {report:#?}"
+    );
+    assert!(
+        report.drawn,
+        "the overlay's page (rgb{PAGE_RGB:?}) never showed at its centre {:?} within \
+         {BUDGET:?}; last pixel {:?} (the target's COLOR_WINDOW is rgb{:?}): a layered \
+         window that is not composed. Facts: {:?}",
+        report.centre, report.last_pixel, report.target_colour, report.facts
+    );
+    assert_eq!(code, 0, "run_return code after end_loop(0)");
+}
+
+/// The words of a log line after its timestamp and level.
+fn message_words(line: &str) -> Vec<&str> {
+    line.split_whitespace().skip(2).collect()
+}
+
+#[test]
+fn show_click_through_on_a_destroyed_window_returns_false_and_writes_one_overlay_failed_line() {
+    // T-067 Acceptance 4 (failure branch; FR-20, #45): the style write of
+    // `overlay::show_click_through` cannot be applied to a window that is gone
+    // (GetWindowLongPtrW / SetWindowLongPtrW fail with ERROR_INVALID_WINDOW_HANDLE,
+    // 1400). It returns false, writes exactly one line `warning kind=overlay_failed
+    // os_code=1400` (no handle, no OS text) and nothing else, shows no window, and
+    // the target in front keeps the foreground and its focus. Bite: true returned on
+    // the failure (the thread would think the bits hold); the error swallowed (no
+    // line); one line per failed call (two or three lines); the code lost
+    // (`os_code` missing: the ambiguous 0 of SetWindowLongPtrW not resolved with
+    // SetLastError(0)/GetLastError) or a stale one; error text in the line.
+    let _serial = serial();
+    let dir = TempDir::new();
+    let log = test_log(dir.path());
+
+    let dead = {
+        let gone = TestWindow::open(Shape::TopLevel);
+        gone.hwnd()
+    };
+    assert!(
+        !is_window(dead.0 as isize),
+        "premise: the dropped test window {dead:?} still exists"
+    );
+    let target = TestWindow::open(Shape::TopLevel);
+    target.front();
+    let target_raw = target.hwnd().0 as isize;
+    let losses_before = target.focus_losses().len();
+    let shown_before = shown_windows(&[]);
+    let lines_before = logged(dir.path()).len();
+    let sampler = ForegroundSampler::start(target_raw);
+
+    let applied = voicen_lib::overlay::show_click_through(dead, &log);
+
+    let foreground_kept = holds_for(SETTLE, || foreground().0 as isize == target_raw);
+    let (samples, away) = sampler.stop();
+    let new_lines: Vec<String> = logged(dir.path())
+        .get(lines_before..)
+        .map(<[_]>::to_vec)
+        .unwrap_or_default();
+    let focus_losses: Vec<(u32, usize)> = target
+        .focus_losses()
+        .get(losses_before..)
+        .map(<[_]>::to_vec)
+        .unwrap_or_default();
+    let shown_after = shown_windows(&[]);
+
+    assert!(
+        !applied,
+        "show_click_through on a destroyed window reported the bits applied"
+    );
+    assert_eq!(
+        new_lines.len(),
+        1,
+        "want exactly one log line for the failed style write: {new_lines:#?}"
+    );
+    assert_eq!(
+        message_words(&new_lines[0]),
+        vec!["warning", "kind=overlay_failed", "os_code=1400"],
+        "{:?}",
+        new_lines[0]
+    );
+    assert!(samples > 0, "premise: the foreground sampler ran");
+    assert!(
+        foreground_kept && away.is_empty(),
+        "the target lost the foreground during the failed show; in front instead: {away:?} \
+         (target {target_raw:#x})"
+    );
+    assert!(
+        focus_losses.is_empty(),
+        "the target got focus/activation-loss messages during the failed show: \
+         {focus_losses:?}"
+    );
+    assert_eq!(
+        shown_after, shown_before,
+        "the failed show changed the process's shown windows"
+    );
 }
