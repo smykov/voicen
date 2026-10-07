@@ -45,13 +45,15 @@ struct RawCredential {
     persist: u32,
 }
 
-fn raw_read(target: &str) -> Option<RawCredential> {
+/// Raw `CredReadW` of `target`: the credential, or the `CredReadW` error as returned
+/// (T-069: never collapsed to "absent").
+fn raw_read(target: &str) -> windows::core::Result<RawCredential> {
     let name = wide(target);
     let mut p: *mut CREDENTIALW = std::ptr::null_mut();
     // SAFETY: `name` is NUL-terminated and outlives the call; on success `p` points to
     // a CREDENTIALW owned by the system until CredFree.
     unsafe {
-        CredReadW(PCWSTR(name.as_ptr()), CRED_TYPE_GENERIC, None, &mut p).ok()?;
+        CredReadW(PCWSTR(name.as_ptr()), CRED_TYPE_GENERIC, None, &mut p)?;
         let cred = &*p;
         let blob = if cred.CredentialBlob.is_null() || cred.CredentialBlobSize == 0 {
             Vec::new()
@@ -66,12 +68,22 @@ fn raw_read(target: &str) -> Option<RawCredential> {
         };
         let persist = cred.Persist.0;
         CredFree(p as *const core::ffi::c_void);
-        Some(RawCredential {
+        Ok(RawCredential {
             blob,
             user_name,
             persist,
         })
     }
+}
+
+/// ERROR_NOT_FOUND, the Win32 code CredReadW returns for a target that does not exist.
+const ERROR_NOT_FOUND_WIN32: u32 = 1168;
+
+/// Whether a raw read says "gone": `CredReadW` failed with `ERROR_NOT_FOUND`. Any
+/// other error is not proof of absence (the same rule as `purge_credentials.rs`).
+fn is_not_found<T>(r: &windows::core::Result<T>) -> bool {
+    let not_found = windows::core::HRESULT::from_win32(ERROR_NOT_FOUND_WIN32);
+    matches!(r, Err(e) if e.code() == not_found)
 }
 
 /// One lock per test binary: at most one test touches Credential Manager at a time
@@ -158,15 +170,18 @@ fn each_slot_round_trips_and_delete_makes_it_absent() {
         let key = fake_key(slot, 1);
         assert_eq!(read_key(&store, slot), Some(key.clone()), "{slot:?}");
         let target = format!("{prefix}{}", slot.target_name());
-        assert_eq!(
-            raw_read(&target),
-            Some(RawCredential {
-                blob: key.into_bytes(),
-                user_name: "voicen".to_string(),
-                persist: CRED_PERSIST_LOCAL_MACHINE.0,
-            }),
-            "Credential Manager content of {target}"
-        );
+        match raw_read(&target) {
+            Ok(raw) => assert_eq!(
+                raw,
+                RawCredential {
+                    blob: key.into_bytes(),
+                    user_name: "voicen".to_string(),
+                    persist: CRED_PERSIST_LOCAL_MACHINE.0,
+                },
+                "Credential Manager content of {target}"
+            ),
+            Err(e) => panic!("raw CredReadW of {target}: {e:?}"),
+        }
     }
 
     // A second write replaces the key.
@@ -181,10 +196,10 @@ fn each_slot_round_trips_and_delete_makes_it_absent() {
             .delete(slot)
             .unwrap_or_else(|e| panic!("delete {slot:?}: {e:?}"));
         assert_eq!(read_key(&store, slot), None, "{slot:?} still present");
-        assert_eq!(
-            raw_read(&format!("{prefix}{}", slot.target_name())),
-            None,
-            "{slot:?} still in Credential Manager"
+        let r = raw_read(&format!("{prefix}{}", slot.target_name()));
+        assert!(
+            is_not_found(&r),
+            "{slot:?} still in Credential Manager: read-back {r:?}"
         );
         assert_eq!(store.delete(slot), Ok(()), "deleting absent {slot:?}");
     }

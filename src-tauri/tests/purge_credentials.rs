@@ -432,7 +432,10 @@ fn read_back_is_ok_for_a_planted_target_and_err_1168_once_deleted() {
     if let Err(e) = read_back(&target, CRED_TYPE_GENERIC) {
         panic!("read-back of a planted target: {e:?}");
     }
-    raw_delete(&target, CRED_TYPE_GENERIC);
+    let name = wide(&target);
+    // SAFETY: `name` is NUL-terminated and outlives the call.
+    unsafe { CredDeleteW(PCWSTR(name.as_ptr()), CRED_TYPE_GENERIC, None) }
+        .unwrap_or_else(|e| panic!("CredDeleteW of {target}: {}", hresult_and_win32(&e)));
     let err = read_back(&target, CRED_TYPE_GENERIC).expect_err("read-back after delete");
     assert_eq!(
         err.code(),
