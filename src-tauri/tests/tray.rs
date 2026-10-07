@@ -20,13 +20,20 @@
 //!
 //! Each test has its own `TempDir`; the runner's real `%LOCALAPPDATA%\Voicen` is
 //! never written. No keys are used; the local server URL is a loopback fake.
+//!
+//! T-071 (Open logs folder): the click path is `on_menu_event` ->
+//! `voicen_lib::logs_folder::request`, over a fake `FolderOpener` installed with
+//! `logs_folder::install` on a `TempDir` path, so no Explorer window opens on the
+//! runner (F-006). The Win32 `ShellOpener` is exercised only on its failure branch
+//! (a missing path).
 #![cfg(windows)]
 
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::io;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
-use std::thread;
+use std::thread::{self, ThreadId};
 use std::time::{Duration, Instant};
 
 use tauri::menu::{MenuEvent, MenuId};
@@ -56,9 +63,11 @@ use voicen_core::test_support::TempDir;
 use voicen_core::timeouts::Timeouts;
 use voicen_core::tray::{self as table, TrayAction};
 use voicen_core::vad::{EnergyDetector, SpeechDetector, SpeechGate};
+use voicen_lib::logs_folder::{self, FolderOpener};
 use voicen_lib::settings_ipc::load_settings;
 use voicen_lib::settings_window::{self, OpenTarget, LABEL};
 use voicen_lib::tray::{self, Applied, TrayPart, TRAY_ID};
+use voicen_lib::win::shell_open::ShellOpener;
 use windows::core::BOOL;
 use windows::Win32::Foundation::{HWND, LPARAM};
 use windows::Win32::System::Threading::GetCurrentThreadId;
@@ -711,12 +720,17 @@ fn the_settings_item_opens_one_window_and_then_fronts_it() {
 #[test]
 fn an_unknown_menu_id_does_nothing() {
     // Only core's ids are mapped (`TrayAction::from_id`); another task's item or a
-    // stray event does nothing. Bite: a catch-all arm (opening settings, or exiting:
-    // the mock's `request_exit` is unimplemented and would panic here).
+    // stray event does nothing. Bite: a catch-all arm (opening settings, opening the
+    // logs folder, or exiting: the mock's `request_exit` is unimplemented and would
+    // panic here). T-071: `open_logs` is an item now, so it left this list; an
+    // installed opener must still see no call for any of these ids.
     let _serial = serial();
     let rig = rig(None);
+    let dir = TempDir::new();
+    let opener = Arc::new(FakeOpener::default());
+    logs_folder::install(rig.handle(), dir.path().join("logs"), opener.clone());
 
-    for id in ["open_logs", "retry", "", "Exit"] {
+    for id in ["retry", "", "Exit", "OPEN_LOGS", "open_logs_folder", "logs"] {
         tray::on_menu_event(
             rig.handle(),
             MenuEvent {
@@ -734,6 +748,11 @@ fn an_unknown_menu_id_does_nothing() {
         rig.applied(),
         Some(expected(TrayState::Idle, false, UiLanguage::En)),
         "an unknown id changed the tray"
+    );
+    assert!(
+        opener.calls().is_empty(),
+        "an unknown id opened the logs folder: {:?}",
+        opener.calls()
     );
 }
 
@@ -846,6 +865,325 @@ fn a_failed_icon_and_tooltip_setter_leaves_the_applied_icon_and_tooltip_unchange
         i18n::text(UiLanguage::En, table::tooltip(TrayState::Idle), &[]),
         "Applied.tooltip recorded from a failed set_tooltip"
     );
+}
+
+// ---- T-071: the Open logs folder item ---------------------------------------------
+
+/// One `FolderOpener::open` call as the fake saw it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OpenCall {
+    dir: PathBuf,
+    /// Whether `dir` was a directory when the opener was called.
+    was_dir: bool,
+    thread: ThreadId,
+}
+
+/// The fake `FolderOpener` port: records every call; returns the OS error code
+/// queued in `fail_next` (once), `Ok` otherwise; while `held`, waits in `open` until
+/// released (or `HOLD_LIMIT`). Opens nothing.
+#[derive(Default)]
+struct FakeOpener {
+    calls: Mutex<Vec<OpenCall>>,
+    fail_next: Mutex<Option<i32>>,
+    /// `(held, released)`.
+    hold: Mutex<(bool, bool)>,
+    changed: Condvar,
+}
+
+impl FakeOpener {
+    fn failing_once(os_code: i32) -> FakeOpener {
+        let fake = FakeOpener::default();
+        *fake
+            .fail_next
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(os_code);
+        fake
+    }
+
+    fn held() -> FakeOpener {
+        let fake = FakeOpener::default();
+        fake.hold.lock().unwrap_or_else(PoisonError::into_inner).0 = true;
+        fake
+    }
+
+    fn release(&self) {
+        self.hold.lock().unwrap_or_else(PoisonError::into_inner).1 = true;
+        self.changed.notify_all();
+    }
+
+    fn calls(&self) -> Vec<OpenCall> {
+        self.calls
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+}
+
+impl FolderOpener for FakeOpener {
+    fn open(&self, dir: &Path) -> io::Result<()> {
+        self.calls
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(OpenCall {
+                dir: dir.to_path_buf(),
+                was_dir: dir.is_dir(),
+                thread: thread::current().id(),
+            });
+        let hold = self.hold.lock().unwrap_or_else(PoisonError::into_inner);
+        if hold.0 {
+            let _released = self
+                .changed
+                .wait_timeout_while(hold, HOLD_LIMIT, |h| !h.1)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+        match self
+            .fail_next
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+        {
+            Some(code) => Err(io::Error::from_raw_os_error(code)),
+            None => Ok(()),
+        }
+    }
+}
+
+/// Releases a held opener when the test ends, also by a failed assertion.
+struct ReleaseOpenerOnDrop(Arc<FakeOpener>);
+
+impl Drop for ReleaseOpenerOnDrop {
+    fn drop(&mut self) {
+        self.0.release();
+    }
+}
+
+/// The `warning kind=logs_folder_failed` lines of `<logs>/voicen.log`.
+fn logs_folder_failed_lines(logs: &Path) -> Vec<String> {
+    std::fs::read_to_string(logs.join("voicen.log"))
+        .map(|t| {
+            t.lines()
+                .filter(|l| l.split_whitespace().any(|w| w == "kind=logs_folder_failed"))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The words of a log line after its timestamp and level (`warning kind=… …`).
+fn message_words(line: &str) -> Vec<&str> {
+    line.split_whitespace().skip(2).collect()
+}
+
+/// A rig whose log is `<dir>/diag` (readable), plus that path.
+fn rig_logging_under(dir: &TempDir) -> (Rig, PathBuf) {
+    let diag_logs = dir.path().join("diag");
+    let rig = rig_with_log(
+        None,
+        voicen_lib::diag::start(diag_logs.clone(), Box::new(|_| {})),
+    );
+    (rig, diag_logs)
+}
+
+#[test]
+fn the_open_logs_item_creates_and_opens_the_logs_dir_off_the_main_thread() {
+    // T-071 Acceptance 1 and the invariant: a click on Open logs folder goes
+    // on_menu_event -> logs_folder::request, which creates the installed logs dir
+    // when it is missing (here two levels are missing, as after the folder was
+    // deleted while the app runs) and hands exactly that dir to the FolderOpener
+    // port, on a thread that is not the main thread (the test thread is the mock's
+    // main thread); the handler returns at once while the opener is still busy
+    // (ShellExecuteEx can block on shell extensions). A success writes no warning.
+    // Bite: OpenLogs not routed in on_menu_event (no call), the opener called
+    // inline on the main thread (the handler blocks on the held opener, and the
+    // thread is the main one), no create_dir_all (or create_dir only) before the
+    // open (`was_dir` false), another path handed over (the log file, the parent,
+    // `paths::log_dir()` instead of the installed dir), a warning on success.
+    let _serial = serial();
+    let dir = TempDir::new();
+    let (rig, diag_logs) = rig_logging_under(&dir);
+    let target = dir.path().join("deleted").join("logs");
+    assert!(!target.exists(), "premise: the logs dir is missing");
+    let opener = Arc::new(FakeOpener::held());
+    let _release = ReleaseOpenerOnDrop(Arc::clone(&opener));
+    logs_folder::install(rig.handle(), target.clone(), opener.clone());
+    let main = thread::current().id();
+
+    let started = Instant::now();
+    tray::on_menu_event(rig.handle(), menu_item(TrayAction::OpenLogs));
+    let took = started.elapsed();
+    opener.release();
+
+    assert!(
+        took < RETURNS_AT_ONCE,
+        "the Open logs handler waited {took:?} for the opener on the main thread"
+    );
+    assert!(
+        eventually(|| opener.calls().len() == 1),
+        "the Open logs item did not reach the opener: {:?}",
+        opener.calls()
+    );
+    let call = opener.calls().remove(0);
+    assert_eq!(call.dir, target, "the opener got another path");
+    assert!(
+        call.was_dir,
+        "the opener was called before the logs dir was created"
+    );
+    assert_ne!(call.thread, main, "the opener ran on the main thread");
+    assert!(target.is_dir(), "the logs dir does not exist afterwards");
+    assert!(
+        holds_for_a_while(
+            || opener.calls().len() == 1 && logs_folder_failed_lines(&diag_logs).is_empty()
+        ),
+        "after a successful open: calls {:?}, warnings {:?}",
+        opener.calls(),
+        logs_folder_failed_lines(&diag_logs)
+    );
+}
+
+#[test]
+fn a_failing_opener_writes_one_logs_folder_failed_line_and_the_app_keeps_working() {
+    // T-071 Acceptance 2 (failure branch: Explorer cannot be started): the opener's
+    // error ends in exactly one `warning kind=logs_folder_failed os_code=5` line,
+    // with nothing else in it (no path, no user name, no OS text such as "Access is
+    // denied"); the tray still applies a state, and a second click reaches the
+    // opener again and, succeeding, adds no line. Bite: the error swallowed (no
+    // line), logged twice (once per layer), logged without its code, the path or
+    // the OS message put in the line, a panic in the worker that poisons or
+    // removes the managed state so the second click does nothing, or a "failed
+    // once, never again" latch.
+    let _serial = serial();
+    let dir = TempDir::new();
+    let (rig, diag_logs) = rig_logging_under(&dir);
+    let target = dir.path().join("logs");
+    let opener = Arc::new(FakeOpener::failing_once(5));
+    logs_folder::install(rig.handle(), target.clone(), opener.clone());
+
+    tray::on_menu_event(rig.handle(), menu_item(TrayAction::OpenLogs));
+
+    assert!(
+        eventually(|| !logs_folder_failed_lines(&diag_logs).is_empty()),
+        "no logs_folder_failed line after the opener failed; calls {:?}",
+        opener.calls()
+    );
+    let lines = logs_folder_failed_lines(&diag_logs);
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert_eq!(
+        message_words(&lines[0]),
+        vec!["warning", "kind=logs_folder_failed", "os_code=5"],
+        "{:?}",
+        lines[0]
+    );
+    let tmp_name = dir
+        .path()
+        .file_name()
+        .and_then(|n| n.to_str())
+        .expect("the temp dir has a name");
+    assert!(
+        !lines[0].contains(tmp_name),
+        "the path is in {:?}",
+        lines[0]
+    );
+
+    rig.part().set_tray(TrayState::Recording, false);
+    assert!(
+        eventually(|| rig.applied() == Some(expected(TrayState::Recording, false, UiLanguage::En))),
+        "the tray stopped applying after the failed open: {:?}",
+        rig.applied()
+    );
+
+    tray::on_menu_event(rig.handle(), menu_item(TrayAction::OpenLogs));
+    assert!(
+        eventually(|| opener.calls().len() == 2),
+        "a second click did not reach the opener: {:?}",
+        opener.calls()
+    );
+    assert!(
+        holds_for_a_while(|| logs_folder_failed_lines(&diag_logs).len() == 1),
+        "a successful second open changed the warnings: {:?}",
+        logs_folder_failed_lines(&diag_logs)
+    );
+}
+
+#[test]
+fn a_file_at_the_logs_path_is_never_opened_and_gives_one_warning() {
+    // T-071 invariant (guard before ShellExecuteEx "open", which would execute a
+    // file): when the logs path is a file, creating the dir fails and the opener is
+    // never called; one `logs_folder_failed` line (an os_code if the OS gave one,
+    // nothing else) and the file is left as it was. Bite: the create error ignored
+    // and no is_dir check (the file handed to the opener), the file removed or
+    // replaced to make room for the dir, no warning, or more than one.
+    let _serial = serial();
+    let dir = TempDir::new();
+    let (rig, diag_logs) = rig_logging_under(&dir);
+    let target = dir.path().join("logs");
+    std::fs::write(&target, b"not a folder").expect("premise: a file at the logs path");
+    let opener = Arc::new(FakeOpener::default());
+    logs_folder::install(rig.handle(), target.clone(), opener.clone());
+
+    tray::on_menu_event(rig.handle(), menu_item(TrayAction::OpenLogs));
+
+    assert!(
+        eventually(|| !logs_folder_failed_lines(&diag_logs).is_empty()),
+        "no logs_folder_failed line for a file at the logs path"
+    );
+    assert!(
+        holds_for_a_while(
+            || opener.calls().is_empty() && logs_folder_failed_lines(&diag_logs).len() == 1
+        ),
+        "calls {:?}, warnings {:?}",
+        opener.calls(),
+        logs_folder_failed_lines(&diag_logs)
+    );
+    let lines = logs_folder_failed_lines(&diag_logs);
+    let words = message_words(&lines[0]);
+    assert_eq!(
+        words.get(..2),
+        Some(&["warning", "kind=logs_folder_failed"][..])
+    );
+    assert!(
+        words.len() == 2
+            || (words.len() == 3
+                && words[2]
+                    .strip_prefix("os_code=")
+                    .is_some_and(|c| c.parse::<i32>().is_ok())),
+        "only kind and os_code may follow `warning`: {:?}",
+        lines[0]
+    );
+    assert_eq!(
+        std::fs::read(&target).ok().as_deref(),
+        Some(&b"not a folder"[..]),
+        "the file at the logs path was changed"
+    );
+}
+
+#[test]
+fn the_shell_opener_refuses_a_missing_folder_with_code_2_and_no_window() {
+    // T-071 option A: the Win32 adapter (ShellExecuteExW "open",
+    // SEE_MASK_NOASYNC | SEE_MASK_FLAG_NO_UI) reports a missing path as Err with
+    // Win32 code 2 (ERROR_FILE_NOT_FOUND), the code the warning carries, and shows
+    // no error dialog: without FLAG_NO_UI the call shows a modal "Windows cannot
+    // find" box and does not return, which the bounded wait turns red. It creates
+    // nothing (creating is logs_folder's). Only the failure branch is run: a
+    // success would open an Explorer window on the runner (F-006). Bite: the error
+    // dropped (Ok for a missing path), the HRESULT (0x80070002) or a ShellExecute
+    // instance code (<= 32) passed as the os code, FLAG_NO_UI left out, the adapter
+    // creating the folder.
+    let _serial = serial();
+    let dir = TempDir::new();
+    let missing = dir.path().join("missing");
+
+    let (tx, rx) = mpsc::channel();
+    let path = missing.clone();
+    thread::spawn(move || {
+        let _ = tx.send(ShellOpener.open(&path));
+    });
+    let result = rx.recv_timeout(BUDGET).unwrap_or_else(|_| {
+        panic!("ShellOpener did not return within {BUDGET:?} for a missing path (an error dialog?)")
+    });
+
+    let err = result.expect_err("ShellOpener opened a missing folder");
+    assert_eq!(err.raw_os_error(), Some(2), "{err:?}");
+    assert!(!missing.exists(), "ShellOpener created the folder");
 }
 
 /// The release context (tauri.conf.json as tauri-build resolved it).

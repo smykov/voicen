@@ -199,6 +199,7 @@ fn all_warning_kinds() -> Vec<(WarningKind, &'static str)> {
         (WarningKind::HotkeyRegisterFailed, "hotkey_register_failed"),
         (WarningKind::DictationStartFailed, "dictation_start_failed"),
         (WarningKind::OverlayFailed, "overlay_failed"),
+        (WarningKind::LogsFolderFailed, "logs_folder_failed"),
     ];
     let seen: BTreeSet<usize> = all
         .iter()
@@ -216,9 +217,10 @@ fn all_warning_kinds() -> Vec<(WarningKind, &'static str)> {
             WarningKind::HotkeyRegisterFailed => 10,
             WarningKind::DictationStartFailed => 11,
             WarningKind::OverlayFailed => 12,
+            WarningKind::LogsFolderFailed => 13,
         })
         .collect();
-    assert_eq!(seen.len(), 13, "every WarningKind once");
+    assert_eq!(seen.len(), 14, "every WarningKind once");
     all
 }
 

@@ -130,11 +130,15 @@ mod tests {
     }
 
     /// Every menu action, by a wildcard-free match (as above).
-    fn all_actions() -> [TrayAction; 2] {
-        let all = [TrayAction::OpenSettings, TrayAction::Exit];
+    fn all_actions() -> [TrayAction; 3] {
+        let all = [
+            TrayAction::OpenSettings,
+            TrayAction::OpenLogs,
+            TrayAction::Exit,
+        ];
         for action in all {
             match action {
-                TrayAction::OpenSettings | TrayAction::Exit => {}
+                TrayAction::OpenSettings | TrayAction::OpenLogs | TrayAction::Exit => {}
             }
         }
         all
@@ -149,20 +153,23 @@ mod tests {
     }
 
     #[test]
-    fn menu_is_settings_then_exit_whether_or_not_a_retry_is_available() {
-        // spec 001 FR-001 / T-052 analysis design 3: the menu is [Settings, Exit] in
-        // T-052, for both values of retry_available (T-007 changes the `true` row:
-        // Retry while the pending slot holds a recording). Bite: Exit missing (the
-        // process could never be ended once prevent_exit is in), the order swapped,
-        // an item for a later task already present, or the two rows differing now.
-        assert_eq!(
-            menu(false),
-            vec![TrayAction::OpenSettings, TrayAction::Exit],
-            "retry_available = false"
-        );
+    fn menu_is_settings_open_logs_then_exit_whether_or_not_a_retry_is_available() {
+        // spec 001 FR-001 / T-052 analysis design 3, T-071: the menu is [Settings,
+        // Open logs folder, Exit], for both values of retry_available (T-007 changes
+        // the `true` row: Retry while the pending slot holds a recording). Bite: the
+        // Open logs item missing from either row (the variant exists but is never
+        // shown), Exit missing (the process could never be ended once prevent_exit
+        // is in), the order changed (Exit no longer last), an item for a later task
+        // already present, or the two rows differing now.
+        let want = vec![
+            TrayAction::OpenSettings,
+            TrayAction::OpenLogs,
+            TrayAction::Exit,
+        ];
+        assert_eq!(menu(false), want, "retry_available = false");
         assert_eq!(
             menu(true),
-            vec![TrayAction::OpenSettings, TrayAction::Exit],
+            want,
             "retry_available = true (T-007 adds Retry here)"
         );
     }
@@ -188,7 +195,9 @@ mod tests {
             "",
             "Exit",
             "SETTINGS",
-            "open_logs",
+            "OPEN_LOGS",
+            "open_logs_folder",
+            "logs",
             "retry",
             "history",
             " exit",
@@ -196,18 +205,30 @@ mod tests {
             assert_eq!(
                 TrayAction::from_id(unknown),
                 None,
-                "{unknown:?} is not an item of the T-052 menu"
+                "{unknown:?} is not an item of the menu"
             );
         }
     }
 
     #[test]
+    fn the_open_logs_item_has_id_open_logs_and_maps_back() {
+        // T-071: the Open logs folder item carries the MenuEvent id `open_logs` (the
+        // word the shell's `on_menu_event` maps back, and the id T-052's tests held
+        // as "another task's item"), and that id maps back to OpenLogs only. Bite:
+        // another spelling (`logs`, `open_logs_folder`), or `from_id("open_logs")`
+        // missing from ALL (the click would do nothing).
+        assert_eq!(TrayAction::OpenLogs.as_str(), "open_logs");
+        assert_eq!(TrayAction::from_id("open_logs"), Some(TrayAction::OpenLogs));
+    }
+
+    #[test]
     fn menu_item_labels_are_the_contract_ids_and_declared() {
-        // contracts/messages.md:32 and :36. Declared in MESSAGE_IDS, so the catalog
+        // contracts/messages.md:32, :36 and the tray.open_logs row (T-071). Declared in MESSAGE_IDS, so the catalog
         // test checks both catalogs. Bite: a wrong id (`tray.open_settings`), the
         // two items swapped, or an id built outside the `messages!` list.
         let table = [
             (TrayAction::OpenSettings, "tray.settings"),
+            (TrayAction::OpenLogs, "tray.open_logs"),
             (TrayAction::Exit, "tray.exit"),
         ];
         assert_eq!(table.map(|(a, _)| a), all_actions());
@@ -251,8 +272,13 @@ mod tests {
         // catalog (rendered as the id itself, or ru falling back to the English
         // text), or a text that is not the contract's. "Voicen" is the product name
         // in both languages (T-005).
-        let rows: [(MessageId, &str, &str); 6] = [
+        let rows: [(MessageId, &str, &str); 7] = [
             (TrayAction::OpenSettings.label(), "Settings", "Настройки"),
+            (
+                TrayAction::OpenLogs.label(),
+                "Open logs folder",
+                "Открыть папку журналов",
+            ),
             (TrayAction::Exit.label(), "Exit", "Выход"),
             (tooltip(TrayState::Idle), "Voicen", "Voicen"),
             (
