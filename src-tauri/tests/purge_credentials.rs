@@ -9,9 +9,11 @@
 //! a time in Credential Manager, and a failed read-back names its `CredReadW` error.
 #![cfg(windows)]
 
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, MutexGuard, PoisonError};
+mod cred_support;
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use cred_support::{is_not_found, serial, ERROR_NOT_FOUND_WIN32};
 use voicen_core::secrets::{
     purge_credentials, CredentialEntry, CredentialError, CredentialNamespace,
 };
@@ -143,21 +145,6 @@ fn premise_failure(target: &str, kind: CRED_TYPE, err: &windows::core::Error) ->
         err.message(),
         enumerate_look(target),
     )
-}
-
-/// Whether a read-back says "gone": `CredReadW` failed with `ERROR_NOT_FOUND`. Any
-/// other error is not proof of absence.
-fn is_not_found(r: &windows::core::Result<()>) -> bool {
-    matches!(r, Err(e) if win32_code(e) == Some(ERROR_NOT_FOUND_WIN32))
-}
-
-/// One lock per test binary: at most one test touches Credential Manager at a time
-/// (T-069). Taken as the first statement of every test, so `Planted`'s cleanup runs
-/// under it too; a test that panicked holding it does not poison the rest.
-static SERIAL: Mutex<()> = Mutex::new(());
-
-fn serial() -> MutexGuard<'static, ()> {
-    SERIAL.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 fn raw_delete(target: &str, kind: CRED_TYPE) {
@@ -383,19 +370,14 @@ fn failed_delete_exits_2_keeps_that_entry_and_removes_the_rest() {
     }
 }
 
-// T-069 tests of the three helpers defined above:
+// T-069 tests of the helpers defined above (`serial` and `is_not_found` live in
+// `cred_support`, shared with `credentials.rs`; its lock tests run in both binaries):
 //
-//   fn serial() -> std::sync::MutexGuard<'static, ()>
-//       one process-wide lock (a static Mutex<()>, poison recovered), taken first by
-//       every test in this file;
 //   fn read_back(target: &str, kind: CRED_TYPE) -> windows::core::Result<()>
 //       raw CredReadW of `target`, replacing the bool `raw_exists`: Ok when the entry
 //       is readable, otherwise the CredReadW error as returned;
 //   fn premise_failure(target: &str, kind: CRED_TYPE, err: &windows::core::Error) -> String
 //       the message `Planted::add` panics with when the read-back of a plant fails.
-
-/// ERROR_NOT_FOUND, the Win32 code CredReadW returns for a target that does not exist.
-const ERROR_NOT_FOUND_WIN32: u32 = 1168;
 
 #[test]
 fn read_back_of_a_never_written_target_names_its_win32_error() {
@@ -549,44 +531,4 @@ fn read_back_is_ok_for_a_planted_target_and_err_1168_once_deleted() {
         windows::core::HRESULT::from_win32(ERROR_NOT_FOUND_WIN32),
         "{err:?}"
     );
-}
-
-#[test]
-fn serial_excludes_a_second_holder_until_the_first_drops() {
-    // Invariant: at most one test touches Credential Manager at a time. While this
-    // thread holds serial(), a second thread's serial() must not return; once the
-    // guard drops, it must.
-    // Bite: serial() locking a fresh Mutex per call, or returning without a lock.
-    // A slow runner can only make a broken lock look correct (the second thread not
-    // yet scheduled), never make a correct lock look broken: no spurious red.
-    let first = serial();
-    let (tx, rx) = std::sync::mpsc::channel();
-    let second = std::thread::spawn(move || {
-        let _held = serial();
-        tx.send(()).expect("main thread waits");
-    });
-    assert!(
-        rx.recv_timeout(std::time::Duration::from_millis(200))
-            .is_err(),
-        "a second serial() returned while the first guard was held"
-    );
-    drop(first);
-    rx.recv_timeout(std::time::Duration::from_secs(30))
-        .expect("serial() after the first guard dropped");
-    second.join().expect("second holder");
-}
-
-#[test]
-fn serial_survives_a_test_that_panicked_holding_it() {
-    // A failing test panics with the guard held (its Planted cleanup still runs under
-    // the lock). The next test must still get the lock, or one red test turns every
-    // later test in the binary red with PoisonError and hides the real failure.
-    // Bite: serial() as SERIAL.lock().unwrap().
-    let panicked = std::thread::spawn(|| {
-        let _held = serial();
-        panic!("T-069: deliberate panic with the serial guard held");
-    })
-    .join();
-    assert!(panicked.is_err(), "the holder thread did not panic");
-    let _again = serial();
 }

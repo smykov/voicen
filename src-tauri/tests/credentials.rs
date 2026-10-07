@@ -8,9 +8,11 @@
 //! Keys are obviously fake.
 #![cfg(windows)]
 
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, MutexGuard, PoisonError};
+mod cred_support;
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use cred_support::{is_not_found, serial};
 use voicen_core::secrets::{CredentialError, CredentialStore, KeySlot, Secret};
 use voicen_lib::credentials::WinCredentialStore;
 use windows::core::{PCWSTR, PWSTR};
@@ -74,25 +76,6 @@ fn raw_read(target: &str) -> windows::core::Result<RawCredential> {
             persist,
         })
     }
-}
-
-/// ERROR_NOT_FOUND, the Win32 code CredReadW returns for a target that does not exist.
-const ERROR_NOT_FOUND_WIN32: u32 = 1168;
-
-/// Whether a raw read says "gone": `CredReadW` failed with `ERROR_NOT_FOUND`. Any
-/// other error is not proof of absence (the same rule as `purge_credentials.rs`).
-fn is_not_found<T>(r: &windows::core::Result<T>) -> bool {
-    let not_found = windows::core::HRESULT::from_win32(ERROR_NOT_FOUND_WIN32);
-    matches!(r, Err(e) if e.code() == not_found)
-}
-
-/// One lock per test binary: at most one test touches Credential Manager at a time
-/// (T-069, the same invariant as `purge_credentials.rs`). Taken as the first statement
-/// of every test, so the `Cleanup` deletes run under it too; poison is recovered.
-static SERIAL: Mutex<()> = Mutex::new(());
-
-fn serial() -> MutexGuard<'static, ()> {
-    SERIAL.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// Writes `blob` under `target` with raw `CredWriteW` (to plant bytes the store
