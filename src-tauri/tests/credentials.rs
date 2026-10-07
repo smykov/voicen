@@ -9,6 +9,7 @@
 #![cfg(windows)]
 
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use voicen_core::secrets::{CredentialError, CredentialStore, KeySlot, Secret};
 use voicen_lib::credentials::WinCredentialStore;
@@ -73,6 +74,15 @@ fn raw_read(target: &str) -> Option<RawCredential> {
     }
 }
 
+/// One lock per test binary: at most one test touches Credential Manager at a time
+/// (T-069, the same invariant as `purge_credentials.rs`). Taken as the first statement
+/// of every test, so the `Cleanup` deletes run under it too; poison is recovered.
+static SERIAL: Mutex<()> = Mutex::new(());
+
+fn serial() -> MutexGuard<'static, ()> {
+    SERIAL.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 /// Writes `blob` under `target` with raw `CredWriteW` (to plant bytes the store
 /// itself would never write).
 fn raw_write(target: &str, blob: &[u8]) {
@@ -133,6 +143,7 @@ fn read_key(store: &WinCredentialStore, slot: KeySlot) -> Option<String> {
 
 #[test]
 fn each_slot_round_trips_and_delete_makes_it_absent() {
+    let _serial = serial();
     // Bite: a slot written to another slot's target, a UTF-16 blob, a user name or
     // persistence other than R-1's, a second write not replacing the first, delete
     // leaving the credential, or deleting an absent key being an error.
@@ -181,6 +192,7 @@ fn each_slot_round_trips_and_delete_makes_it_absent() {
 
 #[test]
 fn missing_target_reads_absent() {
+    let _serial = serial();
     // Bite: ERROR_NOT_FOUND (1168) returned as an error instead of absent, on read
     // or on delete.
     let (store, _prefix, _cleanup) = throwaway_store();
@@ -195,6 +207,7 @@ fn missing_target_reads_absent() {
 
 #[test]
 fn release_store_targets_are_slot_target_names() {
+    let _serial = serial();
     // Bite: the release store adding any prefix or suffix (keys saved by one build
     // unreadable by another), or the test prefix not being a plain prefix.
     let release = WinCredentialStore::new();
@@ -216,6 +229,7 @@ fn release_store_targets_are_slot_target_names() {
 
 #[test]
 fn non_utf8_blob_reads_as_invalid_data_error() {
+    let _serial = serial();
     // Bite: invalid UTF-8 decoded lossily (a different key used silently) or read
     // as absent; the error must be ERROR_INVALID_DATA (13) and carry no bytes.
     let (store, prefix, _cleanup) = throwaway_store();
@@ -232,6 +246,7 @@ fn non_utf8_blob_reads_as_invalid_data_error() {
 
 #[test]
 fn oversized_key_is_refused_and_previous_key_kept() {
+    let _serial = serial();
     // A real (not injected) Credential Manager refusal: a blob over
     // CRED_MAX_CREDENTIAL_BLOB_SIZE (2560 bytes). Bite: the store reporting Ok,
     // truncating, or touching the stored key on a failed write.

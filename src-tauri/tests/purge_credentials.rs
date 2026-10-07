@@ -5,10 +5,12 @@
 //! store prefix (`voicen-test-<pid>-<n>-<nanos>/`), never the bin: the bin has no
 //! prefix override and would purge the developer's real `Voicen/*` keys. A guard
 //! deletes every planted target with raw `CredDeleteW` whether the test passes or not.
-//! Blobs are obviously fake keys.
+//! Blobs are obviously fake keys. Every test takes `serial()` first (T-069): one test at
+//! a time in Credential Manager, and a failed read-back names its `CredReadW` error.
 #![cfg(windows)]
 
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use voicen_core::secrets::{
     purge_credentials, CredentialEntry, CredentialError, CredentialNamespace,
@@ -16,8 +18,8 @@ use voicen_core::secrets::{
 use voicen_lib::win::purge::{from_args, WinCredentialNamespace, PURGE_CREDENTIALS_ARG};
 use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Security::Credentials::{
-    CredDeleteW, CredFree, CredReadW, CredWriteW, CREDENTIALW, CRED_PERSIST_LOCAL_MACHINE,
-    CRED_TYPE, CRED_TYPE_GENERIC,
+    CredDeleteW, CredEnumerateW, CredFree, CredReadW, CredWriteW, CREDENTIALW,
+    CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE, CRED_TYPE_GENERIC,
 };
 
 /// The namespace the app writes (pinned again in core by
@@ -69,19 +71,93 @@ fn try_write(target: &str, kind: CRED_TYPE) -> windows::core::Result<()> {
     unsafe { CredWriteW(&cred, 0) }
 }
 
-/// Whether `target` of type `kind` exists, with raw `CredReadW`.
-fn raw_exists(target: &str, kind: CRED_TYPE) -> bool {
+/// Raw `CredReadW` of `target` of type `kind`: `Ok` when the entry is readable,
+/// otherwise the `CredReadW` error exactly as returned (never collapsed to a bool).
+fn read_back(target: &str, kind: CRED_TYPE) -> windows::core::Result<()> {
     let name = wide(target);
     let mut p: *mut CREDENTIALW = std::ptr::null_mut();
     // SAFETY: `name` is NUL-terminated and outlives the call; on success `p` is owned
-    // by the system until CredFree.
+    // by the system until CredFree, which is called exactly once and `p` not used after.
     unsafe {
-        if CredReadW(PCWSTR(name.as_ptr()), kind, None, &mut p).is_err() {
-            return false;
-        }
+        CredReadW(PCWSTR(name.as_ptr()), kind, None, &mut p)?;
         CredFree(p as *const core::ffi::c_void);
     }
-    true
+    Ok(())
+}
+
+/// The Win32 code inside `err` when it is a `FACILITY_WIN32` HRESULT, else `None`.
+fn win32_code(err: &windows::core::Error) -> Option<u32> {
+    let hr = err.code().0 as u32;
+    (hr & 0xFFFF_0000 == 0x8007_0000).then_some(hr & 0xFFFF)
+}
+
+/// Report-only second look at a failed read-back: does `CredEnumerateW` with the exact
+/// target as filter list it? `yes`, `no`, or `err <hresult> (<win32>)`. Never retries
+/// the read and never changes the outcome; blobs are not read.
+fn enumerate_look(target: &str) -> String {
+    let filter = wide(target);
+    let mut count: u32 = 0;
+    let mut creds: *mut *mut CREDENTIALW = std::ptr::null_mut();
+    // SAFETY: `filter` is NUL-terminated and outlives the call; on success `creds` is
+    // an array of `count` pointers owned by the system until the one CredFree below.
+    unsafe {
+        if let Err(e) = CredEnumerateW(PCWSTR(filter.as_ptr()), None, &mut count, &mut creds) {
+            return format!("err {}", hresult_and_win32(&e));
+        }
+        if creds.is_null() {
+            return "no".to_string();
+        }
+        let mut listed = false;
+        for i in 0..count as usize {
+            let cred = *creds.add(i);
+            if cred.is_null() || (*cred).TargetName.is_null() {
+                continue;
+            }
+            if (*cred).TargetName.to_string().is_ok_and(|t| t == target) {
+                listed = true;
+            }
+        }
+        CredFree(creds as *const core::ffi::c_void);
+        if listed { "yes" } else { "no" }.to_string()
+    }
+}
+
+/// `HRESULT 0x........ (Win32 N)`, or `(not a Win32 code)`.
+fn hresult_and_win32(err: &windows::core::Error) -> String {
+    let hr = err.code().0 as u32;
+    match win32_code(err) {
+        Some(code) => format!("HRESULT {hr:#010x} (Win32 {code})"),
+        None => format!("HRESULT {hr:#010x} (not a Win32 code)"),
+    }
+}
+
+/// The message `Planted::add` panics with when the read-back of a plant fails: names
+/// `CredReadW`, its HRESULT and Win32 code, the target and type, and what a
+/// report-only `CredEnumerateW(<target>)` sees.
+fn premise_failure(target: &str, kind: CRED_TYPE, err: &windows::core::Error) -> String {
+    format!(
+        "premise: {target} type {} planted (CredWriteW Ok), CredReadW failed: {} {}; \
+         CredEnumerateW({target}) lists it: {}",
+        kind.0,
+        hresult_and_win32(err),
+        err.message(),
+        enumerate_look(target),
+    )
+}
+
+/// Whether a read-back says "gone": `CredReadW` failed with `ERROR_NOT_FOUND`. Any
+/// other error is not proof of absence.
+fn is_not_found(r: &windows::core::Result<()>) -> bool {
+    matches!(r, Err(e) if win32_code(e) == Some(ERROR_NOT_FOUND_WIN32))
+}
+
+/// One lock per test binary: at most one test touches Credential Manager at a time
+/// (T-069). Taken as the first statement of every test, so `Planted`'s cleanup runs
+/// under it too; a test that panicked holding it does not poison the rest.
+static SERIAL: Mutex<()> = Mutex::new(());
+
+fn serial() -> MutexGuard<'static, ()> {
+    SERIAL.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 fn raw_delete(target: &str, kind: CRED_TYPE) {
@@ -102,7 +178,9 @@ impl Planted {
         if let Err(e) = try_write(&target, kind) {
             panic!("setup: raw CredWriteW {target} type {}: {e}", kind.0);
         }
-        assert!(raw_exists(&target, kind), "premise: {target} planted");
+        if let Err(e) = read_back(&target, kind) {
+            panic!("{}", premise_failure(&target, kind, &e));
+        }
         target
     }
 }
@@ -121,6 +199,7 @@ fn purge_args() -> [&'static str; 2] {
 
 #[test]
 fn purge_removes_exactly_the_prefixed_entries_and_exits_0() {
+    let _serial = serial();
     // Acceptance: with entries under the prefix and others outside it,
     // --purge-credentials removes exactly the prefixed ones and exits 0.
     // Bite: no enumeration (the non-slot entry stays), the store prefix ignored or
@@ -144,41 +223,44 @@ fn purge_removes_exactly_the_prefixed_entries_and_exits_0() {
 
     assert_eq!(from_args(purge_args(), &p), Some(0));
     for target in &gone {
-        assert!(
-            !raw_exists(target, CRED_TYPE_GENERIC),
-            "{target} still present"
-        );
+        let r = read_back(target, CRED_TYPE_GENERIC);
+        assert!(is_not_found(&r), "{target} still present: read-back {r:?}");
     }
     for target in &kept {
+        let r = read_back(target, CRED_TYPE_GENERIC);
         assert!(
-            raw_exists(target, CRED_TYPE_GENERIC),
-            "{target} outside the prefix deleted"
+            r.is_ok(),
+            "{target} outside the prefix deleted: read-back {r:?}"
         );
     }
 
     // Nothing left: a second purge is still a success.
     assert_eq!(from_args(purge_args(), &p), Some(0));
     for target in &kept {
+        let r = read_back(target, CRED_TYPE_GENERIC);
         assert!(
-            raw_exists(target, CRED_TYPE_GENERIC),
-            "{target} deleted by the second run"
+            r.is_ok(),
+            "{target} deleted by the second run: read-back {r:?}"
         );
     }
 }
 
 #[test]
 fn purge_with_no_entries_exits_0() {
+    let _serial = serial();
     // Failure branch: no entries at all (CredEnumerateW fails with ERROR_NOT_FOUND).
     // Bite: ERROR_NOT_FOUND of the enumeration mapped to 2.
     let p = unique_prefix();
     let mut planted = Planted::default();
     let outsider = planted.add(format!("{p}VoicenOther/keep"), CRED_TYPE_GENERIC);
     assert_eq!(from_args(purge_args(), &p), Some(0));
-    assert!(raw_exists(&outsider, CRED_TYPE_GENERIC), "outsider deleted");
+    let r = read_back(&outsider, CRED_TYPE_GENERIC);
+    assert!(r.is_ok(), "outsider deleted: read-back {r:?}");
 }
 
 #[test]
 fn other_args_are_not_a_purge_and_touch_nothing() {
+    let _serial = serial();
     // Bite: main() would exit on a normal start (no app), or a start with
     // --autostart / an unrelated argument would delete the user's keys.
     let p = unique_prefix();
@@ -192,10 +274,8 @@ fn other_args_are_not_a_purge_and_touch_nothing() {
     ];
     for args in starts {
         assert_eq!(from_args(args.iter().copied(), &p), None, "{args:?}");
-        assert!(
-            raw_exists(&key, CRED_TYPE_GENERIC),
-            "{args:?} deleted a key"
-        );
+        let r = read_back(&key, CRED_TYPE_GENERIC);
+        assert!(r.is_ok(), "{args:?} deleted a key: read-back {r:?}");
     }
     // OsString arguments, as main() passes std::env::args_os().
     let os_args = vec![
@@ -203,14 +283,16 @@ fn other_args_are_not_a_purge_and_touch_nothing() {
         std::ffi::OsString::from(PURGE_CREDENTIALS_ARG),
     ];
     assert_eq!(from_args(os_args, &p), Some(0));
+    let r = read_back(&key, CRED_TYPE_GENERIC);
     assert!(
-        !raw_exists(&key, CRED_TYPE_GENERIC),
-        "purge via OsString args did nothing"
+        is_not_found(&r),
+        "purge via OsString args did nothing: read-back {r:?}"
     );
 }
 
 #[test]
 fn adapter_lists_exactly_the_prefixed_entries_with_their_types() {
+    let _serial = serial();
     // Bite: the filter without `*` (exact match only), ignoring the prefix, wrong
     // TargetName decoding, or the type not copied from the entry.
     let p = unique_prefix();
@@ -262,6 +344,7 @@ impl CredentialNamespace for FailOne<'_> {
 
 #[test]
 fn failed_delete_exits_2_keeps_that_entry_and_removes_the_rest() {
+    let _serial = serial();
     // Failure branch: a delete that fails -> exit 2, the failed entry and the
     // outsider stay, every other prefixed entry is still removed.
     // Bite: stopping at the first failure, or swallowing it (exit 0).
@@ -277,21 +360,20 @@ fn failed_delete_exits_2_keeps_that_entry_and_removes_the_rest() {
         failing: b.clone(),
     };
     assert_eq!(purge_credentials(&failing, &p), 2);
-    assert!(
-        raw_exists(&b, CRED_TYPE_GENERIC),
-        "the failed entry is gone"
-    );
-    assert!(raw_exists(&outsider, CRED_TYPE_GENERIC), "outsider deleted");
+    let r = read_back(&b, CRED_TYPE_GENERIC);
+    assert!(r.is_ok(), "the failed entry is gone: read-back {r:?}");
+    let r = read_back(&outsider, CRED_TYPE_GENERIC);
+    assert!(r.is_ok(), "outsider deleted: read-back {r:?}");
     for target in [&a, &c] {
+        let r = read_back(target, CRED_TYPE_GENERIC);
         assert!(
-            !raw_exists(target, CRED_TYPE_GENERIC),
-            "{target} not removed after the failure"
+            is_not_found(&r),
+            "{target} not removed after the failure: read-back {r:?}"
         );
     }
 }
 
-// T-069 red tests. They name three helpers this file does not have yet; until the
-// developer adds them the file does not compile, which is the red state:
+// T-069 tests of the three helpers defined above:
 //
 //   fn serial() -> std::sync::MutexGuard<'static, ()>
 //       one process-wide lock (a static Mutex<()>, poison recovered), taken first by
