@@ -22,6 +22,28 @@
 //!       one lock per test binary (a static Mutex<()>, poison recovered): at most one test
 //!       touches Credential Manager at a time; taken as the first statement of every test,
 //!       so its cleanup runs under it too.
+#![allow(dead_code)]
+
+use std::sync::{Mutex, MutexGuard, PoisonError};
+
+/// ERROR_NOT_FOUND, the Win32 code CredReadW returns for a target that does not exist.
+pub const ERROR_NOT_FOUND_WIN32: u32 = 1168;
+
+/// Whether a raw read says "gone": `CredReadW` failed with `ERROR_NOT_FOUND`. Any
+/// other error is not proof of absence.
+pub fn is_not_found<T>(r: &windows::core::Result<T>) -> bool {
+    let not_found = windows::core::HRESULT::from_win32(ERROR_NOT_FOUND_WIN32);
+    matches!(r, Err(e) if e.code() == not_found)
+}
+
+/// One lock per test binary: at most one test touches Credential Manager at a time.
+/// Taken as the first statement of every test, so its cleanup runs under it too; a
+/// test that panicked holding it does not poison the rest.
+static SERIAL: Mutex<()> = Mutex::new(());
+
+pub fn serial() -> MutexGuard<'static, ()> {
+    SERIAL.lock().unwrap_or_else(PoisonError::into_inner)
+}
 
 #[test]
 fn serial_excludes_a_second_holder_until_the_first_drops() {
