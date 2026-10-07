@@ -70,7 +70,7 @@ Gotchas: the app itself (`pnpm tauri dev/build`) runs only on Windows; on Linux 
 
 - Follow the task lifecycle: no code before the task's `analysis` block is filled; status changes are commits `chore(task): T-NNN FROM→TO`.
 - Gate green before `NEEDS_REVIEW`. Commit locally; **never push from a DEV session**, except the orchestrator's CI-only `git push origin HEAD:wip/<ID>` (not a delivery; the branch is deleted at `CODE_COMPLETE`).
-- A task with a diff outside `docs/**` cites under `## Tests` `CI: <run> @ <sha>`, a green full `ci.yml` run on `wip/<ID>` at the reviewed head, before `CODE_COMPLETE` (P-016); the next push to `main` is never evidence.
+- A task with a diff outside `docs/**` cites under `## Tests` `CI: <run> @ <sha>`, a green full `ci.yml` run on `wip/<ID>` before `CODE_COMPLETE` (P-016): `<sha>` is the reviewed head or a commit after which only `docs/**` changed; a green re-run at the same sha counts only if each red attempt's failure is outside the diff and logged as its own task or F-entry, cited next to the line. Steps gated on `main` never run on `wip/`. The next push to `main` is never evidence.
 - Self-review doesn't count — `CODE_COMPLETE` is set only by a separate review.
 - Large work (more than one seam or service, or unsettled behaviour) starts in the spec tool; its tasks carry `design_ref`. Small work goes straight to a task.
 - On a recurrence of a known defect class: stop patching, open a `type: rca` task (`recurrence_of: [...]`); exits — code fix, `/arch-review`, or a `PRINCIPLES.md` amendment (owner decides the last two).
