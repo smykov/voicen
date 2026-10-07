@@ -1,0 +1,11 @@
+on:
+  push:
+    branches: [main, "wip/**"]
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/cache/save@v6
+        with:
+          path: x
+          key: k

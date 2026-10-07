@@ -1,0 +1,10 @@
+on:
+  push:
+    branches: [main, "wip/**"]
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: "true"

@@ -1,0 +1,10 @@
+on:
+  pull_request:
+    branches: [main, "wip/**"]
+  push:
+    branches: [main]
+jobs:
+  a:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5

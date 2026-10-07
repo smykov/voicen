@@ -30,9 +30,9 @@ Voicen — a Windows desktop dictation tool: a global hotkey records the microph
 | `e2e/` | Playwright UI tests, Tauri IPC mocked via `window.__TAURI_INTERNALS__`; specs import `test`/`expect` from `e2e/support/boot` (boot fixture); each run builds and serves privately (`docs/decisions/ui-e2e.md`) |
 | `docker/rust.Dockerfile` | Toolchain image `voicen-rust:1.99` for area `core` (`make core-image`) |
 | `docker/ui.Dockerfile` | Toolchain image `voicen-ui:1.63.0` for area `ui` (Node 24, pnpm, Playwright; `make ui-image`) |
-| `.github/workflows/ci.yml` | Linux gate + Windows build / silent install / smoke (= "deployed") |
+| `.github/workflows/ci.yml` | Linux gate + Windows build / silent install / smoke (= "deployed"); runs on push to `main` and `wip/**` (the pre-review run of P-016); caches are saved from `main` only (`make check`: `check-ci-wip`, `docs/decisions/ci-toolchain.md`) |
 | `scripts/ci/helper-windows.txt` | Helper-window manifest: framework windows the install smoke does not count; read by the smoke predicate, the shell overlay tests and the `make check` tripwire (`docs/decisions/overlay.md` §5) |
-| `scripts/ci/credentials.ps1` | The only way a Windows CI step plants or observes Credential Manager entries (Win32 `CredWriteW`/`CredReadW`/`CredEnumerateW`/`CredDeleteW`); `make check` refuses `cmdkey` in workflows (`docs/decisions/windows-ci-runner.md`) |
+| `scripts/ci/credentials.ps1` | The only way a Windows CI step plants or observes Credential Manager entries (Win32 `CredWriteW`/`CredReadW`/`CredEnumerateW`/`CredDeleteW`); `make check` refuses any other Credential Manager entry point (Win32 `Cred*` call, `cmdkey`, `vaultcmd`, ...) in workflows and `scripts/ci` (`docs/decisions/windows-ci-runner.md`) |
 | `docs/plan.md` | Stages and what is in each |
 | `docs/requirements.md` | What must be true (FR-NN, NFR-NN) |
 | `docs/architecture.md` | Components, data flow, boundaries |
@@ -69,7 +69,8 @@ Gotchas: the app itself (`pnpm tauri dev/build`) runs only on Windows; on Linux 
 ## Rules
 
 - Follow the task lifecycle: no code before the task's `analysis` block is filled; status changes are commits `chore(task): T-NNN FROM→TO`.
-- Gate green before `NEEDS_REVIEW`. Commit locally; **never push from a DEV session**.
+- Gate green before `NEEDS_REVIEW`. Commit locally; **never push from a DEV session**, except the orchestrator's CI-only `git push origin HEAD:wip/<ID>` (not a delivery; the branch is deleted at `CODE_COMPLETE`).
+- A task with a diff outside `docs/**` cites under `## Tests` `CI: <run> @ <sha>`, a green full `ci.yml` run on `wip/<ID>` at the reviewed head, before `CODE_COMPLETE` (P-016); the next push to `main` is never evidence.
 - Self-review doesn't count — `CODE_COMPLETE` is set only by a separate review.
 - Large work (more than one seam or service, or unsettled behaviour) starts in the spec tool; its tasks carry `design_ref`. Small work goes straight to a task.
 - On a recurrence of a known defect class: stop patching, open a `type: rca` task (`recurrence_of: [...]`); exits — code fix, `/arch-review`, or a `PRINCIPLES.md` amendment (owner decides the last two).

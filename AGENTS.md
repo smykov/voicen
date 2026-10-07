@@ -35,7 +35,7 @@ Why these roles and how they hand over: `docs/process/roles.md`.
 
 | Session | Does | Ends with |
 |---|---|---|
-| DEV | plan → analysis → red tests → implement → gate → docs → local commit (no push) | task in `NEEDS_REVIEW` |
+| DEV | plan → analysis → red tests → implement → gate → docs → local commit (no push but the orchestrator's CI-only `wip/<ID>`, rule 8) | task in `NEEDS_REVIEW` |
 | REVIEW | `code-reviewer` subagent, fresh context, reviews one task | review record `docs/tasks/<id>.reviews/<n>.md` with verdict `APPROVE \| REQUEST_CHANGES \| REJECT_RECURRENCE \| ESCALATE` |
 | DRAIN | push, only if every task in the unpushed tail is `CODE_COMPLETE`, `DEPLOYED`, `VERIFIED` or `DONE` (or `tail_code: ratified`) | pushed |
 | VERIFY | `task-validator`: deploy smoke + API tests / end-to-end UI run per the task's `surface`, failure branch included | verify record `docs/tasks/<id>.verify/<n>.md` with `result: PASS \| FAIL` → `VERIFIED` or `VERIFY_FAIL` |
@@ -71,7 +71,7 @@ Status change commit: `chore(task): T-042 NEEDS_REVIEW→CODE_COMPLETE`. Agent-w
 5. **Two review rounds max.** After two `REQUEST_CHANGES` in a row the third record is `ESCALATE` to a human (or `REJECT_RECURRENCE`), never another send-back or an `APPROVE`; the review gate enforces it. The reviewer never edits code: every finding goes back to the author.
 6. **Docs in the same task.** Drift between `docs/` and code is a review finding.
 7. **No secrets or personal data** in code, logs, fixtures, docs or commit messages.
-8. **Push only in DRAIN.** Never push unreviewed work.
+8. **Push only in DRAIN.** Never push unreviewed work to a delivery branch. One exception: the orchestrator's CI-only `git push origin HEAD:wip/<ID>` in a DEV session, which runs the full CI before review (P-016); pre-push treats `wip/*` as not a delivery, and the branch is deleted at `CODE_COMPLETE`.
 9. **Verify the running system, don't fix it.** The verifier runs committed tests against the running system and records the result; it never edits code or tests. A `FAIL` goes to `VERIFY_FAIL` → `ANALYSIS`, not to a quick patch.
 10. **Never roll back with destructive git.** No `git stash`, `checkout -- <path>`, `restore`, `clean`, `reset --hard` or forced push to undo an experiment: in a shared working tree they silently destroy uncommitted work of other sessions (this has wiped large parts of a test file before). Experiment on a throwaway copy (`cp -a` into a temp dir, or `git worktree add`) and discard the copy. These commands are in the deny list.
 11. **Config is changed only through the installer.** Nobody edits `.teamwright/config.yml` by hand: the orchestrator writes `.teamwright/config.next.yml` and runs `python3 <kit>/scripts/tw-install.py apply --config .teamwright/config.next.yml` (the installer lives in the plugin, `<kit>` = its directory; `/teamwright:reconfigure` does this; it validates, shows the diff, applies). Staging and committing `config.yml` is allowed. Lowering `enforce` to `gate-first` is the owner's step, outside the agent runtime.

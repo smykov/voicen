@@ -1,10 +1,22 @@
 name: CI
 
 on:
+  # wip/** (T-066, P-016, decisions #90): the orchestrator's CI-only push of a task's head
+  # (git push origin HEAD:wip/<ID>; pre-push: not a delivery) runs this whole workflow before
+  # review, so a premise only CI can run is never first run on main. Pinned by make check
+  # (check-ci-wip).
   push:
-    branches: [main]
+    branches: [main, "wip/**"]
     tags: ["v*"]
   pull_request:
+
+# A newer push to the same wip/<ID> cancels the run of the older head (P-016 counts only the
+# reviewed head). Other refs (main, tags, pull requests) get a group per run: a shared group
+# would make a newer main push wait for the running one and cancel a pending one, so a
+# delivered commit could have no run of its own.
+concurrency:
+  group: ${{ startsWith(github.ref, 'refs/heads/wip/') && format('ci-{0}', github.ref) || format('ci-run-{0}', github.run_id) }}
+  cancel-in-progress: ${{ startsWith(github.ref, 'refs/heads/wip/') }}
 
 jobs:
   gate:
@@ -33,9 +45,14 @@ jobs:
       # Cargo registry of scripts/tw-run core (config.yml cache /usr/local/cargo/registry,
       # mounted from .teamwright/cache/core/_usr_local_cargo_registry). index + cache hold
       # the downloaded .crate files; cargo re-extracts src offline. Saves the crates.io
-      # download of the license check (T-027, decision #24 D3).
-      - name: Cache the cargo registry of the core image
-        uses: actions/cache@v6
+      # download of the license check (T-027, decision #24 D3). Restored on every ref, saved from
+      # main only (T-066): the repo cache is at its 10 GB limit (T-058), and entries saved from
+      # wip/** runs would evict main's. actions/cache saves in its post step on every ref, so
+      # restore and save are separate steps; make check (check-ci-wip) refuses a save that is
+      # not limited to main.
+      - name: Restore the cargo registry of the core image
+        id: cargo-registry
+        uses: actions/cache/restore@v6
         with:
           path: |
             .teamwright/cache/core/_usr_local_cargo_registry/index
@@ -43,6 +60,16 @@ jobs:
           key: cargo-registry-core-${{ hashFiles('Cargo.lock', 'licenses/fixtures/gpl/Cargo.lock') }}
           restore-keys: cargo-registry-core-
       - run: make check
+      # After a green make check, as the post step of actions/cache did; not on an exact hit
+      # (the entry exists).
+      - name: Save the cargo registry of the core image (main only)
+        if: ${{ github.ref == 'refs/heads/main' && steps.cargo-registry.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            .teamwright/cache/core/_usr_local_cargo_registry/index
+            .teamwright/cache/core/_usr_local_cargo_registry/cache
+          key: ${{ steps.cargo-registry.outputs.cache-primary-key }}
 
   windows:
     name: Windows build, install and smoke test
@@ -51,18 +78,41 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: pnpm/action-setup@v4
+      # No cache in setup-node: its post step saves on every ref and has no switch to limit it
+      # to main (setup-node v5 action.yml), so the pnpm store is restored here on every ref and
+      # saved after pnpm install from main only (T-066; make check: check-ci-wip).
       - uses: actions/setup-node@v5
         with:
           node-version: "20.19"
-          cache: pnpm
+          package-manager-cache: false
+      - name: Path of the pnpm store
+        id: pnpm-store
+        shell: bash
+        run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+      - name: Restore the pnpm store
+        id: pnpm-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: pnpm-store-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: pnpm-store-${{ runner.os }}-
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.99.0"
+      # save-if: restored on every ref, saved from main only (T-066, the cache limit above).
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Commit of this build
         shell: bash
         run: echo "VOICEN_COMMIT=$(git rev-parse --short=7 HEAD)" >> "$GITHUB_ENV"
       - run: pnpm install --frozen-lockfile
+      - name: Save the pnpm store (main only)
+        if: ${{ github.ref == 'refs/heads/main' && steps.pnpm-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: ${{ steps.pnpm-cache.outputs.cache-primary-key }}
       # The shell's build script (tauri-build static VC runtime) puts a stub msvcrt.lib on its
       # search path; cargo gives every build script's search dirs (native_dirs) to every doctest
       # of the same invocation, so other crates' doctests must not share a run with `voicen` (T-033, F-001).
@@ -450,8 +500,9 @@ jobs:
           # Plant, presence and cleanup through the product's own calls and type (CredWriteW /
           # CredReadW / CredEnumerateW / CredDeleteW GENERIC; scripts/ci/credentials.ps1), never a
           # second tool's text output: run 37444780779 could not tell a refused write from a missed
-          # list match (make check refuses that tool here, scripts/ci/ci-credentials.sh). Every failed
-          # call throws with its Win32 error.
+          # list match. make check (scripts/ci/ci-credentials.sh) refuses any Credential Manager
+          # entry point named outside credentials.ps1 in CI, so this step names only the helper's
+          # functions. Every failed call throws with its Win32 error.
           . ./scripts/ci/credentials.ps1
           function Test-Cred([string]$target) { Test-VoicenCredential -Target $target }
           # Cleanup: a failed delete is printed (Write-Host) and counted; before a throw it never hides
@@ -461,15 +512,15 @@ jobs:
           try {
             foreach ($t in $gone + $kept) {
               Add-VoicenCredential -Target $t -Secret $fake
-              if (-not (Test-Cred $t)) { throw "premise: $t was written (CredWriteW GENERIC ok) but CredReadW GENERIC does not find it" }
+              if (-not (Test-Cred $t)) { throw "premise: $t was written (Add-VoicenCredential ok) but Test-VoicenCredential does not find it" }
             }
             # The purge finds entries with CredEnumerateW "Voicen/*": both planted targets must be
             # listed there as GENERIC, and the outsider must not be.
             $listed = @(Get-VoicenCredentials -Prefix 'Voicen/')
-            foreach ($t in $gone) { if (@($listed | Where-Object { $_.Target -ceq $t -and $_.Type -eq 1 }).Count -ne 1) { throw "premise: CredEnumerateW 'Voicen/*' does not list $t as one GENERIC entry (listed: $(Format-Listed 'Voicen/'))" } }
-            if (@($listed | Where-Object { $_.Target -ceq $kept }).Count -ne 0) { throw "premise: CredEnumerateW 'Voicen/*' lists $kept, which is outside the prefix" }
+            foreach ($t in $gone) { if (@($listed | Where-Object { $_.Target -ceq $t -and $_.Type -eq 1 }).Count -ne 1) { throw "premise: Get-VoicenCredentials 'Voicen/' does not list $t as one GENERIC entry (listed: $(Format-Listed 'Voicen/'))" } }
+            if (@($listed | Where-Object { $_.Target -ceq $kept }).Count -ne 0) { throw "premise: Get-VoicenCredentials 'Voicen/' lists $kept, which is outside the prefix" }
           } catch { [void](Remove-All); throw }
-          Write-Output "premise: $(($gone + $kept) -join ', ') planted and read back; CredEnumerateW 'Voicen/*' lists: $(Format-Listed 'Voicen/')"
+          Write-Output "premise: $(($gone + $kept) -join ', ') planted and read back; Get-VoicenCredentials 'Voicen/' lists: $(Format-Listed 'Voicen/')"
           function Get-LogState { @(Get-ChildItem -Path $log -ErrorAction SilentlyContinue | ForEach-Object { "$($_.Name)|$($_.Length)|$($_.LastWriteTimeUtc.Ticks)" }) -join ';' }
           function Invoke-Purge([string]$tag) {
             $out = Join-Path $env:RUNNER_TEMP "purge-$tag.out"; $err = Join-Path $env:RUNNER_TEMP "purge-$tag.err"
@@ -488,7 +539,7 @@ jobs:
           # Nothing left under the prefix: still exit 0.
           Invoke-Purge 'second'
           if (-not (Test-Cred $kept)) { [void](Remove-All); throw "$kept was deleted by the second purge" }
-          if ((Remove-All) -ne 0) { throw "cleanup: a CredDeleteW above failed (Win32 error printed)" }
+          if ((Remove-All) -ne 0) { throw "cleanup: a Remove-VoicenCredential above failed (Win32 error printed)" }
           Write-Output "--purge-credentials: exit 0 twice within 15 s, Voicen/ci-purge-a and -b gone, $kept kept, no output, log files unchanged"
       - uses: actions/upload-artifact@v4
         with:

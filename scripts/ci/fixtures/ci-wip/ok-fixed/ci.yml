@@ -1,0 +1,44 @@
+name: CI
+on:
+  push:
+    branches: [main, "wip/**"]
+    tags: ["v*"]
+  pull_request:
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "20.19"
+          package-manager-cache: false
+      - name: Restore
+        id: reg
+        uses: actions/cache/restore@v6
+        with:
+          path: x
+          key: k
+      - run: make check
+      - name: Save (main only)
+        if: ${{ github.ref == 'refs/heads/main' && steps.reg.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v6
+        with:
+          path: x
+          key: ${{ steps.reg.outputs.cache-primary-key }}
+  windows:
+    needs: gate
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99.0"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: a
+          path: b

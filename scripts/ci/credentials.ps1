@@ -10,7 +10,7 @@
 # output discarded, failed with "could not plant" and could not say whether the write or the
 # confirmation failed. A CI step decides "planted", "present" and "gone" only through these
 # functions; no premise is read from another tool's text. make check (scripts/ci/ci-credentials.sh)
-# refuses cmdkey in the workflows.
+# refuses a Credential Manager entry point named anywhere else in the workflows or scripts/ci.
 #
 # Every failed Win32 call throws with the call, the target and the Win32 error (code and
 # message). ERROR_NOT_FOUND (1168) is not a failure where the API uses it for "none":
