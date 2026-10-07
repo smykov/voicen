@@ -126,6 +126,7 @@
   "settings.warning.endpoint_insecure": "This address uses http:// on a non-local host: the API key is sent unencrypted.",
   "settings.write_failed": "The settings could not be saved: the settings file could not be written. Nothing was changed.",
   "tray.exit": "Exit",
+  "tray.open_logs": "Open logs folder",
   "tray.settings": "Settings",
   "tray.tooltip.error": "Voicen — last dictation failed",
   "tray.tooltip.hotkey_error": "Voicen — hotkey not registered",

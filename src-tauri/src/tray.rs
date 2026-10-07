@@ -13,7 +13,8 @@
 //!   task; neither calls a `TrayIcon` setter (they wait for the main thread).
 //! - The main thread never calls a session input: opening the menu stamps the
 //!   instant and hands `DictationSession::tray_menu_opened` to another thread.
-//! - "Settings" posts `settings_window::request(Front)`; "Exit" calls
+//! - "Settings" posts `settings_window::request(Front)`; "Open logs folder" calls
+//!   `logs_folder::request` (its own thread, T-071); "Exit" calls
 //!   `AppHandle::exit(0)`, the only user exit.
 //! - Only tauri keeps the `TrayIcon` (in its resources), so tauri's exit cleanup
 //!   drops the last copy and tray-icon removes the icon from the notification
@@ -37,6 +38,7 @@ use voicen_core::settings::Settings;
 use voicen_core::tray::{self as table, TrayAction, TrayIconKind};
 
 use crate::diag::io_os_code;
+use crate::logs_folder;
 use crate::settings_window::{self, OpenTarget, Receipt};
 
 /// The id of the one tray icon (`Manager::tray_by_id`).
@@ -405,12 +407,14 @@ pub fn applied<R: Runtime>(app: &AppHandle<R>) -> Option<Applied> {
 
 /// The tray menu's handler (`TrayIconBuilder::on_menu_event`): the item id mapped by
 /// `TrayAction::from_id`; `OpenSettings` posts `settings_window::request(Front)`
-/// and drops the receipt, `Exit` calls `app.exit(0)`, any other id does nothing.
+/// and drops the receipt, `OpenLogs` calls `logs_folder::request` (returns at
+/// once), `Exit` calls `app.exit(0)`, any other id does nothing.
 pub fn on_menu_event<R: Runtime>(app: &AppHandle<R>, event: MenuEvent) {
     match TrayAction::from_id(event.id().as_ref()) {
         Some(TrayAction::OpenSettings) => {
             let _ = settings_window::request(app, OpenTarget::Front);
         }
+        Some(TrayAction::OpenLogs) => logs_folder::request(app),
         Some(TrayAction::Exit) => app.exit(0),
         None => {}
     }

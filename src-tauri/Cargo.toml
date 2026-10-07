@@ -37,10 +37,12 @@ tauri-plugin-single-instance = "2.5"
 # and the dictation adapters (T-006, src/win/: hotkey window and SendInput, clipboard formats,
 # the start window's process and its integrity level through Win32_Security), and the overlay's
 # placement (T-057, src/overlay.rs: the monitor of the window in front and its work area and DPI,
-# Win32_Graphics_Gdi and Win32_UI_HiDpi; no main-thread round trip).
+# Win32_Graphics_Gdi and Win32_UI_HiDpi; no main-thread round trip), and the tray's "Open logs
+# folder" (T-071, src/win/shell_open.rs: ShellExecuteExW under CoInitializeEx, Win32_UI_Shell and
+# Win32_System_Com).
 # Already in Cargo.lock via tao/wry (0.62.2): feature flags only, no new crate (#9).
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Credentials", "Win32_Globalization", "Win32_System_Registry", "Win32_Storage_FileSystem", "Win32_System_Time", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_System_Ole", "Win32_System_Threading", "Win32_System_StationsAndDesktops", "Win32_System_RemoteDesktop", "Win32_Graphics_Gdi", "Win32_UI_HiDpi"] }
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Credentials", "Win32_Globalization", "Win32_System_Registry", "Win32_Storage_FileSystem", "Win32_System_Time", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_System_Ole", "Win32_System_Threading", "Win32_System_StationsAndDesktops", "Win32_System_RemoteDesktop", "Win32_Graphics_Gdi", "Win32_UI_HiDpi", "Win32_UI_Shell", "Win32_System_Com"] }
 # The microphone (T-006, src/win/capture.rs; consented by #9): the Windows default input device
 # over WASAPI. Its windows ^0.62 is the lock's 0.62.2, so no second windows version.
 cpal = "0.18"

@@ -110,6 +110,7 @@ Phase 0 of [plan.md](plan.md). The stack is fixed by `docs/requirements.md` §9 
 
 ## R16 — "Open logs folder" and About actions
 
+- **Superseded in part (T-071)**: "Open logs folder" uses `ShellExecuteExW` through the shell's `logs_folder::request` (`docs/decisions/windows-shell.md`), not the plugin.
 - **Decision**: `tauri-plugin-opener` (official Tauri plugin, MIT/Apache-2.0) called from Rust (`app.opener().open_path(...)`), so no JS-side opener permission is granted; IPC commands `open_logs_folder`, `open_third_party_notices`, `open_project_page` take no arguments (paths and the URL are fixed in Rust — the UI cannot open arbitrary paths). The tray item (001) and the About button call the same Rust function (P-011). The project URL is a constant set when the repository exists (R15).
 
 ## Verification placement (constitution V)

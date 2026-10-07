@@ -185,6 +185,8 @@ messages! {
     LOCAL_MODEL_NAME_LARGE_V3_TURBO_Q5_0 = "local_model.name.large-v3-turbo-q5_0",
     /// Tray menu item `TrayAction::OpenSettings` (T-052).
     TRAY_SETTINGS = "tray.settings",
+    /// Tray menu item `TrayAction::OpenLogs` (T-071).
+    TRAY_OPEN_LOGS = "tray.open_logs",
     /// Tray menu item `TrayAction::Exit` (T-052).
     TRAY_EXIT = "tray.exit",
     /// Tray tooltip of `TrayState::Idle` (T-052).

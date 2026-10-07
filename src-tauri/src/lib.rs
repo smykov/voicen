@@ -20,6 +20,7 @@ pub mod diag;
 pub mod dictation;
 pub mod local_models;
 pub mod locale;
+pub mod logs_folder;
 pub mod overlay;
 pub mod paths;
 pub mod settings_ipc;
@@ -263,6 +264,20 @@ fn release_ports<R: Runtime>(
 /// load (a first run writes `settings.json`; the Run value is reconciled). Returns
 /// the parts, the load outcome for `Ready` and the one key store, the instance the
 /// `SettingsService` was given, for the dictation session (T-006 invariant 5).
+/// Installs `paths::log_dir()` with the Explorer opener (T-071) for the tray's
+/// "Open logs folder"; off Windows nothing is installed and the item does nothing.
+#[cfg(windows)]
+fn install_logs_folder<R: Runtime>(app: &AppHandle<R>) {
+    logs_folder::install(
+        app,
+        paths::log_dir(),
+        Arc::new(win::shell_open::ShellOpener),
+    );
+}
+
+#[cfg(not(windows))]
+fn install_logs_folder<R: Runtime>(_app: &AppHandle<R>) {}
+
 fn release_parts() -> (Parts, LoadOutcome, Arc<dyn CredentialStore>) {
     // The one log (T-008), Started first; every later diagnostic is a typed line on
     // it. The unwritable callback is T-054's one-time notice; until then the log
@@ -321,6 +336,8 @@ pub fn run() {
         parts
     })
     .expect("error while building tauri application");
+    // The tray's "Open logs folder" (T-071): the one logs dir, opened by the Explorer.
+    install_logs_folder(app.handle());
     let load_outcome = load_outcome.expect("assemble returned the app, so it ran the parts");
     let credentials = credentials.expect("assemble returned the app, so it ran the parts");
     // The dictation session and the hotkey thread, after the tray exists and before

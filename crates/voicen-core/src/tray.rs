@@ -17,12 +17,15 @@ use crate::i18n::{self, MessageId};
 use crate::recording::TrayState;
 
 /// An item of the tray menu. T-007 adds Retry (only while `retry_available`),
-/// T-054 "Open logs folder", feature 005 History.
+/// feature 005 History.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TrayAction {
     /// "Settings": the settings window to the front on the tab it shows, or opened
     /// on Engine when none is open (OQ-11 Q2 default).
     OpenSettings,
+    /// "Open logs folder": the logs folder in Explorer, created when missing
+    /// (T-071; spec 006 FR-017). The shell opens it off the main thread.
+    OpenLogs,
     /// "Exit": ends the process (the only user exit, T-052 invariant 4).
     Exit,
 }
@@ -33,6 +36,7 @@ impl TrayAction {
     pub fn as_str(self) -> &'static str {
         match self {
             TrayAction::OpenSettings => "settings",
+            TrayAction::OpenLogs => "open_logs",
             TrayAction::Exit => "exit",
         }
     }
@@ -46,6 +50,7 @@ impl TrayAction {
     pub fn label(self) -> MessageId {
         match self {
             TrayAction::OpenSettings => i18n::TRAY_SETTINGS,
+            TrayAction::OpenLogs => i18n::TRAY_OPEN_LOGS,
             TrayAction::Exit => i18n::TRAY_EXIT,
         }
     }
@@ -53,7 +58,11 @@ impl TrayAction {
 
 /// Every action, so [`TrayAction::from_id`] maps back exactly the ids
 /// [`TrayAction::as_str`] gives (a new variant is added here and to `as_str`).
-const ALL: [TrayAction; 2] = [TrayAction::OpenSettings, TrayAction::Exit];
+const ALL: [TrayAction; 3] = [
+    TrayAction::OpenSettings,
+    TrayAction::OpenLogs,
+    TrayAction::Exit,
+];
 
 /// The four tray icons (OQ-11 Q1 default: the app icon plain, with a red dot, with
 /// an amber "!", with an amber "!" and a key mark). The shell embeds one image per
@@ -72,7 +81,11 @@ pub fn menu(retry_available: bool) -> Vec<TrayAction> {
     // T-007 inserts Retry before Exit while `retry_available`; until then both rows
     // are the same.
     let _ = retry_available;
-    vec![TrayAction::OpenSettings, TrayAction::Exit]
+    vec![
+        TrayAction::OpenSettings,
+        TrayAction::OpenLogs,
+        TrayAction::Exit,
+    ]
 }
 
 /// The catalog id of the tooltip `state` shows. Pure.

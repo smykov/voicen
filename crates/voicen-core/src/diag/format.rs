@@ -379,6 +379,7 @@ fn warning_kind(kind: WarningKind) -> &'static str {
         WarningKind::HotkeyRegisterFailed => "hotkey_register_failed",
         WarningKind::DictationStartFailed => "dictation_start_failed",
         WarningKind::OverlayFailed => "overlay_failed",
+        WarningKind::LogsFolderFailed => "logs_folder_failed",
     }
 }
 

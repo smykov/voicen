@@ -2,7 +2,7 @@
 
 **Code:** `crates/voicen-core/src/diag/` (`event.rs` the typed events and the input tables, `format.rs` the line format and the output tables, `log.rs` the writer, `observer.rs` `LogObserver`), `crates/voicen-core/src/clock.rs` (`LocalOffset`), `src-tauri/src/diag.rs` (`start`, the Windows UTC offset), `src-tauri/src/settings_ipc.rs` (`load_settings`, `settings_save`, the bridge warning), `src-tauri/src/lib.rs` (`run`, `assemble`, `build_app`), `.github/workflows/ci.yml` (windows job, install smoke) · **Tests that pin it:** `tests/diag_format.rs`, `tests/diag_log.rs`, `tests/diag_observer.rs`, `tests/diag_pipeline.rs`, `tests/settings_log.rs`, the `compile_fail` doctests in `diag/mod.rs`, `src-tauri/tests/diag.rs` and `settings_ipc::canary_key_never_in_data_dir_or_log` (Windows CI), the install smoke (start, `settings load outcome=first_run`, `autostart reconcile action=removed`)
 
-Tasks: T-008 (narrowed by decision #64: the one-time notice and the tray "Open logs folder" are T-054), T-051 (the `CaptureFailed` line). Class `diagnostics-log` in `docs/failures.md` has no entry yet. Decisions: #9 (no new crate), #23, #30, #45, #64.
+Tasks: T-008 (narrowed by decision #64: the one-time notice and the tray "Open logs folder" went to T-054; the tray item is T-071's since 2026-10-07, T-054 keeps the notice), T-051 (the `CaptureFailed` line), T-071 (the `logs_folder_failed` line of the tray's "Open logs folder", `docs/decisions/windows-shell.md`). Class `diagnostics-log` in `docs/failures.md` has no entry yet. Decisions: #9 (no new crate), #23, #30, #45, #64.
 
 ## Invariants
 
@@ -68,6 +68,7 @@ Tasks: T-008 (narrowed by decision #64: the one-time notice and the tray "Open l
 
 ## Open
 
-- T-054: the one-time `notice.logs_unwritable` from `on_unwritable`, the tray "Open logs folder", the ACL-denied folder proof on Windows. T-054 also decides whether a sharing violation on the roll's rename (Windows notes) is a "not writable" notice reason, or is retried on the next write without degrading.
+- T-054: the one-time `notice.logs_unwritable` from `on_unwritable` and the ACL-denied folder proof on Windows (the tray "Open logs folder" is T-071's). T-054 also decides whether a sharing violation on the roll's rename (Windows notes) is a "not writable" notice reason, or is retried on the next write without degrading.
+- The tray's "Open logs folder" (T-071) writes its failure as `warning kind=logs_folder_failed` to this log. When the logs dir itself cannot be written the log is Degraded and drops that line too, so a failure to create the logs folder may leave no trace; accepted (T-071 analysis). The user notice on that failure (spec 006 FR-017) waits for T-007's notifier.
 - Proposed T3 guard (T-008 analysis, no task yet): `make check` fails when `Cargo.lock` names a logger backend.
 - The failed `.part` removal inside `Downloader` is not logged (core has no log port there; release-2 follow-up, T-008 Q5).

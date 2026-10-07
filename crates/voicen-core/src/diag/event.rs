@@ -83,7 +83,8 @@ pub enum SaveLine {
 }
 
 /// The kinds of a `Warning` line: the pipeline's `WarningCode`s and the shell's
-/// start, settings-window, tray, hotkey, dictation-start and overlay failures.
+/// start, settings-window, tray, hotkey, dictation-start, overlay and
+/// logs-folder failures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WarningKind {
     /// `events::WarningCode::VadFallback`.
@@ -119,6 +120,9 @@ pub enum WarningKind {
     /// The overlay window could not be built, emitted to or destroyed, or the
     /// overlay thread could not be started (T-057); the dictation itself goes on.
     OverlayFailed,
+    /// The tray's "Open logs folder" could not create, check or open the logs
+    /// folder, or its thread could not be started (T-071); the app keeps running.
+    LogsFolderFailed,
 }
 
 /// One dictation: the engine, the outcome and the FR-20 timings plus the
