@@ -289,3 +289,112 @@ fn failed_delete_exits_2_keeps_that_entry_and_removes_the_rest() {
         );
     }
 }
+
+// T-069 red tests. They name three helpers this file does not have yet; until the
+// developer adds them the file does not compile, which is the red state:
+//
+//   fn serial() -> std::sync::MutexGuard<'static, ()>
+//       one process-wide lock (a static Mutex<()>, poison recovered), taken first by
+//       every test in this file;
+//   fn read_back(target: &str, kind: CRED_TYPE) -> windows::core::Result<()>
+//       raw CredReadW of `target`, replacing the bool `raw_exists`: Ok when the entry
+//       is readable, otherwise the CredReadW error as returned;
+//   fn premise_failure(target: &str, kind: CRED_TYPE, err: &windows::core::Error) -> String
+//       the message `Planted::add` panics with when the read-back of a plant fails.
+
+/// ERROR_NOT_FOUND, the Win32 code CredReadW returns for a target that does not exist.
+const ERROR_NOT_FOUND_WIN32: u32 = 1168;
+
+#[test]
+fn read_back_of_a_never_written_target_names_its_win32_error() {
+    // Acceptance (failure branch): a read-back that fails says why, with the CredReadW
+    // error code in the premise message. A fresh target is never written, so the
+    // read-back must fail with ERROR_NOT_FOUND.
+    // Bite: read_back returning Ok on a CredReadW error (or collapsing to a bool), the
+    // error replaced by another code, a message without the call name, without the
+    // Win32 code (windows::core::Error's own Display shows only the HRESULT) or
+    // without the HRESULT, or without the target.
+    let _serial = serial();
+    let target = format!("{}{NS}never-written", unique_prefix());
+
+    let err = read_back(&target, CRED_TYPE_GENERIC)
+        .expect_err("read-back of a target that was never written");
+    assert_eq!(
+        err.code(),
+        windows::core::HRESULT::from_win32(ERROR_NOT_FOUND_WIN32),
+        "CredReadW error of a never-written target: {err:?}"
+    );
+    assert_eq!(err.code().0 as u32, 0x8007_0490);
+
+    let message = premise_failure(&target, CRED_TYPE_GENERIC, &err);
+    for needle in ["CredReadW", "1168", "0x80070490", target.as_str()] {
+        assert!(
+            message.contains(needle),
+            "premise message lacks {needle:?}: {message}"
+        );
+    }
+}
+
+#[test]
+fn read_back_is_ok_for_a_planted_target_and_err_1168_once_deleted() {
+    // read_back replaces raw_exists in every assertion of this file: Ok must mean
+    // "present" and Err(ERROR_NOT_FOUND) "gone", or the purge assertions lose their
+    // meaning.
+    // Bite: read_back always Err (every plant would fail its premise; caught here
+    // directly), read_back always Ok (caught after the delete).
+    let _serial = serial();
+    let target = format!("{}{NS}read-back", unique_prefix());
+    let mut planted = Planted::default();
+    planted.add(target.clone(), CRED_TYPE_GENERIC);
+
+    if let Err(e) = read_back(&target, CRED_TYPE_GENERIC) {
+        panic!("read-back of a planted target: {e:?}");
+    }
+    raw_delete(&target, CRED_TYPE_GENERIC);
+    let err = read_back(&target, CRED_TYPE_GENERIC).expect_err("read-back after delete");
+    assert_eq!(
+        err.code(),
+        windows::core::HRESULT::from_win32(ERROR_NOT_FOUND_WIN32),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn serial_excludes_a_second_holder_until_the_first_drops() {
+    // Invariant: at most one test touches Credential Manager at a time. While this
+    // thread holds serial(), a second thread's serial() must not return; once the
+    // guard drops, it must.
+    // Bite: serial() locking a fresh Mutex per call, or returning without a lock.
+    // A slow runner can only make a broken lock look correct (the second thread not
+    // yet scheduled), never make a correct lock look broken: no spurious red.
+    let first = serial();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let second = std::thread::spawn(move || {
+        let _held = serial();
+        tx.send(()).expect("main thread waits");
+    });
+    assert!(
+        rx.recv_timeout(std::time::Duration::from_millis(200))
+            .is_err(),
+        "a second serial() returned while the first guard was held"
+    );
+    drop(first);
+    rx.recv_timeout(std::time::Duration::from_secs(30))
+        .expect("serial() after the first guard dropped");
+    second.join().expect("second holder");
+}
+
+#[test]
+fn serial_survives_a_test_that_panicked_holding_it() {
+    // A failing test panics with the guard held (its Planted cleanup still runs under
+    // the lock). The next test must still get the lock, or one red test turns every
+    // later test in the binary red with PoisonError and hides the real failure.
+    // Bite: serial() as SERIAL.lock().unwrap().
+    let panicked = std::thread::spawn(|| {
+        let _held = serial();
+        panic!("T-069: deliberate panic with the serial guard held");
+    })
+    .join();
+    assert!(panicked.is_err(), "the holder thread did not panic");
+    let _again = serial();
+}
