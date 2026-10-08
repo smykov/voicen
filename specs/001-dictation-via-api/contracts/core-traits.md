@@ -187,7 +187,7 @@ pub type EngineFactory = dyn Fn(&Settings, &dyn CredentialStore) -> Result<Box<d
 pub struct JobReport { pub end: JobEnd, pub pending: Option<PendingId> }
 
 impl Pipeline {                                            // Send + Sync
-    pub fn new(deps: PipelineDeps) -> Pipeline;            // Timeouts::default(), engine_for
+    pub fn new(deps: PipelineDeps) -> Pipeline;            // per job: Timeouts::from_settings(&job.settings.timeouts), engine_for
     #[cfg(any(test, feature = "test-fakes"))]
     pub fn with_timeouts(deps: PipelineDeps, timeouts: Timeouts) -> Pipeline;
     pub fn with_engine_factory(self, factory: Box<EngineFactory>) -> Pipeline;   // T-017; test fakes
@@ -198,7 +198,7 @@ impl Pipeline {                                            // Send + Sync
 
 `run_job` is the only path a finished recording takes. The dictation session's worker reads `rec.id()` first and then calls `controller.job_finished(id, report.end, at)`. Inside, two private halves (T-011 puts the delivery queue between them):
 
-- `process`: `gate.decide(audio)` → (speech only) `factory(&settings, &*credentials)` → `transcribe(audio, &TranscribeRequest{ language: settings.speech_language, timeouts })` with the pipeline's one `Timeouts` → `post_processor.process`. No speech, a blank engine text or a blank post-processed text is `NoSpeech`; without speech there is no factory call, no credential read and no request.
+- `process`: `gate.decide(audio)` → (speech only) `factory(&settings, &*credentials)` → `transcribe(audio, &TranscribeRequest{ language: settings.speech_language, timeouts })` with that job's `Timeouts::from_settings(&settings.timeouts)` (the job's settings snapshot; defaults 5/30/60 s, bounds per decision #99; `with_timeouts` overrides it in tests) → `post_processor.process`. No speech, a blank engine text or a blank post-processed text is `NoSpeech`; without speech there is no factory call, no credential read and no request.
 - `release`: a text goes through `delivery::deliver` (clipboard first, then data-model "DeliveryDecision", `MODIFIER_WAIT` = 1 s); a clipboard error is `Failed(ClipboardUnavailable)`. A retryable failure stores the audio under a new `PendingId`, swaps the one pending slot to it (or to nothing, if the store failed) and deletes the audio it replaced (decision #47 (4)); id, store write and swap happen under the slot's one lock as an extra safeguard (the replaced audio is deleted after the lock is released); `Text` and `NoSpeech` leave the slot as it is. `release`, and so `run_job` until T-011 splits it, must run on one thread at a time: `deliver` (clipboard write → modifier wait ≤ 1 s → Ctrl+V) is not serialized across jobs, so concurrent jobs could paste one transcript into another's window (research R-10: one delivery thread; the dictation session runs `run_job` on its one FIFO worker, T-051). `process` may run concurrently (R-10 workers). The slot lock does not make concurrent jobs supported.
 - Events, only on the one observer and in this order: `Warning{vad_fallback}` (when `GateDecision.fallback_warning`), `SpeechGate`, `JobFinished` (after the clipboard write), `Delivered` (only for a delivered text).
 

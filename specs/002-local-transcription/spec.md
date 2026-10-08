@@ -150,7 +150,7 @@ The user frees disk space by deleting a model they no longer need. If it was the
 - **FR-017** (req FR-17): When the engine is "local server", the system MUST transcribe through the same OpenAI-compatible transcription client as the API engine (FR-06, built in 001), with the user-given base URL, an optional model name (sent only when set) and an optional key (sent as a bearer token only when set).
 - **FR-018** (req FR-17, NFR-04): The local-server key MUST be stored only in the OS credential store, separately from the API engine's key, and never in settings files or logs.
 - **FR-019a** (req FR-24 v4): Built-in transcription MUST stop waiting after 120 s; on timeout FR-11 applies with reason "timeout" and the audio stays pending.
-- **FR-019** (req FR-24): Local-server transcription MUST use a 5 s connect timeout and a 60 s total request timeout; on timeout FR-11 applies with reason "timeout".
+- **FR-019** (req FR-24): Local-server transcription MUST use the configured connect timeout and total request timeout (defaults 5 s and 60 s, decision #99); on timeout FR-11 applies with reason "timeout".
 - **FR-020** (req FR-17 failure branch, FR-11): If the server cannot be reached, the system MUST paste nothing, notify "cannot reach <host:port>" (e.g. "cannot reach localhost:8000") and keep the audio for retry.
 
 **Model deletion**

@@ -243,7 +243,7 @@ A user who enters an `http://` base URL on a non-local host is warned that the A
 - **SC-003**: Every invalid-input case listed in FR-004 is refused with the right field highlighted (one automated check per rule), and a refused save changes nothing.
 - **SC-004**: A known test key value is found 0 times in the settings file, the log files and the crash files after saving it, testing a connection with it and failing a request with it (req NFR-04).
 - **SC-005**: 100% of user-visible messages exist in both English and Russian with the same placeholders (gate check), and a first start on a Russian Windows shows Russian everywhere the owner looks (manual check).
-- **SC-006**: Test connection reports a result for every case of FR-017 within the FR-24 limits (≤ 35 s for the API engine, ≤ 65 s for a local server, worst case).
+- **SC-006**: Test connection reports a result for every case of FR-017 within the configured FR-24 limits: at most connect + the engine's total timeout in the worst case (defaults: ≤ 35 s for the API engine, ≤ 65 s for a local server).
 - **SC-007**: With start with Windows on, the tray icon is present after logon in 100% of the owner's reboot checks; with it off, the app is absent.
 
 ## Assumptions

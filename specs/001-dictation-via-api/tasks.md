@@ -39,7 +39,7 @@ description: "Task list for feature 001 — dictation via an OpenAI-compatible A
 
 **⚠️ CRITICAL**: No user story work can begin until this phase is complete
 
-- [ ] T006 [P] Red test + implement `Timeouts` (connect 5 s, api_transcription 30 s, local_server 60 s, post_processing 15 s; one constructor; test-overridable) in `crates/voicen-core/src/timeouts.rs` [core] [req FR-24]
+- [ ] T006 [P] Red test + implement `Timeouts` (defaults connect 5 s, api_transcription 30 s, local_server 60 s, post_processing 15 s; `from_settings` per job, bounds per decision #99; test-overridable) in `crates/voicen-core/src/timeouts.rs` [core] [req FR-24]
 - [ ] T007 [P] Add every key and text of contracts/messages.md to the one catalog `i18n/en.json`, `i18n/ru.json` (created by teamwright T-005); `MessageKey` maps to `voicen_core::i18n::MessageId` (declared with `messages!`) and `MessageParams` to its `args`. No own catalog files and no own completeness test: parity is checked only by T-005's tests [core] [req FR-15 (spec FR-034)]
 - [ ] T008 [P] Red test + implement `DictationEvent` (only the fields of data-model.md "DictationEvent") and the `PipelineObserver` trait, plus a recording fake, in `crates/voicen-core/src/events.rs` (teamwright T-001: `DictationEvent` is `Copy`) [core] [req FR-20, NFR-04 (spec FR-033)]
 - [ ] T009 [P] Red test + implement `AudioBuffer` (16 kHz mono i16), mix-down + resample with `rubato` (48 kHz stereo → 16 kHz mono length ±1 sample per 10 ms), and WAV encoding (RIFF PCM 16-bit, 16 000 Hz, mono; 10 min ≈ 19.2 MB) in `crates/voicen-core/src/audio/{mod,resample,wav}.rs` [core] [req FR-06, decisions #1]

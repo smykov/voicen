@@ -22,7 +22,7 @@ The settings model and everything that changes it live in `voicen-core`: one `Se
 
 **Project Type**: Desktop app (Tauri 2) — core library + Windows shell + web UI.
 
-**Performance Goals**: settings window interactive within 1 s of the request on the reference machine (not a requirement; a sanity target). Save completes in < 1 s except when the OS stalls. Test connection bounded by FR-24 (≤ 35 s API, ≤ 65 s local server — spec SC-006). First-run setup ≤ 3 min end to end (req NFR-10).
+**Performance Goals**: settings window interactive within 1 s of the request on the reference machine (not a requirement; a sanity target). Save completes in < 1 s except when the OS stalls. Test connection bounded by the configured FR-24 timeouts (worst case connect + total; defaults ≤ 35 s API, ≤ 65 s local server — spec SC-006). First-run setup ≤ 3 min end to end (req NFR-10).
 
 **Constraints**: keys never in the settings file, logs, crash files, UI state or messages (req NFR-04); settings log lines carry field ids only (spec FR-021); the settings window is created on demand and destroyed on close (req NFR-03); MIT-compatible licences (req NFR-12); per-user only, no elevation.
 

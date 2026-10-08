@@ -20,12 +20,12 @@ response_format = json
 - `Authorization`: one rule for a usable key: the text `Bearer <key>` passes `HeaderValue` validation (http 1.5: no control byte other than tab, no DEL). A key that fails it is `InvalidApiKey`, checked before the client or the request is built, so no request is sent (`TransportError::UnusableKey`); never `CannotReach`. The same rule covers non-ASCII keys: their UTF-8 bytes pass it and are sent as given, and the server's 401/403 gives `InvalidApiKey`. The value is marked sensitive.
 - Size: ≤ 19.2 MB at the 10-minute cap (decisions #1). The multipart body is encoded into one buffer before sending (not streamed): reqwest's blocking client reports a failed connect of a streamed body as a body-channel error without its connect flag. The buffer is reserved once from the WAV length plus 1 KiB of framing and the text parts, so it is never regrown; the WAV moves into the form without a copy. Transient peak per call: the audio, the WAV and the body, about 3 × 19.2 MB at the cap.
 - `model`: the API engine always sends its model. The local-server engine (002, T-018) sends `local_server.model` trimmed, and omits the part when it is empty or whitespace-only (an optional part is never sent empty); `engine_for` decides this once at construction.
-- Timeouts (`Timeouts`, the single source, read from the `TranscribeRequest` of each call): connect 5 s (`connect_timeout` of the client, built per call); the whole request, connect to the last body byte, as the per-request timeout (Clarification 1):
+- Timeouts (`Timeouts`, the single source, read from the `TranscribeRequest` of each call): connect, default 5 s (`connect_timeout` of the client, built per call); the whole request, connect to the last body byte, as the per-request timeout (Clarification 1):
 
   | Engine role | `kind()` | Whole-request deadline |
   |---|---|---|
-  | API | `api` | 30 s (`Timeouts::api_transcription`) |
-  | Local server (002) | `local_server` | 60 s (`Timeouts::local_server`) |
+  | API | `api` | default 30 s, configurable 5-600 s (`Timeouts::api_transcription`) |
+  | Local server (002) | `local_server` | default 60 s, configurable 5-1800 s (`Timeouts::local_server`) |
 - The client is reqwest's blocking client (decision #42): `transcribe` must not run inside a tokio runtime.
 
 ## Response
@@ -39,7 +39,7 @@ response_format = json
 | any other non-2xx (e.g. 400, 404, 413, 429, 500, 503) | `Err(ServerError{status})` |
 | DNS failure; OS "network unreachable" / "host unreachable" | `Err(NetworkUnavailable)` |
 | connection refused; connect not established in 5 s | `Err(CannotReach{host})` (`host[:port]` of the base URL) |
-| whole request > 30 s (API) / 60 s (local server) | `Err(Timeout)` |
+| whole request > the configured limit (defaults 30 s API / 60 s local server) | `Err(Timeout)` |
 
 Classification (`failure::classify`, one mapping for every transport failure; T-040 Investigation probe, reqwest 0.13.5), first match:
 
