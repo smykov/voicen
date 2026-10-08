@@ -63,6 +63,7 @@
   "notice.settings_unavailable": "Не удалось прочитать настройки, поэтому Voicen использует значения по умолчанию и не может сохранить изменения. Проверьте доступ к папке настроек и перезапустите Voicen.",
   "overlay.processing": "Распознавание…",
   "overlay.recording": "Запись {elapsed}",
+  "settings.base_url.hint": "Например, http://10.0.0.5:8000/v1. Подойдёт и полный адрес, оканчивающийся на /audio/transcriptions.",
   "settings.discard.confirm": "Отменить изменения",
   "settings.discard.keep": "Продолжить редактирование",
   "settings.discard.message": "Изменения не сохранены. Если закрыть окно сейчас, они будут потеряны.",

@@ -63,6 +63,7 @@
   "notice.settings_unavailable": "Settings could not be read, so Voicen is using the defaults and cannot save changes. Check access to the settings folder and restart Voicen.",
   "overlay.processing": "Transcribing…",
   "overlay.recording": "Recording {elapsed}",
+  "settings.base_url.hint": "For example http://10.0.0.5:8000/v1. A full address ending in /audio/transcriptions also works.",
   "settings.discard.confirm": "Discard changes",
   "settings.discard.keep": "Keep editing",
   "settings.discard.message": "Your changes have not been saved. If you close the window now, they will be lost.",

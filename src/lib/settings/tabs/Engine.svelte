@@ -6,7 +6,7 @@
   import { currentLanguage } from "$lib/i18n/language.svelte";
   import { t, type MessageId } from "$lib/i18n";
   import type { Draft } from "../draft";
-  import { controlId, describedBy } from "../fields";
+  import { controlId, describedBy, hintId } from "../fields";
   import FieldMessage from "../FieldMessage.svelte";
   import KeyField from "../KeyField.svelte";
   import BuiltinLocal from "$lib/local-models/BuiltinLocal.svelte";
@@ -30,8 +30,8 @@
     return draft.errors[field] ? "true" : undefined;
   }
 
-  function described(field: string): string | undefined {
-    return describedBy(field, draft.errors, warnings);
+  function described(field: string, hint = false): string | undefined {
+    return describedBy(field, draft.errors, warnings, hint);
   }
 </script>
 
@@ -61,8 +61,9 @@
       data-field="engine.api.base_url"
       bind:value={draft.settings.api.base_url}
       aria-invalid={invalid("engine.api.base_url")}
-      aria-describedby={described("engine.api.base_url")}
+      aria-describedby={described("engine.api.base_url", true)}
     />
+    <p class="hint" id={hintId("engine.api.base_url")}>{t("settings.base_url.hint")}</p>
     <FieldMessage errors={draft.errors} {warnings} field="engine.api.base_url" />
   </div>
   <div class="field">
@@ -87,8 +88,9 @@
       data-field="engine.local_server.base_url"
       bind:value={draft.settings.local_server.base_url}
       aria-invalid={invalid("engine.local_server.base_url")}
-      aria-describedby={described("engine.local_server.base_url")}
+      aria-describedby={described("engine.local_server.base_url", true)}
     />
+    <p class="hint" id={hintId("engine.local_server.base_url")}>{t("settings.base_url.hint")}</p>
     <FieldMessage errors={draft.errors} {warnings} field="engine.local_server.base_url" />
   </div>
   <div class="field">
