@@ -8,6 +8,7 @@ use std::sync::{mpsc, Arc, Mutex, PoisonError, RwLock};
 use serde::{Deserialize, Serialize};
 
 use super::file::SettingsFile;
+use super::hotkey::parse_hotkey;
 use super::url::{check_base_url, is_insecure_remote, normalize_base_url};
 use super::validate::{validate, KeyEditsWithPresence};
 use super::{
@@ -15,7 +16,7 @@ use super::{
 };
 use crate::autostart::{Autostart, ReconcileAction};
 use crate::clock::{utc_compact, Clock};
-use crate::hotkey_registrar::HotkeyRegistrar;
+use crate::hotkey_registrar::{HotkeyRegistrar, Prepared};
 use crate::i18n::{
     MessageId, NOTICE_SETTINGS_UNAVAILABLE, SETTINGS_PARTIALLY_RESTORED,
     SETTINGS_WARNING_ENDPOINT_INSECURE, SETTINGS_WRITE_FAILED,
@@ -29,7 +30,9 @@ pub struct SettingsDeps {
     pub credentials: Arc<dyn CredentialStore>,
     /// The logon start entry (T-014): the save step and `reconcile_autostart`.
     pub autostart: Arc<dyn Autostart>,
-    /// Held but not called until T-010 adds the hotkey step.
+    /// The two-step hotkey registration of a save (T-055, R-3 steps 2 and 6):
+    /// `prepare` when the hotkey text changes, `commit` after the file is written
+    /// and before the snapshot swap, `abort` on every later refusal.
     pub hotkeys: Arc<dyn HotkeyRegistrar>,
     pub local_models: Arc<dyn DownloadedModels>,
     pub clock: Arc<dyn Clock>,
@@ -377,15 +380,43 @@ impl SettingsService {
             return refused(errors, None);
         }
 
-        // (4) Hotkey step: none until T-010 (prepare / abort / commit go here).
+        // (4) Hotkey (T-055, R-3 step 2): only when the hotkey text differs from the
+        // snapshot in force (an unchanged one is never re-registered, T032). The new
+        // one is registered next to the old; a failure refuses before anything else
+        // is touched, and the old hotkey stays the one in force.
+        let prepared = if settings.hotkey != self.snapshot().hotkey {
+            let prepared = parse_hotkey(&settings.hotkey)
+                .ok()
+                .and_then(|hotkey| self.deps.hotkeys.prepare(hotkey, settings.mode).ok());
+            match prepared {
+                Some(prepared) => Some(prepared),
+                None => {
+                    return refused(
+                        vec![FieldError {
+                            field: FieldId::RecordingHotkey,
+                            code: ErrorCode::HotkeyUnavailable,
+                        }],
+                        None,
+                    )
+                }
+            }
+        } else {
+            None
+        };
+        // Every refusal from here on releases the prepared registration, last.
+        let abort = |prepared: Option<Prepared>| {
+            if let Some(prepared) = prepared {
+                self.deps.hotkeys.abort(prepared);
+            }
+        };
 
         // (5) Autostart (T-014, R-3 step 3): only when the value differs from the
-        // snapshot in force; a failure refuses before any key or the file is touched
-        // (T-010's prepared hotkey is aborted here once it exists).
+        // snapshot in force; a failure refuses before any key or the file is touched.
         let old_start = self.snapshot().start_with_windows;
         let new_start = settings.start_with_windows;
         let autostart_done = if new_start != old_start {
             if self.deps.autostart.set(new_start).is_err() {
+                abort(prepared);
                 return refused(
                     vec![FieldError {
                         field: FieldId::GeneralStartWithWindows,
@@ -419,6 +450,7 @@ impl SettingsService {
                 }
                 Err(_) => {
                     let form_error = self.undo(autostart_done, done).map(partially_restored);
+                    abort(prepared);
                     return refused(vec![key_store_failed(slot)], form_error);
                 }
             }
@@ -430,11 +462,17 @@ impl SettingsService {
             let form_error = self
                 .undo(autostart_done, done)
                 .map_or(FormError::WriteFailed, partially_restored);
+            abort(prepared);
             return refused(Vec::new(), Some(form_error));
         }
 
-        // (8) Commit: swap the snapshot, then publish to every live subscriber. The
-        // warnings are decided here, once, over what was saved (T-015).
+        // (8) Commit: the new hotkey becomes the active one and the old one is
+        // released (R-3 step 6) before any reader can see the new snapshot; then swap
+        // the snapshot and publish to every live subscriber. The warnings are decided
+        // here, once, over what was saved (T-015).
+        if let Some(prepared) = prepared {
+            self.deps.hotkeys.commit(prepared);
+        }
         let warnings = save_warnings(&settings);
         let snapshot = Arc::new(settings);
         *self.current.write().unwrap_or_else(PoisonError::into_inner) = snapshot.clone();

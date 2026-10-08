@@ -3,6 +3,7 @@ use std::sync::Arc;
 use tauri::{App, AppHandle, Builder, Context, Manager, RunEvent, Runtime};
 use voicen_core::autostart::Autostart;
 use voicen_core::diag::{Log, LogEvent, WarningKind};
+use voicen_core::hotkey_registrar::HotkeyRegistrar;
 use voicen_core::local_models::catalog::MODELS;
 use voicen_core::local_models::download::DiskSpace;
 use voicen_core::local_models::service::LocalModels;
@@ -229,12 +230,13 @@ fn release_launched_by_autostart() -> bool {
 
 /// The release dictation ports (T-006): the Windows default microphone, the
 /// clipboard, the paster, the engine of the settings (`engine::engine_for`), the
-/// tray and the overlay through [`dictation::ShellIndicator`], and `credentials`, the
-/// `SettingsService`'s own key store.
+/// tray and the overlay through [`dictation::ShellIndicator`], and the
+/// `SettingsService`'s own instances: `credentials`, its key store, and `hotkeys`,
+/// its hotkey registrar (T-055).
 #[cfg(windows)]
 fn release_ports<R: Runtime>(
     app: &AppHandle<R>,
-    credentials: Arc<dyn CredentialStore>,
+    shared: SharedPorts,
 ) -> dictation::DictationPorts {
     dictation::DictationPorts {
         audio: Arc::new(win::capture::CpalSource::new()),
@@ -242,15 +244,13 @@ fn release_ports<R: Runtime>(
         paster: Arc::new(win::paste::WinPaster::new()),
         engine_factory: None,
         indicator: Arc::new(dictation::ShellIndicator::new(app)),
-        credentials,
+        credentials: shared.credentials,
+        hotkeys: shared.hotkeys,
     }
 }
 
 #[cfg(not(windows))]
-fn release_ports<R: Runtime>(
-    _app: &AppHandle<R>,
-    _credentials: Arc<dyn CredentialStore>,
-) -> dictation::DictationPorts {
+fn release_ports<R: Runtime>(_app: &AppHandle<R>, _shared: SharedPorts) -> dictation::DictationPorts {
     compile_error!(
         "the Voicen app runs on Windows only: the hotkey, microphone, clipboard and paste \
          are Win32 adapters"
@@ -262,8 +262,8 @@ fn release_ports<R: Runtime>(
 /// exits inside the single-instance plugin's setup, never runs it): the one log
 /// (`Started` first), the one `LocalModels` (its `.part` cleanup), the settings
 /// load (a first run writes `settings.json`; the Run value is reconciled). Returns
-/// the parts, the load outcome for `Ready` and the one key store, the instance the
-/// `SettingsService` was given, for the dictation session (T-006 invariant 5).
+/// the parts, the load outcome for `Ready` and the instances the `SettingsService`
+/// was given that the dictation session shares (T-006 invariant 5, T-055).
 /// Installs `paths::log_dir()` with the Explorer opener (T-071) for the tray's
 /// "Open logs folder"; off Windows nothing is installed and the item does nothing.
 #[cfg(windows)]
@@ -278,7 +278,15 @@ fn install_logs_folder<R: Runtime>(app: &AppHandle<R>) {
 #[cfg(not(windows))]
 fn install_logs_folder<R: Runtime>(_app: &AppHandle<R>) {}
 
-fn release_parts() -> (Parts, LoadOutcome, Arc<dyn CredentialStore>) {
+/// The instances the `SettingsService` and the dictation session share: the one key
+/// store and the one hotkey registrar (T-055: the save's hotkey step is served by
+/// the hotkey thread `start_dictation` attaches to it).
+struct SharedPorts {
+    credentials: Arc<dyn CredentialStore>,
+    hotkeys: Arc<win::hotkey::HotkeyRegistrarHandle>,
+}
+
+fn release_parts() -> (Parts, LoadOutcome, SharedPorts) {
     // The one log (T-008), Started first; every later diagnostic is a typed line on
     // it. The unwritable callback is T-054's one-time notice; until then the log
     // only degrades.
@@ -302,18 +310,23 @@ fn release_parts() -> (Parts, LoadOutcome, Arc<dyn CredentialStore>) {
     let local_models = Arc::new(local_models);
     let os_language = locale::os_language();
     let credentials = release_credentials();
-    let (service, load_outcome) = settings_ipc::load_settings(
+    let hotkeys = win::hotkey::HotkeyRegistrarHandle::new();
+    let (service, load_outcome) = settings_ipc::load_settings_with(
         paths::data_dir(),
         Arc::clone(&credentials),
         release_autostart(),
         local_models.store(),
+        Arc::clone(&hotkeys) as Arc<dyn HotkeyRegistrar>,
         os_language.as_deref(),
         &log,
     );
     (
         Parts::new(service, local_models, log),
         load_outcome,
-        credentials,
+        SharedPorts {
+            credentials,
+            hotkeys,
+        },
     )
 }
 
@@ -321,7 +334,7 @@ fn release_parts() -> (Parts, LoadOutcome, Arc<dyn CredentialStore>) {
 pub fn run() {
     let launched_by_autostart = release_launched_by_autostart();
     let mut load_outcome = None;
-    let mut credentials = None;
+    let mut shared = None;
     // The single-instance plugin is registered first and only here (never in
     // `build_app` or a test: its second-instance path calls `process::exit(0)`
     // inside `build()`). Its setup decides inside `build()`, before `release_parts`.
@@ -330,23 +343,27 @@ pub fn run() {
             let _ = tray::on_second_instance(app, argv, cwd);
         }));
     let app = assemble(builder, tauri::generate_context!(), || {
-        let (parts, outcome, store) = release_parts();
+        let (parts, outcome, ports) = release_parts();
         load_outcome = Some(outcome);
-        credentials = Some(store);
+        shared = Some(ports);
         parts
     })
     .expect("error while building tauri application");
     // The tray's "Open logs folder" (T-071): the one logs dir, opened by the Explorer.
     install_logs_folder(app.handle());
     let load_outcome = load_outcome.expect("assemble returned the app, so it ran the parts");
-    let credentials = credentials.expect("assemble returned the app, so it ran the parts");
+    let shared = shared.expect("assemble returned the app, so it ran the parts");
     // The dictation session and the hotkey thread, after the tray exists and before
     // the loop runs; only a primary gets here (a second instance exited inside
     // `build()`). A failed start is logged where it failed (`dictation_start_failed`,
-    // `hotkey_thread_failed`) and the app runs on without dictation (T-055/T-054 own
-    // any notice). The handle lives as long as the loop: the hotkey stays registered
-    // until the process ends.
-    let ports = release_ports(app.handle(), credentials);
+    // `hotkey_thread_failed`) and the app runs on without dictation (T-054 owns any
+    // notice); the registrar handle then stays detached and refuses every hotkey
+    // change. A hotkey taken at start is reported by the hotkey thread before
+    // `start_dictation` returns (tray HotkeyError, the notice, settings on the
+    // hotkey field), so `Ready`'s startup executor runs after it (T-055 Q1). The
+    // handle lives as long as the loop: the hotkey stays registered until the
+    // process ends.
+    let ports = release_ports(app.handle(), shared);
     let dictation = dictation::start_dictation(app.handle(), ports).ok();
     app.run(move |app, event| {
         let _dictation = &dictation;

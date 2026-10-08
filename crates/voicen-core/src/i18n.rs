@@ -104,6 +104,10 @@ macro_rules! messages {
 messages! {
     /// Hotkey pressed while engine = none (spec 004 FR-007; `settings::gate::blocked_actions`).
     NOTICE_CHOOSE_ENGINE = "notice.choose_engine",
+    /// The hotkey could not be registered (taken by another program or reserved by
+    /// Windows): the overlay notice of `DictationSession::hotkey_registration(false)`
+    /// (T-055), shown before settings open on the hotkey field.
+    NOTICE_HOTKEY_UNAVAILABLE = "notice.hotkey_unavailable",
     /// A save refused because the settings could not be read at startup (decision
     /// #19; `settings::service::FormError::SettingsUnavailable`).
     NOTICE_SETTINGS_UNAVAILABLE = "notice.settings_unavailable",

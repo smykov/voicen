@@ -21,7 +21,7 @@ use voicen_core::secrets::{
 };
 use voicen_core::settings::gate::SettingsTab;
 use voicen_core::settings::hotkey::{Hotkey, HotkeyKey};
-use voicen_core::settings::Mode;
+use voicen_core::settings::{FieldId, Mode};
 
 fn call(op: CredentialOp, slot: KeySlot) -> CredentialCall {
     CredentialCall { op, slot }
@@ -407,13 +407,13 @@ fn fake_indicator_and_shell_requests_record_in_order() {
     assert!(timed.windows(2).all(|w| w[0].0 <= w[1].0));
 
     let requests = FakeShellRequests::new();
-    requests.open_settings(SettingsTab::Engine);
-    requests.open_settings(SettingsTab::General);
+    requests.open_settings(SettingsTab::Engine, None);
+    requests.open_settings(SettingsTab::Recording, Some(FieldId::RecordingHotkey));
     assert_eq!(
         requests.calls(),
         vec![
-            ShellRequestCall::OpenSettings(SettingsTab::Engine),
-            ShellRequestCall::OpenSettings(SettingsTab::General),
+            ShellRequestCall::OpenSettings(SettingsTab::Engine, None),
+            ShellRequestCall::OpenSettings(SettingsTab::Recording, Some(FieldId::RecordingHotkey)),
         ]
     );
 }

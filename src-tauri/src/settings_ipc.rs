@@ -7,9 +7,11 @@
 //!   only, `SaveRequest`'s deserialize errors are fixed texts).
 //! - J3: `settings://changed` is emitted only by the subscribe bridge, so every
 //!   `Saved`, from any caller, gives exactly one event and a `Refused` none.
-//! - J4: the release app and the tests build the service through [`load_settings`]
-//!   and differ only in the injected credential store, autostart entry and data
-//!   dir; it reconciles the autostart entry right after the load (T-014).
+//! - J4: the release app and the tests build the service through
+//!   [`load_settings_with`] ([`load_settings`] is it with a registrar no hotkey
+//!   thread is attached to) and differ only in the injected credential store,
+//!   autostart entry, hotkey registrar and data dir; it reconciles the autostart
+//!   entry right after the load (T-014).
 //!
 //! The only output here goes to the one log as typed lines (T-008, spec 004 R-11):
 //! the load outcome and the reconcile action from [`load_settings`], one save line
@@ -25,31 +27,24 @@ use tauri::{AppHandle, Emitter, Runtime, State};
 use voicen_core::autostart::Autostart;
 use voicen_core::clock::SystemClock;
 use voicen_core::diag::{Log, LogEvent, WarningKind};
-use voicen_core::hotkey_registrar::{HotkeyRegistrar, Prepared, Unavailable};
+use voicen_core::hotkey_registrar::HotkeyRegistrar;
 use voicen_core::local_models::store::ModelStore;
 use voicen_core::secrets::CredentialStore;
 use voicen_core::settings::file::FsSettingsFile;
-use voicen_core::settings::hotkey::Hotkey;
 use voicen_core::settings::service::{
     SaveOutcome, SaveRequest, SettingsDeps, SettingsService, SettingsView,
 };
-use voicen_core::settings::{LoadOutcome, Mode, WHISPER_ISO_639_1};
+use voicen_core::settings::{LoadOutcome, WHISPER_ISO_639_1};
+
+use crate::win::hotkey::HotkeyRegistrarHandle;
 
 /// The event every window listens to; payload `SettingsView` (contracts/ipc.md).
 pub const SETTINGS_CHANGED: &str = "settings://changed";
 
-/// Builds the service the release app and the tests share (J4): `FsSettingsFile`
-/// over `data_dir`, the given credential store, autostart entry and models store,
-/// the interim fail-closed `HotkeyRegistrar`, `SystemClock`; then
-/// `load_or_init`, then `reconcile_autostart` (T-014, R-5).
-///
-/// `local_models` is the store of the one `LocalModels` (`LocalModels::store`,
-/// T-044): it becomes `SettingsDeps.local_models`.
-///
-/// `log` is the one log (`diag::start`, T-008): after the load it gets the
-/// `settings load outcome=..` line, after the reconcile the `autostart reconcile
-/// action=..` line (spec 004 R-11), so a start writes Started, then these two. No
-/// value of the outcome (settings, backup file name) reaches the log.
+/// [`load_settings_with`] over a `HotkeyRegistrarHandle` that no hotkey thread is
+/// ever attached to: every save of a changed hotkey is refused with
+/// `hotkey.unavailable` (fail closed). For the tests that start no dictation;
+/// `run()` passes its one handle through `load_settings_with`.
 pub fn load_settings(
     data_dir: PathBuf,
     credentials: Arc<dyn CredentialStore>,
@@ -58,11 +53,44 @@ pub fn load_settings(
     os_language: Option<&str>,
     log: &Log,
 ) -> (Arc<SettingsService>, LoadOutcome) {
+    load_settings_with(
+        data_dir,
+        credentials,
+        autostart,
+        local_models,
+        HotkeyRegistrarHandle::new(),
+        os_language,
+        log,
+    )
+}
+
+/// Builds the service the release app and the tests share (J4): `FsSettingsFile`
+/// over `data_dir`, the given credential store, autostart entry, models store and
+/// hotkey registrar (T-055: the `HotkeyRegistrarHandle` that `start_dictation` later
+/// attaches its hotkey thread to, the same instance as `DictationPorts::hotkeys`),
+/// `SystemClock`; then `load_or_init`, then `reconcile_autostart` (T-014, R-5).
+///
+/// `local_models` is the store of the one `LocalModels` (`LocalModels::store`,
+/// T-044): it becomes `SettingsDeps.local_models`.
+///
+/// `log` is the one log (`diag::start`, T-008): after the load it gets the
+/// `settings load outcome=..` line, after the reconcile the `autostart reconcile
+/// action=..` line (spec 004 R-11), so a start writes Started, then these two. No
+/// value of the outcome (settings, backup file name) reaches the log.
+pub fn load_settings_with(
+    data_dir: PathBuf,
+    credentials: Arc<dyn CredentialStore>,
+    autostart: Arc<dyn Autostart>,
+    local_models: Arc<ModelStore>,
+    hotkeys: Arc<dyn HotkeyRegistrar>,
+    os_language: Option<&str>,
+    log: &Log,
+) -> (Arc<SettingsService>, LoadOutcome) {
     let deps = SettingsDeps {
         file: Arc::new(FsSettingsFile::new(data_dir)),
         credentials,
         autostart,
-        hotkeys: Arc::new(InterimHotkeyRegistrar),
+        hotkeys,
         local_models,
         clock: Arc::new(SystemClock),
     };
@@ -132,18 +160,4 @@ pub fn settings_save(
 #[tauri::command]
 pub fn settings_speech_languages() -> Vec<&'static str> {
     WHISPER_ISO_639_1.to_vec()
-}
-
-/// Interim until T-055 (the real registrar): fails closed. `SettingsService` does
-/// not call it before T-010 adds the hotkey save step.
-struct InterimHotkeyRegistrar;
-
-impl HotkeyRegistrar for InterimHotkeyRegistrar {
-    fn prepare(&self, _hotkey: Hotkey, _mode: Mode) -> Result<Prepared, Unavailable> {
-        Err(Unavailable)
-    }
-
-    fn commit(&self, _prepared: Prepared) {}
-
-    fn abort(&self, _prepared: Prepared) {}
 }

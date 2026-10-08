@@ -59,6 +59,7 @@
   "notice.choose_engine": "Choose a transcription engine in Settings to start dictating.",
   "notice.copied": "Copied to clipboard",
   "notice.copied_paste_manually": "Copied — paste manually",
+  "notice.hotkey_unavailable": "The dictation shortcut is already used by Windows or another program. Choose another one in Settings.",
   "notice.no_speech": "No speech detected",
   "notice.post_processing_skipped.http": "Post-processing skipped — HTTP {status}",
   "notice.post_processing_skipped.invalid_key": "Post-processing skipped — invalid API key",

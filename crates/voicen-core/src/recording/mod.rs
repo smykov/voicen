@@ -406,6 +406,12 @@ impl<C> RecordingController<C> {
         self.refresh();
     }
 
+    /// `true` while the last hotkey registration result was a failure (tray
+    /// `HotkeyError`).
+    pub fn hotkey_error(&self) -> bool {
+        self.hotkey_error
+    }
+
     /// The id of the recording that is on, if any (T-051: the session asks this
     /// instead of keeping its own flag, P-010).
     pub fn live_id(&self) -> Option<RecordingId> {

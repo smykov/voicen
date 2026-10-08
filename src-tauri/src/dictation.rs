@@ -5,9 +5,11 @@
 //! `SettingsService`'s own instance), the release-1 speech gate
 //! (`SpeechGate(Err(Unavailable), energy)`), `PassThrough`, an interim pending-audio
 //! store whose `put` fails (until T-007) and [`SettingsRequests`]; manages it as
-//! `Arc<DictationSession>` (the type the tray's menu-open handler looks up) and
-//! starts the hotkey thread for the settings' hotkey. `run()` and the tests differ
-//! only in the ports.
+//! `Arc<DictationSession>` (the type the tray's menu-open handler looks up),
+//! starts the hotkey thread for the settings' hotkey and attaches it to the
+//! `HotkeyRegistrarHandle` the `SettingsService` was given (T-055), so a save's
+//! hotkey step is served by that thread. `run()` and the tests differ only in the
+//! ports.
 //!
 //! [`ShellIndicator`] is `run()`'s `Indicator`: the tray half forwards to the
 //! tray's `TrayPart` (nothing when the tray was not built), the overlay half to the
@@ -31,12 +33,13 @@ use voicen_core::recording::{OverlayState, TrayState};
 use voicen_core::secrets::CredentialStore;
 use voicen_core::settings::gate::SettingsTab;
 use voicen_core::settings::service::SettingsService;
+use voicen_core::settings::FieldId;
 use voicen_core::vad::{EnergyDetector, SpeechGate, VadError};
 
 use crate::overlay::{self, OverlayPart};
 use crate::settings_window::{self, OpenTarget};
 use crate::tray::{self, TrayPart};
-use crate::win::hotkey::HotkeyThread;
+use crate::win::hotkey::{HotkeyRegistrarHandle, HotkeyThread};
 
 /// What the tests replace; `run()` passes the Windows adapters.
 pub struct DictationPorts {
@@ -48,17 +51,22 @@ pub struct DictationPorts {
     pub indicator: Arc<dyn Indicator>,
     /// The `SettingsService`'s own instance (`PipelineDeps::credentials`).
     pub credentials: Arc<dyn CredentialStore>,
+    /// The `SettingsService`'s own hotkey registrar (`SettingsDeps::hotkeys`, T-055):
+    /// the started hotkey thread is attached to it.
+    pub hotkeys: Arc<HotkeyRegistrarHandle>,
 }
 
 /// The started dictation of an app: owns the hotkey thread. Dropping it stops the
-/// hotkey thread and frees the hotkey; the session stays managed by the app.
+/// hotkey thread and frees the hotkey (also one a save committed); the session
+/// stays managed by the app, and the registrar handle fails closed again.
 pub struct DictationHandle {
     _hotkey: HotkeyThread,
 }
 
 /// Builds the one dictation session of `app` over `ports`, manages it as
-/// `Arc<DictationSession>` and starts the hotkey thread for the hotkey of the
-/// settings snapshot. Needs the managed `Arc<SettingsService>` and `Arc<Log>`
+/// `Arc<DictationSession>`, starts the hotkey thread for the hotkey of the
+/// settings snapshot (it reports the registration result before this returns) and
+/// attaches it to `ports.hotkeys`. Needs the managed `Arc<SettingsService>` and `Arc<Log>`
 /// (`assemble`'s wiring). `Err` when the session or the hotkey thread could not be
 /// started, or when the app already has a session (then nothing is started): a
 /// failed session start (or a second one) writes `dictation_start_failed`, a failed
@@ -100,6 +108,7 @@ pub fn start_dictation<R: Runtime>(
         engine_factory,
         indicator,
         credentials,
+        hotkeys,
     } = ports;
     let session = DictationSession::start(SessionDeps {
         pipeline: PipelineDeps {
@@ -129,6 +138,7 @@ pub fn start_dictation<R: Runtime>(
     }
     let hotkey = service.snapshot().hotkey.clone();
     let hotkey = HotkeyThread::start(session, &hotkey, log)?;
+    hotkeys.attach(&hotkey);
     Ok(DictationHandle { _hotkey: hotkey })
 }
 
@@ -193,8 +203,8 @@ impl<R: Runtime> Indicator for ShellIndicator<R> {
     }
 }
 
-/// The session's `ShellRequests`: `open_settings(tab)` posts
-/// `settings_window::request(app, OpenTarget::Tab(tab, None))` and drops the
+/// The session's `ShellRequests`: `open_settings(tab, field)` posts
+/// `settings_window::request(app, OpenTarget::Tab(tab, field))` and drops the
 /// receipt (never waits).
 pub struct SettingsRequests<R: Runtime> {
     app: AppHandle<R>,
@@ -207,7 +217,7 @@ impl<R: Runtime> SettingsRequests<R> {
 }
 
 impl<R: Runtime> ShellRequests for SettingsRequests<R> {
-    fn open_settings(&self, tab: SettingsTab) {
-        let _ = settings_window::request(&self.app, OpenTarget::Tab(tab, None));
+    fn open_settings(&self, tab: SettingsTab, field: Option<FieldId>) {
+        let _ = settings_window::request(&self.app, OpenTarget::Tab(tab, field));
     }
 }

@@ -412,10 +412,7 @@ impl Indicator for Sequence {
 }
 
 impl ShellRequests for Sequence {
-    // T-055 changes the trait to `open_settings(tab, field)`; this records the
-    // field it gets (`None` until then).
-    fn open_settings(&self, tab: SettingsTab) {
-        let field: Option<FieldId> = None;
+    fn open_settings(&self, tab: SettingsTab, field: Option<FieldId>) {
         if let Some(session) = self.reenter.get().and_then(Weak::upgrade) {
             session.tray_menu_opened(Instant::now());
         }
@@ -1978,7 +1975,7 @@ fn saved_settings_reach_the_next_press() {
     rig.session.hotkey_released(t0 + ms(1000));
     assert_eq!(
         rig.requests.calls(),
-        vec![ShellRequestCall::OpenSettings(SettingsTab::Engine)]
+        vec![ShellRequestCall::OpenSettings(SettingsTab::Engine, None)]
     );
     assert_eq!(rig.audio.start_calls(), 0);
 
@@ -2295,6 +2292,19 @@ fn a_successful_registration_shows_and_asks_nothing() {
         rig.indicator.trays(),
         vec![(TrayState::HotkeyError, false), (TrayState::Idle, false)]
     );
+}
+
+#[test]
+fn hotkey_registered_follows_the_last_registration_result() {
+    // T-055 Q1 (developer-added): the startup executor asks the session whether the
+    // hotkey works; the answer is the controller's, never a copy. Bite: a flag set
+    // only by the failure (never cleared by a later success), or the opposite sense.
+    let rig = Rig::new(api_settings(), always(TEXT));
+    assert!(rig.session.hotkey_registered(), "before any report");
+    rig.session.hotkey_registration(false, Instant::now());
+    assert!(!rig.session.hotkey_registered(), "after a failure");
+    rig.session.hotkey_registration(true, Instant::now());
+    assert!(rig.session.hotkey_registered(), "after a success");
 }
 
 #[test]

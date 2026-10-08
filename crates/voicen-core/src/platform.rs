@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 use crate::audio::AudioBuffer;
 use crate::recording::{CaptureError, OverlayState, TrayState};
 use crate::settings::gate::SettingsTab;
+use crate::settings::FieldId;
 
 /// An opaque window handle (the HWND in the shell).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -117,10 +118,12 @@ pub trait Indicator: Send + Sync {
 }
 
 /// What the session asks the shell to do (T-051: the open-settings action of
-/// `settings::gate::blocked_actions`; T-055 adds the field focus, T-007 the
-/// notifier).
+/// `settings::gate::blocked_actions`; T-055: the field to focus, for a failed
+/// hotkey registration; T-007 adds the notifier). The session calls it outside its
+/// lock, so an implementation may call back into the session.
 pub trait ShellRequests: Send + Sync {
-    fn open_settings(&self, tab: SettingsTab);
+    /// Open (or raise) the settings window on `tab`, focusing `field` when given.
+    fn open_settings(&self, tab: SettingsTab, field: Option<FieldId>);
 }
 
 #[cfg(any(test, feature = "test-fakes"))]
@@ -134,7 +137,7 @@ mod fakes {
     use std::time::{Duration, Instant};
 
     use super::{
-        AudioBuffer, AudioSource, CaptureError, CaptureHandle, Clipboard, ClipboardError,
+        AudioBuffer, AudioSource, CaptureError, CaptureHandle, Clipboard, ClipboardError, FieldId,
         FrameSink, Indicator, OverlayState, PasteError, Paster, PendingId, SettingsTab,
         ShellRequests, StartWindow, TempAudioStore, TrayState, WindowRef,
     };
@@ -575,7 +578,7 @@ mod fakes {
     /// One recorded call on [`FakeShellRequests`].
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum ShellRequestCall {
-        OpenSettings(SettingsTab),
+        OpenSettings(SettingsTab, Option<FieldId>),
     }
 
     /// [`ShellRequests`] that records every request in order.
@@ -596,8 +599,8 @@ mod fakes {
     }
 
     impl ShellRequests for FakeShellRequests {
-        fn open_settings(&self, tab: SettingsTab) {
-            lock(&self.calls).push(ShellRequestCall::OpenSettings(tab));
+        fn open_settings(&self, tab: SettingsTab, field: Option<FieldId>) {
+            lock(&self.calls).push(ShellRequestCall::OpenSettings(tab, field));
         }
     }
 }

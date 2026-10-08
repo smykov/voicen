@@ -28,6 +28,13 @@ Tasks: T-003, T-032, T-030, T-014, T-004 (`SettingsView.unavailable`, the e2e wi
 - **Where it is enforced:** the settings core defines `CredentialStore`, `HotkeyRegistrar`, `DownloadedModels` and `post_process::settings`; 001, 002 and 003 implement or read them; fakes are public behind feature `test-fakes` (decisions #23 N4).
 - **Don't:** declare another key, hotkey or model-list trait in a feature crate or module, or enable `test-fakes` in a release build.
 
+### A saved hotkey is registered in two steps, and only a changed one
+
+- **Defect that produced it:** none yet (spec 004 R-3, T-055). Registering the new hotkey before the file is written leaves a working hotkey the file does not hold when a later step refuses; releasing the old one first leaves no hotkey when the new one is taken.
+- **What breaks if you violate it:** a refused save that changes which keys dictate, or a taken combination that silently disables dictation.
+- **Where it is enforced:** `SettingsService::save` calls `HotkeyRegistrar::prepare` after validation and before autostart, only when the hotkey text differs from the snapshot in force (a taken one → `Refused [recording.hotkey: hotkey.unavailable]`, nothing touched); every later refusal calls `abort` after its undo; `commit` runs after `write_atomic` and before the snapshot swap and publish. Tests: `taken_hotkey_refuses_with_hotkey_unavailable_and_changes_nothing`, `every_later_refusal_aborts_the_prepared_hotkey`, `a_saved_hotkey_is_committed_after_the_file_and_before_the_swap_and_publish` (`settings::service` tests).
+- **Don't:** register or release a hotkey outside `prepare` / `commit` / `abort`, or prepare an unchanged hotkey.
+
 ### The hotkey grammar is strict and closed
 
 - **Defect that produced it:** none yet (found in T-003 review of the contract, decisions #25, #26). The first contract added numpad operator keys that research R-6 does not contain.

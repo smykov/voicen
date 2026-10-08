@@ -105,6 +105,23 @@ pub fn startup_action(o: &LoadOutcome, _launched_by_autostart: bool) -> StartupA
     }
 }
 
+/// The startup decision once the hotkey registration is known (T-055 Q1): a failed
+/// registration has already asked for settings on the Recording tab with the
+/// hotkey field focused (`DictationSession::hotkey_registration(false)`), so the
+/// startup tab must not take the window from it: `TrayOnly`. Otherwise
+/// [`startup_action`]. Pure.
+pub fn startup_action_after_hotkey(
+    o: &LoadOutcome,
+    launched_by_autostart: bool,
+    hotkey_registered: bool,
+) -> StartupAction {
+    if hotkey_registered {
+        startup_action(o, launched_by_autostart)
+    } else {
+        StartupAction::TrayOnly
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::fixtures::sample;
@@ -141,6 +158,39 @@ mod tests {
                 assert_eq!(
                     startup_action(outcome, autostart),
                     *expected,
+                    "{outcome:?}, autostart {autostart}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_failed_hotkey_registration_keeps_the_startup_tab_away() {
+        // T-055 Q1 (the hotkey field wins over the first-run Engine tab): with the
+        // hotkey not registered no outcome posts a startup tab; with it registered
+        // the decision is `startup_action`'s, row for row. Bite: the Engine tab
+        // posted after a failed registration (the focus moves off the hotkey field),
+        // or the registered case not delegating.
+        let s = sample(EngineKind::Api);
+        let outcomes = [
+            LoadOutcome::FirstRun(s.clone()),
+            LoadOutcome::Reset {
+                settings: s.clone(),
+                backup_file_name: "settings.json.bad-20261003-120000".into(),
+            },
+            LoadOutcome::Unavailable(s.clone()),
+            LoadOutcome::Loaded(s.clone()),
+        ];
+        for outcome in &outcomes {
+            for autostart in [false, true] {
+                assert_eq!(
+                    startup_action_after_hotkey(outcome, autostart, false),
+                    StartupAction::TrayOnly,
+                    "{outcome:?}, autostart {autostart}"
+                );
+                assert_eq!(
+                    startup_action_after_hotkey(outcome, autostart, true),
+                    startup_action(outcome, autostart),
                     "{outcome:?}, autostart {autostart}"
                 );
             }

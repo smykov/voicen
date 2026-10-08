@@ -3,7 +3,9 @@
 //! [`open`] is the only constructor of the window labelled [`LABEL`]: there is at
 //! most one, and a call while it exists creates nothing, brings it forward and
 //! emits `settings://focus` to it. [`on_ready`] is the startup executor: it carries
-//! out `startup_action(outcome, launched_by_autostart)` and decides nothing itself.
+//! out `startup_action_after_hotkey(outcome, launched_by_autostart, registered)`
+//! (`registered`: the managed dictation session's `hotkey_registered`, `true` when
+//! there is none) and decides nothing itself.
 //! `run()`'s loop callback (`on_run_event`) calls it on `RunEvent::Ready`; the tests
 //! call it directly.
 //!
@@ -29,7 +31,8 @@ use tauri::{
     AppHandle, Emitter, Manager, Runtime, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
 };
 use voicen_core::diag::{Log, LogEvent, WarningKind};
-use voicen_core::settings::gate::{startup_action, SettingsTab, StartupAction};
+use voicen_core::dictation::DictationSession;
+use voicen_core::settings::gate::{startup_action_after_hotkey, SettingsTab, StartupAction};
 use voicen_core::settings::{FieldId, LoadOutcome};
 
 use crate::diag::io_os_code;
@@ -259,15 +262,21 @@ pub fn request_with<R: Runtime>(
     post(app, Work::Run(run))
 }
 
-/// The startup executor: carries out `startup_action(outcome, launched_by_autostart)`,
-/// that is a [`request`] for [`OpenTarget::Tab`] on the decided tab with no field
-/// (its receipt returned), or nothing for `TrayOnly` (`None`: nothing is posted).
+/// The startup executor: carries out `startup_action_after_hotkey(outcome,
+/// launched_by_autostart, registered)`, that is a [`request`] for
+/// [`OpenTarget::Tab`] on the decided tab with no field (its receipt returned), or
+/// nothing for `TrayOnly` (`None`: nothing is posted). `registered` is the managed
+/// `DictationSession`'s `hotkey_registered()` (`true` when the app has no session):
+/// a hotkey that failed at start has already asked for the hotkey field (T-055 Q1).
 pub fn on_ready<R: Runtime>(
     app: &AppHandle<R>,
     outcome: &LoadOutcome,
     launched_by_autostart: bool,
 ) -> Option<Receipt> {
-    match startup_action(outcome, launched_by_autostart) {
+    let registered = app
+        .try_state::<Arc<DictationSession>>()
+        .is_none_or(|session| session.hotkey_registered());
+    match startup_action_after_hotkey(outcome, launched_by_autostart, registered) {
         StartupAction::OpenSettings(tab) => Some(request(app, OpenTarget::Tab(tab, None))),
         StartupAction::TrayOnly => None,
     }

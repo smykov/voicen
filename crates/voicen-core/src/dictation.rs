@@ -24,6 +24,7 @@ use std::time::{Duration, Instant};
 
 use crate::audio::{mix_to_mono, AudioBuffer};
 use crate::events::{DeviceKind, DictationEvent, PipelineObserver};
+use crate::i18n::NOTICE_HOTKEY_UNAVAILABLE;
 use crate::pipeline::{EngineFactory, Pipeline, PipelineDeps, PressContext};
 use crate::platform::{AudioSource, CaptureHandle, FrameSink, Indicator, Paster, ShellRequests};
 use crate::recording::{
@@ -32,6 +33,7 @@ use crate::recording::{
 };
 use crate::settings::gate::{blocked_actions, dictation_gate, SettingsTab, ShellAction};
 use crate::settings::service::SettingsService;
+use crate::settings::FieldId;
 
 /// Everything the session talks to. The session builds its one `Pipeline` from
 /// `pipeline` (so the observer and the paster it uses are the pipeline's own).
@@ -307,7 +309,7 @@ impl DictationSession {
             shared.emit(e);
         }
         for tab in open_tabs {
-            shared.requests.open_settings(tab);
+            shared.requests.open_settings(tab, None);
         }
     }
 
@@ -404,12 +406,36 @@ impl DictationSession {
         self.shared.publish(&mut st);
     }
 
+    /// `false` while the last reported registration failed, so no hotkey works
+    /// (T-055 Q1: the startup executor then posts no tab of its own); `true` before
+    /// any report and after a successful one.
+    pub fn hotkey_registered(&self) -> bool {
+        !self.shared.lock().ctrl.hotkey_error()
+    }
+
     /// The hotkey registration result at `at` (tray `HotkeyError` until a
     /// successful registration).
+    ///
+    /// Every failed registration that leaves no working hotkey comes here (T-055:
+    /// the startup one; T-010's resume re-register): after the tray goes
+    /// `HotkeyError`, the overlay shows `notice.hotkey_unavailable` for 3 s from `at`
+    /// and, outside the session lock, the shell is asked to open settings on
+    /// Recording with the hotkey field focused. A success only clears the error.
     pub fn hotkey_registration(&self, registered: bool, at: Instant) {
-        let mut st = self.shared.lock();
-        st.ctrl.hotkey_registration(registered, at);
-        self.shared.publish(&mut st);
+        {
+            let mut st = self.shared.lock();
+            st.ctrl.hotkey_registration(registered, at);
+            self.shared.publish(&mut st);
+            if !registered {
+                st.ctrl.notice(NOTICE_HOTKEY_UNAVAILABLE, at);
+                self.shared.publish(&mut st);
+            }
+        }
+        if !registered {
+            self.shared
+                .requests
+                .open_settings(SettingsTab::Recording, Some(FieldId::RecordingHotkey));
+        }
     }
 }
 
