@@ -54,10 +54,11 @@ Var VoicenScratch
 
   ; The credentials go first, while voicen.exe still exists (the stock section deletes it next).
   ; voicen.exe --purge-credentials (T-061): exit 0 = every "Voicen/" entry removed or none,
-  ; 2 = at least one could not be removed; no window, no log.
+  ; 2 = at least one could not be removed; no window, no log. A missing voicen.exe is not skipped:
+  ; ExecWait then sets the error flag and the user gets the manual-removal message (FR-022).
   ${If} $VoicenPurgeData = 1
-  ${AndIf} ${FileExists} "$INSTDIR\${MAINBINARYNAME}.exe"
     ClearErrors
+    StrCpy $VoicenScratch ""
     ExecWait '"$INSTDIR\${MAINBINARYNAME}.exe" --purge-credentials' $VoicenScratch
     ${If} ${Errors}
     ${OrIf} $VoicenScratch <> 0
