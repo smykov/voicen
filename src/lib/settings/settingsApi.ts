@@ -27,6 +27,14 @@ export interface Settings {
   auto_paste: boolean;
   post_processing: { enabled: boolean; base_url: string; model: string; prompt: string };
   history: { enabled: boolean; size: number };
+  /** `voicen_core::settings::TimeoutSettings`: whole seconds; the range is core's rule (`timeout.range`). */
+  timeouts: {
+    connect_s: number;
+    api_transcription_s: number;
+    local_server_s: number;
+    post_processing_s: number;
+    builtin_local_s: number;
+  };
   start_with_windows: boolean;
   ui_language: UiLanguage;
 }

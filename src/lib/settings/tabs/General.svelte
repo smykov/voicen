@@ -1,11 +1,13 @@
 <script lang="ts">
   // General tab: the interface language, one option per `LANGUAGES` entry (the one
   // list in the UI), and Start with Windows. Both take effect when saved (the window
-  // renders in the saved view's ui_language; the save step writes the Run value).
+  // renders in the saved view's ui_language; the save step writes the Run value), and the
+  // five dictation timeouts (TimeoutsFields, T-073), used by the next job.
   import { LANGUAGES, t, type MessageId } from "$lib/i18n";
   import type { Draft } from "../draft";
   import { controlId, describedBy } from "../fields";
   import FieldMessage from "../FieldMessage.svelte";
+  import TimeoutsFields from "../TimeoutsFields.svelte";
 
   let { draft = $bindable(), warnings }: { draft: Draft; warnings: Record<string, MessageId> } = $props();
   const uiLanguage = "general.ui_language";
@@ -40,3 +42,5 @@
   <label for={controlId(startWithWindows)}>{t("settings.field.start_with_windows")}</label>
   <FieldMessage errors={draft.errors} {warnings} field={startWithWindows} />
 </div>
+
+<TimeoutsFields bind:draft {warnings} />
