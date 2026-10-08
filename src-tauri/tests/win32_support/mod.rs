@@ -93,6 +93,8 @@ pub const VK_SHIFT: u16 = 0x10;
 pub const VK_CONTROL: u16 = 0x11;
 pub const VK_MENU: u16 = 0x12;
 pub const VK_SPACE: u16 = 0x20;
+/// T-009: the cancel key (FR-22).
+pub const VK_ESCAPE: u16 = 0x1B;
 pub const VK_V: u16 = 0x56;
 pub const VK_LWIN: u16 = 0x5B;
 pub const VK_RWIN: u16 = 0x5C;
@@ -339,6 +341,30 @@ impl TakenHotkey {
         }?;
         Ok(TakenHotkey { id })
     }
+}
+
+impl TakenHotkey {
+    /// T-009: takes Esc under `modifiers` (`MOD_*` bits; 0 = bare Esc) for this thread,
+    /// under an id of its own: the claim the hotkey thread makes while recording.
+    pub fn take_esc(modifiers: u32) -> windows::core::Result<TakenHotkey> {
+        let id = NEXT_TAKEN_ID.fetch_add(1, Ordering::SeqCst);
+        // SAFETY: a thread-associated registration (no window), undone on drop.
+        unsafe {
+            RegisterHotKey(
+                None,
+                id,
+                HOT_KEY_MODIFIERS(modifiers) | MOD_NOREPEAT,
+                u32::from(VK_ESCAPE),
+            )
+        }?;
+        Ok(TakenHotkey { id })
+    }
+}
+
+/// T-009: Esc under `modifiers` is free right now (this thread can take it, then frees
+/// it again); `false` while the hotkey thread holds the claim.
+pub fn esc_is_free(modifiers: u32) -> bool {
+    TakenHotkey::take_esc(modifiers).is_ok()
 }
 
 impl Drop for TakenHotkey {

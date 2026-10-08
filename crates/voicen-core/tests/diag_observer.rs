@@ -306,6 +306,80 @@ fn too_short_recording_is_one_line_at_recording_ended() {
 }
 
 #[test]
+fn a_cancelled_recording_is_one_info_line_with_outcome_cancelled() {
+    // T-009 (FR-22, FR-20): an Esc-cancelled recording has no job, so
+    // RecordingEnded{Cancelled} closes its record at once: one INFO line with
+    // outcome=cancelled, the press timing and the duration, nothing else. Bite: no
+    // line (the record waits for a job that never comes, then is evicted), the
+    // outcome spelled as too_short or Debug-formatted ("Cancelled"), the line at
+    // WARN.
+    let f = fixture();
+    let [a] = ids(1)[..] else { unreachable!() };
+    f.feed(&[started(a, 35), ended(a, 2_000, RecordingEnd::Cancelled)]);
+    let lines = f.dictations();
+    assert_eq!(lines.len(), 1, "{lines:#?}");
+    assert_eq!(lines[0].level, "INFO");
+    assert_eq!(
+        lines[0].pairs,
+        pairs(&[
+            ("rec", s(a.get())),
+            ("outcome", "cancelled".to_string()),
+            ("press_to_frame_ms", s(35)),
+            ("duration_ms", s(2_000)),
+        ])
+    );
+    assert_eq!(f.lines().len(), 1, "nothing but the dictation line");
+}
+
+#[test]
+fn toggled_and_max_length_recordings_are_closed_by_their_job() {
+    // T-009: a toggle stop and a max-length stop queue a job like a release does, so
+    // RecordingEnded{Toggled | MaxLength} writes no line; the record closes at the
+    // delivery with the recording's duration. Bite: Toggled or MaxLength closing the
+    // record at RecordingEnded (two lines per dictation, or a line without the job's
+    // timings).
+    let f = fixture();
+    let [a, b] = ids(2)[..] else { unreachable!() };
+    f.feed(&[
+        started(a, 41),
+        ended(a, 10_000, RecordingEnd::Toggled),
+        started(b, 42),
+        ended(b, 600_000, RecordingEnd::MaxLength),
+    ]);
+    assert_eq!(f.dictations(), Vec::<Line>::new(), "a line before the job");
+    f.feed(&[
+        gate(a, "energy", true),
+        finished(1, a, Some("api"), 812, OutcomeCode::Text, None, None),
+        delivered(1, 95, DeliveryResult::Pasted),
+        gate(b, "energy", true),
+        finished(2, b, Some("api"), 900, OutcomeCode::Text, None, None),
+        delivered(2, 90, DeliveryResult::Pasted),
+    ]);
+    let lines = f.dictations();
+    assert_eq!(lines.len(), 2, "{lines:#?}");
+    for (line, (rec, frame, duration, text, paste)) in lines
+        .iter()
+        .zip([(a, 41, 10_000, 812, 95), (b, 42, 600_000, 900, 90)])
+    {
+        assert_eq!(line.level, "INFO");
+        assert_eq!(
+            line.pairs,
+            pairs(&[
+                ("rec", s(rec.get())),
+                ("engine", "api".to_string()),
+                ("outcome", "delivered".to_string()),
+                ("result", "pasted".to_string()),
+                ("detector", "energy".to_string()),
+                ("press_to_frame_ms", s(frame)),
+                ("duration_ms", s(duration)),
+                ("stop_to_text_ms", s(text)),
+                ("text_to_paste_ms", s(paste)),
+            ])
+        );
+    }
+}
+
+#[test]
 fn a_capture_failure_at_press_is_one_warn_line_with_the_mic_literal() {
     // T-051: a capture that cannot open at press emits only CaptureFailed (no
     // RecordingStarted / RecordingEnded, no job), so CaptureFailed itself closes

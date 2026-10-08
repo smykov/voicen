@@ -15,6 +15,12 @@
 //! 3 (one capture per hold, closed on release), 4 (release on any key), 5 (no WM_CHAR,
 //! no menu, the mask key sent), 6 (a taken hotkey is reported and logged with 1409),
 //! 7 (dropping the handle frees the hotkey).
+//!
+//! T-009 (FR-22, OQ-21 (1)): the hotkey thread claims Esc while a recording is on, bare
+//! and under the hotkey's modifiers, through `CancelKeyHandle` (the session's
+//! `CancelKey` port, attached to the thread like T-055's registrar handle); Esc
+//! discards the recording; idle, Esc reaches the focused window; a refused claim keeps
+//! the recording and warns `esc_unavailable`.
 #![cfg(windows)]
 
 mod win32_support;
@@ -25,24 +31,27 @@ use std::time::Instant;
 
 use voicen_core::diag::Log;
 use voicen_core::dictation::{DictationSession, SessionDeps};
-use voicen_core::events::RecordingObserver;
+use voicen_core::events::{DictationEvent, RecordingObserver, WarningCode};
 use voicen_core::pipeline::PipelineDeps;
 use voicen_core::platform::{
     FakeAudioSource, FakeClipboard, FakeIndicator, FakePaster, FakeShellRequests,
     FakeTempAudioStore,
 };
 use voicen_core::post_process::PassThrough;
-use voicen_core::recording::TrayState;
+use voicen_core::recording::{RecordingEnd, TrayState, MAX_LENGTH};
+use voicen_core::secrets::KeyEdits;
 use voicen_core::settings::hotkey::{Hotkey, HotkeyKey};
-use voicen_core::settings::EngineKind;
+use voicen_core::settings::service::{SaveOutcome, SaveRequest};
+use voicen_core::settings::{EngineKind, Mode};
 use voicen_core::test_support::TempDir;
 use voicen_core::vad::{EnergyDetector, SpeechDetector, SpeechGate};
 use voicen_core::win32_data::{hotkey_codes, modifier_wait_keys};
-use voicen_lib::win::hotkey::HotkeyThread;
+use voicen_lib::win::hotkey::{CancelKeyHandle, HotkeyThread};
 use win32_support::{
-    assert_hotkey_free, engine_factory, eventually, has_pair, headed, holds_for, is_down,
-    keyed_store, log_lines, precondition, serial, settings, Keys, Shape, TakenHotkey, TestWindow,
-    TextEngine, HOLD, HOTKEY_KEYS, SETTLE, VK_CONTROL, VK_MASK, VK_MENU, VK_SPACE, WAIT,
+    assert_hotkey_free, engine_factory, esc_is_free, eventually, has_pair, headed, holds_for,
+    is_down, keyed_store, log_lines, precondition, serial, settings, Keys, Shape, TakenHotkey,
+    TestWindow, TextEngine, HOLD, HOTKEY_KEYS, SETTLE, VK_CONTROL, VK_ESCAPE, VK_MASK, VK_MENU,
+    VK_SPACE, WAIT,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN, VIRTUAL_KEY, VK_0, VK_1, VK_2, VK_3,
@@ -70,10 +79,20 @@ struct Rig {
     session: Arc<DictationSession>,
     audio: Arc<FakeAudioSource>,
     indicator: Arc<FakeIndicator>,
+    /// T-009: the session's events (RecordingEnded, Warning, JobFinished).
+    observer: Arc<RecordingObserver>,
+    /// T-009: the Esc claim port, attached to the hotkey thread by `start_hotkey`.
+    cancel: Arc<CancelKeyHandle>,
+    engine: Arc<TextEngine>,
 }
 
 impl Rig {
     fn new() -> Rig {
+        Rig::with_mode(Mode::Hold)
+    }
+
+    /// T-009: the rig with `mode` saved before the session starts.
+    fn with_mode(mode: Mode) -> Rig {
         let dir = TempDir::new();
         let logs = dir.path().join("logs");
         let log = voicen_lib::diag::start(logs.clone(), Box::new(|_| {}));
@@ -84,6 +103,20 @@ impl Rig {
             "Ctrl+Alt+Space",
             "premise: the default hotkey"
         );
+        if mode != service.snapshot().mode {
+            let mut s = (*service.snapshot()).clone();
+            s.mode = mode;
+            let outcome = service.save(SaveRequest {
+                settings: s,
+                keys: KeyEdits::default(),
+            });
+            assert!(
+                matches!(outcome, SaveOutcome::Saved { .. }),
+                "premise: saving mode {mode:?} is refused: {outcome:?}"
+            );
+        }
+        let observer = Arc::new(RecordingObserver::new());
+        let cancel = CancelKeyHandle::new();
         let audio = Arc::new(FakeAudioSource::new());
         let indicator = Arc::new(FakeIndicator::new());
         let engine = TextEngine::new("hotkey test transcript");
@@ -97,7 +130,7 @@ impl Rig {
                 clipboard: Arc::new(FakeClipboard::new()),
                 paster: Arc::new(FakePaster::new()),
                 temp_audio: Arc::new(FakeTempAudioStore::new()),
-                observer: Arc::new(RecordingObserver::new()),
+                observer: observer.clone(),
                 post_processor: Arc::new(PassThrough),
             },
             engine_factory: Some(engine_factory(&engine)),
@@ -105,6 +138,7 @@ impl Rig {
             indicator: indicator.clone(),
             requests: Arc::new(FakeShellRequests::new()),
             settings: service,
+            cancel_key: cancel.clone(),
         })
         .expect("the session starts");
         Rig {
@@ -114,16 +148,42 @@ impl Rig {
             session: Arc::new(session),
             audio,
             indicator,
+            observer,
+            cancel,
+            engine,
         }
     }
 
     fn start_hotkey(&self) -> HotkeyThread {
-        HotkeyThread::start(
+        let thread = HotkeyThread::start(
             Arc::clone(&self.session),
             "Ctrl+Alt+Space",
             Arc::clone(&self.log),
         )
-        .expect("the hotkey thread starts")
+        .expect("the hotkey thread starts");
+        self.cancel.attach(&thread);
+        thread
+    }
+
+    /// T-009: every `RecordingEnded`'s end, in order.
+    fn ends(&self) -> Vec<RecordingEnd> {
+        self.observer
+            .events()
+            .iter()
+            .filter_map(|e| match e {
+                DictationEvent::RecordingEnded { end, .. } => Some(*end),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// T-009: jobs that ended (a cancelled recording must have none).
+    fn jobs(&self) -> usize {
+        self.observer
+            .events()
+            .iter()
+            .filter(|e| matches!(e, DictationEvent::JobFinished { .. }))
+            .count()
     }
 
     /// Presses Ctrl+Alt+Space and waits for the session's press (the capture start):
@@ -501,4 +561,228 @@ fn dropping_the_hotkey_thread_frees_the_hotkey() {
         "Ctrl+Alt+Space is still registered after the hotkey thread was dropped: {:?}",
         taken.err()
     );
+}
+
+// ---- T-009: Esc cancel (FR-22), claimed only while recording -------------------------
+
+/// The hotkey's modifiers as `MOD_*` bits (Ctrl+Alt for the default Ctrl+Alt+Space).
+const HOTKEY_MODS: u32 = MOD_CONTROL.0 | MOD_ALT.0;
+
+/// The thread holds Esc both bare and under the hotkey's modifiers (OQ-21 (1)).
+fn esc_claimed() -> bool {
+    !esc_is_free(0) && !esc_is_free(HOTKEY_MODS)
+}
+
+fn esc_released() -> bool {
+    esc_is_free(0) && esc_is_free(HOTKEY_MODS)
+}
+
+/// The window saw an Esc key-down (WM_KEYDOWN / WM_SYSKEYDOWN with VK_ESCAPE).
+fn esc_reached(window: &TestWindow) -> bool {
+    window
+        .messages()
+        .iter()
+        .any(|(m, w)| (*m == WM_KEYDOWN || *m == WM_SYSKEYDOWN) && *w == usize::from(VK_ESCAPE))
+}
+
+#[track_caller]
+fn assert_esc_free() {
+    precondition(
+        "hotkey (registration)",
+        esc_released(),
+        "Esc or Ctrl+Alt+Esc is already registered by someone",
+    );
+}
+
+#[test]
+fn esc_while_recording_in_hold_mode_discards_with_the_hotkey_held() {
+    // T-009 Acceptance "Esc cancel" (FR-22, OQ-21 (1)): while a hold is on the thread
+    // claims Esc bare and under Ctrl+Alt; Esc pressed with Ctrl+Alt+Space still held
+    // closes the capture, ends the recording Cancelled, runs no job, does not reach the
+    // focused window, and the claim is given back. Bite: only bare Esc claimed (Ctrl+
+    // Alt+Esc is another combination: nothing happens), the claim not released after
+    // the cancel, WM_HOTKEY for the Esc id routed to hotkey_pressed or ignored, the
+    // recording delivered at the hotkey's release.
+    let _serial = serial();
+    assert_hotkey_free();
+    assert_esc_free();
+    let window = TestWindow::open(Shape::TopLevel);
+    window.front();
+    let rig = Rig::new();
+    let _hotkey = rig.start_hotkey();
+
+    let (mut keys, _pressed_at) = rig.press_hotkey();
+    assert!(
+        eventually(WAIT, esc_claimed),
+        "Esc not claimed bare and under Ctrl+Alt while recording"
+    );
+    let mut esc = Keys::press(&[VK_ESCAPE]);
+    assert!(
+        eventually(WAIT, || rig.audio.open_handles() == 0),
+        "the capture is still open {WAIT:?} after Esc"
+    );
+    esc.release_all();
+    keys.release_all();
+    thread::sleep(SETTLE);
+
+    assert_eq!(rig.ends(), vec![RecordingEnd::Cancelled]);
+    assert_eq!(rig.jobs(), 0, "a job ran for the cancelled recording");
+    assert_eq!(rig.engine.calls(), 0, "the cancelled audio was sent");
+    assert_eq!(rig.audio.start_calls(), 1);
+    assert!(!esc_reached(&window), "the claimed Esc reached the window");
+    assert!(
+        eventually(WAIT, esc_released),
+        "Esc still claimed after the cancel"
+    );
+}
+
+#[test]
+fn esc_in_toggle_mode_discards_after_the_hotkey_is_released() {
+    // T-009 (FR-03 toggle, FR-22): in toggle mode the hotkey's release keeps the
+    // recording on, Esc stays claimed with no key held, and bare Esc discards it.
+    // Bite: the claim tied to the hotkey being down (dropped at its release), the
+    // toggle release ending the recording.
+    let _serial = serial();
+    assert_hotkey_free();
+    assert_esc_free();
+    let window = TestWindow::open(Shape::TopLevel);
+    window.front();
+    let rig = Rig::with_mode(Mode::Toggle);
+    let _hotkey = rig.start_hotkey();
+
+    let (mut keys, _pressed_at) = rig.press_hotkey();
+    keys.release_all();
+    assert!(
+        holds_for(SETTLE, || rig.audio.open_handles() == 1),
+        "the toggle recording ended at the hotkey's release"
+    );
+    assert!(eventually(WAIT, esc_claimed), "Esc not claimed");
+    let mut esc = Keys::press(&[VK_ESCAPE]);
+    esc.release_all();
+    assert!(
+        eventually(WAIT, || rig.audio.open_handles() == 0),
+        "the capture is still open {WAIT:?} after Esc"
+    );
+    thread::sleep(SETTLE);
+    assert_eq!(rig.ends(), vec![RecordingEnd::Cancelled]);
+    assert_eq!(rig.jobs(), 0);
+    assert!(!esc_reached(&window), "the claimed Esc reached the window");
+    assert!(eventually(WAIT, esc_released), "Esc still claimed");
+}
+
+#[test]
+fn esc_while_idle_reaches_the_focused_window() {
+    // FR-22 "elsewhere Esc reaches the focused app": with the hotkey thread running and
+    // no recording, Esc is not registered and the foreground window gets its key-down;
+    // nothing is recorded. Bite: Esc claimed at thread start (or kept after a
+    // recording), the window starved of Esc.
+    let _serial = serial();
+    assert_hotkey_free();
+    assert_esc_free();
+    let window = TestWindow::open(Shape::TopLevel);
+    window.front();
+    let rig = Rig::new();
+    let _hotkey = rig.start_hotkey();
+    assert!(
+        holds_for(SETTLE, esc_released),
+        "Esc claimed with no recording on"
+    );
+    let mut esc = Keys::press(&[VK_ESCAPE]);
+    esc.release_all();
+    assert!(
+        eventually(WAIT, || esc_reached(&window)),
+        "the window never saw Esc: {:x?}",
+        window.messages()
+    );
+    assert_eq!(rig.audio.start_calls(), 0);
+    assert!(
+        rig.observer.events().is_empty(),
+        "{:?}",
+        rig.observer.events()
+    );
+}
+
+#[test]
+fn esc_is_released_after_a_max_length_stop() {
+    // T-009 Acceptance failure branch through the shell: a hold reaches its 10 min (the
+    // session's timer input driven by the test at the observed press + MAX_LENGTH); the
+    // capture closes, the recording ends MaxLength and is processed, and Esc is given
+    // back to the apps while the hotkey is still held. Bite: the claim released only on
+    // the hotkey's release path (kept until the keys go up), no 10-min stop.
+    let _serial = serial();
+    assert_hotkey_free();
+    assert_esc_free();
+    let window = TestWindow::open(Shape::TopLevel);
+    window.front();
+    let rig = Rig::new();
+    let _hotkey = rig.start_hotkey();
+
+    let (mut keys, pressed_at) = rig.press_hotkey();
+    assert!(eventually(WAIT, esc_claimed), "Esc not claimed");
+    rig.session.tick(pressed_at + MAX_LENGTH);
+    assert!(
+        eventually(WAIT, || rig.audio.open_handles() == 0),
+        "the capture is still open after the max-length stop"
+    );
+    assert!(
+        eventually(WAIT, esc_released),
+        "Esc still claimed after the max-length stop (hotkey still held)"
+    );
+    keys.release_all();
+    assert!(
+        eventually(WAIT, || rig.jobs() == 1),
+        "the max-length recording was not processed"
+    );
+    assert_eq!(rig.ends(), vec![RecordingEnd::MaxLength]);
+}
+
+#[test]
+fn a_refused_esc_claim_keeps_recording_and_warns_esc_unavailable() {
+    // T-009 Acceptance "Esc unavailable" (FR-22): with bare Esc already registered by
+    // another owner, the thread's claim fails; the session gets the result, emits one
+    // Warning{EscUnavailable}, and the recording goes on to its normal end at the
+    // release. Bite: the claim result never reported (no warning), the recording
+    // stopped or discarded on the refusal, the thread failing on the refused claim (no
+    // release handling afterwards).
+    let _serial = serial();
+    assert_hotkey_free();
+    assert_esc_free();
+    let _taken = TakenHotkey::take_esc(0).expect("premise: the test takes bare Esc");
+    let window = TestWindow::open(Shape::TopLevel);
+    window.front();
+    let rig = Rig::new();
+    let _hotkey = rig.start_hotkey();
+
+    let (mut keys, pressed_at) = rig.press_hotkey();
+    let warned = || {
+        rig.observer
+            .events()
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    DictationEvent::Warning {
+                        code: WarningCode::EscUnavailable
+                    }
+                )
+            })
+            .count()
+    };
+    assert!(
+        eventually(WAIT, || warned() >= 1),
+        "no Warning{{EscUnavailable}}: {:?}",
+        rig.observer.events()
+    );
+    assert!(
+        holds_for(SETTLE, || rig.audio.open_handles() == 1),
+        "the refused claim ended the recording"
+    );
+    wait_out(pressed_at);
+    keys.release_all();
+    assert!(
+        eventually(WAIT, || rig.jobs() == 1),
+        "the recording was not processed after the refused claim"
+    );
+    assert_eq!(rig.ends(), vec![RecordingEnd::Released]);
+    assert_eq!(warned(), 1, "{:?}", rig.observer.events());
 }

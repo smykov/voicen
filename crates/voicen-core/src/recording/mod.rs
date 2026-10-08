@@ -1559,4 +1559,383 @@ mod tests {
             .is_some());
         assert_eq!(c.live_id(), None, "after capture_failed");
     }
+
+    // ---- T-009: toggle mode, the 10-minute maximum, Esc cancel ---------------------
+    //
+    // Pinned API (docs/tasks/T-009.md ## Tests): `press_with_mode(at, mode, ctx) ->
+    // PressOutcome<C>` (`Start(id)` | `Stop(StopTicket)` | `Ignored`; the mode of the
+    // press that started the recording governs it), `release` ignored for a toggle
+    // recording, `MAX_LENGTH`, `tick(at) -> Option<StopTicket<C>>`, `next_deadline =
+    // min(message, started_at + MAX_LENGTH)`, `cancel(at) -> Option<RecordingId>`,
+    // `StopTicket::{end, held}`, `RecordingEnd::{Toggled, MaxLength, Cancelled}`,
+    // `i18n::NOTICE_MAX_LENGTH`. Every instant is supplied by the test.
+
+    use crate::settings::Mode;
+
+    /// 10 minutes, spelled here from decision #1 (OQ-04), not taken from the code.
+    const TEN_MIN: Duration = Duration::from_secs(600);
+
+    fn start_in(
+        c: &mut RecordingController<Ctx>,
+        at: Instant,
+        mode: Mode,
+        ctx: Ctx,
+    ) -> RecordingId {
+        match c.press_with_mode(at, mode, ctx) {
+            PressOutcome::Start(id) => id,
+            other => panic!("press from idle ({mode:?}): expected Start, got {other:?}"),
+        }
+    }
+
+    fn finish_ok(
+        c: &mut RecordingController<Ctx>,
+        ticket: StopTicket<Ctx>,
+        at: Instant,
+    ) -> FinishedRecording<Ctx> {
+        match c.finish(ticket, Ok(audio()), at) {
+            Ok(f) => f,
+            Err(e) => panic!("finish failed: {e:?}"),
+        }
+    }
+
+    fn recording() -> IndicatorState {
+        IndicatorState {
+            tray: TrayState::Recording,
+            overlay: OverlayState::Recording,
+        }
+    }
+
+    #[test]
+    fn toggle_press_press_gives_one_finished_recording_toggled() {
+        // FR-03, data-model "Recording --press (toggle)--> Idle -> job (Toggled)": in
+        // toggle mode the second press ends the recording with a StopTicket (end
+        // Toggled, held = the time between the presses); the FinishedRecording
+        // carries the first press's ctx and instant and the second press's instant.
+        // The controller is idle at once: the release that follows is Ignored and a
+        // third press starts a new recording. Bite: a press while live Ignored in
+        // toggle mode too (no ticket), end Released, the second press's ctx kept, the
+        // recording left live after the stop, stopped_at taken from finish.
+        let t0 = Instant::now();
+        let mut c = RecordingController::<Ctx>::new();
+        let id = start_in(&mut c, t0, Mode::Toggle, "start-window");
+        assert_eq!(c.indicator(), &recording(), "after the first press");
+        let ticket = match c.press_with_mode(t0 + ms(10_000), Mode::Toggle, "second") {
+            PressOutcome::Stop(t) => t,
+            other => panic!("second toggle press: expected Stop, got {other:?}"),
+        };
+        assert_eq!(ticket.id(), id);
+        assert_eq!(ticket.end(), RecordingEnd::Toggled);
+        assert_eq!(ticket.held(), ms(10_000));
+        assert_eq!(c.live_id(), None, "idle once the stopping press returned");
+        assert_eq!(c.indicator().tray, TrayState::Idle);
+        assert!(
+            matches!(c.release(t0 + ms(10_080)), Release::Ignored),
+            "the release of the stopping press must do nothing"
+        );
+        let f = finish_ok(&mut c, ticket, t0 + ms(10_100));
+        assert_eq!(f.id(), id);
+        assert_eq!(f.end(), RecordingEnd::Toggled);
+        assert_eq!(*f.ctx(), "start-window");
+        assert_eq!(f.started_at(), t0);
+        assert_eq!(f.stopped_at(), t0 + ms(10_000));
+        assert_eq!(f.audio(), &audio());
+        assert_eq!(c.indicator().overlay, OverlayState::Processing);
+
+        let next = start_in(&mut c, t0 + ms(12_000), Mode::Toggle, "next");
+        assert_ne!(next, id, "a third press starts a new recording");
+    }
+
+    #[test]
+    fn toggle_release_is_ignored_and_has_no_min_hold() {
+        // data-model "min hold: hold mode only": a toggle recording ignores every
+        // release (the recording stays on, overlay Recording), and a press 120 ms after
+        // the start still gives a ticket (Toggled, held 120 ms; no TooShort discard).
+        // Bite: release handled as in hold mode (Stop or Discarded), MIN_HOLD applied
+        // to a toggle stop.
+        let t0 = Instant::now();
+        let mut c = RecordingController::<Ctx>::new();
+        let id = start_in(&mut c, t0, Mode::Toggle, "w");
+        for at in [t0, t0 + ms(50), t0 + ms(100)] {
+            assert!(
+                matches!(c.release(at), Release::Ignored),
+                "a release during a toggle recording must be Ignored"
+            );
+            assert_eq!(c.live_id(), Some(id), "still recording after a release");
+            assert_eq!(c.indicator(), &recording());
+        }
+        let ticket = match c.press_with_mode(t0 + ms(120), Mode::Toggle, "second") {
+            PressOutcome::Stop(t) => t,
+            other => panic!("expected Stop for a 120 ms toggle recording, got {other:?}"),
+        };
+        assert_eq!(ticket.end(), RecordingEnd::Toggled);
+        assert_eq!(ticket.held(), ms(120));
+        let f = finish_ok(&mut c, ticket, t0 + ms(130));
+        assert_eq!(f.end(), RecordingEnd::Toggled);
+        assert_eq!(f.stopped_at(), t0 + ms(120));
+    }
+
+    #[test]
+    fn mode_of_the_starting_press_governs_the_recording() {
+        // P-013: the mode is taken at the press that starts a recording; a later
+        // press's mode does not change it. A hold recording ignores a press made
+        // "in toggle mode" (auto-repeat) and ends at its release (Released, MIN_HOLD
+        // still applies: 299 ms is discarded); a toggle recording is stopped by a press
+        // made "in hold mode". Bite: the mode read from the latest press (the hold
+        // recording stopped by the press, the toggle one ignoring it), no MIN_HOLD for
+        // press_with_mode(Hold).
+        let t0 = Instant::now();
+        let mut c = RecordingController::<Ctx>::new();
+
+        let a = start_in(&mut c, t0, Mode::Hold, "hold");
+        assert!(
+            matches!(
+                c.press_with_mode(t0 + ms(30), Mode::Toggle, "repeat"),
+                PressOutcome::Ignored
+            ),
+            "a press during a hold recording is auto-repeat, whatever its mode"
+        );
+        assert_eq!(c.live_id(), Some(a));
+        let ticket = stop(&mut c, t0 + ms(1000));
+        assert_eq!(ticket.end(), RecordingEnd::Released);
+        assert_eq!(ticket.held(), ms(1000));
+        let _ = finish_ok(&mut c, ticket, t0 + ms(1010));
+
+        let b = start_in(&mut c, t0 + ms(2000), Mode::Hold, "short");
+        match c.release(t0 + ms(2299)) {
+            Release::Discarded { id, held } => {
+                assert_eq!(id, b);
+                assert_eq!(held, ms(299));
+            }
+            other => panic!("a 299 ms hold must be Discarded, got {other:?}"),
+        }
+
+        let d = start_in(&mut c, t0 + ms(3000), Mode::Toggle, "toggle");
+        assert!(matches!(c.release(t0 + ms(3050)), Release::Ignored));
+        match c.press_with_mode(t0 + ms(5000), Mode::Hold, "after a save to hold") {
+            PressOutcome::Stop(t) => {
+                assert_eq!(t.id(), d);
+                assert_eq!(t.end(), RecordingEnd::Toggled);
+            }
+            other => panic!("the toggle recording must stop at the press, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn max_length_stops_at_exactly_10_min_in_both_modes_with_notice_max_length() {
+        // T-009 Acceptance failure branch (FR-03, decision #1, data-model "Recording
+        // --10 min--> Idle -> job (MaxLength) + notice"): in both modes the timer
+        // deadline is started_at + 10 min; a tick 1 ms before changes nothing; the tick
+        // at exactly 10 min ends the recording with a ticket (end MaxLength, held 10
+        // min), shows notice.max_length for 3 s with the tray unchanged (no Error); the
+        // job is queued by finish (the message wins over Processing until it expires);
+        // the user's later release does nothing. Bite: no max-length deadline, `>`
+        // instead of `>=`, the stop 1 ms early, only one mode limited, end Released,
+        // the notice missing or shown as a failure (tray Error), no ticket (nothing
+        // processed), the recording left live after the stop.
+        assert_eq!(
+            MAX_LENGTH, TEN_MIN,
+            "MAX_LENGTH is decision #1's 10 minutes"
+        );
+        assert_eq!(
+            serde_json::to_value(i18n::NOTICE_MAX_LENGTH).expect("a MessageId serializes"),
+            serde_json::Value::String("notice.max_length".to_string()),
+            "the catalog id of contracts/messages.md"
+        );
+        for mode in [Mode::Hold, Mode::Toggle] {
+            let t0 = Instant::now();
+            let mut c = RecordingController::<Ctx>::new();
+            let id = start_in(&mut c, t0, mode, "w");
+            if mode == Mode::Toggle {
+                assert!(matches!(c.release(t0 + ms(80)), Release::Ignored));
+            }
+            assert_eq!(c.next_deadline(), Some(t0 + TEN_MIN), "{mode:?}: deadline");
+
+            assert!(
+                c.tick(t0 + TEN_MIN - ms(1)).is_none(),
+                "{mode:?}: a tick 1 ms before 10 min must not stop"
+            );
+            assert_eq!(
+                c.live_id(),
+                Some(id),
+                "{mode:?}: still recording at 9:59.999"
+            );
+            assert_eq!(c.indicator(), &recording(), "{mode:?}");
+
+            let at = t0 + TEN_MIN;
+            let Some(ticket) = c.tick(at) else {
+                panic!("{mode:?}: the tick at exactly 10 min gave no StopTicket");
+            };
+            assert_eq!(ticket.id(), id, "{mode:?}");
+            assert_eq!(ticket.end(), RecordingEnd::MaxLength, "{mode:?}");
+            assert_eq!(ticket.held(), TEN_MIN, "{mode:?}");
+            assert_eq!(
+                c.live_id(),
+                None,
+                "{mode:?}: idle after the max-length stop"
+            );
+            assert_eq!(
+                c.indicator(),
+                &IndicatorState {
+                    tray: TrayState::Idle,
+                    overlay: message(i18n::NOTICE_MAX_LENGTH, vec![], at),
+                },
+                "{mode:?}: notice.max_length for 3 s, tray not Error"
+            );
+            assert_eq!(
+                c.next_deadline(),
+                Some(at + Duration::from_secs(3)),
+                "{mode:?}"
+            );
+
+            assert!(
+                matches!(c.release(at + ms(500)), Release::Ignored),
+                "{mode:?}: the release after a max-length stop must do nothing"
+            );
+            let f = finish_ok(&mut c, ticket, at + ms(600));
+            assert_eq!(f.end(), RecordingEnd::MaxLength, "{mode:?}");
+            assert_eq!(f.started_at(), t0, "{mode:?}");
+            assert_eq!(f.stopped_at(), at, "{mode:?}");
+            assert_eq!(
+                c.indicator().overlay,
+                message(i18n::NOTICE_MAX_LENGTH, vec![], at),
+                "{mode:?}: the notice wins over Processing"
+            );
+            assert!(
+                c.tick(at + Duration::from_secs(3)).is_none(),
+                "{mode:?}: no second stop"
+            );
+            assert_eq!(
+                c.indicator(),
+                &IndicatorState {
+                    tray: TrayState::Idle,
+                    overlay: OverlayState::Processing,
+                },
+                "{mode:?}: the queued job shows once the notice expired"
+            );
+            assert_eq!(c.next_deadline(), None, "{mode:?}: no timer left");
+        }
+    }
+
+    #[test]
+    fn next_deadline_is_the_earlier_of_the_message_and_the_max_length() {
+        // The timer must wake for whichever comes first. A failure of the previous job
+        // raised 10 ms into the next recording expires at +3.01 s, before that
+        // recording's 10 min: next_deadline is the message's expiry, its tick stops
+        // nothing, and then next_deadline is the max length. Bite: next_deadline only
+        // the message (the 10-min stop never scheduled while a message is pending) or
+        // only the max length (the message expiry delayed by up to 10 min), a message
+        // tick stopping the recording.
+        let t0 = Instant::now();
+        let mut c = RecordingController::<Ctx>::new();
+        let a = record(&mut c, t0, ms(1000)).id();
+        let t1 = t0 + ms(2000);
+        let b = start_in(&mut c, t1, Mode::Hold, "b");
+        c.job_finished(a, JobEnd::Failed(FailureReason::Timeout), t1 + ms(10));
+        assert_eq!(c.next_deadline(), Some(t1 + ms(3010)), "the message first");
+        assert!(
+            c.tick(t1 + ms(3010)).is_none(),
+            "the message tick stops nothing"
+        );
+        assert_eq!(c.live_id(), Some(b));
+        assert_eq!(c.next_deadline(), Some(t1 + TEN_MIN), "then the max length");
+    }
+
+    #[test]
+    fn esc_cancels_live_recording_and_its_later_release_is_ignored() {
+        // FR-22, data-model "Recording --Esc--> Idle (Cancelled; nothing sent; a later
+        // hold release does nothing)", in both modes: cancel returns the live id, the
+        // controller is idle with no ticket, no job (overlay Hidden, not Processing), no
+        // message and no timer (the max-length deadline is gone); the later release and
+        // a tick at 10 min do nothing; a second cancel returns None; the next press
+        // starts a new recording. Bite: cancel leaving the recording live (the release
+        // then stops it), a job queued for it, a message shown, the 10-min deadline
+        // kept (a later stop of a cancelled recording).
+        for mode in [Mode::Hold, Mode::Toggle] {
+            let t0 = Instant::now();
+            let mut c = RecordingController::<Ctx>::new();
+            let id = start_in(&mut c, t0, mode, "w");
+            assert_eq!(c.cancel(t0 + ms(2000)), Some(id), "{mode:?}");
+            assert_eq!(c.live_id(), None, "{mode:?}: idle after Esc");
+            assert_eq!(
+                c.indicator(),
+                &idle(),
+                "{mode:?}: indicator off, no message"
+            );
+            assert_eq!(c.next_deadline(), None, "{mode:?}: no timer after Esc");
+            assert!(
+                matches!(c.release(t0 + ms(2500)), Release::Ignored),
+                "{mode:?}: the release after Esc must do nothing"
+            );
+            assert!(
+                c.tick(t0 + TEN_MIN).is_none(),
+                "{mode:?}: no max-length stop"
+            );
+            assert_eq!(c.cancel(t0 + ms(3000)), None, "{mode:?}: second Esc");
+            assert_eq!(c.indicator(), &idle(), "{mode:?}");
+            let next = start_in(&mut c, t0 + ms(4000), mode, "next");
+            assert_ne!(next, id, "{mode:?}: a new recording after Esc");
+        }
+    }
+
+    #[test]
+    fn esc_cancels_only_the_live_recording_not_a_queued_job() {
+        // Esc discards the recording that is on; a job already queued for the previous
+        // recording goes on (overlay back to Processing, the job still finishes). Bite:
+        // cancel clearing the queue (overlay Hidden, the job_finished ignored).
+        let t0 = Instant::now();
+        let mut c = RecordingController::<Ctx>::new();
+        let a = record(&mut c, t0, ms(1000)).id();
+        let b = start_in(&mut c, t0 + ms(1500), Mode::Hold, "b");
+        assert_eq!(c.cancel(t0 + ms(2500)), Some(b));
+        assert_eq!(
+            c.indicator(),
+            &IndicatorState {
+                tray: TrayState::Idle,
+                overlay: OverlayState::Processing,
+            }
+        );
+        c.job_finished(a, JobEnd::Delivered { notice: None }, t0 + ms(3000));
+        assert_eq!(c.indicator(), &idle());
+    }
+
+    #[test]
+    fn esc_while_idle_is_ignored() {
+        // Esc with no recording on (idle, a message showing, a stop in flight) returns
+        // None and changes nothing: the message stays, the ticket still finishes into a
+        // job. Bite: cancel dropping the message, cancel marking the stopped recording
+        // so its finish queues nothing.
+        let t0 = Instant::now();
+        let mut c = RecordingController::<Ctx>::new();
+        assert_eq!(c.cancel(t0), None);
+        assert_eq!(c.indicator(), &idle());
+
+        c.notice(NOTICE, t0 + ms(100));
+        assert_eq!(c.cancel(t0 + ms(200)), None);
+        assert_eq!(c.indicator().overlay, message(NOTICE, vec![], t0 + ms(100)));
+
+        let t1 = t0 + ms(5000);
+        start(&mut c, t1, "w");
+        let ticket = stop(&mut c, t1 + ms(1000));
+        assert_eq!(c.cancel(t1 + ms(1001)), None, "Esc during a stop in flight");
+        let f = finish_ok(&mut c, ticket, t1 + ms(1010));
+        assert_eq!(f.end(), RecordingEnd::Released);
+        assert_eq!(c.indicator().overlay, OverlayState::Processing);
+    }
+
+    #[test]
+    fn after_a_max_length_stop_the_next_toggle_press_starts_a_new_recording() {
+        // OQ-21 (2), proceeding on the spec: after a max-length stop the controller is
+        // idle, so the user's toggle press meant as "stop" at 10:05 starts a fresh
+        // recording (the notice is the only cue). Bite: a press swallowed after a
+        // max-length stop (an ignore window the owner did not choose).
+        let t0 = Instant::now();
+        let mut c = RecordingController::<Ctx>::new();
+        let a = start_in(&mut c, t0, Mode::Toggle, "a");
+        let ticket = c.tick(t0 + TEN_MIN).expect("the 10-min stop");
+        let _ = finish_ok(&mut c, ticket, t0 + TEN_MIN + ms(10));
+        match c.press_with_mode(t0 + TEN_MIN + ms(5000), Mode::Toggle, "b") {
+            PressOutcome::Start(b) => assert_ne!(a, b),
+            other => panic!("expected a new recording, got {other:?}"),
+        }
+    }
 }

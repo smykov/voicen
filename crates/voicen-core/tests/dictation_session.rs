@@ -36,7 +36,7 @@ use voicen_core::diag::{LogConfig, LogObserver};
 use voicen_core::dictation::{DictationSession, SessionDeps};
 use voicen_core::engine::{Engine, TranscribeRequest};
 use voicen_core::events::{
-    DeviceKind, DictationEvent, OutcomeCode, PipelineObserver, RecordingObserver,
+    DeviceKind, DictationEvent, OutcomeCode, PipelineObserver, RecordingObserver, WarningCode,
 };
 use voicen_core::failure::FailureReason;
 use voicen_core::hotkey_registrar::FakeHotkeyRegistrar;
@@ -44,14 +44,14 @@ use voicen_core::i18n;
 use voicen_core::models::FakeDownloadedModels;
 use voicen_core::pipeline::{EngineFactory, PipelineDeps};
 use voicen_core::platform::{
-    AudioSource, Clipboard, ClipboardError, FakeAudioSource, FakeClipboard, FakeIndicator,
-    FakePaster, FakeShellRequests, FakeTempAudioStore, FrameChunk, FrameSink, Indicator,
-    IndicatorCall, PasteError, Paster, PasterCall, PendingId, ShellRequestCall, ShellRequests,
-    StartWindow, TempAudioStore, WindowRef,
+    AudioSource, Clipboard, ClipboardError, FakeAudioSource, FakeCancelKey, FakeClipboard,
+    FakeIndicator, FakePaster, FakeShellRequests, FakeTempAudioStore, FrameChunk, FrameSink,
+    Indicator, IndicatorCall, PasteError, Paster, PasterCall, PendingId, ShellRequestCall,
+    ShellRequests, StartWindow, TempAudioStore, WindowRef,
 };
 use voicen_core::post_process::PassThrough;
 use voicen_core::recording::{
-    CaptureError, MicCause, OverlayState, RecordingEnd, TrayState, MESSAGE_DURATION,
+    CaptureError, MicCause, OverlayState, RecordingEnd, TrayState, MAX_LENGTH, MESSAGE_DURATION,
 };
 use voicen_core::secrets::{CredentialStore, FakeCredentialStore, KeyEdits, KeySlot};
 use voicen_core::settings::file::FakeSettingsFile;
@@ -596,6 +596,8 @@ struct Rig {
     observer: Arc<RecordingObserver>,
     settings: Arc<SettingsService>,
     engine: Arc<EngineLog>,
+    /// The Esc claim port (T-009): every `set(claimed)` the session made.
+    cancel: Arc<FakeCancelKey>,
 }
 
 impl Rig {
@@ -643,6 +645,7 @@ impl Rig {
         let store = Arc::new(FakeTempAudioStore::new());
         let observer = Arc::new(RecordingObserver::new());
         let engine = Arc::new(EngineLog::default());
+        let cancel = Arc::new(FakeCancelKey::new());
         let (clipboard_port, paster_port): (Arc<dyn Clipboard>, Arc<dyn Paster>) =
             match &custom.output {
                 Some(o) => (o.clone(), o.clone()),
@@ -679,6 +682,7 @@ impl Rig {
             indicator: indicator_port,
             requests: requests_port,
             settings: settings.clone(),
+            cancel_key: cancel.clone(),
         })
         .expect("the session starts");
         Rig {
@@ -692,6 +696,7 @@ impl Rig {
             observer,
             settings,
             engine,
+            cancel,
         }
     }
 
@@ -1943,21 +1948,491 @@ fn input_threads_never_wait_for_the_pending_slot() {
     );
 }
 
-#[test]
-fn toggle_mode_behaves_as_hold() {
-    // Row 15 (decision #63, until T-009): with mode = Toggle, press and release
-    // after 1 s give one delivery. Bite: the release ignored in toggle mode (no
-    // job until a second press).
+// ---- T-009: toggle mode, the 10-minute maximum, Esc cancel ----------------------------
+//
+// Pinned API (docs/tasks/T-009.md ## Tests): `DictationSession::{esc_pressed(at),
+// cancel_key_result(claimed, at), tick(at)}`, `SessionDeps::cancel_key:
+// Arc<dyn CancelKey>` (`platform::CancelKey::set(claimed)`, fake `FakeCancelKey` with
+// `calls() -> Vec<bool>`), `recording::MAX_LENGTH`, `RecordingEnd::{Toggled,
+// MaxLength, Cancelled}`, `i18n::NOTICE_MAX_LENGTH`. Replaces row 15
+// (`toggle_mode_behaves_as_hold`, decision #63, superseded by T-009).
+
+fn toggle_settings() -> Settings {
     let mut s = api_settings();
     s.mode = Mode::Toggle;
-    let rig = Rig::new(s, always(TEXT));
-    rig.hold(&fixtures::speech_3s(), past(), ms(1000));
+    s
+}
+
+fn warnings(events: &[DictationEvent]) -> Vec<WarningCode> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            DictationEvent::Warning { code } => Some(*code),
+            _ => None,
+        })
+        .collect()
+}
+
+/// `Instant::now() - d`, or `None` when the monotonic clock is not that old (a
+/// Windows `Instant` cannot precede boot; a fresh CI VM may be up for less than
+/// 10 minutes). The Linux gate's clock is the host's uptime.
+fn ago(d: Duration) -> Option<Instant> {
+    Instant::now().checked_sub(d)
+}
+
+#[test]
+fn toggle_press_press_delivers_once() {
+    // T-009 Acceptance "toggle press-press" (FR-03; replaces row 15): with mode =
+    // Toggle the release after the first press does nothing (capture still open,
+    // overlay Recording); the second press 10 s later stops the recording without
+    // running the gate (engine none saved in between: no notice, no settings
+    // request), and the one job pastes once into the start window; RecordingEnded is
+    // (10000, Toggled); the release of the stopping press does nothing; Esc was
+    // claimed for the recording only. Bite: the release stopping a toggle recording
+    // (decision #63 kept: (80, ...) or a TooShort discard), the second press ignored
+    // as auto-repeat (no job), the gate run before the stop (notice/request), the
+    // start window captured again, end Released, no Esc claim.
+    let rig = Rig::new(toggle_settings(), always(TEXT));
+    let t0 = past();
+    rig.frames(&fixtures::speech_3s(), t0 + FIRST_FRAME);
+    rig.session.hotkey_pressed(t0);
+    rig.session.hotkey_released(t0 + ms(80));
+    assert_eq!(
+        rig.audio.open_handles(),
+        1,
+        "the release stopped the capture"
+    );
+    assert_eq!(recording_ends(&rig.events()), vec![]);
+    assert_eq!(rig.indicator.overlays(), vec![OverlayState::Recording]);
+
+    rig.save(|s| s.engine = EngineKind::None);
+    rig.session.hotkey_pressed(t0 + ms(10_000));
+    assert_eq!(
+        rig.audio.open_handles(),
+        0,
+        "the second press closes the mic"
+    );
     rig.wait_jobs(1);
+    let before = rig.events().len();
+    rig.session.hotkey_released(t0 + ms(10_080));
+
     assert_eq!(rig.clipboard.texts(), vec![TEXT.to_string()]);
     assert_eq!(rig.paster.calls(), pasted_into(W1));
     assert_eq!(
+        rig.requests.calls(),
+        vec![],
+        "the stopping press ran the gate"
+    );
+    assert_eq!(
         recording_ends(&rig.events()),
-        vec![(1000, RecordingEnd::Released)]
+        vec![(10_000, RecordingEnd::Toggled)]
+    );
+    assert_eq!(job_count(&rig.events()), 1);
+    assert_eq!(
+        rig.events().len(),
+        before,
+        "the last release emitted an event"
+    );
+    assert_eq!(rig.audio.start_calls(), 1);
+    assert_eq!(
+        rig.indicator.overlays(),
+        vec![
+            OverlayState::Recording,
+            OverlayState::Processing,
+            OverlayState::Hidden
+        ]
+    );
+    assert_eq!(
+        rig.indicator.trays(),
+        vec![(TrayState::Recording, false), (TrayState::Idle, false)]
+    );
+    assert_eq!(rig.cancel.calls(), vec![true, false]);
+}
+
+#[test]
+fn the_mode_of_the_starting_press_governs_the_session_recording() {
+    // P-013: the mode is read at the press that starts a recording. A hold
+    // recording, with Toggle saved during it, still ends at its release (Released);
+    // a toggle recording, with Hold saved during it, ignores its release and ends at
+    // the next press (Toggled). Bite: the mode re-read at release or at the second
+    // press (the first recording never ends, the second ends at its release).
+    let rig = Rig::new(api_settings(), always(TEXT));
+    let t0 = past();
+    rig.frames(&fixtures::speech_3s(), t0 + FIRST_FRAME);
+    rig.session.hotkey_pressed(t0);
+    rig.save(|s| s.mode = Mode::Toggle);
+    rig.session.hotkey_released(t0 + ms(3000));
+    rig.wait_jobs(1);
+
+    let t1 = t0 + ms(5000);
+    rig.frames(&fixtures::speech_3s(), t1 + FIRST_FRAME);
+    rig.session.hotkey_pressed(t1);
+    rig.save(|s| s.mode = Mode::Hold);
+    rig.session.hotkey_released(t1 + ms(80));
+    assert_eq!(
+        rig.audio.open_handles(),
+        1,
+        "the toggle recording ended at release"
+    );
+    rig.session.hotkey_pressed(t1 + ms(3000));
+    rig.wait_jobs(2);
+    assert_eq!(
+        recording_ends(&rig.events()),
+        vec![
+            (3000, RecordingEnd::Released),
+            (3000, RecordingEnd::Toggled)
+        ]
+    );
+    assert_eq!(rig.audio.start_calls(), 2);
+    assert_eq!(rig.audio.open_handles(), 0);
+}
+
+#[test]
+fn max_length_stop_queues_the_job_and_closes_the_mic() {
+    // T-009 Acceptance failure branch (FR-03, decision #1): in both modes a recording
+    // that reaches 10 min is stopped by the session's timer input: a tick 1 ms before
+    // changes nothing; the tick at exactly 10 min closes the mic, emits
+    // RecordingEnded (600000, MaxLength), queues the job (the text is pasted once) and
+    // shows notice.max_length for 3 s from the stop (no tray error); Esc is released;
+    // the user's later release does nothing. In toggle mode the press meant as "stop"
+    // after it starts a new recording (OQ-21 (2)). Bite: no 10-min stop, the stop at
+    // `>` 10 min, the audio dropped (no job), the mic left open, the notice missing,
+    // the Esc claim kept, the release after the stop starting/ending something.
+    for settings in [api_settings(), toggle_settings()] {
+        let mode = settings.mode;
+        let rig = Rig::new(settings, always(TEXT));
+        let t0 = past();
+        rig.frames(&fixtures::speech_3s(), t0 + FIRST_FRAME);
+        rig.session.hotkey_pressed(t0);
+        if mode == Mode::Toggle {
+            rig.session.hotkey_released(t0 + ms(80));
+        }
+        rig.session.tick(t0 + MAX_LENGTH - ms(1));
+        assert_eq!(rig.audio.open_handles(), 1, "{mode:?}: stopped 1 ms early");
+        assert_eq!(recording_ends(&rig.events()), vec![], "{mode:?}");
+
+        let at = t0 + MAX_LENGTH;
+        rig.session.tick(at);
+        assert_eq!(rig.audio.open_handles(), 0, "{mode:?}: the mic stays open");
+        rig.wait_jobs(1);
+        assert_eq!(
+            recording_ends(&rig.events()),
+            vec![(600_000, RecordingEnd::MaxLength)],
+            "{mode:?}"
+        );
+        assert_eq!(rig.clipboard.texts(), vec![TEXT.to_string()], "{mode:?}");
+        assert_eq!(rig.paster.calls(), pasted_into(W1), "{mode:?}");
+        // The notice runs until `at + 3 s`, minutes after the worker's real job end,
+        // so it wins over Processing for the whole job.
+        assert_eq!(
+            rig.indicator.overlays(),
+            vec![
+                OverlayState::Recording,
+                OverlayState::Message {
+                    id: i18n::NOTICE_MAX_LENGTH,
+                    params: vec![],
+                    until: at + MESSAGE_DURATION,
+                },
+            ],
+            "{mode:?}"
+        );
+        assert_eq!(
+            rig.indicator.trays(),
+            vec![(TrayState::Recording, false), (TrayState::Idle, false)],
+            "{mode:?}"
+        );
+        assert_eq!(rig.cancel.calls(), vec![true, false], "{mode:?}");
+
+        let before = rig.events().len();
+        rig.session.hotkey_released(at + ms(500));
+        assert_eq!(
+            rig.events().len(),
+            before,
+            "{mode:?}: the release did something"
+        );
+        assert_eq!(rig.audio.start_calls(), 1, "{mode:?}");
+
+        if mode == Mode::Toggle {
+            let t1 = at + ms(5000);
+            rig.frames(&fixtures::speech_3s(), t1 + FIRST_FRAME);
+            rig.session.hotkey_pressed(t1);
+            assert_eq!(rig.audio.start_calls(), 2, "OQ-21 (2): a new recording");
+            assert_eq!(rig.audio.open_handles(), 1);
+            rig.session.hotkey_pressed(t1 + ms(3000));
+            rig.wait_jobs(2);
+            assert_eq!(
+                recording_ends(&rig.events()),
+                vec![
+                    (600_000, RecordingEnd::MaxLength),
+                    (3000, RecordingEnd::Toggled)
+                ]
+            );
+        }
+    }
+}
+
+#[test]
+fn the_session_timer_stops_a_recording_at_its_max_length() {
+    // The real timer thread (not the test) ends a recording at 10 min: the press is
+    // stamped 10 min - 500 ms ago, so its deadline is 500 ms from now; within the
+    // budget the recording ends MaxLength, measured at least 10 min, the mic closes
+    // and the job is delivered. Bite: run_timer not woken for the recording's
+    // deadline (it sleeps on the message deadline only), the timer ticking without
+    // the stop path (the recording stays on).
+    let Some(t0) = ago(MAX_LENGTH - ms(500)) else {
+        eprintln!("skipped: the monotonic clock is younger than 10 minutes on this host");
+        return;
+    };
+    let rig = Rig::new(api_settings(), always(TEXT));
+    rig.frames(&fixtures::speech_3s(), t0 + FIRST_FRAME);
+    rig.session.hotkey_pressed(t0);
+    assert!(
+        eventually(|| !recording_ends(&rig.events()).is_empty()),
+        "the timer never stopped the recording: {:?}",
+        rig.events()
+    );
+    let ends = recording_ends(&rig.events());
+    assert_eq!(ends.len(), 1);
+    let (duration, end) = ends[0];
+    assert_eq!(end, RecordingEnd::MaxLength);
+    assert!(
+        (600_000..600_000 + EXPIRY_BUDGET.as_millis() as u64).contains(&duration),
+        "stopped after {duration} ms"
+    );
+    rig.wait_jobs(1);
+    assert_eq!(rig.audio.open_handles(), 0);
+    assert_eq!(rig.clipboard.texts(), vec![TEXT.to_string()]);
+}
+
+#[test]
+fn esc_discards_nothing_sent_indicator_off_mic_closed() {
+    // T-009 Acceptance "Esc cancel" (FR-22), in both modes: Esc during a recording
+    // closes the mic, turns the indicator off (overlay Hidden, tray Idle; no message,
+    // no Processing), emits RecordingEnded (2000, Cancelled), releases the Esc claim
+    // and sends nothing (no engine call, no clipboard, no paste); the
+    // hold's later release does nothing. The next recording is the only job. Bite:
+    // Esc ignored (the release delivers it), the audio queued as a job, the capture
+    // left open, a message shown, the claim kept, the release after Esc starting a
+    // stop.
+    for settings in [api_settings(), toggle_settings()] {
+        let mode = settings.mode;
+        let rig = Rig::new(settings, always(TEXT));
+        let t0 = past();
+        rig.frames(&fixtures::speech_3s(), t0 + FIRST_FRAME);
+        rig.session.hotkey_pressed(t0);
+        if mode == Mode::Toggle {
+            rig.session.hotkey_released(t0 + ms(80));
+        }
+        rig.session.esc_pressed(t0 + ms(2000));
+        assert_eq!(rig.audio.open_handles(), 0, "{mode:?}: the mic stays open");
+        assert_eq!(
+            rig.indicator.overlays(),
+            vec![OverlayState::Recording, OverlayState::Hidden],
+            "{mode:?}"
+        );
+        assert_eq!(
+            rig.indicator.trays(),
+            vec![(TrayState::Recording, false), (TrayState::Idle, false)],
+            "{mode:?}"
+        );
+        assert_eq!(
+            recording_ends(&rig.events()),
+            vec![(2000, RecordingEnd::Cancelled)],
+            "{mode:?}"
+        );
+        assert_eq!(rig.cancel.calls(), vec![true, false], "{mode:?}");
+        let before = rig.events().len();
+        rig.session.hotkey_released(t0 + ms(2500));
+        assert_eq!(
+            rig.events().len(),
+            before,
+            "{mode:?}: the release after Esc"
+        );
+
+        // Barrier: the FIFO runs jobs in order, so a job queued by the cancelled
+        // recording would run before this one.
+        let t1 = t0 + ms(5000);
+        rig.frames(&fixtures::speech_3s(), t1 + FIRST_FRAME);
+        rig.session.hotkey_pressed(t1);
+        match mode {
+            Mode::Hold => rig.session.hotkey_released(t1 + ms(3000)),
+            Mode::Toggle => rig.session.hotkey_pressed(t1 + ms(3000)),
+        }
+        rig.wait_jobs(1);
+        assert_eq!(
+            rig.engine.factory_calls(),
+            1,
+            "{mode:?}: the cancelled audio was sent"
+        );
+        assert_eq!(job_count(&rig.events()), 1, "{mode:?}");
+        assert_eq!(rig.clipboard.texts(), vec![TEXT.to_string()], "{mode:?}");
+        // The start window of each press, then one paste (the second recording's).
+        let mut want = vec![PasterCall::CaptureStartWindow];
+        want.extend(pasted_into(W1));
+        assert_eq!(rig.paster.calls(), want, "{mode:?}");
+    }
+}
+
+#[test]
+fn esc_while_idle_or_processing_changes_nothing() {
+    // FR-22 is a recording-only action: Esc while idle emits nothing and touches no
+    // port; Esc right after a hold (its job queued or running) leaves that job to
+    // deliver. Bite: esc_pressed cancelling the queued job, publishing while idle,
+    // claiming or releasing Esc while idle.
+    let rig = Rig::new(api_settings(), always(TEXT));
+    let t0 = past();
+    rig.session.esc_pressed(t0);
+    assert!(rig.events().is_empty(), "{:?}", rig.events());
+    assert!(
+        rig.indicator.calls().is_empty(),
+        "{:?}",
+        rig.indicator.calls()
+    );
+    assert_eq!(rig.cancel.calls(), Vec::<bool>::new());
+
+    rig.hold(&fixtures::speech_3s(), t0 + ms(1000), ms(3000));
+    rig.session.esc_pressed(t0 + ms(4001));
+    rig.wait_jobs(1);
+    assert_eq!(rig.clipboard.texts(), vec![TEXT.to_string()]);
+    assert_eq!(
+        recording_ends(&rig.events()),
+        vec![(3000, RecordingEnd::Released)]
+    );
+    assert_eq!(rig.cancel.calls(), vec![true, false]);
+}
+
+#[test]
+fn cancel_key_claimed_only_while_recording() {
+    // FR-22 "Esc is claimed only while recording; elsewhere it reaches the focused
+    // app": the session claims at the start of every recording and releases when it
+    // ends (release, too-short discard, Esc), once each: auto-repeat presses do not
+    // re-claim, a press whose capture fails claims nothing. Bite: Esc claimed at
+    // session start or never released, a claim per press, a claim for a failed
+    // capture, the discard path not releasing.
+    let rig = Rig::new(api_settings(), always(TEXT));
+    let t0 = past();
+    assert_eq!(rig.cancel.calls(), Vec::<bool>::new(), "claimed at start");
+
+    rig.frames(&fixtures::speech_3s(), t0 + FIRST_FRAME);
+    rig.session.hotkey_pressed(t0);
+    assert_eq!(rig.cancel.calls(), vec![true]);
+    rig.session.hotkey_pressed(t0 + ms(100));
+    rig.session.hotkey_pressed(t0 + ms(200));
+    assert_eq!(rig.cancel.calls(), vec![true], "auto-repeat re-claimed");
+    rig.session.hotkey_released(t0 + ms(3000));
+    assert_eq!(rig.cancel.calls(), vec![true, false]);
+    rig.wait_jobs(1);
+
+    rig.session.hotkey_pressed(t0 + ms(5000));
+    rig.session.hotkey_released(t0 + ms(5299));
+    assert_eq!(
+        rig.cancel.calls(),
+        vec![true, false, true, false],
+        "too short"
+    );
+
+    rig.audio.set_start_error(Some(CaptureError::AccessDenied));
+    rig.session.hotkey_pressed(t0 + ms(6000));
+    rig.session.hotkey_released(t0 + ms(7000));
+    rig.audio.set_start_error(None);
+    assert_eq!(
+        rig.cancel.calls(),
+        vec![true, false, true, false],
+        "claimed for a failed capture"
+    );
+
+    rig.session.hotkey_pressed(t0 + ms(12_000));
+    rig.session.esc_pressed(t0 + ms(13_000));
+    assert_eq!(
+        rig.cancel.calls(),
+        vec![true, false, true, false, true, false]
+    );
+}
+
+#[test]
+fn cancel_key_is_released_at_the_stop_not_at_the_finish() {
+    // The claim follows the controller's recording state, not the capture: once the
+    // release has ended the recording, Esc is released before the (slow) capture stop
+    // returns, and an Esc that arrives during that stop changes nothing (the job is
+    // still delivered). Bite: the claim synced only in publish, which returns early
+    // while a stop is in flight (Esc held through the whole stop), Esc during the
+    // stop cancelling the finished recording.
+    let (source, stop_entered, stop_go) = BlockingStopSource::new();
+    let rig = Rig::with(
+        api_settings(),
+        always(TEXT),
+        Custom {
+            audio: Some(source.clone()),
+            ..Custom::default()
+        },
+    );
+    let t0 = past();
+    *lock(&source.chunks) = vec![FrameChunk::from_buffer(
+        &fixtures::speech_3s(),
+        t0 + FIRST_FRAME,
+    )];
+    source.block_stop.store(true, Ordering::SeqCst);
+    rig.session.hotkey_pressed(t0);
+    let session = &rig.session;
+    thread::scope(|s| {
+        let releasing = s.spawn(move || session.hotkey_released(t0 + ms(3000)));
+        assert!(
+            stop_entered.recv_timeout(BUDGET).is_ok(),
+            "the capture was never stopped"
+        );
+        assert_eq!(
+            rig.cancel.calls(),
+            vec![true, false],
+            "Esc held during the stop"
+        );
+        session.esc_pressed(t0 + ms(3001));
+        stop_go.send(()).expect("the stop is waiting");
+        releasing.join().expect("the release returns");
+    });
+    rig.wait_jobs(1);
+    assert_eq!(rig.clipboard.texts(), vec![TEXT.to_string()]);
+    assert_eq!(
+        recording_ends(&rig.events()),
+        vec![(3000, RecordingEnd::Released)]
+    );
+    assert_eq!(rig.cancel.calls(), vec![true, false]);
+}
+
+#[test]
+fn refused_cancel_key_keeps_recording_and_emits_esc_unavailable() {
+    // T-009 Acceptance "Esc unavailable" (FR-22, events.md `esc_unavailable`): when
+    // the shell reports the Esc claim refused during a recording, the session emits
+    // one Warning{EscUnavailable} and the recording goes on to a normal delivery; a
+    // successful claim, or a stale refusal after the recording ended, emits nothing.
+    // Bite: the warning missing, the recording stopped or discarded on the refusal, a
+    // warning for a stale result or for a granted claim.
+    let rig = Rig::new(api_settings(), always(TEXT));
+    let t0 = past();
+    rig.frames(&fixtures::speech_3s(), t0 + FIRST_FRAME);
+    rig.session.hotkey_pressed(t0);
+    rig.session.cancel_key_result(true, t0 + ms(5));
+    assert_eq!(warnings(&rig.events()), vec![], "a granted claim warned");
+    rig.session.cancel_key_result(false, t0 + ms(10));
+    assert_eq!(warnings(&rig.events()), vec![WarningCode::EscUnavailable]);
+    assert_eq!(
+        rig.audio.open_handles(),
+        1,
+        "the refusal stopped the recording"
+    );
+    assert_eq!(rig.indicator.overlays(), vec![OverlayState::Recording]);
+
+    rig.session.hotkey_released(t0 + ms(3000));
+    rig.wait_jobs(1);
+    rig.session.cancel_key_result(false, t0 + ms(3010));
+    assert_eq!(
+        warnings(&rig.events()),
+        vec![WarningCode::EscUnavailable],
+        "a stale refusal warned"
+    );
+    assert_eq!(rig.clipboard.texts(), vec![TEXT.to_string()]);
+    assert_eq!(
+        recording_ends(&rig.events()),
+        vec![(3000, RecordingEnd::Released)]
     );
 }
 
@@ -2386,6 +2861,7 @@ fn drop_finishes_the_job_in_flight_drops_the_queued_one_and_joins_threads() {
         observer,
         settings,
         engine,
+        cancel: _,
     } = rig;
     // The dropper reports what the clipboard held at the moment drop returned.
     let (dropped_tx, dropped_rx) = mpsc::channel();

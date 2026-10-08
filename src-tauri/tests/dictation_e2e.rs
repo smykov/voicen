@@ -13,6 +13,8 @@
 //!
 //! Red-test table row 18. The data dir and the log are a `TempDir`; the key is fake; the
 //! transcript carries a canary that must never reach the log (FR-020, NFR-04).
+//!
+//! T-009: Esc during a hold through the same wiring discards the recording.
 #![cfg(windows)]
 
 mod win32_support;
@@ -30,7 +32,7 @@ use voicen_lib::win::paste::WinPaster;
 use win32_support::{
     assert_hotkey_free, dictation_lines, engine_factory, eventually, has_pair, read_clipboard,
     serial, shown, AppRig, ClipboardState, Keys, Shape, Shown, TestWindow, TextEngine, BUDGET,
-    HOLD, HOTKEY_KEYS, VK_CONTROL, VK_MENU, VK_SPACE, WAIT,
+    HOLD, HOTKEY_KEYS, SETTLE, VK_CONTROL, VK_ESCAPE, VK_MENU, VK_SPACE, WAIT,
 };
 
 /// The test engine's transcript: non-ASCII, and a canary the log must never contain.
@@ -126,4 +128,72 @@ fn a_hotkey_hold_through_the_real_wiring_pastes_the_transcript_into_the_window()
         shown(&indicator.overlays())
     );
     assert_eq!(engine.calls(), 1, "engine calls");
+}
+
+#[test]
+fn esc_through_the_real_wiring_discards_the_recording() {
+    // T-009 Acceptance "Esc cancel" through `start_dictation` (FR-22, FR-20): the wiring
+    // attaches the Esc claim to the real hotkey thread; Esc during a Ctrl+Alt+Space hold
+    // discards the recording: nothing reaches the window or the engine, the overlay goes
+    // Recording, Hidden, and the log has exactly one `dictation … outcome=cancelled`
+    // line. Bite: start_dictation not wiring a CancelKeyHandle into the session and the
+    // thread (Esc does nothing; the hold is delivered at its release), a cancelled
+    // recording without its dictation line.
+    let _serial = serial();
+    assert_hotkey_free();
+    let window = TestWindow::open(Shape::TopLevel);
+    window.front();
+    let rig = AppRig::new(EngineKind::Api);
+    let engine = TextEngine::new(TRANSCRIPT);
+    let indicator = Arc::new(FakeIndicator::new());
+    let _dictation = start_dictation(
+        rig.app.handle(),
+        DictationPorts {
+            audio: Arc::new(RealtimeSource::from_buffer(&fixtures::speech_3s())),
+            clipboard: Arc::new(WinClipboard::new()),
+            paster: Arc::new(WinPaster::new()),
+            engine_factory: Some(engine_factory(&engine)),
+            indicator: indicator.clone(),
+            credentials: Arc::clone(&rig.creds),
+            hotkeys: Arc::clone(&rig.hotkeys),
+        },
+    )
+    .expect("start_dictation");
+
+    let mut keys = Keys::press(&HOTKEY_KEYS);
+    assert!(
+        eventually(WAIT, || shown(&indicator.overlays())
+            .contains(&Shown::Recording)),
+        "no Recording within {WAIT:?} of the injected Ctrl+Alt+Space: {:?}",
+        indicator.overlays()
+    );
+    thread::sleep(HOLD);
+    let mut esc = Keys::press(&[VK_ESCAPE]);
+    assert!(
+        eventually(WAIT, || shown(&indicator.overlays())
+            == vec![Shown::Recording, Shown::Hidden]),
+        "overlays after Esc: {:?}",
+        shown(&indicator.overlays())
+    );
+    esc.release_all();
+    keys.release(&[VK_SPACE, VK_CONTROL, VK_MENU]);
+
+    assert!(
+        eventually(WAIT, || !dictation_lines(&rig.log_lines()).is_empty()),
+        "no dictation line for the cancelled recording"
+    );
+    thread::sleep(SETTLE);
+    let dictation = dictation_lines(&rig.log_lines());
+    assert_eq!(dictation.len(), 1, "dictation lines: {dictation:?}");
+    assert!(
+        has_pair(&dictation[0], "outcome", "cancelled"),
+        "{}",
+        dictation[0]
+    );
+    assert_eq!(engine.calls(), 0, "the cancelled audio reached the engine");
+    assert_eq!(window.text(), "", "something was pasted");
+    assert_eq!(
+        shown(&indicator.overlays()),
+        vec![Shown::Recording, Shown::Hidden]
+    );
 }

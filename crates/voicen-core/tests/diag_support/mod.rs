@@ -399,6 +399,8 @@ pub const DICTATION_OUTCOMES: &[&str] = &[
     "too_short",
     "capture_failed",
     "blocked",
+    // T-009: an Esc-cancelled recording (FR-22).
+    "cancelled",
 ];
 /// Why a press was blocked (T-006 Refresh 5): one literal per
 /// `settings::gate::Blocked`.

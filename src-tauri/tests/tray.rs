@@ -50,8 +50,8 @@ use voicen_core::local_models::service::LocalModels;
 use voicen_core::local_models::store::ModelStore;
 use voicen_core::pipeline::PipelineDeps;
 use voicen_core::platform::{
-    AudioSource, CaptureHandle, FakeAudioSource, FakeClipboard, FakePaster, FakeShellRequests,
-    FakeTempAudioStore, FrameSink, Indicator,
+    AudioSource, CaptureHandle, FakeAudioSource, FakeCancelKey, FakeClipboard, FakePaster,
+    FakeShellRequests, FakeTempAudioStore, FrameSink, Indicator,
 };
 use voicen_core::post_process::PassThrough;
 use voicen_core::recording::{CaptureError, OverlayState, TrayState};
@@ -341,6 +341,7 @@ fn start_session(rig: &Rig, audio: Arc<dyn AudioSource>) -> Arc<DictationSession
         indicator: Arc::new(TrayOnly(rig.part())),
         requests: Arc::new(FakeShellRequests::new()),
         settings: Arc::clone(&rig.service),
+        cancel_key: Arc::new(FakeCancelKey::new()),
     })
     .expect("the session starts");
     let session = Arc::new(session);

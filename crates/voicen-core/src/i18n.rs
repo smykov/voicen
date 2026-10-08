@@ -821,6 +821,29 @@ mod tests {
         );
     }
 
+    #[test]
+    fn notice_max_length_is_declared_with_its_contract_text() {
+        // T-009 (FR-03, decision #1): the max-length stop shows `notice.max_length`;
+        // it is a declared MessageId (so `message_ids_exist_in_both_catalogs` covers
+        // it) and has the contracts/messages.md text in both catalogs. Bite: the id
+        // missing from `messages!` or from a catalog (the overlay shows the raw id),
+        // the text of another notice.
+        assert_eq!(NOTICE_MAX_LENGTH.0, "notice.max_length");
+        assert!(
+            MESSAGE_IDS.contains(&NOTICE_MAX_LENGTH),
+            "notice.max_length not in MESSAGE_IDS"
+        );
+        let c = catalog(EN_JSON, RU_JSON);
+        assert_eq!(
+            own_text(&c, UiLanguage::En, "notice.max_length"),
+            Some("Maximum length reached")
+        );
+        assert_eq!(
+            own_text(&c, UiLanguage::Ru, "notice.max_length"),
+            Some("Достигнута максимальная длительность")
+        );
+    }
+
     // ---- T-004: every refusal reaches the user in the user's language (U2) --------
 
     /// The non-empty text of `id` in `lang`, straight from the catalog map (no
