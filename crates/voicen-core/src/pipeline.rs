@@ -576,6 +576,76 @@ mod tests {
         assert_eq!(timeouts, vec![Timeouts::default()]);
     }
 
+    /// `settings()` with the given timeouts (whole seconds).
+    fn settings_with_timeouts(t: crate::settings::TimeoutSettings) -> Settings {
+        let mut s = settings();
+        s.timeouts = t;
+        s
+    }
+
+    #[test]
+    fn request_carries_the_job_settings_timeouts() {
+        // T-073 (P-013): every duration of a job comes from that job's settings
+        // snapshot, through the production constructor, with no restart: two jobs on
+        // one pipeline with different snapshots get different request timeouts, and
+        // a hand-edited out-of-range value reaches the engine clamped. Bite: the
+        // pipeline's one Timeouts (Timeouts::default()) copied into every request, a
+        // value taken once at construction or from the first job, a role read from
+        // another setting, or no clamp on the job path.
+        use crate::settings::TimeoutSettings;
+        let f = fakes();
+        let seen = Arc::new(Seen::default());
+        let p = Pipeline::new(deps(&f, Arc::new(PassThrough)))
+            .with_engine_factory(fake_factory(Ok("hallo".to_string()), &seen));
+
+        let first = TimeoutSettings {
+            connect_s: 7,
+            api_transcription_s: 45,
+            local_server_s: 90,
+            post_processing_s: 20,
+            builtin_local_s: 150,
+        };
+        let second = TimeoutSettings {
+            connect_s: 2,
+            api_transcription_s: 9,
+            local_server_s: 11,
+            post_processing_s: 6,
+            builtin_local_s: 33,
+        };
+        // A hand-edited file: load does not validate, the conversion clamps.
+        let edited = TimeoutSettings {
+            connect_s: 0,
+            api_transcription_s: u32::MAX,
+            ..second
+        };
+        for t in [first, second, edited] {
+            let _ = p.run_job(finished(fixtures::speech_3s(), settings_with_timeouts(t)));
+        }
+
+        let secs = Duration::from_secs;
+        let want = |connect, api, local, post, builtin| Timeouts {
+            connect: secs(connect),
+            api_transcription: secs(api),
+            local_server: secs(local),
+            post_processing: secs(post),
+            builtin: secs(builtin),
+            download_no_data: secs(30),
+        };
+        let got: Vec<Timeouts> = lock(&seen.requests).iter().map(|r| r.timeouts).collect();
+        assert_eq!(
+            got,
+            vec![
+                want(7, 45, 90, 20, 150),
+                want(2, 9, 11, 6, 33),
+                want(1, 600, 11, 6, 33),
+            ]
+        );
+        // Every request still carries its snapshot's language.
+        assert!(lock(&seen.requests)
+            .iter()
+            .all(|r| r.language.as_deref() == Some("de")));
+    }
+
     #[test]
     fn post_processor_output_is_what_gets_delivered() {
         // Step 4: the post-processor gets the engine's text and its output, not the

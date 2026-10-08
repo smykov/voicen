@@ -489,6 +489,122 @@ mod tests {
         assert_eq!(errors.len(), 5, "duplicates: {errors:?}");
     }
 
+    // ---- T-073: timeouts (decisions #97, #99) ----
+
+    /// One timeouts field: its wire id, its #99 bounds (default, min, max) and how to
+    /// set it on a draft.
+    struct TimeoutField {
+        id: &'static str,
+        default: u32,
+        min: u32,
+        max: u32,
+        set: fn(&mut Settings, u32),
+    }
+
+    const TIMEOUT_FIELDS: [TimeoutField; 5] = [
+        TimeoutField {
+            id: "timeouts.connect",
+            default: 5,
+            min: 1,
+            max: 60,
+            set: |s, v| s.timeouts.connect_s = v,
+        },
+        TimeoutField {
+            id: "timeouts.api_transcription",
+            default: 30,
+            min: 5,
+            max: 600,
+            set: |s, v| s.timeouts.api_transcription_s = v,
+        },
+        TimeoutField {
+            id: "timeouts.local_server",
+            default: 60,
+            min: 5,
+            max: 1800,
+            set: |s, v| s.timeouts.local_server_s = v,
+        },
+        TimeoutField {
+            id: "timeouts.post_processing",
+            default: 15,
+            min: 5,
+            max: 300,
+            set: |s, v| s.timeouts.post_processing_s = v,
+        },
+        TimeoutField {
+            id: "timeouts.builtin_local",
+            default: 120,
+            min: 10,
+            max: 1800,
+            set: |s, v| s.timeouts.builtin_local_s = v,
+        },
+    ];
+
+    /// The sample for `engine`, valid as it is (API key stored, `base` downloaded).
+    fn valid_for(engine: EngineKind) -> Vec<FieldError> {
+        run(&sample(engine), &no_keys(), api_key_stored(), &["base"])
+    }
+
+    #[test]
+    fn timeouts_out_of_range_are_refused_for_every_engine() {
+        // Decision #99 Q3 bounds, checked on every save whatever engine is selected
+        // (`none` included), like history.size; the post-processing limit is checked
+        // with post-processing on and off. Out of range (min - 1, max + 1, 0,
+        // u32::MAX) -> exactly that field's `timeout.range`; min, max and the default
+        // pass. Bite: a rule missing for one field, an exclusive bound (off by one at
+        // min or max), the bounds of another field, a check only for the selected
+        // engine's limit, a code other than timeout.range, or the error on another
+        // field.
+        for engine in EVERY_ENGINE {
+            assert_eq!(valid_for(engine), vec![], "{engine:?} baseline");
+            for f in &TIMEOUT_FIELDS {
+                for bad in [f.min - 1, f.max + 1, 0, u32::MAX] {
+                    for pp_on in [true, false] {
+                        let mut s = sample(engine);
+                        s.post_processing.enabled = pp_on;
+                        (f.set)(&mut s, bad);
+                        assert_eq!(
+                            pairs(&run(&s, &no_keys(), api_key_stored(), &["base"])),
+                            vec![(f.id, "timeout.range")],
+                            "{engine:?} {} = {bad} (post-processing on: {pp_on})",
+                            f.id
+                        );
+                    }
+                }
+                for good in [f.min, f.max, f.default] {
+                    let mut s = sample(engine);
+                    (f.set)(&mut s, good);
+                    assert_eq!(
+                        run(&s, &no_keys(), api_key_stored(), &["base"]),
+                        vec![],
+                        "{engine:?} {} = {good}",
+                        f.id
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_timeout_error_is_returned_at_once() {
+        // SC-003 for the timeouts: five offending fields, five errors in one refusal,
+        // beside the other rules' errors. Bite: validation stopping at the first
+        // timeouts error, or one error for the whole group.
+        let mut s = sample(EngineKind::None);
+        for f in &TIMEOUT_FIELDS {
+            (f.set)(&mut s, 0);
+        }
+        s.history.size = 0;
+        let mut want: Vec<(&str, &str)> = TIMEOUT_FIELDS
+            .iter()
+            .map(|f| (f.id, "timeout.range"))
+            .chain([("history.size", "history.size_range")])
+            .collect();
+        want.sort();
+        let errors = run(&s, &no_keys(), KeyPresence::default(), &[]);
+        assert_eq!(pairs(&errors), want);
+        assert_eq!(errors.len(), 6, "duplicates: {errors:?}");
+    }
+
     // ---- Decision #27 (T-003 review round 1) ----
 
     /// The FieldId of `speech_language`: `engine.speech_language`, per decision

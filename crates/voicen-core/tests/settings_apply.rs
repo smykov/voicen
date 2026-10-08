@@ -18,7 +18,7 @@ use voicen_core::settings::file::{FakeSettingsFile, FsSettingsFile, SettingsFile
 use voicen_core::settings::service::{SaveOutcome, SaveRequest, SettingsDeps, SettingsService};
 use voicen_core::settings::{
     defaults, ApiSettings, BuiltinLocalSettings, EngineKind, ErrorCode, FieldError, FieldId,
-    HistorySettings, LoadOutcome, LocalServerSettings, Microphone, Mode, Settings,
+    HistorySettings, LoadOutcome, LocalServerSettings, Microphone, Mode, Settings, TimeoutSettings,
 };
 use voicen_core::test_support::TempDir;
 
@@ -83,6 +83,15 @@ fn sample() -> Settings {
         },
         start_with_windows: true,
         ui_language: UiLanguage::Ru,
+        // T-073: every timeout in range and off its default, so the round trip
+        // through a new service proves each one is persisted.
+        timeouts: TimeoutSettings {
+            connect_s: 7,
+            api_transcription_s: 45,
+            local_server_s: 90,
+            post_processing_s: 20,
+            builtin_local_s: 150,
+        },
     }
 }
 

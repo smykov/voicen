@@ -531,6 +531,59 @@ fn server_down_is_cannot_reach_and_audio_kept() {
     assert_eq!(h.job_outcomes(), vec![OutcomeCode::Failed]);
 }
 
+#[tokio::test]
+async fn configured_local_server_timeout_fails_the_job_with_timeout() {
+    // T-073 (the owner's case: long dictations on a slow local server), through
+    // the production pipeline (`Pipeline::new`, no test override): a snapshot with
+    // local_server_s = 5 (the #99 minimum) fails with Timeout against a server
+    // answering after 7 s, about 5 s after the request started, failure=Timeout in
+    // the job event, the audio kept; the API limit in the same snapshot is set long
+    // (600 s) so reading it instead shows. The same server with the default
+    // snapshot (60 s) is delivered. Bite: the pipeline's fixed Timeouts::default(),
+    // the API value used for the local server, or milliseconds.
+    let server = server_with(ok_text("late local text").set_delay(Duration::from_secs(7))).await;
+
+    let mut h = harness(Arc::new(creds(None)), None);
+    let mut s = local_settings(&base(&server), "");
+    s.timeouts.local_server_s = 5;
+    s.timeouts.api_transcription_s = 600;
+    let rec = h.record(fixtures::speech_3s(), Arc::new(s));
+    let started = Instant::now();
+    let report = h.run(rec);
+    let took = started.elapsed();
+    assert_eq!(report.end, JobEnd::Failed(FailureReason::Timeout));
+    assert!(
+        took >= Duration::from_millis(4900) && took < Duration::from_millis(6500),
+        "took {took:?}: the 5 s limit of the snapshot"
+    );
+    assert!(report.pending.is_some(), "{report:?}");
+    assert_eq!(h.clipboard.texts(), Vec::<String>::new());
+    assert_eq!(h.job_engines(), vec![Some("local_server")]);
+    let failures: Vec<Option<&'static str>> = h
+        .observer
+        .events()
+        .iter()
+        .filter_map(|e| match e {
+            DictationEvent::JobFinished { failure, .. } => Some(*failure),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(failures, vec![Some("Timeout")]);
+
+    // The same server, the default snapshot: within the default 60 s.
+    let mut h = harness(Arc::new(creds(None)), None);
+    let rec = h.record(
+        fixtures::speech_3s(),
+        Arc::new(local_settings(&base(&server), "")),
+    );
+    let report = h.run(rec);
+    assert!(
+        matches!(report.end, JobEnd::Delivered { .. }),
+        "default limit: {report:?}"
+    );
+    assert_eq!(h.clipboard.texts(), vec!["late local text".to_string()]);
+}
+
 fn settings_deps(creds: Arc<FakeCredentialStore>) -> SettingsDeps {
     let bytes = serde_json::to_vec(&defaults(OS)).expect("serialize defaults");
     SettingsDeps {

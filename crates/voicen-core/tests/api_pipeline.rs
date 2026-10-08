@@ -731,6 +731,62 @@ async fn no_answer_within_timeout_is_timeout() {
     assert_eq!(h.paster.calls(), vec![]);
 }
 
+/// The server's answer delay for the T-073 cases: above the configured 5 s limit
+/// (the API minimum of decision #99), well under the 30 s default.
+const T073_DELAY: Duration = Duration::from_secs(7);
+
+#[tokio::test]
+async fn configured_api_timeout_fails_the_job_with_timeout() {
+    // T-073 Acceptance failure branch, through the production pipeline
+    // (`Pipeline::new`, no test override): a job whose settings snapshot says
+    // api_transcription_s = 5 fails with Timeout against a server answering after
+    // 7 s, about 5 s after the request started, with failure=Timeout in the job
+    // event and the audio kept; the same server with the default snapshot (30 s)
+    // is delivered. Bite: the pipeline's fixed Timeouts::default() (the 7 s answer
+    // arrives and is delivered), the local-server or connect value used for the
+    // API request (60 s / 5 s), or milliseconds.
+    let server = server_with(ok_text("late but in time").set_delay(T073_DELAY)).await;
+
+    let mut h = harness();
+    let mut s = api_settings(&base(&server));
+    s.timeouts.api_transcription_s = 5;
+    let rec = h.record(fixtures::speech_3s(), Arc::new(s));
+    let (report, took) = h.run(rec);
+    assert_eq!(report.end, JobEnd::Failed(FailureReason::Timeout));
+    assert!(
+        took >= Duration::from_millis(4900) && took < Duration::from_millis(6500),
+        "took {took:?}: the 5 s limit of the snapshot"
+    );
+    assert!(report.pending.is_some(), "{report:?}");
+    assert_eq!(h.clipboard.texts(), Vec::<String>::new());
+    assert_eq!(h.paster.calls(), vec![]);
+    let events = h.events();
+    assert!(
+        matches!(
+            job_finished(&events).as_slice(),
+            [DictationEvent::JobFinished {
+                outcome: OutcomeCode::Failed,
+                failure: Some("Timeout"),
+                ..
+            }]
+        ),
+        "{events:?}"
+    );
+
+    // The same server, the default snapshot: within the FR-24 default 30 s.
+    let mut h = harness();
+    let rec = h.record(
+        fixtures::speech_3s(),
+        Arc::new(api_settings(&base(&server))),
+    );
+    let (report, _) = h.run(rec);
+    assert!(
+        matches!(report.end, JobEnd::Delivered { .. }),
+        "default limit: {report:?}"
+    );
+    assert_eq!(h.clipboard.texts(), vec!["late but in time".to_string()]);
+}
+
 #[test]
 fn refused_host_is_cannot_reach() {
     // Acceptance 4 "unreachable host": a refused loopback port is CannotReach

@@ -1640,6 +1640,80 @@ mod tests {
     }
 
     #[test]
+    fn refused_timeout_saves_nothing() {
+        // T-073 failure branch: an out-of-range timeout is refused on save with its
+        // field error and nothing is saved: no file write, no key change, no
+        // autostart or hotkey call, the snapshot kept, no subscriber message. The
+        // timeouts rule refuses whatever engine is selected (here api with a valid
+        // setup, so timeouts.local_server is the only error). Then the same draft
+        // with an in-range value is Saved and the value is in the file and the
+        // snapshot (the field is persisted, not dropped). Bite: no timeouts rule in
+        // validate (Saved), the rule only for the selected engine's limit, another
+        // field or code, or the timeouts not serialized to the file.
+        let on_disk = with_start(sample(EngineKind::None), false);
+        let bytes = json(&on_disk);
+        let world = World::new(
+            FakeSettingsFile::with_bytes(&bytes),
+            FakeCredentialStore::new().with_key(LOCAL, "sk-test-old-local"),
+        );
+        let (service, _) = world.load();
+        let rx = service.subscribe();
+        let before = service.snapshot();
+
+        let mut draft = with_start(sample(EngineKind::Api), true);
+        draft.hotkey = "Ctrl+Shift+F10".into();
+        draft.timeouts.local_server_s = 0;
+        let keys = || KeyEdits {
+            transcription_api: replace("sk-test-new-api"),
+            local_server: KeyEdit::Clear,
+            post_processing: replace("sk-test-new-pp"),
+        };
+        let (errors, form) = expect_refused(service.save(req(draft.clone(), keys())));
+        assert_eq!(
+            errors,
+            vec![field_error(
+                FieldId::TimeoutsLocalServer,
+                ErrorCode::TimeoutRange
+            )]
+        );
+        assert_eq!(form, None);
+
+        assert_eq!(world.file.bytes(), Some(bytes));
+        assert_eq!(world.file.calls(), vec![FileCall::Read]);
+        assert!(Arc::ptr_eq(&before, &service.snapshot()));
+        assert_eq!(*service.snapshot(), on_disk);
+        assert!(
+            changes(&world.creds).is_empty(),
+            "{:?}",
+            changes(&world.creds)
+        );
+        assert_eq!(
+            stored(&world.creds),
+            [None, Some("sk-test-old-local".to_string()), None]
+        );
+        assert!(
+            world.autostart.calls().is_empty(),
+            "{:?}",
+            world.autostart.calls()
+        );
+        assert!(
+            world.hotkeys.calls().is_empty(),
+            "{:?}",
+            world.hotkeys.calls()
+        );
+        assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+
+        // The control: in range, the same save goes through and the value is stored.
+        draft.timeouts.local_server_s = 1800;
+        let view = expect_saved(service.save(req(draft, keys())), &[]);
+        assert_eq!(view.settings.timeouts.local_server_s, 1800);
+        assert_eq!(service.snapshot().timeouts.local_server_s, 1800);
+        let written = world.file.bytes().expect("settings written");
+        assert_eq!(parse(&written).timeouts.local_server_s, 1800);
+        assert_eq!(parse(&written).timeouts.connect_s, 7);
+    }
+
+    #[test]
     fn file_write_failure_restores_keys() {
         // Bite (I2): keys left changed after the file write fails, undo in forward
         // order, a Clear undone by a delete, or the snapshot swapped / published.
@@ -2855,6 +2929,11 @@ mod tests {
             FieldId::HistorySize,
             FieldId::GeneralStartWithWindows,
             FieldId::GeneralUiLanguage,
+            FieldId::TimeoutsConnect,
+            FieldId::TimeoutsApiTranscription,
+            FieldId::TimeoutsLocalServer,
+            FieldId::TimeoutsPostProcessing,
+            FieldId::TimeoutsBuiltinLocal,
         ];
         let codes = [
             ErrorCode::Required,
@@ -2871,6 +2950,7 @@ mod tests {
             ErrorCode::KeyStoreFailed,
             ErrorCode::UrlCredentials,
             ErrorCode::LanguageUnsupported,
+            ErrorCode::TimeoutRange,
         ];
         let errors: Vec<FieldError> = fields
             .iter()

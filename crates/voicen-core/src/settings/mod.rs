@@ -420,6 +420,14 @@ pub(crate) mod fixtures {
             },
             start_with_windows: true,
             ui_language: UiLanguage::Ru,
+            // T-073: in range, and no value equal to its default (decision #99).
+            timeouts: TimeoutSettings {
+                connect_s: 7,
+                api_transcription_s: 45,
+                local_server_s: 90,
+                post_processing_s: 20,
+                builtin_local_s: 150,
+            },
         }
     }
 }
@@ -460,6 +468,38 @@ mod tests {
         assert_eq!(d.post_processing.model, "");
         assert_eq!(d.post_processing.prompt, STARTER_PROMPT);
         assert_eq!(d.ui_language, UiLanguage::Ru);
+    }
+
+    #[test]
+    fn defaults_hold_fr24_timeouts() {
+        // Decision #97: FR-24's durations become settings whose defaults are
+        // today's values (connect 5, API 30, local server 60, post-processing 15,
+        // built-in 120; whole seconds). Bite: any value changed, two roles swapped,
+        // or milliseconds stored.
+        let t = defaults(Some("ru-RU")).timeouts;
+        assert_eq!(t.connect_s, 5, "connect_s");
+        assert_eq!(t.api_transcription_s, 30, "api_transcription_s");
+        assert_eq!(t.local_server_s, 60, "local_server_s");
+        assert_eq!(t.post_processing_s, 15, "post_processing_s");
+        assert_eq!(t.builtin_local_s, 120, "builtin_local_s");
+        assert_eq!(
+            defaults(None).timeouts,
+            t,
+            "the OS language changes no timeout"
+        );
+        // The wire / file shape (contracts/ipc.md, data-model.md): one `timeouts`
+        // object with the five `_s` fields, numbers.
+        let json = serde_json::to_value(defaults(None)).expect("serializes");
+        assert_eq!(
+            json["timeouts"],
+            json!({
+                "connect_s": 5,
+                "api_transcription_s": 30,
+                "local_server_s": 60,
+                "post_processing_s": 15,
+                "builtin_local_s": 120,
+            })
+        );
     }
 
     #[test]
@@ -548,6 +588,33 @@ mod tests {
 
         let s = parse(r#"{"builtin_local":{}}"#);
         assert_eq!(s.builtin_local.model_id, None);
+
+        // T-073: a file written before the timeouts existed (no `timeouts` key)
+        // loads the FR-24 defaults, not zeros; schema_version stays 1 (research
+        // R-2). Bite: field-level type defaults (0 s: every request fails at once),
+        // or no container default (the old file becomes unreadable and is reset).
+        assert_eq!(empty.timeouts, d.timeouts);
+        assert_eq!(empty.timeouts.connect_s, 5);
+        assert_eq!(empty.timeouts.api_transcription_s, 30);
+        assert_eq!(empty.timeouts.local_server_s, 60);
+        assert_eq!(empty.timeouts.post_processing_s, 15);
+        assert_eq!(empty.timeouts.builtin_local_s, 120);
+        let s = parse(r#"{"timeouts":{}}"#);
+        assert_eq!(s.timeouts, d.timeouts);
+        // A partial timeouts object changes only what it names.
+        let s = parse(r#"{"timeouts":{"local_server_s":900}}"#);
+        assert_eq!(s.timeouts.local_server_s, 900);
+        assert_eq!(s.timeouts.connect_s, 5);
+        assert_eq!(s.timeouts.api_transcription_s, 30);
+        assert_eq!(s.timeouts.post_processing_s, 15);
+        assert_eq!(s.timeouts.builtin_local_s, 120);
+        let s =
+            parse(r#"{"engine":"local_server","timeouts":{"connect_s":2,"builtin_local_s":600}}"#);
+        let mut expected = d.clone();
+        expected.engine = EngineKind::LocalServer;
+        expected.timeouts.connect_s = 2;
+        expected.timeouts.builtin_local_s = 600;
+        assert_eq!(s, expected);
 
         // A partial file changes only what it names.
         let s = parse(r#"{"engine":"api","history":{"size":5}}"#);
@@ -640,6 +707,12 @@ mod tests {
             "schema_version",
             "speech_language",
             "start_with_windows",
+            "timeouts",
+            "timeouts.api_transcription_s",
+            "timeouts.builtin_local_s",
+            "timeouts.connect_s",
+            "timeouts.local_server_s",
+            "timeouts.post_processing_s",
             "ui_language",
         ]
         .iter()
@@ -701,6 +774,12 @@ mod tests {
             FieldId::HistorySize => "history.size",
             FieldId::GeneralStartWithWindows => "general.start_with_windows",
             FieldId::GeneralUiLanguage => "general.ui_language",
+            // T-073 (analysis seam): the five timeouts fields.
+            FieldId::TimeoutsConnect => "timeouts.connect",
+            FieldId::TimeoutsApiTranscription => "timeouts.api_transcription",
+            FieldId::TimeoutsLocalServer => "timeouts.local_server",
+            FieldId::TimeoutsPostProcessing => "timeouts.post_processing",
+            FieldId::TimeoutsBuiltinLocal => "timeouts.builtin_local",
         }
     }
 
@@ -750,7 +829,30 @@ mod tests {
             ErrorCode::KeyStoreFailed => "key.store_failed",
             ErrorCode::UrlCredentials => "url.credentials",
             ErrorCode::LanguageUnsupported => "language.unsupported",
+            // T-073: one code for every timeouts field (the range is in each hint).
+            ErrorCode::TimeoutRange => "timeout.range",
         }
+    }
+
+    #[test]
+    fn timeout_ids_are_listed() {
+        // T-073: FieldId::ALL / ErrorCode::ALL drive the catalog checks
+        // (i18n::tests::every_field_id_has_label_text, every_error_code_has_catalog_text)
+        // and the wire checks above; a new variant left out of them is checked by
+        // nothing. Bite: a timeouts FieldId or TimeoutRange missing from ALL.
+        for id in [
+            FieldId::TimeoutsConnect,
+            FieldId::TimeoutsApiTranscription,
+            FieldId::TimeoutsLocalServer,
+            FieldId::TimeoutsPostProcessing,
+            FieldId::TimeoutsBuiltinLocal,
+        ] {
+            assert!(FieldId::ALL.contains(&id), "{id:?} not in FieldId::ALL");
+        }
+        assert!(
+            ErrorCode::ALL.contains(&ErrorCode::TimeoutRange),
+            "TimeoutRange not in ErrorCode::ALL"
+        );
     }
 
     #[test]

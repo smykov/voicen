@@ -863,6 +863,63 @@ mod tests {
         );
     }
 
+    /// T-073: the five timeouts fields, the suffix of their FieldId and hint ids,
+    /// with the #99 bounds (default, min, max) in whole seconds.
+    const TIMEOUT_ROLES: [(&str, u32, u32, u32); 5] = [
+        ("connect", 5, 1, 60),
+        ("api_transcription", 30, 5, 600),
+        ("local_server", 60, 5, 1800),
+        ("post_processing", 15, 5, 300),
+        ("builtin_local", 120, 10, 1800),
+    ];
+
+    #[test]
+    fn timeout_texts_exist_in_both_catalogs() {
+        // T-073: the refusal and each control reach the user in en and ru, named
+        // here so they are checked even if a variant is left out of FieldId::ALL /
+        // ErrorCode::ALL. Bite: `error.timeout.range`, a
+        // `settings.field_label.timeouts.<role>` or a `settings.timeouts.<role>.hint`
+        // missing or empty in a catalog.
+        let c = catalog(EN_JSON, RU_JSON);
+        let mut ids = vec!["error.timeout.range".to_string()];
+        for (role, ..) in TIMEOUT_ROLES {
+            ids.push(format!("settings.field_label.timeouts.{role}"));
+            ids.push(format!("settings.timeouts.{role}.hint"));
+        }
+        let mut missing = Vec::new();
+        for id in &ids {
+            for lang in LANGS {
+                if own_text(&c, lang, id).is_none() {
+                    missing.push(format!("{id} ({lang:?})"));
+                }
+            }
+        }
+        assert!(missing.is_empty(), "ids without text: {missing:?}");
+    }
+
+    #[test]
+    fn timeout_hints_state_the_bounds_table() {
+        // T-073: FieldError carries no parameters, so each control's range is in a
+        // static hint ("1–60 s, default 5"); the numbers in it must be exactly the
+        // #99 min, max and default of that field, in en and ru, so a hint and the
+        // bounds table cannot drift. Bite: a hint with another field's range, a
+        // changed bound in one language only, or a hint without the default.
+        let c = catalog(EN_JSON, RU_JSON);
+        for (role, default, min, max) in TIMEOUT_ROLES {
+            let id = format!("settings.timeouts.{role}.hint");
+            for lang in LANGS {
+                let text = own_text(&c, lang, &id).unwrap_or("");
+                let numbers: BTreeSet<u32> = text
+                    .split(|ch: char| !ch.is_ascii_digit())
+                    .filter(|part| !part.is_empty())
+                    .filter_map(|part| part.parse().ok())
+                    .collect();
+                let want: BTreeSet<u32> = [default, min, max].into_iter().collect();
+                assert_eq!(numbers, want, "{id} ({lang:?}): {text:?}");
+            }
+        }
+    }
+
     #[test]
     fn settings_window_message_ids_exist() {
         // T-004 owns two more ids. `notice.settings_reset` (the window's reset banner,
