@@ -66,6 +66,7 @@ fn a_hotkey_hold_through_the_real_wiring_pastes_the_transcript_into_the_window()
             engine_factory: Some(engine_factory(&engine)),
             indicator: indicator.clone(),
             credentials: Arc::clone(&rig.creds),
+            hotkeys: Arc::clone(&rig.hotkeys),
         },
     )
     .expect("start_dictation");

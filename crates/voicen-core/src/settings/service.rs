@@ -623,7 +623,7 @@ mod tests {
     use super::*;
     use crate::autostart::{AutostartCall, AutostartError, FakeAutostart};
     use crate::clock::FakeClock;
-    use crate::hotkey_registrar::FakeHotkeyRegistrar;
+    use crate::hotkey_registrar::{FakeHotkeyRegistrar, RegistrarCall};
     use crate::i18n::MESSAGE_IDS;
     use crate::models::FakeDownloadedModels;
     use crate::secrets::{
@@ -2034,6 +2034,13 @@ mod tests {
         Key(CredentialOp, KeySlot),
         Autostart(bool),
         WriteFile,
+        /// T-055: a registrar call (`JournaledHotkeys`).
+        Hotkey(RegistrarCall),
+        /// T-055: at a commit, the snapshot already held the committed hotkey.
+        Swapped,
+        /// T-055: a subscriber received a snapshot (noted at a commit, or by the
+        /// test after the save).
+        Published,
     }
 
     type Journal = Arc<Mutex<Vec<Step>>>;
@@ -2731,6 +2738,353 @@ mod tests {
             );
             assert!(MESSAGE_IDS.contains(&message), "{id} not in MESSAGE_IDS");
         }
+    }
+
+    // ---- T-055: hotkey step of save (spec 004 R-3 steps 2/6, T032) ----------------
+    //
+    // The registrar is the World's `FakeHotkeyRegistrar` behind `JournaledHotkeys`,
+    // which notes every call in the shared journal next to the autostart, key and
+    // file steps. At `commit` it also notes, before the commit itself, whether the
+    // snapshot was already swapped (`Swapped`) and whether a subscriber already got
+    // the new snapshot (`Published`), so "commit after the file, before the swap and
+    // the publish" is one comparison of the journal.
+
+    /// The hotkey every T-055 draft saves: not the `sample` one (Ctrl+Shift+F9).
+    const NEW_HOTKEY: &str = "Ctrl+Alt+F9";
+
+    fn hotkey_of(text: &str) -> crate::settings::hotkey::Hotkey {
+        crate::settings::hotkey::parse_hotkey(text).expect("a canonical test hotkey")
+    }
+
+    /// What `JournaledHotkeys` looks at when `commit` is called.
+    #[derive(Default)]
+    struct CommitProbe {
+        service: Mutex<Option<std::sync::Weak<SettingsService>>>,
+        rx: Mutex<Option<mpsc::Receiver<Arc<Settings>>>>,
+    }
+
+    impl CommitProbe {
+        /// Watches `service` (its snapshot and one subscription taken now).
+        fn watch(&self, service: &Arc<SettingsService>) {
+            *self.rx.lock().unwrap_or_else(PoisonError::into_inner) = Some(service.subscribe());
+            *self.service.lock().unwrap_or_else(PoisonError::into_inner) =
+                Some(Arc::downgrade(service));
+        }
+
+        /// Notes `Swapped` when the snapshot already holds `hotkey`, and `Published`
+        /// when the subscription already received a snapshot.
+        fn note_state(&self, journal: &Journal, hotkey: &str) {
+            let service = self
+                .service
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .as_ref()
+                .and_then(std::sync::Weak::upgrade);
+            if let Some(service) = service {
+                if service.snapshot().hotkey == hotkey {
+                    note(journal, Step::Swapped);
+                }
+            }
+            let got = self
+                .rx
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .as_ref()
+                .map(|rx| rx.try_recv().is_ok());
+            if got == Some(true) {
+                note(journal, Step::Published);
+            }
+        }
+    }
+
+    struct JournaledHotkeys(Arc<FakeHotkeyRegistrar>, Journal, Arc<CommitProbe>);
+
+    impl HotkeyRegistrar for JournaledHotkeys {
+        fn prepare(
+            &self,
+            hotkey: crate::settings::hotkey::Hotkey,
+            mode: crate::settings::Mode,
+        ) -> Result<crate::hotkey_registrar::Prepared, crate::hotkey_registrar::Unavailable>
+        {
+            note(&self.1, Step::Hotkey(RegistrarCall::Prepare(hotkey, mode)));
+            self.0.prepare(hotkey, mode)
+        }
+        fn commit(&self, prepared: crate::hotkey_registrar::Prepared) {
+            self.2.note_state(&self.1, &prepared.hotkey.to_string());
+            note(
+                &self.1,
+                Step::Hotkey(RegistrarCall::Commit(prepared.hotkey)),
+            );
+            self.0.commit(prepared);
+        }
+        fn abort(&self, prepared: crate::hotkey_registrar::Prepared) {
+            note(&self.1, Step::Hotkey(RegistrarCall::Abort(prepared.hotkey)));
+            self.0.abort(prepared);
+        }
+    }
+
+    impl World {
+        /// `load_journaled` with the registrar journaled too; the service is watched
+        /// by the returned probe (one subscription of its own).
+        fn load_journaled_hotkeys(&self) -> (Arc<SettingsService>, Journal, Arc<CommitProbe>) {
+            let journal: Journal = Arc::new(Mutex::new(Vec::new()));
+            let probe = Arc::new(CommitProbe::default());
+            let mut deps = self.deps();
+            deps.file = Arc::new(JournaledFile(self.file.clone(), journal.clone()));
+            deps.credentials = Arc::new(JournaledCreds(self.creds.clone(), journal.clone()));
+            deps.autostart = Arc::new(JournaledAutostart(self.autostart.clone(), journal.clone()));
+            deps.hotkeys = Arc::new(JournaledHotkeys(
+                self.hotkeys.clone(),
+                journal.clone(),
+                probe.clone(),
+            ));
+            let (service, _) = SettingsService::load_or_init(deps, OS);
+            let service = Arc::new(service);
+            probe.watch(&service);
+            (service, journal, probe)
+        }
+    }
+
+    /// The registrar calls of a journal, in order.
+    fn hotkey_steps(journal: &Journal) -> Vec<RegistrarCall> {
+        steps(journal)
+            .into_iter()
+            .filter_map(|s| match s {
+                Step::Hotkey(call) => Some(call),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn taken_hotkey_refuses_with_hotkey_unavailable_and_changes_nothing() {
+        // Acceptance failure branch (FR-05; R-3 step 2): `prepare` fails (the hotkey
+        // is taken by another process) → Refused with the field error
+        // recording.hotkey / hotkey.unavailable and no form error; the registrar saw
+        // exactly that one prepare (no commit, nothing active); no autostart call, no
+        // key change, no file write; the snapshot kept, no subscriber message. The
+        // draft also changes autostart, two keys and a plain field, so a hotkey step
+        // placed after any of them shows here. Bite: no hotkey step (Saved, today),
+        // prepare after the autostart / keys / file, the error on another field or
+        // code, a commit on the failed prepare, the snapshot swapped.
+        let on_disk = with_start(sample(EngineKind::None), false);
+        let bytes = json(&on_disk);
+        let world = World::new(
+            FakeSettingsFile::with_bytes(&bytes),
+            FakeCredentialStore::new().with_key(API, "sk-test-old-api"),
+        );
+        world.hotkeys.fail_prepare(true);
+        let (service, _) = world.load();
+        let rx = service.subscribe();
+        let before = service.snapshot();
+
+        let mut draft = with_start(sample(EngineKind::None), true);
+        draft.hotkey = NEW_HOTKEY.into();
+        draft.history.size = 42;
+        let keys = KeyEdits {
+            transcription_api: replace("sk-test-new-api"),
+            local_server: replace("sk-test-new-local"),
+            post_processing: KeyEdit::Untouched,
+        };
+        assert_eq!(
+            service.save(req(draft.clone(), keys)),
+            SaveOutcome::Refused {
+                errors: vec![field_error(
+                    FieldId::RecordingHotkey,
+                    ErrorCode::HotkeyUnavailable
+                )],
+                form_error: None,
+            }
+        );
+        assert_eq!(
+            world.hotkeys.calls(),
+            vec![RegistrarCall::Prepare(hotkey_of(NEW_HOTKEY), draft.mode)]
+        );
+        assert_eq!(
+            world.hotkeys.active(),
+            None,
+            "a refused hotkey became active"
+        );
+        assert!(
+            world.autostart.calls().is_empty(),
+            "{:?}",
+            world.autostart.calls()
+        );
+        assert!(
+            changes(&world.creds).is_empty(),
+            "{:?}",
+            changes(&world.creds)
+        );
+        assert_eq!(
+            stored(&world.creds),
+            [Some("sk-test-old-api".to_string()), None, None]
+        );
+        assert_eq!(world.file.calls(), vec![FileCall::Read]);
+        assert_eq!(world.file.bytes(), Some(bytes));
+        assert!(Arc::ptr_eq(&before, &service.snapshot()));
+        assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    /// Which later step of `every_later_refusal_aborts_the_prepared_hotkey` refuses.
+    #[derive(Debug, Clone, Copy)]
+    enum LaterRefusal {
+        Autostart,
+        KeyWrite,
+        FileWrite,
+    }
+
+    #[test]
+    fn every_later_refusal_aborts_the_prepared_hotkey() {
+        // R-3 steps 3-5 ("undo ... 2"): after a successful prepare, a refusal by the
+        // autostart step, a key write or the file write aborts the prepared hotkey,
+        // last (the undo runs in reverse: keys, autostart, then the hotkey); never a
+        // commit; the old hotkey stays the one in force (nothing active in the fake,
+        // the snapshot kept). Bite: an abort missing in any one branch (the spare
+        // registration leaks and the combo stays taken), a commit on a refusal, the
+        // abort before the undo of the later steps.
+        let new = hotkey_of(NEW_HOTKEY);
+        for case in [
+            LaterRefusal::Autostart,
+            LaterRefusal::KeyWrite,
+            LaterRefusal::FileWrite,
+        ] {
+            let world = World::new(
+                FakeSettingsFile::with_bytes(&json(&with_start(sample(EngineKind::None), false))),
+                FakeCredentialStore::new(),
+            );
+            match case {
+                LaterRefusal::Autostart => world.autostart.fail_set(true, RUN_ERR),
+                LaterRefusal::KeyWrite => world.creds.fail(CredentialOp::Write, LOCAL, STORE_ERR),
+                LaterRefusal::FileWrite => world.file.fail_write(io::ErrorKind::PermissionDenied),
+            }
+            let (service, journal, _probe) = world.load_journaled_hotkeys();
+            let before = service.snapshot();
+
+            let mut draft = with_start(sample(EngineKind::None), true);
+            draft.hotkey = NEW_HOTKEY.into();
+            let keys = KeyEdits {
+                transcription_api: replace("sk-test-new-api"),
+                local_server: replace("sk-test-new-local"),
+                post_processing: KeyEdit::Untouched,
+            };
+            let outcome = service.save(req(draft.clone(), keys));
+            assert!(
+                matches!(outcome, SaveOutcome::Refused { .. }),
+                "{case:?}: {outcome:?}"
+            );
+            let prepare = Step::Hotkey(RegistrarCall::Prepare(new, draft.mode));
+            let abort = Step::Hotkey(RegistrarCall::Abort(new));
+            let expected = match case {
+                LaterRefusal::Autostart => vec![prepare, Step::Autostart(true), abort],
+                LaterRefusal::KeyWrite => vec![
+                    prepare,
+                    Step::Autostart(true),
+                    Step::Key(CredentialOp::Write, API),
+                    Step::Key(CredentialOp::Write, LOCAL),
+                    Step::Key(CredentialOp::Delete, API),
+                    Step::Autostart(false),
+                    abort,
+                ],
+                LaterRefusal::FileWrite => vec![
+                    prepare,
+                    Step::Autostart(true),
+                    Step::Key(CredentialOp::Write, API),
+                    Step::Key(CredentialOp::Write, LOCAL),
+                    Step::WriteFile,
+                    Step::Key(CredentialOp::Delete, LOCAL),
+                    Step::Key(CredentialOp::Delete, API),
+                    Step::Autostart(false),
+                    abort,
+                ],
+            };
+            assert_eq!(steps(&journal), expected, "{case:?}");
+            assert_eq!(world.hotkeys.active(), None, "{case:?}");
+            assert!(Arc::ptr_eq(&before, &service.snapshot()), "{case:?}");
+        }
+    }
+
+    #[test]
+    fn a_saved_hotkey_is_committed_after_the_file_and_before_the_swap_and_publish() {
+        // R-3 steps 2 and 6 (FR-05 "works at once, no restart"): prepare(new hotkey,
+        // the draft's mode) right after validate and before the autostart step;
+        // commit after write_atomic, before the snapshot swap and before any
+        // subscriber receives the new snapshot; Saved; the new hotkey is the active
+        // one. Bite: no hotkey step (no Prepare / Commit, today), prepare with the
+        // old mode or after the autostart step, commit before the file write (a later
+        // write failure would leave the new combo active), commit after the swap or
+        // the publish (a consumer sees a hotkey that is not registered yet), commit
+        // skipped (the old combo never released).
+        let world = World::new(
+            FakeSettingsFile::with_bytes(&json(&with_start(sample(EngineKind::None), false))),
+            FakeCredentialStore::new(),
+        );
+        let (service, journal, probe) = world.load_journaled_hotkeys();
+
+        let mut draft = with_start(sample(EngineKind::None), true);
+        draft.hotkey = NEW_HOTKEY.into();
+        draft.mode = crate::settings::Mode::Hold;
+        let keys = KeyEdits {
+            transcription_api: replace("sk-test-new-api"),
+            ..KeyEdits::default()
+        };
+        let view = expect_saved(service.save(req(draft, keys)), &[]);
+        assert_eq!(view.settings.hotkey, NEW_HOTKEY);
+        // A publish after the commit shows up here, after it.
+        probe.note_state(&journal, "never a hotkey");
+
+        let new = hotkey_of(NEW_HOTKEY);
+        assert_eq!(
+            steps(&journal),
+            vec![
+                Step::Hotkey(RegistrarCall::Prepare(new, crate::settings::Mode::Hold)),
+                Step::Autostart(true),
+                Step::Key(CredentialOp::Write, API),
+                Step::WriteFile,
+                Step::Hotkey(RegistrarCall::Commit(new)),
+                Step::Published,
+            ]
+        );
+        assert_eq!(
+            world.hotkeys.active(),
+            Some((new, crate::settings::Mode::Hold))
+        );
+        assert_eq!(service.snapshot().hotkey, NEW_HOTKEY);
+    }
+
+    #[test]
+    fn an_unchanged_hotkey_never_calls_the_registrar() {
+        // Spec 004 T032 "unchanged hotkey → registrar not called"; T-055 Q2 (an
+        // unchanged hotkey is not retried by a save, also after a startup failure):
+        // a save that keeps the hotkey text and changes the mode, autostart, a key and
+        // a plain field is Saved with no registrar call, even while every prepare
+        // would fail (so a prepare made anyway refuses the save). Bite: prepare on
+        // every save (Refused here; on Windows the own combo fails with 1409), the
+        // comparison against the draft instead of the snapshot, a mode change taken
+        // as a hotkey change.
+        let world = World::new(
+            FakeSettingsFile::with_bytes(&json(&with_start(sample(EngineKind::None), false))),
+            FakeCredentialStore::new(),
+        );
+        world.hotkeys.fail_prepare(true);
+        let (service, journal, _probe) = world.load_journaled_hotkeys();
+        let unchanged = service.snapshot().hotkey.clone();
+
+        let mut draft = with_start(sample(EngineKind::None), true);
+        assert_eq!(draft.hotkey, unchanged, "premise: the same hotkey text");
+        draft.mode = crate::settings::Mode::Hold;
+        draft.history.size = 42;
+        let keys = KeyEdits {
+            transcription_api: replace("sk-test-new-api"),
+            ..KeyEdits::default()
+        };
+        expect_saved(service.save(req(draft, keys)), &[]);
+        assert!(
+            world.hotkeys.calls().is_empty(),
+            "{:?}",
+            world.hotkeys.calls()
+        );
+        assert!(hotkey_steps(&journal).is_empty());
+        assert_eq!(service.snapshot().mode, crate::settings::Mode::Hold);
     }
 
     // ---- T-030: IPC wire form, shell -> UI (contracts/ipc.md, data-model.md) ----

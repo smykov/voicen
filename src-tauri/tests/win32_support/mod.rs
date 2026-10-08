@@ -18,7 +18,7 @@ use std::ffi::c_void;
 use std::fmt::Display;
 use std::mem::{size_of, size_of_val};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
@@ -38,12 +38,15 @@ use voicen_core::local_models::store::ModelStore;
 use voicen_core::pipeline::EngineFactory;
 use voicen_core::recording::OverlayState;
 use voicen_core::secrets::{CredentialStore, FakeCredentialStore, KeyEdits, KeySlot};
+use voicen_core::settings::hotkey::parse_hotkey;
 use voicen_core::settings::service::{SaveOutcome, SaveRequest, SettingsService};
 use voicen_core::settings::{EngineKind, Settings};
 use voicen_core::test_support::local_models::FakeDisk;
 use voicen_core::test_support::TempDir;
 use voicen_core::timeouts::Timeouts;
-use voicen_lib::settings_ipc::load_settings;
+use voicen_core::win32_data::hotkey_codes;
+use voicen_lib::settings_ipc::{load_settings, load_settings_with};
+use voicen_lib::win::hotkey::HotkeyRegistrarHandle;
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::DataExchange::{
@@ -55,9 +58,9 @@ use windows::Win32::System::Memory::{
 };
 use windows::Win32::System::Ole::CF_UNICODETEXT;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, RegisterHotKey, SendInput, UnregisterHotKey, INPUT, INPUT_0, INPUT_KEYBOARD,
-    KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT,
-    VIRTUAL_KEY,
+    GetAsyncKeyState, RegisterHotKey, SendInput, UnregisterHotKey, HOT_KEY_MODIFIERS, INPUT,
+    INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, MOD_ALT, MOD_CONTROL,
+    MOD_NOREPEAT, VIRTUAL_KEY,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallWindowProcW, CreateWindowExW, DestroyWindow, DispatchMessageW, GetClassNameW,
@@ -294,11 +297,17 @@ impl Drop for Keys {
     }
 }
 
-/// Registers Ctrl+Alt+Space for this thread (no window): the combination is then taken
-/// for everyone else. Unregistered on drop.
-pub struct TakenHotkey;
+/// Registers a combination for this thread (no window): it is then taken for everyone
+/// else. Unregistered on drop (on the thread that took it).
+pub struct TakenHotkey {
+    id: i32,
+}
+
+/// The ids of [`TakenHotkey::take_combo`] (after [`TEST_HOTKEY_ID`], which `take` uses).
+static NEXT_TAKEN_ID: AtomicI32 = AtomicI32::new(TEST_HOTKEY_ID + 1);
 
 impl TakenHotkey {
+    /// Takes Ctrl+Alt+Space (the default hotkey).
     pub fn take() -> windows::core::Result<TakenHotkey> {
         // SAFETY: a thread-associated registration (no window), undone on drop.
         unsafe {
@@ -309,15 +318,39 @@ impl TakenHotkey {
                 u32::from(VK_SPACE),
             )
         }?;
-        Ok(TakenHotkey)
+        Ok(TakenHotkey { id: TEST_HOTKEY_ID })
+    }
+
+    /// T-055: takes any combination in canonical text (`"Ctrl+Alt+F9"`), with the codes
+    /// the hotkey thread would register (`win32_data::hotkey_codes`), under an id of its
+    /// own, so it can be held next to [`take`](Self::take).
+    pub fn take_combo(text: &str) -> windows::core::Result<TakenHotkey> {
+        let hotkey = parse_hotkey(text).expect("a canonical test hotkey");
+        let codes = hotkey_codes(&hotkey);
+        let id = NEXT_TAKEN_ID.fetch_add(1, Ordering::SeqCst);
+        // SAFETY: a thread-associated registration (no window), undone on drop.
+        unsafe {
+            RegisterHotKey(
+                None,
+                id,
+                HOT_KEY_MODIFIERS(codes.modifiers),
+                u32::from(codes.vk),
+            )
+        }?;
+        Ok(TakenHotkey { id })
     }
 }
 
 impl Drop for TakenHotkey {
     fn drop(&mut self) {
         // SAFETY: the id this thread registered.
-        let _ = unsafe { UnregisterHotKey(None, TEST_HOTKEY_ID) };
+        let _ = unsafe { UnregisterHotKey(None, self.id) };
     }
+}
+
+/// T-055: `text` is free right now (this thread can take it, then frees it again).
+pub fn combo_is_free(text: &str) -> bool {
+    TakenHotkey::take_combo(text).is_ok()
 }
 
 /// Asserts that nobody holds Ctrl+Alt+Space (capability `hotkey`: registration): this
@@ -1061,6 +1094,36 @@ pub fn settings(
         None,
         log,
     );
+    save_engine(&service, engine);
+    service
+}
+
+/// T-055: [`settings`] through `load_settings_with`, over the given autostart entry and
+/// the given hotkey registrar handle (the instance `start_dictation` attaches its hotkey
+/// thread to, through `DictationPorts::hotkeys`).
+pub fn settings_with(
+    dir: &Path,
+    creds: &Arc<dyn CredentialStore>,
+    log: &Log,
+    engine: EngineKind,
+    autostart: Arc<dyn Autostart>,
+    hotkeys: &Arc<HotkeyRegistrarHandle>,
+) -> Arc<SettingsService> {
+    let (service, _) = load_settings_with(
+        dir.to_path_buf(),
+        Arc::clone(creds),
+        autostart,
+        Arc::new(ModelStore::new(dir.join("models"), MODELS)),
+        Arc::clone(hotkeys) as Arc<dyn voicen_core::hotkey_registrar::HotkeyRegistrar>,
+        None,
+        log,
+    );
+    save_engine(&service, engine);
+    service
+}
+
+/// Saves `engine` (nothing for `EngineKind::None`, the first-run default).
+fn save_engine(service: &SettingsService, engine: EngineKind) {
     if engine != EngineKind::None {
         let mut s = (*service.snapshot()).clone();
         s.engine = engine;
@@ -1072,7 +1135,6 @@ pub fn settings(
             other => panic!("premise: saving engine {engine:?} is refused: {other:?}"),
         }
     }
-    service
 }
 
 /// The app as `run()` builds it (`build_app` on the mock runtime) over a temp data dir,
@@ -1083,15 +1145,25 @@ pub struct AppRig {
     pub app: App<MockRuntime>,
     pub service: Arc<SettingsService>,
     pub creds: Arc<dyn CredentialStore>,
+    /// T-055: the registrar handle the service was given; pass it to `start_dictation`
+    /// as `DictationPorts::hotkeys` (the same instance, like `creds`).
+    pub hotkeys: Arc<HotkeyRegistrarHandle>,
 }
 
 impl AppRig {
     pub fn new(engine: EngineKind) -> AppRig {
+        AppRig::with_autostart(engine, Arc::new(FakeAutostart::new()))
+    }
+
+    /// T-055: [`new`](Self::new) over the given autostart entry (a failing one for the
+    /// save's later-refusal branch).
+    pub fn with_autostart(engine: EngineKind, autostart: Arc<dyn Autostart>) -> AppRig {
         let dir = TempDir::new();
         let logs = dir.path().join("logs");
         let log = voicen_lib::diag::start(logs.clone(), Box::new(|_| {}));
         let creds = keyed_store();
-        let service = settings(dir.path(), &creds, &log, engine);
+        let hotkeys = HotkeyRegistrarHandle::new();
+        let service = settings_with(dir.path(), &creds, &log, engine, autostart, &hotkeys);
         let app = voicen_lib::build_app(
             mock_builder(),
             mock_context(noop_assets()),
@@ -1106,6 +1178,7 @@ impl AppRig {
             app,
             service,
             creds,
+            hotkeys,
         }
     }
 

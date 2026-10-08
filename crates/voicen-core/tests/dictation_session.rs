@@ -24,7 +24,7 @@ use std::collections::VecDeque;
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, Weak};
 use std::thread::{self, ThreadId};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
@@ -57,7 +57,7 @@ use voicen_core::secrets::{CredentialStore, FakeCredentialStore, KeyEdits, KeySl
 use voicen_core::settings::file::FakeSettingsFile;
 use voicen_core::settings::gate::SettingsTab;
 use voicen_core::settings::service::{SaveOutcome, SaveRequest, SettingsDeps, SettingsService};
-use voicen_core::settings::{defaults, EngineKind, LoadOutcome, Mode, Settings};
+use voicen_core::settings::{defaults, EngineKind, FieldId, LoadOutcome, Mode, Settings};
 use voicen_core::test_support::realtime::{read_wav, RealtimeSource};
 use voicen_core::test_support::{fixtures, TempDir};
 use voicen_core::vad::{EnergyDetector, SpeechDetector, SpeechGate};
@@ -384,17 +384,22 @@ impl Paster for Instrumented {
 }
 
 /// The indicator and the shell requests in one log, for the order of the blocked
-/// actions.
+/// actions. T-055: an open request carries the field to focus (`None` for a
+/// blocked press).
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Step {
     Tray(TrayState, bool),
     Overlay(OverlayState),
-    OpenSettings(SettingsTab),
+    OpenSettings(SettingsTab, Option<FieldId>),
 }
 
 #[derive(Default)]
 struct Sequence {
     steps: Mutex<Vec<Step>>,
+    /// T-055: when set, `open_settings` calls back into this session
+    /// (`tray_menu_opened`) on the calling thread before it records the step, so
+    /// a request made while the session lock is held never returns.
+    reenter: OnceLock<Weak<DictationSession>>,
 }
 
 impl Indicator for Sequence {
@@ -407,8 +412,14 @@ impl Indicator for Sequence {
 }
 
 impl ShellRequests for Sequence {
+    // T-055 changes the trait to `open_settings(tab, field)`; this records the
+    // field it gets (`None` until then).
     fn open_settings(&self, tab: SettingsTab) {
-        lock(&self.steps).push(Step::OpenSettings(tab));
+        let field: Option<FieldId> = None;
+        if let Some(session) = self.reenter.get().and_then(Weak::upgrade) {
+            session.tray_menu_opened(Instant::now());
+        }
+        lock(&self.steps).push(Step::OpenSettings(tab, field));
     }
 }
 
@@ -578,7 +589,7 @@ impl PipelineObserver for Tee {
 }
 
 struct Rig {
-    session: DictationSession,
+    session: Arc<DictationSession>,
     audio: Arc<FakeAudioSource>,
     indicator: Arc<FakeIndicator>,
     requests: Arc<FakeShellRequests>,
@@ -674,7 +685,7 @@ impl Rig {
         })
         .expect("the session starts");
         Rig {
-            session,
+            session: Arc::new(session),
             audio,
             indicator,
             requests,
@@ -1252,7 +1263,7 @@ fn engine_none_opens_no_capture_and_asks_for_the_engine_tab() {
             params: vec![],
             until: tp + MESSAGE_DURATION,
         }),
-        Step::OpenSettings(SettingsTab::Engine),
+        Step::OpenSettings(SettingsTab::Engine, None),
     ];
     let hidden = Step::Overlay(OverlayState::Hidden);
     assert_eq!(
@@ -2145,8 +2156,11 @@ fn hotkey_registration_sets_and_clears_the_tray_hotkey_error() {
     // Row 17 (FR-011, FR-028): a failed registration shows HotkeyError; it stays
     // through a recording, a delivered job and the tray menu (none of them
     // publishes another tray state); a successful registration brings back Idle.
-    // Bite: the input not wired, HotkeyError cleared by the delivery or the menu,
-    // Recording shown over HotkeyError.
+    // T-055 (changed contract; was "the overlay shows only the recording"): the
+    // failure also shows the hotkey notice first and asks once for settings on the
+    // hotkey field; the success asks for nothing. Bite: the input not wired,
+    // HotkeyError cleared by the delivery or the menu, Recording shown over
+    // HotkeyError.
     let rig = Rig::new(api_settings(), always(TEXT));
     let t0 = past();
     rig.session.hotkey_registration(false, t0);
@@ -2160,8 +2174,19 @@ fn hotkey_registration_sets_and_clears_the_tray_hotkey_error() {
         vec![(TrayState::HotkeyError, false)],
         "kept through a recording, a delivery and the tray menu"
     );
+    // The notice was raised at a past instant: the timer may have expired it
+    // (Hidden) before the press replaced it.
+    let mut overlays = rig.indicator.overlays();
+    assert!(
+        !overlays.is_empty() && is_hotkey_notice(&overlays[0]),
+        "the failed registration showed no hotkey notice first: {overlays:?}"
+    );
+    overlays.remove(0);
+    if overlays.first() == Some(&OverlayState::Hidden) {
+        overlays.remove(0);
+    }
     assert_eq!(
-        rig.indicator.overlays(),
+        overlays,
         vec![
             OverlayState::Recording,
             OverlayState::Processing,
@@ -2172,6 +2197,149 @@ fn hotkey_registration_sets_and_clears_the_tray_hotkey_error() {
     assert_eq!(
         rig.indicator.trays(),
         vec![(TrayState::HotkeyError, false), (TrayState::Idle, false)]
+    );
+    assert_eq!(
+        format!("{:?}", rig.requests.calls()),
+        HOTKEY_FIELD_REQUEST,
+        "one request for the hotkey field, none for the success"
+    );
+}
+
+// ---- T-055: the startup failure branch of a hotkey registration --------------------
+
+/// The notice a failed registration shows (T-055; spelled here, not taken from the
+/// code under test).
+const HOTKEY_NOTICE: &str = "notice.hotkey_unavailable";
+
+/// `FakeShellRequests::calls()` after exactly one request for settings on the
+/// Recording tab with the hotkey field focused, through its `Debug` form, so this
+/// binary compiles before T-055 gives `ShellRequestCall::OpenSettings` its field
+/// (red on the assertion, not on the build).
+const HOTKEY_FIELD_REQUEST: &str = "[OpenSettings(Recording, Some(RecordingHotkey))]";
+
+/// The catalog id of a `MessageId` (its serialized form, contracts/ipc.md).
+fn catalog_id(id: i18n::MessageId) -> String {
+    serde_json::to_value(id)
+        .expect("a MessageId serializes")
+        .as_str()
+        .expect("a JSON string")
+        .to_string()
+}
+
+/// The hotkey notice at any `until`, with no params.
+fn is_hotkey_notice(o: &OverlayState) -> bool {
+    matches!(o, OverlayState::Message { id, params, .. }
+        if catalog_id(*id) == HOTKEY_NOTICE && params.is_empty())
+}
+
+#[test]
+fn a_failed_registration_shows_the_notice_then_asks_for_the_hotkey_field() {
+    // T-055 Acceptance "taken at start → tray error and settings opened on Recording
+    // with the hotkey field focused" (spec 004 R-4; invariant: every failed
+    // registration goes through hotkey_registration(false)): tray HotkeyError, then
+    // the hotkey notice for 3 s from the failure, then one request for settings on
+    // Recording / recording.hotkey, in that order; nothing else. Bite: no request
+    // (today), the Engine tab or no field, the request before the publish, no notice
+    // or another id, the notice raised as a failure (tray Error instead of
+    // HotkeyError).
+    let ui = Arc::new(Sequence::default());
+    let rig = Rig::with(
+        api_settings(),
+        always(TEXT),
+        Custom {
+            ui: Some(ui.clone()),
+            ..Custom::default()
+        },
+    );
+    let tf = Instant::now();
+    rig.session.hotkey_registration(false, tf);
+
+    let hidden = Step::Overlay(OverlayState::Hidden);
+    let steps = settled(lock(&ui.steps).clone(), hidden, tf);
+    assert_eq!(steps.len(), 3, "{steps:?}");
+    assert_eq!(steps[0], Step::Tray(TrayState::HotkeyError, false));
+    match &steps[1] {
+        Step::Overlay(OverlayState::Message { id, params, until }) => {
+            assert_eq!(catalog_id(*id), HOTKEY_NOTICE);
+            assert!(params.is_empty(), "{params:?}");
+            assert_eq!(*until, tf + MESSAGE_DURATION, "the notice lasts 3 s");
+        }
+        other => panic!("expected the hotkey notice, got {other:?}"),
+    }
+    assert_eq!(
+        steps[2],
+        Step::OpenSettings(SettingsTab::Recording, Some(FieldId::RecordingHotkey))
+    );
+    assert_eq!(rig.audio.start_calls(), 0);
+    assert!(rig.events().is_empty(), "{:?}", rig.events());
+}
+
+#[test]
+fn a_successful_registration_shows_and_asks_nothing() {
+    // T-055: only a failure notifies. A failure then a success: exactly one request
+    // (the failure's), one notice, and the success publishes Idle only. Bite: the
+    // notice / request raised on every registration result, or on the success too.
+    let rig = Rig::new(api_settings(), always(TEXT));
+    let tf = Instant::now();
+    rig.session.hotkey_registration(false, tf);
+    rig.session.hotkey_registration(true, tf + ms(100));
+    assert_eq!(format!("{:?}", rig.requests.calls()), HOTKEY_FIELD_REQUEST);
+    let notices = rig
+        .indicator
+        .overlays()
+        .iter()
+        .filter(|o| matches!(o, OverlayState::Message { .. }))
+        .count();
+    assert_eq!(notices, 1, "{:?}", rig.indicator.overlays());
+    assert_eq!(
+        rig.indicator.trays(),
+        vec![(TrayState::HotkeyError, false), (TrayState::Idle, false)]
+    );
+}
+
+#[test]
+fn the_settings_request_of_a_failed_registration_is_made_outside_the_session_lock() {
+    // T-055 seam ("open_settings ... after the lock", like the blocked press): the
+    // shell's opener may call back into the session; here the request calls
+    // `tray_menu_opened` on the same thread. Made under the session lock, that call
+    // never returns. The registration runs on a helper thread bounded by BUDGET.
+    // Bite: `requests.open_settings` called inside the locked section of
+    // `hotkey_registration`; no request at all (today).
+    let ui = Arc::new(Sequence::default());
+    let rig = Rig::with(
+        api_settings(),
+        always(TEXT),
+        Custom {
+            ui: Some(ui.clone()),
+            ..Custom::default()
+        },
+    );
+    ui.reenter
+        .set(Arc::downgrade(&rig.session))
+        .unwrap_or_else(|_| panic!("reenter set twice"));
+    let session = Arc::clone(&rig.session);
+    let (done_tx, done_rx) = mpsc::channel();
+    thread::spawn(move || {
+        session.hotkey_registration(false, Instant::now());
+        let _ = done_tx.send(());
+    });
+    if done_rx.recv_timeout(BUDGET).is_err() {
+        // The helper holds the session lock forever: dropping the rig would wait
+        // for it too.
+        std::mem::forget(rig);
+        panic!("hotkey_registration(false) did not return within {BUDGET:?}: the settings request was made under the session lock");
+    }
+    let opens: Vec<Step> = lock(&ui.steps)
+        .iter()
+        .filter(|s| matches!(s, Step::OpenSettings(..)))
+        .cloned()
+        .collect();
+    assert_eq!(
+        opens,
+        vec![Step::OpenSettings(
+            SettingsTab::Recording,
+            Some(FieldId::RecordingHotkey)
+        )]
     );
 }
 

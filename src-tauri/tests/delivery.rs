@@ -131,6 +131,7 @@ fn start(
             engine_factory: Some(engine_factory(engine)),
             indicator,
             credentials: Arc::clone(&rig.creds),
+            hotkeys: Arc::clone(&rig.hotkeys),
         },
     )
     .expect("start_dictation")
