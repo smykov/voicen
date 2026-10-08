@@ -532,6 +532,7 @@ function shownFor(settings: Settings, offered: readonly string[] = []): Record<s
     "history.enabled": settings.history.enabled,
     "history.size": String(settings.history.size),
     "general.ui_language": settings.ui_language,
+    "general.start_with_windows": settings.start_with_windows,
   };
 }
 
@@ -546,7 +547,7 @@ function tabFieldsFor(engine: RoundTripEngine): Record<string, string[]> {
     recording: ["recording.hotkey", "recording.mode"],
     output: ["output.auto_paste"],
     history: ["history.enabled", "history.size"],
-    general: ["general.ui_language"],
+    general: ["general.ui_language", "general.start_with_windows"],
   };
 }
 
@@ -650,8 +651,8 @@ test("a partially_restored refusal naming engine.api.key while engine is local_s
       form_error: {
         kind: "partially_restored",
         message: "settings.partially_restored",
-        // Neither has a control on this page: the API key (engine local_server) and
-        // start-with-Windows (no control until T-034).
+        // Neither has a control on this page (the Engine tab): the API key (engine
+        // local_server) and start-with-Windows (its control is on the General tab, T-034).
         not_restored: ["engine.api.key", "general.start_with_windows"],
       },
     },
@@ -671,7 +672,7 @@ test("a partially_restored refusal naming engine.api.key while engine is local_s
 
 test("a partially_restored refusal lists by label only the not_restored fields with no control on the page, and the list follows the controls the current tab renders", async ({ page }) => {
   // T-039 r1 #1 (invariant L): engine.api.key has a control on the Engine tab (engine
-  // api), general.start_with_windows has none anywhere (until T-034).
+  // api), general.start_with_windows on the General tab (T-034).
   const errors = pageErrors(page);
   const view = apiView();
   view.keys.transcription_api = true;
@@ -715,5 +716,14 @@ test("a partially_restored refusal lists by label only the not_restored fields w
   await field(page, "engine.kind").selectOption("local_server");
   await expect(field(page, "engine.api.key")).toHaveCount(0);
   await expect(listed).toHaveText([apiKeyLabel, startLabel]);
+
+  // General tab (T-034): the start-with-Windows toggle is rendered, so it leaves the list
+  // and carries the field-level highlight (settings.field.not_restored) instead.
+  await tab(page, "general").click();
+  const start = field(page, "general.start_with_windows");
+  await expect(start).toHaveCount(1);
+  await expect(start).toHaveAttribute("aria-invalid", "true");
+  await expect(start).toHaveAccessibleDescription(en("settings.field.not_restored"));
+  await expect(listed).toHaveText([apiKeyLabel]);
   expect(errors).toEqual([]);
 });
