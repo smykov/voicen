@@ -431,3 +431,61 @@ describe("Saved warnings stay out of the Draft (T-015, characterization)", () =>
     expect(applyView(d, outcome.Saved.view)).toEqual(draftFromView(outcome.Saved.view));
   });
 });
+
+// ---- T-073: the timeouts wire object (decisions #97, #99) --------------------------
+
+describe("timeouts on the wire (T-073)", () => {
+  const FR24 = { connect_s: 5, api_transcription_s: 30, local_server_s: 60, post_processing_s: 15, builtin_local_s: 120 };
+  // In range and different from every default.
+  const STORED = { connect_s: 7, api_transcription_s: 45, local_server_s: 90, post_processing_s: 20, builtin_local_s: 300 };
+
+  function withTimeouts(timeouts: typeof STORED): SettingsView {
+    const v = firstRun();
+    v.first_run = false;
+    v.settings.timeouts = { ...timeouts };
+    return v;
+  }
+
+  it("core's first-run view carries the timeouts object with the FR-24 defaults", () => {
+    // Red until e2e/fixtures/settings-wire.json is regenerated from core (never by hand).
+    expect(firstRun().settings.timeouts).toEqual(FR24);
+  });
+
+  it("the timeouts object round-trips through the draft unchanged: view -> draft -> saveRequest -> Saved", () => {
+    // Bite: a draft or saveRequest that rebuilds settings field by field and drops
+    // (or defaults) the timeouts object.
+    const view = withTimeouts(STORED);
+    const d = draftFromView(view);
+    expect(d.settings.timeouts).toEqual(STORED);
+    expect(isDirty(d)).toBe(false);
+    expect(saveRequest(d).settings.timeouts).toEqual(STORED);
+    expect(saveRequest(d).settings).toEqual(view.settings);
+    const saved = applyOutcome(d, { Saved: { view: withTimeouts(STORED), warnings: [] } });
+    expect(saved.settings.timeouts).toEqual(STORED);
+    expect(isDirty(saved)).toBe(false);
+  });
+
+  it("an edited timeout is dirty, sent as edited, and a copy (the view is not changed)", () => {
+    const view = withTimeouts(STORED);
+    const d = draftFromView(view);
+    d.settings.timeouts.local_server_s = 1800;
+    expect(isDirty(d)).toBe(true);
+    expect(saveRequest(d).settings.timeouts).toEqual({ ...STORED, local_server_s: 1800 });
+    expect(view.settings.timeouts).toEqual(STORED);
+    expect(d.baseline.settings.timeouts).toEqual(STORED);
+    d.settings.timeouts.local_server_s = STORED.local_server_s;
+    expect(isDirty(d)).toBe(false);
+  });
+
+  it("a Refused timeouts.<role> timeout.range maps to error.timeout.range on that field; the typed timeouts are kept", () => {
+    const d = draftFromView(withTimeouts(STORED));
+    d.settings.timeouts.api_transcription_s = 601;
+    const refused: SaveOutcome = {
+      Refused: { errors: [{ field: "timeouts.api_transcription", code: "timeout.range" }], form_error: null },
+    };
+    const after = applyOutcome(d, refused);
+    expect(after.errors).toEqual({ "timeouts.api_transcription": "error.timeout.range" });
+    expect(after.settings.timeouts).toEqual({ ...STORED, api_transcription_s: 601 });
+    expect(after.baseline.settings.timeouts).toEqual(STORED);
+  });
+});
