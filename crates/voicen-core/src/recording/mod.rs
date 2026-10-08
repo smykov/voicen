@@ -758,6 +758,94 @@ mod tests {
     }
 
     #[test]
+    fn delivered_skipped_sets_tray_error_and_shows_the_skip_message() {
+        // #91(3), spec 003 FR-009: a skipped post-processing is delivered (raw
+        // text) but sets tray Error and shows the skip message with its params
+        // for 3 s, after a paste (Pasted) and instead of `copied` (CopiedOnly).
+        // A later plain Delivered clears Error. Bite: DeliveredSkipped treated as
+        // Delivered (no Error), as Notice (no Error), the host param dropped, the
+        // delivery notice shown instead of the skip.
+        use crate::delivery::DeliveryResult;
+        use crate::post_process::SkipReason;
+        let t0 = Instant::now();
+        let reason = SkipReason::Unreachable {
+            host: "llm.example.com:8443".to_string(),
+        };
+        for (i, delivery) in [DeliveryResult::Pasted, DeliveryResult::CopiedOnly]
+            .into_iter()
+            .enumerate()
+        {
+            let mut c = RecordingController::<Ctx>::new();
+            let base = t0 + ms(i as u64 * 100_000);
+            let a = record(&mut c, base, ms(1000)).id();
+            let ts = base + ms(2000);
+            c.job_finished(
+                a,
+                JobEnd::DeliveredSkipped {
+                    reason: reason.clone(),
+                    delivery,
+                },
+                ts,
+            );
+            assert_eq!(
+                c.indicator(),
+                &IndicatorState {
+                    tray: TrayState::Error,
+                    overlay: message(
+                        reason.message_id(),
+                        vec![("host", "llm.example.com:8443".to_string())],
+                        ts
+                    ),
+                },
+                "{delivery:?}"
+            );
+            assert_eq!(c.next_deadline(), Some(ts + Duration::from_secs(3)));
+            c.tick(ts + ms(3000));
+            assert_eq!(
+                c.indicator().tray,
+                TrayState::Error,
+                "{delivery:?}: Error stays"
+            );
+
+            let b = record(&mut c, base + ms(10_000), ms(1000)).id();
+            c.job_finished(b, JobEnd::Delivered { notice: None }, base + ms(12_000));
+            assert_eq!(
+                c.indicator(),
+                &idle(),
+                "{delivery:?}: Delivered clears Error"
+            );
+        }
+    }
+
+    #[test]
+    fn delivered_skipped_with_copy_manual_shows_paste_manually_and_sets_error() {
+        // #91(3): when the paste failed (CopyManual) the user must act, so
+        // notice.copied_paste_manually is shown instead of the skip message;
+        // tray Error is still set. Bite: the skip message shown, Error not set.
+        use crate::delivery::DeliveryResult;
+        use crate::post_process::SkipReason;
+        let t0 = Instant::now();
+        let mut c = RecordingController::<Ctx>::new();
+        let a = record(&mut c, t0, ms(1000)).id();
+        let ts = t0 + ms(2000);
+        c.job_finished(
+            a,
+            JobEnd::DeliveredSkipped {
+                reason: SkipReason::Http { status: 502 },
+                delivery: DeliveryResult::CopyManual,
+            },
+            ts,
+        );
+        assert_eq!(
+            c.indicator(),
+            &IndicatorState {
+                tray: TrayState::Error,
+                overlay: message(i18n::NOTICE_COPIED_PASTE_MANUALLY, vec![], ts),
+            }
+        );
+    }
+
+    #[test]
     fn new_recording_preempts_message_and_it_is_not_reshown() {
         // data-model: a new recording pre-empts the message display, and the
         // message is not re-shown. Tray: Recording over Error, Error after.

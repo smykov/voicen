@@ -974,4 +974,42 @@ mod tests {
         }
         assert!(missing.is_empty(), "ids without text: {missing:?}");
     }
+
+    #[test]
+    fn post_processing_skip_ids_are_declared_with_text_and_their_placeholders() {
+        // T-020, contracts/ipc.md "Message catalog entries", #91(2): the six
+        // notice.post_processing_skipped.* ids are declared with messages! (so
+        // the parity and existence tests cover them), have their own non-empty
+        // text in en and ru, and name exactly their placeholders: {host} for
+        // unreachable, {status} for http, none for the rest. Bite: an id missing
+        // from a catalog, a placeholder dropped or misspelled, an id served only
+        // by text()'s fallback.
+        let c = catalog(EN_JSON, RU_JSON);
+        let rows: [(&str, &[&str]); 6] = [
+            ("notice.post_processing_skipped.timeout", &[]),
+            ("notice.post_processing_skipped.unreachable", &["host"]),
+            ("notice.post_processing_skipped.invalid_key", &[]),
+            ("notice.post_processing_skipped.http", &["status"]),
+            ("notice.post_processing_skipped.invalid_response", &[]),
+            ("notice.post_processing_skipped.not_configured", &[]),
+        ];
+        let mut wrong = Vec::new();
+        for (id, names) in rows {
+            if !MESSAGE_IDS.iter().any(|m| m.0 == id) {
+                wrong.push(format!("{id}: not declared with messages!"));
+            }
+            let want: BTreeSet<&str> = names.iter().copied().collect();
+            for lang in LANGS {
+                match own_text(&c, lang, id) {
+                    None => wrong.push(format!("{id} ({lang:?}): no text")),
+                    Some(t) if placeholder_names(t) != want => wrong.push(format!(
+                        "{id} ({lang:?}): placeholders {:?}, expected {want:?}",
+                        placeholder_names(t)
+                    )),
+                    Some(_) => {}
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "\n{}", wrong.join("\n"));
+    }
 }

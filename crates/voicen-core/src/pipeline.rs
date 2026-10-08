@@ -368,11 +368,14 @@ impl Pipeline {
 mod tests {
     use super::*;
     use crate::audio::AudioBuffer;
+    use crate::delivery::DeliveryResult;
     use crate::engine::TranscribeRequest;
     use crate::events::{DictationEvent, OutcomeCode, RecordingObserver};
     use crate::i18n;
-    use crate::platform::{FakeClipboard, FakePaster, FakeTempAudioStore, StoreCall, WindowRef};
-    use crate::post_process::{PassThrough, PostProcessed};
+    use crate::platform::{
+        FakeClipboard, FakePaster, FakeTempAudioStore, PasterCall, StoreCall, WindowRef,
+    };
+    use crate::post_process::{PassThrough, PostProcessInput, PostProcessOutcome, SkipReason};
     use crate::recording::{MicCause, Press, RecordingController, Release};
     use crate::secrets::{CredentialCall, CredentialOp, FakeCredentialStore, KeySlot};
     use crate::settings::{defaults, EngineKind};
@@ -428,31 +431,45 @@ mod tests {
         })
     }
 
-    /// Returns a fixed text and records its inputs.
+    /// Returns a fixed outcome and records what it was given: the raw text, the
+    /// job's post-processing settings and `Timeouts`; it reads the post-processing
+    /// key from the store it is given, so the credential log shows which store
+    /// that was (T-020).
     struct FixedPostProcessor {
-        out: String,
+        out: PostProcessOutcome,
         inputs: Mutex<Vec<String>>,
+        settings: Mutex<Vec<crate::post_process::settings::PostProcessingSettings>>,
+        timeouts: Mutex<Vec<Timeouts>>,
     }
 
     impl FixedPostProcessor {
+        /// `Applied(out)` (the pre-T-020 fake returned this text).
         fn new(out: &str) -> Arc<FixedPostProcessor> {
+            FixedPostProcessor::returning(PostProcessOutcome::Applied(out.to_string()))
+        }
+        fn returning(out: PostProcessOutcome) -> Arc<FixedPostProcessor> {
             Arc::new(FixedPostProcessor {
-                out: out.to_string(),
+                out,
                 inputs: Mutex::new(Vec::new()),
+                settings: Mutex::new(Vec::new()),
+                timeouts: Mutex::new(Vec::new()),
             })
         }
         fn inputs(&self) -> Vec<String> {
             lock(&self.inputs).clone()
         }
+        fn timeouts(&self) -> Vec<Timeouts> {
+            lock(&self.timeouts).clone()
+        }
     }
 
     impl PostProcessor for FixedPostProcessor {
-        fn process(&self, text: String, _settings: &Settings) -> PostProcessed {
-            lock(&self.inputs).push(text);
-            PostProcessed {
-                text: self.out.clone(),
-                notice: None,
-            }
+        fn process(&self, raw: &str, input: &PostProcessInput<'_>) -> PostProcessOutcome {
+            lock(&self.inputs).push(raw.to_string());
+            lock(&self.settings).push(input.settings.clone());
+            lock(&self.timeouts).push(*input.timeouts);
+            let _ = input.credentials.read(KeySlot::PostProcessing);
+            self.out.clone()
         }
     }
 
@@ -754,6 +771,198 @@ mod tests {
         );
         assert_eq!(f.clipboard.texts(), Vec::<String>::new());
         assert_eq!(f.paster.calls(), vec![]);
+    }
+
+    // ---- T-020: the post-processing stage -------------------------------------
+
+    #[test]
+    fn post_processor_gets_the_job_timeouts_of_its_request() {
+        // #99 / T-020 invariant: Pipeline::process derives one Timeouts per job
+        // (the snapshot's, or the with_timeouts override) and hands the same value
+        // to the engine and to the post-processor. Two jobs with different
+        // snapshots on one Pipeline::new: each post-processor input equals that
+        // job's request timeouts and Timeouts::from_settings(snapshot); under
+        // with_timeouts(t) both are t. Bite: Timeouts::default() in the
+        // post-processing path, the override field read directly (None in
+        // production), a value fixed at construction or taken from the first job,
+        // two derivations of which only one sees the override.
+        use crate::settings::TimeoutSettings;
+        let first = TimeoutSettings {
+            connect_s: 7,
+            api_transcription_s: 45,
+            local_server_s: 90,
+            post_processing_s: 20,
+            builtin_local_s: 150,
+        };
+        let second = TimeoutSettings {
+            connect_s: 2,
+            api_transcription_s: 9,
+            local_server_s: 11,
+            post_processing_s: 6,
+            builtin_local_s: 33,
+        };
+
+        let f = fakes();
+        let seen = Arc::new(Seen::default());
+        let pp = FixedPostProcessor::new("POST TEXT");
+        let p = Pipeline::new(deps(&f, pp.clone()))
+            .with_engine_factory(fake_factory(Ok("ENGINE TEXT".to_string()), &seen));
+        for t in [first, second] {
+            let _ = p.run_job(finished(fixtures::speech_3s(), settings_with_timeouts(t)));
+        }
+        let requested: Vec<Timeouts> = lock(&seen.requests).iter().map(|r| r.timeouts).collect();
+        let want = vec![
+            Timeouts::from_settings(&first),
+            Timeouts::from_settings(&second),
+        ];
+        assert_ne!(want.first(), want.last(), "the two snapshots must differ");
+        assert_eq!(pp.timeouts(), want, "post-processor");
+        assert_eq!(requested, want, "engine request");
+
+        let f = fakes();
+        let seen = Arc::new(Seen::default());
+        let pp = FixedPostProcessor::new("POST TEXT");
+        let t = Timeouts {
+            connect: Duration::from_millis(123),
+            post_processing: Duration::from_millis(789),
+            ..Timeouts::default()
+        };
+        let p = Pipeline::with_timeouts(deps(&f, pp.clone()), t)
+            .with_engine_factory(fake_factory(Ok("ENGINE TEXT".to_string()), &seen));
+        let _ = p.run_job(finished(
+            fixtures::speech_3s(),
+            settings_with_timeouts(first),
+        ));
+        let requested: Vec<Timeouts> = lock(&seen.requests).iter().map(|r| r.timeouts).collect();
+        assert_eq!(pp.timeouts(), vec![t], "post-processor under with_timeouts");
+        assert_eq!(requested, vec![t], "engine request under with_timeouts");
+    }
+
+    #[test]
+    fn post_processor_gets_the_snapshot_settings_and_the_deps_credentials() {
+        // spec 003 FR-010: the stage reads the post-processing settings of the
+        // job's press snapshot and the deps' one credential store. Bite: defaults
+        // or a live settings value instead of the snapshot, another store.
+        let f = fakes();
+        let seen = Arc::new(Seen::default());
+        let pp = FixedPostProcessor::new("POST TEXT");
+        let p = Pipeline::new(deps(&f, pp.clone()))
+            .with_engine_factory(fake_factory(Ok("ENGINE TEXT".to_string()), &seen));
+        let mut s = settings();
+        s.post_processing.enabled = true;
+        s.post_processing.base_url = "https://llm.example.com/v1".to_string();
+        s.post_processing.model = "gpt-test-mini".to_string();
+        s.post_processing.prompt = "PROMPT-MARKER".to_string();
+        let _ = p.run_job(finished(fixtures::speech_3s(), s.clone()));
+        assert_eq!(lock(&pp.settings).clone(), vec![s.post_processing]);
+        assert_eq!(pp.inputs(), vec!["ENGINE TEXT".to_string()]);
+        assert_eq!(
+            f.creds.calls(),
+            vec![
+                CredentialCall {
+                    op: CredentialOp::Read,
+                    slot: KeySlot::TranscriptionApi
+                },
+                CredentialCall {
+                    op: CredentialOp::Read,
+                    slot: KeySlot::PostProcessing
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn skipped_post_processing_delivers_the_raw_transcript() {
+        // Acceptance 2 / spec 003 FR-007, FR-016: a skip delivers the engine's text
+        // byte for byte, ends as DeliveredSkipped with its reason and the delivery
+        // result, keeps no pending recording, and logs JobFinished outcome text
+        // with no failure. auto_paste off gives CopiedOnly in the same end. Bite:
+        // the skip delivered as Delivered (no tray error, reason lost), as Failed
+        // (pending kept, nothing pasted), the reason replaced, nothing delivered.
+        let raw = "  ENGINE  TEXT\twith spacing ";
+        for (auto_paste, delivery, pasted) in [
+            (true, DeliveryResult::Pasted, true),
+            (false, DeliveryResult::CopiedOnly, false),
+        ] {
+            let f = fakes();
+            let seen = Arc::new(Seen::default());
+            let pp = FixedPostProcessor::returning(PostProcessOutcome::Skipped(SkipReason::Http {
+                status: 500,
+            }));
+            let p = Pipeline::new(deps(&f, pp.clone()))
+                .with_engine_factory(fake_factory(Ok(raw.to_string()), &seen));
+            let mut s = settings();
+            s.auto_paste = auto_paste;
+            let report = p.run_job(finished(fixtures::speech_3s(), s));
+
+            assert_eq!(
+                report,
+                JobReport {
+                    end: JobEnd::DeliveredSkipped {
+                        reason: SkipReason::Http { status: 500 },
+                        delivery,
+                    },
+                    pending: None,
+                },
+                "auto_paste {auto_paste}"
+            );
+            assert_eq!(pp.inputs(), vec![raw.to_string()]);
+            assert_eq!(
+                f.clipboard.texts(),
+                vec![raw.to_string()],
+                "raw byte for byte"
+            );
+            assert_eq!(
+                f.paster
+                    .calls()
+                    .iter()
+                    .any(|c| matches!(c, PasterCall::SendCtrlV)),
+                pasted,
+                "auto_paste {auto_paste}: {:?}",
+                f.paster.calls()
+            );
+            assert_eq!(p.pending(), None);
+            assert_eq!(f.store.calls(), vec![]);
+            let finished_events = job_finished(&f.observer.events());
+            assert!(
+                matches!(
+                    finished_events.as_slice(),
+                    [DictationEvent::JobFinished {
+                        engine: Some("fake"),
+                        outcome: OutcomeCode::Text,
+                        failure: None,
+                        http_status: None,
+                        ..
+                    }]
+                ),
+                "{finished_events:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn not_run_delivers_the_raw_transcript_as_delivered() {
+        // PostProcessOutcome::final_text: NotRun (post-processing off) delivers the
+        // engine's text, a plain Delivered with the delivery notice. Bite: NotRun
+        // treated as a skip (tray error on every dictation), or as no speech.
+        let f = fakes();
+        let seen = Arc::new(Seen::default());
+        let pp = FixedPostProcessor::returning(PostProcessOutcome::NotRun);
+        let p = Pipeline::new(deps(&f, pp.clone()))
+            .with_engine_factory(fake_factory(Ok("ENGINE TEXT".to_string()), &seen));
+        let mut s = settings();
+        s.auto_paste = false;
+        let report = p.run_job(finished(fixtures::speech_3s(), s));
+        assert_eq!(
+            report,
+            JobReport {
+                end: JobEnd::Delivered {
+                    notice: Some(i18n::NOTICE_COPIED)
+                },
+                pending: None
+            }
+        );
+        assert_eq!(f.clipboard.texts(), vec!["ENGINE TEXT".to_string()]);
     }
 
     #[test]
