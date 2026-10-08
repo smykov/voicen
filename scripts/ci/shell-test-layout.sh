@@ -48,9 +48,9 @@
 #        header or a key. Non-ASCII text inside strings and comments passes;
 #      - before the first table header, any line other than a blank, whitespace-only or comment
 #        line (a line whose code, strings blanked and the comment cut, is not empty, or that
-#        holds a string): a root-level key such as `bin = [{ path = .. }]` or
-#        `example = [{ .., test = true }]` makes a target table without any header. Stable
-#        cargo has no root-level key, so every key there is refused;
+#        holds a string, also a lone "x" or 'y' line of strings only): a root-level key such
+#        as `bin = [{ path = .. }]` or `example = [{ .., test = true }]` makes a target table
+#        without any header. Stable cargo has no root-level key, so every key there is refused;
 #      The tracker does not parse TOML: it accepts only that whitelist grammar, and within it
 #      every target table comes from a header it follows (step 3 below says why);
 #   4. `--doc` or `rustdoc` in a *.yml / *.yaml file of the workflows dir, for any package (the
@@ -136,15 +136,22 @@ add "a bench or example target: its exe is not configured by build.rs" "$hits" "
 # table bare or quoted with bare-key characters only (Q), and nothing but blank lines and
 # comments before the first header (R). In a manifest that passes, a line is a table header
 # exactly when TOML reads one, and a one-key header names exactly the table TOML opens. A
-# target table has only two other sources in TOML, a dotted key or an inline value: under a
+# target table has only three other sources in TOML. A dotted key or an inline value: under a
 # header they belong to that header's table (lib.path under [package] is package.lib.path),
-# and at the root R refuses them. So every [lib], [[bin]], [[test]], [[bench]] and [[example]]
-# table of a manifest that passes is opened by a header the tracker follows.
+# and at the root R refuses them. A dotted header, which creates its parent table: [lib.x]
+# makes `lib`. The tracker reads [lib.x] as the table lib.x, not lib, so it counts as no [lib]:
+# without a real [lib] header N refuses the manifest (cargo 1.99 builds that implicit lib with
+# doctest on), and with one, the keys under [lib.x] belong to lib.x, not to lib, so they add
+# no target field (no path, no doctest). [bin.x], [test.x], [bench.x] and [example.x] make a
+# table where cargo needs an array, and cargo rejects the manifest; after a real [[bin]] they
+# only add a subtable to that bin, again no target field. So every [lib], [[bin]], [[test]],
+# [[bench]] and [[example]] table of a manifest that passes is opened by a header the tracker
+# follows, and the pin is read only from such a [lib].
 # - R: before the first line the header pattern reads, a line is refused when its code (strings
 #   blanked, the comment cut) holds anything but spaces and tabs, or when it holds a string at
-#   all (a lone "x" line, which cargo rejects anyway). Blank, whitespace-only and comment lines
-#   pass, whatever the comment holds. Stable cargo has no root-level key (cargo-features is
-#   nightly-only), so nothing in use is refused.
+#   all (a lone "x" or 'y' line, which cargo rejects anyway; v-cargo-root-lone-string). Blank,
+#   whitespace-only and comment lines pass, whatever the comment holds. Stable cargo has no
+#   root-level key (cargo-features is nightly-only), so nothing in use is refused.
 # - B: each line is scanned left to right; single-line basic strings ("..", with \" and \\
 #   escapes) and literal strings ('..', no escapes) are removed, then the comment from the
 #   first # left. The [ ] and { } left must nest and close on the line, and no string may be
