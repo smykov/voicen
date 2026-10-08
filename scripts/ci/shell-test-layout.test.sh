@@ -212,6 +212,10 @@ check v-cargo-root-inline-bench       1 "v-cargo-root-inline-bench/Cargo.toml:5:
 check v-cargo-root-inline-test        1 "v-cargo-root-inline-test/Cargo.toml:5:"         # test = [{ .., path = "../outside/t.rs" }] (probe j)
 check v-cargo-root-plain-key          1 "v-cargo-root-plain-key/Cargo.toml:5:"           # x = 1: no target name, no path, still refused
 check ok-cargo-root-comments          0 "ok:"                                            # blank, whitespace-only (tab, spaces) and comment lines holding [ ] { } = " before [package]
+# T-036 (T-038 review round 4): rule R's `|| hasstr` branch. A line made only of strings
+# blanks to spaces, so only the string test refuses it; the needle names rule R's message.
+check v-cargo-root-lone-string        1 "Cargo.toml:5:\"x\"  (nothing but blank lines"         # "x" alone before [package]
+check v-cargo-root-lone-string        1 "Cargo.toml:6:'y'  # a lone literal string  (nothing but blank lines" # 'y' + comment
 
 # Cannot run: exit 3.
 check does-not-exist            3 "cannot run"
