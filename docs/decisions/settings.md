@@ -42,6 +42,13 @@ Tasks: T-003, T-032, T-030, T-014, T-004 (`SettingsView.unavailable`, the e2e wi
 - **Where it is enforced:** `settings::url::check_base_url` returns `UrlError::Credentials` for a non-empty username or password, and `validate` maps it to `url.credentials`; a query string is allowed and stored as typed. "Never logged" is the log's typed allowlist (T-008, #30): no `LogEvent` has a field for a URL, host or settings value; the settings lines carry the outcome, field ids and codes only (`diag::LogEvent::settings_load` / `settings_save`, pinned by `tests/settings_log.rs` and the redaction run `tests/diag_pipeline.rs`; docs/decisions/diagnostics-log.md).
 - **Don't:** accept userinfo in a base URL, strip it silently, or log a base URL in any form (no `LogEvent` field may hold one; T-008).
 
+### The request URL is decided only by `transcription_url`; the stored URL is kept as typed (T-072)
+
+- **Defect that produced it:** owner log 2026-10-07 (`dictation rec=4 engine=local_server outcome=failed failure=server_error http_status=404`, decision #96). The join appended `audio/transcriptions` unconditionally, so a full endpoint URL copied from another client was requested at `…/audio/transcriptions/audio/transcriptions`.
+- **What breaks if you violate it:** a pasted full endpoint gets a doubled path and a 404; a second URL rule (in the UI, the shell or on save) disagrees with the one the client connects with (P-010, F-003 class); rewriting the stored value on save makes the file, the snapshot and the UI differ from what the user pasted.
+- **Where it is enforced:** `engine::openai::transcription_url` (the only caller is `OpenAiCompatibleEngine::transcribe`; api, local_server and Test connection all reach it through `engine::engine_for`): drop one empty trailing segment; if the last two segments equal `audio`, `transcriptions` ASCII case-insensitively, keep the path as typed, otherwise append them; the query is always kept. `settings::url::check_base_url` / `normalize_base_url` are unchanged (trim, strip one `/`). Tests: `engine::openai::tests::{join_full_endpoint_kept, join_near_misses_append}`, `tests/openai_client.rs::full_endpoint_url_is_requested_as_is`, `tests/local_server.rs::{full_endpoint_local_server_url_is_requested_as_is, wrong_path_reports_server_404}`.
+- **Don't:** strip `/audio/transcriptions` from the stored value on save, "repair" a doubled path, match on the path text (`ends_with("audio/transcriptions")` accepts `/xaudio/transcriptions`), or build the request URL anywhere else.
+
 ### One language list
 
 - **Defect that produced it:** none yet (found in T-003 review round 1, decisions #27, #28). The contract said "a code from the Whisper language list" without naming it, so the validator, the UI picker and the engines could each carry their own list, and Whisper's `jw` is not ISO 639-1 (`jv`).
@@ -122,6 +129,7 @@ Tasks: T-003, T-032, T-030, T-014, T-004 (`SettingsView.unavailable`, the e2e wi
 | Each feature plans its own key/settings port | duplicate seams, cycles | decisions #20, #21 |
 | Hand-written URL parser | R-8 requires the `url` crate | decisions #17 |
 | A TS loopback rule in the UI for the insecure-endpoint warning | a second rule over another parser (WHATWG `URL`), can disagree with the `url` crate the client connects with | decision #52, T-015 investigation |
+| Strip a trailing `/audio/transcriptions` from the URL on save | rewrites what the user typed; a second normalization rule in `settings/service.rs` | decision #96, T-072 investigation, option B |
 | `tokio::sync::watch` for `subscribe` | no tokio in core | decisions #22 |
 | Plain `fs::rename` into the backup name | replaces an existing `to` on Unix and Windows, so it overwrites an earlier backup | T-032 investigation, hypothesis 5 |
 | `chrono` for the backup suffix | allowed by #9, but one format string does not need a crate in the core build | T-032 investigation, design 5 |

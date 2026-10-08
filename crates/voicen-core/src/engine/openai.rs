@@ -7,7 +7,8 @@
 //! picks the request deadline (`Timeouts::api_transcription` or
 //! `Timeouts::local_server`) and `kind()` (`"api"` or `"local_server"`).
 //!
-//! `POST {base}/audio/transcriptions`, multipart `file` (`audio.wav`, `audio/wav`),
+//! `POST {base}/audio/transcriptions` (or the stored URL as is when it already
+//! ends in `audio/transcriptions`: [`transcription_url`], decision #96), multipart `file` (`audio.wav`, `audio/wav`),
 //! `model` (omitted when the engine has none: an unset local-server model),
 //! `language` (omitted for auto), `response_format=json`;
 //! `Authorization: Bearer <key>` only when a key is stored; a key whose
@@ -271,16 +272,37 @@ fn body_capacity(wav_len: usize, model: Option<&str>, language: Option<&str>) ->
         .saturating_add(MULTIPART_OVERHEAD)
 }
 
-/// `{base}/audio/transcriptions` with the base's query kept: one empty trailing
-/// path segment dropped, then `audio`, `transcriptions` appended. `None` only for
-/// a cannot-be-a-base URL (never `http`/`https`).
+/// The request URL for the stored URL `base`, query always kept (decision #96):
+/// one empty trailing path segment is dropped; then, if the last two path
+/// segments equal `audio`, `transcriptions` (ASCII case-insensitive), the path is
+/// kept as typed (the user gave the full endpoint), otherwise `audio`,
+/// `transcriptions` are appended (the user gave a base). Only whole segments
+/// decide: `/v1/xaudio/transcriptions` or `/v1/audio%2Ftranscriptions` is a base.
+/// The stored setting is never rewritten; this is the only place the request URL
+/// is built. `None` only for a cannot-be-a-base URL (never `http`/`https`).
 pub(crate) fn transcription_url(base: &url::Url) -> Option<url::Url> {
     let mut url = base.clone();
-    url.path_segments_mut()
-        .ok()?
-        .pop_if_empty()
-        .extend(["audio", "transcriptions"]);
+    url.path_segments_mut().ok()?.pop_if_empty();
+    if !names_endpoint(&url) {
+        url.path_segments_mut()
+            .ok()?
+            .extend(["audio", "transcriptions"]);
+    }
     Some(url)
+}
+
+/// Whether the last two path segments of `url` are `audio`, `transcriptions`,
+/// compared ASCII case-insensitively on the segment text as stored.
+fn names_endpoint(url: &url::Url) -> bool {
+    let Some(segments) = url.path_segments() else {
+        return false;
+    };
+    let mut last_two = segments.rev();
+    matches!(
+        (last_two.next(), last_two.next()),
+        (Some(last), Some(prev))
+            if last.eq_ignore_ascii_case("transcriptions") && prev.eq_ignore_ascii_case("audio")
+    )
 }
 
 /// The `host[:port]` shown in `CannotReach`: the host, plus the port only when the
