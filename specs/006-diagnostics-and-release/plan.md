@@ -74,7 +74,7 @@ Post-design re-check (after data-model.md and contracts/): still PASS. No comple
 | FR-015 (FR-20) | 30 days / 20 files; survives log rotation | — | — | — |
 | FR-017 (FR-01, FR-20) | — | button → `open_logs_folder`; error alert | command creates the dir and resolves the path | Explorer opens from tray and About |
 | FR-018, FR-019, FR-020 (NFR-09, FR-12) | — | — | silent per-user install, size ≤ 100 MB, shortcut, resources | clean Win 11 Sandbox, no UAC (SC-009) |
-| FR-021–FR-025 (FR-28, FR-15, FR-19) | — | — | `/KEEPDATA`, `/S`, reinstall, `cmdkey` check, autostart value removed | interactive question EN/RU |
+| FR-021–FR-025 (FR-28, FR-15, FR-19) | — | — | `/KEEPDATA`, `/S`, `/P` reinstall, credential check through `scripts/ci/credentials.ps1`, autostart value removed | interactive question EN/RU |
 | FR-026 (decisions #4) | — | — | first green run of `windows` on the repository | owner creates repo / pushes |
 | FR-027, FR-028 (§9 deployed) | — | — | the job itself | — |
 | FR-029, FR-030 (§9 release) | `check-version.sh` tests | — | release job on a tag | first release notes reviewed |

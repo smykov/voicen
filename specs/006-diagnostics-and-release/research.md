@@ -98,7 +98,7 @@ Phase 0 of [plan.md](plan.md). The stack is fixed by `docs/requirements.md` §9 
   2. launch, start line with commit (existing), then `Stop-Process -Force` (existing);
   3. relaunch → require `previous session ended abnormally` in the log and one `crash-*.txt` of kind `abnormal_end` (FR-013(c), deployed evidence for the "killed" acceptance); exit through a test-only `--exit` command-line request handled by the single-instance forwarder (clean exit) → relaunch → no new crash file (FR-013 clean path) — **if** 001's single-instance handler forwards arguments; otherwise this check stays in the Windows integration tests;
   4. reinstall the same installer silently → user data (log file) still present (FR-024);
-  5. create a test credential with `cmdkey /generic:<prefix>ci-test /user:ci /pass:ci`; silent uninstall with `/KEEPDATA` → data folder and credential still present; reinstall; silent uninstall without switches → `%LOCALAPPDATA%\Voicen` absent, `cmdkey /list` shows no `<prefix>` entry (FR-021, FR-022);
+  5. plant a test credential `<prefix>ci-…` and an outsider outside the prefix through `scripts/ci/credentials.ps1` (`Add-VoicenCredential`; the only way CI plants or observes Credential Manager entries, `make check` › `check-ci-credentials`, T-061/F-009); a same-version `setup.exe /P` reinstall (it runs the old uninstaller) finishes within a bound and keeps the data folder, the credential and the HKCU Run value; silent uninstall with `/KEEPDATA` → data folder and credential still present (`Test-VoicenCredential`); reinstall; silent uninstall without switches → `%LOCALAPPDATA%\Voicen` absent, `Get-VoicenCredentials -Prefix '<prefix>'` empty, the outsider kept (FR-021, FR-022, FR-024; T-025);
   6. upload installer and `voicen.pdb` (zipped) as artifacts named with the commit.
   The uninstaller path is `%LOCALAPPDATA%\Voicen\uninstall.exe` — observed in run 37044674209 (commit 0e73b52), recorded by `docs/tasks/T-029.md`: `found uninstall.exe at C:\Users\runneradmin\AppData\Local\Voicen\uninstall.exe`.
 - **PRs from forks**: the job runs without secrets (none needed); the release job never runs for PRs.
@@ -125,7 +125,7 @@ Phase 0 of [plan.md](plan.md). The stack is fixed by `docs/requirements.md` §9 
 | Session marker classification | all four cases | — | kill → relaunch in the smoke | shutdown/logoff while running → no crash record |
 | Open logs folder / notices / project page | — | buttons call the commands | logs path resolution and folder creation (shell test) | Explorer opens; Notepad shows notices |
 | Installer per-user, size, shortcut | — | — | silent install, size, shortcut exists | clean Windows 11 in Windows Sandbox, no UAC |
-| Uninstaller yes/no/upgrade/credentials | — | — | `/KEEPDATA`, default, reinstall, `cmdkey` | interactive question text EN/RU |
+| Uninstaller yes/no/upgrade/credentials | — | — | `/KEEPDATA`, default, `/P` reinstall, `credentials.ps1` | interactive question text EN/RU |
 | Release publishing | `scripts/check-version.test.sh` in the gate | — | tag on the repository | first real release |
 | License check + notices | `make licenses-check` in the gate | — | — | notices reviewed once per release |
 

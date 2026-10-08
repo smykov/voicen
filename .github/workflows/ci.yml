@@ -147,6 +147,22 @@ jobs:
             else { $missing += "$($p[0]) not found at $($p[1])" }
           }
           if ($missing) { throw ($missing -join '; ') }
+          # T-025 (NFR-09, spec 006 FR-019): the installed size is measured before the first
+          # launch (no settings, logs or WebView2 data yet) and is at most 100 MB (binary units,
+          # OQ-08); the committed THIRD-PARTY-NOTICES.txt (T-027) is installed next to voicen.exe
+          # byte for byte (bundle.resources map form).
+          $installDir = Join-Path $env:LOCALAPPDATA 'Voicen'
+          $installed = @(Get-ChildItem -LiteralPath $installDir -Recurse -File -Force)
+          $size = ($installed | Measure-Object -Property Length -Sum).Sum
+          $limit = 100 * 1024 * 1024
+          Write-Output "installed size before the first launch: $size bytes in $($installed.Count) files (limit $limit)"
+          if ($size -gt $limit) { throw "installed size $size bytes exceeds $limit bytes (100 MB, NFR-09)" }
+          $notices = Join-Path $installDir 'THIRD-PARTY-NOTICES.txt'
+          if (-not (Test-Path -LiteralPath $notices -PathType Leaf)) { throw "THIRD-PARTY-NOTICES.txt not found at $notices after the silent install (installed files: $(($installed | ForEach-Object { $_.Name }) -join ', '))" }
+          $want = (Get-FileHash -LiteralPath 'THIRD-PARTY-NOTICES.txt' -Algorithm SHA256).Hash
+          $got = (Get-FileHash -LiteralPath $notices -Algorithm SHA256).Hash
+          if ($got -ne $want) { throw "the installed THIRD-PARTY-NOTICES.txt (SHA256 $got) differs from the committed one (SHA256 $want)" }
+          Write-Output "found THIRD-PARTY-NOTICES.txt at $notices, equal to the committed file"
           # T-014: a leftover Run value (e.g. from an older install) must be removed by the
           # reconcile at first launch, whose defaults say start_with_windows = off.
           $run = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
@@ -722,6 +738,190 @@ jobs:
           if ($blockedNew.Count -ne 1) { throw "a 3 s hold on a first launch (engine none) gave $($blockedNew.Count) new '$blockedLine' lines, expected exactly 1" }
           if ($recNew -ne 0) { throw "a blocked hold wrote $recNew 'dictation rec=' line(s)" }
           Write-Output "first launch: one blocked hold, one blocked line after $([int]$seenAt) s, no dictation rec= line, voicen.exe still running"
+      # T-025 (FR-28 v4, spec 006 FR-021..024, decisions #76): the three install/uninstall steps
+      # below come after every step that launches the app, in this order: W2 reinstall, W3
+      # uninstall /S /KEEPDATA (then a silent reinstall), W4 uninstall /S (the install is gone
+      # afterwards). Credential Manager is planted and observed only through
+      # scripts/ci/credentials.ps1 (docs/decisions/windows-ci-runner.md); no step launches
+      # voicen.exe, so no window predicate is involved. Raw facts only (F-003).
+      #
+      # W2: a same-version /P reinstall. The installer finds the existing install (same version,
+      # passive) and runs the old uninstaller in place (uninstall.exe _?=<dir>), the one path on
+      # which an installer starts the uninstaller: the forked template passes /UPDATE /P there, so
+      # the uninstaller asks nothing, removes no data, keeps the credentials and keeps the HKCU Run
+      # value written by Start with Windows (T-034). Red on the stock template (it deletes the Run
+      # value without /UPDATE), and red with the hooks but no fork (the passive question blocks:
+      # bounded at 120 s).
+      - name: A same-version /P reinstall asks nothing within 120 s and keeps the data folder, the Voicen/ credential and the Run value (T-025 upgrade path)
+        shell: pwsh
+        run: |
+          . ./scripts/ci/hotkey-hold.ps1
+          . ./scripts/ci/credentials.ps1
+          $dir = Join-Path $env:LOCALAPPDATA 'Voicen'
+          $exe = Join-Path $dir 'voicen.exe'
+          $settings = Join-Path $dir 'settings.json'
+          $marker = Join-Path $dir 'ci-keep.txt'
+          $run = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+          $runValue = '"' + $exe + '" --autostart'
+          $fake = 'sk-test-ci-uninstall-0000-not-a-real-key'
+          $kept = @('Voicen/ci-uninstall', 'VoicenOther/ci-uninstall-keep')
+          function Get-RunValue { (Get-ItemProperty -Path $run -Name 'Voicen' -ErrorAction SilentlyContinue).Voicen }
+          function Remove-All { $failed = 0; foreach ($t in $kept) { try { Remove-VoicenCredential -Target $t } catch { $failed++; Write-Host "cleanup: $($_.Exception.Message)" } }; Remove-ItemProperty -Path $run -Name 'Voicen' -ErrorAction SilentlyContinue; $failed }
+          Stop-AllVoicen
+          if (-not (Test-Path -LiteralPath $settings -PathType Leaf)) { throw "premise: settings.json not found at $settings before the reinstall" }
+          $settingsHash = (Get-FileHash -LiteralPath $settings -Algorithm SHA256).Hash
+          $markerText = "ci-keep $env:VOICEN_COMMIT"
+          Set-Content -LiteralPath $marker -Value $markerText -NoNewline
+          New-ItemProperty -Path $run -Name 'Voicen' -PropertyType String -Value $runValue -Force | Out-Null
+          if ((Get-RunValue) -ne $runValue) { [void](Remove-All); throw "premise: the HKCU Run value Voicen reads '$(Get-RunValue)' after writing '$runValue'" }
+          try {
+            foreach ($t in $kept) {
+              Add-VoicenCredential -Target $t -Secret $fake
+              if (-not (Test-VoicenCredential -Target $t)) { throw "premise: $t was written but Test-VoicenCredential does not find it" }
+            }
+          } catch { [void](Remove-All); throw }
+          Write-Output "premise: settings.json, ci-keep.txt, the Run value '$runValue' and $($kept -join ', ') in place"
+          $setup = Get-ChildItem target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
+          $p = Start-Process $setup.FullName -ArgumentList '/P' -PassThru
+          $null = $p.Handle
+          if (-not $p.WaitForExit(120000)) {
+            Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+            Get-Process -Name uninstall -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+            [void](Remove-All)
+            throw "the same-version /P reinstall did not finish within 120 s: a question blocked the reinstall (the old uninstaller did not get /UPDATE /P)"
+          }
+          Stop-AllVoicen
+          $bad = @()
+          if ($p.ExitCode -ne 0) { $bad += "the /P reinstall exited with $($p.ExitCode), expected 0" }
+          if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { $bad += "voicen.exe not found at $exe after the reinstall" }
+          if (-not (Test-Path -LiteralPath $marker -PathType Leaf)) { $bad += "the data marker $marker was deleted by the reinstall" }
+          elseif ((Get-Content -LiteralPath $marker -Raw) -ne $markerText) { $bad += "the data marker $marker changed during the reinstall" }
+          if (-not (Test-Path -LiteralPath $settings -PathType Leaf)) { $bad += "settings.json was deleted by the reinstall" }
+          elseif ((Get-FileHash -LiteralPath $settings -Algorithm SHA256).Hash -ne $settingsHash) { $bad += "settings.json changed during the reinstall" }
+          foreach ($t in $kept) { if (-not (Test-VoicenCredential -Target $t)) { $bad += "$t was deleted by the reinstall" } }
+          $after = Get-RunValue
+          if ($after -ne $runValue) { $bad += "the HKCU Run value Voicen is '$after' after the reinstall, expected '$runValue' (kept on an installer-started uninstall)" }
+          $cleanup = Remove-All
+          if ($bad) { throw ($bad -join '; ') }
+          if ($cleanup -ne 0) { throw "cleanup: a Remove-VoicenCredential above failed (Win32 error printed)" }
+          Write-Output "same-version /P reinstall: exit 0 within 120 s; settings.json, ci-keep.txt, $($kept -join ', ') and the Run value kept"
+      # W3: uninstall.exe /S /KEEPDATA keeps the data folder and the Voicen/ credentials and still
+      # removes the Run value, the Start-menu shortcut and the uninstall key (a regression pin of
+      # the hook's /KEEPDATA branch; green on the stock uninstaller). Without _?= the uninstaller
+      # copies itself to %TEMP% and returns at once, so the step polls (60 s) and then waits for
+      # that copy to end. Then a silent reinstall for W4.
+      - name: uninstall.exe /S /KEEPDATA keeps the data folder and the Voicen/ credential, removes the Run value and the shortcut (T-025)
+        shell: pwsh
+        run: |
+          . ./scripts/ci/hotkey-hold.ps1
+          . ./scripts/ci/credentials.ps1
+          $dir = Join-Path $env:LOCALAPPDATA 'Voicen'
+          $exe = Join-Path $dir 'voicen.exe'
+          $uninstaller = Join-Path $dir 'uninstall.exe'
+          $settings = Join-Path $dir 'settings.json'
+          $marker = Join-Path $dir 'ci-keep.txt'
+          $shortcut = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Voicen.lnk'
+          $uninstKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Voicen'
+          $run = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+          $fake = 'sk-test-ci-keepdata-0000-not-a-real-key'
+          $target = 'Voicen/ci-keepdata'
+          function Get-RunValue { (Get-ItemProperty -Path $run -Name 'Voicen' -ErrorAction SilentlyContinue).Voicen }
+          function Get-UninstallerCopies { @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path.StartsWith([IO.Path]::GetTempPath(), [StringComparison]::OrdinalIgnoreCase) -and $_.Path -like '*\~nsu*' }) }
+          function Remove-All { $failed = 0; try { Remove-VoicenCredential -Target $target } catch { $failed++; Write-Host "cleanup: $($_.Exception.Message)" }; $failed }
+          Stop-AllVoicen
+          foreach ($p in @($exe, $uninstaller, $settings, $shortcut)) { if (-not (Test-Path -LiteralPath $p -PathType Leaf)) { throw "premise: $p not found before the uninstall" } }
+          if (-not (Test-Path -LiteralPath $uninstKey)) { throw "premise: the uninstall key $uninstKey not found before the uninstall" }
+          $markerText = "ci-keepdata $env:VOICEN_COMMIT"
+          Set-Content -LiteralPath $marker -Value $markerText -NoNewline
+          New-ItemProperty -Path $run -Name 'Voicen' -PropertyType String -Value ('"' + $exe + '" --autostart') -Force | Out-Null
+          try {
+            Add-VoicenCredential -Target $target -Secret $fake
+            if (-not (Test-VoicenCredential -Target $target)) { throw "premise: $target was written but Test-VoicenCredential does not find it" }
+          } catch { [void](Remove-All); throw }
+          Write-Output "premise: installed, settings.json, ci-keep.txt, the Run value and $target in place"
+          $p = Start-Process -FilePath $uninstaller -ArgumentList '/S', '/KEEPDATA' -PassThru
+          $done = $false
+          $clock = [Diagnostics.Stopwatch]::StartNew()
+          while ($clock.Elapsed.TotalSeconds -lt 60 -and -not $done) {
+            Start-Sleep -Seconds 1
+            $done = -not (Test-Path -LiteralPath $exe) -and -not (Test-Path -LiteralPath $uninstaller) -and -not (Test-Path -LiteralPath $uninstKey) -and ($null -eq (Get-RunValue)) -and -not (Test-Path -LiteralPath $shortcut) -and ((Get-UninstallerCopies).Count -eq 0)
+          }
+          while ($clock.Elapsed.TotalSeconds -lt 60 -and (Get-UninstallerCopies).Count -gt 0) { Start-Sleep -Seconds 1 }
+          # A deletion after the end state was first seen (a late hook) still counts.
+          Start-Sleep -Seconds 3
+          $bad = @()
+          if (-not $done) { $bad += "the uninstall did not reach its end state within 60 s (voicen.exe present: $(Test-Path -LiteralPath $exe), uninstall.exe present: $(Test-Path -LiteralPath $uninstaller), uninstall key present: $(Test-Path -LiteralPath $uninstKey), uninstaller copies running: $((Get-UninstallerCopies).Count))" }
+          if (-not (Test-Path -LiteralPath $marker -PathType Leaf)) { $bad += "/KEEPDATA: the data marker $marker was deleted" }
+          if (-not (Test-Path -LiteralPath $settings -PathType Leaf)) { $bad += "/KEEPDATA: settings.json was deleted" }
+          if (-not (Test-VoicenCredential -Target $target)) { $bad += "/KEEPDATA: $target was deleted" }
+          if ($null -ne (Get-RunValue)) { $bad += "the HKCU Run value Voicen ('$(Get-RunValue)') is still present after the uninstall" }
+          if (Test-Path -LiteralPath $shortcut) { $bad += "the shortcut $shortcut is still present after the uninstall" }
+          if ($bad) { [void](Remove-All); Remove-ItemProperty -Path $run -Name 'Voicen' -ErrorAction SilentlyContinue; throw ($bad -join '; ') }
+          Write-Output "uninstall /S /KEEPDATA: data folder, settings.json, ci-keep.txt and $target kept; Run value, shortcut, uninstall key, voicen.exe and uninstall.exe gone"
+          # Reinstall for W4: a silent install over the kept data folder.
+          $setup = Get-ChildItem target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
+          Start-Process $setup.FullName -ArgumentList '/S' -Wait
+          foreach ($q in @($exe, $uninstaller, $shortcut, $marker)) { if (-not (Test-Path -LiteralPath $q -PathType Leaf)) { [void](Remove-All); throw "after the silent reinstall: $q not found" } }
+          if ((Remove-All) -ne 0) { throw "cleanup: a Remove-VoicenCredential above failed (Win32 error printed)" }
+          Write-Output "silent reinstall over the kept data: voicen.exe, uninstall.exe, the shortcut and ci-keep.txt present"
+      # W4: a user-started silent uninstall (the default answer Yes) removes %LOCALAPPDATA%\Voicen
+      # and every Voicen/ credential (voicen.exe --purge-credentials from the PREUNINSTALL hook,
+      # T-061), keeps a credential outside the prefix, and removes the Run value, the shortcut and
+      # the uninstall key. Red on the stock uninstaller (the folder and the credential stay).
+      - name: uninstall.exe /S removes the data folder, every Voicen/ credential, the Run value and the shortcut, and keeps other credentials (T-025)
+        shell: pwsh
+        run: |
+          . ./scripts/ci/hotkey-hold.ps1
+          . ./scripts/ci/credentials.ps1
+          $dir = Join-Path $env:LOCALAPPDATA 'Voicen'
+          $exe = Join-Path $dir 'voicen.exe'
+          $uninstaller = Join-Path $dir 'uninstall.exe'
+          $settings = Join-Path $dir 'settings.json'
+          $marker = Join-Path $dir 'ci-keep.txt'
+          $shortcut = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Voicen.lnk'
+          $uninstKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Voicen'
+          $run = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+          $fake = 'sk-test-ci-uninstall-0000-not-a-real-key'
+          $gone = 'Voicen/ci-uninstall'
+          $outsider = 'VoicenOther/ci-uninstall-keep'
+          function Get-RunValue { (Get-ItemProperty -Path $run -Name 'Voicen' -ErrorAction SilentlyContinue).Voicen }
+          function Get-UninstallerCopies { @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path.StartsWith([IO.Path]::GetTempPath(), [StringComparison]::OrdinalIgnoreCase) -and $_.Path -like '*\~nsu*' }) }
+          function Format-Listed { (@(Get-VoicenCredentials -Prefix 'Voicen/') | ForEach-Object { "$($_.Target) (type $($_.Type))" }) -join ', ' }
+          function Remove-All { $failed = 0; foreach ($t in @($gone, $outsider)) { try { Remove-VoicenCredential -Target $t } catch { $failed++; Write-Host "cleanup: $($_.Exception.Message)" } }; Remove-ItemProperty -Path $run -Name 'Voicen' -ErrorAction SilentlyContinue; $failed }
+          Stop-AllVoicen
+          foreach ($p in @($exe, $uninstaller, $settings, $marker, $shortcut)) { if (-not (Test-Path -LiteralPath $p -PathType Leaf)) { throw "premise: $p not found before the uninstall" } }
+          if (-not (Test-Path -LiteralPath $uninstKey)) { throw "premise: the uninstall key $uninstKey not found before the uninstall" }
+          New-ItemProperty -Path $run -Name 'Voicen' -PropertyType String -Value ('"' + $exe + '" --autostart') -Force | Out-Null
+          try {
+            foreach ($t in @($gone, $outsider)) {
+              Add-VoicenCredential -Target $t -Secret $fake
+              if (-not (Test-VoicenCredential -Target $t)) { throw "premise: $t was written but Test-VoicenCredential does not find it" }
+            }
+            if (@(Get-VoicenCredentials -Prefix 'Voicen/' | Where-Object { $_.Target -ceq $gone }).Count -ne 1) { throw "premise: Get-VoicenCredentials 'Voicen/' does not list $gone (listed: $(Format-Listed))" }
+          } catch { [void](Remove-All); throw }
+          Write-Output "premise: installed, settings.json, ci-keep.txt, the Run value, $gone and $outsider in place"
+          $p = Start-Process -FilePath $uninstaller -ArgumentList '/S' -PassThru
+          $done = $false
+          $clock = [Diagnostics.Stopwatch]::StartNew()
+          while ($clock.Elapsed.TotalSeconds -lt 60 -and -not $done) {
+            Start-Sleep -Seconds 1
+            $done = -not (Test-Path -LiteralPath $dir) -and -not (Test-Path -LiteralPath $uninstKey) -and ($null -eq (Get-RunValue)) -and -not (Test-Path -LiteralPath $shortcut) -and (@(Get-VoicenCredentials -Prefix 'Voicen/').Count -eq 0) -and ((Get-UninstallerCopies).Count -eq 0)
+          }
+          while ($clock.Elapsed.TotalSeconds -lt 60 -and (Get-UninstallerCopies).Count -gt 0) { Start-Sleep -Seconds 1 }
+          Start-Sleep -Seconds 3
+          $bad = @()
+          if (Test-Path -LiteralPath $dir) { $bad += "$dir is still present 60 s after uninstall.exe /S (left: $((@(Get-ChildItem -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName.Substring($dir.Length) }) | Select-Object -First 20) -join ', '))" }
+          $left = @(Get-VoicenCredentials -Prefix 'Voicen/')
+          if ($left.Count -ne 0) { $bad += "Voicen/ credentials left after uninstall.exe /S: $(Format-Listed)" }
+          if (-not (Test-VoicenCredential -Target $outsider)) { $bad += "$outsider (outside Voicen/) was deleted by the uninstall" }
+          if ($null -ne (Get-RunValue)) { $bad += "the HKCU Run value Voicen ('$(Get-RunValue)') is still present after the uninstall" }
+          if (Test-Path -LiteralPath $shortcut) { $bad += "the shortcut $shortcut is still present after the uninstall" }
+          if (Test-Path -LiteralPath $uninstKey) { $bad += "the uninstall key $uninstKey is still present after the uninstall" }
+          if ((Get-UninstallerCopies).Count -gt 0) { $bad += "an uninstaller copy in %TEMP% is still running 60 s after the start" }
+          $cleanup = Remove-All
+          if ($bad) { throw ($bad -join '; ') }
+          if ($cleanup -ne 0) { throw "cleanup: a Remove-VoicenCredential above failed (Win32 error printed)" }
+          Write-Output "uninstall /S: $dir, every Voicen/ credential, the Run value, the shortcut and the uninstall key gone; $outsider kept"
       - uses: actions/upload-artifact@v4
         with:
           name: voicen-installer-${{ env.VOICEN_COMMIT }}
