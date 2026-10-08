@@ -16,6 +16,7 @@ use diag_support::{
     FAILURES, MIC_CAUSES, NOON_UTC, WARNING_KINDS,
 };
 use voicen_core::autostart::ReconcileAction;
+use voicen_core::connection_test::ConnectionTestResult;
 use voicen_core::delivery::DeliveryResult;
 use voicen_core::diag::{
     format_line, DetectorTag, DictationLine, DictationOutcome, EngineTag, FailureTag, LoadKind,
@@ -380,6 +381,36 @@ fn every_event() -> Vec<LogEvent> {
     for a in all_reconcile_actions() {
         all.push(LogEvent::AutostartReconcile(a));
     }
+    // T-046: every ConnectionTestResult kind, through the one constructor, with
+    // the edge values of its numbers and planted hosts.
+    let mut test_results = vec![
+        ConnectionTestResult::Ok { latency_ms: 0 },
+        ConnectionTestResult::Ok {
+            latency_ms: u64::MAX,
+        },
+        ConnectionTestResult::InvalidKey,
+        ConnectionTestResult::Timeout,
+        ConnectionTestResult::Http { status: 100 },
+        ConnectionTestResult::Http { status: 503 },
+        ConnectionTestResult::Http { status: u16::MAX },
+        ConnectionTestResult::UnexpectedResponse,
+        ConnectionTestResult::Invalid { errors: vec![] },
+        ConnectionTestResult::Invalid {
+            errors: vec![FieldError {
+                field: FieldId::EngineApiBaseUrl,
+                code: ErrorCode::UrlMalformed,
+            }],
+        },
+        ConnectionTestResult::KeyStoreUnavailable,
+    ];
+    for p in planted() {
+        test_results.push(ConnectionTestResult::CannotReach {
+            host: p.to_string(),
+        });
+    }
+    for r in &test_results {
+        all.push(LogEvent::settings_test_connection(r));
+    }
     all.push(LogEvent::DictationBlocked {
         reason: Blocked::NoEngine,
     });
@@ -395,9 +426,10 @@ fn every_event() -> Vec<LogEvent> {
             LogEvent::AutostartReconcile(_) => 5,
             LogEvent::LogsRecovered => 6,
             LogEvent::DictationBlocked { .. } => 7,
+            LogEvent::SettingsTestConnection(_) => 8,
         })
         .collect();
-    assert_eq!(seen.len(), 8, "every LogEvent variant is enumerated");
+    assert_eq!(seen.len(), 9, "every LogEvent variant is enumerated");
     all
 }
 

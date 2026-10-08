@@ -1,8 +1,9 @@
 //! The one OpenAI-compatible transcription client
 //! (contracts/openai-transcription.md) for both the transcription API and the
-//! local OpenAI-compatible server (T-018). The client setup, the key rule and the
-//! capped body read are the shared helpers in [`super::http`], which the chat
-//! post-processor (T-020) uses too.
+//! local OpenAI-compatible server (T-018), and for the connection test (T-046,
+//! `connection_test`). The client setup, the key rule and the capped body read
+//! are the shared helpers in [`super::http`], which the chat post-processor
+//! (T-020) uses too.
 //!
 //! The endpoint role is fixed at construction ([`OpenAiCompatibleEngine::new`] for
 //! the API, [`OpenAiCompatibleEngine::local_server`] for the local server) and

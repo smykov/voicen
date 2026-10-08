@@ -6,6 +6,7 @@
 
 use crate::autostart::ReconcileAction;
 use crate::build_info::BuildInfo;
+use crate::connection_test::ConnectionTestResult;
 use crate::delivery::DeliveryResult;
 use crate::recording::MicCause;
 use crate::settings::gate::Blocked;
@@ -33,6 +34,9 @@ pub enum LogEvent {
     SettingsLoad(LoadKind),
     /// `settings save outcome=<ok|refused|failed> ...` (field ids and codes only).
     SettingsSave(SaveLine),
+    /// `settings test_connection result=<...> [latency_ms=<n>]` (spec 004 R-11,
+    /// T-046 choice (iv)): the result kind only, never the host or field errors.
+    SettingsTestConnection(TestConnectionLine),
     /// `autostart reconcile action=<none|written|removed|failed>`.
     AutostartReconcile(ReconcileAction),
     /// The log was unwritable and is written again (written by the log itself).
@@ -64,6 +68,36 @@ impl LogEvent {
             },
         })
     }
+
+    /// The test-connection line of `result`; the host of `CannotReach` and the
+    /// field errors of `Invalid` are dropped (T-008 Q1: no hosts, no values).
+    pub fn settings_test_connection(result: &ConnectionTestResult) -> LogEvent {
+        LogEvent::SettingsTestConnection(match result {
+            ConnectionTestResult::Ok { latency_ms } => TestConnectionLine::Ok {
+                latency_ms: *latency_ms,
+            },
+            ConnectionTestResult::CannotReach { host: _ } => TestConnectionLine::CannotReach,
+            ConnectionTestResult::InvalidKey => TestConnectionLine::InvalidKey,
+            ConnectionTestResult::Timeout => TestConnectionLine::Timeout,
+            ConnectionTestResult::Http { status } => TestConnectionLine::Http { status: *status },
+            ConnectionTestResult::UnexpectedResponse => TestConnectionLine::Unexpected,
+            ConnectionTestResult::Invalid { errors: _ } => TestConnectionLine::Invalid,
+            ConnectionTestResult::KeyStoreUnavailable => TestConnectionLine::KeyStoreUnavailable,
+        })
+    }
+}
+
+/// A connection test result without its host or field errors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TestConnectionLine {
+    Ok { latency_ms: u64 },
+    CannotReach,
+    InvalidKey,
+    Timeout,
+    Http { status: u16 },
+    Unexpected,
+    Invalid,
+    KeyStoreUnavailable,
 }
 
 /// How startup found the settings (`LoadOutcome` without its values).

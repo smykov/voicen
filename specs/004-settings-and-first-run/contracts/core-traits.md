@@ -6,7 +6,7 @@ Rust signatures are indicative; names and semantics are the contract. Types are 
 
 004 defines in `voicen_core` every trait and data type shared with 001–003 (decisions #21): `secrets` (`KeySlot`, `Secret`, `KeyEdit`, `KeyPresence`, `CredentialStore`), `settings` (`Settings`, `FieldId`, `defaults()`, `SettingsService`), `HotkeyRegistrar` and `DownloadedModels` (both with fakes) and the data type `post_process::settings::{PostProcessingSettings, STARTER_PROMPT, defaults()}`. 001, 002 and 003 implement or read them; none declares its own key or settings port.
 
-Split (decisions #23): **T-003** built the types and pure rules — modules `secrets`, `settings` (`mod`, `url`, `validate`, `gate`, `hotkey`), `post_process::settings`, `hotkey_registrar`, `models` (all at `voicen_core::…`). **T-032** built `SettingsFile` (`settings/file.rs`), `SettingsService` with `SettingsDeps`, `SaveRequest`/`SaveOutcome`/`FormError`/`SettingsView`, `subscribe` and the core part of live apply (`settings/service.rs`), and the wall clock `clock::Clock` (crate root, `clock.rs`, shared with 005 and the connection tester, P-011). **T-014** built `Autostart`, the autostart save step and `reconcile_autostart` (surface below). **T-015** built `is_insecure_remote` and the save warnings (surface below). **T-055** built the hotkey save step (below) and the shell's registrar (`src-tauri` `win::hotkey::HotkeyRegistrarHandle`). Not yet in code: the `log` dep, `ConnectionTester`.
+Split (decisions #23): **T-003** built the types and pure rules — modules `secrets`, `settings` (`mod`, `url`, `validate`, `gate`, `hotkey`), `post_process::settings`, `hotkey_registrar`, `models` (all at `voicen_core::…`). **T-032** built `SettingsFile` (`settings/file.rs`), `SettingsService` with `SettingsDeps`, `SaveRequest`/`SaveOutcome`/`FormError`/`SettingsView`, `subscribe` and the core part of live apply (`settings/service.rs`), and the wall clock `clock::Clock` (crate root, `clock.rs`, shared with 005, P-011). **T-014** built `Autostart`, the autostart save step and `reconcile_autostart` (surface below). **T-015** built `is_insecure_remote` and the save warnings (surface below). **T-055** built the hotkey save step (below) and the shell's registrar (`src-tauri` `win::hotkey::HotkeyRegistrarHandle`). **T-046** built the connection test (`connection_test`, `SettingsService::test_connection`; surface below). Not yet in code: the `log` dep.
 
 Built surface (T-003): `secrets::{KeySlot (all(), target_name()), Secret (new, expose), KeyEdit, KeyEdits (get(slot)), KeyPresence (get(slot)), CredentialStore, CredentialError { os_code }}`; `settings::{Settings, defaults, WHISPER_ISO_639_1, FieldId (as_str), ErrorCode (as_str), FieldError, LoadOutcome, EngineKind, Mode}`; `settings::url::{check_base_url, NormalizedUrl, UrlError}`; `settings::validate::{validate, KeyEditsWithPresence}`; `settings::gate::{dictation_gate, blocked_actions, startup_action, startup_action_after_hotkey (T-055), Blocked, ShellAction, StartupAction, SettingsTab}`; `settings::hotkey::{Hotkey, HotkeyKey, HotkeyError, parse_hotkey}`; `hotkey_registrar::{HotkeyRegistrar, Prepared, Unavailable}`; `models::DownloadedModels`.
 
@@ -54,7 +54,7 @@ pub trait SettingsFile: Send + Sync {
 pub trait Clock: Send + Sync { fn now(&self) -> SystemTime; }   // voicen_core::clock
 pub fn utc_compact(t: SystemTime) -> String;                     // yyyyMMdd-HHmmss in UTC; before the epoch → the epoch; std only
 ```
-- `SystemClock` is the real one; `FakeClock::at(t)` / `set(t)` behind `test-fakes`. The one wall-clock port of the core: the backup suffix, history (005) and the connection tester (R-9) read the time through it.
+- `SystemClock` is the real one; `FakeClock::at(t)` / `set(t)` behind `test-fakes`. The one wall-clock port of the core: the backup suffix and history (005) read the time through it. The connection test does not: its latency is a duration, measured with `std::time::Instant` (T-046).
 
 ### `Autostart` (req FR-19; spec FR-019)
 
@@ -111,14 +111,20 @@ pub fn startup_action(o: &LoadOutcome, launched_by_autostart: bool) -> StartupAc
 pub fn parse_hotkey(s: &str) -> Result<Hotkey, HotkeyError>;           // settings::hotkey; canonical text only, round-trips; HotkeyError → hotkey.* code
 ```
 
-### `ConnectionTester` (req FR-14; spec FR-017, FR-018)
+### Connection test (req FR-14; spec FR-017, FR-018; T-046)
 
 ```rust
-impl ConnectionTester {
-    pub async fn test(&self, req: ConnectionTestRequest) -> ConnectionTestResult;
+impl SettingsService {
+    pub fn test_connection(&self, req: ConnectionTestRequest) -> ConnectionTestResult; // blocking (#42): the shell calls it on spawn_blocking
 }
+pub fn request_timeouts(req: &ConnectionTestRequest) -> Timeouts;   // connection_test::; Timeouts::from_settings(&req.timeouts)
+impl LogEvent { pub fn settings_test_connection(r: &ConnectionTestResult) -> LogEvent; } // R-11 line, no host
 ```
-- Uses 001's `TranscriptionClient` and the shared timeouts module (`Timeouts::from_settings` of the form's `timeouts`); reads the stored key only for `KeyEdit::Untouched`; never writes anything; no VAD.
+- Types in `voicen_core::connection_test`: `ConnectionTestRequest`, `TestEngine`, `ConnectionTestResult` (data-model.md). Synchronous like the rest of the core (#42); no separate tester type: the service owns the snapshot, the credential store and the `Unavailable` rule.
+- One request at most, through the dictation path: `engine_for` over the snapshot overlaid by the form (engine, base URL, model, timeouts; then the save's `normalize`) -> `OpenAiCompatibleEngine::transcribe` with the bundled clip, no language, no VAD, the form's timeouts (`request_timeouts`).
+- Before any key read: the save's `validate`, kept to the fields the test uses (selected engine's URL, model, key; `timeouts.connect` and the engine's request limit) -> `Invalid`, nothing sent. Key: the save's key rule (typed key trimmed; blank `Replace` or `Untouched` -> one read of the selected slot, none while `Unavailable`; `Clear` -> none); a read error -> `KeyStoreUnavailable`, nothing sent; no key where one is required -> `Invalid` with `key.required`.
+- Writes nothing: no save, no file, no snapshot change, no credential write or delete (the engine sees the key through a read-only view).
+- Mapping from 001's `FailureReason`: `InvalidApiKey` -> `InvalidKey`; `NetworkUnavailable` (DNS) and `CannotReach` -> `CannotReach { host }` (the base URL's `host[:port]`); `Timeout` -> `Timeout`; `ServerError` -> `Http`; `UnexpectedResponse` -> `UnexpectedResponse`; a 2xx transcription (even empty) -> `Ok { latency_ms }` (`Instant`).
 
 ### `i18n`
 

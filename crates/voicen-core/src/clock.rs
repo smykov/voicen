@@ -1,5 +1,6 @@
-//! The one wall-clock port of the core (P-011): the settings backup suffix (T-032),
-//! history (005) and the connection tester (R-9) read the time through [`Clock`].
+//! The one wall-clock port of the core (P-011): the settings backup suffix (T-032)
+//! and history (005) read the time through [`Clock`]. The connection test measures a
+//! duration with `Instant`, not a wall time (T-046).
 
 use std::time::{SystemTime, UNIX_EPOCH};
 

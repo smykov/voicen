@@ -2,7 +2,7 @@
 //!
 //! Total over [`LogEvent`]; every value is an integer, a literal from this
 //! module's tables (engine, detector, failure, microphone cause, warning kind,
-//! load outcome), a closed `as_str`/`code` match of the crate (settings field
+//! load outcome, test-connection result), a closed `as_str`/`code` match of the crate (settings field
 //! ids and codes, `ReconcileAction`, `DeliveryResult`, `FormError::kind`), or
 //! `BuildInfo`. Std only (the date math of `clock.rs`).
 //!
@@ -13,6 +13,7 @@
 //! 2026-10-04T23:59:04.700+02:00 WARN dictation outcome=blocked reason=no_engine
 //! 2026-10-04T23:59:05.000+02:00 WARN warning kind=vad_fallback
 //! 2026-10-04T23:59:06.000+02:00 INFO settings save outcome=ok warnings=engine.api.base_url:endpoint.insecure
+//! 2026-10-04T23:59:07.000+02:00 INFO settings test_connection result=ok latency_ms=842
 //! ```
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
@@ -22,7 +23,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::event::{
     DetectorTag, DictationLine, DictationOutcome, EngineTag, FailureTag, LoadKind, LogEvent,
-    SaveLine, WarningKind,
+    SaveLine, TestConnectionLine, WarningKind,
 };
 use crate::autostart::ReconcileAction;
 use crate::build_info::BuildInfo;
@@ -136,6 +137,17 @@ fn level(event: &LogEvent) -> &'static str {
             SaveOutcomeLiteral::Failed => WARN,
             SaveOutcomeLiteral::Ok | SaveOutcomeLiteral::Refused => INFO,
         },
+        // A result the user acts on in the form is INFO (like a refused save);
+        // a failed request or an unreadable key store is WARN.
+        LogEvent::SettingsTestConnection(line) => match line {
+            TestConnectionLine::Ok { .. } | TestConnectionLine::Invalid => INFO,
+            TestConnectionLine::CannotReach
+            | TestConnectionLine::InvalidKey
+            | TestConnectionLine::Timeout
+            | TestConnectionLine::Http { .. }
+            | TestConnectionLine::Unexpected
+            | TestConnectionLine::KeyStoreUnavailable => WARN,
+        },
         LogEvent::AutostartReconcile(action) => match action {
             ReconcileAction::Failed => WARN,
             ReconcileAction::None | ReconcileAction::Written | ReconcileAction::Removed => INFO,
@@ -174,11 +186,32 @@ fn write_message(out: &mut String, event: &LogEvent) {
             pair(out, "outcome", load_kind(*kind));
         }
         LogEvent::SettingsSave(line) => write_save(out, line),
+        LogEvent::SettingsTestConnection(line) => write_test_connection(out, *line),
         LogEvent::AutostartReconcile(action) => {
             out.push_str("autostart reconcile");
             pair(out, "action", action.as_str());
         }
         LogEvent::LogsRecovered => out.push_str("logs recovered"),
+    }
+}
+
+/// `settings test_connection result=<kind> [latency_ms=<n>]` (spec 004 R-11,
+/// T-046 choice (iv)): a literal per result, `http_<status>` for an HTTP status,
+/// the latency only on `ok`.
+fn write_test_connection(out: &mut String, line: TestConnectionLine) {
+    out.push_str("settings test_connection");
+    match line {
+        TestConnectionLine::Ok { latency_ms } => {
+            pair(out, "result", "ok");
+            pair(out, "latency_ms", latency_ms);
+        }
+        TestConnectionLine::CannotReach => pair(out, "result", "cannot_reach"),
+        TestConnectionLine::InvalidKey => pair(out, "result", "invalid_key"),
+        TestConnectionLine::Timeout => pair(out, "result", "timeout"),
+        TestConnectionLine::Http { status } => pair(out, "result", format_args!("http_{status}")),
+        TestConnectionLine::Unexpected => pair(out, "result", "unexpected"),
+        TestConnectionLine::Invalid => pair(out, "result", "invalid"),
+        TestConnectionLine::KeyStoreUnavailable => pair(out, "result", "key_store_unavailable"),
     }
 }
 

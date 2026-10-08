@@ -16,6 +16,9 @@ use super::{
 };
 use crate::autostart::{Autostart, ReconcileAction};
 use crate::clock::{utc_compact, Clock};
+use crate::connection_test::{
+    self, request_timeouts, ConnectionTestRequest, ConnectionTestResult, TestContext,
+};
 use crate::hotkey_registrar::{HotkeyRegistrar, Prepared};
 use crate::i18n::{
     MessageId, NOTICE_SETTINGS_UNAVAILABLE, SETTINGS_PARTIALLY_RESTORED,
@@ -23,6 +26,7 @@ use crate::i18n::{
 };
 use crate::models::DownloadedModels;
 use crate::secrets::{CredentialStore, KeyEdit, KeyEdits, KeyPresence, KeySlot, Secret};
+use crate::timeouts::Timeouts;
 
 /// Everything the service talks to.
 pub struct SettingsDeps {
@@ -261,7 +265,7 @@ struct LoadState {
 }
 
 /// What the key step does with one slot once a blank `Replace` is set aside.
-enum KeyStep<'a> {
+pub(crate) enum KeyStep<'a> {
     Keep,
     Store(&'a str),
     Delete,
@@ -561,6 +565,38 @@ impl SettingsService {
             Some(not_restored)
         }
     }
+
+    /// "Test connection" (FR-017, FR-018; T-046): one transcription request with
+    /// the bundled clip, built from the snapshot overlaid by the form, with the
+    /// form's timeouts ([`request_timeouts`]). Writes nothing: no save, no file,
+    /// no snapshot change, no credential write or delete; at most one read of the
+    /// selected key slot, none while `Unavailable` (#19). Blocking: call it off
+    /// any async runtime worker (#42). See [`crate::connection_test`].
+    pub fn test_connection(&self, req: ConnectionTestRequest) -> ConnectionTestResult {
+        let timeouts = request_timeouts(&req);
+        self.run_test(req, timeouts)
+    }
+
+    /// [`Self::test_connection`] with injected durations (tests only).
+    #[cfg(any(test, feature = "test-fakes"))]
+    pub fn test_connection_with_timeouts(
+        &self,
+        req: ConnectionTestRequest,
+        timeouts: Timeouts,
+    ) -> ConnectionTestResult {
+        self.run_test(req, timeouts)
+    }
+
+    fn run_test(&self, req: ConnectionTestRequest, timeouts: Timeouts) -> ConnectionTestResult {
+        let snapshot = self.snapshot();
+        let ctx = TestContext {
+            snapshot: &snapshot,
+            unavailable: self.load.unavailable,
+            credentials: self.deps.credentials.as_ref(),
+            models: self.deps.local_models.as_ref(),
+        };
+        connection_test::run(&ctx, req, timeouts)
+    }
 }
 
 impl LoadState {
@@ -577,7 +613,7 @@ impl LoadState {
 /// [`normalize_base_url`] and every model name trimmed, selected engine or not
 /// and valid or not; `schema_version` set to the current one. The hotkey,
 /// `speech_language`, the prompt and the microphone are kept as entered.
-fn normalize(mut s: Settings) -> Settings {
+pub(crate) fn normalize(mut s: Settings) -> Settings {
     s.schema_version = SCHEMA_VERSION;
     for url in [
         &mut s.api.base_url,
@@ -600,7 +636,7 @@ fn normalize(mut s: Settings) -> Settings {
 
 /// The effective edit of a slot: a `Replace` that is empty after `trim()` keeps
 /// the stored key (decision #30); any other `Replace` is stored trimmed (#33(a)).
-fn key_step(edits: &KeyEdits, slot: KeySlot) -> KeyStep<'_> {
+pub(crate) fn key_step(edits: &KeyEdits, slot: KeySlot) -> KeyStep<'_> {
     match edits.get(slot) {
         KeyEdit::Untouched => KeyStep::Keep,
         KeyEdit::Clear => KeyStep::Delete,

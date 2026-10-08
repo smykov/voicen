@@ -82,8 +82,8 @@ Autostart step (T-014): after the hotkey placeholder and before the keys, and on
 
 ## ConnectionTestRequest / ConnectionTestResult
 
-- Request: `{ engine: api | local_server, base_url, model, key: KeyEdit }` — form values, unsaved included.
-- Result: `Ok { latency_ms }` | `CannotReach { host }` | `InvalidKey` | `Timeout` | `Http { status }` | `UnexpectedResponse` | `Invalid { errors: [FieldError] }` (the form values cannot form a request, e.g. malformed URL). Never contains a key or the response body.
+- Request: `{ engine: api | local_server, base_url, model, key: KeyEdit, timeouts: TimeoutSettings }` — form values, unsaved included; every field required; a malformed request is refused with one fixed text that never quotes the input (T-046).
+- Result: `Ok { latency_ms }` | `CannotReach { host }` | `InvalidKey` | `Timeout` (the form's request limit exceeded; a connect timeout is `CannotReach`) | `Http { status }` | `UnexpectedResponse` | `Invalid { errors: [FieldError] }` (the form values cannot form a request: the save's errors on the selected engine's URL, model and key, `timeouts.connect` and the engine's request limit) | `KeyStoreUnavailable` (the stored key could not be read; nothing sent, #51). Never contains a key, a URL query or the response body.
 
 ## Message catalog
 

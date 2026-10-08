@@ -1,5 +1,5 @@
 {
-  "_format": "Core-checked wire data for the Playwright IPC mock (e2e/support/tauriMock.ts), T-004 option A3. first_run_view = serde_json of SettingsService::view() after a first run with no OS language (ui_language en) and no keys; speech_languages = voicen_core::settings::WHISPER_ISO_639_1 in core order (what settings_speech_languages returns); saved_insecure_api = the SaveOutcome wire of a save, over that first run, of defaults(None) with engine api, api.base_url http://example.com/v1 and a new API key (a Saved with one endpoint.insecure warning, T-015). Kept in sync by the core tests settings::service::tests::e2e_settings_wire_fixture_matches_core and e2e_settings_wire_fixture_saved_insecure_outcome_matches_core: when it fails, copy the value it prints. Never edit by hand to make an e2e test pass.",
+  "_format": "Core-checked wire data for the Playwright IPC mock (e2e/support/tauriMock.ts), T-004 option A3. first_run_view = serde_json of SettingsService::view() after a first run with no OS language (ui_language en) and no keys; speech_languages = voicen_core::settings::WHISPER_ISO_639_1 in core order (what settings_speech_languages returns); saved_insecure_api = the SaveOutcome wire of a save, over that first run, of defaults(None) with engine api, api.base_url http://example.com/v1 and a new API key (a Saved with one endpoint.insecure warning, T-015). test_connection_results = the ConnectionTestResult wire (shell settings_test_connection -> UI, T-046), one sample per kind: ok {latency_ms 123}, cannot_reach {host 127.0.0.1:1}, invalid_key, timeout, http {status 500}, unexpected_response, invalid {engine.api.base_url url.malformed}, key_store_unavailable. Kept in sync by the core tests settings::service::tests::e2e_settings_wire_fixture_matches_core, e2e_settings_wire_fixture_saved_insecure_outcome_matches_core and e2e_settings_wire_fixture_test_connection_results_match_core: when it fails, copy the value it prints. Never edit by hand to make an e2e test pass.",
   "first_run_view": {
     "settings": {
       "schema_version": 1,
@@ -206,6 +206,41 @@
           "message": "settings.warning.endpoint_insecure"
         }
       ]
+    }
+  },
+  "test_connection_results": {
+    "cannot_reach": {
+      "host": "127.0.0.1:1",
+      "kind": "cannot_reach"
+    },
+    "http": {
+      "kind": "http",
+      "status": 500
+    },
+    "invalid": {
+      "errors": [
+        {
+          "code": "url.malformed",
+          "field": "engine.api.base_url"
+        }
+      ],
+      "kind": "invalid"
+    },
+    "invalid_key": {
+      "kind": "invalid_key"
+    },
+    "key_store_unavailable": {
+      "kind": "key_store_unavailable"
+    },
+    "ok": {
+      "kind": "ok",
+      "latency_ms": 123
+    },
+    "timeout": {
+      "kind": "timeout"
+    },
+    "unexpected_response": {
+      "kind": "unexpected_response"
     }
   }
 }

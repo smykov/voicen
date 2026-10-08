@@ -94,7 +94,7 @@ Before saving, a user who entered a base URL, model and key clicks "Test connect
 1. **Given** engine = API with a valid base URL, model and key, **When** the user clicks "Test connection", **Then** "OK" with the measured latency in milliseconds is shown (req FR-14).
 2. **Given** a base URL whose host cannot be reached, **When** the user tests, **Then** "cannot reach <host>" is shown (req FR-14 failure branch).
 3. **Given** a wrong key (endpoint answers 401 or 403), **When** the user tests, **Then** "invalid API key" is shown (req FR-14 failure branch).
-4. **Given** the endpoint does not answer within the configured timeouts of FR-24 (defaults: connect 5 s; 30 s API, 60 s local server), **When** the user tests, **Then** "timeout" is shown.
+4. **Given** the endpoint does not answer within the request limit of FR-24 entered in the form (defaults: 30 s API, 60 s local server), **When** the user tests, **Then** "timeout" is shown (a connect that exceeds the connect limit, default 5 s, is "cannot reach <host>", FR-017).
 5. **Given** engine = local server at `http://localhost:8000/v1` without a key, **When** the user tests and the server runs, **Then** "OK" with latency is shown.
 6. **Given** a test is in progress, **Then** the button is disabled and shows progress; the test never changes the saved settings or the stored key.
 
@@ -211,7 +211,7 @@ A user who enters an `http://` base URL on a non-local host is warned that the A
 
 **Test connection**
 
-- **FR-017** (req FR-14): For engine = API or local server, the settings window MUST offer "Test connection", which sends a bundled ~1 s speech sample through the same transcription client as dictation (req FR-06, FR-17) using the values currently in the form (the stored key when the key field is untouched), and reports: "OK" with latency in ms; "cannot reach <host>" (DNS failure, connection refused, connect timeout); "invalid API key" (HTTP 401/403); "timeout" (the connect or request limit of FR-24 as currently entered in the form exceeded); otherwise "HTTP <status>" or "unexpected response". It MUST NOT change saved settings or stored keys, and MUST be disabled while a test runs (Clarification Q3).
+- **FR-017** (req FR-14): For engine = API or local server, the settings window MUST offer "Test connection", which sends a bundled ~1 s speech sample through the same transcription client as dictation (req FR-06, FR-17) using the values currently in the form (the stored key when the key field is untouched), and reports: "OK" with latency in ms; "cannot reach <host>" (DNS failure, connection refused, connect timeout); "invalid API key" (HTTP 401/403); "timeout" (the request limit of FR-24 as currently entered in the form exceeded; the form's connect limit applies too, and exceeding it is "cannot reach <host>"); otherwise "HTTP <status>" or "unexpected response". It MUST NOT change saved settings or stored keys, and MUST be disabled while a test runs (Clarification Q3).
 - **FR-018** (req FR-14, NFR-05): Test connection MUST NOT apply voice-activity detection to the sample and is the only network call the settings window makes on its own (besides model downloads owned by 002).
 
 **Start with Windows**

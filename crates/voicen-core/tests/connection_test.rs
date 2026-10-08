@@ -411,8 +411,10 @@ fn wav_info(wav: &[u8]) -> (u16, u32, u16, Vec<i16>) {
     let u16_at = |i: usize| u16::from_le_bytes([wav[i], wav[i + 1]]);
     let u32_at = |i: usize| u32::from_le_bytes([wav[i], wav[i + 1], wav[i + 2], wav[i + 3]]);
     let samples = wav[44..]
-        .chunks_exact(2)
-        .map(|c| i16::from_le_bytes([c[0], c[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|c| i16::from_le_bytes(*c))
         .collect();
     (u16_at(22), u32_at(24), u16_at(34), samples)
 }

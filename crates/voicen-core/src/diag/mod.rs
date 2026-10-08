@@ -106,7 +106,7 @@ pub mod observer;
 
 pub use event::{
     DetectorTag, DictationLine, DictationOutcome, EngineTag, FailureTag, LoadKind, LogEvent,
-    SaveLine, WarningKind,
+    SaveLine, TestConnectionLine, WarningKind,
 };
 pub use format::format_line;
 pub use log::{Log, LogConfig, LogsUnwritableReason, OnUnwritable};

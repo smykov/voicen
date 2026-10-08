@@ -42,6 +42,7 @@ fn commands<R: Runtime>(builder: Builder<R>) -> Builder<R> {
         settings_ipc::settings_get,
         settings_ipc::settings_save,
         settings_ipc::settings_speech_languages,
+        settings_ipc::settings_test_connection,
         local_models::local_models_list,
         local_models::local_model_download,
         local_models::local_model_cancel_download,

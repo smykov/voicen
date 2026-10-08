@@ -14,6 +14,12 @@
     "text": "licenses/texts/silero-vad-MIT.txt"
   },
   {
+    "name": "Connection-test speech clip (Lingua Libre, \"speech bubble\" by Vealhurl)",
+    "license": "CC0-1.0",
+    "url": "https://commons.wikimedia.org/wiki/File:LL-Q1860_(eng)-Vealhurl-speech_bubble.wav",
+    "note": "About 1 s of English speech sent by \"Test connection\" (T-046, decision #59), embedded in the app. Recorded by Vealhurl for Lingua Libre and published on Wikimedia Commons under Creative Commons Zero (Public Domain Dedication). Converted from the 48 kHz mono WAV to raw 16 kHz mono signed 16-bit little-endian PCM (low-pass and decimation, nothing else) as crates/voicen-core/assets/connection-test-speech.s16le."
+  },
+  {
     "name": "Whisper ggml models (OpenAI Whisper weights)",
     "license": "MIT",
     "url": "https://huggingface.co/ggerganov/whisper.cpp",

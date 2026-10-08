@@ -15,7 +15,7 @@ The UI calls only these commands and listens only to these events for this featu
 
 Errors: a command that cannot run at all rejects with `{ code: "ipc.unavailable" }`; the UI shows `error.ipc_unavailable` and keeps the draft.
 
-Built (T-030): `settings_get`, `settings_save` (runs off the main thread), `settings_speech_languages`, and the `settings://changed` event. Malformed `settings_save` args reject with Tauri's `invalid args` text followed by a fixed message (`invalid save request: ...`, `invalid key edits: ...`, `invalid key edit: ...`, `invalid key: ...`) that never quotes the input, so a mistyped key never reaches a window (T-030 J1).
+Built (T-030): `settings_get`, `settings_save` (runs off the main thread), `settings_speech_languages`, and the `settings://changed` event. Malformed `settings_save` args reject with Tauri's `invalid args` text followed by a fixed message (`invalid save request: ...`, `invalid key edits: ...`, `invalid key edit: ...`, `invalid key: ...`) that never quotes the input, so a mistyped key never reaches a window (T-030 J1). Built (T-046): `settings_test_connection` (async; core's blocking call runs on `spawn_blocking`; one `settings test_connection` log line, no host); malformed args reject with Tauri's `invalid args` text followed by `invalid connection test request: ...`, which never quotes the input.
 
 ## Wire form (serde impls in `voicen_core`, pinned by core tests on the Linux gate)
 
@@ -29,6 +29,8 @@ Built (T-030): `settings_get`, `settings_save` (runs off the main thread), `sett
 | `FieldError` | shell → UI | `{ "field": FieldId, "code": ErrorCode }`; the UI shows `error.<code>` |
 | `Warning` | shell → UI | `{ "field": FieldId, "code": "endpoint.insecure", "message": MessageId }`; `message` is `WarningCode::message_id()` (`settings.warning.endpoint_insecure`); listed in `Saved.warnings` by core's `save_warnings`, never in `Refused`; the UI renders `t(message)` and holds no URL rule (T-015, decision #52) |
 | `FormError` | shell → UI | `{ "kind": "write_failed" \| "settings_unavailable" \| "partially_restored", "message": MessageId, "not_restored"?: [FieldId] }`; `not_restored` only on `partially_restored`; `message` is `FormError::message_id()` (`settings.write_failed`, `notice.settings_unavailable`, `settings.partially_restored`) |
+| `ConnectionTestRequest` | UI → shell | `{ "engine": "api" \| "local_server", "base_url": string, "model": string, "key": KeyEdit, "timeouts": TimeoutSettings }`; all required |
+| `ConnectionTestResult` | shell → UI | tagged by `kind`: `{ "kind": "ok", "latency_ms": n }` \| `{ "kind": "cannot_reach", "host": "host[:port]" }` \| `{ "kind": "invalid_key" }` \| `{ "kind": "timeout" }` \| `{ "kind": "http", "status": n }` \| `{ "kind": "unexpected_response" }` \| `{ "kind": "invalid", "errors": [FieldError] }` \| `{ "kind": "key_store_unavailable" }`; pinned by `e2e/fixtures/settings-wire.json` `test_connection_results` (T-046) |
 | `FieldId` / `ErrorCode` / `MessageId` | shell → UI | the dotted string (`"engine.api.base_url"`, `"timeouts.api_transcription"`, `"url.malformed"`, `"settings.write_failed"`): `as_str()` / the catalog id, the one spelling |
 
 ## Events (shell → windows)

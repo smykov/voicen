@@ -1,6 +1,7 @@
 //! Settings over IPC (T-030; contracts/ipc.md): the one construction path of the
 //! settings service, the commands `settings_get` / `settings_save` /
-//! `settings_speech_languages`, and the `settings://changed` bridge.
+//! `settings_speech_languages` / `settings_test_connection` (T-046), and the
+//! `settings://changed` bridge.
 //!
 //! - J1: a key moves only UI -> `settings_save` -> `SettingsService` ->
 //!   `CredentialStore`; no response or event carries one (`SettingsView` has presence
@@ -15,7 +16,9 @@
 //!
 //! The only output here goes to the one log as typed lines (T-008, spec 004 R-11):
 //! the load outcome and the reconcile action from [`load_settings`], one save line
-//! per [`settings_save`] (outcome, field ids and codes), and a `change_bridge_failed`
+//! per [`settings_save`] (outcome, field ids and codes), one test line per
+//! [`settings_test_connection`] (result kind, latency on `ok`; no host), and a
+//! `change_bridge_failed`
 //! warning with the OS code when [`spawn_change_bridge`] cannot start its thread. No
 //! key, transcript, settings value or base URL can reach a line: the events have no
 //! field for one (docs/decisions/settings.md, docs/decisions/diagnostics-log.md).
@@ -23,9 +26,11 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Weak};
 
+use serde::Serialize;
 use tauri::{AppHandle, Emitter, Runtime, State};
 use voicen_core::autostart::Autostart;
 use voicen_core::clock::SystemClock;
+use voicen_core::connection_test::{ConnectionTestRequest, ConnectionTestResult};
 use voicen_core::diag::{Log, LogEvent, WarningKind};
 use voicen_core::hotkey_registrar::HotkeyRegistrar;
 use voicen_core::local_models::store::ModelStore;
@@ -154,6 +159,45 @@ pub fn settings_save(
     let outcome = service.save(request);
     log.write(LogEvent::settings_save(&outcome));
     outcome
+}
+
+/// `settings_test_connection { request }` → `ConnectionTestResult` (T-046,
+/// FR-017). Core's `test_connection` is blocking (#42: reqwest's blocking client
+/// panics on a tokio worker), so it runs on `spawn_blocking`, never on the async
+/// runtime's worker or the main thread. Saves nothing; writes one `settings
+/// test_connection` line to the managed log (result kind only, no host). Rejects
+/// with `{ "code": "ipc.unavailable" }` only when the blocking task cannot finish
+/// (contracts/ipc.md "Errors"); malformed args reject with core's fixed text.
+#[tauri::command]
+pub async fn settings_test_connection(
+    service: State<'_, Arc<SettingsService>>,
+    log: State<'_, Arc<Log>>,
+    request: ConnectionTestRequest,
+) -> Result<ConnectionTestResult, IpcUnavailable> {
+    let service = Arc::clone(&service);
+    let log = Arc::clone(&log);
+    tauri::async_runtime::spawn_blocking(move || {
+        let result = service.test_connection(request);
+        log.write(LogEvent::settings_test_connection(&result));
+        result
+    })
+    .await
+    .map_err(|_| IpcUnavailable::new())
+}
+
+/// The rejection of a command that cannot run at all: `{ "code":
+/// "ipc.unavailable" }` (contracts/ipc.md "Errors"); never carries the cause.
+#[derive(Debug, Serialize)]
+pub struct IpcUnavailable {
+    code: &'static str,
+}
+
+impl IpcUnavailable {
+    fn new() -> IpcUnavailable {
+        IpcUnavailable {
+            code: "ipc.unavailable",
+        }
+    }
 }
 
 /// `settings_speech_languages` → core's `WHISPER_ISO_639_1`, in core order (#30).
