@@ -1,7 +1,7 @@
 # The gate: every area's checks, each through scripts/tw-run in the area's toolchain.
 .PHONY: check check-shell-layout check-shell-layout-fixtures check-helper-windows-fixtures check-core \
 	check-ci-credentials check-setup-node-cache check-ci-wip check-telegram-send check-telegram-failure-branch check-telegram-guard \
-	check-e2e-entry-fixtures \
+	check-version-stamp check-e2e-entry-fixtures \
 	check-shell-windows \
 	check-ui core-image ui-image \
 	licenses licenses-check licenses-unit licenses-fixture licenses-rust licenses-bundle \
@@ -9,7 +9,7 @@
 
 # check-shell-windows after check-core: the shell depends on voicen-core, so a core error is
 # reported first by the faster native check-core, before the slower cross-target build.
-check: check-shell-layout check-shell-layout-fixtures check-helper-windows-fixtures check-ci-credentials check-setup-node-cache check-ci-wip check-telegram-send check-telegram-failure-branch check-telegram-guard check-core \
+check: check-shell-layout check-shell-layout-fixtures check-helper-windows-fixtures check-ci-credentials check-setup-node-cache check-ci-wip check-telegram-send check-telegram-failure-branch check-telegram-guard check-version-stamp check-core \
 	check-shell-windows check-e2e-entry-fixtures check-ui \
 	licenses-check
 
@@ -76,6 +76,15 @@ check-telegram-failure-branch:
 # ci.yml (also with M6 applied). Host bash and awk.
 check-telegram-guard:
 	scripts/ci/telegram-guard.test.sh
+
+# T-077 (decisions #98): scripts/ci/version-stamp.sh, the windows job's one version step, writes
+# <repo MAJOR.MINOR>.<run number> (a vX.Y.Z tag: X.Y.Z) into Cargo.toml, tauri.conf.json,
+# package.json and the two workspace members of Cargo.lock, no other line, and exports
+# VOICEN_VERSION to GITHUB_ENV; a malformed tag, repo version, disagreeing files or a bad run
+# number exit 1 naming the value and write nothing. Fixture trees and a copy of the real files,
+# offline. Host bash, diff, awk.
+check-version-stamp:
+	scripts/ci/version-stamp.test.sh
 
 # T-064: the ui e2e entry point (package.json scripts.e2e) runs Playwright only in the ui image
 # at the lockfile's @playwright/test version, with --network none and the caller's CI; a
