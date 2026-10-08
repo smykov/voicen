@@ -155,7 +155,7 @@ Makefile                     # + licenses, licenses-check, version-check in chec
 1. **Installs**: `cargo-about` in `docker/rust.Dockerfile`; crates `chrono`, `tauri-plugin-opener` (research R13, R2, R16).
 2. **Accepted-license list** (research R13), in particular MPL-2.0 and the Unicode licenses.
 3. **Install directory** shared with the data folder (Tauri default) vs `%LOCALAPPDATA%\Programs\Voicen` (research R9).
-4. **Tauri's stock "Delete the application data" checkbox** next to our question — accept for release 1 or move to a custom NSIS template (research R10).
+4. ~~**Tauri's stock "Delete the application data" checkbox** next to our question — accept for release 1 or move to a custom NSIS template (research R10).~~ Decided (decisions #76): a minimal-diff fork of the tauri-cli 2.12.1 template without the checkbox (T-025).
 5. **Creating the public repository and pushing** (FR-026, research R15) — owner session.
 6. The five clarifications in spec.md (confirmed by the owner 2026-10-02).
 

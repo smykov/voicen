@@ -27,10 +27,20 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
+    "resources": {
+      "../THIRD-PARTY-NOTICES.txt": "THIRD-PARTY-NOTICES.txt"
+    },
     "windows": {
       "nsis": {
         "installMode": "currentUser",
-        "compression": "zlib"
+        "compression": "zlib",
+        "template": "windows/installer.nsi",
+        "installerHooks": "windows/installer-hooks.nsh",
+        "languages": [
+          "English",
+          "Russian"
+        ],
+        "displayLanguageSelector": false
       }
     }
   }
