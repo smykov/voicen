@@ -83,6 +83,7 @@
   "settings.field.model": "Model",
   "settings.field.not_restored": "This value could not be restored to what it was before the save. Check it and save again.",
   "settings.field.speech_language": "Speech language",
+  "settings.field.start_with_windows": "Start with Windows",
   "settings.field.ui_language": "Interface language",
   "settings.field_label.engine.api.base_url": "Base URL (OpenAI-compatible API)",
   "settings.field_label.engine.api.key": "API key (OpenAI-compatible API)",

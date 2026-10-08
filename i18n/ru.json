@@ -83,6 +83,7 @@
   "settings.field.model": "Модель",
   "settings.field.not_restored": "Это значение не удалось вернуть к тому, каким оно было до сохранения. Проверьте его и сохраните ещё раз.",
   "settings.field.speech_language": "Язык речи",
+  "settings.field.start_with_windows": "Запускать вместе с Windows",
   "settings.field.ui_language": "Язык интерфейса",
   "settings.field_label.engine.api.base_url": "Базовый адрес (API, совместимый с OpenAI)",
   "settings.field_label.engine.api.key": "Ключ API (API, совместимый с OpenAI)",
