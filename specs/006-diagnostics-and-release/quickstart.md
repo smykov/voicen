@@ -22,7 +22,7 @@ Expected: all green. A redaction test plants a fake transcript `"secret words 12
 The `windows` job log shows, in order:
 1. `cargo test --workspace` including `crash_probe` (panic → crash file kind `panic`; null deref → kind `native_fault`).
 2. `installed size: NN.N MB (limit 100 MB)`.
-3. `voicen 0.1.0 (<commit>) started` from the installed app.
+3. `version: <MAJOR.MINOR>.<run number>` from the step `Version of this build` (a `vX.Y.Z` tag: `X.Y.Z`; T-077, decisions #98), then `voicen <that version> (<commit>) started` from the installed app.
 4. After a forced kill and relaunch: `previous session ended abnormally` and one `crash-*.txt` with `kind: abnormal_end`.
 5. Reinstall keeps the log; `/S /KEEPDATA` keeps `%LOCALAPPDATA%\Voicen` and the `ci-test` credential; `/S` removes both.
 6. Artifacts `voicen-installer-<commit>` and `voicen-symbols-<commit>`.

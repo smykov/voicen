@@ -113,6 +113,18 @@ jobs:
         with:
           path: ${{ steps.pnpm-store.outputs.path }}
           key: ${{ steps.pnpm-cache.outputs.cache-primary-key }}
+      # T-077 (decisions #98): one version per run, written before the first compile into
+      # Cargo.toml, tauri.conf.json, package.json and the two workspace members of Cargo.lock
+      # (never committed): <repo MAJOR.MINOR>.<run_number>, a vX.Y.Z tag build X.Y.Z. A bad tag,
+      # repo version or run number stops the job here. Exports VOICEN_VERSION. Contract and host
+      # test: scripts/ci/version-stamp.sh, version-stamp.test.sh (make check).
+      - name: Version of this build
+        shell: bash
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          RUN_NUMBER: ${{ github.run_number }}
+        run: scripts/ci/version-stamp.sh "$REF_TYPE" "$REF_NAME" "$RUN_NUMBER"
       # The shell's build script (tauri-build static VC runtime) puts a stub msvcrt.lib on its
       # search path; cargo gives every build script's search dirs (native_dirs) to every doctest
       # of the same invocation, so other crates' doctests must not share a run with `voicen` (T-033, F-001).
@@ -149,7 +161,8 @@ jobs:
           function Test-LogLine([string]$text) { (Test-Path $logs) -and (@(Select-String -Path $logs -SimpleMatch $text).Count -gt 0) }
           # First launch writes the defaults through SettingsService (T-030, decision #34).
           $settings = Join-Path $env:LOCALAPPDATA 'Voicen\settings.json'
-          $expected = "($env:VOICEN_COMMIT) started"
+          # T-077: the installed exe reports the stamped version (CARGO_PKG_VERSION) in its start line.
+          $expected = "voicen $env:VOICEN_VERSION ($env:VOICEN_COMMIT) started"
           # T-008 (spec 004 R-11): load_settings logs the load outcome, then the reconcile
           # action; a first run with the leftover Run value is first_run, then removed.
           $loadLine = 'settings load outcome=first_run'
@@ -223,7 +236,7 @@ jobs:
             if ($closedAlive -and -not $gone) { $closedAlive = $false; $closeSeen = "the settings window did not close ($closeSeen)" }
           }
           Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
-          if (-not $found) { if (Test-Path $logs) { Get-Content $logs }; throw "start log line with commit $env:VOICEN_COMMIT not found" }
+          if (-not $found) { if (Test-Path $logs) { Get-Content $logs }; throw "start log line '$expected' (version $env:VOICEN_VERSION, commit $env:VOICEN_COMMIT) not found" }
           Get-Content $logs
           if (-not $loaded) { throw "log line '$loadLine' not found after the first launch" }
           if (-not $reconciled) { throw "log line '$reconcileLine' not found after the first launch" }
@@ -715,7 +728,8 @@ jobs:
           path: target/release/bundle/nsis/*-setup.exe
       # T-070 (decisions #93): the installer goes to the owner's Telegram chat on main and v* tags.
       # The premises run on every ref (wip included, P-016): red when there is not exactly one
-      # *-setup.exe or its name lacks _<tauri.conf.json version>_; a file of 50 MB or more (Bot API
+      # *-setup.exe, its name lacks _<tauri.conf.json version>_ or that version is not the stamped
+      # VOICEN_VERSION (T-077); a file of 50 MB or more (Bot API
       # upload limit) is a warning and send=false. The send is one script, scripts/ci/telegram-send.sh
       # (contract in its header, host test scripts/ci/telegram-send.test.sh in make check): token and
       # chat id reach curl only as config on stdin; no token -> one line, exit 0; a Telegram or network
@@ -737,6 +751,7 @@ jobs:
           installer="${files[0]}"
           version="$(sed -n 's/^[[:space:]]*"version":[[:space:]]*"\([^"]*\)".*/\1/p' src-tauri/tauri.conf.json | head -n 1)"
           if [ -z "$version" ]; then echo "::error::installer for Telegram: no version in src-tauri/tauri.conf.json"; exit 1; fi
+          if [ "$version" != "${VOICEN_VERSION:-}" ]; then echo "::error::installer for Telegram: src-tauri/tauri.conf.json version '$version' differs from the stamped VOICEN_VERSION '${VOICEN_VERSION:-}' (step Version of this build)"; exit 1; fi
           case "$(basename "$installer")" in
             *"_${version}_"*) ;;
             *) echo "::error::installer for Telegram: $(basename "$installer") does not contain _${version}_ (src-tauri/tauri.conf.json version)"; exit 1 ;;
