@@ -571,9 +571,12 @@ mod tests {
 
     #[test]
     fn production_constructor_uses_default_timeouts() {
-        // FR-24 rests on defaults_are_fr24 plus this: Pipeline::new hands the
-        // engine Timeouts::default(). Bite: Pipeline::new with other durations, or
-        // the request built without the pipeline's value.
+        // FR-24 rests on defaults_are_fr24 plus this: Pipeline::new derives each
+        // job's Timeouts from that job's settings snapshot, and the default
+        // snapshot (`settings()`) converts to Timeouts::default(). The per-job case
+        // with other values is request_carries_the_job_settings_timeouts. Bite:
+        // Pipeline::new with other durations, or the request built without the
+        // snapshot's value.
         let f = fakes();
         let seen = Arc::new(Seen::default());
         let p = Pipeline::new(deps(&f, Arc::new(PassThrough)))

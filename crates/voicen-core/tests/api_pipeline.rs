@@ -742,14 +742,18 @@ async fn configured_api_timeout_fails_the_job_with_timeout() {
     // api_transcription_s = 5 fails with Timeout against a server answering after
     // 7 s, about 5 s after the request started, with failure=Timeout in the job
     // event and the audio kept; the same server with the default snapshot (30 s)
-    // is delivered. Bite: the pipeline's fixed Timeouts::default() (the 7 s answer
-    // arrives and is delivered), the local-server or connect value used for the
-    // API request (60 s / 5 s), or milliseconds.
+    // is delivered. connect_s = 2 (in range, not 5) so that the connect value
+    // read as the request limit ends the job at about 2 s, outside the window.
+    // Bite: the pipeline's fixed Timeouts::default() (the 7 s answer arrives and
+    // is delivered), the local-server value used for the API request (60 s:
+    // delivered), the connect value used for it (2 s: too early), or
+    // milliseconds.
     let server = server_with(ok_text("late but in time").set_delay(T073_DELAY)).await;
 
     let mut h = harness();
     let mut s = api_settings(&base(&server));
     s.timeouts.api_transcription_s = 5;
+    s.timeouts.connect_s = 2;
     let rec = h.record(fixtures::speech_3s(), Arc::new(s));
     let (report, took) = h.run(rec);
     assert_eq!(report.end, JobEnd::Failed(FailureReason::Timeout));

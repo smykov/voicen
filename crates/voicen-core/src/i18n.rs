@@ -863,15 +863,42 @@ mod tests {
         );
     }
 
-    /// T-073: the five timeouts fields, the suffix of their FieldId and hint ids,
-    /// with the #99 bounds (default, min, max) in whole seconds.
-    const TIMEOUT_ROLES: [(&str, u32, u32, u32); 5] = [
-        ("connect", 5, 1, 60),
-        ("api_transcription", 30, 5, 600),
-        ("local_server", 60, 5, 1800),
-        ("post_processing", 15, 5, 300),
-        ("builtin_local", 120, 10, 1800),
-    ];
+    /// T-073: the id suffix of a timeouts field (`settings.field_label.timeouts.<suffix>`,
+    /// `settings.timeouts.<suffix>.hint`). An exhaustive match, so a new role does not
+    /// compile until it is named here.
+    fn timeout_suffix(role: crate::timeouts::TimeoutRole) -> &'static str {
+        use crate::timeouts::TimeoutRole;
+        match role {
+            TimeoutRole::Connect => "connect",
+            TimeoutRole::ApiTranscription => "api_transcription",
+            TimeoutRole::LocalServer => "local_server",
+            TimeoutRole::PostProcessing => "post_processing",
+            TimeoutRole::BuiltinLocal => "builtin_local",
+        }
+    }
+
+    /// T-073: every timeouts role, from the one table (`TimeoutRole::ALL`). Pinned to
+    /// the five distinct roles so the tests below cannot pass on an empty or short
+    /// list.
+    fn timeout_roles() -> [crate::timeouts::TimeoutRole; 5] {
+        use crate::timeouts::TimeoutRole;
+        let all = TimeoutRole::ALL;
+        let distinct: BTreeSet<&str> = all.iter().map(|r| timeout_suffix(*r)).collect();
+        assert_eq!(
+            distinct,
+            [
+                "connect",
+                "api_transcription",
+                "local_server",
+                "post_processing",
+                "builtin_local"
+            ]
+            .into_iter()
+            .collect::<BTreeSet<_>>(),
+            "TimeoutRole::ALL must hold exactly the five roles"
+        );
+        all
+    }
 
     #[test]
     fn timeout_texts_exist_in_both_catalogs() {
@@ -882,7 +909,8 @@ mod tests {
         // missing or empty in a catalog.
         let c = catalog(EN_JSON, RU_JSON);
         let mut ids = vec!["error.timeout.range".to_string()];
-        for (role, ..) in TIMEOUT_ROLES {
+        for role in timeout_roles() {
+            let role = timeout_suffix(role);
             ids.push(format!("settings.field_label.timeouts.{role}"));
             ids.push(format!("settings.timeouts.{role}.hint"));
         }
@@ -901,12 +929,16 @@ mod tests {
     fn timeout_hints_state_the_bounds_table() {
         // T-073: FieldError carries no parameters, so each control's range is in a
         // static hint ("1–60 s, default 5"); the numbers in it must be exactly the
-        // #99 min, max and default of that field, in en and ru, so a hint and the
-        // bounds table cannot drift. Bite: a hint with another field's range, a
-        // changed bound in one language only, or a hint without the default.
+        // min, max and default of that role in the one bounds table
+        // (`TimeoutRole::bounds`, decision #99), in en and ru, so a hint and the
+        // table cannot drift (P-010). Bite: a hint with another field's range, a
+        // changed bound in one language only, a hint without the default, or a
+        // bound changed in `TimeoutRole::bounds` with the hints left alone.
         let c = catalog(EN_JSON, RU_JSON);
-        for (role, default, min, max) in TIMEOUT_ROLES {
-            let id = format!("settings.timeouts.{role}.hint");
+        for role in timeout_roles() {
+            let b = role.bounds();
+            let (default, min, max) = (b.default, b.min, b.max);
+            let id = format!("settings.timeouts.{}.hint", timeout_suffix(role));
             for lang in LANGS {
                 let text = own_text(&c, lang, &id).unwrap_or("");
                 let numbers: BTreeSet<u32> = text
