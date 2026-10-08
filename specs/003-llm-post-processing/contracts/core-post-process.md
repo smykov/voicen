@@ -55,7 +55,7 @@ impl PostProcessOutcome {
 
 | Owner | Item | Extension by 003 |
 |---|---|---|
-| 001 | `timeouts::Timeouts` | field `post_processing: Duration`, default 15 s (connect 5 s already there) |
+| 001 | `timeouts::Timeouts` | field `post_processing: Duration`, default 15 s (connect 5 s already there); both are settings (`timeouts.post_processing`, `timeouts.connect`, decision #99), derived per job from the snapshot |
 | 001 | `openai::Client` | method `chat_completion(&self, base_url, model, key: Option<&Secret>, messages, total: Duration) -> Result<String, Failure>` using the same connector, base-URL joining and connect timeout |
 | 001 | `Notice` | variant `PostProcessingSkipped(SkipReason)` |
 | 004 | `Settings` | field `post_processing: PostProcessingSettings` |

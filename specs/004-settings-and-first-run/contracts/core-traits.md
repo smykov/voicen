@@ -118,7 +118,7 @@ impl ConnectionTester {
     pub async fn test(&self, req: ConnectionTestRequest) -> ConnectionTestResult;
 }
 ```
-- Uses 001's `TranscriptionClient` and the shared timeouts module; reads the stored key only for `KeyEdit::Untouched`; never writes anything; no VAD.
+- Uses 001's `TranscriptionClient` and the shared timeouts module (`Timeouts::from_settings` of the form's `timeouts`); reads the stored key only for `KeyEdit::Untouched`; never writes anything; no VAD.
 
 ### `i18n`
 
@@ -152,7 +152,7 @@ pub trait DownloadedModels: Send + Sync { fn is_downloaded(&self, id: &str) -> b
 |---|---|---|
 | `HotkeyRegistrar { prepare, commit, abort }` | defined by 004; implemented by 001 (hotkey) | two-phase replace so a refused save keeps the old hotkey (req FR-05). 001 implements this trait; it does not define another shape. |
 | `TranscriptionClient` + failure reasons | 001 | one request with a given endpoint, audio and timeout; reasons as in data-model `ConnectionTestResult` |
-| timeouts module | 001 (FR-24) | connect 5 s; API 30 s; local server 60 s |
+| timeouts module | 001 (FR-24) | `TimeoutRole::bounds` (defaults and ranges, decision #99), `Timeouts::from_settings`; the tester converts the form's `timeouts` and uses `connect` and the API / local-server limit |
 | `DownloadedModels { is_downloaded(id), list() }` | defined by 004; implemented by 002 (`ModelStore`) | validation of `builtin_local.model_id` |
 | `PostProcessingSettings`, `STARTER_PROMPT`, `defaults()` | data type created by 004 (foundational); 003 adds `validate()` and wiring | embedded in `Settings` |
 | history apply on change | 005 | subscribes (std `mpsc` receiver) to `SettingsService::subscribe()` |

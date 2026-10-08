@@ -131,11 +131,11 @@ creds.read(KeySlot::LocalServer)                         // once; Err -> KeyStor
 OpenAiCompatibleEngine::local_server(base_url, model /* trimmed; None if empty */, key)
 ```
 
-What 001's client provides for it: optional model (`None` omits the form field), optional key (none or empty omits `Authorization`), the per-endpoint request deadline (`Timeouts::local_server`, 60 s; connect 5 s) chosen by the endpoint role, `kind() == "local_server"`, and the "cannot reach <host:port>" reason.
+What 001's client provides for it: optional model (`None` omits the form field), optional key (none or empty omits `Authorization`), the per-endpoint request deadline (`Timeouts::local_server`, default 60 s, and `Timeouts::connect`, default 5 s; both from the job's `timeouts` settings, decision #99) chosen by the endpoint role, `kind() == "local_server"`, and the "cannot reach <host:port>" reason.
 
 ## Timeouts (shared module, owned by 001, extended here)
 
-Implemented as fields of 001's one `voicen_core::timeouts::Timeouts` struct (`Timeouts::default()` holds the production values), not as consts: `connect`, `local_server`, `download_no_data` (T-016, decision #49).
+Implemented as fields of 001's one `voicen_core::timeouts::Timeouts` struct (`Timeouts::default()` is `from_settings` of the default `timeouts` settings), not as consts: `connect`, `local_server`, `download_no_data` (T-016, decision #49). `connect` and `local_server` are settings since T-073 (decision #99); `download_no_data` stays fixed at 30 s and `Downloader`/`LocalModels` keep `Timeouts::default()`. The consts below are the defaults.
 
 ```rust
 pub const CONNECT: Duration = 5 s;                       // req FR-24 — `Timeouts::connect`

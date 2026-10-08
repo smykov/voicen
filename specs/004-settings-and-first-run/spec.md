@@ -94,7 +94,7 @@ Before saving, a user who entered a base URL, model and key clicks "Test connect
 1. **Given** engine = API with a valid base URL, model and key, **When** the user clicks "Test connection", **Then** "OK" with the measured latency in milliseconds is shown (req FR-14).
 2. **Given** a base URL whose host cannot be reached, **When** the user tests, **Then** "cannot reach <host>" is shown (req FR-14 failure branch).
 3. **Given** a wrong key (endpoint answers 401 or 403), **When** the user tests, **Then** "invalid API key" is shown (req FR-14 failure branch).
-4. **Given** the endpoint does not answer within the timeouts of FR-24 (connect 5 s; 30 s API, 60 s local server), **When** the user tests, **Then** "timeout" is shown.
+4. **Given** the endpoint does not answer within the configured timeouts of FR-24 (defaults: connect 5 s; 30 s API, 60 s local server), **When** the user tests, **Then** "timeout" is shown.
 5. **Given** engine = local server at `http://localhost:8000/v1` without a key, **When** the user tests and the server runs, **Then** "OK" with latency is shown.
 6. **Given** a test is in progress, **Then** the button is disabled and shows progress; the test never changes the saved settings or the stored key.
 
@@ -169,7 +169,7 @@ A user who enters an `http://` base URL on a non-local host is warned that the A
   - Output tab: auto-paste on/off.
   - Post-processing tab: on/off, endpoint (base URL), model, API key, prompt.
   - History tab: on/off, size N.
-  - General tab: start with Windows, UI language (English / Russian).
+  - General tab: the "Timeouts (seconds)" group (connect, API transcription, local server, post-processing, built-in engine; req FR-24, decision #99), start with Windows, UI language (English / Russian).
 - **FR-002** (req FR-13): The settings window MUST open from the tray (owned by 001), on first run (FR-005), when the hotkey is pressed with engine = none (FR-007), and on the FR-05 startup branch (owned by 001) on a requested tab/field, when a second instance is launched (001 FR-002), and from the "no local model" notification action (002 FR-011) on the Engine tab; a request while it is open brings the existing window to front on that tab.
   - Note (T-052, OQ-11 default): the tray "Settings" item and a second launch name no tab, so they bring an open window to front on the tab it shows (no tab switch) and open a closed one on the Engine tab (contracts/ipc.md "Window", `OpenTarget::Front`).
 - **FR-003** (req FR-13): Changes MUST be applied only by an explicit Save. A save is all-or-nothing: either every changed setting is validated, applied and persisted, or nothing changes and the reasons are shown on the fields concerned (Clarification Q1).
@@ -182,6 +182,7 @@ A user who enters an `http://` base URL on a non-local host is warned that the A
   - the hotkey has no modifier (Ctrl, Alt, Shift, Win), has no non-modifier key, or uses Esc;
   - the hotkey cannot be registered ("hotkey unavailable", req FR-05);
   - history size N is not a whole number from 1 to 100;
+  - a timeout (req FR-24) is not a whole number of seconds within its range (`timeout.range`, any engine; ranges in data-model.md, decision #99);
   - start with Windows cannot be applied, the key cannot be stored, or the settings cannot be written.
   Fields of engines (and of post-processing) that are not selected are kept as entered but not validated (Clarification Q2).
 - **FR-005** (req FR-21): When the app starts and no settings file exists, the system MUST create the settings with these defaults, persist them, and open the settings window on the Engine tab: engine none; hotkey Ctrl+Alt+Space; mode hold; auto-paste on; speech language auto; history on, N = 20; start with Windows off; UI language from the OS (FR-011); microphone Windows default; post-processing off with empty endpoint, model and key and the prompt = 003's built-in starter prompt (003 FR-011); API engine base URL `https://api.openai.com/v1` and model `whisper-1`; local server base URL `http://localhost:8000/v1` with an empty model (Clarification Q5). Defaults are defined in exactly one place.
@@ -210,7 +211,7 @@ A user who enters an `http://` base URL on a non-local host is warned that the A
 
 **Test connection**
 
-- **FR-017** (req FR-14): For engine = API or local server, the settings window MUST offer "Test connection", which sends a bundled ~1 s speech sample through the same transcription client as dictation (req FR-06, FR-17) using the values currently in the form (the stored key when the key field is untouched), and reports: "OK" with latency in ms; "cannot reach <host>" (DNS failure, connection refused, connect timeout); "invalid API key" (HTTP 401/403); "timeout" (FR-24 limits exceeded); otherwise "HTTP <status>" or "unexpected response". It MUST NOT change saved settings or stored keys, and MUST be disabled while a test runs (Clarification Q3).
+- **FR-017** (req FR-14): For engine = API or local server, the settings window MUST offer "Test connection", which sends a bundled ~1 s speech sample through the same transcription client as dictation (req FR-06, FR-17) using the values currently in the form (the stored key when the key field is untouched), and reports: "OK" with latency in ms; "cannot reach <host>" (DNS failure, connection refused, connect timeout); "invalid API key" (HTTP 401/403); "timeout" (the connect or request limit of FR-24 as currently entered in the form exceeded); otherwise "HTTP <status>" or "unexpected response". It MUST NOT change saved settings or stored keys, and MUST be disabled while a test runs (Clarification Q3).
 - **FR-018** (req FR-14, NFR-05): Test connection MUST NOT apply voice-activity detection to the sample and is the only network call the settings window makes on its own (besides model downloads owned by 002).
 
 **Start with Windows**
@@ -227,7 +228,7 @@ A user who enters an `http://` base URL on a non-local host is warned that the A
 
 ### Key Entities
 
-- **Settings**: everything the user configures except keys: engine choice; per-engine configuration (API: base URL, model; local server: base URL, model; built-in local: selected model id); speech language (auto or a language code); microphone (Windows default or a device id with its last known name); hotkey (modifiers + key) and mode (hold/toggle); auto-paste; post-processing (on, endpoint, model, prompt); history (on, N); start with Windows; UI language (en/ru); schema version. Persisted as one file in the app data folder.
+- **Settings**: everything the user configures except keys: engine choice; per-engine configuration (API: base URL, model; local server: base URL, model; built-in local: selected model id); speech language (auto or a language code); microphone (Windows default or a device id with its last known name); hotkey (modifiers + key) and mode (hold/toggle); auto-paste; post-processing (on, endpoint, model, prompt); history (on, N); the five request timeouts (seconds); start with Windows; UI language (en/ru); schema version. Persisted as one file in the app data folder.
 - **Key slot (Secret)**: one API key per slot — transcription API, local server, post-processing — held only in the OS credential store; the settings model knows only whether each slot holds a key.
 - **Message catalog**: message id → English text and Russian text, with named placeholders (e.g. `{host}`); the single source of all user-visible text.
 - **Save outcome**: success with optional warnings (insecure endpoint), or refusal with a list of field errors (field id + message id).

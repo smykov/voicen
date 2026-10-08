@@ -77,7 +77,7 @@ Rule: never `prewarm` at app start; deletion of the loaded model while `active >
 | `model` | `Option<String>` | trimmed; empty → `None` → not sent |
 | `key` | none in settings | the key is read through 004's `CredentialStore` with `KeySlot::LocalServer` (target `Voicen/local-server`) as `Option<Secret>`; the value is never in settings |
 
-Timeouts are not settings: connect 5 s, transcription 60 s from the shared timeouts module.
+Connect (5 s) and transcription (60 s) are the defaults of the `timeouts` settings (decision #99), read per job from the snapshot through the shared timeouts module. The model download's no-data limit is not a setting.
 
 ## EngineChoice (part of Settings, owned by 004; consumed here)
 
