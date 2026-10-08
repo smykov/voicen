@@ -411,6 +411,74 @@ jobs:
           for ($i = 0; $i -lt 30 -and $freed -ne 0; $i++) { Start-Sleep -Milliseconds 500; $freed = Test-Hotkey }
           if ($freed -ne 0) { throw "Ctrl+Alt+Space is still taken 15 s after the app was stopped (RegisterHotKey error $freed)" }
           Write-Output "the running app held Ctrl+Alt+Space (RegisterHotKey error 1409) and freed it when stopped"
+      # T-055 (review 1 #2): the startup failure branch on the real runtime. The hotkey thread reports
+      # a failed registration before HotkeyThread::start returns, so its settings request (Recording,
+      # recording.hotkey) and the tray error are posted before app.run's loop starts; MockRuntime tests
+      # cannot prove those posts survive on tao/wry. This step's own thread holds Ctrl+Alt+Space
+      # (RegisterHotKey, hWnd 0, MOD_NOREPEAT; freed in finally) for the whole launch. settings.json is
+      # Loaded here (the previous steps' file), so startup_action alone opens no window: a shown
+      # settings window comes only from the failed registration. The settings window is told from the
+      # overlay (same title, notice.hotkey_unavailable) by ex-style: the overlay carries
+      # WS_EX_TOOLWINDOW and WS_EX_TRANSPARENT, the settings window neither. Raw facts only (F-003);
+      # every wait polls against a Windows-sized budget (F-005).
+      - name: A hotkey taken by another program at start opens the settings window, logs the refusal and keeps the app running (T-055 startup failure branch)
+        shell: pwsh
+        run: |
+          . ./scripts/ci/visible-windows.ps1
+          Add-Type -Namespace T055 -Name Hotkey -MemberDefinition @'
+          [DllImport("user32.dll", SetLastError = true)] public static extern bool RegisterHotKey(IntPtr hWnd, int id, uint fsModifiers, uint vk);
+          [DllImport("user32.dll", SetLastError = true)] public static extern bool UnregisterHotKey(IntPtr hWnd, int id);
+          '@
+          $exe = Join-Path $env:LOCALAPPDATA 'Voicen\voicen.exe'
+          $settings = Join-Path $env:LOCALAPPDATA 'Voicen\settings.json'
+          # voicen.log plus rolled voicen-*.log: a run crossing local midnight rolls the file (T-008).
+          $log = Join-Path $env:LOCALAPPDATA 'Voicen\logs\voicen*.log'
+          $expected = "($env:VOICEN_COMMIT) started"
+          $refused = 'kind=hotkey_register_failed os_code=1409'
+          if (-not (Test-Path -LiteralPath $settings -PathType Leaf)) { throw "premise: settings.json not found at $settings before the taken-hotkey launch" }
+          $hotkey = (Get-Content -LiteralPath $settings -Raw | ConvertFrom-Json).hotkey
+          if ($hotkey -cne 'Ctrl+Alt+Space') { throw "premise: settings.json has hotkey '$hotkey', expected the default Ctrl+Alt+Space" }
+          function Get-Count([string]$text) { if (Test-Path $log) { @(Select-String -Path $log -SimpleMatch $text).Count } else { 0 } }
+          $WS_EX_TRANSPARENT = 0x20
+          $WS_EX_TOOLWINDOW = 0x80
+          if (-not [T055.Hotkey]::RegisterHotKey([IntPtr]::Zero, 0x0A55, 0x4003, 0x20)) {
+            throw "premise: this step could not take Ctrl+Alt+Space before the launch (RegisterHotKey error $([Runtime.InteropServices.Marshal]::GetLastWin32Error()))"
+          }
+          $proc = $null
+          try {
+            $starts = Get-Count $expected
+            $refusals = Get-Count $refused
+            $proc = Start-Process -FilePath $exe -PassThru
+            $null = $proc.Handle
+            $started = $false
+            for ($i = 0; $i -lt 30 -and -not $started; $i++) { Start-Sleep -Seconds 1; $started = (Get-Count $expected) -gt $starts }
+            if (-not $started) { throw "start log line with commit $env:VOICEN_COMMIT not written by the taken-hotkey launch" }
+            $logged = $false
+            $win = $false
+            $seen = 'none'
+            for ($i = 0; $i -lt 30 -and -not ($logged -and $win); $i++) {
+              if ($proc.HasExited) { throw "voicen.exe exited during the taken-hotkey launch (exit code $($proc.ExitCode))" }
+              $logged = (Get-Count $refused) -gt $refusals
+              $shown = Get-ShownWindows $proc.Id
+              $seen = Format-ShownWindows $shown
+              $win = @($shown | Where-Object { $_.Title -ceq 'Voicen' -and ($_.ExStyle -band ($WS_EX_TOOLWINDOW -bor $WS_EX_TRANSPARENT)) -eq 0 }).Count -eq 1
+              if (-not ($logged -and $win)) { Start-Sleep -Seconds 1 }
+            }
+            # Still alive a while after both facts: the failure branch must not end the app.
+            Start-Sleep -Seconds 3
+            $alive = -not $proc.HasExited
+            Get-Content $log
+            if (-not $logged) { throw "log line '$refused' not written by the taken-hotkey launch" }
+            Write-Output "found '$refused' after the taken-hotkey launch"
+            if (-not $win) { throw "no settings window (shown, titled Voicen, without WS_EX_TOOLWINDOW / WS_EX_TRANSPARENT) within 30 s of the taken-hotkey launch (last seen: $seen)" }
+            Write-Output "a settings window is shown on the taken-hotkey launch: $seen"
+            if (-not $alive) { throw "voicen.exe exited after the taken-hotkey failure branch (exit code $($proc.ExitCode))" }
+            Write-Output "voicen.exe keeps running after the taken-hotkey failure branch"
+          }
+          finally {
+            if ($proc) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue; $null = $proc.WaitForExit(30000) }
+            [void][T055.Hotkey]::UnregisterHotKey([IntPtr]::Zero, 0x0A55)
+          }
       - name: A .part left by an earlier run is deleted at start (T-044 LocalModels::open in run())
         shell: pwsh
         run: |
