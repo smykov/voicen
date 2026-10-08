@@ -785,6 +785,12 @@ jobs:
           $p = Start-Process $setup.FullName -ArgumentList '/P' -PassThru
           $null = $p.Handle
           if (-not $p.WaitForExit(120000)) {
+            # Diagnostics only: what is still running, with its command line and window title (a
+            # blocking dialog shows its caption here), before the processes are killed.
+            Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Id -eq $p.Id -or $_.ProcessName -match '^(uninstall|Au_|Un_)' -or ($_.Path -and $_.Path -like '*\~nsu*') } | ForEach-Object {
+              $cmd = (Get-CimInstance Win32_Process -Filter "ProcessId=$($_.Id)" -ErrorAction SilentlyContinue).CommandLine
+              Write-Host "still running: $($_.ProcessName) pid $($_.Id) window '$($_.MainWindowTitle)' command line: $cmd"
+            }
             Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
             Get-Process -Name uninstall -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
             [void](Remove-All)

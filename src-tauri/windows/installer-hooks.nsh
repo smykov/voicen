@@ -25,6 +25,17 @@ Var VoicenPurgeData
 ; Scratch for /KEEPDATA and the purge exit code.
 Var VoicenScratch
 
+; Every install records its language, silent ones included. The uninstaller's un.onInit runs
+; MUI_UNGETLANGUAGE (installer.nsi): with no "Installer Language" value under
+; MUI_LANGDLL_REGISTRY_KEY it calls MUI_LANGDLL_DISPLAY, which is skipped only under /S, and
+; LangDLL shows its "Installer Language" dialog whenever more than one language is loaded
+; (English + Russian). MUI writes the value only from the instfiles page's leave function, which
+; never runs in a silent install, so without this line the first uninstall started by a passive
+; reinstall (/UPDATE /P) or a user's /P waits on that dialog (T-025, CI run 37765499554).
+!macro NSIS_HOOK_POSTINSTALL
+  WriteRegStr ${MUI_LANGDLL_REGISTRY_ROOT} "${MUI_LANGDLL_REGISTRY_KEY}" "${MUI_LANGDLL_REGISTRY_VALUENAME}" $LANGUAGE
+!macroend
+
 !macro NSIS_HOOK_PREUNINSTALL
   StrCpy $VoicenPurgeData 0
   ${If} $UpdateMode <> 1

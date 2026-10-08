@@ -15,7 +15,7 @@ Interfaces seen from outside the app: command-line switches, files, CI job names
 | Silent | `/S` | FR-027 |
 | Size | sum of installed files ≤ 100 MB (measured before first launch) | FR-019 |
 | Template | `bundle.windows.nsis.template = "windows/installer.nsi"`: a minimal-diff fork of the tauri-cli 2.12.1 template (header `; upstream: tauri-cli 2.12.1 …`), `@tauri-apps/cli` pinned exactly; edits: `PageLeaveReinstall` always passes `/UPDATE /P` to the old NSIS uninstaller, the stock "Delete the application data" checkbox removed; `make check-nsis-fork` fails when the fork's version, `package.json` and the lockfile differ (decisions #76, T-025, `docs/decisions/installer.md`) | FR-023, FR-024 |
-| Hooks | `bundle.windows.nsis.installerHooks = "windows/installer-hooks.nsh"`: `NSIS_HOOK_PREUNINSTALL` (the data decision, `voicen.exe --purge-credentials`) and `NSIS_HOOK_POSTUNINSTALL` (`RMDir /r "$LOCALAPPDATA\Voicen"`, bookkeeping key) (T-025); `NSIS_HOOK_PREINSTALL`: write `logs\installer-ended` (T-024, not yet) | FR-013(b), FR-021, FR-022 |
+| Hooks | `bundle.windows.nsis.installerHooks = "windows/installer-hooks.nsh"`: `NSIS_HOOK_PREUNINSTALL` (the data decision, `voicen.exe --purge-credentials`) and `NSIS_HOOK_POSTUNINSTALL` (`RMDir /r "$LOCALAPPDATA\Voicen"`, bookkeeping key) (T-025); `NSIS_HOOK_POSTINSTALL`: record the installer language (`HKCU\${MANUPRODUCTKEY}` "Installer Language"), also on silent installs, so a passive uninstall shows no language dialog (T-025); `NSIS_HOOK_PREINSTALL`: write `logs\installer-ended` (T-024, not yet) | FR-013(b), FR-021, FR-022 |
 
 ## Uninstaller (`%LOCALAPPDATA%\Voicen\uninstall.exe` — observed in run 37044674209 (commit 0e73b52), recorded by `docs/tasks/T-029.md`)
 

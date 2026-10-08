@@ -31,7 +31,16 @@ On Yes the hook runs `"$INSTDIR\voicen.exe" --purge-credentials` while the exe s
 - **Where it is enforced:** `make check-nsis-fork`: the header line `; upstream: tauri-cli X.Y.Z crates/tauri-bundler/src/bundle/windows/nsis/installer.nsi` in the first 20 lines of the fork, the exact specifier in `package.json`, the lockfile's specifier and version, and `bundle.windows.nsis.template` must agree.
 - **Don't:** bump `@tauri-apps/cli` without re-forking: take the new upstream `installer.nsi` (tag `tauri-cli-vX.Y.Z`, or the text embedded in the CLI binary), re-apply the two edits listed in the fork's header, update the header version, then run the Windows job.
 
+### Every install records its language, silent installs included
+
+- **Defect that produced it:** CI run 37765499554 (T-025, wip, before review): the same-version `/P` reinstall (W2) hung for 120 s. With two languages loaded (English, Russian), the uninstaller's `un.onInit` (`MUI_UNGETLANGUAGE`) finds no `HKCU\${MANUPRODUCTKEY}` "Installer Language" value and calls `MUI_LANGDLL_DISPLAY`. That macro is skipped only under `/S`, and LangDLL shows its language dialog whenever more than one language is visible (NSIS `Contrib/LangDLL/LangDLL.c`, `visible_langs_num > 1`). MUI writes the value only from the instfiles page's leave function (`MUI_LANGDLL_SAVELANGUAGE` in `Pages/InstallFiles.nsh`), which never runs in a silent install. With the stock single language the dialog never showed, which is why the gap appeared only with `languages`.
+- **What breaks if you violate it:** after a silent install, every passive uninstall (the one each reinstall or upgrade starts with `/UPDATE /P`, or a user's `/P`) waits on an "Installer Language" dialog; an interactive uninstall shows an extra dialog.
+- **Where it is enforced:** `NSIS_HOOK_POSTINSTALL` writes `$LANGUAGE` to `MUI_LANGDLL_REGISTRY_ROOT`/`_KEY`/`_VALUENAME` (the template's own defines) on every install; CI W2.
+- **Don't:** remove that hook while more than one language is listed; rely on the uninstaller's hooks (they run after `un.onInit`).
+
 ## Residual risks
+
+- **Language value missing.** If the "Installer Language" value is gone (deleted by hand, or an install from a build without the POSTINSTALL hook, e.g. afd5352), a passive uninstall still waits on the language dialog: `un.onInit` runs before any hook.
 
 - **Downgrade to a pre-T-025 build.** Installing an older (stock-template) build over a T-025 build runs our uninstaller without `/UPDATE`, so the question shows with default Yes. That is the old installer's code and cannot be fixed; the owner can answer No.
 - **WebView2 data** goes to `%LOCALAPPDATA%\dev.voicen.app` until T-062 lands, and nothing removes it: the stock checkbox was the only path that could, and it deleted outside the folder (FR-023).
