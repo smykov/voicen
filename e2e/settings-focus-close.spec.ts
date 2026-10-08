@@ -456,6 +456,13 @@ const NON_DEFAULT: Settings = {
     prompt: "Fake round-trip prompt: fix punctuation only.",
   },
   history: { enabled: false, size: 42 },
+  timeouts: {
+    connect_s: 7,
+    api_transcription_s: 45,
+    local_server_s: 90,
+    post_processing_s: 20,
+    builtin_local_s: 150,
+  },
   start_with_windows: true,
   ui_language: "ru",
 };
@@ -531,6 +538,11 @@ function shownFor(settings: Settings, offered: readonly string[] = []): Record<s
     "output.auto_paste": settings.auto_paste,
     "history.enabled": settings.history.enabled,
     "history.size": String(settings.history.size),
+    "timeouts.connect": String(settings.timeouts.connect_s),
+    "timeouts.api_transcription": String(settings.timeouts.api_transcription_s),
+    "timeouts.local_server": String(settings.timeouts.local_server_s),
+    "timeouts.post_processing": String(settings.timeouts.post_processing_s),
+    "timeouts.builtin_local": String(settings.timeouts.builtin_local_s),
     "general.ui_language": settings.ui_language,
     "general.start_with_windows": settings.start_with_windows,
   };
@@ -547,7 +559,15 @@ function tabFieldsFor(engine: RoundTripEngine): Record<string, string[]> {
     recording: ["recording.hotkey", "recording.mode"],
     output: ["output.auto_paste"],
     history: ["history.enabled", "history.size"],
-    general: ["general.ui_language", "general.start_with_windows"],
+    general: [
+      "general.ui_language",
+      "general.start_with_windows",
+      "timeouts.connect",
+      "timeouts.api_transcription",
+      "timeouts.local_server",
+      "timeouts.post_processing",
+      "timeouts.builtin_local",
+    ],
   };
 }
 
