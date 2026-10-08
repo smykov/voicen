@@ -22,7 +22,7 @@ mod refused_addr_tests;
 use std::sync::Arc;
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
-use common::{refused_addr, refused_timeouts};
+use common::{refused_addr, refused_timeouts, OVERHEAD_ALLOWANCE};
 use serde_json::json;
 use voicen_core::audio::{wav, AudioBuffer};
 use voicen_core::autostart::FakeAutostart;
@@ -536,12 +536,13 @@ async fn configured_local_server_timeout_fails_the_job_with_timeout() {
     // T-073 (the owner's case: long dictations on a slow local server), through
     // the production pipeline (`Pipeline::new`, no test override): a snapshot with
     // local_server_s = 5 (the #99 minimum) fails with Timeout against a server
-    // answering after 7 s, about 5 s after the request started, failure=Timeout in
-    // the job event, the audio kept; the API limit in the same snapshot is set long
+    // answering after 10 s (T-078: was 7 s; now above the took bound), about 5 s
+    // after the request started, failure=Timeout in the job event, the audio kept; the API limit in the same snapshot is set long
     // (600 s) so reading it instead shows. The same server with the default
     // snapshot (60 s) is delivered. Bite: the pipeline's fixed Timeouts::default(),
     // the API value used for the local server, or milliseconds.
-    let server = server_with(ok_text("late local text").set_delay(Duration::from_secs(7))).await;
+    let delay = Duration::from_secs(10);
+    let server = server_with(ok_text("late local text").set_delay(delay)).await;
 
     let mut h = harness(Arc::new(creds(None)), None);
     let mut s = local_settings(&base(&server), "");
@@ -552,9 +553,18 @@ async fn configured_local_server_timeout_fails_the_job_with_timeout() {
     let report = h.run(rec);
     let took = started.elapsed();
     assert_eq!(report.end, JobEnd::Failed(FailureReason::Timeout));
+    // Bounds (T-078): lower = the 5 s deadline minus 100 ms of timer slack (a
+    // deadline never fires early; catches milliseconds). Upper = 5 s +
+    // OVERHEAD_ALLOWANCE (3 s: client build, VAD, WAV, drop under host load),
+    // 8 s, below the nearest wrong-deadline bite: a retry after the timeout
+    // (2 x 5 s = 10 s, Timeout) and the server's 10 s answer; a limit above that
+    // (the 600 s API value, the 60 s default) is caught by the reason (Delivered).
+    let want = Duration::from_secs(5);
+    let upper = want + OVERHEAD_ALLOWANCE;
+    assert!(upper < delay, "bound {upper:?} not below the bite");
     assert!(
-        took >= Duration::from_millis(4900) && took < Duration::from_millis(6500),
-        "took {took:?}: the 5 s limit of the snapshot"
+        took >= want - Duration::from_millis(100) && took < upper,
+        "took {took:?}: the 5 s limit of the snapshot (bound {upper:?})"
     );
     assert!(report.pending.is_some(), "{report:?}");
     assert_eq!(h.clipboard.texts(), Vec::<String>::new());

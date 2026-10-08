@@ -10,12 +10,15 @@ mod common;
 /// The checks of `common::refused_addr()`, in each binary that calls it (T-047).
 #[path = "common/refused_addr_tests.rs"]
 mod refused_addr_tests;
+/// The checks of `common::unresolvable_host()`, in the binary that calls it (T-078).
+#[path = "common/unresolvable_host_tests.rs"]
+mod unresolvable_host_tests;
 
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::time::{Duration, Instant};
 
-use common::{refused_addr, refused_timeouts};
+use common::{refused_addr, refused_timeouts, resolver_timeouts, unresolvable_host};
 use serde_json::json;
 use voicen_core::audio::{wav, AudioBuffer};
 use voicen_core::engine::openai::OpenAiCompatibleEngine;
@@ -63,6 +66,15 @@ fn req_refused() -> TranscribeRequest {
     TranscribeRequest {
         language: None,
         timeouts: refused_timeouts(),
+    }
+}
+
+/// A request for an unresolvable host: deadlines that let the resolver's own
+/// failure end the lookup, even after the OS retries (T-078).
+fn req_unresolvable() -> TranscribeRequest {
+    TranscribeRequest {
+        language: None,
+        timeouts: resolver_timeouts(),
     }
 }
 
@@ -537,10 +549,13 @@ fn refused_loopback_port_is_cannot_reach_host_port() {
 #[test]
 fn invalid_host_is_network_unavailable() {
     // RFC 6761 `.invalid` never resolves; reqwest reports is_dns AND is_connect.
-    // Bite: is_connect checked before is_dns (-> CannotReach).
+    // Bite: is_connect checked before is_dns (-> CannotReach). The deadlines
+    // outlast the resolver's retries (T-078): a lookup cut off by the connect
+    // timer would be CannotReach too, decided by the resolver's speed.
+    let host = unresolvable_host();
     let got = transcribe(
-        api_engine("http://voicen-test.invalid/v1", Some(KEY)),
-        req(None),
+        api_engine(&format!("http://{host}/v1"), Some(KEY)),
+        req_unresolvable(),
     );
     assert_eq!(got, Err(FailureReason::NetworkUnavailable));
 }
@@ -724,12 +739,13 @@ async fn no_failure_contains_query_key_or_transcript() {
         },
     ));
 
+    let host = unresolvable_host();
     let got = transcribe(
         api_engine(
-            &format!("http://voicen-test.invalid/v1?api-version={QUERY_SECRET}"),
+            &format!("http://{host}/v1?api-version={QUERY_SECRET}"),
             Some(KEY),
         ),
-        req(None),
+        req_unresolvable(),
     );
     outcomes.push((
         "invalid host".to_string(),

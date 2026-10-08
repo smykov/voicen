@@ -15,7 +15,7 @@ mod refused_addr_tests;
 use std::sync::Arc;
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
-use common::{refused_addr, refused_timeouts, REFUSAL_BUDGET};
+use common::{refused_addr, refused_timeouts, OVERHEAD_ALLOWANCE, REFUSAL_BUDGET};
 use serde_json::json;
 use voicen_core::audio::{wav, AudioBuffer};
 use voicen_core::autostart::FakeAutostart;
@@ -732,19 +732,21 @@ async fn no_answer_within_timeout_is_timeout() {
 }
 
 /// The server's answer delay for the T-073 cases: above the configured 5 s limit
-/// (the API minimum of decision #99), well under the 30 s default.
-const T073_DELAY: Duration = Duration::from_secs(7);
+/// (the API minimum of decision #99) plus [`OVERHEAD_ALLOWANCE`], so the took
+/// bound lies below it (T-078; was 7 s, 0.5 s above the old bound), and well
+/// under the 30 s default.
+const T073_DELAY: Duration = Duration::from_secs(10);
 
 #[tokio::test]
 async fn configured_api_timeout_fails_the_job_with_timeout() {
     // T-073 Acceptance failure branch, through the production pipeline
     // (`Pipeline::new`, no test override): a job whose settings snapshot says
     // api_transcription_s = 5 fails with Timeout against a server answering after
-    // 7 s, about 5 s after the request started, with failure=Timeout in the job
+    // 10 s, about 5 s after the request started, with failure=Timeout in the job
     // event and the audio kept; the same server with the default snapshot (30 s)
     // is delivered. connect_s = 2 (in range, not 5) so that the connect value
     // read as the request limit ends the job at about 2 s, outside the window.
-    // Bite: the pipeline's fixed Timeouts::default() (the 7 s answer arrives and
+    // Bite: the pipeline's fixed Timeouts::default() (the 10 s answer arrives and
     // is delivered), the local-server value used for the API request (60 s:
     // delivered), the connect value used for it (2 s: too early), or
     // milliseconds.
@@ -757,9 +759,19 @@ async fn configured_api_timeout_fails_the_job_with_timeout() {
     let rec = h.record(fixtures::speech_3s(), Arc::new(s));
     let (report, took) = h.run(rec);
     assert_eq!(report.end, JobEnd::Failed(FailureReason::Timeout));
+    // Bounds (T-078): lower = the 5 s deadline minus 100 ms of timer slack (a
+    // deadline never fires early; catches the 2 s connect value used as the
+    // limit). Upper = 5 s + OVERHEAD_ALLOWANCE (3 s: client build, VAD, WAV,
+    // drop under host load), 8 s, below the nearest wrong-deadline bite: a retry
+    // after the timeout (2 x 5 s = 10 s, Timeout) and the server's 10 s answer;
+    // a limit above 10 s (the 30 s default, the 60 s local-server value) is
+    // caught by the reason (Delivered).
+    let want = Duration::from_secs(5);
+    let upper = want + OVERHEAD_ALLOWANCE;
+    assert!(upper < T073_DELAY, "bound {upper:?} not below the bite");
     assert!(
-        took >= Duration::from_millis(4900) && took < Duration::from_millis(6500),
-        "took {took:?}: the 5 s limit of the snapshot"
+        took >= want - Duration::from_millis(100) && took < upper,
+        "took {took:?}: the 5 s limit of the snapshot (bound {upper:?})"
     );
     assert!(report.pending.is_some(), "{report:?}");
     assert_eq!(h.clipboard.texts(), Vec::<String>::new());
@@ -837,13 +849,16 @@ fn refused_host_is_cannot_reach() {
 fn blackhole_connect_is_bounded_by_connect_timeout() {
     // T-040 Notes (review 1 #3): that the connect limit reaches the client is
     // pinned here. 192.0.2.1 (RFC 5737) blackholes in voicen-rust:1.99 (probed),
-    // so a 300 ms connect limit gives CannotReach well inside the 3 s total.
+    // so a 300 ms connect limit gives CannotReach well inside the 10 s total.
     // Where the host has no route at all (possibly windows-latest) the OS answers
     // at once with NetworkUnavailable and this test is vacuous there. Bite: no
-    // connect_timeout on the client (the 3 s total fires: Timeout, ~3 s).
+    // connect_timeout on the client (the 10 s total fires: Timeout, caught by the
+    // reason), the production connect value (5 s) instead of the job's (caught by
+    // the bound below).
+    let connect = Duration::from_millis(300);
     let t = Timeouts {
-        connect: Duration::from_millis(300),
-        api_transcription: Duration::from_secs(3),
+        connect,
+        api_transcription: Duration::from_secs(10),
         ..Timeouts::default()
     };
     let mut h = harness_with(energy_gate(), Some(t), creds_with_key());
@@ -860,7 +875,16 @@ fn blackhole_connect_is_bounded_by_connect_timeout() {
         "expected CannotReach(192.0.2.1) or NetworkUnavailable, got {:?}",
         report.end
     );
-    assert!(took < Duration::from_millis(1_500), "took {took:?}");
+    // Bound (T-078; was 1.5 s, overrun at 1.78 s under host load): the 300 ms
+    // connect limit + OVERHEAD_ALLOWANCE (3 s: client build, VAD, WAV, drop),
+    // 3.3 s, below the nearest wrong-deadline bite, the production connect
+    // timeout (5 s, CannotReach at ~5 s); the 10 s total is caught by the reason.
+    let upper = connect + OVERHEAD_ALLOWANCE;
+    assert!(
+        upper < Timeouts::default().connect,
+        "bound {upper:?} not below the production connect timeout"
+    );
+    assert!(took < upper, "took {took:?}, bound {upper:?}");
 }
 
 #[tokio::test]

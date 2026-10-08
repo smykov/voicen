@@ -8,12 +8,21 @@
 //! client panics inside a tokio runtime context, T-040). Timeouts are tested with
 //! servers that accept and answer late or never, never with a refused or
 //! unroutable address (F-004, F-005). Fake data only: 127.0.0.1, `sk-test-...`.
+//!
+//! Wall-clock bounds (T-078): the lower side is the deadline minus [`SLACK`] (a
+//! deadline never fires early); the upper side is the deadline plus
+//! `common::OVERHEAD_ALLOWANCE`, below the nearest wrong-deadline bite, which each
+//! test names. The baseline is the fastest of [`BASELINE_SAMPLES`] runs, so one
+//! cold sample does not shift the stage.
+
+mod common;
 
 use std::io::Read;
 use std::net::TcpListener;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use common::OVERHEAD_ALLOWANCE;
 use serde_json::json;
 use voicen_core::delivery::DeliveryResult;
 use voicen_core::events::{DictationEvent, OutcomeCode, RecordingObserver};
@@ -40,8 +49,13 @@ const PP_KEY: &str = "sk-test-pp-SECRET";
 const RAW: &str = "привет  как\tдела, TRANSCRIPT-MARKER";
 const PROCESSED: &str = "Привет, как дела? PROCESSED";
 
-/// Wall-clock tolerance of contract guarantee 4 (SC-003).
+/// Wall-clock tolerance of contract guarantee 4 (SC-003) on the lower side: the
+/// stage may come out this much under the deadline (baseline noise), never more.
 const SLACK: Duration = Duration::from_millis(500);
+
+/// Baseline runs per test; the fastest one is the baseline (T-078: a single cold
+/// sample gave 1.81 s once, against 0.46 s on another run).
+const BASELINE_SAMPLES: usize = 3;
 
 /// A listener that accepts one connection, reads the request and never answers;
 /// held open for `hold`. The thread is not joined.
@@ -108,20 +122,34 @@ async fn default_deadline_skips_a_silent_server_at_15_s() {
         })))
         .mount(&prompt)
         .await;
-    let (got, baseline) = process_timed(format!("{}/v1", prompt.uri()));
-    assert_eq!(
-        got,
-        PostProcessOutcome::Applied(PROCESSED.to_string()),
-        "baseline"
-    );
+    let mut baseline = Duration::MAX;
+    for _ in 0..BASELINE_SAMPLES {
+        let (got, took) = process_timed(format!("{}/v1", prompt.uri()));
+        assert_eq!(
+            got,
+            PostProcessOutcome::Applied(PROCESSED.to_string()),
+            "baseline"
+        );
+        baseline = baseline.min(took);
+    }
 
     let (got, elapsed) = process_timed(silent_server(Duration::from_secs(30)));
     assert_eq!(got, PostProcessOutcome::Skipped(SkipReason::Timeout));
+    // Upper = 15 s + OVERHEAD_ALLOWANCE (3 s: client build, connect, drop under
+    // host load), 18 s, below the nearest wrong-deadline bite: the transcription
+    // deadline (30 s), the server closing at 30 s, a retry after the timeout
+    // (2 x 15 s). Lower = 15 s - SLACK: catches the connect value (5 s).
     let want = Duration::from_secs(15);
+    let upper = want + OVERHEAD_ALLOWANCE;
+    assert!(
+        upper < Timeouts::default().api_transcription,
+        "bound {upper:?} not below the bite"
+    );
     let stage = elapsed.saturating_sub(baseline);
     assert!(
-        stage + SLACK >= want && stage <= want + SLACK,
-        "took {elapsed:?} against a {baseline:?} baseline: {stage:?}, expected 15 s +- 0.5 s"
+        stage + SLACK >= want && stage <= upper,
+        "took {elapsed:?} against a {baseline:?} baseline: {stage:?}, expected 15 s \
+         (-{SLACK:?}, +{OVERHEAD_ALLOWANCE:?})"
     );
 }
 
@@ -237,18 +265,21 @@ async fn configured_post_processing_timeout_delivers_the_raw_transcript() {
     // Acceptance 2 with #99: a job whose snapshot says post_processing_s = 5 (the
     // #99 minimum), against a chat endpoint answering after 7 s, is delivered
     // with the raw transcript byte for byte, ends as DeliveredSkipped(Timeout),
-    // no pending recording, JobFinished outcome text; the job takes 5 s +- 0.5 s
-    // longer than the same job against a chat endpoint that answers at once (the
-    // baseline: gate, WAV, transcription, chat round trip; about 0.6 s in a debug
-    // build, so the whole job is not timed against 5 s). connect_s = 2, so the connect value
+    // no pending recording, JobFinished outcome text; the job takes 5 s (-0.5 s,
+    // +OVERHEAD_ALLOWANCE) longer than the same job against a chat endpoint that
+    // answers at once (the baseline, fastest of BASELINE_SAMPLES: gate, WAV,
+    // transcription, chat round trip; about 0.6 s in a debug build, so the whole
+    // job is not timed against 5 s). connect_s = 2, so the connect value
     // read as the request limit would end it at about 2 s. The same server with
     // the default snapshot (15 s) is applied. Bite: the processor on
-    // Timeouts::default() (the 7 s answer applied), on the pipeline's test
+    // Timeouts::default() (the 10 s answer applied), on the pipeline's test
     // override field (None in production), on the connect value, or the pipeline
     // deriving a second Timeouts for the processor that ignores the snapshot; the
     // processed text or nothing delivered on a skip; the skip ended as Delivered
     // or Failed.
-    let server = transcribe_then_chat(Duration::from_secs(7)).await;
+    // 10 s (T-078: was 7 s), above the upper bound below.
+    let chat_delay = Duration::from_secs(10);
+    let server = transcribe_then_chat(chat_delay).await;
     let base = format!("{}/v1", server.uri());
     let mut s = snapshot(&base);
     s.timeouts.post_processing_s = 5;
@@ -259,13 +290,17 @@ async fn configured_post_processing_timeout_delivers_the_raw_transcript() {
     let prompt_base = format!("{}/v1", prompt.uri());
     let mut fast = snapshot(&prompt_base);
     fast.timeouts = s.timeouts;
-    let baseline = dictate(fast);
-    assert_eq!(
-        baseline.report.end,
-        JobEnd::Delivered { notice: None },
-        "baseline"
-    );
-    assert_eq!(baseline.clipboard, vec![PROCESSED.to_string()], "baseline");
+    let mut baseline = Duration::MAX;
+    for _ in 0..BASELINE_SAMPLES {
+        let run = dictate(fast.clone());
+        assert_eq!(
+            run.report.end,
+            JobEnd::Delivered { notice: None },
+            "baseline"
+        );
+        assert_eq!(run.clipboard, vec![PROCESSED.to_string()], "baseline");
+        baseline = baseline.min(run.took);
+    }
 
     let run = dictate(s);
     assert_eq!(
@@ -286,13 +321,20 @@ async fn configured_post_processing_timeout_delivers_the_raw_transcript() {
         "raw transcript byte for byte: {:?}",
         run.clipboard
     );
+    // Upper = 5 s + OVERHEAD_ALLOWANCE (3 s: two client builds, VAD, WAV, drop
+    // under host load), 8 s, below the nearest wrong-deadline bite: a retry after
+    // the timeout (2 x 5 s = 10 s, still skipped) and the chat's 10 s answer; a
+    // limit above that (the 15 s default) is caught by the outcome (Applied).
+    // Lower = 5 s - SLACK: catches the connect value (2 s).
     let want = Duration::from_secs(5);
-    let stage = run.took.saturating_sub(baseline.took);
+    let upper = want + OVERHEAD_ALLOWANCE;
+    assert!(upper < chat_delay, "bound {upper:?} not below the bite");
+    let stage = run.took.saturating_sub(baseline);
     assert!(
-        stage + SLACK >= want && stage <= want + SLACK,
-        "took {:?} against a {:?} baseline: {stage:?}, expected the snapshot's 5 s +- 0.5 s",
-        run.took,
-        baseline.took
+        stage + SLACK >= want && stage <= upper,
+        "took {:?} against a {baseline:?} baseline: {stage:?}, expected the snapshot's \
+         5 s (-{SLACK:?}, +{OVERHEAD_ALLOWANCE:?})",
+        run.took
     );
     let finished: Vec<&DictationEvent> = run
         .events
