@@ -436,6 +436,17 @@ pub const WARNING_KINDS: &[&str] = &[
     "logs_folder_failed",
 ];
 pub const LOAD_OUTCOMES: &[&str] = &["loaded", "first_run", "reset", "unavailable"];
+/// `settings test_connection result=<...>` (spec 004 R-11, T-046 choice (iv)),
+/// besides `http_<status>`.
+pub const TEST_CONNECTION_RESULTS: &[&str] = &[
+    "ok",
+    "cannot_reach",
+    "invalid_key",
+    "timeout",
+    "unexpected",
+    "invalid",
+    "key_store_unavailable",
+];
 pub const SAVE_OUTCOMES: &[&str] = &["ok", "refused", "failed"];
 pub const FORM_ERRORS: &[&str] = &["write_failed", "settings_unavailable", "partially_restored"];
 pub const RECONCILE_ACTIONS: &[&str] = &["none", "written", "removed", "failed"];
@@ -492,6 +503,8 @@ pub fn check_closed(line: &Line) -> Result<(), String> {
         "dictation" => &["rec", "outcome"],
         "warning" => &["kind"],
         "settings load" | "settings save" => &["outcome"],
+        "settings test_connection" if line.get("result") == Some("ok") => &["result", "latency_ms"],
+        "settings test_connection" => &["result"],
         "autostart reconcile" => &["action"],
         "logs recovered" => &[],
         other => return Err(format!("unknown head {other:?} in {:?}", line.raw)),
@@ -525,6 +538,14 @@ pub fn check_closed(line: &Line) -> Result<(), String> {
             ("settings save", "form_error") => one_of(k, v, FORM_ERRORS)?,
             ("settings save", "not_restored") => check(field_list(v), k, v)?,
             ("autostart reconcile", "action") => one_of(k, v, RECONCILE_ACTIONS)?,
+            ("settings test_connection", "result") => match v.strip_prefix("http_") {
+                Some(status) => check(unsigned(status) && status.parse::<u16>().is_ok(), k, v)?,
+                None => one_of(k, v, TEST_CONNECTION_RESULTS)?,
+            },
+            // Only an `ok` line has a latency.
+            ("settings test_connection", "latency_ms") => {
+                check(unsigned(v) && line.get("result") == Some("ok"), k, v)?;
+            }
             (head, key) => {
                 return Err(format!(
                     "unknown key {key:?} on a {head:?} line: {:?}",

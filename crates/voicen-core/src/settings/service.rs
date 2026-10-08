@@ -3483,4 +3483,65 @@ mod tests {
             serde_json::to_string_pretty(&saved).expect("outcome serializes")
         );
     }
+
+    #[test]
+    fn e2e_settings_wire_fixture_test_connection_results_match_core() {
+        // T-046 / P-010: the Playwright mock of `settings_test_connection` scripts
+        // core's real ConnectionTestResult wire, one value per kind, so the UI's
+        // mapping to messages is checked against what core sends (no hand-written
+        // result in e2e). `test_connection_results` holds, by name: ok (latency 123
+        // ms), cannot_reach (host 127.0.0.1:1), invalid_key, timeout, http (500),
+        // unexpected_response, invalid ([engine.api.base_url url.malformed]) and
+        // key_store_unavailable. Every kind has its own wire value. Bite: a kind
+        // renamed, merged with another, or its fields renamed, without regenerating
+        // e2e/fixtures/settings-wire.json (and its `_format` note).
+        use crate::connection_test::ConnectionTestResult as R;
+        let fixture: serde_json::Value =
+            serde_json::from_str(E2E_WIRE_FIXTURE).expect("settings-wire.json is valid JSON");
+        let results = [
+            ("ok", R::Ok { latency_ms: 123 }),
+            (
+                "cannot_reach",
+                R::CannotReach {
+                    host: "127.0.0.1:1".to_string(),
+                },
+            ),
+            ("invalid_key", R::InvalidKey),
+            ("timeout", R::Timeout),
+            ("http", R::Http { status: 500 }),
+            ("unexpected_response", R::UnexpectedResponse),
+            (
+                "invalid",
+                R::Invalid {
+                    errors: vec![FieldError {
+                        field: FieldId::EngineApiBaseUrl,
+                        code: ErrorCode::UrlMalformed,
+                    }],
+                },
+            ),
+            ("key_store_unavailable", R::KeyStoreUnavailable),
+        ];
+        let core: serde_json::Map<String, serde_json::Value> = results
+            .iter()
+            .map(|(name, r)| {
+                let v = serde_json::to_value(r).expect("ConnectionTestResult serializes");
+                (name.to_string(), v)
+            })
+            .collect();
+        let mut distinct: Vec<String> = core.values().map(|v| v.to_string()).collect();
+        distinct.sort_unstable();
+        distinct.dedup();
+        assert_eq!(
+            distinct.len(),
+            results.len(),
+            "two kinds share a wire value: {core:?}"
+        );
+        let core = serde_json::Value::Object(core);
+        assert_eq!(
+            fixture["test_connection_results"],
+            core,
+            "e2e/fixtures/settings-wire.json test_connection_results differs from core; core says:\n{}",
+            serde_json::to_string_pretty(&core).expect("results serialize")
+        );
+    }
 }

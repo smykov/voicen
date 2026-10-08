@@ -19,6 +19,7 @@ use std::time::{Duration, UNIX_EPOCH};
 use diag_support::{at, closed, pairs, NOON_UTC};
 use voicen_core::autostart::{FakeAutostart, ReconcileAction};
 use voicen_core::clock::FakeClock;
+use voicen_core::connection_test::ConnectionTestResult;
 use voicen_core::diag::{format_line, LoadKind, LogEvent, SaveLine};
 use voicen_core::hotkey_registrar::FakeHotkeyRegistrar;
 use voicen_core::models::FakeDownloadedModels;
@@ -382,4 +383,71 @@ fn reconcile_actions_map_to_their_codes() {
     assert_eq!(action, ReconcileAction::Removed, "premise");
     let l = line_of(&LogEvent::AutostartReconcile(action));
     assert_eq!(l.get("action"), Some("removed"));
+}
+
+#[test]
+fn every_test_connection_result_maps_to_its_line_without_host() {
+    // R-11 / T-046 choice (iv): `settings test_connection result=<kind>
+    // [latency_ms=<n>]`, one literal per ConnectionTestResult kind, the latency
+    // only on `ok`, no host (T-008 Q1: "no values, no URLs, no hosts"), no status
+    // text, no field values. Bite: Debug of the result on the line (the host),
+    // http without its status, two kinds on one literal, the latency dropped or
+    // put on a failure line.
+    let cases: Vec<(ConnectionTestResult, Vec<(&str, String)>)> = vec![
+        (
+            ConnectionTestResult::Ok { latency_ms: 842 },
+            vec![("result", s("ok")), ("latency_ms", s("842"))],
+        ),
+        (
+            ConnectionTestResult::CannotReach {
+                host: "api.example.com:8443".to_string(),
+            },
+            vec![("result", s("cannot_reach"))],
+        ),
+        (
+            ConnectionTestResult::CannotReach {
+                host: "192.0.2.10".to_string(),
+            },
+            vec![("result", s("cannot_reach"))],
+        ),
+        (
+            ConnectionTestResult::InvalidKey,
+            vec![("result", s("invalid_key"))],
+        ),
+        (
+            ConnectionTestResult::Timeout,
+            vec![("result", s("timeout"))],
+        ),
+        (
+            ConnectionTestResult::Http { status: 503 },
+            vec![("result", s("http_503"))],
+        ),
+        (
+            ConnectionTestResult::UnexpectedResponse,
+            vec![("result", s("unexpected"))],
+        ),
+        (
+            ConnectionTestResult::Invalid {
+                errors: vec![FieldError {
+                    field: FieldId::EngineApiBaseUrl,
+                    code: ErrorCode::UrlMalformed,
+                }],
+            },
+            vec![("result", s("invalid"))],
+        ),
+        (
+            ConnectionTestResult::KeyStoreUnavailable,
+            vec![("result", s("key_store_unavailable"))],
+        ),
+    ];
+    for (result, expected) in cases {
+        let l = line_of(&LogEvent::settings_test_connection(&result));
+        assert_eq!(l.head, "settings test_connection", "{}", l.raw);
+        assert_eq!(l.pairs, pairs(&expected), "{result:?}: {}", l.raw);
+        assert!(
+            !l.raw.contains("8443"),
+            "the port reached the line {:?}",
+            l.raw
+        );
+    }
 }

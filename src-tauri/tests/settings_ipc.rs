@@ -641,3 +641,99 @@ fn data_dir_is_localappdata_voicen_and_logs_live_under_it() {
     assert_eq!(data_dir, PathBuf::from(local).join("Voicen"));
     assert_eq!(voicen_lib::paths::log_dir(), data_dir.join("logs"));
 }
+
+#[test]
+fn test_connection_refused_loopback_port_is_cannot_reach() {
+    // T-046 Acceptance (Windows CI): `settings_test_connection` over a refused
+    // loopback port answers core's CannotReach{host:port} through the shell's one
+    // wiring (build_app), runs the blocking call off the async runtime (a sync
+    // command body on a tokio worker panics in reqwest's blocking client: the
+    // invoke would then never resolve or reject), saves nothing (no credential
+    // write or delete, settings.json byte-identical, no settings://changed), keeps
+    // the typed key out of the response, and writes R-11's line without the host
+    // (choice (iv)). The port: bound by this test, then released, so nothing
+    // listens on it. Bite: the command not registered, a sync body, the request
+    // built from the saved settings, a save inside the test, the host logged.
+    let port = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        listener.local_addr().expect("local addr").port()
+    };
+    let host = format!("127.0.0.1:{port}");
+
+    let dir = TempDir::new();
+    let log_dir = dir.path().join("logs");
+    let log = voicen_lib::diag::start(log_dir.clone(), Box::new(|_| {}));
+    let store = fake_store(
+        FakeCredentialStore::new().with_key(KeySlot::TranscriptionApi, "sk-test-stored"),
+    );
+    let (service, _) = load_settings(
+        dir.path().to_path_buf(),
+        as_port(&store),
+        no_autostart(),
+        idle_store(dir.path()),
+        None,
+        &log,
+    );
+    let settings_before = std::fs::read(dir.path().join(SETTINGS_FILE)).ok();
+    let calls_before = store.calls();
+    let h = harness_with_log(&service, log.clone());
+    let events = h.changed_events();
+
+    let timeouts = voicen_core::timeouts::default_settings();
+    let args = json!({ "request": {
+        "engine": "api",
+        "base_url": format!("http://{host}/v1?api-version=SECRETQ"),
+        "model": "whisper-1",
+        "key": replace(CANARY),
+        "timeouts": timeouts,
+    } });
+    let started = std::time::Instant::now();
+    let result = h
+        .invoke("settings_test_connection", args)
+        .unwrap_or_else(|e| panic!("settings_test_connection rejected: {e}"));
+    assert!(
+        started.elapsed() < Duration::from_secs(30),
+        "took {:?}",
+        started.elapsed()
+    );
+    let expected = serde_json::to_value(
+        voicen_core::connection_test::ConnectionTestResult::CannotReach { host: host.clone() },
+    )
+    .expect("result serializes");
+    assert_eq!(result, expected);
+    let text = result.to_string();
+    assert!(
+        !text.contains("CANARY") && !text.contains("SECRETQ"),
+        "{text}"
+    );
+
+    for call in store.calls().into_iter().skip(calls_before.len()) {
+        assert_eq!(call.op, CredentialOp::Read, "credential store: {call:?}");
+    }
+    assert_eq!(
+        store.stored(KeySlot::TranscriptionApi).as_deref(),
+        Some("sk-test-stored"),
+        "the stored key changed"
+    );
+    assert_eq!(
+        std::fs::read(dir.path().join(SETTINGS_FILE)).ok(),
+        settings_before,
+        "settings.json changed"
+    );
+    assert!(
+        events.recv_timeout(QUIET).is_err(),
+        "settings://changed after a connection test"
+    );
+
+    let log_text = std::fs::read_to_string(log_dir.join("voicen.log")).expect("voicen.log");
+    assert!(
+        log_text
+            .lines()
+            .any(|l| l.ends_with(" settings test_connection result=cannot_reach")),
+        "no test_connection line in the log:\n{log_text}"
+    );
+    assert!(
+        !log_text.contains("127.0.0.1") && !log_text.contains("CANARY"),
+        "host or key in the log:\n{log_text}"
+    );
+}
