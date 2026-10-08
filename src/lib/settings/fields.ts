@@ -41,3 +41,13 @@ export function describedBy(
   if (hint) ids.push(hintId(field));
   return ids.length > 0 ? ids.join(" ") : undefined;
 }
+
+/**
+ * The number a whole-number entry means on the wire (an unsigned integer field): the
+ * entry's value when it is a non-empty, safe, non-negative integer, otherwise 0. Any
+ * range is core's rule (it refuses an out-of-range 0 on save); no client clamp.
+ */
+export function wholeNumber(entry: string): number {
+  const value = Number(entry);
+  return entry.trim() !== "" && Number.isSafeInteger(value) && value >= 0 ? value : 0;
+}

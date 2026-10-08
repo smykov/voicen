@@ -7,7 +7,7 @@
   import { t, type MessageId } from "$lib/i18n";
   import type { Draft } from "./draft";
   import type { Settings } from "./settingsApi";
-  import { controlId, describedBy, hintId } from "./fields";
+  import { controlId, describedBy, hintId, wholeNumber } from "./fields";
   import FieldMessage from "./FieldMessage.svelte";
 
   let { draft = $bindable(), warnings }: { draft: Draft; warnings: Record<string, MessageId> } = $props();
@@ -17,11 +17,6 @@
   const ROLES: readonly Role[] = ["connect", "api_transcription", "local_server", "post_processing", "builtin_local"];
   const key = (role: Role): Key => `${role}_s`;
   const field = (role: Role) => `timeouts.${role}` as const;
-
-  function wholeNumber(entry: string): number {
-    const value = Number(entry);
-    return entry.trim() !== "" && Number.isSafeInteger(value) && value >= 0 ? value : 0;
-  }
 
   // Each input shows what the user typed; it follows the draft only when the draft's
   // number changes to one the entry does not mean (a view applied, a Saved).

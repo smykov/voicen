@@ -4,20 +4,16 @@
   import { untrack } from "svelte";
   import { t, type MessageId } from "$lib/i18n";
   import type { Draft } from "../draft";
-  import { controlId, describedBy } from "../fields";
+  import { controlId, describedBy, wholeNumber } from "../fields";
   import FieldMessage from "../FieldMessage.svelte";
 
   let { draft = $bindable(), warnings }: { draft: Draft; warnings: Record<string, MessageId> } = $props();
   const enabled = "history.enabled";
   const size = "history.size";
 
-  // The wire type is an unsigned whole number: an entry that is not one (empty,
-  // fractional, negative) is sent as 0, which core refuses with history.size_range.
-  // The range itself is core's rule only.
-  function wholeNumber(entry: string): number {
-    const value = Number(entry);
-    return entry.trim() !== "" && Number.isSafeInteger(value) && value >= 0 ? value : 0;
-  }
+  // The wire type is an unsigned whole number: an entry that is not one is sent as 0
+  // (wholeNumber), which core refuses with history.size_range. The range itself is
+  // core's rule only.
 
   // The input shows what the user typed, not the coerced number: a cleared field stays
   // empty (it is not rewritten to "0", so typing a digit gives that digit). The entry
