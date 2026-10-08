@@ -275,7 +275,12 @@ jobs:
           Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
           if ($null -ne $value) { throw "HKCU Run value Voicen still present ('$value') with start_with_windows off" }
           Write-Output "no HKCU Run value Voicen with start_with_windows off"
-      - name: A launch with a loaded settings.json shows no window (T-037 startup executor)
+      # T-034: the same predicate for both ways a loaded start happens: a plain launch and the
+      # logon launch the HKCU Run value makes ("<exe>" --autostart, FR-19, spec 004 US5-3). Each
+      # launch shows zero windows for 10 s after its start line and has the tray
+      # ('tray_icon_app', the class the first launch checks). The settings file is left as the
+      # previous step left it (start_with_windows off), so no Run value outlives this step.
+      - name: A launch with a loaded settings.json, with or without --autostart, shows no window and has the tray (T-037 startup executor, T-034)
         shell: pwsh
         run: |
           . ./scripts/ci/visible-windows.ps1
@@ -286,36 +291,57 @@ jobs:
           $expected = "($env:VOICEN_COMMIT) started"
           if (-not (Test-Path -LiteralPath $settings -PathType Leaf)) { throw "settings.json not found at $settings before the loaded launch" }
           function Get-StartCount { if (Test-Path $log) { @(Select-String -Path $log -SimpleMatch $expected).Count } else { 0 } }
-          $before = Get-StartCount
-          $proc = Start-Process -FilePath $exe -PassThru
-          # Wait for this launch's start line (written before the load), then sample for a
-          # fixed 10 s: a bounded negative, it can miss a window slower than that, never
-          # report one that is not there.
-          $started = $false
-          for ($i = 0; $i -lt 30 -and -not $started; $i++) { Start-Sleep -Seconds 1; $started = (Get-StartCount) -gt $before }
-          if (-not $started) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue; throw "start log line with commit $env:VOICEN_COMMIT not written by the loaded launch" }
-          # Same predicate as the first launch (scripts/ci/visible-windows.ps1): zero shown windows.
-          $shown = $null
-          for ($i = 0; $i -lt 10 -and -not $shown; $i++) {
-            Start-Sleep -Seconds 1
-            if ($proc.HasExited) { throw "voicen.exe exited during the loaded launch (expected it to keep running with no window)" }
-            $windows = Get-ShownWindows $proc.Id
-            if ($windows.Count -gt 0) { $shown = Format-ShownWindows $windows }
+          # '' is the plain launch; Start-Process refuses an empty -ArgumentList, so the argument
+          # is splatted only when there is one.
+          foreach ($flag in @('', '--autostart')) {
+            $what = if ($flag) { "loaded launch with $flag" } else { 'loaded launch without arguments' }
+            $start = @{ FilePath = $exe; PassThru = $true }
+            if ($flag) { $start.ArgumentList = @($flag) }
+            $before = Get-StartCount
+            $proc = Start-Process @start
+            # Wait for this launch's start line (written before the load), then sample for a
+            # fixed 10 s: a bounded negative, it can miss a window slower than that, never
+            # report one that is not there.
+            $started = $false
+            for ($i = 0; $i -lt 30 -and -not $started; $i++) { Start-Sleep -Seconds 1; $started = (Get-StartCount) -gt $before }
+            if (-not $started) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue; throw "$($what): start log line with commit $env:VOICEN_COMMIT not written" }
+            # Same predicate as the first launch (scripts/ci/visible-windows.ps1): zero shown windows.
+            $shown = $null
+            for ($i = 0; $i -lt 10 -and -not $shown; $i++) {
+              Start-Sleep -Seconds 1
+              if ($proc.HasExited) { throw "voicen.exe exited during the $what (expected it to keep running with no window)" }
+              $windows = Get-ShownWindows $proc.Id
+              if ($windows.Count -gt 0) { $shown = Format-ShownWindows $windows }
+            }
+            # The tray: run() builds it on every start (T-052), so a start with no window is
+            # still reachable. Raw facts only (F-003): the window classes of this process.
+            $tray = $false
+            $traySeen = ''
+            for ($i = 0; $i -lt 30 -and -not $tray; $i++) {
+              if ($proc.HasExited) { throw "voicen.exe exited during the $what (expected it to keep running with the tray)" }
+              $all = Get-AllWindows $proc.Id
+              $traySeen = Format-AllWindows $all
+              $tray = @($all | Where-Object { $_.Class -ceq 'tray_icon_app' }).Count -ge 1
+              if (-not $tray) { Start-Sleep -Seconds 1 }
+            }
+            # T-065 census, as in the first launch: the manifest's visible-helper verdicts against
+            # this voicen.exe, both ways, before the shown-window count.
+            $drift = @()
+            for ($i = 0; $i -lt 10; $i++) {
+              if ($proc.HasExited) { throw "voicen.exe exited during the $what (expected it to keep running with no window)" }
+              $drift = @(Get-HelperDrift $proc.Id)
+              if ($drift.Count -eq 0) { break }
+              Start-Sleep -Seconds 1
+            }
+            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+            $null = $proc.WaitForExit(30000)
+            if ($drift.Count -gt 0) { throw "$($what): $(Format-HelperDrift $drift)" }
+            Write-Output "no helper list drift on the $what"
+            if ($shown) { throw "a window is shown on the $what of a loaded settings.json ($shown)" }
+            Write-Output "no shown window for 10 s after the start line of the $what"
+            if (-not $tray) { throw "no 'tray_icon_app' window of voicen.exe on the $what (windows: $traySeen)" }
+            Write-Output "found the tray window on the $what"
           }
-          # T-065 census, as in the first launch: the manifest's visible-helper verdicts against
-          # this voicen.exe, both ways, before the shown-window count.
-          $drift = @()
-          for ($i = 0; $i -lt 10; $i++) {
-            if ($proc.HasExited) { throw "voicen.exe exited during the loaded launch (expected it to keep running with no window)" }
-            $drift = @(Get-HelperDrift $proc.Id)
-            if ($drift.Count -eq 0) { break }
-            Start-Sleep -Seconds 1
-          }
-          Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
-          if ($drift.Count -gt 0) { throw "loaded launch: $(Format-HelperDrift $drift)" }
-          Write-Output "no helper list drift on the loaded launch"
-          if ($shown) { throw "a window is shown on a launch with a loaded settings.json ($shown)" }
-          Write-Output "no shown window for 10 s after the start line of a launch with a loaded settings.json"
       # T-006 red-test row 24: run() starts the hotkey thread. Decided on the raw Win32 result of this
       # step's own RegisterHotKey of the settings' default hotkey (Ctrl+Alt+Space, MOD_NOREPEAT; F-003):
       # free before the launch, refused with 1409 (ERROR_HOTKEY_ALREADY_REGISTERED) while the app runs,
