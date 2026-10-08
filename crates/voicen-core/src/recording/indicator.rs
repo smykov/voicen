@@ -8,8 +8,10 @@
 
 use std::time::{Duration, Instant};
 
+use crate::delivery::DeliveryResult;
 use crate::failure::FailureReason;
 use crate::i18n::MessageId;
+use crate::post_process::SkipReason;
 
 /// How long a failure or notice message stays on the overlay.
 pub const MESSAGE_DURATION: Duration = Duration::from_secs(3);
@@ -58,6 +60,13 @@ impl Default for IndicatorState {
 pub enum JobEnd {
     /// Pasted (`notice: None`) or copied only (`notice: Some(..)`); clears tray `Error`.
     Delivered { notice: Option<MessageId> },
+    /// Delivered with the raw transcript because post-processing was skipped
+    /// (spec 003 FR-007, T-020): sets tray `Error`; the overlay message is
+    /// `post_process::skip_message(reason, delivery)` (decision #91(3)).
+    DeliveredSkipped {
+        reason: SkipReason,
+        delivery: DeliveryResult,
+    },
     /// No speech, copy manually, ...: a message, tray unchanged.
     Notice(MessageId),
     /// A message and tray `Error`.

@@ -9,6 +9,7 @@
 //! endpoint role, fixed by the factory, picks the request deadline and `kind()`.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
+pub(crate) mod http;
 pub mod openai;
 
 use crate::audio::AudioBuffer;

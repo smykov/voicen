@@ -20,7 +20,7 @@ use crate::events::{DictationEvent, OutcomeCode, PipelineObserver, WarningCode};
 use crate::failure::FailureReason;
 use crate::i18n;
 use crate::platform::{Clipboard, ClipboardError, Paster, PendingId, StartWindow, TempAudioStore};
-use crate::post_process::{PostProcessed, PostProcessor};
+use crate::post_process::{PostProcessInput, PostProcessOutcome, PostProcessor, SkipReason};
 use crate::recording::{FinishedRecording, JobEnd, RecordingId};
 use crate::secrets::CredentialStore;
 use crate::settings::Settings;
@@ -106,8 +106,12 @@ struct Job<'a> {
 
 /// What `process` decided, before anything is delivered or kept.
 enum Outcome {
-    /// A non-blank post-processed text.
-    Text(PostProcessed),
+    /// A non-blank text to deliver: the post-processed text, or the raw transcript
+    /// when post-processing did not run or was skipped (`skipped` then says why).
+    Text {
+        text: String,
+        skipped: Option<SkipReason>,
+    },
     NoSpeech,
     Failed(FailureReason),
 }
@@ -167,11 +171,14 @@ impl Pipeline {
     /// inside a tokio runtime.
     ///
     /// Speech gate, then (speech only) the engine from the factory with the
-    /// recording's settings snapshot, then the post-processor, then delivery: the
+    /// recording's settings snapshot, then the post-processor (with the same
+    /// per-job `Timeouts` as the engine), then delivery: the
     /// clipboard is written only for a non-blank text, and Ctrl+V only per
     /// [`deliver`]'s table. A retryable failure keeps the audio as the one pending
-    /// recording. Events, in order: `Warning{vad_fallback}` (once per gate),
-    /// `SpeechGate`, `JobFinished` (after the clipboard write), `Delivered`.
+    /// recording; a skipped post-processing delivers the raw transcript and ends as
+    /// `JobEnd::DeliveredSkipped`. Events, in order: `Warning{vad_fallback}` (once
+    /// per gate), `SpeechGate`, `JobFinished` (after the clipboard write),
+    /// `Delivered`.
     pub fn run_job(&self, rec: FinishedRecording<PressContext>) -> JobReport {
         let ctx = rec.ctx();
         let job = Job {
@@ -235,23 +242,37 @@ impl Pipeline {
                 }
             }
         };
+        // Derived once per job from its snapshot (or the test override) and handed
+        // to both the engine and the post-processor: a save applies to the next
+        // job, never to a running one (P-013, Clarification 4; decision #99).
+        let timeouts = self
+            .timeouts
+            .unwrap_or_else(|| Timeouts::from_settings(&job.settings.timeouts));
         let request = TranscribeRequest {
             language: job.settings.speech_language.clone(),
-            // Derived once per job from its snapshot: a save applies to the next
-            // job, never to a running one (P-013, Clarification 4).
-            timeouts: self
-                .timeouts
-                .unwrap_or_else(|| Timeouts::from_settings(&job.settings.timeouts)),
+            timeouts,
         };
         let outcome = match engine.transcribe(job.audio, &request) {
             Err(reason) => Outcome::Failed(reason),
             Ok(text) if is_blank(&text) => Outcome::NoSpeech,
-            Ok(text) => {
-                let processed = self.deps.post_processor.process(text, job.settings);
-                if is_blank(&processed.text) {
+            Ok(raw) => {
+                let input = PostProcessInput {
+                    settings: &job.settings.post_processing,
+                    credentials: &*self.deps.credentials,
+                    timeouts: &request.timeouts,
+                };
+                let processed = self.deps.post_processor.process(&raw, &input);
+                let text = processed.final_text(&raw);
+                if is_blank(text) {
                     Outcome::NoSpeech
                 } else {
-                    Outcome::Text(processed)
+                    Outcome::Text {
+                        text: text.to_string(),
+                        skipped: match processed {
+                            PostProcessOutcome::Skipped(reason) => Some(reason),
+                            PostProcessOutcome::NotRun | PostProcessOutcome::Applied(_) => None,
+                        },
+                    }
                 }
             }
         };
@@ -288,9 +309,9 @@ impl Pipeline {
                 };
             }
             Outcome::Failed(reason) => reason,
-            Outcome::Text(processed) => {
+            Outcome::Text { text, skipped } => {
                 match deliver(
-                    &processed.text,
+                    &text,
                     job.settings.auto_paste,
                     job.start_window,
                     &*self.deps.clipboard,
@@ -303,14 +324,19 @@ impl Pipeline {
                             text_to_paste_ms: millis(done.at.elapsed()),
                             result,
                         });
-                        // Until T-020 decides how notices combine: the delivery
-                        // notice, else the post-processor's.
-                        return JobReport {
-                            end: JobEnd::Delivered {
-                                notice: result.notice().or(processed.notice),
+                        // A skip is still a delivery (spec 003 FR-007): no pending
+                        // recording, `JobFinished` outcome text; the controller
+                        // picks the one message by decision #91(3).
+                        let end = match skipped {
+                            Some(reason) => JobEnd::DeliveredSkipped {
+                                reason,
+                                delivery: result,
                             },
-                            pending: None,
+                            None => JobEnd::Delivered {
+                                notice: result.notice(),
+                            },
                         };
+                        return JobReport { end, pending: None };
                     }
                     Err(ClipboardError) => FailureReason::ClipboardUnavailable,
                 }

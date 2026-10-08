@@ -18,6 +18,8 @@ pub struct ChatPostProcessor { /* openai::Client (001), Timeouts (001) */ }
 impl PostProcessor for ChatPostProcessor { /* … */ }
 ```
 
+**As implemented (T-020, decisions #42, #91, #99).** Synchronous, like 001's `Engine` (decision #42): `fn process(&self, raw: &str, input: &PostProcessInput<'_>) -> PostProcessOutcome` with `PostProcessInput { settings: &PostProcessingSettings, credentials: &dyn CredentialStore, timeouts: &Timeouts }`. The snapshot is the job's press snapshot (`settings.post_processing`, FR-010); the `enabled`, base-URL and key steps live in `ChatPostProcessor` (so `PassThrough` reads nothing): `enabled` false → `NotRun`, no key read; base URL failing `check_base_url` → `Skipped(NotConfigured)` (#91(2)), no key read; then one key read (`Err` = no key). `timeouts` is the one per-job value `Pipeline::process` also gives the engine (#99). The request goes through the crate-private `engine::http` helpers shared with the transcription engine, not a `chat_completion` method on the engine.
+
 Guarantees:
 1. Exactly one HTTP request per call, to `{snapshot.base_url}/chat/completions`, with the request body from data-model "ChatRequest" (FR-001, FR-013).
 2. `Authorization` header present iff `snapshot.key.is_some()` (FR-012).
@@ -37,7 +39,9 @@ fn post_process_stage(enabled: bool) -> Option<PostProcessingSnapshot>; // snaps
 //           deliver(final_text)  // unchanged 001 delivery; job outcome = delivered (FR-007)
 ```
 
-The pipeline constructor takes `Arc<dyn PostProcessor>`. Tests inject a fake. The shell injects `ChatPostProcessor` (NFR-11).
+The pipeline constructor takes `Arc<dyn PostProcessor>`. Tests inject a fake. The shell injects `ChatPostProcessor` (NFR-11; T-074 — until then it installs `PassThrough`).
+
+**As implemented (T-020).** No `Notice` type: a skip ends the job as `JobEnd::DeliveredSkipped { reason: SkipReason, delivery: DeliveryResult }`; `RecordingController::job_finished` sets tray `Error` and shows one overlay message from `post_process::skip_message` (decision #91(3): `copied_paste_manually` wins over the skip, the skip wins over `copied`). The toast is T-075, the log fields T-076.
 
 ## Added: helpers
 

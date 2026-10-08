@@ -364,6 +364,11 @@ impl<C> RecordingController<C> {
                     self.show(notice, Vec::new(), at);
                 }
             }
+            JobEnd::DeliveredSkipped { reason, delivery } => {
+                self.error = true;
+                let (id, params) = crate::post_process::skip_message(&reason, delivery);
+                self.show(id, params, at);
+            }
             JobEnd::Notice(notice) => self.show(notice, Vec::new(), at),
             JobEnd::Failed(reason) => {
                 self.error = true;

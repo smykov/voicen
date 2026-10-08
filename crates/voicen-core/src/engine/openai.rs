@@ -1,6 +1,8 @@
 //! The one OpenAI-compatible transcription client
 //! (contracts/openai-transcription.md) for both the transcription API and the
-//! local OpenAI-compatible server (T-018), and for T-020's connection test.
+//! local OpenAI-compatible server (T-018). The client setup, the key rule and the
+//! capped body read are the shared helpers in [`super::http`], which the chat
+//! post-processor (T-020) uses too.
 //!
 //! The endpoint role is fixed at construction ([`OpenAiCompatibleEngine::new`] for
 //! the API, [`OpenAiCompatibleEngine::local_server`] for the local server) and
@@ -16,25 +18,21 @@
 //! request sent ([`TransportError::UnusableKey`]). The URL is joined on the
 //! parsed base URL, so a query string (decision #27(2)) survives. The blocking
 //! client is built per call from `TranscribeRequest::timeouts` (connect and
-//! whole-request). The body is read through a 1 MiB cap. Every failure goes
+//! whole-request). The body is read through a 1 MiB cap ([`super::http::MAX_BODY`]). Every failure goes
 //! through `failure::classify`; no `reqwest::Error`, URL or body reaches a
 //! `FailureReason`.
 
 use std::error::Error as _;
 use std::io::Read;
 
-use reqwest::blocking::{multipart, Client};
+use reqwest::blocking::multipart;
 use reqwest::header::{HeaderValue, AUTHORIZATION, CONTENT_TYPE};
-use zeroize::Zeroizing;
 
-use super::{Engine, TranscribeRequest};
+use super::{http, Engine, TranscribeRequest};
 use crate::audio::{wav, AudioBuffer};
 use crate::failure::{classify, FailureReason, TransportError};
 use crate::secrets::Secret;
 use crate::settings::url::NormalizedUrl;
-
-/// Largest accepted response body (contract: "body > 1 MiB" -> `UnexpectedResponse`).
-const MAX_BODY: u64 = 1024 * 1024;
 
 /// Room for the multipart framing around the WAV and the text parts: four part
 /// headers with a 67-character boundary and the closing boundary are under 1 KiB.
@@ -132,20 +130,12 @@ impl OpenAiCompatibleEngine {
         Some((content_type, body))
     }
 
-    /// The `Authorization` value for the stored key: `None` without a key (or with
-    /// an empty one). The one rule for a usable key: `Bearer <key>` passes
-    /// `HeaderValue` validation (http 1.5: no control byte other than tab, no DEL);
-    /// otherwise [`TransportError::UnusableKey`]. Bytes of a non-ASCII key pass that
-    /// rule and are sent as UTF-8; the server's 401/403 then gives `InvalidApiKey`.
-    /// The value is marked sensitive (not printed by `Debug`, not HPACK-indexed).
+    /// The `Authorization` value for the stored key, by the one shared rule
+    /// ([`http::authorization`]): `None` without a key (or with an empty one),
+    /// [`TransportError::UnusableKey`] when `Bearer <key>` is not a valid header
+    /// value, else the value marked sensitive.
     fn authorization(&self) -> Result<Option<HeaderValue>, TransportError> {
-        let Some(key) = self.key.as_ref().filter(|k| !k.expose().is_empty()) else {
-            return Ok(None);
-        };
-        let text = Zeroizing::new(format!("Bearer {}", key.expose()));
-        let mut value = HeaderValue::from_str(&text).map_err(|_| TransportError::UnusableKey)?;
-        value.set_sensitive(true);
-        Ok(Some(value))
+        http::authorization(self.key.as_ref())
     }
 
     /// Sends the request and reads the body; every failure as a [`TransportError`].
@@ -157,10 +147,7 @@ impl OpenAiCompatibleEngine {
     ) -> Result<String, TransportError> {
         // The key is checked before anything is built or sent.
         let authorization = self.authorization()?;
-        let client = Client::builder()
-            .connect_timeout(req.timeouts.connect)
-            .build()
-            .map_err(|_| TransportError::Setup)?;
+        let client = http::client(req.timeouts.connect)?;
         let (content_type, body) = self
             .multipart_body(audio, req)
             .ok_or(TransportError::Setup)?;
@@ -178,20 +165,8 @@ impl OpenAiCompatibleEngine {
         if let Some(value) = authorization {
             request = request.header(AUTHORIZATION, value);
         }
-        let response = request.send().map_err(|e| send_error(&e))?;
-        let status = response.status();
-        if !status.is_success() {
-            // The error body is never read (P-009).
-            return Err(TransportError::Status(status.as_u16()));
-        }
-        let mut body = Vec::new();
-        response
-            .take(MAX_BODY + 1)
-            .read_to_end(&mut body)
-            .map_err(|e| body_error(&e))?;
-        if !u64::try_from(body.len()).is_ok_and(|len| len <= MAX_BODY) {
-            return Err(TransportError::BadBody);
-        }
+        // A non-2xx body is never read (P-009); a 2xx one through the 1 MiB cap.
+        let body = http::send_capped(request)?;
         // An object with a string `text`; other fields are ignored. (A derived struct
         // would also accept a JSON array whose first element is a string.)
         let parsed: serde_json::Value =

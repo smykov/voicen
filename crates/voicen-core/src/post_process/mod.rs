@@ -1,34 +1,174 @@
-//! LLM post-processing (spec 003). T-003 created the settings data type; T-001 adds
-//! the pipeline step's port ([`PostProcessor`], with [`PassThrough`] until T-020);
-//! T-020/T-021 add the real processor and `settings::validate`.
+//! LLM post-processing (spec 003, T-020; decisions #91, #99). T-003 created the
+//! settings data type; T-001 added the pipeline step's port; T-020 widened it to
+//! [`PostProcessInput`] -> [`PostProcessOutcome`] and added the real processor
+//! ([`chat::ChatPostProcessor`]). The shell still installs [`PassThrough`] until
+//! T-074 wires the chat processor; T-021 adds `settings::validate`.
+//!
+//! The stage never fails a dictation: the delivered text is the trimmed non-empty
+//! chat reply ([`PostProcessOutcome::Applied`]) or else the raw transcript byte
+//! for byte ([`PostProcessOutcome::final_text`]). A skip carries exactly one
+//! [`SkipReason`], built only from a status, the transport classification and the
+//! base URL's `host[:port]`: never a key, prompt, transcript, URL query or body.
+#![deny(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
+pub mod chat;
 pub mod settings;
 
-use crate::i18n::MessageId;
-use crate::settings::Settings;
+use crate::delivery::DeliveryResult;
+use crate::failure::FailureReason;
+use crate::i18n::{self, MessageId};
+use crate::secrets::CredentialStore;
+use crate::timeouts::Timeouts;
 
-/// The text to deliver and an optional notice (spec 003 defines the notices).
+use settings::PostProcessingSettings;
+
+/// What the stage gets for one job: the post-processing settings of the job's
+/// press snapshot, the one credential store, and the job's [`Timeouts`] (the same
+/// value `Pipeline::process` hands to the engine; `post_processing` is the whole
+/// request's deadline, `connect` the connect limit).
+#[derive(Clone, Copy)]
+pub struct PostProcessInput<'a> {
+    pub settings: &'a PostProcessingSettings,
+    pub credentials: &'a dyn CredentialStore,
+    pub timeouts: &'a Timeouts,
+}
+
+/// How the stage ended (spec 003 data-model "PostProcessOutcome").
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PostProcessed {
-    pub text: String,
-    pub notice: Option<MessageId>,
+pub enum PostProcessOutcome {
+    /// The stage did not run (post-processing off, or [`PassThrough`]): the raw
+    /// transcript is delivered, nothing is shown.
+    NotRun,
+    /// The trimmed reply text.
+    Applied(String),
+    /// The stage ran and failed: the raw transcript is delivered, the reason shown.
+    Skipped(SkipReason),
 }
 
-/// The pipeline step after transcription (FR-021; contracts/core-traits.md
-/// "PostProcessor"). Must not fail the dictation: on its own failure it returns the
-/// input text plus a notice. Takes the job's settings snapshot. T-020 widens the
-/// arguments (credentials, timeouts).
+impl PostProcessOutcome {
+    /// The text to deliver: the applied text, else `raw` unchanged.
+    pub fn final_text<'a>(&'a self, raw: &'a str) -> &'a str {
+        match self {
+            PostProcessOutcome::Applied(text) => text,
+            PostProcessOutcome::NotRun | PostProcessOutcome::Skipped(_) => raw,
+        }
+    }
+}
+
+/// Why post-processing was skipped (spec 003 Q1 plus #91(2)'s `NotConfigured`).
+/// `host` is the configured base URL's `host[:port]` only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SkipReason {
+    /// The whole request exceeded `Timeouts::post_processing`.
+    Timeout,
+    /// DNS failure, network/host unreachable, refused or failed connect.
+    Unreachable { host: String },
+    /// HTTP 401/403, or a stored key that cannot be sent (nothing was sent).
+    InvalidKey,
+    /// Any other non-2xx status.
+    Http { status: u16 },
+    /// A 2xx body without a non-blank string `choices[0].message.content`, over
+    /// 1 MiB, not UTF-8 or cut off.
+    InvalidResponse,
+    /// Enabled, but the stored base URL fails `check_base_url` (decision #91(2)).
+    NotConfigured,
+}
+
+impl SkipReason {
+    /// Stable code for events and logs.
+    pub fn code(&self) -> &'static str {
+        match self {
+            SkipReason::Timeout => "timeout",
+            SkipReason::Unreachable { .. } => "unreachable",
+            SkipReason::InvalidKey => "invalid_key",
+            SkipReason::Http { .. } => "http",
+            SkipReason::InvalidResponse => "invalid_response",
+            SkipReason::NotConfigured => "not_configured",
+        }
+    }
+
+    /// The catalog message (`notice.post_processing_skipped.*`).
+    pub fn message_id(&self) -> MessageId {
+        match self {
+            SkipReason::Timeout => i18n::NOTICE_POST_PROCESSING_SKIPPED_TIMEOUT,
+            SkipReason::Unreachable { .. } => i18n::NOTICE_POST_PROCESSING_SKIPPED_UNREACHABLE,
+            SkipReason::InvalidKey => i18n::NOTICE_POST_PROCESSING_SKIPPED_INVALID_KEY,
+            SkipReason::Http { .. } => i18n::NOTICE_POST_PROCESSING_SKIPPED_HTTP,
+            SkipReason::InvalidResponse => i18n::NOTICE_POST_PROCESSING_SKIPPED_INVALID_RESPONSE,
+            SkipReason::NotConfigured => i18n::NOTICE_POST_PROCESSING_SKIPPED_NOT_CONFIGURED,
+        }
+    }
+
+    /// Placeholder values for [`message_id`](Self::message_id): `host` for
+    /// `Unreachable`, `status` for `Http`, none otherwise.
+    pub fn message_params(&self) -> Vec<(&'static str, String)> {
+        match self {
+            SkipReason::Unreachable { host } => vec![("host", host.clone())],
+            SkipReason::Http { status } => vec![("status", status.to_string())],
+            SkipReason::Timeout
+            | SkipReason::InvalidKey
+            | SkipReason::InvalidResponse
+            | SkipReason::NotConfigured => Vec::new(),
+        }
+    }
+
+    /// The skip reason of a transport failure classified by `failure::classify`
+    /// (research R4); `host` is the configured base URL's `host[:port]`, used for
+    /// both unreachable kinds (spec US2-2: a DNS failure is "cannot reach").
+    /// `classify` never yields the key-store, engine, clipboard or microphone
+    /// reasons; they map to the nearest skip so the function stays total.
+    pub fn from_failure(reason: &FailureReason, host: &str) -> SkipReason {
+        match reason {
+            FailureReason::InvalidApiKey | FailureReason::KeyStoreUnavailable => {
+                SkipReason::InvalidKey
+            }
+            FailureReason::NetworkUnavailable | FailureReason::CannotReach { .. } => {
+                SkipReason::Unreachable {
+                    host: host.to_string(),
+                }
+            }
+            FailureReason::Timeout => SkipReason::Timeout,
+            FailureReason::ServerError { status } => SkipReason::Http { status: *status },
+            FailureReason::EngineNotConfigured => SkipReason::NotConfigured,
+            FailureReason::UnexpectedResponse
+            | FailureReason::ClipboardUnavailable
+            | FailureReason::MicrophoneUnavailable { .. } => SkipReason::InvalidResponse,
+        }
+    }
+}
+
+/// The one overlay message of a delivered job whose post-processing was skipped
+/// (decision #91(3)): after a failed paste (`CopyManual`) the user must act, so
+/// `notice.copied_paste_manually` wins; otherwise (pasted, or copied with
+/// auto-paste off) the skip message with its params. Tray `Error` marks the skip
+/// in every case (`RecordingController::job_finished`).
+pub fn skip_message(
+    reason: &SkipReason,
+    delivery: DeliveryResult,
+) -> (MessageId, Vec<(&'static str, String)>) {
+    match delivery {
+        DeliveryResult::CopyManual => (i18n::NOTICE_COPIED_PASTE_MANUALLY, Vec::new()),
+        DeliveryResult::Pasted | DeliveryResult::CopiedOnly => {
+            (reason.message_id(), reason.message_params())
+        }
+    }
+}
+
+/// The pipeline step after transcription (spec 003 contracts/core-post-process.md,
+/// in the synchronous form of decision #42). Called on the job thread only for a
+/// non-blank transcript; must not fail the dictation and must return within
+/// `input.timeouts.post_processing` (+ setup).
 pub trait PostProcessor: Send + Sync {
-    fn process(&self, text: String, settings: &Settings) -> PostProcessed;
+    fn process(&self, raw: &str, input: &PostProcessInput<'_>) -> PostProcessOutcome;
 }
 
-/// Returns the text unchanged, with no notice.
+/// The inert stage: [`PostProcessOutcome::NotRun`], no credential read, no request.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct PassThrough;
 
 impl PostProcessor for PassThrough {
-    fn process(&self, text: String, _settings: &Settings) -> PostProcessed {
-        PostProcessed { text, notice: None }
+    fn process(&self, _raw: &str, _input: &PostProcessInput<'_>) -> PostProcessOutcome {
+        PostProcessOutcome::NotRun
     }
 }
 

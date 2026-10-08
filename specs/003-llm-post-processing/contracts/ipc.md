@@ -43,4 +43,5 @@ The UI resolves `notice.post_processing_skipped.<reason>` from 004's catalog in 
 | `notice.post_processing_skipped.invalid_key` | Post-processing skipped — invalid API key | Постобработка пропущена — неверный ключ API |
 | `notice.post_processing_skipped.http` | Post-processing skipped — HTTP {status} | Постобработка пропущена — HTTP {status} |
 | `notice.post_processing_skipped.invalid_response` | Post-processing skipped — empty or invalid response | Постобработка пропущена — пустой или неверный ответ |
+| `notice.post_processing_skipped.not_configured` | Post-processing skipped — not set up. Check the Post-processing settings. | Постобработка пропущена — не настроена. Проверьте настройки постобработки. |
 | `settings.post_processing.privacy_note` | When post-processing is on, the transcript text is sent to this endpoint. | Когда постобработка включена, текст расшифровки отправляется на этот адрес. |

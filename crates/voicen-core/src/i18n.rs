@@ -147,6 +147,18 @@ messages! {
     NOTICE_COPIED = "notice.copied",
     /// Delivered but not pasted (`DeliveryResult::CopyManual`, T-001).
     NOTICE_COPIED_PASTE_MANUALLY = "notice.copied_paste_manually",
+    /// `SkipReason::Timeout`: post-processing exceeded its deadline (T-020).
+    NOTICE_POST_PROCESSING_SKIPPED_TIMEOUT = "notice.post_processing_skipped.timeout",
+    /// `SkipReason::Unreachable`; placeholder `{host}` = `host[:port]` (T-020).
+    NOTICE_POST_PROCESSING_SKIPPED_UNREACHABLE = "notice.post_processing_skipped.unreachable",
+    /// `SkipReason::InvalidKey` (HTTP 401/403 or an unusable key; T-020).
+    NOTICE_POST_PROCESSING_SKIPPED_INVALID_KEY = "notice.post_processing_skipped.invalid_key", // a catalog id, not a key: teamwright:allow-secret
+    /// `SkipReason::Http`; placeholder `{status}` = the HTTP status (T-020).
+    NOTICE_POST_PROCESSING_SKIPPED_HTTP = "notice.post_processing_skipped.http",
+    /// `SkipReason::InvalidResponse` (empty, bad or oversized reply; T-020).
+    NOTICE_POST_PROCESSING_SKIPPED_INVALID_RESPONSE = "notice.post_processing_skipped.invalid_response",
+    /// `SkipReason::NotConfigured` (enabled with an unusable base URL; #91(2), T-020).
+    NOTICE_POST_PROCESSING_SKIPPED_NOT_CONFIGURED = "notice.post_processing_skipped.not_configured",
     /// `DownloadFailure::DownloadInterrupted` (body cut, connection dropped, or no
     /// data for `Timeouts::download_no_data`; T-016).
     DOWNLOAD_INTERRUPTED = "download.interrupted",

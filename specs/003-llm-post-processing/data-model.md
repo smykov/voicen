@@ -66,11 +66,12 @@ Skipped(SkipReason)
 
 | SkipReason | Condition (see research R4) | Notice parameters |
 |---|---|---|
-| `Timeout` | 15 s total elapsed | — |
+| `Timeout` | the job's `Timeouts.post_processing` total elapsed (default 15 s, a setting per #99) | — |
 | `Unreachable` | DNS, refused, connect timeout 5 s, TLS, proxy | `host` (from the configured base URL) |
 | `InvalidKey` | HTTP 401 or 403 | — |
 | `Http` | any other non-2xx | `status` (u16) |
 | `InvalidResponse` | 2xx but unparsable, no content, or empty after trimming | — |
+| `NotConfigured` | enabled, but the stored base URL fails `check_base_url` (decision #91(2)); no key read, no request | — |
 
 - The outcome holds no key, prompt, body or raw text, except `Applied(text)`, which goes only to delivery and history.
 - Final text for delivery and history: `Applied(text)` → `text`; otherwise → the raw transcript (FR-016).
@@ -89,8 +90,8 @@ deliver(*) ──► audio released (NFR-06); no pending recording from this sta
 
 ## Notice (extends 001's notice set)
 
-- `Notice::PostProcessingSkipped(SkipReason)`: shown as a toast, in the overlay for 3 s, and sets the tray error state (FR-25).
-- Message keys (004's catalog, English and Russian): `notice.post_processing_skipped.timeout`, `.unreachable` (`{host}`), `.invalid_key`, `.http` (`{status}`), `.invalid_response`.
+- `Notice::PostProcessingSkipped(SkipReason)`: shown as a toast, in the overlay for 3 s, and sets the tray error state (FR-25). As implemented (T-020): `JobEnd::DeliveredSkipped { reason, delivery }`; the overlay shows one message by decision #91(3) (`post_process::skip_message`), tray `Error` always; the toast is T-075.
+- Message keys (004's catalog, English and Russian): `notice.post_processing_skipped.timeout`, `.unreachable` (`{host}`), `.invalid_key`, `.http` (`{status}`), `.invalid_response`, `.not_configured` (decision #91(2)).
 
 ## Log record (one per post-processed dictation; logger owned by 006)
 
