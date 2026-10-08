@@ -1,9 +1,9 @@
 //! Save-time validation: one rule per line of spec 004 FR-004 (core part).
 //!
 //! Pure: no I/O, no side effects. Of the per-engine fields, only the selected
-//! engine's are validated (Clarification Q2); `speech_language`, the hotkey and the
-//! history size are checked for every engine. Post-processing rules (003's
-//! `validate`) are added by T-020/T-021; `hotkey.unavailable`, `autostart.failed` and `key.store_failed`
+//! engine's are validated (Clarification Q2); `speech_language`, the hotkey, the
+//! history size and the timeouts (decision #99) are checked for every engine.
+//! Post-processing rules (003's `validate`) are added by T-020/T-021; `hotkey.unavailable`, `autostart.failed` and `key.store_failed`
 //! come from the save steps (T-010, T-014, T-032), not from here.
 
 use super::hotkey::{parse_hotkey, HotkeyError};
@@ -11,6 +11,7 @@ use super::url::{check_base_url, UrlError};
 use super::{EngineKind, ErrorCode, FieldError, FieldId, Settings, WHISPER_ISO_639_1};
 use crate::models::DownloadedModels;
 use crate::secrets::{KeyEdit, KeyEdits, KeyPresence, KeySlot};
+use crate::timeouts::TimeoutRole;
 
 /// Valid values of `history.size` (FR-16).
 const HISTORY_SIZE: std::ops::RangeInclusive<u32> = 1..=100;
@@ -95,7 +96,25 @@ pub fn validate(
         refuse(FieldId::HistorySize, ErrorCode::HistorySizeRange);
     }
 
+    // Every timeout, whatever engine is selected (decision #99): the group is
+    // always shown, so each error has a control.
+    for role in TimeoutRole::ALL {
+        if !role.bounds().contains(role.get(&s.timeouts)) {
+            refuse(timeout_field(role), ErrorCode::TimeoutRange);
+        }
+    }
+
     errors
+}
+
+fn timeout_field(role: TimeoutRole) -> FieldId {
+    match role {
+        TimeoutRole::Connect => FieldId::TimeoutsConnect,
+        TimeoutRole::ApiTranscription => FieldId::TimeoutsApiTranscription,
+        TimeoutRole::LocalServer => FieldId::TimeoutsLocalServer,
+        TimeoutRole::PostProcessing => FieldId::TimeoutsPostProcessing,
+        TimeoutRole::BuiltinLocal => FieldId::TimeoutsBuiltinLocal,
+    }
 }
 
 fn base_url_rule(raw: &str) -> Result<(), ErrorCode> {

@@ -94,6 +94,19 @@ pub struct HistorySettings {
     pub size: u32,
 }
 
+/// The dictation timeouts in whole seconds (FR-24, decisions #97, #99). Bounds and
+/// defaults: [`crate::timeouts::TimeoutRole::bounds`]; the durations a job uses:
+/// [`crate::timeouts::Timeouts::from_settings`] of its snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default = "default_timeouts")]
+pub struct TimeoutSettings {
+    pub connect_s: u32,
+    pub api_transcription_s: u32,
+    pub local_server_s: u32,
+    pub post_processing_s: u32,
+    pub builtin_local_s: u32,
+}
+
 /// Every persisted setting (data-model.md › Settings). No key field.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default = "default_settings")]
@@ -116,6 +129,8 @@ pub struct Settings {
     pub history: HistorySettings,
     pub start_with_windows: bool,
     pub ui_language: UiLanguage,
+    /// Checked by `validate`; clamped when converted for a job.
+    pub timeouts: TimeoutSettings,
 }
 
 fn deserialize_schema_version<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u32, D::Error> {
@@ -154,6 +169,7 @@ pub fn defaults(os_tag: Option<&str>) -> Settings {
         },
         start_with_windows: false,
         ui_language: resolve_ui_language(os_tag),
+        timeouts: crate::timeouts::default_settings(),
     }
 }
 
@@ -177,6 +193,10 @@ fn default_builtin_local() -> BuiltinLocalSettings {
 
 fn default_history() -> HistorySettings {
     defaults(None).history
+}
+
+fn default_timeouts() -> TimeoutSettings {
+    defaults(None).timeouts
 }
 
 /// A field as named in validation errors, the UI highlight and log lines.
@@ -206,6 +226,11 @@ pub enum FieldId {
     HistorySize,
     GeneralStartWithWindows,
     GeneralUiLanguage,
+    TimeoutsConnect,
+    TimeoutsApiTranscription,
+    TimeoutsLocalServer,
+    TimeoutsPostProcessing,
+    TimeoutsBuiltinLocal,
 }
 
 impl FieldId {
@@ -233,6 +258,11 @@ impl FieldId {
             FieldId::HistorySize => "history.size",
             FieldId::GeneralStartWithWindows => "general.start_with_windows",
             FieldId::GeneralUiLanguage => "general.ui_language",
+            FieldId::TimeoutsConnect => "timeouts.connect",
+            FieldId::TimeoutsApiTranscription => "timeouts.api_transcription",
+            FieldId::TimeoutsLocalServer => "timeouts.local_server",
+            FieldId::TimeoutsPostProcessing => "timeouts.post_processing",
+            FieldId::TimeoutsBuiltinLocal => "timeouts.builtin_local",
         }
     }
 }
@@ -246,7 +276,7 @@ impl FieldId {
 /// part of the type); `field_ids_match_data_model` checks that no entry is listed twice.
 #[cfg(test)]
 impl FieldId {
-    pub(crate) const ALL: [FieldId; 21] = [
+    pub(crate) const ALL: [FieldId; 26] = [
         FieldId::EngineKind,
         FieldId::EngineApiBaseUrl,
         FieldId::EngineApiModel,
@@ -268,6 +298,11 @@ impl FieldId {
         FieldId::HistorySize,
         FieldId::GeneralStartWithWindows,
         FieldId::GeneralUiLanguage,
+        FieldId::TimeoutsConnect,
+        FieldId::TimeoutsApiTranscription,
+        FieldId::TimeoutsLocalServer,
+        FieldId::TimeoutsPostProcessing,
+        FieldId::TimeoutsBuiltinLocal,
     ];
 }
 
@@ -299,6 +334,9 @@ pub enum ErrorCode {
     UrlCredentials,
     /// `speech_language` not `null` and not a Whisper ISO 639-1 code, decision #27(3).
     LanguageUnsupported,
+    /// A timeouts field outside its bounds (decision #99); the range is in the
+    /// field's hint, the error has no parameters.
+    TimeoutRange,
 }
 
 impl ErrorCode {
@@ -319,6 +357,7 @@ impl ErrorCode {
             ErrorCode::KeyStoreFailed => "key.store_failed",
             ErrorCode::UrlCredentials => "url.credentials",
             ErrorCode::LanguageUnsupported => "language.unsupported",
+            ErrorCode::TimeoutRange => "timeout.range",
         }
     }
 }
@@ -332,7 +371,7 @@ impl ErrorCode {
 /// no entry is listed twice.
 #[cfg(test)]
 impl ErrorCode {
-    pub(crate) const ALL: [ErrorCode; 14] = [
+    pub(crate) const ALL: [ErrorCode; 15] = [
         ErrorCode::Required,
         ErrorCode::UrlMalformed,
         ErrorCode::KeyRequired,
@@ -347,6 +386,7 @@ impl ErrorCode {
         ErrorCode::KeyStoreFailed,
         ErrorCode::UrlCredentials,
         ErrorCode::LanguageUnsupported,
+        ErrorCode::TimeoutRange,
     ];
 }
 

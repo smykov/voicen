@@ -72,8 +72,10 @@ pub struct JobReport {
 /// the pipeline (`crate::dictation`, T-051, decision #48).
 pub struct Pipeline {
     deps: PipelineDeps,
-    /// The one source of every request's durations (FR-24).
-    timeouts: Timeouts,
+    /// Test-only override of every request's durations (`with_timeouts`); `None`
+    /// in production, where each job's durations come from its settings snapshot
+    /// (FR-24, decision #97).
+    timeouts: Option<Timeouts>,
     factory: Box<EngineFactory>,
     /// `JobFinished.seq`, taken at `run_job` entry (T-011 moves it to the stop).
     last_seq: AtomicU64,
@@ -133,7 +135,7 @@ fn is_blank(text: &str) -> bool {
 }
 
 impl Pipeline {
-    fn build(deps: PipelineDeps, timeouts: Timeouts) -> Pipeline {
+    fn build(deps: PipelineDeps, timeouts: Option<Timeouts>) -> Pipeline {
         Pipeline {
             deps,
             timeouts,
@@ -144,15 +146,16 @@ impl Pipeline {
         }
     }
 
-    /// The production pipeline: [`Timeouts::default()`] and [`engine_for`].
+    /// The production pipeline: each job's durations are
+    /// [`Timeouts::from_settings`] of its settings snapshot; [`engine_for`].
     pub fn new(deps: PipelineDeps) -> Pipeline {
-        Pipeline::build(deps, Timeouts::default())
+        Pipeline::build(deps, None)
     }
 
-    /// Test durations (milliseconds) instead of the FR-24 defaults.
+    /// Test durations (milliseconds) for every job, instead of the snapshot's.
     #[cfg(any(test, feature = "test-fakes"))]
     pub fn with_timeouts(deps: PipelineDeps, timeouts: Timeouts) -> Pipeline {
-        Pipeline::build(deps, timeouts)
+        Pipeline::build(deps, Some(timeouts))
     }
 
     /// Replaces the engine factory (T-017's `BuiltinLocal` wrapper; test fakes).
@@ -234,7 +237,11 @@ impl Pipeline {
         };
         let request = TranscribeRequest {
             language: job.settings.speech_language.clone(),
-            timeouts: self.timeouts,
+            // Derived once per job from its snapshot: a save applies to the next
+            // job, never to a running one (P-013, Clarification 4).
+            timeouts: self
+                .timeouts
+                .unwrap_or_else(|| Timeouts::from_settings(&job.settings.timeouts)),
         };
         let outcome = match engine.transcribe(job.audio, &request) {
             Err(reason) => Outcome::Failed(reason),
