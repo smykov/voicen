@@ -162,6 +162,10 @@ pub enum WarningKind {
     /// The tray's "Open logs folder" could not create, check or open the logs
     /// folder, or its thread could not be started (T-071); the app keeps running.
     LogsFolderFailed,
+    /// A `settings_test_connection` call could not finish: its blocking task
+    /// panicked or was cancelled (T-046), so no `settings test_connection` line was
+    /// written; the window gets `ipc.unavailable`.
+    TestConnectionFailed,
 }
 
 /// One dictation: the engine, the outcome and the FR-20 timings plus the

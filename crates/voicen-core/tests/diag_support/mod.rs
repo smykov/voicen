@@ -434,6 +434,7 @@ pub const WARNING_KINDS: &[&str] = &[
     "dictation_start_failed",
     "overlay_failed",
     "logs_folder_failed",
+    "test_connection_failed",
 ];
 pub const LOAD_OUTCOMES: &[&str] = &["loaded", "first_run", "reset", "unavailable"];
 /// `settings test_connection result=<...>` (spec 004 R-11, T-046 choice (iv)),

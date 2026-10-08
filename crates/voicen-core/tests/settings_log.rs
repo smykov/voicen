@@ -444,6 +444,19 @@ fn every_test_connection_result_maps_to_its_line_without_host() {
         let l = line_of(&LogEvent::settings_test_connection(&result));
         assert_eq!(l.head, "settings test_connection", "{}", l.raw);
         assert_eq!(l.pairs, pairs(&expected), "{result:?}: {}", l.raw);
+        // Level (T-046 review 1 #3): a result the user acts on in the form (ok,
+        // invalid) is INFO like a refused save; a failed request or an unreadable
+        // key store is WARN. Bite: any arm of the level match swapped.
+        let level = match &result {
+            ConnectionTestResult::Ok { .. } | ConnectionTestResult::Invalid { .. } => "INFO",
+            ConnectionTestResult::CannotReach { .. }
+            | ConnectionTestResult::InvalidKey
+            | ConnectionTestResult::Timeout
+            | ConnectionTestResult::Http { .. }
+            | ConnectionTestResult::UnexpectedResponse
+            | ConnectionTestResult::KeyStoreUnavailable => "WARN",
+        };
+        assert_eq!(l.level, level, "{result:?}: {}", l.raw);
         assert!(
             !l.raw.contains("8443"),
             "the port reached the line {:?}",

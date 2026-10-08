@@ -202,6 +202,7 @@ fn all_warning_kinds() -> Vec<(WarningKind, &'static str)> {
         (WarningKind::DictationStartFailed, "dictation_start_failed"),
         (WarningKind::OverlayFailed, "overlay_failed"),
         (WarningKind::LogsFolderFailed, "logs_folder_failed"),
+        (WarningKind::TestConnectionFailed, "test_connection_failed"),
     ];
     let seen: BTreeSet<usize> = all
         .iter()
@@ -220,9 +221,10 @@ fn all_warning_kinds() -> Vec<(WarningKind, &'static str)> {
             WarningKind::DictationStartFailed => 11,
             WarningKind::OverlayFailed => 12,
             WarningKind::LogsFolderFailed => 13,
+            WarningKind::TestConnectionFailed => 14,
         })
         .collect();
-    assert_eq!(seen.len(), 14, "every WarningKind once");
+    assert_eq!(seen.len(), 15, "every WarningKind once");
     all
 }
 

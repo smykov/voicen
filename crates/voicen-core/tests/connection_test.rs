@@ -493,8 +493,12 @@ async fn local_server_test_uses_the_forms_local_server_limit() {
     let got = run(&w, req);
     let elapsed = started.elapsed();
     assert_eq!(got, ConnectionTestResult::Timeout);
+    // No upper bound (T-046 review 1 #2): every longer wrong limit (the snapshot's,
+    // the default, the other role's) lets the 6 s answer through as Ok, so the
+    // Timeout assertion catches it; a ceiling caught nothing more and tripped
+    // under host load (T-078 class).
     assert!(
-        elapsed >= Duration::from_millis(4500) && elapsed < Duration::from_millis(5900),
+        elapsed >= Duration::from_millis(4500),
         "Timeout after {elapsed:?}, expected the form's 5 s"
     );
 }
@@ -512,8 +516,12 @@ async fn api_test_uses_the_forms_api_limit() {
     let got = run(&w, req);
     let elapsed = started.elapsed();
     assert_eq!(got, ConnectionTestResult::Timeout);
+    // No upper bound (T-046 review 1 #2): every longer wrong limit (the snapshot's,
+    // the default, the other role's) lets the 6 s answer through as Ok, so the
+    // Timeout assertion catches it; a ceiling caught nothing more and tripped
+    // under host load (T-078 class).
     assert!(
-        elapsed >= Duration::from_millis(4500) && elapsed < Duration::from_millis(5900),
+        elapsed >= Duration::from_millis(4500),
         "Timeout after {elapsed:?}, expected the form's 5 s"
     );
 }

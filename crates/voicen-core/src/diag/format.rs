@@ -427,6 +427,7 @@ fn warning_kind(kind: WarningKind) -> &'static str {
         WarningKind::DictationStartFailed => "dictation_start_failed",
         WarningKind::OverlayFailed => "overlay_failed",
         WarningKind::LogsFolderFailed => "logs_folder_failed",
+        WarningKind::TestConnectionFailed => "test_connection_failed",
     }
 }
 

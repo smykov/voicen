@@ -68,7 +68,7 @@ specs/004-settings-and-first-run/
 ├── data-model.md        # Phase 1
 ├── quickstart.md        # Phase 1
 ├── contracts/
-│   ├── core-traits.md   # CredentialStore, SettingsFile, Autostart, SettingsService, HotkeyRegistrar, DownloadedModels, ConnectionTester, i18n, consumed interfaces
+│   ├── core-traits.md   # CredentialStore, SettingsFile, Autostart, SettingsService (incl. test_connection), HotkeyRegistrar, DownloadedModels, i18n, consumed interfaces
 │   └── ipc.md           # Tauri commands, events and the settings window
 ├── checklists/
 └── tasks.md             # Phase 2 (/speckit-tasks)
@@ -92,7 +92,7 @@ crates/voicen-core/src/
 │   └── gate.rs                   # dictation_gate (engine none)
 ├── secrets.rs                    # KeySlot, Secret, KeyEdit, CredentialStore trait
 ├── autostart.rs                  # Autostart trait
-├── connection_test.rs            # ConnectionTester over 001's client
+├── connection_test.rs            # ConnectionTestRequest/Result; SettingsService::test_connection runs it through engine_for (T-046)
 ├── i18n.rs                       # catalog embed, text(), MESSAGE_IDS, resolve_ui_language — delivered by the catalog task (teamwright T-005), consumed here (decisions #21)
 ├── post_process/settings.rs      # PostProcessingSettings, STARTER_PROMPT, defaults() — data type created here, 003 adds validate() (decisions #21)
 ├── assets/test-clip.wav          # bundled 1 s clip for Test connection

@@ -17,7 +17,8 @@
 //! The only output here goes to the one log as typed lines (T-008, spec 004 R-11):
 //! the load outcome and the reconcile action from [`load_settings`], one save line
 //! per [`settings_save`] (outcome, field ids and codes), one test line per
-//! [`settings_test_connection`] (result kind, latency on `ok`; no host), and a
+//! [`settings_test_connection`] (result kind, latency on `ok`; no host; a
+//! `test_connection_failed` warning when its task cannot finish), and a
 //! `change_bridge_failed`
 //! warning with the OS code when [`spawn_change_bridge`] cannot start its thread. No
 //! key, transcript, settings value or base URL can reach a line: the events have no
@@ -167,7 +168,9 @@ pub fn settings_save(
 /// runtime's worker or the main thread. Saves nothing; writes one `settings
 /// test_connection` line to the managed log (result kind only, no host). Rejects
 /// with `{ "code": "ipc.unavailable" }` only when the blocking task cannot finish
-/// (contracts/ipc.md "Errors"); malformed args reject with core's fixed text.
+/// (contracts/ipc.md "Errors"), and then writes one `warning
+/// kind=test_connection_failed` line instead; malformed args reject with core's
+/// fixed text.
 #[tauri::command]
 pub async fn settings_test_connection(
     service: State<'_, Arc<SettingsService>>,
@@ -176,13 +179,22 @@ pub async fn settings_test_connection(
 ) -> Result<ConnectionTestResult, IpcUnavailable> {
     let service = Arc::clone(&service);
     let log = Arc::clone(&log);
+    let task_log = Arc::clone(&log);
     tauri::async_runtime::spawn_blocking(move || {
         let result = service.test_connection(request);
-        log.write(LogEvent::settings_test_connection(&result));
+        task_log.write(LogEvent::settings_test_connection(&result));
         result
     })
     .await
-    .map_err(|_| IpcUnavailable::new())
+    .map_err(|_join_error| {
+        // The task panicked or was cancelled: its own line was never written, so
+        // one typed warning (no cause text) is the trace (T-046 review 1 #6).
+        log.write(LogEvent::Warning {
+            kind: WarningKind::TestConnectionFailed,
+            os_code: None,
+        });
+        IpcUnavailable::new()
+    })
 }
 
 /// The rejection of a command that cannot run at all: `{ "code":

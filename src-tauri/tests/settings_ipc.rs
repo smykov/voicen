@@ -35,6 +35,14 @@ use voicen_core::test_support::TempDir;
 use voicen_core::timeouts::Timeouts;
 use voicen_lib::settings_ipc::load_settings;
 
+/// Core's test helpers: the one refused address and its budget (T-047, T-048;
+/// docs/decisions/core-tests.md), one copy for the core and the shell tests.
+#[path = "../../crates/voicen-core/tests/common/mod.rs"]
+mod common;
+/// The checks of [`common::refused_addr`], run in the process that relies on it.
+#[path = "../../crates/voicen-core/tests/common/refused_addr_tests.rs"]
+mod refused_addr_tests;
+
 /// Obviously fake key; must never leave the credential store.
 const CANARY: &str = "sk-test-CANARY-7f3a-not-a-real-key";
 const CHANGED: &str = "settings://changed";
@@ -651,14 +659,13 @@ fn test_connection_refused_loopback_port_is_cannot_reach() {
     // invoke would then never resolve or reject), saves nothing (no credential
     // write or delete, settings.json byte-identical, no settings://changed), keeps
     // the typed key out of the response, and writes R-11's line without the host
-    // (choice (iv)). The port: bound by this test, then released, so nothing
-    // listens on it. Bite: the command not registered, a sync body, the request
-    // built from the saved settings, a save inside the test, the host logged.
-    let port = {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
-        listener.local_addr().expect("local addr").port()
-    };
-    let host = format!("127.0.0.1:{port}");
+    // (choice (iv)). The address is core's `refused_addr()` (`127.0.0.1:1`, below
+    // every ephemeral range, probed refused at use; F-004, decision #53), never a
+    // bound-and-released port. Bite: the command not registered, a sync body, the
+    // request built from the saved settings, a save inside the test, the host
+    // logged.
+    let addr = common::refused_addr();
+    let host = addr.to_string();
 
     let dir = TempDir::new();
     let log_dir = dir.path().join("logs");
@@ -679,7 +686,14 @@ fn test_connection_refused_loopback_port_is_cannot_reach() {
     let h = harness_with_log(&service, log.clone());
     let events = h.changed_events();
 
-    let timeouts = voicen_core::timeouts::default_settings();
+    // F-005 / decision #56: the connect limit leaves the ~2.17 s Windows refusal
+    // room (REFUSAL_BUDGET), the request limit twice that, as `refused_timeouts()`.
+    let budget_s = u32::try_from(common::REFUSAL_BUDGET.as_secs()).expect("budget in u32");
+    let timeouts = voicen_core::settings::TimeoutSettings {
+        connect_s: budget_s,
+        api_transcription_s: 2 * budget_s,
+        ..voicen_core::timeouts::default_settings()
+    };
     let args = json!({ "request": {
         "engine": "api",
         "base_url": format!("http://{host}/v1?api-version=SECRETQ"),
