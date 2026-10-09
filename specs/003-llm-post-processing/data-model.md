@@ -98,3 +98,5 @@ deliver(*) ──► audio released (NFR-06); no pending recording from this sta
 `post_process outcome=<applied|skipped> [reason=<timeout|unreachable|invalid_key|http_<status>|invalid_response>] duration_ms=<n>`
 
 These fields form an allowlist (P-009). There is no text, prompt, key, host path or body.
+
+As built (T-076): not a separate line. The fields ride on the one dictation line (006's "one dictation is one line", `docs/decisions/diagnostics-log.md`): `pp=<off|applied|skipped>`, `pp_reason=<timeout|unreachable|invalid_key|http|invalid_response|not_configured>` exactly on `pp=skipped`, `pp_ms=<n>` exactly on `pp=applied|skipped` (the duration of the `PostProcessor::process` call alone). `pp=` is written exactly when the job called the stage (a non-blank transcript existed); `off` is `PostProcessOutcome::NotRun` (post-processing disabled). No HTTP status and no host: `pp_reason=http`, `pp_reason=unreachable`. The values come from `events::PostProcessTrace` (`PostProcessResult`, `SkipKind` = `SkipReason::kind()`), carried on `DictationEvent::JobFinished.post_processing`.

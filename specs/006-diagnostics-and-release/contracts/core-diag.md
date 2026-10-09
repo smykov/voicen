@@ -55,7 +55,8 @@ pub enum LogEvent {
 pub struct DictationLine { pub recording: u64, pub engine: Option<EngineTag>, pub outcome: DictationOutcome,
                            pub detector: Option<DetectorTag>, pub press_to_frame_ms: Option<u64>,
                            pub duration_ms: Option<u64>, pub stop_to_text_ms: Option<u64>,
-                           pub text_to_paste_ms: Option<u64> }
+                           pub text_to_paste_ms: Option<u64>,
+                           pub post_processing: Option<PostProcessTrace> }   // T-076: pp= / pp_reason= / pp_ms=
 pub enum DictationOutcome { Delivered(DeliveryResult), Failed { failure: FailureTag, http_status: Option<u16> },
                             NoSpeech, TooShort }
 impl EngineTag   { pub fn from_kind(kind: &str) -> EngineTag; }      // api | builtin | local_server | other

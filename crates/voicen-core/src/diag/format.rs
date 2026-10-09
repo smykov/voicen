@@ -1,14 +1,15 @@
 //! The one line formatter (T-008): `<local time with offset> <LEVEL> <message>`.
 //!
 //! Total over [`LogEvent`]; every value is an integer, a literal from this
-//! module's tables (engine, detector, failure, microphone cause, warning kind,
-//! load outcome, test-connection result), a closed `as_str`/`code` match of the crate (settings field
+//! module's tables (engine, detector, failure, microphone cause, post-processing
+//! result and skip kind, warning kind, load outcome, test-connection result), a closed `as_str`/`code` match of the crate (settings field
 //! ids and codes, `ReconcileAction`, `DeliveryResult`, `FormError::kind`), or
 //! `BuildInfo`. Std only (the date math of `clock.rs`).
 //!
 //! ```text
 //! 2026-10-04T23:59:00.123+02:00 INFO voicen 0.1.0 (abc1234) started pid=4242
-//! 2026-10-04T23:59:04.020+02:00 INFO dictation rec=0 engine=api outcome=delivered result=pasted detector=energy press_to_frame_ms=41 duration_ms=3000 stop_to_text_ms=812 text_to_paste_ms=95
+//! 2026-10-04T23:59:04.020+02:00 INFO dictation rec=0 engine=api outcome=delivered result=pasted detector=energy pp=applied press_to_frame_ms=41 duration_ms=3000 stop_to_text_ms=2390 pp_ms=1544 text_to_paste_ms=95
+//! 2026-10-04T23:59:30.020+02:00 INFO dictation rec=2 engine=api outcome=delivered result=pasted detector=energy pp=skipped pp_reason=timeout press_to_frame_ms=38 duration_ms=2500 stop_to_text_ms=15900 pp_ms=15004 text_to_paste_ms=90
 //! 2026-10-04T23:59:04.500+02:00 WARN dictation rec=1 outcome=capture_failed mic=access_denied
 //! 2026-10-04T23:59:04.700+02:00 WARN dictation outcome=blocked reason=no_engine
 //! 2026-10-04T23:59:05.000+02:00 WARN warning kind=vad_fallback
@@ -28,6 +29,7 @@ use super::event::{
 use crate::autostart::ReconcileAction;
 use crate::build_info::BuildInfo;
 use crate::clock::civil_from_days;
+use crate::events::{PostProcessResult, SkipKind};
 use crate::recording::MicCause;
 use crate::settings::gate::Blocked;
 use crate::settings::service::FormError;
@@ -226,6 +228,7 @@ fn write_dictation(out: &mut String, line: &DictationLine) {
         duration_ms,
         stop_to_text_ms,
         text_to_paste_ms,
+        post_processing,
     } = line;
     out.push_str("dictation");
     pair(out, "rec", recording);
@@ -258,10 +261,24 @@ fn write_dictation(out: &mut String, line: &DictationLine) {
     if let Some(tag) = detector_tag {
         pair(out, "detector", detector(*tag));
     }
+    // pp exactly when the job called the stage; pp_reason exactly on a skip;
+    // pp_ms on applied and skipped only (off has no step to time).
+    let pp_ms = post_processing.and_then(|trace| {
+        pair(out, "pp", pp_result(trace.result));
+        match trace.result {
+            PostProcessResult::Off => None,
+            PostProcessResult::Applied => Some(trace.ms),
+            PostProcessResult::Skipped(kind) => {
+                pair(out, "pp_reason", skip_kind(kind));
+                Some(trace.ms)
+            }
+        }
+    });
     for (key, value) in [
         ("press_to_frame_ms", press_to_frame_ms),
         ("duration_ms", duration_ms),
         ("stop_to_text_ms", stop_to_text_ms),
+        ("pp_ms", &pp_ms),
         ("text_to_paste_ms", text_to_paste_ms),
     ] {
         if let Some(ms) = value {
@@ -403,6 +420,28 @@ fn mic(cause: MicCause) -> &'static str {
         MicCause::AccessDenied => "access_denied",
         MicCause::Busy => "busy",
         MicCause::Other => "other",
+    }
+}
+
+/// `pp=<...>`: one literal per `PostProcessResult` kind (T-076).
+fn pp_result(result: PostProcessResult) -> &'static str {
+    match result {
+        PostProcessResult::Off => "off",
+        PostProcessResult::Applied => "applied",
+        PostProcessResult::Skipped(_) => "skipped",
+    }
+}
+
+/// `pp_reason=<...>`: one literal per `SkipKind`, spelled like
+/// `SkipReason::code()` but from this table; never a host or a status.
+fn skip_kind(kind: SkipKind) -> &'static str {
+    match kind {
+        SkipKind::Timeout => "timeout",
+        SkipKind::Unreachable => "unreachable",
+        SkipKind::InvalidKey => "invalid_key",
+        SkipKind::Http => "http",
+        SkipKind::InvalidResponse => "invalid_response",
+        SkipKind::NotConfigured => "not_configured",
     }
 }
 

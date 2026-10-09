@@ -15,6 +15,7 @@ pub mod chat;
 pub mod settings;
 
 use crate::delivery::DeliveryResult;
+use crate::events::SkipKind;
 use crate::failure::FailureReason;
 use crate::i18n::{self, MessageId};
 use crate::secrets::CredentialStore;
@@ -84,6 +85,19 @@ impl SkipReason {
             SkipReason::Http { .. } => "http",
             SkipReason::InvalidResponse => "invalid_response",
             SkipReason::NotConfigured => "not_configured",
+        }
+    }
+
+    /// The closed kind for the log (T-076): the reason without its host or
+    /// status.
+    pub fn kind(&self) -> SkipKind {
+        match self {
+            SkipReason::Timeout => SkipKind::Timeout,
+            SkipReason::Unreachable { .. } => SkipKind::Unreachable,
+            SkipReason::InvalidKey => SkipKind::InvalidKey,
+            SkipReason::Http { .. } => SkipKind::Http,
+            SkipReason::InvalidResponse => SkipKind::InvalidResponse,
+            SkipReason::NotConfigured => SkipKind::NotConfigured,
         }
     }
 

@@ -68,7 +68,7 @@ T-008 shipped `DictationLine`, which `LogObserver` aggregates per `RecordingId` 
 | `stop_to_text_ms` | `Option<u64>` | `JobFinished` | T-008 |
 | `text_to_paste_ms` | `Option<u64>` | `Delivered` | T-008 |
 | `model` | — | — | not logged (T-008 Q1, decision #64; no `ModelName`) |
-| `post_processing` | `Option<Applied \| Skipped{category}>` | 003 | later |
+| `post_processing` | `Option<PostProcessTrace>` (`events::PostProcessTrace { result: Off \| Applied \| Skipped(SkipKind), ms }`), written `pp=<off\|applied\|skipped>`, `pp_reason=<timeout\|unreachable\|invalid_key\|http\|invalid_response\|not_configured>` on a skip, `pp_ms=<n>` on applied / skipped; absent (no `pp*` key) when the job never called the stage | `JobFinished.post_processing` | T-076 |
 | `local`, `load_ms` | see 002 data-model | 002 | later |
 
 ## LogWriter state

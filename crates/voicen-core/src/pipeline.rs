@@ -16,7 +16,9 @@ use std::time::{Duration, Instant};
 use crate::audio::AudioBuffer;
 use crate::delivery::deliver;
 use crate::engine::{engine_for, Engine, TranscribeRequest};
-use crate::events::{DictationEvent, OutcomeCode, PipelineObserver, WarningCode};
+use crate::events::{
+    DictationEvent, OutcomeCode, PipelineObserver, PostProcessResult, PostProcessTrace, WarningCode,
+};
 use crate::failure::FailureReason;
 use crate::i18n;
 use crate::platform::{Clipboard, ClipboardError, Paster, PendingId, StartWindow, TempAudioStore};
@@ -121,6 +123,8 @@ struct JobOutcome {
     outcome: Outcome,
     /// `Engine::kind()` of the engine that was built, if any.
     engine: Option<&'static str>,
+    /// The stage's trace, exactly when `process` called the post-processor.
+    post_processing: Option<PostProcessTrace>,
     /// When the outcome was known; used only for event durations.
     at: Instant,
 }
@@ -131,6 +135,16 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 
 fn millis(d: Duration) -> u64 {
     u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
+}
+
+/// The closed result of the stage for the log: `NotRun` is `Off`, a skip keeps
+/// only its [`SkipReason::kind`].
+fn trace_result(outcome: &PostProcessOutcome) -> PostProcessResult {
+    match outcome {
+        PostProcessOutcome::NotRun => PostProcessResult::Off,
+        PostProcessOutcome::Applied(_) => PostProcessResult::Applied,
+        PostProcessOutcome::Skipped(reason) => PostProcessResult::Skipped(reason.kind()),
+    }
 }
 
 /// Nothing to deliver: empty or whitespace only.
@@ -177,7 +191,8 @@ impl Pipeline {
     /// [`deliver`]'s table. A retryable failure keeps the audio as the one pending
     /// recording; a skipped post-processing delivers the raw transcript and ends as
     /// `JobEnd::DeliveredSkipped`. Events, in order: `Warning{vad_fallback}` (once
-    /// per gate), `SpeechGate`, `JobFinished` (after the clipboard write),
+    /// per gate), `SpeechGate`, `JobFinished` (after the clipboard write;
+    /// with the post-processing trace exactly when the stage was called),
     /// `Delivered`.
     pub fn run_job(&self, rec: FinishedRecording<PressContext>) -> JobReport {
         let ctx = rec.ctx();
@@ -228,6 +243,7 @@ impl Pipeline {
             return JobOutcome {
                 outcome: Outcome::NoSpeech,
                 engine: None,
+                post_processing: None,
                 at: Instant::now(),
             };
         }
@@ -238,6 +254,7 @@ impl Pipeline {
                 return JobOutcome {
                     outcome: Outcome::Failed(reason),
                     engine: None,
+                    post_processing: None,
                     at: Instant::now(),
                 }
             }
@@ -252,18 +269,24 @@ impl Pipeline {
             language: job.settings.speech_language.clone(),
             timeouts,
         };
-        let outcome = match engine.transcribe(job.audio, &request) {
-            Err(reason) => Outcome::Failed(reason),
-            Ok(text) if is_blank(&text) => Outcome::NoSpeech,
+        let (outcome, post_processing) = match engine.transcribe(job.audio, &request) {
+            Err(reason) => (Outcome::Failed(reason), None),
+            Ok(text) if is_blank(&text) => (Outcome::NoSpeech, None),
             Ok(raw) => {
                 let input = PostProcessInput {
                     settings: &job.settings.post_processing,
                     credentials: &*self.deps.credentials,
                     timeouts: &request.timeouts,
                 };
+                // The one call of the stage, timed alone (T-076, spec 003 FR-014).
+                let started = Instant::now();
                 let processed = self.deps.post_processor.process(&raw, &input);
+                let trace = PostProcessTrace {
+                    result: trace_result(&processed),
+                    ms: millis(started.elapsed()),
+                };
                 let text = processed.final_text(&raw);
-                if is_blank(text) {
+                let outcome = if is_blank(text) {
                     Outcome::NoSpeech
                 } else {
                     Outcome::Text {
@@ -273,12 +296,14 @@ impl Pipeline {
                             PostProcessOutcome::NotRun | PostProcessOutcome::Applied(_) => None,
                         },
                     }
-                }
+                };
+                (outcome, Some(trace))
             }
         };
         JobOutcome {
             outcome,
             engine: Some(engine.kind()),
+            post_processing,
             at: Instant::now(),
         }
     }
@@ -299,6 +324,8 @@ impl Pipeline {
                     Some(FailureReason::ServerError { status }) => Some(*status),
                     _ => None,
                 },
+                // Every JobFinished of a job that called the stage carries it.
+                post_processing: done.post_processing,
             };
         let reason = match done.outcome {
             Outcome::NoSpeech => {

@@ -1,6 +1,6 @@
 # Post-processing
 
-**Code:** `crates/voicen-core/src/post_process/{mod,chat,settings}.rs`, `crates/voicen-core/src/engine/http.rs`, `src-tauri/src/dictation.rs` `start_dictation`, `Pipeline::process` / `Pipeline::release`, `RecordingController::job_finished` · **Tests that pin it:** `tests/post_process_chat.rs`, `tests/post_process_timeout.rs`, `post_process::tests`, `pipeline::tests::post_processor_*` / `skipped_post_processing_*`, `recording::tests::delivered_skipped_*`, `i18n::tests::post_processing_skip_ids_*`, `post_process::settings::tests::validate_*`, `settings::validate::tests::post_processing_on_is_validated_for_every_engine`, `settings::service::tests::save_refuses_an_unusable_post_processing_url_while_enabled`, `src-tauri/tests/dictation_e2e.rs` `post_processing_*` (Windows CI)
+**Code:** `crates/voicen-core/src/post_process/{mod,chat,settings}.rs`, `crates/voicen-core/src/engine/http.rs`, `src-tauri/src/dictation.rs` `start_dictation`, `Pipeline::process` / `Pipeline::release`, `RecordingController::job_finished` · **Tests that pin it:** `tests/post_process_chat.rs`, `tests/post_process_timeout.rs`, `post_process::tests`, `pipeline::tests::post_processor_*` / `skipped_post_processing_*`, `recording::tests::delivered_skipped_*`, `i18n::tests::post_processing_skip_ids_*`, `post_process::settings::tests::validate_*`, `settings::validate::tests::post_processing_on_is_validated_for_every_engine`, `settings::service::tests::save_refuses_an_unusable_post_processing_url_while_enabled`, `post_process::tests::skip_kind_is_the_closed_copy_of_the_reason`, `pipeline::tests::post_processing_outcome_and_duration_reach_job_finished` / `the_trace_rides_on_every_job_finished_after_the_stage` / `no_trace_when_the_stage_was_not_called`, `tests/diag_pipeline.rs::post_processing_outcome_is_logged_without_prompt_reply_host_or_key`, `src-tauri/tests/dictation_e2e.rs` `post_processing_*` (Windows CI)
 
 Spec: `specs/003-llm-post-processing/` (contracts/core-post-process.md, data-model.md). Decisions: #42 (synchronous engines), #91 (scope, `not_configured`, one overlay message), #99 (timeouts are settings). Tasks: T-020; save rule and settings tab T-021; shell wiring T-074 (done: follow-up 1 of #91), toast T-075, log fields T-076.
 
@@ -55,7 +55,7 @@ Spec: `specs/003-llm-post-processing/` (contracts/core-post-process.md, data-mod
 ### Nothing secret in a skip
 
 - **Why:** FR-014, P-009.
-- **Where it is enforced:** `SkipReason` holds only `host[:port]` (`engine::openai::host_port` of the configured base URL) or a status; never the error text, URL query, body, prompt, transcript or key.
+- **Where it is enforced:** `SkipReason` holds only `host[:port]` (`engine::openai::host_port` of the configured base URL) or a status; never the error text, URL query, body, prompt, transcript or key. The log gets less: only `SkipReason::kind()` (`events::SkipKind`, no host, no status) inside the `Copy` `events::PostProcessTrace` that `Pipeline::process` builds around its one call of the stage and puts on `JobFinished` (T-076): `pp=<off|applied|skipped> [pp_reason=<kind>] [pp_ms=<n>]` on the dictation line (`docs/decisions/diagnostics-log.md`).
 
 ### One overlay message per skip (decision #91(3))
 

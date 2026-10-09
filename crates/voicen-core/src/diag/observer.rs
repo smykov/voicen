@@ -23,7 +23,7 @@ use super::event::{
     DetectorTag, DictationLine, DictationOutcome, EngineTag, FailureTag, LogEvent, WarningKind,
 };
 use super::log::Log;
-use crate::events::{DictationEvent, OutcomeCode, PipelineObserver, WarningCode};
+use crate::events::{DictationEvent, OutcomeCode, PipelineObserver, PostProcessTrace, WarningCode};
 use crate::recording::{RecordingEnd, RecordingId};
 
 /// Open records (and text jobs awaiting `Delivered`) kept at most; the oldest
@@ -51,6 +51,7 @@ struct Record {
     press_to_frame_ms: Option<u64>,
     duration_ms: Option<u64>,
     stop_to_text_ms: Option<u64>,
+    post_processing: Option<PostProcessTrace>,
 }
 
 impl Record {
@@ -69,6 +70,7 @@ impl Record {
             duration_ms: self.duration_ms,
             stop_to_text_ms: self.stop_to_text_ms,
             text_to_paste_ms,
+            post_processing: self.post_processing,
         })
     }
 }
@@ -152,10 +154,12 @@ impl Open {
                 outcome,
                 failure,
                 http_status,
+                post_processing,
             } => {
                 let record = self.record(recording);
                 record.engine = engine.map(EngineTag::from_kind);
                 record.stop_to_text_ms = Some(stop_to_text_ms);
+                record.post_processing = post_processing;
                 match outcome {
                     OutcomeCode::Text => {
                         self.await_delivery(seq, recording);

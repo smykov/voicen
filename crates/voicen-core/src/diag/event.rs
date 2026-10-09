@@ -8,6 +8,7 @@ use crate::autostart::ReconcileAction;
 use crate::build_info::BuildInfo;
 use crate::connection_test::ConnectionTestResult;
 use crate::delivery::DeliveryResult;
+use crate::events::PostProcessTrace;
 use crate::recording::MicCause;
 use crate::settings::gate::Blocked;
 use crate::settings::service::{FormError, SaveOutcome, Warning};
@@ -169,7 +170,7 @@ pub enum WarningKind {
 }
 
 /// One dictation: the engine, the outcome and the FR-20 timings plus the
-/// recording's duration. A timing whose event did not come is `None` and its key
+/// recording's duration and the post-processing trace (spec 003 FR-014). A timing whose event did not come is `None` and its key
 /// is left out of the line (never `0`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DictationLine {
@@ -186,6 +187,9 @@ pub struct DictationLine {
     pub stop_to_text_ms: Option<u64>,
     /// Text -> paste (`Delivered`).
     pub text_to_paste_ms: Option<u64>,
+    /// The post-processing stage's result and duration (`JobFinished`, T-076);
+    /// `None` when the job never called the stage: no `pp*` key is written.
+    pub post_processing: Option<PostProcessTrace>,
 }
 
 /// How a dictation ended.

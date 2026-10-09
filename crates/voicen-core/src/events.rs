@@ -37,6 +37,42 @@ pub enum WarningCode {
     ToastFailed,
 }
 
+/// What the post-processing stage did for one job (T-076, spec 003 FR-014): its
+/// closed result and how long the `PostProcessor::process` call took. Built only
+/// by `Pipeline::process` around its one call of the stage; `Copy`, no `String`,
+/// so no prompt, transcript, reply, host or key can ride on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PostProcessTrace {
+    pub result: PostProcessResult,
+    /// The stage call's duration in milliseconds. Measured for every result;
+    /// the log writes it only for `Applied` and `Skipped` (`Off` has no step).
+    pub ms: u64,
+}
+
+/// The closed result of the stage: `PostProcessOutcome` without its text or
+/// skip details.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PostProcessResult {
+    /// `PostProcessOutcome::NotRun`: post-processing off (or `PassThrough`).
+    Off,
+    /// `PostProcessOutcome::Applied`.
+    Applied,
+    /// `PostProcessOutcome::Skipped`, by `SkipReason::kind()`.
+    Skipped(SkipKind),
+}
+
+/// `SkipReason` without its host or status (`SkipReason::kind()`): one kind per
+/// reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkipKind {
+    Timeout,
+    Unreachable,
+    InvalidKey,
+    Http,
+    InvalidResponse,
+    NotConfigured,
+}
+
 /// The log allowlist: exactly these variants and fields.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DictationEvent {
@@ -70,6 +106,10 @@ pub enum DictationEvent {
         failure: Option<&'static str>,
         /// The status of a `ServerError` only.
         http_status: Option<u16>,
+        /// What the post-processing stage did; `None` when the job never called
+        /// it (no speech, no engine, a failed or blank transcription). Every
+        /// `JobFinished` of a job that called it carries it (T-076).
+        post_processing: Option<PostProcessTrace>,
     },
     Delivered {
         seq: u64,
