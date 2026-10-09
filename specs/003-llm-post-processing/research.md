@@ -45,7 +45,7 @@ The stack is fixed by `docs/requirements.md` §9 (Tauri 2, Rust 1.99, `reqwest`,
 - **Decision**:
   - **Key storage and reading.** The key is read for each dictation through the credential-store trait *(from 004: `CredentialStore`, `KeySlot::PostProcessing`)* and held as `Secret`, a newtype whose `Debug` and `Display` print `***`. A read error or missing entry is treated as no key (spec Edge Cases).
   - **Error values.** `Failure` and `SkipReason` hold no body, no key, no prompt and no transcript.
-  - **Log line.** There is exactly one, built from an allowlist of fields: `post_process outcome=applied|skipped reason=<code> duration_ms=<n>`.
+  - **Log line.** There is exactly one, built from an allowlist of fields: `post_process outcome=applied|skipped reason=<code> duration_ms=<n>`. *As built (T-076): not a separate line; the fields ride on the dictation line as `pp=`, `pp_reason=`, `pp_ms=`, see data-model.md "As built (T-076)".*
   - **Redirects.** The key goes only to the configured endpoint (FR-012). The shared client keeps reqwest's default redirect policy, which drops `Authorization` on a cross-host redirect. A test pins this behaviour (T023).
   - **Library logging.** reqwest and hyper logging stays at its default `off` (no `log`/`tracing` subscriber enables their targets above `warn`). 006 owns the logger; this feature asserts the property with a capture test.
 - **Rationale**: P-009 says to name every path. The paths are our own log line, error values that reach notifications, library request logging, and panic messages. Panic messages are covered by not formatting secrets into `expect` text and by the `Secret` newtype.

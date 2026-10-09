@@ -26,7 +26,7 @@ Expected results:
 | US2-3/4: mock 401, 403, 404, 429, 500 | `InvalidKey` for 401 and 403; `Http{status}` for the others |
 | US2-5: `{}`, `{"choices":[]}`, non-JSON, `"   "` | `InvalidResponse` |
 | US2-7: any skip | job outcome delivered; no pending recording |
-| US3-2 / SC-005: run all of the above with a log capture | the captured log has `post_process outcome=… duration_ms=…` lines and contains neither the key, the prompt, the raw text, the reply nor the error body |
+| US3-2 / SC-005: run all of the above with a log capture | the captured log has one dictation line per dictation carrying the `pp=` keys (as built, T-076: [data-model.md](data-model.md) "As built (T-076)"; there is no separate `post_process` line) and contains neither the key, the prompt, the raw text, the reply nor the error body |
 | FR-23: fake post-processor delays dictation A by 300 ms, B has none | delivery order A then B |
 
 ## 2. UI on the Linux host (Playwright, mocked IPC)
@@ -51,4 +51,4 @@ The job builds, installs silently and runs the smoke check. `cargo test --worksp
 
 1. Turn post-processing on with a real chat endpoint (e.g. `https://api.openai.com/v1` with `gpt-4o-mini`, or Ollama `http://localhost:11434/v1`). Dictate "привет как дела" into Notepad. The pasted text is punctuated.
 2. Set the base URL to `http://localhost:9` and dictate. The raw text is pasted; the toast and overlay show "Post-processing skipped — cannot reach localhost" for 3 s; the tray shows the error state.
-3. Open `%LOCALAPPDATA%\Voicen\logs\voicen.log` and confirm there is a `post_process` line with outcome and duration, and no dictated words, prompt or key.
+3. Open `%LOCALAPPDATA%\Voicen\logs\voicen.log` and confirm the dictation line carries `pp=applied` (or `pp=skipped` with `pp_reason=…`) and `pp_ms=…` (keys: [data-model.md](data-model.md) "As built (T-076)"), and no dictated words, prompt or key.
