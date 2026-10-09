@@ -37,6 +37,8 @@ import {
   releaseMicrophones,
   releaseOverlayReady,
   releaseSettingsGet,
+  holdBuildInfo,
+  releaseBuildInfo,
   setBuildInfo,
   storedModels,
   storedView,
@@ -729,4 +731,55 @@ test("setBuildInfo answers get_build_info on a page installed without the buildI
   expect(await invokeInPage(page, "get_build_info")).toEqual({ err: "unexpected command get_build_info" });
   await setBuildInfo(page, { version: "0.1.0", commit: "abc1234" });
   expect(await invokeInPage(page, "get_build_info")).toEqual({ ok: { version: "0.1.0", commit: "abc1234" } });
+});
+
+// T-023 validation 1 M2: About must show nothing while its get_build_info is pending, and
+// drop an earlier opening's answer that arrives late; the mock can hold the command.
+test("holdBuildInfo keeps get_build_info in flight (recorded, answer taken at the call); releaseBuildInfo('newest'/'oldest') answers that one and keeps holding; releaseBuildInfo() answers the rest in call order and stops holding", async ({ page }) => {
+  // "/" reads get_build_info once in onMount; wait for it before counting.
+  await expect.poll(async () => (await calls(page, "get_build_info")).length).toBe(1);
+  await holdBuildInfo(page);
+  const invokeHeld = (slot: string) =>
+    page.evaluate((name) => {
+      const w = window as unknown as { __TAURI_INTERNALS__: Internals; __build?: Record<string, unknown> };
+      w.__build = w.__build ?? {};
+      void w.__TAURI_INTERNALS__
+        .invoke("get_build_info", {})
+        .then((v) => (w.__build![name] = { ok: v }), (e: Error) => (w.__build![name] = { err: e.message }));
+    }, slot);
+  const answers = () =>
+    page.evaluate(() => (window as unknown as { __build?: Record<string, unknown> }).__build ?? {});
+
+  await invokeHeld("a");
+  await setBuildInfo(page, { reject: "ipc down (fake)" });
+  await invokeHeld("b");
+  await setBuildInfo(page, { version: "9.8.7", commit: "def5678" });
+  await invokeHeld("c");
+  await expect.poll(async () => (await calls(page, "get_build_info")).length).toBe(4);
+  expect(await answers()).toEqual({});
+
+  // Only the newest is answered, with the answer set when it was called.
+  await releaseBuildInfo(page, "newest");
+  await expect.poll(answers).toEqual({ c: { ok: { version: "9.8.7", commit: "def5678" } } });
+  // Still holding: a new call stays in flight too.
+  await invokeHeld("d");
+  await expect.poll(async () => (await calls(page, "get_build_info")).length).toBe(5);
+  // The oldest next, with its call-time answer (not the current one).
+  await releaseBuildInfo(page, "oldest");
+  await expect.poll(answers).toEqual({
+    a: { ok: { version: "0.0.0", commit: "mock" } },
+    c: { ok: { version: "9.8.7", commit: "def5678" } },
+  });
+
+  // The rest, in call order; then holding stops.
+  await releaseBuildInfo(page);
+  await expect.poll(answers).toEqual({
+    a: { ok: { version: "0.0.0", commit: "mock" } },
+    b: { err: "ipc down (fake)" },
+    c: { ok: { version: "9.8.7", commit: "def5678" } },
+    d: { ok: { version: "9.8.7", commit: "def5678" } },
+  });
+  expect(await invokeInPage(page, "get_build_info")).toEqual({ ok: { version: "9.8.7", commit: "def5678" } });
+  // Nothing held any more: a single release names the missing call.
+  await expect(releaseBuildInfo(page, "oldest")).rejects.toThrow("no get_build_info is held");
 });

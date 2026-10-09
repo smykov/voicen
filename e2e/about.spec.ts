@@ -11,6 +11,9 @@
 // - get_build_info is called once per opening, never before the first one; while a
 //   rejection is the answer the dialog shows `role="alert"` with exactly
 //   `about.build_info_error` ("Cannot read build info"): no version text, no rejection text;
+// - while the opening's get_build_info is pending the dialog shows no version line and no
+//   alert (never a value from an earlier opening), and an earlier opening's answer that
+//   arrives after a reopen is dropped;
 // - Esc and Close close it and return focus to the opener;
 // - the discard prompt wins: a close request with a dirty draft closes About first.
 import { readFileSync } from "node:fs";
@@ -20,8 +23,10 @@ import {
   calls,
   emit,
   firstRunView,
+  holdBuildInfo,
   installTauriMock,
   listeners,
+  releaseBuildInfo,
   requestClose,
   setBuildInfo,
   type MockOptions,
@@ -341,5 +346,96 @@ test("About open, a settings://focus request moves to another tab, back on Gener
   await dialog.getByRole("button", { name: "Close", exact: true }).click();
   await expect(dialog).toBeHidden();
   await expect(aboutButton(page)).toBeFocused();
+  expect(errors).toEqual([]);
+});
+
+// (8) validation 1 M2 ----------------------------------------------------------------
+// Each opening clears the previous result; while its own get_build_info is pending the
+// dialog shows nothing (settings-ui.md § A), and an answer to an earlier opening is
+// dropped (`current === opening`).
+
+/** No build-info text at all: no version line of any value and no alert. */
+async function expectNoBuildInfo(dialog: Locator): Promise<void> {
+  await expect(dialog.getByText(/^Voicen \S+ \(\S+\)$/)).toHaveCount(0);
+  await expect(dialog.getByRole("alert")).toHaveCount(0);
+}
+
+test("reopen while get_build_info is pending: open (ok), close, the next answer is held, reopen -> no version line and no alert until the answer, then the new line", async ({ page }) => {
+  const errors = pageErrors(page);
+  await openGeneral(page, { buildInfo: OK });
+
+  await aboutButton(page).click();
+  const dialog = aboutDialog(page);
+  await expect(dialog.getByText(LINE, { exact: true })).toBeVisible();
+  await dialog.getByRole("button", { name: "Close", exact: true }).click();
+  await expect(dialog).toBeHidden();
+
+  await holdBuildInfo(page);
+  await setBuildInfo(page, { version: "0.4.0", commit: "0a1b2c3" });
+  await aboutButton(page).click();
+  await expect(dialog).toBeVisible();
+  // The reopen's call is made and still in flight.
+  await expect.poll(() => buildInfoCalls(page)).toBe(2);
+  await settle(page);
+  await expect(dialog).not.toContainText(LINE);
+  await expectNoBuildInfo(dialog);
+  // The rest of the dialog is there while pending.
+  await expect(dialog.getByText(LICENSE, { exact: true })).toBeVisible();
+
+  await releaseBuildInfo(page);
+  await expect(dialog.getByText("Voicen 0.4.0 (0a1b2c3)", { exact: true })).toBeVisible();
+  await expect(dialog).not.toContainText(LINE);
+  await expect(dialog.getByRole("alert")).toHaveCount(0);
+  expect(await buildInfoCalls(page)).toBe(2);
+  expect(errors).toEqual([]);
+});
+
+test("a late answer of an earlier opening is dropped: open (held), close, reopen (held), the reopen's answer arrives, then the first one -> only the reopen's line is shown", async ({ page }) => {
+  const errors = pageErrors(page);
+  await openGeneral(page, { buildInfo: OK });
+  await holdBuildInfo(page);
+
+  await aboutButton(page).click();
+  const dialog = aboutDialog(page);
+  await expect(dialog).toBeVisible();
+  await expect.poll(() => buildInfoCalls(page)).toBe(1);
+  await dialog.getByRole("button", { name: "Close", exact: true }).click();
+  await expect(dialog).toBeHidden();
+
+  await setBuildInfo(page, { version: "0.5.0", commit: "5e6f7a8" });
+  await aboutButton(page).click();
+  await expect(dialog).toBeVisible();
+  await expect.poll(() => buildInfoCalls(page)).toBe(2);
+  await settle(page);
+  await expectNoBuildInfo(dialog);
+
+  // The reopen's answer first, then the first opening's (OK) arrives late.
+  await releaseBuildInfo(page, "newest");
+  await expect(dialog.getByText("Voicen 0.5.0 (5e6f7a8)", { exact: true })).toBeVisible();
+  await releaseBuildInfo(page, "oldest");
+  // The release's handlers ran with the evaluate; two frames let the render land.
+  await settle(page);
+  await expect(dialog.getByText("Voicen 0.5.0 (5e6f7a8)", { exact: true })).toBeVisible();
+  await expect(dialog).not.toContainText(LINE);
+  await expect(dialog.getByRole("alert")).toHaveCount(0);
+
+  // A late rejection of an earlier opening is dropped too: hold, close, reopen with a
+  // new answer, then let a rejection meant for a closed opening arrive last.
+  await dialog.getByRole("button", { name: "Close", exact: true }).click();
+  await expect(dialog).toBeHidden();
+  await setBuildInfo(page, { reject: REJECTION });
+  await aboutButton(page).click();
+  await expect.poll(() => buildInfoCalls(page)).toBe(3);
+  await dialog.getByRole("button", { name: "Close", exact: true }).click();
+  await expect(dialog).toBeHidden();
+  await setBuildInfo(page, { version: "0.6.0", commit: "6b7c8d9" });
+  await aboutButton(page).click();
+  await expect.poll(() => buildInfoCalls(page)).toBe(4);
+  await releaseBuildInfo(page, "newest");
+  await expect(dialog.getByText("Voicen 0.6.0 (6b7c8d9)", { exact: true })).toBeVisible();
+  await releaseBuildInfo(page, "oldest");
+  await settle(page);
+  await expect(dialog.getByRole("alert")).toHaveCount(0);
+  await expect(dialog.getByText("Voicen 0.6.0 (6b7c8d9)", { exact: true })).toBeVisible();
   expect(errors).toEqual([]);
 });

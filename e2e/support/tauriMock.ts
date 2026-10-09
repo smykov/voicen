@@ -22,6 +22,11 @@
 //   reject with that text; absent -> "unexpected command" like any unmocked command).
 //   `setBuildInfo(page, value | { reject })` replaces that answer mid-test, for every
 //   later call (the About dialog reads it on each opening; T-023).
+//   After `holdBuildInfo(page)`, each `get_build_info` is recorded at once and stays in
+//   flight with the answer taken at its call; `releaseBuildInfo(page)` answers every held
+//   call in call order and stops holding, `releaseBuildInfo(page, "newest" | "oldest")`
+//   answers only that one and keeps holding (so a test can let an earlier opening's
+//   answer arrive after a later one; T-023 validation 1 M2).
 // - `plugin:window|destroy { label }` is recorded and returns null: the settings window's
 //   capability grants destroy (src-tauri/capabilities/default.json), and tauri's
 //   onCloseRequested calls it on every close it does not prevent (T-039).
@@ -463,6 +468,8 @@ export async function installTauriMock(page: Page, options: MockOptions = {}): P
       holdingMics: init.holdMicrophones,
       heldMics: [] as (() => void)[],
       buildInfo: clone(init.buildInfo),
+      holdingBuild: false,
+      heldBuild: [] as (() => void)[],
     };
 
     function setModelState(id: string, modelState: unknown): void {
@@ -606,10 +613,14 @@ export async function installTauriMock(page: Page, options: MockOptions = {}): P
         case "plugin:window|destroy":
           if (init.destroy !== null) throw new Error(init.destroy.reject);
           return null;
-        case "get_build_info":
-          if (state.buildInfo === null) break;
-          if ("reject" in state.buildInfo) throw new Error(state.buildInfo.reject);
-          return clone(state.buildInfo);
+        case "get_build_info": {
+          // The answer is the one set when the call was made; a hold only delays it.
+          const reply = clone(state.buildInfo);
+          if (state.holdingBuild) await new Promise<void>((resolve) => state.heldBuild.push(resolve));
+          if (reply === null) break;
+          if ("reject" in reply) throw new Error(reply.reject);
+          return reply;
+        }
       }
       throw new Error(`unexpected command ${cmd}`);
     }
@@ -660,6 +671,19 @@ export async function installTauriMock(page: Page, options: MockOptions = {}): P
       queueDownloadRejection: (payload: unknown) => state.downloadRejections.push(clone(payload)),
       setBuildInfo: (value: BuildInfo | { reject: string }) => {
         state.buildInfo = clone(value);
+      },
+      holdBuildInfo: () => {
+        state.holdingBuild = true;
+      },
+      releaseBuildInfo: (which: "all" | "newest" | "oldest") => {
+        if (which === "all") {
+          state.holdingBuild = false;
+          for (const resolve of state.heldBuild.splice(0)) resolve();
+          return;
+        }
+        const resolve = which === "newest" ? state.heldBuild.pop() : state.heldBuild.shift();
+        if (!resolve) throw new Error("no get_build_info is held");
+        resolve();
       },
       queueDelete: (script: { outcome: unknown; view: unknown } | { reject: unknown }) =>
         state.deleteScripts.push(clone(script)),
@@ -717,6 +741,8 @@ interface MockHandle {
   releaseOverlayReady: () => void;
   releaseMicrophones: () => void;
   setBuildInfo: (value: BuildInfo | { reject: string }) => void;
+  holdBuildInfo: () => void;
+  releaseBuildInfo: (which: "all" | "newest" | "oldest") => void;
   progress: (id: string, received: number) => void;
   modelState: (id: string, state: ModelState) => void;
 }
@@ -808,6 +834,23 @@ export async function setBuildInfo(page: Page, value: BuildInfo | { reject: stri
   await page.evaluate(
     (next) => (window as unknown as MockWindow).__VOICEN_MOCK__.setBuildInfo(next),
     value,
+  );
+}
+
+/** From now on each `get_build_info` stays in flight until `releaseBuildInfo` (recorded at once, answer taken at the call). */
+export async function holdBuildInfo(page: Page): Promise<void> {
+  await page.evaluate(() => (window as unknown as MockWindow).__VOICEN_MOCK__.holdBuildInfo());
+}
+
+/**
+ * Answers held `get_build_info` calls with the answer taken at each call. Without
+ * `which`: every held call, in call order, and stops holding. With `"newest"` or
+ * `"oldest"`: only that held call, and keeps holding (throws when none is held).
+ */
+export async function releaseBuildInfo(page: Page, which?: "newest" | "oldest"): Promise<void> {
+  await page.evaluate(
+    (w) => (window as unknown as MockWindow).__VOICEN_MOCK__.releaseBuildInfo(w),
+    which ?? "all",
   );
 }
 
