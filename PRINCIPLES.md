@@ -1,6 +1,6 @@
 # PRINCIPLES.md
 
-**Version:** 1.1.1 — bumped in a separate commit on every amendment, recorded in `docs/decisions.md` (major: removed or reversed · minor: added or moved up a tier · patch: wording). Amendments are owner decisions; see `docs/process/principles.md` §2a.
+**Version:** 1.2.0 — bumped in a separate commit on every amendment, recorded in `docs/decisions.md` (major: removed or reversed · minor: added or moved up a tier · patch: wording). Amendments are owner decisions; see `docs/process/principles.md` §2a.
 
 Engineering principles for this project. Each is enforced at a tier:
 **T0** written guidance · **T1** reviewer checklist · **T2** hook warns · **T3** hook/CI blocks.
@@ -91,6 +91,21 @@ Each **Why** names, in one generic sentence, the kind of incident that produced 
 - **Tier:** T1 + T2. The rule itself is T1 only: the code-reviewer applies it, and nothing warns or blocks when a task lacks the `CI:` line. The T2 part is the wiring: the flow pushes `wip/<ID>` for areas with `ci_workflow`, and `make check-ci-wip` keeps `ci.yml` triggering on `wip/**` (it fails the gate, so for the wiring it blocks). T3 for the rule (the review gate requiring the run id) is pending kit feedback.
 - **How checked:** every task whose diff touches anything outside `docs/**` cites under `## Tests` a line `CI: <run url or id> @ <sha>`: a green run of the full CI workflow (Gate and Windows jobs) on `wip/<ID>`, before `NEEDS_REVIEW → CODE_COMPLETE`. The cited `<sha>` is the head commit of the reviewed diff, or a commit after which only `docs/**` changed up to that head (the `CI:` line and the status commits come after the run). A green re-run (attempt n) at the same sha counts only if every red attempt's failure is outside the task's diff and is logged as its own task or F-entry, cited next to the `CI:` line. A red `wip` run returns the task before review. The code-reviewer refuses `APPROVE` without that line (T1); "proven by the next push to `main`" is never evidence. The orchestrator's `git push origin HEAD:wip/<ID>` is CI only, not a delivery (pre-push skips it; the branch is deleted at `CODE_COMPLETE`). Not covered: a step gated on `main` (`if: github.ref == 'refs/heads/main'`, rust-cache `save-if`) never runs on `wip/<ID>`, so its first execution is the next push to `main`; such steps are kept to cache saves and the installer's Telegram send (decisions #95), each consuming only outputs of steps that did run on the wip run and unable to turn `main` red (`docs/decisions/ci-toolchain.md` › "Every CI-only premise runs on a `wip/<ID>` run before review").
 
+### P-017 — A red test hands back its bite
+- **Why:** tests that passed review as red later turned out not to pin the guarantee: toothless-test was the second finding category here (26 findings, 14 tasks returned, one re-opened after DEPLOYED), each caught by the reviewer or the validator's mutations instead of at test time. Origin: process review 2026-10-09 (decisions #114).
+- **Tier:** T1
+- **How checked:** a test-writer's handback lists, for each new test, a one-line mutation of the seam (applied on a throwaway copy, never the worktree) and the test run that turned red under it. The orchestrator does not start the developer without the list; the code-reviewer checks that each guarantee in Acceptance has a listed mutation.
+
+### P-018 — A writer pass before review when code named by docs changes
+- **Why:** docs-drift was the largest finding category here (62 findings, 20 tasks returned): the writer step ran only when the author judged a contract touched, so the reviewer found the drift. Origin: process review 2026-10-09 (decisions #115).
+- **Tier:** T1
+- **How checked:** before `NEEDS_REVIEW`, a task whose diff touches a file or symbol named in `docs/architecture.md`, `contracts/`, `specs/*/contracts/` or `docs/decisions/<area>.md` gets a technical-writer pass in the same task. Docs cite files, symbols and sections, never line numbers. The code-reviewer refuses `APPROVE` on a named-but-stale doc.
+
+### P-019 — A task record stays under 40 KB
+- **Why:** task files grew to 133 KB (T-006), 81 KB and 73 KB with investigation and validation history, re-read by every role though the analysis block is 4–7 KB. Origin: process review 2026-10-09 (decisions #116).
+- **Tier:** T0
+- **How checked:** when `docs/tasks/<ID>.md` passes 40 KB, the Investigation and Validation histories move to `docs/tasks/<ID>.history.md`; the task keeps a summary of the current state and a link. The move is a docs-only commit.
+
 ---
 
 ## Registry
@@ -113,3 +128,6 @@ Each **Why** names, in one generic sentence, the kind of incident that produced 
 | P-014 | Docs follow code; CLAUDE.md is a map | T1+T2 | Accepted |
 | P-015 | Recurrence resolved at its level (code / architecture / process) | T1 | Accepted |
 | P-016 | CI-only premise run on CI before review | T1+T2 | Accepted |
+| P-017 | A red test hands back its bite | T1 | Accepted |
+| P-018 | Writer pass before review when code named by docs changes | T1 | Accepted |
+| P-019 | Task record under 40 KB | T0 | Accepted |
