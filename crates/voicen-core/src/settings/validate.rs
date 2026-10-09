@@ -2,9 +2,10 @@
 //!
 //! Pure: no I/O, no side effects. Of the per-engine fields, only the selected
 //! engine's are validated (Clarification Q2); `speech_language`, the hotkey, the
-//! history size and the timeouts (decision #99) are checked for every engine.
-//! Post-processing rules (003's `validate`) are added by T-020/T-021; `hotkey.unavailable`, `autostart.failed` and `key.store_failed`
-//! come from the save steps (T-010, T-014, T-032), not from here.
+//! history size, the timeouts (decision #99) and post-processing (003's
+//! [`crate::post_process::settings::validate`], T-021) are checked for every
+//! engine. `hotkey.unavailable`, `autostart.failed` and `key.store_failed` come
+//! from the save steps (T-010, T-014, T-032), not from here.
 
 use super::hotkey::{parse_hotkey, HotkeyError};
 use super::url::{check_base_url, UrlError};
@@ -104,6 +105,10 @@ pub fn validate(
         }
     }
 
+    // Post-processing, whatever engine is selected (003 FR-011); refuses nothing
+    // while it is off.
+    errors.extend(crate::post_process::settings::validate(&s.post_processing));
+
     errors
 }
 
@@ -117,7 +122,9 @@ fn timeout_field(role: TimeoutRole) -> FieldId {
     }
 }
 
-fn base_url_rule(raw: &str) -> Result<(), ErrorCode> {
+/// The one base-URL rule (engine and post-processing URLs): `check_base_url`'s
+/// outcome as a field error code.
+pub(crate) fn base_url_rule(raw: &str) -> Result<(), ErrorCode> {
     match check_base_url(raw) {
         Ok(_) => Ok(()),
         Err(UrlError::Empty) => Err(ErrorCode::Required),

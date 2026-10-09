@@ -1,8 +1,8 @@
 # Post-processing
 
-**Code:** `crates/voicen-core/src/post_process/{mod,chat}.rs`, `crates/voicen-core/src/engine/http.rs`, `src-tauri/src/dictation.rs` `start_dictation`, `Pipeline::process` / `Pipeline::release`, `RecordingController::job_finished` · **Tests that pin it:** `tests/post_process_chat.rs`, `tests/post_process_timeout.rs`, `post_process::tests`, `pipeline::tests::post_processor_*` / `skipped_post_processing_*`, `recording::tests::delivered_skipped_*`, `i18n::tests::post_processing_skip_ids_*`, `src-tauri/tests/dictation_e2e.rs` `post_processing_*` (Windows CI)
+**Code:** `crates/voicen-core/src/post_process/{mod,chat,settings}.rs`, `crates/voicen-core/src/engine/http.rs`, `src-tauri/src/dictation.rs` `start_dictation`, `Pipeline::process` / `Pipeline::release`, `RecordingController::job_finished` · **Tests that pin it:** `tests/post_process_chat.rs`, `tests/post_process_timeout.rs`, `post_process::tests`, `pipeline::tests::post_processor_*` / `skipped_post_processing_*`, `recording::tests::delivered_skipped_*`, `i18n::tests::post_processing_skip_ids_*`, `post_process::settings::tests::validate_*`, `settings::validate::tests::post_processing_on_is_validated_for_every_engine`, `settings::service::tests::save_refuses_an_unusable_post_processing_url_while_enabled`, `src-tauri/tests/dictation_e2e.rs` `post_processing_*` (Windows CI)
 
-Spec: `specs/003-llm-post-processing/` (contracts/core-post-process.md, data-model.md). Decisions: #42 (synchronous engines), #91 (scope, `not_configured`, one overlay message), #99 (timeouts are settings). Task: T-020; shell wiring T-074 (done: follow-up 1 of #91), toast T-075, log fields T-076.
+Spec: `specs/003-llm-post-processing/` (contracts/core-post-process.md, data-model.md). Decisions: #42 (synchronous engines), #91 (scope, `not_configured`, one overlay message), #99 (timeouts are settings). Tasks: T-020; save rule and settings tab T-021; shell wiring T-074 (done: follow-up 1 of #91), toast T-075, log fields T-076.
 
 ## Invariants
 
@@ -39,6 +39,13 @@ Spec: `specs/003-llm-post-processing/` (contracts/core-post-process.md, data-mod
 - **Why:** spec 003 FR-002 / NFR-05 (no Credential Manager access when off); #91(2) (a broken config is shown, not silent).
 - **Where it is enforced:** `ChatPostProcessor::process` order: `enabled` → `check_base_url` → key read → request. `PassThrough` reads nothing.
 - **Don't:** read the key in the pipeline or before the URL check.
+
+### One save rule for post-processing, the engines' URL rule
+
+- **Why:** spec 003 FR-011, 004 FR-004; T-021 (option A).
+- **What it says:** while `enabled` is true, a save is refused exactly when the base URL fails the engines' URL rule (`required` / `url.malformed` / `url.credentials`), the model is empty after trim, or the prompt is empty after trim, all errors at once in that order. While off, nothing is refused (the fields are kept as entered). A key is never required.
+- **Where it is enforced:** `post_process::settings::validate`, called once from `settings::validate::validate` outside the engine match (so for every engine); the URL mapping is `settings::validate::base_url_rule` (`pub(crate)`), shared with the engine URLs.
+- **Don't:** copy the URL rule, put the call inside one engine's arm, add a required or URL check in the UI or the e2e mock (the Playwright failure branch scripts core's own outcome, fixture `refused_post_processing_on_empty`), or require a key. `ChatPostProcessor` still checks the URL at run time for a hand-edited file (`NotConfigured`).
 
 ### A key read error is no key
 

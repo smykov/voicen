@@ -217,6 +217,8 @@ pub enum FieldId {
     RecordingHotkey,
     RecordingMode,
     OutputAutoPaste,
+    /// The post-processing toggle (a control's `data-field`; never refused).
+    PostProcessingEnabled,
     PostProcessingBaseUrl,
     PostProcessingModel,
     PostProcessingPrompt,
@@ -250,6 +252,7 @@ impl FieldId {
             FieldId::RecordingHotkey => "recording.hotkey",
             FieldId::RecordingMode => "recording.mode",
             FieldId::OutputAutoPaste => "output.auto_paste",
+            FieldId::PostProcessingEnabled => "post_processing.enabled",
             FieldId::PostProcessingBaseUrl => "post_processing.base_url",
             FieldId::PostProcessingModel => "post_processing.model",
             FieldId::PostProcessingPrompt => "post_processing.prompt",
@@ -276,7 +279,7 @@ impl FieldId {
 /// part of the type); `field_ids_match_data_model` checks that no entry is listed twice.
 #[cfg(test)]
 impl FieldId {
-    pub(crate) const ALL: [FieldId; 26] = [
+    pub(crate) const ALL: [FieldId; 27] = [
         FieldId::EngineKind,
         FieldId::EngineApiBaseUrl,
         FieldId::EngineApiModel,
@@ -290,6 +293,7 @@ impl FieldId {
         FieldId::RecordingHotkey,
         FieldId::RecordingMode,
         FieldId::OutputAutoPaste,
+        FieldId::PostProcessingEnabled,
         FieldId::PostProcessingBaseUrl,
         FieldId::PostProcessingModel,
         FieldId::PostProcessingPrompt,

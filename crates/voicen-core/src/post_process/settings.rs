@@ -1,9 +1,12 @@
 //! Post-processing settings, persisted under `post_processing` in `settings.json`
-//! (specs/003 data-model.md; created by 004 T068, decisions #21). Validation
-//! (`validate`) is added by T-020/T-021; fields are not validated while `enabled`
-//! is false.
+//! (specs/003 data-model.md; created by 004 T068, decisions #21). [`validate`] is
+//! the one post-processing save rule (T-021); fields are not validated while
+//! `enabled` is false.
 
 use serde::{Deserialize, Serialize};
+
+use crate::settings::validate::base_url_rule;
+use crate::settings::{ErrorCode, FieldError, FieldId};
 
 /// The built-in starter prompt (specs/003 data-model.md › STARTER_PROMPT; 003 FR-011).
 pub const STARTER_PROMPT: &str = "Correct punctuation, capitalization and obvious \
@@ -30,6 +33,36 @@ pub fn defaults() -> PostProcessingSettings {
         model: String::new(),
         prompt: STARTER_PROMPT.to_string(),
     }
+}
+
+/// Every post-processing field error, all at once, in the order base URL, model,
+/// prompt (empty = valid). While `enabled` is false nothing is refused (004 FR-004:
+/// kept as entered). The base URL goes through the engines' URL rule; the model
+/// and the prompt are required after `trim()`; a key is never required (003 FR-011).
+pub fn validate(s: &PostProcessingSettings) -> Vec<FieldError> {
+    let mut errors = Vec::new();
+    if !s.enabled {
+        return errors;
+    }
+    if let Err(code) = base_url_rule(&s.base_url) {
+        errors.push(FieldError {
+            field: FieldId::PostProcessingBaseUrl,
+            code,
+        });
+    }
+    if s.model.trim().is_empty() {
+        errors.push(FieldError {
+            field: FieldId::PostProcessingModel,
+            code: ErrorCode::Required,
+        });
+    }
+    if s.prompt.trim().is_empty() {
+        errors.push(FieldError {
+            field: FieldId::PostProcessingPrompt,
+            code: ErrorCode::Required,
+        });
+    }
+    errors
 }
 
 #[cfg(test)]

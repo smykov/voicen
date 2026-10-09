@@ -6,21 +6,21 @@ This feature adds no new IPC command. It adds fields and message keys to the com
 
 ## Settings commands (owned by 004): `post_processing` fragment
 
-In the settings DTO returned by 004's `get_settings` and accepted by its `save_settings`:
+In `Settings` (004's `SettingsView.settings` from `settings_get`, and `SaveRequest.settings` of `settings_save`):
 
 ```json
 "post_processing": {
   "enabled": false,
   "base_url": "",
   "model": "",
-  "prompt": "Correct punctuation, capitalization and …",
-  "has_key": false
+  "prompt": "Correct punctuation, capitalization and …"
 }
 ```
 
-- `has_key` is read-only, from the credential store. The key itself is never in the DTO sent to the UI (004 FR-014).
-- A new key is sent in `save_settings` through 004's key-slot input, slot `"post_processing"`. An absent value means unchanged, and an empty string means delete.
-- Validation errors come back in 004's error shape with the field ids `post_processing.base_url`, `post_processing.model` and `post_processing.prompt` (FR-011).
+- Whether a key is stored is `SettingsView.keys.post_processing` (read-only, from the credential store). The key itself is never in a DTO sent to the UI (004 FR-014).
+- A key is sent in `settings_save` through 004's `KeyEdits`, slot `post_processing`: `"Untouched"` keeps it, `"Clear"` deletes it, `{ "Replace": "<key>" }` stores a new one.
+- Validation (`post_process::settings::validate`, called by 004's settings validation for every engine) runs only while `enabled` is true. Errors come back in 004's `Refused` shape, all at once, in the order `post_processing.base_url` (`required` | `url.malformed` | `url.credentials`, the same rule as the engine URLs), `post_processing.model` (`required`, after trim), `post_processing.prompt` (`required`, after trim) (FR-011). A key is never required. While `enabled` is false no post-processing field is refused.
+- The toggle's field id is `post_processing.enabled` (a control `data-field` and label; never the target of an error).
 
 ## Notice event (owned by 001): skipped payload
 
