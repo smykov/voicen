@@ -890,6 +890,13 @@ mod tests {
         use crate::settings::FieldId;
         let c = catalog(EN_JSON, RU_JSON);
         let mut missing = Vec::new();
+        // T-021: the post-processing toggle is a FieldId (the not-restored list
+        // names it by its label). Bite: the variant left out of FieldId::ALL, so the
+        // loop below never asks for `settings.field_label.post_processing.enabled`.
+        assert!(
+            FieldId::ALL.contains(&FieldId::PostProcessingEnabled),
+            "PostProcessingEnabled not in FieldId::ALL"
+        );
         for field in FieldId::ALL {
             let id = format!("settings.field_label.{}", field.as_str());
             for lang in LANGS {

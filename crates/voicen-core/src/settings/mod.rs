@@ -806,6 +806,9 @@ mod tests {
             FieldId::RecordingHotkey => "recording.hotkey",
             FieldId::RecordingMode => "recording.mode",
             FieldId::OutputAutoPaste => "output.auto_paste",
+            // T-021: the post-processing toggle (a control's data-field, like
+            // history.enabled).
+            FieldId::PostProcessingEnabled => "post_processing.enabled",
             FieldId::PostProcessingBaseUrl => "post_processing.base_url",
             FieldId::PostProcessingModel => "post_processing.model",
             FieldId::PostProcessingPrompt => "post_processing.prompt",
@@ -840,6 +843,17 @@ mod tests {
             assert_eq!(id.as_str(), expected_field_id(id), "{id:?}");
             assert!(is_wire_name(id.as_str()), "{id:?}: {:?}", id.as_str());
         }
+        // T-021: the toggle's FieldId is in the one list, so the catalog check
+        // (i18n every_field_id_has_label_text) and the wire check above cover it.
+        // Bite: PostProcessingEnabled left out of FieldId::ALL.
+        assert!(
+            FieldId::ALL.contains(&FieldId::PostProcessingEnabled),
+            "PostProcessingEnabled not in FieldId::ALL"
+        );
+        assert_eq!(
+            FieldId::PostProcessingEnabled.as_str(),
+            "post_processing.enabled"
+        );
         // Each variant listed once, and no two share a string.
         let ids: std::collections::HashSet<_> = FieldId::ALL.into_iter().collect();
         assert_eq!(ids.len(), FieldId::ALL.len(), "a FieldId listed twice");

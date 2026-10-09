@@ -1618,24 +1618,44 @@ mod tests {
     }
 
     #[test]
-    fn save_gives_no_warning_for_an_unchecked_post_processing_url() {
-        // Investigation 4: core does not validate post_processing.base_url yet
-        // (T-020/T-021), so a malformed or empty one is saved; it gets no warning
-        // (only a URL that passes check_base_url is classified) and the save must
-        // not panic. Bite: `check_base_url(..).unwrap()`/`expect` before
-        // is_insecure_remote, or a text test like `starts_with("http://")` warning
-        // on `http//…`.
-        for url in [
-            "",
-            "http//llm.example.com",
-            "llm.example.com/v1",
-            "ftp://llm.example.com",
+    fn save_refuses_an_unusable_post_processing_url_while_enabled() {
+        // T-021 (replaces save_gives_no_warning_for_an_unchecked_post_processing_url,
+        // which pinned the gap: these URLs were Saved while post-processing was on).
+        // With post-processing on, an empty or malformed post_processing.base_url is
+        // Refused with that field's code from the engine URL rule; nothing is written,
+        // the snapshot is kept, there is no warning (a refusal carries none) and the
+        // save does not panic (no check_base_url(..).unwrap() before the warning
+        // step). Bite: no post-processing rule in validate (Saved), the rule's error
+        // on another field or with another code, or a write before validation.
+        for (url, code) in [
+            ("", ErrorCode::Required),
+            ("http//llm.example.com", ErrorCode::UrlMalformed),
+            ("llm.example.com/v1", ErrorCode::UrlMalformed),
+            ("ftp://llm.example.com", ErrorCode::UrlMalformed),
         ] {
+            let world = World::new(
+                FakeSettingsFile::new(),
+                FakeCredentialStore::new().with_key(API, "sk-test-fake-api"),
+            );
+            let (service, _) = world.load();
+            let written_before = world.file.bytes();
+            let before = service.snapshot();
             let mut draft = sample(EngineKind::Api);
             draft.post_processing.enabled = true;
             draft.post_processing.base_url = url.into();
-            let (outcome, _, _) = save_with_api_key(draft);
-            expect_saved(outcome, &[]);
+            let (errors, form_error) =
+                expect_refused(service.save(req(draft, KeyEdits::default())));
+            assert_eq!(
+                errors,
+                vec![field_error(FieldId::PostProcessingBaseUrl, code)],
+                "base_url {url:?}"
+            );
+            assert_eq!(form_error, None, "base_url {url:?}");
+            assert_eq!(world.file.bytes(), written_before, "base_url {url:?}");
+            assert!(
+                Arc::ptr_eq(&before, &service.snapshot()),
+                "base_url {url:?}"
+            );
         }
     }
 
@@ -3517,6 +3537,48 @@ mod tests {
             saved,
             "e2e/fixtures/settings-wire.json saved_insecure_api differs from core; core says:\n{}",
             serde_json::to_string_pretty(&saved).expect("outcome serializes")
+        );
+    }
+
+    #[test]
+    fn e2e_settings_wire_fixture_refused_post_processing_matches_core() {
+        // T-021 / P-010: the Playwright failure branch of the Post-processing tab
+        // scripts core's real refusal, not a hand-written one.
+        // `refused_post_processing_on_empty` is the wire of a save, over a first run
+        // with no OS language and no keys, of defaults(None) (engine none) with
+        // post_processing enabled and base_url, model and prompt "" and no key edits:
+        // Refused with post_processing.base_url, .model and .prompt `required`, in
+        // that order, and no form error. Bite: no post-processing rule (Saved), a
+        // field or code renamed, a key required, or the order changed, without
+        // regenerating e2e/fixtures/settings-wire.json.
+        let fixture: serde_json::Value =
+            serde_json::from_str(E2E_WIRE_FIXTURE).expect("settings-wire.json is valid JSON");
+        let world = World::new(FakeSettingsFile::new(), FakeCredentialStore::new());
+        let (service, outcome) = SettingsService::load_or_init(world.deps(), None);
+        assert!(matches!(outcome, LoadOutcome::FirstRun(_)), "{outcome:?}");
+        let mut draft = defaults(None);
+        assert_eq!(draft.engine, EngineKind::None);
+        draft.post_processing.enabled = true;
+        draft.post_processing.base_url = String::new();
+        draft.post_processing.model = String::new();
+        draft.post_processing.prompt = String::new();
+        let outcome = service.save(req(draft, KeyEdits::default()));
+        let refused = wire(&outcome);
+        let (errors, form_error) = expect_refused(outcome);
+        assert_eq!(
+            errors,
+            vec![
+                field_error(FieldId::PostProcessingBaseUrl, ErrorCode::Required),
+                field_error(FieldId::PostProcessingModel, ErrorCode::Required),
+                field_error(FieldId::PostProcessingPrompt, ErrorCode::Required),
+            ]
+        );
+        assert_eq!(form_error, None);
+        assert_eq!(
+            fixture["refused_post_processing_on_empty"],
+            refused,
+            "e2e/fixtures/settings-wire.json refused_post_processing_on_empty differs from core; core says:\n{}",
+            serde_json::to_string_pretty(&refused).expect("outcome serializes")
         );
     }
 

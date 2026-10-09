@@ -487,6 +487,49 @@ mod tests {
     }
 
     #[test]
+    fn post_processing_on_is_validated_for_every_engine() {
+        // T-021 / 003 FR-011: post-processing is not a field of one engine, so with
+        // it on its rule runs whatever engine is selected (`none` included), with
+        // the engine URLs' codes; no key is required for it. Each engine is
+        // otherwise valid, so the three post-processing errors are the only ones.
+        // Bite: no call to post_process::settings::validate, the call inside one
+        // engine's arm, or a post_processing.key error.
+        for engine in EVERY_ENGINE {
+            let mut s = sample(engine);
+            s.post_processing.enabled = true;
+            s.post_processing.base_url = String::new();
+            s.post_processing.model = String::new();
+            s.post_processing.prompt = String::new();
+            assert_eq!(
+                run(&s, &no_keys(), api_key_stored(), &["base"]),
+                vec![
+                    FieldError {
+                        field: FieldId::PostProcessingBaseUrl,
+                        code: ErrorCode::Required
+                    },
+                    FieldError {
+                        field: FieldId::PostProcessingModel,
+                        code: ErrorCode::Required
+                    },
+                    FieldError {
+                        field: FieldId::PostProcessingPrompt,
+                        code: ErrorCode::Required
+                    },
+                ],
+                "{engine:?}"
+            );
+            s.post_processing.base_url = "https://user:pass@llm.example.com/v1".into();
+            s.post_processing.model = "llm-test".into();
+            s.post_processing.prompt = "Fix the text.".into();
+            assert_eq!(
+                pairs(&run(&s, &no_keys(), api_key_stored(), &["base"])),
+                vec![("post_processing.base_url", "url.credentials")],
+                "{engine:?}"
+            );
+        }
+    }
+
+    #[test]
     fn all_errors_returned_at_once() {
         // SC-003: every offending field highlighted in one refusal, no duplicates.
         let mut s = sample(EngineKind::Api);
