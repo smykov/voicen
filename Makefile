@@ -5,7 +5,7 @@
 	check-shell-windows \
 	check-ui core-image ui-image \
 	licenses licenses-check licenses-unit licenses-fixture licenses-rust licenses-bundle \
-	licenses-npm licenses-generate licenses-stale
+	licenses-npm licenses-generate licenses-stale licenses-stale-guard
 
 # check-shell-windows after check-core: the shell depends on voicen-core, so a core error is
 # reported first by the faster native check-core, before the slower cross-target build.
@@ -143,7 +143,7 @@ ui-image:
 # failure (decision #24 D3).
 LICENSES_DIR := target/licenses
 
-licenses-check: licenses-unit licenses-fixture licenses-rust licenses-npm licenses-stale
+licenses-check: licenses-unit licenses-fixture licenses-stale-guard licenses-rust licenses-npm licenses-stale
 
 # Unit tests of the npm/manual checker. The files are named: since Node 22 (the ui image has
 # Node 24) `node --test <dir>` runs the directory as a module instead of finding its tests.
@@ -153,6 +153,12 @@ licenses-unit:
 # Guard: cargo-about with the real about.toml must reject licenses/fixtures/gpl.
 licenses-fixture:
 	scripts/licenses/fixture-check.sh
+
+# T-063 guard: the real licenses-stale recipe, run without the generation on
+# licenses/fixtures/stale/<case>/ (LICENSES_DIR and NOTICES overridden), must pass equal notices
+# and fail stale and missing ones naming the file. Offline, no docker. Host bash, make, diff.
+licenses-stale-guard:
+	scripts/licenses/stale-check.sh
 
 # Rust crates of the workspace, Windows target, against about.toml; writes rust.txt.
 licenses-rust:

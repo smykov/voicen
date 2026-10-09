@@ -1,0 +1,8 @@
+THIRD-PARTY NOTICES (T-063 stale-guard fixture, not real notices)
+
+--------------------------------------------------------------------------------
+fixture-crate 1.0.0
+License: MIT
+Source: https://example.com/fixture-crate
+
+Fixture license text.
