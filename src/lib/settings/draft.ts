@@ -13,6 +13,7 @@
 // - U3: a typed key lives only in `keys` until the next Saved, which resets every
 //   slot to "Untouched"; a view carries presence only.
 import type {
+  ConnectionTestRequest,
   FieldError,
   FormError,
   KeyEdit,
@@ -125,6 +126,36 @@ export function resetKey(draft: Draft, slot: KeySlot): Draft {
 /** The `settings_save` request: the whole draft plus one KeyEdit per slot. */
 export function saveRequest(draft: Draft): SaveRequest {
   return { settings: copy(draft.settings), keys: copyKeys(draft.keys) };
+}
+
+/**
+ * The `settings_test_connection` request of the draft's selected engine, or null when
+ * that engine has no test (none, builtin_local). api: `settings.api` and the
+ * `transcription_api` KeyEdit; local_server: `settings.local_server` and the
+ * `local_server` KeyEdit; both with the draft's timeouts. Values are copies, as typed
+ * (no trim, no validation: core normalizes and checks); the draft is not changed.
+ */
+export function testRequest(draft: Draft): ConnectionTestRequest | null {
+  const { engine } = draft.settings;
+  if (engine !== "api" && engine !== "local_server") return null;
+  const slot: KeySlot = engine === "api" ? "transcription_api" : "local_server";
+  const target = engine === "api" ? draft.settings.api : draft.settings.local_server;
+  return {
+    engine,
+    base_url: target.base_url,
+    model: target.model,
+    key: copy(draft.keys[slot]),
+    timeouts: copy(draft.settings.timeouts),
+  };
+}
+
+/**
+ * The draft after an `invalid` connection-test result: its errors replace the
+ * highlights (`errorsByField`, the U2 path); settings, key edits, baseline and the form
+ * error are kept. The input draft is not changed.
+ */
+export function applyTestErrors(draft: Draft, errors: readonly FieldError[]): Draft {
+  return { ...draft, errors: errorsByField(errors) };
 }
 
 /**

@@ -24,16 +24,26 @@
   // listed at form level by its label (L). The polite "Saved" status adds a one-line
   // summary (`settings.saved_with_warnings`) when there is any. A warning never blocks or
   // changes a save.
+  //
+  // T-013: the connection test run (pending flag, generation, last outcome) belongs to
+  // this page, not to the Engine tab (unmounted on every tab switch), so one test at a
+  // time holds and a result survives a tab round trip. A run's result is applied only
+  // while its generation is current; every close the page does not prevent, a discard
+  // and the unmount advance it, so nothing of the run is shown after a close. A run never
+  // saves and never changes the baseline or the key edits; an `invalid` result highlights
+  // its fields through `applyTestErrors` (U2).
   import { onMount } from "svelte";
   import { page } from "$app/state";
   import { setLanguage, t, type MessageId } from "$lib/i18n";
   import {
     applyOutcome,
+    applyTestErrors,
     applyView,
     draftFromView,
     fieldLabelId,
     isDirty,
     saveRequest,
+    testRequest,
     warningsByField,
     type Draft,
   } from "$lib/settings/draft";
@@ -45,8 +55,10 @@
     onSettingsChanged,
     saveSettings,
     speechLanguages,
+    testConnection,
     type SettingsView,
   } from "$lib/settings/settingsApi";
+  import { TEST_IPC_FAILED, testOutcome, type TestOutcome } from "$lib/settings/connectionTest";
   import { provideModalHost } from "$lib/settings/modals";
   import Engine from "$lib/settings/tabs/Engine.svelte";
   import General from "$lib/settings/tabs/General.svelte";
@@ -90,6 +102,12 @@
   /** The discard prompt is shown (a close was requested with a dirty draft). */
   let confirmDiscard = $state(false);
   let keepButton = $state<HTMLButtonElement | undefined>();
+  /** A connection test is in flight (one per window, contracts/ipc.md). */
+  let testPending = $state(false);
+  /** The outcome of the current run, shown on the Engine tab; null while none. */
+  let testShown = $state<TestOutcome | null>(null);
+  /** The current run's generation; a result of an older one is dropped. */
+  let testGeneration = 0;
   /** The in-page modals (About, the delete confirmation), dismissed by a close request. */
   const modals = provideModalHost();
 
@@ -140,6 +158,9 @@
   /** The warnings whose field has no control on the page, listed at form level (L). */
   const unrenderedWarnings = $derived(Object.entries(warnings).filter(([field]) => !renderedFields.includes(field)));
 
+  /** The fields of an `invalid` test result with no control on the page (L). */
+  const unrenderedTestFields = $derived((testShown?.fields ?? []).filter((field) => !renderedFields.includes(field)));
+
   /** The not_restored fields of the form error with no control on the page (L). */
   const unrenderedNotRestored = $derived(
     (draft?.formError?.not_restored ?? []).filter((field) => !renderedFields.includes(field)),
@@ -162,9 +183,43 @@
         // The discard prompt wins: an open modal dialog would leave the prompt inert.
         modals.dismissAll();
         confirmDiscard = true;
+        return;
       }
     } catch {
       // Not prevented: the window closes, as for a clean draft.
+    }
+    dropTest();
+  }
+
+  /** The window closes: the current test run's result is never shown or applied. */
+  function dropTest() {
+    testGeneration += 1;
+    testShown = null;
+  }
+
+  /**
+   * Test connection with the draft's values at the click (`testRequest`). The button is
+   * disabled while a run is in flight, until the shell answers it (even a dropped one),
+   * so the window never has two. Saves nothing; `invalid` highlights its fields.
+   */
+  async function startTest() {
+    if (draft === null || testPending) return;
+    const request = testRequest(draft);
+    if (request === null) return;
+    testGeneration += 1;
+    const generation = testGeneration;
+    testPending = true;
+    testShown = null;
+    try {
+      const result = await testConnection(request);
+      if (generation !== testGeneration) return;
+      if (result.kind === "invalid" && draft !== null) draft = applyTestErrors(draft, result.errors);
+      testShown = testOutcome(result);
+    } catch {
+      // The rejection text is never shown (contracts/ipc.md "Errors"); the draft stays.
+      if (generation === testGeneration) testShown = TEST_IPC_FAILED;
+    } finally {
+      testPending = false;
     }
   }
 
@@ -174,6 +229,7 @@
 
   /** Discard: the window closes through destroy only (never close(), not granted). */
   async function discard() {
+    dropTest();
     try {
       await destroyWindow();
     } catch {
@@ -243,6 +299,7 @@
     );
     return () => {
       disposed = true;
+      dropTest();
       for (const stop of unlisteners) stop();
     };
   });
@@ -297,7 +354,15 @@
     <div class="panel" id="settings-panel" role="tabpanel" aria-labelledby={`tab-${tab}`} bind:this={panel}>
       <fieldset disabled={saving}>
         {#if tab === "engine"}
-          <Engine bind:draft {warnings} {languages} />
+          <Engine
+            bind:draft
+            {warnings}
+            {languages}
+            {testPending}
+            {testShown}
+            {unrenderedTestFields}
+            onTest={startTest}
+          />
         {:else if tab === "recording"}
           <Recording bind:draft {warnings} />
         {:else if tab === "output"}

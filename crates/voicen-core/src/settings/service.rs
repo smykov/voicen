@@ -3751,14 +3751,25 @@ mod tests {
             }
         }
         for (name, result) in &results {
-            assert_eq!(*name, fixture_name(result), "fixture entry {name} holds another kind");
+            assert_eq!(
+                *name,
+                fixture_name(result),
+                "fixture entry {name} holds another kind"
+            );
             let wire = serde_json::to_value(result).expect("ConnectionTestResult serializes");
-            assert_eq!(wire["kind"], *name, "the wire kind of {name} is its fixture name");
+            assert_eq!(
+                wire["kind"], *name,
+                "the wire kind of {name} is its fixture name"
+            );
         }
         let mut names: Vec<&str> = results.iter().map(|(name, _)| *name).collect();
         names.sort_unstable();
         names.dedup();
-        assert_eq!(names.len(), 8, "one fixture value per ConnectionTestResult kind: {names:?}");
+        assert_eq!(
+            names.len(),
+            8,
+            "one fixture value per ConnectionTestResult kind: {names:?}"
+        );
         let core: serde_json::Map<String, serde_json::Value> = results
             .iter()
             .map(|(name, r)| {

@@ -3,9 +3,15 @@
   // select and the model list of BuiltinLocal.svelte), and the speech language. The
   // language list is core's (settings_speech_languages); names come from
   // Intl.DisplayNames in the UI language.
+  //
+  // T-013: the Test connection button and its result for api and local_server. The run
+  // is the page's (+page.svelte `startTest`); this tab only renders it, so it survives
+  // the tab being unmounted.
   import { currentLanguage } from "$lib/i18n/language.svelte";
   import { t, type MessageId } from "$lib/i18n";
   import type { Draft } from "../draft";
+  import { fieldLabelId } from "../draft";
+  import type { TestOutcome } from "../connectionTest";
   import { controlId, describedBy, hintId } from "../fields";
   import FieldMessage from "../FieldMessage.svelte";
   import KeyField from "../KeyField.svelte";
@@ -15,7 +21,22 @@
     draft = $bindable(),
     warnings,
     languages,
-  }: { draft: Draft; warnings: Record<string, MessageId>; languages: readonly string[] } = $props();
+    testPending,
+    testShown,
+    unrenderedTestFields,
+    onTest,
+  }: {
+    draft: Draft;
+    warnings: Record<string, MessageId>;
+    languages: readonly string[];
+    /** A connection test is in flight (the page's run). */
+    testPending: boolean;
+    /** The current run's outcome, or null. */
+    testShown: TestOutcome | null;
+    /** The fields of an `invalid` result with no control on the page, listed by label (L). */
+    unrenderedTestFields: readonly string[];
+    onTest: () => void;
+  } = $props();
 
   const AUTO = "auto";
 
@@ -106,7 +127,34 @@
     <FieldMessage errors={draft.errors} {warnings} field="engine.local_server.model" />
   </div>
   <KeyField bind:draft {warnings} slot="local_server" field="engine.local_server.key" />
-{:else if draft.settings.engine === "builtin_local"}
+{/if}
+
+{#if draft.settings.engine === "api" || draft.settings.engine === "local_server"}
+  <div class="field test-connection">
+    <button
+      type="button"
+      data-testid="settings-test-connection"
+      disabled={testPending}
+      aria-busy={testPending ? "true" : undefined}
+      onclick={onTest}
+      >{testPending ? t("settings.test_connection.running") : t("settings.test_connection.button")}</button
+    >
+    <div data-testid="settings-test-result" role="status">
+      {#if testShown !== null}
+        <p>{t(testShown.message.id, testShown.message.args)}</p>
+        {#if unrenderedTestFields.length > 0}
+          <ul>
+            {#each unrenderedTestFields as field (field)}
+              <li>{t(fieldLabelId(field))}</li>
+            {/each}
+          </ul>
+        {/if}
+      {/if}
+    </div>
+  </div>
+{/if}
+
+{#if draft.settings.engine === "builtin_local"}
   <!-- The model select and the model list (spec 002, T-045): mounted only while the
        engine is builtin_local, so only then is local_models_list called. -->
   <BuiltinLocal bind:draft {warnings} />

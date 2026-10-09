@@ -2,7 +2,7 @@
 //
 // Wire types are the serde forms of voicen_core (contracts/ipc.md › Wire form). One IPC
 // module per contract (settings-ui.md › C): this module holds every invoke/listen/window
-// call of spec 004's contract; spec 002's local-model calls live in
+// call of spec 004's contract (settings_test_connection included, T-013); spec 002's local-model calls live in
 // src/lib/local-models/localModelsApi.ts and the build info in src/lib/buildInfo.ts.
 // The window never builds a SettingsView itself: every one it shows comes from here (U1).
 import { invoke } from "@tauri-apps/api/core";
@@ -95,6 +95,37 @@ export type SaveOutcome =
   | { Saved: { view: SettingsView; warnings: Warning[] } }
   | { Refused: { errors: FieldError[]; form_error: FormError | null } };
 
+/** The engine a connection test checks (`voicen_core::connection_test::TestEngine`). */
+export type TestEngine = "api" | "local_server";
+
+/**
+ * `voicen_core::connection_test::ConnectionTestRequest`: the form values of one test,
+ * unsaved ones included (UI -> shell). `key` is the selected engine's KeyEdit with the
+ * save's semantics; core normalizes and validates every value (no rule here).
+ */
+export interface ConnectionTestRequest {
+  engine: TestEngine;
+  base_url: string;
+  model: string;
+  key: KeyEdit;
+  timeouts: Settings["timeouts"];
+}
+
+/**
+ * `voicen_core::connection_test::ConnectionTestResult`, tagged by `kind`. It carries no
+ * message id: the window maps the kind to its text in one exhaustive switch
+ * (`connectionTest.ts::testMessage`). Never contains a key, a URL query or a body.
+ */
+export type ConnectionTestResult =
+  | { kind: "ok"; latency_ms: number }
+  | { kind: "cannot_reach"; host: string }
+  | { kind: "invalid_key" }
+  | { kind: "timeout" }
+  | { kind: "http"; status: number }
+  | { kind: "unexpected_response" }
+  | { kind: "invalid"; errors: FieldError[] }
+  | { kind: "key_store_unavailable" };
+
 /** `settings_get`: the saved settings, key presence and the load flags. */
 export function getSettings(): Promise<SettingsView> {
   return invoke<SettingsView>("settings_get");
@@ -103,6 +134,15 @@ export function getSettings(): Promise<SettingsView> {
 /** `settings_save { request }`: all-or-nothing; rejects only when the command cannot run. */
 export function saveSettings(request: SaveRequest): Promise<SaveOutcome> {
   return invoke<SaveOutcome>("settings_save", { request });
+}
+
+/**
+ * `settings_test_connection { request }`: one test with the form values; saves nothing.
+ * Rejects only when the command cannot run (the caller shows `error.ipc_unavailable`).
+ * At most one test is in flight per window (contracts/ipc.md); the caller guards it.
+ */
+export function testConnection(request: ConnectionTestRequest): Promise<ConnectionTestResult> {
+  return invoke<ConnectionTestResult>("settings_test_connection", { request });
 }
 
 /** `settings_speech_languages`: core's speech-language codes, the picker's only list. */
