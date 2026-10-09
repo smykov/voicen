@@ -760,12 +760,12 @@ fn release_context() -> Context<MockRuntime> {
 
 #[test]
 fn local_model_commands_pass_the_real_acl_from_the_settings_window() {
-    // Decision #57 / T-049: app commands are not ACL-checked from a local origin
-    // while the app defines no permissions; this pins that the four local-model
-    // commands (T-019: local_model_delete) are reachable from the window `settings_window::open` made, under
-    // the release context. Bite: an app ACL manifest (AppManifest::commands or
-    // src-tauri/permissions/) that does not allow them for `settings` ("not
-    // allowed"), a command not registered.
+    // T-049 (docs/decisions/ipc-acl.md): app commands are ACL-checked per window
+    // label; this pins that the four local-model commands (T-019: local_model_delete)
+    // are reachable from the window `settings_window::open` made, under the release
+    // context. Bite: a command missing from build.rs APP_COMMANDS or an allow-* grant
+    // for `settings` missing from capabilities/default.json ("not allowed"), a command
+    // not registered.
     let tmp = TempDir::new();
     let data = tmp.path().to_path_buf();
     let probe: Arc<dyn DiskSpace> = FakeDisk::with_available(u64::MAX);

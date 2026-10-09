@@ -1,13 +1,23 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capability for the settings window (label `settings`, created only by settings_window::open): listen to and stop listening to events (settings://changed, settings://focus, tauri://close-requested) and destroy itself on close. Least privilege, decision #45.",
+  "description": "Capability for the settings window (label `settings`, created only by settings_window::open): listen to and stop listening to events (settings://changed, settings://focus, tauri://close-requested), destroy itself on close, and invoke the app commands its page uses (get_build_info, settings_*, local_model*). Least privilege, decision #45; app commands are ACL-checked per label (T-049, docs/decisions/ipc-acl.md).",
   "windows": [
     "settings"
   ],
   "permissions": [
     "core:event:allow-listen",
     "core:event:allow-unlisten",
-    "core:window:allow-destroy"
+    "core:window:allow-destroy",
+    "allow-get-build-info",
+    "allow-settings-get",
+    "allow-settings-save",
+    "allow-settings-speech-languages",
+    "allow-settings-list-microphones",
+    "allow-settings-test-connection",
+    "allow-local-models-list",
+    "allow-local-model-download",
+    "allow-local-model-cancel-download",
+    "allow-local-model-delete"
   ]
 }

@@ -71,12 +71,12 @@ Tasks: T-016 (core half), T-044 (coordinator and shell half). Contract: `specs/0
 - **Where it is enforced:** `From<&DownloadError>` / `From<&DownloadFailure>` for `ReasonView` in core; the code and message tables are in `contracts/ipc.md`, not repeated here. An id string `ModelId::parse` rejects is `not_in_catalog`; `cancel` with an unknown id returns `false`. Test `local_models_service` covers every `DownloadError`. `From<&DeleteError>` maps the delete refusals (`model_in_use`, `not_downloaded`, `delete_failed`; `delete.*` ids); none shares a code with a download reason (`e2e_local_models_wire_fixture_matches_core`).
 - **Don't:** return a core error's text or a reqwest error to the window.
 
-### App commands are not ACL-checked from local origins (T-044, decision #57)
+### The local-model commands are invoked only from the `settings` window (T-049; supersedes T-044's "not ACL-checked")
 
-- **Defect that produced it:** none; a finding. tauri 2.12.1 checks app commands only when the app defines permissions (ours defines none, `build.rs` is plain `tauri_build::build()`), so `local_models_*` and `settings_*` pass for any local-origin window. Decision #45's `settings`-label limit covers plugin commands only.
-- **What breaks if you violate it:** nothing today; adding permissions files under `src-tauri/permissions/` switches the ACL on for every app command at once and breaks any command without an entry.
-- **Where it is enforced:** shell test that `local_models_list` resolves from the settings window under `generate_context!(test = true)`.
-- **Don't:** assume the `settings` label protects app commands. Gating them per label is T-049.
+- **Defect that produced it:** none; a finding of T-044 (decision #57): tauri 2.12.1 checked no app command while the app defined no permissions, so `local_models_*` passed for any local-origin window.
+- **What breaks if you violate it:** a local-model command missing from `build.rs` `APP_COMMANDS` or from `capabilities/default.json` is refused from the settings window on Windows only; a grant to another label lets that window download or delete models.
+- **Where it is enforced:** `docs/decisions/ipc-acl.md` (the rule for every app command); Windows CI `src-tauri/tests/app_acl.rs` and `local_models.rs::local_model_commands_pass_the_real_acl_from_the_settings_window`; Linux `make check-app-acl`.
+- **Don't:** add a local-model command without its `APP_COMMANDS` entry and its `allow-*` grant for `settings`.
 
 ## Rejected approaches
 
@@ -92,4 +92,4 @@ Tasks: T-016 (core half), T-044 (coordinator and shell half). Contract: `specs/0
 
 ## Open
 
-- T-049: ACL for app commands.
+- none (T-049, ACL for app commands, is done: `docs/decisions/ipc-acl.md`).
