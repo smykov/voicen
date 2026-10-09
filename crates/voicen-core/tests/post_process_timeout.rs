@@ -22,6 +22,7 @@ use std::net::TcpListener;
 use std::sync::Arc;
 use std::time::Duration;
 
+use common::held::{returns_while_held, Held};
 use common::timing::{ago, at_least, deadline, fastest, left, measure, within_spec, Took};
 
 use serde_json::json;
@@ -328,4 +329,82 @@ async fn configured_post_processing_timeout_delivers_the_raw_transcript() {
         "default limit"
     );
     assert_eq!(run.clipboard, vec![PROCESSED.to_string()]);
+}
+
+// ---- T-079: a lookup with no answer (decisions #106, #113) -------------------------
+
+/// A snapshot whose transcription goes to `transcription` (an IP literal, no
+/// lookup) and whose post-processing goes to the held name `pp_host`.
+fn snapshot_with_held_pp(transcription: &MockServer, pp_host: &str) -> Settings {
+    let mut s = snapshot(&format!("{}/v1", transcription.uri()));
+    s.post_processing.base_url = format!("http://{pp_host}/v1");
+    s
+}
+
+#[tokio::test]
+async fn unanswered_pp_lookup_delivers_the_raw_transcript_at_the_connect_deadline() {
+    // T-079 twin through the production pipeline (#106): the chat host's lookup
+    // never answers while the job runs; connect_s = 1 (the minimum), post-
+    // processing far longer. The job ends while the lookup is still held, with the
+    // raw transcript pasted byte for byte and the skip reason Unreachable{host}.
+    // Today the job returns only after the release (the client drop waits for the
+    // lookup). Bite: the lookup joined at drop; the processor's client built
+    // without the shared resolver (the seam never asked).
+    let server = transcribe_then_chat(Duration::ZERO).await;
+    let held = Held::install("pp-pipeline.t079.example.com", Vec::new());
+    let mut s = snapshot_with_held_pp(&server, &held.host);
+    s.timeouts.connect_s = 1;
+    s.timeouts.post_processing_s = 60;
+    let (run, _) = returns_while_held(&held, || dictate(s));
+    assert_eq!(
+        run.report,
+        JobReport {
+            end: JobEnd::DeliveredSkipped {
+                reason: SkipReason::Unreachable {
+                    host: held.host.clone()
+                },
+                delivery: DeliveryResult::Pasted,
+            },
+            pending: None,
+        }
+    );
+    assert!(
+        run.clipboard
+            .first()
+            .is_some_and(|t| t.as_bytes() == RAW.as_bytes())
+            && run.clipboard.len() == 1,
+        "raw transcript byte for byte: {:?}",
+        run.clipboard
+    );
+    at_least(run.took, Duration::from_secs(1));
+}
+
+#[tokio::test]
+async fn unanswered_pp_lookup_cut_by_the_post_processing_deadline_is_unreachable_not_timeout() {
+    // Decision #113 (T-079 open question 1, the owner's example): connect_s = 60,
+    // post_processing_s = 5, the chat host's lookup still unanswered when the 5 s
+    // whole-request deadline fires -> a DNS failure whichever timer ended the send
+    // -> Unreachable{host}, not Timeout; the raw transcript is delivered. Today:
+    // DeliveredSkipped(Timeout), returned only after the release. Bite: the
+    // lookup record read only for errors with the connect flag (Timeout).
+    let server = transcribe_then_chat(Duration::ZERO).await;
+    let held = Held::install("pp-total.t079.example.com", Vec::new());
+    let mut s = snapshot_with_held_pp(&server, &held.host);
+    s.timeouts.connect_s = 60;
+    s.timeouts.post_processing_s = 5;
+    let (run, _) = returns_while_held(&held, || dictate(s));
+    assert_eq!(
+        run.report,
+        JobReport {
+            end: JobEnd::DeliveredSkipped {
+                reason: SkipReason::Unreachable {
+                    host: held.host.clone()
+                },
+                delivery: DeliveryResult::Pasted,
+            },
+            pending: None,
+        }
+    );
+    assert_eq!(run.clipboard, vec![RAW.to_string()]);
+    at_least(run.took, Duration::from_secs(5));
 }

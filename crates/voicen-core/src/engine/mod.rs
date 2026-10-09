@@ -10,6 +10,7 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
 pub(crate) mod http;
+pub mod lookup;
 pub mod openai;
 
 use crate::audio::AudioBuffer;

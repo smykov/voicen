@@ -296,6 +296,16 @@ mod tests {
                 cannot_reach(),
             ),
             (
+                "lookup unanswered at the connect deadline (T-079, #106): dns (resolver record) + connect + timeout",
+                send(true, true, true, None),
+                FailureReason::NetworkUnavailable,
+            ),
+            (
+                "lookup unanswered at a whole-request deadline below connect (T-079, #113): dns (resolver record) + timeout",
+                send(true, false, true, None),
+                FailureReason::NetworkUnavailable,
+            ),
+            (
                 "connect, no io kind (TLS handshake)",
                 send(false, true, false, None),
                 cannot_reach(),

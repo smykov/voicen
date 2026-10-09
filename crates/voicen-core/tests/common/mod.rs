@@ -8,7 +8,9 @@
 //! - [`os_answer`] (T-080, I1): the only source of a target whose outcome is an OS
 //!   answer (refused, unresolvable), and of the never-answered blackhole
 //!   (`Unanswered`), together with its deadlines;
-//! - [`timing`] (T-080, I2): the only place a core test reads the wall clock.
+//! - [`timing`] (T-080, I2): the only place a core test reads the wall clock;
+//! - [`held`] (T-079): a lookup held without an answer until the test releases it,
+//!   and the ordering check "the call returned while the lookup was held".
 //!
 //! `scripts/ci/core-test-clocks.sh` (in `make check`) refuses an OS-answer literal or
 //! a clock reading in any test file outside this directory. These rules stay here,
@@ -21,6 +23,7 @@
 #![allow(dead_code)]
 
 pub mod download;
+pub mod held;
 pub mod os_answer;
 pub mod timing;
 

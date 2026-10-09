@@ -17,6 +17,7 @@ mod refused_addr_tests;
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
+use common::held::{returns_while_held, Held};
 use common::os_answer::{OsAnswer, Unanswered, OS_ANSWER_BUDGET};
 use common::timing::{ago, at_least, measure, now, Took};
 use serde_json::json;
@@ -1219,4 +1220,48 @@ async fn no_event_or_failure_carries_key_query_or_transcript() {
         .filter(|t| t.contains(KEY) || t.contains(QUERY_SECRET) || t.contains(TRANSCRIPT))
         .collect();
     assert!(leaks.is_empty(), "leaked:\n{leaks:#?}");
+}
+
+// ---- T-079: a lookup with no answer (decisions #106, #113) -------------------------
+
+#[test]
+fn unanswered_lookup_fails_the_job_network_unavailable_and_keeps_the_audio() {
+    // T-079 twin (dictation job, #106, FR-11): the API host's lookup never answers
+    // while the job runs; connect 300 ms, the API limit far longer. The job ends
+    // while the lookup is still held, as Failed(NetworkUnavailable), with the
+    // audio stored as pending for Retry and nothing copied or pasted. Today:
+    // CannotReach, and the job returns only after the release. Bite: no lookup
+    // record (CannotReach); the lookup joined at drop; the audio not kept.
+    let held = Held::install("api-held.t079.example.com", Vec::new());
+    let connect = Duration::from_millis(300);
+    let t = Timeouts {
+        connect,
+        api_transcription: OS_ANSWER_BUDGET,
+        ..Timeouts::default()
+    };
+    let mut h = harness_with(energy_gate(), Some(t), creds_with_key());
+    let rec = h.record(
+        fixtures::speech_3s(),
+        Arc::new(api_settings(&format!("http://{}/v1", held.host))),
+    );
+    let pipeline = &h.pipeline;
+    let (report, took) = returns_while_held(&held, move || pipeline.run_job(rec));
+    assert_eq!(
+        report.end,
+        JobEnd::Failed(FailureReason::NetworkUnavailable)
+    );
+    let Some(id) = report.pending else {
+        panic!("a network failure leaves a pending recording: {report:?}")
+    };
+    assert_eq!(
+        h.pipeline.pending(),
+        Some((id, FailureReason::NetworkUnavailable))
+    );
+    assert_eq!(
+        h.store.get_pending(id).expect("pending audio stored"),
+        fixtures::speech_3s()
+    );
+    assert_eq!(h.clipboard.texts(), Vec::<String>::new());
+    assert_eq!(h.paster.calls(), vec![]);
+    at_least(took, connect);
 }

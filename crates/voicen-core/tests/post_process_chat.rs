@@ -16,9 +16,11 @@ mod refused_addr_tests;
 
 use std::time::Duration;
 
-use common::os_answer::OsAnswer;
+use common::held::{returns_while_held, Held};
+use common::os_answer::{OsAnswer, OS_ANSWER_BUDGET};
 use common::timing::{at_least, measure};
 use serde_json::{json, Value};
+use voicen_core::i18n;
 use voicen_core::post_process::chat::ChatPostProcessor;
 use voicen_core::post_process::settings::PostProcessingSettings;
 use voicen_core::post_process::{PostProcessInput, PostProcessOutcome, PostProcessor, SkipReason};
@@ -651,4 +653,44 @@ async fn no_skip_carries_key_prompt_raw_text_query_or_body() {
         }
     }
     assert!(wrong.is_empty(), "\n{}", wrong.join("\n"));
+}
+
+// ---- T-079: a lookup with no answer (decisions #106, #113) -------------------------
+
+#[test]
+fn unanswered_lookup_skips_as_unreachable_at_the_connect_deadline_and_keeps_the_raw_text() {
+    // T-079 twin (post-processing, #106): the chat host's lookup never answers
+    // while the call runs; connect 300 ms, the whole request far longer. The stage
+    // ends while the lookup is still held, as Skipped(Unreachable{host}) (a DNS
+    // failure is "cannot reach" for post-processing, spec US2-2), the raw
+    // transcript is the delivered text and the skip notice is the unreachable one.
+    // Today the reason is the same but the call returns only after the release
+    // (the client drop waits for the lookup). Bite: the lookup joined at drop (no
+    // return while held); the processor's client built without the shared
+    // resolver (the seam never asked).
+    let held = Held::install("pp-held.t079.example.com", Vec::new());
+    let connect = Duration::from_millis(300);
+    let settings = pp_settings(&format!("http://{}/v1", held.host));
+    let creds = creds_with_key(KEY);
+    let t = Timeouts {
+        connect,
+        post_processing: OS_ANSWER_BUDGET,
+        ..Timeouts::default()
+    };
+    let (got, took) = returns_while_held(&held, || run(&settings, &creds, t, RAW));
+    assert_eq!(
+        got,
+        PostProcessOutcome::Skipped(SkipReason::Unreachable {
+            host: held.host.clone()
+        })
+    );
+    assert_eq!(got.final_text(RAW).as_bytes(), RAW.as_bytes());
+    let PostProcessOutcome::Skipped(reason) = &got else {
+        unreachable!()
+    };
+    assert_eq!(
+        reason.message_id(),
+        i18n::NOTICE_POST_PROCESSING_SKIPPED_UNREACHABLE
+    );
+    at_least(took, connect);
 }

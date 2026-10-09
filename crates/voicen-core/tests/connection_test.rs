@@ -31,7 +31,8 @@ use std::io;
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, UNIX_EPOCH};
 
-use common::os_answer::OsAnswer;
+use common::held::{returns_while_held, Held};
+use common::os_answer::{OsAnswer, OS_ANSWER_BUDGET};
 use common::timing::{at_least, measure};
 use serde_json::json;
 use voicen_core::autostart::FakeAutostart;
@@ -1233,4 +1234,40 @@ fn bad_request_is_one_fixed_text_without_input() {
     }
     messages.dedup();
     assert_eq!(messages.len(), 1, "one fixed text, got {messages:?}");
+}
+
+// ---- T-079: a lookup with no answer (decisions #106, #113) -------------------------
+
+#[test]
+fn unanswered_lookup_is_cannot_reach_host_while_the_lookup_is_held() {
+    // T-079 twin (Test connection, #51 unchanged by #106): the form host's lookup
+    // never answers while the test runs; connect 300 ms, the API limit far longer.
+    // The test ends while the lookup is still held, as CannotReach{host:port}
+    // (NetworkUnavailable converted by `from_failure`). Today the result is the
+    // same but returns only after the release (the client drop waits for the
+    // lookup). Bite: the lookup joined at drop; NetworkUnavailable passed through
+    // unconverted; the port dropped.
+    let held = Held::install("form-held.t079.example.com", Vec::new());
+    let w = world(stored_keys());
+    let t = Timeouts {
+        connect: Duration::from_millis(300),
+        api_transcription: OS_ANSWER_BUDGET,
+        local_server: OS_ANSWER_BUDGET,
+        ..Timeouts::default()
+    };
+    let req = api_req(
+        &format!("http://{}:8443/v1?k={QUERY_SECRET}", held.host),
+        replace(TYPED_KEY),
+    );
+    let service = w.service.clone();
+    let (got, took) =
+        returns_while_held(&held, move || service.test_connection_with_timeouts(req, t));
+    assert_eq!(
+        got,
+        ConnectionTestResult::CannotReach {
+            host: format!("{}:8443", held.host)
+        }
+    );
+    assert_clean(&got, &[]);
+    at_least(took, t.connect);
 }

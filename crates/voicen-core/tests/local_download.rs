@@ -20,6 +20,8 @@ use common::download::{
     assert_no_url_in, assert_retry_succeeds, assert_verified_file_only, events, fixture,
     fixture_with, fixture_with_timeouts, timeouts, Events, Fixture, Seen, END_WAIT, FILE, PART,
 };
+use common::held::Held;
+use common::os_answer::OS_ANSWER_BUDGET;
 use common::timing::{at_least, at_most_per_second, between, now, Took};
 use common::{dir_entries, entry, model_bytes, FakeDisk, Serve, Server, NEEDED, SIZE};
 use voicen_core::local_models::catalog::ModelId;
@@ -675,4 +677,51 @@ fn wrong_size_final_file_is_downloaded_again_and_replaced() {
         DownloadEvent::Finished { id: ModelId::Base }
     );
     assert_verified_file_only(&f, "replaced");
+}
+
+// ---- T-079: a lookup with no answer (decisions #106, #113) -------------------------
+
+#[test]
+fn unanswered_lookup_fails_source_unreachable_while_the_lookup_is_held() {
+    // T-079 twin (model download, #106): the catalog host's lookup never answers
+    // while the download runs; connect 300 ms, download_no_data far longer. The
+    // download ends (the end event emitted) while the lookup is still held, as
+    // Failed(SourceUnreachable{host:port}), with no `.part` and no model file in
+    // the dir at that moment. Today the reason is the same but the end event comes only after the release (the
+    // client drop waits for the lookup), so no end event within END_WAIT. Bite:
+    // the downloader's own client without the shared resolver (the seam never
+    // asked); the lookup joined at drop.
+    let held = Held::install("models.t079.example.com", Vec::new());
+    let host = format!("{}:8443", held.host);
+    let t = Timeouts {
+        connect: Duration::from_millis(300),
+        download_no_data: OS_ANSWER_BUDGET,
+        ..timeouts(OS_ANSWER_BUDGET)
+    };
+    let f = fixture_with_timeouts(
+        vec![entry(
+            ModelId::Base,
+            FILE,
+            &format!("http://{host}/models/{FILE}"),
+        )],
+        FakeDisk::with_available(10 * NEEDED),
+        t,
+    );
+    let mut ev = f.start(ModelId::Base).expect("start accepted");
+    let end = ev.wait_end();
+    held.assert_still_held("download end event");
+    assert_eq!(
+        end.event,
+        DownloadEvent::Failed {
+            id: ModelId::Base,
+            reason: DownloadFailure::SourceUnreachable { host: host.clone() },
+        }
+    );
+    assert!(
+        !end.dir.iter().any(|n| n == PART || n == FILE),
+        "no .part or model file at the end event: {:?}",
+        end.dir
+    );
+    assert_no_url_in(&ev.seen, "held lookup");
+    held.lookup.release();
 }

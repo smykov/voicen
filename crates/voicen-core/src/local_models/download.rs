@@ -415,6 +415,10 @@ impl Job {
         let client = Client::builder()
             .connect_timeout(self.timeouts.connect)
             .timeout(self.timeouts.download_no_data)
+            // T-079 red seam: the lookup seam with today's behaviour (see
+            // `engine::http::DeadlineResolver`); the developer moves this client
+            // into `engine::http`.
+            .dns_resolver(Arc::new(crate::engine::http::DeadlineResolver::system()))
             .build()
             .map_err(|_| transport(&TransportError::Setup))?;
         let sent = client.get(url).send();

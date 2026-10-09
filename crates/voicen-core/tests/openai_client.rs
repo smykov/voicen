@@ -12,14 +12,17 @@ mod common;
 #[path = "common/refused_addr_tests.rs"]
 mod refused_addr_tests;
 
-use std::io::{Read, Write};
-use std::net::{Shutdown, TcpListener, TcpStream};
+use std::io::{self, Read, Write};
+use std::net::{IpAddr, Shutdown, SocketAddr, TcpListener, TcpStream};
+use std::sync::Arc;
 use std::time::Duration;
 
-use common::os_answer::OsAnswer;
-use common::timing::{at_least, measure};
+use common::held::{returns_while_held, Held};
+use common::os_answer::{OsAnswer, Unanswered, OS_ANSWER_BUDGET};
+use common::timing::{at_least, measure, Took};
 use serde_json::json;
 use voicen_core::audio::{wav, AudioBuffer};
+use voicen_core::engine::lookup::{install, FixedLookup};
 use voicen_core::engine::openai::OpenAiCompatibleEngine;
 use voicen_core::engine::{engine_for, Engine, TranscribeRequest};
 use voicen_core::failure::FailureReason;
@@ -858,4 +861,190 @@ async fn engine_for_stored_key_with_control_char_is_invalid_api_key_and_sends_no
         .expect("request recording is on")
         .len();
     assert_eq!(sent, 0, "a request reached the server");
+}
+
+// ---- T-079: a lookup with no answer (decisions #106, #113) -------------------------
+//
+// The lookup is a `voicen_core::engine::lookup` fake installed for a test-only
+// name (`common::held`): no host resolver, no OS-answer literal, and the verdict is
+// the reason plus the ordering "returned while the lookup was held" (T-080 I1, I2).
+// The only clock reading is the lower bound `at_least`.
+
+/// The deadlines of a held-lookup case: `connect` and the whole-request limit.
+fn held_req(connect: Duration, total: Duration) -> TranscribeRequest {
+    TranscribeRequest {
+        language: None,
+        timeouts: Timeouts {
+            connect,
+            api_transcription: total,
+            ..Timeouts::default()
+        },
+    }
+}
+
+/// `transcribe` while `held` holds the lookup of the engine's host (see
+/// `common::held::returns_while_held`).
+fn transcribe_while_held(
+    held: &Held,
+    engine: Box<OpenAiCompatibleEngine>,
+    req: TranscribeRequest,
+) -> (Result<String, FailureReason>, Took) {
+    returns_while_held(held, move || engine.transcribe(&audio(), &req))
+}
+
+/// The address `OsAnswer::refused()` probed (never a literal outside common).
+fn refused_addr(case: &OsAnswer) -> SocketAddr {
+    case.host
+        .parse()
+        .unwrap_or_else(|e| panic!("OsAnswer::refused host {:?}: {e}", case.host))
+}
+
+#[test]
+fn unanswered_lookup_is_network_unavailable_at_the_connect_deadline() {
+    // T-079 Acceptance 1-3 (#106): the reproducing test. The lookup of the API
+    // host never answers while the call runs; connect 300 ms, whole request far
+    // longer. Expected: NetworkUnavailable, returned while the lookup is still
+    // held, not before the connect deadline. Today: reqwest's connect timer cuts
+    // the lookup without a dns flag (CannotReach), and the client drop waits for
+    // the lookup thread, so the call returns only after the release. Bite: no
+    // lookup record read by `send_error` (CannotReach); the lookup joined at drop
+    // (no return while held); a resolver that fails every lookup at once (the
+    // lower bound).
+    let held = Held::install("engine-held.t079.example.com", Vec::new());
+    let connect = Duration::from_millis(300);
+    let (got, took) = transcribe_while_held(
+        &held,
+        api_engine(&format!("http://{}/v1", held.host), Some(KEY)),
+        held_req(connect, OS_ANSWER_BUDGET),
+    );
+    assert_eq!(got, Err(FailureReason::NetworkUnavailable));
+    at_least(took, connect);
+}
+
+#[test]
+fn lookup_error_at_once_is_network_unavailable() {
+    // Failure branch 1: the lookup fails at once -> a DNS error through the new
+    // resolver -> NetworkUnavailable (the existing dns arm). Bite: the resolver's
+    // error not passed to reqwest as a resolve error (no dns flag: CannotReach or
+    // UnexpectedResponse); the seam bypassed (asked == 0).
+    let fixed = Arc::new(FixedLookup::error(io::ErrorKind::Other));
+    let _installed = install("lookup-error.t079.example.com", fixed.clone());
+    let got = transcribe(
+        api_engine("http://lookup-error.t079.example.com/v1", Some(KEY)),
+        held_req(Duration::from_millis(300), OS_ANSWER_BUDGET),
+    );
+    assert_eq!(got, Err(FailureReason::NetworkUnavailable));
+    assert_eq!(
+        fixed.asked(),
+        1,
+        "the engine's lookup goes through the seam"
+    );
+}
+
+#[tokio::test]
+async fn lookup_answered_after_the_connect_deadline_is_network_unavailable_not_a_late_success() {
+    // Failure branch 2: the lookup would answer with a live server's address, but
+    // only after the connect deadline (the test releases it once the call
+    // returned). Expected: NetworkUnavailable at the deadline and no request on
+    // the server. Bite: a resolver that waits for its answer past the deadline
+    // (no return while held; a late request and Ok).
+    let server = server_with(ok_text(TRANSCRIPT)).await;
+    let held = Held::install("late.t079.example.com", vec![*server.address()]);
+    let (got, _) = transcribe_while_held(
+        &held,
+        api_engine(
+            &format!("http://{}:{}/v1", held.host, server.address().port()),
+            Some(KEY),
+        ),
+        held_req(Duration::from_millis(300), OS_ANSWER_BUDGET),
+    );
+    assert_eq!(got, Err(FailureReason::NetworkUnavailable));
+    let sent = server
+        .received_requests()
+        .await
+        .expect("request recording is on")
+        .len();
+    assert_eq!(sent, 0, "a request reached the server after the deadline");
+}
+
+#[test]
+fn lookup_answered_at_once_with_a_refused_address_is_cannot_reach() {
+    // Failure branch 3: the lookup answers at once with the refused loopback
+    // address -> the refusal ends the connect -> CannotReach{name:port}; the
+    // record stays false because the lookup answered. The case's deadlines (T-080
+    // I1). Bite: a record set on every resolver-future drop, or set after an
+    // answer (-> NetworkUnavailable).
+    let case = OsAnswer::refused();
+    let addr = refused_addr(&case);
+    let fixed = Arc::new(FixedLookup::answer(vec![addr]));
+    let _installed = install("refused.t079.example.com", fixed.clone());
+    let host = format!("refused.t079.example.com:{}", addr.port());
+    let got = transcribe(
+        api_engine(&format!("http://{host}/v1"), Some(KEY)),
+        req_os_answer(&case),
+    );
+    assert_eq!(got, Err(FailureReason::CannotReach { host }));
+    assert_eq!(
+        fixed.asked(),
+        1,
+        "the engine's lookup goes through the seam"
+    );
+}
+
+#[test]
+fn answered_lookup_then_unanswered_connect_stays_cannot_reach() {
+    // Failure branch 4: the lookup answers at once with the blackhole address of
+    // `Unanswered::blackhole()`, so the connect timer, not the lookup, ends the
+    // call -> CannotReach{name} as today (classify_table row "192.0.2.1
+    // connect_timeout"). Where the host has no route the OS answers at once with
+    // NetworkUnavailable; the case accepts both endings (vacuous there). The IP
+    // literal itself never reaches the resolver and stays pinned by
+    // `api_pipeline::blackhole_connect_is_bounded_by_connect_timeout`. Bite: a
+    // record set although the lookup answered (-> NetworkUnavailable where the
+    // blackhole holds, as in voicen-rust:1.99).
+    let case = Unanswered::blackhole();
+    let ip: IpAddr = case
+        .host
+        .parse()
+        .unwrap_or_else(|e| panic!("Unanswered host {:?}: {e}", case.host));
+    let fixed = Arc::new(FixedLookup::answer(vec![SocketAddr::new(ip, 0)]));
+    let _installed = install("blackhole.t079.example.com", fixed.clone());
+    let got = transcribe(
+        api_engine("http://blackhole.t079.example.com/v1", Some(KEY)),
+        TranscribeRequest {
+            language: None,
+            timeouts: case.timeouts,
+        },
+    );
+    assert!(
+        matches!(
+            &got,
+            Err(FailureReason::CannotReach { host }) if host == "blackhole.t079.example.com"
+        ) || got == Err(FailureReason::NetworkUnavailable),
+        "expected CannotReach(blackhole.t079.example.com) or (no route) \
+         NetworkUnavailable, got {got:?}"
+    );
+    assert_eq!(
+        fixed.asked(),
+        1,
+        "the engine's lookup goes through the seam"
+    );
+}
+
+#[test]
+fn unanswered_lookup_cut_by_a_total_deadline_below_connect_is_network_unavailable() {
+    // Failure branch 5 (decision #113): connect far above the whole-request limit;
+    // the lookup is still unanswered when the 300 ms total fires -> a DNS failure
+    // whichever timer ended the send -> NetworkUnavailable, not Timeout. Today:
+    // Timeout, and the call returns only after the release. Bite: the record read
+    // only for errors with the connect flag (Timeout).
+    let held = Held::install("total-held.t079.example.com", Vec::new());
+    let total = Duration::from_millis(300);
+    let (got, took) = transcribe_while_held(
+        &held,
+        api_engine(&format!("http://{}/v1", held.host), Some(KEY)),
+        held_req(OS_ANSWER_BUDGET, total),
+    );
+    assert_eq!(got, Err(FailureReason::NetworkUnavailable));
+    at_least(took, total);
 }
