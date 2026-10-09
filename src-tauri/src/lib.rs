@@ -48,6 +48,7 @@ fn commands<R: Runtime>(builder: Builder<R>) -> Builder<R> {
         local_models::local_models_list,
         local_models::local_model_download,
         local_models::local_model_cancel_download,
+        local_models::local_model_delete,
         overlay::overlay_ready
     ])
 }

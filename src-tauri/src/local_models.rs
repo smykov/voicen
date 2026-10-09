@@ -1,6 +1,7 @@
 //! The shell half of the local models (T-044, decision #57 option A; specs/002
-//! contracts/ipc.md): the commands `local_models_list`, `local_model_download { id }`
-//! and `local_model_cancel_download { id }` over core's
+//! contracts/ipc.md): the commands `local_models_list`, `local_model_download { id }`,
+//! `local_model_cancel_download { id }` and `local_model_delete { id }` (T-019) over
+//! core's
 //! `voicen_core::local_models::service::LocalModels`, the emit of its events to the
 //! settings window, and [`WinDiskSpace`].
 //!
@@ -8,7 +9,10 @@
 //! parses it, an unknown id is `not_in_catalog` / `false`), and no reqwest call runs
 //! or is dropped here. `LocalModels::download` does a file metadata read, the disk
 //! probe and a thread spawn on the command thread; the transfer runs on core's
-//! download thread.
+//! download thread. `local_model_delete` passes the managed `SettingsService` and
+//! [`NoResidency`] (nothing is loaded until T-017's residency replaces it) and emits
+//! nothing itself: a selection reset reaches the window as `settings://changed`
+//! through the change bridge.
 //!
 //! Events: every `local-model://progress|state` is emitted from the download thread
 //! through [`emit_to_settings`], with `emit_to(EventTarget::webview_window(LABEL))`, so
@@ -32,8 +36,9 @@ use tauri::{AppHandle, Emitter, EventTarget, Runtime, State};
 #[cfg(windows)]
 use voicen_core::local_models::download::DiskSpace;
 use voicen_core::local_models::service::{
-    LocalModelEvent, LocalModelView, LocalModels, ReasonView,
+    DeleteOutcome, LocalModelEvent, LocalModelView, LocalModels, NoResidency, ReasonView,
 };
+use voicen_core::settings::service::SettingsService;
 #[cfg(windows)]
 use windows::core::PCWSTR;
 #[cfg(windows)]
@@ -65,6 +70,18 @@ pub fn local_model_download<R: Runtime>(
 #[tauri::command]
 pub fn local_model_cancel_download(models: State<'_, Arc<LocalModels>>, id: String) -> bool {
     models.cancel(&id)
+}
+
+/// `local_model_delete { id }` → `{ engineReset, resetFailed }`, or a
+/// `FailureReason` (`model_in_use`, `not_downloaded`, `delete_failed`). Runs off the
+/// main thread: it removes a file and may write `settings.json`.
+#[tauri::command(async)]
+pub fn local_model_delete(
+    models: State<'_, Arc<LocalModels>>,
+    settings: State<'_, Arc<SettingsService>>,
+    id: String,
+) -> Result<DeleteOutcome, ReasonView> {
+    models.delete(&id, &NoResidency, &settings)
 }
 
 /// The emit adapter: the core callback, called on the download thread with no lock

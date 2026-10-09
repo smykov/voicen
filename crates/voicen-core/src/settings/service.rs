@@ -216,6 +216,18 @@ pub enum SaveOutcome {
     },
 }
 
+/// What [`SettingsService::forget_model`] did: `engine_reset` is true when the
+/// engine was `builtin_local` on the forgotten model and is now `none`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ForgetOutcome {
+    pub engine_reset: bool,
+}
+
+/// [`SettingsService::forget_model`] could not write the settings file; the
+/// snapshot in force is unchanged and nothing was published.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ForgetFailed;
+
 /// The fixed deserialize error of [`SaveRequest`].
 const SAVE_REQUEST_WIRE_ERROR: &str =
     "invalid save request: expected {\"settings\": Settings, \"keys\": KeyEdits}";
@@ -244,7 +256,11 @@ impl<'de> Deserialize<'de> for SaveRequest {
 ///   to be available and the draft is normalized and valid; the autostart entry is
 ///   changed next (only when `start_with_windows` changes), then the keys, the file
 ///   last, and a failure undoes the completed steps in reverse.
-/// - A snapshot handed out is never changed: a `Saved` swaps in a new `Arc`.
+/// - `forget_model` (T-019) is the one other writer: a narrow selection reset of a
+///   deleted local model under the same `save_lock`, with no key read and no
+///   revalidation.
+/// - A snapshot handed out is never changed: a `Saved` or a written
+///   `forget_model` swaps in a new `Arc`.
 /// - While `Unavailable` (decision #19) no save, `view` or later call touches the
 ///   file or the credential store.
 pub struct SettingsService {
@@ -321,8 +337,9 @@ impl SettingsService {
             .clone()
     }
 
-    /// A channel that receives the new snapshot after each `Saved`, and nothing
-    /// else (no initial value: call `subscribe` then `snapshot`). A dropped
+    /// A channel that receives the new snapshot after each `Saved` and each written
+    /// `forget_model`, and nothing else (no initial value: call `subscribe` then
+    /// `snapshot`). A dropped
     /// receiver is pruned at the next publish.
     pub fn subscribe(&self) -> mpsc::Receiver<Arc<Settings>> {
         let (tx, rx) = mpsc::channel();
@@ -478,16 +495,66 @@ impl SettingsService {
             self.deps.hotkeys.commit(prepared);
         }
         let warnings = save_warnings(&settings);
+        let snapshot = self.swap_and_publish(settings);
+        SaveOutcome::Saved {
+            view: self.view_with((*snapshot).clone(), presence_after),
+            warnings,
+        }
+    }
+
+    /// The narrow selection reset of a deleted local model (T-019; the only other
+    /// writer path beside [`save`](Self::save)), under `save_lock` for the whole
+    /// read-modify-write, publish included, so a concurrent save is never lost.
+    ///
+    /// - `Unavailable` (decision #19): no call at all, `engine_reset` false.
+    /// - `builtin_local.model_id` is not `id`: nothing written, `engine_reset` false.
+    /// - Otherwise `model_id` becomes `None` and, if the engine is `builtin_local`,
+    ///   the engine becomes `none` (`engine_reset` true); every other field is kept
+    ///   as in force. The file is written, then the snapshot swapped and published
+    ///   (the shell's change bridge emits `settings://changed`).
+    ///
+    /// No key is read and nothing is revalidated or normalized: the reset only
+    /// removes a selection. A write failure keeps the snapshot in force and
+    /// publishes nothing ([`ForgetFailed`]).
+    pub fn forget_model(&self, id: &str) -> Result<ForgetOutcome, ForgetFailed> {
+        let unchanged = ForgetOutcome {
+            engine_reset: false,
+        };
+        if self.load.unavailable {
+            return Ok(unchanged);
+        }
+        let _guard = self
+            .save_lock
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let current = self.snapshot();
+        if current.builtin_local.model_id.as_deref() != Some(id) {
+            return Ok(unchanged);
+        }
+        let mut next = (*current).clone();
+        next.builtin_local.model_id = None;
+        let engine_reset = next.engine == EngineKind::BuiltinLocal;
+        if engine_reset {
+            next.engine = EngineKind::None;
+        }
+        encode(&next)
+            .and_then(|bytes| self.deps.file.write_atomic(&bytes))
+            .map_err(|_| ForgetFailed)?;
+        self.swap_and_publish(next);
+        Ok(ForgetOutcome { engine_reset })
+    }
+
+    /// Swaps `settings` in as the snapshot in force and sends it to every live
+    /// subscriber (a dropped receiver is pruned). Called only under `save_lock`,
+    /// after the file was written.
+    fn swap_and_publish(&self, settings: Settings) -> Arc<Settings> {
         let snapshot = Arc::new(settings);
         *self.current.write().unwrap_or_else(PoisonError::into_inner) = snapshot.clone();
         self.subscribers
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .retain(|tx| tx.send(snapshot.clone()).is_ok());
-        SaveOutcome::Saved {
-            view: self.view_with((*snapshot).clone(), presence_after),
-            warnings,
-        }
+        snapshot
     }
 
     /// Makes the logon start entry match the snapshot (R-5), under the save lock;

@@ -11,14 +11,21 @@
 //! is updated and with no lock held, so a [`LocalModels::list`] after an event
 //! agrees with it. Every refusal leaves as a [`ReasonView`] with a contracts/ipc.md
 //! code: `download_busy`, `already_downloaded`, `not_enough_disk_space{needed}`,
-//! `not_in_catalog`, `download_cannot_start`.
+//! `not_in_catalog`, `download_cannot_start`; and for a delete `model_in_use`,
+//! `not_downloaded`, `delete_failed`.
+//!
+//! Delete (T-019, option A): [`LocalModels::delete`] is the one delete path, in
+//! one order: refuse unless downloaded, release through the [`ModelRelease`] port
+//! (refuse if in use), remove the final file, clear the transient state, reset the
+//! selection through `SettingsService::forget_model`, drop the release guard. It
+//! emits no event: the settings window re-lists after the command settles.
 //!
 //! The shell (`src-tauri/src/local_models.rs`) is an adapter: it parses nothing,
 //! delegates the commands here and emits each event to the settings window.
 
 use std::collections::HashMap;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use serde::ser::{SerializeMap, SerializeStruct};
@@ -28,6 +35,7 @@ use super::catalog::{CatalogEntry, ModelId};
 use super::download::{DiskSpace, DownloadError, DownloadEvent, DownloadFailure, Downloader};
 use super::store::{LocalModelState, ModelStore};
 use crate::i18n::{self, MessageId};
+use crate::settings::service::SettingsService;
 use crate::timeouts::Timeouts;
 
 /// `local-model://progress`, payload `{ id, received, total }`.
@@ -93,6 +101,68 @@ fn name_key(id: ModelId) -> MessageId {
     }
 }
 
+/// The resolved value of `local_model_delete` (contracts/ipc.md, OQ-26 (a)), wire
+/// `{ engineReset, resetFailed }`. `engine_reset`: the engine was `builtin_local` on
+/// the deleted model and is now `none`, persisted and published. `reset_failed`: the
+/// file is gone but the selection naming it could not be written; the settings in
+/// force are unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteOutcome {
+    pub engine_reset: bool,
+    pub reset_failed: bool,
+}
+
+/// A refused `local_model_delete`; nothing changed on disk or in the settings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeleteError {
+    /// The residency holds the model for a transcription (wire `model_in_use`).
+    ModelInUse,
+    /// No final file with the catalog size, a running download, or an id outside
+    /// the catalog (wire `not_downloaded`).
+    NotDownloaded,
+    /// The removal failed with an error other than `NotFound`, e.g. a file held
+    /// open (wire `delete_failed`); the model stays downloaded.
+    DeleteFailed,
+}
+
+/// The residency answered that a transcription holds the model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InUse;
+
+/// Held by [`LocalModels::delete`] from the release until after the removal and
+/// the selection reset; while it lives the residency must not load the model again.
+/// Dropping it ends that (the held value is dropped with it).
+pub struct ReleaseGuard {
+    _held: Box<dyn Send>,
+}
+
+impl ReleaseGuard {
+    /// A guard that drops `held` when it is dropped.
+    pub fn new(held: impl Send + 'static) -> ReleaseGuard {
+        ReleaseGuard {
+            _held: Box::new(held),
+        }
+    }
+}
+
+/// The port from the delete to whatever keeps a model loaded (T-017's residency).
+pub trait ModelRelease {
+    /// Unloads `id` if it is loaded and blocks its loading until the guard drops;
+    /// `InUse` when a transcription holds it (nothing is unloaded then).
+    fn release_for_delete(&self, id: ModelId) -> Result<ReleaseGuard, InUse>;
+}
+
+/// The production [`ModelRelease`] until T-017: nothing is ever loaded or in use.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NoResidency;
+
+impl ModelRelease for NoResidency {
+    fn release_for_delete(&self, _id: ModelId) -> Result<ReleaseGuard, InUse> {
+        Ok(ReleaseGuard::new(()))
+    }
+}
+
 /// The in-memory `Downloading` / `Failed` states by model; a model without an entry
 /// shows its disk state.
 type Transient = Arc<Mutex<HashMap<ModelId, LocalModelState>>>;
@@ -109,6 +179,9 @@ pub struct LocalModels {
     store: Arc<ModelStore>,
     downloader: Downloader,
     transient: Transient,
+    /// The removal of a final file: `std::fs::remove_file`, set in `open`; a unit
+    /// test replaces it to reach `delete_failed` (the gate runs as uid 0).
+    remove: fn(&Path) -> io::Result<()>,
 }
 
 impl LocalModels {
@@ -129,6 +202,7 @@ impl LocalModels {
             store,
             downloader,
             transient: Arc::new(Mutex::new(HashMap::new())),
+            remove: |path| std::fs::remove_file(path),
         };
         (models, cleanup)
     }
@@ -227,6 +301,65 @@ impl LocalModels {
     pub fn cancel(&self, id: &str) -> bool {
         ModelId::parse(id).is_some_and(|id| self.downloader.cancel(id))
     }
+
+    /// `local_model_delete { id }`, the one delete path, in this order:
+    ///
+    /// 1. `not_downloaded` for an id outside the catalog, a running download or no
+    ///    final file with the catalog size (the residency is not asked);
+    /// 2. `residency.release_for_delete(id)`: `InUse` → `model_in_use`;
+    /// 3. the removal of the final file (`NotFound` counts as removed); any other
+    ///    error → `delete_failed`, the model stays downloaded and the settings are
+    ///    untouched;
+    /// 4. the transient state of `id` (a stale `Failed`) is dropped;
+    /// 5. `settings.forget_model(id)`: a write failure does not undo the removal and
+    ///    is reported as `reset_failed`;
+    /// 6. the release guard is dropped.
+    ///
+    /// The transient map stays locked throughout, so the delete is serialized with
+    /// `download` and `list`; `forget_model` takes only the settings `save_lock`,
+    /// and nothing under that lock reads the transient map. No event is emitted.
+    pub fn delete(
+        &self,
+        id: &str,
+        residency: &dyn ModelRelease,
+        settings: &SettingsService,
+    ) -> Result<DeleteOutcome, ReasonView> {
+        let refuse = |error: DeleteError| Err(ReasonView::from(&error));
+        let Some(id) = ModelId::parse(id) else {
+            return refuse(DeleteError::NotDownloaded);
+        };
+        let mut transient = lock(&self.transient);
+        if matches!(
+            transient.get(&id),
+            Some(LocalModelState::Downloading { .. })
+        ) {
+            return refuse(DeleteError::NotDownloaded);
+        }
+        let Some(path) = self.store.path_if_downloaded(id) else {
+            return refuse(DeleteError::NotDownloaded);
+        };
+        let Ok(guard) = residency.release_for_delete(id) else {
+            return refuse(DeleteError::ModelInUse);
+        };
+        match (self.remove)(&path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(_) => return refuse(DeleteError::DeleteFailed),
+        }
+        transient.remove(&id);
+        let outcome = match settings.forget_model(id.as_str()) {
+            Ok(forgotten) => DeleteOutcome {
+                engine_reset: forgotten.engine_reset,
+                reset_failed: false,
+            },
+            Err(_) => DeleteOutcome {
+                engine_reset: false,
+                reset_failed: true,
+            },
+        };
+        drop(guard);
+        Ok(outcome)
+    }
 }
 
 /// Updates the in-memory state for `event` (under the lock, released on return)
@@ -285,6 +418,23 @@ impl From<&DownloadError> for ReasonView {
             }
             DownloadError::NotInCatalog => ("not_in_catalog", i18n::DOWNLOAD_NOT_IN_CATALOG),
             DownloadError::CannotStart => ("download_cannot_start", i18n::DOWNLOAD_CANNOT_START),
+        };
+        ReasonView {
+            code,
+            message_key,
+            params: Vec::new(),
+        }
+    }
+}
+
+/// The refusals of `local_model_delete` (contracts/ipc.md); none shares a code
+/// with a download reason.
+impl From<&DeleteError> for ReasonView {
+    fn from(error: &DeleteError) -> ReasonView {
+        let (code, message_key) = match error {
+            DeleteError::ModelInUse => ("model_in_use", i18n::DELETE_MODEL_IN_USE),
+            DeleteError::NotDownloaded => ("not_downloaded", i18n::DELETE_NOT_DOWNLOADED),
+            DeleteError::DeleteFailed => ("delete_failed", i18n::DELETE_FAILED),
         };
         ReasonView {
             code,

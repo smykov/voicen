@@ -133,7 +133,7 @@
 
 ### Tests (write first, must fail)
 
-- [ ] T032 [P] [US4] Red tests in `crates/voicen-core/tests/local_store.rs`. Covers:
+- [ ] T032 [P] [US4] Red tests in `crates/voicen-core/tests/local_model_delete.rs` (T-019; the removal I/O error as `delete_tests` in `local_models/service.rs`, the retry case with `BuiltinEngine` in T-017). Covers:
   - Delete → file gone, state `NotDownloaded`.
   - The selected model → unloaded if loaded, engine `None` persisted.
   - Deleting while a transcription holds it → `ModelInUse`, nothing changes.
@@ -143,8 +143,8 @@
 
 ### Implementation
 
-- [ ] T034 [US4] Implement `ModelStore::delete` in `crates/voicen-core/src/local_models/store.rs`, in this order: refuse if in use → unload → remove → reset engine and persist {req FR-28}
-- [ ] T035 [US4] Add the IPC command `local_model_delete` in `src-tauri/src/local_models.rs` returning `{ engineReset }`, plus a Windows CI test that deletes the file after a load/unload, and Delete with confirmation in `src/lib/local-models/LocalModelList.svelte` {req FR-28}
+- [ ] T034 [US4] Implement `LocalModels::delete` in `crates/voicen-core/src/local_models/service.rs` (T-019, coordinator-owned; contracts/core-traits.md), in this order: refuse if in use → unload → remove → reset engine and persist (`SettingsService::forget_model`) {req FR-28}
+- [ ] T035 [US4] Add the IPC command `local_model_delete` in `src-tauri/src/local_models.rs` returning `{ engineReset, resetFailed }` (T-019), plus a Windows CI test that deletes the file after a load/unload (needs real loading: T-017; T-019 adds the file-held-open `delete_failed` test), and Delete with confirmation in `src/lib/local-models/BuiltinLocal.svelte` {req FR-28}
 
 **Checkpoint**: all four stories work independently.
 

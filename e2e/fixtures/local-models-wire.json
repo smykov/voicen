@@ -1,5 +1,5 @@
 {
-  "_format": "Core-checked wire data of the local-model IPC (specs/002 contracts/ipc.md) for the Playwright IPC mock (T-045), the same pattern as settings-wire.json (T-004 option A3). event_names = voicen_core::local_models::service::{PROGRESS_EVENT, STATE_EVENT}; list_first_run = serde_json of LocalModels::list() over the production catalog MODELS and an empty models dir (what local_models_list returns before any download); states = serde_json of LocalModelState: not_downloaded, downloading {received 32800, total 65600}, downloaded, failed with ChecksumMismatch; events = serde_json of LocalModelEvent payloads: progress {base, 32800, 65600} and state {base, downloaded}; reasons = serde_json of ReasonView, keyed by code: from DownloadFailure (download_interrupted, checksum_mismatch, not_enough_disk_space {needed 66256}, source_unreachable {host huggingface.co}, disk_error, http_status {code 503}) and from DownloadError (download_busy, already_downloaded, not_enough_disk_space {needed 66256}, not_in_catalog, download_cannot_start). Kept in sync by the core test tests/local_models_service.rs e2e_local_models_wire_fixture_matches_core: when it fails, copy the value it prints. Never edit by hand to make an e2e test pass.",
+  "_format": "Core-checked wire data of the local-model IPC (specs/002 contracts/ipc.md) for the Playwright IPC mock (T-045), the same pattern as settings-wire.json (T-004 option A3). event_names = voicen_core::local_models::service::{PROGRESS_EVENT, STATE_EVENT}; list_first_run = serde_json of LocalModels::list() over the production catalog MODELS and an empty models dir (what local_models_list returns before any download); states = serde_json of LocalModelState: not_downloaded, downloading {received 32800, total 65600}, downloaded, failed with ChecksumMismatch; events = serde_json of LocalModelEvent payloads: progress {base, 32800, 65600} and state {base, downloaded}; reasons = serde_json of ReasonView, keyed by code: from DownloadFailure (download_interrupted, checksum_mismatch, not_enough_disk_space {needed 66256}, source_unreachable {host huggingface.co}, disk_error, http_status {code 503}) and from DownloadError (download_busy, already_downloaded, not_enough_disk_space {needed 66256}, not_in_catalog, download_cannot_start) and from DeleteError (model_in_use, not_downloaded, delete_failed; T-019); delete_outcomes = serde_json of DeleteOutcome, the resolved value of local_model_delete (T-019): kept {false, false}, engine_reset {engineReset true}, reset_failed {resetFailed true}. Kept in sync by the core test tests/local_models_service.rs e2e_local_models_wire_fixture_matches_core: when it fails, copy the value it prints. Never edit by hand to make an e2e test pass.",
   "event_names": {
     "progress": "local-model://progress",
     "state": "local-model://state"
@@ -138,6 +138,32 @@
     "download_cannot_start": {
       "code": "download_cannot_start",
       "messageKey": "download.cannot_start"
+    },
+    "model_in_use": {
+      "code": "model_in_use",
+      "messageKey": "delete.model_in_use"
+    },
+    "not_downloaded": {
+      "code": "not_downloaded",
+      "messageKey": "delete.not_downloaded"
+    },
+    "delete_failed": {
+      "code": "delete_failed",
+      "messageKey": "delete.failed"
+    }
+  },
+  "delete_outcomes": {
+    "kept": {
+      "engineReset": false,
+      "resetFailed": false
+    },
+    "engine_reset": {
+      "engineReset": true,
+      "resetFailed": false
+    },
+    "reset_failed": {
+      "engineReset": false,
+      "resetFailed": true
     }
   }
 }

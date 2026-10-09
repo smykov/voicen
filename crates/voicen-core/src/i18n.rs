@@ -195,6 +195,14 @@ messages! {
     /// `DownloadError::CannotStart` (the OS refused the download thread), wire code
     /// `download_cannot_start` (T-044).
     DOWNLOAD_CANNOT_START = "download.cannot_start",
+    /// `DeleteError::ModelInUse`, wire code `model_in_use`: a transcription holds
+    /// the model (T-019).
+    DELETE_MODEL_IN_USE = "delete.model_in_use",
+    /// `DeleteError::NotDownloaded`, wire code `not_downloaded` (T-019).
+    DELETE_NOT_DOWNLOADED = "delete.not_downloaded",
+    /// `DeleteError::DeleteFailed`, wire code `delete_failed`: the file could not
+    /// be removed (T-019).
+    DELETE_FAILED = "delete.failed",
     /// `LocalModelView.nameKey` of `tiny` (T-044).
     LOCAL_MODEL_NAME_TINY = "local_model.name.tiny",
     /// `LocalModelView.nameKey` of `base` (T-044).

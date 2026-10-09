@@ -30,13 +30,10 @@ impl ModelStore {
     pub fn cleanup_at_start(&self) -> io::Result<()>;   // deletes every *.part (all tried, first error returned); missing dir = Ok
     pub fn states(&self) -> Vec<(ModelId, LocalModelState)>; // disk-derived: Downloaded iff final file with catalog size
     pub fn path_if_downloaded(&self, id: ModelId) -> Option<PathBuf>;
-    pub fn delete(&self, id: ModelId, residency: &ModelResidency, settings: &SettingsService /* 004 */)
-        -> Result<(), DeleteError>;                     // DeleteError::{InUse, NotDownloaded, Io(reason)}
-    // Clearing the selection (reset engine) goes through `SettingsService::save` (decisions #21).
 }
 ```
 
-`delete` order: refuse if `residency` is active on `id` → unload if loaded → remove file → if selected, set engine `None` and persist.
+The store removes nothing but `.part` files: a model is deleted only by `LocalModels::delete` (T-019, below), which can also clear the coordinator's transient `Failed`.
 
 ## Downloader
 
@@ -83,9 +80,26 @@ impl LocalModels {
     pub fn list(&self) -> Vec<LocalModelView>;          // catalog order; disk state merged with the in-memory Downloading/Failed state
     pub fn download(&self, id: &str, emit: impl Fn(LocalModelEvent) + Send + 'static) -> Result<(), ReasonView>;
     pub fn cancel(&self, id: &str) -> bool;             // unknown id or nothing running: false
+    pub fn delete(&self, id: &str, residency: &dyn ModelRelease, settings: &SettingsService /* 004 */)
+        -> Result<DeleteOutcome, ReasonView>;           // T-019; DeleteError::{ModelInUse, NotDownloaded, DeleteFailed}
     pub fn store(&self) -> Arc<ModelStore>;             // the one store, also SettingsDeps.local_models
 }
+pub struct DeleteOutcome { pub engine_reset: bool, pub reset_failed: bool }   // wire { engineReset, resetFailed }
+
+// The port from the delete to whatever keeps a model loaded. Production value `NoResidency`
+// (never loaded, never in use) until T-017's ModelResidency implements it.
+pub trait ModelRelease {
+    fn release_for_delete(&self, id: ModelId) -> Result<ReleaseGuard, InUse>; // unload if loaded; no load of `id` until the guard drops
+}
+impl ReleaseGuard { pub fn new(held: impl Send + 'static) -> ReleaseGuard; } // drops `held` with the guard
+
+// 004's SettingsService, the narrow reset the delete uses (T-019):
+impl SettingsService {
+    pub fn forget_model(&self, id: &str) -> Result<ForgetOutcome /* { engine_reset } */, ForgetFailed>;
+}
 ```
+
+`delete` order (T-019): `not_downloaded` unless the final file has the catalog size and no download of `id` runs (the residency is not asked) → `release_for_delete` (`InUse` → `model_in_use`, nothing changed) → remove the final file (`NotFound` counts as removed; any other error → `delete_failed`, settings untouched, the model stays downloaded) → drop the transient state of `id` → `forget_model(id)` → drop the guard. The transient map stays locked throughout. `forget_model` runs under the settings `save_lock`: while `Unavailable` it calls nothing; if `builtin_local.model_id` is `id` it sets it to `None` and, if the engine is `builtin_local`, the engine to `None` (`engine_reset`), writes the file, swaps and publishes; it reads no key and revalidates nothing (a reset through `save` would be refused by a credential read failure or an invalid hand-edited field). A write failure keeps the snapshot and is reported as `reset_failed`, the removal is not undone (OQ-26 (a)). No event is emitted; the reset reaches the window as `settings://changed`.
 
 Wire types (`LocalModelView`, `ReasonView`, `LocalModelEvent`), codes, message ids and the error-to-code mapping: `contracts/ipc.md` (not repeated here). Invariants: `docs/decisions/model-download.md`.
 
@@ -101,7 +115,7 @@ impl ModelResidency {
         -> Result<(ModelGuard, Warmth), EngineError>;              // waits for an in-flight load
     pub fn recording_started(&self) -> ActivityGuard;              // holds the countdown
     pub fn on_engine_or_model_changed(&self, selected: Option<ModelId>); // unload if different
-    pub fn unload_if(&self, id: ModelId) -> Result<(), InUse>;
+    // implements `ModelRelease::release_for_delete` (T-019) instead of an `unload_if`
     pub fn tick(&self);                                            // called by the shell's timer; unloads when due
     pub fn loaded(&self) -> Option<ModelId>;
 }

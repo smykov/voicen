@@ -372,8 +372,10 @@ impl Job {
         }
         // The slot is free before the end event, so a new `start` of the same model
         // can begin in the short gap before this event is handled; the coordinator
-        // then briefly shows this download's end state over the new one until the
-        // new download's first progress event (accepted, docs/decisions/model-download.md).
+        // then shows this download's end state over the new one until the new
+        // download's first progress event, or its own end event if that comes first;
+        // if the new download had already ended, until the next start (accepted,
+        // docs/decisions/model-download.md).
         guard.release();
         events(match end {
             End::Finished => DownloadEvent::Finished { id },
