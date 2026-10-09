@@ -1084,6 +1084,271 @@ mod tests {
         assert_eq!(delivered_seqs, finished_seqs);
     }
 
+    // ---- T-076: the post-processing trace on JobFinished ------------------------
+
+    /// An engine that sleeps `sleep` and records when it returned.
+    struct TimedEngine {
+        reply: Result<String, FailureReason>,
+        sleep: Duration,
+        returned: Arc<Mutex<Vec<Instant>>>,
+    }
+
+    impl Engine for TimedEngine {
+        fn kind(&self) -> &'static str {
+            "fake"
+        }
+        fn transcribe(
+            &self,
+            _audio: &AudioBuffer,
+            _req: &TranscribeRequest,
+        ) -> Result<String, FailureReason> {
+            std::thread::sleep(self.sleep);
+            lock(&self.returned).push(Instant::now());
+            self.reply.clone()
+        }
+    }
+
+    fn timed_factory(
+        reply: Result<String, FailureReason>,
+        sleep: Duration,
+        returned: &Arc<Mutex<Vec<Instant>>>,
+    ) -> Box<EngineFactory> {
+        let returned = Arc::clone(returned);
+        Box::new(move |_settings: &Settings, _creds: &dyn CredentialStore| {
+            Ok(Box::new(TimedEngine {
+                reply: reply.clone(),
+                sleep,
+                returned: Arc::clone(&returned),
+            }) as Box<dyn Engine>)
+        })
+    }
+
+    /// A post-processor that returns `out` after `sleep` and records when each
+    /// call entered and left.
+    struct TimedPostProcessor {
+        out: PostProcessOutcome,
+        sleep: Duration,
+        spans: Mutex<Vec<(Instant, Instant)>>,
+    }
+
+    impl TimedPostProcessor {
+        fn new(out: PostProcessOutcome, sleep: Duration) -> Arc<TimedPostProcessor> {
+            Arc::new(TimedPostProcessor {
+                out,
+                sleep,
+                spans: Mutex::new(Vec::new()),
+            })
+        }
+    }
+
+    impl PostProcessor for TimedPostProcessor {
+        fn process(&self, _raw: &str, _input: &PostProcessInput<'_>) -> PostProcessOutcome {
+            let entered = Instant::now();
+            std::thread::sleep(self.sleep);
+            let left = Instant::now();
+            lock(&self.spans).push((entered, left));
+            self.out.clone()
+        }
+    }
+
+    /// The `post_processing` field of the one `JobFinished` in `events`.
+    fn trace_of(events: &[DictationEvent]) -> Option<crate::events::PostProcessTrace> {
+        let traces: Vec<Option<crate::events::PostProcessTrace>> = events
+            .iter()
+            .filter_map(|e| match e {
+                DictationEvent::JobFinished {
+                    post_processing, ..
+                } => Some(*post_processing),
+                _ => None,
+            })
+            .collect();
+        match traces.as_slice() {
+            [one] => *one,
+            other => panic!("expected one JobFinished, got {other:?}: {events:?}"),
+        }
+    }
+
+    #[test]
+    fn post_processing_outcome_and_duration_reach_job_finished() {
+        // T-076 Investigation test 3: Pipeline::process maps the stage's outcome to
+        // the closed trace on JobFinished (NotRun -> Off, Applied -> Applied, each
+        // SkipReason -> its own SkipKind) and times the stage call alone. The
+        // duration is checked against the instants the fakes saw, never against a
+        // wall-clock ceiling: it covers the whole call (>= the processor's own span,
+        // which sleeps 40 ms), and it lies inside the interval from the engine's
+        // return to the end of run_job (the stage starts after the transcription),
+        // whatever the host load. Bite: the trace left None, Applied and NotRun
+        // collapsed (as Outcome::Text.skipped does), every skip as one kind, ms = 0
+        // or a constant, the clock started before the engine call (the engine sleeps
+        // 200 ms), stop_to_text_ms copied as the duration.
+        use crate::events::{PostProcessResult, SkipKind};
+        let engine_sleep = Duration::from_millis(200);
+        let pp_sleep = Duration::from_millis(40);
+        let cases: Vec<(PostProcessOutcome, PostProcessResult)> = vec![
+            (PostProcessOutcome::NotRun, PostProcessResult::Off),
+            (
+                PostProcessOutcome::Applied("POST TEXT".to_string()),
+                PostProcessResult::Applied,
+            ),
+            (
+                PostProcessOutcome::Skipped(SkipReason::Timeout),
+                PostProcessResult::Skipped(SkipKind::Timeout),
+            ),
+            (
+                PostProcessOutcome::Skipped(SkipReason::Unreachable {
+                    host: "llm.example.com:8443".to_string(),
+                }),
+                PostProcessResult::Skipped(SkipKind::Unreachable),
+            ),
+            (
+                PostProcessOutcome::Skipped(SkipReason::InvalidKey),
+                PostProcessResult::Skipped(SkipKind::InvalidKey),
+            ),
+            (
+                PostProcessOutcome::Skipped(SkipReason::Http { status: 502 }),
+                PostProcessResult::Skipped(SkipKind::Http),
+            ),
+            (
+                PostProcessOutcome::Skipped(SkipReason::InvalidResponse),
+                PostProcessResult::Skipped(SkipKind::InvalidResponse),
+            ),
+            (
+                PostProcessOutcome::Skipped(SkipReason::NotConfigured),
+                PostProcessResult::Skipped(SkipKind::NotConfigured),
+            ),
+        ];
+        for (out, want) in cases {
+            let f = fakes();
+            let returned = Arc::new(Mutex::new(Vec::new()));
+            let pp = TimedPostProcessor::new(out.clone(), pp_sleep);
+            let p = Pipeline::new(deps(&f, pp.clone())).with_engine_factory(timed_factory(
+                Ok("ENGINE TEXT".to_string()),
+                engine_sleep,
+                &returned,
+            ));
+            let _ = p.run_job(finished(fixtures::speech_3s(), settings()));
+            let after = Instant::now();
+
+            let events = f.observer.events();
+            let Some(trace) = trace_of(&events) else {
+                panic!("{out:?}: the stage ran, JobFinished has no trace: {events:?}")
+            };
+            assert_eq!(trace.result, want, "{out:?}");
+            if want == PostProcessResult::Off {
+                continue;
+            }
+            let Some((entered, left)) = lock(&pp.spans).first().copied() else {
+                panic!("{out:?}: the stage did not run")
+            };
+            let Some(engine_returned) = lock(&returned).first().copied() else {
+                panic!("{out:?}: the engine did not run")
+            };
+            let span = millis(left.saturating_duration_since(entered));
+            let room = millis(after.saturating_duration_since(engine_returned));
+            assert!(span >= 40, "{out:?}: the fake slept {span} ms");
+            assert!(
+                trace.ms >= span,
+                "{out:?}: ms {} shorter than the stage call ({span} ms)",
+                trace.ms
+            );
+            assert!(
+                trace.ms <= room,
+                "{out:?}: ms {} longer than engine return -> end of run_job ({room} ms): \
+                 the clock is not around the stage call alone",
+                trace.ms
+            );
+        }
+    }
+
+    #[test]
+    fn the_trace_rides_on_every_job_finished_after_the_stage() {
+        // T-076: release passes the trace to each JobFinished it emits once the
+        // stage ran: the clipboard-failure Failed and the post-processed-to-blank
+        // NoSpeech keep it. Bite: the trace set only on the Text JobFinished.
+        use crate::events::PostProcessResult;
+        let f = fakes();
+        f.clipboard.set_fail(true);
+        let seen = Arc::new(Seen::default());
+        let p = Pipeline::new(deps(&f, FixedPostProcessor::new("POST TEXT")))
+            .with_engine_factory(fake_factory(Ok("ENGINE TEXT".to_string()), &seen));
+        let report = p.run_job(finished(fixtures::speech_3s(), settings()));
+        assert_eq!(
+            report.end,
+            JobEnd::Failed(FailureReason::ClipboardUnavailable)
+        );
+        let trace = trace_of(&f.observer.events());
+        assert_eq!(
+            trace.map(|t| t.result),
+            Some(PostProcessResult::Applied),
+            "clipboard failure after the stage"
+        );
+
+        let f = fakes();
+        let seen = Arc::new(Seen::default());
+        let p = Pipeline::new(deps(&f, FixedPostProcessor::new("   ")))
+            .with_engine_factory(fake_factory(Ok("ENGINE TEXT".to_string()), &seen));
+        let report = p.run_job(finished(fixtures::speech_3s(), settings()));
+        assert_eq!(report.end, JobEnd::Notice(i18n::NOTICE_NO_SPEECH));
+        let trace = trace_of(&f.observer.events());
+        assert_eq!(
+            trace.map(|t| t.result),
+            Some(PostProcessResult::Applied),
+            "blank after post-processing"
+        );
+    }
+
+    #[test]
+    fn no_trace_when_the_stage_was_not_called() {
+        // T-076 interpretation (Investigation): pp keys exactly on jobs that reached
+        // the stage. Silence, an engine that cannot be built, a failed or blank
+        // transcription: JobFinished.post_processing is None, whether
+        // post-processing is on or off. Bite: Off (or a trace) invented from the
+        // settings for a job that never called the stage.
+        // An engine's reply; `None`: the factory cannot build one.
+        type Reply = Option<Result<String, FailureReason>>;
+        let cases: Vec<(&str, AudioBuffer, Reply)> = vec![
+            (
+                "silence",
+                fixtures::silence_3s(),
+                Some(Ok("never".to_string())),
+            ),
+            ("no engine", fixtures::speech_3s(), None),
+            (
+                "engine failure",
+                fixtures::speech_3s(),
+                Some(Err(FailureReason::ServerError { status: 500 })),
+            ),
+            (
+                "blank text",
+                fixtures::speech_3s(),
+                Some(Ok("  ".to_string())),
+            ),
+        ];
+        for (label, audio, reply) in cases {
+            for enabled in [false, true] {
+                let f = fakes();
+                let seen = Arc::new(Seen::default());
+                let pp = FixedPostProcessor::new("POST TEXT");
+                let factory: Box<EngineFactory> = match reply.clone() {
+                    Some(reply) => fake_factory(reply, &seen),
+                    None => Box::new(|_: &Settings, _: &dyn CredentialStore| {
+                        Err(FailureReason::EngineNotConfigured)
+                    }),
+                };
+                let p = Pipeline::new(deps(&f, pp.clone())).with_engine_factory(factory);
+                let mut s = settings();
+                s.post_processing.enabled = enabled;
+                let _ = p.run_job(finished(audio.clone(), s));
+                assert_eq!(pp.inputs(), Vec::<String>::new(), "{label}");
+                assert_eq!(
+                    trace_of(&f.observer.events()),
+                    None,
+                    "{label}, post-processing enabled {enabled}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn dictation_event_is_copy() {
         // Type-level guard of invariant (5): a String, Vec, Secret or FailureReason

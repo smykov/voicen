@@ -13,7 +13,7 @@ use std::collections::BTreeSet;
 
 use diag_support::{
     at, check_closed, pairs, parse, parse_ts, parsed, DETECTORS, DICTATION_OUTCOMES, ENGINES,
-    FAILURES, MIC_CAUSES, NOON_UTC, WARNING_KINDS,
+    FAILURES, MIC_CAUSES, NOON_UTC, PP_REASONS, PP_RESULTS, WARNING_KINDS,
 };
 use voicen_core::autostart::ReconcileAction;
 use voicen_core::connection_test::ConnectionTestResult;
@@ -23,6 +23,7 @@ use voicen_core::diag::{
     LogEvent, SaveLine, WarningKind,
 };
 use voicen_core::engine::engine_for;
+use voicen_core::events::{PostProcessResult, PostProcessTrace, SkipKind};
 use voicen_core::failure::FailureReason;
 use voicen_core::recording::MicCause;
 use voicen_core::secrets::{FakeCredentialStore, KeySlot};
@@ -76,6 +77,7 @@ fn line(
         duration_ms: timings,
         stop_to_text_ms: timings,
         text_to_paste_ms: timings,
+        post_processing: None,
     }
 }
 
@@ -168,6 +170,54 @@ fn all_mic_causes() -> Vec<(MicCause, &'static str)> {
         })
         .collect();
     assert_eq!(seen.len(), 4, "every MicCause once");
+    all
+}
+
+/// Every `SkipKind` with its `pp_reason` literal (T-076; the six
+/// `SkipReason::code()` spellings, written from format.rs's own table).
+fn all_skip_kinds() -> Vec<(SkipKind, &'static str)> {
+    let all = vec![
+        (SkipKind::Timeout, "timeout"),
+        (SkipKind::Unreachable, "unreachable"),
+        (SkipKind::InvalidKey, "invalid_key"),
+        (SkipKind::Http, "http"),
+        (SkipKind::InvalidResponse, "invalid_response"),
+        (SkipKind::NotConfigured, "not_configured"),
+    ];
+    let seen: BTreeSet<usize> = all
+        .iter()
+        .map(|(k, _)| match k {
+            SkipKind::Timeout => 0,
+            SkipKind::Unreachable => 1,
+            SkipKind::InvalidKey => 2,
+            SkipKind::Http => 3,
+            SkipKind::InvalidResponse => 4,
+            SkipKind::NotConfigured => 5,
+        })
+        .collect();
+    assert_eq!(seen.len(), 6, "every SkipKind once");
+    all
+}
+
+/// Every `PostProcessResult` with its `pp` literal and, for a skip, its
+/// `pp_reason` literal (T-076).
+fn all_pp_results() -> Vec<(PostProcessResult, &'static str, Option<&'static str>)> {
+    let mut all = vec![
+        (PostProcessResult::Off, "off", None),
+        (PostProcessResult::Applied, "applied", None),
+    ];
+    for (kind, reason) in all_skip_kinds() {
+        all.push((PostProcessResult::Skipped(kind), "skipped", Some(reason)));
+    }
+    let seen: BTreeSet<usize> = all
+        .iter()
+        .map(|(r, _, _)| match r {
+            PostProcessResult::Off => 0,
+            PostProcessResult::Applied => 1,
+            PostProcessResult::Skipped(_) => 2,
+        })
+        .collect();
+    assert_eq!(seen.len(), 3, "every PostProcessResult kind");
     all
 }
 
@@ -355,6 +405,32 @@ fn every_event() -> Vec<LogEvent> {
                         *engine, *outcome, *detector, timings,
                     )));
                 }
+            }
+        }
+    }
+    // T-076: every post-processing result on every outcome a job closes (delivered,
+    // failed, no speech: the stage ran before each), with the edge values of its
+    // duration. A too-short, cancelled or capture-failed recording has no job, so
+    // the observer never puts a trace on it.
+    let job_outcomes = outcomes.iter().filter(|o| {
+        matches!(
+            o,
+            DictationOutcome::Delivered(_)
+                | DictationOutcome::Failed { .. }
+                | DictationOutcome::NoSpeech
+        )
+    });
+    for outcome in job_outcomes {
+        for (result, _, _) in all_pp_results() {
+            for ms in [0, 15_004, u64::MAX] {
+                let mut l = line(
+                    Some(EngineTag::Api),
+                    *outcome,
+                    Some(DetectorTag::Energy),
+                    Some(3),
+                );
+                l.post_processing = Some(PostProcessTrace { result, ms });
+                all.push(LogEvent::Dictation(l));
             }
         }
     }
@@ -766,6 +842,7 @@ fn dictation_line_keys_per_outcome() {
         duration_ms: Some(3_000),
         stop_to_text_ms: Some(812),
         text_to_paste_ms: Some(95),
+        post_processing: None,
     });
     let l = parsed(&format_line(at(NOON_UTC, 0), 0, &delivered));
     assert_eq!(l.head, "dictation");
@@ -797,6 +874,7 @@ fn dictation_line_keys_per_outcome() {
         duration_ms: Some(2_500),
         stop_to_text_ms: Some(30_001),
         text_to_paste_ms: None,
+        post_processing: None,
     });
     let l = parsed(&format_line(at(NOON_UTC, 0), 0, &failed));
     assert_eq!(l.level, "WARN");
@@ -831,6 +909,7 @@ fn dictation_line_keys_per_outcome() {
                 duration_ms: Some(120),
                 stop_to_text_ms: None,
                 text_to_paste_ms: None,
+                post_processing: None,
             }),
         );
         let l = parsed(&raw);
@@ -878,6 +957,7 @@ fn capture_failed_line_has_the_mic_literal_at_warn() {
                 duration_ms: Some(2_000),
                 stop_to_text_ms: None,
                 text_to_paste_ms: None,
+                post_processing: None,
             }),
         );
         let l = parsed(&raw);
@@ -968,4 +1048,212 @@ fn logs_recovered_line_has_no_keys() {
     let l = parsed(&raw);
     assert_eq!(l.head, "logs recovered", "{raw}");
     assert!(l.pairs.is_empty(), "{raw}");
+}
+
+// ---- T-076: the post-processing keys ---------------------------------------------
+
+fn delivered_line(post_processing: Option<PostProcessTrace>) -> LogEvent {
+    LogEvent::Dictation(DictationLine {
+        recording: 3,
+        engine: Some(EngineTag::Api),
+        outcome: DictationOutcome::Delivered(DeliveryResult::Pasted),
+        detector: Some(DetectorTag::Energy),
+        press_to_frame_ms: Some(41),
+        duration_ms: Some(3_000),
+        stop_to_text_ms: Some(15_900),
+        text_to_paste_ms: Some(95),
+        post_processing,
+    })
+}
+
+fn delivered_pairs() -> Vec<(&'static str, String)> {
+    vec![
+        ("rec", "3".to_string()),
+        ("engine", "api".to_string()),
+        ("outcome", "delivered".to_string()),
+        ("result", "pasted".to_string()),
+        ("detector", "energy".to_string()),
+        ("press_to_frame_ms", "41".to_string()),
+        ("duration_ms", "3000".to_string()),
+        ("stop_to_text_ms", "15900".to_string()),
+        ("text_to_paste_ms", "95".to_string()),
+    ]
+}
+
+#[test]
+fn dictation_line_carries_pp_keys_per_post_processing_result() {
+    // T-076 / spec 003 FR-014, US3-2: a traced job's line has pp=<off|applied|
+    // skipped>, pp_reason=<one of the six kinds> exactly for a skip, pp_ms=<n>
+    // exactly for applied or skipped (off has a trace but no step to time), each
+    // value from its own literal; a skip on a delivered line stays INFO. Bite: no
+    // pp keys written, the result or kind Debug-formatted ("Skipped(Timeout)",
+    // "InvalidKey"), two kinds on one literal, pp_reason on every line, pp_ms on
+    // an off line or missing on a skip, a skip raising the level to WARN.
+    let mut pp_literals = BTreeSet::new();
+    let mut reason_literals = BTreeSet::new();
+    for (result, pp, reason) in all_pp_results() {
+        let raw = format_line(
+            at(NOON_UTC, 0),
+            0,
+            &delivered_line(Some(PostProcessTrace { result, ms: 15_004 })),
+        );
+        let l = parsed(&raw);
+        assert_eq!(l.level, "INFO", "{result:?}: {raw}");
+        let mut want = delivered_pairs();
+        want.push(("pp", pp.to_string()));
+        if let Some(reason) = reason {
+            want.push(("pp_reason", reason.to_string()));
+            assert!(reason_literals.insert(reason), "{reason} used twice");
+        }
+        if result != PostProcessResult::Off {
+            want.push(("pp_ms", "15004".to_string()));
+        }
+        assert_eq!(l.pairs, pairs(&want), "{result:?}: {raw}");
+        check_closed(&l).unwrap_or_else(|e| panic!("{result:?}: {e}"));
+        pp_literals.insert(pp);
+    }
+    assert_eq!(
+        pp_literals.len(),
+        3,
+        "off, applied, skipped: {pp_literals:?}"
+    );
+    let want_pp: BTreeSet<&str> = PP_RESULTS.iter().copied().collect();
+    assert_eq!(pp_literals, want_pp);
+    let want_reasons: BTreeSet<&str> = PP_REASONS.iter().copied().collect();
+    assert_eq!(reason_literals, want_reasons);
+}
+
+#[test]
+fn a_line_without_a_trace_has_no_pp_key() {
+    // T-076 interpretation: no trace (the stage was not called: no speech before
+    // it, a failed transcription, no engine) writes no pp key at all, not pp=off.
+    // Bite: None written as pp=off or pp_ms=0.
+    let raw = format_line(at(NOON_UTC, 0), 0, &delivered_line(None));
+    let l = parsed(&raw);
+    assert_eq!(l.pairs, pairs(&delivered_pairs()), "{raw}");
+    assert!(
+        l.keys().iter().all(|k| !k.starts_with("pp")),
+        "no pp key without a trace: {raw}"
+    );
+}
+
+#[test]
+fn pp_keys_ride_on_failed_and_no_speech_lines_too() {
+    // T-076: a job that reached the stage keeps its trace whatever closes it: a
+    // clipboard failure after post-processing (failed, WARN) and a reply that was
+    // blank after post-processing (no_speech). A real 0 ms is written. Bite: the
+    // trace written only on delivered lines, the level keyed on the pp result,
+    // pp_ms=0 dropped.
+    let failed = LogEvent::Dictation(DictationLine {
+        recording: 4,
+        engine: Some(EngineTag::Api),
+        outcome: DictationOutcome::Failed {
+            failure: FailureTag::ClipboardUnavailable,
+            http_status: None,
+        },
+        detector: Some(DetectorTag::Energy),
+        press_to_frame_ms: None,
+        duration_ms: Some(2_000),
+        stop_to_text_ms: Some(900),
+        text_to_paste_ms: None,
+        post_processing: Some(PostProcessTrace {
+            result: PostProcessResult::Applied,
+            ms: 812,
+        }),
+    });
+    let raw = format_line(at(NOON_UTC, 0), 0, &failed);
+    let l = parsed(&raw);
+    assert_eq!(l.level, "WARN", "{raw}");
+    assert_eq!(
+        l.pairs,
+        pairs(&[
+            ("rec", "4".to_string()),
+            ("engine", "api".to_string()),
+            ("outcome", "failed".to_string()),
+            ("failure", "clipboard_unavailable".to_string()),
+            ("detector", "energy".to_string()),
+            ("duration_ms", "2000".to_string()),
+            ("stop_to_text_ms", "900".to_string()),
+            ("pp", "applied".to_string()),
+            ("pp_ms", "812".to_string()),
+        ]),
+        "{raw}"
+    );
+
+    let no_speech = LogEvent::Dictation(DictationLine {
+        recording: 5,
+        engine: Some(EngineTag::LocalServer),
+        outcome: DictationOutcome::NoSpeech,
+        detector: Some(DetectorTag::Silero),
+        press_to_frame_ms: None,
+        duration_ms: None,
+        stop_to_text_ms: Some(700),
+        text_to_paste_ms: None,
+        post_processing: Some(PostProcessTrace {
+            result: PostProcessResult::Skipped(SkipKind::Http),
+            ms: 0,
+        }),
+    });
+    let raw = format_line(at(NOON_UTC, 0), 0, &no_speech);
+    let l = parsed(&raw);
+    assert_eq!(l.level, "INFO", "{raw}");
+    assert_eq!(
+        l.pairs,
+        pairs(&[
+            ("rec", "5".to_string()),
+            ("engine", "local_server".to_string()),
+            ("outcome", "no_speech".to_string()),
+            ("detector", "silero".to_string()),
+            ("stop_to_text_ms", "700".to_string()),
+            ("pp", "skipped".to_string()),
+            ("pp_reason", "http".to_string()),
+            ("pp_ms", "0".to_string()),
+        ]),
+        "{raw}"
+    );
+}
+
+#[test]
+fn the_pp_grammar_refuses_keys_outside_their_sets_and_pairings() {
+    // The grammar rows of T-076 in diag_support are not toothless: each line below
+    // breaks exactly one pp rule and is refused; the well-formed ones pass. Bite (on
+    // diag_support): pp or pp_reason accepted as any word, pp_ms accepted on off,
+    // pp_reason without pp=skipped, pp on a recording that had no job.
+    let ts = "2026-10-04T12:00:00.000+00:00";
+    let base = "dictation rec=3 engine=api outcome=delivered result=pasted";
+    let ok = [
+        format!("{ts} INFO {base} pp=off"),
+        format!("{ts} INFO {base} pp=applied pp_ms=12"),
+        format!("{ts} INFO {base} pp=skipped pp_reason=timeout pp_ms=15004"),
+        format!("{ts} WARN dictation rec=3 outcome=failed failure=clipboard_unavailable pp=applied pp_ms=0"),
+        format!("{ts} INFO dictation rec=3 outcome=no_speech pp=skipped pp_reason=http pp_ms=9"),
+        format!("{ts} INFO {base}"),
+    ];
+    for raw in &ok {
+        let l = parsed(raw);
+        assert_eq!(check_closed(&l), Ok(()), "{raw}");
+    }
+    let refused = [
+        format!("{ts} INFO {base} pp=bogus"),
+        format!("{ts} INFO {base} pp=skipped pp_reason=api.example.com pp_ms=1"),
+        format!("{ts} INFO {base} pp=skipped pp_reason=http_500 pp_ms=1"),
+        format!("{ts} INFO {base} pp=skipped pp_ms=1"),
+        format!("{ts} INFO {base} pp=applied pp_reason=timeout pp_ms=1"),
+        format!("{ts} INFO {base} pp=off pp_ms=3"),
+        format!("{ts} INFO {base} pp=applied"),
+        format!("{ts} INFO {base} pp=skipped pp_reason=timeout"),
+        format!("{ts} INFO {base} pp_ms=3"),
+        format!("{ts} INFO {base} pp_reason=timeout"),
+        format!("{ts} INFO {base} pp=applied pp_ms=x1"),
+        format!("{ts} INFO dictation rec=3 outcome=too_short pp=off"),
+        format!("{ts} INFO dictation rec=3 outcome=cancelled pp=applied pp_ms=1"),
+        format!("{ts} WARN dictation rec=3 outcome=capture_failed mic=busy pp=off"),
+        format!("{ts} WARN dictation outcome=blocked reason=no_engine pp=off"),
+    ];
+    for raw in &refused {
+        let refused_here = parse(raw).and_then(|l| check_closed(&l)).is_err();
+        assert!(refused_here, "the grammar accepted {raw:?}");
+    }
+    assert_eq!(PP_RESULTS.len(), 3);
+    assert_eq!(PP_REASONS.len(), all_skip_kinds().len());
 }

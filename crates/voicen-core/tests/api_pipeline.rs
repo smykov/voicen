@@ -24,7 +24,10 @@ use voicen_core::audio::{wav, AudioBuffer};
 use voicen_core::autostart::FakeAutostart;
 use voicen_core::clock::FakeClock;
 use voicen_core::delivery::{DeliveryResult, MODIFIER_WAIT};
-use voicen_core::events::{DictationEvent, OutcomeCode, RecordingObserver, WarningCode};
+use voicen_core::events::{
+    DictationEvent, OutcomeCode, PostProcessResult, PostProcessTrace, RecordingObserver,
+    WarningCode,
+};
 use voicen_core::failure::FailureReason;
 use voicen_core::hotkey_registrar::FakeHotkeyRegistrar;
 use voicen_core::i18n::{self, text, MessageId, UiLanguage};
@@ -399,6 +402,12 @@ async fn speech_is_transcribed_and_delivered_as_mock_text() {
             outcome: OutcomeCode::Text,
             failure: None,
             http_status: None,
+            // T-076: PassThrough is the stage with post-processing off (NotRun).
+            post_processing:
+                Some(PostProcessTrace {
+                    result: PostProcessResult::Off,
+                    ..
+                }),
         }, DictationEvent::Delivered {
             seq: delivered_seq,
             result: DeliveryResult::Pasted,

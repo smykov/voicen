@@ -224,6 +224,48 @@ mod tests {
     }
 
     #[test]
+    fn skip_kind_is_the_closed_copy_of_the_reason() {
+        // T-076: the log gets SkipReason::kind(), a Copy closed enum without the host
+        // or the status, one kind per reason, spelled like code() (the pp_reason
+        // literals). Bite: a shared kind, a kind that depends on the host or the
+        // status, a kind that disagrees with code().
+        use crate::events::SkipKind;
+        fn literal(kind: SkipKind) -> &'static str {
+            match kind {
+                SkipKind::Timeout => "timeout",
+                SkipKind::Unreachable => "unreachable",
+                SkipKind::InvalidKey => "invalid_key",
+                SkipKind::Http => "http",
+                SkipKind::InvalidResponse => "invalid_response",
+                SkipKind::NotConfigured => "not_configured",
+            }
+        }
+        fn assert_copy<T: Copy>() {}
+        assert_copy::<SkipKind>();
+        let mut kinds = Vec::new();
+        for r in every_reason() {
+            let kind = r.kind();
+            assert_eq!(literal(kind), r.code(), "{r:?}");
+            assert!(!kinds.contains(&kind), "{r:?}: {kind:?} used twice");
+            kinds.push(kind);
+        }
+        assert_eq!(kinds.len(), 6);
+        for host in ["", "llm.example.com", "192.0.2.10:8000"] {
+            let r = SkipReason::Unreachable {
+                host: host.to_string(),
+            };
+            assert_eq!(r.kind(), SkipKind::Unreachable, "{host:?}");
+        }
+        for status in [100, 404, 500, u16::MAX] {
+            assert_eq!(
+                SkipReason::Http { status }.kind(),
+                SkipKind::Http,
+                "{status}"
+            );
+        }
+    }
+
+    #[test]
     fn final_text_is_the_applied_text_else_the_raw() {
         // data-model "PostProcessOutcome" / FR-016: Applied(text) -> text;
         // NotRun and every Skipped -> the raw transcript, the same bytes. Bite:

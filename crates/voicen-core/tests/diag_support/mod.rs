@@ -438,6 +438,19 @@ pub const WARNING_KINDS: &[&str] = &[
     "logs_folder_failed",
     "test_connection_failed",
 ];
+/// `pp=<...>` on a dictation line (T-076, spec 003 FR-014): one literal per
+/// `events::PostProcessResult` kind.
+pub const PP_RESULTS: &[&str] = &["off", "applied", "skipped"];
+/// `pp_reason=<...>` (T-076): one literal per `events::SkipKind`, the six
+/// `SkipReason::code()` spellings; never a host or a status.
+pub const PP_REASONS: &[&str] = &[
+    "timeout",
+    "unreachable",
+    "invalid_key",
+    "http",
+    "invalid_response",
+    "not_configured",
+];
 pub const LOAD_OUTCOMES: &[&str] = &["loaded", "first_run", "reset", "unavailable"];
 /// `settings test_connection result=<...>` (spec 004 R-11, T-046 choice (iv)),
 /// besides `http_<status>`.
@@ -522,7 +535,7 @@ pub fn check_closed(line: &Line) -> Result<(), String> {
         match (line.head.as_str(), k) {
             ("started", "pid") => check(unsigned(v), k, v)?,
             ("dictation", "rec" | "press_to_frame_ms" | "duration_ms" | "stop_to_text_ms")
-            | ("dictation", "text_to_paste_ms") => check(unsigned(v), k, v)?,
+            | ("dictation", "text_to_paste_ms" | "pp_ms") => check(unsigned(v), k, v)?,
             ("dictation", "http_status") => {
                 check(unsigned(v) && v.parse::<u16>().is_ok(), k, v)?;
             }
@@ -533,6 +546,8 @@ pub fn check_closed(line: &Line) -> Result<(), String> {
             ("dictation", "detector") => one_of(k, v, DETECTORS)?,
             ("dictation", "mic") => one_of(k, v, MIC_CAUSES)?,
             ("dictation", "reason") => one_of(k, v, BLOCK_REASONS)?,
+            ("dictation", "pp") => one_of(k, v, PP_RESULTS)?,
+            ("dictation", "pp_reason") => one_of(k, v, PP_REASONS)?,
             ("warning", "kind") => one_of(k, v, WARNING_KINDS)?,
             ("warning", "os_code") => check(signed(v), k, v)?,
             ("settings load", "outcome") => one_of(k, v, LOAD_OUTCOMES)?,
@@ -583,6 +598,33 @@ pub fn check_closed(line: &Line) -> Result<(), String> {
         if (outcome == "capture_failed") != line.get("mic").is_some() {
             return Err(format!(
                 "mic= exactly on capture_failed lines: {:?}",
+                line.raw
+            ));
+        }
+        // T-076: the post-processing keys. pp_reason exactly on pp=skipped; pp_ms
+        // exactly on pp=applied|skipped (never on off, never without pp); no pp* on
+        // a line whose recording never reached the stage.
+        let pp = line.get("pp");
+        if (pp == Some("skipped")) != line.get("pp_reason").is_some() {
+            return Err(format!(
+                "pp_reason= exactly on pp=skipped lines: {:?}",
+                line.raw
+            ));
+        }
+        if matches!(pp, Some("applied" | "skipped")) != line.get("pp_ms").is_some() {
+            return Err(format!(
+                "pp_ms= exactly on pp=applied|skipped lines: {:?}",
+                line.raw
+            ));
+        }
+        if pp.is_some()
+            && matches!(
+                outcome,
+                "blocked" | "too_short" | "cancelled" | "capture_failed"
+            )
+        {
+            return Err(format!(
+                "no pp= on a line whose recording never reached post-processing: {:?}",
                 line.raw
             ));
         }

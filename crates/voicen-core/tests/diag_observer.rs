@@ -21,7 +21,10 @@ use common::timing::now;
 use diag_support::{active_lines, closed, dictation_lines, open_log, pairs, Line, NOON_UTC};
 use voicen_core::delivery::DeliveryResult;
 use voicen_core::diag::{LogConfig, LogObserver};
-use voicen_core::events::{DeviceKind, DictationEvent, OutcomeCode, PipelineObserver, WarningCode};
+use voicen_core::events::{
+    DeviceKind, DictationEvent, OutcomeCode, PipelineObserver, PostProcessResult, PostProcessTrace,
+    SkipKind, WarningCode,
+};
 use voicen_core::failure::FailureReason;
 use voicen_core::recording::{MicCause, Press, RecordingController, RecordingEnd, RecordingId};
 use voicen_core::settings::gate::Blocked;
@@ -118,6 +121,30 @@ fn finished(
     failure: Option<&'static str>,
     http_status: Option<u16>,
 ) -> DictationEvent {
+    finished_pp(
+        seq,
+        recording,
+        engine,
+        stop_to_text_ms,
+        outcome,
+        failure,
+        http_status,
+        None,
+    )
+}
+
+/// `JobFinished` with its post-processing trace (T-076).
+#[allow(clippy::too_many_arguments)]
+fn finished_pp(
+    seq: u64,
+    recording: RecordingId,
+    engine: Option<&'static str>,
+    stop_to_text_ms: u64,
+    outcome: OutcomeCode,
+    failure: Option<&'static str>,
+    http_status: Option<u16>,
+    post_processing: Option<PostProcessTrace>,
+) -> DictationEvent {
     DictationEvent::JobFinished {
         seq,
         recording,
@@ -126,7 +153,12 @@ fn finished(
         outcome,
         failure,
         http_status,
+        post_processing,
     }
+}
+
+fn trace(result: PostProcessResult, ms: u64) -> Option<PostProcessTrace> {
+    Some(PostProcessTrace { result, ms })
 }
 
 fn delivered(seq: u64, text_to_paste_ms: u64, result: DeliveryResult) -> DictationEvent {
@@ -1009,4 +1041,275 @@ fn every_failure_code_reaches_the_line_as_its_literal() {
             line.raw
         );
     }
+}
+
+// ---- T-076: the post-processing trace -------------------------------------------
+
+#[test]
+fn a_skipped_post_processing_reaches_the_delivered_line() {
+    // T-076 Investigation test 2: JobFinished{post_processing: Skipped(Timeout),
+    // 15004 ms} then Delivered gives one line with pp=skipped pp_reason=timeout
+    // pp_ms=15004 beside every key it had before. Bite: the observer ignoring the
+    // field (no pp key), the trace dropped between JobFinished and Delivered (kept
+    // only for lines closed at JobFinished), the kind or the duration swapped.
+    let f = fixture();
+    let [a] = ids(1)[..] else { unreachable!() };
+    f.feed(&[
+        started(a, 41),
+        ended(a, 3_000, RecordingEnd::Released),
+        gate(a, "energy", true),
+        finished_pp(
+            1,
+            a,
+            Some("api"),
+            15_900,
+            OutcomeCode::Text,
+            None,
+            None,
+            trace(PostProcessResult::Skipped(SkipKind::Timeout), 15_004),
+        ),
+        delivered(1, 95, DeliveryResult::Pasted),
+    ]);
+    let lines = f.dictations();
+    assert_eq!(lines.len(), 1, "{lines:#?}");
+    assert_eq!(lines[0].level, "INFO", "a skip is still a delivery");
+    assert_eq!(
+        lines[0].pairs,
+        pairs(&[
+            ("rec", s(a.get())),
+            ("engine", "api".to_string()),
+            ("outcome", "delivered".to_string()),
+            ("result", "pasted".to_string()),
+            ("detector", "energy".to_string()),
+            ("press_to_frame_ms", s(41)),
+            ("duration_ms", s(3_000)),
+            ("stop_to_text_ms", s(15_900)),
+            ("text_to_paste_ms", s(95)),
+            ("pp", "skipped".to_string()),
+            ("pp_reason", "timeout".to_string()),
+            ("pp_ms", s(15_004)),
+        ])
+    );
+}
+
+#[test]
+fn every_post_processing_result_reaches_its_line_and_none_gives_no_pp_key() {
+    // Each PostProcessResult on a delivered job gives its pp / pp_reason / pp_ms
+    // keys; a job without a trace gives no pp key. Bite: Off and Applied
+    // collapsed, every skip logged as one kind, None written as pp=off.
+    // A trace and the pp pairs its line must end with.
+    type Case = (Option<PostProcessTrace>, Vec<(&'static str, String)>);
+    let cases: Vec<Case> = vec![
+        (None, vec![]),
+        (
+            trace(PostProcessResult::Off, 3),
+            vec![("pp", "off".to_string())],
+        ),
+        (
+            trace(PostProcessResult::Applied, 640),
+            vec![("pp", "applied".to_string()), ("pp_ms", s(640))],
+        ),
+        (
+            trace(PostProcessResult::Skipped(SkipKind::Unreachable), 7),
+            vec![
+                ("pp", "skipped".to_string()),
+                ("pp_reason", "unreachable".to_string()),
+                ("pp_ms", s(7)),
+            ],
+        ),
+        (
+            trace(PostProcessResult::Skipped(SkipKind::InvalidKey), 8),
+            vec![
+                ("pp", "skipped".to_string()),
+                ("pp_reason", "invalid_key".to_string()),
+                ("pp_ms", s(8)),
+            ],
+        ),
+        (
+            trace(PostProcessResult::Skipped(SkipKind::Http), 9),
+            vec![
+                ("pp", "skipped".to_string()),
+                ("pp_reason", "http".to_string()),
+                ("pp_ms", s(9)),
+            ],
+        ),
+        (
+            trace(PostProcessResult::Skipped(SkipKind::InvalidResponse), 10),
+            vec![
+                ("pp", "skipped".to_string()),
+                ("pp_reason", "invalid_response".to_string()),
+                ("pp_ms", s(10)),
+            ],
+        ),
+        (
+            trace(PostProcessResult::Skipped(SkipKind::NotConfigured), 11),
+            vec![
+                ("pp", "skipped".to_string()),
+                ("pp_reason", "not_configured".to_string()),
+                ("pp_ms", s(11)),
+            ],
+        ),
+    ];
+    let f = fixture();
+    let recs = ids(cases.len());
+    for (i, ((pp, _), id)) in cases.iter().zip(&recs).enumerate() {
+        let seq = i as u64 + 1;
+        f.feed(&[
+            finished_pp(
+                seq,
+                *id,
+                Some("api"),
+                500,
+                OutcomeCode::Text,
+                None,
+                None,
+                *pp,
+            ),
+            delivered(seq, 20, DeliveryResult::CopiedOnly),
+        ]);
+    }
+    let lines = f.dictations();
+    assert_eq!(lines.len(), cases.len(), "{lines:#?}");
+    for ((pp, want_pp), id) in cases.iter().zip(&recs) {
+        let line = lines
+            .iter()
+            .find(|l| l.get("rec") == Some(s(id.get()).as_str()))
+            .unwrap_or_else(|| panic!("no line for {id:?}: {lines:#?}"));
+        let mut want = vec![
+            ("rec", s(id.get())),
+            ("engine", "api".to_string()),
+            ("outcome", "delivered".to_string()),
+            ("result", "copied_only".to_string()),
+            ("stop_to_text_ms", s(500)),
+            ("text_to_paste_ms", s(20)),
+        ];
+        want.extend(want_pp.iter().cloned());
+        assert_eq!(line.pairs, pairs(&want), "{pp:?}");
+    }
+}
+
+#[test]
+fn failed_and_no_speech_jobs_keep_their_trace() {
+    // T-076: the trace rides on every JobFinished release emits after the stage: a
+    // clipboard failure after post-processing (closed at JobFinished, WARN) keeps
+    // pp=applied, and a job whose post-processed text was blank (no_speech) keeps
+    // its trace. A no-speech job that never reached the stage has no pp key.
+    // Bite: the trace copied only on the Text path, or only at Delivered.
+    let f = fixture();
+    let [a, b, c] = ids(3)[..] else {
+        unreachable!()
+    };
+    f.feed(&[
+        finished_pp(
+            1,
+            a,
+            Some("api"),
+            900,
+            OutcomeCode::Failed,
+            Some("ClipboardUnavailable"),
+            None,
+            trace(PostProcessResult::Applied, 812),
+        ),
+        finished_pp(
+            2,
+            b,
+            Some("api"),
+            700,
+            OutcomeCode::NoSpeech,
+            None,
+            None,
+            trace(PostProcessResult::Applied, 5),
+        ),
+        finished(3, c, None, 4, OutcomeCode::NoSpeech, None, None),
+    ]);
+    let lines = f.dictations();
+    assert_eq!(lines.len(), 3, "{lines:#?}");
+    let by_rec = |id: RecordingId| {
+        lines
+            .iter()
+            .find(|l| l.get("rec") == Some(s(id.get()).as_str()))
+            .unwrap_or_else(|| panic!("no line for {id:?}: {lines:#?}"))
+            .clone()
+    };
+    let la = by_rec(a);
+    assert_eq!(la.level, "WARN");
+    assert_eq!(
+        la.pairs,
+        pairs(&[
+            ("rec", s(a.get())),
+            ("engine", "api".to_string()),
+            ("outcome", "failed".to_string()),
+            ("failure", "clipboard_unavailable".to_string()),
+            ("stop_to_text_ms", s(900)),
+            ("pp", "applied".to_string()),
+            ("pp_ms", s(812)),
+        ])
+    );
+    assert_eq!(
+        by_rec(b).pairs,
+        pairs(&[
+            ("rec", s(b.get())),
+            ("engine", "api".to_string()),
+            ("outcome", "no_speech".to_string()),
+            ("stop_to_text_ms", s(700)),
+            ("pp", "applied".to_string()),
+            ("pp_ms", s(5)),
+        ])
+    );
+    assert_eq!(
+        by_rec(c).pairs,
+        pairs(&[
+            ("rec", s(c.get())),
+            ("outcome", "no_speech".to_string()),
+            ("stop_to_text_ms", s(4)),
+        ])
+    );
+}
+
+#[test]
+fn interleaved_jobs_keep_their_own_trace() {
+    // The trace is joined by recording like every other per-job field: B's
+    // JobFinished comes between A's JobFinished and A's Delivered, and each line
+    // carries its own job's trace. Bite: one "last trace" on the observer instead
+    // of one per record, the trace joined by event order.
+    let f = fixture();
+    let [a, b] = ids(2)[..] else { unreachable!() };
+    f.feed(&[
+        finished_pp(
+            1,
+            a,
+            Some("api"),
+            100,
+            OutcomeCode::Text,
+            None,
+            None,
+            trace(PostProcessResult::Skipped(SkipKind::Http), 250),
+        ),
+        finished_pp(
+            2,
+            b,
+            Some("api"),
+            200,
+            OutcomeCode::Text,
+            None,
+            None,
+            trace(PostProcessResult::Off, 0),
+        ),
+        delivered(1, 10, DeliveryResult::Pasted),
+        delivered(2, 20, DeliveryResult::Pasted),
+    ]);
+    let lines = f.dictations();
+    assert_eq!(lines.len(), 2, "{lines:#?}");
+    let get = |id: RecordingId, key: &str| {
+        lines
+            .iter()
+            .find(|l| l.get("rec") == Some(s(id.get()).as_str()))
+            .and_then(|l| l.get(key).map(str::to_string))
+    };
+    assert_eq!(get(a, "pp").as_deref(), Some("skipped"), "{lines:#?}");
+    assert_eq!(get(a, "pp_reason").as_deref(), Some("http"), "{lines:#?}");
+    assert_eq!(get(a, "pp_ms").as_deref(), Some("250"), "{lines:#?}");
+    assert_eq!(get(b, "pp").as_deref(), Some("off"), "{lines:#?}");
+    assert_eq!(get(b, "pp_reason"), None, "{lines:#?}");
+    assert_eq!(get(b, "pp_ms"), None, "{lines:#?}");
 }

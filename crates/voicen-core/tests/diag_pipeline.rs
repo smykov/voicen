@@ -29,13 +29,14 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use common::os_answer::OsAnswer;
-use common::timing::{ago, now};
+use common::timing::{ago, at_least, now};
 use diag_support::{
     all_lines, closed, contains, dictation_lines, files_under, open_log, utf16le, Line,
 };
 use serde_json::json;
 use voicen_core::autostart::FakeAutostart;
 use voicen_core::clock::FakeClock;
+use voicen_core::delivery::DeliveryResult;
 use voicen_core::diag::{Log, LogConfig, LogEvent, LogObserver};
 use voicen_core::events::{DeviceKind, DictationEvent, PipelineObserver};
 use voicen_core::failure::FailureReason;
@@ -46,7 +47,9 @@ use voicen_core::pipeline::{JobReport, Pipeline, PipelineDeps, PressContext};
 use voicen_core::platform::{
     FakeClipboard, FakePaster, FakeTempAudioStore, StartWindow, WindowRef,
 };
-use voicen_core::post_process::PassThrough;
+use voicen_core::post_process::chat::ChatPostProcessor;
+use voicen_core::post_process::settings::PostProcessingSettings;
+use voicen_core::post_process::{PassThrough, PostProcessor, SkipReason};
 use voicen_core::recording::{
     JobEnd, Press, RecordingController, RecordingEnd, RecordingId, Release,
 };
@@ -57,10 +60,23 @@ use voicen_core::settings::{defaults, EngineKind, LoadOutcome, Settings};
 use voicen_core::test_support::{fixtures, TempDir};
 use voicen_core::timeouts::Timeouts;
 use voicen_core::vad::{EnergyDetector, SpeechDetector, SpeechGate};
-use wiremock::matchers::any;
+use wiremock::matchers::{any, path_regex};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const KEY: &str = "sk-test-SECRET";
+// T-076 canaries of the post-processing run: the key, the prompt, the chat reply,
+// the model, the base URL's query and a host that only a refused base URL holds.
+// Lowercase ones pass the log's value grammar, so only the allowlist keeps them out.
+const PP_KEY: &str = "sk-test-PP-SECRET";
+const PP_PROMPT: &str = "PROMPT-SECRET-fix the text";
+const PP_REPLY: &str = "REPLY-SECRET-the fixed text";
+const PP_MODEL: &str = "pp_model_secret";
+const PP_QUERY: &str = "ppqsecret";
+const PP_HOST: &str = "pp-host-secret.example.com";
+/// What the recording's stop lies before `run_job` starts: the press is 4 s ago,
+/// the hold 3 s (see `dictate_with`). The stage starts after it, so every traced
+/// job's stop_to_text_ms is at least this plus its pp_ms, under any load.
+const STOP_BEFORE_JOB_MS: u64 = 1_000;
 const QUERY_SECRET: &str = "SECRETQ";
 const TRANSCRIPT: &str = "TRANSCRIPT-MARKER";
 const OS: Option<&str> = Some("en-US");
@@ -114,17 +130,39 @@ fn dictate(
     timeouts: Timeouts,
     clipboard_fails: bool,
 ) -> (RecordingId, JobReport, Vec<String>) {
+    dictate_with(
+        log,
+        settings,
+        timeouts,
+        clipboard_fails,
+        Arc::new(PassThrough),
+    )
+}
+
+/// [`dictate`] with `post_processor` as the stage (T-076), and the
+/// post-processing key stored next to the transcription key.
+fn dictate_with(
+    log: &Arc<Log>,
+    settings: Settings,
+    timeouts: Timeouts,
+    clipboard_fails: bool,
+    post_processor: Arc<dyn PostProcessor>,
+) -> (RecordingId, JobReport, Vec<String>) {
     let clipboard = Arc::new(FakeClipboard::new());
     clipboard.set_fail(clipboard_fails);
     let observer = Arc::new(LogObserver::new(Arc::clone(log)));
     let deps = PipelineDeps {
         gate: energy_gate(),
-        credentials: Arc::new(FakeCredentialStore::new().with_key(KeySlot::TranscriptionApi, KEY)),
+        credentials: Arc::new(
+            FakeCredentialStore::new()
+                .with_key(KeySlot::TranscriptionApi, KEY)
+                .with_key(KeySlot::PostProcessing, PP_KEY),
+        ),
         clipboard: clipboard.clone(),
         paster: Arc::new(FakePaster::new()),
         temp_audio: Arc::new(FakeTempAudioStore::new()),
         observer: observer.clone(),
-        post_processor: Arc::new(PassThrough),
+        post_processor,
     };
     let pipeline = Pipeline::with_timeouts(deps, timeouts);
     let mut ctrl = RecordingController::<PressContext>::new();
@@ -404,6 +442,365 @@ async fn log_holds_no_key_query_or_transcript_on_any_path() {
     for file in files {
         let bytes = std::fs::read(&file).expect("read");
         for secret in [KEY, QUERY_SECRET, TRANSCRIPT] {
+            assert!(
+                !contains(&bytes, secret.as_bytes()) && !contains(&bytes, &utf16le(secret)),
+                "{secret} in {}",
+                file.display()
+            );
+        }
+    }
+    assert_eq!(seen.count(), 0);
+}
+
+// ---- T-076: the post-processing outcome on the dictation line ---------------------------
+
+/// A chat endpoint (`.../chat/completions`) answering `response`.
+async fn chat_with(response: ResponseTemplate) -> MockServer {
+    let server = MockServer::start().await;
+    Mock::given(path_regex("/chat/completions$"))
+        .respond_with(response)
+        .mount(&server)
+        .await;
+    server
+}
+
+fn chat_reply(text: &str) -> ResponseTemplate {
+    ResponseTemplate::new(200).set_body_json(json!({
+        "choices": [{ "message": { "role": "assistant", "content": text } }]
+    }))
+}
+
+/// The post-processing base URL of `server`, with the query canary.
+fn pp_base(server: &MockServer) -> String {
+    format!("{}/v1?api-version={PP_QUERY}", server.uri())
+}
+
+/// api_settings for transcription at `api_base`, with post-processing `enabled`
+/// at `pp_base_url`, the planted model and prompt.
+fn pp_settings(api_base: &str, enabled: bool, pp_base_url: &str) -> Settings {
+    let mut s = api_settings(api_base);
+    s.post_processing = PostProcessingSettings {
+        enabled,
+        base_url: pp_base_url.to_string(),
+        model: PP_MODEL.to_string(),
+        prompt: PP_PROMPT.to_string(),
+    };
+    s
+}
+
+/// One T-076 scenario and what its dictation line must say.
+struct PpScenario {
+    label: &'static str,
+    settings: Settings,
+    timeouts: Timeouts,
+    clipboard_fails: bool,
+    end: JobEnd,
+    /// What reaches the clipboard (`None`: the write fails).
+    clipboard: Option<&'static str>,
+    outcome: &'static str,
+    /// `pp=`, `pp_reason=`; `pp_ms=` is required exactly for applied / skipped.
+    pp: Option<&'static str>,
+    pp_reason: Option<&'static str>,
+    /// pp_ms is at least this (the chat's delay or the stage's deadline).
+    pp_ms_at_least: Duration,
+}
+
+#[tokio::test]
+async fn post_processing_outcome_is_logged_without_prompt_reply_host_or_key() {
+    // T-076 Acceptance 1 and 2 (spec 003 FR-014, US3-2; FR-20, NFR-04): real
+    // dictations through Pipeline + ChatPostProcessor + LogObserver into one Log.
+    // Each post-processed job's line carries pp=applied|skipped|off, pp_reason=
+    // for a skip (all six kinds through the real processor), pp_ms= for applied and
+    // skipped; a job whose transcription failed carries no pp key; a clipboard
+    // failure after the stage keeps it. pp_ms is at least the chat's delay (applied)
+    // and the stage deadline (timeout), and the stage lies inside stop -> text
+    // (pp_ms + 1 s <= stop_to_text_ms, an interval relation no load can break). No
+    // byte of the post-processing key, prompt, reply, model, base-URL query or a
+    // refused/unparsable host, nor the transcript, reaches any file under the logs
+    // dir, though each was sent (positive controls). Bite: no pp keys (today), the
+    // skip reason written from SkipReason::code() of a value with the host,
+    // Debug-formatted, every skip as one kind, pp=off for a job that never reached
+    // the stage, pp_ms = 0 or the whole job's time, the trace dropped on the
+    // clipboard-failure line, the reply or prompt kept anywhere the log reads.
+    let transcribe = server_with(ok_text(TRANSCRIPT)).await;
+    let api = base(&transcribe);
+    let failing_api = server_with(ResponseTemplate::new(500)).await;
+    let echo = format!("{TRANSCRIPT} {PP_PROMPT} {PP_KEY} {PP_REPLY} {PP_MODEL} {PP_QUERY}");
+    let chat_delay = Duration::from_millis(150);
+    let chat_ok = chat_with(chat_reply(PP_REPLY).set_delay(chat_delay)).await;
+    let chat_500 = chat_with(ResponseTemplate::new(500).set_body_string(echo.clone())).await;
+    let chat_401 = chat_with(ResponseTemplate::new(401).set_body_string(echo.clone())).await;
+    let chat_bad =
+        chat_with(ResponseTemplate::new(200).set_body_json(json!({ "choices": [], "echo": echo })))
+            .await;
+    let chat_slow = chat_with(chat_reply(PP_REPLY).set_delay(Duration::from_secs(3))).await;
+    let chat_off = chat_with(chat_reply(PP_REPLY)).await;
+    let chat_unused = chat_with(chat_reply(PP_REPLY)).await;
+    let refused_case = OsAnswer::refused();
+    let refused = format!("http://{}/v1?api-version={PP_QUERY}", refused_case.host);
+    let unparsable = format!("ftp://{PP_HOST}/v1?api-version={PP_QUERY}");
+
+    let t = Timeouts {
+        connect: Duration::from_secs(2),
+        api_transcription: Duration::from_secs(5),
+        post_processing: Duration::from_secs(5),
+        ..Timeouts::default()
+    };
+    let pp_deadline = Duration::from_millis(300);
+    let t_pp_short = Timeouts {
+        post_processing: pp_deadline,
+        ..t
+    };
+    let skipped = |reason: SkipReason| JobEnd::DeliveredSkipped {
+        reason,
+        delivery: DeliveryResult::Pasted,
+    };
+    let zero = Duration::ZERO;
+    let scenarios = vec![
+        PpScenario {
+            label: "applied",
+            settings: pp_settings(&api, true, &pp_base(&chat_ok)),
+            timeouts: t,
+            clipboard_fails: false,
+            end: JobEnd::Delivered { notice: None },
+            clipboard: Some(PP_REPLY),
+            outcome: "delivered",
+            pp: Some("applied"),
+            pp_reason: None,
+            pp_ms_at_least: chat_delay,
+        },
+        PpScenario {
+            label: "skipped http 500",
+            settings: pp_settings(&api, true, &pp_base(&chat_500)),
+            timeouts: t,
+            clipboard_fails: false,
+            end: skipped(SkipReason::Http { status: 500 }),
+            clipboard: Some(TRANSCRIPT),
+            outcome: "delivered",
+            pp: Some("skipped"),
+            pp_reason: Some("http"),
+            pp_ms_at_least: zero,
+        },
+        PpScenario {
+            label: "skipped invalid key (401)",
+            settings: pp_settings(&api, true, &pp_base(&chat_401)),
+            timeouts: t,
+            clipboard_fails: false,
+            end: skipped(SkipReason::InvalidKey),
+            clipboard: Some(TRANSCRIPT),
+            outcome: "delivered",
+            pp: Some("skipped"),
+            pp_reason: Some("invalid_key"),
+            pp_ms_at_least: zero,
+        },
+        PpScenario {
+            label: "skipped invalid response",
+            settings: pp_settings(&api, true, &pp_base(&chat_bad)),
+            timeouts: t,
+            clipboard_fails: false,
+            end: skipped(SkipReason::InvalidResponse),
+            clipboard: Some(TRANSCRIPT),
+            outcome: "delivered",
+            pp: Some("skipped"),
+            pp_reason: Some("invalid_response"),
+            pp_ms_at_least: zero,
+        },
+        PpScenario {
+            label: "skipped timeout",
+            settings: pp_settings(&api, true, &pp_base(&chat_slow)),
+            timeouts: t_pp_short,
+            clipboard_fails: false,
+            end: skipped(SkipReason::Timeout),
+            clipboard: Some(TRANSCRIPT),
+            outcome: "delivered",
+            pp: Some("skipped"),
+            pp_reason: Some("timeout"),
+            pp_ms_at_least: pp_deadline,
+        },
+        PpScenario {
+            label: "skipped not configured",
+            settings: pp_settings(&api, true, &unparsable),
+            timeouts: t,
+            clipboard_fails: false,
+            end: skipped(SkipReason::NotConfigured),
+            clipboard: Some(TRANSCRIPT),
+            outcome: "delivered",
+            pp: Some("skipped"),
+            pp_reason: Some("not_configured"),
+            pp_ms_at_least: zero,
+        },
+        PpScenario {
+            label: "skipped unreachable (refused)",
+            settings: pp_settings(&api, true, &refused),
+            timeouts: refused_case.timeouts,
+            clipboard_fails: false,
+            end: skipped(SkipReason::Unreachable {
+                host: refused_case.host.clone(),
+            }),
+            clipboard: Some(TRANSCRIPT),
+            outcome: "delivered",
+            pp: Some("skipped"),
+            pp_reason: Some("unreachable"),
+            pp_ms_at_least: zero,
+        },
+        PpScenario {
+            label: "off",
+            settings: pp_settings(&api, false, &pp_base(&chat_off)),
+            timeouts: t,
+            clipboard_fails: false,
+            end: JobEnd::Delivered { notice: None },
+            clipboard: Some(TRANSCRIPT),
+            outcome: "delivered",
+            pp: Some("off"),
+            pp_reason: None,
+            pp_ms_at_least: zero,
+        },
+        PpScenario {
+            label: "clipboard fails after applied",
+            settings: pp_settings(&api, true, &pp_base(&chat_ok)),
+            timeouts: t,
+            clipboard_fails: true,
+            end: JobEnd::Failed(FailureReason::ClipboardUnavailable),
+            clipboard: None,
+            outcome: "failed",
+            pp: Some("applied"),
+            pp_reason: None,
+            pp_ms_at_least: chat_delay,
+        },
+        PpScenario {
+            label: "transcription fails, post-processing on",
+            settings: pp_settings(&base(&failing_api), true, &pp_base(&chat_unused)),
+            timeouts: t,
+            clipboard_fails: false,
+            end: JobEnd::Failed(FailureReason::ServerError { status: 500 }),
+            clipboard: None,
+            outcome: "failed",
+            pp: None,
+            pp_reason: None,
+            pp_ms_at_least: zero,
+        },
+    ];
+
+    let tmp = TempDir::new();
+    let dir = tmp.path().join("logs");
+    let (log, _clock, seen) = open_log(&dir, SystemTime::now(), 7_200, LogConfig::default());
+
+    let mut wrong = Vec::new();
+    let mut ran = Vec::new();
+    for sc in &scenarios {
+        let (id, report, texts) = dictate_with(
+            &log,
+            sc.settings.clone(),
+            sc.timeouts,
+            sc.clipboard_fails,
+            Arc::new(ChatPostProcessor::new()),
+        );
+        if report.end != sc.end {
+            wrong.push(format!(
+                "{}: {:?}, expected {:?}",
+                sc.label, report.end, sc.end
+            ));
+        }
+        if let Some(want) = sc.clipboard {
+            if texts != vec![want.to_string()] {
+                wrong.push(format!(
+                    "{}: clipboard {texts:?}, expected {want:?}",
+                    sc.label
+                ));
+            }
+        }
+        ran.push((sc, id));
+    }
+    assert!(
+        wrong.is_empty(),
+        "paths not exercised:\n{}",
+        wrong.join("\n")
+    );
+
+    // Positive controls: every planted input was really sent where it belongs.
+    let requests = chat_ok
+        .received_requests()
+        .await
+        .expect("request recording");
+    let r = requests
+        .first()
+        .expect("the applied chat endpoint was called");
+    let body = String::from_utf8_lossy(&r.body);
+    for sent in [TRANSCRIPT, PP_PROMPT, PP_MODEL] {
+        assert!(body.contains(sent), "{sent} in the chat request: {body}");
+    }
+    assert_eq!(r.url.query(), Some("api-version=ppqsecret"));
+    assert_eq!(
+        r.headers.get("authorization").and_then(|v| v.to_str().ok()),
+        Some("Bearer sk-test-PP-SECRET")
+    );
+    for (server, label) in [
+        (&chat_500, "500"),
+        (&chat_401, "401"),
+        (&chat_bad, "bad body"),
+    ] {
+        let n = server.received_requests().await.map_or(0, |r| r.len());
+        assert_eq!(n, 1, "the {label} chat endpoint was called once");
+    }
+    for (server, label) in [(&chat_off, "off"), (&chat_unused, "transcription failed")] {
+        let n = server.received_requests().await.map_or(0, |r| r.len());
+        assert_eq!(n, 0, "{label}: no chat request");
+    }
+
+    // Each scenario has its own closed line, in run order (every dictation runs on
+    // a fresh controller, so rec= repeats), with exactly its pp keys.
+    let lines = all_lines(&dir);
+    for l in &lines {
+        closed(l);
+    }
+    let dictations: Vec<Line> = dictation_lines(&lines);
+    assert_eq!(dictations.len(), scenarios.len(), "{lines:#?}");
+    for ((sc, id), l) in ran.iter().zip(&dictations) {
+        let rec = id.get().to_string();
+        assert_eq!(l.get("rec"), Some(rec.as_str()), "{}: {}", sc.label, l.raw);
+        let ctx = format!("{}: {}", sc.label, l.raw);
+        assert_eq!(l.get("outcome"), Some(sc.outcome), "{ctx}");
+        assert_eq!(l.get("engine"), Some("api"), "{ctx}");
+        assert_eq!(l.get("pp"), sc.pp, "{ctx}");
+        assert_eq!(l.get("pp_reason"), sc.pp_reason, "{ctx}");
+        let timed = matches!(sc.pp, Some("applied" | "skipped"));
+        assert_eq!(l.get("pp_ms").is_some(), timed, "pp_ms presence: {ctx}");
+        if let Some(pp_ms) = l.get("pp_ms") {
+            let pp_ms: u64 = pp_ms.parse().unwrap_or_else(|e| panic!("{ctx}: {e}"));
+            at_least(Duration::from_millis(pp_ms), sc.pp_ms_at_least);
+            let stop_to_text: u64 = l
+                .get("stop_to_text_ms")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or_else(|| panic!("no stop_to_text_ms: {ctx}"));
+            assert!(
+                pp_ms + STOP_BEFORE_JOB_MS <= stop_to_text,
+                "the stage lies inside stop -> text: pp_ms {pp_ms} + {STOP_BEFORE_JOB_MS} > \
+                 stop_to_text_ms {stop_to_text}: {ctx}"
+            );
+        }
+    }
+
+    // ...and none of the planted bytes, in any file under the logs dir.
+    let files = files_under(&dir);
+    assert!(!files.is_empty(), "the log was written");
+    let canaries = [
+        KEY,
+        PP_KEY,
+        "sk-test",
+        PP_PROMPT,
+        "PROMPT-SECRET",
+        PP_REPLY,
+        "REPLY-SECRET",
+        PP_MODEL,
+        PP_QUERY,
+        PP_HOST,
+        "pp-host-secret",
+        refused_case.host.as_str(),
+        TRANSCRIPT,
+    ];
+    for file in files {
+        let bytes = std::fs::read(&file).expect("read");
+        for secret in canaries {
             assert!(
                 !contains(&bytes, secret.as_bytes()) && !contains(&bytes, &utf16le(secret)),
                 "{secret} in {}",
