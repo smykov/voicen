@@ -1,20 +1,87 @@
 //! T-012 (FR-27; spec 001 US6, FR-030/FR-031; data-model `MicrophoneChoice`):
 //! the device a press records from, decided only here, and the notify-once
-//! memory of the fallback notice. Red tests first; the implementation follows the
-//! pinned API below (docs/tasks/T-012.md, analysis option A).
+//! memory of the fallback notice (`notice.mic_fallback`).
 //!
-//! Pinned API (T-012 `## Tests`):
-//! - `pub fn choose(selected: Option<&str>, devices: &[InputDevice]) -> Choice`:
-//!   `selected` is the saved `settings::Microphone::id` (the endpoint id), the list
-//!   is `AudioSource::devices()` taken at that press;
-//! - `pub enum Choice { Use { id: DeviceId, kind: DeviceKind }, NoDevice }`;
-//! - `pub struct MicrophoneState` (`new()`, in memory only, OQ-24 (A)) with
-//!   `opened(&mut self, id: &DeviceId, kind: DeviceKind) -> bool`: the press whose
-//!   capture opened `id` as `kind`; `true` exactly when `notice.mic_fallback` is
-//!   due (Selected → Fallback(x), Fallback(x) → Fallback(y)).
-//!
-//! `platform::{DeviceId(pub String), InputDevice { id, name, is_default }}` are the
-//! port's types.
+//! The dictation session calls [`choose`] at every press over the adapter's
+//! `AudioSource::devices()` list taken at that press, opens the chosen id, and
+//! only once the open succeeded tells [`MicrophoneState::opened`], which says
+//! whether the notice is due. Neither the adapter nor the UI picks a device.
+#![deny(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
+
+use crate::events::DeviceKind;
+use crate::platform::{DeviceId, InputDevice};
+
+/// What a press records from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Choice {
+    /// Open `id`; `kind` is `Fallback` when the selected device is absent.
+    Use { id: DeviceId, kind: DeviceKind },
+    /// No device to open (no device flagged default): the press fails with
+    /// `CaptureError::NoDevice` (FR-04) without calling `start`.
+    NoDevice,
+}
+
+/// The device for a press. `selected` is the saved `settings::Microphone::id`
+/// (`None` = the Windows default); `devices` is `AudioSource::devices()` at that
+/// press. The selected device is matched by its whole id only. Present →
+/// `Use(selected, Selected)`; nothing selected → the default, `Selected`; selected
+/// absent → the default, `Fallback`; no device flagged default → `NoDevice`.
+pub fn choose(selected: Option<&str>, devices: &[InputDevice]) -> Choice {
+    if let Some(want) = selected {
+        if let Some(d) = devices.iter().find(|d| d.id.0 == want) {
+            return Choice::Use {
+                id: d.id.clone(),
+                kind: DeviceKind::Selected,
+            };
+        }
+    }
+    let kind = if selected.is_some() {
+        DeviceKind::Fallback
+    } else {
+        DeviceKind::Selected
+    };
+    match devices.iter().find(|d| d.is_default) {
+        Some(d) => Choice::Use {
+            id: d.id.clone(),
+            kind,
+        },
+        None => Choice::NoDevice,
+    }
+}
+
+/// The notify-once memory of the fallback notice: which fallback device the last
+/// opened capture used (`None` = the selected one). In memory only (OQ-24 (A)):
+/// a new run starts as "selected".
+#[derive(Debug, Default)]
+pub struct MicrophoneState {
+    fallback: Option<DeviceId>,
+}
+
+impl MicrophoneState {
+    pub fn new() -> MicrophoneState {
+        MicrophoneState::default()
+    }
+
+    /// A press's capture opened `id` as `kind`. `true` exactly when
+    /// `notice.mic_fallback` is due: Selected → Fallback(x) and Fallback(x) →
+    /// Fallback(y), y ≠ x. Call it only after the open succeeded.
+    pub fn opened(&mut self, id: &DeviceId, kind: DeviceKind) -> bool {
+        match kind {
+            DeviceKind::Selected => {
+                self.fallback = None;
+                false
+            }
+            DeviceKind::Fallback => {
+                if self.fallback.as_ref() == Some(id) {
+                    false
+                } else {
+                    self.fallback = Some(id.clone());
+                    true
+                }
+            }
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {

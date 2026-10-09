@@ -14,7 +14,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crate::audio::AudioBuffer;
-use crate::platform::{AudioSource, CaptureHandle, FrameSink};
+use crate::platform::{AudioSource, CaptureHandle, DeviceId, FrameSink, InputDevice};
 use crate::recording::CaptureError;
 
 /// Interleaved `f32` frames in `[-1.0, 1.0]`.
@@ -137,11 +137,31 @@ impl RealtimeSource {
     }
 }
 
+/// The one device a [`RealtimeSource`] lists (a fake endpoint, the default).
+const REALTIME_DEVICE: &str = "{0.0.1.00000000}.{fake-realtime-mic}";
+
 impl AudioSource for RealtimeSource {
+    /// One fake device, flagged default.
+    fn devices(&self) -> Result<Vec<InputDevice>, CaptureError> {
+        Ok(vec![InputDevice {
+            id: DeviceId(REALTIME_DEVICE.to_string()),
+            name: "Realtime Microphone (fake)".to_string(),
+            is_default: true,
+        }])
+    }
+
     /// Starts the push thread: chunk `k` (10 ms of frames, the data first and then
     /// silence) is pushed once `k × 10 ms` have passed since the start, so a late
     /// wake-up catches up but never runs ahead of real time.
-    fn start(&self, sink: Arc<dyn FrameSink>) -> Result<Box<dyn CaptureHandle>, CaptureError> {
+    /// An id other than the listed device's is `Err(NoDevice)`.
+    fn start(
+        &self,
+        device: &DeviceId,
+        sink: Arc<dyn FrameSink>,
+    ) -> Result<Box<dyn CaptureHandle>, CaptureError> {
+        if device.0 != REALTIME_DEVICE {
+            return Err(CaptureError::NoDevice);
+        }
         let frames = Arc::clone(&self.frames);
         if frames.rate == 0 || frames.channels == 0 {
             return Err(CaptureError::Other(

@@ -61,6 +61,7 @@
   "notice.copied_paste_manually": "Скопировано — вставьте вручную",
   "notice.hotkey_unavailable": "Сочетание клавиш для диктовки уже занято Windows или другой программой. Выберите другое в настройках.",
   "notice.max_length": "Достигнута максимальная длительность",
+  "notice.mic_fallback": "Используется {device}",
   "notice.no_speech": "Речь не распознана",
   "notice.post_processing_skipped.http": "Постобработка пропущена — HTTP {status}",
   "notice.post_processing_skipped.invalid_key": "Постобработка пропущена — неверный ключ API",

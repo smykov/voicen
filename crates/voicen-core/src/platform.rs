@@ -84,6 +84,29 @@ pub trait FrameSink: Send + Sync {
     /// channels. `at` is the instant the adapter stamped in its callback; the first
     /// one of a capture gives `RecordingStarted.hotkey_to_first_frame_ms`.
     fn frames(&self, interleaved: &[f32], rate: u32, channels: u16, at: Instant);
+
+    /// The capture ended without being asked to (T-012, spec 001 FR-031: the device
+    /// was unplugged or failed); `at` is the instant the adapter stamped. The
+    /// adapter reports it at most once per capture, from any thread, also from
+    /// inside `AudioSource::start` or while its handle is dropped. The session's
+    /// sink only records it and hands it off without blocking, and never takes the
+    /// session lock, so the call is safe in all of those places.
+    fn device_lost(&self, at: Instant);
+}
+
+/// An input device's identity: the WASAPI endpoint id in the shell (research R-3),
+/// the saved `settings::Microphone::id`. Matched as a whole string only.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DeviceId(pub String);
+
+/// One input device of [`AudioSource::devices`] (T-012).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InputDevice {
+    pub id: DeviceId,
+    /// The display name (what `notice.mic_fallback` and the settings show).
+    pub name: String,
+    /// The Windows default input device; at most one entry is.
+    pub is_default: bool,
 }
 
 /// One running capture. Once [`stop`](Self::stop) returns, or the handle is
@@ -97,16 +120,30 @@ pub trait CaptureHandle: Send {
     fn stop(self: Box<Self>) -> Result<(), CaptureError>;
 }
 
-/// The microphone (T-051: the default input device; T-012 adds the device choice
-/// and device loss).
+/// The microphones (T-051; T-012: the device list and the open by id). The
+/// adapter enumerates and opens; which device a press uses is decided only by
+/// core (`crate::microphone::choose` over this list).
 pub trait AudioSource: Send + Sync {
-    /// Opens the device and starts delivering frames to `sink`. The session calls
-    /// it at a press with its lock held (T-051): it must return promptly (once the
-    /// device is open or has failed), must never call back into the session (an
-    /// error or device-loss path inside `start` included), and must not wait for
-    /// another call on this source or its handles, such as a `CaptureHandle::stop`
-    /// running on another thread.
-    fn start(&self, sink: Arc<dyn FrameSink>) -> Result<Box<dyn CaptureHandle>, CaptureError>;
+    /// The input devices present now (unplugged ones are absent), with the Windows
+    /// default flagged. The one list for a press and for the settings UI
+    /// (`settings_list_microphones`). The session calls it at a press with its lock
+    /// held, under the same rules as [`start`](Self::start).
+    fn devices(&self) -> Result<Vec<InputDevice>, CaptureError>;
+
+    /// Opens the device `device` (an id of [`devices`](Self::devices); an id no
+    /// device has is `Err(NoDevice)`, never another device) and starts delivering
+    /// frames to `sink`; an end of the capture it was not asked for is reported
+    /// once through [`FrameSink::device_lost`]. The session calls it at a press
+    /// with its lock held (T-051): it must return promptly (once the device is open
+    /// or has failed), must never call back into the session (an error or
+    /// device-loss path inside `start` included), and must not wait for another
+    /// call on this source or its handles, such as a `CaptureHandle::stop` running
+    /// on another thread.
+    fn start(
+        &self,
+        device: &DeviceId,
+        sink: Arc<dyn FrameSink>,
+    ) -> Result<Box<dyn CaptureHandle>, CaptureError>;
 }
 
 /// The tray icon and the overlay (contracts/core-traits.md). The session calls it
@@ -149,8 +186,9 @@ mod fakes {
 
     use super::{
         AudioBuffer, AudioSource, CancelKey, CaptureError, CaptureHandle, Clipboard,
-        ClipboardError, FieldId, FrameSink, Indicator, OverlayState, PasteError, Paster, PendingId,
-        SettingsTab, ShellRequests, StartWindow, TempAudioStore, TrayState, WindowRef,
+        ClipboardError, DeviceId, FieldId, FrameSink, Indicator, InputDevice, OverlayState,
+        PasteError, Paster, PendingId, SettingsTab, ShellRequests, StartWindow, TempAudioStore,
+        TrayState, WindowRef,
     };
 
     fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -402,17 +440,32 @@ mod fakes {
         }
     }
 
-    #[derive(Default)]
     struct SourceScript {
         start_error: Option<CaptureError>,
         stop_error: Option<CaptureError>,
         chunks: Vec<FrameChunk>,
+        devices: Vec<InputDevice>,
+        devices_error: Option<CaptureError>,
+        device_loss: Option<Instant>,
+    }
+
+    impl Default for SourceScript {
+        fn default() -> SourceScript {
+            SourceScript {
+                start_error: None,
+                stop_error: None,
+                chunks: Vec::new(),
+                devices: vec![FakeAudioSource::default_device()],
+                devices_error: None,
+                device_loss: None,
+            }
+        }
     }
 
     #[derive(Default)]
     struct SourceState {
         script: Mutex<SourceScript>,
-        start_calls: Mutex<usize>,
+        started_with: Mutex<Vec<DeviceId>>,
         open: Mutex<usize>,
     }
 
@@ -420,8 +473,10 @@ mod fakes {
     /// handle and delivers the scripted chunks, in order, from its own capture
     /// thread (as a real adapter's callback would); `stop`, or dropping the handle,
     /// joins that thread and then closes the handle, so every chunk has reached the
-    /// sink before `stop` returns and none arrives after. Defaults: `start`
-    /// succeeds, no chunks, `stop` succeeds.
+    /// sink before `stop` returns and none arrives after. Defaults: one device,
+    /// [`default_device`](Self::default_device), flagged default; `start` succeeds
+    /// for an id in the list (any other id is `Err(NoDevice)`, counted, nothing
+    /// opened), no chunks, no device loss, `stop` succeeds.
     #[derive(Default)]
     pub struct FakeAudioSource {
         state: Arc<SourceState>,
@@ -430,6 +485,37 @@ mod fakes {
     impl FakeAudioSource {
         pub fn new() -> FakeAudioSource {
             FakeAudioSource::default()
+        }
+
+        /// The one device of the default list: a fake endpoint, the Windows
+        /// default.
+        pub fn default_device() -> InputDevice {
+            InputDevice {
+                id: DeviceId("{0.0.1.00000000}.{fake-default-mic}".to_string()),
+                name: "Default Microphone (fake)".to_string(),
+                is_default: true,
+            }
+        }
+
+        /// What `devices()` returns from now on (and which ids `start` opens).
+        pub fn set_devices(&self, devices: Vec<InputDevice>) {
+            lock(&self.state.script).devices = devices;
+        }
+
+        /// While `Some`, `devices()` returns this error.
+        pub fn set_devices_error(&self, err: Option<CaptureError>) {
+            lock(&self.state.script).devices_error = err;
+        }
+
+        /// While `Some(at)`, each later capture, after its chunks, reports
+        /// `sink.device_lost(at)` once from its capture thread.
+        pub fn set_device_loss(&self, at: Option<Instant>) {
+            lock(&self.state.script).device_loss = at;
+        }
+
+        /// The id of every `start` call so far, failed ones included.
+        pub fn started_with(&self) -> Vec<DeviceId> {
+            lock(&self.state.started_with).clone()
         }
 
         /// While `Some`, `start` returns this error (the call is still counted) and
@@ -450,7 +536,7 @@ mod fakes {
 
         /// Every `start` call so far, failed ones included.
         pub fn start_calls(&self) -> usize {
-            *lock(&self.state.start_calls)
+            lock(&self.state.started_with).len()
         }
 
         /// Handles started and not yet stopped or dropped: the device is open.
@@ -460,19 +546,37 @@ mod fakes {
     }
 
     impl AudioSource for FakeAudioSource {
-        fn start(&self, sink: Arc<dyn FrameSink>) -> Result<Box<dyn CaptureHandle>, CaptureError> {
-            *lock(&self.state.start_calls) += 1;
-            let chunks = {
+        fn devices(&self) -> Result<Vec<InputDevice>, CaptureError> {
+            let script = lock(&self.state.script);
+            match script.devices_error.clone() {
+                Some(err) => Err(err),
+                None => Ok(script.devices.clone()),
+            }
+        }
+
+        fn start(
+            &self,
+            device: &DeviceId,
+            sink: Arc<dyn FrameSink>,
+        ) -> Result<Box<dyn CaptureHandle>, CaptureError> {
+            lock(&self.state.started_with).push(device.clone());
+            let (chunks, loss) = {
                 let script = lock(&self.state.script);
                 if let Some(err) = script.start_error.clone() {
                     return Err(err);
                 }
-                script.chunks.clone()
+                if !script.devices.iter().any(|d| &d.id == device) {
+                    return Err(CaptureError::NoDevice);
+                }
+                (script.chunks.clone(), script.device_loss)
             };
             *lock(&self.state.open) += 1;
             let deliver = move || {
                 for c in &chunks {
                     sink.frames(&c.samples, c.rate, c.channels, c.at);
+                }
+                if let Some(at) = loss {
+                    sink.device_lost(at);
                 }
             };
             let thread = match std::thread::Builder::new()

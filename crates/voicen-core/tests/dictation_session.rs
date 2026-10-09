@@ -54,6 +54,7 @@ use voicen_core::platform::{
     Indicator, IndicatorCall, PasteError, Paster, PasterCall, PendingId, ShellRequestCall,
     ShellRequests, StartWindow, TempAudioStore, WindowRef,
 };
+use voicen_core::platform::{DeviceId, InputDevice};
 use voicen_core::post_process::PassThrough;
 use voicen_core::recording::{
     CaptureError, MicCause, OverlayState, RecordingEnd, TrayState, MAX_LENGTH, MESSAGE_DURATION,
@@ -502,8 +503,13 @@ impl voicen_core::platform::CaptureHandle for BlockingStopCapture {
 }
 
 impl AudioSource for BlockingStopSource {
+    fn devices(&self) -> Result<Vec<InputDevice>, CaptureError> {
+        Ok(vec![FakeAudioSource::default_device()])
+    }
+
     fn start(
         &self,
+        _device: &DeviceId,
         sink: Arc<dyn FrameSink>,
     ) -> Result<Box<dyn voicen_core::platform::CaptureHandle>, CaptureError> {
         for c in lock(&self.chunks).iter() {
@@ -540,8 +546,13 @@ impl voicen_core::platform::CaptureHandle for PanicOnStopCapture {
 }
 
 impl AudioSource for PanicOnStopSource {
+    fn devices(&self) -> Result<Vec<InputDevice>, CaptureError> {
+        Ok(vec![FakeAudioSource::default_device()])
+    }
+
     fn start(
         &self,
+        _device: &DeviceId,
         sink: Arc<dyn FrameSink>,
     ) -> Result<Box<dyn voicen_core::platform::CaptureHandle>, CaptureError> {
         for c in lock(&self.chunks).iter() {
@@ -2914,6 +2925,17 @@ impl CollectingSink {
     }
 }
 
+/// The id of the one device `source` lists (T-012: `start` opens by id).
+fn realtime_device(source: &RealtimeSource) -> DeviceId {
+    source
+        .devices()
+        .expect("devices")
+        .into_iter()
+        .next()
+        .expect("one device")
+        .id
+}
+
 impl FrameSink for CollectingSink {
     fn frames(&self, interleaved: &[f32], rate: u32, channels: u16, at: Instant) {
         if self.stopped.load(Ordering::SeqCst) {
@@ -2922,6 +2944,7 @@ impl FrameSink for CollectingSink {
         lock(&self.calls).push((interleaved.len(), rate, channels, at));
         lock(&self.samples).extend_from_slice(interleaved);
     }
+    fn device_lost(&self, _at: Instant) {}
 }
 
 #[test]
@@ -2939,7 +2962,9 @@ fn realtime_source_paces_frames_by_real_time_and_pads_with_silence() {
     let source = RealtimeSource::from_buffer(&clip);
     let sink = Arc::new(CollectingSink::default());
     let started = now();
-    let handle = source.start(sink.clone()).expect("start");
+    let handle = source
+        .start(&realtime_device(&source), sink.clone())
+        .expect("start");
     assert!(
         eventually(|| sink.seconds() >= 1.0),
         "no 1 s of audio within {BUDGET:?}: {:.3} s",
@@ -2988,7 +3013,9 @@ fn realtime_source_pushes_nothing_after_stop_or_drop() {
     let source = RealtimeSource::from_buffer(&fixtures::speech_3s());
     for how in ["stop", "drop"] {
         let sink = Arc::new(CollectingSink::default());
-        let handle = source.start(sink.clone()).expect("start");
+        let handle = source
+            .start(&realtime_device(&source), sink.clone())
+            .expect("start");
         thread::sleep(ms(200));
         if how == "stop" {
             handle.stop().expect("stop");

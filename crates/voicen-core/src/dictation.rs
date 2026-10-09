@@ -16,12 +16,23 @@
 //! goes through the one stop path (`stop_recording`), and the Esc claim
 //! ([`CancelKey`](crate::platform::CancelKey)) follows `live_id().is_some()`.
 //!
+//! T-012: the device a press opens is decided here, from the adapter's
+//! `AudioSource::devices()` taken at that press and the snapshot's saved
+//! microphone (`microphone::choose`); `notice.mic_fallback` is raised only for a
+//! press whose capture opened (`microphone::MicrophoneState`). A capture that ends
+//! on its own (`FrameSink::device_lost`) is handed by its sink, without the
+//! session lock, to the loss thread, which ends that recording, by its id, through
+//! the same stop path (end `DeviceLost`).
+//!
 //! Threads: the callers' input threads (hotkey, tray), one worker (owns the
-//! [`Pipeline`]; no other thread can reach `run_job` or `Pipeline::pending`) and one
-//! timer (message expiry and the recording's maximum length). The why of each rule: `docs/decisions/dictation-session.md`.
+//! [`Pipeline`]; no other thread can reach `run_job` or `Pipeline::pending`), one
+//! timer (message expiry and the recording's maximum length) and one loss thread
+//! (device losses reported by the captures' sinks). The why of each rule:
+//! `docs/decisions/dictation-session.md`.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
 use std::io;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
@@ -29,10 +40,12 @@ use std::time::{Duration, Instant};
 
 use crate::audio::{mix_to_mono, AudioBuffer};
 use crate::events::{DeviceKind, DictationEvent, PipelineObserver, WarningCode};
-use crate::i18n::NOTICE_HOTKEY_UNAVAILABLE;
+use crate::i18n::{NOTICE_HOTKEY_UNAVAILABLE, NOTICE_MIC_FALLBACK};
+use crate::microphone::{choose, Choice, MicrophoneState};
 use crate::pipeline::{EngineFactory, Pipeline, PipelineDeps, PressContext};
 use crate::platform::{
-    AudioSource, CancelKey, CaptureHandle, FrameSink, Indicator, Paster, ShellRequests,
+    AudioSource, CancelKey, CaptureHandle, DeviceId, FrameSink, Indicator, InputDevice, Paster,
+    ShellRequests,
 };
 use crate::recording::{
     CaptureError, FinishedRecording, MicCause, OverlayState, PressOutcome, RecordingController,
@@ -65,6 +78,16 @@ pub struct DictationSession {
     shared: Arc<Shared>,
     worker: Option<JoinHandle<()>>,
     timer: Option<JoinHandle<()>>,
+    losses: Option<JoinHandle<()>>,
+}
+
+/// What the loss thread receives.
+enum Loss {
+    /// The capture of `id` ended on its own at `at` (once per capture).
+    Lost { id: RecordingId, at: Instant },
+    /// The session is dropped: the thread ends even though adapters may still
+    /// hold sinks (and so senders).
+    Shutdown,
 }
 
 /// A recording on its way to the worker.
@@ -94,6 +117,8 @@ struct Shared {
     /// The pipeline's own instances (cloned from `PipelineDeps` before the build).
     observer: Arc<dyn PipelineObserver>,
     paster: Arc<dyn Paster>,
+    /// To the loss thread; every capture sink holds a clone.
+    losses: mpsc::Sender<Loss>,
 }
 
 /// Everything behind the session lock.
@@ -116,12 +141,16 @@ struct State {
     /// `finish`, or by [`StopInFlight`] if the release path panics before it.
     stopping: bool,
     shutdown: bool,
+    /// Which fallback device the last opened capture used (the notice's memory).
+    microphone: MicrophoneState,
 }
 
 /// The live recording's open device and where its frames go.
 struct LiveCapture {
     id: RecordingId,
     pressed_at: Instant,
+    /// Whether the device opened is the selected one or the fallback.
+    kind: DeviceKind,
     handle: Box<dyn CaptureHandle>,
     sink: Arc<CaptureSink>,
 }
@@ -223,6 +252,7 @@ impl DictationSession {
         let ctrl = RecordingController::new();
         let initial = ctrl.indicator().clone();
         let (queue, jobs) = mpsc::channel::<Job>();
+        let (losses, lost) = mpsc::channel::<Loss>();
         let shared = Arc::new(Shared {
             state: Mutex::new(State {
                 ctrl,
@@ -236,6 +266,7 @@ impl DictationSession {
                 published_claim: false,
                 stopping: false,
                 shutdown: false,
+                microphone: MicrophoneState::new(),
             }),
             changed: Condvar::new(),
             releasing: Mutex::new(()),
@@ -246,6 +277,7 @@ impl DictationSession {
             settings,
             observer,
             paster,
+            losses,
         });
 
         let for_worker = Arc::clone(&shared);
@@ -257,9 +289,14 @@ impl DictationSession {
             shared,
             worker: Some(worker),
             timer: None,
+            losses: None,
         };
         let for_timer = Arc::clone(&session.shared);
         session.timer = Some(spawn("dictation-timer", move || run_timer(&for_timer))?);
+        let for_losses = Arc::clone(&session.shared);
+        session.losses = Some(spawn("dictation-losses", move || {
+            run_losses(&for_losses, &lost)
+        })?);
         Ok(session)
     }
 
@@ -274,8 +311,12 @@ impl DictationSession {
     /// exactly one `DictationEvent::PressBlocked` (one per press, not per action;
     /// it takes no `RecordingId`, and its release does nothing). Otherwise the
     /// start window is taken, the controller starts the recording and the capture
-    /// opens; the indicator is published only once the capture result is known,
-    /// so a capture that fails never shows a recording state.
+    /// opens on the device `microphone::choose` picks from the adapter's list
+    /// (no device, or a list that cannot be read, fails the press like a capture
+    /// that cannot open, without a `start` call); a fallback that opened raises
+    /// `notice.mic_fallback` when it is due. The indicator is published only once
+    /// the capture result is known, so a capture that fails never shows a
+    /// recording state.
     pub fn hotkey_pressed(&self, at: Instant) {
         let shared = &*self.shared;
         if shared.lock().ctrl.live_id().is_some() {
@@ -311,20 +352,38 @@ impl DictationSession {
                 }
                 Ok(()) => {
                     let mode = settings.mode;
+                    let selected = settings.microphone.as_ref().map(|m| m.id.clone());
                     let ctx = PressContext {
                         start_window: shared.paster.capture_start_window(),
                         settings,
                     };
                     if let PressOutcome::Start(id) = st.ctrl.press_with_mode(at, mode, ctx) {
-                        let sink = Arc::new(CaptureSink::default());
-                        match shared.audio.start(sink.clone()) {
-                            Ok(handle) => {
+                        let sink = Arc::new(CaptureSink::new(id, shared.losses.clone()));
+                        let opened = shared
+                            .audio
+                            .devices()
+                            .and_then(|list| pick(selected.as_deref(), &list))
+                            .and_then(|(device, kind, name)| {
+                                let handle = shared.audio.start(&device, sink.clone())?;
+                                Ok((device, kind, name, handle))
+                            });
+                        match opened {
+                            Ok((device, kind, name, handle)) => {
                                 st.capture = Some(LiveCapture {
                                     id,
                                     pressed_at: at,
+                                    kind,
                                     handle,
                                     sink,
                                 });
+                                // After `press_with_mode`, which drops any message.
+                                if st.microphone.opened(&device, kind) {
+                                    st.ctrl.notice_with(
+                                        NOTICE_MIC_FALLBACK,
+                                        vec![("device", name)],
+                                        at,
+                                    );
+                                }
                             }
                             Err(err) => {
                                 let cause = MicCause::of(&err);
@@ -469,6 +528,25 @@ enum Ended {
     },
 }
 
+/// The device a press opens, with its kind and display name: the
+/// `microphone::choose` decision over `devices`; no device is `NoDevice`.
+fn pick(
+    selected: Option<&str>,
+    devices: &[InputDevice],
+) -> Result<(DeviceId, DeviceKind, String), CaptureError> {
+    match choose(selected, devices) {
+        Choice::Use { id, kind } => {
+            let name = devices
+                .iter()
+                .find(|d| d.id == id)
+                .map(|d| d.name.clone())
+                .unwrap_or_default();
+            Ok((id, kind, name))
+        }
+        Choice::NoDevice => Err(CaptureError::NoDevice),
+    }
+}
+
 /// The timer's input: expires the message, and stops a recording at its maximum
 /// length through the stop path.
 fn tick(shared: &Shared, at: Instant) {
@@ -492,14 +570,14 @@ fn close_capture(
         shared.emit(DictationEvent::RecordingStarted {
             recording: id,
             hotkey_to_first_frame_ms: millis(first.saturating_duration_since(c.pressed_at)),
-            device: DeviceKind::Selected,
+            device: c.kind,
         });
     }
     stopped.map(|()| recorded)
 }
 
-/// The one stop path (T-009 invariant) of a release, a toggle press and the
-/// max-length tick. `decide` runs the controller call under the session lock,
+/// The one stop path (T-009 invariant) of a release, a toggle press, the
+/// max-length tick and a device loss (T-012). `decide` runs the controller call under the session lock,
 /// after `releasing` is taken (queue order = recording order); it may also just
 /// expire a message (`None`), which is published.
 ///
@@ -523,6 +601,10 @@ fn stop_recording(
     };
     let (ended, id, capture) = {
         let mut st = shared.lock();
+        // Shutdown dropped the capture: nothing is ended or reported any more.
+        if st.shutdown {
+            return;
+        }
         let Some(ended) = decide(&mut st.ctrl) else {
             // A message may have expired; `publish` also wakes the timer.
             shared.publish(&mut st);
@@ -579,23 +661,41 @@ fn stop_recording(
 }
 
 /// Lets the job in flight finish (`run_job` cannot be interrupted), drops the
-/// queued recordings and joins the worker and timer threads (analysis Q3).
+/// queued recordings and joins the worker, timer and loss threads (analysis Q3).
 impl Drop for DictationSession {
     fn drop(&mut self) {
         {
             let mut st = self.shared.lock();
             st.shutdown = true;
             st.queue = None;
-            // A recording still on: close the device now.
+            // A recording still on: close the device now (its drop may report a
+            // loss: the sink only sends it, and the loss thread ignores it).
             st.capture = None;
             self.shared.changed.notify_all();
         }
+        let _ = self.shared.losses.send(Loss::Shutdown);
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
         if let Some(timer) = self.timer.take() {
             let _ = timer.join();
         }
+        if let Some(losses) = self.losses.take() {
+            let _ = losses.join();
+        }
+    }
+}
+
+/// The loss thread: ends the recording whose capture reported a loss through the
+/// one stop path, decided by the controller for that id (a stale id, or a
+/// recording already ended, changes nothing). Ends at `Loss::Shutdown`, or at a
+/// loss received once shutdown began.
+fn run_losses(shared: &Shared, losses: &mpsc::Receiver<Loss>) {
+    while let Ok(Loss::Lost { id, at }) = losses.recv() {
+        if shared.lock().shutdown {
+            return;
+        }
+        stop_recording(shared, at, |ctrl| ctrl.device_lost(id, at).map(Ended::Stop));
     }
 }
 
@@ -655,9 +755,13 @@ fn run_timer(shared: &Shared) {
 /// rule, `audio::mix_to_mono`), at the first frame's format. A format change or
 /// frames that cannot be mixed make the capture unusable. Its own short lock,
 /// never the session's: the adapter's audio thread must not wait for the session.
-#[derive(Default)]
+/// It knows its recording, so a loss it reports can only end that one.
 struct CaptureSink {
     inner: Mutex<Recorded>,
+    id: RecordingId,
+    /// Set by the first `device_lost`; later ones are dropped.
+    lost: AtomicBool,
+    losses: mpsc::Sender<Loss>,
 }
 
 #[derive(Default)]
@@ -671,6 +775,15 @@ struct Recorded {
 }
 
 impl CaptureSink {
+    fn new(id: RecordingId, losses: mpsc::Sender<Loss>) -> CaptureSink {
+        CaptureSink {
+            inner: Mutex::new(Recorded::default()),
+            id,
+            lost: AtomicBool::new(false),
+            losses,
+        }
+    }
+
     fn take(&self) -> Recorded {
         std::mem::take(&mut *lock(&self.inner))
     }
@@ -692,6 +805,14 @@ impl FrameSink for CaptureSink {
         if format != (rate, channels) || mix_to_mono(interleaved, channels, &mut r.mono).is_err() {
             r.unusable = true;
             r.mono = Vec::new();
+        }
+    }
+
+    /// Hands the loss to the loss thread (once); never blocks, never takes the
+    /// session lock, so it is safe inside `start` and in a handle's drop.
+    fn device_lost(&self, at: Instant) {
+        if !self.lost.swap(true, Ordering::SeqCst) {
+            let _ = self.losses.send(Loss::Lost { id: self.id, at });
         }
     }
 }

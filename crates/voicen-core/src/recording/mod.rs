@@ -64,7 +64,6 @@ impl RecordingId {
 }
 
 /// Why a recording ended, the `end` of `RecordingEnded` (data-model "Recording").
-/// T-010 and T-012 add the other variants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecordingEnd {
     /// Hold released after at least [`MIN_HOLD`].
@@ -77,6 +76,10 @@ pub enum RecordingEnd {
     MaxLength,
     /// Esc during the recording: nothing sent.
     Cancelled,
+    /// The capture ended without being asked to (T-012, spec 001 FR-031: the
+    /// device was unplugged or failed), in either mode: the audio so far is sent on
+    /// like a release, with no [`MIN_HOLD`] check.
+    DeviceLost,
 }
 
 /// The capture failure the shell reports (contracts/core-traits.md `CaptureError`).
@@ -501,6 +504,29 @@ impl<C> RecordingController<C> {
         self.expire(at);
         self.show(id, Vec::new(), at);
         self.refresh();
+    }
+
+    /// A notice with message parameters (T-012: `notice.mic_fallback` with
+    /// `device`), by the same rule as [`notice`](Self::notice).
+    pub fn notice_with(&mut self, id: MessageId, params: Vec<(&'static str, String)>, at: Instant) {
+        self.expire(at);
+        self.show(id, params, at);
+        self.refresh();
+    }
+
+    /// The capture of `id` ended at `at` without being asked to (T-012, spec 001
+    /// FR-031). For the live id, in either mode: a ticket (end
+    /// [`RecordingEnd::DeviceLost`], `stopped_at = at`, no [`MIN_HOLD`]) and the
+    /// controller is idle once this returns; its later release or press is
+    /// decided from idle. A stale id, or idle, returns `None` and changes nothing.
+    pub fn device_lost(&mut self, id: RecordingId, at: Instant) -> Option<StopTicket<C>> {
+        if self.live.as_ref().map(|l| l.id) != Some(id) {
+            return None;
+        }
+        let live = self.live.take()?;
+        self.expire(at);
+        self.refresh();
+        Some(live.into_ticket(at, RecordingEnd::DeviceLost))
     }
 
     /// `true` while the last hotkey registration result was a failure (tray

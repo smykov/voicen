@@ -61,6 +61,7 @@
   "notice.copied_paste_manually": "Copied — paste manually",
   "notice.hotkey_unavailable": "The dictation shortcut is already used by Windows or another program. Choose another one in Settings.",
   "notice.max_length": "Maximum length reached",
+  "notice.mic_fallback": "Using {device}",
   "notice.no_speech": "No speech detected",
   "notice.post_processing_skipped.http": "Post-processing skipped — HTTP {status}",
   "notice.post_processing_skipped.invalid_key": "Post-processing skipped — invalid API key",

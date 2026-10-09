@@ -149,6 +149,10 @@ messages! {
     NOTICE_NO_SPEECH = "notice.no_speech",
     /// A recording stopped at `recording::MAX_LENGTH` and sent on (T-009, FR-03).
     NOTICE_MAX_LENGTH = "notice.max_length",
+    /// The selected microphone is absent and the press records from the Windows
+    /// default instead (T-012, FR-27): shown once per change of the fallback
+    /// device; placeholder `{device}` = that device's display name.
+    NOTICE_MIC_FALLBACK = "notice.mic_fallback",
     /// Delivered with auto-paste off (`DeliveryResult::CopiedOnly`, T-001).
     NOTICE_COPIED = "notice.copied",
     /// Delivered but not pasted (`DeliveryResult::CopyManual`, T-001).

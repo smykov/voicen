@@ -1,7 +1,7 @@
 //! Settings over IPC (T-030; contracts/ipc.md): the one construction path of the
 //! settings service, the commands `settings_get` / `settings_save` /
-//! `settings_speech_languages` / `settings_test_connection` (T-046), and the
-//! `settings://changed` bridge.
+//! `settings_speech_languages` / `settings_test_connection` (T-046) /
+//! `settings_list_microphones` (T-012), and the `settings://changed` bridge.
 //!
 //! - J1: a key moves only UI -> `settings_save` -> `SettingsService` ->
 //!   `CredentialStore`; no response or event carries one (`SettingsView` has presence
@@ -35,6 +35,7 @@ use voicen_core::connection_test::{ConnectionTestRequest, ConnectionTestResult};
 use voicen_core::diag::{Log, LogEvent, WarningKind};
 use voicen_core::hotkey_registrar::HotkeyRegistrar;
 use voicen_core::local_models::store::ModelStore;
+use voicen_core::platform::AudioSource;
 use voicen_core::secrets::CredentialStore;
 use voicen_core::settings::file::FsSettingsFile;
 use voicen_core::settings::service::{
@@ -216,4 +217,44 @@ impl IpcUnavailable {
 #[tauri::command]
 pub fn settings_speech_languages() -> Vec<&'static str> {
     WHISPER_ISO_639_1.to_vec()
+}
+
+/// The microphones the settings list (T-012): the same `AudioSource` the
+/// dictation session opens, managed by `wire` (one list for a press and the UI).
+pub struct Microphones(pub Arc<dyn AudioSource>);
+
+/// One entry of `settings_list_microphones` (contracts/ipc.md
+/// `[{ id, name, is_default }]`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MicrophoneEntry {
+    /// The endpoint id (`settings::Microphone::id`).
+    pub id: String,
+    pub name: String,
+    pub is_default: bool,
+}
+
+/// `source.devices()` as entries, in the source's order. A list that cannot be
+/// read is empty: the Recording tab then shows only "System default" and a saved
+/// microphone as "(not connected)", and a press reports its own failure.
+pub fn list_microphones(source: &dyn AudioSource) -> Vec<MicrophoneEntry> {
+    source
+        .devices()
+        .map(|devices| {
+            devices
+                .into_iter()
+                .map(|d| MicrophoneEntry {
+                    id: d.id.0,
+                    name: d.name,
+                    is_default: d.is_default,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// `settings_list_microphones` → [`list_microphones`] over the managed
+/// [`Microphones`]. Async: the enumeration may take up to the open budget.
+#[tauri::command(async)]
+pub fn settings_list_microphones(microphones: State<'_, Microphones>) -> Vec<MicrophoneEntry> {
+    list_microphones(microphones.0.as_ref())
 }

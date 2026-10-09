@@ -117,10 +117,12 @@ impl Open {
             } => {
                 self.record(recording).duration_ms = Some(duration_ms);
                 match end {
-                    // A job follows and closes the record.
-                    RecordingEnd::Released | RecordingEnd::Toggled | RecordingEnd::MaxLength => {
-                        None
-                    }
+                    // A job follows and closes the record (a device loss sends the
+                    // audio so far on, T-012).
+                    RecordingEnd::Released
+                    | RecordingEnd::Toggled
+                    | RecordingEnd::MaxLength
+                    | RecordingEnd::DeviceLost => None,
                     RecordingEnd::TooShort => Some(self.close(recording).line(
                         recording,
                         DictationOutcome::TooShort,

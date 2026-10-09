@@ -24,7 +24,7 @@ Stable keys with English and Russian texts. `{x}` marks a parameter. The catalog
 | `notice.max_length` | Maximum length reached | Достигнута максимальная длительность | toast + overlay |
 | `notice.copied` | Copied to clipboard | Скопировано в буфер обмена | toast + overlay |
 | `notice.copied_paste_manually` | Copied — paste manually | Скопировано — вставьте вручную | toast + overlay |
-| `notice.mic_fallback` | Using {device} | Используется {device} | toast |
+| `notice.mic_fallback` | Using {device} | Используется {device} | toast + overlay (T-012, OQ-24 (A): raised at a press whose fallback capture opened, once per change of the fallback device; `{device}` = its display name; the overlay shows it by the existing rule, after the recording, for what is left of its 3 s) |
 | `notice.choose_engine` | Choose a transcription engine | Выберите движок распознавания | toast + overlay (T-051; decision #64) |
 | `notice.hotkey_unavailable` | The dictation shortcut is already used by Windows or another program. Choose another one in Settings. | Сочетание клавиш для диктовки уже занято Windows или другой программой. Выберите другое в настройках. | overlay (T-055: `DictationSession::hotkey_registration(false)`, before settings open on the hotkey field) |
 | `notice.hotkey_failed_startup` | Hotkey {hotkey} could not be registered — choose another one | Не удалось зарегистрировать {hotkey} — выберите другое сочетание | toast |

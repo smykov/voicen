@@ -325,6 +325,7 @@ impl FrameSink for LogSink {
             .expect("lock")
             .push((interleaved.to_vec(), rate, channels, at));
     }
+    fn device_lost(&self, _at: Instant) {}
 }
 
 #[test]
@@ -343,8 +344,9 @@ fn fake_audio_source_delivers_before_stop_and_counts_open_handles() {
     };
     source.set_chunks(vec![chunk.clone(), chunk.clone()]);
     assert_eq!(source.open_handles(), 0);
+    let mic = FakeAudioSource::default_device().id;
 
-    let handle = source.start(sink.clone()).expect("start");
+    let handle = source.start(&mic, sink.clone()).expect("start");
     assert_eq!(source.open_handles(), 1);
     assert_eq!(handle.stop(), Ok(()));
     assert_eq!(source.open_handles(), 0);
@@ -358,19 +360,19 @@ fn fake_audio_source_delivers_before_stop_and_counts_open_handles() {
         "every chunk delivered, in order, before stop returned"
     );
 
-    let handle = source.start(sink.clone()).expect("start");
+    let handle = source.start(&mic, sink.clone()).expect("start");
     assert_eq!(source.open_handles(), 1);
     drop(handle);
     assert_eq!(source.open_handles(), 0, "drop closes");
 
     source.set_stop_error(Some(CaptureError::DeviceBusy));
-    let handle = source.start(sink.clone()).expect("start");
+    let handle = source.start(&mic, sink.clone()).expect("start");
     assert_eq!(handle.stop(), Err(CaptureError::DeviceBusy));
     assert_eq!(source.open_handles(), 0, "a failing stop still closes");
 
     source.set_start_error(Some(CaptureError::AccessDenied));
     assert!(matches!(
-        source.start(sink.clone()),
+        source.start(&mic, sink.clone()),
         Err(CaptureError::AccessDenied)
     ));
     assert_eq!(source.open_handles(), 0);

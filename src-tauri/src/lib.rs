@@ -7,6 +7,7 @@ use voicen_core::hotkey_registrar::HotkeyRegistrar;
 use voicen_core::local_models::catalog::MODELS;
 use voicen_core::local_models::download::DiskSpace;
 use voicen_core::local_models::service::LocalModels;
+use voicen_core::platform::AudioSource;
 use voicen_core::secrets::CredentialStore;
 use voicen_core::settings::service::SettingsService;
 use voicen_core::settings::LoadOutcome;
@@ -42,6 +43,7 @@ fn commands<R: Runtime>(builder: Builder<R>) -> Builder<R> {
         settings_ipc::settings_get,
         settings_ipc::settings_save,
         settings_ipc::settings_speech_languages,
+        settings_ipc::settings_list_microphones,
         settings_ipc::settings_test_connection,
         local_models::local_models_list,
         local_models::local_model_download,
@@ -105,7 +107,7 @@ impl Parts {
 /// `build()`: the single-instance plugin decides there, and a second instance never
 /// returns from it), only then calls `parts()` (the startup side effects: log,
 /// `.part` cleanup, settings load, Run-value reconcile), and wires the result:
-/// manages `service`, `local_models` and `log`, starts the `settings://changed`
+/// manages `service`, `local_models`, `log` and the microphones (T-012), starts the `settings://changed`
 /// bridge, the settings opener thread (`settings_window::request`), the overlay
 /// thread with its mailbox (`overlay::part`, `overlay_ready`), the tray
 /// (`tray`, built in code, never from `tauri.conf.json`) and its language follower.
@@ -139,6 +141,7 @@ fn wire<R: Runtime>(app: &AppHandle<R>, parts: Parts) {
     app.manage(Arc::clone(&service));
     app.manage(local_models);
     app.manage(Arc::clone(&log));
+    app.manage(settings_ipc::Microphones(release_microphones()));
     settings_ipc::spawn_change_bridge(app.clone(), Arc::clone(&service), &log);
     settings_window::start_opener(app, Arc::clone(&log));
     overlay::start(app, Arc::clone(&service), Arc::clone(&log));
@@ -177,6 +180,18 @@ pub fn on_run_event<R: Runtime>(
         }
         _ => {}
     }
+}
+
+/// The microphones (T-012): cpal over WASAPI, the one source of the device list
+/// for `settings_list_microphones` and of the dictation session's captures.
+#[cfg(windows)]
+fn release_microphones() -> Arc<dyn AudioSource> {
+    Arc::new(win::capture::CpalSource::new())
+}
+
+#[cfg(not(windows))]
+fn release_microphones() -> Arc<dyn AudioSource> {
+    compile_error!("the Voicen app runs on Windows only: the microphones are WASAPI endpoints")
 }
 
 /// The release key store: Credential Manager, the only one (NFR-04; no fallback).
@@ -229,18 +244,17 @@ fn release_launched_by_autostart() -> bool {
     )
 }
 
-/// The release dictation ports (T-006): the Windows default microphone, the
-/// clipboard, the paster, the engine of the settings (`engine::engine_for`), the
+/// The release dictation ports (T-006): the microphones `wire` manages (T-012:
+/// the same source as `settings_list_microphones`), the clipboard, the paster, the engine of the settings (`engine::engine_for`), the
 /// tray and the overlay through [`dictation::ShellIndicator`], and the
 /// `SettingsService`'s own instances: `credentials`, its key store, and `hotkeys`,
 /// its hotkey registrar (T-055).
 #[cfg(windows)]
-fn release_ports<R: Runtime>(
-    app: &AppHandle<R>,
-    shared: SharedPorts,
-) -> dictation::DictationPorts {
+fn release_ports<R: Runtime>(app: &AppHandle<R>, shared: SharedPorts) -> dictation::DictationPorts {
     dictation::DictationPorts {
-        audio: Arc::new(win::capture::CpalSource::new()),
+        audio: app
+            .try_state::<settings_ipc::Microphones>()
+            .map_or_else(release_microphones, |m| Arc::clone(&m.0)),
         clipboard: Arc::new(win::clipboard::WinClipboard::new()),
         paster: Arc::new(win::paste::WinPaster::new()),
         engine_factory: None,
@@ -251,7 +265,10 @@ fn release_ports<R: Runtime>(
 }
 
 #[cfg(not(windows))]
-fn release_ports<R: Runtime>(_app: &AppHandle<R>, _shared: SharedPorts) -> dictation::DictationPorts {
+fn release_ports<R: Runtime>(
+    _app: &AppHandle<R>,
+    _shared: SharedPorts,
+) -> dictation::DictationPorts {
     compile_error!(
         "the Voicen app runs on Windows only: the hotkey, microphone, clipboard and paste \
          are Win32 adapters"

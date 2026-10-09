@@ -50,8 +50,8 @@ use voicen_core::local_models::service::LocalModels;
 use voicen_core::local_models::store::ModelStore;
 use voicen_core::pipeline::PipelineDeps;
 use voicen_core::platform::{
-    AudioSource, CaptureHandle, FakeAudioSource, FakeCancelKey, FakeClipboard, FakePaster,
-    FakeShellRequests, FakeTempAudioStore, FrameSink, Indicator,
+    AudioSource, CaptureHandle, DeviceId, FakeAudioSource, FakeCancelKey, FakeClipboard,
+    FakePaster, FakeShellRequests, FakeTempAudioStore, FrameSink, Indicator, InputDevice,
 };
 use voicen_core::post_process::PassThrough;
 use voicen_core::recording::{CaptureError, OverlayState, TrayState};
@@ -374,7 +374,15 @@ impl HeldMic {
 }
 
 impl AudioSource for HeldMic {
-    fn start(&self, _sink: Arc<dyn FrameSink>) -> Result<Box<dyn CaptureHandle>, CaptureError> {
+    fn devices(&self) -> Result<Vec<InputDevice>, CaptureError> {
+        Ok(vec![FakeAudioSource::default_device()])
+    }
+
+    fn start(
+        &self,
+        _device: &DeviceId,
+        _sink: Arc<dyn FrameSink>,
+    ) -> Result<Box<dyn CaptureHandle>, CaptureError> {
         let mut st = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         st.0 = true;
         self.changed.notify_all();
