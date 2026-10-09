@@ -1,6 +1,6 @@
 <script lang="ts">
   // The built-in engine's part of the Engine tab (spec 002 US1, T-045; settings-ui.md › M):
-  // the model select and the five catalog models with Download / Cancel / Retry.
+  // the model select and the five catalog models with Download / Cancel / Retry / Delete.
   //
   // - Rows (I2): only `local_models_list` and the `local-model://` events set them,
   //   through the sequencer in models.ts. Both listeners are registered before the first
@@ -17,7 +17,13 @@
   // - Texts (I5): names by nameKey, reasons by messageKey with `reasonArgs`, labels by
   //   UI-only ids; every byte count through `formatSize`. A refused download, a rejection
   //   that is not a FailureReason and a rejected list are shown in the section; a
-  //   rejection's own text never is. A failed row's reason is rendered inside a
+  //   rejection's own text never is.
+  // - Delete (T-019): offered on a downloaded row only, after an in-page alertdialog
+  //   naming the model. The command emits no event: the rows follow the re-list issued
+  //   after the invoke settles, and every Delete stays disabled until that re-list has
+  //   settled (as I4). A refusal shows its reason and changes no row; `resetFailed`
+  //   shows `settings.write_failed`. An engine reset reaches the window only as
+  //   `settings://changed`; nothing here writes the draft (U1). A failed row's reason is rendered inside a
   //   polite live region that stays mounted with the row, so a row turning failed
   //   changes the text of an existing region (announced), not a new one.
   import { onMount } from "svelte";
@@ -29,6 +35,7 @@
   import {
     asFailureReason,
     cancelLocalModelDownload,
+    deleteLocalModel,
     downloadLocalModel,
     listLocalModels,
     onLocalModelProgress,
@@ -61,8 +68,17 @@
    * until the first list succeeds; a failed re-list keeps the rows (they still take events).
    */
   let ipcListFailed = $state(false);
-  /** The last download invoke's rejection: a contract refusal, or any other failure (`ipc`). */
-  let refusal = $state.raw<{ kind: "refused"; reason: FailureReason } | { kind: "ipc" } | null>(null);
+  /**
+   * The last download or delete invoke's problem: a contract refusal, any other
+   * rejection (`ipc`), or a delete whose settings reset could not be written.
+   */
+  let refusal = $state.raw<
+    { kind: "refused"; reason: FailureReason } | { kind: "ipc" } | { kind: "reset_failed" } | null
+  >(null);
+  /** The row whose Delete asks for confirmation; nothing is sent until it is confirmed. */
+  let confirming = $state.raw<LocalModelView | null>(null);
+  /** A confirmed delete invoke, or the re-list after it, has not settled yet. */
+  let deletePending = $state(false);
 
   const rows = $derived<readonly LocalModelView[]>(models.rows ?? []);
   const choices = $derived(selectable(rows));
@@ -110,6 +126,42 @@
     } catch {
       refusal = { kind: "ipc" };
     }
+  }
+
+  function askDelete(row: LocalModelView): void {
+    if (deletePending) return;
+    confirming = row;
+  }
+
+  function keepModel(): void {
+    confirming = null;
+  }
+
+  async function confirmDelete(): Promise<void> {
+    const row = confirming;
+    confirming = null;
+    if (row === null || deletePending) return;
+    refusal = null;
+    deletePending = true;
+    try {
+      try {
+        const outcome = await deleteLocalModel(row.id);
+        if (outcome.resetFailed) refusal = { kind: "reset_failed" };
+      } catch (error) {
+        const reason = asFailureReason(error);
+        refusal = reason === null ? { kind: "ipc" } : { kind: "refused", reason };
+      }
+      // The command emits nothing: only the list shows the removal (no optimistic row).
+      await refresh();
+    } finally {
+      deletePending = false;
+    }
+  }
+
+  /** Opens the confirmation as a modal: the rest of the page is inert while it is shown. */
+  function showModal(dialog: HTMLDialogElement): () => void {
+    dialog.showModal();
+    return () => dialog.close();
   }
 
   function percent(received: number, total: number): string {
@@ -172,6 +224,9 @@
       {#if refusal?.kind === "refused"}
         <p>{t(refusal.reason.messageKey, reasonArgs(refusal.reason, currentLanguage()))}</p>
       {/if}
+      {#if refusal?.kind === "reset_failed"}
+        <p>{t("settings.write_failed")}</p>
+      {/if}
     </div>
   {/if}
 
@@ -214,6 +269,12 @@
             >
           {:else}
             <span class="model-downloaded">{t("local_models.downloaded")}</span>
+            <button
+              type="button"
+              data-testid="local-model-delete"
+              disabled={deletePending}
+              onclick={() => askDelete(row)}>{t("local_models.delete")}</button
+            >
           {/if}
 
           <!-- Mounted with the row, so a reason appearing is a change inside an existing
@@ -228,6 +289,35 @@
         </li>
       {/each}
     </ul>
+  {/if}
+
+  {#if confirming !== null}
+    {@const model = confirming}
+    <dialog
+      class="dialog"
+      role="alertdialog"
+      aria-labelledby="local-model-delete-title"
+      aria-describedby="local-model-delete-message"
+      {@attach showModal}
+      oncancel={(event) => {
+        // Escape keeps the model; the block below removes the dialog.
+        event.preventDefault();
+        keepModel();
+      }}
+    >
+      <h3 id="local-model-delete-title">{t("local_models.delete_title", { name: t(model.nameKey) })}</h3>
+      <p id="local-model-delete-message">
+        {t("local_models.delete_message", { size: formatSize(model.sizeBytes, currentLanguage()) })}
+      </p>
+      <div class="actions">
+        <button type="button" data-testid="local-model-delete-keep" onclick={keepModel}
+          >{t("local_models.delete_keep")}</button
+        >
+        <button type="button" data-testid="local-model-delete-confirm" onclick={confirmDelete}
+          >{t("local_models.delete_confirm")}</button
+        >
+      </div>
+    </dialog>
   {/if}
 </section>
 
@@ -294,6 +384,30 @@
     margin: 0;
     color: #b00020;
     font-size: 0.9em;
+  }
+
+  .dialog {
+    max-width: 28rem;
+    padding: 1rem 1.25rem;
+    border: none;
+    border-radius: 6px;
+    background: #fff;
+    box-shadow: 0 4px 16px rgb(0 0 0 / 25%);
+  }
+
+  .dialog::backdrop {
+    background: rgb(0 0 0 / 35%);
+  }
+
+  .dialog h3 {
+    margin-top: 0;
+    font-size: 1.1em;
+  }
+
+  .actions {
+    display: flex;
+    gap: 1rem;
+    justify-content: flex-end;
   }
 
   .message {

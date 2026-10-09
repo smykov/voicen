@@ -15,8 +15,8 @@ import type { MessageId } from "../i18n";
 export type ModelId = "tiny" | "base" | "small" | "medium-q5_0" | "large-v3-turbo-q5_0";
 
 /**
- * Why a download failed or was refused (`ReasonView`). `messageKey` is a Rust
- * `MessageId` (`download.*`), typed `MessageId` at this boundary like
+ * Why a download failed or a download or delete was refused (`ReasonView`).
+ * `messageKey` is a Rust `MessageId` (`download.*`, `delete.*`), typed `MessageId` at this boundary like
  * `FormError.message`. `params` is present only when there are any; every value is a
  * string. `needed` is a byte count, shown only through `reasonArgs` (models.ts).
  */
@@ -44,6 +44,17 @@ export interface LocalModelView {
   state: ModelState;
   /** Always false until T-017's residency; not rendered. */
   loaded: boolean;
+}
+
+/**
+ * `local_model_delete`'s result (`DeleteOutcome`). `engineReset`: the deleted model was
+ * the saved built-in selection while engine was `builtin_local`, so core set engine
+ * `none` (persisted and published as `settings://changed`). `resetFailed`: the file is
+ * gone but core could not write that reset (OQ-26 (a)); the settings are unchanged.
+ */
+export interface DeleteOutcome {
+  engineReset: boolean;
+  resetFailed: boolean;
 }
 
 /** `local-model://progress` payload. */
@@ -98,6 +109,15 @@ export function downloadLocalModel(id: ModelId): Promise<void> {
 /** `local_model_cancel_download { id }`: true if a running download was cancelled. */
 export function cancelLocalModelDownload(id: ModelId): Promise<boolean> {
   return invoke<boolean>("local_model_cancel_download", { id });
+}
+
+/**
+ * `local_model_delete { id }`: removes a downloaded model's file (and resets a selection
+ * naming it). Emits no `local-model://` event: the caller re-lists. Rejects with a
+ * `FailureReason` (`model_in_use`, `delete_failed`, `not_downloaded`) when refused.
+ */
+export function deleteLocalModel(id: ModelId): Promise<DeleteOutcome> {
+  return invoke<DeleteOutcome>("local_model_delete", { id });
 }
 
 /** `local-model://progress`, emitted after the listed state is updated. */
