@@ -191,6 +191,12 @@ interface WireFixture {
    * e2e_settings_wire_fixture_test_connection_results_match_core).
    */
   test_connection_results: Record<TestResultKind, ConnectionTestResult>;
+  /**
+   * Core's `invalid` ConnectionTestResult naming engine.api.base_url url.malformed (a
+   * control on Engine) and timeouts.connect timeout.range (a control on General only)
+   * (T-013; pinned by core's e2e_settings_wire_fixture_test_connection_invalid_off_tab_matches_core).
+   */
+  test_connection_invalid_off_tab: ConnectionTestResult;
 }
 
 /** The kinds of `ConnectionTestResult` the fixture holds, one value each. */
@@ -254,6 +260,18 @@ export function refusedPostProcessingOnEmpty(): Extract<SaveOutcome, { Refused: 
 export function testConnectionResult(kind: TestResultKind): ConnectionTestResult {
   const result = fixture.test_connection_results?.[kind];
   if (result === undefined) throw new Error(`settings-wire.json has no test_connection_results.${kind}`);
+  return structuredClone(result);
+}
+
+/**
+ * Core's `invalid` ConnectionTestResult with one field that has a control on the Engine
+ * tab (engine.api.base_url url.malformed) and one that has a control only on General
+ * (timeouts.connect timeout.range), in validate's order (a fresh copy, for
+ * `queueTestResult`; T-013).
+ */
+export function testConnectionInvalidOffTab(): ConnectionTestResult {
+  const result = fixture.test_connection_invalid_off_tab;
+  if (result === undefined) throw new Error("settings-wire.json has no test_connection_invalid_off_tab");
   return structuredClone(result);
 }
 

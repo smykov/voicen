@@ -16,8 +16,11 @@
 // - the result of the current run is rendered in `data-testid="settings-test-result"` with
 //   `role="status"`, through `t` only: ok -> `settings.test_connection.ok {ms}`, the failure
 //   kinds -> `failure.*`, invalid -> `settings.test_connection.invalid` plus the field
-//   errors on their controls (aria-invalid, `error.<code>` text); a rejected invoke shows
-//   `error.ipc_unavailable`, never the rejection text;
+//   errors on their controls (aria-invalid, `error.<code>` text); a field of an invalid
+//   result with no control on the page is listed in the result region by its label
+//   (`settings.field_label.<field>`, one listitem each), a field with a control is not;
+//   a rejected invoke shows `error.ipc_unavailable` in the result region (never the
+//   rejection text, never the page-level role="alert");
 // - the run belongs to the page: it survives a tab switch and an engine switch, and it is
 //   dropped on every close the page does not prevent and on discard.
 import { readFileSync } from "node:fs";
@@ -35,6 +38,7 @@ import {
   releaseTest,
   requestClose,
   storedView,
+  testConnectionInvalidOffTab,
   testConnectionResult,
   type ConnectionTestRequest,
   type SettingsView,
@@ -326,7 +330,9 @@ test("failure branch: invalid -> the base URL is highlighted with error.url.malf
   await field(page, "engine.api.base_url").fill("not a url (fake)");
   await queueTestResult(page, testConnectionResult("invalid"));
   await testButton(page).click();
-  await expect(result(page)).toContainText(INVALID_EN);
+  // Exactly the message: the base URL has a control on the page, so it is not listed.
+  await expect(result(page)).toHaveText(INVALID_EN);
+  await expect(result(page).getByRole("listitem")).toHaveCount(0);
   const url = field(page, "engine.api.base_url");
   await expect(url).toHaveAttribute("aria-invalid", "true");
   await expect(url).toHaveAccessibleDescription(new RegExp(EN["error.url.malformed"].replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
@@ -335,6 +341,48 @@ test("failure branch: invalid -> the base URL is highlighted with error.url.malf
   expect(await calls(page, "settings_save")).toEqual([]);
   expect(await requests(page)).toHaveLength(1);
   expect((await requests(page))[0].base_url).toBe("not a url (fake)");
+  expect(errors).toEqual([]);
+});
+
+test("failure branch: invalid naming a field on another tab -> the result lists that field by label (only it), and General highlights it", async ({ page }) => {
+  const errors = pageErrors(page);
+  await open(page, viewWith("api", { key: true }));
+  // Both fields as typed: the connect timeout on General, the base URL on Engine.
+  await page.getByTestId("tab-general").click();
+  await field(page, "timeouts.connect").fill("0");
+  await expect(field(page, "timeouts.connect")).toHaveValue("0");
+  await page.getByTestId("tab-engine").click();
+  await field(page, "engine.api.base_url").fill("not a url (fake)");
+  const invalid = testConnectionInvalidOffTab();
+  expect((invalid as { errors: { field: string }[] }).errors.map((e) => e.field)).toEqual([
+    "engine.api.base_url",
+    "timeouts.connect",
+  ]);
+  await queueTestResult(page, invalid);
+  await testButton(page).click();
+
+  // On Engine: the message, then exactly one listed field, the one without a control here.
+  const connectLabel = text(EN, "settings.field_label.timeouts.connect");
+  const urlLabel = text(EN, "settings.field_label.engine.api.base_url");
+  await expect(result(page).getByText(INVALID_EN, { exact: true })).toBeVisible();
+  await expect(result(page).getByRole("listitem")).toHaveText([connectLabel]);
+  await expect(result(page)).not.toContainText(urlLabel);
+  await expect(field(page, "engine.api.base_url")).toHaveAttribute("aria-invalid", "true");
+  await expect(field(page, "timeouts.connect")).toHaveCount(0);
+  expect((await requests(page))[0].timeouts.connect_s).toBe(0);
+
+  // On General: the listed field carries its own error.
+  await page.getByTestId("tab-general").click();
+  const connect = field(page, "timeouts.connect");
+  await expect(connect).toHaveAttribute("aria-invalid", "true");
+  await expect(connect).toHaveAccessibleDescription(new RegExp(EN["error.timeout.range"].replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  await expect(connect).toHaveValue("0");
+
+  // Back on Engine: the same list (the result belongs to the page, not to the tab).
+  await page.getByTestId("tab-engine").click();
+  await expect(result(page).getByRole("listitem")).toHaveText([connectLabel]);
+  expect(await calls(page, "settings_save")).toEqual([]);
+  expect(await requests(page)).toHaveLength(1);
   expect(errors).toEqual([]);
 });
 
@@ -465,7 +513,10 @@ test("failure branch: a rejected test shows error.ipc_unavailable, never the rej
   await queueTestRejection(page, REJECTION);
   await testButton(page).click();
 
-  await expect(page.getByText(EN["error.ipc_unavailable"]).first()).toBeVisible();
+  // In the result region, not as the page-level alert.
+  await expect(result(page)).toHaveText(EN["error.ipc_unavailable"]);
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  await expect(page.getByText(EN["error.ipc_unavailable"])).toHaveCount(1);
   await expect(page.locator("body")).not.toContainText(REJECTION);
   await expect(page.locator("body")).not.toContainText(OK_EN);
   await expect(testButton(page)).toBeEnabled();
@@ -478,6 +529,30 @@ test("failure branch: a rejected test shows error.ipc_unavailable, never the rej
   await testButton(page).click();
   await expect(result(page)).toHaveText(OK_EN);
   expect(await calls(page, "settings_test_connection")).toHaveLength(2);
+  expect(errors).toEqual([]);
+});
+
+test("failure branch: a rejection that arrives after the window was discarded shows nothing", async ({ page }) => {
+  const errors = pageErrors(page);
+  await open(page, viewWith("api", { key: true }));
+  await field(page, "engine.api.model").fill("whisper-fake-dirty");
+  await holdTests(page);
+  await queueTestRejection(page, REJECTION);
+  await testButton(page).click();
+  await expect(testButton(page)).toBeDisabled();
+
+  await requestClose(page);
+  const dialog = page.getByRole("alertdialog");
+  await expect(dialog).toBeVisible();
+  await dialog.getByTestId("settings-discard-confirm").click();
+  await expect.poll(async () => (await calls(page, "plugin:window|destroy")).length).toBe(1);
+
+  await releaseTest(page);
+  await settle(page);
+  expect(await resultText(page)).toBe("");
+  await expect(page.getByText(EN["error.ipc_unavailable"])).toHaveCount(0);
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  await expect(page.locator("body")).not.toContainText(REJECTION);
   expect(errors).toEqual([]);
 });
 

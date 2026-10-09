@@ -3793,4 +3793,36 @@ mod tests {
             serde_json::to_string_pretty(&core).expect("results serialize")
         );
     }
+
+    #[test]
+    fn e2e_settings_wire_fixture_test_connection_invalid_off_tab_matches_core() {
+        // T-013 review 1 #1 / P-010: the Playwright case for an `invalid` result whose
+        // field has no control on the Engine tab scripts core's real wire.
+        // `test_connection_invalid_off_tab` is Invalid with engine.api.base_url
+        // url.malformed (a control on Engine) and timeouts.connect timeout.range (a
+        // control on General only), in validate's order. Bite: a field or code
+        // renamed without regenerating e2e/fixtures/settings-wire.json.
+        use crate::connection_test::ConnectionTestResult as R;
+        let fixture: serde_json::Value =
+            serde_json::from_str(E2E_WIRE_FIXTURE).expect("settings-wire.json is valid JSON");
+        let result = R::Invalid {
+            errors: vec![
+                FieldError {
+                    field: FieldId::EngineApiBaseUrl,
+                    code: ErrorCode::UrlMalformed,
+                },
+                FieldError {
+                    field: FieldId::TimeoutsConnect,
+                    code: ErrorCode::TimeoutRange,
+                },
+            ],
+        };
+        let core = serde_json::to_value(&result).expect("ConnectionTestResult serializes");
+        assert_eq!(
+            fixture["test_connection_invalid_off_tab"],
+            core,
+            "e2e/fixtures/settings-wire.json test_connection_invalid_off_tab differs from core; core says:\n{}",
+            serde_json::to_string_pretty(&core).expect("result serializes")
+        );
+    }
 }
