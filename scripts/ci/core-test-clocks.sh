@@ -18,8 +18,10 @@
 # read; `//` inside a string on a code line (http://...) is code. The rule decides on raw text
 # (F-003): it does not model what a helper does. Not caught: a target built from parts at run
 # time, arithmetic on two Instants handed out by common (`now() - a`), SystemTime (not a
-# measurement), a ceiling through within_spec with a made-up spec id, and the #[cfg(test)] unit
-# tests under crates/voicen-core/src (outside this dir).
+# measurement), a ceiling through within_spec with a made-up spec id, a ceiling written as
+# !passed(..) or D - left(..), catch_unwind(at_least), editing a case's pub deadline fields after
+# construction, the #[cfg(test)] unit tests under crates/voicen-core/src (outside this dir) and
+# the shell tests (src-tauri/tests). Review-only (T1) by the owner: decisions #112.
 #
 # Usage: scripts/ci/core-test-clocks.sh [tests-dir]   (default crates/voicen-core/tests)
 # Exit 0: "ok: <n> file(s) outside common". Exit 1: violations, one "<file>:<line>: os-answer

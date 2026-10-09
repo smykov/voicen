@@ -92,7 +92,7 @@ This is one rule for every kind of uncontrolled clock: the OS refusal time, the 
   - `Unanswered`'s deadlines are destructured exhaustively in `os_answer_tests`;
   - `common_helpers` pins both modules.
 - By review only (T1):
-  - no ceiling written as instant arithmetic, through a made-up `within_spec` spec id, or in a unit test under `src` slips in;
+  - no ceiling written as instant arithmetic, through a made-up `within_spec` spec id, as `!passed(..)` or `D - left(..)`, or in a unit test under `src` or a shell test slips in; no `catch_unwind(at_least)`; no edit of a case's `pub` deadline fields after construction (decisions #112);
   - when a ceiling is removed, an outcome catches its bite, named in the test's comment.
 - `ci.yml` runs the Windows workspace tests with `--no-fail-fast`, so one red binary does not hide the others.
 
