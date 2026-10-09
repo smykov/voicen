@@ -1,4 +1,9 @@
 {
+  "about.build_info_error": "Не удалось прочитать сведения о сборке",
+  "about.button": "О программе Voicen",
+  "about.close": "Закрыть",
+  "about.license": "Лицензия MIT",
+  "about.title": "О программе Voicen",
   "app.build_info": "Voicen {version} ({commit})",
   "app.build_info_error": "Не удалось прочитать сведения о сборке: {reason}",
   "download.already_downloaded": "Эта модель уже скачана.",

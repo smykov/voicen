@@ -1,4 +1,9 @@
 {
+  "about.build_info_error": "Cannot read build info",
+  "about.button": "About Voicen",
+  "about.close": "Close",
+  "about.license": "MIT License",
+  "about.title": "About Voicen",
   "app.build_info": "Voicen {version} ({commit})",
   "app.build_info_error": "Cannot read build info: {reason}",
   "download.already_downloaded": "This model is already downloaded.",

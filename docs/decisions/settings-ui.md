@@ -119,6 +119,13 @@ Tasks: T-004, T-037 (S1; the opener thread T-052; the hotkey request T-055), T-0
   - Tests: `e2e/settings-microphone.spec.ts` (list and marks, saved listed / chosen / Windows default by id / System default → null, not connected in en and ru and with an empty list, a list arriving after the draft, rejected list with a canary); the R round trips of `settings-focus-close.spec.ts`; the microphone cases of `tauri-mock.spec.ts`.
 - **Don't:** write the draft when the list arrives, save the Windows-default device as `null` (or System default as the default device's id), match a saved device by name, drop a saved id that is not listed, or show the rejection text.
 
+### A — About shows only this opening's build info, and the discard prompt wins
+
+- **Defect that produced it:** none in the failure log (need, T-023, FR-18, spec 006 US1 and Clarification Q1). Since T-037 no window opens `/`, the only page that showed the version, so an installed build showed it nowhere in the UI.
+- **What breaks if you violate it:** About shows a version from an earlier opening, an empty line or a rejection text (U2), or a modal About leaves the discard prompt inert so the user cannot answer it.
+- **Where it is enforced:** `src/lib/about/About.svelte`, mounted only by `tabs/General.svelte`, reads build info only through `src/lib/buildInfo.ts` (`loadBuildInfo` → `get_build_info` → `voicen_core::build_info()`, the one resolver, C). Each opening clears the previous result and calls `get_build_info` once; an answer to an earlier opening is dropped; while pending nothing is shown. The line is `formatBuildInfo(info)` (`app.build_info`); a rejection shows `role="alert"` with `about.build_info_error` and no rejection text. The dialog is a native `<dialog>` opened with `showModal()` (Esc closes it, focus returns to the button) and `aria-labelledby` its title; it is moved to `<body>` so it is outside the panel's `<fieldset disabled={saving}>` and outside `<main>`, which goes inert under the discard prompt. The button stays in the fieldset (no About mid-save). The discard prompt wins: `onClose` in `+page.svelte` sets the bound `aboutOpen` to false before `confirmDiscard`, and About closes its dialog in a `$effect.pre`, before the page's effect focuses Keep editing. Texts are UI-only ids `about.button`, `about.title`, `about.close`, `about.license`, `about.build_info_error` (i18n.md). Not yet: FR-002's "Project page", "Third-party licenses" and "Open logs folder" buttons (need shell commands; follow-up). Tests: `e2e/about.spec.ts` (opening and call count, failure branch, no stale value or error, keyboard, RU, discard prompt wins); `tauri-mock.spec.ts` › setBuildInfo.
+- **Don't:** load build info on mount or cache it across openings, show the rejection text, render the dialog inside the saving fieldset or `<main>`, open it with `show()` (non-modal), or show the discard prompt while About is open.
+
 ## Rejected approaches
 
 | Approach | Why rejected | Ref |
@@ -136,6 +143,7 @@ Tasks: T-004, T-037 (S1; the opener thread T-052; the hotkey request T-055), T-0
 | Warnings kept in the Draft | the `settings://changed` echo of the save rebuilds a clean Draft and drops them | T-015 Investigation 6 |
 | tauri's dialog plugin for the discard prompt | not a dependency and not granted; an in-page `alertdialog` needs neither | T-039 Q2 |
 | The local-model calls added to `settingsApi.ts` | two contracts in one module (C); `buildInfo.ts` already showed one module per contract | T-045 option B, decision #58 |
+| About on the `/` page (give `/` a window again) | contradicts Clarification Q1 and S1 (one settings window) | T-023 analysis option C |
 | An optimistic `downloading` set by the UI on Download | a local state set after a fast `failed` event would stick (I2); the list after the invoke shows it instead | T-045 Investigation 4 |
 
 ## Open

@@ -22,12 +22,13 @@ No command takes a path or URL: the targets are fixed in Rust (`AppPaths::logs()
 
 ## UI component
 
-`src/lib/about/About.svelte`: a modal dialog (`<dialog>` with `aria-labelledby`, closed by Esc and a Close button, focus returned to the opener) inside the settings window, opened by the "About Voicen" button on 004's General tab (Clarification Q1; req FR-18 "About dialog"). Shows `Voicen <version> (<commit>)` (`formatBuildInfo`, exists), "MIT License", buttons "Project page", "Third-party licenses", "Open logs folder"; `role="alert"` for "Cannot read build info" and open errors. All controls are buttons with accessible names (keyboard operable).
+`src/lib/about/About.svelte`: a modal dialog (`<dialog>` with `aria-labelledby`, closed by Esc and a Close button, focus returned to the opener) inside the settings window, opened by the "About Voicen" button on 004's General tab (Clarification Q1; req FR-18 "About dialog"). Shows `Voicen <version> (<commit>)` (`formatBuildInfo`, exists), "MIT License", buttons "Project page", "Third-party licenses", "Open logs folder"; `role="alert"` for "Cannot read build info" and open errors. All controls are buttons with accessible names (keyboard operable). T-023 ships the dialog with the version line, the license, Close and the build-info alert; `get_build_info` is called on each opening, and the discard prompt of the settings window closes About first. The three action buttons and their error texts come with the shell commands above (follow-up task).
 
 ## Message catalog entries (added to 004's catalog, EN + RU)
 
 | Key | English |
 |---|---|
+| `about.button` | About Voicen (the General-tab button) |
 | `about.title` | About Voicen |
 | `about.close` | Close |
 | `about.license` | MIT License |

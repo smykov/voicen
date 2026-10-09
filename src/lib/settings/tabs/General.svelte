@@ -2,14 +2,21 @@
   // General tab: the interface language, one option per `LANGUAGES` entry (the one
   // list in the UI), and Start with Windows. Both take effect when saved (the window
   // renders in the saved view's ui_language; the save step writes the Run value), and the
-  // five dictation timeouts (TimeoutsFields, T-073), used by the next job.
+  // five dictation timeouts (TimeoutsFields, T-073), used by the next job. Last, the
+  // "About Voicen" button and dialog (T-023); `aboutOpen` is bound by the page, which
+  // closes About when the discard prompt shows.
+  import About from "$lib/about/About.svelte";
   import { LANGUAGES, t, type MessageId } from "$lib/i18n";
   import type { Draft } from "../draft";
   import { controlId, describedBy } from "../fields";
   import FieldMessage from "../FieldMessage.svelte";
   import TimeoutsFields from "../TimeoutsFields.svelte";
 
-  let { draft = $bindable(), warnings }: { draft: Draft; warnings: Record<string, MessageId> } = $props();
+  let {
+    draft = $bindable(),
+    warnings,
+    aboutOpen = $bindable(false),
+  }: { draft: Draft; warnings: Record<string, MessageId>; aboutOpen?: boolean } = $props();
   const uiLanguage = "general.ui_language";
   const startWithWindows = "general.start_with_windows";
 </script>
@@ -44,3 +51,5 @@
 </div>
 
 <TimeoutsFields bind:draft {warnings} />
+
+<About bind:open={aboutOpen} />
