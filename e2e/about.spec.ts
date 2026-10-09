@@ -18,6 +18,7 @@ import type { Locator, Page } from "@playwright/test";
 import { expect, test } from "./support/boot";
 import {
   calls,
+  emit,
   firstRunView,
   installTauriMock,
   listeners,
@@ -292,5 +293,53 @@ test("the discard prompt wins: About open with a dirty draft, a close request cl
   await expect(field(page, "history.size")).toHaveValue("33");
   await settle(page);
   expect(await calls(page, "plugin:window|destroy")).toEqual([]);
+  expect(errors).toEqual([]);
+});
+
+// (7) review 1 #1 ------------------------------------------------------------------
+// A settings://focus request to another tab unmounts General and the portalled
+// <dialog> while About is open; no `close` fires. Back on General, About must not
+// pop up by itself, and the next opening by the button gets its own get_build_info
+// answer (never an empty dialog with no call).
+
+test("About open, a settings://focus request moves to another tab, back on General -> About is not shown unasked, and reopening by the button calls get_build_info again and shows the version line", async ({ page }) => {
+  const errors = pageErrors(page);
+  await openGeneral(page, { buildInfo: OK });
+  await expect
+    .poll(() => listeners(page, "settings://focus"), { message: "the settings page listens to settings://focus" })
+    .toBeGreaterThan(0);
+
+  await aboutButton(page).click();
+  const dialog = aboutDialog(page);
+  await expect(dialog.getByText(LINE, { exact: true })).toBeVisible();
+  expect(await buildInfoCalls(page)).toBe(1);
+
+  // The second path: the shell asks the open window for another tab while About is open.
+  await emit(page, "settings://focus", { tab: "recording", field: "recording.hotkey" });
+  await expect(tab(page, "recording")).toHaveAttribute("aria-selected", "true");
+  await expect(dialog).toHaveCount(0);
+
+  // A new answer, so a line kept from the first opening cannot pass.
+  await setBuildInfo(page, { version: "0.3.0", commit: "fed9876" });
+  await tab(page, "general").click();
+  await expect(tab(page, "general")).toHaveAttribute("aria-selected", "true");
+  await expect(aboutButton(page)).toBeVisible();
+  await settle(page);
+  // Not shown unasked, and no load nobody asked for.
+  await expect(dialog).toBeHidden();
+  expect(await buildInfoCalls(page)).toBe(1);
+
+  // Opening by the button is a new showing: its own call, its own line.
+  await aboutButton(page).click();
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByText("Voicen 0.3.0 (fed9876)", { exact: true })).toBeVisible();
+  await expect(dialog).not.toContainText(LINE);
+  await expect(dialog.getByRole("alert")).toHaveCount(0);
+  expect(await buildInfoCalls(page)).toBe(2);
+
+  // And it still closes normally.
+  await dialog.getByRole("button", { name: "Close", exact: true }).click();
+  await expect(dialog).toBeHidden();
+  await expect(aboutButton(page)).toBeFocused();
   expect(errors).toEqual([]);
 });
