@@ -110,6 +110,25 @@ export function speechLanguages(): Promise<string[]> {
   return invoke<string[]>("settings_speech_languages");
 }
 
+/**
+ * One capture endpoint of `settings_list_microphones` (`voicen_core::platform::InputDevice`):
+ * `id` is the endpoint id the saved `Settings.microphone.id` matches (whole id only),
+ * `name` is for display, `is_default` marks the Windows default input device.
+ */
+export interface InputDevice {
+  id: string;
+  name: string;
+  is_default: boolean;
+}
+
+/**
+ * `settings_list_microphones`: the active input devices in enumeration order (T-012).
+ * Rejects when the list cannot be read (the caller shows `error.ipc_unavailable`).
+ */
+export function listMicrophones(): Promise<InputDevice[]> {
+  return invoke<InputDevice[]>("settings_list_microphones");
+}
+
 /** `settings://changed`: the view after every save, from any window. */
 export function onSettingsChanged(handler: (view: SettingsView) => void): Promise<UnlistenFn> {
   return listen<SettingsView>("settings://changed", (event) => handler(event.payload));
