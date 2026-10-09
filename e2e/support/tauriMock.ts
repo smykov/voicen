@@ -72,6 +72,14 @@
 //     the shell does;
 //   - `windowLabel` is the label tauri reports for the current window (default
 //     `settings`; the overlay page runs in the window labelled `overlay`).
+// - Microphones (spec 004 contracts/ipc.md `settings_list_microphones`, T-012):
+//   `settings_list_microphones` returns a copy of the `microphones` option (default:
+//   `fakeMicrophones()`, three fake endpoints, the second one the Windows default), taken
+//   when the call is made. With `microphones: { reject }` every call is recorded and then
+//   rejects with that text (the command could not run). With `holdMicrophones`, every
+//   call stays in flight (recorded, its copy already taken) until `releaseMicrophones()`;
+//   later calls are answered at once. The list is adapter data (cpal's enumeration), not
+//   a core-derived value, so it is hand-written fake data, not a core-checked fixture.
 // - Any other command rejects, so a call outside the contract fails the test.
 //
 // The init script must be self-contained (it is serialized into the page), so it cannot
@@ -83,13 +91,14 @@ import type { Page } from "@playwright/test";
 // The one TS declaration of the wire is the window's own (src/lib/settings/settingsApi.ts);
 // the mock re-exports it, so a wire change is made in one TS file (T-004 r1 #8).
 
-import type { SaveOutcome, SettingsView } from "../../src/lib/settings/settingsApi";
+import type { InputDevice, SaveOutcome, SettingsView } from "../../src/lib/settings/settingsApi";
 import type { FailureReason, LocalModelView, ModelState } from "../../src/lib/local-models/localModelsApi";
 import type { OverlayPayload } from "../../src/lib/overlay/overlayApi";
 export type {
   EngineKind,
   FieldError,
   FormError,
+  InputDevice,
   KeyEdit,
   KeySlot,
   SaveOutcome,
@@ -264,6 +273,33 @@ export function overlayNothingYet(): OverlayPayload {
   return { ...overlayWire("hidden_en"), seq: 0 };
 }
 
+// ---- Microphones (settings_list_microphones, T-012) -------------------------------
+
+/**
+ * The default `settings_list_microphones` answer (a fresh copy): three fake WASAPI-style
+ * endpoint ids in enumeration order, the second one flagged as the Windows default (so
+ * "the first entry is the default" is not true of it).
+ */
+export function fakeMicrophones(): InputDevice[] {
+  return [
+    {
+      id: "{0.0.1.00000000}.{00000000-0000-4000-8000-0000000fa001}",
+      name: "Microphone (Fake USB Audio)",
+      is_default: false,
+    },
+    {
+      id: "{0.0.1.00000000}.{00000000-0000-4000-8000-0000000fa002}",
+      name: "Headset Microphone (Fake Bluetooth)",
+      is_default: true,
+    },
+    {
+      id: "{0.0.1.00000000}.{00000000-0000-4000-8000-0000000fa003}",
+      name: "Line In (Fake HD Audio)",
+      is_default: false,
+    },
+  ];
+}
+
 // ---- Install -------------------------------------------------------------------
 
 export interface MockOptions {
@@ -300,6 +336,13 @@ export interface MockOptions {
   holdOverlayReady?: boolean;
   /** The label of the current window as tauri reports it; default `settings`. */
   windowLabel?: string;
+  /**
+   * What `settings_list_microphones` returns, or `{ reject }` to make every call reject
+   * with that text (still recorded); default: `fakeMicrophones()`.
+   */
+  microphones?: InputDevice[] | { reject: string };
+  /** Keep every `settings_list_microphones` in flight until `releaseMicrophones` (recorded at once, copy taken then). */
+  holdMicrophones?: boolean;
 }
 
 interface InitArg {
@@ -319,6 +362,8 @@ interface InitArg {
   overlayReady: OverlayPayload | { reject: string };
   holdOverlayReady: boolean;
   windowLabel: string;
+  microphones: InputDevice[] | { reject: string };
+  holdMicrophones: boolean;
 }
 
 /** Installs the mock as an init script; call before `page.goto`. */
@@ -340,6 +385,8 @@ export async function installTauriMock(page: Page, options: MockOptions = {}): P
     overlayReady: options.overlayReady ?? overlayNothingYet(),
     holdOverlayReady: options.holdOverlayReady ?? false,
     windowLabel: options.windowLabel ?? "settings",
+    microphones: options.microphones ?? fakeMicrophones(),
+    holdMicrophones: options.holdMicrophones ?? false,
   };
   await page.addInitScript((init: InitArg) => {
     type Handler = (data: unknown) => void;
@@ -370,6 +417,8 @@ export async function installTauriMock(page: Page, options: MockOptions = {}): P
       heldDownload: [] as (() => void)[],
       holdingReady: init.holdOverlayReady,
       heldReady: [] as (() => void)[],
+      holdingMics: init.holdMicrophones,
+      heldMics: [] as (() => void)[],
     };
 
     function setModelState(id: string, modelState: unknown): void {
@@ -486,6 +535,13 @@ export async function installTauriMock(page: Page, options: MockOptions = {}): P
           if ("reject" in reply) throw new Error(reply.reject);
           return reply;
         }
+        case "settings_list_microphones": {
+          // The answer is the device list when the shell ran the command; a hold only delays it.
+          const reply = clone(init.microphones);
+          if (state.holdingMics) await new Promise<void>((resolve) => state.heldMics.push(resolve));
+          if (!Array.isArray(reply)) throw new Error(reply.reject);
+          return reply;
+        }
         case "plugin:window|destroy":
           if (init.destroy !== null) throw new Error(init.destroy.reject);
           return null;
@@ -545,6 +601,10 @@ export async function installTauriMock(page: Page, options: MockOptions = {}): P
         state.holdingReady = false;
         for (const resolve of state.heldReady.splice(0)) resolve();
       },
+      releaseMicrophones: () => {
+        state.holdingMics = false;
+        for (const resolve of state.heldMics.splice(0)) resolve();
+      },
       progress: (id: string, received: number) => {
         const row = state.models.find((model) => model.id === id);
         if (!row) throw new Error(`no local model ${id}`);
@@ -583,6 +643,7 @@ interface MockHandle {
   releaseDownload: () => void;
   queueDownloadRejection: (payload: unknown) => void;
   releaseOverlayReady: () => void;
+  releaseMicrophones: () => void;
   progress: (id: string, received: number) => void;
   modelState: (id: string, state: ModelState) => void;
 }
@@ -729,4 +790,11 @@ export async function overlayState(page: Page, payload: OverlayPayload): Promise
 /** Answers every held `overlay_ready` with the reply taken at its call, and stops holding. */
 export async function releaseOverlayReady(page: Page): Promise<void> {
   await page.evaluate(() => (window as unknown as MockWindow).__VOICEN_MOCK__.releaseOverlayReady());
+}
+
+// ---- Microphones (spec 004, T-012) ---------------------------------------------------
+
+/** Answers every held `settings_list_microphones` with the list taken at its call, and stops holding. */
+export async function releaseMicrophones(page: Page): Promise<void> {
+  await page.evaluate(() => (window as unknown as MockWindow).__VOICEN_MOCK__.releaseMicrophones());
 }

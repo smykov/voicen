@@ -26,6 +26,11 @@
 // options are the downloaded models (R round trip for builtin_local); and the close guard
 // is registered before any listener that can build a draft (D: a `settings://changed`
 // arriving while the guard's listen is pending builds no editable draft).
+//
+// T-012 adds (locator contract of e2e/settings-microphone.spec.ts): the Recording tab
+// renders `<select data-field="recording.microphone">` whose value is the saved device's
+// id (here one the mock does not list, shown "(not connected)"), so the R round trips
+// cover it too.
 import { readFileSync } from "node:fs";
 import type { Page } from "@playwright/test";
 import { expect, test } from "./support/boot";
@@ -547,6 +552,8 @@ function shownFor(settings: Settings, offered: readonly string[] = []): Record<s
     "engine.builtin_local.model_id": modelId !== null && offered.includes(modelId) ? modelId : "",
     "engine.speech_language": settings.speech_language ?? "auto",
     "recording.hotkey": settings.hotkey,
+    // T-012: the saved device's id, listed or not ("(not connected)"); "" = system default.
+    "recording.microphone": settings.microphone?.id ?? "",
     "recording.mode": settings.mode,
     "output.auto_paste": settings.auto_paste,
     "post_processing.enabled": settings.post_processing.enabled,
@@ -577,7 +584,7 @@ function tabFieldsFor(engine: RoundTripEngine): Record<string, string[]> {
       : [`engine.${engine}.base_url`, `engine.${engine}.model`, `engine.${engine}.key`];
   return {
     engine: ["engine.kind", ...engineFields, "engine.speech_language"],
-    recording: ["recording.hotkey", "recording.mode"],
+    recording: ["recording.hotkey", "recording.microphone", "recording.mode"],
     output: ["output.auto_paste"],
     post_processing: [
       "post_processing.enabled",

@@ -13,6 +13,7 @@ import {
   installTauriMock,
   failedState,
   failureReason,
+  fakeMicrophones,
   holdLists,
   listeners,
   localModelProgress,
@@ -29,6 +30,7 @@ import {
   releaseDownload,
   releaseList,
   releaseListen,
+  releaseMicrophones,
   releaseOverlayReady,
   releaseSettingsGet,
   storedModels,
@@ -529,4 +531,51 @@ test("overlayReady: { reject } records every overlay_ready and rejects it with i
 
   await releaseOverlayReady(held);
   await expect.poll(answer).toEqual({ err: "overlay_ready refused (fake)" });
+});
+
+// ---- Microphones (spec 004 contracts/ipc.md settings_list_microphones, T-012) -----------
+
+test("settings_list_microphones serves fakeMicrophones by default (one default, not the first, unique ids), or the microphones option", async ({ context }) => {
+  const page = await context.newPage();
+  await installTauriMock(page);
+  await page.goto("/");
+  const list = (await invokeInPage(page, "settings_list_microphones")) as { ok: unknown[] };
+  expect(list).toEqual({ ok: fakeMicrophones() });
+  const mics = fakeMicrophones();
+  expect(mics.filter((m) => m.is_default)).toHaveLength(1);
+  expect(mics[0].is_default).toBe(false);
+  expect(new Set(mics.map((m) => m.id)).size).toBe(mics.length);
+  for (const m of mics) expect(Object.keys(m).sort()).toEqual(["id", "is_default", "name"]);
+  expect(await calls(page, "settings_list_microphones")).toEqual([{ cmd: "settings_list_microphones", args: {} }]);
+
+  const other = await context.newPage();
+  await installTauriMock(other, { microphones: [] });
+  await other.goto("/");
+  expect(await invokeInPage(other, "settings_list_microphones")).toEqual({ ok: [] });
+});
+
+test("microphones: { reject } records every settings_list_microphones and rejects it with its text", async ({ context }) => {
+  const page = await context.newPage();
+  await installTauriMock(page, { microphones: { reject: "list_microphones refused (fake)" } });
+  await page.goto("/");
+  expect(await invokeInPage(page, "settings_list_microphones")).toEqual({ err: "list_microphones refused (fake)" });
+  expect(await invokeInPage(page, "settings_list_microphones")).toEqual({ err: "list_microphones refused (fake)" });
+  expect(await calls(page, "settings_list_microphones")).toHaveLength(2);
+});
+
+test("holdMicrophones keeps settings_list_microphones in flight (recorded) until releaseMicrophones; later calls are answered at once", async ({ context }) => {
+  const page = await context.newPage();
+  await installTauriMock(page, { holdMicrophones: true });
+  await page.goto("/");
+  await page.evaluate(() => {
+    const w = window as unknown as { __TAURI_INTERNALS__: Internals; __mics?: unknown };
+    void w.__TAURI_INTERNALS__.invoke("settings_list_microphones", {}).then((v) => (w.__mics = v));
+  });
+  await expect.poll(async () => (await calls(page, "settings_list_microphones")).length).toBe(1);
+  const answer = () => page.evaluate(() => (window as unknown as { __mics?: unknown }).__mics);
+  expect(await answer()).toBeUndefined();
+
+  await releaseMicrophones(page);
+  await expect.poll(answer).toEqual(fakeMicrophones());
+  expect(await invokeInPage(page, "settings_list_microphones")).toEqual({ ok: fakeMicrophones() });
 });
