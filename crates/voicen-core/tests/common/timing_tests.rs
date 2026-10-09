@@ -10,10 +10,14 @@
 //! Not a module of `tests/common`: included by `tests/common_helpers.rs` with
 //! `#[path]`, as `refused_addr_tests.rs` is by its users.
 
+use std::borrow::Borrow;
+use std::ops::Deref;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::time::Duration;
 
-use crate::common::timing::{at_least, measure, within_spec};
+use crate::common::timing::{
+    at_least, at_most_per_second, between, fastest, measure, now, within_spec, Took,
+};
 
 /// SC-003's tolerance (spec 003: "measured tolerance <= 0.5 s").
 const TOL: Duration = Duration::from_millis(500);
@@ -140,5 +144,106 @@ fn measure_returns_the_value_and_a_duration_no_shorter_than_the_work() {
         "VALUE-MARKER"
     });
     assert_eq!(got, "VALUE-MARKER");
-    assert!(took >= work, "measured {took:?} for a {work:?} sleep");
+    at_least(took, work);
+}
+
+/// Compiles only while `T` does NOT implement the trait in the second
+/// impl: with it, `<T as NotImpl<_>>::check` matches both impls and the
+/// type parameter cannot be inferred (the `static_assertions::assert_not_impl_any`
+/// trick, written out: no new dependency).
+macro_rules! assert_not_impl {
+    ($t:ty: $($tr:tt)+) => {{
+        trait NotImpl<A> {
+            fn check() {}
+        }
+        impl<T: ?Sized> NotImpl<()> for T {}
+        #[allow(dead_code)]
+        struct Invalid;
+        impl<T: ?Sized + $($tr)+> NotImpl<Invalid> for T {}
+        let _ = <$t as NotImpl<_>>::check;
+    }};
+}
+
+#[test]
+fn a_measured_time_cannot_be_compared_or_read_back_so_no_ceiling_compiles() {
+    // T-080 review 1 #1: `measure` returns an opaque `Took`, taken only by
+    // `at_least`, `within_spec` and `at_most_per_second`, so
+    // `assert!(took < Duration::from_millis(1500))` on its result does not compile.
+    // Each line below fails to compile once `Took` gains the trait (a comparison,
+    // an `==`, a deref or conversion back to a Duration). Bite: `measure` returning
+    // a `Duration` again, or `Took` deriving `PartialOrd` / `PartialEq` / a
+    // getter-like conversion. A plain method returning the Duration is not visible
+    // to this check; `Took`'s inner field is private and its only accessor is
+    // `pub(super)` (inside `tests/common`).
+    assert_not_impl!(Took: PartialOrd<Duration>);
+    assert_not_impl!(Took: PartialOrd<Took>);
+    assert_not_impl!(Took: PartialEq<Duration>);
+    assert_not_impl!(Took: PartialEq<Took>);
+    assert_not_impl!(Took: Deref);
+    assert_not_impl!(Took: Into<Duration>);
+    assert_not_impl!(Took: AsRef<Duration>);
+    assert_not_impl!(Took: Borrow<Duration>);
+    assert_not_impl!(Duration: PartialOrd<Took>);
+    assert_not_impl!(Duration: PartialEq<Took>);
+}
+
+#[test]
+fn between_two_stamps_is_a_measured_time_from_the_first_to_the_second() {
+    // Two instants from `common::timing::now()` (e.g. a download's start and its
+    // end event) give a `Took` for `at_least`, not a Duration a ceiling could read.
+    // An end before the start is zero, not a panic. Bite: the order swapped, a
+    // constant, an absolute difference.
+    let a = now();
+    let b = a + Duration::from_millis(50);
+    at_least(between(a, b), Duration::from_millis(50));
+    assert!(
+        panic_message(|| at_least(between(a, b), Duration::from_millis(51))).is_some(),
+        "50 ms between the stamps is below 51 ms"
+    );
+    assert!(
+        panic_message(|| at_least(between(b, a), Duration::from_nanos(1))).is_some(),
+        "an end before the start is zero"
+    );
+}
+
+#[test]
+fn fastest_and_less_give_the_sc_003_stage_over_the_baseline() {
+    // SC-003's stage is the measured time over the fastest of the baseline runs
+    // (post_process_timeout), kept a `Took`. Bite: the slowest or the first run as
+    // the baseline, a subtraction that panics or wraps below zero.
+    let runs = [6, 2, 4].map(|s| Took::from(Duration::from_secs(s)));
+    let base = fastest(runs);
+    within_spec(base, Duration::from_secs(2), Duration::ZERO, "SC-003");
+    let stage = Took::from(Duration::from_millis(7_400)).less(base);
+    within_spec(stage, Duration::from_millis(5_400), Duration::ZERO, "SC-003");
+    assert!(
+        panic_message(|| within_spec(
+            Took::from(Duration::from_secs(1)).less(base),
+            Duration::from_millis(1),
+            Duration::ZERO,
+            "SC-003"
+        ))
+        .is_some(),
+        "1 s less a 2 s baseline is zero, not 1 ms"
+    );
+    assert!(
+        panic_message(|| {
+            fastest(Vec::<Took>::new());
+        })
+        .is_some(),
+        "no baseline run is a test bug"
+    );
+}
+
+#[test]
+fn at_most_per_second_caps_a_count_by_the_measured_time_never_the_time() {
+    // A rate check (local_download: <= 4 Progress events per started second, + 1):
+    // the measured time widens the allowed count, so host load can only make it
+    // pass. Bite: the cap rounded down, the count ignored.
+    let two_s = Took::from(Duration::from_secs(2));
+    at_most_per_second(9, 4, two_s, "Progress events");
+    let msg = panic_message(|| at_most_per_second(10, 4, two_s, "Progress events"))
+        .expect("10 events in 2 s is over 4/s + 1");
+    assert!(msg.contains("Progress events"), "{msg}");
+    at_most_per_second(5, 4, Took::from(Duration::from_millis(1)), "events");
 }

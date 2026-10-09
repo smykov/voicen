@@ -14,7 +14,8 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
-use crate::common::os_answer::{OsAnswer, OS_ANSWER_BUDGET};
+use crate::common::os_answer::{OsAnswer, Unanswered, OS_ANSWER_BUDGET};
+use voicen_core::failure::FailureReason;
 use voicen_core::timeouts::Timeouts;
 
 /// Every kind the seam offers today, built through its probe.
@@ -117,4 +118,61 @@ fn unresolvable_case_is_an_rfc_6761_invalid_name() {
         "{}: a bare host name, no port",
         case.host
     );
+}
+
+#[test]
+fn unanswered_case_carries_a_connect_far_below_every_total() {
+    // T-080 review 1 #2: the unrouted kind (a blackholed connect) exists outside
+    // `tests/common` only as an `Unanswered` case with its deadlines, never as a
+    // bare host. Its verdict is decided by two timers the test sets (the connect
+    // timer against the whole-request total), so every total is at least ten
+    // times the connect: a connect limit that does not reach the client lets the
+    // total fire (Timeout), however loaded the host. Exhaustive destructure: a new
+    // deadline does not compile here until it is sized. Bite: a total close to the
+    // connect (the ending then races host scheduling), a test-chosen connect.
+    let case = Unanswered::blackhole();
+    let Timeouts {
+        connect,
+        api_transcription,
+        local_server,
+        post_processing,
+        builtin,
+        download_no_data,
+    } = case.timeouts;
+    assert!(connect > Duration::ZERO, "connect {connect:?}");
+    for (name, total) in [
+        ("api_transcription", api_transcription),
+        ("local_server", local_server),
+        ("post_processing", post_processing),
+        ("download_no_data", download_no_data),
+    ] {
+        assert!(
+            total >= 10 * connect,
+            "{name} = {total:?} is not at least ten times the connect {connect:?}"
+        );
+    }
+    assert_eq!(builtin, Timeouts::default().builtin, "builtin");
+}
+
+#[test]
+fn unanswered_case_is_test_net_1_and_accepts_only_the_connect_or_os_ending() {
+    // RFC 5737 TEST-NET-1, never answered. Both endings the OS may give are
+    // accepted (the connect timer firing: CannotReach for this host; no route at
+    // once: NetworkUnavailable), so no OS answer races the timer for the verdict.
+    // Bite: Timeout accepted (the connect limit not reaching the client would
+    // pass), CannotReach for another host accepted, a routable address.
+    let case = Unanswered::blackhole();
+    let ip: Ipv4Addr = case
+        .host
+        .parse()
+        .unwrap_or_else(|e| panic!("unanswered host {:?} is not an IPv4 address: {e}", case.host));
+    assert_eq!(ip.octets()[..3], [192, 0, 2], "{ip}: TEST-NET-1 (RFC 5737)");
+    assert!(case.ended_by_connect_or_os(&FailureReason::CannotReach {
+        host: case.host.clone()
+    }));
+    assert!(case.ended_by_connect_or_os(&FailureReason::NetworkUnavailable));
+    assert!(!case.ended_by_connect_or_os(&FailureReason::Timeout));
+    assert!(!case.ended_by_connect_or_os(&FailureReason::CannotReach {
+        host: "127.0.0.1:1".to_string()
+    }));
 }
