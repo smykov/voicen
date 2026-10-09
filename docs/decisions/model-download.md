@@ -2,7 +2,7 @@
 
 **Code:** `crates/voicen-core/src/local_models/{catalog,store,download,service}.rs` (T-016, T-044); `src-tauri/src/local_models.rs`, `src-tauri/src/paths.rs` (`models_dir`), `src-tauri/src/lib.rs` (wiring) (T-044) · **Tests that pin it:** core `local_download`, `local_download_refused`, `local_store`, `local_models_service`; shell `src-tauri/tests/local_models.rs` (Windows CI only)
 
-Tasks: T-016 (core half), T-044 (coordinator and shell half). Contract: `specs/002-local-transcription/contracts/{core-traits,ipc}.md`. Decisions: #22, #42, #49, #50, #57. Related: F-004, F-005 (test-only defects in this class's tests, see `docs/decisions/core-tests.md`).
+Tasks: T-016 (core half), T-044 (coordinator and shell half). Contract: `specs/002-local-transcription/contracts/{core-traits,ipc}.md`. Decisions: #22, #42, #49, #50, #57, #106, #113. Related: F-004, F-005 (test-only defects in this class's tests, see `docs/decisions/core-tests.md`).
 
 ## Invariants
 
@@ -17,7 +17,7 @@ Tasks: T-016 (core half), T-044 (coordinator and shell half). Contract: `specs/0
 
 - **Defect that produced it:** none yet. `RequestBuilder::timeout` is a total deadline over the whole body (reqwest 0.13.5), and `OpenAiCompatibleEngine` uses it; copying it would end every large download after the limit.
 - **What breaks if you violate it:** a slow but steady download of a 1.9 GB model is cut off.
-- **Where it is enforced:** `ClientBuilder::timeout(download_no_data)` plus `connect_timeout`; the trickle test in `local_download` fails with a total timeout.
+- **Where it is enforced:** `engine::http::client_with_read_timeout(connect, download_no_data)` (`ClientBuilder::timeout` plus `connect_timeout`); the trickle test in `local_download` fails with a total timeout.
 - **Don't:** reuse the engine's request timeout.
 
 ### The downloader is synchronous and has one active slot (T-016, decisions #22, #42, #49)
@@ -25,6 +25,13 @@ Tasks: T-016 (core half), T-044 (coordinator and shell half). Contract: `specs/0
 - **What breaks if you violate it:** a second concurrent download, or blocking reqwest running on a tokio worker (T-013 hazard).
 - **Where it is enforced:** `Downloader::start` runs the work on its own std thread; the reqwest client is built and used only there. Only `Downloader::start` begins a download. The shell adds no reqwest call and drops no reqwest object on a command thread.
 - **Don't:** make the downloader async or start a transfer from a command.
+
+### The download's client comes from `engine::http` (T-079, decisions #106, #113)
+
+- **Defect that produced it:** T-079: `Downloader::transfer` built its own `Client::builder()` with reqwest's default resolver; a DNS server that did not answer kept the download thread in the client's drop until the OS resolver gave up (~20 s on Linux), past the connect setting.
+- **What breaks if you violate it:** a download with an unanswered lookup ends long after the connect deadline. The reason is `SourceUnreachable{host}` either way (`DownloadFailure::from_transport` maps dns and connect alike).
+- **Where it is enforced:** `Downloader::transfer` takes `engine::http::client_with_read_timeout` and sends through `HttpClient::send` (the shared deadline resolver and lookup record, `docs/decisions/engine-http.md`); `make check-http-client-builder`; test `local_download::unanswered_lookup_fails_source_unreachable_while_the_lookup_is_held`.
+- **Don't:** build the download's client with its own `Client::builder()`.
 
 ### The SHA-256 comes from `sha2` 0.10 (decision #50)
 

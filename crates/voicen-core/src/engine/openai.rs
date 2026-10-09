@@ -167,7 +167,7 @@ impl OpenAiCompatibleEngine {
             request = request.header(AUTHORIZATION, value);
         }
         // A non-2xx body is never read (P-009); a 2xx one through the 1 MiB cap.
-        let body = http::send_capped(request)?;
+        let body = client.send_capped(request)?;
         // An object with a string `text`; other fields are ignored. (A derived struct
         // would also accept a JSON array whose first element is a string.)
         let parsed: serde_json::Value =
@@ -205,9 +205,12 @@ impl Engine for OpenAiCompatibleEngine {
 }
 
 /// The classification flags of a send error: reqwest's flags and the first
-/// `io::ErrorKind` in the source chain. Nothing of the error's text is kept (its
+/// `io::ErrorKind` in the source chain. `lookup_unanswered` is the client's lookup
+/// record (`engine::http::LookupRecord`) when the send failed: a lookup still
+/// without an answer makes it a DNS failure, whichever timer ended the send
+/// (T-079, decisions #106, #113). Nothing of the error's text is kept (its
 /// `Display` contains the URL, query included).
-pub(crate) fn send_error(e: &reqwest::Error) -> TransportError {
+pub(crate) fn send_error(e: &reqwest::Error, lookup_unanswered: bool) -> TransportError {
     if e.is_builder() {
         return TransportError::Setup;
     }
@@ -221,7 +224,7 @@ pub(crate) fn send_error(e: &reqwest::Error) -> TransportError {
         source = err.source();
     }
     TransportError::Send {
-        dns: e.is_dns(),
+        dns: e.is_dns() || lookup_unanswered,
         connect: e.is_connect(),
         timeout: e.is_timeout(),
         io,

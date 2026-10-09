@@ -1,7 +1,14 @@
-//! The shared OpenAI-compatible HTTP helpers (T-020): one client setup, one
-//! `Authorization` rule and one capped send-and-read, used by both
-//! [`super::openai::OpenAiCompatibleEngine`] (transcription) and
-//! [`crate::post_process::chat::ChatPostProcessor`] (chat completions).
+//! The shared HTTP helpers (T-020, T-079): the one place a reqwest client is built
+//! ([`client`], [`client_with_read_timeout`]), one `Authorization` rule and one
+//! capped send-and-read, used by [`super::openai::OpenAiCompatibleEngine`]
+//! (transcription and Test connection), [`crate::post_process::chat::ChatPostProcessor`]
+//! (chat completions) and `local_models::download::Downloader` (model download).
+//!
+//! Every client resolves host names through [`DeadlineResolver`]: a lookup never
+//! runs on the runtime's blocking pool, so a lookup with no answer is not awaited
+//! when the client is dropped, and a send that fails while a lookup is unanswered
+//! is a DNS failure (`TransportError::Send { dns: true, .. }`), whichever timer
+//! ended it (decisions #106, #113; `docs/decisions/engine-http.md`).
 //!
 //! Every failure is a [`TransportError`], which `failure::classify` maps to a
 //! reason; no `reqwest::Error`, URL, key or body leaves this module.
@@ -11,15 +18,15 @@ use std::future::Future;
 use std::io::Read;
 use std::net::SocketAddr;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::task::{Context, Poll, Waker};
-use std::thread::JoinHandle;
 use std::time::Duration;
 
-use reqwest::blocking::{Client, RequestBuilder};
+use reqwest::blocking::{Client, RequestBuilder, Response};
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use reqwest::header::HeaderValue;
+use url::Url;
 use zeroize::Zeroizing;
 
 use super::lookup::{self, Lookup, SystemLookup};
@@ -47,87 +54,151 @@ pub(crate) fn authorization(key: Option<&Secret>) -> Result<Option<HeaderValue>,
     Ok(Some(value))
 }
 
-/// The blocking client for one call, with `connect` as its connect timeout and
-/// reqwest's default redirect policy. The whole-request deadline is set per
-/// request by the caller (`RequestBuilder::timeout`), which bounds connect to the
-/// last body byte.
-pub(crate) fn client(connect: Duration) -> Result<Client, TransportError> {
-    Client::builder()
-        .connect_timeout(connect)
-        .dns_resolver(Arc::new(DeadlineResolver::system()))
+/// A blocking client built here, with the lookup record of its resolver. Every
+/// reqwest client of the crate is one of these (T-079, decisions #106, #113;
+/// `docs/decisions/engine-http.md`; `make check-http-client-builder`): its lookups
+/// run on detached threads through [`DeadlineResolver`], so neither a send nor the
+/// client's drop waits for a host-name lookup with no answer, and a send that
+/// fails while a lookup is unanswered is a DNS failure.
+pub(crate) struct HttpClient {
+    client: Client,
+    record: LookupRecord,
+}
+
+/// The client for one call, with `connect` as its connect timeout and reqwest's
+/// default redirect policy. The whole-request deadline is set per request by the
+/// caller (`RequestBuilder::timeout`), which bounds connect to the last body byte.
+pub(crate) fn client(connect: Duration) -> Result<HttpClient, TransportError> {
+    build(Client::builder().connect_timeout(connect))
+}
+
+/// The client for a download: `connect` as its connect timeout and `read` as
+/// reqwest's per-read timeout (it also bounds the wait for the headers), never a
+/// total one.
+pub(crate) fn client_with_read_timeout(
+    connect: Duration,
+    read: Duration,
+) -> Result<HttpClient, TransportError> {
+    build(Client::builder().connect_timeout(connect).timeout(read))
+}
+
+fn build(builder: reqwest::blocking::ClientBuilder) -> Result<HttpClient, TransportError> {
+    let resolver = DeadlineResolver::system();
+    let record = resolver.record();
+    let client = builder
+        .dns_resolver(Arc::new(resolver))
         .build()
-        .map_err(|_| TransportError::Setup)
+        .map_err(|_| TransportError::Setup)?;
+    Ok(HttpClient { client, record })
 }
 
-/// Sends `request` and reads a 2xx body through the [`MAX_BODY`] cap. A non-2xx
-/// status is [`TransportError::Status`] and its body is never read (P-009); a body
-/// over the cap is [`TransportError::BadBody`].
-pub(crate) fn send_capped(request: RequestBuilder) -> Result<Vec<u8>, TransportError> {
-    let response = request.send().map_err(|e| send_error(&e))?;
-    let status = response.status();
-    if !status.is_success() {
-        return Err(TransportError::Status(status.as_u16()));
+impl HttpClient {
+    pub(crate) fn get(&self, url: Url) -> RequestBuilder {
+        self.client.get(url)
     }
-    let mut body = Vec::new();
-    response
-        .take(MAX_BODY + 1)
-        .read_to_end(&mut body)
-        .map_err(|e| body_error(&e))?;
-    if !u64::try_from(body.len()).is_ok_and(|len| len <= MAX_BODY) {
-        return Err(TransportError::BadBody);
+
+    pub(crate) fn post(&self, url: Url) -> RequestBuilder {
+        self.client.post(url)
     }
-    Ok(body)
+
+    /// Sends `request` (built from this client). A failure is a
+    /// [`TransportError`]; it carries the DNS flag when reqwest says so or when a
+    /// lookup of this client was unanswered at that moment, whichever timer ended
+    /// the send.
+    pub(crate) fn send(&self, request: RequestBuilder) -> Result<Response, TransportError> {
+        request
+            .send()
+            .map_err(|e| send_error(&e, self.record.unanswered()))
+    }
+
+    /// Sends `request` and reads a 2xx body through the [`MAX_BODY`] cap. A
+    /// non-2xx status is [`TransportError::Status`] and its body is never read
+    /// (P-009); a body over the cap is [`TransportError::BadBody`].
+    pub(crate) fn send_capped(&self, request: RequestBuilder) -> Result<Vec<u8>, TransportError> {
+        let response = self.send(request)?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(TransportError::Status(status.as_u16()));
+        }
+        let mut body = Vec::new();
+        response
+            .take(MAX_BODY + 1)
+            .read_to_end(&mut body)
+            .map_err(|e| body_error(&e))?;
+        if !u64::try_from(body.len()).is_ok_and(|len| len <= MAX_BODY) {
+            return Err(TransportError::BadBody);
+        }
+        Ok(body)
+    }
 }
 
-// ---- T-079 red seam ------------------------------------------------------------
-// The lookup seam with TODAY's behaviour, written by the test writer so the T-079
-// tests compile and go red on behaviour (T-079 analysis "Write the seam first with
-// today's behaviour"). It does what reqwest's default `GaiResolver` does: each
-// lookup runs on its own thread, and every lookup thread is joined when the
-// resolver (that is, the client and its runtime) is dropped, as tokio's blocking
-// pool is at runtime drop. The record is never set. The developer replaces this
-// with the real `DeadlineResolver` (detached thread, drop guard, record read by
-// `send_error`).
-
-/// Whether a lookup of the client is unanswered: started and not answered yet
-/// (its future may still be alive: the blocking caller's own deadline can end the
-/// send first), or dropped before its answer.
-// T-079 red seam: read by `send_error` once the developer wires it.
-#[allow(dead_code)]
+/// Whether a lookup of one client is unanswered: started and not answered yet
+/// (its future may still be alive: the blocking client applies the
+/// whole-request deadline on the caller's thread, so the send can fail first),
+/// or dropped before its answer. Shared by the resolver and its client.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct LookupRecord(Arc<AtomicBool>);
+pub(crate) struct LookupRecord(Arc<RecordInner>);
 
-#[allow(dead_code)]
+#[derive(Debug, Default)]
+struct RecordInner {
+    /// Lookups started and neither answered nor dropped.
+    open: AtomicUsize,
+    /// A lookup future was dropped before its answer.
+    dropped: AtomicBool,
+}
+
 impl LookupRecord {
-    /// A lookup future of this client was dropped before its answer.
+    /// A lookup of this client is open, or one was dropped before its answer.
     pub(crate) fn unanswered(&self) -> bool {
-        self.0.load(Ordering::SeqCst)
+        self.0.open.load(Ordering::SeqCst) > 0 || self.0.dropped.load(Ordering::SeqCst)
     }
 }
 
-/// The resolver of every client built here.
-#[allow(dead_code)]
+/// The resolver of every client built here. Each lookup runs on its own named,
+/// detached thread through [`Lookup`] (the OS resolver unless a `test-fakes`
+/// lookup is installed for the name) and wakes its future through a std-only
+/// one-shot slot. Nothing joins the thread: it ends when the lookup returns, after
+/// the client may be gone. Logs nothing (never the host name).
 pub(crate) struct DeadlineResolver {
     lookup: Arc<dyn Lookup>,
     record: LookupRecord,
-    threads: Mutex<Vec<JoinHandle<()>>>,
 }
 
 type LookupResult = std::io::Result<Vec<SocketAddr>>;
 
-#[derive(Default)]
+/// The one-shot between a lookup thread and its future.
 struct Slot {
     answer: Option<LookupResult>,
     waker: Option<Waker>,
+    /// Still counted in the record's `open`: closed by the answer or by the
+    /// future's drop, whichever comes first, under this slot's lock.
+    open: bool,
 }
 
-struct Pending(Arc<Mutex<Slot>>);
+/// Closes `slot`'s count in `record` once; `unanswered` also marks the record.
+fn close(slot: &mut Slot, record: &LookupRecord, unanswered: bool) {
+    if !slot.open {
+        return;
+    }
+    slot.open = false;
+    if unanswered {
+        record.0.dropped.store(true, Ordering::SeqCst);
+    }
+    record.0.open.fetch_sub(1, Ordering::SeqCst);
+}
+
+/// A lookup's future. Dropped before the answer, it marks the record (the drop
+/// guard of T-079): reqwest's connect timer or the request deadline cut it.
+struct Pending {
+    slot: Arc<Mutex<Slot>>,
+    record: LookupRecord,
+}
 
 impl Future for Pending {
     type Output = Result<Addrs, Box<dyn std::error::Error + Send + Sync>>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let mut slot = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut slot = self.slot.lock().unwrap_or_else(PoisonError::into_inner);
         match slot.answer.take() {
             Some(Ok(addrs)) => Poll::Ready(Ok(Box::new(addrs.into_iter()) as Addrs)),
             Some(Err(e)) => Poll::Ready(Err(Box::new(e))),
@@ -136,6 +207,13 @@ impl Future for Pending {
                 Poll::Pending
             }
         }
+    }
+}
+
+impl Drop for Pending {
+    fn drop(&mut self) {
+        let mut slot = self.slot.lock().unwrap_or_else(PoisonError::into_inner);
+        close(&mut slot, &self.record, true);
     }
 }
 
@@ -149,12 +227,10 @@ impl DeadlineResolver {
         DeadlineResolver {
             lookup,
             record: LookupRecord::default(),
-            threads: Mutex::new(Vec::new()),
         }
     }
 
     /// This resolver's lookup record.
-    #[allow(dead_code)]
     pub(crate) fn record(&self) -> LookupRecord {
         self.record.clone()
     }
@@ -164,43 +240,46 @@ impl Resolve for DeadlineResolver {
     fn resolve(&self, name: Name) -> Resolving {
         let host = name.as_str().to_string();
         let lookup = lookup::installed_for(&host).unwrap_or_else(|| Arc::clone(&self.lookup));
-        let slot = Arc::new(Mutex::new(Slot::default()));
+        // Counted open before the thread starts, so a send failing at any later
+        // moment sees it until the answer or the drop closes it.
+        self.record.0.open.fetch_add(1, Ordering::SeqCst);
+        let slot = Arc::new(Mutex::new(Slot {
+            answer: None,
+            waker: None,
+            open: true,
+        }));
         let filled = Arc::clone(&slot);
+        let record = self.record.clone();
         let spawned = std::thread::Builder::new()
             .name("voicen-lookup".to_string())
             .spawn(move || {
                 let answer = lookup.lookup(&host);
                 let mut slot = filled.lock().unwrap_or_else(PoisonError::into_inner);
                 slot.answer = Some(answer);
+                close(&mut slot, &record, false);
                 if let Some(waker) = slot.waker.take() {
                     waker.wake();
                 }
             });
+        let pending = Pending {
+            slot,
+            record: self.record.clone(),
+        };
         match spawned {
-            Ok(handle) => {
-                self.threads
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .push(handle);
-                Box::pin(Pending(slot))
+            // Detached: the handle is dropped, nothing waits for the thread.
+            Ok(_detached) => Box::pin(pending),
+            Err(e) => {
+                // No lookup ran: an answer (the spawn error), not an unanswered one.
+                let mut slot = pending.slot.lock().unwrap_or_else(PoisonError::into_inner);
+                close(&mut slot, &pending.record, false);
+                drop(slot);
+                Box::pin(std::future::ready(Err(
+                    Box::new(e) as Box<dyn std::error::Error + Send + Sync>
+                )))
             }
-            Err(e) => Box::pin(std::future::ready(Err(
-                Box::new(e) as Box<dyn std::error::Error + Send + Sync>
-            ))),
         }
     }
 }
-
-impl Drop for DeadlineResolver {
-    fn drop(&mut self) {
-        let threads =
-            std::mem::take(&mut *self.threads.lock().unwrap_or_else(PoisonError::into_inner));
-        for handle in threads {
-            let _ = handle.join();
-        }
-    }
-}
-// ---- end of the T-079 red seam ---------------------------------------------------
 
 #[cfg(test)]
 mod tests {

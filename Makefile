@@ -1,6 +1,6 @@
 # The gate: every area's checks, each through scripts/tw-run in the area's toolchain.
 .PHONY: check check-shell-layout check-shell-layout-fixtures check-helper-windows-fixtures check-core \
-	check-ci-credentials check-setup-node-cache check-core-test-clocks check-ci-wip check-telegram-send check-telegram-failure-branch check-telegram-guard \
+	check-ci-credentials check-setup-node-cache check-core-test-clocks check-http-client-builder check-ci-wip check-telegram-send check-telegram-failure-branch check-telegram-guard \
 	check-version-stamp check-release-check check-release-guard check-nsis-fork check-e2e-entry-fixtures \
 	check-shell-windows \
 	check-ui core-image ui-image \
@@ -9,7 +9,7 @@
 
 # check-shell-windows after check-core: the shell depends on voicen-core, so a core error is
 # reported first by the faster native check-core, before the slower cross-target build.
-check: check-shell-layout check-shell-layout-fixtures check-helper-windows-fixtures check-ci-credentials check-setup-node-cache check-core-test-clocks check-ci-wip check-telegram-send check-telegram-failure-branch check-telegram-guard check-version-stamp check-release-check check-release-guard check-nsis-fork check-core \
+check: check-shell-layout check-shell-layout-fixtures check-helper-windows-fixtures check-ci-credentials check-setup-node-cache check-core-test-clocks check-http-client-builder check-ci-wip check-telegram-send check-telegram-failure-branch check-telegram-guard check-version-stamp check-release-check check-release-guard check-nsis-fork check-core \
 	check-shell-windows check-e2e-entry-fixtures check-ui \
 	licenses-check
 
@@ -56,6 +56,14 @@ check-setup-node-cache:
 # scripts/ci/fixtures/core-test-clocks/ and the real tests dir. Host bash.
 check-core-test-clocks:
 	scripts/ci/core-test-clocks.test.sh
+
+# T-079 (decisions #106, #113): every reqwest client of voicen-core is built by engine::http
+# (Client::builder, ClientBuilder::new, Client::new( refused in any other *.rs under
+# crates/voicen-core/src), so each has the deadline resolver (docs/decisions/engine-http.md).
+# The self-test runs the tripwire scripts/ci/http-client-builder.sh on
+# scripts/ci/fixtures/http-client-builder/ and the real source dir. Host bash.
+check-http-client-builder:
+	scripts/ci/http-client-builder.test.sh
 
 # T-066 (rca, P-016, decisions #90): .github/workflows/ci.yml runs on push to main and wip/**
 # (the pre-review run of every non-docs task), and no workflow step saves a cache on a ref

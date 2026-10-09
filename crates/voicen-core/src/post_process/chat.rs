@@ -115,7 +115,7 @@ fn send(
     if let Some(value) = authorization {
         request = request.header(AUTHORIZATION, value);
     }
-    let body = http::send_capped(request)?;
+    let body = client.send_capped(request)?;
     reply_text(&body).ok_or(TransportError::BadBody)
 }
 

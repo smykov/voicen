@@ -23,8 +23,8 @@ Also: `scripts/ci/core-test-clocks.sh` (the tripwire, run by `make check-core-te
 
 **Tasks:** T-016; T-047 (F-004); T-048 (F-005); T-078 (F-013; deferred and absorbed by T-080); T-080 (rca, class `os-answer-deadline-race`).
 **Classes** in `docs/failures.md`: `test-port-race` and `os-answer-deadline-race`.
-**Decisions:** #53, #56, #100, #107, #112.
-**Open questions:** OQ-22 / T-079 (which product reason a lookup cut by the connect timer gives).
+**Decisions:** #53, #56, #100, #106, #107, #112, #113.
+**Open questions:** none. OQ-22 (which product reason a lookup cut by the connect timer gives) is answered by decisions #106, #113 and built in T-079 (`docs/decisions/engine-http.md`).
 
 ## Invariants
 
@@ -57,7 +57,8 @@ This is one rule for every kind of uncontrolled clock: the OS refusal time, the 
 **Other clock uses in tests:**
 - Instants handed to a product API as input (a press, a release, a frame's `at`) come from `common::timing::now()` or `ago()`.
 - Waits that only end a hung test use `deadline`, `left` or `eventually`. They are sized far above the time the awaited outcome needs.
-- A target that never answers (TEST-NET-1, `192.0.2.1`) comes only from `common::os_answer::Unanswered::blackhole()`, together with its deadlines (connect 300 ms, every total ten times that) and the endings it accepts (`ended_by_connect_or_os`: `CannotReach` for its host, or `NetworkUnavailable` where there is no route). Its one user is the test that pins the connect timer (the `api_pipeline` blackhole test); it bites on the reason, not on a ceiling. It is not an `OsAnswer`: no OS answer is awaited, so there is no probe and no budget.
+- A target that never answers (TEST-NET-1, `192.0.2.1`) comes only from `common::os_answer::Unanswered::blackhole()`, together with its deadlines (connect 300 ms, every total ten times that) and the endings it accepts (`ended_by_connect_or_os`: `CannotReach` for its host, or `NetworkUnavailable` where there is no route). Its users are the test that pins the connect timer (`api_pipeline::blackhole_connect_is_bounded_by_connect_timeout`) and `openai_client::answered_lookup_then_unanswered_connect_stays_cannot_reach` (T-079: a lookup answered at once with the blackhole address, so the connect timer, not the lookup, ends the call); both bite on the reason, not on a ceiling. It is not an `OsAnswer`: no OS answer is awaited, so there is no probe and no budget.
+- A lookup with no answer (T-079) is not a host resolver target: it comes from `tests/common/held.rs` (`Held::install` puts a `test-fakes` `engine::lookup::HeldLookup` in front of the OS resolver for one test-only `*.t079.example.com` name). The verdict is the ordering "the call returned while the lookup was still held" (`returns_while_held`); the clock gives only the lower bound `at_least(took, connect)`. `HELD_WAIT` (`OS_ANSWER_BUDGET`) only ends a hung test.
 - A settings value a fake engine records but nothing contacts (`dictation_session`) is a TEST-NET-2 literal (`198.51.100.9`), not an OS-answer target.
 - `dictation_session::realtime_source_paces_frames_by_real_time_and_pads_with_silence` holds the capture until about 1 s of audio arrived (`eventually`), not for a fixed sleep, and checks only that the capture lasted at least the audio less one chunk (`at_least(between(..))`).
 
@@ -116,5 +117,4 @@ This is one rule for every kind of uncontrolled clock: the OS refusal time, the 
 ## Open
 
 - The ~2 s user-facing refusal on Windows: OQ-07 (non-blocking).
-- Which reason a lookup cut off by the connect timer gives, and the ~20 s wait: OQ-22 / T-079 (product).
 - `src-tauri/tests/settings_ipc.rs` keeps one `took < 30 s` ceiling on its refused invoke. The shell tests are outside the tripwire's scope.

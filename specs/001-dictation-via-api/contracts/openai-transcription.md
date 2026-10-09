@@ -37,15 +37,15 @@ response_format = json
 | 2xx, body not JSON, `text` missing or not a string, body > 1 MiB, invalid UTF-8, connection reset while reading | `Err(UnexpectedResponse)` |
 | 401, 403; or a key that fails the `Authorization` rule (no request sent) | `Err(InvalidApiKey)` |
 | any other non-2xx (e.g. 400, 404, 413, 429, 500, 503) | `Err(ServerError{status})` |
-| DNS failure; OS "network unreachable" / "host unreachable" | `Err(NetworkUnavailable)` |
-| connection refused; connect not established in 5 s | `Err(CannotReach{host})` (`host[:port]` of the base URL) |
+| DNS failure, including a lookup with no answer by the connect deadline or by the whole-request deadline (T-079, decisions #106, #113); OS "network unreachable" / "host unreachable" | `Err(NetworkUnavailable)` |
+| connection refused; connect not established in 5 s after the lookup answered | `Err(CannotReach{host})` (`host[:port]` of the base URL) |
 | whole request > the configured limit (defaults 30 s API / 60 s local server) | `Err(Timeout)` |
 
 Classification (`failure::classify`, one mapping for every transport failure; T-040 Investigation probe, reqwest 0.13.5), first match:
 
 1. HTTP status: 401/403 → `InvalidApiKey`; any other non-2xx → `ServerError{status}`. The error body is not read. A key that fails the `Authorization` rule above → `InvalidApiKey` (no request).
-2. DNS failure (`is_dns`), or `NetworkUnreachable`/`HostUnreachable` as the first `io::ErrorKind` in the error's source chain → `NetworkUnavailable`. Checked before 3, because a DNS failure is also `is_connect`.
-3. `is_connect` (refused, connect timeout, TLS handshake), or the HTTP client cannot be built → `CannotReach{host}`. Checked before 4, because a connect timeout is also `is_timeout`.
+2. DNS failure (`is_dns`, or a lookup of the client still without an answer when the send failed: the resolver's record, `engine::http::LookupRecord`, whichever timer ended the send; T-079, decisions #106, #113), or `NetworkUnreachable`/`HostUnreachable` as the first `io::ErrorKind` in the error's source chain → `NetworkUnavailable`. Checked before 3, because a DNS failure is also `is_connect`.
+3. `is_connect` (refused, connect timeout after the lookup answered, TLS handshake), or the HTTP client cannot be built → `CannotReach{host}`. Checked before 4, because a connect timeout is also `is_timeout`.
 4. `is_timeout` → `Timeout`; also a body read that stalls past the deadline (the blocking reader's `io::Error` wraps a `reqwest::Error` with `is_timeout`).
 5. Body errors → `UnexpectedResponse`: a read reset or closed mid-body, a body over 1 MiB (read through a 1 MiB + 1 cap; exactly 1 MiB is accepted), and a body that is not a JSON object with a string `text` (parsed with `serde_json`, so invalid UTF-8 is refused); also a send error with none of the flags above.
 

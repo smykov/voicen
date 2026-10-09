@@ -3,7 +3,10 @@
 //!
 //! Synchronous (decisions #22, #42): [`Downloader::start`] runs a blocking reqwest
 //! GET on its own std thread and reports [`DownloadEvent`]s through a callback.
-//! The no-data timeout is reqwest's per-read timeout
+//! The client comes from `engine::http::client_with_read_timeout` (T-079: the
+//! shared resolver, so a host-name lookup with no answer ends the download at the
+//! connect deadline as `SourceUnreachable` and is never awaited). The no-data
+//! timeout is reqwest's per-read timeout
 //! (`ClientBuilder::timeout(Timeouts::download_no_data)` + `connect_timeout`), never
 //! a total request timeout: a slow but steady download longer than
 //! `download_no_data` must succeed. Bytes go to `<file>.part` and into a streamed
@@ -19,12 +22,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
-use reqwest::blocking::Client;
 use sha2::{Digest, Sha256};
 
 use super::catalog::{CatalogEntry, ModelId};
 use super::store::ModelStore;
-use crate::engine::openai::{body_error, host_port, send_error};
+use crate::engine::http;
+use crate::engine::openai::{body_error, host_port};
 use crate::failure::TransportError;
 use crate::i18n::{self, MessageId};
 use crate::timeouts::Timeouts;
@@ -411,21 +414,16 @@ impl Job {
         let host = host_port(&url);
         let transport = |e: &TransportError| self.failed(DownloadFailure::from_transport(e, &host));
 
-        // Per-read timeout (also bounds the wait for the headers), never a total one.
-        let client = Client::builder()
-            .connect_timeout(self.timeouts.connect)
-            .timeout(self.timeouts.download_no_data)
-            // T-079 red seam: the lookup seam with today's behaviour (see
-            // `engine::http::DeadlineResolver`); the developer moves this client
-            // into `engine::http`.
-            .dns_resolver(Arc::new(crate::engine::http::DeadlineResolver::system()))
-            .build()
-            .map_err(|_| transport(&TransportError::Setup))?;
-        let sent = client.get(url).send();
+        // Per-read timeout (also bounds the wait for the headers), never a total one;
+        // the client and its resolver come from `engine::http` (T-079).
+        let client =
+            http::client_with_read_timeout(self.timeouts.connect, self.timeouts.download_no_data)
+                .map_err(|e| transport(&e))?;
+        let sent = client.send(client.get(url));
         if self.cancelled() {
             return Err(End::Cancelled);
         }
-        let mut response = sent.map_err(|e| transport(&send_error(&e)))?;
+        let mut response = sent.map_err(|e| transport(&e))?;
         let status = response.status();
         if !status.is_success() {
             // The error body is never read or written (P-009).
