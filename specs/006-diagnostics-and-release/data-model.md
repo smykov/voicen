@@ -29,7 +29,7 @@ T-008 shipped the variants marked "T-008". Their fields hold only integers, clos
 | Variant | Fields | Level | Status |
 |---|---|---|---|
 | `Started` | `build: BuildInfo`, `pid: u32` | INFO | T-008, without `os`. `os: OsVersion` comes later, with the session work |
-| `Dictation` | `DictationLine` (below) | INFO (delivered, no_speech, too_short) / WARN (failed, capture_failed) | T-008, T-051 |
+| `Dictation` | `DictationLine` (below) | INFO (delivered, no_speech, too_short, cancelled) / WARN (failed, capture_failed) | T-008, T-051, T-009 |
 | `DictationBlocked` | `reason: settings::gate::Blocked` (`no_engine`), written `dictation outcome=blocked reason=<reason>`; no `rec=` (a blocked press is not a recording) | WARN | T-006 (from `DictationEvent::PressBlocked`) |
 | `Warning` | `kind: WarningKind`, `os_code: Option<i32>`. Kinds in T-008: `vad_fallback`, `esc_unavailable`, `toast_failed` (the pipeline's `WarningCode`s), `models_cleanup_failed`, `settings_window_failed`, `change_bridge_failed`. T-052: `settings_opener_failed` (the settings window's opener thread could not start), `tray_failed` (the tray icon could not be built, or a state could not be applied to it), `tray_follower_failed` (the tray's language follower thread could not start). Later features add kinds (e.g. notification or history write failures) | WARN | T-008 |
 | `SettingsLoad` | `LoadKind`: `loaded` / `first_run` / `reset` / `unavailable` (from `LoadOutcome`, without the settings or the backup name) | INFO / WARN (reset, unavailable) | T-008 (spec 004 R-11) |
@@ -61,7 +61,7 @@ T-008 shipped `DictationLine`, which `LogObserver` aggregates per `RecordingId` 
 |---|---|---|---|
 | `recording` | `u64` (`RecordingId::get()`) | every event of the recording | T-008 |
 | `engine` | `Option<EngineTag>`: `api` / `builtin` / `local_server` / `other` (`EngineTag::from_kind`) | `JobFinished.engine` (absent when no engine was built) | T-008 |
-| `outcome` | `Delivered(DeliveryResult)` (`pasted` / `copied_only` / `copy_manual`), `Failed{failure: FailureTag, http_status: Option<u16>}`, `NoSpeech`, `TooShort`, `CaptureFailed{cause: MicCause}` (`no_device` / `access_denied` / `busy` / `other`, written `outcome=capture_failed mic=<cause>`) | `Delivered`, `JobFinished`, `RecordingEnded{TooShort}`, `CaptureFailed` | T-008; `CaptureFailed` T-051 |
+| `outcome` | `Delivered(DeliveryResult)` (`pasted` / `copied_only` / `copy_manual`), `Failed{failure: FailureTag, http_status: Option<u16>}`, `NoSpeech`, `TooShort`, `Cancelled` (Esc, nothing sent), `CaptureFailed{cause: MicCause}` (`no_device` / `access_denied` / `busy` / `other`, written `outcome=capture_failed mic=<cause>`) | `Delivered`, `JobFinished`, `RecordingEnded{TooShort}`, `RecordingEnded{Cancelled}`, `CaptureFailed` | T-008; `CaptureFailed` T-051; `Cancelled` T-009 |
 | `detector` | `Option<DetectorTag>`: `silero` / `energy` / `other` | `SpeechGate.detector` | T-008 |
 | `press_to_frame_ms` | `Option<u64>` | `RecordingStarted` (emitted by the dictation session at the release, T-051) | T-008 |
 | `duration_ms` | `Option<u64>` | `RecordingEnded` | T-008 (Q2: FR-20's three timings plus the duration) |

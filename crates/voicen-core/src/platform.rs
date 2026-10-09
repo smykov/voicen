@@ -126,6 +126,17 @@ pub trait ShellRequests: Send + Sync {
     fn open_settings(&self, tab: SettingsTab, field: Option<FieldId>);
 }
 
+/// The Esc claim (T-009, FR-22): the session asks for Esc while a recording is on
+/// and gives it back when the recording ends, once per change of
+/// `RecordingController::live_id().is_some()`. The session calls it from inside
+/// its lock: an implementation must not block on another thread and must never
+/// call back into the session from `set`; it reports the outcome later through
+/// `DictationSession::cancel_key_result`, and an Esc press through
+/// `DictationSession::esc_pressed`.
+pub trait CancelKey: Send + Sync {
+    fn set(&self, claimed: bool);
+}
+
 #[cfg(any(test, feature = "test-fakes"))]
 pub use fakes::*;
 
@@ -137,9 +148,9 @@ mod fakes {
     use std::time::{Duration, Instant};
 
     use super::{
-        AudioBuffer, AudioSource, CaptureError, CaptureHandle, Clipboard, ClipboardError, FieldId,
-        FrameSink, Indicator, OverlayState, PasteError, Paster, PendingId, SettingsTab,
-        ShellRequests, StartWindow, TempAudioStore, TrayState, WindowRef,
+        AudioBuffer, AudioSource, CancelKey, CaptureError, CaptureHandle, Clipboard,
+        ClipboardError, FieldId, FrameSink, Indicator, OverlayState, PasteError, Paster, PendingId,
+        SettingsTab, ShellRequests, StartWindow, TempAudioStore, TrayState, WindowRef,
     };
 
     fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -601,6 +612,29 @@ mod fakes {
     impl ShellRequests for FakeShellRequests {
         fn open_settings(&self, tab: SettingsTab, field: Option<FieldId>) {
             lock(&self.calls).push(ShellRequestCall::OpenSettings(tab, field));
+        }
+    }
+
+    /// [`CancelKey`] that records every `set` in order.
+    #[derive(Default)]
+    pub struct FakeCancelKey {
+        calls: Mutex<Vec<bool>>,
+    }
+
+    impl FakeCancelKey {
+        pub fn new() -> FakeCancelKey {
+            FakeCancelKey::default()
+        }
+
+        /// Every `set(claimed)` so far, in order.
+        pub fn calls(&self) -> Vec<bool> {
+            lock(&self.calls).clone()
+        }
+    }
+
+    impl CancelKey for FakeCancelKey {
+        fn set(&self, claimed: bool) {
+            lock(&self.calls).push(claimed);
         }
     }
 }

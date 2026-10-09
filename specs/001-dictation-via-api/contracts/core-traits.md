@@ -137,6 +137,17 @@ pub trait Indicator: Send + Sync {                        // built in T-051, `vo
 // TrayIcon setter itself (those wait for the main thread). The tray's "menu opened" reaches
 // `DictationSession::tray_menu_opened` from another thread, never from the main thread.
 
+pub trait CancelKey: Send + Sync {                        // T-009, `voicen_core::platform`; fake FakeCancelKey
+    fn set(&self, claimed: bool);                          // claim Esc (true) / give it back (false)
+}
+// The Esc claim (FR-22): the session calls it from inside its lock, once per change of
+// `live_id().is_some()` (released at the stop, not at the finish; a failed capture gets no
+// claim). Non-blocking, never calls back; the result comes later as
+// `DictationSession::cancel_key_result`, an Esc press as `esc_pressed`. Windows:
+// `win::hotkey::CancelKeyHandle`, served by the hotkey thread (bare Esc and Esc under the
+// hotkey's modifiers, OQ-21 (1)), built and attached inside `start_dictation` (not a
+// `DictationPorts` field).
+
 pub trait ShellRequests: Send + Sync {                    // built in T-051, `voicen_core::platform`
     fn open_settings(&self, tab: SettingsTab);            // the OpenSettings of `blocked_actions`; T-055 adds the field focus
 }
@@ -216,6 +227,7 @@ pub struct SessionDeps {
     pub indicator: Arc<dyn Indicator>,
     pub requests: Arc<dyn ShellRequests>,
     pub settings: Arc<SettingsService>,                    // snapshot() at each press (P-013)
+    pub cancel_key: Arc<dyn CancelKey>,                    // the Esc claim (T-009)
 }
 impl DictationSession {                                    // Send + Sync; inputs take &self and the caller's instant
     pub fn start(deps: SessionDeps) -> io::Result<DictationSession>;   // spawns the worker and the timer; Err: the spawn error's kind
@@ -223,31 +235,39 @@ impl DictationSession {                                    // Send + Sync; input
     pub fn hotkey_released(&self, at: Instant);
     pub fn tray_menu_opened(&self, at: Instant);
     pub fn hotkey_registration(&self, registered: bool, at: Instant);
+    pub fn esc_pressed(&self, at: Instant);                // T-009: cancels the recording that is on
+    pub fn cancel_key_result(&self, claimed: bool, at: Instant);   // T-009: false while live → Warning{EscUnavailable}
+    pub fn tick(&self, at: Instant);                       // T-009: the timer's input (message expiry, max length)
 }
 impl Drop for DictationSession { /* the job in flight finishes, queued recordings are dropped, threads joined */ }
 ```
 
-- **Press.** Under the session lock: while a recording is on (`live_id()`), nothing runs (no gate, no start window, no capture). Otherwise `snapshot()` is gated with `dictation_gate`; when blocked, `blocked_actions` run in order: `Notify(id)` → `controller.notice(id, at)` (overlay message, tray unchanged), `OpenSettings(tab)` → `requests.open_settings(tab)` after the lock is released, and exactly one `PressBlocked { reason }` is emitted after the lock is released (one per press, not per action; no `RecordingId` is taken; T-006). Else `PressContext { start_window: paster.capture_start_window(), settings }` goes to `press`, and `audio.start(sink)` opens the capture; a start error → `capture_failed` and `CaptureFailed { recording, cause }`. The indicator is published only once the start result is known, so a failed capture never shows a recording state. Because the lock is held from `press` to the start result, `capture_start_window` and `AudioSource::start` (and, in `Drop`, dropping a live `CaptureHandle`) run under it: their implementations follow the rule stated with those traits in "Platform traits" (return promptly, never call the session, never wait for another call on the same port). `Settings.mode` is not read: toggle behaves as hold until T-009 (decision #63).
-- **Release.** `release` under the lock; `CaptureHandle::stop` outside it, before the input returns (device closed, NFR-02). Then `RecordingStarted` (only if a frame arrived: first frame instant − press instant, `device: Selected`) and `RecordingEnded` (`Release::end()`, `Release::held()`). For a stop the frames become audio on the caller's thread (mixed down to mono as they arrive, `audio::mix_to_mono`; `AudioBuffer::from_frames` at the stop; a format change within one capture or unconvertible frames → `CaptureError::Other` with a fixed text), then `finish` and the push onto the FIFO happen in one critical section, so queue order = finish order; releases are serialised, so that is also recording order. `finish(Err)` → `CaptureFailed`.
+- **Press.** While a recording is on (`live_id()`), the controller decides by the mode of the press that started it (`press_while_live`): a hold recording ignores it (auto-repeat), a toggle recording stops through the stop path (below); no gate, no start window, no capture either way. Otherwise `snapshot()` is gated with `dictation_gate`; when blocked, `blocked_actions` run in order: `Notify(id)` → `controller.notice(id, at)` (overlay message, tray unchanged), `OpenSettings(tab)` → `requests.open_settings(tab)` after the lock is released, and exactly one `PressBlocked { reason }` is emitted after the lock is released (one per press, not per action; no `RecordingId` is taken; T-006). Else `PressContext { start_window: paster.capture_start_window(), settings }` goes to `press`, and `audio.start(sink)` opens the capture; a start error → `capture_failed` and `CaptureFailed { recording, cause }`. The indicator is published only once the start result is known, so a failed capture never shows a recording state. Because the lock is held from `press` to the start result, `capture_start_window` and `AudioSource::start` (and, in `Drop`, dropping a live `CaptureHandle`) run under it: their implementations follow the rule stated with those traits in "Platform traits" (return promptly, never call the session, never wait for another call on the same port). The snapshot's `Settings.mode` goes to `press_with_mode` and governs that recording to its end (P-013; T-009 ends decision #63's "toggle behaves as hold").
+- **Stop path (T-009).** A hold release, a toggle press and the max-length tick all end a recording through one private `stop_recording`: `releasing` is taken first, then the lock for the controller's decision. **Release.** `release` under the lock (a toggle recording ignores it); `CaptureHandle::stop` outside it, before the input returns (device closed, NFR-02). Then `RecordingStarted` (only if a frame arrived: first frame instant − press instant, `device: Selected`) and `RecordingEnded` (`Release::end()`, `Release::held()`). For a stop the frames become audio on the caller's thread (mixed down to mono as they arrive, `audio::mix_to_mono`; `AudioBuffer::from_frames` at the stop; a format change within one capture or unconvertible frames → `CaptureError::Other` with a fixed text), then `finish` and the push onto the FIFO happen in one critical section, so queue order = finish order; releases are serialised, so that is also recording order. `finish(Err)` → `CaptureFailed`.
 - **Worker.** One std thread owns the `Pipeline` and is the only caller of `run_job` and `job_finished` (decision #48): `run_job` with no lock held, then `pending().is_some()` (the slot itself, read on the only thread that changes it) as `retry_available`, then `job_finished(id, report.end, Instant::now())` and publish under the lock.
-- **Timer.** One std thread calls `tick(now)` once `now >= next_deadline()`, and re-reads the deadline after every change.
+- **Timer.** One std thread calls `tick(now)` once `now >= next_deadline()` (the message expiry or the recording's `MAX_LENGTH`), and re-reads the deadline after every change. It ticks with the lock released, through the stop path, so a max-length stop is queued in recording order.
+- **Esc (T-009).** `esc_pressed`: `cancel` under the lock; the capture is closed outside it before the input returns (NFR-02), the audio dropped unread, `RecordingEnded{Cancelled}` emitted; nothing with no recording on (idle, or a stop in flight). The claim (`CancelKey::set`) follows `live_id().is_some()` from `publish`, not held back by a stop in flight. `cancel_key_result(false)` while a recording is on emits one `Warning{EscUnavailable}`; the recording goes on.
 - **Publication.** `(indicator.tray, retry_available)` and `indicator.overlay` reach the `Indicator` port from inside the session lock, right after the controller call that changed them, only when they differ from what was last sent; nothing at start. Between a stop's `release` and its `finish` nothing is sent (from any thread): the `finish` sends what changed meanwhile, so the overlay goes Recording → Processing, never through Hidden. If the release path panics in between (an adapter's `stop`, the observer, the conversion), a drop guard ends that hold and publishes what the controller shows, and the panic reaches the caller.
 - The shell implements the hotkey thread (research R-1, R-2, R-17) and turns OS messages into these calls. The `RegisterHotKey` modifiers and virtual key, the release poll groups and rule, and the "target is elevated" rule come from `voicen_core::win32_data` (pure data: `hotkey_codes`, `released`, `target_elevated` over `IntegrityLevel` RIDs; T-051), which T-006 cross-checks against the `windows` crate constants on Windows CI.
-- Later inputs go through the same session: Esc, 10-minute maximum and toggle (T-009), Retry and toasts (T-007), registrar results at start and on save (T-055), device choice and device loss (T-012), the delivery queue that replaces the worker (T-011). App exit does not go through the session (T-052, which settles T-051 Q3 for exit): the process ends by tao's `process::exit` after `RunEvent::Exit`, the session is never dropped, and in-flight and queued results are dropped with the process (spec.md edge case "app exit"); deleting the pending audio on exit is T-007's.
+- Later inputs go through the same session: Retry and toasts (T-007), registrar results at start and on save (T-055), device choice and device loss (T-012), the delivery queue that replaces the worker (T-011). App exit does not go through the session (T-052, which settles T-051 Q3 for exit): the process ends by tao's `process::exit` after `RunEvent::Exit`, the session is never dropped, and in-flight and queued results are dropped with the process (spec.md edge case "app exit"); deleting the pending audio on exit is T-007's.
 
 There is no clock port in this feature. Every `Instant` is the instant of the caller's event: the hotkey thread stamps the press and the release when the OS message arrives, so worker or lock delay never counts in the 0.3 s hold. `run_job` reads `std::time::Instant::now()` only for the two event durations (`stop_to_text_ms` from the recording's `stopped_at`, `text_to_paste_ms`), never for a decision (decision #47 (2)). The session's worker is the caller of `job_finished`, so it stamps the job-end instant (`Instant::now()` when `run_job` returned); the session's timer passes `Instant::now()` to `tick` once the deadline is reached. `voicen_core::clock::Clock` (wall time, used by `SettingsService`) is unchanged (T-042).
 
 ## RecordingController and IndicatorState (`voicen_core::recording`, T-042)
 
-Hold mode. Sans-IO: no threads, no capture, no clock; `&mut self`, the dictation session serialises the calls under its lock (T-051). The controller is the only place that decides a recording starts or ends, the only constructor of a `FinishedRecording`, and the only owner of `IndicatorState`.
+Hold and toggle mode, the 10-minute maximum and Esc (T-009). Sans-IO: no threads, no capture, no clock; `&mut self`, the dictation session serialises the calls under its lock (T-051). The controller is the only place that decides a recording starts or ends, the only constructor of a `FinishedRecording`, and the only owner of `IndicatorState`.
 
 ```rust
 pub const MIN_HOLD: Duration;            // 300 ms; a hold of exactly 300 ms is kept
 pub const MESSAGE_DURATION: Duration;    // 3 s
+pub const MAX_LENGTH: Duration;          // 600 s, either mode (decision #1, T-009)
 
 impl<C> RecordingController<C> {         // C: opaque press context, returned with the recording (the session: PressContext)
-    pub fn press(&mut self, at: Instant, ctx: C) -> Press;        // Start(RecordingId) | Ignored (auto-repeat while recording)
-    pub fn release(&mut self, at: Instant) -> Release<C>;         // Stop(StopTicket<C>) | Discarded{id, held} | Ignored; idle on return; .end(): Released | TooShort | None; .held(): the hold for Stop and Discarded
+    pub fn press(&mut self, at: Instant, ctx: C) -> Press;        // hold-mode entry: Start(RecordingId) | Ignored (any press while recording)
+    pub fn press_with_mode(&mut self, at: Instant, mode: Mode, ctx: C) -> PressOutcome<C>;   // T-009: Start | Stop(ticket, Toggled) | Ignored
+    pub fn press_while_live(&mut self, at: Instant) -> Option<PressOutcome<C>>;            // T-009: None while idle
+    pub fn release(&mut self, at: Instant) -> Release<C>;         // Stop(StopTicket<C>) | Discarded{id, held} | Ignored (also every toggle release); .end(): Released | TooShort | None; .held(): the hold for Stop and Discarded
+    pub fn cancel(&mut self, at: Instant) -> Option<RecordingId>; // T-009 Esc: live → idle, no ticket, no job, no message; None otherwise
     pub fn capture_failed(&mut self, id: RecordingId, err: CaptureError, at: Instant)
         -> Option<FailureReason>;                                 // live id: idle + MicrophoneUnavailable{cause}; stale id: None
     pub fn finish(&mut self, ticket: StopTicket<C>, audio: Result<AudioBuffer, CaptureError>, at: Instant)
@@ -257,8 +277,8 @@ impl<C> RecordingController<C> {         // C: opaque press context, returned wi
     pub fn hotkey_registration(&mut self, registered: bool, at: Instant);   // false: tray HotkeyError; only true clears it (T-051)
     pub fn notice(&mut self, id: MessageId, at: Instant);         // a message for 3 s, tray unchanged (JobEnd::Notice's rule; T-051)
     pub fn live_id(&self) -> Option<RecordingId>;                 // the recording that is on (T-051)
-    pub fn tick(&mut self, at: Instant);                          // expires the message at its `until`
-    pub fn next_deadline(&self) -> Option<Instant>;               // when the shell's timer calls tick
+    pub fn tick(&mut self, at: Instant) -> Option<StopTicket<C>>; // expires the message at its `until`; at started_at + MAX_LENGTH: ticket (MaxLength), notice.max_length 3 s, tray unchanged
+    pub fn next_deadline(&self) -> Option<Instant>;               // min(message until, started_at + MAX_LENGTH)
     pub fn indicator(&self) -> &IndicatorState;                   // { tray: TrayState, overlay: OverlayState }
 }
 pub enum JobEnd { Delivered { notice: Option<MessageId> }, Notice(MessageId), Failed(FailureReason) }
@@ -270,4 +290,4 @@ pub enum MicCause { NoDevice, AccessDenied, Busy, Other }       // CaptureError 
 - A message lasts 3 s from the event that raised it. A message raised during a live recording (for example `finish(Err)` of the previous recording, FR-029) is not shown while the recording is on; after its release it is shown for the rest of its 3 s, and not at all if they have passed.
 - A job counts from `finish(Ok)` until `job_finished` for its id; an unknown or repeated id changes nothing. `Delivered` clears tray `Error` and shows its notice if any; `Notice` shows a message; `Failed` shows the reason's message and sets tray `Error`.
 - Tray priority `HotkeyError > Recording > Error > Idle`; overlay priority `Recording > Message > Processing (≥ 1 queued job) > Hidden`. A press drops the message; it is not shown again. `hotkey_registration(false, at)` sets `HotkeyError`; only `hotkey_registration(true, at)` clears it (a delivery, the tray menu or a tick do not), and it changes nothing else.
-- The controller emits no events: the dictation session builds `RecordingStarted`/`RecordingEnded`/`CaptureFailed` (and, for a blocked press, `PressBlocked` from the gate's `Blocked`) from the returned id, instants, `end` and `held` (`Release::end()`: `TooShort` for a discard, the ticket's `Released` for a stop, the same value as `FinishedRecording::end`). T-009 (toggle, 10-minute maximum, Esc) and T-006 (device lost, suspend) add inputs and `RecordingEnd` variants to the same controller. The engine = none check stays in `settings::gate::dictation_gate`, which the dictation session calls before `press`.
+- The controller emits no events: the dictation session builds `RecordingStarted`/`RecordingEnded`/`CaptureFailed` (and, for a blocked press, `PressBlocked` from the gate's `Blocked`) from the returned id, instants, `end` and `held` (`Release::end()`: `TooShort` for a discard, the ticket's `Released` for a stop, the same value as `FinishedRecording::end`). T-009 added toggle (`Toggled`), the 10-minute maximum (`MaxLength`) and Esc (`Cancelled`; no ticket, the session emits `RecordingEnded{Cancelled}` itself); T-010 / T-012 (suspend, device lost) add inputs and `RecordingEnd` variants to the same controller. The engine = none check stays in `settings::gate::dictation_gate`, which the dictation session calls before `press`.

@@ -2,7 +2,7 @@
 
 **Code:** `crates/voicen-core/src/dictation.rs` (`DictationSession`), the controller inputs in `crates/voicen-core/src/recording/mod.rs` (`hotkey_registration`, `notice`, `live_id`, `Release::held`), the ports and fakes in `crates/voicen-core/src/platform.rs`, `audio::mix_to_mono`, `crates/voicen-core/src/test_support/realtime.rs`, `crates/voicen-core/src/win32_data.rs` · **Tests that pin it:** `crates/voicen-core/tests/dictation_session.rs` (all), `recording::tests::{failed_hotkey_registration_is_tray_hotkey_error_above_every_state_until_registered, successful_registration_clears_only_hotkey_error, notice_*, press_drops_a_notice_and_it_is_not_reshown, live_id_is_the_recording_on_and_none_otherwise}`, `win32_data::tests::*`, `tests/fakes.rs` (the session fakes)
 
-Tasks: T-051 (split from T-006 by decision #64). Decisions: #47, #48, #63, #64. Class `dictation-session`; no `docs/failures.md` entry of this class yet, so the defects below are the risks the T-051 analysis named, not incidents.
+Tasks: T-051 (split from T-006 by decision #64), T-009 (toggle, 10-minute maximum, Esc). Decisions: #1, #47, #48, #63 (superseded for the mode by T-009), #64. Class `dictation-session`; no `docs/failures.md` entry of this class yet, so the defects below are the risks the T-051 analysis named, not incidents.
 
 ## Invariants
 
@@ -17,7 +17,7 @@ Tasks: T-051 (split from T-006 by decision #64). Decisions: #47, #48, #63, #64. 
 
 - **Defect that produced it:** none here (analysis option C, `finish` on the worker, rejected).
 - **What breaks if you violate it:** a later recording delivered first; with `finish` on the worker, B's job is not counted until A's ends, so the overlay hides between A's end and B's finish and the processing count is wrong.
-- **Where it is enforced:** `finish` and the push onto the channel happen in one critical section; the release path (release → stop → convert → finish) is serialised by its own mutex, taken before the session lock, so recordings released from different threads still queue in order. Test `jobs_never_overlap_in_delivery_and_finish_in_recording_order` (gate events in id order).
+- **Where it is enforced:** `finish` and the push onto the channel happen in one critical section; the stop path `stop_recording` (decision → stop → convert → finish) is serialised by its own mutex (`releasing`), taken before the session lock, so recordings stopped from different threads (a hold release or toggle press on the hotkey thread, a max-length stop on the timer, T-009) still queue in order. Test `jobs_never_overlap_in_delivery_and_finish_in_recording_order` (gate events in id order).
 - **Don't:** push after unlocking; move `finish` to the worker. If T-006 measures the conversion as too slow for the hotkey thread (analysis Q6), add a converter thread FIFO-to-FIFO, not `finish` on the worker.
 
 ### Indicator changes reach the port only from inside the session lock, once per change, and never through Hidden between Recording and Processing
@@ -46,7 +46,7 @@ Tasks: T-051 (split from T-006 by decision #64). Decisions: #47, #48, #63, #64. 
 - **Defect that produced it:** none here (FR-007, Clarification 4, P-013).
 - **What breaks if you violate it:** auto-repeat runs the gate (a settings window per repeat) or opens a second stream; the job pastes into the window in front at release; a setting saved while recording changes the running dictation; a cached snapshot ignores a saved engine.
 - **Where it is enforced:** `hotkey_pressed` checks `live_id()` first, then `snapshot()` and `dictation_gate`; blocked presses run `blocked_actions` in order (the notice through `RecordingController::notice` inside the lock, `open_settings` after it) and emit exactly one `PressBlocked { reason }` after the lock, which takes no `RecordingId` (T-006; the log writes it as `dictation outcome=blocked`, `docs/decisions/diagnostics-log.md`). Tests `press_while_recording_runs_no_gate_and_opens_no_second_stream`, `engine_none_opens_no_capture_and_asks_for_the_engine_tab`, `start_window_and_settings_are_taken_once_at_press`, `saved_settings_reach_the_next_press`, `a_blocked_press_writes_one_log_line_and_takes_no_recording_number`.
-- **Don't:** keep a session-side "recording" flag (P-010: ask `live_id`); read `Settings.mode` before T-009 (decision #63: toggle behaves as hold).
+- **Don't:** keep a session-side "recording" flag (P-010: ask `live_id`); read the mode anywhere but the press that starts a recording (T-009: `press_with_mode` stores it in the live recording; the shell reads no mode).
 
 ### The microphone is open only between press and release; OS text never leaves the session
 
@@ -61,6 +61,13 @@ Tasks: T-051 (split from T-006 by decision #64). Decisions: #47, #48, #63, #64. 
 - **What breaks if you violate it:** a message hidden early, or never (a timer armed only for the first deadline it saw).
 - **Where it is enforced:** `run_timer` waits on the session condvar, which `publish` notifies after every change, and calls `tick` only when `now >= next_deadline()`. Tests `message_expires_without_input`, `timer_follows_the_latest_deadline` (real time; budgets sized for Windows timer resolution).
 - **Don't:** sleep a fixed 3 s; tick on every wake-up; assert exact deadlines in tests.
+
+### Every end of a recording is a controller decision and every end that keeps the audio takes the one stop path; the Esc claim follows `live_id` (T-009)
+
+- **Defect that produced it:** none here (T-009 analysis hypothesis 2: a max-length stop on the timer thread or an Esc stop on the hotkey thread written as their own stop code would be a second and third path, P-011).
+- **What breaks if you violate it:** a stop path without `releasing` queues a max-length recording out of order with a release on the hotkey thread; one that skips the `stopping` hold flashes Hidden; a claim synced only at the `finish` keeps Esc away from the focused app while a long recording converts; a claim the shell decides on its own (polling, the hotkey being down) is a second owner of "is a recording on".
+- **Where it is enforced:** `RecordingController::{press_with_mode, press_while_live, release, tick, cancel}` decide (mode of the starting press, `MAX_LENGTH` at `>=`); `dictation::stop_recording` is the only code that stops a capture for a job (`hotkey_released`, the toggle `hotkey_pressed`, `tick`/`run_timer`); `esc_pressed` queues nothing, so it closes the capture without `releasing`; `Shared::publish` syncs `CancelKey::set` with `live_id().is_some()` before the `stopping` check. Tests: `recording::tests::{toggle_*, mode_of_the_starting_press_governs_the_recording, max_length_*, next_deadline_is_the_earlier_*, esc_*, after_a_max_length_stop_*}`, `dictation_session.rs` `{toggle_press_press_delivers_once, the_mode_of_the_starting_press_governs_the_session_recording, max_length_stop_queues_the_job_and_closes_the_mic, the_session_timer_stops_a_recording_at_its_max_length, esc_*, cancel_key_*, refused_cancel_key_keeps_recording_and_emits_esc_unavailable}`; Windows CI `src-tauri/tests/hotkey.rs` `esc_*`, `a_refused_esc_claim_*`, `dictation_e2e.rs::esc_through_the_real_wiring_discards_the_recording`.
+- **Don't:** stop a capture for a job outside `stop_recording`; tick the controller on the timer under the lock and drop its ticket; take `releasing` while holding the state lock; let `CancelKey::set` wait for the hotkey thread (it is called under the lock, also from that thread).
 
 ### Drop lets the job in flight finish, drops the queued ones and joins both threads
 
@@ -95,5 +102,5 @@ Tasks: T-051 (split from T-006 by decision #64). Decisions: #47, #48, #63, #64. 
 
 ## Open
 
-- Converting the frames runs on the hotkey thread at release (analysis Q6); T-006 built the hotkey thread without measuring it (the optional 30 s / 48 kHz stereo timing was not done): still open, measure on Windows before a converter thread is decided.
+- Converting the frames runs on the thread that stops the recording: the hotkey thread at a release or toggle press, the timer thread at a max-length stop (up to 10 min of audio; the 3 s message expiry waits meanwhile, T-009 analysis risk) (analysis Q6); T-006 built the hotkey thread without measuring it (the optional 30 s / 48 kHz stereo timing was not done): still open, measure on Windows before a converter thread is decided.
 - If `run_job` ever panicked, the worker would end: later recordings are dropped at the queue and the overlay stays Processing. `run_job` is written not to panic (no `unwrap` on engine or server data); no restart is built.

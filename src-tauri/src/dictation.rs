@@ -8,8 +8,9 @@
 //! `Arc<DictationSession>` (the type the tray's menu-open handler looks up),
 //! starts the hotkey thread for the settings' hotkey and attaches it to the
 //! `HotkeyRegistrarHandle` the `SettingsService` was given (T-055), so a save's
-//! hotkey step is served by that thread. `run()` and the tests differ only in the
-//! ports.
+//! hotkey step is served by that thread. The session's Esc claim (T-009,
+//! `CancelKey`) is a `CancelKeyHandle` built here and attached to the same thread;
+//! it is not a port. `run()` and the tests differ only in the ports.
 //!
 //! [`ShellIndicator`] is `run()`'s `Indicator`: the tray half forwards to the
 //! tray's `TrayPart` (nothing when the tray was not built), the overlay half to the
@@ -39,7 +40,7 @@ use voicen_core::vad::{EnergyDetector, SpeechGate, VadError};
 use crate::overlay::{self, OverlayPart};
 use crate::settings_window::{self, OpenTarget};
 use crate::tray::{self, TrayPart};
-use crate::win::hotkey::{HotkeyRegistrarHandle, HotkeyThread};
+use crate::win::hotkey::{CancelKeyHandle, HotkeyRegistrarHandle, HotkeyThread};
 
 /// What the tests replace; `run()` passes the Windows adapters.
 pub struct DictationPorts {
@@ -110,6 +111,7 @@ pub fn start_dictation<R: Runtime>(
         credentials,
         hotkeys,
     } = ports;
+    let cancel_key = CancelKeyHandle::new();
     let session = DictationSession::start(SessionDeps {
         pipeline: PipelineDeps {
             // Release 1 has no Silero (#62, T-043): the energy detector decides and
@@ -127,6 +129,7 @@ pub fn start_dictation<R: Runtime>(
         indicator,
         requests: Arc::new(SettingsRequests::new(app)),
         settings: Arc::clone(&service),
+        cancel_key: cancel_key.clone(),
     })
     .map_err(failed)?;
     let session = Arc::new(session);
@@ -139,6 +142,7 @@ pub fn start_dictation<R: Runtime>(
     let hotkey = service.snapshot().hotkey.clone();
     let hotkey = HotkeyThread::start(session, &hotkey, log)?;
     hotkeys.attach(&hotkey);
+    cancel_key.attach(&hotkey);
     Ok(DictationHandle { _hotkey: hotkey })
 }
 

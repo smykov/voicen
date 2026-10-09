@@ -147,6 +147,8 @@ messages! {
     FAILURE_CLIPBOARD_UNAVAILABLE = "failure.clipboard_unavailable",
     /// A job without speech (`JobEnd::Notice`, T-001).
     NOTICE_NO_SPEECH = "notice.no_speech",
+    /// A recording stopped at `recording::MAX_LENGTH` and sent on (T-009, FR-03).
+    NOTICE_MAX_LENGTH = "notice.max_length",
     /// Delivered with auto-paste off (`DeliveryResult::CopiedOnly`, T-001).
     NOTICE_COPIED = "notice.copied",
     /// Delivered but not pasted (`DeliveryResult::CopyManual`, T-001).

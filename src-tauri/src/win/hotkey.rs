@@ -25,6 +25,16 @@
 //! posted `WM_REGISTRAR` wakes the message loop. The thread never takes the settings
 //! save lock (it only reads `snapshot()` through the session), so a save waiting on
 //! a request cannot deadlock with it.
+//!
+//! T-009 (FR-22, OQ-21 (1)): the thread also serves the session's Esc claim through
+//! [`CancelKeyHandle`] (the `CancelKey` port), over the same request channel, so a
+//! claim or release runs on the thread that owns the window and in queue order with
+//! `WM_HOTKEY`, whichever thread ended the recording. A claim registers Esc bare and
+//! under the active hotkey's modifiers (the hotkey's keys are held during a hold) and
+//! reports the result with `DictationSession::cancel_key_result`; a release
+//! unregisters both. `WM_HOTKEY` on an Esc id calls `esc_pressed`. The thread does
+//! not decide when a recording is on: the session asks (it follows
+//! `RecordingController::live_id`).
 
 use std::io;
 use std::mem::size_of;
@@ -36,6 +46,7 @@ use std::time::{Duration, Instant};
 use voicen_core::diag::{Log, LogEvent, WarningKind};
 use voicen_core::dictation::DictationSession;
 use voicen_core::hotkey_registrar::{HotkeyRegistrar, Prepared, Unavailable};
+use voicen_core::platform::CancelKey;
 use voicen_core::settings::hotkey::{parse_hotkey, Hotkey};
 use voicen_core::settings::Mode;
 use voicen_core::win32_data::{hotkey_codes, menu_mask_vk, released, HotkeyCodes};
@@ -44,7 +55,8 @@ use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, RegisterHotKey, SendInput, UnregisterHotKey, HOT_KEY_MODIFIERS, INPUT,
-    INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, VIRTUAL_KEY,
+    INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, MOD_NOREPEAT,
+    VIRTUAL_KEY, VK_ESCAPE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DestroyWindow, DispatchMessageW, GetMessageW, KillTimer, PostThreadMessageW,
@@ -60,6 +72,10 @@ use super::os_code;
 const HOTKEY_ID: i32 = 1;
 /// The second registration id (see [`HOTKEY_ID`]).
 const SPARE_ID: i32 = 2;
+/// The id of the bare Esc claim (T-009); never [`HOTKEY_ID`] or [`SPARE_ID`].
+const ESC_ID: i32 = 3;
+/// The id of the Esc claim under the hotkey's modifiers (T-009, OQ-21 (1)).
+const ESC_MOD_ID: i32 = 4;
 /// The thread message that wakes the loop for the queued registrar requests.
 const WM_REGISTRAR: u32 = WM_APP + 1;
 /// How long a registrar call waits for the hotkey thread. The thread may be inside
@@ -93,6 +109,8 @@ enum Request {
     Commit { token: u64, done: mpsc::Sender<()> },
     /// Release the prepared registration `token`.
     Abort { token: u64, done: mpsc::Sender<()> },
+    /// The session's Esc claim (T-009): register (`true`) or release (`false`) Esc.
+    CancelKey { claimed: bool },
 }
 
 impl HotkeyThread {
@@ -185,19 +203,7 @@ impl HotkeyRegistrarHandle {
 
     /// Queues `request` and wakes the thread; `false` when no thread takes it.
     fn post(&self, request: Request) -> bool {
-        let link = self
-            .link
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone();
-        let Some(link) = link else {
-            return false;
-        };
-        if link.requests.send(request).is_err() {
-            return false;
-        }
-        // SAFETY: a plain post to the hotkey thread's queue (created with its window).
-        unsafe { PostThreadMessageW(link.thread_id, WM_REGISTRAR, WPARAM(0), LPARAM(0)) }.is_ok()
+        post(&self.link, request)
     }
 
     /// Posts a commit or an abort and waits (bounded) until the thread ran it.
@@ -206,6 +212,52 @@ impl HotkeyRegistrarHandle {
         if self.post(request(done)) {
             let _ = ran.recv_timeout(REQUEST_BUDGET);
         }
+    }
+}
+
+/// Queues `request` for the thread attached to `link` and wakes it (never waits);
+/// `false` when no thread takes it.
+fn post(link: &Mutex<Option<Link>>, request: Request) -> bool {
+    let link = link.lock().unwrap_or_else(PoisonError::into_inner).clone();
+    let Some(link) = link else {
+        return false;
+    };
+    if link.requests.send(request).is_err() {
+        return false;
+    }
+    // SAFETY: a plain post to the hotkey thread's queue (created with its window).
+    unsafe { PostThreadMessageW(link.thread_id, WM_REGISTRAR, WPARAM(0), LPARAM(0)) }.is_ok()
+}
+
+/// The shell's [`CancelKey`] (T-009, FR-22): `start_dictation` creates it, gives it
+/// to the session (`SessionDeps::cancel_key`) and attaches the started hotkey thread.
+/// `set` only queues a request and posts a thread message (it never waits and never
+/// calls the session; the session calls it under its lock). Until a thread is
+/// attached, and once it has ended, `set` does nothing: Esc is never claimed.
+pub struct CancelKeyHandle {
+    link: Mutex<Option<Link>>,
+}
+
+impl CancelKeyHandle {
+    /// A handle with no thread attached.
+    pub fn new() -> Arc<CancelKeyHandle> {
+        Arc::new(CancelKeyHandle {
+            link: Mutex::new(None),
+        })
+    }
+
+    /// Sends the later claims to `thread` (`start_dictation`).
+    pub fn attach(&self, thread: &HotkeyThread) {
+        *self.link.lock().unwrap_or_else(PoisonError::into_inner) = Some(Link {
+            thread_id: thread.thread_id,
+            requests: thread.requests.clone(),
+        });
+    }
+}
+
+impl CancelKey for CancelKeyHandle {
+    fn set(&self, claimed: bool) {
+        let _ = post(&self.link, Request::CancelKey { claimed });
     }
 }
 
@@ -310,16 +362,7 @@ fn register(hwnd: HWND, id: i32, codes: Option<&HotkeyCodes>, log: &Log) -> bool
         });
         return false;
     };
-    // SAFETY: a window of this thread; the codes come from win32_data.
-    let result = unsafe {
-        RegisterHotKey(
-            Some(hwnd),
-            id,
-            HOT_KEY_MODIFIERS(codes.modifiers),
-            u32::from(codes.vk),
-        )
-    };
-    match result {
+    match try_register(hwnd, id, codes) {
         Ok(()) => true,
         Err(err) => {
             log.write(LogEvent::Warning {
@@ -328,6 +371,29 @@ fn register(hwnd: HWND, id: i32, codes: Option<&HotkeyCodes>, log: &Log) -> bool
             });
             false
         }
+    }
+}
+
+/// `RegisterHotKey` of `codes` for `hwnd` (this thread's window) under `id`.
+fn try_register(hwnd: HWND, id: i32, codes: &HotkeyCodes) -> windows::core::Result<()> {
+    // SAFETY: a window of this thread; the codes come from win32_data.
+    unsafe {
+        RegisterHotKey(
+            Some(hwnd),
+            id,
+            HOT_KEY_MODIFIERS(codes.modifiers),
+            u32::from(codes.vk),
+        )
+    }
+}
+
+/// Esc under `modifiers` (`MOD_*` bits, `MOD_NOREPEAT` included) as registration
+/// codes (T-009); the poll groups are unused (Esc is never polled).
+fn esc_codes(modifiers: u32) -> HotkeyCodes {
+    HotkeyCodes {
+        modifiers,
+        vk: VK_ESCAPE.0,
+        poll: Vec::new(),
     }
 }
 
@@ -358,6 +424,10 @@ struct Registrations<'a> {
     registered: bool,
     pending: Option<Pending>,
     next_token: u64,
+    /// The Esc claims registered now (T-009): bare ([`ESC_ID`]) and under the
+    /// hotkey's modifiers ([`ESC_MOD_ID`]).
+    esc: bool,
+    esc_mod: bool,
 }
 
 impl Registrations<'_> {
@@ -405,11 +475,49 @@ impl Registrations<'_> {
                 }
                 let _ = done.send(());
             }
+            Request::CancelKey { claimed } => self.cancel_key(claimed),
+        }
+    }
+
+    /// The session's Esc claim (T-009). A claim registers Esc bare and under the
+    /// active hotkey's modifiers and reports to the session whether both hold (a
+    /// refusal is not logged here: the session's `Warning{EscUnavailable}` is its
+    /// line; what was registered stays, so bare Esc still cancels when only the
+    /// modified one is taken). A release unregisters what is registered and
+    /// reports nothing.
+    fn cancel_key(&mut self, claimed: bool) {
+        if !claimed {
+            self.release_esc();
+            return;
+        }
+        if !self.esc {
+            self.esc = try_register(self.hwnd, ESC_ID, &esc_codes(MOD_NOREPEAT.0)).is_ok();
+        }
+        if !self.esc_mod {
+            self.esc_mod = self.active_codes.as_ref().is_some_and(|codes| {
+                let modded = esc_codes(codes.modifiers | MOD_NOREPEAT.0);
+                try_register(self.hwnd, ESC_MOD_ID, &modded).is_ok()
+            });
+        }
+        self.session
+            .cancel_key_result(self.esc && self.esc_mod, Instant::now());
+    }
+
+    /// Unregisters the Esc claims that are registered.
+    fn release_esc(&mut self) {
+        if self.esc {
+            unregister(self.hwnd, ESC_ID);
+            self.esc = false;
+        }
+        if self.esc_mod {
+            unregister(self.hwnd, ESC_MOD_ID);
+            self.esc_mod = false;
         }
     }
 
     /// Releases every registration of this thread (the end of the thread).
     fn release_all(&mut self) {
+        self.release_esc();
         if self.registered {
             unregister(self.hwnd, self.active_id);
             self.registered = false;
@@ -458,6 +566,8 @@ fn run(
         registered,
         pending: None,
         next_token: 0,
+        esc: false,
+        esc_mod: false,
     };
 
     let mut polling = false;
@@ -495,6 +605,10 @@ fn run(
                         });
                     }
                 }
+            }
+            // T-009: a claimed Esc (bare or under the hotkey's modifiers).
+            WM_HOTKEY if msg.wParam.0 == ESC_ID as usize || msg.wParam.0 == ESC_MOD_ID as usize => {
+                session.esc_pressed(Instant::now());
             }
             WM_TIMER if msg.wParam.0 == POLL_TIMER_ID => {
                 let up = hold_codes

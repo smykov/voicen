@@ -198,6 +198,8 @@ pub enum DictationOutcome {
     },
     NoSpeech,
     TooShort,
+    /// Esc cancelled the recording (T-009, FR-22): nothing was sent.
+    Cancelled,
     /// The capture failed at press or at stop (`DictationEvent::CaptureFailed`,
     /// T-051); only the closed `MicCause`, which carries no OS text.
     CaptureFailed {

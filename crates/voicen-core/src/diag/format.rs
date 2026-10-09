@@ -126,7 +126,8 @@ fn level(event: &LogEvent) -> &'static str {
             DictationOutcome::Failed { .. } | DictationOutcome::CaptureFailed { .. } => WARN,
             DictationOutcome::Delivered(_)
             | DictationOutcome::NoSpeech
-            | DictationOutcome::TooShort => INFO,
+            | DictationOutcome::TooShort
+            | DictationOutcome::Cancelled => INFO,
         },
         LogEvent::DictationBlocked { .. } | LogEvent::Warning { .. } => WARN,
         LogEvent::SettingsLoad(kind) => match kind {
@@ -248,6 +249,7 @@ fn write_dictation(out: &mut String, line: &DictationLine) {
         }
         DictationOutcome::NoSpeech => pair(out, "outcome", "no_speech"),
         DictationOutcome::TooShort => pair(out, "outcome", "too_short"),
+        DictationOutcome::Cancelled => pair(out, "outcome", "cancelled"),
         DictationOutcome::CaptureFailed { cause } => {
             pair(out, "outcome", "capture_failed");
             pair(out, "mic", mic(*cause));

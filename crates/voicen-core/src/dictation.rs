@@ -11,9 +11,14 @@
 //! the [`Indicator`](crate::platform::Indicator) port from inside the session lock,
 //! once per change; `retry_available` is read from the pending slot on the worker.
 //!
+//! T-009: every end of a recording (hold release, toggle press, the 10-minute
+//! tick, Esc) is decided by `RecordingController`; every end that keeps the audio
+//! goes through the one stop path (`stop_recording`), and the Esc claim
+//! ([`CancelKey`](crate::platform::CancelKey)) follows `live_id().is_some()`.
+//!
 //! Threads: the callers' input threads (hotkey, tray), one worker (owns the
 //! [`Pipeline`]; no other thread can reach `run_job` or `Pipeline::pending`) and one
-//! message timer. The why of each rule: `docs/decisions/dictation-session.md`.
+//! timer (message expiry and the recording's maximum length). The why of each rule: `docs/decisions/dictation-session.md`.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
 use std::io;
@@ -23,13 +28,15 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crate::audio::{mix_to_mono, AudioBuffer};
-use crate::events::{DeviceKind, DictationEvent, PipelineObserver};
+use crate::events::{DeviceKind, DictationEvent, PipelineObserver, WarningCode};
 use crate::i18n::NOTICE_HOTKEY_UNAVAILABLE;
 use crate::pipeline::{EngineFactory, Pipeline, PipelineDeps, PressContext};
-use crate::platform::{AudioSource, CaptureHandle, FrameSink, Indicator, Paster, ShellRequests};
+use crate::platform::{
+    AudioSource, CancelKey, CaptureHandle, FrameSink, Indicator, Paster, ShellRequests,
+};
 use crate::recording::{
-    CaptureError, FinishedRecording, MicCause, OverlayState, Press, RecordingController,
-    RecordingId, Release, TrayState,
+    CaptureError, FinishedRecording, MicCause, OverlayState, PressOutcome, RecordingController,
+    RecordingEnd, RecordingId, Release, StopTicket, TrayState,
 };
 use crate::settings::gate::{blocked_actions, dictation_gate, SettingsTab, ShellAction};
 use crate::settings::service::SettingsService;
@@ -47,6 +54,8 @@ pub struct SessionDeps {
     /// Settings are read with `snapshot()` at each press (P-013; no
     /// `SettingsSource`, decision #47).
     pub settings: Arc<SettingsService>,
+    /// The Esc claim (T-009): claimed while a recording is on.
+    pub cancel_key: Arc<dyn CancelKey>,
 }
 
 /// The one dictation session. Inputs take `&self` and the instant the shell
@@ -72,12 +81,14 @@ struct Shared {
     state: Mutex<State>,
     /// Wakes the timer after every change of the state.
     changed: Condvar,
-    /// Serialises the release path (release → stop → finish), so recordings
-    /// reach the queue in recording order even if releases come from several
-    /// threads. Taken before `state`, never while holding it.
+    /// Serialises the stop path (decision → capture stop → finish) of a release,
+    /// a toggle press and the max-length tick, so recordings reach the queue in
+    /// recording order whichever thread ends them. Taken before `state`, never
+    /// while holding it.
     releasing: Mutex<()>,
     audio: Arc<dyn AudioSource>,
     indicator: Arc<dyn Indicator>,
+    cancel_key: Arc<dyn CancelKey>,
     requests: Arc<dyn ShellRequests>,
     settings: Arc<SettingsService>,
     /// The pipeline's own instances (cloned from `PipelineDeps` before the build).
@@ -97,6 +108,8 @@ struct State {
     /// What the indicator port was last given.
     published_tray: (TrayState, bool),
     published_overlay: OverlayState,
+    /// What the cancel-key port was last given (`false` before the first call).
+    published_claim: bool,
     /// A stop is between its `release` and its `finish`: the controller shows
     /// neither the recording nor its job yet, so nothing is published until the
     /// `finish` (at most one: the release path is serialised). Cleared by the
@@ -140,10 +153,17 @@ impl Shared {
     /// Hands every indicator change since the last call to the port, then wakes
     /// the timer. Called with the lock held, right after the controller call that
     /// made the change; an unchanged value is not sent again. While a stop is in
-    /// flight it sends nothing: the stop's `finish` publishes what changed
-    /// meanwhile, so the overlay goes Recording → Processing, never through Hidden.
+    /// flight it sends no indicator change: the stop's `finish` publishes what
+    /// changed meanwhile, so the overlay goes Recording → Processing, never
+    /// through Hidden. The Esc claim is synced first and is not held back by a
+    /// stop: it is released when the recording ends, not when its audio is queued.
     fn publish(&self, st: &mut State) {
         self.changed.notify_all();
+        let claim = st.ctrl.live_id().is_some();
+        if claim != st.published_claim {
+            self.cancel_key.set(claim);
+            st.published_claim = claim;
+        }
         if st.stopping {
             return;
         }
@@ -192,6 +212,7 @@ impl DictationSession {
             indicator,
             requests,
             settings,
+            cancel_key,
         } = deps;
         let observer = Arc::clone(&pipeline.observer);
         let paster = Arc::clone(&pipeline.paster);
@@ -212,6 +233,7 @@ impl DictationSession {
                 // change from the controller's initial state.
                 published_tray: (initial.tray, false),
                 published_overlay: initial.overlay,
+                published_claim: false,
                 stopping: false,
                 shutdown: false,
             }),
@@ -219,6 +241,7 @@ impl DictationSession {
             releasing: Mutex::new(()),
             audio,
             indicator,
+            cancel_key,
             requests,
             settings,
             observer,
@@ -240,10 +263,12 @@ impl DictationSession {
         Ok(session)
     }
 
-    /// The hotkey went down at `at` (hold mode; toggle behaves as hold until
-    /// T-009, decision #63).
+    /// The hotkey went down at `at`.
     ///
-    /// While a recording is on this is auto-repeat: nothing runs. From idle, the
+    /// While a recording is on, the controller decides by the mode of the press
+    /// that started it: a hold recording takes it as auto-repeat (nothing runs), a
+    /// toggle recording stops through the stop path; neither runs the gate nor
+    /// takes a start window. From idle, the
     /// settings snapshot is taken and gated; a blocked press shows the notice and
     /// asks the shell to open settings, in `blocked_actions` order, and emits
     /// exactly one `DictationEvent::PressBlocked` (one per press, not per action;
@@ -253,10 +278,20 @@ impl DictationSession {
     /// so a capture that fails never shows a recording state.
     pub fn hotkey_pressed(&self, at: Instant) {
         let shared = &*self.shared;
+        if shared.lock().ctrl.live_id().is_some() {
+            stop_recording(shared, at, |ctrl| match ctrl.press_while_live(at) {
+                Some(PressOutcome::Stop(ticket)) => Some(Ended::Stop(ticket)),
+                Some(PressOutcome::Start(_) | PressOutcome::Ignored) | None => None,
+            });
+            return;
+        }
         let mut open_tabs: Vec<SettingsTab> = Vec::new();
         let mut emitted: Option<DictationEvent> = None;
         {
             let mut st = shared.lock();
+            // Ended on another thread since the check: a press from idle is a new
+            // recording, but only the hotkey thread presses, so this one is
+            // dropped rather than racing it.
             if st.ctrl.live_id().is_some() {
                 return;
             }
@@ -275,11 +310,12 @@ impl DictationSession {
                     }
                 }
                 Ok(()) => {
+                    let mode = settings.mode;
                     let ctx = PressContext {
                         start_window: shared.paster.capture_start_window(),
                         settings,
                     };
-                    if let Press::Start(id) = st.ctrl.press(at, ctx) {
+                    if let PressOutcome::Start(id) = st.ctrl.press_with_mode(at, mode, ctx) {
                         let sink = Arc::new(CaptureSink::default());
                         match shared.audio.start(sink.clone()) {
                             Ok(handle) => {
@@ -315,86 +351,68 @@ impl DictationSession {
 
     /// The hotkey went up at `at`.
     ///
-    /// The controller decides the release under the lock; the device is stopped
-    /// outside it (closed once this returns, NFR-02). A discard is published at
-    /// once. For a stop, the frames become audio outside the lock and `finish`
-    /// queues the job under it; no publication happens between the release and
-    /// the `finish` (`State::stopping`), so the overlay goes Recording →
-    /// Processing with no Hidden in between. If this path panics in between, the
-    /// panic reaches the caller and publication resumes at once (`StopInFlight`).
+    /// The controller decides the release (a toggle recording ignores it); a stop
+    /// goes through the stop path, which closes the device before this returns
+    /// (NFR-02). A discard is published at once.
     pub fn hotkey_released(&self, at: Instant) {
+        stop_recording(&self.shared, at, |ctrl| match ctrl.release(at) {
+            Release::Ignored => None,
+            Release::Stop(ticket) => Some(Ended::Stop(ticket)),
+            Release::Discarded { id, held } => Some(Ended::Dropped {
+                id,
+                held,
+                end: RecordingEnd::TooShort,
+            }),
+        });
+    }
+
+    /// The timer's input at `at` (`run_timer` calls it at the controller's next
+    /// deadline): expires the message and, at the recording's maximum length,
+    /// stops it through the stop path (end `MaxLength`, `notice.max_length`).
+    pub fn tick(&self, at: Instant) {
+        tick(&self.shared, at);
+    }
+
+    /// Esc went down at `at` while claimed (FR-22). The recording that is on ends
+    /// with nothing sent: the device is closed before this returns (NFR-02), the
+    /// indicator goes off and `RecordingEnded{Cancelled}` is emitted. With no
+    /// recording on (idle, or a stop in flight) nothing happens. It does not wait
+    /// for a stop in flight: a cancel queues nothing, so it needs no queue order.
+    pub fn esc_pressed(&self, at: Instant) {
         let shared = &*self.shared;
-        let _order = lock(&shared.releasing);
-        // Before the lock guards below, so a panic releases them first.
-        let mut stop_in_flight = StopInFlight {
-            shared,
-            armed: false,
-        };
-        let (release, id, capture) = {
+        let (id, capture) = {
             let mut st = shared.lock();
-            let release = st.ctrl.release(at);
-            let id = match &release {
-                Release::Ignored => return,
-                Release::Stop(ticket) => ticket.id(),
-                Release::Discarded { id, .. } => *id,
+            let Some(id) = st.ctrl.cancel(at) else {
+                return;
             };
-            // A stop publishes at its `finish`; `publish` still wakes the timer,
-            // whose deadline the release may have moved.
-            st.stopping = matches!(release, Release::Stop(_));
-            stop_in_flight.armed = st.stopping;
             shared.publish(&mut st);
-            let capture = st.capture.take().filter(|c| c.id == id);
-            (release, id, capture)
+            (id, st.capture.take().filter(|c| c.id == id))
         };
+        let held = capture.as_ref().map_or(Duration::ZERO, |c| {
+            at.saturating_duration_since(c.pressed_at)
+        });
+        // The audio is dropped unread.
+        let _ = close_capture(shared, id, capture);
+        shared.emit(DictationEvent::RecordingEnded {
+            recording: id,
+            duration_ms: millis(held),
+            end: RecordingEnd::Cancelled,
+        });
+    }
 
-        // Outside the lock: once `stop` returns the sink gets no more frames.
-        let audio = match capture {
-            Some(c) => {
-                let stopped = c.handle.stop();
-                let recorded = c.sink.take();
-                if let Some(first) = recorded.first_at {
-                    shared.emit(DictationEvent::RecordingStarted {
-                        recording: id,
-                        hotkey_to_first_frame_ms: millis(
-                            first.saturating_duration_since(c.pressed_at),
-                        ),
-                        device: DeviceKind::Selected,
-                    });
-                }
-                stopped.map(|()| recorded)
-            }
-            None => Err(CaptureError::Other(NO_CAPTURE.to_string())),
-        };
-        if let (Some(end), Some(held)) = (release.end(), release.held()) {
-            shared.emit(DictationEvent::RecordingEnded {
-                recording: id,
-                duration_ms: millis(held),
-                end,
-            });
-        }
-
-        let Release::Stop(ticket) = release else {
+    /// The shell's answer at `at` to the last Esc claim. A refusal while a
+    /// recording is on emits `Warning{EscUnavailable}`; the recording goes on (Esc
+    /// just cannot cancel it). A granted claim, or a refusal that arrives after
+    /// the recording ended, emits nothing.
+    pub fn cancel_key_result(&self, claimed: bool, at: Instant) {
+        let _ = at;
+        if claimed {
             return;
-        };
-        // On the caller's thread (T-051 analysis Q6).
-        let audio = audio.and_then(Recorded::into_audio);
-        let cause = audio.as_ref().err().map(MicCause::of);
-        {
-            let mut st = shared.lock();
-            if let Ok(job) = st.ctrl.finish(ticket, audio, at) {
-                // Under the lock, so the queue order is the finish order.
-                if let Some(queue) = &st.queue {
-                    let _ = queue.send(job);
-                }
-            }
-            st.stopping = false;
-            stop_in_flight.armed = false;
-            shared.publish(&mut st);
         }
-        if let Some(cause) = cause {
-            shared.emit(DictationEvent::CaptureFailed {
-                recording: id,
-                cause,
+        let live = self.shared.lock().ctrl.live_id().is_some();
+        if live {
+            self.shared.emit(DictationEvent::Warning {
+                code: WarningCode::EscUnavailable,
             });
         }
     }
@@ -439,6 +457,127 @@ impl DictationSession {
     }
 }
 
+/// How the controller ended a recording, for [`stop_recording`].
+enum Ended {
+    /// The audio goes on to `finish` and a job.
+    Stop(StopTicket<PressContext>),
+    /// Nothing is sent (a too-short hold).
+    Dropped {
+        id: RecordingId,
+        held: Duration,
+        end: RecordingEnd,
+    },
+}
+
+/// The timer's input: expires the message, and stops a recording at its maximum
+/// length through the stop path.
+fn tick(shared: &Shared, at: Instant) {
+    stop_recording(shared, at, |ctrl| ctrl.tick(at).map(Ended::Stop));
+}
+
+/// Closes the capture of recording `id` (outside the session lock: once `stop`
+/// returns the sink gets no more frames) and emits `RecordingStarted` if a frame
+/// came. Returns what was recorded.
+fn close_capture(
+    shared: &Shared,
+    id: RecordingId,
+    capture: Option<LiveCapture>,
+) -> Result<Recorded, CaptureError> {
+    let Some(c) = capture else {
+        return Err(CaptureError::Other(NO_CAPTURE.to_string()));
+    };
+    let stopped = c.handle.stop();
+    let recorded = c.sink.take();
+    if let Some(first) = recorded.first_at {
+        shared.emit(DictationEvent::RecordingStarted {
+            recording: id,
+            hotkey_to_first_frame_ms: millis(first.saturating_duration_since(c.pressed_at)),
+            device: DeviceKind::Selected,
+        });
+    }
+    stopped.map(|()| recorded)
+}
+
+/// The one stop path (T-009 invariant) of a release, a toggle press and the
+/// max-length tick. `decide` runs the controller call under the session lock,
+/// after `releasing` is taken (queue order = recording order); it may also just
+/// expire a message (`None`), which is published.
+///
+/// The device is stopped outside the lock (closed once this returns, NFR-02). A
+/// discard is published at once. For a stop, the frames become audio outside the
+/// lock and `finish` queues the job under it; no indicator change is published
+/// between the decision and the `finish` (`State::stopping`), so the overlay goes
+/// Recording → Processing with no Hidden in between. If this path panics in
+/// between, the panic reaches the caller and publication resumes at once
+/// (`StopInFlight`).
+fn stop_recording(
+    shared: &Shared,
+    at: Instant,
+    decide: impl FnOnce(&mut RecordingController<PressContext>) -> Option<Ended>,
+) {
+    let _order = lock(&shared.releasing);
+    // Before the lock guards below, so a panic releases them first.
+    let mut stop_in_flight = StopInFlight {
+        shared,
+        armed: false,
+    };
+    let (ended, id, capture) = {
+        let mut st = shared.lock();
+        let Some(ended) = decide(&mut st.ctrl) else {
+            // A message may have expired; `publish` also wakes the timer.
+            shared.publish(&mut st);
+            return;
+        };
+        let id = match &ended {
+            Ended::Stop(ticket) => ticket.id(),
+            Ended::Dropped { id, .. } => *id,
+        };
+        // A stop publishes its indicator at its `finish`; `publish` still syncs
+        // the Esc claim and wakes the timer, whose deadline may have moved.
+        st.stopping = matches!(ended, Ended::Stop(_));
+        stop_in_flight.armed = st.stopping;
+        shared.publish(&mut st);
+        let capture = st.capture.take().filter(|c| c.id == id);
+        (ended, id, capture)
+    };
+
+    let audio = close_capture(shared, id, capture);
+    let (held, end) = match &ended {
+        Ended::Stop(ticket) => (ticket.held(), ticket.end()),
+        Ended::Dropped { held, end, .. } => (*held, *end),
+    };
+    shared.emit(DictationEvent::RecordingEnded {
+        recording: id,
+        duration_ms: millis(held),
+        end,
+    });
+
+    let Ended::Stop(ticket) = ended else {
+        return;
+    };
+    // On the caller's thread (T-051 analysis Q6).
+    let audio = audio.and_then(Recorded::into_audio);
+    let cause = audio.as_ref().err().map(MicCause::of);
+    {
+        let mut st = shared.lock();
+        if let Ok(job) = st.ctrl.finish(ticket, audio, at) {
+            // Under the lock, so the queue order is the finish order.
+            if let Some(queue) = &st.queue {
+                let _ = queue.send(job);
+            }
+        }
+        st.stopping = false;
+        stop_in_flight.armed = false;
+        shared.publish(&mut st);
+    }
+    if let Some(cause) = cause {
+        shared.emit(DictationEvent::CaptureFailed {
+            recording: id,
+            cause,
+        });
+    }
+}
+
 /// Lets the job in flight finish (`run_job` cannot be interrupted), drops the
 /// queued recordings and joins the worker and timer threads (analysis Q3).
 impl Drop for DictationSession {
@@ -479,8 +618,10 @@ fn run_worker(shared: &Shared, pipeline: &Pipeline, jobs: &mpsc::Receiver<Job>) 
     }
 }
 
-/// The message timer: calls `tick` once the controller's next deadline is
-/// reached, and re-reads the deadline after every change (`Shared::changed`).
+/// The timer: calls [`tick`] once the controller's next deadline (a message's
+/// expiry or a recording's maximum length) is reached, and re-reads the deadline
+/// after every change (`Shared::changed`). The tick runs with the session lock
+/// released, because a max-length stop takes the stop path (`releasing` first).
 fn run_timer(shared: &Shared) {
     let mut st = shared.lock();
     loop {
@@ -495,9 +636,9 @@ fn run_timer(shared: &Shared) {
             Some(deadline) => {
                 let now = Instant::now();
                 if now >= deadline {
-                    st.ctrl.tick(now);
-                    shared.publish(&mut st);
-                    st
+                    drop(st);
+                    tick(shared, now);
+                    shared.lock()
                 } else {
                     shared
                         .changed

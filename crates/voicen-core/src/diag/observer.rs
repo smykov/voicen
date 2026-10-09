@@ -3,7 +3,8 @@
 //!
 //! Closing rules: `Delivered` for a text outcome (it follows `JobFinished{Text}`,
 //! joined by `seq`); `JobFinished` for no-speech or failed; `RecordingEnded{TooShort}`
-//! for a discarded recording; `CaptureFailed` for a capture that failed at press
+//! for a discarded recording and `RecordingEnded{Cancelled}` for an Esc-cancelled
+//! one (T-009; `Toggled` and `MaxLength` are closed by their job like `Released`); `CaptureFailed` for a capture that failed at press
 //! (its only event) or at stop (after `RecordingStarted` / `RecordingEnded`, no
 //! job follows). A pipeline `Warning` and a blocked press (`PressBlocked`, no
 //! recording, T-006) are each their own line at once and touch no open record.
@@ -116,10 +117,19 @@ impl Open {
             } => {
                 self.record(recording).duration_ms = Some(duration_ms);
                 match end {
-                    RecordingEnd::Released => None,
+                    // A job follows and closes the record.
+                    RecordingEnd::Released | RecordingEnd::Toggled | RecordingEnd::MaxLength => {
+                        None
+                    }
                     RecordingEnd::TooShort => Some(self.close(recording).line(
                         recording,
                         DictationOutcome::TooShort,
+                        None,
+                    )),
+                    // Esc (T-009): no job comes.
+                    RecordingEnd::Cancelled => Some(self.close(recording).line(
+                        recording,
+                        DictationOutcome::Cancelled,
                         None,
                     )),
                 }

@@ -1,5 +1,6 @@
-//! The recording state machine, hold mode (spec 001 data-model "Recording",
-//! FR-02, T-042).
+//! The recording state machine (spec 001 data-model "Recording"): hold mode
+//! (FR-02, T-042), toggle mode, the 10-minute maximum and Esc cancel (FR-03, FR-22,
+//! T-009).
 //!
 //! [`RecordingController`] is the only place in core that decides a recording
 //! starts or ends and the only constructor of a [`FinishedRecording`]. It is
@@ -8,10 +9,16 @@
 //! delay never counts in the 0.3 s hold. It owns the [`IndicatorState`]: the
 //! indicator changes only inside controller methods.
 //!
-//! One press yields at most one [`FinishedRecording`]: `release` hands out a
-//! [`StopTicket`] (not `Clone`, built only here) and goes idle at once, and
-//! `finish` consumes the ticket. A hold under [`MIN_HOLD`], a capture error or a
-//! stale id yields none.
+//! Every end of a recording is decided here, with the mode of the press that
+//! started it (P-013): a hold recording ends at its release, a toggle recording at
+//! the next press (its releases are ignored, no [`MIN_HOLD`]), either at
+//! [`MAX_LENGTH`] (a [`tick`](RecordingController::tick)), and either by Esc
+//! ([`cancel`](RecordingController::cancel), nothing sent).
+//!
+//! One recording yields at most one [`FinishedRecording`]: the stopping event
+//! hands out a [`StopTicket`] (not `Clone`, built only here) and goes idle at
+//! once, and `finish` consumes the ticket. A hold under [`MIN_HOLD`], a cancel, a
+//! capture error or a stale id yields none.
 //!
 //! The overlay message of a failure or notice lasts 3 s from the event that
 //! raised it ([`MESSAGE_DURATION`]). A message raised during a live recording
@@ -21,10 +28,8 @@
 //! not shown again); a later failure or notice replaces it.
 //!
 //! The dictation session (`crate::dictation`, T-051) calls
-//! `settings::gate::dictation_gate` before [`press`]; the engine = none check is not
-//! repeated here.
-//!
-//! [`press`]: RecordingController::press
+//! `settings::gate::dictation_gate` before a press that starts a recording; the
+//! engine = none check is not repeated here.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
 pub mod indicator;
@@ -35,12 +40,17 @@ use std::time::{Duration, Instant};
 use crate::audio::AudioBuffer;
 use crate::failure::FailureReason;
 use crate::i18n::{self, MessageId};
+use crate::settings::Mode;
 
 use indicator::{IndicatorInputs, ShownMessage};
 pub use indicator::{IndicatorState, JobEnd, OverlayState, TrayState, MESSAGE_DURATION};
 
 /// A hold shorter than this is discarded silently (FR-02); exactly 300 ms is kept.
 pub const MIN_HOLD: Duration = Duration::from_millis(300);
+
+/// The longest recording, in either mode (FR-03, decision #1): at exactly this
+/// length it is stopped, sent on and `notice.max_length` is shown.
+pub const MAX_LENGTH: Duration = Duration::from_secs(600);
 
 /// One recording, monotonic per controller.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -54,13 +64,19 @@ impl RecordingId {
 }
 
 /// Why a recording ended, the `end` of `RecordingEnded` (data-model "Recording").
-/// T-009 and T-006 add the other variants.
+/// T-010 and T-012 add the other variants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecordingEnd {
     /// Hold released after at least [`MIN_HOLD`].
     Released,
     /// Hold released before [`MIN_HOLD`]: [`Release::Discarded`], nothing sent.
     TooShort,
+    /// Toggle recording stopped by the next press.
+    Toggled,
+    /// Stopped at [`MAX_LENGTH`] (either mode); sent on with `notice.max_length`.
+    MaxLength,
+    /// Esc during the recording: nothing sent.
+    Cancelled,
 }
 
 /// The capture failure the shell reports (contracts/core-traits.md `CaptureError`).
@@ -104,11 +120,23 @@ impl MicCause {
     }
 }
 
-/// Result of [`RecordingController::press`].
+/// Result of [`RecordingController::press`] (a hold-mode press).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Press {
     Start(RecordingId),
-    /// Auto-repeat while recording.
+    /// Any press while recording.
+    Ignored,
+}
+
+/// Result of [`RecordingController::press_with_mode`].
+#[derive(Debug)]
+pub enum PressOutcome<C> {
+    /// From idle: a recording started.
+    Start(RecordingId),
+    /// A press during a toggle recording: stop the capture and pass the audio to
+    /// [`RecordingController::finish`] (end [`RecordingEnd::Toggled`]).
+    Stop(StopTicket<C>),
+    /// A press during a hold recording (auto-repeat).
     Ignored,
 }
 
@@ -140,11 +168,7 @@ impl<C> Release<C> {
     /// `Discarded`; `None` for `Ignored`.
     pub fn held(&self) -> Option<Duration> {
         match self {
-            Release::Stop(ticket) => Some(
-                ticket
-                    .stopped_at
-                    .saturating_duration_since(ticket.started_at),
-            ),
+            Release::Stop(ticket) => Some(ticket.held()),
             Release::Discarded { held, .. } => Some(*held),
             Release::Ignored => None,
         }
@@ -164,6 +188,17 @@ pub struct StopTicket<C> {
 impl<C> StopTicket<C> {
     pub fn id(&self) -> RecordingId {
         self.id
+    }
+
+    /// How the recording ended (comes back as [`FinishedRecording::end`]).
+    pub fn end(&self) -> RecordingEnd {
+        self.end
+    }
+
+    /// The recording's length (the `duration_ms` of `RecordingEnded`): stop
+    /// instant minus press instant, saturating at zero.
+    pub fn held(&self) -> Duration {
+        self.stopped_at.saturating_duration_since(self.started_at)
     }
 }
 
@@ -192,7 +227,8 @@ impl<C> FinishedRecording<C> {
     pub fn started_at(&self) -> Instant {
         self.started_at
     }
-    /// The release instant (not the instant the capture finished stopping).
+    /// The instant of the stopping event (release, press, the max-length tick),
+    /// not the instant the capture finished stopping.
     pub fn stopped_at(&self) -> Instant {
         self.stopped_at
     }
@@ -207,9 +243,28 @@ struct Live<C> {
     id: RecordingId,
     ctx: C,
     started_at: Instant,
+    /// The mode of the press that started it; it governs the recording.
+    mode: Mode,
 }
 
-/// Hold-mode recording controller. `C` is opaque context taken at press and
+impl<C> Live<C> {
+    fn into_ticket(self, stopped_at: Instant, end: RecordingEnd) -> StopTicket<C> {
+        StopTicket {
+            id: self.id,
+            ctx: self.ctx,
+            started_at: self.started_at,
+            stopped_at,
+            end,
+        }
+    }
+
+    /// When the recording reaches [`MAX_LENGTH`] (`None` past the clock's range).
+    fn max_deadline(&self) -> Option<Instant> {
+        self.started_at.checked_add(MAX_LENGTH)
+    }
+}
+
+/// The recording controller. `C` is opaque context taken at press and
 /// returned with the recording (the session passes `pipeline::PressContext`).
 ///
 /// Methods take `&mut self` and run no threads; the dictation session serialises
@@ -251,12 +306,27 @@ impl<C> RecordingController<C> {
         c
     }
 
-    /// Hotkey pressed at `at` (after `settings::gate::dictation_gate`). From idle
-    /// it starts a recording and drops any overlay message (not re-shown); while
-    /// recording it is hotkey auto-repeat and ignored.
+    /// A hold-mode press at `at`: from idle it starts a hold recording, like
+    /// [`press_with_mode`](Self::press_with_mode) with [`Mode::Hold`]; while any
+    /// recording is on it is ignored and changes nothing (it never stops one).
     pub fn press(&mut self, at: Instant, ctx: C) -> Press {
         if self.live.is_some() {
             return Press::Ignored;
+        }
+        match self.press_with_mode(at, Mode::Hold, ctx) {
+            PressOutcome::Start(id) => Press::Start(id),
+            PressOutcome::Stop(_) | PressOutcome::Ignored => Press::Ignored,
+        }
+    }
+
+    /// Hotkey pressed at `at`, with the recording mode of the press's settings
+    /// snapshot. From idle (after `settings::gate::dictation_gate`) it starts a
+    /// recording governed by `mode` and drops any overlay message (not re-shown).
+    /// While recording, the mode of the press that started the recording decides
+    /// ([`press_while_live`](Self::press_while_live)); `mode` and `ctx` are unused.
+    pub fn press_with_mode(&mut self, at: Instant, mode: Mode, ctx: C) -> PressOutcome<C> {
+        if let Some(outcome) = self.press_while_live(at) {
+            return outcome;
         }
         let id = RecordingId(self.next_id);
         self.next_id = self.next_id.saturating_add(1);
@@ -264,16 +334,38 @@ impl<C> RecordingController<C> {
             id,
             ctx,
             started_at: at,
+            mode,
         });
         self.message = None;
         self.refresh();
-        Press::Start(id)
+        PressOutcome::Start(id)
     }
 
-    /// Hotkey released at `at`. The controller is idle once this returns. The
-    /// hold is measured between the two event instants, saturating at zero (a
-    /// release stamped before its press is a zero hold).
+    /// A press at `at` while a recording is on, decided without a press context
+    /// (the session takes none for a press that cannot start a recording): a hold
+    /// recording ignores it (auto-repeat); a toggle recording ends with a ticket
+    /// (end `Toggled`, `stopped_at = at`, no [`MIN_HOLD`]) and the controller is idle
+    /// once this returns. `None` while idle (the press would start a recording).
+    pub fn press_while_live(&mut self, at: Instant) -> Option<PressOutcome<C>> {
+        if self.live.as_ref()?.mode == Mode::Hold {
+            return Some(PressOutcome::Ignored);
+        }
+        let live = self.live.take()?;
+        self.expire(at);
+        self.refresh();
+        Some(PressOutcome::Stop(
+            live.into_ticket(at, RecordingEnd::Toggled),
+        ))
+    }
+
+    /// Hotkey released at `at`. For a hold recording the controller is idle once
+    /// this returns; the hold is measured between the two event instants,
+    /// saturating at zero (a release stamped before its press is a zero hold). A
+    /// toggle recording ignores its releases and stays on.
     pub fn release(&mut self, at: Instant) -> Release<C> {
+        if !self.live.as_ref().is_some_and(|l| l.mode == Mode::Hold) {
+            return Release::Ignored;
+        }
         let Some(live) = self.live.take() else {
             return Release::Ignored;
         };
@@ -283,13 +375,18 @@ impl<C> RecordingController<C> {
         if held < MIN_HOLD {
             return Release::Discarded { id: live.id, held };
         }
-        Release::Stop(StopTicket {
-            id: live.id,
-            ctx: live.ctx,
-            started_at: live.started_at,
-            stopped_at: at,
-            end: RecordingEnd::Released,
-        })
+        Release::Stop(live.into_ticket(at, RecordingEnd::Released))
+    }
+
+    /// Esc at `at` (FR-22): the recording that is on ends with nothing sent (no
+    /// ticket, no job, no message) and its id is returned; its later release does
+    /// nothing. While idle, or while a stopped recording is being finished, it
+    /// returns `None` and changes nothing (a queued job goes on).
+    pub fn cancel(&mut self, at: Instant) -> Option<RecordingId> {
+        let live = self.live.take()?;
+        self.expire(at);
+        self.refresh();
+        Some(live.id)
     }
 
     /// The capture for `id` could not be opened or failed before release. For the
@@ -418,15 +515,41 @@ impl<C> RecordingController<C> {
         self.live.as_ref().map(|l| l.id)
     }
 
-    /// Timer callback: expires the overlay message (at exactly its `until`).
-    pub fn tick(&mut self, at: Instant) {
+    /// Timer callback: expires the overlay message (at exactly its `until`), and
+    /// ends a recording that has reached [`MAX_LENGTH`] (at exactly its length, in
+    /// either mode) with a ticket (end `MaxLength`, `stopped_at = at`): the
+    /// controller is idle once this returns and `notice.max_length` is shown for
+    /// 3 s from `at`, tray unchanged.
+    pub fn tick(&mut self, at: Instant) -> Option<StopTicket<C>> {
         self.expire(at);
+        let due = self
+            .live
+            .as_ref()
+            .and_then(Live::max_deadline)
+            .is_some_and(|deadline| at >= deadline);
+        let ticket = if due {
+            self.live
+                .take()
+                .map(|live| live.into_ticket(at, RecordingEnd::MaxLength))
+        } else {
+            None
+        };
+        if ticket.is_some() {
+            self.show(i18n::NOTICE_MAX_LENGTH, Vec::new(), at);
+        }
         self.refresh();
+        ticket
     }
 
-    /// When the shell's timer should call [`tick`](Self::tick) next.
+    /// When the timer should call [`tick`](Self::tick) next: the earlier of the
+    /// message's expiry and the live recording's [`MAX_LENGTH`].
     pub fn next_deadline(&self) -> Option<Instant> {
-        self.message.as_ref().map(|m| m.until)
+        let message = self.message.as_ref().map(|m| m.until);
+        let max = self.live.as_ref().and_then(Live::max_deadline);
+        match (message, max) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
     }
 
     pub fn indicator(&self) -> &IndicatorState {
@@ -1737,8 +1860,8 @@ mod tests {
             "MAX_LENGTH is decision #1's 10 minutes"
         );
         assert_eq!(
-            serde_json::to_value(i18n::NOTICE_MAX_LENGTH).expect("a MessageId serializes"),
-            serde_json::Value::String("notice.max_length".to_string()),
+            serde_json::to_value(i18n::NOTICE_MAX_LENGTH).ok(),
+            Some(serde_json::Value::String("notice.max_length".to_string())),
             "the catalog id of contracts/messages.md"
         );
         for mode in [Mode::Hold, Mode::Toggle] {
@@ -1931,7 +2054,9 @@ mod tests {
         let t0 = Instant::now();
         let mut c = RecordingController::<Ctx>::new();
         let a = start_in(&mut c, t0, Mode::Toggle, "a");
-        let ticket = c.tick(t0 + TEN_MIN).expect("the 10-min stop");
+        let Some(ticket) = c.tick(t0 + TEN_MIN) else {
+            panic!("the 10-min stop");
+        };
         let _ = finish_ok(&mut c, ticket, t0 + TEN_MIN + ms(10));
         match c.press_with_mode(t0 + TEN_MIN + ms(5000), Mode::Toggle, "b") {
             PressOutcome::Start(b) => assert_ne!(a, b),
