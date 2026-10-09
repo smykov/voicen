@@ -1,9 +1,12 @@
 //! The public test fakes (feature `test-fakes`, decision #23 N4), used from outside
 //! the crate the way T-032's and T-030's tests will use them.
 
+mod common;
+
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use common::timing::now;
 use voicen_core::audio::AudioBuffer;
 use voicen_core::autostart::{Autostart, AutostartCall, AutostartError, FakeAutostart};
 use voicen_core::hotkey_registrar::{
@@ -331,7 +334,7 @@ fn fake_audio_source_delivers_before_stop_and_counts_open_handles() {
     // by a failing stop, a failed start counted as open or not counted as a call.
     let source = FakeAudioSource::new();
     let sink = Arc::new(LogSink::default());
-    let at = Instant::now();
+    let at = now();
     let chunk = FrameChunk {
         samples: vec![0.5, -0.5, 0.25, -0.25],
         rate: 48_000,
@@ -377,7 +380,7 @@ fn fake_audio_source_delivers_before_stop_and_counts_open_handles() {
 #[test]
 fn frame_chunk_from_buffer_is_16k_mono_scaled_to_unit_range() {
     // Bite: a wrong scale (the session's audio would change level), another rate.
-    let at = Instant::now();
+    let at = now();
     let chunk = FrameChunk::from_buffer(&AudioBuffer::from_16k_mono(vec![16_384, -32_768, 0]), at);
     assert_eq!(chunk.samples, vec![0.5, -1.0, 0.0]);
     assert_eq!((chunk.rate, chunk.channels, chunk.at), (16_000, 1, at));

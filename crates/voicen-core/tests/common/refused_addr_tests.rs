@@ -1,21 +1,20 @@
-//! T-047 (decision #53): [`refused_addr`] can never be handed to another socket
-//! of the test process, and nothing listens on it. T-048 (decision #56): the
-//! deadlines of a refused case, [`refused_timeouts`], leave the refusal room.
+//! T-047 (decision #53): the refused case, `OsAnswer::refused()`, can never be handed
+//! to another socket of the test process, and nothing listens on it. T-048 (decision
+//! #56), T-080 (I1): its deadlines leave the refusal room.
 //!
-//! Not a module of `tests/common`: each binary that calls [`refused_addr`]
+//! Not a module of `tests/common`: each binary that takes a refused case
 //! (`tests/openai_client.rs`, `tests/api_pipeline.rs`, `tests/diag_pipeline.rs`,
-//! `tests/local_server.rs`)
-//! includes this file with
-//! `#[path]`, so the helper is checked in the process that relies on it, and a
-//! binary that does not use it runs none of these connect probes (each probe takes
-//! an ephemeral source port for an instant; T-047 review 1 #3). Keep it out of
-//! `tests/local_download_refused.rs`, whose refused phase needs a process that
-//! takes no other port.
+//! `tests/local_server.rs`, `tests/post_process_chat.rs`, `tests/connection_test.rs`,
+//! `src-tauri/tests/settings_ipc.rs`) includes this file with `#[path]`, so the case
+//! is checked in the process that relies on it, and a binary that does not use it
+//! runs none of these connect probes (each probe takes an ephemeral source port for
+//! an instant; T-047 review 1 #3). Keep it out of `tests/local_download_refused.rs`,
+//! whose refused phase needs a process that takes no other port.
 
 use std::io::ErrorKind;
-use std::net::{Ipv4Addr, TcpStream};
+use std::net::{Ipv4Addr, SocketAddr, TcpStream};
 
-use crate::common::{refused_addr, refused_timeouts, REFUSAL_BUDGET};
+use crate::common::os_answer::{OsAnswer, OS_ANSWER_BUDGET};
 use voicen_core::timeouts::Timeouts;
 
 /// Linux: the range `bind(0)` and `connect()` pick local ports from.
@@ -32,6 +31,14 @@ fn ephemeral_low_bound() -> Result<u16, String> {
         .map_err(|e| format!("{PORT_RANGE}: {low:?}: {e}"))
 }
 
+/// The refused case's address.
+fn refused_addr() -> SocketAddr {
+    let case = OsAnswer::refused();
+    case.host
+        .parse()
+        .unwrap_or_else(|e| panic!("refused host {:?} is not ip:port: {e}", case.host))
+}
+
 #[test]
 fn refused_addr_port_is_below_the_ephemeral_range() {
     // The invariant itself: the OS never gives a port outside the ephemeral
@@ -40,7 +47,7 @@ fn refused_addr_port_is_below_the_ephemeral_range() {
     // from inside the range by construction), port 0. On Linux (the gate) the
     // range must be readable: a check that silently did not run would be a green
     // that proves nothing (T-047 review 1 #4). Other OSes (the Windows CI) have no
-    // such file and skip; the doc of `refused_addr()` covers their range.
+    // such file and skip; the doc of `OsAnswer::refused()` covers their range.
     if !cfg!(target_os = "linux") {
         eprintln!("skipped: the ephemeral range is read from {PORT_RANGE} on Linux only");
         return;
@@ -63,7 +70,7 @@ fn refused_addr_is_refused_by_a_connect_probe() {
     // Bite: a held listener's address, an unroutable address (TimedOut), a
     // non-loopback address.
     let addr = refused_addr();
-    match TcpStream::connect_timeout(&addr, REFUSAL_BUDGET) {
+    match TcpStream::connect_timeout(&addr, OS_ANSWER_BUDGET) {
         Ok(_) => panic!("{addr}: something listens there"),
         Err(e) => assert_eq!(e.kind(), ErrorKind::ConnectionRefused, "{addr}: {e}"),
     }
@@ -79,15 +86,21 @@ fn refused_addr_is_ipv4_loopback() {
 
 #[test]
 fn refused_timeouts_leave_the_refusal_room_on_every_deadline() {
-    // T-048 (decision #56): on a refused path the refusal, not a timer, must end
-    // the connect. The connect limit is the whole budget, which `refused_addr()`
-    // checks is twice the measured refusal time; every whole-request and no-data
-    // deadline is twice that again, so it cannot fire before the connect ends.
-    // The destructuring is exhaustive on purpose: a new deadline in `Timeouts`
-    // does not compile here until it is sized for the refusal. Bite: any of them
-    // left at a test value below the budget (the leak test's 300 ms total, the
-    // download harness's 2 s connect / no-data), or the probe budget not tied to
-    // these deadlines.
+    // T-048 (decision #56), T-080 I1: on a refused path the refusal, not a timer,
+    // must end the connect. The connect limit is the whole budget, which the case's
+    // probe checks is at least twice the measured refusal time; every whole-request
+    // and no-data deadline is twice that again, so it cannot fire before the
+    // connect ends. The destructuring is exhaustive on purpose: a new deadline in
+    // `Timeouts` does not compile here until it is sized for the refusal. Bite: any
+    // of them left at a test value below the budget (the leak test's 300 ms total,
+    // the download harness's 2 s connect / no-data), or the probe budget not tied
+    // to these deadlines.
+    let case = OsAnswer::refused();
+    assert!(
+        2 * case.answer_took <= OS_ANSWER_BUDGET,
+        "refused after {:?}",
+        case.answer_took
+    );
     let Timeouts {
         connect,
         api_transcription,
@@ -95,15 +108,15 @@ fn refused_timeouts_leave_the_refusal_room_on_every_deadline() {
         post_processing,
         builtin,
         download_no_data,
-    } = refused_timeouts();
-    assert_eq!(connect, REFUSAL_BUDGET, "connect");
+    } = case.timeouts;
+    assert_eq!(connect, OS_ANSWER_BUDGET, "connect");
     for (name, total) in [
         ("api_transcription", api_transcription),
         ("local_server", local_server),
         ("post_processing", post_processing),
         ("download_no_data", download_no_data),
     ] {
-        assert_eq!(total, 2 * REFUSAL_BUDGET, "{name}");
+        assert_eq!(total, 2 * OS_ANSWER_BUDGET, "{name}");
     }
     // Not a network deadline: whisper.cpp runs in-process.
     assert_eq!(builtin, Timeouts::default().builtin, "builtin");

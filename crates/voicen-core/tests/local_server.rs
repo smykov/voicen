@@ -7,22 +7,24 @@
 //! built the client directly could pass while the user's path stays broken.
 //! wiremock serves on its own thread and runtime; `transcribe` and `run_job` run
 //! on a plain std thread, because the blocking reqwest client panics inside a
-//! tokio runtime context (decision #42). Refused cases use `refused_addr()` and
-//! `refused_timeouts()` (F-004, F-005; docs/decisions/core-tests.md); timeout
+//! tokio runtime context (decision #42). Refused cases use `OsAnswer::refused()` and
+//! its deadlines (F-004, F-005, T-080; docs/decisions/core-tests.md); timeout
 //! cases use a server that accepts and answers late. The "connection not accepted
 //! in time" row (connect + timeout -> CannotReach) has no deterministic local
 //! fixture and is pinned by `failure::tests` (T-018 Investigation).
 //! Fake data only: 127.0.0.1, `sk-test-…`.
 
 mod common;
-/// The checks of `common::refused_addr()`, in each binary that calls it (T-047).
+/// The checks of `common::os_answer::OsAnswer::refused()`, in each binary that takes it
+/// (T-047).
 #[path = "common/refused_addr_tests.rs"]
 mod refused_addr_tests;
 
 use std::sync::Arc;
-use std::time::{Duration, Instant, UNIX_EPOCH};
+use std::time::{Duration, UNIX_EPOCH};
 
-use common::{refused_addr, refused_timeouts};
+use common::os_answer::OsAnswer;
+use common::timing::{ago, at_least, measure};
 use serde_json::json;
 use voicen_core::audio::{wav, AudioBuffer};
 use voicen_core::autostart::FakeAutostart;
@@ -345,23 +347,22 @@ async fn request_deadline_is_local_server_not_api_transcription() {
 #[tokio::test]
 async fn no_answer_within_local_server_deadline_is_timeout() {
     // Acceptance 2 "no answer in 60 s -> timeout", with the deadline injected: a
-    // 5 s delay against a 300 ms local-server deadline is Timeout well before 5 s
+    // 5 s delay against a 300 ms local-server deadline is Timeout, not the answer
     // (the API deadline is 10 s here). Bite: api_transcription or
     // Timeouts::default() used (the call succeeds after 5 s), or the timeout
-    // mapped to CannotReach.
+    // mapped to CannotReach. No upper bound (T-080 I2): the outcome catches every
+    // longer limit.
     let server = server_with(ok_text("too late").set_delay(Duration::from_secs(5))).await;
     let engine = local_engine(&local_settings(&base(&server), ""), &creds(None));
-    let started = Instant::now();
-    let got = transcribe(
-        engine,
-        req_with(timeouts(
-            Duration::from_secs(10),
-            Duration::from_millis(300),
-        )),
-    );
-    let elapsed = started.elapsed();
+    let deadline = Duration::from_millis(300);
+    let (got, took) = measure(|| {
+        transcribe(
+            engine,
+            req_with(timeouts(Duration::from_secs(10), deadline)),
+        )
+    });
     assert_eq!(got, Err(FailureReason::Timeout));
-    assert!(elapsed < Duration::from_secs(3), "took {elapsed:?}");
+    at_least(took, deadline);
 }
 
 #[test]
@@ -370,16 +371,16 @@ fn refused_server_is_cannot_reach_host_port() {
     // port gives CannotReach with the local URL's host:port (the default URL gives
     // "localhost:8000": openai::tests). Bite: EngineNotConfigured (no arm), the
     // API URL's host, NetworkUnavailable, the whole URL as host.
-    let addr = refused_addr();
+    let case = OsAnswer::refused();
     let engine = local_engine(
-        &local_settings(&format!("http://{addr}/v1"), ""),
+        &local_settings(&format!("http://{}/v1", case.host), ""),
         &creds(None),
     );
-    let got = transcribe(engine, req_with(refused_timeouts()));
+    let got = transcribe(engine, req_with(case.timeouts));
     assert_eq!(
         got,
         Err(FailureReason::CannotReach {
-            host: addr.to_string()
+            host: case.host.clone()
         })
     );
 }
@@ -445,9 +446,7 @@ impl Harness {
         audio: AudioBuffer,
         settings: Arc<Settings>,
     ) -> FinishedRecording<PressContext> {
-        let t0 = Instant::now()
-            .checked_sub(Duration::from_secs(4))
-            .expect("monotonic clock at least 4 s past its origin");
+        let t0 = ago(Duration::from_secs(4));
         let ctx = PressContext {
             start_window: Some(StartWindow {
                 handle: WindowRef(0x0001_0042),
@@ -507,15 +506,15 @@ fn server_down_is_cannot_reach_and_audio_kept() {
     // retry, FR-17), nothing is copied, and the job is tagged "local_server" in the
     // diag events. Bite: EngineNotConfigured (not retryable: nothing kept), kind()
     // still "api", the API host named.
-    let addr = refused_addr();
-    let mut h = harness(Arc::new(creds(None)), Some(refused_timeouts()));
+    let case = OsAnswer::refused();
+    let mut h = harness(Arc::new(creds(None)), Some(case.timeouts));
     let rec = h.record(
         fixtures::speech_3s(),
-        Arc::new(local_settings(&format!("http://{addr}/v1"), "")),
+        Arc::new(local_settings(&format!("http://{}/v1", case.host), "")),
     );
     let report = h.run(rec);
     let reason = FailureReason::CannotReach {
-        host: addr.to_string(),
+        host: case.host.clone(),
     };
     assert_eq!(report.end, JobEnd::Failed(reason.clone()));
     let Some(id) = report.pending else {
@@ -540,7 +539,9 @@ async fn configured_local_server_timeout_fails_the_job_with_timeout() {
     // the job event, the audio kept; the API limit in the same snapshot is set long
     // (600 s) so reading it instead shows. The same server with the default
     // snapshot (60 s) is delivered. Bite: the pipeline's fixed Timeouts::default(),
-    // the API value used for the local server, or milliseconds.
+    // the API value used for the local server, or milliseconds. No upper bound
+    // (T-080 I2): every longer wrong limit is caught by the outcome (Delivered at
+    // 7 s).
     let server = server_with(ok_text("late local text").set_delay(Duration::from_secs(7))).await;
 
     let mut h = harness(Arc::new(creds(None)), None);
@@ -548,14 +549,9 @@ async fn configured_local_server_timeout_fails_the_job_with_timeout() {
     s.timeouts.local_server_s = 5;
     s.timeouts.api_transcription_s = 600;
     let rec = h.record(fixtures::speech_3s(), Arc::new(s));
-    let started = Instant::now();
-    let report = h.run(rec);
-    let took = started.elapsed();
+    let (report, took) = measure(|| h.run(rec));
     assert_eq!(report.end, JobEnd::Failed(FailureReason::Timeout));
-    assert!(
-        took >= Duration::from_millis(4900) && took < Duration::from_millis(6500),
-        "took {took:?}: the 5 s limit of the snapshot"
-    );
+    at_least(took, Duration::from_secs(5));
     assert!(report.pending.is_some(), "{report:?}");
     assert_eq!(h.clipboard.texts(), Vec::<String>::new());
     assert_eq!(h.job_engines(), vec![Some("local_server")]);

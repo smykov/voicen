@@ -5,17 +5,20 @@
 //! 3 s later, finish) and closed with `job_finished`, as T-006 will do. wiremock
 //! serves on its own thread and runtime; `run_job` runs on a plain std thread,
 //! because the blocking reqwest client panics inside a tokio runtime context
-//! (T-040). Fake data only: 127.0.0.1, 192.0.2.1 (RFC 5737), `sk-test-SECRET`.
+//! (T-040). Fake data only: 127.0.0.1, TEST-NET-1 (RFC 5737), `sk-test-SECRET`.
+//! OS-answer targets and every clock reading come from `tests/common` (T-080).
 
 mod common;
-/// The checks of `common::refused_addr()`, in each binary that calls it (T-047).
+/// The checks of `common::os_answer::OsAnswer::refused()`, in each binary that takes it
+/// (T-047).
 #[path = "common/refused_addr_tests.rs"]
 mod refused_addr_tests;
 
 use std::sync::Arc;
-use std::time::{Duration, Instant, UNIX_EPOCH};
+use std::time::{Duration, UNIX_EPOCH};
 
-use common::{refused_addr, refused_timeouts, REFUSAL_BUDGET};
+use common::os_answer::{OsAnswer, OS_ANSWER_BUDGET, UNANSWERED_HOST};
+use common::timing::{ago, at_least, measure, now};
 use serde_json::json;
 use voicen_core::audio::{wav, AudioBuffer};
 use voicen_core::autostart::FakeAutostart;
@@ -136,9 +139,7 @@ impl Harness {
         audio: AudioBuffer,
         settings: Arc<Settings>,
     ) -> FinishedRecording<PressContext> {
-        let t0 = Instant::now()
-            .checked_sub(Duration::from_secs(4))
-            .expect("monotonic clock at least 4 s past its origin");
+        let t0 = ago(Duration::from_secs(4));
         let ctx = PressContext {
             start_window: Some(window()),
             settings,
@@ -159,13 +160,9 @@ impl Harness {
     fn run(&self, rec: FinishedRecording<PressContext>) -> (JobReport, Duration) {
         let pipeline = &self.pipeline;
         std::thread::scope(|s| {
-            s.spawn(move || {
-                let started = Instant::now();
-                let report = pipeline.run_job(rec);
-                (report, started.elapsed())
-            })
-            .join()
-            .expect("run_job must not panic")
+            s.spawn(move || measure(|| pipeline.run_job(rec)))
+                .join()
+                .expect("run_job must not panic")
         })
     }
 
@@ -174,8 +171,7 @@ impl Harness {
         let rec = self.record(audio, Arc::new(settings));
         let id = rec.id();
         let (report, _) = self.run(rec);
-        self.ctrl
-            .job_finished(id, report.end.clone(), Instant::now());
+        self.ctrl.job_finished(id, report.end.clone(), now());
         (id, report)
     }
 
@@ -335,7 +331,7 @@ async fn speech_is_transcribed_and_delivered_as_mock_text() {
     );
     let id = rec.id();
     let (report, _) = h.run(rec);
-    h.ctrl.job_finished(id, report.end.clone(), Instant::now());
+    h.ctrl.job_finished(id, report.end.clone(), now());
 
     assert_eq!(
         report,
@@ -466,7 +462,7 @@ async fn saved_settings_reach_the_job() {
     let rec = h.record(fixtures::speech_3s(), service.snapshot());
     let id = rec.id();
     let (report, _) = h.run(rec);
-    h.ctrl.job_finished(id, report.end.clone(), Instant::now());
+    h.ctrl.job_finished(id, report.end.clone(), now());
 
     assert_eq!(
         report,
@@ -712,6 +708,7 @@ async fn no_answer_within_timeout_is_timeout() {
     // FR-24 through the pipeline: the pipeline's Timeouts reach the request (a
     // 300 ms limit against a 5 s delay). Bite: run_job using Timeouts::default()
     // (the 5 s answer would arrive and be delivered), Timeout not kept pending.
+    // No upper bound (T-080 I2): the outcome catches every longer limit.
     let server = server_with(ok_text("late").set_delay(Duration::from_secs(5))).await;
     let t = Timeouts {
         connect: Duration::from_secs(2),
@@ -725,7 +722,7 @@ async fn no_answer_within_timeout_is_timeout() {
     );
     let (report, took) = h.run(rec);
     assert_eq!(report.end, JobEnd::Failed(FailureReason::Timeout));
-    assert!(took < Duration::from_secs(3), "took {took:?}");
+    at_least(took, t.api_transcription);
     assert!(report.pending.is_some(), "{report:?}");
     assert_eq!(h.clipboard.texts(), Vec::<String>::new());
     assert_eq!(h.paster.calls(), vec![]);
@@ -747,7 +744,8 @@ async fn configured_api_timeout_fails_the_job_with_timeout() {
     // Bite: the pipeline's fixed Timeouts::default() (the 7 s answer arrives and
     // is delivered), the local-server value used for the API request (60 s:
     // delivered), the connect value used for it (2 s: too early), or
-    // milliseconds.
+    // milliseconds. No upper bound (T-080 I2): every longer wrong limit is
+    // caught by the outcome (Delivered at 7 s).
     let server = server_with(ok_text("late but in time").set_delay(T073_DELAY)).await;
 
     let mut h = harness();
@@ -757,10 +755,7 @@ async fn configured_api_timeout_fails_the_job_with_timeout() {
     let rec = h.record(fixtures::speech_3s(), Arc::new(s));
     let (report, took) = h.run(rec);
     assert_eq!(report.end, JobEnd::Failed(FailureReason::Timeout));
-    assert!(
-        took >= Duration::from_millis(4900) && took < Duration::from_millis(6500),
-        "took {took:?}: the 5 s limit of the snapshot"
-    );
+    at_least(took, Duration::from_secs(5));
     assert!(report.pending.is_some(), "{report:?}");
     assert_eq!(h.clipboard.texts(), Vec::<String>::new());
     assert_eq!(h.paster.calls(), vec![]);
@@ -794,40 +789,32 @@ async fn configured_api_timeout_fails_the_job_with_timeout() {
 #[test]
 fn refused_host_is_cannot_reach() {
     // Acceptance 4 "unreachable host": a refused loopback port is CannotReach
-    // with host:port, at once, with the production pipeline. Bite: the error
+    // with host:port, and the refusal ends the job, not a timer. Bite: the error
     // turned into another reason, the whole URL as host, nothing kept pending.
-    let addr = refused_addr();
-    let mut h = harness();
+    // The case's deadlines (T-080 I1) with the whole-request limit below the
+    // connect limit: the refusal (probed within half of OS_ANSWER_BUDGET) ends the
+    // connect as CannotReach; a job that waits for the connect timer instead hits
+    // the whole-request limit first and ends Timeout. No wall-clock ceiling (T-080
+    // I2; before it, "took < connect - 1 s" decided this and raced the ~2.17 s
+    // Windows refusal, T-047/F-005).
+    let case = OsAnswer::refused();
+    let t = Timeouts {
+        connect: 2 * OS_ANSWER_BUDGET,
+        api_transcription: OS_ANSWER_BUDGET,
+        ..case.timeouts
+    };
+    let mut h = harness_with(energy_gate(), Some(t), creds_with_key());
     let rec = h.record(
         fixtures::speech_3s(),
-        Arc::new(api_settings(&format!("http://{addr}/v1"))),
+        Arc::new(api_settings(&format!("http://{}/v1", case.host))),
     );
-    let (report, took) = h.run(rec);
+    let (report, _) = h.run(rec);
     assert_eq!(
         report.end,
         JobEnd::Failed(FailureReason::CannotReach {
-            host: addr.to_string()
+            host: case.host.clone()
         })
     );
-    // "At once" = well before the connect timeout (FR-24: 5 s, the production
-    // pipeline here) and the 30 s total: a refusal is not waited out. The bound is
-    // the connect timeout minus 1 s, not a tighter one, because on windows-latest
-    // one refused loopback connect itself takes ~2.1 s (Windows retries the SYN
-    // after the RST; CI run 37183609259). Bite: a wait for the connect timeout or
-    // the total, a sleep/backoff of ~4 s before failing, and on Windows a second
-    // connect attempt (~2 x 2.1 s).
-    // The bound stays tied to the production connect timeout, not to
-    // REFUSAL_BUDGET (equal today, 5 s), so "a wait for the connect timeout" keeps
-    // biting if the test budget ever grows. It must still leave room for the one
-    // refusal that `refused_addr()` accepted (within REFUSAL_BUDGET / 2; T-048).
-    let at_once = Timeouts::default().connect - Duration::from_secs(1);
-    assert!(
-        REFUSAL_BUDGET / 2 < at_once,
-        "the bound {at_once:?} leaves no room for a refusal the probe accepts \
-         (up to {:?})",
-        REFUSAL_BUDGET / 2
-    );
-    assert!(took < at_once, "took {took:?}, limit {at_once:?}");
     assert!(report.pending.is_some(), "{report:?}");
     assert_eq!(h.clipboard.texts(), Vec::<String>::new());
     assert_eq!(h.paster.calls(), vec![]);
@@ -836,11 +823,13 @@ fn refused_host_is_cannot_reach() {
 #[test]
 fn blackhole_connect_is_bounded_by_connect_timeout() {
     // T-040 Notes (review 1 #3): that the connect limit reaches the client is
-    // pinned here. 192.0.2.1 (RFC 5737) blackholes in voicen-rust:1.99 (probed),
-    // so a 300 ms connect limit gives CannotReach well inside the 3 s total.
-    // Where the host has no route at all (possibly windows-latest) the OS answers
-    // at once with NetworkUnavailable and this test is vacuous there. Bite: no
-    // connect_timeout on the client (the 3 s total fires: Timeout, ~3 s).
+    // pinned here. UNANSWERED_HOST (TEST-NET-1, RFC 5737) blackholes in
+    // voicen-rust:1.99 (probed), so a 300 ms connect limit gives CannotReach well
+    // inside the 3 s total. Where the host has no route at all (possibly
+    // windows-latest) the OS answers at once with NetworkUnavailable and this test
+    // is vacuous there; both endings are accepted, so no OS answer races the timer
+    // for the verdict. Bite: no connect_timeout on the client (the 3 s total fires:
+    // Timeout). No wall-clock ceiling (T-080 I2): the reason catches it.
     let t = Timeouts {
         connect: Duration::from_millis(300),
         api_transcription: Duration::from_secs(3),
@@ -849,18 +838,17 @@ fn blackhole_connect_is_bounded_by_connect_timeout() {
     let mut h = harness_with(energy_gate(), Some(t), creds_with_key());
     let rec = h.record(
         fixtures::speech_3s(),
-        Arc::new(api_settings("http://192.0.2.1/v1")),
+        Arc::new(api_settings(&format!("http://{UNANSWERED_HOST}/v1"))),
     );
-    let (report, took) = h.run(rec);
+    let (report, _) = h.run(rec);
     assert!(
         matches!(
             &report.end,
-            JobEnd::Failed(FailureReason::CannotReach { host }) if host == "192.0.2.1"
+            JobEnd::Failed(FailureReason::CannotReach { host }) if host == UNANSWERED_HOST
         ) || report.end == JobEnd::Failed(FailureReason::NetworkUnavailable),
-        "expected CannotReach(192.0.2.1) or NetworkUnavailable, got {:?}",
+        "expected CannotReach({UNANSWERED_HOST}) or NetworkUnavailable, got {:?}",
         report.end
     );
-    assert!(took < Duration::from_millis(1_500), "took {took:?}");
 }
 
 #[tokio::test]
@@ -1090,7 +1078,8 @@ async fn no_event_or_failure_carries_key_query_or_transcript() {
     .await;
     let slow = server_with(ok_text(TRANSCRIPT).set_delay(Duration::from_secs(5))).await;
     let with_query = |base: &str| format!("{base}?api-version={QUERY_SECRET}");
-    let refused = format!("http://{}/v1", refused_addr());
+    let refused_case = OsAnswer::refused();
+    let refused = format!("http://{}/v1", refused_case.host);
     let ms = Timeouts {
         connect: Duration::from_secs(2),
         api_transcription: Duration::from_millis(300),
@@ -1098,9 +1087,9 @@ async fn no_event_or_failure_carries_key_query_or_transcript() {
     };
     // The refused scenario must not run under `ms`: on windows-latest the refusal
     // takes ~2.17 s, so the 300 ms total would fire first and end it `Timeout`
-    // (T-048, CI run 37204170764). The "timeout" scenario keeps `ms` against the
-    // slow server.
-    let refused_t = refused_timeouts();
+    // (T-048, CI run 37204170764): it takes the case's deadlines (T-080 I1). The
+    // "timeout" scenario keeps `ms` against the slow server.
+    let refused_t = refused_case.timeouts;
 
     // (label, base URL, auto_paste, clipboard fails, expected end, timeouts)
     let scenarios: Vec<(&str, String, bool, bool, JobEnd, Timeouts)> = vec![
@@ -1168,10 +1157,7 @@ async fn no_event_or_failure_carries_key_query_or_transcript() {
             true,
             false,
             JobEnd::Failed(FailureReason::CannotReach {
-                host: refused
-                    .trim_start_matches("http://")
-                    .trim_end_matches("/v1")
-                    .to_string(),
+                host: refused_case.host.clone(),
             }),
             refused_t,
         ),

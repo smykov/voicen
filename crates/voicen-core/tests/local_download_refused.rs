@@ -11,7 +11,7 @@
 //! one after another, each in its own process, so here no sibling test binds a
 //! port. Keep exactly one test in this file: a second test that binds a port would
 //! bring the race back. The same holds for tests pulled in from `tests/common`:
-//! its module has no tests, and the `refused_addr()` checks
+//! its module has no tests, and the `OsAnswer::refused()` checks
 //! (`common/refused_addr_tests.rs`, whose connect probes take a source port) are
 //! included only by the binaries that call that helper, never here (T-047 review
 //! 1 #3). So this one test is the only test of this process.
@@ -21,7 +21,8 @@ mod common;
 use std::net::TcpListener;
 
 use common::download::{assert_no_url_in, assert_retry_succeeds, fixture_with_timeouts, FILE};
-use common::{entry, refused_timeouts, url_for, FakeDisk, Server, NEEDED};
+use common::os_answer::OsAnswer;
+use common::{entry, url_for, FakeDisk, Server, NEEDED};
 use voicen_core::local_models::catalog::ModelId;
 use voicen_core::local_models::download::{DownloadEvent, DownloadFailure};
 
@@ -36,15 +37,17 @@ fn refused_port() -> u16 {
 fn refused_port_fails_source_unreachable_with_host_port_then_retry_succeeds() {
     // Nothing listens; then a server comes up on the same port. Bite: another
     // reason, the host without the port, the whole URL (path, query) in the reason.
-    // `refused_timeouts()`: a refused connect takes ~2.17 s on windows-latest, so
-    // the harness's 2 s connect and no-data (a blocking whole-send deadline, set
-    // first) would end it `DownloadInterrupted` there (T-048). Its connect probe
-    // (`refused_addr()`) is not run here: this process binds no other port.
+    // The case's deadlines (T-080 I1): a refused connect takes ~2.17 s on
+    // windows-latest, so the harness's 2 s connect and no-data (a blocking
+    // whole-send deadline, set first) would end it `DownloadInterrupted` there
+    // (T-048). The case's probe connects to the released port once, before the
+    // download, and binds nothing.
     let port = refused_port();
+    let case = OsAnswer::refused_released_port(port);
     let f = fixture_with_timeouts(
         vec![entry(ModelId::Base, FILE, &url_for(port, FILE))],
         FakeDisk::with_available(10 * NEEDED),
-        refused_timeouts(),
+        case.timeouts,
     );
     let mut ev = f.start(ModelId::Base).expect("start");
     let end = ev.wait_end();
@@ -53,7 +56,7 @@ fn refused_port_fails_source_unreachable_with_host_port_then_retry_succeeds() {
         DownloadEvent::Failed {
             id: ModelId::Base,
             reason: DownloadFailure::SourceUnreachable {
-                host: format!("127.0.0.1:{port}")
+                host: case.host.clone()
             }
         }
     );

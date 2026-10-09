@@ -9,11 +9,14 @@
 //! from the real `RecordingController`; events are fed as T-006 and the pipeline
 //! emit them.
 
+mod common;
 mod diag_support;
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use common::timing::now;
 
 use diag_support::{active_lines, closed, dictation_lines, open_log, pairs, Line, NOON_UTC};
 use voicen_core::delivery::DeliveryResult;
@@ -27,7 +30,7 @@ use voicen_core::test_support::TempDir;
 /// `n` distinct recording ids from the real controller (press, discarded release).
 fn ids(n: usize) -> Vec<RecordingId> {
     let mut ctrl = RecordingController::<()>::new();
-    let t0 = Instant::now();
+    let t0 = now();
     (0..n)
         .map(|i| {
             let t = t0 + Duration::from_secs(i as u64);

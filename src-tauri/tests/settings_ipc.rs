@@ -35,11 +35,12 @@ use voicen_core::test_support::TempDir;
 use voicen_core::timeouts::Timeouts;
 use voicen_lib::settings_ipc::load_settings;
 
-/// Core's test helpers: the one refused address and its budget (T-047, T-048;
+/// Core's test helpers: the one refused case, its probe and its deadlines
+/// (`common::os_answer::OsAnswer`; T-047, T-048, T-080;
 /// docs/decisions/core-tests.md), one copy for the core and the shell tests.
 #[path = "../../crates/voicen-core/tests/common/mod.rs"]
 mod common;
-/// The checks of [`common::refused_addr`], run in the process that relies on it.
+/// The checks of `OsAnswer::refused()`, run in the process that relies on it.
 #[path = "../../crates/voicen-core/tests/common/refused_addr_tests.rs"]
 mod refused_addr_tests;
 
@@ -659,13 +660,13 @@ fn test_connection_refused_loopback_port_is_cannot_reach() {
     // invoke would then never resolve or reject), saves nothing (no credential
     // write or delete, settings.json byte-identical, no settings://changed), keeps
     // the typed key out of the response, and writes R-11's line without the host
-    // (choice (iv)). The address is core's `refused_addr()` (`127.0.0.1:1`, below
-    // every ephemeral range, probed refused at use; F-004, decision #53), never a
-    // bound-and-released port. Bite: the command not registered, a sync body, the
-    // request built from the saved settings, a save inside the test, the host
-    // logged.
-    let addr = common::refused_addr();
-    let host = addr.to_string();
+    // (choice (iv)). The address is core's `OsAnswer::refused()` (`127.0.0.1:1`,
+    // below every ephemeral range, probed refused at use; F-004, decision #53,
+    // T-080 I1), never a bound-and-released port. Bite: the command not
+    // registered, a sync body, the request built from the saved settings, a save
+    // inside the test, the host logged.
+    let case = common::os_answer::OsAnswer::refused();
+    let host = case.host.clone();
 
     let dir = TempDir::new();
     let log_dir = dir.path().join("logs");
@@ -686,12 +687,13 @@ fn test_connection_refused_loopback_port_is_cannot_reach() {
     let h = harness_with_log(&service, log.clone());
     let events = h.changed_events();
 
-    // F-005 / decision #56: the connect limit leaves the ~2.17 s Windows refusal
-    // room (REFUSAL_BUDGET), the request limit twice that, as `refused_timeouts()`.
-    let budget_s = u32::try_from(common::REFUSAL_BUDGET.as_secs()).expect("budget in u32");
+    // F-005 / decision #56 / T-080 I1: the form limits are the case's deadlines
+    // (connect = OS_ANSWER_BUDGET, the request limit twice that), so the refusal,
+    // not a timer, ends the connect.
+    let secs = |d: Duration| u32::try_from(d.as_secs()).expect("a case deadline in u32 s");
     let timeouts = voicen_core::settings::TimeoutSettings {
-        connect_s: budget_s,
-        api_transcription_s: 2 * budget_s,
+        connect_s: secs(case.timeouts.connect),
+        api_transcription_s: secs(case.timeouts.api_transcription),
         ..voicen_core::timeouts::default_settings()
     };
     let args = json!({ "request": {

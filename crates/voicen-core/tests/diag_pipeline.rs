@@ -15,19 +15,21 @@
 //! own runtime); `RecordingStarted` / `RecordingEnded` are emitted on the same
 //! observer the way the dictation session does (T-051: it emits them, and
 //! `CaptureFailed`, on `PipelineDeps.observer`). Fake data only: 127.0.0.1,
-//! `sk-test-SECRET`. The refused scenario uses `common::refused_addr()` and
-//! `common::refused_timeouts()` (F-004, F-005).
+//! `sk-test-SECRET`. The refused scenario uses `common::os_answer::OsAnswer::refused()`
+//! and its deadlines (F-004, F-005, T-080 I1).
 
 mod common;
 mod diag_support;
-/// The checks of `common::refused_addr()`, in each binary that calls it (T-047).
+/// The checks of `common::os_answer::OsAnswer::refused()`, in each binary that takes it
+/// (T-047).
 #[path = "common/refused_addr_tests.rs"]
 mod refused_addr_tests;
 
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use common::{refused_addr, refused_timeouts};
+use common::os_answer::OsAnswer;
+use common::timing::{ago, now};
 use diag_support::{
     all_lines, closed, contains, dictation_lines, files_under, open_log, utf16le, Line,
 };
@@ -126,9 +128,7 @@ fn dictate(
     };
     let pipeline = Pipeline::with_timeouts(deps, timeouts);
     let mut ctrl = RecordingController::<PressContext>::new();
-    let t0 = Instant::now()
-        .checked_sub(Duration::from_secs(4))
-        .expect("monotonic clock at least 4 s past its origin");
+    let t0 = ago(Duration::from_secs(4));
     let ctx = PressContext {
         start_window: Some(StartWindow {
             handle: WindowRef(0x0001_0042),
@@ -164,7 +164,7 @@ fn dictate(
             .join()
             .expect("run_job must not panic")
     });
-    ctrl.job_finished(id, report.end.clone(), Instant::now());
+    ctrl.job_finished(id, report.end.clone(), now());
     (id, report, clipboard.texts())
 }
 
@@ -202,14 +202,15 @@ async fn log_holds_no_key_query_or_transcript_on_any_path() {
     .await;
     let slow = server_with(ok_text(TRANSCRIPT).set_delay(Duration::from_secs(5))).await;
     let with_query = |base: &str| format!("{base}?api-version={QUERY_SECRET}");
-    let refused = format!("http://{}/v1", refused_addr());
+    let refused_case = OsAnswer::refused();
+    let refused = format!("http://{}/v1", refused_case.host);
     let ms = Timeouts {
         connect: Duration::from_secs(2),
         api_transcription: Duration::from_millis(300),
         ..Timeouts::default()
     };
     // As in api_pipeline (T-048): the refused scenario never runs under `ms`.
-    let refused_t = refused_timeouts();
+    let refused_t = refused_case.timeouts;
 
     let tmp = TempDir::new();
     let dir = tmp.path().join("logs");
@@ -310,10 +311,7 @@ async fn log_holds_no_key_query_or_transcript_on_any_path() {
             true,
             false,
             JobEnd::Failed(FailureReason::CannotReach {
-                host: refused
-                    .trim_start_matches("http://")
-                    .trim_end_matches("/v1")
-                    .to_string(),
+                host: refused_case.host.clone(),
             }),
             refused_t,
             "failed",

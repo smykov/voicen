@@ -7,15 +7,17 @@
 //! (RFC 6761), `sk-test-SECRET`.
 
 mod common;
-/// The checks of `common::refused_addr()`, in each binary that calls it (T-047).
+/// The checks of `common::os_answer::OsAnswer::refused()`, in each binary that takes it
+/// (T-047).
 #[path = "common/refused_addr_tests.rs"]
 mod refused_addr_tests;
 
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use common::{refused_addr, refused_timeouts};
+use common::os_answer::OsAnswer;
+use common::timing::{at_least, measure};
 use serde_json::json;
 use voicen_core::audio::{wav, AudioBuffer};
 use voicen_core::engine::openai::OpenAiCompatibleEngine;
@@ -57,12 +59,13 @@ fn req(language: Option<&str>) -> TranscribeRequest {
     }
 }
 
-/// A request for a refused address: deadlines that let the refusal itself end
-/// the connect, also on Windows (~2.17 s there; T-048, decision #56).
-fn req_refused() -> TranscribeRequest {
+/// A request for an OS-answer case: the case's deadlines, which let the OS answer
+/// itself (a refusal, ~2.17 s on Windows; a failed lookup, ~20 s when a resolver
+/// answer is lost) end the connect (T-048, T-078, T-080 I1).
+fn req_os_answer(case: &OsAnswer) -> TranscribeRequest {
     TranscribeRequest {
         language: None,
-        timeouts: refused_timeouts(),
+        timeouts: case.timeouts,
     }
 }
 
@@ -505,31 +508,34 @@ async fn delay_past_ms_timeout_is_timeout() {
     // req.timeouts (the call then succeeds after 5 s), or a timeout mapped to
     // CannotReach.
     let server = server_with(ok_text("late").set_delay(Duration::from_secs(5))).await;
-    let started = Instant::now();
-    let got = transcribe(
-        api_engine(&format!("{}/v1", server.uri()), Some(KEY)),
-        req_with_total(Duration::from_millis(300)),
-    );
-    let elapsed = started.elapsed();
+    // No upper bound (T-080 I2): a longer wrong limit lets the 5 s answer through
+    // as Ok, which the Timeout assertion catches.
+    let total = Duration::from_millis(300);
+    let (got, took) = measure(|| {
+        transcribe(
+            api_engine(&format!("{}/v1", server.uri()), Some(KEY)),
+            req_with_total(total),
+        )
+    });
     assert_eq!(got, Err(FailureReason::Timeout));
-    assert!(elapsed < Duration::from_secs(3), "took {elapsed:?}");
+    at_least(took, total);
 }
 
 #[test]
 fn refused_loopback_port_is_cannot_reach_host_port() {
     // Connection refused -> CannotReach with the base URL's host:port.
     // Bite: NetworkUnavailable for a refused port, the whole URL as `host`.
-    // `req_refused()`: with the 2 s connect of `req(None)` the connect timeout,
-    // not the refusal, ended this connect on Windows (T-048).
-    let addr = refused_addr();
+    // The case's deadlines: with the 2 s connect of `req(None)` the connect
+    // timeout, not the refusal, ended this connect on Windows (T-048).
+    let case = OsAnswer::refused();
     let got = transcribe(
-        api_engine(&format!("http://{addr}/v1"), Some(KEY)),
-        req_refused(),
+        api_engine(&format!("http://{}/v1", case.host), Some(KEY)),
+        req_os_answer(&case),
     );
     assert_eq!(
         got,
         Err(FailureReason::CannotReach {
-            host: addr.to_string()
+            host: case.host.clone()
         })
     );
 }
@@ -537,10 +543,13 @@ fn refused_loopback_port_is_cannot_reach_host_port() {
 #[test]
 fn invalid_host_is_network_unavailable() {
     // RFC 6761 `.invalid` never resolves; reqwest reports is_dns AND is_connect.
-    // Bite: is_connect checked before is_dns (-> CannotReach).
+    // Bite: is_connect checked before is_dns (-> CannotReach). The case's
+    // deadlines: reqwest times the lookup inside the connect timeout, so a 2 s
+    // connect cut a lookup whose UDP answer was lost (F-013, T-080 I1).
+    let case = OsAnswer::unresolvable();
     let got = transcribe(
-        api_engine("http://voicen-test.invalid/v1", Some(KEY)),
-        req(None),
+        api_engine(&format!("http://{}/v1", case.host), Some(KEY)),
+        req_os_answer(&case),
     );
     assert_eq!(got, Err(FailureReason::NetworkUnavailable));
 }
@@ -634,14 +643,17 @@ fn stall_mid_body_is_timeout_and_cut_mid_body_is_unexpected_response() {
     // is the same wrapper without timeout -> UnexpectedResponse.
     // Bite: the adapter not downcasting io::Error::get_ref() to reqwest::Error
     // (stall -> UnexpectedResponse), or treating every body error as Timeout.
-    let started = Instant::now();
-    let got = transcribe(
-        api_engine(&partial_body_server(Duration::from_secs(4)), Some(KEY)),
-        req_with_total(Duration::from_millis(500)),
-    );
-    let elapsed = started.elapsed();
+    // No upper bound (T-080 I2): a longer wrong limit lets the 4 s stall end as
+    // the closed body (UnexpectedResponse), which the Timeout assertion catches.
+    let total = Duration::from_millis(500);
+    let (got, took) = measure(|| {
+        transcribe(
+            api_engine(&partial_body_server(Duration::from_secs(4)), Some(KEY)),
+            req_with_total(total),
+        )
+    });
     assert_eq!(got, Err(FailureReason::Timeout), "stall mid-body");
-    assert!(elapsed < Duration::from_secs(3), "stall took {elapsed:?}");
+    at_least(took, total);
 
     let got = transcribe(
         api_engine(&partial_body_server(Duration::ZERO), Some(KEY)),
@@ -708,28 +720,29 @@ async fn no_failure_contains_query_key_or_transcript() {
         outcomes.push((name.to_string(), got, expected));
     }
 
-    let addr = refused_addr();
+    let refused = OsAnswer::refused();
     let got = transcribe(
         api_engine(
-            &format!("http://{addr}/v1?api-version={QUERY_SECRET}"),
+            &format!("http://{}/v1?api-version={QUERY_SECRET}", refused.host),
             Some(KEY),
         ),
-        req_refused(),
+        req_os_answer(&refused),
     );
     outcomes.push((
         "refused".to_string(),
         got,
         FailureReason::CannotReach {
-            host: addr.to_string(),
+            host: refused.host.clone(),
         },
     ));
 
+    let unresolvable = OsAnswer::unresolvable();
     let got = transcribe(
         api_engine(
-            &format!("http://voicen-test.invalid/v1?api-version={QUERY_SECRET}"),
+            &format!("http://{}/v1?api-version={QUERY_SECRET}", unresolvable.host),
             Some(KEY),
         ),
-        req(None),
+        req_os_answer(&unresolvable),
     );
     outcomes.push((
         "invalid host".to_string(),

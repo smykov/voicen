@@ -16,12 +16,15 @@
 //! No refused-port or stall case: the downloader's own tests cover those (F-004,
 //! F-005). Fake data only: 127.0.0.1, `huggingface.co` as a host string.
 
+mod common;
+
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+use common::timing::{deadline, left};
 use serde_json::{json, Value};
 use voicen_core::i18n::{self, MessageId, MESSAGE_IDS};
 use voicen_core::local_models::catalog::{CatalogEntry, ModelId, MODELS};
@@ -186,12 +189,9 @@ struct Events {
 impl Events {
     /// Blocks until a `State` event; returns it.
     fn wait_state(&mut self) -> Seen {
-        let deadline = Instant::now() + END_WAIT;
+        let end = deadline(END_WAIT);
         loop {
-            match self
-                .rx
-                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-            {
+            match self.rx.recv_timeout(left(end)) {
                 Ok(s) => {
                     self.seen.push(s.clone());
                     if matches!(s.event, LocalModelEvent::State { .. }) {
@@ -228,12 +228,9 @@ impl Events {
 
     /// Whatever arrives within `d`.
     fn drain_for(&mut self, d: Duration) -> Vec<Seen> {
-        let deadline = Instant::now() + d;
+        let end = deadline(d);
         let mut more = Vec::new();
-        while let Ok(s) = self
-            .rx
-            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-        {
+        while let Ok(s) = self.rx.recv_timeout(left(end)) {
             self.seen.push(s.clone());
             more.push(s);
         }

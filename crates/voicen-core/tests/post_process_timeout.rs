@@ -8,11 +8,21 @@
 //! client panics inside a tokio runtime context, T-040). Timeouts are tested with
 //! servers that accept and answer late or never, never with a refused or
 //! unroutable address (F-004, F-005). Fake data only: 127.0.0.1, `sk-test-...`.
+//!
+//! The clock is read only through `common::timing` (T-080 I2): each case checks the
+//! lower bound (`at_least`: the deadline did not fire early) and SC-003's tolerance
+//! (`within_spec`: the stage over the fastest of 3 baseline runs is the deadline
+//! ± 0.5 s, under the reference load of OQ-23 (a)), the only wall-clock ceiling in
+//! the core tests.
+
+mod common;
 
 use std::io::Read;
 use std::net::TcpListener;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use common::timing::{ago, at_least, deadline, left, measure, within_spec};
 
 use serde_json::json;
 use voicen_core::delivery::DeliveryResult;
@@ -43,6 +53,10 @@ const PROCESSED: &str = "Привет, как дела? PROCESSED";
 /// Wall-clock tolerance of contract guarantee 4 (SC-003).
 const SLACK: Duration = Duration::from_millis(500);
 
+/// Baseline runs per case; the fastest is the baseline, so one cold run (first
+/// client build, first connect) is not counted as part of the stage (T-078).
+const BASELINE_RUNS: usize = 3;
+
 /// A listener that accepts one connection, reads the request and never answers;
 /// held open for `hold`. The thread is not joined.
 fn silent_server(hold: Duration) -> String {
@@ -52,10 +66,10 @@ fn silent_server(hold: Duration) -> String {
         let Ok((mut s, _)) = listener.accept() else {
             return;
         };
-        let started = Instant::now();
+        let end = deadline(hold);
         let _ = s.set_read_timeout(Some(Duration::from_millis(200)));
         let mut buf = [0u8; 8192];
-        while started.elapsed() < hold {
+        while !left(end).is_zero() {
             if let Ok(0) = s.read(&mut buf) {
                 return;
             }
@@ -82,9 +96,7 @@ fn process_timed(base: String) -> (PostProcessOutcome, Duration) {
                 credentials: &creds,
                 timeouts: &timeouts,
             };
-            let started = Instant::now();
-            let got = ChatPostProcessor::new().process(RAW, &input);
-            (got, started.elapsed())
+            measure(|| ChatPostProcessor::new().process(RAW, &input))
         })
         .join()
         .expect("process must not panic")
@@ -96,9 +108,9 @@ async fn default_deadline_skips_a_silent_server_at_15_s() {
     // FR-24 / spec 003 FR-004, SC-003: with the production durations
     // (Timeouts::default(), post_processing 15 s) a server that accepts and never
     // answers ends the stage as Skipped(Timeout) 15 s +- 0.5 s after the call. The
-    // time is taken against a baseline call to a server that answers at once
-    // (client setup, connect, round trip), so a loaded debug build is not counted
-    // against the deadline. Bite: no request timeout (hangs until the server
+    // time is taken against the fastest of 3 baseline calls to a server that
+    // answers at once (client setup, connect, round trip), so a loaded debug build
+    // is not counted against the deadline. Bite: no request timeout (hangs until the server
     // closes at 30 s), the connect timeout (5 s) or the transcription one (30 s)
     // as the deadline, a fixed deadline of its own.
     let prompt = MockServer::start().await;
@@ -108,21 +120,22 @@ async fn default_deadline_skips_a_silent_server_at_15_s() {
         })))
         .mount(&prompt)
         .await;
-    let (got, baseline) = process_timed(format!("{}/v1", prompt.uri()));
-    assert_eq!(
-        got,
-        PostProcessOutcome::Applied(PROCESSED.to_string()),
-        "baseline"
-    );
+    let mut baseline = Duration::MAX;
+    for _ in 0..BASELINE_RUNS {
+        let (got, took) = process_timed(format!("{}/v1", prompt.uri()));
+        assert_eq!(
+            got,
+            PostProcessOutcome::Applied(PROCESSED.to_string()),
+            "baseline"
+        );
+        baseline = baseline.min(took);
+    }
 
-    let (got, elapsed) = process_timed(silent_server(Duration::from_secs(30)));
+    let (got, took) = process_timed(silent_server(Duration::from_secs(30)));
     assert_eq!(got, PostProcessOutcome::Skipped(SkipReason::Timeout));
     let want = Duration::from_secs(15);
-    let stage = elapsed.saturating_sub(baseline);
-    assert!(
-        stage + SLACK >= want && stage <= want + SLACK,
-        "took {elapsed:?} against a {baseline:?} baseline: {stage:?}, expected 15 s +- 0.5 s"
-    );
+    at_least(took, want);
+    within_spec(took.saturating_sub(baseline), want, SLACK, "SC-003");
 }
 
 // ---- the configured value, through the production pipeline ------------------------
@@ -194,9 +207,7 @@ fn dictate(settings: Settings) -> Run {
         post_processor: Arc::new(ChatPostProcessor::new()),
     });
     let mut ctrl = RecordingController::<PressContext>::new();
-    let t0 = Instant::now()
-        .checked_sub(Duration::from_secs(4))
-        .expect("monotonic clock at least 4 s past its origin");
+    let t0 = ago(Duration::from_secs(4));
     let ctx = PressContext {
         start_window: Some(StartWindow {
             handle: WindowRef(0x0001_0042),
@@ -216,13 +227,9 @@ fn dictate(settings: Settings) -> Run {
         .expect("finish(Ok) gives the recording");
     let pipeline = &pipeline;
     let (report, took) = std::thread::scope(|s| {
-        s.spawn(move || {
-            let started = Instant::now();
-            let report = pipeline.run_job(rec);
-            (report, started.elapsed())
-        })
-        .join()
-        .expect("run_job must not panic")
+        s.spawn(move || measure(|| pipeline.run_job(rec)))
+            .join()
+            .expect("run_job must not panic")
     });
     Run {
         report,
@@ -238,9 +245,10 @@ async fn configured_post_processing_timeout_delivers_the_raw_transcript() {
     // #99 minimum), against a chat endpoint answering after 7 s, is delivered
     // with the raw transcript byte for byte, ends as DeliveredSkipped(Timeout),
     // no pending recording, JobFinished outcome text; the job takes 5 s +- 0.5 s
-    // longer than the same job against a chat endpoint that answers at once (the
-    // baseline: gate, WAV, transcription, chat round trip; about 0.6 s in a debug
-    // build, so the whole job is not timed against 5 s). connect_s = 2, so the connect value
+    // longer than the fastest of 3 runs of the same job against a chat endpoint
+    // that answers at once (the baseline: gate, WAV, transcription, chat round
+    // trip; about 0.6 s in a debug build, so the whole job is not timed against
+    // 5 s). connect_s = 2, so the connect value
     // read as the request limit would end it at about 2 s. The same server with
     // the default snapshot (15 s) is applied. Bite: the processor on
     // Timeouts::default() (the 7 s answer applied), on the pipeline's test
@@ -259,13 +267,17 @@ async fn configured_post_processing_timeout_delivers_the_raw_transcript() {
     let prompt_base = format!("{}/v1", prompt.uri());
     let mut fast = snapshot(&prompt_base);
     fast.timeouts = s.timeouts;
-    let baseline = dictate(fast);
-    assert_eq!(
-        baseline.report.end,
-        JobEnd::Delivered { notice: None },
-        "baseline"
-    );
-    assert_eq!(baseline.clipboard, vec![PROCESSED.to_string()], "baseline");
+    let mut baseline = Duration::MAX;
+    for _ in 0..BASELINE_RUNS {
+        let run = dictate(fast.clone());
+        assert_eq!(
+            run.report.end,
+            JobEnd::Delivered { notice: None },
+            "baseline"
+        );
+        assert_eq!(run.clipboard, vec![PROCESSED.to_string()], "baseline");
+        baseline = baseline.min(run.took);
+    }
 
     let run = dictate(s);
     assert_eq!(
@@ -287,13 +299,8 @@ async fn configured_post_processing_timeout_delivers_the_raw_transcript() {
         run.clipboard
     );
     let want = Duration::from_secs(5);
-    let stage = run.took.saturating_sub(baseline.took);
-    assert!(
-        stage + SLACK >= want && stage <= want + SLACK,
-        "took {:?} against a {:?} baseline: {stage:?}, expected the snapshot's 5 s +- 0.5 s",
-        run.took,
-        baseline.took
-    );
+    at_least(run.took, want);
+    within_spec(run.took.saturating_sub(baseline), want, SLACK, "SC-003");
     let finished: Vec<&DictationEvent> = run
         .events
         .iter()

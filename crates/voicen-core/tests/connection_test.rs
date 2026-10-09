@@ -12,23 +12,27 @@
 //!
 //! wiremock serves on its own thread and runtime; the blocking call runs on a plain
 //! std thread (the blocking reqwest client panics inside a tokio runtime context,
-//! decision #42). Refused cases use `refused_addr()` / `refused_timeouts()` (F-004,
-//! F-005; docs/decisions/core-tests.md); timeout cases use a server that accepts
+//! decision #42). OS-answer cases (a refused port, an unresolvable name) take their
+//! target and deadlines from `common::os_answer::OsAnswer` (F-004, F-005, F-013;
+//! T-080 I1, docs/decisions/core-tests.md); timeout cases use a server that accepts
 //! and answers late. The "connection not accepted in time" row (connect timeout ->
 //! CannotReach, Investigation (ii)) has no deterministic local fixture and is
 //! pinned by `failure::tests::classify_table` through `classify`.
 //! Fake data only: 127.0.0.1, `.invalid` (RFC 6761), `example.com`, `sk-test-…`.
+//! Wall-clock readings go through `common::timing` and decide only lower bounds
+//! (T-080 I2).
 
 mod common;
-/// The checks of `common::refused_addr()`, in each binary that calls it (T-047).
+/// The checks of `OsAnswer::refused()`, in each binary that takes it (T-047, T-080).
 #[path = "common/refused_addr_tests.rs"]
 mod refused_addr_tests;
 
 use std::io;
 use std::sync::{mpsc, Arc};
-use std::time::{Duration, Instant, UNIX_EPOCH};
+use std::time::{Duration, UNIX_EPOCH};
 
-use common::{refused_addr, refused_timeouts};
+use common::os_answer::OsAnswer;
+use common::timing::{at_least, measure};
 use serde_json::json;
 use voicen_core::autostart::FakeAutostart;
 use voicen_core::clock::FakeClock;
@@ -162,6 +166,18 @@ fn local_req(base_url: &str, model: &str, key: KeyEdit) -> ConnectionTestRequest
         model: model.to_string(),
         key,
         timeouts: default_settings(),
+    }
+}
+
+/// The form timeouts (whole seconds) of an OS-answer case's deadlines, for the
+/// public entry, which takes no durations.
+fn form_of(t: &Timeouts) -> TimeoutSettings {
+    let s = |d: Duration| u32::try_from(d.as_secs()).expect("a case deadline fits u32 s");
+    TimeoutSettings {
+        connect_s: s(t.connect),
+        api_transcription_s: s(t.api_transcription),
+        local_server_s: s(t.local_server),
+        ..default_settings()
     }
 }
 
@@ -489,18 +505,14 @@ async fn local_server_test_uses_the_forms_local_server_limit() {
     let w = world(stored_keys());
     let mut req = local_req(&base(&server), "", KeyEdit::Untouched);
     req.timeouts = form_timeouts(5, 600, 5);
-    let started = Instant::now();
-    let got = run(&w, req);
-    let elapsed = started.elapsed();
+    let (got, took) = measure(|| run(&w, req));
     assert_eq!(got, ConnectionTestResult::Timeout);
     // No upper bound (T-046 review 1 #2): every longer wrong limit (the snapshot's,
     // the default, the other role's) lets the 6 s answer through as Ok, so the
     // Timeout assertion catches it; a ceiling caught nothing more and tripped
-    // under host load (T-078 class).
-    assert!(
-        elapsed >= Duration::from_millis(4500),
-        "Timeout after {elapsed:?}, expected the form's 5 s"
-    );
+    // under host load (T-078 class; T-080 I2: the clock decides only this lower
+    // bound, the form's 5 s).
+    at_least(took, Duration::from_secs(5));
 }
 
 #[tokio::test]
@@ -512,18 +524,14 @@ async fn api_test_uses_the_forms_api_limit() {
     let w = world(stored_keys());
     let mut req = api_req(&base(&server), KeyEdit::Untouched);
     req.timeouts = form_timeouts(5, 5, 1800);
-    let started = Instant::now();
-    let got = run(&w, req);
-    let elapsed = started.elapsed();
+    let (got, took) = measure(|| run(&w, req));
     assert_eq!(got, ConnectionTestResult::Timeout);
     // No upper bound (T-046 review 1 #2): every longer wrong limit (the snapshot's,
     // the default, the other role's) lets the 6 s answer through as Ok, so the
     // Timeout assertion catches it; a ceiling caught nothing more and tripped
-    // under host load (T-078 class).
-    assert!(
-        elapsed >= Duration::from_millis(4500),
-        "Timeout after {elapsed:?}, expected the form's 5 s"
-    );
+    // under host load (T-078 class; T-080 I2: the clock decides only this lower
+    // bound, the form's 5 s).
+    at_least(took, Duration::from_secs(5));
 }
 
 #[tokio::test]
@@ -544,24 +552,20 @@ async fn saved_limit_does_not_override_the_forms_limit() {
 
 #[tokio::test]
 async fn injected_short_timeout_is_timeout() {
-    // T052: no answer within an injected short total timeout -> Timeout, well
-    // before the server's 5 s delay. Bite: the injected durations ignored
-    // (test_connection_with_timeouts calling the form conversion), or a timeout
-    // mapped to CannotReach / UnexpectedResponse.
+    // T052: no answer within an injected short total timeout -> Timeout, before
+    // the server's 5 s delay. Bite: the injected durations ignored
+    // (test_connection_with_timeouts calling the form conversion: the request's
+    // default 30 s lets the 5 s answer through as Ok), a shorter limit (the end
+    // before 300 ms), or a timeout mapped to CannotReach / UnexpectedResponse.
     let server = server_with(ok_text("late").set_delay(Duration::from_secs(5))).await;
     let w = world(stored_keys());
     let t = Timeouts {
         api_transcription: Duration::from_millis(300),
         ..quick()
     };
-    let started = Instant::now();
-    let got = run_with(&w, api_req(&base(&server), KeyEdit::Untouched), t);
+    let (got, took) = measure(|| run_with(&w, api_req(&base(&server), KeyEdit::Untouched), t));
     assert_eq!(got, ConnectionTestResult::Timeout);
-    assert!(
-        started.elapsed() < Duration::from_secs(3),
-        "{:?}",
-        started.elapsed()
-    );
+    at_least(took, t.api_transcription);
 }
 
 // ---- out-of-bounds form timeouts (choice (i)) ------------------------------------
@@ -660,9 +664,8 @@ async fn ok_reports_latency_at_least_the_server_delay_and_saves_nothing() {
     let server = server_with(ok_text("hello").set_delay(Duration::from_millis(200))).await;
     let w = world(stored_keys());
     let guard = before(&w);
-    let started = Instant::now();
-    let got = run(&w, api_req(&base(&server), KeyEdit::Untouched));
-    let elapsed = started.elapsed().as_millis();
+    let (got, took) = measure(|| run(&w, api_req(&base(&server), KeyEdit::Untouched)));
+    let elapsed = took.as_millis();
     let latency = latency_of(&got);
     assert!(latency >= 200, "latency {latency} ms < the 200 ms delay");
     assert!(
@@ -1007,22 +1010,22 @@ async fn non_json_body_is_unexpected_response() {
 fn refused_port_is_cannot_reach_host_port_without_query() {
     // FR-017: connection refused -> CannotReach with the base URL's host:port,
     // never the query (#27(2)) or the path. Bite: NetworkUnavailable passed
-    // through, the whole URL as host. refused_timeouts(): the refusal, not a
-    // timer, ends the connect (T-048).
-    let addr = refused_addr();
+    // through, the whole URL as host. The case's deadlines: the refusal, not a
+    // timer, ends the connect (T-048, T-080 I1).
+    let case = OsAnswer::refused();
     let w = world(stored_keys());
     let got = run_with(
         &w,
         api_req(
-            &format!("http://{addr}/v1?api-version={QUERY_SECRET}"),
+            &format!("http://{}/v1?api-version={QUERY_SECRET}", case.host),
             replace(TYPED_KEY),
         ),
-        refused_timeouts(),
+        case.timeouts,
     );
     assert_eq!(
         got,
         ConnectionTestResult::CannotReach {
-            host: addr.to_string()
+            host: case.host.clone()
         }
     );
     assert_clean(&got, &["/v1", "http"]);
@@ -1030,19 +1033,19 @@ fn refused_port_is_cannot_reach_host_port_without_query() {
 
 #[test]
 fn refused_port_through_the_public_entry_is_cannot_reach() {
-    // The same through `test_connection` with the form's default limits (connect
-    // 5 s = REFUSAL_BUDGET), the path the shell takes. Bite: the public entry
-    // building another client or swallowing the failure.
-    let addr = refused_addr();
+    // The same through `test_connection`, the path the shell takes, with the
+    // case's deadlines as form limits (connect 60 s = OS_ANSWER_BUDGET, the
+    // largest the form allows; T-080 I1). Bite: the public entry building another
+    // client or swallowing the failure.
+    let case = OsAnswer::refused();
     let w = world(stored_keys());
-    let got = run(
-        &w,
-        local_req(&format!("http://{addr}/v1"), "", KeyEdit::Untouched),
-    );
+    let mut req = local_req(&format!("http://{}/v1", case.host), "", KeyEdit::Untouched);
+    req.timeouts = form_of(&case.timeouts);
+    let got = run(&w, req);
     assert_eq!(
         got,
         ConnectionTestResult::CannotReach {
-            host: addr.to_string()
+            host: case.host.clone()
         }
     );
 }
@@ -1052,32 +1055,35 @@ fn unresolvable_host_is_cannot_reach_host() {
     // FR-017 / T-013 H3: a DNS failure is "cannot reach <host>" in a test, though
     // the dictation path keeps NetworkUnavailable (classify unchanged, #51). The
     // explicit port is part of `host`. Bite: NetworkUnavailable passed through
-    // (no such result kind: the mapping must convert it), the port dropped.
+    // (no such result kind: the mapping must convert it), the port dropped. The
+    // name and deadlines come from the case: the resolver's answer, not the
+    // connect timer, ends the lookup (F-013, T-080 I1).
+    let case = OsAnswer::unresolvable();
     let w = world(stored_keys());
     let got = run_with(
         &w,
-        api_req("http://voicen-test.invalid/v1", replace(TYPED_KEY)),
-        quick(),
+        api_req(&format!("http://{}/v1", case.host), replace(TYPED_KEY)),
+        case.timeouts,
     );
     assert_eq!(
         got,
         ConnectionTestResult::CannotReach {
-            host: "voicen-test.invalid".to_string()
+            host: case.host.clone()
         }
     );
     let got = run_with(
         &w,
         local_req(
-            &format!("http://voicen-test.invalid:8443/v1?k={QUERY_SECRET}"),
+            &format!("http://{}:8443/v1?k={QUERY_SECRET}", case.host),
             "",
             KeyEdit::Untouched,
         ),
-        quick(),
+        case.timeouts,
     );
     assert_eq!(
         got,
         ConnectionTestResult::CannotReach {
-            host: "voicen-test.invalid:8443".to_string()
+            host: format!("{}:8443", case.host)
         }
     );
     assert_clean(&got, &[]);

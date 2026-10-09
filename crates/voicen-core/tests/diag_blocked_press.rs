@@ -15,10 +15,13 @@
 //! The session half (one event per blocked press, no line at its release, rec
 //! numbering unchanged) is in `tests/dictation_session.rs`.
 
+mod common;
 mod diag_support;
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use common::timing::now;
 
 use diag_support::{active_lines, closed, open_log, NOON_UTC};
 use voicen_core::diag::{LogConfig, LogObserver};
@@ -121,7 +124,7 @@ fn a_blocked_press_leaves_an_open_recording_untouched() {
     // timings. Bite: PressBlocked closing or resetting the newest open record,
     // or held back until the next close.
     let mut ctrl = RecordingController::<()>::new();
-    let t0 = Instant::now();
+    let t0 = now();
     let id = match ctrl.press(t0, ()) {
         Press::Start(id) => id,
         Press::Ignored => panic!("premise: the press starts a recording"),

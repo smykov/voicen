@@ -7,17 +7,20 @@
 //! `FakePaster` (a non-elevated start window), `FakeIndicator`,
 //! `FakeShellRequests` and one `RecordingObserver`.
 //!
-//! Instants: deterministic tests stamp the caller's events in the past (`past()`),
-//! so they stay ordered against the worker's real job-end instants. A message
-//! raised at such an instant has already expired, so those tests match messages
-//! without their `until`, or raise the message at `Instant::now()` and allow the
-//! timer's expiry only once its 3 s have passed (`settled`). The real-time tests
-//! (message expiry, timer re-arm, `RealtimeSource`) check recorded instants
-//! against budgets sized for windows-latest (timer resolution ~15.6 ms, slower
-//! thread start), never an exact deadline. Everything that waits on the session's
-//! threads is bounded by `BUDGET`, so a broken session fails instead of hanging.
+//! Instants come from `common::timing` (T-080 I2): deterministic tests stamp the
+//! caller's events in the past (`past()`), so they stay ordered against the
+//! worker's real job-end instants. A message raised at such an instant has already
+//! expired, so those tests match messages without their `until`, or raise the
+//! message at `now()` and allow the timer's expiry only once its 3 s have passed
+//! (`settled`). The real-time tests (message expiry, timer re-arm,
+//! `RealtimeSource`) check recorded instants only from below (an expiry never
+//! before its `until`) and by order; a late or missing expiry shows as the wrong
+//! overlay sequence or no `Hidden` within `BUDGET`, never as a wall-clock ceiling.
+//! Everything that waits on the session's threads is bounded by `BUDGET`, so a
+//! broken session fails instead of hanging.
 //! Fake data only: example.com, `sk-test-SECRET`.
 
+mod common;
 mod diag_support;
 
 use std::collections::VecDeque;
@@ -27,6 +30,9 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, Weak};
 use std::thread::{self, ThreadId};
 use std::time::{Duration, Instant, UNIX_EPOCH};
+
+use common::os_answer::UNANSWERED_HOST;
+use common::timing::{ago, now, passed};
 
 use voicen_core::audio::{wav, AudioBuffer};
 use voicen_core::autostart::FakeAutostart;
@@ -69,8 +75,6 @@ const W1: WindowRef = WindowRef(0x0001_0051);
 const W2: WindowRef = WindowRef(0x0001_0052);
 /// Upper bound on anything that waits for the session's threads.
 const BUDGET: Duration = Duration::from_secs(10);
-/// How late the timer may publish an expiry on windows-latest.
-const EXPIRY_BUDGET: Duration = Duration::from_secs(2);
 /// Where the fake capture stamps the first frame, after the press.
 const FIRST_FRAME: Duration = Duration::from_millis(40);
 
@@ -85,11 +89,9 @@ fn ms(n: u64) -> Duration {
 }
 
 /// A caller instant one minute ago: later test instants (up to ~30 s on) stay
-/// before the worker's real `Instant::now()`.
+/// before the worker's real job-end instants.
 fn past() -> Instant {
-    Instant::now()
-        .checked_sub(Duration::from_secs(60))
-        .expect("monotonic clock at least 60 s past its origin")
+    ago(Duration::from_secs(60))
 }
 
 fn window(handle: WindowRef) -> StartWindow {
@@ -117,24 +119,15 @@ fn energy_gate() -> SpeechGate {
 }
 
 /// Polls `cond` every 5 ms until it holds or `BUDGET` has passed.
-fn eventually(mut cond: impl FnMut() -> bool) -> bool {
-    let deadline = Instant::now() + BUDGET;
-    loop {
-        if cond() {
-            return true;
-        }
-        if Instant::now() >= deadline {
-            return false;
-        }
-        thread::sleep(ms(5));
-    }
+fn eventually(cond: impl FnMut() -> bool) -> bool {
+    common::timing::eventually(BUDGET, cond)
 }
 
 /// `calls` without a trailing timer expiry (`hidden`) once the message raised at
 /// `raised` may have expired, so an immediate check does not race the timer on a
 /// slow machine. Before its 3 s have passed an expiry cannot be there.
 fn settled<T: PartialEq>(mut calls: Vec<T>, hidden: T, raised: Instant) -> Vec<T> {
-    if raised.elapsed() >= MESSAGE_DURATION && calls.last() == Some(&hidden) {
+    if passed(raised, MESSAGE_DURATION) && calls.last() == Some(&hidden) {
         calls.pop();
     }
     calls
@@ -414,7 +407,7 @@ impl Indicator for Sequence {
 impl ShellRequests for Sequence {
     fn open_settings(&self, tab: SettingsTab, field: Option<FieldId>) {
         if let Some(session) = self.reenter.get().and_then(Weak::upgrade) {
-            session.tray_menu_opened(Instant::now());
+            session.tray_menu_opened(now());
         }
         lock(&self.steps).push(Step::OpenSettings(tab, field));
     }
@@ -1176,7 +1169,7 @@ fn access_denied_publishes_no_recording_state_and_queues_no_job() {
     // for the failed press (two factory calls), the event missing.
     let rig = Rig::new(api_settings(), always(TEXT));
     rig.audio.set_start_error(Some(CaptureError::AccessDenied));
-    let tp = Instant::now();
+    let tp = now();
     rig.session.hotkey_pressed(tp);
 
     let calls = rig.indicator.calls();
@@ -1213,7 +1206,7 @@ fn access_denied_publishes_no_recording_state_and_queues_no_job() {
         "{events:?}"
     );
 
-    rig.session.hotkey_released(Instant::now());
+    rig.session.hotkey_released(now());
     let mut after = settled(rig.indicator.calls(), hidden, tp);
     after.sort_by_key(|c| matches!(c, IndicatorCall::Overlay(_)));
     assert_eq!(after, expected, "the stray release changed the indicator");
@@ -1257,7 +1250,7 @@ fn engine_none_opens_no_capture_and_asks_for_the_engine_tab() {
             ..Custom::default()
         },
     );
-    let tp = Instant::now();
+    let tp = now();
     rig.session.hotkey_pressed(tp);
     let expected = vec![
         Step::Overlay(OverlayState::Message {
@@ -1274,7 +1267,7 @@ fn engine_none_opens_no_capture_and_asks_for_the_engine_tab() {
     );
     assert_eq!(rig.audio.start_calls(), 0, "a capture was started");
 
-    rig.session.hotkey_released(Instant::now());
+    rig.session.hotkey_released(now());
     assert_eq!(
         settled(lock(&ui.steps).clone(), hidden, tp),
         expected,
@@ -1596,9 +1589,9 @@ fn tray_menu_opened_clears_tray_error_and_keeps_the_message() {
     // message dropped with the tray Error.
     let rig = Rig::new(api_settings(), always(TEXT));
     rig.audio.set_start_error(Some(CaptureError::AccessDenied));
-    let tp = Instant::now();
+    let tp = now();
     rig.session.hotkey_pressed(tp);
-    rig.session.tray_menu_opened(Instant::now());
+    rig.session.tray_menu_opened(now());
     assert_eq!(
         rig.indicator.trays(),
         vec![(TrayState::Error, false), (TrayState::Idle, false)]
@@ -1617,12 +1610,13 @@ fn tray_menu_opened_clears_tray_error_and_keeps_the_message() {
 #[test]
 fn message_expires_without_input() {
     // Row 12 (real time): after a capture failure the overlay goes Hidden at the
-    // message's `until` (press + 3 s) with no further input, not before and
-    // within a Windows-sized budget after; tray Error stays. Bite: no timer
-    // thread, tick never armed (no Hidden), the timer firing early.
+    // message's `until` (press + 3 s) with no further input, not before; tray
+    // Error stays. Bite: no timer thread, tick never armed (no Hidden within
+    // BUDGET), the timer firing early. How late after `until` is not asserted
+    // (T-080 I2: no wall-clock ceiling without a spec tolerance).
     let rig = Rig::new(api_settings(), always(TEXT));
     rig.audio.set_start_error(Some(CaptureError::AccessDenied));
-    let tp = Instant::now();
+    let tp = now();
     rig.session.hotkey_pressed(tp);
     assert!(
         eventually(|| rig.indicator.overlays().contains(&OverlayState::Hidden)),
@@ -1641,11 +1635,6 @@ fn message_expires_without_input() {
         hidden_at >= until,
         "expired {:?} before its until",
         until - hidden_at
-    );
-    assert!(
-        hidden_at <= until + EXPIRY_BUDGET,
-        "expired {:?} after its until",
-        hidden_at - until
     );
     assert_eq!(
         rig.indicator.overlays(),
@@ -1666,13 +1655,13 @@ fn timer_follows_the_latest_deadline() {
     // the first deadline it saw.
     let rig = Rig::new(api_settings(), always(TEXT));
     rig.audio.set_start_error(Some(CaptureError::AccessDenied));
-    let ta = Instant::now();
+    let ta = now();
     rig.session.hotkey_pressed(ta);
-    rig.session.hotkey_released(Instant::now());
+    rig.session.hotkey_released(now());
     thread::sleep(Duration::from_secs(1));
-    let tb = Instant::now();
+    let tb = now();
     rig.session.hotkey_pressed(tb);
-    rig.session.hotkey_released(Instant::now());
+    rig.session.hotkey_released(now());
     assert!(
         eventually(|| rig.indicator.overlays().contains(&OverlayState::Hidden)),
         "the message never expired: {:?}",
@@ -1690,11 +1679,6 @@ fn timer_follows_the_latest_deadline() {
         hidden_at >= until_b,
         "hidden {:?} before B's until (at A's deadline?)",
         until_b - hidden_at
-    );
-    assert!(
-        hidden_at <= until_b + EXPIRY_BUDGET,
-        "hidden {:?} after B's until",
-        hidden_at - until_b
     );
     assert_eq!(
         rig.indicator.overlays(),
@@ -1751,10 +1735,10 @@ fn a_job_failure_during_a_recording_shows_after_its_release_for_the_rest_of_its_
         a_entered.recv_timeout(BUDGET).is_ok(),
         "A's job never reached the engine"
     );
-    let tb = Instant::now();
+    let tb = now();
     rig.frames(&b, tb + FIRST_FRAME);
     rig.session.hotkey_pressed(tb);
-    let failing_from = Instant::now();
+    let failing_from = now();
     go_a.send(()).expect("A's engine is waiting");
     // The 503 keeps A's audio pending, so the tray (Recording while B is on) gains
     // Retry, published in the critical section of A's job_finished: its instant is
@@ -1784,7 +1768,7 @@ fn a_job_failure_during_a_recording_shows_after_its_release_for_the_rest_of_its_
 
     // B released 1 s after A's failure: about 2 s of the message are left.
     thread::sleep(ms(1000));
-    let released = Instant::now();
+    let released = now();
     rig.session.hotkey_released(released);
     let shown = rig.indicator.overlays();
     let until = match shown.last() {
@@ -1828,11 +1812,6 @@ fn a_job_failure_during_a_recording_shows_after_its_release_for_the_rest_of_its_
         expired_at >= until,
         "expired {:?} before its until",
         until - expired_at
-    );
-    assert!(
-        expired_at <= until + EXPIRY_BUDGET,
-        "expired {:?} after its until",
-        expired_at - until
     );
 
     go_b.send(()).expect("B's engine is waiting");
@@ -2600,7 +2579,7 @@ fn a_first_run_session_records_on_the_first_press_after_a_save() {
 
     rig.save(|s| {
         s.engine = EngineKind::LocalServer;
-        s.local_server.base_url = "http://192.0.2.1:9/v1".to_string();
+        s.local_server.base_url = format!("http://{UNANSWERED_HOST}:9/v1");
     });
     rig.hold(&fixtures::speech_3s(), past(), ms(3000));
     assert_eq!(rig.audio.start_calls(), 1, "the first press after the save");
@@ -2618,7 +2597,10 @@ fn a_first_run_session_records_on_the_first_press_after_a_save() {
         .collect();
     assert_eq!(
         used,
-        vec![(EngineKind::LocalServer, "http://192.0.2.1:9/v1".to_string())]
+        vec![(
+            EngineKind::LocalServer,
+            format!("http://{UNANSWERED_HOST}:9/v1")
+        )]
     );
     assert_eq!(rig.clipboard.texts(), vec![TEXT.to_string()]);
 }
@@ -2723,7 +2705,7 @@ fn a_failed_registration_shows_the_notice_then_asks_for_the_hotkey_field() {
             ..Custom::default()
         },
     );
-    let tf = Instant::now();
+    let tf = now();
     rig.session.hotkey_registration(false, tf);
 
     let hidden = Step::Overlay(OverlayState::Hidden);
@@ -2752,7 +2734,7 @@ fn a_successful_registration_shows_and_asks_nothing() {
     // (the failure's), one notice, and the success publishes Idle only. Bite: the
     // notice / request raised on every registration result, or on the success too.
     let rig = Rig::new(api_settings(), always(TEXT));
-    let tf = Instant::now();
+    let tf = now();
     rig.session.hotkey_registration(false, tf);
     rig.session.hotkey_registration(true, tf + ms(100));
     assert_eq!(format!("{:?}", rig.requests.calls()), HOTKEY_FIELD_REQUEST);
@@ -2776,9 +2758,9 @@ fn hotkey_registered_follows_the_last_registration_result() {
     // only by the failure (never cleared by a later success), or the opposite sense.
     let rig = Rig::new(api_settings(), always(TEXT));
     assert!(rig.session.hotkey_registered(), "before any report");
-    rig.session.hotkey_registration(false, Instant::now());
+    rig.session.hotkey_registration(false, now());
     assert!(!rig.session.hotkey_registered(), "after a failure");
-    rig.session.hotkey_registration(true, Instant::now());
+    rig.session.hotkey_registration(true, now());
     assert!(rig.session.hotkey_registered(), "after a success");
 }
 
@@ -2805,7 +2787,7 @@ fn the_settings_request_of_a_failed_registration_is_made_outside_the_session_loc
     let session = Arc::clone(&rig.session);
     let (done_tx, done_rx) = mpsc::channel();
     thread::spawn(move || {
-        session.hotkey_registration(false, Instant::now());
+        session.hotkey_registration(false, now());
         let _ = done_tx.send(());
     });
     if done_rx.recv_timeout(BUDGET).is_err() {
@@ -2960,12 +2942,12 @@ fn realtime_source_paces_frames_by_real_time_and_pads_with_silence() {
     let clip = fixtures::speech_250ms();
     let source = RealtimeSource::from_buffer(&clip);
     let sink = Arc::new(CollectingSink::default());
-    let started = Instant::now();
+    let started = now();
     let handle = source.start(sink.clone()).expect("start");
     thread::sleep(Duration::from_secs(1));
-    let stop_called = Instant::now();
+    let stop_called = now();
     handle.stop().expect("stop");
-    let stopped = Instant::now();
+    let stopped = now();
     let held = (stop_called - started).as_secs_f64();
     let got = sink.seconds();
     assert!(

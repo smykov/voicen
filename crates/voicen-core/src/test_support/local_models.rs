@@ -3,10 +3,10 @@
 //! #57): the fake model, test catalog entries, a fake disk probe and a raw-TCP mock
 //! model server.
 //!
-//! The refused-address rules (`refused_addr`, `REFUSAL_BUDGET`, `refused_timeouts`)
-//! stay in voicen-core's `tests/common`: they are core-test-only
-//! (docs/decisions/core-tests.md), and the shell tests have no refused-port case
-//! (F-004, F-005).
+//! The OS-answer cases (`OsAnswer`, `OS_ANSWER_BUDGET`) and the timing helpers stay
+//! in voicen-core's `tests/common` (docs/decisions/core-tests.md; F-004, F-005,
+//! F-013): the shell's one refused case (`src-tauri/tests/settings_ipc.rs`) includes
+//! that module by `#[path]` instead of a copy here.
 //!
 //! The fake model is 65 600 bytes (~64 KiB; size + 1 % is a whole number). Its
 //! SHA-256 was computed once on the host with `sha256sum` over the same byte

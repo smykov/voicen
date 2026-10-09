@@ -167,9 +167,9 @@ pub fn fixture_with(entries: Vec<CatalogEntry>, disk: Arc<FakeDisk>, no_data: Du
     fixture_with_timeouts(entries, disk, timeouts(no_data))
 }
 
-/// [`fixture_with`] under the given deadlines. A refused-port test passes
-/// `super::refused_timeouts()`: the 2 s connect and no-data of [`timeouts`] are
-/// below a refused connect's ~2.17 s on windows-latest (T-048).
+/// [`fixture_with`] under the given deadlines. A refused-port test passes the
+/// deadlines of its `super::os_answer::OsAnswer` case: the 2 s connect and no-data
+/// of [`timeouts`] are below a refused connect's ~2.17 s on windows-latest (T-048).
 pub fn fixture_with_timeouts(
     entries: Vec<CatalogEntry>,
     disk: Arc<FakeDisk>,

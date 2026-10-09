@@ -4,18 +4,20 @@
 //!
 //! wiremock serves on its own thread and runtime; the processor is called on a
 //! plain std thread, because the blocking reqwest client panics inside a tokio
-//! runtime context (T-040). Refused connects use `common::refused_addr()` with
-//! `common::refused_timeouts()` (F-004, F-005); the timeout case uses a server that
+//! runtime context (T-040). Refused connects use `common::os_answer::OsAnswer::refused()`
+//! and its deadlines (F-004, F-005, T-080 I1); the timeout case uses a server that
 //! accepts and answers late. Fake data only: 127.0.0.1, `sk-test-...` keys.
 
 mod common;
-/// The checks of `common::refused_addr()`, in each binary that calls it (T-047).
+/// The checks of `common::os_answer::OsAnswer::refused()`, in each binary that takes it
+/// (T-047).
 #[path = "common/refused_addr_tests.rs"]
 mod refused_addr_tests;
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use common::{refused_addr, refused_timeouts};
+use common::os_answer::OsAnswer;
+use common::timing::{at_least, measure};
 use serde_json::{json, Value};
 use voicen_core::post_process::chat::ChatPostProcessor;
 use voicen_core::post_process::settings::PostProcessingSettings;
@@ -453,21 +455,24 @@ async fn reply_body_is_capped_at_1_mib() {
 #[test]
 fn refused_port_is_unreachable_with_host_port() {
     // research R4: connection refused -> Unreachable{host} with the configured
-    // base URL's host:port, never the error text. refused_timeouts() so the
+    // base URL's host:port, never the error text. The case's deadlines so the
     // refusal, not a timer, ends the connect on Windows too (F-005). Bite:
     // Timeout or InvalidResponse for a refusal, the whole URL (query included) as
     // host.
-    let addr = refused_addr();
+    let case = OsAnswer::refused();
     let got = run(
-        &pp_settings(&format!("http://{addr}/v1?api-version={QUERY_SECRET}")),
+        &pp_settings(&format!(
+            "http://{}/v1?api-version={QUERY_SECRET}",
+            case.host
+        )),
         &creds_with_key(KEY),
-        refused_timeouts(),
+        case.timeouts,
         RAW,
     );
     assert_eq!(
         got,
         PostProcessOutcome::Skipped(SkipReason::Unreachable {
-            host: addr.to_string()
+            host: case.host.clone()
         })
     );
 }
@@ -476,7 +481,7 @@ fn refused_port_is_unreachable_with_host_port() {
 async fn late_reply_past_the_input_deadline_is_timeout() {
     // FR-24 / contract guarantee 4: the whole request is bounded by
     // input.timeouts.post_processing (here 300 ms against a 5 s answer), so the
-    // call returns Timeout well before the answer. Bite: Timeouts::default() (15 s,
+    // call returns Timeout, not the answer. Bite: Timeouts::default() (15 s,
     // the 5 s answer is applied), the transcription or connect deadline instead of
     // post_processing, a read without the request timeout, Timeout mapped to
     // Unreachable.
@@ -486,16 +491,18 @@ async fn late_reply_past_the_input_deadline_is_timeout() {
         post_processing: Duration::from_millis(300),
         ..Timeouts::default()
     };
-    let started = Instant::now();
-    let got = run(
-        &pp_settings(&format!("{}/v1", server.uri())),
-        &creds_with_key(KEY),
-        short,
-        RAW,
-    );
-    let elapsed = started.elapsed();
+    // No upper bound (T-080 I2): every longer wrong limit lets the 5 s answer
+    // through as Applied, which the Timeout assertion catches.
+    let (got, took) = measure(|| {
+        run(
+            &pp_settings(&format!("{}/v1", server.uri())),
+            &creds_with_key(KEY),
+            short,
+            RAW,
+        )
+    });
     assert_eq!(got, PostProcessOutcome::Skipped(SkipReason::Timeout));
-    assert!(elapsed < Duration::from_secs(3), "took {elapsed:?}");
+    at_least(took, short.post_processing);
 }
 
 #[tokio::test]
@@ -607,7 +614,7 @@ async fn no_skip_carries_key_prompt_raw_text_query_or_body() {
     // the response body, on every failure path. Bite: a reason built from the
     // reqwest error text (URL with query), from the response body, or carrying
     // the request.
-    let refused = refused_addr();
+    let refused = OsAnswer::refused();
     let status_500 = server_with(
         ResponseTemplate::new(500).set_body_string(format!("{BODY_MARKER} {KEY} {PROMPT}")),
     )
@@ -618,7 +625,10 @@ async fn no_skip_carries_key_prompt_raw_text_query_or_body() {
     let unauthorized = server_with(ResponseTemplate::new(401).set_body_string(BODY_MARKER)).await;
     let query = format!("?api-version={QUERY_SECRET}");
     let cases = [
-        (format!("http://{refused}/v1{query}"), refused_timeouts()),
+        (
+            format!("http://{}/v1{query}", refused.host),
+            refused.timeouts,
+        ),
         (format!("{}/v1{query}", status_500.uri()), timeouts()),
         (format!("{}/v1{query}", bad_body.uri()), timeouts()),
         (format!("{}/v1{query}", unauthorized.uri()), timeouts()),
