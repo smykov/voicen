@@ -107,6 +107,8 @@
 
 **Independent test**: `check-version` tests in the gate; a tag pushed by the owner.
 
+*T031-T033 superseded by T-026 (decisions #98, #102, #103): `scripts/ci/release-check.sh` (host test `release-check.test.sh`) replaces `check-version.sh`, `tauri.conf.json` keeps its stamped `version`, and the `release` job is in `ci.yml`; the symbols zip waits for T-024.*
+
 - [ ] T031 [P] [US5] [area ci] Red tests `scripts/check-version.test.sh` (run by `make check`): equal versions → exit 0; `package.json` differs → non-zero naming both values; expected `0.2.0` vs `0.1.0` → non-zero naming both; `tauri.conf.json` without `version` is accepted (spec FR-029; req §9; Clarification Q5; P-010).
 - [ ] T032 [US5] [area ci] Implement `scripts/check-version.sh` until T031 is green; remove `version` from `src-tauri/tauri.conf.json` (bundler takes the Cargo version); add `version-check` to `make check`; confirm on the runner that the installer file name carries the Cargo version (research R12) (spec FR-001, FR-029; req FR-18, §9).
 - [ ] T033 [US5] [area ci] Add the `release` job to `.github/workflows/ci.yml` (tags `v*` only, `needs: [gate, windows]`, `permissions: contents: write`): download the commit's installer and symbols artifacts (never rebuild); `scripts/check-version.sh "${GITHUB_REF_NAME#v}"`; fail with "release already exists" if `gh release view` succeeds; write `SHA256SUMS.txt`; render `.github/release-notes.md` (version, commit, checksum, SmartScreen note, notices link); `gh release create`. **Owner** pushes the first tag; evidence: the release page lists the installer, `SHA256SUMS.txt` and the symbols zip, and the installer's checksum matches the Windows job's artifact (spec FR-029, FR-030; req §9, §2 success 3, OQ-02). Depends on T030, T032.

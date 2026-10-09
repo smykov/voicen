@@ -30,12 +30,13 @@ The `windows` job log shows, in order:
 ## Release (owner)
 
 ```sh
-# version bumped in Cargo.toml (workspace) and package.json in a normal commit, gate green
-git tag v0.2.0 && git push origin v0.2.0                    # owner session only
-gh release view v0.2.0                                      # installer, SHA256SUMS.txt, symbols zip, notes
+# tag vX.Y.Z: X.Y = the committed MAJOR.MINOR, Z >= the tag run's github.run_number
+# (take Z above the latest ci.yml run number: gh run list -w ci.yml -L 1 --json number)
+git tag v0.1.200 && git push origin v0.1.200               # owner session only
+gh release view v0.1.200                                    # installer, SHA256SUMS.txt, notes
 ```
 
-A tag that does not match the version fails the `release` job with both versions printed and publishes nothing.
+A tag whose MAJOR.MINOR differs from the repository's (decision #102) or whose patch is below the tag run's number (#103) fails the `release` job with both values printed and publishes nothing; so does a tag whose release already exists. The release's `SHA256SUMS.txt` equals the hash the windows job prints in `SHA-256 of the installer`.
 
 ## Owner's manual checks on Windows
 

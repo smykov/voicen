@@ -1066,6 +1066,54 @@ jobs:
           INSTALLER: ${{ steps.telegram-installer.outputs.path }}
           CAPTION: ${{ steps.telegram-installer.outputs.caption }}
         run: bash scripts/ci/telegram-send.sh "$INSTALLER" "$CAPTION"
+      # T-026 (decisions #102, #103): scripts/ci/release-check.sh is the one release verdict; the
+      # release job (v* tags only) runs it before publishing. Its pass path and failure branch run
+      # here on every other ref (wip/** included, P-016), so the script meets the real runner and
+      # the real artifact before the first tag: the stamped build is <repo MAJOR.MINOR>.<run>, so
+      # tag v$VOICEN_VERSION with this run's number must pass (the #103 boundary); no token, so no
+      # release-exists check. Not on v* tags: there a refused tag must fail in the release job,
+      # naming both values, and the tag's Telegram send above is unchanged. After the Telegram
+      # steps, so a defect here never skips a send. The hash is printed on every ref; on a tag it
+      # must equal the release's SHA256SUMS.txt.
+      - name: SHA-256 of the installer
+        shell: bash
+        run: sha256sum target/release/bundle/nsis/*-setup.exe
+      - name: Release check premise (pass path; not on v* tags)
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        shell: bash
+        env:
+          RUN_NUMBER: ${{ github.run_number }}
+        run: env -u GH_TOKEN bash scripts/ci/release-check.sh "v${VOICEN_VERSION:-}" "$RUN_NUMBER" . target/release/bundle/nsis
+      # Red unless release-check.sh refuses (exit 1) a synthetic tag and names both values:
+      # v<MAJOR>.<MINOR+1>.<run> (#102) and, when run > 1, v<MAJOR>.<MINOR>.<run-1> (#103).
+      - name: Release check failure branch (synthetic bad tags; not on v* tags)
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        shell: bash
+        env:
+          RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          [[ "${VOICEN_VERSION:-}" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] || { echo "::error::release check failure branch: VOICEN_VERSION '${VOICEN_VERSION:-}' is not X.Y.Z"; exit 1; }
+          major="${BASH_REMATCH[1]}" minor="${BASH_REMATCH[2]}"
+          bad=0
+          # expect <case> <tag> <value> <value>: exit 1 and both values named (not inside a longer number).
+          expect() {
+            local name="$1" tag="$2" rc=0 out v re
+            out="$(env -u GH_TOKEN bash scripts/ci/release-check.sh "$tag" "$RUN_NUMBER" . target/release/bundle/nsis 2>&1)" || rc=$?
+            sed "s/^/$name: /" <<<"$out"
+            if [ "$rc" != 1 ]; then echo "::error::release check failure branch $name: tag $tag exit $rc, want 1"; bad=1; fi
+            for v in "$3" "$4"; do
+              re="$(sed 's/\./\\./g' <<<"$v")"
+              grep -qE -- "(^|[^0-9.])${re}(\$|[^0-9.]|\.(\$|[^0-9]))" <<<"$out" || { echo "::error::release check failure branch $name: the refusal of $tag does not name $v"; bad=1; }
+            done
+          }
+          expect "#102" "v${major}.$((minor + 1)).${RUN_NUMBER}" "${major}.$((minor + 1))" "${major}.${minor}"
+          if [ "$RUN_NUMBER" -gt 1 ]; then
+            expect "#103" "v${major}.${minor}.$((RUN_NUMBER - 1))" "$((RUN_NUMBER - 1))" "$RUN_NUMBER"
+          else
+            echo "#103: skipped, run number 1 has no lower patch"
+          fi
+          [ "$bad" = 0 ] || exit 1
+          echo "release check failure branch: every synthetic tag refused, naming both values"
       # T-059: runner capability facts for later Windows CI tests (docs/decisions/windows-ci-runner.md).
       # A missing capability is a result line, never a red step; red only when the probe is defective:
       # its test fails (pipefail), there is not exactly one end line, or the number of well-formed fact
@@ -1088,3 +1136,65 @@ jobs:
           all=$(count '^runner-probe: ')
           if [ "$facts" != "$want" ] || [ "$all" != "$((want + 1))" ]; then echo "::error::runner probe: $facts well-formed fact lines and $all runner-probe lines, the end line says facts=$want"; exit 1; fi
           echo "runner probe: $facts fact lines, as the end line says"
+
+  # T-026 (spec 006 US5, decisions #102, #103): a pushed vX.Y.Z tag becomes GitHub Release vX.Y.Z
+  # with the installer and SHA256SUMS.txt, only after gate and windows passed and
+  # scripts/ci/release-check.sh accepted the tag: X.Y = the committed MAJOR.MINOR (#102), Z >= this
+  # run's github.run_number (#103), exactly one installer carrying _X.Y.Z_, no release for the tag
+  # yet (never overwritten). A refusal exits 1 naming both values before any gh write call. The
+  # only job with contents: write; gh CLI only (no release action). Skipped on every other ref,
+  # so wip/** runs never publish; the check's pass path and failure branch run in the windows job
+  # there. gh release create uploads to a draft and publishes it last, so a failed upload leaves a
+  # draft, not a half release. Pinned by make check (check-release-check, check-release-guard).
+  release:
+    name: GitHub Release (v* tags only)
+    needs: [gate, windows]
+    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+      - name: Commit of this build
+        shell: bash
+        run: echo "VOICEN_COMMIT=$(git rev-parse --short=7 HEAD)" >> "$GITHUB_ENV"
+      - uses: actions/download-artifact@v4
+        with:
+          name: voicen-installer-${{ env.VOICEN_COMMIT }}
+          path: dist
+      # The committed (unstamped) checkout gives the repository's MAJOR.MINOR.
+      - name: Release check (decisions #102, #103; nothing is published on a refusal)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          RUN_NUMBER: ${{ github.run_number }}
+        run: bash scripts/ci/release-check.sh "$TAG" "$RUN_NUMBER" . dist
+      - name: SHA-256 file and release notes
+        shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          (cd dist && sha256sum -- *-setup.exe > SHA256SUMS.txt)
+          cat dist/SHA256SUMS.txt
+          installer="$(cd dist && ls -- *-setup.exe)"
+          {
+            echo "Voicen ${TAG#v} for Windows 10/11 x64, commit ${VOICEN_COMMIT}."
+            echo
+            echo "Install: download \`${installer}\` and run it (per-user install, no administrator rights)."
+            echo
+            echo "The installer is not code-signed in this release: Windows SmartScreen may show \"Windows protected your PC\". To proceed, click \"More info\", then \"Run anyway\"."
+            echo
+            echo "Check the download: the SHA-256 in \`SHA256SUMS.txt\` must match \`Get-FileHash ${installer}\` (PowerShell) or \`sha256sum ${installer}\`."
+          } > dist/release-notes.md
+          cat dist/release-notes.md
+      - name: Publish the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh --version
+          gh release create "$TAG" dist/*-setup.exe dist/SHA256SUMS.txt --verify-tag --title "Voicen $TAG" --notes-file dist/release-notes.md
