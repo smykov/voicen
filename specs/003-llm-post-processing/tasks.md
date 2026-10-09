@@ -143,7 +143,7 @@ description: "Task list for LLM post-processing (003)"
   - it runs success plus every failure mode of T013 with a log capture and a fake `CredentialStore` (004's);
   - the mock error bodies echo the transcript and the key;
   - the captured log, the `Debug` output of every outcome and notice, and the saved settings file contain none of: key, prompt, raw text, reply, error body (SC-005);
-  - each dictation yields exactly one `post_process outcome=… duration_ms=…` line.
+  - each post-processed dictation line carries `pp=`, `pp_reason=` (skipped only) and `pp_ms=` — as built by T-076, see data-model.md "As built (T-076)".
   - a mock `302` redirect from the configured host to another host does not carry the `Authorization` header to that host (the key is sent only to the configured endpoint, research R5);
   - when 006's crash-file writer is in place, a panic injected in a fake post-processor while a snapshot is alive writes a crash file that contains none of the above.
 
