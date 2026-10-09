@@ -1,8 +1,8 @@
 //! LLM post-processing (spec 003, T-020; decisions #91, #99). T-003 created the
 //! settings data type; T-001 added the pipeline step's port; T-020 widened it to
 //! [`PostProcessInput`] -> [`PostProcessOutcome`] and added the real processor
-//! ([`chat::ChatPostProcessor`]). The shell still installs [`PassThrough`] until
-//! T-074 wires the chat processor; T-021 added `settings::validate`.
+//! ([`chat::ChatPostProcessor`]), which the shell installs since T-074
+//! ([`PassThrough`] stays for tests); T-021 added `settings::validate`.
 //!
 //! The stage never fails a dictation: the delivered text is the trimmed non-empty
 //! chat reply ([`PostProcessOutcome::Applied`]) or else the raw transcript byte
