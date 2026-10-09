@@ -60,6 +60,7 @@ import {
   releaseDelete,
   releaseDownload,
   releaseList,
+  requestClose,
   storedModels,
   type LocalModelView,
   type MockOptions,
@@ -867,6 +868,127 @@ test("every Delete button stays disabled while the delete invoke and then the re
   await expect(deleteButton(page, "small")).toHaveCount(0);
   await expect(deleteButton(page, "base")).toBeEnabled();
   expect(await deleteCalls(page)).toEqual([{ id: "small" }]);
+  expect(errors).toEqual([]);
+});
+
+// ---- T-019 review 1 #1: the discard prompt wins over the delete confirmation ----------
+//
+// Decision A (docs/decisions/settings-ui.md): with a dirty draft, a close request shows the
+// discard prompt, and nothing on the page may leave it unanswerable (T-023 fixed this for
+// About; e2e/about.spec.ts (6)). The delete confirmation is a second modal on the same
+// page: a close request while it is open must close it (cancelled, nothing deleted) and
+// show an operable discard prompt. "Operable" is checked as the user meets it: Keep
+// editing focused, the buttons clickable (a pointer hit, not a scripted click), and no
+// element left `:modal` (an open modal <dialog>, even hidden by CSS, makes the rest inert).
+
+function discardPrompt(page: Page) {
+  return page.getByRole("alertdialog").filter({ has: page.getByTestId("settings-discard-keep") });
+}
+
+function deleteConfirmation(page: Page) {
+  return page.getByTestId("local-model-delete-confirm");
+}
+
+/** How many elements are `:modal` (an open modal dialog, shown or hidden by CSS). */
+async function modalCount(page: Page): Promise<number> {
+  return page.evaluate(() => document.querySelectorAll(":modal").length);
+}
+
+async function settle(page: Page): Promise<void> {
+  await page.evaluate(
+    () => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))),
+  );
+}
+
+/** Dirty draft (speech language edited), small downloaded and selected, its delete confirmation open. */
+async function openDirtyWithDeleteConfirmation(page: Page): Promise<void> {
+  const view = localView("small");
+  view.settings.speech_language = "en";
+  await openLoaded(page, view, { localModels: modelsWith("small", DOWNLOADED) });
+  await expect
+    .poll(() => listeners(page, "tauri://close-requested"), { message: "the settings page listens to close requests" })
+    .toBeGreaterThan(0);
+  await page.locator('[data-field="engine.speech_language"]').selectOption("de");
+  await expect(page.locator('[data-field="engine.speech_language"]')).toHaveValue("de");
+  await deleteButton(page, "small").click();
+  await expect(deleteConfirmation(page)).toBeVisible();
+}
+
+test("the discard prompt wins: delete confirmation open with a dirty draft, a close request closes the confirmation and shows the discard prompt with Keep editing focused; Keep editing (clicked) keeps the draft, nothing is deleted or destroyed, and the page stays usable", async ({ page }) => {
+  const errors = pageErrors(page);
+  await openDirtyWithDeleteConfirmation(page);
+
+  await requestClose(page);
+  const prompt = discardPrompt(page);
+  await expect(prompt).toBeVisible();
+  await expect(deleteConfirmation(page), "the delete confirmation is closed by the close request").toBeHidden();
+  await expect.poll(() => modalCount(page), { message: "no modal dialog is left open behind the prompt" }).toBe(0);
+  await expect(prompt.getByTestId("settings-discard-keep")).toBeFocused();
+
+  // Operable by pointer: a real hit test, which an inert or covered prompt fails.
+  await prompt.getByTestId("settings-discard-keep").click({ timeout: 5_000 });
+  await expect(prompt).toBeHidden();
+  await settle(page);
+
+  // The confirmation was cancelled, not hidden: it does not come back, nothing was sent.
+  await expect(deleteConfirmation(page)).toBeHidden();
+  expect(await modalCount(page)).toBe(0);
+  expect(await calls(page, "local_model_delete")).toEqual([]);
+  expect(await calls(page, "plugin:window|destroy")).toEqual([]);
+  await expect(page.locator('[data-field="engine.speech_language"]')).toHaveValue("de");
+  await expect(row(page, "small")).toHaveAttribute("data-state", "downloaded");
+
+  // The page is usable (no stuck inert): a control takes a pointer edit, and Delete asks again.
+  await page.locator('[data-field="engine.speech_language"]').selectOption("fr", { timeout: 5_000 });
+  await expect(page.locator('[data-field="engine.speech_language"]')).toHaveValue("fr");
+  await deleteButton(page, "small").click({ timeout: 5_000 });
+  await expect(deleteConfirmation(page)).toBeVisible();
+  await page.getByTestId("local-model-delete-keep").click({ timeout: 5_000 });
+  await expect(deleteConfirmation(page)).toBeHidden();
+  await settle(page);
+  expect(await calls(page, "local_model_delete")).toEqual([]);
+  expect(await calls(page, "settings_save")).toEqual([]);
+  expect(errors).toEqual([]);
+});
+
+test("the discard prompt wins: delete confirmation open with a dirty draft, a close request and Enter on the focused Keep editing closes the prompt; the confirmation does not come back and no delete is sent", async ({ page }) => {
+  const errors = pageErrors(page);
+  await openDirtyWithDeleteConfirmation(page);
+
+  await requestClose(page);
+  const prompt = discardPrompt(page);
+  await expect(prompt).toBeVisible();
+  await expect(prompt.getByTestId("settings-discard-keep")).toBeFocused();
+  // Enter goes to Keep editing, never to the hidden confirmation's buttons.
+  await page.keyboard.press("Enter");
+  await expect(prompt).toBeHidden();
+  await settle(page);
+  await expect(deleteConfirmation(page)).toBeHidden();
+  expect(await modalCount(page)).toBe(0);
+  await page.keyboard.press("Enter");
+  await settle(page);
+  expect(await calls(page, "local_model_delete")).toEqual([]);
+  expect(await calls(page, "plugin:window|destroy")).toEqual([]);
+  await expect(row(page, "small")).toHaveAttribute("data-state", "downloaded");
+  expect(errors).toEqual([]);
+});
+
+test("the discard prompt wins: delete confirmation open with a dirty draft, a close request then Discard (clicked) destroys the settings window and sends no local_model_delete", async ({ page }) => {
+  const errors = pageErrors(page);
+  await openDirtyWithDeleteConfirmation(page);
+
+  await requestClose(page);
+  const prompt = discardPrompt(page);
+  await expect(prompt).toBeVisible();
+  await expect(deleteConfirmation(page)).toBeHidden();
+  await prompt.getByTestId("settings-discard-confirm").click({ timeout: 5_000 });
+  await expect.poll(async () => (await calls(page, "plugin:window|destroy")).length).toBe(1);
+  expect(await calls(page, "plugin:window|destroy")).toEqual([
+    { cmd: "plugin:window|destroy", args: { label: "settings" } },
+  ]);
+  await settle(page);
+  expect(await calls(page, "local_model_delete")).toEqual([]);
+  expect(await calls(page, "settings_save")).toEqual([]);
   expect(errors).toEqual([]);
 });
 
