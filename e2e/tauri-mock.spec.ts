@@ -33,6 +33,7 @@ import {
   releaseMicrophones,
   releaseOverlayReady,
   releaseSettingsGet,
+  setBuildInfo,
   storedModels,
   storedView,
   type SaveOutcome,
@@ -578,4 +579,28 @@ test("holdMicrophones keeps settings_list_microphones in flight (recorded) until
   await releaseMicrophones(page);
   await expect.poll(answer).toEqual(fakeMicrophones());
   expect(await invokeInPage(page, "settings_list_microphones")).toEqual({ ok: fakeMicrophones() });
+});
+
+// T-023: the About dialog reads get_build_info on each opening; setBuildInfo changes the
+// answer of every later call, a value or a rejection, in either order.
+test("setBuildInfo replaces the get_build_info answer for every later call: a value, then a rejection, then a value", async ({ page }) => {
+  const before = (await calls(page, "get_build_info")).length;
+  expect(await invokeInPage(page, "get_build_info")).toEqual({ ok: { version: "0.0.0", commit: "mock" } });
+
+  await setBuildInfo(page, { reject: "ipc down (fake)" });
+  expect(await invokeInPage(page, "get_build_info")).toEqual({ err: "ipc down (fake)" });
+  expect(await invokeInPage(page, "get_build_info")).toEqual({ err: "ipc down (fake)" });
+
+  await setBuildInfo(page, { version: "9.8.7", commit: "def5678" });
+  expect(await invokeInPage(page, "get_build_info")).toEqual({ ok: { version: "9.8.7", commit: "def5678" } });
+  expect((await calls(page, "get_build_info")).length - before).toBe(4);
+});
+
+test("setBuildInfo answers get_build_info on a page installed without the buildInfo option", async ({ context }) => {
+  const page = await context.newPage();
+  await installTauriMock(page);
+  await page.goto("/");
+  expect(await invokeInPage(page, "get_build_info")).toEqual({ err: "unexpected command get_build_info" });
+  await setBuildInfo(page, { version: "0.1.0", commit: "abc1234" });
+  expect(await invokeInPage(page, "get_build_info")).toEqual({ ok: { version: "0.1.0", commit: "abc1234" } });
 });

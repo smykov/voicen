@@ -18,7 +18,10 @@
 //   until `releaseSave()`, so a test can act while a save is pending (T-004 r1 #10).
 // - `plugin:event|listen` / `plugin:event|unlisten` keep the handler ids registered by
 //   `transformCallback`, so `listen()` from @tauri-apps/api works and `emit()` reaches it.
-// - `get_build_info` answers for the build-info page.
+// - `get_build_info` answers with the `buildInfo` option (a value, or `{ reject }` to
+//   reject with that text; absent -> "unexpected command" like any unmocked command).
+//   `setBuildInfo(page, value | { reject })` replaces that answer mid-test, for every
+//   later call (the About dialog reads it on each opening; T-023).
 // - `plugin:window|destroy { label }` is recorded and returns null: the settings window's
 //   capability grants destroy (src-tauri/capabilities/default.json), and tauri's
 //   onCloseRequested calls it on every close it does not prevent (T-039).
@@ -419,6 +422,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}): P
       heldReady: [] as (() => void)[],
       holdingMics: init.holdMicrophones,
       heldMics: [] as (() => void)[],
+      buildInfo: clone(init.buildInfo),
     };
 
     function setModelState(id: string, modelState: unknown): void {
@@ -546,9 +550,9 @@ export async function installTauriMock(page: Page, options: MockOptions = {}): P
           if (init.destroy !== null) throw new Error(init.destroy.reject);
           return null;
         case "get_build_info":
-          if (init.buildInfo === null) break;
-          if ("reject" in init.buildInfo) throw new Error(init.buildInfo.reject);
-          return clone(init.buildInfo);
+          if (state.buildInfo === null) break;
+          if ("reject" in state.buildInfo) throw new Error(state.buildInfo.reject);
+          return clone(state.buildInfo);
       }
       throw new Error(`unexpected command ${cmd}`);
     }
@@ -597,6 +601,9 @@ export async function installTauriMock(page: Page, options: MockOptions = {}): P
         for (const resolve of state.heldDownload.splice(0)) resolve();
       },
       queueDownloadRejection: (payload: unknown) => state.downloadRejections.push(clone(payload)),
+      setBuildInfo: (value: BuildInfo | { reject: string }) => {
+        state.buildInfo = clone(value);
+      },
       releaseOverlayReady: () => {
         state.holdingReady = false;
         for (const resolve of state.heldReady.splice(0)) resolve();
@@ -644,6 +651,7 @@ interface MockHandle {
   queueDownloadRejection: (payload: unknown) => void;
   releaseOverlayReady: () => void;
   releaseMicrophones: () => void;
+  setBuildInfo: (value: BuildInfo | { reject: string }) => void;
   progress: (id: string, received: number) => void;
   modelState: (id: string, state: ModelState) => void;
 }
@@ -725,6 +733,17 @@ export async function releaseSettingsGet(page: Page): Promise<void> {
 /** Registers every held `plugin:event|listen` (see `holdListen`), answers it, and stops holding. */
 export async function releaseListen(page: Page): Promise<void> {
   await page.evaluate(() => (window as unknown as MockWindow).__VOICEN_MOCK__.releaseListen());
+}
+
+/**
+ * From now on `get_build_info` answers `value`, or rejects with `reject` (replaces the
+ * `buildInfo` option; T-023).
+ */
+export async function setBuildInfo(page: Page, value: BuildInfo | { reject: string }): Promise<void> {
+  await page.evaluate(
+    (next) => (window as unknown as MockWindow).__VOICEN_MOCK__.setBuildInfo(next),
+    value,
+  );
 }
 
 // ---- Local models (spec 002, T-045) ----------------------------------------------
