@@ -47,6 +47,13 @@ pub fn ago(d: Duration) -> Instant {
         .unwrap_or_else(|| panic!("monotonic clock at least {d:?} past its origin"))
 }
 
+/// [`ago`] for a test that skips, rather than fails, on a monotonic clock younger
+/// than `d` (a Windows `Instant` cannot precede boot; a fresh CI VM may be up for
+/// less than 10 minutes): `None` there. A timestamp, not a measurement.
+pub fn try_ago(d: Duration) -> Option<Instant> {
+    Instant::now().checked_sub(d)
+}
+
 /// A measured time: what [`measure`] and [`between`] return (T-080 review 1 #1).
 ///
 /// Opaque on purpose: no comparison, no `==`, no deref or conversion back to a

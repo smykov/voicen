@@ -31,7 +31,7 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, Weak};
 use std::thread::{self, ThreadId};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
-use common::timing::{ago, at_least, between, now, passed};
+use common::timing::{ago, at_least, between, now, passed, try_ago};
 
 use voicen_core::audio::{wav, AudioBuffer};
 use voicen_core::autostart::FakeAutostart;
@@ -1955,13 +1955,6 @@ fn warnings(events: &[DictationEvent]) -> Vec<WarningCode> {
         .collect()
 }
 
-/// `Instant::now() - d`, or `None` when the monotonic clock is not that old (a
-/// Windows `Instant` cannot precede boot; a fresh CI VM may be up for less than
-/// 10 minutes). The Linux gate's clock is the host's uptime.
-fn ago(d: Duration) -> Option<Instant> {
-    Instant::now().checked_sub(d)
-}
-
 #[test]
 fn toggle_press_press_delivers_once() {
     // T-009 Acceptance "toggle press-press" (FR-03; replaces row 15): with mode =
@@ -2161,7 +2154,7 @@ fn the_session_timer_stops_a_recording_at_its_max_length() {
     // and the job is delivered. Bite: run_timer not woken for the recording's
     // deadline (it sleeps on the message deadline only), the timer ticking without
     // the stop path (the recording stays on).
-    let Some(t0) = ago(MAX_LENGTH - ms(500)) else {
+    let Some(t0) = try_ago(MAX_LENGTH - ms(500)) else {
         eprintln!("skipped: the monotonic clock is younger than 10 minutes on this host");
         return;
     };
@@ -2177,10 +2170,9 @@ fn the_session_timer_stops_a_recording_at_its_max_length() {
     assert_eq!(ends.len(), 1);
     let (duration, end) = ends[0];
     assert_eq!(end, RecordingEnd::MaxLength);
-    assert!(
-        (600_000..600_000 + EXPIRY_BUDGET.as_millis() as u64).contains(&duration),
-        "stopped after {duration} ms"
-    );
+    // No upper bound on the measured length (T-080 I2: no spec tolerance; a timer
+    // that never fires fails `eventually` above).
+    assert!(duration >= 600_000, "stopped after {duration} ms");
     rig.wait_jobs(1);
     assert_eq!(rig.audio.open_handles(), 0);
     assert_eq!(rig.clipboard.texts(), vec![TEXT.to_string()]);

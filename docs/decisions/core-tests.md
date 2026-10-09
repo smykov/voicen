@@ -2,7 +2,7 @@
 
 **Code:** `crates/voicen-core/tests/common/`:
 - `os_answer.rs`: `OsAnswer::refused()`, `OsAnswer::unresolvable()`, `OsAnswer::refused_released_port()`, `OS_ANSWER_BUDGET`, `Unanswered::blackhole()`;
-- `timing.rs`: `Took` (an opaque measured time), `measure`, `between`, `fastest`, `Took::less`, `at_least`, `within_spec`, `at_most_per_second`, `REFERENCE_LOAD`, `now`, `ago`, `deadline`, `left`, `passed`, `eventually`;
+- `timing.rs`: `Took` (an opaque measured time), `measure`, `between`, `fastest`, `Took::less`, `at_least`, `within_spec`, `at_most_per_second`, `REFERENCE_LOAD`, `now`, `ago`, `try_ago` (T-009's 10-minute timer test skips on a young clock), `deadline`, `left`, `passed`, `eventually`;
 - `refused_addr_tests.rs` and `download.rs`.
 
 Also: `scripts/ci/core-test-clocks.sh` (the tripwire, run by `make check-core-test-clocks`; its self-test `scripts/ci/core-test-clocks.test.sh` uses the fixtures in `scripts/ci/fixtures/core-test-clocks/`), and `.github/workflows/ci.yml` (the windows job, `--no-fail-fast`).
