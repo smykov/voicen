@@ -17,6 +17,10 @@
 // - labels: a field of `not_restored` with no control on the page is named in the
 //   form-level message by the text of `settings.field_label.<FieldId>`.
 //
+// T-021 adds: the Post-processing tab (`tab-post_processing`, between Output and History)
+// renders post_processing.{enabled,base_url,model,key,prompt}; `?tab=post_processing` and
+// `settings://focus { tab: "post_processing" }` select it (R visits all six tabs).
+//
 // T-045 adds (locator contract of e2e/local-models.spec.ts): with engine builtin_local
 // the Engine tab renders `<select data-field="engine.builtin_local.model_id">` whose
 // options are the downloaded models (R round trip for builtin_local); and the close guard
@@ -177,19 +181,28 @@ test("failure branch: a malformed field (selector syntax) raises no page error a
   expect(errors).toEqual([]);
 });
 
-test("tab post_processing (no page tab yet) selects Engine, from the URL and from settings://focus", async ({ page }) => {
+test("tab post_processing selects the Post-processing tab and focuses its field, from the URL and from settings://focus; a tab the page does not have selects Engine", async ({ page }) => {
+  // T-021: the page has a Post-processing tab now; tabOf honours it. The Engine fallback
+  // (the requested tab is not one of the page's) is pinned with a name no tab has.
   const errors = pageErrors(page);
   await open(page, "/settings?tab=post_processing&field=post_processing.prompt");
-  await expect(tab(page, "engine")).toHaveAttribute("aria-selected", "true");
-  await settle(page);
-  expect(await focusedField(page)).toBeNull();
+  await expect(tab(page, "post_processing")).toHaveAttribute("aria-selected", "true");
+  await expect(field(page, "post_processing.prompt")).toBeFocused();
 
   await tab(page, "recording").click();
   await expect(tab(page, "recording")).toHaveAttribute("aria-selected", "true");
   await waitForListener(page, "settings://focus");
   // `field` is optional in the event.
   await emit(page, "settings://focus", { tab: "post_processing" });
+  await expect(tab(page, "post_processing")).toHaveAttribute("aria-selected", "true");
+  await emit(page, "settings://focus", { tab: "post_processing", field: "post_processing.base_url" });
+  await expect(field(page, "post_processing.base_url")).toBeFocused();
+
+  // A tab the page does not have: Engine, nothing focused, nothing shown.
+  await emit(page, "settings://focus", { tab: "diagnostics", field: "post_processing.model" });
   await expect(tab(page, "engine")).toHaveAttribute("aria-selected", "true");
+  await settle(page);
+  expect(await focusedField(page)).toBeNull();
   await expect(page.getByRole("alert")).toHaveCount(0);
   expect(errors).toEqual([]);
 });
@@ -536,6 +549,11 @@ function shownFor(settings: Settings, offered: readonly string[] = []): Record<s
     "recording.hotkey": settings.hotkey,
     "recording.mode": settings.mode,
     "output.auto_paste": settings.auto_paste,
+    "post_processing.enabled": settings.post_processing.enabled,
+    "post_processing.base_url": settings.post_processing.base_url,
+    "post_processing.model": settings.post_processing.model,
+    "post_processing.key": "",
+    "post_processing.prompt": settings.post_processing.prompt,
     "history.enabled": settings.history.enabled,
     "history.size": String(settings.history.size),
     "timeouts.connect": String(settings.timeouts.connect_s),
@@ -548,7 +566,10 @@ function shownFor(settings: Settings, offered: readonly string[] = []): Record<s
   };
 }
 
-/** The controls each release-1 tab must render for engine api, local_server or builtin_local. */
+/**
+ * The controls each tab must render for engine api, local_server or builtin_local, in the
+ * page's tab order (004 FR-001: Engine, Recording, Output, Post-processing, History, General).
+ */
 function tabFieldsFor(engine: RoundTripEngine): Record<string, string[]> {
   const engineFields =
     engine === "builtin_local"
@@ -558,6 +579,13 @@ function tabFieldsFor(engine: RoundTripEngine): Record<string, string[]> {
     engine: ["engine.kind", ...engineFields, "engine.speech_language"],
     recording: ["recording.hotkey", "recording.mode"],
     output: ["output.auto_paste"],
+    post_processing: [
+      "post_processing.enabled",
+      "post_processing.base_url",
+      "post_processing.model",
+      "post_processing.key",
+      "post_processing.prompt",
+    ],
     history: ["history.enabled", "history.size"],
     general: [
       "general.ui_language",
@@ -621,7 +649,12 @@ async function expectRoundTrip(
 
   const tabFields = tabFieldsFor(engine);
   const shown = shownFor(settings, models.offered);
-  for (const name of ["engine", "recording", "output", "history", "general", "engine"]) {
+  // Every tab of the page (T-021: six, Post-processing between Output and History).
+  const order = await page
+    .getByRole("tab")
+    .evaluateAll((els) => els.map((e) => (e as HTMLElement).dataset.testid ?? ""));
+  expect(order).toEqual(Object.keys(tabFields).map((name) => `tab-${name}`));
+  for (const name of [...Object.keys(tabFields), "engine"]) {
     await expectTabShowsView(page, name, tabFields, shown);
   }
 

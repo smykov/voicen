@@ -134,6 +134,11 @@ interface WireFixture {
   speech_languages: string[];
   /** Core's Saved outcome of an engine-api save with base URL http://example.com/v1 (T-015). */
   saved_insecure_api: SaveOutcome;
+  /**
+   * Core's Refused outcome of a save, over the first run, with post_processing enabled and
+   * base_url, model and prompt "" (T-021).
+   */
+  refused_post_processing_on_empty: SaveOutcome;
 }
 
 const fixture = JSON.parse(
@@ -152,6 +157,17 @@ export function firstRunView(): SettingsView {
  */
 export function savedInsecureApi(): Extract<SaveOutcome, { Saved: unknown }> {
   return structuredClone(fixture.saved_insecure_api) as Extract<SaveOutcome, { Saved: unknown }>;
+}
+
+/**
+ * Core's `SaveOutcome` for a save, over the first run (engine none, no key edits), with
+ * post-processing on and base URL, model and prompt all "": a Refused with
+ * `post_processing.base_url`, `.model` and `.prompt` `required` and no form error (T-021;
+ * pinned by core's e2e_settings_wire_fixture_refused_post_processing_matches_core; a fresh
+ * copy, for `queueSaveOutcome`).
+ */
+export function refusedPostProcessingOnEmpty(): Extract<SaveOutcome, { Refused: unknown }> {
+  return structuredClone(fixture.refused_post_processing_on_empty) as Extract<SaveOutcome, { Refused: unknown }>;
 }
 
 /** Core's `WHISPER_ISO_639_1` in core order (a fresh copy). */
