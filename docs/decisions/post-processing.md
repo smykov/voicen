@@ -1,10 +1,17 @@
 # Post-processing
 
-**Code:** `crates/voicen-core/src/post_process/{mod,chat}.rs`, `crates/voicen-core/src/engine/http.rs`, `Pipeline::process` / `Pipeline::release`, `RecordingController::job_finished` · **Tests that pin it:** `tests/post_process_chat.rs`, `tests/post_process_timeout.rs`, `post_process::tests`, `pipeline::tests::post_processor_*` / `skipped_post_processing_*`, `recording::tests::delivered_skipped_*`, `i18n::tests::post_processing_skip_ids_*`
+**Code:** `crates/voicen-core/src/post_process/{mod,chat}.rs`, `crates/voicen-core/src/engine/http.rs`, `src-tauri/src/dictation.rs` `start_dictation`, `Pipeline::process` / `Pipeline::release`, `RecordingController::job_finished` · **Tests that pin it:** `tests/post_process_chat.rs`, `tests/post_process_timeout.rs`, `post_process::tests`, `pipeline::tests::post_processor_*` / `skipped_post_processing_*`, `recording::tests::delivered_skipped_*`, `i18n::tests::post_processing_skip_ids_*`, `src-tauri/tests/dictation_e2e.rs` `post_processing_*` (Windows CI)
 
-Spec: `specs/003-llm-post-processing/` (contracts/core-post-process.md, data-model.md). Decisions: #42 (synchronous engines), #91 (scope, `not_configured`, one overlay message), #99 (timeouts are settings). Task: T-020; shell wiring T-074, toast T-075, log fields T-076.
+Spec: `specs/003-llm-post-processing/` (contracts/core-post-process.md, data-model.md). Decisions: #42 (synchronous engines), #91 (scope, `not_configured`, one overlay message), #99 (timeouts are settings). Task: T-020; shell wiring T-074 (done: follow-up 1 of #91), toast T-075, log fields T-076.
 
 ## Invariants
+
+### The app runs the same post-processor as the shell tests
+
+- **Why:** T-006 invariant 5 (`start_dictation` is the one builder of the app's `DictationSession`); #91 follow-up 1 (T-020 was core only; the shell installed `PassThrough`, so an enabled step never ran in the app).
+- **What breaks if you violate it:** the installed app silently ignores post-processing, or the shell tests prove a processor the app does not run.
+- **Where it is enforced:** `start_dictation` installs `Arc::new(ChatPostProcessor::new())` in `PipelineDeps.post_processor`; it is stateless (settings, key and timeouts come from each job), so `DictationPorts` has no post-processor port (T-074, option B rejected).
+- **Don't:** add a post-processor field to `DictationPorts`, or install `PassThrough` in `start_dictation`.
 
 ### A post-processed dictation always ends delivered
 

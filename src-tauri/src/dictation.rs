@@ -3,8 +3,10 @@
 //! app. It builds the session from the managed `SettingsService`, one `LogObserver`
 //! over the managed `Log`, the given ports (the credential store must be the
 //! `SettingsService`'s own instance), the release-1 speech gate
-//! (`SpeechGate(Err(Unavailable), energy)`), `PassThrough`, an interim pending-audio
-//! store whose `put` fails (until T-007) and [`SettingsRequests`]; manages it as
+//! (`SpeechGate(Err(Unavailable), energy)`), `ChatPostProcessor` (T-074: stateless,
+//! settings, key and timeouts come from each job, so the app and the tests run the
+//! same processor), an interim pending-audio store whose `put` fails (until T-007)
+//! and [`SettingsRequests`]; manages it as
 //! `Arc<DictationSession>` (the type the tray's menu-open handler looks up),
 //! starts the hotkey thread for the settings' hotkey and attaches it to the
 //! `HotkeyRegistrarHandle` the `SettingsService` was given (T-055), so a save's
@@ -29,7 +31,7 @@ use voicen_core::pipeline::{EngineFactory, PipelineDeps};
 use voicen_core::platform::{
     AudioSource, Clipboard, Indicator, Paster, PendingId, ShellRequests, TempAudioStore,
 };
-use voicen_core::post_process::PassThrough;
+use voicen_core::post_process::chat::ChatPostProcessor;
 use voicen_core::recording::{OverlayState, TrayState};
 use voicen_core::secrets::CredentialStore;
 use voicen_core::settings::gate::SettingsTab;
@@ -122,7 +124,7 @@ pub fn start_dictation<R: Runtime>(
             paster,
             temp_audio: Arc::new(NoPendingAudio),
             observer: Arc::new(LogObserver::new(Arc::clone(&log))),
-            post_processor: Arc::new(PassThrough),
+            post_processor: Arc::new(ChatPostProcessor::new()),
         },
         engine_factory,
         audio,

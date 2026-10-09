@@ -39,7 +39,7 @@ fn post_process_stage(enabled: bool) -> Option<PostProcessingSnapshot>; // snaps
 //           deliver(final_text)  // unchanged 001 delivery; job outcome = delivered (FR-007)
 ```
 
-The pipeline constructor takes `Arc<dyn PostProcessor>`. Tests inject a fake. The shell injects `ChatPostProcessor` (NFR-11; T-074 — until then it installs `PassThrough`).
+The pipeline constructor takes `Arc<dyn PostProcessor>`. Tests inject a fake. The shell injects `ChatPostProcessor` in `start_dictation` (NFR-11; T-074), not through a port, so the app and the shell tests run the same processor.
 
 **As implemented (T-020).** No `Notice` type: a skip ends the job as `JobEnd::DeliveredSkipped { reason: SkipReason, delivery: DeliveryResult }`; `RecordingController::job_finished` sets tray `Error` and shows one overlay message from `post_process::skip_message` (decision #91(3): `copied_paste_manually` wins over the skip, the skip wins over `copied`). The toast is T-075, the log fields T-076.
 
