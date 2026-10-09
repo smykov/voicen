@@ -61,7 +61,19 @@
 //     comes after the command returned (T-045 review r1 #8);
 //   - `localModelProgress(page, id, received)` and `localModelState(page, id, state)`
 //     update the list first, then emit, as core does (so a list after an event agrees
-//     with it).
+//     with it);
+//   - `local_model_delete { id }` (T-019) records the call, then runs the next queued
+//     script: a rejection (`queueDeleteRejection`; any payload, a FailureReason or not)
+//     is thrown as is and changes nothing; an outcome (`queueDeleteOutcome(page,
+//     outcome, view?)`) sets the row to `not_downloaded` and returns the outcome, and
+//     with a `view` stores it and then emits `settings://changed` with it after the
+//     command returned, as the change bridge does when core's selection reset was
+//     published (`engineReset`). Without a script the row becomes `not_downloaded` and
+//     core's `delete_outcomes.kept` is returned. The command emits no `local-model://`
+//     event (option A: the UI re-lists). The mock never validates (in use, not
+//     downloaded, which engine resets): a refusal or a reset is always scripted
+//     (decision #38). With `holdDelete`, every call is recorded at once and stays in
+//     flight, not yet run, until `releaseDelete()`; later calls run at once.
 // - Overlay (spec 001 contracts/ipc.md, T-053). Payloads are core's
 //   (e2e/fixtures/overlay-wire.json, `overlayWire(key)`):
 //   - `overlay_ready` returns the `overlayReady` option (default: core's hidden payload
@@ -95,7 +107,7 @@ import type { Page } from "@playwright/test";
 // the mock re-exports it, so a wire change is made in one TS file (T-004 r1 #8).
 
 import type { InputDevice, SaveOutcome, SettingsView } from "../../src/lib/settings/settingsApi";
-import type { FailureReason, LocalModelView, ModelState } from "../../src/lib/local-models/localModelsApi";
+import type { DeleteOutcome, FailureReason, LocalModelView, ModelState } from "../../src/lib/local-models/localModelsApi";
 import type { OverlayPayload } from "../../src/lib/overlay/overlayApi";
 export type {
   EngineKind,
@@ -112,6 +124,7 @@ export type {
 } from "../../src/lib/settings/settingsApi";
 // The local-model wire (spec 002) is declared once, in the window's localModelsApi.ts.
 export type {
+  DeleteOutcome,
   FailureReason,
   LocalModelProgress,
   LocalModelStateChange,
@@ -189,8 +202,11 @@ export function coreSpeechLanguages(): string[] {
 
 // ---- Core-checked local-model data (e2e/fixtures/local-models-wire.json, T-044) -------
 
-/** The `ReasonView` codes the fixture holds (DownloadFailure and DownloadError). */
+/** The `ReasonView` codes the fixture holds (DownloadFailure, DownloadError and DeleteError, T-019). */
 export type ReasonCode =
+  | "model_in_use"
+  | "not_downloaded"
+  | "delete_failed"
   | "download_interrupted"
   | "checksum_mismatch"
   | "not_enough_disk_space"
@@ -207,7 +223,12 @@ interface LocalModelsFixture {
   list_first_run: LocalModelView[];
   states: Record<"not_downloaded" | "downloading" | "downloaded" | "failed", ModelState>;
   reasons: Record<ReasonCode, FailureReason>;
+  /** Core's resolved values of `local_model_delete` (T-019, OQ-26 (a)). */
+  delete_outcomes?: Record<DeleteOutcomeKey, DeleteOutcome>;
 }
+
+/** The fixture's delete outcomes: nothing reset, the engine reset to none, the reset write failed. */
+export type DeleteOutcomeKey = "kept" | "engine_reset" | "reset_failed";
 
 const modelsFixture = JSON.parse(
   readFileSync(new URL("../fixtures/local-models-wire.json", import.meta.url), "utf8"),
@@ -223,9 +244,18 @@ export function localModelsFirstRun(): LocalModelView[] {
   return structuredClone(modelsFixture.list_first_run);
 }
 
-/** Core's `ReasonView` for `code` (a fresh copy). */
+/** Core's `ReasonView` for `code` (a fresh copy); a code the fixture lacks fails here, by name. */
 export function failureReason(code: ReasonCode): FailureReason {
-  return structuredClone(modelsFixture.reasons[code]);
+  const reason = modelsFixture.reasons[code];
+  if (reason === undefined) throw new Error(`local-models-wire.json has no reason ${code}`);
+  return structuredClone(reason);
+}
+
+/** Core's `DeleteOutcome` for `key` (a fresh copy); a fixture without it fails here, by name. */
+export function deleteOutcome(key: DeleteOutcomeKey): DeleteOutcome {
+  const outcome = modelsFixture.delete_outcomes?.[key];
+  if (outcome === undefined) throw new Error(`local-models-wire.json has no delete_outcomes.${key}`);
+  return structuredClone(outcome);
 }
 
 /** A `failed` state with core's reason for `code`. */
@@ -330,6 +360,8 @@ export interface MockOptions {
   holdDownload?: boolean;
   /** `local_models_list` rejects with this text (recorded); the command cannot run. */
   listRejection?: string;
+  /** Keep every `local_model_delete` in flight, not yet run, until `releaseDelete` (recorded at once). */
+  holdDelete?: boolean;
   /**
    * What `overlay_ready` returns, or `{ reject }` to make every call reject with that
    * text (still recorded); default: `overlayNothingYet()`.
@@ -361,6 +393,9 @@ interface InitArg {
   holdList: boolean;
   holdDownload: boolean;
   listRejection: string | null;
+  holdDelete: boolean;
+  /** Core's `delete_outcomes.kept`, or null when the fixture has none yet. */
+  deleteKept: DeleteOutcome | null;
   modelEvents: { progress: string; state: string };
   overlayReady: OverlayPayload | { reject: string };
   holdOverlayReady: boolean;
@@ -384,6 +419,8 @@ export async function installTauriMock(page: Page, options: MockOptions = {}): P
     holdList: options.holdList ?? false,
     holdDownload: options.holdDownload ?? false,
     listRejection: options.listRejection ?? null,
+    holdDelete: options.holdDelete ?? false,
+    deleteKept: modelsFixture.delete_outcomes?.kept ?? null,
     modelEvents: { ...modelsFixture.event_names },
     overlayReady: options.overlayReady ?? overlayNothingYet(),
     holdOverlayReady: options.holdOverlayReady ?? false,
@@ -418,6 +455,9 @@ export async function installTauriMock(page: Page, options: MockOptions = {}): P
       heldList: [] as (() => void)[],
       holdingDownload: init.holdDownload,
       heldDownload: [] as (() => void)[],
+      deleteScripts: [] as ({ outcome: unknown; view: unknown } | { reject: unknown })[],
+      holdingDelete: init.holdDelete,
+      heldDelete: [] as (() => void)[],
       holdingReady: init.holdOverlayReady,
       heldReady: [] as (() => void)[],
       holdingMics: init.holdMicrophones,
@@ -531,6 +571,23 @@ export async function installTauriMock(page: Page, options: MockOptions = {}): P
           }, 0);
           return true;
         }
+        case "local_model_delete": {
+          if (state.holdingDelete) await new Promise<void>((resolve) => state.heldDelete.push(resolve));
+          const script = state.deleteScripts.shift();
+          if (script && "reject" in script) throw clone(script.reject);
+          if (!script && init.deleteKept === null) {
+            throw new Error("local-models-wire.json has no delete_outcomes.kept (regenerate it)");
+          }
+          // Core removed the file before returning: the listed state is not_downloaded now.
+          setModelState(args.id as string, { kind: "not_downloaded" });
+          if (script && script.view !== null) {
+            const view = clone(script.view) as typeof state.view;
+            state.view = view;
+            // The bridge emits from another thread, after the reset was published.
+            setTimeout(() => emit("settings://changed", view, "mock"), 0);
+          }
+          return clone(script ? script.outcome : init.deleteKept);
+        }
         case "overlay_ready": {
           // The answer is the state when the shell ran the command (or its refusal); a
           // hold only delays it.
@@ -604,6 +661,12 @@ export async function installTauriMock(page: Page, options: MockOptions = {}): P
       setBuildInfo: (value: BuildInfo | { reject: string }) => {
         state.buildInfo = clone(value);
       },
+      queueDelete: (script: { outcome: unknown; view: unknown } | { reject: unknown }) =>
+        state.deleteScripts.push(clone(script)),
+      releaseDelete: () => {
+        state.holdingDelete = false;
+        for (const resolve of state.heldDelete.splice(0)) resolve();
+      },
       releaseOverlayReady: () => {
         state.holdingReady = false;
         for (const resolve of state.heldReady.splice(0)) resolve();
@@ -649,6 +712,8 @@ interface MockHandle {
   holdLists: () => void;
   releaseDownload: () => void;
   queueDownloadRejection: (payload: unknown) => void;
+  queueDelete: (script: { outcome: unknown; view: unknown } | { reject: unknown }) => void;
+  releaseDelete: () => void;
   releaseOverlayReady: () => void;
   releaseMicrophones: () => void;
   setBuildInfo: (value: BuildInfo | { reject: string }) => void;
@@ -797,6 +862,35 @@ export async function localModelState(page: Page, id: string, state: ModelState)
     ([model, next]) => (window as unknown as MockWindow).__VOICEN_MOCK__.modelState(model, next),
     [id, state] as const,
   );
+}
+
+/**
+ * The next `local_model_delete` resolves with `outcome` (`deleteOutcome(key)`): the row
+ * becomes `not_downloaded`; with `view` (core's selection reset was published), the mock
+ * stores it and emits `settings://changed` with it after the command returned.
+ */
+export async function queueDeleteOutcome(page: Page, outcome: DeleteOutcome, view?: SettingsView): Promise<void> {
+  await page.evaluate(
+    (script) => (window as unknown as MockWindow).__VOICEN_MOCK__.queueDelete(script),
+    { outcome, view: view ?? null },
+  );
+}
+
+/**
+ * The next `local_model_delete` rejects with `payload` and changes nothing: a
+ * `FailureReason` for a contract refusal (`failureReason("model_in_use")`, ...), anything
+ * else for a failure of the invoke itself.
+ */
+export async function queueDeleteRejection(page: Page, payload: unknown): Promise<void> {
+  await page.evaluate(
+    (value) => (window as unknown as MockWindow).__VOICEN_MOCK__.queueDelete({ reject: value }),
+    payload,
+  );
+}
+
+/** Runs every held `local_model_delete` (see `holdDelete`) in call order, answers it, and stops holding. */
+export async function releaseDelete(page: Page): Promise<void> {
+  await page.evaluate(() => (window as unknown as MockWindow).__VOICEN_MOCK__.releaseDelete());
 }
 
 // ---- Overlay (spec 001, T-053) -----------------------------------------------------

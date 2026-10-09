@@ -40,6 +40,7 @@ import type { Page } from "@playwright/test";
 import { expect, test } from "./support/boot";
 import {
   calls,
+  deleteOutcome,
   emitted,
   failedState,
   failureReason,
@@ -52,8 +53,11 @@ import {
   localModelState,
   LOCAL_MODEL_EVENTS,
   modelsWith,
+  queueDeleteOutcome,
+  queueDeleteRejection,
   queueDownloadRejection,
   queueSaveOutcome,
+  releaseDelete,
   releaseDownload,
   releaseList,
   storedModels,
@@ -568,5 +572,320 @@ test("the Download and Retry buttons stay disabled after the invoke resolves unt
   await expect(row(page, "base")).toHaveAttribute("data-state", "downloading");
   await expectAllDownloadOrRetry(page, "disabled", 4);
   expect(await downloadCalls(page)).toEqual([{ id: "base" }]);
+  expect(errors).toEqual([]);
+});
+
+// ---- T-019: delete a downloaded model (spec 002 US4, FR-021 to FR-023; option A) -------
+//
+// Locator contract this part adds (T-019 analysis, Investigation 7):
+// - Delete is a button with test id `local-model-delete` inside a row, offered on a
+//   `downloaded` row only (never on not_downloaded, downloading or failed);
+// - it asks first in an in-page `role="alertdialog"` with an accessible name that names
+//   the model (`t(nameKey)`); its buttons are `local-model-delete-keep` (nothing is sent)
+//   and `local-model-delete-confirm` (one `local_model_delete { id }`); no window.confirm;
+// - the command emits no event: after the invoke settles the rows follow a re-list of
+//   `local_models_list` (no optimistic state). Every Delete button is disabled from the
+//   confirmed invoke until the re-list after it has settled;
+// - a refusal (`model_in_use`, `delete_failed`, `not_downloaded`) is shown by its
+//   messageKey in the section's `role="alert"`, a rejection that is not a FailureReason as
+//   `error.ipc_unavailable` (never its text); a refusal changes no row and no selection;
+// - `engineReset: true` reaches the window only as `settings://changed` (the mock emits
+//   it, as the bridge does): the UI writes nothing to the draft (U1); a clean draft then
+//   shows engine none and the section unmounts; a dirty draft keeps its edits;
+// - `resetFailed: true` (OQ-26 (a)): the row follows the re-list (not downloaded) and the
+//   section shows `settings.write_failed` in its alert.
+
+const ru = (id: string, args?: Record<string, string>) => msg("ru", id, args);
+
+function deleteButton(page: Page, id: string) {
+  return row(page, id).getByTestId("local-model-delete");
+}
+
+function deleteDialog(page: Page) {
+  return page.getByRole("alertdialog");
+}
+
+async function deleteCalls(page: Page): Promise<unknown[]> {
+  return (await calls(page, "local_model_delete")).map((call) => call.args);
+}
+
+async function listCount(page: Page): Promise<number> {
+  return (await calls(page, "local_models_list")).length;
+}
+
+/** Clicks Delete on `id`, checks the confirmation names the model, and confirms. */
+async function confirmDelete(page: Page, id: string, lang: Lang = "en"): Promise<void> {
+  await deleteButton(page, id).click();
+  const dialog = deleteDialog(page);
+  await expect(dialog, "Delete asks first in an in-page alertdialog").toBeVisible();
+  const nameKey = localModelsFirstRun().find((model) => model.id === id)!.nameKey;
+  await expect(dialog).toContainText(msg(lang, nameKey));
+  await dialog.getByTestId("local-model-delete-confirm").click();
+  await expect(deleteDialog(page)).toHaveCount(0);
+}
+
+/** `localModelsFirstRun()` with each listed row in its state. */
+function modelsIn(states: Record<string, ModelState>): LocalModelView[] {
+  const list = localModelsFirstRun();
+  for (const [id, state] of Object.entries(states)) {
+    const r = list.find((model) => model.id === id);
+    if (r === undefined) throw new Error(`local-models-wire.json has no model ${id}`);
+    r.state = structuredClone(state);
+  }
+  return list;
+}
+
+/** The view core publishes after deleting the selected built-in model: engine none, no model. */
+function resetView(from: SettingsView): SettingsView {
+  const view = structuredClone(from);
+  view.settings.engine = "none";
+  view.settings.builtin_local.model_id = null;
+  return view;
+}
+
+test("Delete is offered only on downloaded rows: not on a not downloaded, downloading or failed row, and it appears when a row becomes downloaded", async ({ page }) => {
+  const errors = pageErrors(page);
+  await openLoaded(page, localView(), {
+    localModels: modelsIn({
+      tiny: DOWNLOADED,
+      base: { kind: "downloading", received: QUARTER_OF_BASE, total: BASE_BYTES },
+      small: DOWNLOADED,
+      "medium-q5_0": failedState("checksum_mismatch"),
+    }),
+  });
+  await expect(row(page, "small")).toHaveAttribute("data-state", "downloaded");
+
+  await expect(deleteButton(page, "tiny")).toBeEnabled();
+  await expect(deleteButton(page, "small")).toBeEnabled();
+  await expect(deleteButton(page, "base")).toHaveCount(0);
+  await expect(deleteButton(page, "medium-q5_0")).toHaveCount(0);
+  await expect(deleteButton(page, "large-v3-turbo-q5_0")).toHaveCount(0);
+  // Exactly the two downloaded rows carry one, and nothing outside the rows does.
+  await expect(section(page).getByTestId("local-model-delete")).toHaveCount(2);
+
+  // The rows decide it: base finishing makes it deletable.
+  await localModelState(page, "base", DOWNLOADED);
+  await expect(deleteButton(page, "base")).toBeEnabled();
+  await expect(section(page).getByTestId("local-model-delete")).toHaveCount(3);
+  expect(await calls(page, "local_model_delete")).toEqual([]);
+  expect(errors).toEqual([]);
+});
+
+test("Keep in the delete confirmation sends nothing and leaves small downloaded and selected", async ({ page }) => {
+  const errors = pageErrors(page);
+  await openLoaded(page, localView("small"), { localModels: modelsWith("small", DOWNLOADED) });
+  const lists = await listCount(page);
+
+  await deleteButton(page, "small").click();
+  const dialog = deleteDialog(page);
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toHaveAccessibleName(/\S/);
+  await expect(dialog).toContainText(en("local_model.name.small"));
+  await dialog.getByTestId("local-model-delete-keep").click();
+
+  await expect(deleteDialog(page)).toHaveCount(0);
+  expect(await calls(page, "local_model_delete")).toEqual([]);
+  await expect(row(page, "small")).toHaveAttribute("data-state", "downloaded");
+  await expect(deleteButton(page, "small")).toBeEnabled();
+  await expect(modelSelect(page)).toHaveValue("small");
+  expect(await listCount(page)).toBe(lists);
+  expect(errors).toEqual([]);
+});
+
+test("Acceptance 1: confirming Delete on small sends local_model_delete {id: small} once, and the re-list shows small not downloaded with Download and not selectable; the selection and settings are untouched", async ({ page }) => {
+  const errors = pageErrors(page);
+  await openLoaded(page, localView("base"), { localModels: modelsIn({ base: DOWNLOADED, small: DOWNLOADED }) });
+  await expectOptions(page, ["base", "small"]);
+  const lists = await listCount(page);
+
+  await confirmDelete(page, "small");
+  await expect.poll(() => deleteCalls(page)).toEqual([{ id: "small" }]);
+  // The command emits nothing (option A): only a re-list can show the removal.
+  await expect.poll(() => listCount(page)).toBeGreaterThan(lists);
+  const small = row(page, "small");
+  await expect(small).toHaveAttribute("data-state", "not_downloaded");
+  await expect(action(page, "small", "download")).toBeEnabled();
+  await expect(deleteButton(page, "small")).toHaveCount(0);
+  await expect(small.getByTestId("local-model-reason")).toHaveCount(0);
+  await expectOptions(page, ["base"]);
+  await expect(modelSelect(page)).toHaveValue("base");
+  await expect(deleteButton(page, "base")).toBeEnabled();
+  expect(await emitted(page, LOCAL_MODEL_EVENTS.state)).toEqual([]);
+  expect(await calls(page, "settings_save")).toEqual([]);
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  expect(await deleteCalls(page)).toEqual([{ id: "small" }]);
+  expect(errors).toEqual([]);
+});
+
+test("failure branch: deleting the selected model with a clean draft: engineReset arrives as settings://changed, the Engine select shows none and the model section is gone; the UI saves nothing", async ({ page }) => {
+  const errors = pageErrors(page);
+  const view = localView("small");
+  await openLoaded(page, view, { localModels: modelsWith("small", DOWNLOADED) });
+  await expect(modelSelect(page)).toHaveValue("small");
+  await queueDeleteOutcome(page, deleteOutcome("engine_reset"), resetView(view));
+
+  await confirmDelete(page, "small");
+  await expect.poll(() => deleteCalls(page)).toEqual([{ id: "small" }]);
+  await expect(page.locator('[data-field="engine.kind"]')).toHaveValue("none");
+  await expect(section(page)).toHaveCount(0);
+  await expect(modelSelect(page)).toHaveCount(0);
+  // The reset is core's (persisted and published); the window writes nothing (U1).
+  expect(await calls(page, "settings_save")).toEqual([]);
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  expect(await deleteCalls(page)).toEqual([{ id: "small" }]);
+  expect(errors).toEqual([]);
+});
+
+test("failure branch: deleting the selected model with a dirty draft keeps the draft's builtin_local and small (no UI write); the re-list shows small not downloaded and Save sends the draft as edited", async ({ page }) => {
+  const errors = pageErrors(page);
+  const view = localView("small");
+  view.settings.speech_language = "en";
+  await openLoaded(page, view, { localModels: modelsWith("small", DOWNLOADED) });
+  // A pending edit elsewhere on the tab makes the draft dirty.
+  await page.locator('[data-field="engine.speech_language"]').selectOption("de");
+  await queueDeleteOutcome(page, deleteOutcome("engine_reset"), resetView(view));
+
+  await confirmDelete(page, "small");
+  await expect.poll(() => deleteCalls(page)).toEqual([{ id: "small" }]);
+  await expect.poll(async () => (await emitted(page, "settings://changed")).length).toBe(1);
+  await expect(row(page, "small")).toHaveAttribute("data-state", "not_downloaded");
+  await expect(page.locator('[data-field="engine.kind"]')).toHaveValue("builtin_local");
+  await expectOptions(page, []);
+  expect(await calls(page, "settings_save")).toEqual([]);
+
+  await page.getByTestId("settings-save").click();
+  await expect.poll(async () => (await calls(page, "settings_save")).length).toBe(1);
+  const [save] = await calls(page, "settings_save");
+  const request = (save.args as { request: SaveRequest }).request;
+  expect(request.settings.engine).toBe("builtin_local");
+  expect(request.settings.builtin_local.model_id).toBe("small");
+  expect(request.settings.speech_language).toBe("de");
+  expect(errors).toEqual([]);
+});
+
+test("failure branch: resetFailed (OQ-26 a): the file is gone, the re-list shows small not downloaded, and the section shows settings.write_failed; the engine stays builtin_local", async ({ page }) => {
+  const errors = pageErrors(page);
+  await openLoaded(page, localView("small"), { localModels: modelsWith("small", DOWNLOADED) });
+  await queueDeleteOutcome(page, deleteOutcome("reset_failed"));
+
+  await confirmDelete(page, "small");
+  await expect.poll(() => deleteCalls(page)).toEqual([{ id: "small" }]);
+  await expect(section(page).getByRole("alert")).toContainText(en("settings.write_failed"));
+  await expect(row(page, "small")).toHaveAttribute("data-state", "not_downloaded");
+  await expect(action(page, "small", "download")).toBeEnabled();
+  await expect(page.locator('[data-field="engine.kind"]')).toHaveValue("builtin_local");
+  await expect(section(page).getByRole("alert")).not.toContainText(en("error.ipc_unavailable"));
+  expect(await calls(page, "settings_save")).toEqual([]);
+  expect(errors).toEqual([]);
+});
+
+for (const [code, messageKey] of [
+  ["model_in_use", "delete.model_in_use"],
+  ["delete_failed", "delete.failed"],
+  ["not_downloaded", "delete.not_downloaded"],
+] as const) {
+  test(`failure branch: a delete refused with ${code} shows ${messageKey} in the section, and small stays downloaded, selected and deletable`, async ({ page }) => {
+    const errors = pageErrors(page);
+    await openLoaded(page, localView("small"), { localModels: modelsWith("small", DOWNLOADED) });
+    await queueDeleteRejection(page, failureReason(code));
+
+    await confirmDelete(page, "small");
+    await expect.poll(() => deleteCalls(page)).toEqual([{ id: "small" }]);
+    const alert = section(page).getByRole("alert");
+    await expect(alert).toContainText(en(messageKey));
+    await expect(alert).not.toContainText(en("error.ipc_unavailable"));
+    // Never the code or the key as text.
+    await expect(section(page)).not.toContainText(code);
+    await expect(section(page)).not.toContainText(messageKey);
+    // A refusal changes no row and no selection.
+    const small = row(page, "small");
+    await expect(small).toHaveAttribute("data-state", "downloaded");
+    await expect(small.getByTestId("local-model-reason")).toHaveCount(0);
+    await expect(deleteButton(page, "small")).toBeEnabled();
+    await expectOptions(page, ["small"]);
+    await expect(modelSelect(page)).toHaveValue("small");
+    await expect(page.locator('[data-field="engine.kind"]')).toHaveValue("builtin_local");
+    expect(await calls(page, "settings_save")).toEqual([]);
+    expect(errors).toEqual([]);
+  });
+}
+
+test("failure branch: a delete refused with model_in_use is shown in Russian when the UI language is ru", async ({ page }) => {
+  const errors = pageErrors(page);
+  await openLoaded(page, localView("small", "ru"), { localModels: modelsWith("small", DOWNLOADED) });
+  await queueDeleteRejection(page, failureReason("model_in_use"));
+
+  await confirmDelete(page, "small", "ru");
+  await expect.poll(() => deleteCalls(page)).toEqual([{ id: "small" }]);
+  await expect(section(page).getByRole("alert")).toContainText(ru("delete.model_in_use"));
+  await expect(section(page)).not.toContainText(en("delete.model_in_use"));
+  await expect(row(page, "small")).toHaveAttribute("data-state", "downloaded");
+  expect(errors).toEqual([]);
+});
+
+test("failure branch: a delete rejection that is not a FailureReason shows error.ipc_unavailable and never the rejection text; small stays downloaded", async ({ page }) => {
+  const errors = pageErrors(page);
+  await openLoaded(page, localView("small"), { localModels: modelsWith("small", DOWNLOADED) });
+  await queueDeleteRejection(page, "local_model_delete exploded (fake)");
+
+  await confirmDelete(page, "small");
+  await expect.poll(() => deleteCalls(page)).toEqual([{ id: "small" }]);
+  await expect(section(page).getByRole("alert")).toContainText(en("error.ipc_unavailable"));
+  await expect(page.locator("body")).not.toContainText("exploded (fake)");
+  await expect(row(page, "small")).toHaveAttribute("data-state", "downloaded");
+  await expect(deleteButton(page, "small")).toBeEnabled();
+  await expect(modelSelect(page)).toHaveValue("small");
+  expect(errors).toEqual([]);
+});
+
+test("every Delete button stays disabled while the delete invoke and then the re-list after it are held, and the row changes only with that re-list", async ({ page }) => {
+  const errors = pageErrors(page);
+  await openLoaded(page, localView("base"), {
+    holdDelete: true,
+    localModels: modelsIn({ base: DOWNLOADED, small: DOWNLOADED }),
+  });
+  const lists = await listCount(page);
+
+  await confirmDelete(page, "small");
+  await expect.poll(() => deleteCalls(page)).toEqual([{ id: "small" }]);
+  // Held: core has not answered, so no row has changed; the pending invoke blocks.
+  await expect(deleteButton(page, "small")).toBeDisabled();
+  await expect(deleteButton(page, "base")).toBeDisabled();
+  await expect(row(page, "small")).toHaveAttribute("data-state", "downloaded");
+
+  await holdLists(page);
+  await releaseDelete(page);
+  // The invoke resolved and its re-list was issued (and is held): still blocked, and the
+  // row is not changed by the UI itself (no optimistic not_downloaded).
+  await expect.poll(() => listCount(page)).toBe(lists + 1);
+  await expect(row(page, "small")).toHaveAttribute("data-state", "downloaded");
+  await expect(deleteButton(page, "small")).toBeDisabled();
+  await expect(deleteButton(page, "base")).toBeDisabled();
+
+  await releaseList(page);
+  await expect(row(page, "small")).toHaveAttribute("data-state", "not_downloaded");
+  await expect(deleteButton(page, "small")).toHaveCount(0);
+  await expect(deleteButton(page, "base")).toBeEnabled();
+  expect(await deleteCalls(page)).toEqual([{ id: "small" }]);
+  expect(errors).toEqual([]);
+});
+
+// ---- T-045 review r2 Low #9: the per-row polite live region (characterization) -------
+
+test("a row turning failed shows its reason inside the polite live region that was already mounted with the row (the same element)", async ({ page }) => {
+  const errors = pageErrors(page);
+  await openLoaded(page);
+  const regions = row(page, "base").locator('[aria-live="polite"]');
+  await expect(regions).toHaveCount(1);
+  await expect(regions.getByTestId("local-model-reason")).toHaveCount(0);
+  // Mark the element that exists while base is not downloaded.
+  await regions.evaluate((el) => el.setAttribute("data-t045-marker", "before-failed"));
+
+  await localModelState(page, "base", failedState("download_interrupted"));
+  const marked = section(page).locator('[data-t045-marker="before-failed"]');
+  await expect(marked).toHaveCount(1);
+  await expect(marked).toHaveAttribute("aria-live", "polite");
+  await expect(marked.getByTestId("local-model-reason")).toHaveText(en("download.interrupted"));
+  await expect(row(page, "base").locator('[aria-live="polite"]')).toHaveCount(1);
   expect(errors).toEqual([]);
 });

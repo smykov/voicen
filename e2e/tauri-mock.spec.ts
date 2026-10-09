@@ -7,6 +7,7 @@ import type { Page } from "@playwright/test";
 import { expect, test } from "./support/boot";
 import {
   calls,
+  deleteOutcome,
   emit,
   emitted,
   firstRunView,
@@ -25,8 +26,11 @@ import {
   overlayNothingYet,
   overlayState,
   overlayWire,
+  queueDeleteOutcome,
+  queueDeleteRejection,
   queueDownloadRejection,
   queueSaveOutcome,
+  releaseDelete,
   releaseDownload,
   releaseList,
   releaseListen,
@@ -453,6 +457,125 @@ test("holdLists starts holding local_models_list mid-test, each answered with it
   await releaseList(page);
   await expect.poll(held).toEqual(localModelsFirstRun());
   expect(await invokeInPage(page, "local_models_list")).toEqual({ ok: modelsWith("base", { kind: "downloaded" }) });
+});
+
+// ---- local_model_delete (spec 002 contracts/ipc.md, T-019) -----------------------------
+
+test("local_model_delete unscripted records the call, lists the row not_downloaded, returns core's kept outcome, changes no settings and emits nothing", async ({ page }) => {
+  await listenInPage(page, LOCAL_MODEL_EVENTS.state);
+  await listenInPage(page, "settings://changed");
+  expect(deleteOutcome("kept")).toEqual({ engineReset: false, resetFailed: false });
+  const before = await storedView(page);
+  await localModelState(page, "small", { kind: "downloaded" });
+  const eventsBefore = (await emitted(page)).length;
+
+  expect(await invokeInPage(page, "local_model_delete", { id: "small" })).toEqual({ ok: deleteOutcome("kept") });
+  expect((await calls(page, "local_model_delete")).map((c) => c.args)).toEqual([{ id: "small" }]);
+  expect(await storedModels(page)).toEqual(localModelsFirstRun());
+  expect(await storedView(page)).toEqual(before);
+  // Give a deferred emit its chance: none may come (option A, no event; no reset).
+  await page.evaluate(() => new Promise((resolve) => setTimeout(resolve, 0)));
+  expect((await emitted(page)).length).toBe(eventsBefore);
+});
+
+test("a queued delete outcome with a view: the row is not_downloaded when the command returns, the view is stored, and settings://changed with it comes after the return; no local-model event", async ({ page }) => {
+  await localModelState(page, "small", { kind: "downloaded" });
+  const reset = firstRunView();
+  reset.first_run = false;
+  reset.settings.engine = "none";
+  reset.settings.builtin_local.model_id = null;
+  const outcome = deleteOutcome("engine_reset");
+  expect(outcome).toEqual({ engineReset: true, resetFailed: false });
+  await queueDeleteOutcome(page, outcome, reset);
+
+  const observed = await page.evaluate(async () => {
+    type Mock = { state: { models: { id: string; state: unknown }[] } };
+    const w = window as unknown as { __TAURI_INTERNALS__: Internals; __VOICEN_MOCK__: Mock; __changed?: unknown[] };
+    w.__changed = [];
+    const handler = w.__TAURI_INTERNALS__.transformCallback((e) => w.__changed!.push((e as { payload: unknown }).payload));
+    await w.__TAURI_INTERNALS__.invoke("plugin:event|listen", { event: "settings://changed", target: { kind: "Any" }, handler });
+    const answer = await w.__TAURI_INTERNALS__.invoke("local_model_delete", { id: "small" });
+    const listed = JSON.parse(JSON.stringify(w.__VOICEN_MOCK__.state.models.find((m) => m.id === "small")!.state));
+    return { answer, listed, changedYet: w.__changed.length };
+  });
+  expect(observed).toEqual({ answer: outcome, listed: { kind: "not_downloaded" }, changedYet: 0 });
+  const changed = () => page.evaluate(() => (window as unknown as { __changed: unknown[] }).__changed);
+  await expect.poll(changed).toEqual([reset]);
+  expect(await storedView(page)).toEqual(reset);
+  expect(await invokeInPage(page, "settings_get")).toEqual({ ok: reset });
+  expect((await emitted(page)).filter((e) => e.event.startsWith("local-model://") && e.source === "mock")).toEqual([]);
+});
+
+test("a queued delete outcome without a view (reset_failed) lists the row not_downloaded and changes no settings", async ({ page }) => {
+  await localModelState(page, "small", { kind: "downloaded" });
+  const before = await storedView(page);
+  await queueDeleteOutcome(page, deleteOutcome("reset_failed"));
+  expect(await invokeInPage(page, "local_model_delete", { id: "small" })).toEqual({
+    ok: { engineReset: false, resetFailed: true },
+  });
+  expect((await storedModels(page)).find((m) => m.id === "small")!.state).toEqual({ kind: "not_downloaded" });
+  await page.evaluate(() => new Promise((resolve) => setTimeout(resolve, 0)));
+  expect(await storedView(page)).toEqual(before);
+  expect(await emitted(page, "settings://changed")).toEqual([]);
+});
+
+test("queued delete rejections are thrown as is in order and change nothing; the queue is consumed", async ({ page }) => {
+  await localModelState(page, "small", { kind: "downloaded" });
+  const listed = await storedModels(page);
+  const view = await storedView(page);
+  const inUse = failureReason("model_in_use");
+  expect(inUse).toEqual({ code: "model_in_use", messageKey: "delete.model_in_use" });
+  expect(failureReason("not_downloaded")).toEqual({ code: "not_downloaded", messageKey: "delete.not_downloaded" });
+  expect(failureReason("delete_failed")).toEqual({ code: "delete_failed", messageKey: "delete.failed" });
+  await queueDeleteRejection(page, inUse);
+  await queueDeleteRejection(page, "not a FailureReason (fake)");
+  const thrown = await page.evaluate(async () => {
+    const w = window as unknown as { __TAURI_INTERNALS__: Internals };
+    try {
+      await w.__TAURI_INTERNALS__.invoke("local_model_delete", { id: "small" });
+      return "resolved";
+    } catch (e) {
+      return e;
+    }
+  });
+  expect(thrown).toEqual(inUse);
+  expect(await invokeInPage(page, "local_model_delete", { id: "small" })).toEqual({ err: "\"not a FailureReason (fake)\"" });
+  expect(await storedModels(page)).toEqual(listed);
+  expect(await storedView(page)).toEqual(view);
+  expect(await emitted(page, "settings://changed")).toEqual([]);
+  // Consumed: the next one runs unscripted.
+  expect(await invokeInPage(page, "local_model_delete", { id: "small" })).toEqual({ ok: deleteOutcome("kept") });
+  expect(await calls(page, "local_model_delete")).toHaveLength(3);
+});
+
+test("holdDelete keeps local_model_delete in flight and not yet run (no row changes) until releaseDelete; later calls run at once", async ({ context }) => {
+  const page = await context.newPage();
+  await installTauriMock(page, { holdDelete: true, localModels: modelsWith("small", { kind: "downloaded" }) });
+  await page.goto("/");
+  await queueDeleteRejection(page, failureReason("model_in_use"));
+  await page.evaluate(() => {
+    const w = window as unknown as { __TAURI_INTERNALS__: Internals; __first?: unknown; __second?: unknown };
+    void w.__TAURI_INTERNALS__
+      .invoke("local_model_delete", { id: "small" })
+      .then((v) => (w.__first = { ok: v }), (e) => (w.__first = { err: e }));
+    void w.__TAURI_INTERNALS__
+      .invoke("local_model_delete", { id: "small" })
+      .then((v) => (w.__second = { ok: v }), (e) => (w.__second = { err: e }));
+  });
+  await expect.poll(async () => (await calls(page, "local_model_delete")).length).toBe(2);
+  const answers = () =>
+    page.evaluate(() => {
+      const w = window as unknown as { __first?: unknown; __second?: unknown };
+      return [w.__first ?? null, w.__second ?? null];
+    });
+  expect(await answers()).toEqual([null, null]);
+  expect(await storedModels(page)).toEqual(modelsWith("small", { kind: "downloaded" }));
+
+  await releaseDelete(page);
+  // Run in call order: the first takes the scripted rejection, the second deletes.
+  await expect.poll(answers).toEqual([{ err: failureReason("model_in_use") }, { ok: deleteOutcome("kept") }]);
+  expect(await storedModels(page)).toEqual(localModelsFirstRun());
+  expect(await invokeInPage(page, "local_model_delete", { id: "small" })).toEqual({ ok: deleteOutcome("kept") });
 });
 
 // ---- Overlay (spec 001 contracts/ipc.md, T-053) ---------------------------------------
