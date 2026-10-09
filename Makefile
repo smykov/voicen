@@ -3,7 +3,7 @@
 	check-ci-credentials \
 	check-clippy-lines \
 	check-core-test-os-answer check-ci-wip check-telegram-send check-telegram-failure-branch \
-	check-version-stamp check-release-check check-release check-release-guard check-nsis-fork check-e2e-entry-fixtures \
+	check-version-stamp check-release-check check-release check-release-guard check-nsis-fork check-app-acl check-e2e-entry-fixtures \
 	check-whisper-cmake-cache check-whisper-model-key check-crt-imports check-whisper \
 	check-shell-windows check-ban-canary check-role-tools check-guard-trigger \
 	check-ui core-image ui-image \
@@ -14,7 +14,7 @@
 # error is reported first by the faster native check-core, before the slower runs.
 check: check-shell-layout check-shell-layout-fixtures check-helper-windows-fixtures check-ci-credentials check-role-tools check-guard-trigger \
 	check-clippy-lines \
-	check-core-test-os-answer check-ci-wip check-telegram-send check-telegram-failure-branch check-version-stamp check-release-check check-release check-release-guard check-nsis-fork check-whisper-cmake-cache check-whisper-model-key check-crt-imports check-core check-whisper \
+	check-core-test-os-answer check-ci-wip check-telegram-send check-telegram-failure-branch check-version-stamp check-release-check check-release check-release-guard check-nsis-fork check-app-acl check-whisper-cmake-cache check-whisper-model-key check-crt-imports check-core check-whisper \
 	check-ban-canary check-shell-windows check-e2e-entry-fixtures check-ui \
 	licenses-check
 
@@ -169,6 +169,15 @@ check-release-guard:
 # built in a temp dir and on the real repo. Host bash, python3 (stdlib json).
 check-nsis-fork:
 	scripts/ci/nsis-fork.test.sh
+
+# T-049 (class ipc-acl, decisions #45, #57): every #[tauri::command] under src-tauri/src is in
+# generate_handler!, in build.rs APP_COMMANDS (handed to tauri-build's AppManifest::commands)
+# and granted as allow-<command> by a capability that names exact window labels; no app deny-*,
+# no orphan grant, no hand-written permission file. Which label gets which command is
+# src-tauri/tests/app_acl.rs (Windows CI). The self-test runs the tripwire scripts/ci/app-acl.sh
+# on shell dirs built in a temp dir and on the real src-tauri. Host bash, python3.
+check-app-acl:
+	scripts/ci/app-acl.test.sh
 
 # T-064: the ui e2e entry point (package.json scripts.e2e) runs Playwright only in the ui image
 # at the lockfile's @playwright/test version, with --network none and the caller's CI; a
