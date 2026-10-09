@@ -18,8 +18,9 @@
   //   UI-only ids; every byte count through `formatSize`. A refused download, a rejection
   //   that is not a FailureReason and a rejected list are shown in the section; a
   //   rejection's own text never is.
-  // - Delete (T-019): offered on a downloaded row only, after an in-page alertdialog
-  //   naming the model. The command emits no event: the rows follow the re-list issued
+  // - Delete (T-019): offered on a downloaded row only, after a modal alertdialog
+  //   naming the model. A close request with a dirty draft cancels the confirmation
+  //   (keepModel, nothing sent) before the discard prompt shows (settings-ui.md A, M). The command emits no event: the rows follow the re-list issued
   //   after the invoke settles, and every Delete stays disabled until that re-list has
   //   settled (as I4). A refusal shows its reason and changes no row; `resetFailed`
   //   shows `settings.write_failed`. An engine reset reaches the window only as
@@ -32,6 +33,7 @@
   import type { Draft } from "$lib/settings/draft";
   import { controlId, describedBy } from "$lib/settings/fields";
   import FieldMessage from "$lib/settings/FieldMessage.svelte";
+  import { dismissOnDiscardPrompt } from "$lib/settings/modals";
   import {
     asFailureReason,
     cancelLocalModelDownload,
@@ -136,6 +138,8 @@
   function keepModel(): void {
     confirming = null;
   }
+  // The discard prompt wins: the confirmation is cancelled, not confirmed.
+  dismissOnDiscardPrompt(keepModel);
 
   async function confirmDelete(): Promise<void> {
     const row = confirming;

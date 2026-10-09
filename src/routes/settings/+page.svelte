@@ -13,8 +13,9 @@
   // draft is dirty (D); a not_restored field with no control on the page is named in the
   // form-level message by its label, `settings.field_label.<FieldId>` (L).
   //
-  // T-023: About (General tab) is a modal <dialog>; the discard prompt wins, so onClose
-  // closes About before it shows the prompt.
+  // T-023, T-019: the discard prompt wins over every in-page modal (About, the delete
+  // confirmation): onClose dismisses each one registered through $lib/settings/modals
+  // (its own keep path) before it shows the prompt.
   //
   // T-015 (decision #52): the warnings of the last Saved outcome are rendered as core
   // sent them (no URL, scheme or host rule here) and kept in page state beside `saved`,
@@ -46,6 +47,7 @@
     speechLanguages,
     type SettingsView,
   } from "$lib/settings/settingsApi";
+  import { provideModalHost } from "$lib/settings/modals";
   import Engine from "$lib/settings/tabs/Engine.svelte";
   import General from "$lib/settings/tabs/General.svelte";
   import History from "$lib/settings/tabs/History.svelte";
@@ -88,8 +90,8 @@
   /** The discard prompt is shown (a close was requested with a dirty draft). */
   let confirmDiscard = $state(false);
   let keepButton = $state<HTMLButtonElement | undefined>();
-  /** The About dialog of the General tab is open (T-023). */
-  let aboutOpen = $state(false);
+  /** The in-page modals (About, the delete confirmation), dismissed by a close request. */
+  const modals = provideModalHost();
 
   function fieldRequest(field: string | null | undefined): { field: string } | null {
     return typeof field === "string" ? { field } : null;
@@ -157,8 +159,8 @@
     try {
       if (draft !== null && isDirty(draft)) {
         event.preventDefault();
-        // The discard prompt wins: a modal About would leave the prompt inert.
-        aboutOpen = false;
+        // The discard prompt wins: an open modal dialog would leave the prompt inert.
+        modals.dismissAll();
         confirmDiscard = true;
       }
     } catch {
@@ -305,7 +307,7 @@
         {:else if tab === "history"}
           <History bind:draft {warnings} />
         {:else}
-          <General bind:draft {warnings} bind:aboutOpen />
+          <General bind:draft {warnings} />
         {/if}
       </fieldset>
     </div>
