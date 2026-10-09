@@ -30,7 +30,8 @@ use voicen_core::i18n::{self, MessageId, MESSAGE_IDS};
 use voicen_core::local_models::catalog::{CatalogEntry, ModelId, MODELS};
 use voicen_core::local_models::download::{DiskSpace, DownloadError, DownloadFailure};
 use voicen_core::local_models::service::{
-    LocalModelEvent, LocalModelView, LocalModels, ReasonView, PROGRESS_EVENT, STATE_EVENT,
+    DeleteError, DeleteOutcome, LocalModelEvent, LocalModelView, LocalModels, ReasonView,
+    PROGRESS_EVENT, STATE_EVENT,
 };
 use voicen_core::local_models::store::{LocalModelState, ModelStore};
 use voicen_core::models::DownloadedModels;
@@ -719,19 +720,29 @@ fn a_failed_never_hides_a_model_downloaded_on_disk_and_a_retry_does_not_bring_it
     // the same Arc). The one exception to "a refused start keeps the state it had"
     // is AlreadyDownloaded: the refusal itself says the disk has the model. The
     // final file appears outside a download (a manual copy, a second instance).
-    // Bite: list() preferring a transient Failed over the disk Downloaded, or the
-    // Err branch of download() restoring the Failed after already_downloaded.
-    let w = world(vec![Serve::Altered]);
-    let mut first = start(&w, "base");
-    let end = first.wait_state();
+    //
+    // Phase 1 (T-044 review 2 Low 1, folded into T-019): no list() runs between
+    // the copy and the refused retry, so the refusal meets the transient Failed
+    // (list() itself drops a stale Failed). The file is then removed by hand (not
+    // through `delete`, which clears the transient entry itself): a Failed restored
+    // by the refusal would now show `failed`; the right answer is not_downloaded.
+    // Bite: the Err branch of download() restoring the Failed after
+    // already_downloaded.
+    //
+    // Phase 2: a second failed download, the copy again, then list() must show the
+    // disk Downloaded. Bite: list() preferring a transient Failed over the disk
+    // Downloaded.
+    let w = world(vec![Serve::Altered, Serve::Altered]);
     let failed = LocalModelState::Failed {
         reason: DownloadFailure::ChecksumMismatch,
     };
+    let mut first = start(&w, "base");
+    let end = first.wait_state();
     assert_eq!(
         end.event,
         LocalModelEvent::State {
             id: ModelId::Base,
-            state: failed,
+            state: failed.clone(),
         },
         "precondition: the download failed"
     );
@@ -741,7 +752,30 @@ fn a_failed_never_hides_a_model_downloaded_on_disk_and_a_retry_does_not_bring_it
         w.models.store().is_downloaded("base"),
         "precondition: the store (settings validation) sees the copied model"
     );
+    let got = refused(&w, "base");
+    assert_eq!(
+        got,
+        reason("already_downloaded", i18n::DOWNLOAD_ALREADY_DOWNLOADED, &[])
+    );
+    assert_eq!(w.server.accepts(), 1, "the refused retry sent a request");
+    std::fs::remove_file(w.dir.join(final_name(ModelId::Base))).expect("remove the copy");
+    assert_eq!(
+        states(&w.models),
+        all_not_downloaded(),
+        "the already_downloaded refusal restored the stale Failed"
+    );
 
+    let mut second = start(&w, "base");
+    let end = second.wait_state();
+    assert_eq!(
+        end.event,
+        LocalModelEvent::State {
+            id: ModelId::Base,
+            state: failed,
+        },
+        "precondition: the second download failed"
+    );
+    put(&w.dir, &final_name(ModelId::Base), &model_bytes());
     let mut expected = all_not_downloaded();
     expected[1].1 = LocalModelState::Downloaded;
     assert_eq!(
@@ -749,19 +783,8 @@ fn a_failed_never_hides_a_model_downloaded_on_disk_and_a_retry_does_not_bring_it
         expected,
         "list() after the file appeared disagrees with store().is_downloaded"
     );
-
-    let got = refused(&w, "base");
-    assert_eq!(
-        got,
-        reason("already_downloaded", i18n::DOWNLOAD_ALREADY_DOWNLOADED, &[])
-    );
-    assert_eq!(
-        states(&w.models),
-        expected,
-        "list() after the already_downloaded refusal"
-    );
     assert!(w.models.store().is_downloaded("base"));
-    assert_eq!(w.server.accepts(), 1, "the refused retry sent a request");
+    assert_eq!(w.server.accepts(), 2);
 }
 
 #[test]
@@ -971,7 +994,8 @@ fn e2e_local_models_wire_fixture_matches_core() {
     // P-010: the e2e mock holds no hand copy of the catalog or the wire shapes.
     // Bite: a field renamed (`name_key` instead of `nameKey`), a state kind spelled
     // another way, a code or message key changed, the production catalog changed,
-    // without regenerating e2e/fixtures/local-models-wire.json.
+    // a delete outcome field renamed (T-019), without regenerating
+    // e2e/fixtures/local-models-wire.json.
     let fixture: Value =
         serde_json::from_str(E2E_WIRE_FIXTURE).expect("local-models-wire.json is valid JSON");
     let tmp = TempDir::new();
@@ -1019,7 +1043,31 @@ fn e2e_local_models_wire_fixture_matches_core() {
         }
         reasons.insert(r.code.to_string(), value);
     }
+    // T-019: the refusals of `local_model_delete` (contracts/ipc.md:39), keyed by
+    // code beside the download reasons; no code may collide with one of those.
+    for e in [
+        DeleteError::ModelInUse,
+        DeleteError::NotDownloaded,
+        DeleteError::DeleteFailed,
+    ] {
+        let r = ReasonView::from(&e);
+        assert!(
+            !reasons.contains_key(r.code),
+            "{e:?} reuses the download code {}",
+            r.code
+        );
+        reasons.insert(r.code.to_string(), wire(&r));
+    }
     core.insert("reasons".into(), Value::Object(reasons));
+    // T-019: the resolved value of `local_model_delete` (OQ-26 (a)).
+    core.insert(
+        "delete_outcomes".into(),
+        json!({
+            "kept": wire(&DeleteOutcome { engine_reset: false, reset_failed: false }),
+            "engine_reset": wire(&DeleteOutcome { engine_reset: true, reset_failed: false }),
+            "reset_failed": wire(&DeleteOutcome { engine_reset: false, reset_failed: true }),
+        }),
+    );
 
     for (key, value) in &core {
         assert_eq!(

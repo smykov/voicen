@@ -1,6 +1,7 @@
 //! T-044: the local-model commands and events (specs/002 contracts/ipc.md
 //! `local_models_list`, `local_model_download { id }`,
-//! `local_model_cancel_download { id }`, `local-model://progress|state`) over the
+//! `local_model_cancel_download { id }`, `local-model://progress|state`; T-019:
+//! `local_model_delete { id }` → `{ engineReset, resetFailed }`) over the
 //! shell's one construction path (`load_settings`) and app wiring (`build_app`),
 //! through Tauri's mock runtime; the models-dir resolver (`paths::models_dir`) and
 //! the Windows disk probe (`WinDiskSpace`). Windows CI only (decision #5).
@@ -50,6 +51,8 @@ use voicen_lib::settings_window::{self, LABEL};
 /// contracts/ipc.md event names, spelled out here (not taken from the code).
 const PROGRESS: &str = "local-model://progress";
 const STATE: &str = "local-model://state";
+/// The change bridge's event (settings_ipc::spawn_change_bridge).
+const CHANGED: &str = "settings://changed";
 /// Long enough for any local end event; a hang fails the test instead of the run.
 const END_WAIT: Duration = Duration::from_secs(10);
 /// How long "nothing more happens" is watched.
@@ -220,6 +223,28 @@ impl World {
     fn cancel(&self, id: &str) -> Value {
         self.invoke("local_model_cancel_download", json!({ "id": id }))
             .unwrap_or_else(|e| panic!("local_model_cancel_download rejected: {e}"))
+    }
+
+    fn delete(&self, id: &str) -> Result<Value, Value> {
+        self.invoke("local_model_delete", json!({ "id": id }))
+    }
+
+    #[track_caller]
+    fn settings_get(&self) -> Value {
+        self.invoke("settings_get", json!({}))
+            .unwrap_or_else(|e| panic!("settings_get rejected: {e}"))
+    }
+
+    /// Every payload of `settings://changed` (app.emit by the change bridge), as
+    /// JSON, in a channel.
+    fn changed_events(&self) -> Receiver<Value> {
+        let (tx, rx) = mpsc::channel();
+        self.app.listen_any(CHANGED, move |event| {
+            let payload: Value =
+                serde_json::from_str(event.payload()).expect("event payload is JSON");
+            let _ = tx.send(payload);
+        });
+        rx
     }
 
     /// `settings_save` of `settings` with every key `Untouched`.
@@ -613,6 +638,118 @@ fn events_reach_the_settings_window_and_no_app_or_other_window_listener() {
     assert!(at_other.is_empty(), "the `other` window got: {at_other:?}");
 }
 
+// ---- local_model_delete (T-019) ---------------------------------------------------------
+
+#[test]
+fn deleting_the_selected_model_through_ipc_resets_the_engine_and_the_window_hears_it() {
+    // Spec US4 scenario 2 through the shell: the command delegates to
+    // LocalModels::delete with the managed SettingsService, so the reset is
+    // persisted (a new settings_get) and published (the change bridge emits
+    // settings://changed with the new view); no local-model event is emitted (the UI
+    // re-lists, analysis A). Bite: the command not registered or not given the
+    // managed service (no reset), a second SettingsService, an emit of
+    // local-model://state from the command, the wire fields re-spelled.
+    let w = world_with(vec![], FakeDisk::with_available(10 * NEEDED), |dir| {
+        put(dir, "ggml-small.bin", &model_bytes());
+    });
+    let saved = w.save(&builtin_local("small"));
+    assert!(saved.get("Saved").is_some(), "precondition: {saved}");
+    let changed = w.changed_events();
+    let local = record(&w.webview);
+
+    let got = w.delete("small");
+
+    assert_eq!(
+        got,
+        Ok(json!({ "engineReset": true, "resetFailed": false }))
+    );
+    assert_eq!(dir_entries(&w.models_dir), Vec::<String>::new());
+    assert_eq!(w.state_of("small"), json!({ "kind": "not_downloaded" }));
+    let view = w.settings_get();
+    assert_eq!(view["settings"]["engine"], json!("none"), "{view}");
+    assert_eq!(
+        view["settings"]["builtin_local"]["model_id"],
+        Value::Null,
+        "{view}"
+    );
+    assert_eq!(w.service.snapshot().engine, EngineKind::None);
+    let heard = changed
+        .recv_timeout(END_WAIT)
+        .unwrap_or_else(|e| panic!("no {CHANGED} after the reset ({e:?})"));
+    assert_eq!(heard["settings"]["engine"], json!("none"), "{heard}");
+    let events = drain(&local, QUIET);
+    assert!(
+        events.is_empty(),
+        "local-model events from a delete: {events:?}"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn a_model_file_held_open_is_delete_failed_and_stays_downloaded_and_selected() {
+    // FR-023, the real "locked" branch (the core unit test injects the error): the
+    // file is held open without FILE_SHARE_DELETE, as a reader in another process
+    // would, so DeleteFileW fails with a sharing violation → `delete_failed`; the
+    // model stays downloaded and selected and settings_get is unchanged. Once the
+    // handle is closed the same delete succeeds. Bite: the error swallowed (Ok, or
+    // a delete that schedules removal on close and reports success), the settings
+    // reset before the removal, another code.
+    use std::os::windows::fs::OpenOptionsExt;
+    /// FILE_SHARE_READ: other openers may read, not write or delete.
+    const FILE_SHARE_READ: u32 = 0x1;
+
+    let w = world_with(vec![], FakeDisk::with_available(10 * NEEDED), |dir| {
+        put(dir, "ggml-small.bin", &model_bytes());
+    });
+    let saved = w.save(&builtin_local("small"));
+    assert!(saved.get("Saved").is_some(), "precondition: {saved}");
+    let before = w.settings_get();
+    let held = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ)
+        .open(w.models_dir.join("ggml-small.bin"))
+        .expect("open the model file without FILE_SHARE_DELETE");
+
+    let got = w.delete("small");
+
+    assert_eq!(
+        got,
+        Err(json!({ "code": "delete_failed", "messageKey": "delete.failed" }))
+    );
+    assert_eq!(w.state_of("small"), json!({ "kind": "downloaded" }));
+    assert_eq!(w.settings_get(), before, "settings_get after delete_failed");
+    assert_eq!(
+        w.service.snapshot().builtin_local.model_id.as_deref(),
+        Some("small")
+    );
+    drop(held);
+    assert!(
+        w.models_dir.join("ggml-small.bin").exists(),
+        "the file went away when the handle closed (delete-on-close)"
+    );
+
+    let again = w.delete("small");
+    assert_eq!(
+        again,
+        Ok(json!({ "engineReset": true, "resetFailed": false }))
+    );
+    assert_eq!(w.state_of("small"), json!({ "kind": "not_downloaded" }));
+}
+
+#[test]
+fn delete_refusals_reach_the_window_as_failure_reasons() {
+    // contracts/ipc.md:39: `not_downloaded` for a model not on disk and for an id
+    // outside the catalog; nothing changes. Bite: not_in_catalog for an unknown id,
+    // a rejection that is not a FailureReason, a reset of the selection.
+    let w = world(vec![]);
+    let before = w.settings_get();
+    let not_downloaded = json!({ "code": "not_downloaded", "messageKey": "delete.not_downloaded" });
+
+    assert_eq!(w.delete("base"), Err(not_downloaded.clone()));
+    assert_eq!(w.delete("medium"), Err(not_downloaded));
+    assert_eq!(w.settings_get(), before);
+}
+
 // ---- tauri's real ACL ------------------------------------------------------------------
 
 /// The release context (tauri.conf.json and the capabilities as tauri-build resolved
@@ -624,8 +761,8 @@ fn release_context() -> Context<MockRuntime> {
 #[test]
 fn local_model_commands_pass_the_real_acl_from_the_settings_window() {
     // Decision #57 / T-049: app commands are not ACL-checked from a local origin
-    // while the app defines no permissions; this pins that the three local-model
-    // commands are reachable from the window `settings_window::open` made, under
+    // while the app defines no permissions; this pins that the four local-model
+    // commands (T-019: local_model_delete) are reachable from the window `settings_window::open` made, under
     // the release context. Bite: an app ACL manifest (AppManifest::commands or
     // src-tauri/permissions/) that does not allow them for `settings` ("not
     // allowed"), a command not registered.
@@ -672,13 +809,21 @@ fn local_model_commands_pass_the_real_acl_from_the_settings_window() {
     // A command error, not an ACL refusal: the call reached the command.
     let refused = invoke_at(
         &window,
-        url,
+        url.clone(),
         "local_model_download",
         json!({ "id": "medium" }),
     );
     assert_eq!(
         refused,
         Err(json!({ "code": "not_in_catalog", "messageKey": "download.not_in_catalog" }))
+    );
+
+    // T-019: `local_model_delete` registered and allowed for `settings`; a command
+    // error, not an ACL refusal or an unknown command.
+    let delete = invoke_at(&window, url, "local_model_delete", json!({ "id": "base" }));
+    assert_eq!(
+        delete,
+        Err(json!({ "code": "not_downloaded", "messageKey": "delete.not_downloaded" }))
     );
 }
 

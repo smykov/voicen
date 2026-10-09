@@ -409,3 +409,178 @@ impl Serialize for LocalModelEvent {
         }
     }
 }
+
+/// T-019: the `delete_failed` branch, which the Linux gate cannot reach through the
+/// file system (the container runs as uid 0, so no permission trick makes
+/// `remove_file` fail on a regular file). The removal is the private
+/// `LocalModels::remove: fn(&Path) -> io::Result<()>`, which `open` sets to
+/// `std::fs::remove_file`; these tests replace it. The real lock is the Windows CI
+/// test in `src-tauri/tests/local_models.rs`.
+#[cfg(test)]
+mod delete_tests {
+    use super::*;
+    use crate::autostart::FakeAutostart;
+    use crate::clock::FakeClock;
+    use crate::hotkey_registrar::FakeHotkeyRegistrar;
+    use crate::models::DownloadedModels;
+    use crate::secrets::FakeCredentialStore;
+    use crate::settings::file::{FakeSettingsFile, FileCall};
+    use crate::settings::service::{SettingsDeps, SettingsService};
+    use crate::settings::{defaults, EngineKind, Settings};
+    use crate::test_support::local_models::{catalog, entry, file_name, model_bytes, FakeDisk};
+    use crate::test_support::TempDir;
+    use std::path::Path;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::mpsc::TryRecvError;
+    use std::time::{Duration, UNIX_EPOCH};
+
+    const OS: Option<&str> = Some("en-US");
+
+    struct Rig {
+        _tmp: TempDir,
+        file_path: PathBuf,
+        models: LocalModels,
+        file: Arc<FakeSettingsFile>,
+        service: SettingsService,
+        stored: Settings,
+        changes: std::sync::mpsc::Receiver<Arc<Settings>>,
+    }
+
+    /// `small` on disk (never served: the URL is a host string only), and the
+    /// settings selecting it as the built-in engine.
+    fn rig() -> Rig {
+        let tmp = TempDir::new();
+        let dir = tmp.path().join("models");
+        let name = file_name(ModelId::Small);
+        std::fs::create_dir_all(&dir).expect("models dir");
+        let file_path = dir.join(name);
+        std::fs::write(&file_path, model_bytes()).expect("model file");
+        let cat = catalog(vec![entry(
+            ModelId::Small,
+            name,
+            "https://huggingface.co/fake/ggml-small.bin",
+        )]);
+        let disk: Arc<dyn DiskSpace> = FakeDisk::with_available(u64::MAX);
+        let (models, cleanup) = LocalModels::open(dir, disk, Timeouts::default(), cat);
+        cleanup.expect("cleanup");
+        let mut stored = defaults(OS);
+        stored.engine = EngineKind::BuiltinLocal;
+        stored.builtin_local.model_id = Some("small".into());
+        let file = Arc::new(FakeSettingsFile::with_bytes(
+            &serde_json::to_vec(&stored).expect("serialize"),
+        ));
+        let deps = SettingsDeps {
+            file: file.clone(),
+            credentials: Arc::new(FakeCredentialStore::new()),
+            autostart: Arc::new(FakeAutostart::new()),
+            hotkeys: Arc::new(FakeHotkeyRegistrar::new()),
+            local_models: models.store(),
+            clock: Arc::new(FakeClock::at(
+                UNIX_EPOCH + Duration::from_secs(1_709_251_199),
+            )),
+        };
+        let (service, _) = SettingsService::load_or_init(deps, OS);
+        let changes = service.subscribe();
+        Rig {
+            _tmp: tmp,
+            file_path,
+            models,
+            file,
+            service,
+            stored,
+            changes,
+        }
+    }
+
+    /// Releases every model and counts the guards dropped.
+    #[derive(Default)]
+    struct CountingRelease {
+        released: AtomicUsize,
+        dropped: Arc<AtomicUsize>,
+    }
+
+    struct Counted(Arc<AtomicUsize>);
+
+    impl Drop for Counted {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    impl ModelRelease for CountingRelease {
+        fn release_for_delete(&self, _id: ModelId) -> Result<ReleaseGuard, InUse> {
+            self.released.fetch_add(1, Ordering::SeqCst);
+            Ok(ReleaseGuard::new(Counted(Arc::clone(&self.dropped))))
+        }
+    }
+
+    fn sharing_violation(_: &Path) -> io::Result<()> {
+        // Stands in for Windows' ERROR_SHARING_VIOLATION: any error but NotFound is
+        // a failed removal.
+        Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "injected: file locked",
+        ))
+    }
+
+    fn already_gone(_: &Path) -> io::Result<()> {
+        Err(io::Error::from(io::ErrorKind::NotFound))
+    }
+
+    #[test]
+    fn a_removal_error_is_delete_failed_and_the_model_stays_downloaded_and_selected() {
+        // FR-023 / spec US4: a removal I/O error → `delete_failed`; the model stays
+        // downloaded (listed, and in the store the settings validation reads) and the
+        // settings are untouched. The guard is still dropped (the model reloads on
+        // the next use). Bite: the error swallowed (Ok), the settings reset before the
+        // removal, the transient state set to Failed, the guard leaked on the error
+        // path, another code.
+        let mut r = rig();
+        r.models.remove = sharing_violation;
+        let residency = CountingRelease::default();
+
+        let got = r.models.delete("small", &residency, &r.service);
+
+        assert_eq!(got, Err(ReasonView::from(&DeleteError::DeleteFailed)));
+        assert_eq!(got.map_err(|e| e.code), Err("delete_failed"));
+        assert!(r.file_path.exists());
+        assert!(r.models.store().is_downloaded("small"));
+        let listed: Vec<_> = r.models.list().into_iter().map(|v| v.state).collect();
+        assert_eq!(listed, vec![LocalModelState::Downloaded]);
+        assert_eq!(r.file.calls(), vec![FileCall::Read], "settings file calls");
+        assert_eq!(&*r.service.snapshot(), &r.stored);
+        assert_eq!(r.changes.try_recv().err(), Some(TryRecvError::Empty));
+        assert_eq!(residency.released.load(Ordering::SeqCst), 1);
+        assert_eq!(residency.dropped.load(Ordering::SeqCst), 1, "guard dropped");
+    }
+
+    #[test]
+    fn a_removal_that_finds_the_file_already_gone_counts_as_removed() {
+        // Analysis step 4: `NotFound` from the removal counts as removed (a second
+        // instance or the user removed it meanwhile); the selection is reset. Bite:
+        // NotFound mapped to delete_failed, the reset skipped.
+        let mut r = rig();
+        r.models.remove = already_gone;
+
+        let got = r.models.delete("small", &NoResidency, &r.service);
+
+        assert_eq!(
+            got,
+            Ok(DeleteOutcome {
+                engine_reset: true,
+                reset_failed: false,
+            })
+        );
+        assert_eq!(r.service.snapshot().engine, EngineKind::None);
+        assert_eq!(r.service.snapshot().builtin_local.model_id, None);
+    }
+
+    #[test]
+    fn open_removes_through_std_fs_remove_file() {
+        // The production removal is the real one. Bite: `open` leaving a no-op or a
+        // test double in `remove`.
+        let r = rig();
+        assert!((r.models.remove)(&r.file_path).is_ok());
+        assert!(!r.file_path.exists());
+    }
+}
