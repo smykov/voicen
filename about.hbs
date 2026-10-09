@@ -4,8 +4,9 @@
   source_path is machine-specific. scripts/licenses/notices.mjs adds the other sections.
   Crates without a source (path crates: the workspace's own, voicen and voicen-core) are
   checked by cargo-about like any other but are not third-party, so they are not listed
-  (T-027 review round 1). Third-party code is never vendored as a path crate (see
-  docs/decisions/licenses.md).
+  (T-027 review round 1). Third-party code is never vendored as a path crate or [patch]:
+  scripts/licenses/notices.test.mjs fails on a sourceless Cargo.lock package that is not a
+  workspace member (T-063; docs/decisions/licenses.md).
 -}}
 {{#each licenses}}
 --------------------------------------------------------------------------------

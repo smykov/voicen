@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { renderNotices } from "./notices.mjs";
+import { workspaceMemberNames } from "./workspace.mjs";
 
 const CHECK = fileURLToPath(new URL("./check.mjs", import.meta.url));
 
@@ -75,15 +76,8 @@ test("check.mjs --require: a bundle list without the required package cannot che
 // workspace manifests, so a new member is covered without editing this test.
 test("the committed notices do not list the project's own workspace crates", () => {
   const root = fileURLToPath(new URL("../../", import.meta.url));
-  const workspace = readFileSync(join(root, "Cargo.toml"), "utf8");
-  const members = workspace.match(/^members\s*=\s*\[([^\]]*)\]/m);
-  assert.ok(members, "Cargo.toml has a [workspace] members list");
-  const names = [...members[1].matchAll(/"([^"]+)"/g)].map(([, dir]) => {
-    const manifest = readFileSync(join(root, dir, "Cargo.toml"), "utf8");
-    const pkg = manifest.slice(manifest.indexOf("[package]")).match(/^name\s*=\s*"([^"]+)"/m);
-    assert.ok(manifest.includes("[package]") && pkg, `${dir}/Cargo.toml has a [package] name`);
-    return pkg[1];
-  });
+  // T-063: the members parse lives in ./workspace.mjs (it throws on a glob or nameless member).
+  const names = workspaceMemberNames(root);
   assert.ok(names.length >= 2, `workspace members found: ${names.join(", ")}`);
   const text = readFileSync(join(root, "THIRD-PARTY-NOTICES.txt"), "utf8");
   const listed = names.flatMap((name) => {

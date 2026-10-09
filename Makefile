@@ -142,6 +142,9 @@ ui-image:
 # Needs crates.io access; without it the check says it cannot run (exit 3), not a license
 # failure (decision #24 D3).
 LICENSES_DIR := target/licenses
+# The committed notices file. `:=`, not `?=`: an environment variable cannot redirect the
+# check; only a command-line override can (licenses-stale-guard, on its fixtures).
+NOTICES := THIRD-PARTY-NOTICES.txt
 
 licenses-check: licenses-unit licenses-fixture licenses-stale-guard licenses-rust licenses-npm licenses-stale
 
@@ -183,11 +186,11 @@ licenses-generate: licenses-rust licenses-bundle
 		--bundle $(LICENSES_DIR)/npm-bundled.json --manual licenses/manual.json \
 		--out $(LICENSES_DIR)/THIRD-PARTY-NOTICES.txt
 
-# The committed notices must equal a fresh generation.
+# The committed notices must equal a fresh generation (guarded by licenses-stale-guard).
 licenses-stale: licenses-generate
-	@test -f THIRD-PARTY-NOTICES.txt || { echo "licenses-check: THIRD-PARTY-NOTICES.txt is not committed; run make licenses and commit it" >&2; exit 1; }
-	@diff -u THIRD-PARTY-NOTICES.txt $(LICENSES_DIR)/THIRD-PARTY-NOTICES.txt || { echo "licenses-check: THIRD-PARTY-NOTICES.txt is stale; run make licenses and commit it" >&2; exit 1; }
+	@test -f $(NOTICES) || { echo "licenses-check: $(NOTICES) is not committed; run make licenses and commit it" >&2; exit 1; }
+	@diff -u $(NOTICES) $(LICENSES_DIR)/THIRD-PARTY-NOTICES.txt || { echo "licenses-check: $(NOTICES) is stale; run make licenses and commit it" >&2; exit 1; }
 
 # Regenerate the committed notices.
 licenses: licenses-generate
-	cp $(LICENSES_DIR)/THIRD-PARTY-NOTICES.txt THIRD-PARTY-NOTICES.txt
+	cp $(LICENSES_DIR)/THIRD-PARTY-NOTICES.txt $(NOTICES)
