@@ -39,6 +39,8 @@ fn post_process_stage(enabled: bool) -> Option<PostProcessingSnapshot>; // snaps
 //           deliver(final_text)  // unchanged 001 delivery; job outcome = delivered (FR-007)
 ```
 
+**As built (T-076).** The `log::info!(target: "pipeline", ...)` call above does not exist: there is no `log`/`tracing` logger and no separate post-processing line. The pipeline puts a `Copy` `events::PostProcessTrace` on `DictationEvent::JobFinished.post_processing`, and `diag/format.rs` writes it on the one dictation line as `pp=`, `pp_reason=`, `pp_ms=` (data-model.md "As built (T-076)", `docs/decisions/diagnostics-log.md`).
+
 The pipeline constructor takes `Arc<dyn PostProcessor>`. Tests inject a fake. The shell injects `ChatPostProcessor` in `start_dictation` (NFR-11; T-074), not through a port, so the app and the shell tests run the same processor.
 
 **As implemented (T-020).** No `Notice` type: a skip ends the job as `JobEnd::DeliveredSkipped { reason: SkipReason, delivery: DeliveryResult }`; `RecordingController::job_finished` sets tray `Error` and shows one overlay message from `post_process::skip_message` (decision #91(3): `copied_paste_manually` wins over the skip, the skip wins over `copied`). The toast is T-075, the log fields T-076.
@@ -54,6 +56,8 @@ impl PostProcessOutcome {
     pub fn log_fields(&self, duration: Duration) -> LogFields;   // allowlisted fields only
 }
 ```
+
+**As built (T-076).** `log_fields` / `LogFields` were not built and must not be added: the formatter in `diag/format.rs` owns the literals (one source, P-010), fed by `events::PostProcessTrace`. See data-model.md "As built (T-076)".
 
 ## Extended (owned elsewhere)
 

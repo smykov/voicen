@@ -48,7 +48,7 @@ The stack is fixed by `docs/requirements.md` §9 (Tauri 2, Rust 1.99, `reqwest`,
   - **Log line.** There is exactly one, built from an allowlist of fields: `post_process outcome=applied|skipped reason=<code> duration_ms=<n>`. *As built (T-076): not a separate line; the fields ride on the dictation line as `pp=`, `pp_reason=`, `pp_ms=`, see data-model.md "As built (T-076)".*
   - **Redirects.** The key goes only to the configured endpoint (FR-012). The shared client keeps reqwest's default redirect policy, which drops `Authorization` on a cross-host redirect. A test pins this behaviour (T023).
   - **Library logging.** reqwest and hyper logging stays at its default `off` (no `log`/`tracing` subscriber enables their targets above `warn`). 006 owns the logger; this feature asserts the property with a capture test.
-- **Rationale**: P-009 says to name every path. The paths are our own log line, error values that reach notifications, library request logging, and panic messages. Panic messages are covered by not formatting secrets into `expect` text and by the `Secret` newtype.
+- **Rationale**: P-009 says to name every path. The paths are our own log line (as built, T-076: the `pp*` keys on the dictation line), error values that reach notifications, library request logging, and panic messages. Panic messages are covered by not formatting secrets into `expect` text and by the `Secret` newtype.
 - **Alternatives considered**: Use the `secrecy` crate. That is acceptable, MIT/Apache (NFR-12), and can replace the newtype if 001 or 004 already adopted it. Whichever type 004 uses for key slots is used here, so there is one secret type (P-010).
 
 ## R6. Settings snapshot and live apply

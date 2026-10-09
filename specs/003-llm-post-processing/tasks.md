@@ -41,7 +41,7 @@ description: "Task list for LLM post-processing (003)"
 - [ ] T003 Write red unit tests in `crates/voicen-core/src/timeouts.rs` asserting `Timeouts::default().post_processing == 15 s` and `.connect == 5 s`, then add the `post_processing: Duration` field to 001's `Timeouts` (one source, P-010) — req FR-24 — FR-004 — L
 - [ ] T004 [P] Define `PostProcessOutcome { NotRun, Applied(String), Skipped(SkipReason) }` and `SkipReason { Timeout, Unreachable{host}, InvalidKey, Http{status:u16}, InvalidResponse }` in `crates/voicen-core/src/post_process/mod.rs`, with red tests first:
   - `final_text(raw)` returns the applied text, or raw for `NotRun` and `Skipped`;
-  - `log_fields(duration)` renders only `outcome`, `reason` and `duration_ms` (data-model "Log record").
+  - `log_fields(duration)` renders only `outcome`, `reason` and `duration_ms` (data-model "Log record"). *As built (T-076): no `log_fields`; the outcome is a `Copy` `events::PostProcessTrace` rendered by `diag/format.rs` as `pp=`, `pp_reason=`, `pp_ms=` on the dictation line, see data-model.md "As built (T-076)".*
   — req FR-09, FR-20, NFR-04 — FR-014, FR-016 — L
 - [ ] T005 [P] Define the `PostProcessor` trait and `PostProcessingSnapshot { base_url, model, prompt, key: Option<Secret> }` in `crates/voicen-core/src/post_process/mod.rs` per `contracts/core-post-process.md`. Reuse 004's `Secret` newtype; it must show a redacted `Debug` (test that `format!("{:?}")` does not contain the key) — req NFR-04, NFR-11 — FR-012, FR-015 — L
 - [ ] T006 Write red pipeline tests in `crates/voicen-core/tests/post_process_pipeline.rs`, then replace 001's pass-through stage in `crates/voicen-core/src/pipeline.rs` with `Arc<dyn PostProcessor>` plus a snapshot taken when the job enters the stage. Use a fake `PostProcessor` and a fake delivery. The tests are:
@@ -153,7 +153,7 @@ description: "Task list for LLM post-processing (003)"
 ### Implementation for User Story 3
 
 - [ ] T025 [US3] Implement `validate()` only in `crates/voicen-core/src/post_process/settings.rs`; `PostProcessingSettings`, `STARTER_PROMPT` (exact text from data-model.md) and `defaults()` are created there by 004's foundational phase (004 T068, decisions #21). Wire `validate()` into 004's validator (makes T022 and T024 green) — req FR-13, FR-21 — FR-010, FR-011 — L
-- [x] T026 [US3] Read the key from 004's `CredentialStore` with `KeySlot::PostProcessing` when taking the snapshot, treating a missing entry or read error as no key. Emit the one allowlisted log line per post-processed dictation through 006's logger target (makes T023 green). Done as built by T-076: no separate line; the outcome rides on the dictation line as `pp=`, `pp_reason=`, `pp_ms=` (data-model.md "As built (T-076)") — req NFR-04, FR-20 — FR-012, FR-014 — L
+- [x] T026 [US3] Read the key from 004's `CredentialStore` with `KeySlot::PostProcessing` when taking the snapshot, treating a missing entry or read error as no key. Emit the one allowlisted log line per post-processed dictation through 006's logger target (makes T023 green; as built, the log part is covered by `crates/voicen-core/tests/diag_pipeline.rs::post_processing_outcome_is_logged_without_prompt_reply_host_or_key`, `post_process_secrets.rs` was not created). Done as built by T-076: no separate line; the outcome rides on the dictation line as `pp=`, `pp_reason=`, `pp_ms=` (data-model.md "As built (T-076)") — req NFR-04, FR-20 — FR-012, FR-014 — L
 - [ ] T027 [P] [US3] Add the `settings.post_processing.privacy_note` text (en/ru, `contracts/ipc.md`) to 004's Post-processing tab in `src/routes/settings/`. Add a Playwright test in `e2e/post-processing.spec.ts` with mocked `get_settings` that checks:
   - the tab shows "off" and the starter prompt;
   - the privacy note is visible;
@@ -172,7 +172,7 @@ description: "Task list for LLM post-processing (003)"
 - [ ] T030 Owner's manual check per quickstart §5:
   - a real endpoint pastes the punctuated text;
   - an unreachable endpoint pastes raw text with the notice for 3 s and the tray error state;
-  - the log line has no text, prompt or key.
+  - the log line has no text, prompt or key (as built, T-076: the dictation line with its `pp=` keys, data-model.md "As built (T-076)").
 
   Record it as the verify record for the US2 tasks that carry a `verify_exception` — req FR-09, FR-25, NFR-04 — M
 

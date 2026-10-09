@@ -12,7 +12,7 @@
 ```sh
 scripts/tw-run core -- cargo test -p voicen-core post_process     # stage: success, every skip reason, trim, auth header
 scripts/tw-run core -- cargo test -p voicen-core pipeline          # off → no request; skipped → raw delivered + notice; ordering
-scripts/tw-run core -- cargo test -p voicen-core secrets_not_logged # log capture over success + all failure modes
+scripts/tw-run core -- cargo test -p voicen-core --test diag_pipeline post_processing_outcome_is_logged # log capture, redaction run (as built, T-076; no `secrets_not_logged` test)
 ```
 
 Expected results:

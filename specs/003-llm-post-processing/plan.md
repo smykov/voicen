@@ -98,12 +98,12 @@ specs/003-llm-post-processing/
 ```text
 crates/voicen-core/src/
 ├── post_process/
-│   ├── mod.rs           # PostProcessor trait, PostProcessOutcome, SkipReason, final_text, log_fields
+│   ├── mod.rs           # PostProcessor trait, PostProcessOutcome, SkipReason, final_text, log_fields (As built T-076: no log_fields; see data-model.md "As built (T-076)")
 │   ├── chat.rs          # ChatPostProcessor: request build, reply parse, classify (R4)
 │   └── settings.rs      # validate() and wiring; the data type, STARTER_PROMPT and defaults() are created by 004 (decisions #21)
 ├── openai.rs            # (001) + chat_completion()
 ├── timeouts.rs          # (001) + post_processing: 15 s
-├── pipeline.rs          # (001) stage uses Arc<dyn PostProcessor>; notice + log line
+├── pipeline.rs          # (001) stage uses Arc<dyn PostProcessor>; notice + log line (As built T-076: the outcome rides on the dictation line as pp=, pp_reason=, pp_ms=, not a separate line)
 └── notice.rs            # (001) + PostProcessingSkipped
 crates/voicen-core/tests/
 └── post_process_*.rs    # mock-server tests, pipeline tests, log-capture test
