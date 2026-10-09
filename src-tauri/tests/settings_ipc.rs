@@ -564,6 +564,94 @@ fn speech_languages_is_core_list() {
     assert_eq!(languages.as_array().map(Vec::len), Some(97));
 }
 
+// ---- T-012: settings_list_microphones (contracts/ipc.md; FR-27, decision #64) ---------
+//
+// Pinned API (docs/tasks/T-012.md `## Tests`): the command `settings_list_microphones`
+// (no args) -> `[{ id, name, is_default }]`, built by
+// `voicen_lib::settings_ipc::list_microphones(&dyn AudioSource)` over the same
+// `AudioSource::devices()` a press uses (P-010: one list for the press and the UI).
+
+#[test]
+fn list_microphones_is_the_sources_device_list_as_id_name_is_default() {
+    // contracts/ipc.md `settings_list_microphones` -> `[{ id, name, is_default }]`: the
+    // scripted list of a fake source, in its order, every field as given, and nothing
+    // else per entry. Bite: a second enumeration in the shell (the fake's list ignored),
+    // the name as the id, a re-ordered or filtered list (the non-default device dropped),
+    // extra fields.
+    use voicen_core::platform::{DeviceId, FakeAudioSource, InputDevice};
+    let source = FakeAudioSource::new();
+    source.set_devices(vec![
+        InputDevice {
+            id: DeviceId("{0.0.1.00000000}.{fake-usb-headset-0001}".to_string()),
+            name: "USB Headset (fake)".to_string(),
+            is_default: false,
+        },
+        InputDevice {
+            id: DeviceId("{0.0.1.00000000}.{fake-mic-array-0002}".to_string()),
+            name: "Microphone Array (fake)".to_string(),
+            is_default: true,
+        },
+    ]);
+    let listed = serde_json::to_value(voicen_lib::settings_ipc::list_microphones(&source))
+        .expect("the list serializes");
+    assert_eq!(
+        listed,
+        json!([
+            { "id": "{0.0.1.00000000}.{fake-usb-headset-0001}", "name": "USB Headset (fake)", "is_default": false },
+            { "id": "{0.0.1.00000000}.{fake-mic-array-0002}", "name": "Microphone Array (fake)", "is_default": true },
+        ])
+    );
+}
+
+#[test]
+fn settings_list_microphones_is_registered_and_answers_with_entries_of_that_shape() {
+    // contracts/ipc.md: the release wiring (`build_app`) registers the command; on the
+    // runner (whatever capture endpoints it has, possibly none) it answers an array whose
+    // entries have exactly `id` (non-empty string), `name` (string) and `is_default`
+    // (bool), with at most one default. Bite: the command not registered (rejected), a
+    // different wire shape (`isDefault`, a nested object), more than one default.
+    let dir = TempDir::new();
+    let store = fake_store(FakeCredentialStore::new());
+    let (service, _) = load_settings(
+        dir.path().to_path_buf(),
+        as_port(&store),
+        no_autostart(),
+        idle_store(dir.path()),
+        None,
+        &discard_log(),
+    );
+    let h = harness(&service);
+
+    let listed = h
+        .invoke("settings_list_microphones", json!({}))
+        .unwrap_or_else(|e| panic!("settings_list_microphones rejected: {e}"));
+    let entries = listed
+        .as_array()
+        .unwrap_or_else(|| panic!("not an array: {listed}"));
+    for e in entries {
+        let obj = e
+            .as_object()
+            .unwrap_or_else(|| panic!("not an object: {e}"));
+        let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, vec!["id", "is_default", "name"], "{e}");
+        assert!(
+            e["id"].as_str().is_some_and(|s| !s.is_empty()),
+            "id not a non-empty string: {e}"
+        );
+        assert!(e["name"].is_string(), "name not a string: {e}");
+        assert!(e["is_default"].is_boolean(), "is_default not a bool: {e}");
+    }
+    assert!(
+        entries
+            .iter()
+            .filter(|e| e["is_default"] == json!(true))
+            .count()
+            <= 1,
+        "more than one default: {listed}"
+    );
+}
+
 #[test]
 fn first_run_with_russian_os_language_writes_ru() {
     // Acceptance 5 (spec 004 T049), the load half. Bite: load_settings dropping

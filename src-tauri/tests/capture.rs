@@ -332,3 +332,149 @@ fn a_panicking_opener_is_an_other_error_not_a_hang() {
         "a dead opener came back after {took:?} (budget {budget:?})"
     );
 }
+
+// ---- T-012: devices by endpoint id and device loss (FR-27, spec 001 FR-030/FR-031) ----
+//
+// Pinned API (docs/tasks/T-012.md `## Tests`, analysis option A): `CpalSource` implements
+// core's `AudioSource::devices()` (cpal `input_devices()`: `id()` = the WASAPI endpoint
+// id, `description()?.name()`, `is_default` by comparing the default's id; under
+// `open_bounded`) and `start(&DeviceId, sink)` (`device_by_id`; missing -> `NoDevice`);
+// `voicen_lib::win::capture::device_loss_callback(sink) -> impl FnMut(cpal::Error) + Send
+// + 'static`, the stream's error callback: the first call reports `sink.device_lost(now)`,
+// whatever the error kind, and later calls report nothing. The runner has no capture
+// endpoint probed (docs/decisions/windows-ci-runner.md), so these tests need none: the
+// list is checked for its shape only, the open by id on an id no machine has, and the
+// error callback without a stream. A real unplug is the owner's check (quickstart §3).
+
+use std::sync::Mutex;
+
+use voicen_core::platform::{AudioSource, DeviceId, FrameSink};
+use voicen_lib::win::capture::{device_loss_callback, CpalSource, OPEN_BUDGET};
+
+/// A sink that records what reached it.
+#[derive(Default)]
+struct RecordingSink {
+    frames: AtomicUsize,
+    lost: Mutex<Vec<Instant>>,
+}
+
+impl RecordingSink {
+    fn lost(&self) -> Vec<Instant> {
+        self.lost.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+}
+
+impl FrameSink for RecordingSink {
+    fn frames(&self, _interleaved: &[f32], _rate: u32, _channels: u16, _at: Instant) {
+        self.frames.fetch_add(1, Ordering::SeqCst);
+    }
+    fn device_lost(&self, at: Instant) {
+        self.lost.lock().unwrap_or_else(|e| e.into_inner()).push(at);
+    }
+}
+
+#[test]
+fn the_error_callback_reports_device_lost_once_for_any_error_kind() {
+    // T-012 invariant (3) / investigation (cpal 0.18.2 `run_input`: every error-callback
+    // call on a Specific-device stream is followed by the stream thread ending): every
+    // error kind is "capture ended", reported once as `device_lost(at)` with `at` stamped
+    // in the callback; a second and third error on the same stream report nothing; no
+    // frame is invented. Bite: the T-006 no-op `|_err| {}` (nothing reported), a filter on
+    // DeviceNotAvailable only (other kinds lost), a report per call (no once flag), an
+    // `at` taken before the callback ran (a constant captured at build).
+    let mut wrong = Vec::new();
+    for kind in all_kinds() {
+        let sink = Arc::new(RecordingSink::default());
+        let mut callback = device_loss_callback(sink.clone() as Arc<dyn FrameSink>);
+        let before = Instant::now();
+        callback(Error::with_message(kind, CANARY));
+        let after = Instant::now();
+        callback(Error::new(ErrorKind::DeviceNotAvailable));
+        callback(Error::new(ErrorKind::StreamInvalidated));
+        let lost = sink.lost();
+        match lost.as_slice() {
+            [at] if *at >= before && *at <= after => {}
+            other => wrong.push(format!(
+                "{kind:?}: device_lost calls {other:?}, expected one between {before:?} and {after:?}"
+            )),
+        }
+        if sink.frames.load(Ordering::SeqCst) != 0 {
+            wrong.push(format!("{kind:?}: frames reported by the error callback"));
+        }
+    }
+    assert!(wrong.is_empty(), "\n{}", wrong.join("\n"));
+}
+
+#[test]
+fn the_device_list_has_unique_endpoint_ids_and_at_most_one_default() {
+    // FR-27 / research R-3 / contracts/ipc.md `[{ id, name, is_default }]`: whatever the
+    // runner has (possibly nothing), `devices()` returns within the open budget without
+    // panicking; every entry has a non-empty endpoint id and a non-empty display name, the
+    // ids are unique, and at most one entry is the default. An enumeration error carries a
+    // fixed literal, never OS text. Bite: an unbounded enumeration (past OPEN_BUDGET +
+    // MARGIN), the name used as the id (duplicates when two devices share a name, as two
+    // identical USB headsets do), every device flagged default, cpal's text in an error.
+    let source = CpalSource::new();
+    let started = Instant::now();
+    let listed = source.devices();
+    let took = started.elapsed();
+    assert!(
+        took < OPEN_BUDGET + MARGIN,
+        "devices() took {took:?}, past the budget {OPEN_BUDGET:?} + {MARGIN:?}"
+    );
+    match listed {
+        Ok(devices) => {
+            let mut ids: Vec<&str> = devices.iter().map(|d| d.id.0.as_str()).collect();
+            assert!(
+                devices
+                    .iter()
+                    .all(|d| !d.id.0.is_empty() && !d.name.is_empty()),
+                "an entry without id or name: {devices:?}"
+            );
+            ids.sort_unstable();
+            let n = ids.len();
+            ids.dedup();
+            assert_eq!(ids.len(), n, "duplicate endpoint ids: {devices:?}");
+            assert!(
+                devices.iter().filter(|d| d.is_default).count() <= 1,
+                "more than one default: {devices:?}"
+            );
+        }
+        Err(CaptureError::Other(text)) => {
+            assert!(!text.is_empty(), "an empty literal");
+        }
+        Err(_) => {}
+    }
+}
+
+#[test]
+fn start_on_an_id_no_machine_has_is_no_device_and_reports_nothing() {
+    // FR-04 branch / `## Investigation` (`device_by_id` missing -> `NoDevice`): a
+    // well-formed endpoint id of no device and a malformed id both give `NoDevice` within
+    // the open budget, and the sink gets neither frames nor a loss (the session reports
+    // the press's failure itself). Bite: falling back to the default device inside the
+    // adapter (Ok, or frames), an unparsable id mapped to Other, a loss reported for a
+    // capture that never opened, an unbounded lookup.
+    for raw in [
+        "{0.0.1.00000000}.{00000000-0000-0000-0000-000000000000}",
+        "not-an-endpoint-id",
+    ] {
+        let sink = Arc::new(RecordingSink::default());
+        let source = CpalSource::new();
+        let started = Instant::now();
+        let result = source.start(&DeviceId(raw.to_string()), sink.clone());
+        let took = started.elapsed();
+        match result {
+            Err(CaptureError::NoDevice) => {}
+            Err(other) => panic!("{raw}: expected NoDevice, got {other:?}"),
+            Ok(_) => panic!("{raw}: a capture opened on a device that does not exist"),
+        }
+        assert!(
+            took < OPEN_BUDGET + MARGIN,
+            "{raw}: took {took:?}, past the budget"
+        );
+        thread::sleep(Duration::from_millis(100));
+        assert_eq!(sink.frames.load(Ordering::SeqCst), 0, "{raw}: frames");
+        assert_eq!(sink.lost(), Vec::<Instant>::new(), "{raw}: a loss reported");
+    }
+}

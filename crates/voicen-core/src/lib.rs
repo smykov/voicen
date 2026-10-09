@@ -14,6 +14,7 @@ pub mod failure;
 pub mod hotkey_registrar;
 pub mod i18n;
 pub mod local_models;
+pub mod microphone;
 pub mod models;
 pub mod overlay;
 pub mod pipeline;

@@ -2063,4 +2063,98 @@ mod tests {
             other => panic!("expected a new recording, got {other:?}"),
         }
     }
+
+    // ---- T-012: device loss (FR-27, spec 001 FR-031) ------------------------------
+    //
+    // Pinned API (docs/tasks/T-012.md `## Tests`): `RecordingEnd::DeviceLost` and
+    // `RecordingController::device_lost(id, at) -> Option<StopTicket<C>>`, the
+    // controller input of the one stop path for a capture that ended on its own.
+
+    #[test]
+    fn device_lost_ends_the_live_recording_with_a_ticket_in_either_mode() {
+        // T-012 invariant (3): a loss for the live id ends the recording in either
+        // mode with a ticket (end DeviceLost, held = loss instant - press instant,
+        // stopped_at = the loss instant), the controller is idle at once (tray Idle,
+        // no Esc to claim), and the audio goes on to a job (`finish` -> Processing).
+        // A hold's later release and a toggle's later press then find no recording:
+        // the release is Ignored, the press starts a new one. Bite: device_lost as a
+        // cancel (no ticket), end Released/Toggled, the recording left live, held
+        // measured to finish's instant.
+        for mode in [Mode::Hold, Mode::Toggle] {
+            let t0 = Instant::now();
+            let mut c = RecordingController::<Ctx>::new();
+            let id = start_in(&mut c, t0, mode, "start-window");
+            let Some(ticket) = c.device_lost(id, t0 + ms(5000)) else {
+                panic!("{mode:?}: no ticket for the live recording's loss");
+            };
+            assert_eq!(ticket.id(), id, "{mode:?}");
+            assert_eq!(ticket.end(), RecordingEnd::DeviceLost, "{mode:?}");
+            assert_eq!(ticket.held(), ms(5000), "{mode:?}");
+            assert_eq!(c.live_id(), None, "{mode:?}: still live after the loss");
+            assert_eq!(c.indicator().tray, TrayState::Idle, "{mode:?}");
+            let f = finish_ok(&mut c, ticket, t0 + ms(5020));
+            assert_eq!(f.end(), RecordingEnd::DeviceLost, "{mode:?}");
+            assert_eq!(f.stopped_at(), t0 + ms(5000), "{mode:?}");
+            assert_eq!(*f.ctx(), "start-window", "{mode:?}");
+            assert_eq!(c.indicator().overlay, OverlayState::Processing, "{mode:?}");
+            assert!(
+                matches!(c.release(t0 + ms(6000)), Release::Ignored),
+                "{mode:?}: the release after the loss"
+            );
+            match c.press_with_mode(t0 + ms(7000), mode, "next") {
+                PressOutcome::Start(next) => assert_ne!(next, id, "{mode:?}"),
+                other => panic!("{mode:?}: the press after a loss gave {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn device_lost_keeps_even_a_very_short_hold() {
+        // `## Investigation` implementation notes: "process what was captured" -
+        // a loss is not a release, so MIN_HOLD does not apply: 100 ms gives a ticket
+        // (the speech gate decides an almost empty one). Bite: the release rule
+        // reused (a TooShort discard / `None`).
+        let t0 = Instant::now();
+        let mut c = RecordingController::<Ctx>::new();
+        let id = start_in(&mut c, t0, Mode::Hold, "w");
+        let Some(ticket) = c.device_lost(id, t0 + ms(100)) else {
+            panic!("a 100 ms recording's loss gave no ticket");
+        };
+        assert_eq!(ticket.end(), RecordingEnd::DeviceLost);
+        assert_eq!(ticket.held(), ms(100));
+        assert!(ms(100) < MIN_HOLD, "premise: shorter than the hold minimum");
+    }
+
+    #[test]
+    fn device_lost_for_a_stale_id_or_while_idle_changes_nothing() {
+        // T-012 invariant (3), "stale ids ignored": a loss reported by the capture
+        // of an earlier recording (its sink outlives it) must not end the next one,
+        // and a loss while idle does nothing. Bite: a loss that ends whatever is
+        // live (no id check), a loss while idle that changes the indicator.
+        let t0 = Instant::now();
+        let mut c = RecordingController::<Ctx>::new();
+        let a = start_in(&mut c, t0, Mode::Hold, "a");
+        let ticket = stop(&mut c, t0 + ms(1000));
+        let _ = finish_ok(&mut c, ticket, t0 + ms(1010));
+        let before = c.indicator().clone();
+        assert!(c.device_lost(a, t0 + ms(1500)).is_none(), "loss while idle");
+        assert_eq!(
+            c.indicator(),
+            &before,
+            "a loss while idle changed the indicator"
+        );
+
+        let b = start_in(&mut c, t0 + ms(2000), Mode::Toggle, "b");
+        assert!(
+            c.device_lost(a, t0 + ms(2500)).is_none(),
+            "the stale loss of A ended B"
+        );
+        assert_eq!(c.live_id(), Some(b), "B must still be on");
+        assert_eq!(c.indicator(), &recording());
+        assert!(c.device_lost(b, t0 + ms(3000)).is_some());
+        assert!(
+            c.device_lost(b, t0 + ms(3001)).is_none(),
+            "a second loss for the same recording gave a second ticket"
+        );
+    }
 }
