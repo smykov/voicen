@@ -1618,15 +1618,63 @@ mod tests {
     }
 
     #[test]
+    fn save_warnings_skips_a_url_that_fails_check_base_url() {
+        // Direct test of save_warnings (a save refuses these URLs at validation, step
+        // (3), so it never reaches the warning step (8) with them). An in-use URL
+        // that fails check_base_url gets no warning and no panic: the classifier
+        // runs only on a URL that parsed. Every in-use URL is fed malformed: the
+        // post-processing URL (engine api and none), the api URL and the
+        // local_server URL. Bite: check_base_url(..).unwrap()/expect() or a warning
+        // decided on the raw text.
+        let unusable = [
+            "",
+            "http//llm.example.com",
+            "llm.example.com/v1",
+            "ftp://llm.example.com",
+        ];
+        for url in unusable {
+            for engine in [EngineKind::Api, EngineKind::None] {
+                let mut s = sample(engine);
+                s.post_processing.enabled = true;
+                s.post_processing.base_url = url.into();
+                assert_eq!(save_warnings(&s), vec![], "{engine:?} pp {url:?}");
+            }
+
+            let mut s = sample(EngineKind::Api);
+            s.api.base_url = url.into();
+            s.post_processing.enabled = true;
+            s.post_processing.base_url = url.into();
+            assert_eq!(save_warnings(&s), vec![], "api+pp {url:?}");
+
+            let mut s = sample(EngineKind::LocalServer);
+            s.local_server.base_url = url.into();
+            assert_eq!(save_warnings(&s), vec![], "local_server {url:?}");
+
+            // A malformed URL beside an insecure one: only the usable one warns.
+            let mut s = sample(EngineKind::Api);
+            s.api.base_url = "http://192.0.2.20/v1".into();
+            s.post_processing.enabled = true;
+            s.post_processing.base_url = url.into();
+            assert_eq!(
+                save_warnings(&s),
+                vec![insecure(FieldId::EngineApiBaseUrl)],
+                "insecure api + pp {url:?}"
+            );
+        }
+    }
+
+    #[test]
     fn save_refuses_an_unusable_post_processing_url_while_enabled() {
         // T-021 (replaces save_gives_no_warning_for_an_unchecked_post_processing_url,
         // which pinned the gap: these URLs were Saved while post-processing was on).
         // With post-processing on, an empty or malformed post_processing.base_url is
         // Refused with that field's code from the engine URL rule; nothing is written,
-        // the snapshot is kept, there is no warning (a refusal carries none) and the
-        // save does not panic (no check_base_url(..).unwrap() before the warning
-        // step). Bite: no post-processing rule in validate (Saved), the rule's error
-        // on another field or with another code, or a write before validation.
+        // the snapshot is kept and there is no warning (a refusal carries none). The
+        // refusal comes before step (8), so this test never reaches save_warnings;
+        // its no-unwrap guarantee is pinned by
+        // save_warnings_skips_a_url_that_fails_check_base_url. Bite: no
+        // post-processing rule in validate (Saved), the rule's error on another field
+        // or with another code, or a write before validation.
         for (url, code) in [
             ("", ErrorCode::Required),
             ("http//llm.example.com", ErrorCode::UrlMalformed),

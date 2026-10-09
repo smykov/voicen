@@ -2,7 +2,7 @@
 //! settings data type; T-001 added the pipeline step's port; T-020 widened it to
 //! [`PostProcessInput`] -> [`PostProcessOutcome`] and added the real processor
 //! ([`chat::ChatPostProcessor`]). The shell still installs [`PassThrough`] until
-//! T-074 wires the chat processor; T-021 adds `settings::validate`.
+//! T-074 wires the chat processor; T-021 added `settings::validate`.
 //!
 //! The stage never fails a dictation: the delivered text is the trimmed non-empty
 //! chat reply ([`PostProcessOutcome::Applied`]) or else the raw transcript byte
