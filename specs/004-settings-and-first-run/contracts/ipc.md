@@ -10,7 +10,7 @@ The UI calls only these commands and listens only to these events for this featu
 | `settings_save` | `{ request: SaveRequest }` | `SaveOutcome` | all-or-nothing; `KeyEdit.Replace` carries the typed key once, UI → shell only |
 | `settings_speech_languages` | — | `string[]` | core's `WHISPER_ISO_639_1` in core order (97 codes, #30); the speech-language picker's list, never re-spelled in the UI (T-030) |
 | `settings_test_connection` | `{ request: ConnectionTestRequest }` | `ConnectionTestResult` | never changes settings or keys; at most one in flight per window (UI disables the button) |
-| `settings_list_microphones` | — | `[{ id, name, is_default }]` | provided by 001's capture enumeration; the saved microphone is shown "(not connected)" when absent |
+| `settings_list_microphones` | — | `[{ id, name, is_default }]` | provided by 001's capture enumeration; the saved microphone is shown "(not connected)" when absent; a list that cannot be read rejects with `{ "code": "ipc.unavailable" }`, never an empty list (T-012) |
 | `local_models_list` (002) | — | 002's model list | used by the Engine tab for the built-in model selection |
 
 Errors: a command that cannot run at all rejects with `{ code: "ipc.unavailable" }`; the UI shows `error.ipc_unavailable` and keeps the draft.

@@ -592,14 +592,39 @@ fn list_microphones_is_the_sources_device_list_as_id_name_is_default() {
             is_default: true,
         },
     ]);
-    let listed = serde_json::to_value(voicen_lib::settings_ipc::list_microphones(&source))
-        .expect("the list serializes");
+    let entries = voicen_lib::settings_ipc::list_microphones(&source)
+        .unwrap_or_else(|e| panic!("a readable list rejected: {e:?}"));
+    let listed = serde_json::to_value(entries).expect("the list serializes");
     assert_eq!(
         listed,
         json!([
             { "id": "{0.0.1.00000000}.{fake-usb-headset-0001}", "name": "USB Headset (fake)", "is_default": false },
             { "id": "{0.0.1.00000000}.{fake-mic-array-0002}", "name": "Microphone Array (fake)", "is_default": true },
         ])
+    );
+}
+
+#[test]
+fn a_device_list_that_cannot_be_read_rejects_with_ipc_unavailable_not_an_empty_list() {
+    // contracts/ipc.md "Errors" (T-012, coordinator decision on deviation 2): a source
+    // whose `devices()` fails rejects with exactly `{ "code": "ipc.unavailable" }`, the
+    // closed shape the other settings commands use, so the UI shows
+    // `error.ipc_unavailable`. Bite: an empty list (the tab would read "no microphones"
+    // for a broken listing), the capture error's kind or any device text on the wire.
+    use voicen_core::platform::FakeAudioSource;
+    use voicen_core::recording::CaptureError;
+    let source = FakeAudioSource::new();
+    source.set_devices_error(Some(CaptureError::Other(
+        "fake enumeration failure".to_string(),
+    )));
+
+    let rejected = match voicen_lib::settings_ipc::list_microphones(&source) {
+        Ok(entries) => panic!("an unreadable list answered {entries:?}"),
+        Err(e) => e,
+    };
+    assert_eq!(
+        serde_json::to_value(&rejected).expect("the rejection serializes"),
+        json!({ "code": "ipc.unavailable" })
     );
 }
 

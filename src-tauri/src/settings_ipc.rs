@@ -234,9 +234,10 @@ pub struct MicrophoneEntry {
 }
 
 /// `source.devices()` as entries, in the source's order. A list that cannot be
-/// read is empty: the Recording tab then shows only "System default" and a saved
-/// microphone as "(not connected)", and a press reports its own failure.
-pub fn list_microphones(source: &dyn AudioSource) -> Vec<MicrophoneEntry> {
+/// read rejects with [`IpcUnavailable`] (`{ "code": "ipc.unavailable" }`, no
+/// device or OS text), never an empty list: "no microphones" and "the list could
+/// not be read" stay apart, and the Recording tab shows `error.ipc_unavailable`.
+pub fn list_microphones(source: &dyn AudioSource) -> Result<Vec<MicrophoneEntry>, IpcUnavailable> {
     source
         .devices()
         .map(|devices| {
@@ -249,12 +250,14 @@ pub fn list_microphones(source: &dyn AudioSource) -> Vec<MicrophoneEntry> {
                 })
                 .collect()
         })
-        .unwrap_or_default()
+        .map_err(|_capture_error| IpcUnavailable::new())
 }
 
 /// `settings_list_microphones` → [`list_microphones`] over the managed
 /// [`Microphones`]. Async: the enumeration may take up to the open budget.
 #[tauri::command(async)]
-pub fn settings_list_microphones(microphones: State<'_, Microphones>) -> Vec<MicrophoneEntry> {
+pub fn settings_list_microphones(
+    microphones: State<'_, Microphones>,
+) -> Result<Vec<MicrophoneEntry>, IpcUnavailable> {
     list_microphones(microphones.0.as_ref())
 }
