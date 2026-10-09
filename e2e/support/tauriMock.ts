@@ -100,6 +100,15 @@
 //   call stays in flight (recorded, its copy already taken) until `releaseMicrophones()`;
 //   later calls are answered at once. The list is adapter data (cpal's enumeration), not
 //   a core-derived value, so it is hand-written fake data, not a core-checked fixture.
+// - Connection test (spec 004 contracts/ipc.md `settings_test_connection`, T-013):
+//   `settings_test_connection { request }` records the call, then answers the next queued
+//   script: a result (`queueTestResult`, normally core's `testConnectionResult(kind)` from
+//   e2e/fixtures/settings-wire.json) is returned as is, a rejection (`queueTestRejection`)
+//   is thrown as is. With nothing queued it rejects (a test always scripts its result; the
+//   mock never decides one: no URL, key or timeout rule here, decision #38). It changes no
+//   state: nothing stored, no key presence, no event. After `holdTests()` each call stays
+//   in flight (recorded at once, its script taken only when answered) until
+//   `releaseTest()`, which answers every held call in call order and stops holding.
 // - Any other command rejects, so a call outside the contract fails the test.
 //
 // The init script must be self-contained (it is serialized into the page), so it cannot
@@ -111,10 +120,17 @@ import type { Page } from "@playwright/test";
 // The one TS declaration of the wire is the window's own (src/lib/settings/settingsApi.ts);
 // the mock re-exports it, so a wire change is made in one TS file (T-004 r1 #8).
 
-import type { InputDevice, SaveOutcome, SettingsView } from "../../src/lib/settings/settingsApi";
+import type {
+  ConnectionTestResult,
+  InputDevice,
+  SaveOutcome,
+  SettingsView,
+} from "../../src/lib/settings/settingsApi";
 import type { DeleteOutcome, FailureReason, LocalModelView, ModelState } from "../../src/lib/local-models/localModelsApi";
 import type { OverlayPayload } from "../../src/lib/overlay/overlayApi";
 export type {
+  ConnectionTestRequest,
+  ConnectionTestResult,
   EngineKind,
   FieldError,
   FormError,
@@ -125,6 +141,7 @@ export type {
   SaveRequest,
   Settings,
   SettingsView,
+  TestEngine,
   Warning,
 } from "../../src/lib/settings/settingsApi";
 // The local-model wire (spec 002) is declared once, in the window's localModelsApi.ts.
@@ -169,7 +186,35 @@ interface WireFixture {
    * base_url, model and prompt "" (T-021).
    */
   refused_post_processing_on_empty: SaveOutcome;
+  /**
+   * Core's `ConnectionTestResult` wire, one value per kind (T-046; pinned by core's
+   * e2e_settings_wire_fixture_test_connection_results_match_core).
+   */
+  test_connection_results: Record<TestResultKind, ConnectionTestResult>;
 }
+
+/** The kinds of `ConnectionTestResult` the fixture holds, one value each. */
+export type TestResultKind =
+  | "ok"
+  | "cannot_reach"
+  | "invalid_key"
+  | "timeout"
+  | "http"
+  | "unexpected_response"
+  | "invalid"
+  | "key_store_unavailable";
+
+/** Every kind of the fixture, in core's declaration order. */
+export const TEST_RESULT_KINDS: readonly TestResultKind[] = [
+  "ok",
+  "cannot_reach",
+  "invalid_key",
+  "timeout",
+  "http",
+  "unexpected_response",
+  "invalid",
+  "key_store_unavailable",
+];
 
 const fixture = JSON.parse(
   readFileSync(new URL("../fixtures/settings-wire.json", import.meta.url), "utf8"),
@@ -198,6 +243,18 @@ export function savedInsecureApi(): Extract<SaveOutcome, { Saved: unknown }> {
  */
 export function refusedPostProcessingOnEmpty(): Extract<SaveOutcome, { Refused: unknown }> {
   return structuredClone(fixture.refused_post_processing_on_empty) as Extract<SaveOutcome, { Refused: unknown }>;
+}
+
+/**
+ * Core's `ConnectionTestResult` of `kind` (a fresh copy, for `queueTestResult`): ok
+ * (latency 123 ms), cannot_reach (host 127.0.0.1:1), invalid_key, timeout, http (500),
+ * unexpected_response, invalid ([engine.api.base_url url.malformed]),
+ * key_store_unavailable. A kind the fixture lacks fails here, by name.
+ */
+export function testConnectionResult(kind: TestResultKind): ConnectionTestResult {
+  const result = fixture.test_connection_results?.[kind];
+  if (result === undefined) throw new Error(`settings-wire.json has no test_connection_results.${kind}`);
+  return structuredClone(result);
 }
 
 /** Core's `WHISPER_ISO_639_1` in core order (a fresh copy). */
@@ -470,6 +527,9 @@ export async function installTauriMock(page: Page, options: MockOptions = {}): P
       buildInfo: clone(init.buildInfo),
       holdingBuild: false,
       heldBuild: [] as (() => void)[],
+      testScripts: [] as Scripted[],
+      holdingTests: false,
+      heldTests: [] as (() => void)[],
     };
 
     function setModelState(id: string, modelState: unknown): void {
@@ -610,6 +670,14 @@ export async function installTauriMock(page: Page, options: MockOptions = {}): P
           if (!Array.isArray(reply)) throw new Error(reply.reject);
           return reply;
         }
+        case "settings_test_connection": {
+          // Held calls are answered in call order; the script is taken at the answer.
+          if (state.holdingTests) await new Promise<void>((resolve) => state.heldTests.push(resolve));
+          const next = state.testScripts.shift();
+          if (next === undefined) throw new Error("settings_test_connection: no result queued");
+          if ("reject" in next) throw clone(next.reject);
+          return clone(next.outcome);
+        }
         case "plugin:window|destroy":
           if (init.destroy !== null) throw new Error(init.destroy.reject);
           return null;
@@ -699,6 +767,14 @@ export async function installTauriMock(page: Page, options: MockOptions = {}): P
         state.holdingMics = false;
         for (const resolve of state.heldMics.splice(0)) resolve();
       },
+      queueTest: (item: Scripted) => state.testScripts.push(clone(item)),
+      holdTests: () => {
+        state.holdingTests = true;
+      },
+      releaseTest: () => {
+        state.holdingTests = false;
+        for (const resolve of state.heldTests.splice(0)) resolve();
+      },
       progress: (id: string, received: number) => {
         const row = state.models.find((model) => model.id === id);
         if (!row) throw new Error(`no local model ${id}`);
@@ -740,6 +816,9 @@ interface MockHandle {
   releaseDelete: () => void;
   releaseOverlayReady: () => void;
   releaseMicrophones: () => void;
+  queueTest: (item: { outcome: unknown } | { reject: unknown }) => void;
+  holdTests: () => void;
+  releaseTest: () => void;
   setBuildInfo: (value: BuildInfo | { reject: string }) => void;
   holdBuildInfo: () => void;
   releaseBuildInfo: (which: "all" | "newest" | "oldest") => void;
@@ -953,4 +1032,32 @@ export async function releaseOverlayReady(page: Page): Promise<void> {
 /** Answers every held `settings_list_microphones` with the list taken at its call, and stops holding. */
 export async function releaseMicrophones(page: Page): Promise<void> {
   await page.evaluate(() => (window as unknown as MockWindow).__VOICEN_MOCK__.releaseMicrophones());
+}
+
+// ---- Connection test (spec 004 settings_test_connection, T-013) -----------------------
+
+/** The next `settings_test_connection` returns `result` (`testConnectionResult(kind)`). */
+export async function queueTestResult(page: Page, result: ConnectionTestResult): Promise<void> {
+  await page.evaluate(
+    (value) => (window as unknown as MockWindow).__VOICEN_MOCK__.queueTest({ outcome: value }),
+    result,
+  );
+}
+
+/** The next `settings_test_connection` rejects with `payload` (the command could not run). */
+export async function queueTestRejection(page: Page, payload: unknown): Promise<void> {
+  await page.evaluate(
+    (value) => (window as unknown as MockWindow).__VOICEN_MOCK__.queueTest({ reject: value }),
+    payload,
+  );
+}
+
+/** From now on each `settings_test_connection` stays in flight until `releaseTest` (recorded at once). */
+export async function holdTests(page: Page): Promise<void> {
+  await page.evaluate(() => (window as unknown as MockWindow).__VOICEN_MOCK__.holdTests());
+}
+
+/** Answers every held `settings_test_connection` in call order, and stops holding. */
+export async function releaseTest(page: Page): Promise<void> {
+  await page.evaluate(() => (window as unknown as MockWindow).__VOICEN_MOCK__.releaseTest());
 }

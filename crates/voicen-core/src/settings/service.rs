@@ -3734,6 +3734,31 @@ mod tests {
             ),
             ("key_store_unavailable", R::KeyStoreUnavailable),
         ];
+        // T-013: the fixture name of each kind, by an exhaustive match (no wildcard arm):
+        // a new ConnectionTestResult variant does not compile here until it has a fixture
+        // value, and so a case in the UI's exhaustive switch (connectionTest.ts::testMessage)
+        // checked by src/lib/settings/connectionTest.test.ts over this fixture.
+        fn fixture_name(result: &R) -> &'static str {
+            match result {
+                R::Ok { .. } => "ok",
+                R::CannotReach { .. } => "cannot_reach",
+                R::InvalidKey => "invalid_key",
+                R::Timeout => "timeout",
+                R::Http { .. } => "http",
+                R::UnexpectedResponse => "unexpected_response",
+                R::Invalid { .. } => "invalid",
+                R::KeyStoreUnavailable => "key_store_unavailable",
+            }
+        }
+        for (name, result) in &results {
+            assert_eq!(*name, fixture_name(result), "fixture entry {name} holds another kind");
+            let wire = serde_json::to_value(result).expect("ConnectionTestResult serializes");
+            assert_eq!(wire["kind"], *name, "the wire kind of {name} is its fixture name");
+        }
+        let mut names: Vec<&str> = results.iter().map(|(name, _)| *name).collect();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), 8, "one fixture value per ConnectionTestResult kind: {names:?}");
         let core: serde_json::Map<String, serde_json::Value> = results
             .iter()
             .map(|(name, r)| {

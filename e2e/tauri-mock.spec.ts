@@ -16,6 +16,7 @@ import {
   failureReason,
   fakeMicrophones,
   holdLists,
+  holdTests,
   listeners,
   localModelProgress,
   localModelsFirstRun,
@@ -30,6 +31,8 @@ import {
   queueDeleteRejection,
   queueDownloadRejection,
   queueSaveOutcome,
+  queueTestRejection,
+  queueTestResult,
   releaseDelete,
   releaseDownload,
   releaseList,
@@ -39,9 +42,13 @@ import {
   releaseSettingsGet,
   holdBuildInfo,
   releaseBuildInfo,
+  releaseTest,
   setBuildInfo,
   storedModels,
   storedView,
+  TEST_RESULT_KINDS,
+  testConnectionResult,
+  type ConnectionTestRequest,
   type SaveOutcome,
   type SaveRequest,
 } from "./support/tauriMock";
@@ -159,8 +166,9 @@ test("emit reaches listeners until they unlisten; other commands reject", async 
   await emit(page, "settings://changed", { probe: 2 });
   expect(await received(page)).toHaveLength(1);
 
-  expect(await invokeInPage(page, "settings_test_connection", {})).toEqual({
-    err: "unexpected command settings_test_connection",
+  // T-013: settings_test_connection is in the contract now; a command outside it still rejects.
+  expect(await invokeInPage(page, "settings_export_fake", {})).toEqual({
+    err: "unexpected command settings_export_fake",
   });
 });
 
@@ -782,4 +790,120 @@ test("holdBuildInfo keeps get_build_info in flight (recorded, answer taken at th
   expect(await invokeInPage(page, "get_build_info")).toEqual({ ok: { version: "9.8.7", commit: "def5678" } });
   // Nothing held any more: a single release names the missing call.
   await expect(releaseBuildInfo(page, "oldest")).rejects.toThrow("no get_build_info is held");
+});
+
+// ---- settings_test_connection (T-013) ----------------------------------------------
+// The command's own contract in the mock: it records the request, answers only what a
+// test queued (core's fixture results), changes no state, and holds/releases like
+// settings_save. So a red in e2e/settings-test-connection.spec.ts is the UI's.
+
+function testRequest(key: ConnectionTestRequest["key"]): ConnectionTestRequest {
+  const settings = firstRunView().settings;
+  return {
+    engine: "api",
+    base_url: "https://api.example.com/v1",
+    model: "whisper-fake",
+    key,
+    timeouts: settings.timeouts,
+  };
+}
+
+test("testConnectionResult serves core's fixture: one distinct wire value per kind, tagged by kind", async () => {
+  const values = TEST_RESULT_KINDS.map((kind) => testConnectionResult(kind));
+  expect(values.map((v) => (v as { kind: string }).kind)).toEqual([...TEST_RESULT_KINDS]);
+  expect(new Set(values.map((v) => JSON.stringify(v))).size).toBe(TEST_RESULT_KINDS.length);
+  expect(testConnectionResult("ok")).toEqual({ kind: "ok", latency_ms: 123 });
+  expect(testConnectionResult("cannot_reach")).toEqual({ kind: "cannot_reach", host: "127.0.0.1:1" });
+  expect(testConnectionResult("http")).toEqual({ kind: "http", status: 500 });
+  expect(testConnectionResult("invalid")).toEqual({
+    kind: "invalid",
+    errors: [{ field: "engine.api.base_url", code: "url.malformed" }],
+  });
+  // A fresh copy each time.
+  const a = testConnectionResult("ok") as { latency_ms: number };
+  a.latency_ms = 1;
+  expect(testConnectionResult("ok")).toEqual({ kind: "ok", latency_ms: 123 });
+});
+
+test("settings_test_connection records the request and returns the queued results in order; it stores nothing and emits nothing", async ({ page }) => {
+  await listenInPage(page, "settings://changed");
+  const view = await storedView(page);
+  await queueTestResult(page, testConnectionResult("ok"));
+  await queueTestResult(page, testConnectionResult("invalid_key"));
+  const typed = testRequest({ Replace: "sk-test-FAKE-0013-not-a-real-key" });
+  const untouched = testRequest("Untouched");
+  expect(await invokeInPage(page, "settings_test_connection", { request: typed })).toEqual({
+    ok: testConnectionResult("ok"),
+  });
+  expect(await invokeInPage(page, "settings_test_connection", { request: untouched })).toEqual({
+    ok: testConnectionResult("invalid_key"),
+  });
+  expect((await calls(page, "settings_test_connection")).map((c) => c.args)).toEqual([
+    { request: typed },
+    { request: untouched },
+  ]);
+  // No state: the view (key presence included) is unchanged and no event was emitted.
+  expect(await storedView(page)).toEqual(view);
+  expect(await emitted(page)).toEqual([]);
+  expect(await received(page)).toEqual([]);
+});
+
+test("settings_test_connection with nothing queued rejects (recorded): the mock never decides a result", async ({ page }) => {
+  const result = await invokeInPage(page, "settings_test_connection", { request: testRequest("Untouched") });
+  expect(result).toEqual({ err: "settings_test_connection: no result queued" });
+  expect(await calls(page, "settings_test_connection")).toHaveLength(1);
+});
+
+test("a queued test rejection is thrown as is, in queue order with results; the queue is consumed", async ({ page }) => {
+  await queueTestRejection(page, "shell cannot run the test (fake)");
+  await queueTestResult(page, testConnectionResult("timeout"));
+  const req = { request: testRequest("Untouched") };
+  const thrown = await page.evaluate(async (args) => {
+    const w = window as unknown as { __TAURI_INTERNALS__: Internals };
+    try {
+      await w.__TAURI_INTERNALS__.invoke("settings_test_connection", args);
+      return "resolved";
+    } catch (e) {
+      return e;
+    }
+  }, req);
+  expect(thrown).toBe("shell cannot run the test (fake)");
+  expect(await invokeInPage(page, "settings_test_connection", req)).toEqual({ ok: testConnectionResult("timeout") });
+  expect(await invokeInPage(page, "settings_test_connection", req)).toEqual({
+    err: "settings_test_connection: no result queued",
+  });
+});
+
+test("holdTests keeps settings_test_connection in flight (recorded at once) until releaseTest, answered in call order; later calls are answered at once", async ({ page }) => {
+  await holdTests(page);
+  await queueTestResult(page, testConnectionResult("ok"));
+  await queueTestResult(page, testConnectionResult("http"));
+  await page.evaluate(() => {
+    const w = window as unknown as {
+      __TAURI_INTERNALS__: Internals;
+      __tests?: unknown[];
+    };
+    w.__tests = [];
+    for (const n of [1, 2]) {
+      void w.__TAURI_INTERNALS__
+        .invoke("settings_test_connection", { request: { n } })
+        .then((v) => w.__tests!.push({ n, ok: v }), (e) => w.__tests!.push({ n, err: e }));
+    }
+  });
+  const answered = () =>
+    page.evaluate(() => (window as unknown as { __tests?: unknown[] }).__tests ?? []);
+  await expect.poll(async () => (await calls(page, "settings_test_connection")).length).toBe(2);
+  // Recorded, not answered: a round trip through the page does not resolve them.
+  expect(await invokeInPage(page, "settings_get")).toEqual({ ok: firstRunView() });
+  expect(await answered()).toEqual([]);
+
+  await releaseTest(page);
+  await expect.poll(answered).toEqual([
+    { n: 1, ok: testConnectionResult("ok") },
+    { n: 2, ok: testConnectionResult("http") },
+  ]);
+  await queueTestResult(page, testConnectionResult("unexpected_response"));
+  expect(await invokeInPage(page, "settings_test_connection", { request: { n: 3 } })).toEqual({
+    ok: testConnectionResult("unexpected_response"),
+  });
 });

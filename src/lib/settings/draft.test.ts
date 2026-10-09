@@ -31,6 +31,7 @@ import ruCatalog from "../../../i18n/ru.json";
 import wire from "../../../e2e/fixtures/settings-wire.json";
 import {
   applyOutcome,
+  applyTestErrors,
   applyView,
   clearKey,
   draftFromView,
@@ -39,6 +40,7 @@ import {
   isDirty,
   resetKey,
   saveRequest,
+  testRequest,
   typeKey,
   warningsByField,
 } from "./draft";
@@ -487,5 +489,154 @@ describe("timeouts on the wire (T-073)", () => {
     expect(after.errors).toEqual({ "timeouts.api_transcription": "error.timeout.range" });
     expect(after.settings.timeouts).toEqual({ ...STORED, api_transcription_s: 601 });
     expect(after.baseline.settings.timeouts).toEqual(STORED);
+  });
+});
+
+// ---- T-013: the connection-test request and its Invalid errors ------------------------
+//
+//   testRequest(draft): ConnectionTestRequest | null
+//     api          -> { engine: "api", base_url: settings.api.base_url, model: settings.api.model,
+//                       key: keys.transcription_api, timeouts: settings.timeouts }
+//     local_server -> { engine: "local_server", ...settings.local_server, key: keys.local_server, timeouts }
+//     none, builtin_local -> null
+//   Values are copied as in the draft (no trim, no validation: core normalizes and checks).
+//
+//   applyTestErrors(draft, errors: FieldError[]): Draft
+//     errors = errorsByField(errors) (U2), replacing the previous highlights (choice (i));
+//     settings, keys, baseline and formError are kept.
+
+describe("testRequest (T-013)", () => {
+  function apiDraft() {
+    const view = firstRun();
+    view.settings.engine = "api";
+    return draftFromView(view);
+  }
+
+  it("api: the draft's api URL and model, the transcription_api KeyEdit and the draft's timeouts, nothing else", () => {
+    let d = apiDraft();
+    d.settings.api.base_url = "https://api.example.com/v1";
+    d.settings.api.model = "whisper-fake-0013";
+    d.settings.timeouts.connect_s = 7;
+    d = typeKey(d, "transcription_api", FAKE_KEY);
+    const request = testRequest(d);
+    expect(request).toEqual({
+      engine: "api",
+      base_url: "https://api.example.com/v1",
+      model: "whisper-fake-0013",
+      key: { Replace: FAKE_KEY },
+      timeouts: { ...wire.first_run_view.settings.timeouts, connect_s: 7 },
+    });
+    expect(Object.keys(request!).sort()).toEqual(["base_url", "engine", "key", "model", "timeouts"]);
+  });
+
+  it("local_server: the local_server URL and model and the local_server KeyEdit; the api key slot is never used", () => {
+    const view = firstRun();
+    view.settings.engine = "local_server";
+    let d = draftFromView(view);
+    d = typeKey(d, "transcription_api", FAKE_KEY);
+    expect(testRequest(d)).toEqual({
+      engine: "local_server",
+      base_url: wire.first_run_view.settings.local_server.base_url,
+      model: "",
+      key: "Untouched",
+      timeouts: wire.first_run_view.settings.timeouts,
+    });
+    d = typeKey(d, "local_server", "local-FAKE-0013");
+    expect(testRequest(d)!.key).toEqual({ Replace: "local-FAKE-0013" });
+  });
+
+  it("api ignores a key typed for local_server or post_processing; Clear is sent as Clear (the save's semantics)", () => {
+    let d = apiDraft();
+    d = typeKey(d, "local_server", "local-FAKE-0013");
+    d = typeKey(d, "post_processing", "pp-FAKE-0013");
+    expect(testRequest(d)!.key).toBe("Untouched");
+    d = clearKey(d, "transcription_api");
+    expect(testRequest(d)!.key).toBe("Clear");
+  });
+
+  it("a key typed and emptied again is Untouched (never a blank Replace)", () => {
+    let d = apiDraft();
+    d = typeKey(d, "transcription_api", FAKE_KEY);
+    d = resetKey(d, "transcription_api");
+    expect(testRequest(d)!.key).toBe("Untouched");
+  });
+
+  it("none and builtin_local have no test: null", () => {
+    const d = draftFromView(firstRun());
+    expect(d.settings.engine).toBe("none");
+    expect(testRequest(d)).toBeNull();
+    d.settings.engine = "builtin_local";
+    expect(testRequest(d)).toBeNull();
+  });
+
+  it("values are sent as typed: no trim and no validation in the UI", () => {
+    const d = apiDraft();
+    d.settings.api.base_url = "  not a url (fake)  ";
+    d.settings.api.model = " whisper ";
+    d.settings.timeouts.connect_s = 0;
+    const request = testRequest(d)!;
+    expect(request.base_url).toBe("  not a url (fake)  ");
+    expect(request.model).toBe(" whisper ");
+    expect(request.timeouts.connect_s).toBe(0);
+  });
+
+  it("the request is a copy: later edits of the draft do not change it, and building it changes nothing in the draft", () => {
+    let d = apiDraft();
+    d = typeKey(d, "transcription_api", FAKE_KEY);
+    const before = structuredClone(d);
+    const request = testRequest(d)!;
+    expect(d).toEqual(before);
+    d.settings.api.model = "edited-after-click";
+    d.settings.timeouts.connect_s = 99;
+    (d.keys.transcription_api as { Replace: string }).Replace = "changed";
+    expect(request.model).toBe(wire.first_run_view.settings.api.model);
+    expect(request.timeouts.connect_s).toBe(wire.first_run_view.settings.timeouts.connect_s);
+    expect(request.key).toEqual({ Replace: FAKE_KEY });
+  });
+});
+
+describe("applyTestErrors (T-013)", () => {
+  const malformed = wire.test_connection_results.invalid.errors;
+
+  it("core's invalid result highlights its field with error.<code> (the U2 path, errorsByField)", () => {
+    const d = applyTestErrors(draftFromView(firstRun()), malformed);
+    expect(d.errors).toEqual({ "engine.api.base_url": "error.url.malformed" });
+    expect(d.errors).toEqual(errorsByField(malformed));
+  });
+
+  it("a field on another tab (timeouts.connect) is highlighted too; the first error of a field wins", () => {
+    const d = applyTestErrors(draftFromView(firstRun()), [
+      { field: "timeouts.connect", code: "timeout.range" },
+      { field: "engine.api.model", code: "required" },
+      { field: "timeouts.connect", code: "required" },
+    ]);
+    expect(d.errors).toEqual({ "timeouts.connect": "error.timeout.range", "engine.api.model": "error.required" });
+  });
+
+  it("replaces the previous highlights (choice (i)) and keeps the form error, settings, key edits and baseline", () => {
+    let d = draftFromView(firstRun());
+    d.settings.api.model = "whisper-edited";
+    d = typeKey(d, "transcription_api", FAKE_KEY);
+    d = applyOutcome(d, {
+      Refused: {
+        errors: [{ field: "history.size", code: "range" }],
+        form_error: { kind: "write_failed", message: "settings.write_failed" },
+      },
+    } as SaveOutcome);
+    const before = structuredClone(d);
+    const next = applyTestErrors(d, malformed);
+    expect(next.errors).toEqual({ "engine.api.base_url": "error.url.malformed" });
+    expect(next.formError).toEqual(before.formError);
+    expect(next.settings).toEqual(before.settings);
+    expect(next.keys).toEqual(before.keys);
+    expect(next.baseline).toEqual(before.baseline);
+    expect(isDirty(next)).toBe(true);
+    // The input draft is not changed in place.
+    expect(d).toEqual(before);
+  });
+
+  it("no errors clears the highlights", () => {
+    const d = applyTestErrors(applyTestErrors(draftFromView(firstRun()), malformed), []);
+    expect(d.errors).toEqual({});
   });
 });
