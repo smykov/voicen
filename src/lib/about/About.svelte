@@ -11,7 +11,9 @@
   // The <dialog> is moved to <body> (portal), so it is not inside the page's
   // <fieldset disabled={saving}> nor inside <main>, which goes inert under the discard
   // prompt. `open` is bindable so the page can close About when the discard prompt
-  // shows (the discard prompt wins, settings-ui D).
+  // shows (the discard prompt wins, settings-ui D); About sets it false when it is
+  // destroyed, so a torn-down About never reopens by itself.
+  import { onDestroy } from "svelte";
   import type { Action } from "svelte/action";
   import { formatBuildInfo, loadBuildInfo, type BuildInfo } from "$lib/buildInfo";
   import { t } from "$lib/i18n";
@@ -55,6 +57,16 @@
     const active = document.activeElement;
     if (active === null || active === document.body || (dialog?.contains(active) ?? false)) opener?.focus();
   }
+
+  // Teardown (a settings://focus request switches the tab away from General while About
+  // is open): removing an open modal fires no `close`, so the bound `open` would stay
+  // true and the next instance would show the dialog unasked, with no get_build_info
+  // call. About ends with its instance; the next showing comes only from the button,
+  // and an answer still pending for this instance is dropped.
+  onDestroy(() => {
+    opening++;
+    open = false;
+  });
 
   /** Moves the node to <body> and removes it on destroy. */
   const portal: Action<HTMLElement> = (node) => {
