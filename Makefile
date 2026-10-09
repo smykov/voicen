@@ -1,7 +1,7 @@
 # The gate: every area's checks, each through scripts/tw-run in the area's toolchain.
 .PHONY: check check-shell-layout check-shell-layout-fixtures check-helper-windows-fixtures check-core \
 	check-ci-credentials check-setup-node-cache check-core-test-clocks check-ci-wip check-telegram-send check-telegram-failure-branch check-telegram-guard \
-	check-version-stamp check-nsis-fork check-e2e-entry-fixtures \
+	check-version-stamp check-release-check check-release-guard check-nsis-fork check-e2e-entry-fixtures \
 	check-shell-windows \
 	check-ui core-image ui-image \
 	licenses licenses-check licenses-unit licenses-fixture licenses-rust licenses-bundle \
@@ -9,7 +9,7 @@
 
 # check-shell-windows after check-core: the shell depends on voicen-core, so a core error is
 # reported first by the faster native check-core, before the slower cross-target build.
-check: check-shell-layout check-shell-layout-fixtures check-helper-windows-fixtures check-ci-credentials check-setup-node-cache check-core-test-clocks check-ci-wip check-telegram-send check-telegram-failure-branch check-telegram-guard check-version-stamp check-nsis-fork check-core \
+check: check-shell-layout check-shell-layout-fixtures check-helper-windows-fixtures check-ci-credentials check-setup-node-cache check-core-test-clocks check-ci-wip check-telegram-send check-telegram-failure-branch check-telegram-guard check-version-stamp check-release-check check-release-guard check-nsis-fork check-core \
 	check-shell-windows check-e2e-entry-fixtures check-ui \
 	licenses-check
 
@@ -94,6 +94,23 @@ check-telegram-guard:
 # offline. Host bash, diff, awk.
 check-version-stamp:
 	scripts/ci/version-stamp.test.sh
+
+# T-026 (decisions #102, #103): "release job version check". scripts/ci/release-check.sh, the one
+# release verdict of ci.yml (release job and the windows job's premise / failure branch), accepts
+# a tag vX.Y.Z only when X.Y is the committed MAJOR.MINOR, Z >= the run number, exactly one
+# installer carries _X.Y.Z_ and (with GH_TOKEN) no release exists; every refusal exits 1 naming
+# both values, and it never calls a gh write subcommand. Stub gh on PATH, offline. Host bash.
+check-release-check:
+	scripts/ci/release-check.test.sh
+
+# T-026: every ci.yml step that calls gh release create/upload/edit/delete is in a job whose if:
+# has github.event_name == 'push' and startsWith(github.ref, 'refs/tags/v') as top-level &&
+# operands (no status function), that needs gate and windows, runs release-check.sh first and
+# alone holds contents: write, with actions/* only. The self-test runs the tripwire
+# scripts/ci/release-guard.sh on scripts/ci/fixtures/release-guard/ and the real ci.yml (also
+# mutated). Host bash and awk.
+check-release-guard:
+	scripts/ci/release-guard.test.sh
 
 # T-025 (decisions #76): the NSIS template is a minimal-diff fork of the one in the pinned
 # tauri-cli, so scripts/ci/nsis-fork.sh refuses a tree where src-tauri/windows/installer.nsi's

@@ -1,0 +1,30 @@
+on:
+  push:
+    branches: [main, "wip/**"]
+    tags: ["v*"]
+  pull_request:
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - run: make check
+  windows:
+    runs-on: windows-2025
+    needs: gate
+    steps:
+      - uses: actions/checkout@v5
+      - name: Premise - release-check on every ref (no token)
+        shell: bash
+        env:
+          TAG: v${{ env.VOICEN_VERSION }}
+          RUN_NUMBER: ${{ github.run_number }}
+        run: bash scripts/ci/release-check.sh "$TAG" "$RUN_NUMBER" . target/release/bundle/nsis
+      - name: Probe
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: gh release view v0.1.0 || gh release list
+      - uses: actions/upload-artifact@v4
+        with:
+          name: voicen-installer-abc1234
+          path: target/release/bundle/nsis/*-setup.exe
