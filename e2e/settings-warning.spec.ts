@@ -12,8 +12,8 @@
 //   a visible element with the text of `t(warning.message)`, referenced by the control's
 //   aria-describedby (so it is in the control's accessible description); it is not an
 //   error: the control's aria-invalid stays unset/false and nothing is in role="alert";
-// - a warning of a field with no control on the page (another tab, another engine,
-//   post_processing.base_url until T-021) is listed in the form-level element with test
+// - a warning of a field with no control on the page (another tab, another engine;
+//   post_processing.base_url while the Engine tab is shown) is listed in the form-level element with test
 //   id `settings-warnings`, one `role="listitem"` per such field, holding the field's
 //   label `t(settings.field_label.<FieldId>)` and `t(warning.message)`, never the raw
 //   FieldId; the list follows the controls the current tab renders (rule L); with no
@@ -263,8 +263,8 @@ test("with ui_language switched to ru, the warning and Saved are shown in Russia
 test("a warning for a field with no control on the current tab is listed at form level by its field label, and the list follows the rendered controls", async ({ page }) => {
   const errors = pageErrors(page);
   await open(page);
-  // Core's case of two URLs in use: the engine's and the post-processing one (no control
-  // until T-021). The post-processing URL is a documentation address.
+  // Core's case of two URLs in use: the engine's and the post-processing one (its control
+  // is on the Post-processing tab, not on the Engine tab shown here). The post-processing URL is a documentation address.
   const outcome = savedInsecureApi();
   outcome.Saved.view.settings.post_processing.enabled = true;
   outcome.Saved.view.settings.post_processing.base_url = "http://192.0.2.10/v1";

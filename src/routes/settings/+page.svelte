@@ -47,13 +47,15 @@
   import General from "$lib/settings/tabs/General.svelte";
   import History from "$lib/settings/tabs/History.svelte";
   import Output from "$lib/settings/tabs/Output.svelte";
+  import PostProcessing from "$lib/settings/tabs/PostProcessing.svelte";
   import Recording from "$lib/settings/tabs/Recording.svelte";
 
-  type Tab = "engine" | "recording" | "output" | "history" | "general";
+  type Tab = "engine" | "recording" | "output" | "post_processing" | "history" | "general";
   const TABS: readonly { id: Tab; label: MessageId }[] = [
     { id: "engine", label: "settings.tab.engine" },
     { id: "recording", label: "settings.tab.recording" },
     { id: "output", label: "settings.tab.output" },
+    { id: "post_processing", label: "settings.tab.post_processing" },
     { id: "history", label: "settings.tab.history" },
     { id: "general", label: "settings.tab.general" },
   ];
@@ -291,6 +293,8 @@
           <Recording bind:draft {warnings} />
         {:else if tab === "output"}
           <Output bind:draft {warnings} />
+        {:else if tab === "post_processing"}
+          <PostProcessing bind:draft {warnings} />
         {:else if tab === "history"}
           <History bind:draft {warnings} />
         {:else}
