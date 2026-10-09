@@ -584,6 +584,9 @@ test("holdMicrophones keeps settings_list_microphones in flight (recorded) until
 // T-023: the About dialog reads get_build_info on each opening; setBuildInfo changes the
 // answer of every later call, a value or a rejection, in either order.
 test("setBuildInfo replaces the get_build_info answer for every later call: a value, then a rejection, then a value", async ({ page }) => {
+  // "/" reads get_build_info once in onMount; that call can land after goto() returns,
+  // so wait for it before taking the baseline (else the count below is off by one).
+  await expect.poll(async () => (await calls(page, "get_build_info")).length).toBe(1);
   const before = (await calls(page, "get_build_info")).length;
   expect(await invokeInPage(page, "get_build_info")).toEqual({ ok: { version: "0.0.0", commit: "mock" } });
 
