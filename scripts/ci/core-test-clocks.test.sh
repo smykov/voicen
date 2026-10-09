@@ -73,7 +73,8 @@ check ok-targets-and-clock-in-common  0 "ok: 1 file(s) outside common"   # the l
 check ok-other-addresses              0 "ok: 1 file(s) outside common"   # 192.0.2.10 (settings_log), 127.0.0.1:0 bind, 127.0.0.1:18080, 198.51.100.7
 check ok-comments                     0 "ok: 1 file(s) outside common"   # //, ///, //! lines naming targets and Instant::now
 check ok-config-comparison            0 "ok: 1 file(s) outside common"   # Duration comparisons of configured values, no clock read
-check ok-timing-helpers               0 "ok: 2 file(s) outside common"   # measure / at_least / within_spec("SC-003"); a nested dir is read
+check ok-timing-helpers               0 "ok: 2 file(s) outside common"   # measure / fastest / at_least / within_spec("SC-003"); a nested dir is read
+check ok-unanswered-case              0 "ok: 1 file(s) outside common"   # the blackhole only as common::os_answer::Unanswered (review 1 #2); 198.51.100.9 never contacted
 
 # I1: an OS-answer target outside common.
 check v-invalid-own-connect           1 "/openai_client.rs:13: os-answer"   # T-078's shape: voicen-test.invalid with its own 2 s connect; `//` of http:// is not a comment
@@ -89,6 +90,10 @@ check v-common-prefix-file            1 "/common_extra.rs:4: os-answer"     # on
 # I2: a wall-clock reading outside common.
 check v-took-ceiling                  1 "/post_process_timeout.rs:8: clock" # let started = Instant::now();
 check v-took-ceiling                  1 "/post_process_timeout.rs:10: clock" # started.elapsed(); then took < 1.5 s
+# The same ceiling on measure()'s result (`let (got, took) = measure(..); assert!(took < ..)`)
+# names no clock, so it is not this tripwire's: it does not compile, because measure returns
+# an opaque common::timing::Took (pinned by timing_tests::a_measured_time_cannot_be_compared_
+# or_read_back_so_no_ceiling_compiles, in make check through cargo test; review 1 #1).
 check v-elapsed-on-helper-instant     1 "/local_download.rs:9: clock"       # .elapsed() on an Instant handed out by common
 check v-instant-alias                 1 "/openai_client.rs:3: clock"        # use std::time::Instant as Clock;
 check v-nested-dir                    1 "/diag_support/mod.rs:6: clock"     # a subdir other than common/ is read

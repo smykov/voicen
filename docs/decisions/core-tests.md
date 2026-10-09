@@ -1,8 +1,8 @@
 # voicen-core test network and timing
 
 **Code:** `crates/voicen-core/tests/common/`:
-- `os_answer.rs`: `OsAnswer::refused()`, `OsAnswer::unresolvable()`, `OsAnswer::refused_released_port()`, `OS_ANSWER_BUDGET`, `UNANSWERED_HOST`;
-- `timing.rs`: `at_least`, `within_spec`, `REFERENCE_LOAD`, `measure`, `now`, `ago`, `deadline`, `left`, `passed`, `eventually`;
+- `os_answer.rs`: `OsAnswer::refused()`, `OsAnswer::unresolvable()`, `OsAnswer::refused_released_port()`, `OS_ANSWER_BUDGET`, `Unanswered::blackhole()`;
+- `timing.rs`: `Took` (an opaque measured time), `measure`, `between`, `fastest`, `Took::less`, `at_least`, `within_spec`, `at_most_per_second`, `REFERENCE_LOAD`, `now`, `ago`, `deadline`, `left`, `passed`, `eventually`;
 - `refused_addr_tests.rs` and `download.rs`.
 
 Also: `scripts/ci/core-test-clocks.sh` (the tripwire, run by `make check-core-test-clocks`; its self-test `scripts/ci/core-test-clocks.test.sh` uses the fixtures in `scripts/ci/fixtures/core-test-clocks/`), and `.github/workflows/ci.yml` (the windows job, `--no-fail-fast`).
@@ -18,7 +18,8 @@ Also: `scripts/ci/core-test-clocks.sh` (the tripwire, run by `make check-core-te
   - the address is IPv4 loopback;
   - the port is refused by a probe within `OS_ANSWER_BUDGET`;
   - every deadline of the case, destructured exhaustively.
-- The tripwire self-test: 23 cases, including the real tests dir.
+- `timing_tests::a_measured_time_cannot_be_compared_or_read_back_so_no_ceiling_compiles`: a compile-time check that `Took` has no comparison, `==`, deref or conversion back to a `Duration`.
+- The tripwire self-test: 24 cases, including the real tests dir.
 
 **Tasks:** T-016; T-047 (F-004); T-048 (F-005); T-078 (F-013; deferred and absorbed by T-080); T-080 (rca, class `os-answer-deadline-race`).
 **Classes** in `docs/failures.md`: `test-port-race` and `os-answer-deadline-race`.
@@ -42,7 +43,8 @@ This is one rule for every kind of uncontrolled clock: the OS refusal time, the 
 - A new kind of OS answer adds a constructor with its own probe. It never adds a new budget or a timeouts helper.
 
 **I2: the wall clock decides only lower bounds.**
-- A measured time (`common::timing::measure`) is checked only with `at_least(took, deadline)`. That shows a deadline never fires early and no shorter wrong limit was used.
+- A measured time (`common::timing::measure`, or `between` for two stamps) is checked only with `at_least(took, deadline)`. That shows a deadline never fires early and no shorter wrong limit was used.
+- The measured time is an opaque `Took`: no comparison, no `==`, no deref or conversion back to a `Duration`, and its only accessor is private to `tests/common`. So `assert!(took < ...)` does not compile. Only `at_least`, `within_spec` and `at_most_per_second` (a count capped by the time; the time only widens the cap) read it.
 - A wrong *longer* deadline is caught by the outcome, for example:
   - the server answers between the right and the wrong deadline (`Ok` instead of `Timeout`);
   - a stall holds longer than the harness waits for the end event (no end event);
@@ -50,14 +52,15 @@ This is one rule for every kind of uncontrolled clock: the OS refusal time, the 
   - the overlay sequence.
 - The only ceiling is a tolerance a spec states. It goes through `within_spec(stage, want, tol, spec)`, which names the spec id and the reference load (`REFERENCE_LOAD`).
   - The reference load is OQ-23 proposal (a): the gate's own load. That is one `make check` at a time, `cargo test -j2`, test binaries one after another.
-  - Its only use today is SC-003 in `post_process_timeout`: the stage, over the fastest of 3 baseline runs, lies within the deadline ± 0.5 s.
+  - Its only use today is SC-003 in `post_process_timeout`: the stage (`took.less(fastest(baseline runs))`, 3 runs) lies within the deadline ± 0.5 s.
+  - OQ-23 is still open; the tests proceed on proposal (a). A different answer from the owner changes `REFERENCE_LOAD` and reopens T-080.
 
 **Other clock uses in tests:**
 - Instants handed to a product API as input (a press, a release, a frame's `at`) come from `common::timing::now()` or `ago()`.
 - Waits that only end a hung test use `deadline`, `left` or `eventually`. They are sized far above the time the awaited outcome needs.
-- The never-contacted TEST-NET-1 value `192.0.2.1` comes from `common::os_answer::UNANSWERED_HOST`. It has two uses:
-  - a settings value a fake engine records (`dictation_session`);
-  - the one test that pins the connect timer (the `api_pipeline` blackhole test). Its verdict accepts both endings the OS may give, and it bites on the reason, not on a ceiling.
+- A target that never answers (TEST-NET-1, `192.0.2.1`) comes only from `common::os_answer::Unanswered::blackhole()`, together with its deadlines (connect 300 ms, every total ten times that) and the endings it accepts (`ended_by_connect_or_os`: `CannotReach` for its host, or `NetworkUnavailable` where there is no route). Its one user is the test that pins the connect timer (the `api_pipeline` blackhole test); it bites on the reason, not on a ceiling. It is not an `OsAnswer`: no OS answer is awaited, so there is no probe and no budget.
+- A settings value a fake engine records but nothing contacts (`dictation_session`) is a TEST-NET-2 literal (`198.51.100.9`), not an OS-answer target.
+- `dictation_session::realtime_source_paces_frames_by_real_time_and_pads_with_silence` holds the capture until about 1 s of audio arrived (`eventually`), not for a fixed sleep, and checks only that the capture lasted at least the audio less one chunk (`at_least(between(..))`).
 
 **Defects that produced it:**
 - F-005: a refused loopback connect takes about 2.17 s on windows-latest, so a 300 ms total gave `Timeout`, not `CannotReach`.
@@ -75,16 +78,21 @@ This is one rule for every kind of uncontrolled clock: the OS refusal time, the 
   - It skips lines that start with `//`.
   - It decides on raw text (F-003). It does not catch:
     - a target built from parts at run time;
-    - arithmetic on two instants handed out by `common`, including a ceiling written that way;
+    - arithmetic on two instants handed out by `common` (`now() - a`), including a ceiling written that way;
+    - a ceiling through `within_spec` with a made-up spec id;
+    - the `#[cfg(test)]` unit tests under `crates/voicen-core/src` (outside the dir it reads; they use `Instant::now()` as stamps and hold no ceiling today);
     - the shell tests.
+  - A ceiling on what `measure` / `between` return is not text it reads: it does not compile (`Took`, above).
   - Exit 3 ("cannot run") is never a pass.
 - Automatic checks inside `common`:
   - the `OsAnswer` probes;
   - the exhaustive `Timeouts` destructure in `refused_addr_tests`: a new deadline field breaks the build until it is set;
   - `within_spec` refuses a ceiling without a spec id;
+  - `Took` makes a ceiling on a measured time a compile error, pinned by a compile-time not-impl check in `timing_tests`;
+  - `Unanswered`'s deadlines are destructured exhaustively in `os_answer_tests`;
   - `common_helpers` pins both modules.
 - By review only (T1):
-  - no ceiling written as instant arithmetic slips past the tripwire;
+  - no ceiling written as instant arithmetic, through a made-up `within_spec` spec id, or in a unit test under `src` slips in;
   - when a ceiling is removed, an outcome catches its bite, named in the test's comment.
 - `ci.yml` runs the Windows workspace tests with `--no-fail-fast`, so one red binary does not hide the others.
 

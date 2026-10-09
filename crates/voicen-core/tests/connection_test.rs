@@ -665,12 +665,13 @@ async fn ok_reports_latency_at_least_the_server_delay_and_saves_nothing() {
     let w = world(stored_keys());
     let guard = before(&w);
     let (got, took) = measure(|| run(&w, api_req(&base(&server), KeyEdit::Untouched)));
-    let elapsed = took.as_millis();
     let latency = latency_of(&got);
     assert!(latency >= 200, "latency {latency} ms < the 200 ms delay");
-    assert!(
-        latency <= elapsed,
-        "latency {latency} ms > the call's {elapsed} ms"
+    // The call lasted at least the latency it reports (a lower bound on the
+    // measured time, T-080 I2).
+    at_least(
+        took,
+        Duration::from_millis(u64::try_from(latency).unwrap_or(u64::MAX)),
     );
     assert_clean(&got, &[]);
     only_request(&server).await;

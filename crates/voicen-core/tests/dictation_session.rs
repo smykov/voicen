@@ -31,8 +31,7 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, Weak};
 use std::thread::{self, ThreadId};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
-use common::os_answer::UNANSWERED_HOST;
-use common::timing::{ago, now, passed};
+use common::timing::{ago, at_least, between, now, passed};
 
 use voicen_core::audio::{wav, AudioBuffer};
 use voicen_core::autostart::FakeAutostart;
@@ -75,6 +74,10 @@ const W1: WindowRef = WindowRef(0x0001_0051);
 const W2: WindowRef = WindowRef(0x0001_0052);
 /// Upper bound on anything that waits for the session's threads.
 const BUDGET: Duration = Duration::from_secs(10);
+
+/// A local-server URL the fake engine factory records but nothing ever contacts
+/// (TEST-NET-2, RFC 5737; not an OS-answer target: no connect is made, T-080).
+const NEVER_CONTACTED_URL: &str = "http://198.51.100.9:9/v1";
 /// Where the fake capture stamps the first frame, after the press.
 const FIRST_FRAME: Duration = Duration::from_millis(40);
 
@@ -2579,7 +2582,7 @@ fn a_first_run_session_records_on_the_first_press_after_a_save() {
 
     rig.save(|s| {
         s.engine = EngineKind::LocalServer;
-        s.local_server.base_url = format!("http://{UNANSWERED_HOST}:9/v1");
+        s.local_server.base_url = NEVER_CONTACTED_URL.to_string();
     });
     rig.hold(&fixtures::speech_3s(), past(), ms(3000));
     assert_eq!(rig.audio.start_calls(), 1, "the first press after the save");
@@ -2597,10 +2600,7 @@ fn a_first_run_session_records_on_the_first_press_after_a_save() {
         .collect();
     assert_eq!(
         used,
-        vec![(
-            EngineKind::LocalServer,
-            format!("http://{UNANSWERED_HOST}:9/v1")
-        )]
+        vec![(EngineKind::LocalServer, NEVER_CONTACTED_URL.to_string())]
     );
     assert_eq!(rig.clipboard.texts(), vec![TEXT.to_string()]);
 }
@@ -2934,29 +2934,31 @@ impl FrameSink for CollectingSink {
 
 #[test]
 fn realtime_source_paces_frames_by_real_time_and_pads_with_silence() {
-    // Row 19 (analysis Q5): a 250 ms clip held for ~1 s yields about the hold's
-    // length of audio (a Windows-sized budget), the clip first and then silence,
+    // Row 19 (analysis Q5): a 250 ms clip held until about 1 s of audio has
+    // arrived yields the clip first and then silence, never ahead of real time,
     // stamped with instants inside the capture. Bite: not paced (the whole clip,
-    // or endless silence, at once), stopping when the data runs out (only
-    // 250 ms), instants not stamped at push time.
+    // or endless silence, at once: more audio than the capture's time), stopping
+    // when the data runs out (only 250 ms: no 1 s within BUDGET), instants not
+    // stamped at push time. No wall-clock ceiling (T-080 I2, review 1 #4): the
+    // hold ends on the audio, not on a sleep, and the capture's measured time is
+    // checked only from below (chunk k is pushed no earlier than k x 10 ms after
+    // the start, so the capture lasted at least the audio less one chunk).
     let clip = fixtures::speech_250ms();
     let source = RealtimeSource::from_buffer(&clip);
     let sink = Arc::new(CollectingSink::default());
     let started = now();
     let handle = source.start(sink.clone()).expect("start");
-    thread::sleep(Duration::from_secs(1));
-    let stop_called = now();
+    assert!(
+        eventually(|| sink.seconds() >= 1.0),
+        "no 1 s of audio within {BUDGET:?}: {:.3} s",
+        sink.seconds()
+    );
     handle.stop().expect("stop");
     let stopped = now();
-    let held = (stop_called - started).as_secs_f64();
     let got = sink.seconds();
-    assert!(
-        got <= held + 0.25,
-        "not paced: {got:.3} s of audio in a {held:.3} s hold"
-    );
-    assert!(
-        got >= held * 0.5,
-        "too little: {got:.3} s of audio in a {held:.3} s hold"
+    at_least(
+        between(started, stopped),
+        Duration::from_secs_f64(got).saturating_sub(ms(20)),
     );
     let calls = sink.calls();
     assert!(

@@ -162,10 +162,12 @@ fn unanswered_case_is_test_net_1_and_accepts_only_the_connect_or_os_ending() {
     // Bite: Timeout accepted (the connect limit not reaching the client would
     // pass), CannotReach for another host accepted, a routable address.
     let case = Unanswered::blackhole();
-    let ip: Ipv4Addr = case
-        .host
-        .parse()
-        .unwrap_or_else(|e| panic!("unanswered host {:?} is not an IPv4 address: {e}", case.host));
+    let ip: Ipv4Addr = case.host.parse().unwrap_or_else(|e| {
+        panic!(
+            "unanswered host {:?} is not an IPv4 address: {e}",
+            case.host
+        )
+    });
     assert_eq!(ip.octets()[..3], [192, 0, 2], "{ip}: TEST-NET-1 (RFC 5737)");
     assert!(case.ended_by_connect_or_os(&FailureReason::CannotReach {
         host: case.host.clone()

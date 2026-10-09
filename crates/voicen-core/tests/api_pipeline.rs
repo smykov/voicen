@@ -17,8 +17,8 @@ mod refused_addr_tests;
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
-use common::os_answer::{OsAnswer, OS_ANSWER_BUDGET, UNANSWERED_HOST};
-use common::timing::{ago, at_least, measure, now};
+use common::os_answer::{OsAnswer, Unanswered, OS_ANSWER_BUDGET};
+use common::timing::{ago, at_least, measure, now, Took};
 use serde_json::json;
 use voicen_core::audio::{wav, AudioBuffer};
 use voicen_core::autostart::FakeAutostart;
@@ -157,7 +157,7 @@ impl Harness {
 
     /// `run_job` on a plain std thread (no tokio context there); also returns how
     /// long it took. A panic in `run_job` fails the test (NFR-07).
-    fn run(&self, rec: FinishedRecording<PressContext>) -> (JobReport, Duration) {
+    fn run(&self, rec: FinishedRecording<PressContext>) -> (JobReport, Took) {
         let pipeline = &self.pipeline;
         std::thread::scope(|s| {
             s.spawn(move || measure(|| pipeline.run_job(rec)))
@@ -823,30 +823,25 @@ fn refused_host_is_cannot_reach() {
 #[test]
 fn blackhole_connect_is_bounded_by_connect_timeout() {
     // T-040 Notes (review 1 #3): that the connect limit reaches the client is
-    // pinned here. UNANSWERED_HOST (TEST-NET-1, RFC 5737) blackholes in
-    // voicen-rust:1.99 (probed), so a 300 ms connect limit gives CannotReach well
-    // inside the 3 s total. Where the host has no route at all (possibly
-    // windows-latest) the OS answers at once with NetworkUnavailable and this test
-    // is vacuous there; both endings are accepted, so no OS answer races the timer
-    // for the verdict. Bite: no connect_timeout on the client (the 3 s total fires:
-    // Timeout). No wall-clock ceiling (T-080 I2): the reason catches it.
-    let t = Timeouts {
-        connect: Duration::from_millis(300),
-        api_transcription: Duration::from_secs(3),
-        ..Timeouts::default()
-    };
-    let mut h = harness_with(energy_gate(), Some(t), creds_with_key());
+    // pinned here. The `Unanswered::blackhole()` case (TEST-NET-1, RFC 5737)
+    // blackholes in voicen-rust:1.99 (probed), so its 300 ms connect limit gives
+    // CannotReach well inside its 3 s total. Where the host has no route at all
+    // (possibly windows-latest) the OS answers at once with NetworkUnavailable and
+    // this test is vacuous there; the case accepts both endings, so no OS answer
+    // races the timer for the verdict. Bite: no connect_timeout on the client (the
+    // 3 s total fires: Timeout). No wall-clock ceiling (T-080 I2): the reason
+    // catches it.
+    let case = Unanswered::blackhole();
+    let mut h = harness_with(energy_gate(), Some(case.timeouts), creds_with_key());
     let rec = h.record(
         fixtures::speech_3s(),
-        Arc::new(api_settings(&format!("http://{UNANSWERED_HOST}/v1"))),
+        Arc::new(api_settings(&format!("http://{}/v1", case.host))),
     );
     let (report, _) = h.run(rec);
     assert!(
-        matches!(
-            &report.end,
-            JobEnd::Failed(FailureReason::CannotReach { host }) if host == UNANSWERED_HOST
-        ) || report.end == JobEnd::Failed(FailureReason::NetworkUnavailable),
-        "expected CannotReach({UNANSWERED_HOST}) or NetworkUnavailable, got {:?}",
+        matches!(&report.end, JobEnd::Failed(reason) if case.ended_by_connect_or_os(reason)),
+        "expected CannotReach({}) or NetworkUnavailable, got {:?}",
+        case.host,
         report.end
     );
 }

@@ -20,7 +20,7 @@ use common::download::{
     assert_no_url_in, assert_retry_succeeds, assert_verified_file_only, events, fixture,
     fixture_with, fixture_with_timeouts, timeouts, Events, Fixture, Seen, END_WAIT, FILE, PART,
 };
-use common::timing::{at_least, now};
+use common::timing::{at_least, at_most_per_second, between, now, Took};
 use common::{dir_entries, entry, model_bytes, FakeDisk, Serve, Server, NEEDED, SIZE};
 use voicen_core::local_models::catalog::ModelId;
 use voicen_core::local_models::download::{DownloadError, DownloadEvent, DownloadFailure};
@@ -90,13 +90,13 @@ fn fails_then_retry_succeeds(
     label: &str,
     f: &Fixture,
     expect: impl Fn(&DownloadFailure) -> bool,
-) -> Duration {
+) -> Took {
     let started = now();
     let mut ev = f
         .start(ModelId::Base)
         .unwrap_or_else(|e| panic!("{label}: start refused: {e:?}"));
     let end = ev.wait_end();
-    let took = end.at - started;
+    let took = between(started, end.at);
     match &end.event {
         DownloadEvent::Failed { id, reason } => {
             assert_eq!(*id, ModelId::Base, "{label}: id");
@@ -369,7 +369,7 @@ fn trickle_longer_than_no_data_succeeds_and_stall_fails() {
         first.dir
     );
     let end = ev.wait_end();
-    let took = end.at - started;
+    let took = between(started, end.at);
     assert_eq!(
         end.event,
         DownloadEvent::Finished { id: ModelId::Base },
@@ -383,8 +383,7 @@ fn trickle_longer_than_no_data_succeeds_and_stall_fails() {
         n >= 2,
         "only {n} Progress events over {took:?} (≥ 1/s while data arrives)"
     );
-    let max = 4 * (took.as_millis() as usize).div_ceil(1_000) + 1;
-    assert!(n <= max, "{n} Progress events over {took:?} (≤ 4/s)");
+    at_most_per_second(n, 4, took, "Progress events");
     assert_verified_file_only(&f, "trickle");
 
     let stall = Server::start(vec![Serve::Stall {
@@ -402,7 +401,7 @@ fn trickle_longer_than_no_data_succeeds_and_stall_fails() {
             reason: DownloadFailure::DownloadInterrupted
         }
     );
-    at_least(end.at - started, no_data);
+    at_least(between(started, end.at), no_data);
     assert!(end.dir.is_empty(), "dir at Failed: {:?}", end.dir);
 }
 

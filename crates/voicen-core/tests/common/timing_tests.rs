@@ -215,7 +215,12 @@ fn fastest_and_less_give_the_sc_003_stage_over_the_baseline() {
     let base = fastest(runs);
     within_spec(base, Duration::from_secs(2), Duration::ZERO, "SC-003");
     let stage = Took::from(Duration::from_millis(7_400)).less(base);
-    within_spec(stage, Duration::from_millis(5_400), Duration::ZERO, "SC-003");
+    within_spec(
+        stage,
+        Duration::from_millis(5_400),
+        Duration::ZERO,
+        "SC-003",
+    );
     assert!(
         panic_message(|| within_spec(
             Took::from(Duration::from_secs(1)).less(base),

@@ -22,6 +22,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
+use voicen_core::failure::FailureReason;
 use voicen_core::timeouts::Timeouts;
 
 use super::timing::measure;
@@ -85,7 +86,7 @@ impl OsAnswer {
                  nothing listening there (T-047, decision #53)"
             ),
             Err(e) if e.kind() == io::ErrorKind::ConnectionRefused => {
-                Self::answered("refused", addr.to_string(), took)
+                Self::answered("refused", addr.to_string(), took.duration())
             }
             Err(e) => panic!(
                 "OsAnswer::refused: a connect probe to {addr} was not refused within \
@@ -121,7 +122,7 @@ impl OsAnswer {
                  address(es)); the DNS-failure cases need a resolver that fails `.invalid` \
                  (RFC 6761)"
             ),
-            Ok(Err(_)) => Self::answered("unresolvable", HOST.to_string(), took),
+            Ok(Err(_)) => Self::answered("unresolvable", HOST.to_string(), took.duration()),
             Err(_) => panic!(
                 "OsAnswer::unresolvable: the lookup of {HOST} gave no answer within \
                  {OS_ANSWER_BUDGET:?}; the DNS-failure cases need the system resolver to \
@@ -159,13 +160,50 @@ fn budget_timeouts() -> Timeouts {
     }
 }
 
-/// A TEST-NET-1 address (RFC 5737) that no test ever expects an answer from.
-///
-/// Two uses, neither an OS-answer case: a settings value a fake engine records but
-/// never contacts (`dictation_session`), and the target of the one test that pins
-/// the connect timer (`api_pipeline::blackhole_connect_is_bounded_by_connect_timeout`):
-/// there the verdict accepts both endings the OS may give (the connect timer firing,
-/// `CannotReach`; no route at once, `NetworkUnavailable`), so no OS answer races
-/// the timer for the verdict; the bite is the reason (`Timeout` when the connect
-/// limit does not reach the client), never a wall-clock ceiling.
-pub const UNANSWERED_HOST: &str = "192.0.2.1";
+/// A target that never answers (T-080 review 1 #2): a connect to it is ended by
+/// the test's connect timer, or by the OS at once where the host has no route.
+/// Not an [`OsAnswer`]: no OS answer is awaited, so there is no probe and no
+/// budget; the case carries its deadlines and the endings it accepts, so the
+/// verdict never depends on which of the two the OS gives. The host exists
+/// outside `tests/common` only inside this case (the literal is refused there by
+/// `scripts/ci/core-test-clocks.sh`).
+#[derive(Debug, Clone)]
+pub struct Unanswered {
+    /// The authority to put in a URL: TEST-NET-1 (RFC 5737), `192.0.2.1`.
+    pub host: String,
+    /// connect = 300 ms; every whole-request and no-data deadline is ten times
+    /// that (3 s), so a connect limit that does not reach the client ends the
+    /// request as `Timeout`; `builtin` keeps the production default.
+    pub timeouts: Timeouts,
+}
+
+impl Unanswered {
+    /// The blackhole case of `api_pipeline::blackhole_connect_is_bounded_by_connect_timeout`
+    /// (T-040 Notes, review 1 #3): it blackholes in voicen-rust:1.99 (probed), and
+    /// may have no route on windows-latest.
+    pub fn blackhole() -> Unanswered {
+        let connect = Duration::from_millis(300);
+        Unanswered {
+            host: "192.0.2.1".to_string(),
+            timeouts: Timeouts {
+                connect,
+                api_transcription: 10 * connect,
+                local_server: 10 * connect,
+                post_processing: 10 * connect,
+                download_no_data: 10 * connect,
+                ..Timeouts::default()
+            },
+        }
+    }
+
+    /// Whether `reason` is one of the two endings this case accepts: the connect
+    /// timer fired (`CannotReach` for this host) or the OS had no route
+    /// (`NetworkUnavailable`).
+    pub fn ended_by_connect_or_os(&self, reason: &FailureReason) -> bool {
+        match reason {
+            FailureReason::CannotReach { host } => *host == self.host,
+            FailureReason::NetworkUnavailable => true,
+            _ => false,
+        }
+    }
+}

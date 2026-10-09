@@ -6,7 +6,8 @@
 //!   `voicen_core::test_support::local_models` (one copy for the core and the shell
 //!   tests since T-044, P-010; the download harness is in [`download`]);
 //! - [`os_answer`] (T-080, I1): the only source of a target whose outcome is an OS
-//!   answer (refused, unresolvable), together with its deadlines;
+//!   answer (refused, unresolvable), and of the never-answered blackhole
+//!   (`Unanswered`), together with its deadlines;
 //! - [`timing`] (T-080, I2): the only place a core test reads the wall clock.
 //!
 //! `scripts/ci/core-test-clocks.sh` (in `make check`) refuses an OS-answer literal or

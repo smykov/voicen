@@ -22,7 +22,7 @@ use std::net::TcpListener;
 use std::sync::Arc;
 use std::time::Duration;
 
-use common::timing::{ago, at_least, deadline, left, measure, within_spec};
+use common::timing::{ago, at_least, deadline, fastest, left, measure, within_spec, Took};
 
 use serde_json::json;
 use voicen_core::delivery::DeliveryResult;
@@ -80,7 +80,7 @@ fn silent_server(hold: Duration) -> String {
 
 /// `ChatPostProcessor::process` with the production durations on a plain std
 /// thread, timed.
-fn process_timed(base: String) -> (PostProcessOutcome, Duration) {
+fn process_timed(base: String) -> (PostProcessOutcome, Took) {
     let settings = PostProcessingSettings {
         enabled: true,
         base_url: base,
@@ -120,22 +120,21 @@ async fn default_deadline_skips_a_silent_server_at_15_s() {
         })))
         .mount(&prompt)
         .await;
-    let mut baseline = Duration::MAX;
-    for _ in 0..BASELINE_RUNS {
+    let baseline = fastest((0..BASELINE_RUNS).map(|_| {
         let (got, took) = process_timed(format!("{}/v1", prompt.uri()));
         assert_eq!(
             got,
             PostProcessOutcome::Applied(PROCESSED.to_string()),
             "baseline"
         );
-        baseline = baseline.min(took);
-    }
+        took
+    }));
 
     let (got, took) = process_timed(silent_server(Duration::from_secs(30)));
     assert_eq!(got, PostProcessOutcome::Skipped(SkipReason::Timeout));
     let want = Duration::from_secs(15);
     at_least(took, want);
-    within_spec(took.saturating_sub(baseline), want, SLACK, "SC-003");
+    within_spec(took.less(baseline), want, SLACK, "SC-003");
 }
 
 // ---- the configured value, through the production pipeline ------------------------
@@ -179,7 +178,7 @@ fn snapshot(base: &str) -> Settings {
 
 struct Run {
     report: JobReport,
-    took: Duration,
+    took: Took,
     clipboard: Vec<String>,
     events: Vec<DictationEvent>,
 }
@@ -267,8 +266,7 @@ async fn configured_post_processing_timeout_delivers_the_raw_transcript() {
     let prompt_base = format!("{}/v1", prompt.uri());
     let mut fast = snapshot(&prompt_base);
     fast.timeouts = s.timeouts;
-    let mut baseline = Duration::MAX;
-    for _ in 0..BASELINE_RUNS {
+    let baseline = fastest((0..BASELINE_RUNS).map(|_| {
         let run = dictate(fast.clone());
         assert_eq!(
             run.report.end,
@@ -276,8 +274,8 @@ async fn configured_post_processing_timeout_delivers_the_raw_transcript() {
             "baseline"
         );
         assert_eq!(run.clipboard, vec![PROCESSED.to_string()], "baseline");
-        baseline = baseline.min(run.took);
-    }
+        run.took
+    }));
 
     let run = dictate(s);
     assert_eq!(
@@ -300,7 +298,7 @@ async fn configured_post_processing_timeout_delivers_the_raw_transcript() {
     );
     let want = Duration::from_secs(5);
     at_least(run.took, want);
-    within_spec(run.took.saturating_sub(baseline), want, SLACK, "SC-003");
+    within_spec(run.took.less(baseline), want, SLACK, "SC-003");
     let finished: Vec<&DictationEvent> = run
         .events
         .iter()

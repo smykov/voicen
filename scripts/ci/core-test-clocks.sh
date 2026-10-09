@@ -12,10 +12,14 @@
 #       with deadlines sized by its probe. 192.0.2.10, 127.0.0.1:0/:10/:18080 are other values.
 #   I2  no code line reads the wall clock itself: Instant::now, .elapsed( or an alias of Instant
 #       (`Instant as`). Timing goes through tests/common::timing (at_least, within_spec, measure).
+#       A ceiling on what measure/between return is not text this tripwire reads: their opaque
+#       Took has no comparison or Duration getter, so it does not compile (T-080 review 1 #1).
 # A line whose first non-blank characters are // (also /// and //!) is a comment and is not
 # read; `//` inside a string on a code line (http://...) is code. The rule decides on raw text
 # (F-003): it does not model what a helper does. Not caught: a target built from parts at run
-# time, arithmetic on two Instants handed out by common, SystemTime (not a measurement).
+# time, arithmetic on two Instants handed out by common (`now() - a`), SystemTime (not a
+# measurement), a ceiling through within_spec with a made-up spec id, and the #[cfg(test)] unit
+# tests under crates/voicen-core/src (outside this dir).
 #
 # Usage: scripts/ci/core-test-clocks.sh [tests-dir]   (default crates/voicen-core/tests)
 # Exit 0: "ok: <n> file(s) outside common". Exit 1: violations, one "<file>:<line>: os-answer
@@ -54,7 +58,7 @@ report="$(awk '
   else if (line ~ /127\.0\.0\.1:1([^0-9]|$)/ || line ~ /\[ *127 *, *0 *, *0 *, *1 *\] *, *1 *\)/)
     print FILENAME ":" FNR ": os-answer: the refused loopback 127.0.0.1:1; take common::os_answer::OsAnswer::refused()"
   else if (line ~ /192\.0\.2\.1([^0-9]|$)/)
-    print FILENAME ":" FNR ": os-answer: the blackhole 192.0.2.1; take it from tests/common with its deadlines"
+    print FILENAME ":" FNR ": os-answer: the blackhole 192.0.2.1; take common::os_answer::Unanswered::blackhole()"
   if (line ~ /Instant::now/ || line ~ /\.elapsed\(/ || line ~ /Instant[ \t]+as[ \t]/)
     print FILENAME ":" FNR ": clock: a wall-clock reading outside tests/common; use common::timing (at_least / within_spec / measure / now)"
 }
