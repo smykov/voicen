@@ -9,7 +9,7 @@
 //! never by a ceiling, because a ceiling races host scheduling (F-013, T-046, T-047).
 //! The only ceiling is a spec-stated tolerance, through [`within_spec`], which names
 //! the spec id and the reference load the tolerance holds under ([`REFERENCE_LOAD`],
-//! OQ-23 proposal (a)).
+//! OQ-23, decision #107).
 //!
 //! The stopwatch ([`measure`], [`between`]) returns an opaque [`Took`] that only
 //! these helpers read, so a ceiling on a measured time does not compile (review 1
@@ -23,12 +23,11 @@
 use std::thread;
 use std::time::{Duration, Instant};
 
-/// The host load a spec tolerance holds under. OQ-23 is still open; the tests
-/// proceed on its proposal (a): the gate's own load, one `make check` at a time,
+/// The host load a spec tolerance holds under, as the owner answered OQ-23
+/// (decision #107): the gate's own load, one `make check` at a time,
 /// `cargo test -j2`, test binaries one after another, on the dev host and the CI
-/// runners. Red under a heavier concurrent load is then not a defect. A different
-/// answer from the owner changes this text and reopens T-080.
-pub const REFERENCE_LOAD: &str = "OQ-23 (open; proposal (a) assumed): the gate's own \
+/// runners. Red under a heavier concurrent load is then not a defect.
+pub const REFERENCE_LOAD: &str = "OQ-23 (decision #107): the gate's own \
      load, one `make check`, `cargo test -j2`, test binaries one after another";
 
 /// The current instant, as a timestamp handed to a product API (a press, a

@@ -23,8 +23,8 @@ Also: `scripts/ci/core-test-clocks.sh` (the tripwire, run by `make check-core-te
 
 **Tasks:** T-016; T-047 (F-004); T-048 (F-005); T-078 (F-013; deferred and absorbed by T-080); T-080 (rca, class `os-answer-deadline-race`).
 **Classes** in `docs/failures.md`: `test-port-race` and `os-answer-deadline-race`.
-**Decisions:** #53, #56.
-**Open questions:** OQ-23 (the reference load); OQ-22 / T-079 (which product reason a lookup cut by the connect timer gives).
+**Decisions:** #53, #56, #100, #107, #112.
+**Open questions:** OQ-22 / T-079 (which product reason a lookup cut by the connect timer gives).
 
 ## Invariants
 
@@ -51,9 +51,8 @@ This is one rule for every kind of uncontrolled clock: the OS refusal time, the 
   - a request count;
   - the overlay sequence.
 - The only ceiling is a tolerance a spec states. It goes through `within_spec(stage, want, tol, spec)`, which names the spec id and the reference load (`REFERENCE_LOAD`).
-  - The reference load is OQ-23 proposal (a): the gate's own load. That is one `make check` at a time, `cargo test -j2`, test binaries one after another.
+  - The reference load is the owner's answer to OQ-23 (decision #107): the gate's own load. That is one `make check` at a time, `cargo test -j2`, test binaries one after another.
   - Its only use today is SC-003 in `post_process_timeout`: the stage (`took.less(fastest(baseline runs))`, 3 runs) lies within the deadline ± 0.5 s.
-  - OQ-23 is still open; the tests proceed on proposal (a). A different answer from the owner changes `REFERENCE_LOAD` and reopens T-080.
 
 **Other clock uses in tests:**
 - Instants handed to a product API as input (a press, a release, a frame's `at`) come from `common::timing::now()` or `ago()`.
