@@ -4,8 +4,11 @@
 # job; only that job may write contents. No wip/** run can show the publish step running, so this
 # tripwire pins the workflow's shape (lesson of T-070 mutation M6; docs/decisions/ci-toolchain.md).
 #
-# A "publish step" is a step whose run: calls `gh release` create, upload, edit, delete or
-# delete-asset (`gh release view` / `list` are reads and not judged). For every publish step:
+# A "publish step" is a step whose run: has a shell command (split at ;, |, &, an unescaped
+# newline) with a word gh, a later word release and a later word create, upload, edit, delete or
+# delete-asset; gh options anywhere between (--repo R, --repo=R, -R R) do not hide it, and no
+# flag is listed (fail-closed: `gh release view` with an argument "upload" counts too; plain
+# `gh release view` / `list` are reads and not judged). For every publish step:
 #   1. its job has a job-level `if:` (blanks removed, `${{ }}` optional) with both top-level `&&`
 #      operands github.event_name=='push' and startsWith(github.ref,'refs/tags/v'), no top-level
 #      `||`, and no status function (always(), failure(), cancelled(), !cancelled(), success()
@@ -13,8 +16,8 @@
 #   2. its job `needs:` both gate and windows (flow or block list);
 #   3. its job has no `continue-on-error:`;
 #   4. an earlier step of the same job runs scripts/ci/release-check.sh with no `if:`, no
-#      `continue-on-error:`, GH_TOKEN in its env: or the job's env: (so the release-exists
-#      check runs), and a plain or block (not quoted) run: that, blank lines and `#` lines
+#      `continue-on-error:`, GH_TOKEN as a whole key (not NOT_GH_TOKEN, not in a `#` comment)
+#      of its env: or the job's env: (so the release-exists check runs), and a plain or block (not quoted) run: that, blank lines and `#` lines
 #      before it aside, is exactly one `bash scripts/ci/release-check.sh ...` line with no `;`,
 #      `|` or `&` (so no `||`, `;`, pipe, `if`, `set +e` or later command can swallow the
 #      script's exit status; a `#` line after the call may close a quote opened on it, and a
@@ -119,9 +122,35 @@ function addneeds(s,   a, n, k) {
 }
 function endstep() {
   if (!cs) return
-  if (srun[cs] ~ /(^|[^A-Za-z0-9_-])gh[ \t]+release[ \t]+(create|upload|edit|delete|delete-asset)([^A-Za-z0-9_-]|$)/) spub[cs] = 1
+  if (publishes(srun[cs])) spub[cs] = 1
   if (srun[cs] ~ /release-check\.sh/) { scheck[cs] = 1; ssole[cs] = !squot[cs] && solecall(srun[cs]) }
   cs = 0; smode = ""
+}
+# 1 when run: has a gh call that writes a release: a shell command (split at ;, |, &, an
+# unescaped newline) with a word gh (or .../gh, gh.exe), a later word release and a later word
+# create, upload, edit, delete or delete-asset. Fail-closed: no gh flag is listed, so any option
+# (--repo R, --repo=R, -R R) before or after release is skipped, and quotes, (, `, { and } count
+# as word breaks; an argument that happens to be "upload" counts too.
+function publishes(r,   segs, n, k, w, m, x, g, rel) {
+  gsub(/\\\n/, " ", r)
+  gsub(/[()`{}"\047]/, " ", r)
+  n = split(r, segs, /[;|&\n]/)
+  for (k = 1; k <= n; k++) {
+    m = split(segs[k], w, /[ \t]+/); g = 0; rel = 0
+    for (x = 1; x <= m; x++) {
+      if (w[x] ~ /^([^ \t]*\/)?gh(\.exe)?$/) { g = 1; rel = 0 }
+      else if (g && w[x] == "release") rel = 1
+      else if (rel && w[x] ~ /^(create|upload|edit|delete|delete-asset)$/) return 1
+    }
+  }
+  return 0
+}
+# 1 when an env: line (the text after the key) names GH_TOKEN as a whole key of a flow mapping
+# or of the line itself, a YAML comment (" #...") dropped first: `env: # GH_TOKEN: ...` and
+# NOT_GH_TOKEN are not the token. Stripping too much only drops a match (fails closed).
+function envtok(t,   v) {
+  v = t; sub(/^[^:]*:/, "", v); sub(/(^|[ \t])#.*$/, "", v)
+  return v ~ /(^|[{,])[ \t]*["\047]?GH_TOKEN["\047]?[ \t]*:/
 }
 # 1 when run: is exactly one `bash scripts/ci/release-check.sh ...` line with no ;, | or & (so
 # no ||, &&, pipe or background), blank lines aside and `#` lines only before it: nothing can
@@ -149,14 +178,14 @@ function stepkey(t,   k) {
   # reader cannot see. The real check step is a plain scalar.
   else if (k == "run") { srun[cs] = val(t); v = t; sub(/^[^:]*:[ \t]*/, "", v); squot[cs] = (v ~ /^["\047]/) }
   else if (k == "uses") suses[cs] = val(t)
-  else if (k == "env") { if (t ~ /GH_TOKEN[ \t"\047]*:/) stok[cs] = 1 }
+  else if (k == "env") { if (envtok(t)) stok[cs] = 1 }
 }
 function jobkey(t,   k, v) {
   k = keyof(t); jmode = k
   if (k == "if") { jifh[nj] = 1; jif[nj] = val(t) }
   else if (k == "needs") { v = val(t); if (v != "") addneeds(v) }
   else if (k == "continue-on-error") jcoe[nj] = 1
-  else if (k == "env") { if (t ~ /GH_TOKEN[ \t"\047]*:/) jtok[nj] = 1 }
+  else if (k == "env") { if (envtok(t)) jtok[nj] = 1 }
   else if (k == "steps") { waitsteps = 1 }
 }
 { line = $0; sub(/\r$/, "", line) }
