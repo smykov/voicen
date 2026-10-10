@@ -48,9 +48,14 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: bash scripts/ci/telegram-send.sh target/release/bundle/nsis
       - uses: actions/upload-artifact@v4
+        if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
         with:
-          name: voicen-installer-abc1234
+          name: voicen-installer-${{ env.VOICEN_COMMIT }}
           path: target/release/bundle/nsis/*-setup.exe
+          retention-days: 1
+          if-no-files-found: error
+      - name: Installer for Telegram
+        run: echo fake installer check
   release:
     name: GitHub Release (v* tags only)
     needs: [gate, windows]

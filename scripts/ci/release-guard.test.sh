@@ -44,6 +44,16 @@
 #        the verbatim `!<tag:yaml.org,2002:binary>` and a `%TAG` directive decode to permissions
 #        or a gh call that R3-R5 cannot see). A raw-token rule (P-020): no tag reader, so a lone
 #        `!` (`!cancelled()`, `!=`, `[ ! -f ]`) and `% TAG` pass. Listed line: the occurrence.
+#     R9 (T-084, decision #119) the raw token `upload-artifact` (any case, comments included, a
+#        sub-path or a fork name too) occurs exactly once in the dir, and the lines starting at
+#        that line are byte-identical to the owned copy scripts/ci/release-upload.yml: the
+#        installer upload step with the release job's own if: (v* tag push only) and
+#        retention-days: 1, ended by the first line of the next step, so no key can be appended
+#        to the step. A raw-token rule plus an owned literal (P-020): no step reader. Listed line:
+#        for zero occurrences any line of the file; for two or more, the second occurrence (in
+#        dir order: files sorted, then line order); for a literal difference, the first line
+#        that differs from the copy. The copy missing, unreadable or not starting with the line
+#        `      - uses: actions/upload-artifact@v4` is exit 3, its message naming the copy.
 #   Exit 0: ok, one line containing "ok:".
 #   Exit 1: a violation; each listed as "<workflows-dir>/<file>:<line>: R<n>: <why>". <line> is
 #           the first line of the block that differs from the owned copy for R2 (for a second
@@ -57,7 +67,10 @@
 # carry the same text (the fixtures are generated from one block; change them together). The
 # same holds for the header: every fixture file that holds the release job starts with the real
 # ci.yml header, line 1 to `jobs:` (the owned copy release-header.yml); an edit of the ci.yml
-# header edits the owned copy and every such fixture together.
+# header edits the owned copy and every such fixture together. The same holds for the upload
+# step (R9): the ok-* fixtures and the real ci.yml carry scripts/ci/release-upload.yml verbatim,
+# and the v-upload-* fixtures are ok-release with one edit each (each passes the guard without
+# R9, so only R9 can refuse it).
 # Cases: every dir scripts/ci/fixtures/release-guard/<case>/ (ok-* exit 0, v-* exit 1, each
 # naming the rule that refuses it), the real .github/workflows (exit 0) and copies of it with the
 # release job or the workflow-level block mutated, a gh step or a PAT secret added (exit 1 each),
@@ -72,9 +85,11 @@ guard=scripts/ci/release-guard.sh
 fx=scripts/ci/fixtures/release-guard
 real=.github/workflows
 owned_src="$fx/ok-release/ci.yml"
+upl=scripts/ci/release-upload.yml
 [ -d "$fx" ] || { echo "release-guard.test: cannot run: $fx not found" >&2; exit 3; }
 [ -f "$real/ci.yml" ] || { echo "release-guard.test: cannot run: $real/ci.yml not found" >&2; exit 3; }
 [ -f "$owned_src" ] || { echo "release-guard.test: cannot run: $owned_src not found" >&2; exit 3; }
+[ -f "$upl" ] || { echo "release-guard.test: cannot run: $upl not found" >&2; exit 3; }
 tmp="$(mktemp -d)" || { echo "release-guard.test: cannot run: mktemp failed" >&2; exit 3; }
 trap 'rm -rf "$tmp"' EXIT
 
@@ -157,6 +172,27 @@ first_hdiff() {
   done
 }
 
+# tok_lines <file>: the numbers of the lines holding the token upload-artifact, in any case.
+tok_lines() { grep -n -i -F -- 'upload-artifact' "$1" | cut -d: -f1; }
+
+# first_udiff <file>: the file's line number of the first line, from its first token line on,
+# that differs from the owned upload copy (empty when equal; with no token line, empty).
+first_udiff() {
+  local f="$1" start i n
+  local -a a b
+  start="$(tok_lines "$f" | head -n 1)"
+  [ -n "$start" ] || return 0
+  mapfile -t a < "$upl"
+  mapfile -t b < <(tail -n "+$start" "$f")
+  n=${#a[@]}
+  for ((i = 0; i < n; i++)); do
+    if [ "${a[i]}" != "${b[i]-<none>}" ]; then
+      echo $((start + i))
+      return 0
+    fi
+  done
+}
+
 # at <path> <line> <rule>: the ERE of a listing line "<path>:<line>: R<n>"; line "*" = any.
 at() {
   local l="$2"
@@ -166,8 +202,8 @@ at() {
 
 # check <case> <exit> [<rule> <where> [<file>]]: the case dir as the workflows dir. <where> is
 # "@text" (the first line of <file> containing text), "diff" (first_diff of <file>), "hdiff"
-# (first_hdiff of <file>), "*" (any
-# line) or a number; <file> defaults to ci.yml.
+# (first_hdiff of <file>), "udiff" (first_udiff of <file>), "tok2" (the second token line of
+# <file>), "*" (any line) or a number; <file> defaults to ci.yml.
 check() {
   local c="$1" want="$2" rule="${3:-}" where="${4:-}" file="${5:-ci.yml}" d f l
   d="$fx/$c"
@@ -181,6 +217,8 @@ check() {
     @*) l="$(line_of "$f" "${where#@}")" ;;
     diff) l="$(first_diff "$f")" ;;
     hdiff) l="$(first_hdiff "$f")" ;;
+    udiff) l="$(first_udiff "$f")" ;;
+    tok2) l="$(tok_lines "$f" | sed -n 2p)" ;;
     *) l="$where" ;;
   esac
   if [ -z "$l" ]; then
@@ -343,6 +381,19 @@ check v-tag-directive-other-file 1 R8 '@%TAG !e!' other.yml                    #
 check v-tag-in-comment           1 R8 '@# a !!binary'                          # a raw rule: a comment is text (no comment reader)
 check ok-tag-lookalikes          0   # !cancelled(), !=, [ ! -f ], "100% TAG ! < ! !x": not a tag token
 
+# ---- R9: the installer upload step is the owned literal, and its token occurs once -----------
+# T-084 (decision #119): the artifact exists only on the runs where the release job runs.
+check v-upload-no-if            1 R9 udiff   # the upload runs on every ref, wip and main included
+check v-upload-main-or-tag-if   1 R9 udiff   # main || (tag push): widened by one operand
+check v-upload-retention-90     1 R9 udiff   # retention-days: 90 instead of 1
+check v-upload-trailing-space   1 R9 udiff   # "retention-days: 1 ": byte identity, not a reading
+check v-upload-key-appended     1 R9 udiff   # continue-on-error after the step: the copy's last line pins the step end
+check v-upload-missing          1 R9 '*'     # no upload: the release job would download nothing on a tag
+check v-upload-twice            1 R9 tok2    # a second, unconditional upload in the same job
+check v-upload-uppercase-action 1 R9 '@Actions/Upload-Artifact'   # owner/repo resolve in any case
+check v-upload-token-in-comment 1 R9 '@# a second upload-artifact' # a raw rule: a comment is text
+check v-upload-in-other-file    1 R9 '@uses: actions/upload-artifact' other.yml   # the count is dir-wide
+
 # ---- R3: permissions only in the workflow-level block and once in the release block ----------
 check v-write-other-job        1 R3 '@    permissions:'          # windows job gets contents: write
 check v-write-all-windows      1 R3 '@permissions: write-all'
@@ -364,6 +415,30 @@ check v-r1-jobs-uppercase-key          1 R1 '@JOBS:' other.yml   # S10: the bloc
 
 # ---- the real workflows dir -------------------------------------------------------------------
 run "real $real" 0 'ok:' "$real"
+
+# expect <label> <command...>: the command must succeed (a test-side check, not a guard run).
+expect() {
+  local label="$1"
+  shift
+  if "$@"; then
+    echo "ok   $label"
+    passed=$((passed + 1))
+  else
+    echo "FAIL $label" >&2
+    failed=$((failed + 1))
+  fi
+}
+# The owned upload copy, the real dir and ok-release agree (R9 cannot pass on a stale copy).
+upl_if() { sed -n 2p "$upl" | sed 's/^ *//'; }
+job_if() { grep -m 1 '^    if: ' scripts/ci/release-job.yml | sed 's/^ *//'; }
+expect "owned upload copy starts with the upload-artifact@v4 uses line" \
+  test "$(head -n 1 "$upl")" = "      - uses: actions/upload-artifact@v4"
+expect "owned upload copy: its if: is the release job's if:" test "$(upl_if)" = "$(job_if)"
+expect "owned upload copy: retention-days: 1" grep -q -x '          retention-days: 1' "$upl"
+tok_count() { cat "$1"/* "$1"/.[!.]* 2>/dev/null | grep -i -o -F 'upload-artifact' | wc -l | tr -d ' '; }
+expect "real: the token upload-artifact occurs once in $real" test "$(tok_count "$real")" = 1
+expect "real: the upload step is the owned copy $upl" test -z "$(first_udiff "$real/ci.yml")" -a -n "$(tok_lines "$real/ci.yml")"
+expect "ok-release: the upload step is the owned copy $upl" test -z "$(first_udiff "$owned_src")" -a -n "$(tok_lines "$owned_src")"
 
 # Copies of the real dir, ci.yml mutated. mutate <name> <awk body>: inrel is 1 on the release
 # block's lines, inwin on the windows job's.
@@ -419,6 +494,14 @@ mutate win-pat 'inwin && /^    steps:$/ && !d { print; print "      - env:"; pri
 mutate win-tag 'inwin && /^    steps:$/ && !d { print; print "      - run: !!str echo tagged"; d = 1; next } { print }' &&
   run "real with a YAML tag in the windows job" 1 \
     "$(at "$tmp/win-tag/ci.yml" "$(line_of "$tmp/win-tag/ci.yml" '!!str echo tagged')" R8)" "$tmp/win-tag"
+# T-084 R9 on the real file: the upload step's if: dropped or widened, or the step deleted.
+# inup is 1 from the upload step's uses line through its body (lines indented 8 or more).
+mutate up-no-if 'inwin && /upload-artifact/ { inup = 1; print; next } inup && !/^        / { inup = 0 } inup && /^        if:/ { next } { print }' &&
+  run "real without the upload step's if:" 1 "$(at "$tmp/up-no-if/ci.yml" "$(first_udiff "$tmp/up-no-if/ci.yml")" R9)" "$tmp/up-no-if"
+mutate up-always 'inwin && /upload-artifact/ { inup = 1; print; next } inup && !/^        / { inup = 0 } inup && /^        if: \$\{\{ / { sub(/^        if: \$\{\{ /, "        if: ${{ always() || ") } { print }' &&
+  run "real with always() || in the upload step's if:" 1 "$(at "$tmp/up-always/ci.yml" "$(first_udiff "$tmp/up-always/ci.yml")" R9)" "$tmp/up-always"
+mutate up-delete 'inwin && /upload-artifact/ { inup = 1; next } inup && /^        / { next } { inup = 0; print }' &&
+  run "real with the upload step deleted" 1 "$(at "$tmp/up-delete/ci.yml" '*' R9)" "$tmp/up-delete"
 
 # ---- usage and cannot run -------------------------------------------------------------------
 run "usage: no argument"           2 'usage'
@@ -445,7 +528,7 @@ PATH="$saved_path"
 # guard is copied next to its release-job.yml; the header copy is left out or truncated.
 owned_guard() {
   mkdir -p "$tmp/$1"
-  cp -p "$guard" scripts/ci/release-job.yml "$tmp/$1/" 2>/dev/null
+  cp -p "$guard" scripts/ci/release-job.yml "$upl" "$tmp/$1/" 2>/dev/null
 }
 real_guard="$guard"
 if owned_guard g-header-missing; then
@@ -465,6 +548,34 @@ if owned_guard g-header-jobs-mid; then
   head_lines "$owned_src" | sed '1a jobs:' > "$tmp/g-header-jobs-mid/release-header.yml"
   guard="$tmp/g-header-jobs-mid/release-guard.sh"
   run "cannot run: owned header copy has jobs: before its last line" 3 'cannot run' "$real"
+fi
+guard="$real_guard"
+# T-084: the owned upload copy (R9) is a guard input too: missing, empty, or not starting with the
+# uses line (a copy cut at the top would compare the wrong lines) is never a pass. The guard is
+# copied next to its other two owned copies; the upload copy is left out or broken.
+upload_guard() {
+  mkdir -p "$tmp/$1"
+  if ! cp -p "$guard" scripts/ci/release-job.yml scripts/ci/release-header.yml "$tmp/$1/"; then
+    echo "FAIL $1: cannot copy the guard and its owned copies (fix the test)" >&2
+    failed=$((failed + 1))
+    return 1
+  fi
+}
+if upload_guard g-upload-missing; then
+  guard="$tmp/g-upload-missing/release-guard.sh"
+  run "cannot run: owned upload copy missing" 3 'cannot run.*release-upload\.yml' "$real"
+fi
+guard="$real_guard"
+if upload_guard g-upload-empty; then
+  : > "$tmp/g-upload-empty/release-upload.yml"
+  guard="$tmp/g-upload-empty/release-guard.sh"
+  run "cannot run: owned upload copy empty" 3 'cannot run.*release-upload\.yml' "$real"
+fi
+guard="$real_guard"
+if upload_guard g-upload-no-uses; then
+  sed 1d "$upl" > "$tmp/g-upload-no-uses/release-upload.yml"
+  guard="$tmp/g-upload-no-uses/release-guard.sh"
+  run "cannot run: owned upload copy does not start with the uses line" 3 'cannot run.*release-upload\.yml' "$real"
 fi
 guard="$real_guard"
 
