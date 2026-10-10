@@ -7,23 +7,34 @@
 #   Usage: scripts/ci/release-guard.sh <workflows-dir>
 #   Every regular file directly in <workflows-dir> is read as raw text, comments included (no
 #   extension filter: a .yaml file counts like a .yml one):
-#     R1 each file has the workflow-level block, exactly the two lines `permissions:` (column 0)
-#        and `  contents: read`, once, before its `jobs:` line, and the block has no third line
-#        (a `  contents: write` after it is refused);
+#     R1 each file has the word jobs (any case, bounded by characters outside [A-Za-z0-9_]) on
+#        exactly one line, and that line is exactly `jobs:`; the two lines just before it are
+#        exactly `permissions:` (column 0) and `  contents: read`, and the block has no third line
+#        (a `  contents: write` after it is refused; a second `jobs:` line inside a quoted scalar,
+#        or the real key spelled `"jobs":`, is refused: review 1 finding 2);
 #     R2 the line `  release:` occurs exactly once in the dir, and the release-job block (that
-#        line up to the next line indented 0-2 columns, or EOF) is byte-identical to the guard's
-#        owned copy (a trailing space or a CR is a difference);
+#        line up to the end of its file) is byte-identical to the guard's owned copy (a trailing
+#        space or a CR is a difference); the release job is its file's last job, and any text
+#        after the owned copy, a comment included, is a difference (review 1 finding 1);
 #     R3 the substring `permissions` (any case) occurs only in R1's block and once inside the
 #        release block;
 #     R4 every occurrence of `secrets` (any case) is exactly secrets.TELEGRAM_BOT_TOKEN or
 #        secrets.TELEGRAM_CHAT_ID (not a longer name, not secrets['...']);
 #     R5 the word gh (any case; a word = bounded by characters outside [A-Za-z0-9_], so GH_TOKEN,
 #        gh_pages and ghcr do not count, $GH, ${GH:-gh} and gh.exe do) occurs nowhere outside the
-#        release block.
+#        release block;
+#     R4 also: the word vars (any case, as for gh) occurs nowhere (a PAT kept in a repository
+#        variable is a token from outside permissions:; review 1 finding 3);
+#     R6 no YAML escape that spells a character or joins two lines: the raw text \x plus 2 hex
+#        digits, \u or \U plus 4 hex digits, and a backslash right before a line break (LF, CR,
+#        NEL U+0085, LS U+2028, PS U+2029) occur nowhere, comments included (an escape in a
+#        double-quoted scalar would hide secrets, vars, gh or permissions from R3-R5; review 1
+#        finding 3). No scalar reader: the raw bytes decide, in any scalar style.
 #   Exit 0: ok, one line containing "ok:".
 #   Exit 1: a violation; each listed as "<workflows-dir>/<file>:<line>: R<n>: <why>". <line> is
 #           the first line of the block that differs from the owned copy for R2 (for a second
-#           `  release:`, that line), the line of the occurrence for R3, R4 and R5.
+#           `  release:`, that line), the line of the occurrence for R3, R4, R5 and R6 (for an
+#           escaped line break, the line ending in the backslash).
 #   Exit 2: usage error (no argument, or more than one).
 #   Exit 3: cannot run (the dir is missing or not a directory, holds no regular file, or a file
 #           has no top-level `jobs:` line); never a pass.
@@ -85,9 +96,9 @@ run() {
 # line_of <file> <fixed text>: the number of the first line containing the text (empty if none).
 line_of() { grep -n -m 1 -F -- "$2" "$1" | cut -d: -f1; }
 
-# block <file>: the release block's lines (from the line "  release:" to the next line indented
-# 0-2 columns, or EOF), bytes kept (a CR stays in its line).
-block() { awk 'inb && /^ {0,2}[^ ]/ { exit } /^  release:$/ { inb = 1 } inb { print }' "$1"; }
+# block <file>: the release block's lines (from the line "  release:" to the end of the file),
+# bytes kept (a CR stays in its line).
+block() { awk '/^  release:$/ { inb = 1 } inb { print }' "$1"; }
 
 # first_diff <file>: the file's line number of the first line of its release block that differs
 # from the owned copy (empty when the blocks are equal).
@@ -143,7 +154,6 @@ check() {
 # ---- allowed --------------------------------------------------------------------------------
 check ok-release          0   # the target shape: workflow-level contents: read, the release job = the owned copy, Telegram secrets
 check ok-lookalikes       0   # GH_TOKEN, GH_PROMPT_DISABLED, github, ghcr.io, gh_pages, high_gh, "a secret": none is the word gh or secrets
-check ok-release-not-last 0   # a job after the release job ends the block (the block is not "to EOF")
 
 # ---- R2: the release job is the owned literal, byte for byte ---------------------------------
 # T-026 job-level fixtures (old rules 1-3), now the same edit on the new block's lines.
@@ -206,6 +216,12 @@ check v-release-trailing-space     1 R2 diff   # "runs-on: ubuntu-24.04 "
 check v-release-crlf-line          1 R2 diff   # one line ends in CR LF
 check v-release-step-appended      1 R2 diff   # a step after the owned copy's last line, at EOF
 check v-release-twice              1 R2 '@  release:' other.yml   # a second release block in another workflow file
+# Review 1 finding 1 (probes P1, P1b, P1c): the block runs to the end of its file; a comment does
+# not end it (the guard has no comment reader, P-020).
+check v-release-job-after                 1 R2 diff   # was ok-release-not-last: a job after the release job
+check v-release-comment-col0-then-step    1 R2 diff   # P1: "# end", then an always() step POSTing a release with the job token
+check v-release-comment-indent2-then-step 1 R2 diff   # P1b: the same, the comment indented 2
+check v-release-comment-then-job-env      1 R2 diff   # P1c: "#", then job-level env BASH_ENV: ./evil.sh
 
 # ---- R5: the word gh outside the release block -----------------------------------------------
 check v-unguarded-upload                   1 R5 '@gh release'
@@ -230,6 +246,20 @@ check v-pat-curl               1 R4 '@secrets.RELEASE_PAT'      # the PAT with c
 check v-secrets-index          1 R4 "@secrets['RELEASE_PAT']"
 check v-secrets-allowed-prefix 1 R4 '@secrets.TELEGRAM_CHAT_ID_2' # an allowed name as a prefix
 check v-secrets-uppercase      1 R4 '@SECRETS.RELEASE_PAT'      # expressions ignore case
+# Review 1 finding 3 (probe P5): a token kept in a repository variable.
+check v-vars-pat               1 R4 '@vars.RELEASE_PAT'         # P5: ${{ vars.RELEASE_PAT }}
+check v-vars-index             1 R4 "@VARS['RELEASE_PAT']"      # the word vars, not only "vars."
+
+# ---- R6: no YAML escape that spells a character or joins two lines ----------------------------
+# Review 1 finding 3 (probes P3, P4): each reads, to a YAML reader, as text R3-R5 refuse.
+check v-escape-x-secrets               1 R6 '@s\x65crets'      # P3: "${{ s\x65crets.RELEASE_PAT }}"
+check v-escape-u-secrets               1 R6 '@s\u0065crets'    # \u, 4 hex digits
+check v-escape-U-gh                    1 R6 '@\U00000067h'     # \U, 8 hex digits: gh release upload
+check v-escape-x-gh                    1 R6 '@\x67h release'   # P4: "\x67h release upload v1 x"
+check v-escape-line-break-secrets      1 R6 '@secr\'           # P4: "${{ secr\<LF>  ets.RELEASE_PAT }}"
+check v-escape-line-break-crlf-secrets 1 R6 '@secr\'           # the same, the line break is CR LF
+check v-escape-line-break-ls-secrets   1 R6 '@secr\'           # the same, the line break is U+2028 (a YAML 1.1 line break)
+check v-escape-permissions-key         1 R6 '@permi\x73sions'  # "permi\x73sions": a job-level contents: write (was Not caught)
 
 # ---- R3: permissions only in the workflow-level block and once in the release block ----------
 check v-write-other-job        1 R3 '@    permissions:'          # windows job gets contents: write
@@ -238,6 +268,9 @@ check v-permissions-in-comment 1 R3 '@permissions come'        # comments are ra
 check v-other-file-write-all   1 R3 '@permissions: write-all' other.yml
 
 # ---- R1: the workflow-level block, in every file ---------------------------------------------
+# Review 1 finding 2 (probe P11): the block and a jobs: line inside a double-quoted scalar.
+check v-r1-jobs-in-quoted-scalar           1 R1 '*'   # P11: two lines `jobs:`, the first inside x-note: "..."
+check v-r1-jobs-key-quoted                 1 R1 '*'   # one line `jobs:` (in the scalar), the real key spelled "jobs":
 check v-workflow-write                     1 R1 '*'   # permissions: / contents: write at workflow level
 check v-no-workflow-permissions            1 R1 '*'   # jobs would take the repository default
 check v-workflow-permissions-dup-contents  1 R1 '*'   # contents: read, then contents: write in the same block
@@ -282,6 +315,11 @@ mutate wf-write '!inrel && !inwin && /^  contents: read$/ { $0 = "  contents: wr
 mutate win-gh 'inwin && /^    steps:$/ && !d { print; print "      - run: gh release upload v0.1.0 x.exe"; d = 1; next } { print }' &&
   run "real with gh release upload in the windows job" 1 \
     "$(at "$tmp/win-gh/ci.yml" "$(line_of "$tmp/win-gh/ci.yml" 'gh release upload v0.1.0')" R5)" "$tmp/win-gh"
+mutate comment-step '{ print } END { print "# end of the release job"; print "      - name: Publish anyway"; print "        if: always()"; print "        run: echo publish" }' &&
+  real_r2 comment-step "real with a comment and a step appended after the release job"
+mutate win-escape 'inwin && /^    steps:$/ && !d { print; print "      - run: \"\\x67h release upload v0.1.0 x.exe\""; d = 1; next } { print }' &&
+  run "real with an escaped gh in the windows job" 1 \
+    "$(at "$tmp/win-escape/ci.yml" "$(line_of "$tmp/win-escape/ci.yml" '\x67h release')" R6)" "$tmp/win-escape"
 mutate win-pat 'inwin && /^    steps:$/ && !d { print; print "      - env:"; print "          TOKEN: ${{ secrets.RELEASE_PAT }}"; print "        run: echo pat"; d = 1; next } { print }' &&
   run "real with a PAT secret in the windows job" 1 \
     "$(at "$tmp/win-pat/ci.yml" "$(line_of "$tmp/win-pat/ci.yml" 'secrets.RELEASE_PAT')" R4)" "$tmp/win-pat"
