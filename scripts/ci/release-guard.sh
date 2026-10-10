@@ -14,10 +14,12 @@
 #   3. its job has no `continue-on-error:`;
 #   4. an earlier step of the same job runs scripts/ci/release-check.sh with no `if:`, no
 #      `continue-on-error:`, GH_TOKEN in its env: or the job's env: (so the release-exists
-#      check runs), and a run: that, comment lines dropped, is exactly one
-#      `bash scripts/ci/release-check.sh ...` line with no `;`, `|` or `&` (so no `||`, `;`,
-#      pipe, `if`, `set +e` or later command can swallow the script's exit status; the step's
-#      exit status is then the script's under any shell:);
+#      check runs), and a plain or block (not quoted) run: that, blank lines and `#` lines
+#      before it aside, is exactly one `bash scripts/ci/release-check.sh ...` line with no `;`,
+#      `|` or `&` (so no `||`, `;`, pipe, `if`, `set +e` or later command can swallow the
+#      script's exit status; a `#` line after the call may close a quote opened on it, and a
+#      quoted scalar's \n escapes hide shell lines, so both are refused). The step's exit status
+#      is then the script's under any shell: that returns its last command's status;
 #   5. its own `if:`, if any, has no status function;
 # and:
 #   6. `contents: write` appears only inside a job with a publish step (not at workflow level,
@@ -118,16 +120,19 @@ function addneeds(s,   a, n, k) {
 function endstep() {
   if (!cs) return
   if (srun[cs] ~ /(^|[^A-Za-z0-9_-])gh[ \t]+release[ \t]+(create|upload|edit|delete|delete-asset)([^A-Za-z0-9_-]|$)/) spub[cs] = 1
-  if (srun[cs] ~ /release-check\.sh/) { scheck[cs] = 1; ssole[cs] = solecall(srun[cs]) }
+  if (srun[cs] ~ /release-check\.sh/) { scheck[cs] = 1; ssole[cs] = !squot[cs] && solecall(srun[cs]) }
   cs = 0; smode = ""
 }
-# 1 when run:, comment lines dropped, is exactly one `bash scripts/ci/release-check.sh ...` line
-# with no ;, | or & (so no ||, &&, pipe or background): nothing can follow the call or swallow
-# its exit status, and an `if`, `set +e` or second command makes a second line or no match.
+# 1 when run: is exactly one `bash scripts/ci/release-check.sh ...` line with no ;, | or & (so
+# no ||, &&, pipe or background), blank lines aside and `#` lines only before it: nothing can
+# follow the call or swallow its exit status, and an `if`, `set +e` or second command makes a
+# second line or no match. A `#` line after the call may be the rest of a quote opened on it
+# (`"dist` then `#" || true`), so it is refused, not read as a comment.
 function solecall(r,   a, n, k, m, one) {
   n = split(r, a, "\n"); m = 0; one = ""
   for (k = 1; k <= n; k++) {
-    if (a[k] ~ /^[ \t]*(#.*)?$/) continue
+    if (a[k] ~ /^[ \t]*$/) continue
+    if (a[k] ~ /^[ \t]*#/) { if (m) return 0; continue }
     m++; one = a[k]
   }
   if (m != 1) return 0
@@ -140,7 +145,9 @@ function stepkey(t,   k) {
   k = keyof(t); smode = k
   if (k == "if") { sifh[cs] = 1; sif[cs] = val(t) }
   else if (k == "continue-on-error") scoe[cs] = 1
-  else if (k == "run") srun[cs] = val(t)
+  # A quoted run: scalar is refused for the check step: YAML escapes (\n) give shell lines this
+  # reader cannot see. The real check step is a plain scalar.
+  else if (k == "run") { srun[cs] = val(t); v = t; sub(/^[^:]*:[ \t]*/, "", v); squot[cs] = (v ~ /^["\047]/) }
   else if (k == "uses") suses[cs] = val(t)
   else if (k == "env") { if (t ~ /GH_TOKEN[ \t"\047]*:/) stok[cs] = 1 }
 }
@@ -153,6 +160,9 @@ function jobkey(t,   k, v) {
   else if (k == "steps") { waitsteps = 1 }
 }
 { line = $0; sub(/\r$/, "", line) }
+# A `#` line indented into the run: block of a step is kept: in the shell it may be the rest of a
+# quote, not a comment (solecall decides). Every other blank or comment line is skipped.
+line ~ /^[ \t]*#/ && insteps && cs && smode == "run" && ind(line) > skind { srun[cs] = srun[cs] "\n" substr(line, ind(line) + 1); next }
 line ~ /^[ \t]*(#.*)?$/ { next }
 {
   i = ind(line); t = substr(line, i + 1)
@@ -224,7 +234,7 @@ END {
       reasons = ""
       if (sifh[u]) why("has an if: (a skipped check counts as success)")
       if (scoe[u]) why("has continue-on-error: (a refusal would not stop the publish)")
-      if (!ssole[u]) why("its run: is not the release-check.sh call alone (comment lines aside, run: must be one `bash scripts/ci/release-check.sh ...` line with no ;, | or &; ||, ;, a pipe, if, set +e or a later command can swallow its exit status)")
+      if (!ssole[u]) why("its run: is not the release-check.sh call alone (run: must be a plain or block scalar holding one `bash scripts/ci/release-check.sh ...` line with no ;, | or &, only blank lines and # lines before it; ||, ;, a pipe, if, set +e, a later line or a quoted scalar with \\n can swallow its exit status)")
       if (!stok[u] && !jtok[j]) why("has no GH_TOKEN in its env: or the job env: (the release-exists check would be skipped)")
       if (reasons == "") good = 1
       else { nbad++; bad[nbad] = "V " file ":" sline[u] ": release-check step before a publish step " reasons }
