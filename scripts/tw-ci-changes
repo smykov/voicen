@@ -1,0 +1,72 @@
+#!/usr/bin/env python3
+"""tw-ci-changes - does this CI run carry code, or only task bookkeeping? (stdlib only).
+
+With one branch per task and every status change its own `chore(task)` commit, most
+pushes carry only records, and each re-ran the whole CI on code that had not changed.
+`[skip ci]` on status commits is not the answer: DRAIN pushes the code together with
+its `→CODE_COMPLETE` commit on top, so the tip of a delivery is a status commit and
+skipping it would skip CI on the code being delivered.
+
+This decides per run instead: it compares the commit the run is for with the previous
+tip of the same ref (`github.event.before`) and answers `code=false` only when every
+file changed between them is a record - task, review and verify records, sprints,
+decisions, open questions. The code at the new tip is then byte-for-byte the code the
+previous run checked. A new branch, a first PR event or an unknown previous tip is
+always `code=true`.
+
+  scripts/tw-ci-changes --before <sha> --after <sha>     # prints code=true|false
+  (appends the same line to $GITHUB_OUTPUT when set)
+
+Record paths: $TEAMWRIGHT_RECORD_PATHS_RE (default below).
+"""
+import argparse
+import os
+import re
+import subprocess
+import sys
+
+RECORDS = (r"^docs/tasks/|^docs/sprints/|^docs/process-reviews/"
+           r"|^docs/(decisions|open-questions)\.md$")
+
+
+def git(*args):
+    r = subprocess.run(("git",) + args, capture_output=True, text=True)
+    return r.returncode, r.stdout
+
+
+def decide(before, after, record_re):
+    if not before or not re.fullmatch(r"[0-9a-f]{7,64}", before) or not before.strip("0"):
+        return True, "no previous tip (new branch or first event)"
+    if git("cat-file", "-e", before + "^{commit}")[0] != 0:
+        return True, "previous tip %s not in the clone (fetch-depth: 0?) or rewritten" % before[:8]
+    if git("merge-base", "--is-ancestor", before, after)[0] != 0:
+        return True, "history rewritten since %s" % before[:8]
+    rc, out = git("diff", "--name-only", before, after)
+    if rc != 0:
+        return True, "git diff failed"
+    files = [f for f in out.splitlines() if f]
+    code = [f for f in files if not record_re.search(f)]
+    if code:
+        return True, "%d non-record file(s) changed, e.g. %s" % (len(code), code[0])
+    return False, "only records changed since %s (%d file(s))" % (before[:8], len(files))
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    ap.add_argument("--before", default="")
+    ap.add_argument("--after", default="HEAD")
+    args = ap.parse_args(argv)
+    record_re = re.compile(os.environ.get("TEAMWRIGHT_RECORD_PATHS_RE") or RECORDS)
+    code, why = decide(args.before.strip(), args.after.strip() or "HEAD", record_re)
+    line = "code=%s" % ("true" if code else "false")
+    print(line)
+    print("tw-ci-changes: " + why, file=sys.stderr)
+    out = os.environ.get("GITHUB_OUTPUT")
+    if out:
+        with open(out, "a") as fh:
+            fh.write(line + "\n")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

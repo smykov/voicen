@@ -30,6 +30,10 @@ verify_exception: ""
 class: ""
 # set by the reviewer when the same defect class was fixed before
 recurrence_of: []
+# true when the seam is a checker or guard - code whose whole guarantee is rejecting bad
+# input (a validator, a manifest check, a permission guard). The test-writer's bite check
+# is then an exhaustive sweep before the first review, not 2-3 wrong implementations.
+checker: false
 # rca task id, when this task is deferred into a root task
 absorbed_by: ""
 # soft hold reason; clear to "" when resolved

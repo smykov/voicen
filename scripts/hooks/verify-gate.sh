@@ -45,15 +45,19 @@
 #   5. Acceptance verdicts - validation records docs/tasks/<ID>.validation/<n>.md
 #      (verdict PASS|FAIL|NEEDS_OWNER, commit, validator) - written by anyone but
 #      task-validator, by a shell command, out of round order, or over an existing round.
+#      After two FAIL rounds in a row, the next round must be `method: sweep` (every
+#      condition, guard, return and write of the changed code mutated) or NEEDS_OWNER:
+#      sampled mutations find one survivor per round and the loop does not end.
 #      Entering DONE needs the latest round PASS, written through this gate (ledger),
 #      fresh for the task's code - for every surface, including `deploys: false` +
 #      `surface: none`, where it is the only check.
 #
 # FRESHNESS. The task's code commits are commits whose message names the task id
 # (subject, body or trailer - the commit convention requires it) and that touch files
-# outside docs/tasks/. The newest of them must be contained in the verified commit.
-# If no commit names the task, the verified commit must equal HEAD, or every change
-# since it must be under docs/tasks/ (records committed after the check).
+# other than process records (docs/tasks/, docs/sprints/, docs/process-reviews/,
+# docs/decisions.md, docs/open-questions.md: a decision naming the task is not code).
+# The newest of them must be contained in the verified commit. If no commit names the
+# task, the verified commit must equal HEAD, or every change since it must be a record.
 #
 # LEDGER (local, gitignored): .teamwright/sessions/<ID>.verify.jsonl - who wrote which
 # round, kind, result, commit; <ID>.validation.jsonl - acceptance verdicts. Implementers: .teamwright/sessions/<ID>.dev (review gate).
@@ -137,15 +141,19 @@ def last_code_commit(tid):
     out = git("log", "--format=%H", "-E", "--grep=" + pat, "HEAD")
     for sha in (out or "").split():
         files = git("show", "--name-only", "--format=", sha) or ""
-        if any(f and not f.startswith("docs/tasks/") for f in files.splitlines()):
+        if any(f and not is_record(f) for f in files.splitlines()):
             return sha
     return ""
 
+def is_record(f):
+    return task.is_record(f) if hasattr(task, "is_record") else f.startswith("docs/tasks/")
+
 def records_only_since(c):
-    """True when every change between c and HEAD is under docs/tasks/ (task records,
-    review / verify / validation rounds): the code that was checked is still HEAD's."""
+    """True when every change between c and HEAD is a process record (task, review,
+    verify and validation records, decisions, open questions): the code that was
+    checked is still HEAD's."""
     out = git("diff", "--name-only", c, "HEAD")
-    return out is not None and all(f.startswith("docs/tasks/") for f in out.splitlines() if f)
+    return out is not None and all(is_record(f) for f in out.splitlines() if f)
 
 def sessions_dir():
     return os.path.join(root, ".teamwright", "sessions")
@@ -300,11 +308,23 @@ if m and rel.startswith("docs/tasks/"):
         p.append("`verdict:` one of %s" % " | ".join(VERDICTS))
     if not SHA.match(w(rec, "commit")):
         p.append("`commit:` the sha of the revision that was checked (7-40 hex)")
+    method = w(rec, "method").lower() or "sample"
+    if method not in ("sample", "sweep"):
+        p.append("`method:` sample | sweep")
     if w(rec, "validator") != VALIDATOR:
         p.append("`validator: %s`" % VALIDATOR)
     if p:
         deny("validation record %s round %d is incomplete: %s. Template: "
              "docs/tasks/_validation-template.md." % (tid, n, "; ".join(p)))
+    prev = [w(r, "verdict") for _, r in task.validation_rounds(root, tid)][-2:]
+    if prev == ["FAIL", "FAIL"] and method != "sweep" and w(rec, "verdict") != "NEEDS_OWNER":
+        # two sampling rounds in a row each found a different survivor: a third sample
+        # would find a third. Like two REQUEST_CHANGES in review: stop sampling.
+        deny("validation of %s failed twice in a row; round %d is not another sample of 3-6 "
+             "mutations: either `method: sweep` - mutate every condition, guard, return and "
+             "write in the task's changed code, re-run the test-writer's wrong implementations "
+             "and every mutation of earlier rounds, record killed / survived / equivalent - or "
+             "`verdict: NEEDS_OWNER` to escalate." % (tid, n))
     if resolve(w(rec, "commit")) == "":
         deny("commit %s does not resolve in this repository; check a committed revision "
              "and record its sha." % w(rec, "commit"))

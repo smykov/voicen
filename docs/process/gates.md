@@ -200,8 +200,10 @@ rca_task: T-050             # required with REJECT_RECURRENCE
    Deny messages quote the counted rounds.
 5. Shell commands that write review records or the `.teamwright/` ledgers and journal.
 6. With `process.review.blocking` set in `.teamwright/config.yml` (the owner's threshold,
-   `low` | `medium` | `high`): an `APPROVE` whose `## Findings` table holds a blocking
-   row, or a `REQUEST_CHANGES` with none. A row blocks when its Severity is at or above
+   `low` | `medium` | `high`): an `APPROVE` whose findings table holds a blocking
+   row, or a `REQUEST_CHANGES` with none. The findings table is the first table with a
+   Severity column under a heading starting with "Findings" (any level), or the first
+   such table in the record when no heading says so. A row blocks when its Severity is at or above
    the threshold, when it is Critical, or when its Category is `secret-leak`,
    `security`, `weakened-test`, `done-not-working` or `recurrence` — at any threshold.
    Severities other than Critical | High | Medium | Low are refused. Rows below the
@@ -280,8 +282,10 @@ may be empty).
      `VERIFY_FAIL` and back to `ANALYSIS`;
    - each counted record is fresh: its `commit` is an ancestor of (or equal to) `HEAD`
      and contains the task's last code commit — the newest commit whose message names
-     the task id and that touches files outside `docs/tasks/`. If no commit names the
-     task, the record must verify `HEAD` itself;
+     the task id and that touches files other than process records (`docs/tasks/`,
+     `docs/sprints/`, `docs/process-reviews/`, `docs/decisions.md`,
+     `docs/open-questions.md` — a decision naming the task is not a code change). If no
+     commit names the task, the record must verify `HEAD` itself;
    - each counted record matches its ledger entry (kind, result, commit), or is a
      person's committed record (`verifier: human:<name>`, no ledger entry).
 4. `kind: manual` without `verify_exception` in the task (at write time and at the
@@ -297,7 +301,12 @@ may be empty).
    `PASS`, matching its ledger entry, for the task's current code (same freshness rule as
    verify records) — for every `surface`, including `deploys: false` + `surface: none`,
    where it is the only check. A round whose file is gone while the ledger has it blocks
-   `DONE` (`TEAMWRIGHT_VALIDATOR_AGENT`, default `task-validator`).
+   `DONE` (`TEAMWRIGHT_VALIDATOR_AGENT`, default `task-validator`). After two `FAIL`
+   rounds in a row the next round must be `method: sweep` (every condition, guard,
+   return and write of the changed code mutated, earlier rounds' mutations and the
+   test-writer's wrong implementations re-run) or `verdict: NEEDS_OWNER`: sampled
+   mutations find one survivor per round, so a third sample does not end the loop — the
+   same stop rule as two `REQUEST_CHANGES` in review.
 
 **Deliberate exits** (all stay visible in the task file)
 
@@ -327,7 +336,7 @@ the agent's report.
 | `PreToolUse`, `PostToolUse`, `PostToolUseFailure` | `tools.jsonl` | tool call: `ts`, `event` (`pre`/`post`/`failure`), `session_id`, `agent_id`, `agent_type`, `tool`, `detail`; Agent calls add `subagent_type`, `task_ids` (ids in the spawn description, else the first id in the prompt) |
 | `PermissionRequest`, `PermissionDenied` | `perms.jsonl` | permission decision needed / call denied (`PermissionDenied` fires for auto-mode denials; a deny-rule refusal shows as a `pre` line with no `post`) |
 | `PostToolUse` of Edit/Write on `docs/tasks/<ID>.verify/<n>.md` | `verify.jsonl` | verify record landed: task, round, kind, tool, environment, result, commit (never the command or the body) |
-| `Stop`, `SubagentStop` | `outcomes.jsonl` | session or subagent end: `outcome` from the final message's `Outcome: barrier\|idle\|escalate\|interrupted` line — `last_assistant_message`, else the last assistant text in the transcript (`none` if missing; `outcome_source`: message / transcript / none); a `Stop` without the line while an agent the session launched has not finished is `waiting` (`outcome_source: open-agent`) — active task and its status, the agent's tool-call count |
+| `Stop`, `SubagentStop` | `outcomes.jsonl` | session or subagent end: `outcome` from the final message's `Outcome: barrier\|idle\|escalate\|interrupted` line — `last_assistant_message`, else the last assistant text in the transcript (`none` if missing; `outcome_source`: message / transcript / none); a `Stop` without the line while an agent the session launched has not finished is `waiting` (`outcome_source: open-agent`), and so is a `Stop` whose final message ends on the flow's `waiting for <role> on <ID>` line (`outcome_source: waiting-line`) — active task and its status, the agent's tool-call count |
 | any gate warning or denial | `gates.jsonl` | `event: gate`, `gate`, `decision` (`warn` / `deny`), session, agent, tool, first line of the reason — written by the gates themselves (`_hookio.deny`) |
 
 `detail` classifies a call, it never replays it: program + subcommand of a shell command
@@ -427,8 +436,10 @@ was stopped. Asking a model to stop is racy; a hook is not.
 
 **Attribution** (one owner per commit):
 
-- A commit that touches only `docs/**` or the spec tool's directories (`specs/**`,
-  `openspec/**`) — task and review records, specs, decisions — belongs to no task: it
+- A commit that touches only `docs/**`, the spec tool's directories (`specs/**`,
+  `openspec/**`) or the root process documents (`PRINCIPLES.md`, `AGENTS.md`,
+  `CLAUDE.md`) — task and review records, specs, decisions, a process review from
+  `/teamwright:improve` — belongs to no task: it
   ships no code, so opening a `TODO` task or recording a decision must not dirty the
   tail (`$TEAMWRIGHT_DOC_PATHS_RE`).
 - Otherwise the owner is the first task id in the message that has a
@@ -523,7 +534,7 @@ guard's variables. Unset means the default.
 | `TEAMWRIGHT_GATE_LOG` | Claude Code gates | a file that gets one plain line per warning or denial: time, gate, `WARN`/`DENY`, first line of the reason (off) |
 | `TEAMWRIGHT_PAUSE_FILE` | `pre-push`, router | pause file (`TEAMWRIGHT_PAUSE` at the repository root) |
 | `TEAMWRIGHT_PUSH_STATUSES` | `pre-push` | statuses whose code may be pushed (`CODE_COMPLETE DEPLOYED VERIFIED DONE`) |
-| `TEAMWRIGHT_DOC_PATHS_RE` | `pre-push` | commits touching only these paths belong to no task (`^(docs\|specs\|openspec)/`) |
+| `TEAMWRIGHT_DOC_PATHS_RE` | `pre-push` | commits touching only these paths belong to no task (`^(docs\|specs\|openspec)/\|^(PRINCIPLES\|AGENTS\|CLAUDE)\.md$`) |
 | `TEAMWRIGHT_WIP_REFS_RE` | `pre-push` | remote refs that are CI-only pushes, not deliveries (`^refs/heads/wip/`) |
 | `TEAMWRIGHT_ALLOW_PUSH=1` | `pre-push` | one-off human override of DRAIN |
 | `PATCH_GUARD=off` | patch guard | one-off human override |

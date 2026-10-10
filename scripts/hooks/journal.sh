@@ -29,7 +29,9 @@
 #       `outcome_source` says which: message | transcript | none. A Stop with no
 #       Outcome line while an agent this session launched has not finished yet is
 #       `outcome: waiting`, `outcome_source: open-agent` (the runtime ran the role in
-#       the background; the session resumes on its result). A SubagentStop without
+#       the background; the session resumes on its result); so is a Stop whose final
+#       message ends on the flow's "waiting for <role> on <ID>" line
+#       (`outcome_source: waiting-line`). A SubagentStop without
 #       `agent_type` takes it from this agent's own tool-call lines.
 #
 # PRIVACY. `detail` is a short classification, never a replay of the call: the
@@ -136,6 +138,8 @@ elif ev in ("PermissionRequest", "PermissionDenied"):
 
 elif ev in ("Stop", "SubagentStop"):
     OUT_RE = re.compile(r"(?im)^\W*outcome\W*[:=]\s*\W*(barrier|idle|escalate|interrupted)\b")
+    # the flow's line for a turn that ends while a role runs in the background
+    WAIT_RE = re.compile(r"(?im)^\W*waiting for [\w.-]+ on [A-Za-z][\w.]*-\d+\W*$")
 
     def last_text(path):
         """Last assistant text block of a transcript (JSONL), read from the tail."""
@@ -164,15 +168,16 @@ elif ev in ("Stop", "SubagentStop"):
                 return text
         return ""
 
-    src = "none"
-    m = OUT_RE.search(data.get("last_assistant_message") or "")
+    src, text = "none", data.get("last_assistant_message") or ""
+    m = OUT_RE.search(text)
     if m:
         src = "message"
     else:
         tp = data.get("agent_transcript_path") if ev == "SubagentStop" else None
         tp = tp or (data.get("transcript_path") if ev == "Stop" else None)
-        if tp:
-            m = OUT_RE.search(last_text(os.path.expanduser(str(tp))))
+        if tp and not WAIT_RE.search(text):
+            text = last_text(os.path.expanduser(str(tp))) or text
+            m = OUT_RE.search(text)
             if m:
                 src = "transcript"
     cur, st = "", ""
@@ -197,7 +202,11 @@ elif ev in ("Stop", "SubagentStop"):
     if ev == "SubagentStop" and not base["agent_type"] and who["agent_id"]:
         base["agent_type"] = seen_type
     outcome = m.group(1).lower() if m else "none"
-    if ev == "Stop" and not m and launched:
+    if ev == "Stop" and not m and WAIT_RE.search(text):
+        # the turn ended on the flow's waiting line: a clean wait, whatever the hook can
+        # or cannot see of the background agent (its spawn may not be journaled as returned)
+        outcome, src = "waiting", "waiting-line"
+    elif ev == "Stop" and not m and launched:
         # The turn ended while an agent it launched is still running (the runtime ran it
         # in the background): the session is waiting, not stopped without an outcome.
         # Matched per agent type, so a helper or a nested agent of another type finishing

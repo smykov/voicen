@@ -117,7 +117,8 @@ Verification (VERIFY session) runs committed tests against the running system; i
    git worktree add --detach "$copy/tree" HEAD
    # copy your uncommitted test files in, write a wrong implementation, run the tests there
    ```
-   Write the result into the task record body under `## Tests` (never the front matter): one line per wrong implementation — what it did, which test went red. The reviewer reads it.
+   **`checker: true` in the task** (the seam's whole guarantee is rejecting bad input): instead of 2–3 wrong implementations, sweep — mutate every condition, guard, return and write of the seam, one at a time; each must turn a test red or be shown equivalent. Sampling a checker leaves survivors for the validator to find one per round.
+   Write the result into the task record body under `## Tests` (never the front matter): one line per wrong implementation — what it did, which test went red. The reviewer reads it, and the task-validator re-runs every line, so write each so it can be repeated (file, symbol, the change).
 5. Lint the tests.
 
 ## Limits

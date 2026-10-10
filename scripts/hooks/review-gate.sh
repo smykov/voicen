@@ -33,7 +33,7 @@
 #   3. A review record with verdict REJECT_RECURRENCE that does not link an
 #      existing `type: rca` task via `rca_task:`.
 #   6. With `process.review.blocking` set in .teamwright/config.yml: an APPROVE whose
-#      `## Findings` table holds a blocking row (severity at or above the threshold,
+#      findings table (first Severity table, under "Findings" if headed) holds a blocking row (severity at or above the threshold,
 #      Critical, or an always-blocking category), or a REQUEST_CHANGES with none.
 #      Without the key, findings are not checked (behaviour before settings existed).
 #   4. Any verdict outside the four above; and, after 2 rounds of REQUEST_CHANGES in

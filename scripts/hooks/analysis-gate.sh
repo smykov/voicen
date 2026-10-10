@@ -13,8 +13,10 @@
 #      invariant seam approach; override with TEAMWRIGHT_ANALYSIS_FIELDS).
 #   2. An edit of a code file while the active task (.teamwright/current-task or
 #      $TEAMWRIGHT_TASK) is not IN_PROGRESS or has an incomplete analysis.
-#   3. A Bash command that rewrites a task status in docs/tasks/ (sed -i, >, tee…):
-#      status changes must go through Edit/Write so the gates can see them.
+#   3. A Bash command that rewrites a task record docs/tasks/<ID>.md (sed -i, >, tee…)
+#      and mentions `status`: status changes must go through Edit/Write so the gates
+#      can see them. Only the write target counts - a command that reads a record and
+#      writes elsewhere, or writes text that merely names one, passes.
 #      Appending (>>, tee -a) is allowed: it lands after the front matter, where
 #      `status:` is never read, so a note cannot change the task's state.
 #
@@ -107,10 +109,7 @@ if io.event(data) != "PreToolUse":
 
 # ---- 3. status rewrite through the shell -------------------------------------
 if tool == "Bash":
-    cmd = ti.get("command") or ""
-    if "docs/tasks/" in cmd and re.search(r"status", cmd) and re.search(
-            r"(sed\s+(-[a-zA-Z]*i|--in-place)|perl\s+-[a-zA-Z]*i|(?<!>)>(?!>)\s*\S*docs/tasks/"
-            r"|\btee\b(?!\s+(-a|--append)\b))", cmd):
+    if io.shell_rewrites_task_record(ti.get("command") or ""):
         io.deny("ANALYSIS GATE: task status must be changed with Edit/Write on "
                 "docs/tasks/<ID>.md, not through the shell - otherwise the analysis and "
                 "review gates cannot see the transition.", "analysis-gate")

@@ -226,27 +226,28 @@ def _split_heredocs(cmd):
 
 
 def _segments(text):
-    """Shell words split into simple commands; redirect targets marked as ('>', target).
-    Raises ValueError on unbalanced quotes."""
+    """Shell words split into simple commands; redirect targets marked as (op, target),
+    op being the redirect token ('>', '>>', '&>', '>|' ...). Raises ValueError on
+    unbalanced quotes."""
     import shlex
     lex = shlex.shlex(text, posix=True, punctuation_chars=";&|<>()")
     lex.whitespace_split = True
     lex.commenters = ""
-    segs, cur, redirect = [], [], False
+    segs, cur, redirect = [], [], ""
     for tok in lex:
         if tok in (";", "&", "&&", "|", "||", "|&", "(", ")", ";;") or tok == "\n":
             if cur:
                 segs.append(cur)
-            cur, redirect = [], False
+            cur, redirect = [], ""
             continue
         if set(tok) <= set("<>&|") and ">" in tok:
-            redirect = True
+            redirect = tok
             continue
         if set(tok) <= set("<"):
             continue                     # input redirect / heredoc marker: reading
         if redirect:
-            cur.append((">", tok))
-            redirect = False
+            cur.append((redirect, tok))
+            redirect = ""
             continue
         if re.fullmatch(r"\d?>&?\d*", tok):
             continue
@@ -344,6 +345,57 @@ def shell_writes_switch(cmd, _depth=0):
             code = " ".join(args) + "\n" + body_text
             if _SWITCH_TEXT.search(code) and _CODE_WRITE.search(code):
                 return True
+    return False
+
+
+_INPLACE = re.compile(r"^(-[a-zA-Z]*i|--in-place)")
+
+
+def _is_task_record(tok, in_tasks):
+    t = tok.replace("\\", "/")
+    if TASK_FILE_RE.search(t):
+        return True
+    return in_tasks and "/" not in t and t.endswith(".md")
+
+
+def shell_rewrites_task_record(cmd):
+    """True when a shell command overwrites a task record (docs/tasks/<ID>.md) and the
+    command mentions `status`: an in-place sed/perl edit, a `>` redirect or a `tee`
+    without -a whose target is the record. Appends (>>, tee -a), reads, and writes to
+    any other file are not - even when the command text names a task record."""
+    if "status" not in cmd:
+        return False
+    text, _ = _split_heredocs(cmd)
+    if "docs/tasks" not in text:
+        return False
+    try:
+        segs = _segments(text)
+    except ValueError:
+        return bool(re.search(r"(sed\s+(-[a-zA-Z]*i|--in-place)|perl\s+-[a-zA-Z]*i|(?<!>)>(?!>)\s*\S*"
+                              r"docs/tasks/|\btee\b(?!\s+(-a|--append)\b))", text))
+    in_tasks = False
+    for seg in segs:
+        for op, target in (w for w in seg if isinstance(w, tuple)):
+            if ">>" not in op and _is_task_record(target, in_tasks):
+                return True
+        words = [w for w in seg if isinstance(w, str)]
+        while words and (re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", words[0]) or words[0] in _PREFIX
+                         or words[0] == "env"):
+            words = words[1:]
+        if not words:
+            continue
+        prog, args = os.path.basename(words[0]), words[1:]
+        if prog in ("cd", "pushd"):
+            in_tasks = bool(args) and args[-1].rstrip("/").endswith("docs/tasks")
+            continue
+        records = [a for a in args if not a.startswith("-") and _is_task_record(a, in_tasks)]
+        if not records:
+            continue
+        if prog == "tee" and not any(a in ("-a", "--append") or re.fullmatch(r"-[a-zA-Z]*a[a-zA-Z]*", a)
+                                     for a in args):
+            return True
+        if prog in ("sed", "gsed", "perl") and any(_INPLACE.match(a) for a in args):
+            return True
     return False
 
 

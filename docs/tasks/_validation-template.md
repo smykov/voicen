@@ -12,6 +12,9 @@ verdict: PASS
 # otherwise the verdict is stale and a new round is needed
 commit: <sha>
 validator: task-validator
+# sample (3-6 targeted mutations) | sweep (every condition, guard, return and write in the
+# changed code). After two FAIL rounds in a row the gate accepts only sweep or NEEDS_OWNER.
+method: sample
 ---
 
 ## Claims
@@ -22,6 +25,6 @@ validator: task-validator
 
 **Verification**: <verify/<n>.md — kind — PASS/FAIL> | surface none
 **Gate** (run by validator): <command — result>
-**Mutations**: <n> applied, <k> killed — <surviving: file:line — what was changed>
+**Mutations** (<sample|sweep>): <n> applied, <k> killed, <e> equivalent — re-run: <test-writer's wrong implementations from `## Tests`, earlier rounds' mutations> — <surviving: file:line — what was changed>
 **Review**: round N — APPROVE | missing
 **Needs owner**: <action> | none

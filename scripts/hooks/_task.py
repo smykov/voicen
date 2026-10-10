@@ -167,32 +167,56 @@ def review_rounds(root, tid):
 
 
 
+# Process records, not code: task, review, verify and validation records, sprints,
+# process reviews, decisions and open questions. A commit that touches only these
+# (a decision naming a task, a status change) does not make the task's checks stale.
+# Same set as scripts/tw-ci-changes and scripts/tw-next.py (RECORD_RE).
+RECORD_RE = re.compile(r"^docs/tasks/|^docs/sprints/|^docs/process-reviews/"
+                       r"|^docs/(decisions|open-questions)\.md$")
+
+
+def is_record(path):
+    return bool(RECORD_RE.search(path or ""))
+
+
 def findings(text):
-    """[(severity, category)] from the first table under `## Findings` of a review record
-    that has a Severity column (Category optional); rows without a severity are skipped."""
-    out, cols, inside = [], None, False
+    """[(severity, category)] from the findings table of a review record: the first table
+    with a Severity column (Category optional) under a heading that starts with "Findings"
+    at any level, or - when no heading says so - the first such table in the record.
+    Reviewers often put the table straight under `### Review round N`; reading only
+    `## Findings` saw no findings there, so the blocking-threshold rule refused honest
+    send-backs and let an APPROVE with blocking rows through. Rows without a severity
+    are skipped."""
+    tables, cols, under, current = [], None, False, None
     for line in text.splitlines():
-        if line.startswith("## "):
-            if inside and cols:
-                break
-            inside = line[3:].strip().lower().startswith("findings")
-            cols = None
+        m = re.match(r"^(#{1,6})\s+(.*)$", line)
+        if m:
+            under = m.group(2).strip().lower().startswith("findings")
+            cols, current = None, None
             continue
-        if not inside or not line.strip().startswith("|"):
+        if not line.strip().startswith("|"):
+            cols, current = None, None
             continue
         cells = [c.strip() for c in line.strip().strip("|").split("|")]
         if cols is None:
+            if current is not None:
+                continue
             low = [c.lower() for c in cells]
+            current = []
             if "severity" in low:
                 cols = (low.index("severity"), low.index("category") if "category" in low else None)
+                tables.append((under, current))
             continue
         if all(set(c) <= set("-: ") for c in cells):
             continue
         sev = cells[cols[0]] if cols[0] < len(cells) else ""
         if sev:
             cat = cells[cols[1]] if cols[1] is not None and cols[1] < len(cells) else ""
-            out.append((sev, cat))
-    return out
+            current.append((sev, cat))
+    for under, rows in tables:
+        if under:
+            return rows
+    return tables[0][1] if tables else []
 
 def read(path):
     if path == "-":

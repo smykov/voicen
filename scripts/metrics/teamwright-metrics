@@ -965,8 +965,27 @@ def norm_record(r):
             "event": ev, "outcome": r.get("outcome"), "raw": r}
 
 
+def journal_dir(project):
+    """The journal directory: $TEAMWRIGHT_LOG_DIR, else <project>/.teamwright/logs; from a
+    git worktree without its own journal, the main checkout's (the hooks write to
+    $CLAUDE_PROJECT_DIR, which is the main checkout when the session runs in a worktree)."""
+    if os.environ.get("TEAMWRIGHT_LOG_DIR"):
+        return os.environ["TEAMWRIGHT_LOG_DIR"]
+    own = os.path.join(project, ".teamwright", "logs")
+    if os.path.isdir(own):
+        return own
+    try:
+        out = subprocess.run(["git", "-C", project, "worktree", "list", "--porcelain"],
+                             capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return own
+    first = next((l[len("worktree "):] for l in out.splitlines() if l.startswith("worktree ")), "")
+    main = os.path.join(first, ".teamwright", "logs") if first else ""
+    return main if main and os.path.isdir(main) else own
+
+
 def load_journal(opt):
-    paths = opt.logs or [os.path.join(opt.repo, ".teamwright", "logs")]
+    paths = opt.logs or [journal_dir(opt.repo)]
     files = []
     for p in paths:
         if os.path.isdir(p):
@@ -1099,9 +1118,12 @@ def journal_period_summary(recs, opt, tasks, src, typed_since=None):
         "tool_calls_per_session_max": number(max(per_session) if per_session else None,
                                              len(per_session), src),
         "sessions_without_outcome": share(
-            sum(1 for r in last_stop.values() if str(r["outcome"]) in ("none", "", "waiting")),
-            len(last_stop), src + " - last Stop of each session: outcome none, or still waiting "
-                                  "on a background agent"),
+            sum(1 for r in last_stop.values() if str(r["outcome"]) in ("none", "")),
+            len(last_stop), src + " - last Stop of each session: outcome none"),
+        "sessions_ended_waiting": share(
+            sum(1 for r in last_stop.values() if str(r["outcome"]) == "waiting"),
+            len(last_stop), src + " - last Stop of each session: still waiting on a background "
+                                  "agent (a clean wait the session never came back from)"),
         "gate_warnings": count(sum(1 for r in gates if r["raw"].get("decision") == "warn")
                                if recs else None, src + " - gates.jsonl, gate-first warnings", len(recs)),
         "gate_denials": count(sum(1 for r in gates if r["raw"].get("decision") == "deny")
@@ -1514,7 +1536,8 @@ def parse_args(argv):
     a("--task-period", choices=["end", "start"], help="period a task belongs to: its last DONE "
                                                       "(end, default) or its start (cohort)")
     a("--logs", action="append", help="journal file or directory (repeatable; default "
-                                      "<repo>/.teamwright/logs)")
+                                      "$TEAMWRIGHT_LOG_DIR, else <repo>/.teamwright/logs; from a git "
+                                      "worktree, the main checkout's)")
     a("--reviewer-agent-regex", help="subagent/agent type that counts as a reviewer")
     a("--review-claim-field", action="append", help="record field that claims a review (repeatable)")
     a("--review-claim-regex", help="claim-field string values that count as a claim "

@@ -161,7 +161,7 @@ Fragments that do not parse are skipped and counted in the report.
 | Metric | Meaning |
 |---|---|
 | Sessions | Distinct `session_id`. A session belongs to the period of its first timestamp |
-| Session outcomes | `Stop` records by `outcome`; `none` = the turn ended without the outcome line, `waiting` = it ended while a background agent was still running (`sessions.md` §2). Sessions without outcome are counted by each session's **last** `Stop` (`none` or still `waiting`). Subagent outcomes are listed separately; runtime helper stops (no agent type, no tool calls) are left out and counted on their own |
+| Session outcomes | `Stop` records by `outcome`; `none` = the turn ended without the outcome line, `waiting` = it ended while a background agent was still running (`sessions.md` §2). Sessions are counted by each session's **last** `Stop`: `sessions_without_outcome` — `none`; `sessions_ended_waiting` — still `waiting` (a clean wait the session never resumed from, not a crash). Subagent outcomes are listed separately; runtime helper stops (no agent type, no tool calls) are left out and counted on their own |
 | Gate warnings / denials | `gates.jsonl` records by `decision`, and per gate in the breakdown: how often the gates fired in `gate-first`, the evidence for switching to `enforce` |
 | Tool calls per session | `pre` events per session (median, p75, max) and per tool. Journals without `pre`/`post` events: every record with a tool counts |
 | Sessions with reviewer evidence | Sessions containing a spawn of the reviewer agent (`--reviewer-agent-regex`, default `^code-reviewer$`) or records from an agent of that type |
