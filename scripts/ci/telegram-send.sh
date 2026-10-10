@@ -16,7 +16,9 @@
 #     control character) -> ::warning:: (value not printed), exit 0, curl not run.
 #   - curl fails (network, HTTP error from Telegram) -> one ::warning:: line with curl's exit
 #     code and Telegram's `description` (CR/LF stripped, or "none"), exit 0: a notification
-#     failure never turns a delivery run red; the installer is in the run artifact.
+#     failure never turns a delivery run red. That warning in the run log is the only trace:
+#     off v* tags no installer artifact is uploaded (T-084), so re-run the workflow to rebuild
+#     and resend.
 #   - Success -> "installer sent to Telegram: <file name>", exit 0.
 # Reads only its two arguments and the environment variables TELEGRAM_BOT_TOKEN and
 # TELEGRAM_CHAT_ID. Host-tested by scripts/ci/telegram-send.test.sh (stub curl).

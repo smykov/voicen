@@ -46,6 +46,15 @@
 #      declared by a `%TAG` directive) could decode other text, e.g. base64, into secrets, vars, gh
 #      or permissions and hide it from R3-R5. A raw index() search, no tag reader: a lone `!`
 #      (`!cancelled()`, `!=`, `[ ! -f ]`) passes.
+#   R9 (T-084, decision #119) the raw token upload-artifact (any case, comments included, a
+#      sub-path such as upload-artifact/merge or a fork name too) occurs exactly once in the dir
+#      (files in glob order, then line order), and the lines starting at that line are
+#      byte-identical to the guard's third owned copy, scripts/ci/release-upload.yml (edit both
+#      together): the installer upload step with the release job's own if: (v* tag push only),
+#      retention-days: 1 and if-no-files-found: error, ended by the first line of the next step
+#      so no key can be appended to it. So the artifact exists exactly on the runs where the
+#      release job (R2) downloads it: zero occurrences = a tag release with nothing to download,
+#      two or more = a second upload. A raw token plus an owned literal, no step reader.
 # R1, R3 and R4 are the capability lock (GitHub enforces the token scope; it also covers gh api
 # and curl); R2 and R7 pin the release job and the header it inherits as two literals; R5 is the
 # early, fail-closed tripwire; R6 and R8 keep R3-R5's raw text the text a YAML reader sees.
@@ -67,10 +76,14 @@
 # `jobs:` line when the block before it differs; R2: the first line of the block that differs
 # from the owned copy, or the second `  release:` line; R3-R6: the line of the occurrence, for an
 # escaped line break the line ending in the backslash; R7: the first header line that differs
-# from scripts/ci/release-header.yml; R8: every line holding !!, !< or %TAG). Exit 2: usage
+# from scripts/ci/release-header.yml; R8: every line holding !!, !< or %TAG; R9: the second
+# token occurrence, the first line from the token on that differs from release-upload.yml, or,
+# with no token, the first file's jobs: line). Exit 2: usage
 # error. Exit 3: cannot run (the dir is missing or not a directory, holds no regular file, a file
 # is unreadable or has no `jobs:` line, an owned copy is missing or malformed: release-job.yml not
-# starting with `  release:`, release-header.yml not ending in its only `jobs:` line; awk failed);
+# starting with `  release:`, release-header.yml not ending in its only `jobs:` line,
+# release-upload.yml missing, empty or not starting with `      - uses: actions/upload-artifact@v4`;
+# awk failed);
 # never a pass.
 # Host test: scripts/ci/release-guard.test.sh (make check-release-guard).
 set -uo pipefail
@@ -91,6 +104,9 @@ ownedh="$here/release-header.yml"
 [ -f "$ownedh" ] && [ -r "$ownedh" ] || cannot_run "owned header copy $ownedh not found or not readable"
 [ "$(tail -n 1 -- "$ownedh")" = "jobs:" ] || cannot_run "owned header copy $ownedh does not end in the line 'jobs:'"
 [ "$(grep -c -x 'jobs:' -- "$ownedh")" = "1" ] || cannot_run "owned header copy $ownedh has more than one line 'jobs:' (only its last line may be)"
+ownedu="$here/release-upload.yml"
+[ -f "$ownedu" ] && [ -r "$ownedu" ] || cannot_run "owned upload copy $ownedu not found or not readable"
+[ "$(head -n 1 -- "$ownedu")" = "      - uses: actions/upload-artifact@v4" ] || cannot_run "owned upload copy $ownedu does not start with the line '      - uses: actions/upload-artifact@v4'"
 
 shopt -s nullglob dotglob
 files=()
@@ -104,7 +120,7 @@ shopt -u nullglob dotglob
 [ "${#files[@]}" -gt 0 ] || cannot_run "no regular file in $dir"
 
 # Output lines: "V <file>:<line>: R<n>: <why>"; awk exit 3 = an owned copy could not be read.
-report="$(awk -v owned="$owned" -v ownedh="$ownedh" '
+report="$(awk -v owned="$owned" -v ownedh="$ownedh" -v ownedu="$ownedu" '
 function v(k, i, r, why) { print "V " F[k] ":" i ": " r ": " why; nv++ }
 # count(s, t): occurrences of t in s.
 function count(s, t,   n, p) { n = 0; while ((p = index(s, t)) > 0) { n++; s = substr(s, p + length(t)) } return n }
@@ -119,12 +135,16 @@ BEGIN {
   while ((rc = (getline line < ownedh)) > 0) oh[++nh] = line
   if (rc < 0 || nh == 0 || oh[nh] != "jobs:") { bad = 1; exit 3 }
   close(ownedh)
+  nu = 0
+  while ((rc = (getline line < ownedu)) > 0) ou[++nu] = line
+  if (rc < 0 || nu == 0) { bad = 1; exit 3 }
+  close(ownedu)
 }
 FNR == 1 { nf++; F[nf] = FILENAME }
 { N[nf] = FNR; L[nf, FNR] = $0 }
 END {
   if (bad) exit 3
-  nrel = 0
+  nrel = 0; ntok = 0
   for (k = 1; k <= nf; k++) {
     # R1: one line with the word jobs, exactly "jobs:", right after the read-only block.
     j = 0; jbad = 0
@@ -186,6 +206,14 @@ END {
         v(k, i, "R6", "a YAML escape (\\x + 2 hex, \\u or \\U + 4 hex, \\0, or a backslash before a line break) could hide secrets, vars, gh or permissions")
       if (index(s, "!!") || index(s, "!<") || index(s, "%TAG"))
         v(k, i, "R8", "a YAML tag (the raw text !!, !< or %TAG) could turn other text into secrets, vars, gh or permissions")
+      # R9: the raw token upload-artifact, any case, comments included, once in the dir.
+      n = count(lo, "upload-artifact")
+      if (n > 0) {
+        if (ntok == 0) { tk = k; ti = i }
+        if (ntok < 2 && ntok + n >= 2)
+          v(k, i, "R9", "a second upload-artifact in the workflows dir (the installer upload occurs once, as the owned copy scripts/ci/release-upload.yml)")
+        ntok += n
+      }
     }
     if (inb) {
       if (!bdiff && boff < no) bdiff = bs + boff
@@ -197,6 +225,18 @@ END {
       for (i = 1; i <= N[k]; i++) if (L[k, i] == "jobs:") break
       v(k, i, "R2", "no \"  release:\" job line in the workflows dir (the release job is the owned copy scripts/ci/release-job.yml)")
     }
+  # R9: the lines from the first token line on are the owned upload copy, byte for byte.
+  if (ntok == 0) {
+    for (i = 1; i <= N[1]; i++) if (L[1, i] == "jobs:") break
+    v(1, i, "R9", "no upload-artifact in the workflows dir (the release job downloads the installer the owned step scripts/ci/release-upload.yml uploads on a v* tag)")
+  } else
+    for (m = 1; m <= nu; m++) {
+      i = ti + m - 1
+      if (i > N[tk] || L[tk, i] != ou[m]) {
+        v(tk, i, "R9", "the installer upload step differs from the owned copy scripts/ci/release-upload.yml here (byte for byte; v* tag push only, retention-days: 1; edit both together)")
+        break
+      }
+    }
   exit (nv > 0 ? 1 : 0)
 }
 ' "${files[@]}")"
@@ -205,10 +245,10 @@ case "$rc" in
   0) ;;
   1)
     sed -n 's/^V //p' <<<"$report" >&2
-    echo "release-guard: FAIL: a token other than the release job's could write contents, or the release job is not the owned copy (T-085, P-020)" >&2
+    echo "release-guard: FAIL: a token other than the release job's could write contents, the release job is not the owned copy, or the installer upload is not the owned tag-only step (T-085, T-084, P-020)" >&2
     exit 1
     ;;
-  *) cannot_run "awk failed (exit $rc) on $dir or the owned copy $owned" ;;
+  *) cannot_run "awk failed (exit $rc) on $dir or an owned copy ($owned, $ownedh, $ownedu)" ;;
 esac
 grep -q '^V ' <<<"$report" && cannot_run "awk listed violations but exited 0"
-echo "release-guard: ok: $dir: ${#files[@]} file(s); token read-only but in the release job, which is the owned copy; no other secret, permissions or gh"
+echo "release-guard: ok: $dir: ${#files[@]} file(s); token read-only but in the release job, which is the owned copy; no other secret, permissions or gh; one installer upload, the owned tag-only step"
