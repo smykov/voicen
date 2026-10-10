@@ -1,0 +1,11 @@
+name: Other
+on:
+  push:
+permissions:
+  contents: read
+jobs:
+  other:
+    runs-on: ubuntu-24.04
+    permissions: write-all
+    steps:
+      - run: echo other

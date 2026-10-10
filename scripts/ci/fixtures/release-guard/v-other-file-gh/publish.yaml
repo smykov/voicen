@@ -1,0 +1,10 @@
+name: Other
+on:
+  push:
+permissions:
+  contents: read
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: gh release upload v0.1.0 x.exe

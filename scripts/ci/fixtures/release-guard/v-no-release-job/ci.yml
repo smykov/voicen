@@ -3,6 +3,8 @@ on:
     branches: [main, "wip/**"]
     tags: ["v*"]
   pull_request:
+permissions:
+  contents: read
 jobs:
   gate:
     runs-on: ubuntu-24.04
@@ -20,10 +22,13 @@ jobs:
           TAG: v${{ env.VOICEN_VERSION }}
           RUN_NUMBER: ${{ github.run_number }}
         run: bash scripts/ci/release-check.sh "$TAG" "$RUN_NUMBER" . target/release/bundle/nsis
-      - name: Probe
-        if: ${{ !cancelled() }}
-        continue-on-error: true
-        run: gh release view v0.1.0 || gh release list
+      - name: Send the installer to Telegram
+        if: github.ref == 'refs/heads/main'
+        shell: bash
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: bash scripts/ci/telegram-send.sh target/release/bundle/nsis
       - uses: actions/upload-artifact@v4
         with:
           name: voicen-installer-abc1234

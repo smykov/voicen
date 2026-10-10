@@ -1,7 +1,7 @@
 # The gate: every area's checks, each through scripts/tw-run in the area's toolchain.
 .PHONY: check check-shell-layout check-shell-layout-fixtures check-helper-windows-fixtures check-core \
 	check-ci-credentials check-setup-node-cache check-core-test-clocks check-http-client-builder check-ci-wip check-telegram-send check-telegram-failure-branch check-telegram-guard \
-	check-version-stamp check-release-check check-release-guard check-nsis-fork check-e2e-entry-fixtures \
+	check-version-stamp check-release-check check-release check-release-guard check-nsis-fork check-e2e-entry-fixtures \
 	check-shell-windows \
 	check-ui core-image ui-image \
 	licenses licenses-check licenses-unit licenses-fixture licenses-rust licenses-bundle \
@@ -9,7 +9,7 @@
 
 # check-shell-windows after check-core: the shell depends on voicen-core, so a core error is
 # reported first by the faster native check-core, before the slower cross-target build.
-check: check-shell-layout check-shell-layout-fixtures check-helper-windows-fixtures check-ci-credentials check-setup-node-cache check-core-test-clocks check-http-client-builder check-ci-wip check-telegram-send check-telegram-failure-branch check-telegram-guard check-version-stamp check-release-check check-release-guard check-nsis-fork check-core \
+check: check-shell-layout check-shell-layout-fixtures check-helper-windows-fixtures check-ci-credentials check-setup-node-cache check-core-test-clocks check-http-client-builder check-ci-wip check-telegram-send check-telegram-failure-branch check-telegram-guard check-version-stamp check-release-check check-release check-release-guard check-nsis-fork check-core \
 	check-shell-windows check-e2e-entry-fixtures check-ui \
 	licenses-check
 
@@ -111,12 +111,19 @@ check-version-stamp:
 check-release-check:
 	scripts/ci/release-check.test.sh
 
-# T-026: every ci.yml step that calls gh release create/upload/edit/delete is in a job whose if:
-# has github.event_name == 'push' and startsWith(github.ref, 'refs/tags/v') as top-level &&
-# operands (no status function), that needs gate and windows, runs release-check.sh first and
-# alone holds contents: write, with actions/* only. The self-test runs the tripwire
-# scripts/ci/release-guard.sh on scripts/ci/fixtures/release-guard/ and the real ci.yml (also
-# mutated). Host bash and awk.
+# T-085 (rca, decisions #120): scripts/ci/release.sh, the release job's one step, refuses before
+# any gh call without GH_TOKEN, runs release-check.sh and, only on its pass, writes
+# SHA256SUMS.txt and the notes and calls gh release create --verify-tag exactly once; a refusal
+# writes nothing and a failed create is not a pass. Stub gh on PATH, offline. Host bash.
+check-release:
+	scripts/ci/release.test.sh
+
+# T-026, T-085 (rca, decisions #120, P-020): raw-text rules over every file in
+# .github/workflows: the workflow-level permissions: contents: read block (R1), the release job
+# byte-identical to the guard's owned copy (R2), permissions only there (R3), no secret but the
+# two Telegram ones (R4), the word gh only inside the release job (R5). The self-test runs the
+# tripwire scripts/ci/release-guard.sh on scripts/ci/fixtures/release-guard/ and the real
+# workflows dir (also mutated). Host bash and awk.
 check-release-guard:
 	scripts/ci/release-guard.test.sh
 

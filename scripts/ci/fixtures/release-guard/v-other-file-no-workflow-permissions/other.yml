@@ -1,0 +1,8 @@
+name: Other
+on:
+  push:
+jobs:
+  other:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: echo other

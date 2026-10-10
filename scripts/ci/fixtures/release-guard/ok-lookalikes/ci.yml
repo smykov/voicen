@@ -1,0 +1,65 @@
+on:
+  push:
+    branches: [main, "wip/**"]
+    tags: ["v*"]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - run: make check
+  windows:
+    runs-on: windows-2025
+    needs: gate
+    steps:
+      - uses: actions/checkout@v5
+      - name: Premise - release-check on every ref (no token)
+        shell: bash
+        env:
+          TAG: v${{ env.VOICEN_VERSION }}
+          RUN_NUMBER: ${{ github.run_number }}
+        run: bash scripts/ci/release-check.sh "$TAG" "$RUN_NUMBER" . target/release/bundle/nsis
+      - name: Send the installer to Telegram
+        if: github.ref == 'refs/heads/main'
+        shell: bash
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: bash scripts/ci/telegram-send.sh target/release/bundle/nsis
+      # GitHub, ghcr.io, gh_pages, high_gh and a secret value are lookalikes, not the guarded words.
+      - name: Lookalikes
+        env:
+          GH_PROMPT_DISABLED: 1
+          NO_GH_TOKEN_HERE: 1
+        run: echo "${{ github.sha }} ghcr.io/example/voicen gh_pages high_gh $GITHUB_REF_NAME"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: voicen-installer-abc1234
+          path: target/release/bundle/nsis/*-setup.exe
+  release:
+    name: GitHub Release (v* tags only)
+    needs: [gate, windows]
+    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+      - name: Commit of this build
+        shell: bash
+        run: echo "VOICEN_COMMIT=$(git rev-parse --short=7 HEAD)" >> "$GITHUB_ENV"
+      - uses: actions/download-artifact@v4
+        with:
+          name: voicen-installer-${{ env.VOICEN_COMMIT }}
+          path: dist
+      - name: Release check, SHA-256 file, notes and publish (scripts/ci/release.sh)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          RUN_NUMBER: ${{ github.run_number }}
+        run: bash scripts/ci/release.sh "$TAG" "$RUN_NUMBER" . dist
