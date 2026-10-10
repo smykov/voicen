@@ -1,295 +1,153 @@
 #!/usr/bin/env bash
-# T-026 (decisions #102, #103): a GitHub Release may be created only by a push of a v* tag, after
-# the gate and windows jobs passed and scripts/ci/release-check.sh accepted the tag in the same
-# job; only that job may write contents. No wip/** run can show the publish step running, so this
-# tripwire pins the workflow's shape (lesson of T-070 mutation M6; docs/decisions/ci-toolchain.md).
+# T-085 (rca, class guard-model, F-003, F-015; decisions #120, P-020) after T-026 (decisions #102,
+# #103): only the release job's token can write repository contents, and that job is exactly the
+# reviewed text. A GitHub Release is written by `bash scripts/ci/release.sh` (release-check.sh,
+# then SHA256SUMS.txt, the notes and `gh release create --verify-tag`; host test release.test.sh)
+# in the release job, which is a v* tag push job that needs gate and windows.
 #
-# A "publish step" is a step whose run: has a shell command (split at ;, |, &, an unescaped
-# newline) with a word gh, a later word release and a later word create, upload, edit, delete or
-# delete-asset; gh options anywhere between (--repo R, --repo=R, -R R) do not hide it, and no
-# flag is listed (fail-closed: `gh release view` with an argument "upload" counts too; plain
-# `gh release view` / `list` are reads and not judged). For every publish step:
-#   1. its job has a job-level `if:` (blanks removed, `${{ }}` optional) with both top-level `&&`
-#      operands github.event_name=='push' and startsWith(github.ref,'refs/tags/v'), no top-level
-#      `||`, and no status function (always(), failure(), cancelled(), !cancelled(), success()
-#      next to `||`);
-#   2. its job `needs:` both gate and windows (flow or block list);
-#   3. its job has no `continue-on-error:`;
-#   4. an earlier step of the same job runs scripts/ci/release-check.sh with no `if:`, no
-#      `continue-on-error:`, GH_TOKEN as a whole key (not NOT_GH_TOKEN, not in a `#` comment)
-#      of its env: or the job's env: (so the release-exists check runs), and a plain or block (not quoted) run: that, blank lines and `#` lines
-#      before it aside, is exactly one `bash scripts/ci/release-check.sh ...` line with no `;`,
-#      `|` or `&` (so no `||`, `;`, pipe, `if`, `set +e` or later command can swallow the
-#      script's exit status; a `#` line after the call may close a quote opened on it, and a
-#      quoted scalar's \n escapes hide shell lines, so both are refused). The step's exit status
-#      is then the script's under any shell: that returns its last command's status;
-#   5. its own `if:`, if any, has no status function;
-# and:
-#   6. `contents: write` appears only inside a job with a publish step (not at workflow level,
-#      not in another job); `permissions: write-all` appears nowhere;
-#   7. every `uses:` of a job with a publish step names an actions/* action (no third-party
-#      release action).
-# The rule reads what the workflow writes (F-003). Not caught: a release written through
-# `gh api` or curl, an `if:` that is always false, a reusable workflow, a release-check.sh that
-# itself exits 0 on a refusal (release-check.test.sh covers that), a call hidden in a quoted
-# argument or `$(...)` on the one allowed line, a `shell:` that ignores the exit status.
+# The guard decides on raw text and on a literal it owns, never on a reading of YAML, shell or gh
+# syntax (P-020): it has no tokenizer, no scalar reader and no comment reader, so a comment is
+# text like any other. Every regular file directly in <workflows-dir> (any name, any extension)
+# is read line by line:
+#   R1 the two lines just before the file's first `jobs:` line are exactly `permissions:` and
+#      `  contents: read` (the workflow-level token is read-only, in every file; GitHub applies a
+#      job's own `permissions:` instead of it, so only a job that names one can write);
+#   R2 the line `  release:` occurs exactly once in the dir, and its block (that line up to the
+#      next line indented 0-2 columns, or the end of the file) is byte-identical to the guard's
+#      owned copy, scripts/ci/release-job.yml (a trailing space or a CR is a difference); the copy
+#      pins the tag `if:`, `needs: [gate, windows]`, `contents: write` and the one release.sh step
+#      with GH_TOKEN;
+#   R3 the substring `permissions` (any case) occurs only on R1's `permissions:` line and once
+#      inside the release block;
+#   R4 every occurrence of `secrets` (any case) is exactly secrets.TELEGRAM_BOT_TOKEN or
+#      secrets.TELEGRAM_CHAT_ID, ended by a character outside [A-Za-z0-9_] or the line's end (no
+#      write-capable token from outside `permissions:`: no PAT, no secrets['...'], no
+#      toJSON(secrets), no `secrets: inherit`);
+#   R5 the word gh (any case, bounded by characters outside [A-Za-z0-9_]: GH_TOKEN, gh_pages and
+#      ghcr do not count; $GH, ${GH:-gh}, GH=gh, gh.exe and /usr/bin/gh do) occurs nowhere outside
+#      the release block.
+# R1, R3 and R4 are the capability lock (GitHub enforces the token scope; it also covers gh api
+# and curl); R2 pins the release job as one literal; R5 is the early, fail-closed tripwire.
+# Not caught (deliberate only): YAML escapes in a quoted key (`"permi\x73sions"`); a token written
+# into the workflow as text (the gitleaks pre-commit scan refuses it); release.sh itself exiting 0
+# on a refusal (release.test.sh covers that); whether GitHub enforces `permissions:` as documented
+# (platform semantics, docs/decisions/ci-toolchain.md); a repository default token scope flipped
+# to write (R1 pins the workflow level, so it does not matter for jobs without their own block).
 #
-# Usage: scripts/ci/release-guard.sh <workflow-file>
-# Exit 0: ok ("<n> step(s) publish a release"). Exit 1: a violation, listed as
-# <workflow-file>:<line>: why, <line> = the job key for 1-3; for 4 the release-check step's "- "
-# item (bad if:, continue-on-error, no GH_TOKEN, run: not the call alone) or, with no release-check step before it, the
-# publish step's; the step's "- " item for 5 and 7; the permissions line for 6.
-# Exit 2: usage error. Exit 3: cannot run (file missing, unreadable, no jobs:, awk error);
-# never a pass. Host test: scripts/ci/release-guard.test.sh (make check-release-guard).
+# Usage: scripts/ci/release-guard.sh <workflows-dir>
+# Exit 0: ok. Exit 1: a violation, each listed as "<workflows-dir>/<file>:<line>: R<n>: <why>"
+# (R2: the first line of the block that differs from the owned copy, or the second `  release:`
+# line; R3-R5: the line of the occurrence). Exit 2: usage error. Exit 3: cannot run (the dir is
+# missing or not a directory, holds no regular file, a file is unreadable or has no top-level
+# `jobs:` line, the owned copy is missing or malformed, awk failed); never a pass.
+# Host test: scripts/ci/release-guard.test.sh (make check-release-guard).
 set -uo pipefail
+export LC_ALL=C
 if [ "$#" -ne 1 ]; then
-  echo "usage: scripts/ci/release-guard.sh <workflow-file>" >&2
+  echo "usage: scripts/ci/release-guard.sh <workflows-dir>" >&2
   exit 2
 fi
-wf="$1"
 cannot_run() { echo "release-guard: cannot run: $1" >&2; exit 3; }
-[ -f "$wf" ] && [ -r "$wf" ] || cannot_run "$wf not found or not readable"
+dir="$1"
+while [ "${#dir}" -gt 1 ] && [ "${dir%/}" != "$dir" ]; do dir="${dir%/}"; done
+[ -d "$dir" ] || cannot_run "$dir is not a directory (missing, or a file: give the workflows dir)"
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || cannot_run "cannot locate the script dir"
+owned="$here/release-job.yml"
+[ -f "$owned" ] && [ -r "$owned" ] || cannot_run "owned copy $owned not found or not readable"
+[ "$(head -n 1 -- "$owned")" = "  release:" ] || cannot_run "owned copy $owned does not start with the line '  release:'"
 
-# Output lines: "V <file>:<line>: <why>", "C <n>" (publish steps), "N" (no jobs:).
-report="$(awk -v file="$wf" '
-function ind(s) { match(s, /^ */); return RLENGTH }
-function nx(s) { gsub(/[ \t]/, "", s); return s }
-function keyof(t,   k) { k = t; sub(/[ \t]*:.*$/, "", k); gsub(/["\047]/, "", k); return k }
-function iskey(t) { return t ~ /^["\047]?[A-Za-z0-9_-]+["\047]?[ \t]*:([ \t]|$)/ }
-# The scalar after "key:": quotes removed, a trailing comment dropped, a block indicator -> "".
-function val(s,   q, n) {
-  sub(/^[^:]*:/, "", s); sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s)
-  if (s ~ /^#/ || s ~ /^[|>][-+0-9]*([ \t]+#.*)?$/) return ""
-  q = substr(s, 1, 1)
-  if (q == "\"") { s = substr(s, 2); n = match(s, /"[^"]*$/); return n ? substr(s, 1, n - 1) : s }
-  if (q == "\047") { s = substr(s, 2); n = match(s, /\047[^\047]*$/); s = n ? substr(s, 1, n - 1) : s; gsub(/\047\047/, "\047", s); return s }
-  sub(/[ \t]+#.*$/, "", s); return s
+shopt -s nullglob dotglob
+files=()
+for f in "$dir"/*; do
+  [ -f "$f" ] || continue
+  [ -r "$f" ] || cannot_run "$f is not readable"
+  grep -q -x 'jobs:' -- "$f" || cannot_run "$f has no top-level jobs: line (not a workflow)"
+  files+=("$f")
+done
+shopt -u nullglob dotglob
+[ "${#files[@]}" -gt 0 ] || cannot_run "no regular file in $dir"
+
+# Output lines: "V <file>:<line>: R<n>: <why>"; awk exit 3 = the owned copy could not be read.
+report="$(awk -v owned="$owned" '
+function v(k, i, r, why) { print "V " F[k] ":" i ": " r ": " why; nv++ }
+# count(s, t): occurrences of t in s.
+function count(s, t,   n, p) { n = 0; while ((p = index(s, t)) > 0) { n++; s = substr(s, p + length(t)) } return n }
+function closeblock(k) {
+  if (!inb) return
+  if (!bdiff && boff < no) bdiff = bs + boff
+  if (bdiff) v(k, bdiff, "R2", "the release job differs from the owned copy scripts/ci/release-job.yml here (byte for byte; edit both together)")
+  inb = 0
 }
-# 1 when s is "(...)" with the first "(" closing at the last character.
-function wrapped(s,   i, c, d, q) {
-  if (substr(s, 1, 1) != "(" || substr(s, length(s)) != ")") return 0
-  d = 0; q = 0
-  for (i = 1; i <= length(s); i++) {
-    c = substr(s, i, 1)
-    if (c == "\047") q = !q
-    else if (!q && c == "(") d++
-    else if (!q && c == ")") { d--; if (d == 0 && i < length(s)) return 0 }
-  }
-  return 1
+BEGIN {
+  no = 0
+  while ((rc = (getline line < owned)) > 0) own[++no] = line
+  if (rc < 0 || no == 0) { bad = 1; exit 3 }
+  close(owned)
 }
-function why(s) { reasons = reasons (reasons == "" ? "" : "; ") s }
-function bare(expr,   e) {
-  e = nx(expr)
-  if (e ~ /^\$\{\{.*\}\}$/) e = substr(e, 4, length(e) - 5)
-  while (wrapped(e)) e = substr(e, 2, length(e) - 2)
-  return e
-}
-function statusfn(e,   l) {
-  l = tolower(e)
-  if (index(l, "always()")) why("its if: has always() (it would run after a red job or step)")
-  if (index(l, "failure()")) why("its if: has failure() (it would run after a red job or step)")
-  if (index(l, "cancelled()")) why("its if: has cancelled() or !cancelled() (it would run after a red job or step)")
-  if (index(l, "success()||") || index(l, "||success()")) why("its if: has success() as an || operand (it would run after a red job or step)")
-}
-function judgejob(expr,   e, i, c, d, q, n, ops, cur, hasor, k, ev, rf) {
-  e = bare(expr)
-  if (e == "") { why("its if: is empty"); return }
-  statusfn(e)
-  n = 0; cur = ""; d = 0; q = 0; hasor = 0
-  for (i = 1; i <= length(e); i++) {
-    c = substr(e, i, 1)
-    if (c == "\047") q = !q
-    else if (!q && c == "(") d++
-    else if (!q && c == ")") d--
-    if (!q && d == 0 && substr(e, i, 2) == "&&") { ops[++n] = cur; cur = ""; i++; continue }
-    if (!q && d == 0 && substr(e, i, 2) == "||") hasor = 1
-    cur = cur c
-  }
-  ops[++n] = cur
-  if (hasor) { why("its if: has a top-level || (the guard must be top-level && operands)"); return }
-  ev = 0; rf = 0
-  for (k = 1; k <= n; k++) {
-    if (ops[k] == "github.event_name==\047push\047") ev = 1
-    if (ops[k] == "startsWith(github.ref,\047refs/tags/v\047)") rf = 1
-  }
-  if (!ev) why("its if: lacks github.event_name == \047push\047 as a top-level && operand")
-  if (!rf) why("its if: lacks startsWith(github.ref, \047refs/tags/v\047) as a top-level && operand (it would publish off v* tags, wip/** included)")
-}
-function addneeds(s,   a, n, k) {
-  gsub(/[][ \t"\047]/, "", s)
-  n = split(s, a, ",")
-  for (k = 1; k <= n; k++) if (a[k] != "") jneeds[nj] = jneeds[nj] " " a[k] " "
-}
-function endstep() {
-  if (!cs) return
-  if (publishes(srun[cs])) spub[cs] = 1
-  if (srun[cs] ~ /release-check\.sh/) { scheck[cs] = 1; ssole[cs] = !squot[cs] && solecall(srun[cs]) }
-  cs = 0; smode = ""
-}
-# 1 when run: has a gh call that writes a release: a shell command (split at ;, |, &, an
-# unescaped newline) with a word gh (or .../gh, gh.exe), a later word release and a later word
-# create, upload, edit, delete or delete-asset. Fail-closed: no gh flag is listed, so any option
-# (--repo R, --repo=R, -R R) before or after release is skipped, and quotes, (, `, { and } count
-# as word breaks; an argument that happens to be "upload" counts too.
-function publishes(r,   segs, n, k, w, m, x, g, rel) {
-  gsub(/\\\n/, " ", r)
-  gsub(/[()`{}"\047]/, " ", r)
-  n = split(r, segs, /[;|&\n]/)
-  for (k = 1; k <= n; k++) {
-    m = split(segs[k], w, /[ \t]+/); g = 0; rel = 0
-    for (x = 1; x <= m; x++) {
-      if (w[x] ~ /^([^ \t]*\/)?gh(\.exe)?$/) { g = 1; rel = 0 }
-      else if (g && w[x] == "release") rel = 1
-      else if (rel && w[x] ~ /^(create|upload|edit|delete|delete-asset)$/) return 1
-    }
-  }
-  return 0
-}
-# 1 when an env: line (the text after the key) names GH_TOKEN as a whole key of a flow mapping
-# or of the line itself, a YAML comment (" #...") dropped first: `env: # GH_TOKEN: ...` and
-# NOT_GH_TOKEN are not the token. Stripping too much only drops a match (fails closed).
-function envtok(t,   v) {
-  v = t; sub(/^[^:]*:/, "", v); sub(/(^|[ \t])#.*$/, "", v)
-  return v ~ /(^|[{,])[ \t]*["\047]?GH_TOKEN["\047]?[ \t]*:/
-}
-# 1 when run: is exactly one `bash scripts/ci/release-check.sh ...` line with no ;, | or & (so
-# no ||, &&, pipe or background), blank lines aside and `#` lines only before it: nothing can
-# follow the call or swallow its exit status, and an `if`, `set +e` or second command makes a
-# second line or no match. A `#` line after the call may be the rest of a quote opened on it
-# (`"dist` then `#" || true`), so it is refused, not read as a comment.
-function solecall(r,   a, n, k, m, one) {
-  n = split(r, a, "\n"); m = 0; one = ""
-  for (k = 1; k <= n; k++) {
-    if (a[k] ~ /^[ \t]*$/) continue
-    if (a[k] ~ /^[ \t]*#/) { if (m) return 0; continue }
-    m++; one = a[k]
-  }
-  if (m != 1) return 0
-  sub(/^[ \t]+/, "", one)
-  if (one !~ /^bash[ \t]+scripts\/ci\/release-check\.sh([ \t]|$)/) return 0
-  if (one ~ /[;|&]/) return 0
-  return 1
-}
-function stepkey(t,   k) {
-  k = keyof(t); smode = k
-  if (k == "if") { sifh[cs] = 1; sif[cs] = val(t) }
-  else if (k == "continue-on-error") scoe[cs] = 1
-  # A quoted run: scalar is refused for the check step: YAML escapes (\n) give shell lines this
-  # reader cannot see. The real check step is a plain scalar.
-  else if (k == "run") { srun[cs] = val(t); v = t; sub(/^[^:]*:[ \t]*/, "", v); squot[cs] = (v ~ /^["\047]/) }
-  else if (k == "uses") suses[cs] = val(t)
-  else if (k == "env") { if (envtok(t)) stok[cs] = 1 }
-}
-function jobkey(t,   k, v) {
-  k = keyof(t); jmode = k
-  if (k == "if") { jifh[nj] = 1; jif[nj] = val(t) }
-  else if (k == "needs") { v = val(t); if (v != "") addneeds(v) }
-  else if (k == "continue-on-error") jcoe[nj] = 1
-  else if (k == "env") { if (envtok(t)) jtok[nj] = 1 }
-  else if (k == "steps") { waitsteps = 1 }
-}
-{ line = $0; sub(/\r$/, "", line) }
-# A `#` line indented into the run: block of a step is kept: in the shell it may be the rest of a
-# quote, not a comment (solecall decides). Every other blank or comment line is skipped.
-line ~ /^[ \t]*#/ && insteps && cs && smode == "run" && ind(line) > skind { srun[cs] = srun[cs] "\n" substr(line, ind(line) + 1); next }
-line ~ /^[ \t]*(#.*)?$/ { next }
-{
-  i = ind(line); t = substr(line, i + 1)
-  if (t ~ /^[^#]*["\047]?permissions["\047]?[ \t]*:[ \t]*["\047]?write-all/) { print "V " file ":" FNR ": permissions: write-all gives every scope write access"; viol++ }
-  if (t ~ /^[^#]*["\047]?contents["\047]?[ \t]*:[ \t]*["\047]?write/) { nw++; wline[nw] = FNR; wjob[nw] = (injobs && i > jobind && nj) ? nj : 0 }
-  if (i == 0) {
-    endstep(); insteps = 0; waitsteps = 0
-    injobs = (t ~ /^["\047]?jobs["\047]?[ \t]*:/)
-    if (injobs) seenjobs = 1
-    next
-  }
-  if (!injobs) next
-  if (jobind == "") jobind = i
-  if (i <= jobind) {
-    endstep(); insteps = 0; waitsteps = 0
-    if (i == jobind && iskey(t)) { nj++; jline[nj] = FNR; jkind = ""; jmode = "" }
-    next
-  }
-  if (!nj) next
-  if (jkind == "") jkind = i
-  # The steps list ends at a line left of its items, or a non-item at the item indent.
-  if (insteps && (i < itemind || (i == itemind && t !~ /^-([ \t]|$)/))) { endstep(); insteps = 0 }
-  if (waitsteps && i > jkind) {
-    waitsteps = 0
-    if (t ~ /^-([ \t]|$)/) { insteps = 1; itemind = i }
-  } else if (waitsteps) waitsteps = 0
-  if (insteps) {
-    if (i == itemind) {
-      endstep()
-      ns++; cs = ns; sjob[cs] = nj; sline[cs] = FNR; smode = ""
-      match(t, /^-[ \t]*/); skind = i + RLENGTH
-      rest = substr(t, RLENGTH + 1)
-      if (rest != "") stepkey(rest)
-      next
-    }
-    if (i == skind) { stepkey(t); next }
-    if (smode == "run") srun[cs] = srun[cs] "\n" t
-    else if (smode == "if") sif[cs] = sif[cs] " " t
-    else if (smode == "env" && t ~ /^["\047]?GH_TOKEN["\047]?[ \t]*:/) stok[cs] = 1
-    next
-  }
-  if (i == jkind) { jobkey(t); next }
-  if (jmode == "if") jif[nj] = jif[nj] " " t
-  else if (jmode == "needs" && t ~ /^-[ \t]/) { v = t; sub(/^-[ \t]*/, "", v); sub(/[ \t]+#.*$/, "", v); addneeds(v) }
-  else if (jmode == "env" && t ~ /^["\047]?GH_TOKEN["\047]?[ \t]*:/) jtok[nj] = 1
-}
+FNR == 1 { nf++; F[nf] = FILENAME }
+{ N[nf] = FNR; L[nf, FNR] = $0 }
 END {
-  endstep()
-  if (!seenjobs) { print "N"; exit 0 }
-  count = 0
-  for (s = 1; s <= ns; s++) {
-    if (!spub[s]) continue
-    count++
-    j = sjob[s]
-    if (!jpub[j]) {
-      jpub[j] = 1
-      reasons = ""
-      if (!jifh[j]) why("no job-level if: (it needs github.event_name == \047push\047 and startsWith(github.ref, \047refs/tags/v\047) as top-level && operands)")
-      else judgejob(jif[j])
-      if (index(jneeds[j], " gate ") == 0 || index(jneeds[j], " windows ") == 0) why("its needs: lacks gate or windows (needs:" jneeds[j] ")")
-      if (jcoe[j]) why("has continue-on-error: (a failed publish would count as success)")
-      if (reasons != "") { print "V " file ":" jline[j] ": job publishes a release, " reasons; viol++ }
-      for (u = 1; u <= ns; u++)
-        if (sjob[u] == j && suses[u] != "" && suses[u] !~ /^actions\//) { print "V " file ":" sline[u] ": uses " suses[u] " in the release job (gh only, actions/* only; no third-party release action)"; viol++ }
+  if (bad) exit 3
+  nrel = 0
+  for (k = 1; k <= nf; k++) {
+    j = 0; p = 0
+    for (i = 1; i <= N[k]; i++) {
+      if (L[k, i] == "jobs:") { j = i; break }
+      if (!p && L[k, i] == "permissions:") p = i
     }
-    good = 0; nbad = 0
-    for (u = 1; u < s; u++) {
-      if (sjob[u] != j || !scheck[u]) continue
-      reasons = ""
-      if (sifh[u]) why("has an if: (a skipped check counts as success)")
-      if (scoe[u]) why("has continue-on-error: (a refusal would not stop the publish)")
-      if (!ssole[u]) why("its run: is not the release-check.sh call alone (run: must be a plain or block scalar holding one `bash scripts/ci/release-check.sh ...` line with no ;, | or &, only blank lines and # lines before it; ||, ;, a pipe, if, set +e, a later line or a quoted scalar with \\n can swallow its exit status)")
-      if (!stok[u] && !jtok[j]) why("has no GH_TOKEN in its env: or the job env: (the release-exists check would be skipped)")
-      if (reasons == "") good = 1
-      else { nbad++; bad[nbad] = "V " file ":" sline[u] ": release-check step before a publish step " reasons }
+    r1 = 0
+    if (j >= 3 && L[k, j - 2] == "permissions:" && L[k, j - 1] == "  contents: read") r1 = j - 2
+    else v(k, (p ? p : j), "R1", "the two lines before jobs: must be exactly \"permissions:\" and \"  contents: read\" (read-only token at workflow level)")
+    inb = 0
+    for (i = 1; i <= N[k]; i++) {
+      s = L[k, i]
+      if (inb && (s ~ /^[^ ]/ || s ~ /^ [^ ]/ || s ~ /^  [^ ]/)) closeblock(k)
+      if (s == "  release:") {
+        nrel++
+        if (nrel > 1) v(k, i, "R2", "a second \"  release:\" job line in the workflows dir (the release job occurs once)")
+        inb = 1; bs = i; boff = 0; bdiff = 0; bperm = 0
+      }
+      lo = tolower(s)
+      n = count(lo, "permissions")
+      if (n > 0) {
+        if (i == r1) n--
+        else if (inb && !bperm) { n--; bperm = 1 }
+        if (n > 0) v(k, i, "R3", "\"permissions\" outside the workflow-level read block and the release job (no other job or file may widen the token)")
+      }
+      t = lo; c = 0
+      while ((q = index(t, "secrets")) > 0) {
+        if (substr(s, c + q) !~ /^secrets\.TELEGRAM_(BOT_TOKEN|CHAT_ID)([^A-Za-z0-9_]|$)/) {
+          v(k, i, "R4", "a secret other than secrets.TELEGRAM_BOT_TOKEN / secrets.TELEGRAM_CHAT_ID (a token from outside the job permissions)")
+          break
+        }
+        c += q + 6; t = substr(t, q + 7)
+      }
+      if (!inb && lo ~ /(^|[^a-z0-9_])gh([^a-z0-9_]|$)/)
+        v(k, i, "R5", "the word gh outside the release job (only scripts/ci/release.sh in that job may call gh)")
+      if (inb) {
+        boff++
+        if (!bdiff && (boff > no || s != own[boff])) bdiff = i
+      }
     }
-    if (!good) {
-      if (nbad) for (u = 1; u <= nbad; u++) { print bad[u]; viol++ }
-      else { print "V " file ":" sline[s] ": publish step with no earlier scripts/ci/release-check.sh step in its job"; viol++ }
-    }
-    if (sifh[s]) {
-      reasons = ""
-      statusfn(bare(sif[s]))
-      if (reasons != "") { print "V " file ":" sline[s] ": publish step " reasons; viol++ }
-    }
+    closeblock(k)
   }
-  for (k = 1; k <= nw; k++)
-    if (!wjob[k] || !jpub[wjob[k]]) { print "V " file ":" wline[k] ": contents: write outside the job that publishes the release (" (wjob[k] ? "another job" : "workflow level") ")"; viol++ }
-  print "C " count
+  if (nrel == 0)
+    for (k = 1; k <= nf; k++) {
+      for (i = 1; i <= N[k]; i++) if (L[k, i] == "jobs:") break
+      v(k, i, "R2", "no \"  release:\" job line in the workflows dir (the release job is the owned copy scripts/ci/release-job.yml)")
+    }
+  exit (nv > 0 ? 1 : 0)
 }
-' "$wf")" || cannot_run "awk failed on $wf"
-
-grep -q '^N$' <<<"$report" && cannot_run "$wf has no top-level jobs: (not a workflow)"
-n="$(sed -n 's/^C //p' <<<"$report")"
-[ -n "$n" ] || cannot_run "no result from the reader for $wf"
-if grep -q '^V ' <<<"$report"; then
-  sed -n 's/^V //p' <<<"$report" >&2
-  echo "release-guard: FAIL: a GitHub Release could be published off a v* tag push, after a red job or without release-check.sh, or contents: write is wider than the release job (T-026)" >&2
-  exit 1
-fi
-echo "release-guard: ok: $wf: $n step(s) publish a release, each in a v* tag push job that needs gate and windows and runs release-check.sh first; contents: write only there"
+' "${files[@]}")"
+rc=$?
+case "$rc" in
+  0) ;;
+  1)
+    sed -n 's/^V //p' <<<"$report" >&2
+    echo "release-guard: FAIL: a token other than the release job's could write contents, or the release job is not the owned copy (T-085, P-020)" >&2
+    exit 1
+    ;;
+  *) cannot_run "awk failed (exit $rc) on $dir or the owned copy $owned" ;;
+esac
+grep -q '^V ' <<<"$report" && cannot_run "awk listed violations but exited 0"
+echo "release-guard: ok: $dir: ${#files[@]} file(s); token read-only but in the release job, which is the owned copy; no other secret, permissions or gh"

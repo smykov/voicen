@@ -18,6 +18,11 @@ concurrency:
   group: ${{ startsWith(github.ref, 'refs/heads/wip/') && format('ci-{0}', github.ref) || format('ci-run-{0}', github.run_id) }}
   cancel-in-progress: ${{ startsWith(github.ref, 'refs/heads/wip/') }}
 
+# T-085 (decisions #120, P-020): the job token is read-only for every job; GitHub applies a job's
+# own block instead, and only the release job has one (contents: write). Pinned literally by
+# make check (check-release-guard, R1): these two lines, right before jobs:, in every workflow.
+permissions:
+  contents: read
 jobs:
   gate:
     name: Gate (make check)
@@ -1013,7 +1018,7 @@ jobs:
       # scripts/ci/telegram-failure-branch.sh (host test in make check) judges it: red only when the
       # script exits non-zero, prints no ::warning:: or prints the fake token; Telegram not reached
       # (API description none) is a ::warning::, green. So no Telegram step can turn main or a tag
-      # red or skip the send. The main/v* step runs the script with the secrets, consumes only the
+      # red or skip the send. The main/v* step runs the script with the Telegram token, consumes only the
       # premise step's outputs, and its if: has no status function, so it never runs after a red step.
       - name: Installer for Telegram
         id: telegram-installer
@@ -1137,15 +1142,18 @@ jobs:
           if [ "$facts" != "$want" ] || [ "$all" != "$((want + 1))" ]; then echo "::error::runner probe: $facts well-formed fact lines and $all runner-probe lines, the end line says facts=$want"; exit 1; fi
           echo "runner probe: $facts fact lines, as the end line says"
 
-  # T-026 (spec 006 US5, decisions #102, #103): a pushed vX.Y.Z tag becomes GitHub Release vX.Y.Z
-  # with the installer and SHA256SUMS.txt, only after gate and windows passed and
-  # scripts/ci/release-check.sh accepted the tag: X.Y = the committed MAJOR.MINOR (#102), Z >= this
-  # run's github.run_number (#103), exactly one installer carrying _X.Y.Z_, no release for the tag
-  # yet (never overwritten). A refusal exits 1 naming both values before any gh write call. The
-  # only job with contents: write; gh CLI only (no release action). Skipped on every other ref,
-  # so wip/** runs never publish; the check's pass path and failure branch run in the windows job
-  # there. gh release create uploads to a draft and publishes it last, so a failed upload leaves a
-  # draft, not a half release. Pinned by make check (check-release-check, check-release-guard).
+  # T-026 (spec 006 US5, decisions #102, #103), T-085 (decisions #120, P-020): a pushed vX.Y.Z tag
+  # becomes GitHub Release vX.Y.Z with the installer and SHA256SUMS.txt, only after gate and
+  # windows passed. The one step is scripts/ci/release.sh (host test release.test.sh): it stops
+  # without GH_TOKEN, runs scripts/ci/release-check.sh (X.Y = the committed MAJOR.MINOR (#102),
+  # Z >= this run's github.run_number (#103), exactly one installer carrying _X.Y.Z_, no release
+  # for the tag yet: never overwritten; a refusal exits 1 naming both values and writes nothing),
+  # then writes SHA256SUMS.txt and the notes and creates the release with --verify-tag (uploaded
+  # to a draft that is published last, so a failed upload leaves a draft, not a half release).
+  # The only job whose token can write contents. Skipped on every other ref, so wip/** runs never
+  # publish; the check's pass path and failure branch run in the windows job there. This job is
+  # byte-identical to scripts/ci/release-job.yml (edit both together): make check
+  # (check-release-guard) refuses any other text, and check-release runs release.sh.
   release:
     name: GitHub Release (v* tags only)
     needs: [gate, windows]
@@ -1162,39 +1170,11 @@ jobs:
         with:
           name: voicen-installer-${{ env.VOICEN_COMMIT }}
           path: dist
-      # The committed (unstamped) checkout gives the repository's MAJOR.MINOR.
-      - name: Release check (decisions #102, #103; nothing is published on a refusal)
+      - name: Release check, SHA-256 file, notes and publish (scripts/ci/release.sh)
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
           RUN_NUMBER: ${{ github.run_number }}
-        run: bash scripts/ci/release-check.sh "$TAG" "$RUN_NUMBER" . dist
-      - name: SHA-256 file and release notes
-        shell: bash
-        env:
-          TAG: ${{ github.ref_name }}
-        run: |
-          (cd dist && sha256sum -- *-setup.exe > SHA256SUMS.txt)
-          cat dist/SHA256SUMS.txt
-          installer="$(cd dist && ls -- *-setup.exe)"
-          {
-            echo "Voicen ${TAG#v} for Windows 10/11 x64, commit ${VOICEN_COMMIT}."
-            echo
-            echo "Install: download \`${installer}\` and run it (per-user install, no administrator rights)."
-            echo
-            echo "The installer is not code-signed in this release: Windows SmartScreen may show \"Windows protected your PC\". To proceed, click \"More info\", then \"Run anyway\"."
-            echo
-            echo "Check the download: the SHA-256 in \`SHA256SUMS.txt\` must match \`Get-FileHash ${installer}\` (PowerShell) or \`sha256sum ${installer}\`."
-          } > dist/release-notes.md
-          cat dist/release-notes.md
-      - name: Publish the release
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          TAG: ${{ github.ref_name }}
-        run: |
-          gh --version
-          gh release create "$TAG" dist/*-setup.exe dist/SHA256SUMS.txt --verify-tag --title "Voicen $TAG" --notes-file dist/release-notes.md
+        run: bash scripts/ci/release.sh "$TAG" "$RUN_NUMBER" . dist
