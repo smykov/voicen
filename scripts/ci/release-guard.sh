@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # T-085 (rca, class guard-model, F-003, F-015; decisions #120, P-020) after T-026 (decisions #102,
-# #103): only the release job's token can write repository contents, and that job is exactly the
-# reviewed text. A GitHub Release is written by `bash scripts/ci/release.sh` (release-check.sh,
-# then SHA256SUMS.txt, the notes and `gh release create --verify-tag`; host test release.test.sh)
-# in the release job, which is a v* tag push job that needs gate and windows.
+# #103, #121): only the release job's token can write repository contents, and that job and the
+# workflow header GitHub applies to it are exactly the reviewed text. A GitHub Release is written
+# by `bash scripts/ci/release.sh` (release-check.sh, then SHA256SUMS.txt, the notes and
+# `gh release create --verify-tag`; host test release.test.sh) in the release job, which is a v*
+# tag push job that needs gate and windows.
 #
-# The guard decides on raw text and on a literal it owns, never on a reading of YAML, shell or gh
+# The guard decides on raw text and on literals it owns, never on a reading of YAML, shell or gh
 # syntax (P-020): it has no tokenizer, no scalar reader and no comment reader, so a comment is
 # text like any other and no rule depends on where a YAML construct ends. Every regular file
 # directly in <workflows-dir> (any name, any extension) is read line by line. A "word" below is
@@ -28,29 +29,42 @@
 #   R5 the word gh (GH_TOKEN, gh_pages and ghcr do not count; $GH, ${GH:-gh}, GH=gh, gh.exe and
 #      /usr/bin/gh do) occurs nowhere outside the release block;
 #   R6 no YAML escape that spells a character or joins two lines occurs anywhere: the raw text
-#      \x plus 2 hex digits, \u or \U plus 4 hex digits, or a backslash right before a line break
-#      (LF or the end of the file, CR, NEL U+0085, LS U+2028, PS U+2029). Such an escape in a
-#      double-quoted scalar would hide secrets, vars, gh or permissions from R3-R5; the raw bytes
-#      decide in any scalar style, so no scalar reader is needed (a Windows path such as
-#      `Voicen\uninstall.exe` has no 4 hex digits after \u and passes).
+#      \x plus 2 hex digits, \u or \U plus 4 hex digits, \0 (NUL, which bash drops from a script,
+#      so g\0h runs as gh), or a backslash right before a line break (LF or the end of the file,
+#      CR, NEL U+0085, LS U+2028, PS U+2029). Such an escape in a double-quoted scalar would hide
+#      secrets, vars, gh or permissions from R3-R5; the raw bytes decide in any scalar style, so no
+#      scalar reader is needed (a Windows path such as `Voicen\uninstall.exe` has no 4 hex digits
+#      after \u and passes);
+#   R7 every file that holds a `  release:` line starts with the guard's second owned copy,
+#      scripts/ci/release-header.yml, byte for byte, from line 1 to the file's first line that is
+#      exactly `jobs:` (comments included: a comment is text). GitHub applies the workflow-level
+#      keys (env:, defaults:, on:, concurrency:, permissions: ...) to the release job, so a
+#      BASH_ENV or working-directory there would run with its write token; the literal closes them
+#      all without naming any key or variable.
 # R1, R3 and R4 are the capability lock (GitHub enforces the token scope; it also covers gh api
-# and curl); R2 pins the release job as one literal; R5 is the early, fail-closed tripwire; R6
-# keeps R3-R5's raw text the text a YAML reader sees.
+# and curl); R2 and R7 pin the release job and the header it inherits as two literals; R5 is the
+# early, fail-closed tripwire; R6 keeps R3-R5's raw text the text a YAML reader sees.
 # Not caught (deliberate only): a token written into the workflow as text (the gitleaks
 # pre-commit scan refuses it); release.sh itself exiting 0 on a refusal (release.test.sh covers
 # that); whether GitHub enforces `permissions:` as documented (platform semantics,
 # docs/decisions/ci-toolchain.md); a repository default token scope flipped to write (R1 pins the
 # workflow level, so it does not matter for jobs without their own block); a YAML parser that
-# reads escapes or line breaks beyond YAML 1.1/1.2 (GitHub's parser is not available on the host).
+# reads escapes or line breaks beyond YAML 1.1/1.2 (GitHub's parser is not available on the host);
+# a column-0 key such as `env:` put between two jobs before `  release:` (header and release block
+# unchanged, so R2 and R7 pass): YAML then reads `  release:` as a key under that top-level key,
+# so the release job no longer exists, no job holds contents: write, and the workflow is invalid
+# or releases nothing (probed with PyYAML 6.0.1, not GitHub's parser; T-085 Red tests round 3).
 #
 # Usage: scripts/ci/release-guard.sh <workflows-dir>
 # Exit 0: ok. Exit 1: a violation, each listed as "<workflows-dir>/<file>:<line>: R<n>: <why>"
 # (R1: the second line with the word jobs, or the line that is not exactly `jobs:`, or the
 # `jobs:` line when the block before it differs; R2: the first line of the block that differs
 # from the owned copy, or the second `  release:` line; R3-R6: the line of the occurrence, for an
-# escaped line break the line ending in the backslash). Exit 2: usage error. Exit 3: cannot run
+# escaped line break the line ending in the backslash; R7: the first header line that differs
+# from scripts/ci/release-header.yml). Exit 2: usage error. Exit 3: cannot run
 # (the dir is missing or not a directory, holds no regular file, a file is unreadable or has no
-# `jobs:` line, the owned copy is missing or malformed, awk failed); never a pass.
+# `jobs:` line, an owned copy is missing or malformed: release-job.yml not starting with
+# `  release:`, release-header.yml not ending in its only `jobs:` line; awk failed); never a pass.
 # Host test: scripts/ci/release-guard.test.sh (make check-release-guard).
 set -uo pipefail
 export LC_ALL=C
@@ -66,6 +80,10 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || cannot_run "cannot locat
 owned="$here/release-job.yml"
 [ -f "$owned" ] && [ -r "$owned" ] || cannot_run "owned copy $owned not found or not readable"
 [ "$(head -n 1 -- "$owned")" = "  release:" ] || cannot_run "owned copy $owned does not start with the line '  release:'"
+ownedh="$here/release-header.yml"
+[ -f "$ownedh" ] && [ -r "$ownedh" ] || cannot_run "owned header copy $ownedh not found or not readable"
+[ "$(tail -n 1 -- "$ownedh")" = "jobs:" ] || cannot_run "owned header copy $ownedh does not end in the line 'jobs:'"
+[ "$(grep -c -x 'jobs:' -- "$ownedh")" = "1" ] || cannot_run "owned header copy $ownedh has more than one line 'jobs:' (only its last line may be)"
 
 shopt -s nullglob dotglob
 files=()
@@ -78,8 +96,8 @@ done
 shopt -u nullglob dotglob
 [ "${#files[@]}" -gt 0 ] || cannot_run "no regular file in $dir"
 
-# Output lines: "V <file>:<line>: R<n>: <why>"; awk exit 3 = the owned copy could not be read.
-report="$(awk -v owned="$owned" '
+# Output lines: "V <file>:<line>: R<n>: <why>"; awk exit 3 = an owned copy could not be read.
+report="$(awk -v owned="$owned" -v ownedh="$ownedh" '
 function v(k, i, r, why) { print "V " F[k] ":" i ": " r ": " why; nv++ }
 # count(s, t): occurrences of t in s.
 function count(s, t,   n, p) { n = 0; while ((p = index(s, t)) > 0) { n++; s = substr(s, p + length(t)) } return n }
@@ -90,6 +108,10 @@ BEGIN {
   while ((rc = (getline line < owned)) > 0) own[++no] = line
   if (rc < 0 || no == 0) { bad = 1; exit 3 }
   close(owned)
+  nh = 0
+  while ((rc = (getline line < ownedh)) > 0) oh[++nh] = line
+  if (rc < 0 || nh == 0 || oh[nh] != "jobs:") { bad = 1; exit 3 }
+  close(ownedh)
 }
 FNR == 1 { nf++; F[nf] = FILENAME }
 { N[nf] = FNR; L[nf, FNR] = $0 }
@@ -108,6 +130,18 @@ END {
     if (jbad) v(k, jbad, "R1", "the word jobs must occur on exactly one line, and that line must be exactly \"jobs:\"")
     else if (j >= 3 && L[k, j - 2] == "permissions:" && L[k, j - 1] == "  contents: read") r1 = j - 2
     else v(k, j, "R1", "the two lines before jobs: must be exactly \"permissions:\" and \"  contents: read\" (read-only token at workflow level)")
+    # R7: a file holding a "  release:" line starts with the owned header copy, line 1 to its
+    # first "jobs:" line, byte for byte (the copy has "jobs:" only as its last line).
+    hasrel = 0
+    for (i = 1; i <= N[k]; i++) if (L[k, i] == "  release:") { hasrel = 1; break }
+    if (hasrel) {
+      for (i = 1; i <= N[k]; i++) {
+        if (i > nh || L[k, i] != oh[i]) break
+        if (L[k, i] == "jobs:") break
+      }
+      if (i > N[k] || i > nh || L[k, i] != oh[i])
+        v(k, i, "R7", "the workflow header, from line 1 to jobs:, differs from the owned copy scripts/ci/release-header.yml here (byte for byte; GitHub applies it to the release job)")
+    }
     # inb: inside the release block, which runs from "  release:" to the end of the file (R2).
     inb = 0
     for (i = 1; i <= N[k]; i++) {
@@ -141,8 +175,8 @@ END {
       if (!inb && word(lo, "gh"))
         v(k, i, "R5", "the word gh outside the release job (only scripts/ci/release.sh in that job may call gh)")
       if (s ~ /\\x[0-9A-Fa-f][0-9A-Fa-f]/ || s ~ /\\[uU][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]/ ||
-          s ~ /\\$/ || s ~ /\\(\r|\302\205|\342\200\250|\342\200\251)/)
-        v(k, i, "R6", "a YAML escape (\\x + 2 hex, \\u or \\U + 4 hex, or a backslash before a line break) could hide secrets, vars, gh or permissions")
+          s ~ /\\$/ || index(s, "\\0") || s ~ /\\(\r|\302\205|\342\200\250|\342\200\251)/)
+        v(k, i, "R6", "a YAML escape (\\x + 2 hex, \\u or \\U + 4 hex, \\0, or a backslash before a line break) could hide secrets, vars, gh or permissions")
     }
     if (inb) {
       if (!bdiff && boff < no) bdiff = bs + boff
