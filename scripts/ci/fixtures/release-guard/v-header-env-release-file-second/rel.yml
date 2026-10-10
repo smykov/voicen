@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  # wip/** (T-066, P-016, decisions #90): the orchestrator's CI-only push of a task's head
+  # (git push origin HEAD:wip/<ID>; pre-push: not a delivery) runs this whole workflow before
+  # review, so a premise only CI can run is never first run on main. Pinned by make check
+  # (check-ci-wip).
+  push:
+    branches: [main, "wip/**"]
+    tags: ["v*"]
+  pull_request:
+
+# A newer push to the same wip/<ID> cancels the run of the older head (P-016 counts only the
+# reviewed head). Other refs (main, tags, pull requests) get a group per run: a shared group
+# would make a newer main push wait for the running one and cancel a pending one, so a
+# delivered commit could have no run of its own.
+concurrency:
+  group: ${{ startsWith(github.ref, 'refs/heads/wip/') && format('ci-{0}', github.ref) || format('ci-run-{0}', github.run_id) }}
+  cancel-in-progress: ${{ startsWith(github.ref, 'refs/heads/wip/') }}
+
+# T-085 (decisions #120, P-020): the job token is read-only for every job; GitHub applies a job's
+# own block instead, and only the release job has one (contents: write). Pinned literally by
+# make check (check-release-guard, R1): these two lines, right before the job map, in every workflow.
+env:
+  BASH_ENV: ./fake-env.sh
+permissions:
+  contents: read
+jobs:
+  release:
+    name: GitHub Release (v* tags only)
+    needs: [gate, windows]
+    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+      - name: Commit of this build
+        shell: bash
+        run: echo "VOICEN_COMMIT=$(git rev-parse --short=7 HEAD)" >> "$GITHUB_ENV"
+      - uses: actions/download-artifact@v4
+        with:
+          name: voicen-installer-${{ env.VOICEN_COMMIT }}
+          path: dist
+      - name: Release check, SHA-256 file, notes and publish (scripts/ci/release.sh)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          RUN_NUMBER: ${{ github.run_number }}
+        run: bash scripts/ci/release.sh "$TAG" "$RUN_NUMBER" . dist

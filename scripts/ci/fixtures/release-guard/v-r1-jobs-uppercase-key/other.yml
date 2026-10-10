@@ -1,0 +1,13 @@
+name: Other
+on:
+  push:
+x-note: "
+permissions:
+  contents: read
+jobs:
+  "
+JOBS:
+  other:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: echo other

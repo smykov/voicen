@@ -6,7 +6,7 @@
 # (docs/tasks/T-085.md, Investigation section 6). Contract of the checker, pinned here:
 #   Usage: scripts/ci/release-guard.sh <workflows-dir>
 #   Every regular file directly in <workflows-dir> is read as raw text, comments included (no
-#   extension filter: a .yaml file counts like a .yml one):
+#   extension filter: a .yaml file counts like a .yml one; a dotfile counts too):
 #     R1 each file has the word jobs (any case, bounded by characters outside [A-Za-z0-9_]) on
 #        exactly one line, and that line is exactly `jobs:`; the two lines just before it are
 #        exactly `permissions:` (column 0) and `  contents: read`, and the block has no third line
@@ -51,7 +51,7 @@
 #           escaped line break, the line ending in the backslash).
 #   Exit 2: usage error (no argument, or more than one).
 #   Exit 3: cannot run (the dir is missing or not a directory, holds no regular file, or a file
-#           has no top-level `jobs:` line); never a pass.
+#           has no top-level `jobs:` line; awk failed); never a pass.
 # The owned copy is the release block of fixtures/release-guard/ok-release/ci.yml: ok-release
 # and the real .github/workflows must both pass, so the guard's copy, the fixtures and ci.yml
 # carry the same text (the fixtures are generated from one block; change them together). The
@@ -279,6 +279,11 @@ check v-r4-b-param-expansion-gh            1 R5 '@${GH:-gh}'    # B: ${GH:-gh} r
 check v-r4-c-plain-multiline-gh            1 R5 '@gh release'   # C: plain multi-line scalar
 check v-r4-e-gh-alias-var                  1 R5 '@GH=gh'        # E: GH=gh; $GH release upload
 check v-other-file-gh                      1 R5 '@gh release' publish.yaml   # another workflow file, .yaml
+# Validation 1 survivors (docs/tasks/T-085.validation/1.md): R5 is matched in any case (S11), and
+# every regular file is read, a dotfile included (S12; the guard's dotglob).
+check v-gh-uppercase-pwsh                  1 R5 '@GH release'   # S11: pwsh resolves GH as gh (word matched in any case)
+check v-dotfile-workflow                   1 R5 '@gh release' .hidden.yml        # S12: a dotfile in the workflows dir is scanned
+check v-dotfile-workflow                   1 R3 '@permissions: write-all' .hidden.yml
 
 # ---- R4: no secret but the two Telegram ones ------------------------------------------------
 check v-r4-a-plus-pat          1 R4 '@secrets.RELEASE_PAT'      # Investigation section 2, A-plus-PAT: the open hole at 6e7e7a8 (a token from outside permissions:)
@@ -289,6 +294,11 @@ check v-secrets-uppercase      1 R4 '@SECRETS.RELEASE_PAT'      # expressions ig
 # Review 1 finding 3 (probe P5): a token kept in a repository variable.
 check v-vars-pat               1 R4 '@vars.RELEASE_PAT'         # P5: ${{ vars.RELEASE_PAT }}
 check v-vars-index             1 R4 "@VARS['RELEASE_PAT']"      # the word vars, not only "vars."
+# Validation 1 survivors S1, S2: every occurrence on a line is checked, not only up to the first
+# allowed one; a line starting with # is text (inside a multi-line double-quoted scalar it is
+# part of the value, so the PAT expression is live).
+check v-secrets-after-allowed   1 R4 '@}}${{ secrets.RELEASE_PAT' # S1: ${{ secrets.TELEGRAM_CHAT_ID }}${{ secrets.RELEASE_PAT }}
+check v-secrets-in-comment-line 1 R4 '@# ${{ secrets.RELEASE_PAT' # S2: T: "x / # ${{ secrets.RELEASE_PAT }}"
 
 # ---- R6: no YAML escape that spells a character or joins two lines ----------------------------
 # Review 1 finding 3 (probes P3, P4): each reads, to a YAML reader, as text R3-R5 refuse.
@@ -299,6 +309,10 @@ check v-escape-x-gh                    1 R6 '@\x67h release'   # P4: "\x67h rele
 check v-escape-line-break-secrets      1 R6 '@secr\'           # P4: "${{ secr\<LF>  ets.RELEASE_PAT }}"
 check v-escape-line-break-crlf-secrets 1 R6 '@secr\'           # the same, the line break is CR LF
 check v-escape-line-break-ls-secrets   1 R6 '@secr\'           # the same, the line break is U+2028 (a YAML 1.1 line break)
+# Validation 1 survivors S6-S8: each escaped line break, not only LS and CR LF.
+check v-escape-line-break-nel-secrets  1 R6 '@secr\'           # S6: the line break is NEL U+0085
+check v-escape-line-break-ps-secrets   1 R6 '@secr\'           # S7: the line break is PS U+2029
+check v-escape-line-break-cr-secrets   1 R6 '@secr\'           # S8: a lone CR inside the line (not at its end)
 check v-escape-permissions-key         1 R6 '@permi\x73sions'  # "permi\x73sions": a job-level contents: write (was Not caught)
 # Review 2 finding 2 (probe Q9-zero): \0 is a NUL, and bash drops NUL bytes from its input.
 check v-escape-zero-gh                 1 R6 '@g\0h release'    # "g\0h release upload v1 x" runs gh
@@ -312,6 +326,10 @@ check v-header-defaults-workdir  1 R7 hdiff   # Q2: defaults: run: working-direc
 check v-header-env-node-options  1 R7 hdiff   # Q3: env: NODE_OPTIONS: --require (code in download-artifact, which gets github.token)
 check v-header-comment-byte      1 R7 hdiff   # one comment byte (A -> a): no comment reader (P-020)
 check v-header-on-trigger        1 R7 hdiff   # on: gains workflow_dispatch
+# Validation 1 survivors S3, S4: R7 applies to whichever file holds the release job, whatever its
+# name and its place in the dir (ci.yml there has no release job; fake BASH_ENV path).
+check v-header-env-release-file-second 1 R7 hdiff rel.yml     # S3, S4: rel.yml, sorted after ci.yml
+check v-header-env-release-file-first  1 R7 hdiff a-rel.yml   # S3: a-rel.yml, sorted before ci.yml
 
 # ---- R8: no YAML tag (raw `!!`, `!<`, `%TAG`), comments included ---------------------------
 # Review 3 finding 1, decision #122 (probes C4c-C4e, /root/.claude/jobs/97682091/tmp/t085-r3review/
@@ -330,6 +348,7 @@ check v-write-other-job        1 R3 '@    permissions:'          # windows job g
 check v-write-all-windows      1 R3 '@permissions: write-all'
 check v-permissions-in-comment 1 R3 '@permissions come'        # comments are raw text too
 check v-other-file-write-all   1 R3 '@permissions: write-all' other.yml
+check v-permissions-mixed-case-windows 1 R3 '@Permissions: {contents: write}'   # S5 (review 1 probe P7): any case
 
 # ---- R1: the workflow-level block, in every file ---------------------------------------------
 # Review 1 finding 2 (probe P11): the block and a jobs: line inside a double-quoted scalar.
@@ -339,6 +358,9 @@ check v-workflow-write                     1 R1 '*'   # permissions: / contents:
 check v-no-workflow-permissions            1 R1 '*'   # jobs would take the repository default
 check v-workflow-permissions-dup-contents  1 R1 '*'   # contents: read, then contents: write in the same block
 check v-other-file-no-workflow-permissions 1 R1 '*' other.yml
+# Validation 1 survivors S9, S10.
+check v-other-file-env-not-permissions 1 R1 '@jobs:' other.yml   # S9: env: / contents: read / jobs: (the permissions: line replaced)
+check v-r1-jobs-uppercase-key          1 R1 '@JOBS:' other.yml   # S10: the block and jobs: in x-note: "...", the real key JOBS:
 
 # ---- the real workflows dir -------------------------------------------------------------------
 run "real $real" 0 'ok:' "$real"
@@ -409,6 +431,15 @@ run "cannot run: no workflow file" 3 'cannot run' "$tmp/empty"
 mkdir -p "$tmp/no-jobs"
 printf 'on:\n  push:\npermissions:\n  contents: read\n' > "$tmp/no-jobs/ci.yml"
 run "cannot run: no jobs:"         3 'no top-level jobs' "$tmp/no-jobs"
+# Validation 1 survivor S13: awk failing is exit 3, never a pass. A fake awk (exit 2) first on
+# PATH, only for this one guard run; nothing else in the guard's path is replaced.
+mkdir -p "$tmp/fake-awk"
+printf '#!/bin/sh\nexit 2\n' > "$tmp/fake-awk/awk"
+chmod +x "$tmp/fake-awk/awk"
+saved_path="$PATH"
+PATH="$tmp/fake-awk:$PATH"
+run "cannot run: awk fails (exit 2)" 3 'cannot run: awk failed \(exit 2\)' "$real"
+PATH="$saved_path"
 # The owned header copy (R7) is a guard input like release-job.yml: missing, or not ending in the
 # line `jobs:` (a truncated copy would compare only part of the header), is never a pass. The
 # guard is copied next to its release-job.yml; the header copy is left out or truncated.
