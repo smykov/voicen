@@ -29,7 +29,15 @@
 #        digits, \u or \U plus 4 hex digits, and a backslash right before a line break (LF, CR,
 #        NEL U+0085, LS U+2028, PS U+2029) occur nowhere, comments included (an escape in a
 #        double-quoted scalar would hide secrets, vars, gh or permissions from R3-R5; review 1
-#        finding 3). No scalar reader: the raw bytes decide, in any scalar style.
+#        finding 3). No scalar reader: the raw bytes decide, in any scalar style. Also the raw
+#        text \0 (a NUL to a YAML reader; bash drops NUL bytes, so "g\0h" runs gh: review 2
+#        finding 2);
+#     R7 in every file that holds a `  release:` line, the header (line 1 up to and including the
+#        first line exactly `jobs:`) is byte-identical to the guard's owned copy
+#        scripts/ci/release-header.yml (decision #121, review 2 finding 1: GitHub applies a
+#        workflow-level env:, defaults: or on: to the release job; a comment byte is a
+#        difference too). The listed line is the first header line that differs from the copy.
+#        The owned copy missing, unreadable or not ending in the line `jobs:` is exit 3.
 #   Exit 0: ok, one line containing "ok:".
 #   Exit 1: a violation; each listed as "<workflows-dir>/<file>:<line>: R<n>: <why>". <line> is
 #           the first line of the block that differs from the owned copy for R2 (for a second
@@ -40,7 +48,10 @@
 #           has no top-level `jobs:` line); never a pass.
 # The owned copy is the release block of fixtures/release-guard/ok-release/ci.yml: ok-release
 # and the real .github/workflows must both pass, so the guard's copy, the fixtures and ci.yml
-# carry the same text (the fixtures are generated from one block; change them together).
+# carry the same text (the fixtures are generated from one block; change them together). The
+# same holds for the header: every fixture file that holds the release job starts with the real
+# ci.yml header, line 1 to `jobs:` (the owned copy release-header.yml); an edit of the ci.yml
+# header edits the owned copy and every such fixture together.
 # Cases: every dir scripts/ci/fixtures/release-guard/<case>/ (ok-* exit 0, v-* exit 1, each
 # naming the rule that refuses it), the real .github/workflows (exit 0) and copies of it with the
 # release job or the workflow-level block mutated, a gh step or a PAT secret added (exit 1 each),
@@ -119,6 +130,27 @@ first_diff() {
   done
 }
 
+# head_lines <file>: the file's header, line 1 up to and including its first line exactly `jobs:`
+# (bytes kept).
+head_lines() { awk '{ print } $0 == "jobs:" { exit }' "$1"; }
+
+# first_hdiff <file>: the file's line number of the first header line that differs from the
+# header of ok-release (the owned header copy; empty when the headers are equal).
+first_hdiff() {
+  local f="$1" i n
+  local -a a b
+  mapfile -t a < <(head_lines "$owned_src")
+  mapfile -t b < <(head_lines "$f")
+  n=${#a[@]}
+  [ "${#b[@]}" -gt "$n" ] && n=${#b[@]}
+  for ((i = 0; i < n; i++)); do
+    if [ "${a[i]-<none>}" != "${b[i]-<none>}" ]; then
+      echo $((i + 1))
+      return 0
+    fi
+  done
+}
+
 # at <path> <line> <rule>: the ERE of a listing line "<path>:<line>: R<n>"; line "*" = any.
 at() {
   local l="$2"
@@ -127,7 +159,8 @@ at() {
 }
 
 # check <case> <exit> [<rule> <where> [<file>]]: the case dir as the workflows dir. <where> is
-# "@text" (the first line of <file> containing text), "diff" (first_diff of <file>), "*" (any
+# "@text" (the first line of <file> containing text), "diff" (first_diff of <file>), "hdiff"
+# (first_hdiff of <file>), "*" (any
 # line) or a number; <file> defaults to ci.yml.
 check() {
   local c="$1" want="$2" rule="${3:-}" where="${4:-}" file="${5:-ci.yml}" d f l
@@ -141,6 +174,7 @@ check() {
   case "$where" in
     @*) l="$(line_of "$f" "${where#@}")" ;;
     diff) l="$(first_diff "$f")" ;;
+    hdiff) l="$(first_hdiff "$f")" ;;
     *) l="$where" ;;
   esac
   if [ -z "$l" ]; then
@@ -260,6 +294,18 @@ check v-escape-line-break-secrets      1 R6 '@secr\'           # P4: "${{ secr\<
 check v-escape-line-break-crlf-secrets 1 R6 '@secr\'           # the same, the line break is CR LF
 check v-escape-line-break-ls-secrets   1 R6 '@secr\'           # the same, the line break is U+2028 (a YAML 1.1 line break)
 check v-escape-permissions-key         1 R6 '@permi\x73sions'  # "permi\x73sions": a job-level contents: write (was Not caught)
+# Review 2 finding 2 (probe Q9-zero): \0 is a NUL, and bash drops NUL bytes from its input.
+check v-escape-zero-gh                 1 R6 '@g\0h release'    # "g\0h release upload v1 x" runs gh
+check v-escape-zero-secrets            1 R6 '@s\0ecrets'       # "${{ s\0ecrets.RELEASE_PAT }}"
+
+# ---- R7: the header of the release job's file is the owned literal, byte for byte -------------
+# Review 2 finding 1, decision #121: GitHub applies workflow-level env:, defaults: and on: to the
+# release job, so line 1 to `jobs:` of its file must equal scripts/ci/release-header.yml.
+check v-header-env-bash-env      1 R7 hdiff   # Q1: env: BASH_ENV: "$(curl ... $GH_TOKEN ...)" (fake URL, no token): runs before release.sh with the write token
+check v-header-defaults-workdir  1 R7 hdiff   # Q2: defaults: run: working-directory: another release.sh runs
+check v-header-env-node-options  1 R7 hdiff   # Q3: env: NODE_OPTIONS: --require (code in download-artifact, which gets github.token)
+check v-header-comment-byte      1 R7 hdiff   # one comment byte (A -> a): no comment reader (P-020)
+check v-header-on-trigger        1 R7 hdiff   # on: gains workflow_dispatch
 
 # ---- R3: permissions only in the workflow-level block and once in the release block ----------
 check v-write-other-job        1 R3 '@    permissions:'          # windows job gets contents: write
@@ -311,7 +357,13 @@ mutate semicolon-true 'inrel && /^        run: bash scripts\/ci\/release\.sh / {
 mutate background 'inrel && /^        run: bash scripts\/ci\/release\.sh / { $0 = $0 " &" } { print }' &&
   real_r2 background "real with & after release.sh"
 mutate wf-write '!inrel && !inwin && /^  contents: read$/ { $0 = "  contents: write" } { print }' &&
-  run "real with contents: write at workflow level" 1 "$(at "$tmp/wf-write/ci.yml" '*' R1)" "$tmp/wf-write"
+  run "real with contents: write at workflow level" 1 "$(at "$tmp/wf-write/ci.yml" '*' R1)" "$tmp/wf-write" &&
+  run "real with contents: write at workflow level [R7: the header runs to jobs:]" 1 \
+    "$(at "$tmp/wf-write/ci.yml" "$(first_hdiff "$tmp/wf-write/ci.yml")" R7)" "$tmp/wf-write"
+# Review 2 finding 1 on the real file: a workflow-level env: above the R1 block (fake path).
+mutate wf-env '/^permissions:$/ && !d { print "env:"; print "  BASH_ENV: ./fake-env.sh"; d = 1 } { print }' &&
+  run "real with a workflow-level env: (BASH_ENV)" 1 \
+    "$(at "$tmp/wf-env/ci.yml" "$(line_of "$tmp/wf-env/ci.yml" 'env:')" R7)" "$tmp/wf-env"
 mutate win-gh 'inwin && /^    steps:$/ && !d { print; print "      - run: gh release upload v0.1.0 x.exe"; d = 1; next } { print }' &&
   run "real with gh release upload in the windows job" 1 \
     "$(at "$tmp/win-gh/ci.yml" "$(line_of "$tmp/win-gh/ci.yml" 'gh release upload v0.1.0')" R5)" "$tmp/win-gh"
@@ -335,6 +387,25 @@ run "cannot run: no workflow file" 3 'cannot run' "$tmp/empty"
 mkdir -p "$tmp/no-jobs"
 printf 'on:\n  push:\npermissions:\n  contents: read\n' > "$tmp/no-jobs/ci.yml"
 run "cannot run: no jobs:"         3 'no top-level jobs' "$tmp/no-jobs"
+# The owned header copy (R7) is a guard input like release-job.yml: missing, or not ending in the
+# line `jobs:` (a truncated copy would compare only part of the header), is never a pass. The
+# guard is copied next to its release-job.yml; the header copy is left out or truncated.
+owned_guard() {
+  mkdir -p "$tmp/$1"
+  cp -p "$guard" scripts/ci/release-job.yml "$tmp/$1/" 2>/dev/null
+}
+real_guard="$guard"
+if owned_guard g-header-missing; then
+  guard="$tmp/g-header-missing/release-guard.sh"
+  run "cannot run: owned header copy missing" 3 'cannot run' "$real"
+fi
+guard="$real_guard"
+if owned_guard g-header-no-jobs; then
+  head_lines "$owned_src" | sed '$d' > "$tmp/g-header-no-jobs/release-header.yml"
+  guard="$tmp/g-header-no-jobs/release-guard.sh"
+  run "cannot run: owned header copy does not end in jobs:" 3 'cannot run' "$real"
+fi
+guard="$real_guard"
 
 # Every committed fixture dir is in the table.
 for d in "$fx"/*/; do
