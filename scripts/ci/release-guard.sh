@@ -13,8 +13,11 @@
 #   2. its job `needs:` both gate and windows (flow or block list);
 #   3. its job has no `continue-on-error:`;
 #   4. an earlier step of the same job runs scripts/ci/release-check.sh with no `if:`, no
-#      `continue-on-error:`, and GH_TOKEN in its env: or the job's env: (so the release-exists
-#      check runs);
+#      `continue-on-error:`, GH_TOKEN in its env: or the job's env: (so the release-exists
+#      check runs), and a run: that, comment lines dropped, is exactly one
+#      `bash scripts/ci/release-check.sh ...` line with no `;`, `|` or `&` (so no `||`, `;`,
+#      pipe, `if`, `set +e` or later command can swallow the script's exit status; the step's
+#      exit status is then the script's under any shell:);
 #   5. its own `if:`, if any, has no status function;
 # and:
 #   6. `contents: write` appears only inside a job with a publish step (not at workflow level,
@@ -22,12 +25,14 @@
 #   7. every `uses:` of a job with a publish step names an actions/* action (no third-party
 #      release action).
 # The rule reads what the workflow writes (F-003). Not caught: a release written through
-# `gh api` or curl, an `if:` that is always false, a reusable workflow.
+# `gh api` or curl, an `if:` that is always false, a reusable workflow, a release-check.sh that
+# itself exits 0 on a refusal (release-check.test.sh covers that), a call hidden in a quoted
+# argument or `$(...)` on the one allowed line, a `shell:` that ignores the exit status.
 #
 # Usage: scripts/ci/release-guard.sh <workflow-file>
 # Exit 0: ok ("<n> step(s) publish a release"). Exit 1: a violation, listed as
 # <workflow-file>:<line>: why, <line> = the job key for 1-3; for 4 the release-check step's "- "
-# item (bad if:, continue-on-error, no GH_TOKEN) or, with no release-check step before it, the
+# item (bad if:, continue-on-error, no GH_TOKEN, run: not the call alone) or, with no release-check step before it, the
 # publish step's; the step's "- " item for 5 and 7; the permissions line for 6.
 # Exit 2: usage error. Exit 3: cannot run (file missing, unreadable, no jobs:, awk error);
 # never a pass. Host test: scripts/ci/release-guard.test.sh (make check-release-guard).
@@ -113,8 +118,23 @@ function addneeds(s,   a, n, k) {
 function endstep() {
   if (!cs) return
   if (srun[cs] ~ /(^|[^A-Za-z0-9_-])gh[ \t]+release[ \t]+(create|upload|edit|delete|delete-asset)([^A-Za-z0-9_-]|$)/) spub[cs] = 1
-  if (srun[cs] ~ /release-check\.sh/) scheck[cs] = 1
+  if (srun[cs] ~ /release-check\.sh/) { scheck[cs] = 1; ssole[cs] = solecall(srun[cs]) }
   cs = 0; smode = ""
+}
+# 1 when run:, comment lines dropped, is exactly one `bash scripts/ci/release-check.sh ...` line
+# with no ;, | or & (so no ||, &&, pipe or background): nothing can follow the call or swallow
+# its exit status, and an `if`, `set +e` or second command makes a second line or no match.
+function solecall(r,   a, n, k, m, one) {
+  n = split(r, a, "\n"); m = 0; one = ""
+  for (k = 1; k <= n; k++) {
+    if (a[k] ~ /^[ \t]*(#.*)?$/) continue
+    m++; one = a[k]
+  }
+  if (m != 1) return 0
+  sub(/^[ \t]+/, "", one)
+  if (one !~ /^bash[ \t]+scripts\/ci\/release-check\.sh([ \t]|$)/) return 0
+  if (one ~ /[;|&]/) return 0
+  return 1
 }
 function stepkey(t,   k) {
   k = keyof(t); smode = k
@@ -204,6 +224,7 @@ END {
       reasons = ""
       if (sifh[u]) why("has an if: (a skipped check counts as success)")
       if (scoe[u]) why("has continue-on-error: (a refusal would not stop the publish)")
+      if (!ssole[u]) why("its run: is not the release-check.sh call alone (comment lines aside, run: must be one `bash scripts/ci/release-check.sh ...` line with no ;, | or &; ||, ;, a pipe, if, set +e or a later command can swallow its exit status)")
       if (!stok[u] && !jtok[j]) why("has no GH_TOKEN in its env: or the job env: (the release-exists check would be skipped)")
       if (reasons == "") good = 1
       else { nbad++; bad[nbad] = "V " file ":" sline[u] ": release-check step before a publish step " reasons }
