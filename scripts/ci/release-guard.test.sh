@@ -18,7 +18,9 @@
 #        check runs); and its run: cannot swallow the script's exit status: no `||`, `;`, `if`,
 #        `set +e` or pipe around the call, and the call is the step's last command (validation 1
 #        M6: `... || true` let a refused tag reach `gh release create`). A `run: |` block holding
-#        only comments and the call is fine;
+#        only comments and the call is fine; a `#` line after the call is not a comment when a
+#        quote is open (`"dist` then `#" || true`), and a double-quoted run: scalar's `\n` is a
+#        second shell line (review 2 finding 2): neither may pass;
 #     5. its own `if:`, if any, has no status function;
 #   and:
 #     6. `contents: write` appears only in the permissions: of a job with a publish step (not at
@@ -137,6 +139,13 @@ check v-check-set-plus-e          1 "@- name: Release check"     # run: | set +e
 check v-check-block-or-true       1 "@- name: Release check"     # run: | the call with || continued on the next line
 check v-check-trailing-no-errexit 1 "@- name: Release check"     # shell without -e, the call followed by echo
 check v-check-pipe-default-shell  1 "@- name: Release check"     # ... | tee, default shell bash -e {0} has no pipefail
+# Review 2 finding 1: each needs one condition of the sole-call rule on its own.
+check v-check-bang                1 "@- name: Release check"     # run: | ! bash ... (one line, no ;|&; ! inverts the exit) - the bash anchor
+check v-check-echo-only           1 "@- name: Release check"     # run: echo scripts/ci/release-check.sh ... (never runs it) - the bash anchor
+check v-check-trap-exit-0         1 "@- name: Release check"     # run: | trap 'exit 0' EXIT, then the call alone - one line only
+# Review 2 finding 2: the run's own lines, not a comment-dropped model of them.
+check v-check-quoted-hash         1 "@- name: Release check"     # run: | the call ending in an open "dist, then a #" || true line
+check v-check-dq-scalar-newline   1 "@- name: Release check"     # run: "... dist\nexit 0" (YAML \n = 2 shell lines), shell without -e
 check v-publish-always          1 "@- name: Publish the release" # publishes after a refused check
 check v-workflow-write          1 "@contents: write"             # every job, wip/** runs included, gets contents: write
 check v-write-other-job         1 "@contents: write"             # the windows job gets contents: write
