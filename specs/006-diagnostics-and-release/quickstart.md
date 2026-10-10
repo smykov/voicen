@@ -17,7 +17,7 @@ make check                                                  # the gate (includes
 
 Expected: all green. A redaction test plants a fake transcript `"secret words 123"` and key `sk-test-PLANTED` into every input path and asserts 0 occurrences in the temp log folder.
 
-## Windows CI runner (every push to `main`)
+## Windows CI runner (every push to `main`, `wip/**` and `v*` tags)
 
 The `windows` job log shows, in order:
 1. `cargo test --workspace` including `crash_probe` (panic → crash file kind `panic`; null deref → kind `native_fault`).
@@ -25,7 +25,7 @@ The `windows` job log shows, in order:
 3. `version: <MAJOR.MINOR>.<run number>` from the step `Version of this build` (a `vX.Y.Z` tag: `X.Y.Z`; T-077, decisions #98), then `voicen <that version> (<commit>) started` from the installed app.
 4. After a forced kill and relaunch: `previous session ended abnormally` and one `crash-*.txt` with `kind: abnormal_end`.
 5. Reinstall keeps the log; `/S /KEEPDATA` keeps `%LOCALAPPDATA%\Voicen` and the `ci-test` credential; `/S` removes both.
-6. Artifacts `voicen-installer-<commit>` and `voicen-symbols-<commit>`.
+6. On a `v*` tag run only: the artifact `voicen-installer-<commit>`, kept 1 day, which the `release` job downloads (T-084, decisions #119); a push to `main` uploads no artifact and sends the installer to Telegram.
 
 ## Release (owner)
 

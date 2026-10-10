@@ -52,9 +52,10 @@
 #      byte-identical to the guard's third owned copy, scripts/ci/release-upload.yml (edit both
 #      together): the installer upload step with the release job's own if: (v* tag push only),
 #      retention-days: 1 and if-no-files-found: error, ended by the first line of the next step
-#      so no key can be appended to it. So the artifact exists exactly on the runs where the
-#      release job (R2) downloads it: zero occurrences = a tag release with nothing to download,
-#      two or more = a second upload. A raw token plus an owned literal, no step reader.
+#      so no key can be appended to it. Zero occurrences = a tag release with nothing to
+#      download, two or more = a second upload. R9 finds the literal by the token's line and
+#      cannot tell which job or YAML node holds it, so it pins the upload text, not its place
+#      (see Not caught). A raw token plus an owned literal, no step reader.
 # R1, R3 and R4 are the capability lock (GitHub enforces the token scope; it also covers gh api
 # and curl); R2 and R7 pin the release job and the header it inherits as two literals; R5 is the
 # early, fail-closed tripwire; R6 and R8 keep R3-R5's raw text the text a YAML reader sees.
@@ -68,7 +69,11 @@
 # a column-0 key such as `env:` put between two jobs before `  release:` (header and release block
 # unchanged, so R2 and R7 pass): YAML then reads `  release:` as a key under that top-level key,
 # so the release job no longer exists, no job holds contents: write, and the workflow is invalid
-# or releases nothing (probed with PyYAML 6.0.1, not GitHub's parser; T-085 Red tests round 3).
+# or releases nothing (probed with PyYAML 6.0.1, not GitHub's parser; T-085 Red tests round 3);
+# R9's limits: the owned upload literal moved into another job, or hidden inside other YAML such
+# as a `name: |` block scalar, with the real upload step deleted, passes R9; loud, not silent: on
+# a v* tag the release job's download fails and nothing is published (T-084 review 1); an upload
+# through another action is refused only by ci-wip.sh's fail-closed action list, not by R9.
 #
 # Usage: scripts/ci/release-guard.sh <workflows-dir>
 # Exit 0: ok. Exit 1: a violation, each listed as "<workflows-dir>/<file>:<line>: R<n>: <why>"
