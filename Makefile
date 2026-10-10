@@ -120,8 +120,9 @@ check-release:
 
 # T-026, T-085 (rca, decisions #120, P-020): raw-text rules over every file in
 # .github/workflows: the workflow-level permissions: contents: read block (R1), the release job
-# byte-identical to the guard's owned copy (R2), permissions only there (R3), no secret but the
-# two Telegram ones (R4), the word gh only inside the release job (R5). The self-test runs the
+# to the end of its file byte-identical to the guard's owned copy (R2), permissions only there
+# (R3), no secret but the two Telegram ones and no vars (R4), the word gh only inside the release
+# job (R5), no YAML escape that spells a character or joins two lines (R6). The self-test runs the
 # tripwire scripts/ci/release-guard.sh on scripts/ci/fixtures/release-guard/ and the real
 # workflows dir (also mutated). Host bash and awk.
 check-release-guard:
