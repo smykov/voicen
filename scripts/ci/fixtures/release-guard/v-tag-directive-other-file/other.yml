@@ -1,0 +1,14 @@
+%TAG !e! tag:yaml.org,2002:bin
+---
+name: Other
+on: push
+permissions:
+  contents: read
+jobs:
+  x:
+    runs-on: ubuntu-24.04
+    !e!ary cGVybWlzc2lvbnM=: {contents: write}
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: !e!ary Z2ggcmVsZWFzZSBjcmVhdGUgdjkuOS45IHggLS1yZXBvIGV4YW1wbGUvZmFrZQ==

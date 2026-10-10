@@ -37,11 +37,17 @@
 #        scripts/ci/release-header.yml (decision #121, review 2 finding 1: GitHub applies a
 #        workflow-level env:, defaults: or on: to the release job; a comment byte is a
 #        difference too). The listed line is the first header line that differs from the copy.
-#        The owned copy missing, unreadable or not ending in the line `jobs:` is exit 3.
+#        The owned copy missing, unreadable or not ending in the line `jobs:` is exit 3; so is a
+#        copy with a line `jobs:` before its last line (review 3 finding 3);
+#     R8 no YAML tag: the raw texts `!!`, `!<` and `%TAG` occur nowhere, in any file, comments
+#        included (decision #122, review 3 finding 1: `!!binary <base64>` as a key or a run value,
+#        the verbatim `!<tag:yaml.org,2002:binary>` and a `%TAG` directive decode to permissions
+#        or a gh call that R3-R5 cannot see). A raw-token rule (P-020): no tag reader, so a lone
+#        `!` (`!cancelled()`, `!=`, `[ ! -f ]`) and `% TAG` pass. Listed line: the occurrence.
 #   Exit 0: ok, one line containing "ok:".
 #   Exit 1: a violation; each listed as "<workflows-dir>/<file>:<line>: R<n>: <why>". <line> is
 #           the first line of the block that differs from the owned copy for R2 (for a second
-#           `  release:`, that line), the line of the occurrence for R3, R4, R5 and R6 (for an
+#           `  release:`, that line), the line of the occurrence for R3, R4, R5, R6 and R8 (for an
 #           escaped line break, the line ending in the backslash).
 #   Exit 2: usage error (no argument, or more than one).
 #   Exit 3: cannot run (the dir is missing or not a directory, holds no regular file, or a file
@@ -307,6 +313,18 @@ check v-header-env-node-options  1 R7 hdiff   # Q3: env: NODE_OPTIONS: --require
 check v-header-comment-byte      1 R7 hdiff   # one comment byte (A -> a): no comment reader (P-020)
 check v-header-on-trigger        1 R7 hdiff   # on: gains workflow_dispatch
 
+# ---- R8: no YAML tag (raw `!!`, `!<`, `%TAG`), comments included ---------------------------
+# Review 3 finding 1, decision #122 (probes C4c-C4e, /root/.claude/jobs/97682091/tmp/t085-r3review/
+# s/probe4.py): in a second file (no release job, so R7 does not apply), a tag decodes base64 into
+# a key `permissions` (contents: write) and a run value `gh release create v9.9.9 x --repo
+# example/fake` (fake repo); PyYAML 6.0.1 and npm yaml 2.8.2 decode both.
+check v-tag-binary-other-file    1 R8 '@!!binary cGVybWlzc2lvbnM=' other.yml   # C4c: the key line
+check v-tag-binary-other-file    1 R8 '@run: !!binary' other.yml               # C4c: the run line, listed too
+check v-tag-verbatim-other-file  1 R8 '@!<tag:yaml.org,2002:binary> cGVy' other.yml   # C4d: verbatim tag
+check v-tag-directive-other-file 1 R8 '@%TAG !e!' other.yml                    # C4e: %TAG directive, then !e!ary (no !! and no !<)
+check v-tag-in-comment           1 R8 '@# a !!binary'                          # a raw rule: a comment is text (no comment reader)
+check ok-tag-lookalikes          0   # !cancelled(), !=, [ ! -f ], "100% TAG ! < ! !x": not a tag token
+
 # ---- R3: permissions only in the workflow-level block and once in the release block ----------
 check v-write-other-job        1 R3 '@    permissions:'          # windows job gets contents: write
 check v-write-all-windows      1 R3 '@permissions: write-all'
@@ -375,6 +393,10 @@ mutate win-escape 'inwin && /^    steps:$/ && !d { print; print "      - run: \"
 mutate win-pat 'inwin && /^    steps:$/ && !d { print; print "      - env:"; print "          TOKEN: ${{ secrets.RELEASE_PAT }}"; print "        run: echo pat"; d = 1; next } { print }' &&
   run "real with a PAT secret in the windows job" 1 \
     "$(at "$tmp/win-pat/ci.yml" "$(line_of "$tmp/win-pat/ci.yml" 'secrets.RELEASE_PAT')" R4)" "$tmp/win-pat"
+# Review 3 finding 1 on the real file: a tag on a windows step's run value (decision #122).
+mutate win-tag 'inwin && /^    steps:$/ && !d { print; print "      - run: !!str echo tagged"; d = 1; next } { print }' &&
+  run "real with a YAML tag in the windows job" 1 \
+    "$(at "$tmp/win-tag/ci.yml" "$(line_of "$tmp/win-tag/ci.yml" '!!str echo tagged')" R8)" "$tmp/win-tag"
 
 # ---- usage and cannot run -------------------------------------------------------------------
 run "usage: no argument"           2 'usage'
@@ -404,6 +426,14 @@ if owned_guard g-header-no-jobs; then
   head_lines "$owned_src" | sed '$d' > "$tmp/g-header-no-jobs/release-header.yml"
   guard="$tmp/g-header-no-jobs/release-guard.sh"
   run "cannot run: owned header copy does not end in jobs:" 3 'cannot run' "$real"
+fi
+guard="$real_guard"
+# Review 3 finding 3: a copy with a `jobs:` line before its last line would let R7 stop comparing
+# at that line; never a pass (characterization: the guard already refuses it).
+if owned_guard g-header-jobs-mid; then
+  head_lines "$owned_src" | sed '1a jobs:' > "$tmp/g-header-jobs-mid/release-header.yml"
+  guard="$tmp/g-header-jobs-mid/release-guard.sh"
+  run "cannot run: owned header copy has jobs: before its last line" 3 'cannot run' "$real"
 fi
 guard="$real_guard"
 
