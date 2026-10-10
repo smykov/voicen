@@ -118,14 +118,14 @@ check-release-check:
 check-release:
 	scripts/ci/release.test.sh
 
-# T-026, T-085 (rca, decisions #120, #121, P-020): raw-text rules over every file in
+# T-026, T-085 (rca, decisions #120, #121, #122, P-020): raw-text rules R1-R8 over every file in
 # .github/workflows: the workflow-level permissions: contents: read block (R1), the release job
 # to the end of its file byte-identical to the guard's owned copy (R2), permissions only there
 # (R3), no secret but the two Telegram ones and no vars (R4), the word gh only inside the release
-# job (R5), no YAML escape that spells a character or joins two lines (R6), and the header of the
+# job (R5), no YAML escape that spells a character or joins two lines (R6), the header of the
 # file holding the release job, line 1 to jobs:, byte-identical to scripts/ci/release-header.yml
-# (R7; decisions #121). The self-test runs the
-# tripwire scripts/ci/release-guard.sh on scripts/ci/fixtures/release-guard/ and the real
+# (R7; decisions #121), and no YAML tag: the raw texts !!, !< and %TAG nowhere (R8; decisions
+# #122). The self-test runs the tripwire scripts/ci/release-guard.sh on scripts/ci/fixtures/release-guard/ and the real
 # workflows dir (also mutated). Host bash and awk.
 check-release-guard:
 	scripts/ci/release-guard.test.sh

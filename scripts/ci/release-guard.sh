@@ -41,15 +41,21 @@
 #      keys (env:, defaults:, on:, concurrency:, permissions: ...) to the release job, so a
 #      BASH_ENV or working-directory there would run with its write token; the literal closes them
 #      all without naming any key or variable.
+#   R8 none of the raw texts `!!`, `!<` and `%TAG` (case-sensitive) occurs on any line, comments
+#      included: a YAML tag (the shorthand `!!binary`, the verbatim `!<tag:...>`, or a handle
+#      declared by a `%TAG` directive) could decode other text, e.g. base64, into secrets, vars, gh
+#      or permissions and hide it from R3-R5. A raw index() search, no tag reader: a lone `!`
+#      (`!cancelled()`, `!=`, `[ ! -f ]`) passes.
 # R1, R3 and R4 are the capability lock (GitHub enforces the token scope; it also covers gh api
 # and curl); R2 and R7 pin the release job and the header it inherits as two literals; R5 is the
-# early, fail-closed tripwire; R6 keeps R3-R5's raw text the text a YAML reader sees.
+# early, fail-closed tripwire; R6 and R8 keep R3-R5's raw text the text a YAML reader sees.
 # Not caught (deliberate only): a token written into the workflow as text (the gitleaks
 # pre-commit scan refuses it); release.sh itself exiting 0 on a refusal (release.test.sh covers
 # that); whether GitHub enforces `permissions:` as documented (platform semantics,
 # docs/decisions/ci-toolchain.md); a repository default token scope flipped to write (R1 pins the
 # workflow level, so it does not matter for jobs without their own block); a YAML parser that
-# reads escapes or line breaks beyond YAML 1.1/1.2 (GitHub's parser is not available on the host);
+# reads escapes, line breaks or tags beyond YAML 1.1/1.2 (GitHub's parser is not available on the
+# host);
 # a column-0 key such as `env:` put between two jobs before `  release:` (header and release block
 # unchanged, so R2 and R7 pass): YAML then reads `  release:` as a key under that top-level key,
 # so the release job no longer exists, no job holds contents: write, and the workflow is invalid
@@ -61,10 +67,11 @@
 # `jobs:` line when the block before it differs; R2: the first line of the block that differs
 # from the owned copy, or the second `  release:` line; R3-R6: the line of the occurrence, for an
 # escaped line break the line ending in the backslash; R7: the first header line that differs
-# from scripts/ci/release-header.yml). Exit 2: usage error. Exit 3: cannot run
-# (the dir is missing or not a directory, holds no regular file, a file is unreadable or has no
-# `jobs:` line, an owned copy is missing or malformed: release-job.yml not starting with
-# `  release:`, release-header.yml not ending in its only `jobs:` line; awk failed); never a pass.
+# from scripts/ci/release-header.yml; R8: every line holding !!, !< or %TAG). Exit 2: usage
+# error. Exit 3: cannot run (the dir is missing or not a directory, holds no regular file, a file
+# is unreadable or has no `jobs:` line, an owned copy is missing or malformed: release-job.yml not
+# starting with `  release:`, release-header.yml not ending in its only `jobs:` line; awk failed);
+# never a pass.
 # Host test: scripts/ci/release-guard.test.sh (make check-release-guard).
 set -uo pipefail
 export LC_ALL=C
@@ -177,6 +184,8 @@ END {
       if (s ~ /\\x[0-9A-Fa-f][0-9A-Fa-f]/ || s ~ /\\[uU][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]/ ||
           s ~ /\\$/ || index(s, "\\0") || s ~ /\\(\r|\302\205|\342\200\250|\342\200\251)/)
         v(k, i, "R6", "a YAML escape (\\x + 2 hex, \\u or \\U + 4 hex, \\0, or a backslash before a line break) could hide secrets, vars, gh or permissions")
+      if (index(s, "!!") || index(s, "!<") || index(s, "%TAG"))
+        v(k, i, "R8", "a YAML tag (the raw text !!, !< or %TAG) could turn other text into secrets, vars, gh or permissions")
     }
     if (inb) {
       if (!bdiff && boff < no) bdiff = bs + boff
