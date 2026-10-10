@@ -34,12 +34,13 @@
 #           GH_TOKEN) or, with no release-check step before it, the publish step's; the step's
 #           "- " item for 5 and 7; the offending permissions line for 6.
 #   Exit 2: usage error (no argument, or more than one).
-#   Exit 3: cannot run (the file is missing or unreadable); never a pass.
+#   Exit 3: cannot run (the file is missing or unreadable, or has no top-level jobs:); never a
+#           pass.
 # Cases: every dir scripts/ci/fixtures/release-guard/<case>/ci.yml (ok-* exit 0, v-* exit 1),
 # the real .github/workflows/ci.yml (exit 0, 1 publish step) and the real ci.yml with its
 # release job's if: dropped, always() added, needs without windows, contents: write at
-# workflow level, and its release-check run: ending in `|| true` or `; true` (exit 1 each), usage
-# and a missing file. Every fixture dir must appear in the
+# workflow level, and its release-check run: ending in `|| true`, `; true` or `&` (exit 1 each), usage,
+# a missing file and a file with no jobs:. Every fixture dir must appear in the
 # table, so a case cannot be dropped silently.
 # Usage: scripts/ci/release-guard.test.sh   (host bash, sed, grep, awk)
 # Exit 0: every case as expected. Exit 1: a case differs (listed). Exit 3: cannot run.
@@ -118,6 +119,15 @@ check v-no-tag-operand          1 "@  release:"                  # push on any r
 check v-no-event-name           1 "@  release:"
 check v-top-level-or            1 "@  release:"                  # both operands present as text, not top-level &&
 check v-tag-operand-widened     1 "@  release:"                  # refs/tags/ instead of refs/tags/v
+# Validation 2 sweep: each needs one condition of rule 1 on its own.
+check v-job-failure                1 "@  release:"   # failure() && push && tag: publishes only after a red gate or windows job (statusfn failure())
+check v-job-success-or             1 "@  release:"   # (success() || ...) && push && tag (statusfn success()||)
+check v-job-or-success             1 "@  release:"   # (... || success()) && push && tag (statusfn ||success())
+check v-top-level-or-last          1 "@  release:"   # push && tag && x || main: both operands clean, the || is top-level (hasor)
+check v-job-or-in-parens           1 "@  release:"   # (main || x && push && tag && y) && z: operands only inside the parens (&& split at depth 0)
+check v-job-or-after-quoted-paren  1 "@  release:"   # push && tag && ref != '(' || main: a quoted ( must not hide the top-level || (quotes in the operand split)
+check v-job-or-two-groups          1 "@  release:"   # (main) || (x && push && tag && y): not one wrapped group (wrapped(): first ( closes early)
+check v-job-or-quoted-paren-groups 1 "@  release:"   # ('(') || (x && push && tag && y): a quoted ( must not make it one group (quotes in wrapped())
 check v-job-always              1 "@  release:"                  # publishes after a red gate or windows job
 check v-job-not-cancelled       1 "@  release:"
 check v-job-continue-on-error   1 "@  release:"
@@ -129,6 +139,7 @@ check v-no-check                1 "@- name: Publish the release" # only the wind
 check v-check-if                1 "@- name: Release check"       # a skipped step counts as success
 check v-check-continue-on-error 1 "@- name: Release check"       # a refusal would not stop the publish
 check v-check-no-token          1 "@- name: Release check"       # the release-exists check would be skipped
+check v-check-no-token-job-env  1 "@- name: Release check"       # the job has an env: (GH_REPO), neither it nor the step has GH_TOKEN
 # The check's exit status swallowed in its run: (validation 1 M6): a refused tag is published.
 check v-check-or-true             1 "@- name: Release check"     # ... || true
 check v-check-semicolon-true      1 "@- name: Release check"     # ...; true
@@ -139,9 +150,11 @@ check v-check-set-plus-e          1 "@- name: Release check"     # run: | set +e
 check v-check-block-or-true       1 "@- name: Release check"     # run: | the call with || continued on the next line
 check v-check-trailing-no-errexit 1 "@- name: Release check"     # shell without -e, the call followed by echo
 check v-check-pipe-default-shell  1 "@- name: Release check"     # ... | tee, default shell bash -e {0} has no pipefail
+check v-check-background          1 "@- name: Release check"     # ... & (validation 2 M4: a background job's exit is never read; bash -e exits 0)
 # Review 2 finding 1: each needs one condition of the sole-call rule on its own.
 check v-check-bang                1 "@- name: Release check"     # run: | ! bash ... (one line, no ;|&; ! inverts the exit) - the bash anchor
 check v-check-echo-only           1 "@- name: Release check"     # run: echo scripts/ci/release-check.sh ... (never runs it) - the bash anchor
+check v-check-other-script        1 "@- name: Release check"     # run: bash scripts/ci/release-check.sh.orig ... (another script) - the anchor's end
 check v-check-trap-exit-0         1 "@- name: Release check"     # run: | trap 'exit 0' EXIT, then the call alone - one line only
 # Review 2 finding 2: the run's own lines, not a comment-dropped model of them.
 check v-check-quoted-hash         1 "@- name: Release check"     # run: | the call ending in an open "dist, then a #" || true line
@@ -152,6 +165,15 @@ check v-write-other-job         1 "@contents: write"             # the windows j
 check v-write-all               1 "@write-all"
 check v-third-party-action      1 "@softprops/action-gh-release" # a release action instead of gh
 check v-unguarded-upload        1 "@  windows:"                  # gh release upload from the windows job (no tag if:, needs gate only)
+check v-unguarded-edit          1 "@  windows:"                  # gh release edit (publishes a draft) from the windows job
+check v-unguarded-delete        1 "@  windows:"                  # gh release delete from the windows job
+check v-unguarded-delete-asset  1 "@  windows:"                  # gh release delete-asset from the windows job
+check v-unguarded-upload-after-cd 1 "@  windows:"                # cd ... && gh release upload: gh not at the start of the run
+# Validation 2 sweep, gaps (red at 2e90f89): shapes the guard accepts although the contract refuses them.
+check v-unguarded-upload-repo-flag-first   1 "@  windows:"       # gh --repo R release upload: gh 2.101 runs it as release upload
+check v-unguarded-upload-repo-flag-between 1 "@  windows:"       # gh release --repo R upload: likewise
+check v-check-token-in-comment  1 "@- name: Release check"       # env: # GH_TOKEN: ... - the token is only in a YAML comment
+check v-check-token-name-suffix 1 "@- name: Release check"       # env: { NOT_GH_TOKEN: ... } - another variable whose name ends in GH_TOKEN
 
 # The real workflow: ok, and exactly its one publish step is read.
 run "real $real" 0 "$(ok_n 1)" "$real"
@@ -188,12 +210,18 @@ else
     run "real with || true after the release job's release-check" 1 "$tmp/or-true.yml:$check_line:" "$tmp/or-true.yml"
   mutate semicolon-true 'inrel && /^        run: bash scripts\/ci\/release-check\.sh / { $0 = $0 "; true" } { print }' &&
     run "real with ; true after the release job's release-check" 1 "$tmp/semicolon-true.yml:$check_line:" "$tmp/semicolon-true.yml"
+  # Validation 2 M4: the call backgrounded with a trailing &; the step exits 0 on a refusal.
+  mutate background 'inrel && /^        run: bash scripts\/ci\/release-check\.sh / { $0 = $0 " &" } { print }' &&
+    run "real with & after the release job's release-check" 1 "$tmp/background.yml:$check_line:" "$tmp/background.yml"
 fi
 
 # Usage and cannot run.
 run "usage: no argument"        2 "usage"
 run "usage: two arguments"      2 "usage" "$real" "$real"
 run "cannot run: missing file"  3 "cannot run" "$tmp/absent.yml"
+# A file with no top-level jobs: is not a workflow: never a pass (validation 2 sweep).
+printf 'on:\n  push:\n' > "$tmp/no-jobs.yml"
+run "cannot run: no jobs:"      3 "no top-level jobs" "$tmp/no-jobs.yml"
 
 # Every committed fixture dir is in the table.
 for d in "$fx"/*/; do

@@ -195,6 +195,12 @@ call pass-numeric-v0.1.1000-run-200 missing "$token" v0.1.1000 200 "$tmp/repo" "
 want_rc 0
 done_case
 
+# Each part may be up to 65535 (validation 2 sweep: the bound, not one below it).
+mk_dir "$tmp/i" Voicen_0.1.65535_x64-setup.exe
+call pass-v0.1.65535-run-100 missing "$token" v0.1.65535 100 "$tmp/repo" "$tmp/i"
+want_rc 0
+done_case
+
 # The windows job's premise on a wip run: stamped tree <MAJOR.MINOR>.<run>, tag v$VOICEN_VERSION,
 # no token. gh would say "exists", but must not be asked.
 mk_dir "$tmp/i" Voicen_0.1.100_x64-setup.exe
@@ -265,7 +271,9 @@ call refuse-run-number-empty missing "$token" v0.1.200 '' "$tmp/repo" "$tmp/i"
 want_rc 1
 grep -qiE -- 'run.?number' <<<"$out" || fail "the output does not name the run number"
 done_case
-for n in abc 1e2 0x64 -5 '10 0'; do
+# 0, a leading zero and 21 digits (beyond any integer test, so #103 could not refuse it) are
+# refused by the run-number rule itself (validation 2 sweep).
+for n in abc 1e2 0x64 -5 '10 0' 0 0100 123456789012345678901; do
   call "refuse-run-number-$n" missing "$token" v0.1.200 "$n" "$tmp/repo" "$tmp/i"
   want_rc 1; says "$n" "the bad run number"
   done_case
@@ -282,11 +290,16 @@ want_rc 1
 done_case
 mk_dir "$tmp/i"
 call refuse-no-installer missing "$token" v0.1.200 100 "$tmp/repo" "$tmp/i"
-want_rc 1
+want_rc 1; says "0 *-setup.exe" "the installer count (a refusal, not a crash)"
 done_case
 mk_dir "$tmp/i" Voicen_0.1.200_x64-setup.exe Voicen_0.1.200_x86-setup.exe
 call refuse-two-installers missing "$token" v0.1.200 100 "$tmp/repo" "$tmp/i"
 want_rc 1
+done_case
+# An installer whose name holds no X.Y.Z at all (validation 2 sweep).
+mk_dir "$tmp/i" Voicen_x64-setup.exe
+call refuse-installer-unversioned missing "$token" v0.1.200 100 "$tmp/repo" "$tmp/i"
+want_rc 1; says Voicen_x64-setup.exe "the installer"
 done_case
 call refuse-missing-installer-dir missing "$token" v0.1.200 100 "$tmp/repo" "$tmp/no-such-dir"
 want_rc 1
@@ -302,9 +315,26 @@ done
 call refuse-tag-empty missing "$token" '' 100 "$tmp/repo" "$tmp/i"
 want_rc 1
 done_case
+# Only the tag rule can refuse these: the installer carries the same version and every other rule
+# would pass (validation 2 sweep: leading zero, and the 65535 bound).
+mk_dir "$tmp/i" Voicen_0.1.0200_x64-setup.exe
+call refuse-tag-leading-zero-only missing "$token" v0.1.0200 100 "$tmp/repo" "$tmp/i"
+want_rc 1; says v0.1.0200 "the bad tag"
+done_case
+mk_dir "$tmp/i" Voicen_0.1.65536_x64-setup.exe
+call refuse-tag-v0.1.65536 missing "$token" v0.1.65536 100 "$tmp/repo" "$tmp/i"
+want_rc 1; says v0.1.65536 "the bad tag"
+done_case
+mk_dir "$tmp/i" Voicen_0.1.200_x64-setup.exe
 
 # The committed version files disagree: no single MAJOR.MINOR to compare with.
 call refuse-repo-files-disagree missing "$token" v0.1.200 100 "$tmp/disagree" "$tmp/i"
+want_rc 1
+done_case
+
+# No version files under <root>: no MAJOR.MINOR, so #102 cannot be checked; never a pass.
+mkdir -p "$tmp/empty-root"
+call refuse-version-files-missing missing "$token" v0.1.200 100 "$tmp/empty-root" "$tmp/i"
 want_rc 1
 done_case
 
