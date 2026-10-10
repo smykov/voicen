@@ -15,7 +15,10 @@
 #     3. its job has no `continue-on-error:`;
 #     4. an earlier step of the same job runs scripts/ci/release-check.sh, with no `if:` and no
 #        `continue-on-error:`, and GH_TOKEN in its env: or the job's env: (so the release-exists
-#        check runs);
+#        check runs); and its run: cannot swallow the script's exit status: no `||`, `;`, `if`,
+#        `set +e` or pipe around the call, and the call is the step's last command (validation 1
+#        M6: `... || true` let a refused tag reach `gh release create`). A `run: |` block holding
+#        only comments and the call is fine;
 #     5. its own `if:`, if any, has no status function;
 #   and:
 #     6. `contents: write` appears only in the permissions: of a job with a publish step (not at
@@ -32,8 +35,9 @@
 #   Exit 3: cannot run (the file is missing or unreadable); never a pass.
 # Cases: every dir scripts/ci/fixtures/release-guard/<case>/ci.yml (ok-* exit 0, v-* exit 1),
 # the real .github/workflows/ci.yml (exit 0, 1 publish step) and the real ci.yml with its
-# release job's if: dropped, always() added, needs without windows, and contents: write at
-# workflow level (exit 1 each), usage and a missing file. Every fixture dir must appear in the
+# release job's if: dropped, always() added, needs without windows, contents: write at
+# workflow level, and its release-check run: ending in `|| true` or `; true` (exit 1 each), usage
+# and a missing file. Every fixture dir must appear in the
 # table, so a case cannot be dropped silently.
 # Usage: scripts/ci/release-guard.test.sh   (host bash, sed, grep, awk)
 # Exit 0: every case as expected. Exit 1: a case differs (listed). Exit 3: cannot run.
@@ -104,6 +108,7 @@ ok_n() { echo "$1 step(s) publish a release"; }
 check ok-release                       0 "$(ok_n 1)"   # the shipped shape; a windows probe with gh release view/list, !cancelled() and continue-on-error is not judged
 check ok-no-release                    0 "$(ok_n 0)"   # no publish step (ci.yml before T-026)
 check ok-reordered-job-token-block-run 0 "$(ok_n 1)"   # no ${{ }}, operands reordered plus one more, needs as a block list, GH_TOKEN in the job env, gh release create in a run: | block
+check ok-check-block-run              0 "$(ok_n 1)"   # the release-check call alone in a run: | block after a comment
 
 # Violations: exit 1, the listing names file:line.
 check v-no-job-if               1 "@  release:"                  # the publish job runs on every ref, wip/** included
@@ -122,6 +127,16 @@ check v-no-check                1 "@- name: Publish the release" # only the wind
 check v-check-if                1 "@- name: Release check"       # a skipped step counts as success
 check v-check-continue-on-error 1 "@- name: Release check"       # a refusal would not stop the publish
 check v-check-no-token          1 "@- name: Release check"       # the release-exists check would be skipped
+# The check's exit status swallowed in its run: (validation 1 M6): a refused tag is published.
+check v-check-or-true             1 "@- name: Release check"     # ... || true
+check v-check-semicolon-true      1 "@- name: Release check"     # ...; true
+check v-check-or-colon            1 "@- name: Release check"     # ... || :
+check v-check-or-exit-0           1 "@- name: Release check"     # ... || exit 0
+check v-check-if-wrapped          1 "@- name: Release check"     # if ...; then ...; fi (errexit ignores an if condition)
+check v-check-set-plus-e          1 "@- name: Release check"     # run: | set +e, the call, then echo
+check v-check-block-or-true       1 "@- name: Release check"     # run: | the call with || continued on the next line
+check v-check-trailing-no-errexit 1 "@- name: Release check"     # shell without -e, the call followed by echo
+check v-check-pipe-default-shell  1 "@- name: Release check"     # ... | tee, default shell bash -e {0} has no pipefail
 check v-publish-always          1 "@- name: Publish the release" # publishes after a refused check
 check v-workflow-write          1 "@contents: write"             # every job, wip/** runs included, gets contents: write
 check v-write-other-job         1 "@contents: write"             # the windows job gets contents: write
@@ -157,6 +172,13 @@ else
   awk '/^jobs:/ && !done { print "permissions:"; print "  contents: write"; done = 1 } { print }' "$real" > "$tmp/wf-write.yml"
   wl="$(grep -n -m 1 -x '  contents: write' "$tmp/wf-write.yml" | cut -d: -f1)"
   run "real with contents: write at workflow level" 1 "$tmp/wf-write.yml:$wl:" "$tmp/wf-write.yml"
+  # The release job's release-check run: with its exit swallowed (validation 1 M6); the listing
+  # names the check step's "- " item.
+  check_line="$(awk "$scope"' inrel && /^      - name: Release check/ { print FNR; exit }' "$real")"
+  mutate or-true 'inrel && /^        run: bash scripts\/ci\/release-check\.sh / { $0 = $0 " || true" } { print }' &&
+    run "real with || true after the release job's release-check" 1 "$tmp/or-true.yml:$check_line:" "$tmp/or-true.yml"
+  mutate semicolon-true 'inrel && /^        run: bash scripts\/ci\/release-check\.sh / { $0 = $0 "; true" } { print }' &&
+    run "real with ; true after the release job's release-check" 1 "$tmp/semicolon-true.yml:$check_line:" "$tmp/semicolon-true.yml"
 fi
 
 # Usage and cannot run.
