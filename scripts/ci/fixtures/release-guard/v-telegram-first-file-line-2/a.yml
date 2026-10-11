@@ -1,0 +1,11 @@
+name: A
+# ${{ secrets.TELEGRAM_BOT_TOKEN }} on line 2: the alignment starts before line 1
+on:
+  push:
+permissions:
+  contents: read
+jobs:
+  a:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: echo a

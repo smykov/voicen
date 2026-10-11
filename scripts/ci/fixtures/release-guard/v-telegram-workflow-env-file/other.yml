@@ -1,0 +1,28 @@
+name: Other
+
+on:
+  push:
+
+env:
+ X: |
+  windows:
+    steps:
+      - name: Send the installer to Telegram (main and v* tags only)
+        if: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && steps.telegram-installer.outputs.send == 'true' }}
+        timeout-minutes: 10
+        shell: bash
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          INSTALLER: ${{ steps.telegram-installer.outputs.path }}
+          CAPTION: ${{ steps.telegram-installer.outputs.caption }}
+        run: bash scripts/ci/telegram-send.sh "$INSTALLER" "$CAPTION"
+      - name: SHA-256 of the installer
+
+permissions:
+  contents: read
+jobs:
+  extra:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: echo extra

@@ -60,11 +60,18 @@
 #        (the Telegram send step from its name line to its run: line, ended by the next step's
 #        first line `      - name: SHA-256 of the installer`, so no key can be appended), and the
 #        lines aligned on the first token line (that line minus the copy's first-token offset) are
-#        byte-identical to the copy. So the only step GitHub hands the Telegram secrets to is the
-#        reviewed send step with its reviewed if: (push && (main || v* tag) && send == 'true').
-#        A raw-token rule plus an owned literal: no YAML or expression reader. Listed line: the
-#        token occurrence where the dir count first exceeds the copy's count; the first aligned
-#        line that differs from the copy; with no token, the first file's `jobs:` line. The copy
+#        byte-identical to the copy; and, going up from the copy's first line and skipping lines
+#        of spaces only, the first line with fewer than 6 leading spaces is exactly `    steps:`,
+#        the next with fewer than 4 is exactly `  windows:` and the next with fewer than 2 is
+#        exactly `jobs:` (review 1 finding 1: the literal held by a block scalar, e.g. a job's
+#        `env: X: |`, cannot meet this). So the only step GitHub hands the Telegram secrets to is
+#        the reviewed send step of the windows job with its reviewed if: (push && (main || v* tag)
+#        && send == 'true'). A raw-token rule, an owned literal and a leading-space count: no YAML
+#        or expression reader. Listed line: the token occurrence where the dir count first exceeds
+#        the copy's count; the first aligned line that differs from the copy (line 1 when the
+#        alignment starts before line 1); the first line met going up that is not the expected
+#        one (the copy's first line when none is met); with no token, the first file's `jobs:`
+#        line. The copy
 #        missing, empty, holding no token or not starting with the send step's name line is
 #        exit 3, its message naming the copy.
 #   Exit 0: ok, one line containing "ok:".
@@ -484,6 +491,14 @@ check v-telegram-key-appended    1 R10 tdiff     # continue-on-error after run::
 check v-telegram-trailing-space  1 R10 tdiff     # "if: ... }} ": byte identity, not a reading
 check v-telegram-none            1 R10 jobs      # the send step deleted: the build's send (#93) is gone
 check v-telegram-twice           1 R10 texcess   # the owned step twice: the literal occurs exactly once
+# T-087 review 1 finding 1: the owned literal moved, the real send step deleted, so count and
+# alignment pass. The nearest lines above the literal with fewer than 6, 4 and 2 leading spaces
+# must be `    steps:`, `  windows:` and `jobs:`; a block scalar holding the literal cannot have them.
+check v-telegram-env-block         1 R10 '@     X: |'   # review 1 probe: jobs.other.env.X: | holds the literal (both secrets to every step of other, every ref)
+check v-telegram-other-job         1 R10 '@  other:'    # the owned step in another job's steps: not the reviewed job
+check v-telegram-steps-in-scalar   1 R10 '@   name: |'  # a fake "    steps:" inside a job's name: | block scalar
+check v-telegram-workflow-env-file 1 R10 '@ X: |' other.yml   # workflow-level env: X: | holds fake windows:/steps: lines and the literal
+check v-telegram-first-file-line-2 1 R10 tdiff a.yml   # review 1 finding 2: a.yml sorts first, token on line 2; the alignment starts before line 1, listed as line 1
 
 # ---- R3: permissions only in the workflow-level block and once in the release block ----------
 check v-write-other-job        1 R3 '@    permissions:'          # windows job gets contents: write
