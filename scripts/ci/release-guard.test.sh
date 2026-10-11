@@ -74,6 +74,37 @@
 #        line. The copy
 #        missing, empty, holding no token or not starting with the send step's name line is
 #        exit 3, its message naming the copy.
+#     R7 (T-088, widened) applies to ci.yml as well as to every file holding `  release:`: ci.yml
+#        starts with the owned header even when the release job sits in another file (probe W4:
+#        the job moved to release.yml with the owned header, ci.yml's trigger cut to [main]).
+#     R11 (T-088, P-020; replaces ci-wip.sh and setup-node-cache.sh) in every regular file of the
+#        dir, comments included, every line holding the word uses (any case, bounded as for R1)
+#        or one of the action-name tokens actions/cache, setup-node, rust-cache, cache/save,
+#        pnpm/action-setup (any case, substrings) is either byte-identical to a line of the owned
+#        list scripts/ci/action-lines.txt (the never-saving uses lines) or lies inside a
+#        byte-exact copy of one of the owned step fragments scripts/ci/cache-steps/*.yml (each
+#        from its `      - ` line through the next step's first line or the next job's key
+#        line, so no key can be appended; that last line only pins the end: it is not inside
+#        the fragment, so the step it starts needs its own owned line or fragment). Listed line:
+#        every such token line outside them.
+#        The guard checks its own fragments before it reads the dir: a fragment not starting with
+#        `      - ` or not ending on a `      - ` line or a job key line (`  <name>:`), a
+#        setup-node fragment without `          package-manager-cache: false` or with the raw
+#        cache on any other line, a rust-cache fragment without
+#        `          save-if: ${{ github.ref == 'refs/heads/main' }}` or with a second save-if line,
+#        a cache/save fragment without an if: line starting
+#        `        if: ${{ github.ref == 'refs/heads/main' && `, with a second if: line or holding
+#        ||, a pnpm/action-setup fragment holding cache, is exit 3 naming the fragment
+#        (even when the workflow carries the same edit, so the copy and ci.yml cannot be
+#        loosened together); the list or the fragment dir missing or empty is exit 3 too.
+#     R12 (T-088) after a file's `jobs:` line, every line that is not empty or spaces only starts
+#        with a space (probe W3: a column-0 `on:` between two jobs turns the release job into a
+#        key of it; a column-0 comment counts too, there is no comment reader). Listed line:
+#        the column-0 line.
+#     R13 (T-088) no YAML merge key: the raw text << not followed by <, a letter, _, -, ' or "
+#        (bash here-docs <<EOF, <<-EOF, <<'EOF', <<"EOF", <<_X and here-strings <<< pass).
+#        Probe M2: an anchored step list starting with a byte-exact setup-node fragment, merged
+#        into another job's step with cache: pnpm. Listed line: the occurrence.
 #   Exit 0: ok, one line containing "ok:".
 #   Exit 1: a violation; each listed as "<workflows-dir>/<file>:<line>: R<n>: <why>". <line> is
 #           the first line of the block that differs from the owned copy for R2 (for a second
@@ -113,6 +144,11 @@ tgs_name='      - name: Send the installer to Telegram (main and v* tags only)'
 [ -f "$owned_src" ] || { echo "release-guard.test: cannot run: $owned_src not found" >&2; exit 3; }
 [ -f "$upl" ] || { echo "release-guard.test: cannot run: $upl not found" >&2; exit 3; }
 [ -f "$tgs" ] || { echo "release-guard.test: cannot run: $tgs not found" >&2; exit 3; }
+# T-088: the owned never-saving uses lines and the owned cache / setup-node step fragments (R11).
+alines=scripts/ci/action-lines.txt
+csd=scripts/ci/cache-steps
+[ -f "$alines" ] || { echo "release-guard.test: cannot run: $alines not found" >&2; exit 3; }
+[ -d "$csd" ] || { echo "release-guard.test: cannot run: $csd not found" >&2; exit 3; }
 tmp="$(mktemp -d)" || { echo "release-guard.test: cannot run: mktemp failed" >&2; exit 3; }
 trap 'rm -rf "$tmp"' EXIT
 
@@ -450,6 +486,8 @@ check v-header-on-trigger        1 R7 hdiff   # on: gains workflow_dispatch
 # name and its place in the dir (ci.yml there has no release job; fake BASH_ENV path).
 check v-header-env-release-file-second 1 R7 hdiff rel.yml     # S3, S4: rel.yml, sorted after ci.yml
 check v-header-env-release-file-first  1 R7 hdiff a-rel.yml   # S3: a-rel.yml, sorted before ci.yml
+# T-088 (probe W4): R7 also holds for ci.yml when the release job lives in another file.
+check v-trigger-w4-release-moved       1 R7 hdiff             # W4: release job in release.yml (owned header), ci.yml push branches [main]
 
 # ---- R8: no YAML tag (raw `!!`, `!<`, `%TAG`), comments included ---------------------------
 # Review 3 finding 1, decision #122 (probes C4c-C4e, /root/.claude/jobs/97682091/tmp/t085-r3review/
@@ -499,6 +537,42 @@ check v-telegram-other-job         1 R10 '@  other:'    # the owned step in anot
 check v-telegram-steps-in-scalar   1 R10 '@   name: |'  # a fake "    steps:" inside a job's name: | block scalar
 check v-telegram-workflow-env-file 1 R10 '@ X: |' other.yml   # workflow-level env: X: | holds fake windows:/steps: lines and the literal
 check v-telegram-first-file-line-2 1 R10 tdiff a.yml   # review 1 finding 2: a.yml sorts first, token on line 2; the alignment starts before line 1, listed as line 1
+
+# ---- R11: action tokens only on owned lines or inside owned step fragments -------------------
+# T-088 (decisions #124, P-020; replaces ci-wip.sh and setup-node-cache.sh): every fixture is
+# ok-release plus one edit and passes R1-R10, so only R11-R13 can refuse it. Probes W1, W2, S1, S2
+# passed both old guards and release-guard (docs/tasks/T-088.md, Investigation section 1).
+check ok-action-lookalikes            0   # reuses, users, causes, uses_x, xuses; <<EOF, <<-EOF, <<'EOF', <<"EOF", <<_X, <<<; a spaces-only line
+check v-cache-w1-flow-step            1 R11 '@- {name: "cache #1", uses: actions/cache@v4'   # W1: flow-mapping step, " #" inside a quoted value
+check v-cache-w2-explicit-key         1 R11 '@? uses'               # W2: explicit key ? uses / : actions/cache@v4
+check v-cache-w2-explicit-key         1 R11 '@: actions/cache@v4'   # the action-name line is listed too (no uses word on it)
+check v-setup-node-s1-quoted-key      1 R11 '@- uses: actions/setup-node@v5'   # S1: the owned gate fragment plus "cache": pnpm
+check v-setup-node-s2-explicit-key    1 R11 '@- uses: actions/setup-node@v5'   # S2: the owned gate fragment plus ? cache / : pnpm
+check v-setup-node-cache-pnpm         1 R11 '@- uses: actions/setup-node@v5'   # the owned gate fragment, package-manager-cache: false replaced by cache: pnpm
+check v-cache-actions-cache           1 R11 '@- uses: actions/cache@v4'        # actions/cache saves in its post step on every ref
+check v-cache-save-not-main           1 R11 '@uses: actions/cache/save@v6'     # the owned cargo-save fragment, its if: without the main operand
+check v-cache-rust-save-if-true       1 R11 '@- uses: Swatinem/rust-cache@v2'  # the owned rust-cache fragment, save-if: true
+check v-cache-fragment-key-inserted   1 R11 '@- uses: Swatinem/rust-cache@v2'  # a key inside an owned fragment: a second save-if: true (the last one wins)
+check v-cache-pnpm-action-cache       1 R11 '@- uses: pnpm/action-setup@v4'    # pnpm/action-setup with cache: true
+check v-setup-node-after-fragment-end 1 R11 '@- uses: actions/setup-node@v5'  # the byte-exact pnpm/action-setup fragment ends on this uses line; the step it starts (cache: pnpm) is not vouched for
+check v-action-unlisted               1 R11 '@- uses: someone/cache-thing@v1'  # an action that is neither an owned line nor in a fragment
+check v-action-job-uses               1 R11 '@    uses: ./.github/workflows/other.yml'   # a job-level uses: (reusable workflow)
+check v-action-owned-line-trailing-space 1 R11 '@- uses: actions/checkout@v5 '   # byte identity: an owned line plus a trailing space
+check v-cache-second-file             1 R11 '@- uses: Swatinem/rust-cache@v2' other.yaml   # every regular file (.yaml too, no release job)
+# The five action-name tokens, any case, comments included (no comment reader): each line listed.
+check v-action-name-tokens-in-comments 1 R11 '@# Actions/Cache saves'
+check v-action-name-tokens-in-comments 1 R11 '@# setup-node caches'
+check v-action-name-tokens-in-comments 1 R11 '@# Swatinem/Rust-Cache saves'
+check v-action-name-tokens-in-comments 1 R11 '@# cache/save from main'
+check v-action-name-tokens-in-comments 1 R11 '@# PNPM/action-setup with'
+
+# ---- R12: no column-0 line after jobs: ------------------------------------------------------
+check v-trigger-w3-col0-on            1 R12 "$(grep -n -x 'on:' "$fx/v-trigger-w3-col0-on/ci.yml" | sed -n 2p | cut -d: -f1)"   # W3: the second on: line, column 0 before "  release:" (+ push: / branches: [main])
+check v-r12-col0-comment              1 R12 '@# a comment in column 0'   # a comment is text: no comment reader
+
+# ---- R13: no YAML merge key ------------------------------------------------------------------
+check v-cache-merge-key               1 R13 '@- <<: *s'   # M2: steps: &s starts with the byte-exact gate setup-node fragment; <<: *s plus cache: pnpm
+check v-cache-merge-key-spaced        1 R13 '@- << : *s'  # the same, written "<< :" (a raw rule: not only the text "<<:")
 
 # ---- R3: permissions only in the workflow-level block and once in the release block ----------
 check v-write-other-job        1 R3 '@    permissions:'          # windows job gets contents: write
@@ -631,6 +705,86 @@ mutate tg-m6 'inwin && /^        if: \$\{\{ github\.event_name == .push. && \(gi
   run "real M6 (always() && send) [R10]" 1 "$(at "$tmp/tg-m6/ci.yml" "$(tg_if_line "$real/ci.yml")" R10)" "$tmp/tg-m6"
 mutate tg-no-event 'inwin && /^        if: \$\{\{ github\.event_name == .push. && \(github\.ref == .refs\/heads\/main. \|\| startsWith/ { sub(/github\.event_name == .push. && /, "") } { print }' &&
   run "real without event_name [R10]" 1 "$(at "$tmp/tg-no-event/ci.yml" "$(tg_if_line "$real/ci.yml")" R10)" "$tmp/tg-no-event"
+# T-088 R11-R13 and R7 on the real file (ported from ci-wip and setup-node-cache): a cache step
+# loosened in ci.yml alone no longer matches its owned fragment, so its uses line is listed.
+# ingate is 1 on the gate job's lines.
+nth_line() { grep -n -F -- "$2" "$1" | sed -n "${3}p" | cut -d: -f1; }
+mutate gate-cache-pnpm '/^  gate:$/ { ingate = 1 } /^  windows:$/ { ingate = 0 } { print } ingate && $0 == "          package-manager-cache: false" && !d { print "          cache: pnpm"; d = 1 }' &&
+  run "real with cache: pnpm added to the gate setup-node [R11]" 1 \
+    "$(at "$tmp/gate-cache-pnpm/ci.yml" "$(nth_line "$tmp/gate-cache-pnpm/ci.yml" '      - uses: actions/setup-node@v5' 1)" R11)" "$tmp/gate-cache-pnpm"
+mutate win-setup-node-pnpm 'inwin && $0 == "          package-manager-cache: false" && !d { $0 = "          cache: pnpm"; d = 1 } { print }' &&
+  run "real with the windows setup-node's package-manager-cache: false replaced by cache: pnpm [R11]" 1 \
+    "$(at "$tmp/win-setup-node-pnpm/ci.yml" "$(nth_line "$tmp/win-setup-node-pnpm/ci.yml" '      - uses: actions/setup-node@v5' 2)" R11)" "$tmp/win-setup-node-pnpm"
+mutate cargo-save-or '/^        if: \$\{\{ github\.ref == .refs\/heads\/main. && steps\.cargo-registry\./ { sub(/ \}\}$/, " || always() }}") } { print }' &&
+  run "real with || always() in the cargo save if: [R11]" 1 \
+    "$(at "$tmp/cargo-save-or/ci.yml" "$(nth_line "$tmp/cargo-save-or/ci.yml" 'uses: actions/cache/save@v6' 1)" R11)" "$tmp/cargo-save-or"
+mutate pnpm-save-no-main '/^        if: \$\{\{ github\.ref == .refs\/heads\/main. && steps\.pnpm-cache\./ { sub(/github\.ref == .refs\/heads\/main. && /, "") } { print }' &&
+  run "real with the pnpm save if: without the main operand [R11]" 1 \
+    "$(at "$tmp/pnpm-save-no-main/ci.yml" "$(nth_line "$tmp/pnpm-save-no-main/ci.yml" 'uses: actions/cache/save@v6' 2)" R11)" "$tmp/pnpm-save-no-main"
+mutate rust-save-if-true 'inwin && /^          save-if: / { $0 = "          save-if: true" } { print }' &&
+  run "real with rust-cache save-if: true [R11]" 1 \
+    "$(at "$tmp/rust-save-if-true/ci.yml" "$(nth_line "$tmp/rust-save-if-true/ci.yml" '      - uses: Swatinem/rust-cache@v2' 1)" R11)" "$tmp/rust-save-if-true"
+mutate actions-cache 'inwin && /^    steps:$/ && !d { print; print "      - uses: actions/cache@v4"; print "        with:"; print "          path: x"; print "          key: y"; d = 1; next } { print }' &&
+  run "real with an actions/cache step in the windows job [R11]" 1 \
+    "$(at "$tmp/actions-cache/ci.yml" "$(nth_line "$tmp/actions-cache/ci.yml" '      - uses: actions/cache@v4' 1)" R11)" "$tmp/actions-cache"
+mutate col0-on '$0 == "  release:" && !d { print "on:"; print "  push:"; print "    branches: [main]"; d = 1 } { print }' &&
+  run "real with a column-0 on: before the release job [R12]" 1 \
+    "$(at "$tmp/col0-on/ci.yml" "$(grep -n -x 'on:' "$tmp/col0-on/ci.yml" | sed -n 2p | cut -d: -f1)" R12)" "$tmp/col0-on"
+# Characterization (already R7 before T-088): the ci.yml trigger cut to [main] or given paths-ignore.
+mutate trigger-main '!d && $0 == "    branches: [main, \"wip/**\"]" { $0 = "    branches: [main]"; d = 1 } { print }' &&
+  run "real with push branches [main] [R7]" 1 "$(at "$tmp/trigger-main/ci.yml" "$(first_hdiff "$tmp/trigger-main/ci.yml")" R7)" "$tmp/trigger-main"
+mutate trigger-paths '{ print } !d && $0 == "    branches: [main, \"wip/**\"]" { print "    paths-ignore: [\"docs/**\"]"; d = 1 }' &&
+  run "real with push paths-ignore [R7]" 1 "$(at "$tmp/trigger-paths/ci.yml" "$(first_hdiff "$tmp/trigger-paths/ci.yml")" R7)" "$tmp/trigger-paths"
+
+# T-088: the owned list and fragments (R11) agree with the real ci.yml, and say what the retired
+# guards said (test-side reads of the guard's own copies; the guard checks them too, see below).
+# has_block <file> <fragment>: the fragment's lines occur in the file as consecutive lines.
+has_block() {
+  awk -v frag="$2" 'BEGIN { while ((getline l < frag) > 0) F[++n] = l } { L[++m] = $0 }
+    END { if (n == 0) exit 1; for (s = 1; s + n - 1 <= m; s++) { for (k = 1; k <= n && L[s + k - 1] == F[k]; k++); if (k > n) exit 0 } exit 1 }' "$1"
+}
+# frag_kind <fragment>: the action of the fragment's step (its first line holding the word uses,
+# the step-ending last line excluded): setup-node, rust-cache, cache/save, pnpm/action-setup.
+frag_kind() {
+  sed '$d' "$1" | grep -i -E '(^|[^A-Za-z0-9_])uses([^A-Za-z0-9_]|$)' | head -n 1 |
+    grep -o -i -E 'setup-node|rust-cache|cache/save|pnpm/action-setup' | head -n 1 | tr 'A-Z' 'a-z'
+}
+expect "owned list $alines is not empty" test -s "$alines"
+while IFS= read -r al || [ -n "$al" ]; do
+  expect "owned line '$al' occurs in the real ci.yml" grep -q -x -F -- "$al" "$real/ci.yml"
+  expect "owned line '$al' holds the word uses and names no saving action" \
+    bash -c 'grep -q -i -E "(^|[^a-z0-9_])uses([^a-z0-9_]|\$)" <<<"$1" && ! grep -q -i -E "actions/cache@|actions/cache/save|cache/save|rust-cache|setup-node|pnpm/action-setup" <<<"$1"' _ "$al"
+done < "$alines"
+nfrag=0
+for fr in "$csd"/*; do
+  [ -f "$fr" ] || continue
+  nfrag=$((nfrag + 1))
+  expect "fragment $fr starts with a step line" bash -c '[[ "$(head -n 1 "$1")" == "      - "* ]]' _ "$fr"
+  expect "fragment $fr ends on a step line or a job key line" bash -c 'l="$(tail -n 1 "$1")"; [[ "$l" == "      - "* ]] || [[ "$l" =~ ^\ \ [A-Za-z0-9_-]+:$ ]]' _ "$fr"
+  expect "fragment $fr occurs byte for byte in the real ci.yml" has_block "$real/ci.yml" "$fr"
+  body="$(sed '$d' "$fr")"
+  case "$(frag_kind "$fr")" in
+    setup-node)
+      expect "setup-node fragment $fr: package-manager-cache: false" grep -q -x -F '          package-manager-cache: false' <<<"$body"
+      expect "setup-node fragment $fr: the raw cache on no other line" test "$(grep -c -i 'cache' <<<"$body")" = 1 ;;
+    rust-cache)
+      expect "rust-cache fragment $fr: save-if on main only" grep -q -x -F "          save-if: \${{ github.ref == 'refs/heads/main' }}" <<<"$body"
+      expect "rust-cache fragment $fr: one save-if line" test "$(grep -c -i 'save-if' <<<"$body")" = 1 ;;
+    cache/save)
+      expect "cache/save fragment $fr: if: on main only" grep -q -F "        if: \${{ github.ref == 'refs/heads/main' && " <<<"$body"
+      expect "cache/save fragment $fr: one if: line" test "$(grep -c -E '^ *if:' <<<"$body")" = 1
+      expect "cache/save fragment $fr: no ||" test -z "$(grep -F '||' <<<"$body")" ;;
+    pnpm/action-setup)
+      expect "pnpm/action-setup fragment $fr: no cache" test -z "$(grep -i 'cache' <<<"$body")" ;;
+    *)
+      expect "fragment $fr: its step uses setup-node, rust-cache, cache/save or pnpm/action-setup" false ;;
+  esac
+done
+expect "owned fragments in $csd: at least one" test "$nfrag" -gt 0
+# The real cache steps are all owned: each kind the retired guards covered has a fragment.
+for kind in setup-node rust-cache cache/save pnpm/action-setup; do
+  expect "owned fragments in $csd: one for $kind" bash -c 'for f in "$1"/*; do [ -f "$f" ] || continue; sed "\$d" "$f" | grep -q -i -F -- "$2" && exit 0; done; exit 1' _ "$csd" "$kind"
+done
 
 # ---- usage and cannot run -------------------------------------------------------------------
 run "usage: no argument"           2 'usage'
@@ -657,7 +811,8 @@ PATH="$saved_path"
 # guard is copied next to its release-job.yml; the header copy is left out or truncated.
 owned_guard() {
   mkdir -p "$tmp/$1"
-  cp -p "$guard" scripts/ci/release-job.yml "$upl" "$tgs" "$tmp/$1/" 2>/dev/null
+  cp -p "$guard" scripts/ci/release-job.yml "$upl" "$tgs" "$alines" "$tmp/$1/" 2>/dev/null
+  cp -pR "$csd" "$tmp/$1/" 2>/dev/null
 }
 real_guard="$guard"
 if owned_guard g-header-missing; then
@@ -684,7 +839,7 @@ guard="$real_guard"
 # copied next to its other two owned copies; the upload copy is left out or broken.
 upload_guard() {
   mkdir -p "$tmp/$1"
-  if ! cp -p "$guard" scripts/ci/release-job.yml scripts/ci/release-header.yml "$tgs" "$tmp/$1/"; then
+  if ! cp -p "$guard" scripts/ci/release-job.yml scripts/ci/release-header.yml "$tgs" "$alines" "$tmp/$1/" || ! cp -pR "$csd" "$tmp/$1/"; then
     echo "FAIL $1: cannot copy the guard and its owned copies (fix the test)" >&2
     failed=$((failed + 1))
     return 1
@@ -712,7 +867,7 @@ guard="$real_guard"
 # the top) is never a pass. The guard is copied next to its other three owned copies.
 tgs_guard() {
   mkdir -p "$tmp/$1"
-  if ! cp -p "$guard" scripts/ci/release-job.yml scripts/ci/release-header.yml "$upl" "$tmp/$1/"; then
+  if ! cp -p "$guard" scripts/ci/release-job.yml scripts/ci/release-header.yml "$upl" "$alines" "$tmp/$1/" || ! cp -pR "$csd" "$tmp/$1/"; then
     echo "FAIL $1: cannot copy the guard and its owned copies (fix the test)" >&2
     failed=$((failed + 1))
     return 1
@@ -741,6 +896,88 @@ if tgs_guard g-tgs-no-name; then
   run "cannot run: owned send-step copy does not start with the name line" 3 'cannot run.*telegram-send-step\.yml' "$real"
 fi
 guard="$real_guard"
+
+# T-088: the owned list scripts/ci/action-lines.txt and the owned fragments scripts/ci/cache-steps/
+# (R11) are guard inputs too. r11_guard <name>: the guard and all its owned copies in
+# $tmp/<name>/g, a copy of ok-release in $tmp/<name>/wf.
+r11_guard() {
+  mkdir -p "$tmp/$1/g" "$tmp/$1/wf"
+  if ! cp -p "$real_guard" scripts/ci/release-job.yml scripts/ci/release-header.yml "$upl" "$tgs" "$alines" "$tmp/$1/g/" ||
+     ! cp -pR "$csd" "$tmp/$1/g/" || ! cp -p "$owned_src" "$tmp/$1/wf/"; then
+    echo "FAIL $1: cannot copy the guard and its owned copies (fix the test)" >&2
+    failed=$((failed + 1))
+    return 1
+  fi
+}
+# r11_cannot <name> <label> <ERE>: the guard copy in $tmp/<name>/g on $tmp/<name>/wf is exit 3.
+r11_cannot() {
+  guard="$tmp/$1/g/release-guard.sh"
+  run "$2" 3 "$3" "$tmp/$1/wf"
+  guard="$real_guard"
+}
+if r11_guard g-alines-missing; then
+  rm -f "$tmp/g-alines-missing/g/action-lines.txt"
+  r11_cannot g-alines-missing "cannot run: owned action lines missing" 'cannot run.*action-lines\.txt'
+fi
+if r11_guard g-alines-empty; then
+  : > "$tmp/g-alines-empty/g/action-lines.txt"
+  r11_cannot g-alines-empty "cannot run: owned action lines empty" 'cannot run.*action-lines\.txt'
+fi
+if r11_guard g-steps-missing; then
+  rm -rf "$tmp/g-steps-missing/g/cache-steps"
+  r11_cannot g-steps-missing "cannot run: owned fragment dir missing" 'cannot run.*cache-steps'
+fi
+if r11_guard g-steps-empty; then
+  rm -f "$tmp/g-steps-empty/g/cache-steps"/*
+  r11_cannot g-steps-empty "cannot run: owned fragment dir empty" 'cannot run.*cache-steps'
+fi
+# frag_case <name> <fragment basename> <label> <sed script>: the fragment edited by the sed script
+# in the guard's copy AND inserted at the end of the gate job of the workflow copy, so the edited
+# fragment occurs byte for byte and only the guard's check of its own copy can refuse it (the copy
+# and ci.yml loosened together). A fragment ending on a job key line `  windows:` is completed by
+# ok-release's own `  windows:` line; any other is followed by a run: line. Exit 3 naming it.
+frag_case() {
+  local n="$1" base="$2" label="$3" sc="$4" fr t
+  r11_guard "$n" || return
+  fr="$tmp/$n/g/cache-steps/$base"
+  if [ ! -f "$csd/$base" ]; then
+    echo "FAIL $n: $csd/$base not found (fix the test with the owned fragments)" >&2
+    failed=$((failed + 1))
+    return
+  fi
+  sed -e "$sc" "$csd/$base" > "$fr"
+  if cmp -s "$csd/$base" "$fr"; then
+    echo "FAIL $n: the edit did not apply to $base (fix the test)" >&2
+    failed=$((failed + 1))
+    return
+  fi
+  t="$tmp/$n/ins"
+  if [ "$(tail -n 1 "$fr")" = "  windows:" ]; then sed '$d' "$fr" > "$t"; else { cat "$fr"; echo "        run: echo next"; } > "$t"; fi
+  awk -v t="$t" '{ print } NR == 31 { while ((getline l < t) > 0) print l }' "$owned_src" > "$tmp/$n/wf/ci.yml"
+  r11_cannot "$n" "$label" "cannot run.*$(ere "$base")"
+}
+frag_case g-frag-sn-cache-pnpm gate-setup-node.yml "cannot run: setup-node fragment with cache: pnpm instead of package-manager-cache: false" \
+  's/^          package-manager-cache: false$/          cache: pnpm/'
+frag_case g-frag-sn-cache-added gate-setup-node.yml "cannot run: setup-node fragment with cache: pnpm beside package-manager-cache: false" \
+  '/^          package-manager-cache: false$/a\          cache: pnpm'
+frag_case g-frag-rust-save-if-true windows-rust-cache.yml "cannot run: rust-cache fragment with save-if: true" \
+  's/^          save-if: .*$/          save-if: true/'
+frag_case g-frag-rust-two-save-if windows-rust-cache.yml "cannot run: rust-cache fragment with a second save-if: true after the main one (the last one wins)" \
+  '/^          save-if: /a\          save-if: true'
+frag_case g-frag-save-two-if gate-cargo-save.yml "cannot run: cache/save fragment with a second if: without the main operand (the last one wins)" \
+  '2a\        if: ${{ steps.cargo-registry.outputs.cache-hit != '"'"'true'"'"' }}'
+frag_case g-frag-save-no-main gate-cargo-save.yml "cannot run: cache/save fragment whose if: lacks the main operand" \
+  "s/github.ref == 'refs\/heads\/main' && //"
+frag_case g-frag-save-or gate-cargo-save.yml "cannot run: cache/save fragment whose if: holds ||" \
+  's/^\(        if: .*\) }}$/\1 || always() }}/'
+frag_case g-frag-pnpm-cache windows-pnpm-action-setup.yml "cannot run: pnpm/action-setup fragment with cache: true" \
+  '1a\        with:\n          cache: true'
+frag_case g-frag-short-end gate-setup-node.yml "cannot run: fragment not ending on a step-ending line (a key could be appended)" \
+  '$d'
+frag_case g-frag-comment-end gate-setup-node.yml "cannot run: fragment ending on a comment line (the next key joins the step)" \
+  '$s/^.*$/      # end of the step/'
+frag_case g-frag-no-step-start gate-cargo-save.yml "cannot run: fragment not starting with a step line (keys before it are unpinned)" \
+  '1d'
 
 # Every committed fixture dir is in the table.
 for d in "$fx"/*/; do

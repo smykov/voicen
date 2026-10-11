@@ -1,0 +1,5 @@
+      - uses: actions/checkout@v5
+        uses: actions/cache/restore@v6
+      - uses: dtolnay/rust-toolchain@master
+      - uses: actions/upload-artifact@v4
+      - uses: actions/download-artifact@v4

@@ -1,0 +1,9 @@
+name: Other
+on: push
+permissions:
+  contents: read
+jobs:
+  other:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: Swatinem/rust-cache@v2

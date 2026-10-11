@@ -1,0 +1,10 @@
+      - name: Save the cargo registry of the core image (main only)
+        if: ${{ github.ref == 'refs/heads/main' && steps.cargo-registry.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            .teamwright/cache/core/_usr_local_cargo_registry/index
+            .teamwright/cache/core/_usr_local_cargo_registry/cache
+          key: ${{ steps.cargo-registry.outputs.cache-primary-key }}
+
+  windows:
