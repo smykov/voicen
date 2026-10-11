@@ -1,275 +1,131 @@
 #!/usr/bin/env bash
-# T-035 guard (class ci-toolchain, F-001/F-002; docs/decisions/ci-toolchain.md).
-# src-tauri/build.rs gives the Windows link configuration of the release exe to the bin and,
-# through rustc-link-arg-tests, to every src-tauri/tests/*.rs integration test. No cargo
-# selector reaches the other test-exe kinds of the voicen package without also reaching the
-# bin, so those kinds must contain no tests, and the lib doctest kind stays off. Doc comments
-# are not read (T-038, decision #41): a doc block becomes an exe only through the two cargo
-# switches pinned in steps 3 and 4. This check fails when any of the following is present:
-#   1. under src-tauri/src, read by a lexer (scripts/ci/shell-test-layout.awk) that drops
-#      every comment (doc comments included) and string/char literals, so text inside them
-#      never counts:
-#      - a test attribute anywhere on a line, with any whitespace or line breaks inside it:
-#        #[test], # [test], #[<path>::test], #[test_case(..)] (any attribute whose name
-#        starts with `test`), also as an attribute argument of cfg_attr;
-#      - a cfg or cfg_attr predicate naming `test`, on one line or split across lines:
-#        #[cfg(test)], #![cfg(test)], #[cfg(all(windows, test))], #[cfg_attr(test, ..)];
-#      - a block comment, string or attribute left open at the end of a file;
-#      - a source rustc compiles from outside the scanned files: #[path = ..] (also inside
-#        cfg_attr), the token `include` anywhere in code (include!, renamed by `use`,
-#        r#include; also an identifier named `include`, fail-closed), and any symlink
-#        under src-tauri/src;
-#   2. src-tauri/benches, src-tauri/examples, or [[bench]] / [[example]] in
-#      src-tauri/Cargo.toml: bench and example exes;
-#   3. in src-tauri/Cargo.toml (raw lines, table headers tracked):
-#      - a line-start `path` key (bare or quoted) under a [lib], [[bin]], [[test]], [[bench]]
-#        or [[example]] header (a target file the scan does not read); `path` in dependency
-#        tables and inline `{ path = .. }` pass;
-#      - no line `doctest = false` (spaces and a trailing comment allowed) in the [lib] table,
-#        or no [lib] table: plain `cargo test` would build the lib doctests;
-#      - any other line containing `doctest` that is not a full-line `#` comment (`true`, a
-#        quoted or dotted key, an inline table, the key under another table);
-#      - `"""` or `'''` anywhere: a multi-line string could fake a [lib] header for the line
-#        tracker;
-#      - a line that is not self-contained: once single-line strings (basic with \" and \\
-#        escapes, literal without) and then the comment are removed, its [ ] and { } do not
-#        nest and close on the line, or a string is left open. An element of a multi-line
-#        array or inline table could fake a [lib] header or end a target table early. Fail-
-#        closed false positive: an array or inline table split over lines, which TOML accepts;
-#        keep arrays and inline tables on one line;
-#      - a backslash in a quoted key (a string followed by = or .) or in a table header: an
-#        escape could spell path, lib or bin past the tracker;
-#      - a line starting with [ that the header pattern does not read;
-#      - a header of one key whose quoted name holds a character other than A-Z a-z 0-9 _ -
-#        (["li b"], ["lib#x"], ["l]i[b"] name tables other than lib); ["lib"] counts as [lib],
-#        and later keys of a dotted header ([target.'cfg(windows)'.dependencies]) may hold any;
-#      - a byte outside printable ASCII and tab in code (strings blanked, comment cut, the
-#        trailing \r of a CRLF line stripped): a UTF-8 BOM or an invisible space could hide a
-#        header or a key. Non-ASCII text inside strings and comments passes;
-#      - before the first table header, any line other than a blank, whitespace-only or comment
-#        line (a line whose code, strings blanked and the comment cut, is not empty, or that
-#        holds a string, also a lone "x" or 'y' line of strings only): a root-level key such
-#        as `bin = [{ path = .. }]` or `example = [{ .., test = true }]` makes a target table
-#        without any header. Stable cargo has no root-level key, so every key there is refused;
-#      The tracker does not parse TOML: it accepts only that whitelist grammar, and within it
-#      every target table comes from a header it follows (step 3 below says why);
-#   4. `--doc` or `rustdoc` in a *.yml / *.yaml file of the workflows dir, for any package (the
-#      scan cannot tell which one a step selects): `cargo test --doc` and
-#      `cargo rustdoc -- --test` build the lib doctests whatever `doctest` says (cargo 1.99
-#      unit_generator.rs:425-440).
-# Not caught (outside what a raw scan can see): tests a proc macro generates from an
-# attribute with another name; a dependency's macro that expands to include!; a workflow that
-# reaches `--doc` through a script or a .cargo alias. Each is loud on the Windows job, not
-# silent.
-# Host bash, find, sort, grep and awk; no toolchain.
+# T-035/T-038/T-092 guard (class ci-toolchain F-002, guard-model F-003/F-015, P-020;
+# docs/decisions/ci-toolchain.md). src-tauri/build.rs gives the Windows link configuration of the
+# release exe (the Common-Controls manifest) to the bin and, through rustc-link-arg-tests, to every
+# kind-test target (src-tauri/tests/*.rs). No other test exe of the voicen package may hold shell
+# code: not the lib or bin unit-test exe, not a lib doctest, example or bench.
 #
-# Usage: scripts/ci/shell-test-layout.sh [shell-dir [workflows-dir]]
-#        (defaults: src-tauri, .github/workflows)
-# Exit 0: layout ok. Exit 1: a violation (listed). Exit 3: cannot run (shell dir or workflows
-# dir missing, find, sort, grep or awk error); never reported as a pass.
+# The guard reads no Rust, TOML or workflow text (T-092: a macro-built #[cfg(test)] #[test] and a
+# quoted `cargo test --d"oc"` passed the old lexer). It decides on two things only:
+#   1. cargo's own target list: `cargo metadata --no-deps --offline --format-version 1` for
+#      <shell-dir>/Cargo.toml, run in the core image (scripts/tw-run core). The voicen package's
+#      targets, without kind-test rows, projected one per line as
+#        <kinds,comma-joined> <name> <src_path relative to the shell dir> test=<b> doctest=<b>
+#      and sorted, must equal scripts/ci/shell-targets.txt byte for byte. So cargo itself reports
+#      test = false and doctest = false for lib and bin, the crate roots are the owned files, and
+#      any other target (example, bench, a second bin, a missing build.rs) is a difference.
+#   2. line 1 of every lib and bin crate root cargo reports, byte for byte (no trailing \r):
+#      lib `#![cfg(not(any(test, doctest)))]`, bin `#![cfg(not(test))]`. rustc applies a
+#      crate-level cfg before name resolution, so under --cfg test (cargo test --lib, --bins,
+#      --all-targets, any spelling) and doctest (cargo test --doc, cargo rustdoc -- --test) the
+#      crate is empty: nothing in it reaches a test exe, whatever macro builds it. test = false
+#      alone does not do this: --lib, --bins and --all-targets select the targets regardless
+#      (cargo 1.99 unit_generator.rs; T-092 Investigation §2-3).
+# The JSON is read with host `python3 -I` (json module), not a grammar model.
+#
+# Usage: scripts/ci/shell-test-layout.sh [shell-dir]   (repo-relative; default src-tauri)
+# Exit 0: as owned (prints "ok:"). Exit 1: a violation; the listing names the target or crate
+# root. Exit 3: cannot run (no Cargo.toml, docker, the core image or cargo metadata failing, the
+# JSON not readable, a crate root not readable); never reported as a pass.
 set -uo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$root" || exit 3
 shell="${1:-src-tauri}"
-workflows="${2:-.github/workflows}"
-scan=scripts/ci/shell-test-layout.awk
-if [ ! -d "$shell/src" ] || [ ! -f "$shell/Cargo.toml" ]; then
-  echo "shell-test-layout: cannot run: $shell/src or $shell/Cargo.toml not found" >&2
-  exit 3
-fi
-# A workflows dir that cannot be listed would hide a --doc step: never a pass.
-if [ ! -d "$workflows" ] || [ ! -r "$workflows" ] || [ ! -x "$workflows" ]; then
-  echo "shell-test-layout: cannot run: workflows dir $workflows not found or not readable" >&2
-  exit 3
-fi
+owned=scripts/ci/shell-targets.txt
+lib_pin='#![cfg(not(any(test, doctest)))]'
+bin_pin='#![cfg(not(test))]'
 
-# Each scan fails closed: a tool error is "cannot run" (exit 3), never a pass.
 cannot_run() { echo "shell-test-layout: cannot run: $1" >&2; exit 3; }
-[ -f "$scan" ] || cannot_run "$scan not found"
+# scripts/tw-run mounts only the repository: the shell dir must lie inside it.
+case "$shell" in
+  /* | .. | ../* | */.. | */../*) cannot_run "$shell is not a repo-relative dir inside the repository" ;;
+esac
+[ -f "$shell/Cargo.toml" ] || cannot_run "$shell/Cargo.toml not found"
+[ -f "$owned" ] || cannot_run "$owned not found"
+command -v python3 >/dev/null 2>&1 || cannot_run "python3 not found"
+run="$(mktemp -d)" || cannot_run "mktemp failed"
+trap 'rm -rf "$run"' EXIT
+
+# 1. cargo's own target list (no build, no network).
+if ! scripts/tw-run core -- 'cargo metadata --no-deps --offline --format-version 1 --manifest-path' \
+  "$shell/Cargo.toml" >"$run/metadata.json" 2>"$run/metadata.err"; then
+  sed 's/^/  | /' "$run/metadata.err" >&2
+  cannot_run "cargo metadata failed in the core image for $shell/Cargo.toml (image missing: make core-image)"
+fi
+
+# The projection and the line-1 findings. Any error here is exit 3 (the reader never decides a
+# violation by failing); violations are data: the projection on stdout, and in pins.txt one line
+# per crate root whose line 1 is not its pin.
+if ! python3 -I - "$run/metadata.json" "$shell" "$lib_pin" "$bin_pin" "$run/pins.txt" \
+  >"$run/targets.txt" 2>"$run/py.err" <<'PY'; then
+import json
+import os
+import sys
+
+meta_path, shell, lib_pin, bin_pin, pins_out = sys.argv[1:6]
+with open(meta_path, encoding="utf-8") as f:
+    meta = json.load(f)
+want_manifest = os.path.normpath(os.path.join(shell, "Cargo.toml"))
+# cargo reports absolute paths in its own file system (/work/... in the core image): the
+# package is the one named voicen whose manifest path ends with the repo-relative manifest.
+packages = [
+    p for p in meta["packages"]
+    if p["name"] == "voicen"
+    and os.path.normpath(p["manifest_path"]).endswith(os.sep + want_manifest)
+]
+if len(packages) != 1:
+    sys.exit("expected one package voicen at %s, cargo metadata reports %d" % (want_manifest, len(packages)))
+base = os.path.dirname(os.path.normpath(packages[0]["manifest_path"]))
+lib_kinds = {"lib", "rlib", "dylib", "cdylib", "staticlib", "proc-macro"}
+rows = []
+findings = []
+for t in packages[0]["targets"]:
+    kinds = t["kind"]
+    if kinds == ["test"]:
+        continue
+    rel = os.path.relpath(os.path.normpath(t["src_path"]), base)
+    rows.append("%s %s %s test=%s doctest=%s" % (
+        ",".join(kinds), t["name"], rel, str(t["test"]).lower(), str(t["doctest"]).lower()))
+    if "bin" in kinds:
+        pin = bin_pin
+    elif lib_kinds.intersection(kinds):
+        pin = lib_pin
+    else:
+        continue
+    # The crate root is read in the repo (the host path of cargo's src_path).
+    local = os.path.join(shell, rel)
+    with open(local, "rb") as f:
+        line1 = f.read().split(b"\n", 1)[0]
+    if line1 != pin.encode("utf-8"):
+        findings.append("%s: line 1 is not the crate-level cfg pin (want: %s, got: %s)" % (
+            local, pin, line1.decode("utf-8", "backslashreplace")))
+for r in sorted(rows):
+    print(r)
+with open(pins_out, "w", encoding="utf-8") as f:
+    f.write("".join(x + "\n" for x in findings))
+PY
+  sed 's/^/  | /' "$run/py.err" >&2
+  cannot_run "could not read the cargo metadata of $shell (python3 -I)"
+fi
+
 found=""
-# add <note> <hits...>: one listed line per non-empty hit, prefixed with <prefix>.
-add() {
-  local note="$1" prefix="${3:-}" hit
-  while IFS= read -r hit; do
-    [ -n "$hit" ] && found="$found  $prefix$hit  ($note)"$'\n'
-  done <<<"$2"
-}
-
-# 1. Test attributes, cfg(test) predicates and outside sources under src (one awk lexer).
-# A path with a newline splits into names that do not exist, so awk fails: still exit 3.
-# Symlinks are refused rather than followed: find -L would skip a dangling link silently
-# and walk a linked dir outside src.
-links="$(find "$shell/src" -type l)" || cannot_run "find failed on $shell/src"
-links="$(LC_ALL=C sort <<<"$links")" || cannot_run "sort failed on the symlink list of $shell/src"
-add "a symlink: rustc compiles its target, which the guard does not scan; keep a regular file under src" "$links"
-list="$(find "$shell/src" -name '*.rs' -type f)" || cannot_run "find failed on $shell/src"
-list="$(LC_ALL=C sort <<<"$list")" || cannot_run "sort failed on the file list of $shell/src"
-files=()
-[ -n "$list" ] && mapfile -t files <<<"$list"
-if [ "${#files[@]}" -gt 0 ]; then
-  hits="$(LC_ALL=C awk -f "$scan" "${files[@]}")" || cannot_run "awk failed on $shell/src"
-  while IFS= read -r hit; do
-    [ -n "$hit" ] && found="$found  $hit"$'\n'
-  done <<<"$hits"
+if ! diff -u "$owned" "$run/targets.txt" >"$run/targets.diff"; then
+  found="${found}  the voicen targets cargo reports (kind name src_path test doctest, kind-test rows left out) differ from $owned (- owned, + reported):"$'\n'
+  found="${found}$(tail -n +3 "$run/targets.diff" | sed 's/^/    /')"$'\n'
 fi
-
-# 2. Bench and example targets. grep: 0 = hits, 1 = none, 2 = error.
-for d in benches examples; do
-  [ -e "$shell/$d" ] && add "bench or example exes are not configured by build.rs" "$shell/$d/"
-done
-hits="$(grep -nE '^[[:space:]]*\[\[[[:space:]]*(bench|example)[[:space:]]*\]\]' "$shell/Cargo.toml")"
-[ $? -le 1 ] || cannot_run "grep failed on $shell/Cargo.toml"
-add "a bench or example target: its exe is not configured by build.rs" "$hits" "$shell/Cargo.toml:"
-
-# 3. src-tauri/Cargo.toml, raw lines with table-header tracking, in one awk. Each finding is
-# tagged with its rule: P target path, D a doctest line other than the pin, M a multi-line
-# string, B a line that is not self-contained, C a byte outside printable ASCII and tab in
-# code, K a backslash in a quoted key or a header, H a line starting with [ that is not a plain
-# header, Q a one-key header whose quoted name holds other than bare-key characters, R a line
-# before the first header that is not blank or a comment, L a [lib] table without the pin, N no
-# [lib] table.
-# What the tracker guarantees (T-038 review rounds 1 to 3, decision #42 B): it does not parse
-# TOML. It accepts only a whitelist grammar and refuses every line outside it, fail-closed:
-# every line self-contained (B, M), its code (single-line strings blanked, the comment cut)
-# printable ASCII and tab (C), no backslash in a quoted key or a header (K), every line whose
-# code starts with [ a header of bare or quoted dotted keys (H), a one-key header naming its
-# table bare or quoted with bare-key characters only (Q), and nothing but blank lines and
-# comments before the first header (R). In a manifest that passes, a line is a table header
-# exactly when TOML reads one, and a one-key header names exactly the table TOML opens. A
-# target table has only three other sources in TOML. A dotted key or an inline value: under a
-# header they belong to that header's table (lib.path under [package] is package.lib.path),
-# and at the root R refuses them. A dotted header, which creates its parent table: [lib.x]
-# makes `lib`. The tracker reads [lib.x] as the table lib.x, not lib, so it counts as no [lib]:
-# without a real [lib] header N refuses the manifest (cargo 1.99 builds that implicit lib with
-# doctest on), and with one, the keys under [lib.x] belong to lib.x, not to lib, so they add
-# no target field (no path, no doctest). [bin.x], [test.x], [bench.x] and [example.x] make a
-# table where cargo needs an array, and cargo rejects the manifest; after a real [[bin]] they
-# only add a subtable to that bin, again no target field. So every [lib], [[bin]], [[test]],
-# [[bench]] and [[example]] table of a manifest that passes is opened by a header the tracker
-# follows, and the pin is read only from such a [lib].
-# - R: before the first line the header pattern reads, a line is refused when its code (strings
-#   blanked, the comment cut) holds anything but spaces and tabs, or when it holds a string at
-#   all (a lone "x" or 'y' line, which cargo rejects anyway; v-cargo-root-lone-string). Blank,
-#   whitespace-only and comment lines pass, whatever the comment holds. Stable cargo has no
-#   root-level key (cargo-features is nightly-only), so nothing in use is refused.
-# - B: each line is scanned left to right; single-line basic strings ("..", with \" and \\
-#   escapes) and literal strings ('..', no escapes) are removed, then the comment from the
-#   first # left. The [ ] and { } left must nest and close on the line, and no string may be
-#   left open. So no element of a multi-line array or inline table can pose as a header (a
-#   fake [lib]) or end a target table early. The false positive: an array or inline table
-#   split over lines is refused although TOML accepts it; keep them on one line.
-# - C: after the trailing \r of a CRLF line is stripped, the code may hold only bytes 0x20-0x7E
-#   and tab. A UTF-8 BOM (which cargo strips) or an invisible space before [[bin]] or a key
-#   would keep the line from reading as a header or key. Non-ASCII in strings and comments is
-#   not code and passes. The false positive: a file saved with a BOM.
-# - K: a quoted key (a string followed by = or .) or a header line holding a backslash; an
-#   escape such as "p\u0061th" or [["b\u0069n"]] spells path or bin past the tracker.
-# - H: with B and C, a line whose code starts with [ can only be a header, so one the header
-#   pattern does not read is refused rather than leaving the tracker in the previous table.
-# - Q: the table name is read from the scan, with each quoted key replaced by its content when
-#   that is bare-key characters only ([A-Za-z0-9_-]*) and by a marker otherwise. A one-key
-#   header holding the marker is refused: ["li b"], ["lib#x"], ["l'i'b"] or ["l]i[b"] names a
-#   table cargo ignores, which stripping quotes would read as lib. So quoting a one-key name
-#   changes nothing, and ["lib"] is [lib]. A dotted header never names a target table, so its
-#   keys may hold other characters ([target.'cfg(windows)'.dependencies]).
-# A line counts as a header only when it is one; dependency tables (`[dependencies.x]`,
-# `[target.'cfg(..)'.dev-dependencies.x]`) pass.
-# Target paths: a line-start `path` key (bare or quoted) under a [lib], [[bin]], [[test]],
-# [[bench]] or [[example]] header (spaces inside the brackets, and quotes around a bare-key
-# name, allowed).
-# The doctest pin: the line `doctest = false` inside [lib]. Any other line naming `doctest`
-# that is not a full-line comment is refused, and so is any `"""` or `'''`, since a
-# multi-line string could hold a fake [lib] header and pin.
-hits="$(LC_ALL=C awk '
-  BEGIN { key = "([A-Za-z0-9_-]+|\"[^\"]*\"|\047[^\047]*\047)"
-          hdr = "^[ \t]*\\[\\[?[ \t]*" key "([ \t]*\\.[ \t]*" key ")*[ \t]*\\]\\]?[ \t]*(#.*)?$"
-          pin = "^[ \t]*doctest[ \t]*=[ \t]*false[ \t]*(#.*)?$" }
-  { sub(/\r$/, "") }
-  index($0, "\"\"\"") || index($0, "\047\047\047") { print "M" FNR ":" $0 }
-  { code = ""; name = ""; open = 0; esckey = 0; hasstr = 0; n = length($0); i = 1
-    while (i <= n) {
-      c = substr($0, i, 1)
-      if (c == "#") break
-      if (c != "\"" && c != "\047") { code = code c; name = name c; i++; continue }
-      q = c; str = ""; closed = 0; hasstr = 1; i++
-      while (i <= n) {
-        c = substr($0, i, 1)
-        if (q == "\"" && c == "\\") { str = str substr($0, i, 2); i += 2; continue }
-        i++
-        if (c == q) { closed = 1; break }
-        str = str c
-      }
-      if (!closed) { open = 1; break }
-      after = substr($0, i); sub(/^[ \t]+/, "", after); c = substr(after, 1, 1)
-      if (index(str, "\\") && (c == "=" || c == ".")) esckey = 1
-      code = code " "
-      name = name (str ~ /^[A-Za-z0-9_-]*$/ ? str : "\"")
-    }
-    stack = ""; bad = open
-    for (j = 1; j <= length(code) && !bad; j++) {
-      c = substr(code, j, 1)
-      if (c == "[" || c == "{") stack = stack c
-      else if (c == "]" || c == "}") {
-        top = substr(stack, length(stack), 1)
-        if ((c == "]" && top != "[") || (c == "}" && top != "{")) bad = 1
-        else stack = substr(stack, 1, length(stack) - 1)
-      }
-    }
-    if (bad || stack != "") print "B" FNR ":" $0
-    if (code ~ /[^\t -~]/) print "C" FNR ":" $0
-    header = (code ~ /^[ \t]*\[/)
-    if (esckey || (header && index(substr($0, 1, i - 1), "\\"))) print "K" FNR ":" $0
-    if (header && $0 !~ hdr) print "H" FNR ":" $0
-    if ($0 ~ hdr) seen = 1
-    else if (!seen && (code ~ /[^ \t]/ || hasstr)) print "R" FNR ":" $0 }
-  $0 ~ hdr { t = name; gsub(/[][ \t]/, "", t)
-             if (index(t, "\"") && !index(t, ".")) { print "Q" FNR ":" $0; t = "" }
-             target = (t == "lib" || t == "bin" || t == "test" || t == "bench" || t == "example")
-             inlib = (t == "lib"); if (inlib) { libs++; libline = FNR; libtext = $0 }; next }
-  target && /^[ \t]*("path"|\047path\047|path)[ \t]*=/ { print "P" FNR ":" $0 }
-  /doctest/ && !/^[ \t]*#/ { if (inlib && $0 ~ pin) pinned = 1; else print "D" FNR ":" $0 }
-  END { if (!libs) print "N"; else if (!pinned) print "L" libline ":" libtext }
-' "$shell/Cargo.toml")" || cannot_run "awk failed on $shell/Cargo.toml"
-cargo="$shell/Cargo.toml"
-while IFS= read -r hit; do
-  case "$hit" in
-    P*) add "a target path under [lib], [[bin]], [[test]], [[bench]] or [[example]]: rustc compiles a file the guard does not scan; keep the default src/lib.rs, src/main.rs and tests/<name>.rs, without a path key" "${hit#P}" "$cargo:" ;;
-    D*) add "a doctest key other than the line \`doctest = false\` in [lib]: keep exactly that one line" "${hit#D}" "$cargo:" ;;
-    M*) add "a multi-line string: it could hide or fake a [lib] header; write the value on one line" "${hit#M}" "$cargo:" ;;
-    B*) add "a line that is not self-contained ([ ] or { } do not close on the line once single-line strings and the comment are removed, or a string is left open): an array or inline table split over lines can fake or hide a table header for the line tracker; keep arrays and inline tables on one line" "${hit#B}" "$cargo:" ;;
-    K*) add "a backslash in a quoted key or a table header: an escape can spell path, lib or bin past the line tracker; write keys and headers without escapes" "${hit#K}" "$cargo:" ;;
-    Q*) add "a quoted table name holding characters other than A-Z a-z 0-9 _ -: it names a table other than the bare word it resembles (e.g. [\"li b\"] is not [lib]), so the line tracker cannot tell which table follows; write a one-key table name bare, or quoted with those characters only" "${hit#Q}" "$cargo:" ;;
-    C*) add "a byte outside printable ASCII and tab in code (outside strings and comments), such as a UTF-8 byte order mark or an invisible space: it can hide a table header or a key from the line tracker; save the file as plain UTF-8 without a BOM and keep non-ASCII text inside strings or comments" "${hit#C}" "$cargo:" ;;
-    R*) add "nothing but blank lines and comments before the first [table] header in Cargo.toml: a root-level key (bin = [{ path = .. }], example = [{ .., test = true }]) makes a target table without any header; move the key under its table or delete it" "${hit#R}" "$cargo:" ;;
-    H*) add "a line starting with [ that is not a plain table header: the line tracker cannot tell which table follows; write [name] or [[name]] with bare or quoted dotted keys" "${hit#H}" "$cargo:" ;;
-    L*) add "[lib] has no line \`doctest = false\`: plain cargo test would build the lib doctests, an exe build.rs does not configure" "${hit#L}" "$cargo:" ;;
-    N) add "no [lib] table with \`doctest = false\`: the lib (src/lib.rs) keeps doctests on, an exe build.rs does not configure" "$cargo: no [lib] table" ;;
-  esac
-done <<<"$hits"
-
-# 4. The workflows dir: `--doc` or `rustdoc` (cargo test --doc, cargo rustdoc -- --test)
-# builds the lib doctests even with `doctest = false`. Refused for every package: a raw scan
-# cannot tell which package a step selects. GitHub reads *.yml and *.yaml at the
-# top of the dir; an empty dir has nothing to scan. /dev/null makes grep name the file even
-# when there is only one. grep: 0 = hits, 1 = none, 2 = error.
-shopt -s nullglob
-wfiles=("$workflows"/*.yml "$workflows"/*.yaml)
-shopt -u nullglob
-if [ "${#wfiles[@]}" -gt 0 ]; then
-  hits="$(grep -nE -e '--doc([^A-Za-z0-9_-]|$)|rustdoc' -- "${wfiles[@]}" /dev/null)"
-  [ $? -le 1 ] || cannot_run "grep failed on $workflows"
-  add "--doc or rustdoc in a workflow step, for any package, since the scan cannot tell which package a step selects: for voicen it builds the lib doctests whatever [lib] doctest says, an exe build.rs does not configure; test the shell with cargo test -p voicen, and other packages' doctests run in cargo test --workspace --exclude voicen" "$hits"
-fi
+while IFS= read -r finding; do
+  [ -n "$finding" ] && found="${found}  ${finding}"$'\n'
+done <"$run/pins.txt"
 
 if [ -n "$found" ]; then
   {
-    echo "shell-test-layout: FAIL: shell tests belong only in $shell/tests/*.rs (or, for platform-independent logic, in crates/voicen-core)."
-    echo "Only integration tests get the release exe's Windows link configuration from $shell/build.rs;"
-    echo "any other test exe of the voicen package links or starts only partly on Windows CI (F-001, F-002)."
-    echo "Lib doctests stay off: [lib] doctest = false in $shell/Cargo.toml, and no --doc or rustdoc in $workflows."
+    echo "shell-test-layout: FAIL: only integration tests ($shell/tests/*.rs) may become a test exe of the voicen package;"
+    echo "only they get the release exe's Windows link configuration from $shell/build.rs (F-002)."
+    echo "Keep [lib] test = false and doctest = false, [[bin]] name = \"voicen\" test = false, the targets in $owned,"
+    echo "and line 1 of the lib crate root '$lib_pin', of the bin crate root '$bin_pin'."
     echo "Why and what to do instead: docs/decisions/ci-toolchain.md"
     printf '%s' "$found"
   } >&2
   exit 1
 fi
-echo "shell-test-layout: ok: no tests in $shell/src (no test attributes or cfg(test)), no sources outside it, no benches or examples, [lib] doctest = false, no --doc or rustdoc in $workflows"
+echo "shell-test-layout: ok: the voicen targets of $shell are as in $owned (lib and bin test = false, doctest = false), and line 1 of each lib and bin crate root is its crate-level cfg pin"

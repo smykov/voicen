@@ -13,15 +13,16 @@ check: check-shell-layout check-shell-layout-fixtures check-helper-windows-fixtu
 	check-shell-windows check-e2e-entry-fixtures check-ui \
 	licenses-check
 
-# Shell tests only in src-tauri/tests/*.rs: no test attributes in src-tauri/src, no benches or
-# examples, [lib] doctest = false kept and no --doc / rustdoc in .github/workflows (T-035, T-038,
-# F-002; docs/decisions/ci-toolchain.md). Host bash/grep and an awk lexer
-# (scripts/ci/shell-test-layout.awk).
+# Shell tests only in src-tauri/tests/*.rs (T-035, T-038, T-092, F-002; docs/decisions/ci-toolchain.md):
+# cargo metadata's voicen targets (no kind-test rows) equal scripts/ci/shell-targets.txt (lib and
+# bin test = false, doctest = false; no example, bench or extra target), and line 1 of the lib and
+# bin crate roots is the crate-level cfg pin. cargo metadata in the core image, host python3 -I.
 check-shell-layout:
 	scripts/ci/shell-test-layout.sh
 
 # Guard: the layout check must give its documented exit code on every fixture shell dir in
-# scripts/ci/fixtures/shell-test-layout/ (0 allowed, 1 violation, 3 cannot run). Host bash.
+# scripts/ci/fixtures/shell-test-layout/ (0 allowed, 1 violation, 3 cannot run), and the pins
+# must empty the crate under every cargo test selector (mechanism crate). Host bash, core image.
 check-shell-layout-fixtures:
 	scripts/ci/shell-test-layout.test.sh
 

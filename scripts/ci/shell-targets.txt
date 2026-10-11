@@ -1,0 +1,3 @@
+bin voicen src/main.rs test=false doctest=false
+custom-build build-script-build build.rs test=false doctest=false
+staticlib,cdylib,rlib voicen_lib src/lib.rs test=false doctest=false

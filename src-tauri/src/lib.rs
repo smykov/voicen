@@ -1,3 +1,9 @@
+#![cfg(not(any(test, doctest)))]
+// Line 1 (T-092, F-002): under --cfg test or doctest this crate is empty, so no cargo selector or
+// spelling (--lib, --all-targets, --doc, rustdoc -- --test) builds shell code into a test exe that
+// build.rs does not configure. Shell tests live in src-tauri/tests/*.rs. make check compares this
+// line byte for byte (scripts/ci/shell-test-layout.sh, docs/decisions/ci-toolchain.md).
+
 use std::sync::Arc;
 
 use tauri::{App, AppHandle, Builder, Context, Manager, RunEvent, Runtime};
