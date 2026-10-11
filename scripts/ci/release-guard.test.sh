@@ -328,6 +328,10 @@ check() {
     run "$c" 0 'ok:' "$d"
     return
   fi
+  if [ "$want" = 3 ]; then
+    run "$c [$rule]" 3 "$where" "$d"
+    return
+  fi
   case "$where" in
     @*) l="$(line_of "$f" "${where#@}")" ;;
     diff) l="$(first_diff "$f")" ;;
@@ -488,6 +492,8 @@ check v-header-env-release-file-second 1 R7 hdiff rel.yml     # S3, S4: rel.yml,
 check v-header-env-release-file-first  1 R7 hdiff a-rel.yml   # S3: a-rel.yml, sorted before ci.yml
 # T-088 (probe W4): R7 also holds for ci.yml when the release job lives in another file.
 check v-trigger-w4-release-moved       1 R7 hdiff             # W4: release job in release.yml (owned header), ci.yml push branches [main]
+# T-088 review 1 finding 2: W4 with ci.yml renamed to build.yml; the guard itself needs ci.yml.
+check c-no-ci-file                     3 'cannot run' 'cannot run.*ci\.yml'   # probe pt-W4R
 
 # ---- R8: no YAML tag (raw `!!`, `!<`, `%TAG`), comments included ---------------------------
 # Review 3 finding 1, decision #122 (probes C4c-C4e, /root/.claude/jobs/97682091/tmp/t085-r3review/
@@ -978,6 +984,52 @@ frag_case g-frag-comment-end gate-setup-node.yml "cannot run: fragment ending on
   '$s/^.*$/      # end of the step/'
 frag_case g-frag-no-step-start gate-cargo-save.yml "cannot run: fragment not starting with a step line (keys before it are unpinned)" \
   '1d'
+# T-088 review 1 finding 1 (probes A-G, /root/.claude/jobs/97682091/tmp/t088-review/probe.py): the
+# fragment and the workflow edited together; each passed the line-presence checks of round 1.
+# One step per fragment: line 1 is the only `      - ` line of the body, one line holds uses.
+frag_case g-frag-second-step-actions-cache windows-rust-cache.yml "cannot run: rust-cache fragment with a second step actions/cache (probe A: saves on every ref)" \
+  '$i\      - uses: actions/cache@v4\n        with:\n          path: x\n          key: y'
+frag_case g-frag-second-step-rust-cache windows-pnpm-save.yml "cannot run: cache/save fragment with a second step rust-cache (probe D: default save-if true)" \
+  '$i\      - uses: Swatinem/rust-cache@v2'
+frag_case g-frag-second-step-setup-node windows-pnpm-action-setup.yml "cannot run: pnpm/action-setup fragment with a second step setup-node without package-manager-cache (probe E: auto-cache)" \
+  '$c\      - uses: actions/setup-node@v5\n        with:\n          node-version: "20.19"\n      - name: Path of the pnpm store'
+frag_case g-frag-second-step-run windows-rust-cache.yml "cannot run: a second step line inside a fragment (one step per fragment)" \
+  '$i\      - run: echo second'
+frag_case g-frag-uses-other-action gate-setup-node.yml "cannot run: a fragment whose uses line runs an unlisted action naming setup-node in a comment" \
+  '1s/^.*$/      - uses: someone\/saver@v1 # setup-node/'
+# The pinned with: key right under `        with:` (probes F, G: moved to env:, the input unset).
+frag_case g-frag-sn-pmc-under-env gate-setup-node.yml "cannot run: setup-node fragment with package-manager-cache: false under env:, not with: (probe F)" \
+  '/^          package-manager-cache: false$/i\        env:'
+frag_case g-frag-rust-save-if-under-env windows-rust-cache.yml "cannot run: rust-cache fragment with save-if under env:, not with: (probe G)" \
+  's/^        with:$/        env:/'
+frag_case g-frag-sn-second-with gate-setup-node.yml "cannot run: setup-node fragment with a second with: (the last one wins, package-manager-cache unset)" \
+  '$i\        with:\n          node-version: "20"'
+# The pinned line held by a multi-line scalar opened on the line above, or continued on the line
+# below (PyYAML 6.0.1: x = "y package-manager-cache: false z"; save-if = "${{ ... }} || true").
+frag_case g-frag-sn-pmc-in-quoted-scalar gate-setup-node.yml "cannot run: setup-node fragment whose package-manager-cache line is inside a double-quoted scalar" \
+  '/^          package-manager-cache: false$/{
+i\          x: "y
+a\          z"
+}'
+frag_case g-frag-rust-save-if-continued windows-rust-cache.yml "cannot run: rust-cache fragment whose save-if value continues on the next line" \
+  '/^          save-if: /a\            || true'
+# The cache/save step-level if: (probes B, C): at the step's key column, one ${{ }} that ends the line.
+frag_case g-frag-save-if-under-with windows-pnpm-save.yml "cannot run: cache/save fragment with its if: under with: (probe B: no step-level if)" \
+  '/^        if: /{
+h
+d
+}
+/^        with:$/{
+G
+s/\n        if: /\n          if: /
+}'
+frag_case g-frag-save-if-string windows-pnpm-save.yml "cannot run: cache/save fragment whose if: has text outside \${{ }} (probe C: always true)" \
+  's/^\(        if: .*\) }}$/\1 }} \&\& ${{ true }}/'
+frag_case g-frag-save-if-continued windows-pnpm-save.yml "cannot run: cache/save fragment whose if: value continues on the next line (text outside \${{ }})" \
+  '/^        if: /a\          ${{ true }}'
+frag_case g-frag-save-name-quote windows-pnpm-save.yml "cannot run: cache/save fragment whose name opens a double-quoted scalar holding the if: line" \
+  '1s/name: /name: "/
+/^        if: /a\        z"'
 
 # Every committed fixture dir is in the table.
 for d in "$fx"/*/; do
