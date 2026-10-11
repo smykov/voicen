@@ -1,0 +1,3 @@
+# Fixture (T-091): a dotfile of the app dir is app source too (only the top-level tests/ is
+# excluded): it names tao's visible-helper class as a window class.
+window_classname = "Tao Thread Event Target"

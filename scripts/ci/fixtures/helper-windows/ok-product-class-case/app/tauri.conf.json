@@ -1,0 +1,7 @@
+{
+  "productName": "Fixture",
+  "identifier": "com.example.voicen-fixture",
+  "app": {
+    "windows": []
+  }
+}

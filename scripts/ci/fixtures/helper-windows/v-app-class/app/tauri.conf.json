@@ -1,0 +1,12 @@
+{
+  "productName": "Fixture",
+  "identifier": "com.example.voicen-fixture",
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "windowClassname": "Tao Thread Event Target"
+      }
+    ]
+  }
+}
