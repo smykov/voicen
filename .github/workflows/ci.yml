@@ -40,8 +40,8 @@ jobs:
       # (check-release-guard, owned step copies in scripts/ci/cache-steps; T-068, T-088).
       - uses: actions/setup-node@v5
         with:
-          node-version: "20.19"
           package-manager-cache: false
+          node-version: "20.19"
       - name: Build the ui toolchain image
         run: make ui-image
       - run: scripts/tw-run ui -- pnpm install --frozen-lockfile
@@ -88,8 +88,8 @@ jobs:
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v5
         with:
-          node-version: "20.19"
           package-manager-cache: false
+          node-version: "20.19"
       - name: Path of the pnpm store
         id: pnpm-store
         shell: bash

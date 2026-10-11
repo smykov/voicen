@@ -82,27 +82,34 @@
 #        or one of the action-name tokens actions/cache, setup-node, rust-cache, cache/save,
 #        pnpm/action-setup (any case, substrings) is either byte-identical to a line of the owned
 #        list scripts/ci/action-lines.txt (the never-saving uses lines) or lies inside a
-#        byte-exact copy of one of the owned step fragments scripts/ci/cache-steps/*.yml (each
-#        from its `      - ` line through the next step's first line or the next job's key
+#        byte-exact copy of one of the owned step fragments, one per regular file in
+#        scripts/ci/cache-steps/ (each from its `      - ` line through the next step's first line or the next job's key
 #        line, so no key can be appended; that last line only pins the end: it is not inside
 #        the fragment, so the step it starts needs its own owned line or fragment). Listed line:
 #        every such token line outside them.
 #        The guard checks its own fragments before it reads the dir: a fragment not starting with
-#        `      - ` or not ending on a `      - ` line or a job key line (`  <name>:`), a
-#        setup-node fragment without `          package-manager-cache: false` or with the raw
-#        cache on any other line, a rust-cache fragment without
-#        `          save-if: ${{ github.ref == 'refs/heads/main' }}` or with a second save-if line,
-#        a cache/save fragment without an if: line starting
-#        `        if: ${{ github.ref == 'refs/heads/main' && `, with a second if: line or holding
-#        ||, a pnpm/action-setup fragment holding cache, is exit 3 naming the fragment
-#        (even when the workflow carries the same edit, so the copy and ci.yml cannot be
-#        loosened together); the list or the fragment dir missing or empty is exit 3 too.
+#        `      - ` or not ending on a `      - ` line or a job key line (`  <name>:`); not one
+#        step (a second `      - ` line before the last, not exactly one line with the word
+#        uses, or that line not `      - uses: ` / `        uses: ` plus actions/setup-node,
+#        Swatinem/rust-cache, actions/cache/save or pnpm/action-setup, `@` and a ref of
+#        [A-Za-z0-9._-]); a setup-node or rust-cache fragment whose line 1 is not the uses line,
+#        line 2 not `        with:`, line 3 not `          package-manager-cache: false` /
+#        `          save-if: ${{ github.ref == 'refs/heads/main' }}`, line 4 blank or indented
+#        more than 10, the word with on a second line, or the raw cache (save-if) on another
+#        line; a cache/save fragment whose line 1 is not `      - name: ` plus [A-Za-z0-9 ()._-],
+#        line 2 not starting `        if: ${{ github.ref == 'refs/heads/main' && `, not ending in
+#        `}}` or not holding exactly one `${{` and one `}}`, line 3 blank or indented more than 8,
+#        the word if on a second line, or holding ||; a pnpm/action-setup fragment holding cache:
+#        exit 3 naming the fragment (even when the workflow carries the same edit, so the copy
+#        and ci.yml cannot be loosened together; review 1 finding 1, probes A-G); the list or the
+#        fragment dir missing or empty is exit 3 too.
 #     R12 (T-088) after a file's `jobs:` line, every line that is not empty or spaces only starts
 #        with a space (probe W3: a column-0 `on:` between two jobs turns the release job into a
 #        key of it; a column-0 comment counts too, there is no comment reader). Listed line:
 #        the column-0 line.
 #     R13 (T-088) no YAML merge key: the raw text << not followed by <, a letter, _, -, ' or "
-#        (bash here-docs <<EOF, <<-EOF, <<'EOF', <<"EOF", <<_X and here-strings <<< pass).
+#        (bash here-docs <<EOF, <<-EOF, <<'EOF', <<"EOF", <<_X and here-strings <<< pass;
+#        `cat << EOF` and a shift `$((1 << 2))` are refused, fail-closed).
 #        Probe M2: an anchored step list starting with a byte-exact setup-node fragment, merged
 #        into another job's step with cache: pnpm. Listed line: the occurrence.
 #   Exit 0: ok, one line containing "ok:".
@@ -111,8 +118,9 @@
 #           `  release:`, that line), the line of the occurrence for R3, R4, R5, R6 and R8 (for an
 #           escaped line break, the line ending in the backslash).
 #   Exit 2: usage error (no argument, or more than one).
-#   Exit 3: cannot run (the dir is missing or not a directory, holds no regular file, or a file
-#           has no top-level `jobs:` line; awk failed); never a pass.
+#   Exit 3: cannot run (the dir is missing or not a directory, holds no regular file, holds no
+#           ci.yml (review 1 finding 2: fixture c-no-ci-file), or a file has no top-level `jobs:`
+#           line; awk failed); never a pass.
 # The owned copy is the release block of fixtures/release-guard/ok-release/ci.yml: ok-release
 # and the real .github/workflows must both pass, so the guard's copy, the fixtures and ci.yml
 # carry the same text (the fixtures are generated from one block; change them together). The
@@ -579,6 +587,10 @@ check v-r12-col0-comment              1 R12 '@# a comment in column 0'   # a com
 # ---- R13: no YAML merge key ------------------------------------------------------------------
 check v-cache-merge-key               1 R13 '@- <<: *s'   # M2: steps: &s starts with the byte-exact gate setup-node fragment; <<: *s plus cache: pnpm
 check v-cache-merge-key-spaced        1 R13 '@- << : *s'  # the same, written "<< :" (a raw rule: not only the text "<<:")
+# Review 1 finding 3: R13 is a raw-text rule; a here-doc with a space before its delimiter and a
+# shift are refused too (fail-closed; write <<EOF).
+check v-r13-heredoc-space-and-shift 1 R13 '@cat << EOF'
+check v-r13-heredoc-space-and-shift 1 R13 '@$((1 << 2))'
 
 # ---- R3: permissions only in the workflow-level block and once in the release block ----------
 check v-write-other-job        1 R3 '@    permissions:'          # windows job gets contents: write
@@ -769,16 +781,33 @@ for fr in "$csd"/*; do
   expect "fragment $fr ends on a step line or a job key line" bash -c 'l="$(tail -n 1 "$1")"; [[ "$l" == "      - "* ]] || [[ "$l" =~ ^\ \ [A-Za-z0-9_-]+:$ ]]' _ "$fr"
   expect "fragment $fr occurs byte for byte in the real ci.yml" has_block "$real/ci.yml" "$fr"
   body="$(sed '$d' "$fr")"
+  # Review 1 finding 1: one step (line 1 the only '      - ' line of the body, one uses line, the
+  # uses line one owned action at the step's key column), and per kind the pinned lines at fixed
+  # positions, so no scalar opened above can hold them and no value continues below them.
+  expect "fragment $fr: one step line" test "$(grep -c '^      - ' <<<"$body")" = 1
+  expect "fragment $fr: one line holds the word uses" test "$(grep -c -i -E '(^|[^A-Za-z0-9_])uses([^A-Za-z0-9_]|$)' <<<"$body")" = 1
+  expect "fragment $fr: the uses line is an owned action at the step's key column" \
+    bash -c 'grep -i -E "(^|[^A-Za-z0-9_])uses([^A-Za-z0-9_]|\$)" <<<"$1" | grep -q -x -E "      (- |  )uses: (actions/setup-node|Swatinem/rust-cache|actions/cache/save|pnpm/action-setup)@[A-Za-z0-9._-]+"' _ "$body"
+  l1="$(sed -n 1p "$fr")"; l2="$(sed -n 2p "$fr")"; l3="$(sed -n 3p "$fr")"; l4="$(sed -n 4p "$fr")"
   case "$(frag_kind "$fr")" in
     setup-node)
-      expect "setup-node fragment $fr: package-manager-cache: false" grep -q -x -F '          package-manager-cache: false' <<<"$body"
+      expect "setup-node fragment $fr: line 1 the uses line, line 2 with:, line 3 package-manager-cache: false" \
+        test "${l1:0:14}|$l2|$l3" = "      - uses: |        with:|          package-manager-cache: false"
+      expect "setup-node fragment $fr: line 4 not blank, at most 10 leading spaces" bash -c '[[ "$1" =~ ^\ {0,10}[^\ ] ]]' _ "$l4"
+      expect "setup-node fragment $fr: one with line" test "$(grep -c -i -E '(^|[^A-Za-z0-9_])with([^A-Za-z0-9_]|$)' <<<"$body")" = 1
       expect "setup-node fragment $fr: the raw cache on no other line" test "$(grep -c -i 'cache' <<<"$body")" = 1 ;;
     rust-cache)
-      expect "rust-cache fragment $fr: save-if on main only" grep -q -x -F "          save-if: \${{ github.ref == 'refs/heads/main' }}" <<<"$body"
+      expect "rust-cache fragment $fr: line 1 the uses line, line 2 with:, line 3 save-if on main" \
+        test "${l1:0:14}|$l2|$l3" = "      - uses: |        with:|          save-if: \${{ github.ref == 'refs/heads/main' }}"
+      expect "rust-cache fragment $fr: line 4 not blank, at most 10 leading spaces" bash -c '[[ "$1" =~ ^\ {0,10}[^\ ] ]]' _ "$l4"
+      expect "rust-cache fragment $fr: one with line" test "$(grep -c -i -E '(^|[^A-Za-z0-9_])with([^A-Za-z0-9_]|$)' <<<"$body")" = 1
       expect "rust-cache fragment $fr: one save-if line" test "$(grep -c -i 'save-if' <<<"$body")" = 1 ;;
     cache/save)
-      expect "cache/save fragment $fr: if: on main only" grep -q -F "        if: \${{ github.ref == 'refs/heads/main' && " <<<"$body"
-      expect "cache/save fragment $fr: one if: line" test "$(grep -c -E '^ *if:' <<<"$body")" = 1
+      expect "cache/save fragment $fr: line 1 a plain name" grep -q -x -E '      - name: [A-Za-z0-9 ()._-]+' <<<"$l1"
+      expect "cache/save fragment $fr: line 2 the main if:, one \${{ }} ending the line" \
+        bash -c '[[ "$1" == "        if: \${{ github.ref == '"'"'refs/heads/main'"'"' && "*"}}" ]] && [ "$(grep -o -F "\${{" <<<"$1" | wc -l)" -eq 1 ] && [ "$(grep -o -F "}}" <<<"$1" | wc -l)" -eq 1 ]' _ "$l2"
+      expect "cache/save fragment $fr: line 3 not blank, at most 8 leading spaces" bash -c '[[ "$1" =~ ^\ {0,8}[^\ ] ]]' _ "$l3"
+      expect "cache/save fragment $fr: one if line" test "$(grep -c -i -E '(^|[^A-Za-z0-9_])if([^A-Za-z0-9_]|$)' <<<"$body")" = 1
       expect "cache/save fragment $fr: no ||" test -z "$(grep -F '||' <<<"$body")" ;;
     pnpm/action-setup)
       expect "pnpm/action-setup fragment $fr: no cache" test -z "$(grep -i 'cache' <<<"$body")" ;;
@@ -1014,6 +1043,9 @@ a\          z"
 frag_case g-frag-rust-save-if-continued windows-rust-cache.yml "cannot run: rust-cache fragment whose save-if value continues on the next line" \
   '/^          save-if: /a\            || true'
 # The cache/save step-level if: (probes B, C): at the step's key column, one ${{ }} that ends the line.
+frag_case g-frag-sn-name-quote gate-setup-node.yml "cannot run: setup-node fragment whose line 1 is a name opening a double-quoted scalar over with: and package-manager-cache (the uses line below)" \
+  '1c\      - name: "x\n        with:\n          package-manager-cache: false\n        y"\n        uses: actions/setup-node@v5
+2,4d'
 frag_case g-frag-save-if-under-with windows-pnpm-save.yml "cannot run: cache/save fragment with its if: under with: (probe B: no step-level if)" \
   '/^        if: /{
 h
@@ -1027,6 +1059,8 @@ frag_case g-frag-save-if-string windows-pnpm-save.yml "cannot run: cache/save fr
   's/^\(        if: .*\) }}$/\1 }} \&\& ${{ true }}/'
 frag_case g-frag-save-if-continued windows-pnpm-save.yml "cannot run: cache/save fragment whose if: value continues on the next line (text outside \${{ }})" \
   '/^        if: /a\          ${{ true }}'
+frag_case g-frag-save-if-indented windows-pnpm-save.yml "cannot run: cache/save fragment whose if: line is indented past the step's key column (the main prefix only as a substring)" \
+  's/^        if: /          if: /'
 frag_case g-frag-save-name-quote windows-pnpm-save.yml "cannot run: cache/save fragment whose name opens a double-quoted scalar holding the if: line" \
   '1s/name: /name: "/
 /^        if: /a\        z"'

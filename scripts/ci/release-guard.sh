@@ -89,28 +89,43 @@
 #      cache/save, pnpm/action-setup (any case, comments included) is byte-identical to a line of
 #      the owned list scripts/ci/action-lines.txt (the never-saving uses lines: checkout,
 #      cache/restore, rust-toolchain, upload-artifact, download-artifact) or lies inside a
-#      byte-exact copy of an owned step fragment scripts/ci/cache-steps/*.yml (edit each together
-#      with ci.yml). A fragment runs from its step's `      - ` line through the first line of the
-#      next step or the next job's key line, so no key can be appended to the step; that last
+#      byte-exact copy of an owned step fragment, one per regular file in scripts/ci/cache-steps/
+#      (any name; edit each together with ci.yml). A fragment runs from its step's `      - ` line
+#      through the first line of the next step or the next job's key line, so no key can be
+#      appended to the step; that last
 #      line only pins the end and is not inside the fragment (the step it starts needs its own
-#      owned line or fragment). Before it reads the dir, the guard checks its own fragments
-#      (exit 3 on a bad one, so the copy and ci.yml cannot be loosened together): each starts
-#      with `      - ` and ends on a `      - ` line or a job key line `  <name>:` (a comment line
-#      does not end a step: the key after it joins the step); a setup-node fragment holds
-#      `          package-manager-cache: false` and the raw cache on no other line (no host
-#      pnpm); a rust-cache fragment holds `          save-if: ${{ github.ref == 'refs/heads/main'
-#      }}` (one line) and no other save-if; a cache/save fragment holds one if: line, starting
-#      `        if: ${{ github.ref == 'refs/heads/main' && `, and no ||; a pnpm/action-setup
-#      fragment holds no cache. So every action a workflow runs is reviewed text, every step that
-#      can save a cache saves from main only, and no setup-node step needs host pnpm. That uses
-#      and the action names cannot be spelled another way rests on R6 (no escape) and R8 (no
-#      tag); the word uses is the load-bearing token (every action run, reusable-workflow call
+#      owned line or fragment). Before it reads the dir, the guard checks its own fragments by
+#      literals and positions only (exit 3 on a bad one, so the copy and ci.yml cannot be
+#      loosened together; T-088 review 1 finding 1, probes A-G): each starts with `      - ` and
+#      ends on a `      - ` line or a job key line `  <name>:` (a comment line does not end a
+#      step: the key after it joins the step); it is one step: line 1 is the only `      - ` line
+#      before the last, exactly one line holds the word uses, and that line is `      - uses: `
+#      or `        uses: ` followed by actions/setup-node, Swatinem/rust-cache,
+#      actions/cache/save or pnpm/action-setup, `@` and a ref of [A-Za-z0-9._-] (no quote or
+#      comment); a setup-node or rust-cache fragment has the uses line as line 1, exactly
+#      `        with:` as line 2 and the pinned input as line 3 (`          package-manager-cache:
+#      false`, or `          save-if: ${{ github.ref == 'refs/heads/main' }}`), so no line above
+#      it can open a scalar that holds it (PyYAML 6.0.1 reads `x: "y` above it as one string) and
+#      no key other than with: holds it; line 4 is not blank and has at most 10 leading spaces
+#      (the value does not continue), the word with is on one line (a second with: replaces the
+#      first) and the raw cache (save-if) on no other line; a cache/save fragment has line 1
+#      `      - name: ` plus [A-Za-z0-9 ()._-] only (no scalar opens there), line 2 starting
+#      `        if: ${{ github.ref == 'refs/heads/main' && ` (at the step's key column), ending
+#      in `}}` and holding one `${{` and one `}}` (text outside the expression would make the
+#      condition a non-empty string, always true), line 3 not blank with at most 8 leading
+#      spaces (the if: value does not continue), the word if on one line and no ||; a
+#      pnpm/action-setup fragment holds no cache. So every action a workflow runs is reviewed
+#      text, every step that can save a cache saves from main only, and no setup-node step needs
+#      host pnpm. That uses and the action names cannot be spelled another way rests on R6 (no
+#      escape) and R8 (no tag); the word uses is the load-bearing token (every action run, reusable-workflow call
 #      and local action is a uses key), the five names are a belt (comments must not name them).
 #   R12 (T-088) after a file's `jobs:` line, every line that is not empty or spaces only starts
 #      with a space, comments included: a column-0 key between two jobs (`on:`, `env:`) would
 #      turn the jobs after it, the release job included, into its keys (probe W3).
 #   R13 (T-088) no YAML merge key: the raw text << not followed by <, a letter, _, -, ' or " (a
-#      bash here-doc <<EOF, <<-EOF, <<'EOF', <<"EOF", <<_X or a here-string <<< passes). A merge
+#      bash here-doc <<EOF, <<-EOF, <<'EOF', <<"EOF", <<_X or a here-string <<< passes; a
+#      here-doc with a space before its delimiter, `cat << EOF`, and a shift such as
+#      $((1 << 2)) are refused, fail-closed: write <<EOF). A merge
 #      key could pull an owned fragment, anchored elsewhere, into a step with other keys (probe
 #      M2); R11 needs every step's keys to be text on its own lines.
 # R1, R3 and R4 are the capability lock (GitHub enforces the token scope; it also covers gh api
@@ -148,7 +163,11 @@
 # reused with its own with: or an owned fragment copied whole into another job (neither can save
 # a cache or reach host pnpm; the place of a fragment is not pinned on purpose); whether GitHub
 # honours YAML merge keys at all was NOT checked against GitHub's docs either: R13 refuses them
-# fail-closed, so the answer does not matter for the guard.
+# fail-closed, so the answer does not matter for the guard; a quoted "<<" key passes R13 as
+# not a merge key (PyYAML 6.0.1 reads it as a plain string key; GitHub's parser was not checked);
+# the line before a fragment in ci.yml is not pinned: a scalar opened there that swallows the
+# fragment's first lines either swallows its `      - ` line (no step: nothing runs) or ends on
+# a quote inside the fragment, which leaves text after a closed scalar (invalid, loud).
 #
 # Usage: scripts/ci/release-guard.sh <workflows-dir>
 # Exit 0: ok. Exit 1: a violation, each listed as "<workflows-dir>/<file>:<line>: R<n>: <why>"
@@ -171,7 +190,7 @@
 # telegram-send-step.yml missing, empty, holding no secrets.TELEGRAM_ token or not starting with
 # `      - name: Send the installer to Telegram (main and v* tags only)`; action-lines.txt missing or
 # empty; cache-steps/ missing or holding no fragment, or a fragment failing R11's checks of its
-# own text; awk failed);
+# own text; the dir holding no ci.yml (R7 pins its trigger); awk failed);
 # never a pass.
 # Host test: scripts/ci/release-guard.test.sh (make check-release-guard).
 set -uo pipefail
@@ -213,38 +232,66 @@ for fr in "$csd"/*; do
   frags+=("$fr")
 done
 [ "${#frags[@]}" -gt 0 ] || cannot_run "owned fragment dir $csd holds no fragment"
+# wcount <word> <text>: the number of lines of <text> holding <word>, any case, bounded by
+# characters outside [A-Za-z0-9_] or the line's ends.
+wcount() { grep -c -i -E "(^|[^A-Za-z0-9_])$1([^A-Za-z0-9_]|\$)" <<<"$2"; }
+# lead <line>: the number of leading spaces of <line>.
+lead() { local p="${1%%[! ]*}"; echo "${#p}"; }
+# The action of a fragment's step: its one uses line, at the step's key column, exactly one of
+# the four owned action names, @ and a ref of [A-Za-z0-9._-] (no quote, comment or other byte
+# that could open a scalar or hide another action).
+uses_re='^      (- |  )uses: (actions/setup-node|Swatinem/rust-cache|actions/cache/save|pnpm/action-setup)@[A-Za-z0-9._-]+$'
+# A cache/save step's name line: plain text that cannot open a quoted, flow or block scalar.
+name_re='^      - name: [A-Za-z0-9 ()._-]+$'
+save_if="        if: \${{ github.ref == 'refs/heads/main' && "
 for fr in "${frags[@]}"; do
-  first="$(head -n 1 -- "$fr")"; last="$(tail -n 1 -- "$fr")"; body="$(sed '$d' -- "$fr")"
+  mapfile -t A < "$fr"
+  n="${#A[@]}"
+  [ "$n" -ge 2 ] || cannot_run "owned fragment $fr has fewer than two lines (a step line and a step-ending line)"
+  first="${A[0]}"; last="${A[n - 1]}"; body="$(printf '%s\n' "${A[@]:0:n-1}")"
   [[ "$first" == "      - "* ]] || cannot_run "owned fragment $fr does not start with a step line '      - '"
   [[ "$last" == "      - "* || "$last" =~ ^\ \ [A-Za-z0-9_-]+:$ ]] ||
     cannot_run "owned fragment $fr does not end on a step-ending line (the next step's '      - ' line or a job key line '  <name>:')"
-  # The step's action: the first line of the body (last line excluded) holding the word uses.
-  kind="$(grep -i -E '(^|[^A-Za-z0-9_])uses([^A-Za-z0-9_]|$)' <<<"$body" | head -n 1 |
-    grep -o -i -E 'setup-node|rust-cache|cache/save|pnpm/action-setup' | head -n 1 | tr 'A-Z' 'a-z')"
+  # One step: line 1 is the body's only '      - ' line, and one body line holds the word uses.
+  [ "$(grep -c '^      - ' <<<"$body")" = 1 ] || cannot_run "owned fragment $fr holds more than one step (a '      - ' line after its first line)"
+  [ "$(wcount uses "$body")" = 1 ] || cannot_run "owned fragment $fr: not exactly one line holds the word uses (one step, one action)"
+  ul="$(grep -i -E '(^|[^A-Za-z0-9_])uses([^A-Za-z0-9_]|$)' <<<"$body")"
+  [[ "$ul" =~ $uses_re ]] ||
+    cannot_run "owned fragment $fr: its uses line is not '      - uses: ' or '        uses: ' followed by actions/setup-node, Swatinem/rust-cache, actions/cache/save or pnpm/action-setup, '@' and a ref of [A-Za-z0-9._-]"
+  kind="${BASH_REMATCH[2]}"
   case "$kind" in
-    setup-node)
-      grep -q -x -F '          package-manager-cache: false' <<<"$body" ||
-        cannot_run "owned fragment $fr (setup-node) has no line '          package-manager-cache: false'"
-      [ "$(grep -c -i 'cache' <<<"$body")" = 1 ] ||
-        cannot_run "owned fragment $fr (setup-node) holds cache on a line other than package-manager-cache: false"
+    actions/setup-node | Swatinem/rust-cache)
+      # The pinned input is line 3, right under line 2 '        with:', right under the uses line
+      # (line 1): no line above it can open a scalar that holds it, and no other key holds it. The
+      # next line is not blank and has at most 10 leading spaces, so its value does not continue.
+      if [ "$kind" = actions/setup-node ]; then pin='          package-manager-cache: false'; tok=cache
+      else pin="          save-if: \${{ github.ref == 'refs/heads/main' }}"; tok=save-if; fi
+      [[ "$first" == "      - uses: "* ]] || cannot_run "owned fragment $fr ($kind): line 1 is not its uses line"
+      [ "$n" -ge 4 ] && [ "${A[1]}" = "        with:" ] && [ "${A[2]}" = "$pin" ] ||
+        cannot_run "owned fragment $fr ($kind): line 2 is not '        with:' or line 3 is not '$pin'"
+      [[ ! "${A[3]}" =~ ^\ *$ ]] && [ "$(lead "${A[3]}")" -le 10 ] ||
+        cannot_run "owned fragment $fr ($kind): line 4 is blank or indented more than line 3 (the pinned value could continue)"
+      [ "$(wcount with "$body")" = 1 ] || cannot_run "owned fragment $fr ($kind): the word with on more than one line (a second with: replaces the first)"
+      [ "$(grep -c -i -F "$tok" <<<"$body")" = 1 ] ||
+        cannot_run "owned fragment $fr ($kind) holds $tok on a line other than line 3"
       ;;
-    rust-cache)
-      grep -q -x -F "          save-if: \${{ github.ref == 'refs/heads/main' }}" <<<"$body" ||
-        cannot_run "owned fragment $fr (rust-cache) has no save-if on main only"
-      [ "$(grep -c -i 'save-if' <<<"$body")" = 1 ] ||
-        cannot_run "owned fragment $fr (rust-cache) holds more than one save-if line"
-      ;;
-    cache/save)
-      grep -q -F "        if: \${{ github.ref == 'refs/heads/main' && " <<<"$body" ||
-        cannot_run "owned fragment $fr (cache/save) has no if: on main"
-      [ "$(grep -c -E '^ *if:' <<<"$body")" = 1 ] ||
-        cannot_run "owned fragment $fr (cache/save) holds more than one if: line"
+    actions/cache/save)
+      # Line 1 a plain name, line 2 the step-level if: (the main operand, one ${{ }} ending the
+      # line, so no text outside it), line 3 not blank and at most 8 leading spaces (the if: value
+      # does not continue); the word if on one line; no ||.
+      [[ "$first" =~ $name_re ]] || cannot_run "owned fragment $fr (cache/save): line 1 is not '      - name: ' followed by [A-Za-z0-9 ()._-] only"
+      l2="${A[1]}"
+      [ "$n" -ge 4 ] && [ "${l2:0:${#save_if}}" = "$save_if" ] && [ "${l2: -2}" = "}}" ] &&
+        [ "$(grep -o -F '${{' <<<"$l2" | wc -l)" -eq 1 ] && [ "$(grep -o -F '}}' <<<"$l2" | wc -l)" -eq 1 ] ||
+        cannot_run "owned fragment $fr (cache/save): line 2 is not '$save_if...}}' with exactly one \${{ and one }}"
+      [[ ! "${A[2]}" =~ ^\ *$ ]] && [ "$(lead "${A[2]}")" -le 8 ] ||
+        cannot_run "owned fragment $fr (cache/save): line 3 is blank or indented more than 8 (the if: value could continue)"
+      [ "$(wcount if "$body")" = 1 ] || cannot_run "owned fragment $fr (cache/save): the word if on more than one line"
       ! grep -q -F '||' <<<"$body" || cannot_run "owned fragment $fr (cache/save) holds ||"
       ;;
     pnpm/action-setup)
       ! grep -q -i 'cache' <<<"$body" || cannot_run "owned fragment $fr (pnpm/action-setup) holds cache"
       ;;
-    *) cannot_run "owned fragment $fr: its step uses none of setup-node, rust-cache, cache/save, pnpm/action-setup" ;;
   esac
 done
 fraglist="$(printf '%s\n' "${frags[@]}")"
@@ -259,6 +306,9 @@ for f in "$dir"/*; do
 done
 shopt -u nullglob dotglob
 [ "${#files[@]}" -gt 0 ] || cannot_run "no regular file in $dir"
+# R7 pins the trigger of ci.yml: a dir without it (the release job and the header moved to another
+# name) is not the workflows dir this guard checks.
+[ -f "$dir/ci.yml" ] || cannot_run "no ci.yml in $dir (R7 pins its trigger to the owned header)"
 
 # Output lines: "V <file>:<line>: R<n>: <why>"; awk exit 3 = an owned copy could not be read.
 report="$(RG_FRAGS="$fraglist" awk -v owned="$owned" -v ownedh="$ownedh" -v ownedu="$ownedu" -v ownedt="$ownedt" -v ownedl="$ownedl" '
