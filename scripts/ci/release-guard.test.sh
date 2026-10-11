@@ -54,6 +54,19 @@
 #        dir order: files sorted, then line order); for a literal difference, the first line
 #        that differs from the copy. The copy missing, unreadable or not starting with the line
 #        `      - uses: actions/upload-artifact@v4` is exit 3, its message naming the copy.
+#     R10 (T-087, decisions #124, P-020; replaces telegram-guard.sh) the raw token
+#        `secrets.TELEGRAM_` (any case, comments included) occurs in the dir (files in glob order,
+#        then line order) exactly as often as in the owned copy scripts/ci/telegram-send-step.yml
+#        (the Telegram send step from its name line to its run: line, ended by the next step's
+#        first line `      - name: SHA-256 of the installer`, so no key can be appended), and the
+#        lines aligned on the first token line (that line minus the copy's first-token offset) are
+#        byte-identical to the copy. So the only step GitHub hands the Telegram secrets to is the
+#        reviewed send step with its reviewed if: (push && (main || v* tag) && send == 'true').
+#        A raw-token rule plus an owned literal: no YAML or expression reader. Listed line: the
+#        token occurrence where the dir count first exceeds the copy's count; the first aligned
+#        line that differs from the copy; with no token, the first file's `jobs:` line. The copy
+#        missing, empty, holding no token or not starting with the send step's name line is
+#        exit 3, its message naming the copy.
 #   Exit 0: ok, one line containing "ok:".
 #   Exit 1: a violation; each listed as "<workflows-dir>/<file>:<line>: R<n>: <why>". <line> is
 #           the first line of the block that differs from the owned copy for R2 (for a second
@@ -86,10 +99,13 @@ fx=scripts/ci/fixtures/release-guard
 real=.github/workflows
 owned_src="$fx/ok-release/ci.yml"
 upl=scripts/ci/release-upload.yml
+tgs=scripts/ci/telegram-send-step.yml
+tgs_name='      - name: Send the installer to Telegram (main and v* tags only)'
 [ -d "$fx" ] || { echo "release-guard.test: cannot run: $fx not found" >&2; exit 3; }
 [ -f "$real/ci.yml" ] || { echo "release-guard.test: cannot run: $real/ci.yml not found" >&2; exit 3; }
 [ -f "$owned_src" ] || { echo "release-guard.test: cannot run: $owned_src not found" >&2; exit 3; }
 [ -f "$upl" ] || { echo "release-guard.test: cannot run: $upl not found" >&2; exit 3; }
+[ -f "$tgs" ] || { echo "release-guard.test: cannot run: $tgs not found" >&2; exit 3; }
 tmp="$(mktemp -d)" || { echo "release-guard.test: cannot run: mktemp failed" >&2; exit 3; }
 trap 'rm -rf "$tmp"' EXIT
 
@@ -193,6 +209,61 @@ first_udiff() {
   done
 }
 
+# ttok_n <file>: the number of occurrences of the Telegram token secrets.telegram_ (any case) in
+# the file, comments included.
+ttok_n() { grep -i -o -F -- 'secrets.telegram_' "$1" | wc -l | tr -d ' '; }
+
+# ttok_lines <file>: the numbers of the lines holding the Telegram token, in any case.
+ttok_lines() { grep -n -i -F -- 'secrets.telegram_' "$1" | cut -d: -f1; }
+
+# tgs_off: the copy's first token line minus 1 (the token line's offset inside the literal).
+tgs_off() { echo $(( $(ttok_lines "$tgs" | head -n 1) - 1 )); }
+
+# first_tdiff <file>: the file's line number of the first line, from (its first token line minus
+# the copy's offset) on, that differs from the owned send-step copy (empty when equal or no token).
+first_tdiff() {
+  local f="$1" start i n
+  local -a a b
+  start="$(ttok_lines "$f" | head -n 1)"
+  [ -n "$start" ] || return 0
+  start=$((start - $(tgs_off)))
+  mapfile -t a < "$tgs"
+  if [ "$start" -lt 1 ]; then echo 1; return 0; fi
+  mapfile -t b < <(tail -n "+$start" "$f")
+  n=${#a[@]}
+  for ((i = 0; i < n; i++)); do
+    if [ "${a[i]}" != "${b[i]-<none>}" ]; then
+      echo $((start + i))
+      return 0
+    fi
+  done
+}
+
+# texcess <file>: the line of <file> where the Telegram token count of its dir (files in glob
+# order, dotfiles included, then line order) first exceeds the owned copy's count (empty if it
+# never does, or does in another file).
+texcess() {
+  local f="$1" d g k=0 max i c
+  d="$(dirname "$f")"
+  max="$(ttok_n "$tgs")"
+  shopt -s nullglob dotglob
+  for g in "$d"/*; do
+    [ -f "$g" ] || continue
+    i=0
+    while IFS= read -r line || [ -n "$line" ]; do
+      i=$((i + 1))
+      c="$(grep -i -o -F -- 'secrets.telegram_' <<<"$line" | wc -l | tr -d ' ')"
+      k=$((k + c))
+      if [ "$k" -gt "$max" ]; then
+        shopt -u nullglob dotglob
+        [ "$g" = "$f" ] && echo "$i"
+        return 0
+      fi
+    done < "$g"
+  done
+  shopt -u nullglob dotglob
+}
+
 # at <path> <line> <rule>: the ERE of a listing line "<path>:<line>: R<n>"; line "*" = any.
 at() {
   local l="$2"
@@ -203,7 +274,8 @@ at() {
 # check <case> <exit> [<rule> <where> [<file>]]: the case dir as the workflows dir. <where> is
 # "@text" (the first line of <file> containing text), "diff" (first_diff of <file>), "hdiff"
 # (first_hdiff of <file>), "udiff" (first_udiff of <file>), "tok2" (the second token line of
-# <file>), "*" (any line) or a number; <file> defaults to ci.yml.
+# <file>), "tdiff" (first_tdiff of <file>), "texcess" (texcess of <file>), "jobs" (the line of
+# <file> that is exactly jobs:), "*" (any line) or a number; <file> defaults to ci.yml.
 check() {
   local c="$1" want="$2" rule="${3:-}" where="${4:-}" file="${5:-ci.yml}" d f l
   d="$fx/$c"
@@ -219,6 +291,9 @@ check() {
     hdiff) l="$(first_hdiff "$f")" ;;
     udiff) l="$(first_udiff "$f")" ;;
     tok2) l="$(tok_lines "$f" | sed -n 2p)" ;;
+    tdiff) l="$(first_tdiff "$f")" ;;
+    texcess) l="$(texcess "$f")" ;;
+    jobs) l="$(grep -n -m 1 -x 'jobs:' "$f" | cut -d: -f1)" ;;
     *) l="$where" ;;
   esac
   if [ -z "$l" ]; then
@@ -394,6 +469,22 @@ check v-upload-uppercase-action 1 R9 '@Actions/Upload-Artifact'   # owner/repo r
 check v-upload-token-in-comment 1 R9 '@# a second upload-artifact' # a raw rule: a comment is text
 check v-upload-in-other-file    1 R9 '@uses: actions/upload-artifact' other.yml   # the count is dir-wide
 
+# ---- R10: the Telegram send step is the owned literal, and its token occurs only there --------
+# T-087 (decisions #93, #124; P-020): telegram-guard.sh read YAML and expressions and one file;
+# probes T1-T4 (docs/tasks/T-087.md, Investigation section 2) passed it and release-guard R4.
+# Each fixture is ok-release (which carries scripts/ci/telegram-send-step.yml verbatim) with one
+# edit, and each passes R1-R9, so only R10 can refuse it.
+check v-telegram-t1              1 R10 texcess   # T1: no if:, run: | line "# ${{ secrets... }}" (GitHub expands it; a comment is text)
+check v-telegram-second-step     1 R10 texcess   # T2: a second step reading the token, guard-shaped if:, before the send step
+check v-telegram-if-changed      1 R10 tdiff     # T3: send == 'true' dropped from the send step's if:
+check v-telegram-second-file     1 R10 texcess other.yml   # T4: other.yml, a step reading the token, no if: (the count is dir-wide)
+check v-telegram-m6              1 R10 tdiff     # T-070 validation 1 M6: always() && send, the ref guard gone
+check v-telegram-no-event-name   1 R10 tdiff     # event_name == 'push' dropped: a pull_request from main
+check v-telegram-key-appended    1 R10 tdiff     # continue-on-error after run:: the copy's last line pins the step end
+check v-telegram-trailing-space  1 R10 tdiff     # "if: ... }} ": byte identity, not a reading
+check v-telegram-none            1 R10 jobs      # the send step deleted: the build's send (#93) is gone
+check v-telegram-twice           1 R10 texcess   # the owned step twice: the literal occurs exactly once
+
 # ---- R3: permissions only in the workflow-level block and once in the release block ----------
 check v-write-other-job        1 R3 '@    permissions:'          # windows job gets contents: write
 check v-write-all-windows      1 R3 '@permissions: write-all'
@@ -439,6 +530,22 @@ tok_count() { cat "$1"/* "$1"/.[!.]* 2>/dev/null | grep -i -o -F 'upload-artifac
 expect "real: the token upload-artifact occurs once in $real" test "$(tok_count "$real")" = 1
 expect "real: the upload step is the owned copy $upl" test -z "$(first_udiff "$real/ci.yml")" -a -n "$(tok_lines "$real/ci.yml")"
 expect "ok-release: the upload step is the owned copy $upl" test -z "$(first_udiff "$owned_src")" -a -n "$(tok_lines "$owned_src")"
+# T-087: the owned send-step copy, the real dir and the ok-* fixtures agree (R10 cannot pass on a
+# stale copy, and the real send step is the copy byte for byte, from its name line to the next
+# step's first line).
+tgs_if="        if: \${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && steps.telegram-installer.outputs.send == 'true' }}"
+expect "owned send-step copy starts with the send step's name line" test "$(head -n 1 "$tgs")" = "$tgs_name"
+expect "owned send-step copy: its if: is push && (main || v* tag) && send == 'true'" test "$(sed -n 2p "$tgs")" = "$tgs_if"
+expect "owned send-step copy: no continue-on-error, no status function" test -z "$(grep -i -E 'continue-on-error|always\(|failure\(|cancelled\(|success\(' "$tgs")"
+expect "owned send-step copy ends with the next step's first line" test "$(tail -n 1 "$tgs")" = "      - name: SHA-256 of the installer"
+expect "owned send-step copy: the token secrets.TELEGRAM_ occurs twice (bot token, chat id)" test "$(ttok_n "$tgs")" = 2
+ttok_dir() { cat "$1"/* "$1"/.[!.]* 2>/dev/null | grep -i -o -F 'secrets.telegram_' | wc -l | tr -d ' '; }
+expect "real: the Telegram token occurs in $real as often as in $tgs" test "$(ttok_dir "$real")" = "$(ttok_n "$tgs")"
+expect "real: the send step is the owned copy $tgs (byte for byte, through the SHA-256 name line)" \
+  test -z "$(first_tdiff "$real/ci.yml")" -a -n "$(ttok_lines "$real/ci.yml")"
+for c in ok-release ok-lookalikes ok-tag-lookalikes; do
+  expect "$c: the send step is the owned copy $tgs" test -z "$(first_tdiff "$fx/$c/ci.yml")" -a "$(ttok_dir "$fx/$c")" = "$(ttok_n "$tgs")"
+done
 
 # Copies of the real dir, ci.yml mutated. mutate <name> <awk body>: inrel is 1 on the release
 # block's lines, inwin on the windows job's.
@@ -502,6 +609,13 @@ mutate up-always 'inwin && /upload-artifact/ { inup = 1; print; next } inup && !
   run "real with always() || in the upload step's if:" 1 "$(at "$tmp/up-always/ci.yml" "$(first_udiff "$tmp/up-always/ci.yml")" R9)" "$tmp/up-always"
 mutate up-delete 'inwin && /upload-artifact/ { inup = 1; next } inup && /^        / { next } { inup = 0; print }' &&
   run "real with the upload step deleted" 1 "$(at "$tmp/up-delete/ci.yml" '*' R9)" "$tmp/up-delete"
+# T-087 R10 on the real file, ported from telegram-guard.test.sh: M6 exactly as T-070 validation 1
+# applied it, and the event_name operand dropped. Listed: the send step's if: line.
+tg_if_line() { grep -n -m 1 -x -F -- "$tgs_if" "$1" | cut -d: -f1; }
+mutate tg-m6 'inwin && /^        if: \$\{\{ github\.event_name == .push. && \(github\.ref == .refs\/heads\/main. \|\| startsWith\(github\.ref, .refs\/tags\/v.\)\) && steps\.telegram-installer\.outputs\.send == .true. \}\}$/ { $0 = "        if: ${{ always() && steps.telegram-installer.outputs.send == '"'"'true'"'"' }}" } { print }' &&
+  run "real M6 (always() && send) [R10]" 1 "$(at "$tmp/tg-m6/ci.yml" "$(tg_if_line "$real/ci.yml")" R10)" "$tmp/tg-m6"
+mutate tg-no-event 'inwin && /^        if: \$\{\{ github\.event_name == .push. && \(github\.ref == .refs\/heads\/main. \|\| startsWith/ { sub(/github\.event_name == .push. && /, "") } { print }' &&
+  run "real without event_name [R10]" 1 "$(at "$tmp/tg-no-event/ci.yml" "$(tg_if_line "$real/ci.yml")" R10)" "$tmp/tg-no-event"
 
 # ---- usage and cannot run -------------------------------------------------------------------
 run "usage: no argument"           2 'usage'
@@ -528,7 +642,7 @@ PATH="$saved_path"
 # guard is copied next to its release-job.yml; the header copy is left out or truncated.
 owned_guard() {
   mkdir -p "$tmp/$1"
-  cp -p "$guard" scripts/ci/release-job.yml "$upl" "$tmp/$1/" 2>/dev/null
+  cp -p "$guard" scripts/ci/release-job.yml "$upl" "$tgs" "$tmp/$1/" 2>/dev/null
 }
 real_guard="$guard"
 if owned_guard g-header-missing; then
@@ -555,7 +669,7 @@ guard="$real_guard"
 # copied next to its other two owned copies; the upload copy is left out or broken.
 upload_guard() {
   mkdir -p "$tmp/$1"
-  if ! cp -p "$guard" scripts/ci/release-job.yml scripts/ci/release-header.yml "$tmp/$1/"; then
+  if ! cp -p "$guard" scripts/ci/release-job.yml scripts/ci/release-header.yml "$tgs" "$tmp/$1/"; then
     echo "FAIL $1: cannot copy the guard and its owned copies (fix the test)" >&2
     failed=$((failed + 1))
     return 1
@@ -576,6 +690,40 @@ if upload_guard g-upload-no-uses; then
   sed 1d "$upl" > "$tmp/g-upload-no-uses/release-upload.yml"
   guard="$tmp/g-upload-no-uses/release-guard.sh"
   run "cannot run: owned upload copy does not start with the uses line" 3 'cannot run.*release-upload\.yml' "$real"
+fi
+guard="$real_guard"
+# T-087: the owned send-step copy (R10) is a guard input too: missing, empty, holding no token (a
+# copy with nothing to align on) or not starting with the send step's name line (a copy cut at
+# the top) is never a pass. The guard is copied next to its other three owned copies.
+tgs_guard() {
+  mkdir -p "$tmp/$1"
+  if ! cp -p "$guard" scripts/ci/release-job.yml scripts/ci/release-header.yml "$upl" "$tmp/$1/"; then
+    echo "FAIL $1: cannot copy the guard and its owned copies (fix the test)" >&2
+    failed=$((failed + 1))
+    return 1
+  fi
+}
+if tgs_guard g-tgs-missing; then
+  guard="$tmp/g-tgs-missing/release-guard.sh"
+  run "cannot run: owned send-step copy missing" 3 'cannot run.*telegram-send-step\.yml' "$real"
+fi
+guard="$real_guard"
+if tgs_guard g-tgs-empty; then
+  : > "$tmp/g-tgs-empty/telegram-send-step.yml"
+  guard="$tmp/g-tgs-empty/release-guard.sh"
+  run "cannot run: owned send-step copy empty" 3 'cannot run.*telegram-send-step\.yml' "$real"
+fi
+guard="$real_guard"
+if tgs_guard g-tgs-no-token; then
+  grep -v -i -F 'secrets.telegram_' "$tgs" > "$tmp/g-tgs-no-token/telegram-send-step.yml"
+  guard="$tmp/g-tgs-no-token/release-guard.sh"
+  run "cannot run: owned send-step copy holds no token" 3 'cannot run.*telegram-send-step\.yml' "$real"
+fi
+guard="$real_guard"
+if tgs_guard g-tgs-no-name; then
+  sed 1d "$tgs" > "$tmp/g-tgs-no-name/telegram-send-step.yml"
+  guard="$tmp/g-tgs-no-name/release-guard.sh"
+  run "cannot run: owned send-step copy does not start with the name line" 3 'cannot run.*telegram-send-step\.yml' "$real"
 fi
 guard="$real_guard"
 

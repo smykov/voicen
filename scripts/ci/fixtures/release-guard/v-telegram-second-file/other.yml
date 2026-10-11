@@ -1,0 +1,15 @@
+name: Extra
+
+on:
+  push:
+
+permissions:
+  contents: read
+jobs:
+  extra:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Notify
+        env:
+          T: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        run: echo notify
