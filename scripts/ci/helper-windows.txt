@@ -4,9 +4,10 @@
 # and by the shell tests (src-tauri/tests/helper_windows/mod.rs is_helper). Checked on the Linux
 # host by scripts/ci/helper-windows.sh (make check): every crate@version (with its resolved
 # features) of the shell's Windows dependency graph whose source mentions CreateWindowEx has
-# exactly one entry here, every entry is such a crate, and no visible-helper class is a product
-# window class of the graph (a window_classname("<class>") literal, today tauri-runtime-wry's
-# "Tauri Window"; F-003). Checked on Windows CI by the census: every visible-helper class exists in the
+# exactly one entry here, every entry is such a crate, and no visible-helper class ({identifier}
+# resolved) occurs as raw text in a source that names product window classes: the owned
+# product-window crate tauri-runtime-wry (its "Tauri Window") and the app dir src-tauri minus
+# tests/ (F-003, T-091). Checked on Windows CI by the census: every visible-helper class exists in the
 # real voicen.exe, and no visible, unowned, top-level window with the four helper ex-style bits
 # (LAYERED, TRANSPARENT, NOACTIVATE, TOOLWINDOW) has a class not listed as visible-helper.
 #
