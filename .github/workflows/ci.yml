@@ -1078,6 +1078,7 @@ jobs:
           INSTALLER: ${{ steps.telegram-installer.outputs.path }}
           CAPTION: ${{ steps.telegram-installer.outputs.caption }}
         run: bash scripts/ci/telegram-send.sh "$INSTALLER" "$CAPTION"
+      - name: SHA-256 of the installer
       # T-026 (decisions #102, #103): scripts/ci/release-check.sh is the one release verdict; the
       # release job (v* tags only) runs it before publishing. Its pass path and failure branch run
       # here on every other ref (wip/** included, P-016), so the script meets the real runner and
@@ -1087,7 +1088,6 @@ jobs:
       # naming both values, and the tag's Telegram send above is unchanged. After the Telegram
       # steps, so a defect here never skips a send. The hash is printed on every ref; on a tag it
       # must equal the release's SHA256SUMS.txt.
-      - name: SHA-256 of the installer
         shell: bash
         run: sha256sum target/release/bundle/nsis/*-setup.exe
       - name: Release check premise (pass path; not on v* tags)

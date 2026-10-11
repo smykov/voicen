@@ -1,6 +1,6 @@
 # The gate: every area's checks, each through scripts/tw-run in the area's toolchain.
 .PHONY: check check-shell-layout check-shell-layout-fixtures check-helper-windows-fixtures check-core \
-	check-ci-credentials check-setup-node-cache check-core-test-clocks check-http-client-builder check-ci-wip check-telegram-send check-telegram-failure-branch check-telegram-guard \
+	check-ci-credentials check-setup-node-cache check-core-test-clocks check-http-client-builder check-ci-wip check-telegram-send check-telegram-failure-branch \
 	check-version-stamp check-release-check check-release check-release-guard check-nsis-fork check-e2e-entry-fixtures \
 	check-shell-windows \
 	check-ui core-image ui-image \
@@ -9,7 +9,7 @@
 
 # check-shell-windows after check-core: the shell depends on voicen-core, so a core error is
 # reported first by the faster native check-core, before the slower cross-target build.
-check: check-shell-layout check-shell-layout-fixtures check-helper-windows-fixtures check-ci-credentials check-setup-node-cache check-core-test-clocks check-http-client-builder check-ci-wip check-telegram-send check-telegram-failure-branch check-telegram-guard check-version-stamp check-release-check check-release check-release-guard check-nsis-fork check-core \
+check: check-shell-layout check-shell-layout-fixtures check-helper-windows-fixtures check-ci-credentials check-setup-node-cache check-core-test-clocks check-http-client-builder check-ci-wip check-telegram-send check-telegram-failure-branch check-version-stamp check-release-check check-release check-release-guard check-nsis-fork check-core \
 	check-shell-windows check-e2e-entry-fixtures check-ui \
 	licenses-check
 
@@ -86,14 +86,6 @@ check-telegram-send:
 check-telegram-failure-branch:
 	scripts/ci/telegram-failure-branch.test.sh
 
-# T-070 (validation 1, M6): every ci.yml step that reads secrets.TELEGRAM_BOT_TOKEN or
-# secrets.TELEGRAM_CHAT_ID has an if: with github.event_name == 'push' and (main || v* tag) as
-# top-level && operands, no status function and no continue-on-error. The self-test runs the
-# tripwire scripts/ci/telegram-guard.sh on scripts/ci/fixtures/telegram-guard/ and the real
-# ci.yml (also with M6 applied). Host bash and awk.
-check-telegram-guard:
-	scripts/ci/telegram-guard.test.sh
-
 # T-077 (decisions #98): scripts/ci/version-stamp.sh, the windows job's one version step, writes
 # <repo MAJOR.MINOR>.<run number> (a vX.Y.Z tag: X.Y.Z) into Cargo.toml, tauri.conf.json,
 # package.json and the two workspace members of Cargo.lock, no other line, and exports
@@ -118,14 +110,17 @@ check-release-check:
 check-release:
 	scripts/ci/release.test.sh
 
-# T-026, T-085 (rca, decisions #120, #121, #122, P-020): raw-text rules R1-R8 over every file in
-# .github/workflows: the workflow-level permissions: contents: read block (R1), the release job
+# T-026, T-085 (rca, decisions #120, #121, #122, P-020), T-084 (#119), T-087 (#124): raw-text
+# rules R1-R10 over every file in .github/workflows: the workflow-level permissions: contents: read block (R1), the release job
 # to the end of its file byte-identical to the guard's owned copy (R2), permissions only there
 # (R3), no secret but the two Telegram ones and no vars (R4), the word gh only inside the release
 # job (R5), no YAML escape that spells a character or joins two lines (R6), the header of the
 # file holding the release job, line 1 to jobs:, byte-identical to scripts/ci/release-header.yml
-# (R7; decisions #121), and no YAML tag: the raw texts !!, !< and %TAG nowhere (R8; decisions
-# #122). The self-test runs the tripwire scripts/ci/release-guard.sh on scripts/ci/fixtures/release-guard/ and the real
+# (R7; decisions #121), no YAML tag: the raw texts !!, !< and %TAG nowhere (R8; decisions
+# #122), the one installer upload byte-identical to scripts/ci/release-upload.yml (R9), and the
+# raw token secrets.TELEGRAM_ (any case, comments included) only in the one Telegram send step,
+# byte-identical to scripts/ci/telegram-send-step.yml (R10; replaces telegram-guard, T-087:
+# T-070 validation 1 M6 and probes T1-T4 are its fixtures). The self-test runs the tripwire scripts/ci/release-guard.sh on scripts/ci/fixtures/release-guard/ and the real
 # workflows dir (also mutated). Host bash and awk.
 check-release-guard:
 	scripts/ci/release-guard.test.sh

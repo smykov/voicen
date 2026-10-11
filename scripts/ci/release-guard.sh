@@ -56,9 +56,23 @@
 #      download, two or more = a second upload. R9 finds the literal by the token's line and
 #      cannot tell which job or YAML node holds it, so it pins the upload text, not its place
 #      (see Not caught). A raw token plus an owned literal, no step reader.
+#   R10 (T-087, decisions #93, #124; replaces telegram-guard.sh) the raw token secrets.telegram_
+#      (any case, comments included) occurs in the dir (files in glob order, then line order)
+#      exactly as often as in the guard's fourth owned copy, scripts/ci/telegram-send-step.yml
+#      (edit both together), and the lines aligned on the dir's first token line (that line minus
+#      the offset of the copy's first token line) are byte-identical to the copy: the Telegram
+#      send step from its name line to its run: line, with its if: (push && (main || v* tag) &&
+#      send == 'true', no status function, no continue-on-error), ended by the next step's first
+#      line `      - name: SHA-256 of the installer`, so no key can be appended. GitHub expands
+#      ${{ }} in run: text before the shell starts (T-086 Investigation section 2), so a comment
+#      line is text here too. Zero tokens is refused (the build sends the installer,
+#      #93). That the secret cannot be spelled without this raw text rests on R4 (every secrets
+#      is one of the two names), R6 (no escape) and R8 (no tag) of this guard. A raw token plus
+#      an owned literal, no YAML or expression reader.
 # R1, R3 and R4 are the capability lock (GitHub enforces the token scope; it also covers gh api
 # and curl); R2 and R7 pin the release job and the header it inherits as two literals; R5 is the
-# early, fail-closed tripwire; R6 and R8 keep R3-R5's raw text the text a YAML reader sees.
+# early, fail-closed tripwire; R6 and R8 keep R3-R5's raw text the text a YAML reader sees; R9 and
+# R10 pin the only upload step and the only step the Telegram secrets reach as literals.
 # Not caught (deliberate only): a token written into the workflow as text (the gitleaks
 # pre-commit scan refuses it); release.sh itself exiting 0 on a refusal (release.test.sh covers
 # that); whether GitHub enforces `permissions:` as documented (platform semantics,
@@ -73,7 +87,13 @@
 # R9's limits: the owned upload literal moved into another job, or hidden inside other YAML such
 # as a `name: |` block scalar, with the real upload step deleted, passes R9; loud, not silent: on
 # a v* tag the release job's download fails and nothing is published (T-084 review 1); an upload
-# through another action is refused only by ci-wip.sh's fail-closed action list, not by R9.
+# through another action is refused only by ci-wip.sh's fail-closed action list, not by R9;
+# R10's limits: the owned send-step literal moved, with the real send step deleted, into a place
+# that is not that step (a `run: |` block scalar of a job whose keys are indented 3 columns, a
+# step `name: |`) passes R10; whether GitHub then expands the secret there depends on that key's
+# context availability, and the send no longer happens on main, so the owner gets no installer
+# (loud, not silent); telegram-send.sh itself leaking the token (to GITHUB_ENV, a file or the log)
+# is telegram-send.test.sh's concern, not this guard's.
 #
 # Usage: scripts/ci/release-guard.sh <workflows-dir>
 # Exit 0: ok. Exit 1: a violation, each listed as "<workflows-dir>/<file>:<line>: R<n>: <why>"
@@ -83,12 +103,15 @@
 # escaped line break the line ending in the backslash; R7: the first header line that differs
 # from scripts/ci/release-header.yml; R8: every line holding !!, !< or %TAG; R9: the second
 # token occurrence, the first line from the token on that differs from release-upload.yml, or,
-# with no token, the first file's jobs: line). Exit 2: usage
+# with no token, the first file's jobs: line; R10: the token occurrence where the dir count first
+# exceeds the copy's, the first aligned line that differs from telegram-send-step.yml, or, with no
+# token, the first file's jobs: line). Exit 2: usage
 # error. Exit 3: cannot run (the dir is missing or not a directory, holds no regular file, a file
 # is unreadable or has no `jobs:` line, an owned copy is missing or malformed: release-job.yml not
 # starting with `  release:`, release-header.yml not ending in its only `jobs:` line,
 # release-upload.yml missing, empty or not starting with `      - uses: actions/upload-artifact@v4`;
-# awk failed);
+# telegram-send-step.yml missing, empty, holding no secrets.TELEGRAM_ token or not starting with
+# `      - name: Send the installer to Telegram (main and v* tags only)`; awk failed);
 # never a pass.
 # Host test: scripts/ci/release-guard.test.sh (make check-release-guard).
 set -uo pipefail
@@ -112,6 +135,10 @@ ownedh="$here/release-header.yml"
 ownedu="$here/release-upload.yml"
 [ -f "$ownedu" ] && [ -r "$ownedu" ] || cannot_run "owned upload copy $ownedu not found or not readable"
 [ "$(head -n 1 -- "$ownedu")" = "      - uses: actions/upload-artifact@v4" ] || cannot_run "owned upload copy $ownedu does not start with the line '      - uses: actions/upload-artifact@v4'"
+ownedt="$here/telegram-send-step.yml"
+[ -f "$ownedt" ] && [ -r "$ownedt" ] || cannot_run "owned send-step copy $ownedt not found or not readable"
+[ "$(head -n 1 -- "$ownedt")" = "      - name: Send the installer to Telegram (main and v* tags only)" ] || cannot_run "owned send-step copy $ownedt does not start with the line '      - name: Send the installer to Telegram (main and v* tags only)'"
+grep -q -i -F 'secrets.telegram_' -- "$ownedt" || cannot_run "owned send-step copy $ownedt holds no secrets.TELEGRAM_ token (nothing to align on)"
 
 shopt -s nullglob dotglob
 files=()
@@ -125,7 +152,7 @@ shopt -u nullglob dotglob
 [ "${#files[@]}" -gt 0 ] || cannot_run "no regular file in $dir"
 
 # Output lines: "V <file>:<line>: R<n>: <why>"; awk exit 3 = an owned copy could not be read.
-report="$(awk -v owned="$owned" -v ownedh="$ownedh" -v ownedu="$ownedu" '
+report="$(awk -v owned="$owned" -v ownedh="$ownedh" -v ownedu="$ownedu" -v ownedt="$ownedt" '
 function v(k, i, r, why) { print "V " F[k] ":" i ": " r ": " why; nv++ }
 # count(s, t): occurrences of t in s.
 function count(s, t,   n, p) { n = 0; while ((p = index(s, t)) > 0) { n++; s = substr(s, p + length(t)) } return n }
@@ -144,12 +171,22 @@ BEGIN {
   while ((rc = (getline line < ownedu)) > 0) ou[++nu] = line
   if (rc < 0 || nu == 0) { bad = 1; exit 3 }
   close(ownedu)
+  # R10: the owned send-step copy, its token count tco and its first token line tof.
+  nt = 0; tco = 0; tof = 0
+  while ((rc = (getline line < ownedt)) > 0) {
+    ot[++nt] = line
+    c = count(tolower(line), "secrets.telegram_")
+    if (c && !tof) tof = nt
+    tco += c
+  }
+  if (rc < 0 || nt == 0 || tco == 0) { bad = 1; exit 3 }
+  close(ownedt)
 }
 FNR == 1 { nf++; F[nf] = FILENAME }
 { N[nf] = FNR; L[nf, FNR] = $0 }
 END {
   if (bad) exit 3
-  nrel = 0; ntok = 0
+  nrel = 0; ntok = 0; ttc = 0
   for (k = 1; k <= nf; k++) {
     # R1: one line with the word jobs, exactly "jobs:", right after the read-only block.
     j = 0; jbad = 0
@@ -219,6 +256,15 @@ END {
           v(k, i, "R9", "a second upload-artifact in the workflows dir (the installer upload occurs once, as the owned copy scripts/ci/release-upload.yml)")
         ntok += n
       }
+      # R10: the raw token secrets.telegram_, any case, comments included, as often as in the
+      # owned send-step copy.
+      n = count(lo, "secrets.telegram_")
+      if (n > 0) {
+        if (ttc == 0) { ttk = k; tti = i }
+        if (ttc <= tco && ttc + n > tco)
+          v(k, i, "R10", "secrets.TELEGRAM_ beyond the owned send step scripts/ci/telegram-send-step.yml (the Telegram secrets reach only that step)")
+        ttc += n
+      }
     }
     if (inb) {
       if (!bdiff && boff < no) bdiff = bs + boff
@@ -229,6 +275,19 @@ END {
     for (k = 1; k <= nf; k++) {
       for (i = 1; i <= N[k]; i++) if (L[k, i] == "jobs:") break
       v(k, i, "R2", "no \"  release:\" job line in the workflows dir (the release job is the owned copy scripts/ci/release-job.yml)")
+    }
+  # R10: the lines aligned on the first token line (minus the first-token offset of the copy) are the
+  # owned send-step copy, byte for byte.
+  if (ttc == 0) {
+    for (i = 1; i <= N[1]; i++) if (L[1, i] == "jobs:") break
+    v(1, i, "R10", "no secrets.TELEGRAM_ in the workflows dir (the owned send step scripts/ci/telegram-send-step.yml is missing; the build sends the installer, #93)")
+  } else
+    for (m = 1; m <= nt; m++) {
+      i = tti - tof + m
+      if (i < 1 || i > N[ttk] || L[ttk, i] != ot[m]) {
+        v(ttk, (i < 1 ? 1 : i), "R10", "the Telegram send step differs from the owned copy scripts/ci/telegram-send-step.yml here (byte for byte; push && (main || v* tag) && send == true; edit both together)")
+        break
+      }
     }
   # R9: the lines from the first token line on are the owned upload copy, byte for byte.
   if (ntok == 0) {
@@ -250,10 +309,10 @@ case "$rc" in
   0) ;;
   1)
     sed -n 's/^V //p' <<<"$report" >&2
-    echo "release-guard: FAIL: a token other than the release job's could write contents, the release job is not the owned copy, or the installer upload is not the owned tag-only step (T-085, T-084, P-020)" >&2
+    echo "release-guard: FAIL: a token other than the release job's could write contents, the release job is not the owned copy, the installer upload is not the owned tag-only step, or the Telegram secrets reach a step other than the owned send step (T-085, T-084, T-087, P-020)" >&2
     exit 1
     ;;
-  *) cannot_run "awk failed (exit $rc) on $dir or an owned copy ($owned, $ownedh, $ownedu)" ;;
+  *) cannot_run "awk failed (exit $rc) on $dir or an owned copy ($owned, $ownedh, $ownedu, $ownedt)" ;;
 esac
 grep -q '^V ' <<<"$report" && cannot_run "awk listed violations but exited 0"
-echo "release-guard: ok: $dir: ${#files[@]} file(s); token read-only but in the release job, which is the owned copy; no other secret, permissions or gh; one installer upload, the owned tag-only step"
+echo "release-guard: ok: $dir: ${#files[@]} file(s); token read-only but in the release job, which is the owned copy; no other secret, permissions or gh; one installer upload, the owned tag-only step; the Telegram secrets only in the owned send step"
