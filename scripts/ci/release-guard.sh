@@ -63,16 +63,28 @@
 #      the offset of the copy's first token line) are byte-identical to the copy: the Telegram
 #      send step from its name line to its run: line, with its if: (push && (main || v* tag) &&
 #      send == 'true', no status function, no continue-on-error), ended by the next step's first
-#      line `      - name: SHA-256 of the installer`, so no key can be appended. GitHub expands
-#      ${{ }} in run: text before the shell starts (T-086 Investigation section 2), so a comment
-#      line is text here too. Zero tokens is refused (the build sends the installer,
-#      #93). That the secret cannot be spelled without this raw text rests on R4 (every secrets
-#      is one of the two names), R6 (no escape) and R8 (no tag) of this guard. A raw token plus
-#      an owned literal, no YAML or expression reader.
+#      line `      - name: SHA-256 of the installer`, so no key can be appended. And, going up
+#      from the copy's first line and skipping lines of spaces only, the first line with fewer
+#      than 6 leading spaces is exactly `    steps:`, the next with fewer than 4 is exactly
+#      `  windows:` and the next with fewer than 2 is exactly `jobs:` (T-087 review 1 finding 1):
+#      a YAML block scalar ends at its first line indented less than its content, so a block
+#      scalar holding the literal (a job's or the workflow's `env: X: |`, a `name: |`) puts its
+#      own header line, not one of these three, first on the way up; a quoted or plain scalar
+#      cannot hold the literal (its raw ' and " end a quoted one, its `: ` a plain one), and an
+#      anchor that could alias the step would sit on one of the pinned lines. So the literal is
+#      a step of the windows job. A comment line is text here too: GitHub expands ${{ }} in run:
+#      text, comment lines included, before the shell starts (premise from T-086 Investigation
+#      section 2; not checked against GitHub's docs in T-087: no docs tool or web access), and
+#      a comment line with fewer than 6 leading spaces between `    steps:` and the send step is
+#      refused. Zero tokens is refused (the build sends the installer, #93). That the secret
+#      cannot be spelled without this raw text rests on R4 (every secrets is one of the two
+#      names), R6 (no escape) and R8 (no tag) of this guard. A raw token, an owned literal and a
+#      leading-space count, no YAML or expression reader.
 # R1, R3 and R4 are the capability lock (GitHub enforces the token scope; it also covers gh api
 # and curl); R2 and R7 pin the release job and the header it inherits as two literals; R5 is the
 # early, fail-closed tripwire; R6 and R8 keep R3-R5's raw text the text a YAML reader sees; R9 and
-# R10 pin the only upload step and the only step the Telegram secrets reach as literals.
+# R10 pin the upload step and the windows job's send step, the only step the Telegram secrets
+# reach, as literals.
 # Not caught (deliberate only): a token written into the workflow as text (the gitleaks
 # pre-commit scan refuses it); release.sh itself exiting 0 on a refusal (release.test.sh covers
 # that); whether GitHub enforces `permissions:` as documented (platform semantics,
@@ -88,12 +100,15 @@
 # as a `name: |` block scalar, with the real upload step deleted, passes R9; loud, not silent: on
 # a v* tag the release job's download fails and nothing is published (T-084 review 1); an upload
 # through another action is refused only by ci-wip.sh's fail-closed action list, not by R9;
-# R10's limits: the owned send-step literal moved, with the real send step deleted, into a place
-# that is not that step (a `run: |` block scalar of a job whose keys are indented 3 columns, a
-# step `name: |`) passes R10; whether GitHub then expands the secret there depends on that key's
-# context availability, and the send no longer happens on main, so the owner gets no installer
-# (loud, not silent); telegram-send.sh itself leaking the token (to GITHUB_ENV, a file or the log)
-# is telegram-send.test.sh's concern, not this guard's.
+# R10's limits: R10 pins the send step and its place, not the job around it: code that runs in
+# the windows job with the secrets in the send step's environment, on the refs its if: allows
+# (push to main or a v* tag) - a job-level or (in another file) workflow-level env: such as
+# BASH_ENV, an earlier step writing GITHUB_ENV or GITHUB_PATH, an edit of
+# scripts/ci/telegram-send.sh - is not refused (the retired telegram-guard did not refuse it
+# either); telegram-send.sh itself leaking the token (to GITHUB_ENV, a file or the log) is
+# telegram-send.test.sh's concern, not this guard's; a YAML parser that lets a quoted scalar end
+# without its closing quote, or a block scalar hold a less-indented line, is outside YAML 1.1/1.2
+# (GitHub's parser is not available on the host; probed with PyYAML 6, T-087 Red tests round 2).
 #
 # Usage: scripts/ci/release-guard.sh <workflows-dir>
 # Exit 0: ok. Exit 1: a violation, each listed as "<workflows-dir>/<file>:<line>: R<n>: <why>"
@@ -104,8 +119,10 @@
 # from scripts/ci/release-header.yml; R8: every line holding !!, !< or %TAG; R9: the second
 # token occurrence, the first line from the token on that differs from release-upload.yml, or,
 # with no token, the first file's jobs: line; R10: the token occurrence where the dir count first
-# exceeds the copy's, the first aligned line that differs from telegram-send-step.yml, or, with no
-# token, the first file's jobs: line). Exit 2: usage
+# exceeds the copy's, the first aligned line that differs from telegram-send-step.yml (line 1 when
+# the alignment starts before line 1), the first line met going up from the send step that is not
+# `    steps:`, `  windows:` or `jobs:` as due (the step's first line when none is met), or, with
+# no token, the first file's jobs: line). Exit 2: usage
 # error. Exit 3: cannot run (the dir is missing or not a directory, holds no regular file, a file
 # is unreadable or has no `jobs:` line, an owned copy is missing or malformed: release-job.yml not
 # starting with `  release:`, release-header.yml not ending in its only `jobs:` line,
@@ -281,14 +298,35 @@ END {
   if (ttc == 0) {
     for (i = 1; i <= N[1]; i++) if (L[1, i] == "jobs:") break
     v(1, i, "R10", "no secrets.TELEGRAM_ in the workflows dir (the owned send step scripts/ci/telegram-send-step.yml is missing; the build sends the installer, #93)")
-  } else
+  } else {
+    tbad = 0
     for (m = 1; m <= nt; m++) {
       i = tti - tof + m
       if (i < 1 || i > N[ttk] || L[ttk, i] != ot[m]) {
         v(ttk, (i < 1 ? 1 : i), "R10", "the Telegram send step differs from the owned copy scripts/ci/telegram-send-step.yml here (byte for byte; push && (main || v* tag) && send == true; edit both together)")
+        tbad = 1
         break
       }
     }
+    # R10: going up from the first line of the copy (lines of spaces only skipped), the first line with
+    # fewer than 6, then 4, then 2 leading spaces is "    steps:", "  windows:", "jobs:". A
+    # block scalar ends at its first less-indented line, so one holding the literal cannot hold
+    # all three, and its header line is met first.
+    if (!tbad) {
+      lim[1] = 6; want[1] = "    steps:"; lim[2] = 4; want[2] = "  windows:"; lim[3] = 2; want[3] = "jobs:"
+      lv = 1; s0 = tti - tof + 1
+      for (i = s0 - 1; i >= 1 && lv <= 3; i--) {
+        s = L[ttk, i]
+        if (s ~ /^ *$/) continue
+        match(s, /^ */)
+        if (RLENGTH >= lim[lv]) continue
+        if (s != want[lv]) break
+        lv++
+      }
+      if (lv <= 3)
+        v(ttk, (i >= 1 ? i : s0), "R10", "the Telegram send step is not a step of the windows job here: going up from it, the first line with fewer than " lim[lv] " leading spaces must be \"" want[lv] "\" (a block scalar or another job could hold the owned literal and hand the secrets to every step of a job, on every ref)")
+    }
+  }
   # R9: the lines from the first token line on are the owned upload copy, byte for byte.
   if (ntok == 0) {
     for (i = 1; i <= N[1]; i++) if (L[1, i] == "jobs:") break
@@ -315,4 +353,4 @@ case "$rc" in
   *) cannot_run "awk failed (exit $rc) on $dir or an owned copy ($owned, $ownedh, $ownedu, $ownedt)" ;;
 esac
 grep -q '^V ' <<<"$report" && cannot_run "awk listed violations but exited 0"
-echo "release-guard: ok: $dir: ${#files[@]} file(s); token read-only but in the release job, which is the owned copy; no other secret, permissions or gh; one installer upload, the owned tag-only step; the Telegram secrets only in the owned send step"
+echo "release-guard: ok: $dir: ${#files[@]} file(s); token read-only but in the release job, which is the owned copy; no other secret, permissions or gh; one installer upload, the owned tag-only step; the Telegram secrets only in the owned send step of the windows job"
