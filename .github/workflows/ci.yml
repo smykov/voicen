@@ -34,10 +34,10 @@ jobs:
       # install, lint, unit tests, licenses and the e2e run (its browser in a network namespace
       # of its own, --network none; T-064, decision #89). The e2e entry passes CI through.
       # Host node only for the host-side fixture tests (scripts/ci/e2e-entry.test.sh); no ui
-      # command runs on it. package-manager-cache: false because setup-node v5 otherwise
-      # auto-caches the package.json packageManager (pnpm) and runs `pnpm store path` on the
-      # host; this job has no host pnpm since T-064 (decision #89). Pinned by make check
-      # (check-setup-node-cache, T-068).
+      # command runs on it. package-manager-cache: false because the node setup action (v5)
+      # otherwise auto-caches the package.json packageManager (pnpm) and runs `pnpm store path`
+      # on the host; this job has no host pnpm since T-064 (decision #89). Pinned by make check
+      # (check-release-guard, owned step copies in scripts/ci/cache-steps; T-068, T-088).
       - uses: actions/setup-node@v5
         with:
           node-version: "20.19"
@@ -52,9 +52,9 @@ jobs:
       # the downloaded .crate files; cargo re-extracts src offline. Saves the crates.io
       # download of the license check (T-027, decision #24 D3). Restored on every ref, saved from
       # main only (T-066): the repo cache is at its 10 GB limit (T-058), and entries saved from
-      # wip/** runs would evict main's. actions/cache saves in its post step on every ref, so
-      # restore and save are separate steps; make check (check-ci-wip) refuses a save that is
-      # not limited to main.
+      # wip/** runs would evict main's. The combined cache action saves in its post step on every
+      # ref, so restore and save are separate steps; make check (check-release-guard) refuses a
+      # save that is not limited to main.
       - name: Restore the cargo registry of the core image
         id: cargo-registry
         uses: actions/cache/restore@v6
@@ -65,8 +65,8 @@ jobs:
           key: cargo-registry-core-${{ hashFiles('Cargo.lock', 'licenses/fixtures/gpl/Cargo.lock') }}
           restore-keys: cargo-registry-core-
       - run: make check
-      # After a green make check, as the post step of actions/cache did; not on an exact hit
-      # (the entry exists).
+      # After a green make check, as the post step of the combined cache action did; not on an
+      # exact hit (the entry exists).
       - name: Save the cargo registry of the core image (main only)
         if: ${{ github.ref == 'refs/heads/main' && steps.cargo-registry.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@v6
@@ -82,10 +82,10 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
+      # No cache in the node setup action: its post step saves on every ref and has no switch to
+      # limit it to main (its v5 action.yml), so the pnpm store is restored here on every ref and
+      # saved after pnpm install from main only (T-066; make check: check-release-guard).
       - uses: pnpm/action-setup@v4
-      # No cache in setup-node: its post step saves on every ref and has no switch to limit it
-      # to main (setup-node v5 action.yml), so the pnpm store is restored here on every ref and
-      # saved after pnpm install from main only (T-066; make check: check-ci-wip).
       - uses: actions/setup-node@v5
         with:
           node-version: "20.19"
@@ -118,12 +118,12 @@ jobs:
         with:
           path: ${{ steps.pnpm-store.outputs.path }}
           key: ${{ steps.pnpm-cache.outputs.cache-primary-key }}
+      - name: Version of this build
       # T-077 (decisions #98): one version per run, written before the first compile into
       # Cargo.toml, tauri.conf.json, package.json and the two workspace members of Cargo.lock
       # (never committed): <repo MAJOR.MINOR>.<run_number>, a vX.Y.Z tag build X.Y.Z. A bad tag,
       # repo version or run number stops the job here. Exports VOICEN_VERSION. Contract and host
       # test: scripts/ci/version-stamp.sh, version-stamp.test.sh (make check).
-      - name: Version of this build
         shell: bash
         env:
           REF_TYPE: ${{ github.ref_type }}

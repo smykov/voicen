@@ -1,6 +1,6 @@
 # The gate: every area's checks, each through scripts/tw-run in the area's toolchain.
 .PHONY: check check-shell-layout check-shell-layout-fixtures check-helper-windows-fixtures check-core \
-	check-ci-credentials check-setup-node-cache check-core-test-clocks check-http-client-builder check-ci-wip check-telegram-send check-telegram-failure-branch \
+	check-ci-credentials check-core-test-clocks check-http-client-builder check-ci-wip check-telegram-send check-telegram-failure-branch \
 	check-version-stamp check-release-check check-release check-release-guard check-nsis-fork check-e2e-entry-fixtures \
 	check-shell-windows \
 	check-ui core-image ui-image \
@@ -9,7 +9,7 @@
 
 # check-shell-windows after check-core: the shell depends on voicen-core, so a core error is
 # reported first by the faster native check-core, before the slower cross-target build.
-check: check-shell-layout check-shell-layout-fixtures check-helper-windows-fixtures check-ci-credentials check-setup-node-cache check-core-test-clocks check-http-client-builder check-ci-wip check-telegram-send check-telegram-failure-branch check-version-stamp check-release-check check-release check-release-guard check-nsis-fork check-core \
+check: check-shell-layout check-shell-layout-fixtures check-helper-windows-fixtures check-ci-credentials check-core-test-clocks check-http-client-builder check-ci-wip check-telegram-send check-telegram-failure-branch check-version-stamp check-release-check check-release check-release-guard check-nsis-fork check-core \
 	check-shell-windows check-e2e-entry-fixtures check-ui \
 	licenses-check
 
@@ -40,14 +40,6 @@ check-helper-windows-fixtures:
 check-ci-credentials:
 	scripts/ci/ci-credentials.test.sh
 
-# T-068: no actions/setup-node step in .github/workflows needs pnpm on the host unless an
-# earlier step of its job runs pnpm/action-setup (setup-node v5 caches the package.json
-# packageManager by default; run 37498788064). The self-test runs the tripwire
-# scripts/ci/setup-node-cache.sh on scripts/ci/fixtures/setup-node-cache/ and the real repo.
-# Host bash and awk.
-check-setup-node-cache:
-	scripts/ci/setup-node-cache.test.sh
-
 # T-080 (rca, class os-answer-deadline-race): no core test outside crates/voicen-core/tests/common
 # names an OS-answer target (a .invalid host, 127.0.0.1:1, the blackhole 192.0.2.1) or reads
 # the wall clock itself (Instant::now, .elapsed(), an Instant alias); targets come with their
@@ -67,10 +59,9 @@ check-http-client-builder:
 
 # T-066 (rca, P-016, decisions #90): .github/workflows/ci.yml runs on push to main and wip/**
 # (the pre-review run of every non-docs task), and no workflow step saves a cache on a ref
-# other than main (fail-closed classification of every uses:). The self-test runs the tripwire
-# scripts/ci/ci-wip.sh on scripts/ci/fixtures/ci-wip/ and the real repo. Host bash and awk.
-check-ci-wip:
-	scripts/ci/ci-wip.test.sh
+# other than main. Since T-088 both are release-guard rules (R7 on ci.yml, R11-R13): this name
+# stays, as a prerequisite-only alias, because PRINCIPLES.md P-016 names it.
+check-ci-wip: check-release-guard
 
 # T-070 (decisions #93): scripts/ci/telegram-send.sh, the one Telegram send path of ci.yml, keeps
 # the token and chat id out of curl's argv and its output, sends the caption as a form string,
@@ -120,8 +111,14 @@ check-release:
 # #122), the one installer upload byte-identical to scripts/ci/release-upload.yml (R9), and the
 # raw token secrets.TELEGRAM_ (any case, comments included) only in the one Telegram send step,
 # byte-identical to scripts/ci/telegram-send-step.yml (R10; replaces telegram-guard, T-087:
-# T-070 validation 1 M6 and probes T1-T4 are its fixtures). The self-test runs the tripwire scripts/ci/release-guard.sh on scripts/ci/fixtures/release-guard/ and the real
-# workflows dir (also mutated). Host bash and awk.
+# T-070 validation 1 M6 and probes T1-T4 are its fixtures); and (T-088, replaces ci-wip and
+# setup-node-cache) R7 also on ci.yml (its trigger: push to main and wip/**), every line with the
+# word uses or an action name (actions/cache, setup-node, rust-cache, cache/save,
+# pnpm/action-setup) an owned line of scripts/ci/action-lines.txt or inside a byte-exact owned
+# step fragment of scripts/ci/cache-steps/ (whose own text the guard checks: saves from main
+# only, no setup-node cache) (R11), no column-0 line after jobs: (R12) and no YAML merge key
+# (R13). The self-test runs the tripwire scripts/ci/release-guard.sh on
+# scripts/ci/fixtures/release-guard/ and the real workflows dir (also mutated). Host bash and awk.
 check-release-guard:
 	scripts/ci/release-guard.test.sh
 

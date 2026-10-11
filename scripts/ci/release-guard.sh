@@ -4,7 +4,9 @@
 # workflow header GitHub applies to it are exactly the reviewed text. A GitHub Release is written
 # by `bash scripts/ci/release.sh` (release-check.sh, then SHA256SUMS.txt, the notes and
 # `gh release create --verify-tag`; host test release.test.sh) in the release job, which is a v*
-# tag push job that needs gate and windows.
+# tag push job that needs gate and windows. Since T-088 (which retired ci-wip.sh and
+# setup-node-cache.sh) it also pins every action a workflow runs and every step that can save a
+# cache to owned text (R11-R13) and ci.yml's trigger to the owned header (R7).
 #
 # The guard decides on raw text and on literals it owns, never on a reading of YAML, shell or gh
 # syntax (P-020): it has no tokenizer, no scalar reader and no comment reader, so a comment is
@@ -35,12 +37,14 @@
 #      secrets, vars, gh or permissions from R3-R5; the raw bytes decide in any scalar style, so no
 #      scalar reader is needed (a Windows path such as `Voicen\uninstall.exe` has no 4 hex digits
 #      after \u and passes);
-#   R7 every file that holds a `  release:` line starts with the guard's second owned copy,
+#   R7 ci.yml and every file that holds a `  release:` line start with the guard's second owned copy,
 #      scripts/ci/release-header.yml, byte for byte, from line 1 to the file's first line that is
 #      exactly `jobs:` (comments included: a comment is text). GitHub applies the workflow-level
 #      keys (env:, defaults:, on:, concurrency:, permissions: ...) to the release job, so a
 #      BASH_ENV or working-directory there would run with its write token; the literal closes them
-#      all without naming any key or variable.
+#      all without naming any key or variable. ci.yml is named (T-088) so that its trigger
+#      (push to main and wip/**, the P-016 pre-review run) holds even with the release job moved
+#      to another file.
 #   R8 none of the raw texts `!!`, `!<` and `%TAG` (case-sensitive) occurs on any line, comments
 #      included: a YAML tag (the shorthand `!!binary`, the verbatim `!<tag:...>`, or a handle
 #      declared by a `%TAG` directive) could decode other text, e.g. base64, into secrets, vars, gh
@@ -80,11 +84,41 @@
 #      cannot be spelled without this raw text rests on R4 (every secrets is one of the two
 #      names), R6 (no escape) and R8 (no tag) of this guard. A raw token, an owned literal and a
 #      leading-space count, no YAML or expression reader.
+#   R11 (T-088, decision #124, P-020; replaces ci-wip.sh and setup-node-cache.sh) every line
+#      holding the word uses or one of the raw tokens actions/cache, setup-node, rust-cache,
+#      cache/save, pnpm/action-setup (any case, comments included) is byte-identical to a line of
+#      the owned list scripts/ci/action-lines.txt (the never-saving uses lines: checkout,
+#      cache/restore, rust-toolchain, upload-artifact, download-artifact) or lies inside a
+#      byte-exact copy of an owned step fragment scripts/ci/cache-steps/*.yml (edit each together
+#      with ci.yml). A fragment runs from its step's `      - ` line through the first line of the
+#      next step or the next job's key line, so no key can be appended to the step; that last
+#      line only pins the end and is not inside the fragment (the step it starts needs its own
+#      owned line or fragment). Before it reads the dir, the guard checks its own fragments
+#      (exit 3 on a bad one, so the copy and ci.yml cannot be loosened together): each starts
+#      with `      - ` and ends on a `      - ` line or a job key line `  <name>:` (a comment line
+#      does not end a step: the key after it joins the step); a setup-node fragment holds
+#      `          package-manager-cache: false` and the raw cache on no other line (no host
+#      pnpm); a rust-cache fragment holds `          save-if: ${{ github.ref == 'refs/heads/main'
+#      }}` (one line) and no other save-if; a cache/save fragment holds one if: line, starting
+#      `        if: ${{ github.ref == 'refs/heads/main' && `, and no ||; a pnpm/action-setup
+#      fragment holds no cache. So every action a workflow runs is reviewed text, every step that
+#      can save a cache saves from main only, and no setup-node step needs host pnpm. That uses
+#      and the action names cannot be spelled another way rests on R6 (no escape) and R8 (no
+#      tag); the word uses is the load-bearing token (every action run, reusable-workflow call
+#      and local action is a uses key), the five names are a belt (comments must not name them).
+#   R12 (T-088) after a file's `jobs:` line, every line that is not empty or spaces only starts
+#      with a space, comments included: a column-0 key between two jobs (`on:`, `env:`) would
+#      turn the jobs after it, the release job included, into its keys (probe W3).
+#   R13 (T-088) no YAML merge key: the raw text << not followed by <, a letter, _, -, ' or " (a
+#      bash here-doc <<EOF, <<-EOF, <<'EOF', <<"EOF", <<_X or a here-string <<< passes). A merge
+#      key could pull an owned fragment, anchored elsewhere, into a step with other keys (probe
+#      M2); R11 needs every step's keys to be text on its own lines.
 # R1, R3 and R4 are the capability lock (GitHub enforces the token scope; it also covers gh api
 # and curl); R2 and R7 pin the release job and the header it inherits as two literals; R5 is the
 # early, fail-closed tripwire; R6 and R8 keep R3-R5's raw text the text a YAML reader sees; R9 and
 # R10 pin the upload step and the windows job's send step, the only step the Telegram secrets
-# reach, as literals.
+# reach, as literals; R11-R13 pin every action and every cache-saving step to owned text, and
+# R7 on ci.yml its trigger.
 # Not caught (deliberate only): a token written into the workflow as text (the gitleaks
 # pre-commit scan refuses it); release.sh itself exiting 0 on a refusal (release.test.sh covers
 # that); whether GitHub enforces `permissions:` as documented (platform semantics,
@@ -92,14 +126,10 @@
 # workflow level, so it does not matter for jobs without their own block); a YAML parser that
 # reads escapes, line breaks or tags beyond YAML 1.1/1.2 (GitHub's parser is not available on the
 # host);
-# a column-0 key such as `env:` put between two jobs before `  release:` (header and release block
-# unchanged, so R2 and R7 pass): YAML then reads `  release:` as a key under that top-level key,
-# so the release job no longer exists, no job holds contents: write, and the workflow is invalid
-# or releases nothing (probed with PyYAML 6.0.1, not GitHub's parser; T-085 Red tests round 3);
 # R9's limits: the owned upload literal moved into another job, or hidden inside other YAML such
 # as a `name: |` block scalar, with the real upload step deleted, passes R9; loud, not silent: on
 # a v* tag the release job's download fails and nothing is published (T-084 review 1); an upload
-# through another action is refused only by ci-wip.sh's fail-closed action list, not by R9;
+# through another action is refused by R11 (no unlisted uses line), not by R9;
 # R10's limits: R10 pins the send step and its place, not the job around it: code that runs in
 # the windows job with the secrets in the send step's environment, on the refs its if: allows
 # (push to main or a v* tag) - a job-level or (in another file) workflow-level env: such as
@@ -108,7 +138,17 @@
 # either); telegram-send.sh itself leaking the token (to GITHUB_ENV, a file or the log) is
 # telegram-send.test.sh's concern, not this guard's; a YAML parser that lets a quoted scalar end
 # without its closing quote, or a block scalar hold a less-indented line, is outside YAML 1.1/1.2
-# (GitHub's parser is not available on the host; probed with PyYAML 6, T-087 Red tests round 2).
+# (GitHub's parser is not available on the host; probed with PyYAML 6, T-087 Red tests round 2);
+# R11-R13's limits (T-088 Investigation section 5): a cache written by a run step (docker buildx
+# --cache-to type=gha, a script calling the cache service); a save if: that is always false on
+# main (loud: main saves nothing); an action input supplied through the environment (a job- or
+# workflow-level env: INPUT_CACHE: pnpm, or a run step writing it to GITHUB_ENV) - whether the
+# runner reads inputs from INPUT_* variables set this way was NOT checked against GitHub's docs
+# (no docs tool in T-088), so this hole is unverified, not ruled out; an owned never-saving line
+# reused with its own with: or an owned fragment copied whole into another job (neither can save
+# a cache or reach host pnpm; the place of a fragment is not pinned on purpose); whether GitHub
+# honours YAML merge keys at all was NOT checked against GitHub's docs either: R13 refuses them
+# fail-closed, so the answer does not matter for the guard.
 #
 # Usage: scripts/ci/release-guard.sh <workflows-dir>
 # Exit 0: ok. Exit 1: a violation, each listed as "<workflows-dir>/<file>:<line>: R<n>: <why>"
@@ -122,13 +162,16 @@
 # exceeds the copy's, the first aligned line that differs from telegram-send-step.yml (line 1 when
 # the alignment starts before line 1), the first line met going up from the send step that is not
 # `    steps:`, `  windows:` or `jobs:` as due (the step's first line when none is met), or, with
-# no token, the first file's jobs: line). Exit 2: usage
+# no token, the first file's jobs: line; R11: every token line outside the owned lines and
+# fragments; R12: the column-0 line; R13: the line of the occurrence). Exit 2: usage
 # error. Exit 3: cannot run (the dir is missing or not a directory, holds no regular file, a file
 # is unreadable or has no `jobs:` line, an owned copy is missing or malformed: release-job.yml not
 # starting with `  release:`, release-header.yml not ending in its only `jobs:` line,
 # release-upload.yml missing, empty or not starting with `      - uses: actions/upload-artifact@v4`;
 # telegram-send-step.yml missing, empty, holding no secrets.TELEGRAM_ token or not starting with
-# `      - name: Send the installer to Telegram (main and v* tags only)`; awk failed);
+# `      - name: Send the installer to Telegram (main and v* tags only)`; action-lines.txt missing or
+# empty; cache-steps/ missing or holding no fragment, or a fragment failing R11's checks of its
+# own text; awk failed);
 # never a pass.
 # Host test: scripts/ci/release-guard.test.sh (make check-release-guard).
 set -uo pipefail
@@ -156,6 +199,55 @@ ownedt="$here/telegram-send-step.yml"
 [ -f "$ownedt" ] && [ -r "$ownedt" ] || cannot_run "owned send-step copy $ownedt not found or not readable"
 [ "$(head -n 1 -- "$ownedt")" = "      - name: Send the installer to Telegram (main and v* tags only)" ] || cannot_run "owned send-step copy $ownedt does not start with the line '      - name: Send the installer to Telegram (main and v* tags only)'"
 grep -q -i -F 'secrets.telegram_' -- "$ownedt" || cannot_run "owned send-step copy $ownedt holds no secrets.TELEGRAM_ token (nothing to align on)"
+# R11: the owned never-saving uses lines and the owned step fragments; each fragment's own text
+# is checked here, so the copy and ci.yml cannot be loosened together.
+ownedl="$here/action-lines.txt"
+[ -f "$ownedl" ] && [ -r "$ownedl" ] || cannot_run "owned action lines $ownedl not found or not readable"
+[ -s "$ownedl" ] || cannot_run "owned action lines $ownedl is empty"
+csd="$here/cache-steps"
+[ -d "$csd" ] || cannot_run "owned fragment dir $csd not found or not a directory"
+frags=()
+for fr in "$csd"/*; do
+  [ -f "$fr" ] || continue
+  [ -r "$fr" ] || cannot_run "owned fragment $fr is not readable"
+  frags+=("$fr")
+done
+[ "${#frags[@]}" -gt 0 ] || cannot_run "owned fragment dir $csd holds no fragment"
+for fr in "${frags[@]}"; do
+  first="$(head -n 1 -- "$fr")"; last="$(tail -n 1 -- "$fr")"; body="$(sed '$d' -- "$fr")"
+  [[ "$first" == "      - "* ]] || cannot_run "owned fragment $fr does not start with a step line '      - '"
+  [[ "$last" == "      - "* || "$last" =~ ^\ \ [A-Za-z0-9_-]+:$ ]] ||
+    cannot_run "owned fragment $fr does not end on a step-ending line (the next step's '      - ' line or a job key line '  <name>:')"
+  # The step's action: the first line of the body (last line excluded) holding the word uses.
+  kind="$(grep -i -E '(^|[^A-Za-z0-9_])uses([^A-Za-z0-9_]|$)' <<<"$body" | head -n 1 |
+    grep -o -i -E 'setup-node|rust-cache|cache/save|pnpm/action-setup' | head -n 1 | tr 'A-Z' 'a-z')"
+  case "$kind" in
+    setup-node)
+      grep -q -x -F '          package-manager-cache: false' <<<"$body" ||
+        cannot_run "owned fragment $fr (setup-node) has no line '          package-manager-cache: false'"
+      [ "$(grep -c -i 'cache' <<<"$body")" = 1 ] ||
+        cannot_run "owned fragment $fr (setup-node) holds cache on a line other than package-manager-cache: false"
+      ;;
+    rust-cache)
+      grep -q -x -F "          save-if: \${{ github.ref == 'refs/heads/main' }}" <<<"$body" ||
+        cannot_run "owned fragment $fr (rust-cache) has no save-if on main only"
+      [ "$(grep -c -i 'save-if' <<<"$body")" = 1 ] ||
+        cannot_run "owned fragment $fr (rust-cache) holds more than one save-if line"
+      ;;
+    cache/save)
+      grep -q -F "        if: \${{ github.ref == 'refs/heads/main' && " <<<"$body" ||
+        cannot_run "owned fragment $fr (cache/save) has no if: on main"
+      [ "$(grep -c -E '^ *if:' <<<"$body")" = 1 ] ||
+        cannot_run "owned fragment $fr (cache/save) holds more than one if: line"
+      ! grep -q -F '||' <<<"$body" || cannot_run "owned fragment $fr (cache/save) holds ||"
+      ;;
+    pnpm/action-setup)
+      ! grep -q -i 'cache' <<<"$body" || cannot_run "owned fragment $fr (pnpm/action-setup) holds cache"
+      ;;
+    *) cannot_run "owned fragment $fr: its step uses none of setup-node, rust-cache, cache/save, pnpm/action-setup" ;;
+  esac
+done
+fraglist="$(printf '%s\n' "${frags[@]}")"
 
 shopt -s nullglob dotglob
 files=()
@@ -169,7 +261,7 @@ shopt -u nullglob dotglob
 [ "${#files[@]}" -gt 0 ] || cannot_run "no regular file in $dir"
 
 # Output lines: "V <file>:<line>: R<n>: <why>"; awk exit 3 = an owned copy could not be read.
-report="$(awk -v owned="$owned" -v ownedh="$ownedh" -v ownedu="$ownedu" -v ownedt="$ownedt" '
+report="$(RG_FRAGS="$fraglist" awk -v owned="$owned" -v ownedh="$ownedh" -v ownedu="$ownedu" -v ownedt="$ownedt" -v ownedl="$ownedl" '
 function v(k, i, r, why) { print "V " F[k] ":" i ": " r ": " why; nv++ }
 # count(s, t): occurrences of t in s.
 function count(s, t,   n, p) { n = 0; while ((p = index(s, t)) > 0) { n++; s = substr(s, p + length(t)) } return n }
@@ -198,6 +290,17 @@ BEGIN {
   }
   if (rc < 0 || nt == 0 || tco == 0) { bad = 1; exit 3 }
   close(ownedt)
+  # R11: the owned lines (a set) and the owned fragments FR[f, m], FN[f] lines each.
+  while ((rc = (getline line < ownedl)) > 0) OL[line] = 1
+  if (rc < 0) { bad = 1; exit 3 }
+  close(ownedl)
+  nfr = split(ENVIRON["RG_FRAGS"], FP, "\n")
+  for (f = 1; f <= nfr; f++) {
+    FN[f] = 0
+    while ((rc = (getline line < FP[f])) > 0) FR[f, ++FN[f]] = line
+    if (rc < 0 || FN[f] < 2) { bad = 1; exit 3 }
+    close(FP[f])
+  }
 }
 FNR == 1 { nf++; F[nf] = FILENAME }
 { N[nf] = FNR; L[nf, FNR] = $0 }
@@ -220,13 +323,42 @@ END {
     # first "jobs:" line, byte for byte (the copy has "jobs:" only as its last line).
     hasrel = 0
     for (i = 1; i <= N[k]; i++) if (L[k, i] == "  release:") { hasrel = 1; break }
-    if (hasrel) {
+    if (hasrel || F[k] ~ /(^|\/)ci\.yml$/) {
       for (i = 1; i <= N[k]; i++) {
         if (i > nh || L[k, i] != oh[i]) break
         if (L[k, i] == "jobs:") break
       }
       if (i > N[k] || i > nh || L[k, i] != oh[i])
         v(k, i, "R7", "the workflow header, from line 1 to jobs:, differs from the owned copy scripts/ci/release-header.yml here (byte for byte; GitHub applies it to the release job)")
+    }
+    # R11: cov[k, i] = line i lies inside a byte-exact copy of an owned fragment, its last line
+    # (the first line of the next step, or a job key) excluded: that line only pins the end.
+    for (f = 1; f <= nfr; f++)
+      for (st = 1; st + FN[f] - 1 <= N[k]; st++) {
+        for (m = 1; m <= FN[f] && L[k, st + m - 1] == FR[f, m]; m++);
+        if (m > FN[f]) for (m = 1; m < FN[f]; m++) cov[k, st + m - 1] = 1
+      }
+    jl = 0
+    for (i = 1; i <= N[k]; i++) {
+      s = L[k, i]; lo = tolower(s)
+      # R11: the word uses or an action-name token, any case, comments included.
+      if ((word(lo, "uses") || index(lo, "actions/cache") || index(lo, "setup-node") ||
+           index(lo, "rust-cache") || index(lo, "cache/save") || index(lo, "pnpm/action-setup")) &&
+          !cov[k, i] && !(s in OL))
+        v(k, i, "R11", "an action (the word uses or actions/cache, setup-node, rust-cache, cache/save, pnpm/action-setup) outside the owned lines scripts/ci/action-lines.txt and the owned step fragments scripts/ci/cache-steps/ (byte for byte; edit both together)")
+      # R12: after jobs:, no line that is not empty or spaces only starts in column 0.
+      if (jl && s !~ /^ *$/ && s !~ /^ /)
+        v(k, i, "R12", "a column-0 line after jobs: (a top-level key between jobs would turn the jobs after it into its keys)")
+      if (!jl && s == "jobs:") jl = i
+      # R13: << not followed by <, a letter, _, -, \047 or " is a YAML merge key.
+      mt = s
+      while ((mp = index(mt, "<<")) > 0) {
+        if (substr(mt, mp + 2, 1) !~ /[<A-Za-z_\047"-]/) {
+          v(k, i, "R13", "a YAML merge key << (it could merge an owned fragment into a step with other keys)")
+          break
+        }
+        mt = substr(mt, mp + 2)
+      }
     }
     # inb: inside the release block, which runs from "  release:" to the end of the file (R2).
     inb = 0
@@ -347,10 +479,10 @@ case "$rc" in
   0) ;;
   1)
     sed -n 's/^V //p' <<<"$report" >&2
-    echo "release-guard: FAIL: a token other than the release job's could write contents, the release job is not the owned copy, the installer upload is not the owned tag-only step, or the Telegram secrets reach a step other than the owned send step (T-085, T-084, T-087, P-020)" >&2
+    echo "release-guard: FAIL: a token other than the release job's could write contents, the release job or the ci.yml header is not the owned copy, the installer upload is not the owned tag-only step, the Telegram secrets reach a step other than the owned send step, or an action is not an owned line or step fragment (T-085, T-084, T-087, T-088, P-020)" >&2
     exit 1
     ;;
-  *) cannot_run "awk failed (exit $rc) on $dir or an owned copy ($owned, $ownedh, $ownedu, $ownedt)" ;;
+  *) cannot_run "awk failed (exit $rc) on $dir or an owned copy ($owned, $ownedh, $ownedu, $ownedt, $ownedl, $csd)" ;;
 esac
 grep -q '^V ' <<<"$report" && cannot_run "awk listed violations but exited 0"
-echo "release-guard: ok: $dir: ${#files[@]} file(s); token read-only but in the release job, which is the owned copy; no other secret, permissions or gh; one installer upload, the owned tag-only step; the Telegram secrets only in the owned send step of the windows job"
+echo "release-guard: ok: $dir: ${#files[@]} file(s); token read-only but in the release job, which is the owned copy; no other secret, permissions or gh; one installer upload, the owned tag-only step; the Telegram secrets only in the owned send step of the windows job; every action an owned line or step fragment, no column-0 line after jobs:, no merge key"

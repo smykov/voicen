@@ -1,9 +1,0 @@
-on:
-  push:
-    branches: [main, "wip/**"]
-    paths-ignore: ["docs/**"]
-jobs:
-  a:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v5
