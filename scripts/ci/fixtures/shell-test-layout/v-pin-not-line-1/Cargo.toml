@@ -1,0 +1,19 @@
+# T-092 fixture (v-pin-not-line-1): stands in for src-tauri/Cargo.toml. Package voicen, lib voicen_lib, bin
+# voicen and build.rs, as the owned scripts/ci/shell-targets.txt lists them (paths relative to
+# the shell dir). Its own [workspace] keeps cargo from reading the repository's workspace.
+[package]
+name = "voicen"
+version = "0.0.0"
+edition = "2021"
+
+[lib]
+name = "voicen_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+test = false
+doctest = false
+[[bin]]
+name = "voicen"
+test = false
+
+
+[workspace]

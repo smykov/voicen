@@ -1,36 +1,8 @@
-//! The shape of src-tauri/src today: platform cfgs, tauri commands, a mobile entry point.
-use std::path::Path;
+#![cfg(not(any(test, doctest)))]
+// T-092 fixture: the shell's lib crate root. Line 1 is the crate-level cfg that empties the
+// crate under test and doctest (scripts/ci/shell-test-layout.sh compares it byte-exactly).
 
-#[cfg(windows)]
-pub mod autostart;
-pub mod locale;
-
-#[tauri::command]
-fn get_build_info() -> String {
-    String::new()
-}
-
-#[tauri::command(async)]
-async fn save() -> Result<(), String> {
-    Ok(())
-}
-
-/// The command registration; reached only through [`run`].
-fn commands(path: &Path) -> bool {
-    path.exists()
-}
-
-#[cfg(windows)]
-fn platform() -> &'static str {
-    "windows"
-}
-
-#[cfg(not(windows))]
-fn platform() -> &'static str {
-    "other"
-}
-
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub fn run() {
-    let _ = (platform(), commands(Path::new(".")));
+/// A doc block: the pin keeps it out of every doctest run.
+pub fn run() -> u32 {
+    7
 }

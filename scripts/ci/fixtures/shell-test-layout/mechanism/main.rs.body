@@ -1,0 +1,27 @@
+// T-092 mechanism: the bin crate root after its pin line.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+fn main() {
+    std::process::exit(if voicen_lib::run() == 7 { 0 } else { 1 });
+}
+
+macro_rules! r1 {
+    ($t:ident) => {
+        #[cfg($t)]
+        mod r1 {
+            #[$t]
+            fn planted() {
+                panic!("T092-PLANTED-BIN-R1");
+            }
+        }
+    };
+}
+r1!(test);
+
+#[cfg(test)]
+mod plain {
+    #[test]
+    fn planted() {
+        panic!("T092-PLANTED-BIN-TEST");
+    }
+}

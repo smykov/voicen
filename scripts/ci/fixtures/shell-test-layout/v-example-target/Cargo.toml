@@ -1,14 +1,23 @@
-# Fixture shell dir for scripts/ci/shell-test-layout.test.sh; never built.
+# T-092 fixture (v-example-target): stands in for src-tauri/Cargo.toml. Package voicen, lib voicen_lib, bin
+# voicen and build.rs, as the owned scripts/ci/shell-targets.txt lists them (paths relative to
+# the shell dir). Its own [workspace] keeps cargo from reading the repository's workspace.
 [package]
-name = "shell-layout-fixture"
+name = "voicen"
 version = "0.0.0"
 edition = "2021"
-publish = false
 
 [lib]
-name = "shell_layout_fixture_lib"
+name = "voicen_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
+test = false
 doctest = false
+[[bin]]
+name = "voicen"
+test = false
 
 [[example]]
-name = "demo"
+name = "t092_example"
+path = "elsewhere/t092_example.rs"
+test = true
+
+[workspace]

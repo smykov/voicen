@@ -1,251 +1,218 @@
 #!/usr/bin/env bash
-# T-035 guard of the guard (review round 1, findings 1 and 2): scripts/ci/shell-test-layout.sh
-# must give the documented exit code on every committed fixture shell dir under
-# scripts/ci/fixtures/shell-test-layout/<case>/ (each mimics src-tauri: src/, Cargo.toml,
-# optional tests/, benches/, examples/, and workflows/ standing in for .github/workflows).
-# The guard gets the case's workflows/ as its 2nd argument, or an empty dir when the case has
-# none, so the real .github/workflows never decides a case. Without this, a weakened regex or awk branch keeps
-# `make check` green, because the real src-tauri has no violation to catch.
+# Guard of the guard for scripts/ci/shell-test-layout.sh (make check-shell-layout), and proof of
+# the compiler switch it pins (T-035, T-038, T-092; F-002; docs/decisions/ci-toolchain.md).
 #
-#   ok-*  allowed shapes: exit 0, and the guard prints "ok:".
-#   v-*   one violation each: exit 1, and the guard's listing names the offending path.
-#   c-*   cannot run: exit 3, and the guard says "cannot run" (never a pass).
-# Tool errors are simulated with a PATH shim: an awk, grep or find that always exits
-# non-zero, or a selective one that fails only on the call of one scan (its arguments
-# match) and runs the real tool otherwise, so the guard gets past the earlier scans and
-# reaches that scan's own error branch.
-# Every fixture dir must appear in the table below, so a case cannot be dropped silently.
+# T-092 (P-020 rewrite; supersedes the T-035/T-036/T-038 fixture set): CONTRACT CHANGE, not a
+# weakened case. The guard no longer reads Rust, TOML or workflow text (the awk lexer, the TOML
+# line tracker, the benches/examples greps and the workflow --doc/rustdoc grep are retired: R1, a
+# macro-built #[cfg(test)] #[test], and L1, `cargo test --d"oc"`, passed them). It decides on
+#   (a) cargo's own target list: `cargo metadata --no-deps --offline --format-version 1
+#       --manifest-path <shell>/Cargo.toml` in the core image (scripts/tw-run core), the voicen
+#       package's targets projected to kind, name, src_path (relative to the shell dir), test,
+#       doctest, without kind-test rows (every integration test gets rustc-link-arg-tests),
+#       compared byte-exactly with the owned scripts/ci/shell-targets.txt (build.rs custom-build,
+#       lib voicen_lib src/lib.rs test=false doctest=false, bin voicen src/main.rs test=false
+#       doctest=false); JSON read with host `python3 -I` (json module);
+#   (b) line 1 of each crate root cargo reports, compared byte-exactly with an owned line:
+#       lib `#![cfg(not(any(test, doctest)))]`, bin `#![cfg(not(test))]`. rustc applies the
+#       crate-level cfg before name resolution, so every test exe and doctest of lib and bin is
+#       empty for every cargo selector and every spelling of it (part 1 below proves it).
+# The ~78 old fixture dirs (test attributes, cfg(test) shapes, lexer states, include!/#[path]/
+# symlinks, Cargo.toml grammar whitelist, workflow --doc/rustdoc) were removed on purpose: each
+# old guarantee now lives in the pin or in cargo's target list (T-092 Investigation §5):
+#   test attributes, cfg(test), R1, include!, #[path], symlinks under src -> the crate cfg
+#     empties them in every test mode (ok-r1-l1 passes; part 1 shows they never run);
+#   [lib]/[[bin]] path                -> v-lib-path-moved, v-bin-path-moved (src_path in the set);
+#   benches, examples, extra targets  -> v-bench-dir, v-example-target, v-second-bin (any target
+#     cargo reports that is not in the owned set);
+#   doctest = false / TOML shapes     -> v-doctest-on (cargo's own doctest value; cargo parses);
+#   --doc / rustdoc in workflows (L1) -> the lib pin: 0 doctests for any spelling (part 1);
+#   [[test]] path                     -> allowed now (ok-more-integration-tests): kind test gets
+#     the -tests link args wherever its file lives;
+#   cannot run on tool errors         -> kept: docker, cargo metadata or python3 failing is exit 3.
 #
-# T-038 (rca, supersedes decision #39): the guard no longer reads doc comments; it pins the
-# two cargo switches that can turn a doc block into an exe instead ([lib] doctest = false in
-# Cargo.toml, no --doc / rustdoc in the workflows). The 25 doc-shape fixture dirs of T-035/T-036
-# were removed on purpose, as a contract change and not a weakened case: their sources and
-# the b8b0b81 probes live on in ok-doc-text, which must pass, and every remaining Cargo.toml
-# carries the pinned `doctest = false` so each case passes or fails for its own reason only.
+# Part 1, mechanism (needs the core image): the template scripts/ci/fixtures/shell-test-layout/
+# mechanism/ is copied under target/ and its crate roots are written as <pin> + *.rs.body, where
+# <pin> is line 1 of the ok-current-shape fixture's crate root (the line the guard must accept).
+# The bodies plant R1, a plain #[test], a crate and an item doctest, each panicking with
+# T092-PLANTED-*. With the pins, cargo test, --lib, --bins, --all-targets, --doc, L1 verbatim
+# (`cargo test --d"oc"`) and `cargo rustdoc --lib -- --test` exit 0, print no planted text, and
+# the selected exes run 0 tests. Without line 1 (bite): the planted panics show.
+# Part 2, the real shell: line 1 of src-tauri/src/lib.rs and src-tauri/src/main.rs is the pin
+# part 1 proved, and the guard on src-tauri exits 0.
+# Part 3, guard cases (fixture dirs under scripts/ci/fixtures/shell-test-layout/, each a cargo
+# package mimicking src-tauri with its own [workspace]; the guard gets the repo-relative dir):
+#   ok-*  allowed: exit 0, the guard prints "ok:".
+#   v-*   one violation each: exit 1, the listing names the offending target or crate root.
+#   c-*   cannot run: exit 3, the guard says "cannot run" (never a pass). Tool errors are
+#         simulated with TW_DOCKER (scripts/tw-run's docker binary) and a python3 shim that
+#         fails on `python3 -I` calls only (scripts/tw-run's own python3 call has no -I).
+# Every fixture dir must appear in the tables, so a case cannot be dropped silently.
 #
-# Usage: scripts/ci/shell-test-layout.test.sh
+# Usage: scripts/ci/shell-test-layout.test.sh   (host bash; parts 1-3 reach the core image)
 # Exit 0: every case as expected. Exit 1: a case differs (listed). Exit 3: cannot run.
 set -uo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$root" || exit 3
 guard=scripts/ci/shell-test-layout.sh
 fx=scripts/ci/fixtures/shell-test-layout
-[ -x "$guard" ] || { echo "shell-test-layout.test: cannot run: $guard not found or not executable" >&2; exit 3; }
+mech="$fx/mechanism"
 [ -d "$fx" ] || { echo "shell-test-layout.test: cannot run: $fx not found" >&2; exit 3; }
+[ -f "$mech/Cargo.toml" ] || { echo "shell-test-layout.test: cannot run: $mech/Cargo.toml not found" >&2; exit 3; }
 shims="$(mktemp -d)" || { echo "shell-test-layout.test: cannot run: mktemp failed" >&2; exit 3; }
-trap 'rm -rf "$shims"' EXIT
-for tool in awk grep find; do
-  mkdir -p "$shims/$tool"
-  printf '#!/bin/sh\necho "%s: simulated failure" >&2\nexit 2\n' "$tool" >"$shims/$tool/$tool"
-  chmod +x "$shims/$tool/$tool"
-done
-# selective <shim-dir> <tool> <case pattern on "$*">: fail when the arguments match, else exec the real tool.
-selective() {
-  local real
-  real="$(command -v "$2")" || { echo "shell-test-layout.test: cannot run: $2 not found" >&2; exit 3; }
-  mkdir -p "$shims/$1"
-  printf '#!/bin/sh\ncase "$*" in %s) echo "%s: simulated failure (%s)" >&2; exit 2;; esac\nexec "%s" "$@"\n' \
-    "$3" "$2" "$1" "$real" >"$shims/$1/$2"
-  chmod +x "$shims/$1/$2"
-}
-# find-rs: only the `-name '*.rs'` file scan fails; the symlink scan before it runs.
-selective find-rs find "*'*.rs'*"
-# cargo-path: only the Cargo.toml target-path scan fails, whichever tool reads it: a grep
-# whose arguments name Cargo.toml and `path` (the bench/example grep names neither key),
-# or an awk reading Cargo.toml (the source lexer reads only *.rs files).
-selective cargo-path grep "*Cargo.toml*path*|*path*Cargo.toml*"
-selective cargo-path awk "*Cargo.toml*"
-# workflow-grep: only the scan of the workflows dir fails: its arguments name the dir, and no
-# other call of the guard does on the case it runs on (ok-current-shape: no `workflows` in
-# its shell path).
-selective workflow-grep grep "*workflows*"
+# Work dirs cargo must see live in the repo (scripts/tw-run mounts only the repo): target/ is ignored.
+mkdir -p target || { echo "shell-test-layout.test: cannot run: mkdir target failed" >&2; exit 3; }
+work="$(mktemp -d "$root/target/shell-test-layout.XXXXXX")" \
+  || { echo "shell-test-layout.test: cannot run: mktemp in target/ failed" >&2; exit 3; }
+work_rel="${work#"$root"/}"
+trap 'rm -rf "$shims" "$work"' EXIT
 
 failed=0
 passed=0
 declare -A seen=()
-# Workflows dir for a case without workflows/: empty, so a clean case passes the workflow scan.
-no_workflows="$shims/no-workflows"
-mkdir -p "$no_workflows" || { echo "shell-test-layout.test: cannot run: mkdir $no_workflows failed" >&2; exit 3; }
-# check <case-or-path> <expected exit> <substring the output must contain> [failing tool] [dir] [workflows]
-# dir: run the guard on this shell dir instead of $fx/<case> (a prepared copy of the case).
-# workflows: the guard's 2nd argument; default <dir>/workflows if it exists, else an empty dir.
-check() {
-  local case="$1" want="$2" needle="$3" tool="${4:-}" dir="${5:-$fx/$1}" wf="${6:-}" out got path_env
-  seen["$case"]=1
-  if [ -z "$wf" ]; then
-    wf="$no_workflows"
-    [ -d "$dir/workflows" ] && wf="$dir/workflows"
-  fi
-  path_env="$PATH"
-  [ -n "$tool" ] && path_env="$shims/$tool:$PATH"
-  out="$(PATH="$path_env" "$guard" "$dir" "$wf" 2>&1)"
+seen[mechanism]=1
+fail() { echo "FAIL $1" >&2; [ -n "${2:-}" ] && sed 's/^/       | /' <<<"$2" >&2; failed=$((failed + 1)); }
+pass() { echo "ok   $1"; passed=$((passed + 1)); }
+
+# ---------------------------------------------------------------------------------------------
+# Part 1: the mechanism. The pins come from the ok fixture, so the line proved here is the line
+# the guard accepts (part 3: ok-current-shape exit 0, v-pin-* exit 1).
+lib_pin="$(head -n1 "$fx/ok-current-shape/src/lib.rs")"
+bin_pin="$(head -n1 "$fx/ok-current-shape/src/main.rs")"
+# make_crate <dir> <lib line 1 or empty> <bin line 1 or empty>
+make_crate() {
+  mkdir -p "$1/src" "$1/tests" && cp "$mech/Cargo.toml" "$1/" && cp "$mech/tests/it.rs" "$1/tests/" || return 1
+  { [ -n "$2" ] && printf '%s\n' "$2"; cat "$mech/lib.rs.body"; } >"$1/src/lib.rs" || return 1
+  { [ -n "$3" ] && printf '%s\n' "$3"; cat "$mech/main.rs.body"; } >"$1/src/main.rs"
+}
+make_crate "$work/pinned" "$lib_pin" "$bin_pin" && make_crate "$work/unpinned" "" "" \
+  || { echo "shell-test-layout.test: cannot run: could not build the mechanism crates in $work" >&2; exit 3; }
+# incrate <variant> <command string>: run in the core image inside the variant's crate (-j2, offline).
+incrate() {
+  scripts/tw-run core -- "cd $work_rel/$1 && CARGO_BUILD_JOBS=2 CARGO_NET_OFFLINE=true CARGO_TARGET_DIR=/work/$work_rel/target-$1 $2" 2>&1
+}
+# The pinned crate builds and its bin runs unchanged (the pin is a no-op outside test/doctest).
+out="$(incrate pinned 'cargo build && ../target-pinned/debug/voicen && echo T092-BIN-EXIT-0')"
+if ! grep -qF T092-BIN-EXIT-0 <<<"$out"; then
+  fail "mechanism: the pinned crate does not build or its bin does not run (core image: make core-image)" "$out"
+else
+  pass "mechanism: pinned crate builds, bin runs"
+fi
+# pinned <label> <command> [needle that must appear]: exit 0, no planted text, needle present.
+pinned() {
+  local out got
+  out="$(incrate pinned "$2")"
   got=$?
-  local label="$case${tool:+ (failing $tool)}"
-  if [ "$got" -ne "$want" ]; then
-    echo "FAIL $label: exit $got, want $want" >&2
-    sed 's/^/       | /' <<<"$out" >&2
-    failed=$((failed + 1))
-  elif ! grep -qF -- "$needle" <<<"$out"; then
-    echo "FAIL $label: exit $got as wanted, but the output does not contain: $needle" >&2
-    sed 's/^/       | /' <<<"$out" >&2
-    failed=$((failed + 1))
-  else
-    echo "ok   $label: exit $got"
-    passed=$((passed + 1))
-  fi
+  if [ "$got" -ne 0 ]; then fail "mechanism pinned '$2': exit $got, want 0" "$out"
+  elif grep -qF T092-PLANTED <<<"$out"; then fail "mechanism pinned '$2': a planted test ran" "$(grep -F T092-PLANTED <<<"$out")"
+  elif [ -n "${3:-}" ] && ! grep -qF -- "$3" <<<"$out"; then fail "mechanism pinned '$2': output lacks: $3" "$out"
+  else pass "mechanism pinned: $1"; fi
+}
+# unpinned <label> <command> <needle>...: without line 1 the planted panics show (bite).
+unpinned() {
+  local label="$1" cmd="$2" out got n
+  shift 2
+  out="$(incrate unpinned "$cmd")"
+  got=$?
+  if [ "$got" -eq 0 ]; then fail "mechanism unpinned '$cmd': exit 0, want a failing planted test" "$out"; return; fi
+  for n in "$@"; do
+    grep -qF -- "$n" <<<"$out" || { fail "mechanism unpinned '$cmd': planted $n did not run" "$out"; return; }
+  done
+  pass "mechanism unpinned (bite): $label"
+}
+pinned "cargo test (integration test only)" 'cargo test'               "test integration_runs ... ok"
+pinned "cargo test --lib"                   'cargo test --lib'         "running 0 tests"
+pinned "cargo test --bins"                  'cargo test --bins'        "running 0 tests"
+pinned "cargo test --all-targets"           'cargo test --all-targets' "running 0 tests"
+pinned "cargo test --doc"                   'cargo test --doc'         "running 0 tests"
+pinned "L1 cargo test --d\"oc\" verbatim"   'cargo test --d"oc"'       "running 0 tests"
+pinned "cargo rustdoc --lib -- --test"      'cargo rustdoc --lib -- --test' "running 0 tests"
+unpinned "--lib runs R1 and the plain test"  'cargo test --lib'         T092-PLANTED-R1 T092-PLANTED-LIB-TEST
+unpinned "--bins runs the bin's tests"       'cargo test --bins'        T092-PLANTED-BIN-R1 T092-PLANTED-BIN-TEST
+unpinned "--all-targets runs lib and bin"    'cargo test --all-targets --no-fail-fast' T092-PLANTED-R1 T092-PLANTED-BIN-TEST
+unpinned "--doc runs both doctests"          'cargo test --doc'         T092-PLANTED-CRATE-DOCTEST T092-PLANTED-ITEM-DOCTEST
+unpinned "L1 --d\"oc\" runs the doctests"    'cargo test --d"oc"'       T092-PLANTED-CRATE-DOCTEST T092-PLANTED-ITEM-DOCTEST
+
+# ---------------------------------------------------------------------------------------------
+# Part 2: the real shell carries the pins part 1 proved (byte-exact line 1), and the guard holds.
+for pair in "src-tauri/src/lib.rs:$lib_pin" "src-tauri/src/main.rs:$bin_pin"; do
+  f="${pair%%:*}" want="${pair#*:}"
+  got_line="$(head -n1 "$f" 2>&1)"
+  if [ "$got_line" = "$want" ]; then pass "real shell: line 1 of $f is the pin"
+  else fail "real shell: line 1 of $f is not the pin (want: $want)" "$got_line"; fi
+done
+
+# ---------------------------------------------------------------------------------------------
+# Part 3: guard cases.
+mkdir -p "$shims/py-fail" "$shims/docker-missing-image" "$shims/docker-not-json" \
+  || { echo "shell-test-layout.test: cannot run: mkdir in $shims failed" >&2; exit 3; }
+real_py="$(command -v python3)" || { echo "shell-test-layout.test: cannot run: python3 not found" >&2; exit 3; }
+# python3 shim: fails on `python3 -I ...` (the guard's JSON reader), runs the real python3 otherwise.
+printf '#!/bin/sh\ncase " $* " in *" -I "*) echo "python3: simulated failure (py-fail)" >&2; exit 2;; esac\nexec "%s" "$@"\n' \
+  "$real_py" >"$shims/py-fail/python3"
+printf '#!/bin/sh\necho "Unable to find image '"'"'voicen-rust:1.99'"'"' locally (simulated)" >&2\nexit 125\n' \
+  >"$shims/docker-missing-image/docker"
+printf '#!/bin/sh\necho "this is not cargo metadata JSON (simulated)"\nexit 0\n' >"$shims/docker-not-json/docker"
+chmod +x "$shims/py-fail/python3" "$shims/docker-missing-image/docker" "$shims/docker-not-json/docker"
+
+# check <case-or-path> <expected exit> <substring the output must contain> [env assignment...]
+# The guard gets a repo-relative dir: $fx/<case>, or src-tauri itself for the case src-tauri.
+check() {
+  local case="$1" want="$2" needle="$3" dir out got label
+  shift 3
+  dir="$fx/$case"
+  [ "$case" = src-tauri ] && dir=src-tauri
+  seen["$case"]=1
+  label="$case"
+  if [ $# -gt 0 ]; then local shim="${1#*"$shims"/}"; label="$case (shim ${shim%%[/:]*})"; fi
+  if [ ! -x "$guard" ]; then fail "$label: $guard not found or not executable"; return; fi
+  out="$(env "$@" "$guard" "$dir" 2>&1)"
+  got=$?
+  if [ "$got" -ne "$want" ]; then fail "$label: exit $got, want $want" "$out"
+  elif ! grep -qF -- "$needle" <<<"$out"; then fail "$label: exit $got as wanted, but the output does not contain: $needle" "$out"
+  else pass "$label: exit $got"; fi
 }
 
+# The real shell (part 2's pins plus test = false / doctest = false and the [[bin]] table).
+check src-tauri                   0 "ok:"
+
 # Allowed: exit 0.
-check ok-current-shape          0 "ok:"   # cfg(windows), cfg(not(windows)), tauri::command, cfg_attr(mobile, ...), tests/*.rs with #[test]; doctest comments, `  doctest = false   # ..`; workflows/ci.yml mirror
-check ok-doc-text               0 "ok:"   # T-038: every removed doc-shape fixture and b8b0b81 probe, code-looking text in ///, //!, /** */, /*! */, #[doc = ..], #![doc = include_str!(..)]
-check ok-feature-test           0 "ok:"   # cfg(feature = "test"), cfg_attr(feature = "test", ...)
-check ok-quad-slash             0 "ok:"   # //// fence and indented block: plain comment
-check ok-plain-comment-attr     0 "ok:"   # // #[test], // #[cfg(test)], trailing // comment naming them
+check ok-current-shape            0 "ok:"   # the owned target set and both pins; tests/it.rs
+check ok-more-integration-tests   0 "ok:"   # more tests/*.rs, tests/support/, a [[test]] path elsewhere: kind-test rows are not compared
+check ok-r1-l1                    0 "ok:"   # R1 + a plain #[cfg(test)] #[test] in src/lib.rs, L1 in workflows/ci.yml: the guard reads neither (part 1)
 
-# Violations: exit 1, the listing names the offending file.
-check v-cfg-test                1 "v-cfg-test/src/lib.rs"
-check v-inner-cfg-test          1 "v-inner-cfg-test/src/lib.rs"
-check v-cfg-all-test            1 "v-cfg-all-test/src/lib.rs"
-check v-cfg-attr-test           1 "v-cfg-attr-test/src/lib.rs"
-check v-cfg-attr-test-attr      1 "v-cfg-attr-test-attr/src/lib.rs"
-check v-test-attr               1 "v-test-attr/src/lib.rs"
-check v-test-attr-indented      1 "v-test-attr-indented/src/lib.rs"
-check v-path-test-attr          1 "v-path-test-attr/src/lib.rs"
-check v-test-case-attr          1 "v-test-case-attr/src/lib.rs"
-check v-benches-dir             1 "v-benches-dir/benches"
-check v-examples-dir            1 "v-examples-dir/examples"
-check v-bench-target            1 "v-bench-target/Cargo.toml"
-check v-example-target          1 "v-example-target/Cargo.toml"
-# Review round 1, finding 1 (d), (e): attribute shapes rustc accepts that the guard must also refuse.
-check v-cfg-test-multiline       1 "v-cfg-test-multiline/src/lib.rs"        # (d) #[cfg(\n test\n)]
-check v-cfg-all-test-multiline   1 "v-cfg-all-test-multiline/src/lib.rs"    # (d) #[cfg(all(\n windows,\n test\n))]
-check v-test-after-code          1 "v-test-after-code/src/lib.rs"           # (e) mod t { #[test] fn a() {} }
-check v-cfg-test-after-code      1 "v-cfg-test-after-code/src/lib.rs"       # (e) code; #[cfg(test)] mod t {}
-check v-test-hash-space          1 "v-test-hash-space/src/lib.rs"           # (e) # [test]: rustc allows space after #
-
-# T-036 (T-035 review round 2). (1) Doc list and quote shapes: removed by T-038 (header).
-# (2) Lexer states: each case changes exit code when its lexer branch is deleted.
-check ok-literals                 0 "ok:"                                        # strings, escapes, raw/byte/c-raw strings, chars, lifetimes, nested and /*** comments
-check v-char-quote-cfg-test       1 "v-char-quote-cfg-test/src/lib.rs:2:"        # '"' must not open a string that hides #[cfg(test)]
-check v-unterminated-string       1 "(unterminated string"
-check v-unterminated-block-comment 1 "(unterminated block comment"
-check v-unterminated-attribute    1 "(unterminated attribute"
-# (3) Sources rustc compiles that are not regular *.rs files under src: refused.
-check v-path-attr                 1 "v-path-attr/src/lib.rs:1:"                  # #[path = "../other/t.rs"] mod t;
-check v-include-macro             1 "v-include-macro/src/lib.rs:2:"              # include!("../other/t.rs");
-check v-lib-path-target           1 "v-lib-path-target/Cargo.toml:10:"           # [lib] path = "other/lib.rs"
-# The symlink is made here, in a copy of the case, so the committed fixture tree stays plain files.
-copies="$shims/fixture-copies"
-mkdir -p "$copies" && cp -R "$fx/v-symlink-src" "$copies/" && ln -s ../other/t.rs "$copies/v-symlink-src/src/s.rs" \
-  || { echo "shell-test-layout.test: cannot run: could not prepare the symlink case in $copies" >&2; exit 3; }
-check v-symlink-src               1 "v-symlink-src/src/s.rs" "" "$copies/v-symlink-src"  # src/s.rs -> ../other/t.rs
-
-# T-036 review round 1. Findings 1 and 4 (doc shapes under decision #39): removed by T-038,
-# folded into ok-doc-text (header).
-# Finding 2 (+4, 6): the `include` token anywhere in code, not only before `!`; identifiers
-# that merely contain it, include_str!/include_bytes!, comments, strings and docs pass.
-check v-include-renamed             1 "v-include-renamed/src/lib.rs:1:"             # use core::include as pull; pull!(..)
-check v-include-eol                 1 "v-include-eol/src/lib.rs:2:"                 # `include` / `!(..)` on the next line
-check v-include-raw-ident           1 "v-include-raw-ident/src/lib.rs:3:"           # r#include!(..): rustc 1.99 runs the outside test
-check ok-include-substring          0 "ok:"                                          # included, include_count, INCLUDE_ALL, include_str!
-# Finding 3 (+4): Cargo.toml `path` is refused only under [lib], [[bin]], [[test]],
-# [[bench]], [[example]] (table-header tracking); dependency tables pass.
-check ok-dependency-table-path      0 "ok:"                                          # [dependencies.x] / [dev-dependencies.x] / target deps
-check v-lib-quoted-path             1 "v-lib-quoted-path/Cargo.toml:10:"             # [lib] "path" = ..
-check v-lib-path-after-dependency   1 "v-lib-path-after-dependency/Cargo.toml:14:"   # [dependencies.x] path, then [ lib ] path = '..'
-check v-bin-path-target             1 "v-bin-path-target/Cargo.toml:10:"             # [[bin]] path = ..
-check v-test-target-path            1 "v-test-target-path/Cargo.toml:12:"            # [[test]] path = "tests/x.rs"
-
-# T-038: the doctest switches. (1) src-tauri/Cargo.toml: the [lib] table holds the line
-# `doctest = false` (any spaces, a trailing comment allowed; ok-current-shape), no other
-# non-comment line names `doctest`, and no multi-line string can fake a table header.
-check v-doctest-missing             1 "v-doctest-missing/Cargo.toml"                 # [lib] without the key: cargo test runs lib doctests
-check v-doctest-true                1 "v-doctest-true/Cargo.toml:12:"                # [lib] doctest = true
-check v-doctest-no-lib-table        1 "v-doctest-no-lib-table/Cargo.toml"            # no [lib]: the implicit src/lib.rs lib has doctests on
-check v-doctest-other-table         1 "v-doctest-other-table/Cargo.toml"             # doctest = false under [[bin]], [lib] has none
-check v-doctest-extra-key           1 "v-doctest-extra-key/Cargo.toml:17:"           # [lib] pinned, plus "doctest" = true under [[test]]
-check v-cargo-multiline-string      1 "v-cargo-multiline-string/Cargo.toml:9:"       # description = """ [lib] doctest = false """, no real [lib]
-check v-cargo-multiline-literal     1 "v-cargo-multiline-literal/Cargo.toml:9:"      # same with ''' (literal string)
-# (2) The workflows dir (2nd argument; .github/workflows by default): no `--doc` and no
-# `rustdoc`, which build lib doctests whatever `doctest` says (cargo 1.99 unit_generator.rs:425-440).
-check v-workflow-doc                1 "v-workflow-doc/workflows/ci.yml:16:"          # cargo test -p voicen --doc
-check v-workflow-rustdoc            1 "v-workflow-rustdoc/workflows/release.yaml:14:" # cargo rustdoc -p voicen -- --test, in a *.yaml file
-# T-038 review rounds 1-2, finding 1: the Cargo.toml line tracker accepts only a whitelist grammar.
-# (i) Every non-comment line is self-contained: [ ] and { } balance once single-line strings
-# and then the comment are removed, so no array or inline table element can pose as a header.
-check v-cargo-array-fake-lib          1 "v-cargo-array-fake-lib/Cargo.toml:10:"          # (a) x = [ / ["lib"] / ], doctest = false, no real [lib]
-check v-cargo-array-leaves-lib        1 "v-cargo-array-leaves-lib/Cargo.toml:15:"        # (b) in [lib]: x = [ / ["dependencies"] / ], then path = "../outside/lib.rs"
-check v-cargo-array-number-element    1 "v-cargo-array-number-element/Cargo.toml:12:"    # (b) in [[bin]]: last element [1], then path
-check v-cargo-array-string-bracket    1 "v-cargo-array-string-bracket/Cargo.toml:13:"    # x = [ "]",  : the ] in a string does not close
-check v-cargo-array-comment-bracket   1 "v-cargo-array-comment-bracket/Cargo.toml:13:"   # x = [ # ]   : the ] in a comment does not close
-check v-cargo-multiline-inline-table  1 "v-cargo-multiline-inline-table/Cargo.toml:15:"  # y = { / z = 1 }
-check v-cargo-split-array             1 "v-cargo-split-array/Cargo.toml:15:"             # the real windows features array split over lines: refused on purpose
-check v-cargo-split-array             1 "keep arrays and inline tables on one line"      # the message says what to do (review round 1, finding 1)
-check ok-cargo-strings-and-comments   0 "ok:"                                            # [ ] { } # \ in single-line strings, [ { in comments, quoted keys without \
-# (ii) No backslash inside a quoted key or a table header: an escape can spell path or bin.
-check v-cargo-escaped-key             1 "v-cargo-escaped-key/Cargo.toml:14:"             # (c) [lib] "path" = "../outside/lib.rs"
-check v-cargo-escaped-header          1 "v-cargo-escaped-header/Cargo.toml:15:"          # (c) [["bin"]] path = "../outside/main.rs"
-# (iii) A line starting with [ that the header pattern does not read is refused (rule H;
-# review round 2, finding 2): otherwise the tracker stays in the previous table.
-check v-cargo-unreadable-header       1 "v-cargo-unreadable-header/Cargo.toml:19:"       # [[bin]] name = "voicen", then path = "../outside/main.rs"
-# T-038 review round 2, finding 1: a whitelist, not more shapes. (a) The table name is read
-# from the string-aware scan, and a quoted key that names the table may hold bare-key
-# characters only ([A-Za-z0-9_-]), so quoting is exactly bare. Each header below names a table
-# cargo 1.99 ignores, so the lib keeps doctests on; read from the raw line it was lib.
-check v-cargo-header-quoted-space     1 "v-cargo-header-quoted-space/Cargo.toml:11:"     # ["li b"]   / doctest = false, no real [lib]
-check v-cargo-header-quoted-hash      1 "v-cargo-header-quoted-hash/Cargo.toml:11:"      # ["lib#x"]  / doctest = false, no real [lib]
-check v-cargo-header-quoted-quote     1 "v-cargo-header-quoted-quote/Cargo.toml:11:"     # ["l'i'b"]  / doctest = false, no real [lib]
-check v-cargo-header-quoted-bracket   1 "v-cargo-header-quoted-bracket/Cargo.toml:11:"   # ["l]i[b"]  / doctest = false, no real [lib]
-check v-cargo-header-real-lib-then-fake 1 "v-cargo-header-real-lib-then-fake/Cargo.toml:15:" # [lib] without the pin, then ["li b"] / doctest = false
-# (b) Code (strings blanked, comment cut) holds printable ASCII and tab only: a UTF-8 BOM, or
-# any invisible prefix, cannot hide a header or a key.
-check v-cargo-bom-bin                 1 "v-cargo-bom-bin/Cargo.toml:1:"                  # BOM [[bin]] / path = "../outside/main.rs", cargo strips the BOM
-check ok-cargo-quoted-header-keys     0 "ok:"                                            # ["lib"] is [lib]; 'cfg(all(.., target_arch = "x86_64"))' target key; non-ASCII in strings, keys and comments
-# T-038 review round 3, finding 1 (decision #42 B): before the first header only blank lines
-# and comments. A root-level line there can make a target table with no header at all (an
-# inline array of tables), which cargo 1.99 builds; stable cargo has no root-level key, so any
-# key there is refused, not only the target names.
-check v-cargo-root-inline-bin         1 "v-cargo-root-inline-bin/Cargo.toml:5:"          # bin = [{ name = "voicen", path = "../outside/main.rs" }] (probe g)
-check v-cargo-root-inline-bin-quoted  1 "v-cargo-root-inline-bin-quoted/Cargo.toml:1:"   # "bin" = [{ .. }] on line 1, comments after it (probe n)
-check v-cargo-root-inline-example     1 "v-cargo-root-inline-example/Cargo.toml:5:"      # example = [{ .., test = true }]: plain cargo test runs it (probe h)
-check v-cargo-root-inline-bench       1 "v-cargo-root-inline-bench/Cargo.toml:5:"        # bench = [{ .., test = true }] (probe i)
-check v-cargo-root-inline-test        1 "v-cargo-root-inline-test/Cargo.toml:5:"         # test = [{ .., path = "../outside/t.rs" }] (probe j)
-check v-cargo-root-plain-key          1 "v-cargo-root-plain-key/Cargo.toml:5:"           # x = 1: no target name, no path, still refused
-check ok-cargo-root-comments          0 "ok:"                                            # blank, whitespace-only (tab, spaces) and comment lines holding [ ] { } = " before [package]
-# T-036 (T-038 review round 4): rule R's `|| hasstr` branch. A line made only of strings
-# blanks to spaces, so only the string test refuses it; the needle names rule R's message.
-check v-cargo-root-lone-string        1 "Cargo.toml:5:\"x\"  (nothing but blank lines"         # "x" alone before [package]
-check v-cargo-root-lone-string        1 "Cargo.toml:6:'y'  # a lone literal string  (nothing but blank lines" # 'y' + comment
+# Violations: exit 1, the listing names the offending target or crate root.
+check v-lib-tested                1 "voicen_lib"         # [lib] without test = false: --lib / plain cargo test build the lib unit-test exe
+check v-bin-tested                1 "src/main.rs"        # no [[bin]] test = false: plain cargo test builds the bin unit-test exe
+check v-doctest-on                1 "voicen_lib"         # [lib] without doctest = false
+check v-pin-missing-lib           1 "src/lib.rs"         # lib.rs line 1 is not the lib pin
+check v-pin-missing-main          1 "src/main.rs"        # main.rs line 1 is not the bin pin
+check v-pin-not-line-1            1 "src/lib.rs"         # the lib pin on line 2, after a comment
+check v-pin-lib-test-only         1 "src/lib.rs"         # lib.rs line 1 is the bin pin #![cfg(not(test))]: doctests not emptied
+check v-lib-path-moved            1 "other/lib.rs"       # [lib] path = "other/lib.rs", pinned: not the owned crate root
+check v-bin-path-moved            1 "src/app.rs"         # [[bin]] path = "src/app.rs", pinned: not the owned crate root
+check v-second-bin                1 "t092_extra"         # src/bin/t092_extra.rs: a tested bin without a pin
+check v-example-target            1 "t092_example"       # [[example]] path elsewhere, test = true
+check v-bench-dir                 1 "t092_bench"         # benches/t092_bench.rs, auto-discovered
+check v-build-rs-missing          1 "build"              # no build.rs: no custom-build target, so no -tests link args (F-002)
 
 # Cannot run: exit 3.
-check does-not-exist            3 "cannot run"
-check c-no-src                  3 "cannot run"
-check c-no-cargo-toml           3 "cannot run"
-check ok-current-shape          3 "cannot run" awk
-check ok-current-shape          3 "cannot run" grep
-check c-find-fails-cfg-test     3 "cannot run" find   # a find error must not skip the source scan (the fixture holds #[cfg(test)])
-# T-038: a missing workflows dir cannot be scanned, so it is never a pass (the shell is clean).
-check c-no-workflows-dir        3 "cannot run" "" "$fx/c-no-workflows-dir" "$fx/c-no-workflows-dir/workflows"
-# Review round 1, finding 7: the always-failing shims stop at the first find (symlinks) and
-# the first grep (benches); these reach the later calls' own error branches.
-# The needle is the shim's own message: it appears only if the guard got past the earlier
-# calls (run by the real tool) and made the matching call; exit 3 shows that call's error
-# branch fails closed (without it: an empty list, so exit 0).
-check c-find-fails-cfg-test     3 "find: simulated failure (find-rs)" find-rs  # the *.rs find, after the symlink find
-check ok-current-shape          3 "simulated failure (cargo-path)" cargo-path  # the Cargo.toml path scan, after the bench grep
-check ok-current-shape          3 "simulated failure (workflow-grep)" workflow-grep  # T-038: the workflows scan, after the Cargo.toml scans
+check does-not-exist              3 "cannot run"
+check c-no-cargo-toml             3 "cannot run"         # src/ without Cargo.toml
+check c-no-src                    3 "cannot run"         # cargo metadata fails: no src/lib.rs for [lib]
+check c-bad-manifest              3 "cannot run"         # cargo metadata fails: Cargo.toml does not parse
+check ok-current-shape            3 "cannot run" TW_DOCKER="$shims/docker-missing-image/docker"  # core image missing
+check ok-current-shape            3 "cannot run" TW_DOCKER="$shims/docker-not-json/docker"       # cargo metadata output is not JSON
+check ok-current-shape            3 "cannot run" PATH="$shims/py-fail:$PATH"                      # the JSON reader (python3 -I) fails
 
-# Every committed fixture dir is in the table.
+# Every committed fixture dir is in the tables.
 for d in "$fx"/*/; do
   c="$(basename "$d")"
-  if [ -z "${seen[$c]:-}" ]; then
-    echo "FAIL $c: fixture dir has no expected exit code in $0" >&2
-    failed=$((failed + 1))
-  fi
+  [ -n "${seen[$c]:-}" ] || fail "$c: fixture dir has no expected exit code in $0"
 done
 
 if [ "$failed" -gt 0 ]; then
-  echo "shell-test-layout.test: FAIL: $failed case(s) differ, $passed as expected; the guard does not hold its contract (docs/decisions/ci-toolchain.md)" >&2
+  echo "shell-test-layout.test: FAIL: $failed case(s) differ, $passed as expected; the guard or the pin does not hold its contract (docs/decisions/ci-toolchain.md)" >&2
   exit 1
 fi
 echo "shell-test-layout.test: ok: $passed cases as expected"

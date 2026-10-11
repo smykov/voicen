@@ -1,0 +1,38 @@
+//! T-092 mechanism: everything below must reach no test exe once line 1 is the lib pin.
+//!
+//! A crate doctest:
+//!
+//! ```
+//! panic!("T092-PLANTED-CRATE-DOCTEST");
+//! ```
+
+/// An item doctest:
+///
+/// ```
+/// panic!("T092-PLANTED-ITEM-DOCTEST");
+/// ```
+pub fn run() -> u32 {
+    7
+}
+
+// R1 (T-086 audit): #[cfg(test)] #[test] built from an ident fragment, after expansion only.
+macro_rules! r1 {
+    ($t:ident) => {
+        #[cfg($t)]
+        mod r1 {
+            #[$t]
+            fn planted() {
+                panic!("T092-PLANTED-R1");
+            }
+        }
+    };
+}
+r1!(test);
+
+#[cfg(test)]
+mod plain {
+    #[test]
+    fn planted() {
+        panic!("T092-PLANTED-LIB-TEST");
+    }
+}
