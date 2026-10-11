@@ -51,7 +51,7 @@ Voicen — a Windows desktop dictation tool: a global hotkey records the microph
 - **Windows-only code lives in `src-tauri` or behind a trait in `voicen-core`.** The local gate builds only `voicen-core` on Linux; anything Windows-specific is proven only by the Windows CI job (decisions #5).
 - **Rust runs only in Docker** (`scripts/tw-run core -- ...`); there is no host toolchain. Rebuild the image with `make core-image` after changing `docker/rust.Dockerfile`.
 - **Never log transcript text, audio or API keys** (FR-20, NFR-04). Keys live in Windows Credential Manager only.
-- **Shell tests live only in `src-tauri/tests/*.rs`** (they get the Common-Controls v6 manifest from `src-tauri/build.rs`); line 1 of `src-tauri/src/lib.rs` / `main.rs` is the crate-level cfg pin (code there is empty under test), `[lib]`/`[[bin]]` keep `test = false` and `doctest = false`, and cargo's target set must equal `scripts/ci/shell-targets.txt` — `make check` compares (`docs/decisions/ci-toolchain.md`).
+- **Shell tests live only in `src-tauri/tests/*.rs`** (they get the Common-Controls v6 manifest from `src-tauri/build.rs`); line 1 of `src-tauri/src/lib.rs` / `main.rs` is the crate-level cfg pin (code there is empty under test), `[lib]` keeps `test = false` and `doctest = false`, `[[bin]]` keeps `test = false`, and cargo's target set must equal `scripts/ci/shell-targets.txt` — `make check` compares (`docs/decisions/ci-toolchain.md`).
 
 ## Commands
 

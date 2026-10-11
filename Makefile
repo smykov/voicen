@@ -148,9 +148,10 @@ check-core:
 # dev profile (no dev-dependency features, tauri without custom-protocol: not what
 # `pnpm tauri build` compiles, so its production context and cfg(not(dev)) /
 # cfg(not(debug_assertions)) code stay the windows job's; positive cfg(dev) /
-# cfg(debug_assertions) code is checked here), then the test crates (every
-# src-tauri/tests/*.rs and the lib/bin unit-test crates) with the dev-dependency features: --tests alone would check the lib with
-# test-fakes on and pass a release-only error. cargo check never links and builds no doctest;
+# cfg(debug_assertions) code is checked here), then with --tests every src-tauri/tests/*.rs, the
+# lib (and voicen-core) checked as their dependency with the dev-dependency features; lib and bin
+# have test = false, so there are no unit-test crates (T-092). --tests alone would check the lib
+# only with test-fakes on and pass a release-only error, and not check the bin. cargo check never links and builds no doctest;
 # linking, starting and running the shell stay the windows job's. Needs the gnu target and
 # mingw gcc baked into the core image (docker/rust.Dockerfile; `make core-image`).
 check-shell-windows:

@@ -73,7 +73,7 @@ The shell also compiles only for Windows: every `release_*` fn in `src-tauri/src
 - **Need that produced it:** no defect, only detection latency (decisions #5, #57, #63; T-056). Before this check a compile error in shell code or in a shell test reached review and first showed in the windows job.
 - **What it covers:** every crate target the windows job builds for `voicen`, type-checked for `x86_64-pc-windows-gnu` in the dev profile. It runs two invocations:
   1. `cargo check -p voicen --target x86_64-pc-windows-gnu`: the lib and the bin with the release feature set in the dev profile. That means the default features, no dev-dependency features, and tauri without `custom-protocol`. It is the closest to `pnpm tauri build` that needs no built frontend, but it is not that build (see "What it does not cover");
-  2. the same with `--tests`: the lib and bin unit-test crates and every `src-tauri/tests/*.rs`, with the test features (`tauri/test`, `voicen-core/test-fakes` from `[dev-dependencies]`), as `cargo test -p voicen` builds them.
+  2. the same with `--tests`: every `src-tauri/tests/*.rs`, with the lib (and voicen-core) checked as their dependency with the test features (`tauri/test`, `voicen-core/test-fakes` from `[dev-dependencies]`), as `cargo test -p voicen` builds them. Since T-092 there are no lib or bin unit-test crates: both have `test = false`, so `--tests` does not select them (and under `--cfg test` the crate-level cfg pin would empty them). The bin is type-checked only by (1).
 
   Both are needed:
   - A type error that is only in a test file passes (1) and fails (2). T-056 probe P-F2, re-run on the implemented image with `src-tauri/tests/credentials.rs` in `docs/tasks/T-056.reviews/1.md` (mutation 2).
