@@ -126,9 +126,10 @@ check-release-guard:
 # T-025 (decisions #76): the NSIS template is a minimal-diff fork of the one in the pinned
 # tauri-cli, so scripts/ci/nsis-fork.sh refuses a tree where src-tauri/windows/installer.nsi's
 # '; upstream: tauri-cli X.Y.Z' header, the exact @tauri-apps/cli in package.json and the
-# lockfile's root @tauri-apps/cli version differ, or tauri.conf.json does not use the fork. The
-# self-test runs it on fixture trees built in a temp dir and on the real repo. Host bash, awk,
-# python3.
+# version of the installed node_modules/@tauri-apps/cli/package.json differ, or tauri.conf.json
+# does not use the fork; pnpm-lock.yaml is not read (T-093, P-020: the specifier equality is
+# pnpm --frozen-lockfile's). No installed CLI: cannot run. The self-test runs it on fixture trees
+# built in a temp dir and on the real repo. Host bash, python3 (stdlib json).
 check-nsis-fork:
 	scripts/ci/nsis-fork.test.sh
 

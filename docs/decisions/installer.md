@@ -28,7 +28,7 @@ On Yes the hook runs `"$INSTDIR\voicen.exe" --purge-credentials` while the exe s
 
 - **Defect that produced it:** none yet (decision #76). The fork replaces the bundler's own template; a `pnpm install` that moved `@tauri-apps/cli` to another 2.x would build installers from a template written for a different bundler (other handlebars variables, other plugins).
 - **What breaks if you violate it:** a silent mismatch between the fork and the bundler: a broken or subtly wrong installer.
-- **Where it is enforced:** `make check-nsis-fork`: the header line `; upstream: tauri-cli X.Y.Z crates/tauri-bundler/src/bundle/windows/nsis/installer.nsi` in the first 20 lines of the fork, the exact specifier in `package.json`, the lockfile's specifier and version, and `bundle.windows.nsis.template` must agree.
+- **Where it is enforced:** `make check-nsis-fork`: the header line `; upstream: tauri-cli X.Y.Z crates/tauri-bundler/src/bundle/windows/nsis/installer.nsi` in the first 20 lines of the fork, the exact specifier in `package.json`, the version of the installed `node_modules/@tauri-apps/cli/package.json` (read with python3 `json`; missing or invalid: cannot run, exit 3; `pnpm-lock.yaml` is not read, T-093, the specifier equality is `pnpm --frozen-lockfile`'s), and `bundle.windows.nsis.template` must agree.
 - **Don't:** bump `@tauri-apps/cli` without re-forking: take the new upstream `installer.nsi` (tag `tauri-cli-vX.Y.Z`, or the text embedded in the CLI binary), re-apply the two edits listed in the fork's header, update the header version, then run the Windows job.
 
 ### Every install records its language, silent installs included
