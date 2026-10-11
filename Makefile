@@ -33,7 +33,7 @@ check-helper-windows-fixtures:
 	scripts/ci/helper-windows.test.sh
 
 # T-061, T-066: CI reaches Credential Manager only through scripts/ci/credentials.ps1: no other
-# non-comment line of a workflow or a scripts/ci file names a Credential Manager entry point
+# line of a workflow or a scripts/ci file, comments included (T-090), names a Credential Manager entry point
 # (a Win32 Cred* call, cmdkey, vaultcmd, keymgr, PasswordVault, the CredentialManager module);
 # the self-test runs the tripwire scripts/ci/ci-credentials.sh on its cases and on the real
 # repo. Host bash.
