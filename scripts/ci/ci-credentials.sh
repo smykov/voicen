@@ -13,11 +13,11 @@
 # case-sensitive; the other names match in any case.
 #
 # This check fails when:
-#   1. a non-comment line of a *.yml / *.yaml file at the top of the workflows dir, or of any
-#      regular file at the top of the CI scripts dir other than the helper and this tripwire's
-#      two files (ci-credentials.sh, ci-credentials.test.sh), names such an entry point (a line
-#      whose first non-blank character is `#` is a comment and passes; a trailing comment does
-#      not: fail-closed). A step names the helper's functions (Add-VoicenCredential, ...);
+#   1. any line of a *.yml / *.yaml file at the top of the workflows dir, or of any regular file
+#      at the top of the CI scripts dir other than the helper and this tripwire's two files
+#      (ci-credentials.sh, ci-credentials.test.sh), names such an entry point, comment-looking
+#      lines included: whether a line is a comment is decided by YAML and the shell, not here
+#      (T-090, P-020; fail-closed). A step names the helper's functions (Add-VoicenCredential, ...);
 #   2. the helper (default scripts/ci/credentials.ps1) is missing, or does not declare all four
 #      calls CredWriteW, CredReadW, CredEnumerateW and CredDeleteW.
 # Not caught: an entry point reached by a name built at run time, or from a file outside these
@@ -57,7 +57,6 @@ if [ "${#files[@]}" -gt 0 ]; then
   while IFS= read -r hit; do
     [ -n "$hit" ] || continue
     text="${hit#*:*:}"
-    [[ "$text" =~ ^[[:space:]]*# ]] && continue
     found="$found  $hit  (a Credential Manager entry point outside $helper: use its Add-/Test-/Remove-VoicenCredential, Get-VoicenCredentials)"$'\n'
   done < <(printf '%s\n%s\n' "$api" "$tools" | sort -t: -k1,1 -k2,2n -u)
 fi

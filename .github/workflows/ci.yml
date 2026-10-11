@@ -625,8 +625,8 @@ jobs:
           Get-Process -Name voicen -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
           Start-Sleep -Seconds 2
           if (@(Get-Process -Name voicen -ErrorAction SilentlyContinue).Count -ne 0) { throw "premise: a voicen process is still running" }
-          # Plant, presence and cleanup through the product's own calls and type (CredWriteW /
-          # CredReadW / CredEnumerateW / CredDeleteW GENERIC; scripts/ci/credentials.ps1), never a
+          # Plant, presence and cleanup through the product's own Win32 write/read/enumerate/delete
+          # calls and type (GENERIC; scripts/ci/credentials.ps1), never a
           # second tool's text output: run 37444780779 could not tell a refused write from a missed
           # list match. make check (scripts/ci/ci-credentials.sh) refuses any Credential Manager
           # entry point named outside credentials.ps1 in CI, so this step names only the helper's
@@ -642,7 +642,7 @@ jobs:
               Add-VoicenCredential -Target $t -Secret $fake
               if (-not (Test-Cred $t)) { throw "premise: $t was written (Add-VoicenCredential ok) but Test-VoicenCredential does not find it" }
             }
-            # The purge finds entries with CredEnumerateW "Voicen/*": both planted targets must be
+            # The purge enumerates "Voicen/*" with the Win32 enumerate call: both planted targets must be
             # listed there as GENERIC, and the outsider must not be.
             $listed = @(Get-VoicenCredentials -Prefix 'Voicen/')
             foreach ($t in $gone) { if (@($listed | Where-Object { $_.Target -ceq $t -and $_.Type -eq 1 }).Count -ne 1) { throw "premise: Get-VoicenCredentials 'Voicen/' does not list $t as one GENERIC entry (listed: $(Format-Listed 'Voicen/'))" } }
