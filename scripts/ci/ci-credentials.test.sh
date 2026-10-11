@@ -40,10 +40,21 @@ check() {
   fi
 }
 
-mk ok-comment-only '      run: |
+# T-090: any line is scanned, comment-looking lines included (no comment reader, P-020).
+# C1: YAML folds this double-quoted scalar to 'echo a #\n cmdkey /list'; the shell runs cmdkey on its
+# second line, but the physical line starts with '#'.
+mk v-c1-escaped-newline 'jobs:
+  j:
+    steps:
+      - run: "echo a
+          #\n cmdkey /list"'
+check v-c1-escaped-newline 1 "workflows/ci.yml:5:"
+mk v-hash-comment-workflow '      run: |
           # never cmdkey here
           . ./scripts/ci/credentials.ps1'
-check ok-comment-only 0 "ok:"
+check v-hash-comment-workflow 1 "workflows/ci.yml:2:"
+mk v-hash-comment-script '      run: echo ok' '' '# CredWriteW in a plain comment' notes.sh
+check v-hash-comment-script 1 "ps1/notes.sh:1:"
 mk v-cmdkey-step '      run: |
           cmdkey "/generic:Voicen/a" /user:voicen "/pass:x" | Out-Null'
 check v-cmdkey-step 1 "workflows/ci.yml:2:"
@@ -57,7 +68,7 @@ check v-helper-missing 1 "credentials.ps1: missing"
 mk v-helper-no-enumerate '      run: echo ok' 'CredWriteW CredReadW CredDeleteW'
 check v-helper-no-enumerate 1 "does not declare CredEnumerateW"
 mk ok-helper-functions-only '      run: |
-          # CredWriteW through the helper (a comment)
+          # through the helper (a comment)
           . ./scripts/ci/credentials.ps1
           Add-VoicenCredential -Target $t -Secret $fake
           if (-not (Test-VoicenCredential -Target $t)) { throw "Credential Manager lost $t" }' '' 'Write-Output "credentials.ps1 is the only way in"' notes.sh
@@ -82,6 +93,29 @@ mk v-credential-manager-module '      run: |
 check v-credential-manager-module 1 "workflows/ci.yml:3:"
 mk v-keymgr '      run: rundll32.exe keymgr.dll,KRShowKeyMgr'
 check v-keymgr 1 "workflows/ci.yml:1:"
+# T-090 checker sweep: scope and helper rules pinned case by case (characterization, green before T-090).
+mk v-yaml-workflow '      run: echo ok'
+printf '%s\n' '      run: cmdkey /list' >"$tmp/v-yaml-workflow/workflows/release.yaml"
+check v-yaml-workflow 1 "workflows/release.yaml:1:"
+mk v-dotfile-script '      run: echo ok' '' 'vaultcmd /list' .plant
+check v-dotfile-script 1 "ps1/.plant:1:"
+mk v-helper-no-write '      run: echo ok' 'CredReadW CredEnumerateW CredDeleteW'
+check v-helper-no-write 1 "does not declare CredWriteW"
+mk v-helper-no-read '      run: echo ok' 'CredWriteW CredEnumerateW CredDeleteW'
+check v-helper-no-read 1 "does not declare CredReadW"
+mk v-helper-no-delete '      run: echo ok' 'CredWriteW CredReadW CredEnumerateW'
+check v-helper-no-delete 1 "does not declare CredDeleteW"
+mk c-no-ci-dir '      run: echo ok'
+out="$("$guard" "$tmp/c-no-ci-dir/workflows" "$tmp/c-no-ci-dir/absent" "$tmp/c-no-ci-dir/ps1/credentials.ps1" 2>&1)"
+got=$?
+if [ "$got" -eq 3 ] && grep -qF "cannot run" <<<"$out"; then
+  echo "ok   c-no-ci-dir: exit $got"
+  passed=$((passed + 1))
+else
+  echo "FAIL c-no-ci-dir: exit $got (want 3), needle 'cannot run'" >&2
+  sed 's/^/       | /' <<<"$out" >&2
+  failed=$((failed + 1))
+fi
 mk c-no-workflows '      run: echo ok'
 check c-no-workflows 3 "cannot run" "$tmp/c-no-workflows/absent"
 
