@@ -64,6 +64,7 @@ impl DetectorTag { pub fn from_name(name: &str) -> DetectorTag; }    // silero |
 impl FailureTag  { pub fn from_code(code: &str) -> FailureTag; }     // one per FailureReason::code() | other
 
 pub enum LogsUnwritableReason { PermissionDenied, DiskFull, NotADirectory, Other(Option<i32>) }  // raw OS code if any
+impl LogsUnwritableReason { pub fn message_id(self) -> MessageId; }   // logs_reason.{permission_denied,disk_full,not_a_directory,other}; every Other is other (T-054)
 
 pub struct LogConfig { pub roll_bytes: u64 /*2 MiB*/, pub total_bytes: u64 /*10 MiB*/, pub max_age: Duration /*7 d*/,
                        pub reopen_every: Duration /*60 s*/ }        // impl Default with these values
@@ -88,7 +89,23 @@ Guarantees (each pinned by a test):
 - Size: the active `voicen.log` ≤ `roll_bytes`, rolled before a line would cross it or at the local date change. The rolled `voicen-*.log` files total ≤ `total_bytes − roll_bytes`, so the whole set stays ≤ `total_bytes` after every write. Rolled files older than `max_age` are deleted at open and after each roll: `size_bound_holds_after_every_write_*`, `date_roll_follows_local_midnight_at_an_offset`, `rolled_files_*`.
 - Retention touches only regular `voicen-*.log` files. It never deletes `voicen.log`, `crash-*.txt`, `session.marker`, `installer-ended` or any other file: `a_clock_one_year_off_deletes_at_most_what_the_rules_name`.
 - `on_unwritable` is called at most once per `Log` instance, outside the lock. A degraded log retries the open at most every `reopen_every`, writes `LogsRecovered` first after a successful reopen, and does not replay dropped lines: `a_file_at_the_logs_path_*`, `a_full_disk_*`, `a_degraded_log_reopens_*`.
-- Windows, a reader that blocks the roll. The roll closes the log's own handle and then renames `voicen.log`. A rename needs every other open handle on the file to share delete. A reader that shares read and write but not delete (.NET `FileShare.ReadWrite`, as used by a tail such as `Get-Content -Wait` or a log viewer) makes the rename fail with a sharing violation (OS error 32). The log then goes Degraded, `on_unwritable` gets `Other(Some(32))`, and lines are dropped, in 60 s retry windows, until the reader closes. This follows from reading `log.rs` (T-008 review round 1 #4); it has not been observed on Windows. T-054 decides how its notice treats this case: as a "not writable" reason, or retried on the next write without degrading.
+- Windows, a reader that blocks the roll. The roll closes the log's own handle and then renames `voicen.log`. A rename needs every other open handle on the file to share delete. A reader that shares read and write but not delete (.NET `FileShare.ReadWrite`, as used by a tail such as `Get-Content -Wait` or a log viewer) makes the rename fail. The log then goes Degraded, `on_unwritable` is called once, and lines are dropped, in 60 s retry windows, until the reader closes. std 1.99 maps a sharing violation (OS error 32) to no `ErrorKind`, so the reason is `Other(Some(32))`; if `MoveFileExW` reports access denied (5) instead, it is `PermissionDenied`. `src-tauri/tests/diag.rs::a_roll_blocked_by_a_reader_without_share_delete_degrades_with_one_notice` pins the one Windows gives (Windows CI). Decided by T-054: a blocked roll is "not writable" like any other failure (retrying without degrading would write past `roll_bytes`).
+
+## Logs notice (T-054)
+
+```rust
+pub trait LogsNoticeSink: Send + Sync { fn logs_unwritable(&self, reason: LogsUnwritableReason); }
+pub struct LogsNotice { /* Mutex<Empty | Pending(reason) | Attached(sink) | Delivered> */ }
+impl LogsNotice {
+    pub fn new() -> LogsNotice;
+    pub fn callback(self: &Arc<Self>) -> OnUnwritable;      // the log's on_unwritable
+    pub fn attach(&self, sink: Arc<dyn LogsNoticeSink>);
+}
+impl LogsNoticeSink for voicen_core::dictation::DictationSession { /* notice_with(notice.logs_unwritable, [("reason", logs_reason.*)], now) */ }
+impl DictationSession { pub fn notice_with(&self, id: MessageId, params: Vec<(&'static str, String)>, at: Instant); }
+```
+
+The latch between the log and the user: one per process (`src-tauri` `release_parts`), its callback given to `diag::start`. A reported failure is delivered exactly once, whatever the order: a call before the attach is latched and delivered by `attach` on the attaching thread before it returns; a call after the attach is delivered on one spawned thread (the caller may hold the session lock: the session publishes to the tray under it, and the tray's render writes a log line); a call while attaching is one of the two. The callback takes only the latch's own mutex and never calls the sink inline. Later calls, and a second log's, add nothing. If the delivery thread cannot be spawned the notice is lost. The session shows it with `DictationSession::notice_with`: the controller's `notice_with` under the session lock plus one publish, so the overlay shows `Message{notice.logs_unwritable, reason}` for 3 s, the tray is unchanged, the newest message wins the one slot and the next press drops it. Tests: `diag_logs_notice.rs` (orders, off-lock delivery, 8-thread race, reason map), `dictation_session.rs` (`notice_with_shows_the_message_for_3s_*`, `a_log_unwritable_before_the_session_*`, `a_log_failing_under_the_session_lock_*`), `src-tauri/tests/diag.rs` (ACL-denied folder; blocked roll; Windows CI).
 
 ## Pipeline observer (seam with 001 — P-011)
 

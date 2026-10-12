@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use tauri::{App, AppHandle, Builder, Context, Manager, RunEvent, Runtime};
 use voicen_core::autostart::Autostart;
-use voicen_core::diag::{Log, LogEvent, WarningKind};
+use voicen_core::diag::{Log, LogEvent, LogsNotice, WarningKind};
 use voicen_core::hotkey_registrar::HotkeyRegistrar;
 use voicen_core::local_models::catalog::MODELS;
 use voicen_core::local_models::download::DiskSpace;
@@ -93,6 +93,11 @@ pub struct Parts {
     pub service: Arc<SettingsService>,
     pub local_models: Arc<LocalModels>,
     pub log: Arc<Log>,
+    /// The latch of the log's one-time "logs cannot be written" notice (T-054):
+    /// `release_parts` gives the log its callback, `wire` manages it and
+    /// `dictation::start_dictation` attaches the session. `None` from
+    /// [`Parts::new`] ([`build_app`] and the tests manage their own, if any).
+    pub logs_notice: Option<Arc<LogsNotice>>,
 }
 
 impl Parts {
@@ -105,6 +110,15 @@ impl Parts {
             service,
             local_models,
             log,
+            logs_notice: None,
+        }
+    }
+
+    /// These parts with the latch whose callback the log was given (T-054).
+    pub fn with_logs_notice(self, logs_notice: Arc<LogsNotice>) -> Parts {
+        Parts {
+            logs_notice: Some(logs_notice),
+            ..self
         }
     }
 }
@@ -114,7 +128,8 @@ impl Parts {
 /// `build()`: the single-instance plugin decides there, and a second instance never
 /// returns from it), only then calls `parts()` (the startup side effects: log,
 /// `.part` cleanup, settings load, Run-value reconcile), and wires the result:
-/// manages `service`, `local_models`, `log` and the microphones (T-012), starts the `settings://changed`
+/// manages `service`, `local_models`, `log`, the logs-notice latch when the parts
+/// carry one (T-054) and the microphones (T-012), starts the `settings://changed`
 /// bridge, the settings opener thread (`settings_window::request`), the overlay
 /// thread with its mailbox (`overlay::part`, `overlay_ready`), the tray
 /// (`tray`, built in code, never from `tauri.conf.json`) and its language follower.
@@ -144,7 +159,11 @@ fn wire<R: Runtime>(app: &AppHandle<R>, parts: Parts) {
         service,
         local_models,
         log,
+        logs_notice,
     } = parts;
+    if let Some(logs_notice) = logs_notice {
+        app.manage(logs_notice);
+    }
     app.manage(Arc::clone(&service));
     app.manage(local_models);
     app.manage(Arc::clone(&log));
@@ -174,7 +193,7 @@ pub fn on_run_event<R: Runtime>(
         RunEvent::Ready => {
             // A failed open is written by the opener thread
             // (`settings_window_failed`). The user's way back is the tray "Settings"
-            // item or a second launch; the one-time notice is T-054's.
+            // item or a second launch; there is no notice for it yet.
             let _ = settings_window::on_ready(app, outcome, launched_by_autostart);
         }
         RunEvent::ExitRequested {
@@ -313,9 +332,11 @@ struct SharedPorts {
 
 fn release_parts() -> (Parts, LoadOutcome, SharedPorts) {
     // The one log (T-008), Started first; every later diagnostic is a typed line on
-    // it. The unwritable callback is T-054's one-time notice; until then the log
-    // only degrades.
-    let log = diag::start(paths::log_dir(), Box::new(|_| {}));
+    // it. Its unwritable callback is the latch of T-054's one-time notice: a
+    // failure here, before any session exists, is latched and shown when
+    // `start_dictation` attaches the session (`wire` manages the latch).
+    let logs_notice = Arc::new(LogsNotice::new());
+    let log = diag::start(paths::log_dir(), logs_notice.callback());
     // The one LocalModels (T-044): its `.part` cleanup runs inside `open`, before
     // any list or settings validation reads the models dir.
     let (local_models, cleanup) = LocalModels::open(
@@ -346,7 +367,7 @@ fn release_parts() -> (Parts, LoadOutcome, SharedPorts) {
         &log,
     );
     (
-        Parts::new(service, local_models, log),
+        Parts::new(service, local_models, log).with_logs_notice(logs_notice),
         load_outcome,
         SharedPorts {
             credentials,
@@ -381,8 +402,8 @@ pub fn run() {
     // The dictation session and the hotkey thread, after the tray exists and before
     // the loop runs; only a primary gets here (a second instance exited inside
     // `build()`). A failed start is logged where it failed (`dictation_start_failed`,
-    // `hotkey_thread_failed`) and the app runs on without dictation (T-054 owns any
-    // notice); the registrar handle then stays detached and refuses every hotkey
+    // `hotkey_thread_failed`) and the app runs on without dictation and with no
+    // notice for it (nor the logs notice: no session to show it); the registrar handle then stays detached and refuses every hotkey
     // change. A hotkey taken at start is reported by the hotkey thread before
     // `start_dictation` returns (tray HotkeyError, the notice, settings on the
     // hotkey field), so `Ready`'s startup executor runs after it (T-055 Q1). The

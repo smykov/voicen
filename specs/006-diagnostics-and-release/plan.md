@@ -145,8 +145,8 @@ Makefile                     # + licenses, licenses-check, version-check in chec
 
 ## Dependencies on other features
 
-- **001**: `PipelineObserver` trait and `DictationRecord` values; single-instance check before `diag_start`; tray item "Open logs folder" calls `open_logs_folder`; tray Exit and `WM_ENDSESSION` call `diag_exit`; notifier for `notice.logs_unwritable`; the Silero model file to bundle.
-- **002**: `cold`/`warm` and `load_ms` fields in `DictationRecord`; models live under `AppPaths` (removed with the folder).
+- **001**: `PipelineObserver` trait and `DictationLine` values; single-instance check before `diag_start`; tray item "Open logs folder" calls `open_logs_folder`; tray Exit and `WM_ENDSESSION` call `diag_exit`; notifier for `notice.logs_unwritable`; the Silero model file to bundle.
+- **002**: `cold`/`warm` and `load_ms` fields in `DictationLine`; models live under `AppPaths` (removed with the folder).
 - **004**: General tab hosts About; message catalog; key-slot naming → `CREDENTIAL_TARGET_PREFIX`; autostart Run value name.
 - **005**: history file under `AppPaths` (removed with the folder).
 

@@ -39,8 +39,11 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crate::audio::{mix_to_mono, AudioBuffer};
+use crate::diag::{LogsNoticeSink, LogsUnwritableReason};
 use crate::events::{DeviceKind, DictationEvent, PipelineObserver, WarningCode};
-use crate::i18n::{NOTICE_HOTKEY_UNAVAILABLE, NOTICE_MIC_FALLBACK};
+use crate::i18n::{
+    MessageId, NOTICE_HOTKEY_UNAVAILABLE, NOTICE_LOGS_UNWRITABLE, NOTICE_MIC_FALLBACK,
+};
 use crate::microphone::{choose, Choice, MicrophoneState};
 use crate::pipeline::{EngineFactory, Pipeline, PipelineDeps, PressContext};
 use crate::platform::{
@@ -513,6 +516,33 @@ impl DictationSession {
                 .requests
                 .open_settings(SettingsTab::Recording, Some(FieldId::RecordingHotkey));
         }
+    }
+}
+
+impl DictationSession {
+    /// Shows the notice `id` with `params` on the overlay for
+    /// [`MESSAGE_DURATION`](crate::recording::MESSAGE_DURATION) from `at`, through
+    /// the controller under the session lock, and publishes it (the
+    /// `hotkey_registration` notice path). The newest message wins the one slot; the
+    /// tray is left as it is; the next press drops it. Takes the session lock: never
+    /// call it from a thread that holds it (an `Indicator` call).
+    pub fn notice_with(&self, id: MessageId, params: Vec<(&'static str, String)>, at: Instant) {
+        let mut st = self.shared.lock();
+        st.ctrl.notice_with(id, params, at);
+        self.shared.publish(&mut st);
+    }
+}
+
+/// T-054: the session shows the one-time logs notice. `diag::LogsNotice` calls this
+/// at its attach (on the attaching thread) or on its own thread, never from the
+/// log's callback, so the session lock is free here.
+impl LogsNoticeSink for DictationSession {
+    fn logs_unwritable(&self, reason: LogsUnwritableReason) {
+        self.notice_with(
+            NOTICE_LOGS_UNWRITABLE,
+            vec![("reason", reason.message_id().nested_arg())],
+            Instant::now(),
+        );
     }
 }
 

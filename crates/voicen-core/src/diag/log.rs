@@ -29,6 +29,7 @@ use std::time::{Duration, SystemTime};
 use super::event::LogEvent;
 use super::format::{format_line, LocalTime};
 use crate::clock::{Clock, LocalOffset};
+use crate::i18n::{self, MessageId};
 
 /// The active file (the Windows CI smoke reads `logs\voicen.log`).
 const ACTIVE: &str = "voicen.log";
@@ -63,7 +64,8 @@ impl Default for LogConfig {
     }
 }
 
-/// Why the log cannot be written (T-054 shows it to the user once).
+/// Why the log cannot be written (T-054 shows it to the user once, through
+/// [`LogsNotice`](super::LogsNotice)).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogsUnwritableReason {
     PermissionDenied,
@@ -72,6 +74,19 @@ pub enum LogsUnwritableReason {
     NotADirectory,
     /// Any other error, with its raw OS code if it has one.
     Other(Option<i32>),
+}
+
+impl LogsUnwritableReason {
+    /// The `logs_reason.*` text, the `{reason}` of `notice.logs_unwritable`. The OS
+    /// code of `Other` is never shown: every `Other` is `logs_reason.other`.
+    pub fn message_id(self) -> MessageId {
+        match self {
+            LogsUnwritableReason::PermissionDenied => i18n::LOGS_REASON_PERMISSION_DENIED,
+            LogsUnwritableReason::DiskFull => i18n::LOGS_REASON_DISK_FULL,
+            LogsUnwritableReason::NotADirectory => i18n::LOGS_REASON_NOT_A_DIRECTORY,
+            LogsUnwritableReason::Other(_) => i18n::LOGS_REASON_OTHER,
+        }
+    }
 }
 
 /// Called at most once per [`Log`] when it becomes unwritable.

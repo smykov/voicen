@@ -105,6 +105,7 @@
 pub mod event;
 pub mod format;
 pub mod log;
+pub mod notice;
 pub mod observer;
 
 pub use event::{
@@ -113,4 +114,5 @@ pub use event::{
 };
 pub use format::format_line;
 pub use log::{Log, LogConfig, LogsUnwritableReason, OnUnwritable};
+pub use notice::{LogsNotice, LogsNoticeSink};
 pub use observer::LogObserver;

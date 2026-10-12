@@ -227,6 +227,10 @@ messages! {
     TRAY_TOOLTIP_ERROR = "tray.tooltip.error",
     /// Tray tooltip of `TrayState::HotkeyError` (T-052).
     TRAY_TOOLTIP_HOTKEY_ERROR = "tray.tooltip.hotkey_error",
+    /// The log cannot be written (T-054, spec 006 FR-009): shown once per process
+    /// through `diag::LogsNotice` and `DictationSession::notice_with`; placeholder
+    /// `{reason}` = a `logs_reason.*` id, rendered in the same language.
+    NOTICE_LOGS_UNWRITABLE = "notice.logs_unwritable",
     ;
     nested:
     /// `MicCause::NoDevice`.
@@ -237,6 +241,14 @@ messages! {
     MIC_REASON_BUSY = "mic_reason.busy",
     /// `MicCause::Other`.
     MIC_REASON_OTHER = "mic_reason.other",
+    /// `diag::LogsUnwritableReason::PermissionDenied`.
+    LOGS_REASON_PERMISSION_DENIED = "logs_reason.permission_denied",
+    /// `diag::LogsUnwritableReason::DiskFull`.
+    LOGS_REASON_DISK_FULL = "logs_reason.disk_full",
+    /// `diag::LogsUnwritableReason::NotADirectory`.
+    LOGS_REASON_NOT_A_DIRECTORY = "logs_reason.not_a_directory",
+    /// `diag::LogsUnwritableReason::Other` (any OS code; the code is not shown).
+    LOGS_REASON_OTHER = "logs_reason.other",
 }
 
 impl MessageId {

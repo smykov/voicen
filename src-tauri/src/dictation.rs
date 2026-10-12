@@ -25,7 +25,7 @@ use std::sync::Arc;
 
 use tauri::{AppHandle, Manager, Runtime};
 use voicen_core::audio::AudioBuffer;
-use voicen_core::diag::{Log, LogEvent, LogObserver, WarningKind};
+use voicen_core::diag::{Log, LogEvent, LogObserver, LogsNotice, LogsNoticeSink, WarningKind};
 use voicen_core::dictation::{DictationSession, SessionDeps};
 use voicen_core::pipeline::{EngineFactory, PipelineDeps};
 use voicen_core::platform::{
@@ -69,7 +69,9 @@ pub struct DictationHandle {
 /// Builds the one dictation session of `app` over `ports`, manages it as
 /// `Arc<DictationSession>`, starts the hotkey thread for the hotkey of the
 /// settings snapshot (it reports the registration result before this returns) and
-/// attaches it to `ports.hotkeys`. Needs the managed `Arc<SettingsService>` and `Arc<Log>`
+/// attaches it to `ports.hotkeys`. Between the two it attaches the session to the
+/// managed `Arc<LogsNotice>`, if any (T-054: a logs failure latched at start is
+/// shown then, before the hotkey thread can raise its own notice). Needs the managed `Arc<SettingsService>` and `Arc<Log>`
 /// (`assemble`'s wiring). `Err` when the session or the hotkey thread could not be
 /// started, or when the app already has a session (then nothing is started): a
 /// failed session start (or a second one) writes `dictation_start_failed`, a failed
@@ -140,6 +142,13 @@ pub fn start_dictation<R: Runtime>(
             io::ErrorKind::AlreadyExists,
             "the app already has a dictation session",
         )));
+    }
+    // T-054: the logs notice reaches the user through this session. A failure the
+    // log reported before (at start) is shown here, on this thread; it comes before
+    // the hotkey thread starts, so a startup `notice.hotkey_unavailable` replaces it
+    // in the one message slot.
+    if let Some(logs_notice) = app.try_state::<Arc<LogsNotice>>() {
+        logs_notice.attach(Arc::clone(&session) as Arc<dyn LogsNoticeSink>);
     }
     let hotkey = service.snapshot().hotkey.clone();
     let hotkey = HotkeyThread::start(session, &hotkey, log)?;
