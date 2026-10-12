@@ -340,8 +340,9 @@ fn a_panicking_opener_is_an_other_error_not_a_hang() {
 // id, `description()?.name()`, `is_default` by comparing the default's id; under
 // `open_bounded`) and `start(&DeviceId, sink)` (`device_by_id`; missing -> `NoDevice`);
 // `voicen_lib::win::capture::device_loss_callback(sink) -> impl FnMut(cpal::Error) + Send
-// + 'static`, the stream's error callback: the first call reports `sink.device_lost(now)`,
-// whatever the error kind, and later calls report nothing. The runner has no capture
+// + 'static`, the stream's error callback: the first call of a kind that ends the stream
+// reports `sink.device_lost(now)` and later calls report nothing; a kind after which cpal
+// keeps the stream running (T-104: `keeps_running`) reports nothing. The runner has no capture
 // endpoint probed (docs/decisions/windows-ci-runner.md), so these tests need none: the
 // list is checked for its shape only, the open by id on an id no machine has, and the
 // error callback without a stream. A real unplug is the owner's check (quickstart §3).
@@ -373,17 +374,28 @@ impl FrameSink for RecordingSink {
     }
 }
 
+/// The error kinds after which cpal 0.18.2 keeps the stream running (T-104): `Xrun`
+/// (`process_input` emits it for a discontinuous packet and goes on capturing),
+/// `RealtimeDenied` ("Audio will still play") and `DeviceChanged` ("The stream remains
+/// active").
+fn keeps_running(kind: ErrorKind) -> bool {
+    matches!(
+        kind,
+        ErrorKind::Xrun | ErrorKind::RealtimeDenied | ErrorKind::DeviceChanged
+    )
+}
+
 #[test]
-fn the_error_callback_reports_device_lost_once_for_any_error_kind() {
-    // T-012 invariant (3) / investigation (cpal 0.18.2 `run_input`: every error-callback
-    // call on a Specific-device stream is followed by the stream thread ending): every
-    // error kind is "capture ended", reported once as `device_lost(at)` with `at` stamped
-    // in the callback; a second and third error on the same stream report nothing; no
-    // frame is invented. Bite: the T-006 no-op `|_err| {}` (nothing reported), a filter on
-    // DeviceNotAvailable only (other kinds lost), a report per call (no once flag), an
-    // `at` taken before the callback ran (a constant captured at build).
+fn the_error_callback_reports_device_lost_once_for_a_kind_that_ends_the_stream() {
+    // T-012 invariant (3), corrected by T-104: a kind that ends the stream (every kind
+    // but `keeps_running`) is "capture ended", reported once as `device_lost(at)` with
+    // `at` stamped in the callback; a second and third error on the same stream report
+    // nothing; no frame is invented. Bite: the T-006 no-op `|_err| {}` (nothing
+    // reported), a filter on DeviceNotAvailable only (other kinds lost), a report per
+    // call (no once flag), an `at` taken before the callback ran (a constant captured at
+    // build).
     let mut wrong = Vec::new();
-    for kind in all_kinds() {
+    for kind in all_kinds().into_iter().filter(|k| !keeps_running(*k)) {
         let sink = Arc::new(RecordingSink::default());
         let mut callback = device_loss_callback(sink.clone() as Arc<dyn FrameSink>);
         let before = Instant::now();
@@ -396,6 +408,43 @@ fn the_error_callback_reports_device_lost_once_for_any_error_kind() {
             [at] if *at >= before && *at <= after => {}
             other => wrong.push(format!(
                 "{kind:?}: device_lost calls {other:?}, expected one between {before:?} and {after:?}"
+            )),
+        }
+        if sink.frames.load(Ordering::SeqCst) != 0 {
+            wrong.push(format!("{kind:?}: frames reported by the error callback"));
+        }
+    }
+    assert!(wrong.is_empty(), "\n{}", wrong.join("\n"));
+}
+
+#[test]
+fn an_error_that_keeps_the_stream_running_is_not_a_device_loss() {
+    // T-104 (the owner's microphone: an Xrun on the first packets ended every hold as
+    // DeviceLost ~70 ms after the press, "no speech", and the auto-repeat restarted it):
+    // a `keeps_running` kind reports nothing, also repeated, and does not use up the
+    // stream's one report: a later DeviceNotAvailable (an unplug, the failure branch)
+    // still reports exactly one loss, stamped at that call, and later errors nothing.
+    // Bite: the T-012 "any kind" callback (the Xrun reports the loss), a filter that lets
+    // one of the three through, a once flag set by an ignored kind (the unplug lost).
+    let mut wrong = Vec::new();
+    for kind in all_kinds().into_iter().filter(|k| keeps_running(*k)) {
+        let sink = Arc::new(RecordingSink::default());
+        let mut callback = device_loss_callback(sink.clone() as Arc<dyn FrameSink>);
+        callback(Error::with_message(kind, CANARY));
+        callback(Error::new(kind));
+        if !sink.lost().is_empty() {
+            wrong.push(format!("{kind:?}: reported as a device loss"));
+            continue;
+        }
+        let before = Instant::now();
+        callback(Error::new(ErrorKind::DeviceNotAvailable));
+        let after = Instant::now();
+        callback(Error::new(kind));
+        callback(Error::new(ErrorKind::StreamInvalidated));
+        match sink.lost().as_slice() {
+            [at] if *at >= before && *at <= after => {}
+            other => wrong.push(format!(
+                "{kind:?} then DeviceNotAvailable: device_lost calls {other:?}, expected one between {before:?} and {after:?}"
             )),
         }
         if sink.frames.load(Ordering::SeqCst) != 0 {
