@@ -24,9 +24,9 @@
 //!   `Message{notice.logs_unwritable, reason = logs_reason.permission_denied}`
 //!   reaches the session's indicator;
 //! - a roll blocked by a reader that does not share delete degrades the log with one
-//!   callback; the test pins the reason Windows gives (`Other(Some(32))` by std
-//!   1.99's mapping when `MoveFileExW` reports a sharing violation; the analysis
-//!   leaves `PermissionDenied` possible). The first Windows run measures it.
+//!   callback; the test pins the reason Windows gives, `Other(Some(32))` (a
+//!   sharing violation, no `ErrorKind` in std 1.99), measured by CI run
+//!   38234346755 (docs/decisions/diagnostics-log.md § Windows notes).
 //!
 //! The ACE is set and removed with `icacls`, the only external process here, bounded
 //! and observable by the F-006 rule (`run_icacls`).
@@ -651,8 +651,8 @@ fn a_roll_blocked_by_a_reader_without_share_delete_degrades_with_one_notice() {
     // READ|WRITE (no DELETE). The roll's rename fails: the log degrades (the
     // active file never grows past roll_bytes, no rolled file), the latch's sink
     // gets one reason, the one Windows gives (pinned: Other(Some(32)), the sharing
-    // violation by std 1.99's mapping; if the first run measures PermissionDenied,
-    // the pin and docs/decisions/diagnostics-log.md change together). With the
+    // violation by std 1.99's mapping, measured by CI run 38234346755; a change
+    // of it changes the pin and docs/decisions/diagnostics-log.md together). With the
     // reader closed and 61 s later (fake clock) the log recovers and rolls; a
     // second blocked roll gives no second notice. Bite: appending past roll_bytes
     // when the rename fails (10 MiB bound), a callback per failed roll, the reason

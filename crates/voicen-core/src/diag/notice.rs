@@ -13,6 +13,14 @@
 //! inline. A delivery at [`LogsNotice::attach`] runs on the attaching thread before
 //! `attach` returns; a delivery after the attach runs on one spawned thread. If that
 //! thread cannot be spawned the notice is lost (there is nothing to report it to).
+//!
+//! The latch holds the attached sink strongly until it delivers (it may be the
+//! sink's only owner). In release this is a reference cycle while nothing has been
+//! delivered: session -> pipeline observer -> `Log` -> `on_unwritable` -> latch ->
+//! session, so the session's `Drop` (which joins its threads) never runs. That is
+//! harmless there, because the session lives for the whole process as Tauri managed
+//! state. A caller that relies on dropping the session must not attach it to a log
+//! it keeps alive, or must give that log a fresh latch.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
