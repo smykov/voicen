@@ -1072,4 +1072,64 @@ mod tests {
         }
         assert!(wrong.is_empty(), "\n{}", wrong.join("\n"));
     }
+
+    #[test]
+    fn logs_unwritable_ids_are_declared_with_text_and_the_reason_renders_nested() {
+        // T-054 (contracts/ipc.md:41, OQ-35): `notice.logs_unwritable` and the four
+        // `logs_reason.*` ids are declared with messages! (so parity and existence
+        // cover them), have their own non-empty text in en and ru, the notice names
+        // exactly {reason} and a reason names nothing; the EN notice text is the
+        // contract's; `{reason}` carrying a `logs_reason.*` id renders that id's
+        // text in the same language (the ids are in the nested group, as
+        // `mic_reason.*`). Bite: an id missing from messages! or a catalog, the
+        // reasons outside the nested group (the overlay shows "logs_reason.disk_full"),
+        // a placeholder dropped or renamed.
+        let c = catalog(EN_JSON, RU_JSON);
+        let notice = "notice.logs_unwritable";
+        let reasons = [
+            "logs_reason.permission_denied",
+            "logs_reason.disk_full",
+            "logs_reason.not_a_directory",
+            "logs_reason.other",
+        ];
+        let mut wrong = Vec::new();
+        let rows =
+            std::iter::once((notice, &["reason"][..])).chain(reasons.iter().map(|r| (*r, &[][..])));
+        for (id, names) in rows {
+            if !MESSAGE_IDS.iter().any(|m| m.0 == id) {
+                wrong.push(format!("{id}: not declared with messages!"));
+            }
+            let want: BTreeSet<&str> = names.iter().copied().collect();
+            for lang in LANGS {
+                match own_text(&c, lang, id) {
+                    None => wrong.push(format!("{id} ({lang:?}): no text")),
+                    Some(t) if placeholder_names(t) != want => wrong.push(format!(
+                        "{id} ({lang:?}): placeholders {:?}, expected {want:?}",
+                        placeholder_names(t)
+                    )),
+                    Some(_) => {}
+                }
+            }
+        }
+        for r in reasons {
+            if !NESTED_IDS.iter().any(|m| m.0 == r) {
+                wrong.push(format!("{r}: not in the nested group (NESTED_IDS)"));
+            }
+        }
+        assert!(wrong.is_empty(), "\n{}", wrong.join("\n"));
+        assert_eq!(
+            own_text(&c, UiLanguage::En, notice),
+            Some("Logs cannot be written: {reason}")
+        );
+        for lang in LANGS {
+            for r in reasons {
+                let got = text(lang, MessageId(notice), &[("reason", r)]);
+                let reason_text = own_text(&c, lang, r).unwrap_or("<none>");
+                assert!(
+                    !got.contains("logs_reason.") && got.contains(reason_text),
+                    "{lang:?} {r}: rendered {got:?}"
+                );
+            }
+        }
+    }
 }

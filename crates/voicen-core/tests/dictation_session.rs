@@ -580,6 +580,9 @@ struct Custom {
     /// A second observer fed every event next to the rig's `RecordingObserver`
     /// (T-006 Refresh 5: a `diag::LogObserver` over a real `Log`).
     also_observe: Option<Arc<dyn PipelineObserver>>,
+    /// T-054: the indicator port alone (the shell requests stay the rig's); wins
+    /// over `ui`'s indicator half.
+    indicator: Option<Arc<dyn Indicator>>,
 }
 
 /// Feeds every event to both observers, in order (the session takes one).
@@ -663,6 +666,7 @@ impl Rig {
                 Some(u) => (u.clone(), u.clone()),
                 None => (indicator.clone(), requests.clone()),
             };
+        let indicator_port = custom.indicator.clone().unwrap_or(indicator_port);
         let store_port: Arc<dyn TempAudioStore> = match &custom.store {
             Some(b) => b.clone(),
             None => store.clone(),
@@ -2811,6 +2815,283 @@ fn the_settings_request_of_a_failed_registration_is_made_outside_the_session_loc
             Some(FieldId::RecordingHotkey)
         )]
     );
+}
+
+// ---- T-054: the one-time "logs cannot be written" notice ----------------------------
+
+/// The notice of an unwritable log (T-054; contracts: specs/006 contracts/ipc.md),
+/// spelled here, not taken from the code under test.
+const LOGS_NOTICE: &str = "notice.logs_unwritable";
+
+/// The declared `MessageId` with catalog id `id`; panics (red on the assertion,
+/// not on the build) while it is not declared with `messages!`.
+#[track_caller]
+fn declared(id: &str) -> i18n::MessageId {
+    *i18n::MESSAGE_IDS
+        .iter()
+        .find(|m| catalog_id(**m) == id)
+        .unwrap_or_else(|| panic!("{id} is not declared with messages! (i18n::MESSAGE_IDS)"))
+}
+
+/// The logs notice with `{reason}` = the nested id `reason`, at any `until`.
+fn is_logs_notice(o: &OverlayState, reason: &str) -> bool {
+    matches!(o, OverlayState::Message { id, params, .. }
+        if catalog_id(*id) == LOGS_NOTICE && *params == vec![("reason", reason.to_string())])
+}
+
+/// How many logs notices (any reason) were shown.
+fn logs_notices(overlays: &[OverlayState]) -> usize {
+    overlays
+        .iter()
+        .filter(|o| matches!(o, OverlayState::Message { id, .. } if catalog_id(*id) == LOGS_NOTICE))
+        .count()
+}
+
+/// How long a test keeps watching for a second (wrong) notice.
+const NOTICE_SETTLE: Duration = Duration::from_millis(300);
+
+#[test]
+fn notice_with_shows_the_message_for_3s_leaves_the_tray_and_a_press_drops_it() {
+    // T-054 seam (3): the public `DictationSession::notice_with(id, params, at)` is
+    // the controller's `notice_with` under the session lock plus one publish (the
+    // `hotkey_registration` notice path, made public): the overlay shows
+    // Message{id, params} until `at + 3 s`; no tray change, no event, no settings
+    // request; the next press drops it (Recording replaces it). Bite: no publish
+    // (nothing shown until the next change), the notice raised as a failure (tray
+    // Error), params dropped, a duration other than MESSAGE_DURATION, a message
+    // that survives the press.
+    let rig = Rig::new(api_settings(), always(TEXT));
+    let id = declared(LOGS_NOTICE);
+    let params = vec![("reason", "logs_reason.disk_full".to_string())];
+    let t = now();
+    rig.session.notice_with(id, params.clone(), t);
+
+    let overlays = settled(rig.indicator.overlays(), OverlayState::Hidden, t);
+    assert_eq!(
+        overlays,
+        vec![OverlayState::Message {
+            id,
+            params,
+            until: t + MESSAGE_DURATION,
+        }]
+    );
+    assert_eq!(rig.indicator.trays(), vec![], "the tray is left as it was");
+    assert!(rig.events().is_empty(), "{:?}", rig.events());
+    assert!(
+        rig.requests.calls().is_empty(),
+        "{:?}",
+        rig.requests.calls()
+    );
+
+    let tp = now();
+    rig.session.hotkey_pressed(tp);
+    let mut after = rig.indicator.overlays();
+    after.remove(0);
+    if passed(t, MESSAGE_DURATION) && after.first() == Some(&OverlayState::Hidden) {
+        after.remove(0);
+    }
+    assert_eq!(
+        after.first(),
+        Some(&OverlayState::Recording),
+        "the press did not replace the notice: {:?}",
+        rig.indicator.overlays()
+    );
+    rig.session.hotkey_released(tp + ms(10));
+}
+
+#[test]
+fn a_log_unwritable_before_the_session_shows_one_notice_when_the_session_attaches() {
+    // T-054 Acceptance failure branch "the log fails before the dictation session
+    // exists (at start)", the order of `run()`: the log opens over a file at the
+    // logs path (NotADirectory) with the latch's callback, the session starts, the
+    // latch attaches the session. The attach shows exactly one
+    // Message{notice.logs_unwritable, reason = logs_reason.not_a_directory} before
+    // it returns, through the session's controller (FakeIndicator); later failed
+    // reopens (61 s apart, fake clock) and a whole dictation, whose line goes to the
+    // degraded log, show no second notice; the dictation is delivered; the file at
+    // the logs path is untouched. Bite: today's no-op callback (no notice), the
+    // reason lost while latched, a notice per failed reopen, the session's
+    // `logs_unwritable` not wired to `notice_with` (or wired to the tray), a
+    // dictation blocked by the degraded log.
+    let tmp = TempDir::new();
+    let logs = tmp.path().join("logs");
+    std::fs::write(&logs, b"not a directory\n").expect("plant a file at the logs path");
+    let notice = Arc::new(voicen_core::diag::LogsNotice::new());
+    let clock = Arc::new(FakeClock::at(diag_support::at(diag_support::NOON_UTC, 0)));
+    let log = Arc::new(voicen_core::diag::Log::open(
+        logs.clone(),
+        clock.clone(),
+        Arc::new(diag_support::Offset(0)),
+        LogConfig::default(),
+        notice.callback(),
+    ));
+    let rig = Rig::with(
+        api_settings(),
+        always(TEXT),
+        Custom {
+            also_observe: Some(Arc::new(LogObserver::new(Arc::clone(&log)))),
+            ..Custom::default()
+        },
+    );
+    assert!(
+        rig.indicator.calls().is_empty(),
+        "premise: nothing shown before the attach: {:?}",
+        rig.indicator.calls()
+    );
+
+    notice.attach(Arc::clone(&rig.session) as Arc<dyn voicen_core::diag::LogsNoticeSink>);
+    let shown = rig.indicator.overlays();
+    assert!(
+        shown.len() == 1 && is_logs_notice(&shown[0], "logs_reason.not_a_directory"),
+        "the attach did not show the latched notice before it returned: {shown:?}"
+    );
+    assert_eq!(rig.indicator.trays(), vec![], "the tray is left as it was");
+
+    for i in 1..=5u64 {
+        clock.set(diag_support::at(diag_support::NOON_UTC + 61 * i, 0));
+        log.write(voicen_core::diag::LogEvent::Warning {
+            kind: voicen_core::diag::WarningKind::TrayFailed,
+            os_code: None,
+        });
+    }
+    rig.hold(&fixtures::speech_3s(), past(), ms(3000));
+    rig.wait_jobs(1);
+    assert_eq!(rig.clipboard.texts(), vec![TEXT.to_string()]);
+    thread::sleep(NOTICE_SETTLE);
+    assert_eq!(
+        logs_notices(&rig.indicator.overlays()),
+        1,
+        "{:?}",
+        rig.indicator.overlays()
+    );
+    assert_eq!(
+        std::fs::read(&logs).expect("still a file"),
+        b"not a directory\n"
+    );
+}
+
+/// An indicator that writes a log line from `set_tray`, as the shell's tray does
+/// (`tray.rs` render writes `tray_failed`, inline on the main thread), and records
+/// every call in `shown`. `set_tray` is called under the session lock.
+struct LogOnTray {
+    shown: Arc<FakeIndicator>,
+    log: Arc<voicen_core::diag::Log>,
+}
+
+impl Indicator for LogOnTray {
+    fn set_tray(&self, state: TrayState, retry_available: bool) {
+        self.log.write(voicen_core::diag::LogEvent::Warning {
+            kind: voicen_core::diag::WarningKind::TrayFailed,
+            os_code: None,
+        });
+        self.shown.set_tray(state, retry_available);
+    }
+    fn set_overlay(&self, state: &OverlayState) {
+        self.shown.set_overlay(state);
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_log_failing_under_the_session_lock_shows_one_notice_without_deadlock() {
+    // T-054 Acceptance failure branch "from a thread that holds the session lock"
+    // (analysis root cause (2), red test 2): the log opens healthy over
+    // `voicen.log` -> /dev/full (the T-008 DiskFull probe), the latch attaches the
+    // session, and the first failing write runs inside `Indicator::set_tray`,
+    // under the session lock, from `hotkey_registration(false)`. The call returns
+    // within BUDGET, exactly one Message{notice.logs_unwritable,
+    // reason = logs_reason.disk_full} is shown, and a later dictation (its tray
+    // change writes to the degraded log again) is delivered with no second notice.
+    // Bite: the latch calling the session inline (the session mutex is taken twice
+    // on one thread: this call never returns), a notice per failed write, no
+    // notice for a failure after the attach.
+    let probe = std::fs::OpenOptions::new()
+        .append(true)
+        .open("/dev/full")
+        .and_then(|mut f| std::io::Write::write_all(&mut f, b"x\n"));
+    assert_eq!(
+        probe.map_err(|e| e.kind()),
+        Err(std::io::ErrorKind::StorageFull),
+        "precondition: /dev/full refuses writes with StorageFull"
+    );
+    let tmp = TempDir::new();
+    let logs = tmp.path().join("logs");
+    std::fs::create_dir_all(&logs).expect("logs dir");
+    std::os::unix::fs::symlink("/dev/full", logs.join(diag_support::ACTIVE)).expect("symlink");
+    // The clock's day is the day of the link target's modification time (see
+    // diag_log.rs `a_full_disk_degrades_with_one_disk_full_callback`): no date roll
+    // can move the link away.
+    const DAY: u64 = 86_400;
+    let file_day = std::fs::metadata(logs.join(diag_support::ACTIVE))
+        .and_then(|m| m.modified())
+        .expect("modification time of the linked /dev/full")
+        .duration_since(UNIX_EPOCH)
+        .expect("/dev/full modified after the epoch")
+        .as_secs()
+        / DAY
+        * DAY;
+    let notice = Arc::new(voicen_core::diag::LogsNotice::new());
+    let log = Arc::new(voicen_core::diag::Log::open(
+        logs.clone(),
+        Arc::new(FakeClock::at(diag_support::at(file_day + 3_600, 0))),
+        Arc::new(diag_support::Offset(0)),
+        LogConfig::default(),
+        notice.callback(),
+    ));
+    let shown = Arc::new(FakeIndicator::new());
+    let rig = Rig::with(
+        api_settings(),
+        always(TEXT),
+        Custom {
+            indicator: Some(Arc::new(LogOnTray {
+                shown: Arc::clone(&shown),
+                log: Arc::clone(&log),
+            })),
+            ..Custom::default()
+        },
+    );
+    notice.attach(Arc::clone(&rig.session) as Arc<dyn voicen_core::diag::LogsNoticeSink>);
+    assert!(
+        shown.calls().is_empty(),
+        "premise: the log opened healthy, so the attach shows nothing: {:?}",
+        shown.calls()
+    );
+
+    let session = Arc::clone(&rig.session);
+    let (done_tx, done_rx) = mpsc::channel();
+    thread::spawn(move || {
+        session.hotkey_registration(false, now());
+        let _ = done_tx.send(());
+    });
+    if done_rx.recv_timeout(BUDGET).is_err() {
+        // The helper holds the session lock forever: dropping the rig would wait
+        // for it too.
+        std::mem::forget(rig);
+        panic!("hotkey_registration(false) did not return within {BUDGET:?}: the logs notice was delivered inline under the session lock");
+    }
+    assert!(
+        eventually(|| logs_notices(&shown.overlays()) >= 1),
+        "no logs notice within {BUDGET:?}: {:?}",
+        shown.calls()
+    );
+    assert!(
+        shown
+            .overlays()
+            .iter()
+            .any(|o| is_logs_notice(o, "logs_reason.disk_full")),
+        "{:?}",
+        shown.overlays()
+    );
+
+    rig.hold(&fixtures::speech_3s(), past(), ms(3000));
+    assert!(
+        eventually(|| job_count(&rig.events()) >= 1),
+        "the dictation did not end within {BUDGET:?}: {:?}",
+        rig.events()
+    );
+    assert_eq!(rig.clipboard.texts(), vec![TEXT.to_string()]);
+    thread::sleep(NOTICE_SETTLE);
+    assert_eq!(logs_notices(&shown.overlays()), 1, "{:?}", shown.overlays());
 }
 
 // ---- shutdown --------------------------------------------------------------------------
