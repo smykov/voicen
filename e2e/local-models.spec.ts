@@ -594,7 +594,10 @@ test("the Download and Retry buttons stay disabled after the invoke resolves unt
 //   it, as the bridge does): the UI writes nothing to the draft (U1); a clean draft then
 //   shows engine none and the section unmounts; a dirty draft keeps its edits;
 // - `resetFailed: true` (OQ-26 (a)): the row follows the re-list (not downloaded) and the
-//   section shows `settings.write_failed` in its alert.
+//   section shows its own `delete.reset_failed` in its alert (T-081, decision #111), never
+//   `settings.write_failed` ("Nothing was changed" is untrue once the file is gone);
+//   `settings.write_failed` stays the text of a failed settings save
+//   (e2e/settings-first-run.spec.ts).
 
 const ru = (id: string, args?: Record<string, string>) => msg("ru", id, args);
 
@@ -764,18 +767,43 @@ test("failure branch: deleting the selected model with a dirty draft keeps the d
   expect(errors).toEqual([]);
 });
 
-test("failure branch: resetFailed (OQ-26 a): the file is gone, the re-list shows small not downloaded, and the section shows settings.write_failed; the engine stays builtin_local", async ({ page }) => {
+test("failure branch: resetFailed (OQ-26 a): the file is gone, the re-list shows small not downloaded, and the section shows delete.reset_failed, not settings.write_failed; the engine stays builtin_local", async ({ page }) => {
   const errors = pageErrors(page);
   await openLoaded(page, localView("small"), { localModels: modelsWith("small", DOWNLOADED) });
   await queueDeleteOutcome(page, deleteOutcome("reset_failed"));
 
   await confirmDelete(page, "small");
   await expect.poll(() => deleteCalls(page)).toEqual([{ id: "small" }]);
-  await expect(section(page).getByRole("alert")).toContainText(en("settings.write_failed"));
+  const alert = section(page).getByRole("alert");
+  await expect(alert).toContainText(en("delete.reset_failed"));
+  // T-081: the file is already removed, so the save-failure text ("Nothing was changed") is
+  // never shown for this outcome, anywhere in the window.
+  await expect(page.getByText(en("settings.write_failed"))).toHaveCount(0);
+  await expect(alert).not.toContainText(en("settings.write_failed"));
+  await expect(alert).not.toContainText(en("error.ipc_unavailable"));
+  // Never the id as text.
+  await expect(section(page)).not.toContainText("delete.reset_failed");
   await expect(row(page, "small")).toHaveAttribute("data-state", "not_downloaded");
   await expect(action(page, "small", "download")).toBeEnabled();
   await expect(page.locator('[data-field="engine.kind"]')).toHaveValue("builtin_local");
-  await expect(section(page).getByRole("alert")).not.toContainText(en("error.ipc_unavailable"));
+  expect(await calls(page, "settings_save")).toEqual([]);
+  expect(errors).toEqual([]);
+});
+
+test("failure branch: resetFailed (OQ-26 a) is shown in Russian as delete.reset_failed when the UI language is ru, never settings.write_failed or the English text", async ({ page }) => {
+  const errors = pageErrors(page);
+  await openLoaded(page, localView("small", "ru"), { localModels: modelsWith("small", DOWNLOADED) });
+  await queueDeleteOutcome(page, deleteOutcome("reset_failed"));
+
+  await confirmDelete(page, "small", "ru");
+  await expect.poll(() => deleteCalls(page)).toEqual([{ id: "small" }]);
+  const alert = section(page).getByRole("alert");
+  await expect(alert).toContainText(ru("delete.reset_failed"));
+  await expect(page.getByText(ru("settings.write_failed"))).toHaveCount(0);
+  await expect(alert).not.toContainText(ru("settings.write_failed"));
+  await expect(section(page)).not.toContainText(en("delete.reset_failed"));
+  await expect(section(page)).not.toContainText("delete.reset_failed");
+  await expect(row(page, "small")).toHaveAttribute("data-state", "not_downloaded");
   expect(await calls(page, "settings_save")).toEqual([]);
   expect(errors).toEqual([]);
 });
