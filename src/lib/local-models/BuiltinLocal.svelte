@@ -23,7 +23,8 @@
   //   (keepModel, nothing sent) before the discard prompt shows (settings-ui.md A, M). The command emits no event: the rows follow the re-list issued
   //   after the invoke settles, and every Delete stays disabled until that re-list has
   //   settled (as I4). A refusal shows its reason and changes no row; `resetFailed`
-  //   shows `settings.write_failed`. An engine reset reaches the window only as
+  //   (file gone, reset not written) shows its own UI-only `delete.reset_failed`, never
+  //   `settings.write_failed` ("Nothing was changed"; decisions #110, #111). An engine reset reaches the window only as
   //   `settings://changed`; nothing here writes the draft (U1). A failed row's reason is rendered inside a
   //   polite live region that stays mounted with the row, so a row turning failed
   //   changes the text of an existing region (announced), not a new one.
@@ -229,7 +230,7 @@
         <p>{t(refusal.reason.messageKey, reasonArgs(refusal.reason, currentLanguage()))}</p>
       {/if}
       {#if refusal?.kind === "reset_failed"}
-        <p>{t("settings.write_failed")}</p>
+        <p>{t("delete.reset_failed")}</p>
       {/if}
     </div>
   {/if}
