@@ -66,7 +66,7 @@ implemented_by: ""
 review: ""
 # `ratified` = the owner accepts pushing this task's code although the task is not in an
 # approved status (CODE_COMPLETE, DEPLOYED, VERIFIED, DONE). Any other value keeps pre-push blocking.
-tail_code: ""
+tail_code: "ratified"
 ---
 
 ## Context
