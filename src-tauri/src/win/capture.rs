@@ -10,9 +10,11 @@
 //! `CaptureError` kinds with fixed literals ([`capture_error`]): cpal's message is
 //! never copied (P-009).
 //!
-//! Device loss (T-012): every call of a stream's error callback means the capture
-//! ended (cpal 0.18.2 `run_input` ends a `Specific` device's stream thread after
-//! it), so the first one reports `FrameSink::device_lost` and later ones nothing
+//! Device loss (T-012, T-104): an error after which cpal 0.18.2 ends a `Specific`
+//! device's stream thread (`run_input`) means the capture ended, so the first one
+//! reports `FrameSink::device_lost` and later ones nothing; an `Xrun` (emitted by
+//! `process_input` for a discontinuous packet, capture goes on), `RealtimeDenied`
+//! or `DeviceChanged` leaves the stream running and reports nothing
 //! ([`device_loss_callback`]).
 //!
 //! Lock contract (core `platform.rs`): `devices` and `start` return within
@@ -103,13 +105,19 @@ where
     )
 }
 
-/// A stream's error callback (T-012): the first call, whatever the error kind,
-/// reports `sink.device_lost` with the instant stamped in the callback; later
-/// calls report nothing. It never invents frames.
+/// A stream's error callback (T-012): the first call of a kind that ends the
+/// stream reports `sink.device_lost` with the instant stamped in the callback;
+/// later calls report nothing. A kind that leaves the stream running is no loss
+/// (T-104: an `Xrun` on the first packets ended every recording). It never invents
+/// frames.
 pub fn device_loss_callback(sink: Arc<dyn FrameSink>) -> impl FnMut(Error) + Send + 'static {
     let mut reported = false;
-    move |_err: Error| {
-        if !reported {
+    move |err: Error| {
+        let keeps_running = matches!(
+            err.kind(),
+            ErrorKind::Xrun | ErrorKind::RealtimeDenied | ErrorKind::DeviceChanged
+        );
+        if !reported && !keeps_running {
             reported = true;
             sink.device_lost(Instant::now());
         }

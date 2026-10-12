@@ -175,7 +175,7 @@ pub struct PendingId(/* u64, monotonic per Pipeline, never reused */);
 
 // Windows implementations (T-006, `src-tauri`, Windows CI only): AudioSource `win/capture.rs` `CpalSource`
 // (T-012: `input_devices` with the endpoint id, open by `device_by_id`; enumeration and open each bounded
-// by `OPEN_BUDGET` 3 s; the stream's error callback reports `device_lost` once, whatever the kind), Clipboard `win/clipboard.rs` `WinClipboard`, Paster `win/paste.rs`
+// by `OPEN_BUDGET` 3 s; the stream's error callback reports `device_lost` once, for a kind that ends the stream: not `Xrun`, `RealtimeDenied`, `DeviceChanged`, T-104), Clipboard `win/clipboard.rs` `WinClipboard`, Paster `win/paste.rs`
 // `WinPaster`, Indicator `dictation.rs` `ShellIndicator`, ShellRequests `dictation.rs` `SettingsRequests`;
 // `dictation::start_dictation` is the only builder of the session and the hotkey thread (`win/hotkey.rs`).
 
