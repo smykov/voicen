@@ -363,8 +363,8 @@ mod tests {
         // (the doubled row loses a pair), a dropped query.
         for (raw, expected) in [
             (
-                "http://10.10.10.110:8000/v1/audio/transcriptions",
-                "http://10.10.10.110:8000/v1/audio/transcriptions",
+                "http://localhost:8000/v1/audio/transcriptions",
+                "http://localhost:8000/v1/audio/transcriptions",
             ),
             (
                 "https://api.example.com/v1/audio/transcriptions/",
