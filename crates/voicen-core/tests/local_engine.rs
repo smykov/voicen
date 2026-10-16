@@ -41,7 +41,9 @@ use common::timing::{ago, now};
 use diag_support::{
     all_lines, at, contains, dictation_lines, files_under, open_log, utf16le, NOON_UTC,
 };
-use local_support::{file_name, local_catalog, place_models, FakeLoader, FakeMono, Script};
+use local_support::{
+    file_name, local_catalog, place_models, wrong_magic_bytes, FakeLoader, FakeMono, Script,
+};
 use voicen_core::audio::AudioBuffer;
 use voicen_core::clock::MonotonicClock;
 use voicen_core::diag::{LogConfig, LogObserver};
@@ -80,6 +82,7 @@ const STEP: Duration = Duration::from_secs(1);
 struct Rig {
     _tmp: TempDir,
     dir: PathBuf,
+    clock: Arc<FakeMono>,
     loader: Arc<FakeLoader>,
     residency: Arc<ModelResidency>,
     store: Arc<ModelStore>,
@@ -106,6 +109,7 @@ fn rig(on_disk: &[ModelId], script: Script) -> Rig {
     Rig {
         _tmp: tmp,
         dir,
+        clock,
         loader,
         residency,
         store,
@@ -459,6 +463,98 @@ fn a_slow_load_alone_never_times_out() {
     let got = r.job(&builtin(Some("tiny")), &fixtures::speech_3s());
     assert_eq!(got, Ok(TRANSCRIPT.to_string()));
     assert!(!r.loader.last_transcription().aborted);
+}
+
+/// Lets a spawned job reach the model's lock. Too short only weakens
+/// `a_job_waiting_for_the_model_gets_its_whole_limit_from_when_it_holds_it`; it
+/// never turns it red.
+const SETTLE: Duration = Duration::from_millis(300);
+
+#[test]
+fn a_job_waiting_for_the_model_gets_its_whole_limit_from_when_it_holds_it() {
+    // T-098 review 1 #1 / #133 ("the limit covers transcription only"): two jobs
+    // run at once on the one warm model (`Pipeline::process` may run concurrently,
+    // T-011). Job 1 holds the model for 2x the limit of fake time and is aborted
+    // (Timeout). Job 2 waited for the model all that time; its 45 s budget starts
+    // when it holds the model, so its 2 s transcription ends Ok, not aborted.
+    // Bite: the abort start taken after `acquire` but before the model's lock
+    // (job 2 is Timeout at once, its wait counted), the start taken at submit.
+    let r = rig(
+        &[ModelId::Tiny],
+        Script {
+            transcribe_takes: STEP * 2,
+            step: STEP,
+            text: TRANSCRIPT.to_string(),
+            ..Script::default()
+        },
+    );
+    let s = builtin(Some("tiny"));
+    assert_eq!(
+        r.job(&s, &fixtures::speech_3s()),
+        Ok(TRANSCRIPT.to_string()),
+        "warm-up"
+    );
+    let first = r.engine(&s);
+    let second = r.engine(&s);
+    let local_support::Gate { entered, release } = r.loader.gate_transcriptions();
+    let audio = fixtures::speech_3s();
+
+    let (job1, job2) = std::thread::scope(|scope| {
+        let job1 = scope.spawn(|| first.transcribe(&audio, &request(None)));
+        entered
+            .recv_timeout(Duration::from_secs(30))
+            .expect("job 1 holds the model");
+        let job2 = scope.spawn(|| second.transcribe(&audio, &request(None)));
+        std::thread::sleep(SETTLE);
+        // Job 1 runs 2x the limit while job 2 waits for the model.
+        r.clock.advance(LIMIT * 2);
+        // One release for job 1; the dropped sender lets job 2 through.
+        let _ = release.send(());
+        drop(release);
+        (
+            job1.join().expect("job 1 must not panic"),
+            job2.join().expect("job 2 must not panic"),
+        )
+    });
+
+    assert_eq!(
+        job1,
+        Err(FailureReason::Timeout),
+        "job 1 ran past the limit"
+    );
+    assert_eq!(
+        job2,
+        Ok(TRANSCRIPT.to_string()),
+        "job 2's wait for the model was counted against its limit"
+    );
+    let calls = r.loader.transcriptions();
+    let last = calls.last().expect("job 2 reached the model");
+    assert!(!last.aborted, "job 2 was aborted: {last:?}");
+    assert_eq!(last.ran_for, STEP * 2, "job 2 ran its whole transcription");
+    assert_eq!(r.loader.loads().len(), 1, "one model, one load");
+}
+
+// ---- R-8: the file is checked before the load (review 1 #3) ---------------------------
+
+#[test]
+fn a_downloaded_file_without_the_ggml_magic_is_local_engine_failed_and_never_loaded() {
+    // T-098 review 1 #3 / spec 002 T025 ("size and ggml-magic check before load",
+    // research R-8, NFR-07): a file with the catalog size (so the store calls it
+    // downloaded) whose header is not the ggml magic is refused before the loader
+    // runs: the job is LocalEngineFailed (spec FR-012: a load that fails inside the
+    // engine), retryable, nothing loaded. whisper.cpp may abort the process on such
+    // a file. Bite: no magic check (the loader gets the file and the job is Ok),
+    // the magic compared in the wrong byte order, NoLocalModel or Timeout instead.
+    let r = rig(&[ModelId::Tiny], Script::default());
+    std::fs::write(r.path(ModelId::Tiny), wrong_magic_bytes()).expect("corrupt tiny");
+    assert!(
+        r.store.path_if_downloaded(ModelId::Tiny).is_some(),
+        "the store's size rule still calls it downloaded"
+    );
+    let got = r.job(&builtin(Some("tiny")), &fixtures::speech_3s());
+    assert_eq!(got, Err(FailureReason::LocalEngineFailed));
+    assert_eq!(r.loader.loads(), Vec::<PathBuf>::new(), "never loaded");
+    assert_eq!(r.residency.loaded(), None);
 }
 
 // ---- failure reasons -------------------------------------------------------------------

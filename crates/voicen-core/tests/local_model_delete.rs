@@ -743,6 +743,8 @@ fn a_model_a_transcription_holds_in_the_real_residency_is_refused_and_stays_load
     // transcription), unloading anyway, NoResidency still wired.
     let stored = settings(EngineKind::BuiltinLocal, Some("small"));
     let w = world(vec![], &[ModelId::Small], Some(&stored));
+    // A ggml header, so the residency's file check before the load passes (R-8).
+    local_support::stamp_ggml_magic(&w.path(ModelId::Small));
     let (loader, residency) = real_residency();
     let (held, _) = residency
         .acquire(ModelId::Small, w.path(ModelId::Small))
@@ -768,6 +770,8 @@ fn after_deleting_the_loaded_model_a_retry_of_its_job_is_no_local_model_without_
     // a load of the deleted path (LocalEngineFailed), a non-retryable reason.
     let stored = settings(EngineKind::BuiltinLocal, Some("small"));
     let w = world(vec![], &[ModelId::Small], Some(&stored));
+    // A ggml header, so the residency's file check before the load passes (R-8).
+    local_support::stamp_ggml_magic(&w.path(ModelId::Small));
     let (loader, residency) = real_residency();
     drop(
         residency

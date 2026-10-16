@@ -137,6 +137,7 @@ pub struct FakeLoader {
     dropped: Arc<AtomicUsize>,
     calls: Arc<Mutex<Vec<Transcription>>>,
     gate: Mutex<Option<GateInside>>,
+    transcription_gate: Arc<Mutex<Option<GateInside>>>,
 }
 
 impl FakeLoader {
@@ -153,6 +154,7 @@ impl FakeLoader {
             dropped: Arc::new(AtomicUsize::new(0)),
             calls: Arc::new(Mutex::new(Vec::new())),
             gate: Mutex::new(None),
+            transcription_gate: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -161,6 +163,23 @@ impl FakeLoader {
         let (entered_tx, entered_rx) = channel();
         let (release_tx, release_rx) = channel();
         *lock(&self.gate) = Some(GateInside {
+            entered: entered_tx,
+            release: release_rx,
+        });
+        Gate {
+            entered: entered_rx,
+            release: release_tx,
+        }
+    }
+
+    /// From now on every transcription waits at a [`Gate`] the test holds, before
+    /// it polls the abort hook or advances the clock (it holds the model while it
+    /// waits, as a real run does). `entered` gets the pcm length of each
+    /// transcription that reached the gate.
+    pub fn gate_transcriptions(&self) -> Gate {
+        let (entered_tx, entered_rx) = channel();
+        let (release_tx, release_rx) = channel();
+        *lock(&self.transcription_gate) = Some(GateInside {
             entered: entered_tx,
             release: release_rx,
         });
@@ -225,6 +244,7 @@ impl SpeechModelLoader for FakeLoader {
             live: Arc::clone(&self.live),
             dropped: Arc::clone(&self.dropped),
             calls: Arc::clone(&self.calls),
+            gate: Arc::clone(&self.transcription_gate),
         }))
     }
 }
@@ -235,6 +255,7 @@ struct FakeModel {
     live: Arc<AtomicUsize>,
     dropped: Arc<AtomicUsize>,
     calls: Arc<Mutex<Vec<Transcription>>>,
+    gate: Arc<Mutex<Option<GateInside>>>,
 }
 
 impl SpeechModel for FakeModel {
@@ -244,6 +265,14 @@ impl SpeechModel for FakeModel {
         language: Option<&str>,
         abort: &Abort,
     ) -> Result<String, FailureReason> {
+        {
+            let gate = lock(&self.gate);
+            if let Some(gate) = gate.as_ref() {
+                let _ = gate.entered.send(PathBuf::from(pcm.len().to_string()));
+                // A dropped release sender lets every transcription through.
+                let _ = gate.release.recv();
+            }
+        }
         let script = lock(&self.script).clone();
         let mut ran_for = Duration::ZERO;
         let mut aborted = false;
@@ -286,6 +315,24 @@ pub fn ggml_bytes() -> Vec<u8> {
     let mut bytes = vec![0x6c, 0x6d, 0x67, 0x67];
     bytes.extend((0..4_092u32).map(|i| (i % 251) as u8));
     bytes
+}
+
+/// [`ggml_bytes`] with the magic in the wrong byte order (`b"ggml"`, what a
+/// big-endian read of `0x67676d6c` would write) and nothing else changed: the
+/// size is right, so only a magic check refuses it (R-8, T-098 review 1 #3).
+pub fn wrong_magic_bytes() -> Vec<u8> {
+    let mut bytes = ggml_bytes();
+    bytes[..4].copy_from_slice(b"ggml");
+    bytes
+}
+
+/// Overwrites the first four bytes of the file at `path` with the ggml magic,
+/// keeping its size: a fixture written for the store's size rule (for example
+/// `test_support::local_models::model_bytes`) then also passes a magic check.
+pub fn stamp_ggml_magic(path: &Path) {
+    let mut bytes = std::fs::read(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    bytes[..4].copy_from_slice(&ggml_bytes()[..4]);
+    std::fs::write(path, bytes).unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
 }
 
 /// `ggml-<id>.bin`.
