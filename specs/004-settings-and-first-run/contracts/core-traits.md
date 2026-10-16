@@ -54,7 +54,7 @@ pub trait SettingsFile: Send + Sync {
 pub trait Clock: Send + Sync { fn now(&self) -> SystemTime; }   // voicen_core::clock
 pub fn utc_compact(t: SystemTime) -> String;                     // yyyyMMdd-HHmmss in UTC; before the epoch → the epoch; std only
 ```
-- `SystemClock` is the real one; `FakeClock::at(t)` / `set(t)` behind `test-fakes`. The one wall-clock port of the core: the backup suffix and history (005) read the time through it. The connection test does not: its latency is a duration, measured with `std::time::Instant` (T-046).
+- `SystemClock` is the real one; `FakeClock::at(t)` / `set(t)` behind `test-fakes`. The one wall-clock port of the core: the backup suffix and history (005) read the time through it. The connection test does not: its latency is a duration, measured with `Instant` through `crate::clock::instant()` / `since()` (T-046, T-103).
 
 ### `Autostart` (req FR-19; spec FR-019)
 

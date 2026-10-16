@@ -80,7 +80,7 @@ This is one rule for every kind of uncontrolled clock: the OS refusal time, the 
     - a target built from parts at run time;
     - arithmetic on two instants handed out by `common` (`now() - a`), including a ceiling written that way;
     - a ceiling through `within_spec` with a made-up spec id;
-    - the `#[cfg(test)]` unit tests under `crates/voicen-core/src` (outside the dir it reads; they use `Instant::now()` as stamps and hold no ceiling today);
+    - the `#[cfg(test)]` unit tests under `crates/voicen-core/src` (outside the dir it reads; they stamp through `crate::clock::instant()` and hold no ceiling today);
     - the shell tests.
   - A ceiling on what `measure` / `between` return is not text it reads: it does not compile (`Took`, above).
   - Exit 3 ("cannot run") is never a pass.
