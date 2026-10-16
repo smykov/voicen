@@ -571,3 +571,122 @@ fn a_model_file_gone_before_the_load_is_no_local_model_without_a_load() {
     assert_eq!(r.loader.loads(), Vec::<PathBuf>::new(), "no load");
     assert_eq!(r.residency.loaded(), None);
 }
+
+// ---- T-098 validation 1 ---------------------------------------------------------------
+
+/// `release_for_delete(id)` while a load of `id` waits at the fake loader's gate:
+/// whether it was `InUse`. A wrongly granted guard is dropped before the load goes
+/// on, so the load can finish and the test reports the verdict instead of hanging.
+fn delete_refused_during_load(r: &Rig, id: ModelId) -> bool {
+    match r.residency.release_for_delete(id) {
+        Err(InUse) => true,
+        Ok(guard) => {
+            drop(guard);
+            false
+        }
+    }
+}
+
+#[test]
+fn release_for_delete_while_an_acquire_loads_that_model_is_in_use() {
+    // Validation 1 (M5; invariant "while a ReleaseGuard lives its model is not
+    // loaded"): an acquire on its own thread is inside the loader for `small`; a
+    // delete of `small` then must be InUse (the file is being read), the load ends
+    // with `small` loaded, and once the transcription's guard drops a later delete
+    // unloads it. Bite: `release_for_delete` checking only held guards
+    // (`st.holds(id)`), not the load in flight — it grants the delete during the
+    // load, and the load then installs a model whose delete is running.
+    let r = rig();
+    let gate = r.loader.gate();
+    let residency = Arc::clone(&r.residency);
+    let small = r.path(ModelId::Small);
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (end_tx, end_rx) = std::sync::mpsc::channel::<()>();
+    let job = std::thread::spawn(move || {
+        let got = residency.acquire(ModelId::Small, small);
+        let warmth = got.as_ref().map(|(_, w)| *w).map_err(|e| e.clone());
+        let _ = held_tx.send(warmth);
+        // Holds the guard until the test has looked at the loaded model.
+        let _ = end_rx.recv_timeout(HANG);
+        drop(got);
+    });
+    assert_eq!(
+        gate.entered.recv_timeout(HANG),
+        Ok(r.path(ModelId::Small)),
+        "the acquire's load started"
+    );
+
+    let refused = delete_refused_during_load(&r, ModelId::Small);
+    gate.release.send(()).expect("let the load finish");
+    drop(gate);
+    let warmth = held_rx.recv_timeout(HANG).expect("the acquire returned");
+    assert!(
+        refused,
+        "release_for_delete during a load of that model must be InUse"
+    );
+    assert_eq!(warmth, Ok(Warmth::Cold { load_ms: 1_234 }));
+    assert_eq!(
+        r.residency.loaded(),
+        Some(ModelId::Small),
+        "the load ended loaded"
+    );
+    assert_eq!(r.loader.dropped(), 0);
+
+    let _ = end_tx.send(());
+    job.join().expect("acquire thread must not panic");
+    let release = r.residency.release_for_delete(ModelId::Small);
+    assert!(release.is_ok(), "nothing holds or loads the model any more");
+    assert_eq!(r.residency.loaded(), None, "unloaded by the later release");
+    assert_eq!(r.loader.dropped(), 1);
+    assert_eq!(r.loader.loads().len(), 1, "one load only");
+}
+
+#[test]
+fn release_for_delete_while_a_prewarm_loads_that_model_is_in_use() {
+    // Validation 1 (M5): same guarantee for the prewarm's load (its own thread,
+    // spec FR-015). The acquire after the release waits for the load in flight
+    // (condvar, no sleep), so once it returns the prewarm is over and its model is
+    // the one loaded (Cold, the prewarm's load_ms, one load). Bite: as above —
+    // under `if st.holds(id)` the delete is granted during the prewarm.
+    let r = rig();
+    let gate = r.loader.gate();
+    r.residency.prewarm(ModelId::Small, r.path(ModelId::Small));
+    assert_eq!(
+        gate.entered.recv_timeout(HANG),
+        Ok(r.path(ModelId::Small)),
+        "the prewarm load started"
+    );
+
+    let refused = delete_refused_during_load(&r, ModelId::Small);
+    gate.release.send(()).expect("let the prewarm load finish");
+    drop(gate);
+    assert!(
+        refused,
+        "release_for_delete during a prewarm of that model must be InUse"
+    );
+
+    let residency = Arc::clone(&r.residency);
+    let small = r.path(ModelId::Small);
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let got = residency
+            .acquire(ModelId::Small, small)
+            .map(|(_guard, warmth)| warmth);
+        let _ = tx.send(got);
+    });
+    let got = rx
+        .recv_timeout(HANG)
+        .expect("the acquire after the prewarm returned");
+    assert_eq!(
+        got,
+        Ok(Warmth::Cold { load_ms: 1_234 }),
+        "the prewarm's model"
+    );
+    assert_eq!(r.loader.loads().len(), 1, "the prewarm's one load");
+    assert_eq!(r.residency.loaded(), Some(ModelId::Small));
+
+    let release = r.residency.release_for_delete(ModelId::Small);
+    assert!(release.is_ok(), "nothing holds or loads the model any more");
+    assert_eq!(r.residency.loaded(), None, "unloaded by the later release");
+    assert_eq!(r.loader.dropped(), 1);
+}
