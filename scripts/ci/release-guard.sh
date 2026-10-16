@@ -99,7 +99,10 @@
 #      loosened together; T-088 review 1 finding 1, probes A-G): each starts with `      - ` and
 #      ends on a `      - ` line or a job key line `  <name>:` (a comment line does not end a
 #      step: the key after it joins the step); it is one step: line 1 is the only `      - ` line
-#      before the last, exactly one line holds the word uses, and that line is `      - uses: `
+#      before the last, no body line holds `*` (a YAML alias) or `&` outside `&&` (an anchor;
+#      review 2 finding 1: an alias key `*c : pnpm`, with `&c cache` anchored outside the
+#      fragment, spells cache with no cache on the line), exactly one line holds the word
+#      uses, and that line is `      - uses: `
 #      or `        uses: ` followed by actions/setup-node, Swatinem/rust-cache,
 #      actions/cache/save or pnpm/action-setup, `@` and a ref of [A-Za-z0-9._-] (no quote or
 #      comment); a setup-node or rust-cache fragment has the uses line as line 1, exactly
@@ -116,8 +119,9 @@
 #      spaces (the if: value does not continue), the word if on one line and no ||; a
 #      pnpm/action-setup fragment holds no cache. So every action a workflow runs is reviewed
 #      text, every step that can save a cache saves from main only, and no setup-node step needs
-#      host pnpm. That uses and the action names cannot be spelled another way rests on R6 (no
-#      escape) and R8 (no tag); the word uses is the load-bearing token (every action run, reusable-workflow call
+#      host pnpm. That uses, the action names and the counted words (cache, save-if, with, if)
+#      cannot be spelled another way rests on R6 (no escape), R8 (no tag) and no alias or anchor
+#      in a fragment; the word uses is the load-bearing token (every action run, reusable-workflow call
 #      and local action is a uses key), the five names are a belt (comments must not name them).
 #   R12 (T-088) after a file's `jobs:` line, every line that is not empty or spaces only starts
 #      with a space, comments included: a column-0 key between two jobs (`on:`, `env:`) would
@@ -158,9 +162,11 @@
 # --cache-to type=gha, a script calling the cache service); a save if: that is always false on
 # main (loud: main saves nothing); an action input supplied through the environment (a job- or
 # workflow-level env: INPUT_CACHE: pnpm, or a run step writing it to GITHUB_ENV) - whether the
-# runner reads inputs from INPUT_* variables set this way was NOT checked against GitHub's docs
-# (no docs tool in T-088), so this hole is unverified, not ruled out; an owned never-saving line
-# reused with its own with: or an owned fragment copied whole into another job (neither can save
+# runner reads inputs from INPUT_* variables set this way is unverified, not ruled out: github/docs
+# metadata-syntax.md (inputs) and workflow-syntax.md (jobs.<job_id>.steps[*].with) say a with:
+# input reaches the action as an INPUT_<NAME> variable, not whether a job-level env: INPUT_CACHE
+# reaches an action whose with: leaves the input unset (T-088 review 2 finding 2); an owned
+# never-saving line reused with its own with: or an owned fragment copied whole into another job (neither can save
 # a cache or reach host pnpm; the place of a fragment is not pinned on purpose); whether GitHub
 # honours YAML merge keys at all was NOT checked against GitHub's docs either: R13 refuses them
 # fail-closed, so the answer does not matter for the guard; a quoted "<<" key passes R13 as
@@ -254,6 +260,10 @@ for fr in "${frags[@]}"; do
     cannot_run "owned fragment $fr does not end on a step-ending line (the next step's '      - ' line or a job key line '  <name>:')"
   # One step: line 1 is the body's only '      - ' line, and one body line holds the word uses.
   [ "$(grep -c '^      - ' <<<"$body")" = 1 ] || cannot_run "owned fragment $fr holds more than one step (a '      - ' line after its first line)"
+  # No alias or anchor: an alias key (*c : pnpm, with &c cache anchored outside the fragment)
+  # spells a word the counts below look for without the word (review 2 finding 1, probes N1-N4).
+  ! grep -q -F '*' <<<"$body" || cannot_run "owned fragment $fr holds * (a YAML alias)"
+  ! grep -q -F '&' <<<"${body//&&/}" || cannot_run "owned fragment $fr holds & outside && (a YAML anchor)"
   [ "$(wcount uses "$body")" = 1 ] || cannot_run "owned fragment $fr: not exactly one line holds the word uses (one step, one action)"
   ul="$(grep -i -E '(^|[^A-Za-z0-9_])uses([^A-Za-z0-9_]|$)' <<<"$body")"
   [[ "$ul" =~ $uses_re ]] ||
