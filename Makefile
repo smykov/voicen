@@ -2,7 +2,7 @@
 .PHONY: check check-shell-layout check-shell-layout-fixtures check-helper-windows-fixtures check-core \
 	check-ci-credentials check-core-test-clocks check-http-client-builder check-ci-wip check-telegram-send check-telegram-failure-branch \
 	check-version-stamp check-release-check check-release check-release-guard check-nsis-fork check-e2e-entry-fixtures \
-	check-shell-windows \
+	check-shell-windows check-ban-canary check-clippy-lines check-core-test-os-answer \
 	check-ui core-image ui-image \
 	licenses licenses-check licenses-unit licenses-fixture licenses-rust licenses-bundle \
 	licenses-npm licenses-generate licenses-stale licenses-stale-guard
@@ -57,6 +57,32 @@ check-core-test-clocks:
 # scripts/ci/fixtures/http-client-builder/ and the real source dir. Host bash.
 check-http-client-builder:
 	scripts/ci/http-client-builder.test.sh
+
+# T-089 (P-020; docs/tasks/T-089.md). Red tests written ahead of the implementation; not yet
+# prerequisites of check: (each fails until T-089 lands; the implementation adds them to check:
+# and retires check-http-client-builder and check-core-test-clocks).
+# check-ban-canary (decides_on: switch): the voicen-core call bans (reqwest client construction
+# outside engine::http, Instant::now / elapsed outside crate::clock and tests/common) are
+# clippy disallowed-types / -methods at deny level; scripts/ci/ban-canary.sh lints the owned
+# probe files (features ban-canary-lib, ban-canary-tests) in the core image and compares every
+# diagnostic with scripts/ci/ban-canary.expected.txt.
+check-ban-canary:
+	scripts/ci/ban-canary.sh
+
+# check-clippy-lines (decides_on: token + literal): every tracked line holding the token clippy
+# (any case, comments included) in a *.rs, Cargo.toml or .cargo config is an owned line of
+# scripts/ci/clippy-lines.txt. The self-test runs the guard scripts/ci/clippy-lines.sh on trees
+# built in a temp dir and on the real repository. Host bash, git.
+check-clippy-lines:
+	scripts/ci/clippy-lines.test.sh
+
+# check-core-test-os-answer (decides_on: token; the I1 half of core-test-clocks, renamed): no
+# core test outside crates/voicen-core/tests/common names an OS-answer target (.invalid,
+# 127.0.0.1:1, 192.0.2.1), any case, comments included. The self-test runs the tripwire
+# scripts/ci/core-test-os-answer.sh on scripts/ci/fixtures/core-test-os-answer/ and the real
+# tests dir. Host bash.
+check-core-test-os-answer:
+	scripts/ci/core-test-os-answer.test.sh
 
 # T-066 (rca, P-016, decisions #90): .github/workflows/ci.yml runs on push to main and wip/**
 # (the pre-review run of every non-docs task), and no workflow step saves a cache on a ref

@@ -1,0 +1,49 @@
+# T-089 owned diagnostic list of the ban canary (scripts/ci/ban-canary.sh, make check-ban-canary).
+# One row per diagnostic of the two canary runs (feature ban-canary-lib --lib; feature
+# ban-canary-tests --all-targets), tab-separated:
+#   <target kind>:<target name>  <file>:<line>  <level>  <lint code>  <banned path>
+# Every probe line (marked `probe: <id>` in crates/voicen-core/src/ban_canary.rs and
+# crates/voicen-core/tests/ban_canary.rs) has a row, and every row sits on a probe line.
+# h01-h21: a reqwest client outside engine::http (disallowed_types on the client types,
+# disallowed_methods on reqwest::get / reqwest::blocking::get); h21 and k15 under
+# #[allow(warnings)] (the deny level is the package's); k01-k15: Instant::now / elapsed
+# outside crate::clock and tests/common. Rows are keyed by line: a probe-file edit needs this
+# list regenerated and reviewed row by row. Lines starting with # and blank lines are not rows.
+lib:voicen_core	crates/voicen-core/src/ban_canary.rs:102	error	clippy::disallowed_methods	reqwest::get
+lib:voicen_core	crates/voicen-core/src/ban_canary.rs:108	error	clippy::disallowed_methods	reqwest::blocking::get
+lib:voicen_core	crates/voicen-core/src/ban_canary.rs:114	error	clippy::disallowed_methods	reqwest::blocking::get
+lib:voicen_core	crates/voicen-core/src/ban_canary.rs:119	error	clippy::disallowed_types	reqwest::blocking::Client
+lib:voicen_core	crates/voicen-core/src/ban_canary.rs:128	error	clippy::disallowed_types	reqwest::blocking::Client
+lib:voicen_core	crates/voicen-core/src/ban_canary.rs:134	error	clippy::disallowed_methods	std::time::Instant::now
+lib:voicen_core	crates/voicen-core/src/ban_canary.rs:15	error	clippy::disallowed_types	reqwest::blocking::Client
+lib:voicen_core	crates/voicen-core/src/ban_canary.rs:20	error	clippy::disallowed_types	reqwest::blocking::Client
+lib:voicen_core	crates/voicen-core/src/ban_canary.rs:26	error	clippy::disallowed_types	reqwest::blocking::Client
+lib:voicen_core	crates/voicen-core/src/ban_canary.rs:31	error	clippy::disallowed_types	reqwest::blocking::Client
+lib:voicen_core	crates/voicen-core/src/ban_canary.rs:32	error	clippy::disallowed_types	reqwest::blocking::Client
+lib:voicen_core	crates/voicen-core/src/ban_canary.rs:37	error	clippy::disallowed_methods	reqwest::blocking::get
+lib:voicen_core	crates/voicen-core/src/ban_canary.rs:42	error	clippy::disallowed_types	reqwest::blocking::ClientBuilder
+lib:voicen_core	crates/voicen-core/src/ban_canary.rs:47	error	clippy::disallowed_types	reqwest::blocking::Client
+lib:voicen_core	crates/voicen-core/src/ban_canary.rs:53	error	clippy::disallowed_types	reqwest::blocking::Client
+lib:voicen_core	crates/voicen-core/src/ban_canary.rs:59	error	clippy::disallowed_types	reqwest::blocking::Client
+lib:voicen_core	crates/voicen-core/src/ban_canary.rs:65	error	clippy::disallowed_types	reqwest::blocking::Client
+lib:voicen_core	crates/voicen-core/src/ban_canary.rs:72	error	clippy::disallowed_types	reqwest::blocking::Client
+lib:voicen_core	crates/voicen-core/src/ban_canary.rs:77	error	clippy::disallowed_types	reqwest::Client
+lib:voicen_core	crates/voicen-core/src/ban_canary.rs:82	error	clippy::disallowed_types	reqwest::blocking::Client
+lib:voicen_core	crates/voicen-core/src/ban_canary.rs:87	error	clippy::disallowed_types	reqwest::Client
+lib:voicen_core	crates/voicen-core/src/ban_canary.rs:92	error	clippy::disallowed_types	reqwest::ClientBuilder
+lib:voicen_core	crates/voicen-core/src/ban_canary.rs:97	error	clippy::disallowed_types	reqwest::blocking::ClientBuilder
+test:ban_canary	crates/voicen-core/tests/ban_canary.rs:17	error	clippy::disallowed_methods	std::time::Instant::now
+test:ban_canary	crates/voicen-core/tests/ban_canary.rs:22	error	clippy::disallowed_methods	std::time::Instant::elapsed
+test:ban_canary	crates/voicen-core/tests/ban_canary.rs:30	error	clippy::disallowed_methods	std::time::Instant::now
+test:ban_canary	crates/voicen-core/tests/ban_canary.rs:35	error	clippy::disallowed_methods	std::time::Instant::elapsed
+test:ban_canary	crates/voicen-core/tests/ban_canary.rs:40	error	clippy::disallowed_methods	std::time::Instant::elapsed
+test:ban_canary	crates/voicen-core/tests/ban_canary.rs:46	error	clippy::disallowed_methods	std::time::Instant::now
+test:ban_canary	crates/voicen-core/tests/ban_canary.rs:51	error	clippy::disallowed_methods	std::time::Instant::now
+test:ban_canary	crates/voicen-core/tests/ban_canary.rs:56	error	clippy::disallowed_methods	std::time::Instant::now
+test:ban_canary	crates/voicen-core/tests/ban_canary.rs:62	error	clippy::disallowed_methods	std::time::Instant::elapsed
+test:ban_canary	crates/voicen-core/tests/ban_canary.rs:68	error	clippy::disallowed_methods	std::time::Instant::now
+test:ban_canary	crates/voicen-core/tests/ban_canary.rs:75	error	clippy::disallowed_methods	std::time::Instant::elapsed
+test:ban_canary	crates/voicen-core/tests/ban_canary.rs:75	error	clippy::disallowed_methods	std::time::Instant::now
+test:ban_canary	crates/voicen-core/tests/ban_canary.rs:80	error	clippy::disallowed_methods	std::time::Instant::elapsed
+test:ban_canary	crates/voicen-core/tests/ban_canary.rs:85	error	clippy::disallowed_methods	std::time::Instant::now
+test:ban_canary	crates/voicen-core/tests/ban_canary.rs:93	error	clippy::disallowed_methods	std::time::Instant::now

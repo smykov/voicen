@@ -28,6 +28,13 @@ sha2 = "0.10"
 # for this crate's integration tests and for other crates' tests (decision #23 N4).
 # Never enabled in a release build.
 test-fakes = []
+# T-089 ban canary: ban-canary-lib compiles src/ban_canary.rs, ban-canary-tests
+# tests/ban_canary.rs, the probes that scripts/ci/ban-canary.sh (make check-ban-canary) lints
+# with the package's lint config to prove each call ban bites. Two features, two runs: a denied
+# probe in the lib stops the build of every test target that links it. Test tooling only;
+# never enabled in a build that ships.
+ban-canary-lib = []
+ban-canary-tests = []
 
 [dev-dependencies]
 # Self dev-dependency: switches `test-fakes` on for this crate's own tests
