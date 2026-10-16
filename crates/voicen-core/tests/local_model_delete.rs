@@ -27,6 +27,7 @@
 //! lock test in `src-tauri/tests/local_models.rs`. Fake data only: 127.0.0.1.
 
 mod common;
+mod local_support;
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -712,4 +713,94 @@ fn delete_outcome_and_refusals_have_the_contract_wire_form() {
             "{key} is not a declared message id"
         );
     }
+}
+
+// ---- T-098: the real residency ---------------------------------------------------------
+
+/// The one `ModelResidency` over a fake loader on a fake monotonic clock.
+fn real_residency() -> (
+    Arc<local_support::FakeLoader>,
+    Arc<voicen_core::local_models::residency::ModelResidency>,
+) {
+    use voicen_core::clock::MonotonicClock;
+    use voicen_core::engine::speech_model::SpeechModelLoader;
+    let clock = local_support::FakeMono::starting_at(common::timing::now());
+    let loader = local_support::FakeLoader::new(&clock);
+    let residency = Arc::new(voicen_core::local_models::residency::ModelResidency::new(
+        Arc::clone(&loader) as Arc<dyn SpeechModelLoader>,
+        Arc::clone(&clock) as Arc<dyn MonotonicClock>,
+        voicen_core::timeouts::MODEL_IDLE_UNLOAD,
+    ));
+    (loader, residency)
+}
+
+#[test]
+fn a_model_a_transcription_holds_in_the_real_residency_is_refused_and_stays_loaded() {
+    // T-098 Acceptance 1 with T-019's one delete path: while a transcription holds
+    // `small` (an acquired residency guard), delete is `model_in_use`, the file and
+    // the settings are unchanged and the model stays loaded. Bite: the residency's
+    // release_for_delete ignoring the holder (Ok: the file removed under a running
+    // transcription), unloading anyway, NoResidency still wired.
+    let stored = settings(EngineKind::BuiltinLocal, Some("small"));
+    let w = world(vec![], &[ModelId::Small], Some(&stored));
+    let (loader, residency) = real_residency();
+    let (held, _) = residency
+        .acquire(ModelId::Small, w.path(ModelId::Small))
+        .expect("load small");
+
+    let got = w.models.delete("small", &*residency, &w.service);
+
+    assert_eq!(got.as_ref().map_err(|r| r.code), Err("model_in_use"));
+    assert!(w.path(ModelId::Small).exists(), "the file was removed");
+    assert_eq!(residency.loaded(), Some(ModelId::Small));
+    assert_eq!((loader.live(), loader.dropped()), (1, 0), "still loaded");
+    w.assert_settings_untouched(&stored);
+    drop(held);
+}
+
+#[test]
+fn after_deleting_the_loaded_model_a_retry_of_its_job_is_no_local_model_without_a_load() {
+    // T-098 / spec FR-011, FR-021: delete unloads the idle loaded model, then a
+    // retry whose settings snapshot still names it (the pending recording was made
+    // before the delete) ends NoLocalModel through the one factory; the loader is
+    // not called again and the audio stays retryable. Bite: the model left loaded
+    // (live 1), the engine serving the stale loaded model (Ok, no file behind it),
+    // a load of the deleted path (LocalEngineFailed), a non-retryable reason.
+    let stored = settings(EngineKind::BuiltinLocal, Some("small"));
+    let w = world(vec![], &[ModelId::Small], Some(&stored));
+    let (loader, residency) = real_residency();
+    drop(
+        residency
+            .acquire(ModelId::Small, w.path(ModelId::Small))
+            .expect("load small"),
+    );
+
+    let got = w.models.delete("small", &*residency, &w.service);
+
+    assert_eq!(got, ok(true, false));
+    assert!(!w.path(ModelId::Small).exists());
+    assert_eq!(residency.loaded(), None, "unloaded by the delete");
+    assert_eq!((loader.live(), loader.dropped()), (0, 1));
+
+    let deps = voicen_core::engine::builtin::BuiltinDeps {
+        residency: Arc::clone(&residency),
+        store: w.models.store(),
+    };
+    let creds = FakeCredentialStore::new();
+    let retry = voicen_core::engine::engine_for(&stored, &creds, Some(&deps)).and_then(|engine| {
+        engine.transcribe(
+            &voicen_core::test_support::fixtures::speech_3s(),
+            &voicen_core::engine::TranscribeRequest {
+                language: None,
+                timeouts: Timeouts::default(),
+            },
+        )
+    });
+    assert_eq!(
+        retry,
+        Err(voicen_core::failure::FailureReason::NoLocalModel)
+    );
+    assert!(voicen_core::failure::FailureReason::NoLocalModel.retryable());
+    assert_eq!(loader.loads().len(), 1, "no load after the delete");
+    assert_eq!(creds.calls(), vec![], "no credential call");
 }

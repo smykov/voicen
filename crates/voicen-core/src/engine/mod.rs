@@ -131,27 +131,123 @@ mod tests {
         let got = reason(engine_for(
             &api_settings("https://api.example.com/v1"),
             &creds,
+            None,
         ));
         assert_eq!(got, Some(FailureReason::KeyStoreUnavailable));
         assert_eq!(creds.calls(), vec![read_api()]);
     }
 
+    // ---- T-098: BuiltinLocal --------------------------------------------------------
+
+    /// A loader that must never run: the factory builds the engine without a load
+    /// (the residency loads at the job's first transcription).
+    struct NoLoad;
+
+    impl crate::engine::speech_model::SpeechModelLoader for NoLoad {
+        fn load(
+            &self,
+            _path: &std::path::Path,
+        ) -> Result<Box<dyn crate::engine::speech_model::SpeechModel>, FailureReason> {
+            panic!("engine_for must not load a model");
+        }
+    }
+
+    struct StillClock(std::time::Instant);
+
+    impl crate::clock::MonotonicClock for StillClock {
+        fn now(&self) -> std::time::Instant {
+            self.0
+        }
+    }
+
+    /// The built-in deps over `dir`, which holds a downloaded `tiny` (the file of
+    /// its catalog size).
+    fn builtin_deps(dir: &std::path::Path) -> builtin::BuiltinDeps {
+        use crate::local_models::catalog::{CatalogEntry, ModelId};
+        use crate::test_support::local_models::{catalog, model_bytes, SHA256, SIZE};
+        let entries: &'static [CatalogEntry] = catalog(vec![CatalogEntry {
+            id: ModelId::Tiny,
+            file_name: "ggml-tiny.bin",
+            url: "https://models.example.com/ggml-tiny.bin",
+            size_bytes: SIZE,
+            sha256: SHA256,
+            recommended: false,
+        }]);
+        std::fs::create_dir_all(dir).unwrap_or_else(|e| panic!("mkdir: {e}"));
+        std::fs::write(dir.join("ggml-tiny.bin"), model_bytes())
+            .unwrap_or_else(|e| panic!("write model: {e}"));
+        let clock: std::sync::Arc<dyn crate::clock::MonotonicClock> =
+            std::sync::Arc::new(StillClock(crate::clock::instant()));
+        builtin::BuiltinDeps {
+            residency: std::sync::Arc::new(crate::local_models::residency::ModelResidency::new(
+                std::sync::Arc::new(NoLoad),
+                clock,
+                crate::timeouts::MODEL_IDLE_UNLOAD,
+            )),
+            store: std::sync::Arc::new(crate::local_models::store::ModelStore::new(
+                dir.to_path_buf(),
+                entries,
+            )),
+        }
+    }
+
     #[test]
-    fn unbuilt_or_unset_engine_is_engine_not_configured() {
-        // Decision #44 (2): BuiltinLocal (shell, T-017) and None give
-        // EngineNotConfigured without reading any key (LocalServer is built since
-        // T-018: local_server_* below). Bite: a panic / todo!() arm, an API engine
-        // built for another kind, or a key read first.
-        for kind in [EngineKind::BuiltinLocal, EngineKind::None] {
+    fn unset_engine_is_engine_not_configured() {
+        // Decision #44 (2): None gives EngineNotConfigured without reading any key,
+        // with or without the built-in deps. Bite: a panic / todo!() arm, an
+        // engine built for None (the built-in one, since its deps are there), a
+        // key read first.
+        let tmp = crate::test_support::TempDir::new();
+        let deps = builtin_deps(&tmp.path().join("models"));
+        for with in [None, Some(&deps)] {
             let creds = FakeCredentialStore::new()
                 .with_key(KeySlot::TranscriptionApi, KEY)
                 .with_key(KeySlot::LocalServer, KEY);
             let mut s = api_settings("https://api.example.com/v1");
-            s.engine = kind;
-            let got = reason(engine_for(&s, &creds));
-            assert_eq!(got, Some(FailureReason::EngineNotConfigured), "{kind:?}");
-            assert_eq!(creds.calls(), vec![], "{kind:?}: no credential call");
+            s.engine = EngineKind::None;
+            s.builtin_local.model_id = Some("tiny".to_string());
+            let got = reason(engine_for(&s, &creds, with));
+            assert_eq!(got, Some(FailureReason::EngineNotConfigured));
+            assert_eq!(creds.calls(), vec![], "no credential call");
         }
+    }
+
+    #[test]
+    fn builtin_local_builds_the_builtin_engine_without_a_key_or_a_load() {
+        // T-098 flips decision #44 (2) for BuiltinLocal: the one factory builds
+        // the built-in engine (kind "builtin") from the deps, reads no key and
+        // loads nothing at build time (NoLoad panics). Bite: the arm left at
+        // EngineNotConfigured, an API / local-server engine built instead (their
+        // sections are valid here), a key read, a load in the factory.
+        let tmp = crate::test_support::TempDir::new();
+        let deps = builtin_deps(&tmp.path().join("models"));
+        let creds = FakeCredentialStore::new()
+            .with_key(KeySlot::TranscriptionApi, KEY)
+            .with_key(KeySlot::LocalServer, KEY);
+        let mut s = api_settings("https://api.example.com/v1");
+        s.engine = EngineKind::BuiltinLocal;
+        s.builtin_local.model_id = Some("tiny".to_string());
+        match engine_for(&s, &creds, Some(&deps)) {
+            Ok(engine) => assert_eq!(engine.kind(), "builtin"),
+            Err(e) => panic!("built-in engine expected, got {e:?}"),
+        }
+        assert_eq!(creds.calls(), vec![], "no credential call");
+    }
+
+    #[test]
+    fn builtin_local_without_deps_is_engine_not_configured() {
+        // A caller that has no residency (no built-in engine wired) gets the
+        // settled EngineNotConfigured, never a panic or a key read. Bite: an
+        // unwrap of the deps, a fall-through to the API arm.
+        let creds = FakeCredentialStore::new().with_key(KeySlot::TranscriptionApi, KEY);
+        let mut s = api_settings("https://api.example.com/v1");
+        s.engine = EngineKind::BuiltinLocal;
+        s.builtin_local.model_id = Some("tiny".to_string());
+        assert_eq!(
+            reason(engine_for(&s, &creds, None)),
+            Some(FailureReason::EngineNotConfigured)
+        );
+        assert_eq!(creds.calls(), vec![], "no credential call");
     }
 
     #[test]
@@ -171,7 +267,7 @@ mod tests {
             "https://user@api.example.com/v1",
         ] {
             let creds = FakeCredentialStore::new().with_key(KeySlot::TranscriptionApi, KEY);
-            let got = reason(engine_for(&api_settings(bad), &creds));
+            let got = reason(engine_for(&api_settings(bad), &creds, None));
             assert_eq!(got, Some(FailureReason::EngineNotConfigured), "{bad:?}");
             assert_eq!(creds.calls(), vec![], "{bad:?}: no credential call");
         }
@@ -184,6 +280,7 @@ mod tests {
         match engine_for(
             &api_settings("https://api.example.com/v1?api-version=2024-06-01"),
             &creds,
+            None,
         ) {
             Ok(engine) => assert_eq!(engine.kind(), "api"),
             Err(e) => panic!("API engine expected, got {e:?}"),
@@ -218,7 +315,7 @@ mod tests {
         let creds = FakeCredentialStore::new()
             .with_key(KeySlot::TranscriptionApi, KEY)
             .with_key(KeySlot::LocalServer, "sk-test-LOCAL");
-        match engine_for(&local_settings("http://localhost:8000/v1"), &creds) {
+        match engine_for(&local_settings("http://localhost:8000/v1"), &creds, None) {
             Ok(engine) => assert_eq!(engine.kind(), "local_server"),
             Err(e) => panic!("local-server engine expected, got {e:?}"),
         }
@@ -234,7 +331,7 @@ mod tests {
         let mut s = defaults(None);
         s.engine = EngineKind::LocalServer;
         let creds = FakeCredentialStore::new();
-        match engine_for(&s, &creds) {
+        match engine_for(&s, &creds, None) {
             Ok(engine) => assert_eq!(engine.kind(), "local_server"),
             Err(e) => panic!("local-server engine expected, got {e:?}"),
         }
@@ -255,6 +352,7 @@ mod tests {
         let got = reason(engine_for(
             &local_settings("http://localhost:8000/v1"),
             &creds,
+            None,
         ));
         assert_eq!(got, Some(FailureReason::KeyStoreUnavailable));
         assert_eq!(creds.calls(), vec![read_local()]);
@@ -274,7 +372,7 @@ mod tests {
             "http://user:pass@localhost:8000/v1",
         ] {
             let creds = FakeCredentialStore::new().with_key(KeySlot::LocalServer, "sk-test-LOCAL");
-            let got = reason(engine_for(&local_settings(bad), &creds));
+            let got = reason(engine_for(&local_settings(bad), &creds, None));
             assert_eq!(got, Some(FailureReason::EngineNotConfigured), "{bad:?}");
             assert_eq!(creds.calls(), vec![], "{bad:?}: no credential call");
         }
@@ -286,7 +384,7 @@ mod tests {
         // Authorization header (the server's 401 then gives InvalidApiKey).
         // Bite: Ok(None) turned into KeyStoreUnavailable / EngineNotConfigured.
         let creds = FakeCredentialStore::new();
-        match engine_for(&api_settings("https://api.example.com/v1"), &creds) {
+        match engine_for(&api_settings("https://api.example.com/v1"), &creds, None) {
             Ok(engine) => assert_eq!(engine.kind(), "api"),
             Err(e) => panic!("API engine expected, got {e:?}"),
         }

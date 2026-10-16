@@ -419,8 +419,12 @@ pub const FAILURES: &[&str] = &[
     "engine_not_configured",
     "clipboard_unavailable",
     "microphone_unavailable",
+    "no_local_model",
+    "local_engine_failed",
     "other",
 ];
+/// The built-in engine's model warmth on a dictation line (T-098, spec FR-015).
+pub const LOCAL_WARMTH: &[&str] = &["cold", "warm"];
 pub const WARNING_KINDS: &[&str] = &[
     "vad_fallback",
     "esc_unavailable",
@@ -535,7 +539,10 @@ pub fn check_closed(line: &Line) -> Result<(), String> {
         match (line.head.as_str(), k) {
             ("started", "pid") => check(unsigned(v), k, v)?,
             ("dictation", "rec" | "press_to_frame_ms" | "duration_ms" | "stop_to_text_ms")
-            | ("dictation", "text_to_paste_ms" | "pp_ms") => check(unsigned(v), k, v)?,
+            | ("dictation", "text_to_paste_ms" | "pp_ms" | "load_ms") => {
+                check(unsigned(v), k, v)?;
+            }
+            ("dictation", "local") => one_of(k, v, LOCAL_WARMTH)?,
             ("dictation", "http_status") => {
                 check(unsigned(v) && v.parse::<u16>().is_ok(), k, v)?;
             }
@@ -598,6 +605,20 @@ pub fn check_closed(line: &Line) -> Result<(), String> {
         if (outcome == "capture_failed") != line.get("mic").is_some() {
             return Err(format!(
                 "mic= exactly on capture_failed lines: {:?}",
+                line.raw
+            ));
+        }
+        // T-098: local= only on a built-in line; load_ms= exactly on local=cold.
+        let local = line.get("local");
+        if local.is_some() && line.get("engine") != Some("builtin") {
+            return Err(format!(
+                "local= only on engine=builtin lines: {:?}",
+                line.raw
+            ));
+        }
+        if (local == Some("cold")) != line.get("load_ms").is_some() {
+            return Err(format!(
+                "load_ms= exactly on local=cold lines: {:?}",
                 line.raw
             ));
         }
