@@ -48,6 +48,7 @@
 //!         stop_to_text_ms: None,
 //!         text_to_paste_ms: None,
 //!         post_processing: None,
+//!         local: None,
 //!     }
 //! }
 //! ```
@@ -65,6 +66,7 @@
 //!         stop_to_text_ms: None,
 //!         text_to_paste_ms: None,
 //!         post_processing: None,
+//!         local: None,
 //!     }
 //! }
 //! ```
@@ -97,6 +99,7 @@
 //!         stop_to_text_ms: None,
 //!         text_to_paste_ms: None,
 //!         post_processing: None,
+//!         local: None,
 //!     }));
 //! }
 //! ```

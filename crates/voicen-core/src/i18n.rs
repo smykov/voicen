@@ -145,6 +145,12 @@ messages! {
     FAILURE_MICROPHONE_UNAVAILABLE = "failure.microphone_unavailable",
     /// `FailureReason::ClipboardUnavailable` (the clipboard write failed; T-001).
     FAILURE_CLIPBOARD_UNAVAILABLE = "failure.clipboard_unavailable",
+    /// `FailureReason::NoLocalModel` (the built-in engine has no downloaded model
+    /// for the settings; T-098, spec 002 FR-011).
+    FAILURE_NO_LOCAL_MODEL = "failure.no_local_model",
+    /// `FailureReason::LocalEngineFailed` (the built-in engine's load or
+    /// transcription failed; T-098).
+    FAILURE_LOCAL_ENGINE = "failure.local_engine",
     /// A job without speech (`JobEnd::Notice`, T-001).
     NOTICE_NO_SPEECH = "notice.no_speech",
     /// A recording stopped at `recording::MAX_LENGTH` and sent on (T-009, FR-03).

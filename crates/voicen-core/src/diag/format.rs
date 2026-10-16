@@ -1,14 +1,16 @@
 //! The one line formatter (T-008): `<local time with offset> <LEVEL> <message>`.
 //!
 //! Total over [`LogEvent`]; every value is an integer, a literal from this
-//! module's tables (engine, detector, failure, microphone cause, post-processing
-//! result and skip kind, warning kind, load outcome, test-connection result), a closed `as_str`/`code` match of the crate (settings field
+//! module's tables (engine, detector, failure, microphone cause, local warmth,
+//! post-processing result and skip kind, warning kind, load outcome,
+//! test-connection result), a closed `as_str`/`code` match of the crate (settings field
 //! ids and codes, `ReconcileAction`, `DeliveryResult`, `FormError::kind`), or
 //! `BuildInfo`. Std only (the date math of `clock.rs`).
 //!
 //! ```text
 //! 2026-10-04T23:59:00.123+02:00 INFO voicen 0.1.0 (abc1234) started pid=4242
 //! 2026-10-04T23:59:04.020+02:00 INFO dictation rec=0 engine=api outcome=delivered result=pasted detector=energy pp=applied press_to_frame_ms=41 duration_ms=3000 stop_to_text_ms=2390 pp_ms=1544 text_to_paste_ms=95
+//! 2026-10-04T23:59:12.020+02:00 INFO dictation rec=3 engine=builtin outcome=delivered result=pasted detector=energy local=cold load_ms=1234 pp=off press_to_frame_ms=37 duration_ms=3000 stop_to_text_ms=4100 text_to_paste_ms=90
 //! 2026-10-04T23:59:30.020+02:00 INFO dictation rec=2 engine=api outcome=delivered result=pasted detector=energy pp=skipped pp_reason=timeout press_to_frame_ms=38 duration_ms=2500 stop_to_text_ms=15900 pp_ms=15004 text_to_paste_ms=90
 //! 2026-10-04T23:59:04.500+02:00 WARN dictation rec=1 outcome=capture_failed mic=access_denied
 //! 2026-10-04T23:59:04.700+02:00 WARN dictation outcome=blocked reason=no_engine
@@ -30,6 +32,7 @@ use crate::autostart::ReconcileAction;
 use crate::build_info::BuildInfo;
 use crate::clock::civil_from_days;
 use crate::events::{PostProcessResult, SkipKind};
+use crate::local_models::residency::Warmth;
 use crate::recording::MicCause;
 use crate::settings::gate::Blocked;
 use crate::settings::service::FormError;
@@ -229,6 +232,7 @@ fn write_dictation(out: &mut String, line: &DictationLine) {
         stop_to_text_ms,
         text_to_paste_ms,
         post_processing,
+        local,
     } = line;
     out.push_str("dictation");
     pair(out, "rec", recording);
@@ -260,6 +264,17 @@ fn write_dictation(out: &mut String, line: &DictationLine) {
     }
     if let Some(tag) = detector_tag {
         pair(out, "detector", detector(*tag));
+    }
+    // local exactly on a built-in line that used a model; load_ms exactly on cold.
+    if *engine_tag == Some(EngineTag::Builtin) {
+        match local {
+            Some(Warmth::Cold { load_ms }) => {
+                pair(out, "local", "cold");
+                pair(out, "load_ms", load_ms);
+            }
+            Some(Warmth::Warm) => pair(out, "local", "warm"),
+            None => {}
+        }
     }
     // pp exactly when the job called the stage; pp_reason exactly on a skip;
     // pp_ms on applied and skipped only (off has no step to time).
@@ -408,6 +423,8 @@ fn failure(tag: FailureTag) -> &'static str {
         FailureTag::EngineNotConfigured => "engine_not_configured",
         FailureTag::ClipboardUnavailable => "clipboard_unavailable",
         FailureTag::MicrophoneUnavailable => "microphone_unavailable",
+        FailureTag::NoLocalModel => "no_local_model",
+        FailureTag::LocalEngineFailed => "local_engine_failed",
         FailureTag::Other => "other",
     }
 }

@@ -7,14 +7,20 @@
 //! settings and key (Clarification 4). The transcription API and the local
 //! OpenAI-compatible server (T-018) share [`openai::OpenAiCompatibleEngine`]; its
 //! endpoint role, fixed by the factory, picks the request deadline and `kind()`.
+//! The built-in engine ([`builtin::BuiltinEngine`], T-098) is built by the same
+//! factory from the [`builtin::BuiltinDeps`] its caller passes; its model comes
+//! through [`speech_model`]'s port (implemented outside the core, decision #12).
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
+pub mod builtin;
 pub(crate) mod http;
 pub mod lookup;
 pub mod openai;
+pub mod speech_model;
 
 use crate::audio::AudioBuffer;
 use crate::failure::FailureReason;
+use crate::local_models::residency::Warmth;
 use crate::secrets::{CredentialStore, KeySlot};
 use crate::settings::url::check_base_url;
 use crate::settings::{EngineKind, Settings};
@@ -22,7 +28,7 @@ use crate::timeouts::Timeouts;
 
 /// A transcription engine (NFR-11; shared with specs 002 and 003).
 pub trait Engine: Send + Sync {
-    /// Short stable name for logs: "api", "local_server" (later "builtin").
+    /// Short stable name for logs: "api", "local_server", "builtin".
     fn kind(&self) -> &'static str;
     /// Transcribe 16 kHz mono audio. Empty or whitespace-only text is `Ok("")`.
     /// Never panics on server or engine data.
@@ -31,6 +37,13 @@ pub trait Engine: Send + Sync {
         audio: &AudioBuffer,
         req: &TranscribeRequest,
     ) -> Result<String, FailureReason>;
+
+    /// Whether the last `transcribe` found its model loaded (the dictation log's
+    /// `local=cold|warm`, spec 002 FR-015). `None` for an engine without a local
+    /// model, and when the last call got no model.
+    fn local_warmth(&self) -> Option<Warmth> {
+        None
+    }
 }
 
 /// Per-call input besides the audio.
@@ -53,11 +66,16 @@ pub struct TranscribeRequest {
 ///   -> `KeyStoreUnavailable`; `Ok(None)` = no `Authorization` header) ->
 ///   [`openai::OpenAiCompatibleEngine::local_server`] with the model trimmed, or
 ///   no model (the part omitted) when it is empty or whitespace-only.
-/// - `BuiltinLocal` (built by the shell, T-017), `None`: `EngineNotConfigured`, no
-///   key read.
+/// - `BuiltinLocal` (T-098): with `builtin` -> [`builtin::BuiltinEngine`] over the
+///   snapshot's `builtin_local.model_id` and the given residency and store, no key
+///   read, nothing loaded (the model is resolved and loaded at `transcribe`);
+///   without `builtin` (a caller that has no residency wired) ->
+///   `EngineNotConfigured`, no key read.
+/// - `None`: `EngineNotConfigured`, no key read.
 pub fn engine_for(
     settings: &Settings,
     creds: &dyn CredentialStore,
+    builtin: Option<&builtin::BuiltinDeps>,
 ) -> Result<Box<dyn Engine>, FailureReason> {
     match settings.engine {
         EngineKind::Api => {
@@ -84,7 +102,14 @@ pub fn engine_for(
                 base_url, model, key,
             )))
         }
-        EngineKind::BuiltinLocal | EngineKind::None => Err(FailureReason::EngineNotConfigured),
+        EngineKind::BuiltinLocal => match builtin {
+            Some(deps) => Ok(Box::new(builtin::BuiltinEngine::new(
+                deps,
+                settings.builtin_local.model_id.clone(),
+            ))),
+            None => Err(FailureReason::EngineNotConfigured),
+        },
+        EngineKind::None => Err(FailureReason::EngineNotConfigured),
     }
 }
 

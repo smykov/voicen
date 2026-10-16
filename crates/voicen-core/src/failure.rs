@@ -50,6 +50,15 @@ pub enum FailureReason {
     /// Carries only the closed cause, never the OS error text.
     #[error("microphone unavailable")]
     MicrophoneUnavailable { cause: MicCause },
+    /// The built-in engine has no model to run (T-098, spec 002 FR-011): no
+    /// model selected, the selected one not downloaded, or being deleted. Nothing
+    /// is loaded; retryable, the audio is kept.
+    #[error("no local model is downloaded")]
+    NoLocalModel,
+    /// The built-in engine failed to load its model or to transcribe (T-098).
+    /// Retryable; the next job loads the model again.
+    #[error("the built-in engine failed")]
+    LocalEngineFailed,
 }
 
 impl FailureReason {
@@ -66,6 +75,8 @@ impl FailureReason {
             FailureReason::EngineNotConfigured => "EngineNotConfigured",
             FailureReason::ClipboardUnavailable => "ClipboardUnavailable",
             FailureReason::MicrophoneUnavailable { .. } => "MicrophoneUnavailable",
+            FailureReason::NoLocalModel => "NoLocalModel",
+            FailureReason::LocalEngineFailed => "LocalEngineFailed",
         }
     }
 
@@ -82,6 +93,8 @@ impl FailureReason {
             FailureReason::EngineNotConfigured => i18n::FAILURE_ENGINE_NOT_CONFIGURED,
             FailureReason::ClipboardUnavailable => i18n::FAILURE_CLIPBOARD_UNAVAILABLE,
             FailureReason::MicrophoneUnavailable { .. } => i18n::FAILURE_MICROPHONE_UNAVAILABLE,
+            FailureReason::NoLocalModel => i18n::FAILURE_NO_LOCAL_MODEL,
+            FailureReason::LocalEngineFailed => i18n::FAILURE_LOCAL_ENGINE,
         }
     }
 
@@ -102,13 +115,16 @@ impl FailureReason {
             | FailureReason::UnexpectedResponse
             | FailureReason::KeyStoreUnavailable
             | FailureReason::EngineNotConfigured
-            | FailureReason::ClipboardUnavailable => Vec::new(),
+            | FailureReason::ClipboardUnavailable
+            | FailureReason::NoLocalModel
+            | FailureReason::LocalEngineFailed => Vec::new(),
         }
     }
 
     /// Whether the failed recording is kept as the pending recording (data-model
     /// "Retryable": every reason from `InvalidApiKey` through
-    /// `ClipboardUnavailable`; not `MicrophoneUnavailable`).
+    /// `ClipboardUnavailable`, and the built-in engine's `NoLocalModel` and
+    /// `LocalEngineFailed`; not `MicrophoneUnavailable`).
     pub fn retryable(&self) -> bool {
         match self {
             FailureReason::InvalidApiKey
@@ -119,7 +135,9 @@ impl FailureReason {
             | FailureReason::UnexpectedResponse
             | FailureReason::KeyStoreUnavailable
             | FailureReason::EngineNotConfigured
-            | FailureReason::ClipboardUnavailable => true,
+            | FailureReason::ClipboardUnavailable
+            | FailureReason::NoLocalModel
+            | FailureReason::LocalEngineFailed => true,
             FailureReason::MicrophoneUnavailable { .. } => false,
         }
     }
@@ -375,6 +393,8 @@ mod tests {
             FailureReason::MicrophoneUnavailable {
                 cause: MicCause::NoDevice,
             },
+            FailureReason::NoLocalModel,
+            FailureReason::LocalEngineFailed,
         ];
         for r in &all {
             match r {
@@ -387,7 +407,9 @@ mod tests {
                 | FailureReason::KeyStoreUnavailable
                 | FailureReason::EngineNotConfigured
                 | FailureReason::ClipboardUnavailable
-                | FailureReason::MicrophoneUnavailable { .. } => {}
+                | FailureReason::MicrophoneUnavailable { .. }
+                | FailureReason::NoLocalModel
+                | FailureReason::LocalEngineFailed => {}
             }
         }
         all
@@ -461,6 +483,19 @@ mod tests {
                 "Microphone unavailable: no input device",
                 "Микрофон недоступен: нет устройства ввода",
             ),
+            // spec 002 FR-011 (T-098).
+            FailureReason::NoLocalModel => (
+                "NoLocalModel",
+                "failure.no_local_model",
+                "No local model is downloaded. Choose a model in the Engine settings.",
+                "Локальная модель не скачана. Выберите модель в настройках движка.",
+            ),
+            FailureReason::LocalEngineFailed => (
+                "LocalEngineFailed",
+                "failure.local_engine",
+                "The built-in engine failed",
+                "Ошибка встроенного движка",
+            ),
         }
     }
 
@@ -514,7 +549,9 @@ mod tests {
                 | FailureReason::UnexpectedResponse
                 | FailureReason::KeyStoreUnavailable
                 | FailureReason::EngineNotConfigured
-                | FailureReason::ClipboardUnavailable => true,
+                | FailureReason::ClipboardUnavailable
+                | FailureReason::NoLocalModel
+                | FailureReason::LocalEngineFailed => true,
                 FailureReason::MicrophoneUnavailable { .. } => false,
             };
             if r.retryable() != want {

@@ -24,6 +24,7 @@ use super::event::{
 };
 use super::log::Log;
 use crate::events::{DictationEvent, OutcomeCode, PipelineObserver, PostProcessTrace, WarningCode};
+use crate::local_models::residency::Warmth;
 use crate::recording::{RecordingEnd, RecordingId};
 
 /// Open records (and text jobs awaiting `Delivered`) kept at most; the oldest
@@ -52,6 +53,7 @@ struct Record {
     duration_ms: Option<u64>,
     stop_to_text_ms: Option<u64>,
     post_processing: Option<PostProcessTrace>,
+    local: Option<Warmth>,
 }
 
 impl Record {
@@ -71,6 +73,7 @@ impl Record {
             stop_to_text_ms: self.stop_to_text_ms,
             text_to_paste_ms,
             post_processing: self.post_processing,
+            local: self.local,
         })
     }
 }
@@ -155,8 +158,10 @@ impl Open {
                 failure,
                 http_status,
                 post_processing,
+                local,
             } => {
                 let record = self.record(recording);
+                record.local = local;
                 record.engine = engine.map(EngineTag::from_kind);
                 record.stop_to_text_ms = Some(stop_to_text_ms);
                 record.post_processing = post_processing;

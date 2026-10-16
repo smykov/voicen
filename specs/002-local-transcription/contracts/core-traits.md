@@ -4,20 +4,31 @@ Rust signatures are the contract's shape; exact generic/async spelling follows 0
 
 ## SpeechModel — implemented by `crates/voicen-whisper` (real) and core tests (fake)
 
+`voicen_core::engine::speech_model` (T-098). Synchronous (decision #42) and in 001's `FailureReason`, not a separate error type:
+
 ```rust
 pub trait SpeechModelLoader: Send + Sync {
-    /// Blocking; called on a blocking thread. Must not touch the network.
-    fn load(&self, path: &Path) -> Result<Box<dyn SpeechModel>, EngineError>;
+    /// Blocking. Must not touch the network.
+    fn load(&self, path: &Path) -> Result<Box<dyn SpeechModel>, FailureReason>;
 }
 
 pub trait SpeechModel: Send {
     /// Blocking. `pcm`: 16 kHz mono f32 in [-1, 1]. `language`: None = auto-detect, Some("ru") = fixed.
-    fn transcribe(&mut self, pcm: &[f32], language: Option<&str>) -> Result<String, EngineError>;
+    /// Polls `abort` while it runs and stops once `abort.requested()` is true (decision #133).
+    fn transcribe(&mut self, pcm: &[f32], language: Option<&str>, abort: &Abort)
+        -> Result<String, FailureReason>;
 }
 // Dropping the Box frees the model's memory (unload).
+
+#[derive(Clone)] // Send + Sync + 'static: movable into a native abort callback
+pub struct Abort;
+impl Abort {
+    pub fn new(clock: Arc<dyn MonotonicClock>, start: Instant, limit: Duration) -> Abort;
+    pub fn requested(&self) -> bool; // now - start >= limit on the monotonic port; latches for every clone
+}
 ```
 
-Guarantees: no panics on bad input (errors are `EngineError::Load(reason)` / `EngineError::Transcribe(reason)`); no network; no logging of text.
+Guarantees: no panics on bad input (a load or transcription error is `FailureReason::LocalEngineFailed`; the residency and the engine pass `NoLocalModel` on and map every other error to `LocalEngineFailed`); no network; no logging of text.
 
 ## ModelStore
 
@@ -105,15 +116,18 @@ Wire types (`LocalModelView`, `ReasonView`, `LocalModelEvent`), codes, message i
 
 ## ModelResidency
 
+`voicen_core::local_models::residency` (T-098); std `Mutex` + `Condvar`, no async (decision #42).
+
 ```rust
 pub enum Warmth { Cold { load_ms: u32 }, Warm }
 
 impl ModelResidency {
-    pub fn new(loader: Arc<dyn SpeechModelLoader>, clock: Arc<dyn Clock>, idle: Duration) -> Self;
-    pub fn prewarm(&self, id: ModelId, path: PathBuf);             // recording started with builtin; idempotent
-    pub async fn acquire(&self, id: ModelId, path: PathBuf)
-        -> Result<(ModelGuard, Warmth), EngineError>;              // waits for an in-flight load
-    pub fn recording_started(&self) -> ActivityGuard;              // holds the countdown
+    pub fn new(loader: Arc<dyn SpeechModelLoader>, clock: Arc<dyn MonotonicClock>, idle: Duration) -> Self;
+                                                                   // idle = timeouts::MODEL_IDLE_UNLOAD in production
+    pub fn prewarm(&self, id: ModelId, path: PathBuf);             // recording started with builtin; idempotent; loads on its own thread
+    pub fn acquire(&self, id: ModelId, path: PathBuf)
+        -> Result<(ModelGuard, Warmth), FailureReason>;            // blocking; waits for an in-flight load
+    pub fn recording_started(&self) -> RecordingGuard;             // holds the countdown
     pub fn on_engine_or_model_changed(&self, selected: Option<ModelId>); // unload if different
     // implements `ModelRelease::release_for_delete` (T-019) instead of an `unload_if`
     pub fn tick(&self);                                            // called by the shell's timer; unloads when due
@@ -121,18 +135,23 @@ impl ModelResidency {
 }
 ```
 
+`acquire`: `Cold { load_ms }` (load timed on the injected monotonic clock) for the transcription that loaded the model or the first after its prewarm, `Warm` otherwise; `NoLocalModel` while a delete of `id` holds its release guard; a load error is `LocalEngineFailed` and leaves the residency empty. Unload when nothing holds the model, no recording runs and `idle` has passed since the last activity ended.
+
 ## BuiltinEngine — implements `001::Engine`
+
+`voicen_core::engine::builtin` (T-098). Built by 001's `engine_for(settings, creds, builtin: Option<&BuiltinDeps>)`, `BuiltinLocal` arm; `None` (no residency wired) → `EngineNotConfigured`. `BuiltinDeps { residency: Arc<ModelResidency>, store: Arc<ModelStore> }`.
 
 ```rust
 impl 001::Engine for BuiltinEngine {
-    async fn transcribe(&self, audio: 001::Audio16kMono, lang: 001::Language)
-        -> Result<001::Transcript, 001::EngineFailure>;
+    fn transcribe(&self, audio: &AudioBuffer, req: &TranscribeRequest) -> Result<String, FailureReason>;
+    fn local_warmth(&self) -> Option<Warmth>;   // 001's Engine default: None
 }
 ```
 
-- Model not selected / not downloaded → `EngineFailure::NoLocalModel` → FR-11 path (paste nothing, notify "no local model" with an "open settings" action, audio kept as the pending recording); no load or transcription is attempted.
-- Load/transcribe error → `EngineFailure::Engine(reason)` → FR-11 path.
-- Reports `Warmth` into the dictation log record.
+- Model not selected / not downloaded → `FailureReason::NoLocalModel` → FR-11 path (paste nothing, notify "no local model", audio kept as the pending recording); no load or transcription is attempted.
+- The limit `req.timeouts.builtin` (default 120 s) runs from after the acquire, through the `Abort` hook: transcription only, never the load (decision #133). A run the hook stopped → `Timeout`.
+- Any other load/transcribe error → `FailureReason::LocalEngineFailed` → FR-11 path.
+- Reports `Warmth` into the dictation log record (`local=cold load_ms=<n>` / `local=warm`, written only for `engine=builtin`).
 
 ## Local server — configuration of 001's `OpenAiCompatibleEngine`
 

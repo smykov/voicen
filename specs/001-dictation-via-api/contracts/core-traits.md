@@ -24,7 +24,7 @@ pub struct TranscribeRequest {
 The factory is one total function in core (T-040, decision #44):
 
 ```rust
-pub fn engine_for(settings: &Settings, creds: &dyn CredentialStore)
+pub fn engine_for(settings: &Settings, creds: &dyn CredentialStore, builtin: Option<&BuiltinDeps>)
     -> Result<Box<dyn Engine>, FailureReason>;
 ```
 
@@ -32,7 +32,8 @@ It takes 004's `Settings` snapshot (`engine`, `api.base_url`, `api.model`, `loca
 
 - `Api`: `check_base_url(api.base_url)` (else `EngineNotConfigured`, no key read) → `creds.read(KeySlot::TranscriptionApi)` once (`Err` → `KeyStoreUnavailable`; `Ok(None)` → no `Authorization` header) → `OpenAiCompatibleEngine`.
 - `LocalServer` (T-018; 002's "register in src-tauri factory" became this arm): `check_base_url(local_server.base_url)` (else `EngineNotConfigured`, no key read) → `creds.read(KeySlot::LocalServer)` once (`Err` → `KeyStoreUnavailable`; `Ok(None)` → no `Authorization` header) → `OpenAiCompatibleEngine::local_server` with `local_server.model` trimmed, or no model (the part omitted) when it is empty or whitespace-only.
-- `BuiltinLocal`, `None`: `EngineNotConfigured`, no key read. T-017 wraps `engine_for` in the shell for `BuiltinLocal` (no whisper in core, decision #12).
+- `BuiltinLocal` (T-098): with `Some(deps)` (the app's one `ModelResidency` and `ModelStore`, 002 contracts/core-traits.md "BuiltinEngine") → `BuiltinEngine`, no key read, nothing loaded; the model is resolved at `transcribe`. With `None` → `EngineNotConfigured`. The whisper loader stays outside core (decision #12).
+- `None`: `EngineNotConfigured`, no key read.
 
 ## SpeechDetector
 

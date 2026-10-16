@@ -119,7 +119,7 @@ fn read_local() -> CredentialCall {
 
 /// `engine_for` for these settings; panics with the reason when no engine is built.
 fn local_engine(settings: &Settings, creds: &FakeCredentialStore) -> Box<dyn Engine> {
-    match engine_for(settings, creds) {
+    match engine_for(settings, creds, None) {
         Ok(engine) => engine,
         Err(e) => panic!("local-server engine expected from engine_for, got {e:?}"),
     }

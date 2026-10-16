@@ -62,7 +62,9 @@ use crate::settings::FieldId;
 /// `pipeline` (so the observer and the paster it uses are the pipeline's own).
 pub struct SessionDeps {
     pub pipeline: PipelineDeps,
-    /// Replaces `engine::engine_for` (T-017's `BuiltinLocal` wrapper; test fakes).
+    /// Replaces the pipeline's default factory (`engine::engine_for` without
+    /// built-in deps): the shell's closure over `engine_for` with its
+    /// `BuiltinDeps` (T-017), test fakes.
     pub engine_factory: Option<Box<EngineFactory>>,
     pub audio: Arc<dyn AudioSource>,
     pub indicator: Arc<dyn Indicator>,

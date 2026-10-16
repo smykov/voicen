@@ -273,7 +273,7 @@ pub(crate) fn run(
         slot,
         key: resolved,
     };
-    let built = match engine_for(&overlaid, &view) {
+    let built = match engine_for(&overlaid, &view, None) {
         Ok(built) => built,
         Err(reason) => return from_failure(reason, &overlaid, engine),
     };
@@ -384,10 +384,11 @@ fn from_failure(
                 code: ErrorCode::UrlMalformed,
             }],
         },
-        // Not produced by an engine; kept total.
-        FailureReason::ClipboardUnavailable | FailureReason::MicrophoneUnavailable { .. } => {
-            ConnectionTestResult::UnexpectedResponse
-        }
+        // Not produced by an HTTP engine; kept total.
+        FailureReason::ClipboardUnavailable
+        | FailureReason::MicrophoneUnavailable { .. }
+        | FailureReason::NoLocalModel
+        | FailureReason::LocalEngineFailed => ConnectionTestResult::UnexpectedResponse,
     }
 }
 

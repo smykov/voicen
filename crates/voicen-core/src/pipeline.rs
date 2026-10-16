@@ -21,6 +21,7 @@ use crate::events::{
 };
 use crate::failure::FailureReason;
 use crate::i18n;
+use crate::local_models::residency::Warmth;
 use crate::platform::{Clipboard, ClipboardError, Paster, PendingId, StartWindow, TempAudioStore};
 use crate::post_process::{PostProcessInput, PostProcessOutcome, PostProcessor, SkipReason};
 use crate::recording::{FinishedRecording, JobEnd, RecordingId};
@@ -30,7 +31,8 @@ use crate::timeouts::Timeouts;
 use crate::vad::SpeechGate;
 
 /// Builds the engine for one job from its settings snapshot (default
-/// [`engine_for`]; T-017 wraps it in the shell for `BuiltinLocal`).
+/// [`engine_for`] without built-in deps; the shell passes a closure calling the
+/// same [`engine_for`] with its `BuiltinDeps`, T-017).
 pub type EngineFactory =
     dyn Fn(&Settings, &dyn CredentialStore) -> Result<Box<dyn Engine>, FailureReason> + Send + Sync;
 
@@ -123,6 +125,8 @@ struct JobOutcome {
     outcome: Outcome,
     /// `Engine::kind()` of the engine that was built, if any.
     engine: Option<&'static str>,
+    /// `Engine::local_warmth()` after its transcription (T-098).
+    local: Option<Warmth>,
     /// The stage's trace, exactly when `process` called the post-processor.
     post_processing: Option<PostProcessTrace>,
     /// When the outcome was known; used only for event durations.
@@ -157,7 +161,7 @@ impl Pipeline {
         Pipeline {
             deps,
             timeouts,
-            factory: Box::new(engine_for),
+            factory: Box::new(|settings, creds| engine_for(settings, creds, None)),
             last_seq: AtomicU64::new(0),
             last_pending_id: AtomicU64::new(0),
             pending: Mutex::new(None),
@@ -176,7 +180,8 @@ impl Pipeline {
         Pipeline::build(deps, Some(timeouts))
     }
 
-    /// Replaces the engine factory (T-017's `BuiltinLocal` wrapper; test fakes).
+    /// Replaces the engine factory: the shell's closure over [`engine_for`] with
+    /// its `BuiltinDeps` (T-017), test fakes.
     pub fn with_engine_factory(self, factory: Box<EngineFactory>) -> Pipeline {
         Pipeline { factory, ..self }
     }
@@ -243,6 +248,7 @@ impl Pipeline {
             return JobOutcome {
                 outcome: Outcome::NoSpeech,
                 engine: None,
+                local: None,
                 post_processing: None,
                 at: crate::clock::instant(),
             };
@@ -254,6 +260,7 @@ impl Pipeline {
                 return JobOutcome {
                     outcome: Outcome::Failed(reason),
                     engine: None,
+                    local: None,
                     post_processing: None,
                     at: crate::clock::instant(),
                 }
@@ -303,6 +310,7 @@ impl Pipeline {
         JobOutcome {
             outcome,
             engine: Some(engine.kind()),
+            local: engine.local_warmth(),
             post_processing,
             at: crate::clock::instant(),
         }
@@ -326,6 +334,7 @@ impl Pipeline {
                 },
                 // Every JobFinished of a job that called the stage carries it.
                 post_processing: done.post_processing,
+                local: done.local,
             };
         let reason = match done.outcome {
             Outcome::NoSpeech => {

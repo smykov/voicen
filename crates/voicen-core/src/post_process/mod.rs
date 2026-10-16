@@ -129,8 +129,8 @@ impl SkipReason {
     /// The skip reason of a transport failure classified by `failure::classify`
     /// (research R4); `host` is the configured base URL's `host[:port]`, used for
     /// both unreachable kinds (spec US2-2: a DNS failure is "cannot reach").
-    /// `classify` never yields the key-store, engine, clipboard or microphone
-    /// reasons; they map to the nearest skip so the function stays total.
+    /// `classify` never yields the key-store, engine, clipboard, microphone or
+    /// built-in engine reasons; they map to the nearest skip so the function stays total.
     pub fn from_failure(reason: &FailureReason, host: &str) -> SkipReason {
         match reason {
             FailureReason::InvalidApiKey | FailureReason::KeyStoreUnavailable => {
@@ -146,7 +146,9 @@ impl SkipReason {
             FailureReason::EngineNotConfigured => SkipReason::NotConfigured,
             FailureReason::UnexpectedResponse
             | FailureReason::ClipboardUnavailable
-            | FailureReason::MicrophoneUnavailable { .. } => SkipReason::InvalidResponse,
+            | FailureReason::MicrophoneUnavailable { .. }
+            | FailureReason::NoLocalModel
+            | FailureReason::LocalEngineFailed => SkipReason::InvalidResponse,
         }
     }
 }

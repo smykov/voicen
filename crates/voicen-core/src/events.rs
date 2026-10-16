@@ -11,6 +11,7 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
 use crate::delivery::DeliveryResult;
+use crate::local_models::residency::Warmth;
 use crate::recording::{MicCause, RecordingEnd, RecordingId};
 use crate::settings::gate::Blocked;
 
@@ -110,6 +111,10 @@ pub enum DictationEvent {
         /// it (no speech, no engine, a failed or blank transcription). Every
         /// `JobFinished` of a job that called it carries it (T-076).
         post_processing: Option<PostProcessTrace>,
+        /// The built-in engine's model warmth (`Engine::local_warmth`, spec 002
+        /// FR-015, T-098): `Some` exactly when the built-in engine got its model
+        /// for this job; `None` for every other engine and when no model was used.
+        local: Option<Warmth>,
     },
     Delivered {
         seq: u64,

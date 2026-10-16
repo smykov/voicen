@@ -9,6 +9,7 @@ use crate::build_info::BuildInfo;
 use crate::connection_test::ConnectionTestResult;
 use crate::delivery::DeliveryResult;
 use crate::events::PostProcessTrace;
+use crate::local_models::residency::Warmth;
 use crate::recording::MicCause;
 use crate::settings::gate::Blocked;
 use crate::settings::service::{FormError, SaveOutcome, Warning};
@@ -190,6 +191,10 @@ pub struct DictationLine {
     /// The post-processing stage's result and duration (`JobFinished`, T-076);
     /// `None` when the job never called the stage: no `pp*` key is written.
     pub post_processing: Option<PostProcessTrace>,
+    /// The built-in engine's model warmth (`JobFinished.local`, spec 002 FR-015,
+    /// T-098): `local=cold load_ms=<n>` or `local=warm`, written only on an
+    /// `engine=builtin` line; `None` writes neither key.
+    pub local: Option<Warmth>,
 }
 
 /// How a dictation ended.
@@ -266,6 +271,8 @@ pub enum FailureTag {
     EngineNotConfigured,
     ClipboardUnavailable,
     MicrophoneUnavailable,
+    NoLocalModel,
+    LocalEngineFailed,
     Other,
 }
 
@@ -285,6 +292,8 @@ impl FailureTag {
             "EngineNotConfigured" => FailureTag::EngineNotConfigured,
             "ClipboardUnavailable" => FailureTag::ClipboardUnavailable,
             "MicrophoneUnavailable" => FailureTag::MicrophoneUnavailable,
+            "NoLocalModel" => FailureTag::NoLocalModel,
+            "LocalEngineFailed" => FailureTag::LocalEngineFailed,
             _ => FailureTag::Other,
         }
     }

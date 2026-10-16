@@ -154,6 +154,7 @@ fn finished_pp(
         failure,
         http_status,
         post_processing,
+        local: None,
     }
 }
 
@@ -988,6 +989,8 @@ fn every_reason() -> Vec<(FailureReason, &'static str)> {
         FailureReason::MicrophoneUnavailable {
             cause: MicCause::Busy,
         },
+        FailureReason::NoLocalModel,
+        FailureReason::LocalEngineFailed,
     ];
     all.into_iter()
         .map(|r| {
@@ -1002,6 +1005,8 @@ fn every_reason() -> Vec<(FailureReason, &'static str)> {
                 FailureReason::EngineNotConfigured => "engine_not_configured",
                 FailureReason::ClipboardUnavailable => "clipboard_unavailable",
                 FailureReason::MicrophoneUnavailable { .. } => "microphone_unavailable",
+                FailureReason::NoLocalModel => "no_local_model",
+                FailureReason::LocalEngineFailed => "local_engine_failed",
             };
             (r, literal)
         })

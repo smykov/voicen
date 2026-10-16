@@ -11,8 +11,11 @@
 //! [`store::ModelStore::cleanup_at_start`] removes it). [`store::ModelStore`] is the one `DownloadedModels` the settings
 //! validation, the IPC list and the engine read. [`service::LocalModels`] is the
 //! coordinator the shell's commands and events go through (T-044, decision #57).
+//! [`residency::ModelResidency`] is the one owner of a loaded model and the
+//! `ModelRelease` the delete goes through once the shell wires it (T-098; T-017).
 
 pub mod catalog;
 pub mod download;
+pub mod residency;
 pub mod service;
 pub mod store;

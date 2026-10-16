@@ -78,6 +78,7 @@ fn line(
         stop_to_text_ms: timings,
         text_to_paste_ms: timings,
         post_processing: None,
+        local: None,
     }
 }
 
@@ -130,6 +131,8 @@ fn all_failure_tags() -> Vec<(FailureTag, &'static str)> {
         (FailureTag::EngineNotConfigured, "engine_not_configured"),
         (FailureTag::ClipboardUnavailable, "clipboard_unavailable"),
         (FailureTag::MicrophoneUnavailable, "microphone_unavailable"),
+        (FailureTag::NoLocalModel, "no_local_model"),
+        (FailureTag::LocalEngineFailed, "local_engine_failed"),
         (FailureTag::Other, "other"),
     ];
     let seen: BTreeSet<usize> = all
@@ -145,10 +148,12 @@ fn all_failure_tags() -> Vec<(FailureTag, &'static str)> {
             FailureTag::EngineNotConfigured => 7,
             FailureTag::ClipboardUnavailable => 8,
             FailureTag::MicrophoneUnavailable => 9,
-            FailureTag::Other => 10,
+            FailureTag::NoLocalModel => 10,
+            FailureTag::LocalEngineFailed => 11,
+            FailureTag::Other => 12,
         })
         .collect();
-    assert_eq!(seen.len(), 11, "every FailureTag once");
+    assert_eq!(seen.len(), 13, "every FailureTag once");
     all
 }
 
@@ -597,7 +602,7 @@ fn real_engine_and_detector_names_map_to_their_own_tags() {
     let mut s = defaults(None);
     s.engine = EngineKind::Api;
     s.api.base_url = "https://api.example.com/v1".to_string();
-    let engine = match engine_for(&s, &creds) {
+    let engine = match engine_for(&s, &creds, None) {
         Ok(engine) => engine,
         Err(e) => panic!("API engine expected, got {e:?}"),
     };
@@ -660,6 +665,8 @@ fn every_reason() -> Vec<(FailureReason, FailureTag, &'static str)> {
         FailureReason::MicrophoneUnavailable {
             cause: MicCause::NoDevice,
         },
+        FailureReason::NoLocalModel,
+        FailureReason::LocalEngineFailed,
     ];
     all.into_iter()
         .map(|r| {
@@ -685,6 +692,10 @@ fn every_reason() -> Vec<(FailureReason, FailureTag, &'static str)> {
                 }
                 FailureReason::MicrophoneUnavailable { .. } => {
                     (FailureTag::MicrophoneUnavailable, "microphone_unavailable")
+                }
+                FailureReason::NoLocalModel => (FailureTag::NoLocalModel, "no_local_model"),
+                FailureReason::LocalEngineFailed => {
+                    (FailureTag::LocalEngineFailed, "local_engine_failed")
                 }
             };
             (r, tag, literal)
@@ -843,6 +854,7 @@ fn dictation_line_keys_per_outcome() {
         stop_to_text_ms: Some(812),
         text_to_paste_ms: Some(95),
         post_processing: None,
+        local: None,
     });
     let l = parsed(&format_line(at(NOON_UTC, 0), 0, &delivered));
     assert_eq!(l.head, "dictation");
@@ -875,6 +887,7 @@ fn dictation_line_keys_per_outcome() {
         stop_to_text_ms: Some(30_001),
         text_to_paste_ms: None,
         post_processing: None,
+        local: None,
     });
     let l = parsed(&format_line(at(NOON_UTC, 0), 0, &failed));
     assert_eq!(l.level, "WARN");
@@ -910,6 +923,7 @@ fn dictation_line_keys_per_outcome() {
                 stop_to_text_ms: None,
                 text_to_paste_ms: None,
                 post_processing: None,
+                local: None,
             }),
         );
         let l = parsed(&raw);
@@ -958,6 +972,7 @@ fn capture_failed_line_has_the_mic_literal_at_warn() {
                 stop_to_text_ms: None,
                 text_to_paste_ms: None,
                 post_processing: None,
+                local: None,
             }),
         );
         let l = parsed(&raw);
@@ -1063,6 +1078,7 @@ fn delivered_line(post_processing: Option<PostProcessTrace>) -> LogEvent {
         stop_to_text_ms: Some(15_900),
         text_to_paste_ms: Some(95),
         post_processing,
+        local: None,
     })
 }
 
@@ -1160,6 +1176,7 @@ fn pp_keys_ride_on_failed_and_no_speech_lines_too() {
             result: PostProcessResult::Applied,
             ms: 812,
         }),
+        local: None,
     });
     let raw = format_line(at(NOON_UTC, 0), 0, &failed);
     let l = parsed(&raw);
@@ -1193,6 +1210,7 @@ fn pp_keys_ride_on_failed_and_no_speech_lines_too() {
             result: PostProcessResult::Skipped(SkipKind::Http),
             ms: 0,
         }),
+        local: None,
     });
     let raw = format_line(at(NOON_UTC, 0), 0, &no_speech);
     let l = parsed(&raw);

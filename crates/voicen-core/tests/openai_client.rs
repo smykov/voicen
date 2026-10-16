@@ -449,7 +449,7 @@ async fn engine_for_api_settings_sends_stored_key_and_model() {
     settings.api.base_url = format!("{}/v1", server.uri());
     settings.api.model = "whisper-large-v3-turbo".to_string();
     let creds = FakeCredentialStore::new().with_key(KeySlot::TranscriptionApi, KEY);
-    let engine = match engine_for(&settings, &creds) {
+    let engine = match engine_for(&settings, &creds, None) {
         Ok(engine) => engine,
         Err(e) => panic!("API engine expected, got {e:?}"),
     };
@@ -850,7 +850,7 @@ async fn engine_for_stored_key_with_control_char_is_invalid_api_key_and_sends_no
     settings.engine = EngineKind::Api;
     settings.api.base_url = format!("{}/v1", server.uri());
     let creds = FakeCredentialStore::new().with_key(KeySlot::TranscriptionApi, "sk-test-a\nb");
-    let got = match engine_for(&settings, &creds) {
+    let got = match engine_for(&settings, &creds, None) {
         Ok(engine) => transcribe(engine, req(None)),
         Err(e) => Err(e),
     };

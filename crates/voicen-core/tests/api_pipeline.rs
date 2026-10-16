@@ -409,6 +409,7 @@ async fn speech_is_transcribed_and_delivered_as_mock_text() {
                     result: PostProcessResult::Off,
                     ..
                 }),
+            local: None,
         }, DictationEvent::Delivered {
             seq: delivered_seq,
             result: DeliveryResult::Pasted,

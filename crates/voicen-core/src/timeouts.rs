@@ -22,6 +22,11 @@ use crate::settings::TimeoutSettings;
 /// decision #49); fixed, not a setting (decision #99 Q1).
 const DOWNLOAD_NO_DATA: Duration = Duration::from_secs(30);
 
+/// How long a loaded built-in model stays in memory after its last activity (the
+/// end of a transcription or a recording) before `ModelResidency::tick` unloads it
+/// (NFR-03, spec 002 FR-013; T-098). Fixed, not a setting.
+pub const MODEL_IDLE_UNLOAD: Duration = Duration::from_secs(600);
+
 /// A user-configurable duration (one field of [`TimeoutSettings`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TimeoutRole {
@@ -109,7 +114,8 @@ pub struct Timeouts {
     pub local_server: Duration,
     /// The whole post-processing request (default 15 s).
     pub post_processing: Duration,
-    /// Built-in whisper.cpp transcription (default 120 s).
+    /// Built-in whisper.cpp transcription (default 120 s): the transcription only,
+    /// not the model load, enforced through the model's abort hook (decision #133).
     pub builtin: Duration,
     /// Model download: the longest wait for the next body bytes (or the response
     /// headers), a per-read timeout, never a total one (spec 002 Clarification 5:

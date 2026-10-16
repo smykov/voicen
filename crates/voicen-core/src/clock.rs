@@ -1,5 +1,7 @@
-//! The one wall-clock port of the core (P-011): the settings backup suffix (T-032)
-//! and history (005) read the time through [`Clock`]. The connection test measures a
+//! The clock ports of the core (P-011). The wall-clock port [`Clock`]: the settings
+//! backup suffix (T-032) and history (005) read the time through it. The monotonic
+//! port [`MonotonicClock`]: the model residency's idle deadline and the built-in
+//! engine's transcription budget read it (T-098). The connection test measures a
 //! duration with `Instant`, not a wall time (T-046).
 //!
 //! Every monotonic read in `src` goes through [`instant`] / [`since`] (T-103): one
@@ -36,6 +38,24 @@ pub(crate) fn instant() -> Instant {
 #[allow(clippy::disallowed_methods)]
 pub(crate) fn since(t: Instant) -> Duration {
     t.elapsed()
+}
+
+/// The monotonic time port (T-098): the model residency's idle deadline and the
+/// built-in engine's transcription budget read the time only through it, so tests
+/// drive both on a fake without sleeping. The production impl is
+/// [`SystemMonotonic`], which reads [`instant`].
+pub trait MonotonicClock: Send + Sync {
+    fn now(&self) -> Instant;
+}
+
+/// The operating system's monotonic clock, through [`instant`].
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SystemMonotonic;
+
+impl MonotonicClock for SystemMonotonic {
+    fn now(&self) -> Instant {
+        instant()
+    }
 }
 
 /// Wall-clock time source.
