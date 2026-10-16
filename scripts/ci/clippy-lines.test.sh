@@ -8,8 +8,12 @@
 #
 # Contract of clippy-lines.sh [root]   (default root: the repository)
 #   Scanned: every file `git -C <root> ls-files` lists whose name ends in .rs, whose base name is
-#     Cargo.toml, or that is config or config.toml in a .cargo directory. Comments are lines like
-#     any other (no // skip); the guard reads no Rust or TOML syntax.
+#     Cargo.toml, or that is config or config.toml in a .cargo directory; and (T-089 review 1 #3)
+#     every make file: base name Makefile, makefile or GNUmakefile, or a name ending in .mk.
+#     check-core's clippy command line is where the bans apply to real code, so it is an owned
+#     line bound to the Makefile: dropping --all-targets, swapping clippy for cargo check, adding
+#     -A clippy::disallowed_* or any new line holding the token there is a finding. Comments are
+#     lines like any other (no // or # skip); the guard reads no Rust, TOML or make syntax.
 #   Token: a scanned line holds the token when it contains clippy in any case.
 #   Owned: <root>/scripts/ci/clippy-lines.txt; lines starting with # and blank lines are not
 #     entries; an entry is <path> TAB <text>. A token line is owned when, with leading and
@@ -29,8 +33,10 @@
 # Cases are trees built in a temp dir from one base shaped like the repository (each a fresh git
 # repository with every file added): ok-* exit 0 and "ok:"; v-* exit 1 and every needle (a
 # needle starting with / is <file>:<line> relative to the case tree's root); c-* exit 3 and
-# "cannot run". Then the real repository must pass (exit 0): red until T-089 lands the owned
-# list (the three exemption lines, the [lints.clippy] line, the existing deny and allow lines).
+# "cannot run". real-* cases copy the real repository's scanned files and owned list into a case
+# tree and edit the real check-core recipe line (red until the guard scans the Makefile). Then
+# the real repository must pass (exit 0), its owned list must bind check-core's clippy command
+# line to the Makefile, and that line must be the first recipe line under check-core:.
 # Usage: scripts/ci/clippy-lines.test.sh   (host bash, git)
 # Exit 0: every case as expected. Exit 1: a case differs (listed), or the guard is missing.
 # Exit 3: cannot run.
@@ -47,6 +53,8 @@ passed=0
 
 deny='#![deny(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]'
 tab="$(printf '\t')"
+# check-core's clippy command line (Makefile recipe; the point where the bans apply to real code).
+check_core_clippy="scripts/tw-run core -- 'cargo fmt --check -p voicen-core && cargo clippy -p voicen-core --all-targets -- -D warnings'"
 
 # base <dir>: the repository's shape, every token line owned.
 base() {
@@ -60,9 +68,17 @@ crates/voicen-core/src/clock.rs${tab}#[allow(clippy::disallowed_methods)]
 crates/voicen-core/src/clock.rs${tab}#[allow(clippy::disallowed_methods)]
 crates/voicen-core/tests/common/mod.rs${tab}#![allow(dead_code, clippy::disallowed_methods)]
 crates/voicen-core/Cargo.toml${tab}[lints.clippy]
-
+Makefile${tab}${check_core_clippy}
 *${tab}${deny}
 *${tab}#[allow(clippy::too_many_arguments)]
+EOF
+  cat >"$d/Makefile" <<EOF
+.PHONY: check check-core
+check: check-core
+
+check-core:
+${tab}${check_core_clippy}
+${tab}scripts/tw-run core -- cargo test -p voicen-core
 EOF
   cat >"$d/Cargo.toml" <<'EOF'
 [workspace]
@@ -191,22 +207,22 @@ V=crates/voicen-core
 
 # Allowed.
 mk ok-base
-check ok-base 0 "ok: 9 line(s) owned"   # 4 exemption allows, [lints.clippy], 3 deny lines, 1 allow
+check ok-base 0 "ok: 10 line(s) owned"   # 4 exemption allows, [lints.clippy], check-core clippy, 3 deny lines, 1 allow
 
 mk ok-general-line-in-new-file   # a * line (deny) in a new module needs no list edit
 printf '//! Settings.\n%s\n\npub fn load() {}\n' "$deny" >"$tmp/ok-general-line-in-new-file/$V/src/settings.rs"
-check ok-general-line-in-new-file 0 "ok: 10 line(s) owned"
+check ok-general-line-in-new-file 0 "ok: 11 line(s) owned"
 
 mk ok-token-outside-scanned-files   # not .rs, Cargo.toml or a .cargo config: not read
 printf 'cargo clippy -- -A clippy::all\n' >"$tmp/ok-token-outside-scanned-files/scripts/ci/lint.sh"
 printf 'avoid-breaking-exported-api = false # clippy\n' >"$tmp/ok-token-outside-scanned-files/$V/clippy.toml"
 printf '[clippy]\nall = "allow"\n' >"$tmp/ok-token-outside-scanned-files/$V/Cargo.toml.orig"
-check ok-token-outside-scanned-files 0 "ok: 9 line(s) owned"
+check ok-token-outside-scanned-files 0 "ok: 10 line(s) owned"
 
 mk ok-indented-owned-line   # leading and trailing blanks are not part of the text
 sed -i 's/^#!\[allow(clippy::disallowed_types)\]$/    #![allow(clippy::disallowed_types)]  /' \
   "$tmp/ok-indented-owned-line/$V/src/engine/http.rs"
-check ok-indented-owned-line 0 "ok: 9 line(s) owned"
+check ok-indented-owned-line 0 "ok: 10 line(s) owned"
 
 # The token on a line that is not owned.
 mk v-allow-all-in-test-file   # silences every clippy lint of the test crate, the bans included
@@ -278,6 +294,56 @@ mk v-shell-file   # the whole repository is read, not only voicen-core
 printf '#![cfg(windows)]\n#![allow(clippy::all)]\npub fn run() {}\n' >"$tmp/v-shell-file/src-tauri/src/lib.rs"
 check v-shell-file 1 "/src-tauri/src/lib.rs:2"
 
+# The make files (T-089 review 1 #3): check-core's clippy command line is owned, bound to the
+# Makefile (base line 5, owned-list line 7); every other line holding the token is a finding.
+mk v-makefile-check-core-no-all-targets   # the bans would no longer reach tests, examples, benches
+sed -i 's/ --all-targets//' "$tmp/v-makefile-check-core-no-all-targets/Makefile"
+check v-makefile-check-core-no-all-targets 1 "/Makefile:5" "/scripts/ci/clippy-lines.txt:7"
+
+mk v-makefile-check-core-cargo-check   # clippy swapped for cargo check: no lint runs, the line loses the token
+sed -i 's/cargo clippy -p voicen-core --all-targets -- -D warnings/cargo check -p voicen-core --all-targets/' \
+  "$tmp/v-makefile-check-core-cargo-check/Makefile"
+check v-makefile-check-core-cargo-check 1 "/scripts/ci/clippy-lines.txt:7"
+
+mk v-makefile-check-core-allow-methods   # a -A flag after -D warnings lowers the clock and get bans
+sed -i "s/-D warnings'\$/-D warnings -A clippy::disallowed_methods'/" "$tmp/v-makefile-check-core-allow-methods/Makefile"
+check v-makefile-check-core-allow-methods 1 "/Makefile:5" "/scripts/ci/clippy-lines.txt:7"
+
+mk v-makefile-check-core-allow-types   # a -A flag after -D warnings lowers the client-type bans
+sed -i "s/-D warnings'\$/-D warnings -A clippy::disallowed_types'/" "$tmp/v-makefile-check-core-allow-types/Makefile"
+check v-makefile-check-core-allow-types 1 "/Makefile:5" "/scripts/ci/clippy-lines.txt:7"
+
+mk v-makefile-check-core-cap-lints   # a lint cap on the same command line
+sed -i "s/-D warnings'\$/-D warnings --cap-lints warn'/" "$tmp/v-makefile-check-core-cap-lints/Makefile"
+check v-makefile-check-core-cap-lints 1 "/Makefile:5" "/scripts/ci/clippy-lines.txt:7"
+
+mk v-makefile-new-clippy-line   # a second clippy run in a new target, the owned line kept
+printf '\nlint-fast:\n\tscripts/tw-run core -- cargo clippy -p voicen-core -- -A clippy::disallowed_types\n' \
+  >>"$tmp/v-makefile-new-clippy-line/Makefile"
+check v-makefile-new-clippy-line 1 "/Makefile:9"
+
+mk v-makefile-recipe-line-copied   # the bound entry owns one copy of the line, not two
+printf '\nlint-again:\n\t%s\n' "$check_core_clippy" >>"$tmp/v-makefile-recipe-line-copied/Makefile"
+check v-makefile-recipe-line-copied 1 "Makefile:"
+
+mk v-makefile-comment   # comments are lines like any other in a make file too
+sed -i '1i # check-core: cargo clippy, add -A clippy::disallowed_methods when it gets in the way' \
+  "$tmp/v-makefile-comment/Makefile"
+check v-makefile-comment 1 "/Makefile:1"
+
+mk v-makefile-config-dir   # every recipe would lint with another clippy.toml
+sed -i '1i export CLIPPY_CONF_DIR := /tmp' "$tmp/v-makefile-config-dir/Makefile"
+check v-makefile-config-dir 1 "/Makefile:1"
+
+mk v-gnumakefile   # GNU make reads GNUmakefile before Makefile
+printf 'check-core:\n\tcargo clippy -p voicen-core --all-targets -- -A clippy::all\n' >"$tmp/v-gnumakefile/GNUmakefile"
+check v-gnumakefile 1 "/GNUmakefile:2"
+
+mk v-make-include   # an included make file can redefine the check-core recipe
+mkdir -p "$tmp/v-make-include/mk"
+printf 'check-core:\n\tcargo clippy -p voicen-core -- -A clippy::disallowed_methods\n' >"$tmp/v-make-include/mk/lint.mk"
+check v-make-include 1 "/mk/lint.mk:2"
+
 # The owned list itself.
 mk v-stale-path-entry   # an entry for a line that is not there
 printf 'crates/voicen-core/src/pipeline.rs\t#[allow(clippy::large_enum_variant)]\n' \
@@ -305,6 +371,54 @@ mkdir -p "$tmp/c-no-scanned-file/scripts/ci" && cp "$tmp/ok-base/scripts/ci/clip
 printf 'notes\n' >"$tmp/c-no-scanned-file/README.md"
 commit_tree c-no-scanned-file && run c-no-scanned-file 3 "$tmp/c-no-scanned-file" "cannot run"
 
+# The real repository's check-core recipe (T-089 review 1 #3). real <case>: a case tree with a
+# copy of every tracked file the guard scans (and the owned list), taken from the working tree.
+real() {
+  local d="$tmp/$1" f
+  mkdir -p "$d"
+  while IFS= read -r -d '' f; do
+    case "$f" in
+      *.rs | Cargo.toml | */Cargo.toml | .cargo/config | .cargo/config.toml | */.cargo/config | \
+        */.cargo/config.toml | Makefile | */Makefile | makefile | */makefile | GNUmakefile | \
+        */GNUmakefile | *.mk | scripts/ci/clippy-lines.txt) ;;
+      *) continue ;;
+    esac
+    [ -f "$root/$f" ] || continue
+    mkdir -p "$d/$(dirname "$f")" && cp "$root/$f" "$d/$f"
+  done < <(git -C "$root" ls-files -z)
+}
+recipe_line="$(grep -nxF "$tab$check_core_clippy" "$root/Makefile" | cut -d: -f1)"
+if [ "$(grep -cxF "$tab$check_core_clippy" "$root/Makefile")" != 1 ]; then
+  echo "FAIL real-*: the Makefile does not hold check-core's clippy line exactly once:" >&2
+  echo "       | $check_core_clippy" >&2
+  failed=$((failed + 1))
+else
+  real real-ok-check-core
+  check real-ok-check-core 0 "ok:"
+
+  real real-v-no-all-targets
+  sed -i "${recipe_line}s/ --all-targets//" "$tmp/real-v-no-all-targets/Makefile"
+  check real-v-no-all-targets 1 "/Makefile:$recipe_line"
+
+  real real-v-cargo-check
+  sed -i "${recipe_line}s/cargo clippy -p voicen-core --all-targets -- -D warnings/cargo check -p voicen-core --all-targets/" \
+    "$tmp/real-v-cargo-check/Makefile"
+  check real-v-cargo-check 1 "scripts/ci/clippy-lines.txt:" "stale entry"
+
+  real real-v-allow-methods
+  sed -i "${recipe_line}s/-D warnings'\$/-D warnings -A clippy::disallowed_methods'/" "$tmp/real-v-allow-methods/Makefile"
+  check real-v-allow-methods 1 "/Makefile:$recipe_line"
+
+  real real-v-allow-types
+  sed -i "${recipe_line}s/-D warnings'\$/-D warnings -A clippy::disallowed_types'/" "$tmp/real-v-allow-types/Makefile"
+  check real-v-allow-types 1 "/Makefile:$recipe_line"
+
+  real real-v-new-line   # a new line holding the token, right after the recipe line
+  sed -i "${recipe_line}a\\\\tscripts/tw-run core -- cargo clippy -p voicen-core -- -A clippy::disallowed_types" \
+    "$tmp/real-v-new-line/Makefile"
+  check real-v-new-line 1 "/Makefile:$((recipe_line + 1))"
+fi
+
 # The real repository (the guard's default root).
 if [ -x "$guard" ]; then
   out="$("$guard" 2>&1)"
@@ -315,6 +429,27 @@ if [ -x "$guard" ]; then
   else
     echo "FAIL real repository: exit $got, want 0" >&2
     sed 's/^/       | /' <<<"$out" >&2
+    failed=$((failed + 1))
+  fi
+  # check-core's clippy command line is bound to the Makefile in the owned list (not a * entry:
+  # a * entry would also own copies of it elsewhere) ...
+  if [ "$(grep -cxF "Makefile$tab$check_core_clippy" scripts/ci/clippy-lines.txt)" = 1 ]; then
+    echo "ok   real repository: the owned list binds check-core's clippy line to the Makefile"
+    passed=$((passed + 1))
+  else
+    echo "FAIL real repository: scripts/ci/clippy-lines.txt lacks exactly one entry" >&2
+    echo "       | Makefile<TAB>$check_core_clippy" >&2
+    failed=$((failed + 1))
+  fi
+  # ... and that line is the first recipe line under check-core: (an owned line moved to another
+  # target while check-core runs something else would keep every guard green).
+  if [ "$(grep -A1 -xF 'check-core:' Makefile | sed -n 2p)" = "$tab$check_core_clippy" ] \
+    && [ "$(grep -cxF 'check-core:' Makefile)" = 1 ]; then
+    echo "ok   real repository: check-core: runs the owned clippy line"
+    passed=$((passed + 1))
+  else
+    echo "FAIL real repository: the line after the one check-core: of the Makefile is not" >&2
+    echo "       | $tab$check_core_clippy" >&2
     failed=$((failed + 1))
   fi
 else

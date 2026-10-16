@@ -10,7 +10,7 @@
 #![cfg(feature = "ban-canary-tests")]
 #![allow(dead_code)]
 
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 #[rustfmt::skip]
 fn k01_whitespace_in_path() -> Instant {
@@ -91,4 +91,16 @@ fn k13_full_path() -> ::std::time::Instant {
 #[allow(warnings)]
 fn k15_under_allow_warnings() -> Instant {
     Instant :: now() // probe: k15
+}
+
+// A wall-clock measurement on SystemTime (T-089 review 1 #2): the retired text guard refused
+// any `.elapsed(`, so SystemTime::elapsed was banned before the switch and must stay banned.
+#[rustfmt::skip]
+fn k16_system_time_elapsed(t: std::time::SystemTime) -> bool {
+    t.elapsed ().is_ok() // probe: k16
+}
+
+#[rustfmt::skip]
+fn k17_system_time_elapsed_ufcs(t: SystemTime) -> bool {
+    SystemTime :: elapsed(&t).is_ok() // probe: k17
 }

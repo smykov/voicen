@@ -133,3 +133,10 @@ pub fn h21_under_allow_warnings() {
 pub fn k14_lib_clock_read() -> Instant {
     Instant :: now() // probe: k14
 }
+
+// The wall-clock measurement on SystemTime is banned in src too (T-089 review 1 #2): the retired
+// text guard refused any `.elapsed(`, so SystemTime::elapsed was covered before the switch.
+#[rustfmt::skip]
+pub fn k18_lib_system_time_elapsed(t: std::time::SystemTime) -> bool {
+    t.elapsed().is_ok() // probe: k18
+}
