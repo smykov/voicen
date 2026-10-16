@@ -7,7 +7,8 @@
 # h01-h21: a reqwest client outside engine::http (disallowed_types on the client types,
 # disallowed_methods on reqwest::get / reqwest::blocking::get); h21 and k15 under
 # #[allow(warnings)] (the deny level is the package's); k01-k15: Instant::now / elapsed
-# outside crate::clock and tests/common; k16-k18: SystemTime::elapsed (T-089 review 1 #2). Rows are keyed by line: a probe-file edit needs this
+# outside crate::clock and tests/common; k16-k18: SystemTime::elapsed (T-089 review 1 #2); k19, k20: tokio::time::Instant::now /
+# elapsed (tokio's time feature is on through feature unification). Rows are keyed by line: a probe-file edit needs this
 # list regenerated and reviewed row by row. Lines starting with # and blank lines are not rows.
 lib:voicen_core	crates/voicen-core/src/ban_canary.rs:102	error	clippy::disallowed_methods	reqwest::get
 lib:voicen_core	crates/voicen-core/src/ban_canary.rs:108	error	clippy::disallowed_methods	reqwest::blocking::get
@@ -50,3 +51,5 @@ test:ban_canary	crates/voicen-core/tests/ban_canary.rs:85	error	clippy::disallow
 test:ban_canary	crates/voicen-core/tests/ban_canary.rs:93	error	clippy::disallowed_methods	std::time::Instant::now
 test:ban_canary	crates/voicen-core/tests/ban_canary.rs:100	error	clippy::disallowed_methods	std::time::SystemTime::elapsed
 test:ban_canary	crates/voicen-core/tests/ban_canary.rs:105	error	clippy::disallowed_methods	std::time::SystemTime::elapsed
+test:ban_canary	crates/voicen-core/tests/ban_canary.rs:113	error	clippy::disallowed_methods	tokio::time::Instant::now
+test:ban_canary	crates/voicen-core/tests/ban_canary.rs:118	error	clippy::disallowed_methods	tokio::time::Instant::elapsed

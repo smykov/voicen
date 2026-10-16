@@ -19,7 +19,7 @@ Also: `scripts/ci/core-test-os-answer.sh` (the I1 tripwire, run by `make check-c
   - the port is refused by a probe within `OS_ANSWER_BUDGET`;
   - every deadline of the case, destructured exhaustively.
 - `timing_tests::a_measured_time_cannot_be_compared_or_read_back_so_no_ceiling_compiles`: a compile-time check that `Took` has no comparison, `==`, deref or conversion back to a `Duration`.
-- The I1 tripwire self-test `core-test-os-answer.test.sh`: 24 cases, including the real tests dir. The I2 ban's canary `ban-canary.sh` (probes k01-k15 in `tests/ban_canary.rs`, feature `ban-canary-tests`).
+- The I1 tripwire self-test `core-test-os-answer.test.sh`: 24 cases, including the real tests dir. The I2 ban's canary `ban-canary.sh` (probes k01-k13 and k15-k17, k19, k20 in `tests/ban_canary.rs`, feature `ban-canary-tests`; k14 and k18 in `src/ban_canary.rs`, feature `ban-canary-lib`).
 
 **Tasks:** T-016; T-047 (F-004); T-048 (F-005); T-078 (F-013; deferred and absorbed by T-080); T-080 (rca, class `os-answer-deadline-race`); T-089 (I2 moved to a compiler ban, I1 a raw-token tripwire).
 **Classes** in `docs/failures.md`: `test-port-race` and `os-answer-deadline-race`.
@@ -80,8 +80,11 @@ This is one rule for every kind of uncontrolled clock: the OS refusal time, the 
     - the `#[cfg(test)]` unit tests under `crates/voicen-core/src` (outside the dir it reads);
     - the shell tests.
   - Exit 3 ("cannot run") is never a pass.
-- T3, I2 (T-089, `decides_on: switch`): rustc's path resolution. Clippy `disallowed-methods` (`std::time::Instant::now`, `std::time::Instant::elapsed` in `crates/voicen-core/clippy.toml`), pinned at deny by `[lints.clippy]` in `crates/voicen-core/Cargo.toml`, fails `make check-core` on a clock read under any spelling (whitespace, a split path, `use … as`, UFCS, a fn reference, a macro) in every target of the package. The only exemptions are owned lines: `#![allow(dead_code, clippy::disallowed_methods)]` in `tests/common/mod.rs` (all of `common`) and the two allows on `crate::clock::instant` / `since` (the src seam, T-103). `make check-ban-canary` proves the ban bites (probes k01-k15), and `make check-clippy-lines` refuses any other line naming the lint tool.
+- T3, I2 (T-089, `decides_on: switch`): rustc's path resolution. Clippy `disallowed-methods` (`std::time::Instant::now`, `std::time::Instant::elapsed`, `std::time::SystemTime::elapsed`, `tokio::time::Instant::now`, `tokio::time::Instant::elapsed` in `crates/voicen-core/clippy.toml`; tokio's `time` feature is on in voicen-core's build through feature unification, so tokio's clock is reachable), pinned at deny by `[lints.clippy]` in `crates/voicen-core/Cargo.toml`, fails `make check-core` on a clock read that check-core compiles (`--all-targets`, default features, the Linux target), whatever the spelling (whitespace, a split path, `use … as`, UFCS, a fn reference, a macro). The only exemptions are owned lines: `#![allow(dead_code, clippy::disallowed_methods)]` in `tests/common/mod.rs` (all of `common`) and the two allows on `crate::clock::instant` / `since` (the src seam, T-103). `make check-ban-canary` proves the ban bites (probes k01-k20), and `make check-clippy-lines` refuses any other line naming the lint tool, check-core's clippy command line in the `Makefile` included (an owned line, so dropping `--all-targets` or adding `-A clippy::…` there is refused).
   - It does not catch:
+    - code under a cfg that check-core does not compile: `#[cfg(windows)]` or another target, a feature that is off (clippy never lints it; the retired text guard did read such lines);
+    - a wall-clock measurement through a method the config does not name: `SystemTime::now()` stays allowed (log timestamps, `SystemClock`), so `SystemTime::now().duration_since(t)` passes, and so does another crate's clock; a new clock source needs its path in `clippy.toml` with a canary probe;
+    - a make-level setting without the lint tool's name (`export RUSTFLAGS := --cap-lints allow`) or a `check:` that drops `check-core`: review only (T1);
     - arithmetic on two instants handed out by `common` (`now() - a`), including a ceiling written that way;
     - a ceiling through `within_spec` with a made-up spec id;
     - a clock read in src through `crate::clock::instant()` / `since()` (the unit tests under `src` stamp through it and hold no ceiling today);

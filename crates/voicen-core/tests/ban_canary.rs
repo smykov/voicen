@@ -104,3 +104,16 @@ fn k16_system_time_elapsed(t: std::time::SystemTime) -> bool {
 fn k17_system_time_elapsed_ufcs(t: SystemTime) -> bool {
     SystemTime :: elapsed(&t).is_ok() // probe: k17
 }
+
+// tokio's own clock (T-089 review 1 #2 c): tokio's `time` feature is on in voicen-core's build
+// through feature unification (cargo tree -e features), so tokio::time::Instant is reachable and
+// banned like std's.
+#[rustfmt::skip]
+fn k19_tokio_instant_now() -> tokio::time::Instant {
+    tokio::time::Instant :: now() // probe: k19
+}
+
+#[rustfmt::skip]
+fn k20_tokio_instant_elapsed(t: tokio::time::Instant) -> std::time::Duration {
+    t.elapsed () // probe: k20
+}

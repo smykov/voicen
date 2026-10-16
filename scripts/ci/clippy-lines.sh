@@ -5,12 +5,19 @@
 # denied by the [lints.clippy] table of crates/voicen-core/Cargo.toml and proven to bite by
 # make check-ban-canary. Every way left to lower a denied lint in the source spells the token
 # clippy (allow / expect of the lint, of clippy::all or a group, a renamed lint, a -A flag in a
-# cargo config, a config dir set by a build script), so this guard holds: every line holding
-# that token is an owned line (docs/decisions/ci-toolchain.md, docs/tasks/T-089.md §4, §5, §12).
+# cargo config or on check-core's command line, a config dir set by a build script or a make
+# file), so this guard holds: every line holding that token is an owned line
+# (docs/decisions/ci-toolchain.md, docs/tasks/T-089.md §4, §5, §12, review 1 #3).
 #
 # Scanned: every file `git -C <root> ls-files` lists whose name ends in .rs, whose base name is
-#   Cargo.toml, or that is config or config.toml in a .cargo directory. Comments are lines like
-#   any other (no // skip); the guard reads no Rust or TOML syntax.
+#   Cargo.toml, or that is config or config.toml in a .cargo directory; and every make file:
+#   base name Makefile, makefile or GNUmakefile, or a name ending in .mk. check-core's clippy
+#   command line in the Makefile is where the bans apply to real code, so it is an owned line
+#   bound to the Makefile: dropping --all-targets, swapping clippy for cargo check, or adding
+#   -A clippy::disallowed_* to it is a finding (the edited line is not owned, its entry is stale).
+#   Comments are lines like any other (no // or # skip); the guard reads no Rust, TOML or make
+#   syntax. Not seen (review only, T1): a make-level setting without the token
+#   (export RUSTFLAGS := --cap-lints allow) and a check: that drops check-core.
 # Token: a scanned line holds the token when it contains clippy in any case.
 # Owned: scripts/ci/clippy-lines.txt under <root>; lines starting with # and blank lines are not
 #   entries; an entry is <path> TAB <text>. A token line is owned when, with leading and trailing
@@ -19,8 +26,9 @@
 #   - An entry bound to a path owns one line: a file holds exactly as many lines with that text
 #     as there are entries for it (one more line is not owned, one fewer is a stale entry).
 #   - A * entry owns its text in any file, any number of times, must match at least one line, and
-#     its text must not contain disallowed in any case (an exemption from the bans is always
-#     bound to its file).
+#     its text must not contain disallowed in any case. That is the whole check on a * entry: an
+#     entry naming a lint group (#[allow(clippy::all)], clippy::style) would lower the bans in
+#     any file and passes; only the review of clippy-lines.txt edits catches it (T1).
 #
 # Usage: scripts/ci/clippy-lines.sh [root]   (default: the repository)
 # Exit 0: "clippy-lines: ok: <n> line(s) owned". Exit 1: one "<file>:<line>: clippy: ..." per
@@ -48,12 +56,13 @@ files=()
 for f in "${tracked[@]}"; do
   case "$f" in
     *.rs | Cargo.toml | */Cargo.toml | .cargo/config | .cargo/config.toml | */.cargo/config | */.cargo/config.toml) ;;
+    Makefile | */Makefile | makefile | */makefile | GNUmakefile | */GNUmakefile | *.mk) ;;
     *) continue ;;
   esac
   [ -f "$f" ] && [ -r "$f" ] || cannot_run "$f is tracked but not readable"
   files+=("$f")
 done
-[ "${#files[@]}" -gt 0 ] || cannot_run "no tracked .rs, Cargo.toml or .cargo config file under $root"
+[ "${#files[@]}" -gt 0 ] || cannot_run "no tracked .rs, Cargo.toml, .cargo config or make file under $root"
 
 report="$(LC_ALL=C awk -v list="$list" '
 function trim(s) { sub(/^[ \t\r]+/, "", s); sub(/[ \t\r]+$/, "", s); return s }

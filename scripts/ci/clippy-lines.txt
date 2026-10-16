@@ -1,12 +1,19 @@
 # Owned lines holding the token clippy (T-089; guard scripts/ci/clippy-lines.sh, docs/decisions/ci-toolchain.md).
 # <path> TAB <text>; * = any file. Each line holding clippy (any case, comments included) in a tracked
-# *.rs, Cargo.toml or .cargo config must equal an entry. An exemption from the call bans
-# (crates/voicen-core/clippy.toml) is bound to its file; a * entry never names disallowed.
+# *.rs, Cargo.toml, .cargo config or make file must equal an entry. An exemption from the call bans
+# (crates/voicen-core/clippy.toml) is bound to its file; a * entry never names disallowed (the only
+# check on a * entry: one naming a lint group, e.g. clippy::all, is caught by review only, T1).
+# check-core's clippy command line is bound to the Makefile: the bans apply to real code there.
 crates/voicen-core/src/engine/http.rs	#![allow(clippy::disallowed_types)]
 crates/voicen-core/src/clock.rs	#[allow(clippy::disallowed_methods)]
 crates/voicen-core/src/clock.rs	#[allow(clippy::disallowed_methods)]
 crates/voicen-core/tests/common/mod.rs	#![allow(dead_code, clippy::disallowed_methods)]
 crates/voicen-core/Cargo.toml	[lints.clippy]
+Makefile	scripts/tw-run core -- 'cargo fmt --check -p voicen-core && cargo clippy -p voicen-core --all-targets -- -D warnings'
+Makefile	check-clippy-lines \
+Makefile	check-clippy-lines \
+Makefile	check-clippy-lines:
+Makefile	scripts/ci/clippy-lines.test.sh
 
 *	#![deny(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 *	#[allow(clippy::too_many_arguments)]

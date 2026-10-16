@@ -3,7 +3,9 @@
 # crates/voicen-core/Cargo.toml [lints] pins at deny. Exemptions are owned lines only
 # (scripts/ci/clippy-lines.txt): engine/http.rs (the one place a reqwest client is built),
 # clock::instant / clock::since (the one src clock seam, T-103), tests/common/mod.rs (the
-# tests' clock, common::timing). A path that does not resolve is only a non-denied warning, so
+# tests' clock, common::timing; its crate-level allow covers every method below, the reqwest
+# shortcuts included). tokio::time::Instant is reachable through feature unification of tokio's
+# time feature, so it is banned like std's. A path that does not resolve is only a non-denied warning, so
 # make check-ban-canary proves each entry bites (scripts/ci/ban-canary.expected.txt): an entry
 # change needs that list regenerated and reviewed. Trait-impl methods (Client::default) cannot
 # be named here; the disallowed types cover them. docs/decisions/ci-toolchain.md,
@@ -13,6 +15,9 @@ disallowed-methods = [
   { path = "reqwest::get", reason = "T-079: every reqwest client is built by engine::http" },
   { path = "std::time::Instant::now", reason = "T-080 I2: read the clock through crate::clock / tests/common::timing" },
   { path = "std::time::Instant::elapsed", reason = "T-080 I2: read the clock through crate::clock / tests/common::timing" },
+  { path = "std::time::SystemTime::elapsed", reason = "T-089: measure time through crate::clock / tests/common::timing" },
+  { path = "tokio::time::Instant::now", reason = "T-089: read the clock through crate::clock / tests/common::timing" },
+  { path = "tokio::time::Instant::elapsed", reason = "T-089: read the clock through crate::clock / tests/common::timing" },
 ]
 disallowed-types = [
   { path = "reqwest::blocking::Client", reason = "T-079: build clients in engine::http" },

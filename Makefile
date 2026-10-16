@@ -1,6 +1,8 @@
 # The gate: every area's checks, each through scripts/tw-run in the area's toolchain.
 .PHONY: check check-shell-layout check-shell-layout-fixtures check-helper-windows-fixtures check-core \
-	check-ci-credentials check-clippy-lines check-core-test-os-answer check-ci-wip check-telegram-send check-telegram-failure-branch \
+	check-ci-credentials \
+	check-clippy-lines \
+	check-core-test-os-answer check-ci-wip check-telegram-send check-telegram-failure-branch \
 	check-version-stamp check-release-check check-release check-release-guard check-nsis-fork check-e2e-entry-fixtures \
 	check-shell-windows check-ban-canary \
 	check-ui core-image ui-image \
@@ -9,7 +11,9 @@
 
 # check-ban-canary and check-shell-windows after check-core: both build voicen-core, so a core
 # error is reported first by the faster native check-core, before the slower runs.
-check: check-shell-layout check-shell-layout-fixtures check-helper-windows-fixtures check-ci-credentials check-clippy-lines check-core-test-os-answer check-ci-wip check-telegram-send check-telegram-failure-branch check-version-stamp check-release-check check-release check-release-guard check-nsis-fork check-core \
+check: check-shell-layout check-shell-layout-fixtures check-helper-windows-fixtures check-ci-credentials \
+	check-clippy-lines \
+	check-core-test-os-answer check-ci-wip check-telegram-send check-telegram-failure-branch check-version-stamp check-release-check check-release check-release-guard check-nsis-fork check-core \
 	check-ban-canary check-shell-windows check-e2e-entry-fixtures check-ui \
 	licenses-check
 
@@ -43,20 +47,21 @@ check-ci-credentials:
 
 # T-089 (P-020; docs/decisions/ci-toolchain.md, docs/tasks/T-089.md): the voicen-core call bans
 # (a reqwest client built outside engine::http, decisions #106, #113; Instant::now / elapsed
-# outside crate::clock and tests/common, T-080 I2) are rustc's path resolution: clippy
-# disallowed-types / -methods from crates/voicen-core/clippy.toml, pinned at deny by the
-# [lints.clippy] table of crates/voicen-core/Cargo.toml (check-core adds -D warnings).
+# outside crate::clock and tests/common, T-080 I2) are rustc's path resolution: the
+# disallowed-types / -methods lints, configured next to crates/voicen-core/Cargo.toml and pinned
+# at deny by its [lints] table (check-core adds -D warnings).
 # check-ban-canary (decides_on: switch): scripts/ci/ban-canary.sh lints the owned probe files
 # (features ban-canary-lib, ban-canary-tests) in the core image and compares every diagnostic
 # with scripts/ci/ban-canary.expected.txt, so each config entry and the deny level are proven.
 check-ban-canary:
 	scripts/ci/ban-canary.sh
 
-# check-clippy-lines (decides_on: token + literal): every tracked line holding the token clippy
-# (any case, comments included) in a *.rs, Cargo.toml or .cargo config is an owned line of
-# scripts/ci/clippy-lines.txt, so no allow, cap or config can lower the bans unseen. The
-# self-test runs the guard scripts/ci/clippy-lines.sh on trees built in a temp dir and on the
-# real repository. Host bash, git.
+# The token guard below (decides_on: token + literal): every tracked line holding the lint
+# tool's name (any case, comments included) in a *.rs, Cargo.toml, .cargo config or make file
+# is an owned line of the guard's list, so no allow, cap, config or edit of check-core's lint
+# command can lower the bans unseen; this file's lines holding the name are owned too. The
+# self-test runs the guard on trees built in a temp dir, on copies of the real repository and
+# on the real repository. Host bash, git.
 check-clippy-lines:
 	scripts/ci/clippy-lines.test.sh
 
