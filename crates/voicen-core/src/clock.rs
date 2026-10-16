@@ -5,6 +5,23 @@
 //! Every monotonic read in `src` goes through [`instant`] / [`since`] (T-103): one
 //! owned seam for `Instant::now` and `Instant::elapsed`. They are `pub(crate)`, so
 //! the integration tests under `tests/` keep their own `tests/common::timing`.
+//! Outside the crate neither is reachable (E0603 private function); one block per
+//! function, so each fails for its own function only:
+//!
+//! ```compile_fail,E0603
+//! let _ = voicen_core::clock::instant();
+//! ```
+//!
+//! ```compile_fail,E0603
+//! let _ = voicen_core::clock::since(std::time::Instant::now());
+//! ```
+//!
+//! The same path to a public item of this module compiles, so the blocks above fail
+//! only because the two functions are `pub(crate)`:
+//!
+//! ```
+//! let _ = voicen_core::clock::utc_compact(std::time::UNIX_EPOCH);
+//! ```
 
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
