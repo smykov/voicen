@@ -51,7 +51,7 @@ mod fakes {
     use std::io;
     use std::net::SocketAddr;
     use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     use super::Lookup;
 
@@ -157,12 +157,12 @@ mod fakes {
 
     impl Lookup for HeldLookup {
         fn lookup(&self, _host: &str) -> io::Result<Vec<SocketAddr>> {
-            let end = Instant::now() + self.inner.backstop;
+            let end = crate::clock::instant() + self.inner.backstop;
             let mut state = self.state();
             state.asked += 1;
             self.inner.changed.notify_all();
             while !state.released {
-                let left = end.saturating_duration_since(Instant::now());
+                let left = end.saturating_duration_since(crate::clock::instant());
                 if left.is_zero() {
                     break;
                 }

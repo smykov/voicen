@@ -293,7 +293,7 @@ mod lifecycle_tests {
     //! `Destroy` out. The window "world" in the property test is a model of tauri's
     //! (a label is free only after `Destroyed`), never the code under test.
 
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     use super::*;
     use crate::i18n;
@@ -302,7 +302,7 @@ mod lifecycle_tests {
         OverlayState::Message {
             id: i18n::NOTICE_NO_SPEECH,
             params: Vec::new(),
-            until: Instant::now() + Duration::from_secs(3),
+            until: crate::clock::instant() + Duration::from_secs(3),
         }
     }
 
@@ -1141,7 +1141,6 @@ mod tests {
     //! Fake data only (`api.example.com`).
 
     use std::collections::BTreeSet;
-    use std::time::Instant;
 
     use serde_json::{json, Value};
 
@@ -1164,7 +1163,7 @@ mod tests {
         OverlayState::Message {
             id: reason.message_id(),
             params: reason.message_params(),
-            until: Instant::now() + MESSAGE_DURATION,
+            until: crate::clock::instant() + MESSAGE_DURATION,
         }
     }
 
@@ -1176,7 +1175,7 @@ mod tests {
         OverlayState::Message {
             id,
             params: Vec::new(),
-            until: Instant::now() + MESSAGE_DURATION,
+            until: crate::clock::instant() + MESSAGE_DURATION,
         }
     }
 

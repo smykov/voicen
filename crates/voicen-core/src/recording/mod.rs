@@ -706,7 +706,7 @@ mod tests {
         // that does not go idle (second release stops again), stopped_at taken
         // from finish's instant, ctx not returned.
         for held in [300u64, 301, 4000] {
-            let t0 = Instant::now();
+            let t0 = crate::clock::instant();
             let mut c = RecordingController::<Ctx>::new();
             let id = start(&mut c, t0, "start-window");
             let ticket = stop(&mut c, t0 + ms(held));
@@ -735,7 +735,7 @@ mod tests {
         // replaced by `>` on the wrong side, a Stop for short holds, the overlay
         // left on Recording/Processing, a message for the silent discard.
         for held in [0u64, 1, 299] {
-            let t0 = Instant::now();
+            let t0 = crate::clock::instant();
             let mut c = RecordingController::<Ctx>::new();
             let id = start(&mut c, t0, "w");
             match c.release(t0 + ms(held)) {
@@ -758,7 +758,7 @@ mod tests {
     fn recording_ids_are_distinct_and_increasing() {
         // data-model: RecordingId is monotonic. Bite: a constant id (a stale
         // capture_failed or job_finished would then hit the live recording).
-        let t0 = Instant::now();
+        let t0 = crate::clock::instant();
         let mut c = RecordingController::<Ctx>::new();
         let a = record(&mut c, t0, ms(500)).id();
         let b = record(&mut c, t0 + ms(1000), ms(500)).id();
@@ -773,7 +773,7 @@ mod tests {
         // One job: press -> Recording/Recording; release -> tray Idle; finish ->
         // overlay Processing; Delivered (pasted) -> Hidden. Bite: no Recording on
         // press, no job counted at finish, the job not removed on Delivered.
-        let t0 = Instant::now();
+        let t0 = crate::clock::instant();
         let mut c = RecordingController::<Ctx>::new();
         let id = start(&mut c, t0, "w");
         assert_eq!(
@@ -807,7 +807,7 @@ mod tests {
         // expires); tray Error stays until a later job is Delivered. Bite: no
         // expiry in tick, expiry at `>` instead of `>=`, Error cleared by the
         // tick, Delivered not clearing Error.
-        let t0 = Instant::now();
+        let t0 = crate::clock::instant();
         let mut c = RecordingController::<Ctx>::new();
         let a = record(&mut c, t0, ms(1000)).id();
         let tf = t0 + ms(5000);
@@ -852,7 +852,7 @@ mod tests {
     fn tray_menu_opened_clears_error_but_not_the_message() {
         // data-model: Error is cleared by opening the tray menu. Bite: a no-op
         // tray_menu_opened, or one that also drops the overlay message.
-        let t0 = Instant::now();
+        let t0 = crate::clock::instant();
         let mut c = RecordingController::<Ctx>::new();
         let a = record(&mut c, t0, ms(1000)).id();
         let tf = t0 + ms(2000);
@@ -875,7 +875,7 @@ mod tests {
     fn notice_shows_message_without_tray_error() {
         // Notice (no speech, paste manually) -> Message for 3 s, tray unchanged.
         // Bite: a notice treated as a failure (tray Error), or no message.
-        let t0 = Instant::now();
+        let t0 = crate::clock::instant();
         let mut c = RecordingController::<Ctx>::new();
         let a = record(&mut c, t0, ms(1000)).id();
         let tn = t0 + ms(2000);
@@ -895,7 +895,7 @@ mod tests {
         // CopiedOnly: Delivered{notice: Some} -> its message, and tray Error from
         // an earlier failure cleared. Bite: the notice ignored on Delivered, or
         // Error kept.
-        let t0 = Instant::now();
+        let t0 = crate::clock::instant();
         let mut c = RecordingController::<Ctx>::new();
         let a = record(&mut c, t0, ms(1000)).id();
         c.job_finished(a, JobEnd::Failed(FailureReason::Timeout), t0 + ms(2000));
@@ -927,7 +927,7 @@ mod tests {
         // delivery notice shown instead of the skip.
         use crate::delivery::DeliveryResult;
         use crate::post_process::SkipReason;
-        let t0 = Instant::now();
+        let t0 = crate::clock::instant();
         let reason = SkipReason::Unreachable {
             host: "llm.example.com:8443".to_string(),
         };
@@ -984,7 +984,7 @@ mod tests {
         // tray Error is still set. Bite: the skip message shown, Error not set.
         use crate::delivery::DeliveryResult;
         use crate::post_process::SkipReason;
-        let t0 = Instant::now();
+        let t0 = crate::clock::instant();
         let mut c = RecordingController::<Ctx>::new();
         let a = record(&mut c, t0, ms(1000)).id();
         let ts = t0 + ms(2000);
@@ -1011,7 +1011,7 @@ mod tests {
         // message is not re-shown. Tray: Recording over Error, Error after.
         // Bite: the message kept and shown again after a short (discarded) hold
         // that ends within its 3 s.
-        let t0 = Instant::now();
+        let t0 = crate::clock::instant();
         let mut c = RecordingController::<Ctx>::new();
         let a = record(&mut c, t0, ms(1000)).id();
         let tf = t0 + ms(2000);
@@ -1045,7 +1045,7 @@ mod tests {
         // Two queued jobs: the first fails -> Message (over Processing); after the
         // 3 s the second is still queued -> Processing. Bite: a job counter reset
         // on any job end, Processing over Message.
-        let t0 = Instant::now();
+        let t0 = crate::clock::instant();
         let mut c = RecordingController::<Ctx>::new();
         let a = record(&mut c, t0, ms(1000)).id();
         let b = record(&mut c, t0 + ms(1500), ms(1000)).id();
@@ -1073,7 +1073,7 @@ mod tests {
         // press starts before the previous capture is finished; Recording wins
         // over Processing; jobs are keyed by id. Bite: release staying busy until
         // finish, a single job flag instead of a per-id set.
-        let t0 = Instant::now();
+        let t0 = crate::clock::instant();
         let mut c = RecordingController::<Ctx>::new();
         let a = start(&mut c, t0, "first");
         let ta = stop(&mut c, t0 + ms(1000));
@@ -1115,7 +1115,7 @@ mod tests {
         // underflow the queue and hide a later job. Bite: a decrementing counter
         // (the repeat hides job c's Processing), Delivered for an unknown id
         // clearing Error.
-        let t0 = Instant::now();
+        let t0 = crate::clock::instant();
         let mut c = RecordingController::<Ctx>::new();
         let a = record(&mut c, t0, ms(1000)).id();
         c.job_finished(a, JobEnd::Failed(FailureReason::Timeout), t0 + ms(2000));
@@ -1149,7 +1149,7 @@ mod tests {
         // A stray release (key released after a gate refusal, or twice) is Ignored,
         // never panics, shows nothing, and the next press/release still works.
         // Bite: a release that stamps a phantom recording, or that panics.
-        let t0 = Instant::now();
+        let t0 = crate::clock::instant();
         let mut c = RecordingController::<Ctx>::new();
         assert!(matches!(c.release(t0), Release::Ignored));
         assert_eq!(c.indicator(), &idle());
@@ -1164,7 +1164,7 @@ mod tests {
         // after release. Bite: a second press restarting the recording (new id,
         // later started_at, the hold measured from the repeat -> discarded) or
         // ending it.
-        let t0 = Instant::now();
+        let t0 = crate::clock::instant();
         let mut c = RecordingController::<Ctx>::new();
         let id = start(&mut c, t0, "first");
         for k in 1..=5u64 {
@@ -1200,7 +1200,7 @@ mod tests {
         // Recording, a job counted, `self.fail(&reason, at)` deleted from
         // capture_failed (indicator Idle/Hidden, no deadline), a wrong reason param
         // or `until` taken from the press instant.
-        let t0 = Instant::now();
+        let t0 = crate::clock::instant();
         let mut c = RecordingController::<Ctx>::new();
         let id = start(&mut c, t0, "w");
         let tf = t0 + ms(20);
@@ -1250,7 +1250,7 @@ mod tests {
             (CaptureError::Other(os_text.to_string()), MicCause::Other),
         ];
         for (err, cause) in rows {
-            let t0 = Instant::now();
+            let t0 = crate::clock::instant();
             let mut c = RecordingController::<Ctx>::new();
             let id = start(&mut c, t0, "w");
             let got = c.capture_failed(id, err.clone(), t0 + ms(10));
@@ -1272,7 +1272,7 @@ mod tests {
     fn capture_failed_with_stale_id_returns_none_and_changes_nothing() {
         // A late capture error for an earlier recording must not end the live one.
         // Bite: capture_failed ignoring the id.
-        let t0 = Instant::now();
+        let t0 = crate::clock::instant();
         let mut c = RecordingController::<Ctx>::new();
         let old = record(&mut c, t0, ms(500)).id();
         c.job_finished(old, JobEnd::Delivered { notice: None }, t0 + ms(600));
@@ -1292,7 +1292,7 @@ mod tests {
         // Once release returned, the id is no longer live (the ticket owns it).
         // Bite: a capture_failed that still matches the stopped id and reports a
         // second outcome for it.
-        let t0 = Instant::now();
+        let t0 = crate::clock::instant();
         let mut c = RecordingController::<Ctx>::new();
         let id = start(&mut c, t0, "w");
         let ticket = stop(&mut c, t0 + ms(1000));
@@ -1314,7 +1314,7 @@ mod tests {
         // Bite: `self.fail(&reason, at)` deleted from finish's Err arm (indicator
         // Idle/Hidden, no deadline), a wrong reason param, `until` from
         // stopped_at.
-        let t0 = Instant::now();
+        let t0 = crate::clock::instant();
         let mut c = RecordingController::<Ctx>::new();
         start(&mut c, t0, "w");
         let ticket = stop(&mut c, t0 + ms(1000));
@@ -1358,7 +1358,7 @@ mod tests {
         // (tray Idle after B's release), Error checked before Recording (tray
         // Error during B), Message over Recording, B's live state ended by A's
         // failure, `until` restarted at B's release.
-        let t0 = Instant::now();
+        let t0 = crate::clock::instant();
         let mut c = RecordingController::<Ctx>::new();
         let a = start(&mut c, t0, "a");
         let ticket_a = stop(&mut c, t0 + ms(1000));
@@ -1428,7 +1428,7 @@ mod tests {
         // counts as a 0 s hold (saturating), is discarded, never panics. Bite:
         // `at - started_at` / `duration_since` panicking or wrapping into a long
         // hold that is kept.
-        let t0 = Instant::now() + Duration::from_secs(10);
+        let t0 = crate::clock::instant() + Duration::from_secs(10);
         let mut c = RecordingController::<Ctx>::new();
         let id = start(&mut c, t0, "w");
         match c.release(t0 - ms(50)) {
@@ -1447,7 +1447,7 @@ mod tests {
         // release outcome (data-model "Recording": a hold under 0.3 s ends
         // `TooShort`). Bite: `TooShort` produced nowhere, `Stop`'s end differing
         // from the finished recording's, or an end for an ignored release.
-        let t0 = Instant::now();
+        let t0 = crate::clock::instant();
         let mut c = RecordingController::<Ctx>::new();
         assert_eq!(c.release(t0).end(), None, "release without press");
 
@@ -1480,7 +1480,7 @@ mod tests {
         // the tray the other inputs give. Bite: the hard-coded `hotkey_error:
         // false` in `refresh` kept, the flag cleared by a delivery, by
         // `tray_menu_opened` or by `tick`, HotkeyError below Recording.
-        let t0 = Instant::now();
+        let t0 = crate::clock::instant();
         let mut c = RecordingController::<Ctx>::new();
         c.hotkey_registration(false, t0);
         assert_eq!(
@@ -1541,7 +1541,7 @@ mod tests {
         // goes back to Recording; a repeated true changes nothing. Bite:
         // registration(true) clearing `error`, setting the tray to Idle directly
         // instead of re-deriving it, or dropping the message.
-        let t0 = Instant::now();
+        let t0 = crate::clock::instant();
         let mut c = RecordingController::<Ctx>::new();
         let a = record(&mut c, t0, ms(1000)).id();
         let tf = t0 + ms(2000);
@@ -1579,7 +1579,7 @@ mod tests {
         // expired by a tick at exactly + 3 s; a later notice replaces an earlier
         // failure message. Bite: tray Error set by a notice, Error cleared by it,
         // no message, `until` not at + 3 s, no deadline.
-        let t0 = Instant::now();
+        let t0 = crate::clock::instant();
         let mut c = RecordingController::<Ctx>::new();
         c.notice(i18n::NOTICE_CHOOSE_ENGINE, t0);
         assert_eq!(
@@ -1624,7 +1624,7 @@ mod tests {
         // shown at all once its 3 s passed during the recording. Bite: `until`
         // restarted at release, the notice shown over Recording, the notice
         // dropped by the release, an expired notice shown.
-        let t0 = Instant::now();
+        let t0 = crate::clock::instant();
         let mut c = RecordingController::<Ctx>::new();
         start(&mut c, t0, "w");
         let tn = t0 + ms(100);
@@ -1664,7 +1664,7 @@ mod tests {
         // T-051 row 21: "a press drops it" holds for a notice like for any
         // message. Bite: the notice kept across the press and shown again after a
         // short (discarded) hold that ends within its 3 s.
-        let t0 = Instant::now();
+        let t0 = crate::clock::instant();
         let mut c = RecordingController::<Ctx>::new();
         c.notice(NOTICE, t0);
         start(&mut c, t0 + ms(500), "w");
@@ -1682,7 +1682,7 @@ mod tests {
         // (Stop and Discard) and after capture_failed. Bite: live_id always None,
         // the next id instead of the live one, Some after the release or after a
         // capture failure.
-        let t0 = Instant::now();
+        let t0 = crate::clock::instant();
         let mut c = RecordingController::<Ctx>::new();
         assert_eq!(c.live_id(), None, "new controller");
         let a = start(&mut c, t0, "a");
@@ -1764,7 +1764,7 @@ mod tests {
         // third press starts a new recording. Bite: a press while live Ignored in
         // toggle mode too (no ticket), end Released, the second press's ctx kept, the
         // recording left live after the stop, stopped_at taken from finish.
-        let t0 = Instant::now();
+        let t0 = crate::clock::instant();
         let mut c = RecordingController::<Ctx>::new();
         let id = start_in(&mut c, t0, Mode::Toggle, "start-window");
         assert_eq!(c.indicator(), &recording(), "after the first press");
@@ -1801,7 +1801,7 @@ mod tests {
         // the start still gives a ticket (Toggled, held 120 ms; no TooShort discard).
         // Bite: release handled as in hold mode (Stop or Discarded), MIN_HOLD applied
         // to a toggle stop.
-        let t0 = Instant::now();
+        let t0 = crate::clock::instant();
         let mut c = RecordingController::<Ctx>::new();
         let id = start_in(&mut c, t0, Mode::Toggle, "w");
         for at in [t0, t0 + ms(50), t0 + ms(100)] {
@@ -1832,7 +1832,7 @@ mod tests {
         // made "in hold mode". Bite: the mode read from the latest press (the hold
         // recording stopped by the press, the toggle one ignoring it), no MIN_HOLD for
         // press_with_mode(Hold).
-        let t0 = Instant::now();
+        let t0 = crate::clock::instant();
         let mut c = RecordingController::<Ctx>::new();
 
         let a = start_in(&mut c, t0, Mode::Hold, "hold");
@@ -1891,7 +1891,7 @@ mod tests {
             "the catalog id of contracts/messages.md"
         );
         for mode in [Mode::Hold, Mode::Toggle] {
-            let t0 = Instant::now();
+            let t0 = crate::clock::instant();
             let mut c = RecordingController::<Ctx>::new();
             let id = start_in(&mut c, t0, mode, "w");
             if mode == Mode::Toggle {
@@ -1974,7 +1974,7 @@ mod tests {
         // the message (the 10-min stop never scheduled while a message is pending) or
         // only the max length (the message expiry delayed by up to 10 min), a message
         // tick stopping the recording.
-        let t0 = Instant::now();
+        let t0 = crate::clock::instant();
         let mut c = RecordingController::<Ctx>::new();
         let a = record(&mut c, t0, ms(1000)).id();
         let t1 = t0 + ms(2000);
@@ -2000,7 +2000,7 @@ mod tests {
         // then stops it), a job queued for it, a message shown, the 10-min deadline
         // kept (a later stop of a cancelled recording).
         for mode in [Mode::Hold, Mode::Toggle] {
-            let t0 = Instant::now();
+            let t0 = crate::clock::instant();
             let mut c = RecordingController::<Ctx>::new();
             let id = start_in(&mut c, t0, mode, "w");
             assert_eq!(c.cancel(t0 + ms(2000)), Some(id), "{mode:?}");
@@ -2031,7 +2031,7 @@ mod tests {
         // Esc discards the recording that is on; a job already queued for the previous
         // recording goes on (overlay back to Processing, the job still finishes). Bite:
         // cancel clearing the queue (overlay Hidden, the job_finished ignored).
-        let t0 = Instant::now();
+        let t0 = crate::clock::instant();
         let mut c = RecordingController::<Ctx>::new();
         let a = record(&mut c, t0, ms(1000)).id();
         let b = start_in(&mut c, t0 + ms(1500), Mode::Hold, "b");
@@ -2053,7 +2053,7 @@ mod tests {
         // None and changes nothing: the message stays, the ticket still finishes into a
         // job. Bite: cancel dropping the message, cancel marking the stopped recording
         // so its finish queues nothing.
-        let t0 = Instant::now();
+        let t0 = crate::clock::instant();
         let mut c = RecordingController::<Ctx>::new();
         assert_eq!(c.cancel(t0), None);
         assert_eq!(c.indicator(), &idle());
@@ -2077,7 +2077,7 @@ mod tests {
         // idle, so the user's toggle press meant as "stop" at 10:05 starts a fresh
         // recording (the notice is the only cue). Bite: a press swallowed after a
         // max-length stop (an ignore window the owner did not choose).
-        let t0 = Instant::now();
+        let t0 = crate::clock::instant();
         let mut c = RecordingController::<Ctx>::new();
         let a = start_in(&mut c, t0, Mode::Toggle, "a");
         let Some(ticket) = c.tick(t0 + TEN_MIN) else {
@@ -2107,7 +2107,7 @@ mod tests {
         // cancel (no ticket), end Released/Toggled, the recording left live, held
         // measured to finish's instant.
         for mode in [Mode::Hold, Mode::Toggle] {
-            let t0 = Instant::now();
+            let t0 = crate::clock::instant();
             let mut c = RecordingController::<Ctx>::new();
             let id = start_in(&mut c, t0, mode, "start-window");
             let Some(ticket) = c.device_lost(id, t0 + ms(5000)) else {
@@ -2140,7 +2140,7 @@ mod tests {
         // a loss is not a release, so MIN_HOLD does not apply: 100 ms gives a ticket
         // (the speech gate decides an almost empty one). Bite: the release rule
         // reused (a TooShort discard / `None`).
-        let t0 = Instant::now();
+        let t0 = crate::clock::instant();
         let mut c = RecordingController::<Ctx>::new();
         let id = start_in(&mut c, t0, Mode::Hold, "w");
         let Some(ticket) = c.device_lost(id, t0 + ms(100)) else {
@@ -2157,7 +2157,7 @@ mod tests {
         // of an earlier recording (its sink outlives it) must not end the next one,
         // and a loss while idle does nothing. Bite: a loss that ends whatever is
         // live (no id check), a loss while idle that changes the indicator.
-        let t0 = Instant::now();
+        let t0 = crate::clock::instant();
         let mut c = RecordingController::<Ctx>::new();
         let a = start_in(&mut c, t0, Mode::Hold, "a");
         let ticket = stop(&mut c, t0 + ms(1000));

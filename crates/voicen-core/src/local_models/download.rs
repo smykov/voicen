@@ -455,7 +455,7 @@ impl Job {
             }
             file.write_all(chunk).map_err(disk_error)?;
             hasher.update(chunk);
-            if throttle.should_emit(Instant::now()) {
+            if throttle.should_emit(crate::clock::instant()) {
                 events(DownloadEvent::Progress {
                     id: entry.id,
                     received,
@@ -631,7 +631,7 @@ mod tests {
 
     /// Feeds chunk times (ms after `t0`) to a fresh throttle; returns the emit times.
     fn emits(chunks_ms: &[u64]) -> Vec<u64> {
-        let t0 = Instant::now();
+        let t0 = crate::clock::instant();
         let mut throttle = ProgressThrottle::new();
         chunks_ms
             .iter()

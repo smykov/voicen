@@ -541,7 +541,7 @@ impl LogsNoticeSink for DictationSession {
         self.notice_with(
             NOTICE_LOGS_UNWRITABLE,
             vec![("reason", reason.message_id().nested_arg())],
-            Instant::now(),
+            crate::clock::instant(),
         );
     }
 }
@@ -742,7 +742,8 @@ fn run_worker(shared: &Shared, pipeline: &Pipeline, jobs: &mpsc::Receiver<Job>) 
         // The slot itself, read here: only this thread changes it.
         let retry_available = pipeline.pending().is_some();
         let mut st = shared.lock();
-        st.ctrl.job_finished(id, report.end, Instant::now());
+        st.ctrl
+            .job_finished(id, report.end, crate::clock::instant());
         st.retry_available = retry_available;
         shared.publish(&mut st);
     }
@@ -764,7 +765,7 @@ fn run_timer(shared: &Shared) {
                 .wait(st)
                 .unwrap_or_else(PoisonError::into_inner),
             Some(deadline) => {
-                let now = Instant::now();
+                let now = crate::clock::instant();
                 if now >= deadline {
                     drop(st);
                     tick(shared, now);

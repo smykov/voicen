@@ -1,8 +1,8 @@
 //! A real-time [`AudioSource`] for tests (T-051; feature `test-fakes`, never in a
 //! release build): frames from an [`AudioBuffer`] or PCM16 WAV bytes, pushed in
-//! 10 ms chunks paced by real time and stamped with `Instant::now()`; silence once
-//! the data runs out, as a live microphone would. T-006's `dictation_e2e` injects
-//! it through the wiring function.
+//! 10 ms chunks paced by real time and stamped with `crate::clock::instant()`;
+//! silence once the data runs out, as a live microphone would. T-006's
+//! `dictation_e2e` injects it through the wiring function.
 //!
 //! The WAV reader is the inverse of [`wav::encode`](crate::audio::wav::encode),
 //! plus any channel count and any rate; written by hand (`hound` is not consented,
@@ -11,7 +11,7 @@
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::Arc;
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::audio::AudioBuffer;
 use crate::platform::{AudioSource, CaptureHandle, DeviceId, FrameSink, InputDevice};
@@ -172,12 +172,12 @@ impl AudioSource for RealtimeSource {
         let per_chunk = usize::try_from(frames.rate / 100).unwrap_or(1).max(1) * channels;
         let (stop_tx, stop_rx) = mpsc::channel::<()>();
         let push = move || {
-            let started = Instant::now();
+            let started = crate::clock::instant();
             let mut pos = 0usize;
             let mut chunk = Vec::with_capacity(per_chunk);
             for k in 0u32.. {
                 let due = started + CHUNK * k;
-                let now = Instant::now();
+                let now = crate::clock::instant();
                 if due > now {
                     match stop_rx.recv_timeout(due - now) {
                         Err(RecvTimeoutError::Timeout) => {}
@@ -191,7 +191,12 @@ impl AudioSource for RealtimeSource {
                 chunk.extend_from_slice(frames.samples.get(pos..end).unwrap_or(&[]));
                 pos = end;
                 chunk.resize(per_chunk, 0.0);
-                sink.frames(&chunk, frames.rate, frames.channels, Instant::now());
+                sink.frames(
+                    &chunk,
+                    frames.rate,
+                    frames.channels,
+                    crate::clock::instant(),
+                );
             }
         };
         let thread = std::thread::Builder::new()

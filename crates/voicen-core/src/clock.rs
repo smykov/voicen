@@ -1,8 +1,22 @@
 //! The one wall-clock port of the core (P-011): the settings backup suffix (T-032)
 //! and history (005) read the time through [`Clock`]. The connection test measures a
 //! duration with `Instant`, not a wall time (T-046).
+//!
+//! Every monotonic read in `src` goes through [`instant`] / [`since`] (T-103): one
+//! owned seam for `Instant::now` and `Instant::elapsed`. They are `pub(crate)`, so
+//! the integration tests under `tests/` keep their own `tests/common::timing`.
 
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+/// The monotonic clock now: exactly `Instant::now()`.
+pub(crate) fn instant() -> Instant {
+    Instant::now()
+}
+
+/// Time passed since `t` on the monotonic clock: exactly `t.elapsed()`.
+pub(crate) fn since(t: Instant) -> Duration {
+    t.elapsed()
+}
 
 /// Wall-clock time source.
 pub trait Clock: Send + Sync {

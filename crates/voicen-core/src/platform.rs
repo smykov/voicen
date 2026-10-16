@@ -682,11 +682,17 @@ mod fakes {
 
     impl Indicator for FakeIndicator {
         fn set_tray(&self, state: TrayState, retry_available: bool) {
-            lock(&self.calls).push((Instant::now(), IndicatorCall::Tray(state, retry_available)));
+            lock(&self.calls).push((
+                crate::clock::instant(),
+                IndicatorCall::Tray(state, retry_available),
+            ));
         }
 
         fn set_overlay(&self, state: &OverlayState) {
-            lock(&self.calls).push((Instant::now(), IndicatorCall::Overlay(state.clone())));
+            lock(&self.calls).push((
+                crate::clock::instant(),
+                IndicatorCall::Overlay(state.clone()),
+            ));
         }
     }
 

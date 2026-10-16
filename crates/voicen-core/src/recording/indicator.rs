@@ -173,7 +173,7 @@ mod tests {
         // combination. Bite: Processing shown while recording (Clarification 5),
         // a message hidden behind Processing, Processing for 0 jobs, a constant
         // overlay.
-        let t0 = Instant::now();
+        let t0 = crate::clock::instant();
         let msg = ShownMessage {
             id: FailureReason::Timeout.message_id(),
             params: FailureReason::Timeout.message_params(),
@@ -222,7 +222,7 @@ mod tests {
         // The overlay message is the one passed in, params included (CannotReach's
         // `host`), and `until` unchanged. Bite: params dropped, a fixed id, until
         // recomputed.
-        let t0 = Instant::now();
+        let t0 = crate::clock::instant();
         let reason = FailureReason::CannotReach {
             host: "api.example.com:8443".to_string(),
         };

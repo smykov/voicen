@@ -244,7 +244,7 @@ impl Pipeline {
                 outcome: Outcome::NoSpeech,
                 engine: None,
                 post_processing: None,
-                at: Instant::now(),
+                at: crate::clock::instant(),
             };
         }
 
@@ -255,7 +255,7 @@ impl Pipeline {
                     outcome: Outcome::Failed(reason),
                     engine: None,
                     post_processing: None,
-                    at: Instant::now(),
+                    at: crate::clock::instant(),
                 }
             }
         };
@@ -279,11 +279,11 @@ impl Pipeline {
                     timeouts: &request.timeouts,
                 };
                 // The one call of the stage, timed alone (T-076, spec 003 FR-014).
-                let started = Instant::now();
+                let started = crate::clock::instant();
                 let processed = self.deps.post_processor.process(&raw, &input);
                 let trace = PostProcessTrace {
                     result: trace_result(&processed),
-                    ms: millis(started.elapsed()),
+                    ms: millis(crate::clock::since(started)),
                 };
                 let text = processed.final_text(&raw);
                 let outcome = if is_blank(text) {
@@ -304,7 +304,7 @@ impl Pipeline {
             outcome,
             engine: Some(engine.kind()),
             post_processing,
-            at: Instant::now(),
+            at: crate::clock::instant(),
         }
     }
 
@@ -348,7 +348,7 @@ impl Pipeline {
                         self.emit(finished(OutcomeCode::Text, None));
                         self.emit(DictationEvent::Delivered {
                             seq: job.seq,
-                            text_to_paste_ms: millis(done.at.elapsed()),
+                            text_to_paste_ms: millis(crate::clock::since(done.at)),
                             result,
                         });
                         // A skip is still a delivery (spec 003 FR-007): no pending
@@ -578,7 +578,7 @@ mod tests {
     /// finish).
     fn finished(audio: AudioBuffer, settings: Settings) -> FinishedRecording<PressContext> {
         let mut ctrl = RecordingController::<PressContext>::new();
-        let t0 = Instant::now();
+        let t0 = crate::clock::instant();
         let ctx = PressContext {
             start_window: Some(window()),
             settings: Arc::new(settings),
@@ -1130,7 +1130,7 @@ mod tests {
             _req: &TranscribeRequest,
         ) -> Result<String, FailureReason> {
             std::thread::sleep(self.sleep);
-            lock(&self.returned).push(Instant::now());
+            lock(&self.returned).push(crate::clock::instant());
             self.reply.clone()
         }
     }
@@ -1170,9 +1170,9 @@ mod tests {
 
     impl PostProcessor for TimedPostProcessor {
         fn process(&self, _raw: &str, _input: &PostProcessInput<'_>) -> PostProcessOutcome {
-            let entered = Instant::now();
+            let entered = crate::clock::instant();
             std::thread::sleep(self.sleep);
-            let left = Instant::now();
+            let left = crate::clock::instant();
             lock(&self.spans).push((entered, left));
             self.out.clone()
         }
@@ -1254,7 +1254,7 @@ mod tests {
                 &returned,
             ));
             let _ = p.run_job(finished(fixtures::speech_3s(), settings()));
-            let after = Instant::now();
+            let after = crate::clock::instant();
 
             let events = f.observer.events();
             let Some(trace) = trace_of(&events) else {

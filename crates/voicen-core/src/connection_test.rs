@@ -21,7 +21,6 @@
 //! `Instant`-measured latency (#47(2)); never from a key, a URL query or a body.
 
 use std::fmt;
-use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
@@ -283,9 +282,9 @@ pub(crate) fn run(
         timeouts,
     };
     let audio = clip();
-    let started = Instant::now();
+    let started = crate::clock::instant();
     let outcome = built.transcribe(&audio, &request);
-    let elapsed = started.elapsed();
+    let elapsed = crate::clock::since(started);
     match outcome {
         Ok(_text) => ConnectionTestResult::Ok {
             latency_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
