@@ -10,7 +10,7 @@
 //! or is dropped here. `LocalModels::download` does a file metadata read, the disk
 //! probe and a thread spawn on the command thread; the transfer runs on core's
 //! download thread. `local_model_delete` passes the managed `SettingsService` and
-//! [`NoResidency`] (nothing is loaded until T-017's residency replaces it) and emits
+//! [`NoResidency`] (nothing is loaded until T-017 wires T-098's `ModelResidency` in) and emits
 //! nothing itself: a selection reset reaches the window as `settings://changed`
 //! through the change bridge.
 //!

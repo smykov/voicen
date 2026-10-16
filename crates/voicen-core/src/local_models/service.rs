@@ -52,7 +52,7 @@ pub struct LocalModelView {
     pub size_bytes: u64,
     pub recommended: bool,
     pub state: LocalModelState,
-    /// Always `false` until T-017's residency exists.
+    /// Always `false` until T-017 wires the residency (T-098's `ModelResidency`).
     pub loaded: bool,
 }
 
@@ -146,14 +146,16 @@ impl ReleaseGuard {
     }
 }
 
-/// The port from the delete to whatever keeps a model loaded (T-017's residency).
+/// The port from the delete to whatever keeps a model loaded; implemented by
+/// T-098's `ModelResidency`.
 pub trait ModelRelease {
     /// Unloads `id` if it is loaded and blocks its loading until the guard drops;
     /// `InUse` when a transcription holds it (nothing is unloaded then).
     fn release_for_delete(&self, id: ModelId) -> Result<ReleaseGuard, InUse>;
 }
 
-/// The production [`ModelRelease`] until T-017: nothing is ever loaded or in use.
+/// The [`ModelRelease`] the shell passes until T-017 wires the residency: nothing is
+/// ever loaded or in use.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct NoResidency;
 

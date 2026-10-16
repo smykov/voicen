@@ -54,7 +54,7 @@ Note: the docs tool (context7) was unavailable during planning, so exact whisper
 ## R-8 Failure isolation of native code (NFR-07)
 
 - **Finding**: whisper.cpp/ggml may abort the process on internal asserts (e.g. a malformed model file), and the workspace release profile sets `panic = "abort"`, so neither a native abort nor a Rust panic inside the engine can be caught in-process.
-- **Decision (within the fixed stack)**: keep in-process (§9), and reduce the risk: verify size and the ggml magic header before loading; load only files that passed SHA-256 at download; return every whisper-rs `Result` error as an engine failure (spec FR-012); never `unwrap` in the engine path.
+- **Decision (within the fixed stack)**: keep in-process (§9), and reduce the risk: verify size and the ggml magic header before loading (as built, T-098: size in `ModelStore::path_if_downloaded`, magic `b"lmgg"` in `ModelResidency` before every load; no magic → `LocalEngineFailed`, missing file → `NoLocalModel`, the loader not called); load only files that passed SHA-256 at download; return every whisper-rs `Result` error as an engine failure (spec FR-012); never `unwrap` in the engine path.
 - **Alternative for the owner**: a child-process worker would make native aborts survivable but contradicts "in-process" in §9 and costs extra RAM and startup. Listed under Findings for the owner.
 
 ## R-9 Free disk space

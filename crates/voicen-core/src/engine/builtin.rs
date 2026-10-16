@@ -6,16 +6,16 @@
 //! nothing when built. At `transcribe` it resolves the snapshot's
 //! `builtin_local.model_id` through [`ModelStore::path_if_downloaded`] (none ->
 //! `NoLocalModel`, nothing loaded), takes the model from the one
-//! [`ModelResidency`], and runs it with an [`Abort`] hook that turns true once
+//! [`ModelResidency`], and runs it with an [`Abort`](super::speech_model::Abort) hook that turns true once
 //! `req.timeouts.builtin` has passed on the residency's monotonic port, counted from
-//! after the acquire: the limit covers the transcription only, never the load
+//! when the job holds the model (after the acquire and after any other job on the
+//! same model): the limit covers the transcription only, never the load or a wait
 //! (#133). A run the hook stopped is `Timeout`; any other load or model error is
 //! `LocalEngineFailed`.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
 use std::sync::{Arc, Mutex, PoisonError};
 
-use super::speech_model::Abort;
 use super::{Engine, TranscribeRequest};
 use crate::audio::AudioBuffer;
 use crate::failure::FailureReason;
@@ -81,23 +81,14 @@ impl Engine for BuiltinEngine {
         let (model, warmth) = self.deps.residency.acquire(id, path)?;
         self.set_warmth(Some(warmth));
 
-        let clock = self.deps.residency.clock();
-        let start = clock.now();
-        let abort = Abort::new(clock, start, req.timeouts.builtin);
         let pcm: Vec<f32> = audio
             .samples()
             .iter()
             .map(|&s| f32::from(s) / I16_SCALE)
             .collect();
-        let result = model.transcribe(&pcm, req.language.as_deref(), &abort);
+        let result = model.transcribe_within(&pcm, req.language.as_deref(), req.timeouts.builtin);
         drop(model);
-        if abort.fired() {
-            return Err(FailureReason::Timeout);
-        }
-        match result {
-            Ok(text) => Ok(text.trim().to_string()),
-            Err(_) => Err(FailureReason::LocalEngineFailed),
-        }
+        result.map(|text| text.trim().to_string())
     }
 
     fn local_warmth(&self) -> Option<Warmth> {

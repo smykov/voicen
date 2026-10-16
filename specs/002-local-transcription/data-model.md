@@ -55,7 +55,7 @@ Downloaded ──delete refused (in use) / remove error──▶ Downloaded   (e
 | `handle` | `Box<dyn SpeechModel>` | dropping it frees the memory |
 | `loaded_at`, `load_ms` | instant, u32 | logged |
 | `active` | count of activity guards | > 0 holds the countdown |
-| `idle_deadline` | `Option<Instant>` | `last activity end + 10 min` (`IDLE_UNLOAD = 600 s`) |
+| `idle_deadline` | `Option<Instant>` | `last activity end + 10 min` (`timeouts::MODEL_IDLE_UNLOAD = 600 s`) |
 
 ```text
 Empty ──prewarm(selected) on recording start──▶ Loading(model)

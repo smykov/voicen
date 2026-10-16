@@ -107,8 +107,10 @@ impl Inner {
             .unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Runs the loader (outside the lock), timing it on the monotonic port.
+    /// Checks the file (see [`check_file`]), then runs the loader (outside the
+    /// lock), timing it on the monotonic port.
     fn load(&self, path: &std::path::Path) -> Result<(Box<dyn SpeechModel>, u32), FailureReason> {
+        check_file(path)?;
         let start = self.clock.now();
         let model = self.loader.load(path).map_err(|e| match e {
             FailureReason::NoLocalModel => FailureReason::NoLocalModel,
@@ -117,6 +119,29 @@ impl Inner {
         let took = self.clock.now().saturating_duration_since(start);
         let load_ms = u32::try_from(took.as_millis()).unwrap_or(u32::MAX);
         Ok((model, load_ms))
+    }
+}
+
+/// The ggml magic `0x67676d6c` as whisper.cpp writes it (little-endian).
+const GGML_MAGIC: [u8; 4] = *b"lmgg";
+
+/// The check before every load (spec 002 research R-8: whisper.cpp may abort the
+/// process on a malformed file): a missing file is `NoLocalModel`; a file that
+/// does not start with the ggml magic (shorter than 4 bytes included) or cannot
+/// be read is `LocalEngineFailed`. The loader is never called then.
+fn check_file(path: &std::path::Path) -> Result<(), FailureReason> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path).map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound => FailureReason::NoLocalModel,
+        _ => FailureReason::LocalEngineFailed,
+    })?;
+    let mut head = [0u8; 4];
+    file.read_exact(&mut head)
+        .map_err(|_| FailureReason::LocalEngineFailed)?;
+    if head == GGML_MAGIC {
+        Ok(())
+    } else {
+        Err(FailureReason::LocalEngineFailed)
     }
 }
 
@@ -167,18 +192,14 @@ impl ModelResidency {
         }
     }
 
-    /// The monotonic port the residency reads (the built-in engine's budget uses
-    /// the same one).
-    pub(crate) fn clock(&self) -> Arc<dyn MonotonicClock> {
-        Arc::clone(&self.inner.clock)
-    }
-
     /// The model `id` (file `path`), held until the guard drops. Loads it when
     /// another or no model is loaded (dropping the other one first, once nothing
     /// holds it), waits for a load in flight. `Cold` with the load's duration for
     /// the transcription that loaded it (or the first after its prewarm), `Warm`
     /// otherwise. `NoLocalModel` while a delete of `id` holds its guard; a load
-    /// error is `LocalEngineFailed` and leaves the residency empty.
+    /// error is `LocalEngineFailed` and leaves the residency empty; before every load
+    /// the file is checked (a missing file is `NoLocalModel`, one without the ggml
+    /// magic `LocalEngineFailed`, the loader not called).
     pub fn acquire(
         &self,
         id: ModelId,
@@ -394,17 +415,27 @@ pub struct ModelGuard {
 }
 
 impl ModelGuard {
-    /// Runs the held model (see [`SpeechModel::transcribe`]).
-    pub fn transcribe(
+    /// Runs the held model (see [`SpeechModel::transcribe`]) with an [`Abort`]
+    /// hook whose `limit` starts once the model is held: a job waiting for another
+    /// job on the same model spends none of its budget waiting (decision #133).
+    /// A run the hook stopped is `Timeout`; any other model error is
+    /// `LocalEngineFailed`.
+    pub fn transcribe_within(
         &self,
         pcm: &[f32],
         language: Option<&str>,
-        abort: &Abort,
+        limit: Duration,
     ) -> Result<String, FailureReason> {
-        self.model
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .transcribe(pcm, language, abort)
+        let mut model = self.model.lock().unwrap_or_else(PoisonError::into_inner);
+        let clock = Arc::clone(&self.inner.clock);
+        let start = clock.now();
+        let abort = Abort::new(clock, start, limit);
+        let result = model.transcribe(pcm, language, &abort);
+        drop(model);
+        if abort.fired() {
+            return Err(FailureReason::Timeout);
+        }
+        result.map_err(|_| FailureReason::LocalEngineFailed)
     }
 }
 

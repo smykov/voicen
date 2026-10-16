@@ -97,8 +97,8 @@ impl LocalModels {
 }
 pub struct DeleteOutcome { pub engine_reset: bool, pub reset_failed: bool }   // wire { engineReset, resetFailed }
 
-// The port from the delete to whatever keeps a model loaded. Production value `NoResidency`
-// (never loaded, never in use) until T-017's ModelResidency implements it.
+// The port from the delete to whatever keeps a model loaded. Implemented by T-098's
+// ModelResidency; the shell passes `NoResidency` (never loaded, never in use) until T-017 wires it.
 pub trait ModelRelease {
     fn release_for_delete(&self, id: ModelId) -> Result<ReleaseGuard, InUse>; // unload if loaded; no load of `id` until the guard drops
 }
@@ -135,7 +135,7 @@ impl ModelResidency {
 }
 ```
 
-`acquire`: `Cold { load_ms }` (load timed on the injected monotonic clock) for the transcription that loaded the model or the first after its prewarm, `Warm` otherwise; `NoLocalModel` while a delete of `id` holds its release guard; a load error is `LocalEngineFailed` and leaves the residency empty. Unload when nothing holds the model, no recording runs and `idle` has passed since the last activity ended.
+`acquire`: `Cold { load_ms }` (load timed on the injected monotonic clock) for the transcription that loaded the model or the first after its prewarm, `Warm` otherwise; `NoLocalModel` while a delete of `id` holds its release guard; a load error is `LocalEngineFailed` and leaves the residency empty. Before every load (`acquire` and `prewarm`) the file is checked (research R-8): a missing file → `NoLocalModel`; a file that does not start with the ggml magic `0x67676d6c` little-endian (`b"lmgg"`; shorter than 4 bytes or empty included) → `LocalEngineFailed`; the loader is not called in either case. Unload when nothing holds the model, no recording runs and `idle` has passed since the last activity ended.
 
 ## BuiltinEngine — implements `001::Engine`
 
@@ -149,7 +149,7 @@ impl 001::Engine for BuiltinEngine {
 ```
 
 - Model not selected / not downloaded → `FailureReason::NoLocalModel` → FR-11 path (paste nothing, notify "no local model", audio kept as the pending recording); no load or transcription is attempted.
-- The limit `req.timeouts.builtin` (default 120 s) runs from after the acquire, through the `Abort` hook: transcription only, never the load (decision #133). A run the hook stopped → `Timeout`.
+- The limit `req.timeouts.builtin` (default 120 s) runs from when the job holds the model (`ModelGuard::transcribe_within` builds the `Abort` hook after taking the model's lock), so it covers the transcription only, never the load or a wait for another job on the same model (decision #133). A run the hook stopped → `Timeout`.
 - Any other load/transcribe error → `FailureReason::LocalEngineFailed` → FR-11 path.
 - Reports `Warmth` into the dictation log record (`local=cold load_ms=<n>` / `local=warm`, written only for `engine=builtin`).
 

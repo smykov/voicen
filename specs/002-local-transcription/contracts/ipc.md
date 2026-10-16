@@ -64,7 +64,7 @@ A `failed` state's `reason` uses the `DownloadFailure` codes above with message 
 
 Serialized by serde impls in `voicen-core` (`local_models::service`); `e2e/fixtures/local-models-wire.json` holds the core-checked values for the Playwright mock.
 
-- `LocalModelView` fields: `id`, `nameKey` (= `local_model.name.<id>`, en/ru in `i18n/`), `sizeBytes`, `recommended`, `state`, `loaded` (always `false` until T-017's residency).
+- `LocalModelView` fields: `id`, `nameKey` (= `local_model.name.<id>`, en/ru in `i18n/`), `sizeBytes`, `recommended`, `state`, `loaded` (always `false` until T-017 wires the residency).
 - `ModelState`: `{ "kind": "not_downloaded" | "downloading" | "downloaded" | "failed" }`, plus `received` and `total` for `downloading`, `reason` for `failed`.
 - `FailureReason`: `code`, `messageKey`, and `params` only when there are any; param values are strings (`{ "needed": "66256" }`, `{ "code": "503" }`, `{ "host": "huggingface.co" }`). `needed` is a byte count: the UI shows it only through its one size formatter, in the UI language, and the catalog texts carry no unit (T-045, decision #58; `docs/decisions/i18n.md`).
 - The TS declaration of this wire is `src/lib/local-models/localModelsApi.ts` (the one IPC module of this contract; the e2e mock re-exports it).
