@@ -99,7 +99,11 @@
 #        line; a cache/save fragment whose line 1 is not `      - name: ` plus [A-Za-z0-9 ()._-],
 #        line 2 not starting `        if: ${{ github.ref == 'refs/heads/main' && `, not ending in
 #        `}}` or not holding exactly one `${{` and one `}}`, line 3 blank or indented more than 8,
-#        the word if on a second line, or holding ||; a pnpm/action-setup fragment holding cache:
+#        the word if on a second line, or holding ||; a pnpm/action-setup fragment holding cache;
+#        any fragment whose body (all but its last line) holds the raw `*` (a YAML alias: `*c :
+#        pnpm` with the anchor `&c cache` outside the fragment spells cache with no cache on the
+#        line, so the word counts rest on no alias as on R6 and R8) or the raw `&` outside `&&`
+#        (an anchor; `&&` in a cache/save if: passes; T-088 r3, decision #128, review 2 finding 1):
 #        exit 3 naming the fragment (even when the workflow carries the same edit, so the copy
 #        and ci.yml cannot be loosened together; review 1 finding 1, probes A-G); the list or the
 #        fragment dir missing or empty is exit 3 too.
@@ -966,30 +970,66 @@ if r11_guard g-steps-empty; then
   rm -f "$tmp/g-steps-empty/g/cache-steps"/*
   r11_cannot g-steps-empty "cannot run: owned fragment dir empty" 'cannot run.*cache-steps'
 fi
-# frag_case <name> <fragment basename> <label> <sed script>: the fragment edited by the sed script
-# in the guard's copy AND inserted at the end of the gate job of the workflow copy, so the edited
-# fragment occurs byte for byte and only the guard's check of its own copy can refuse it (the copy
-# and ci.yml loosened together). A fragment ending on a job key line `  windows:` is completed by
-# ok-release's own `  windows:` line; any other is followed by a run: line. Exit 3 naming it.
-frag_case() {
-  local n="$1" base="$2" label="$3" sc="$4" fr t
-  r11_guard "$n" || return
+# frag_build <name> <fragment basename> <sed script> [<env block>]: the fragment edited by the sed
+# script in the guard's copy AND inserted at the end of the gate job of the workflow copy, so the
+# edited fragment occurs byte for byte and only the guard's check of its own copy can refuse it
+# (the copy and ci.yml loosened together). A fragment ending on a job key line `  windows:` is
+# completed by ok-release's own `  windows:` line; any other is followed by a run: line. An empty
+# sed script leaves the fragment as it is. The env block (T-088 r3, decision #128), when given, is
+# inserted as the gate job's env: right under its runs-on: line, outside every fragment: the place
+# an anchor (`&c cache`) sits for an alias key inside the fragment (review 2 finding 1, N1-N4).
+frag_build() {
+  local n="$1" base="$2" sc="$3" envb="${4:-}" fr t e c nx
+  r11_guard "$n" || return 1
   fr="$tmp/$n/g/cache-steps/$base"
   if [ ! -f "$csd/$base" ]; then
     echo "FAIL $n: $csd/$base not found (fix the test with the owned fragments)" >&2
     failed=$((failed + 1))
-    return
+    return 1
   fi
-  sed -e "$sc" "$csd/$base" > "$fr"
-  if cmp -s "$csd/$base" "$fr"; then
-    echo "FAIL $n: the edit did not apply to $base (fix the test)" >&2
-    failed=$((failed + 1))
-    return
+  if [ -n "$sc" ]; then
+    sed -e "$sc" "$csd/$base" > "$fr"
+    if cmp -s "$csd/$base" "$fr"; then
+      echo "FAIL $n: the edit did not apply to $base (fix the test)" >&2
+      failed=$((failed + 1))
+      return 1
+    fi
   fi
   t="$tmp/$n/ins"
-  if [ "$(tail -n 1 "$fr")" = "  windows:" ]; then sed '$d' "$fr" > "$t"; else { cat "$fr"; echo "        run: echo next"; } > "$t"; fi
-  awk -v t="$t" '{ print } NR == 31 { while ((getline l < t) > 0) print l }' "$owned_src" > "$tmp/$n/wf/ci.yml"
-  r11_cannot "$n" "$label" "cannot run.*$(ere "$base")"
+  e="$tmp/$n/env"
+  if [ -n "$envb" ]; then printf '    env:\n%s\n' "$envb" > "$e"; else : > "$e"; fi
+  # A fragment whose last line is the first line of another owned fragment (pnpm/action-setup
+  # ends on the windows setup-node line) is completed by that fragment, so its end line is covered
+  # as in the real ci.yml and only the self-check can refuse the case.
+  nx=""
+  for c in "$csd"/*; do
+    [ "$(basename "$c")" != "$base" ] && [ "$(head -n 1 "$c")" = "$(tail -n 1 "$fr")" ] && nx="$c"
+  done
+  if [ "$(tail -n 1 "$fr")" = "  windows:" ]; then sed '$d' "$fr" > "$t"
+  elif [ -n "$nx" ]; then { sed '$d' "$fr"; cat "$nx"; echo "        run: echo next"; } > "$t"
+  else { cat "$fr"; echo "        run: echo next"; } > "$t"; fi
+  if [ "$(sed -n 28p "$owned_src")" != "    runs-on: ubuntu-24.04" ] || [ "$(sed -n 31p "$owned_src")" != "      - run: make check" ]; then
+    echo "FAIL $n: ok-release gate job moved (lines 28 and 31; fix the test)" >&2
+    failed=$((failed + 1))
+    return 1
+  fi
+  awk -v t="$t" -v e="$e" '{ print }
+    NR == 28 { while ((getline l < e) > 0) print l }
+    NR == 31 { while ((getline l < t) > 0) print l }' "$owned_src" > "$tmp/$n/wf/ci.yml"
+}
+# frag_case <name> <fragment basename> <label> <sed script> [<env block>]: frag_build, then exit 3
+# naming the fragment.
+frag_case() {
+  frag_build "$1" "$2" "$4" "${5:-}" || return
+  r11_cannot "$1" "$3" "cannot run.*$(ere "$2")"
+}
+# frag_ok <name> <fragment basename> <label> <sed script> [<env block>]: frag_build, then exit 0
+# (an edit the self-check must not refuse: no over-reach).
+frag_ok() {
+  frag_build "$1" "$2" "$4" "${5:-}" || return
+  guard="$tmp/$1/g/release-guard.sh"
+  run "$3" 0 'ok:' "$tmp/$1/wf"
+  guard="$real_guard"
 }
 frag_case g-frag-sn-cache-pnpm gate-setup-node.yml "cannot run: setup-node fragment with cache: pnpm instead of package-manager-cache: false" \
   's/^          package-manager-cache: false$/          cache: pnpm/'
@@ -1064,6 +1104,38 @@ frag_case g-frag-save-if-indented windows-pnpm-save.yml "cannot run: cache/save 
 frag_case g-frag-save-name-quote windows-pnpm-save.yml "cannot run: cache/save fragment whose name opens a double-quoted scalar holding the if: line" \
   '1s/name: /name: "/
 /^        if: /a\        z"'
+
+# T-088 r3 (decision #128, review 2 finding 1, probes N1-N4 in reviews/2.md): a YAML alias used as
+# a key spells cache, with, if or save-if with none of those words on the fragment's line, so the
+# self-check's word counts (premises R6, R8) do not see it; the anchor sits in ci.yml outside every
+# fragment (the gate job's env:). No alias in a fragment: the raw `*` in a fragment body is exit 3.
+# No anchor in a fragment: the raw `&` outside `&&` in a fragment body is exit 3. `&&` (the real
+# cache/save if: lines) stays accepted.
+frag_case g-frag-alias-sn-cache-pnpm gate-setup-node.yml "cannot run: setup-node fragment with an alias key *c : pnpm, anchor &c cache outside the fragment (N1: with.cache = pnpm)" \
+  '/^          node-version: "20.19"$/a\          *c : pnpm' \
+  '      VOICEN_K: &c cache'
+frag_case g-frag-alias-pnpm-cache windows-pnpm-action-setup.yml "cannot run: pnpm/action-setup fragment with with: and an alias key *c : true, anchor &c cache outside (N2: with.cache = true)" \
+  '1a\        with:\n          *c : true' \
+  '      VOICEN_K: &c cache'
+frag_case g-frag-alias-rust-save-if windows-rust-cache.yml "cannot run: rust-cache fragment with an alias key *s : true after save-if, anchor &s save-if outside (N3: the last save-if wins)" \
+  '/^          save-if: /a\          *s : true' \
+  '      VOICEN_K: &s save-if'
+frag_case g-frag-alias-save-if windows-pnpm-save.yml "cannot run: cache/save fragment with an alias key *i : \${{ always() }}, anchor &i if outside (N4: the last if wins)" \
+  '/^        uses: actions\/cache\/save@/a\        *i : ${{ always() }}' \
+  '      VOICEN_K: &i if'
+frag_case g-frag-alias-value gate-setup-node.yml "cannot run: setup-node fragment with an alias as a value (node-version: *v, anchor &v outside; no alias in a fragment at all)" \
+  's/^          node-version: "20.19"$/          node-version: *v/' \
+  '      VOICEN_V: &v "20.19"'
+frag_case g-frag-anchor-sn gate-setup-node.yml "cannot run: setup-node fragment holding an anchor (node-version: &v ...)" \
+  's/^          node-version: "20.19"$/          node-version: \&v "20.19"/'
+frag_case g-frag-anchor-save-beside-and gate-cargo-save.yml "cannot run: cache/save fragment holding an anchor (key: &k ...) beside the && of its if: line" \
+  's/^          key: /          key: \&k /'
+frag_ok g-frag-ok-save-if-second-and windows-pnpm-save.yml "ok: cache/save fragment whose if: holds a second && (&& is not an anchor)" \
+  "2s/ }}\$/ \\&\\& github.event_name == 'push' }}/"
+frag_ok g-frag-ok-anchor-alias-outside gate-setup-node.yml "ok: an anchor and an alias in ci.yml outside every fragment, fragments as owned (the rule reads fragments only)" \
+  '' \
+  '      VOICEN_V: &v "20.19"
+      VOICEN_W: *v'
 
 # Every committed fixture dir is in the table.
 for d in "$fx"/*/; do
