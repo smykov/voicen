@@ -3,8 +3,8 @@
 //!
 //! wiremock serves on its own thread and runtime; the engine is called on a plain
 //! std thread, because the blocking reqwest client panics inside a tokio runtime
-//! context (T-001 Investigation (e)). Fake data only: 127.0.0.1, `.invalid`
-//! (RFC 6761), `sk-test-SECRET`.
+//! context (T-001 Investigation (e)). Fake data only: 127.0.0.1, the RFC 6761
+//! reserved TLD (through `common::os_answer`), `sk-test-SECRET`.
 
 mod common;
 /// The checks of `common::os_answer::OsAnswer::refused()`, in each binary that takes it
@@ -545,7 +545,7 @@ fn refused_loopback_port_is_cannot_reach_host_port() {
 
 #[test]
 fn invalid_host_is_network_unavailable() {
-    // RFC 6761 `.invalid` never resolves; reqwest reports is_dns AND is_connect.
+    // An RFC 6761 reserved name never resolves; reqwest reports is_dns AND is_connect.
     // Bite: is_connect checked before is_dns (-> CannotReach). The case's
     // deadlines: reqwest times the lookup inside the connect timeout, so a 2 s
     // connect cut a lookup whose UDP answer was lost (F-013, T-080 I1).
@@ -995,8 +995,8 @@ fn lookup_answered_at_once_with_a_refused_address_is_cannot_reach() {
 fn answered_lookup_then_unanswered_connect_stays_cannot_reach() {
     // Failure branch 4: the lookup answers at once with the blackhole address of
     // `Unanswered::blackhole()`, so the connect timer, not the lookup, ends the
-    // call -> CannotReach{name} as today (classify_table row "192.0.2.1
-    // connect_timeout"). Where the host has no route the OS answers at once with
+    // call -> CannotReach{name} as today (the classify_table row of the blackhole
+    // connect_timeout). Where the host has no route the OS answers at once with
     // NetworkUnavailable; the case accepts both endings (vacuous there). The IP
     // literal itself never reaches the resolver and stays pinned by
     // `api_pipeline::blackhole_connect_is_bounded_by_connect_timeout`. Bite: a

@@ -1,16 +1,16 @@
 # The gate: every area's checks, each through scripts/tw-run in the area's toolchain.
 .PHONY: check check-shell-layout check-shell-layout-fixtures check-helper-windows-fixtures check-core \
-	check-ci-credentials check-core-test-clocks check-http-client-builder check-ci-wip check-telegram-send check-telegram-failure-branch \
+	check-ci-credentials check-clippy-lines check-core-test-os-answer check-ci-wip check-telegram-send check-telegram-failure-branch \
 	check-version-stamp check-release-check check-release check-release-guard check-nsis-fork check-e2e-entry-fixtures \
-	check-shell-windows check-ban-canary check-clippy-lines check-core-test-os-answer \
+	check-shell-windows check-ban-canary \
 	check-ui core-image ui-image \
 	licenses licenses-check licenses-unit licenses-fixture licenses-rust licenses-bundle \
 	licenses-npm licenses-generate licenses-stale licenses-stale-guard
 
-# check-shell-windows after check-core: the shell depends on voicen-core, so a core error is
-# reported first by the faster native check-core, before the slower cross-target build.
-check: check-shell-layout check-shell-layout-fixtures check-helper-windows-fixtures check-ci-credentials check-core-test-clocks check-http-client-builder check-ci-wip check-telegram-send check-telegram-failure-branch check-version-stamp check-release-check check-release check-release-guard check-nsis-fork check-core \
-	check-shell-windows check-e2e-entry-fixtures check-ui \
+# check-ban-canary and check-shell-windows after check-core: both build voicen-core, so a core
+# error is reported first by the faster native check-core, before the slower runs.
+check: check-shell-layout check-shell-layout-fixtures check-helper-windows-fixtures check-ci-credentials check-clippy-lines check-core-test-os-answer check-ci-wip check-telegram-send check-telegram-failure-branch check-version-stamp check-release-check check-release check-release-guard check-nsis-fork check-core \
+	check-ban-canary check-shell-windows check-e2e-entry-fixtures check-ui \
 	licenses-check
 
 # Shell tests only in src-tauri/tests/*.rs (T-035, T-038, T-092, F-002; docs/decisions/ci-toolchain.md):
@@ -41,44 +41,29 @@ check-helper-windows-fixtures:
 check-ci-credentials:
 	scripts/ci/ci-credentials.test.sh
 
-# T-080 (rca, class os-answer-deadline-race): no core test outside crates/voicen-core/tests/common
-# names an OS-answer target (a .invalid host, 127.0.0.1:1, the blackhole 192.0.2.1) or reads
-# the wall clock itself (Instant::now, .elapsed(), an Instant alias); targets come with their
-# deadlines from tests/common, timing goes through its helpers (docs/decisions/core-tests.md).
-# The self-test runs the tripwire scripts/ci/core-test-clocks.sh on
-# scripts/ci/fixtures/core-test-clocks/ and the real tests dir. Host bash.
-check-core-test-clocks:
-	scripts/ci/core-test-clocks.test.sh
-
-# T-079 (decisions #106, #113): every reqwest client of voicen-core is built by engine::http
-# (Client::builder, ClientBuilder::new, Client::new( refused in any other *.rs under
-# crates/voicen-core/src), so each has the deadline resolver (docs/decisions/engine-http.md).
-# The self-test runs the tripwire scripts/ci/http-client-builder.sh on
-# scripts/ci/fixtures/http-client-builder/ and the real source dir. Host bash.
-check-http-client-builder:
-	scripts/ci/http-client-builder.test.sh
-
-# T-089 (P-020; docs/tasks/T-089.md). Red tests written ahead of the implementation; not yet
-# prerequisites of check: (each fails until T-089 lands; the implementation adds them to check:
-# and retires check-http-client-builder and check-core-test-clocks).
-# check-ban-canary (decides_on: switch): the voicen-core call bans (reqwest client construction
-# outside engine::http, Instant::now / elapsed outside crate::clock and tests/common) are
-# clippy disallowed-types / -methods at deny level; scripts/ci/ban-canary.sh lints the owned
-# probe files (features ban-canary-lib, ban-canary-tests) in the core image and compares every
-# diagnostic with scripts/ci/ban-canary.expected.txt.
+# T-089 (P-020; docs/decisions/ci-toolchain.md, docs/tasks/T-089.md): the voicen-core call bans
+# (a reqwest client built outside engine::http, decisions #106, #113; Instant::now / elapsed
+# outside crate::clock and tests/common, T-080 I2) are rustc's path resolution: clippy
+# disallowed-types / -methods from crates/voicen-core/clippy.toml, pinned at deny by the
+# [lints.clippy] table of crates/voicen-core/Cargo.toml (check-core adds -D warnings).
+# check-ban-canary (decides_on: switch): scripts/ci/ban-canary.sh lints the owned probe files
+# (features ban-canary-lib, ban-canary-tests) in the core image and compares every diagnostic
+# with scripts/ci/ban-canary.expected.txt, so each config entry and the deny level are proven.
 check-ban-canary:
 	scripts/ci/ban-canary.sh
 
 # check-clippy-lines (decides_on: token + literal): every tracked line holding the token clippy
 # (any case, comments included) in a *.rs, Cargo.toml or .cargo config is an owned line of
-# scripts/ci/clippy-lines.txt. The self-test runs the guard scripts/ci/clippy-lines.sh on trees
-# built in a temp dir and on the real repository. Host bash, git.
+# scripts/ci/clippy-lines.txt, so no allow, cap or config can lower the bans unseen. The
+# self-test runs the guard scripts/ci/clippy-lines.sh on trees built in a temp dir and on the
+# real repository. Host bash, git.
 check-clippy-lines:
 	scripts/ci/clippy-lines.test.sh
 
-# check-core-test-os-answer (decides_on: token; the I1 half of core-test-clocks, renamed): no
-# core test outside crates/voicen-core/tests/common names an OS-answer target (.invalid,
-# 127.0.0.1:1, 192.0.2.1), any case, comments included. The self-test runs the tripwire
+# check-core-test-os-answer (T-080 rca, class os-answer-deadline-race; T-089, decides_on: token):
+# no core test outside crates/voicen-core/tests/common names an OS-answer target (.invalid,
+# 127.0.0.1:1, 192.0.2.1), any case, comments included; targets come with their deadlines from
+# tests/common (docs/decisions/core-tests.md, I1). The self-test runs the tripwire
 # scripts/ci/core-test-os-answer.sh on scripts/ci/fixtures/core-test-os-answer/ and the real
 # tests dir. Host bash.
 check-core-test-os-answer:

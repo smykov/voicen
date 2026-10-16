@@ -30,7 +30,7 @@ Tasks: T-016 (core half), T-044 (coordinator and shell half). Contract: `specs/0
 
 - **Defect that produced it:** T-079: `Downloader::transfer` built its own `Client::builder()` with reqwest's default resolver; a DNS server that did not answer kept the download thread in the client's drop until the OS resolver gave up (~20 s on Linux), past the connect setting.
 - **What breaks if you violate it:** a download with an unanswered lookup ends long after the connect deadline. The reason is `SourceUnreachable{host}` either way (`DownloadFailure::from_transport` maps dns and connect alike).
-- **Where it is enforced:** `Downloader::transfer` takes `engine::http::client_with_read_timeout` and sends through `HttpClient::send` (the shared deadline resolver and lookup record, `docs/decisions/engine-http.md`); `make check-http-client-builder`; test `local_download::unanswered_lookup_fails_source_unreachable_while_the_lookup_is_held`.
+- **Where it is enforced:** `Downloader::transfer` takes `engine::http::client_with_read_timeout` and sends through `HttpClient::send` (the shared deadline resolver and lookup record, `docs/decisions/engine-http.md`); the reqwest call ban of `make check-core` (T-089); test `local_download::unanswered_lookup_fails_source_unreachable_while_the_lookup_is_held`.
 - **Don't:** build the download's client with its own `Client::builder()`.
 
 ### The SHA-256 comes from `sha2` 0.10 (decision #50)

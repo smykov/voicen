@@ -12,15 +12,17 @@
 //! - [`held`] (T-079): a lookup held without an answer until the test releases it,
 //!   and the ordering check "the call returned while the lookup was held".
 //!
-//! `scripts/ci/core-test-clocks.sh` (in `make check`) refuses an OS-answer literal or
-//! a clock reading in any test file outside this directory. These rules stay here,
+//! `scripts/ci/core-test-os-answer.sh` (in `make check`) refuses an OS-answer literal
+//! in any test file outside this directory, and the package's call ban (rustc's
+//! path resolution, T-089) refuses a clock reading there; the allow below exempts
+//! this directory (an owned line, T-089). These rules stay here,
 //! not in `test_support`: they are core-test-only (docs/decisions/core-tests.md).
 //! The checks of the helpers are not modules of `common`: `common/os_answer_tests.rs`
 //! and `common/timing_tests.rs` run in `tests/common_helpers.rs`, and
 //! `common/refused_addr_tests.rs` in each binary that takes a refused case (T-047
 //! review 1 #3), so a binary that takes none, `tests/local_download_refused.rs`
 //! above all, runs none of its connect probes.
-#![allow(dead_code)]
+#![allow(dead_code, clippy::disallowed_methods)]
 
 pub mod download;
 pub mod held;

@@ -1,6 +1,6 @@
 //! The one way a voicen-core test gets a target whose outcome comes from an OS
 //! answer (T-080, invariant I1; docs/decisions/core-tests.md): a refused loopback
-//! port or a name the resolver fails. `scripts/ci/core-test-clocks.sh` (in
+//! port or a name the resolver fails. `scripts/ci/core-test-os-answer.sh` (in
 //! `make check`) refuses such a literal (`*.invalid`, `127.0.0.1:1`, `192.0.2.1`) in
 //! every test file outside `tests/common`.
 //!
@@ -166,7 +166,7 @@ fn budget_timeouts() -> Timeouts {
 /// budget; the case carries its deadlines and the endings it accepts, so the
 /// verdict never depends on which of the two the OS gives. The host exists
 /// outside `tests/common` only inside this case (the literal is refused there by
-/// `scripts/ci/core-test-clocks.sh`).
+/// `scripts/ci/core-test-os-answer.sh`).
 #[derive(Debug, Clone)]
 pub struct Unanswered {
     /// The authority to put in a URL: TEST-NET-1 (RFC 5737), `192.0.2.1`.

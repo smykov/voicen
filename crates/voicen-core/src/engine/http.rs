@@ -13,6 +13,7 @@
 //! Every failure is a [`TransportError`], which `failure::classify` maps to a
 //! reason; no `reqwest::Error`, URL, key or body leaves this module.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
+#![allow(clippy::disallowed_types)]
 
 use std::future::Future;
 use std::io::Read;
@@ -56,8 +57,9 @@ pub(crate) fn authorization(key: Option<&Secret>) -> Result<Option<HeaderValue>,
 
 /// A blocking client built here, with the lookup record of its resolver. Every
 /// reqwest client of the crate is one of these (T-079, decisions #106, #113;
-/// `docs/decisions/engine-http.md`; `make check-http-client-builder`): its lookups
-/// run on detached threads through [`DeadlineResolver`], so neither a send nor the
+/// `docs/decisions/engine-http.md`; held by the call ban of T-089,
+/// `make check-ban-canary`): its lookups run on detached threads through
+/// [`DeadlineResolver`], so neither a send nor the
 /// client's drop waits for a host-name lookup with no answer, and a send that
 /// fails while a lookup is unanswered is a DNS failure.
 pub(crate) struct HttpClient {

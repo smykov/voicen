@@ -1,7 +1,7 @@
 //! The only place a voicen-core test reads the wall clock (T-080, invariant I2;
-//! docs/decisions/core-tests.md). `scripts/ci/core-test-clocks.sh` (in `make check`)
-//! refuses `Instant::now`, `.elapsed(` and an alias of `Instant` in every test file
-//! outside `tests/common`.
+//! docs/decisions/core-tests.md). The package's call ban (rustc's path resolution,
+//! T-089; in `make check`) refuses `Instant::now` and `Instant::elapsed`, under any
+//! spelling or alias, in every test file outside `tests/common`.
 //!
 //! I2: a wall-clock reading decides only a lower bound ([`at_least`]: a deadline
 //! never fires early). A wrong longer deadline is caught by the outcome (the server

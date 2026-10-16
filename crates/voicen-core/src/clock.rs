@@ -25,12 +25,15 @@
 
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-/// The monotonic clock now: exactly `Instant::now()`.
+/// The monotonic clock now: exactly `Instant::now()`. This function and [`since`]
+/// are the only src exemptions from the clock ban (T-089, owned lines).
+#[allow(clippy::disallowed_methods)]
 pub(crate) fn instant() -> Instant {
     Instant::now()
 }
 
 /// Time passed since `t` on the monotonic clock: exactly `t.elapsed()`.
+#[allow(clippy::disallowed_methods)]
 pub(crate) fn since(t: Instant) -> Duration {
     t.elapsed()
 }

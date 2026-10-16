@@ -5,7 +5,7 @@
 - `timing.rs`: `Took` (an opaque measured time), `measure`, `between`, `fastest`, `Took::less`, `at_least`, `within_spec`, `at_most_per_second`, `REFERENCE_LOAD`, `now`, `ago`, `try_ago` (T-009's 10-minute timer test skips on a young clock), `deadline`, `left`, `passed`, `eventually`;
 - `refused_addr_tests.rs` and `download.rs`.
 
-Also: `scripts/ci/core-test-clocks.sh` (the tripwire, run by `make check-core-test-clocks`; its self-test `scripts/ci/core-test-clocks.test.sh` uses the fixtures in `scripts/ci/fixtures/core-test-clocks/`), and `.github/workflows/ci.yml` (the windows job, `--no-fail-fast`).
+Also: `scripts/ci/core-test-os-answer.sh` (the I1 tripwire, run by `make check-core-test-os-answer`; its self-test `scripts/ci/core-test-os-answer.test.sh` uses the fixtures in `scripts/ci/fixtures/core-test-os-answer/`), the I2 call ban (`crates/voicen-core/clippy.toml`, `[lints.clippy]` in `crates/voicen-core/Cargo.toml`, the owned crate-level allow of `tests/common/mod.rs`; `make check-core`, proven by `make check-ban-canary`, owned lines held by `make check-clippy-lines`; T-089, `docs/decisions/ci-toolchain.md`), and `.github/workflows/ci.yml` (the windows job, `--no-fail-fast`).
 
 **Users of `tests/common`:**
 - Every voicen-core test binary that declares `mod common;`. Among them: `api_pipeline`, `openai_client`, `diag_pipeline`, `local_server`, `local_download`, `local_download_refused`, `post_process_chat`, `post_process_timeout`, `connection_test`, `dictation_session`, `fakes`, `local_models_service`, `diag_blocked_press`, `diag_observer`, `common_helpers`.
@@ -19,9 +19,9 @@ Also: `scripts/ci/core-test-clocks.sh` (the tripwire, run by `make check-core-te
   - the port is refused by a probe within `OS_ANSWER_BUDGET`;
   - every deadline of the case, destructured exhaustively.
 - `timing_tests::a_measured_time_cannot_be_compared_or_read_back_so_no_ceiling_compiles`: a compile-time check that `Took` has no comparison, `==`, deref or conversion back to a `Duration`.
-- The tripwire self-test: 24 cases, including the real tests dir.
+- The I1 tripwire self-test `core-test-os-answer.test.sh`: 24 cases, including the real tests dir. The I2 ban's canary `ban-canary.sh` (probes k01-k15 in `tests/ban_canary.rs`, feature `ban-canary-tests`).
 
-**Tasks:** T-016; T-047 (F-004); T-048 (F-005); T-078 (F-013; deferred and absorbed by T-080); T-080 (rca, class `os-answer-deadline-race`).
+**Tasks:** T-016; T-047 (F-004); T-048 (F-005); T-078 (F-013; deferred and absorbed by T-080); T-080 (rca, class `os-answer-deadline-race`); T-089 (I2 moved to a compiler ban, I1 a raw-token tripwire).
 **Classes** in `docs/failures.md`: `test-port-race` and `os-answer-deadline-race`.
 **Decisions:** #53, #56, #100, #106, #107, #112, #113.
 **Open questions:** none. OQ-22 (which product reason a lookup cut by the connect timer gives) is answered by decisions #106, #113 and built in T-079 (`docs/decisions/engine-http.md`).
@@ -72,18 +72,21 @@ This is one rule for every kind of uncontrolled clock: the OS refusal time, the 
 **What breaks if you violate it:** a test is green on an idle host and red on a loaded one, on windows-latest, or behind a slow resolver. The verdict then reports the host, not the product.
 
 **Where it is enforced:**
-- T3: `make check-core-test-clocks` runs `scripts/ci/core-test-clocks.sh` over every `*.rs` under `crates/voicen-core/tests` outside the top-level `common/`.
-  - It refuses an OS-answer literal: `<name>.invalid`, `127.0.0.1:1` (as text or as `([127, 0, 0, 1], 1)`), `192.0.2.1`.
-  - It refuses a clock read: `Instant::now`, `.elapsed(`, an `Instant` alias.
-  - It skips lines that start with `//`.
-  - It decides on raw text (F-003). It does not catch:
+- T3, I1 (T-089, `decides_on: token`): `make check-core-test-os-answer` runs `scripts/ci/core-test-os-answer.sh` over every `*.rs` under `crates/voicen-core/tests` outside the top-level `common/`.
+  - It refuses a line holding an OS-answer token, in any case, comments included (no `//` skip): `.invalid` not followed by a letter, digit or `_`; `127.0.0.1:1` not followed by a digit; `192.0.2.1` not followed by a digit.
+  - It reads no Rust syntax (F-003, P-020). It does not catch:
+    - the array form `SocketAddr::from(([127, 0, 0, 1], 1))`, `Ipv4Addr::LOCALHOST`, `127.1`, `:01`;
     - a target built from parts at run time;
+    - the `#[cfg(test)]` unit tests under `crates/voicen-core/src` (outside the dir it reads);
+    - the shell tests.
+  - Exit 3 ("cannot run") is never a pass.
+- T3, I2 (T-089, `decides_on: switch`): rustc's path resolution. Clippy `disallowed-methods` (`std::time::Instant::now`, `std::time::Instant::elapsed` in `crates/voicen-core/clippy.toml`), pinned at deny by `[lints.clippy]` in `crates/voicen-core/Cargo.toml`, fails `make check-core` on a clock read under any spelling (whitespace, a split path, `use … as`, UFCS, a fn reference, a macro) in every target of the package. The only exemptions are owned lines: `#![allow(dead_code, clippy::disallowed_methods)]` in `tests/common/mod.rs` (all of `common`) and the two allows on `crate::clock::instant` / `since` (the src seam, T-103). `make check-ban-canary` proves the ban bites (probes k01-k15), and `make check-clippy-lines` refuses any other line naming the lint tool.
+  - It does not catch:
     - arithmetic on two instants handed out by `common` (`now() - a`), including a ceiling written that way;
     - a ceiling through `within_spec` with a made-up spec id;
-    - the `#[cfg(test)]` unit tests under `crates/voicen-core/src` (outside the dir it reads; they stamp through `crate::clock::instant()` and hold no ceiling today);
-    - the shell tests.
+    - a clock read in src through `crate::clock::instant()` / `since()` (the unit tests under `src` stamp through it and hold no ceiling today);
+    - the shell tests (another package, no such config).
   - A ceiling on what `measure` / `between` return is not text it reads: it does not compile (`Took`, above).
-  - Exit 3 ("cannot run") is never a pass.
 - Automatic checks inside `common`:
   - the `OsAnswer` probes;
   - the exhaustive `Timeouts` destructure in `refused_addr_tests`: a new deadline field breaks the build until it is set;
@@ -109,7 +112,7 @@ This is one rule for every kind of uncontrolled clock: the OS refusal time, the 
 - **What breaks if you violate it:** a rare flaky "refused" test.
 - **Where it is enforced:**
   - The single seam is `OsAnswer::refused()`: `127.0.0.1:1`, below the Linux and Windows ephemeral ranges. Its probe asserts `ConnectionRefused` at each use, so a listener on port 1 fails loudly.
-  - The tripwire keeps the literal inside `tests/common`.
+  - The I1 tripwire (`core-test-os-answer.sh`) keeps the literal inside `tests/common`.
   - The rule itself (no bound-and-released port) is enforced by review (T1).
   - `local_download_refused` keeps its own test binary because its test needs refused-then-serve on one port. It is the only user of `OsAnswer::refused_released_port()`.
 - **Don't:** bind port 0 and release it to get a "closed" port.
@@ -117,4 +120,4 @@ This is one rule for every kind of uncontrolled clock: the OS refusal time, the 
 ## Open
 
 - The ~2 s user-facing refusal on Windows: OQ-07 (non-blocking).
-- `src-tauri/tests/settings_ipc.rs` keeps one `took < 30 s` ceiling on its refused invoke. The shell tests are outside the tripwire's scope.
+- `src-tauri/tests/settings_ipc.rs` keeps one `took < 30 s` ceiling on its refused invoke. The shell tests are outside the I1 tripwire's and the I2 ban's scope.

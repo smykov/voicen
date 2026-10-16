@@ -18,7 +18,7 @@
 //! and answers late. The "connection not accepted in time" row (connect timeout ->
 //! CannotReach, Investigation (ii)) has no deterministic local fixture and is
 //! pinned by `failure::tests::classify_table` through `classify`.
-//! Fake data only: 127.0.0.1, `.invalid` (RFC 6761), `example.com`, `sk-test-…`.
+//! Fake data only: 127.0.0.1, RFC 6761 reserved names, `example.com`, `sk-test-…`.
 //! Wall-clock readings go through `common::timing` and decide only lower bounds
 //! (T-080 I2).
 

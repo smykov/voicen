@@ -1,0 +1,13 @@
+# Owned lines holding the token clippy (T-089; guard scripts/ci/clippy-lines.sh, docs/decisions/ci-toolchain.md).
+# <path> TAB <text>; * = any file. Each line holding clippy (any case, comments included) in a tracked
+# *.rs, Cargo.toml or .cargo config must equal an entry. An exemption from the call bans
+# (crates/voicen-core/clippy.toml) is bound to its file; a * entry never names disallowed.
+crates/voicen-core/src/engine/http.rs	#![allow(clippy::disallowed_types)]
+crates/voicen-core/src/clock.rs	#[allow(clippy::disallowed_methods)]
+crates/voicen-core/src/clock.rs	#[allow(clippy::disallowed_methods)]
+crates/voicen-core/tests/common/mod.rs	#![allow(dead_code, clippy::disallowed_methods)]
+crates/voicen-core/Cargo.toml	[lints.clippy]
+
+*	#![deny(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
+*	#[allow(clippy::too_many_arguments)]
+*	#[allow(clippy::large_enum_variant)]

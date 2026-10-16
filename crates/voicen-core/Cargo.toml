@@ -43,3 +43,13 @@ voicen-core = { path = ".", features = ["test-fakes"] }
 # Mock OpenAI-compatible server for tests/openai_client.rs (T-040).
 tokio = { version = "1", features = ["macros", "rt"] }
 wiremock = "0.6"
+
+# T-089 call bans (P-020): the two lints that read this package's lint config file (reqwest
+# client types and get shortcuts outside engine::http; Instant::now / elapsed outside
+# crate::clock and tests/common) at deny, for every target of this package. This level beats an
+# allow or expect of `warnings`; check-core keeps -D warnings on top. Proven to bite by
+# make check-ban-canary; every line naming the lint tool is an owned line (T-089 token guard).
+# docs/decisions/ci-toolchain.md.
+[lints.clippy]
+disallowed_methods = "deny"
+disallowed_types = "deny"

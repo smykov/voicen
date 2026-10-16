@@ -4,8 +4,8 @@
 //! spec-stated tolerance ([`within_spec`]), whose failure names the spec id and the
 //! reference load the tolerance holds under (OQ-23: the gate's own load, one
 //! `make check`, `cargo test -j2`). [`measure`] is the stopwatch callers use instead
-//! of `Instant::now()` / `.elapsed()` (refused outside `tests/common` by
-//! `scripts/ci/core-test-clocks.sh`).
+//! of `Instant::now()` / `.elapsed()` (refused outside `tests/common` by the
+//! package's call ban, rustc's path resolution, T-089).
 //!
 //! Not a module of `tests/common`: included by `tests/common_helpers.rs` with
 //! `#[path]`, as `refused_addr_tests.rs` is by its users.
