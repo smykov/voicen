@@ -33,7 +33,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{mpsc, Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use tauri::menu::{MenuEvent, MenuId};
 use tauri::test::{mock_context, noop_assets};
@@ -464,6 +464,31 @@ fn new_names(before: &[String], after: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// Runs an `idle` child over `logs`, waits for its marker naming its pid, kills it
+/// (TerminateProcess) and returns that pid: the marker is left for the next begin.
+fn killed_idle_session(logs: &Path) -> u32 {
+    let (mut child, readers) = spawn_child("idle", logs);
+    let pid = child.id();
+    let deadline = Instant::now() + MARKER_BUDGET;
+    let marked = loop {
+        let text = std::fs::read_to_string(logs.join(MARKER)).unwrap_or_default();
+        if text.lines().any(|l| l == format!("pid={pid}")) {
+            break true;
+        }
+        if Instant::now() >= deadline || matches!(child.try_wait(), Ok(Some(_))) {
+            break false;
+        }
+        thread::sleep(Duration::from_millis(20));
+    };
+    let _ = child.kill();
+    let ran = finish(child, readers, CHILD_BUDGET);
+    assert!(
+        marked,
+        "the idle child wrote no marker naming pid {pid} within {MARKER_BUDGET:?}: {ran:#?}"
+    );
+    pid
+}
+
 #[test]
 fn a_panic_in_extern_c_leaves_one_panic_file_without_the_payload() {
     // Acceptance (a): the panic hook runs before std aborts; its first-wins guard
@@ -601,25 +626,7 @@ fn a_killed_session_gets_one_abnormal_end_file_on_the_next_begin() {
     let _serial = serial();
     let tmp = TempDir::new();
     let logs = logs_dir(&tmp);
-    let (mut child, readers) = spawn_child("idle", &logs);
-    let pid = child.id();
-    let deadline = Instant::now() + MARKER_BUDGET;
-    let marked = loop {
-        let text = std::fs::read_to_string(logs.join(MARKER)).unwrap_or_default();
-        if text.lines().any(|l| l == format!("pid={pid}")) {
-            break true;
-        }
-        if Instant::now() >= deadline || matches!(child.try_wait(), Ok(Some(_))) {
-            break false;
-        }
-        thread::sleep(Duration::from_millis(20));
-    };
-    let _ = child.kill();
-    let ran = finish(child, readers, CHILD_BUDGET);
-    assert!(
-        marked,
-        "the idle child wrote no marker naming pid {pid} within {MARKER_BUDGET:?}: {ran:#?}"
-    );
+    let pid = killed_idle_session(&logs);
     assert!(
         crash_files(&logs).is_empty(),
         "premise: no crash file before the next begin"
@@ -642,6 +649,135 @@ fn a_killed_session_gets_one_abnormal_end_file_on_the_next_begin() {
         messages(&lines, "previous session"),
         vec![format!("previous session outcome=ended_abnormally crash_file={name}").as_str()],
         "{lines:#?}"
+    );
+}
+
+const DAY: Duration = Duration::from_secs(86_400);
+const HOUR: Duration = Duration::from_secs(3_600);
+
+/// Writes a planted crash file `name` in `logs` whose modification time is `age`
+/// before now. Its text matches no session (no `session_started:` line).
+fn plant_crash_file(logs: &Path, name: &str, age: Duration) {
+    let path = logs.join(name);
+    std::fs::write(&path, format!("planted for retention: {name}\n"))
+        .unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
+    let at = SystemTime::now()
+        .checked_sub(age)
+        .expect("now minus the planted age");
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .and_then(|f| f.set_modified(at))
+        .unwrap_or_else(|e| panic!("set_modified {}: {e}", path.display()));
+}
+
+/// A planted name: a year-2000 local time and a pid no child has (`i` in the
+/// seconds), so it never collides with a name diag writes now.
+fn planted_crash_name(i: usize) -> String {
+    format!("crash-20000101-0000{i:02}-1.txt")
+}
+
+#[test]
+fn the_next_begin_retains_the_20_newest_crash_files_counting_its_own_abnormal_end() {
+    // Acceptance failure branch (review 1 #1): "a crash file 20 days old survives
+    // rotation; the 21st crash file removes the oldest". begin_session runs
+    // retain_crash_files AFTER Session::begin (invariant 1), so begin's own
+    // abnormal_end file counts toward the cap of 20. Planted after the kill (the idle
+    // child's own begin must not prune them): one 31 days old, one 25 days old, one
+    // 20 days old and 18 of the last 18 hours = 21 files; the next begin adds its
+    // abnormal_end = 22. Right order: the 31-day file goes by age, then the 25-day one
+    // by the cap: 20 left, the 20-day one and the new file among them.
+    // Bite (P-017, by reading; Windows CI only):
+    // - no retain_crash_files call (or over another dir): 22 files, the 31-day file
+    //   still there -> `old_gone` red;
+    // - the call moved above Session::begin: it sees 21 plants, drops the 31-day one
+    //   (20 left, no cap), then begin adds its file -> 21 files and the 25-day one kept
+    //   -> `capped_gone` / the count red.
+    let _serial = serial();
+    let tmp = TempDir::new();
+    let logs = logs_dir(&tmp);
+    let pid = killed_idle_session(&logs);
+    assert!(
+        crash_files(&logs).is_empty(),
+        "premise: the kill left no crash file before the plants"
+    );
+    let old = planted_crash_name(0);
+    let capped = planted_crash_name(1);
+    let kept = planted_crash_name(2);
+    plant_crash_file(&logs, &old, DAY * 31);
+    plant_crash_file(&logs, &capped, DAY * 25);
+    plant_crash_file(&logs, &kept, DAY * 20);
+    let recent: Vec<String> = (3..21).map(planted_crash_name).collect();
+    for (hours, name) in (1_u32..).zip(&recent) {
+        plant_crash_file(&logs, name, HOUR * hours);
+    }
+    let planted = crash_files(&logs);
+    assert_eq!(planted.len(), 21, "premise: 21 planted files: {planted:?}");
+
+    let next = run_child("next", &logs, CHILD_BUDGET);
+    assert_eq!(next.code, Some(0), "{next:#?}");
+    let files = crash_files(&logs);
+    let old_gone = !files.contains(&old);
+    assert!(
+        old_gone,
+        "the 31-day file survived the next begin: {files:?}"
+    );
+    let capped_gone = !files.contains(&capped);
+    assert!(
+        capped_gone,
+        "the 25-day file (the oldest of 21 within 30 days, begin's file included) was kept: {files:?}"
+    );
+    assert!(
+        files.contains(&kept),
+        "the 20-day file was removed: {files:?}"
+    );
+    assert_eq!(files.len(), 20, "exactly 20 crash files remain: {files:?}");
+    for name in &recent {
+        assert!(
+            files.contains(name),
+            "the recent {name} was removed: {files:?}"
+        );
+    }
+    let written = new_names(&planted, &files);
+    assert_eq!(
+        written.len(),
+        1,
+        "the next begin's own file is among the 20: {files:?}"
+    );
+    let name = written.first().cloned().unwrap_or_default();
+    let text = read_text(&logs.join(&name));
+    assert_eq!(value(&text, "kind"), Some("abnormal_end"), "{text}");
+    assert_eq!(
+        value(&text, "previous_session_pid"),
+        Some(pid.to_string().as_str()),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_begin_deletes_a_crash_file_past_30_days_and_keeps_a_29_day_one() {
+    // The age rule alone (below the cap, so the cap cannot remove anything): with no
+    // previous marker the next begin writes no file of its own, and of two planted
+    // files only the one past CRASH_MAX_AGE_DAYS goes.
+    // Bite (by reading): no retain_crash_files call, or over another dir -> the
+    // 31-day file kept; a `now` that is not the clock's (e.g. the epoch, so nothing is
+    // old) -> the 31-day file kept (the 20-file test above cannot tell, since its cap
+    // drops the oldest anyway).
+    let _serial = serial();
+    let tmp = TempDir::new();
+    let logs = logs_dir(&tmp);
+    std::fs::create_dir_all(&logs).expect("create the logs dir");
+    let old = planted_crash_name(0);
+    let young = planted_crash_name(1);
+    plant_crash_file(&logs, &old, DAY * 31);
+    plant_crash_file(&logs, &young, DAY * 29);
+
+    let next = run_child("next", &logs, CHILD_BUDGET);
+    assert_eq!(next.code, Some(0), "{next:#?}");
+    assert_eq!(
+        crash_files(&logs),
+        vec![young],
+        "only the 29-day file is left"
     );
 }
 
