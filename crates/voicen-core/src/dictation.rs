@@ -24,6 +24,10 @@
 //! session lock, to the loss thread, which ends that recording, by its id, through
 //! the same stop path (end `DeviceLost`).
 //!
+//! T-010: a suspend ([`DictationSession::suspended`]) ends the recording that is on
+//! through the same stop path (end `Suspended`); a failed hotkey registration
+//! notifies only on the transition working → failed (decision #131).
+//!
 //! Threads: the callers' input threads (hotkey, tray), one worker (owns the
 //! [`Pipeline`]; no other thread can reach `run_job` or `Pipeline::pending`), one
 //! timer (message expiry and the recording's maximum length) and one loss thread
@@ -498,26 +502,42 @@ impl DictationSession {
     /// The hotkey registration result at `at` (tray `HotkeyError` until a
     /// successful registration).
     ///
-    /// Every failed registration that leaves no working hotkey comes here (T-055:
-    /// the startup one; T-010's resume re-register): after the tray goes
-    /// `HotkeyError`, the overlay shows `notice.hotkey_unavailable` for 3 s from `at`
+    /// Every registration attempt that decides whether a hotkey works comes here
+    /// (T-055: the startup one and a save; T-010: the re-register after resume and
+    /// unlock). A failure sets the tray to `HotkeyError`. Only on the transition
+    /// working → failed (the controller was not already in `HotkeyError`, decision
+    /// #131) does the overlay show `notice.hotkey_unavailable` for 3 s from `at`
     /// and, outside the session lock, the shell is asked to open settings on
-    /// Recording with the hotkey field focused. A success only clears the error.
+    /// Recording with the hotkey field focused; a failure while already failing
+    /// only keeps the tray. A success only clears the error, so the next failure
+    /// notifies again.
     pub fn hotkey_registration(&self, registered: bool, at: Instant) {
-        {
+        let notify = {
             let mut st = self.shared.lock();
+            let was_failing = st.ctrl.hotkey_error();
             st.ctrl.hotkey_registration(registered, at);
             self.shared.publish(&mut st);
-            if !registered {
+            let notify = !registered && !was_failing;
+            if notify {
                 st.ctrl.notice(NOTICE_HOTKEY_UNAVAILABLE, at);
                 self.shared.publish(&mut st);
             }
-        }
-        if !registered {
+            notify
+        };
+        if notify {
             self.shared
                 .requests
                 .open_settings(SettingsTab::Recording, Some(FieldId::RecordingHotkey));
         }
+    }
+
+    /// The machine is going to sleep at `at` (T-010; the hotkey thread's
+    /// `PBT_APMSUSPEND`). The recording that is on, in either mode, ends through
+    /// the stop path with end `Suspended` and no minimum-hold check: the device is
+    /// closed before this returns (NFR-02) and the audio so far goes on to one job.
+    /// Its later release is ignored. With no recording on nothing happens.
+    pub fn suspended(&self, at: Instant) {
+        stop_recording(&self.shared, at, |ctrl| ctrl.suspend(at).map(Ended::Stop));
     }
 }
 

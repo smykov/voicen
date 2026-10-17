@@ -30,7 +30,8 @@ The API key is not part of the snapshot. It is read from `CredentialStore` per r
 
 - start: register → `Active` or `Failed` (tray `HotkeyError`, notification, open settings on the hotkey field — FR-011)
 - change: register the new binding → success: `Active(new)`, unregister the old one; failure: stay `Active(old)`, report "hotkey unavailable" (FR-012)
-- resume/unlock: re-register → failure → `Failed` (FR-013)
+- resume/unlock: re-register (unregister if registered, then register the active binding under the same id; also from `Failed`) → success: `Active`; failure → `Failed` (FR-013)
+- notification rule (decision #131): the notification and the settings window on the hotkey field come only on the transition `Active` → `Failed`; a failure while already `Failed` only keeps the tray `HotkeyError` (T-010)
 - `Failed` → `Active` only after a successful registration; the hotkey error clears only then (FR-028)
 - Each result reaches core as `DictationSession::hotkey_registration(registered, at)` → `RecordingController::hotkey_registration` (tray `HotkeyError`; T-051)
 

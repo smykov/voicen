@@ -100,7 +100,7 @@ If the hotkey cannot be registered because another application or the OS owns it
 1. **Given** the saved hotkey cannot be registered at start-up, **Then** the tray icon shows the error state, a notification is shown, and settings open on the hotkey field; the error state persists until a hotkey is registered. (req FR-05, FR-25)
 2. **Given** a working hotkey, **When** the user picks a hotkey that is taken, **Then** "hotkey unavailable" is shown and the old hotkey stays active. (req FR-05)
 3. **Given** the PC sleeps and resumes, or is locked and unlocked, or Explorer restarts, **When** the hotkey is pressed, **Then** recording starts, and after an Explorer restart the tray icon is present again. (req FR-26)
-4. **Given** re-registering the hotkey after resume fails, **Then** the start-up failure branch (scenario 1) applies. (req FR-26, FR-05)
+4. **Given** re-registering the hotkey after resume or unlock fails, **Then** the tray shows the error state as in scenario 1; the notification and the settings window on the hotkey field come only when the hotkey was working before (the transition working → failed); while the error state is already on, a failed retry only keeps it, and a successful one clears it, so the next failure notifies again (decision #131). (req FR-26, FR-05)
 
 ---
 

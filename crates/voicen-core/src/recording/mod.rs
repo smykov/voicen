@@ -80,6 +80,10 @@ pub enum RecordingEnd {
     /// device was unplugged or failed), in either mode: the audio so far is sent on
     /// like a release, with no [`MIN_HOLD`] check.
     DeviceLost,
+    /// The machine went to sleep during the recording (T-010, spec 001 edge case
+    /// "sleep while recording"), in either mode: the audio so far is sent on like
+    /// [`DeviceLost`](Self::DeviceLost), with no [`MIN_HOLD`] check.
+    Suspended,
 }
 
 /// The capture failure the shell reports (contracts/core-traits.md `CaptureError`).
@@ -527,6 +531,18 @@ impl<C> RecordingController<C> {
         self.expire(at);
         self.refresh();
         Some(live.into_ticket(at, RecordingEnd::DeviceLost))
+    }
+
+    /// The machine is going to sleep at `at` (T-010). The live recording, whatever
+    /// its id and mode, ends with a ticket (end [`RecordingEnd::Suspended`],
+    /// `stopped_at = at`, no [`MIN_HOLD`]) and the controller is idle once this
+    /// returns; its later release or press is decided from idle. Idle returns
+    /// `None` and changes nothing.
+    pub fn suspend(&mut self, at: Instant) -> Option<StopTicket<C>> {
+        let live = self.live.take()?;
+        self.expire(at);
+        self.refresh();
+        Some(live.into_ticket(at, RecordingEnd::Suspended))
     }
 
     /// `true` while the last hotkey registration result was a failure (tray

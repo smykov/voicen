@@ -35,6 +35,16 @@
 //! unregisters both. `WM_HOTKEY` on an Esc id calls `esc_pressed`. The thread does
 //! not decide when a recording is on: the session asks (it follows
 //! `RecordingController::live_id`).
+//!
+//! T-010 (FR-26, spec 001 US4): the window has a class of our own whose procedure
+//! only re-posts the power and session events to this thread's queue (`WM_LIFECYCLE`):
+//! `PBT_APMSUSPEND`, `PBT_APMRESUMEAUTOMATIC` (`WM_POWERBROADCAST`) and
+//! `WTS_SESSION_UNLOCK` (`WM_WTSSESSION_CHANGE`, after
+//! `WTSRegisterSessionNotification`). The message loop acts on them: after a resume
+//! or an unlock it re-makes the active registration from its own codes and reports
+//! the result with `DictationSession::hotkey_registration` (the only retry besides a
+//! save); at a suspend it stops the release poll and calls
+//! `DictationSession::suspended`, so the recording that is on ends `Suspended`.
 
 use std::io;
 use std::mem::size_of;
@@ -51,7 +61,11 @@ use voicen_core::settings::hotkey::{parse_hotkey, Hotkey};
 use voicen_core::settings::Mode;
 use voicen_core::win32_data::{hotkey_codes, menu_mask_vk, released, HotkeyCodes};
 use windows::core::w;
-use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+use windows::Win32::Foundation::{ERROR_CLASS_ALREADY_EXISTS, HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::RemoteDesktop::{
+    WTSRegisterSessionNotification, WTSUnRegisterSessionNotification, NOTIFY_FOR_THIS_SESSION,
+};
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, RegisterHotKey, SendInput, UnregisterHotKey, HOT_KEY_MODIFIERS, INPUT,
@@ -59,9 +73,10 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     VIRTUAL_KEY, VK_ESCAPE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DestroyWindow, DispatchMessageW, GetMessageW, KillTimer, PostThreadMessageW,
-    SetTimer, TranslateMessage, MSG, WINDOW_EX_STYLE, WM_APP, WM_HOTKEY, WM_QUIT, WM_TIMER,
-    WS_OVERLAPPED,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, KillTimer,
+    PostMessageW, PostThreadMessageW, RegisterClassExW, SetTimer, TranslateMessage, MSG,
+    PBT_APMRESUMEAUTOMATIC, PBT_APMSUSPEND, WINDOW_EX_STYLE, WM_APP, WM_HOTKEY, WM_POWERBROADCAST,
+    WM_QUIT, WM_TIMER, WM_WTSSESSION_CHANGE, WNDCLASSEXW, WS_OVERLAPPED, WTS_SESSION_UNLOCK,
 };
 
 use super::os_code;
@@ -78,6 +93,15 @@ const ESC_ID: i32 = 3;
 const ESC_MOD_ID: i32 = 4;
 /// The thread message that wakes the loop for the queued registrar requests.
 const WM_REGISTRAR: u32 = WM_APP + 1;
+/// The window message the hotkey window's procedure posts to itself for a power or
+/// session event (T-010); `wParam` is one of the `LIFECYCLE_*` kinds.
+const WM_LIFECYCLE: u32 = WM_APP + 2;
+/// `WM_LIFECYCLE` kind: the machine is going to sleep (`PBT_APMSUSPEND`).
+const LIFECYCLE_SUSPEND: usize = 1;
+/// `WM_LIFECYCLE` kind: the machine woke up (`PBT_APMRESUMEAUTOMATIC`).
+const LIFECYCLE_RESUME: usize = 2;
+/// `WM_LIFECYCLE` kind: this session was unlocked (`WTS_SESSION_UNLOCK`).
+const LIFECYCLE_UNLOCK: usize = 3;
 /// How long a registrar call waits for the hotkey thread. The thread may be inside
 /// `hotkey_pressed` (the device open, up to the session's 3 s open budget); a
 /// `prepare` not answered in time is `Unavailable`, and the thread then releases
@@ -330,14 +354,68 @@ fn send_menu_mask() {
     let _ = unsafe { SendInput(&inputs, size_of::<INPUT>() as i32) };
 }
 
-/// The hidden top-level window that receives `WM_HOTKEY` (the system STATIC class:
-/// no class of our own, never shown).
+/// The class of the hotkey window (T-010): ours, so its procedure is
+/// [`hotkey_window_proc`].
+const CLASS_NAME: windows::core::PCWSTR = w!("VoicenHotkey");
+
+/// The hotkey window's procedure (T-010). It only re-posts the power and session
+/// events the loop acts on to this window's queue as [`WM_LIFECYCLE`], so they are
+/// handled by the loop in order with `WM_HOTKEY` and the registrar requests, never
+/// inside a sent message. Everything else goes to `DefWindowProcW`.
+unsafe extern "system" fn hotkey_window_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    let kind = match msg {
+        WM_POWERBROADCAST => match u32::try_from(wparam.0) {
+            Ok(PBT_APMSUSPEND) => Some(LIFECYCLE_SUSPEND),
+            // PBT_APMRESUMESUSPEND (after user input) follows the automatic one and
+            // is ignored, so one resume makes one retry.
+            Ok(PBT_APMRESUMEAUTOMATIC) => Some(LIFECYCLE_RESUME),
+            _ => None,
+        },
+        WM_WTSSESSION_CHANGE if wparam.0 == WTS_SESSION_UNLOCK as usize => Some(LIFECYCLE_UNLOCK),
+        WM_WTSSESSION_CHANGE => None,
+        // SAFETY: the arguments this procedure was called with.
+        _ => return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
+    };
+    if let Some(kind) = kind {
+        // SAFETY: a post to this thread's own window. A full queue loses the event
+        // (no retry then; the next one comes with the next event).
+        let _ = unsafe { PostMessageW(Some(hwnd), WM_LIFECYCLE, WPARAM(kind), LPARAM(0)) };
+    }
+    // WM_POWERBROADCAST: TRUE (processed); WM_WTSSESSION_CHANGE: the return is unused.
+    LRESULT(1)
+}
+
+/// The hidden top-level window that receives `WM_HOTKEY` and the power and session
+/// events (a class of our own, [`CLASS_NAME`], registered once per process; never
+/// shown, so the install smoke's census does not see it).
 fn create_window() -> windows::core::Result<HWND> {
-    // SAFETY: a system class and static strings; no parent, menu or instance.
+    // SAFETY: no module name: the handle of this process's executable.
+    let instance = unsafe { GetModuleHandleW(None) }?.into();
+    let class = WNDCLASSEXW {
+        cbSize: size_of::<WNDCLASSEXW>() as u32,
+        lpfnWndProc: Some(hotkey_window_proc),
+        hInstance: instance,
+        lpszClassName: CLASS_NAME,
+        ..Default::default()
+    };
+    // SAFETY: a valid class description with a static name and a procedure of ours.
+    if unsafe { RegisterClassExW(&class) } == 0 {
+        let err = windows::core::Error::from_thread();
+        // A later hotkey thread of the same process finds the class registered.
+        if err.code() != ERROR_CLASS_ALREADY_EXISTS.to_hresult() {
+            return Err(err);
+        }
+    }
+    // SAFETY: the class registered above and static strings; no parent or menu.
     unsafe {
         CreateWindowExW(
             WINDOW_EX_STYLE(0),
-            w!("STATIC"),
+            CLASS_NAME,
             w!("Voicen hotkey"),
             WS_OVERLAPPED,
             0,
@@ -346,7 +424,7 @@ fn create_window() -> windows::core::Result<HWND> {
             0,
             None,
             None,
-            None,
+            Some(instance),
             None,
         )
     }
@@ -515,6 +593,24 @@ impl Registrations<'_> {
         }
     }
 
+    /// Re-makes the active registration from the active codes (T-010: after a
+    /// resume or an unlock): unregister if registered, then register under the same
+    /// id, and report the result to the session (a failure is logged by
+    /// [`register`]). A pending prepare and the Esc claims are left alone.
+    fn reassert(&mut self) {
+        if self.registered {
+            unregister(self.hwnd, self.active_id);
+        }
+        self.registered = register(
+            self.hwnd,
+            self.active_id,
+            self.active_codes.as_ref(),
+            self.log,
+        );
+        self.session
+            .hotkey_registration(self.registered, Instant::now());
+    }
+
     /// Releases every registration of this thread (the end of the thread).
     fn release_all(&mut self) {
         self.release_esc();
@@ -528,8 +624,9 @@ impl Registrations<'_> {
     }
 }
 
-/// The thread body: window, registration, message loop; on quit it unregisters
-/// and destroys the window on this thread (the thread that registered). The
+/// The thread body: window, registration, session notifications (T-010), message
+/// loop; on quit it unregisters, ends the session notifications and destroys the
+/// window on this thread (the thread that registered). The
 /// registration result is reported to the session before `ready` is answered, so
 /// `start` returns after the report (a startup failure has asked for the settings
 /// window before `run()`'s `Ready`, T-055 Q1).
@@ -554,6 +651,20 @@ fn run(
     };
     let registered = register(hwnd, HOTKEY_ID, codes.as_ref(), log);
     session.hotkey_registration(registered, Instant::now());
+    // T-010: unlock events reach the window only after this; a failure is logged
+    // (before `start` returns) and the hotkey keeps working (resume still
+    // re-registers).
+    // SAFETY: this thread's own window.
+    let sessions = match unsafe { WTSRegisterSessionNotification(hwnd, NOTIFY_FOR_THIS_SESSION) } {
+        Ok(()) => true,
+        Err(err) => {
+            log.write(LogEvent::Warning {
+                kind: WarningKind::HotkeyThreadFailed,
+                os_code: Some(os_code(&err)),
+            });
+            false
+        }
+    };
     // SAFETY: no arguments.
     let thread_id = unsafe { GetCurrentThreadId() };
     let _ = ready.send(Some(thread_id));
@@ -610,6 +721,21 @@ fn run(
             WM_HOTKEY if msg.wParam.0 == ESC_ID as usize || msg.wParam.0 == ESC_MOD_ID as usize => {
                 session.esc_pressed(Instant::now());
             }
+            // T-010: a power or session event re-posted by the window procedure.
+            WM_LIFECYCLE if msg.wParam.0 == LIFECYCLE_SUSPEND => {
+                if polling {
+                    // SAFETY: the timer this thread set on its window.
+                    let _ = unsafe { KillTimer(Some(hwnd), POLL_TIMER_ID) };
+                    polling = false;
+                }
+                hold_codes = None;
+                session.suspended(Instant::now());
+            }
+            WM_LIFECYCLE
+                if msg.wParam.0 == LIFECYCLE_RESUME || msg.wParam.0 == LIFECYCLE_UNLOCK =>
+            {
+                regs.reassert();
+            }
             WM_TIMER if msg.wParam.0 == POLL_TIMER_ID => {
                 let up = hold_codes
                     .as_ref()
@@ -632,8 +758,11 @@ fn run(
         }
     }
     regs.release_all();
-    // SAFETY: the timer and window of this thread, undone once.
+    // SAFETY: the timer, session notification and window of this thread, undone once.
     unsafe {
+        if sessions {
+            let _ = WTSUnRegisterSessionNotification(hwnd);
+        }
         if polling {
             let _ = KillTimer(Some(hwnd), POLL_TIMER_ID);
         }
