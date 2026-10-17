@@ -38,7 +38,7 @@ Phase 0 of [plan.md](plan.md). The stack is fixed by `docs/requirements.md` §9 
 ## R6 — Native faults
 
 - **Decision**: In `src-tauri` (`win/crash.rs`), `SetUnhandledExceptionFilter` installs a filter that writes a crash file of kind `native_fault` with the exception code, the faulting address as `<module>+0x<offset>`, version, commit and session start — using a buffer and a wide path prepared at install time and `CreateFileW`/`WriteFile` only (no allocation, no Rust formatting machinery inside the filter), then returns `EXCEPTION_CONTINUE_SEARCH` so Windows Error Reporting proceeds as usual. Stack overflows and faults that bypass the filter (e.g. fail-fast `__fastfail`) produce no file; the session marker covers them at the next start (FR-016).
-- **Test**: a `crash_probe` binary in `src-tauri` behind the cargo feature `crash-probe` installs both handlers through the same functions the app uses and then panics or dereferences null depending on its argument; a Windows-only integration test runs it with a temporary `LOCALAPPDATA` and asserts the crash file and its allowlisted content. The shipped app has no crash trigger.
+- **Test**: `src-tauri/tests/crash.rs` re-runs its own test executable as a child (`crash_child --exact --ignored`, the mode in an environment variable); the child installs both handlers through the same functions the app uses and then panics or dereferences null, and the parent, with a temporary `LOCALAPPDATA`, asserts the crash file and its allowlisted content. There is no probe binary and no cargo feature; `scripts/ci/shell-targets.txt` is unchanged. The shipped app has no crash trigger.
 
 ## R7 — Session marker and "ended by the installer"
 
@@ -48,7 +48,7 @@ Phase 0 of [plan.md](plan.md). The stack is fixed by `docs/requirements.md` §9 
   3. `logs/installer-ended` exists with a file time not older than the marker's file time (as built, T-100: file times, the note's text is not read) → `previous session was ended by the installer`, no crash record;
   4. otherwise → crash file of kind `abnormal_end` + log line `previous session ended abnormally`.
   Then the old marker and the installer note are deleted and the new marker is written. A second instance never reaches `Session::begin()` (FR-01 single instance runs first — ordering pinned by a shell test).
-- **Installer note**: the NSIS pre-install and pre-uninstall hooks write `%LOCALAPPDATA%\Voicen\logs\installer-ended` (one line, the time) before Tauri's installer closes a running app; if the app was not running the note is harmless and is deleted at the next start.
+- **Installer note**: the NSIS pre-install and pre-uninstall hooks write `%LOCALAPPDATA%\Voicen\logs\installer-ended` (one line, the time) before Tauri's installer closes a running app; if the app was not running the note is harmless and is deleted at the next start. Restart Manager normally closes a running app cleanly (`WM_ENDSESSION` → `RunEvent::Exit`: marker deleted, no previous-session line), so `ended_by_installer` follows only a forced kill (CI run 39009159665; `docs/decisions/diagnostics-log.md`).
 
 ## R8 — Data directory and web view data
 
@@ -120,8 +120,8 @@ Phase 0 of [plan.md](plan.md). The stack is fixed by `docs/requirements.md` §9 
 | Build info resolver, start line text | unit tests | About shows values / failure | smoke: start line with commit | — |
 | Log format, allowlist, redaction | unit + redaction test with planted text/key | — | log of the smoke run grepped for the planted test key (none) | — |
 | Rolling, retention, degraded mode | fake clock + temp dir | — | read-only logs dir integration test | — |
-| Panic crash file | hook test in a spawned thread | — | `crash_probe panic` | — |
-| Native fault crash file | — | — | `crash_probe fault` | — |
+| Panic crash file | hook test in a spawned thread | — | `crash.rs` child, panic | — |
+| Native fault crash file | — | — | `crash.rs` child, native fault | — |
 | Session marker classification | all four cases | — | kill → relaunch in the smoke | shutdown/logoff while running → no crash record |
 | Open logs folder / notices / project page | — | buttons call the commands | logs path resolution and folder creation (shell test) | Explorer opens; Notepad shows notices |
 | Installer per-user, size, shortcut | — | — | silent install, size, shortcut exists | clean Windows 11 in Windows Sandbox, no UAC |

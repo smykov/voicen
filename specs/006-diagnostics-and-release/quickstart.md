@@ -20,7 +20,7 @@ Expected: all green. A redaction test plants a fake transcript `"secret words 12
 ## Windows CI runner (every push to `main`, `wip/**` and `v*` tags)
 
 The `windows` job log shows, in order:
-1. `cargo test --workspace` including `crash_probe` (panic → crash file kind `panic`; null deref → kind `native_fault`).
+1. `cargo test --workspace` including `tests/crash.rs` (panic → crash file kind `panic`; null deref → kind `native_fault`).
 2. `installed size: NN.N MB (limit 100 MB)`.
 3. `version: <MAJOR.MINOR>.<run number>` from the step `Version of this build` (a `vX.Y.Z` tag: `X.Y.Z`; T-077, decisions #98), then `voicen <that version> (<commit>) started` from the installed app.
 4. After a forced kill and relaunch: `previous session ended abnormally` and one `crash-*.txt` with `kind: abnormal_end`.

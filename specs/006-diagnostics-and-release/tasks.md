@@ -74,7 +74,7 @@
 
 **Goal**: every panic, native fault or abnormal end leaves exactly one crash record; clean exits and OS shutdowns leave none; crash files keep 30 days / 20 files.
 
-**Independent test**: core session/crash tests on the Linux host; `crash_probe` on the Windows runner; kill → relaunch in the Windows job (T030).
+**Independent test**: core session/crash tests on the Linux host; `tests/crash.rs` on the Windows runner; kill → relaunch in the Windows job (T030).
 
 - [ ] T022 [P] [US3] [area core] Red tests in `crates/voicen-core/src/diag/session.rs` (temp dir, fake clock): no marker → `Clean`, marker written with pid/started/version/commit; marker + crash file with matching `session_started` → `Crashed{file}`, no new crash file; marker + `installer-ended` newer than `started` → `EndedByInstaller`, no crash file; marker + `installer-ended` older than `started` → `EndedAbnormally` with a new `abnormal_end` crash file; marker only → `EndedAbnormally` with one crash file; in all cases the old marker and note are gone and the new marker exists; `end_clean` deletes the marker and writes `Exited`; a corrupt marker file is treated as `EndedAbnormally` (or `EndedByInstaller` when a newer `installer-ended` note exists: file times only) without panicking (spec FR-013; req FR-20, r2#4, NFR-07).
 - [ ] T023 [US3] [area core] Implement `Session::begin` / `end_clean` and the `PreviousSession` log line in `crates/voicen-core/src/diag/session.rs` until T022 is green (spec FR-013; req FR-20).

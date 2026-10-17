@@ -11,7 +11,7 @@ Make every build identifiable, every problem diagnosable and every crash countab
 Technical approach (see [research.md](research.md)):
 
 - **Core (`crates/voicen-core`)**: `paths` (the one data-dir resolver), `diag::log` (own writer: typed `LogEvent` → one `key=value` line; roll at 2 MB or date change; 7 days / 10 MB retention; degraded mode with a once-per-session signal), `diag::session` (marker and previous-session classification), `diag::crash` (panic hook writing allowlisted crash files; crash retention 30 days / 20 files), `LogObserver` implementing 001's `PipelineObserver`. All tested on Linux with a temp dir and a fake clock.
-- **Shell (`src-tauri`)**: wiring at start (after 001's single-instance check), native-fault filter, `--purge-credentials`, the opener-backed commands, a window helper that puts web view data under `%LOCALAPPDATA%\Voicen\webview`, the `crash_probe` test binary.
+- **Shell (`src-tauri`)**: wiring at start (after 001's single-instance check), native-fault filter, `--purge-credentials`, the opener-backed commands, a window helper that puts web view data under `%LOCALAPPDATA%\Voicen\webview`.
 - **UI (`src/`)**: an About dialog opened from 004's General tab (req FR-18 "About dialog").
 - **Packaging/CI**: NSIS hooks (`src-tauri/windows/installer-hooks.nsh`), bundle resources, `cargo-about` + `pnpm licenses` check and notices, version single-source check, extended Windows job, new `release` job.
 
@@ -22,13 +22,13 @@ Technical approach (see [research.md](research.md)):
 **Language/Version**: Rust 1.99 (edition 2021) for `voicen-core` and `src-tauri`; TypeScript + Svelte 5 for About; NSIS script for the installer hooks; PowerShell and bash in CI.
 
 **Primary Dependencies**:
-- Core: `chrono` (local time with offset; MIT/Apache-2.0). Nothing else new; `std::backtrace` for frames.
+- Core: `chrono` (local time with offset; MIT/Apache-2.0). Nothing else new; frames through a `FrameSource` port (`RtlCaptureStackBackTrace` on Windows; decisions #134).
 - Shell: `tauri-plugin-opener` (open folder/file/URL from Rust), `windows` (already planned by 001: `SetUnhandledExceptionFilter`, `GetModuleHandleExW`, `CredEnumerateW`/`CredDeleteW`).
 - Tooling (install needs owner consent): `cargo-about` in the `voicen-rust:1.99` image; `pnpm licenses` (built in); `gh` in CI (preinstalled on GitHub runners).
 
 **Storage**: files under `%LOCALAPPDATA%\Voicen\logs`: `voicen.log` + rolled `voicen-*.log`, `crash-*.txt`, `session.marker`, `installer-ended`. No database.
 
-**Testing**: `cargo test -p voicen-core` (Docker) for all diag logic; vitest + Playwright (mocked IPC) for About; `cargo test --workspace` on `windows-latest` for the native-fault filter, `crash_probe`, credentials purge, path resolution; the Windows job's install/uninstall smoke; the owner's manual checks (quickstart.md).
+**Testing**: `cargo test -p voicen-core` (Docker) for all diag logic; vitest + Playwright (mocked IPC) for About; `cargo test --workspace` on `windows-latest` for the native-fault filter, the crash child tests (`tests/crash.rs`), credentials purge, path resolution; the Windows job's install/uninstall smoke; the owner's manual checks (quickstart.md).
 
 **Target Platform**: Windows 10 22H2 / 11 x64; dev host Linux.
 
@@ -68,8 +68,8 @@ Post-design re-check (after data-model.md and contracts/): still PASS. No comple
 | FR-008 (FR-20) | roll at 2 MB / date; 7 days; 10 MB; crash files untouched | — | — | — |
 | FR-009 (FR-20 failure) | degraded mode, once-per-session signal, silent recovery | — | logs dir made read-only (ACL) → app runs, one notice | — |
 | FR-010 (NFR-05) | diag module has no network dependency (review + `cargo tree` check) | — | — | — |
-| FR-011, FR-014, FR-016 (FR-20, NFR-07, NFR-04) | panic hook in a spawned thread: file, allowlisted keys, no payload; re-entry | — | `crash_probe panic` | — |
-| FR-012 (FR-20, NFR-07) | `render_crash_file` for native fault | — | `crash_probe fault` | — |
+| FR-011, FR-014, FR-016 (FR-20, NFR-07, NFR-04) | panic hook in a spawned thread: file, allowlisted keys, no payload; re-entry | — | `tests/crash.rs` child, panic | — |
+| FR-012 (FR-20, NFR-07) | `render_crash_file` for native fault | — | `tests/crash.rs` child, native fault | — |
 | FR-013 (FR-20) | four classifications; second instance never calls `begin` (ordering test in shell) | — | kill → relaunch → abnormal-end record | logoff/shutdown → no record |
 | FR-015 (FR-20) | 30 days / 20 files; survives log rotation | — | — | — |
 | FR-017 (FR-01, FR-20) | — | button → `open_logs_folder`; error alert | command creates the dir and resolves the path | Explorer opens from tray and About |
@@ -127,8 +127,7 @@ src-tauri/
 ├── src/window.rs            # webview_window helper (data_directory)
 ├── src/win/crash.rs         # SetUnhandledExceptionFilter, ModuleResolver impl
 ├── src/win/purge.rs         # CredEnumerateW/CredDeleteW by prefix
-├── src/bin/crash_probe.rs   # cfg(feature = "crash-probe")
-├── tests/crash_probe.rs     # Windows-only
+├── tests/crash.rs           # Windows-only; re-runs its own exe as the crash child
 ├── windows/installer-hooks.nsh
 └── tauri.conf.json          # resources, nsis hooks/languages, no `version`
 
