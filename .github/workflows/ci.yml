@@ -957,7 +957,7 @@ jobs:
           if ($previous.Count -ne 0) { throw "the launch after a clean end (pid $($next.Id)) logged a previous-session outcome: $($previous -join ' | ')" }
           if ($new.Count -ne 0) { throw "a clean end left $($new.Count) crash file(s): $($new -join ', ')" }
           Write-Output "WM_ENDSESSION(TRUE): exit 0, marker deleted, one exited line; the next launch logs no previous-session outcome and writes no crash file"
-      - name: A /P reinstall over the running app leaves the installer note, so the next launch logs ended_by_installer and writes no crash file (T-024)
+      - name: A /P reinstall over the running app writes the installer note and closes the app cleanly (exit 0, marker gone, one exited line), so the next launch logs no previous-session outcome, writes no crash file and consumes the note (T-024)
         shell: pwsh
         run: |
           . ./scripts/ci/hotkey-hold.ps1
@@ -974,9 +974,12 @@ jobs:
           if ($p.ExitCode -ne 0) { Stop-AllVoicen; throw "the /P reinstall over the running app exited with $($p.ExitCode), expected 0" }
           if (-not $app.WaitForExit(10000)) { Stop-AllVoicen; throw "premise: the app (pid $($app.Id)) still runs after the /P reinstall" }
           $noted = Test-Path -LiteralPath $note -PathType Leaf
-          # What the installer's close left, for the failure messages: the installer may close the
-          # app through Restart Manager (WM_QUERYENDSESSION/WM_ENDSESSION), a clean end that deletes
-          # the marker, logs an exited line and leaves the relaunch no previous session to report.
+          # The reinstall's uninstaller (uninstall.exe /UPDATE /P, run first by PageLeaveReinstall)
+          # writes the note in PREUNINSTALL while the app runs; its CheckIfAppIsRunning then closes
+          # the app through Restart Manager (WM_QUERYENDSESSION/WM_ENDSESSION), a clean end: exit 0,
+          # the marker deleted, one exited line (CI run 39009159665). The relaunch then has no
+          # previous session to report, and Session::begin deletes the note without a marker.
+          # ended_by_installer is the forced-kill fallback only (core tests, diag_session.rs).
           $appCode = $app.ExitCode
           $markerBefore = if (Test-Path -LiteralPath $CrashMarker -PathType Leaf) { if (Test-MarkerOf $app.Id) { "present, naming pid $($app.Id)" } else { "present, not naming pid $($app.Id): $((Get-Content -LiteralPath $CrashMarker) -join ' ')" } } else { 'absent' }
           $closeLines = Get-CrashLogLinesSince $mark
@@ -989,11 +992,13 @@ jobs:
           $previous = @($lines | Where-Object { $_.Contains(' previous session outcome=') })
           $diag = "app exit code $appCode; before the relaunch: marker $markerBefore, note $(if ($noted) { 'present' } else { 'absent' }), $exitedBefore exited line(s); after it: note $(if ($noteLeft) { 'present' } else { 'absent' }), $($new.Count) new crash file(s) $($new -join ', '); previous-session lines: $(if ($previous.Count) { $previous -join ' | ' } else { 'none' }); new lines: $($lines -join ' | ')"
           if (-not $noted) { throw "the /P reinstall over the running app (pid $($app.Id)) wrote no $note ($diag)" }
-          $hits = @($lines | Where-Object { $_.EndsWith(' previous session outcome=ended_by_installer') }).Count
-          if ($hits -ne 1) { throw "the launch after the reinstall (pid $($next.Id)) logged 'previous session outcome=ended_by_installer' $hits times, expected 1 ($diag)" }
-          if ($new.Count -ne 0) { throw "an installer-ended session left $($new.Count) crash file(s): $($new -join ', ') ($diag)" }
+          if ($appCode -ne 0) { throw "the app (pid $($app.Id)) closed by the /P reinstall exited with $appCode, expected 0 (a clean close) ($diag)" }
+          if ($markerBefore -ne 'absent') { throw "the session marker is $markerBefore after the /P reinstall closed the app, expected absent (no clean end on RunEvent::Exit) ($diag)" }
+          if ($exitedBefore -ne 1) { throw "$exitedBefore exited line(s) after the /P reinstall closed the app, expected 1 ($diag)" }
+          if ($previous.Count -ne 0) { throw "the launch after the reinstall (pid $($next.Id)) logged a previous-session outcome, expected none after a clean close: $($previous -join ' | ') ($diag)" }
+          if ($new.Count -ne 0) { throw "a session closed by the installer left $($new.Count) crash file(s): $($new -join ', ') ($diag)" }
           if ($noteLeft) { throw "the next launch did not consume $note ($diag)" }
-          Write-Output "/P over the running app: the note written, ended_by_installer logged once, no crash file"
+          Write-Output "/P over the running app: the note written, exit 0, marker deleted, one exited line; the next launch logs no previous-session outcome, writes no crash file and consumes the note"
       - name: A /P reinstall with no app running writes no note, so a kill before it still logs ended_abnormally with one crash file (T-024 failure branch)
         shell: pwsh
         run: |
