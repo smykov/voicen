@@ -33,6 +33,11 @@
     const current = ++opening;
     result = null;
     open = true;
+    // Decide from the element, not from `open`: after a native close (Esc) the dialog is
+    // already hidden while its `close` event, which sets `open = false`, is still queued
+    // to the next rendering step; `open = true` is then a no-op and the effect would not
+    // run (T-095).
+    if (dialog !== undefined && !dialog.open) dialog.showModal();
     loadBuildInfo().then(
       (info) => {
         if (current === opening) result = { kind: "ok", info };
@@ -51,8 +56,13 @@
     else if (!open && dialog.open) dialog.close();
   });
 
-  /** Esc, Close or the page: the dialog closed. Focus goes back to the opener unless it moved elsewhere. */
+  /**
+   * Esc, Close or the page: the dialog closed. Focus goes back to the opener unless it moved elsewhere.
+   * A `close` that arrives while the element is open again belongs to an earlier showing that the
+   * button has already replaced, so it is ignored (T-095).
+   */
   function onDialogClose() {
+    if (dialog?.open ?? false) return;
     open = false;
     const active = document.activeElement;
     if (active === null || active === document.body || (dialog?.contains(active) ?? false)) opener?.focus();
