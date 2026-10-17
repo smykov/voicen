@@ -38,8 +38,11 @@ Var VoicenScratch
 
 ; The installer-ended note (T-024; invariant 5, docs/decisions/diagnostics-log.md): written to
 ; %LOCALAPPDATA%\Voicen\logs\installer-ended only while voicen.exe is running, so the stock
-; CheckIfAppIsRunning that follows the PRE hooks is what ends that session, and the next start's
-; Session::begin reads it as ended_by_installer (note mtime >= marker mtime). With no running
+; CheckIfAppIsRunning that follows the PRE hooks is what ends that session. Restart Manager
+; normally closes the app through WM_QUERYENDSESSION/WM_ENDSESSION, a clean end (marker deleted,
+; `exited` line), and the next start's Session::begin only consumes the note (CI run 39009159665).
+; Only when Restart Manager falls back to a forced kill does the marker survive, and then the note
+; (mtime >= marker mtime) makes it ended_by_installer instead of ended_abnormally. With no running
 ; voicen.exe nothing is written, so an earlier kill stays ended_abnormally. "Running" is asked the
 ; way CheckIfAppIsRunning asks it (Restart Manager, RmGetList on "$INSTDIR\voicen.exe":
 ; ERROR_MORE_DATA = some process has it open). The content is not read. An empty $LOCALAPPDATA or
