@@ -14,8 +14,10 @@
 //!   panicking thread); one installed hook writes at most one file (the first panic
 //!   wins); it does not chain the previous hook (std's default hook prints the
 //!   payload to stderr).
-//! - a file is written as `crash-*.tmp` and renamed, so a process killed mid-write
-//!   never leaves a partial `crash-*.txt` (`Session::begin` deletes stale tmp files).
+//! - a file is written as `crash-*.tmp` and hard-linked to its name, so a process
+//!   killed mid-write never leaves a partial `crash-*.txt` (`Session::begin` deletes
+//!   stale tmp files), and an existing crash file is never replaced: a taken name
+//!   steps to the next second (same pid, true `time:` line), see [`write_crash_file`].
 //! - [`retain_crash_files`] removes only regular `crash-*.txt` files: older than
 //!   [`CRASH_MAX_AGE_DAYS`] by modification time, then all but the
 //!   [`CRASH_MAX_FILES`] newest. The log's own retention never touches them.
@@ -23,6 +25,7 @@
 
 use std::fmt::{self, Display, Write as _};
 use std::fs;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
@@ -167,6 +170,13 @@ impl CrashFileName {
             pid: pid.parse().ok()?,
         };
         (parsed.to_string() == name).then_some(parsed)
+    }
+
+    /// Test constructor (feature `test-fakes`): the same acceptance as the
+    /// parser diag uses for its own names, `None` for any other text.
+    #[cfg(any(test, feature = "test-fakes"))]
+    pub fn fake(name: &str) -> Option<CrashFileName> {
+        CrashFileName::parse(name)
     }
 
     fn stem(&self) -> String {
@@ -361,25 +371,68 @@ pub fn render_crash_file(fields: &CrashFields) -> String {
     out
 }
 
-/// Writes `fields` to `logs_dir/<name>` through `<stem>.tmp` and a rename; `None`
-/// (and no file left) when either step fails. Never panics, never creates the
-/// folder.
+/// How many names [`write_crash_file`] tries: the name of `fields.time`, then each
+/// following second (same pid).
+const MAX_NAME_TRIES: u64 = 60;
+
+/// Writes `fields` to a new `logs_dir/crash-*.txt` and returns the name written;
+/// `None` (and no file left) when it cannot. An existing file is never replaced:
+/// the text goes to `<stem>-<kind>.tmp` (created new, so a concurrent writer's tmp
+/// is not overwritten either), which is then hard-linked to the name of
+/// `fields.time` or, while that name is taken, of the next second (at most
+/// [`MAX_NAME_TRIES`] names, the pid kept, the `time:` line unchanged). A hard link
+/// fails when its path exists (`link` / `CreateHardLinkW`), so the claim of a name
+/// is atomic between writers and the file appears complete. Never panics, takes no
+/// lock, never creates the folder.
 pub(crate) fn write_crash_file(
     logs_dir: &Path,
     pid: u32,
     fields: &CrashFields,
 ) -> Option<CrashFileName> {
-    let name = CrashFileName::new(fields.time, pid);
-    let tmp = logs_dir.join(format!("{}{TMP_SUFFIX}", name.stem()));
-    if fs::write(&tmp, render_crash_file(fields)).is_err() {
-        let _ = fs::remove_file(&tmp);
+    let first = CrashFileName::new(fields.time, pid);
+    let tmp = logs_dir.join(format!(
+        "{}-{}{TMP_SUFFIX}",
+        first.stem(),
+        fields.detail.kind().as_str()
+    ));
+    let written = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp)
+        .and_then(|mut file| {
+            use std::io::Write as _;
+            file.write_all(render_crash_file(fields).as_bytes())
+        });
+    if let Err(e) = written {
+        // A tmp that already existed belongs to another writer: leave it.
+        if e.kind() != ErrorKind::AlreadyExists {
+            let _ = fs::remove_file(&tmp);
+        }
         return None;
     }
-    if fs::rename(&tmp, logs_dir.join(name.to_string())).is_err() {
-        let _ = fs::remove_file(&tmp);
-        return None;
+    let mut claimed = None;
+    for step in 0..MAX_NAME_TRIES {
+        let Some(at) = fields.time.at.checked_add(Duration::from_secs(step)) else {
+            break;
+        };
+        let name = CrashFileName::new(
+            LocalStamp {
+                at,
+                seconds_east: fields.time.seconds_east,
+            },
+            pid,
+        );
+        match fs::hard_link(&tmp, logs_dir.join(name.to_string())) {
+            Ok(()) => {
+                claimed = Some(name);
+                break;
+            }
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => continue,
+            Err(_) => break,
+        }
     }
-    Some(name)
+    let _ = fs::remove_file(&tmp);
+    claimed
 }
 
 /// Deletes stale `crash-*.tmp` files of `logs_dir` (a write cut short by a kill).

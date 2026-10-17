@@ -124,7 +124,7 @@ Plain text, `key: value` lines, fixed order:
 
 Never: panic message, transcript, audio, keys, memory contents.
 
-Retention: at start, delete files older than 30 days, then keep the 20 newest. As built (T-100): both by modification time (ties by name), regular `crash-*.txt` files only. Written as `crash-*.tmp` and renamed.
+Retention: at start, delete files older than 30 days, then keep the 20 newest. As built (T-100): both by modification time (ties by name), regular `crash-*.txt` files only. Written as `crash-*.tmp` and hard-linked to its name, never replacing an existing file (a taken name steps its second, same pid; contracts/core-diag.md "Crash files").
 
 ## UninstallChoice *(installer)*
 
