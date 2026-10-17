@@ -563,6 +563,13 @@ jobs:
           $tray = $false
           for ($i = 0; $i -lt 30 -and -not $tray; $i++) { $tray = @(Get-AllWindows $primary.Id | Where-Object { $_.Class -ceq 'tray_icon_app' }).Count -ge 1; if (-not $tray) { Start-Sleep -Seconds 1 } }
           if (-not $tray) { $all = Format-AllWindows (Get-AllWindows $primary.Id); Stop-All; throw "no 'tray_icon_app' window of the primary (windows: $all)" }
+          # T-024: the primary's session marker names its pid; a second launch never begins a session,
+          # so the marker's bytes stay the primary's.
+          $marker = Join-Path $env:LOCALAPPDATA 'Voicen\logs\session.marker'
+          $marked = $false
+          for ($i = 0; $i -lt 10 -and -not $marked; $i++) { $marked = (Test-Path -LiteralPath $marker -PathType Leaf) -and (@(Get-Content -LiteralPath $marker) -ccontains "pid=$($primary.Id)"); if (-not $marked) { Start-Sleep -Seconds 1 } }
+          if (-not $marked) { Stop-All; throw "premise: no session marker naming the primary (pid $($primary.Id)) at $marker" }
+          $markerHash = (Get-FileHash -LiteralPath $marker -Algorithm SHA256).Hash
           New-Item -ItemType Directory -Force -Path $models | Out-Null
           [System.IO.File]::WriteAllBytes($part, [byte[]]::new(1024))
           if (-not (Test-Path -LiteralPath $part -PathType Leaf)) { Stop-All; throw "could not place $part" }
@@ -589,6 +596,8 @@ jobs:
           if ($secondLines -ne 0) { Stop-All; throw "the second launch (pid $($second.Id)) wrote $secondLines start line(s) into the primary's log" }
           if ($primaryLines -ne 1) { Stop-All; throw "the primary's start line occurs $primaryLines times for this launch, expected 1" }
           if (-not $partKept) { Stop-All; throw "the second launch deleted the primary's $part" }
+          $markerAfter = if (Test-Path -LiteralPath $marker -PathType Leaf) { (Get-FileHash -LiteralPath $marker -Algorithm SHA256).Hash } else { 'missing' }
+          if ($markerAfter -ne $markerHash) { Stop-All; throw "the second launch changed the primary's session marker ($markerHash -> $markerAfter)" }
           if (-not $win) { Stop-All; throw "the second launch did not bring up exactly one shown window titled Voicen (last seen: $seen)" }
           Write-Output "second launch: exit 0, no start line of its own, the .part kept, one shown window: $seen"
           # Minimised, the one window comes back on a third launch (OQ-11 Q2 default: front, same window).
@@ -884,6 +893,127 @@ jobs:
           if ($bad) { throw ($bad -join '; ') }
           if ($cleanup -ne 0) { throw "cleanup: a Remove-VoicenCredential above failed (Win32 error printed)" }
           Write-Output "same-version /P reinstall: exit 0 within 120 s; settings.json, ci-keep.txt, $($kept -join ', ') and the Run value kept"
+      # T-024: the installed app's crash records (spec 006 T026, T029 note, T030 crash part). Each
+      # step starts from no running voicen, counts crash files by name set (every earlier
+      # Stop-Process -Force leaves one) and asserts its premise, the marker naming the pid, first.
+      - name: A killed app keeps its session marker, and the next launch writes exactly one abnormal_end file naming it (T-024)
+        shell: pwsh
+        run: |
+          . ./scripts/ci/hotkey-hold.ps1
+          . ./scripts/ci/crash-records.ps1
+          Stop-AllVoicen
+          $first = Start-VoicenSession
+          $before = Get-CrashNames
+          $mark = Get-CrashLogMark
+          Stop-Process -Id $first.Id -Force
+          if (-not $first.WaitForExit(10000)) { Stop-AllVoicen; throw "premise: the killed app (pid $($first.Id)) is still running 10 s later" }
+          if (-not (Test-MarkerOf $first.Id)) { throw "the kill left no session marker naming pid $($first.Id)" }
+          $next = Start-VoicenSession
+          $new = Get-NewCrashNames $before (Get-CrashNames)
+          $lines = Get-CrashLogLinesSince $mark
+          Stop-AllVoicen
+          if ($new.Count -ne 1) { throw "the launch after a kill (pid $($next.Id)) wrote $($new.Count) crash file(s), expected 1: $($new -join ', ')" }
+          $name = $new[0]
+          $kind = Get-CrashValue $name 'kind'
+          $killed = Get-CrashValue $name 'previous_session_pid'
+          if ($kind -cne 'abnormal_end') { throw "$name is kind '$kind', expected abnormal_end" }
+          if ($killed -cne "$($first.Id)") { throw "$name names previous_session_pid '$killed', expected the killed pid $($first.Id)" }
+          $want = "previous session outcome=ended_abnormally crash_file=$name"
+          $hits = @($lines | Where-Object { $_.EndsWith(" $want") }).Count
+          if ($hits -ne 1) { throw "the line '$want' occurs $hits times since the kill, expected 1 (new lines: $($lines -join ' | '))" }
+          Assert-CrashKeys (Get-CrashNames)
+          Write-Output "kill: one new abnormal_end file $name naming pid $($first.Id), and its previous-session line"
+      - name: WM_ENDSESSION(TRUE) to the app ends it with code 0, the marker deleted, one exited line and no crash record (T-024)
+        shell: pwsh
+        run: |
+          . ./scripts/ci/hotkey-hold.ps1
+          . ./scripts/ci/visible-windows.ps1
+          . ./scripts/ci/crash-records.ps1
+          Stop-AllVoicen
+          $app = Start-VoicenSession
+          $target = $null
+          for ($i = 0; $i -lt 30 -and -not $target; $i++) { $target = @(Get-AllWindows $app.Id | Where-Object { $_.Class -ceq 'Tao Thread Event Target' }) | Select-Object -First 1; if (-not $target) { Start-Sleep -Seconds 1 } }
+          if (-not $target) { $all = Format-AllWindows (Get-AllWindows $app.Id); Stop-AllVoicen; throw "premise: no 'Tao Thread Event Target' window of pid $($app.Id) (windows: $all)" }
+          $before = Get-CrashNames
+          $mark = Get-CrashLogMark
+          Send-EndSession $target.Handle
+          if (-not $app.WaitForExit(30000)) { Stop-AllVoicen; throw "the app (pid $($app.Id)) did not exit within 30 s of WM_ENDSESSION(TRUE)" }
+          $code = $app.ExitCode
+          $markerLeft = Test-Path -LiteralPath $CrashMarker
+          $exited = @(Get-CrashLogLinesSince $mark | Where-Object { $_.EndsWith(' exited') }).Count
+          $next = Start-VoicenSession
+          $previous = @(Get-CrashLogLinesSince $mark | Where-Object { $_.Contains(' previous session outcome=') })
+          $new = Get-NewCrashNames $before (Get-CrashNames)
+          Stop-AllVoicen
+          if ($code -ne 0) { throw "the app exited with code $code after WM_ENDSESSION(TRUE), expected 0" }
+          if ($markerLeft) { throw "the session marker is still there after WM_ENDSESSION(TRUE) (no clean end on RunEvent::Exit)" }
+          if ($exited -ne 1) { throw "$exited exited line(s) after WM_ENDSESSION(TRUE), expected 1" }
+          if ($previous.Count -ne 0) { throw "the launch after a clean end (pid $($next.Id)) logged a previous-session outcome: $($previous -join ' | ')" }
+          if ($new.Count -ne 0) { throw "a clean end left $($new.Count) crash file(s): $($new -join ', ')" }
+          Write-Output "WM_ENDSESSION(TRUE): exit 0, marker deleted, one exited line; the next launch logs no previous-session outcome and writes no crash file"
+      - name: A /P reinstall over the running app leaves the installer note, so the next launch logs ended_by_installer and writes no crash file (T-024)
+        shell: pwsh
+        run: |
+          . ./scripts/ci/hotkey-hold.ps1
+          . ./scripts/ci/crash-records.ps1
+          $note = Join-Path $CrashLogs 'installer-ended'
+          Stop-AllVoicen
+          $app = Start-VoicenSession
+          $before = Get-CrashNames
+          $mark = Get-CrashLogMark
+          $setup = Get-ChildItem target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
+          $p = Start-Process $setup.FullName -ArgumentList '/P' -PassThru
+          $null = $p.Handle
+          if (-not $p.WaitForExit(120000)) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue; Stop-AllVoicen; throw "the /P reinstall over the running app did not finish within 120 s" }
+          if ($p.ExitCode -ne 0) { Stop-AllVoicen; throw "the /P reinstall over the running app exited with $($p.ExitCode), expected 0" }
+          if (-not $app.WaitForExit(10000)) { Stop-AllVoicen; throw "premise: the app (pid $($app.Id)) still runs after the /P reinstall" }
+          $noted = Test-Path -LiteralPath $note -PathType Leaf
+          $next = Start-VoicenSession
+          $lines = Get-CrashLogLinesSince $mark
+          $new = Get-NewCrashNames $before (Get-CrashNames)
+          $noteLeft = Test-Path -LiteralPath $note
+          Stop-AllVoicen
+          if (-not $noted) { throw "the /P reinstall over the running app (pid $($app.Id)) wrote no $note" }
+          $hits = @($lines | Where-Object { $_.EndsWith(' previous session outcome=ended_by_installer') }).Count
+          if ($hits -ne 1) { throw "the launch after the reinstall (pid $($next.Id)) logged 'previous session outcome=ended_by_installer' $hits times, expected 1 (new lines: $($lines -join ' | '))" }
+          if ($new.Count -ne 0) { throw "an installer-ended session left $($new.Count) crash file(s): $($new -join ', ')" }
+          if ($noteLeft) { throw "the next launch did not consume $note" }
+          Write-Output "/P over the running app: the note written, ended_by_installer logged once, no crash file"
+      - name: A /P reinstall with no app running writes no note, so a kill before it still logs ended_abnormally with one crash file (T-024 failure branch)
+        shell: pwsh
+        run: |
+          . ./scripts/ci/hotkey-hold.ps1
+          . ./scripts/ci/crash-records.ps1
+          $note = Join-Path $CrashLogs 'installer-ended'
+          Stop-AllVoicen
+          $app = Start-VoicenSession
+          $before = Get-CrashNames
+          $mark = Get-CrashLogMark
+          Stop-Process -Id $app.Id -Force
+          if (-not $app.WaitForExit(10000)) { Stop-AllVoicen; throw "premise: the killed app (pid $($app.Id)) is still running 10 s later" }
+          if (-not (Test-MarkerOf $app.Id)) { throw "premise: the kill left no session marker naming pid $($app.Id)" }
+          $setup = Get-ChildItem target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
+          $p = Start-Process $setup.FullName -ArgumentList '/P' -PassThru
+          $null = $p.Handle
+          if (-not $p.WaitForExit(120000)) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue; throw "the /P reinstall with no app running did not finish within 120 s" }
+          if ($p.ExitCode -ne 0) { throw "the /P reinstall with no app running exited with $($p.ExitCode), expected 0" }
+          $noted = Test-Path -LiteralPath $note
+          $next = Start-VoicenSession
+          $lines = Get-CrashLogLinesSince $mark
+          $new = Get-NewCrashNames $before (Get-CrashNames)
+          Stop-AllVoicen
+          if ($noted) { throw "the /P reinstall with no voicen.exe running wrote $note (it would hide the kill)" }
+          if ($new.Count -ne 1) { throw "the launch after kill + /P (pid $($next.Id)) wrote $($new.Count) crash file(s), expected 1: $($new -join ', ')" }
+          $name = $new[0]
+          $kind = Get-CrashValue $name 'kind'
+          $killed = Get-CrashValue $name 'previous_session_pid'
+          if ($kind -cne 'abnormal_end') { throw "$name is kind '$kind', expected abnormal_end" }
+          if ($killed -cne "$($app.Id)") { throw "$name names previous_session_pid '$killed', expected the killed pid $($app.Id)" }
+          $want = "previous session outcome=ended_abnormally crash_file=$name"
+          $hits = @($lines | Where-Object { $_.EndsWith(" $want") }).Count
+          if ($hits -ne 1) { throw "the line '$want' occurs $hits times after kill + /P, expected 1 (new lines: $($lines -join ' | '))" }
+          Assert-CrashKeys (Get-CrashNames)
+          Write-Output "kill, then /P with no app running: no note, one abnormal_end file $name, ended_abnormally logged"
       # W3: uninstall.exe /S /KEEPDATA keeps the data folder and the Voicen/ credentials and still
       # removes the Run value, the Start-menu shortcut and the uninstall key (a regression pin of
       # the hook's /KEEPDATA branch; green on the stock uninstaller). Without _?= the uninstaller

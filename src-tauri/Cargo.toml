@@ -69,6 +69,9 @@ tauri = { version = "2", features = ["test"] }
 # versions as above: feature flags only.
 # T-057 (VERIFY_FAIL 3): tests/smoke_predicate.rs registers window classes the way
 # tauri-plugin-single-instance and tao do (GetModuleHandleW, Win32_System_LibraryLoader).
+# T-024: tests/crash.rs turns off the fault and abort error boxes of its children (SetErrorMode,
+# Win32_System_Diagnostics_Debug) and plants crash files under the local time's names
+# (GetLocalTime, Win32_System_SystemInformation). Feature flags only, no new crate.
 [target.'cfg(windows)'.dev-dependencies]
-windows = { version = "0.62", features = ["Win32_UI_WindowsAndMessaging", "Win32_UI_Shell", "Win32_System_LibraryLoader"] }
+windows = { version = "0.62", features = ["Win32_UI_WindowsAndMessaging", "Win32_UI_Shell", "Win32_System_LibraryLoader", "Win32_System_Diagnostics_Debug", "Win32_System_SystemInformation"] }
 cpal = "0.18"
