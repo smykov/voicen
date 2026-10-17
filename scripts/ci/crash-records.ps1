@@ -3,6 +3,12 @@
 # Every crash file is counted by name set per step: each earlier Stop-Process -Force leaves one
 # (an abnormal_end file on the next launch), so a step compares the names before and after.
 
+# The list-returning helpers (Get-CrashNames, Get-NewCrashNames, Get-CrashLogLinesSince, and
+# visible-windows.ps1's Get-AllWindows) emit their array as ONE pipeline object (leading comma),
+# so a 0- or 1-item result stays an array on assignment. Assign the result to a variable before
+# piping it: "Get-CrashLogLinesSince $m | Where-Object" hands Where-Object the whole array as $_,
+# and member access then enumerates it (CI run 39007036803: a window's Handle came out Object[]).
+
 $CrashLogs = Join-Path $env:LOCALAPPDATA 'Voicen\logs'
 $CrashExe = Join-Path $env:LOCALAPPDATA 'Voicen\voicen.exe'
 $CrashMarker = Join-Path $CrashLogs 'session.marker'

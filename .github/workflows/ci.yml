@@ -931,18 +931,24 @@ jobs:
           . ./scripts/ci/crash-records.ps1
           Stop-AllVoicen
           $app = Start-VoicenSession
+          # Get-AllWindows and Get-CrashLogLinesSince return their array as one pipeline object
+          # (the leading comma): assign it first, then pipe the variable, so Where-Object sees
+          # each element, not the whole array (CI run 39007036803: $target.Handle was Object[]).
           $target = $null
-          for ($i = 0; $i -lt 30 -and -not $target; $i++) { $target = @(Get-AllWindows $app.Id | Where-Object { $_.Class -ceq 'Tao Thread Event Target' }) | Select-Object -First 1; if (-not $target) { Start-Sleep -Seconds 1 } }
+          for ($i = 0; $i -lt 30 -and -not $target; $i++) { $wins = Get-AllWindows $app.Id; $target = @($wins | Where-Object { $_.Class -ceq 'Tao Thread Event Target' }) | Select-Object -First 1; if (-not $target) { Start-Sleep -Seconds 1 } }
           if (-not $target) { $all = Format-AllWindows (Get-AllWindows $app.Id); Stop-AllVoicen; throw "premise: no 'Tao Thread Event Target' window of pid $($app.Id) (windows: $all)" }
+          if ($target -isnot [VoicenWindow] -or $target.Handle -isnot [IntPtr] -or $target.Handle -eq [IntPtr]::Zero) { Stop-AllVoicen; throw "premise: the target is not one window with a non-zero IntPtr handle (type $($target.GetType().FullName), handle type $(if ($null -eq $target.Handle) { 'null' } else { $target.Handle.GetType().FullName }))" }
           $before = Get-CrashNames
           $mark = Get-CrashLogMark
           Send-EndSession $target.Handle
           if (-not $app.WaitForExit(30000)) { Stop-AllVoicen; throw "the app (pid $($app.Id)) did not exit within 30 s of WM_ENDSESSION(TRUE)" }
           $code = $app.ExitCode
           $markerLeft = Test-Path -LiteralPath $CrashMarker
-          $exited = @(Get-CrashLogLinesSince $mark | Where-Object { $_.EndsWith(' exited') }).Count
+          $endLines = Get-CrashLogLinesSince $mark
+          $exited = @($endLines | Where-Object { $_.EndsWith(' exited') }).Count
           $next = Start-VoicenSession
-          $previous = @(Get-CrashLogLinesSince $mark | Where-Object { $_.Contains(' previous session outcome=') })
+          $nextLines = Get-CrashLogLinesSince $mark
+          $previous = @($nextLines | Where-Object { $_.Contains(' previous session outcome=') })
           $new = Get-NewCrashNames $before (Get-CrashNames)
           Stop-AllVoicen
           if ($code -ne 0) { throw "the app exited with code $code after WM_ENDSESSION(TRUE), expected 0" }
@@ -968,16 +974,25 @@ jobs:
           if ($p.ExitCode -ne 0) { Stop-AllVoicen; throw "the /P reinstall over the running app exited with $($p.ExitCode), expected 0" }
           if (-not $app.WaitForExit(10000)) { Stop-AllVoicen; throw "premise: the app (pid $($app.Id)) still runs after the /P reinstall" }
           $noted = Test-Path -LiteralPath $note -PathType Leaf
+          # What the installer's close left, for the failure messages: the installer may close the
+          # app through Restart Manager (WM_QUERYENDSESSION/WM_ENDSESSION), a clean end that deletes
+          # the marker, logs an exited line and leaves the relaunch no previous session to report.
+          $appCode = $app.ExitCode
+          $markerBefore = if (Test-Path -LiteralPath $CrashMarker -PathType Leaf) { if (Test-MarkerOf $app.Id) { "present, naming pid $($app.Id)" } else { "present, not naming pid $($app.Id): $((Get-Content -LiteralPath $CrashMarker) -join ' ')" } } else { 'absent' }
+          $closeLines = Get-CrashLogLinesSince $mark
+          $exitedBefore = @($closeLines | Where-Object { $_.EndsWith(' exited') }).Count
           $next = Start-VoicenSession
           $lines = Get-CrashLogLinesSince $mark
           $new = Get-NewCrashNames $before (Get-CrashNames)
           $noteLeft = Test-Path -LiteralPath $note
           Stop-AllVoicen
-          if (-not $noted) { throw "the /P reinstall over the running app (pid $($app.Id)) wrote no $note" }
+          $previous = @($lines | Where-Object { $_.Contains(' previous session outcome=') })
+          $diag = "app exit code $appCode; before the relaunch: marker $markerBefore, note $(if ($noted) { 'present' } else { 'absent' }), $exitedBefore exited line(s); after it: note $(if ($noteLeft) { 'present' } else { 'absent' }), $($new.Count) new crash file(s) $($new -join ', '); previous-session lines: $(if ($previous.Count) { $previous -join ' | ' } else { 'none' }); new lines: $($lines -join ' | ')"
+          if (-not $noted) { throw "the /P reinstall over the running app (pid $($app.Id)) wrote no $note ($diag)" }
           $hits = @($lines | Where-Object { $_.EndsWith(' previous session outcome=ended_by_installer') }).Count
-          if ($hits -ne 1) { throw "the launch after the reinstall (pid $($next.Id)) logged 'previous session outcome=ended_by_installer' $hits times, expected 1 (new lines: $($lines -join ' | '))" }
-          if ($new.Count -ne 0) { throw "an installer-ended session left $($new.Count) crash file(s): $($new -join ', ')" }
-          if ($noteLeft) { throw "the next launch did not consume $note" }
+          if ($hits -ne 1) { throw "the launch after the reinstall (pid $($next.Id)) logged 'previous session outcome=ended_by_installer' $hits times, expected 1 ($diag)" }
+          if ($new.Count -ne 0) { throw "an installer-ended session left $($new.Count) crash file(s): $($new -join ', ') ($diag)" }
+          if ($noteLeft) { throw "the next launch did not consume $note ($diag)" }
           Write-Output "/P over the running app: the note written, ended_by_installer logged once, no crash file"
       - name: A /P reinstall with no app running writes no note, so a kill before it still logs ended_abnormally with one crash file (T-024 failure branch)
         shell: pwsh
