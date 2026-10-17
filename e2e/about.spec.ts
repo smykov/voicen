@@ -229,6 +229,81 @@ test("keyboard: Tab reaches the button, Enter opens with focus inside, Esc close
   expect(await buildInfoCalls(page)).toBe(2);
 });
 
+// (4b) T-095 -------------------------------------------------------------------------
+// Chromium hides a <dialog> and refocuses the opener synchronously on a native close
+// (Esc, dialog.close()), but dispatches `close` at the next rendering step. A press of
+// the About button in that gap must still show the dialog, and the late `close` of the
+// earlier showing must not close (or mark closed) the new one.
+
+/** True when the native <dialog> behind `dialog` is open (its `open` attribute). */
+async function nativeOpen(page: Page): Promise<boolean> {
+  return page.evaluate(() => document.querySelector<HTMLDialogElement>("dialog.about-dialog")?.open ?? false);
+}
+
+test("T-095: the dialog is closed natively and the About button is pressed before the close event fires -> the dialog shows again with the version line, get_build_info called 2 times, and the late close event does not close it", async ({ page }) => {
+  const errors = pageErrors(page);
+  await openGeneral(page, { buildInfo: OK });
+  const button = aboutButton(page);
+  await button.click();
+  const dialog = aboutDialog(page);
+  await expect(dialog.getByText(LINE, { exact: true })).toBeVisible();
+  expect(await buildInfoCalls(page)).toBe(1);
+
+  // One evaluate: the native close (the Esc path, `close` queued to the next frame), then
+  // the button press, with no frame between them.
+  const dialogHandle = await dialog.elementHandle();
+  const buttonHandle = await button.elementHandle();
+  await page.evaluate(
+    ([d, b]) => {
+      (d as HTMLDialogElement).close();
+      (b as HTMLButtonElement).click();
+    },
+    [dialogHandle, buttonHandle] as const,
+  );
+
+  await expect(dialog).toBeVisible();
+  // Two frames: the queued `close` of the first showing has been dispatched by now.
+  await settle(page);
+  await settle(page);
+  await expect(dialog).toBeVisible();
+  expect(await nativeOpen(page), "the <dialog> element is still open after the late close event").toBe(true);
+  await expect(dialog.getByText(LINE, { exact: true })).toBeVisible();
+  await expect.poll(() => focusInside(dialog), { message: "focus is inside the reopened dialog" }).toBe(true);
+  expect(await buildInfoCalls(page)).toBe(2);
+
+  // The reopened dialog still closes normally and the state is consistent afterwards.
+  await dialog.getByRole("button", { name: "Close", exact: true }).click();
+  await expect(dialog).toBeHidden();
+  await expect(button).toBeFocused();
+  await button.click();
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByText(LINE, { exact: true })).toBeVisible();
+  expect(await buildInfoCalls(page)).toBe(3);
+  expect(errors).toEqual([]);
+});
+
+test("T-095: keyboard rounds of Escape then Enter with nothing between -> the dialog is shown after every round", async ({ page }) => {
+  const errors = pageErrors(page);
+  await openGeneral(page, { buildInfo: OK });
+  const button = aboutButton(page);
+  const dialog = aboutDialog(page);
+  await button.focus();
+  await page.keyboard.press("Enter");
+  await expect(dialog).toBeVisible();
+
+  const ROUNDS = 20;
+  for (let round = 1; round <= ROUNDS; round++) {
+    await page.keyboard.press("Escape");
+    await page.keyboard.press("Enter");
+    await expect(dialog, `round ${round}: Enter after Escape shows the dialog`).toBeVisible();
+    // Let a late `close` of the previous showing land; the dialog must stay open.
+    await settle(page);
+    await expect(dialog, `round ${round}: the dialog is still shown after the next frames`).toBeVisible();
+  }
+  expect(await buildInfoCalls(page)).toBe(ROUNDS + 1);
+  expect(errors).toEqual([]);
+});
+
 // (5) ------------------------------------------------------------------------------
 
 test("with ui_language ru the button and the dialog title are in Russian and the version line is unchanged", async ({ page }) => {
