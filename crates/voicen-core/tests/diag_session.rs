@@ -38,7 +38,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use diag_support::{
-    all_lines, at, closed, contains, files_under, lines_of, open_log, Line, Offset, NOON_UTC,
+    all_lines, at, closed, contains, crash_file_name, files_under, lines_of, open_log, Line,
+    Offset, NOON_UTC,
 };
 use voicen_core::build_info::BuildInfo;
 use voicen_core::clock::FakeClock;
@@ -505,6 +506,102 @@ fn a_corrupt_marker_gives_ended_abnormally_without_panicking_or_copying_its_byte
         }
         assert_after_begin(&run);
     }
+}
+
+#[test]
+fn a_corrupt_marker_with_a_newer_installer_note_is_ended_by_installer() {
+    // Review 1 #3 (characterization of the documented verdict order): the note is
+    // judged by the old marker's mtime, which a corrupt marker still has; not older
+    // -> EndedByInstaller and no record; older -> one abnormal_end record.
+    let cases: [(&str, Vec<u8>); 3] = [
+        (
+            "garbage",
+            format!("\u{1}not a marker started={CANARY}\n").into_bytes(),
+        ),
+        ("empty", Vec::new()),
+        ("non-UTF-8", [0xFF, 0xFE, 0xFD, b'\n'].to_vec()),
+    ];
+    for (what, bytes) in cases {
+        let run = setup();
+        plant(&run.dir.join(MARKER), &bytes, at(OLD_SECS, 0));
+        plant(&run.dir.join(NOTE), b"note\n", at(OLD_SECS + 6 * 3_600, 0));
+        let (_session, verdict) = run.begin();
+        assert_eq!(verdict, PreviousSession::EndedByInstaller, "{what}");
+        assert!(crash_files(&run.dir).is_empty(), "{what}: no crash record");
+        let previous = run.previous_lines();
+        assert_eq!(previous.len(), 1, "{what}");
+        assert_eq!(
+            previous.first().and_then(|l| l.get("outcome")),
+            Some("ended_by_installer"),
+            "{what}"
+        );
+        assert_after_begin(&run);
+
+        let run = setup();
+        plant(&run.dir.join(MARKER), &bytes, at(OLD_SECS, 0));
+        plant(&run.dir.join(NOTE), b"note\n", at(OLD_SECS - 60, 0));
+        let (_session, verdict) = run.begin();
+        let lines = assert_one_abnormal_end(&run, &verdict, &[]);
+        assert_eq!(
+            lines.first().map(String::as_str),
+            Some("kind: abnormal_end"),
+            "{what}: an older note does not explain the end"
+        );
+        assert_after_begin(&run);
+    }
+}
+
+// ---- name collisions (review 1 #1) ------------------------------------------------------------
+
+#[test]
+fn begin_never_replaces_a_crash_file_that_has_the_name_it_would_write() {
+    // A crash file of this process and second already exists (a panic right before
+    // begin, or a native fault): begin's abnormal_end file gets its own name, and
+    // the verdict and its line name that new file.
+    let run = setup();
+    plant_old_marker(&run.dir);
+    let taken = format!("crash-20261004-140000-{PID}.txt");
+    let foreign = plant_crash_file(&run.dir, &taken, "2026-10-04T13:59:59.000+02:00");
+    let (_session, verdict) = run.begin();
+    let PreviousSession::EndedAbnormally {
+        crash_file: Some(name),
+    } = &verdict
+    else {
+        panic!("expected EndedAbnormally with a crash file, got {verdict:?}");
+    };
+    let name = name.to_string();
+    assert_ne!(name, taken, "the existing file's name is not reused");
+    assert!(
+        crash_file_name(&name),
+        "the new name follows crash-YYYYMMDD-HHMMSS-<pid>.txt: {name}"
+    );
+    assert!(
+        name.ends_with(&format!("-{PID}.txt")),
+        "the new name keeps this process's pid: {name}"
+    );
+    let mut expected = vec![taken.clone(), name.clone()];
+    expected.sort();
+    assert_eq!(crash_files(&run.dir), expected, "both files exist");
+    assert_eq!(
+        std::fs::read(run.dir.join(&taken)).ok(),
+        Some(foreign),
+        "the existing file is left as it was"
+    );
+    assert_eq!(
+        lines_of(&run.dir.join(&name)),
+        abnormal_end_with_marker(),
+        "the new file is the whole abnormal_end record"
+    );
+    let previous = run.previous_lines();
+    assert_eq!(previous.len(), 1);
+    let line = previous.first().unwrap_or_else(|| unreachable!());
+    assert_eq!(line.get("outcome"), Some("ended_abnormally"));
+    assert_eq!(
+        line.get("crash_file"),
+        Some(name.as_str()),
+        "the line names the abnormal_end file"
+    );
+    assert_after_begin(&run);
 }
 
 // ---- clean end ------------------------------------------------------------------------------

@@ -19,8 +19,8 @@ use voicen_core::autostart::ReconcileAction;
 use voicen_core::connection_test::ConnectionTestResult;
 use voicen_core::delivery::DeliveryResult;
 use voicen_core::diag::{
-    format_line, DetectorTag, DictationLine, DictationOutcome, EngineTag, FailureTag, LoadKind,
-    LogEvent, SaveLine, WarningKind,
+    format_line, CrashFileName, DetectorTag, DictationLine, DictationOutcome, EngineTag,
+    FailureTag, LoadKind, LogEvent, PreviousSessionLine, SaveLine, WarningKind,
 };
 use voicen_core::engine::engine_for;
 use voicen_core::events::{PostProcessResult, PostProcessTrace, SkipKind};
@@ -497,6 +497,63 @@ fn every_event() -> Vec<LogEvent> {
     all.push(LogEvent::DictationBlocked {
         reason: Blocked::NoEngine,
     });
+    // T-100 (review 1 #2): the session lines. A `CrashFileName` is built in tests
+    // through the `test-fakes` constructor `CrashFileName::fake`, which accepts
+    // only a name diag itself writes; the edge values of every part.
+    all.push(LogEvent::Exited);
+    all.push(LogEvent::PreviousSession(
+        PreviousSessionLine::EndedByInstaller,
+    ));
+    all.push(LogEvent::PreviousSession(
+        PreviousSessionLine::EndedAbnormally { crash_file: None },
+    ));
+    for name in [
+        "crash-20261004-140000-4242.txt",
+        "crash-00000101-000000-0.txt",
+        "crash-99991231-235959-4294967295.txt",
+    ] {
+        let crash_file =
+            CrashFileName::fake(name).unwrap_or_else(|| panic!("{name} is a diag name"));
+        assert_eq!(crash_file.to_string(), name, "the name renders back");
+        all.push(LogEvent::PreviousSession(PreviousSessionLine::Crashed {
+            crash_file,
+        }));
+        all.push(LogEvent::PreviousSession(
+            PreviousSessionLine::EndedAbnormally {
+                crash_file: Some(crash_file),
+            },
+        ));
+    }
+    for foreign in [
+        "crash-x.txt",
+        "crash-20261004-140000-4242.txt\nkind: panic",
+        "",
+    ] {
+        assert_eq!(
+            CrashFileName::fake(foreign),
+            None,
+            "the fake constructor refuses {foreign:?}"
+        );
+    }
+    let session_lines: BTreeSet<usize> = all
+        .iter()
+        .filter_map(|e| match e {
+            LogEvent::PreviousSession(PreviousSessionLine::Crashed { .. }) => Some(0),
+            LogEvent::PreviousSession(PreviousSessionLine::EndedByInstaller) => Some(1),
+            LogEvent::PreviousSession(PreviousSessionLine::EndedAbnormally {
+                crash_file: None,
+            }) => Some(2),
+            LogEvent::PreviousSession(PreviousSessionLine::EndedAbnormally {
+                crash_file: Some(_),
+            }) => Some(3),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        session_lines.len(),
+        4,
+        "every PreviousSessionLine arm, with and without a file"
+    );
 
     let seen: BTreeSet<usize> = all
         .iter()
@@ -510,13 +567,11 @@ fn every_event() -> Vec<LogEvent> {
             LogEvent::LogsRecovered => 6,
             LogEvent::DictationBlocked { .. } => 7,
             LogEvent::SettingsTestConnection(_) => 8,
-            // T-100: built only by `Session` (a `CrashFileName` has no public
-            // constructor); their lines are checked by diag_session.rs.
             LogEvent::PreviousSession(_) => 9,
             LogEvent::Exited => 10,
         })
         .collect();
-    assert_eq!(seen.len(), 9, "every LogEvent variant is enumerated");
+    assert_eq!(seen.len(), 11, "every LogEvent variant is enumerated");
     all
 }
 

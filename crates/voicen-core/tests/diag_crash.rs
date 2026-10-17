@@ -46,13 +46,17 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Barrier, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, SystemTime};
 
-use diag_support::{at, contains, files_under, lines_of, parse_ts, utf16le, Offset, NOON_UTC};
+use diag_support::{
+    all_lines, at, closed, contains, crash_file_name, files_under, lines_of, open_log, parse_ts,
+    utf16le, Line, Offset, NOON_UTC,
+};
 use voicen_core::build_info::BuildInfo;
 use voicen_core::clock::{Clock, FakeClock};
 use voicen_core::diag::{
     install_panic_hook, render_crash_file, retain_crash_files, CodeLocation, CrashContext,
-    CrashDetail, CrashFields, CrashKind, Frame, FrameSource, LocalStamp, ModuleResolver, OsVersion,
-    ThreadName, CRASH_MAX_AGE_DAYS, CRASH_MAX_FILES,
+    CrashDetail, CrashFields, CrashKind, Frame, FrameSource, LocalStamp, LogConfig, ModuleResolver,
+    OsVersion, PreviousSession, Session, SessionStart, ThreadName, CRASH_MAX_AGE_DAYS,
+    CRASH_MAX_FILES,
 };
 use voicen_core::test_support::TempDir;
 
@@ -688,6 +692,235 @@ fn a_frame_source_claiming_more_frames_than_the_buffer_does_not_panic() {
         .and_then(|n| std::fs::read_to_string(dir.join(n)).ok())
         .unwrap_or_default();
     keys_of(&text);
+}
+
+#[test]
+fn an_unresolved_frame_is_written_as_unknown_with_its_absolute_address() {
+    // Review 1 #4 (characterization, contract "Crash files"): an address outside
+    // every module (`resolve` -> None) is written `unknown+0x<absolute address>`.
+    let _serial = serial();
+    let tmp = TempDir::new();
+    let dir = logs_dir(&tmp);
+    let clock: Arc<dyn Clock> = Arc::new(FakeClock::at(at(NOON_UTC, 0)));
+    let frames = Frames {
+        // 0xbad0 lies below every module base of `default_modules`.
+        ips: vec![VOICEN_BASE + 0x10, 0xbad0, NTDLL_BASE + 0x2bc],
+        claim: None,
+    };
+    let ctx = context(dir.clone(), clock, frames, default_modules());
+    let seen = seen();
+    let joined = with_hook(ctx, || {
+        let seen = Arc::clone(&seen);
+        std::thread::spawn(move || boom(&seen)).join().is_err()
+    });
+    assert!(joined);
+    let files = crash_files(&dir);
+    assert_eq!(files.len(), 1, "{files:?}");
+    let text = files
+        .first()
+        .and_then(|n| std::fs::read_to_string(dir.join(n)).ok())
+        .unwrap_or_default();
+    keys_of(&text);
+    let frames: Vec<&str> = text.lines().filter_map(|l| l.strip_prefix("  ")).collect();
+    assert_eq!(
+        frames,
+        vec!["voicen.exe+0x10", "unknown+0xbad0", "ntdll.dll+0x2bc"],
+        "{text:?}"
+    );
+}
+
+// ---- name collisions: a crash file is never replaced (review 1 #1) ----------------------
+
+/// The previous session (as in diag_session.rs): pid 4100, started
+/// 2026-10-03T10:00:00Z, written at +02:00, its marker last modified then.
+const OLD_PID: u32 = 4_100;
+const OLD_SECS: u64 = NOON_UTC - 26 * 3_600;
+const OLD_STARTED: &str = "2026-10-03T12:00:00.000+02:00";
+/// Now (NOON_UTC) as local text at +02:00.
+const NOW_LOCAL: &str = "2026-10-04T14:00:00.000+02:00";
+/// The name `begin` and the hook both pick at NOON_UTC for [`PID`] when it is free.
+const SAME_SECOND: &str = "crash-20261004-140000-4242.txt";
+
+fn plant_old_marker(dir: &Path) {
+    let text = format!("pid={OLD_PID}\nstarted={OLD_STARTED}\nversion=0.9.0\ncommit=fedcba9\n");
+    plant(
+        &dir.join("session.marker"),
+        text.as_bytes(),
+        at(OLD_SECS, 0),
+    );
+}
+
+/// `Session::begin` as this process ([`PID`]) at NOON_UTC.
+fn begin_now(dir: &Path, log: &voicen_core::diag::Log) -> (Session, PreviousSession) {
+    let clock = FakeClock::at(at(NOON_UTC, 0));
+    Session::begin(
+        SessionStart {
+            logs_dir: dir,
+            build: build(),
+            os: os(),
+            pid: PID,
+            clock: &clock,
+            offset: &Offset(EAST),
+        },
+        log,
+    )
+}
+
+/// The one `previous session` line of the log in `dir`.
+#[track_caller]
+fn previous_line(dir: &Path) -> Line {
+    let lines: Vec<Line> = all_lines(dir)
+        .iter()
+        .map(|l| closed(l))
+        .filter(|l| l.head == "previous session")
+        .collect();
+    assert_eq!(lines.len(), 1, "one previous-session line: {lines:?}");
+    lines.into_iter().next().unwrap_or_else(|| unreachable!())
+}
+
+/// A second writer's name: the crash-file grammar (`CrashFileName::parse` accepts
+/// it) and this process's pid.
+#[track_caller]
+fn assert_second_name(name: &str, first: &str) {
+    assert_ne!(name, first, "the second file has its own name");
+    assert!(
+        crash_file_name(name),
+        "the second name follows crash-YYYYMMDD-HHMMSS-<pid>.txt: {name}"
+    );
+    assert!(
+        name.ends_with(&format!("-{PID}.txt")),
+        "the second name keeps this process's pid: {name}"
+    );
+}
+
+#[test]
+fn a_panic_in_the_second_of_begin_keeps_the_abnormal_end_file() {
+    // Review 1 #1: begin writes the previous session's abnormal_end file under this
+    // pid and second; a panic in the same second must not replace it.
+    let _serial = serial();
+    let tmp = TempDir::new();
+    let dir = logs_dir(&tmp);
+    plant_old_marker(&dir);
+    let (log, _clock, _seen) = open_log(&dir, at(NOON_UTC, 0), EAST, LogConfig::default());
+    let (session, verdict) = begin_now(&dir, &log);
+    let PreviousSession::EndedAbnormally {
+        crash_file: Some(abnormal),
+    } = verdict
+    else {
+        panic!("expected EndedAbnormally with a file, got {verdict:?}");
+    };
+    let abnormal = abnormal.to_string();
+    assert_eq!(abnormal, SAME_SECOND, "no collision yet: the plain name");
+    let abnormal_bytes = std::fs::read(dir.join(&abnormal)).unwrap_or_default();
+
+    let clock: Arc<dyn Clock> = Arc::new(FakeClock::at(at(NOON_UTC, 0)));
+    let mut ctx = context(dir.clone(), clock, default_frames(), default_modules());
+    ctx.session_started = session.started();
+    let seen = seen();
+    let joined = with_hook(ctx, || {
+        let seen = Arc::clone(&seen);
+        std::thread::spawn(move || boom(&seen)).join().is_err()
+    });
+    assert!(joined);
+
+    let files = crash_files(&dir);
+    assert_eq!(files.len(), 2, "both records survive: {files:?}");
+    assert_eq!(
+        std::fs::read(dir.join(&abnormal)).ok(),
+        Some(abnormal_bytes),
+        "the abnormal_end file is left as begin wrote it"
+    );
+    assert_eq!(
+        lines_of(&dir.join(&abnormal)).first().map(String::as_str),
+        Some("kind: abnormal_end")
+    );
+    let panic_name = files
+        .iter()
+        .find(|n| **n != abnormal)
+        .cloned()
+        .unwrap_or_default();
+    assert_second_name(&panic_name, &abnormal);
+    let text = std::fs::read_to_string(dir.join(&panic_name)).unwrap_or_default();
+    keys_of(&text);
+    let lines = lines_of(&dir.join(&panic_name));
+    assert_eq!(lines.first().map(String::as_str), Some("kind: panic"));
+    assert!(
+        lines.contains(&format!("session_started: {NOW_LOCAL}")),
+        "the panic file belongs to this session: {lines:?}"
+    );
+    let line = previous_line(&dir);
+    assert_eq!(line.get("outcome"), Some("ended_abnormally"));
+    assert_eq!(
+        line.get("crash_file"),
+        Some(abnormal.as_str()),
+        "the verdict line names the abnormal_end file"
+    );
+    assert!(
+        files_under(&dir)
+            .iter()
+            .all(|p| p.extension().is_none_or(|e| e != "tmp")),
+        "no temp file left"
+    );
+    assert_no_payload(tmp.path());
+}
+
+#[test]
+fn begin_in_the_second_of_a_panic_keeps_the_panic_file() {
+    // Review 1 #1, the other order: the hook wrote first, begin's abnormal_end file
+    // gets its own name and the verdict and its line name that one.
+    let _serial = serial();
+    let tmp = TempDir::new();
+    let dir = logs_dir(&tmp);
+    let clock: Arc<dyn Clock> = Arc::new(FakeClock::at(at(NOON_UTC, 0)));
+    let ctx = context(dir.clone(), clock, default_frames(), default_modules());
+    let seen = seen();
+    let joined = with_hook(ctx, || {
+        let seen = Arc::clone(&seen);
+        std::thread::spawn(move || boom(&seen)).join().is_err()
+    });
+    assert!(joined);
+    assert_eq!(crash_files(&dir), vec![SAME_SECOND.to_string()]);
+    let panic_bytes = std::fs::read(dir.join(SAME_SECOND)).unwrap_or_default();
+
+    plant_old_marker(&dir);
+    let (log, _clock, _seen) = open_log(&dir, at(NOON_UTC, 0), EAST, LogConfig::default());
+    let (_session, verdict) = begin_now(&dir, &log);
+    let PreviousSession::EndedAbnormally {
+        crash_file: Some(abnormal),
+    } = verdict
+    else {
+        panic!("expected EndedAbnormally with a file, got {verdict:?}");
+    };
+    let abnormal = abnormal.to_string();
+    assert_second_name(&abnormal, SAME_SECOND);
+    let files = crash_files(&dir);
+    assert_eq!(files.len(), 2, "both records survive: {files:?}");
+    assert!(
+        files.contains(&abnormal),
+        "the verdict names a file that exists: {files:?}"
+    );
+    assert_eq!(
+        std::fs::read(dir.join(SAME_SECOND)).ok(),
+        Some(panic_bytes),
+        "the panic file is left as the hook wrote it"
+    );
+    let lines = lines_of(&dir.join(&abnormal));
+    assert_eq!(
+        lines.first().map(String::as_str),
+        Some("kind: abnormal_end")
+    );
+    assert!(
+        lines.contains(&format!("session_started: {OLD_STARTED}")),
+        "{lines:?}"
+    );
+    assert!(
+        lines.contains(&format!("previous_session_pid: {OLD_PID}")),
+        "{lines:?}"
+    );
+    let line = previous_line(&dir);
+    assert_eq!(line.get("outcome"), Some("ended_abnormally"));
+    assert_eq!(line.get("crash_file"), Some(abnormal.as_str()));
+    assert_no_payload(tmp.path());
 }
 
 // ---- retain_crash_files -----------------------------------------------------------------
