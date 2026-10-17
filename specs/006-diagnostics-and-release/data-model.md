@@ -28,7 +28,7 @@ T-008 shipped the variants marked "T-008". Their fields hold only integers, clos
 
 | Variant | Fields | Level | Status |
 |---|---|---|---|
-| `Started` | `build: BuildInfo`, `pid: u32` | INFO | T-008, without `os`. `os: OsVersion` comes later, with the session work |
+| `Started` | `build: BuildInfo`, `pid: u32` | INFO | T-008, without `os`. `os: OsVersion` comes with T-024 (the shell's `RtlGetVersion`); T-100 defines `OsVersion` for crash files |
 | `Dictation` | `DictationLine` (below) | INFO (delivered, no_speech, too_short, cancelled) / WARN (failed, capture_failed) | T-008, T-051, T-009 |
 | `DictationBlocked` | `reason: settings::gate::Blocked` (`no_engine`), written `dictation outcome=blocked reason=<reason>`; no `rec=` (a blocked press is not a recording) | WARN | T-006 (from `DictationEvent::PressBlocked`) |
 | `Warning` | `kind: WarningKind`, `os_code: Option<i32>`. Kinds in T-008: `vad_fallback`, `esc_unavailable`, `toast_failed` (the pipeline's `WarningCode`s), `models_cleanup_failed`, `settings_window_failed`, `change_bridge_failed`. T-052: `settings_opener_failed` (the settings window's opener thread could not start), `tray_failed` (the tray icon could not be built, or a state could not be applied to it), `tray_follower_failed` (the tray's language follower thread could not start). Later features add kinds (e.g. notification or history write failures) | WARN | T-008 |
@@ -36,20 +36,21 @@ T-008 shipped the variants marked "T-008". Their fields hold only integers, clos
 | `SettingsSave` | `SaveLine`: `ok` with warnings, or `refused` / `failed` with field ids + codes, the form error and `not_restored` field ids; no values (from `SaveOutcome`) | INFO / WARN (failed) | T-008 (spec 004 R-11; no `changed=` list) |
 | `AutostartReconcile` | `ReconcileAction`: `none` / `written` / `removed` / `failed` | INFO / WARN (failed) | T-008 (spec 004 R-11) |
 | `LogsRecovered` | — | INFO | T-008 |
-| `PreviousSession` | `outcome: Clean \| Crashed{crash_file: FileName} \| EndedByInstaller \| EndedAbnormally{crash_file: Option<FileName>}` | INFO / WARN | later (session marker) |
+| `PreviousSession` | `PreviousSessionLine`: `Crashed{crash_file: CrashFileName}` \| `EndedByInstaller` \| `EndedAbnormally{crash_file: Option<CrashFileName>}`, written `previous session outcome=<crashed\|ended_by_installer\|ended_abnormally> [crash_file=<name>]`; a clean previous session has no line, so no `Clean` variant | INFO (ended_by_installer) / WARN | T-100 (written by `Session::begin`) |
 | `Error` | `area: ErrorArea`, `category: ErrorCategory`, `http_status: Option<u16>`, `os_code: Option<i32>` (no `host`: see below) | ERROR / WARN | later |
-| `CrashFileWritten` | `file: FileName`, `kind: CrashKind` | ERROR | later (crash files) |
+| `CrashFileWritten` | `file: FileName`, `kind: CrashKind` | ERROR | not built: the panic hook writes no log line (decision #134, T-100); the file is reported by the next start's `previous session outcome=crashed` |
 | `RetentionDeleted` | `logs: u32`, `crash_files: u32` | INFO | later, if wanted (T-008 retention writes no line) |
-| `Exited` | `reason: TrayExit \| SessionEnd` | INFO | later (session marker) |
+| `Exited` | — (written `exited`; tray Exit and session end both reach the shell as `RunEvent::Exit`, so no reason) | INFO | T-100 (written by `Session::end_clean`) |
 
-Bounded string newtypes (constructed only through validating constructors). None exists after T-008:
+Bounded string newtypes (constructed only through validating constructors). None existed after T-008; T-100 added the crash-file ones:
 
 | Newtype | Constraint | Status |
 |---|---|---|
 | `HostName` | host part of a URL only (no scheme, user-info, path, query); ≤ 253 chars; built from the configured URL, never from error text | not built. T-008 logs no host (Q1 default, decision #64). Adding one is a new decision |
 | `ModelName` | ≤ 128 chars, printable, no whitespace control chars; quoted in output | not built. T-008 logs no model name (Q1 default, decision #64). Adding one is a new decision |
-| `FileName` | a file name inside the data folder (no directories) | later (crash files, session) |
-| `OsVersion` | `major.minor.build` digits only | later (`Started`, crash files) |
+| `FileName` | a file name inside the data folder (no directories) | not built: T-100's `CrashFileName` holds a crash file's name as integers (local date-time fields + pid), rendered by diag |
+| `ThreadName`, `CodeLocation`, `Frame` | crash-file texts: control characters removed, ≤ 255 bytes; `Frame`'s module reduced to its base name (no `/` or `\\`); an empty thread name is `unnamed` | T-100 (crash files only, never on a log line) |
+| `OsVersion` | three `u32`, written `major.minor.build` | T-100 (crash files); on `Started` with T-024 |
 
 Feature extensions: 001 contributes outcome and failure values through its events (`DictationEvent`, `FailureReason::code()` via `FailureTag`); 002 adds `local: Option<Cold|Warm>`, `load_ms` (002 data-model); 003/005 add warning kinds. Adding a variant or field is the only way to log something new — reviewed under P-009.
 
@@ -97,11 +98,11 @@ T-008 shipped `DictationLine`, which `LogObserver` aggregates per `RecordingId` 
 | `started` | local time with offset (identity of the session) |
 | `version`, `commit` | from BuildInfo |
 
-Lifecycle: written by `Session::begin()` (primary instance only, after the single-instance check) → deleted by `Session::end_clean()` (tray Exit, `WM_ENDSESSION`). Found at start → classification (research R7).
+Lifecycle: written by `Session::begin()` (primary instance only, after the single-instance check) → deleted by `Session::end_clean()` (tray Exit, `WM_ENDSESSION`). Found at start → classification (research R7). As built (T-100): `key=value` lines `pid`, `started`, `version`, `commit`, written as `session.marker.tmp` and renamed; on reading only `pid` (digits) and `started` (diag's timestamp, round-tripped) are parsed, nothing is copied.
 
 ## InstallerNote (`logs/installer-ended`)
 
-One line: local time with offset. Written by the NSIS pre-install / pre-uninstall hooks; consumed and deleted at the next start.
+One line: local time with offset. Written by the NSIS pre-install / pre-uninstall hooks; consumed and deleted at the next start. As built (T-100): its text is not read; it counts when its modification time is not older than the old marker's.
 
 ## CrashFile (`logs/crash-YYYYMMDD-HHMMSS-<pid>.txt`) — spec FR-014
 
@@ -123,7 +124,7 @@ Plain text, `key: value` lines, fixed order:
 
 Never: panic message, transcript, audio, keys, memory contents.
 
-Retention: at start, delete files older than 30 days, then keep the 20 newest (by time in the name, falling back to file time).
+Retention: at start, delete files older than 30 days, then keep the 20 newest. As built (T-100): both by modification time (ties by name), regular `crash-*.txt` files only. Written as `crash-*.tmp` and renamed.
 
 ## UninstallChoice *(installer)*
 

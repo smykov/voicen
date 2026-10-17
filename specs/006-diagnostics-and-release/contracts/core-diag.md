@@ -2,7 +2,7 @@
 
 Platform-independent; tested on the Linux host with a temp directory and a fake clock. Used by the shell (`src-tauri`) and, through `PipelineObserver`, by features 001–005. Signatures are the contract; bodies are not.
 
-**Updated by T-008 (2026-10-04).** The Clock, Log and Pipeline observer sections below are the signatures T-008 shipped; they replace the earlier draft (a chrono `WallClock`, `Log::open(&AppPaths, ..)`, `retain_now()`, `format_line(DateTime<FixedOffset>, ..)`, `LogsUnwritableReason::Other(i32)`, `dictation_finished(&DictationRecord)`, `HostName::from_url`). Session and Crash files are not built yet; their signatures are updated to the same time ports. Why: `docs/decisions/diagnostics-log.md`.
+**Updated by T-008 (2026-10-04).** The Clock, Log and Pipeline observer sections below are the signatures T-008 shipped; they replace the earlier draft (a chrono `WallClock`, `Log::open(&AppPaths, ..)`, `retain_now()`, `format_line(DateTime<FixedOffset>, ..)`, `LogsUnwritableReason::Other(i32)`, `dictation_finished(&DictationRecord)`, `HostName::from_url`). Session and Crash files were built by T-100 (2026-10-17) over the same time ports; see their sections. Why: `docs/decisions/diagnostics-log.md`.
 
 ## Paths (P-010)
 
@@ -125,44 +125,68 @@ As built (T-006): a press the dictation gate blocks is one `DictationEvent::Pres
 
 ## Session
 
-Not built yet (a later task). The time parameters are the ports of "Clock" above. `started` is the instant; its local text comes from diag's timestamp formatting with the same `LocalOffset`.
+**As built (T-100, 2026-10-17).** `crates/voicen-core/src/diag/session.rs`. The time parameters are the ports of "Clock" above; the seven inputs are one `SessionStart` struct (no `too_many_arguments` allow). `started` is the clock's now at `begin`; its local text is diag's timestamp format with the same `LocalOffset`. Not wired into the shell yet (T-024: `run()` calls `begin` after `diag::start`, `end_clean` on tray Exit / `WM_ENDSESSION`).
 
 ```rust
-pub enum PreviousSession { Clean, Crashed{crash_file: FileName}, EndedByInstaller,
-                           EndedAbnormally{crash_file: Option<FileName>} }
+pub struct SessionStart<'a> { pub logs_dir: &'a Path, pub build: BuildInfo, pub os: OsVersion, pub pid: u32,
+                              pub clock: &'a dyn Clock, pub offset: &'a dyn LocalOffset }
+
+pub enum PreviousSession { Clean, Crashed { crash_file: CrashFileName }, EndedByInstaller,
+                           EndedAbnormally { crash_file: Option<CrashFileName> } }
 
 pub struct Session { /* marker path, started */ }
 impl Session {
     /// Classifies the previous session (research R7), writes an abnormal-end crash file if needed,
-    /// deletes the old marker and installer note, writes the new marker. Call only in the primary instance.
-    pub fn begin(logs_dir: &Path, build: BuildInfo, os: OsVersion, pid: u32, clock: &dyn Clock,
-                 offset: &dyn LocalOffset, log: &Log) -> (Session, PreviousSession);
+    /// deletes the old marker, the installer note and stale crash-*.tmp files, writes the new marker,
+    /// writes one `previous session` line (none for Clean). Never fails or panics. Primary instance only.
+    pub fn begin(start: SessionStart<'_>, log: &Log) -> (Session, PreviousSession);
     pub fn started(&self) -> SystemTime;
-    pub fn end_clean(self, log: &Log);           // deletes the marker; logs Exited
+    pub fn end_clean(self, log: &Log);           // deletes the marker; logs `exited`. Drop does not.
 }
 ```
 
+- Marker: `pid=<n>\nstarted=<ts>\nversion=<v>\ncommit=<c>\n`, written as `session.marker.tmp` and renamed. Reading an old marker parses `pid` (decimal digits, `u32`) and `started` (diag's timestamp grammar, accepted only when it formats back byte for byte); any other byte is ignored and never copied. Garbage, empty or non-UTF-8 → both absent, still a marker.
+- Verdict, in order: no marker → `Clean`; a `crash-*.txt` diag named, holding the line `session_started: <old started>` → `Crashed` (no new file); `logs/installer-ended` whose modification time is not older than the old marker's modification time → `EndedByInstaller` (the note's text is not read; R7's "time ≥ started" is decided on file times, so there is no second timestamp parser); anything else → `EndedAbnormally` with one `abnormal_end` file (`crash_file: None` when it cannot be written).
+- The `abnormal_end` file carries the current build's version and commit, the OS, the old marker's `started` as `session_started` and its `pid` as `previous_session_pid` (each left out when it did not parse). Whose build it names is OQ-38 (built with the proposal: the current one, typed).
+- Log lines: `previous session outcome=crashed crash_file=<name>` (WARN), `previous session outcome=ended_by_installer` (INFO), `previous session outcome=ended_abnormally [crash_file=<name>]` (WARN), `exited` (INFO, no field: the shell cannot tell tray Exit from session end, both are `RunEvent::Exit`). `LogEvent::PreviousSession(PreviousSessionLine)` has no `Clean` variant; `CrashFileName` is held as integers.
+- Tests: `tests/diag_session.rs`.
+
 ## Crash files
 
-Not built yet (a later task). These use the same time ports. The panic hook gets its own `Arc` clones of the `Clock` and `LocalOffset` the log uses.
+**As built (T-100, 2026-10-17).** `crates/voicen-core/src/diag/crash.rs`. The panic hook gets its own `Arc` clones of the `Clock` and `LocalOffset` the log uses, and two ports filled on Windows by T-024: `FrameSource` (`RtlCaptureStackBackTrace`; std's `Backtrace` gives no frame addresses on stable) and `ModuleResolver`. Not installed by the shell yet (T-024).
 
 ```rust
-pub enum CrashKind { Panic, NativeFault, AbnormalEnd }
+pub enum CrashKind { Panic, NativeFault, AbnormalEnd }          // as_str: panic / native_fault / abnormal_end
+pub struct OsVersion { pub major: u32, pub minor: u32, pub build: u32 }   // Display major.minor.build
+pub struct LocalStamp { pub at: SystemTime, pub seconds_east: i32 }
+pub struct CrashFileName { /* local date-time fields + pid */ }  // Display crash-YYYYMMDD-HHMMSS-<pid>.txt
 
-pub struct CrashContext { logs_dir: PathBuf, build: BuildInfo, os: OsVersion, session_started: SystemTime,
-                          pid: u32, clock: Arc<dyn Clock>, offset: Arc<dyn LocalOffset>,
-                          modules: Arc<dyn ModuleResolver> }
+pub trait FrameSource: Send + Sync { fn capture(&self, out: &mut [usize]) -> usize; }   // count clamped
+pub trait ModuleResolver: Send + Sync { fn resolve(&self, ip: usize) -> Option<(String, usize)>; }
 
-pub trait ModuleResolver: Send + Sync { fn resolve(&self, ip: usize) -> Option<(String /*module file name*/, usize /*offset*/)>; }
+pub struct CrashContext { pub logs_dir: PathBuf, pub build: BuildInfo, pub os: OsVersion,
+                          pub session_started: SystemTime, pub pid: u32, pub clock: Arc<dyn Clock>,
+                          pub offset: Arc<dyn LocalOffset>, pub frames: Arc<dyn FrameSource>,
+                          pub modules: Arc<dyn ModuleResolver> }
 
-pub fn install_panic_hook(ctx: CrashContext);        // std::panic::set_hook; ignores the payload
-pub fn render_crash_file(fields: &CrashFields) -> String;   // pure; allowlisted keys only
-pub fn retain_crash_files(logs_dir: &Path, now: SystemTime);   // ≤ 30 days, ≤ 20 files
+pub struct CrashFields { pub time: LocalStamp, pub build: BuildInfo, pub os: OsVersion,
+                         pub session_started: Option<LocalStamp>, pub detail: CrashDetail }
+pub enum CrashDetail { Panic { thread: ThreadName, location: Option<CodeLocation>, backtrace: Vec<Frame> },
+                       NativeFault { exception_code: u32, fault_address: Option<Frame> },
+                       AbnormalEnd { previous_session_pid: Option<u32> } }   // kind() -> CrashKind
+ThreadName::new(Option<&str>)  CodeLocation::new(&str, u32, u32)  Frame::new(&str, usize)
+
+pub fn install_panic_hook(ctx: CrashContext);        // std::panic::set_hook; never reads the payload
+pub fn render_crash_file(fields: &CrashFields) -> String;   // pure; allowlisted keys only, data-model order
+pub fn retain_crash_files(logs_dir: &Path, now: SystemTime);   // > 30 days by mtime, then all but the 20 newest
 pub const CRASH_MAX_AGE_DAYS: u32 = 30;
 pub const CRASH_MAX_FILES: usize = 20;
 ```
 
-Guarantees: the hook never formats the panic payload; never panics (re-entry guard); writes the file before returning (the process then aborts under `panic = "abort"`).
+- Text: `key: value` lines; the panic kind writes a bare `backtrace:` line and then `  <module>+0x<lowercase hex>` lines; `exception_code: 0x%08X`; an absent optional is left out. Bounded texts: control characters removed, at most 255 bytes; a module is reduced to the text after its last `/` or `\` (a full path names the user); an empty thread name is `unnamed`; an unresolved frame is `unknown+0x<address>`.
+- Guarantees: the hook never formats or reads the payload; never panics (every error ignored; std aborts a panic inside a hook, so this is by construction); takes no lock of its own (its ports must not lock either; T-024's Windows adapters are built to that rule) and never calls `Log::write` (decision #134: no log line from the hook, so no `CrashFileWritten` event); does not chain the previous hook (std's default hook prints the payload); one installed hook writes at most one file, the first panic wins, and a later panic waits (sleeping, at most 2 s) for that file so `panic = "abort"` cannot cut it short; each `install_panic_hook` call has its own guard. The file is written as `crash-*.tmp` and renamed (`Session::begin` deletes stale tmp files); the hook never creates the folder.
+- Retention removes only regular `crash-*.txt` files (a file from the future has age zero; ties by name). The shell calls it at start (T-024); the log's retention never touches crash files.
+- Tests: `tests/diag_crash.rs` (its own binary: the hook is process-global).
 
 ## Credentials prefix
 

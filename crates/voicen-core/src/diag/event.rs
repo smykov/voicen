@@ -4,6 +4,7 @@
 //! Every field is an integer, a closed enum of this crate, or `BuildInfo`.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
+use super::crash::CrashFileName;
 use crate::autostart::ReconcileAction;
 use crate::build_info::BuildInfo;
 use crate::connection_test::ConnectionTestResult;
@@ -43,6 +44,26 @@ pub enum LogEvent {
     AutostartReconcile(ReconcileAction),
     /// The log was unwritable and is written again (written by the log itself).
     LogsRecovered,
+    /// The verdict on the previous session (T-100, research R7), written by
+    /// [`Session::begin`](super::Session::begin):
+    /// `previous session outcome=<crashed|ended_by_installer|ended_abnormally>
+    /// [crash_file=<name>]`. A clean previous session has no line (no variant).
+    PreviousSession(PreviousSessionLine),
+    /// A clean end of the session (`Session::end_clean`, T-100): `exited`.
+    Exited,
+}
+
+/// A logged previous-session verdict (T-100): `PreviousSession` without `Clean`.
+/// The file name is a [`CrashFileName`], held as integers and rendered by diag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreviousSessionLine {
+    /// A crash file of the previous session exists (no new record): WARN.
+    Crashed { crash_file: CrashFileName },
+    /// The installer ended it: INFO, no file.
+    EndedByInstaller,
+    /// It ended without a clean exit or a crash file; the new `abnormal_end`
+    /// file, when it could be written: WARN.
+    EndedAbnormally { crash_file: Option<CrashFileName> },
 }
 
 impl LogEvent {

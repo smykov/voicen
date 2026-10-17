@@ -510,6 +510,10 @@ fn every_event() -> Vec<LogEvent> {
             LogEvent::LogsRecovered => 6,
             LogEvent::DictationBlocked { .. } => 7,
             LogEvent::SettingsTestConnection(_) => 8,
+            // T-100: built only by `Session` (a `CrashFileName` has no public
+            // constructor); their lines are checked by diag_session.rs.
+            LogEvent::PreviousSession(_) => 9,
+            LogEvent::Exited => 10,
         })
         .collect();
     assert_eq!(seen.len(), 9, "every LogEvent variant is enumerated");

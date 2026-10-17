@@ -3,9 +3,10 @@
 //! Total over [`LogEvent`]; every value is an integer, a literal from this
 //! module's tables (engine, detector, failure, microphone cause, local warmth,
 //! post-processing result and skip kind, warning kind, load outcome,
-//! test-connection result), a closed `as_str`/`code` match of the crate (settings field
-//! ids and codes, `ReconcileAction`, `DeliveryResult`, `FormError::kind`), or
-//! `BuildInfo`. Std only (the date math of `clock.rs`).
+//! test-connection result, previous-session outcome), a closed `as_str`/`code` match
+//! of the crate (settings field ids and codes, `ReconcileAction`, `DeliveryResult`,
+//! `FormError::kind`), a `CrashFileName` (integers), or `BuildInfo`. Std only (the
+//! date math of `clock.rs`).
 //!
 //! ```text
 //! 2026-10-04T23:59:00.123+02:00 INFO voicen 0.1.0 (abc1234) started pid=4242
@@ -22,15 +23,15 @@
 
 use std::borrow::Cow;
 use std::fmt::{Display, Write as _};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::event::{
     DetectorTag, DictationLine, DictationOutcome, EngineTag, FailureTag, LoadKind, LogEvent,
-    SaveLine, TestConnectionLine, WarningKind,
+    PreviousSessionLine, SaveLine, TestConnectionLine, WarningKind,
 };
 use crate::autostart::ReconcileAction;
 use crate::build_info::BuildInfo;
-use crate::clock::civil_from_days;
+use crate::clock::{civil_from_days, days_from_civil};
 use crate::events::{PostProcessResult, SkipKind};
 use crate::local_models::residency::Warmth;
 use crate::recording::MicCause;
@@ -104,7 +105,9 @@ impl LocalTime {
     }
 }
 
-fn write_timestamp(out: &mut String, t: &LocalTime) {
+/// Writes `t` as `YYYY-MM-DDTHH:MM:SS.mmm+HH:MM`: the one timestamp text of the
+/// log lines, the session marker and the crash files (T-100).
+pub(crate) fn write_timestamp(out: &mut String, t: &LocalTime) {
     let sign = if t.offset < 0 { '-' } else { '+' };
     let abs = t.offset.unsigned_abs();
     let _ = write!(
@@ -122,11 +125,67 @@ fn write_timestamp(out: &mut String, t: &LocalTime) {
     );
 }
 
+/// The instant and the offset (seconds east) of a timestamp written by
+/// [`write_timestamp`]; `None` for any other text. Round-trips: a text is accepted
+/// only when `write_timestamp` writes it back byte for byte, so an impossible date
+/// (2026-02-31), an offset that is not whole minutes or beyond ±14:00, or a time
+/// outside the clamp range is refused (T-100: the session marker's `started`).
+pub(crate) fn parse_timestamp(text: &str) -> Option<(SystemTime, i32)> {
+    let b = text.as_bytes();
+    if b.len() != 29 {
+        return None;
+    }
+    for (i, c) in [
+        (4, b'-'),
+        (7, b'-'),
+        (10, b'T'),
+        (13, b':'),
+        (16, b':'),
+        (19, b'.'),
+        (26, b':'),
+    ] {
+        if b.get(i) != Some(&c) {
+            return None;
+        }
+    }
+    let sign: i64 = match b.get(23) {
+        Some(b'+') => 1,
+        Some(b'-') => -1,
+        _ => return None,
+    };
+    let num = |from: usize, n: usize| -> Option<u64> {
+        b.get(from..from + n)?.iter().try_fold(0u64, |acc, c| {
+            c.is_ascii_digit().then(|| acc * 10 + u64::from(c - b'0'))
+        })
+    };
+    let (year, month, day) = (num(0, 4)?, num(5, 2)?, num(8, 2)?);
+    let (hour, minute, second, millis) = (num(11, 2)?, num(14, 2)?, num(17, 2)?, num(20, 3)?);
+    let (offset_hours, offset_minutes) = (num(24, 2)?, num(27, 2)?);
+    if hour > 23 || minute > 59 || second > 59 || offset_hours > 14 || offset_minutes > 59 {
+        return None;
+    }
+    let days = days_from_civil(year, month, day)?;
+    let local_ms = days * MS_PER_DAY + ((hour * 60 + minute) * 60 + second) * 1_000 + millis;
+    let offset = sign * i64::try_from((offset_hours * 60 + offset_minutes) * 60).ok()?;
+    let utc_ms = i64::try_from(local_ms).ok()?.checked_sub(offset * 1_000)?;
+    let at = UNIX_EPOCH.checked_add(Duration::from_millis(u64::try_from(utc_ms).ok()?))?;
+    let offset = i32::try_from(offset).ok()?;
+    let mut back = String::with_capacity(29);
+    write_timestamp(&mut back, &LocalTime::of(at, offset));
+    (back == text).then_some((at, offset))
+}
+
 fn level(event: &LogEvent) -> &'static str {
     const INFO: &str = "INFO";
     const WARN: &str = "WARN";
     match event {
-        LogEvent::Started { .. } | LogEvent::LogsRecovered => INFO,
+        LogEvent::Started { .. } | LogEvent::LogsRecovered | LogEvent::Exited => INFO,
+        LogEvent::PreviousSession(line) => match line {
+            PreviousSessionLine::EndedByInstaller => INFO,
+            PreviousSessionLine::Crashed { .. } | PreviousSessionLine::EndedAbnormally { .. } => {
+                WARN
+            }
+        },
         LogEvent::Dictation(line) => match line.outcome {
             DictationOutcome::Failed { .. } | DictationOutcome::CaptureFailed { .. } => WARN,
             DictationOutcome::Delivered(_)
@@ -168,9 +227,8 @@ fn write_message(out: &mut String, event: &LogEvent) {
             let _ = write!(
                 out,
                 "voicen {} ({}) started",
-                build_text(version, |b| b.is_ascii_alphanumeric()
-                    || b".+-".contains(&b)),
-                build_text(commit, |b| b.is_ascii_alphanumeric()),
+                version_text(version),
+                commit_text(commit),
             );
             pair(out, "pid", pid);
         }
@@ -198,6 +256,25 @@ fn write_message(out: &mut String, event: &LogEvent) {
             pair(out, "action", action.as_str());
         }
         LogEvent::LogsRecovered => out.push_str("logs recovered"),
+        LogEvent::PreviousSession(line) => {
+            out.push_str("previous session");
+            match line {
+                PreviousSessionLine::Crashed { crash_file } => {
+                    pair(out, "outcome", "crashed");
+                    pair(out, "crash_file", crash_file);
+                }
+                PreviousSessionLine::EndedByInstaller => {
+                    pair(out, "outcome", "ended_by_installer");
+                }
+                PreviousSessionLine::EndedAbnormally { crash_file } => {
+                    pair(out, "outcome", "ended_abnormally");
+                    if let Some(name) = crash_file {
+                        pair(out, "crash_file", name);
+                    }
+                }
+            }
+        }
+        LogEvent::Exited => out.push_str("exited"),
     }
 }
 
@@ -375,6 +452,19 @@ fn list(out: &mut String, key: &str, items: impl Iterator<Item = String>) {
     if !items.is_empty() {
         pair(out, key, items.join(","));
     }
+}
+
+/// `BuildInfo::version` as written everywhere diag writes it (log, marker, crash
+/// files): digits, letters and `.+-` only.
+pub(crate) fn version_text(version: &'static str) -> Cow<'static, str> {
+    build_text(version, |b| {
+        b.is_ascii_alphanumeric() || b".+-".contains(&b)
+    })
+}
+
+/// `BuildInfo::commit` as written everywhere diag writes it: letters and digits.
+pub(crate) fn commit_text(commit: &'static str) -> Cow<'static, str> {
+    build_text(commit, |b| b.is_ascii_alphanumeric())
 }
 
 /// A `BuildInfo` field as written: unchanged when every byte is allowed (the real

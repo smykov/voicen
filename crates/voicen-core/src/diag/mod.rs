@@ -10,6 +10,11 @@
 //! ([`EngineTag::from_kind`], [`DetectorTag::from_name`], [`FailureTag::from_code`]),
 //! where an unknown value becomes `other`.
 //!
+//! T-100 adds the two other writers under `logs/`, each over closed typed fields
+//! too: [`Session`] (the session marker and the previous-session verdict, `session`)
+//! and the crash files (`crash`: [`render_crash_file`], [`install_panic_hook`],
+//! [`retain_crash_files`]). The panic hook never calls [`Log::write`].
+//!
 //! A transcript, a key or any other text cannot be handed to the log: this must
 //! not compile.
 //!
@@ -105,17 +110,25 @@
 //! ```
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
+pub mod crash;
 pub mod event;
 pub mod format;
 pub mod log;
 pub mod notice;
 pub mod observer;
+pub mod session;
 
+pub use crash::{
+    install_panic_hook, render_crash_file, retain_crash_files, CodeLocation, CrashContext,
+    CrashDetail, CrashFields, CrashFileName, CrashKind, Frame, FrameSource, LocalStamp,
+    ModuleResolver, OsVersion, ThreadName, CRASH_MAX_AGE_DAYS, CRASH_MAX_FILES,
+};
 pub use event::{
     DetectorTag, DictationLine, DictationOutcome, EngineTag, FailureTag, LoadKind, LogEvent,
-    SaveLine, TestConnectionLine, WarningKind,
+    PreviousSessionLine, SaveLine, TestConnectionLine, WarningKind,
 };
 pub use format::format_line;
 pub use log::{Log, LogConfig, LogsUnwritableReason, OnUnwritable};
 pub use notice::{LogsNotice, LogsNoticeSink};
 pub use observer::LogObserver;
+pub use session::{PreviousSession, Session, SessionStart};

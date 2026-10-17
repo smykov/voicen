@@ -115,6 +115,23 @@ pub(crate) fn civil_from_days(days: u64) -> (u64, u64, u64) {
     (year, month, day)
 }
 
+/// Proleptic Gregorian (year, month, day) -> days since 1970-01-01, the inverse of
+/// [`civil_from_days`] (same algorithm), for dates from 1970-01-01 on; `None`
+/// before it or for a month outside 1..=12. The day is not checked against the
+/// month: the caller round-trips (`diag::format::parse_timestamp`, T-100).
+pub(crate) fn days_from_civil(year: u64, month: u64, day: u64) -> Option<u64> {
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) || year < 1970 {
+        return None;
+    }
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = y / 400;
+    let yoe = y - era * 400; // [0, 399]
+    let mp = if month > 2 { month - 3 } else { month + 9 }; // March = 0
+    let doy = (153 * mp + 2) / 5 + day - 1; // [0, 365]
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
+    (era * 146_097 + doe).checked_sub(719_468)
+}
+
 /// A [`Clock`] that returns a fixed time, changeable with [`set`](Self::set).
 #[cfg(any(test, feature = "test-fakes"))]
 pub struct FakeClock {
@@ -181,6 +198,21 @@ mod tests {
         for (t, expected) in table {
             assert_eq!(utc_compact(t), expected, "{t:?}");
         }
+    }
+
+    #[test]
+    fn days_from_civil_inverts_civil_from_days() {
+        for days in (0..3_000_000u64)
+            .step_by(97)
+            .chain([0, 59, 10_956, 2_932_896])
+        {
+            let (y, m, d) = civil_from_days(days);
+            assert_eq!(days_from_civil(y, m, d), Some(days), "{y}-{m}-{d}");
+        }
+        assert_eq!(days_from_civil(1969, 12, 31), None);
+        assert_eq!(days_from_civil(2026, 13, 1), None);
+        assert_eq!(days_from_civil(2026, 0, 1), None);
+        assert_eq!(days_from_civil(2026, 1, 0), None);
     }
 
     #[test]
