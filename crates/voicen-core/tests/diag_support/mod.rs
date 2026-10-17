@@ -470,6 +470,24 @@ pub const TEST_CONNECTION_RESULTS: &[&str] = &[
 pub const SAVE_OUTCOMES: &[&str] = &["ok", "refused", "failed"];
 pub const FORM_ERRORS: &[&str] = &["write_failed", "settings_unavailable", "partially_restored"];
 pub const RECONCILE_ACTIONS: &[&str] = &["none", "written", "removed", "failed"];
+/// `previous session outcome=<...>` (T-100, research R7): one literal per
+/// `PreviousSession` verdict that is logged (a clean previous session writes no line).
+pub const PREVIOUS_SESSION_OUTCOMES: &[&str] =
+    &["crashed", "ended_by_installer", "ended_abnormally"];
+
+/// A crash-file name as diag writes it: `crash-YYYYMMDD-HHMMSS-<pid>.txt` (T-100,
+/// data-model "CrashFile"); nothing else may follow `crash_file=`.
+pub fn crash_file_name(v: &str) -> bool {
+    let Some(body) = v
+        .strip_prefix("crash-")
+        .and_then(|r| r.strip_suffix(".txt"))
+    else {
+        return false;
+    };
+    let parts: Vec<&str> = body.split('-').collect();
+    matches!(parts.as_slice(), [date, time, pid]
+        if digits(date, 8).is_some() && digits(time, 6).is_some() && unsigned(pid))
+}
 
 fn unsigned(v: &str) -> bool {
     !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()) && v.parse::<u64>().is_ok()
@@ -527,6 +545,9 @@ pub fn check_closed(line: &Line) -> Result<(), String> {
         "settings test_connection" => &["result"],
         "autostart reconcile" => &["action"],
         "logs recovered" => &[],
+        // T-100: the previous-session verdict and the clean exit.
+        "previous session" => &["outcome"],
+        "exited" => &[],
         other => return Err(format!("unknown head {other:?} in {:?}", line.raw)),
     };
     for k in required {
@@ -563,6 +584,8 @@ pub fn check_closed(line: &Line) -> Result<(), String> {
             ("settings save", "form_error") => one_of(k, v, FORM_ERRORS)?,
             ("settings save", "not_restored") => check(field_list(v), k, v)?,
             ("autostart reconcile", "action") => one_of(k, v, RECONCILE_ACTIONS)?,
+            ("previous session", "outcome") => one_of(k, v, PREVIOUS_SESSION_OUTCOMES)?,
+            ("previous session", "crash_file") => check(crash_file_name(v), k, v)?,
             ("settings test_connection", "result") => match v.strip_prefix("http_") {
                 Some(status) => check(unsigned(status) && status.parse::<u16>().is_ok(), k, v)?,
                 None => one_of(k, v, TEST_CONNECTION_RESULTS)?,
@@ -577,6 +600,21 @@ pub fn check_closed(line: &Line) -> Result<(), String> {
                     line.raw
                 ))
             }
+        }
+    }
+    if line.head == "previous session" {
+        let outcome = line.get("outcome").unwrap_or_default();
+        let file = line.get("crash_file").is_some();
+        let ok = match outcome {
+            "crashed" => file,
+            "ended_by_installer" => !file,
+            _ => true,
+        };
+        if !ok {
+            return Err(format!(
+                "crash_file= on every crashed line and never on ended_by_installer: {:?}",
+                line.raw
+            ));
         }
     }
     if line.head == "dictation" {
