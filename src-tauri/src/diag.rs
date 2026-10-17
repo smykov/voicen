@@ -10,11 +10,14 @@
 //! (docs/decisions/diagnostics-log.md).
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::SystemTime;
 
-use voicen_core::clock::{LocalOffset, SystemClock};
-use voicen_core::diag::{Log, LogConfig, LogEvent, OnUnwritable};
+use voicen_core::clock::{Clock, LocalOffset, SystemClock};
+use voicen_core::diag::{
+    install_panic_hook, retain_crash_files, CrashContext, Log, LogConfig, LogEvent,
+    NativeFaultSetup, OnUnwritable, OsVersion, Session, SessionStart,
+};
 
 /// Opens the one log over `logs_dir` (`SystemClock`, the local UTC offset,
 /// `LogConfig::default()`) and writes `LogEvent::Started { build_info(),
@@ -34,6 +37,151 @@ pub fn start(logs_dir: PathBuf, on_unwritable: OnUnwritable) -> Arc<Log> {
         pid: std::process::id(),
     });
     log
+}
+
+/// This process's session (T-024): ended cleanly at most once, by
+/// [`SessionEnd::end`] from `on_run_event`'s `RunEvent::Exit` arm (tray Exit, and
+/// `WM_ENDSESSION(TRUE)` through tao). Dropping it ends nothing: only `end` deletes
+/// the marker, so every other way out of the process leaves it for the next start.
+pub struct SessionEnd(Mutex<Option<(Session, Arc<Log>)>>);
+
+impl SessionEnd {
+    /// Deletes the marker and writes one `exited` line (`Session::end_clean`) the
+    /// first time; later calls do nothing.
+    pub fn end(&self) {
+        let taken = self.0.lock().unwrap_or_else(PoisonError::into_inner).take();
+        if let Some((session, log)) = taken {
+            session.end_clean(&log);
+        }
+    }
+}
+
+/// Begins this process's session over `logs_dir` and arms the crash records
+/// (T-024 invariant 1), in this order: the OS version (`RtlGetVersion`),
+/// `Session::begin` (the previous session's verdict, its `previous session` line,
+/// stale `crash-*.tmp` deleted, the new marker), the panic hook (frames from
+/// `RtlCaptureStackBackTrace`, modules from `GetModuleHandleExW`), the
+/// unhandled-exception filter (a `native_fault` file, offset fixed now), then
+/// `retain_crash_files`. Call once, in the primary instance only, right after
+/// [`start`] (`release_parts`; the crash tests' children). [`start`] stays
+/// hook-free. Never fails or panics.
+pub fn begin_session(logs_dir: PathBuf, log: &Arc<Log>) -> SessionEnd {
+    let os = os_version();
+    let build = voicen_core::build_info();
+    let pid = std::process::id();
+    let clock: Arc<dyn Clock> = Arc::new(SystemClock);
+    let offset: Arc<dyn LocalOffset> = Arc::new(OsLocalOffset);
+    let (session, _previous) = Session::begin(
+        SessionStart {
+            logs_dir: &logs_dir,
+            build: build.clone(),
+            os,
+            pid,
+            clock: clock.as_ref(),
+            offset: offset.as_ref(),
+        },
+        log,
+    );
+    let started = session.started();
+    install_panic_hook(CrashContext {
+        logs_dir: logs_dir.clone(),
+        build: build.clone(),
+        os,
+        session_started: started,
+        pid,
+        clock: Arc::clone(&clock),
+        offset: Arc::clone(&offset),
+        frames: crash_ports::frames(),
+        modules: crash_ports::modules(),
+    });
+    crash_ports::install_fault_filter(
+        &logs_dir,
+        NativeFaultSetup {
+            build,
+            os,
+            session_started: started,
+            pid,
+            // The marker's offset, so the file's `session_started` equals its `started`.
+            seconds_east: offset.seconds_east(started),
+        },
+    );
+    retain_crash_files(&logs_dir, clock.now());
+    SessionEnd(Mutex::new(Some((session, Arc::clone(log)))))
+}
+
+/// The Windows version (`RtlGetVersion`, which the compatibility layer does not
+/// shim); `0.0.0` when it cannot be read.
+pub fn os_version() -> OsVersion {
+    crash_ports::os_version()
+}
+
+/// The Win32 crash adapters (`win::crash`).
+#[cfg(windows)]
+mod crash_ports {
+    use std::path::Path;
+    use std::sync::Arc;
+
+    use voicen_core::diag::{FrameSource, ModuleResolver, NativeFaultSetup, OsVersion};
+
+    use crate::win::crash;
+
+    pub(super) fn frames() -> Arc<dyn FrameSource> {
+        Arc::new(crash::WinFrames)
+    }
+
+    pub(super) fn modules() -> Arc<dyn ModuleResolver> {
+        Arc::new(crash::WinModules)
+    }
+
+    pub(super) fn install_fault_filter(logs_dir: &Path, setup: NativeFaultSetup) {
+        crash::install_fault_filter(logs_dir, setup);
+    }
+
+    pub(super) fn os_version() -> OsVersion {
+        crash::os_version()
+    }
+}
+
+/// Not Windows (the shell runs on Windows only, decision #5): no frames, no
+/// modules, no filter, version `0.0.0`.
+#[cfg(not(windows))]
+mod crash_ports {
+    use std::path::Path;
+    use std::sync::Arc;
+
+    use voicen_core::diag::{FrameSource, ModuleResolver, NativeFaultSetup, OsVersion};
+
+    struct Nothing;
+
+    impl FrameSource for Nothing {
+        fn capture(&self, _out: &mut [usize]) -> usize {
+            0
+        }
+    }
+
+    impl ModuleResolver for Nothing {
+        fn resolve(&self, _ip: usize) -> Option<(String, usize)> {
+            None
+        }
+    }
+
+    pub(super) fn frames() -> Arc<dyn FrameSource> {
+        Arc::new(Nothing)
+    }
+
+    pub(super) fn modules() -> Arc<dyn ModuleResolver> {
+        Arc::new(Nothing)
+    }
+
+    pub(super) fn install_fault_filter(_logs_dir: &Path, _setup: NativeFaultSetup) {}
+
+    pub(super) fn os_version() -> OsVersion {
+        OsVersion {
+            major: 0,
+            minor: 0,
+            build: 0,
+        }
+    }
 }
 
 /// The OS code of a tauri error that is an I/O error; `None` otherwise. A warning

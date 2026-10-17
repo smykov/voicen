@@ -3,10 +3,13 @@
 //! for the hotkey, calls the session's inputs; the Win32 numbers come from
 //! `voicen_core::win32_data`. Windows CI proves them (`src-tauri/tests/{hotkey,
 //! capture,clipboard,paste}.rs`). `shell_open` is the tray's Explorer opener, the
-//! shell's `logs_folder::FolderOpener` port (T-071, `src-tauri/tests/tray.rs`).
+//! shell's `logs_folder::FolderOpener` port (T-071, `src-tauri/tests/tray.rs`). `crash` holds
+//! the crash records' frame source, module resolver, exception filter and OS
+//! version (T-024, `src-tauri/tests/crash.rs`).
 
 pub mod capture;
 pub mod clipboard;
+pub mod crash;
 pub mod hotkey;
 pub mod paste;
 pub mod purge;

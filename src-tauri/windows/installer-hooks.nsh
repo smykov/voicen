@@ -36,7 +36,47 @@ Var VoicenScratch
   WriteRegStr ${MUI_LANGDLL_REGISTRY_ROOT} "${MUI_LANGDLL_REGISTRY_KEY}" "${MUI_LANGDLL_REGISTRY_VALUENAME}" $LANGUAGE
 !macroend
 
+; The installer-ended note (T-024; invariant 5, docs/decisions/diagnostics-log.md): written to
+; %LOCALAPPDATA%\Voicen\logs\installer-ended only while voicen.exe is running, so the stock
+; CheckIfAppIsRunning that follows the PRE hooks is what ends that session, and the next start's
+; Session::begin reads it as ended_by_installer (note mtime >= marker mtime). With no running
+; voicen.exe nothing is written, so an earlier kill stays ended_abnormally. "Running" is asked the
+; way CheckIfAppIsRunning asks it (Restart Manager, RmGetList on "$INSTDIR\voicen.exe":
+; ERROR_MORE_DATA = some process has it open). The content is not read. An empty $LOCALAPPDATA or
+; a missing logs dir writes nothing. Clobbers $R0 and $0..$3, which CheckIfAppIsRunning sets
+; again right after.
+!macro VoicenNoteInstallerEnded
+  !insertmacro RestartManager_StartSession $R0
+  ${If} $R0 != ""
+    !insertmacro RestartManager_RegisterFile $R0 "$INSTDIR\${MAINBINARYNAME}.exe"
+    ${If} $0 = 0
+      System::Call 'RSTRTMGR::RmGetList(p R0, *i .r1, *i .r2, p 0, *i .r3) i .r0'
+      ${If} $0 = ${ERROR_MORE_DATA}
+        SetShellVarContext current
+        ${If} $LOCALAPPDATA != ""
+        ${AndIf} ${FileExists} "$LOCALAPPDATA\Voicen\logs\*.*"
+          ClearErrors
+          FileOpen $1 "$LOCALAPPDATA\Voicen\logs\installer-ended" w
+          ${IfNot} ${Errors}
+            FileWrite $1 "installer-ended$\n"
+            FileClose $1
+          ${EndIf}
+        ${EndIf}
+      ${EndIf}
+    ${EndIf}
+    !insertmacro RestartManager_EndSession $R0
+  ${EndIf}
+!macroend
+
+!macro NSIS_HOOK_PREINSTALL
+  !insertmacro VoicenNoteInstallerEnded
+!macroend
+
 !macro NSIS_HOOK_PREUNINSTALL
+  ; Any mode, before the purge: a reinstall's uninstaller closes the app first (decision #76),
+  ; so the new installer's PREINSTALL would no longer see it running.
+  !insertmacro VoicenNoteInstallerEnded
+
   StrCpy $VoicenPurgeData 0
   ${If} $UpdateMode <> 1
     ClearErrors

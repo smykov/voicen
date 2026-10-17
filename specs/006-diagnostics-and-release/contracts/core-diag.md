@@ -125,7 +125,7 @@ As built (T-006): a press the dictation gate blocks is one `DictationEvent::Pres
 
 ## Session
 
-**As built (T-100, 2026-10-17).** `crates/voicen-core/src/diag/session.rs`. The time parameters are the ports of "Clock" above; the seven inputs are one `SessionStart` struct (no `too_many_arguments` allow). `started` is the clock's now at `begin`; its local text is diag's timestamp format with the same `LocalOffset`. Not wired into the shell yet (T-024: `run()` calls `begin` after `diag::start`, `end_clean` on tray Exit / `WM_ENDSESSION`).
+**As built (T-100, 2026-10-17).** `crates/voicen-core/src/diag/session.rs`. The time parameters are the ports of "Clock" above; the seven inputs are one `SessionStart` struct (no `too_many_arguments` allow). `started` is the clock's now at `begin`; its local text is diag's timestamp format with the same `LocalOffset`. Wired by T-024: the shell's `diag::begin_session(logs_dir, &Arc<Log>) -> SessionEnd` (`src-tauri/src/diag.rs`), called by `release_parts` right after `diag::start` in the primary instance only, runs in this fixed order: `RtlGetVersion` → `Session::begin` → `install_panic_hook` (`session_started = session.started()`) → the native-fault filter → `retain_crash_files`. `diag::start` stays hook-free. `SessionEnd` is managed state; the single `RunEvent::Exit` arm of `on_run_event` (tray Exit, and `WM_ENDSESSION(TRUE)` through tao) calls `end_clean` at most once. No other exit path deletes the marker.
 
 ```rust
 pub struct SessionStart<'a> { pub logs_dir: &'a Path, pub build: BuildInfo, pub os: OsVersion, pub pid: u32,
@@ -153,7 +153,7 @@ impl Session {
 
 ## Crash files
 
-**As built (T-100, 2026-10-17).** `crates/voicen-core/src/diag/crash.rs`. The panic hook gets its own `Arc` clones of the `Clock` and `LocalOffset` the log uses, and two ports filled on Windows by T-024: `FrameSource` (`RtlCaptureStackBackTrace`; std's `Backtrace` gives no frame addresses on stable) and `ModuleResolver`. Not installed by the shell yet (T-024).
+**As built (T-100, 2026-10-17).** `crates/voicen-core/src/diag/crash.rs`. The panic hook gets its own `Arc` clones of the `Clock` and `LocalOffset` the log uses, and two ports filled on Windows by T-024: `FrameSource` (`RtlCaptureStackBackTrace`; std's `Backtrace` gives no frame addresses on stable) and `ModuleResolver` (`GetModuleHandleExW` + `GetModuleFileNameW`), both in `src-tauri/src/win/crash.rs`. Installed by `diag::begin_session` (T-024; see "Session").
 
 ```rust
 pub enum CrashKind { Panic, NativeFault, AbnormalEnd }          // as_str: panic / native_fault / abnormal_end
@@ -182,11 +182,24 @@ pub fn render_crash_file(fields: &CrashFields) -> String;   // pure; allowlisted
 pub fn retain_crash_files(logs_dir: &Path, now: SystemTime);   // > 30 days by mtime, then all but the 20 newest
 pub const CRASH_MAX_AGE_DAYS: u32 = 30;
 pub const CRASH_MAX_FILES: usize = 20;
+
+// diag::native_fault (T-024): the second writer, for the shell's unhandled-exception filter
+pub struct NativeFaultSetup { pub build: BuildInfo, pub os: OsVersion, pub session_started: SystemTime,
+                              pub pid: u32, pub seconds_east: i32 }
+pub trait FaultFiles { fn create_new(&mut self, tmp: &str, bytes: &[u8]) -> io::Result<()>;
+                       fn hard_link(&mut self, tmp: &str, name: &str) -> io::Result<()>;
+                       fn remove(&mut self, tmp: &str); }
+pub struct NativeFaultWriter;                                   // Send + Sync
+impl NativeFaultWriter {
+    pub fn new(setup: NativeFaultSetup) -> NativeFaultWriter;   // allocates (at install)
+    pub fn record(&self, now: SystemTime, exception_code: u32, fault_address: usize,
+                  module: Option<(&[u16], usize)>, files: &mut dyn FaultFiles) -> Option<CrashFileName>;
+}
 ```
 
 - Text: `key: value` lines; the panic kind writes a bare `backtrace:` line and then `  <module>+0x<lowercase hex>` lines; `exception_code: 0x%08X`; an absent optional is left out. Bounded texts: control characters removed, at most 255 bytes; a module is reduced to the text after its last `/` or `\` (a full path names the user); an empty thread name is `unnamed`; an unresolved frame is `unknown+0x<address>`.
-- Guarantees: the hook never formats or reads the payload; never panics (every error ignored; std aborts a panic inside a hook, so this is by construction); takes no lock of its own (its ports must not lock either; T-024's Windows adapters are built to that rule) and never calls `Log::write` (decision #134: no log line from the hook, so no `CrashFileWritten` event); does not chain the previous hook (std's default hook prints the payload); one installed hook writes at most one file, the first panic wins, and a later panic waits (sleeping, at most 2 s) for that file so `panic = "abort"` cannot cut it short; each `install_panic_hook` call has its own guard. The file is written as `crash-<stem>-<kind>.tmp` (created new) and hard-linked to its `.txt` name (`Session::begin` deletes stale tmp files); the hook never creates the folder.
-- A crash file is never replaced. `write_crash_file` (the one writer, used by `Session::begin` and the hook) claims a name with `fs::hard_link`, which fails when the path exists (`linkat` on Linux, `CreateHardLinkW` on Windows), so two writers cannot both win a name and no `exists`-then-rename race is left. A taken name (an `abnormal_end` file and a panic of the same pid in the same second, either order) steps the name's second forward, at most 60 names, the pid kept; the `time:` line stays the true time. The name returned, and so `Crashed`/`EndedAbnormally { crash_file }` and its `previous session` line, is the name actually written; all 60 taken, or any other link error → `None`, no file left. The logs folder must support hard links (NTFS under `%LOCALAPPDATA%`; ext4/tmpfs in the Linux gate). Tests: `begin_never_replaces_a_crash_file_that_has_the_name_it_would_write`, `a_panic_in_the_second_of_begin_keeps_the_abnormal_end_file`, `begin_in_the_second_of_a_panic_keeps_the_panic_file`.
+- Guarantees: the hook never formats or reads the payload; never panics (every error ignored; std aborts a panic inside a hook, so this is by construction); takes no Voicen lock (T-024: the Windows ports `RtlCaptureStackBackTrace`, `GetModuleHandleExW` and `GetModuleFileNameW` take OS loader / function-table locks; accepted as a residual) and never calls `Log::write` (decision #134: no log line from the hook, so no `CrashFileWritten` event); does not chain the previous hook (std's default hook prints the payload); one installed hook writes at most one file, the first panic wins, and a later panic waits (sleeping, at most 2 s) for that file so `panic = "abort"` cannot cut it short; each `install_panic_hook` call has its own guard. The file is written as `crash-<stem>-<kind>.tmp` (created new) and hard-linked to its `.txt` name (`Session::begin` deletes stale tmp files); the hook never creates the folder.
+- A crash file is never replaced. `write_crash_file` (used by `Session::begin` and the hook) and `NativeFaultWriter::record` (the filter's writer, T-024: no allocation, buffers and the `version`..`session_started` lines prepared at install from `render_crash_file`, the offset fixed at install, first call wins, bytes identical to `render_crash_file`; the filter returns `EXCEPTION_CONTINUE_SEARCH` and does not chain a previous filter) claims a name with `fs::hard_link`, which fails when the path exists (`linkat` on Linux, `CreateHardLinkW` on Windows), so two writers cannot both win a name and no `exists`-then-rename race is left. A taken name (an `abnormal_end` file and a panic of the same pid in the same second, either order) steps the name's second forward, at most 60 names, the pid kept; the `time:` line stays the true time. The name returned, and so `Crashed`/`EndedAbnormally { crash_file }` and its `previous session` line, is the name actually written; all 60 taken, or any other link error → `None`, no file left. The logs folder must support hard links (NTFS under `%LOCALAPPDATA%`; ext4/tmpfs in the Linux gate). Tests: `begin_never_replaces_a_crash_file_that_has_the_name_it_would_write`, `a_panic_in_the_second_of_begin_keeps_the_abnormal_end_file`, `begin_in_the_second_of_a_panic_keeps_the_panic_file`.
 - Retention removes only regular `crash-*.txt` files (a file from the future has age zero; ties by name). The shell calls it at start (T-024); the log's retention never touches crash files.
 - Tests: `tests/diag_crash.rs` (its own binary: the hook is process-global).
 

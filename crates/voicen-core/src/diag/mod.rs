@@ -114,6 +114,7 @@ pub mod crash;
 pub mod event;
 pub mod format;
 pub mod log;
+pub mod native_fault;
 pub mod notice;
 pub mod observer;
 pub mod session;
@@ -129,6 +130,7 @@ pub use event::{
 };
 pub use format::format_line;
 pub use log::{Log, LogConfig, LogsUnwritableReason, OnUnwritable};
+pub use native_fault::{FaultFiles, NativeFaultSetup, NativeFaultWriter};
 pub use notice::{LogsNotice, LogsNoticeSink};
 pub use observer::LogObserver;
 pub use session::{PreviousSession, Session, SessionStart};

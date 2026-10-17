@@ -107,7 +107,7 @@ impl LocalTime {
 
 /// Writes `t` as `YYYY-MM-DDTHH:MM:SS.mmm+HH:MM`: the one timestamp text of the
 /// log lines, the session marker and the crash files (T-100).
-pub(crate) fn write_timestamp(out: &mut String, t: &LocalTime) {
+pub(crate) fn write_timestamp(out: &mut impl std::fmt::Write, t: &LocalTime) {
     let sign = if t.offset < 0 { '-' } else { '+' };
     let abs = t.offset.unsigned_abs();
     let _ = write!(

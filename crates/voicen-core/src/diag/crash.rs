@@ -18,6 +18,9 @@
 //!   killed mid-write never leaves a partial `crash-*.txt` (`Session::begin` deletes
 //!   stale tmp files), and an existing crash file is never replaced: a taken name
 //!   steps to the next second (same pid, true `time:` line), see [`write_crash_file`].
+//!   The shell's native-fault filter has its own writer that does not allocate,
+//!   [`NativeFaultWriter`](super::NativeFaultWriter) (T-024), with the same
+//!   rendering and the same names.
 //! - [`retain_crash_files`] removes only regular `crash-*.txt` files: older than
 //!   [`CRASH_MAX_AGE_DAYS`] by modification time, then all but the
 //!   [`CRASH_MAX_FILES`] newest. The log's own retention never touches them.
@@ -42,13 +45,13 @@ pub const CRASH_MAX_FILES: usize = 20;
 
 /// The longest bounded text written (thread name, location file, module name), in
 /// bytes; longer text is cut at a character boundary.
-const MAX_TEXT_BYTES: usize = 255;
+pub(crate) const MAX_TEXT_BYTES: usize = 255;
 /// The most frames the panic hook captures.
 const MAX_FRAMES: usize = 64;
 
 const CRASH_PREFIX: &str = "crash-";
 const CRASH_SUFFIX: &str = ".txt";
-const TMP_SUFFIX: &str = ".tmp";
+pub(crate) const TMP_SUFFIX: &str = ".tmp";
 
 /// The Windows version `major.minor.build` (shell: `RtlGetVersion`, T-024).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,7 +101,7 @@ impl LocalStamp {
         }
     }
 
-    fn local(self) -> LocalTime {
+    pub(crate) fn local(self) -> LocalTime {
         LocalTime::of(self.at, self.seconds_east)
     }
 
@@ -180,7 +183,16 @@ impl CrashFileName {
     }
 
     fn stem(&self) -> String {
-        format!(
+        let mut out = String::with_capacity(40);
+        let _ = self.write_stem(&mut out);
+        out
+    }
+
+    /// Writes `crash-YYYYMMDD-HHMMSS-<pid>` to `out` without allocating (the
+    /// native-fault writer renders its names into fixed buffers).
+    pub(crate) fn write_stem(&self, out: &mut dyn fmt::Write) -> fmt::Result {
+        write!(
+            out,
             "{CRASH_PREFIX}{:04}{:02}{:02}-{:02}{:02}{:02}-{}",
             self.year, self.month, self.day, self.hour, self.minute, self.second, self.pid
         )
@@ -189,7 +201,8 @@ impl CrashFileName {
 
 impl Display for CrashFileName {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}{CRASH_SUFFIX}", self.stem())
+        self.write_stem(f)?;
+        f.write_str(CRASH_SUFFIX)
     }
 }
 
@@ -373,7 +386,7 @@ pub fn render_crash_file(fields: &CrashFields) -> String {
 
 /// How many names [`write_crash_file`] tries: the name of `fields.time`, then each
 /// following second (same pid).
-const MAX_NAME_TRIES: u64 = 60;
+pub(crate) const MAX_NAME_TRIES: u64 = 60;
 
 /// Writes `fields` to a new `logs_dir/crash-*.txt` and returns the name written;
 /// `None` (and no file left) when it cannot. An existing file is never replaced:

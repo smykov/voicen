@@ -98,6 +98,10 @@ pub struct Parts {
     /// `dictation::start_dictation` attaches the session. `None` from
     /// [`Parts::new`] ([`build_app`] and the tests manage their own, if any).
     pub logs_notice: Option<Arc<LogsNotice>>,
+    /// This process's session (T-024, `diag::begin_session`): `wire` manages it and
+    /// `on_run_event`'s `RunEvent::Exit` arm ends it. `None` from [`Parts::new`]
+    /// (the tests that need it manage their own).
+    pub session_end: Option<diag::SessionEnd>,
 }
 
 impl Parts {
@@ -111,6 +115,7 @@ impl Parts {
             local_models,
             log,
             logs_notice: None,
+            session_end: None,
         }
     }
 
@@ -118,6 +123,14 @@ impl Parts {
     pub fn with_logs_notice(self, logs_notice: Arc<LogsNotice>) -> Parts {
         Parts {
             logs_notice: Some(logs_notice),
+            ..self
+        }
+    }
+
+    /// These parts with the session `release_parts` began (T-024).
+    pub fn with_session_end(self, session_end: diag::SessionEnd) -> Parts {
+        Parts {
+            session_end: Some(session_end),
             ..self
         }
     }
@@ -129,7 +142,8 @@ impl Parts {
 /// returns from it), only then calls `parts()` (the startup side effects: log,
 /// `.part` cleanup, settings load, Run-value reconcile), and wires the result:
 /// manages `service`, `local_models`, `log`, the logs-notice latch when the parts
-/// carry one (T-054) and the microphones (T-012), starts the `settings://changed`
+/// carry one (T-054), the session when they carry one (T-024) and the
+/// microphones (T-012), starts the `settings://changed`
 /// bridge, the settings opener thread (`settings_window::request`), the overlay
 /// thread with its mailbox (`overlay::part`, `overlay_ready`), the tray
 /// (`tray`, built in code, never from `tauri.conf.json`) and its language follower.
@@ -160,9 +174,13 @@ fn wire<R: Runtime>(app: &AppHandle<R>, parts: Parts) {
         local_models,
         log,
         logs_notice,
+        session_end,
     } = parts;
     if let Some(logs_notice) = logs_notice {
         app.manage(logs_notice);
+    }
+    if let Some(session_end) = session_end {
+        app.manage(session_end);
     }
     app.manage(Arc::clone(&service));
     app.manage(local_models);
@@ -182,6 +200,9 @@ fn wire<R: Runtime>(app: &AppHandle<R>, parts: Parts) {
 ///   window, or the overlay's destroy on `Hidden` (T-057), keeps the app;
 ///   `ExitRequested { code: Some(_) }` (`AppHandle::exit`, the
 ///   tray "Exit" item) passes, and without a tray nothing is prevented;
+/// - `Exit` (the loop ended: after the tray "Exit" item, and on `WM_ENDSESSION(TRUE)`
+///   through tao): the managed `diag::SessionEnd`, if any, ends the session once
+///   (marker deleted, one `exited` line; T-024 invariant 2, the only clean end);
 /// - everything else: nothing.
 pub fn on_run_event<R: Runtime>(
     app: &AppHandle<R>,
@@ -202,6 +223,11 @@ pub fn on_run_event<R: Runtime>(
             // Without a tray there would be no way to end the process.
             if app.tray_by_id(tray::TRAY_ID).is_some() {
                 api.prevent_exit();
+            }
+        }
+        RunEvent::Exit => {
+            if let Some(session_end) = app.try_state::<diag::SessionEnd>() {
+                session_end.end();
             }
         }
         _ => {}
@@ -304,7 +330,8 @@ fn release_ports<R: Runtime>(
 /// The startup side effects of the primary, in this order (T-052 invariant 1:
 /// `assemble` calls this only after tauri's `build()`, so a second instance, which
 /// exits inside the single-instance plugin's setup, never runs it): the one log
-/// (`Started` first), the one `LocalModels` (its `.part` cleanup), the settings
+/// (`Started` first), the session and the crash records (`diag::begin_session`,
+/// T-024), the one `LocalModels` (its `.part` cleanup), the settings
 /// load (a first run writes `settings.json`; the Run value is reconciled). Returns
 /// the parts, the load outcome for `Ready` and the instances the `SettingsService`
 /// was given that the dictation session shares (T-006 invariant 5, T-055).
@@ -337,6 +364,10 @@ fn release_parts() -> (Parts, LoadOutcome, SharedPorts) {
     // `start_dictation` attaches the session (`wire` manages the latch).
     let logs_notice = Arc::new(LogsNotice::new());
     let log = diag::start(paths::log_dir(), logs_notice.callback());
+    // The session and the crash records (T-024 invariant 1), right after Started:
+    // the previous session's verdict, the marker, the panic hook, the exception
+    // filter, the crash-file retention. Only the primary gets here.
+    let session_end = diag::begin_session(paths::log_dir(), &log);
     // The one LocalModels (T-044): its `.part` cleanup runs inside `open`, before
     // any list or settings validation reads the models dir.
     let (local_models, cleanup) = LocalModels::open(
@@ -367,7 +398,9 @@ fn release_parts() -> (Parts, LoadOutcome, SharedPorts) {
         &log,
     );
     (
-        Parts::new(service, local_models, log).with_logs_notice(logs_notice),
+        Parts::new(service, local_models, log)
+            .with_logs_notice(logs_notice)
+            .with_session_end(session_end),
         load_outcome,
         SharedPorts {
             credentials,
