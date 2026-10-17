@@ -2817,6 +2817,197 @@ fn the_settings_request_of_a_failed_registration_is_made_outside_the_session_loc
     );
 }
 
+// ---- T-010: notify once per transition registered -> failed (decision #131) ---------
+
+/// How many times the hotkey notice was published (each raise has its own `until`, so a
+/// second raise is a second publish even inside the first one's 3 s).
+fn hotkey_notices(rig: &Rig) -> usize {
+    rig.indicator
+        .overlays()
+        .iter()
+        .filter(|o| is_hotkey_notice(o))
+        .count()
+}
+
+#[test]
+fn a_failed_registration_while_already_failing_neither_notifies_nor_asks_again() {
+    // T-010 invariant (2), decision #131 (OQ-28 (a)): the notice and the settings
+    // request come only on the transition registered -> failed. A second failure while
+    // HotkeyError is on (the resume/unlock retry of a still-taken hotkey) keeps the tray
+    // HotkeyError and the hotkey not registered, and raises no second notice and no
+    // second OpenSettings, also once the first notice's 3 s are over. Bite: the notice
+    // and request made on every `false` (today), the error read after the controller
+    // update (then no failure ever notifies; the T-055 tests go red too), the retry
+    // clearing HotkeyError.
+    let rig = Rig::new(api_settings(), always(TEXT));
+    let tf = now();
+    rig.session.hotkey_registration(false, tf);
+    rig.session.hotkey_registration(false, tf + ms(5000));
+
+    assert_eq!(
+        format!("{:?}", rig.requests.calls()),
+        HOTKEY_FIELD_REQUEST,
+        "exactly one settings request for two failures in a row"
+    );
+    assert_eq!(
+        hotkey_notices(&rig),
+        1,
+        "the notice was raised again while already failing: {:?}",
+        rig.indicator.overlays()
+    );
+    assert_eq!(
+        rig.indicator.trays(),
+        vec![(TrayState::HotkeyError, false)],
+        "the tray left HotkeyError on the second failure"
+    );
+    assert!(!rig.session.hotkey_registered());
+    assert!(rig.events().is_empty(), "{:?}", rig.events());
+}
+
+#[test]
+fn failure_success_failure_notifies_twice() {
+    // T-010 invariant (2), decision #131: a success clears the error, so the next
+    // failure is a new transition registered -> failed and notifies again: false,
+    // true, false give two notices and two OpenSettings(Recording, RecordingHotkey),
+    // and the tray HotkeyError, Idle, HotkeyError. Bite: a "notified once" flag that a
+    // success does not reset (one request), the transition taken from the first
+    // result ever instead of the controller's current error.
+    let rig = Rig::new(api_settings(), always(TEXT));
+    let tf = now();
+    rig.session.hotkey_registration(false, tf);
+    rig.session.hotkey_registration(true, tf + ms(4000));
+    rig.session.hotkey_registration(false, tf + ms(8000));
+
+    assert_eq!(
+        format!("{:?}", rig.requests.calls()),
+        "[OpenSettings(Recording, Some(RecordingHotkey)), OpenSettings(Recording, Some(RecordingHotkey))]",
+        "one settings request per transition to failed"
+    );
+    assert_eq!(
+        hotkey_notices(&rig),
+        2,
+        "one notice per transition to failed: {:?}",
+        rig.indicator.overlays()
+    );
+    assert_eq!(
+        rig.indicator.trays(),
+        vec![
+            (TrayState::HotkeyError, false),
+            (TrayState::Idle, false),
+            (TrayState::HotkeyError, false)
+        ]
+    );
+    assert!(!rig.session.hotkey_registered());
+}
+
+// ---- T-010: suspend ends a live recording (spec 001 edge case "sleep while recording") --
+
+#[test]
+fn a_suspend_during_a_hold_ends_it_suspended_and_its_audio_goes_on_to_one_job() {
+    // T-010 Acceptance "Suspend during a recording ends it as Suspended and the audio so
+    // far goes on to one job, with no 0.3 s discard; the later release does nothing"
+    // (invariant 3): a hold suspended 100 ms after its press (under MIN_HOLD) goes
+    // through the stop path: the device is closed once `suspended` returns (NFR-02),
+    // RecordingEnded (100, Suspended), one job whose text is pasted once, Esc claimed
+    // for the recording and given back. The user's release after resume then finds no
+    // recording: no event, no second job, no second capture. Bite: suspended as a
+    // cancel (no job), routed through `release` (TooShort discard), end
+    // Released/DeviceLost, the device closed later or never, the controller left live
+    // (the release then stops it as Released 3000).
+    let rig = Rig::new(api_settings(), always(TEXT));
+    let t0 = past();
+    rig.frames(&fixtures::speech_3s(), t0 + FIRST_FRAME);
+    rig.session.hotkey_pressed(t0);
+    assert_eq!(rig.audio.open_handles(), 1, "premise: recording");
+    rig.session.suspended(t0 + ms(100));
+    assert_eq!(
+        rig.audio.open_handles(),
+        0,
+        "the device is still open after suspended returned"
+    );
+    rig.wait_jobs(1);
+    let before = rig.events().len();
+    rig.session.hotkey_released(t0 + ms(3000));
+
+    assert_eq!(
+        recording_ends(&rig.events()),
+        vec![(100, RecordingEnd::Suspended)]
+    );
+    assert_eq!(
+        rig.events().len(),
+        before,
+        "the release after the suspend emitted: {:?}",
+        rig.events()
+    );
+    assert_eq!(job_count(&rig.events()), 1);
+    assert_eq!(rig.clipboard.texts(), vec![TEXT.to_string()]);
+    assert_eq!(rig.engine.transcribed().len(), 1, "one job transcribed");
+    assert_eq!(rig.audio.start_calls(), 1);
+    assert_eq!(rig.audio.open_handles(), 0);
+    assert_eq!(rig.cancel.calls(), vec![true, false]);
+}
+
+#[test]
+fn a_suspend_during_a_toggle_recording_delivers_it_and_the_next_press_starts_anew() {
+    // T-010 invariant (3), toggle mode: no release can end it, so the suspend at press
+    // + 5 s is the stop: RecordingEnded (5000, Suspended), one job pasted, the device
+    // closed; the next press starts a new recording (it is not taken as the toggle's
+    // stopping press). Bite: suspend handled only for hold recordings (the toggle stays
+    // on until its 10 min), the controller left live (the next press stops instead of
+    // starting).
+    let rig = Rig::new(toggle_settings(), always(TEXT));
+    let t0 = past();
+    rig.frames(&fixtures::speech_3s(), t0 + FIRST_FRAME);
+    rig.session.hotkey_pressed(t0);
+    rig.session.hotkey_released(t0 + ms(80));
+    assert_eq!(
+        rig.audio.open_handles(),
+        1,
+        "premise: the toggle recording is on"
+    );
+    rig.session.suspended(t0 + ms(5000));
+    assert_eq!(rig.audio.open_handles(), 0, "the device is still open");
+    rig.wait_jobs(1);
+    assert_eq!(
+        recording_ends(&rig.events()),
+        vec![(5000, RecordingEnd::Suspended)]
+    );
+    assert_eq!(rig.clipboard.texts(), vec![TEXT.to_string()]);
+
+    rig.frames(&fixtures::speech_3s(), t0 + ms(8000) + FIRST_FRAME);
+    rig.session.hotkey_pressed(t0 + ms(8000));
+    assert_eq!(rig.audio.start_calls(), 2, "the next press did not start");
+    assert_eq!(rig.audio.open_handles(), 1);
+}
+
+#[test]
+fn a_suspend_while_idle_changes_nothing() {
+    // T-010 seam: a suspend with no recording on (the machine sleeps while idle, or
+    // after a recording ended) emits nothing, opens or closes no device and publishes
+    // nothing new; the next hold works as usual. Bite: a RecordingEnded or a job for no
+    // recording, an indicator publish (Hidden flash), a suspend that blocks the next
+    // press.
+    let rig = Rig::new(api_settings(), always(TEXT));
+    let t0 = past();
+    rig.session.suspended(t0);
+    assert!(rig.events().is_empty(), "{:?}", rig.events());
+    assert_eq!(rig.audio.start_calls(), 0);
+    assert!(
+        rig.indicator.calls().is_empty(),
+        "{:?}",
+        rig.indicator.calls()
+    );
+
+    rig.hold(&fixtures::speech_3s(), t0 + ms(1000), ms(3000));
+    rig.wait_jobs(1);
+    rig.session.suspended(t0 + ms(9000));
+    assert_eq!(
+        recording_ends(&rig.events()),
+        vec![(3000, RecordingEnd::Released)]
+    );
+    assert_eq!(job_count(&rig.events()), 1);
+}
+
 // ---- T-054: the one-time "logs cannot be written" notice ----------------------------
 
 /// The notice of an unwritable log (T-054; contracts: specs/006 contracts/ipc.md),

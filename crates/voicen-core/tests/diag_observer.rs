@@ -416,6 +416,41 @@ fn toggled_and_max_length_recordings_are_closed_by_their_job() {
 }
 
 #[test]
+fn a_suspended_recording_is_closed_by_its_job() {
+    // T-010 seam (diag::observer: Suspended in the "a job follows" arm with
+    // DeviceLost): a suspend sends the audio so far on, so RecordingEnded{Suspended}
+    // writes no line; the record closes at the delivery, one line with the
+    // recording's duration. Bite: Suspended put in the TooShort or Cancelled arm (a
+    // `too_short` / `cancelled` line at the end, then a second line or none at the
+    // delivery).
+    let f = fixture();
+    let [a] = ids(1)[..] else { unreachable!() };
+    f.feed(&[started(a, 40), ended(a, 2_000, RecordingEnd::Suspended)]);
+    assert_eq!(f.dictations(), Vec::<Line>::new(), "a line before the job");
+    f.feed(&[
+        gate(a, "energy", true),
+        finished(1, a, Some("api"), 700, OutcomeCode::Text, None, None),
+        delivered(1, 80, DeliveryResult::Pasted),
+    ]);
+    let lines = f.dictations();
+    assert_eq!(lines.len(), 1, "{lines:#?}");
+    assert_eq!(
+        lines[0].pairs,
+        pairs(&[
+            ("rec", s(a.get())),
+            ("engine", "api".to_string()),
+            ("outcome", "delivered".to_string()),
+            ("result", "pasted".to_string()),
+            ("detector", "energy".to_string()),
+            ("press_to_frame_ms", s(40)),
+            ("duration_ms", s(2_000)),
+            ("stop_to_text_ms", s(700)),
+            ("text_to_paste_ms", s(80)),
+        ])
+    );
+}
+
+#[test]
 fn a_capture_failure_at_press_is_one_warn_line_with_the_mic_literal() {
     // T-051: a capture that cannot open at press emits only CaptureFailed (no
     // RecordingStarted / RecordingEnded, no job), so CaptureFailed itself closes

@@ -2183,4 +2183,124 @@ mod tests {
             "a second loss for the same recording gave a second ticket"
         );
     }
+
+    // ---- T-010: suspend (FR-26, spec 001 edge case "sleep while recording") --------
+    //
+    // Pinned API (docs/tasks/T-010.md analysis seam): `RecordingEnd::Suspended` and
+    // `RecordingController::suspend(at) -> Option<StopTicket<C>>`, next to
+    // `device_lost`: it ends the live recording, whatever its id, with no MIN_HOLD
+    // check. The instant is the shell's (no clock read in the controller).
+
+    #[test]
+    fn suspend_ends_the_live_recording_with_a_ticket_in_either_mode() {
+        // T-010 invariant (3): a suspend ends a live recording in either mode with a
+        // ticket (end Suspended, held = suspend instant - press instant, stopped_at =
+        // the suspend instant), the controller is idle at once (tray Idle, no Esc to
+        // claim), and the audio goes on to a job (`finish` -> Processing). A hold's
+        // later release and a toggle's later press then find no recording: the
+        // release is Ignored, the press starts a new one. Bite: suspend as a cancel
+        // (no ticket), end Released/Toggled/DeviceLost, the recording left live,
+        // held measured to finish's instant, the ctx not carried.
+        for mode in [Mode::Hold, Mode::Toggle] {
+            let t0 = crate::clock::instant();
+            let mut c = RecordingController::<Ctx>::new();
+            let id = start_in(&mut c, t0, mode, "start-window");
+            let Some(ticket) = c.suspend(t0 + ms(2000)) else {
+                panic!("{mode:?}: no ticket for the live recording at suspend");
+            };
+            assert_eq!(ticket.id(), id, "{mode:?}");
+            assert_eq!(ticket.end(), RecordingEnd::Suspended, "{mode:?}");
+            assert_eq!(ticket.held(), ms(2000), "{mode:?}");
+            assert_eq!(c.live_id(), None, "{mode:?}: still live after the suspend");
+            assert_eq!(c.indicator().tray, TrayState::Idle, "{mode:?}");
+            let f = finish_ok(&mut c, ticket, t0 + ms(2020));
+            assert_eq!(f.id(), id, "{mode:?}");
+            assert_eq!(f.end(), RecordingEnd::Suspended, "{mode:?}");
+            assert_eq!(f.started_at(), t0, "{mode:?}");
+            assert_eq!(f.stopped_at(), t0 + ms(2000), "{mode:?}");
+            assert_eq!(*f.ctx(), "start-window", "{mode:?}");
+            assert_eq!(f.audio(), &audio(), "{mode:?}");
+            assert_eq!(c.indicator().overlay, OverlayState::Processing, "{mode:?}");
+            assert!(
+                matches!(c.release(t0 + ms(3000)), Release::Ignored),
+                "{mode:?}: the release after the suspend"
+            );
+            match c.press_with_mode(t0 + ms(4000), mode, "next") {
+                PressOutcome::Start(next) => assert_ne!(next, id, "{mode:?}"),
+                other => panic!("{mode:?}: the press after a suspend gave {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn suspend_keeps_a_hold_shorter_than_min_hold() {
+        // T-010 Acceptance "with no 0.3 s discard": a suspend is not a release, so
+        // MIN_HOLD does not apply. A hold suspended 100 ms after its press, and one
+        // suspended at the press instant itself, each give a ticket (Suspended, held
+        // 100 / 0 ms), never a TooShort discard. Bite: the release rule reused
+        // (`held < MIN_HOLD` -> None), suspend implemented as `release(at)`.
+        assert!(ms(100) < MIN_HOLD, "premise: shorter than the hold minimum");
+        for held in [100u64, 0] {
+            let t0 = crate::clock::instant();
+            let mut c = RecordingController::<Ctx>::new();
+            let id = start_in(&mut c, t0, Mode::Hold, "w");
+            let Some(ticket) = c.suspend(t0 + ms(held)) else {
+                panic!("a {held} ms hold at suspend gave no ticket (MIN_HOLD applied)");
+            };
+            assert_eq!(ticket.id(), id, "{held} ms");
+            assert_eq!(ticket.end(), RecordingEnd::Suspended, "{held} ms");
+            assert_eq!(ticket.held(), ms(held), "{held} ms");
+            assert_eq!(c.live_id(), None, "{held} ms");
+        }
+    }
+
+    #[test]
+    fn suspend_while_idle_or_after_the_recording_ended_returns_none_and_changes_nothing() {
+        // T-010 seam: with no recording on (before any press; while a stopped
+        // recording's job is queued, with tray HotkeyError and a message shown) a
+        // suspend returns None and leaves the indicator and the next deadline as they
+        // were; a second suspend after one that ended a recording gives no second
+        // ticket. Bite: a ticket from nothing (a fresh id), a suspend that clears
+        // HotkeyError, drops the message or the queued job's Processing, a second
+        // ticket for the same recording.
+        let t0 = crate::clock::instant();
+        let mut c = RecordingController::<Ctx>::new();
+        assert!(c.suspend(t0).is_none(), "a suspend before any press");
+        assert_eq!(c.indicator(), &idle());
+        assert_eq!(c.next_deadline(), None);
+
+        c.hotkey_registration(false, t0);
+        c.notice(NOTICE, t0 + ms(10));
+        let _queued = record(&mut c, t0 + ms(100), ms(1000));
+        c.notice(NOTICE, t0 + ms(1200));
+        let before = c.indicator().clone();
+        let deadline = c.next_deadline();
+        assert_eq!(before.tray, TrayState::HotkeyError, "premise");
+        assert!(
+            matches!(before.overlay, OverlayState::Message { .. }),
+            "premise: {before:?}"
+        );
+        assert!(
+            c.suspend(t0 + ms(1300)).is_none(),
+            "a suspend with no recording on"
+        );
+        assert_eq!(
+            c.indicator(),
+            &before,
+            "a suspend while idle changed the indicator"
+        );
+        assert_eq!(c.next_deadline(), deadline);
+
+        let _ = start_in(&mut c, t0 + ms(2000), Mode::Toggle, "b");
+        assert!(c.suspend(t0 + ms(2500)).is_some());
+        assert!(
+            c.suspend(t0 + ms(2501)).is_none(),
+            "a second suspend gave a second ticket"
+        );
+        assert_eq!(
+            c.indicator().tray,
+            TrayState::HotkeyError,
+            "a suspend cleared HotkeyError"
+        );
+    }
 }

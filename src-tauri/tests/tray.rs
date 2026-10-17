@@ -68,13 +68,13 @@ use voicen_lib::settings_ipc::load_settings;
 use voicen_lib::settings_window::{self, OpenTarget, LABEL};
 use voicen_lib::tray::{self, Applied, TrayPart, TRAY_ID};
 use voicen_lib::win::shell_open::ShellOpener;
-use windows::core::BOOL;
-use windows::Win32::Foundation::{HWND, LPARAM};
+use windows::core::{w, BOOL};
+use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::Shell::{Shell_NotifyIconW, NIM_DELETE, NOTIFYICONDATAW};
 use windows::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, EnumThreadWindows, GetClassNameW, PeekMessageW, TranslateMessage, MSG,
-    PM_REMOVE,
+    DispatchMessageW, EnumThreadWindows, GetClassNameW, PeekMessageW, RegisterWindowMessageW,
+    SendMessageW, TranslateMessage, MSG, PM_REMOVE,
 };
 
 /// How long a test waits for an asynchronous change (Windows-sized, F-005).
@@ -874,6 +874,93 @@ fn a_failed_icon_and_tooltip_setter_leaves_the_applied_icon_and_tooltip_unchange
         i18n::text(UiLanguage::En, table::tooltip(TrayState::Idle), &[]),
         "Applied.tooltip recorded from a failed set_tooltip"
     );
+}
+
+// ---- T-010: Explorer restart (TaskbarCreated) -------------------------------------
+
+/// The `tray_icon_app` windows (tray-icon's class) of this thread.
+fn tray_windows() -> Vec<isize> {
+    let mut windows: Vec<isize> = Vec::new();
+    // SAFETY: the callback only reads class names and pushes into `windows`, which
+    // outlives this synchronous call.
+    let _ = unsafe {
+        EnumThreadWindows(
+            GetCurrentThreadId(),
+            Some(collect_tray_windows),
+            LPARAM(&mut windows as *mut Vec<isize> as isize),
+        )
+    };
+    windows
+}
+
+#[test]
+fn taskbar_created_brings_the_tray_icon_back_after_it_was_deleted() {
+    // T-010 Acceptance "TaskbarCreated brings the tray icon back after it was deleted"
+    // (spec 001 US4 scenario 3, FR-26; pin, expected green: tray-icon 0.25.1 handles
+    // the registered "TaskbarCreated" message in its window procedure by re-adding the
+    // icon with its last icon, tooltip and visibility). The shell forgets the icon
+    // (NIM_DELETE, as an Explorer restart does), then the message Explorer broadcasts
+    // at its start is sent to tray-icon's window: the shell knows a rect for the icon
+    // again, and the next render's setters succeed (no tray_failed line). Bite: a
+    // tray-icon upgrade that drops the handler, a tray built on a window that does not
+    // get the message, an app-side handler that removes the icon for good.
+    let _serial = serial();
+    let dir = TempDir::new();
+    let logs = dir.path().join("logs");
+    let rig = rig_with_log(
+        None,
+        voicen_lib::diag::start(logs.clone(), Box::new(|_| {})),
+    );
+    assert!(
+        matches!(rig.tray_icon().rect(), Ok(Some(_))),
+        "runner precondition `taskbar` (docs/decisions/windows-ci-runner.md): the shell \
+         knows no rect for the tray icon before the test"
+    );
+    let removed = remove_tray_icons();
+    assert!(
+        removed >= 1,
+        "runner precondition `taskbar`: no tray icon of this thread could be removed"
+    );
+    let gone = rig.tray_icon().rect();
+    assert!(
+        !matches!(gone, Ok(Some(_))),
+        "premise: the shell still knows the deleted icon: {gone:?}"
+    );
+
+    // SAFETY: a static string; registers (or looks up) the system-wide message.
+    let taskbar_created = unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) };
+    assert_ne!(
+        taskbar_created, 0,
+        "RegisterWindowMessageW(TaskbarCreated) failed"
+    );
+    let windows = tray_windows();
+    assert!(
+        !windows.is_empty(),
+        "premise: no tray_icon_app window on this thread"
+    );
+    for hwnd in windows {
+        // SAFETY: a window of this thread; the procedure runs inline on this call.
+        let _ = unsafe {
+            SendMessageW(
+                HWND(hwnd as *mut std::ffi::c_void),
+                taskbar_created,
+                Some(WPARAM(0)),
+                Some(LPARAM(0)),
+            )
+        };
+    }
+
+    assert!(
+        eventually(|| matches!(rig.tray_icon().rect(), Ok(Some(_)))),
+        "the tray icon is not back in the notification area after TaskbarCreated: {:?}",
+        rig.tray_icon().rect()
+    );
+    rig.part().set_tray(TrayState::Recording, false);
+    assert!(
+        holds_for_a_while(|| tray_failed_lines(&logs) == 0),
+        "a render after TaskbarCreated failed (the icon is not known to the shell)"
+    );
+    assert_eq!(rig.state(), Some(TrayState::Recording));
 }
 
 // ---- T-071: the Open logs folder item ---------------------------------------------

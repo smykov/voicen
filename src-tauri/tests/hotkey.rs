@@ -84,6 +84,8 @@ struct Rig {
     /// T-009: the Esc claim port, attached to the hotkey thread by `start_hotkey`.
     cancel: Arc<CancelKeyHandle>,
     engine: Arc<TextEngine>,
+    /// T-010: the session's settings requests (one OpenSettings per transition to failed).
+    requests: Arc<FakeShellRequests>,
 }
 
 impl Rig {
@@ -120,6 +122,7 @@ impl Rig {
         let audio = Arc::new(FakeAudioSource::new());
         let indicator = Arc::new(FakeIndicator::new());
         let engine = TextEngine::new("hotkey test transcript");
+        let requests = Arc::new(FakeShellRequests::new());
         let session = DictationSession::start(SessionDeps {
             pipeline: PipelineDeps {
                 gate: SpeechGate::new(
@@ -136,7 +139,7 @@ impl Rig {
             engine_factory: Some(engine_factory(&engine)),
             audio: audio.clone(),
             indicator: indicator.clone(),
-            requests: Arc::new(FakeShellRequests::new()),
+            requests: requests.clone(),
             settings: service,
             cancel_key: cancel.clone(),
         })
@@ -151,6 +154,7 @@ impl Rig {
             observer,
             cancel,
             engine,
+            requests,
         }
     }
 
@@ -785,4 +789,357 @@ fn a_refused_esc_claim_keeps_recording_and_warns_esc_unavailable() {
     );
     assert_eq!(rig.ends(), vec![RecordingEnd::Released]);
     assert_eq!(warned(), 1, "{:?}", rig.observer.events());
+}
+
+// ---- T-010: resume, unlock and suspend reach the hotkey thread ------------------------
+//
+// The OS sends WM_POWERBROADCAST and WM_WTSSESSION_CHANGE to the hotkey thread's own
+// hidden top-level window (titled "Voicen hotkey"; option A gives it a class of our own,
+// option B keeps STATIC with a subclass, so the test finds it by title in this process).
+// The runner cannot sleep or lock, so the test sends the same messages with SendMessageW.
+// The registration is proven with the 1409 probe (`TakenHotkey::take` refused), never with
+// a synthetic hold (F-014); only the suspend test uses one hold, and sends the suspend at
+// once after the observed press.
+
+use voicen_core::i18n;
+use voicen_core::recording::OverlayState;
+use windows::core::{w, HRESULT, PCWSTR};
+use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+use windows::Win32::System::RemoteDesktop::ProcessIdToSessionId;
+use windows::Win32::UI::WindowsAndMessaging::{
+    FindWindowExW, GetWindowThreadProcessId, SendMessageW, PBT_APMRESUMEAUTOMATIC, PBT_APMSUSPEND,
+    WM_POWERBROADCAST, WM_WTSSESSION_CHANGE, WTS_SESSION_UNLOCK,
+};
+
+/// ERROR_HOTKEY_ALREADY_REGISTERED.
+const ALREADY_REGISTERED: u32 = 1409;
+
+/// `FakeShellRequests::calls()` (Debug) after the one request of a transition to failed.
+const ONE_HOTKEY_FIELD_REQUEST: &str = "[OpenSettings(Recording, Some(RecordingHotkey))]";
+
+/// The hotkey thread's window: the one top-level window of this process titled
+/// "Voicen hotkey" (hidden windows included).
+#[track_caller]
+fn hotkey_window() -> HWND {
+    let pid = std::process::id();
+    let mut found = Vec::new();
+    let mut after: Option<HWND> = None;
+    loop {
+        // SAFETY: static strings; `after` is a window FindWindowExW just returned.
+        let next = unsafe { FindWindowExW(None, after, PCWSTR::null(), w!("Voicen hotkey")) };
+        let Ok(hwnd) = next else { break };
+        if hwnd.is_invalid() {
+            break;
+        }
+        let mut owner = 0u32;
+        // SAFETY: a window handle and a writable u32.
+        let _ = unsafe { GetWindowThreadProcessId(hwnd, Some(&mut owner)) };
+        if owner == pid {
+            found.push(hwnd);
+        }
+        after = Some(hwnd);
+    }
+    assert_eq!(
+        found.len(),
+        1,
+        "the running hotkey thread has no single top-level window titled \"Voicen hotkey\" in \
+         this process (the test finds it by title): {found:?}"
+    );
+    found[0]
+}
+
+/// Sends `msg` to `hwnd` and waits until its procedure returned (the hotkey thread
+/// dispatches sent messages inside GetMessageW).
+fn deliver(hwnd: HWND, msg: u32, wparam: usize, lparam: isize) {
+    // SAFETY: a window of this process; plain integer arguments.
+    let _ = unsafe { SendMessageW(hwnd, msg, Some(WPARAM(wparam)), Some(LPARAM(lparam))) };
+}
+
+/// The session id of this process (the `lParam` of WM_WTSSESSION_CHANGE).
+fn this_session() -> isize {
+    let mut id = 0u32;
+    // SAFETY: this process's id and a writable u32.
+    unsafe { ProcessIdToSessionId(std::process::id(), &mut id) }
+        .expect("ProcessIdToSessionId for this process");
+    id as isize
+}
+
+/// A simulated resume from sleep.
+fn resume(hwnd: HWND) {
+    deliver(hwnd, WM_POWERBROADCAST, PBT_APMRESUMEAUTOMATIC as usize, 0);
+}
+
+/// A simulated unlock of this session.
+fn unlock(hwnd: HWND) {
+    deliver(
+        hwnd,
+        WM_WTSSESSION_CHANGE,
+        WTS_SESSION_UNLOCK as usize,
+        this_session(),
+    );
+}
+
+/// The 1409 probe: `Ok` when Ctrl+Alt+Space is held by someone else (the test cannot take
+/// it: ERROR_HOTKEY_ALREADY_REGISTERED), `Err` when it is free or refused otherwise.
+fn held_by_someone_else() -> Result<(), String> {
+    match TakenHotkey::take() {
+        Ok(_free) => Err("Ctrl+Alt+Space is free (nobody holds it)".to_string()),
+        Err(e) if e.code() == HRESULT::from_win32(ALREADY_REGISTERED) => Ok(()),
+        Err(e) => Err(format!("refused, but not with 1409: {e:?}")),
+    }
+}
+
+impl Rig {
+    /// The `warning kind=hotkey_register_failed` lines so far.
+    fn register_failed(&self) -> Vec<String> {
+        headed(&log_lines(&self.logs), "warning")
+            .into_iter()
+            .filter(|l| has_pair(l, "kind", "hotkey_register_failed"))
+            .collect()
+    }
+
+    /// How many times the hotkey notice was published.
+    fn hotkey_notices(&self) -> usize {
+        self.indicator
+            .overlays()
+            .iter()
+            .filter(|o| {
+                matches!(o, OverlayState::Message { id, .. } if *id == i18n::NOTICE_HOTKEY_UNAVAILABLE)
+            })
+            .count()
+    }
+
+    fn last_tray(&self) -> Option<TrayState> {
+        self.indicator.trays().last().map(|(s, _)| *s)
+    }
+
+    /// The thread started with Ctrl+Alt+Space taken by the test: HotkeyError, one
+    /// failed line, one notice, one settings request (T-055's startup branch).
+    #[track_caller]
+    fn assert_started_failing(&self) {
+        assert!(
+            eventually(WAIT, || self.last_tray() == Some(TrayState::HotkeyError)),
+            "premise: no HotkeyError at start with the hotkey taken: {:?}",
+            self.indicator.trays()
+        );
+        assert!(
+            eventually(WAIT, || self.register_failed().len() == 1),
+            "premise: not one hotkey_register_failed line at start: {:?}",
+            self.register_failed()
+        );
+        assert_eq!(
+            format!("{:?}", self.requests.calls()),
+            ONE_HOTKEY_FIELD_REQUEST,
+            "premise"
+        );
+        assert_eq!(self.hotkey_notices(), 1, "premise");
+    }
+}
+
+/// Acceptance 3 and 4: a hotkey taken at start and freed since is registered again by
+/// `event`: the tray leaves HotkeyError, the test's own take fails with 1409, the session
+/// reads it as registered, and no new failed line, notice or settings request appears.
+fn a_freed_hotkey_is_registered_again_on(event: &str, send: fn(HWND)) {
+    let _serial = serial();
+    assert_hotkey_free();
+    let taken = TakenHotkey::take().expect("premise: the test takes Ctrl+Alt+Space");
+    let rig = Rig::new();
+    let _hotkey = rig.start_hotkey();
+    rig.assert_started_failing();
+    let hwnd = hotkey_window();
+    drop(taken);
+
+    send(hwnd);
+
+    // No probe before the tray changes: a probe's take could win the re-registration.
+    assert!(
+        eventually(WAIT, || rig.last_tray() == Some(TrayState::Idle)),
+        "{event}: the tray is still HotkeyError {WAIT:?} after the {event} (no re-register): {:?}",
+        rig.indicator.trays()
+    );
+    assert_eq!(
+        held_by_someone_else(),
+        Ok(()),
+        "{event}: the hotkey thread does not hold Ctrl+Alt+Space after the {event}"
+    );
+    assert!(rig.session.hotkey_registered(), "{event}");
+    assert_eq!(
+        rig.register_failed().len(),
+        1,
+        "{event}: a failed line for a retry that succeeded: {:?}",
+        rig.register_failed()
+    );
+    assert_eq!(rig.hotkey_notices(), 1, "{event}: a notice for the success");
+    assert_eq!(
+        format!("{:?}", rig.requests.calls()),
+        ONE_HOTKEY_FIELD_REQUEST,
+        "{event}: a settings request for the success"
+    );
+}
+
+#[test]
+fn a_resume_re_registers_a_hotkey_taken_at_start_and_freed_since() {
+    // T-010 Acceptance 3 (FR-26, spec 001 US4; invariant 1): PBT_APMRESUMEAUTOMATIC to the
+    // hotkey window re-makes the active registration from the thread's own codes and
+    // reports it, so a success clears HotkeyError. Bite: no window procedure of ours (the
+    // STATIC procedure swallows the message: today), the event re-posted but no arm in
+    // the loop, the re-register skipped while `registered == false`, the result not
+    // reported to the session (the tray stays HotkeyError).
+    a_freed_hotkey_is_registered_again_on("resume", resume);
+}
+
+#[test]
+fn an_unlock_re_registers_a_hotkey_taken_at_start_and_freed_since() {
+    // T-010 Acceptance 4: the same for WM_WTSSESSION_CHANGE / WTS_SESSION_UNLOCK. Bite:
+    // only WM_POWERBROADCAST handled, the session-change code read from lParam instead of
+    // wParam.
+    a_freed_hotkey_is_registered_again_on("unlock", unlock);
+}
+
+#[test]
+fn a_registered_hotkey_stays_registered_across_a_resume_and_an_unlock() {
+    // T-010 Acceptance 3, second half (invariant 1 "unregister if registered, then
+    // register under the same id"): with the hotkey registered, a resume and then an
+    // unlock leave it registered (1409 from the test after each), with no
+    // hotkey_register_failed line, no HotkeyError, no notice and no settings request.
+    // Expected green today (nothing reacts yet); it guards the re-register. Bite: a
+    // re-register without the unregister (RegisterHotKey on the same id refuses: a
+    // failed line and HotkeyError), an unregister with no register after it (the probe
+    // finds the hotkey free), the spare id used instead of the active one.
+    let _serial = serial();
+    assert_hotkey_free();
+    let rig = Rig::new();
+    let _hotkey = rig.start_hotkey();
+    assert!(
+        eventually(WAIT, || held_by_someone_else().is_ok()),
+        "premise: the running hotkey thread does not hold Ctrl+Alt+Space"
+    );
+    let hwnd = hotkey_window();
+    for (event, send) in [("resume", resume as fn(HWND)), ("unlock", unlock)] {
+        send(hwnd);
+        // The re-register runs from the loop after the procedure re-posted it.
+        thread::sleep(SETTLE);
+        assert_eq!(
+            held_by_someone_else(),
+            Ok(()),
+            "{event}: Ctrl+Alt+Space is not held by the hotkey thread after the {event}"
+        );
+    }
+    assert_eq!(rig.register_failed(), Vec::<String>::new());
+    assert!(
+        !rig.indicator
+            .trays()
+            .iter()
+            .any(|(s, _)| *s == TrayState::HotkeyError),
+        "{:?}",
+        rig.indicator.trays()
+    );
+    assert_eq!(rig.hotkey_notices(), 0);
+    assert_eq!(format!("{:?}", rig.requests.calls()), "[]");
+    assert!(rig.session.hotkey_registered());
+}
+
+#[test]
+fn a_retry_while_the_hotkey_is_still_taken_keeps_hotkey_error_and_notifies_once() {
+    // T-010 Acceptance 5, failure branch (decision #131): taken at start and still taken,
+    // a resume and then an unlock each retry: one more `hotkey_register_failed
+    // os_code=1409` line per retry, the tray stays HotkeyError (never Idle), and no
+    // second notice and no second OpenSettings(Recording, RecordingHotkey). Bite: no
+    // retry (today: one line only), the retry's result not logged or logged without the
+    // Win32 code, the session notifying on every failure, a retry that reports success
+    // without registering.
+    let _serial = serial();
+    assert_hotkey_free();
+    let _taken = TakenHotkey::take().expect("premise: the test takes Ctrl+Alt+Space");
+    let rig = Rig::new();
+    let _hotkey = rig.start_hotkey();
+    rig.assert_started_failing();
+    let hwnd = hotkey_window();
+
+    for (n, (event, send)) in [("resume", resume as fn(HWND)), ("unlock", unlock)]
+        .into_iter()
+        .enumerate()
+    {
+        let want = n + 2;
+        send(hwnd);
+        assert!(
+            eventually(WAIT, || rig.register_failed().len() >= want),
+            "{event}: no hotkey_register_failed line for the retry: {:?}",
+            rig.register_failed()
+        );
+        assert!(
+            holds_for(SETTLE, || rig.register_failed().len() == want),
+            "{event}: not exactly one more failed line: {:?}",
+            rig.register_failed()
+        );
+        let lines = rig.register_failed();
+        assert!(
+            has_pair(&lines[want - 1], "os_code", "1409"),
+            "{event}: {}",
+            lines[want - 1]
+        );
+    }
+    assert_eq!(
+        rig.indicator.trays(),
+        vec![(TrayState::HotkeyError, false)],
+        "the tray left HotkeyError during the failed retries"
+    );
+    assert!(!rig.session.hotkey_registered());
+    assert_eq!(
+        rig.hotkey_notices(),
+        1,
+        "a second hotkey notice while already failing: {:?}",
+        rig.indicator.overlays()
+    );
+    assert_eq!(
+        format!("{:?}", rig.requests.calls()),
+        ONE_HOTKEY_FIELD_REQUEST,
+        "a second settings request while already failing"
+    );
+}
+
+#[test]
+fn a_suspend_during_a_hold_closes_the_capture_as_suspended() {
+    // T-010 Acceptance 6 (invariant 3; spec 001 edge case "sleep while recording"):
+    // PBT_APMSUSPEND to the hotkey window during a hold, with the keys still down,
+    // closes the capture at once and ends the recording Suspended; the audio goes on to
+    // one job; the later key-up starts no second stop (the poll was stopped). Bite: no
+    // suspend arm (today: the capture stays open until the key-up, end Released), the
+    // poll left running (a second session call at the key-up: harmless in the core, but
+    // the end must still be Suspended), suspend mapped to `hotkey_released` (TooShort or
+    // Released). The end is compared through its Debug form, so this binary builds
+    // before `RecordingEnd::Suspended` exists.
+    let _serial = serial();
+    assert_hotkey_free();
+    let window = TestWindow::open(Shape::TopLevel);
+    window.front();
+    let rig = Rig::new();
+    let _hotkey = rig.start_hotkey();
+    let hwnd = hotkey_window();
+
+    let (mut keys, _pressed_at) = rig.press_hotkey();
+    precondition(
+        "async_keys",
+        HOTKEY_KEYS.iter().all(|&vk| is_down(vk)),
+        "Ctrl+Alt+Space no longer reads down right after the observed press (F-014)",
+    );
+    deliver(hwnd, WM_POWERBROADCAST, PBT_APMSUSPEND as usize, 0);
+    assert!(
+        eventually(WAIT, || rig.audio.open_handles() == 0),
+        "the capture is still open {WAIT:?} after PBT_APMSUSPEND with the hotkey held"
+    );
+    keys.release_all();
+    assert!(
+        eventually(WAIT, || rig.jobs() == 1),
+        "the suspended recording was not processed"
+    );
+    thread::sleep(SETTLE);
+    assert_eq!(
+        format!("{:?}", rig.ends()),
+        "[Suspended]",
+        "the recording did not end Suspended (an early end of the synthetic hold, F-014, \
+         would show Released or TooShort here)"
+    );
+    assert_eq!(rig.jobs(), 1);
+    assert_eq!(rig.audio.start_calls(), 1);
 }
