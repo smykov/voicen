@@ -38,6 +38,8 @@ On Yes the hook runs `"$INSTDIR\voicen.exe" --purge-credentials` while the exe s
 - **Where it is enforced:** `NSIS_HOOK_POSTINSTALL` writes `$LANGUAGE` to `MUI_LANGDLL_REGISTRY_ROOT`/`_KEY`/`_VALUENAME` (the template's own defines) on every install; CI W2.
 - **Don't:** remove that hook while more than one language is listed; rely on the uninstaller's hooks (they run after `un.onInit`).
 
+The hooks also write the `logs/installer-ended` note (PREINSTALL, and the start of PREUNINSTALL) while the app runs, so the next start can tell an installer close from a kill: see `docs/decisions/diagnostics-log.md` (T-024).
+
 ## Residual risks
 
 - **Language value missing.** If the "Installer Language" value is gone (deleted by hand, or an install from a build without the POSTINSTALL hook, e.g. afd5352), a passive uninstall still waits on the language dialog: `un.onInit` runs before any hook.

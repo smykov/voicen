@@ -23,7 +23,7 @@ The `windows` job log shows, in order:
 1. `cargo test --workspace` including `tests/crash.rs` (panic → crash file kind `panic`; null deref → kind `native_fault`).
 2. `installed size: NN.N MB (limit 100 MB)`.
 3. `version: <MAJOR.MINOR>.<run number>` from the step `Version of this build` (a `vX.Y.Z` tag: `X.Y.Z`; T-077, decisions #98), then `voicen <that version> (<commit>) started` from the installed app.
-4. After a forced kill and relaunch: `previous session ended abnormally` and one `crash-*.txt` with `kind: abnormal_end`.
+4. After a forced kill and relaunch: `previous session outcome=ended_abnormally crash_file=<name>` (`outcome=crashed` after a panic) and one `crash-*.txt` with `kind: abnormal_end`.
 5. Reinstall keeps the log; `/S /KEEPDATA` keeps `%LOCALAPPDATA%\Voicen` and the `ci-test` credential; `/S` removes both.
 6. On a `v*` tag run only: the artifact `voicen-installer-<commit>`, kept 1 day, which the `release` job downloads (T-084, decisions #119); a push to `main` uploads no artifact and sends the installer to Telegram.
 
