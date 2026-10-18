@@ -83,6 +83,13 @@ Task: T-006. Class `windows-shell`; no `docs/failures.md` entry, so the defects 
 - **Where it is enforced:** `settings_window.rs`: `request` and `request_with` both post a `Job` with `Work::Target` or `Work::Run` through `post`; the opener loop runs either under `catch_unwind` and writes the same `settings_window_failed` line and receipt. `request_with` is for tests only (no production caller).
 - **Don't:** give a test its own thread or a second path around the loop; call `request_with` from production code.
 
+### No shell test decides a verdict with a wall-clock ceiling on a window build
+
+- **Defect that produced it:** F-019 (T-097): the first cold WebView2 build of `lifecycle.rs` took 21.6-37.7 s on some runners against a 20 s poll, three red runs.
+- **What breaks if you violate it:** the test goes red at random on a slow runner although the product opened the window; a red `main` run and a re-run that hides a real failure.
+- **Where it is enforced:** `lifecycle.rs`'s "Ready's open has run" helper `ready_opened` (a `request_with` probe posted after Ready; the opener runs jobs in posting order, so its receipt returns only after Ready's open), then `get_webview_window(LABEL)` and the log's `settings_window_failed`; only the hang bound `OPENER_HANG` and the watchdog bound a build that never ends. Review only (T1); same rule as `core-tests.md` "No core test's verdict races a clock it does not control", I2.
+- **Don't:** size a `BUDGET` for a cold WebView2 build, or raise it after a red run.
+
 ## Rejected approaches
 
 | Approach | Why rejected | Ref |

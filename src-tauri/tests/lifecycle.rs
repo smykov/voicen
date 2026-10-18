@@ -255,11 +255,25 @@ fn poll(budget: Duration, mut cond: impl FnMut() -> bool) -> bool {
     }
 }
 
+/// A hang bound, not a budget: how long `ready_opened`'s probe may wait for the
+/// opener to reach it. It only ends a build that never finishes (with the
+/// watchdog above it); it must exceed `OPENER_HELD` plus a cold WebView2 build
+/// (up to 37.7 s seen on the runner) and stay below `WATCHDOG` (T-097).
+const OPENER_HANG: Duration = Duration::from_secs(120);
+
 /// True when `Ready`'s first-run open has left the settings window open, as the
 /// driver sees it. The one place the two first-run tests and the T-097 reproduction
 /// decide "the window opened on Ready".
+///
+/// No wall-clock ceiling on the window build (T-097, os-answer-deadline-race): the
+/// driver posts a probe through `request_with` after `Ready` was handled; the opener
+/// runs its jobs one at a time in posting order and a window open returns only once
+/// the main thread has built (and tauri attached) the window, so the probe's receipt
+/// comes back only after `Ready`'s open has run, Ok or Err. The window is read then.
+/// A probe still unanswered after `OPENER_HANG` (a hung build) reads as not opened.
 fn ready_opened(handle: &AppHandle<Wry>) -> bool {
-    poll(BUDGET, || handle.get_webview_window(LABEL).is_some())
+    let probe = voicen_lib::settings_window::request_with(handle, Box::new(|_| Ok(())));
+    probe.wait_timeout(OPENER_HANG).is_some() && handle.get_webview_window(LABEL).is_some()
 }
 
 /// The verdict "Ready opened the first-run settings window", with the app's log read
