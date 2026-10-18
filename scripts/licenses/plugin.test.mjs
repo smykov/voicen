@@ -106,7 +106,7 @@ function fakeProject(t, { viteLicense = "MIT", rolldownLicense = "MIT", others =
   const root = mkdtempSync(join(tmpdir(), "voicen-plugin-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   writeFileSync(join(root, "package.json"), JSON.stringify({ name: "voicen-fixture", private: true, type: "module", devDependencies: { svelte: "5.57.1", vite: "8.3.2" } }));
-  writeFileSync(join(root, "about.toml"), 'accepted = ["MIT"]\n');
+  writeFileSync(join(root, "about.toml"), 'accepted = [\n    "MIT",\n]\n');
   writeFileSync(join(root, "manual.json"), "[]\n");
   writeFileSync(join(root, "rust.txt"), "Rust part (example)\n");
 

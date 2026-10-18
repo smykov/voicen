@@ -3,6 +3,9 @@
 # cargo-about (Rust crates) and by scripts/licenses/accepted.mjs (npm bundle and
 # licenses/manual.json). Changing it is an owner decision: add a docs/decisions.md row
 # first, never edit the list alone (P-010).
+# Keep this head's line shape (T-094): the file starts with `# ...` lines, then
+# `accepted = [`, then only `    # ...` or `    "<id>",` lines, then `]`. accepted.mjs reads
+# only that shape and refuses any other (single-line array, inline comment, 'literal' ids).
 accepted = [
     # decision #9
     "MIT",

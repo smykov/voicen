@@ -60,7 +60,7 @@ test("notices: a bundled package without a license file cannot be listed and thr
 test("check.mjs --require: a bundle list without the required package cannot check (exit 2)", (t) => {
   const root = tmp(t);
   const p = fakePackage(root, { name: "fake-ok-lib", version: "1.0.0", license: "MIT", files: { LICENSE: "x" } });
-  writeFileSync(join(root, "about.toml"), 'accepted = ["MIT"]\n');
+  writeFileSync(join(root, "about.toml"), 'accepted = [\n    "MIT",\n]\n');
   writeFileSync(join(root, "bundle.json"), JSON.stringify([p]));
   writeFileSync(join(root, "manual.json"), "[]");
   const args = ["--about", join(root, "about.toml"), "--bundle", join(root, "bundle.json"), "--manual", join(root, "manual.json")];
