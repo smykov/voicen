@@ -648,13 +648,29 @@ fn deleting_the_selected_model_through_ipc_resets_the_engine_and_the_window_hear
     // settings://changed with the new view); no local-model event is emitted (the UI
     // re-lists, analysis A). Bite: the command not registered or not given the
     // managed service (no reset), a second SettingsService, an emit of
-    // local-model://state from the command, the wire fields re-spelled.
+    // local-model://state from the command, the wire fields re-spelled, two
+    // publishes for one delete.
+    // T-096 / F-018: the bridge emits on its own thread with the view read at emit
+    // time, so the listener is registered before the precondition save and the
+    // save's event is received before the delete starts; otherwise a late save
+    // event could be heard as the delete's.
     let w = world_with(vec![], FakeDisk::with_available(10 * NEEDED), |dir| {
         put(dir, "ggml-small.bin", &model_bytes());
     });
+    let changed = w.changed_events();
     let saved = w.save(&builtin_local("small"));
     assert!(saved.get("Saved").is_some(), "precondition: {saved}");
-    let changed = w.changed_events();
+    let saved_view = saved["Saved"]["view"].clone();
+    assert!(saved_view.is_object(), "precondition: {saved}");
+    let heard_save = changed
+        .recv_timeout(END_WAIT)
+        .unwrap_or_else(|e| panic!("no {CHANGED} after the precondition save ({e:?})"));
+    assert_eq!(heard_save, saved_view, "the save's {CHANGED}");
+    assert_eq!(
+        heard_save["settings"]["engine"],
+        json!("builtin_local"),
+        "{heard_save}"
+    );
     let local = record(&w.webview);
 
     let got = w.delete("small");
@@ -677,6 +693,14 @@ fn deleting_the_selected_model_through_ipc_resets_the_engine_and_the_window_hear
         .recv_timeout(END_WAIT)
         .unwrap_or_else(|e| panic!("no {CHANGED} after the reset ({e:?})"));
     assert_eq!(heard["settings"]["engine"], json!("none"), "{heard}");
+    assert_eq!(
+        heard, view,
+        "the delete's {CHANGED} is the settings_get view"
+    );
+    assert!(
+        changed.recv_timeout(QUIET).is_err(),
+        "more than one {CHANGED} for one delete"
+    );
     let events = drain(&local, QUIET);
     assert!(
         events.is_empty(),
