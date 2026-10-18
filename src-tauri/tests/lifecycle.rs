@@ -55,8 +55,14 @@ use windows::Win32::UI::WindowsAndMessaging::{
 /// A test identifier: WebView2's profile goes under it, not under the release one.
 const IDENTIFIER: &str = "dev.voicen.test.lifecycle";
 
-/// How long the driver waits for a window, a removal or an apply (Windows-sized:
-/// a cold WebView2 creation on the runner, F-005).
+/// How long the driver waits for a step that is not a window build: a window's
+/// removal (`gone`), the loop ending (`ended`), a tray removal, an apply, the
+/// driver's report after the loop returned. It is not sized for, and must not be
+/// raised for, a cold WebView2 build (T-097, os-answer-deadline-race: a build is
+/// decided through the opener's FIFO in `ready_opened`). One build wait still uses
+/// it as an unaudited ceiling: the overlay poll in
+/// `destroying_the_overlay_as_the_last_window_keeps_the_app_while_the_tray_exists`
+/// (the overlay has no receipt; T-097 follow-up (1)).
 const BUDGET: Duration = Duration::from_secs(20);
 
 /// How long a main-thread round trip may take on a running loop.
@@ -261,50 +267,92 @@ fn poll(budget: Duration, mut cond: impl FnMut() -> bool) -> bool {
 /// (up to 37.7 s seen on the runner) and stay below `WATCHDOG` (T-097).
 const OPENER_HANG: Duration = Duration::from_secs(120);
 
-/// True when `Ready`'s first-run open has left the settings window open, as the
-/// driver sees it. The one place the two first-run tests and the T-097 reproduction
-/// decide "the window opened on Ready".
+/// What the driver saw of `Ready`'s first-run open: two facts, so a red verdict can
+/// say which of two different failures happened.
+#[derive(Debug, Default, Clone, Copy)]
+struct ReadyOpen {
+    /// The opener answered `ready_opened`'s probe within `OPENER_HANG`, so `Ready`'s
+    /// open (if `Ready` asked for one) has run, Ok or Err. False: a build still
+    /// running past the hang bound (hung).
+    answered: bool,
+    /// The settings window existed when the probe answered (read only then).
+    window: bool,
+    /// How long the probe waited for the opener (the queue ahead of it plus the
+    /// window build; printed, not judged).
+    waited: Duration,
+}
+
+impl ReadyOpen {
+    /// "The window opened on Ready": the probe answered and the window is there.
+    fn opened(&self) -> bool {
+        self.answered && self.window
+    }
+}
+
+/// Whether `Ready`'s first-run open has left the settings window open, as the driver
+/// sees it. The one place the two first-run tests and the T-097 reproduction decide
+/// "the window opened on Ready".
 ///
 /// No wall-clock ceiling on the window build (T-097, os-answer-deadline-race): the
 /// driver posts a probe through `request_with` after `Ready` was handled; the opener
 /// runs its jobs one at a time in posting order and a window open returns only once
 /// the main thread has built (and tauri attached) the window, so the probe's receipt
 /// comes back only after `Ready`'s open has run, Ok or Err. The window is read then.
-/// A probe still unanswered after `OPENER_HANG` (a hung build) reads as not opened.
-fn ready_opened(handle: &AppHandle<Wry>) -> bool {
+/// A probe still unanswered after `OPENER_HANG` (a hung build) reads as
+/// `answered: false`.
+fn ready_opened(handle: &AppHandle<Wry>) -> ReadyOpen {
+    let started = Instant::now();
     let probe = voicen_lib::settings_window::request_with(handle, Box::new(|_| Ok(())));
-    probe.wait_timeout(OPENER_HANG).is_some() && handle.get_webview_window(LABEL).is_some()
+    let answered = probe.wait_timeout(OPENER_HANG).is_some();
+    let waited = started.elapsed();
+    let window = answered && handle.get_webview_window(LABEL).is_some();
+    eprintln!("lifecycle: Ready's first-run open probe answered={answered} after {waited:?}");
+    ReadyOpen {
+        answered,
+        window,
+        waited,
+    }
 }
 
 /// The verdict "Ready opened the first-run settings window", with the app's log read
-/// at the driver's verdict: a failed build leaves a `settings_window_failed` line, a
-/// build still running then leaves none (T-006 verify 1: slow or failed WebView2
-/// window build).
-fn assert_opened_on_ready(opened: bool, lines: &[String]) {
+/// when the driver decided: a failed build leaves a `settings_window_failed` line
+/// (T-006 verify 1: slow or failed WebView2 window build).
+fn assert_opened_on_ready(open: ReadyOpen, lines: &[String]) {
     let failed = lines.iter().any(|l| l.contains("settings_window_failed"));
+    let opener = if failed {
+        "the opener logged a failed open (the window build failed)"
+    } else {
+        "the opener logged no failed open"
+    };
     assert!(
-        opened,
-        "Ready did not open the first-run settings window within {BUDGET:?}; {}; the app's \
-         log at the budget: {lines:#?}",
-        if !failed {
-            "the opener logged no failed open (the window build was still running, or was \
-             never asked for)"
+        open.answered,
+        "Ready's first-run open did not finish within the hang bound {OPENER_HANG:?} \
+         (the window build hung); {opener}; {open:?}; the app's log then: {lines:#?}"
+    );
+    assert!(
+        open.window,
+        "Ready's first-run open ran (the opener answered after {:?}) but left no settings \
+         window; {}; the app's log then: {lines:#?}",
+        open.waited,
+        if failed {
+            opener
         } else {
-            "the opener logged a failed open (the window build failed)"
+            "the opener logged no failed open (the open was never asked for, or there is \
+             no opener)"
         }
     );
 }
 
 #[derive(Debug, Default)]
 struct CloseReport {
-    opened: bool,
+    opened: ReadyOpen,
     destroyed: bool,
     gone: bool,
     alive_at_once: bool,
     alive_later: bool,
     /// The app's log when `opened` failed, read before the loop is ended (ending it
     /// fails a build still waiting on it, which would log a failure of its own).
-    log_at_budget: Vec<String>,
+    log_at_verdict: Vec<String>,
 }
 
 #[test]
@@ -326,10 +374,10 @@ fn destroying_the_last_window_keeps_the_app_running() {
             opened: ready_opened(&handle),
             ..CloseReport::default()
         };
-        if !report.opened {
-            report.log_at_budget = logged(&logs_of);
+        if !report.opened.opened() {
+            report.log_at_verdict = logged(&logs_of);
         }
-        if report.opened {
+        if report.opened.opened() {
             report.destroyed = handle
                 .get_webview_window(LABEL)
                 .is_some_and(|w| w.destroy().is_ok());
@@ -343,7 +391,7 @@ fn destroying_the_last_window_keeps_the_app_running() {
     });
 
     let report = report.expect("the driver sent no report");
-    assert_opened_on_ready(report.opened, &report.log_at_budget);
+    assert_opened_on_ready(report.opened, &report.log_at_verdict);
     assert!(
         report.destroyed && report.gone,
         "premise: the window was destroyed: {report:?}"
@@ -365,12 +413,12 @@ const OPENER_HELD: Duration = Duration::from_secs(25);
 struct HeldOpenerReport {
     /// The held job had not finished when the driver started (premise).
     held_at_ready: bool,
-    opened: bool,
+    opened: ReadyOpen,
     /// The window exists when the driver looks after `ready_opened` (a raw fact, not
     /// the helper's own verdict).
     window_after: bool,
     /// The app's log when `opened` failed, read before the loop is ended.
-    log_at_budget: Vec<String>,
+    log_at_verdict: Vec<String>,
 }
 
 #[test]
@@ -414,8 +462,8 @@ fn ready_opens_the_first_run_window_when_its_open_queues_behind_a_slow_build() {
             ..HeldOpenerReport::default()
         };
         report.window_after = handle.get_webview_window(LABEL).is_some();
-        if !report.opened {
-            report.log_at_budget = logged(&logs_of);
+        if !report.opened.opened() {
+            report.log_at_verdict = logged(&logs_of);
         }
         end_loop(&handle, 0);
         report
@@ -427,7 +475,7 @@ fn ready_opens_the_first_run_window_when_its_open_queues_behind_a_slow_build() {
         "premise: the opener was still held by the planted job when Ready's driver \
          started: {report:?}"
     );
-    assert_opened_on_ready(report.opened, &report.log_at_budget);
+    assert_opened_on_ready(report.opened, &report.log_at_verdict);
     assert!(
         report.window_after,
         "`ready_opened` reported an open window that the app does not have: {report:?}"
@@ -505,7 +553,7 @@ fn destroying_the_overlay_as_the_last_window_keeps_the_app_while_the_tray_exists
 
 #[derive(Debug, Default)]
 struct NoTrayReport {
-    opened: bool,
+    opened: ReadyOpen,
     tray_removed: bool,
     destroyed: bool,
     /// A main-thread round trip failed within `BUDGET` after the destroy: the loop
@@ -540,7 +588,7 @@ fn without_the_tray_destroying_the_last_window_ends_the_app() {
             thread::sleep(BUDGET * 2);
             end_loop(&fallback, FALLBACK_CODE);
         });
-        if !report.opened {
+        if !report.opened.opened() {
             return report;
         }
         // Removed (and the removed icon dropped) on the main thread, where tauri's
@@ -565,7 +613,7 @@ fn without_the_tray_destroying_the_last_window_ends_the_app() {
 
     let report = report.expect("the driver sent no report");
     assert!(
-        report.opened && report.tray_removed && report.destroyed,
+        report.opened.opened() && report.tray_removed && report.destroyed,
         "premise: the settings window opened, the tray was removed and the window \
          destroyed: {report:?}"
     );
