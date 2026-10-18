@@ -130,7 +130,8 @@ test("the committed licenses/manual.json lists whisper.cpp, Silero VAD, the whis
 /** A throwaway project: about.toml, node_modules with fake packages, bundle list, manual list. */
 function project(t, { accepted = ["MIT", "Apache-2.0"], packages = [], manual = [] } = {}) {
   const dir = tmp(t);
-  writeFileSync(join(dir, "about.toml"), `accepted = [${accepted.map((a) => JSON.stringify(a)).join(", ")}]\n`);
+  // The owned head shape of about.toml (T-094): `accepted = [`, one `    "<id>",` per line, `]`.
+  writeFileSync(join(dir, "about.toml"), `accepted = [\n${accepted.map((a) => `    ${JSON.stringify(a)},\n`).join("")}]\n`);
   const bundled = packages.map(({ name, version, license }) => {
     const pkgDir = join(dir, "node_modules", ".pnpm", `${name.replace("/", "+")}@${version}`, "node_modules", ...name.split("/"));
     mkdirSync(pkgDir, { recursive: true });
