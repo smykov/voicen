@@ -42,6 +42,17 @@
 #   advanced       an extra "GGML_BACKEND_DL-ADVANCED:INTERNAL=1" line -> exit 1;
 #   line-text      GGML_BACKEND_DL:BOOL=ON -> the error ends with "line text [GGML_BACKEND_DL:BOOL=ON]";
 #   usage          no argument, two arguments -> exit 2.
+#   (T-099 validation 1, mutations M3-M6: every REQUIRED line has an absent and a duplicate case,
+#   every TOKENS entry has a case that only the token check refuses, the REQUIRED count staying 1)
+#   avx2-absent      no GGML_AVX2 entry -> exit 1, "GGML_AVX2:BOOL=ON occurs 0 time";
+#   avx2-dup         GGML_AVX2:BOOL=ON twice -> exit 1, "occurs 2 time";
+#   avx512-absent    no GGML_AVX512 entry -> exit 1, "GGML_AVX512:BOOL=OFF occurs 0 time";
+#   avx512-dup       GGML_AVX512:BOOL=OFF twice -> exit 1, "occurs 2 time";
+#   avx512-both      the good cache plus a second, unowned GGML_AVX512:BOOL=ON line -> exit 1;
+#   shared-absent    no BUILD_SHARED_LIBS entry -> exit 1, "BUILD_SHARED_LIBS:BOOL=OFF occurs 0 time";
+#   shared-dup       BUILD_SHARED_LIBS:BOOL=OFF twice -> exit 1, "occurs 2 time";
+#   shared-both      the good cache plus a second, unowned BUILD_SHARED_LIBS:BOOL=ON line -> exit 1;
+#   native-both      the good cache plus a second, unowned GGML_NATIVE:BOOL=ON line -> exit 1.
 # Usage: scripts/ci/whisper-cmake-cache.test.sh   (host bash)
 # Exit 0: every case as expected. Exit 1: a case differs (listed). Exit 3: cannot run.
 set -uo pipefail
@@ -178,6 +189,15 @@ refuse avx-vnni-absent "$(drop GGML_AVX_VNNI:BOOL=OFF)" 'GGML_AVX_VNNI:BOOL=OFF 
 refuse avx-vnni-uninit "$(swap GGML_AVX_VNNI:BOOL=OFF GGML_AVX_VNNI:UNINITIALIZED=ON)" 'GGML_AVX_VNNI: a line that is not an owned line'
 refuse avx-vnni-both "$(printf '%s\nGGML_AVX_VNNI:BOOL=ON' "$g")" 'GGML_AVX_VNNI: a line that is not an owned line'
 refuse avx-vnni-dup "$(printf '%s\nGGML_AVX_VNNI:BOOL=OFF' "$g")" 'GGML_AVX_VNNI:BOOL=OFF occurs 2 time'
+refuse avx2-absent "$(drop GGML_AVX2:BOOL=ON)" 'GGML_AVX2:BOOL=ON occurs 0 time'
+refuse avx2-dup "$(printf '%s\nGGML_AVX2:BOOL=ON' "$g")" 'GGML_AVX2:BOOL=ON occurs 2 time'
+refuse avx512-absent "$(drop GGML_AVX512:BOOL=OFF)" 'GGML_AVX512:BOOL=OFF occurs 0 time'
+refuse avx512-dup "$(printf '%s\nGGML_AVX512:BOOL=OFF' "$g")" 'GGML_AVX512:BOOL=OFF occurs 2 time'
+refuse avx512-both "$(printf '%s\nGGML_AVX512:BOOL=ON' "$g")" 'GGML_AVX512: a line that is not an owned line .*line text \[GGML_AVX512:BOOL=ON\]$'
+refuse shared-absent "$(drop BUILD_SHARED_LIBS:BOOL=OFF)" 'BUILD_SHARED_LIBS:BOOL=OFF occurs 0 time'
+refuse shared-dup "$(printf '%s\nBUILD_SHARED_LIBS:BOOL=OFF' "$g")" 'BUILD_SHARED_LIBS:BOOL=OFF occurs 2 time'
+refuse shared-both "$(printf '%s\nBUILD_SHARED_LIBS:BOOL=ON' "$g")" 'BUILD_SHARED_LIBS: a line that is not an owned line .*line text \[BUILD_SHARED_LIBS:BOOL=ON\]$'
+refuse native-both "$(printf '%s\nGGML_NATIVE:BOOL=ON' "$g")" 'GGML_NATIVE: a line that is not an owned line .*line text \[GGML_NATIVE:BOOL=ON\]$'
 refuse line-text "$(swap GGML_BACKEND_DL:BOOL=OFF GGML_BACKEND_DL:BOOL=ON)" ':[0-9]+: GGML_BACKEND_DL: a line that is not an owned line .*: line text \[GGML_BACKEND_DL:BOOL=ON\]$'
 
 run absent-dir "$(tree absent-dir "$(drop "$dir_help" | awk '$0 != "GGML_BACKEND_DIR:PATH="')")"
