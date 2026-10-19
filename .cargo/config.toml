@@ -23,6 +23,9 @@ GGML_SSE42 = { value = "ON", force = true }
 GGML_AVX = { value = "ON", force = true }
 GGML_AVX2 = { value = "ON", force = true }
 GGML_BMI2 = { value = "ON", force = true }
+# AVX-VNNI is outside the AVX2 baseline and its option sits outside the AVX512 / AVX2 chain, so a
+# GGML_AVX_VNNI=ON of the calling shell would add AVX-VNNI code; pinned OFF (the ggml default).
+GGML_AVX_VNNI = { value = "OFF", force = true }
 # C runtime (T-099 invariant 4): whisper.cpp is compiled /MT (static vcruntime, libcmt, libcpmt),
 # the CRT of the shell (tauri-build static_vcruntime), so no exe imports MSVCP140 or
 # VCRUNTIME140. whisper.cpp's cmake_minimum_required leaves policy CMP0091 unset, so the

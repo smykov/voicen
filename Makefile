@@ -159,8 +159,8 @@ check-e2e-entry-fixtures:
 
 # T-099 (decisions #142, invariant 3): scripts/ci/whisper-cmake-cache.sh, the windows job's
 # verdict on every whisper-rs-sys CMakeCache.txt under target/ (decides_on: token + literal),
-# passes only when each holds GGML_NATIVE:BOOL=OFF, GGML_AVX2:BOOL=ON, GGML_AVX512:BOOL=OFF and
-# BUILD_SHARED_LIBS:BOOL=OFF exactly once and every line naming one of those options or
+# passes only when each holds GGML_NATIVE:BOOL=OFF, GGML_AVX2:BOOL=ON, GGML_AVX512:BOOL=OFF,
+# GGML_AVX_VNNI:BOOL=OFF and BUILD_SHARED_LIBS:BOOL=OFF exactly once and every line naming one of those options or
 # GGML_BACKEND_DL / GGML_CPU_ALL_VARIANTS is an owned line; no cache found is red. Fixture trees,
 # offline. Host bash.
 check-whisper-cmake-cache:

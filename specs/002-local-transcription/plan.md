@@ -47,6 +47,8 @@ The shell (`src-tauri`) adds IPC commands and events for the model list, downloa
 | IV. Core / thin shell | Catalog, store, downloader, residency, built-in engine and local-server config live in `voicen-core` and are tested on Linux with fakes. whisper.cpp sits behind the `SpeechModel` trait in its own crate; Windows-only code (disk-space probe impl, IPC, events) in `src-tauri`. | PASS |
 | V. Measured, not assumed | Cold/warm marking and load duration in the dictation log line feed the NFR-01 benchmark; verification location stated per requirement below. | PASS |
 
+**As built (T-099)**: "`voicen-whisper` does not depend on `reqwest`" holds for its direct dependencies only. The crate depends on `voicen-core`, which links `reqwest`, so `reqwest` is in its dependency graph. NFR-05 / SC-003 therefore rest on the core no-network test (request-recording fake, zero requests), not on the crate's dependency list.
+
 **Post-design re-check (after Phase 1)**: PASS. One justified addition: a new workspace crate (see Complexity Tracking).
 
 ### Where each requirement is verified
@@ -61,6 +63,8 @@ The shell (`src-tauri`) adds IPC commands and events for the model list, downloa
 | NFR-01 (local, warm) | log line marks `cold`/`warm` and load ms (fake clock) | — | — | benchmark of 20 phrases with `small`, warm |
 | NFR-03 warm model, 10 min unload | residency with fake clock: stays loaded, unloads at 10 min, hold during work, unload on engine/model change and delete, never at start | — | — | RAM drops after 10 min idle (Task Manager) |
 | NFR-05 no network | pipeline with built-in engine + request-recording network fake: zero requests; dependency check that `voicen-whisper` has no HTTP crate | — | — | code review of network call sites |
+
+**As built (T-099)**: the NFR-05 "dependency check that `voicen-whisper` has no HTTP crate" pins its direct dependencies only; `reqwest` reaches it through `voicen-core`. The zero-requests proof is the core pipeline test with the request-recording network fake.
 
 ## Project Structure
 

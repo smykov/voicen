@@ -15,11 +15,15 @@
 #     (whisper.cpp 1.8.3, whisper-rs-sys 0.15.0, ggml/CMakeLists.txt: option GGML_BACKEND_DL,
 #     set(GGML_BACKEND_DIR ... CACHE PATH), option GGML_CPU_ALL_VARIANTS) are owned lines, byte
 #     for byte; the GGML_BACKEND_DIR help really lacks its closing ")". A new help text holding
-#     a token is refused until it is reviewed and owned. None of the six options is
+#     a token is refused until it is reviewed and owned. None of the seven options is
 #     mark_as_advanced or has a STRINGS property in 0.15.0, so no "//ADVANCED property ..." /
 #     "NAME-ADVANCED:INTERNAL=1" line names one; such a line is refused, not owned.
-# GGML_FMA / GGML_F16C are not cache options on MSVC (option() only if NOT MSVC), so they are
-# not asserted. No CMakeCache.txt found is a refusal, never a pass.
+# GGML_AVX_VNNI (review 1 finding 3) is an option on every compiler (ggml/CMakeLists.txt, not
+# under if (NOT MSVC)), outside the AVX512 / AVX2 chain, and adds AVX-VNNI instructions beyond the
+# AVX2 baseline; it is REQUIRED, so a cache without it (a whisper.cpp nobody reviewed renamed or
+# moved it) refuses. Its help text names no token. GGML_AVX512_* / GGML_AMX_* are read only
+# inside if (GGML_AVX512), asserted OFF, so they are not tokens. GGML_FMA / GGML_F16C are not
+# cache options on MSVC (option() only if NOT MSVC), so they are not asserted. No CMakeCache.txt found is a refusal, never a pass.
 #
 # Usage: scripts/ci/whisper-cmake-cache.sh <target dir>
 # Exit 0: "whisper-cmake-cache: ok: <n> CMakeCache.txt checked". Exit 1: one
@@ -41,6 +45,7 @@ REQUIRED=(
   "GGML_NATIVE:BOOL=OFF"
   "GGML_AVX2:BOOL=ON"
   "GGML_AVX512:BOOL=OFF"
+  "GGML_AVX_VNNI:BOOL=OFF"
   "BUILD_SHARED_LIBS:BOOL=OFF"
 )
 OWNED=(
@@ -51,7 +56,7 @@ OWNED=(
   "//ggml: build all variants of the CPU backend (requires GGML_BACKEND_DL)"
   "//ggml: directory to load dynamic backends from (requires GGML_BACKEND_DL"
 )
-TOKENS=(GGML_NATIVE GGML_AVX2 GGML_AVX512 BUILD_SHARED_LIBS GGML_BACKEND_DL GGML_CPU_ALL_VARIANTS)
+TOKENS=(GGML_NATIVE GGML_AVX2 GGML_AVX512 GGML_AVX_VNNI BUILD_SHARED_LIBS GGML_BACKEND_DL GGML_CPU_ALL_VARIANTS)
 
 caches=()
 while IFS= read -r -d '' f; do

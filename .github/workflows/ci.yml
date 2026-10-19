@@ -131,14 +131,17 @@ jobs:
           RUN_NUMBER: ${{ github.run_number }}
         run: scripts/ci/version-stamp.sh "$REF_TYPE" "$REF_NAME" "$RUN_NUMBER"
       # T-099 (invariant 5): the tiny whisper model for crates/voicen-whisper/tests, outside target/
-      # (the build cache holds target/). The key is the catalog's pinned commit and SHA-256, so a
-      # catalog change fetches anew; restored on every ref, saved from main only after the tests.
+      # (the build cache holds target/). The key is a hash of the model catalog file, the one place
+      # that pins the model, so ci.yml repeats none of its values (P-010). Any edit of that file
+      # gives a new key: the entry of the old key is not restored and the model is downloaded and
+      # checked again; no restore-keys, as a prefix match would bring back another catalog's model.
+      # Restored on every ref, saved from main only after the tests (make check-whisper-model-key).
       - name: Restore the tiny whisper model
         id: whisper-tiny
         uses: actions/cache/restore@v6
         with:
           path: ${{ runner.temp }}/voicen-whisper-models
-          key: whisper-model-tiny-5359861c739e955e79d9a303bcbc70fb988958b1-be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21
+          key: whisper-model-tiny-${{ hashFiles('crates/voicen-core/src/local_models/catalog.rs') }}
       # Through the one model downloader (catalog size and SHA-256, .part then rename); a restored
       # model of the catalog size is kept. Its own cargo invocation (T-033, F-001). The test reads
       # the directory from VOICEN_WHISPER_TEST_MODELS_DIR; a missing model is red there, never a skip.
