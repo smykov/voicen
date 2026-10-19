@@ -25,6 +25,7 @@ Voicen — a Windows desktop dictation tool: a global hotkey records the microph
 | Path | What |
 |---|---|
 | `crates/voicen-core/` | Platform-independent core (area `core`): engines, pipeline, settings, VAD gate, build info |
+| `crates/voicen-whisper/` | Built-in engine: whisper-rs loader/model implementing core's `SpeechModelLoader` (static AVX2 whisper.cpp, static CRT). Built and tested in Windows CI; the Linux gate only lints it (`make check-whisper`, `DOCS_RS=1`). Checkers: `scripts/ci/whisper-cmake-cache.sh`, `scripts/ci/crt-imports.sh`; CI fetches the tiny test model with `crates/voicen-core/examples/fetch_model.rs` (`docs/decisions/ci-toolchain.md`) |
 | `src-tauri/` | Tauri shell: tray, hotkey, capture, clipboard, paste, IPC commands — Windows-only, built and tested only in Windows CI |
 | `src/` | Web UI (area `ui`); unit tests `src/**/*.test.ts` |
 | `e2e/` | Playwright UI tests, Tauri IPC mocked via `window.__TAURI_INTERNALS__`; specs import `test`/`expect` from `e2e/support/boot` (boot fixture); each run builds and serves privately (`docs/decisions/ui-e2e.md`) |
