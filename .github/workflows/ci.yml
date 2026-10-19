@@ -120,7 +120,7 @@ jobs:
           key: ${{ steps.pnpm-cache.outputs.cache-primary-key }}
       - name: Version of this build
       # T-077 (decisions #98): one version per run, written before the first compile into
-      # Cargo.toml, tauri.conf.json, package.json and the two workspace members of Cargo.lock
+      # Cargo.toml, tauri.conf.json, package.json and every workspace member of Cargo.lock
       # (never committed): <repo MAJOR.MINOR>.<run_number>, a vX.Y.Z tag build X.Y.Z. A bad tag,
       # repo version or run number stops the job here. Exports VOICEN_VERSION. Contract and host
       # test: scripts/ci/version-stamp.sh, version-stamp.test.sh (make check).
@@ -130,11 +130,36 @@ jobs:
           REF_NAME: ${{ github.ref_name }}
           RUN_NUMBER: ${{ github.run_number }}
         run: scripts/ci/version-stamp.sh "$REF_TYPE" "$REF_NAME" "$RUN_NUMBER"
+      # T-099 (invariant 5): the tiny whisper model for crates/voicen-whisper/tests, outside target/
+      # (the build cache holds target/). The key is the catalog's pinned commit and SHA-256, so a
+      # catalog change fetches anew; restored on every ref, saved from main only after the tests.
+      - name: Restore the tiny whisper model
+        id: whisper-tiny
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ runner.temp }}/voicen-whisper-models
+          key: whisper-model-tiny-5359861c739e955e79d9a303bcbc70fb988958b1-be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21
+      # Through the one model downloader (catalog size and SHA-256, .part then rename); a restored
+      # model of the catalog size is kept. Its own cargo invocation (T-033, F-001). The test reads
+      # the directory from VOICEN_WHISPER_TEST_MODELS_DIR; a missing model is red there, never a skip.
+      - name: Fetch the tiny whisper model (T-099)
+        shell: bash
+        env:
+          MODELS_DIR: ${{ runner.temp }}/voicen-whisper-models
+        run: |
+          cargo run -p voicen-core --example fetch_model -- "$MODELS_DIR" tiny
+          echo "VOICEN_WHISPER_TEST_MODELS_DIR=$MODELS_DIR" >> "$GITHUB_ENV"
       # The shell's build script (tauri-build static VC runtime) puts a stub msvcrt.lib on its
       # search path; cargo gives every build script's search dirs (native_dirs) to every doctest
       # of the same invocation, so other crates' doctests must not share a run with `voicen` (T-033, F-001).
       # --no-fail-fast: one red test binary must not hide the others; the step still fails at the end (T-048, T-044).
       - run: cargo test --workspace --exclude voicen --no-fail-fast
+      - name: Save the tiny whisper model (main only)
+        if: ${{ github.ref == 'refs/heads/main' && steps.whisper-tiny.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ runner.temp }}/voicen-whisper-models
+          key: ${{ steps.whisper-tiny.outputs.cache-primary-key }}
       - run: cargo test -p voicen --no-fail-fast
       - run: pnpm tauri build
       # T-099 (decisions #142, invariant 3): the effective whisper.cpp configuration cmake wrote,

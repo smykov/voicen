@@ -13,10 +13,12 @@
 #     the run number is not used. Any other ref_type (a branch, a pull request):
 #     V = <repo MAJOR>.<repo MINOR>.<run_number>, run_number [1-9][0-9]* and <= 65535 (Windows
 #     VS_FIXEDFILEINFO / NSIS VIProductVersion fields are 16-bit), else exit 1 naming it.
-#   - Writes V into the three fields and into the version of the two workspace members of
-#     <root>/Cargo.lock ([[package]] voicen and voicen-core, no source line), so the stamped tree
-#     still passes --locked; no other line changes (CRLF line ends are kept). Then re-reads all
-#     five places, prints "version: V" and appends "VOICEN_VERSION=V" to $GITHUB_ENV when set.
+#   - Writes V into the three fields and into the version of every workspace member of
+#     <root>/Cargo.lock (each [[package]] without a source line: voicen, voicen-core and every
+#     other member, all with version.workspace = true; T-099), so the stamped tree still passes
+#     --locked; no other line changes (CRLF line ends are kept). voicen and voicen-core must be
+#     among them and no member name may occur twice, else exit 1. Then re-reads all those places,
+#     prints "version: V" and appends "VOICEN_VERSION=V" to $GITHUB_ENV when set.
 #   - Nothing is written unless every input is valid: the new files are built in a temp dir
 #     first, and $GITHUB_ENV is appended only after the re-read.
 # Inputs come from the workflow through env: (github.ref_type, github.ref_name,
@@ -103,9 +105,9 @@ json_version() {
   ' "$2"
 }
 
-# lock_version <mode> <file> [new]: the versions of the workspace members voicen and voicen-core
-# in Cargo.lock ([[package]] blocks without a source line). mode read: prints "name value" per
-# member. Exit 3 unless each member is found exactly once.
+# lock_version <mode> <file> [new]: the versions of the workspace members in Cargo.lock (every
+# [[package]] block without a source line). mode read: prints "name value" per member. Exit 3
+# unless voicen and voicen-core are found and no member name is found twice.
 lock_version() {
   awk -v mode="$1" -v new="${3:-}" '
     FNR == NR {
@@ -125,11 +127,12 @@ lock_version() {
     function targets(   i) {
       if (done) return; done = 1
       for (i = 1; i <= b; i++)
-        if (pkg[i] && !src[i] && (name[i] == "voicen" || name[i] == "voicen-core") && vline[i]) {
-          seen[name[i]]++; target[vline[i]] = 1
+        if (pkg[i] && !src[i] && vline[i]) {
+          if (++seen[name[i]] > 1) twice = 1
+          target[vline[i]] = 1
           if (mode == "read") print name[i], vval[i]
         }
-      if (seen["voicen"] != 1 || seen["voicen-core"] != 1) { bad = 1; exit 3 }
+      if (twice || seen["voicen"] != 1 || seen["voicen-core"] != 1) { bad = 1; exit 3 }
       if (mode == "read") exit 0
     }
     END { if (bad) exit 3; if (!done) { targets(); if (bad) exit 3 } }
@@ -141,7 +144,7 @@ lock_version() {
 cargo_ver="$(toml_version read "$root/$cargo_toml")" || die "$cargo_toml: no single [workspace.package] version found"
 tauri_ver="$(json_version read "$root/$tauri_conf")" || die "$tauri_conf: no single top-level \"version\" found"
 package_ver="$(json_version read "$root/$package_json")" || die "$package_json: no single top-level \"version\" found"
-lock_version read "$root/$cargo_lock" > /dev/null || die "$cargo_lock: the workspace members voicen and voicen-core not found once each"
+lock_version read "$root/$cargo_lock" > /dev/null || die "$cargo_lock: the workspace members voicen and voicen-core not found, or a member name found twice"
 
 version_ok "$cargo_ver" || die "$cargo_toml: [workspace.package] version '$cargo_ver' is not X.Y.Z (no leading zeros, each part <= 65535)"
 for pair in "$tauri_conf=$tauri_ver" "$package_json=$package_ver"; do
@@ -178,14 +181,14 @@ cat "$tmp/cargo_toml" > "$root/$cargo_toml" &&
   cat "$tmp/package_json" > "$root/$package_json" &&
   cat "$tmp/cargo_lock" > "$root/$cargo_lock" || die "cannot write the stamped files under $root"
 
-# ---- re-read the five places -----------------------------------------------------------------
+# ---- re-read every stamped place -------------------------------------------------------------
 
 got="$(toml_version read "$root/$cargo_toml")" && [ "$got" = "$V" ] || die "$cargo_toml: reads '$got' after stamping, want '$V'"
 for f in "$tauri_conf" "$package_json"; do
   got="$(json_version read "$root/$f")" && [ "$got" = "$V" ] || die "$f: reads '$got' after stamping, want '$V'"
 done
-got="$(lock_version read "$root/$cargo_lock" | sort)" &&
-  [ "$got" = "$(printf 'voicen %s\nvoicen-core %s' "$V" "$V")" ] ||
+got="$(lock_version read "$root/$cargo_lock")" &&
+  [ -z "$(awk -v v="$V" '$2 != v' <<<"$got")" ] ||
   die "$cargo_lock: workspace members read '$(tr '\n' ' ' <<<"$got")' after stamping, want '$V'"
 
 echo "version: $V"

@@ -6,10 +6,19 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
-# T-099 red skeleton (test-writer): no dependencies and no loader yet. The implementation
-# adds exactly voicen-core and whisper-rs (default features) here (T-099 invariant 1;
-# tests/transcribe_wav.rs::direct_dependencies_are_voicen_core_and_whisper_rs).
+# The crate has no unit tests and no doctests: every test is an integration test in tests/*.rs,
+# the only targets build.rs gives the shell's C runtime (rustc-link-arg-tests; T-099 invariant 4,
+# docs/decisions/ci-toolchain.md). A lib test or doctest exe would link the dynamic VC runtime.
+[lib]
+test = false
+doctest = false
+
+# Exactly voicen-core and whisper-rs (default features: CPU only, no log backend) (T-099
+# invariant 1; tests/transcribe_wav.rs::direct_dependencies_are_voicen_core_and_whisper_rs).
+# The whisper.cpp build settings (CPU baseline, C runtime) live in .cargo/config.toml [env].
 [dependencies]
+voicen-core = { path = "../voicen-core" }
+whisper-rs = "0.16"
 
 [dev-dependencies]
 # tests/transcribe_wav.rs: the speech-model port, the catalog and the ModelStore.

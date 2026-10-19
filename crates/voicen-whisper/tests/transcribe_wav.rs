@@ -48,8 +48,10 @@ const SAMPLE_RATE: usize = 16_000;
 fn clip() -> Vec<f32> {
     assert_eq!(CLIP_S16LE.len() % 2, 0, "clip is not whole s16le samples");
     CLIP_S16LE
-        .chunks_exact(2)
-        .map(|b| f32::from(i16::from_le_bytes([b[0], b[1]])) / 32768.0)
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|&b| f32::from(i16::from_le_bytes(b)) / 32768.0)
         .collect()
 }
 

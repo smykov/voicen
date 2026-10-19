@@ -10,6 +10,7 @@ crates/voicen-core/src/clock.rs	#[allow(clippy::disallowed_methods)]
 crates/voicen-core/tests/common/mod.rs	#![allow(dead_code, clippy::disallowed_methods)]
 crates/voicen-core/Cargo.toml	[lints.clippy]
 Makefile	scripts/tw-run core -- 'cargo fmt --check -p voicen-core && cargo clippy -p voicen-core --all-targets -- -D warnings'
+Makefile	scripts/tw-run core -- 'cargo fmt --check -p voicen-whisper && DOCS_RS=1 cargo clippy -p voicen-whisper --all-targets -- -D warnings'
 Makefile	check-clippy-lines \
 Makefile	check-clippy-lines \
 Makefile	check-clippy-lines:

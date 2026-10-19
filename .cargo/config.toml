@@ -7,3 +7,37 @@
 # no NASM in the image): aws-lc-sys uses the same shipped objects there (T-056). The
 # native Linux build has no NASM step.
 AWS_LC_SYS_PREBUILT_NASM = "1"
+
+# whisper.cpp (whisper-rs-sys 0.15.0, crates/voicen-whisper; T-099). Its build script passes
+# every GGML_* / CMAKE_* variable to cmake as a -D define; force = true, so a variable of the
+# calling shell cannot change these. Proven on the build the CI job makes, not here:
+# scripts/ci/whisper-cmake-cache.sh reads the effective CMakeCache.txt, scripts/ci/crt-imports.sh
+# the exes' imports (docs/decisions/ci-toolchain.md).
+#
+# CPU baseline (decision #142): one static build that never depends on the build machine's CPU.
+# GGML_NATIVE=OFF stops ggml from detecting the CI runner's CPU; the four x86 options equal the
+# ggml defaults but are explicit, because a cross build or SOURCE_DATE_EPOCH turns those
+# defaults off (a build with no SIMD at all). CPUs without AVX2 are unsupported.
+GGML_NATIVE = { value = "OFF", force = true }
+GGML_SSE42 = { value = "ON", force = true }
+GGML_AVX = { value = "ON", force = true }
+GGML_AVX2 = { value = "ON", force = true }
+GGML_BMI2 = { value = "ON", force = true }
+# C runtime (T-099 invariant 4): whisper.cpp is compiled /MT (static vcruntime, libcmt, libcpmt),
+# the CRT of the shell (tauri-build static_vcruntime), so no exe imports MSVCP140 or
+# VCRUNTIME140. whisper.cpp's cmake_minimum_required leaves policy CMP0091 unset, so the
+# runtime setting needs the policy default. The flag values are given explicitly because
+# cmake-rs otherwise writes cc-rs's -MD into CMAKE_<LANG>_FLAGS and, for the Visual Studio
+# generator, into CMAKE_<LANG>_FLAGS_<BUILD TYPE>; once defined, cmake-rs adds nothing, so
+# they carry what it would add (-nologo, whisper-rs-sys's /utf-8) and CMake's MSVC defaults
+# (/DWIN32 /D_WINDOWS, /GR /EHsc for C++, the optimisation flags of the two build types
+# whisper-rs-sys uses). MSVC values: whisper.cpp builds for the MSVC target only (the Linux
+# gate type-checks voicen-whisper with DOCS_RS=1, which skips cmake).
+CMAKE_POLICY_DEFAULT_CMP0091 = { value = "NEW", force = true }
+CMAKE_MSVC_RUNTIME_LIBRARY = { value = "MultiThreaded", force = true }
+CMAKE_C_FLAGS = { value = "-nologo /DWIN32 /D_WINDOWS", force = true }
+CMAKE_CXX_FLAGS = { value = "-nologo /DWIN32 /D_WINDOWS /GR /EHsc /utf-8", force = true }
+CMAKE_C_FLAGS_RELEASE = { value = "/O2 /Ob2 /DNDEBUG", force = true }
+CMAKE_CXX_FLAGS_RELEASE = { value = "/O2 /Ob2 /DNDEBUG", force = true }
+CMAKE_C_FLAGS_RELWITHDEBINFO = { value = "/O2 /Ob1 /DNDEBUG", force = true }
+CMAKE_CXX_FLAGS_RELWITHDEBINFO = { value = "/O2 /Ob1 /DNDEBUG", force = true }

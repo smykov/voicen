@@ -1,0 +1,7 @@
+      - name: Save the tiny whisper model (main only)
+        if: ${{ github.ref == 'refs/heads/main' && steps.whisper-tiny.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ runner.temp }}/voicen-whisper-models
+          key: ${{ steps.whisper-tiny.outputs.cache-primary-key }}
+      - run: cargo test -p voicen --no-fail-fast

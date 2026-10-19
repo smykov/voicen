@@ -9,14 +9,17 @@
 #   naming the tag; V = X.Y.Z (the run number is not used).
 #   Otherwise V = <repo MAJOR>.<repo MINOR>.<run_number>, run_number [1-9][0-9]* and <= 65535,
 #   else exit 1 naming the value.
-#   Writes V into the three fields and the version of the two workspace members of
-#   <root>/Cargo.lock ([[package]] voicen and voicen-core, no source line), no other line; prints
+#   Writes V into the three fields and the version of every workspace member of
+#   <root>/Cargo.lock (each [[package]] without a source line; voicen and voicen-core must be
+#   among them, no member name twice, else exit 1; T-099), no other line; prints
 #   "version: V"; appends "VOICEN_VERSION=V" to $GITHUB_ENV when it is set. On exit 1 nothing is
 #   written (the tree and $GITHUB_ENV are byte-identical).
 # Cases: branch run 58 and 65535 on a fixture tree whose files carry decoy version lines (the
 # whole tree must equal the expected tree); tag v1.2.3 (run number ignored); GITHUB_ENV unset;
 # bad tags, bad repo versions, the three files disagreeing, bad run numbers (exit 1, the value
-# named, tree and GITHUB_ENV unchanged); a copy of the real repo's three files plus Cargo.lock.
+# named, tree and GITHUB_ENV unchanged); a third workspace member (stamped too); a member name
+# twice and a missing voicen-core (exit 1, nothing written); a copy of the real repo's three
+# files plus Cargo.lock (every member stamped).
 # Usage: scripts/ci/version-stamp.test.sh   (host bash, diff, awk)
 # Exit 0: every case as expected. Exit 1: a case differs (listed), or the script is missing.
 # Exit 3: cannot run.
@@ -223,6 +226,44 @@ for n in 5a 0x3A -1 0 058 65536 99999999999999999999; do
   done_case
 done
 
+# ---- the workspace members of Cargo.lock (T-099) -----------------------------------------
+
+# add_member <tree dir> <name> <version>: one more [[package]] without a source line.
+add_member() {
+  printf '\n[[package]]\nname = "%s"\nversion = "%s"\ndependencies = [\n "voicen-core",\n]\n' "$2" "$3" >> "$1/Cargo.lock"
+}
+
+mk_tree "$tmp/third" 0.1.0 0.1.0 0.1.0 0.1.0
+add_member "$tmp/third" voicen-whisper 0.1.0
+mk_tree "$tmp/want-third" 0.1.58 0.1.58 0.1.58 0.1.58
+add_member "$tmp/want-third" voicen-whisper 0.1.58
+run third-member branch main 58 "$tmp/third"
+want_rc 0; want_line 'version: 0.1.58'
+same_tree "$tmp/want-third" "$tmp/third" "the expected tree (the third member voicen-whisper stamped too)"
+env_is $'OTHER=keep\nVOICEN_VERSION=0.1.58'
+done_case
+
+# refused_lock <label> <how>: a tree whose Cargo.lock members are wrong; exit 1, nothing written.
+refused_lock() {
+  label="$1"; ok=1
+  rm -rf "$tmp/lock" "$tmp/lock-orig"
+  for d in "$tmp/lock" "$tmp/lock-orig"; do
+    mk_tree "$d" 0.1.0 0.1.0 0.1.0 0.1.0
+    case "$2" in
+      twice) add_member "$d" voicen-whisper 0.1.0; add_member "$d" voicen-whisper 0.1.0 ;;
+      no-core) awk '$0 == "name = \"voicen-core\"" { $0 = "name = \"voicen-other\"" } { print }' "$d/Cargo.lock" > "$d/lock" && mv "$d/lock" "$d/Cargo.lock" ;;
+    esac
+  done
+  run "$label" branch main 58 "$tmp/lock"
+  want_rc 1
+  names Cargo.lock "Cargo.lock"
+  same_tree "$tmp/lock-orig" "$tmp/lock" "the untouched tree"
+  env_is 'OTHER=keep'
+  done_case
+}
+refused_lock member-name-twice twice
+refused_lock no-voicen-core no-core
+
 # Fewer than three arguments: refused (non-zero), the current directory's tree unchanged.
 rm -rf "$tmp/usage" "$tmp/usage-orig"
 mk_tree "$tmp/usage" 0.1.0 0.1.0 0.1.0 0.1.0
@@ -245,16 +286,23 @@ mm="${repo_ver%.*}"
 run real-repo branch main 58 "$real"
 want_rc 0; want_line "version: $mm.58"
 env_is "OTHER=keep"$'\n'"VOICEN_VERSION=$mm.58"
-# exactly the version lines change: one per manifest, two in Cargo.lock, each to the new value
+# The workspace members of the real Cargo.lock: every [[package]] without a source line.
+members="$(awk '/^\[/{if (n != "" && !s) print n; n=""; s=0} /^name = /{n=$3; gsub(/"/, "", n)} /^source = /{s=1} END{if (n != "" && !s) print n}' Cargo.lock)"
+for pkg in voicen voicen-core voicen-whisper; do
+  grep -qxF -- "$pkg" <<<"$members" || fail "the real Cargo.lock has no workspace member $pkg"
+done
+n_members="$(grep -c . <<<"$members")"
+# exactly the version lines change: one per manifest, one per member in Cargo.lock, each to the
+# new value
 for f in Cargo.toml src-tauri/tauri.conf.json package.json Cargo.lock; do
-  want_n=1; [ "$f" = Cargo.lock ] && want_n=2
+  want_n=1; [ "$f" = Cargo.lock ] && want_n="$n_members"
   d="$(diff "$tmp/real-orig/$f" "$real/$f")"
   n_old="$(grep -c '^< ' <<<"$d")"; n_new="$(grep -c '^> ' <<<"$d")"
   [ "$n_old" = "$want_n" ] && [ "$n_new" = "$want_n" ] || fail "$f: $n_old line(s) removed, $n_new added, want $want_n each"
   ! grep '^> ' <<<"$d" | grep -vqE "^> *\"?version\"? *[=:] *\"$mm\.58\",?$" || fail "$f: a changed line is not the version $mm.58: $(grep '^> ' <<<"$d" | tr '\n' ' ')"
   ! grep '^< ' <<<"$d" | grep -vqE "^< *\"?version\"? *[=:] *\"$repo_ver\",?$" || fail "$f: a line other than version $repo_ver was replaced"
 done
-for pkg in voicen voicen-core; do
+for pkg in $members; do
   got="$(awk -v p="$pkg" '/^\[\[package\]\]/{n=""} /^name = /{n=$3} n=="\""p"\"" && /^version = /{print $3; exit}' "$real/Cargo.lock")"
   [ "$got" = "\"$mm.58\"" ] || fail "Cargo.lock [[package]] $pkg has version $got, want \"$mm.58\""
 done

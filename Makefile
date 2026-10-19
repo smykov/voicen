@@ -4,7 +4,7 @@
 	check-clippy-lines \
 	check-core-test-os-answer check-ci-wip check-telegram-send check-telegram-failure-branch \
 	check-version-stamp check-release-check check-release check-release-guard check-nsis-fork check-e2e-entry-fixtures \
-	check-whisper-cmake-cache check-crt-imports \
+	check-whisper-cmake-cache check-crt-imports check-whisper \
 	check-shell-windows check-ban-canary \
 	check-ui core-image ui-image \
 	licenses licenses-check licenses-unit licenses-fixture licenses-rust licenses-bundle \
@@ -14,7 +14,7 @@
 # error is reported first by the faster native check-core, before the slower runs.
 check: check-shell-layout check-shell-layout-fixtures check-helper-windows-fixtures check-ci-credentials \
 	check-clippy-lines \
-	check-core-test-os-answer check-ci-wip check-telegram-send check-telegram-failure-branch check-version-stamp check-release-check check-release check-release-guard check-nsis-fork check-whisper-cmake-cache check-crt-imports check-core \
+	check-core-test-os-answer check-ci-wip check-telegram-send check-telegram-failure-branch check-version-stamp check-release-check check-release check-release-guard check-nsis-fork check-whisper-cmake-cache check-crt-imports check-core check-whisper \
 	check-ban-canary check-shell-windows check-e2e-entry-fixtures check-ui \
 	licenses-check
 
@@ -176,6 +176,15 @@ check-crt-imports:
 check-core:
 	scripts/tw-run core -- 'cargo fmt --check -p voicen-core && cargo clippy -p voicen-core --all-targets -- -D warnings'
 	scripts/tw-run core -- cargo test -p voicen-core
+
+# Linux format and lint check of crates/voicen-whisper with -D warnings over every target (T-099;
+# docs/decisions/ci-toolchain.md "voicen-whisper on the Linux gate"). DOCS_RS=1, scoped to this
+# one invocation and never set in .cargo/config.toml, makes whisper-rs-sys skip its cmake build
+# of whisper.cpp (it generates or copies the bindings first): the lint never links, so it needs
+# no C++ toolchain for whisper.cpp. Building, linking and running the crate's tests stay the
+# windows job's (tests/transcribe_wav.rs, the CMakeCache and dumpbin steps).
+check-whisper:
+	scripts/tw-run core -- 'cargo fmt --check -p voicen-whisper && DOCS_RS=1 cargo clippy -p voicen-whisper --all-targets -- -D warnings'
 
 # Windows-target type check of the shell on Linux (T-056, decisions #63;
 # docs/decisions/ci-toolchain.md). First the lib and bin with the release feature set in the
