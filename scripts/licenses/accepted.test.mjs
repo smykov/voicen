@@ -117,6 +117,19 @@ const REFUSALS = {
   "trailing text after the closing bracket": ["accepted = [", '    "MIT",', "] # end"],
   "an indented closing bracket": ["accepted = [", '    "MIT",', "    ]"],
   "an unterminated list": ["accepted = [", '    "MIT",'],
+  // T-094 round 2: every exact-line comparison of the head refuses a prefix, trim or trimEnd
+  // match. Under a prefix match of `accepted = [` the first file reads ["MIT"], TOML reads
+  // ["GPL-3.0-only", "MIT"] (validation 1, M1).
+  "an id after the opening bracket": ['accepted = [ "GPL-3.0-only",', '    "MIT",', "]"],
+  "a comment after the opening bracket": ["accepted = [ # c", '    "MIT",', "]"],
+  "trailing whitespace after the opening bracket": ["accepted = [ ", '    "MIT",', "]"],
+  "leading whitespace before accepted": ["  accepted = [", '    "MIT",', "]"],
+  "trailing whitespace after the closing bracket": ["accepted = [", '    "MIT",', "] "],
+  "an indented header comment": ["  # header", ...HEAD.slice(1)],
+  "a header comment without a space after #": ["#header", ...HEAD.slice(1)],
+  "a list comment without a space after #": ["accepted = [", "    #comment", '    "MIT",', "]"],
+  "a list comment indented with two spaces": ["accepted = [", "  # comment", '    "MIT",', "]"],
+  "a list comment indented with a tab": ["accepted = [", "\t# comment", '    "MIT",', "]"],
 };
 
 for (const [name, lines] of Object.entries(REFUSALS)) {
