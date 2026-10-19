@@ -10,15 +10,21 @@
 #   - each REQUIRED line below occurs exactly once, byte for byte;
 #   - every line holding one of the TOKENS (whole word: not next to [A-Za-z0-9_]) is one of
 #     the OWNED lines below; anything else (another type, value or spelling, an ON) refuses.
-#     GGML_BACKEND_DL and GGML_CPU_ALL_VARIANTS may be absent or OFF; the two ggml option
-#     descriptions that name an option (whisper.cpp 1.8.3, whisper-rs-sys 0.15.0) are owned
-#     lines, so a new description holding a token is refused until it is reviewed and owned.
+#     GGML_BACKEND_DL and GGML_CPU_ALL_VARIANTS may be absent or OFF. CMake writes each cache
+#     entry as "//<help>" then "NAME:TYPE=VALUE"; the three ggml help texts that name a token
+#     (whisper.cpp 1.8.3, whisper-rs-sys 0.15.0, ggml/CMakeLists.txt: option GGML_BACKEND_DL,
+#     set(GGML_BACKEND_DIR ... CACHE PATH), option GGML_CPU_ALL_VARIANTS) are owned lines, byte
+#     for byte; the GGML_BACKEND_DIR help really lacks its closing ")". A new help text holding
+#     a token is refused until it is reviewed and owned. None of the six options is
+#     mark_as_advanced or has a STRINGS property in 0.15.0, so no "//ADVANCED property ..." /
+#     "NAME-ADVANCED:INTERNAL=1" line names one; such a line is refused, not owned.
 # GGML_FMA / GGML_F16C are not cache options on MSVC (option() only if NOT MSVC), so they are
 # not asserted. No CMakeCache.txt found is a refusal, never a pass.
 #
 # Usage: scripts/ci/whisper-cmake-cache.sh <target dir>
 # Exit 0: "whisper-cmake-cache: ok: <n> CMakeCache.txt checked". Exit 1: one
-# "::error::<file>:<line>: ..." per violation (or none found). Exit 2: wrong usage.
+# "::error::<file>:<line>: ..." per violation, ending "line text [<the line, CR removed>]"
+# for an unowned line (a cache holds no secret), or none found. Exit 2: wrong usage.
 # Host-tested by scripts/ci/whisper-cmake-cache.test.sh (make check-whisper-cmake-cache).
 set -uo pipefail
 if [ "$#" != 1 ] || [ -z "$1" ]; then
@@ -43,6 +49,7 @@ OWNED=(
   "GGML_CPU_ALL_VARIANTS:BOOL=OFF"
   "//ggml: build backends as dynamic libraries (requires BUILD_SHARED_LIBS)"
   "//ggml: build all variants of the CPU backend (requires GGML_BACKEND_DL)"
+  "//ggml: directory to load dynamic backends from (requires GGML_BACKEND_DL"
 )
 TOKENS=(GGML_NATIVE GGML_AVX2 GGML_AVX512 BUILD_SHARED_LIBS GGML_BACKEND_DL GGML_CPU_ALL_VARIANTS)
 
@@ -78,7 +85,7 @@ for f in "${caches[@]}"; do
     done
     for t in "${TOKENS[@]}"; do
       if [[ "$line" =~ (^|[^A-Za-z0-9_])${t}($|[^A-Za-z0-9_]) ]] && ! is_owned "$line"; then
-        echo "::error::$f:$n: $t: a line that is not an owned line (want ${REQUIRED[*]}; GGML_BACKEND_DL / GGML_CPU_ALL_VARIANTS absent or OFF)"
+        echo "::error::$f:$n: $t: a line that is not an owned line (want ${REQUIRED[*]}; GGML_BACKEND_DL / GGML_CPU_ALL_VARIANTS absent or OFF): line text [$line]"
         bad=1
         break
       fi

@@ -22,7 +22,13 @@
 #   indented       a leading blank before GGML_BACKEND_DL:BOOL=ON -> exit 1;
 #   duplicate      GGML_NATIVE:BOOL=OFF twice -> exit 1;
 #   one-bad        debug good, release with GGML_NATIVE:BOOL=ON -> exit 1 naming the release file;
-#   new-desc       an unowned description naming GGML_BACKEND_DL -> exit 1;
+#   new-desc       an unowned description naming GGML_BACKEND_DL -> exit 1, the line text printed;
+#   absent-dir     good without the GGML_BACKEND_DIR help and entry -> exit 0;
+#   dir-closed     the GGML_BACKEND_DIR help with a closing ")" (not cmake's text) -> exit 1;
+#   dir-indented   the GGML_BACKEND_DIR help with a leading blank -> exit 1;
+#   dir-trailing   the GGML_BACKEND_DIR help with a trailing blank -> exit 1;
+#   advanced       an extra "GGML_BACKEND_DL-ADVANCED:INTERNAL=1" line -> exit 1;
+#   line-text      GGML_BACKEND_DL:BOOL=ON -> the error ends with "line text [GGML_BACKEND_DL:BOOL=ON]";
 #   usage          no argument, two arguments -> exit 2.
 # Usage: scripts/ci/whisper-cmake-cache.test.sh   (host bash)
 # Exit 0: every case as expected. Exit 1: a case differs (listed). Exit 3: cannot run.
@@ -63,6 +69,9 @@ GGML_AVX512:BOOL=OFF
 
 //ggml: enable AVX512-VBMI
 GGML_AVX512_VBMI:BOOL=OFF
+
+//ggml: directory to load dynamic backends from (requires GGML_BACKEND_DL
+GGML_BACKEND_DIR:PATH=
 
 //ggml: build backends as dynamic libraries (requires BUILD_SHARED_LIBS)
 GGML_BACKEND_DL:BOOL=OFF
@@ -143,7 +152,16 @@ refuse dl-on "$(swap GGML_BACKEND_DL:BOOL=OFF GGML_BACKEND_DL:BOOL=ON)" 'GGML_BA
 refuse variants-on "$(swap GGML_CPU_ALL_VARIANTS:BOOL=OFF GGML_CPU_ALL_VARIANTS:BOOL=ON)" 'GGML_CPU_ALL_VARIANTS'
 refuse indented "$(swap GGML_BACKEND_DL:BOOL=OFF '  GGML_BACKEND_DL:BOOL=ON')" 'GGML_BACKEND_DL'
 refuse duplicate "$(printf '%s\nGGML_NATIVE:BOOL=OFF' "$g")" 'GGML_NATIVE:BOOL=OFF occurs 2 time'
-refuse new-desc "$(printf '%s\n//ggml: new text naming GGML_BACKEND_DL' "$g")" 'GGML_BACKEND_DL'
+refuse new-desc "$(printf '%s\n//ggml: new text naming GGML_BACKEND_DL' "$g")" 'GGML_BACKEND_DL: .*line text \[//ggml: new text naming GGML_BACKEND_DL\]$'
+dir_help='//ggml: directory to load dynamic backends from (requires GGML_BACKEND_DL'
+refuse dir-closed "$(swap "$dir_help" "$dir_help)")" 'line text \[//ggml: directory to load dynamic backends from \(requires GGML_BACKEND_DL\)\]$'
+refuse dir-indented "$(swap "$dir_help" " $dir_help")" 'GGML_BACKEND_DL: a line that is not an owned line'
+refuse dir-trailing "$(swap "$dir_help" "$dir_help ")" 'GGML_BACKEND_DL: a line that is not an owned line'
+refuse advanced "$(printf '%s\nGGML_BACKEND_DL-ADVANCED:INTERNAL=1' "$g")" 'line text \[GGML_BACKEND_DL-ADVANCED:INTERNAL=1\]$'
+refuse line-text "$(swap GGML_BACKEND_DL:BOOL=OFF GGML_BACKEND_DL:BOOL=ON)" ':[0-9]+: GGML_BACKEND_DL: a line that is not an owned line .*: line text \[GGML_BACKEND_DL:BOOL=ON\]$'
+
+run absent-dir "$(tree absent-dir "$(drop "$dir_help" | awk '$0 != "GGML_BACKEND_DIR:PATH="')")"
+want_rc 0; has 'ok: 1 CMakeCache.txt'; lacks '::error::'; done_case
 
 run avx512-sub "$(tree avx512-sub "$(swap GGML_AVX512_VBMI:BOOL=OFF GGML_AVX512_VBMI:BOOL=ON)")"
 want_rc 0; done_case
