@@ -2,7 +2,8 @@
 # T-099: host test of scripts/ci/whisper-cmake-cache.sh, the windows job's verdict on every
 # whisper-rs-sys CMakeCache.txt under target/ (decisions #142, invariant 3), on fixture trees
 # built in a temp dir (offline). Cases:
-#   good           debug + release caches with the #142 lines -> exit 0, "2 CMakeCache.txt";
+#   good           debug + release caches with the #142 lines (GGML_AVX_VNNI:BOOL=OFF and its
+#                  help line included) -> exit 0, "2 CMakeCache.txt";
 #   crlf           the good cache with CRLF line ends -> exit 0;
 #   absent-dl      good without GGML_BACKEND_DL / GGML_CPU_ALL_VARIANTS entries -> exit 0;
 #   none           no CMakeCache.txt at all -> exit 1;
@@ -16,6 +17,17 @@
 #   avx2-both      the good cache plus a second, unowned GGML_AVX2:BOOL=OFF line -> exit 1;
 #   avx512-on      GGML_AVX512:BOOL=ON -> exit 1 naming GGML_AVX512;
 #   avx512-sub     an extra GGML_AVX512_VBMI:BOOL=ON line -> exit 0 (another option, whole word);
+#   (T-099 review 1 finding 3: GGML_AVX_VNNI adds __AVXVNNI__ outside the AVX2 baseline on MSVC,
+#   outside the AVX512 chain; its option() is unconditional in whisper-rs-sys 0.15.0, so the
+#   cache always holds it and its help text "ggml: enable AVX-VNNI" names no token)
+#   avx-vnni-on      GGML_AVX_VNNI:BOOL=ON -> exit 1 naming GGML_AVX_VNNI;
+#   avx-vnni-absent  no GGML_AVX_VNNI entry -> exit 1 (refused, not allowed: the option always
+#                    reaches the cache, so absence means an unreviewed whisper.cpp);
+#   avx-vnni-uninit  GGML_AVX_VNNI:UNINITIALIZED=ON (a -D that no option() typed) -> exit 1;
+#   avx-vnni-both    the good cache plus a second, unowned GGML_AVX_VNNI:BOOL=ON line -> exit 1;
+#   avx-vnni-dup     GGML_AVX_VNNI:BOOL=OFF twice -> exit 1;
+#   avx512-vnni      an extra GGML_AVX512_VNNI:BOOL=ON line -> exit 0 (another option, gated by
+#                    GGML_AVX512, which is asserted OFF);
 #   shared-on      BUILD_SHARED_LIBS:BOOL=ON -> exit 1;
 #   dl-on          GGML_BACKEND_DL:BOOL=ON -> exit 1;
 #   variants-on    GGML_CPU_ALL_VARIANTS:BOOL=ON -> exit 1;
@@ -69,6 +81,9 @@ GGML_AVX512:BOOL=OFF
 
 //ggml: enable AVX512-VBMI
 GGML_AVX512_VBMI:BOOL=OFF
+
+//ggml: enable AVX-VNNI
+GGML_AVX_VNNI:BOOL=OFF
 
 //ggml: directory to load dynamic backends from (requires GGML_BACKEND_DL
 GGML_BACKEND_DIR:PATH=
@@ -158,6 +173,11 @@ refuse dir-closed "$(swap "$dir_help" "$dir_help)")" 'line text \[//ggml: direct
 refuse dir-indented "$(swap "$dir_help" " $dir_help")" 'GGML_BACKEND_DL: a line that is not an owned line'
 refuse dir-trailing "$(swap "$dir_help" "$dir_help ")" 'GGML_BACKEND_DL: a line that is not an owned line'
 refuse advanced "$(printf '%s\nGGML_BACKEND_DL-ADVANCED:INTERNAL=1' "$g")" 'line text \[GGML_BACKEND_DL-ADVANCED:INTERNAL=1\]$'
+refuse avx-vnni-on "$(swap GGML_AVX_VNNI:BOOL=OFF GGML_AVX_VNNI:BOOL=ON)" 'GGML_AVX_VNNI: a line that is not an owned line .*line text \[GGML_AVX_VNNI:BOOL=ON\]$'
+refuse avx-vnni-absent "$(drop GGML_AVX_VNNI:BOOL=OFF)" 'GGML_AVX_VNNI:BOOL=OFF occurs 0 time'
+refuse avx-vnni-uninit "$(swap GGML_AVX_VNNI:BOOL=OFF GGML_AVX_VNNI:UNINITIALIZED=ON)" 'GGML_AVX_VNNI: a line that is not an owned line'
+refuse avx-vnni-both "$(printf '%s\nGGML_AVX_VNNI:BOOL=ON' "$g")" 'GGML_AVX_VNNI: a line that is not an owned line'
+refuse avx-vnni-dup "$(printf '%s\nGGML_AVX_VNNI:BOOL=OFF' "$g")" 'GGML_AVX_VNNI:BOOL=OFF occurs 2 time'
 refuse line-text "$(swap GGML_BACKEND_DL:BOOL=OFF GGML_BACKEND_DL:BOOL=ON)" ':[0-9]+: GGML_BACKEND_DL: a line that is not an owned line .*: line text \[GGML_BACKEND_DL:BOOL=ON\]$'
 
 run absent-dir "$(tree absent-dir "$(drop "$dir_help" | awk '$0 != "GGML_BACKEND_DIR:PATH="')")"
@@ -165,6 +185,9 @@ want_rc 0; has 'ok: 1 CMakeCache.txt'; lacks '::error::'; done_case
 
 run avx512-sub "$(tree avx512-sub "$(swap GGML_AVX512_VBMI:BOOL=OFF GGML_AVX512_VBMI:BOOL=ON)")"
 want_rc 0; done_case
+
+run avx512-vnni "$(tree avx512-vnni "$(printf '%s\nGGML_AVX512_VNNI:BOOL=ON' "$g")")"
+want_rc 0; lacks '::error::'; done_case
 
 run one-bad "$(tree one-bad "$g" "$(swap GGML_NATIVE:BOOL=OFF GGML_NATIVE:BOOL=ON)")"
 want_rc 1; has 'release/build/whisper-rs-sys-fedcba9876543210/out/build/CMakeCache.txt'

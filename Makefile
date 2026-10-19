@@ -4,7 +4,7 @@
 	check-clippy-lines \
 	check-core-test-os-answer check-ci-wip check-telegram-send check-telegram-failure-branch \
 	check-version-stamp check-release-check check-release check-release-guard check-nsis-fork check-e2e-entry-fixtures \
-	check-whisper-cmake-cache check-crt-imports check-whisper \
+	check-whisper-cmake-cache check-whisper-model-key check-crt-imports check-whisper \
 	check-shell-windows check-ban-canary \
 	check-ui core-image ui-image \
 	licenses licenses-check licenses-unit licenses-fixture licenses-rust licenses-bundle \
@@ -14,7 +14,7 @@
 # error is reported first by the faster native check-core, before the slower runs.
 check: check-shell-layout check-shell-layout-fixtures check-helper-windows-fixtures check-ci-credentials \
 	check-clippy-lines \
-	check-core-test-os-answer check-ci-wip check-telegram-send check-telegram-failure-branch check-version-stamp check-release-check check-release check-release-guard check-nsis-fork check-whisper-cmake-cache check-crt-imports check-core check-whisper \
+	check-core-test-os-answer check-ci-wip check-telegram-send check-telegram-failure-branch check-version-stamp check-release-check check-release check-release-guard check-nsis-fork check-whisper-cmake-cache check-whisper-model-key check-crt-imports check-core check-whisper \
 	check-ban-canary check-shell-windows check-e2e-entry-fixtures check-ui \
 	licenses-check
 
@@ -165,6 +165,12 @@ check-e2e-entry-fixtures:
 # offline. Host bash.
 check-whisper-cmake-cache:
 	scripts/ci/whisper-cmake-cache.test.sh
+
+# T-099 (review 1 finding 2, P-010): the windows job's tiny-model cache key is derived from the
+# catalog (hashFiles of crates/voicen-core/src/local_models/catalog.rs, no restore-keys), and
+# ci.yml repeats no commit or SHA-256 of the catalog. Raw lines of ci.yml and catalog.rs. Host bash.
+check-whisper-model-key:
+	scripts/ci/whisper-model-key.test.sh
 
 # T-099 (invariant 4, F-001 class): scripts/ci/crt-imports.sh, the windows job's verdict on the
 # C runtime of every exe linking whisper.cpp (decides_on: token), refuses an exe whose dumpbin
