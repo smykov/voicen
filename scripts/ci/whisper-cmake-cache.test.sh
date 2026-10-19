@@ -53,6 +53,28 @@
 #   shared-dup       BUILD_SHARED_LIBS:BOOL=OFF twice -> exit 1, "occurs 2 time";
 #   shared-both      the good cache plus a second, unowned BUILD_SHARED_LIBS:BOOL=ON line -> exit 1;
 #   native-both      the good cache plus a second, unowned GGML_NATIVE:BOOL=ON line -> exit 1.
+#   (T-099 validation 2, mutation F1 (V2-F1): the verdict of every cache counts, not only the
+#   last one find lists. find's order is the filesystem's, so the bad cache is put in each
+#   position by a pair of cases: one-bad (bad release) and one-bad-first (bad debug). Both trees
+#   have the same directory names, so whichever of debug/ and release/ find lists first, one of
+#   the two cases has its bad cache first. The line numbers pin the per-cache line counter.)
+#   one-bad-first    debug with GGML_NATIVE:BOOL=ON, release good -> exit 1, the debug file named
+#                    at line 33, the release file not named, no "ok:";
+#   one-bad-line     debug good, release with GGML_NATIVE:BOOL=ON -> the release file at line 33;
+#   both-bad         debug GGML_NATIVE:BOOL=ON, release GGML_BACKEND_DL:BOOL=ON -> exit 1, both
+#                    files named, 3 errors (every cache is read to its end);
+#   three-caches     good debug, bad release, good third cache -> exit 1, no "ok:";
+#   mixed-crate      a good whisper-rs-sys cache plus another crate's cache with GGML_NATIVE:BOOL=ON
+#                    -> exit 0, "ok: 1 CMakeCache.txt" (only whisper-rs-sys caches are read and counted);
+#   two-errors       GGML_NATIVE:BOOL=ON and an extra GGML_BACKEND_DL:BOOL=ON in one cache -> 3 errors
+#                    (both lines and the GGML_NATIVE:BOOL=OFF count);
+#   multi-absent     no GGML_NATIVE and no GGML_AVX2 entry -> both "occurs 0 time" errors;
+#   empty-cache      a zero-byte whisper-rs-sys CMakeCache.txt -> exit 1, 5 "occurs 0 time" errors;
+#   no-eol-bad       an unowned last line GGML_BACKEND_DL:BOOL=ON without a final newline -> exit 1;
+#   no-eol-good      the good cache whose last line GGML_NATIVE:BOOL=OFF has no final newline -> exit 0;
+#   crlf-bad         the CRLF cache with GGML_NATIVE:BOOL=ON -> exit 1 (CR removal hides nothing);
+#   crlf-double      GGML_NATIVE:BOOL=OFF followed by two CRs -> exit 1 (only one CR is removed);
+#   dir-named-cache  a directory named CMakeCache.txt under whisper-rs-sys only -> exit 1, none found.
 # Usage: scripts/ci/whisper-cmake-cache.test.sh   (host bash)
 # Exit 0: every case as expected. Exit 1: a case differs (listed). Exit 3: cannot run.
 set -uo pipefail
@@ -212,6 +234,69 @@ want_rc 0; lacks '::error::'; done_case
 run one-bad "$(tree one-bad "$g" "$(swap GGML_NATIVE:BOOL=OFF GGML_NATIVE:BOOL=ON)")"
 want_rc 1; has 'release/build/whisper-rs-sys-fedcba9876543210/out/build/CMakeCache.txt'
 lacks 'debug/build/whisper-rs-sys-0123456789abcdef/out/build/CMakeCache.txt'; done_case
+
+# nerr <n>: the output holds exactly n "::error::" lines.
+nerr() { local c; c="$(grep -c '^::error::' <<<"$out")"; [ "$c" = "$1" ] || fail "$c error line(s), want $1"; }
+dbg='debug/build/whisper-rs-sys-0123456789abcdef/out/build/CMakeCache\.txt'
+rel='release/build/whisper-rs-sys-fedcba9876543210/out/build/CMakeCache\.txt'
+native_on="$(swap GGML_NATIVE:BOOL=OFF GGML_NATIVE:BOOL=ON)"
+
+run one-bad-first "$(tree one-bad-first "$native_on" "$g")"
+want_rc 1; has "$dbg:33: GGML_NATIVE: a line that is not an owned line"; lacks "$rel"; lacks ': ok:'; nerr 2; done_case
+
+run one-bad-line "$(tree one-bad-line "$g" "$native_on")"
+want_rc 1; has "$rel:33: GGML_NATIVE: a line that is not an owned line"; lacks "$dbg"; lacks ': ok:'; nerr 2; done_case
+
+run both-bad "$(tree both-bad "$native_on" "$(swap GGML_BACKEND_DL:BOOL=OFF GGML_BACKEND_DL:BOOL=ON)")"
+want_rc 1; has "$dbg:33: GGML_NATIVE"; has "$dbg: the line GGML_NATIVE:BOOL=OFF occurs 0 time"
+has "$rel:27: GGML_BACKEND_DL: a line that is not an owned line"; lacks ': ok:'; nerr 3; done_case
+
+t="$(tree three-caches "$g" "$native_on")"
+mkdir -p "$t/x86_64-pc-windows-msvc/release/build/whisper-rs-sys-00112233aabbccdd/out/build"
+printf '%s\n' "$g" > "$t/x86_64-pc-windows-msvc/release/build/whisper-rs-sys-00112233aabbccdd/out/build/CMakeCache.txt"
+run three-caches "$t"
+want_rc 1; has "$rel:33: GGML_NATIVE"; lacks 'x86_64-pc-windows-msvc'; lacks ': ok:'; nerr 2; done_case
+
+t="$(tree mixed-crate "$g")"; mkdir -p "$t/debug/build/aws-lc-sys-1/out/build"
+printf '%s\n' "$native_on" > "$t/debug/build/aws-lc-sys-1/out/build/CMakeCache.txt"
+run mixed-crate "$t"
+want_rc 0; has '^whisper-cmake-cache: ok: 1 CMakeCache.txt checked$'; lacks '::error::'; done_case
+
+run two-errors "$(tree two-errors "$(printf '%s\nGGML_BACKEND_DL:BOOL=ON' "$native_on")")"
+want_rc 1; has ':33: GGML_NATIVE: a line'; has ':4[0-9]: GGML_BACKEND_DL: a line .*line text \[GGML_BACKEND_DL:BOOL=ON\]$'
+has 'GGML_NATIVE:BOOL=OFF occurs 0 time'; lacks ': ok:'; nerr 3; done_case
+
+run multi-absent "$(tree multi-absent "$(drop GGML_NATIVE:BOOL=OFF | awk '$0 != "GGML_AVX2:BOOL=ON"')")"
+want_rc 1; has 'GGML_NATIVE:BOOL=OFF occurs 0 time'; has 'GGML_AVX2:BOOL=ON occurs 0 time'; lacks ': ok:'; nerr 2; done_case
+
+t="$(tree empty-cache -)"; mkdir -p "$t/debug/build/whisper-rs-sys-1/out/build"
+: > "$t/debug/build/whisper-rs-sys-1/out/build/CMakeCache.txt"
+run empty-cache "$t"
+want_rc 1; has 'occurs 0 time'; lacks ': ok:'; nerr 5; done_case
+
+t="$(tree no-eol-bad -)"; mkdir -p "$t/debug/build/whisper-rs-sys-1/out/build"
+printf '%s\nGGML_BACKEND_DL:BOOL=ON' "$g" > "$t/debug/build/whisper-rs-sys-1/out/build/CMakeCache.txt"
+run no-eol-bad "$t"
+want_rc 1; has 'GGML_BACKEND_DL: a line .*line text \[GGML_BACKEND_DL:BOOL=ON\]$'; lacks ': ok:'; done_case
+
+t="$(tree no-eol-good -)"; mkdir -p "$t/debug/build/whisper-rs-sys-1/out/build"
+printf '%s\nGGML_NATIVE:BOOL=OFF' "$(drop GGML_NATIVE:BOOL=OFF)" > "$t/debug/build/whisper-rs-sys-1/out/build/CMakeCache.txt"
+run no-eol-good "$t"
+want_rc 0; has 'ok: 1 CMakeCache.txt'; lacks '::error::'; done_case
+
+t="$(tree crlf-bad -)"; mkdir -p "$t/debug/build/whisper-rs-sys-1/out/build"
+sed 's/$/\r/' <<<"$native_on" > "$t/debug/build/whisper-rs-sys-1/out/build/CMakeCache.txt"
+run crlf-bad "$t"
+want_rc 1; has ':33: GGML_NATIVE: a line'; lacks ': ok:'; done_case
+
+t="$(tree crlf-double -)"; mkdir -p "$t/debug/build/whisper-rs-sys-1/out/build"
+sed 's/^GGML_NATIVE:BOOL=OFF$/&\r\r/' <<<"$g" > "$t/debug/build/whisper-rs-sys-1/out/build/CMakeCache.txt"
+run crlf-double "$t"
+want_rc 1; has ':33: GGML_NATIVE: a line that is not an owned line'; lacks ': ok:'; done_case
+
+t="$(tree dir-named-cache -)"; mkdir -p "$t/debug/build/whisper-rs-sys-1/out/build/CMakeCache.txt"
+run dir-named-cache "$t"
+want_rc 1; has '^::error::whisper-cmake-cache: no whisper-rs-sys CMakeCache.txt'; lacks ': ok:'; nerr 1; done_case
 
 run usage-none
 want_rc 2; done_case
