@@ -187,7 +187,7 @@ test("the repo's Cargo.lock has no sourceless package outside the workspace memb
   const { pathCratesOutsideWorkspace, workspaceMemberNames } = await import(WORKSPACE);
   const root = fileURLToPath(new URL("../../", import.meta.url));
   const names = workspaceMemberNames(root);
-  assert.deepEqual([...names].sort(), ["voicen", "voicen-core"]);
+  assert.deepEqual([...names].sort(), ["voicen", "voicen-core", "voicen-whisper"]);
   assert.deepEqual(pathCratesOutsideWorkspace(readFileSync(join(root, "Cargo.lock"), "utf8"), names), []);
 });
 

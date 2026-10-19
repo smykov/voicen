@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/voicen-core", "src-tauri"]
+members = ["crates/voicen-core", "crates/voicen-whisper", "src-tauri"]
 resolver = "2"
 
 [workspace.package]

@@ -4829,6 +4829,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "voicen-whisper"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "sha2",
+ "voicen-core",
+]
+
+[[package]]
 name = "vswhom"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

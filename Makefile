@@ -4,6 +4,7 @@
 	check-clippy-lines \
 	check-core-test-os-answer check-ci-wip check-telegram-send check-telegram-failure-branch \
 	check-version-stamp check-release-check check-release check-release-guard check-nsis-fork check-e2e-entry-fixtures \
+	check-whisper-cmake-cache check-crt-imports \
 	check-shell-windows check-ban-canary \
 	check-ui core-image ui-image \
 	licenses licenses-check licenses-unit licenses-fixture licenses-rust licenses-bundle \
@@ -13,7 +14,7 @@
 # error is reported first by the faster native check-core, before the slower runs.
 check: check-shell-layout check-shell-layout-fixtures check-helper-windows-fixtures check-ci-credentials \
 	check-clippy-lines \
-	check-core-test-os-answer check-ci-wip check-telegram-send check-telegram-failure-branch check-version-stamp check-release-check check-release check-release-guard check-nsis-fork check-core \
+	check-core-test-os-answer check-ci-wip check-telegram-send check-telegram-failure-branch check-version-stamp check-release-check check-release check-release-guard check-nsis-fork check-whisper-cmake-cache check-crt-imports check-core \
 	check-ban-canary check-shell-windows check-e2e-entry-fixtures check-ui \
 	licenses-check
 
@@ -155,6 +156,22 @@ check-nsis-fork:
 # fake docker and fake Playwright CLIs. Host bash, python3, node.
 check-e2e-entry-fixtures:
 	scripts/ci/e2e-entry.test.sh
+
+# T-099 (decisions #142, invariant 3): scripts/ci/whisper-cmake-cache.sh, the windows job's
+# verdict on every whisper-rs-sys CMakeCache.txt under target/ (decides_on: token + literal),
+# passes only when each holds GGML_NATIVE:BOOL=OFF, GGML_AVX2:BOOL=ON, GGML_AVX512:BOOL=OFF and
+# BUILD_SHARED_LIBS:BOOL=OFF exactly once and every line naming one of those options or
+# GGML_BACKEND_DL / GGML_CPU_ALL_VARIANTS is an owned line; no cache found is red. Fixture trees,
+# offline. Host bash.
+check-whisper-cmake-cache:
+	scripts/ci/whisper-cmake-cache.test.sh
+
+# T-099 (invariant 4, F-001 class): scripts/ci/crt-imports.sh, the windows job's verdict on the
+# C runtime of every exe linking whisper.cpp (decides_on: token), refuses an exe whose dumpbin
+# -dependents output holds MSVCP140 or VCRUNTIME140, a missing exe and an empty or failed dump.
+# Stub dumpbin, offline. Host bash.
+check-crt-imports:
+	scripts/ci/crt-imports.test.sh
 
 check-core:
 	scripts/tw-run core -- 'cargo fmt --check -p voicen-core && cargo clippy -p voicen-core --all-targets -- -D warnings'

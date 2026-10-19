@@ -1,0 +1,20 @@
+[package]
+name = "voicen-whisper"
+description = "Built-in engine of Voicen: whisper.cpp through whisper-rs behind voicen-core's SpeechModelLoader"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+# T-099 red skeleton (test-writer): no dependencies and no loader yet. The implementation
+# adds exactly voicen-core and whisper-rs (default features) here (T-099 invariant 1;
+# tests/transcribe_wav.rs::direct_dependencies_are_voicen_core_and_whisper_rs).
+[dependencies]
+
+[dev-dependencies]
+# tests/transcribe_wav.rs: the speech-model port, the catalog and the ModelStore.
+voicen-core = { path = "../voicen-core" }
+# tests/transcribe_wav.rs: `cargo metadata` JSON of this package.
+serde_json = "1"
+# tests/transcribe_wav.rs: SHA-256 of the cached tiny model against the pinned catalog value.
+sha2 = "0.10"
