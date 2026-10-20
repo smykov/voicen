@@ -20,6 +20,48 @@
     "note": "About 1 s of English speech sent by \"Test connection\" (T-046, decision #59), embedded in the app. Recorded by Vealhurl for Lingua Libre and published on Wikimedia Commons under Creative Commons Zero (Public Domain Dedication). Converted from the 48 kHz mono WAV to raw 16 kHz mono signed 16-bit little-endian PCM (low-pass and decimation, nothing else) as crates/voicen-core/assets/connection-test-speech.s16le."
   },
   {
+    "name": "Speech test clip (Indonesian phrase by Czechcamp)",
+    "license": "CC0-1.0",
+    "url": "https://commons.wikimedia.org/wiki/File:I_need_something_for_a_cough.wav",
+    "note": "Test clip of the FR-12 speech-detector check (T-043, decision #59); not shipped. \"I need something for a cough.wav\" by Czechcamp (own work), published on Wikimedia Commons under Creative Commons Zero (Public Domain Dedication). Converted with ffmpeg to raw 16 kHz mono signed 16-bit little-endian PCM, the whole 2.7 s, as crates/voicen-whisper/tests/clips/speech-id-phrase.s16le."
+  },
+  {
+    "name": "Speech test clip (Lingua Libre, \"Аэрофлот\" by Svetlov Artem)",
+    "license": "CC0-1.0",
+    "url": "https://commons.wikimedia.org/wiki/File:LL-Q7737_(rus)-Svetlov_Artem-%D0%90%D1%8D%D1%80%D0%BE%D1%84%D0%BB%D0%BE%D1%82.wav",
+    "note": "Test clip of the FR-12 speech-detector check (T-043, decision #59); not shipped. \"LL-Q7737 (rus)-Svetlov Artem-Аэрофлот.wav\" by Svetlov Artem for Lingua Libre, published on Wikimedia Commons under Creative Commons Zero (Public Domain Dedication). Converted with ffmpeg to raw 16 kHz mono signed 16-bit little-endian PCM, the whole 1.3 s, as crates/voicen-whisper/tests/clips/speech-ru-lingualibre.s16le."
+  },
+  {
+    "name": "Cough test clip (\"Woman coughing three times\" by Ashe Kirk)",
+    "license": "CC0-1.0",
+    "url": "https://commons.wikimedia.org/wiki/File:Woman_coughing_three_times.wav",
+    "note": "Test clip of the FR-12 speech-detector check (T-043, decision #59); not shipped. \"Woman coughing three times.wav\" by Ashe Kirk (OwlStorm) (Freesound 151212, \"Cough (2)\"), published on Wikimedia Commons under Creative Commons Zero (Public Domain Dedication). Converted with ffmpeg to raw 16 kHz mono signed 16-bit little-endian PCM, the whole 1.6 s, as crates/voicen-whisper/tests/clips/cough-woman.s16le."
+  },
+  {
+    "name": "Cough test clip (\"Langes husten durch Zigaretten (Künstlich)\" by KnorkFox74)",
+    "license": "CC0-1.0",
+    "url": "https://commons.wikimedia.org/wiki/File:Langes_husten_durch_Zigaretten_(K%C3%BCnstlich).ogg",
+    "note": "Test clip of the FR-12 speech-detector check (T-043, decision #59); not shipped. \"Langes husten durch Zigaretten (Künstlich).ogg\" by KnorkFox74 (own work), published on Wikimedia Commons under Creative Commons Zero (Public Domain Dedication). Converted with ffmpeg to raw 16 kHz mono signed 16-bit little-endian PCM, the excerpt 0.5-4.5 s, as crates/voicen-whisper/tests/clips/cough-smoker.s16le."
+  },
+  {
+    "name": "Keyboard test clip (\"Typing - Model M 1986\" by Raymangold22)",
+    "license": "CC0-1.0",
+    "url": "https://commons.wikimedia.org/wiki/File:Typing_-_Model_M_1986.ogg",
+    "note": "Test clip of the FR-12 speech-detector check (T-043, decision #59); not shipped. \"Typing - Model M 1986.ogg\" by Raymangold22 (own work), published on Wikimedia Commons under Creative Commons Zero (Public Domain Dedication). Converted with ffmpeg to raw 16 kHz mono signed 16-bit little-endian PCM, the excerpt 0-3 s, as crates/voicen-whisper/tests/clips/keyboard-model-m.s16le."
+  },
+  {
+    "name": "Keyboard test clip (\"Soft laptop keyboard-wxA-2\" by Mrakash1)",
+    "license": "CC0-1.0",
+    "url": "https://commons.wikimedia.org/wiki/File:Soft_laptop_keyboard-wxA-2.wav",
+    "note": "Test clip of the FR-12 speech-detector check (T-043, decision #59); not shipped. \"Soft laptop keyboard-wxA-2.wav\" by Mrakash1 (own work), published on Wikimedia Commons under Creative Commons Zero (Public Domain Dedication). Converted with ffmpeg to raw 16 kHz mono signed 16-bit little-endian PCM, the excerpt 0-3 s, as crates/voicen-whisper/tests/clips/keyboard-soft-laptop.s16le."
+  },
+  {
+    "name": "Room-tone test clip (\"Resident air-conditioned out door unit\" by Ranch9613)",
+    "license": "CC0-1.0",
+    "url": "https://commons.wikimedia.org/wiki/File:Resident_air-conditioned_out_door_unit.ogg",
+    "note": "Test clip of the FR-12 speech-detector check (T-043, decision #59); not shipped. \"Resident air-conditioned out door unit.ogg\" by Ranch9613 (own work), published on Wikimedia Commons under Creative Commons Zero (Public Domain Dedication). Converted with ffmpeg to raw 16 kHz mono signed 16-bit little-endian PCM, the excerpt 0-3 s, as crates/voicen-whisper/tests/clips/room-tone-ac-unit.s16le."
+  },
+  {
     "name": "Whisper ggml models (OpenAI Whisper weights)",
     "license": "MIT",
     "url": "https://huggingface.co/ggerganov/whisper.cpp",
