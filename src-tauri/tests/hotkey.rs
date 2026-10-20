@@ -31,7 +31,7 @@
 
 mod win32_support;
 
-use std::sync::{Arc, Condvar, Mutex, PoisonError};
+use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
 
@@ -56,8 +56,8 @@ use voicen_core::win32_data::{hotkey_codes, modifier_wait_keys};
 use voicen_lib::win::hotkey::{CancelKeyHandle, HotkeyRegistrarHandle, HotkeyThread};
 use win32_support::{
     assert_hotkey_free, combo_is_free, engine_factory, esc_is_free, eventually, has_pair, headed,
-    holds_for, is_down, keyed_store, log_lines, precondition, serial, settings, Keys, Shape,
-    TakenHotkey, TestWindow, TextEngine, HOLD, HOLD_LIMIT, HOTKEY_KEYS, SETTLE, VK_CONTROL,
+    holds_for, is_down, keyed_store, log_lines, precondition, serial, settings, Gate, Keys,
+    OpenOnDrop, Shape, TakenHotkey, TestWindow, TextEngine, HOLD, HOTKEY_KEYS, SETTLE, VK_CONTROL,
     VK_ESCAPE, VK_MASK, VK_MENU, VK_SPACE, WAIT,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -109,12 +109,12 @@ impl Rig {
     }
 
     /// T-108: the rig whose indicator holds the hotkey thread inside the session's
-    /// first `set_tray(Recording)` until `gate` opens (see [`TrayGate`]).
-    fn gated(gate: &Arc<TrayGate>) -> Rig {
+    /// first `set_tray(Recording)` until `gate` opens (a `win32_support::Gate`).
+    fn gated(gate: &Arc<Gate>) -> Rig {
         Rig::build(Mode::Hold, Some(Arc::clone(gate)))
     }
 
-    fn build(mode: Mode, gate: Option<Arc<TrayGate>>) -> Rig {
+    fn build(mode: Mode, gate: Option<Arc<Gate>>) -> Rig {
         let dir = TempDir::new();
         let logs = dir.path().join("logs");
         let log = voicen_lib::diag::start(logs.clone(), Box::new(|_| {}));
@@ -845,60 +845,15 @@ fn a_refused_esc_claim_keeps_recording_and_warns_esc_unavailable() {
 // combination once (`Registrations::cancel_key`, no retry), so a probe that overlaps a
 // claim still pending makes the thread's claim fail (1409) and then reads "not claimed"
 // for the whole wait (CI 39299815752, T-108 Investigation). The tests below hold the
-// hotkey thread inside the session's first `set_tray(Recording)` (`TrayGate`): the
+// hotkey thread inside the session's first `set_tray(Recording)` (a `Gate`): the
 // session has queued the CancelKey request (`Shared::publish` syncs the claim before
 // the indicator) but the thread has not run it, so a collision is planted, not hoped for.
-
-/// Holds the thread that calls the first `set_tray(Recording)` until [`open`](Self::open)
-/// (or `HOLD_LIMIT`); `entered` once that call arrived.
-#[derive(Default)]
-struct TrayGate {
-    /// (entered, open)
-    state: Mutex<(bool, bool)>,
-    changed: Condvar,
-}
-
-impl TrayGate {
-    fn enter_and_wait(&self) {
-        let mut st = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        st.0 = true;
-        self.changed.notify_all();
-        let _ = self
-            .changed
-            .wait_timeout_while(st, HOLD_LIMIT, |s| !s.1)
-            .unwrap_or_else(PoisonError::into_inner);
-    }
-
-    fn wait_entered(&self) -> bool {
-        let st = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        let (st, _) = self
-            .changed
-            .wait_timeout_while(st, WAIT, |s| !s.0)
-            .unwrap_or_else(PoisonError::into_inner);
-        st.0
-    }
-
-    fn open(&self) {
-        self.state.lock().unwrap_or_else(PoisonError::into_inner).1 = true;
-        self.changed.notify_all();
-    }
-}
-
-/// Opens the tray gate when dropped, also by a failed assertion (the hotkey thread is
-/// never left blocked).
-struct OpenTrayOnDrop(Arc<TrayGate>);
-
-impl Drop for OpenTrayOnDrop {
-    fn drop(&mut self) {
-        self.0.open();
-    }
-}
 
 /// The rig's `FakeIndicator` (every call recorded first, so the Recording indicator is
 /// visible to the test) that then blocks the caller on the gate for `Recording`.
 struct GatedIndicator {
     inner: Arc<FakeIndicator>,
-    gate: Arc<TrayGate>,
+    gate: Arc<Gate>,
 }
 
 impl Indicator for GatedIndicator {
@@ -1054,14 +1009,16 @@ fn a_collision_planted_at_the_esc_claim_is_named_esc_unavailable_by_the_claim_ch
     assert_esc_free();
     let window = TestWindow::open(Shape::TopLevel);
     window.front();
-    let gate = Arc::new(TrayGate::default());
-    let opener = OpenTrayOnDrop(Arc::clone(&gate));
+    let gate = Arc::new(Gate::default());
     let rig = Rig::gated(&gate);
     let _hotkey = rig.start_hotkey();
+    // Declared after the thread, so it drops first: a panic opens the gate before
+    // `HotkeyThread::drop` joins the thread held in `set_tray`.
+    let opener = OpenOnDrop(Arc::clone(&gate));
 
     let (keys, _pressed_at) = rig.press_hotkey();
     assert!(
-        gate.wait_entered(),
+        gate.wait_entered(WAIT),
         "premise: the session's set_tray(Recording) never came: {:?}",
         rig.indicator.calls()
     );
@@ -1102,14 +1059,16 @@ fn an_esc_claim_check_started_while_the_claim_is_pending_waits_for_the_claim() {
     assert_esc_free();
     let window = TestWindow::open(Shape::TopLevel);
     window.front();
-    let gate = Arc::new(TrayGate::default());
-    let opener = OpenTrayOnDrop(Arc::clone(&gate));
+    let gate = Arc::new(Gate::default());
     let rig = Rig::gated(&gate);
     let _hotkey = rig.start_hotkey();
+    // Declared after the thread, so it drops first: a panic opens the gate before
+    // `HotkeyThread::drop` joins the thread held in `set_tray`.
+    let opener = OpenOnDrop(Arc::clone(&gate));
 
     let (keys, _pressed_at) = rig.press_hotkey();
     assert!(
-        gate.wait_entered(),
+        gate.wait_entered(WAIT),
         "premise: the session's set_tray(Recording) never came: {:?}",
         rig.indicator.calls()
     );
@@ -1161,14 +1120,16 @@ fn an_esc_claim_check_started_while_the_claim_is_pending_sees_the_claim_once_it_
     assert_esc_free();
     let window = TestWindow::open(Shape::TopLevel);
     window.front();
-    let gate = Arc::new(TrayGate::default());
-    let opener = OpenTrayOnDrop(Arc::clone(&gate));
+    let gate = Arc::new(Gate::default());
     let rig = Rig::gated(&gate);
     let _hotkey = rig.start_hotkey();
+    // Declared after the thread, so it drops first: a panic opens the gate before
+    // `HotkeyThread::drop` joins the thread held in `set_tray`.
+    let opener = OpenOnDrop(Arc::clone(&gate));
 
     let (keys, _pressed_at) = rig.press_hotkey();
     assert!(
-        gate.wait_entered(),
+        gate.wait_entered(WAIT),
         "premise: the session's set_tray(Recording) never came: {:?}",
         rig.indicator.calls()
     );
@@ -1420,8 +1381,15 @@ fn a_registered_hotkey_stays_registered_across_a_resume_and_an_unlock() {
     let hwnd = hotkey_window();
     for (event, send) in [("resume", resume as fn(HWND)), ("unlock", unlock)] {
         send(hwnd);
-        // The re-register runs from the loop after the procedure re-posted it.
-        thread::sleep(SETTLE);
+        // The re-register runs from the loop after the procedure re-posted it. T-108:
+        // the probe below must not overlap that pending reassert (its take between the
+        // unregister and the register would refuse it), so order it with a round trip,
+        // not a sleep: `send` returns after the procedure posted WM_LIFECYCLE, and the
+        // round trip's WM_REGISTRAR is posted after it to the same queue, so when the
+        // round trip is answered the reassert has run.
+        if let Err(why) = hotkey_round_trip(&rig) {
+            panic!("{event}: {why}");
+        }
         assert_eq!(
             held_by_someone_else(),
             Ok(()),

@@ -1043,16 +1043,19 @@ pub fn engine_factory(engine: &Arc<TextEngine>) -> Box<EngineFactory> {
     })
 }
 
-/// A gate the test engine waits on: `entered` once the engine runs, `open` lets it go
-/// (or `HOLD_LIMIT` passes).
+/// A gate a test fake waits on (the test engine; T-108: the hotkey tests' tray
+/// indicator): `entered` once the fake runs, `open` lets it go (or `HOLD_LIMIT` passes).
 #[derive(Default)]
 pub struct Gate {
+    /// (entered, open)
     state: Mutex<(bool, bool)>,
     changed: Condvar,
 }
 
 impl Gate {
-    fn enter_and_wait(&self) {
+    /// Marks the gate entered, then blocks the caller until [`open`](Self::open) or
+    /// `HOLD_LIMIT`.
+    pub fn enter_and_wait(&self) {
         let mut st = lock(&self.state);
         st.0 = true;
         self.changed.notify_all();
