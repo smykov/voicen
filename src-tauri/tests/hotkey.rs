@@ -21,6 +21,12 @@
 //! `CancelKey` port, attached to the thread like T-055's registrar handle); Esc
 //! discards the recording; idle, Esc reaches the focused window; a refused claim keeps
 //! the recording and warns `esc_unavailable`.
+//!
+//! T-108: a check that Esc is claimed never probes while the claim is still pending
+//! (an Esc probe registers Esc itself and can refuse the thread's one-shot claim):
+//! [`esc_claim`] waits for the Recording indicator, makes one round trip on the hotkey
+//! thread's request channel ([`hotkey_round_trip`]), then probes once. The release side
+//! polls (`esc_released`): a probe cannot block an unregistration.
 #![cfg(windows)]
 
 mod win32_support;
@@ -32,6 +38,7 @@ use std::time::Instant;
 use voicen_core::diag::Log;
 use voicen_core::dictation::{DictationSession, SessionDeps};
 use voicen_core::events::{DictationEvent, RecordingObserver, WarningCode};
+use voicen_core::hotkey_registrar::HotkeyRegistrar;
 use voicen_core::pipeline::PipelineDeps;
 use voicen_core::platform::{
     FakeAudioSource, FakeClipboard, FakeIndicator, FakePaster, FakeShellRequests,
@@ -40,18 +47,18 @@ use voicen_core::platform::{
 use voicen_core::post_process::PassThrough;
 use voicen_core::recording::{RecordingEnd, TrayState, MAX_LENGTH};
 use voicen_core::secrets::KeyEdits;
-use voicen_core::settings::hotkey::{Hotkey, HotkeyKey};
+use voicen_core::settings::hotkey::{parse_hotkey, Hotkey, HotkeyKey};
 use voicen_core::settings::service::{SaveOutcome, SaveRequest};
 use voicen_core::settings::{EngineKind, Mode};
 use voicen_core::test_support::TempDir;
 use voicen_core::vad::{EnergyDetector, SpeechDetector, SpeechGate};
 use voicen_core::win32_data::{hotkey_codes, modifier_wait_keys};
-use voicen_lib::win::hotkey::{CancelKeyHandle, HotkeyThread};
+use voicen_lib::win::hotkey::{CancelKeyHandle, HotkeyRegistrarHandle, HotkeyThread};
 use win32_support::{
-    assert_hotkey_free, engine_factory, esc_is_free, eventually, has_pair, headed, holds_for,
-    is_down, keyed_store, log_lines, precondition, serial, settings, Keys, Shape, TakenHotkey,
-    TestWindow, TextEngine, HOLD, HOLD_LIMIT, HOTKEY_KEYS, SETTLE, VK_CONTROL, VK_ESCAPE, VK_MASK,
-    VK_MENU, VK_SPACE, WAIT,
+    assert_hotkey_free, combo_is_free, engine_factory, esc_is_free, eventually, has_pair, headed,
+    holds_for, is_down, keyed_store, log_lines, precondition, serial, settings, Keys, Shape,
+    TakenHotkey, TestWindow, TextEngine, HOLD, HOLD_LIMIT, HOTKEY_KEYS, SETTLE, VK_CONTROL,
+    VK_ESCAPE, VK_MASK, VK_MENU, VK_SPACE, WAIT,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN, VIRTUAL_KEY, VK_0, VK_1, VK_2, VK_3,
@@ -83,6 +90,9 @@ struct Rig {
     observer: Arc<RecordingObserver>,
     /// T-009: the Esc claim port, attached to the hotkey thread by `start_hotkey`.
     cancel: Arc<CancelKeyHandle>,
+    /// T-108: a registrar on the hotkey thread's request channel, attached by
+    /// `start_hotkey`; only [`hotkey_round_trip`] uses it (never a save).
+    registrar: Arc<HotkeyRegistrarHandle>,
     engine: Arc<TextEngine>,
     /// T-010: the session's settings requests (one OpenSettings per transition to failed).
     requests: Arc<FakeShellRequests>,
@@ -169,6 +179,7 @@ impl Rig {
             indicator,
             observer,
             cancel,
+            registrar: HotkeyRegistrarHandle::new(),
             engine,
             requests,
         }
@@ -182,6 +193,7 @@ impl Rig {
         )
         .expect("the hotkey thread starts");
         self.cancel.attach(&thread);
+        self.registrar.attach(&thread);
         thread
     }
 
@@ -589,10 +601,16 @@ fn dropping_the_hotkey_thread_frees_the_hotkey() {
 const HOTKEY_MODS: u32 = MOD_CONTROL.0 | MOD_ALT.0;
 
 /// The thread holds Esc both bare and under the hotkey's modifiers (OQ-21 (1)).
+///
+/// A registration probe: it takes and frees each combination, so it must never overlap
+/// a claim still pending on the hotkey thread (T-108). Call it only through
+/// [`esc_claim`] (which orders it after the claim), or after `esc_claim` returned `Ok`.
 fn esc_claimed() -> bool {
     !esc_is_free(0) && !esc_is_free(HOTKEY_MODS)
 }
 
+/// Esc is free both bare and under the hotkey's modifiers. Polling it is safe on the
+/// release side: a probe cannot block an unregistration, only a registration (T-108).
 fn esc_released() -> bool {
     esc_is_free(0) && esc_is_free(HOTKEY_MODS)
 }
@@ -632,10 +650,9 @@ fn esc_while_recording_in_hold_mode_discards_with_the_hotkey_held() {
     let _hotkey = rig.start_hotkey();
 
     let (mut keys, _pressed_at) = rig.press_hotkey();
-    assert!(
-        eventually(WAIT, esc_claimed),
-        "Esc not claimed bare and under Ctrl+Alt while recording"
-    );
+    if let Err(why) = esc_claim(&rig) {
+        panic!("Esc not claimed bare and under Ctrl+Alt while recording: {why}");
+    }
     let mut esc = Keys::press(&[VK_ESCAPE]);
     assert!(
         eventually(WAIT, || rig.audio.open_handles() == 0),
@@ -652,7 +669,8 @@ fn esc_while_recording_in_hold_mode_discards_with_the_hotkey_held() {
     assert!(!esc_reached(&window), "the claimed Esc reached the window");
     assert!(
         eventually(WAIT, esc_released),
-        "Esc still claimed after the cancel"
+        "Esc still claimed after the cancel; observer events: {:?}",
+        rig.observer.events()
     );
 }
 
@@ -676,7 +694,9 @@ fn esc_in_toggle_mode_discards_after_the_hotkey_is_released() {
         holds_for(SETTLE, || rig.audio.open_handles() == 1),
         "the toggle recording ended at the hotkey's release"
     );
-    assert!(eventually(WAIT, esc_claimed), "Esc not claimed");
+    if let Err(why) = esc_claim(&rig) {
+        panic!("Esc not claimed in toggle mode after the hotkey's release: {why}");
+    }
     let mut esc = Keys::press(&[VK_ESCAPE]);
     esc.release_all();
     assert!(
@@ -687,7 +707,11 @@ fn esc_in_toggle_mode_discards_after_the_hotkey_is_released() {
     assert_eq!(rig.ends(), vec![RecordingEnd::Cancelled]);
     assert_eq!(rig.jobs(), 0);
     assert!(!esc_reached(&window), "the claimed Esc reached the window");
-    assert!(eventually(WAIT, esc_released), "Esc still claimed");
+    assert!(
+        eventually(WAIT, esc_released),
+        "Esc still claimed after the cancel; observer events: {:?}",
+        rig.observer.events()
+    );
 }
 
 #[test]
@@ -703,9 +727,14 @@ fn esc_while_idle_reaches_the_focused_window() {
     window.front();
     let rig = Rig::new();
     let _hotkey = rig.start_hotkey();
+    // T-108: whatever the thread was asked at its start has run before the first probe.
+    if let Err(why) = hotkey_round_trip(&rig) {
+        panic!("{why}");
+    }
     assert!(
         holds_for(SETTLE, esc_released),
-        "Esc claimed with no recording on"
+        "Esc claimed with no recording on; observer events: {:?}",
+        rig.observer.events()
     );
     let mut esc = Keys::press(&[VK_ESCAPE]);
     esc.release_all();
@@ -738,7 +767,9 @@ fn esc_is_released_after_a_max_length_stop() {
     let _hotkey = rig.start_hotkey();
 
     let (mut keys, pressed_at) = rig.press_hotkey();
-    assert!(eventually(WAIT, esc_claimed), "Esc not claimed");
+    if let Err(why) = esc_claim(&rig) {
+        panic!("Esc not claimed while recording: {why}");
+    }
     rig.session.tick(pressed_at + MAX_LENGTH);
     assert!(
         eventually(WAIT, || rig.audio.open_handles() == 0),
@@ -746,7 +777,8 @@ fn esc_is_released_after_a_max_length_stop() {
     );
     assert!(
         eventually(WAIT, esc_released),
-        "Esc still claimed after the max-length stop (hotkey still held)"
+        "Esc still claimed after the max-length stop (hotkey still held); observer events: {:?}",
+        rig.observer.events()
     );
     keys.release_all();
     assert!(
@@ -893,16 +925,86 @@ impl Indicator for GatedIndicator {
 /// then a synchronous round trip on the hotkey thread's request channel) and probes
 /// once, never by polling registrations.
 ///
-/// Today's body is the T-009 check unchanged (`eventually(WAIT, esc_claimed)`, the line
-/// of `esc_is_released_after_a_max_length_stop`); T-108's developer replaces it (and may
-/// move the probe into `win32_support`), keeping this signature.
+/// Why the order holds: `Shared::publish` queues the CancelKey request before it calls
+/// `set_tray(Recording)`, so once the indicator shows Recording the request is on the
+/// thread's channel; the thread runs the channel in order, so when the round trip's
+/// `prepare` is answered the claim has run and its `cancel_key_result` (the warning,
+/// emitted on the hotkey thread) is in the observer.
 fn esc_claim(rig: &Rig) -> Result<(), String> {
-    let _ = rig;
-    if eventually(WAIT, esc_claimed) {
+    let recording = || {
+        rig.indicator
+            .trays()
+            .iter()
+            .any(|(s, _)| *s == TrayState::Recording)
+    };
+    // A memory read of the fake, not a registration probe: polling it races nothing.
+    if !eventually(WAIT, recording) {
+        return Err(format!(
+            "Esc not claimed: no Recording indicator within {WAIT:?} of the press \
+             (indicator calls: {:?}); observer events: {:?}",
+            rig.indicator.calls(),
+            rig.observer.events()
+        ));
+    }
+    hotkey_round_trip(rig)?;
+    if esc_unavailable_warnings(rig) > 0 {
+        return Err(format!(
+            "the hotkey thread's Esc claim was refused (Warning{{EscUnavailable}}); \
+             observer events: {:?}",
+            rig.observer.events()
+        ));
+    }
+    if esc_claimed() {
         Ok(())
     } else {
-        Err("Esc not claimed".to_owned())
+        Err(format!(
+            "Esc not claimed bare and under the hotkey's modifiers after the claim ran \
+             (bare free: {}, Ctrl+Alt free: {}); observer events: {:?}",
+            esc_is_free(0),
+            esc_is_free(HOTKEY_MODS),
+            rig.observer.events()
+        ))
     }
+}
+
+/// The unused combination of [`hotkey_round_trip`] (never the rig's hotkey, never Esc).
+const ROUND_TRIP_COMBO: &str = "Ctrl+Alt+F9";
+
+/// T-108: one synchronous round trip on the hotkey thread's request channel: a
+/// registrar `prepare` of [`ROUND_TRIP_COMBO`] under the spare id, then its `abort`.
+/// When it returns `Ok`, every request queued before it (an Esc claim or release
+/// included) has run. Prepare and abort touch only the spare id (`Registrations::
+/// handle`), so the active hotkey and the Esc ids stay as they were; the check reads
+/// back that the hotkey is still held and the spare combination free again (neither
+/// probe is an Esc registration). `Err` (with the observer's events) when the thread
+/// did not answer within the registrar's budget, refused the spare combination, or
+/// the round trip changed a registration.
+fn hotkey_round_trip(rig: &Rig) -> Result<(), String> {
+    let spare = parse_hotkey(ROUND_TRIP_COMBO)
+        .map_err(|e| format!("premise: {ROUND_TRIP_COMBO} does not parse: {e:?}"))?;
+    let prepared = rig.registrar.prepare(spare, Mode::Hold).map_err(|e| {
+        format!(
+            "no round trip on the hotkey thread's request channel: prepare of \
+             {ROUND_TRIP_COMBO} was {e:?} (refused, or not answered in the budget); \
+             observer events: {:?}",
+            rig.observer.events()
+        )
+    })?;
+    rig.registrar.abort(prepared);
+    if TakenHotkey::take().is_ok() {
+        return Err(format!(
+            "the round trip released the active hotkey Ctrl+Alt+Space; observer events: {:?}",
+            rig.observer.events()
+        ));
+    }
+    if !combo_is_free(ROUND_TRIP_COMBO) {
+        return Err(format!(
+            "{ROUND_TRIP_COMBO} is still registered after the round trip's abort; \
+             observer events: {:?}",
+            rig.observer.events()
+        ));
+    }
+    Ok(())
 }
 
 /// The observer's `Warning{EscUnavailable}` count.
@@ -931,7 +1033,8 @@ fn end_gated_hold(rig: &Rig, mut keys: Keys) {
     );
     assert!(
         eventually(WAIT, esc_released),
-        "cleanup: Esc still claimed after the hold ended"
+        "cleanup: Esc still claimed after the hold ended; observer events: {:?}",
+        rig.observer.events()
     );
 }
 
