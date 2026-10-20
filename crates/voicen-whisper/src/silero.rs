@@ -12,6 +12,12 @@
 //!   whole clip set of `tests/silero_clips.rs` (speech 89-154 cs, non-speech 0 cs), never
 //!   tuned per clip.
 //! - Prints nothing: whisper.cpp's and ggml's log hooks are installed before the native load.
+//! - One ggml thread per decision ([`VAD_THREADS`]): see the constant for the measurements.
+//!
+//! Known cost: whisper-rs 0.16.0 `WhisperVadContext::new` hands whisper.cpp its path through
+//! `CString::into_raw` and never frees it, so every successful or refused native load leaks
+//! the path string once (a few hundred bytes). Bounded per load, not per decision; the shell
+//! loads the detector once (T-102).
 
 use std::ffi::c_int;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -28,8 +34,13 @@ use whisper_rs::{WhisperVadContext, WhisperVadContextParams, WhisperVadParams};
 /// floor, fixed for the whole clip set.
 const MIN_SPEECH_CS: f32 = 25.0;
 
-/// Upper bound of the VAD threads (whisper-rs' default): the Silero model is tiny.
-const MAX_THREADS: usize = 4;
+/// ggml compute threads of one decision: 1, as upstream Silero runs. whisper.cpp runs one
+/// graph per 512-sample chunk (~94 for 3 s of audio), and ggml's CPU barrier between graph
+/// nodes is a pure spin (no yield), so a waiting thread burns the CPU the thread it waits for
+/// needs; with 1 thread the barrier returns at once. Measured (T-043 review 1, Linux surrogate,
+/// a 3 s clip, best of 5): 1 thread ~15-20 ms, 4 threads 29-105 ms alone; on 4 pinned CPUs
+/// with 4 detectors deciding at once, 1 thread ~20 ms and 4 threads ~48 s per decision.
+const VAD_THREADS: c_int = 1;
 
 /// The Silero detector: one whisper.cpp VAD context behind a lock (`&self`, `Send + Sync`).
 pub struct SileroDetector {
@@ -46,7 +57,8 @@ impl SileroDetector {
     /// Loads the Silero model at `path`. `Err(VadError::Unavailable)` when the file is not
     /// the pinned model (checked before any whisper.cpp call), the path is not UTF-8 or holds
     /// a NUL, the CPU lacks AVX2 (the whisper.cpp baseline, decision #142), or whisper.cpp
-    /// refuses the file. Never panics.
+    /// refuses the file. Never panics. Each call that reaches whisper.cpp leaks the path
+    /// string once (whisper-rs, see the module doc).
     pub fn load(path: &Path) -> Result<Box<dyn SpeechDetector>, VadError> {
         silero_model::verify(path)?;
         whisper_rs::install_logging_hooks();
@@ -60,7 +72,7 @@ impl SileroDetector {
         }
         let mut params = WhisperVadContextParams::new();
         params.set_use_gpu(false);
-        params.set_n_threads(thread_count());
+        params.set_n_threads(VAD_THREADS);
         let context = catch_unwind(|| WhisperVadContext::new(path, params))
             .map_err(|_| VadError::Unavailable)?
             .map_err(|_| VadError::Unavailable)?;
@@ -110,13 +122,4 @@ fn cpu_supported() -> bool {
     {
         true
     }
-}
-
-/// min(available parallelism, [`MAX_THREADS`]); 1 when the OS does not say.
-fn thread_count() -> c_int {
-    let n = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1)
-        .min(MAX_THREADS);
-    c_int::try_from(n).unwrap_or(1)
 }

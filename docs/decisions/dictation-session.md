@@ -95,7 +95,7 @@ Tasks: T-051 (split from T-006 by decision #64), T-009 (toggle, 10-minute maximu
 
 - `AudioSource`: `src-tauri/src/win/capture.rs` `CpalSource` (T-012: the active input endpoints by id, open by id; enumeration and open bounded; the error callback reports `device_lost` once, for a kind that ends the stream (not `Xrun`, `RealtimeDenied`, `DeviceChanged`, T-104)); `Clipboard`: `win/clipboard.rs` `WinClipboard`; `Paster`: `win/paste.rs` `WinPaster`; `Indicator`: `dictation.rs` `ShellIndicator` (tray half to `tray::TrayPart`, overlay half to `overlay::OverlayPart`: the newest state into the overlay mailbox, the one overlay thread builds, emits to or destroys the window; T-057, `docs/decisions/overlay.md`); `ShellRequests`: `dictation.rs` `SettingsRequests` (`settings_window::request(Tab(tab, None))`, receipt dropped). Their rules (bounds under the lock, no OS text, one wiring function): `docs/decisions/windows-shell.md`.
 - `TempAudioStore`: an interim `NoPendingAudio` in `dictation.rs` whose `put_pending` fails, so a failed dictation leaves no pending recording until T-007's file store replaces it (T-001 Notes).
-- Speech gate: `SpeechGate::new(Err(VadError::Unavailable), EnergyDetector::new())` in release 1 (no Silero, #62, T-043): the energy detector decides and the first decision writes one `vad_fallback` line per process (FR-016; T-006 Q3 default).
+- Speech gate: `SpeechGate::new(Err(VadError::Unavailable), EnergyDetector::new())` in release 1 (no Silero in the shell: `voicen_whisper::SileroDetector` exists since T-043, its shell wiring and bundle are T-102's, #62, #136): the energy detector decides and the first decision writes one `vad_fallback` line per process (FR-016; T-006 Q3 default).
 
 ### Win32 facts come from `win32_data` only
 

@@ -10,7 +10,7 @@
 //! Usage: `cargo run -p voicen-core --example fetch_model -- <dir> <model id | silero>`
 //! Exit 0: the model is in `<dir>` (already there, or downloaded and verified).
 //! Exit 1: the download was refused or failed (the reason's wire code is printed).
-//! Exit 2: wrong usage, or `<dir>` cannot be created.
+//! Exit 2: wrong usage, or `<dir>` cannot be created (for either id).
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -36,21 +36,27 @@ impl DiskSpace for NoProbe {
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let [dir, id] = args.as_slice() else {
-        eprintln!("usage: fetch_model <dir> <model id>");
+        eprintln!("usage: fetch_model <dir> <model id | silero>");
         return ExitCode::from(2);
     };
-    if id == "silero" {
-        return fetch_silero(Path::new(dir));
-    }
-    let Some(id) = ModelId::parse(id) else {
-        eprintln!("fetch_model: {id} is neither a catalog model id nor silero");
-        return ExitCode::from(2);
+    let silero = id == "silero";
+    let id = if silero {
+        None
+    } else {
+        let Some(id) = ModelId::parse(id) else {
+            eprintln!("fetch_model: {id} is neither a catalog model id nor silero");
+            return ExitCode::from(2);
+        };
+        Some(id)
     };
     let dir = PathBuf::from(dir);
     if let Err(e) = std::fs::create_dir_all(&dir) {
         eprintln!("fetch_model: cannot create {}: {e}", dir.display());
         return ExitCode::from(2);
     }
+    let Some(id) = id else {
+        return fetch_silero(&dir);
+    };
     let store = Arc::new(ModelStore::new(dir, MODELS));
     if let Some(path) = store.path_if_downloaded(id) {
         println!("fetch_model: {} is already downloaded", path.display());

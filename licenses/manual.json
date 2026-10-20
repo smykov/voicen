@@ -11,7 +11,7 @@
     "version": "v6.2.0",
     "license": "MIT",
     "url": "https://huggingface.co/ggml-org/whisper-vad/resolve/9ffd54a1e1ee413ddf265af9913beaf518d1639b/ggml-silero-v6.2.0.bin",
-    "note": "Voice activity model of snakers4/silero-vad (https://github.com/snakers4/silero-vad) in whisper.cpp's ggml format, ggml-silero-v6.2.0.bin from ggml-org/whisper-vad at commit 9ffd54a1e1ee413ddf265af9913beaf518d1639b, 885098 bytes, SHA-256 2aa269b785eeb53a82983a20501ddf7c1d9c48e33ab63a41391ac6c9f7fb6987 (pinned in voicen_core::vad::silero_model::SILERO_MODEL). Downloaded in CI for tests; bundled by T-102.",
+    "note": "Voice activity model of snakers4/silero-vad (https://github.com/snakers4/silero-vad) in whisper.cpp's ggml format, ggml-silero-v6.2.0.bin from ggml-org/whisper-vad at the commit in the URL above; its size and SHA-256 are pinned in voicen_core::vad::silero_model::SILERO_MODEL. Downloaded in CI for tests; bundled by T-102.",
     "text": "licenses/texts/silero-vad-MIT.txt"
   },
   {

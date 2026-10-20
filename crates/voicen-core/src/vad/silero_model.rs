@@ -34,7 +34,7 @@ pub struct ModelPin {
 }
 
 /// The Silero VAD model v6.2.0 in whisper.cpp's ggml format (`ggml-org/whisper-vad`, MIT),
-/// at commit 9ffd54a1e1ee413ddf265af9913beaf518d1639b. A `static`, not a `const`: one
+/// at the commit in `url`. A `static`, not a `const`: one
 /// value at one address, and checks of it are not folded at compile time.
 pub static SILERO_MODEL: ModelPin = ModelPin {
     file_name: "ggml-silero-v6.2.0.bin",

@@ -134,6 +134,59 @@ fn pin_sha256_is_64_lowercase_hex_and_size_is_set() {
     assert!(SILERO_MODEL.size_bytes > 0, "the pinned size is 0");
 }
 
+/// licenses/manual.json's Silero entry derives from the pin (invariant 3; T-043 review 1
+/// finding 4): its `url` is `SILERO_MODEL.url` (the notice's Source line), its `version` is
+/// the one in `SILERO_MODEL.file_name`, and its `note` holds no copy of the pin's commit,
+/// SHA-256 or size that a pin bump could leave stale.
+#[test]
+fn manual_json_silero_entry_derives_from_the_pin() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../licenses/manual.json");
+    let text = fs::read_to_string(&path).expect("read licenses/manual.json");
+    let entries: serde_json::Value = serde_json::from_str(&text).expect("manual.json is JSON");
+    let entries = entries.as_array().expect("manual.json is an array");
+    let silero: Vec<_> = entries
+        .iter()
+        .filter(|e| {
+            e["name"]
+                .as_str()
+                .is_some_and(|n| n.starts_with("Silero VAD model"))
+        })
+        .collect();
+    assert_eq!(
+        silero.len(),
+        1,
+        "manual.json has no single Silero VAD entry"
+    );
+    let entry = silero[0];
+    assert_eq!(
+        entry["url"].as_str(),
+        Some(SILERO_MODEL.url),
+        "manual.json's Silero url is not SILERO_MODEL.url"
+    );
+    let version = entry["version"]
+        .as_str()
+        .expect("Silero entry has a version");
+    assert_eq!(
+        SILERO_MODEL.file_name,
+        format!("ggml-silero-{version}.bin"),
+        "manual.json's Silero version is not the pinned file's"
+    );
+    let note = entry["note"].as_str().expect("Silero entry has a note");
+    let longest_hex_run = note
+        .split(|c: char| !c.is_ascii_hexdigit())
+        .map(str::len)
+        .max()
+        .unwrap_or(0);
+    assert!(
+        longest_hex_run < 40,
+        "manual.json's Silero note copies a commit or SHA-256 ({longest_hex_run} hex digits)"
+    );
+    assert!(
+        !note.contains(&SILERO_MODEL.size_bytes.to_string()),
+        "manual.json's Silero note copies the pinned size"
+    );
+}
+
 /// The production fetch's signature (used by `examples/fetch_model.rs ... silero`); its
 /// network run is the Windows job's fetch step, not this test.
 #[test]

@@ -462,6 +462,36 @@ fn two_threads_decide_at_once() {
     }
 }
 
+// ---- latency figure for the CI log (T-043 review 1 finding 1) --------------------------
+
+/// Prints the elapsed time of three decisions on the 3 s `keyboard-model-m` clip, and their
+/// best, to the process's stderr past libtest's capture, so the Windows CI log carries the
+/// figure (`silero-timing:` lines). Print only: no wall-clock ceiling (F-013,
+/// docs/decisions/core-tests.md). The other tests of this binary run at the same time, so
+/// the best of three is the figure closest to a decision with nothing else running.
+#[test]
+fn three_second_decision_time_is_printed() {
+    use std::io::Write;
+    use std::time::Instant;
+    let d = load_good();
+    let audio = buffer("keyboard-model-m", KEYBOARD_MODEL_M);
+    let mut ms = Vec::new();
+    for _ in 0..3 {
+        let start = Instant::now();
+        let got = d.contains_speech(&audio);
+        ms.push(start.elapsed().as_secs_f64() * 1000.0);
+        assert_eq!(got, Ok(false), "keyboard-model-m: timed decision");
+    }
+    let best = ms.iter().copied().fold(f64::INFINITY, f64::min);
+    let audio_s = audio.samples().len() as f64 / SAMPLE_RATE as f64;
+    let cpus = std::thread::available_parallelism().map_or(0, |n| n.get());
+    let line = format!(
+        "silero-timing: {audio_s:.2} s clip, decisions {ms:.1?} ms, best {best:.1} ms, \
+         available parallelism {cpus}\n"
+    );
+    let _ = std::io::stderr().write_all(line.as_bytes());
+}
+
 // ---- nothing of whisper.cpp / ggml on stdout or stderr ---------------------------------
 
 /// Work of the child process of `silero_prints_nothing`; a no-op unless the parent set
