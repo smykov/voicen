@@ -25,7 +25,7 @@
 
 mod win32_support;
 
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread;
 use std::time::Instant;
 
@@ -35,7 +35,7 @@ use voicen_core::events::{DictationEvent, RecordingObserver, WarningCode};
 use voicen_core::pipeline::PipelineDeps;
 use voicen_core::platform::{
     FakeAudioSource, FakeClipboard, FakeIndicator, FakePaster, FakeShellRequests,
-    FakeTempAudioStore,
+    FakeTempAudioStore, Indicator,
 };
 use voicen_core::post_process::PassThrough;
 use voicen_core::recording::{RecordingEnd, TrayState, MAX_LENGTH};
@@ -50,8 +50,8 @@ use voicen_lib::win::hotkey::{CancelKeyHandle, HotkeyThread};
 use win32_support::{
     assert_hotkey_free, engine_factory, esc_is_free, eventually, has_pair, headed, holds_for,
     is_down, keyed_store, log_lines, precondition, serial, settings, Keys, Shape, TakenHotkey,
-    TestWindow, TextEngine, HOLD, HOTKEY_KEYS, SETTLE, VK_CONTROL, VK_ESCAPE, VK_MASK, VK_MENU,
-    VK_SPACE, WAIT,
+    TestWindow, TextEngine, HOLD, HOLD_LIMIT, HOTKEY_KEYS, SETTLE, VK_CONTROL, VK_ESCAPE, VK_MASK,
+    VK_MENU, VK_SPACE, WAIT,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN, VIRTUAL_KEY, VK_0, VK_1, VK_2, VK_3,
@@ -95,6 +95,16 @@ impl Rig {
 
     /// T-009: the rig with `mode` saved before the session starts.
     fn with_mode(mode: Mode) -> Rig {
+        Rig::build(mode, None)
+    }
+
+    /// T-108: the rig whose indicator holds the hotkey thread inside the session's
+    /// first `set_tray(Recording)` until `gate` opens (see [`TrayGate`]).
+    fn gated(gate: &Arc<TrayGate>) -> Rig {
+        Rig::build(Mode::Hold, Some(Arc::clone(gate)))
+    }
+
+    fn build(mode: Mode, gate: Option<Arc<TrayGate>>) -> Rig {
         let dir = TempDir::new();
         let logs = dir.path().join("logs");
         let log = voicen_lib::diag::start(logs.clone(), Box::new(|_| {}));
@@ -138,7 +148,13 @@ impl Rig {
             },
             engine_factory: Some(engine_factory(&engine)),
             audio: audio.clone(),
-            indicator: indicator.clone(),
+            indicator: match gate {
+                None => indicator.clone() as Arc<dyn Indicator>,
+                Some(gate) => Arc::new(GatedIndicator {
+                    inner: indicator.clone(),
+                    gate,
+                }),
+            },
             requests: requests.clone(),
             settings: service,
             cancel_key: cancel.clone(),
@@ -789,6 +805,290 @@ fn a_refused_esc_claim_keeps_recording_and_warns_esc_unavailable() {
     );
     assert_eq!(rig.ends(), vec![RecordingEnd::Released]);
     assert_eq!(warned(), 1, "{:?}", rig.observer.events());
+}
+
+// ---- T-108: the Esc claim check never races the claim it checks ----------------------
+//
+// `esc_claimed` probes by registering Esc itself. The hotkey thread claims each Esc
+// combination once (`Registrations::cancel_key`, no retry), so a probe that overlaps a
+// claim still pending makes the thread's claim fail (1409) and then reads "not claimed"
+// for the whole wait (CI 39299815752, T-108 Investigation). The tests below hold the
+// hotkey thread inside the session's first `set_tray(Recording)` (`TrayGate`): the
+// session has queued the CancelKey request (`Shared::publish` syncs the claim before
+// the indicator) but the thread has not run it, so a collision is planted, not hoped for.
+
+/// Holds the thread that calls the first `set_tray(Recording)` until [`open`](Self::open)
+/// (or `HOLD_LIMIT`); `entered` once that call arrived.
+#[derive(Default)]
+struct TrayGate {
+    /// (entered, open)
+    state: Mutex<(bool, bool)>,
+    changed: Condvar,
+}
+
+impl TrayGate {
+    fn enter_and_wait(&self) {
+        let mut st = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        st.0 = true;
+        self.changed.notify_all();
+        let _ = self
+            .changed
+            .wait_timeout_while(st, HOLD_LIMIT, |s| !s.1)
+            .unwrap_or_else(PoisonError::into_inner);
+    }
+
+    fn wait_entered(&self) -> bool {
+        let st = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let (st, _) = self
+            .changed
+            .wait_timeout_while(st, WAIT, |s| !s.0)
+            .unwrap_or_else(PoisonError::into_inner);
+        st.0
+    }
+
+    fn open(&self) {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner).1 = true;
+        self.changed.notify_all();
+    }
+}
+
+/// Opens the tray gate when dropped, also by a failed assertion (the hotkey thread is
+/// never left blocked).
+struct OpenTrayOnDrop(Arc<TrayGate>);
+
+impl Drop for OpenTrayOnDrop {
+    fn drop(&mut self) {
+        self.0.open();
+    }
+}
+
+/// The rig's `FakeIndicator` (every call recorded first, so the Recording indicator is
+/// visible to the test) that then blocks the caller on the gate for `Recording`.
+struct GatedIndicator {
+    inner: Arc<FakeIndicator>,
+    gate: Arc<TrayGate>,
+}
+
+impl Indicator for GatedIndicator {
+    fn set_tray(&self, state: TrayState, retry_available: bool) {
+        self.inner.set_tray(state, retry_available);
+        if state == TrayState::Recording {
+            self.gate.enter_and_wait();
+        }
+    }
+
+    fn set_overlay(&self, state: &OverlayState) {
+        self.inner.set_overlay(state);
+    }
+}
+
+/// T-108: the claim check of the Esc tests, for the recording just pressed.
+///
+/// Contract (T-108 invariant and approach, option A): `Ok(())` only when the hotkey
+/// thread has run this recording's claim and holds Esc bare and under the hotkey's
+/// modifiers, with no `Warning{EscUnavailable}` among the observer's events; otherwise
+/// `Err` with a message that names a refused claim (`EscUnavailable`) and prints
+/// `rig.observer.events()`. No registration probe of the check may overlap a claim that
+/// is still pending: the check orders itself after the claim (the Recording indicator,
+/// then a synchronous round trip on the hotkey thread's request channel) and probes
+/// once, never by polling registrations.
+///
+/// Today's body is the T-009 check unchanged (`eventually(WAIT, esc_claimed)`, the line
+/// of `esc_is_released_after_a_max_length_stop`); T-108's developer replaces it (and may
+/// move the probe into `win32_support`), keeping this signature.
+fn esc_claim(rig: &Rig) -> Result<(), String> {
+    let _ = rig;
+    if eventually(WAIT, esc_claimed) {
+        Ok(())
+    } else {
+        Err("Esc not claimed".to_owned())
+    }
+}
+
+/// The observer's `Warning{EscUnavailable}` count.
+fn esc_unavailable_warnings(rig: &Rig) -> usize {
+    rig.observer
+        .events()
+        .iter()
+        .filter(|e| {
+            matches!(
+                e,
+                DictationEvent::Warning {
+                    code: WarningCode::EscUnavailable
+                }
+            )
+        })
+        .count()
+}
+
+/// Ends the gated hold and waits until the capture closed and Esc is given back, so
+/// the next test starts with Esc free.
+fn end_gated_hold(rig: &Rig, mut keys: Keys) {
+    keys.release_all();
+    assert!(
+        eventually(WAIT, || rig.audio.open_handles() == 0),
+        "cleanup: the capture is still open {WAIT:?} after the hotkey's release"
+    );
+    assert!(
+        eventually(WAIT, esc_released),
+        "cleanup: Esc still claimed after the hold ended"
+    );
+}
+
+#[test]
+fn a_collision_planted_at_the_esc_claim_is_named_esc_unavailable_by_the_claim_check() {
+    // T-108 reproduction (Acceptance "Test that fails without the change"): the CI
+    // 39299815752 collision, planted. While the claim is pending the test takes
+    // Ctrl+Alt+Esc, so the thread's one-shot claim gets bare Esc and is refused the
+    // modified one (Warning{EscUnavailable}); then the test frees Ctrl+Alt+Esc. The
+    // claim check must not say "not claimed" with no reason: it names the refusal.
+    // Red before T-108: `eventually(WAIT, esc_claimed)` reads Ctrl+Alt+Esc free for the
+    // whole WAIT and returns "Esc not claimed" (the CI message) with no events. Bite:
+    // a check that does not read the observer's events (no EscUnavailable in its
+    // message), a check that reads `Ok` while one combination is free.
+    let _serial = serial();
+    assert_hotkey_free();
+    assert_esc_free();
+    let window = TestWindow::open(Shape::TopLevel);
+    window.front();
+    let gate = Arc::new(TrayGate::default());
+    let opener = OpenTrayOnDrop(Arc::clone(&gate));
+    let rig = Rig::gated(&gate);
+    let _hotkey = rig.start_hotkey();
+
+    let (keys, _pressed_at) = rig.press_hotkey();
+    assert!(
+        gate.wait_entered(),
+        "premise: the session's set_tray(Recording) never came: {:?}",
+        rig.indicator.calls()
+    );
+    let planted = TakenHotkey::take_esc(HOTKEY_MODS)
+        .expect("premise: Ctrl+Alt+Esc is free while the hotkey thread's claim is pending");
+    drop(opener);
+    assert!(
+        eventually(WAIT, || esc_unavailable_warnings(&rig) >= 1),
+        "premise: the planted Ctrl+Alt+Esc did not refuse the thread's claim: {:?}",
+        rig.observer.events()
+    );
+    drop(planted);
+
+    let verdict = esc_claim(&rig);
+    let named = matches!(&verdict, Err(message) if message.contains("EscUnavailable"));
+    assert!(
+        named,
+        "the claim check does not name the refused claim (want Err naming EscUnavailable, \
+         got {verdict:?}); observer events: {:?}",
+        rig.observer.events()
+    );
+    end_gated_hold(&rig, keys);
+}
+
+#[test]
+fn an_esc_claim_check_started_while_the_claim_is_pending_waits_for_the_claim() {
+    // T-108 invariant: no probe of the check overlaps a pending claim, and the verdict
+    // is the shell's claim, never someone else's registration. While the hotkey thread
+    // is held before its claim, the test takes both Esc combinations itself and starts
+    // the check; it frees the thread after SETTLE. The thread's claim is then refused
+    // both (Warning{EscUnavailable}). Red before T-108: the polling check reads the
+    // test's own registrations as "claimed" at its first probe and returns Ok while
+    // the claim is still pending. Bite: a check that probes before the round trip
+    // (returns during the pending claim), a check that ignores the observer's warning
+    // (Ok, because both combinations read taken).
+    let _serial = serial();
+    assert_hotkey_free();
+    assert_esc_free();
+    let window = TestWindow::open(Shape::TopLevel);
+    window.front();
+    let gate = Arc::new(TrayGate::default());
+    let opener = OpenTrayOnDrop(Arc::clone(&gate));
+    let rig = Rig::gated(&gate);
+    let _hotkey = rig.start_hotkey();
+
+    let (keys, _pressed_at) = rig.press_hotkey();
+    assert!(
+        gate.wait_entered(),
+        "premise: the session's set_tray(Recording) never came: {:?}",
+        rig.indicator.calls()
+    );
+    let bare = TakenHotkey::take_esc(0)
+        .expect("premise: bare Esc is free while the hotkey thread's claim is pending");
+    let modded = TakenHotkey::take_esc(HOTKEY_MODS)
+        .expect("premise: Ctrl+Alt+Esc is free while the hotkey thread's claim is pending");
+
+    let (verdict, returned_while_pending) = thread::scope(|scope| {
+        let check = scope.spawn(|| esc_claim(&rig));
+        let returned_while_pending = !holds_for(SETTLE, || !check.is_finished());
+        drop(opener);
+        let verdict = check.join().expect("the claim check panicked");
+        (verdict, returned_while_pending)
+    });
+    assert!(
+        eventually(WAIT, || esc_unavailable_warnings(&rig) >= 1),
+        "premise: the test's own Esc registrations did not refuse the thread's claim: {:?}",
+        rig.observer.events()
+    );
+    drop(modded);
+    drop(bare);
+
+    assert!(
+        !returned_while_pending,
+        "the claim check returned {verdict:?} while the hotkey thread's claim was still \
+         pending (it probed before the claim ran)"
+    );
+    let named = matches!(&verdict, Err(message) if message.contains("EscUnavailable"));
+    assert!(
+        named,
+        "the claim check took the test's own Esc registrations for the shell's claim \
+         (want Err naming EscUnavailable, got {verdict:?}); observer events: {:?}",
+        rig.observer.events()
+    );
+    end_gated_hold(&rig, keys);
+}
+
+#[test]
+fn an_esc_claim_check_started_while_the_claim_is_pending_sees_the_claim_once_it_ran() {
+    // T-108 happy path through the pending window (guard, green before and after the
+    // change): the check starts while the hotkey thread is held before its claim and
+    // nobody else holds Esc; once the thread runs the claim, the check is Ok and the
+    // session never warned EscUnavailable. Bite: a check that probes once before the
+    // claim ran (Err "not claimed" during the pending claim), a check that always fails,
+    // a check whose probe collides with the claim (EscUnavailable in the events).
+    let _serial = serial();
+    assert_hotkey_free();
+    assert_esc_free();
+    let window = TestWindow::open(Shape::TopLevel);
+    window.front();
+    let gate = Arc::new(TrayGate::default());
+    let opener = OpenTrayOnDrop(Arc::clone(&gate));
+    let rig = Rig::gated(&gate);
+    let _hotkey = rig.start_hotkey();
+
+    let (keys, _pressed_at) = rig.press_hotkey();
+    assert!(
+        gate.wait_entered(),
+        "premise: the session's set_tray(Recording) never came: {:?}",
+        rig.indicator.calls()
+    );
+    let verdict = thread::scope(|scope| {
+        let check = scope.spawn(|| esc_claim(&rig));
+        let _ = holds_for(SETTLE, || !check.is_finished());
+        drop(opener);
+        check.join().expect("the claim check panicked")
+    });
+    assert_eq!(
+        verdict,
+        Ok(()),
+        "observer events: {:?}",
+        rig.observer.events()
+    );
+    assert_eq!(
+        esc_unavailable_warnings(&rig),
+        0,
+        "the check collided with the claim: {:?}",
+        rig.observer.events()
+    );
+    assert!(esc_claimed(), "Esc not held after an Ok claim check");
+    end_gated_hold(&rig, keys);
 }
 
 // ---- T-010: resume, unlock and suspend reach the hotkey thread ------------------------
