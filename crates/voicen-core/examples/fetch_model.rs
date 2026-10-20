@@ -3,7 +3,11 @@
 //! rename). Used by the Windows CI job to provide the tiny model for
 //! `crates/voicen-whisper/tests/transcribe_wav.rs` (T-099); not shipped.
 //!
-//! Usage: `cargo run -p voicen-core --example fetch_model -- <dir> <model id>`
+//! The id `silero` fetches the pinned Silero VAD model instead
+//! (`vad::silero_model::fetch`, the same transfer) for
+//! `crates/voicen-whisper/tests/silero_clips.rs` (T-043).
+//!
+//! Usage: `cargo run -p voicen-core --example fetch_model -- <dir> <model id | silero>`
 //! Exit 0: the model is in `<dir>` (already there, or downloaded and verified).
 //! Exit 1: the download was refused or failed (the reason's wire code is printed).
 //! Exit 2: wrong usage, or `<dir>` cannot be created.
@@ -17,6 +21,7 @@ use voicen_core::local_models::catalog::{ModelId, MODELS};
 use voicen_core::local_models::download::{DiskSpace, DownloadEvent, Downloader};
 use voicen_core::local_models::store::ModelStore;
 use voicen_core::timeouts::Timeouts;
+use voicen_core::vad::silero_model;
 
 /// No free-space probe: the downloader then proceeds (R-9); a full disk ends the
 /// download as a disk error instead.
@@ -34,8 +39,11 @@ fn main() -> ExitCode {
         eprintln!("usage: fetch_model <dir> <model id>");
         return ExitCode::from(2);
     };
+    if id == "silero" {
+        return fetch_silero(Path::new(dir));
+    }
     let Some(id) = ModelId::parse(id) else {
-        eprintln!("fetch_model: {id} is not a catalog model id");
+        eprintln!("fetch_model: {id} is neither a catalog model id nor silero");
         return ExitCode::from(2);
     };
     let dir = PathBuf::from(dir);
@@ -82,6 +90,25 @@ fn main() -> ExitCode {
         }
         Err(_) => {
             eprintln!("fetch_model: the download thread ended without a result");
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// `<dir>/<SILERO_MODEL.file_name>`: kept when it verifies, else downloaded and verified.
+fn fetch_silero(dir: &Path) -> ExitCode {
+    let path = dir.join(silero_model::SILERO_MODEL.file_name);
+    if silero_model::verify(&path).is_ok() {
+        println!("fetch_model: {} is already downloaded", path.display());
+        return ExitCode::SUCCESS;
+    }
+    match silero_model::fetch(dir, &Timeouts::default()) {
+        Ok(path) => {
+            println!("fetch_model: downloaded {}", path.display());
+            ExitCode::SUCCESS
+        }
+        Err(reason) => {
+            eprintln!("fetch_model: the download failed: {}", reason.code());
             ExitCode::from(1)
         }
     }

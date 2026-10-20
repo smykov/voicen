@@ -9,6 +9,7 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
 pub mod energy;
+pub mod silero_model;
 
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};

@@ -120,13 +120,17 @@ impl ModelStore {
 
     /// `<dir>/<file_name>`: the only name a verified model has.
     pub(crate) fn final_path(&self, entry: &CatalogEntry) -> PathBuf {
-        self.dir.join(entry.file_name)
+        ModelStore::final_path_in(&self.dir, entry.file_name)
     }
 
-    /// `<dir>/<file_name>.part`: where a running download writes.
-    pub(crate) fn part_path(&self, entry: &CatalogEntry) -> PathBuf {
-        self.dir
-            .join(format!("{}.{PART_EXTENSION}", entry.file_name))
+    /// `<dir>/<file_name>`: the final name of a pinned download in `dir`.
+    pub(crate) fn final_path_in(dir: &Path, file_name: &str) -> PathBuf {
+        dir.join(file_name)
+    }
+
+    /// `<dir>/<file_name>.part`: where a pinned download into `dir` writes.
+    pub(crate) fn part_path_in(dir: &Path, file_name: &str) -> PathBuf {
+        dir.join(format!("{file_name}.{PART_EXTENSION}"))
     }
 
     /// The one "downloaded" rule: the final file is a regular file with the

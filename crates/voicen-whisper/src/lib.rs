@@ -1,6 +1,7 @@
 //! Built-in engine of Voicen (T-099, decisions #12, #130, #142): implements
 //! voicen-core's [`SpeechModelLoader`] and [`SpeechModel`] with whisper.cpp through
-//! whisper-rs.
+//! whisper-rs, and its [`SpeechDetector`](voicen_core::vad::SpeechDetector) with
+//! whisper.cpp's Silero VAD ([`SileroDetector`], T-043).
 //!
 //! - CPU only (`use_gpu` off); whisper.cpp is one static build with the CPU baseline of
 //!   decision #142 and the shell's C runtime (both set in `.cargo/config.toml` [env]).
@@ -13,6 +14,10 @@
 //! set of parameters per language it was asked for (at most the ~100 languages whisper
 //! knows), so the leak is bounded per loaded model, not per transcription.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
+
+mod silero;
+
+pub use silero::SileroDetector;
 
 use std::collections::HashMap;
 use std::ffi::{c_int, c_void};

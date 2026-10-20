@@ -14,6 +14,10 @@
 //! to the rename to the final name. Every other end tries to remove
 //! `<file>.part` before the end event (best effort, see `remove_part`). At most
 //! one download runs at a time.
+//!
+//! The transfer itself is `download_pinned`, the one pinned download of the crate: the
+//! Downloader runs it for catalog entries, `vad::silero_model::fetch` for the Silero
+//! model (T-043 invariant 4).
 
 use std::fs::File;
 use std::io::{self, Read, Write};
@@ -338,10 +342,69 @@ impl Drop for SlotGuard {
 }
 
 /// How a download ended (before the end event is emitted).
-enum End {
+pub(crate) enum End {
     Finished,
     Failed(DownloadFailure),
     Cancelled,
+}
+
+/// What a pinned download fetches: the file name it ends under, its URL and the exact
+/// size and SHA-256 of the file. The catalog's entries ([`CatalogEntry::pinned`]) and the
+/// Silero model (`vad::silero_model`) are the two sources; both go through
+/// [`download_pinned`], the one transfer (T-043 invariant 4).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Pinned<'a> {
+    pub(crate) file_name: &'a str,
+    pub(crate) url: &'a str,
+    pub(crate) size_bytes: u64,
+    /// 64 lowercase hex digits.
+    pub(crate) sha256: &'a str,
+}
+
+impl CatalogEntry {
+    /// This entry as the pin of a download.
+    pub(crate) fn pinned(&self) -> Pinned<'static> {
+        Pinned {
+            file_name: self.file_name,
+            url: self.url,
+            size_bytes: self.size_bytes,
+            sha256: self.sha256,
+        }
+    }
+}
+
+/// Downloads `pin` into `dir` (created when missing): the body streams to
+/// `<dir>/<file_name>.part` and into a SHA-256; only a byte count equal to the pinned size
+/// and the pinned digest lead to the rename to `<dir>/<file_name>` ([`End::Finished`]).
+/// Every other end attempts to remove the `.part` before it returns. `progress` gets the
+/// received byte count, throttled to 1-4 calls a second. `cancel` is read between reads.
+pub(crate) fn download_pinned(
+    pin: Pinned<'_>,
+    dir: &Path,
+    timeouts: &Timeouts,
+    cancel: &AtomicBool,
+    progress: &dyn Fn(u64),
+) -> End {
+    let part = ModelStore::part_path_in(dir, pin.file_name);
+    let transfer = Transfer {
+        pin,
+        dir,
+        timeouts,
+        cancel,
+    };
+    // `run` returns only after its file handle is closed (Windows cannot remove or rename
+    // an open file).
+    let end = match transfer.run(&part, progress) {
+        Ok(()) => match std::fs::rename(&part, ModelStore::final_path_in(dir, pin.file_name)) {
+            Ok(()) => End::Finished,
+            Err(_) => End::Failed(DownloadFailure::DiskError),
+        },
+        Err(end) => end,
+    };
+    if !matches!(end, End::Finished) {
+        remove_part(&part);
+    }
+    end
 }
 
 /// One download, run on its own thread.
@@ -352,27 +415,26 @@ struct Job {
     cancel: Arc<AtomicBool>,
 }
 
-/// Read buffer of the body loop.
-const CHUNK: usize = 64 * 1024;
-
 impl Job {
     /// Runs the transfer, settles the `.part` (renamed, or removal attempted),
     /// clears the active slot, then emits exactly one end event.
     fn run(self, guard: SlotGuard, events: impl Fn(DownloadEvent)) {
         let id = self.entry.id;
-        let part = self.store.part_path(self.entry);
-        // `transfer` returns only after its file handle is closed (Windows cannot
-        // remove or rename an open file).
-        let end = match self.transfer(&part, &events) {
-            Ok(()) => match std::fs::rename(&part, self.store.final_path(self.entry)) {
-                Ok(()) => End::Finished,
-                Err(_) => End::Failed(DownloadFailure::DiskError),
-            },
-            Err(end) => end,
+        let total = self.entry.size_bytes;
+        let progress = |received: u64| {
+            events(DownloadEvent::Progress {
+                id,
+                received,
+                total,
+            })
         };
-        if !matches!(end, End::Finished) {
-            remove_part(&part);
-        }
+        let end = download_pinned(
+            self.entry.pinned(),
+            self.store.dir(),
+            &self.timeouts,
+            &self.cancel,
+            &progress,
+        );
         // The slot is free before the end event, so a new `start` of the same model
         // can begin in the short gap before this event is handled; the coordinator
         // then shows this download's end state over the new one until the new
@@ -386,7 +448,20 @@ impl Job {
             End::Cancelled => DownloadEvent::Cancelled { id },
         });
     }
+}
 
+/// Read buffer of the body loop.
+const CHUNK: usize = 64 * 1024;
+
+/// The transfer of one pinned file into its `.part`.
+struct Transfer<'a> {
+    pin: Pinned<'a>,
+    dir: &'a Path,
+    timeouts: &'a Timeouts,
+    cancel: &'a AtomicBool,
+}
+
+impl Transfer<'_> {
     fn cancelled(&self) -> bool {
         self.cancel.load(Ordering::SeqCst)
     }
@@ -401,12 +476,12 @@ impl Job {
         }
     }
 
-    /// GET the catalog URL into `part`, hashing as it goes. `Ok` only when the
-    /// byte count equals the catalog size and the digest equals the pinned value,
+    /// GET the pinned URL into `part`, hashing as it goes. `Ok` only when the
+    /// byte count equals the pinned size and the digest equals the pinned value,
     /// with `part` written, synced and closed.
-    fn transfer(&self, part: &Path, events: &impl Fn(DownloadEvent)) -> Result<(), End> {
-        let entry = self.entry;
-        let url = url::Url::parse(entry.url).map_err(|_| {
+    fn run(&self, part: &Path, progress: &dyn Fn(u64)) -> Result<(), End> {
+        let pin = self.pin;
+        let url = url::Url::parse(pin.url).map_err(|_| {
             End::Failed(DownloadFailure::SourceUnreachable {
                 host: String::new(),
             })
@@ -431,7 +506,7 @@ impl Job {
         }
 
         let disk_error = |_: io::Error| self.failed(DownloadFailure::DiskError);
-        std::fs::create_dir_all(self.store.dir()).map_err(disk_error)?;
+        std::fs::create_dir_all(self.dir).map_err(disk_error)?;
         let mut file = File::create(part).map_err(disk_error)?;
         let mut hasher = Sha256::new();
         let mut throttle = ProgressThrottle::new();
@@ -449,29 +524,25 @@ impl Job {
             };
             let chunk = &buf[..n];
             received = received.saturating_add(chunk.len() as u64);
-            if received > entry.size_bytes {
+            if received > pin.size_bytes {
                 // Longer than the pinned file: it cannot be the pinned file.
                 return Err(self.failed(DownloadFailure::ChecksumMismatch));
             }
             file.write_all(chunk).map_err(disk_error)?;
             hasher.update(chunk);
             if throttle.should_emit(crate::clock::instant()) {
-                events(DownloadEvent::Progress {
-                    id: entry.id,
-                    received,
-                    total: entry.size_bytes,
-                });
+                progress(received);
             }
         }
         if self.cancelled() {
             return Err(End::Cancelled);
         }
-        if received < entry.size_bytes {
+        if received < pin.size_bytes {
             return Err(self.failed(DownloadFailure::DownloadInterrupted));
         }
         file.sync_all().map_err(disk_error)?;
         drop(file);
-        if !hex_eq(&hasher.finalize(), entry.sha256) {
+        if !hex_eq(&hasher.finalize(), pin.sha256) {
             return Err(self.failed(DownloadFailure::ChecksumMismatch));
         }
         Ok(())
@@ -490,7 +561,7 @@ fn remove_part(part: &Path) {
 }
 
 /// `digest` as lowercase hex equals `pinned` (64 lowercase hex digits).
-fn hex_eq(digest: &[u8], pinned: &str) -> bool {
+pub(crate) fn hex_eq(digest: &[u8], pinned: &str) -> bool {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let pinned = pinned.as_bytes();
     pinned.len() == digest.len() * 2
