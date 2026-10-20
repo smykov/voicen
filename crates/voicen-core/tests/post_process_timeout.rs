@@ -1,6 +1,6 @@
 //! T-020: the post-processing deadline (FR-24, spec 003 FR-004 / SC-003, decision
 //! #99). Its own binary because both cases take real seconds: the production
-//! default (15 s) against a server that accepts and stays silent, and a configured
+//! default (15 s) against a server that answers after 15.5 s, and a configured
 //! `post_processing_s = 5` read from the job's settings snapshot through the
 //! production pipeline (`Pipeline::new`), the reader T-073 left to T-020.
 //!
@@ -9,21 +9,22 @@
 //! servers that accept and answer late or never, never with a refused or
 //! unroutable address (F-004, F-005). Fake data only: 127.0.0.1, `sk-test-...`.
 //!
-//! The clock is read only through `common::timing` (T-080 I2): each case checks the
-//! lower bound (`at_least`: the deadline did not fire early) and SC-003's tolerance
-//! (`within_spec`: the stage over the fastest of 3 baseline runs is the deadline
-//! ± 0.5 s, under the reference load of OQ-23 (a)), the only wall-clock ceiling in
-//! the core tests.
+//! The clock is read only through `common::timing` (T-080 I2), and only for the
+//! lower bound (`at_least`: the deadline did not fire early). SC-003's tolerance
+//! (± 0.5 s) is checked by its outcome, an outcome bracket (decision #149, T-110):
+//! the server answers 200 with a valid body at deadline + tolerance, so the right
+//! deadline gives the timeout outcome and a deadline past the tolerance gives
+//! Applied; a sibling leg with a generous deadline proves the same server answers.
+//! No wall-clock ceiling: a host stall can delay a case but not turn a correct
+//! deadline red (F-021).
 
 mod common;
 
-use std::io::Read;
-use std::net::TcpListener;
 use std::sync::Arc;
 use std::time::Duration;
 
 use common::held::{returns_while_held, Held};
-use common::timing::{ago, at_least, deadline, fastest, left, measure, within_spec, Took};
+use common::timing::{ago, at_least, measure, Took};
 
 use serde_json::json;
 use voicen_core::delivery::DeliveryResult;
@@ -51,37 +52,32 @@ const PP_KEY: &str = "sk-test-pp-SECRET";
 const RAW: &str = "привет  как\tдела, TRANSCRIPT-MARKER";
 const PROCESSED: &str = "Привет, как дела? PROCESSED";
 
-/// Wall-clock tolerance of contract guarantee 4 (SC-003).
-const SLACK: Duration = Duration::from_millis(500);
+/// SC-003's tolerance over a deadline: the bracket server answers this much after
+/// the deadline, so a deadline past the tolerance gets the answer (Applied).
+const TOLERANCE: Duration = Duration::from_millis(500);
 
-/// Baseline runs per case; the fastest is the baseline, so one cold run (first
-/// client build, first connect) is not counted as part of the stage (T-078).
-const BASELINE_RUNS: usize = 3;
-
-/// A listener that accepts one connection, reads the request and never answers;
-/// held open for `hold`. The thread is not joined.
-fn silent_server(hold: Duration) -> String {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind 127.0.0.1:0");
-    let addr = listener.local_addr().expect("local addr");
-    std::thread::spawn(move || {
-        let Ok((mut s, _)) = listener.accept() else {
-            return;
-        };
-        let end = deadline(hold);
-        let _ = s.set_read_timeout(Some(Duration::from_millis(200)));
-        let mut buf = [0u8; 8192];
-        while !left(end).is_zero() {
-            if let Ok(0) = s.read(&mut buf) {
-                return;
-            }
-        }
-    });
-    format!("http://{addr}/v1")
+/// A chat server that answers every request `delay` after it has read it, with 200
+/// and a valid `choices[0].message.content` of `PROCESSED`. wiremock reads the whole
+/// request before the delay starts, so the answer comes at least `delay` after the
+/// client's timers started (a raw listener that answers without draining the body
+/// risks a RST on Windows).
+async fn chat_answering_after(delay: Duration) -> MockServer {
+    let server = MockServer::start().await;
+    Mock::given(path_regex("/chat/completions$"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({
+                    "choices": [{ "message": { "role": "assistant", "content": PROCESSED } }]
+                }))
+                .set_delay(delay),
+        )
+        .mount(&server)
+        .await;
+    server
 }
 
-/// `ChatPostProcessor::process` with the production durations on a plain std
-/// thread, timed.
-fn process_timed(base: String) -> (PostProcessOutcome, Took) {
+/// `ChatPostProcessor::process` with `timeouts` on a plain std thread, timed.
+fn process_timed(base: String, timeouts: Timeouts) -> (PostProcessOutcome, Took) {
     let settings = PostProcessingSettings {
         enabled: true,
         base_url: base,
@@ -89,7 +85,6 @@ fn process_timed(base: String) -> (PostProcessOutcome, Took) {
         prompt: "PROMPT-MARKER".to_string(),
     };
     let creds = FakeCredentialStore::new().with_key(KeySlot::PostProcessing, PP_KEY);
-    let timeouts = Timeouts::default();
     std::thread::scope(|s| {
         s.spawn(|| {
             let input = PostProcessInput {
@@ -106,36 +101,41 @@ fn process_timed(base: String) -> (PostProcessOutcome, Took) {
 
 #[tokio::test]
 async fn default_deadline_skips_a_silent_server_at_15_s() {
-    // FR-24 / spec 003 FR-004, SC-003: with the production durations
-    // (Timeouts::default(), post_processing 15 s) a server that accepts and never
-    // answers ends the stage as Skipped(Timeout) 15 s +- 0.5 s after the call. The
-    // time is taken against the fastest of 3 baseline calls to a server that
-    // answers at once (client setup, connect, round trip), so a loaded debug build
-    // is not counted against the deadline. Bite: no request timeout (hangs until the server
-    // closes at 30 s), the connect timeout (5 s) or the transcription one (30 s)
-    // as the deadline, a fixed deadline of its own.
-    let prompt = MockServer::start().await;
-    Mock::given(path_regex("/chat/completions$"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "choices": [{ "message": { "role": "assistant", "content": PROCESSED } }]
-        })))
-        .mount(&prompt)
-        .await;
-    let baseline = fastest((0..BASELINE_RUNS).map(|_| {
-        let (got, took) = process_timed(format!("{}/v1", prompt.uri()));
-        assert_eq!(
-            got,
-            PostProcessOutcome::Applied(PROCESSED.to_string()),
-            "baseline"
-        );
-        took
-    }));
-
-    let (got, took) = process_timed(silent_server(Duration::from_secs(30)));
-    assert_eq!(got, PostProcessOutcome::Skipped(SkipReason::Timeout));
+    // FR-24 / spec 003 FR-004, SC-003 (15 s +- 0.5 s), checked by its outcome
+    // (decision #149, T-110): with the production durations (Timeouts::default(),
+    // post_processing 15 s) a server that stays silent until 15.5 s, the end of the
+    // tolerance, and then answers 200 with a valid body ends the stage as
+    // Skipped(Timeout), and not before 15 s. The sibling leg sends the same server
+    // a 60 s deadline and gets Applied(PROCESSED): the server does answer, so the
+    // Timeout leg is not passed by a broken body or a mock that never answers. No
+    // wall-clock ceiling (F-021: a 1.4 s host stall in the window is not a defect).
+    // Bite: no request timeout, the transcription (30 s) or local-server (60 s)
+    // value or any deadline past 15.5 s as the limit (the answer is applied); the
+    // connect timeout (5 s) or any deadline below 15 s (at_least); the answer read
+    // as a timeout, or every error read as Timeout (the 60 s leg).
     let want = Duration::from_secs(15);
+    let server = chat_answering_after(want + TOLERANCE).await;
+    let base = format!("{}/v1", server.uri());
+
+    let (got, took) = process_timed(base.clone(), Timeouts::default());
+    assert_eq!(
+        got,
+        PostProcessOutcome::Skipped(SkipReason::Timeout),
+        "the default deadline against an answer at {:?}",
+        want + TOLERANCE
+    );
     at_least(took, want);
-    within_spec(took.less(baseline), want, SLACK, "SC-003");
+
+    let generous = Timeouts {
+        post_processing: Duration::from_secs(60),
+        ..Timeouts::default()
+    };
+    let (got, _) = process_timed(base, generous);
+    assert_eq!(
+        got,
+        PostProcessOutcome::Applied(PROCESSED.to_string()),
+        "the same server, post_processing 60 s: it answers"
+    );
 }
 
 // ---- the configured value, through the production pipeline ------------------------
@@ -242,41 +242,25 @@ fn dictate(settings: Settings) -> Run {
 #[tokio::test]
 async fn configured_post_processing_timeout_delivers_the_raw_transcript() {
     // Acceptance 2 with #99: a job whose snapshot says post_processing_s = 5 (the
-    // #99 minimum), against a chat endpoint answering after 7 s, is delivered
-    // with the raw transcript byte for byte, ends as DeliveredSkipped(Timeout),
-    // no pending recording, JobFinished outcome text; the job takes 5 s +- 0.5 s
-    // longer than the fastest of 3 runs of the same job against a chat endpoint
-    // that answers at once (the baseline: gate, WAV, transcription, chat round
-    // trip; about 0.6 s in a debug build, so the whole job is not timed against
-    // 5 s). connect_s = 2, so the connect value
-    // read as the request limit would end it at about 2 s. The same server with
-    // the default snapshot (15 s) is applied. Bite: the processor on
-    // Timeouts::default() (the 7 s answer applied), on the pipeline's test
+    // #99 minimum), against a chat endpoint answering after 5.5 s (the end of
+    // SC-003's 0.5 s tolerance: an outcome bracket, decision #149, T-110), is
+    // delivered with the raw transcript byte for byte, ends as
+    // DeliveredSkipped(Timeout), no pending recording, JobFinished outcome text,
+    // and takes at least 5 s; no wall-clock ceiling (F-021). connect_s = 2, so
+    // the connect value read as the request limit would end it at about 2 s
+    // (at_least). The same server with the default snapshot (15 s) is applied, so
+    // the server does answer. Bite: the processor on Timeouts::default() or any
+    // limit past 5.5 s (the answer applied), on the pipeline's test
     // override field (None in production), on the connect value, or the pipeline
     // deriving a second Timeouts for the processor that ignores the snapshot; the
     // processed text or nothing delivered on a skip; the skip ended as Delivered
     // or Failed.
-    let server = transcribe_then_chat(Duration::from_secs(7)).await;
+    let want = Duration::from_secs(5);
+    let server = transcribe_then_chat(want + TOLERANCE).await;
     let base = format!("{}/v1", server.uri());
     let mut s = snapshot(&base);
     s.timeouts.post_processing_s = 5;
     s.timeouts.connect_s = 2;
-
-    // The baseline: the same snapshot against a chat endpoint answering at once.
-    let prompt = transcribe_then_chat(Duration::ZERO).await;
-    let prompt_base = format!("{}/v1", prompt.uri());
-    let mut fast = snapshot(&prompt_base);
-    fast.timeouts = s.timeouts;
-    let baseline = fastest((0..BASELINE_RUNS).map(|_| {
-        let run = dictate(fast.clone());
-        assert_eq!(
-            run.report.end,
-            JobEnd::Delivered { notice: None },
-            "baseline"
-        );
-        assert_eq!(run.clipboard, vec![PROCESSED.to_string()], "baseline");
-        run.took
-    }));
 
     let run = dictate(s);
     assert_eq!(
@@ -297,9 +281,7 @@ async fn configured_post_processing_timeout_delivers_the_raw_transcript() {
         "raw transcript byte for byte: {:?}",
         run.clipboard
     );
-    let want = Duration::from_secs(5);
     at_least(run.took, want);
-    within_spec(run.took.less(baseline), want, SLACK, "SC-003");
     let finished: Vec<&DictationEvent> = run
         .events
         .iter()

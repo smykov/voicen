@@ -3481,14 +3481,20 @@ fn realtime_source_paces_frames_by_real_time_and_pads_with_silence() {
 #[test]
 fn realtime_source_pushes_nothing_after_stop_or_drop() {
     // Row 19: once `stop` returns, or the handle is dropped, no frame reaches the
-    // sink. Bite: a push thread that is not joined, a drop that does not stop.
+    // sink. The premise (something was pushed before the stop) is awaited, not
+    // timed: a host that schedules the push thread late only delays the test
+    // (T-110, no wall-clock ceiling). Bite: a push thread that is not joined, a
+    // drop that does not stop.
     let source = RealtimeSource::from_buffer(&fixtures::speech_3s());
     for how in ["stop", "drop"] {
         let sink = Arc::new(CollectingSink::default());
         let handle = source
             .start(&realtime_device(&source), sink.clone())
             .expect("start");
-        thread::sleep(ms(200));
+        assert!(
+            eventually(|| !sink.calls().is_empty()),
+            "{how}: nothing pushed within {BUDGET:?}"
+        );
         if how == "stop" {
             handle.stop().expect("stop");
         } else {
@@ -3496,7 +3502,6 @@ fn realtime_source_pushes_nothing_after_stop_or_drop() {
         }
         sink.stopped.store(true, Ordering::SeqCst);
         let count = sink.calls().len();
-        assert!(count > 0, "{how}: nothing pushed in 200 ms");
         thread::sleep(ms(150));
         assert_eq!(
             sink.after_stop.load(Ordering::SeqCst),
