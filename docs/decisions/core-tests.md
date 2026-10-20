@@ -50,7 +50,7 @@ This is one rule for every kind of uncontrolled clock: the OS refusal time, the 
   - a stall holds longer than the harness waits for the end event (no end event);
   - a request count;
   - the overlay sequence.
-- There is no wall-clock ceiling in any core test. A spec tolerance (SC-003) is checked by its outcome: a server that answers 200 with a valid body at deadline + tolerance must still give the timeout outcome, and a sibling with a generous deadline proves the server answers (decision #149, which amends #107's measurement wording). A host stall can then delay a test but cannot turn a correct deadline red. `within_spec`, `REFERENCE_LOAD`, `fastest` and `Took::less` were retired in T-110.
+- There is no wall-clock ceiling in any core test. A spec tolerance (SC-003) is checked by its outcome: a server that answers 200 with a valid body at deadline + tolerance must still give the timeout outcome, and a sibling with a generous deadline proves the server answers (decision #149, which amends #107's measurement wording). A host stall can then delay such a test but cannot turn a correct deadline red. `within_spec`, `REFERENCE_LOAD`, `fastest` and `Took::less` were retired in T-110.
   - Its users: `post_process_timeout::default_deadline_skips_a_silent_server_at_15_s` (answer at 15.5 s, `Timeouts::default()` → `Skipped(Timeout)`; a 60 s sibling leg → `Applied`) and `post_process_timeout::configured_post_processing_timeout_delivers_the_raw_transcript` (answer at 5.5 s, `post_processing_s = 5` → `DeliveredSkipped(Timeout)`; the default snapshot → `Delivered`).
 
 **Other clock uses in tests:**
@@ -61,6 +61,7 @@ This is one rule for every kind of uncontrolled clock: the OS refusal time, the 
 - A settings value a fake engine records but nothing contacts (`dictation_session`) is a TEST-NET-2 literal (`198.51.100.9`), not an OS-answer target.
 - `dictation_session::realtime_source_paces_frames_by_real_time_and_pads_with_silence` holds the capture until about 1 s of audio arrived (`eventually`), not for a fixed sleep, and checks only that the capture lasted at least the audio less one chunk (`at_least(between(..))`).
 - `dictation_session::realtime_source_pushes_nothing_after_stop_or_drop` awaits its premise (the first push) with `eventually`, not after a fixed sleep (T-110); only the absence check after the stop sleeps, and a stall can only make an absence check pass.
+- A real-time verdict that needs the test thread to act before a product timer fires checks that premise, it does not time it (T-110 review 1 #1). Right after the act the test asks `passed(raised, MESSAGE_DURATION)`; when a host stall made it miss the premise, `dictation_session::with_premise` re-runs the scenario on a fresh rig while `BUDGET` since the first start allows, and skips with the reason printed when every run missed. `passed` there decides only "no verdict", never a red, so it is not a ceiling. Its users: `timer_follows_the_latest_deadline` (B's press before A's `until`) and `a_job_failure_during_a_recording_shows_after_its_release_for_the_rest_of_its_3s` (B's release, and the overlay read after it, before A's `until`). The other real-time tests of `dictation_session` drop a possible expiry once its 3 s have passed (`settled`), stamp their instants in the past or ahead of the clock (`past()`, `audio_device`'s `ahead()`), or stamp a 10-minute deadline that the timer fires at once when it is already due (`the_session_timer_stops_a_recording_at_its_max_length`).
 
 **Defects that produced it:**
 - F-005: a refused loopback connect takes about 2.17 s on windows-latest, so a 300 ms total gave `Timeout`, not `CannotReach`.
@@ -97,7 +98,7 @@ This is one rule for every kind of uncontrolled clock: the OS refusal time, the 
   - `Unanswered`'s deadlines are destructured exhaustively in `os_answer_tests`;
   - `common_helpers` pins both modules.
 - By review only (T1):
-  - no ceiling written as instant arithmetic, as `!passed(..)` or `D - left(..)`, or in a unit test under `src` or a shell test slips in; no `catch_unwind(at_least)`; no edit of a case's `pub` deadline fields after construction (decisions #112); no new public reader of `Took` in `common::timing` besides `at_least` and `at_most_per_second` (T-110);
+  - no ceiling written as instant arithmetic, as `!passed(..)` or `D - left(..)`, or in a unit test under `src` or a shell test slips in; no real-time verdict that needs the test thread to act before a product timer without a premise check (`with_premise`), and no premise check that goes red instead of re-running or skipping (T-110); no `catch_unwind(at_least)`; no edit of a case's `pub` deadline fields after construction (decisions #112); no new public reader of `Took` in `common::timing` besides `at_least` and `at_most_per_second` (T-110);
   - when a ceiling is removed, an outcome catches its bite, named in the test's comment.
 - `ci.yml` runs the Windows workspace tests with `--no-fail-fast`, so one red binary does not hide the others.
 
@@ -121,5 +122,13 @@ This is one rule for every kind of uncontrolled clock: the OS refusal time, the 
 
 ## Open
 
+- In-time legs against a loopback server (T-110 review 1 #1, the grep of hypothesis 3 redone): a test that expects an answer, not a timeout, from a local mock under a finite product deadline still needs that answer before the deadline, so a host stall longer than the margin turns it red on correct code. This is the presence-before-a-deadline shape on the server side, not the test thread's; no premise check covers it yet. T1 residual, not fixed in T-110 (follow-up for the orchestrator). The margins found, smallest first:
+  - about 300 ms: the immediate-answer scenarios (`pasted`, `copied only`, `clipboard fails`, `401`, `500`, bad body) of `api_pipeline::no_event_or_failure_carries_key_query_or_transcript` and `diag_pipeline::log_holds_no_key_query_or_transcript_on_any_path` run under the `ms` timeouts (300 ms whole request); `local_download`'s retry after a stall (`assert_retry_succeeds` in `stall_past_no_data_fails_interrupted_within_the_timeout_then_retry_succeeds` and `no_response_headers_within_no_data_fails_then_retry_succeeds`) downloads the whole model under `no_data = 300 ms`;
+  - 350 ms per gap: `local_download::trickle_longer_than_no_data_succeeds_and_stall_fails` (a chunk every 50 ms, `no_data = 400 ms`);
+  - about 2 s: every loopback call under a test helper's `connect: 2 s` (`openai_client::timeouts`, `connection_test::quick`, `post_process_chat::timeouts`, `local_models_service::timeouts`, `local_model_delete::timeouts`, `common::download::timeouts`); `local_download::cancel_during_steady_transfer_ends_cancelled_quickly` (60 ms gaps, `no_data = 2 s`);
+  - 3.5 s: `local_server::request_deadline_is_local_server_not_api_transcription` (an answer at 1.5 s, a 5 s local-server deadline);
+  - about 5 s: the same helpers' 5 s whole-request and no-data limits; `diag_pipeline::post_processing_outcome_is_logged_without_prompt_reply_host_or_key` (a chat answer at 150 ms under 5 s);
+  - 9.5 s: `post_process_timeout::configured_post_processing_timeout_delivers_the_raw_transcript`'s default-snapshot leg (answer at 5.5 s, default 15 s; accepted in T-110 review 1).
+  Margins of `BUDGET` scale and above (the 44.5 s sibling leg of the SC-003 bracket, the 23-58 s siblings of `api_pipeline`, `local_server` and `connection_test`) only end a hung test.
 - The ~2 s user-facing refusal on Windows: OQ-07 (non-blocking).
 - `src-tauri/tests/settings_ipc.rs` keeps one `took < 30 s` ceiling on its refused invoke. The shell tests are outside the I1 tripwire's and the I2 ban's scope.

@@ -100,7 +100,7 @@ description: "Task list for LLM post-processing (003)"
   - a delayed reply beyond the scaled total → `Timeout`.
 
   — req FR-09, FR-24 — FR-003, FR-005, FR-006 — L
-- [ ] T014 [P] [US2] Write a red real-timeout test in `crates/voicen-core/tests/post_process_timeout.rs`: the mock accepts the connection and never answers, and with default `Timeouts` the step returns `Skipped(Timeout)` within 15 s ± 0.5 s (SC-003) — req FR-24 — FR-003, FR-004 — L
+- [ ] T014 [P] [US2] Write a red real-timeout test in `crates/voicen-core/tests/post_process_timeout.rs`: the mock accepts the connection and never answers, and with default `Timeouts` the step returns `Skipped(Timeout)` within 15 s ± 0.5 s (SC-003) — req FR-24 — FR-003, FR-004 — L. Note: checked by an outcome bracket (#149), T-110: the mock answers at 15.5 s, no ceiling.
 - [ ] T015 [P] [US2] Write red pipeline tests in `crates/voicen-core/tests/post_process_pipeline.rs`. They use a fake `PostProcessor` that returns each `Skipped(reason)`, a fake notifier and a fake pending store. For every reason they check:
   - the raw text is delivered;
   - exactly one `Notice::PostProcessingSkipped(reason)` is raised;

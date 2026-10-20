@@ -16,6 +16,9 @@
 //! `RealtimeSource`) check recorded instants only from below (an expiry never
 //! before its `until`) and by order; a late or missing expiry shows as the wrong
 //! overlay sequence or no `Hidden` within `BUDGET`, never as a wall-clock ceiling.
+//! A verdict that needs the test thread to act before a timer fires checks that
+//! premise with `passed` and re-runs or skips the scenario (`with_premise`, T-110),
+//! so a host stall gives no verdict rather than a red.
 //! Everything that waits on the session's threads is bounded by `BUDGET`, so a
 //! broken session fails instead of hanging.
 //! Fake data only: example.com, `sk-test-SECRET`.
@@ -135,6 +138,31 @@ fn settled<T: PartialEq>(mut calls: Vec<T>, hidden: T, raised: Instant) -> Vec<T
         calls.pop();
     }
     calls
+}
+
+/// Runs a real-time scenario whose verdict needs the test thread to act before a
+/// product timer fires (B's press before A's message expires; T-110 review 1 #1).
+/// `run` builds its own rig, checks that premise with `passed` right after the
+/// act, and returns `false` when a host stall made the test thread miss it; it is
+/// then re-run on a fresh rig while `BUDGET` since the first start allows. When
+/// every run missed, the test is skipped with the reason printed: a missed premise
+/// gives no verdict, never a red. The verdict is the assertions inside `run`.
+fn with_premise(what: &str, mut run: impl FnMut() -> bool) {
+    let start = now();
+    let mut missed = 0;
+    loop {
+        if run() {
+            return;
+        }
+        missed += 1;
+        if passed(start, BUDGET) {
+            eprintln!(
+                "skipped: {what}: the premise was missed {missed} time(s) within {BUDGET:?} \
+                 (a host stall), no verdict"
+            );
+            return;
+        }
+    }
 }
 
 /// The "microphone unavailable" overlay with the catalog id of its reason
@@ -1670,43 +1698,52 @@ fn timer_follows_the_latest_deadline() {
     // A's message); the overlay is hidden at B's `until`, not at A's. Bite: the
     // timer not re-armed on a mutation (it wakes at A's deadline, the tick changes
     // nothing, and it never wakes again: no Hidden), a timer that waits only for
-    // the first deadline it saw.
-    let rig = Rig::new(api_settings(), always(TEXT));
-    rig.audio.set_start_error(Some(CaptureError::AccessDenied));
-    let ta = now();
-    rig.session.hotkey_pressed(ta);
-    rig.session.hotkey_released(now());
-    thread::sleep(Duration::from_secs(1));
-    let tb = now();
-    rig.session.hotkey_pressed(tb);
-    rig.session.hotkey_released(now());
-    assert!(
-        eventually(|| rig.indicator.overlays().contains(&OverlayState::Hidden)),
-        "the message never expired: {:?}",
-        rig.indicator.calls()
-    );
-    let hidden_at = rig
-        .indicator
-        .timed_calls()
-        .iter()
-        .find(|(_, c)| *c == IndicatorCall::Overlay(OverlayState::Hidden))
-        .map(|(at, _)| *at)
-        .expect("Hidden was published");
-    let until_b = tb + MESSAGE_DURATION;
-    assert!(
-        hidden_at >= until_b,
-        "hidden {:?} before B's until (at A's deadline?)",
-        until_b - hidden_at
-    );
-    assert_eq!(
-        rig.indicator.overlays(),
-        vec![
-            mic_message("mic_reason.access_denied", ta + MESSAGE_DURATION),
-            mic_message("mic_reason.access_denied", until_b),
-            OverlayState::Hidden,
-        ]
-    );
-    assert_eq!(rig.indicator.trays(), vec![(TrayState::Error, false)]);
+    // the first deadline it saw. Premise (T-110): B's press returns before A's
+    // `until`; checked with `passed`, not timed by the 1 s sleep, so a host stall
+    // past A's deadline re-runs the scenario (`with_premise`) instead of turning a
+    // correct timer red.
+    with_premise("B's press before A's until", || {
+        let rig = Rig::new(api_settings(), always(TEXT));
+        rig.audio.set_start_error(Some(CaptureError::AccessDenied));
+        let ta = now();
+        rig.session.hotkey_pressed(ta);
+        rig.session.hotkey_released(now());
+        thread::sleep(Duration::from_secs(1));
+        let tb = now();
+        rig.session.hotkey_pressed(tb);
+        if passed(ta, MESSAGE_DURATION) {
+            return false;
+        }
+        rig.session.hotkey_released(now());
+        assert!(
+            eventually(|| rig.indicator.overlays().contains(&OverlayState::Hidden)),
+            "the message never expired: {:?}",
+            rig.indicator.calls()
+        );
+        let hidden_at = rig
+            .indicator
+            .timed_calls()
+            .iter()
+            .find(|(_, c)| *c == IndicatorCall::Overlay(OverlayState::Hidden))
+            .map(|(at, _)| *at)
+            .expect("Hidden was published");
+        let until_b = tb + MESSAGE_DURATION;
+        assert!(
+            hidden_at >= until_b,
+            "hidden {:?} before B's until (at A's deadline?)",
+            until_b - hidden_at
+        );
+        assert_eq!(
+            rig.indicator.overlays(),
+            vec![
+                mic_message("mic_reason.access_denied", ta + MESSAGE_DURATION),
+                mic_message("mic_reason.access_denied", until_b),
+                OverlayState::Hidden,
+            ]
+        );
+        assert_eq!(rig.indicator.trays(), vec![(TrayState::Error, false)]);
+        true
+    });
 }
 
 #[test]
@@ -1722,130 +1759,143 @@ fn a_job_failure_during_a_recording_shows_after_its_release_for_the_rest_of_its_
     // release (no Message), `until` restarted at the release, the timer not woken
     // for the new deadline (no change at `until`), the message hidden behind
     // Processing.
-    let [a, b, _] = three_recordings();
-    let (a_entered_tx, a_entered) = mpsc::channel::<()>();
-    let (go_a, go_a_rx) = mpsc::channel::<()>();
-    let (go_b, go_b_rx) = mpsc::channel::<()>();
-    let a_entered_tx = Mutex::new(a_entered_tx);
-    let go_a_rx = Mutex::new(go_a_rx);
-    let go_b_rx = Mutex::new(go_b_rx);
-    let reply: Reply = Box::new(move |audio: &AudioBuffer| match audio.samples().len() {
-        48_000 => {
-            let _ = lock(&a_entered_tx).send(());
-            let _ = lock(&go_a_rx).recv_timeout(BUDGET);
-            Err(FailureReason::ServerError { status: 503 })
+    // Premise (T-110): B's release, and the read of the overlay after it, come
+    // before A's `until`; checked with `passed` from the go to A's engine (the
+    // earliest instant `until` can be counted from), not timed by the 1 s sleep,
+    // so a host stall past A's deadline re-runs the scenario (`with_premise`)
+    // instead of turning a correct expiry red.
+    with_premise("B's release before A's until", || {
+        let [a, b, _] = three_recordings();
+        let (a_entered_tx, a_entered) = mpsc::channel::<()>();
+        let (go_a, go_a_rx) = mpsc::channel::<()>();
+        let (go_b, go_b_rx) = mpsc::channel::<()>();
+        let a_entered_tx = Mutex::new(a_entered_tx);
+        let go_a_rx = Mutex::new(go_a_rx);
+        let go_b_rx = Mutex::new(go_b_rx);
+        let reply: Reply = Box::new(move |audio: &AudioBuffer| match audio.samples().len() {
+            48_000 => {
+                let _ = lock(&a_entered_tx).send(());
+                let _ = lock(&go_a_rx).recv_timeout(BUDGET);
+                Err(FailureReason::ServerError { status: 503 })
+            }
+            32_000 => {
+                let _ = lock(&go_b_rx).recv_timeout(BUDGET);
+                Ok("B".to_string())
+            }
+            n => Ok(format!("unexpected audio of {n} samples")),
+        });
+        let rig = Rig::new(api_settings(), reply);
+        let a_message = |until: Instant| OverlayState::Message {
+            id: i18n::FAILURE_SERVER_ERROR,
+            params: vec![("status", "503".to_string())],
+            until,
+        };
+
+        rig.hold(&a, past(), ms(3000));
+        assert!(
+            a_entered.recv_timeout(BUDGET).is_ok(),
+            "A's job never reached the engine"
+        );
+        let tb = now();
+        rig.frames(&b, tb + FIRST_FRAME);
+        rig.session.hotkey_pressed(tb);
+        let failing_from = now();
+        go_a.send(()).expect("A's engine is waiting");
+        // The 503 keeps A's audio pending, so the tray (Recording while B is on) gains
+        // Retry, published in the critical section of A's job_finished: its instant is
+        // at or after the failure instant.
+        let retry_tray = IndicatorCall::Tray(TrayState::Recording, true);
+        assert!(
+            eventually(|| rig.indicator.calls().contains(&retry_tray)),
+            "A's job did not end while B records: {:?}",
+            rig.indicator.calls()
+        );
+        let failed_by = rig
+            .indicator
+            .timed_calls()
+            .iter()
+            .find(|(_, c)| *c == retry_tray)
+            .map(|(at, _)| *at)
+            .expect("the Retry tray was published");
+        assert_eq!(
+            rig.indicator.overlays(),
+            vec![
+                OverlayState::Recording,
+                OverlayState::Processing,
+                OverlayState::Recording,
+            ],
+            "A's failure must not show while B records"
+        );
+
+        // B released 1 s after A's failure: about 2 s of the message are left
+        // unless the host stalled (the premise check below).
+        thread::sleep(ms(1000));
+        let released = now();
+        rig.session.hotkey_released(released);
+        let shown = rig.indicator.overlays();
+        if passed(failing_from, MESSAGE_DURATION) {
+            let _ = go_b.send(());
+            return false;
         }
-        32_000 => {
-            let _ = lock(&go_b_rx).recv_timeout(BUDGET);
-            Ok("B".to_string())
-        }
-        n => Ok(format!("unexpected audio of {n} samples")),
+        let until = match shown.last() {
+            Some(OverlayState::Message { until, .. }) => *until,
+            other => panic!("no message after B's release: {other:?} (all: {shown:?})"),
+        };
+        assert_eq!(
+            shown.last(),
+            Some(&a_message(until)),
+            "A's message after B's release"
+        );
+        assert!(
+            until >= failing_from + MESSAGE_DURATION && until <= failed_by + MESSAGE_DURATION,
+            "until is not A's failure instant + 3 s: {:?} after the go, {:?} after the Retry tray",
+            until.saturating_duration_since(failing_from),
+            until.saturating_duration_since(failed_by)
+        );
+        assert!(
+            until < released + MESSAGE_DURATION,
+            "until restarted at B's release"
+        );
+
+        // At `until` the message expires; B's job is still in the engine: Processing.
+        assert!(
+            eventually(|| rig.indicator.overlays().len() > shown.len()),
+            "the message never expired: {:?}",
+            rig.indicator.calls()
+        );
+        let (expired_at, next) = rig
+            .indicator
+            .timed_calls()
+            .into_iter()
+            .filter_map(|(at, c)| match c {
+                IndicatorCall::Overlay(o) => Some((at, o)),
+                IndicatorCall::Tray(..) => None,
+            })
+            .nth(shown.len())
+            .expect("an overlay change after the message");
+        assert_eq!(next, OverlayState::Processing, "B's job is still running");
+        assert!(
+            expired_at >= until,
+            "expired {:?} before its until",
+            until - expired_at
+        );
+
+        go_b.send(()).expect("B's engine is waiting");
+        rig.wait_jobs(2);
+        assert_eq!(rig.clipboard.texts(), vec!["B"]);
+        assert_eq!(
+            rig.indicator.overlays(),
+            vec![
+                OverlayState::Recording,
+                OverlayState::Processing,
+                OverlayState::Recording,
+                a_message(until),
+                OverlayState::Processing,
+                OverlayState::Hidden,
+            ]
+        );
+        true
     });
-    let rig = Rig::new(api_settings(), reply);
-    let a_message = |until: Instant| OverlayState::Message {
-        id: i18n::FAILURE_SERVER_ERROR,
-        params: vec![("status", "503".to_string())],
-        until,
-    };
-
-    rig.hold(&a, past(), ms(3000));
-    assert!(
-        a_entered.recv_timeout(BUDGET).is_ok(),
-        "A's job never reached the engine"
-    );
-    let tb = now();
-    rig.frames(&b, tb + FIRST_FRAME);
-    rig.session.hotkey_pressed(tb);
-    let failing_from = now();
-    go_a.send(()).expect("A's engine is waiting");
-    // The 503 keeps A's audio pending, so the tray (Recording while B is on) gains
-    // Retry, published in the critical section of A's job_finished: its instant is
-    // at or after the failure instant.
-    let retry_tray = IndicatorCall::Tray(TrayState::Recording, true);
-    assert!(
-        eventually(|| rig.indicator.calls().contains(&retry_tray)),
-        "A's job did not end while B records: {:?}",
-        rig.indicator.calls()
-    );
-    let failed_by = rig
-        .indicator
-        .timed_calls()
-        .iter()
-        .find(|(_, c)| *c == retry_tray)
-        .map(|(at, _)| *at)
-        .expect("the Retry tray was published");
-    assert_eq!(
-        rig.indicator.overlays(),
-        vec![
-            OverlayState::Recording,
-            OverlayState::Processing,
-            OverlayState::Recording,
-        ],
-        "A's failure must not show while B records"
-    );
-
-    // B released 1 s after A's failure: about 2 s of the message are left.
-    thread::sleep(ms(1000));
-    let released = now();
-    rig.session.hotkey_released(released);
-    let shown = rig.indicator.overlays();
-    let until = match shown.last() {
-        Some(OverlayState::Message { until, .. }) => *until,
-        other => panic!("no message after B's release: {other:?} (all: {shown:?})"),
-    };
-    assert_eq!(
-        shown.last(),
-        Some(&a_message(until)),
-        "A's message after B's release"
-    );
-    assert!(
-        until >= failing_from + MESSAGE_DURATION && until <= failed_by + MESSAGE_DURATION,
-        "until is not A's failure instant + 3 s: {:?} after the go, {:?} after the Retry tray",
-        until.saturating_duration_since(failing_from),
-        until.saturating_duration_since(failed_by)
-    );
-    assert!(
-        until < released + MESSAGE_DURATION,
-        "until restarted at B's release"
-    );
-
-    // At `until` the message expires; B's job is still in the engine: Processing.
-    assert!(
-        eventually(|| rig.indicator.overlays().len() > shown.len()),
-        "the message never expired: {:?}",
-        rig.indicator.calls()
-    );
-    let (expired_at, next) = rig
-        .indicator
-        .timed_calls()
-        .into_iter()
-        .filter_map(|(at, c)| match c {
-            IndicatorCall::Overlay(o) => Some((at, o)),
-            IndicatorCall::Tray(..) => None,
-        })
-        .nth(shown.len())
-        .expect("an overlay change after the message");
-    assert_eq!(next, OverlayState::Processing, "B's job is still running");
-    assert!(
-        expired_at >= until,
-        "expired {:?} before its until",
-        until - expired_at
-    );
-
-    go_b.send(()).expect("B's engine is waiting");
-    rig.wait_jobs(2);
-    assert_eq!(rig.clipboard.texts(), vec!["B"]);
-    assert_eq!(
-        rig.indicator.overlays(),
-        vec![
-            OverlayState::Recording,
-            OverlayState::Processing,
-            OverlayState::Recording,
-            a_message(until),
-            OverlayState::Processing,
-            OverlayState::Hidden,
-        ]
-    );
 }
 
 // ---- retry, toggle, settings, hotkey registration -------------------------------------

@@ -24,7 +24,7 @@ Guarantees:
 1. Exactly one HTTP request per call, to `{snapshot.base_url}/chat/completions`, with the request body from data-model "ChatRequest" (FR-001, FR-013).
 2. `Authorization` header present iff `snapshot.key.is_some()` (FR-012).
 3. It returns `Applied(trimmed)` only when the trimmed content is non-empty. Every other result is `Skipped(reason)` per the R4 mapping (FR-003, FR-005, FR-006).
-4. Wall-clock time from call to return is ≤ `timeouts.post_processing` + scheduling slack, with a test tolerance of 0.5 s (FR-004, SC-003).
+4. Wall-clock time from call to return is ≤ `timeouts.post_processing` + scheduling slack, with a test tolerance of 0.5 s (FR-004, SC-003). Note: checked by an outcome bracket (#149): a server that answers 200 at the deadline + 0.5 s still gives `Skipped(Timeout)`, a sibling with a generous deadline gives `Applied`, and the time is checked only from below (`at_least`); no wall-clock ceiling (T-110).
 5. The returned value and any error path contain no key, prompt, raw text or response body (FR-014).
 
 ## Added: pipeline wiring (in 001's pipeline)
