@@ -6,10 +6,10 @@
 //! I2: a wall-clock reading decides only a lower bound ([`at_least`]: a deadline
 //! never fires early). A wrong longer deadline is caught by the outcome (the server
 //! answers between the right and the wrong deadline, or the mock's request count),
-//! never by a ceiling, because a ceiling races host scheduling (F-013, T-046, T-047).
-//! The only ceiling is a spec-stated tolerance, through [`within_spec`], which names
-//! the spec id and the reference load the tolerance holds under ([`REFERENCE_LOAD`],
-//! OQ-23, decision #107).
+//! never by a ceiling, because a ceiling races host scheduling (F-013, F-021, T-046,
+//! T-047). There is no wall-clock ceiling in any core test, a spec tolerance
+//! included: SC-003's is checked by an outcome bracket (decision #149, T-110, which
+//! retired `within_spec` and its baseline helpers).
 //!
 //! The stopwatch ([`measure`], [`between`]) returns an opaque [`Took`] that only
 //! these helpers read, so a ceiling on a measured time does not compile (review 1
@@ -23,16 +23,9 @@
 use std::thread;
 use std::time::{Duration, Instant};
 
-/// The host load a spec tolerance holds under, as the owner answered OQ-23
-/// (decision #107): the gate's own load, one `make check` at a time,
-/// `cargo test -j2`, test binaries one after another, on the dev host and the CI
-/// runners. Red under a heavier concurrent load is then not a defect.
-pub const REFERENCE_LOAD: &str = "OQ-23 (decision #107): the gate's own \
-     load, one `make check`, `cargo test -j2`, test binaries one after another";
-
 /// The current instant, as a timestamp handed to a product API (a press, a
 /// release, a frame's `at`). Not a measurement: a duration is taken with
-/// [`measure`], and a bound is checked with [`at_least`] or [`within_spec`].
+/// [`measure`], and a bound is checked with [`at_least`].
 pub fn now() -> Instant {
     Instant::now()
 }
@@ -57,9 +50,8 @@ pub fn try_ago(d: Duration) -> Option<Instant> {
 ///
 /// Opaque on purpose: no comparison, no `==`, no deref or conversion back to a
 /// [`Duration`], so a ceiling on a measured time (`assert!(took < ...)`) does not
-/// compile. Only [`at_least`] (the lower bound), [`within_spec`] (a spec-stated
-/// tolerance) and [`at_most_per_second`] (a count capped by the time) read it;
-/// [`Took::less`] and [`fastest`] keep a baseline subtraction a `Took`. `Debug`
+/// compile. Only [`at_least`] (the lower bound) and [`at_most_per_second`] (a
+/// count capped by the time, which host load can only widen) read it. `Debug`
 /// prints the duration for failure messages. `From<Duration>` exists for the
 /// helpers' own contract tests and for times a product reports; it gives nothing
 /// back. Pinned by `timing_tests::a_measured_time_cannot_be_compared_or_read_back_so_no_ceiling_compiles`.
@@ -67,12 +59,6 @@ pub fn try_ago(d: Duration) -> Option<Instant> {
 pub struct Took(Duration);
 
 impl Took {
-    /// This time less `baseline` (zero when the baseline is longer): the SC-003
-    /// stage over the fastest baseline run.
-    pub fn less(self, baseline: Took) -> Took {
-        Took(self.0.saturating_sub(baseline.0))
-    }
-
     /// The duration, for the other helpers of `tests/common` only (the OS-answer
     /// probes); never handed to a test file.
     pub(super) fn duration(self) -> Duration {
@@ -106,16 +92,6 @@ pub fn between(start: Instant, end: Instant) -> Took {
     Took(end.saturating_duration_since(start))
 }
 
-/// The fastest of `runs` (a baseline taken as the minimum of several runs, so a
-/// cold first run does not count). Panics on no run: a test bug.
-pub fn fastest(runs: impl IntoIterator<Item = Took>) -> Took {
-    runs.into_iter()
-        .map(|t| t.0)
-        .min()
-        .map(Took)
-        .unwrap_or_else(|| panic!("fastest: no baseline run"))
-}
-
 /// The lower bound a wall-clock reading may decide: `took` (a measured time) is at
 /// least `deadline`, i.e. the deadline did not fire early and no shorter wrong limit
 /// was used. No upper side: a wrong longer limit is caught by the outcome.
@@ -138,24 +114,6 @@ pub fn at_most_per_second(count: usize, per_second: usize, took: Took, what: &st
     assert!(
         count <= max,
         "{count} {what} over {took:?}: more than {per_second}/s (+ 1)"
-    );
-}
-
-/// A spec-stated tolerance, the only wall-clock ceiling a core test may assert
-/// (I2): `stage` lies within `want ± tol`, both ends inclusive. `spec` names the
-/// spec item that states the tolerance (e.g. `"SC-003"`); a ceiling without one is
-/// refused. The failure names the spec id, the stage and [`REFERENCE_LOAD`].
-pub fn within_spec(stage: impl Into<Took>, want: Duration, tol: Duration, spec: &str) {
-    let stage = stage.into().0;
-    assert!(
-        !spec.trim().is_empty(),
-        "within_spec: a wall-clock ceiling needs the id of the spec item that states \
-         its tolerance (T-080 I2); got {spec:?} for stage {stage:?}"
-    );
-    assert!(
-        stage + tol >= want && stage <= want + tol,
-        "{spec}: stage {stage:?} is outside {want:?} ± {tol:?} (the spec's tolerance, \
-         held under {REFERENCE_LOAD})"
     );
 }
 

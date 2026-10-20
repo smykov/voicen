@@ -1,9 +1,8 @@
 //! T-080 (I2, docs/decisions/core-tests.md): the contract of `common::timing`, the only
 //! place a core test reads the wall clock. A wall-clock reading decides only a lower
-//! bound ([`at_least`]: a deadline never fires early); the only ceiling is a
-//! spec-stated tolerance ([`within_spec`]), whose failure names the spec id and the
-//! reference load the tolerance holds under (OQ-23: the gate's own load, one
-//! `make check`, `cargo test -j2`). [`measure`] is the stopwatch callers use instead
+//! bound ([`at_least`]: a deadline never fires early); no core test asserts a
+//! wall-clock ceiling, a spec tolerance included (SC-003 is checked by an outcome
+//! bracket, decision #149; `within_spec` was retired in T-110). [`measure`] is the stopwatch callers use instead
 //! of `Instant::now()` / `.elapsed()` (refused outside `tests/common` by the
 //! package's call ban, rustc's path resolution, T-089).
 //!
@@ -15,12 +14,8 @@ use std::ops::Deref;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::time::Duration;
 
-use crate::common::timing::{
-    at_least, at_most_per_second, between, fastest, measure, now, within_spec, Took,
-};
+use crate::common::timing::{at_least, at_most_per_second, between, measure, now, Took};
 
-/// SC-003's tolerance (spec 003: "measured tolerance <= 0.5 s").
-const TOL: Duration = Duration::from_millis(500);
 const WANT: Duration = Duration::from_secs(5);
 
 /// The panic message of `f`, or `None` when it did not panic.
@@ -33,69 +28,6 @@ fn panic_message(f: impl FnOnce()) -> Option<String> {
     } else {
         "<non-string panic payload>".to_string()
     })
-}
-
-#[test]
-fn within_spec_refuses_a_stage_0_6_s_over_a_0_5_s_tolerance() {
-    // The red case of the analysis (iv): 5.6 s against 5 s +- 0.5 s breaks SC-003.
-    // The message names the spec id, the stage and the reference load (OQ-23), so a
-    // red run says which promise broke and under which load it holds. Bite: a
-    // helper that does not check the upper side, one that widens the tolerance
-    // (T-078's + 3 s), a message without the spec id or the load.
-    let msg = panic_message(|| within_spec(WANT + Duration::from_millis(600), WANT, TOL, "SC-003"))
-        .expect("a stage 0.6 s over a 0.5 s tolerance must fail within_spec");
-    assert!(
-        msg.contains("SC-003"),
-        "the message names the spec id: {msg}"
-    );
-    assert!(
-        msg.contains("OQ-23"),
-        "the message names the reference load (OQ-23): {msg}"
-    );
-    assert!(
-        msg.contains(&format!("{:?}", WANT + Duration::from_millis(600))),
-        "the message names the measured stage: {msg}"
-    );
-}
-
-#[test]
-fn within_spec_accepts_the_tolerance_edges_and_inside() {
-    // "Tolerance <= 0.5 s" includes 0.5 s on either side. Bite: a strict `<`, a
-    // one-sided check that fails a stage below `want`.
-    for stage in [
-        WANT,
-        WANT + TOL,
-        WANT - TOL,
-        WANT + Duration::from_millis(499),
-    ] {
-        if let Some(msg) = panic_message(|| within_spec(stage, WANT, TOL, "SC-003")) {
-            panic!("{stage:?} is within {WANT:?} +- {TOL:?}, but within_spec failed: {msg}");
-        }
-    }
-}
-
-#[test]
-fn within_spec_refuses_a_stage_that_ended_before_the_tolerance() {
-    // A deadline that fires 0.6 s early breaks SC-003 just as a late one does (the
-    // existing check is two-sided: `stage + SLACK >= want && stage <= want + SLACK`).
-    // Bite: an upper-bound-only helper.
-    let msg = panic_message(|| within_spec(WANT - Duration::from_millis(600), WANT, TOL, "SC-003"))
-        .expect("a stage 0.6 s under a 0.5 s tolerance must fail within_spec");
-    assert!(msg.contains("SC-003"), "{msg}");
-}
-
-#[test]
-fn within_spec_refuses_a_ceiling_without_a_spec_id() {
-    // I2: the only ceiling allowed is a spec-stated tolerance, so a ceiling that
-    // names no spec is refused even when the stage is inside it. Bite: a helper
-    // that ignores its spec argument (any test could then add an undocumented
-    // ceiling through it).
-    for spec in ["", "  "] {
-        assert!(
-            panic_message(|| within_spec(WANT, WANT, TOL, spec)).is_some(),
-            "within_spec with spec id {spec:?} must fail: a ceiling names its spec"
-        );
-    }
 }
 
 #[test]
@@ -167,7 +99,7 @@ macro_rules! assert_not_impl {
 #[test]
 fn a_measured_time_cannot_be_compared_or_read_back_so_no_ceiling_compiles() {
     // T-080 review 1 #1: `measure` returns an opaque `Took`, taken only by
-    // `at_least`, `within_spec` and `at_most_per_second`, so
+    // `at_least` and `at_most_per_second` (T-110 retired `within_spec`), so
     // `assert!(took < Duration::from_millis(1500))` on its result does not compile.
     // Each line below fails to compile once `Took` gains the trait (a comparison,
     // an `==`, a deref or conversion back to a Duration). Bite: `measure` returning
@@ -203,40 +135,6 @@ fn between_two_stamps_is_a_measured_time_from_the_first_to_the_second() {
     assert!(
         panic_message(|| at_least(between(b, a), Duration::from_nanos(1))).is_some(),
         "an end before the start is zero"
-    );
-}
-
-#[test]
-fn fastest_and_less_give_the_sc_003_stage_over_the_baseline() {
-    // SC-003's stage is the measured time over the fastest of the baseline runs
-    // (post_process_timeout), kept a `Took`. Bite: the slowest or the first run as
-    // the baseline, a subtraction that panics or wraps below zero.
-    let runs = [6, 2, 4].map(|s| Took::from(Duration::from_secs(s)));
-    let base = fastest(runs);
-    within_spec(base, Duration::from_secs(2), Duration::ZERO, "SC-003");
-    let stage = Took::from(Duration::from_millis(7_400)).less(base);
-    within_spec(
-        stage,
-        Duration::from_millis(5_400),
-        Duration::ZERO,
-        "SC-003",
-    );
-    assert!(
-        panic_message(|| within_spec(
-            Took::from(Duration::from_secs(1)).less(base),
-            Duration::from_millis(1),
-            Duration::ZERO,
-            "SC-003"
-        ))
-        .is_some(),
-        "1 s less a 2 s baseline is zero, not 1 ms"
-    );
-    assert!(
-        panic_message(|| {
-            fastest(Vec::<Took>::new());
-        })
-        .is_some(),
-        "no baseline run is a test bug"
     );
 }
 
