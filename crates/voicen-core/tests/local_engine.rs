@@ -56,12 +56,15 @@ use voicen_core::i18n::{self, UiLanguage, MESSAGE_IDS};
 use voicen_core::local_models::catalog::ModelId;
 use voicen_core::local_models::residency::ModelResidency;
 use voicen_core::local_models::store::ModelStore;
+use voicen_core::overlay::{overlay_payload, OverlayView};
 use voicen_core::pipeline::{JobReport, Pipeline, PipelineDeps, PressContext};
 use voicen_core::platform::{
     FakeClipboard, FakePaster, FakeTempAudioStore, StartWindow, StoreCall, WindowRef,
 };
 use voicen_core::post_process::PassThrough;
-use voicen_core::recording::{JobEnd, Press, RecordingController, RecordingEnd, Release};
+use voicen_core::recording::{
+    JobEnd, OverlayState, Press, RecordingController, RecordingEnd, Release,
+};
 use voicen_core::secrets::{FakeCredentialStore, KeySlot};
 use voicen_core::settings::{defaults, EngineKind, Settings};
 use voicen_core::test_support::{fixtures, TempDir};
@@ -210,6 +213,17 @@ impl Rig {
 /// std thread.
 fn dictate(pipeline: &Pipeline, observer: &dyn PipelineObserver, settings: Settings) -> JobReport {
     let mut ctrl = RecordingController::<PressContext>::new();
+    dictate_on(&mut ctrl, pipeline, observer, settings)
+}
+
+/// `dictate` on the caller's controller, so the test can read what it shows after
+/// `job_finished`.
+fn dictate_on(
+    ctrl: &mut RecordingController<PressContext>,
+    pipeline: &Pipeline,
+    observer: &dyn PipelineObserver,
+    settings: Settings,
+) -> JobReport {
     let t0 = ago(Duration::from_secs(4));
     let ctx = PressContext {
         start_window: Some(StartWindow {
@@ -463,6 +477,151 @@ fn a_slow_load_alone_never_times_out() {
     let got = r.job(&builtin(Some("tiny")), &fixtures::speech_3s());
     assert_eq!(got, Ok(TRANSCRIPT.to_string()));
     assert!(!r.loader.last_transcription().aborted);
+}
+
+// ---- T-106: the built-in timeout's own text (OQ-36, decision #147 (a)) -------------
+
+/// contracts/messages.md `failure.local_timeout` (decision #147), spelled here, not
+/// derived from the code under test.
+const LOCAL_TIMEOUT_EN: &str = "Transcription took too long";
+const LOCAL_TIMEOUT_RU: &str = "Распознавание заняло слишком много времени";
+/// contracts/messages.md `failure.timeout`: the server's text, never shown for a
+/// built-in timeout.
+const SERVER_TIMEOUT_EN: &str = "The server did not answer in time";
+const SERVER_TIMEOUT_RU: &str = "Сервер не ответил вовремя";
+
+#[test]
+fn a_builtin_timeout_renders_failure_local_timeout_with_code_timeout() {
+    // T-106 Acceptance 1 at the reason: the abort of a transcription over
+    // `timeouts.builtin` gives a reason whose code stays "Timeout" (what
+    // JobFinished and the log carry, spec 002 FR-019a), whose message id is the
+    // declared `failure.local_timeout` with no params, and which renders the
+    // decision-#147 text in en and ru. Still retryable (FR-11). Bite:
+    // `FailureReason::message_id` still mapping every Timeout to
+    // `failure.timeout` (the server text), the id declared but missing from a
+    // catalog (text() falls back to the id), a new code for the built-in timeout.
+    let r = rig(
+        &[ModelId::Tiny],
+        Script {
+            transcribe_takes: LIMIT * 10,
+            step: STEP,
+            ..Script::default()
+        },
+    );
+    let reason = r
+        .job(&builtin(Some("tiny")), &fixtures::speech_3s())
+        .expect_err("a transcription over the limit fails");
+    assert!(r.loader.last_transcription().aborted, "stopped by the hook");
+    assert_eq!(reason.code(), "Timeout", "the log reason stays Timeout");
+    assert!(reason.retryable(), "the audio is kept");
+    assert_eq!(
+        serde_json::to_value(reason.message_id()).expect("id serializes"),
+        serde_json::Value::String("failure.local_timeout".to_string())
+    );
+    assert!(MESSAGE_IDS.contains(&reason.message_id()), "declared");
+    assert_eq!(reason.message_params(), Vec::new(), "no params");
+    assert_eq!(
+        i18n::text(UiLanguage::En, reason.message_id(), &[]),
+        LOCAL_TIMEOUT_EN
+    );
+    assert_eq!(
+        i18n::text(UiLanguage::Ru, reason.message_id(), &[]),
+        LOCAL_TIMEOUT_RU
+    );
+}
+
+#[test]
+fn a_builtin_timeout_dictation_shows_transcription_took_too_long_and_logs_failure_timeout() {
+    // T-106 Acceptance 1 through the app's path: a built-in dictation whose
+    // transcription runs past `timeouts.builtin` ends Failed with code "Timeout",
+    // keeps the audio pending, and the controller's overlay message (rendered by
+    // `overlay_payload`, the text the overlay window shows) is "Transcription took
+    // too long" / "Распознавание заняло слишком много времени", never the server
+    // text. The dictation line still says `engine=builtin outcome=failed
+    // failure=timeout` (the log reason stays Timeout). Bite: the old
+    // `Timeout => FAILURE_TIMEOUT` mapping (server text on the overlay), a new code
+    // for the built-in timeout (`failure=` changes or JobFinished.failure differs),
+    // the audio dropped.
+    let r = rig(
+        &[ModelId::Tiny],
+        Script {
+            transcribe_takes: LIMIT * 10,
+            step: STEP,
+            ..Script::default()
+        },
+    );
+    let tmp = TempDir::new();
+    let logs = tmp.path().join("logs");
+    let (log, _clock, seen) = open_log(&logs, at(NOON_UTC, 0), 0, LogConfig::default());
+    let observer = Arc::new(LogObserver::new(Arc::clone(&log)));
+    let clipboard = Arc::new(FakeClipboard::new());
+    let temp = Arc::new(FakeTempAudioStore::new());
+    let paster = Arc::new(FakePaster::new());
+    let pipeline = r.pipeline(
+        observer.clone(),
+        clipboard.clone(),
+        temp.clone(),
+        paster.clone(),
+    );
+    let mut ctrl = RecordingController::<PressContext>::new();
+
+    let report = dictate_on(&mut ctrl, &pipeline, &*observer, builtin(Some("tiny")));
+
+    let reason = match &report.end {
+        JobEnd::Failed(reason) => reason.clone(),
+        other => panic!("expected a failed job, got {other:?}"),
+    };
+    assert_eq!(reason.code(), "Timeout");
+    assert!(r.loader.last_transcription().aborted, "stopped by the hook");
+    let pending = report.pending.expect("the audio is kept pending");
+    assert_eq!(temp.calls(), vec![StoreCall::Put(pending)]);
+    assert_eq!(clipboard.texts(), Vec::<String>::new(), "nothing copied");
+    assert_eq!(paster.calls(), vec![], "nothing pasted");
+
+    let shown = ctrl.indicator().overlay.clone();
+    assert!(
+        matches!(shown, OverlayState::Message { .. }),
+        "a message is shown: {shown:?}"
+    );
+    for (lang, want, server) in [
+        (UiLanguage::En, LOCAL_TIMEOUT_EN, SERVER_TIMEOUT_EN),
+        (UiLanguage::Ru, LOCAL_TIMEOUT_RU, SERVER_TIMEOUT_RU),
+    ] {
+        let view = overlay_payload(&shown, lang, 1, Duration::ZERO).state;
+        assert_ne!(
+            view,
+            OverlayView::Message {
+                text: server.to_string()
+            },
+            "{lang:?}: the server text for a built-in timeout"
+        );
+        assert_eq!(
+            view,
+            OverlayView::Message {
+                text: want.to_string()
+            },
+            "{lang:?}"
+        );
+    }
+
+    let lines = all_lines(&logs);
+    let dictations = dictation_lines(&lines);
+    assert_eq!(dictations.len(), 1, "{lines:#?}");
+    let key = |k: &str| dictations[0].get(k).map(str::to_string);
+    assert_eq!(key("engine").as_deref(), Some("builtin"), "{lines:#?}");
+    assert_eq!(key("outcome").as_deref(), Some("failed"), "{lines:#?}");
+    assert_eq!(key("failure").as_deref(), Some("timeout"), "{lines:#?}");
+    for file in files_under(&logs) {
+        let bytes = std::fs::read(&file).expect("read");
+        for text in [LOCAL_TIMEOUT_EN, LOCAL_TIMEOUT_RU] {
+            assert!(
+                !contains(&bytes, text.as_bytes()) && !contains(&bytes, &utf16le(text)),
+                "the message text, not the reason, in {}",
+                file.display()
+            );
+        }
+    }
+    assert_eq!(seen.count(), 0, "the log stayed writable");
 }
 
 /// Lets a spawned job reach the model's lock. Too short only weakens

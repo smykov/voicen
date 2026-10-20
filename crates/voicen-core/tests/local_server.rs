@@ -365,6 +365,38 @@ async fn no_answer_within_local_server_deadline_is_timeout() {
     at_least(took, deadline);
 }
 
+#[tokio::test]
+async fn a_local_server_timeout_still_shows_the_server_did_not_answer_in_time() {
+    // T-106 failure branch (decision #147): a local-server engine timeout is a
+    // server's timeout: code "Timeout", id `failure.timeout`, the server text in
+    // en and ru (contracts/messages.md, spelled here), not the built-in engine's
+    // `failure.local_timeout`. Bite: the local-server engine or every Timeout
+    // given the built-in text.
+    let server = server_with(ok_text("too late").set_delay(Duration::from_secs(5))).await;
+    let engine = local_engine(&local_settings(&base(&server), ""), &creds(None));
+    let reason = transcribe(
+        engine,
+        req_with(timeouts(
+            Duration::from_secs(10),
+            Duration::from_millis(300),
+        )),
+    )
+    .expect_err("past the local-server deadline");
+    assert_eq!(reason.code(), "Timeout");
+    assert_eq!(
+        serde_json::to_value(reason.message_id()).expect("id serializes"),
+        json!("failure.timeout")
+    );
+    assert_eq!(
+        voicen_core::i18n::text(voicen_core::i18n::UiLanguage::En, reason.message_id(), &[]),
+        "The server did not answer in time"
+    );
+    assert_eq!(
+        voicen_core::i18n::text(voicen_core::i18n::UiLanguage::Ru, reason.message_id(), &[]),
+        "Сервер не ответил вовремя"
+    );
+}
+
 #[test]
 fn refused_server_is_cannot_reach_host_port() {
     // Acceptance 2 "server down -> cannot reach <host:port>": a refused loopback

@@ -565,6 +565,39 @@ mod tests {
     }
 
     #[test]
+    fn classify_timeouts_render_the_server_text() {
+        // T-106 failure branch (decision #147): every timeout `classify` builds
+        // (the HTTP engines: API, local server, post-processing chat, connection
+        // test) keeps code "Timeout" and `failure.timeout`, "The server did not
+        // answer in time" / "Сервер не ответил вовремя"; only the built-in
+        // engine's abort renders `failure.local_timeout`. Bite: `classify`
+        // building the built-in timeout, or `message_id` giving every Timeout the
+        // new local text.
+        for err in [
+            send(false, false, true, None),
+            TransportError::BodyRead { timeout: true },
+        ] {
+            let r = classify(&err, HOST);
+            assert_eq!(r.code(), "Timeout", "{err:?}");
+            assert_eq!(
+                serde_json::to_value(r.message_id()).unwrap_or_default(),
+                serde_json::Value::String("failure.timeout".to_string()),
+                "{err:?}"
+            );
+            assert_eq!(
+                text(UiLanguage::En, r.message_id(), &[]),
+                "The server did not answer in time",
+                "{err:?}"
+            );
+            assert_eq!(
+                text(UiLanguage::Ru, r.message_id(), &[]),
+                "Сервер не ответил вовремя",
+                "{err:?}"
+            );
+        }
+    }
+
+    #[test]
     fn codes_are_distinct() {
         // Codes are what T-001's JobFinished event carries; two reasons with one
         // code cannot be told apart in the log. Bite: a shared fallback code.

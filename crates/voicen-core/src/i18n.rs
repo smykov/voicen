@@ -876,6 +876,49 @@ mod tests {
         );
     }
 
+    #[test]
+    fn failure_local_timeout_is_declared_with_its_contract_text_and_listed_in_messages_md() {
+        // T-106 Acceptance 3 (decision #147): the built-in engine's timeout id
+        // `failure.local_timeout` is declared with messages! (so
+        // `message_ids_exist_in_both_catalogs` and the parity tests cover it), has
+        // the decision-#147 text in en and ru (spelled here), and
+        // specs/001 contracts/messages.md lists it with both texts. Bite: the id
+        // missing from `messages!`, from a catalog or from the contract table;
+        // the server text (`failure.timeout`) reused under the new id.
+        assert!(
+            MESSAGE_IDS.iter().any(|id| id.0 == "failure.local_timeout"),
+            "failure.local_timeout not in MESSAGE_IDS"
+        );
+        let c = catalog(EN_JSON, RU_JSON);
+        assert_eq!(
+            own_text(&c, UiLanguage::En, "failure.local_timeout"),
+            Some("Transcription took too long")
+        );
+        assert_eq!(
+            own_text(&c, UiLanguage::Ru, "failure.local_timeout"),
+            Some("Распознавание заняло слишком много времени")
+        );
+        const MESSAGES_MD: &str = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../specs/001-dictation-via-api/contracts/messages.md"
+        ));
+        let row = MESSAGES_MD
+            .lines()
+            .find(|l| l.starts_with("| `failure.local_timeout` |"))
+            .expect("contracts/messages.md has a failure.local_timeout row");
+        let cells: Vec<&str> = row.split('|').map(str::trim).collect();
+        assert_eq!(
+            cells.get(2..4),
+            Some(
+                &[
+                    "Transcription took too long",
+                    "Распознавание заняло слишком много времени"
+                ][..]
+            ),
+            "{row}"
+        );
+    }
+
     // ---- T-004: every refusal reaches the user in the user's language (U2) --------
 
     /// The non-empty text of `id` in `lang`, straight from the catalog map (no

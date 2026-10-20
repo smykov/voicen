@@ -524,6 +524,34 @@ async fn delay_past_ms_timeout_is_timeout() {
     at_least(took, total);
 }
 
+#[tokio::test]
+async fn an_api_timeout_still_shows_the_server_did_not_answer_in_time() {
+    // T-106 failure branch (decision #147): only the built-in engine's timeout
+    // gets `failure.local_timeout`; an API timeout keeps `failure.timeout`, code
+    // "Timeout", and the server text in en and ru (contracts/messages.md, spelled
+    // here). Bite: every Timeout mapped to the new local text, or `classify`
+    // building the built-in timeout.
+    let server = server_with(ok_text("late").set_delay(Duration::from_secs(5))).await;
+    let reason = transcribe(
+        api_engine(&format!("{}/v1", server.uri()), Some(KEY)),
+        req_with_total(Duration::from_millis(300)),
+    )
+    .expect_err("past the deadline");
+    assert_eq!(reason.code(), "Timeout");
+    assert_eq!(
+        serde_json::to_value(reason.message_id()).expect("id serializes"),
+        json!("failure.timeout")
+    );
+    assert_eq!(
+        text(UiLanguage::En, reason.message_id(), &[]),
+        "The server did not answer in time"
+    );
+    assert_eq!(
+        text(UiLanguage::Ru, reason.message_id(), &[]),
+        "Сервер не ответил вовремя"
+    );
+}
+
 #[test]
 fn refused_loopback_port_is_cannot_reach_host_port() {
     // Connection refused -> CannotReach with the base URL's host:port.
