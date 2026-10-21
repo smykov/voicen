@@ -43,8 +43,9 @@
 #      keys (env:, defaults:, on:, concurrency:, permissions: ...) to the release job, so a
 #      BASH_ENV or working-directory there would run with its write token; the literal closes them
 #      all without naming any key or variable. ci.yml is named (T-088) so that its trigger
-#      (push to main and wip/**, the P-016 pre-review run) holds even with the release job moved
-#      to another file.
+#      (push to main and wip/**, the P-016 pre-review run, with the one path filter
+#      paths-ignore: ["docs/tasks/**"], T-083, decisions #144) holds even with the release job
+#      moved to another file.
 #   R8 none of the raw texts `!!`, `!<` and `%TAG` (case-sensitive) occurs on any line, comments
 #      included: a YAML tag (the shorthand `!!binary`, the verbatim `!<tag:...>`, or a handle
 #      declared by a `%TAG` directive) could decode other text, e.g. base64, into secrets, vars, gh

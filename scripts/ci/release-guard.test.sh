@@ -1025,14 +1025,14 @@ frag_build() {
   if [ "$(tail -n 1 "$fr")" = "  windows:" ]; then sed '$d' "$fr" > "$t"
   elif [ -n "$nx" ]; then { sed '$d' "$fr"; cat "$nx"; echo "        run: echo next"; } > "$t"
   else { cat "$fr"; echo "        run: echo next"; } > "$t"; fi
-  if [ "$(sed -n 28p "$owned_src")" != "    runs-on: ubuntu-24.04" ] || [ "$(sed -n 31p "$owned_src")" != "      - run: make check" ]; then
-    echo "FAIL $n: ok-release gate job moved (lines 28 and 31; fix the test)" >&2
+  if [ "$(sed -n 29p "$owned_src")" != "    runs-on: ubuntu-24.04" ] || [ "$(sed -n 32p "$owned_src")" != "      - run: make check" ]; then
+    echo "FAIL $n: ok-release gate job moved (lines 29 and 32; fix the test)" >&2
     failed=$((failed + 1))
     return 1
   fi
   awk -v t="$t" -v e="$e" '{ print }
-    NR == 28 { while ((getline l < e) > 0) print l }
-    NR == 31 { while ((getline l < t) > 0) print l }' "$owned_src" > "$tmp/$n/wf/ci.yml"
+    NR == 29 { while ((getline l < e) > 0) print l }
+    NR == 32 { while ((getline l < t) > 0) print l }' "$owned_src" > "$tmp/$n/wf/ci.yml"
 }
 # frag_case <name> <fragment basename> <label> <sed script> [<env block>]: frag_build, then exit 3
 # naming the fragment.

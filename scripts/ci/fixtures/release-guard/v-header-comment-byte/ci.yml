@@ -8,6 +8,7 @@ on:
   push:
     branches: [main, "wip/**"]
     tags: ["v*"]
+    paths-ignore: ["docs/tasks/**"]
   pull_request:
 
 # a newer push to the same wip/<ID> cancels the run of the older head (P-016 counts only the

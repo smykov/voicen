@@ -76,7 +76,8 @@ check-core-test-os-answer:
 	scripts/ci/core-test-os-answer.test.sh
 
 # T-066 (rca, P-016, decisions #90): .github/workflows/ci.yml runs on push to main and wip/**
-# (the pre-review run of every non-docs task), and no workflow step saves a cache on a ref
+# (the pre-review run of every non-docs task) unless the push changes only docs/tasks/** (T-083,
+# decisions #144), and no workflow step saves a cache on a ref
 # other than main. Since T-088 both are release-guard rules (R7 on ci.yml, R11-R13): this name
 # stays, as a prerequisite-only alias, because PRINCIPLES.md P-016 names it.
 check-ci-wip: check-release-guard
@@ -130,8 +131,8 @@ check-release:
 # raw token secrets.TELEGRAM_ (any case, comments included) only in the one Telegram send step,
 # byte-identical to scripts/ci/telegram-send-step.yml (R10; replaces telegram-guard, T-087:
 # T-070 validation 1 M6 and probes T1-T4 are its fixtures); and (T-088, replaces ci-wip and
-# setup-node-cache) R7 also on ci.yml (its trigger: push to main and wip/**), every line with the
-# word uses or an action name (actions/cache, setup-node, rust-cache, cache/save,
+# setup-node-cache) R7 also on ci.yml (its trigger: push to main and wip/**, skipped when only
+# docs/tasks/** changed, T-083), every line with the word uses or an action name (actions/cache, setup-node, rust-cache, cache/save,
 # pnpm/action-setup) an owned line of scripts/ci/action-lines.txt or inside a byte-exact owned
 # step fragment of scripts/ci/cache-steps/ (whose own text the guard checks: saves from main
 # only, no setup-node cache) (R11), no column-0 line after jobs: (R12) and no YAML merge key
