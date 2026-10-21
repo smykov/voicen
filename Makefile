@@ -5,14 +5,14 @@
 	check-core-test-os-answer check-ci-wip check-telegram-send check-telegram-failure-branch \
 	check-version-stamp check-release-check check-release check-release-guard check-nsis-fork check-e2e-entry-fixtures \
 	check-whisper-cmake-cache check-whisper-model-key check-crt-imports check-whisper \
-	check-shell-windows check-ban-canary check-role-tools \
+	check-shell-windows check-ban-canary check-role-tools check-guard-trigger \
 	check-ui core-image ui-image \
 	licenses licenses-check licenses-unit licenses-fixture licenses-rust licenses-bundle \
 	licenses-npm licenses-generate licenses-stale licenses-stale-guard
 
 # check-ban-canary and check-shell-windows after check-core: both build voicen-core, so a core
 # error is reported first by the faster native check-core, before the slower runs.
-check: check-shell-layout check-shell-layout-fixtures check-helper-windows-fixtures check-ci-credentials check-role-tools \
+check: check-shell-layout check-shell-layout-fixtures check-helper-windows-fixtures check-ci-credentials check-role-tools check-guard-trigger \
 	check-clippy-lines \
 	check-core-test-os-answer check-ci-wip check-telegram-send check-telegram-failure-branch check-version-stamp check-release-check check-release check-release-guard check-nsis-fork check-whisper-cmake-cache check-whisper-model-key check-crt-imports check-core check-whisper \
 	check-ban-canary check-shell-windows check-e2e-entry-fixtures check-ui \
@@ -66,15 +66,23 @@ check-ban-canary:
 check-clippy-lines:
 	scripts/ci/clippy-lines.test.sh
 
-# T-082 (decisions #145; docs/tasks/T-082.md). Red test written ahead of the implementation; not yet
-# a prerequisite of check: (it fails until T-082 lands; the implementation adds it to check:).
-# check-role-tools: every role file in .claude/agents with a teamwright:tools block names in its
-# front-matter tools: line every tool of scripts/ci/role-tools.txt (the read-only Serena and
-# context7 tools, ToolSearch) and no other MCP tool, and its Tools block keeps both "not connected"
-# fallback lines. The self-test runs the tripwire scripts/ci/role-tools.sh on role files built in a
-# temp dir and on the real .claude/agents. Host bash.
+# check-role-tools (T-082, decisions #145; T-113, decisions #154, P-020 decides_on: literal): every
+# file under .claude/agents (recursive, any name) has an owned head scripts/ci/role-heads/<name>,
+# its front matter is byte-equal to that head from byte 0 through the closing --- line (cmp, no
+# YAML reading, no CRLF/BOM normalisation), every head has its role file, and a role whose head
+# names an mcp__ tool keeps both owned "not connected" fallback lines in its Tools block. The
+# self-test runs the tripwire scripts/ci/role-tools.sh on trees built in a temp dir and on the real
+# .claude/agents. Host bash.
 check-role-tools:
 	scripts/ci/role-tools.test.sh
+
+# check-guard-trigger (T-113, decisions #154, P-020 "How checked"): the git pre-commit hook
+# scripts/hooks/pre-commit refuses a staged guard change (a scripts/ci/ file a check* target runs
+# or names, or a changed check* Makefile target) unless the active task has checker: true and a
+# non-empty analysis.decides_on. The self-test runs the hook in fixture git repos. Host bash,
+# git, python3.
+check-guard-trigger:
+	scripts/ci/guard-trigger.test.sh
 
 # check-core-test-os-answer (T-080 rca, class os-answer-deadline-race; T-089, decides_on: token):
 # no core test outside crates/voicen-core/tests/common names an OS-answer target (.invalid,

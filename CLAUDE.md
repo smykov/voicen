@@ -35,6 +35,7 @@ Voicen — a Windows desktop dictation tool: a global hotkey records the microph
 | `scripts/ci/helper-windows.txt` | Helper-window manifest: framework windows the install smoke does not count; read by the smoke predicate, the shell overlay tests and the `make check` tripwire (`docs/decisions/overlay.md` §5) |
 | `scripts/ci/shell-targets.txt` | Owned target list of the `voicen` shell package (lib, bin, build script; no example or bench); `make check-shell-layout` compares it with `cargo metadata` and checks the line-1 cfg pins of the lib and bin roots (`docs/decisions/ci-toolchain.md`) |
 | `scripts/ci/credentials.ps1` | The only way a Windows CI step plants or observes Credential Manager entries (Win32 `CredWriteW`/`CredReadW`/`CredEnumerateW`/`CredDeleteW`); `make check` refuses any other Credential Manager entry point (Win32 `Cred*` call, `cmdkey`, `vaultcmd`, ...) in workflows and `scripts/ci` (`docs/decisions/windows-ci-runner.md`) |
+| `scripts/ci/role-heads/` | Owned front matter of each `.claude/agents/**` role file, byte-exact; `make check-role-tools` compares them and the file set (`docs/decisions/context-tools.md`). A guard change (a `scripts/ci/` file a `check*` target runs, or a `check*` Makefile target) is committed only in a task with `checker: true` and `analysis.decides_on` (pre-commit; `make check-guard-trigger`; `docs/process/gates.md`) |
 | `docs/plan.md` | Stages and what is in each |
 | `docs/requirements.md` | What must be true (FR-NN, NFR-NN) |
 | `docs/architecture.md` | Components, data flow, boundaries |
