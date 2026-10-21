@@ -138,120 +138,39 @@ PY
   python3 -c "$_tw_py"
 }
 
-# Guard trigger (P-020 "How checked", T-113, decisions #154). A staged guard change belongs to a
-# task with `checker: true` and a non-empty analysis.decides_on. Guard change: a staged path
-# (added, modified or deleted; renames as delete + add) that is a file under scripts/ci/ named in
-# the recipe of a check* Makefile target, or named by such a file (scripts/ci/<path>, or
-# /<path> relative to scripts/ci/, e.g. "$here/x.yml"), transitively, in HEAD or in the index (a
-# named directory makes every file under it a guard file); or the Makefile, when its check*
-# targets (names, prerequisites, recipes) differ between HEAD and the index. Active task:
-# $TEAMWRIGHT_TASK, else the first word of .teamwright/current-task; its record
-# docs/tasks/<ID>.md (front matter only). A missing `checker:` key counts as false; no active
-# task or no record refuses a guard change. Commits without a guard change are not affected.
+# Guard trigger (P-020 "How checked", T-113, decisions #154, #155). A staged guard change belongs
+# to a task with `checker: true` and a non-empty analysis.decides_on. Guard change (decides_on
+# token, #155): a path listed by `git diff --cached --name-only --no-renames -z` (any status; a
+# rename is its old and its new path) that starts with scripts/ci/ or scripts/licenses/, is the
+# path Makefile, or ends in .mk. Nothing else decides: no Make, shell or file-content reading, so
+# every change to such a path counts, even one unrelated to any check. Not caught: a root
+# GNUmakefile or makefile (docs/process/gates.md › Guard trigger). Active task: $TEAMWRIGHT_TASK,
+# else the first word of .teamwright/current-task; its record docs/tasks/<ID>.md (front matter,
+# read by scripts/hooks/_task.py). A missing `checker:` key counts as false; no active task or no
+# record refuses a guard change. Commits without a guard change are not affected.
 # Test: scripts/ci/guard-trigger.test.sh (make check-guard-trigger).
 guard_trigger() {
-  # No pipe into grep -q: under pipefail a SIGPIPE'd git would read as "nothing staged".
-  [ -n "$(git diff --cached --name-only --no-renames --diff-filter=ACMRD -- Makefile scripts/ci)" ] \
-    || return 0
+  local p
+  local -a guards=()
+  # -z: raw path bytes, no C-style quoting that would hide the prefix.
+  while IFS= read -r -d '' p; do
+    case "$p" in
+      scripts/ci/* | scripts/licenses/* | Makefile | *.mk) guards+=("$p") ;;
+    esac
+  done < <(git diff --cached --name-only --no-renames -z)
+  [ "${#guards[@]}" -gt 0 ] || return 0
   if ! command -v python3 >/dev/null 2>&1; then
-    echo "pre-commit: REFUSED - Makefile or scripts/ci/ staged and python3 missing: the P-020" \
-      "guard trigger cannot decide whether this is a guard change." >&2
+    echo "pre-commit: REFUSED - guard path staged and python3 missing: the P-020 guard trigger" \
+      "cannot read the active task record." >&2
+    printf '  guard change: %s\n' "${guards[@]}" >&2
     return 1
   fi
   IFS= read -r -d '' _tw_gt <<'PY' || true
-import os, re, subprocess, sys
+import os, re, sys
 sys.path.insert(0, sys.argv[1])
 import _task as task
 
-def git(*args):
-    r = subprocess.run(("git",) + args, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-    return r.returncode, r.stdout.decode("utf-8", "replace")
-
-def has_head():
-    return git("rev-parse", "--verify", "-q", "HEAD")[0] == 0
-
-def files(rev):
-    """Tracked paths under scripts/ci/ in HEAD ("HEAD") or in the index (None)."""
-    if rev:
-        rc, out = git("ls-tree", "-r", "--name-only", rev, "--", "scripts/ci")
-    else:
-        rc, out = git("ls-files", "--", "scripts/ci")
-    return set(out.splitlines()) if rc == 0 else set()
-
-def show(rev, path):
-    rc, out = git("show", "%s:%s" % (rev or "", path))
-    return out if rc == 0 else ""
-
-def make_rules(text):
-    """{target: (prerequisites, recipe lines)} for the rule lines of a Makefile."""
-    rules, cur, logical = {}, None, []
-    lines = text.splitlines()
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        while line.endswith("\\") and i + 1 < len(lines):
-            i += 1
-            line = line[:-1] + " " + lines[i]
-        i += 1
-        if line.startswith("\t"):
-            if cur is not None:
-                for t in cur:
-                    rules[t][1].append(line.strip())
-            continue
-        if not line.strip() or line.lstrip().startswith("#"):
-            continue
-        m = re.match(r"^([^:=#\s][^:=#]*?)\s*::?(?![=])\s*(.*)$", line)
-        if not m or re.match(r"^\s*(export|override|define|endef|ifn?eq|ifn?def|else|endif|include)\b", line):
-            cur = None
-            continue
-        names = [t for t in m.group(1).split() if not t.startswith(".")]
-        pre = m.group(2).split("#", 1)[0].split(";", 1)
-        recipe = [pre[1].strip()] if len(pre) > 1 and pre[1].strip() else []
-        cur = names
-        for t in names:
-            rules.setdefault(t, ([], []))
-            rules[t][0].extend(pre[0].split())
-            rules[t][1].extend(recipe)
-    return {t: v for t, v in rules.items() if t.startswith("check")}
-
-REF = re.compile(r"(?:scripts/ci/|/)([A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*)")
-
-def guard_files(rev):
-    """Files under scripts/ci/ a check* target names, directly or through a named file."""
-    tracked = files(rev)
-    if not tracked:
-        return set()
-    rules = make_rules(show(rev, "Makefile"))
-    texts = [line for _, recipe in rules.values() for line in recipe]
-    found, todo = set(), []
-    def visit(text, direct):
-        pat = re.compile(r"scripts/ci/([A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*)") if direct else REF
-        for m in pat.finditer(text):
-            p = "scripts/ci/" + m.group(1).rstrip("/.")
-            if p in tracked:
-                if p not in found:
-                    found.add(p)
-                    todo.append(p)
-            else:
-                found.update(f for f in tracked if f.startswith(p + "/"))
-    for t in texts:
-        visit(t, True)
-    while todo:
-        visit(show(rev, todo.pop()), False)
-    return found
-
-head = "HEAD" if has_head() else None
-rc, out = git("diff", "--cached", "--name-only", "--no-renames", "--diff-filter=ACMRD")
-staged = [p for p in out.splitlines() if p]
-guards = guard_files(None) | (guard_files(head) if head else set())
-changed = [p for p in staged if p in guards]
-if "Makefile" in staged:
-    before = make_rules(show(head, "Makefile")) if head else {}
-    if make_rules(show(None, "Makefile")) != before:
-        changed.append("Makefile")
-if not changed:
-    sys.exit(0)
-
+changed = sys.argv[2:]
 tid = os.environ.get("TEAMWRIGHT_TASK", "").strip()
 if not tid:
     try:
@@ -287,13 +206,14 @@ print("pre-commit: REFUSED - guard change without the P-020 design step: %s." % 
       file=sys.stderr)
 for p in changed:
     print("  guard change: %s" % p, file=sys.stderr)
-print("  A guard (a scripts/ci/ file a check* target runs or names, or a check* Makefile target)\n"
-      "  changes only in a task with `checker: true` and analysis.decides_on naming the switch,\n"
-      "  owned literal or raw token it decides on (PRINCIPLES.md P-020; docs/process/gates.md).",
+print("  A staged path under scripts/ci/ or scripts/licenses/, the Makefile or a *.mk file is a\n"
+      "  guard change; it is committed only in a task with `checker: true` and analysis.decides_on\n"
+      "  naming the switch, owned literal or raw token it decides on (PRINCIPLES.md P-020;\n"
+      "  docs/process/gates.md).",
       file=sys.stderr)
 sys.exit(1)
 PY
-  python3 -I -B -c "$_tw_gt" "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  python3 -I -B -c "$_tw_gt" "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" "${guards[@]}"
 }
 
 # Reusable by CI / make scan:  git diff ... | scripts/hooks/pre-commit --scan-stdin
@@ -334,7 +254,7 @@ fi
 # ---- 3. CLAUDE.md budget (warning, never blocks) ----------------------------
 bash "$(dirname "${BASH_SOURCE[0]}")/claude-md-budget.sh" || true
 
-# ---- 4. guard trigger (P-020, T-113, decisions #154) -------------------------
+# ---- 4. guard trigger (P-020, T-113, decisions #154, #155) -------------------
 guard_trigger || fail=1
 
 exit "$fail"

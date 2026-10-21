@@ -76,11 +76,12 @@ check-clippy-lines:
 check-role-tools:
 	scripts/ci/role-tools.test.sh
 
-# check-guard-trigger (T-113, decisions #154, P-020 "How checked"): the git pre-commit hook
-# scripts/hooks/pre-commit refuses a staged guard change (a scripts/ci/ file a check* target runs
-# or names, or a changed check* Makefile target) unless the active task has checker: true and a
-# non-empty analysis.decides_on. The self-test runs the hook in fixture git repos. Host bash,
-# git, python3.
+# check-guard-trigger (T-113, decisions #154, #155, P-020 "How checked"): the git pre-commit hook
+# scripts/hooks/pre-commit refuses a staged guard change unless the active task has checker: true
+# and a non-empty analysis.decides_on. Guard change (raw token, #155): a staged path (any status,
+# no rename detection) under scripts/ci/ or scripts/licenses/, the path Makefile, or a path ending
+# in .mk; no Make, shell or content reading. The self-test runs the hook in fixture git repos.
+# Host bash, git, python3.
 check-guard-trigger:
 	scripts/ci/guard-trigger.test.sh
 
