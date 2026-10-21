@@ -39,6 +39,6 @@ They have no `teamwright:tools` block, so their instructions never tell them to 
 
 ## Open
 
-- T-082 Acceptance 1 is met (journal lines above). Acceptance 2 (`get_symbols_overview` on `.svelte` and `.ts`) stays open: Serena's rust language server fails to initialise on this host, and Serena stops every server when one fails (fail-fast risk above).
-- Playwright MCP tools for the ui roles' Tools block are left out by #145 and have no task or OQ: untracked.
+- T-082 Acceptance 1 is met (journal lines above). Acceptance 2 (`get_symbols_overview` on `.svelte` and `.ts`) stays open, tracked in T-114 (BLOCKED): Serena's rust language server fails to initialise on this host, and Serena stops every server when one fails (fail-fast risk above).
+- Playwright MCP tools for the ui roles' Tools block are left out by #145; tracked in OQ-40 (`docs/open-questions.md`).
 - Upstream: the kit never renders the allowlist entries; draft in `docs/process-reviews/2026-10-09.md` › Feedback drafts.

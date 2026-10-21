@@ -13,7 +13,7 @@ Every spec, plan and task MUST comply with `PRINCIPLES.md`. Most relevant to pla
 P-004 (a guarantee needs a failing test), P-005 (tests must bite), P-006 (verify the running
 system against logs), P-009 (secrets never reach logs, commits or docs), P-010 (one source of
 truth per cross-cutting value), P-011 (one shared seam, not parallel paths), P-020 (a guard decides on a switch, an owned
-literal or a raw token; a guard change belongs to a `checker: true` task with `decides_on`).
+literal or a raw token; a guard change, decided on raw staged paths, belongs to a `checker: true` task with `decides_on`).
 
 ### II. Privacy by default
 

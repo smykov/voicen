@@ -46,6 +46,8 @@ analysis:
   invariant: ""
   seam: ""
   approach: ""
+  # REQUIRED when checker is true (P-020): switch | literal | token, naming the switch, owned literal or raw token the guard decides on
+  decides_on: ""
 # type: rca replaces the block above with this one (required: root_cause, evidence, decision;
 # no skipped:trivial). decision = the exit and what it changes: for (a) code, the invariant and
 # the seam; for (b) architecture or (c) process, the owner's decision (docs/decisions.md row).
@@ -56,6 +58,7 @@ analysis:
 #   decision: ""
 #   invariant: ""
 #   seam: ""
+#   decides_on: ""  # when checker is true, as above
 # agent or person who implemented the task; the reviewer must differ (checked by the review gate)
 implemented_by: ""
 # Review rounds are not a field: the gates count docs/tasks/<ID>.reviews/<n>.md files.

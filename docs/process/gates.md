@@ -489,13 +489,15 @@ backstop adds the scan to its own CI, for example a `make scan` target that runs
 
 ## Guard trigger
 
-`scripts/hooks/pre-commit` §4 (`guard_trigger`), self-test `scripts/ci/guard-trigger.test.sh` (`make check-guard-trigger`) · T3 (local project addition, not a kit gate; PRINCIPLES.md P-020, decisions #154, T-113)
+`scripts/hooks/pre-commit` §4 (`guard_trigger`), self-test `scripts/ci/guard-trigger.test.sh` (`make check-guard-trigger`) · T3 (local project addition, not a kit gate; PRINCIPLES.md P-020, decisions #154, #155, T-113)
 
 **Incident it prevents.** A new guard is designed as a model of the grammar of a tool that interprets the text (F-003, F-015, F-022), because the P-020 design step (`checker: true` and `analysis.decides_on`) fires only if the analysis author remembers it.
 
-**What it refuses.** A commit that stages a guard change while the active task lacks `checker: true` or a non-empty, non-placeholder `analysis.decides_on` (a top-level `decides_on` or a `checker:` line in the body does not count; a missing `checker:` key counts as false). Guard change: an added, modified or deleted file under `scripts/ci/` that a `check*` Makefile recipe runs or names, transitively (in HEAD or in the index), or a change to the names, prerequisites or recipes of a `check*` Makefile target. The active task is `$TEAMWRIGHT_TASK`, else the first word of `.teamwright/current-task`; no active task or no record refuses too. Commits without a guard change are not affected.
+**What it refuses.** A commit that stages a guard change while the active task lacks `checker: true` or a non-empty, non-placeholder `analysis.decides_on` (a top-level `decides_on` or a `checker:` line in the body does not count; a missing `checker:` key counts as false). Guard change (decided on raw staged paths from `git diff --cached --name-only --no-renames -z`, any status, no Make or shell parsing; decision #155): a path under `scripts/ci/` or `scripts/licenses/`, the path `Makefile`, or a path ending in `.mk`. The refusal lists every guard path, including the old path of a rename. Over-inclusion is accepted: a change to `Makefile` or `scripts/ci/` unrelated to any check also needs `checker: true` and `decides_on`. The active task is `$TEAMWRIGHT_TASK`, else the first word of `.teamwright/current-task`; no active task or no record refuses too. Commits without a guard change are not affected.
 
 **Exit.** Set `checker: true` in the task's front matter and fill `analysis.decides_on` (`switch | literal | token`, naming the switch, owned literal or raw token) before committing the guard; copy it into the `decides_on` column of the guard table in `docs/decisions/ci-toolchain.md`. If the commit is not a guard change, fix the task id in `.teamwright/current-task`. `git commit --no-verify` skips it (see Overriding deliberately); say why in review.
+
+**Not caught.** A new root `GNUmakefile` or `makefile` (GNU make reads them before `Makefile`; the token is not widened, decision #155). `scripts/hooks/pre-commit` itself is not a guard path under the token; `make check-guard-trigger` runs its fixtures, but a hook edit alone does not need `checker: true`. Guards outside the four path forms (none known; the guard table in `docs/decisions/ci-toolchain.md` lists the paths).
 
 ## CLAUDE.md budget
 
