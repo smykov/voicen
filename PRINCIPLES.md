@@ -1,6 +1,6 @@
 # PRINCIPLES.md
 
-**Version:** 1.3.0 — bumped in a separate commit on every amendment, recorded in `docs/decisions.md` (major: removed or reversed · minor: added or moved up a tier · patch: wording). Amendments are owner decisions; see `docs/process/principles.md` §2a.
+**Version:** 1.4.0 — bumped in a separate commit on every amendment, recorded in `docs/decisions.md` (major: removed or reversed · minor: added or moved up a tier · patch: wording). Amendments are owner decisions; see `docs/process/principles.md` §2a.
 
 Engineering principles for this project. Each is enforced at a tier:
 **T0** written guidance · **T1** reviewer checklist · **T2** hook warns · **T3** hook/CI blocks.
@@ -107,14 +107,16 @@ Each **Why** names, in one generic sentence, the kind of incident that produced 
 - **How checked:** when `docs/tasks/<ID>.md` passes 40 KB, the Investigation and Validation histories move to `docs/tasks/<ID>.history.md`; the task keeps a summary of the current state and a link. The move is a docs-only commit.
 
 ### P-020 — A guard decides on a switch or a literal it owns, never on a model of another tool's parser
-- **Why:** a tripwire that re-reads another tool's grammar passes every shape it does not read, and every patch adds another clause to the model. Here: the first guard rewrite was T-038 (F-003). The class came back in the next guard designed, `release-guard.sh` (T-026, then rca T-085): three patches in two days, and review 4 still found probes that passed. Origin: F-003, T-085 (decisions #120).
-- **Tier:** T1
+- **Why:** a tripwire that re-reads another tool's grammar passes every shape it does not read, and every patch adds another clause to the model. Here: the first guard rewrite was T-038 (F-003). The class came back in the next guard designed, `release-guard.sh` (T-026, then rca T-085): three patches in two days, and review 4 still found probes that passed. It came back again in `role-tools.sh` (T-082, rca T-113), a guard designed in a task with no `checker:` key, so the design-time step never fired. Origin: F-003, T-085 (decisions #120), T-113 (decisions #154).
+- **Tier:** T1+T3
 - **How checked:** a guard is a `checker: true` task, i.e. a tripwire over text that another tool interprets (workflow YAML, shell, Rust, Cargo, JSON). It may pass only on one of these:
   - a platform-enforced switch pinned as literal text, such as a permission or a compiler or cargo flag;
   - a byte-exact comparison with a block or line the guard owns;
   - the absence of a raw token anywhere in the scanned files (fail-closed: any occurrence refuses).
 
   It never passes because its own reading of another tool's grammar found no violation. The analysis of a `checker: true` task says which of these it decides on (`decides_on: switch | literal | token`) and names the switch, literal or token. The code-reviewer returns `REJECT_RECURRENCE` (class `guard-model`) for a guard diff that adds a tokenizer, a scalar or comment reader, or a pass decided by such a reader.
+
+  Mechanical trigger (T3, decisions #154): the git pre-commit hook (`scripts/hooks/pre-commit`, test `make check-guard-trigger`) refuses a commit that adds, changes or deletes a guard — a file under `scripts/ci/` that a `check*` Makefile target runs or names, directly or through another such file, or a `check*` Makefile target (added, removed, or its prerequisites or recipe changed) — unless the active task (`$TEAMWRIGHT_TASK`, else `.teamwright/current-task`) has `checker: true` and a non-empty `analysis.decides_on`. A task record without a `checker:` key counts as `checker: false`; no active task, or no record for it, refuses too. The `decides_on` cell of the guard table in `docs/decisions/ci-toolchain.md` is copied from the task's analysis, not chosen by the writer.
 
 ---
 
@@ -141,4 +143,4 @@ Each **Why** names, in one generic sentence, the kind of incident that produced 
 | P-017 | A red test hands back its bite | T1 | Accepted |
 | P-018 | Writer pass before review when code named by docs changes | T1 | Accepted |
 | P-019 | Task record under 40 KB | T0 | Accepted |
-| P-020 | A guard decides on a switch, an owned literal or a raw token | T1 | Accepted |
+| P-020 | A guard decides on a switch, an owned literal or a raw token | T1+T3 | Accepted |

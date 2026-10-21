@@ -1,6 +1,6 @@
 # Voicen Constitution
 
-The engineering principles are defined in `PRINCIPLES.md` (P-001 … P-016), the single source.
+The engineering principles are defined in `PRINCIPLES.md` (P-001 … P-020), the single source.
 This constitution references them and does not restate them; it adds the product-level
 principles that follow from the approved requirements (`docs/requirements.md` v3). A change to
 `PRINCIPLES.md` updates this file in the same commit.
@@ -12,7 +12,8 @@ principles that follow from the approved requirements (`docs/requirements.md` v3
 Every spec, plan and task MUST comply with `PRINCIPLES.md`. Most relevant to plans:
 P-004 (a guarantee needs a failing test), P-005 (tests must bite), P-006 (verify the running
 system against logs), P-009 (secrets never reach logs, commits or docs), P-010 (one source of
-truth per cross-cutting value), P-011 (one shared seam, not parallel paths).
+truth per cross-cutting value), P-011 (one shared seam, not parallel paths), P-020 (a guard decides on a switch, an owned
+literal or a raw token; a guard change belongs to a `checker: true` task with `decides_on`).
 
 ### II. Privacy by default
 
@@ -71,4 +72,4 @@ win and this file is corrected. Amendments: a commit that changes this file with
 `docs/decisions.md`; the owner decides. Versioning: MAJOR for a removed or redefined principle,
 MINOR for an added one, PATCH for wording. Every plan's Constitution Check lists principles I–V.
 
-**Version**: 1.1.1 | **Ratified**: 2026-10-02 | **Last Amended**: 2026-10-07
+**Version**: 1.4.0 | **Ratified**: 2026-10-02 | **Last Amended**: 2026-10-21
