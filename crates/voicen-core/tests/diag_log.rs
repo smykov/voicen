@@ -31,7 +31,7 @@ use diag_support::{
 use voicen_core::clock::utc_compact;
 use voicen_core::diag::{
     format_line, DetectorTag, DictationLine, DictationOutcome, EngineTag, FailureTag, LogConfig,
-    LogEvent, LogsUnwritableReason,
+    LogEvent, LogsUnwritableReason, OsVersion,
 };
 use voicen_core::test_support::TempDir;
 
@@ -185,6 +185,11 @@ fn open_creates_the_dir_writes_nothing_itself_and_appends_whole_lines() {
     log.write(LogEvent::Started {
         build: voicen_core::build_info(),
         pid: 4242,
+        os: OsVersion {
+            major: 10,
+            minor: 0,
+            build: 26100,
+        },
     });
     clock.set(at(NOON_UTC, 250));
     log.write(short(1));
@@ -198,6 +203,40 @@ fn open_creates_the_dir_writes_nothing_itself_and_appends_whole_lines() {
         lines[0].contains(&format!("voicen {} started", voicen_core::build_info())),
         "{lines:#?}"
     );
+    assert_eq!(seen.count(), 0);
+}
+
+#[test]
+fn a_start_with_an_unreadable_os_version_is_still_written_with_the_placeholder() {
+    // T-105 failure branch through the writer: the shell could not read the OS
+    // version and passes OsVersion::UNKNOWN; the start line is still the first
+    // line of the file, whole, inside the closed grammar, with os=0.0.0 and no
+    // unwritable callback. Bite: Log::write dropping a Started without a real os,
+    // the placeholder written as free text or not at all.
+    let tmp = TempDir::new();
+    let dir = tmp.path().join("logs");
+    let (log, _clock, seen) = open_log(&dir, at(NOON_UTC, 0), 0, LogConfig::default());
+    log.write(LogEvent::Started {
+        build: voicen_core::build_info(),
+        pid: 4242,
+        os: OsVersion::UNKNOWN,
+    });
+    log.write(short(1));
+
+    let lines = active_lines(&dir);
+    assert_eq!(lines.len(), 2, "{lines:#?}");
+    let first = closed(&lines[0]);
+    assert_eq!(first.head, "started");
+    assert_eq!(first.get("pid"), Some("4242"));
+    assert_eq!(first.get("os"), Some("0.0.0"));
+    assert!(
+        lines[0].ends_with(&format!(
+            "voicen {} started pid=4242 os=0.0.0",
+            voicen_core::build_info()
+        )),
+        "{lines:#?}"
+    );
+    assert_eq!(closed(&lines[1]).head, "dictation");
     assert_eq!(seen.count(), 0);
 }
 

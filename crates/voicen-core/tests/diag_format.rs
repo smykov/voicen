@@ -20,7 +20,7 @@ use voicen_core::connection_test::ConnectionTestResult;
 use voicen_core::delivery::DeliveryResult;
 use voicen_core::diag::{
     format_line, CrashFileName, DetectorTag, DictationLine, DictationOutcome, EngineTag,
-    FailureTag, LoadKind, LogEvent, PreviousSessionLine, SaveLine, WarningKind,
+    FailureTag, LoadKind, LogEvent, OsVersion, PreviousSessionLine, SaveLine, WarningKind,
 };
 use voicen_core::engine::engine_for;
 use voicen_core::events::{PostProcessResult, PostProcessTrace, SkipKind};
@@ -54,6 +54,13 @@ fn planted() -> Vec<&'static str> {
         leak(""),
     ]
 }
+
+/// Windows 11 24H2, as `RtlGetVersion` reports it.
+const WIN11: OsVersion = OsVersion {
+    major: 10,
+    minor: 0,
+    build: 26100,
+};
 
 fn fake_build() -> BuildInfo {
     BuildInfo {
@@ -375,10 +382,21 @@ fn every_event() -> Vec<LogEvent> {
         LogEvent::Started {
             build: fake_build(),
             pid: 4242,
+            os: WIN11,
         },
         LogEvent::Started {
             build: voicen_core::build_info(),
             pid: u32::MAX,
+            os: OsVersion {
+                major: u32::MAX,
+                minor: u32::MAX,
+                build: u32::MAX,
+            },
+        },
+        LogEvent::Started {
+            build: fake_build(),
+            pid: 0,
+            os: OsVersion::UNKNOWN,
         },
         LogEvent::LogsRecovered,
     ];
@@ -856,16 +874,18 @@ fn timestamp_is_local_time_with_offset_and_milliseconds() {
 // ---- line contents ---------------------------------------------------------------
 
 #[test]
-fn started_line_carries_version_commit_and_pid() {
-    // FR-18 and the Windows CI smoke (`(<commit>) started`). Bite: another word
-    // order, the commit without parentheses, no pid, the real build info not used
-    // verbatim.
+fn started_line_carries_version_commit_pid_and_os() {
+    // FR-18, spec 006 FR-003 (T-105) and the Windows CI smoke (`(<commit>) started`,
+    // `started pid=<n>` then a non-digit). Bite: another word order, the commit
+    // without parentheses, no pid, no os, os before pid, os written in another form
+    // (Debug, two parts), the real build info not used verbatim.
     let raw = format_line(
         at(NOON_UTC, 0),
         0,
         &LogEvent::Started {
             build: fake_build(),
             pid: 4242,
+            os: WIN11,
         },
     );
     assert!(
@@ -875,10 +895,17 @@ fn started_line_carries_version_commit_and_pid() {
     let l = parsed(&raw);
     assert_eq!(l.head, "started");
     assert_eq!(l.level, "INFO");
-    assert_eq!(l.pairs, pairs(&[("pid", "4242".to_string())]));
+    assert_eq!(
+        l.pairs,
+        pairs(&[
+            ("pid", "4242".to_string()),
+            ("os", "10.0.26100".to_string())
+        ])
+    );
+    assert_eq!(check_closed(&l), Ok(()), "{raw}");
     // The message as the shell test (src-tauri/tests/diag.rs) reads it.
     assert!(
-        raw.ends_with(" INFO voicen 0.1.0 (abc1234) started pid=4242"),
+        raw.ends_with(" INFO voicen 0.1.0 (abc1234) started pid=4242 os=10.0.26100"),
         "{raw}"
     );
 
@@ -889,6 +916,11 @@ fn started_line_carries_version_commit_and_pid() {
         &LogEvent::Started {
             build: info.clone(),
             pid: 1,
+            os: OsVersion {
+                major: 6,
+                minor: 3,
+                build: 9600,
+            },
         },
     );
     assert!(
@@ -896,6 +928,78 @@ fn started_line_carries_version_commit_and_pid() {
         "start line {raw:?} for {info}"
     );
     assert!(raw.contains(&format!("({}) started", info.commit)), "{raw}");
+    // The os value is the event's, not a constant.
+    assert!(raw.ends_with(" started pid=1 os=6.3.9600"), "{raw}");
+}
+
+#[test]
+fn started_line_with_an_unreadable_os_version_writes_the_placeholder() {
+    // T-105 failure branch: RtlGetVersion fails -> the shell passes the closed
+    // placeholder OsVersion::UNKNOWN; the line is still written, with os=0.0.0 (the
+    // value the same session's crash files carry), no free text and no missing key.
+    // Bite: UNKNOWN another value, os= dropped or written as `unknown` for it.
+    assert_eq!(
+        OsVersion::UNKNOWN,
+        OsVersion {
+            major: 0,
+            minor: 0,
+            build: 0,
+        }
+    );
+    let raw = format_line(
+        at(NOON_UTC, 0),
+        0,
+        &LogEvent::Started {
+            build: fake_build(),
+            pid: 4242,
+            os: OsVersion::UNKNOWN,
+        },
+    );
+    assert!(
+        raw.ends_with(" INFO voicen 0.1.0 (abc1234) started pid=4242 os=0.0.0"),
+        "{raw}"
+    );
+    let l = parsed(&raw);
+    assert_eq!(check_closed(&l), Ok(()), "{raw}");
+    assert_eq!(l.get("os"), Some("0.0.0"));
+}
+
+#[test]
+fn the_started_grammar_requires_os_in_u32_dotted_form() {
+    // The T-105 rows of diag_support are not toothless: a start line without os=,
+    // with os before pid, or with an os value that is not three u32 parts is
+    // refused; the well-formed ones (the placeholder included) pass. Bite (on
+    // diag_support): os not required, os accepted as any value, the pid-first rule
+    // dropped.
+    let ts = "2026-10-04T12:00:00.000+00:00";
+    let head = "INFO voicen 0.1.0 (abc1234) started";
+    let ok = [
+        format!("{ts} {head} pid=4242 os=10.0.26100"),
+        format!("{ts} {head} pid=4242 os=0.0.0"),
+        format!("{ts} {head} pid=1 os=4294967295.4294967295.4294967295"),
+    ];
+    for raw in &ok {
+        let l = parsed(raw);
+        assert_eq!(check_closed(&l), Ok(()), "{raw}");
+    }
+    let refused = [
+        format!("{ts} {head} pid=4242"),
+        format!("{ts} {head} os=10.0.26100"),
+        format!("{ts} {head} os=10.0.26100 pid=4242"),
+        format!("{ts} {head} pid=4242 os=unknown"),
+        format!("{ts} {head} pid=4242 os=10.0"),
+        format!("{ts} {head} pid=4242 os=10.0.26100.1"),
+        format!("{ts} {head} pid=4242 os=10..26100"),
+        format!("{ts} {head} pid=4242 os=10.0.x"),
+        format!("{ts} {head} pid=4242 os=-1.0.26100"),
+        format!("{ts} {head} pid=4242 os=+10.0.26100"),
+        format!("{ts} {head} pid=4242 os=4294967296.0.0"),
+        format!("{ts} {head} pid=4242 os=10.0.26100 build=1"),
+    ];
+    for raw in &refused {
+        let refused_here = parse(raw).and_then(|l| check_closed(&l)).is_err();
+        assert!(refused_here, "the grammar accepted {raw:?}");
+    }
 }
 
 #[test]

@@ -493,6 +493,17 @@ fn unsigned(v: &str) -> bool {
     !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()) && v.parse::<u64>().is_ok()
 }
 
+/// An OS version `<major>.<minor>.<build>` (T-105): exactly three parts, each a
+/// `u32` written in plain digits. The closed placeholder `0.0.0`
+/// (`OsVersion::UNKNOWN`) is of this form too.
+fn os_version(v: &str) -> bool {
+    let parts: Vec<&str> = v.split('.').collect();
+    parts.len() == 3
+        && parts.iter().all(|p| {
+            !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()) && p.parse::<u32>().is_ok()
+        })
+}
+
 fn signed(v: &str) -> bool {
     let body = v.strip_prefix('-').unwrap_or(v);
     unsigned(body) && v.parse::<i64>().is_ok()
@@ -535,7 +546,8 @@ pub fn check_closed(line: &Line) -> Result<(), String> {
         }
     };
     let required: &[&str] = match line.head.as_str() {
-        "started" => &["pid"],
+        // T-105: the OS version is on every start line.
+        "started" => &["pid", "os"],
         // A blocked press is not a recording: no `rec`, a `reason` instead.
         "dictation" if line.get("outcome") == Some("blocked") => &["outcome", "reason"],
         "dictation" => &["rec", "outcome"],
@@ -559,6 +571,7 @@ pub fn check_closed(line: &Line) -> Result<(), String> {
         let (k, v) = (k.as_str(), v.as_str());
         match (line.head.as_str(), k) {
             ("started", "pid") => check(unsigned(v), k, v)?,
+            ("started", "os") => check(os_version(v), k, v)?,
             ("dictation", "rec" | "press_to_frame_ms" | "duration_ms" | "stop_to_text_ms")
             | ("dictation", "text_to_paste_ms" | "pp_ms" | "load_ms") => {
                 check(unsigned(v), k, v)?;
@@ -601,6 +614,11 @@ pub fn check_closed(line: &Line) -> Result<(), String> {
                 ))
             }
         }
+    }
+    // T-105: `pid=` comes first, right after `started` (the CI smoke matches
+    // `started pid=<n>`), and `os=` follows it.
+    if line.head == "started" && !line.raw.contains(") started pid=") {
+        return Err(format!("a start line begins with pid=: {:?}", line.raw));
     }
     if line.head == "previous session" {
         let outcome = line.get("outcome").unwrap_or_default();

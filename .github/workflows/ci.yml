@@ -317,6 +317,17 @@ jobs:
           Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
           if (-not $found) { if (Test-Path $logs) { Get-Content $logs }; throw "start log line '$expected' (version $env:VOICEN_VERSION, commit $env:VOICEN_COMMIT) not found" }
           Get-Content $logs
+          # T-105 (spec 006 FR-003): the launched pid's start line ends with the OS version
+          # os=<major>.<minor>.<build> from RtlGetVersion. On the runner it is readable, so the
+          # closed placeholder 0.0.0 (version unreadable) fails here, as does a missing os=.
+          $osPattern = "\($([regex]::Escape($env:VOICEN_COMMIT))\) started pid=$($proc.Id) os=(\d+)\.(\d+)\.(\d+)$"
+          $osLines = @(Select-String -Path $logs -Pattern $osPattern)
+          if ($osLines.Count -ne 1) { throw "expected one start line of pid $($proc.Id) ending with os=<major>.<minor>.<build>, found $($osLines.Count)" }
+          $osParts = $osLines[0].Matches[0].Groups
+          $osMajor = [uint64]$osParts[1].Value; $osBuild = [uint64]$osParts[3].Value
+          $osText = "$($osParts[1].Value).$($osParts[2].Value).$($osParts[3].Value)"
+          if ($osText -ceq '0.0.0' -or $osMajor -lt 10 -or $osBuild -eq 0) { throw "start line of pid $($proc.Id) has os=$osText; expected a readable Windows version (major >= 10, build > 0, not the 0.0.0 placeholder)" }
+          Write-Output "the start line of pid $($proc.Id) carries os=$osText"
           if (-not $loaded) { throw "log line '$loadLine' not found after the first launch" }
           if (-not $reconciled) { throw "log line '$reconcileLine' not found after the first launch" }
           Write-Output "found the start, '$loadLine' and '$reconcileLine' log lines"

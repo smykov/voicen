@@ -209,10 +209,15 @@ fn start_writes_started_first_then_the_load_and_reconcile_lines() {
 
     let messages: Vec<String> = log_lines(&logs).iter().map(|l| message(l)).collect();
     let info = voicen_core::build_info();
+    // T-105: the start line carries the OS version from the shell's one source,
+    // RtlGetVersion. On the Windows runner it is readable, so the expected value
+    // is never the placeholder (a start writing OsVersion::UNKNOWN is caught).
+    let os = voicen_lib::diag::os_version();
+    assert!(os.major >= 10 && os.build > 0, "os_version() = {os}");
     assert_eq!(
         messages,
         vec![
-            format!("voicen {info} started pid={}", std::process::id()),
+            format!("voicen {info} started pid={} os={os}", std::process::id()),
             "settings load outcome=first_run".to_string(),
             "autostart reconcile action=removed".to_string(),
         ]

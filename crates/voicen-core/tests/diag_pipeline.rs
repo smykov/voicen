@@ -37,7 +37,7 @@ use serde_json::json;
 use voicen_core::autostart::FakeAutostart;
 use voicen_core::clock::FakeClock;
 use voicen_core::delivery::DeliveryResult;
-use voicen_core::diag::{Log, LogConfig, LogEvent, LogObserver};
+use voicen_core::diag::{Log, LogConfig, LogEvent, LogObserver, OsVersion};
 use voicen_core::events::{DeviceKind, DictationEvent, PipelineObserver};
 use voicen_core::failure::{FailureReason, TimeoutSource};
 use voicen_core::hotkey_registrar::FakeHotkeyRegistrar;
@@ -256,6 +256,7 @@ async fn log_holds_no_key_query_or_transcript_on_any_path() {
     log.write(LogEvent::Started {
         build: voicen_core::build_info(),
         pid: 4242,
+        os: OsVersion::UNKNOWN,
     });
 
     // (label, base URL, auto_paste, clipboard fails, expected end, timeouts,
