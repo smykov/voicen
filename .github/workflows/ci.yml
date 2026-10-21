@@ -607,8 +607,9 @@ jobs:
             }
             , $m
           }
-          # The Started lines of one pid ("... started pid=<pid>" at the end of the line) in any log file
-          # that are not in $mark: the ones written since the mark, whatever file they are in now (a
+          # The Started lines of one pid ("... started pid=<pid>", then a non-digit such as " os=" or the
+          # end of the line) in any log file that are not in $mark: the ones written since the mark,
+          # whatever file they are in now (a
           # retention delete of an old file only removes lines, so it cannot add to the count).
           function Get-StartCountSince($mark, [int]$id) {
             $n = 0

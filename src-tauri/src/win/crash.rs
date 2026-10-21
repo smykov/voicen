@@ -58,7 +58,8 @@ const MODULE_PATH_UNITS: usize = 1024;
 /// most 49 ASCII bytes) and the terminating NUL.
 const NAME_UNITS: usize = 64;
 
-/// The Windows version from `RtlGetVersion`; `0.0.0` when the call fails.
+/// The Windows version from `RtlGetVersion`; [`OsVersion::UNKNOWN`] (`0.0.0`) when
+/// the call fails.
 pub fn os_version() -> OsVersion {
     let mut info = OSVERSIONINFOW {
         dwOSVersionInfoSize: std::mem::size_of::<OSVERSIONINFOW>() as u32,
@@ -73,11 +74,7 @@ pub fn os_version() -> OsVersion {
             build: info.dwBuildNumber,
         }
     } else {
-        OsVersion {
-            major: 0,
-            minor: 0,
-            build: 0,
-        }
+        OsVersion::UNKNOWN
     }
 }
 

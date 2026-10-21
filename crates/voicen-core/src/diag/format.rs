@@ -222,7 +222,7 @@ fn level(event: &LogEvent) -> &'static str {
 
 fn write_message(out: &mut String, event: &LogEvent) {
     match event {
-        LogEvent::Started { build, pid } => {
+        LogEvent::Started { build, pid, os } => {
             let BuildInfo { version, commit } = *build;
             let _ = write!(
                 out,
@@ -231,6 +231,7 @@ fn write_message(out: &mut String, event: &LogEvent) {
                 commit_text(commit),
             );
             pair(out, "pid", pid);
+            pair(out, "os", os);
         }
         LogEvent::Dictation(line) => write_dictation(out, line),
         LogEvent::DictationBlocked { reason } => {

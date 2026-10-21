@@ -43,7 +43,7 @@ pub struct SystemClock;                                         // impl Clock (S
 ```rust
 // voicen_core::diag
 pub enum LogEvent {
-    Started { build: BuildInfo, pid: u32 },                 // `voicen <version> (<commit>) started pid=<n>`
+    Started { build: BuildInfo, pid: u32, os: OsVersion },  // `voicen <version> (<commit>) started pid=<n> os=<major.minor.build>` (os: T-105)
     Dictation(DictationLine),                               // written by LogObserver only
     Warning { kind: WarningKind, os_code: Option<i32> },
     SettingsLoad(LoadKind),                                 // LogEvent::settings_load(&LoadOutcome)
@@ -84,7 +84,7 @@ pub fn format_line(at: SystemTime, seconds_east: i32, event: &LogEvent) -> Strin
 The shell opens the log only through `src-tauri` `diag::start(logs_dir, on_unwritable) -> Arc<Log>`, which writes `Started` first. Retention has no public entry point: `open` runs it, and so does every roll.
 
 Guarantees (each pinned by a test):
-- `format_line(Started)` contains `voicen <version> (<commit>) started` (CI greps `(<commit>) started`): `diag_format.rs` `started_line_carries_version_commit_and_pid`.
+- `format_line(Started)` is `voicen <version> (<commit>) started pid=<n> os=<major.minor.build>` (CI greps `(<commit>) started`; `os=` comes after `pid=`, so the `started pid=<n>` + non-digit-or-end matchers still match): `diag_format.rs` `started_line_carries_version_commit_pid_and_os`. `os` is always written (T-105); an OS version that cannot be read is the closed placeholder `OsVersion::UNKNOWN`, written `os=0.0.0`: `started_line_with_an_unreadable_os_version_writes_the_placeholder`, `diag_log.rs` `a_start_with_an_unreadable_os_version_is_still_written_with_the_placeholder`. The shell's `diag::start` fills it from `diag::os_version()`, the same source as `SessionStart` and the crash files.
 - Closed output. No `LogEvent` field is a `String`, `&str`, path, `io::Error` or `FailureReason`, so a transcript, a key, a URL, a host or error text cannot be passed in: the `compile_fail` doctests in `diag/mod.rs`. An outside `&'static str` (engine kind, detector, failure code) passes through its table, where an unknown value is `other`: `diag_format.rs` `every_log_event_formats_to_one_closed_line`, `foreign_engine_detector_and_failure_strings_become_other`. No model name and no host is logged (T-008 Q1, decision #64), so `HostName` / `ModelName` do not exist yet.
 - `write` from N threads produces N complete lines (no interleaving): `diag_log.rs` `eight_threads_write_4000_whole_lines`.
 - Size: the active `voicen.log` ≤ `roll_bytes`, rolled before a line would cross it or at the local date change. The rolled `voicen-*.log` files total ≤ `total_bytes − roll_bytes`, so the whole set stays ≤ `total_bytes` after every write. Rolled files older than `max_age` are deleted at open and after each roll: `size_bound_holds_after_every_write_*`, `date_roll_follows_local_midnight_at_an_offset`, `rolled_files_*`.
@@ -158,6 +158,7 @@ impl Session {
 ```rust
 pub enum CrashKind { Panic, NativeFault, AbnormalEnd }          // as_str: panic / native_fault / abnormal_end
 pub struct OsVersion { pub major: u32, pub minor: u32, pub build: u32 }   // Display major.minor.build
+// OsVersion::UNKNOWN = 0.0.0: the closed placeholder the shell's os_version returns when RtlGetVersion fails (T-105)
 pub struct LocalStamp { pub at: SystemTime, pub seconds_east: i32 }
 pub struct CrashFileName { /* local date-time fields + pid */ }  // Display crash-YYYYMMDD-HHMMSS-<pid>.txt
 // test-fakes: CrashFileName::fake(&str) -> Option<CrashFileName>   // same acceptance as diag's own parse

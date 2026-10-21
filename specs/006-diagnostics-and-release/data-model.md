@@ -28,7 +28,7 @@ T-008 shipped the variants marked "T-008". Their fields hold only integers, clos
 
 | Variant | Fields | Level | Status |
 |---|---|---|---|
-| `Started` | `build: BuildInfo`, `pid: u32` | INFO | T-008, without `os`. `os: OsVersion` is planned for T-105 (not shipped; the shell's `RtlGetVersion`, which T-024 already calls for crash files); T-100 defines `OsVersion` for crash files |
+| `Started` | `build: BuildInfo`, `pid: u32`, `os: OsVersion` | INFO | T-008 (`build`, `pid`); `os` shipped with T-105, written `os=<major.minor.build>` after `pid=`, from the shell's `diag::os_version()` (`RtlGetVersion`, the same source as the crash files); `OsVersion::UNKNOWN` (`0.0.0`) when it cannot be read |
 | `Dictation` | `DictationLine` (below) | INFO (delivered, no_speech, too_short, cancelled) / WARN (failed, capture_failed) | T-008, T-051, T-009 |
 | `DictationBlocked` | `reason: settings::gate::Blocked` (`no_engine`), written `dictation outcome=blocked reason=<reason>`; no `rec=` (a blocked press is not a recording) | WARN | T-006 (from `DictationEvent::PressBlocked`) |
 | `Warning` | `kind: WarningKind`, `os_code: Option<i32>`. Kinds in T-008: `vad_fallback`, `esc_unavailable`, `toast_failed` (the pipeline's `WarningCode`s), `models_cleanup_failed`, `settings_window_failed`, `change_bridge_failed`. T-052: `settings_opener_failed` (the settings window's opener thread could not start), `tray_failed` (the tray icon could not be built, or a state could not be applied to it), `tray_follower_failed` (the tray's language follower thread could not start). Later features add kinds (e.g. notification or history write failures) | WARN | T-008 |
@@ -50,7 +50,7 @@ Bounded string newtypes (constructed only through validating constructors). None
 | `ModelName` | ≤ 128 chars, printable, no whitespace control chars; quoted in output | not built. T-008 logs no model name (Q1 default, decision #64). Adding one is a new decision |
 | `FileName` | a file name inside the data folder (no directories) | not built: T-100's `CrashFileName` holds a crash file's name as integers (local date-time fields + pid), rendered by diag |
 | `ThreadName`, `CodeLocation`, `Frame` | crash-file texts: control characters removed, ≤ 255 bytes; `Frame`'s module reduced to its base name (no `/` or `\\`); an empty thread name is `unnamed` | T-100 (crash files only, never on a log line) |
-| `OsVersion` | three `u32`, written `major.minor.build` | T-100 (crash files); on `Started`: planned, T-105 (not shipped) |
+| `OsVersion` | three `u32`, written `major.minor.build`; `OsVersion::UNKNOWN` = `0.0.0` (unreadable) | T-100 (crash files); on `Started`: T-105 (shipped) |
 
 Feature extensions: 001 contributes outcome and failure values through its events (`DictationEvent`, `FailureReason::code()` via `FailureTag`); 002 adds `local: Option<Cold|Warm>`, `load_ms` (002 data-model); 003/005 add warning kinds. Adding a variant or field is the only way to log something new — reviewed under P-009.
 

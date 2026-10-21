@@ -61,6 +61,18 @@ pub struct OsVersion {
     pub build: u32,
 }
 
+impl OsVersion {
+    /// The closed placeholder for an OS version that cannot be read (`0.0.0`): the
+    /// one value the shell's `os_version` returns when `RtlGetVersion` fails (and off
+    /// Windows), so the start line's `os=` and the crash files' `os:` agree. No
+    /// Windows release reports major 0, so it never collides with a real value.
+    pub const UNKNOWN: OsVersion = OsVersion {
+        major: 0,
+        minor: 0,
+        build: 0,
+    };
+}
+
 impl Display for OsVersion {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}.{}.{}", self.major, self.minor, self.build)

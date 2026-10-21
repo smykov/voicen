@@ -21,7 +21,7 @@ use voicen_core::diag::{
 
 /// Opens the one log over `logs_dir` (`SystemClock`, the local UTC offset,
 /// `LogConfig::default()`) and writes `LogEvent::Started { build_info(),
-/// std::process::id() }` as its first line. Never fails and never panics: an
+/// std::process::id(), os_version() }` as its first line. Never fails and never panics: an
 /// unwritable folder gives a degraded log and one `on_unwritable` call (T-054
 /// turns it into the one-time notice).
 pub fn start(logs_dir: PathBuf, on_unwritable: OnUnwritable) -> Arc<Log> {
@@ -35,6 +35,7 @@ pub fn start(logs_dir: PathBuf, on_unwritable: OnUnwritable) -> Arc<Log> {
     log.write(LogEvent::Started {
         build: voicen_core::build_info(),
         pid: std::process::id(),
+        os: os_version(),
     });
     log
 }
@@ -110,7 +111,8 @@ pub fn begin_session(logs_dir: PathBuf, log: &Arc<Log>) -> SessionEnd {
 }
 
 /// The Windows version (`RtlGetVersion`, which the compatibility layer does not
-/// shim); `0.0.0` when it cannot be read.
+/// shim); [`OsVersion::UNKNOWN`] (`0.0.0`) when it cannot be read. The one
+/// source of `os` for `Started`, `SessionStart` and the crash files.
 pub fn os_version() -> OsVersion {
     crash_ports::os_version()
 }
@@ -176,11 +178,7 @@ mod crash_ports {
     pub(super) fn install_fault_filter(_logs_dir: &Path, _setup: NativeFaultSetup) {}
 
     pub(super) fn os_version() -> OsVersion {
-        OsVersion {
-            major: 0,
-            minor: 0,
-            build: 0,
-        }
+        OsVersion::UNKNOWN
     }
 }
 

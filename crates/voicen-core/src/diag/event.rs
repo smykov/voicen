@@ -4,7 +4,7 @@
 //! Every field is an integer, a closed enum of this crate, or `BuildInfo`.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
-use super::crash::CrashFileName;
+use super::crash::{CrashFileName, OsVersion};
 use crate::autostart::ReconcileAction;
 use crate::build_info::BuildInfo;
 use crate::connection_test::ConnectionTestResult;
@@ -19,9 +19,15 @@ use crate::settings::{FieldError, LoadOutcome};
 /// One log line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LogEvent {
-    /// The first line of a session: `voicen <version> (<commit>) started pid=<n>`
-    /// (FR-18; the CI smoke greps `(<commit>) started`).
-    Started { build: BuildInfo, pid: u32 },
+    /// The first line of a session:
+    /// `voicen <version> (<commit>) started pid=<n> os=<major.minor.build>`
+    /// (FR-18, spec 006 FR-003; the CI smoke greps `(<commit>) started`). `os` is
+    /// always written; an unreadable OS version is [`OsVersion::UNKNOWN`] (`0.0.0`).
+    Started {
+        build: BuildInfo,
+        pid: u32,
+        os: OsVersion,
+    },
     /// One dictation, written by [`LogObserver`](super::LogObserver).
     Dictation(DictationLine),
     /// A hotkey press the dictation gate blocked (T-006):
