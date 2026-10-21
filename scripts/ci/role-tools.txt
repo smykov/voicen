@@ -1,0 +1,19 @@
+# Tools a role file with a teamwright:tools block must name in its front-matter `tools:` line, and the
+# only MCP tools it may name there (T-082, decisions #145; guard scripts/ci/role-tools.sh). One exact
+# tool name per line; lines starting with # and blank lines are not entries.
+# Serena: the read/navigation tools that the claude-code context of serena-agent 2.0.0.dev0 exposes
+# (its contexts/claude-code.yml excludes search_for_pattern, list_dir, find_file, read_file,
+# create_text_file and execute_shell_command, so those names do not exist in this project's sessions).
+# No edit, memory or shell tool: the teamwright Edit/Write gates stay the only write path.
+mcp__serena__get_symbols_overview
+mcp__serena__find_symbol
+mcp__serena__find_referencing_symbols
+mcp__serena__find_implementations
+mcp__serena__find_declaration
+# context7: both of its tools (read-only).
+mcp__context7__resolve-library-id
+mcp__context7__query-docs
+# Claude Code offers MCP tools as deferred tools (deferred_tools_delta in the session journal); the
+# main session called ToolSearch before its first Serena call (.teamwright/logs/tools.jsonl,
+# 2026-10-05). Whether a subagent needs it in its allowlist is settled by the T-082 Acceptance run.
+ToolSearch

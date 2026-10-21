@@ -5,7 +5,7 @@
 	check-core-test-os-answer check-ci-wip check-telegram-send check-telegram-failure-branch \
 	check-version-stamp check-release-check check-release check-release-guard check-nsis-fork check-e2e-entry-fixtures \
 	check-whisper-cmake-cache check-whisper-model-key check-crt-imports check-whisper \
-	check-shell-windows check-ban-canary \
+	check-shell-windows check-ban-canary check-role-tools \
 	check-ui core-image ui-image \
 	licenses licenses-check licenses-unit licenses-fixture licenses-rust licenses-bundle \
 	licenses-npm licenses-generate licenses-stale licenses-stale-guard
@@ -65,6 +65,16 @@ check-ban-canary:
 # on the real repository. Host bash, git.
 check-clippy-lines:
 	scripts/ci/clippy-lines.test.sh
+
+# T-082 (decisions #145; docs/tasks/T-082.md). Red test written ahead of the implementation; not yet
+# a prerequisite of check: (it fails until T-082 lands; the implementation adds it to check:).
+# check-role-tools: every role file in .claude/agents with a teamwright:tools block names in its
+# front-matter tools: line every tool of scripts/ci/role-tools.txt (the read-only Serena and
+# context7 tools, ToolSearch) and no other MCP tool, and its Tools block keeps both "not connected"
+# fallback lines. The self-test runs the tripwire scripts/ci/role-tools.sh on role files built in a
+# temp dir and on the real .claude/agents. Host bash.
+check-role-tools:
+	scripts/ci/role-tools.test.sh
 
 # check-core-test-os-answer (T-080 rca, class os-answer-deadline-race; T-089, decides_on: token):
 # no core test outside crates/voicen-core/tests/common names an OS-answer target (.invalid,
