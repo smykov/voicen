@@ -12,7 +12,7 @@
 
 # check-ban-canary and check-shell-windows after check-core: both build voicen-core, so a core
 # error is reported first by the faster native check-core, before the slower runs.
-check: check-shell-layout check-shell-layout-fixtures check-helper-windows-fixtures check-ci-credentials \
+check: check-shell-layout check-shell-layout-fixtures check-helper-windows-fixtures check-ci-credentials check-role-tools \
 	check-clippy-lines \
 	check-core-test-os-answer check-ci-wip check-telegram-send check-telegram-failure-branch check-version-stamp check-release-check check-release check-release-guard check-nsis-fork check-whisper-cmake-cache check-whisper-model-key check-crt-imports check-core check-whisper \
 	check-ban-canary check-shell-windows check-e2e-entry-fixtures check-ui \
