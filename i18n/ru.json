@@ -42,6 +42,7 @@
   "failure.invalid_api_key": "Неверный API-ключ",
   "failure.key_store_unavailable": "Не удалось прочитать API-ключ из диспетчера учётных данных Windows.",
   "failure.local_engine": "Ошибка встроенного движка",
+  "failure.local_timeout": "Распознавание заняло слишком много времени",
   "failure.microphone_unavailable": "Микрофон недоступен: {reason}",
   "failure.network_unavailable": "Сеть недоступна",
   "failure.no_local_model": "Локальная модель не скачана. Выберите модель в настройках движка.",

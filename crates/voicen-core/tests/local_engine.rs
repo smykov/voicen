@@ -51,7 +51,7 @@ use voicen_core::engine::builtin::BuiltinDeps;
 use voicen_core::engine::speech_model::SpeechModelLoader;
 use voicen_core::engine::{engine_for, Engine, TranscribeRequest};
 use voicen_core::events::{DeviceKind, DictationEvent, PipelineObserver, RecordingObserver};
-use voicen_core::failure::FailureReason;
+use voicen_core::failure::{FailureReason, TimeoutSource};
 use voicen_core::i18n::{self, UiLanguage, MESSAGE_IDS};
 use voicen_core::local_models::catalog::ModelId;
 use voicen_core::local_models::residency::ModelResidency;
@@ -427,7 +427,12 @@ fn a_transcription_over_timeouts_builtin_is_timeout_through_the_abort_hook() {
         },
     );
     let got = r.job(&builtin(Some("tiny")), &fixtures::speech_3s());
-    assert_eq!(got, Err(FailureReason::Timeout));
+    assert_eq!(
+        got,
+        Err(FailureReason::Timeout {
+            origin: TimeoutSource::Builtin
+        })
+    );
     let call = r.loader.last_transcription();
     assert!(
         call.aborted,
@@ -678,7 +683,9 @@ fn a_job_waiting_for_the_model_gets_its_whole_limit_from_when_it_holds_it() {
 
     assert_eq!(
         job1,
-        Err(FailureReason::Timeout),
+        Err(FailureReason::Timeout {
+            origin: TimeoutSource::Builtin
+        }),
         "job 1 ran past the limit"
     );
     assert_eq!(

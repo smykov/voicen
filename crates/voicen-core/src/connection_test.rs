@@ -373,7 +373,7 @@ fn from_failure(
             ConnectionTestResult::CannotReach { host: host_of(raw) }
         }
         FailureReason::CannotReach { host } => ConnectionTestResult::CannotReach { host },
-        FailureReason::Timeout => ConnectionTestResult::Timeout,
+        FailureReason::Timeout { .. } => ConnectionTestResult::Timeout,
         FailureReason::ServerError { status } => ConnectionTestResult::Http { status },
         FailureReason::UnexpectedResponse => ConnectionTestResult::UnexpectedResponse,
         FailureReason::KeyStoreUnavailable => ConnectionTestResult::KeyStoreUnavailable,

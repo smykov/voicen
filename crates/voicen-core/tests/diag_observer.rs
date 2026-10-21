@@ -25,7 +25,7 @@ use voicen_core::events::{
     DeviceKind, DictationEvent, OutcomeCode, PipelineObserver, PostProcessResult, PostProcessTrace,
     SkipKind, WarningCode,
 };
-use voicen_core::failure::FailureReason;
+use voicen_core::failure::{FailureReason, TimeoutSource};
 use voicen_core::recording::{MicCause, Press, RecordingController, RecordingEnd, RecordingId};
 use voicen_core::settings::gate::Blocked;
 use voicen_core::test_support::TempDir;
@@ -1015,7 +1015,13 @@ fn every_reason() -> Vec<(FailureReason, &'static str)> {
         FailureReason::CannotReach {
             host: "api.example.com:8443".to_string(),
         },
-        FailureReason::Timeout,
+        FailureReason::Timeout {
+            origin: TimeoutSource::Server,
+        },
+        // T-106: the built-in engine's timeout logs the same reason.
+        FailureReason::Timeout {
+            origin: TimeoutSource::Builtin,
+        },
         FailureReason::ServerError { status: 503 },
         FailureReason::UnexpectedResponse,
         FailureReason::KeyStoreUnavailable,
@@ -1033,7 +1039,7 @@ fn every_reason() -> Vec<(FailureReason, &'static str)> {
                 FailureReason::InvalidApiKey => "invalid_api_key",
                 FailureReason::NetworkUnavailable => "network_unavailable",
                 FailureReason::CannotReach { .. } => "cannot_reach",
-                FailureReason::Timeout => "timeout",
+                FailureReason::Timeout { .. } => "timeout",
                 FailureReason::ServerError { .. } => "server_error",
                 FailureReason::UnexpectedResponse => "unexpected_response",
                 FailureReason::KeyStoreUnavailable => "key_store_unavailable",

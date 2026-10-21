@@ -24,7 +24,7 @@ use voicen_core::diag::{
 };
 use voicen_core::engine::engine_for;
 use voicen_core::events::{PostProcessResult, PostProcessTrace, SkipKind};
-use voicen_core::failure::FailureReason;
+use voicen_core::failure::{FailureReason, TimeoutSource};
 use voicen_core::recording::MicCause;
 use voicen_core::secrets::{FakeCredentialStore, KeySlot};
 use voicen_core::settings::gate::Blocked;
@@ -715,7 +715,9 @@ fn every_reason() -> Vec<(FailureReason, FailureTag, &'static str)> {
         FailureReason::CannotReach {
             host: "api.example.com:8443".to_string(),
         },
-        FailureReason::Timeout,
+        FailureReason::Timeout {
+            origin: TimeoutSource::Server,
+        },
         FailureReason::ServerError { status: 503 },
         FailureReason::UnexpectedResponse,
         FailureReason::KeyStoreUnavailable,
@@ -735,7 +737,7 @@ fn every_reason() -> Vec<(FailureReason, FailureTag, &'static str)> {
                     (FailureTag::NetworkUnavailable, "network_unavailable")
                 }
                 FailureReason::CannotReach { .. } => (FailureTag::CannotReach, "cannot_reach"),
-                FailureReason::Timeout => (FailureTag::Timeout, "timeout"),
+                FailureReason::Timeout { .. } => (FailureTag::Timeout, "timeout"),
                 FailureReason::ServerError { .. } => (FailureTag::ServerError, "server_error"),
                 FailureReason::UnexpectedResponse => {
                     (FailureTag::UnexpectedResponse, "unexpected_response")

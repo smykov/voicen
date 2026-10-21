@@ -641,6 +641,7 @@ fn mic_unavailable(err: &CaptureError) -> FailureReason {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::failure::TimeoutSource;
     use crate::i18n::{self, MessageId};
 
     /// Opaque context standing in for T-001's `StartWindow`.
@@ -827,7 +828,13 @@ mod tests {
         let mut c = RecordingController::<Ctx>::new();
         let a = record(&mut c, t0, ms(1000)).id();
         let tf = t0 + ms(5000);
-        c.job_finished(a, JobEnd::Failed(FailureReason::Timeout), tf);
+        c.job_finished(
+            a,
+            JobEnd::Failed(FailureReason::Timeout {
+                origin: TimeoutSource::Server,
+            }),
+            tf,
+        );
         assert_eq!(
             c.indicator(),
             &IndicatorState {
@@ -914,7 +921,13 @@ mod tests {
         let t0 = crate::clock::instant();
         let mut c = RecordingController::<Ctx>::new();
         let a = record(&mut c, t0, ms(1000)).id();
-        c.job_finished(a, JobEnd::Failed(FailureReason::Timeout), t0 + ms(2000));
+        c.job_finished(
+            a,
+            JobEnd::Failed(FailureReason::Timeout {
+                origin: TimeoutSource::Server,
+            }),
+            t0 + ms(2000),
+        );
         let b = record(&mut c, t0 + ms(6000), ms(1000)).id();
         let td = t0 + ms(8000);
         c.job_finished(
@@ -1031,7 +1044,13 @@ mod tests {
         let mut c = RecordingController::<Ctx>::new();
         let a = record(&mut c, t0, ms(1000)).id();
         let tf = t0 + ms(2000);
-        c.job_finished(a, JobEnd::Failed(FailureReason::Timeout), tf);
+        c.job_finished(
+            a,
+            JobEnd::Failed(FailureReason::Timeout {
+                origin: TimeoutSource::Server,
+            }),
+            tf,
+        );
         start(&mut c, tf + ms(1000), "w");
         assert_eq!(
             c.indicator(),
@@ -1066,7 +1085,13 @@ mod tests {
         let a = record(&mut c, t0, ms(1000)).id();
         let b = record(&mut c, t0 + ms(1500), ms(1000)).id();
         let tf = t0 + ms(3000);
-        c.job_finished(a, JobEnd::Failed(FailureReason::Timeout), tf);
+        c.job_finished(
+            a,
+            JobEnd::Failed(FailureReason::Timeout {
+                origin: TimeoutSource::Server,
+            }),
+            tf,
+        );
         assert_eq!(
             c.indicator().overlay,
             message(i18n::FAILURE_TIMEOUT, vec![], tf)
@@ -1134,7 +1159,13 @@ mod tests {
         let t0 = crate::clock::instant();
         let mut c = RecordingController::<Ctx>::new();
         let a = record(&mut c, t0, ms(1000)).id();
-        c.job_finished(a, JobEnd::Failed(FailureReason::Timeout), t0 + ms(2000));
+        c.job_finished(
+            a,
+            JobEnd::Failed(FailureReason::Timeout {
+                origin: TimeoutSource::Server,
+            }),
+            t0 + ms(2000),
+        );
         c.tick(t0 + ms(5000));
         let before = c.indicator().clone();
         assert_eq!(before.tray, TrayState::Error);
@@ -1519,7 +1550,13 @@ mod tests {
         );
         let ticket = stop(&mut c, t0 + ms(1100));
         assert!(c.finish(ticket, Ok(audio()), t0 + ms(1110)).is_ok());
-        c.job_finished(a, JobEnd::Failed(FailureReason::Timeout), t0 + ms(2000));
+        c.job_finished(
+            a,
+            JobEnd::Failed(FailureReason::Timeout {
+                origin: TimeoutSource::Server,
+            }),
+            t0 + ms(2000),
+        );
         assert_eq!(c.indicator().tray, TrayState::HotkeyError, "over Error");
 
         let b = record(&mut c, t0 + ms(6000), ms(1000)).id();
@@ -1561,7 +1598,13 @@ mod tests {
         let mut c = RecordingController::<Ctx>::new();
         let a = record(&mut c, t0, ms(1000)).id();
         let tf = t0 + ms(2000);
-        c.job_finished(a, JobEnd::Failed(FailureReason::Timeout), tf);
+        c.job_finished(
+            a,
+            JobEnd::Failed(FailureReason::Timeout {
+                origin: TimeoutSource::Server,
+            }),
+            tf,
+        );
         c.hotkey_registration(false, tf + ms(100));
         assert_eq!(c.indicator().tray, TrayState::HotkeyError);
         c.hotkey_registration(true, tf + ms(200));
@@ -1618,7 +1661,13 @@ mod tests {
         assert_eq!(c.next_deadline(), None);
 
         let a = record(&mut c, t0 + ms(4000), ms(1000)).id();
-        c.job_finished(a, JobEnd::Failed(FailureReason::Timeout), t0 + ms(6000));
+        c.job_finished(
+            a,
+            JobEnd::Failed(FailureReason::Timeout {
+                origin: TimeoutSource::Server,
+            }),
+            t0 + ms(6000),
+        );
         let tn = t0 + ms(7000);
         c.notice(i18n::NOTICE_CHOOSE_ENGINE, tn);
         assert_eq!(
@@ -1995,7 +2044,13 @@ mod tests {
         let a = record(&mut c, t0, ms(1000)).id();
         let t1 = t0 + ms(2000);
         let b = start_in(&mut c, t1, Mode::Hold, "b");
-        c.job_finished(a, JobEnd::Failed(FailureReason::Timeout), t1 + ms(10));
+        c.job_finished(
+            a,
+            JobEnd::Failed(FailureReason::Timeout {
+                origin: TimeoutSource::Server,
+            }),
+            t1 + ms(10),
+        );
         assert_eq!(c.next_deadline(), Some(t1 + ms(3010)), "the message first");
         assert!(
             c.tick(t1 + ms(3010)).is_none(),

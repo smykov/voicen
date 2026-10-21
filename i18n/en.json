@@ -42,6 +42,7 @@
   "failure.invalid_api_key": "Invalid API key",
   "failure.key_store_unavailable": "The API key could not be read from Windows Credential Manager.",
   "failure.local_engine": "The built-in engine failed",
+  "failure.local_timeout": "Transcription took too long",
   "failure.microphone_unavailable": "Microphone unavailable: {reason}",
   "failure.network_unavailable": "Network unavailable",
   "failure.no_local_model": "No local model is downloaded. Choose a model in the Engine settings.",

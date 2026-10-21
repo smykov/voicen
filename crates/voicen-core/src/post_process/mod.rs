@@ -141,7 +141,7 @@ impl SkipReason {
                     host: host.to_string(),
                 }
             }
-            FailureReason::Timeout => SkipReason::Timeout,
+            FailureReason::Timeout { .. } => SkipReason::Timeout,
             FailureReason::ServerError { status } => SkipReason::Http { status: *status },
             FailureReason::EngineNotConfigured => SkipReason::NotConfigured,
             FailureReason::UnexpectedResponse
@@ -192,7 +192,7 @@ impl PostProcessor for PassThrough {
 mod tests {
     use super::*;
     use crate::delivery::DeliveryResult;
-    use crate::failure::FailureReason;
+    use crate::failure::{FailureReason, TimeoutSource};
     use crate::i18n::{self, text, UiLanguage, MESSAGE_IDS};
     use crate::secrets::FakeCredentialStore;
     use crate::secrets::KeySlot;
@@ -431,7 +431,12 @@ mod tests {
                     host: HOST.to_string(),
                 },
             ),
-            (FailureReason::Timeout, SkipReason::Timeout),
+            (
+                FailureReason::Timeout {
+                    origin: TimeoutSource::Server,
+                },
+                SkipReason::Timeout,
+            ),
             (
                 FailureReason::ServerError { status: 429 },
                 SkipReason::Http { status: 429 },

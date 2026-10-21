@@ -27,9 +27,14 @@ pub enum FailureReason {
     /// `host` is the base URL's `host[:port]` (explicit port only).
     #[error("cannot reach {host}")]
     CannotReach { host: String },
-    /// The whole request exceeded its `Timeouts` duration.
-    #[error("the server did not answer in time")]
-    Timeout,
+    /// The job ran past its time limit: an HTTP request past its `Timeouts`
+    /// duration ([`TimeoutSource::Server`], built only by [`classify`]), or the
+    /// built-in engine past `timeouts.builtin` ([`TimeoutSource::Builtin`], T-098).
+    /// One code (`"Timeout"`) for both; the message follows the origin (T-106,
+    /// decision #147). The field is not named `source`: thiserror would take it
+    /// as the error's `source()`.
+    #[error("the transcription did not finish in time")]
+    Timeout { origin: TimeoutSource },
     /// Any other non-2xx status.
     #[error("server error (HTTP {status})")]
     ServerError { status: u16 },
@@ -61,6 +66,16 @@ pub enum FailureReason {
     LocalEngineFailed,
 }
 
+/// Which limit a [`FailureReason::Timeout`] hit. Closed: it decides the message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimeoutSource {
+    /// An HTTP engine (API, local server, post-processing chat, connection test):
+    /// the server did not answer within the request's duration.
+    Server,
+    /// The built-in engine's transcription ran past `timeouts.builtin`.
+    Builtin,
+}
+
 impl FailureReason {
     /// Stable code for events and logs (data-model "Code" column).
     pub fn code(&self) -> &'static str {
@@ -68,7 +83,7 @@ impl FailureReason {
             FailureReason::InvalidApiKey => "InvalidApiKey",
             FailureReason::NetworkUnavailable => "NetworkUnavailable",
             FailureReason::CannotReach { .. } => "CannotReach",
-            FailureReason::Timeout => "Timeout",
+            FailureReason::Timeout { .. } => "Timeout",
             FailureReason::ServerError { .. } => "ServerError",
             FailureReason::UnexpectedResponse => "UnexpectedResponse",
             FailureReason::KeyStoreUnavailable => "KeyStoreUnavailable",
@@ -86,7 +101,12 @@ impl FailureReason {
             FailureReason::InvalidApiKey => i18n::FAILURE_INVALID_API_KEY,
             FailureReason::NetworkUnavailable => i18n::FAILURE_NETWORK_UNAVAILABLE,
             FailureReason::CannotReach { .. } => i18n::FAILURE_CANNOT_REACH,
-            FailureReason::Timeout => i18n::FAILURE_TIMEOUT,
+            FailureReason::Timeout {
+                origin: TimeoutSource::Server,
+            } => i18n::FAILURE_TIMEOUT,
+            FailureReason::Timeout {
+                origin: TimeoutSource::Builtin,
+            } => i18n::FAILURE_LOCAL_TIMEOUT,
             FailureReason::ServerError { .. } => i18n::FAILURE_SERVER_ERROR,
             FailureReason::UnexpectedResponse => i18n::FAILURE_UNEXPECTED_RESPONSE,
             FailureReason::KeyStoreUnavailable => i18n::FAILURE_KEY_STORE_UNAVAILABLE,
@@ -111,7 +131,7 @@ impl FailureReason {
             }
             FailureReason::InvalidApiKey
             | FailureReason::NetworkUnavailable
-            | FailureReason::Timeout
+            | FailureReason::Timeout { .. }
             | FailureReason::UnexpectedResponse
             | FailureReason::KeyStoreUnavailable
             | FailureReason::EngineNotConfigured
@@ -130,7 +150,7 @@ impl FailureReason {
             FailureReason::InvalidApiKey
             | FailureReason::NetworkUnavailable
             | FailureReason::CannotReach { .. }
-            | FailureReason::Timeout
+            | FailureReason::Timeout { .. }
             | FailureReason::ServerError { .. }
             | FailureReason::UnexpectedResponse
             | FailureReason::KeyStoreUnavailable
@@ -199,7 +219,9 @@ pub fn classify(err: &TransportError, host: &str) -> FailureReason {
         }
         TransportError::Send { connect: true, .. } | TransportError::Setup => cannot_reach(),
         TransportError::Send { timeout: true, .. } | TransportError::BodyRead { timeout: true } => {
-            FailureReason::Timeout
+            FailureReason::Timeout {
+                origin: TimeoutSource::Server,
+            }
         }
         TransportError::Send { .. }
         | TransportError::BodyRead { timeout: false }
@@ -221,6 +243,12 @@ mod tests {
             connect,
             timeout,
             io,
+        }
+    }
+
+    fn server_timeout() -> FailureReason {
+        FailureReason::Timeout {
+            origin: TimeoutSource::Server,
         }
     }
 
@@ -331,7 +359,7 @@ mod tests {
             (
                 "silent listener: timeout only",
                 send(false, false, true, None),
-                FailureReason::Timeout,
+                server_timeout(),
             ),
             // Contract openai-transcription.md › Classification 5: a send error with
             // none of the flags (closed before a response, protocol error) is
@@ -351,7 +379,7 @@ mod tests {
             (
                 "stall mid-body",
                 TransportError::BodyRead { timeout: true },
-                FailureReason::Timeout,
+                server_timeout(),
             ),
             (
                 "reset mid-body",
@@ -375,8 +403,10 @@ mod tests {
         assert!(wrong.is_empty(), "misclassified:\n{}", wrong.join("\n"));
     }
 
-    /// Every variant once. The exhaustive match makes a new variant a compile error
-    /// here until it is added to this list (and so to `message_ids_per_reason`).
+    /// Every variant once, `Timeout` once per [`TimeoutSource`] (each origin has
+    /// its own message). The exhaustive matches make a new variant or origin a
+    /// compile error here until it is added to this list (and so to
+    /// `message_ids_per_reason`).
     fn every_reason() -> Vec<FailureReason> {
         let all = vec![
             FailureReason::InvalidApiKey,
@@ -384,7 +414,10 @@ mod tests {
             FailureReason::CannotReach {
                 host: HOST.to_string(),
             },
-            FailureReason::Timeout,
+            server_timeout(),
+            FailureReason::Timeout {
+                origin: TimeoutSource::Builtin,
+            },
             FailureReason::ServerError { status: 503 },
             FailureReason::UnexpectedResponse,
             FailureReason::KeyStoreUnavailable,
@@ -401,7 +434,9 @@ mod tests {
                 FailureReason::InvalidApiKey
                 | FailureReason::NetworkUnavailable
                 | FailureReason::CannotReach { .. }
-                | FailureReason::Timeout
+                | FailureReason::Timeout {
+                    origin: TimeoutSource::Server | TimeoutSource::Builtin,
+                }
                 | FailureReason::ServerError { .. }
                 | FailureReason::UnexpectedResponse
                 | FailureReason::KeyStoreUnavailable
@@ -438,11 +473,23 @@ mod tests {
                 "Cannot reach api.example.com:8443",
                 "Не удаётся подключиться к api.example.com:8443",
             ),
-            FailureReason::Timeout => (
+            FailureReason::Timeout {
+                origin: TimeoutSource::Server,
+            } => (
                 "Timeout",
                 "failure.timeout",
                 "The server did not answer in time",
                 "Сервер не ответил вовремя",
+            ),
+            // contracts/messages.md, decision #147 (T-106): the built-in engine's
+            // timeout has its own text; the code stays "Timeout".
+            FailureReason::Timeout {
+                origin: TimeoutSource::Builtin,
+            } => (
+                "Timeout",
+                "failure.local_timeout",
+                "Transcription took too long",
+                "Распознавание заняло слишком много времени",
             ),
             FailureReason::ServerError { .. } => (
                 "ServerError",
@@ -544,7 +591,7 @@ mod tests {
                 FailureReason::InvalidApiKey
                 | FailureReason::NetworkUnavailable
                 | FailureReason::CannotReach { .. }
-                | FailureReason::Timeout
+                | FailureReason::Timeout { .. }
                 | FailureReason::ServerError { .. }
                 | FailureReason::UnexpectedResponse
                 | FailureReason::KeyStoreUnavailable
@@ -600,13 +647,28 @@ mod tests {
     #[test]
     fn codes_are_distinct() {
         // Codes are what T-001's JobFinished event carries; two reasons with one
-        // code cannot be told apart in the log. Bite: a shared fallback code.
-        let codes: Vec<&str> = every_reason().iter().map(FailureReason::code).collect();
+        // code cannot be told apart in the log. A code names a variant, not a
+        // field value: the two `Timeout` origins share "Timeout" on purpose (the
+        // log reason stays `Timeout`, spec 002 FR-019a, decision #147; the log
+        // line has `engine=` beside it). So: one code per variant, and different
+        // variants never share one. Bite: a shared fallback code; a per-origin
+        // code ("LocalTimeout").
+        let mut per_variant: Vec<(std::mem::Discriminant<FailureReason>, &str)> = Vec::new();
+        for r in every_reason() {
+            let (d, code) = (std::mem::discriminant(&r), r.code());
+            assert!(!code.is_empty(), "{r:?}: empty code");
+            match per_variant.iter().find(|(seen, _)| *seen == d) {
+                Some((_, first)) => {
+                    assert_eq!(*first, code, "{r:?}: code differs within its variant")
+                }
+                None => per_variant.push((d, code)),
+            }
+        }
+        let codes: Vec<&str> = per_variant.iter().map(|(_, c)| *c).collect();
         let mut unique = codes.clone();
         unique.sort_unstable();
         unique.dedup();
         assert_eq!(unique.len(), codes.len(), "codes not distinct: {codes:?}");
-        assert!(codes.iter().all(|c| !c.is_empty()), "empty code: {codes:?}");
     }
 
     #[test]

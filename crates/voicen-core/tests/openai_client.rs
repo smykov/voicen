@@ -25,7 +25,7 @@ use voicen_core::audio::{wav, AudioBuffer};
 use voicen_core::engine::lookup::{install, FixedLookup};
 use voicen_core::engine::openai::OpenAiCompatibleEngine;
 use voicen_core::engine::{engine_for, Engine, TranscribeRequest};
-use voicen_core::failure::FailureReason;
+use voicen_core::failure::{FailureReason, TimeoutSource};
 use voicen_core::i18n::{text, UiLanguage};
 use voicen_core::secrets::{FakeCredentialStore, KeySlot, Secret};
 use voicen_core::settings::url::check_base_url;
@@ -520,7 +520,12 @@ async fn delay_past_ms_timeout_is_timeout() {
             req_with_total(total),
         )
     });
-    assert_eq!(got, Err(FailureReason::Timeout));
+    assert_eq!(
+        got,
+        Err(FailureReason::Timeout {
+            origin: TimeoutSource::Server
+        })
+    );
     at_least(took, total);
 }
 
@@ -683,7 +688,13 @@ fn stall_mid_body_is_timeout_and_cut_mid_body_is_unexpected_response() {
             req_with_total(total),
         )
     });
-    assert_eq!(got, Err(FailureReason::Timeout), "stall mid-body");
+    assert_eq!(
+        got,
+        Err(FailureReason::Timeout {
+            origin: TimeoutSource::Server
+        }),
+        "stall mid-body"
+    );
     at_least(took, total);
 
     let got = transcribe(
@@ -741,7 +752,9 @@ async fn no_failure_contains_query_key_or_transcript() {
             "delay",
             ok_text(TRANSCRIPT).set_delay(Duration::from_secs(5)),
             Duration::from_millis(300),
-            FailureReason::Timeout,
+            FailureReason::Timeout {
+                origin: TimeoutSource::Server,
+            },
         ),
     ];
     for (name, template, total, expected) in http_cases {

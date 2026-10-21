@@ -29,7 +29,7 @@ use voicen_core::events::{
     DictationEvent, OutcomeCode, PostProcessResult, PostProcessTrace, RecordingObserver,
     WarningCode,
 };
-use voicen_core::failure::FailureReason;
+use voicen_core::failure::{FailureReason, TimeoutSource};
 use voicen_core::hotkey_registrar::FakeHotkeyRegistrar;
 use voicen_core::i18n::{self, text, MessageId, UiLanguage};
 use voicen_core::models::FakeDownloadedModels;
@@ -732,7 +732,12 @@ async fn no_answer_within_timeout_is_timeout() {
         Arc::new(api_settings(&base(&server))),
     );
     let (report, took) = h.run(rec);
-    assert_eq!(report.end, JobEnd::Failed(FailureReason::Timeout));
+    assert_eq!(
+        report.end,
+        JobEnd::Failed(FailureReason::Timeout {
+            origin: TimeoutSource::Server
+        })
+    );
     at_least(took, t.api_transcription);
     assert!(report.pending.is_some(), "{report:?}");
     assert_eq!(h.clipboard.texts(), Vec::<String>::new());
@@ -765,7 +770,12 @@ async fn configured_api_timeout_fails_the_job_with_timeout() {
     s.timeouts.connect_s = 2;
     let rec = h.record(fixtures::speech_3s(), Arc::new(s));
     let (report, took) = h.run(rec);
-    assert_eq!(report.end, JobEnd::Failed(FailureReason::Timeout));
+    assert_eq!(
+        report.end,
+        JobEnd::Failed(FailureReason::Timeout {
+            origin: TimeoutSource::Server
+        })
+    );
     at_least(took, Duration::from_secs(5));
     assert!(report.pending.is_some(), "{report:?}");
     assert_eq!(h.clipboard.texts(), Vec::<String>::new());
@@ -1154,7 +1164,9 @@ async fn no_event_or_failure_carries_key_query_or_transcript() {
             with_query(&base(&slow)),
             true,
             false,
-            JobEnd::Failed(FailureReason::Timeout),
+            JobEnd::Failed(FailureReason::Timeout {
+                origin: TimeoutSource::Server,
+            }),
             ms,
         ),
         (

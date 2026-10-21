@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 
 use crate::clock::MonotonicClock;
 use crate::engine::speech_model::{Abort, SpeechModel, SpeechModelLoader};
-use crate::failure::FailureReason;
+use crate::failure::{FailureReason, TimeoutSource};
 use crate::local_models::catalog::ModelId;
 use crate::local_models::service::{InUse, ModelRelease, ReleaseGuard};
 
@@ -433,7 +433,9 @@ impl ModelGuard {
         let result = model.transcribe(pcm, language, &abort);
         drop(model);
         if abort.fired() {
-            return Err(FailureReason::Timeout);
+            return Err(FailureReason::Timeout {
+                origin: TimeoutSource::Builtin,
+            });
         }
         result.map_err(|_| FailureReason::LocalEngineFailed)
     }

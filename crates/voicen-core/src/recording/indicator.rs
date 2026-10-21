@@ -123,6 +123,7 @@ impl IndicatorState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::failure::TimeoutSource;
     use crate::i18n;
 
     fn inputs(hotkey_error: bool, recording: bool, error: bool) -> IndicatorInputs {
@@ -175,8 +176,14 @@ mod tests {
         // overlay.
         let t0 = crate::clock::instant();
         let msg = ShownMessage {
-            id: FailureReason::Timeout.message_id(),
-            params: FailureReason::Timeout.message_params(),
+            id: FailureReason::Timeout {
+                origin: TimeoutSource::Server,
+            }
+            .message_id(),
+            params: FailureReason::Timeout {
+                origin: TimeoutSource::Server,
+            }
+            .message_params(),
             until: t0 + MESSAGE_DURATION,
         };
         let mut wrong = Vec::new();

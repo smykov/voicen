@@ -31,7 +31,7 @@ use voicen_core::autostart::FakeAutostart;
 use voicen_core::clock::FakeClock;
 use voicen_core::engine::{engine_for, Engine, TranscribeRequest};
 use voicen_core::events::{DictationEvent, OutcomeCode, RecordingObserver};
-use voicen_core::failure::FailureReason;
+use voicen_core::failure::{FailureReason, TimeoutSource};
 use voicen_core::hotkey_registrar::FakeHotkeyRegistrar;
 use voicen_core::models::FakeDownloadedModels;
 use voicen_core::pipeline::{JobReport, Pipeline, PipelineDeps, PressContext};
@@ -361,7 +361,12 @@ async fn no_answer_within_local_server_deadline_is_timeout() {
             req_with(timeouts(Duration::from_secs(10), deadline)),
         )
     });
-    assert_eq!(got, Err(FailureReason::Timeout));
+    assert_eq!(
+        got,
+        Err(FailureReason::Timeout {
+            origin: TimeoutSource::Server
+        })
+    );
     at_least(took, deadline);
 }
 
@@ -582,7 +587,12 @@ async fn configured_local_server_timeout_fails_the_job_with_timeout() {
     s.timeouts.api_transcription_s = 600;
     let rec = h.record(fixtures::speech_3s(), Arc::new(s));
     let (report, took) = measure(|| h.run(rec));
-    assert_eq!(report.end, JobEnd::Failed(FailureReason::Timeout));
+    assert_eq!(
+        report.end,
+        JobEnd::Failed(FailureReason::Timeout {
+            origin: TimeoutSource::Server
+        })
+    );
     at_least(took, Duration::from_secs(5));
     assert!(report.pending.is_some(), "{report:?}");
     assert_eq!(h.clipboard.texts(), Vec::<String>::new());

@@ -46,7 +46,7 @@ use voicen_core::engine::{Engine, TranscribeRequest};
 use voicen_core::events::{
     DeviceKind, DictationEvent, OutcomeCode, PipelineObserver, RecordingObserver, WarningCode,
 };
-use voicen_core::failure::FailureReason;
+use voicen_core::failure::{FailureReason, TimeoutSource};
 use voicen_core::hotkey_registrar::FakeHotkeyRegistrar;
 use voicen_core::i18n;
 use voicen_core::models::FakeDownloadedModels;
@@ -1914,7 +1914,9 @@ fn retry_available_follows_the_pending_slot() {
         in_order(vec![
             Err(FailureReason::ServerError { status: 503 }),
             Ok(TEXT.to_string()),
-            Err(FailureReason::Timeout),
+            Err(FailureReason::Timeout {
+                origin: TimeoutSource::Server,
+            }),
         ]),
     );
     let speech = fixtures::speech_3s();
