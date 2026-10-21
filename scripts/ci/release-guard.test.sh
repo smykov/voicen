@@ -757,6 +757,23 @@ mutate trigger-main '!d && $0 == "    branches: [main, \"wip/**\"]" { $0 = "    
   run "real with push branches [main] [R7]" 1 "$(at "$tmp/trigger-main/ci.yml" "$(first_hdiff "$tmp/trigger-main/ci.yml")" R7)" "$tmp/trigger-main"
 mutate trigger-paths '{ print } !d && $0 == "    branches: [main, \"wip/**\"]" { print "    paths-ignore: [\"docs/**\"]"; d = 1 }' &&
   run "real with push paths-ignore [R7]" 1 "$(at "$tmp/trigger-paths/ci.yml" "$(first_hdiff "$tmp/trigger-paths/ci.yml")" R7)" "$tmp/trigger-paths"
+# T-083 (decision #144): the push trigger skips a push whose whole diff lies under docs/tasks/**,
+# nothing wider. R7 only compares ci.yml with the owned header, so the owned copy's content is
+# pinned here (a widening must edit ci.yml, the owned copy, the fixtures and this test together).
+# Raw text, comments included: exactly one header line holds paths or branches-ignore (any case),
+# it is the owned filter line, and it sits right after the push trigger's tags line.
+hdr=scripts/ci/release-header.yml
+pig='    paths-ignore: ["docs/tasks/**"]'
+expect "owned header $hdr: the line '$pig' occurs exactly once" \
+  test "$(grep -c -x -F -- "$pig" "$hdr")" = 1
+expect "owned header $hdr: the line before '$pig' is the push trigger's '    tags: [\"v*\"]'" \
+  test "$(grep -x -F -B 1 -- "$pig" "$hdr" | head -n 1)" = '    tags: ["v*"]'
+expect "owned header $hdr: no other line holds paths or branches-ignore (raw text, comments included)" \
+  test "$(grep -i -E 'paths|branches-ignore' "$hdr")" = "$pig"
+mutate trigger-no-paths-ignore '$0 == "    paths-ignore: [\"docs/tasks/**\"]" { next } { print }' &&
+  run "real with the push paths-ignore line deleted [R7]" 1 "$(at "$tmp/trigger-no-paths-ignore/ci.yml" "$(first_hdiff "$tmp/trigger-no-paths-ignore/ci.yml")" R7)" "$tmp/trigger-no-paths-ignore"
+mutate trigger-paths-wide '$0 == "    paths-ignore: [\"docs/tasks/**\"]" { $0 = "    paths-ignore: [\"docs/**\"]" } { print }' &&
+  run "real with push paths-ignore widened to docs/** [R7]" 1 "$(at "$tmp/trigger-paths-wide/ci.yml" "$(first_hdiff "$tmp/trigger-paths-wide/ci.yml")" R7)" "$tmp/trigger-paths-wide"
 
 # T-088: the owned list and fragments (R11) agree with the real ci.yml, and say what the retired
 # guards said (test-side reads of the guard's own copies; the guard checks them too, see below).
