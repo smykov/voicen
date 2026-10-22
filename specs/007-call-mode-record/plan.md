@@ -95,7 +95,7 @@ No NEEDS CLARIFICATION remains. Behaviours the Linux host cannot observe are mar
 | IV. Core + thin shell | Session, timeline, codec, storage, chunking, engine mapping, merge, schema, settings, tray state and launch args are core and Linux-tested. The shell holds only cpal/WASAPI, COM notification, Win32 disk and dialogs, the windows and NSIS. | PASS |
 | V. Measured, not assumed | SC-003 comes from `final_finished ms=`; FR-011 from a ±50 ppm test; CA-9 from a 60-min encode test; WER from the `wer` example on pinned sets. The table below shows where each requirement is verified. | PASS |
 
-**Note on II (owner decides)**: `.specify/memory/constitution.md` v1.4.0 still says that audio is kept only until its result is delivered and that at most one failed recording is kept (NFR-06), and it cites requirements v3. Requirements v7 keep calls until deleted (#170), and NFR-06 was amended `(v6, r3#1)` to cover dictation temp audio only. Under the constitution's Governance the requirements win, so this plan follows v7. The constitution needs an amendment, which is an owner decision through `/speckit-constitution`. It is not made here.
+**Note on II**: constitution v1.4.0 limited all audio by NFR-06 and cited requirements v3. Amended to v1.5.0 (#189): dictation audio keeps the NFR-06 limit; calls are kept until deleted (#170, FR-77). The plan follows v7 and the amended principle.
 
 Post-design re-check (after data-model.md and contracts/): still PASS with the same note. No complexity-tracking entry.
 
@@ -233,7 +233,7 @@ README.md (consent section EN/RU, FR-045), docs/architecture.md, docs/decisions/
 2. **Chunk concurrency** (research R11): at most 3 requests in flight, with decoding still one chunk at a time, against FR-018's wording; or strictly sequential, which risks SC-003. **Decided (#187)**: at most 3 in flight.
 3. **Silero unavailable during a pass** (research R8): use energy spans with a logged `vad_fallback`, which may send music (against SC-008); or fail the track with a new reason that FR-027's list lacks. **Decided (#188)**: energy spans with `vad_fallback`.
 4. **Fallback codec** if libopus cannot be built `/MT` (research R5): pure-Rust `ropus` (young), or a prebuilt `/MT` library. Open: OQ-66.
-5. **Constitution amendment** for principle II and the v3 references (Constitution Check note). **Decided (#189)**: amend through `/speckit-constitution`.
+5. **Constitution amendment** for principle II and the v3 references (Constitution Check note). **Decided (#189)**: amended, constitution v1.5.0.
 6. **OQ-45** stays open until the indicator spike. **OQ-48** is answered here as amended ADR-011, for owner confirmation. **OQ-44** needs nothing in 1a (FR-61 is 1d).
 
 ## Risks
@@ -248,4 +248,4 @@ README.md (consent section EN/RU, FR-045), docs/architecture.md, docs/decisions/
 
 ## Complexity Tracking
 
-No constitution violations. The principle II wording conflict is a stale constitution, not a violation (see the note).
+No constitution violations. Principle II was amended to v1.5.0 (#189), see the note.

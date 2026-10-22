@@ -2,7 +2,7 @@
 
 The engineering principles are defined in `PRINCIPLES.md` (P-001 … P-020), the single source.
 This constitution references them and does not restate them; it adds the product-level
-principles that follow from the approved requirements (`docs/requirements.md` v3). A change to
+principles that follow from the approved requirements (`docs/requirements.md` v7). A change to
 `PRINCIPLES.md` updates this file in the same commit.
 
 ## Core Principles
@@ -21,8 +21,11 @@ literal or a raw token; a guard change, decided on raw staged paths, belongs to 
   endpoints the user configured (NFR-05). No telemetry.
 - Transcript text, audio and API keys MUST NOT appear in logs, crash files or errors (FR-20, NFR-04).
 - API keys MUST be stored only in Windows Credential Manager (NFR-04).
-- Audio is kept only until its result is delivered; at most one failed recording is kept for
-  retry (NFR-06).
+- Dictation audio is kept only as NFR-06 allows: until its result is delivered, at most one
+  failed recording kept for retry.
+- Calls (release 2) are kept until the user deletes them (FR-77; auto-delete only as the opt-in
+  of FR-79; decisions #170). Temp-audio cleanup MUST NOT touch a call folder (NFR-06, FR-49).
+  Subtitles-only sessions write no call audio or text to disk (FR-51).
 
 ### III. Never lose the user's words, never paste garbage
 
@@ -72,4 +75,4 @@ win and this file is corrected. Amendments: a commit that changes this file with
 `docs/decisions.md`; the owner decides. Versioning: MAJOR for a removed or redefined principle,
 MINOR for an added one, PATCH for wording. Every plan's Constitution Check lists principles I–V.
 
-**Version**: 1.4.0 | **Ratified**: 2026-10-02 | **Last Amended**: 2026-10-21
+**Version**: 1.5.0 | **Ratified**: 2026-10-02 | **Last Amended**: 2026-10-22
