@@ -23,7 +23,7 @@ Every toggle source (tray, hotkey, `--call record`) calls `toggle_record(on, Sou
                                                      └── device events → Timeline (stays Recording)
 ```
 
-`Starting` opens both tracks and checks the root before it creates any folder. A refusal leaves nothing on disk and logs `call_refused` (FR-002).
+`Starting` opens both tracks and checks the root before it creates any folder. The system track is opened first, then the mic, then the root is checked; the first failure refuses the start, so on a host with no output device the refusal is `call_refused part=system reason=no_device` whatever the capture endpoints (FR-043). A refusal leaves nothing on disk, closes any track already opened and logs `call_refused` (FR-002).
 
 ## Call (`meta.json`, the source of state and names)
 
@@ -31,16 +31,16 @@ Every toggle source (tray, hotkey, `--call record`) calls `toggle_record(on, Sou
 |---|---|---|
 | `schema` | `1` | Version of `meta.json`. An unknown version is listed as `damaged`. |
 | `id` | `CallId` = folder name `YYYY-MM-DD_HHMMSS[-n]` | Unique within a root. |
-| `title` | `String` | Default "Call DD.MM HH:MM" (local start time, in the UI language at creation). Empty or whitespace-only is refused (FR-035). |
+| `title` | `String` | Default "Call DD.MM HH:MM" (local start time, in the UI language at creation), rendered from catalog id `calls.title_default` = `Call {day}.{month} {hour}:{minute}` (two-digit values). Empty or whitespace-only is refused (FR-035). |
 | `started_at` | ISO-8601 with offset | The QPC instant at which both tracks were open, mapped to wall time once. |
 | `ended_at`, `duration_ms` | `Option<…>` | Set at stop or recovery. `duration_ms` = the shorter readable track. |
 | `state` | `CallState` | See the transitions below. |
 | `failure` | `Option<{reason: FailReason, track: Option<Track>}>` | Present only in `failed`. |
-| `stop_reason` | `Option<StopReason>` | `user` / `hotkey` / `exit` / `system_end` / `sleep` / `max_length` / `low_disk` / `storage_error` / `switch`. |
+| `stop_reason` | `Option<StopReason>` | `user` / `hotkey` / `exit` / `system_end` / `sleep` / `max_length` / `low_disk` / `storage_error`. 1a has no stop switch (#184), so `switch` is a start `Source` only, never a `StopReason`. |
 | `mode` | `{record: true, subtitles: bool}` | §7 "mode flags". |
 | `tracks` | `[TrackMeta; 2]` | `mic`, `system`. |
 | `device_changes` | `Vec<DeviceChange>` | Appended while recording (FR-012). |
-| `engines` | `{transcription: Option<EngineRef>, diarization: null}` | Set when a pass starts. `EngineRef` = `{kind: "api", model}`. The base URL host is not stored (the provider notice has its own setting). |
+| `engines` | `{transcription: Option<EngineRef>, diarization: null}` | Set when a pass starts. `EngineRef` is a typed core value serialized as one string `"<kind>:<model>"`; in 1a always `"api:<model>"` (e.g. `"api:whisper-1"`). The same representation is used in `meta.json` and in `transcript.json` `engines.transcription` (requirements §7 lists `engines.transcription` as one value, not an object). The base URL host is not stored (the provider notice has its own setting). |
 | `app_version` | `String` | `BuildInfo::version`. |
 | `speakers` | `Vec<Speaker>` | In 1a always `me` and `s1`. |
 | `results` | `{mic: TrackResult, system: TrackResult}` | Per-track result of the last pass (FR-027). |
@@ -131,7 +131,7 @@ As in §7 schema 1: `start_ms`, `end_ms` (relative to `started_at` = track `star
 | Field | Type | Rule |
 |---|---|---|
 | `queue` | FIFO of `(root, CallId, TrackSet)` | One pass at a time (FR-028). New calls are appended at stop. At start, `ready-to-transcribe` calls are enqueued oldest first. |
-| `in_flight` | ≤ 3 chunk requests | R11 (owner confirmation). |
+| `in_flight` | ≤ 3 chunk requests | Decided (#187): at most 3 requests in flight; the decoder and the chunker still hold one chunk at a time (FR-018 applies to decoding). |
 | `engine_mode` | `timed` → `timeless` (one way, per pass) | FR-024. |
 | `cancel` | token | Deleting a transcribing call cancels its pass first (FR-037). |
 
@@ -172,7 +172,7 @@ The settings `SCHEMA_VERSION` stays 1. The section is added with container-level
 | `low_disk` | < 1 GB (FR-018) | indicator + toast |
 | `call_saved_transcribing`, `transcript_ready{call}`, `pass_failed{reason}` | FR-030 | toast |
 | `stopped{reason}` | sleep, 4 h, < 200 MB, storage error (FR-008, FR-016, FR-018) | toast |
-| `provider_notice{host}` | First session on a new cloud host (FR-031) | indicator |
+| `provider_notice{host}` | First session on a new cloud host (FR-031) | indicator (`warning.provider_notice`, wire kind `providerNotice`) |
 
 Warnings stay in the indicator's list until dismissed (FR-006); a dismissed kind re-arms on its next trigger.
 

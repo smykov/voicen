@@ -63,17 +63,17 @@ trait TrackDecoder { fn next_window(&mut self, max_ms: u32) -> Result<Option<Aud
 
 ## `meta.json` (schema 1 of the call metadata)
 
-A JSON object with the fields of data-model.md "Call", in that order, snake_case keys, written with temp + rename. Example states: `"state": "recording"`, `"state": "failed", "failure": {"reason": "timeout", "track": "system"}`.
+A JSON object with the fields of data-model.md "Call", in that order, snake_case keys, written with temp + rename. Example states: `"state": "recording"`, `"state": "failed", "failure": {"reason": "timeout", "track": "system"}`. `engines` is `{"transcription": "api:<model>", "diarization": null}` once a pass has started (`EngineRef`, the same string as in `transcript.json`; data-model.md "Call").
 
 ## `transcript.json` (requirements §7 schema 1)
 
 Exactly the §7 keys. In 1a:
-- `engines.transcription` is `"api:<model>"`;
+- `engines.transcription` is `"api:<model>"`, the `EngineRef` string `"<kind>:<model>"` also stored in `meta.json` (one representation in both files; §7 gives `engines.transcription` as a single value);
 - `engines.diarization` is `null`;
 - every segment has `source: "final"`;
 - no `hidden` or `confidence`.
 
-`validate()` (research R17) runs before every write, and a failure is a programming error logged as `transcript_invalid` that leaves the call `failed: storage`. Writes use temp + rename, so a crash never leaves a partial file.
+`validate()` (research R17) runs before every write, and a failure is a programming error logged as `transcript_invalid rule=<…> segment=<n>` (see "Log lines") that leaves the call `failed: storage`. Writes use temp + rename, so a crash never leaves a partial file.
 
 ## `transcript.md`
 
@@ -110,19 +110,24 @@ Mapping to the pass:
 
 ## Launch arguments
 
-`LaunchArgs::parse(argv)` recognises `--autostart` and `--call record`. `second_launch_action(&LaunchArgs, settings_open: bool)` returns:
-- `StartCallRecord` when the switch is present;
-- otherwise the existing `FrontSettings` / `TrayOnly`.
+`LaunchArgs::parse(argv)` recognises `--autostart` and `--call record`: `LaunchArgs { autostart: bool, call: Option<CallSwitch> }`, `CallSwitch` = `Record` | `Unknown`. It becomes the one parser of `--autostart`: the shell's `autostart::launched_by_autostart` (`src-tauri/src/autostart.rs`, also read at primary startup in `src-tauri/src/lib.rs`) delegates to it, and `AUTOSTART_ARG` stays the constant pinned by `src-tauri/tests/autostart.rs`.
 
-`--call <other>` → `CallSwitchRefused { reason: unknown_value }`.
+**Signature change of an existing function.** Today `crates/voicen-core/src/settings/gate.rs` has `pub fn second_launch_action(launched_by_autostart: bool) -> SecondLaunchAction` (`FrontSettings` | `TrayOnly`). It becomes `pub fn second_launch_action(args: &LaunchArgs) -> SecondLaunchAction`, and `SecondLaunchAction` gains `StartCallRecord`:
+- `call: Some(Record)` → `StartCallRecord` (with or without `--autostart`);
+- `call: Some(Unknown)` → `TrayOnly` (no action), and the primary logs `CallSwitchRefused { reason: unknown_value }`;
+- otherwise the existing table, unchanged: `autostart` → `TrayOnly`, else `FrontSettings`.
+
+No `settings_open` argument: whether a settings window is open stays the shell's concern inside `FrontSettings`, as today. The existing callers change with it:
+- `src-tauri/src/tray.rs` `on_second_instance`, which today calls `second_launch_action(second_launched_by_autostart(&argv))`; it calls `second_launch_action(&LaunchArgs::parse(&argv))`, and `StartCallRecord` posts one request to the main loop (exercised by `src-tauri/tests/single_instance.rs`);
+- the core test `second_launch_action_table` in `gate.rs`, rewritten over `LaunchArgs` with its existing rows kept.
 
 ## Log lines
 
-One line per event, `key=value` after the 006 prefix. The smoke and tests grep the starred lines.
+One line per event, `key=value` after the 006 prefix. The smoke and tests grep the starred lines; the install smoke greps `call_requested source=switch` and `call_refused part=system reason=no_device` (FR-043; the session opens the system track first, data-model.md "CallSession").
 
 | Event | Line body |
 |---|---|
-| `CallRequested` | `call_requested source=<tray\|hotkey\|switch>` |
+| `CallRequested` ★ | `call_requested source=<tray\|hotkey\|switch>` |
 | `CallRefused` ★ | `call_refused part=<mic\|system\|root> reason=<no_device\|access_denied\|busy\|unwritable\|missing\|other>` |
 | `CallStarted` | `call_started record=1 subtitles=0 mic=<EndpointId> system=<EndpointId> comms_differs=<0\|1>` |
 | `CallDeviceChanged` | `call_device track=<mic\|system> cause=<…> gap_ms=<n> to=<EndpointId\|none>` |
@@ -133,6 +138,8 @@ One line per event, `key=value` after the 006 prefix. The smoke and tests grep t
 | `FinalPassStage` | `final_stage track=<…> stage=<decode\|vad\|upload\|merge\|write> ms=<n> chunks=<n>` |
 | `FinalPassFinished` | `final_finished outcome=<ready\|failed> reason=<…> mode=<timed\|timeless> ms=<n>` |
 | `CallSwitchRefused` | `call_switch_refused reason=unknown_value` |
+| `VadFallback` | `vad_fallback track=<mic\|system> cause=<unavailable\|error>` (#188: the pass goes on with energy spans) |
+| `TranscriptInvalid` | `transcript_invalid rule=<unsorted\|out_of_range\|unknown_speaker\|unknown_track\|bad_source\|bad_lang\|empty_text> segment=<n>` (research R17; `segment` is the index, never the text) |
 
 Never logged: transcript text, titles, speaker names, folder or root paths, hosts, device friendly names, audio (FR-042, SC-009).
 

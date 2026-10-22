@@ -33,20 +33,32 @@ There is no stop switch in 1a.
 | `cargo test -p voicen` (`src-tauri/tests/call_*.rs`) | WAV-sourced chain capture → storage → final (local mock server) → merge; IMMNotificationClient register/unregister; loopback open on a device-less runner gives `no_device`; indicator window style bits (topmost, no taskbar, shown without activation) | FR-014, FR-010, FR-005 |
 | `crt-imports.sh` | `voicen.exe` and the call test exes import no `MSVCP140` / `VCRUNTIME140` (libopus /MT) | R5 |
 | `opus-cmake-cache.sh` (new) | opus `CMakeCache.txt`: `OPUS_STATIC_RUNTIME=ON`, `CMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded` | R5 |
-| install smoke (existing, extended) | after the start line: `voicen.exe --call record` → log has `call_requested source=switch` and `call_refused part=system reason=no_device` (or `part=mic`, whichever the runner's endpoint set gives first; both are refusals), the process is still running, no call folder exists, the window census is unchanged | FR-043, FR-002 |
-| uninstall `/S` (ci.yml ≈ :1170, extended) | a planted `calls\2026-01-01_000000\meta.json` exists after uninstall | FR-041 |
+| install smoke (existing step "Install silently, launch, check the start, settings-load and reconcile log lines, the first-run settings.json, the Run value and the settings window", extended) | after the start line: `voicen.exe --call record` → log has `call_requested source=switch` and `call_refused part=system reason=no_device` (the "no output device" refusal of FR-043; the session opens the system track before the mic, so this holds whatever capture endpoints the runner has), the process is still running, no call folder exists, the window census is unchanged | FR-043, FR-002 |
+| uninstall `/S` (existing step "uninstall.exe /S removes the data folder, every Voicen/ credential, the Run value and the shortcut, and keeps other credentials (T-025)", extended) | a planted `calls\2026-01-01_000000\meta.json` exists after uninstall; the step's current assertion that the whole data folder is gone becomes "gone except `calls\`" | FR-041 |
 | uninstall `/S /PURGECALLS` (new, after a reinstall) | the planted folder is gone; a planted folder in a non-default root (`$RUNNER_TEMP\calls-elsewhere`) still exists | FR-041, SC-010 |
 
 New CI tests run red first on `wip/<ID>` (P-016, windows-ci-runner.md). The runner has no capture-endpoint probe fact, so no step asserts real capture.
 
-## Guard and owned files touched (each change in a task with `checker: true` and `analysis.decides_on`, P-020)
+## Guard and owned files touched
+
+**Guard trigger** (decisions #154, #155; `scripts/hooks/pre-commit`, tested by `make check-guard-trigger`): a staged path under `scripts/ci/` or `scripts/licenses/`, the path `Makefile`, or a path ending in `.mk`. Only such a change needs a task with `checker: true` and a non-empty `analysis.decides_on` (P-020). The hook reads paths only, so the other files below are owned files checked by their own `make check` targets, not guard changes.
+
+| File | Guard change? |
+|---|---|
+| `scripts/ci/opus-cmake-cache.sh`, its test and fixtures, `Makefile` `check-opus-cmake-cache` | yes |
+| `scripts/ci/crt-imports.sh` (and its test) | yes |
+| `scripts/ci/shell-targets.txt`, `scripts/ci/helper-windows.txt` | yes, if changed (planned unchanged) |
+| `scripts/ci/nsis-fork.sh` (if extended by G42) | yes |
+| `.cargo/config.toml`, `docker/rust.Dockerfile`, `about.toml`, `licenses/manual.json`, `THIRD-PARTY-NOTICES.txt`, `.github/workflows/ci.yml` | no (owned files with their own checks, e.g. `licenses-check`, `check-whisper-cmake-cache`, and the `ci.yml` byte comparisons of `make check`) |
+
+Planned changes:
 
 | File | Change |
 |---|---|
 | `.cargo/config.toml` | `CMAKE_TOOLCHAIN_FILE` (opus static runtime) — confirm it does not change whisper.cpp's cache (`whisper-cmake-cache.sh` stays green) |
 | `scripts/ci/opus-cmake-cache.sh` + Makefile `check-opus-cmake-cache` + host fixtures | new checker |
 | `scripts/ci/crt-imports.sh` exe list | call test exes |
-| `docker/rust.Dockerfile` | `cmake` (core image; also serves the mingw build of `check-shell-windows`) — owner consent |
+| `docker/rust.Dockerfile` | `cmake` (core image; also serves the mingw build of `check-shell-windows`) — approved (#186) |
 | `scripts/ci/shell-targets.txt` | unchanged (new shell tests are `tests/*.rs`, not targets of lib/bin) — confirm with `make check-shell-layout` |
 | `scripts/ci/helper-windows.txt` | unchanged; the indicator and Calls windows are product windows (overlay.md §5). If the spike shows a new framework helper window, it is added there with its evidence |
 | `about.toml` / `licenses/manual.json` / `THIRD-PARTY-NOTICES.txt` | `opus`, `opusic-sys` (BSD-3-Clause, with the bundled libopus notice), `ogg` (BSD-3-Clause); `make licenses` |
@@ -58,5 +70,4 @@ New CI tests run red first on `wip/<ID>` (P-016, windows-ci-runner.md). The runn
 | `opus` 0.4 | MIT OR Apache-2.0 | — | cargo-about |
 | `opusic-sys` 0.7 | BSD-3-Clause | libopus 1.6.1 (BSD-3-Clause) | cargo-about + libopus copyright in `licenses/manual.json` if not in the crate metadata |
 | `ogg` 0.9 | BSD-3-Clause | — | cargo-about |
-| `claxon` (example only, if chosen) | Apache-2.0 | — | not shipped |
 | LibriSpeech test-clean subset | CC BY 4.0 | — | not shipped; attribution in the WER report |

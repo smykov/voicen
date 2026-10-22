@@ -32,7 +32,7 @@ Technical approach (see [research.md](research.md)):
 - **UI (`src/`)**: `/calls` and `/call-indicator` routes, the Calls settings tab, `callsApi.ts` and `indicatorApi.ts`, and Playwright specs with core-pinned wire fixtures.
 - **Packaging/CI**:
   - NSIS calls question and `/PURGECALLS`, and a POSTUNINSTALL that keeps `calls\`;
-  - the install smoke uses `--call record` and greps the `no_device` refusal;
+  - the install smoke uses `--call record` and greps `call_refused part=system reason=no_device` (FR-043);
   - uninstall checks for a planted folder;
   - libopus `/MT` checks; licence entries.
 
@@ -42,12 +42,12 @@ Technical approach (see [research.md](research.md)):
 
 **Primary Dependencies**:
 - **Existing, reused**: `cpal` 0.18.2 (loopback, `StreamInstant` capture stamps); `windows` 0.62.2; `rubato` 5; `reqwest` 0.13 through `engine::http`; `serde_json`; whisper-rs (Silero) in `voicen-whisper`; tauri 2.12 and single-instance 2.5.
-- **New, each needing owner consent when its increment starts (OQ-63 (a)); not added to any `Cargo.toml` by this plan**:
+- **New, approved by the owner (decisions #186, OQ-63 (a)); each is added to its `Cargo.toml` by the task that first uses it, not by this plan**:
   - `opus` 0.4 with `opusic-sys` 0.7 (bundled libopus 1.6.1, built with CMake);
   - `ogg` 0.9;
   - `windows` features `Win32_Media_Audio`, `Win32_System_Com`, plus `Win32_System_Com_StructuredStorage` only if a property store is read (no `implement` feature in 0.62);
-  - `cmake` in `docker/rust.Dockerfile`;
-  - `claxon` as a dev-only dependency of the `wer` example (optional, see Owner decisions).
+  - `cmake` in `docker/rust.Dockerfile`.
+- **Not added**: `claxon` (#186). The LibriSpeech FLAC files are converted to WAV once with an external tool, and the `wer` example reads WAV only.
 
 **Storage**:
 - call folders `<root>\<YYYY-MM-DD_HHMMSS>\` with `mic.opus`, `system.opus`, `meta.json`, `transcript.json`, `transcript.md` (§7); the default root is `%LOCALAPPDATA%\Voicen\calls`;
@@ -79,7 +79,7 @@ Technical approach (see [research.md](research.md)):
 - shell tests only in `src-tauri/tests`;
 - no push from a DEV session.
 
-**Scale/Scope**: one call at a time, ≤ 4 h each; one pass at a time; calls kept until deleted (#170).
+**Scale/Scope**: one call at a time, ≤ 4 h each; one pass at a time, with at most 3 chunk requests in flight and one chunk decoded at a time (#187); calls kept until deleted (#170).
 
 No NEEDS CLARIFICATION remains. Behaviours the Linux host cannot observe are marked **confirm on Windows** or **confirm at spike** in research.md. Each is the first acceptance item of the task that depends on it.
 
@@ -116,7 +116,7 @@ ADR-011's capture / segmentation / recognition / speakers / session / storage / 
 | Storage | core `call::storage` | `CallStore`, `DiskSpace` |
 | Final pass | core `call::final_pass` → `engine`, `vad` | `transcribe_timed`, `SpeechSpans` (Silero in `voicen-whisper`) |
 | Transcript | core `call::transcript` | pure functions |
-| Launch | core `settings::gate` ↔ shell single-instance callback | `LaunchArgs`, `SecondLaunchAction::StartCallRecord` |
+| Launch | core `settings::gate` ↔ shell single-instance callback | `LaunchArgs`, `SecondLaunchAction::StartCallRecord`; `second_launch_action` changes signature (contracts/core-call.md "Launch arguments") |
 | Tray | core `tray` table and state ↔ shell tray | `TrayState::CallRecording`, menu rows |
 | Hotkey | core settings ↔ shell hotkey thread | second registrar slot (prepare/commit/abort) |
 | Exit/power | shell exit handler, hotkey thread → core | `stop(StopReason)` / `finalize` |
@@ -128,7 +128,7 @@ ADR-011's capture / segmentation / recognition / speakers / session / storage / 
 
 | Spec FR (req) | Linux host — core with fakes | Linux host — UI, mocked IPC | Windows CI runner | Owner's manual check |
 |---|---|---|---|---|
-| FR-001, FR-002 (FR-30, FR-31, FR-37) | session toggles, repeated on, refusals per part, no folder left, mic fallback | refusal notices | smoke: `call_refused part=… reason=no_device`, app alive | real start |
+| FR-001, FR-002 (FR-30, FR-31, FR-37) | session toggles, repeated on, refusals per part, no folder left, mic fallback | refusal notices | smoke: `call_refused part=system reason=no_device`, app alive | real start |
 | FR-003, FR-043 (FR-32, #184) | `LaunchArgs`, `second_launch_action` | — | smoke via `--call record`; window census | — |
 | FR-004 (FR-33) | hotkey equality both ways; conflict leaves the dictation hotkey and tray alone | Calls tab marks the field | second slot registers | Ctrl+Alt+R in a call |
 | FR-005, FR-006 (FR-34, FR-35) | tray precedence, full product; warning list rules | indicator content, reminder 10 s, warning list add/dismiss | indicator style bits; shown without activation | focus, drag, above full screen (spike) |
@@ -143,7 +143,7 @@ ADR-011's capture / segmentation / recognition / speakers / session / storage / 
 | FR-038–FR-040 (FR-59, FR-80) | settings defaults, unwritable root, earlier roots | Calls tab | — | — |
 | FR-041 (FR-28) | — | — | `/S` keeps the planted folder; `/S /PURGECALLS` removes only the default | interactive question EN/RU |
 | FR-042 (FR-84, FR-20) | log lines; planted-content privacy test (SC-009) | — | smoke log has no planted value | — |
-| FR-044 (NFR-21) | `make licenses` | — | crt-imports, opus cmake cache | consent per crate |
+| FR-044 (NFR-21) | `make licenses` | — | crt-imports, opus cmake cache | consent given (#186) |
 | FR-045, FR-046 (FR-15) | catalog parity | RU rendering in specs | — | README review |
 | FR-047 (FR-60, CA-7) | `wer` scoring unit tests | — | — | WER run (SC-004) |
 
@@ -182,10 +182,10 @@ crates/voicen-core/src/
 │   └── events.rs         # CallNotice, CallWarning
 ├── vad/                  # + SpeechSpans, energy spans
 ├── engine/               # + transcribe_timed, LangCode
-├── settings/             # + calls section, FieldIds, SettingsTab::Calls, LaunchArgs
+├── settings/             # + calls section, FieldIds, SettingsTab::Calls; gate.rs: LaunchArgs, second_launch_action(&LaunchArgs)
 ├── tray.rs               # + CallRecording, precedence, menu rows
 ├── diag/                 # + call LogEvent variants, EndpointId
-├── i18n/{en,ru,conformance}.json
+├── i18n.rs               # + the call ids in `messages!` (texts in the root i18n/en.json, i18n/ru.json)
 └── wer.rs
 crates/voicen-core/examples/wer.rs
 crates/voicen-whisper/src/   # SileroDetector implements SpeechSpans
@@ -206,6 +206,7 @@ src/lib/settings/ (Calls tab)
 e2e/calls.spec.ts, e2e/call-indicator.spec.ts, e2e/settings-calls.spec.ts, e2e/fixtures/{calls,call-indicator}-wire.json
 .github/workflows/ci.yml, scripts/ci/opus-cmake-cache.sh, scripts/ci/crt-imports.sh
 .cargo/config.toml, docker/rust.Dockerfile
+i18n/en.json, i18n/ru.json (the one EN/RU catalog at the repository root, decision #13; i18n/conformance.json is the shared render-rule fixture and gains no ids)
 README.md (consent section EN/RU, FR-045), docs/architecture.md, docs/decisions/<area>.md
 ```
 

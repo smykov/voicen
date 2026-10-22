@@ -14,7 +14,7 @@
 - `docs`: docs-only groups (no CI evidence needed, P-016).
 
 **Markers**:
-- **checker** = the group stages a guard path (`scripts/ci/**`, `scripts/licenses/**`, `Makefile`, `*.mk`), or a file that contracts/installer-ci.md "Guard and owned files" lists. The teamwright task needs `checker: true` and `analysis.decides_on` (P-020, decisions #154/#155).
+- **checker** = the group stages a guard path: a path under `scripts/ci/` or `scripts/licenses/`, the path `Makefile`, or a path ending in `.mk` (the `scripts/hooks/pre-commit` trigger, `make check-guard-trigger`; contracts/installer-ci.md "Guard and owned files"). The teamwright task needs `checker: true` and `analysis.decides_on` (P-020, decisions #154/#155). `.cargo/config.toml`, `docker/rust.Dockerfile`, `about.toml` and `licenses/manual.json` are not guard paths.
 - **Needs T-102** = waits for the teamwright task T-102 (Silero ships in the installer).
 - **Needs T-007** = waits for the teamwright task T-007 (toasts and notifier). Indicator-only and log-only parts of these groups can go first; the toast path stays open until T-007 is DONE.
 - **First acceptance** = an item that must be proven, on the `wip/<ID>` run or by the owner, before any code builds on it (research "confirm on Windows" / "confirm at spike").
@@ -63,7 +63,7 @@
 ### G04 — Call types, log events, `EndpointId` (area: core) <a id="g04"></a>
 
 - [ ] T008 [P] [area core] Red tests in `crates/voicen-core/src/diag/event.rs` / `format.rs` and `crates/voicen-core/src/call/events.rs`.
-  - Every new `LogEvent` formats exactly as the line bodies in contracts/core-call.md "Log lines": `call_requested`, `call_refused`, `call_started`, `call_device`, `call_track_silent`, `call_stopped`, `call_storage_failed`, `call_recovered`, `final_stage`, `final_finished`, `call_switch_refused`. It also formats the two lines the plan decisions need: `vad_fallback track=<…>` (#188) and `transcript_invalid` (core-call.md "transcript.json").
+  - Every new `LogEvent` formats exactly as the line bodies in contracts/core-call.md "Log lines": `call_requested`, `call_refused`, `call_started`, `call_device`, `call_track_silent`, `call_stopped`, `call_storage_failed`, `call_recovered`, `final_stage`, `final_finished`, `call_switch_refused`, `vad_fallback track=<mic|system> cause=<unavailable|error>` (#188) and `transcript_invalid rule=<…> segment=<n>` (R17 rule names; never the segment text).
   - `EndpointId` accepts only "`{`, `}`, `.`, hex digits, `-`" and "at most 128 characters"; anything else formats as `endpoint=invalid`.
   - The exhaustive `LogObserver` match and the `diag_format` tests cover every variant.
   - `CallNotice` / `CallWarning` hold catalog ids and enums only, never free text.
@@ -73,8 +73,8 @@
 
 ### G05 — Message catalog, EN and RU (area: core) <a id="g05"></a>
 
-- [ ] T010 [P] [area core] Red tests in `crates/voicen-core/src/i18n.rs`, with the conformance data the existing catalog tests use: every id in contracts/ipc.md "Message catalog" exists in EN and RU, and the RU speaker labels are "Я" / "Собеседник". Placeholders are distinct within a message: `calls.title_default` must not use `{mm}` for both month and minute (see the Report). `notice.call_refused.{part}.{reason}` covers every part × reason of `CallRefused` (spec FR-046; req FR-15).
-- [ ] T011 [area core] Add the ids to the `messages!` catalog (EN + RU) until T010 is green, and update `src/lib/i18n` id tests if they mirror the catalog.
+- [ ] T010 [P] [area core] Red tests in `crates/voicen-core/src/i18n.rs` (the `messages!` declaration and the existing catalog checks over the root `i18n/en.json` and `i18n/ru.json`): every id in contracts/ipc.md "Message catalog" exists in EN and RU, including `warning.provider_notice` with `{host}`, and the RU speaker labels are "Я" / "Собеседник". `calls.title_default` has the four distinct placeholders `{day}`, `{month}`, `{hour}`, `{minute}` in EN and RU, and renders a call started on 5 March at 09:07 as "Call 05.03 09:07". `notice.call_refused.{part}.{reason}` covers every part × reason of `CallRefused` (spec FR-046; req FR-15).
+- [ ] T011 [area core] Add the ids to `messages!` in `crates/voicen-core/src/i18n.rs` and the texts to `i18n/en.json` and `i18n/ru.json` until T010 is green, and update `src/lib/i18n` id tests if they mirror the catalog. `i18n/conformance.json` (the render-rule fixture) is unchanged.
 
 ### G06 — `calls` settings section and provider-host rule (area: core) <a id="g06"></a>
 
@@ -90,8 +90,8 @@
 
 ### G07 — Launch arguments `--call record` (area: core) <a id="g07"></a>
 
-- [ ] T014 [P] [area core] Red tests in `crates/voicen-core/src/settings/gate.rs`: `LaunchArgs::parse` recognises `--autostart` and `--call record`; `--call <other>` gives `CallSwitch::Unknown` (logged `call_switch_refused reason=unknown_value`, no action); the second-launch action is `StartCallRecord` when the switch is present, otherwise the existing table is unchanged (`second_launch_action_table` stays green). Note that today's signature is `second_launch_action(launched_by_autostart: bool)`, not the contract's `(&LaunchArgs, settings_open)` (spec FR-003, FR-043; R13; #184).
-- [ ] T015 [area core] Implement `LaunchArgs` and the extended `second_launch_action` until T014 is green.
+- [ ] T014 [P] [area core] Red tests in `crates/voicen-core/src/settings/gate.rs`: `LaunchArgs::parse` recognises `--autostart` and `--call record`; `--call <other>` gives `CallSwitch::Unknown` (logged `call_switch_refused reason=unknown_value`, no action); `second_launch_action` changes signature from `(launched_by_autostart: bool)` to `(&LaunchArgs)` (contracts/core-call.md "Launch arguments"): `--call record` gives `StartCallRecord` with or without `--autostart`, an unknown value gives `TrayOnly`, and otherwise the existing rows hold (`second_launch_action_table` rewritten over `LaunchArgs` with the same rows) (spec FR-003, FR-043; R13; #184).
+- [ ] T015 [area core] Implement `LaunchArgs` and the new `second_launch_action(&LaunchArgs)` until T014 is green. The existing caller `src-tauri/src/tray.rs` `on_second_instance` moves to `second_launch_action(&LaunchArgs::parse(&argv))` in the same commit, keeping the `StartCallRecord` arm a no-op until G14, and `src-tauri/src/autostart.rs` `launched_by_autostart` delegates to `LaunchArgs::parse` (one parser); the shell part is proven on the `wip/<ID>` run (`src-tauri/tests/single_instance.rs`, `autostart.rs`).
 
 ### G08 — Tray state and menu rows (area: core) <a id="g08"></a>
 
@@ -101,7 +101,7 @@
 ### G09 — `transcript.json` schema 1, merge, Markdown (area: core) <a id="g09"></a>
 
 - [ ] T018 [P] [area core] Red tests in `crates/voicen-core/src/call/transcript.rs`, with fixtures.
-  - **Serde**: the types of §7 schema 1 use `deny_unknown_fields` and `schema: 1`. `engines.transcription` is `"api:<model>"`, `engines.diarization` is `null`, and there is no `hidden` or `confidence`.
+  - **Serde**: the types of §7 schema 1 use `deny_unknown_fields` and `schema: 1`. `engines.transcription` is `"api:<model>"` (the `EngineRef` string, the same one `meta.json` stores), `engines.diarization` is `null`, and there is no `hidden` or `confidence`.
   - **`validate()`** refuses each broken rule of R17: segments unsorted by `start_ms`; outside `0 ≤ start_ms ≤ end_ms ≤ duration_ms`; a speaker not in the meta speakers; a track not in {mic, system}; `source` ≠ `final`; a bad `lang`; empty `text`.
   - **Merge**: the lines of both tracks are ordered by start time and overlaps are kept (US2 #5). The segment time is "track `start_offset_ms` + chunk `start_ms` + engine segment time, clamped to the chunk". An empty engine segment "is dropped".
   - **Markdown** renders exactly as contracts/core-call.md "`transcript.md`" (`**[HH:MM:SS] <name>:** text`, names from `meta.json`), and the same renderer serves copy and export.
@@ -147,7 +147,7 @@
 - [ ] T024 [US1] [area core] Red tests in `crates/voicen-core/src/call/session.rs`, with fake sources, a fake store and a fake clock.
   - **Off at start**: call mode is off at construction.
   - **One session**: tray, hotkey and switch all enter `toggle_record(on, Source)` under one lock, and a repeated on gives one session, one capture per track and one folder. Off then on gives a second folder.
-  - **Refusals**: either track failing to open (`no_device`, `access_denied`, `busy`, `other`) or a missing or unwritable root refuses the start with `call_refused part=… reason=…`. Neither track is kept open and no folder is left. An unwritable root also asks to open the Calls tab.
+  - **Refusals**: either track failing to open (`no_device`, `access_denied`, `busy`, `other`) or a missing or unwritable root refuses the start with `call_refused part=… reason=…`. Neither track is kept open and no folder is left. The system track opens first, then the mic, then the root check: with no output device and no capture device the refusal is `part=system reason=no_device` (FR-043). An unwritable root also asks to open the Calls tab.
   - **Mic fallback**: a missing selected mic with a default input present starts on the default input with `mic_changed`.
   - **FR-019**: Subtitles-only, with a fake subtitle consumer, writes nothing to disk.
   - **Stop**: `stop(StopReason)` closes both files readable, sets `ready-to-transcribe`, emits `call_saved_transcribing` and logs `call_stopped` with byte counts.
@@ -167,7 +167,7 @@
 ### G14 — Session wiring, tray "Call" menu, `--call record` route (area: shell) <a id="g14"></a> — Needs T-007 (refusal and stop toasts); must not reach `main` before G42
 
 - [ ] T028 [US1] [area shell] Red tests in `src-tauri/tests/call_launch.rs` and `call_tray.rs`.
-  - A second instance launched with `--call record` posts exactly one `StartCallRecord` request, which enters `toggle_record(On, Source::Switch)` and logs `call_requested source=switch`. On the runner it is then refused with `no_device`, and the app keeps running.
+  - A second instance launched with `--call record` posts exactly one `StartCallRecord` request, which enters `toggle_record(On, Source::Switch)` and logs `call_requested source=switch`. On the runner it is then refused with `call_refused part=system reason=no_device`, and the app keeps running.
   - A first launch with the switch applies it once after the tray exists; a launch without the switch never starts call mode.
   - The tray "Call" › "Record" / "Stop" and "Calls" items invoke the same path.
   - The call wiring lives in `src-tauri/src/call.rs`, outside `build_app`.
@@ -208,8 +208,8 @@
 
 ### G18 — Install smoke through `--call record` (area: installer-ci) <a id="g18"></a> — checker only if `scripts/ci/` changes
 
-- [ ] T036 [US1] [area installer-ci] Extend the install smoke in `.github/workflows/ci.yml`. After the start line, run `voicen.exe --call record` and assert all of the following:
-  - the log has `call_requested source=switch` and `call_refused part=<system|mic> reason=no_device`;
+- [ ] T036 [US1] [area installer-ci] Extend the install smoke in `.github/workflows/ci.yml` (step "Install silently, launch, check the start, settings-load and reconcile log lines, the first-run settings.json, the Run value and the settings window"). After the start line, run `voicen.exe --call record` and assert all of the following:
+  - the log has `call_requested source=switch` and `call_refused part=system reason=no_device` (spec FR-043 names only the no-output-device refusal);
   - the process is still running;
   - no call folder exists under `%LOCALAPPDATA%\Voicen\calls`;
   - the window census is unchanged;
@@ -473,7 +473,7 @@
 ### G42 — Uninstaller calls question, `/PURGECALLS`, CI proof (area: installer-ci) <a id="g42"></a> — checker (`scripts/ci/nsis-fork.sh` if extended)
 
 - [ ] T082 [US10] [area installer-ci] Red CI steps in `.github/workflows/ci.yml`, run on `wip/<ID>`:
-  - before the existing `/S` uninstall step (the T-025 block, about `:893`; research's `:1170` is stale), plant `calls\2026-01-01_000000\meta.json` and assert that it exists after uninstall;
+  - in the existing step "uninstall.exe /S removes the data folder, every Voicen/ credential, the Run value and the shortcut, and keeps other credentials (T-025)", plant `calls\2026-01-01_000000\meta.json` before the uninstall and assert that it exists after it; the step's "data folder gone" assertion becomes "gone except `calls\`";
   - add a step: reinstall, then `/S /PURGECALLS`; the planted default folder is gone and `$RUNNER_TEMP\calls-elsewhere` still exists;
   - **first acceptance** (R15): prove that the forked template never runs `RMDir /r "$INSTDIR"`, by extending `scripts/ci/nsis-fork.sh` and its test if needed (this is what makes the group checker).
 
@@ -496,7 +496,7 @@
   - `docs/decisions/<area>.md` invariants: call storage, `meta.json` temp + rename, recovery never rewrites audio, the libopus CRT, the indicator as a product window;
   - `CLAUDE.md` "Where things live" rows for `call/` and `opus-cmake-cache.sh`;
   - OQ-48 recorded for owner confirmation.
-- [ ] T086 [area docs] **G45** <a id="g45"></a> **Owner**: amend constitution principle II through `/speckit-constitution` to requirements v7: calls are kept until deleted, dictation audio keeps its limit, and the v3 references are updated (#189).
+- [x] T086 [area docs] **G45** <a id="g45"></a> Done, not a pending task: constitution principle II was amended to v1.5.0 by decisions #189 in commit cdb98e4 (calls are kept until deleted, dictation audio keeps its limit, v3 references updated). No teamwright task is derived from this group.
 - [ ] T087 [area docs] **G46** <a id="g46"></a> **Owner** manual checks from quickstart.md 1–10, recorded as the verify evidence of the `verify_exception` items in G16, G31, G36, G37 and G42:
   - SC-001;
   - SC-003 via `final_finished ms=` with `whisper-1` and Groq;
@@ -526,7 +526,7 @@
 - **US8**: G38 (after G11, G32 for the cancel) → G39 → G40 (after G29).
 - **US9**: G41 after G06; it also needs G15 for live re-registration.
 - **US10**: G42 is independent (see the ordering rule).
-- **Polish**: G43 after G24, G30, G35, G38. G44 at the end. G45 at any time (owner). G46 after G25, G31, G36, G37, G42.
+- **Polish**: G43 after G24, G30, G35, G38. G44 at the end. G45 is done (#189, cdb98e4). G46 after G25, G31, G36, G37, G42.
 
 ## Parallel opportunities
 
@@ -542,4 +542,4 @@
 1. **MVP (the 1a done-when, SC-001)**: Phase 1, Phase 2, US1, US2 and US3, with G42 merged before G14.
 2. **Data safety next**: US4. It is P1, but its tests need the US1 and US2 seams.
 3. **Then the P2 stories**: US5, US6, US7, US8, US9.
-4. **Close out**: Polish, the owner checks (G46) and the constitution amendment (G45).
+4. **Close out**: Polish and the owner checks (G46); the constitution amendment (G45) is already done (#189).

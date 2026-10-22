@@ -19,8 +19,7 @@ type CallState = "recording" | "queued" | "transcribing" | "ready" | "failed" | 
 type FailReason = "key" | "network" | "timeout" | "provider" | "storage" | "engineNotSetUp";
 interface CallSummary { id: string; root: string; title: string; startedAt: string; durationMs: number | null;
                         state: CallState; failReason?: FailReason }
-interface RootLine { root: string; available: boolean }
-interface CallList { calls: CallSummary[]; unavailableRoots: string[] }
+interface CallList { calls: CallSummary[]; unavailableRoots: string[] }   // one entry per earlier or current root that is not available (FR-033)
 interface Speaker { id: "me" | "s1"; name: string }
 interface Line { startMs: number; endMs: number; track: "mic" | "system"; speaker: "me" | "s1"; lang: string | null; text: string }
 interface CallDetail { summary: CallSummary; speakers: Speaker[]; lines: Line[] }
@@ -90,6 +89,8 @@ Playwright specs (`e2e/calls.spec.ts`, `e2e/call-indicator.spec.ts`, `e2e/settin
 
 ## Message catalog (EN + RU, `messages!`)
 
+The texts live in the one catalog at the repository root, `i18n/en.json` and `i18n/ru.json` (decision #13); the ids are declared in `messages!` in `crates/voicen-core/src/i18n.rs`, the only Rust code that parses and renders them. `i18n/conformance.json` is the shared render-rule fixture of the Rust and UI suites and gains no call ids.
+
 | Id | English |
 |---|---|
 | `tray.call` / `tray.call.record` / `tray.call.stop` / `tray.calls` | Call / Record / Stop / Calls |
@@ -104,6 +105,7 @@ Playwright specs (`e2e/calls.spec.ts`, `e2e/call-indicator.spec.ts`, `e2e/settin
 | `warning.cant_hear_other_party` | Can't hear the other party — check the output device |
 | `warning.cant_hear_you` | Can't hear you — check the microphone |
 | `warning.low_disk` | Less than 1 GB free in the calls folder |
+| `warning.provider_notice` | The other party's audio goes to provider {host} (indicator kind `providerNotice`, FR-031) |
 | `notice.call_refused.{mic,system,root}.{reason}` | Can't start recording: <part> — <reason> |
 | `notice.call_saved` | Call saved — transcribing |
 | `notice.transcript_ready` / `notice.open` | Transcript ready / Open |
@@ -111,7 +113,7 @@ Playwright specs (`e2e/calls.spec.ts`, `e2e/call-indicator.spec.ts`, `e2e/settin
 | `notice.stopped.{sleep,max_length,low_disk,storage}` | Recording stopped: … |
 | `notice.call_hotkey_conflict` | The call hotkey is in use by another program |
 | `exit.recording.question` | A call is being recorded. Save it and exit? |
-| `calls.title_default` | Call {dd}.{mm} {hh}:{mm} |
+| `calls.title_default` | Call {day}.{month} {hour}:{minute} (each a two-digit value; the catalog allows only `{[a-z][a-z0-9_]*}` placeholders) |
 | `calls.empty` | No calls yet — choose Call › Record in the tray or press {hotkey} |
 | `calls.state.{recording,queued,transcribing,ready,failed,recovered,damaged}` | … ("Recovered after a crash") |
 | `calls.failed.{key,network,timeout,provider,storage,engine_not_set_up}` | … ("Set up the API engine") |
@@ -124,4 +126,4 @@ Playwright specs (`e2e/calls.spec.ts`, `e2e/call-indicator.spec.ts`, `e2e/settin
 | `settings.calls.provider_notice` | The other party's audio goes to provider {host} |
 | `settings.calls.storage_unwritable` | This folder can't be written: {reason} |
 
-RU texts are added with the EN ones in the same task (`conformance.json` parity). Byte counts use `formatSize`.
+RU texts are added with the EN ones in the same task; the existing catalog checks (`Catalog::parity_problems` and the ids-exist-in-both-catalogs tests in `i18n.rs`) enforce parity. Byte counts use `formatSize`.

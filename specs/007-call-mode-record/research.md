@@ -93,7 +93,7 @@ Crate facts were read from the published sources of `opus` 0.4.0 / `opusic-sys` 
   - **Port**: core adds `vad::SpeechSpans` with one method returning the speech spans `[start_ms, end_ms)` of an `AudioBuffer`, or a `VadError`.
   - **Silero**: `voicen-whisper`'s `SileroDetector` already computes the segments inside `contains_speech` and discards them, so it implements the port by returning them. One model load is shared with dictation through T-102's loader.
   - **Fakes**: core tests use a scripted span fake.
-  - **Energy fallback**: `EnergyDetector` gets an energy-span implementation, used only if Silero cannot load. See the owner decision in plan.md: FR-023 says Silero, so falling back to energy spans would let music through.
+  - **Energy fallback (decided, #188)**: `EnergyDetector` gets an energy-span implementation, used only if Silero cannot load or returns a `VadError`. The pass goes on with energy spans and logs `vad_fallback track=<mic|system> cause=<unavailable|error>` (contracts/core-call.md "Log lines"). Accepted trade-off: music or noise may reach the API in that case, so SC-008 holds only with Silero; Silero ships in the installer (T-102), so the fallback is rare.
   - **Process**: the pass runs Silero per decoded window (≤ 120 s plus carry), never over a whole track at once (FR-018).
 - **Rationale**: FR-023 and SC-008 need span boundaries for the cut, not a yes/no. Extending the existing seam keeps one VAD stack (P-011).
 - **Alternatives**: a separate VAD crate (a second model and stack); cutting at energy minima (music without vocals would be sent, against SC-008).
@@ -130,12 +130,12 @@ Crate facts were read from the published sources of `opus` 0.4.0 / `opusic-sys` 
 
 ## R11 — Concurrency within a pass
 
-- **Decision (owner confirmation needed, plan.md)**:
-  - **Proposal**: one pass at a time (FR-028). Within it, at most 3 chunk requests are in flight, drawn from both tracks in start order, while the decoder produces chunks one at a time, so at most 3 encoded chunks (≈ 11.5 MB) are held in memory.
+- **Decision (decided, #187)**:
+  - **Bound**: one pass at a time (FR-028). Within it, at most 3 chunk requests are in flight, drawn from both tracks in start order, while the decoder produces chunks one at a time, so at most 3 encoded chunks (≈ 11.5 MB) are held in memory.
   - **Ordering**: results are kept by chunk index; a track is `done` when all its chunks succeed.
   - **Failure**: the first failure of a track cancels that track's remaining chunks and lets the other track finish (FR-027).
   - **Rate limits**: 429 is `provider_error` (no hidden retry; "Transcribe again" exists).
-- **Rationale**: SC-003 (1 h call ≤ 5 min after stop) does not fit a strictly sequential pass. Suppose about 60 chunks of 3.8 MB at 20 Mbit/s (≈ 1.5 s each to upload) plus 5–10 s server time each: sequential that is 6–11 min, and 3 in flight is 2–4 min. FR-018's "decode one chunk at a time" holds for decoding. In-flight uploads are a bounded few, which stretches the wording, so the owner is asked.
+- **Rationale**: SC-003 (1 h call ≤ 5 min after stop) does not fit a strictly sequential pass. Suppose about 60 chunks of 3.8 MB at 20 Mbit/s (≈ 1.5 s each to upload) plus 5–10 s server time each: sequential that is 6–11 min, and 3 in flight is 2–4 min. FR-018's "one chunk at a time" applies to decoding, not to requests (#187): the decoder still holds one chunk at a time, and the in-flight uploads are a bounded few.
 - **Alternatives**: (a) strictly sequential, which risks SC-003 on slow providers; (b) unbounded parallel, which hits provider rate limits and memory.
 
 ## R12 — Call indicator window (OQ-45 spike, ADR-007)
@@ -160,7 +160,7 @@ Crate facts were read from the published sources of `opus` 0.4.0 / `opusic-sys` 
 ## R13 — `--call record`: a core-decided launch action
 
 - **Decision**:
-  - **Parsing**: core `settings::gate` gains `LaunchArgs::parse(argv)` (known: `--autostart`, `--call record`; unknown `--call <x>` → `CallSwitch::Unknown`, logged `call_switch_refused reason=unknown_value`, no action). `second_launch_action` returns `StartCallRecord` when the switch is present.
+  - **Parsing**: core `settings::gate` gains `LaunchArgs::parse(argv)` (known: `--autostart`, `--call record`; unknown `--call <x>` → `CallSwitch::Unknown`, logged `call_switch_refused reason=unknown_value`, no action). `second_launch_action` changes signature from today's `second_launch_action(launched_by_autostart: bool)` (`crates/voicen-core/src/settings/gate.rs`) to `second_launch_action(&LaunchArgs)`, and returns `StartCallRecord` when the switch is present (contracts/core-call.md "Launch arguments" names the callers).
   - **Second instance**: `tray::on_second_instance` posts that single request to the main event loop (windows-shell.md: the callback writes nothing and posts one request). The request enters the same `CallSession::toggle_record(On, Source::Switch)` as the tray and the hotkey. The refusals of FR-002, the indicator, the tray state and the reminder therefore follow from the one path.
   - **First launch with the switch**: the switch is read in primary startup after `build()` and the log start line, then applied once the tray exists. A launch without it never starts call mode (FR-001).
   - **Log**: `call_requested source=switch|tray|hotkey`.
@@ -190,7 +190,7 @@ Crate facts were read from the published sources of `opus` 0.4.0 / `opusic-sys` 
   - **POSTUNINSTALL**: `RMDir /r "$LOCALAPPDATA\Voicen"` is replaced. When calls are kept, every top-level entry except `calls` is removed and `$LOCALAPPDATA\Voicen` is left in place. When calls are purged, `calls\` alone is removed with `RMDir /r` (and the rest per `$VoicenPurgeData`).
   - **Other roots**: no storage root other than the default is ever touched; the uninstaller does not read the settings file.
 - **Confirm on Windows**: the forked NSIS template of T-025 never runs `RMDir /r "$INSTDIR"`, since `$INSTDIR` is `%LOCALAPPDATA%\Voicen`, the parent of `calls\`. The first installer task greps the fork and proves it on the runner.
-- **CI**: the windows job's `/S` uninstall step (ci.yml :1170) first plants `calls\2026-01-01_000000\meta.json` and after uninstall asserts it exists. A new step runs `/S /PURGECALLS` and asserts it is gone. Both are first run on `wip/` (windows-ci-runner.md).
+- **CI**: the windows job's `/S` uninstall step ("uninstall.exe /S removes the data folder, every Voicen/ credential, the Run value and the shortcut, and keeps other credentials (T-025)") first plants `calls\2026-01-01_000000\meta.json` and after uninstall asserts it exists. A new step runs `/S /PURGECALLS` and asserts it is gone. Both are first run on `wip/` (windows-ci-runner.md).
 - **Rationale**: FR-041, decisions #170, #180 #1, r4#12; SC-010.
 
 ## R16 — Toasts and notices
@@ -208,6 +208,8 @@ Crate facts were read from the published sources of `opus` 0.4.0 / `opusic-sys` 
   - `source` = `final`;
   - `lang` either a `LangCode` or null;
   - non-empty `text`.
+
+  Each check has a closed rule name for the `transcript_invalid rule=` log line: `unsorted`, `out_of_range`, `unknown_speaker`, `unknown_track`, `bad_source`, `bad_lang`, `empty_text`.
 
   Writing is temp file + rename in the call folder, so no partial file is left; a write failure leaves `failed: storage` (FR-018, FR-026). `transcript.md` is rendered from the validated value.
 - **Rationale**: the schema is small and fixed; a JSON-Schema crate would be a dependency for one file. Validation runs on our own types before the write (FR-026).
@@ -229,7 +231,8 @@ Crate facts were read from the published sources of `opus` 0.4.0 / `opusic-sys` 
 
 ## R20 — Log events
 
-- **Decision**: New closed `LogEvent` variants, integers and enums only plus one validated identifier type (diagnostics-log.md; each needs `format.rs`, the exhaustive `LogObserver` and `diag_format` tests). The variants:
+- **Decision**: New closed `LogEvent` variants, integers and enums only plus one validated identifier type (diagnostics-log.md; each needs `format.rs`, the exhaustive `LogObserver` and `diag_format` tests). The line bodies are those of contracts/core-call.md "Log lines", which is authoritative for the fields. The variants:
+  - `CallRequested { source: tray|hotkey|switch }`; the smoke greps `call_requested source=switch`;
   - `CallStarted { tracks, mic_endpoint, system_endpoint }`;
   - `CallRefused { part: mic|system|root, reason }`; the smoke greps `call_refused part=system reason=no_device`;
   - `CallStopped { reason, duration_ms }`;
@@ -239,7 +242,9 @@ Crate facts were read from the published sources of `opus` 0.4.0 / `opusic-sys` 
   - `CallStorageFailed { kind }`;
   - `FinalPassStage { track, stage: decode|vad|upload|merge|write, ms, chunks }`;
   - `FinalPassFinished { outcome, reason }`;
-  - `CallSwitchRefused { reason }`.
+  - `CallSwitchRefused { reason }`;
+  - `VadFallback { track, cause: unavailable|error }` (#188);
+  - `TranscriptInvalid { rule, segment }`: the R17 rule that `validate()` refused and the segment index, never the segment's text.
 
   Endpoint ids are logged as `EndpointId`, a newtype accepting only the WASAPI endpoint-id charset (`{`, `}`, `.`, hex digits, `-`) and at most 128 characters. Anything else is logged as `endpoint=invalid`, so no friendly name or free text can reach the file (FR-042, SC-009, P-009). The log never names the call folder or title.
 - **Rationale**: FR-042 with the existing allowlist mechanism. SC-003's measurement reads the `FinalPassStage` durations.
@@ -261,7 +266,7 @@ Crate facts were read from the published sources of `opus` 0.4.0 / `opusic-sys` 
   - **English set**: a pinned subset of LibriSpeech test-clean (CC BY 4.0, #185).
     - The archive is `test-clean.tar.gz`, 346 663 984 bytes. OpenSLR publishes MD5 `32fa31d27d2e1cad72775fee3f4849a9` only, so the first fetch also pins our own SHA-256.
     - The subset is a committed manifest of utterance ids totalling ≥ 30 min. They are concatenated in manifest order into one 16 kHz mono WAV per speaker group, so the chunker and VAD are exercised.
-  - **FLAC**: the archive is FLAC. The harness decodes it with `claxon` (Apache-2.0) as a dev-dependency of the example only (owner consent), or else the owner converts it once with a documented external tool; see plan.md.
+  - **FLAC (decided, #186)**: the archive is FLAC. The owner converts the subset once to 16 kHz mono WAV with an external tool; the command is documented in the example's usage. The example reads WAV only and adds no dependency (no `claxon`).
   - **Russian set**: the owner's 2 × 10-min labelled calls with word-for-word transcripts, kept outside the repository (customer data rule).
 - **Rationale**: FR-047, SC-004, CA-7. Nothing of the sets or the key enters the repository or CI.
 
