@@ -45,8 +45,9 @@ trap 'rm -rf "$tmp"' EXIT
 token='example-fake-gh-token-not-a-secret'
 
 # Stub gh: logs each call (all arguments on one line) and answers `release view` from
-# STUB_VIEW (missing | exists | error | error-echo: an error that carries GH_TOKEN, as a gh
-# debug or proxy message might); every other call is unsupported (exit 1).
+# STUB_VIEW (missing | exists | error | error-echo: an error that carries GH_TOKEN twice, as a gh
+# debug or proxy message might; twice so a mask of the first occurrence only is caught, validation 4
+# C10); every other call is unsupported (exit 1).
 mkdir -p "$tmp/bin"
 cat > "$tmp/bin/gh" <<'EOF'
 #!/usr/bin/env bash
@@ -55,7 +56,7 @@ if [ "${1:-}" = release ] && [ "${2:-}" = view ]; then
   case "${STUB_VIEW:-missing}" in
     exists) printf 'title:\t%s\ntag:\t%s\n' "${3:-}" "${3:-}"; exit 0 ;;
     missing) echo "release not found" >&2; exit 1 ;;
-    error-echo) echo "HTTP 401: Bad credentials for token ${GH_TOKEN:-} (https://api.github.com/repos/example/example/releases/tags/${3:-})" >&2; exit 1 ;;
+    error-echo) echo "HTTP 401: Bad credentials for token ${GH_TOKEN:-} (retry with token ${GH_TOKEN:-}; https://api.github.com/repos/example/example/releases/tags/${3:-})" >&2; exit 1 ;;
     *) echo "HTTP 401: Bad credentials (https://api.github.com/repos/example/example/releases/tags/${3:-})" >&2; exit 1 ;;
   esac
 fi
@@ -373,7 +374,7 @@ done_case
 # gh echoes the token in its error (validation 3, S2): the output is masked, never the token.
 call refuse-gh-error-echoes-token error-echo "$token" v0.1.200 100 "$tmp/repo" "$tmp/i"
 want_rc 1; gh_viewed v0.1.200
-says "Bad credentials for token ***" "gh's error with the token masked"
+says "Bad credentials for token *** (retry with token ***;" "gh's error with every token occurrence masked (C10)"
 done_case
 
 # ---- usage ---------------------------------------------------------------------------------

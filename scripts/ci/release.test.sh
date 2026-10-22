@@ -39,10 +39,11 @@ trap 'rm -rf "$tmp"' EXIT
 
 token='example-fake-gh-token-not-a-secret'
 
-# Stub gh: one log line per call; `gh --version` echoes GH_TOKEN when STUB_VERSION=echo;
+# Stub gh: one log line per call; `gh --version` echoes GH_TOKEN (twice) when STUB_VERSION=echo;
 # `release view` answered from STUB_VIEW (missing | exists | error); `release create` answered
-# from STUB_CREATE (ok | fail | ok-echo: succeeds, printing GH_TOKEN on stdout | fail-echo: fails,
-# printing GH_TOKEN on stderr) after copying, as they are at
+# from STUB_CREATE (ok | fail | ok-echo: succeeds, printing GH_TOKEN twice on stdout | fail-echo:
+# fails, printing GH_TOKEN twice on stderr; twice so a mask of the first occurrence only is caught,
+# validation 4 G10) after copying, as they are at
 # that moment, the SHA256SUMS.txt it is given (to sums.at-create), the --notes-file (to
 # notes.at-create) and the names of the *-setup.exe files it is given (to installers.at-create).
 mkdir -p "$tmp/bin"
@@ -51,7 +52,7 @@ cat > "$tmp/bin/gh" <<'EOF'
 printf '%s\n' "$*" >> "$STUB_DIR/gh.log"
 if [ "$*" = --version ]; then
   echo "gh version 2.101.0 (stub)"
-  [ "${STUB_VERSION:-}" = echo ] && echo "auth: token $GH_TOKEN (stub echo)"
+  [ "${STUB_VERSION:-}" = echo ] && echo "auth: token $GH_TOKEN (stub echo, again: $GH_TOKEN)"
   exit 0
 fi
 if [ "${1:-}" = release ] && [ "${2:-}" = view ]; then
@@ -74,8 +75,8 @@ if [ "${1:-}" = release ] && [ "${2:-}" = create ]; then
   done
   case "${STUB_CREATE:-ok}" in
     ok) echo "https://github.com/example/voicen/releases/tag/${3:-}"; exit 0 ;;
-    ok-echo) echo "https://x-access-token:$GH_TOKEN@github.com/example/voicen/releases/tag/${3:-}"; exit 0 ;;
-    fail-echo) echo "HTTP 401: Bad credentials for token $GH_TOKEN (https://api.github.com/repos/example/voicen/releases)" >&2; exit 1 ;;
+    ok-echo) echo "https://x-access-token:$GH_TOKEN@github.com/example/voicen/releases/tag/${3:-} (auth: $GH_TOKEN)"; exit 0 ;;
+    fail-echo) echo "HTTP 401: Bad credentials for token $GH_TOKEN (retry with token $GH_TOKEN; https://api.github.com/repos/example/voicen/releases)" >&2; exit 1 ;;
   esac
   echo "HTTP 422: Validation Failed" >&2
   exit 1
@@ -254,20 +255,21 @@ call create-fails-echoes-token missing fail-echo "$token" v0.1.200 100 "$tmp/rep
 want_nonzero
 says "release-check: ok" "the check passed, so the stop is the create"
 [ "$(grep -c -E -- '^release create ' "$tmp/gh.log")" = 1 ] || fail "gh release create was not called exactly once"
-says "Bad credentials for token ***" "gh's create error reaches the log, the token masked"
+says "Bad credentials for token *** (retry with token ***;" "gh's create error reaches the log, every token occurrence masked (G10)"
 ! grep -qF -- 'release: ok' <<<"$out" || fail "release: ok printed after the create failed"
 done_case
 mk_dist "$tmp/dist" "$inst"
 call create-ok-echoes-token missing ok-echo "$token" v0.1.200 100 "$tmp/repo" "$tmp/dist"
 want_rc 0
 says "x-access-token:***@github.com" "gh's create output reaches the log, the token masked"
+says "(auth: ***)" "the second token occurrence in create's output masked too (G10)"
 done_case
 mk_dist "$tmp/dist" "$inst"
 stub_version=echo
 call gh-version-echoes-token missing ok "$token" v0.1.200 100 "$tmp/repo" "$tmp/dist"
 stub_version=""
 want_rc 0
-says "auth: token *** (stub echo)" "gh --version output reaches the log, the token masked"
+says "auth: token *** (stub echo, again: ***)" "gh --version output reaches the log, every token occurrence masked (G10)"
 done_case
 
 # ---- usage ----------------------------------------------------------------------------------
