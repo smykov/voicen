@@ -15,7 +15,10 @@
 #     (no other gh call but `gh --version`); the notes name the version X.Y.Z and the
 #     installer's file name. Exit 0.
 #   - gh release create fails: exit non-zero (never a pass).
-#   - Never prints GH_TOKEN.
+#   - The SHA256SUMS.txt write fails (sha256sum exits non-zero): exit non-zero before any
+#     gh release create, no "release: ok" (a release never carries a missing or empty SHA-256).
+#   - Never prints GH_TOKEN, not even when gh echoes it: gh's output (`gh --version` and
+#     `gh release create`, success or failure) reaches the log with the token masked as `***`.
 #   - Exit 2: wrong number of arguments, nothing called.
 # Stub gh first on PATH (offline): it logs every call and, at the moment of `release create`,
 # copies the SHA256SUMS.txt and notes files it is given, so the test sees what gh would upload.
@@ -36,15 +39,21 @@ trap 'rm -rf "$tmp"' EXIT
 
 token='example-fake-gh-token-not-a-secret'
 
-# Stub gh: one log line per call; `release view` answered from STUB_VIEW (missing | exists |
-# error); `release create` answered from STUB_CREATE (ok | fail) after copying, as they are at
+# Stub gh: one log line per call; `gh --version` echoes GH_TOKEN when STUB_VERSION=echo;
+# `release view` answered from STUB_VIEW (missing | exists | error); `release create` answered
+# from STUB_CREATE (ok | fail | ok-echo: succeeds, printing GH_TOKEN on stdout | fail-echo: fails,
+# printing GH_TOKEN on stderr) after copying, as they are at
 # that moment, the SHA256SUMS.txt it is given (to sums.at-create), the --notes-file (to
 # notes.at-create) and the names of the *-setup.exe files it is given (to installers.at-create).
 mkdir -p "$tmp/bin"
 cat > "$tmp/bin/gh" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$STUB_DIR/gh.log"
-[ "$*" = --version ] && { echo "gh version 2.101.0 (stub)"; exit 0; }
+if [ "$*" = --version ]; then
+  echo "gh version 2.101.0 (stub)"
+  [ "${STUB_VERSION:-}" = echo ] && echo "auth: token $GH_TOKEN (stub echo)"
+  exit 0
+fi
 if [ "${1:-}" = release ] && [ "${2:-}" = view ]; then
   case "${STUB_VIEW:-missing}" in
     exists) printf 'title:\t%s\ntag:\t%s\n' "${3:-}" "${3:-}"; exit 0 ;;
@@ -63,7 +72,11 @@ if [ "${1:-}" = release ] && [ "${2:-}" = create ]; then
     if [ "$prev" = --notes-file ] && [ -f "$a" ]; then cp -- "$a" "$STUB_DIR/notes.at-create"; fi
     prev="$a"
   done
-  [ "${STUB_CREATE:-ok}" = ok ] && { echo "https://github.com/example/voicen/releases/tag/${3:-}"; exit 0; }
+  case "${STUB_CREATE:-ok}" in
+    ok) echo "https://github.com/example/voicen/releases/tag/${3:-}"; exit 0 ;;
+    ok-echo) echo "https://x-access-token:$GH_TOKEN@github.com/example/voicen/releases/tag/${3:-}"; exit 0 ;;
+    fail-echo) echo "HTTP 401: Bad credentials for token $GH_TOKEN (https://api.github.com/repos/example/voicen/releases)" >&2; exit 1 ;;
+  esac
   echo "HTTP 422: Validation Failed" >&2
   exit 1
 fi
@@ -71,6 +84,13 @@ echo "stub gh: unsupported call: $*" >&2
 exit 1
 EOF
 chmod +x "$tmp/bin/gh"
+
+# A failing sha256sum, put first on PATH only when extra_path is set to $tmp/bin-sha-fails.
+mkdir -p "$tmp/bin-sha-fails"
+printf '#!/usr/bin/env bash\necho "sha256sum: stub: read error" >&2\nexit 1\n' > "$tmp/bin-sha-fails/sha256sum"
+chmod +x "$tmp/bin-sha-fails/sha256sum"
+extra_path=""
+stub_version=""
 
 # mk_tree <dir> <version>: the version files release-check.sh (version-stamp.sh) reads.
 mk_tree() {
@@ -105,7 +125,7 @@ call() {
   rm -f "$tmp/gh.log" "$tmp/sums.at-create" "$tmp/notes.at-create" "$tmp/installers.at-create"
   : > "$tmp/gh.log"
   ls -A "$tmp/dist" > "$tmp/dist.before" 2>/dev/null || : > "$tmp/dist.before"
-  local -a envs=(env -u GH_TOKEN -u GITHUB_TOKEN PATH="$tmp/bin:$PATH" STUB_DIR="$tmp" STUB_VIEW="$view" STUB_CREATE="$create")
+  local -a envs=(env -u GH_TOKEN -u GITHUB_TOKEN PATH="${extra_path:+$extra_path:}$tmp/bin:$PATH" STUB_DIR="$tmp" STUB_VIEW="$view" STUB_CREATE="$create" STUB_VERSION="$stub_version")
   case "$tok" in
     -) envs+=(GITHUB_TOKEN="$token") ;;
     empty) envs+=(GH_TOKEN= GITHUB_TOKEN="$token") ;;
@@ -213,6 +233,41 @@ mk_dist "$tmp/dist" "$inst"
 call create-fails missing fail "$token" v0.1.200 100 "$tmp/repo" "$tmp/dist"
 want_nonzero
 [ "$(grep -c -E -- '^release create ' "$tmp/gh.log")" = 1 ] || fail "gh release create was not called exactly once"
+done_case
+
+# ---- the SHA256SUMS.txt write fails: no create (validation 3, S3) ---------------------------
+mk_dist "$tmp/dist" "$inst"
+extra_path="$tmp/bin-sha-fails"
+call sha256sum-fails missing ok "$token" v0.1.200 100 "$tmp/repo" "$tmp/dist"
+extra_path=""
+want_nonzero
+# release-check.sh passed, so the stop is the checksum write, not an earlier refusal
+says "release-check: ok" "the check passed before the checksum write"
+! grep -qE -- '^release create ' "$tmp/gh.log" || fail "gh release create was called after sha256sum failed: $(tr '\n' '|' < "$tmp/gh.log")"
+! grep -qF -- 'release: ok' <<<"$out" || fail "release: ok printed after sha256sum failed"
+done_case
+
+# ---- gh echoes the token: masked, never printed (validation 3, S5) -------------------------
+# release.sh passes gh's output through; release-check.sh masks it, release.sh must too.
+mk_dist "$tmp/dist" "$inst"
+call create-fails-echoes-token missing fail-echo "$token" v0.1.200 100 "$tmp/repo" "$tmp/dist"
+want_nonzero
+says "release-check: ok" "the check passed, so the stop is the create"
+[ "$(grep -c -E -- '^release create ' "$tmp/gh.log")" = 1 ] || fail "gh release create was not called exactly once"
+says "Bad credentials for token ***" "gh's create error reaches the log, the token masked"
+! grep -qF -- 'release: ok' <<<"$out" || fail "release: ok printed after the create failed"
+done_case
+mk_dist "$tmp/dist" "$inst"
+call create-ok-echoes-token missing ok-echo "$token" v0.1.200 100 "$tmp/repo" "$tmp/dist"
+want_rc 0
+says "x-access-token:***@github.com" "gh's create output reaches the log, the token masked"
+done_case
+mk_dist "$tmp/dist" "$inst"
+stub_version=echo
+call gh-version-echoes-token missing ok "$token" v0.1.200 100 "$tmp/repo" "$tmp/dist"
+stub_version=""
+want_rc 0
+says "auth: token *** (stub echo)" "gh --version output reaches the log, the token masked"
 done_case
 
 # ---- usage ----------------------------------------------------------------------------------

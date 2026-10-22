@@ -19,7 +19,9 @@
 #     any other gh failure -> exit 1 (cannot tell, never a pass). Without GH_TOKEN (the windows
 #     job's premise) gh is not called and the output names GH_TOKEN as the reason.
 #   - Never calls a gh write subcommand (create, upload, edit, delete, delete-asset); never prints
-#     GH_TOKEN.
+#     GH_TOKEN, also when gh itself echoes it in an error (masked as ***).
+#   - Never writes <root>: the version files are read by version-stamp.sh on a copy, so every
+#     file under <root> is byte-identical after a run (pass or refusal).
 #   - Exit 0: the release may be published; the output names the installer path.
 #   - Exit 2: wrong number of arguments.
 # A number is "named" when it stands alone in the output: not part of a longer dotted number, so
@@ -43,7 +45,8 @@ trap 'rm -rf "$tmp"' EXIT
 token='example-fake-gh-token-not-a-secret'
 
 # Stub gh: logs each call (all arguments on one line) and answers `release view` from
-# STUB_VIEW (missing | exists | error); every other call is unsupported (exit 1).
+# STUB_VIEW (missing | exists | error | error-echo: an error that carries GH_TOKEN, as a gh
+# debug or proxy message might); every other call is unsupported (exit 1).
 mkdir -p "$tmp/bin"
 cat > "$tmp/bin/gh" <<'EOF'
 #!/usr/bin/env bash
@@ -52,6 +55,7 @@ if [ "${1:-}" = release ] && [ "${2:-}" = view ]; then
   case "${STUB_VIEW:-missing}" in
     exists) printf 'title:\t%s\ntag:\t%s\n' "${3:-}" "${3:-}"; exit 0 ;;
     missing) echo "release not found" >&2; exit 1 ;;
+    error-echo) echo "HTTP 401: Bad credentials for token ${GH_TOKEN:-} (https://api.github.com/repos/example/example/releases/tags/${3:-})" >&2; exit 1 ;;
     *) echo "HTTP 401: Bad credentials (https://api.github.com/repos/example/example/releases/tags/${3:-})" >&2; exit 1 ;;
   esac
 fi
@@ -130,13 +134,23 @@ passed=0
 fail() { echo "FAIL $label: $1" >&2; sed 's/^/       | /' <<<"$out" >&2; failed=$((failed + 1)); ok=0; }
 done_case() { [ "$ok" = 1 ] && { echo "ok   $label"; passed=$((passed + 1)); }; }
 
+# tree_state <dir>: every path under <dir> and the bytes of every file (S4 of validation 3:
+# the checkout is never written).
+tree_state() {
+  [ -d "$1" ] || return 0
+  (cd "$1" && find . -print | LC_ALL=C sort && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 -r sha256sum)
+}
+
 # call <label> <view> <token|-> <args...>: runs the script with the stub gh first on PATH;
-# token "-" runs it without GH_TOKEN. Sets out/rc; the gh calls are in $tmp/gh.log.
+# token "-" runs it without GH_TOKEN. Sets out/rc; the gh calls are in $tmp/gh.log. The <root>
+# argument (the 3rd) must be unchanged by the run.
 call() {
   label="$1"; ok=1
   local view="$2" tok="$3"
   shift 3
   : > "$tmp/gh.log"
+  local root_arg="${3:-}" before=""
+  [ -n "$root_arg" ] && before="$(tree_state "$root_arg")"
   if [ "$tok" = - ]; then
     out="$(env -u GH_TOKEN -u GITHUB_TOKEN PATH="$tmp/bin:$PATH" STUB_DIR="$tmp" STUB_VIEW="$view" "$script" "$@" 2>&1)"
   else
@@ -144,6 +158,9 @@ call() {
   fi
   rc=$?
   common
+  if [ -n "$root_arg" ] && [ "$(tree_state "$root_arg")" != "$before" ]; then
+    fail "the run changed files under <root> $root_arg (the checkout is never written)"
+  fi
 }
 # Every case: no gh write subcommand, the token never printed.
 common() {
@@ -284,6 +301,11 @@ mk_dir "$tmp/i" Voicen_0.1.7_x64-setup.exe
 call refuse-installer-0.1.7-under-v0.1.8 missing "$token" v0.1.8 5 "$tmp/repo" "$tmp/i"
 want_rc 1; names 0.1.7 "the installer's version"; names 0.1.8 "the tag's version"
 done_case
+# The version must start at a '_' (validation 3, S1): 10.1.8 ends in 0.1.8 but is not it.
+mk_dir "$tmp/i" Voicen_10.1.8_x64-setup.exe
+call refuse-installer-10.1.8-under-v0.1.8 missing "$token" v0.1.8 5 "$tmp/repo" "$tmp/i"
+want_rc 1; names 10.1.8 "the installer's version"; names 0.1.8 "the tag's version"
+done_case
 mk_dir "$tmp/i" Voicen_0.1.80_x64-setup.exe
 call refuse-installer-0.1.80-under-v0.1.8 missing "$token" v0.1.8 5 "$tmp/repo" "$tmp/i"
 want_rc 1
@@ -346,6 +368,12 @@ done_case
 # gh fails for another reason: whether the release exists is unknown, never a pass.
 call refuse-gh-error error "$token" v0.1.200 100 "$tmp/repo" "$tmp/i"
 want_rc 1; gh_viewed v0.1.200
+done_case
+
+# gh echoes the token in its error (validation 3, S2): the output is masked, never the token.
+call refuse-gh-error-echoes-token error-echo "$token" v0.1.200 100 "$tmp/repo" "$tmp/i"
+want_rc 1; gh_viewed v0.1.200
+says "Bad credentials for token ***" "gh's error with the token masked"
 done_case
 
 # ---- usage ---------------------------------------------------------------------------------

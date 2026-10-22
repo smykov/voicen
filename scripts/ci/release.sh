@@ -16,7 +16,10 @@
 #     `gh release create <tag> <installer> <dir>/SHA256SUMS.txt --verify-tag --title ...
 #     --notes-file <notes>` (gh uploads to a draft and publishes it last). A failed create exits
 #     non-zero. The repository is GH_REPO's (or the checkout's).
-#   - GH_TOKEN is never printed (release-check.sh masks it in gh's output; nothing here echoes it).
+#   - GH_TOKEN is never printed: release-check.sh masks it in gh's output, and the output of
+#     `gh --version` and `gh release create` (stdout and stderr, success or failure) is captured
+#     and printed with GH_TOKEN replaced by `***` (gh_masked); gh's own exit status, not the
+#     masking's, decides (a failed create is never reported ok).
 #
 # Usage: scripts/ci/release.sh <tag> <run_number> <root> <installer dir>
 # Exit 0: published. Exit 1: refused or the publish failed. Exit 2: wrong usage.
@@ -70,8 +73,21 @@ notes="$dist/release-notes.md"
 } > "$notes"
 cat -- "$notes"
 
-gh --version
-if ! gh release create "$tag" "$dist/$installer" "$dist/SHA256SUMS.txt" --verify-tag --title "Voicen $tag" --notes-file "$notes"; then
+# gh_masked <args...>: run gh with stdout and stderr captured, print that output with GH_TOKEN
+# masked as *** (stdout on success, stderr on failure), return gh's exit status. No pipe, so the
+# mask cannot hide gh's status.
+gh_masked() {
+  local out rc=0
+  out="$(gh "$@" 2>&1)" || rc=$?
+  out="${out//"$GH_TOKEN"/***}"
+  if [ -n "$out" ]; then
+    if [ "$rc" = 0 ]; then printf '%s\n' "$out"; else printf '%s\n' "$out" >&2; fi
+  fi
+  return "$rc"
+}
+
+gh_masked --version
+if ! gh_masked release create "$tag" "$dist/$installer" "$dist/SHA256SUMS.txt" --verify-tag --title "Voicen $tag" --notes-file "$notes"; then
   echo "::error::release: gh release create $tag failed; the release is not published (a draft may remain)" >&2
   exit 1
 fi
