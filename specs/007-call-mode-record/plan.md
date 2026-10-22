@@ -228,10 +228,12 @@ README.md (consent section EN/RU, FR-045), docs/architecture.md, docs/decisions/
    - the `windows` features `Win32_Media_Audio` and `Win32_System_Com` (plus `Win32_System_Com_StructuredStorage` if needed);
    - `cmake` in `docker/rust.Dockerfile`;
    - optional `claxon` for the WER example (or the owner converts the FLAC files once with an external tool).
-2. **Chunk concurrency** (research R11): at most 3 requests in flight, with decoding still one chunk at a time, against FR-018's wording; or strictly sequential, which risks SC-003.
-3. **Silero unavailable during a pass** (research R8): use energy spans with a logged `vad_fallback`, which may send music (against SC-008); or fail the track with a new reason that FR-027's list lacks.
-4. **Fallback codec** if libopus cannot be built `/MT` (research R5): pure-Rust `ropus` (young), or a prebuilt `/MT` library.
-5. **Constitution amendment** for principle II and the v3 references (Constitution Check note).
+
+   **Decided (#186)**: all approved except `claxon`; the FLAC files are converted once with an external tool.
+2. **Chunk concurrency** (research R11): at most 3 requests in flight, with decoding still one chunk at a time, against FR-018's wording; or strictly sequential, which risks SC-003. **Decided (#187)**: at most 3 in flight.
+3. **Silero unavailable during a pass** (research R8): use energy spans with a logged `vad_fallback`, which may send music (against SC-008); or fail the track with a new reason that FR-027's list lacks. **Decided (#188)**: energy spans with `vad_fallback`.
+4. **Fallback codec** if libopus cannot be built `/MT` (research R5): pure-Rust `ropus` (young), or a prebuilt `/MT` library. Open: OQ-66.
+5. **Constitution amendment** for principle II and the v3 references (Constitution Check note). **Decided (#189)**: amend through `/speckit-constitution`.
 6. **OQ-45** stays open until the indicator spike. **OQ-48** is answered here as amended ADR-011, for owner confirmation. **OQ-44** needs nothing in 1a (FR-61 is 1d).
 
 ## Risks
