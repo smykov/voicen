@@ -16,7 +16,8 @@
 #     exit 1 (a wrong version names the installer's version and the tag's).
 #   - With GH_TOKEN set: `gh release view <tag>` decides whether the release exists. Exit 0 ->
 #     exit 1 naming the tag (never overwrite); exit non-zero with "release not found" -> no release;
-#     any other gh failure -> exit 1 (cannot tell, never a pass). Without GH_TOKEN (the windows
+#     any other gh failure -> exit 1 (cannot tell, never a pass), also one that says "Not Found"
+#     without "release not found" (HTTP 404, e.g. a wrong GH_REPO). Without GH_TOKEN (the windows
 #     job's premise) gh is not called and the output names GH_TOKEN as the reason.
 #   - Never calls a gh write subcommand (create, upload, edit, delete, delete-asset); never prints
 #     GH_TOKEN, also when gh itself echoes it in an error (masked as ***).
@@ -47,7 +48,8 @@ token='example-fake-gh-token-not-a-secret'
 # Stub gh: logs each call (all arguments on one line) and answers `release view` from
 # STUB_VIEW (missing | exists | error | error-echo: an error that carries GH_TOKEN twice, as a gh
 # debug or proxy message might; twice so a mask of the first occurrence only is caught, validation 4
-# C10); every other call is unsupported (exit 1).
+# C10 | error-404: an HTTP 404 "Not Found" that is not "release not found", e.g. a wrong GH_REPO;
+# validation 5 N15); every other call is unsupported (exit 1).
 mkdir -p "$tmp/bin"
 cat > "$tmp/bin/gh" <<'EOF'
 #!/usr/bin/env bash
@@ -56,6 +58,7 @@ if [ "${1:-}" = release ] && [ "${2:-}" = view ]; then
   case "${STUB_VIEW:-missing}" in
     exists) printf 'title:\t%s\ntag:\t%s\n' "${3:-}" "${3:-}"; exit 0 ;;
     missing) echo "release not found" >&2; exit 1 ;;
+    error-404) echo "HTTP 404: Not Found (https://api.github.com/repos/example/example/releases/tags/${3:-})" >&2; exit 1 ;;
     error-echo) echo "HTTP 401: Bad credentials for token ${GH_TOKEN:-} (retry with token ${GH_TOKEN:-}; https://api.github.com/repos/example/example/releases/tags/${3:-})" >&2; exit 1 ;;
     *) echo "HTTP 401: Bad credentials (https://api.github.com/repos/example/example/releases/tags/${3:-})" >&2; exit 1 ;;
   esac
@@ -369,6 +372,16 @@ done_case
 # gh fails for another reason: whether the release exists is unknown, never a pass.
 call refuse-gh-error error "$token" v0.1.200 100 "$tmp/repo" "$tmp/i"
 want_rc 1; gh_viewed v0.1.200
+done_case
+
+# gh fails with a "Not Found" that is not "release not found" (validation 5, N15: e.g. HTTP 404 for
+# a wrong GH_REPO): whether the release exists is unknown, so refused; only the literal "release not
+# found" means no release yet.
+call refuse-gh-error-not-found-other error-404 "$token" v0.1.200 100 "$tmp/repo" "$tmp/i"
+want_rc 1; gh_viewed v0.1.200
+says "for another reason than 'release not found'" "the refusal for a gh failure other than 'release not found'"
+! grep -qF -- "no release for tag" <<<"$out" || fail "the 404 was read as 'no release yet'"
+! grep -qF -- "release-check: ok:" <<<"$out" || fail "the 404 was read as a pass"
 done_case
 
 # gh echoes the token in its error (validation 3, S2): the output is masked, never the token.

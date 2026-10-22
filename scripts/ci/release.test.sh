@@ -40,7 +40,8 @@ trap 'rm -rf "$tmp"' EXIT
 token='example-fake-gh-token-not-a-secret'
 
 # Stub gh: one log line per call; `gh --version` echoes GH_TOKEN (twice) when STUB_VERSION=echo;
-# `release view` answered from STUB_VIEW (missing | exists | error); `release create` answered
+# `release view` answered from STUB_VIEW (missing | exists | error | error-404: "HTTP 404: Not Found",
+# not "release not found", validation 5 N15); `release create` answered
 # from STUB_CREATE (ok | fail | ok-echo: succeeds, printing GH_TOKEN twice on stdout | fail-echo:
 # fails, printing GH_TOKEN twice on stderr; twice so a mask of the first occurrence only is caught,
 # validation 4 G10) after copying, as they are at
@@ -59,6 +60,7 @@ if [ "${1:-}" = release ] && [ "${2:-}" = view ]; then
   case "${STUB_VIEW:-missing}" in
     exists) printf 'title:\t%s\ntag:\t%s\n' "${3:-}" "${3:-}"; exit 0 ;;
     missing) echo "release not found" >&2; exit 1 ;;
+    error-404) echo "HTTP 404: Not Found (https://api.github.com/repos/example/voicen/releases/tags/${3:-})" >&2; exit 1 ;;
     *) echo "HTTP 401: Bad credentials" >&2; exit 1 ;;
   esac
 fi
@@ -222,6 +224,14 @@ done_case
 mk_dist "$tmp/dist" "$inst"
 call refuse-gh-view-error error ok "$token" v0.1.200 100 "$tmp/repo" "$tmp/dist"
 want_nonzero; gh_no_write; dist_unchanged
+done_case
+# gh's "Not Found" is not "release not found" (validation 5, N15): never read as "no release yet",
+# so release.sh never reaches gh release create.
+mk_dist "$tmp/dist" "$inst"
+call refuse-gh-view-not-found-other error-404 ok "$token" v0.1.200 100 "$tmp/repo" "$tmp/dist"
+want_nonzero; gh_no_write; dist_unchanged
+grep -qE -- '^release view v0\.1\.200' "$tmp/gh.log" || fail "the release-exists check did not run"
+! grep -qE -- '^release create ' "$tmp/gh.log" || fail "gh release create was called after a 404 from release view: $(tr '\n' '|' < "$tmp/gh.log")"
 done_case
 # A bad tag.
 mk_dist "$tmp/dist" "$inst"
