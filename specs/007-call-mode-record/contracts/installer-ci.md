@@ -1,0 +1,62 @@
+# Contract: Command line, installer and CI
+
+## Command line (`voicen.exe`)
+
+| Switch | Instance | Effect | Spec |
+|---|---|---|---|
+| `--call record` | running instance | the single-instance callback posts one `StartCallRecord` request; it enters the tray's Record path (refusals, indicator, tray state, reminder) | FR-003, FR-043, #184 |
+| `--call record` | no instance running | the process becomes primary, starts normally (log start line, tray), then applies the switch once | spec Assumptions |
+| `--call <other>` | either | ignored, `call_switch_refused reason=unknown_value` logged by the primary | — |
+| `--autostart`, `--purge-credentials` | — | unchanged | 001, 006 |
+
+There is no stop switch in 1a.
+
+## Uninstaller
+
+| Invocation | Data question (existing) | Calls question (new) | Default calls folder |
+|---|---|---|---|
+| interactive | asked as today | "Remove recorded calls in <folder>?", default **No**, asked only when `%LOCALAPPDATA%\Voicen\calls` exists | kept unless Yes |
+| `/S`, `/P` | as today (`/S` removes data) | never asked; keep | **kept** |
+| `/S /PURGECALLS`, `/P /PURGECALLS` | as today | never asked; remove | removed |
+| `/S /KEEPDATA` | keep | keep | kept |
+| update mode | keep | keep | kept |
+
+- **Decision point**: `$VoicenPurgeCalls` is computed in PREUNINSTALL next to `$VoicenPurgeData`, the one decision point (installer.md). Question strings are LangStrings 1033/1049.
+- **POSTUNINSTALL**: it never runs `RMDir /r` on `%LOCALAPPDATA%\Voicen` while calls are kept. It removes the other entries one by one and leaves `calls\`.
+- **Other roots**: no root other than the default is ever deleted (FR-041, SC-010).
+
+## Windows CI (`.github/workflows/ci.yml`, windows job)
+
+| Step | Assertion | Spec |
+|---|---|---|
+| `cargo test --workspace --exclude voicen` | core call tests (Linux ones also pass on Windows) + `voicen-whisper` `SpeechSpans` on the fetched Silero model | FR-023, R8 |
+| `cargo test -p voicen` (`src-tauri/tests/call_*.rs`) | WAV-sourced chain capture → storage → final (local mock server) → merge; IMMNotificationClient register/unregister; loopback open on a device-less runner gives `no_device`; indicator window style bits (topmost, no taskbar, shown without activation) | FR-014, FR-010, FR-005 |
+| `crt-imports.sh` | `voicen.exe` and the call test exes import no `MSVCP140` / `VCRUNTIME140` (libopus /MT) | R5 |
+| `opus-cmake-cache.sh` (new) | opus `CMakeCache.txt`: `OPUS_STATIC_RUNTIME=ON`, `CMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded` | R5 |
+| install smoke (existing, extended) | after the start line: `voicen.exe --call record` → log has `call_requested source=switch` and `call_refused part=system reason=no_device` (or `part=mic`, whichever the runner's endpoint set gives first; both are refusals), the process is still running, no call folder exists, the window census is unchanged | FR-043, FR-002 |
+| uninstall `/S` (ci.yml ≈ :1170, extended) | a planted `calls\2026-01-01_000000\meta.json` exists after uninstall | FR-041 |
+| uninstall `/S /PURGECALLS` (new, after a reinstall) | the planted folder is gone; a planted folder in a non-default root (`$RUNNER_TEMP\calls-elsewhere`) still exists | FR-041, SC-010 |
+
+New CI tests run red first on `wip/<ID>` (P-016, windows-ci-runner.md). The runner has no capture-endpoint probe fact, so no step asserts real capture.
+
+## Guard and owned files touched (each change in a task with `checker: true` and `analysis.decides_on`, P-020)
+
+| File | Change |
+|---|---|
+| `.cargo/config.toml` | `CMAKE_TOOLCHAIN_FILE` (opus static runtime) — confirm it does not change whisper.cpp's cache (`whisper-cmake-cache.sh` stays green) |
+| `scripts/ci/opus-cmake-cache.sh` + Makefile `check-opus-cmake-cache` + host fixtures | new checker |
+| `scripts/ci/crt-imports.sh` exe list | call test exes |
+| `docker/rust.Dockerfile` | `cmake` (core image; also serves the mingw build of `check-shell-windows`) — owner consent |
+| `scripts/ci/shell-targets.txt` | unchanged (new shell tests are `tests/*.rs`, not targets of lib/bin) — confirm with `make check-shell-layout` |
+| `scripts/ci/helper-windows.txt` | unchanged; the indicator and Calls windows are product windows (overlay.md §5). If the spike shows a new framework helper window, it is added there with its evidence |
+| `about.toml` / `licenses/manual.json` / `THIRD-PARTY-NOTICES.txt` | `opus`, `opusic-sys` (BSD-3-Clause, with the bundled libopus notice), `ogg` (BSD-3-Clause); `make licenses` |
+
+## Licences of new components
+
+| Component | Licence | Bundled C | Notice |
+|---|---|---|---|
+| `opus` 0.4 | MIT OR Apache-2.0 | — | cargo-about |
+| `opusic-sys` 0.7 | BSD-3-Clause | libopus 1.6.1 (BSD-3-Clause) | cargo-about + libopus copyright in `licenses/manual.json` if not in the crate metadata |
+| `ogg` 0.9 | BSD-3-Clause | — | cargo-about |
+| `claxon` (example only, if chosen) | Apache-2.0 | — | not shipped |
+| LibriSpeech test-clean subset | CC BY 4.0 | — | not shipped; attribution in the WER report |
