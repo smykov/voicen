@@ -5,7 +5,7 @@
      Write only what the owner said or approved. A guess is marked "working assumption" in section 10;
      an unknown goes to docs/open-questions.md. IDs (FR-NN, NFR-NN) are never reused. -->
 
-Version: 7 · Status: draft (v5: release 2 — call mode added; v6: the owner's answers to roast round 3 applied, 2026-10-21; v7: the owner's answers to roast round 4 applied, 2026-10-21; release 1 lines unchanged from v4, approved by the owner 2026-10-02, except the amendments marked `(v6, r3#N)` and `(v7, r4#N)`)
+Version: 7 · Status: approved · Approved by the owner: 2026-10-22 (decisions #183) (v5: release 2 — call mode added; v6: the owner's answers to roast round 3 applied, 2026-10-21; v7: the owner's answers to roast round 4 applied, 2026-10-21; release 1 lines unchanged from v4, approved by the owner 2026-10-02, except the amendments marked `(v6, r3#N)` and `(v7, r4#N)`)
 Roast: round 4 NOT_READY (on v6), remaining High closed by the owner; `docs/requirements.reviews/4.md`, its findings answered by the owner 2026-10-21 (decisions #180–#182). Round 3 NOT_READY (on v5), `docs/requirements.reviews/3.md`; its findings answered by the owner 2026-10-21 (decisions #175–#178)
 Source: owner's brief in the /teamwright:init call (2026-10-02, Russian), interview rounds 1–3 (2026-10-02), roast round 1–2 answers (2026-10-02), spec findings accepted by the owner (2026-10-02, `(v4)`); release 2: the owner's call-mode package v4, `docs/briefs/call-mode-r1/` (2026-10-21, Russian: `tz.md`, `kontseptsiya.md`, `prozharka-1.md`, `adr/`); roast round 3 answers (2026-10-21, `(r3#N)`); roast round 4 answers (2026-10-21, `(r4#N)`)
 
