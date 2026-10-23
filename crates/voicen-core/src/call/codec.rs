@@ -516,6 +516,9 @@ mod tests {
         syncs: usize,
         /// A write fails once this many bytes are stored.
         fail_write_at: Option<(usize, ErrorKind)>,
+        /// Only the first write that would store more than this many bytes fails; it stores
+        /// nothing, and every later write succeeds. Cleared when it fires.
+        fail_write_once_at: Option<(usize, ErrorKind)>,
         /// The n-th flush (0-based) and every later one fail.
         fail_flush_from: Option<(usize, ErrorKind)>,
         /// The n-th sync (0-based) and every later one fail.
@@ -548,6 +551,12 @@ mod tests {
             if let Some((at, kind)) = s.fail_write_at {
                 if s.bytes.len() + buf.len() > at {
                     return Err(io::Error::new(kind, "fake write failure"));
+                }
+            }
+            if let Some((at, kind)) = s.fail_write_once_at {
+                if s.bytes.len() + buf.len() > at {
+                    s.fail_write_once_at = None;
+                    return Err(io::Error::new(kind, "fake one-shot write failure"));
                 }
             }
             s.bytes.extend_from_slice(buf);
@@ -1424,6 +1433,131 @@ mod tests {
         }
     }
 
+    /// One Ogg page (RFC 3533) holding `packets` whole, CRC set.
+    fn ogg_page(flags: u8, granule: u64, serial: u32, seq: u32, packets: &[Vec<u8>]) -> Vec<u8> {
+        let mut lacing = Vec::new();
+        for p in packets {
+            lacing.extend(std::iter::repeat_n(255u8, p.len() / 255));
+            lacing.push(u8::try_from(p.len() % 255).unwrap());
+        }
+        let mut page = b"OggS".to_vec();
+        page.push(0);
+        page.push(flags);
+        page.extend_from_slice(&granule.to_le_bytes());
+        page.extend_from_slice(&serial.to_le_bytes());
+        page.extend_from_slice(&seq.to_le_bytes());
+        page.extend_from_slice(&[0; 4]);
+        page.push(u8::try_from(lacing.len()).unwrap());
+        page.extend_from_slice(&lacing);
+        for p in packets {
+            page.extend_from_slice(p);
+        }
+        let crc = ogg_crc(&page);
+        page[22..26].copy_from_slice(&crc.to_le_bytes());
+        page
+    }
+
+    /// The fixture rebuilt from `first` (the leading pages, sequence numbers from 0) and then
+    /// the fixture's pages from `from` on, renumbered after them.
+    fn rebuilt(f: &Fixture, first: &[(u8, Vec<Vec<u8>>)], from: usize) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut seq = 0u32;
+        for (flags, packets) in first {
+            out.extend(ogg_page(*flags, 0, SERIAL, seq, packets));
+            seq += 1;
+        }
+        for p in &f.pages[from..] {
+            out.extend(ogg_page(p.flags, p.granule, p.serial, seq, &p.packets));
+            seq += 1;
+        }
+        out
+    }
+
+    #[test]
+    fn each_opus_head_field_check_makes_the_file_unreadable() {
+        // "No valid OpusHead on the first page -> Unreadable" (contracts/core-call.md): a
+        // CRC-valid page 1 whose OpusHead has the right magic but a version of 16 or more
+        // (an incompatible major version, RFC 7845 5.1), 0 or 3 channels, or a channel
+        // mapping family other than 0. Each field is changed alone; the rest is the fixture.
+        let f = fixture();
+        let head = &f.pages[0];
+        let body = head.start + 27 + usize::from(f.bytes[head.start + 26]);
+        for (what, offset, was, value) in [
+            ("version 16", 8, 1, 0x10),
+            ("version 255", 8, 1, 0xFF),
+            ("0 channels", 9, 1, 0),
+            ("3 channels", 9, 1, 3),
+            ("mapping family 1", 18, 0, 1),
+            ("mapping family 255", 18, 0, 255),
+        ] {
+            let mut bytes = f.bytes.clone();
+            assert_eq!(bytes[body + offset], was, "{what}: fixture byte");
+            bytes[body + offset] = value;
+            fix_crc(&mut bytes, head);
+            assert!(
+                matches!(scan_of(&bytes), Err(DecodeEnd::Unreadable)),
+                "{what}: scan {:?}",
+                scan_of(&bytes)
+            );
+            assert!(
+                matches!(
+                    OpusOggReader::open(Cursor::new(bytes)),
+                    Err(DecodeEnd::Unreadable)
+                ),
+                "{what}: open"
+            );
+        }
+    }
+
+    #[test]
+    fn an_opus_head_sharing_page_1_with_opus_tags_makes_the_file_unreadable() {
+        // Page 1 holds the OpusHead alone (RFC 7845 3, contract "Page 1 | BOS, OpusHead
+        // only"). Control: the same rebuild with the head alone on page 1 reads completely,
+        // so only the shared page makes the file unreadable.
+        let f = fixture();
+        let head = f.pages[0].packets.clone();
+        let tags = f.pages[1].packets.clone();
+        let alone = rebuilt(&f, &[(BOS, head.clone()), (0, tags.clone())], 2);
+        assert!(alone == f.bytes, "the rebuild reproduces the fixture");
+        let shared = rebuilt(&f, &[(BOS, [head, tags].concat())], 2);
+        assert!(
+            matches!(scan_of(&shared), Err(DecodeEnd::Unreadable)),
+            "scan {:?}",
+            scan_of(&shared)
+        );
+        assert!(
+            matches!(
+                OpusOggReader::open(Cursor::new(shared)),
+                Err(DecodeEnd::Unreadable)
+            ),
+            "open"
+        );
+    }
+
+    #[test]
+    fn a_packet_libopus_rejects_ends_the_windows_with_a_codec_error() {
+        // "`Codec`: libopus refused ... to decode a packet of a CRC-valid page". The first
+        // audio packet becomes a code-3 packet with a frame count of 0 (RFC 6716 3.2.5),
+        // which libopus rejects as invalid; its page stays CRC-valid.
+        let f = fixture();
+        let mut audio = f.pages[2].packets.clone();
+        audio[0] = vec![0x03, 0x00];
+        let mut first = vec![
+            (BOS, f.pages[0].packets.clone()),
+            (0, f.pages[1].packets.clone()),
+        ];
+        first.push((f.pages[2].flags, audio));
+        let mut bytes = rebuilt(&f, &first, 3);
+        // `rebuilt` gives leading pages granule 0; put page 3's granule back.
+        let p = pages(&bytes);
+        bytes[p[2].start + 6..p[2].start + 14].copy_from_slice(&f.pages[2].granule.to_le_bytes());
+        fix_crc(&mut bytes, &p[2]);
+        assert_eq!(pages(&bytes).len(), f.pages.len(), "every page CRC-valid");
+        let (samples, how) = decode(&bytes, 500);
+        assert!(matches!(how, Err(DecodeEnd::Codec)), "{how:?}");
+        assert!(samples.is_empty(), "nothing before the rejected packet");
+    }
+
     // ---- storage failures (FR-016) ------------------------------------------------------
 
     /// Encodes 8 s, the clock moving 1 s per second of audio; the first error.
@@ -1578,6 +1712,97 @@ mod tests {
                 "sync {only} fails: the flushed page is the last thing written: {events:?}"
             );
         }
+    }
+
+    // ---- one-shot failures at create and finish (FR-016) -------------------------------
+
+    /// `create`'s error on `sink`, or `None` if it returned a track.
+    fn create_error(sink: &Sink) -> Option<StorageError> {
+        OpusOgg::create(sink.clone(), SERIAL, dyn_clock(&StepClock::new())).err()
+    }
+
+    /// Creates a track and pushes 3 s, each step required to succeed; `finish`'s result.
+    fn finish_result(sink: &Sink) -> Result<(), StorageError> {
+        let mut enc = OpusOgg::create(sink.clone(), SERIAL, dyn_clock(&StepClock::new()))
+            .unwrap_or_else(|e| panic!("create failed early: {e:?}"));
+        for c in speech(3 * RATE).chunks(RATE) {
+            enc.push(c)
+                .unwrap_or_else(|e| panic!("push failed early: {e:?}"));
+        }
+        enc.finish()
+    }
+
+    #[test]
+    fn create_fails_when_only_a_header_page_write_fails() {
+        // Only the one write fails; every later write, flush and sync succeeds, so the
+        // error must come from `create` itself.
+        let head_end = pages(&encode(&speech(RATE)))[0].end;
+        for (at, kind, what) in [
+            (0, ErrorKind::StorageFull, "OpusHead page"),
+            (head_end, ErrorKind::PermissionDenied, "OpusTags page"),
+        ] {
+            let sink = Sink::default();
+            sink.state().fail_write_once_at = Some((at, kind));
+            assert_storage(create_error(&sink), StorageOp::Write, kind, what);
+            assert_eq!(
+                sink.state().fail_write_once_at,
+                None,
+                "{what}: the fake fired"
+            );
+        }
+    }
+
+    #[test]
+    fn create_fails_when_only_a_header_page_flush_fails() {
+        for (only, kind) in [(0, ErrorKind::BrokenPipe), (1, ErrorKind::TimedOut)] {
+            let sink = Sink::default();
+            sink.state().fail_flush_only = Some((only, kind));
+            assert_storage(
+                create_error(&sink),
+                StorageOp::Flush,
+                kind,
+                &format!("header flush {only}"),
+            );
+        }
+    }
+
+    #[test]
+    fn finish_fails_when_only_the_eos_page_write_fails() {
+        // The write holding the file's last byte is the EOS page's; it fails once, and the
+        // final flush and sync after it succeed.
+        let reference = Sink::default();
+        finish_result(&reference).unwrap();
+        let bytes = reference.bytes();
+        let sink = Sink::default();
+        sink.state().fail_write_once_at = Some((bytes.len() - 1, ErrorKind::StorageFull));
+        assert_storage(
+            finish_result(&sink).err(),
+            StorageOp::Write,
+            ErrorKind::StorageFull,
+            "EOS page write",
+        );
+        assert_eq!(sink.state().fail_write_once_at, None, "the fake fired");
+        assert!(
+            sink.bytes().len() < bytes.len(),
+            "the EOS page was not stored whole"
+        );
+    }
+
+    #[test]
+    fn finish_fails_when_only_the_final_flush_fails() {
+        // The last flush of a whole encode is `finish`'s own; it fails once, the final sync
+        // after it succeeds.
+        let reference = Sink::default();
+        finish_result(&reference).unwrap();
+        let last = reference.state().flushes - 1;
+        let sink = Sink::default();
+        sink.state().fail_flush_only = Some((last, ErrorKind::TimedOut));
+        assert_storage(
+            finish_result(&sink).err(),
+            StorageOp::Flush,
+            ErrorKind::TimedOut,
+            "final flush",
+        );
     }
 
     // ---- the production writer ----------------------------------------------------------
