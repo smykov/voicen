@@ -21,6 +21,10 @@ rubato = "5"
 thiserror = "2"
 # Streamed SHA-256 of a downloaded model (T-016; consented in decision #50).
 sha2 = "0.10"
+# Call tracks as Ogg Opus (spec 007 R5/R6, decision #186): libopus 1.6.1 bundled and built
+# with CMake by opusic-sys; the Ogg container in pure Rust (T-116).
+opus = "0.4"
+ogg = "0.9"
 
 [features]
 # Public test fakes (FakeCredentialStore, FakeHotkeyRegistrar, FakeDownloadedModels,
