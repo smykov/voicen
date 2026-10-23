@@ -520,6 +520,10 @@ mod tests {
         fail_flush_from: Option<(usize, ErrorKind)>,
         /// The n-th sync (0-based) and every later one fail.
         fail_sync_from: Option<(usize, ErrorKind)>,
+        /// Only the n-th flush (0-based) fails; the ones before and after succeed.
+        fail_flush_only: Option<(usize, ErrorKind)>,
+        /// Only the n-th sync (0-based) fails; the ones before and after succeed.
+        fail_sync_only: Option<(usize, ErrorKind)>,
     }
 
     /// The counting fake writer: records bytes, flushes and syncs in order; fails on demand.
@@ -561,6 +565,11 @@ mod tests {
                     return Err(io::Error::new(kind, "fake flush failure"));
                 }
             }
+            if let Some((only, kind)) = s.fail_flush_only {
+                if i == only {
+                    return Err(io::Error::new(kind, "fake flush failure"));
+                }
+            }
             let n = s.bytes.len();
             s.events.push(Ev::Flush(n));
             Ok(())
@@ -574,6 +583,11 @@ mod tests {
             s.syncs += 1;
             if let Some((from, kind)) = s.fail_sync_from {
                 if i >= from {
+                    return Err(io::Error::new(kind, "fake sync failure"));
+                }
+            }
+            if let Some((only, kind)) = s.fail_sync_only {
+                if i == only {
                     return Err(io::Error::new(kind, "fake sync failure"));
                 }
             }
@@ -1447,6 +1461,82 @@ mod tests {
             ErrorKind::Unsupported,
             "final sync fails",
         );
+    }
+
+    /// Pushes 20 ms chunks (one packet each), the clock moving 20 ms before each, until a
+    /// `push` fails: the 0-based index of that push, its error, and the sink's events at
+    /// that moment. Panics if every push of `seconds` succeeds (the failure was swallowed
+    /// mid-recording; `finish` is never reached).
+    fn first_failing_push(sink: &Sink, seconds: usize) -> (usize, StorageError, Vec<Ev>) {
+        let clock = StepClock::new();
+        let mut enc = OpusOgg::create(sink.clone(), SERIAL, dyn_clock(&clock)).unwrap();
+        let mut sig = Speech::new(140.0, 0.01, 7);
+        for i in 0..seconds * 50 {
+            clock.advance(Duration::from_millis(20));
+            if let Err(e) = enc.push(&sig.take(320)) {
+                return (i, e, sink.events());
+            }
+        }
+        panic!("no push failed in {seconds} s: the mid-recording failure was swallowed");
+    }
+
+    #[test]
+    fn push_fails_on_the_page_whose_flush_fails() {
+        // FR-016: a mid-recording write failure stops the recording. Flushes 0 and 1 are
+        // the header pages; flush 2 + k ends audio page k + 1, i.e. packet 50 (k + 1).
+        // Only that one flush fails: the error must come from that push, not from a later
+        // flush or from finish.
+        for (only, kind) in [
+            (2, ErrorKind::BrokenPipe),
+            (4, ErrorKind::TimedOut),
+            (6, ErrorKind::StorageFull),
+        ] {
+            let sink = Sink::default();
+            sink.state().fail_flush_only = Some((only, kind));
+            let (at, e, events) = first_failing_push(&sink, 8);
+            let page = only - 1;
+            assert_eq!(
+                (at, e.op, e.kind),
+                (page * 50 - 1, StorageOp::Flush, kind),
+                "flush {only} fails: the push closing audio page {page} returns it"
+            );
+            // Nothing runs after the failed flush: no periodic sync on unflushed data.
+            let last_flush_ok = events.iter().rposition(|e| matches!(e, Ev::Flush(_)));
+            let last_write = events.iter().rposition(|e| matches!(e, Ev::Write(_)));
+            assert!(
+                last_write > last_flush_ok
+                    && !events[last_write.unwrap_or(0)..]
+                        .iter()
+                        .any(|e| matches!(e, Ev::Sync(_))),
+                "flush {only} fails: the page's bytes stay unflushed and unsynced: {events:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn push_fails_on_the_page_whose_periodic_sync_fails() {
+        // The clock moves 20 ms per packet: 5 s pass at the end of every 5th audio page
+        // (packet 250 k), where the periodic sync k - 1 (0-based) runs. Only that one sync
+        // fails: the error must come from that push, not from finish.
+        for (only, kind) in [(0, ErrorKind::TimedOut), (1, ErrorKind::PermissionDenied)] {
+            let sink = Sink::default();
+            sink.state().fail_sync_only = Some((only, kind));
+            let (at, e, events) = first_failing_push(&sink, 12);
+            assert_eq!(
+                (at, e.op, e.kind),
+                ((only + 1) * 250 - 1, StorageOp::Sync, kind),
+                "sync {only} fails: the push closing audio page {} returns it",
+                (only + 1) * 5
+            );
+            // The failing sync came right after its page was flushed; nothing was written
+            // after it.
+            let total = sink.bytes().len();
+            assert_eq!(
+                events.last(),
+                Some(&Ev::Flush(total)),
+                "sync {only} fails: the flushed page is the last thing written: {events:?}"
+            );
+        }
     }
 
     // ---- the production writer ----------------------------------------------------------
