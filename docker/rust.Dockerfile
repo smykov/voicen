@@ -9,6 +9,10 @@ FROM rust:1.99-bookworm
 # resource with windres. Nothing is linked. The target is baked in, not added at run time:
 # tw-run's containers are removed after each command, so a run-time add would download it on
 # every run. Its files are world-readable for tw-run's caller uid.
+# cmake (unpinned like clang, libclang-dev and mingw gcc; the base image tag fixes the Debian
+# suite): the cmake-rs build scripts of aws-lc-sys and whisper-rs-sys run it (whisper-rs-sys
+# skips it on the Linux gate, DOCS_RS=1), and from T-116 the bundled libopus build, both native
+# (check-core) and with mingw gcc in check-shell-windows (T-115; docs/decisions/ci-toolchain.md).
 RUN apt-get update \
  && apt-get install -y --no-install-recommends cmake clang libclang-dev gcc-mingw-w64-x86-64-win32 \
  && rm -rf /var/lib/apt/lists/* \
