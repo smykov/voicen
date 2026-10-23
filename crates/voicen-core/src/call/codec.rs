@@ -1347,6 +1347,47 @@ mod tests {
         assert_prefix(&f, &bytes, 3, ReadEnd::Truncated, "bad page 4, page 5 cut");
     }
 
+    /// Corrupts pages `from..from + run`: the body of even-numbered pages, a header byte
+    /// (granule) of odd-numbered ones, so a run mixes both kinds of CRC mismatch.
+    fn corrupt_run(f: &Fixture, from: usize, run: usize) -> Vec<u8> {
+        let mut bytes = f.bytes.clone();
+        for (i, p) in f.pages.iter().enumerate().skip(from).take(run) {
+            if i % 2 == 0 {
+                corrupt_body(&mut bytes, p);
+            } else {
+                bytes[p.start + 7] ^= 0x01;
+            }
+        }
+        bytes
+    }
+
+    #[test]
+    fn consecutive_bad_pages_before_a_valid_page_give_a_damaged_file_with_its_prefix() {
+        // Damaged iff a CRC-valid page follows the bad one, however many bad pages lie
+        // between: a run of 2 or 3 CRC-invalid pages, then at least one valid page.
+        let f = fixture();
+        let last = f.pages.len() - 1;
+        for run in [2, 3] {
+            for k in 3..=last - run {
+                let bytes = corrupt_run(&f, k, run);
+                let what = format!("bad pages {k}..{}, page {} valid", k + run - 1, k + run);
+                assert_prefix(&f, &bytes, k - 1, ReadEnd::Damaged, &what);
+            }
+        }
+    }
+
+    #[test]
+    fn consecutive_bad_pages_up_to_the_end_of_the_file_end_recoverable_data() {
+        // No CRC-valid page after the run: the data ends at the last good page.
+        let f = fixture();
+        let last = f.pages.len() - 1;
+        for k in 3..last {
+            let bytes = corrupt_run(&f, k, last + 1 - k);
+            let what = format!("bad pages {k}..{last}");
+            assert_prefix(&f, &bytes, k - 1, ReadEnd::Truncated, &what);
+        }
+    }
+
     #[test]
     fn a_file_without_a_valid_opus_head_is_unreadable() {
         let f = fixture();
