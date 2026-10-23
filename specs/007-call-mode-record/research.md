@@ -51,7 +51,7 @@ Crate facts were read from the published sources of `opus` 0.4.0 / `opusic-sys` 
     - `scripts/ci/crt-imports.sh` gains `voicen.exe` (already listed) and the call codec test exes;
     - a new `opus-cmake-cache` check reads opus's `CMakeCache.txt` (the T-099 pattern);
     - both are guard changes, so the task carries `checker: true` (P-020).
-  - **Linux image**: the core image gains `cmake` (decision-gated Dockerfile change). The mingw cross build of `make check-shell-windows` also builds libopus with mingw gcc, so the same `cmake` serves it.
+  - **Linux image**: the core image already has `cmake` (added by T-115; the Dockerfile comment and `docs/decisions/ci-toolchain.md` say why). The mingw cross build of `make check-shell-windows` also builds libopus with mingw gcc, so the same `cmake` serves it.
 - **Rationale**: This is the confirmed stack (req §8: `opus` on libopus BSD-3). Voip at 16 kHz/24 kbit/s is libopus's speech sweet spot and leaves room under NFR-18.
 - **Alternatives**:
   - `ropus` 0.12 (pure Rust, BSD-3-Clause, no C toolchain, bit-exact claim): fallback if the CRT fix fails, as an owner decision (it is young, created 2026-04);
@@ -77,7 +77,7 @@ Crate facts were read from the published sources of `opus` 0.4.0 / `opusic-sys` 
 ## R7 — Reading a crashed or truncated recording; recovery does not rewrite
 
 - **Decision**:
-  - **Reader**: the core `TrackReader` walks pages with `ogg::PacketReader`.
+  - **Reader**: the core `OpusOggReader` walks pages with `ogg::PacketReader`.
     - It treats `Ok(None)` and `Err(ReadError(UnexpectedEof))` after at least one audio page as "end of recoverable data".
     - It treats `HashMismatch` on the last page as the same.
     - `HashMismatch` before the last page is a damaged file. Its readable prefix is still used.

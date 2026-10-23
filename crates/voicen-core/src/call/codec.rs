@@ -26,10 +26,437 @@
 // after a valid OpusHead; any read error ends the data; Damaged iff a CRC-valid page follows
 // an invalid one; duration = last good granule - pre-skip.
 
+use std::collections::VecDeque;
+use std::io::{self, Read, Seek, Write};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use ogg::{OggReadError, Packet, PacketReader, PacketWriteEndInfo, PacketWriter};
+
+use crate::audio::AudioBuffer;
+use crate::call::{DecodeEnd, StorageError, StorageOp};
+use crate::clock::MonotonicClock;
+
+/// The encoder's sample rate: call tracks are 16 kHz mono (research R5).
+const RATE: u32 = 16_000;
+/// 20 ms at 16 kHz: the samples of one Opus packet.
+const FRAME: usize = 320;
+/// One packet in the 48 kHz granule units of Ogg Opus (RFC 7845).
+const GRANULE_PER_PACKET: u64 = 960;
+/// 16 kHz samples per 48 kHz granule unit, inverted: granule = 3 x samples.
+const GRANULE_PER_SAMPLE: u64 = 3;
+/// A page ends after this many packets (1 s, research R6).
+const PACKETS_PER_PAGE: u64 = 50;
+/// `sync_data` runs once this much clock time passed since the last one (research R6).
+const SYNC_EVERY: Duration = Duration::from_secs(5);
+/// Encoder settings (research R5).
+const BITRATE: i32 = 24_000;
+const COMPLEXITY: i32 = 9;
+/// libopus's recommended output buffer for one packet.
+const MAX_PACKET: usize = 4_000;
+/// The longest Opus packet (120 ms) at 16 kHz.
+const MAX_DECODED: usize = 1_920;
+
+/// A writer whose written data can be made durable: `File::sync_data` in production, a
+/// counting fake in tests.
+pub trait SyncWrite: Write {
+    fn sync_data(&mut self) -> io::Result<()>;
+}
+
+impl SyncWrite for std::fs::File {
+    fn sync_data(&mut self) -> io::Result<()> {
+        std::fs::File::sync_data(self)
+    }
+}
+
+/// Writes one call track (contracts/core-call.md "Codec"). Runs on the session's writer
+/// thread, never in the audio callback.
+pub trait TrackEncoder {
+    /// Appends 16 kHz mono samples; any chunking gives the same file.
+    fn push(&mut self, pcm16k: &[f32]) -> Result<(), StorageError>;
+    /// Ends the stream (EOS page, final granule trims the tail), flushes and syncs.
+    fn finish(self) -> Result<(), StorageError>;
+}
+
+/// Reads one call track back as 16 kHz audio.
+pub trait TrackDecoder {
+    /// The next window of at most `max_ms` (at least 1 ms) of 16 kHz audio; `Ok(None)` at
+    /// the end of the recoverable data, `Err(DecodeEnd::Damaged)` instead of it when a bad
+    /// page sits before the end of the file.
+    fn next_window(&mut self, max_ms: u32) -> Result<Option<AudioBuffer>, DecodeEnd>;
+}
+
+fn storage(op: StorageOp) -> impl Fn(io::Error) -> StorageError {
+    move |e| StorageError { op, kind: e.kind() }
+}
+
+fn encode_failed(_: opus::Error) -> StorageError {
+    StorageError {
+        op: StorageOp::Encode,
+        kind: io::ErrorKind::Other,
+    }
+}
+
+/// The Ogg Opus writer of a call track (research R5, R6): page 1 `OpusHead`, page 2
+/// `OpusTags`, then audio pages of 50 packets, each flushed; `sync_data` whenever 5 s of the
+/// injected clock passed since the last sync, and after the EOS page.
+pub struct OpusOgg<W: SyncWrite> {
+    pages: PacketWriter<'static, W>,
+    encoder: opus::Encoder,
+    serial: u32,
+    clock: Arc<dyn MonotonicClock>,
+    last_sync: Instant,
+    /// 48 kHz units the decoder drops at the start (encoder lookahead x 3).
+    pre_skip: u64,
+    /// Samples of the next packet, fewer than `FRAME`.
+    frame: Vec<f32>,
+    out: Vec<u8>,
+    packets: u64,
+    samples: u64,
+}
+
+impl<W: SyncWrite> OpusOgg<W> {
+    /// Sets up the R5 encoder and writes the two header pages, each flushed.
+    pub fn create(
+        inner: W,
+        serial: u32,
+        clock: Arc<dyn MonotonicClock>,
+    ) -> Result<OpusOgg<W>, StorageError> {
+        let mut encoder = opus::Encoder::new(RATE, opus::Channels::Mono, opus::Application::Voip)
+            .map_err(encode_failed)?;
+        encoder
+            .set_bitrate(opus::Bitrate::Bits(BITRATE))
+            .map_err(encode_failed)?;
+        encoder.set_vbr(true).map_err(encode_failed)?;
+        encoder.set_complexity(COMPLEXITY).map_err(encode_failed)?;
+        encoder.set_dtx(false).map_err(encode_failed)?;
+        encoder.set_inband_fec(false).map_err(encode_failed)?;
+        let lookahead = encoder.get_lookahead().map_err(encode_failed)?;
+        let pre_skip = u16::try_from(lookahead)
+            .ok()
+            .and_then(|l| l.checked_mul(3))
+            .ok_or(StorageError {
+                op: StorageOp::Encode,
+                kind: io::ErrorKind::Other,
+            })?;
+
+        let mut head = Vec::with_capacity(19);
+        head.extend_from_slice(b"OpusHead");
+        head.push(1); // version
+        head.push(1); // channels
+        head.extend_from_slice(&pre_skip.to_le_bytes());
+        head.extend_from_slice(&RATE.to_le_bytes()); // input sample rate
+        head.extend_from_slice(&0i16.to_le_bytes()); // output gain
+        head.push(0); // channel mapping family
+
+        let vendor = format!("voicen {}", env!("CARGO_PKG_VERSION"));
+        let vendor_len = u32::try_from(vendor.len()).map_err(|_| StorageError {
+            op: StorageOp::Encode,
+            kind: io::ErrorKind::Other,
+        })?;
+        let mut tags = Vec::with_capacity(16 + vendor.len());
+        tags.extend_from_slice(b"OpusTags");
+        tags.extend_from_slice(&vendor_len.to_le_bytes());
+        tags.extend_from_slice(vendor.as_bytes());
+        tags.extend_from_slice(&0u32.to_le_bytes()); // no user comments
+
+        let last_sync = clock.now();
+        let mut track = OpusOgg {
+            pages: PacketWriter::new(inner),
+            encoder,
+            serial,
+            clock,
+            last_sync,
+            pre_skip: u64::from(pre_skip),
+            frame: Vec::with_capacity(FRAME),
+            out: vec![0; MAX_PACKET],
+            packets: 0,
+            samples: 0,
+        };
+        for header in [head, tags] {
+            track.write(header, PacketWriteEndInfo::EndPage, 0)?;
+            track.flush()?;
+        }
+        Ok(track)
+    }
+
+    fn write(
+        &mut self,
+        packet: Vec<u8>,
+        end: PacketWriteEndInfo,
+        granule: u64,
+    ) -> Result<(), StorageError> {
+        self.pages
+            .write_packet(packet, self.serial, end, granule)
+            .map_err(storage(StorageOp::Write))
+    }
+
+    fn flush(&mut self) -> Result<(), StorageError> {
+        self.pages
+            .inner_mut()
+            .flush()
+            .map_err(storage(StorageOp::Flush))
+    }
+
+    fn sync(&mut self, now: Instant) -> Result<(), StorageError> {
+        self.pages
+            .inner_mut()
+            .sync_data()
+            .map_err(storage(StorageOp::Sync))?;
+        self.last_sync = now;
+        Ok(())
+    }
+
+    /// Encodes the full `frame` into one packet. `last` carries the final granule.
+    fn encode_frame(&mut self, last: Option<u64>) -> Result<(), StorageError> {
+        let n = self
+            .encoder
+            .encode_float(&self.frame, &mut self.out)
+            .map_err(encode_failed)?;
+        let packet = self.out.get(..n).unwrap_or_default().to_vec();
+        self.frame.clear();
+        self.packets += 1;
+        let (end, granule) = match last {
+            Some(granule) => (PacketWriteEndInfo::EndStream, granule),
+            None if self.packets.is_multiple_of(PACKETS_PER_PAGE) => (
+                PacketWriteEndInfo::EndPage,
+                self.packets * GRANULE_PER_PACKET,
+            ),
+            None => (
+                PacketWriteEndInfo::NormalPacket,
+                self.packets * GRANULE_PER_PACKET,
+            ),
+        };
+        self.write(packet, end, granule)?;
+        if end == PacketWriteEndInfo::EndPage {
+            self.flush()?;
+            let now = self.clock.now();
+            if now.saturating_duration_since(self.last_sync) >= SYNC_EVERY {
+                self.sync(now)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl<W: SyncWrite> TrackEncoder for OpusOgg<W> {
+    fn push(&mut self, pcm16k: &[f32]) -> Result<(), StorageError> {
+        self.samples += pcm16k.len() as u64;
+        let mut rest = pcm16k;
+        while !rest.is_empty() {
+            let take = (FRAME - self.frame.len()).min(rest.len());
+            let (now, later) = rest.split_at(take);
+            self.frame.extend_from_slice(now);
+            rest = later;
+            if self.frame.len() == FRAME {
+                self.encode_frame(None)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn finish(mut self) -> Result<(), StorageError> {
+        // Enough zero-padded packets to flush the encoder's lookahead: the final granule
+        // (pre-skip + every input sample) then trims the padding (RFC 7845 end trimming).
+        let final_granule = self.pre_skip + GRANULE_PER_SAMPLE * self.samples;
+        let packets = final_granule
+            .div_ceil(GRANULE_PER_PACKET)
+            .max(self.packets + 1);
+        while self.packets < packets {
+            self.frame.resize(FRAME, 0.0);
+            let last = (self.packets + 1 == packets).then_some(final_granule);
+            self.encode_frame(last)?;
+        }
+        self.flush()?;
+        let now = self.clock.now();
+        self.sync(now)
+    }
+}
+
+/// How the readable data of a track ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadEnd {
+    /// The EOS page was read.
+    Complete,
+    /// The data ends early (a cut, a zero tail, a bad last page): recoverable up to there.
+    Truncated,
+    /// A bad page is followed by a valid one: only the prefix before it was read.
+    Damaged,
+}
+
+/// What a track holds, without decoding it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TrackScan {
+    /// Readable audio in 48 kHz units: last good granule - pre-skip.
+    pub duration_48k: u64,
+    pub end: ReadEnd,
+}
+
+/// The pages of a track after its `OpusHead`, CRC-valid prefix only (research R7).
+struct Pages<R: Read + Seek> {
+    reader: PacketReader<R>,
+    pre_skip: u64,
+    tags_seen: bool,
+    /// Granule of the page of the last packet handed out.
+    granule: u64,
+    end: Option<ReadEnd>,
+}
+
+/// The pre-skip of an `OpusHead` packet (RFC 7845 5.1), or `None` if it is not one.
+fn opus_head_pre_skip(packet: &[u8]) -> Option<u64> {
+    let rest = packet.strip_prefix(b"OpusHead")?;
+    let [version, channels, s0, s1, _, _, _, _, _, _, mapping, ..] = rest else {
+        return None;
+    };
+    let valid = version >> 4 == 0 && (1..=2).contains(channels) && *mapping == 0;
+    valid.then(|| u64::from(u16::from_le_bytes([*s0, *s1])))
+}
+
+impl<R: Read + Seek> Pages<R> {
+    fn open(inner: R) -> Result<Pages<R>, DecodeEnd> {
+        let mut reader = PacketReader::new(inner);
+        let pre_skip = match reader.read_packet() {
+            Ok(Some(head)) if head.last_in_page() => opus_head_pre_skip(&head.data),
+            _ => None,
+        }
+        .ok_or(DecodeEnd::Unreadable)?;
+        Ok(Pages {
+            reader,
+            pre_skip,
+            tags_seen: false,
+            granule: 0,
+            end: None,
+        })
+    }
+
+    /// The next audio packet of a CRC-valid page, or `None` once the data ended (`end` says
+    /// how). Any read error ends the data.
+    fn next_audio(&mut self) -> Option<Packet> {
+        while self.end.is_none() {
+            match self.reader.read_packet() {
+                Ok(Some(packet)) => {
+                    if packet.last_in_stream() {
+                        self.end = Some(ReadEnd::Complete);
+                    }
+                    if !self.tags_seen {
+                        self.tags_seen = true;
+                        if packet.data.starts_with(b"OpusTags") {
+                            continue;
+                        }
+                    }
+                    self.granule = packet.absgp_page();
+                    return Some(packet);
+                }
+                Ok(None) => self.end = Some(ReadEnd::Truncated),
+                Err(OggReadError::HashMismatch(..)) => self.end = Some(self.after_bad_page()),
+                Err(_) => self.end = Some(ReadEnd::Truncated),
+            }
+        }
+        None
+    }
+
+    /// Damaged iff a CRC-valid page follows the bad one. Each mismatch consumes its page,
+    /// so this walks forward to the end of the file at most.
+    fn after_bad_page(&mut self) -> ReadEnd {
+        loop {
+            match self.reader.read_packet() {
+                Ok(Some(_)) => return ReadEnd::Damaged,
+                Err(OggReadError::HashMismatch(..)) => continue,
+                Ok(None) | Err(_) => return ReadEnd::Truncated,
+            }
+        }
+    }
+
+    fn duration_48k(&self) -> u64 {
+        self.granule.saturating_sub(self.pre_skip)
+    }
+}
+
+/// Reads how long a track is and how it ends, without decoding the audio.
+pub fn scan<R: Read + Seek>(inner: R) -> Result<TrackScan, DecodeEnd> {
+    let mut pages = Pages::open(inner)?;
+    while pages.next_audio().is_some() {}
+    Ok(TrackScan {
+        duration_48k: pages.duration_48k(),
+        end: pages.end.unwrap_or(ReadEnd::Truncated),
+    })
+}
+
+/// The Ogg Opus reader of a call track: the audio of the CRC-valid prefix, the pre-skip
+/// dropped and the tail trimmed to the last good granule.
+pub struct OpusOggReader<R: Read + Seek> {
+    pages: Pages<R>,
+    decoder: opus::Decoder,
+    /// 16 kHz samples of pre-skip still to drop.
+    skip: usize,
+    /// 16 kHz samples queued or handed out so far.
+    emitted: u64,
+    queue: VecDeque<i16>,
+    pcm: Vec<i16>,
+}
+
+impl<R: Read + Seek> OpusOggReader<R> {
+    /// Reads the `OpusHead`; `Err(DecodeEnd::Unreadable)` without a valid one.
+    pub fn open(inner: R) -> Result<OpusOggReader<R>, DecodeEnd> {
+        let pages = Pages::open(inner)?;
+        let decoder =
+            opus::Decoder::new(RATE, opus::Channels::Mono).map_err(|_| DecodeEnd::Codec)?;
+        let skip = usize::try_from(pages.pre_skip / GRANULE_PER_SAMPLE).unwrap_or(usize::MAX);
+        Ok(OpusOggReader {
+            pages,
+            decoder,
+            skip,
+            emitted: 0,
+            queue: VecDeque::new(),
+            pcm: vec![0; MAX_DECODED],
+        })
+    }
+
+    /// Decodes one packet into the queue, keeping no more than its page's granule allows.
+    fn decode(&mut self, packet: &Packet) -> Result<(), DecodeEnd> {
+        let n = self
+            .decoder
+            .decode(&packet.data, &mut self.pcm, false)
+            .map_err(|_| DecodeEnd::Codec)?;
+        let decoded = self.pcm.get(..n).unwrap_or_default();
+        let dropped = self.skip.min(decoded.len());
+        self.skip -= dropped;
+        let fresh = decoded.get(dropped..).unwrap_or_default();
+        let limit = packet.absgp_page().saturating_sub(self.pages.pre_skip) / GRANULE_PER_SAMPLE;
+        let room = usize::try_from(limit.saturating_sub(self.emitted)).unwrap_or(usize::MAX);
+        let kept = fresh.get(..room.min(fresh.len())).unwrap_or_default();
+        self.queue.extend(kept);
+        self.emitted += kept.len() as u64;
+        Ok(())
+    }
+}
+
+impl<R: Read + Seek> TrackDecoder for OpusOggReader<R> {
+    fn next_window(&mut self, max_ms: u32) -> Result<Option<AudioBuffer>, DecodeEnd> {
+        let want = usize::try_from(max_ms.max(1))
+            .unwrap_or(usize::MAX)
+            .saturating_mul(16);
+        while self.queue.len() < want {
+            let Some(packet) = self.pages.next_audio() else {
+                break;
+            };
+            self.decode(&packet)?;
+        }
+        if self.queue.is_empty() {
+            return match self.pages.end {
+                Some(ReadEnd::Damaged) => Err(DecodeEnd::Damaged),
+                _ => Ok(None),
+            };
+        }
+        let n = want.min(self.queue.len());
+        Ok(Some(AudioBuffer::from_16k_mono(
+            self.queue.drain(..n).collect(),
+        )))
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
-
     use super::{
         scan, OpusOgg, OpusOggReader, ReadEnd, SyncWrite, TrackDecoder, TrackEncoder, TrackScan,
     };

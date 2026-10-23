@@ -47,6 +47,22 @@ trait TrackEncoder { fn push(&mut self, pcm16k: &[f32]) -> Result<(), StorageErr
 trait TrackDecoder { fn next_window(&mut self, max_ms: u32) -> Result<Option<AudioBuffer>, DecodeEnd>; }
 ```
 
+Error and result types (`call::codec` and `call`, as in the code):
+
+```text
+struct StorageError { pub op: StorageOp, pub kind: std::io::ErrorKind }
+enum StorageOp { Write, Flush, Sync, Encode }
+enum DecodeEnd { Unreadable, Damaged, Codec }
+enum ReadEnd { Complete, Truncated, Damaged }
+struct TrackScan { pub duration_48k: u64, pub end: ReadEnd }
+fn scan<R: Read + Seek>(inner: R) -> Result<TrackScan, DecodeEnd>
+```
+
+- `StorageOp::Encode` is libopus refusing to set up the encoder or to encode a frame; it is not an I/O error and its `kind` is `Other`.
+- `DecodeEnd::Unreadable`: no valid `OpusHead` on the first page. `Damaged`: a bad page is followed by a valid one; the readable prefix before it was returned first. `Codec`: libopus refused to set up the decoder or to decode a packet of a CRC-valid page (not an I/O error).
+- `next_window(max_ms)` treats `0` as 1 ms. After a damaged end the reader keeps returning `Err(DecodeEnd::Damaged)`.
+- `OpusOgg::create(inner: impl SyncWrite, serial, clock)` is the encoder; `OpusOggReader::open(inner: impl Read + Seek)` is the decoder. `scan` reads a track without decoding: `duration_48k` = last good granule - pre-skip, `end` = how the readable data ended (`Complete` EOS page read, `Truncated` data ends early, `Damaged` as above).
+
 `push` runs on the session's writer thread, never in the audio callback. The audio callback only hands blocks to a bounded channel; a full channel drops blocks and the timeline fills that time with silence and logs it.
 
 ## `mic.opus` / `system.opus`

@@ -10,10 +10,10 @@ FROM rust:1.99-bookworm
 # tw-run's containers are removed after each command, so a run-time add would download it on
 # every run. Its files are world-readable for tw-run's caller uid.
 # cmake (unpinned like clang, libclang-dev and mingw gcc; the base image tag fixes the Debian
-# suite): no build in this image runs it today. aws-lc-sys uses its cc builder (cmake is only
-# its fallback builder), and whisper-rs-sys skips its cmake build on the Linux gate (DOCS_RS=1).
-# It is kept for T-116's bundled libopus build, whose expected uses, native (check-core) and
-# with mingw gcc (check-shell-windows), T-116 proves (T-115; docs/decisions/ci-toolchain.md).
+# suite): it builds the bundled libopus of the opus crate (voicen-core's call codec, T-116),
+# natively in check-core and with mingw gcc in check-shell-windows. aws-lc-sys uses its cc
+# builder (cmake is only its fallback builder), and whisper-rs-sys skips its cmake build on the
+# Linux gate (DOCS_RS=1) (T-115; docs/decisions/ci-toolchain.md).
 RUN apt-get update \
  && apt-get install -y --no-install-recommends cmake clang libclang-dev gcc-mingw-w64-x86-64-win32 \
  && rm -rf /var/lib/apt/lists/* \
