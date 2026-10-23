@@ -82,7 +82,7 @@ Tasks: T-016 (core half), T-044 (coordinator and shell half). Contract: `specs/0
 
 - **Defect that produced it:** none; a finding of T-044 (decision #57): tauri 2.12.1 checked no app command while the app defined no permissions, so `local_models_*` passed for any local-origin window.
 - **What breaks if you violate it:** a local-model command missing from `build.rs` `APP_COMMANDS` or from `capabilities/default.json` is refused from the settings window on Windows only; a grant to another label lets that window download or delete models.
-- **Where it is enforced:** `docs/decisions/ipc-acl.md` (the rule for every app command); Windows CI `src-tauri/tests/app_acl.rs` and `local_models.rs::local_model_commands_pass_the_real_acl_from_the_settings_window`; Linux `make check-app-acl`.
+- **Where it is enforced:** `docs/decisions/ipc-acl.md` (the rule for every app command); Windows CI `src-tauri/tests/app_acl.rs` and `local_models.rs::local_model_commands_pass_the_real_acl_from_the_settings_window`.
 - **Don't:** add a local-model command without its `APP_COMMANDS` entry and its `allow-*` grant for `settings`.
 
 ## Rejected approaches

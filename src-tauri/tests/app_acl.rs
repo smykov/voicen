@@ -11,10 +11,8 @@
 //! cannot show any of this. Invokes come from the window's own URL, like its page.
 //!
 //! Each test gets its own `TempDir` as the data dir; no keys are used; nothing is
-//! downloaded (`local_model_download` asks for an id outside the catalog). The Linux
-//! twin of these tests is `scripts/ci/app-acl.sh` (`make check-app-acl`): it keeps the
-//! command, `generate_handler!`, `APP_COMMANDS` and capability `allow-*` sets equal,
-//! but only these tests prove which label gets what.
+//! downloaded (`local_model_download` asks for an id outside the catalog). These
+//! tests are the only proof of the invariant; there is no Linux check (decision #191).
 #![cfg(windows)]
 
 use std::path::Path;
@@ -255,7 +253,7 @@ fn settings_commands_are_refused_from_any_window_but_settings() {
     // window labelled `other` at the settings page and from one labelled `overlay`
     // at the overlay page, each of the ten settings commands is refused by the ACL
     // before its handler. Bite: no `AppManifest::commands` in build.rs (no
-    // `__app__` manifest), the settings grants also in capabilities/overlay.json, a
+    // `__app-acl__` manifest), the settings grants also in capabilities/overlay.json, a
     // window wildcard in default.json, or a `deny-*` (which ignores labels).
     let _serial = serial();
     let dir = TempDir::new();
@@ -341,7 +339,7 @@ fn a_command_without_a_permission_is_refused_even_from_the_settings_window() {
     // Acceptance 2, the failure branch (red today): an app command registered in
     // `generate_handler!` but given no permission is refused by the ACL from the
     // settings window (fail closed), with the release context's ACL, and its handler
-    // never runs. Bite: no `__app__` manifest (tauri then skips the check for every
+    // never runs. Bite: no `__app-acl__` manifest (tauri then skips the check for every
     // local app command), or a capability granting every command (e.g. a permission
     // set that is not per command).
     let _serial = serial();
