@@ -7,7 +7,7 @@
 //! frame levels clamped to [-70, -40] dBFS; loud = level >= floor + 12 dB; only
 //! runs of >= 3 loud frames count; speech = counted frames >= 10 (300 ms).
 
-use super::{SpeechDetector, VadError};
+use super::{SpeechDetector, SpeechSpan, SpeechSpans, VadError};
 use crate::audio::AudioBuffer;
 
 /// 30 ms at 16 kHz.
@@ -50,6 +50,16 @@ impl SpeechDetector for EnergyDetector {
     /// Always `Ok`: the energy detector never fails.
     fn contains_speech(&self, audio: &AudioBuffer) -> Result<bool, VadError> {
         Ok(self.detect(audio))
+    }
+}
+
+impl SpeechSpans for EnergyDetector {
+    fn name(&self) -> &'static str {
+        todo!("T-134")
+    }
+
+    fn speech_spans(&self, _audio: &AudioBuffer) -> Result<Vec<SpeechSpan>, VadError> {
+        todo!("T-134")
     }
 }
 
@@ -510,5 +520,170 @@ mod tests {
         assert_eq!(det.contains_speech(&fixtures::speech_3s()), Ok(true));
         assert_eq!(det.contains_speech(&fixtures::silence_3s()), Ok(false));
         assert_eq!(det.contains_speech(&fixtures::digital_zero_3s()), Ok(false));
+    }
+
+    // --- Energy spans (T-134) ------------------------------------------------------
+
+    /// Frame length in ms.
+    const FRAME_MS: u64 = 30;
+
+    fn spans_of(audio: &AudioBuffer) -> Result<Vec<SpeechSpan>, VadError> {
+        let det = EnergyDetector::new();
+        SpeechSpans::speech_spans(&det, audio)
+    }
+
+    fn sp(start_ms: u64, end_ms: u64) -> SpeechSpan {
+        SpeechSpan { start_ms, end_ms }
+    }
+
+    #[test]
+    fn energy_spans_are_named_energy() {
+        assert_eq!(SpeechSpans::name(&EnergyDetector::new()), "energy");
+    }
+
+    #[test]
+    fn one_burst_in_silence_is_one_span_on_frame_boundaries() {
+        // Frames 30..42 are loud: [30*30, 42*30) = [900, 1260) ms. Bite: ms not
+        // multiplied by 30 (frame indices), an end off by one frame, a start offset.
+        let audio = buffer(31, &[(30, None), (12, BURST), (30, None)]);
+        let a = analyse(audio.samples());
+        assert_eq!(
+            (a.loud, a.longest_run, a.counted),
+            (12, 12, 12),
+            "premise: {a:?}"
+        );
+        assert_eq!(spans_of(&audio), Ok(vec![sp(900, 1260)]));
+    }
+
+    #[test]
+    fn a_burst_at_the_very_start_and_one_at_the_very_end_are_spans_within_the_buffer() {
+        // Start 0 and end == duration are legal (half-open, end <= duration). Bite: a
+        // run closed only by a quiet frame (the last run lost), or end clamped short.
+        let audio = buffer(32, &[(12, BURST), (30, None), (12, BURST)]);
+        let a = analyse(audio.samples());
+        assert_eq!((a.loud, a.counted), (24, 24), "premise: {a:?}");
+        let duration_ms = 54 * FRAME_MS;
+        assert_eq!(
+            spans_of(&audio),
+            Ok(vec![sp(0, 360), sp(42 * FRAME_MS, duration_ms)])
+        );
+    }
+
+    #[test]
+    fn several_bursts_give_sorted_separate_spans_gaps_are_not_merged() {
+        // Gaps are the chunker's business (R9): a 4-frame (120 ms) pause stays a gap.
+        // Bite: merging neighbours, or only reporting the first or longest run.
+        let audio = buffer(
+            33,
+            &[(30, None), (5, BURST), (4, None), (5, BURST), (30, None)],
+        );
+        let a = analyse(audio.samples());
+        assert_eq!((a.loud, a.counted), (10, 10), "premise: {a:?}");
+        assert_eq!(spans_of(&audio), Ok(vec![sp(900, 1050), sp(1170, 1320)]));
+    }
+
+    #[test]
+    fn a_short_blip_under_the_minimum_run_is_not_a_span_but_a_long_burst_is() {
+        // The 2-frame blip is not a counted run; the 12-frame burst is. Bite: spans
+        // from every loud frame instead of the counted runs.
+        let audio = buffer(
+            34,
+            &[(30, None), (12, BURST), (10, None), (2, BURST), (30, None)],
+        );
+        let a = analyse(audio.samples());
+        assert_eq!(
+            (a.loud, a.longest_run, a.counted),
+            (14, 12, 12),
+            "premise: {a:?}"
+        );
+        assert_eq!(spans_of(&audio), Ok(vec![sp(900, 1260)]));
+    }
+
+    #[test]
+    fn a_burst_under_the_speech_minimum_has_no_span_and_agrees_with_detect() {
+        // 9 counted frames: detect is false, so no spans (one energy rule, P-011);
+        // 10 counted: detect true, one span. Bite: ignoring MIN_SPEECH_FRAMES.
+        let nine = buffer(35, &[(30, None), (9, BURST), (30, None)]);
+        let ten = buffer(36, &[(30, None), (10, BURST), (30, None)]);
+        assert_eq!(analyse(nine.samples()).counted, 9, "premise");
+        assert_eq!(analyse(ten.samples()).counted, 10, "premise");
+        assert!(!energy(&nine) && energy(&ten));
+        assert_eq!(spans_of(&nine), Ok(vec![]));
+        assert_eq!(spans_of(&ten), Ok(vec![sp(900, 1200)]));
+    }
+
+    #[test]
+    fn silence_and_digital_zero_have_no_spans_and_are_ok() {
+        // Empty means "no speech" and is Ok; digital zero (-inf dB) must not turn
+        // every frame loud. Bite: Err on silence, or one span over the whole buffer.
+        for (label, audio) in [
+            ("silence", fixtures::silence_3s()),
+            ("zeros", fixtures::digital_zero_3s()),
+        ] {
+            assert_eq!(spans_of(&audio), Ok(vec![]), "{label}");
+        }
+    }
+
+    #[test]
+    fn empty_and_sub_frame_buffers_have_no_spans() {
+        let empty = AudioBuffer::from_16k_mono(vec![]);
+        let short = AudioBuffer::from_16k_mono(vec![i16::MAX; FRAME - 1]);
+        assert_eq!(spans_of(&empty), Ok(vec![]));
+        assert_eq!(spans_of(&short), Ok(vec![]));
+    }
+
+    #[test]
+    fn every_buffer_meets_the_span_invariant_and_two_bursts_give_two_spans() {
+        // The invariant over many buffers, not known cases: sorted, non-overlapping,
+        // non-empty, on frame boundaries, within the duration, and empty exactly when
+        // detect is false. Bite: any of those broken, or spans from another rule.
+        let two_bursts = || {
+            buffer(
+                37,
+                &[(30, None), (10, BURST), (10, None), (12, BURST), (30, None)],
+            )
+        };
+        let cases = [
+            ("speech_3s", fixtures::speech_3s()),
+            ("continuous_speech_1s", fixtures::continuous_speech_1s()),
+            ("speech_250ms", fixtures::speech_250ms()),
+            ("silence_3s", fixtures::silence_3s()),
+            ("digital_zero_3s", fixtures::digital_zero_3s()),
+            ("cough_1s", fixtures::cough_1s()),
+            ("keyboard_3s", fixtures::keyboard_3s()),
+            ("empty", AudioBuffer::from_16k_mono(vec![])),
+            ("two bursts", two_bursts()),
+        ];
+        for (label, audio) in &cases {
+            let spans = spans_of(audio).unwrap_or_default();
+            let duration_ms = audio.samples().len() as u64 / 16;
+            assert_eq!(
+                spans.is_empty(),
+                !energy(audio),
+                "{label}: empty iff detect false"
+            );
+            let mut prev_end = 0;
+            for s in &spans {
+                assert!(s.start_ms < s.end_ms, "{label}: non-empty, got {s:?}");
+                assert!(
+                    s.start_ms >= prev_end,
+                    "{label}: sorted, disjoint: {spans:?}"
+                );
+                assert!(s.end_ms <= duration_ms, "{label}: within buffer: {spans:?}");
+                assert_eq!(s.start_ms % FRAME_MS, 0, "{label}: {s:?}");
+                assert_eq!(s.end_ms % FRAME_MS, 0, "{label}: {s:?}");
+                prev_end = s.end_ms;
+            }
+        }
+        assert!(
+            !spans_of(&fixtures::speech_3s())
+                .unwrap_or_default()
+                .is_empty(),
+            "speech_3s has speech, so spans"
+        );
+        assert_eq!(
+            spans_of(&two_bursts()),
+            Ok(vec![sp(900, 1200), sp(1500, 1860)])
+        );
     }
 }

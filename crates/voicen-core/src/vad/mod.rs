@@ -27,6 +27,23 @@ pub trait SpeechDetector: Send + Sync {
     fn contains_speech(&self, audio: &AudioBuffer) -> Result<bool, VadError>;
 }
 
+/// One stretch of speech, `[start_ms, end_ms)`, relative to the start of the buffer
+/// it was found in (T-134).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpeechSpan {
+    pub start_ms: u64,
+    pub end_ms: u64,
+}
+
+/// Finds where the speech is in a buffer (T-134; spec 007 FR-023, R8).
+pub trait SpeechSpans: Send + Sync {
+    /// Short stable name: "silero" | "energy".
+    fn name(&self) -> &'static str;
+    /// Sorted, non-overlapping, non-empty spans within the buffer; empty means no
+    /// speech. An error is never reported as an empty list.
+    fn speech_spans(&self, audio: &AudioBuffer) -> Result<Vec<SpeechSpan>, VadError>;
+}
+
 /// Why a detector cannot decide. `Display` texts are static: no path, no audio.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -413,5 +430,60 @@ mod tests {
         assert!(!unavailable.trim().is_empty());
         assert!(!failed.trim().is_empty());
         assert_ne!(unavailable, failed);
+    }
+
+    // --- SpeechSpans port and its scripted fake (T-134) --------------------------------
+
+    use crate::test_support::spans::ScriptedSpans;
+
+    fn span(start_ms: u64, end_ms: u64) -> SpeechSpan {
+        SpeechSpan { start_ms, end_ms }
+    }
+
+    #[test]
+    fn scripted_spans_return_the_script_in_order_then_the_default_and_count_calls() {
+        // Bite: a fake that ignores the queue, repeats the first entry, or does not count.
+        let fake = Arc::new(ScriptedSpans::new(
+            vec![
+                Ok(vec![span(0, 300)]),
+                Ok(vec![span(30, 60), span(90, 120)]),
+            ],
+            Ok(vec![]),
+        ));
+        let port: Arc<dyn SpeechSpans> = Arc::clone(&fake) as Arc<dyn SpeechSpans>;
+        let audio = AudioBuffer::from_16k_mono(vec![]);
+        assert_eq!(port.speech_spans(&audio), Ok(vec![span(0, 300)]));
+        assert_eq!(fake.calls(), 1);
+        assert_eq!(
+            port.speech_spans(&audio),
+            Ok(vec![span(30, 60), span(90, 120)])
+        );
+        assert_eq!(port.speech_spans(&audio), Ok(vec![]));
+        assert_eq!(port.speech_spans(&audio), Ok(vec![]));
+        assert_eq!(fake.calls(), 4);
+    }
+
+    #[test]
+    fn scripted_spans_surface_every_vad_error_unchanged_never_as_empty() {
+        // Failure branch: an Err through &dyn SpeechSpans is that Err, not Ok(empty)
+        // ("no speech" would drop the audio). Bite: mapping Err to Ok(vec![]).
+        for err in [VadError::Unavailable, VadError::Failed] {
+            let fake = ScriptedSpans::new(vec![Err(err), Ok(vec![span(0, 30)])], Err(err));
+            let port: &dyn SpeechSpans = &fake;
+            let audio = AudioBuffer::from_16k_mono(vec![]);
+            assert_eq!(port.speech_spans(&audio), Err(err));
+            assert_eq!(port.speech_spans(&audio), Ok(vec![span(0, 30)]));
+            assert_eq!(port.speech_spans(&audio), Err(err), "{err:?} as default");
+            assert_eq!(fake.calls(), 3);
+        }
+    }
+
+    #[test]
+    fn scripted_spans_have_a_name_and_are_send_and_sync() {
+        fn shared<T: Send + Sync + ?Sized>() {}
+        shared::<dyn SpeechSpans>();
+        shared::<ScriptedSpans>();
+        let fake = ScriptedSpans::new(vec![], Ok(vec![]));
+        assert!(!SpeechSpans::name(&fake).is_empty());
     }
 }
