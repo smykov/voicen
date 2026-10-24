@@ -1,12 +1,18 @@
 //! The typed log allowlist (T-008; spec 006 data-model "LogEvent", spec 004 R-11).
 //!
 //! Adding a variant or a field is the only way to log something new (P-009).
-//! Every field is an integer, a closed enum of this crate, or `BuildInfo`.
+//! Every field is an integer, a closed enum of this crate, `BuildInfo`, or a validated
+//! `call::EndpointId` (T-118).
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
 use super::crash::{CrashFileName, OsVersion};
 use crate::autostart::ReconcileAction;
 use crate::build_info::BuildInfo;
+use crate::call::{
+    CallSource, DeviceCause, EndpointId, FinalOutcome, FinalStage, InvalidRule, PassMode,
+    RefusedPart, RefusedReason, SilentRule, StopReason, StorageKind, SwitchRefusal, Track,
+    VadFallbackCause,
+};
 use crate::connection_test::ConnectionTestResult;
 use crate::delivery::DeliveryResult;
 use crate::events::PostProcessTrace;
@@ -57,6 +63,65 @@ pub enum LogEvent {
     PreviousSession(PreviousSessionLine),
     /// A clean end of the session (`Session::end_clean`, T-100): `exited`.
     Exited,
+    // ---- T-118: the call lines (contracts/core-call.md "Log lines"). Never the call
+    // folder, a device name, a path or segment text.
+    /// `call_requested source=<tray|hotkey|switch>`.
+    CallRequested { source: CallSource },
+    /// `call_refused part=<…> reason=<…>` (WARN).
+    CallRefused {
+        part: RefusedPart,
+        reason: RefusedReason,
+    },
+    /// `call_started record=1 subtitles=0 mic=<EndpointId> system=<EndpointId>
+    /// comms_differs=<0|1>` (the 1a mode is fixed: record on, subtitles off).
+    CallStarted {
+        mic: EndpointId,
+        system: EndpointId,
+        comms_differs: bool,
+    },
+    /// `call_device track=<…> cause=<…> gap_ms=<n> to=<EndpointId|none>` (WARN on `none`).
+    CallDeviceChanged {
+        track: Track,
+        cause: DeviceCause,
+        gap_ms: u64,
+        to: Option<EndpointId>,
+    },
+    /// `call_track_silent track=<…> rule=<lost|cant_hear>` (WARN).
+    CallTrackSilent { track: Track, rule: SilentRule },
+    /// `call_stopped reason=<StopReason> duration_ms=<n> mic_bytes=<n> system_bytes=<n>`.
+    CallStopped {
+        reason: StopReason,
+        duration_ms: u64,
+        mic_bytes: u64,
+        system_bytes: u64,
+    },
+    /// `call_storage_failed kind=<…> [os=<code>]` (WARN); `os` is left out when unknown.
+    CallStorageFailed { kind: StorageKind, os: Option<i32> },
+    /// `call_recovered calls=<n>`.
+    CallRecovered { calls: u32 },
+    /// `final_stage track=<…> stage=<…> ms=<n> chunks=<n>`.
+    FinalPassStage {
+        track: Track,
+        stage: FinalStage,
+        ms: u64,
+        chunks: u32,
+    },
+    /// `final_finished outcome=<ready|failed> [reason=<FailReason>] mode=<timed|timeless>
+    /// ms=<n>`; `reason` only on `failed` (WARN).
+    FinalPassFinished {
+        outcome: FinalOutcome,
+        mode: PassMode,
+        ms: u64,
+    },
+    /// `call_switch_refused reason=unknown_value` (WARN).
+    CallSwitchRefused { reason: SwitchRefusal },
+    /// `vad_fallback track=<…> cause=<unavailable|error>` (WARN; #188).
+    VadFallback {
+        track: Track,
+        cause: VadFallbackCause,
+    },
+    /// `transcript_invalid rule=<…> segment=<n>` (WARN): the index, never the text.
+    TranscriptInvalid { rule: InvalidRule, segment: u32 },
 }
 
 /// A logged previous-session verdict (T-100): `PreviousSession` without `Clean`.

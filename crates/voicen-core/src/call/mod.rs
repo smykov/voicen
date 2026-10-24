@@ -1,6 +1,13 @@
 //! Call mode (spec 007, contracts/core-call.md "Modules").
 
 pub mod codec;
+pub mod events;
+
+pub use events::{
+    CallId, CallNotice, CallSource, CallState, CallWarning, DeviceCause, EndpointId, FailReason,
+    FinalOutcome, FinalStage, InvalidRule, PassMode, RefusedPart, RefusedReason, SilentRule,
+    StopReason, StorageKind, SwitchRefusal, Track, VadFallbackCause,
+};
 
 use std::fmt;
 use std::io;

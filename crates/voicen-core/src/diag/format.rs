@@ -3,9 +3,11 @@
 //! Total over [`LogEvent`]; every value is an integer, a literal from this
 //! module's tables (engine, detector, failure, microphone cause, local warmth,
 //! post-processing result and skip kind, warning kind, load outcome,
-//! test-connection result, previous-session outcome), a closed `as_str`/`code` match
+//! test-connection result, previous-session outcome, the call field values of T-118),
+//! a closed `as_str`/`code` match
 //! of the crate (settings field ids and codes, `ReconcileAction`, `DeliveryResult`,
-//! `FormError::kind`), a `CrashFileName` (integers), or `BuildInfo`. Std only (the
+//! `FormError::kind`), a `CrashFileName` (integers), a `call::EndpointId` (its
+//! validated text or `invalid`), or `BuildInfo`. Std only (the
 //! date math of `clock.rs`).
 //!
 //! ```text
@@ -31,6 +33,11 @@ use super::event::{
 };
 use crate::autostart::ReconcileAction;
 use crate::build_info::BuildInfo;
+use crate::call::{
+    CallSource, DeviceCause, FailReason, FinalOutcome, FinalStage, InvalidRule, PassMode,
+    RefusedPart, RefusedReason, SilentRule, StopReason, StorageKind, SwitchRefusal, Track,
+    VadFallbackCause,
+};
 use crate::clock::{civil_from_days, days_from_civil};
 use crate::events::{PostProcessResult, SkipKind};
 use crate::local_models::residency::Warmth;
@@ -217,6 +224,25 @@ fn level(event: &LogEvent) -> &'static str {
             ReconcileAction::Failed => WARN,
             ReconcileAction::None | ReconcileAction::Written | ReconcileAction::Removed => INFO,
         },
+        LogEvent::CallRequested { .. }
+        | LogEvent::CallStarted { .. }
+        | LogEvent::CallStopped { .. }
+        | LogEvent::CallRecovered { .. }
+        | LogEvent::FinalPassStage { .. } => INFO,
+        LogEvent::CallRefused { .. }
+        | LogEvent::CallTrackSilent { .. }
+        | LogEvent::CallStorageFailed { .. }
+        | LogEvent::CallSwitchRefused { .. }
+        | LogEvent::VadFallback { .. }
+        | LogEvent::TranscriptInvalid { .. } => WARN,
+        LogEvent::CallDeviceChanged { to, .. } => match to {
+            Some(_) => INFO,
+            None => WARN,
+        },
+        LogEvent::FinalPassFinished { outcome, .. } => match outcome {
+            FinalOutcome::Ready => INFO,
+            FinalOutcome::Failed { .. } => WARN,
+        },
     }
 }
 
@@ -276,6 +302,108 @@ fn write_message(out: &mut String, event: &LogEvent) {
             }
         }
         LogEvent::Exited => out.push_str("exited"),
+        LogEvent::CallRequested { source } => {
+            out.push_str("call_requested");
+            pair(out, "source", call_source(*source));
+        }
+        LogEvent::CallRefused { part, reason } => {
+            out.push_str("call_refused");
+            pair(out, "part", refused_part(*part));
+            pair(out, "reason", refused_reason(*reason));
+        }
+        LogEvent::CallStarted {
+            mic,
+            system,
+            comms_differs,
+        } => {
+            out.push_str("call_started");
+            pair(out, "record", 1);
+            pair(out, "subtitles", 0);
+            pair(out, "mic", mic);
+            pair(out, "system", system);
+            pair(out, "comms_differs", u8::from(*comms_differs));
+        }
+        LogEvent::CallDeviceChanged {
+            track,
+            cause,
+            gap_ms,
+            to,
+        } => {
+            out.push_str("call_device");
+            pair(out, "track", track_name(*track));
+            pair(out, "cause", device_cause(*cause));
+            pair(out, "gap_ms", gap_ms);
+            match to {
+                Some(id) => pair(out, "to", id),
+                None => pair(out, "to", "none"),
+            }
+        }
+        LogEvent::CallTrackSilent { track, rule } => {
+            out.push_str("call_track_silent");
+            pair(out, "track", track_name(*track));
+            pair(out, "rule", silent_rule(*rule));
+        }
+        LogEvent::CallStopped {
+            reason,
+            duration_ms,
+            mic_bytes,
+            system_bytes,
+        } => {
+            out.push_str("call_stopped");
+            pair(out, "reason", stop_reason(*reason));
+            pair(out, "duration_ms", duration_ms);
+            pair(out, "mic_bytes", mic_bytes);
+            pair(out, "system_bytes", system_bytes);
+        }
+        LogEvent::CallStorageFailed { kind, os } => {
+            out.push_str("call_storage_failed");
+            pair(out, "kind", storage_kind(*kind));
+            if let Some(code) = os {
+                pair(out, "os", code);
+            }
+        }
+        LogEvent::CallRecovered { calls } => {
+            out.push_str("call_recovered");
+            pair(out, "calls", calls);
+        }
+        LogEvent::FinalPassStage {
+            track,
+            stage,
+            ms,
+            chunks,
+        } => {
+            out.push_str("final_stage");
+            pair(out, "track", track_name(*track));
+            pair(out, "stage", final_stage(*stage));
+            pair(out, "ms", ms);
+            pair(out, "chunks", chunks);
+        }
+        LogEvent::FinalPassFinished { outcome, mode, ms } => {
+            out.push_str("final_finished");
+            match outcome {
+                FinalOutcome::Ready => pair(out, "outcome", "ready"),
+                FinalOutcome::Failed { reason } => {
+                    pair(out, "outcome", "failed");
+                    pair(out, "reason", fail_reason(*reason));
+                }
+            }
+            pair(out, "mode", pass_mode(*mode));
+            pair(out, "ms", ms);
+        }
+        LogEvent::CallSwitchRefused { reason } => {
+            out.push_str("call_switch_refused");
+            pair(out, "reason", switch_refusal(*reason));
+        }
+        LogEvent::VadFallback { track, cause } => {
+            out.push_str("vad_fallback");
+            pair(out, "track", track_name(*track));
+            pair(out, "cause", vad_fallback_cause(*cause));
+        }
+        LogEvent::TranscriptInvalid { rule, segment } => {
+            out.push_str("transcript_invalid");
+            pair(out, "rule", invalid_rule(*rule));
+            pair(out, "segment", segment);
+        }
     }
 }
 
@@ -586,5 +714,136 @@ fn load_kind(kind: LoadKind) -> &'static str {
         LoadKind::FirstRun => "first_run",
         LoadKind::Reset => "reset",
         LoadKind::Unavailable => "unavailable",
+    }
+}
+
+// ---- the call tables (T-118, contracts/core-call.md "Log lines") ------------------
+
+fn call_source(source: CallSource) -> &'static str {
+    match source {
+        CallSource::Tray => "tray",
+        CallSource::Hotkey => "hotkey",
+        CallSource::Switch => "switch",
+    }
+}
+
+fn refused_part(part: RefusedPart) -> &'static str {
+    match part {
+        RefusedPart::Mic => "mic",
+        RefusedPart::System => "system",
+        RefusedPart::Root => "root",
+    }
+}
+
+fn refused_reason(reason: RefusedReason) -> &'static str {
+    match reason {
+        RefusedReason::NoDevice => "no_device",
+        RefusedReason::AccessDenied => "access_denied",
+        RefusedReason::Busy => "busy",
+        RefusedReason::Unwritable => "unwritable",
+        RefusedReason::Missing => "missing",
+        RefusedReason::Other => "other",
+    }
+}
+
+fn track_name(track: Track) -> &'static str {
+    match track {
+        Track::Mic => "mic",
+        Track::System => "system",
+    }
+}
+
+fn device_cause(cause: DeviceCause) -> &'static str {
+    match cause {
+        DeviceCause::DefaultOutputChanged => "default_output_changed",
+        DeviceCause::MicLost => "mic_lost",
+        DeviceCause::MicDefaultChanged => "mic_default_changed",
+        DeviceCause::TrackLost => "track_lost",
+        DeviceCause::Reopened => "reopened",
+        DeviceCause::NoDevice => "no_device",
+    }
+}
+
+fn silent_rule(rule: SilentRule) -> &'static str {
+    match rule {
+        SilentRule::Lost => "lost",
+        SilentRule::CantHear => "cant_hear",
+    }
+}
+
+fn stop_reason(reason: StopReason) -> &'static str {
+    match reason {
+        StopReason::User => "user",
+        StopReason::Hotkey => "hotkey",
+        StopReason::Exit => "exit",
+        StopReason::SystemEnd => "system_end",
+        StopReason::Sleep => "sleep",
+        StopReason::MaxLength => "max_length",
+        StopReason::LowDisk => "low_disk",
+        StopReason::StorageError => "storage_error",
+    }
+}
+
+fn storage_kind(kind: StorageKind) -> &'static str {
+    match kind {
+        StorageKind::Write => "write",
+        StorageKind::Flush => "flush",
+        StorageKind::Sync => "sync",
+        StorageKind::Meta => "meta",
+        StorageKind::Transcript => "transcript",
+        StorageKind::LowDisk => "low_disk",
+    }
+}
+
+fn final_stage(stage: FinalStage) -> &'static str {
+    match stage {
+        FinalStage::Decode => "decode",
+        FinalStage::Vad => "vad",
+        FinalStage::Upload => "upload",
+        FinalStage::Merge => "merge",
+        FinalStage::Write => "write",
+    }
+}
+
+fn fail_reason(reason: FailReason) -> &'static str {
+    match reason {
+        FailReason::Key => "key",
+        FailReason::Network => "network",
+        FailReason::Timeout => "timeout",
+        FailReason::Provider => "provider",
+        FailReason::Storage => "storage",
+        FailReason::EngineNotSetUp => "engine_not_set_up",
+    }
+}
+
+fn pass_mode(mode: PassMode) -> &'static str {
+    match mode {
+        PassMode::Timed => "timed",
+        PassMode::Timeless => "timeless",
+    }
+}
+
+fn switch_refusal(reason: SwitchRefusal) -> &'static str {
+    match reason {
+        SwitchRefusal::UnknownValue => "unknown_value",
+    }
+}
+
+fn vad_fallback_cause(cause: VadFallbackCause) -> &'static str {
+    match cause {
+        VadFallbackCause::Unavailable => "unavailable",
+        VadFallbackCause::Error => "error",
+    }
+}
+
+fn invalid_rule(rule: InvalidRule) -> &'static str {
+    match rule {
+        InvalidRule::Unsorted => "unsorted",
+        InvalidRule::OutOfRange => "out_of_range",
+        InvalidRule::UnknownSpeaker => "unknown_speaker",
+        InvalidRule::UnknownTrack => "unknown_track",
+        InvalidRule::BadSource => "bad_source",
+        InvalidRule::BadLang => "bad_lang",
+        InvalidRule::EmptyText => "empty_text",
     }
 }

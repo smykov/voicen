@@ -1,0 +1,2 @@
+# T-118: the task's tests only (call value types and the call log lines).
+cargo test -j 2 -p voicen-core --test call_events --test diag_format

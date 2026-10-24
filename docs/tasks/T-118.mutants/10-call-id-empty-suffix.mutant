@@ -1,0 +1,8 @@
+guarantee: AC-5: CallId refuses a `-` suffix without digits
+file: crates/voicen-core/src/call/events.rs
+added_by: test-writer
+--- old
+        Some((b'-', n)) if !n.is_empty() && n.iter().all(u8::is_ascii_digit) => Some(()),
+--- new
+        Some((b'-', n)) if n.iter().all(u8::is_ascii_digit) => Some(()),
+--- end

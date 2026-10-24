@@ -1,0 +1,10 @@
+guarantee: AC-1: call_device with to=none is WARN (pinned level)
+file: crates/voicen-core/src/diag/format.rs
+added_by: test-writer
+--- old
+            Some(_) => INFO,
+            None => WARN,
+--- new
+            Some(_) => INFO,
+            None => INFO,
+--- end

@@ -1,0 +1,10 @@
+guarantee: AC-5: CallId refuses any text after the stamp but -<digits> (paths, `..`, spaces)
+file: crates/voicen-core/src/call/events.rs
+added_by: test-writer
+--- old
+        Some(_) => None,
+    }
+--- new
+        Some(_) => Some(()),
+    }
+--- end

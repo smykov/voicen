@@ -1,0 +1,10 @@
+guarantee: AC-1: transcript_invalid is WARN (pinned level)
+file: crates/voicen-core/src/diag/format.rs
+added_by: test-writer
+--- old
+        | LogEvent::VadFallback { .. }
+        | LogEvent::TranscriptInvalid { .. } => WARN,
+--- new
+        | LogEvent::VadFallback { .. } => WARN,
+        LogEvent::TranscriptInvalid { .. } => INFO,
+--- end

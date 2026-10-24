@@ -1,0 +1,8 @@
+guarantee: AC-2: longer than 128 characters formats as endpoint=invalid
+file: crates/voicen-core/src/call/events.rs
+added_by: test-writer
+--- old
+const ENDPOINT_MAX: usize = 128;
+--- new
+const ENDPOINT_MAX: usize = 129;
+--- end

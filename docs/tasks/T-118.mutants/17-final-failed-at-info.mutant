@@ -1,0 +1,8 @@
+guarantee: AC-1: final_finished outcome=failed is WARN (pinned level)
+file: crates/voicen-core/src/diag/format.rs
+added_by: test-writer
+--- old
+            FinalOutcome::Failed { .. } => WARN,
+--- new
+            FinalOutcome::Failed { .. } => INFO,
+--- end

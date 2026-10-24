@@ -1,0 +1,8 @@
+guarantee: AC-2: an EndpointId outside the rule (empty text: 1..=128) formats as endpoint=invalid
+file: crates/voicen-core/src/call/events.rs
+added_by: test-writer
+--- old
+        let ok = (1..=ENDPOINT_MAX).contains(&len)
+--- new
+        let ok = (0..=ENDPOINT_MAX).contains(&len)
+--- end

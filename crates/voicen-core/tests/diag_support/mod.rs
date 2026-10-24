@@ -678,7 +678,10 @@ pub fn check_closed(line: &Line) -> Result<(), String> {
     if line.head == "final_finished"
         && (line.get("outcome") == Some("failed")) != line.get("reason").is_some()
     {
-        return Err(format!("reason= exactly on failed final passes: {:?}", line.raw));
+        return Err(format!(
+            "reason= exactly on failed final passes: {:?}",
+            line.raw
+        ));
     }
     if line.head == "previous session" {
         let outcome = line.get("outcome").unwrap_or_default();

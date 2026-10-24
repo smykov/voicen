@@ -12,8 +12,8 @@ mod diag_support;
 use std::collections::BTreeSet;
 
 use diag_support::{
-    at, check_closed, closed, pairs, parse, parse_ts, parsed, DETECTORS, DICTATION_OUTCOMES, ENGINES,
-    FAILURES, MIC_CAUSES, NOON_UTC, PP_REASONS, PP_RESULTS, WARNING_KINDS,
+    at, check_closed, closed, pairs, parse, parse_ts, parsed, DETECTORS, DICTATION_OUTCOMES,
+    ENGINES, FAILURES, MIC_CAUSES, NOON_UTC, PP_REASONS, PP_RESULTS, WARNING_KINDS,
 };
 use voicen_core::autostart::ReconcileAction;
 use voicen_core::call::{
@@ -953,20 +953,35 @@ fn every_value_of_every_call_field_has_its_own_literal() {
     for (track, t) in TRACKS {
         for (cause, c) in CAUSES_ALL {
             assert_eq!(
-                line(LogEvent::CallDeviceChanged { track, cause, gap_ms: 1, to: None }),
+                line(LogEvent::CallDeviceChanged {
+                    track,
+                    cause,
+                    gap_ms: 1,
+                    to: None
+                }),
                 format!("call_device track={t} cause={c} gap_ms=1 to=none")
             );
         }
         for (stage, s) in STAGES_ALL {
             assert_eq!(
-                line(LogEvent::FinalPassStage { track, stage, ms: 2, chunks: 3 }),
+                line(LogEvent::FinalPassStage {
+                    track,
+                    stage,
+                    ms: 2,
+                    chunks: 3
+                }),
                 format!("final_stage track={t} stage={s} ms=2 chunks=3")
             );
         }
     }
     for (reason, r) in STOPS_ALL {
         assert_eq!(
-            line(LogEvent::CallStopped { reason, duration_ms: 1, mic_bytes: 2, system_bytes: 3 }),
+            line(LogEvent::CallStopped {
+                reason,
+                duration_ms: 1,
+                mic_bytes: 2,
+                system_bytes: 3
+            }),
             format!("call_stopped reason={r} duration_ms=1 mic_bytes=2 system_bytes=3")
         );
     }
@@ -1028,8 +1043,7 @@ fn an_endpoint_outside_the_charset_or_length_formats_as_invalid() {
             to: Some(EndpointId::new(text)),
         });
         assert_eq!(
-            device,
-            "INFO call_device track=mic cause=mic_default_changed gap_ms=9 to=invalid",
+            device, "INFO call_device track=mic cause=mic_default_changed gap_ms=9 to=invalid",
             "{text:?}"
         );
     }
@@ -1054,7 +1068,10 @@ fn transcript_invalid_names_the_segment_by_index_only() {
         let raw = format_line(
             at(NOON_UTC, 0),
             0,
-            &LogEvent::TranscriptInvalid { rule, segment: u32::MAX },
+            &LogEvent::TranscriptInvalid {
+                rule,
+                segment: u32::MAX,
+            },
         );
         let l = closed(&raw);
         assert_eq!(l.keys(), ["rule", "segment"], "{raw}");

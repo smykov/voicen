@@ -1,0 +1,8 @@
+guarantee: AC-2: the Invalid state is written as the literal `invalid`
+file: crates/voicen-core/src/call/events.rs
+added_by: test-writer
+--- old
+        f.write_str(self.0.as_deref().unwrap_or("invalid"))
+--- new
+        f.write_str(self.0.as_deref().unwrap_or("none"))
+--- end

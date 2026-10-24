@@ -1,0 +1,8 @@
+guarantee: AC-2: a meta.json endpoint outside the rule never becomes kept text (Deserialize through EndpointId::new)
+file: crates/voicen-core/src/call/events.rs
+added_by: test-writer
+--- old
+        Ok(EndpointId::new(&text))
+--- new
+        Ok(EndpointId(Some(text)))
+--- end

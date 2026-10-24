@@ -1,0 +1,10 @@
+guarantee: AC-5: CallState keeps `ready-to-transcribe`; the snake spelling is refused
+file: crates/voicen-core/src/call/events.rs
+added_by: test-writer
+--- old
+    #[serde(rename = "ready-to-transcribe")]
+    ReadyToTranscribe,
+--- new
+    #[serde(rename = "ready-to-transcribe", alias = "ready_to_transcribe")]
+    ReadyToTranscribe,
+--- end

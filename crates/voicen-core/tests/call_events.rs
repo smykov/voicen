@@ -19,7 +19,11 @@ fn wire<T: serde::Serialize + serde::de::DeserializeOwned + PartialEq + std::fmt
     value: T,
     name: &str,
 ) {
-    assert_eq!(json(&value), format!("\"{name}\""), "{value:?} serializes as {name}");
+    assert_eq!(
+        json(&value),
+        format!("\"{name}\""),
+        "{value:?} serializes as {name}"
+    );
     let back: T = serde_json::from_str(&format!("\"{name}\""))
         .unwrap_or_else(|e| panic!("{name} must deserialize: {e}"));
     assert_eq!(back, value, "{name} round-trips");
@@ -135,7 +139,11 @@ fn call_id_accepts_the_folder_grammar_and_keeps_the_text() {
     ] {
         let id = CallId::parse(ok).unwrap_or_else(|| panic!("{ok} is a call id"));
         assert_eq!(id.to_string(), ok, "Display writes the folder name back");
-        assert_eq!(json(&id), format!("\"{ok}\""), "serialized as the folder name");
+        assert_eq!(
+            json(&id),
+            format!("\"{ok}\""),
+            "serialized as the folder name"
+        );
         let back: CallId = serde_json::from_str(&format!("\"{ok}\""))
             .unwrap_or_else(|e| panic!("{ok} must deserialize: {e}"));
         assert_eq!(back, id);
@@ -176,7 +184,10 @@ fn call_id_refuses_everything_outside_the_grammar() {
     ] {
         assert!(CallId::parse(bad).is_none(), "{bad:?} is not a call id");
         let r = serde_json::from_str::<CallId>(&json(&bad));
-        assert!(r.is_err(), "{bad:?} must not deserialize (meta.json is untrusted): {r:?}");
+        assert!(
+            r.is_err(),
+            "{bad:?} must not deserialize (meta.json is untrusted): {r:?}"
+        );
     }
 }
 
@@ -239,9 +250,8 @@ fn endpoint_id_deserialize_goes_through_the_same_rule() {
     // A hand-edited meta.json must not carry free text into a later log line. Either the
     // value is refused or it becomes the invalid state; it is never kept.
     for bad in ["Headset (Realtek Audio)", "", "a\nb", "x=1"] {
-        match serde_json::from_str::<EndpointId>(&json(&bad)) {
-            Ok(id) => assert_eq!(text_of(&id), "invalid", "{bad:?}"),
-            Err(_) => {}
+        if let Ok(id) = serde_json::from_str::<EndpointId>(&json(&bad)) {
+            assert_eq!(text_of(&id), "invalid", "{bad:?}");
         }
     }
     let id: EndpointId = serde_json::from_str(&json(&REAL))
@@ -260,7 +270,9 @@ fn notices_and_warnings_are_built_from_closed_values() {
     let warnings = [
         CallWarning::CommunicationsDeviceDiffers,
         CallWarning::TrackLost { track: Track::Mic },
-        CallWarning::TrackLost { track: Track::System },
+        CallWarning::TrackLost {
+            track: Track::System,
+        },
         CallWarning::MicChanged,
         CallWarning::CantHearOtherParty,
         CallWarning::CantHearYou,
@@ -281,8 +293,12 @@ fn notices_and_warnings_are_built_from_closed_values() {
     let notices = [
         CallNotice::CallSavedTranscribing,
         CallNotice::TranscriptReady { call: call.clone() },
-        CallNotice::PassFailed { reason: FailReason::Network },
-        CallNotice::Stopped { reason: StopReason::Sleep },
+        CallNotice::PassFailed {
+            reason: FailReason::Network,
+        },
+        CallNotice::Stopped {
+            reason: StopReason::Sleep,
+        },
     ];
     for n in &notices {
         match n {

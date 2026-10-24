@@ -12,7 +12,7 @@ The core API (`crates/voicen-core`) that the shell and the tests build on. Every
 | `call::storage` | `CallStore`: roots, folder creation, `meta.json`, track writers, recovery, listing (incl. `damaged`), rename, delete, disk thresholds | temp dirs, fault-injecting writer, fake `DiskSpace` |
 | `call::final_pass` | queue, chunker, `SpeechSpans` use, timed/time-less mode, per-track results, cancel | scripted spans, wiremock server |
 | `call::transcript` | merge, schema 1 types + `validate`, Markdown render, export, speaker/title rename (pure functions) | fixtures |
-| `call::events` | `CallNotice`, `CallWarning`, the `LogEvent` variants | `diag_format` tests |
+| `call::events` | the call value types (`Track`, `CallId`, `EndpointId`, `CallState`, `StopReason`, `FailReason`, the closed log field enums), `CallNotice`, `CallWarning`; the `LogEvent` variants are in `diag::event`, the line bodies in `diag::format` (T-118) | `diag_format`, `call_events` tests |
 | `settings` (extended) | `calls` section, `FieldId`s, `SettingsTab::Calls`, `LaunchArgs`, `SecondLaunchAction::StartCallRecord` | existing settings tests |
 | `tray` (extended) | `TrayState::CallRecording`, precedence function, menu table rows | existing tray tests |
 | `vad` (extended) | `SpeechSpans` port; energy-span implementation | scripted buffers |
@@ -149,13 +149,15 @@ One line per event, `key=value` after the 006 prefix. The smoke and tests grep t
 | `CallDeviceChanged` | `call_device track=<mic\|system> cause=<…> gap_ms=<n> to=<EndpointId\|none>` |
 | `CallTrackSilent` | `call_track_silent track=<…> rule=<lost\|cant_hear>` |
 | `CallStopped` | `call_stopped reason=<StopReason> duration_ms=<n> mic_bytes=<n> system_bytes=<n>` |
-| `CallStorageFailed` | `call_storage_failed kind=<write\|flush\|sync\|meta\|transcript\|low_disk> os=<code>` |
+| `CallStorageFailed` | `call_storage_failed kind=<write\|flush\|sync\|meta\|transcript\|low_disk> [os=<code>]` (`os` left out when unknown) |
 | `CallRecovered` | `call_recovered calls=<n>` |
 | `FinalPassStage` | `final_stage track=<…> stage=<decode\|vad\|upload\|merge\|write> ms=<n> chunks=<n>` |
-| `FinalPassFinished` | `final_finished outcome=<ready\|failed> reason=<…> mode=<timed\|timeless> ms=<n>` |
+| `FinalPassFinished` | `final_finished outcome=<ready\|failed> [reason=<…>] mode=<timed\|timeless> ms=<n>` (`reason` only on `failed`) |
 | `CallSwitchRefused` | `call_switch_refused reason=unknown_value` |
 | `VadFallback` | `vad_fallback track=<mic\|system> cause=<unavailable\|error>` (#188: the pass goes on with energy spans) |
 | `TranscriptInvalid` | `transcript_invalid rule=<unsorted\|out_of_range\|unknown_speaker\|unknown_track\|bad_source\|bad_lang\|empty_text> segment=<n>` (research R17; `segment` is the index, never the text) |
+
+Levels: WARN for `call_refused`, `call_track_silent`, `call_storage_failed`, `final_finished outcome=failed`, `call_switch_refused`, `vad_fallback`, `transcript_invalid` and `call_device` with `to=none`; INFO for the rest. The `<EndpointId>` rule (closed charset and length, else `invalid`): `docs/decisions/diagnostics-log.md`.
 
 Never logged: transcript text, titles, speaker names, folder or root paths, hosts, device friendly names, audio (FR-042, SC-009).
 

@@ -1,0 +1,8 @@
+guarantee: -
+file: crates/voicen-core/src/call/events.rs
+added_by: test-writer
+--- old
+        2 if leap => 29,
+--- new
+        2 if leap || !leap => 29,
+--- end

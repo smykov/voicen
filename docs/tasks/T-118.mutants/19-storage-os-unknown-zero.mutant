@@ -1,0 +1,10 @@
+guarantee: AC-1: call_storage_failed leaves os out when unknown (contract body)
+file: crates/voicen-core/src/diag/format.rs
+added_by: test-writer
+--- old
+            if let Some(code) = os {
+                pair(out, "os", code);
+            }
+--- new
+            pair(out, "os", os.unwrap_or(0));
+--- end
