@@ -65,9 +65,9 @@
 - [ ] T008 [P] [area core] Red tests in `crates/voicen-core/src/diag/event.rs` / `format.rs` and `crates/voicen-core/src/call/events.rs`.
   - Every new `LogEvent` formats exactly as the line bodies in contracts/core-call.md "Log lines": `call_requested`, `call_refused`, `call_started`, `call_device`, `call_track_silent`, `call_stopped`, `call_storage_failed`, `call_recovered`, `final_stage`, `final_finished`, `call_switch_refused`, `vad_fallback track=<mic|system> cause=<unavailable|error>` (#188) and `transcript_invalid rule=<…> segment=<n>` (R17 rule names; never the segment text).
   - `EndpointId` accepts only "`{`, `}`, `.`, hex digits, `-`" and "at most 128 characters"; anything else formats as `endpoint=invalid`.
-  - The exhaustive `LogObserver` match and the `diag_format` tests cover every variant.
+  - The exhaustive matches in diag/format.rs (`level`, `write_message`) and the `diag_format` tests cover every variant (`LogObserver` gets no call arm; decision #195).
   - `CallNotice` / `CallWarning` hold catalog ids and enums only, never free text.
-  - `Track`, `CallId` (grammar `YYYY-MM-DD_HHMMSS[-n]`), `StopReason`, `FailReason` and `CallState` serialize with the snake_case names of data-model.md.
+  - `Track`, `CallId` (grammar `YYYY-MM-DD_HHMMSS[-n]`), `StopReason`, `FailReason` and `CallState` serialize with the names of data-model.md (snake_case; `CallState` keeps data-model's hyphenated `ready-to-transcribe`; decision #195).
   - (spec FR-042, SC-009; R20; P-009)
 - [ ] T009 [area core] Implement the types in `crates/voicen-core/src/call/{mod,events}.rs`, the `LogEvent` variants, `format.rs` and `EndpointId` until T008 is green.
 
