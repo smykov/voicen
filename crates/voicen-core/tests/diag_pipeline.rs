@@ -79,6 +79,8 @@ const PP_HOST: &str = "pp-host-secret.example.com";
 const STOP_BEFORE_JOB_MS: u64 = 1_000;
 const QUERY_SECRET: &str = "SECRETQ";
 const TRANSCRIPT: &str = "TRANSCRIPT-MARKER";
+/// T-186: the query of a refused cross-origin `Location`; never in a log file.
+const REDIRECT_MARKER: &str = "REDIRQ-MARKER";
 const OS: Option<&str> = Some("en-US");
 /// Press -> first frame and the hold, as the dictation session (T-051) reports them.
 const PRESS_TO_FRAME_MS: u64 = 37;
@@ -238,6 +240,17 @@ async fn log_holds_no_key_query_or_transcript_on_any_path() {
         ResponseTemplate::new(200).set_body_json(json!({ "txt": TRANSCRIPT, "key": KEY })),
     )
     .await;
+    // T-186: a cross-origin 307 whose Location carries a marker query; the target
+    // (another port) must get nothing and the marker must reach no log file.
+    let redirect_target = server_with(ok_text(TRANSCRIPT)).await;
+    let redirecting = server_with(ResponseTemplate::new(307).insert_header(
+        "location",
+        format!(
+            "{}/v1/audio/transcriptions?leak={REDIRECT_MARKER}",
+            redirect_target.uri()
+        ),
+    ))
+    .await;
     let slow = server_with(ok_text(TRANSCRIPT).set_delay(Duration::from_secs(5))).await;
     let with_query = |base: &str| format!("{base}?api-version={QUERY_SECRET}");
     let refused_case = OsAnswer::refused();
@@ -333,6 +346,16 @@ async fn log_holds_no_key_query_or_transcript_on_any_path() {
             ms,
             "failed",
             ("failure", "unexpected_response"),
+        ),
+        (
+            "cross-origin 307",
+            with_query(&base(&redirecting)),
+            true,
+            false,
+            JobEnd::Failed(FailureReason::ServerError { status: 307 }),
+            ms,
+            "failed",
+            ("failure", "server_error"),
         ),
         (
             "timeout",
@@ -444,7 +467,7 @@ async fn log_holds_no_key_query_or_transcript_on_any_path() {
     assert!(!files.is_empty(), "the log was written");
     for file in files {
         let bytes = std::fs::read(&file).expect("read");
-        for secret in [KEY, QUERY_SECRET, TRANSCRIPT] {
+        for secret in [KEY, QUERY_SECRET, TRANSCRIPT, REDIRECT_MARKER] {
             assert!(
                 !contains(&bytes, secret.as_bytes()) && !contains(&bytes, &utf16le(secret)),
                 "{secret} in {}",
@@ -453,6 +476,15 @@ async fn log_holds_no_key_query_or_transcript_on_any_path() {
         }
     }
     assert_eq!(seen.count(), 0);
+    let reached = redirect_target
+        .received_requests()
+        .await
+        .expect("request recording");
+    assert_eq!(
+        reached.len(),
+        0,
+        "the refused cross-origin redirect still sent a request"
+    );
 }
 
 // ---- T-076: the post-processing outcome on the dictation line ---------------------------

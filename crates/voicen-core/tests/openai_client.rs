@@ -504,6 +504,63 @@ async fn other_status_is_server_error() {
 }
 
 #[tokio::test]
+async fn cross_origin_307_is_refused_and_nothing_reaches_the_target() {
+    // T-186 acceptance 2: a 307 to another origin (127.0.0.1, another port) is not
+    // followed, so the audio is not re-sent; the 3xx is a classified
+    // ServerError{307} (nothing of the Location kept). Bite: reqwest's default
+    // redirect policy on `engine::http::client` (the target gets the audio and its
+    // text is the result).
+    let target = server_with(ok_text(TRANSCRIPT)).await;
+    let origin = server_with(
+        ResponseTemplate::new(307)
+            .insert_header("location", format!("{}/v1/audio/transcriptions", target.uri())),
+    )
+    .await;
+    let got = transcribe(
+        api_engine(&format!("{}/v1", origin.uri()), Some(KEY)),
+        req(None),
+    );
+    assert_eq!(got, Err(FailureReason::ServerError { status: 307 }));
+    let first = only_request(&origin).await;
+    assert_eq!(header(&first, "authorization"), Some("Bearer sk-test-SECRET"));
+    let reached = target.received_requests().await.expect("recording is on");
+    assert_eq!(reached.len(), 0, "the refused redirect still sent a request");
+}
+
+#[tokio::test]
+async fn same_origin_307_is_followed_with_body_and_key() {
+    // T-186 acceptance 3 (green pin): path A answers 307 to path B on the same
+    // server; B's request keeps the multipart audio and Authorization, and B's
+    // text is the result. Bite: Policy::none() on the shared client, an origin
+    // comparison that includes the path, a policy that stops every redirect.
+    use wiremock::matchers::path;
+    let server = MockServer::start().await;
+    Mock::given(path("/v1/audio/transcriptions"))
+        .respond_with(ResponseTemplate::new(307).insert_header("location", "/moved/here"))
+        .mount(&server)
+        .await;
+    Mock::given(path("/moved/here"))
+        .respond_with(ok_text("from B"))
+        .mount(&server)
+        .await;
+    let got = transcribe(
+        api_engine(&format!("{}/v1", server.uri()), Some(KEY)),
+        req(None),
+    );
+    assert_eq!(got, Ok("from B".to_string()));
+
+    let all = server.received_requests().await.expect("recording is on");
+    assert_eq!(all.len(), 2, "A then B");
+    let b = &all[1];
+    assert_eq!(b.url.path(), "/moved/here");
+    assert_eq!(b.method.as_str(), "POST");
+    assert_eq!(header(b, "authorization"), Some("Bearer sk-test-SECRET"));
+    let parts = multipart(b);
+    let file = part(&parts, "file").expect("file part on the followed request");
+    assert!(file.body == wav::encode(&audio()), "audio not re-sent to B");
+}
+
+#[tokio::test]
 async fn delay_past_ms_timeout_is_timeout() {
     // FR-24: the whole-request duration comes from the request's Timeouts.
     // A 5 s delay against a 300 ms limit is Timeout, well before 5 s.

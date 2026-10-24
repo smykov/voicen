@@ -507,56 +507,70 @@ async fn late_reply_past_the_input_deadline_is_timeout() {
     at_least(took, short.post_processing);
 }
 
-#[tokio::test]
-async fn cross_host_redirect_drops_the_key() {
-    // Acceptance 2 / research R5: the key goes only to the configured endpoint.
-    // The configured server answers 302 to another server (127.0.0.1, another
-    // port: another origin); that server must see no header or URL carrying the
-    // key, while the configured one got the Bearer key. The shared client keeps
-    // reqwest's default redirect policy (R5), so the redirect is followed. Bite: a
-    // redirect policy that re-attaches Authorization, the key sent in a header
-    // reqwest does not treat as sensitive (`api-key`), or in the URL.
+/// T-186: `origin` answers `status` with a `Location` on a second server (another
+/// port = another origin). Returns the outcome, the origin's only request and the
+/// requests the target got.
+async fn cross_origin_redirect(status: u16) -> (PostProcessOutcome, Vec<wiremock::Request>) {
     let target = server_with(chat_reply(json!(REPLY))).await;
     let origin = server_with(
-        ResponseTemplate::new(302)
+        ResponseTemplate::new(status)
             .insert_header("location", format!("{}/v1/chat/completions", target.uri())),
     )
     .await;
-    let _ = run(
+    let got = run(
         &pp_settings(&format!("{}/v1", origin.uri())),
         &creds_with_key(KEY),
         timeouts(),
         RAW,
     );
-
     let first = only_request(&origin).await;
     let expected_auth = format!("Bearer {KEY}");
     assert_eq!(
         header(&first, "authorization"),
-        Some(expected_auth.as_str())
+        Some(expected_auth.as_str()),
+        "the configured origin still gets the key"
     );
+    (got, requests(&target).await)
+}
 
-    let followed = requests(&target).await;
+#[tokio::test]
+async fn cross_origin_307_is_refused_and_nothing_reaches_the_target() {
+    // T-186 acceptance 2 and 4: the prompt and transcript are not re-sent to
+    // another origin; the refusal is a classified skip (HTTP 307), the raw text is
+    // delivered. Replaces cross_host_redirect_drops_the_key (the key is not
+    // re-sent either, because no request is). Bite: reqwest's default redirect
+    // policy (the target gets the body and its reply is Applied), Policy::none()
+    // is not caught here (see the same-origin pin in openai_client.rs).
+    let (got, reached) = cross_origin_redirect(307).await;
     assert_eq!(
-        followed.len(),
-        1,
-        "the redirect is followed once (default policy, research R5)"
+        got,
+        PostProcessOutcome::Skipped(SkipReason::Http { status: 307 })
     );
-    for r in &followed {
-        assert_eq!(
-            header(r, "authorization"),
-            None,
-            "Authorization on the redirect"
-        );
-        let leaked: Vec<String> = r
-            .headers
-            .iter()
-            .filter(|(_, v)| v.to_str().is_ok_and(|v| v.contains(KEY)))
-            .map(|(k, _)| k.to_string())
-            .collect();
-        assert!(leaked.is_empty(), "key in headers {leaked:?}");
-        assert!(!r.url.as_str().contains(KEY), "key in the URL");
-    }
+    assert_eq!(reached.len(), 0, "a request reached the other origin");
+}
+
+#[tokio::test]
+async fn cross_origin_308_is_refused_and_nothing_reaches_the_target() {
+    // As the 307 case, for 308. Bite: a policy that refuses only 307.
+    let (got, reached) = cross_origin_redirect(308).await;
+    assert_eq!(
+        got,
+        PostProcessOutcome::Skipped(SkipReason::Http { status: 308 })
+    );
+    assert_eq!(reached.len(), 0, "a request reached the other origin");
+}
+
+#[tokio::test]
+async fn cross_origin_302_is_refused_too() {
+    // T-186 Investigation 3: 301/302/303 turn the POST into a bodiless GET whose
+    // 2xx reply would still be used as the result; the policy refuses every
+    // cross-origin hop, not only 307/308. Bite: a policy that checks the status.
+    let (got, reached) = cross_origin_redirect(302).await;
+    assert_eq!(
+        got,
+        PostProcessOutcome::Skipped(SkipReason::Http { status: 302 })
+    );
+    assert_eq!(reached.len(), 0, "a request reached the other origin");
 }
 
 // ---- off or not set up: no key read, no request ---------------------------------

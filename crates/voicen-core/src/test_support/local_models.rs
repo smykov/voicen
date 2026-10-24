@@ -163,6 +163,9 @@ pub enum Serve {
     SilentHeaders { hold: Duration },
     /// `Content-Length: SIZE`, `chunk` bytes every `every` until done.
     Trickle { chunk: usize, every: Duration },
+    /// 302 with `Location: to` and an empty body (T-186: a cross-origin hop to a
+    /// second server).
+    Redirect { to: String },
 }
 
 /// A loopback server answering connection `n` with `plan[n]`, and [`Serve::Full`]
@@ -291,6 +294,12 @@ fn answer(mut s: TcpStream, serve: Serve) {
             std::thread::sleep(hold);
             Ok(())
         }
+        Serve::Redirect { to } => s.write_all(
+            format!(
+                "HTTP/1.1 302 Found\r\nLocation: {to}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            )
+            .as_bytes(),
+        ),
         Serve::Trickle { chunk, every } => {
             let mut r = s.write_all(head("200 OK", size).as_bytes());
             for part in body.chunks(chunk) {
