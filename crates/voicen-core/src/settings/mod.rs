@@ -13,6 +13,7 @@
 pub mod file;
 pub mod gate;
 pub mod hotkey;
+pub mod roots;
 pub mod service;
 pub mod url;
 pub mod validate;
@@ -472,6 +473,26 @@ pub(crate) mod fixtures {
                 post_processing_s: 20,
                 builtin_local_s: 150,
             },
+            calls: sample_calls(),
+        }
+    }
+
+    /// T-120: a valid `calls` section whose hotkey differs from the sample's
+    /// dictation hotkey (`Ctrl+Shift+F9`). The server-owned fields (`last_combination`,
+    /// `earlier_roots`, `warned_hosts`, `indicator_position`) and `storage_root` hold
+    /// their defaults, so a test that saves the sample is not rewritten by the
+    /// server-owned rule and triggers no root probe; `hotkey`, `reminder` and
+    /// `primary_language` differ from the defaults.
+    pub(crate) fn sample_calls() -> CallSettings {
+        CallSettings {
+            hotkey: "Ctrl+Shift+F10".into(),
+            last_combination: Toggles { record: true },
+            reminder: false,
+            primary_language: "de".into(),
+            storage_root: None,
+            earlier_roots: Vec::new(),
+            warned_hosts: Vec::new(),
+            indicator_position: None,
         }
     }
 }
@@ -561,6 +582,8 @@ mod tests {
         // Nothing but the language depends on the OS tag.
         let mut ru = defaults(Some("ru-RU"));
         ru.ui_language = UiLanguage::En;
+        // T-120: the UI language also sets the call primary language (FR-038).
+        ru.calls.primary_language = "en".into();
         assert_eq!(ru, defaults(None));
     }
 
@@ -731,6 +754,16 @@ mod tests {
             "auto_paste",
             "builtin_local",
             "builtin_local.model_id",
+            "calls",
+            "calls.earlier_roots",
+            "calls.hotkey",
+            "calls.indicator_position",
+            "calls.last_combination",
+            "calls.last_combination.record",
+            "calls.primary_language",
+            "calls.reminder",
+            "calls.storage_root",
+            "calls.warned_hosts",
             "engine",
             "history",
             "history.enabled",
@@ -827,6 +860,11 @@ mod tests {
             FieldId::TimeoutsLocalServer => "timeouts.local_server",
             FieldId::TimeoutsPostProcessing => "timeouts.post_processing",
             FieldId::TimeoutsBuiltinLocal => "timeouts.builtin_local",
+            // T-120 (decision #196): the four call-settings fields.
+            FieldId::CallHotkey => "calls.hotkey",
+            FieldId::CallReminder => "calls.reminder",
+            FieldId::PrimaryLanguage => "calls.primary_language",
+            FieldId::StorageRoot => "calls.storage_root",
         }
     }
 
@@ -889,6 +927,9 @@ mod tests {
             ErrorCode::LanguageUnsupported => "language.unsupported",
             // T-073: one code for every timeouts field (the range is in each hint).
             ErrorCode::TimeoutRange => "timeout.range",
+            // T-120 (decision #196).
+            ErrorCode::HotkeyEqualsDictation => "hotkey.equals_dictation",
+            ErrorCode::StorageUnwritable => "storage.unwritable",
         }
     }
 
@@ -1005,5 +1046,322 @@ mod tests {
                 .microphone,
             None
         );
+    }
+
+    // ---- T-120: the `calls` section (spec 007 G06; decisions #196, #198) ----------
+
+    fn calls_json_of_defaults(primary_language: &str) -> Value {
+        json!({
+            "hotkey": "Ctrl+Alt+R",
+            "last_combination": { "record": true },
+            "reminder": true,
+            "primary_language": primary_language,
+            "storage_root": null,
+            "earlier_roots": [],
+            "warned_hosts": [],
+            "indicator_position": null,
+        })
+    }
+
+    #[test]
+    fn calls_defaults_match_data_model() {
+        // data-model.md "CallSettings". Bite: any single default changed in
+        // defaults(); primary_language not taken from the resolved UI language; a
+        // field renamed or skipped in serde (the file shape).
+        let d = defaults(None).calls;
+        assert_eq!(d.hotkey, "Ctrl+Alt+R");
+        assert_eq!(d.last_combination, Toggles { record: true });
+        assert!(d.reminder);
+        assert_eq!(d.primary_language, "en");
+        assert_eq!(d.storage_root, None);
+        assert!(d.earlier_roots.is_empty());
+        assert!(d.warned_hosts.is_empty());
+        assert!(d.indicator_position.is_none());
+        assert_eq!(
+            serde_json::to_value(defaults(None)).expect("serializes")["calls"],
+            calls_json_of_defaults("en")
+        );
+        // The primary language follows the resolved UI language, nothing else of
+        // the section does.
+        let ru = defaults(Some("ru-RU")).calls;
+        assert_eq!(ru.primary_language, "ru");
+        assert_eq!(
+            serde_json::to_value(&ru).expect("serializes"),
+            calls_json_of_defaults("ru")
+        );
+        assert_eq!(defaults(Some("de-DE")).calls.primary_language, "en");
+        // The version of the file format does not move (data-model: container
+        // default, no migration).
+        assert_eq!(SCHEMA_VERSION, 1);
+        assert_eq!(defaults(Some("ru-RU")).schema_version, 1);
+        assert_eq!(
+            serde_json::to_value(defaults(None)).expect("serializes")["schema_version"],
+            json!(1)
+        );
+    }
+
+    #[test]
+    fn older_file_without_calls_loads_with_defaults() {
+        // Bite: no container default on `calls` (a release-1 file fails to parse and
+        // is reset), field-level `#[serde(default)]` (type defaults: "", false), or a
+        // bumped SCHEMA_VERSION.
+        let d = defaults(None);
+        for text in [
+            "{}",
+            r#"{"schema_version":1}"#,
+            r#"{"calls":{}}"#,
+            r#"{"schema_version":1,"calls":{}}"#,
+        ] {
+            assert_eq!(parse(text), d, "{text}");
+            assert_eq!(parse(text).calls, d.calls, "{text}");
+        }
+        // A full release-1 file: the sample as it was written before `calls` existed.
+        let mut release1 = serde_json::to_value(sample(EngineKind::Api)).expect("serializes");
+        release1
+            .as_object_mut()
+            .expect("object")
+            .remove("calls")
+            .expect("the sample serializes a calls section");
+        let loaded: Settings = serde_json::from_value(release1).expect("a release-1 file loads");
+        let mut expected = sample(EngineKind::Api);
+        expected.calls = defaults(None).calls;
+        assert_eq!(loaded, expected);
+        assert_eq!(loaded.schema_version, 1);
+    }
+
+    #[test]
+    fn partial_calls_object_changes_only_what_it_names() {
+        // Bite: field-level type defaults inside `calls` or `last_combination`
+        // (reminder false, hotkey "", record false), or a missing nested default.
+        type Change = fn(&mut CallSettings);
+        let cases: [(&str, Change); 8] = [
+            (r#"{"calls":{"reminder":false}}"#, |c| c.reminder = false),
+            (r#"{"calls":{"hotkey":"Ctrl+Shift+F10"}}"#, |c| {
+                c.hotkey = "Ctrl+Shift+F10".into()
+            }),
+            (r#"{"calls":{"primary_language":"de"}}"#, |c| {
+                c.primary_language = "de".into()
+            }),
+            (r#"{"calls":{"storage_root":"calls-x"}}"#, |c| {
+                c.storage_root = Some("calls-x".into())
+            }),
+            (r#"{"calls":{"earlier_roots":["a","b"]}}"#, |c| {
+                c.earlier_roots = vec!["a".into(), "b".into()]
+            }),
+            (r#"{"calls":{"warned_hosts":["api.example.com"]}}"#, |c| {
+                c.warned_hosts = vec!["api.example.com".into()]
+            }),
+            (r#"{"calls":{"last_combination":{}}}"#, |_| {}),
+            (r#"{"calls":{"last_combination":{"record":false}}}"#, |c| {
+                c.last_combination = Toggles { record: false }
+            }),
+        ];
+        for (text, change) in cases {
+            let mut expected = defaults(None);
+            change(&mut expected.calls);
+            assert_eq!(parse(text), expected, "{text}");
+        }
+        // An unknown key of the section is dropped, not written back.
+        let s = parse(r#"{"calls":{"future_flag":true}}"#);
+        assert_eq!(s, defaults(None));
+        assert!(!serde_json::to_string(&s)
+            .expect("serializes")
+            .contains("future_flag"));
+    }
+
+    #[test]
+    fn calls_section_round_trips_with_every_field_set() {
+        // Bite: a field of the section skipped or renamed asymmetrically in serde.
+        let mut value = serde_json::to_value(sample(EngineKind::Api)).expect("serializes");
+        value["calls"] = json!({
+            "hotkey": "Ctrl+Shift+F10",
+            "last_combination": { "record": false },
+            "reminder": false,
+            "primary_language": "de",
+            "storage_root": "calls-x",
+            "earlier_roots": ["calls-a", "calls-b"],
+            "warned_hosts": ["api.example.com"],
+            "indicator_position": { "x": -5, "y": 12 },
+        });
+        let s: Settings = serde_json::from_value(value.clone()).expect("loads");
+        assert_eq!(s.calls.storage_root, Some("calls-x".into()));
+        assert_eq!(s.calls.earlier_roots.len(), 2);
+        assert_eq!(s.calls.last_combination, Toggles { record: false });
+        assert_eq!(
+            serde_json::to_value(&s).expect("serializes")["calls"],
+            value["calls"]
+        );
+    }
+
+    #[test]
+    fn parse_file_fills_a_missing_primary_language_from_ui_language() {
+        // Decision #196 (1), FR-038: the one load path fills `calls.primary_language`
+        // from the loaded `ui_language` when the file lacks it. Bite: no fill (the
+        // plain container default `en` stays for a Russian user), the fill ignoring
+        // `calls` that exist without the key, an explicit value overwritten, or `null`
+        // not counted as missing.
+        let cases = [
+            (r#"{"ui_language":"ru"}"#, "ru"),
+            (r#"{"ui_language":"ru","calls":{}}"#, "ru"),
+            (r#"{"calls":{},"ui_language":"ru"}"#, "ru"),
+            (r#"{"ui_language":"ru","calls":{"primary_language":null}}"#, "ru"),
+            (r#"{"ui_language":"ru","calls":{"reminder":false}}"#, "ru"),
+            (r#"{"ui_language":"en"}"#, "en"),
+            (r#"{}"#, "en"),
+            // An explicit value is kept, valid or not (validate decides at save).
+            (r#"{"ui_language":"ru","calls":{"primary_language":"en"}}"#, "en"),
+            (r#"{"ui_language":"en","calls":{"primary_language":"de"}}"#, "de"),
+            (r#"{"ui_language":"ru","calls":{"primary_language":"xx"}}"#, "xx"),
+            (r#"{"ui_language":"ru","calls":{"primary_language":""}}"#, ""),
+        ];
+        for (text, language) in cases {
+            let loaded = parse_file(text.as_bytes())
+                .unwrap_or_else(|e| panic!("{text} must load: {e}"));
+            assert_eq!(loaded.calls.primary_language, language, "{text}");
+            // Nothing but primary_language differs from the plain parse.
+            let mut plain = parse(text);
+            plain.calls.primary_language = language.into();
+            assert_eq!(loaded, plain, "{text}");
+        }
+        // A full release-1 file (the sample is Russian) gets Russian.
+        let mut release1 = serde_json::to_value(sample(EngineKind::Api)).expect("serializes");
+        release1.as_object_mut().expect("object").remove("calls");
+        let loaded = parse_file(&serde_json::to_vec(&release1).expect("bytes")).expect("loads");
+        assert_eq!(loaded.ui_language, UiLanguage::Ru);
+        assert_eq!(loaded.calls.primary_language, "ru");
+        assert_eq!(loaded.calls.hotkey, "Ctrl+Alt+R");
+    }
+
+    #[test]
+    fn parse_file_refuses_what_the_plain_parse_refuses() {
+        // The fill is not a repair: unreadable stays unreadable (the service resets
+        // it). Bite: errors swallowed into defaults, a wrong type for
+        // primary_language treated as missing, schema_version above 1 accepted.
+        for bytes in [
+            &b"{not json"[..],
+            b"",
+            br#"{"schema_version":2}"#,
+            br#"{"calls":{"primary_language":5}}"#,
+            br#"{"calls":{"reminder":"yes"}}"#,
+            br#"{"microphone":{"id":"x"}}"#,
+        ] {
+            assert!(
+                parse_file(bytes).is_err(),
+                "{} must not load",
+                String::from_utf8_lossy(bytes)
+            );
+        }
+    }
+
+    #[test]
+    fn container_default_for_primary_language_stays_en() {
+        // The limitation settings/mod.rs documents: a container default cannot see
+        // `ui_language`. The fill is `parse_file`'s alone; a plain parse (a save
+        // request, a consumer) never derives the value. Bite: the fill moved into
+        // Deserialize / defaults().
+        assert_eq!(
+            parse(r#"{"ui_language":"ru"}"#).calls.primary_language,
+            "en"
+        );
+    }
+
+    #[test]
+    fn is_lang_code_is_exactly_the_whisper_list() {
+        // One membership test for every language code (invariant I4; decision #196
+        // (4)). Bite: case-insensitive or trimmed matching, a prefix match, `jw`.
+        for code in WHISPER_ISO_639_1 {
+            assert!(is_lang_code(code), "{code}");
+            let lang = LangCode::parse(code).unwrap_or_else(|| panic!("{code} must parse"));
+            assert_eq!(lang.as_str(), code);
+            assert_eq!(
+                serde_json::to_value(lang).expect("serializes"),
+                json!(code),
+                "LangCode serializes as the bare code"
+            );
+        }
+        for bad in [
+            "", " ", "EN", "En", "en ", " en", "en\n", "eng", "e", "jw", "haw", "yue", "xx",
+            "ру", "русский", "en-US",
+        ] {
+            assert!(!is_lang_code(bad), "{bad:?}");
+            assert!(LangCode::parse(bad).is_none(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn call_ids_are_listed_and_named() {
+        // Decision #196 names. Bite: a variant missing from the one lists (the catalog
+        // checks and the wire checks iterate them), a wire string other than the
+        // dotted id, ALL not grown with the enum.
+        for (id, wire) in [
+            (FieldId::CallHotkey, "calls.hotkey"),
+            (FieldId::CallReminder, "calls.reminder"),
+            (FieldId::PrimaryLanguage, "calls.primary_language"),
+            (FieldId::StorageRoot, "calls.storage_root"),
+        ] {
+            assert_eq!(id.as_str(), wire);
+            assert!(FieldId::ALL.contains(&id), "{id:?} not in FieldId::ALL");
+            assert_eq!(serde_json::to_value(id).expect("serializes"), json!(wire));
+        }
+        for (code, wire) in [
+            (ErrorCode::HotkeyEqualsDictation, "hotkey.equals_dictation"),
+            (ErrorCode::StorageUnwritable, "storage.unwritable"),
+        ] {
+            assert_eq!(code.as_str(), wire);
+            assert!(
+                ErrorCode::ALL.contains(&code),
+                "{code:?} not in ErrorCode::ALL"
+            );
+            assert_eq!(serde_json::to_value(code).expect("serializes"), json!(wire));
+        }
+        assert_eq!(FieldId::ALL.len(), 31);
+        assert_eq!(ErrorCode::ALL.len(), 17);
+    }
+
+    #[test]
+    fn field_error_carries_a_reason_only_for_storage_unwritable() {
+        // Invariant I5, decision #196 (2). Bite: `reason` serialized as null when
+        // absent (every existing wire shape changes), the reason dropped, the reason
+        // spelled in camel case, a path or OS text in place of the closed enum.
+        use super::roots::UnwritableReason as R;
+        let plain = FieldError::new(FieldId::EngineKind, ErrorCode::Required);
+        assert_eq!(plain.field, FieldId::EngineKind);
+        assert_eq!(plain.code, ErrorCode::Required);
+        assert_eq!(plain.reason, None);
+        assert_eq!(
+            serde_json::to_value(plain).expect("serializes"),
+            json!({ "field": "engine.kind", "code": "required" }),
+            "no `reason` key when there is none"
+        );
+        let table = [
+            (R::Missing, "missing"),
+            (R::NotAFolder, "not_a_folder"),
+            (R::Relative, "relative"),
+            (R::AccessDenied, "access_denied"),
+            (R::DiskFull, "disk_full"),
+            (R::Other, "other"),
+        ];
+        for (reason, wire) in table {
+            let e = FieldError::storage_unwritable(reason);
+            assert_eq!(e.field, FieldId::StorageRoot);
+            assert_eq!(e.code, ErrorCode::StorageUnwritable);
+            assert_eq!(e.reason, Some(reason));
+            assert_eq!(
+                serde_json::to_value(e).expect("serializes"),
+                json!({
+                    "field": "calls.storage_root",
+                    "code": "storage.unwritable",
+                    "reason": wire,
+                })
+            );
+        }
+        // The reason is part of the identity, and the type stays a plain value.
+        assert_ne!(
+            FieldError::storage_unwritable(R::Missing),
+            FieldError::storage_unwritable(R::Other)
+        );
+        fn plain_value<T: Copy + Eq + std::hash::Hash + std::fmt::Debug>() {}
+        plain_value::<FieldError>();
+        plain_value::<R>();
     }
 }

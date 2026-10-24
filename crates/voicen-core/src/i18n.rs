@@ -988,6 +988,33 @@ mod tests {
         );
     }
 
+    #[test]
+    fn call_settings_ids_have_text_without_a_reason_placeholder() {
+        // T-120 (decisions #196, #198): the four `calls.*` labels and the two new error
+        // codes have EN and RU text. `error.storage.unwritable` takes no `{reason}`:
+        // FieldMessage.svelte renders `t(id)` without arguments, and the per-reason
+        // texts belong to the Calls tab (G41). Bite: a label or error text
+        // missing in one language, a placeholder in the error text (the UI would show
+        // `{reason}`).
+        let c = catalog(EN_JSON, RU_JSON);
+        for lang in LANGS {
+            for id in [
+                "settings.field_label.calls.hotkey",
+                "settings.field_label.calls.reminder",
+                "settings.field_label.calls.primary_language",
+                "settings.field_label.calls.storage_root",
+                "error.hotkey.equals_dictation",
+                "error.storage.unwritable",
+            ] {
+                assert!(own_text(&c, lang, id).is_some(), "{id} ({lang:?})");
+            }
+            for id in ["error.hotkey.equals_dictation", "error.storage.unwritable"] {
+                let text = own_text(&c, lang, id).expect("checked above");
+                assert!(!text.contains('{'), "{id} ({lang:?}) has a placeholder: {text}");
+            }
+        }
+    }
+
     /// T-073: the id suffix of a timeouts field (`settings.field_label.timeouts.<suffix>`,
     /// `settings.timeouts.<suffix>.hint`). An exhaustive match, so a new role does not
     /// compile until it is named here.

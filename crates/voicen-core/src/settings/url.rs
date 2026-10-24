@@ -162,6 +162,46 @@ mod tests {
         check_base_url(raw).unwrap_or_else(|e| panic!("{raw:?} must pass check_base_url: {e:?}"))
     }
 
+    /// `http` to a non-loopback host: `is_insecure_remote` is true and the provider
+    /// rule names the host. One case list for both rules (T-120, invariant I4), so
+    /// they cannot disagree about a host.
+    const INSECURE: [&str; 10] = [
+        "http://example.com/v1",
+        "HTTP://EXAMPLE.COM/v1",
+        "http://192.168.1.5:8000/v1",
+        "http://192.0.2.10:8000/v1",
+        "http://0.0.0.0:8000",
+        "http://[::]:8000",
+        "http://[::ffff:127.0.0.1]",
+        "http://localhost./v1",
+        "http://foo.localhost:8000",
+        "http://127.0.0.1.nip.io/v1",
+    ];
+    /// A loopback host under either scheme: `is_insecure_remote` is false and the
+    /// provider rule says none.
+    const LOOPBACK: [&str; 11] = [
+        "http://LOCALHOST:8000/v1",
+        "http://localhost",
+        "http://LocalHost:8000/v1",
+        "http://127.0.0.1",
+        "http://127.1.2.3",
+        "http://127.255.255.254:8080/v1",
+        "http://0x7f.1/v1",
+        "http://2130706433:8000",
+        "http://[::1]:8000/v1",
+        "http://[0:0:0:0:0:0:0:1]",
+        "https://localhost:8443/v1",
+    ];
+    /// `https` to a non-loopback host: not insecure, but a provider host.
+    const SECURE_REMOTE: [&str; 6] = [
+        "https://example.com",
+        "https://example.com/v1",
+        "https://192.168.1.5:8000/v1",
+        "https://0.0.0.0:8000",
+        "https://[::ffff:127.0.0.1]",
+        "https://localhost.:8443",
+    ];
+
     #[test]
     fn is_insecure_remote_table() {
         // T-015 / decision #52: http + a non-loopback host of the `url` crate warns;
@@ -173,42 +213,12 @@ mod tests {
         // red); `Ipv4Addr::is_loopback` replaced by `== 127.0.0.1` (`127.1.2.3` red);
         // `to_ipv4()`/`is_unspecified` counted as loopback (`[::ffff:127.0.0.1]`,
         // `0.0.0.0`, `[::]` red); https treated like http (`https://example.com` red).
-        let insecure = [
-            "http://example.com/v1",
-            "HTTP://EXAMPLE.COM/v1",
-            "http://192.168.1.5:8000/v1",
-            "http://192.0.2.10:8000/v1",
-            "http://0.0.0.0:8000",
-            "http://[::]:8000",
-            "http://[::ffff:127.0.0.1]",
-            "http://localhost./v1",
-            "http://foo.localhost:8000",
-            "http://127.0.0.1.nip.io/v1",
-        ];
-        let not_insecure = [
-            "http://LOCALHOST:8000/v1",
-            "http://localhost",
-            "http://LocalHost:8000/v1",
-            "http://127.0.0.1",
-            "http://127.1.2.3",
-            "http://127.255.255.254:8080/v1",
-            "http://0x7f.1/v1",
-            "http://2130706433:8000",
-            "http://[::1]:8000/v1",
-            "http://[0:0:0:0:0:0:0:1]",
-            "https://example.com",
-            "https://example.com/v1",
-            "https://192.168.1.5:8000/v1",
-            "https://0.0.0.0:8000",
-            "https://[::ffff:127.0.0.1]",
-            "https://localhost.:8443",
-            "https://localhost:8443/v1",
-        ];
         let mut wrong = Vec::new();
-        for (raw, expected) in insecure
+        for (raw, expected) in INSECURE
             .iter()
             .map(|r| (*r, true))
-            .chain(not_insecure.iter().map(|r| (*r, false)))
+            .chain(LOOPBACK.iter().map(|r| (*r, false)))
+            .chain(SECURE_REMOTE.iter().map(|r| (*r, false)))
         {
             let got = is_insecure_remote(&normalized(raw));
             if got != expected {
@@ -216,5 +226,110 @@ mod tests {
             }
         }
         assert!(wrong.is_empty(), "is_insecure_remote wrong for: {wrong:#?}");
+    }
+
+    // ---- T-120: the provider-host rule (spec 007 FR-031) -----------------------------
+
+    #[test]
+    fn is_loopback_host_is_the_one_loopback_test() {
+        // Invariant I4: `localhost` (any case), 127.0.0.0/8 and `::1` only, over the
+        // parsed host. Bite: any of the near misses of `is_insecure_remote_table`
+        // accepted, a loopback shape refused.
+        let mut wrong = Vec::new();
+        for (raw, expected) in LOOPBACK
+            .iter()
+            .map(|r| (*r, true))
+            .chain(INSECURE.iter().map(|r| (*r, false)))
+            .chain(SECURE_REMOTE.iter().map(|r| (*r, false)))
+        {
+            let parsed = ::url::Url::parse(raw).unwrap_or_else(|e| panic!("{raw}: {e}"));
+            let host = parsed.host().unwrap_or_else(|| panic!("{raw}: no host"));
+            let got = is_loopback_host(&host);
+            if got != expected {
+                wrong.push(format!("{raw:?}: expected {expected}, got {got}"));
+            }
+        }
+        assert!(wrong.is_empty(), "is_loopback_host wrong for: {wrong:#?}");
+    }
+
+    #[test]
+    fn provider_host_is_none_for_loopback_and_the_host_otherwise() {
+        // data-model "warned_hosts", tasks.md G06: `localhost`, `127.0.0.0/8`, `::1` ->
+        // none; `api.openai.com`, `192.168.1.5` -> host. The scheme does not matter
+        // (the notice is about where the audio text goes, not about encryption), and
+        // the same cases drive `is_insecure_remote`. Bite: the rule duplicated with a
+        // narrower loopback test (`127.1.2.3`, `LOCALHOST`, `[::1]` come back as hosts),
+        // `scheme == https` deciding, the port kept in the host.
+        let mut wrong = Vec::new();
+        for raw in LOOPBACK {
+            if let Some(host) = provider_host(&normalized(raw)) {
+                wrong.push(format!("{raw:?}: expected none, got a host ({})", host.as_str()));
+            }
+        }
+        for raw in INSECURE.iter().chain(SECURE_REMOTE.iter()) {
+            if provider_host(&normalized(raw)).is_none() {
+                wrong.push(format!("{raw:?}: expected a host, got none"));
+            }
+        }
+        assert!(wrong.is_empty(), "provider_host wrong for: {wrong:#?}");
+
+        // The host text: lower case (the `url` crate's), no port, no path.
+        for (raw, host) in [
+            ("https://api.openai.com/v1", "api.openai.com"),
+            ("https://API.OpenAI.com/v1", "api.openai.com"),
+            ("http://192.168.1.5:8000/v1", "192.168.1.5"),
+            ("https://LOCALHOST.example/v1", "localhost.example"),
+            ("https://api.example.com:8443/v1/", "api.example.com"),
+        ] {
+            let got = provider_host(&normalized(raw)).unwrap_or_else(|| panic!("{raw}: none"));
+            assert_eq!(got.as_str(), host, "{raw}");
+        }
+        // Two spellings of one host are one host (the notice shows once per host).
+        assert_eq!(
+            provider_host(&normalized("https://api.example.com/v1")),
+            provider_host(&normalized("https://API.EXAMPLE.COM:443/other")),
+        );
+        assert_ne!(
+            provider_host(&normalized("https://api.example.com/v1")),
+            provider_host(&normalized("https://api.example.org/v1")),
+        );
+    }
+
+    #[test]
+    fn provider_host_never_prints_the_host() {
+        // "A host is never logged": the value has no Display and its Debug (what a
+        // `{:?}` in a log or an assertion would print) names no host. Bite: `derive(Debug)`
+        // on a tuple struct over the String, an `impl Display`.
+        use std::fmt::{Debug, Display};
+        use std::marker::PhantomData;
+        trait NotDisplay {
+            const IS: bool = false;
+        }
+        impl<T: ?Sized> NotDisplay for T {}
+        struct Probe<T: ?Sized>(PhantomData<T>);
+        #[allow(dead_code)]
+        impl<T: ?Sized + Display> Probe<T> {
+            const IS: bool = true;
+        }
+        assert!(
+            !Probe::<ProviderHost>::IS,
+            "ProviderHost implements Display"
+        );
+        fn debug_of<T: Debug>(value: &T) -> String {
+            format!("{value:?} {value:#?}")
+        }
+        for raw in [
+            "https://secret-host.example.com/v1",
+            "http://198.51.100.77:8000/v1",
+        ] {
+            let host = provider_host(&normalized(raw)).expect("a host");
+            let printed = debug_of(&host);
+            assert!(!printed.contains("secret-host"), "{printed}");
+            assert!(!printed.contains("example.com"), "{printed}");
+            assert!(!printed.contains("198.51.100"), "{printed}");
+            let printed = debug_of(&Some(host));
+            assert!(!printed.contains("secret-host"), "{printed}");
+            assert!(!printed.contains("198.51.100"), "{printed}");
+        }
     }
 }

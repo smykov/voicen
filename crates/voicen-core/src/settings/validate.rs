@@ -865,4 +865,176 @@ mod tests {
             }
         }
     }
+
+    // ---- T-120: the `calls` rules (spec 007 FR-004, FR-038; decision #196) --------
+
+    fn api_run(s: &Settings) -> Vec<FieldError> {
+        run(s, &no_keys(), api_key_stored(), &["base"])
+    }
+
+    #[test]
+    fn call_hotkey_equal_to_the_dictation_hotkey_is_refused_from_either_side() {
+        // FR-004: one rule over the whole draft, whichever hotkey the user changed.
+        // The error sits on `calls.hotkey` in both cases (the Calls tab's field), never
+        // on `recording.hotkey`. Bite: the rule missing; the comparison on the text of
+        // one side only; the error put on the dictation field; a rule that fires only
+        // when the call hotkey is the changed one.
+        // The dictation hotkey was changed to the call hotkey.
+        let mut s = sample(EngineKind::Api);
+        s.hotkey = s.calls.hotkey.clone();
+        assert_eq!(
+            pairs(&api_run(&s)),
+            vec![("calls.hotkey", "hotkey.equals_dictation")]
+        );
+        // The call hotkey was changed to the dictation hotkey.
+        let mut s = sample(EngineKind::Api);
+        s.calls.hotkey = s.hotkey.clone();
+        assert_eq!(
+            pairs(&api_run(&s)),
+            vec![("calls.hotkey", "hotkey.equals_dictation")]
+        );
+        // Every engine (the rule is not a field of one engine).
+        for engine in EVERY_ENGINE {
+            let mut s = sample(engine);
+            s.calls.hotkey = s.hotkey.clone();
+            assert_eq!(
+                pairs(&run(&s, &no_keys(), api_key_stored(), &["base"])),
+                vec![("calls.hotkey", "hotkey.equals_dictation")],
+                "{engine:?}"
+            );
+        }
+        // The shipped defaults: dictation `Ctrl+Alt+Space`, calls `Ctrl+Alt+R`.
+        // Bite: equality on the key alone (`Ctrl+Alt+R` vs `Ctrl+Shift+R`).
+        let mut s = sample(EngineKind::Api);
+        s.hotkey = "Ctrl+Alt+R".into();
+        s.calls.hotkey = "Ctrl+Shift+R".into();
+        assert_eq!(api_run(&s), vec![]);
+        s.calls.hotkey = "Ctrl+Alt+T".into();
+        assert_eq!(api_run(&s), vec![]);
+    }
+
+    #[test]
+    fn release_one_file_with_the_default_call_hotkey_as_dictation_hotkey() {
+        // Edge (T-120 Investigation): a release-1 file whose dictation hotkey is
+        // already `Ctrl+Alt+R` loads (nothing validates at load), and from then on every
+        // save is refused on `calls.hotkey` until one of the two hotkeys changes.
+        // Bite: a rule that exempts the default, or one that moves the error to
+        // `recording.hotkey`.
+        let mut s = sample(EngineKind::Api);
+        s.hotkey = "Ctrl+Alt+R".into();
+        s.calls.hotkey = "Ctrl+Alt+R".into(); // the default of `defaults()`
+        assert_eq!(
+            pairs(&api_run(&s)),
+            vec![("calls.hotkey", "hotkey.equals_dictation")]
+        );
+        s.calls.hotkey = "Ctrl+Alt+T".into();
+        assert_eq!(api_run(&s), vec![]);
+        s.calls.hotkey = "Ctrl+Alt+R".into();
+        s.hotkey = "Ctrl+Alt+Space".into();
+        assert_eq!(api_run(&s), vec![]);
+    }
+
+    #[test]
+    fn call_hotkey_grammar_errors_are_refused_on_the_call_hotkey_field() {
+        // The call hotkey follows the dictation hotkey's grammar (`hotkey_code`), on its
+        // own field. Bite: no grammar check (a stored `Esc` is accepted), the error on
+        // `recording.hotkey`, an equality check on unparsed text.
+        for (text, code) in [
+            ("Space", "hotkey.no_modifier"),
+            ("Ctrl+Alt", "hotkey.no_key"),
+            ("Ctrl+Esc", "hotkey.esc_reserved"),
+            ("Alt+Ctrl+R", "hotkey.invalid"),
+            ("ctrl+alt+r", "hotkey.invalid"),
+            ("", "hotkey.no_key"),
+        ] {
+            let mut s = sample(EngineKind::Api);
+            s.calls.hotkey = text.into();
+            let got = pairs(&api_run(&s));
+            assert_eq!(got.len(), 1, "{text:?}: {got:?}");
+            assert_eq!(got[0].0, "calls.hotkey", "{text:?}");
+            if !text.is_empty() {
+                assert_eq!(got[0].1, code, "{text:?}");
+            }
+        }
+        // Equal text that does not parse is a grammar error, not an equality: the
+        // comparison is over parsed hotkeys.
+        let mut s = sample(EngineKind::Api);
+        s.hotkey = "Ctrl+Esc".into();
+        s.calls.hotkey = "Ctrl+Esc".into();
+        assert_eq!(
+            pairs(&api_run(&s)),
+            vec![
+                ("calls.hotkey", "hotkey.esc_reserved"),
+                ("recording.hotkey", "hotkey.esc_reserved"),
+            ]
+        );
+    }
+
+    #[test]
+    fn unknown_primary_language_is_refused() {
+        // FR-038: `language.unsupported` on `calls.primary_language`, for every engine.
+        // Bite: no rule, a length-only rule, a case-insensitive or trimmed match,
+        // `null`-like empty accepted, the error put on the speech-language field.
+        for raw in [
+            "xx", "zz", "rus", "RU", "Ru", "", " ", "en-US", "ru ", " de", "jw", "haw", "yue",
+            "english",
+        ] {
+            for engine in EVERY_ENGINE {
+                let mut s = sample(engine);
+                s.calls.primary_language = raw.into();
+                assert_eq!(
+                    pairs(&run(&s, &no_keys(), api_key_stored(), &["base"])),
+                    vec![("calls.primary_language", "language.unsupported")],
+                    "{engine:?} {raw:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_whisper_code_is_an_accepted_primary_language() {
+        for code in crate::settings::WHISPER_ISO_639_1 {
+            let mut s = sample(EngineKind::Api);
+            s.calls.primary_language = code.into();
+            assert_eq!(api_run(&s), vec![], "{code}");
+        }
+    }
+
+    #[test]
+    fn is_lang_code_decides_speech_language_and_primary_language_alike() {
+        // Invariant I4: one membership test. For every candidate, the speech-language
+        // rule, the primary-language rule and `is_lang_code` agree. Bite: either rule
+        // on its own copy of the test (a code accepted by one and refused by the other).
+        let mut candidates: Vec<String> = crate::settings::WHISPER_ISO_639_1.iter().map(|c| c.to_string()).collect();
+        candidates.extend(
+            ["", "xx", "EN", "en ", " en", "jw", "haw", "yue", "eng", "e", "en-US", "ру"]
+                .map(String::from),
+        );
+        for code in candidates {
+            let mut s = sample(EngineKind::Api);
+            s.speech_language = Some(code.clone());
+            s.calls.primary_language = code.clone();
+            let errors = pairs(&api_run(&s));
+            let speech_refused = errors.contains(&("engine.speech_language", "language.unsupported"));
+            let primary_refused =
+                errors.contains(&("calls.primary_language", "language.unsupported"));
+            assert_eq!(speech_refused, !crate::settings::is_lang_code(&code), "{code:?}");
+            assert_eq!(primary_refused, !crate::settings::is_lang_code(&code), "{code:?}");
+        }
+    }
+
+    #[test]
+    fn the_reminder_and_the_other_call_fields_are_never_refused() {
+        // `calls.reminder` is a toggle (never refused); the server-owned fields and a
+        // storage root are not judged by the pure validate (the service probes the
+        // root). Bite: a rule on a server-owned field, or a probe inside `validate`.
+        for reminder in [true, false] {
+            let mut s = sample(EngineKind::Api);
+            s.calls.reminder = reminder;
+            s.calls.storage_root = Some("relative/never/judged/here".into());
+            s.calls.earlier_roots = vec!["a".into(), "a".into()];
+            s.calls.warned_hosts = vec!["api.example.com".into()];
+            assert_eq!(api_run(&s), vec![], "reminder {reminder}");
+        }
+    }
 }

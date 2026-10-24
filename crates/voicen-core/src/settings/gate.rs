@@ -212,7 +212,7 @@ mod tests {
 
     /// Every tab, by a wildcard-free match: a new variant fails to compile here until
     /// it is added to the token table below (T-037).
-    fn all_tabs() -> [SettingsTab; 6] {
+    fn all_tabs() -> [SettingsTab; 7] {
         let all = [
             SettingsTab::Engine,
             SettingsTab::Recording,
@@ -220,6 +220,8 @@ mod tests {
             SettingsTab::PostProcessing,
             SettingsTab::History,
             SettingsTab::General,
+            // T-120 (spec 007 FR-040): the Calls tab.
+            SettingsTab::Calls,
         ];
         for tab in all {
             match tab {
@@ -228,7 +230,8 @@ mod tests {
                 | SettingsTab::Output
                 | SettingsTab::PostProcessing
                 | SettingsTab::History
-                | SettingsTab::General => {}
+                | SettingsTab::General
+                | SettingsTab::Calls => {}
             }
         }
         all
@@ -247,6 +250,7 @@ mod tests {
             (SettingsTab::PostProcessing, "post_processing"),
             (SettingsTab::History, "history"),
             (SettingsTab::General, "general"),
+            (SettingsTab::Calls, "calls"),
         ];
         assert_eq!(table.map(|(tab, _)| tab), all_tabs());
         for (tab, token) in table {
