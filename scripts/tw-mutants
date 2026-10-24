@@ -1,0 +1,461 @@
+#!/usr/bin/env bash
+# tw-mutants — re-run a task's mutant catalog on a throwaway copy of the tree, all mutants
+# in one toolchain start. Tier T1 (tooling, not a gate).
+#
+#   scripts/tw-mutants <area> <ID> --tree <dir> [--check] [--only <name>]...
+#   scripts/tw-mutants <area> --tree <dir> --prepare      only make the copy runnable
+#
+# WHY. Hand-written mutants used to live only in prose (`## Tests`, validation records):
+# every validation round re-typed them, sweeps grew a new, larger list each time, and the
+# runner (often a container) was started once per mutant. The catalog keeps each mutant as
+# an exact replacement in the repository, so a round re-runs all of them first and only
+# adds; the loop runs inside one `scripts/tw-run <area>` start. Mutants on the diff are
+# review hints, not a gate (Google: Petrović, Ivanković, ICSE-SEIP 2018; Petrović et al.,
+# IEEE TSE 2021) - so only a survivor that breaks a named guarantee is a failure.
+#
+# CATALOG: docs/tasks/<ID>.mutants/ in the project (the working tree, not the copy).
+#   test-command        the first line that is not empty or a comment: the command that runs
+#                       only the task's tests, as the area runs it (relative to its workdir)
+#   <NN>-<slug>.mutant  one mutant each:
+#       guarantee: <Acceptance/DoD line it targets, e.g. "AC-2: empty header -> 400">
+#                  `-` when it targets no stated guarantee (a survivor is then a follow-up)
+#       file: <path relative to the project root>
+#       added_by: <test-writer | task-validator round N>
+#       test: <optional: a different test command for this mutant>
+#       equivalent: <optional: why no input can tell it apart; it is then not run>
+#       --- old
+#       <exact text; must occur exactly once in the file>
+#       --- new
+#       <replacement text>
+#       --- end
+#   The text between the markers is taken line by line, without the last newline.
+#
+# RUN. <dir> is a throwaway copy (git worktree) that holds the code under test - never the
+# working tree itself. The script checks every mutant against the copy (old text exactly
+# once), writes the mutated files and one POSIX sh loop into <dir>/.tw-mutants/, and runs
+# that loop once through scripts/tw-run with the copy as the project root
+# (TEAMWRIGHT_ROOT=<dir>, the project's own config) - for `runner: docker` the copy is
+# what the container mounts, so <dir> must be on a path the Docker host can see
+# (mktemp -d honours $TMPDIR; never a hardcoded /tmp inside a container). The loop runs the
+# test command(s) once unmutated (baseline must be green), then per mutant: put the mutated
+# file in place, run its tests, put the original back.
+#
+# THE COPY'S GENERATED CODE AND CACHES. A fresh copy has no generated code (ignored files
+# are not in a worktree) and a cold build dir. When the area has a `generate_command`:
+# with `generated: [paths]` declared (its outputs, relative to the project root) and the
+# copy's inputs equal to the working tree's — `generate_inputs: [paths]` when declared,
+# else the whole tree (ignored files, the outputs and .tw-mutants/ left out) — the outputs
+# are copied from the working tree into the copy; otherwise generate_command runs in the
+# copy, inside the same runner start, before the baseline (exit 4 when it fails). Runs in
+# the copy get TW_RUN_COPY=1 (the area's `copy_env`, e.g. CARGO_TARGET_DIR:
+# "{cache}/target") and TW_CACHE_ROOT=<project root> (the runner's caches of the main
+# checkout), so a copy does not rebuild from cold or trample the working tree's build dir.
+# `--prepare` does only this step (generate_command, when needed, in its own runner start):
+# for a copy whose tests you run by hand.
+#
+# DETACHED RUN, BOUNDED WAIT (scripts/hooks/_job.sh, as scripts/tw-gate). The loop runs in
+# its own session and process group; the command waits up to TW_WAIT_SECONDS (default 540).
+# Not finished -> `RUNNING: mutants <ID> ... - run the same command again to keep waiting`,
+# exit 75; the same command again (same area, ID, copy, --only) attaches to that run, and a
+# result nobody waited for is printed by the next same call. Another run of the same task
+# is waited for first. A run killed without a result is cleaned up and started again.
+#
+# OUTPUT: one line per mutant - killed | SURVIVED (breaks <guarantee>) | survived,
+# follow-up (no guarantee) | equivalent - and a summary; a copy goes to
+# <logs>/mutants/<ID>-<UTC time>.txt (<logs> = $TEAMWRIGHT_LOG_DIR or .teamwright/logs).
+# Exit: 0 no survivor breaks a guarantee (follow-ups may exist), 1 one does, 2 usage or a
+# broken catalog (old text missing or not unique, unknown field), 3 baseline red, 4
+# generate_command failed in the copy, 75 still running, the runner's code (e.g. 127) when
+# it cannot start. --check validates only, runs nothing.
+set -uo pipefail
+
+die() { echo "tw-mutants: $*" >&2; exit 2; }
+usage="usage: scripts/tw-mutants <area> <ID> --tree <dir> [--check] [--only <name>]... | <area> --tree <dir> --prepare"
+AREA=""; TID=""; TREE=""; CHECK=0; PREPARE=0; JOB=""; ONLY=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --tree) [ $# -ge 2 ] || die "$usage"; TREE="$2"; shift 2 ;;
+    --only) [ $# -ge 2 ] || die "$usage"; ONLY+=("$2"); shift 2 ;;
+    --check) CHECK=1; shift ;;
+    --prepare) PREPARE=1; shift ;;
+    --_job) [ $# -ge 2 ] || die "$usage"; JOB="$2"; shift 2 ;;   # internal: the detached run
+    -h|--help) echo "$usage"; exit 0 ;;
+    -*) die "unknown option $1; $usage" ;;
+    *) if [ -z "$AREA" ]; then AREA="$1"; elif [ -z "$TID" ]; then TID="$1"; else die "$usage"; fi; shift ;;
+  esac
+done
+[ -n "$AREA" ] && [ -n "$TREE" ] || die "$usage"
+[ -n "$TID" ] || [ "$PREPARE" = 1 ] || die "$usage"
+
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SELF="$here/$(basename "${BASH_SOURCE[0]}")"
+if [ -n "${TEAMWRIGHT_ROOT:-}" ]; then ROOT="$TEAMWRIGHT_ROOT"
+elif [ -d "$here/../.teamwright" ]; then ROOT="$(cd "$here/.." && pwd)"
+else ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"; fi
+ROOT="$(cd "$ROOT" && pwd)" || die "project root not found"
+[ -d "$TREE" ] || die "tree not found: $TREE"
+TREE="$(cd "$TREE" && pwd -P)"
+[ "$TREE" != "$(cd "$ROOT" && pwd -P)" ] || die "--tree is the working tree; mutate a throwaway copy (git worktree add --detach \"\$(mktemp -d)/tree\" HEAD)"
+CFG="${TEAMWRIGHT_CONFIG:-$ROOT/.teamwright/config.yml}"
+CONFIG_PY="$ROOT/scripts/hooks/_config.py"
+[ -f "$CONFIG_PY" ] || CONFIG_PY="$here/hooks/_config.py"
+JOB_SH="$ROOT/scripts/hooks/_job.sh"
+[ -f "$JOB_SH" ] || JOB_SH="$here/hooks/_job.sh"
+TW_RUN="$ROOT/scripts/tw-run"
+[ -f "$TW_RUN" ] || TW_RUN="$here/tw-run"
+command -v python3 >/dev/null 2>&1 || die "python3 is required"
+[ -f "$CONFIG_PY" ] || die "scripts/hooks/_config.py not found"
+[ -f "$JOB_SH" ] || die "scripts/hooks/_job.sh not found"
+[ -f "$TW_RUN" ] || die "scripts/tw-run not found"
+# shellcheck source=hooks/_job.sh
+. "$JOB_SH"
+WORK="$TREE/.tw-mutants"
+LOGROOT="${TEAMWRIGHT_LOG_DIR:-$ROOT/.teamwright/logs}"
+
+# ---- the area's generate_command, its outputs and inputs -----------------------------
+IFS= read -r -d '' _area_py <<'PY' || true
+import os, sys
+sys.dont_write_bytecode = True
+sys.path.insert(0, os.path.dirname(sys.argv[1]))
+import _config
+try:
+    cfg = _config.parse_yaml(open(sys.argv[2], encoding="utf-8").read())
+except (OSError, ValueError) as e:
+    sys.stderr.write("tw-mutants: cannot read %s: %s\n" % (sys.argv[2], e)); sys.exit(2)
+a = next((x for x in cfg.get("areas") or [] if isinstance(x, dict) and x.get("name") == sys.argv[3]), None)
+if a is None:
+    sys.stderr.write("tw-mutants: no area %r in %s\n" % (sys.argv[3], sys.argv[2])); sys.exit(2)
+def lst(v):
+    if v is None: return []
+    return [str(x).strip("/") for x in v] if isinstance(v, list) else [str(v).strip("/")]
+for k in ("generated", "generate_inputs"):
+    for p in lst(a.get(k)):
+        n = os.path.normpath(p)
+        if not p or n.startswith("..") or os.path.isabs(n):
+            sys.stderr.write("tw-mutants: areas[%s].%s: %r must be relative to the project root\n"
+                             % (sys.argv[3], k, p)); sys.exit(2)
+gen, out, inp = str(a.get("generate_command") or "").strip(), lst(a.get("generated")), lst(a.get("generate_inputs"))
+sys.stdout.write("".join(x + "\0" for x in [gen, str(len(out))] + out + inp))
+PY
+afields=()
+while IFS= read -r -d '' f; do afields+=("$f"); done < <(python3 -c "$_area_py" "$CONFIG_PY" "$CFG" "$AREA") || exit 2
+[ "${#afields[@]}" -ge 2 ] || exit 2
+GEN="${afields[0]}"; NOUT="${afields[1]}"
+GENERATED=(); INPUTS=()
+[ "$NOUT" -gt 0 ] && GENERATED=("${afields[@]:2:$NOUT}")
+[ "${#afields[@]}" -gt $((2 + NOUT)) ] && INPUTS=("${afields[@]:$((2 + NOUT))}")
+
+# content_key <repo>: its working tree's content as git sees it (ignored files, the declared
+# outputs, .tw-mutants and .teamwright/logs left out), restricted to generate_inputs if any
+content_key() {
+  ( cd "$1" 2>/dev/null || exit 1
+    git rev-parse --is-inside-work-tree >/dev/null 2>&1 || exit 1
+    idx="$(git rev-parse --git-path index)" || exit 1
+    tmp="$(mktemp "${TMPDIR:-/tmp}/tw-mutants-index.XXXXXX")" || exit 1
+    rm -f "$tmp"; [ -f "$idx" ] && cp "$idx" "$tmp"
+    trap 'rm -f "$tmp"' EXIT
+    GIT_INDEX_FILE="$tmp" git add -A >/dev/null 2>&1 || exit 1
+    GIT_INDEX_FILE="$tmp" git rm -r -q --cached --ignore-unmatch -- .tw-mutants .teamwright/logs \
+      ${GENERATED[@]+"${GENERATED[@]}"} >/dev/null 2>&1 || exit 1
+    t="$(GIT_INDEX_FILE="$tmp" git write-tree)" || exit 1
+    if [ "${#INPUTS[@]}" -eq 0 ]; then echo "$t"
+    else { printf '%s\n' "${INPUTS[@]}"; echo "--"; git ls-tree -r "$t" -- "${INPUTS[@]}"; } | git hash-object --stdin; fi )
+}
+
+# prepare_copy -> sets PREP (none | copied | generate) and PREP_NOTE
+prepare_copy() {
+  PREP=none; PREP_NOTE=""
+  [ -n "$GEN" ] || return 0
+  PREP=generate
+  if [ "${#GENERATED[@]}" -eq 0 ]; then
+    PREP_NOTE="generate_command runs in the copy (the area declares no \`generated:\` outputs to copy)"; return 0
+  fi
+  local a b p
+  a="$(content_key "$ROOT")" || a=""
+  b="$(content_key "$TREE")" || b=""
+  if [ -z "$a" ] || [ "$a" != "$b" ]; then
+    PREP_NOTE="generate_command runs in the copy (its inputs differ from the working tree's)"; return 0
+  fi
+  for p in "${GENERATED[@]}"; do
+    [ -e "$ROOT/$p" ] || { PREP_NOTE="generate_command runs in the copy ($p is missing in the working tree)"; return 0; }
+  done
+  for p in "${GENERATED[@]}"; do
+    rm -rf "${TREE:?}/$p"; mkdir -p "$(dirname "$TREE/$p")"
+    cp -R "$ROOT/$p" "$TREE/$p" || { PREP_NOTE="generate_command runs in the copy (copying $p failed)"; return 0; }
+  done
+  PREP=copied
+  PREP_NOTE="generated outputs copied from the working tree, inputs unchanged: ${GENERATED[*]}"
+}
+copy_run() {  # tw-run in the copy, with the area's copy_env and the main checkout's caches
+  TEAMWRIGHT_ROOT="$TREE" TEAMWRIGHT_CONFIG="$CFG" TW_RUN_COPY=1 TW_CACHE_ROOT="$ROOT" \
+    bash "$TW_RUN" "$AREA" -- "$@" < /dev/null
+}
+
+if [ "$PREPARE" = 1 ]; then
+  prepare_copy
+  if [ "$PREP" = none ]; then echo "tw-mutants: $AREA has no generate_command; the copy needs no preparation"; exit 0; fi
+  echo "tw-mutants: $PREP_NOTE"
+  [ "$PREP" = copied ] && exit 0
+  copy_run "$GEN"; rc=$?
+  [ "$rc" -eq 0 ] || echo "tw-mutants: generate_command failed in the copy (exit $rc)" >&2
+  exit "$rc"
+fi
+
+CAT="$ROOT/docs/tasks/$TID.mutants"
+[ -d "$CAT" ] || die "no catalog at docs/tasks/$TID.mutants/"
+
+IFS= read -r -d '' _tw_py <<'PY' || true
+import glob, os, shlex, sys
+sys.dont_write_bytecode = True
+op, config_py, cfg_path, area, cat, tree, work = sys.argv[1:8]
+only = set(sys.argv[8:])
+sys.path.insert(0, os.path.dirname(config_py))
+import _config
+FIELDS = ("guarantee", "file", "added_by", "test", "equivalent")
+
+def fail(msg):
+    sys.stderr.write("tw-mutants: %s\n" % msg); sys.exit(2)
+
+def first_line(path):
+    for line in open(path, encoding="utf-8"):
+        s = line.strip()
+        if s and not s.startswith("#"):
+            return s
+    return ""
+
+def parse(path):
+    name = os.path.basename(path)[:-len(".mutant")]
+    m, block, buf = {"name": name}, None, []
+    for line in open(path, encoding="utf-8").read().split("\n"):
+        if line.strip() in ("--- old", "--- new", "--- end"):
+            if block:
+                m[block] = "\n".join(buf)
+            block, buf = {"--- old": "old", "--- new": "new", "--- end": None}[line.strip()], []
+            continue
+        if block:
+            buf.append(line)
+        elif line.strip() and not line.startswith("#"):
+            k, sep, v = line.partition(":")
+            if not sep or k.strip() not in FIELDS:
+                fail("%s: unknown line %r (fields: %s, then --- old / --- new / --- end)"
+                     % (name, line, ", ".join(FIELDS)))
+            m[k.strip()] = v.strip()
+    if block:
+        fail("%s: no `--- end` after `--- %s`" % (name, block))
+    for k in ("guarantee", "file", "old", "new"):
+        if k not in m or (k != "new" and not m[k]):
+            fail("%s: `%s` missing" % (name, k if k in FIELDS else "--- " + k))
+    if m["old"] == m["new"]:
+        fail("%s: new text equals old text" % name)
+    return m
+
+try:
+    cfg = _config.parse_yaml(open(cfg_path, encoding="utf-8").read())
+except (OSError, ValueError) as e:
+    fail("cannot read %s: %s" % (cfg_path, e))
+a = next((x for x in cfg.get("areas") or [] if isinstance(x, dict) and x.get("name") == area), None)
+if a is None:
+    fail("no area %r in %s" % (area, cfg_path))
+workdir = str(a.get("workdir") or "").strip("/")
+tc = os.path.join(cat, "test-command")
+default_test = first_line(tc) if os.path.exists(tc) else ""
+files = sorted(glob.glob(os.path.join(cat, "*.mutant")))
+if not files:
+    fail("no *.mutant files in %s" % cat)
+muts = [parse(f) for f in files]
+if only:
+    unknown = only - {m["name"] for m in muts}
+    if unknown:
+        fail("--only: no mutant %s" % ", ".join(sorted(unknown)))
+    muts = [m for m in muts if m["name"] in only]
+for m in muts:
+    m["test"] = m.get("test") or default_test
+    if not m["test"]:
+        fail("%s: no test command (docs/tasks/<ID>.mutants/test-command or `test:`)" % m["name"])
+    p = os.path.normpath(m["file"])
+    if p.startswith("..") or os.path.isabs(p):
+        fail("%s: file must be relative to the project root: %s" % (m["name"], m["file"]))
+    m["file"] = p
+    if m.get("equivalent"):
+        continue
+    try:
+        text = open(os.path.join(tree, p), encoding="utf-8").read()
+    except OSError as e:
+        fail("%s: %s not readable in the copy: %s" % (m["name"], p, e))
+    k = text.count(m["old"])
+    if k != 1:
+        fail("%s: old text found %d times in %s (must be exactly once); update the entry "
+             "to the code under test" % (m["name"], k, p))
+    m["mutated"] = text.replace(m["old"], m["new"], 1)
+
+if op == "check":
+    for m in muts:
+        print("ok   %s  %s  (%s)" % (m["name"], m["file"], m["guarantee"]))
+    sys.exit(0)
+
+q = shlex.quote
+os.makedirs(work, exist_ok=True)
+tests = []
+for m in muts:
+    if m["test"] not in tests:
+        tests.append(m["test"])
+lines = ["#!/bin/sh",
+         "# generated by scripts/tw-mutants; runs inside one tw-run start",
+         'W="$(pwd)"; M="$(cd "$(dirname "$0")" && pwd)"; R="$(cd "$M/.." && pwd)"',
+         ': > "$M/results"',
+         'run() { ( cd "$W" && sh -c "$2" ) > "$M/$1.log" 2>&1 </dev/null; echo "$1 $?" >> "$M/results"; }']
+gen = os.environ.get("TWM_GEN", "")
+if gen:   # only when the copy's inputs changed (tw-mutants writes the flag file)
+    lines.append('if [ -f "$M/run-generate" ]; then run generate %s; grep -q "^generate 0$" "$M/results" || exit 4; fi'
+                 % q(gen))
+for i, t in enumerate(tests):
+    lines.append("run baseline-%d %s" % (i, q(t)))
+    lines.append('grep -q "^baseline-%d 0$" "$M/results" || exit 3' % i)
+for i, m in enumerate(muts):
+    if m.get("equivalent"):
+        continue
+    mut = "%04d.mut" % i
+    with open(os.path.join(work, mut), "w", encoding="utf-8") as f:
+        f.write(m["mutated"])
+    dst = '"$R"/%s' % q(m["file"])
+    lines += ['cp %s "$M/%04d.orig"' % (dst, i),
+              'cp "$M/%s" %s' % (mut, dst),
+              "run %s %s" % (q(m["name"]), q(m["test"])),
+              'cp "$M/%04d.orig" %s' % (i, dst)]
+with open(os.path.join(work, "loop.sh"), "w", encoding="utf-8") as f:
+    f.write("\n".join(lines) + "\n")
+with open(os.path.join(work, "catalog.tsv"), "w", encoding="utf-8") as f:
+    for m in muts:
+        f.write("\t".join((m["name"], m["file"], m["guarantee"], m.get("equivalent", ""))) + "\n")
+rel = os.path.relpath(os.path.join(work, "loop.sh"), os.path.join(tree, workdir or "."))
+print("sh " + q(rel))
+PY
+
+pyrun() { TWM_GEN="$GEN" python3 -c "$_tw_py" "$1" "$CONFIG_PY" "$CFG" "$AREA" "$CAT" "$TREE" "$WORK" ${ONLY[@]+"${ONLY[@]}"}; }
+if [ "$CHECK" = 1 ]; then pyrun check; exit $?; fi
+
+IFS= read -r -d '' _rep_py <<'PY' || true
+import os, sys
+work, baseline_rc = sys.argv[1], int(sys.argv[2])
+res = {}
+if os.path.exists(os.path.join(work, "results")):
+    for line in open(os.path.join(work, "results"), encoding="utf-8"):
+        k, _, v = line.strip().rpartition(" ")
+        res[k] = int(v)
+if baseline_rc == 4 or res.get("generate", 0) != 0:
+    print("GENERATE FAILED: generate_command exited %s in the copy; nothing was run. Log: %s"
+          % (res.get("generate", "?"), os.path.join(work, "generate.log")))
+    sys.exit(4)
+if baseline_rc == 3 or any(v != 0 for k, v in res.items() if k.startswith("baseline-")):
+    bad = sorted(k for k, v in res.items() if k.startswith("baseline-") and v != 0)
+    print("BASELINE RED: the tests fail without any mutant (%s); fix the tests or the copy "
+          "first - every mutant would look killed. Log: %s"
+          % (", ".join(bad) or "?", os.path.join(work, (bad or ["baseline-0"])[0] + ".log")))
+    sys.exit(3)
+killed = surv = follow = equiv = 0
+for line in open(os.path.join(work, "catalog.tsv"), encoding="utf-8"):
+    name, path, guarantee, eq = (line.rstrip("\n").split("\t") + [""] * 4)[:4]
+    if eq:
+        equiv += 1; print("equivalent  %s  %s  (%s)" % (name, path, eq)); continue
+    if name not in res:
+        print("NOT RUN     %s  %s" % (name, path)); surv += 1; continue
+    if res[name] != 0:
+        killed += 1; print("killed      %s  %s" % (name, path))
+    elif guarantee.strip() in ("", "-", "none"):
+        follow += 1; print("survived, follow-up (no guarantee)  %s  %s" % (name, path))
+    else:
+        surv += 1; print("SURVIVED    %s  %s  breaks: %s" % (name, path, guarantee))
+print("%d killed, %d survived breaking a guarantee, %d follow-ups, %d equivalent"
+      % (killed, surv, follow, equiv))
+sys.exit(1 if surv else 0)
+PY
+
+# ---- the detached run (internal: started by the caller below) --------------------------
+if [ -n "$JOB" ]; then
+  prepare_copy
+  rm -f "$WORK/run-generate"
+  [ "$PREP" = generate ] && : > "$WORK/run-generate"
+  LOOP="$(job_get "$JOB" loop)"
+  {
+    echo "tw-mutants: $TID on $TREE - one tw-run $AREA start for all mutants"
+    [ -z "$PREP_NOTE" ] || echo "tw-mutants: $PREP_NOTE"
+  } > "$JOB/report"
+  copy_run "$LOOP"; rc=$?
+  if [ "$rc" -ne 0 ] && [ "$rc" -ne 3 ] && [ "$rc" -ne 4 ]; then
+    echo "tw-mutants: the runner exited $rc before the loop finished (not runnable?); its output: $JOB/out" >> "$JOB/report"
+    tail -n 20 "$JOB/out" >> "$JOB/report" 2>/dev/null
+    job_finish "$JOB" "$rc"; exit 0
+  fi
+  LOGDIR="$LOGROOT/mutants"
+  REPORT="$LOGDIR/$TID-$(date -u +%Y%m%dT%H%M%SZ).txt"
+  python3 -c "$_rep_py" "$WORK" "$rc" >> "$JOB/report"; prc=$?
+  if mkdir -p "$LOGDIR" 2>/dev/null && cp "$JOB/report" "$REPORT" 2>/dev/null; then
+    echo "report: $REPORT" >> "$JOB/report"
+  fi
+  job_finish "$JOB" "$prc"
+  exit 0
+fi
+
+# ---- the caller --------------------------------------------------------------------------
+JOBS="$LOGROOT/mutants/jobs"
+mkdir -p "$JOBS" 2>/dev/null || die "cannot create $JOBS"
+JOBKEY="$(printf '%s\n' "$ROOT" "$AREA" "$TID" "$TREE" ${ONLY[@]+"${ONLY[@]}"})"
+JOBDIR="$JOBS/$TID.$(printf '%s' "$JOBKEY" | python3 -c 'import hashlib,sys; print(hashlib.sha1(sys.stdin.buffer.read()).hexdigest()[:12])')"
+DEADLINE=$(( SECONDS + $(job_wait_budget) ))
+
+result() {
+  local d="$1" rc
+  rc="$(job_get "$d" rc)"
+  cat "$d/report" 2>/dev/null
+  rm -rf "$d"
+  case "$rc" in ''|*[!0-9]*) rc=2 ;; esac
+  exit "$rc"
+}
+running() {
+  echo "RUNNING: $2 (pid $(job_get "$1" pid)), started $(job_get "$1" started), output $1/out - run the same command again to keep waiting"
+  exit "$TW_JOB_EXIT_RUNNING"
+}
+
+mine=0
+while :; do
+  case "$(job_state "$JOBDIR")" in
+    running)
+      [ "$mine" = 1 ] || echo "tw-mutants: attached to the running catalog of $TID on $TREE (started $(job_get "$JOBDIR" started))"
+      mine=1
+      job_wait "$JOBDIR" "$DEADLINE"
+      [ $? -eq 2 ] && running "$JOBDIR" "mutants $TID"
+      continue ;;
+    done) result "$JOBDIR" ;;
+    stale)
+      echo "tw-mutants: the earlier run of $TID ended without a result (killed?). Starting again." >&2
+      rm -rf "$JOBDIR" ;;
+  esac
+  other=""
+  for d in "$JOBS/$TID".*; do
+    [ -d "$d" ] && [ "$d" != "$JOBDIR" ] || continue
+    case "$(job_state "$d")" in
+      running) other="$d"; break ;;
+      stale) rm -rf "$d" ;;
+      done) [ "$(job_age "$d")" -lt 3600 ] || rm -rf "$d" ;;
+    esac
+  done
+  if [ -n "$other" ]; then
+    echo "tw-mutants: another run of $TID is going (started $(job_get "$other" started)); this one starts after it"
+    job_wait "$other" "$DEADLINE"
+    [ $? -eq 2 ] && running "$other" "an earlier run of $TID; yours starts after it"
+    continue
+  fi
+  mkdir "$JOBDIR" 2>/dev/null || continue
+  mkdir -p "$WORK" 2>/dev/null || { rm -rf "$JOBDIR"; die "cannot write $WORK"; }
+  # leftovers of an earlier run in the same copy would mix into this one's results
+  rm -f "$WORK"/*.orig "$WORK"/*.mut "$WORK"/*.log "$WORK/results" "$WORK/run-generate" 2>/dev/null
+  LOOP="$(pyrun prepare)" || { rm -rf "$JOBDIR"; exit 2; }
+  printf '%s' "$JOBKEY" > "$JOBDIR/key"
+  printf '%s\n' "$LOOP" > "$JOBDIR/loop"
+  date -u +%Y-%m-%dT%H:%M:%SZ > "$JOBDIR/started"
+  export TEAMWRIGHT_ROOT="$ROOT" TEAMWRIGHT_CONFIG="$CFG" TEAMWRIGHT_LOG_DIR="$LOGROOT"
+  jargs=("$AREA" "$TID" --tree "$TREE")
+  for o in ${ONLY[@]+"${ONLY[@]}"}; do jargs+=(--only "$o"); done
+  job_spawn "$JOBDIR" bash "$SELF" "${jargs[@]}" --_job "$JOBDIR" || { rm -rf "$JOBDIR"; die "cannot start the run"; }
+  mine=1
+done

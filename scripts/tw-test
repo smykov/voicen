@@ -1,0 +1,470 @@
+#!/usr/bin/env bash
+# tw-test — the one way to run tests while working: the area's configured test command,
+# narrowed to the tests you name, full output to a log, a short summary on stdout, one run
+# per state of the code. Tier T1 (tooling, not a gate).
+#
+#   scripts/tw-test <area> [selector ...] [--fresh]     run (selectors: test files, node ids, filters)
+#   scripts/tw-test <area> --tree <copy> [selector ...]  run in a throwaway copy (bite checks)
+#   scripts/tw-test --stop <area>                        stop a running test run of the area
+#
+# WHY. In one project's autonomous run the test-writer ran the same 4-minute suite four
+# times in a row: twice with its output cut by `| grep | tail` (the failures were lost),
+# once with `-p no:logging`, which removed a fixture and produced 25 false errors, and once
+# right — with one worker instead of the configured ones. The developer ran the gate
+# script directly twice as well. The role files already said "never cut output, run long
+# commands once with output to a file"; agents did not follow it. So the tooling does it:
+# the test-guard hook (scripts/hooks/test-guard.sh) refuses direct test runs and cut
+# output, and this script is what it points to.
+#
+# WHAT IT RUNS (.teamwright/config.yml, areas[]):
+#   test_select_command: "<cmd with {tests}>"   the area's test command for chosen tests;
+#                        {tests} becomes the selectors, shell-quoted. Workers and other
+#                        knobs stay in the string, e.g.
+#                        "pytest -q -n ${PYTEST_WORKERS:-4} {tests}"
+#   test_command: "<cmd>"                       without test_select_command, the selectors
+#                        are appended to it; with no selectors it runs as written
+# always through `scripts/tw-run <area> -- <cmd>` (host or docker, as the area says), from
+# the area's workdir. tw-test knows no test framework: what the command is, is the config's.
+#
+# OUTPUT. The whole output goes to <logs>/test/<area>-<UTC time>-<commit>.log (<logs> =
+# $TEAMWRIGHT_LOG_DIR or .teamwright/logs); stdout gets only a summary: PASS/FAIL, exit
+# code, duration, the counts when the output is recognisable (pytest, cargo test, go test,
+# flutter/dart test, jest, vitest), the failed tests with their first error line (at most
+# 30), else the last 15 lines, and the log path. Read the log for the details (grep or
+# `sed -n` on the log file); never pipe tw-test into grep/tail/head.
+#
+# CACHE. A run is keyed by the area's files (the same area-scoped key as scripts/tw-gate:
+# source_dirs, test_dirs, workdir, manifests, config, files the commands name), the
+# resolved command and the selectors. An identical repeat prints the cached summary and
+# the log path instead of running again — a FAIL too (unlike the gate): the answer to a
+# failure is to read its log, not to run it again. `--fresh` runs anyway. A run during
+# which the files changed, or that could not start (exit 126/127, killed), is not reused.
+#
+# DETACHED RUN, BOUNDED WAIT (scripts/hooks/_job.sh, as tw-gate). The run lives in its own
+# session and process group and the command waits up to TW_WAIT_SECONDS (default 540).
+# Not finished -> `RUNNING: tests <area> (pid N), started <when>, log <path> - run the
+# same command again to keep waiting`, exit 75; the same command again attaches. A test
+# run of the same area on other content or selectors is waited for first (the toolchain,
+# its containers and databases are shared). Never wrap tw-test in a sleep loop or a
+# background call.
+#
+# --tree <copy>: run in a throwaway copy (git worktree) — TEAMWRIGHT_ROOT=<copy>,
+# TW_RUN_COPY=1 (the area's copy_env), TW_CACHE_ROOT=<project> — logs stay in the project.
+#
+# Exit: the test command's code; 75 still running; 2 usage or config error.
+# Environment: TEAMWRIGHT_ROOT, TEAMWRIGHT_CONFIG, TEAMWRIGHT_LOG_DIR, TW_WAIT_SECONDS,
+# TW_POLL_SECONDS.
+set -uo pipefail
+
+die() { echo "tw-test: $*" >&2; exit 2; }
+usage="usage: scripts/tw-test <area> [selector ...] [--fresh] [--tree <copy>] | --stop <area>"
+AREA=""; FRESH=0; STOP=0; JOB=""; COPY=""; SEL=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --fresh) FRESH=1; shift ;;
+    --stop) STOP=1; shift ;;
+    --tree) [ $# -ge 2 ] || die "$usage"; COPY="$2"; shift 2 ;;
+    --_job) [ $# -ge 2 ] || die "$usage"; JOB="$2"; shift 2 ;;   # internal: the detached run
+    -h|--help) echo "$usage"; exit 0 ;;
+    --) shift; while [ $# -gt 0 ]; do SEL+=("$1"); shift; done ;;
+    *) if [ -z "$AREA" ] && [ -z "$JOB" ]; then
+         case "$1" in -*) die "$usage" ;; esac
+         AREA="$1"
+       else SEL+=("$1"); fi
+       shift ;;
+  esac
+done
+[ -n "$AREA" ] || [ -n "$JOB" ] || die "$usage"
+
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SELF="$here/$(basename "${BASH_SOURCE[0]}")"
+if [ -n "${TEAMWRIGHT_ROOT:-}" ]; then ROOT="$TEAMWRIGHT_ROOT"
+elif [ -d "$here/../.teamwright" ]; then ROOT="$(cd "$here/.." && pwd)"
+else ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"; fi
+cd "$ROOT" || die "project root not found: $ROOT"
+ROOT="$(pwd)"
+CFG="${TEAMWRIGHT_CONFIG:-$ROOT/.teamwright/config.yml}"
+CONFIG_PY="$ROOT/scripts/hooks/_config.py"
+[ -f "$CONFIG_PY" ] || CONFIG_PY="$here/hooks/_config.py"
+JOB_SH="$ROOT/scripts/hooks/_job.sh"
+[ -f "$JOB_SH" ] || JOB_SH="$here/hooks/_job.sh"
+TW_RUN="$ROOT/scripts/tw-run"
+[ -f "$TW_RUN" ] || TW_RUN="$here/tw-run"
+TW_GATE="$ROOT/scripts/tw-gate"
+[ -f "$TW_GATE" ] || TW_GATE="$here/tw-gate"
+command -v python3 >/dev/null 2>&1 || die "python3 is required to read $CFG"
+for f in "$CONFIG_PY" "$JOB_SH" "$TW_RUN" "$TW_GATE"; do [ -f "$f" ] || die "$f not found"; done
+# shellcheck source=hooks/_job.sh
+. "$JOB_SH"
+LOGROOT="${TEAMWRIGHT_LOG_DIR:-$ROOT/.teamwright/logs}"
+LOGDIR="$LOGROOT/test"
+JOBS="$LOGDIR/jobs"
+CACHE="$LOGDIR/cache"
+mkdir -p "$JOBS" "$CACHE" || die "cannot create $LOGDIR"
+now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+human() { if [ "$1" -ge 60 ]; then echo "$(($1 / 60))m$(($1 % 60))s"; else echo "${1}s"; fi; }
+short() { printf '%s' "$1" | cut -c1-10; }
+
+# area_key <root>: tree, key, head, clean of the area's scope (scripts/tw-gate --_key)
+area_key() {
+  KF=()
+  while IFS= read -r -d '' f; do KF+=("$f"); done < <(
+    TEAMWRIGHT_ROOT="$1" TEAMWRIGHT_CONFIG="$CFG" TEAMWRIGHT_LOG_DIR="$LOGROOT" TW_GATE_SCOPE_CMD="$CMD" \
+      bash "$TW_GATE" "$AREA" --_key 2>/dev/null)
+  [ "${#KF[@]}" -eq 4 ] || KF=("" "" none false)
+}
+
+# summary <log> <rc>: counts, failed tests and their first error line, else the tail
+IFS= read -r -d '' _sum_py <<'PY' || true
+import re, sys
+log, rc = sys.argv[1], int(sys.argv[2])
+try:
+    raw = open(log, encoding="utf-8", errors="replace").read()
+except OSError:
+    print("(log not readable: %s)" % log); sys.exit(0)
+raw = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", raw).replace("\r\n", "\n").replace("\r", "\n")
+lines = [l for l in raw.split("\n") if not re.match(r"# (tw-test |\$ |finished |stopped )", l)]
+CAP, MSG = 30, 160
+
+def nxt(i):
+    for l in lines[i + 1:i + 8]:
+        s = l.strip()
+        if s:
+            return s
+    return ""
+
+def counts_text(d, order):
+    return ", ".join("%d %s" % (d[k], k) for k in order if d.get(k))
+
+def pytest():
+    summ = None
+    for l in lines:
+        m = re.search(r"((?:\d+ (?:passed|failed|errors?|skipped|xfailed|xpassed|deselected|warnings?|rerun)"
+                      r"(?:, )?)+) in [\d.]+s", l)
+        if m:
+            summ = m.group(1)
+    if summ is None:
+        return None
+    failed = []
+    for l in lines:
+        m = re.match(r"(FAILED|ERROR) (\S+)(?: - (.*))?$", l)
+        if m:
+            failed.append((m.group(2) + (" (error)" if m.group(1) == "ERROR" else ""), m.group(3) or ""))
+    return "pytest", summ, failed
+
+def cargo():
+    tot, seen = {"passed": 0, "failed": 0, "ignored": 0}, False
+    for l in lines:
+        m = re.match(r"test result: \w+\. (\d+) passed; (\d+) failed; (\d+) ignored", l)
+        if m:
+            seen = True
+            for k, v in zip(("passed", "failed", "ignored"), m.groups()):
+                tot[k] += int(v)
+    if not seen:
+        return None
+    failed = []
+    for l in lines:
+        m = re.match(r"test (\S+) \.\.\. FAILED$", l)
+        if m and m.group(1) not in [f[0] for f in failed]:
+            err = ""
+            for i, x in enumerate(lines):
+                if x.strip() == "---- %s stdout ----" % m.group(1):
+                    err = nxt(i)
+                    if err.startswith("thread ") and err.endswith(":"):
+                        err = (err + " " + nxt(i + 1)).strip()
+                    break
+            failed.append((m.group(1), err))
+    return "cargo test", counts_text(tot, ("failed", "passed", "ignored")) or "0 tests", failed
+
+def gotest():
+    fails = [(i, re.match(r"\s*--- FAIL: (\S+)", l)) for i, l in enumerate(lines)]
+    fails = [(i, m) for i, m in fails if m]
+    pkgs = [l for l in lines if re.match(r"(ok|FAIL)\s+\S+\s", l + " ") or re.match(r"ok\s+\S+", l)]
+    if not fails and not pkgs:
+        return None
+    passed = sum(1 for l in lines if re.match(r"\s*--- PASS: ", l))
+    d = {"failed": len(fails), "passed": passed,
+         "packages ok": sum(1 for l in pkgs if l.startswith("ok")),
+         "packages failed": sum(1 for l in pkgs if l.startswith("FAIL"))}
+    return "go test", counts_text(d, ("failed", "passed", "packages failed", "packages ok")) or "no tests", \
+        [(m.group(1), nxt(i)) for i, m in fails]
+
+def flutter():
+    end, failed = None, []
+    for i, l in enumerate(lines):
+        m = re.match(r"\d+:\d+ \+(\d+)(?: ~(\d+))?(?: -(\d+))?: (.*)$", l.strip())
+        if not m:
+            continue
+        end = m
+        t = m.group(4)
+        if t.endswith(" [E]"):
+            name = t[:-4]
+            if name not in [f[0] for f in failed]:
+                failed.append((name, nxt(i)))
+    if end is None:
+        return None
+    d = {"passed": int(end.group(1)), "skipped": int(end.group(2) or 0), "failed": int(end.group(3) or 0)}
+    return "flutter/dart test", counts_text(d, ("failed", "passed", "skipped")) or "0 tests", failed
+
+def jest():
+    summ = None
+    for l in lines:
+        m = re.match(r"Tests:\s+(.*\d+ total)\s*$", l.strip())
+        if m:
+            summ = m.group(1)
+    if summ is None:
+        return None
+    failed = []
+    for i, l in enumerate(lines):
+        m = re.match(r"\s*● (.+)$", l)
+        if m and m.group(1) not in [f[0] for f in failed]:
+            failed.append((m.group(1).strip(), nxt(i)))
+    return "jest", summ, failed
+
+def vitest():
+    summ = None
+    for l in lines:
+        m = re.match(r"\s*Tests\s+(\d+ (?:failed|passed|skipped).*)$", l)
+        if m:
+            summ = m.group(1).strip()
+    if summ is None:
+        return None
+    failed = []
+    for i, l in enumerate(lines):
+        m = re.match(r"\s*(?:FAIL|×|✗)\s+(.+?)(?:\s+\d+ms)?\s*$", l)
+        if m and ">" in m.group(1) and m.group(1) not in [f[0] for f in failed]:
+            failed.append((m.group(1), nxt(i)))
+    return "vitest", summ, failed
+
+res = None
+for p in (pytest, cargo, flutter, jest, vitest, gotest):
+    try:
+        res = p()
+    except Exception:
+        res = None
+    if res:
+        break
+if res:
+    tool, summ, failed = res
+    print("  %s (%s)" % (summ, tool))
+    if failed:
+        print("failed (%d):" % len(failed))
+        for name, err in failed[:CAP]:
+            err = err if len(err) <= MSG else err[:MSG - 3] + "..."
+            print("  %s%s" % (name, " - " + err if err else ""))
+        if len(failed) > CAP:
+            print("  ... and %d more (in the log)" % (len(failed) - CAP))
+    elif rc != 0:
+        res = None   # failed without a recognisable failed test: show the tail too
+if not res:
+    body = [l for l in lines if l.strip()]
+    print("last %d lines:" % min(15, len(body)))
+    print("-----")
+    for l in body[-15:]:
+        print(l)
+    print("-----")
+PY
+
+# ---- the detached run (internal) --------------------------------------------------------
+if [ -n "$JOB" ]; then
+  AREA="$(job_get "$JOB" area)"; CMD="$(job_get "$JOB" cmd)"; RUNROOT="$(job_get "$JOB" runroot)"
+  LOG="$(job_get "$JOB" log)"; STARTED="$(job_get "$JOB" started)"; KEY="$(job_get "$JOB" tree_key)"
+  [ -n "$LOG" ] && [ -n "$AREA" ] || exit 2
+  t0="$(date +%s)"
+  {
+    echo "# tw-test $AREA  root $RUNROOT  head $(job_get "$JOB" head)  key ${KEY:-?}  started $STARTED"
+    echo "# \$ scripts/tw-run $AREA -- $CMD"
+  } > "$LOG"
+  trap 'echo "# stopped (signal)" >> "$LOG"; exit 143' INT TERM
+  if [ "$RUNROOT" = "$ROOT" ]; then
+    bash "$TW_RUN" "$AREA" -- "$CMD" >> "$LOG" 2>&1 < /dev/null; rc=$?
+  else
+    TEAMWRIGHT_ROOT="$RUNROOT" TW_RUN_COPY=1 TW_CACHE_ROOT="$ROOT" \
+      bash "$TW_RUN" "$AREA" -- "$CMD" >> "$LOG" 2>&1 < /dev/null; rc=$?
+  fi
+  trap - INT TERM
+  dur=$(( $(date +%s) - t0 ))
+  echo "# finished $(now)  exit $rc  ${dur}s" >> "$LOG"
+  area_key "$RUNROOT"
+  echo "$dur" > "$JOB/dur"; printf '%s\n' "${KF[1]}" > "$JOB/key_after"; now > "$JOB/finished"
+  job_finish "$JOB" "$rc"
+  exit 0
+fi
+
+# ---- the caller ----------------------------------------------------------------------------
+if [ "$STOP" = 1 ]; then
+  n=0
+  for d in "$JOBS/$AREA".*; do
+    [ -d "$d" ] && [ "$(job_state "$d")" = running ] || continue
+    job_stop "$d" && n=$((n + 1))
+    echo "tw-test: stopped the tests of $AREA (pid $(job_get "$d" pid), log $(job_get "$d" log))"
+    rm -rf "$d"
+  done
+  [ "$n" -gt 0 ] || echo "tw-test: no running tests of $AREA"
+  exit 0
+fi
+
+RUNROOT="$ROOT"
+if [ -n "$COPY" ]; then
+  [ -d "$COPY" ] || die "--tree: no directory $COPY"
+  RUNROOT="$(cd "$COPY" && pwd -P)"
+  [ "$RUNROOT" != "$(pwd -P)" ] || RUNROOT="$ROOT"
+fi
+
+# the resolved command: test_select_command with {tests}, or test_command + selectors
+IFS= read -r -d '' _cmd_py <<'PY' || true
+import os, re, shlex, sys
+sys.dont_write_bytecode = True
+config_py, cfg_path, name = sys.argv[1:4]
+sel = sys.argv[4:]
+sys.path.insert(0, os.path.dirname(config_py))
+import _config
+try:
+    cfg = _config.parse_yaml(open(cfg_path, encoding="utf-8").read())
+except (OSError, ValueError) as e:
+    sys.stderr.write("tw-test: cannot read %s: %s\n" % (cfg_path, e)); sys.exit(2)
+area = next((a for a in cfg.get("areas") or [] if isinstance(a, dict) and a.get("name") == name), None)
+if area is None:
+    sys.stderr.write("tw-test: no area %r in %s\n" % (name, cfg_path)); sys.exit(2)
+tc = str(area.get("test_command") or "").strip()
+ts = str(area.get("test_select_command") or "").strip()
+q = " ".join(shlex.quote(s) for s in sel)
+if sel and ts:
+    cmd = ts.replace("{tests}", q)
+elif sel and tc:
+    cmd = tc + " " + q
+elif tc:
+    cmd = tc
+elif ts:
+    cmd = re.sub(r"\s+", " ", ts.replace("{tests}", "")).strip()
+else:
+    sys.stderr.write("tw-test: area %r has no test_command or test_select_command in %s\n" % (name, cfg_path))
+    sys.exit(2)
+sys.stdout.write(cmd)
+PY
+CMD="$(python3 -c "$_cmd_py" "$CONFIG_PY" "$CFG" "$AREA" ${SEL[@]+"${SEL[@]}"})" || exit 2
+SELTEXT="${SEL[*]+${SEL[*]}}"
+LABEL="$AREA${SELTEXT:+ $SELTEXT}"
+
+area_key "$RUNROOT"
+TREE="${KF[0]}"; KEY="${KF[1]}"; HEAD="${KF[2]}"; CLEAN="${KF[3]}"
+ID="$(printf '%s\n%s\n%s\n%s' "$RUNROOT" "$AREA" "$CMD" "${KEY:-nokey-$$-$(date +%s)}" | git hash-object --stdin 2>/dev/null | cut -c1-12)"
+[ -n "$ID" ] || ID="$$"
+JOBDIR="$JOBS/$AREA.$ID"
+RECORD="$CACHE/$AREA.$ID.json"
+DEADLINE=$(( SECONDS + $(job_wait_budget) ))
+
+IFS= read -r -d '' _rec_py <<'PY' || true
+import json, os, sys
+op = sys.argv[1]
+if op == "write":
+    rec, path, runs = json.loads(sys.stdin.read()), sys.argv[2], sys.argv[3]
+    if path:
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(rec, f, indent=2); f.write("\n")
+        os.replace(tmp, path)
+    with open(runs, "a", encoding="utf-8") as f:
+        f.write(json.dumps(rec, sort_keys=True) + "\n")
+elif op == "make":
+    k = sys.argv[2:]
+    print(json.dumps({"area": k[0], "root": k[1], "head": k[2], "clean": k[3] == "true", "tree": k[4],
+                      "key": k[5], "key_after": k[6], "command": k[7], "selectors": k[8],
+                      "exit": int(k[9]), "pass": k[9] == "0", "cacheable": k[10] == "true",
+                      "duration_s": int(k[11]), "started": k[12], "finished": k[13], "log": k[14],
+                      "cached": k[15] == "true"}))
+elif op == "lookup":
+    path, key, command = sys.argv[2:5]
+    try:
+        r = json.load(open(path, encoding="utf-8"))
+    except (OSError, ValueError):
+        sys.exit(1)
+    if not (key and r.get("key") == key and r.get("key_after") == key and r.get("command") == command
+            and r.get("cacheable") is True and os.path.isfile(r.get("log") or "")):
+        sys.exit(1)
+    sys.stdout.write("".join(str(r.get(k, "")) + "\0" for k in ("exit", "head", "finished", "log", "duration_s")))
+PY
+rec() { python3 -c "$_rec_py" "$@"; }
+
+show() {  # rc dur log [cached-note] -> the summary
+  local rc="$1" dur="$2" log="$3" note="${4:-}" word=PASS
+  [ "$rc" -eq 0 ] || word=FAIL
+  if [ -n "$note" ]; then echo "$word $LABEL: exit $rc, $(human "$dur") ($note)"
+  else echo "$word $LABEL: exit $rc, $(human "$dur")"; fi
+  python3 -c "$_sum_py" "$log" "$rc"
+  echo "log: $log"
+  [ "$rc" -eq 0 ] || echo "tw-test: read the log for the details; the same call answers from this run until the code changes (--fresh reruns)"
+}
+result() {  # job dir -> summary, cache record, exit with the tests' code
+  local d="$1" rc dur log ka fin started cacheable=false
+  rc="$(job_get "$d" rc)"; dur="$(job_get "$d" dur)"; log="$(job_get "$d" log)"
+  ka="$(job_get "$d" key_after)"; fin="$(job_get "$d" finished)"; started="$(job_get "$d" started)"
+  rm -rf "$d"
+  case "$rc" in ''|*[!0-9]*) rc=1 ;; esac
+  case "$dur" in ''|*[!0-9]*) dur=0 ;; esac
+  [ -n "$KEY" ] && [ "$ka" = "$KEY" ] && [ "$rc" -lt 126 ] && cacheable=true
+  rec make "$AREA" "$RUNROOT" "$HEAD" "$CLEAN" "$TREE" "$KEY" "$ka" "$CMD" "$SELTEXT" "$rc" "$cacheable" \
+    "$dur" "$started" "${fin:-$(now)}" "$log" false | rec write "$RECORD" "$LOGDIR/runs.jsonl"
+  show "$rc" "$dur" "$log"
+  [ -n "$KEY" ] && [ "$ka" != "$KEY" ] && echo "tw-test: WARNING the area's files changed while the tests ran; this result is not reused"
+  exit "$rc"
+}
+running() {
+  echo "RUNNING: $2 (pid $(job_get "$1" pid)), started $(job_get "$1" started), log $(job_get "$1" log) - run the same command again to keep waiting"
+  exit "$TW_JOB_EXIT_RUNNING"
+}
+
+mine=0
+while :; do
+  case "$(job_state "$JOBDIR")" in
+    running)
+      [ "$mine" = 1 ] || echo "tw-test: attached to the running tests of $LABEL on this content (started $(job_get "$JOBDIR" started), log $(job_get "$JOBDIR" log))"
+      mine=1
+      job_wait "$JOBDIR" "$DEADLINE"
+      [ $? -eq 2 ] && running "$JOBDIR" "tests $LABEL"
+      continue ;;
+    done)
+      if [ "$FRESH" = 0 ] || [ "$mine" = 1 ]; then result "$JOBDIR"; fi
+      rm -rf "$JOBDIR" ;;
+    stale)
+      echo "tw-test: the earlier run of $LABEL ended without a result (killed?); partial output in $(job_get "$JOBDIR" log). Starting again." >&2
+      rm -rf "$JOBDIR" ;;
+  esac
+  other=""
+  for d in "$JOBS/$AREA".*; do
+    [ -d "$d" ] && [ "$d" != "$JOBDIR" ] || continue
+    case "$(job_state "$d")" in
+      running) other="$d"; break ;;
+      stale) rm -rf "$d" ;;
+      done) [ "$(job_age "$d")" -lt 3600 ] || rm -rf "$d" ;;
+    esac
+  done
+  if [ -n "$other" ]; then
+    echo "tw-test: other tests of $AREA are running (started $(job_get "$other" started), log $(job_get "$other" log)); these start after them"
+    job_wait "$other" "$DEADLINE"
+    [ $? -eq 2 ] && running "$other" "earlier tests of $AREA; yours start after them"
+    continue
+  fi
+  if [ "$FRESH" = 0 ] && [ -f "$RECORD" ]; then
+    hit=()
+    while IFS= read -r -d '' f; do hit+=("$f"); done < <(rec lookup "$RECORD" "$KEY" "$CMD")
+    if [ "${#hit[@]}" -eq 5 ]; then
+      show "${hit[0]}" "${hit[4]}" "${hit[3]}" "cached: $AREA files, command and selectors unchanged since the run at commit $(short "${hit[1]}"), ${hit[2]}; not run again, --fresh reruns"
+      t="$(now)"
+      rec make "$AREA" "$RUNROOT" "$HEAD" "$CLEAN" "$TREE" "$KEY" "$KEY" "$CMD" "$SELTEXT" "${hit[0]}" false 0 "$t" "$t" \
+        "${hit[3]}" true | rec write "" "$LOGDIR/runs.jsonl"
+      exit "${hit[0]}"
+    fi
+  fi
+  mkdir "$JOBDIR" 2>/dev/null || continue
+  LOG="$LOGDIR/$AREA-$(date -u +%Y%m%dT%H%M%SZ)-$(short "$HEAD" | cut -c1-7)-$ID.log"
+  printf '%s\n' "$AREA" > "$JOBDIR/area"; printf '%s' "$CMD" > "$JOBDIR/cmd"
+  printf '%s\n' "$RUNROOT" > "$JOBDIR/runroot"; printf '%s\n' "$LOG" > "$JOBDIR/log"
+  printf '%s\n' "$KEY" > "$JOBDIR/tree_key"; printf '%s\n' "$HEAD" > "$JOBDIR/head"
+  now > "$JOBDIR/started"
+  state=dirty; [ "$CLEAN" = true ] && state=clean
+  echo "tw-test: $LABEL at $(short "$HEAD") ($state tree$([ "$RUNROOT" = "$ROOT" ] || echo ", copy $RUNROOT")), full output -> $LOG"
+  export TEAMWRIGHT_ROOT="$ROOT" TEAMWRIGHT_CONFIG="$CFG" TEAMWRIGHT_LOG_DIR="$LOGROOT"
+  job_spawn "$JOBDIR" bash "$SELF" --_job "$JOBDIR" || { rm -rf "$JOBDIR"; die "cannot start the run"; }
+  mine=1
+done

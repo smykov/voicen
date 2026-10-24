@@ -31,6 +31,11 @@
 #    no status changes. Commits on remote wip branches never count as delivered: the
 #    DRAIN range of a later push ignores them. The pause still applies.
 #
+# 4. CI SKIP. A pushed tip whose message carries [skip ci] (or [ci skip], [no ci],
+#    [skip actions], ***NO_CI***, skip-checks: true) gets a warning, never a refusal: CI
+#    skips the whole push by the tip's message, so the code under a status commit and the
+#    head a pull request is opened from go unchecked (one project lost ~8 minutes on it).
+#
 # Human override, one-off: TEAMWRIGHT_ALLOW_PUSH=1 git push ...
 set -uo pipefail
 
@@ -61,9 +66,12 @@ blocked=""
 while read -r _lref lsha rref rsha; do
   [ -z "${lsha:-}" ] && continue
   case "$lsha" in *[!0]*) ;; *) continue ;; esac          # branch deletion
+  if git log -1 --format=%B "$lsha" 2>/dev/null | grep -qiE '\[(skip ci|ci skip|no ci|skip actions|actions skip)\]|\*\*\*NO_CI\*\*\*|^skip-checks: *true'; then
+    echo "pre-push: WARNING the pushed tip $(git rev-parse --short "$lsha") carries a CI-skip marker ([skip ci] ...): CI skips this whole push, including the code under it, and a pull request opened from it has no checks. Amend the message (or push one more commit without it)." >&2
+  fi
   [[ "${rref:-}" =~ $WIP_RE ]] && continue                 # wip branch: CI only, not a delivery
   if [ -z "${rsha:-}" ] || [ "$rsha" = "$ZERO" ] || ! git cat-file -e "$rsha" 2>/dev/null; then
-    range=("$lsha" --not "${delivered[@]}")
+    range=("$lsha" --not ${delivered[@]+"${delivered[@]}"})
   else
     range=("$rsha..$lsha")
   fi
@@ -101,7 +109,7 @@ for sha in sys.stdin.read().split():
             break
     if owner is None:
         for f in files:
-            m = re.match(r"^docs/tasks/([^/]+)\.md$", f)
+            m = re.match(r"^docs/tasks/(" + task.TASK_ID + r")\.md$", f)  # not _*-template.md
             if m and record(m.group(1)) is not None:
                 owner = m.group(1)
                 break

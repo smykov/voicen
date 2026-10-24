@@ -29,7 +29,7 @@ Template: `docs/tasks/_task-template.md`.
 | `status` | always | See the status machine below |
 | `sprint` | always | Sprint the task was **created** in; never changes |
 | `priority` | always | `P0`…`P3` by observable effect, not by importance to the author |
-| `depends_on` | optional | Task ids that must be `VERIFIED` or `DONE` first (the router's readiness rule, section 4) |
+| `depends_on` | optional | Task ids that must be `VERIFIED` or `DONE` first — or `CODE_COMPLETE` / `DEPLOYED` with `process.ready.after: code_complete` (the router's readiness rule, section 4) |
 | `deploys` | optional | `false` for work with no deployable artifact (docs, scripts, config) |
 | `surface` | always | What verification must exercise: `api` · `ui` · `both` · `none` (section 7). Left empty, the task cannot reach `VERIFIED` or `DONE` |
 | `verify_exception` | optional | One line: why the change cannot be checked by an api/ui test; the only thing that allows a `kind: manual` verify record. Reviewed like code |
@@ -85,13 +85,13 @@ stateDiagram-v2
     DONE --> [*]
 ```
 
-- `ANALYSIS` and `IN_PROGRESS` are transient: a task should not survive a session boundary in them.
+- `ANALYSIS` is transient: a task should not survive a session boundary in it — except with its analysis complete and committed, waiting for the tree's one `IN_PROGRESS` task to reach `NEEDS_REVIEW` (an analyze batch analyses several tasks, but moves one into `IN_PROGRESS`). `IN_PROGRESS` may, when its sub-stage is recorded in the task's `stage:` field (`red-tests | implement`) and the tree is clean — the next stage session picks it up there (`sessions.md` §8). Without the field (a task started before stages) the router derives the stage from the evidence, and the stage gate asks for `stage: implement` with its move to `NEEDS_REVIEW`; with uncommitted changes the next session resumes it.
 - Review verdicts are exactly `APPROVE | REQUEST_CHANGES | REJECT_RECURRENCE | ESCALATE`. The reviewer writes the record; the **orchestrator** changes the status according to it. `NEEDS_REVIEW → CODE_COMPLETE` requires a latest record with `APPROVE` written by the `code-reviewer` agent, never by the author (review gate).
 - A review returns the task only for a finding at or above the project's threshold (`process.review.blocking`, default `low` = any finding), a Critical one, or one of the always-blocking categories (`secret-leak`, `security`, `weakened-test`, `done-not-working`, `recurrence`); the review gate checks the verdict against the record's findings table. Findings below the threshold leave the task `APPROVE`d and become lines in the sprint's `review-follow-up` task.
 - Two `REQUEST_CHANGES` records in a row → stop. The task is not returned to the same author a third time, and the third attempt is not approved either: the third record's verdict is `ESCALATE` (owner) or `REJECT_RECURRENCE` (section 6) — the review gate refuses anything else. An `APPROVE` or `ESCALATE` ends the run, so a task back from `VERIFY_FAIL` or from an owner decision starts a new count.
 - **A recurrence never parks the original task in `BLOCKED`.** It goes to `DEFERRED` with `absorbed_by: <rca id>`. `BLOCKED` is reserved for "waiting for a person or for evidence". When escalated patches were parked as `BLOCKED`, nothing owned them: they piled up next to the root task, each was retried on its own, and the queue grew faster than it could be worked. `DEFERRED + absorbed_by` gives every such task an owner and a single exit — the root task.
 - `VERIFY_FAIL` goes back to `ANALYSIS`, not `IN_PROGRESS`: a failed verify means the analysis was wrong.
-- An acceptance `FAIL` from the `task-validator` (the verify record passed, but a mutation survived, docs drifted or a claim has no evidence) goes back to `IN_PROGRESS` with its findings, then through review again: the analysis held, the proof did not.
+- An acceptance `FAIL` from the `task-validator` (the verify record passed, but a mutation that breaks a stated guarantee survived, docs drifted or a claim has no evidence) goes back to `IN_PROGRESS` with its findings, then through review again: the analysis held, the proof did not.
 - `IN_PROGRESS → BLOCKED`: work stopped on a person or a decision (`sessions.md` §4), with the question in `blocked_on`. The task re-enters through `TODO` and keeps its analysis.
 - `DEPLOYED` means pushed during DRAIN. Whether anything was deployed is checked by the smoke in verification (section 7), not by the pipeline's status; no hook reads the pipeline.
 - When a root task reaches `DONE`, tasks it absorbed are **re-checked**, not auto-closed: close them only if their reproduction no longer fires.
@@ -101,8 +101,8 @@ stateDiagram-v2
 | Leaving… | …requires |
 |---|---|
 | `TODO → ANALYSIS` | Task is ready (section 4) |
-| `ANALYSIS → IN_PROGRESS` | `analysis` block filled with real evidence; recurrence check done (grep `docs/failures.md` and past tasks for the same class) |
-| `IN_PROGRESS → NEEDS_REVIEW` | Gate `make test` (or the project's `<gate command>`) green; a test that fails without the change (red-before-fix); docs touched by the change updated in the same commit; local commit, **no push** |
+| `ANALYSIS → IN_PROGRESS` | `analysis` block filled with real evidence; recurrence check done (grep `docs/failures.md` and past tasks for the same class); `stage: red-tests` set in the same edit (the stage gate) |
+| `IN_PROGRESS → NEEDS_REVIEW` | At `stage: implement` with `## Tests` filled and, for a task that changes code (unless `analysis: skipped:trivial`), its `### Failure branches` table (the stage gate); gate green — `scripts/tw-gate <area>` for each gate `scripts/tw-gate --for-task <ID>` lists, which runs the project's gate command once per state of the area's files and keeps the full log (a run over ~9 minutes: exit 75, the same command again attaches) (`gates.md`, [Gate runs](gates.md#gate-runs-tw-gate)); a test that fails without the change (red-before-fix); every Acceptance failure branch broken once by the test-writer's second spawn and caught by its test (`### Failure branches` under `## Tests`, checked by the reviewer); docs touched by the change updated in the same commit; local commit, **no push** |
 | `NEEDS_REVIEW → CODE_COMPLETE` | Latest review record `APPROVE` from the `code-reviewer` agent; findings fixed or filed; no principle violated without a recorded exception |
 | `CODE_COMPLETE → DEPLOYED` | Pushed during DRAIN (the `pre-push` hook checks every task in the tail); the deploy itself is proven later by the smoke (section 7) |
 | `DEPLOYED → VERIFIED` | A `PASS` verify record of each kind `surface` requires, for the deployed commit (section 7): API tests and/or an end-to-end UI test run per `surface`, including the **failure branch** from Acceptance, checked against data/logs — not against the system's own text output |
@@ -122,18 +122,22 @@ Per type, in addition:
 The "what next" list is derived, never curated by hand:
 
 ```
-ready = { status: TODO, every depends_on is VERIFIED or DONE,
+ready = { status: TODO, every depends_on is finished,
           blocked_on is empty or names only OQ-NN that are resolved }
 resolved = the question's Status cell in docs/open-questions.md starts with
            answered, dropped, closed, resolved or done
 order = effective priority (P0 > P1 > P2 > P3) → number of open tasks it blocks (desc) → id (asc)
 effective priority = the highest priority of the task itself and of every open task
                      that depends on it, directly or transitively
+finished = VERIFIED or DONE; with process.ready.after: code_complete also
+           CODE_COMPLETE or DEPLOYED
 ```
+
+With `code_complete` the dependent starts while the dependency's pipeline, deploy and verification still run. Its worktree is based on the dependency's branch when the dependency is not merged yet. A `VERIFY_FAIL` on the dependency is then a reason to re-check the dependent: the investigator of the reanalysis names the dependents it affects.
 
 A task that is not ready is not picked, even if it looks easy.
 
-The router, `tw-next.py`, lives in the plugin, not in the project: `/teamwright:flow` and `/teamwright:status` call it, and other runtimes run `python3 <kit>/scripts/tw-next.py --json` (`<kit>` = the plugin directory). It computes the next action deterministically from task files, review and verify records, journals, `.teamwright/current-task`, `TEAMWRIGHT_PAUSE` and git state. Its order: an interrupted or dirty task first (`resume`); then `ANALYSIS` / `IN_PROGRESS` (`continue`); `NEEDS_REVIEW` without a record (`review`); `CODE_COMPLETE` / `DEPLOYED` without a `PASS` verify record for the current code (`verify`) and `VERIFY_FAIL` (`reanalyze`); `BLOCKED` with an owner decision pending (`decide`); then the ready set above (`start`). Nothing left → `idle`; pause file → `paused`. Finishing started work before starting new work keeps tasks from surviving session boundaries in transient statuses.
+The router, `tw-next.py`, lives in the plugin, not in the project: `/teamwright:flow` and `/teamwright:status` call it, and other runtimes run `python3 <kit>/scripts/tw-next.py --json` (`<kit>` = the plugin directory). It computes the next action deterministically from task files, review and verify records, journals, `.teamwright/current-task`, `TEAMWRIGHT_PAUSE` and git state. Its order: unfinished work in the tree first — tracked changes, or a session that ended `interrupted` (`resume`); then `ANALYSIS` / `IN_PROGRESS` (`continue`, at the task's stage); `NEEDS_REVIEW` without a record (`review`); `CODE_COMPLETE` / `DEPLOYED` without a `PASS` verify record for the current code (`verify`) and `VERIFY_FAIL` (`reanalyze`); `BLOCKED` with an owner decision pending (`decide`); then the ready set above (`start`). Nothing left → `idle`; pause file → `paused`. Finishing started work before starting new work keeps tasks from piling up half-done. Every task-bound decision names its stage (analyze, red-tests, implement, review, verify); `process.stages` may hold a stage back until enough tasks wait there, and `/teamwright:router` runs one stage per session (`sessions.md` §8).
 
 ## 5. Commit convention
 
@@ -165,7 +169,7 @@ The failure mode this prevents: agents fix a class of bugs by adding one more `i
    - **(a)** like any task: `IN_PROGRESS` → red test for the invariant → fix → review → verify per its `surface` → `DONE`.
    - **(b) and (c)** produce no deployable code of their own. The owner's decision goes into `decision:` (and `docs/decisions.md`) before `IN_PROGRESS`; the task carries `deploys: false` and `surface: none`. In `IN_PROGRESS` the orchestrator and roles produce the artefacts — follow-up task records with `design_ref` (b), or the separate `PRINCIPLES.md` amendment commit (c), plus the `docs/failures.md` entry. Then `NEEDS_REVIEW`: a fresh code-reviewer checks the artefacts against the decision → `CODE_COMPLETE` → `DONE` (the verify gate needs no record for `deploys: false` + `surface: none`). The follow-up tasks run their own lifecycle; absorbed tasks are re-checked when those are `DONE`.
 4. **The rca task** also records the story in `docs/failures.md` and the decision in `docs/decisions.md` (+ area file).
-5. **Limits:** an `rca` task that itself hits recurrence stops the loop and goes to the owner (depth ≤ 1). One reviewed task may spawn at most two new tasks; more goes into one umbrella task.
+5. **Limits:** an `rca` task that itself hits recurrence stops the loop and goes to the owner (depth ≤ 1). One reviewed task may spawn at most two new tasks; more goes into one umbrella task (the review gate counts them, `gates.md` check 7).
 6. **Expect the next sprint to grow** — in the source process one sprint roughly tripled in task count once recurrences were split out. Growth here is the rule working (hidden debt becoming visible), not a planning failure.
 
 ```mermaid

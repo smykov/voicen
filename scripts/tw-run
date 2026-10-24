@@ -17,6 +17,11 @@
 #   cache:  [<dir>, ...]       persistent caches for docker: a relative dir lives in the
 #                              container's $HOME (kept in .teamwright/cache/<area>/home),
 #                              an absolute dir gets its own .teamwright/cache/<area>/ dir
+#   copy_env: {VAR: value}     environment for runs in a throwaway copy (TW_RUN_COPY=1, set
+#                              by scripts/tw-mutants): e.g. CARGO_TARGET_DIR: "{cache}/target",
+#                              so a copy neither builds from cold nor tramples the working
+#                              tree's build dir. `{cache}` = .teamwright/cache/<area>/copy of
+#                              the main checkout (mounted at /tw-copy-cache for docker)
 #
 # Docker: docker run --rm -u $(id -u):$(id -g) -v <root>:/work -w /work/<workdir>
 #   -e HOME=/tw-home -v <cache>:/tw-home <image> sh -c '<cmd> "$@"' sh <args>
@@ -25,6 +30,8 @@
 # config error.
 #
 # Environment: TEAMWRIGHT_ROOT (project root), TEAMWRIGHT_CONFIG (config file),
+# TW_CACHE_ROOT (whose .teamwright/cache holds the caches: a throwaway copy uses the main
+# checkout's, so its runs start warm), TW_RUN_COPY=1 (apply the area's copy_env),
 # TW_DOCKER (docker-compatible binary, e.g. podman), TW_RUN_PRINT=1 (print the
 # command instead of running it), TW_DOCKER_ARGS (extra `docker run` arguments).
 set -uo pipefail
@@ -61,17 +68,23 @@ if area is None:
 cache = area.get("cache") or []
 if isinstance(cache, str):
     cache = [cache]
+env = area.get("copy_env") or {}
+env = ["%s=%s" % (k, v) for k, v in sorted(env.items())] if isinstance(env, dict) else []
 out = [str(area.get("runner") or "host"), str(area.get("image") or ""),
-       str(area.get("workdir") or "").strip("/")] + [str(c) for c in cache]
+       str(area.get("workdir") or "").strip("/"), str(len(cache))] + [str(c) for c in cache] + env
 sys.stdout.write("".join(x + "\0" for x in out))
 PY
 fields=()
 while IFS= read -r -d '' f; do fields+=("$f"); done < <(
   python3 -c "$_tw_py" "$CONFIG_PY" "$CFG" "$AREA"
 ) || exit 2
-[ "${#fields[@]}" -ge 3 ] || exit 2
-RUNNER="${fields[0]}"; IMAGE="${fields[1]}"; WORKDIR="${fields[2]}"
-CACHE=("${fields[@]:3}")
+[ "${#fields[@]}" -ge 4 ] || exit 2
+RUNNER="${fields[0]}"; IMAGE="${fields[1]}"; WORKDIR="${fields[2]}"; NCACHE="${fields[3]}"
+CACHE=(); COPY_ENV=()
+[ "$NCACHE" -gt 0 ] && CACHE=("${fields[@]:4:$NCACHE}")
+[ "${#fields[@]}" -gt $((4 + NCACHE)) ] && COPY_ENV=("${fields[@]:$((4 + NCACHE))}")
+[ "${TW_RUN_COPY:-}" = 1 ] || COPY_ENV=()
+CROOT="${TW_CACHE_ROOT:-$ROOT}/.teamwright/cache/$AREA"
 case "$WORKDIR" in *..*) die "workdir must stay inside the project: $WORKDIR" ;; esac
 
 script="$1 \"\$@\""
@@ -84,6 +97,11 @@ run() {
 case "$RUNNER" in
   host)
     cd "$ROOT/${WORKDIR:-.}" 2>/dev/null || die "workdir not found: $WORKDIR"
+    for kv in ${COPY_ENV[@]+"${COPY_ENV[@]}"}; do
+      v="${kv#*=}"; case "$v" in *"{cache}"*) mkdir -p "$CROOT/copy" 2>/dev/null || true ;; esac
+      v="$(printf '%s' "$v" | sed "s|{cache}|$CROOT/copy|g")"
+      export "${kv%%=*}=$v"
+    done
     run sh -c "$script" sh "$@" ;;
   docker)
     [ -n "$IMAGE" ] || die "area '$AREA': runner docker needs image"
@@ -92,7 +110,7 @@ case "$RUNNER" in
       echo "tw-run: $DOCKER not found - not runnable (install Docker or set runner: host)" >&2
       exit 127
     fi
-    c="$ROOT/.teamwright/cache/$AREA"
+    c="$CROOT"
     mkdir -p "$c/home" 2>/dev/null || true
     args=(run --rm -u "$(id -u):$(id -g)" -v "$ROOT:/work" -w "/work${WORKDIR:+/$WORKDIR}"
           -e HOME=/tw-home -v "$c/home:/tw-home")
@@ -104,6 +122,13 @@ case "$RUNNER" in
         *) mkdir -p "$c/home/$d" 2>/dev/null || true ;;   # lives in the persisted $HOME
       esac
     done
+    if [ "${#COPY_ENV[@]}" -gt 0 ]; then
+      mkdir -p "$c/copy" 2>/dev/null || true
+      args+=(-v "$c/copy:/tw-copy-cache")
+      for kv in "${COPY_ENV[@]}"; do
+        args+=(-e "${kv%%=*}=$(printf '%s' "${kv#*=}" | sed 's|{cache}|/tw-copy-cache|g')")
+      done
+    fi
     [ -t 0 ] && [ -t 1 ] && args+=(-it)
     # shellcheck disable=SC2206
     [ -n "${TW_DOCKER_ARGS:-}" ] && args+=(${TW_DOCKER_ARGS})

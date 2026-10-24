@@ -12,8 +12,11 @@ verdict: PASS
 # otherwise the verdict is stale and a new round is needed
 commit: <sha>
 validator: task-validator
-# sample (3-6 targeted mutations) | sweep (every condition, guard, return and write in the
-# changed code). After two FAIL rounds in a row the gate accepts only sweep or NEEDS_OWNER.
+# sample (the catalog re-run + 15-30 new mutants aimed at the guarantees and the task's
+# changed lines) | sweep (the catalog re-run + every condition, guard, return and write on
+# the task's changed lines; the whole seam only for a `critical: true` task).
+# After two FAIL rounds in a row the gate accepts only sweep or NEEDS_OWNER; after two
+# sweep rounds with FAIL, only NEEDS_OWNER.
 method: sample
 ---
 
@@ -25,6 +28,8 @@ method: sample
 
 **Verification**: <verify/<n>.md — kind — PASS/FAIL> | surface none
 **Gate** (run by validator): <command — result>
-**Mutations** (<sample|sweep>): <n> applied, <k> killed, <e> equivalent — re-run: <test-writer's wrong implementations from `## Tests`, earlier rounds' mutations> — <surviving: file:line — what was changed>
+**Mutations** (<sample|sweep>): catalog `docs/tasks/<ID>.mutants/` — <n> re-run, <a> added this round; <k> killed, <e> equivalent — `scripts/tw-mutants` summary: <line> — also re-run by hand: <test-writer's wrong implementations from `## Tests`> | none
+**Survivors that break a guarantee** (each fails the round): <mutant — the Acceptance/DoD guarantee it breaks> | none
+**Follow-ups** (survivors that break no stated guarantee; not a FAIL): <mutant — what it changed> | none
 **Review**: round N — APPROVE | missing
 **Needs owner**: <action> | none

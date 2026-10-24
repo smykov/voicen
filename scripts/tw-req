@@ -19,6 +19,9 @@ import os
 import re
 import sys
 
+# a task record is docs/tasks/<ID>.md - not a template, not a side file like T-089.history.md
+TASK_FILE = re.compile(r"(?:%s)\.md" % os.environ.get("TEAMWRIGHT_TASK_ID_RE", r"[A-Z][A-Z0-9]*-\d+"))
+
 ROOTS = ("specs", "openspec", "docs")
 SKIP = ("docs/tasks/", "docs/process/", "docs/process-reviews/")
 
@@ -105,7 +108,7 @@ def collect(root, rid, max_lines):
     tdir = os.path.join(root, "docs", "tasks")
     if os.path.isdir(tdir):
         for f in sorted(os.listdir(tdir)):
-            if f.endswith(".md") and not f.startswith("_") and rx.search(read(os.path.join(tdir, f))):
+            if TASK_FILE.fullmatch(f) and rx.search(read(os.path.join(tdir, f))):
                 st, title = task_line(os.path.join(tdir, f))
                 res["tasks"].append({"task": f[:-3], "status": st, "title": title})
     if rid.startswith("OQ-"):

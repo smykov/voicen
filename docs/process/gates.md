@@ -19,16 +19,19 @@ them as `python3 <kit>/scripts/tw-install.py ...`, where `<kit>` is the plugin d
 
 | Gate | Where it runs | Tier | Prevents |
 |------|---------------|------|----------|
-| [Analysis gate](#analysis-gate) | Claude Code `PreToolUse` (Edit/Write/Bash) + `PostToolUse` | T3 | Coding before the root cause is known |
-| [Review gate](#review-gate) | Claude Code `PreToolUse` (Edit/Write/Bash) | T3 | Self-review, skipped review, endless review loops, recurrence accepted as a patch |
-| [Verify gate](#verify-gate) | Claude Code `PreToolUse` (Edit/Write/Bash) | T3 | "Done" that does not work in the running system |
+| [Analysis gate](#analysis-gate) | Claude Code `PreToolUse` (Edit/Write/Bash) + `PostToolUse` | T3 | Coding before the root cause is known; a task handed to review from the red-tests stage |
+| [Review gate](#review-gate) | Claude Code `PreToolUse` (Edit/Write/Bash) + `PostToolUse` | T3 | Self-review, skipped review, endless review loops, recurrence accepted as a patch |
+| [Verify gate](#verify-gate) | Claude Code `PreToolUse` (Edit/Write/Bash) + `PostToolUse` | T3 | "Done" that does not work in the running system |
 | [Journal](#journal) | Claude Code tool, permission and stop events | — (facts) | Metrics and gates built on self-report |
 | [Deny list](#deny-list) | `.claude/settings.json` permissions | T3 | Destroying uncommitted work or shared history |
 | [Patch guard](#patch-guard) | git `commit-msg` | T2 (warns; blocking is opt-in) | "One more `if`" fixes in an area already fixed before |
 | [DRAIN / pause](#drain-and-pause) | git `pre-push` | T3 | Unapproved work leaving the machine; pushes during a pause |
 | [Secret scan](#secret-scan) | git `pre-commit` (CI only if the project adds it) | T3 | Tokens, keys, `.env`, local settings in history |
-| [Guard trigger](#guard-trigger) | git `pre-commit` | T3 | A guard written without the P-020 design step (`checker: true`, `analysis.decides_on`) |
 | [CLAUDE.md budget](#claudemd-budget) | Claude Code `SessionStart` + git `pre-commit` | T2 | A context file that grows into a second docs folder |
+| [Gate runs](#gate-runs-tw-gate) | `scripts/tw-gate <area>`, called by the developer, the flow, the reviewer and the validator | T1 (tooling) | The same full gate run by four roles on the same code; gate output lost to `\| tail`; a docs commit invalidating the cache; a gate cut by the 10-minute Bash limit; the server suite run for a CI-only change |
+| [Test guard](#test-guard) | Claude Code `PreToolUse` (Bash) + `scripts/tw-test <area> [tests]` | T3 (own switch `process.test_guard`, blocks by default) | Tests and gates run directly — with the wrong workers, flags that break fixtures — and their output cut with `\| tail`, then run again to see what failed |
+| [Mutation checks](#mutation-checks-tw-mutants) | `scripts/tw-mutants <area> <ID>`, called by the test-writer and the validator; the stop rules in the verify gate | T1 (tooling) + T3 (stop rules) | Mutation rounds without an end: every sweep a new, larger list, any survivor a FAIL, the runner started once per mutant |
+| [Guard trigger](#guard-trigger) | git `pre-commit` | T3 | A guard written without the P-020 design step (`checker: true`, `analysis.decides_on`) |
 
 All files live in `scripts/hooks/`. Install the git hooks once per clone:
 
@@ -95,6 +98,11 @@ install manifest and the ledgers are not the agents' to change:
   are covered by the review gate (5).
 - `tw-install.py` runs only from the main session (a subagent is denied; it hands the
   proposal file to the main session).
+- Running a hook is refused: `bash scripts/hooks/review-gate.sh`, `./scripts/hooks/…`,
+  `cd scripts/hooks && …`, `sh -c` with one, and interpreter code that imports the hook
+  helpers (`scripts/hooks`, `_hookio`). Hooks are run by Claude Code and git with the
+  runtime's input; a gate fed a hand-made payload would write a genuine-looking ledger
+  line or stamp. Reading them (`cat`, `grep`, `git diff`) is fine.
 - Owner override: a person runs `TEAMWRIGHT_OWNER=1 python3 <kit>/scripts/tw-install.py apply ...`
   outside Claude Code, or edits the file by hand. The variable is ignored when
   `CLAUDECODE` is set (every Claude Code tool call), and agent commands that mention
@@ -123,10 +131,40 @@ root cause cost a full review round; the same seam was reopened five times in a 
    `$TEAMWRIGHT_TASK`) is not `IN_PROGRESS` or has no complete analysis. Files under
    `docs/`, `.claude/`, `.github/`, `.teamwright/` and top-level `*.md` are not code.
    If no active task is declared, this check does nothing.
-3. A shell command that rewrites a task status in `docs/tasks/` (`sed -i`, `perl -i`,
-   `>`, `tee`) — status changes must go through Edit/Write so the gates see them.
+3. A shell command that creates or replaces a task record in `docs/tasks/` (`>`, `tee`,
+   `cp` / `mv` / `install` onto it — the whole record, with or without a `status:`), or
+   rewrites its status in place (`sed -i`, `perl -i`) — records and status changes go
+   through Edit/Write so the gates see them.
    Appending (`>>`, `tee -a`) is allowed: it lands after the front matter, where `status:`
-   is never read, so a note cannot change the task's state.
+   is never read, so a note cannot change the task's state. The same holds for a command
+   that rewrites the `stage:` field — recognised by the keys or by their values
+   (`perl -pi -e 's/red-tests/implement/'`, `sed -i 's/ANALYSIS/IN_PROGRESS/'`).
+   Also refused: an old version put back (`git checkout <rev> -- <record>`, `git restore`,
+   `git stash pop|apply` or `git apply|am` of changes that touch a record), `dd of=<record>`,
+   and interpreter one-liners that name a record and write (after `cd docs/tasks` too) —
+   best effort, like every shell parser here.
+4. **Stage order** — an edit of `docs/tasks/<ID>.md` that breaks the order of the
+   `stage:` field, the sub-stage of `IN_PROGRESS` (`sessions.md` §8). Not opt-in:
+   - a value other than `red-tests` or `implement`;
+   - **entering `IN_PROGRESS` without a stage** in the same edit: from `TODO`, `ANALYSIS`
+     or `VERIFY_FAIL` it is `stage: red-tests` (the red tests come first); a send-back
+     (from `NEEDS_REVIEW`, a verified status, `BLOCKED`) may set `red-tests` or
+     `implement`;
+   - removing the field from an `IN_PROGRESS` task;
+   - **`stage: implement` while `## Tests` is empty** (nothing but the template
+     placeholder): the red-tests stage fills it and sets the stage in the same edit;
+   - **`IN_PROGRESS → NEEDS_REVIEW`** unless the task is at `stage: implement` (a task
+     started before stages sets it in that edit), `## Tests` is filled, and — when the
+     task changes code — `## Tests` has the `### Failure branches` table of the
+     test-writer's bite. *Changes code*: a commit whose message names the task id, or a
+     tracked uncommitted change in the tree, touches a code file — anything outside
+     `docs/`, `.teamwright/`, `.claude/`, `.github/` and top-level `*.md`
+     (`TEAMWRIGHT_NONCODE_RE`, the rule of check 2; `_task.code_changed`). An rca exit
+     (b)/(c), a docs-only task, or a task with `analysis: skipped:trivial` (a version bump,
+     a typo in code — no failure branch to break; never an rca task) needs no table.
+   `red-tests → implement` and back (`implement → red-tests`, or either value when review
+   or verification return the task to `IN_PROGRESS`) pass. `gate-first` warns, `enforce`
+   blocks, as for every check.
 
 **Deliberate exits** (all stay visible in the task file)
 
@@ -137,6 +175,8 @@ root cause cost a full review round; the same seam was reopened five times in a 
 | Root cause cannot be proven with current evidence | `ANALYSIS → BLOCKED` with `blocked_on: <reason>` (what evidence or person it waits for) |
 | Instance of a known root | `absorbed_by: <rca task>` + `DEFERRED` |
 | The task *is* the investigation | `type: rca` with root cause + evidence + decision |
+| A red test turns out wrong during implement | `stage: red-tests` in the same edit as the note why; the test-writer rewrites it |
+| No red tests are possible (rca exit (b)/(c), no code) | `## Tests: none — <why>` and `stage: implement` |
 
 **Active task.** The gate keeps `.teamwright/current-task` itself: on `PostToolUse` (the
 edit has landed) it writes the task id when the task is `IN_PROGRESS` and clears the
@@ -178,7 +218,9 @@ rca_task: T-050             # required with REJECT_RECURRENCE
    task. The hook records every agent (`session_id:agent_id`) that starts
    (`→ IN_PROGRESS`) or submits (`→ NEEDS_REVIEW`) a task in
    `.teamwright/sessions/<ID>.dev`, and every review round it lets through, with its
-   author and verdict, in `.teamwright/sessions/<ID>.reviews.jsonl`. A send-back
+   author and verdict, in `.teamwright/sessions/<ID>.reviews.jsonl` — once the write
+   has landed (`PostToolUse`). The record's
+   `task:` must be the task whose `.reviews/` directory it is written to. A send-back
    (`NEEDS_REVIEW → IN_PROGRESS`) is not recorded as development.
 2. `→ CODE_COMPLETE` unless the latest round says `APPROVE` and
    - its ledger entry shows it was written by a `code-reviewer` agent that did not
@@ -187,7 +229,18 @@ rca_task: T-050             # required with REJECT_RECURRENCE
      spawned for this task in that session — the task id must appear in the spawn's
      description or prompt. A top-level `claude --agent code-reviewer` session has no
      spawn and needs none;
-   - `reviewer` differs from the task's `implemented_by` (when set).
+   - when this checkout has no review ledger for the task at all (a status move on a
+     fresh checkout — an autonomous job), the round's committed stamp
+     `docs/tasks/<ID>.reviews/<n>.gate.json` (*Gate stamps* below) stands in for the
+     ledger entry and the journaled spawn, as long as it matches the record. Where the
+     ledger exists it alone decides, as before stamps: a round it does not have is not
+     recognised, whatever the stamp says;
+   - the record's `task:` names this task (a review copied from another task's
+     directory does not count), and the stamp names this task, record and round;
+   - `reviewer` differs from the task's `implemented_by` (when set);
+   - the approval is newer than the task's latest failed check (a `FAIL` verify or
+     acceptance record): an `APPROVE` from before a `VERIFY_FAIL` does not carry over,
+     even when the code did not change — the task needs a fresh review round.
    Who moves the status (normally the orchestrator) does not matter; who wrote the
    approval does.
 3. A review with `REJECT_RECURRENCE` whose `rca_task` does not point to an existing
@@ -199,7 +252,16 @@ rca_task: T-050             # required with REJECT_RECURRENCE
    the task). An `APPROVE` or `ESCALATE` ends a run: a task that comes back after
    `VERIFY_FAIL`, or after the owner's decision on an escalation, starts a new count.
    Deny messages quote the counted rounds.
-5. Shell commands that write review records or the `.teamwright/` ledgers and journal.
+5. Shell commands that write review records or the `.teamwright/` ledgers and journal,
+   and any shell write that targets a review, verify or validation record directory or a
+   stamp (`docs/tasks/<ID>.reviews|verify|validation/`, `*.gate.json`): redirects, `tee`,
+   `cp` / `mv` / `install` / `rsync` / `ln` onto them (also a directory copied *into*
+   `docs/tasks/`), `rm`, `dd of=`, `sed -i` / `perl -i`, `tar` / `unzip` into them,
+   `find … -delete|-exec`, `git checkout|restore|mv|rm` of them, `git stash pop|apply` and
+   `git apply|am` of changes that touch them, `sh -c` with any of these, and interpreter
+   one-liners (python, node, perl, ruby …) that name such a path and write — after a `cd`
+   or `pushd` too. Reading, `ls`, `git add` and `git commit` are fine. Best effort: a path
+   built at run time or a script file is not seen (*Known limitations*).
 6. With `process.review.blocking` set in `.teamwright/config.yml` (the owner's threshold,
    `low` | `medium` | `high`): an `APPROVE` whose findings table holds a blocking
    row, or a `REQUEST_CHANGES` with none. The findings table is the first table with a
@@ -211,6 +273,24 @@ rca_task: T-050             # required with REJECT_RECURRENCE
    threshold are follow-ups: the task is approved and the flow collects them into one
    `review-follow-up` task per sprint. Without the key nothing here is checked (every
    finding may send the task back, as before settings existed).
+7. **A review that spawns more than two tasks** (`lifecycle.md` §6: one reviewed task
+   spawns at most two new tasks; more goes into one umbrella task). Creating a new
+   `docs/tasks/<ID>.md` counts toward the review of task R when the session's latest
+   spawn by its main agent was a `code-reviewer` naming R (the journal); a later spawn
+   of another role closes that window, a reviewer's own helper spawns do not. Both the
+   reviewer (an rca task) and the orchestrator (the sprint's follow-up task) count. The
+   third new record is refused — append to an existing record (the follow-up task, one
+   umbrella task) instead, or ask the owner. Counted per reviewed task and spawn in
+   `.teamwright/sessions/<R>.new-tasks.jsonl`; re-creating the same id is not a new
+   task. In `gate-first` the third one warns and is counted. A record created outside
+   Edit/Write (a shell redirect, `cp`, a script) is not seen when it is written, so the
+   count is taken again when R's status leaves `NEEDS_REVIEW` in that window: every
+   `docs/tasks/<ID>.md` added in a commit since the reviewer's spawn, or new in the tree
+   (untracked or added to the index) and written since then, counts. Limit:
+   `TEAMWRIGHT_REVIEW_NEW_TASKS` (2). The seam is the review gate because it already
+   reads the reviewer spawns from the journal: the session's stage is only declared at
+   its end (`Stage:`), so the reviewer spawn is the one fact available while the review
+   runs.
 
 **Human review.** A person reviewing outside Claude Code writes the record with
 `reviewer: human:<name>` and commits it. The gate accepts that record only when no agent
@@ -287,7 +367,9 @@ may be empty).
      `docs/sprints/`, `docs/process-reviews/`, `docs/decisions.md`,
      `docs/open-questions.md` — a decision naming the task is not a code change). If no
      commit names the task, the record must verify `HEAD` itself;
-   - each counted record matches its ledger entry (kind, result, commit), or is a
+   - each counted record matches its ledger entry (kind, result, commit) — or, when this
+     checkout has no verify ledger for the task at all, its committed stamp `<n>.gate.json`
+     (*Gate stamps*) — or is a
      person's committed record (`verifier: human:<name>`, no ledger entry).
 4. `kind: manual` without `verify_exception` in the task (at write time and at the
    transition); with the exception, at least one fresh manual `PASS` must come from an
@@ -297,17 +379,22 @@ may be empty).
 6. Acceptance verdicts are validation records, `docs/tasks/<ID>.validation/<n>.md`
    (`verdict: PASS | FAIL | NEEDS_OWNER`, `commit:`, `validator: task-validator`,
    template `docs/tasks/_validation-template.md`): written only by `task-validator`,
-   only with Edit/Write, append-only, next round only, commit must resolve; ledger
+   only with Edit/Write, append-only (an edit or overwrite of an existing verify or
+   acceptance round is denied in every mode, `gate-first` too: an edited record keeps
+   no stamp), next round only, commit must resolve; ledger
    `.teamwright/sessions/<ID>.validation.jsonl`. Entering `DONE` needs the latest round
-   `PASS`, matching its ledger entry, for the task's current code (same freshness rule as
+   `PASS`, matching its ledger entry (or, with no validation ledger for the task, its committed stamp), for the task's current code (same freshness rule as
    verify records) — for every `surface`, including `deploys: false` + `surface: none`,
    where it is the only check. A round whose file is gone while the ledger has it blocks
    `DONE` (`TEAMWRIGHT_VALIDATOR_AGENT`, default `task-validator`). After two `FAIL`
-   rounds in a row the next round must be `method: sweep` (every condition, guard,
-   return and write of the changed code mutated, earlier rounds' mutations and the
-   test-writer's wrong implementations re-run) or `verdict: NEEDS_OWNER`: sampled
-   mutations find one survivor per round, so a third sample does not end the loop — the
-   same stop rule as two `REQUEST_CHANGES` in review.
+   rounds in a row the next round must be `method: sweep` (the catalog
+   `docs/tasks/<ID>.mutants/` re-run, then every condition, guard, return and write on
+   the task's changed lines mutated) or `verdict: NEEDS_OWNER`: sampled mutations find
+   one survivor per round, so a third sample does not end the loop — the same stop rule
+   as two `REQUEST_CHANGES` in review. After two **sweep** rounds with `FAIL` (since the
+   last `PASS` or `NEEDS_OWNER` round) the next verdict must be `NEEDS_OWNER`, not a third
+   sweep: each sweep finds new survivors on the same code. See
+   [Mutation checks](#mutation-checks-tw-mutants).
 
 **Deliberate exits** (all stay visible in the task file)
 
@@ -337,7 +424,7 @@ the agent's report.
 | `PreToolUse`, `PostToolUse`, `PostToolUseFailure` | `tools.jsonl` | tool call: `ts`, `event` (`pre`/`post`/`failure`), `session_id`, `agent_id`, `agent_type`, `tool`, `detail`; Agent calls add `subagent_type`, `task_ids` (ids in the spawn description, else the first id in the prompt) |
 | `PermissionRequest`, `PermissionDenied` | `perms.jsonl` | permission decision needed / call denied (`PermissionDenied` fires for auto-mode denials; a deny-rule refusal shows as a `pre` line with no `post`) |
 | `PostToolUse` of Edit/Write on `docs/tasks/<ID>.verify/<n>.md` | `verify.jsonl` | verify record landed: task, round, kind, tool, environment, result, commit (never the command or the body) |
-| `Stop`, `SubagentStop` | `outcomes.jsonl` | session or subagent end: `outcome` from the final message's `Outcome: barrier\|idle\|escalate\|interrupted` line — `last_assistant_message`, else the last assistant text in the transcript (`none` if missing; `outcome_source`: message / transcript / none); a `Stop` without the line while an agent the session launched has not finished is `waiting` (`outcome_source: open-agent`), and so is a `Stop` whose final message ends on the flow's `waiting for <role> on <ID>` line (`outcome_source: waiting-line`) — active task and its status, the agent's tool-call count |
+| `Stop`, `SubagentStop` | `outcomes.jsonl` | session or subagent end: `outcome` from the final message's `Outcome: barrier\|idle\|escalate\|interrupted` line — `last_assistant_message`, else the last assistant text in the transcript (`none` if missing; `outcome_source`: message / transcript / none); a `Stop` without the line while an agent the session launched has not finished is `waiting` (`outcome_source: open-agent`), and so is a `Stop` whose final message ends on the flow's `waiting for <role> on <ID>` line (`outcome_source: waiting-line`) — active task and its status, the agent's tool-call count; `stage` from a `Stage: analyze\|red-tests\|implement\|review\|verify\|flow` line, and `batch` / `batch_reason` from `Batch: <ids> - <why>` (the tasks the session chose from the router's candidates); `tokens` — model usage of the agent's transcript so far, per model (`input`, `output`, `cache_read`, `cache_write`; cumulative; `Stop`: the session's own lines from `transcript_path`, `SubagentStop`: `agent_transcript_path`; `{}` without a path), read incrementally with the offset kept under `.teamwright/logs/.tokens/` |
 | any gate warning or denial | `gates.jsonl` | `event: gate`, `gate`, `decision` (`warn` / `deny`), session, agent, tool, first line of the reason — written by the gates themselves (`_hookio.deny`) |
 
 `detail` classifies a call, it never replays it: program + subcommand of a shell command
@@ -481,6 +568,13 @@ settings files into commits. Once pushed, a secret has to be rotated, not delete
   `python3 <kit>/scripts/tw-install.py scan` reports the same classes with a summary and fails only on
   secret-like findings.
 
+**Gate stamps.** The same hook refuses a staged new or changed stamp
+(`docs/tasks/<ID>.<reviews|verify|validation>/<n>.gate.json`) that matches no line of the
+task's local ledger (`.teamwright/sessions/`: same round, writer, verdict), where that
+ledger exists — the gate writes both together, so a stamp without its line was not
+written by the gate on this machine. Without the ledger (a fresh clone) it is not
+checked (*Gate stamps*).
+
 **False positive:** add `teamwright:allow-secret` (or `gitleaks:allow`) to the line.
 **Deliberate bypass** (human, rare): `git commit --no-verify` — and say why in review.
 The kit installs no CI workflow. `--no-verify` skips the hook, so a project that wants a
@@ -527,6 +621,237 @@ commands that fix it. `TEAMWRIGHT_SESSION_CHECK=0` turns it off.
 
 ---
 
+## Gate runs (tw-gate)
+
+`scripts/tw-gate <area>|--top [--fresh]`, `--for-task <ID>`, `--for-diff <base>`,
+`--stop <area>|--top` · T1 (tooling: nothing refuses a role that skips it)
+
+**Incidents it prevents.** One small task took about 90 minutes in an autonomous run, and
+the area's full gate (about 10 minutes) ran five times on the same code: the developer
+twice (it cut the output with `tail -8` and could not see the result), the flow's Gate
+step, the code-reviewer and the task-validator. In another project the gate ran five
+times for one task, three of them on docs-only changes that invalidated a whole-tree
+cache (10–14 minutes each); a validator ran the server suite for a CI-only change; and a
+gate over Claude Code's 10-minute Bash limit was cut, its test container killed and the
+run started over, or polled in `until grep …; sleep` loops.
+
+**What it runs.** Exactly the gate the role files name, from `.teamwright/config.yml`:
+the area's `generate_command` first when it has one, then the area's `gate_command`,
+both through `scripts/tw-run <area> -- ...`; an area without its own `gate_command` runs
+the top-level `gate_command` as written, from the project root.
+
+**What it keeps.** The whole output in `<logs>/gate/<area>-<time>-<commit>.log`
+(`<logs>` = `$TEAMWRIGHT_LOG_DIR` or `.teamwright/logs/`, gitignored); the last run in
+`<logs>/gate/<area>.json` (`_top.json` for `--top`: area, root, head, clean, tree,
+tree_after, key, key_after, scope, exit, pass, cacheable, duration_s, started, finished,
+log, command); every run and every cached answer appended to `<logs>/gate/runs.jsonl`.
+On screen: `PASS` or `FAIL`, exit code, duration, the last 30 lines of a failure, and the
+log path. Exit code = the gate's (`generate_command`'s when that failed); 75 while it is
+still running (below); 2 for a usage or config error.
+
+**Detached run, bounded wait.** Claude Code stops a Bash call after 10 minutes, so the
+run itself lives in its own session and process group (`scripts/hooks/_job.sh`; Python's
+`start_new_session`, which works on macOS too) and writes to its log; the call waits up
+to `TW_WAIT_SECONDS` (default 540). Finished in time: the normal result and exit code.
+Not yet: `RUNNING: gate <area> (pid N), started <when>, log <path> - run the same command
+again to keep waiting`, exit **75**. The same command again attaches to that run — same
+area, same content key, same command — instead of starting another, and waits again; a
+result that finished while nobody waited is printed by the next same call (once: a FAIL
+is then never reused). A run of the same area on other content is waited for first (the
+toolchain, containers and build directories are shared). `--fresh` never starts a second
+run next to a running one: it attaches to it. A run whose process is gone without a
+result (killed) is reported, cleaned up and started again; a killed or interrupted
+caller leaves the run going; `--stop` sends TERM to its process group. Jobs live in
+`<logs>/gate/jobs/`. Roles never wrap tw-gate in sleep loops or background calls.
+
+**When it does not rerun.** The cache key is the content of the area's files: the
+working tree as git sees it (HEAD plus every tracked and untracked change, ignored files
+left out — a temporary index, `git add -A`, `git write-tree`), restricted to the area's
+scope — its `source_dirs`, `test_dirs` and `workdir`; the dependency manifests and
+lockfiles at the project root and the workdir (Makefile, justfile, package.json and the
+lockfiles, pyproject.toml, Cargo.toml/.lock, go.mod/.sum, pubspec.yaml/.lock, Gradle and
+Maven files, Gemfile, composer.json, Dockerfile, compose files, ...);
+`.teamwright/config.yml`; the gate scripts (`tw-gate`, `tw-run`, `hooks/_config.py`,
+`hooks/_job.sh`); and every repository file the area's `generate_command` or
+`gate_command` names (`sh ../tools/check.sh` adds `tools/check.sh`). An area without
+`source_dirs` and `test_dirs`, an area that runs the top-level gate, and `--top` key on
+the whole tree, as before. When the area's last record is a PASS for the same key, root
+and command, and the key did not change while it ran, tw-gate prints
+`PASS (cached: same commit <sha>, <when>, log <path>)`, `same tree … as the run at
+commit …` (changes not committed yet) or `<area> files unchanged since the run at commit
+…` (only files outside the scope changed — docs, task records, another area) and exits 0.
+So the developer's PASS before the commit answers the flow, the reviewer and the
+validator, and a docs commit after it does not cost another run. Never reused: a FAIL, a
+run during which the area's files changed (the gate or `generate_command` wrote files, or
+someone edited meanwhile — tw-gate warns when the tree changed), another command, and
+anything after `--fresh`.
+
+**Which gates a task needs.** `scripts/tw-gate --for-task <ID>` (the files of the
+commits whose message names the task, plus uncommitted and untracked ones) or
+`--for-diff <base>` prints one line per gate: each area whose `source_dirs`, `test_dirs`
+or `workdir` holds a changed file, and `--top` when a file lies outside every area (every
+area's name instead when there is no top-level `gate_command`). Process records, `docs/`,
+Markdown, CI configuration (`.github/`, `.gitlab-ci.yml`, `.circleci/`, ...) and tool
+settings (`.claude/`, `.teamwright/`, `.serena/`, `.mcp.json`, licence and git
+metadata files) outside the areas need no local gate — CI checks its own configuration;
+`$TEAMWRIGHT_NO_GATE_RE` replaces that pattern. Nothing printed: no suite runs. The
+reviewer, the validator and the flow's Gate step run exactly the listed gates.
+
+A cached PASS is the tool's own record of a run on the same content, not an agent's
+report; the reviewer and the validator still compare `git status` before and after, and
+their verdict stays theirs. Files the gate depends on but git ignores (build caches,
+downloaded dependencies) are outside the key — `--fresh` when they matter.
+
+## Test guard
+
+`scripts/hooks/test-guard.sh` (Claude Code `PreToolUse`, Bash) and `scripts/tw-test` · T3
+
+**Incident it prevents.** In one project's autonomous run the test-writer, after fixing
+one test, ran the same ~4-minute suite four times in a row: twice through
+`… pytest -q -n 1 … tests/pipeline 2>&1 | grep -E "passed|failed" | tail -15` (the
+failures were cut off and lost), once with its output in a file but with
+`-p no:logging`, which removed the `caplog` fixture and produced 25 false errors, and
+once right — about 12 minutes lost, and with one worker instead of the configured
+`PYTEST_WORKERS`. The developer ran the project's gate script directly twice. The role
+files already said "never cut output, run long commands once with output to a file";
+agents ignored it, so the tooling enforces it.
+
+**The rule.** Tests run only through `scripts/tw-test`, gates through `scripts/tw-gate`,
+mutants through `scripts/tw-mutants`; lint, build and code generation through
+`scripts/tw-run <area> -- <cmd>`.
+
+**What the hook refuses** (one message naming the command to run instead and saying to
+read the log it prints):
+
+1. A test runner or gate called directly: `pytest`, `python -m pytest|unittest`,
+   `make test|tests|check|test-*`, `flutter|dart|deno|bun|go test`, `cargo test|nextest`,
+   `npm|pnpm|yarn [run] test[:*]`, `vitest`, `jest`, `phpunit`, `pest`,
+   `php artisan test`, `gradle(w) test|check`, `mvn test` — also behind `uv run`,
+   `poetry run`, `npx`, `pnpm exec` and the like, inside `sh -c '…'`, `eval`,
+   `docker run|exec`, a wrapper script's arguments, and inside
+   `scripts/tw-run <area> -- <cmd>`; plus every command the config names: each area's
+   `gate_command`, `test_command` and `test_select_command` and the top-level
+   `gate_command` (a repository script such as `tool/gate.sh` by its name, a
+   `make check`-style command by its first words), and the regular expressions in the
+   top-level `test_runner_patterns: [...]`.
+2. Test or gate output — the wrappers' own included — piped into `grep`, `tail`, `head`,
+   `sed`, `awk`, `cut`, `wc`, `sort`, `less`: the wrappers already print a summary and
+   keep the whole output in a log. Reading that log with `grep` or `sed -n` is fine.
+
+**What it allows.** The wrappers; `scripts/tw-run <area> -- <cmd>` for anything that is
+not a test run, and for the area's own `lint_command`, `generate_command`,
+`api_test_command` and `e2e_ui_command` (verification against a running service runs as
+rendered); everything else. The wrappers' internal runs go through `scripts/tw-run`
+inside the script, never through the Bash tool, so the hook never sees them. The command
+is parsed (quotes, pipes, `&&`, heredocs), not grepped: `git commit -m "fix pytest"` or
+`echo pytest` pass.
+
+**Mode — its own switch.** `gate-first` only warns, and this guard exists to stop
+agents, so it does not follow `mode:`. `process.test_guard: block | warn | off` in
+`.teamwright/config.yml` (default `block`, also in `gate-first`); `TW_TEST_GUARD=block|warn|off`
+in the environment Claude Code is started with wins — the human escape. An assignment
+inside the agent's command (`TW_TEST_GUARD=off pytest`) does not reach the hook, and
+agents cannot edit `config.yml` (state guard).
+
+**`scripts/tw-test <area> [selector ...] [--fresh] [--tree <copy>]`**, `--stop <area>`:
+
+- **Command:** the area's `test_select_command` with `{tests}` replaced by the selectors
+  (test files, node ids, filters, shell-quoted), e.g.
+  `test_select_command: "pytest -q -n ${PYTEST_WORKERS:-4} {tests}"`; without it the
+  selectors are appended to `test_command`; with none, `test_command` as written. Workers
+  and other knobs stay in the config string; tw-test knows no test framework. It runs
+  through `scripts/tw-run <area>` from the area's workdir, so selectors are relative to it.
+- **Output:** the whole output in `<logs>/test/<area>-<time>-<commit>-<id>.log`; on
+  screen PASS/FAIL, the exit code, the duration, the counts when the output is
+  recognisable (pytest, cargo test, go test, flutter/dart test, jest, vitest), the failed
+  tests with their first error line (at most 30), otherwise the last 15 lines, and the
+  log path. Exit code = the test command's.
+- **Cache:** keyed by the area's files (the same area-scoped key as tw-gate, plus files
+  the test command names), the resolved command and the selectors, in
+  `<logs>/test/cache/`. An identical repeat prints the cached summary and the log path —
+  a FAIL too, unlike the gate: the answer to a failure is its log, not another run.
+  `--fresh` runs anyway. Not reused: a run during which the files changed, exit 126/127
+  (not runnable), a killed run. Every run and cached answer is appended to
+  `<logs>/test/runs.jsonl`.
+- **Long runs:** detached and waited for up to `TW_WAIT_SECONDS`, like tw-gate: `RUNNING: tests <area> … - run the same command again to keep waiting`, exit 75; the
+  same command attaches. Another test run of the same area is waited for first.
+- **`--tree <copy>`:** runs in a throwaway copy (`TEAMWRIGHT_ROOT=<copy>`,
+  `TW_RUN_COPY=1`, the main checkout's caches) — the test-writer's wrong implementations
+  and the validator's hand-run tests; logs stay in the project.
+
+## Mutation checks (tw-mutants)
+
+`scripts/tw-mutants <area> <ID> --tree <copy> [--check] [--only <name>]` · T1 (tooling);
+the stop rules are the verify gate's (T3, check 6 above)
+
+**Incident it prevents.** Mutation testing in acceptance had no stopping point: every
+sweep wrote a new, larger list of mutants and found new survivors, and any survivor
+failed the task. One task failed acceptance four times, each time on a new gap in one CI
+step; one sweep ran about 109 mutants × 40 s, over an hour. Each mutant also started the
+area's runner (a container) again, which cost more than its tests.
+
+**The rules** (the kit's default for every project; a project narrows them in its own
+role files and records why in `docs/decisions.md`). Mutants on the task's diff are
+evidence for the reviewer and the validator, not a gate on every line — the practice at
+Google, where mutants on changed lines are shown in code review as hints (Petrović,
+Ivanković, "State of Mutation Testing at Google", ICSE-SEIP 2018; Petrović, Ivanković,
+Fraser, Just, "Practical Mutation Testing at Scale: A view from Google", IEEE TSE 2021,
+arXiv 2102.11378).
+
+1. **Severity.** Acceptance fails only on a surviving mutant that breaks a stated
+   Acceptance/DoD guarantee, and the mutant names that guarantee. Other survivors are
+   follow-ups in the validation record, not a `FAIL`.
+2. **Budget.** A `sample` round: 15–30 mutants aimed at the guarantees and the task's
+   changed lines. A `sweep` (and the test-writer's sweep for `checker: true`): every
+   condition, guard, return and write on the task's changed lines, not the whole seam.
+   A whole-seam sweep only for a `critical: true` task — code whose failure loses or
+   corrupts data (sync, recovery after a restore, data deletion).
+3. **Catalog in the repository**, `docs/tasks/<ID>.mutants/`: one `<NN>-<slug>.mutant`
+   file per mutant — `guarantee:` (`-` for none), `file:`, `added_by:`, optional `test:`
+   and `equivalent: <why>`, then the exact replacement between `--- old`, `--- new` and
+   `--- end` (the old text must occur exactly once) — and `test-command`, the command
+   that runs only the task's tests. The test-writer starts it; each validation round
+   re-runs it first and then only adds. It is a process record (like the rest of
+   `docs/tasks/`), so committing it does not make a verdict stale.
+4. **Stop.** Two `FAIL` rounds in a row → the next is a sweep or `NEEDS_OWNER`; two
+   sweep rounds with `FAIL` → the next verdict is `NEEDS_OWNER` (accept the rest as
+   follow-ups, or rethink the task). The verify gate refuses anything else.
+5. **Machine mutation tools** (mutmut, PIT, Stryker, cargo-mutants) stay off the
+   acceptance path: a project that wants them runs them in a scheduled CI job whose
+   survivors become follow-ups.
+
+**What the tool does.** `--tree` is a throwaway copy (a `git worktree`), never the
+working tree — tw-mutants refuses the project root. It checks every entry against the
+copy, writes the mutated files and one POSIX `sh` loop into `<copy>/.tw-mutants/`, and
+runs the loop in **one** `scripts/tw-run <area>` start with the copy as the project root:
+the task's tests once unmutated (the baseline must be green, otherwise every mutant
+would look killed), then for each mutant put the mutated file in place, run its tests,
+put the original back. For `runner: docker` the container mounts the copy, so the copy
+must be on a path the Docker host can see: create it with `mktemp -d` (it honours
+`$TMPDIR`), never a hardcoded `/tmp` inside an agent's container. Output: one line per
+mutant (`killed`, `SURVIVED … breaks: <guarantee>`, `survived, follow-up`, `equivalent`)
+and a summary, also kept in `<logs>/mutants/<ID>-<time>.txt`. Exit 0 when no survivor
+breaks a guarantee, 1 when one does, 2 for a usage error or a catalog entry that no
+longer matches the code, 3 for a red baseline, 4 when `generate_command` failed in the
+copy, 75 while it is still running, the runner's code (e.g. 127) when it cannot start.
+`--check` validates the catalog without running anything.
+
+**A copy that does not start from cold.** A fresh worktree has no generated code
+(ignored files) and an empty build directory. When the area has a `generate_command`:
+with `generated: [paths]` (its outputs, relative to the project root) declared and the
+copy's inputs equal to the working tree's — `generate_inputs: [paths]` when declared,
+else the whole tree without ignored files, the outputs and `.tw-mutants/` — tw-mutants
+copies the outputs from the working tree into the copy; otherwise `generate_command`
+runs in the copy inside the same runner start, before the baseline (one project spent
+~5 minutes of `build_runner` on every clean copy). Runs in the copy get `TW_RUN_COPY=1`,
+which applies the area's `copy_env` (e.g. `CARGO_TARGET_DIR: "{cache}/target"`; `{cache}`
+is `.teamwright/cache/<area>/copy` of the main checkout, mounted at `/tw-copy-cache` for
+`runner: docker`), and `TW_CACHE_ROOT=<project root>`, so docker areas reuse the main
+checkout's package caches. `scripts/tw-mutants <area> --tree <copy> --prepare` does only
+this step, for a copy whose tests are run by hand. The catalog run is detached and waited
+for like tw-gate (exit 75, the same command again attaches; another run of the same task
+is waited for first); a copy with a running catalog is kept until it returns.
+
 ## Environment variables
 
 Set by the person who starts Claude Code or runs git; agents cannot change the state
@@ -542,19 +867,84 @@ guard's variables. Unset means the default.
 | `TEAMWRIGHT_CODE_STATUSES` | analysis gate | statuses of the active task in which code may be edited (`IN_PROGRESS`) |
 | `TEAMWRIGHT_NONCODE_RE` | analysis gate | paths that are not code (`docs/`, `.claude/`, `.github/`, `.teamwright/`, top-level `*.md`) |
 | `TEAMWRIGHT_REVIEWER_AGENT` | review gate | the reviewer's `agent_type` (`code-reviewer`) |
+| `TEAMWRIGHT_REVIEW_NEW_TASKS` | review gate | new task records one review may create (`2`) |
 | `TEAMWRIGHT_ESCALATE_AFTER` | review gate | `REQUEST_CHANGES` rounds in a row before the next record must escalate (`2`) |
-| `TEAMWRIGHT_LOG_DIR` | journal, review gate | journal directory (`.teamwright/logs`) |
+| `TEAMWRIGHT_LOG_DIR` | journal, review gate, `scripts/tw-gate`, `scripts/tw-test`, `scripts/tw-mutants` | journal directory (`.teamwright/logs`); gate logs and records go to its `gate/` subdirectory, test logs to `test/`, mutant reports to `mutants/` |
 | `TEAMWRIGHT_GATE_LOG` | Claude Code gates | a file that gets one plain line per warning or denial: time, gate, `WARN`/`DENY`, first line of the reason (off) |
 | `TEAMWRIGHT_PAUSE_FILE` | `pre-push`, router | pause file (`TEAMWRIGHT_PAUSE` at the repository root) |
 | `TEAMWRIGHT_PUSH_STATUSES` | `pre-push` | statuses whose code may be pushed (`CODE_COMPLETE DEPLOYED VERIFIED DONE`) |
 | `TEAMWRIGHT_DOC_PATHS_RE` | `pre-push` | commits touching only these paths belong to no task (`^(docs\|specs\|openspec)/\|^(PRINCIPLES\|AGENTS\|CLAUDE)\.md$`) |
 | `TEAMWRIGHT_WIP_REFS_RE` | `pre-push` | remote refs that are CI-only pushes, not deliveries (`^refs/heads/wip/`) |
+| `TEAMWRIGHT_TASK_BRANCH_RE` | router, progress report | a branch that names a task worked in its own worktree, group 1 = the id (`^(?:tw\|task)/(<task id>)(?:$\|[-_/.])`) |
 | `TEAMWRIGHT_ALLOW_PUSH=1` | `pre-push` | one-off human override of DRAIN |
 | `PATCH_GUARD=off` | patch guard | one-off human override |
 | `TEAMWRIGHT_CLAUDE_MD_MAX_KB` | CLAUDE.md budget | warning threshold in KB (`40`, set in `.claude/settings.json` → `env`) |
 | `TEAMWRIGHT_SESSION_CHECK` | session check | `0` turns it off (on) |
-| `TEAMWRIGHT_ROOT`, `TEAMWRIGHT_CONFIG` | `scripts/tw-run` | another project root or config file |
+| `TEAMWRIGHT_PLUGIN_DIR` | session check | the directory a plugin was loaded from (`--plugin-dir`, Agent SDK): taken as installed, its version (`plugin.json`, else the directory's git commit) compared with the recorded one (unset) |
+| `TW_TEST_GUARD` | test guard | `block`, `warn` or `off`, set by the person who starts Claude Code; wins over `process.test_guard` |
+| `TEAMWRIGHT_ROOT`, `TEAMWRIGHT_CONFIG` | `scripts/tw-run`, `scripts/tw-gate`, `scripts/tw-test`, `scripts/tw-mutants` | another project root or config file |
+| `TW_WAIT_SECONDS`, `TW_POLL_SECONDS` | `scripts/tw-gate`, `scripts/tw-test`, `scripts/tw-mutants` | how long a call waits for the detached run (default 540; `0` = start or attach and return 75 at once) and how often it looks (default 0.2 s, then 1 s) |
+| `TEAMWRIGHT_NO_GATE_RE` | `scripts/tw-gate --for-task`, `--for-diff` | files outside every area that need no local gate (records, docs, Markdown, CI and tool configuration by default) |
+| `TW_RUN_COPY`, `TW_CACHE_ROOT` | `scripts/tw-run` (set by `scripts/tw-mutants`) | apply the area's `copy_env`; whose `.teamwright/cache` holds the runner's caches |
 | `TEAMWRIGHT_OWNER=1` | installer (in the kit) | owner override outside Claude Code; ignored when `CLAUDECODE` is set |
+
+## Gate stamps
+
+The ledgers (`.teamwright/sessions/`) and the journal (`.teamwright/logs/`) are local and
+gitignored. A session that writes a review, verify or acceptance record and a later
+session that moves the task's status do not always share them: in an autonomous run each
+job starts from a fresh checkout. A job cut after the reviewer's `APPROVE` (or the
+validator's `PASS`) was committed but before the status move would then loop — the next
+job's gate finds no ledger entry and refuses, the router sends the same stage again.
+
+So when the review gate lets a review record through, and the verify gate a verify or
+validation record, the gate also writes `<n>.gate.json` next to it: the writer's
+`session_id`, `agent_id` and `agent_type`, the round, the verdict (verify: kind, result,
+commit; validation: verdict, commit), for a review whether the reviewer's spawn was
+journaled, the record it belongs to (`task`, `path`, `round`) and the sha256 of the
+record as written. The ledger line and the stamp are written when the write has landed
+(`PostToolUse`, with the record on disk equal to what the gate checked): a write the gate
+allowed that another hook then refused, the person cancelled or that failed leaves
+neither — no orphan stamp, no ledger round "written but gone" that would block the task.
+A stamp without its record (from a pre-release of 0.12) is ignored and removed by the
+verify gate. A stamp counts only for the record it names: copied with its record
+into another task's directory or another round it does not count, and the gates also
+check that a review or acceptance record's `task:` is the task it is counted for. The stage commits it with the record.
+A status move on a checkout that has **no ledger of that kind for the task at all** (a
+fresh clone) uses the stamp instead, when it matches the record on disk. Where the ledger
+exists it alone decides, as in 0.11: a round it lacks is not recognised whatever its stamp
+says — so do not restore `.teamwright/sessions` from a cache that may be older than the
+last job (`docs/usage.md`, *Autonomous runs*).
+
+What it keeps, what it does not:
+
+- **The same checks.** The stamp says what the ledger says: written by a `code-reviewer`
+  (`task-validator`) through the gate, after the write-time checks (not the implementer,
+  the verdict rules, the findings threshold), with the spawn journaled. A record changed
+  after its stamp does not match the hash and does not count; a stamp with
+  `spawned: false` does not pass without the journal.
+- **Not tamper-proof.** Only the gates write stamps: the state guard refuses Edit/Write
+  to them and running a hook by hand, and the review gate refuses shell writes into the
+  record directories (check 5, a best-effort parser). The stamps are not signed: anyone
+  who can run a script that computes a sha256 and writes a file can make one, and the
+  gates cannot tell. What limits that: on a checkout with the task's ledger the stamp is
+  not consulted at all; the git `pre-commit` hook refuses a staged stamp that matches no
+  line of the local ledger, where that ledger exists; a stamp names its task, record and
+  round, so a copy does not count elsewhere; and stamps are in git — a forged one is a
+  reviewable file in a diff, and `git log` says which commit brought it. On a fresh
+  checkout (CI) the stamp is all the gate has: review what the jobs commit.
+- **Records from before stamps.** A review, verify or acceptance record written by a kit
+  before 0.12 has no stamp. On a checkout without the task's ledger it still counts when
+  git shows it was last changed in a commit *before* the commit that moved
+  `.teamwright/installed.json` from a pre-0.12 kit to a stamping one, and the working copy
+  is that committed version (`_hookio.legacy_record`): the 0.11 gate checked it in the
+  session that wrote it. A project installed at 0.12 or later has no such records.
+- **The implementer check stays at write time.** The status move in a later session has no
+  `.dev` ledger; whether the reviewer implemented the task was checked when the review was
+  written. One stage per job also means the reviewer's session is never the implementer's.
+- **The journal is still local.** Tool calls, outcomes and tokens per stage do not survive
+  a fresh checkout; keep `.teamwright/logs` (and `.teamwright/sessions`) between jobs with a
+  cache or a workspace that is not cleaned (`docs/usage.md`, *Autonomous runs*).
 
 ## Overriding deliberately
 
@@ -566,10 +956,17 @@ gate is wrong or the process is — record it in `docs/failures.md` and fix the 
 ## Known limitations
 
 - Claude Code gates see Edit/Write and obvious shell rewrites; a determined script
-  (e.g. Python writing the file) bypasses them. Git hooks and review are the backstop.
-- Ledgers and the journal are local (`.teamwright/`, gitignored): a review written by
-  an agent on another machine is not recognised — record it as `reviewer: human:<name>`
-  after a person checked it, or run the review where the work was done.
+  (e.g. Python writing the file from a script file, or a path assembled at run time)
+  bypasses them. Git hooks and review are the backstop. The same holds for gate stamps
+  on a fresh checkout, where no local ledger can contradict them (*Gate stamps*).
+- Ledgers and the journal are local (`.teamwright/`, gitignored). The gate stamps committed
+  with review, verify and validation records carry what a later status move needs
+  (*Gate stamps*). A review, verify or acceptance record written before 0.12 has no stamp;
+  on a checkout without its ledger it counts when it was last changed in a commit before
+  the one that moved `installed.json` from a pre-0.12 kit to a stamping one, and the tree
+  holds that version (*Gate stamps*). A record without a stamp committed after the upgrade
+  is not recognised — record it as `reviewer: human:<name>` after a person checked it, or
+  run the review where the work was done.
 - One `.teamwright/current-task` per working tree; parallel sessions need worktrees.
 - The state guard parses shell commands; a script file that writes
   `.teamwright/config.yml` without the command naming it, or a path built at run time,
@@ -577,6 +974,12 @@ gate is wrong or the process is — record it in `docs/failures.md` and fix the 
   file like code (it is committed), and `tw-install.py` refuses lowering the mode.
 - The review gate trusts `agent_type`: anyone who can edit `.claude/agents/` can name
   an agent `code-reviewer`. Review changes to agent definitions like code.
+- The review gate's new-task count (check 7) attributes a new record by the journal's
+  spawns, not by its content: a task the orchestrator creates after the review for an
+  unrelated reason, before spawning another role, counts toward that review; a task
+  created through the shell is counted when the reviewed task's status leaves
+  `NEEDS_REVIEW` (git), not when it is written; the analysis gate refuses shell writes that
+  create or replace a task record.
 - `review: skipped:trivial` is declared in the task record by whoever edits it, the
   author included. It is visible to the validator, to later reviews of the history and
   to metrics, not prevented.

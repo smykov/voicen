@@ -26,8 +26,21 @@
 #       from `last_assistant_message`; when the runtime does not send it (or it
 #       has no Outcome line), from the last assistant text in the transcript
 #       (`transcript_path`, `agent_transcript_path` for a subagent).
-#       `outcome_source` says which: message | transcript | none. A Stop with no
+#       `outcome_source` says which: message | transcript | none. `stage` is the
+#       stage the session ran, from its `Stage: <analyze|red-tests|implement|review|
+#       verify|flow>` line - the last one in the message, the end block ('' when none;
+#       SubagentStop lines leave it empty; a flow session runs several stages and records
+#       `flow`: its tokens are the whole session's, per-stage numbers come from stage
+#       sessions); `batch`
+#       and `batch_reason` are the tasks the session chose from the router's candidates
+#       and its one-line reason, from `Batch: T-1 T-2 - <reason>`. A Stop with no
 #       Outcome line while an agent this session launched has not finished yet is
+#       `tokens` is the model usage of this agent's transcript so far, per model:
+#       {model: {input, output, cache_read, cache_write}} - cumulative, from
+#       `transcript_path` (Stop: the session's own lines, sidechains left out) or
+#       `agent_transcript_path` (SubagentStop); {} when the runtime sends no path.
+#       Read incrementally: the offset per transcript is kept in
+#       .teamwright/logs/.tokens/ (a dot directory: tool state, not a journal).
 #       `outcome: waiting`, `outcome_source: open-agent` (the runtime ran the role in
 #       the background; the session resumes on its result); so is a Stop whose final
 #       message ends on the flow's "waiting for <role> on <ID>" line
@@ -138,6 +151,12 @@ elif ev in ("PermissionRequest", "PermissionDenied"):
 
 elif ev in ("Stop", "SubagentStop"):
     OUT_RE = re.compile(r"(?im)^\W*outcome\W*[:=]\s*\W*(barrier|idle|escalate|interrupted)\b")
+    # the stage the session ran (`Stage: implement` in the end block of a stage command,
+    # `Stage: flow` for a flow run of several stages)
+    STAGE_RE = re.compile(r"(?im)^\W*stage\W*[:=]\s*\W*(analyze|red-tests|implement|review|verify|flow)\b")
+    # the batch the session chose from the router's candidates, and why:
+    # `Batch: T-1 T-2 - disjoint seams, same area`
+    BATCH_RE = re.compile(r"(?im)^\W*batch\W*[:=]\s*(.+)$")
     # the flow's line for a turn that ends while a role runs in the background
     WAIT_RE = re.compile(r"(?im)^\W*waiting for [\w.-]+ on [A-Za-z][\w.]*-\d+\W*$")
 
@@ -217,9 +236,81 @@ elif ev in ("Stop", "SubagentStop"):
                 finished[r["agent_type"]] = finished.get(r["agent_type"], 0) + 1
         if any(n > finished.get(t, 0) for t, n in launched.items()):
             outcome, src = "waiting", "open-agent"
+    # the LAST match: a message quotes an earlier `Stage:` / `Batch:` (the router's answer, a
+    # previous step) above its own end block, which is always the bottom of the message
+    sm = (list(STAGE_RE.finditer(text)) or [None])[-1] if ev == "Stop" else None
+    bm = (list(BATCH_RE.finditer(text)) or [None])[-1] if ev == "Stop" else None
+    batch = ID_RE.findall(bm.group(1).split(" - ")[0].split("\u2014")[0]) if bm else []
+    reason = ""
+    if bm:
+        rest = re.split(r"\s(?:-|\u2014|:)\s", bm.group(1), 1)
+        reason = clean(rest[1], 160) if len(rest) > 1 else ""
+    def usage(path, sidechains):
+        """Cumulative token usage of a transcript, per model. Reads only what was appended
+        since the last call (offset kept per transcript); a message written as several
+        lines (one per content block) is counted once."""
+        import hashlib, json
+        if not path:
+            return {}
+        path = os.path.expanduser(str(path))
+        sdir = os.path.join(logdir, ".tokens")
+        sfile = os.path.join(sdir, hashlib.sha1(path.encode("utf-8", "replace")).hexdigest()[:16] + ".json")
+        try:
+            stt = json.load(open(sfile))
+        except (OSError, ValueError):
+            stt = {}
+        off, last, sums = int(stt.get("offset") or 0), stt.get("last") or "", stt.get("sums") or {}
+        try:
+            with open(path, "rb") as fh:
+                fh.seek(0, 2)
+                if fh.tell() < off:          # rewritten transcript: start over
+                    off, last, sums = 0, "", {}
+                fh.seek(off)
+                chunk = fh.read()
+        except (OSError, TypeError, ValueError):
+            return sums
+        end = chunk.rfind(b"\n") + 1        # a partly written last line waits for the next call
+        for line in chunk[:end].decode("utf-8", "replace").splitlines():
+            try:
+                r = json.loads(line)
+            except ValueError:
+                continue
+            msg = r.get("message") if isinstance(r, dict) else None
+            if not isinstance(msg, dict) or not isinstance(msg.get("usage"), dict):
+                continue
+            if r.get("isSidechain") and not sidechains:
+                continue
+            mid = str(msg.get("id") or r.get("requestId") or r.get("uuid") or "")
+            if mid and mid == last:
+                continue
+            last = mid
+            u = msg["usage"]
+            m = sums.setdefault(clean(str(msg.get("model") or "unknown"), 60),
+                                {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0})
+            for k, f in (("input", "input_tokens"), ("output", "output_tokens"),
+                         ("cache_read", "cache_read_input_tokens"),
+                         ("cache_write", "cache_creation_input_tokens")):
+                try:
+                    m[k] += int(u.get(f) or 0)
+                except (TypeError, ValueError):
+                    pass
+        try:
+            os.makedirs(sdir, exist_ok=True)
+            with open(sfile, "w") as fh:
+                json.dump({"offset": off + end, "last": last, "sums": sums}, fh)
+        except OSError:
+            pass
+        return sums
+
+    try:
+        tokens = usage(data.get("agent_transcript_path") if ev == "SubagentStop"
+                       else data.get("transcript_path"), ev == "SubagentStop")
+    except Exception:
+        tokens = {}
     io.append_jsonl(os.path.join(logdir, "outcomes.jsonl"), dict(
-        base, event=ev, outcome=outcome, outcome_source=src,
-        current_task=cur, task_status=st, tool_calls=calls))
+        base, event=ev, outcome=outcome, outcome_source=src, stage=sm.group(1).lower() if sm else "",
+        batch=batch[:10], batch_reason=reason,
+        current_task=cur, task_status=st, tool_calls=calls, tokens=tokens))
 PY
 python3 -c "$_tw_py" >/dev/null 2>&1
 exit 0

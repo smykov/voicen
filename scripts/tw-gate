@@ -1,0 +1,525 @@
+#!/usr/bin/env bash
+# tw-gate — run an area's full gate once, keep its whole output, reuse a PASS on the same
+# code, and outlive the caller's command time limit. Tier T1 (tooling, not a gate).
+#
+#   scripts/tw-gate <area> [--fresh]      the area's gate
+#   scripts/tw-gate --top [--fresh]       the top-level gate_command
+#   scripts/tw-gate --for-task <ID>       which gates a task needs (one per line: area names, --top)
+#   scripts/tw-gate --for-diff <base>     the same for the changes since <base> (incl. uncommitted)
+#   scripts/tw-gate --stop <area>|--top   stop a running gate (TERM to its process group)
+#
+# WHY. The developer, the flow's Gate step, the code-reviewer and the task-validator each
+# ran the full gate (minutes per run) on the same code; an agent that cut the output with
+# `| tail` had to run it again; a docs-only commit invalidated the cache; and a gate over
+# Claude Code's 10-minute command limit was cut, restarted, or polled in sleep loops.
+#
+# WHAT IT RUNS (the same source of truth as make check in the role files,
+# .teamwright/config.yml): the area's `generate_command` first when it has one, then the
+# area's `gate_command`, both through `scripts/tw-run <area> -- ...`; an area without its
+# own gate_command runs the top-level `gate_command` as written, from the project root.
+#
+# DETACHED RUN, BOUNDED WAIT. The run is started in its own session and process group
+# (scripts/hooks/_job.sh) and writes everything to its log; the command waits for it up to
+# TW_WAIT_SECONDS (default 540, under the 10-minute limit). Finished in time -> the normal
+# result and exit code. Not yet -> one line
+#   RUNNING: gate <area> (pid N), started <when>, log <path> - run the same command again to keep waiting
+# and exit 75. The same command again attaches to that run (same area, same content, same
+# command) instead of starting another, and waits again; a result nobody was waiting for is
+# printed by the next same call. Never wrap tw-gate in a sleep loop or a background call.
+# A run of the same area on other content is waited for first (the area's toolchain, its
+# containers and build dirs are shared). `--fresh` never starts a second run next to a
+# running one: it attaches to it (that run is real, not a cached answer). A run whose
+# process is gone without a result (killed) is cleaned up and started again. Ctrl-C or a
+# killed caller leaves the run going; `--stop` ends it.
+#
+# RECORD. Full output: <logs>/gate/<area>-<UTC time>-<commit>.log, where <logs> is
+# $TEAMWRIGHT_LOG_DIR or .teamwright/logs (gitignored). <logs>/gate/<area>.json holds the
+# last run (`_top.json` for --top): area, root, head, clean, tree, tree_after, key,
+# key_after, scope, exit, pass, cacheable, duration_s, started, finished, log, command;
+# every run (and every cached answer) is also appended to <logs>/gate/runs.jsonl. Running
+# and uncollected runs: <logs>/gate/jobs/.
+#
+# CACHE KEY. `tree` is the content of the working tree as git sees it — HEAD plus every
+# tracked and untracked change, ignored files left out (a temporary index, `git add -A`,
+# `git write-tree`). The cache key is that tree restricted to the area's scope: its
+# source_dirs, test_dirs and workdir, the dependency manifests and lockfiles at the
+# project root and at the workdir (Makefile, package.json, Cargo.toml, pubspec.yaml, ...),
+# .teamwright/config.yml, the gate scripts (tw-gate, tw-run, hooks/_config.py,
+# hooks/_job.sh) and every repository file the area's generate/gate command names. A
+# commit that touches only files outside the scope (docs, task records, another area)
+# keeps the PASS. An area with neither source_dirs nor test_dirs, an area that runs the
+# top-level gate, and --top use the whole tree. A PASS is reused when the last record of
+# the area is a PASS on the same key, root and command, and the key did not change while
+# it ran:
+#   PASS (cached: same commit <sha>, <when>, log <path>)            clean tree at that commit
+#   PASS (cached: same tree <tree> as the run at commit <sha>, ...)   uncommitted changes
+#   PASS (cached: <area> files unchanged since the run at commit <sha>, ...)  only other files changed
+# A FAIL is never reused; `--fresh` always reruns.
+#
+# WHICH GATES (--for-task, --for-diff). The changed files — of the commits whose message
+# names the task, or `git diff <base>`, plus uncommitted and untracked ones — map to the
+# areas whose source_dirs, test_dirs or workdir hold them. A file outside every area runs
+# the top-level gate (--top; every area's gate when there is none), except process records,
+# docs and Markdown, CI configuration and tool settings, which no local gate checks
+# (.github/, .gitlab-ci.yml, .claude/, .teamwright/, ...; $TEAMWRIGHT_NO_GATE_RE replaces
+# the pattern). Nothing printed = no local gate needed; a CI-only change runs no suite.
+#
+# OUTPUT: PASS or FAIL, exit code, duration, the last 30 lines on a failure, the log path.
+# Exit code = the gate's (generate_command's when that failed); 75 still running; 2 on a
+# usage or config error. Environment: TEAMWRIGHT_ROOT, TEAMWRIGHT_CONFIG,
+# TEAMWRIGHT_LOG_DIR, TW_WAIT_SECONDS, TW_POLL_SECONDS (default 1), TEAMWRIGHT_NO_GATE_RE.
+set -uo pipefail
+
+die() { echo "tw-gate: $*" >&2; exit 2; }
+usage="usage: scripts/tw-gate <area>|--top [--fresh] | --for-task <ID> | --for-diff <base> | --stop <area>|--top"
+AREA=""; FRESH=0; TOP=0; STOP=0; FOR=""; FORARG=""; JOB=""; KEYONLY=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --fresh) FRESH=1; shift ;;
+    --top) TOP=1; shift ;;
+    --stop) STOP=1; shift ;;
+    --for-task|--for-diff) [ $# -ge 2 ] || die "$usage"; FOR="$1"; FORARG="$2"; shift 2 ;;
+    --_job) [ $# -ge 2 ] || die "$usage"; JOB="$2"; shift 2 ;;   # internal: the detached run
+    --_key) KEYONLY=1; shift ;;   # internal (scripts/tw-test): print tree, key, head, clean of the area's scope
+    -h|--help) echo "$usage"; exit 0 ;;
+    -*) die "unknown option $1; $usage" ;;
+    *) [ -z "$AREA" ] || die "$usage"; AREA="$1"; shift ;;
+  esac
+done
+if [ -z "$FOR" ]; then
+  [ -n "$AREA" ] || [ "$TOP" = 1 ] || die "$usage"
+  [ -z "$AREA" ] || [ "$TOP" = 0 ] || die "$usage"
+fi
+
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SELF="$here/$(basename "${BASH_SOURCE[0]}")"
+if [ -n "${TEAMWRIGHT_ROOT:-}" ]; then ROOT="$TEAMWRIGHT_ROOT"
+elif [ -d "$here/../.teamwright" ]; then ROOT="$(cd "$here/.." && pwd)"
+else ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"; fi
+cd "$ROOT" || die "project root not found: $ROOT"
+ROOT="$(pwd)"
+CFG="${TEAMWRIGHT_CONFIG:-$ROOT/.teamwright/config.yml}"
+CONFIG_PY="$ROOT/scripts/hooks/_config.py"
+[ -f "$CONFIG_PY" ] || CONFIG_PY="$here/hooks/_config.py"
+JOB_SH="$ROOT/scripts/hooks/_job.sh"
+[ -f "$JOB_SH" ] || JOB_SH="$here/hooks/_job.sh"
+TW_RUN="$ROOT/scripts/tw-run"
+[ -f "$TW_RUN" ] || TW_RUN="$here/tw-run"
+command -v python3 >/dev/null 2>&1 || die "python3 is required to read $CFG"
+[ -f "$CONFIG_PY" ] || die "scripts/hooks/_config.py not found"
+[ -f "$JOB_SH" ] || die "scripts/hooks/_job.sh not found"
+[ -f "$TW_RUN" ] || die "scripts/tw-run not found"
+# shellcheck source=hooks/_job.sh
+. "$JOB_SH"
+
+# ---- which gates a change needs -------------------------------------------------------
+if [ -n "$FOR" ]; then
+  git rev-parse --git-dir >/dev/null 2>&1 || die "$FOR needs a git repository"
+  if [ "$FOR" = --for-diff ]; then
+    git rev-parse --verify -q "$FORARG^{commit}" >/dev/null || die "--for-diff: no commit '$FORARG'"
+    changed="$(git diff --name-only "$FORARG" -- 2>/dev/null)"
+  else
+    # Only the task's own commits: on a branch, those since it left the default branch (a
+    # commit on main that merely mentions the id in its body is not the task's, e.g. a CI fix
+    # "after the run of T-051"); everywhere, a commit whose subject names this id first - task
+    # commits carry it there (`feat(srv): T-7 ...`); an id only in the body is a mention.
+    range=""
+    def="$(git symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null)"
+    [ -n "$def" ] || for b in origin/main origin/master main master; do
+      git rev-parse --verify -q "$b^{commit}" >/dev/null && { def="$b"; break; }; done
+    if [ -n "$def" ] && [ "$(git rev-parse --abbrev-ref HEAD 2>/dev/null)" != "${def#origin/}" ]; then
+      mb="$(git merge-base HEAD "$def" 2>/dev/null)"
+      [ -n "$mb" ] && [ "$mb" != "$(git rev-parse HEAD)" ] && range="$mb..HEAD"
+    fi
+    changed="$(git log --format='%x01%H%n%B%x02' ${range:+"$range"} 2>/dev/null | python3 -c '
+import re, subprocess, sys
+tid = sys.argv[1]
+for rec in sys.stdin.read().split("\x01")[1:]:
+    sha, _, msg = rec.partition("\n")
+    subject = msg.split("\x02")[0].strip().split("\n")[0]
+    ids = re.findall(r"(?<![A-Za-z0-9_-])([A-Z][A-Z0-9]*-[0-9]+)(?![A-Za-z0-9_])", subject)
+    if ids and ids[0] == tid:
+        out = subprocess.run(["git", "show", "--format=", "--name-only", sha.strip()],
+                             capture_output=True, text=True).stdout
+        sys.stdout.write(out)
+' "$FORARG"; git diff --name-only HEAD -- 2>/dev/null)"
+  fi
+  changed="$changed
+$(git ls-files -o --exclude-standard 2>/dev/null)"
+  IFS= read -r -d '' _for_py <<'PY' || true
+import os, re, sys
+sys.dont_write_bytecode = True
+sys.path.insert(0, os.path.dirname(sys.argv[1]))
+import _config
+try:
+    import _task
+    is_record = _task.is_record
+except Exception:
+    is_record = lambda p: False
+try:
+    cfg = _config.parse_yaml(open(sys.argv[2], encoding="utf-8").read())
+except (OSError, ValueError) as e:
+    sys.stderr.write("tw-gate: cannot read %s: %s\n" % (sys.argv[2], e)); sys.exit(2)
+NO_GATE = (r"^docs/|(^|/)[^/]*\.md$|^\.github/|^\.gitlab-ci\.yml$|^\.circleci/|^azure-pipelines\.yml$"
+           r"|^bitbucket-pipelines\.yml$|^Jenkinsfile$|^\.teamwright/|^\.claude/|^\.serena/|^\.specify/"
+           r"|^specs/|^openspec/|^\.mcp\.json$|^(LICENSE|COPYING|NOTICE)([.-][^/]*)?$"
+           r"|^\.(gitignore|gitattributes|editorconfig)$")
+no_gate = re.compile(os.environ.get("TEAMWRIGHT_NO_GATE_RE") or NO_GATE)
+def lst(v):
+    if v is None: return []
+    return [str(x) for x in v] if isinstance(v, list) else [str(v)]
+areas = [a for a in cfg.get("areas") or [] if isinstance(a, dict) and a.get("name")]
+dirs = {}
+for a in areas:
+    d = lst(a.get("source_dirs")) + lst(a.get("test_dirs")) + lst(a.get("workdir"))
+    dirs[a["name"]] = [os.path.normpath(x).strip("/") for x in d if x.strip("/. ")]
+hit, top, skipped = [], False, 0
+for f in sorted(set(l.strip() for l in sys.stdin.read().split("\n") if l.strip())):
+    owners = [a["name"] for a in areas if any(f == d or f.startswith(d + "/") for d in dirs[a["name"]])]
+    if owners:
+        hit += [o for o in owners if o not in hit]
+    elif is_record(f) or no_gate.search(f):
+        skipped += 1
+    else:
+        top = True
+out = [a["name"] for a in areas if a["name"] in hit]
+if top:
+    if str(cfg.get("gate_command") or "").strip():
+        out.append("--top")
+    else:
+        out = [a["name"] for a in areas]
+for o in out:
+    print(o)
+if not out:
+    sys.stderr.write("tw-gate: no area touched (%d file(s): records, docs, CI or tool configuration): "
+                     "no local gate needed\n" % skipped)
+PY
+  printf '%s\n' "$changed" | python3 -c "$_for_py" "$CONFIG_PY" "$CFG"
+  exit $?
+fi
+
+# ---- what to run and its scope ------------------------------------------------------------
+# generate_command, gate kind (area | top), gate command, display command, scope paths...
+IFS= read -r -d '' _tw_py <<'PY' || true
+import os, shlex, sys
+sys.dont_write_bytecode = True
+config_py, cfg_path, name, root, keyonly = sys.argv[1:6]
+keyonly = keyonly == "1"
+extra = os.environ.get("TW_GATE_SCOPE_CMD", "") if keyonly else ""
+sys.path.insert(0, os.path.dirname(config_py))
+import _config
+try:
+    cfg = _config.parse_yaml(open(cfg_path, encoding="utf-8").read())
+except (OSError, ValueError) as e:
+    sys.stderr.write("tw-gate: cannot read %s: %s\n" % (cfg_path, e)); sys.exit(2)
+MANIFESTS = ("Makefile", "makefile", "GNUmakefile", "justfile", "Taskfile.yml", "package.json",
+             "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "bun.lockb", "tsconfig.json",
+             ".nvmrc", ".tool-versions", "pyproject.toml", "setup.cfg", "setup.py", "tox.ini",
+             "noxfile.py", "pytest.ini", "conftest.py", "requirements.txt", "poetry.lock", "uv.lock",
+             "Pipfile.lock", "Cargo.toml", "Cargo.lock", "rust-toolchain", "rust-toolchain.toml",
+             "go.mod", "go.sum", "go.work", "pubspec.yaml", "pubspec.lock", "analysis_options.yaml",
+             "build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts",
+             "gradle.properties", "gradle.lockfile", "pom.xml", "Gemfile", "Gemfile.lock",
+             "composer.json", "composer.lock", "Package.swift", "Podfile.lock", "mix.exs",
+             "deno.json", "Dockerfile", "docker-compose.yml", "compose.yaml")
+KIT = ("scripts/tw-gate", "scripts/tw-run", "scripts/hooks/_config.py", "scripts/hooks/_job.sh")
+def lst(v):
+    if v is None: return []
+    return [str(x) for x in v] if isinstance(v, list) else [str(v)]
+def inside(p):
+    p = os.path.normpath(p)
+    return None if p.startswith("..") or os.path.isabs(p) else p
+scope = []
+if not name:
+    gate, kind, gen = str(cfg.get("gate_command") or "").strip(), "top", ""
+    if not gate:
+        sys.stderr.write("tw-gate: no top-level gate_command in %s\n" % cfg_path); sys.exit(2)
+    shown = gate
+else:
+    area = next((a for a in cfg.get("areas") or [] if isinstance(a, dict) and a.get("name") == name), None)
+    if area is None:
+        sys.stderr.write("tw-gate: no area %r in %s\n" % (name, cfg_path)); sys.exit(2)
+    gen = str(area.get("generate_command") or "").strip()
+    gate, kind = str(area.get("gate_command") or "").strip(), "area"
+    if not gate and not keyonly:
+        gate, kind = str(cfg.get("gate_command") or "").strip(), "top"
+    if not gate and not keyonly:
+        sys.stderr.write("tw-gate: no gate_command for area %r or at the top level of %s\n"
+                         % (name, cfg_path)); sys.exit(2)
+    wrap = lambda c: "scripts/tw-run %s -- %s" % (name, shlex.quote(c))
+    shown = " && ".join(([wrap(gen)] if gen else []) + [wrap(gate) if kind == "area" else gate])
+    dirs = [d for d in lst(area.get("source_dirs")) + lst(area.get("test_dirs")) if d.strip("/. ")]
+    if kind == "area" and dirs:
+        wd = str(area.get("workdir") or "").strip("/")
+        scope += dirs + ([wd] if wd else [])
+        for base in sorted({"", wd}):
+            scope += [os.path.join(base, m) for m in MANIFESTS]
+        c = os.path.relpath(os.path.abspath(cfg_path), root)
+        if inside(c):
+            scope.append(c)
+        scope += list(KIT)
+        for cmd in (gen, gate, extra):
+            try:
+                toks = shlex.split(cmd)
+            except ValueError:
+                toks = cmd.split()
+            for t in toks:
+                t = t.strip(";&|()<>")
+                if not t or t.startswith("-") or "=" in t or "$" in t:
+                    continue
+                for base in (wd, ""):
+                    p = inside(os.path.join(base, t))
+                    if p and os.path.isfile(os.path.join(root, p)):
+                        scope.append(p); break
+scope = sorted({inside(s).strip("/") for s in scope if inside(s)})
+sys.stdout.write("".join(x + "\0" for x in [gen, kind, gate, shown] + scope))
+PY
+fields=()
+while IFS= read -r -d '' f; do fields+=("$f"); done < <(
+  python3 -c "$_tw_py" "$CONFIG_PY" "$CFG" "$AREA" "$ROOT" "$KEYONLY"
+) || exit 2
+[ "${#fields[@]}" -ge 4 ] || exit 2
+GEN="${fields[0]}"; KIND="${fields[1]}"; GATE="${fields[2]}"; SHOWN="${fields[3]}"
+SCOPE=()
+[ "${#fields[@]}" -gt 4 ] && SCOPE=("${fields[@]:4}")
+if [ "$TOP" = 1 ]; then NAME="_top"; LABEL="the top-level gate"; RUNARG="--top"
+else NAME="$AREA"; LABEL="$AREA"; RUNARG="$AREA"; fi
+
+LOGROOT="${TEAMWRIGHT_LOG_DIR:-$ROOT/.teamwright/logs}"
+LOGDIR="$LOGROOT/gate"
+JOBS="$LOGDIR/jobs"
+[ "$KEYONLY" = 1 ] || mkdir -p "$JOBS" || die "cannot create $JOBS"
+RECORD="$LOGDIR/$NAME.json"
+
+HEAD="$(git rev-parse HEAD 2>/dev/null || echo none)"
+short() { printf '%s' "$1" | cut -c1-10; }
+
+# tree_id: the working tree's content as a git tree (ignored files left out), "" outside git
+tree_id() {
+  local idx tmp t
+  idx="$(git rev-parse --git-path index 2>/dev/null)" || { echo ""; return; }
+  tmp="$(mktemp "${TMPDIR:-/tmp}/tw-gate-index.XXXXXX")" || { echo ""; return; }
+  rm -f "$tmp"
+  # -p keeps the index's mtime: git re-reads a file whose stat equals its index entry only when
+  # the entry is not older than the index file ("racy git"); a copy with a new mtime made a
+  # same-size edit within that second look clean, and its old PASS was reused (CI, 24.10.2026)
+  [ -f "$idx" ] && cp -p "$idx" "$tmp"
+  if GIT_INDEX_FILE="$tmp" git add -A >/dev/null 2>&1 &&
+     GIT_INDEX_FILE="$tmp" git rm -r -q --cached --ignore-unmatch -- .teamwright/logs >/dev/null 2>&1; then
+    t="$(GIT_INDEX_FILE="$tmp" git write-tree 2>/dev/null)"
+  else
+    t=""
+  fi
+  rm -f "$tmp"
+  echo "$t"
+}
+# scope_key: the tree restricted to the area's scope (the whole tree when it has none)
+scope_key() {
+  [ -n "$1" ] || { echo ""; return; }
+  if [ "${#SCOPE[@]}" -eq 0 ]; then echo "$1"; return; fi
+  { printf '%s\n' "${SCOPE[@]}"; echo "--"; git ls-tree -r "$1" -- "${SCOPE[@]}"; } | git hash-object --stdin
+}
+is_clean() { [ -z "$(git status --porcelain --untracked-files=all -- . ":(exclude).teamwright/logs" 2>/dev/null)" ]; }
+
+TREE="$(tree_id)"
+KEY="$(scope_key "$TREE")"
+CLEAN=false; is_clean && CLEAN=true
+SCOPE_TEXT=""; [ "${#SCOPE[@]}" -gt 0 ] && SCOPE_TEXT="$(printf '%s\n' "${SCOPE[@]}")"
+if [ "$KEYONLY" = 1 ]; then   # scripts/tw-test keys its cache on the same area scope
+  printf '%s\0' "$TREE" "$KEY" "$HEAD" "$CLEAN"
+  exit 0
+fi
+
+# record JSON helpers (python: escaping, atomic replace)
+IFS= read -r -d '' _rec_py <<'PY' || true
+import json, os, sys
+op, path = sys.argv[1], (sys.argv[2:3] or [""])[0]
+if op == "write":
+    rec = json.loads(sys.stdin.read())
+    if sys.argv[3] == "last":
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(rec, f, indent=2); f.write("\n")
+        os.replace(tmp, path)
+    with open(os.path.join(os.path.dirname(path), "runs.jsonl"), "a", encoding="utf-8") as f:
+        f.write(json.dumps(rec, sort_keys=True) + "\n")
+elif op == "make":
+    k = sys.argv[2:]
+    b = lambda s: s == "true"
+    rec = {"area": k[0], "root": k[1], "head": k[2], "clean": b(k[3]), "tree": k[4],
+           "tree_after": k[5], "exit": int(k[6]), "pass": k[6] == "0", "cacheable": b(k[7]),
+           "duration_s": int(k[8]), "started": k[9], "finished": k[10], "log": k[11],
+           "command": k[12], "cached": b(k[13]), "key": k[15], "key_after": k[16],
+           "scope": [s for s in k[17].split("\n") if s]}
+    if k[14]:
+        rec["cached_from"] = k[14]
+    print(json.dumps(rec))
+elif op == "lookup":
+    area, root, key, command = sys.argv[3:7]
+    try:
+        r = json.load(open(path, encoding="utf-8"))
+    except (OSError, ValueError):
+        sys.exit(1)
+    if not (key and r.get("area") == area and r.get("root") == root and r.get("key") == key
+            and r.get("command") == command and r.get("exit") == 0 and r.get("cacheable") is True
+            and r.get("key_after") == key):
+        sys.exit(1)
+    sys.stdout.write("".join(str(r.get(k, "")) + "\0" for k in ("head", "finished", "log", "tree")))
+PY
+rec() { python3 -c "$_rec_py" "$@"; }
+now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+
+# ---- the detached run (internal: started by the caller below) --------------------------
+if [ -n "$JOB" ]; then
+  LOG="$(job_get "$JOB" log)"; STARTED="$(job_get "$JOB" started)"
+  [ -n "$LOG" ] || exit 2
+  # the content the caller asked about, not whatever is there a moment later
+  TREE="$(job_get "$JOB" tree)"; KEY="$(job_get "$JOB" tree_key)"
+  HEAD="$(job_get "$JOB" head)"; CLEAN="$(job_get "$JOB" clean)"
+  t0="$(date +%s)"
+  state=dirty; [ "$CLEAN" = true ] && state=clean
+  {
+    echo "# tw-gate $LABEL  head $HEAD  tree ${TREE:-?}  key ${KEY:-?}  $state  started $STARTED"
+    echo "# $SHOWN"
+  } > "$LOG"
+  trap 'echo "# stopped (signal)" >> "$LOG"; exit 143' INT TERM
+  rc=0
+  if [ -n "$GEN" ]; then
+    echo "# --- generate_command" >> "$LOG"
+    bash "$TW_RUN" "$AREA" -- "$GEN" >> "$LOG" 2>&1 < /dev/null; rc=$?
+  fi
+  if [ "$rc" -eq 0 ]; then
+    echo "# --- gate_command" >> "$LOG"
+    if [ "$KIND" = area ]; then
+      bash "$TW_RUN" "$AREA" -- "$GATE" >> "$LOG" 2>&1 < /dev/null; rc=$?
+    else
+      sh -c "$GATE" >> "$LOG" 2>&1 < /dev/null; rc=$?
+    fi
+  else
+    echo "# generate_command failed (exit $rc); gate not run" >> "$LOG"
+  fi
+  trap - INT TERM
+  dur=$(( $(date +%s) - t0 ))
+  FINISHED="$(now)"
+  echo "# finished $FINISHED  exit $rc  ${dur}s" >> "$LOG"
+  TREE_AFTER="$(tree_id)"
+  KEY_AFTER="$(scope_key "$TREE_AFTER")"
+  cacheable=false
+  [ "$rc" -eq 0 ] && [ -n "$KEY" ] && [ "$KEY_AFTER" = "$KEY" ] && cacheable=true
+  rec make "$NAME" "$ROOT" "$HEAD" "$CLEAN" "$TREE" "$TREE_AFTER" "$rc" "$cacheable" "$dur" \
+    "$STARTED" "$FINISHED" "$LOG" "$SHOWN" false "" "$KEY" "$KEY_AFTER" "$SCOPE_TEXT" | rec write "$RECORD" last
+  changed=0; [ "$TREE_AFTER" != "$TREE" ] && changed=1
+  echo "$dur" > "$JOB/dur"; echo "$changed" > "$JOB/changed"
+  job_finish "$JOB" "$rc"
+  exit 0
+fi
+
+# ---- the caller --------------------------------------------------------------------------
+JOBKEY="$(printf '%s\n%s\n%s' "$ROOT" "$SHOWN" "${KEY:-notree-$$-$(date +%s)}")"
+JOBDIR="$JOBS/$NAME.$(printf '%s' "$JOBKEY" | git hash-object --stdin 2>/dev/null | cut -c1-12)"
+[ "$JOBDIR" != "$JOBS/$NAME." ] || JOBDIR="$JOBS/$NAME.$$"
+DEADLINE=$(( SECONDS + $(job_wait_budget) ))
+
+if [ "$STOP" = 1 ]; then
+  n=0
+  for d in "$JOBS/$NAME".*; do
+    [ -d "$d" ] && [ "$(job_state "$d")" = running ] || continue
+    job_stop "$d" && n=$((n + 1))
+    echo "tw-gate: stopped the gate of $LABEL (pid $(job_get "$d" pid), log $(job_get "$d" log))"
+    rm -rf "$d"
+  done
+  [ "$n" -gt 0 ] || echo "tw-gate: no running gate of $LABEL"
+  exit 0
+fi
+
+human() { if [ "$1" -ge 60 ]; then echo "$(($1 / 60))m$(($1 % 60))s"; else echo "${1}s"; fi; }
+result() {  # job dir -> prints the run's result, removes the job, exits with the gate's code
+  local d="$1" rc dur log changed
+  rc="$(job_get "$d" rc)"; dur="$(job_get "$d" dur)"; log="$(job_get "$d" log)"; changed="$(job_get "$d" changed)"
+  rm -rf "$d"
+  case "$rc" in ''|*[!0-9]*) rc=1 ;; esac
+  case "$dur" in ''|*[!0-9]*) dur=0 ;; esac
+  if [ "$rc" -eq 0 ]; then
+    echo "PASS $LABEL: exit 0, $(human "$dur")"
+  else
+    echo "FAIL $LABEL: exit $rc, $(human "$dur"); last 30 lines:"
+    echo "-----"
+    tail -n 30 "$log"
+    echo "-----"
+  fi
+  if [ "$changed" = 1 ]; then
+    echo "tw-gate: WARNING the working tree changed while the gate ran (generate_command or the gate wrote files, or someone edited meanwhile); compare git status. Not reusable."
+  fi
+  echo "log: $log"
+  exit "$rc"
+}
+running() {  # job dir, what -> RUNNING line, exit 75
+  echo "RUNNING: $2 (pid $(job_get "$1" pid)), started $(job_get "$1" started), log $(job_get "$1" log) - run the same command again to keep waiting"
+  exit "$TW_JOB_EXIT_RUNNING"
+}
+
+mine=0
+while :; do
+  # 1. a run on this content: attach, or print the result nobody collected yet
+  case "$(job_state "$JOBDIR")" in
+    running)
+      [ "$mine" = 1 ] || echo "tw-gate: attached to the running gate of $LABEL on this content (started $(job_get "$JOBDIR" started), log $(job_get "$JOBDIR" log))"
+      mine=1
+      job_wait "$JOBDIR" "$DEADLINE"
+      [ $? -eq 2 ] && running "$JOBDIR" "gate $LABEL"
+      continue ;;
+    done)
+      if [ "$FRESH" = 0 ] || [ "$mine" = 1 ]; then result "$JOBDIR"; fi
+      rm -rf "$JOBDIR" ;;
+    stale)
+      echo "tw-gate: the earlier run of $LABEL ended without a result (killed?); partial output in $(job_get "$JOBDIR" log). Starting again." >&2
+      rm -rf "$JOBDIR" ;;
+  esac
+  # 2. a run of this area on other content: the toolchain is shared, wait for it first
+  other=""
+  for d in "$JOBS/$NAME".*; do
+    [ -d "$d" ] && [ "$d" != "$JOBDIR" ] || continue
+    case "$(job_state "$d")" in
+      running) other="$d"; break ;;
+      stale) rm -rf "$d" ;;
+      done) [ "$(job_age "$d")" -lt 3600 ] || rm -rf "$d" ;;
+    esac
+  done
+  if [ -n "$other" ]; then
+    echo "tw-gate: a gate of $LABEL on other content is running (started $(job_get "$other" started), log $(job_get "$other" log)); this one starts after it"
+    job_wait "$other" "$DEADLINE"
+    [ $? -eq 2 ] && running "$other" "an earlier gate of $LABEL on other content; yours starts after it"
+    continue
+  fi
+  # 3. the cache
+  if [ "$FRESH" = 0 ] && [ -n "$KEY" ] && [ -f "$RECORD" ]; then
+    hit=()
+    while IFS= read -r -d '' f; do hit+=("$f"); done < <(rec lookup "$RECORD" "$NAME" "$ROOT" "$KEY" "$SHOWN")
+    if [ "${#hit[@]}" -eq 4 ] && [ -f "${hit[2]}" ]; then
+      if [ "$CLEAN" = true ] && [ "${hit[0]}" = "$HEAD" ]; then
+        echo "PASS (cached: same commit $(short "$HEAD"), ${hit[1]}, log ${hit[2]})"
+      elif [ "${hit[3]}" = "$TREE" ]; then
+        echo "PASS (cached: same tree $(short "$TREE") as the run at commit $(short "${hit[0]}"), ${hit[1]}, log ${hit[2]})"
+      else
+        echo "PASS (cached: $LABEL files unchanged since the run at commit $(short "${hit[0]}"), ${hit[1]}, log ${hit[2]})"
+      fi
+      t="$(now)"
+      rec make "$NAME" "$ROOT" "$HEAD" "$CLEAN" "$TREE" "$TREE" 0 false 0 "$t" "$t" "${hit[2]}" "$SHOWN" true "${hit[1]}" \
+        "$KEY" "$KEY" "$SCOPE_TEXT" | rec write "$RECORD" history
+      exit 0
+    fi
+  fi
+  # 4. start the run, detached, and wait for it
+  mkdir "$JOBDIR" 2>/dev/null || continue
+  LOG="$LOGDIR/$NAME-$(date -u +%Y%m%dT%H%M%SZ)-$(short "$HEAD" | cut -c1-7).log"
+  printf '%s' "$JOBKEY" > "$JOBDIR/key"
+  now > "$JOBDIR/started"
+  printf '%s\n' "$LOG" > "$JOBDIR/log"
+  printf '%s\n' "$TREE" > "$JOBDIR/tree"; printf '%s\n' "$KEY" > "$JOBDIR/tree_key"
+  printf '%s\n' "$HEAD" > "$JOBDIR/head"; printf '%s\n' "$CLEAN" > "$JOBDIR/clean"
+  state=dirty; [ "$CLEAN" = true ] && state=clean
+  echo "tw-gate: $LABEL at $(short "$HEAD") ($state tree), full output -> $LOG"
+  export TEAMWRIGHT_ROOT="$ROOT" TEAMWRIGHT_CONFIG="$CFG" TEAMWRIGHT_LOG_DIR="$LOGROOT"
+  job_spawn "$JOBDIR" bash "$SELF" "$RUNARG" --_job "$JOBDIR" || { rm -rf "$JOBDIR"; die "cannot start the run"; }
+  mine=1
+done

@@ -23,7 +23,8 @@ Sources:
      several ids, `->`, missing from, words around; parse coverage is reported)
      plus docs/tasks/<ID>.md and docs/tasks/<ID>.reviews/<n>.md as committed in git
   3. .teamwright/logs/*.jsonl (journal.sh) -> outcomes, declared vs actual review,
-     permission denials, tool calls per session
+     permission denials, tool calls per session; per stage (the `Stage:` line a session
+     ends with): sessions, duration, tool calls, outcomes, tasks, tokens, cost (--prices)
 
 Options may also come from a JSON file (--config, or .teamwright/metrics.json in the
 repository): keys are the long option names with underscores. Command-line wins.
@@ -1201,6 +1202,130 @@ def journal_period_summary(recs, opt, tasks, src, typed_since=None):
     return out, breakdown
 
 
+TOKEN_KINDS = ("input", "output", "cache_read", "cache_write")
+
+
+def load_prices(path):
+    """--prices JSON: {"<model regex>": {"input": $, "output": $, "cache_read": $,
+    "cache_write": $}} in dollars per million tokens. None without the option."""
+    if not path:
+        return None
+    try:
+        d = json.load(open(path, encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        die("cannot read --prices %s: %s" % (os.path.basename(path), e))
+    if not isinstance(d, dict):
+        die("--prices: a JSON object {model regex: {input, output, cache_read, cache_write}}")
+    out = []
+    for k, v in d.items():
+        try:
+            out.append((re.compile(k, re.I), {t: float((v or {}).get(t) or 0) for t in TOKEN_KINDS}))
+        except (re.error, TypeError, ValueError, AttributeError) as e:
+            die("--prices: entry %r: %s" % (k, e))
+    return out
+
+
+def stage_section(recs, opt):
+    """Per stage (the `stage` of a session's last Stop with one; `-` for sessions that
+    declared none): sessions, duration (first journal record of the session to its last
+    Stop), tool calls of every agent in the session, outcomes (last Stop), tasks taken
+    (`batch`), and tokens - the session's own transcript (last Stop, cumulative) plus each
+    subagent's (its last SubagentStop) - with a cost when --prices gives one."""
+    src = "hook journal - outcomes.jsonl Stop/SubagentStop (stage, batch, tokens), tools.jsonl pre events"
+    sess = defaultdict(list)
+    for r in recs:
+        if r["session"]:
+            sess[r["session"]].append(r)
+    staged = [r for r in recs if r["event"] == "Stop" and "stage" in r["raw"]]
+    if not staged:
+        return {"status": NO_DATA, "source": src,
+                "reason": "no Stop records with a `stage` field (journal.sh before 0.12, or no sessions)"}
+    prices = load_prices(getattr(opt, "prices", None))
+    key = lambda r: r["ts"].timestamp() if r["ts"] else float("-inf")
+    rows, has_tokens, unpriced = {}, False, set()
+    for sid, rs in sess.items():
+        stops = sorted((r for r in rs if r["event"] == "Stop"), key=key)
+        if not stops:
+            continue
+        with_stage = [r for r in stops if r["raw"].get("stage")]
+        stage = with_stage[-1]["raw"]["stage"] if with_stage else "-"
+        last = stops[-1]
+        tss = [r["ts"] for r in rs if r["ts"]]
+        dur = (last["ts"] - min(tss)).total_seconds() / 60.0 if last["ts"] and tss else None
+        tok = {}
+        main = [r for r in stops if isinstance(r["raw"].get("tokens"), dict) and r["raw"]["tokens"]]
+        subs = {}
+        for r in sorted((r for r in rs if r["event"] == "SubagentStop"), key=key):
+            if isinstance(r["raw"].get("tokens"), dict) and r["raw"]["tokens"]:
+                subs[r["agent_id"]] = r["raw"]["tokens"]
+        for t in ([main[-1]["raw"]["tokens"]] if main else []) + list(subs.values()):
+            for model, u in t.items():
+                m = tok.setdefault(model, dict.fromkeys(TOKEN_KINDS, 0))
+                for k in TOKEN_KINDS:
+                    try:
+                        m[k] += int((u or {}).get(k) or 0)
+                    except (TypeError, ValueError, AttributeError):
+                        pass
+        batch = next((r["raw"].get("batch") for r in reversed(with_stage or stops)
+                      if isinstance(r["raw"].get("batch"), list) and r["raw"].get("batch")), [])
+        row = rows.setdefault(stage, {"sessions": 0, "durations": [], "tool_calls": [], "outcomes": Counter(),
+                                      "tasks": 0, "sessions_with_batch": 0, "sessions_with_tokens": 0,
+                                      "tokens": dict.fromkeys(TOKEN_KINDS, 0), "tokens_by_model": {},
+                                      "cost": 0.0, "priced": False})
+        row["sessions"] += 1
+        if dur is not None:
+            row["durations"].append(dur)
+        row["tool_calls"].append(sum(1 for r in rs if r["event"] == "pre"))
+        row["outcomes"][str(last["outcome"])] += 1
+        if batch:
+            row["tasks"] += len(batch)
+            row["sessions_with_batch"] += 1
+        if tok:
+            has_tokens = True
+            row["sessions_with_tokens"] += 1
+        for model, u in tok.items():
+            bm = row["tokens_by_model"].setdefault(model, dict.fromkeys(TOKEN_KINDS, 0))
+            for k in TOKEN_KINDS:
+                row["tokens"][k] += u[k]
+                bm[k] += u[k]
+            if prices is not None:
+                pr = next((p for rx, p in prices if rx.search(model)), None)
+                if pr is None:
+                    unpriced.add(model)
+                else:
+                    row["cost"] += sum(u[k] * pr[k] for k in TOKEN_KINDS) / 1e6
+                    row["priced"] = True
+    out = {}
+    for stage, row in sorted(rows.items()):
+        d = row["durations"]
+        tot = sum(row["tokens"].values())
+        out[stage] = {
+            "sessions": row["sessions"],
+            "duration_min_median": round(quantile(d, .5), 1) if d else None,
+            "duration_min_total": round(sum(d), 1) if d else None,
+            "tool_calls": sum(row["tool_calls"]),
+            "tool_calls_per_session_median": quantile(row["tool_calls"], .5),
+            "outcomes": dict(row["outcomes"].most_common()),
+            "tasks": row["tasks"] if row["sessions_with_batch"] else None,
+            "sessions_with_batch": row["sessions_with_batch"],
+            "tokens": row["tokens"] if row["sessions_with_tokens"] else None,
+            "tokens_total": tot if row["sessions_with_tokens"] else None,
+            "tokens_per_session": round(tot / row["sessions_with_tokens"]) if row["sessions_with_tokens"] else None,
+            "tokens_per_task": round(tot / row["tasks"]) if row["sessions_with_tokens"] and row["tasks"] else None,
+            "sessions_with_tokens": row["sessions_with_tokens"],
+            "tokens_by_model": row["tokens_by_model"],
+            "cost_usd": round(row["cost"], 2) if row["priced"] else None,
+        }
+    res = {"source": src, "rows": out,
+           "tokens": "transcripts (journal.sh 0.12+): the session's own lines and each subagent's"
+                     if has_tokens else NO_DATA + " - no `tokens` in Stop records (journal.sh before 0.12, "
+                     "or the runtime sent no transcript path)",
+           "cost": ("--prices" + ("; models without a price, left out of the cost: " + ", ".join(sorted(unpriced))
+                                  if unpriced else "")) if prices is not None else
+                   NO_DATA + " - pass --prices <json> ($ per million tokens per model) for a cost"}
+    return res
+
+
 def journal_section(opt, periods, tasks):
     files, recs, bad = load_journal(opt)
     src = "hook journal"
@@ -1236,6 +1361,7 @@ def journal_section(opt, periods, tasks):
                   in_period(first.get(r["session"]) or r["ts"], a, b)]
         summary[name], breakdown[name] = journal_period_summary(rs, opt, tasks, src, typed_since)
     return {"source": src, "files": [os.path.basename(f) for f in files],
+            "stages": stage_section(in_range, opt),
             "n_records": len(in_range), "unparsed_fragments": bad, "claim_join": join,
             "subagent_type_since": typed_since.strftime("%Y-%m-%d") if typed_since and
             typed_since.year < 9999 else ("never" if typed_since else None),
@@ -1451,7 +1577,26 @@ def render_md(rep, periods):
                      "interrupted calls): %s" % kv(b["unmatched_pre_by_tool"]))
             L.append("- Tool calls by tool (top %d): %s" % (rep["params"]["top"], kv(b["calls_by_tool"])))
             L.append("")
+        L += stage_lines(j.get("stages") or {})
     return "\n".join(L).rstrip() + "\n"
+
+
+def stage_lines(st):
+    L = ["### Per stage", ""]
+    if st.get("status") == NO_DATA:
+        return L + ["%s - %s." % (NO_DATA, st["reason"]), ""]
+    L += ["Source: %s. Tokens: %s. Cost: %s." % (st["source"], st["tokens"], st["cost"]), "",
+          "| Stage | Sessions | Duration, median min | Duration, total min | Tool calls | Tasks | "
+          "Outcomes | Tokens | Tokens / task | Cost, $ |", "|---|---|---|---|---|---|---|---|---|---|"]
+    nd = lambda v: NO_DATA if v is None else v
+    for stage, r in st["rows"].items():
+        L.append("| %s | %d | %s | %s | %d | %s | %s | %s | %s | %s |" % (
+            stage, r["sessions"], nd(r["duration_min_median"]), nd(r["duration_min_total"]),
+            r["tool_calls"], nd(r["tasks"]), kv(r["outcomes"]),
+            nd(r["tokens_total"]) if r["tokens_total"] is None else "%d (%d of %d sessions)" % (
+                r["tokens_total"], r["sessions_with_tokens"], r["sessions"]),
+            nd(r["tokens_per_task"]), nd(r["cost_usd"])))
+    return L + [""]
 
 
 def coverage_lines(cv):
@@ -1488,6 +1633,7 @@ DEFAULTS = {
     "reviewer_agent_regex": DEFAULT_REVIEWER_RE, "review_claim_field": DEFAULT_CLAIM_FIELDS,
     "review_claim_regex": DEFAULT_CLAIM_VALUE_RE, "claim_join": "auto", "claim_window": 10,
     "json": False, "output": None, "config": None, "debug": False, "debug_sample": 20,
+    "prices": None,
 }
 
 
@@ -1545,6 +1691,8 @@ def parse_args(argv):
     a("--claim-join", choices=["auto", "session", "time"], help="how claim/outcome records "
       "find their session: by session id, or by time for journals without one (auto)")
     a("--claim-window", type=int, help="minutes for --claim-join time (10)")
+    a("--prices", help="JSON {model regex: {input, output, cache_read, cache_write}} in $ per "
+                       "million tokens: adds a cost per stage")
     a("--json", action="store_true", default=None, help="print JSON instead of Markdown")
     a("--output", "-o", help="write to a file instead of stdout")
     a("--debug", action="store_true", default=None, help="add a sample of unparsed ledger "

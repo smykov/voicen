@@ -170,6 +170,7 @@ Fragments that do not parse are skipped and counted in the report.
 | Declared vs actual review (tasks) | Of the `→ CODE_COMPLETE` transitions that fall inside the journal's time span: the share with a journaled reviewer spawn naming the task id. Approvals outside the span are not counted, so a journal started last week does not make older approvals look unreviewed |
 | Permission denials per tool | `PermissionDenied` records (auto-mode denials) |
 | `pre` without `post` per tool | Heuristic: deny-rule refusals leave a `pre` with no `post`; so do interrupted calls |
+| Per stage (`journal.stages`) | Sessions grouped by the `stage` of their last `Stop` that names one (`Stage:` line; `-` = none declared, `flow` = several stages in one session), over the whole range (not split by `--split-date`): sessions, duration (first journal record of the session to its last `Stop`, median and total minutes), tool calls of every agent in the session, outcomes of the last `Stop`, tasks taken (`batch`), and tokens — the session's own transcript (its last `Stop`, cumulative) plus each subagent's (its last `SubagentStop`), by type (`input`, `output`, `cache_read`, `cache_write`) and per model, per session and per task. Cost only with `--prices <json>` (`{"<model regex>": {"input": $, "output": $, "cache_read": $, "cache_write": $}}`, dollars per million tokens; models without a price are named and left out). A session that sent no tokens is counted in `sessions_with_tokens` = no, never as 0 tokens |
 
 Journals of other harnesses need two adjustments, both automatic:
 

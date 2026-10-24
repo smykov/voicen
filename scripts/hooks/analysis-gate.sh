@@ -13,12 +13,26 @@
 #      invariant seam approach; override with TEAMWRIGHT_ANALYSIS_FIELDS).
 #   2. An edit of a code file while the active task (.teamwright/current-task or
 #      $TEAMWRIGHT_TASK) is not IN_PROGRESS or has an incomplete analysis.
-#   3. A Bash command that rewrites a task record docs/tasks/<ID>.md (sed -i, >, tee…)
-#      and mentions `status`: status changes must go through Edit/Write so the gates
-#      can see them. Only the write target counts - a command that reads a record and
-#      writes elsewhere, or writes text that merely names one, passes.
+#   3. A Bash command that creates or replaces a task record docs/tasks/<ID>.md (>, tee,
+#      cp/mv/install onto it - a record written whole, with or without `status:`), or edits
+#      one in place (sed -i, perl -i) and mentions `status`, `stage` or one of their values:
+#      records and their state go through Edit/Write so the gates can see them. Only the
+#      write target counts - a command that reads a record and writes elsewhere, or writes
+#      text that merely names one, passes.
 #      Appending (>>, tee -a) is allowed: it lands after the front matter, where
 #      `status:` is never read, so a note cannot change the task's state.
+#   4. An edit of docs/tasks/<ID>.md that breaks the order of the `stage:` field (the
+#      sub-stage of IN_PROGRESS, written by the stage that finished its work): a value
+#      other than red-tests | implement; entering IN_PROGRESS without a stage (from TODO,
+#      ANALYSIS or VERIFY_FAIL it must be red-tests; a send-back from NEEDS_REVIEW, a
+#      verified status or BLOCKED may set implement); removing it from an IN_PROGRESS
+#      task; `stage: implement` while `## Tests` is empty; IN_PROGRESS -> NEEDS_REVIEW
+#      unless the task is at `stage: implement` (a task started before stages sets it in
+#      that edit), `## Tests` is filled and, when the task changes code (a commit naming
+#      it, or a tracked uncommitted change, touches a file outside docs/, .teamwright/,
+#      .claude/, .github/ and top-level *.md - _task.code_changed), `## Tests` has the
+#      `### Failure branches` table (not with `analysis: skipped:trivial`: a version bump
+#      has no failure branch). Gate-first warns, enforce blocks.
 #
 # ACTIVE TASK (PostToolUse): after an edit of docs/tasks/<ID>.md lands, the gate
 #   writes <ID> to .teamwright/current-task when the task is IN_PROGRESS, and clears
@@ -109,10 +123,10 @@ if io.event(data) != "PreToolUse":
 
 # ---- 3. status rewrite through the shell -------------------------------------
 if tool == "Bash":
-    if io.shell_rewrites_task_record(ti.get("command") or ""):
-        io.deny("ANALYSIS GATE: task status must be changed with Edit/Write on "
-                "docs/tasks/<ID>.md, not through the shell - otherwise the analysis and "
-                "review gates cannot see the transition.", "analysis-gate")
+    if io.shell_rewrites_task_record(ti.get("command") or "", io.project_root(data)):
+        io.deny("ANALYSIS GATE: task records are created and their status or stage changed with "
+                "Edit/Write on docs/tasks/<ID>.md, not through the shell - otherwise the analysis "
+                "and review gates cannot see the transition (or the new record).", "analysis-gate")
     sys.exit(0)
 
 if tool not in ("Edit", "Write", "MultiEdit"):
@@ -132,6 +146,52 @@ if m and rel.startswith("docs/tasks/"):
             io.deny("ANALYSIS GATE: %s cannot enter IN_PROGRESS - the `analysis:` block "
                     "is incomplete (missing: %s). Add it in the same edit:\n%s\n%s"
                     % (m.group(1), ", ".join(missing), template_for(ra), EXITS), "analysis-gate")
+    # ---- 4. the `stage:` field inside IN_PROGRESS -----------------------------
+    stage = getattr(task, "task_stage", None)
+    if stage:
+        sb, sa, stb, sta, tid = stage(rb), stage(ra), task.status(rb), task.status(ra), m.group(1)
+        STAGES = ("red-tests", "implement")
+        tests = getattr(task, "tests_written", lambda _t: True)
+        fbranches = getattr(task, "failure_branches", lambda _t: True)
+        changed = getattr(task, "code_changed", lambda _r, _t: False)
+        entering = sta == "IN_PROGRESS" and stb != "IN_PROGRESS"
+        # `analysis: skipped:trivial` (never on an rca task): a change with no design freedom -
+        # a version bump, a typo in code - has no failure branch to bite
+        an = ra.get("analysis")
+        trivial = isinstance(an, str) and an.replace(" ", "").startswith("skipped:trivial") \
+            and not task.is_rca(ra)
+        why = None
+        if sa and sa != sb and sa not in STAGES:
+            why = "`stage: %s` is not a stage of IN_PROGRESS (red-tests | implement)" % sa
+        elif entering and not sa:
+            why = "a task entering IN_PROGRESS sets its stage in the same edit: `stage: red-tests` " \
+                  "(a send-back from review or verification may set `stage: implement`)"
+        elif entering and stb in ("", "TODO", "ANALYSIS", "VERIFY_FAIL") and sa != "red-tests":
+            why = "a task leaving %s enters `stage: red-tests` - the red tests come before " \
+                  "the implementation" % (stb or "a new record")
+        elif stb == "IN_PROGRESS" and sta == "IN_PROGRESS" and sb and not sa:
+            why = "the `stage:` field of an IN_PROGRESS task is not removed; set the stage the " \
+                  "task is at (red-tests | implement)"
+        elif sta == "IN_PROGRESS" and sa == "implement" and (sb != "implement" or entering) \
+                and not tests(after):
+            why = "`stage: implement` needs the red tests written down: `## Tests` is empty " \
+                  "(the red-tests stage fills it and sets the stage in the same edit)"
+        elif stb == "IN_PROGRESS" and sta == "NEEDS_REVIEW":
+            if not (sb == "implement" or (not sb and sa == "implement")):
+                why = "only the implement stage moves a task to NEEDS_REVIEW; this task is at " \
+                      "`stage: %s` (%s)" % (sb or "<none>", "commit the red tests with `stage: implement` "
+                                             "first" if sb == "red-tests" else "a task started before "
+                                             "stages sets `stage: implement` in this edit")
+            elif not tests(after):
+                why = "`## Tests` is empty: a task goes to review with its red tests written down"
+            elif changed(root, tid) and not fbranches(after) and not trivial:
+                why = "the task changes code (a commit naming %s touches a code file) but `## Tests` " \
+                      "has no `### Failure branches` table: the test-writer's failure-branch bite " \
+                      "comes before review (implement stage, step 2)" % tid
+        if why:
+            io.deny("STAGE GATE: %s: %s. The stage moves forward red-tests -> implement (back to " \
+                    "red-tests only from implement, or from review/verify when the task returns to " \
+                    "IN_PROGRESS); docs/process/sessions.md section 8." % (tid, why), "analysis-gate")
     sys.exit(0)
 
 # ---- 2. code edit for an active task -----------------------------------------

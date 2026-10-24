@@ -28,6 +28,12 @@ PLACEHOLDER = re.compile(r"^(\.\.\.|…|todo|tbd|n/?a|none|-|<[^>]*>|\?+)$", re.
 TASK_ID = os.environ.get("TEAMWRIGHT_TASK_ID_RE", r"[A-Z][A-Z0-9]*-\d+")
 
 
+def is_task_file(name):
+    """True for a task record's file name, `<ID>.md` (T-12.md) - not a template (_*.md) and
+    not a side file such as T-089.history.md or T-12.notes.md."""
+    return bool(re.fullmatch(r"(?:%s)\.md" % TASK_ID, name or ""))
+
+
 def front_matter(text):
     """Return the front-matter lines (without the --- fences)."""
     lines = text.splitlines()
@@ -126,6 +132,82 @@ def body(text):
         if lines[i].strip() == "---":
             return "\n".join(lines[i + 1:])
     return ""
+
+
+def section(text, name):
+    """Body of the `## <name>` section of a task record ('' when absent), up to the next
+    `## ` heading."""
+    out, inside = [], False
+    for line in body(text).splitlines():
+        if re.match(r"^##\s", line):
+            if inside:
+                break
+            inside = line[2:].strip().lower() == name.lower()
+            continue
+        if inside:
+            out.append(line)
+    return "\n".join(out)
+
+
+def _without_placeholders(text):
+    """Text with HTML comments and template placeholder blocks removed - a block that
+    starts a line with `<` and ends a line with `>` (`<test-writer: ...>`)."""
+    text = re.sub(r"(?s)<!--.*?-->", "", text)
+    return re.sub(r"(?ms)^<[^<\n][^\n]*?(\n[^\n]*?)*?>[ \t]*$", "", text)
+
+
+def tests_written(text):
+    """True when the record's `## Tests` section holds something besides the template
+    placeholder: the test-writer's first spawn wrote the red tests down."""
+    return bool(_without_placeholders(section(text, "Tests")).strip())
+
+
+def failure_branches(text):
+    """True when `## Tests` has a `### Failure branches` heading followed by a table row
+    (the test-writer's second spawn, in the implement stage)."""
+    sec = section(text, "Tests")
+    m = re.search(r"(?im)^###\s+failure branches\b.*$", sec)
+    if not m:
+        return False
+    rows = [l for l in sec[m.end():].splitlines() if l.strip().startswith("|")
+            and not set(l.strip().strip("|").replace("|", "")) <= set("-: ")]
+    return len(rows) >= 2  # header + one row
+
+
+def task_stage(rec):
+    """The `stage:` field of a task record, lower-case ('' when absent)."""
+    v = rec.get("stage") if isinstance(rec.get("stage"), str) else ""
+    return v.strip().lower()
+
+
+# A code file, as the analysis gate's check 2 reads it: anything outside docs/, .teamwright/,
+# .claude/, .github/ and top-level Markdown files ($TEAMWRIGHT_NONCODE_RE overrides).
+NONCODE_RE = os.environ.get("TEAMWRIGHT_NONCODE_RE",
+                            r"^(docs/|\.teamwright/|\.claude/|\.github/|[^/]*\.md$)")
+
+
+def is_code(path):
+    return bool(path) and not path.startswith("..") and not re.search(NONCODE_RE, path)
+
+
+def code_changed(root, tid):
+    """True when the task changes code: a commit whose message names the task id (subject,
+    body or trailer - the commit convention), or a tracked uncommitted change in the tree,
+    touches a code file (is_code). An rca exit (b)/(c) or a docs-only task does not. False
+    when git is unavailable (nothing to check against)."""
+    import subprocess
+
+    def git(*args):
+        try:
+            p = subprocess.run(("git",) + args, cwd=root, capture_output=True, text=True, timeout=20)
+        except Exception:
+            return ""
+        return p.stdout if p.returncode == 0 else ""
+
+    pat = r"(^|[^A-Za-z0-9_-])" + re.escape(tid) + r"([^A-Za-z0-9_]|$)"
+    files = git("log", "--format=", "--name-only", "-E", "--grep=" + pat, "HEAD").splitlines()
+    files += git("diff", "--name-only", "HEAD").splitlines()
+    return any(is_code(f.strip()) for f in files)
 
 
 def _rounds(root, tid, suffix, with_body=False):

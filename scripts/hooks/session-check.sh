@@ -11,6 +11,11 @@
 #     project, at that version — read from Claude Code's plugin registry
 #     ($CLAUDE_CONFIG_DIR or ~/.claude, plugins/installed_plugins.json). A registry in a
 #     format it does not know is skipped, not reported.
+#   A plugin loaded from a directory rather than the registry (`claude --plugin-dir`, the
+#   Agent SDK's local plugin in an autonomous run) is not in the registry: set
+#   TEAMWRIGHT_PLUGIN_DIR to that directory and the check takes the plugin from there -
+#   and its version (plugin.json `version`, else the directory's git commit, 12 hex) is
+#   compared with the recorded one the same way.
 # Prints JSON (systemMessage for the owner, additionalContext for the agent), or nothing
 # when all is well. TEAMWRIGHT_SESSION_CHECK=0 turns it off.
 set -uo pipefail
@@ -68,10 +73,54 @@ elif src.get("url"):
 else:
     add = "/plugin marketplace add <teamwright repository or local checkout>"
 
+def drift(have, want, where):
+    """A message when the plugin's version differs from the one the project was set up with
+    ('' when it matches or cannot be told). Release versions compare by number; a channel
+    build has no version - its version is the 12-hex commit - and only equality is known."""
+    if not want or not have or have == "?":
+        return ""
+    if ver(have) and ver(want):
+        if ver(have) < ver(want):
+            return ("the %s plugin %s is %s, older than the %s this project was set up with: "
+                    "`/plugin marketplace update %s`, then `/plugin update %s` (or uninstall and install), "
+                    "then restart." % (pid, where, have, want, mname, pid))
+        if ver(have) > ver(want):
+            return ("the %s plugin %s is %s, newer than the project files (%s): run "
+                    "`/teamwright:reconfigure` to update them." % (pid, where, have, want))
+        return ""
+    if have[:12] != want[:12]:
+        return ("the %s plugin %s is %s, the project was set up with %s: run `/teamwright:reconfigure` "
+                "when the plugin is the newer one, or update the plugin to that version." % (pid, where, have, want))
+    return ""
+
+
+def dir_version(d, manifest):
+    """A plugin directory's version: plugin.json `version`, else the 12-hex commit of the
+    directory's git checkout (what Claude Code takes for a channel build); '' when neither."""
+    if manifest.get("version"):
+        return str(manifest["version"])
+    import subprocess
+    try:
+        top = subprocess.run(["git", "-C", d, "rev-parse", "--show-toplevel"], capture_output=True, text=True)
+        sha = subprocess.run(["git", "-C", d, "rev-parse", "HEAD"], capture_output=True, text=True)
+    except OSError:
+        return ""
+    if top.returncode == 0 and os.path.realpath(top.stdout.strip()) == os.path.realpath(d) and sha.returncode == 0:
+        return sha.stdout.strip()[:12]
+    return ""
+
+
+local_dir = os.environ.get("TEAMWRIGHT_PLUGIN_DIR") or ""
+local_manifest = load(os.path.join(local_dir, ".claude-plugin", "plugin.json")) if local_dir else None
 cdir = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(os.path.expanduser("~"), ".claude")
 reg_path = os.path.join(cdir, "plugins", "installed_plugins.json")
 reg = load(reg_path) if os.path.exists(reg_path) else {"plugins": {}}
 plugins = reg.get("plugins") if reg else None
+if local_manifest is not None and local_manifest.get("name") == pid.split("@", 1)[0]:
+    plugins = None  # loaded from a directory for this session: nothing to install, but its version counts
+    msg = drift(dir_version(local_dir, local_manifest), want, "loaded from TEAMWRIGHT_PLUGIN_DIR (%s)" % local_dir)
+    if msg:
+        issues.append(msg)
 if isinstance(plugins, dict):
     real = os.path.realpath(root)
     have = None
@@ -90,15 +139,8 @@ if isinstance(plugins, dict):
             "commands are unavailable. Restart Claude Code here and accept the marketplace and "
             "plugin offer, or in a terminal session: `%s`, then `/plugin install %s`, then restart."
             % (pid, need, add, pid))
-    elif want and ver(have) and ver(want) and ver(have) < ver(want):
-        issues.append(
-            "the %s plugin here is %s, older than the %s this project was set up with: "
-            "`/plugin marketplace update %s`, then `/plugin update %s` (or uninstall and install), "
-            "then restart." % (pid, have, want, mname, pid))
-    elif want and ver(have) and ver(want) and ver(have) > ver(want):
-        issues.append(
-            "the %s plugin here is %s, newer than the project files (%s): run "
-            "`/teamwright:reconfigure` to update them." % (pid, have, want))
+    elif drift(have, want, "here"):
+        issues.append(drift(have, want, "here"))
 
 if issues:
     text = "teamwright: " + " ".join(issues)
