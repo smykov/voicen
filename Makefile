@@ -4,7 +4,7 @@
 	check-clippy-lines \
 	check-core-test-os-answer check-ci-wip check-telegram-send check-telegram-failure-branch \
 	check-version-stamp check-release-check check-release check-release-guard check-nsis-fork check-e2e-entry-fixtures \
-	check-whisper-cmake-cache check-whisper-model-key check-crt-imports check-whisper \
+	check-whisper-cmake-cache check-opus-cmake-cache check-whisper-model-key check-crt-imports check-whisper \
 	check-shell-windows check-ban-canary check-role-tools check-guard-trigger \
 	check-ui core-image ui-image \
 	licenses licenses-check licenses-unit licenses-fixture licenses-rust licenses-bundle \
@@ -14,7 +14,7 @@
 # error is reported first by the faster native check-core, before the slower runs.
 check: check-shell-layout check-shell-layout-fixtures check-helper-windows-fixtures check-ci-credentials check-role-tools check-guard-trigger \
 	check-clippy-lines \
-	check-core-test-os-answer check-ci-wip check-telegram-send check-telegram-failure-branch check-version-stamp check-release-check check-release check-release-guard check-nsis-fork check-whisper-cmake-cache check-whisper-model-key check-crt-imports check-core check-whisper \
+	check-core-test-os-answer check-ci-wip check-telegram-send check-telegram-failure-branch check-version-stamp check-release-check check-release check-release-guard check-nsis-fork check-whisper-cmake-cache check-opus-cmake-cache check-whisper-model-key check-crt-imports check-core check-whisper \
 	check-ban-canary check-shell-windows check-e2e-entry-fixtures check-ui \
 	licenses-check
 
@@ -185,6 +185,15 @@ check-e2e-entry-fixtures:
 # offline. Host bash.
 check-whisper-cmake-cache:
 	scripts/ci/whisper-cmake-cache.test.sh
+
+# T-117 (decisions #197): scripts/ci/opus-cmake-cache.sh, the windows job's verdict on every
+# opusic-sys build under target/ (decides_on: token + literal, plus the dumpbin -directives effect
+# check), passes only when each CMakeCache.txt holds OPUS_STATIC_RUNTIME:BOOL=ON and
+# CMAKE_BUILD_TYPE:STRING=Release exactly once, no line names CMAKE_MSVC_RUNTIME_LIBRARY or another
+# OPUS_STATIC_RUNTIME, and each out/lib/opus.lib names /DEFAULTLIB:LIBCMT and never MSVCRT; no
+# cache found is red. Fixture trees and a stub dumpbin, offline. Host bash.
+check-opus-cmake-cache:
+	scripts/ci/opus-cmake-cache.test.sh
 
 # T-099 (review 1 finding 2, P-010): the windows job's tiny-model cache key is derived from the
 # catalog (hashFiles of crates/voicen-core/src/local_models/catalog.rs, no restore-keys), and
