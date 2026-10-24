@@ -1,0 +1,8 @@
+guarantee: AC-1: scripted fake answers the script, then the default
+file: crates/voicen-core/src/test_support/spans.rs
+added_by: test-writer
+--- old
+            .unwrap_or_else(|| self.then.clone())
+--- new
+            .unwrap_or_else(|| Ok(Vec::new()))
+--- end

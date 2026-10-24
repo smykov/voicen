@@ -1,0 +1,10 @@
+guarantee: AC-2: a run touching the buffer end is a span
+file: crates/voicen-core/src/vad/energy.rs
+added_by: test-writer
+--- old
+        .chain(std::iter::once(false))
+
+--- new
+        // sentinel removed
+
+--- end

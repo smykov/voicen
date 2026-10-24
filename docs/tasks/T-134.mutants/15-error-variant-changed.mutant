@@ -1,0 +1,11 @@
+guarantee: AC-3: the VadError comes back unchanged (cause kept)
+file: crates/voicen-core/src/test_support/spans.rs
+added_by: test-writer
+--- old
+            .pop_front()
+            .unwrap_or_else(|| self.then.clone())
+--- new
+            .pop_front()
+            .unwrap_or_else(|| self.then.clone())
+            .map_err(|_| VadError::Failed)
+--- end

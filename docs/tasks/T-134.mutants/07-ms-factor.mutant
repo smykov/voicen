@@ -1,0 +1,8 @@
+guarantee: AC-2: spans are [start_ms, end_ms) in ms
+file: crates/voicen-core/src/vad/energy.rs
+added_by: test-writer
+--- old
+    (frames * FRAME_SAMPLES) as u64 * 1000 / u64::from(SAMPLE_RATE)
+--- new
+    (frames * FRAME_SAMPLES) as u64 * 1001 / u64::from(SAMPLE_RATE)
+--- end

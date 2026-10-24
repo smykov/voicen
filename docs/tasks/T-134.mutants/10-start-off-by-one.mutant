@@ -1,0 +1,8 @@
+guarantee: AC-2: spans start on the first loud frame
+file: crates/voicen-core/src/vad/energy.rs
+added_by: test-writer
+--- old
+                    start: i - run,
+--- new
+                    start: i - run + 1,
+--- end

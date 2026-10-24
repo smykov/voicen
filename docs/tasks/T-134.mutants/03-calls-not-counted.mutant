@@ -1,0 +1,8 @@
+guarantee: AC-1: scripted fake counts calls
+file: crates/voicen-core/src/test_support/spans.rs
+added_by: test-writer
+--- old
+        self.calls.fetch_add(1, Ordering::SeqCst);
+--- new
+        let _ = &self.calls;
+--- end

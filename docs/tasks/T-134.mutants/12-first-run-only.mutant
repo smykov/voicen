@@ -1,0 +1,13 @@
+guarantee: AC-2: every counted run is a span, gaps not merged
+file: crates/voicen-core/src/vad/energy.rs
+added_by: test-writer
+--- old
+        Ok(a.runs
+            .iter()
+
+--- new
+        Ok(a.runs
+            .iter()
+            .take(1)
+
+--- end

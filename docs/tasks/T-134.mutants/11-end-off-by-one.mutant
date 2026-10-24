@@ -1,0 +1,8 @@
+guarantee: AC-2: spans end after the last loud frame
+file: crates/voicen-core/src/vad/energy.rs
+added_by: test-writer
+--- old
+                end_ms: frames_to_ms(r.start + r.len),
+--- new
+                end_ms: frames_to_ms(r.start + r.len + 1),
+--- end

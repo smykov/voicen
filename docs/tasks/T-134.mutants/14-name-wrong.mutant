@@ -1,0 +1,12 @@
+guarantee: AC-1: the energy impl is named energy
+file: crates/voicen-core/src/vad/energy.rs
+added_by: test-writer
+--- old
+impl SpeechSpans for EnergyDetector {
+    fn name(&self) -> &'static str {
+        "energy"
+--- new
+impl SpeechSpans for EnergyDetector {
+    fn name(&self) -> &'static str {
+        "silero"
+--- end

@@ -1,0 +1,12 @@
+guarantee: AC-2: silence returns no spans, Ok
+file: crates/voicen-core/src/vad/energy.rs
+added_by: test-writer
+--- old
+            return Ok(Vec::new());
+        }
+        Ok(a.runs
+--- new
+            return Err(VadError::Failed);
+        }
+        Ok(a.runs
+--- end

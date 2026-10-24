@@ -1,0 +1,2 @@
+# runs only the task's tests
+cargo test -p voicen-core --lib vad

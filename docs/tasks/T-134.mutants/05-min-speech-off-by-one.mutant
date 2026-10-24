@@ -1,0 +1,10 @@
+guarantee: AC-2: energy spans agree with detect (10 counted frames is speech)
+file: crates/voicen-core/src/vad/energy.rs
+added_by: test-writer
+--- old
+        if a.counted < MIN_SPEECH_FRAMES {
+            return Ok(Vec::new());
+--- new
+        if a.counted <= MIN_SPEECH_FRAMES {
+            return Ok(Vec::new());
+--- end

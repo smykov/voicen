@@ -1,0 +1,8 @@
+guarantee: AC-2: runs under MIN_RUN_FRAMES are not spans
+file: crates/voicen-core/src/vad/energy.rs
+added_by: test-writer
+--- old
+            if run >= MIN_RUN_FRAMES {
+--- new
+            if run >= 1 {
+--- end
