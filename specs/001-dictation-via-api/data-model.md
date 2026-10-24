@@ -9,7 +9,7 @@ Built as the `Arc<Settings>` snapshot of 004's `SettingsService::snapshot()`, ta
 | Field | Type | Rule |
 |---|---|---|
 | engine | `EngineKind` (`None`, `Api`, later `BuiltIn`, `LocalServer` from 002) | `None` → the hotkey does not record; "choose a transcription engine" (req FR-21) |
-| api_base_url | `Url` | path joined as `<base>/audio/transcriptions`; a trailing `/` is ignored |
+| api_base_url | `Url` | path joined as `<base>/audio/transcriptions`; a trailing `/` is ignored (as built: the URL join of contracts/openai-transcription.md keeps a base that already ends in `/audio/transcriptions`, decision #96) |
 | api_model | `String` | sent as `model` |
 | language | `Language` (`Auto` or ISO-639-1 code) | `Auto` → no `language` field |
 | microphone | `Option<DeviceId>` | `None` → Windows default device |
