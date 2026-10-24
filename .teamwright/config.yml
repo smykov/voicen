@@ -59,7 +59,7 @@ process:
     after: code_complete
   stages:
     analyze:
-      batch: 3
+      batch: 10
       min: 3
       max_wait_hours: 4
     red-tests:
@@ -71,11 +71,11 @@ process:
       min: 3
       max_wait_hours: 4
     review:
-      batch: 3
+      batch: 10
       min: 3
       max_wait_hours: 4
     verify:
-      batch: 3
+      batch: 10
       min: 3
       max_wait_hours: 4
   models:
