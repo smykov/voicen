@@ -591,7 +591,7 @@ backstop adds the scan to its own CI, for example a `make scan` target that runs
 
 **Exit.** Set `checker: true` in the task's front matter and fill `analysis.decides_on` (`switch | literal | token`, naming the switch, owned literal or raw token) before committing the guard; copy it into the `decides_on` column of the guard table in `docs/decisions/ci-toolchain.md`. If the commit is not a guard change, fix the task id in `.teamwright/current-task`. `git commit --no-verify` skips it (see Overriding deliberately); say why in review.
 
-**Not caught.** A new root `GNUmakefile` or `makefile` (GNU make reads them before `Makefile`; the token is not widened, decision #155). `scripts/hooks/pre-commit` itself is not a guard path under the token; `make check-guard-trigger` runs its fixtures, but a hook edit alone does not need `checker: true`. Guards outside the four path forms (none known; the guard table in `docs/decisions/ci-toolchain.md` lists the paths).
+**Not caught.** A new root `GNUmakefile` or `makefile` (GNU make reads them before `Makefile`; the token is not widened, decision #155). `scripts/hooks/pre-commit` itself and `scripts/hooks/_task.py` (the shared task parser that reads `checker` and `analysis.decides_on` for the trigger) are not guard paths under the token; `make check-guard-trigger` runs their fixtures, but an edit of either alone does not need `checker: true`. Check code added outside the four path forms is not caught either; the guard table in `docs/decisions/ci-toolchain.md` lists the guard paths, and whether `scripts/hooks/` belongs in the token is OQ-71.
 
 ## CLAUDE.md budget
 
