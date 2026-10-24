@@ -113,7 +113,7 @@
   - Connection not accepted in time → "cannot reach" (injected connect timeout).
   - No response within the injected request timeout → "timeout".
   - 401/403 → "invalid API key".
-  - Production timeouts asserted: 5 s and 60 s from the shared module {req FR-17, FR-24, FR-06, FR-11, NFR-04}
+  - Production timeouts asserted: the defaults (connect 5 s, local server 60 s, #99) come from the shared module, the values in use from the settings {req FR-17, FR-24, FR-06, FR-11, NFR-04}
 - [ ] T029 [P] [US3] Red test in `crates/voicen-core/tests/local_server.rs` through the real settings loader: a saved local-server URL, model and key reference reach the endpoint used at runtime without a restart (P-013) {req FR-17, FR-13}
 
 ### Implementation

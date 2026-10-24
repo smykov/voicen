@@ -78,8 +78,8 @@ A user who already runs a local transcription server (speaches, faster-whisper-s
 1. **Given** a speaches/faster-whisper server at `http://localhost:8000/v1` and no key, **When** the user dictates with engine = local server, **Then** the transcript is returned and delivered per FR-10, and the request carried no key (req FR-17).
 2. **Given** a key is entered for the local server, **When** a request is made, **Then** the key is sent as a bearer token, read from the OS credential store, and never written to the settings file or logs (req FR-17, NFR-04).
 3. **Given** the server is not running, **When** the user finishes a recording, **Then** the notification says "cannot reach localhost:8000", nothing is pasted, and the audio is kept for retry (req FR-17 failure branch, FR-11).
-4. **Given** the server accepts the connection but does not answer within 60 s, **When** the timeout elapses, **Then** FR-11 applies with reason "timeout" (req FR-24).
-5. **Given** the server cannot be connected to within 5 s, **When** the connect timeout elapses, **Then** FR-11 applies with reason "cannot reach <host:port>" (req FR-24 connect 5 s, FR-17).
+4. **Given** the server accepts the connection but does not answer within the configured local-server timeout (default 60 s, #99), **When** the timeout elapses, **Then** FR-11 applies with reason "timeout" (req FR-24).
+5. **Given** the server cannot be reached within the configured connect timeout (default 5 s, #99), **When** the connect timeout elapses, **Then** FR-11 applies with reason "cannot reach <host:port>" (req FR-24 connect timeout, FR-17).
 6. **Given** the server returns 401/403 because a key is required, **When** a recording is transcribed, **Then** the notification says "invalid API key" and nothing is pasted (req FR-17 via the shared client of FR-06).
 
 ---
@@ -111,7 +111,7 @@ The user frees disk space by deleting a model they no longer need. If it was the
 - **Engine switched or another model selected while loaded**: the loaded model is unloaded immediately (Clarification 2).
 - **Hotkey pressed while the model is still loading**: recording proceeds; transcription waits for loading to finish; loading failure follows User Story 2 scenario 7.
 - **VAD finds no speech** (FR-12, owned by 001): the built-in engine is not called; the idle countdown, cancelled when the recording started, restarts when the recording ends.
-- **Long recording on a slow CPU with a large model**: the built-in transcription is bounded by 120 s (requirements v4 FR-24); when it elapses, FR-11 applies with reason "timeout" and the audio is kept for retry.
+- **Long recording on a slow CPU with a large model**: the built-in transcription is bounded by the configured built-in timeout (default 120 s, #99; requirements v4 FR-24); when it elapses, FR-11 applies with reason "timeout" and the audio is kept for retry.
 - **Multiple recordings in flight** (FR-23, owned by 001): the built-in engine transcribes them one at a time in recording order with the single loaded model.
 - **Local server on a non-local host over `http://`**: FR-29's warning (owned by 004) applies; with `localhost`/`127.0.0.1` no warning.
 - **Local server URL invalid or empty**: save is refused with the field highlighted (FR-13, owned by 004).

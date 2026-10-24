@@ -139,7 +139,7 @@ description: "Task list for LLM post-processing (003)"
   - **Validation while disabled.** Every field may be empty.
 
   — req FR-13, FR-21 — FR-011 — L
-- [ ] T023 [P] [US3] Write a red secrets and logging test in `crates/voicen-core/tests/post_process_secrets.rs`:
+- [ ] T023 [P] [US3] Write a red secrets and logging test (as built: `crates/voicen-core/tests/diag_pipeline.rs::post_processing_outcome_is_logged_without_prompt_reply_host_or_key`, see T026; no separate secrets test file was created):
   - it runs success plus every failure mode of T013 with a log capture and a fake `CredentialStore` (004's);
   - the mock error bodies echo the transcript and the key;
   - the captured log, the `Debug` output of every outcome and notice, and the saved settings file contain none of: key, prompt, raw text, reply, error body (SC-005);
@@ -153,7 +153,7 @@ description: "Task list for LLM post-processing (003)"
 ### Implementation for User Story 3
 
 - [ ] T025 [US3] Implement `validate()` only in `crates/voicen-core/src/post_process/settings.rs`; `PostProcessingSettings`, `STARTER_PROMPT` (exact text from data-model.md) and `defaults()` are created there by 004's foundational phase (004 T068, decisions #21). Wire `validate()` into 004's validator (makes T022 and T024 green) — req FR-13, FR-21 — FR-010, FR-011 — L
-- [x] T026 [US3] Read the key from 004's `CredentialStore` with `KeySlot::PostProcessing` when taking the snapshot, treating a missing entry or read error as no key. Emit the one allowlisted log line per post-processed dictation through 006's logger target (makes T023 green; as built, the log part is covered by `crates/voicen-core/tests/diag_pipeline.rs::post_processing_outcome_is_logged_without_prompt_reply_host_or_key`, `post_process_secrets.rs` was not created). Done as built by T-076: no separate line; the outcome rides on the dictation line as `pp=`, `pp_reason=`, `pp_ms=` (data-model.md "As built (T-076)") — req NFR-04, FR-20 — FR-012, FR-014 — L
+- [x] T026 [US3] Read the key from 004's `CredentialStore` with `KeySlot::PostProcessing` when taking the snapshot, treating a missing entry or read error as no key. Emit the one allowlisted log line per post-processed dictation through 006's logger target (makes T023 green; as built, the log part is covered by `crates/voicen-core/tests/diag_pipeline.rs::post_processing_outcome_is_logged_without_prompt_reply_host_or_key`, no separate secrets test file was created). Done as built by T-076: no separate line; the outcome rides on the dictation line as `pp=`, `pp_reason=`, `pp_ms=` (data-model.md "As built (T-076)") — req NFR-04, FR-20 — FR-012, FR-014 — L
 - [ ] T027 [P] [US3] Add the `settings.post_processing.privacy_note` text (en/ru, `contracts/ipc.md`) to 004's Post-processing tab in `src/routes/settings/`. Add a Playwright test in `e2e/post-processing.spec.ts` with mocked `get_settings` that checks:
   - the tab shows "off" and the starter prompt;
   - the privacy note is visible;

@@ -133,6 +133,12 @@ impl ModelResidency {
     pub fn tick(&self);                                            // called by the shell's timer; unloads when due
     pub fn loaded(&self) -> Option<ModelId>;
 }
+
+impl ModelGuard {                                                 // the hold `acquire` returns; drop = activity end
+    pub fn transcribe_within(&self, pcm: &[f32], language: Option<&str>, limit: Duration)
+        -> Result<String, FailureReason>;                          // limit starts once the model is held (#133);
+                                                                   // stopped by the abort hook -> Timeout, other error -> LocalEngineFailed
+}
 ```
 
 `acquire`: `Cold { load_ms }` (load timed on the injected monotonic clock) for the transcription that loaded the model or the first after its prewarm, `Warm` otherwise; `NoLocalModel` while a delete of `id` holds its release guard; a load error is `LocalEngineFailed` and leaves the residency empty. Before every load (`acquire` and `prewarm`) the file is checked (research R-8): a missing file → `NoLocalModel`; a file that does not start with the ggml magic `0x67676d6c` little-endian (`b"lmgg"`; shorter than 4 bytes or empty included) → `LocalEngineFailed`; the loader is not called in either case. Unload when nothing holds the model, no recording runs and `idle` has passed since the last activity ended.
