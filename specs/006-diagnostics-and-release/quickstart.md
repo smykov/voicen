@@ -17,7 +17,7 @@ make check                                                  # the gate (includes
 
 Expected: all green. A redaction test plants a fake transcript `"secret words 123"` and key `sk-test-PLANTED` into every input path and asserts 0 occurrences in the temp log folder.
 
-## Windows CI runner (every push to `main`, `wip/**` and `v*` tags)
+## Windows CI runner (every push to `main` and `wip/**` unless it changes only `docs/tasks/**`, every `v*` tag, every pull request)
 
 The `windows` job log shows, in order:
 1. `cargo test --workspace` including `tests/crash.rs` (panic → crash file kind `panic`; null deref → kind `native_fault`).

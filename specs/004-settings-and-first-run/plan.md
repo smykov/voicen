@@ -95,7 +95,7 @@ crates/voicen-core/src/
 ├── connection_test.rs            # ConnectionTestRequest/Result; SettingsService::test_connection runs it through engine_for (T-046)
 ├── i18n.rs                       # catalog embed, text(), MESSAGE_IDS, resolve_ui_language — delivered by the catalog task (teamwright T-005), consumed here (decisions #21)
 ├── post_process/settings.rs      # PostProcessingSettings, STARTER_PROMPT, defaults() — data type created here, 003 adds validate() (decisions #21)
-├── assets/test-clip.wav          # bundled 1 s clip for Test connection
+├── assets/connection-test-speech.s16le # bundled ~1 s 16 kHz mono s16le speech clip for Test connection (decision #59)
 └── (unit tests in each module; crates/voicen-core/tests/settings_*.rs)
 
 src-tauri/src/
