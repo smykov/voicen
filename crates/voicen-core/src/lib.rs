@@ -31,6 +31,7 @@ pub mod test_support;
 pub mod timeouts;
 pub mod tray;
 pub mod vad;
+pub mod wer;
 pub mod win32_data;
 
 pub use build_info::{build_info, BuildInfo};
