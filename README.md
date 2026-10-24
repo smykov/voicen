@@ -24,6 +24,34 @@ If something fails — no network, a wrong key, the microphone disappeared — y
 
 Keys are stored in Windows Credential Manager. Audio is not saved to history — only the last transcripts as text, and history can be turned off.
 
+## Recording calls
+
+Call mode is in development and is not in a release yet.
+
+**Consent is your responsibility.** Before you record a call, tell the other party and ask for their consent; the rules differ by country. Voicen cannot notify them for you. A recording is always visible — there is no secret mode — and at each start Voicen reminds you to tell the other party; the reminder is on by default and can be turned off in the Calls settings. A sample opening phrase:
+
+> Just so you know, I'm recording this call to keep notes. Is that OK with you?
+
+**Where the audio goes.** If the transcription engine is not on your computer (an API provider), the other party's audio is sent to that provider.
+
+**Storage.** Calls are stored unencrypted in `%LOCALAPPDATA%\Voicen\calls` or in the folder you choose. Anyone signed in to your Windows account can read them. Uninstalling keeps them unless you answer "yes" to the separate question about recorded calls, or a silent uninstall is run with `/PURGECALLS`. A folder you chose yourself is never deleted by the uninstaller.
+
+**Starting from the command line.** `voicen.exe --call record` starts a recording in the running Voicen. Any program running under your Windows account can do the same; the recording indicator is always shown, so such a recording cannot stay hidden.
+
+### Русский
+
+Режим записи звонков ещё в разработке и пока не вошёл ни в один релиз.
+
+**Согласие собеседника — ваша ответственность.** Перед записью звонка предупредите собеседника и спросите его согласия; правила в разных странах разные. Voicen не может сообщить ему о записи за вас. Запись всегда видна — скрытого режима нет, — и при каждом старте Voicen напоминает предупредить собеседника; напоминание включено по умолчанию, его можно отключить в настройках звонков. Пример фразы в начале разговора:
+
+> Предупреждаю: я записываю этот разговор, чтобы не потерять детали. Вы не против?
+
+**Куда уходит звук.** Если движок распознавания работает не на вашем компьютере (API-провайдер), звук собеседника отправляется этому провайдеру.
+
+**Хранение.** Звонки хранятся без шифрования в `%LOCALAPPDATA%\Voicen\calls` или в выбранной вами папке. Их может прочитать любой, кто вошёл в вашу учётную запись Windows. При удалении программы они сохраняются, если только вы не ответите «да» на отдельный вопрос о записанных звонках или тихое удаление не запущено с ключом `/PURGECALLS`. Папку, которую вы выбрали сами, деинсталлятор не удаляет никогда.
+
+**Запуск из командной строки.** `voicen.exe --call record` начинает запись в уже запущенном Voicen. То же может сделать любая программа, работающая под вашей учётной записью Windows; индикатор записи показывается всегда, поэтому такая запись не останется незаметной.
+
 ## Built by an AI agent team
 
 Voicen is written by Claude Code agents working under [teamwright](https://github.com/smykov/teamwright), a process plugin that turns each step of a development team into a checked record. The owner sets requirements and accepts results; agents do the analysis, tests, code and review. All of it stays in the repository:
