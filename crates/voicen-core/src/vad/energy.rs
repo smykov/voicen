@@ -8,7 +8,7 @@
 //! runs of >= 3 loud frames count; speech = counted frames >= 10 (300 ms).
 
 use super::{SpeechDetector, SpeechSpan, SpeechSpans, VadError};
-use crate::audio::AudioBuffer;
+use crate::audio::{AudioBuffer, SAMPLE_RATE};
 
 /// 30 ms at 16 kHz.
 const FRAME_SAMPLES: usize = 480;
@@ -55,18 +55,48 @@ impl SpeechDetector for EnergyDetector {
 
 impl SpeechSpans for EnergyDetector {
     fn name(&self) -> &'static str {
-        todo!("T-134")
+        "energy"
     }
 
-    fn speech_spans(&self, _audio: &AudioBuffer) -> Result<Vec<SpeechSpan>, VadError> {
-        todo!("T-134")
+    /// Always `Ok`: the counted runs of the energy rule as `[start, end)` ms on
+    /// 30 ms frame boundaries, gaps not merged; empty exactly when [`detect`] is
+    /// false (the same `analyse` pass).
+    ///
+    /// [`detect`]: EnergyDetector::detect
+    fn speech_spans(&self, audio: &AudioBuffer) -> Result<Vec<SpeechSpan>, VadError> {
+        let a = analyse(audio.samples());
+        if a.counted < MIN_SPEECH_FRAMES {
+            return Ok(Vec::new());
+        }
+        Ok(a.runs
+            .iter()
+            .map(|r| SpeechSpan {
+                start_ms: frames_to_ms(r.start),
+                end_ms: frames_to_ms(r.start + r.len),
+            })
+            .collect())
     }
+}
+
+/// Start of frame `frames` in ms: 480 samples at 16 kHz are exactly 30 ms.
+fn frames_to_ms(frames: usize) -> u64 {
+    // usize -> u64 is lossless on every supported target.
+    (frames * FRAME_SAMPLES) as u64 * 1000 / u64::from(SAMPLE_RATE)
+}
+
+/// A run of consecutive loud frames that counts (at least `MIN_RUN_FRAMES`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct LoudRun {
+    /// Index of the first loud frame.
+    pub(crate) start: usize,
+    /// Number of loud frames.
+    pub(crate) len: usize,
 }
 
 /// What the energy rule sees in a recording. Tests assert fixture premises with it
 /// (P-005), so the fields beyond `counted` may be read by tests only.
 #[cfg_attr(not(test), allow(dead_code))]
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct EnergyAnalysis {
     /// The noise floor after clamping, dBFS.
     pub(crate) floor_db: f64,
@@ -76,6 +106,8 @@ pub(crate) struct EnergyAnalysis {
     pub(crate) longest_run: usize,
     /// Loud frames in runs of 3 or more.
     pub(crate) counted: usize,
+    /// The runs of 3 or more loud frames, in order (their lengths sum to `counted`).
+    pub(crate) runs: Vec<LoudRun>,
 }
 
 /// RMS level of one frame in dBFS (full scale = 32768); an all-zero frame is
@@ -117,12 +149,14 @@ pub(crate) fn analyse(samples: &[i16]) -> EnergyAnalysis {
     let mut loud = 0;
     let mut longest_run = 0;
     let mut counted = 0;
+    let mut runs = Vec::new();
     let mut run = 0;
     // A trailing quiet sentinel closes the last run.
-    for is_loud in levels
+    for (i, is_loud) in levels
         .iter()
         .map(|&l| l >= threshold)
         .chain(std::iter::once(false))
+        .enumerate()
     {
         if is_loud {
             loud += 1;
@@ -131,6 +165,11 @@ pub(crate) fn analyse(samples: &[i16]) -> EnergyAnalysis {
             longest_run = longest_run.max(run);
             if run >= MIN_RUN_FRAMES {
                 counted += run;
+                // Frame i is the first quiet one, so the run is [i - run, i).
+                runs.push(LoudRun {
+                    start: i - run,
+                    len: run,
+                });
             }
             run = 0;
         }
@@ -141,6 +180,7 @@ pub(crate) fn analyse(samples: &[i16]) -> EnergyAnalysis {
         loud,
         longest_run,
         counted,
+        runs,
     }
 }
 
