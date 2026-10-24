@@ -44,15 +44,40 @@ tools:
 language: en
 process:
   review:
-    blocking: medium
+    blocking: high
   batch:
-    max_tasks: 3
+    max_tasks: 5
     by_priority:
-      P1: 2
+      P1: 3
+      P2: 5
+      P3: 5
     parallel: 10
   autonomy:
     start: auto
     continue: true
+  ready:
+    after: code_complete
+  stages:
+    analyze:
+      batch: 3
+      min: 3
+      max_wait_hours: 4
+    red-tests:
+      batch: 3
+      min: 3
+      max_wait_hours: 4
+    implement:
+      batch: 3
+      min: 3
+      max_wait_hours: 4
+    review:
+      batch: 3
+      min: 3
+      max_wait_hours: 4
+    verify:
+      batch: 3
+      min: 3
+      max_wait_hours: 4
   models:
     analyze: opus
     red-tests: sonnet

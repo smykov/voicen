@@ -45,7 +45,7 @@ Why these roles and how they hand over: `docs/process/roles.md`.
 
 Every session ends with an outcome: `barrier | idle | escalate | interrupted`; hooks journal tool calls and outcomes into `.teamwright/logs/`. Details: `docs/process/sessions.md` §2.
 
-Process settings (`process:` in `.teamwright/config.yml`, changed only by the owner through `/teamwright:settings`): review blocks from **medium** findings up; a pass takes at most **3** task(s), capped per priority at P0 1, P1 2, P2 3, P3 3; starting a ready task: **auto**; continue after a barrier: **true**; tasks in parallel worktrees: **10** (`/teamwright:parallel`). Tasks of a pass run one after another in this working tree; a red gate stops the pass.
+Process settings (`process:` in `.teamwright/config.yml`, changed only by the owner through `/teamwright:settings`): review blocks from **high** findings up; a pass takes at most **5** task(s), capped per priority at P0 1, P1 3, P2 5, P3 5; starting a ready task: **auto**; continue after a barrier: **true**; tasks in parallel worktrees: **10** (`/teamwright:parallel`). Tasks of a pass run one after another in this working tree; a red gate stops the pass.
 
 ## Where tasks come from
 
