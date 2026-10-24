@@ -31,8 +31,8 @@ There is no stop switch in 1a.
 |---|---|---|
 | `cargo test --workspace --exclude voicen` | core call tests (Linux ones also pass on Windows) + `voicen-whisper` `SpeechSpans` on the fetched Silero model | FR-023, R8 |
 | `cargo test -p voicen` (`src-tauri/tests/call_*.rs`) | WAV-sourced chain capture → storage → final (local mock server) → merge; IMMNotificationClient register/unregister; loopback open on a device-less runner gives `no_device`; indicator window style bits (topmost, no taskbar, shown without activation) | FR-014, FR-010, FR-005 |
-| `crt-imports.sh` | `voicen.exe` and the call test exes import no `MSVCP140` / `VCRUNTIME140` (libopus /MT) | R5 |
-| `opus-cmake-cache.sh` (new) | opus `CMakeCache.txt`: `OPUS_STATIC_RUNTIME=ON`, `CMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded` | R5 |
+| `crt-imports.sh` | `voicen.exe` and the call test exes import no `MSVCP140` / `VCRUNTIME140` (the list gains the call exes with T-127 / T-139; the libopus `/MT` proof is `opus-cmake-cache.sh`, decisions #197) | R5 |
+| `opus-cmake-cache.sh` (new) | opus `CMakeCache.txt`: `OPUS_STATIC_RUNTIME:BOOL=ON`, `CMAKE_BUILD_TYPE:STRING=Release`, no line naming `CMAKE_MSVC_RUNTIME_LIBRARY`; `dumpbin -directives` of each `opus.lib`: `/DEFAULTLIB:LIBCMT`, never `/DEFAULTLIB:MSVCRT` (decisions #197) | R5 |
 | install smoke (existing step "Install silently, launch, check the start, settings-load and reconcile log lines, the first-run settings.json, the Run value and the settings window", extended) | after the start line: `voicen.exe --call record` → log has `call_requested source=switch` and `call_refused part=system reason=no_device` (the "no output device" refusal of FR-043; the session opens the system track before the mic, so this holds whatever capture endpoints the runner has), the process is still running, no call folder exists, the window census is unchanged | FR-043, FR-002 |
 | uninstall `/S` (existing step "uninstall.exe /S removes the data folder, every Voicen/ credential, the Run value and the shortcut, and keeps other credentials (T-025)", extended) | a planted `calls\2026-01-01_000000\meta.json` exists after uninstall; the step's current assertion that the whole data folder is gone becomes "gone except `calls\`" | FR-041 |
 | uninstall `/S /PURGECALLS` (new, after a reinstall) | the planted folder is gone; a planted folder in a non-default root (`$RUNNER_TEMP\calls-elsewhere`) still exists | FR-041, SC-010 |
@@ -55,9 +55,9 @@ Planned changes:
 
 | File | Change |
 |---|---|
-| `.cargo/config.toml` | `CMAKE_TOOLCHAIN_FILE` (opus static runtime) — confirm it does not change whisper.cpp's cache (`whisper-cmake-cache.sh` stays green) |
+| `.cargo/config.toml` | `CMAKE_TOOLCHAIN_FILE_x86_64_pc_windows_msvc` -> `cmake/msvc-static-crt.cmake` (opus static runtime) — confirm it does not change whisper.cpp's cache (`whisper-cmake-cache.sh` stays green) |
 | `scripts/ci/opus-cmake-cache.sh` + Makefile `check-opus-cmake-cache` + host fixtures | new checker |
-| `scripts/ci/crt-imports.sh` exe list | call test exes |
+| `scripts/ci/crt-imports.sh` exe list | call test exes (T-127 / T-139, not T-117) |
 | `docker/rust.Dockerfile` | `cmake` (core image; also serves the mingw build of `check-shell-windows`) — approved (#186) |
 | `scripts/ci/shell-targets.txt` | unchanged (new shell tests are `tests/*.rs`, not targets of lib/bin) — confirm with `make check-shell-layout` |
 | `scripts/ci/helper-windows.txt` | unchanged; the indicator and Calls windows are product windows (overlay.md §5). If the spike shows a new framework helper window, it is added there with its evidence |
