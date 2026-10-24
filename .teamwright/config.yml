@@ -49,7 +49,13 @@ process:
     max_tasks: 3
     by_priority:
       P1: 2
-    parallel: 2
+    parallel: 10
   autonomy:
     start: auto
     continue: true
+  models:
+    analyze: opus
+    red-tests: sonnet
+    implement: opus
+    review: opus
+    verify: opus
