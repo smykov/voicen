@@ -1,0 +1,8 @@
+guarantee: AC-3: empty reference, no panic or division by zero
+file: crates/voicen-core/src/wer.rs
+added_by: test-writer
+--- old
+        if self.reference_words == 0 {
+--- new
+        if self.reference_words != 0 {
+--- end

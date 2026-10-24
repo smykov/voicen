@@ -1,0 +1,8 @@
+guarantee: AC-2: Levenshtein fixtures
+file: crates/voicen-core/src/wer.rs
+added_by: test-writer
+--- old
+            let mut best = if r == h { *diag } else { diag.sub() };
+--- new
+            let mut best = diag.sub();
+--- end

@@ -1,0 +1,8 @@
+guarantee: AC-3: empty reference, no panic or division by zero
+file: crates/voicen-core/src/wer.rs
+added_by: test-writer
+--- old
+        reference_words: reference.len(),
+--- new
+        reference_words: hypothesis.len(),
+--- end

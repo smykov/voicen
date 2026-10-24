@@ -1,0 +1,8 @@
+guarantee: AC-1: normalization
+file: crates/voicen-core/src/wer.rs
+added_by: test-writer
+--- old
+            'ё' => word.push('е'),
+--- new
+            'ё' => word.push('ё'),
+--- end

@@ -1,0 +1,8 @@
+guarantee: AC-2: Levenshtein fixtures
+file: crates/voicen-core/src/wer.rs
+added_by: test-writer
+--- old
+            ins: self.ins + 1,
+--- new
+            ins: self.ins,
+--- end

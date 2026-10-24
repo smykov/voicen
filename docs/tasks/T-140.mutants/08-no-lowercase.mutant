@@ -1,0 +1,8 @@
+guarantee: AC-1: normalization
+file: crates/voicen-core/src/wer.rs
+added_by: test-writer
+--- old
+    for ch in text.to_lowercase().chars() {
+--- new
+    for ch in text.chars() {
+--- end

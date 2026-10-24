@@ -1,0 +1,8 @@
+guarantee: AC-1: normalization
+file: crates/voicen-core/src/wer.rs
+added_by: test-writer
+--- old
+        '\'' | '\u{2019}' => {}
+--- new
+        '\'' => {}
+--- end

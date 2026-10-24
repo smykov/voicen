@@ -1,0 +1,10 @@
+guarantee: AC-3: empty reference, no panic or division by zero
+file: crates/voicen-core/src/wer.rs
+added_by: test-writer
+--- old
+        left = left.ins();
+        prev.push(left);
+--- new
+        left = left.del();
+        prev.push(left);
+--- end

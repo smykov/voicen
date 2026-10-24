@@ -1,0 +1,1 @@
+cargo test -p voicen-core --lib wer::

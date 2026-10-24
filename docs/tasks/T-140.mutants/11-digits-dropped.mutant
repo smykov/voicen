@@ -1,0 +1,8 @@
+guarantee: AC-1: normalization
+file: crates/voicen-core/src/wer.rs
+added_by: test-writer
+--- old
+            c if c.is_alphanumeric() => word.push(c),
+--- new
+            c if c.is_alphabetic() => word.push(c),
+--- end

@@ -1,0 +1,8 @@
+guarantee: -
+file: crates/voicen-core/src/wer.rs
+added_by: test-writer
+--- old
+            if del.cost < best.cost {
+--- new
+            if del.cost <= best.cost {
+--- end
