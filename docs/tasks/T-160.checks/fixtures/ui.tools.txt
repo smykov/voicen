@@ -1,0 +1,51 @@
+<!-- teamwright:tools:begin -->
+## Tools
+
+Configured by teamwright from `.teamwright/config.yml` (spec=spec-kit, context=serena, docs=context7, ui_verify=playwright, api_verify=project-runner). Re-rendered by `/teamwright:reconfigure`; edit outside the markers.
+
+### spec: spec-kit
+
+- **When:** a task is large (more than one seam or service, or product behaviour not settled) → it starts in Spec Kit, not in a task record. Small work skips Spec Kit.
+- **Commands** (agent skills, run in the chat one at a time, review each result): `/speckit-specify <what and why>` → `/speckit-clarify` → `/speckit-plan <stack and constraints>` → `/speckit-tasks`. Some integrations name them `/speckit.specify` etc.; use whichever the project's `.claude/` provides. `/speckit-analyze` is optional before `tasks`.
+- **Never run `/speckit-implement` or `/speckit-converge`.** Implementation goes through the teamwright lifecycle.
+- **Where the output lives:** one directory per feature under the Spec Kit specs directory (usually `specs/<NNN-feature>/` with `spec.md`, `plan.md`, `tasks.md`). Each item of `tasks.md` becomes a `docs/tasks/T-NNN.md` record with `design_ref: specs/<NNN-feature>/plan.md#<section>` (relative path + anchor).
+- **Constitution:** `.specify/memory/constitution.md` points to `PRINCIPLES.md`; if it has to change, it changes in the same commit and with the same version as `PRINCIPLES.md`. Agents do not edit either.
+- **No `specify` CLI or no `.specify/` directory:** do not improvise a spec format; write the spec as `docs/specs/<name>.md` (problem, behaviour, decisions, open questions) and link it with `design_ref`, and tell the orchestrator Spec Kit is missing.
+
+### context: serena
+
+- **Before reading files to understand code, ask Serena.** `get_symbols_overview` for a file's structure; `find_symbol` for a definition (pass `relative_path` to scope it, `include_body: true` only for the symbol you need); `find_referencing_symbols` for every caller of a seam; `find_implementations` / `find_declaration` for interfaces.
+- **Who uses it for what:** investigator — every path that handles the concern (hypothesis "a second path"); developer — callers of the seam before changing it; test-writer — the seam's public surface; reviewer — call sites and sibling paths of every changed symbol.
+- **Documents** (`docs/`, specs): `get_symbols_overview` on the file lists its headings; read only the section you need (`find_symbol` with the heading name, or the line range it reports). A requirement id: `scripts/tw-req <ID>`.
+- **Text search** (`search_for_pattern`, or grep) is for strings, config keys, SQL, templates and files the language server does not parse; use it too when a symbol tool returns nothing or times out.
+- **An empty result is not proof of absence** — an unindexed file, an unsupported language or a dynamic call also return nothing. Say which tool and scope you used.
+- **Stale index** (results miss code you can see): tell the orchestrator to run `serena project index`; meanwhile fall back to grep and say so.
+- **Edit with the normal Edit/Write tools**, not Serena's editing tools (`replace_symbol_body`, `insert_*`, `rename_symbol`): the teamwright gates see only Edit/Write. Do not write Serena memories for process facts — those live in `docs/`.
+- **Serena not connected** (no `mcp__serena__*` tools): use grep and file reads, and say so in your report.
+
+### docs: context7
+
+- **Before using a library or framework API** you have not already verified in this task — a new call, a changed signature, a config option, a migration — look it up: `resolve-library-id` (`libraryName`, `query`) → `query-docs` (`libraryId`, `query`). Skip the first step when the ID is known (e.g. `/vercel/next.js`).
+- **Pin the version:** read the version from the project's lock file or manifest and put it in the query; docs for another major version are a finding, not an answer.
+- **Cite it:** name the library ID and version in your report when a decision depends on the docs. The reviewer checks changed calls against the same source.
+- **No match or empty result:** the package is not indexed — read the package's own docs or source in the dependency directory, say so, and never fill the gap from memory.
+- **Not connected** (no `mcp__context7__*` tools) or rate-limited: same fallback; report it.
+
+### ui_verify: playwright
+
+- **Test files:** under the project's Playwright `testDir` (see `playwright.config.*`), one scenario per test named after the Acceptance line. Locators: `getByRole`, `getByLabel`, `getByTestId` — no CSS chains or XPath tied to layout. Wait with web-first assertions (`await expect(locator).toHaveText(...)`), never `waitForTimeout`.
+- **Run:** the area's `e2e_ui_command` (typically `npx --no playwright test <file>` — `--no` stops npx from downloading a package that is not installed); a single test with `-g "<title>"`; against a running system with its base URL from the environment (`BASE_URL=... npx playwright test`). Red first: show the test fails on the missing behaviour, not on a locator typo.
+- **Assert the effect,** not only the page text: where the test can reach it, check the API response (`page.waitForResponse`, `request` fixture) or the stored state.
+- **Explore with Playwright MCP** (`browser_navigate`, `browser_snapshot` for the accessibility tree and refs, `browser_click`, `browser_fill_form`, `browser_console_messages`, `browser_network_requests`) to reproduce a bug or find locators. Snapshot before acting; never type real credentials; close the browser (`browser_close`) when done. What you learn goes into a committed test.
+- **Validator:** record `tool: playwright` and the exact command; `evidence` is the HTML report directory (`playwright-report/`) or a JUnit file, plus `test-results/` traces for failures.
+- **Browsers missing** (`Executable doesn't exist`): installing them (`npx playwright install`) is setup, not a test failure — ask the owner first, it downloads browsers; never install when the owner declined downloads. **Flaky** (passes on retry): report it as a finding; a retry pass is not a clean PASS.
+
+### api_verify: project-runner
+
+- **Test files** live with the area's existing API tests; follow their fixtures and naming. One test per Acceptance scenario, failure branch included (invalid input, missing auth, dependency down, limit exceeded).
+- **Against the running system:** the base URL comes from an environment variable (e.g. `BASE_URL`), never a host in code or in the record. In-process tests (app booted inside the test) count for the gate, not for verification of a deploy — say which kind you ran.
+- **Assert the effect:** status code and body **and** the stored state, sent message or log line where reachable — not the API's own success message alone.
+- **Test data:** fake values only (`example.com`, documentation IP ranges, obvious fake tokens); create what you need and clean it up; never point at production data.
+- **Run:** the area's `api_test_command`, narrowed to the task's tests with the runner's own filter (`-t`, `-k`, `--grep`). Save machine-readable output (JUnit XML or JSON reporter) when the runner supports it.
+- **Validator:** `kind: api`, `tool:` the runner name (e.g. `jest`, `pytest`), the exact command, `environment: local | staging | production-like`.
+<!-- teamwright:tools:end -->
