@@ -131,6 +131,18 @@ jobs:
           REF_NAME: ${{ github.ref_name }}
           RUN_NUMBER: ${{ github.run_number }}
         run: scripts/ci/version-stamp.sh "$REF_TYPE" "$REF_NAME" "$RUN_NUMBER"
+      # T-117 (decisions #197, D3): every libopus of this run is configured fresh from the committed
+      # toolchain file (cmake/msvc-static-crt.cmake). opusic-sys's build script does not rerun when
+      # that file or its variable changes, and the restored build cache can hold an older /MD
+      # OUT_DIR, so its build dirs, fingerprints and deps artifacts are dropped before the first
+      # cargo command (one libopus build per profile). make check: check-opus-cmake-cache.
+      - name: Drop restored opusic-sys build outputs (T-117)
+        shell: bash
+        run: |
+          if [ -d target ]; then
+            find target \( -path '*/build/opusic-sys-*' -o -path '*/.fingerprint/opusic-sys-*' \) -prune -print -exec rm -rf {} +
+            find target -path '*/deps/*' \( -name 'libopusic_sys-*' -o -name 'opusic_sys-*' \) -print -exec rm -f {} +
+          fi
       # T-099 (invariant 5): the tiny whisper model for crates/voicen-whisper/tests, outside target/
       # (the build cache holds target/). The key is a hash of the model catalog file, the one place
       # that pins the model, so ci.yml repeats none of its values (P-010). Any edit of that file
@@ -188,6 +200,14 @@ jobs:
         if: ${{ !cancelled() }}
         shell: bash
         run: bash scripts/ci/whisper-cmake-cache.sh target
+      # T-117 (decisions #197): every libopus under target/ (debug for cargo test, release for the
+      # installer) was configured with OPUS_STATIC_RUNTIME ON and Release, and each opus.lib names
+      # the static CRT (dumpbin -directives: LIBCMT, never MSVCRT). !cancelled(): as above.
+      # make check: check-opus-cmake-cache.
+      - name: libopus C runtime in every opusic-sys CMakeCache.txt and opus.lib (T-117)
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: bash scripts/ci/opus-cmake-cache.sh target
       # T-099 (invariant 4, F-001 class): the exes that link whisper.cpp (the voicen-whisper test
       # exes; voicen.exe from T-017 on) import no MSVCP140 / VCRUNTIME140 DLL. The runner has the
       # VC redistributable, so only the import table proves it. make check: check-crt-imports.

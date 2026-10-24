@@ -44,3 +44,16 @@ CMAKE_C_FLAGS_RELEASE = { value = "/O2 /Ob2 /DNDEBUG", force = true }
 CMAKE_CXX_FLAGS_RELEASE = { value = "/O2 /Ob2 /DNDEBUG", force = true }
 CMAKE_C_FLAGS_RELWITHDEBINFO = { value = "/O2 /Ob1 /DNDEBUG", force = true }
 CMAKE_CXX_FLAGS_RELWITHDEBINFO = { value = "/O2 /Ob1 /DNDEBUG", force = true }
+
+# libopus (opusic-sys 0.7.5, bundled, crates/voicen-core; T-117, decisions #197): built /MT, the
+# shell's CRT. opusic-sys forwards no environment to cmake, and cmake-rs reads from it only the
+# toolchain file (and generator, prefix path), so the setting lives in cmake/msvc-static-crt.cmake.
+# Target-scoped on purpose: once a toolchain file is defined, cmake-rs stops passing
+# CMAKE_SYSTEM_NAME (cross builds) and CMAKE_C_COMPILER, which the native Linux build and the mingw
+# build of `make check-shell-windows` need; cmake-rs tries CMAKE_TOOLCHAIN_FILE_<target with _>
+# before the plain name, so only x86_64-pc-windows-msvc builds load it (whisper-rs-sys too, which
+# reads nothing it sets). relative = true: cargo passes the absolute path. A restored build cache
+# keeps an old opusic-sys OUT_DIR (its build script does not rerun on this variable), so the
+# windows job drops it before the first cargo command. Proven on the CI build:
+# scripts/ci/opus-cmake-cache.sh (docs/decisions/ci-toolchain.md).
+CMAKE_TOOLCHAIN_FILE_x86_64_pc_windows_msvc = { value = "cmake/msvc-static-crt.cmake", relative = true, force = true }
