@@ -108,6 +108,50 @@
 //!     }));
 //! }
 //! ```
+//!
+//! T-118: the call lines carry a device only as an [`EndpointId`](crate::call::EndpointId), so
+//! a friendly name or a path cannot be put on a line (one field per block):
+//!
+//! ```compile_fail,E0308
+//! use voicen_core::call::EndpointId;
+//! use voicen_core::diag::LogEvent;
+//! fn started(name: &'static str, id: EndpointId) -> LogEvent {
+//!     LogEvent::CallStarted { mic: name, system: id, comms_differs: false }
+//! }
+//! ```
+//!
+//! ```compile_fail,E0308
+//! use voicen_core::call::{DeviceCause, Track};
+//! use voicen_core::diag::LogEvent;
+//! fn moved(name: &'static str) -> LogEvent {
+//!     LogEvent::CallDeviceChanged {
+//!         track: Track::Mic,
+//!         cause: DeviceCause::Reopened,
+//!         gap_ms: 0,
+//!         to: Some(name),
+//!     }
+//! }
+//! ```
+//!
+//! The same shapes compile through the constructor, which keeps the text or writes `invalid`:
+//!
+//! ```
+//! use voicen_core::call::{DeviceCause, EndpointId, Track};
+//! use voicen_core::diag::{Log, LogEvent};
+//! fn log_lines(log: &Log, name: &str) {
+//!     log.write(LogEvent::CallStarted {
+//!         mic: EndpointId::new(name),
+//!         system: EndpointId::new("{0.0.0.00000000}.{abc}"),
+//!         comms_differs: false,
+//!     });
+//!     log.write(LogEvent::CallDeviceChanged {
+//!         track: Track::Mic,
+//!         cause: DeviceCause::Reopened,
+//!         gap_ms: 0,
+//!         to: Some(EndpointId::new(name)),
+//!     });
+//! }
+//! ```
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
 pub mod crash;

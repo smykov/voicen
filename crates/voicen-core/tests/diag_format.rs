@@ -12,10 +12,15 @@ mod diag_support;
 use std::collections::BTreeSet;
 
 use diag_support::{
-    at, check_closed, pairs, parse, parse_ts, parsed, DETECTORS, DICTATION_OUTCOMES, ENGINES,
+    at, check_closed, closed, pairs, parse, parse_ts, parsed, DETECTORS, DICTATION_OUTCOMES, ENGINES,
     FAILURES, MIC_CAUSES, NOON_UTC, PP_REASONS, PP_RESULTS, WARNING_KINDS,
 };
 use voicen_core::autostart::ReconcileAction;
+use voicen_core::call::{
+    CallSource, DeviceCause, EndpointId, FailReason, FinalOutcome, FinalStage, InvalidRule,
+    PassMode, RefusedPart, RefusedReason, SilentRule, StopReason, StorageKind, SwitchRefusal,
+    Track, VadFallbackCause,
+};
 use voicen_core::connection_test::ConnectionTestResult;
 use voicen_core::delivery::DeliveryResult;
 use voicen_core::diag::{
@@ -515,6 +520,7 @@ fn every_event() -> Vec<LogEvent> {
     all.push(LogEvent::DictationBlocked {
         reason: Blocked::NoEngine,
     });
+    all.extend(call_events());
     // T-100 (review 1 #2): the session lines. A `CrashFileName` is built in tests
     // through the `test-fakes` constructor `CrashFileName::fake`, which accepts
     // only a name diag itself writes; the edge values of every part.
@@ -587,10 +593,473 @@ fn every_event() -> Vec<LogEvent> {
             LogEvent::SettingsTestConnection(_) => 8,
             LogEvent::PreviousSession(_) => 9,
             LogEvent::Exited => 10,
+            LogEvent::CallRequested { .. } => 11,
+            LogEvent::CallRefused { .. } => 12,
+            LogEvent::CallStarted { .. } => 13,
+            LogEvent::CallDeviceChanged { .. } => 14,
+            LogEvent::CallTrackSilent { .. } => 15,
+            LogEvent::CallStopped { .. } => 16,
+            LogEvent::CallStorageFailed { .. } => 17,
+            LogEvent::CallRecovered { .. } => 18,
+            LogEvent::FinalPassStage { .. } => 19,
+            LogEvent::FinalPassFinished { .. } => 20,
+            LogEvent::CallSwitchRefused { .. } => 21,
+            LogEvent::VadFallback { .. } => 22,
+            LogEvent::TranscriptInvalid { .. } => 23,
         })
         .collect();
-    assert_eq!(seen.len(), 11, "every LogEvent variant is enumerated");
+    assert_eq!(seen.len(), 24, "every LogEvent variant is enumerated");
     all
+}
+
+// ---- T-118: the call lines --------------------------------------------------------
+
+const MIC_ID: &str = "{0.0.1.00000000}.{8a1c2f3e-0b4d-4c5a-9e6f-1a2b3c4d5e6f}";
+const SYS_ID: &str = "{0.0.0.00000000}.{ABCDEF01-2345-6789-abcd-EF0123456789}";
+
+const TRACKS: [(Track, &str); 2] = [(Track::Mic, "mic"), (Track::System, "system")];
+
+const REFUSED_PARTS_ALL: [(RefusedPart, &str); 3] = [
+    (RefusedPart::Mic, "mic"),
+    (RefusedPart::System, "system"),
+    (RefusedPart::Root, "root"),
+];
+const REFUSED_REASONS_ALL: [(RefusedReason, &str); 6] = [
+    (RefusedReason::NoDevice, "no_device"),
+    (RefusedReason::AccessDenied, "access_denied"),
+    (RefusedReason::Busy, "busy"),
+    (RefusedReason::Unwritable, "unwritable"),
+    (RefusedReason::Missing, "missing"),
+    (RefusedReason::Other, "other"),
+];
+const CAUSES_ALL: [(DeviceCause, &str); 6] = [
+    (DeviceCause::DefaultOutputChanged, "default_output_changed"),
+    (DeviceCause::MicLost, "mic_lost"),
+    (DeviceCause::MicDefaultChanged, "mic_default_changed"),
+    (DeviceCause::TrackLost, "track_lost"),
+    (DeviceCause::Reopened, "reopened"),
+    (DeviceCause::NoDevice, "no_device"),
+];
+const STOPS_ALL: [(StopReason, &str); 8] = [
+    (StopReason::User, "user"),
+    (StopReason::Hotkey, "hotkey"),
+    (StopReason::Exit, "exit"),
+    (StopReason::SystemEnd, "system_end"),
+    (StopReason::Sleep, "sleep"),
+    (StopReason::MaxLength, "max_length"),
+    (StopReason::LowDisk, "low_disk"),
+    (StopReason::StorageError, "storage_error"),
+];
+const STORAGE_ALL: [(StorageKind, &str); 6] = [
+    (StorageKind::Write, "write"),
+    (StorageKind::Flush, "flush"),
+    (StorageKind::Sync, "sync"),
+    (StorageKind::Meta, "meta"),
+    (StorageKind::Transcript, "transcript"),
+    (StorageKind::LowDisk, "low_disk"),
+];
+const STAGES_ALL: [(FinalStage, &str); 5] = [
+    (FinalStage::Decode, "decode"),
+    (FinalStage::Vad, "vad"),
+    (FinalStage::Upload, "upload"),
+    (FinalStage::Merge, "merge"),
+    (FinalStage::Write, "write"),
+];
+const FAILS_ALL: [(FailReason, &str); 6] = [
+    (FailReason::Key, "key"),
+    (FailReason::Network, "network"),
+    (FailReason::Timeout, "timeout"),
+    (FailReason::Provider, "provider"),
+    (FailReason::Storage, "storage"),
+    (FailReason::EngineNotSetUp, "engine_not_set_up"),
+];
+const RULES_ALL: [(InvalidRule, &str); 7] = [
+    (InvalidRule::Unsorted, "unsorted"),
+    (InvalidRule::OutOfRange, "out_of_range"),
+    (InvalidRule::UnknownSpeaker, "unknown_speaker"),
+    (InvalidRule::UnknownTrack, "unknown_track"),
+    (InvalidRule::BadSource, "bad_source"),
+    (InvalidRule::BadLang, "bad_lang"),
+    (InvalidRule::EmptyText, "empty_text"),
+];
+
+/// Every call variant with every value of every closed field, the edge integers, both
+/// `Some`/`None` optionals, and the planted strings through `EndpointId`.
+fn call_events() -> Vec<LogEvent> {
+    let mut all = Vec::new();
+    for source in [CallSource::Tray, CallSource::Hotkey, CallSource::Switch] {
+        all.push(LogEvent::CallRequested { source });
+    }
+    for (part, _) in REFUSED_PARTS_ALL {
+        for (reason, _) in REFUSED_REASONS_ALL {
+            all.push(LogEvent::CallRefused { part, reason });
+        }
+    }
+    let mut ids = vec![MIC_ID, SYS_ID];
+    ids.extend(planted());
+    for a in &ids {
+        for b in &ids {
+            for comms_differs in [false, true] {
+                all.push(LogEvent::CallStarted {
+                    mic: EndpointId::new(a),
+                    system: EndpointId::new(b),
+                    comms_differs,
+                });
+            }
+        }
+    }
+    for (track, _) in TRACKS {
+        for (cause, _) in CAUSES_ALL {
+            for gap_ms in [0, 1_500, u64::MAX] {
+                all.push(LogEvent::CallDeviceChanged {
+                    track,
+                    cause,
+                    gap_ms,
+                    to: None,
+                });
+                for id in &ids {
+                    all.push(LogEvent::CallDeviceChanged {
+                        track,
+                        cause,
+                        gap_ms,
+                        to: Some(EndpointId::new(id)),
+                    });
+                }
+            }
+        }
+        for rule in [SilentRule::Lost, SilentRule::CantHear] {
+            all.push(LogEvent::CallTrackSilent { track, rule });
+        }
+        for (stage, _) in STAGES_ALL {
+            for ms in [0, u64::MAX] {
+                for chunks in [0, u32::MAX] {
+                    all.push(LogEvent::FinalPassStage {
+                        track,
+                        stage,
+                        ms,
+                        chunks,
+                    });
+                }
+            }
+        }
+        for cause in [VadFallbackCause::Unavailable, VadFallbackCause::Error] {
+            all.push(LogEvent::VadFallback { track, cause });
+        }
+    }
+    for (reason, _) in STOPS_ALL {
+        for n in [0, u64::MAX] {
+            all.push(LogEvent::CallStopped {
+                reason,
+                duration_ms: n,
+                mic_bytes: n,
+                system_bytes: u64::MAX - n,
+            });
+        }
+    }
+    for (kind, _) in STORAGE_ALL {
+        for os in [None, Some(0), Some(5), Some(i32::MIN), Some(i32::MAX)] {
+            all.push(LogEvent::CallStorageFailed { kind, os });
+        }
+    }
+    for calls in [0, 1, u32::MAX] {
+        all.push(LogEvent::CallRecovered { calls });
+    }
+    for mode in [PassMode::Timed, PassMode::Timeless] {
+        for ms in [0, u64::MAX] {
+            all.push(LogEvent::FinalPassFinished {
+                outcome: FinalOutcome::Ready,
+                mode,
+                ms,
+            });
+            for (reason, _) in FAILS_ALL {
+                all.push(LogEvent::FinalPassFinished {
+                    outcome: FinalOutcome::Failed { reason },
+                    mode,
+                    ms,
+                });
+            }
+        }
+    }
+    all.push(LogEvent::CallSwitchRefused {
+        reason: SwitchRefusal::UnknownValue,
+    });
+    for (rule, _) in RULES_ALL {
+        for segment in [0, 7, u32::MAX] {
+            all.push(LogEvent::TranscriptInvalid { rule, segment });
+        }
+    }
+    all
+}
+
+/// `"<LEVEL> <message>"` of an event: what follows the 29-character timestamp.
+fn level_and_body(event: &LogEvent) -> String {
+    let raw = format_line(at(NOON_UTC, 0), 0, event);
+    let l = parsed(&raw);
+    assert_eq!(l.ts.len(), 29, "{raw}");
+    raw.get(30..)
+        .unwrap_or_else(|| panic!("short line {raw:?}"))
+        .to_string()
+}
+
+#[test]
+fn every_call_line_formats_exactly_as_the_contract_with_its_level() {
+    // Acceptance 1 (contracts/core-call.md "Log lines"; levels: the T-118 investigation,
+    // pinned here so a change is visible). Bite: a renamed head or key, a changed key order,
+    // `record=`/`subtitles=` dropped, `to=none` written as an empty value, an `os=` written
+    // when unknown, a reason on a ready pass, a level moved.
+    let mic = || EndpointId::new(MIC_ID);
+    let sys = || EndpointId::new(SYS_ID);
+    let ep = |t: &str| EndpointId::new(t);
+    let cases: Vec<(LogEvent, String)> = vec![
+        (
+            LogEvent::CallRequested { source: CallSource::Tray },
+            "INFO call_requested source=tray".into(),
+        ),
+        (
+            LogEvent::CallRequested { source: CallSource::Hotkey },
+            "INFO call_requested source=hotkey".into(),
+        ),
+        (
+            LogEvent::CallRequested { source: CallSource::Switch },
+            "INFO call_requested source=switch".into(),
+        ),
+        (
+            LogEvent::CallRefused { part: RefusedPart::System, reason: RefusedReason::NoDevice },
+            "WARN call_refused part=system reason=no_device".into(),
+        ),
+        (
+            LogEvent::CallRefused { part: RefusedPart::Root, reason: RefusedReason::Unwritable },
+            "WARN call_refused part=root reason=unwritable".into(),
+        ),
+        (
+            LogEvent::CallStarted { mic: mic(), system: sys(), comms_differs: true },
+            format!("INFO call_started record=1 subtitles=0 mic={MIC_ID} system={SYS_ID} comms_differs=1"),
+        ),
+        (
+            LogEvent::CallStarted { mic: ep("Headset (Realtek)"), system: sys(), comms_differs: false },
+            format!("INFO call_started record=1 subtitles=0 mic=invalid system={SYS_ID} comms_differs=0"),
+        ),
+        (
+            LogEvent::CallDeviceChanged {
+                track: Track::System,
+                cause: DeviceCause::DefaultOutputChanged,
+                gap_ms: 340,
+                to: Some(sys()),
+            },
+            format!("INFO call_device track=system cause=default_output_changed gap_ms=340 to={SYS_ID}"),
+        ),
+        (
+            LogEvent::CallDeviceChanged {
+                track: Track::Mic,
+                cause: DeviceCause::MicLost,
+                gap_ms: 2000,
+                to: None,
+            },
+            "WARN call_device track=mic cause=mic_lost gap_ms=2000 to=none".into(),
+        ),
+        (
+            LogEvent::CallDeviceChanged {
+                track: Track::Mic,
+                cause: DeviceCause::Reopened,
+                gap_ms: 0,
+                to: Some(ep("bad name")),
+            },
+            "INFO call_device track=mic cause=reopened gap_ms=0 to=invalid".into(),
+        ),
+        (
+            LogEvent::CallTrackSilent { track: Track::System, rule: SilentRule::CantHear },
+            "WARN call_track_silent track=system rule=cant_hear".into(),
+        ),
+        (
+            LogEvent::CallTrackSilent { track: Track::Mic, rule: SilentRule::Lost },
+            "WARN call_track_silent track=mic rule=lost".into(),
+        ),
+        (
+            LogEvent::CallStopped {
+                reason: StopReason::SystemEnd,
+                duration_ms: 61_000,
+                mic_bytes: 1_234,
+                system_bytes: 5_678,
+            },
+            "INFO call_stopped reason=system_end duration_ms=61000 mic_bytes=1234 system_bytes=5678".into(),
+        ),
+        (
+            LogEvent::CallStorageFailed { kind: StorageKind::Sync, os: Some(112) },
+            "WARN call_storage_failed kind=sync os=112".into(),
+        ),
+        (
+            LogEvent::CallStorageFailed { kind: StorageKind::LowDisk, os: None },
+            "WARN call_storage_failed kind=low_disk".into(),
+        ),
+        (
+            LogEvent::CallStorageFailed { kind: StorageKind::Meta, os: Some(-5) },
+            "WARN call_storage_failed kind=meta os=-5".into(),
+        ),
+        (LogEvent::CallRecovered { calls: 3 }, "INFO call_recovered calls=3".into()),
+        (
+            LogEvent::FinalPassStage { track: Track::Mic, stage: FinalStage::Upload, ms: 4_200, chunks: 12 },
+            "INFO final_stage track=mic stage=upload ms=4200 chunks=12".into(),
+        ),
+        (
+            LogEvent::FinalPassFinished { outcome: FinalOutcome::Ready, mode: PassMode::Timed, ms: 9_000 },
+            "INFO final_finished outcome=ready mode=timed ms=9000".into(),
+        ),
+        (
+            LogEvent::FinalPassFinished {
+                outcome: FinalOutcome::Failed { reason: FailReason::EngineNotSetUp },
+                mode: PassMode::Timeless,
+                ms: 5,
+            },
+            "WARN final_finished outcome=failed reason=engine_not_set_up mode=timeless ms=5".into(),
+        ),
+        (
+            LogEvent::CallSwitchRefused { reason: SwitchRefusal::UnknownValue },
+            "WARN call_switch_refused reason=unknown_value".into(),
+        ),
+        (
+            LogEvent::VadFallback { track: Track::System, cause: VadFallbackCause::Unavailable },
+            "WARN vad_fallback track=system cause=unavailable".into(),
+        ),
+        (
+            LogEvent::VadFallback { track: Track::Mic, cause: VadFallbackCause::Error },
+            "WARN vad_fallback track=mic cause=error".into(),
+        ),
+        (
+            LogEvent::TranscriptInvalid { rule: InvalidRule::OutOfRange, segment: 17 },
+            "WARN transcript_invalid rule=out_of_range segment=17".into(),
+        ),
+    ];
+    for (event, want) in cases {
+        assert_eq!(level_and_body(&event), want, "{event:?}");
+    }
+}
+
+#[test]
+fn every_value_of_every_call_field_has_its_own_literal() {
+    // Acceptance 1, per value: a table that maps two values to one literal, or to `other`,
+    // is caught here, which the single examples above would not.
+    let line = |e: LogEvent| {
+        let s = level_and_body(&e);
+        s.split_once(' ').map(|(_, b)| b.to_string()).unwrap_or(s)
+    };
+    for (part, p) in REFUSED_PARTS_ALL {
+        for (reason, r) in REFUSED_REASONS_ALL {
+            assert_eq!(
+                line(LogEvent::CallRefused { part, reason }),
+                format!("call_refused part={p} reason={r}")
+            );
+        }
+    }
+    for (track, t) in TRACKS {
+        for (cause, c) in CAUSES_ALL {
+            assert_eq!(
+                line(LogEvent::CallDeviceChanged { track, cause, gap_ms: 1, to: None }),
+                format!("call_device track={t} cause={c} gap_ms=1 to=none")
+            );
+        }
+        for (stage, s) in STAGES_ALL {
+            assert_eq!(
+                line(LogEvent::FinalPassStage { track, stage, ms: 2, chunks: 3 }),
+                format!("final_stage track={t} stage={s} ms=2 chunks=3")
+            );
+        }
+    }
+    for (reason, r) in STOPS_ALL {
+        assert_eq!(
+            line(LogEvent::CallStopped { reason, duration_ms: 1, mic_bytes: 2, system_bytes: 3 }),
+            format!("call_stopped reason={r} duration_ms=1 mic_bytes=2 system_bytes=3")
+        );
+    }
+    for (kind, k) in STORAGE_ALL {
+        assert_eq!(
+            line(LogEvent::CallStorageFailed { kind, os: Some(1) }),
+            format!("call_storage_failed kind={k} os=1")
+        );
+    }
+    for (reason, r) in FAILS_ALL {
+        assert_eq!(
+            line(LogEvent::FinalPassFinished {
+                outcome: FinalOutcome::Failed { reason },
+                mode: PassMode::Timed,
+                ms: 1
+            }),
+            format!("final_finished outcome=failed reason={r} mode=timed ms=1")
+        );
+    }
+    for (rule, r) in RULES_ALL {
+        assert_eq!(
+            line(LogEvent::TranscriptInvalid { rule, segment: 0 }),
+            format!("transcript_invalid rule={r} segment=0")
+        );
+    }
+}
+
+#[test]
+fn an_endpoint_outside_the_charset_or_length_formats_as_invalid() {
+    // Acceptance 2, the failure branch, end to end through both lines that carry an
+    // endpoint. Bite: Display echoing the text, a length check of 129 or 256, a charset
+    // that also lets space, `=`, `\` or a letter past `f` through, `to=` written for None.
+    let long = "a".repeat(129);
+    let longest = "a".repeat(128);
+    let bad: Vec<&str> = vec![
+        "",
+        "Headset (Realtek Audio)",
+        "{abc} key=value",
+        "{abc}\nINJECT=1",
+        "{abcg}",
+        "\\\\?\\SWD#MMDEVAPI#{abc}",
+        &long,
+    ];
+    for text in bad {
+        let started = level_and_body(&LogEvent::CallStarted {
+            mic: EndpointId::new(text),
+            system: EndpointId::new(MIC_ID),
+            comms_differs: false,
+        });
+        assert_eq!(
+            started,
+            format!("INFO call_started record=1 subtitles=0 mic=invalid system={MIC_ID} comms_differs=0"),
+            "{text:?}"
+        );
+        let device = level_and_body(&LogEvent::CallDeviceChanged {
+            track: Track::Mic,
+            cause: DeviceCause::MicDefaultChanged,
+            gap_ms: 9,
+            to: Some(EndpointId::new(text)),
+        });
+        assert_eq!(
+            device,
+            "INFO call_device track=mic cause=mic_default_changed gap_ms=9 to=invalid",
+            "{text:?}"
+        );
+    }
+    // The limit is inclusive and the kept text is written whole.
+    let kept = level_and_body(&LogEvent::CallDeviceChanged {
+        track: Track::System,
+        cause: DeviceCause::TrackLost,
+        gap_ms: 9,
+        to: Some(EndpointId::new(&longest)),
+    });
+    assert_eq!(
+        kept,
+        format!("INFO call_device track=system cause=track_lost gap_ms=9 to={longest}")
+    );
+}
+
+#[test]
+fn transcript_invalid_names_the_segment_by_index_only() {
+    // Acceptance 1 "never with segment text": the line has exactly two keys, whatever the
+    // values. Bite: an extra key (text=, speaker=) or a title.
+    for (rule, _) in RULES_ALL {
+        let raw = format_line(
+            at(NOON_UTC, 0),
+            0,
+            &LogEvent::TranscriptInvalid { rule, segment: u32::MAX },
+        );
+        let l = closed(&raw);
+        assert_eq!(l.keys(), ["rule", "segment"], "{raw}");
+        assert_eq!(l.get("segment"), Some("4294967295"));
+    }
 }
 
 // ---- the closed output -----------------------------------------------------------

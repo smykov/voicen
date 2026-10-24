@@ -357,9 +357,17 @@ pub fn parse(raw: &str) -> Result<Line, String> {
             if !is_word(k) {
                 return Err(format!("key {k:?} in {raw:?}"));
             }
+            // T-118: an `EndpointId` value (`{0.0.1.00000000}.{guid}`) has braces and may have
+            // upper-case hex; only the three endpoint keys may, and `check_closed` holds them
+            // to the endpoint rule.
+            let endpoint_key = matches!(k, "mic" | "system" | "to");
             let value_ok = !v.is_empty()
-                && v.bytes()
-                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"_.:,-".contains(&b));
+                && v.bytes().all(|b| {
+                    b.is_ascii_lowercase()
+                        || b.is_ascii_digit()
+                        || b"_.:,-".contains(&b)
+                        || (endpoint_key && (b"{}".contains(&b) || b.is_ascii_uppercase()))
+                });
             if !value_ok {
                 return Err(format!("value {v:?} of {k} in {raw:?}"));
             }
@@ -560,6 +568,20 @@ pub fn check_closed(line: &Line) -> Result<(), String> {
         // T-100: the previous-session verdict and the clean exit.
         "previous session" => &["outcome"],
         "exited" => &[],
+        // T-118: the call lines (contracts/core-call.md "Log lines").
+        "call_requested" => &["source"],
+        "call_refused" => &["part", "reason"],
+        "call_started" => &["record", "subtitles", "mic", "system", "comms_differs"],
+        "call_device" => &["track", "cause", "gap_ms", "to"],
+        "call_track_silent" => &["track", "rule"],
+        "call_stopped" => &["reason", "duration_ms", "mic_bytes", "system_bytes"],
+        "call_storage_failed" => &["kind"],
+        "call_recovered" => &["calls"],
+        "final_stage" => &["track", "stage", "ms", "chunks"],
+        "final_finished" => &["outcome", "mode", "ms"],
+        "call_switch_refused" => &["reason"],
+        "vad_fallback" => &["track", "cause"],
+        "transcript_invalid" => &["rule", "segment"],
         other => return Err(format!("unknown head {other:?} in {:?}", line.raw)),
     };
     for k in required {
@@ -607,6 +629,38 @@ pub fn check_closed(line: &Line) -> Result<(), String> {
             ("settings test_connection", "latency_ms") => {
                 check(unsigned(v) && line.get("result") == Some("ok"), k, v)?;
             }
+            ("call_requested", "source") => one_of(k, v, CALL_SOURCES)?,
+            ("call_refused", "part") => one_of(k, v, REFUSED_PARTS)?,
+            ("call_refused", "reason") => one_of(k, v, REFUSED_REASONS)?,
+            ("call_started", "record") => one_of(k, v, &["1"])?,
+            ("call_started", "subtitles") => one_of(k, v, &["0"])?,
+            ("call_started", "comms_differs") => one_of(k, v, &["0", "1"])?,
+            ("call_started", "mic" | "system") => check(endpoint(v), k, v)?,
+            ("call_device", "track")
+            | ("call_track_silent", "track")
+            | ("final_stage", "track")
+            | ("vad_fallback", "track") => one_of(k, v, TRACKS)?,
+            ("call_device", "cause") => one_of(k, v, DEVICE_CAUSES)?,
+            ("call_device", "gap_ms") => check(unsigned(v), k, v)?,
+            ("call_device", "to") => check(v == "none" || endpoint(v), k, v)?,
+            ("call_track_silent", "rule") => one_of(k, v, SILENT_RULES)?,
+            ("call_stopped", "reason") => one_of(k, v, STOP_REASONS)?,
+            ("call_stopped", "duration_ms" | "mic_bytes" | "system_bytes") => {
+                check(unsigned(v), k, v)?;
+            }
+            ("call_storage_failed", "kind") => one_of(k, v, STORAGE_KINDS)?,
+            ("call_storage_failed", "os") => check(signed(v), k, v)?,
+            ("call_recovered", "calls") => check(unsigned(v), k, v)?,
+            ("final_stage", "stage") => one_of(k, v, FINAL_STAGES)?,
+            ("final_stage", "ms" | "chunks") => check(unsigned(v), k, v)?,
+            ("final_finished", "outcome") => one_of(k, v, &["ready", "failed"])?,
+            ("final_finished", "reason") => one_of(k, v, FAIL_REASONS)?,
+            ("final_finished", "mode") => one_of(k, v, &["timed", "timeless"])?,
+            ("final_finished", "ms") => check(unsigned(v), k, v)?,
+            ("call_switch_refused", "reason") => one_of(k, v, &["unknown_value"])?,
+            ("vad_fallback", "cause") => one_of(k, v, &["unavailable", "error"])?,
+            ("transcript_invalid", "rule") => one_of(k, v, INVALID_RULES)?,
+            ("transcript_invalid", "segment") => check(unsigned(v), k, v)?,
             (head, key) => {
                 return Err(format!(
                     "unknown key {key:?} on a {head:?} line: {:?}",
@@ -619,6 +673,12 @@ pub fn check_closed(line: &Line) -> Result<(), String> {
     // `started pid=<n>`), and `os=` follows it.
     if line.head == "started" && !line.raw.contains(") started pid=") {
         return Err(format!("a start line begins with pid=: {:?}", line.raw));
+    }
+    // T-118: `reason=` exactly on a failed final pass; `os=` is optional.
+    if line.head == "final_finished"
+        && (line.get("outcome") == Some("failed")) != line.get("reason").is_some()
+    {
+        return Err(format!("reason= exactly on failed final passes: {:?}", line.raw));
     }
     if line.head == "previous session" {
         let outcome = line.get("outcome").unwrap_or_default();
@@ -707,6 +767,65 @@ pub fn check_closed(line: &Line) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+pub const CALL_SOURCES: &[&str] = &["tray", "hotkey", "switch"];
+pub const REFUSED_PARTS: &[&str] = &["mic", "system", "root"];
+pub const REFUSED_REASONS: &[&str] = &[
+    "no_device",
+    "access_denied",
+    "busy",
+    "unwritable",
+    "missing",
+    "other",
+];
+pub const TRACKS: &[&str] = &["mic", "system"];
+pub const DEVICE_CAUSES: &[&str] = &[
+    "default_output_changed",
+    "mic_lost",
+    "mic_default_changed",
+    "track_lost",
+    "reopened",
+    "no_device",
+];
+pub const SILENT_RULES: &[&str] = &["lost", "cant_hear"];
+pub const STOP_REASONS: &[&str] = &[
+    "user",
+    "hotkey",
+    "exit",
+    "system_end",
+    "sleep",
+    "max_length",
+    "low_disk",
+    "storage_error",
+];
+pub const STORAGE_KINDS: &[&str] = &["write", "flush", "sync", "meta", "transcript", "low_disk"];
+pub const FINAL_STAGES: &[&str] = &["decode", "vad", "upload", "merge", "write"];
+pub const FAIL_REASONS: &[&str] = &[
+    "key",
+    "network",
+    "timeout",
+    "provider",
+    "storage",
+    "engine_not_set_up",
+];
+pub const INVALID_RULES: &[&str] = &[
+    "unsorted",
+    "out_of_range",
+    "unknown_speaker",
+    "unknown_track",
+    "bad_source",
+    "bad_lang",
+    "empty_text",
+];
+
+/// An `EndpointId` as the log writes it: `invalid`, or 1..=128 characters of `{`, `}`, `.`,
+/// hex digits and `-`.
+pub fn endpoint(v: &str) -> bool {
+    v == "invalid"
+        || ((1..=128).contains(&v.chars().count())
+            && v.chars()
+                .all(|c| c.is_ascii_hexdigit() || matches!(c, '{' | '}' | '.' | '-')))
 }
 
 /// Grammar plus closed sets, or a panic naming the line.
