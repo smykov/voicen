@@ -235,6 +235,11 @@ day the process (or one gate) was adopted, a model change, a team change.
   commit counts and dilute the agent and fix shares. Compare like with like.
 - **Journals are local** (`.teamwright/logs/` is gitignored): a machine that did not
   collect them is absent, not zero. Merge journals from several machines with `--logs`.
+- **Probe records in this project's journal** (local project addition, not part of the
+  teamwright text): the main checkout's `.teamwright/logs/tools.jsonl` holds 3 lines of
+  session `t162-probe` (agent `t162probe`), written when T-162 fed hook payloads to the
+  hooks by hand. They are not runtime records: leave that session out when reading
+  session counts and tool calls per session (T-162 review 1 #2).
 - **Goodhart.** No metric here is a target. Rework rate falls fastest by not sending
   work back; recurrence rate falls by not calling fixes fixes. Read the numbers
   together and against the diffs.
