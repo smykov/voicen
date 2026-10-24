@@ -21,6 +21,7 @@ pub use silero::SileroDetector;
 
 use std::collections::HashMap;
 use std::ffi::{c_int, c_void};
+use std::num::NonZero;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
 
@@ -31,14 +32,17 @@ use whisper_rs::{
     WhisperSysContext, WhisperSysState,
 };
 
-/// Upper bound of the decoder threads (T-099): more threads stop paying off on whisper's
-/// small models and starve the rest of the desktop.
-const MAX_THREADS: usize = 8;
+/// B of the thread policy ([`thread_count_for`], T-109 I2, decision #200 D1): the best ggml
+/// thread count of one transcription. Placeholder: this is T-099's former upper bound (8);
+/// T-109 step 2 sets it from the measured windows-latest `whisper-timing` table (the count
+/// with the lowest 30 s figure, ties to fewer threads).
+const BEST_THREADS: usize = 8;
 
 /// Loads a whisper model file (`ggml-*.bin`) for the CPU.
 #[derive(Debug, Default)]
 pub struct WhisperLoader {
-    _private: (),
+    /// Test-only override of the policy ([`WhisperLoader::with_threads`]); `None` = policy.
+    threads: Option<NonZero<usize>>,
 }
 
 impl WhisperLoader {
@@ -46,14 +50,31 @@ impl WhisperLoader {
     /// `install_logging_hooks`, once).
     pub fn new() -> WhisperLoader {
         whisper_rs::install_logging_hooks();
-        WhisperLoader { _private: () }
+        WhisperLoader { threads: None }
     }
-}
 
-impl SpeechModelLoader for WhisperLoader {
-    fn load(&self, path: &Path) -> Result<Box<dyn SpeechModel>, FailureReason> {
+    /// Test-only (T-109, decision #200 D2): a loader whose models use `threads` ggml threads
+    /// instead of the policy's count. Not a user setting. Silences whisper.cpp like [`new`].
+    ///
+    /// [`new`]: WhisperLoader::new
+    #[doc(hidden)]
+    pub fn with_threads(threads: NonZero<usize>) -> WhisperLoader {
+        whisper_rs::install_logging_hooks();
+        WhisperLoader {
+            threads: Some(threads),
+        }
+    }
+
+    /// Test-only (T-109): the concrete load behind [`SpeechModelLoader::load`] (the one load
+    /// path), so a test can read [`WhisperModel`]'s thread and segment counts.
+    #[doc(hidden)]
+    pub fn load_whisper(&self, path: &Path) -> Result<WhisperModel, FailureReason> {
         // Also here: a loader built through `Default` has not installed the hooks.
         whisper_rs::install_logging_hooks();
+        let threads = match self.threads {
+            None => thread_count(),
+            Some(n) => c_int::try_from(n.get()).unwrap_or(c_int::MAX),
+        };
         let mut params = WhisperContextParameters::new();
         params.use_gpu(false);
         let context = WhisperContext::new_with_params(path, params)
@@ -61,11 +82,18 @@ impl SpeechModelLoader for WhisperLoader {
         let state = context
             .create_state()
             .map_err(|_| FailureReason::LocalEngineFailed)?;
-        Ok(Box::new(WhisperModel {
+        Ok(WhisperModel {
             state,
-            threads: thread_count(),
+            threads,
             params: HashMap::new(),
-        }))
+            last_segments: 0,
+        })
+    }
+}
+
+impl SpeechModelLoader for WhisperLoader {
+    fn load(&self, path: &Path) -> Result<Box<dyn SpeechModel>, FailureReason> {
+        Ok(Box::new(self.load_whisper(path)?))
     }
 }
 
@@ -75,6 +103,9 @@ pub struct WhisperModel {
     threads: c_int,
     /// Parameters per language: `None` = auto-detect, `Some(code)` = whisper's code for it.
     params: HashMap<Option<&'static str>, FullParams<'static, 'static>>,
+    /// whisper.cpp's segment count of the last `transcribe` (0 before the first, and after
+    /// a run that ended before `whisper_full` or was stopped before its first window).
+    last_segments: usize,
 }
 
 impl std::fmt::Debug for WhisperModel {
@@ -86,6 +117,20 @@ impl std::fmt::Debug for WhisperModel {
 }
 
 impl WhisperModel {
+    /// Test-only (T-109): the ggml thread count this model computes with.
+    #[doc(hidden)]
+    pub fn threads(&self) -> usize {
+        usize::try_from(self.threads).unwrap_or(1)
+    }
+
+    /// Test-only (T-109 I3): whisper.cpp's segment count (`whisper_full_n_segments`) of the
+    /// last [`SpeechModel::transcribe`], on every path (success, error and abort); 0 when
+    /// that run never reached `whisper_full` or was stopped before its first window.
+    #[doc(hidden)]
+    pub fn last_segment_count(&self) -> usize {
+        self.last_segments
+    }
+
     /// The parameters for `language`, built on first use.
     fn params_for(
         &mut self,
@@ -129,6 +174,7 @@ impl SpeechModel for WhisperModel {
         language: Option<&str>,
         abort: &Abort,
     ) -> Result<String, FailureReason> {
+        self.last_segments = 0;
         // whisper-rs passes the length as a C int; an empty slice is refused there.
         if pcm.is_empty() || c_int::try_from(pcm.len()).is_err() {
             return Err(FailureReason::LocalEngineFailed);
@@ -145,6 +191,8 @@ impl SpeechModel for WhisperModel {
             params.set_start_encoder_callback_user_data(user_data);
         }
         let ran = self.state.full(params, pcm);
+        // Recorded before any early return: the abort and error paths count too (T-109 I3).
+        self.last_segments = usize::try_from(self.state.full_n_segments()).unwrap_or(0);
         if abort.requested() {
             // Ignored by the engine, which reports Timeout (decision #133).
             return Err(FailureReason::LocalEngineFailed);
@@ -165,13 +213,19 @@ impl SpeechModel for WhisperModel {
     }
 }
 
-/// min(available parallelism, [`MAX_THREADS`]); 1 when the OS does not say.
+/// The engine's ggml thread policy (T-109 I2, decision #200 D1), its single source:
+/// `max(1, min(B, P - 1))` for `parallelism` P, B = [`BEST_THREADS`]. Below P whenever
+/// P > 1 (ggml's barrier spins, so a thread per CPU stalls whenever anything else needs a
+/// core) and at least 1. Public only for the tests.
+#[doc(hidden)]
+pub fn thread_count_for(parallelism: usize) -> usize {
+    BEST_THREADS.min(parallelism.saturating_sub(1)).max(1)
+}
+
+/// [`thread_count_for`] on this machine's available parallelism (1 when the OS does not say).
 fn thread_count() -> c_int {
-    let n = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1)
-        .min(MAX_THREADS);
-    c_int::try_from(n).unwrap_or(1)
+    let p = std::thread::available_parallelism().map_or(1, |n| n.get());
+    c_int::try_from(thread_count_for(p)).unwrap_or(1)
 }
 
 /// Whether `user_data` (an `&Abort`) asks to stop; a panic counts as a stop.
