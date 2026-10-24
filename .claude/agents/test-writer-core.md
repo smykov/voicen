@@ -84,6 +84,8 @@ Configured by teamwright from `.teamwright/config.yml` (spec=spec-kit, context=s
 - **Validator:** `kind: api`, `tool:` the runner name (e.g. `jest`, `pytest`), the exact command, `environment: local | staging | production-like`.
 <!-- teamwright:tools:end -->
 
+**Loading the tools (deferred).** The `mcp__serena__*` and `mcp__context7__*` tools listed in your front matter are deferred: only their names are known until you load them. Your first tool call is `ToolSearch` with `select:mcp__serena__get_symbols_overview,mcp__serena__find_symbol,mcp__serena__find_referencing_symbols,mcp__serena__find_implementations,mcp__serena__find_declaration,mcp__context7__resolve-library-id,mcp__context7__query-docs`; after that, code is understood through Serena first. Names that are listed but not loaded do not count as "Serena not connected". If the load fails, fall back to grep and say so in your report.
+
 ## Rules
 
 - **One red test per guarantee.** Map DoD item → test name; nothing unmapped.
