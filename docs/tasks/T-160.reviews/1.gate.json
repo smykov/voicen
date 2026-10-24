@@ -1,0 +1,13 @@
+{
+ "agent_id": "aff5bd177f6981915",
+ "agent_type": "code-reviewer",
+ "gate": "review",
+ "path": "docs/tasks/T-160.reviews/1.md",
+ "round": 1,
+ "session_id": "e277f263-bbb6-454d-9c63-5466402138bf",
+ "sha256": "5edbe0bb69800a442754aadd20aefc628b214c6055903f2f4c34115279449cdd",
+ "spawned": true,
+ "task": "T-160",
+ "ts": "2026-10-24T21:39:48Z",
+ "verdict": "REQUEST_CHANGES"
+}
