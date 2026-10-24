@@ -266,7 +266,7 @@ if m and rel.startswith("docs/tasks/"):
     path = os.path.join(root, rel)
     if os.path.exists(path):
         # hard in every mode: an edited record keeps no stamp and no ledger line, so on a fresh
-        # checkout nothing proves who wrote it (prove-it run 27, 24.10.2026)
+        # checkout nothing proves who wrote it
         deny("docs/tasks/%s.verify/%d.md already exists. Verify records are append-only: "
              "a new run (or a correction) is a new round, %s.verify/%d.md."
              % (tid, n, tid, max([r for r, _ in task.verify_rounds(root, tid)] + [n]) + 1), hard=True)

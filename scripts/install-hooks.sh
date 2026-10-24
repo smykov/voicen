@@ -22,7 +22,7 @@ git config core.hooksPath "$HOOKS"
 
 # Local-only state must never be committed.
 touch .gitignore
-for pat in '.teamwright/sessions/' '.teamwright/logs/' '.teamwright/current-task' '.teamwright/cache/' '.teamwright/config.next.yml' 'TEAMWRIGHT_PAUSE' '*.local.json' '.env' '.env.*' '!.env.example'; do
+for pat in '.teamwright/sessions/' '.teamwright/logs/' '.teamwright/current-task' '.teamwright/cache/' '.teamwright/config.next.yml' '.teamwright/parallel/' '.serena/cache/' '.serena/logs/' 'TEAMWRIGHT_PAUSE' '*.local.json' '.env' '.env.*' '!.env.example'; do
   grep -qxF -- "$pat" .gitignore || printf '%s\n' "$pat" >> .gitignore
 done
 

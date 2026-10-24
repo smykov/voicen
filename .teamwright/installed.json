@@ -23,7 +23,7 @@
   "docs/process/principles.md": "b30e28928d68882aac771bc0793eab5cc465634526ba7e347c6169402546e84d",
   "docs/process/roles.md": "4dec213e8cdd3515ea237879395c7bfb28ddf57175f85328f91c9a725954e154",
   "docs/process/sessions.md": "d7f8c350e2e39822aa67f19c421eea1c84af6eceb84cb83a4a5e0879e6d31c07",
-  "docs/process/stage-protocol.md": "0b245dd10e4079723461490ce3398e87b7b5aaba65e9bdd37b79e4af7af1b48a",
+  "docs/process/stage-protocol.md": "0f66406109c8325d34da315e631f733a143394f8a31a20d04592d65b2aa20741",
   "docs/process/tools.md": "38277f862ad59ef39718fba6b4243d106387e8fb9ad1718924a40d7615a5dc0d",
   "docs/sprints/_sprint-template.md": "fd7418137b07a7f8bc08b88d31b255a2358a682169492af88b2de5cfed401f0f",
   "docs/tasks/_review-template.md": "6c521f41330d848f2e974d3996cd3368cdd9707066110c8f6d5c15fbf0b09bb5",
@@ -45,18 +45,18 @@
   "scripts/hooks/review-gate.sh": "7b174a62dc766c8e0c839494a313b50d9b30be7beb71402e3c5349e68440dc14",
   "scripts/hooks/session-check.sh": "ceaa4923cad571052d885b6208cc9900c0ad4291454f43cae45141a64f881047",
   "scripts/hooks/test-guard.sh": "deaf5b9c5f75ef8d9ffb0ddd26f77e80f49925d525512a1264b5b19b5525ff9e",
-  "scripts/hooks/verify-gate.sh": "d30237fd16d87eb16ec811747cc3ab561153749e287c007167fb8d070f94d19f",
-  "scripts/install-hooks.sh": "0f430f70466a982e17b1094d405683b82af046aa0d4e512d55816ebb9555a7c6",
+  "scripts/hooks/verify-gate.sh": "41cb549f85fe74baee15bffb31a85c3b6fdbb3a545f5ff1d85951d9bf53e9f77",
+  "scripts/install-hooks.sh": "b873b0001bc9a6dccee4c30e8296706ca56b949a92aeb05c287577cd199fccc7",
   "scripts/metrics/metrics.example.json": "ddd87e1bc78f637c5c4a96e6261d23a72c681512c7b9866c511363da58a9401e",
   "scripts/metrics/teamwright-metrics": "9d59a2de9f5b626baf5446a3d906e4904657d2d9e27aeed7d6e1d6c5d8992766",
   "scripts/tw-ci-changes": "75bf0d098bdd19011d4b812a36d8f58846ed17c22f28bdd8f55055ac041dda1a",
-  "scripts/tw-gate": "7cd020228b3afde5b17369cb940a6b3b3c8e0d148e1ab9f5af660e45dc03e6ad",
+  "scripts/tw-gate": "c0414b6d73b33331d7521b9b29e9bc865a0ed4fa8e11e2f7bc0c57c8d45bb2cd",
   "scripts/tw-mutants": "afd08e8a26c70601243e4238a7042b0e8977c1a495d0d0f93792f2f415039432",
   "scripts/tw-req": "73696214a50ead1879f8f73637e979fe4e2d626ac56c3da3342e7ca5f1771d0d",
   "scripts/tw-run": "306c7eacd56ecd6e728bae07c72baa9e949374dfea3732a9f624c3d108cffa7a",
   "scripts/tw-test": "b85b7064dbe1b0ce24f3e3ee9ae042ea7dba35a16b64ae6df7caba35b7d6b89f",
   "@kit": {
     "plugin": "teamwright@teamwright",
-    "version": "0.12.0"
+    "version": "0.13.0"
   }
 }

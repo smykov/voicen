@@ -28,3 +28,6 @@ TEAMWRIGHT_PAUSE
 
 # Serena project config: rewritten by each Serena version (decision #16)
 .serena/project.yml
+.teamwright/parallel/
+.serena/cache/
+.serena/logs/

@@ -121,7 +121,7 @@ if [ -n "$FOR" ]; then
   else
     # Only the task's own commits: on a branch, those since it left the default branch (a
     # commit on main that merely mentions the id in its body is not the task's, e.g. a CI fix
-    # "after the run of T-051"); everywhere, a commit whose subject names this id first - task
+    # "after the run of T-7"); everywhere, a commit whose subject names this id first - task
     # commits carry it there (`feat(srv): T-7 ...`); an id only in the body is a mention.
     range=""
     def="$(git symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null)"
@@ -302,7 +302,7 @@ tree_id() {
   rm -f "$tmp"
   # -p keeps the index's mtime: git re-reads a file whose stat equals its index entry only when
   # the entry is not older than the index file ("racy git"); a copy with a new mtime made a
-  # same-size edit within that second look clean, and its old PASS was reused (CI, 24.10.2026)
+  # same-size edit within that second look clean, and its old PASS was reused (a flaky test in CI)
   [ -f "$idx" ] && cp -p "$idx" "$tmp"
   if GIT_INDEX_FILE="$tmp" git add -A >/dev/null 2>&1 &&
      GIT_INDEX_FILE="$tmp" git rm -r -q --cached --ignore-unmatch -- .teamwright/logs >/dev/null 2>&1; then
