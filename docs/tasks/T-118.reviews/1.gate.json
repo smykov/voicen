@@ -1,0 +1,13 @@
+{
+ "agent_id": "a7507617ebca2c649",
+ "agent_type": "code-reviewer",
+ "gate": "review",
+ "path": "docs/tasks/T-118.reviews/1.md",
+ "round": 1,
+ "session_id": "e136a9f6-80a6-465a-a6ca-2a581f557a81",
+ "sha256": "7300d72e2763688bcba7abe630d9a031619b2be75c8ac8bcaf3117f934434732",
+ "spawned": true,
+ "task": "T-118",
+ "ts": "2026-10-24T23:35:28Z",
+ "verdict": "ESCALATE"
+}
