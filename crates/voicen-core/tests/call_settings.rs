@@ -176,7 +176,9 @@ fn expect_refused(outcome: SaveOutcome) -> Vec<FieldError> {
 }
 
 fn root(name: &str) -> PathBuf {
-    std::env::temp_dir().join("voicen-t120-fake-roots").join(name)
+    std::env::temp_dir()
+        .join("voicen-t120-fake-roots")
+        .join(name)
 }
 
 fn no_duplicates(roots: &[PathBuf]) {
@@ -212,7 +214,11 @@ fn a_release_1_file_without_calls_loads_with_defaults_and_is_not_rewritten() {
     assert!(loaded.calls.reminder);
     assert_eq!(loaded.calls.storage_root, None);
     assert_eq!(*service.snapshot(), expected);
-    assert_eq!(world.file.calls(), vec![FileCall::Read], "read once, no write");
+    assert_eq!(
+        world.file.calls(),
+        vec![FileCall::Read],
+        "read once, no write"
+    );
     assert!(world.file.backups().is_empty());
 }
 
@@ -277,7 +283,11 @@ fn a_call_hotkey_equal_to_the_dictation_hotkey_is_refused_from_either_side() {
             "{side}"
         );
         assert_eq!(errors[0].reason, None);
-        assert_eq!(world.footprint(), before, "{side}: a refused save touched something");
+        assert_eq!(
+            world.footprint(),
+            before,
+            "{side}: a refused save touched something"
+        );
         assert_eq!(*service.snapshot(), defaults(OS));
     }
 }
@@ -412,7 +422,11 @@ fn an_unwritable_root_is_refused_on_the_storage_root_with_its_reason_and_nothing
         let wire = serde_json::to_value(&outcome).expect("serializes");
         let errors = expect_refused(outcome);
 
-        assert_eq!(errors, vec![FieldError::storage_unwritable(reason)], "{reason:?}");
+        assert_eq!(
+            errors,
+            vec![FieldError::storage_unwritable(reason)],
+            "{reason:?}"
+        );
         assert_eq!(errors[0].field, FieldId::StorageRoot);
         assert_eq!(errors[0].code, ErrorCode::StorageUnwritable);
         assert_eq!(errors[0].reason, Some(reason));
@@ -421,13 +435,31 @@ fn an_unwritable_root_is_refused_on_the_storage_root_with_its_reason_and_nothing
             serde_json::to_value(reason).expect("serializes"),
             "the reason is on the wire"
         );
-        assert_eq!(wire["Refused"]["errors"][0]["field"], json!("calls.storage_root"));
-        assert_eq!(wire["Refused"]["errors"][0]["code"], json!("storage.unwritable"));
-        assert_eq!(world.roots.probes(), vec![chosen], "{reason:?}: probed once");
-        assert_eq!(world.footprint(), before, "{reason:?}: a refused save touched something");
+        assert_eq!(
+            wire["Refused"]["errors"][0]["field"],
+            json!("calls.storage_root")
+        );
+        assert_eq!(
+            wire["Refused"]["errors"][0]["code"],
+            json!("storage.unwritable")
+        );
+        assert_eq!(
+            world.roots.probes(),
+            vec![chosen],
+            "{reason:?}: probed once"
+        );
+        assert_eq!(
+            world.footprint(),
+            before,
+            "{reason:?}: a refused save touched something"
+        );
         assert_eq!(world.hotkeys.calls(), vec![]);
         assert_eq!(*service.snapshot(), defaults(OS));
-        assert_eq!(snapshot_rx.try_recv(), Err(TryRecvError::Empty), "nothing published");
+        assert_eq!(
+            snapshot_rx.try_recv(),
+            Err(TryRecvError::Empty),
+            "nothing published"
+        );
     }
 }
 
@@ -444,10 +476,17 @@ fn no_error_but_the_unwritable_root_carries_a_reason() {
     let wire = serde_json::to_value(&outcome).expect("serializes");
     let errors = expect_refused(outcome);
     assert_eq!(errors.len(), 2);
-    for (error, wire_error) in errors.iter().zip(wire["Refused"]["errors"].as_array().expect("array")) {
+    for (error, wire_error) in errors
+        .iter()
+        .zip(wire["Refused"]["errors"].as_array().expect("array"))
+    {
         assert_eq!(error.reason, None);
         assert!(wire_error.get("reason").is_none(), "{wire_error}");
-        assert_eq!(wire_error.as_object().expect("object").len(), 2, "{wire_error}");
+        assert_eq!(
+            wire_error.as_object().expect("object").len(),
+            2,
+            "{wire_error}"
+        );
     }
 }
 
@@ -470,7 +509,7 @@ fn validation_errors_win_and_no_probe_runs_for_a_draft_that_already_failed() {
             ErrorCode::LanguageUnsupported
         )]
     );
-    assert_eq!(world.roots.probes(), vec![]);
+    assert_eq!(world.roots.probes(), Vec::<PathBuf>::new());
 }
 
 #[test]
@@ -485,14 +524,20 @@ fn an_unchanged_unwritable_root_does_not_block_an_unrelated_save() {
     let (service, outcome) = world.load();
     assert!(matches!(outcome, LoadOutcome::Loaded(_)), "{outcome:?}");
     world.roots.fail(&chosen, UnwritableReason::Missing);
-    world.roots.fail(&world.roots.default_root(), UnwritableReason::AccessDenied);
+    world
+        .roots
+        .fail(&world.roots.default_root(), UnwritableReason::AccessDenied);
 
     let mut d = draft(&service);
     d.history.size = 5;
     expect_saved(service.save(req(d)));
     assert_eq!(service.snapshot().history.size, 5);
     assert_eq!(service.snapshot().calls.storage_root, Some(chosen));
-    assert_eq!(world.roots.probes(), vec![], "no probe for an unchanged root");
+    assert_eq!(
+        world.roots.probes(),
+        Vec::<PathBuf>::new(),
+        "no probe for an unchanged root"
+    );
 }
 
 #[test]
@@ -507,8 +552,11 @@ fn the_default_root_written_out_or_left_empty_is_the_same_root() {
     let mut d = draft(&service);
     d.calls.storage_root = Some(default_root.clone());
     expect_saved(service.save(req(d)));
-    assert_eq!(world.roots.probes(), vec![]);
-    assert_eq!(service.snapshot().calls.earlier_roots, Vec::<PathBuf>::new());
+    assert_eq!(world.roots.probes(), Vec::<PathBuf>::new());
+    assert_eq!(
+        service.snapshot().calls.earlier_roots,
+        Vec::<PathBuf>::new()
+    );
 
     let mut d = draft(&service);
     d.calls.storage_root = Some(PathBuf::new());
@@ -519,8 +567,11 @@ fn the_default_root_written_out_or_left_empty_is_the_same_root() {
         "an empty root is stored as the default (one encoding)"
     );
     assert_eq!(world.stored().calls.storage_root, None);
-    assert_eq!(world.roots.probes(), vec![]);
-    assert_eq!(service.snapshot().calls.earlier_roots, Vec::<PathBuf>::new());
+    assert_eq!(world.roots.probes(), Vec::<PathBuf>::new());
+    assert_eq!(
+        service.snapshot().calls.earlier_roots,
+        Vec::<PathBuf>::new()
+    );
 }
 
 #[test]
@@ -536,7 +587,7 @@ fn a_changed_root_is_probed_once_and_the_old_one_joins_the_earlier_roots_without
     let default_root = world.roots.default_root();
     let (a, b) = (root("a"), root("b"));
 
-    let mut step = |new_root: Option<&PathBuf>| {
+    let step = |new_root: Option<&PathBuf>| {
         let mut d = draft(&service);
         d.calls.storage_root = new_root.cloned();
         expect_saved(service.save(req(d)));
@@ -552,14 +603,30 @@ fn a_changed_root_is_probed_once_and_the_old_one_joins_the_earlier_roots_without
             "the current root {effective:?} is in {:?}",
             snapshot.calls.earlier_roots
         );
-        assert_eq!(world.stored(), *snapshot, "the file holds what the service holds");
+        assert_eq!(
+            world.stored(),
+            *snapshot,
+            "the file holds what the service holds"
+        );
         snapshot.calls.earlier_roots.clone()
     };
 
     assert_eq!(step(Some(&a)), vec![default_root.clone()], "None -> A");
-    assert_eq!(step(Some(&b)), vec![default_root.clone(), a.clone()], "A -> B");
-    assert_eq!(step(Some(&a)), vec![default_root.clone(), b.clone()], "B -> A");
-    assert_eq!(step(Some(&a)), vec![default_root.clone(), b.clone()], "A -> A");
+    assert_eq!(
+        step(Some(&b)),
+        vec![default_root.clone(), a.clone()],
+        "A -> B"
+    );
+    assert_eq!(
+        step(Some(&a)),
+        vec![default_root.clone(), b.clone()],
+        "B -> A"
+    );
+    assert_eq!(
+        step(Some(&a)),
+        vec![default_root.clone(), b.clone()],
+        "A -> A"
+    );
     assert_eq!(step(None), vec![b.clone(), a.clone()], "A -> default");
     assert_eq!(
         world.roots.probes(),
@@ -611,7 +678,10 @@ fn a_draft_cannot_overwrite_the_server_owned_fields() {
     d.calls.reminder = false;
     expect_saved(service.save(req(d)));
     assert_eq!(owned(&service.snapshot()), before);
-    assert!(!service.snapshot().calls.reminder, "ordinary fields come from the draft");
+    assert!(
+        !service.snapshot().calls.reminder,
+        "ordinary fields come from the draft"
+    );
     assert_eq!(owned(&world.stored()), before);
 
     // A root change: the old root joins the snapshot's list, not the draft's.
@@ -643,7 +713,10 @@ fn a_root_that_became_writable_again_is_accepted_and_a_failed_try_leaves_the_lis
         errors,
         vec![FieldError::storage_unwritable(UnwritableReason::Missing)]
     );
-    assert_eq!(service.snapshot().calls.earlier_roots, Vec::<PathBuf>::new());
+    assert_eq!(
+        service.snapshot().calls.earlier_roots,
+        Vec::<PathBuf>::new()
+    );
 
     world.roots.heal(&chosen);
     expect_saved(service.save(req(d)));
