@@ -1,0 +1,2 @@
+# Windows-only: whisper.cpp builds only in the Windows CI job; run on wip/T-109 in CI, not on Linux.
+cargo test -p voicen-whisper --test transcribe_wav pre_requested_abort_returns_promptly

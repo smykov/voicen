@@ -18,14 +18,30 @@
 //! - Direct normal dependencies are exactly voicen-core and whisper-rs with default features
 //!   (invariant 1).
 //!
+//! T-109 additions:
+//! - I1: one file-level lock ([`serial`]) so at most one whisper.cpp computation runs at a
+//!   time in this process (ggml's barrier is a pure spin; parallel models oversubscribe the
+//!   runner). Held first by every test that loads a model, and by the parent of a child
+//!   process for the child's whole run.
+//! - I2: the engine's thread count comes from one policy function; the properties below hold
+//!   for any measured best count.
+//! - I3: the abort guarantee is asserted in units of whisper.cpp work (segments), never in
+//!   time (F-013, F-021). Durations and thread timings are printed, never compared.
+//!
+//! New test-only surface the engine must provide (all `#[doc(hidden)]`, decision #200 D2):
+//! `WhisperLoader::with_threads(NonZero<usize>) -> WhisperLoader`,
+//! `WhisperLoader::load_whisper(&self, &Path) -> Result<WhisperModel, FailureReason>`,
+//! `WhisperModel::threads(&self) -> usize`, `WhisperModel::last_segment_count(&self) -> usize`,
+//! `voicen_whisper::thread_count_for(parallelism: usize) -> usize`.
+//!
 //! FR-20 / NFR-04: no assertion message carries a transcript; only lengths and booleans.
 
 use std::fs;
 use std::io::Read;
+use std::num::NonZero;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
@@ -34,12 +50,24 @@ use voicen_core::engine::speech_model::{Abort, SpeechModel, SpeechModelLoader};
 use voicen_core::failure::FailureReason;
 use voicen_core::local_models::catalog::{ModelId, MODELS};
 use voicen_core::local_models::store::ModelStore;
-use voicen_whisper::WhisperLoader;
+use voicen_whisper::{thread_count_for, WhisperLoader, WhisperModel};
 
 /// The ModelStore directory the CI fetch step filled (contract above).
 const MODELS_DIR_VAR: &str = "VOICEN_WHISPER_TEST_MODELS_DIR";
 /// Set by `whisper_and_ggml_print_nothing` for its child run of `quiet_child_run`.
 const QUIET_CHILD_VAR: &str = "VOICEN_WHISPER_QUIET_CHILD";
+/// Set by `whisper_timing_is_printed` for its child run of `whisper_timing_child_run`.
+const TIMING_CHILD_VAR: &str = "VOICEN_WHISPER_TIMING_CHILD";
+
+/// I1 (T-109): the one lock of this file. A test that loads a model takes it first and keeps
+/// it to its end; the parent of a child process keeps it across the child's whole run.
+static MODEL_LOCK: Mutex<()> = Mutex::new(());
+
+/// Takes [`MODEL_LOCK`]. A test that panicked while holding it poisons the mutex; the guard
+/// is recovered, so one red test does not turn every later one red.
+fn serial() -> MutexGuard<'static, ()> {
+    MODEL_LOCK.lock().unwrap_or_else(PoisonError::into_inner)
+}
 
 const CLIP_S16LE: &[u8] = include_bytes!("../../voicen-core/assets/connection-test-speech.s16le");
 const SAMPLE_RATE: usize = 16_000;
@@ -124,6 +152,7 @@ fn names_the_clip(text: &str) -> bool {
 }
 
 fn assert_transcribes_clip(language: Option<&str>) {
+    let _serial = serial();
     let mut model = load_tiny();
     let text = match model.transcribe(&clip(), language, &no_abort()) {
         Ok(t) => t,
@@ -209,6 +238,7 @@ fn clip_is_transcribed_with_auto_detect() {
 /// A loader that returns a fixed text would pass the two tests above.
 #[test]
 fn silence_is_not_transcribed_as_the_clip() {
+    let _serial = serial();
     let mut model = load_tiny();
     let silence = vec![0.0f32; SAMPLE_RATE];
     let text = match model.transcribe(&silence, Some("en"), &no_abort()) {
@@ -225,6 +255,7 @@ fn silence_is_not_transcribed_as_the_clip() {
 /// One loaded model serves more than one transcription (the residency keeps it, #133).
 #[test]
 fn one_model_transcribes_twice() {
+    let _serial = serial();
     let mut model = load_tiny();
     for round in 0..2 {
         let text = match model.transcribe(&clip(), Some("en"), &no_abort()) {
@@ -253,46 +284,173 @@ fn truncated_model_is_a_load_error() {
     assert_load_fails(&cut, "truncated tiny (valid magic, tensors cut off)");
 }
 
-/// The monotonic clock, counting the reads: `Abort::requested` reads it until it latches.
-struct CountingClock(AtomicUsize);
-
-impl MonotonicClock for CountingClock {
-    fn now(&self) -> Instant {
-        self.0.fetch_add(1, Ordering::SeqCst);
-        SystemMonotonic.now()
+/// A concrete model with an explicit ggml thread count (test-only loader).
+fn load_tiny_with_threads(threads: usize) -> WhisperModel {
+    let n = NonZero::new(threads).expect("thread count is not zero");
+    match WhisperLoader::with_threads(n).load_whisper(&tiny_path()) {
+        Ok(m) => m,
+        Err(e) => panic!("loading the cached tiny model ({threads} threads) failed: {e:?}"),
     }
 }
 
+/// I3 (T-109, Acceptance 5, replaces the wall-clock ratio of T-099): an `Abort` that is
+/// already requested leaves whisper.cpp's segment count of that run at 0, while the same
+/// audio unaborted on the same model leaves more than 0. `whisper_full` clears its result
+/// at the start of a run and asks the encoder-begin callback before the first window, so
+/// with both stop callbacks removed the aborted run equals the baseline (segments > 0).
+///
+/// Not covered by design: the mel spectrogram of the whole input is computed before any
+/// callback runs, so it cannot be aborted and is not what this asserts. Durations are
+/// printed, never compared (F-013, F-021).
 #[test]
 fn pre_requested_abort_returns_promptly() {
-    let mut model = load_tiny();
+    let _serial = serial();
+    let mut model = load_tiny_with_threads(1);
     let audio = long_audio(60);
 
-    let t0 = SystemMonotonic.now();
+    let t0 = Instant::now();
     let full = model.transcribe(&audio, Some("en"), &no_abort());
-    let baseline = SystemMonotonic.now().saturating_duration_since(t0);
+    let baseline = t0.elapsed();
     assert!(
         full.is_ok(),
         "the unaborted 60 s baseline failed: {:?}",
         full.err()
     );
-
-    // Limit zero: the first `requested()` the model makes is true and latches. The start is
-    // read from the system clock directly, so every read of `clock` is the model's.
-    let clock = Arc::new(CountingClock(AtomicUsize::new(0)));
-    let abort = Abort::new(clock.clone(), SystemMonotonic.now(), Duration::ZERO);
-    let t1 = SystemMonotonic.now();
-    let _ignored = model.transcribe(&audio, Some("en"), &abort); // result ignored (#133)
-    let aborted = SystemMonotonic.now().saturating_duration_since(t1);
-
+    let baseline_segments = model.last_segment_count();
     assert!(
-        clock.0.load(Ordering::SeqCst) >= 1,
-        "the model never asked the Abort whether to stop"
+        baseline_segments > 0,
+        "the unaborted 60 s run left no segments: the abort assertion below would prove nothing"
     );
-    assert!(
-        aborted * 4 <= baseline,
-        "an aborted transcription took {aborted:?}, the unaborted one {baseline:?}: whisper_full was not stopped"
+
+    // Limit zero: the first `requested()` is true and latches.
+    let abort = Abort::new(
+        Arc::new(SystemMonotonic),
+        SystemMonotonic.now(),
+        Duration::ZERO,
     );
+    let t1 = Instant::now();
+    let aborted = model.transcribe(&audio, Some("en"), &abort);
+    let aborted_for = t1.elapsed();
+    assert_eq!(
+        aborted.err(),
+        Some(FailureReason::LocalEngineFailed),
+        "an aborted transcription must be a LocalEngineFailed (decision #133)"
+    );
+    assert_eq!(
+        model.last_segment_count(),
+        0,
+        "the aborted run left segments (baseline {baseline_segments}): whisper_full was not stopped"
+    );
+    eprintln!("abort-test: baseline {baseline:?}, aborted {aborted_for:?} (printed, not compared)");
+}
+
+// ---- I2: the engine's thread count has one policy -------------------------------------
+
+/// Properties of `max(1, min(B, P - 1))` that hold for every B >= 1, so they do not wait
+/// for the measured best count: at least 1, below P when P > 1, monotone in P.
+#[test]
+fn thread_policy_is_at_least_one_and_below_parallelism() {
+    let mut previous = 0;
+    for p in 1..=256usize {
+        let n = thread_count_for(p);
+        assert!(n >= 1, "policy for parallelism {p} is {n}");
+        if p > 1 {
+            assert!(n < p, "policy for parallelism {p} is {n}: not below P");
+        } else {
+            assert_eq!(n, 1, "policy for parallelism 1 is {n}");
+        }
+        assert!(
+            n >= previous,
+            "policy fell from {previous} to {n} at P = {p}"
+        );
+        previous = n;
+    }
+    // Unknown parallelism reaches the policy as 1.
+    assert_eq!(thread_count_for(1), 1);
+    assert_eq!(thread_count_for(2), 1);
+}
+
+/// The loader without an override uses the policy on this machine's parallelism; the
+/// override is used as asked.
+#[test]
+fn loader_uses_the_policy_and_with_threads_overrides_it() {
+    let _serial = serial();
+    let p = std::thread::available_parallelism().map_or(1, |n| n.get());
+    let default = WhisperLoader::new()
+        .load_whisper(&tiny_path())
+        .expect("load tiny");
+    assert_eq!(
+        default.threads(),
+        thread_count_for(p),
+        "default thread count"
+    );
+    drop(default);
+    let two = load_tiny_with_threads(2);
+    assert_eq!(two.threads(), 2, "with_threads(2)");
+}
+
+// ---- Acceptance 1 / 2: the figure for the Windows log (print only, F-013) --------------
+
+/// Work of the child of `whisper_timing_is_printed`; a no-op unless the parent set
+/// `VOICEN_WHISPER_TIMING_CHILD`. Per thread count n in 1..=4 it loads tiny, times 3 runs of
+/// the 1 s clip and of 30 s of audio, and prints one `whisper-timing:` line to stderr.
+/// Print only: no figure is compared to anything.
+#[test]
+#[ignore = "child of whisper_timing_is_printed"]
+fn whisper_timing_child_run() {
+    if std::env::var_os(TIMING_CHILD_VAR).is_none() {
+        return;
+    }
+    let cpus = std::thread::available_parallelism().map_or(1, |n| n.get());
+    let clip = clip();
+    let long = long_audio(30);
+    let best = |model: &mut WhisperModel, audio: &[f32]| -> f64 {
+        (0..3)
+            .map(|_| {
+                let t = Instant::now();
+                let r = model.transcribe(audio, Some("en"), &no_abort());
+                let ms = t.elapsed().as_secs_f64() * 1000.0;
+                assert!(r.is_ok(), "timing run failed: {:?}", r.err());
+                ms
+            })
+            .fold(f64::INFINITY, f64::min)
+    };
+    for n in 1..=4usize {
+        let mut model = load_tiny_with_threads(n);
+        let short_ms = best(&mut model, &clip);
+        let long_ms = best(&mut model, &long);
+        eprintln!(
+            "whisper-timing: threads {n}, 1 s clip best {short_ms:.1} ms, 30 s best {long_ms:.1} ms, \
+             available parallelism {cpus}"
+        );
+    }
+    eprintln!(
+        "whisper-timing: policy picks {} threads, available parallelism {cpus}",
+        thread_count_for(cpus)
+    );
+}
+
+/// Runs the timing child with nothing else computing in this process (the lock is held for
+/// its whole run) and asserts only that it passed. The child's stderr is the parent's, so
+/// the Windows CI log carries the `whisper-timing:` lines past libtest's capture.
+#[test]
+fn whisper_timing_is_printed() {
+    let _serial = serial();
+    let exe = std::env::current_exe().expect("current test exe");
+    let status = Command::new(exe)
+        .args([
+            "--exact",
+            "whisper_timing_child_run",
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(TIMING_CHILD_VAR, "1")
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .status()
+        .expect("start the timing child run");
+    assert!(status.success(), "the timing child run failed: {status:?}");
 }
 
 // ---- invariant 1: no whisper / ggml text on stdout or stderr --------------------------
@@ -316,6 +474,8 @@ fn quiet_child_run() {
 
 #[test]
 fn whisper_and_ggml_print_nothing() {
+    // Held across the child's whole run: its models must not compute beside another test's.
+    let _serial = serial();
     let exe = std::env::current_exe().expect("current test exe");
     let out = Command::new(exe)
         .args([

@@ -1,0 +1,12 @@
+guarantee: AC-5: the abort assertion bites (T-099 v3#N2: both stop callbacks removed)
+file: crates/voicen-whisper/src/lib.rs
+added_by: test-writer
+--- old
+            params.set_abort_callback(Some(abort_requested));
+            params.set_abort_callback_user_data(user_data);
+            params.set_start_encoder_callback(Some(encoder_may_start));
+            params.set_start_encoder_callback_user_data(user_data);
+--- new
+            params.set_abort_callback_user_data(user_data);
+            params.set_start_encoder_callback_user_data(user_data);
+--- end
