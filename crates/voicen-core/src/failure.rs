@@ -28,13 +28,13 @@ pub enum FailureReason {
     #[error("cannot reach {host}")]
     CannotReach { host: String },
     /// The job ran past its time limit: an HTTP request past its `Timeouts`
-    /// duration ([`TimeoutSource::Server`], built only by [`classify`]), or the
-    /// built-in engine past `timeouts.builtin` ([`TimeoutSource::Builtin`], T-098).
+    /// duration ([`TimeoutOrigin::Server`], built only by [`classify`]), or the
+    /// built-in engine past `timeouts.builtin` ([`TimeoutOrigin::Builtin`], T-098).
     /// One code (`"Timeout"`) for both; the message follows the origin (T-106,
     /// decision #147). The field is not named `source`: thiserror would take it
     /// as the error's `source()`.
-    #[error("the transcription did not finish in time")]
-    Timeout { origin: TimeoutSource },
+    #[error("did not finish in time")]
+    Timeout { origin: TimeoutOrigin },
     /// Any other non-2xx status.
     #[error("server error (HTTP {status})")]
     ServerError { status: u16 },
@@ -68,7 +68,7 @@ pub enum FailureReason {
 
 /// Which limit a [`FailureReason::Timeout`] hit. Closed: it decides the message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TimeoutSource {
+pub enum TimeoutOrigin {
     /// An HTTP engine (API, local server, post-processing chat, connection test):
     /// the server did not answer within the request's duration.
     Server,
@@ -102,10 +102,10 @@ impl FailureReason {
             FailureReason::NetworkUnavailable => i18n::FAILURE_NETWORK_UNAVAILABLE,
             FailureReason::CannotReach { .. } => i18n::FAILURE_CANNOT_REACH,
             FailureReason::Timeout {
-                origin: TimeoutSource::Server,
+                origin: TimeoutOrigin::Server,
             } => i18n::FAILURE_TIMEOUT,
             FailureReason::Timeout {
-                origin: TimeoutSource::Builtin,
+                origin: TimeoutOrigin::Builtin,
             } => i18n::FAILURE_LOCAL_TIMEOUT,
             FailureReason::ServerError { .. } => i18n::FAILURE_SERVER_ERROR,
             FailureReason::UnexpectedResponse => i18n::FAILURE_UNEXPECTED_RESPONSE,
@@ -220,7 +220,7 @@ pub fn classify(err: &TransportError, host: &str) -> FailureReason {
         TransportError::Send { connect: true, .. } | TransportError::Setup => cannot_reach(),
         TransportError::Send { timeout: true, .. } | TransportError::BodyRead { timeout: true } => {
             FailureReason::Timeout {
-                origin: TimeoutSource::Server,
+                origin: TimeoutOrigin::Server,
             }
         }
         TransportError::Send { .. }
@@ -229,7 +229,7 @@ pub fn classify(err: &TransportError, host: &str) -> FailureReason {
     }
 }
 
-/// Every variant once, `Timeout` once per [`TimeoutSource`] (each origin has
+/// Every variant once, `Timeout` once per [`TimeoutOrigin`] (each origin has
 /// its own message). The exhaustive matches make a new variant or origin a
 /// compile error here until it is added to this list (and so to
 /// `message_ids_per_reason`). Also the one every-variant list of the
@@ -243,10 +243,10 @@ pub(crate) fn every_reason() -> Vec<FailureReason> {
             host: "api.example.com:8443".to_string(),
         },
         FailureReason::Timeout {
-            origin: TimeoutSource::Server,
+            origin: TimeoutOrigin::Server,
         },
         FailureReason::Timeout {
-            origin: TimeoutSource::Builtin,
+            origin: TimeoutOrigin::Builtin,
         },
         FailureReason::ServerError { status: 503 },
         FailureReason::UnexpectedResponse,
@@ -265,7 +265,7 @@ pub(crate) fn every_reason() -> Vec<FailureReason> {
             | FailureReason::NetworkUnavailable
             | FailureReason::CannotReach { .. }
             | FailureReason::Timeout {
-                origin: TimeoutSource::Server | TimeoutSource::Builtin,
+                origin: TimeoutOrigin::Server | TimeoutOrigin::Builtin,
             }
             | FailureReason::ServerError { .. }
             | FailureReason::UnexpectedResponse
@@ -299,7 +299,7 @@ mod tests {
 
     fn server_timeout() -> FailureReason {
         FailureReason::Timeout {
-            origin: TimeoutSource::Server,
+            origin: TimeoutOrigin::Server,
         }
     }
 
@@ -314,7 +314,7 @@ mod tests {
         // T-168: Timeout is built for transcription, post-processing chat and the
         // connection test, so its text names no stage. Bite: a Display text that
         // keeps "the transcription" for either origin.
-        for origin in [TimeoutSource::Server, TimeoutSource::Builtin] {
+        for origin in [TimeoutOrigin::Server, TimeoutOrigin::Builtin] {
             let r = FailureReason::Timeout { origin };
             assert_eq!(r.to_string(), "did not finish in time", "{r:?}");
         }
@@ -489,7 +489,7 @@ mod tests {
                 "Не удаётся подключиться к api.example.com:8443",
             ),
             FailureReason::Timeout {
-                origin: TimeoutSource::Server,
+                origin: TimeoutOrigin::Server,
             } => (
                 "Timeout",
                 "failure.timeout",
@@ -499,7 +499,7 @@ mod tests {
             // contracts/messages.md, decision #147 (T-106): the built-in engine's
             // timeout has its own text; the code stays "Timeout".
             FailureReason::Timeout {
-                origin: TimeoutSource::Builtin,
+                origin: TimeoutOrigin::Builtin,
             } => (
                 "Timeout",
                 "failure.local_timeout",

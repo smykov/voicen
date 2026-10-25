@@ -130,7 +130,7 @@ messages! {
     FAILURE_NETWORK_UNAVAILABLE = "failure.network_unavailable",
     /// `FailureReason::CannotReach`; placeholder `{host}` = `host[:port]`.
     FAILURE_CANNOT_REACH = "failure.cannot_reach",
-    /// `FailureReason::Timeout` from an HTTP engine (`TimeoutSource::Server`: the
+    /// `FailureReason::Timeout` from an HTTP engine (`TimeoutOrigin::Server`: the
     /// whole request exceeded its duration).
     FAILURE_TIMEOUT = "failure.timeout",
     /// `FailureReason::ServerError`; placeholder `{status}` = the HTTP status.
@@ -152,7 +152,7 @@ messages! {
     /// `FailureReason::LocalEngineFailed` (the built-in engine's load or
     /// transcription failed; T-098).
     FAILURE_LOCAL_ENGINE = "failure.local_engine",
-    /// `FailureReason::Timeout` from the built-in engine (`TimeoutSource::Builtin`:
+    /// `FailureReason::Timeout` from the built-in engine (`TimeoutOrigin::Builtin`:
     /// the transcription ran past `timeouts.builtin`; T-106, decision #147).
     FAILURE_LOCAL_TIMEOUT = "failure.local_timeout",
     /// A job without speech (`JobEnd::Notice`, T-001).

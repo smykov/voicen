@@ -641,7 +641,7 @@ fn mic_unavailable(err: &CaptureError) -> FailureReason {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::failure::TimeoutSource;
+    use crate::failure::TimeoutOrigin;
     use crate::i18n::{self, MessageId};
 
     /// Opaque context standing in for T-001's `StartWindow`.
@@ -831,7 +831,7 @@ mod tests {
         c.job_finished(
             a,
             JobEnd::Failed(FailureReason::Timeout {
-                origin: TimeoutSource::Server,
+                origin: TimeoutOrigin::Server,
             }),
             tf,
         );
@@ -924,7 +924,7 @@ mod tests {
         c.job_finished(
             a,
             JobEnd::Failed(FailureReason::Timeout {
-                origin: TimeoutSource::Server,
+                origin: TimeoutOrigin::Server,
             }),
             t0 + ms(2000),
         );
@@ -1047,7 +1047,7 @@ mod tests {
         c.job_finished(
             a,
             JobEnd::Failed(FailureReason::Timeout {
-                origin: TimeoutSource::Server,
+                origin: TimeoutOrigin::Server,
             }),
             tf,
         );
@@ -1088,7 +1088,7 @@ mod tests {
         c.job_finished(
             a,
             JobEnd::Failed(FailureReason::Timeout {
-                origin: TimeoutSource::Server,
+                origin: TimeoutOrigin::Server,
             }),
             tf,
         );
@@ -1162,7 +1162,7 @@ mod tests {
         c.job_finished(
             a,
             JobEnd::Failed(FailureReason::Timeout {
-                origin: TimeoutSource::Server,
+                origin: TimeoutOrigin::Server,
             }),
             t0 + ms(2000),
         );
@@ -1553,7 +1553,7 @@ mod tests {
         c.job_finished(
             a,
             JobEnd::Failed(FailureReason::Timeout {
-                origin: TimeoutSource::Server,
+                origin: TimeoutOrigin::Server,
             }),
             t0 + ms(2000),
         );
@@ -1601,7 +1601,7 @@ mod tests {
         c.job_finished(
             a,
             JobEnd::Failed(FailureReason::Timeout {
-                origin: TimeoutSource::Server,
+                origin: TimeoutOrigin::Server,
             }),
             tf,
         );
@@ -1664,7 +1664,7 @@ mod tests {
         c.job_finished(
             a,
             JobEnd::Failed(FailureReason::Timeout {
-                origin: TimeoutSource::Server,
+                origin: TimeoutOrigin::Server,
             }),
             t0 + ms(6000),
         );
@@ -2047,7 +2047,7 @@ mod tests {
         c.job_finished(
             a,
             JobEnd::Failed(FailureReason::Timeout {
-                origin: TimeoutSource::Server,
+                origin: TimeoutOrigin::Server,
             }),
             t1 + ms(10),
         );

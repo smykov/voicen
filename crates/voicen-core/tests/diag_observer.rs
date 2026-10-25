@@ -25,7 +25,7 @@ use voicen_core::events::{
     DeviceKind, DictationEvent, OutcomeCode, PipelineObserver, PostProcessResult, PostProcessTrace,
     SkipKind, WarningCode,
 };
-use voicen_core::failure::{FailureReason, TimeoutSource};
+use voicen_core::failure::{FailureReason, TimeoutOrigin};
 use voicen_core::recording::{MicCause, Press, RecordingController, RecordingEnd, RecordingId};
 use voicen_core::settings::gate::Blocked;
 use voicen_core::test_support::TempDir;
@@ -1016,11 +1016,11 @@ fn every_reason() -> Vec<(FailureReason, &'static str)> {
             host: "api.example.com:8443".to_string(),
         },
         FailureReason::Timeout {
-            origin: TimeoutSource::Server,
+            origin: TimeoutOrigin::Server,
         },
         // T-106: the built-in engine's timeout logs the same reason.
         FailureReason::Timeout {
-            origin: TimeoutSource::Builtin,
+            origin: TimeoutOrigin::Builtin,
         },
         FailureReason::ServerError { status: 503 },
         FailureReason::UnexpectedResponse,

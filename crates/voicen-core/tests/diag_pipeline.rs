@@ -39,7 +39,7 @@ use voicen_core::clock::FakeClock;
 use voicen_core::delivery::DeliveryResult;
 use voicen_core::diag::{Log, LogConfig, LogEvent, LogObserver, OsVersion};
 use voicen_core::events::{DeviceKind, DictationEvent, PipelineObserver};
-use voicen_core::failure::{FailureReason, TimeoutSource};
+use voicen_core::failure::{FailureReason, TimeoutOrigin};
 use voicen_core::hotkey_registrar::FakeHotkeyRegistrar;
 use voicen_core::i18n;
 use voicen_core::models::FakeDownloadedModels;
@@ -340,7 +340,7 @@ async fn log_holds_no_key_query_or_transcript_on_any_path() {
             true,
             false,
             JobEnd::Failed(FailureReason::Timeout {
-                origin: TimeoutSource::Server,
+                origin: TimeoutOrigin::Server,
             }),
             ms,
             "failed",

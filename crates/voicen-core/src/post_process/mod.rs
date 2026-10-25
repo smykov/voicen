@@ -192,8 +192,9 @@ impl PostProcessor for PassThrough {
 mod tests {
     use super::*;
     use crate::delivery::DeliveryResult;
-    use crate::failure::{every_reason as every_failure_reason, FailureReason, TimeoutSource};
+    use crate::failure::{every_reason as every_failure_reason, FailureReason, TimeoutOrigin};
     use crate::i18n::{self, text, UiLanguage, MESSAGE_IDS};
+    use crate::recording::MicCause;
     use crate::secrets::FakeCredentialStore;
     use crate::secrets::KeySlot;
     use crate::timeouts::Timeouts;
@@ -433,7 +434,7 @@ mod tests {
             ),
             (
                 FailureReason::Timeout {
-                    origin: TimeoutSource::Server,
+                    origin: TimeoutOrigin::Server,
                 },
                 SkipReason::Timeout,
             ),
@@ -449,13 +450,34 @@ mod tests {
                 FailureReason::UnexpectedResponse,
                 SkipReason::InvalidResponse,
             ),
-            // T-168: the developer adds the 6 rows classify never produces on this
-            // path (from_failure keeps them total; the mapping does not change):
-            //   KeyStoreUnavailable -> InvalidKey
-            //   EngineNotConfigured -> NotConfigured
-            //   ClipboardUnavailable, MicrophoneUnavailable{cause: NoDevice},
-            //   NoLocalModel, LocalEngineFailed -> InvalidResponse
-            //   Timeout{origin: Builtin} -> Timeout
+            // T-168: reasons classify never produces on this path; from_failure
+            // stays total over them with its nearest skip (no wildcard).
+            (FailureReason::KeyStoreUnavailable, SkipReason::InvalidKey),
+            (
+                FailureReason::EngineNotConfigured,
+                SkipReason::NotConfigured,
+            ),
+            (
+                FailureReason::ClipboardUnavailable,
+                SkipReason::InvalidResponse,
+            ),
+            (
+                FailureReason::MicrophoneUnavailable {
+                    cause: MicCause::NoDevice,
+                },
+                SkipReason::InvalidResponse,
+            ),
+            (FailureReason::NoLocalModel, SkipReason::InvalidResponse),
+            (
+                FailureReason::LocalEngineFailed,
+                SkipReason::InvalidResponse,
+            ),
+            (
+                FailureReason::Timeout {
+                    origin: TimeoutOrigin::Builtin,
+                },
+                SkipReason::Timeout,
+            ),
         ];
         for (failure, want) in &rows {
             assert_eq!(

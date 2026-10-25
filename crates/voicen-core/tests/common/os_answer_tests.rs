@@ -15,7 +15,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
 use crate::common::os_answer::{OsAnswer, Unanswered, OS_ANSWER_BUDGET};
-use voicen_core::failure::{FailureReason, TimeoutSource};
+use voicen_core::failure::{FailureReason, TimeoutOrigin};
 use voicen_core::timeouts::Timeouts;
 
 /// Every kind the seam offers today, built through its probe.
@@ -174,7 +174,7 @@ fn unanswered_case_is_test_net_1_and_accepts_only_the_connect_or_os_ending() {
     }));
     assert!(case.ended_by_connect_or_os(&FailureReason::NetworkUnavailable));
     assert!(!case.ended_by_connect_or_os(&FailureReason::Timeout {
-        origin: TimeoutSource::Server
+        origin: TimeoutOrigin::Server
     }));
     assert!(!case.ended_by_connect_or_os(&FailureReason::CannotReach {
         host: "127.0.0.1:1".to_string()

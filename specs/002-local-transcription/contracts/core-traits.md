@@ -149,7 +149,7 @@ impl 001::Engine for BuiltinEngine {
 ```
 
 - Model not selected / not downloaded → `FailureReason::NoLocalModel` → FR-11 path (paste nothing, notify "no local model", audio kept as the pending recording); no load or transcription is attempted.
-- The limit `req.timeouts.builtin` (default 120 s) runs from when the job holds the model (`ModelGuard::transcribe_within` builds the `Abort` hook after taking the model's lock), so it covers the transcription only, never the load or a wait for another job on the same model (decision #133). A run the hook stopped → `Timeout`.
+- The limit `req.timeouts.builtin` (default 120 s) runs from when the job holds the model (`ModelGuard::transcribe_within` builds the `Abort` hook after taking the model's lock), so it covers the transcription only, never the load or a wait for another job on the same model (decision #133). A run the hook stopped → `FailureReason::Timeout { origin: TimeoutOrigin::Builtin }`, rendered as `failure.local_timeout`; the code and the log reason stay `Timeout` (decision #147).
 - Any other load/transcribe error → `FailureReason::LocalEngineFailed` → FR-11 path.
 - Reports `Warmth` into the dictation log record (`local=cold load_ms=<n>` / `local=warm`, written only for `engine=builtin`).
 

@@ -123,7 +123,7 @@ impl IndicatorState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::failure::TimeoutSource;
+    use crate::failure::TimeoutOrigin;
     use crate::i18n;
 
     fn inputs(hotkey_error: bool, recording: bool, error: bool) -> IndicatorInputs {
@@ -177,11 +177,11 @@ mod tests {
         let t0 = crate::clock::instant();
         let msg = ShownMessage {
             id: FailureReason::Timeout {
-                origin: TimeoutSource::Server,
+                origin: TimeoutOrigin::Server,
             }
             .message_id(),
             params: FailureReason::Timeout {
-                origin: TimeoutSource::Server,
+                origin: TimeoutOrigin::Server,
             }
             .message_params(),
             until: t0 + MESSAGE_DURATION,

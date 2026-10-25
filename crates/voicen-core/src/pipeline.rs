@@ -433,7 +433,7 @@ mod tests {
     use crate::delivery::DeliveryResult;
     use crate::engine::TranscribeRequest;
     use crate::events::{DictationEvent, OutcomeCode, RecordingObserver};
-    use crate::failure::TimeoutSource;
+    use crate::failure::TimeoutOrigin;
     use crate::i18n;
     use crate::platform::{
         FakeClipboard, FakePaster, FakeTempAudioStore, PasterCall, StoreCall, WindowRef,
@@ -789,10 +789,10 @@ mod tests {
                 "engine failure",
                 fixtures::speech_3s(),
                 Err(FailureReason::Timeout {
-                    origin: TimeoutSource::Server,
+                    origin: TimeoutOrigin::Server,
                 }),
                 JobEnd::Failed(FailureReason::Timeout {
-                    origin: TimeoutSource::Server,
+                    origin: TimeoutOrigin::Server,
                 }),
             ),
             (

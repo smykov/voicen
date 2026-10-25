@@ -29,7 +29,7 @@ use voicen_core::events::{
     DictationEvent, OutcomeCode, PostProcessResult, PostProcessTrace, RecordingObserver,
     WarningCode,
 };
-use voicen_core::failure::{FailureReason, TimeoutSource};
+use voicen_core::failure::{FailureReason, TimeoutOrigin};
 use voicen_core::hotkey_registrar::FakeHotkeyRegistrar;
 use voicen_core::i18n::{self, text, MessageId, UiLanguage};
 use voicen_core::models::FakeDownloadedModels;
@@ -735,7 +735,7 @@ async fn no_answer_within_timeout_is_timeout() {
     assert_eq!(
         report.end,
         JobEnd::Failed(FailureReason::Timeout {
-            origin: TimeoutSource::Server
+            origin: TimeoutOrigin::Server
         })
     );
     at_least(took, t.api_transcription);
@@ -773,7 +773,7 @@ async fn configured_api_timeout_fails_the_job_with_timeout() {
     assert_eq!(
         report.end,
         JobEnd::Failed(FailureReason::Timeout {
-            origin: TimeoutSource::Server
+            origin: TimeoutOrigin::Server
         })
     );
     at_least(took, Duration::from_secs(5));
@@ -1165,7 +1165,7 @@ async fn no_event_or_failure_carries_key_query_or_transcript() {
             true,
             false,
             JobEnd::Failed(FailureReason::Timeout {
-                origin: TimeoutSource::Server,
+                origin: TimeoutOrigin::Server,
             }),
             ms,
         ),

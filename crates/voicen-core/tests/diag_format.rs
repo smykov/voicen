@@ -29,7 +29,7 @@ use voicen_core::diag::{
 };
 use voicen_core::engine::engine_for;
 use voicen_core::events::{PostProcessResult, PostProcessTrace, SkipKind};
-use voicen_core::failure::{FailureReason, TimeoutSource};
+use voicen_core::failure::{FailureReason, TimeoutOrigin};
 use voicen_core::recording::MicCause;
 use voicen_core::secrets::{FakeCredentialStore, KeySlot};
 use voicen_core::settings::gate::Blocked;
@@ -1220,7 +1220,7 @@ fn every_reason() -> Vec<(FailureReason, FailureTag, &'static str)> {
             host: "api.example.com:8443".to_string(),
         },
         FailureReason::Timeout {
-            origin: TimeoutSource::Server,
+            origin: TimeoutOrigin::Server,
         },
         FailureReason::ServerError { status: 503 },
         FailureReason::UnexpectedResponse,

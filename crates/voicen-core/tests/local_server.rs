@@ -31,7 +31,7 @@ use voicen_core::autostart::FakeAutostart;
 use voicen_core::clock::FakeClock;
 use voicen_core::engine::{engine_for, Engine, TranscribeRequest};
 use voicen_core::events::{DictationEvent, OutcomeCode, RecordingObserver};
-use voicen_core::failure::{FailureReason, TimeoutSource};
+use voicen_core::failure::{FailureReason, TimeoutOrigin};
 use voicen_core::hotkey_registrar::FakeHotkeyRegistrar;
 use voicen_core::models::FakeDownloadedModels;
 use voicen_core::pipeline::{JobReport, Pipeline, PipelineDeps, PressContext};
@@ -364,7 +364,7 @@ async fn no_answer_within_local_server_deadline_is_timeout() {
     assert_eq!(
         got,
         Err(FailureReason::Timeout {
-            origin: TimeoutSource::Server
+            origin: TimeoutOrigin::Server
         })
     );
     at_least(took, deadline);
@@ -590,7 +590,7 @@ async fn configured_local_server_timeout_fails_the_job_with_timeout() {
     assert_eq!(
         report.end,
         JobEnd::Failed(FailureReason::Timeout {
-            origin: TimeoutSource::Server
+            origin: TimeoutOrigin::Server
         })
     );
     at_least(took, Duration::from_secs(5));

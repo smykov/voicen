@@ -25,7 +25,7 @@ use voicen_core::audio::{wav, AudioBuffer};
 use voicen_core::engine::lookup::{install, FixedLookup};
 use voicen_core::engine::openai::OpenAiCompatibleEngine;
 use voicen_core::engine::{engine_for, Engine, TranscribeRequest};
-use voicen_core::failure::{FailureReason, TimeoutSource};
+use voicen_core::failure::{FailureReason, TimeoutOrigin};
 use voicen_core::i18n::{text, UiLanguage};
 use voicen_core::secrets::{FakeCredentialStore, KeySlot, Secret};
 use voicen_core::settings::url::check_base_url;
@@ -523,7 +523,7 @@ async fn delay_past_ms_timeout_is_timeout() {
     assert_eq!(
         got,
         Err(FailureReason::Timeout {
-            origin: TimeoutSource::Server
+            origin: TimeoutOrigin::Server
         })
     );
     at_least(took, total);
@@ -691,7 +691,7 @@ fn stall_mid_body_is_timeout_and_cut_mid_body_is_unexpected_response() {
     assert_eq!(
         got,
         Err(FailureReason::Timeout {
-            origin: TimeoutSource::Server
+            origin: TimeoutOrigin::Server
         }),
         "stall mid-body"
     );
@@ -753,7 +753,7 @@ async fn no_failure_contains_query_key_or_transcript() {
             ok_text(TRANSCRIPT).set_delay(Duration::from_secs(5)),
             Duration::from_millis(300),
             FailureReason::Timeout {
-                origin: TimeoutSource::Server,
+                origin: TimeoutOrigin::Server,
             },
         ),
     ];
