@@ -73,6 +73,7 @@ Gotchas: the app itself (`pnpm tauri dev/build`) runs only on Windows; on Linux 
 ## Rules
 
 - Follow the task lifecycle: no code before the task's `analysis` block is filled; status changes are commits `chore(task): T-NNN FROM→TO`.
+- Edit task records (`docs/tasks/*.md`: status and front matter included) only with the Edit/Write tools; the analysis gate refuses shell edits (process review 2026-10-25, decisions #208).
 - Gate green before `NEEDS_REVIEW`. Commit locally; **never push from a DEV session**, except the orchestrator's CI-only `git push origin HEAD:wip/<ID>` (not a delivery; the branch is deleted at `CODE_COMPLETE`).
 - A task with a diff outside `docs/**` cites under `## Tests` `CI: <run> @ <sha>`, a green full `ci.yml` run on `wip/<ID>` before `CODE_COMPLETE` (P-016): `<sha>` is the reviewed head or a commit after which only `docs/**` changed; a green re-run at the same sha counts only if each red attempt's failure is outside the diff and logged as its own task or F-entry, cited next to the line. Steps gated on `main` never run on `wip/`. The next push to `main` is never evidence.
 - Self-review doesn't count — `CODE_COMPLETE` is set only by a separate review.
