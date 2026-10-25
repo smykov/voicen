@@ -13,7 +13,7 @@ The core API (`crates/voicen-core`) that the shell and the tests build on. Every
 | `call::final_pass` | queue, chunker, `SpeechSpans` use, timed/time-less mode, per-track results, cancel | scripted spans, wiremock server |
 | `call::transcript` | merge, schema 1 types + `validate`, Markdown render, export, speaker/title rename (pure functions) | fixtures |
 | `call::events` | the call value types (`Track`, `CallId`, `EndpointId`, `CallState`, `StopReason`, `FailReason`, the closed log field enums), `CallNotice`, `CallWarning`; the `LogEvent` variants are in `diag::event`, the line bodies in `diag::format` (T-118) | `diag_format`, `call_events` tests |
-| `settings` (extended) | `calls` section, `FieldId`s, `SettingsTab::Calls`, `LaunchArgs`, `SecondLaunchAction::StartCallRecord` | existing settings tests |
+| `settings` (extended) | `calls` section, `FieldId`s, `SettingsTab::Calls`, `LaunchArgs`, `SecondLaunchAction::StartCallRecord` (built so far: [004 core-traits.md › Built surface (T-120)](../../004-settings-and-first-run/contracts/core-traits.md)) | existing settings tests |
 | `tray` (extended) | `TrayState::CallRecording`, precedence function, menu table rows | existing tray tests |
 | `vad` (extended) | `SpeechSpans` port; energy-span implementation | scripted buffers |
 | `engine` (extended) | `transcribe_timed`, `ResponseShape`, `Timed`, `LangCode` table | wiremock |

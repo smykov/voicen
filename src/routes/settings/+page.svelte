@@ -12,7 +12,8 @@
   // the window closes only through destroy, after an in-page discard prompt when the
   // draft is dirty (D); a not_restored field with no control on the page is named in the
   // form-level message by its label, `settings.field_label.<FieldId>` (L). T-178: so is a
-  // field error whose control is not on the panel and that nothing else names (#201).
+  // field error whose control is not on the panel and that nothing else names (#201;
+  // T-120: e.g. a Refused calls.hotkey, whose Calls tab this window does not have yet).
   //
   // T-023, T-019: the discard prompt wins over every in-page modal (About, the delete
   // confirmation): onClose dismisses each one registered through $lib/settings/modals

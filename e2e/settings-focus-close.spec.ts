@@ -37,6 +37,7 @@ import { expect, test } from "./support/boot";
 import {
   calls,
   emit,
+  emitted,
   firstRunView,
   installTauriMock,
   listeners,
@@ -45,6 +46,7 @@ import {
   releaseListen,
   releaseSettingsGet,
   requestClose,
+  storedView,
   type MockOptions,
   type SaveRequest,
   type Settings,
@@ -853,5 +855,82 @@ test("T-178 (U2/L closed): a refused field that is also not_restored and has no 
   await expect(alert.getByRole("listitem")).toHaveText([startLabel]);
   await expect(page.getByTestId("settings-errors")).toHaveCount(0);
   await expect(alert).not.toContainText(en("error.autostart.failed"));
+  expect(errors).toEqual([]);
+});
+
+// ---- (L) A refused field without a control is named at form level -----------------------
+//
+// T-120 r1 #1: core refuses on fields the window has no control for yet (calls.hotkey,
+// whose Calls tab arrives with G41/T-155). A Refused FieldError whose field has no
+// `[data-field]` control in the panel is listed in the form-level field-error list of
+// T-178 (`settings-errors`, in the role=alert region) by `settings.field_label.<FieldId>`
+// and `error.<code>`; a field with a control keeps its field-level message and is not
+// listed.
+
+test("failure branch: a Refused calls.hotkey hotkey.equals_dictation after a Recording-tab hotkey change is listed at form level by its label and error text, nothing is saved and no Saved status shows", async ({ page }) => {
+  const errors = pageErrors(page);
+  const view = apiView();
+  await open(page, "/settings?tab=recording", view);
+  await queueSaveOutcome(page, {
+    Refused: { errors: [{ field: "calls.hotkey", code: "hotkey.equals_dictation" }], form_error: null },
+  });
+
+  const hotkey = field(page, "recording.hotkey");
+  await hotkey.press("Control+Alt+R");
+  await expect(hotkey).toHaveValue("Ctrl+Alt+R");
+  await page.getByTestId("settings-save").click();
+
+  // The edited hotkey reached core once (the UI does not validate, P-010).
+  await expect.poll(async () => (await calls(page, "settings_save")).length).toBe(1);
+  const [save] = await calls(page, "settings_save");
+  expect((save.args as { request: SaveRequest }).request.settings.hotkey).toBe("Ctrl+Alt+R");
+
+  // calls.hotkey has no control on any tab of this window: it is listed at form level.
+  await expect(field(page, "calls.hotkey")).toHaveCount(0);
+  const refused = page.getByTestId("settings-errors");
+  await expect(refused.getByRole("listitem")).toHaveText([
+    `${en("settings.field_label.calls.hotkey")} ${en("error.hotkey.equals_dictation")}`,
+  ]);
+  // By label, never by the raw FieldId or code.
+  await expect(refused).not.toContainText("calls.hotkey");
+  await expect(refused).not.toContainText("hotkey.equals_dictation");
+  // The dictation hotkey control is not the refused field: no highlight there.
+  await expect(hotkey).not.toHaveAttribute("aria-invalid", "true");
+  await expect(hotkey).toHaveValue("Ctrl+Alt+R"); // draft kept
+  await expect(page.getByRole("status").filter({ hasText: en("settings.saved") })).toHaveCount(0);
+
+  // Nothing was saved and nothing announced.
+  expect(await storedView(page)).toEqual(view);
+  expect(await emitted(page, "settings://changed")).toEqual([]);
+  expect(errors).toEqual([]);
+});
+
+test("a Refused field error is listed at form level only while its field has no control on the page, and a later Saved clears the list", async ({ page }) => {
+  const errors = pageErrors(page);
+  await open(page, "/settings?tab=recording", apiView());
+  await queueSaveOutcome(page, {
+    Refused: { errors: [{ field: "engine.api.base_url", code: "required" }], form_error: null },
+  });
+  await page.getByTestId("settings-save").click();
+
+  const listed = page.getByTestId("settings-errors").getByRole("listitem");
+  const entry = `${en("settings.field_label.engine.api.base_url")} ${en("error.required")}`;
+  // Recording tab: the base URL control is on the Engine tab, so it is listed.
+  await expect(listed).toHaveText([entry]);
+
+  // Engine tab: the control is rendered and carries the field-level message instead.
+  await tab(page, "engine").click();
+  const url = field(page, "engine.api.base_url");
+  await expect(url).toHaveAttribute("aria-invalid", "true");
+  await expect(listed).toHaveCount(0);
+
+  // Back on Recording: listed again.
+  await tab(page, "recording").click();
+  await expect(listed).toHaveText([entry]);
+
+  // The next outcome replaces the refusal: a Saved leaves nothing listed.
+  await page.getByTestId("settings-save").click();
+  await expect(page.getByRole("status").filter({ hasText: en("settings.saved") })).toBeVisible();
+  await expect(listed).toHaveCount(0);
   expect(errors).toEqual([]);
 });
