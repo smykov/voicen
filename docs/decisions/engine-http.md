@@ -2,7 +2,7 @@
 
 **Code:** `crates/voicen-core/src/engine/http.rs` (`HttpClient`, `client`, `client_with_read_timeout`, `DeadlineResolver`, `LookupRecord`), `crates/voicen-core/src/engine/lookup.rs` (`Lookup`, `SystemLookup`; the `test-fakes` `HeldLookup`, `FixedLookup`, `install`), `engine::openai::send_error` · **Tests that pin it:** `engine::http::tests` (the lookup record), `openai_client` (`unanswered_lookup_is_network_unavailable_at_the_connect_deadline`, `lookup_answered_after_the_connect_deadline_is_network_unavailable_not_a_late_success`, `unanswered_lookup_cut_by_a_total_deadline_below_connect_is_network_unavailable`, `lookup_error_at_once_is_network_unavailable`, `lookup_answered_at_once_with_a_refused_address_is_cannot_reach`), `post_process_chat`, `post_process_timeout`, `diag_pipeline` (`log_holds_no_key_query_or_transcript_on_any_path`), `local_download`, `connection_test`, `api_pipeline` (the `unanswered_lookup_*` twins), `failure::classify_table`; `make check-core` (the call ban, T-089), `make check-ban-canary`, `make check-clippy-lines`
 
-Tasks: T-079 (found by T-078), T-186. Decisions: #106, #113, #201, #202. Contract: `specs/001-dictation-via-api/contracts/openai-transcription.md` › Classification. Related: F-013.
+Tasks: T-079 (found by T-078), T-186. Decisions: #106, #113, #201, #211. Contract: `specs/001-dictation-via-api/contracts/openai-transcription.md` › Classification. Related: F-013.
 
 ## Invariants
 
