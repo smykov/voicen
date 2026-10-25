@@ -1,0 +1,2 @@
+# T-186: the task's tests only (redirect policy of engine::http; the lib filter runs the same_origin unit tests).
+cargo test -j 2 -p voicen-core --no-fail-fast --test post_process_chat --test openai_client --test local_download --test diag_pipeline && cargo test -j 2 -p voicen-core --lib engine::http

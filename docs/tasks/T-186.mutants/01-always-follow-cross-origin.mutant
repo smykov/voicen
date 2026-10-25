@@ -1,0 +1,8 @@
+guarantee: AC-2: a 307 or 308 to another origin is refused, and the prompt and transcript are not re-sent to it
+file: crates/voicen-core/src/engine/http.rs
+added_by: test-writer
+--- old
+            .is_some_and(|first| same_origin(attempt.url(), first));
+--- new
+            .is_some_and(|_first| true);
+--- end

@@ -63,7 +63,7 @@ Spec: `specs/003-llm-post-processing/` (contracts/core-post-process.md, data-mod
 
 ## Known residual
 
-- Redirects use reqwest's default policy (up to 10). A cross-origin redirect drops `Authorization` (pinned by `cross_host_redirect_drops_the_key`), but a 307/308 re-sends the body (prompt and transcript) to the other host, and its reply is used. Same as the transcription engine; changing it means changing the shared `engine::http::client`.
+- Redirects: resolved by T-186. The shared client refuses a cross-origin redirect, so no body reaches another host; see `docs/decisions/engine-http.md` (a refused redirect is `SkipReason::Http{status}`).
 - `chat_completions_url` always appends `chat/completions` (spec 003 FR-001). Whether a full endpoint URL is kept as is, like decision #96 for transcription, is OQ-17.
 
 ## Open

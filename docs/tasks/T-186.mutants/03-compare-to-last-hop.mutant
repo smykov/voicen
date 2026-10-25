@@ -1,0 +1,11 @@
+guarantee: AC-2: a redirect to another origin is refused (compared to the chain's first URL)
+file: crates/voicen-core/src/engine/http.rs
+added_by: test-writer
+equivalent: every URL in previous() was reached by a followed hop, and a hop is followed only when its target has the origin of the hop before it, so by induction last() and first() always share one origin; no input tells them apart
+--- old
+            .previous()
+            .first()
+--- new
+            .previous()
+            .last()
+--- end

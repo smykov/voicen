@@ -1,0 +1,10 @@
+guarantee: AC-3: a same-origin redirect is still followed
+file: crates/voicen-core/src/engine/http.rs
+added_by: test-writer
+--- old
+        Client::builder().connect_timeout(connect).referer(false),
+        same_origin_policy(),
+--- new
+        Client::builder().connect_timeout(connect).referer(false),
+        reqwest::redirect::Policy::none(),
+--- end

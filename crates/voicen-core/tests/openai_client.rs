@@ -511,10 +511,10 @@ async fn cross_origin_307_is_refused_and_nothing_reaches_the_target() {
     // redirect policy on `engine::http::client` (the target gets the audio and its
     // text is the result).
     let target = server_with(ok_text(TRANSCRIPT)).await;
-    let origin = server_with(
-        ResponseTemplate::new(307)
-            .insert_header("location", format!("{}/v1/audio/transcriptions", target.uri())),
-    )
+    let origin = server_with(ResponseTemplate::new(307).insert_header(
+        "location",
+        format!("{}/v1/audio/transcriptions", target.uri()),
+    ))
     .await;
     let got = transcribe(
         api_engine(&format!("{}/v1", origin.uri()), Some(KEY)),
@@ -522,9 +522,16 @@ async fn cross_origin_307_is_refused_and_nothing_reaches_the_target() {
     );
     assert_eq!(got, Err(FailureReason::ServerError { status: 307 }));
     let first = only_request(&origin).await;
-    assert_eq!(header(&first, "authorization"), Some("Bearer sk-test-SECRET"));
+    assert_eq!(
+        header(&first, "authorization"),
+        Some("Bearer sk-test-SECRET")
+    );
     let reached = target.received_requests().await.expect("recording is on");
-    assert_eq!(reached.len(), 0, "the refused redirect still sent a request");
+    assert_eq!(
+        reached.len(),
+        0,
+        "the refused redirect still sent a request"
+    );
 }
 
 #[tokio::test]
@@ -558,6 +565,65 @@ async fn same_origin_307_is_followed_with_body_and_key() {
     let parts = multipart(b);
     let file = part(&parts, "file").expect("file part on the followed request");
     assert!(file.body == wav::encode(&audio()), "audio not re-sent to B");
+}
+
+#[tokio::test]
+async fn followed_redirect_carries_no_referer() {
+    // T-186 hardening (`engine::http::client` doc: "No `Referer` is sent"): the
+    // followed request must not carry the configured base URL (path and query, which
+    // may hold a URL secret) as `Referer`. Bite: dropping `.referer(false)` from
+    // `client()` (reqwest's default sends the previous URL as Referer).
+    use wiremock::matchers::path;
+    let server = MockServer::start().await;
+    Mock::given(path("/v1/audio/transcriptions"))
+        .respond_with(ResponseTemplate::new(307).insert_header("location", "/moved/here"))
+        .mount(&server)
+        .await;
+    Mock::given(path("/moved/here"))
+        .respond_with(ok_text("from B"))
+        .mount(&server)
+        .await;
+    let got = transcribe(
+        api_engine(&format!("{}/v1", server.uri()), Some(KEY)),
+        req(None),
+    );
+    assert_eq!(got, Ok("from B".to_string()));
+    let all = server.received_requests().await.expect("recording is on");
+    assert_eq!(all.len(), 2, "A then B");
+    for r in &all {
+        assert_eq!(
+            header(r, "referer"),
+            None,
+            "Referer sent to {}",
+            r.url.path()
+        );
+    }
+}
+
+#[tokio::test]
+async fn same_origin_redirect_loop_stops_at_the_hop_limit() {
+    // T-186 approach: a followed same-origin redirect keeps reqwest's default
+    // 10-hop limit, so a redirect loop ends fast as a classified failure
+    // (TooManyRedirects -> UnexpectedResponse) after exactly 11 requests (the first
+    // plus 10 followed hops), not at the
+    // whole-request deadline. Bite: `attempt.follow()` instead of delegating to
+    // `Policy::default().redirect(attempt)` (the loop runs until the 5 s deadline:
+    // Timeout, and far more requests).
+    use wiremock::matchers::path;
+    let server = MockServer::start().await;
+    Mock::given(path("/v1/audio/transcriptions"))
+        .respond_with(
+            ResponseTemplate::new(307).insert_header("location", "/v1/audio/transcriptions"),
+        )
+        .mount(&server)
+        .await;
+    let got = transcribe(
+        api_engine(&format!("{}/v1", server.uri()), Some(KEY)),
+        req(None),
+    );
+    assert_eq!(got, Err(FailureReason::UnexpectedResponse));
+    let all = server.received_requests().await.expect("recording is on");
+    assert_eq!(all.len(), 11, "the first request plus the 10-hop limit");
 }
 
 #[tokio::test]

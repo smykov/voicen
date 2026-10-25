@@ -1,0 +1,8 @@
+guarantee: analysis.approach: a followed same-origin redirect keeps the 10-hop limit (a loop ends as a classified failure)
+file: crates/voicen-core/src/engine/http.rs
+added_by: test-writer
+--- old
+            reqwest::redirect::Policy::default().redirect(attempt)
+--- new
+            attempt.follow()
+--- end

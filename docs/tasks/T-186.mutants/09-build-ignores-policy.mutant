@@ -1,0 +1,8 @@
+guarantee: AC-2: a redirect to another origin is refused (the original defect: build() never sets the policy)
+file: crates/voicen-core/src/engine/http.rs
+added_by: test-writer
+--- old
+        .redirect(redirect)
+--- new
+        .redirect(reqwest::redirect::Policy::default())
+--- end

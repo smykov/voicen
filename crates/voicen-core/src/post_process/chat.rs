@@ -12,8 +12,9 @@
 //!    `{"model", "messages": [system prompt, user raw]}`, through the shared
 //!    helpers of `engine::http` (client with `timeouts.connect`, the one
 //!    `Authorization` rule, the 1 MiB capped read); the whole request is bounded
-//!    by `timeouts.post_processing`. The default redirect policy drops the key on
-//!    a cross-origin redirect.
+//!    by `timeouts.post_processing`. A redirect is followed only to the same
+//!    origin; a cross-origin one is not followed (nothing, neither the prompt nor
+//!    the transcript, reaches that origin) and its 3xx is `Skipped(Http)` (T-186).
 //! 5. `choices[0].message.content` as a string, trimmed, non-empty -> `Applied`;
 //!    anything else -> `Skipped(InvalidResponse)`; a transport failure ->
 //!    `failure::classify` -> [`SkipReason::from_failure`].

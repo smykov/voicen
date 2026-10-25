@@ -1,0 +1,8 @@
+guarantee: AC-4: a refused redirect surfaces as a classified failure (ServerError{3xx} / Skipped(Http{3xx}))
+file: crates/voicen-core/src/engine/http.rs
+added_by: test-writer
+--- old
+            attempt.stop()
+--- new
+            attempt.error("cross-origin redirect")
+--- end

@@ -10,6 +10,11 @@
 //! is a DNS failure (`TransportError::Send { dns: true, .. }`), whichever timer
 //! ended it (decisions #106, #113; `docs/decisions/engine-http.md`).
 //!
+//! A [`client`] client sends a request only to the origin of the URL it was built
+//! for: a redirect to another origin is never followed (its 3xx is the result),
+//! so neither body nor headers reach that origin; the download client keeps
+//! reqwest's default redirects (T-186, `docs/decisions/engine-http.md`).
+//!
 //! Every failure is a [`TransportError`], which `failure::classify` maps to a
 //! reason; no `reqwest::Error`, URL, key or body leaves this module.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
@@ -43,8 +48,9 @@ pub(crate) const MAX_BODY: u64 = 1024 * 1024;
 /// validation (http 1.5: no control byte other than tab, no DEL); otherwise
 /// [`TransportError::UnusableKey`]. Bytes of a non-ASCII key pass that rule and
 /// are sent as UTF-8; the server's 401/403 then gives `InvalidApiKey`. The value
-/// is marked sensitive (not printed by `Debug`, not HPACK-indexed, and dropped by
-/// reqwest's redirect policy on a cross-origin redirect).
+/// is marked sensitive (not printed by `Debug`, not HPACK-indexed). It never
+/// reaches another origin: a [`client`] client does not follow a cross-origin
+/// redirect (T-186).
 pub(crate) fn authorization(key: Option<&Secret>) -> Result<Option<HeaderValue>, TransportError> {
     let Some(key) = key.filter(|k| !k.expose().is_empty()) else {
         return Ok(None);
@@ -67,31 +73,73 @@ pub(crate) struct HttpClient {
     record: LookupRecord,
 }
 
-/// The client for one call, with `connect` as its connect timeout and reqwest's
-/// default redirect policy. The whole-request deadline is set per request by the
-/// caller (`RequestBuilder::timeout`), which bounds connect to the last body byte.
+/// The client for one call (transcription, Test connection, post-processing),
+/// with `connect` as its connect timeout and the same-origin redirect policy
+/// (T-186): a redirect is followed only to the origin (scheme, host, port with
+/// default) of the URL the request was built for, up to reqwest's default 10
+/// hops; a redirect to any other origin is not followed, nothing is sent there,
+/// and the 3xx response comes back to [`HttpClient::send_capped`] as
+/// [`TransportError::Status`]. No `Referer` is sent. The whole-request deadline
+/// is set per request by the caller (`RequestBuilder::timeout`), which bounds
+/// connect to the last body byte.
 pub(crate) fn client(connect: Duration) -> Result<HttpClient, TransportError> {
-    build(Client::builder().connect_timeout(connect))
+    build(
+        Client::builder().connect_timeout(connect).referer(false),
+        same_origin_policy(),
+    )
 }
 
 /// The client for a download: `connect` as its connect timeout and `read` as
 /// reqwest's per-read timeout (it also bounds the wait for the headers), never a
-/// total one.
+/// total one. It keeps reqwest's default redirect policy (any origin, 10 hops):
+/// a model download is a pinned GET with no key and no body, checked by size and
+/// SHA-256, and its host redirects to a CDN on another origin.
 pub(crate) fn client_with_read_timeout(
     connect: Duration,
     read: Duration,
 ) -> Result<HttpClient, TransportError> {
-    build(Client::builder().connect_timeout(connect).timeout(read))
+    build(
+        Client::builder().connect_timeout(connect).timeout(read),
+        reqwest::redirect::Policy::default(),
+    )
 }
 
-fn build(builder: reqwest::blocking::ClientBuilder) -> Result<HttpClient, TransportError> {
+fn build(
+    builder: reqwest::blocking::ClientBuilder,
+    redirect: reqwest::redirect::Policy,
+) -> Result<HttpClient, TransportError> {
     let resolver = DeadlineResolver::system();
     let record = resolver.record();
     let client = builder
+        .redirect(redirect)
         .dns_resolver(Arc::new(resolver))
         .build()
         .map_err(|_| TransportError::Setup)?;
     Ok(HttpClient { client, record })
+}
+
+/// Follows a redirect only when its target has the origin of the chain's first
+/// URL (then reqwest's default policy decides, which keeps its 10-hop limit);
+/// otherwise stops, so the 3xx is the response. Never logs or formats the
+/// attempt: its URLs may carry query secrets.
+fn same_origin_policy() -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(|attempt| {
+        let follow = attempt
+            .previous()
+            .first()
+            .is_some_and(|first| same_origin(attempt.url(), first));
+        if follow {
+            reqwest::redirect::Policy::default().redirect(attempt)
+        } else {
+            attempt.stop()
+        }
+    })
+}
+
+/// Whether `next` has the web origin of `first`: scheme, host and port, the port
+/// defaulted per scheme (`https://h` and `https://h:443` are one origin).
+fn same_origin(next: &Url, first: &Url) -> bool {
+    next.origin() == first.origin()
 }
 
 impl HttpClient {
@@ -294,6 +342,53 @@ mod tests {
         assert!(matches!(authorization(None), Ok(None)));
         let empty = Secret::new("");
         assert!(matches!(authorization(Some(&empty)), Ok(None)));
+    }
+
+    // ---- T-186: the same-origin redirect rule -----------------------------------
+
+    fn url(text: &str) -> Url {
+        match Url::parse(text) {
+            Ok(url) => url,
+            Err(_) => panic!("test url {text:?} does not parse"),
+        }
+    }
+
+    #[test]
+    fn same_origin_defaults_the_port_per_scheme() {
+        // Bite: comparing the explicit port (`port()`) instead of the origin.
+        assert!(same_origin(
+            &url("https://api.example.com:443/b"),
+            &url("https://api.example.com/a")
+        ));
+        assert!(same_origin(
+            &url("http://127.0.0.1:80/b?q=1"),
+            &url("http://127.0.0.1/a")
+        ));
+    }
+
+    #[test]
+    fn same_origin_refuses_another_port_host_or_scheme() {
+        // Bite: comparing `host_str()` only.
+        let first = url("https://api.example.com/v1/chat/completions");
+        assert!(!same_origin(
+            &url("https://api.example.com:8443/v1"),
+            &first
+        ));
+        assert!(!same_origin(&url("https://other.example.com/v1"), &first));
+        assert!(!same_origin(&url("http://api.example.com/v1"), &first));
+        assert!(!same_origin(
+            &url("http://127.0.0.1:8081/x"),
+            &url("http://127.0.0.1:8080/x")
+        ));
+    }
+
+    #[test]
+    fn same_origin_ignores_host_case_path_and_query() {
+        // Hosts are case-insensitive (the URL parser lowercases them).
+        assert!(same_origin(
+            &url("https://API.Example.COM/other/path?x=1"),
+            &url("https://api.example.com/v1")
+        ));
     }
 
     // ---- T-079: the lookup record (drop guard) -----------------------------------

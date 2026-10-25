@@ -1,0 +1,8 @@
+guarantee: engine::http::client doc: no Referer is sent (the base URL path and query never ride along on a followed hop)
+file: crates/voicen-core/src/engine/http.rs
+added_by: test-writer
+--- old
+        Client::builder().connect_timeout(connect).referer(false),
+--- new
+        Client::builder().connect_timeout(connect),
+--- end

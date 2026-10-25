@@ -1,0 +1,8 @@
+guarantee: AC-2/AC-3: cross-origin refused, same-origin followed
+file: crates/voicen-core/src/engine/http.rs
+added_by: test-writer
+--- old
+        if follow {
+--- new
+        if !follow {
+--- end

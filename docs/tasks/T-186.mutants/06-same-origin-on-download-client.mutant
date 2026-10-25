@@ -1,0 +1,10 @@
+guarantee: invariant: the model download client keeps following redirects (cross-origin CDN hop)
+file: crates/voicen-core/src/engine/http.rs
+added_by: test-writer
+--- old
+        Client::builder().connect_timeout(connect).timeout(read),
+        reqwest::redirect::Policy::default(),
+--- new
+        Client::builder().connect_timeout(connect).timeout(read),
+        same_origin_policy(),
+--- end

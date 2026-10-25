@@ -149,9 +149,7 @@ fn download_follows_a_cross_origin_redirect_to_a_second_server() {
     // policy applied to `client_with_read_timeout` (the 302 comes back as an HTTP
     // error and no file is kept).
     let cdn = Server::start(vec![]);
-    let hub = Server::start(vec![Serve::Redirect {
-        to: cdn.url(FILE),
-    }]);
+    let hub = Server::start(vec![Serve::Redirect { to: cdn.url(FILE) }]);
     let f = fixture(&hub, Duration::from_secs(2));
     let mut ev = f.start(ModelId::Base).expect("start");
     let end = ev.wait_end();
@@ -160,7 +158,6 @@ fn download_follows_a_cross_origin_redirect_to_a_second_server() {
     assert_eq!(hub.accepts(), 1, "hub requests");
     assert_eq!(cdn.accepts(), 1, "cdn requests");
 }
-
 
 #[test]
 fn happy_path_reports_progress_then_finished_and_the_verified_file_is_downloaded() {
