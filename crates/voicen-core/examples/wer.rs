@@ -20,22 +20,44 @@
 //! - `pairs <dir> [language]`: every `<name>.wav` in `<dir>` with a `<name>.txt`
 //!   reference next to it (for example the owner's Russian calls, language `ru`).
 //!
+//! Running it: Rust runs only in the `core` image, through `scripts/tw-run core`,
+//! which mounts only the repository and forwards no variable of its own. The
+//! variables and the data directory go through its `TW_DOCKER_ARGS` hook. Pass the
+//! variables by name only (`-e VOICEN_WER_KEY`, never `-e VOICEN_WER_KEY=...`), so
+//! the key is never on a command line; export them in the calling shell first.
+//! Mount the data read-only at `/data`, from an absolute host path without spaces
+//! (`TW_DOCKER_ARGS` is split on whitespace).
+//!
 //! Preparing LibriSpeech test-clean (https://www.openslr.org/resources/12/test-clean.tar.gz,
-//! CC BY 4.0):
+//! CC BY 4.0), on the host except the `scripts/tw-run` lines:
 //!
 //! ```text
 //! md5sum test-clean.tar.gz                  # must match archive-md5 in the manifest
-//! cargo run -p voicen-core --example wer -- verify-archive test-clean.tar.gz
+//! TW_DOCKER_ARGS="-v <archive-dir>:/data:ro" scripts/tw-run core -- \
+//!   cargo run -p voicen-core --example wer -- verify-archive /data/test-clean.tar.gz
 //! tar -xzf test-clean.tar.gz                # gives LibriSpeech/test-clean/
 //! # then, once per FLAC file X.flac (the one external conversion):
 //! ffmpeg -i X.flac -ar 16000 -ac 1 -c:a pcm_s16le X.wav
-//! cargo run -p voicen-core --example wer -- librispeech LibriSpeech/test-clean
+//! export VOICEN_WER_KEY VOICEN_WER_BASE_URL VOICEN_WER_MODEL   # set beforehand
+//! TW_DOCKER_ARGS="-e VOICEN_WER_KEY -e VOICEN_WER_BASE_URL -e VOICEN_WER_MODEL \
+//!   -v <abs>/LibriSpeech/test-clean:/data:ro" scripts/tw-run core -- \
+//!   cargo run -p voicen-core --example wer -- librispeech /data
+//! ```
+//!
+//! Pairs (for example the owner's Russian calls):
+//!
+//! ```text
+//! TW_DOCKER_ARGS="-e VOICEN_WER_KEY -e VOICEN_WER_BASE_URL -e VOICEN_WER_MODEL \
+//!   -v <pairs-dir>:/data:ro" scripts/tw-run core -- \
+//!   cargo run -p voicen-core --example wer -- pairs /data ru
 //! ```
 //!
 //! Environment: `VOICEN_WER_KEY` (the API key; unset or empty = no
 //! `Authorization` header), `VOICEN_WER_BASE_URL` (default
 //! `https://api.openai.com/v1`, checked by `check_base_url`), `VOICEN_WER_MODEL`
-//! (default `whisper-1`).
+//! (default `whisper-1`). A variable not forwarded by `-e` (or not set in the
+//! calling shell) is unset inside the container, so its default applies; for the
+//! key that means requests without `Authorization`.
 //!
 //! Exit 0: scored, no item failed. Exit 1: refused (too little audio, checksum
 //! mismatch, nothing to score) or at least one item failed. Exit 2: wrong usage or
@@ -74,14 +96,21 @@ const USAGE: &str = "usage:
   wer librispeech <test-clean-dir>
   wer pairs <dir> [language]
 
-Prepare LibriSpeech test-clean:
+Run through the core image; variables by name only, data mounted read-only at /data:
+  export VOICEN_WER_KEY VOICEN_WER_BASE_URL VOICEN_WER_MODEL
+  TW_DOCKER_ARGS=\"-e VOICEN_WER_KEY -e VOICEN_WER_BASE_URL -e VOICEN_WER_MODEL -v <set-dir>:/data:ro\" \\
+    scripts/tw-run core -- cargo run -p voicen-core --example wer -- librispeech /data
+  (pairs: the same with -v <pairs-dir>:/data:ro and `pairs /data ru`;
+   verify-archive: -v <archive-dir>:/data:ro and `verify-archive /data/test-clean.tar.gz`)
+
+Prepare LibriSpeech test-clean (on the host):
   md5sum test-clean.tar.gz        (must match archive-md5 in wer-librispeech-test-clean.txt)
-  wer verify-archive test-clean.tar.gz
+  verify-archive as above
   tar -xzf test-clean.tar.gz
   ffmpeg -i X.flac -ar 16000 -ac 1 -c:a pcm_s16le X.wav   (once per FLAC file)
 
 Environment: VOICEN_WER_KEY, VOICEN_WER_BASE_URL (default https://api.openai.com/v1),
-VOICEN_WER_MODEL (default whisper-1).";
+VOICEN_WER_MODEL (default whisper-1); a variable not passed with -e is unset in the container.";
 
 /// One scored item: its id, audio and normalized reference.
 struct Item {

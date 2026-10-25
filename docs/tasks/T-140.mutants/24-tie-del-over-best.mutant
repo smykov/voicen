@@ -1,4 +1,4 @@
-guarantee: -
+guarantee: AC-2: score doc comment tie-break (match/substitution over deletion over insertion)
 file: crates/voicen-core/src/wer.rs
 added_by: test-writer
 --- old

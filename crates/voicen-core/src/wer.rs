@@ -143,19 +143,6 @@ pub fn score(reference: &[String], hypothesis: &[String]) -> WerCounts {
     }
 }
 
-// T050 red tests (T-140). The implementation (T051) is written above this module by the developer.
-//
-// API the developer implements exactly (all `pub`, std only):
-//   fn normalize(text: &str) -> Vec<String>
-//   fn score(reference: &[String], hypothesis: &[String]) -> WerCounts   // applied to normalize() output
-//   #[derive(Debug, Default, Clone, PartialEq)]
-//   struct WerCounts { pub substitutions: usize, pub deletions: usize,
-//                      pub insertions: usize, pub reference_words: usize }
-//   impl WerCounts {
-//       fn add(&mut self, other: &WerCounts)      // field-wise sum, in place
-//       fn rate(&self) -> Option<f64>             // None iff reference_words == 0
-//   }
-
 #[cfg(test)]
 mod tests {
     use super::{normalize, score, WerCounts};
@@ -237,6 +224,13 @@ mod tests {
         assert_eq!(counts("a b c d", "a x c d e"), c(1, 0, 1, 4));
         // reference: a b c d ; hypothesis: b x d  -> 1 del (a), 1 sub (c->x)
         assert_eq!(counts("a b c d", "b x d"), c(1, 1, 0, 4));
+    }
+
+    #[test]
+    fn score_prefers_substitutions_over_a_deletion_insertion_pair_on_a_cost_tie() {
+        // reference: a b ; hypothesis: b a -> cost 2 either way: 2 subs, or
+        // del a + match b + ins a. The documented tie-break gives the 2 subs.
+        assert_eq!(counts("a b", "b a"), c(2, 0, 0, 2));
     }
 
     #[test]
