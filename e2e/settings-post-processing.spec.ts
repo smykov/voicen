@@ -23,8 +23,10 @@ import {
   calls,
   firstRunView,
   installTauriMock,
+  listeners,
   queueSaveOutcome,
   refusedPostProcessingOnEmpty,
+  requestClose,
   storedView,
   type SaveRequest,
   type Settings,
@@ -264,6 +266,55 @@ test("failure branch: post-processing on with an empty URL, model and prompt is 
   for (const id of [URL_FIELD, MODEL, PROMPT]) await expect(field(page, id), id).toHaveValue("");
   await expect(page.getByRole("alert")).toHaveCount(0);
   await expect(page.getByText(en("settings.saved"))).toHaveCount(0);
+  expect((await storedView(page)).settings.post_processing.enabled).toBe(false);
+  expect(errors).toEqual([]);
+});
+
+test("T-178 (3, 11) failure branch: Save from the General tab with post-processing on and empty fields lists the three refused fields by label with error.required in the role=alert region, keeps the draft dirty, and on the Post-processing tab the list is gone and the controls carry the errors", async ({ page }) => {
+  const errors = pageErrors(page);
+  await openPostProcessing(page);
+  await field(page, ENABLED).check();
+  await field(page, PROMPT).fill("");
+  await tab(page, "general").click();
+  await expect(tab(page, "general")).toHaveAttribute("aria-selected", "true");
+  // None of the refused controls is on this tab.
+  for (const id of [URL_FIELD, MODEL, PROMPT]) await expect(field(page, id), id).toHaveCount(0);
+
+  await queueSaveOutcome(page, refusedPostProcessingOnEmpty());
+  await page.getByTestId("settings-save").click();
+  await saveRequests(page, 1);
+
+  // The form-level list (decision #201): every field named once, by label, with its reason.
+  const region = page.getByRole("alert");
+  await expect(region).toHaveCount(1);
+  const labels = [URL_FIELD, MODEL, PROMPT].map((id) => en(`settings.field_label.${id}`));
+  const items = region.getByRole("listitem");
+  await expect(items).toHaveCount(3);
+  for (const label of labels) {
+    await expect(items.filter({ hasText: label }), label).toHaveCount(1);
+    await expect(items.filter({ hasText: label }), label).toContainText(en("error.required"));
+  }
+  await expect(page.getByText(en("settings.saved"))).toHaveCount(0);
+
+  // The draft stays dirty: a close request asks to discard and destroys nothing.
+  await expect
+    .poll(() => listeners(page, "tauri://close-requested"), { message: "the settings page listens to close requests" })
+    .toBeGreaterThan(0);
+  await requestClose(page);
+  const prompt = page.getByRole("alertdialog");
+  await expect(prompt).toBeVisible();
+  expect(await calls(page, "plugin:window|destroy")).toEqual([]);
+  await prompt.getByTestId("settings-discard-keep").click();
+  await expect(page.getByRole("alertdialog")).toHaveCount(0);
+
+  // Back on the tab that renders the controls: they name the errors, the list is gone.
+  await tab(page, "post_processing").click();
+  await expect(tab(page, "post_processing")).toHaveAttribute("aria-selected", "true");
+  for (const id of [URL_FIELD, MODEL, PROMPT]) {
+    await expect(field(page, id), id).toHaveAttribute("aria-invalid", "true");
+    await expect(field(page, id), id).toHaveAccessibleDescription(escapeRegExp(en("error.required")));
+  }
+  await expect(page.getByRole("alert")).toHaveCount(0);
   expect((await storedView(page)).settings.post_processing.enabled).toBe(false);
   expect(errors).toEqual([]);
 });

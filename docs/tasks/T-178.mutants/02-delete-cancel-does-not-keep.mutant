@@ -1,0 +1,10 @@
+guarantee: line 10 (T-095 r1#2): Esc on the delete confirmation closes it (no native close lag, 20 keyboard rounds)
+file: src/lib/local-models/BuiltinLocal.svelte
+added_by: test-writer
+test: pnpm e2e --workers=2 e2e/local-models.spec.ts -g "T-178 \(10\)"
+--- old
+        event.preventDefault();
+        keepModel();
+--- new
+        event.preventDefault();
+--- end

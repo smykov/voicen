@@ -1,0 +1,9 @@
+guarantee: line 6 (T-019 r2): after a close request with a dirty draft no element is :modal behind the discard prompt (shared expectNoModalBehindPrompt)
+file: src/lib/local-models/BuiltinLocal.svelte
+added_by: test-writer
+test: pnpm e2e --workers=2 e2e/local-models.spec.ts -g "the discard prompt wins"
+--- old
+  dismissOnDiscardPrompt(keepModel);
+--- new
+  void dismissOnDiscardPrompt;
+--- end

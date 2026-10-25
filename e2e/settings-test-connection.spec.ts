@@ -28,11 +28,13 @@ import type { Locator, Page } from "@playwright/test";
 import { expect, test } from "./support/boot";
 import {
   calls,
+  emit,
   emitted,
   firstRunView,
   holdTests,
   installTauriMock,
   listeners,
+  queueSaveOutcome,
   queueTestRejection,
   queueTestResult,
   releaseTest,
@@ -593,4 +595,52 @@ test("a new click clears the previous result; switching the engine keeps the sho
   await releaseTest(page);
   await expect(result(page)).toHaveText(RESULT_EN.timeout);
   expect((await requests(page)).map((r) => r.engine)).toEqual(["api", "local_server"]);
+});
+
+// ---- T-178 line 7 (T-013 r1#3): an invalid result does not outlive its highlights ------
+// A save start and a clean-draft rebuild both replace draft.errors, so a shown `invalid`
+// result ("Check the highlighted fields") is cleared by them. Other kinds keep decision #51.
+
+async function showInvalidResult(page: Page, options: { dirty: boolean }): Promise<void> {
+  await open(page, viewWith("api", { key: true }));
+  if (options.dirty) await field(page, "engine.api.base_url").fill("not a url (fake)");
+  await queueTestResult(page, testConnectionInvalidOffTab());
+  await testButton(page).click();
+  await expect(result(page).getByText(INVALID_EN, { exact: true })).toBeVisible();
+}
+
+for (const outcome of ["Saved", "Refused"] as const) {
+  test(`T-178 (7): after an invalid test result, a Save answered ${outcome} leaves no "${INVALID_EN}" text in the result region`, async ({ page }) => {
+    const errors = pageErrors(page);
+    await showInvalidResult(page, { dirty: true });
+    if (outcome === "Refused") {
+      await queueSaveOutcome(page, {
+        Refused: { errors: [{ field: "engine.api.base_url", code: "url.malformed" }], form_error: null },
+      });
+    }
+    await page.getByTestId("settings-save").click();
+    await expect.poll(async () => (await calls(page, "settings_save")).length).toBe(1);
+    await settle(page);
+
+    await expect(page.getByText(INVALID_EN)).toHaveCount(0);
+    expect(await resultText(page)).not.toContain(INVALID_EN);
+    if (outcome === "Refused") {
+      // The refusal's own highlight is the information now, on the control.
+      await expect(field(page, "engine.api.base_url")).toHaveAttribute("aria-invalid", "true");
+    }
+    expect(errors).toEqual([]);
+  });
+}
+
+test(`T-178 (7): after an invalid test result on a clean draft, a rebuilt view (settings://changed) leaves no "${INVALID_EN}" text in the result region`, async ({ page }) => {
+  const errors = pageErrors(page);
+  const view = viewWith("api", { key: true });
+  await showInvalidResult(page, { dirty: false });
+
+  await emit(page, "settings://changed", view);
+  await settle(page);
+
+  await expect(page.getByText(INVALID_EN)).toHaveCount(0);
+  expect(await resultText(page)).not.toContain(INVALID_EN);
+  expect(errors).toEqual([]);
 });

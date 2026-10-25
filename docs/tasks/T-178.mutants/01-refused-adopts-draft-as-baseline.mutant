@@ -1,0 +1,17 @@
+guarantee: line 2 (T-034 v1): the draft stays dirty after a Refused save (a close request still asks to discard)
+file: src/lib/settings/draft.ts
+added_by: test-writer
+test: pnpm e2e --workers=2 e2e/settings-autostart.spec.ts -g "failure branch: settings_save Refused"
+--- old
+  return {
+    baseline: draft.baseline,
+    settings: draft.settings,
+    keys: draft.keys,
+    errors: byField,
+--- new
+  return {
+    baseline: { ...draft.baseline, settings: structuredClone(draft.settings) },
+    settings: draft.settings,
+    keys: draft.keys,
+    errors: byField,
+--- end

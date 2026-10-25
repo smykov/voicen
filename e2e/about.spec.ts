@@ -32,6 +32,7 @@ import {
   type MockOptions,
   type SettingsView,
 } from "./support/tauriMock";
+import { expectNoModalBehindPrompt } from "./support/modals";
 
 const RU = JSON.parse(readFileSync(new URL("../i18n/ru.json", import.meta.url), "utf8")) as Record<string, string>;
 const EN = JSON.parse(readFileSync(new URL("../i18n/en.json", import.meta.url), "utf8")) as Record<string, string>;
@@ -365,6 +366,7 @@ test("the discard prompt wins: About open with a dirty draft, a close request cl
   await expect(prompt).toBeVisible();
   await expect(about).toBeHidden();
   await expect(prompt.getByTestId("settings-discard-keep")).toBeFocused();
+  await expectNoModalBehindPrompt(page);
 
   // The prompt is operable: Keep editing closes it and keeps the draft, nothing destroyed.
   await page.keyboard.press("Enter");

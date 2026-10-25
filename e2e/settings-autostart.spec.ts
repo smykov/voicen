@@ -20,7 +20,9 @@ import {
   emitted,
   firstRunView,
   installTauriMock,
+  listeners,
   queueSaveOutcome,
+  requestClose,
   storedView,
   type SaveRequest,
   type SettingsView,
@@ -152,6 +154,15 @@ test("failure branch: settings_save Refused with general.start_with_windows auto
   // The draft keeps the user's value (settings-ui.md U2), and Save can be pressed again.
   await expect(toggle).toBeChecked({ checked: true });
   await expect(page.getByTestId("settings-save")).toBeEnabled();
+
+  // T-178 (2): the draft is still dirty after the refusal, as the user meets it: a close
+  // request asks to discard instead of destroying the window (the baseline was not moved).
+  await expect
+    .poll(() => listeners(page, "tauri://close-requested"), { message: "the settings page listens to close requests" })
+    .toBeGreaterThan(0);
+  await requestClose(page);
+  await expect(page.getByRole("alertdialog")).toBeVisible();
+  expect(await calls(page, "plugin:window|destroy")).toEqual([]);
 
   // Nothing was saved and nothing announced.
   await expect(page.getByRole("status")).toHaveCount(0);

@@ -451,6 +451,31 @@ test("with a stored API key, Remove key then Save sends Clear and the key is no 
   await expect(field(page, "engine.api.key")).toHaveValue("");
 });
 
+// ---- T-178 line 1 (T-072 r1#3): a rendered hint is in the control's description ---------
+// fields.ts::describedBy promises it; HotkeyField's hint and KeyField's state hints must
+// be wired through hintId + describedBy(..., true).
+
+test("T-178 (1): the hotkey input's accessible description contains the settings.hotkey.hint text", async ({ page }) => {
+  await openSettings(page, firstRunView());
+  await tab(page, "recording").click();
+  const hotkey = field(page, "recording.hotkey");
+  await expect(hotkey).toHaveCount(1);
+  await expect(page.getByText(en("settings.hotkey.hint"))).toBeVisible();
+  await expect(hotkey).toHaveAccessibleDescription(escapeRegExp(en("settings.hotkey.hint")));
+});
+
+test("T-178 (1): the key input's accessible description contains settings.key.saved for a stored key and settings.key.cleared after Remove key", async ({ page }) => {
+  await openSettings(page, apiWithStoredKey());
+  const key = field(page, "engine.api.key");
+  await expect(page.getByText(en("settings.key.saved"))).toBeVisible();
+  await expect(key).toHaveAccessibleDescription(escapeRegExp(en("settings.key.saved")));
+
+  await page.getByRole("button", { name: en("settings.key.clear") }).click();
+  await expect(page.getByText(en("settings.key.cleared"))).toBeVisible();
+  await expect(key).toHaveAccessibleDescription(escapeRegExp(en("settings.key.cleared")));
+  await expect(key).not.toHaveAccessibleDescription(escapeRegExp(en("settings.key.saved")));
+});
+
 // ---- T-004 review r1 #9, #10 (Low) ----------------------------------------------------
 
 test("clearing the history size and typing a digit gives that digit, not a leading 0", async ({ page }) => {

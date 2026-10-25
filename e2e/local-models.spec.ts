@@ -68,6 +68,7 @@ import {
   type SaveRequest,
   type SettingsView,
 } from "./support/tauriMock";
+import { expectNoModalBehindPrompt, modalCount } from "./support/modals";
 
 type Lang = "en" | "ru";
 type Messages = Record<string, string>;
@@ -696,6 +697,32 @@ test("Keep in the delete confirmation sends nothing and leaves small downloaded 
   expect(errors).toEqual([]);
 });
 
+test("T-178 (10): 20 keyboard rounds of Enter on the focused Delete then Esc each show the confirmation (one :modal), then close it (no :modal) and send no local_model_delete (F-017: no native close lag)", async ({ page }) => {
+  const errors = pageErrors(page);
+  await openLoaded(page, localView("small"), { localModels: modelsWith("small", DOWNLOADED) });
+  const del = deleteButton(page, "small");
+  await expect(del).toBeEnabled();
+  expect(await modalCount(page)).toBe(0);
+
+  for (let round = 1; round <= 20; round++) {
+    const at = `round ${round}`;
+    await del.focus();
+    await expect(del, at).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(deleteDialog(page), `${at}: Enter on Delete shows the confirmation`).toBeVisible();
+    await expect.poll(() => modalCount(page), { message: `${at}: the confirmation is the one :modal` }).toBe(1);
+
+    await page.keyboard.press("Escape");
+    await expect(deleteDialog(page), `${at}: Esc closes the confirmation`).toHaveCount(0);
+    await expect.poll(() => modalCount(page), { message: `${at}: no :modal after Esc` }).toBe(0);
+    expect(await calls(page, "local_model_delete"), at).toEqual([]);
+  }
+
+  await expect(row(page, "small")).toHaveAttribute("data-state", "downloaded");
+  await expect(del).toBeEnabled();
+  expect(errors).toEqual([]);
+});
+
 test("Acceptance 1: confirming Delete on small sends local_model_delete {id: small} once, and the re-list shows small not downloaded with Download and not selectable; the selection and settings are untouched", async ({ page }) => {
   const errors = pageErrors(page);
   await openLoaded(page, localView("base"), { localModels: modelsIn({ base: DOWNLOADED, small: DOWNLOADED }) });
@@ -917,11 +944,6 @@ function deleteConfirmation(page: Page) {
   return page.getByTestId("local-model-delete-confirm");
 }
 
-/** How many elements are `:modal` (an open modal dialog, shown or hidden by CSS). */
-async function modalCount(page: Page): Promise<number> {
-  return page.evaluate(() => document.querySelectorAll(":modal").length);
-}
-
 async function settle(page: Page): Promise<void> {
   await page.evaluate(
     () => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))),
@@ -950,7 +972,7 @@ test("the discard prompt wins: delete confirmation open with a dirty draft, a cl
   const prompt = discardPrompt(page);
   await expect(prompt).toBeVisible();
   await expect(deleteConfirmation(page), "the delete confirmation is closed by the close request").toBeHidden();
-  await expect.poll(() => modalCount(page), { message: "no modal dialog is left open behind the prompt" }).toBe(0);
+  await expectNoModalBehindPrompt(page);
   await expect(prompt.getByTestId("settings-discard-keep")).toBeFocused();
 
   // Operable by pointer: a real hit test, which an inert or covered prompt fails.
