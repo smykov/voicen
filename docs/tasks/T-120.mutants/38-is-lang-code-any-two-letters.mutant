@@ -1,0 +1,8 @@
+guarantee: AC-5: one is_lang_code decides every language code (exactly the whisper list)
+file: crates/voicen-core/src/settings/mod.rs
+added_by: test-writer
+--- old
+    WHISPER_ISO_639_1.contains(&code)
+--- new
+    code.len() >= 2
+--- end

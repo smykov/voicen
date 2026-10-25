@@ -698,6 +698,28 @@ fn a_draft_cannot_overwrite_the_server_owned_fields() {
 }
 
 #[test]
+fn a_hand_edited_file_that_lists_the_current_root_does_not_make_a_duplicate() {
+    // I3: `earlier_roots` has no duplicates after an accepted save, even when the file
+    // on disk already lists the root in force (hand-edited). Bite: the old root pushed
+    // without the `contains` check.
+    let a = root("a");
+    let b = root("b");
+    let mut file = serde_json::to_value(defaults(OS)).expect("serializes");
+    file["calls"]["storage_root"] = json!(a);
+    file["calls"]["earlier_roots"] = json!([a]);
+    let world = World::with_settings(&file);
+    let (service, outcome) = world.load();
+    assert!(matches!(outcome, LoadOutcome::Loaded(_)), "{outcome:?}");
+    let mut d = draft(&service);
+    d.calls.storage_root = Some(b.clone());
+    expect_saved(service.save(req(d)));
+    let earlier = service.snapshot().calls.earlier_roots.clone();
+    no_duplicates(&earlier);
+    assert_eq!(earlier, vec![a]);
+    assert_eq!(world.stored().calls.earlier_roots, earlier);
+}
+
+#[test]
 fn a_root_that_became_writable_again_is_accepted_and_a_failed_try_leaves_the_list_alone() {
     // A refused root change records nothing in `earlier_roots` (the old root is still
     // the current one); the same root accepted later appends once. Bite: the append

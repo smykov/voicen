@@ -345,18 +345,9 @@ fn save_lines() -> Vec<SaveLine> {
         },
         SaveLine::Refused {
             errors: vec![
-                FieldError {
-                    field: FieldId::EngineApiBaseUrl,
-                    code: ErrorCode::UrlMalformed,
-                },
-                FieldError {
-                    field: FieldId::HistorySize,
-                    code: ErrorCode::HistorySizeRange,
-                },
-                FieldError {
-                    field: FieldId::RecordingHotkey,
-                    code: ErrorCode::HotkeyEscReserved,
-                },
+                FieldError::new(FieldId::EngineApiBaseUrl, ErrorCode::UrlMalformed),
+                FieldError::new(FieldId::HistorySize, ErrorCode::HistorySizeRange),
+                FieldError::new(FieldId::RecordingHotkey, ErrorCode::HotkeyEscReserved),
             ],
             form_error: None,
         },
@@ -369,10 +360,10 @@ fn save_lines() -> Vec<SaveLine> {
             form_error: Some(FormError::SettingsUnavailable),
         },
         SaveLine::Refused {
-            errors: vec![FieldError {
-                field: FieldId::EngineApiKey,
-                code: ErrorCode::KeyStoreFailed,
-            }],
+            errors: vec![FieldError::new(
+                FieldId::EngineApiKey,
+                ErrorCode::KeyStoreFailed,
+            )],
             form_error: Some(FormError::PartiallyRestored {
                 not_restored: vec![FieldId::GeneralStartWithWindows, FieldId::EngineApiKey],
             }),
@@ -502,10 +493,10 @@ fn every_event() -> Vec<LogEvent> {
         ConnectionTestResult::UnexpectedResponse,
         ConnectionTestResult::Invalid { errors: vec![] },
         ConnectionTestResult::Invalid {
-            errors: vec![FieldError {
-                field: FieldId::EngineApiBaseUrl,
-                code: ErrorCode::UrlMalformed,
-            }],
+            errors: vec![FieldError::new(
+                FieldId::EngineApiBaseUrl,
+                ErrorCode::UrlMalformed,
+            )],
         },
         ConnectionTestResult::KeyStoreUnavailable,
     ];

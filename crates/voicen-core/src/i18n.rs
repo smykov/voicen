@@ -1010,7 +1010,10 @@ mod tests {
             }
             for id in ["error.hotkey.equals_dictation", "error.storage.unwritable"] {
                 let text = own_text(&c, lang, id).expect("checked above");
-                assert!(!text.contains('{'), "{id} ({lang:?}) has a placeholder: {text}");
+                assert!(
+                    !text.contains('{'),
+                    "{id} ({lang:?}) has a placeholder: {text}"
+                );
             }
         }
     }

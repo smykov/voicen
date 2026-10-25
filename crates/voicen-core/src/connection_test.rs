@@ -379,10 +379,7 @@ fn from_failure(
         FailureReason::KeyStoreUnavailable => ConnectionTestResult::KeyStoreUnavailable,
         // The URL passed validation, so the engine cannot refuse it; kept total.
         FailureReason::EngineNotConfigured => ConnectionTestResult::Invalid {
-            errors: vec![FieldError {
-                field: url_field,
-                code: ErrorCode::UrlMalformed,
-            }],
+            errors: vec![FieldError::new(url_field, ErrorCode::UrlMalformed)],
         },
         // Not produced by an HTTP engine; kept total.
         FailureReason::ClipboardUnavailable

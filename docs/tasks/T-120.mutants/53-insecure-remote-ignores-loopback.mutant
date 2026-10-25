@@ -1,0 +1,9 @@
+guarantee: AC-6 (characterization): is_insecure_remote still treats loopback as secure
+file: crates/voicen-core/src/settings/url.rs
+added_by: test-writer
+--- old
+    parsed.scheme() == "http" && !loopback
+--- new
+    let _ = loopback;
+    parsed.scheme() == "http"
+--- end

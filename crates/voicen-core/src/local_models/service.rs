@@ -630,6 +630,7 @@ mod delete_tests {
             clock: Arc::new(FakeClock::at(
                 UNIX_EPOCH + Duration::from_secs(1_709_251_199),
             )),
+            call_roots: Arc::new(crate::settings::roots::FakeCallRoots::new()),
         };
         let (service, _) = SettingsService::load_or_init(deps, OS);
         let changes = service.subscribe();

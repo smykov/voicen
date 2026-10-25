@@ -1,0 +1,8 @@
+guarantee: AC-5: an unknown primary language is refused
+file: crates/voicen-core/src/settings/validate.rs
+added_by: test-writer
+--- old
+    if !is_lang_code(&s.calls.primary_language) {
+--- new
+    if false {
+--- end

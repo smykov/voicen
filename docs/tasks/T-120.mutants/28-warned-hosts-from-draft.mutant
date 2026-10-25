@@ -1,0 +1,8 @@
+guarantee: AC-4: warned_hosts is server-owned
+file: crates/voicen-core/src/settings/service.rs
+added_by: test-writer
+--- old
+    draft.warned_hosts = in_force.warned_hosts.clone();
+--- new
+    let _ = &in_force.warned_hosts;
+--- end

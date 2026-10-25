@@ -633,6 +633,7 @@ fn settings_deps(creds: Arc<FakeCredentialStore>) -> SettingsDeps {
         clock: Arc::new(FakeClock::at(
             UNIX_EPOCH + Duration::from_secs(1_709_251_199),
         )),
+        call_roots: Arc::new(voicen_core::settings::roots::FakeCallRoots::new()),
     }
 }
 

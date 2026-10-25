@@ -656,6 +656,7 @@ impl Rig {
                 clock: Arc::new(FakeClock::at(
                     UNIX_EPOCH + Duration::from_secs(1_709_251_199),
                 )),
+                call_roots: Arc::new(voicen_core::settings::roots::FakeCallRoots::new()),
             },
             OS,
         );
@@ -2624,6 +2625,7 @@ fn a_first_run_session_records_on_the_first_press_after_a_save() {
             clock: Arc::new(FakeClock::at(
                 UNIX_EPOCH + Duration::from_secs(1_709_251_199),
             )),
+            call_roots: Arc::new(voicen_core::settings::roots::FakeCallRoots::new()),
         },
         OS,
     );

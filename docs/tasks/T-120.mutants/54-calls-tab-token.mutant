@@ -1,0 +1,8 @@
+guarantee: AC-7: SettingsTab::Calls exists with token calls
+file: crates/voicen-core/src/settings/gate.rs
+added_by: test-writer
+--- old
+            SettingsTab::Calls => "calls",
+--- new
+            SettingsTab::Calls => "call",
+--- end

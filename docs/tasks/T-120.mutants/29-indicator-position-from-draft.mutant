@@ -1,0 +1,8 @@
+guarantee: AC-4: indicator_position is server-owned
+file: crates/voicen-core/src/settings/service.rs
+added_by: test-writer
+--- old
+    draft.indicator_position = in_force.indicator_position;
+--- new
+    let _ = in_force.indicator_position;
+--- end

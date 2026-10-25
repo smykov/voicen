@@ -1,0 +1,12 @@
+guarantee: AC-1: data-model default last_combination.record is true
+file: crates/voicen-core/src/settings/mod.rs
+added_by: test-writer
+--- old
+            last_combination: Toggles { record: true },
+            reminder: true,
+            primary_language: ui_language_code
+--- new
+            last_combination: Toggles { record: false },
+            reminder: true,
+            primary_language: ui_language_code
+--- end

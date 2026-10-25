@@ -1,0 +1,10 @@
+guarantee: AC-3: a chosen root is never created (missing is refused)
+file: crates/voicen-core/src/settings/roots.rs
+added_by: test-writer
+--- old
+        if root == self.default_root {
+            fs::create_dir_all
+--- new
+        if true {
+            fs::create_dir_all
+--- end

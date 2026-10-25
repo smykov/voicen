@@ -1,0 +1,8 @@
+guarantee: AC-2: a call hotkey grammar error is refused
+file: crates/voicen-core/src/settings/validate.rs
+added_by: test-writer
+--- old
+        Err(e) => refuse(FieldId::CallHotkey, hotkey_code(e)),
+--- new
+        Err(_) => {}
+--- end

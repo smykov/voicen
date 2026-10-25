@@ -1,7 +1,142 @@
-//! T-120 red tests for the call-storage-root port (`CallRoots`, `UnwritableReason`,
-//! `FsCallRoots`, `reason_of`; research R19, decisions #196, #198). Only the tests
-//! exist so far: the implementation is written above this module at the implement
-//! stage, and the doc comment of the file with it.
+//! The call storage root (spec 007 FR-002, FR-039; research R19; decisions #196,
+//! #198): the one write probe of a root, as a port the settings core owns.
+//!
+//! [`CallRoots::probe`] is called by `SettingsService::save` when the effective root
+//! changes, and (T-125/T-126) at every Record start; there is no second probe. A
+//! refusal is a closed [`UnwritableReason`], never a path or OS text.
+
+use std::fs::{self, OpenOptions};
+use std::io;
+use std::path::{Path, PathBuf};
+
+use serde::Serialize;
+
+/// The file the probe creates and deletes in a root (research R19).
+pub const WRITE_PROBE_FILE: &str = ".voicen-write-probe";
+
+/// Why a storage root cannot be written; on the wire as the snake_case word
+/// (`FieldError.reason`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnwritableReason {
+    /// The folder does not exist (a chosen root is never created).
+    Missing,
+    /// The path, or a part of it, is not a folder.
+    NotAFolder,
+    /// The path is not absolute.
+    Relative,
+    AccessDenied,
+    DiskFull,
+    /// Any other io error.
+    Other,
+}
+
+/// The storage-root port: the default root and the one write probe.
+pub trait CallRoots: Send + Sync {
+    /// The root in force when `calls.storage_root` is `None` (`<data_dir>/calls`).
+    fn default_root(&self) -> PathBuf;
+
+    /// `Ok` when `root` is an absolute, existing folder in which
+    /// `.voicen-write-probe` can be created and deleted.
+    fn probe(&self, root: &Path) -> Result<(), UnwritableReason>;
+}
+
+/// [`CallRoots`] on `std::fs`.
+///
+/// Probe order: a relative path is `relative` (the disk is not touched); the default
+/// root is created (`create_dir_all`, the app's own folder); any other root must
+/// exist (`missing`) and be a folder (`not_a_folder`) and is never created; then the
+/// probe file is created or truncated (not `create_new`, so a probe left by a crash
+/// does not block) and removed. Each io error goes through [`reason_of`].
+#[derive(Debug, Clone)]
+pub struct FsCallRoots {
+    default_root: PathBuf,
+}
+
+impl FsCallRoots {
+    pub fn new(default_root: PathBuf) -> FsCallRoots {
+        FsCallRoots { default_root }
+    }
+}
+
+impl CallRoots for FsCallRoots {
+    fn default_root(&self) -> PathBuf {
+        self.default_root.clone()
+    }
+
+    fn probe(&self, root: &Path) -> Result<(), UnwritableReason> {
+        if !root.is_absolute() {
+            return Err(UnwritableReason::Relative);
+        }
+        if root == self.default_root {
+            fs::create_dir_all(root).map_err(|e| reason_of(e.kind()))?;
+        }
+        let meta = fs::metadata(root).map_err(|e| reason_of(e.kind()))?;
+        if !meta.is_dir() {
+            return Err(UnwritableReason::NotAFolder);
+        }
+        let probe = root.join(WRITE_PROBE_FILE);
+        OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&probe)
+            .map_err(|e| reason_of(e.kind()))?;
+        fs::remove_file(&probe).map_err(|e| reason_of(e.kind()))
+    }
+}
+
+/// A [`CallRoots`] for tests that do not exercise the root: every probe passes and
+/// the disk is never touched. The default root is a fixed absolute fake path.
+#[cfg(any(test, feature = "test-fakes"))]
+#[derive(Debug, Clone)]
+pub struct FakeCallRoots {
+    default_root: PathBuf,
+}
+
+#[cfg(any(test, feature = "test-fakes"))]
+impl FakeCallRoots {
+    pub fn new() -> FakeCallRoots {
+        let root = if cfg!(windows) {
+            r"C:\voicen-fake-data\calls"
+        } else {
+            "/voicen-fake-data/calls"
+        };
+        FakeCallRoots {
+            default_root: PathBuf::from(root),
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-fakes"))]
+impl Default for FakeCallRoots {
+    fn default() -> FakeCallRoots {
+        FakeCallRoots::new()
+    }
+}
+
+#[cfg(any(test, feature = "test-fakes"))]
+impl CallRoots for FakeCallRoots {
+    fn default_root(&self) -> PathBuf {
+        self.default_root.clone()
+    }
+
+    fn probe(&self, _root: &Path) -> Result<(), UnwritableReason> {
+        Ok(())
+    }
+}
+
+/// The one mapping of a probe's io error to its reason (as
+/// `diag::log::LogsUnwritableReason`).
+pub fn reason_of(kind: io::ErrorKind) -> UnwritableReason {
+    match kind {
+        io::ErrorKind::NotFound => UnwritableReason::Missing,
+        io::ErrorKind::PermissionDenied => UnwritableReason::AccessDenied,
+        io::ErrorKind::StorageFull | io::ErrorKind::QuotaExceeded => UnwritableReason::DiskFull,
+        io::ErrorKind::NotADirectory => UnwritableReason::NotAFolder,
+        _ => UnwritableReason::Other,
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -89,7 +224,11 @@ mod tests {
         let file = dir.path().join("a-file");
         fs::write(&file, b"x").expect("write");
         assert_eq!(fs_roots.probe(&file), Err(UnwritableReason::NotAFolder));
-        assert_eq!(fs::read(&file).expect("read"), b"x", "the file is untouched");
+        assert_eq!(
+            fs::read(&file).expect("read"),
+            b"x",
+            "the file is untouched"
+        );
     }
 
     #[test]
@@ -122,7 +261,11 @@ mod tests {
         // the cwd, or is created, and the probe passes).
         let dir = TempDir::new();
         let (fs_roots, _) = roots(&dir);
-        for relative in ["voicen-t120-relative-root", "voicen-t120-a/voicen-t120-b", "."] {
+        for relative in [
+            "voicen-t120-relative-root",
+            "voicen-t120-a/voicen-t120-b",
+            ".",
+        ] {
             assert_eq!(
                 fs_roots.probe(Path::new(relative)),
                 Err(UnwritableReason::Relative),
@@ -164,6 +307,22 @@ mod tests {
         let got = fs_roots.probe(&chosen);
         assert!(got.is_err(), "{got:?}");
         assert!(chosen.join(PROBE).is_dir(), "the probe path was replaced");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_create_error_is_refused_even_when_the_delete_would_succeed() {
+        // `.voicen-write-probe` is a symlink to itself: opening it fails (ELOOP) while
+        // unlinking a symlink succeeds, so only the create error can refuse. (The
+        // folder case above fails both steps and cannot tell them apart.) Bite: the
+        // create error swallowed (`.ok()`), leaving the delete as the only check.
+        let dir = TempDir::new();
+        let (fs_roots, _) = roots(&dir);
+        let chosen = dir.path().join("chosen");
+        fs::create_dir(&chosen).expect("create");
+        std::os::unix::fs::symlink(PROBE, chosen.join(PROBE)).expect("symlink");
+        let got = fs_roots.probe(&chosen);
+        assert!(got.is_err(), "{got:?}");
     }
 
     #[test]

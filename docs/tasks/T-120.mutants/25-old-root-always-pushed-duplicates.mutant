@@ -1,0 +1,8 @@
+guarantee: AC-4: earlier_roots has no duplicates
+file: crates/voicen-core/src/settings/service.rs
+added_by: test-writer
+--- old
+            if !earlier.contains(&old_root) {
+--- new
+            if true {
+--- end

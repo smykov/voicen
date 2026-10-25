@@ -1,0 +1,8 @@
+guarantee: AC-3/4: an empty storage_root is the default root (one encoding)
+file: crates/voicen-core/src/settings/service.rs
+added_by: test-writer
+--- old
+        .is_some_and(|root| root.as_os_str().is_empty())
+--- new
+        .is_some_and(|_| false)
+--- end

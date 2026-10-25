@@ -1,0 +1,10 @@
+guarantee: AC-1: data-model default calls.reminder is true
+file: crates/voicen-core/src/settings/mod.rs
+added_by: test-writer
+--- old
+            reminder: true,
+            primary_language
+--- new
+            reminder: false,
+            primary_language
+--- end

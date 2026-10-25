@@ -1,0 +1,8 @@
+guarantee: AC-5: language code match is exact
+file: crates/voicen-core/src/settings/mod.rs
+added_by: test-writer
+--- old
+    WHISPER_ISO_639_1.contains(&code)
+--- new
+    WHISPER_ISO_639_1.contains(&code.to_ascii_lowercase().as_str())
+--- end

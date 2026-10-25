@@ -1,0 +1,10 @@
+guarantee: AC-3: a refused root touches nothing (probe before the hotkey prepare)
+file: crates/voicen-core/src/settings/service.rs
+added_by: test-writer
+--- old
+            if let Err(reason) = self.deps.call_roots.probe(&new_root) {
+                return refused(vec![FieldError::storage_unwritable(reason)], None);
+            }
+--- new
+            let late_probe = self.deps.call_roots.probe(&new_root);
+--- end

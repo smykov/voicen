@@ -37,6 +37,21 @@ export interface Settings {
   };
   start_with_windows: boolean;
   ui_language: UiLanguage;
+  /**
+   * `voicen_core::settings::CallSettings` (T-120). `last_combination`, `earlier_roots`,
+   * `warned_hosts` and `indicator_position` are server-owned: a save keeps the values in
+   * force whatever the window sends. `storage_root` null = the default root.
+   */
+  calls: {
+    hotkey: string;
+    last_combination: { record: boolean };
+    reminder: boolean;
+    primary_language: string;
+    storage_root: string | null;
+    earlier_roots: string[];
+    warned_hosts: string[];
+    indicator_position: { x: number; y: number } | null;
+  };
 }
 
 export type KeySlot = "transcription_api" | "local_server" | "post_processing";

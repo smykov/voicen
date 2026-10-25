@@ -1,0 +1,8 @@
+guarantee: AC-2: the equality refusal has code hotkey.equals_dictation
+file: crates/voicen-core/src/settings/validate.rs
+added_by: test-writer
+--- old
+            refuse(FieldId::CallHotkey, ErrorCode::HotkeyEqualsDictation)
+--- new
+            refuse(FieldId::CallHotkey, ErrorCode::HotkeyUnavailable)
+--- end

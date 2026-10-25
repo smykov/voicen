@@ -1,0 +1,8 @@
+guarantee: AC-3: the refusal carries the probe's own reason
+file: crates/voicen-core/src/settings/service.rs
+added_by: test-writer
+--- old
+FieldError::storage_unwritable(reason)], None);
+--- new
+FieldError::storage_unwritable(crate::settings::roots::UnwritableReason::Other)], None);
+--- end

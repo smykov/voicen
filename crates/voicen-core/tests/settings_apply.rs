@@ -17,8 +17,9 @@ use voicen_core::secrets::{FakeCredentialStore, KeyEdit, KeyEdits, Secret};
 use voicen_core::settings::file::{FakeSettingsFile, FsSettingsFile, SettingsFile};
 use voicen_core::settings::service::{SaveOutcome, SaveRequest, SettingsDeps, SettingsService};
 use voicen_core::settings::{
-    defaults, ApiSettings, BuiltinLocalSettings, EngineKind, ErrorCode, FieldError, FieldId,
-    HistorySettings, LoadOutcome, LocalServerSettings, Microphone, Mode, Settings, TimeoutSettings,
+    defaults, ApiSettings, BuiltinLocalSettings, CallSettings, EngineKind, ErrorCode, FieldError,
+    FieldId, HistorySettings, LoadOutcome, LocalServerSettings, Microphone, Mode, Settings,
+    TimeoutSettings, Toggles,
 };
 use voicen_core::test_support::TempDir;
 
@@ -34,6 +35,7 @@ fn deps(file: Arc<dyn SettingsFile>, creds: Arc<FakeCredentialStore>) -> Setting
         clock: Arc::new(FakeClock::at(
             UNIX_EPOCH + Duration::from_secs(1_709_251_199),
         )),
+        call_roots: Arc::new(voicen_core::settings::roots::FakeCallRoots::new()),
     }
 }
 
@@ -91,6 +93,19 @@ fn sample() -> Settings {
             local_server_s: 90,
             post_processing_s: 20,
             builtin_local_s: 150,
+        },
+        // T-120: the user-set call fields differ from the defaults; the server-owned
+        // ones (taken from the snapshot by a save) and the root (a change is probed)
+        // keep theirs.
+        calls: CallSettings {
+            hotkey: "Ctrl+Shift+F10".into(),
+            last_combination: Toggles { record: true },
+            reminder: false,
+            primary_language: "de".into(),
+            storage_root: None,
+            earlier_roots: Vec::new(),
+            warned_hosts: Vec::new(),
+            indicator_position: None,
         },
     }
 }
@@ -203,10 +218,10 @@ fn refused_save_sends_nothing() {
         SaveOutcome::Refused { errors, form_error } => {
             assert_eq!(
                 errors,
-                vec![FieldError {
-                    field: FieldId::HistorySize,
-                    code: ErrorCode::HistorySizeRange,
-                }]
+                vec![FieldError::new(
+                    FieldId::HistorySize,
+                    ErrorCode::HistorySizeRange
+                )]
             );
             assert_eq!(form_error, None);
         }

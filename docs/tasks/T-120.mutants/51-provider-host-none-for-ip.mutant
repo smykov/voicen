@@ -1,0 +1,10 @@
+guarantee: AC-6: an IP address that is not loopback is a host
+file: crates/voicen-core/src/settings/url.rs
+added_by: test-writer
+--- old
+    if is_loopback_host(&host) {
+        return None;
+--- new
+    if is_loopback_host(&host) || matches!(host, url::Host::Ipv4(_)) {
+        return None;
+--- end

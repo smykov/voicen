@@ -1,0 +1,8 @@
+guarantee: AC-1: load_or_init goes through parse_file
+file: crates/voicen-core/src/settings/service.rs
+added_by: test-writer
+--- old
+            Ok(Some(bytes)) => match parse_file(&bytes) {
+--- new
+            Ok(Some(bytes)) => match serde_json::from_slice::<Settings>(&bytes) {
+--- end

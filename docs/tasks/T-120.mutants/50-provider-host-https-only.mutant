@@ -1,0 +1,13 @@
+guarantee: AC-6: a non-loopback host is a provider host whatever the scheme
+file: crates/voicen-core/src/settings/url.rs
+added_by: test-writer
+--- old
+    let host = parsed.host()?;
+    if is_loopback_host
+--- new
+    let host = parsed.host()?;
+    if parsed.scheme() != "https" {
+        return None;
+    }
+    if is_loopback_host
+--- end

@@ -106,6 +106,7 @@ fn deps(file: Arc<FakeSettingsFile>, creds: Arc<FakeCredentialStore>) -> Setting
         clock: Arc::new(FakeClock::at(
             UNIX_EPOCH + Duration::from_secs(1_709_251_199),
         )),
+        call_roots: Arc::new(voicen_core::settings::roots::FakeCallRoots::new()),
     }
 }
 
@@ -1159,10 +1160,10 @@ fn malformed_url_with_typed_key_is_exactly_the_url_error() {
     assert_eq!(
         got,
         ConnectionTestResult::Invalid {
-            errors: vec![FieldError {
-                field: FieldId::EngineApiBaseUrl,
-                code: ErrorCode::UrlMalformed,
-            }]
+            errors: vec![FieldError::new(
+                FieldId::EngineApiBaseUrl,
+                ErrorCode::UrlMalformed
+            )]
         }
     );
 }

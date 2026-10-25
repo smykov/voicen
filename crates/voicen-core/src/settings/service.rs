@@ -3,16 +3,19 @@
 //! R-4; decisions #19, #22, #23 N5, #30, #33; contracts/core-traits.md#settingsservice).
 
 use std::io;
+use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc, Mutex, PoisonError, RwLock};
 
 use serde::{Deserialize, Serialize};
 
 use super::file::SettingsFile;
 use super::hotkey::parse_hotkey;
+use super::roots::CallRoots;
 use super::url::{check_base_url, is_insecure_remote, normalize_base_url};
 use super::validate::{validate, KeyEditsWithPresence};
 use super::{
-    defaults, EngineKind, ErrorCode, FieldError, FieldId, LoadOutcome, Settings, SCHEMA_VERSION,
+    defaults, parse_file, CallSettings, EngineKind, ErrorCode, FieldError, FieldId, LoadOutcome,
+    Settings, SCHEMA_VERSION,
 };
 use crate::autostart::{Autostart, ReconcileAction};
 use crate::clock::{utc_compact, Clock};
@@ -40,6 +43,9 @@ pub struct SettingsDeps {
     pub hotkeys: Arc<dyn HotkeyRegistrar>,
     pub local_models: Arc<dyn DownloadedModels>,
     pub clock: Arc<dyn Clock>,
+    /// The call storage root (T-120): its default and the one write probe, run by a
+    /// save that changes the effective root.
+    pub call_roots: Arc<dyn CallRoots>,
 }
 
 /// A save from the settings window: the whole draft plus one edit per key slot.
@@ -295,7 +301,7 @@ impl SettingsService {
         let (outcome, write_defaults) = match deps.file.read() {
             Err(_) => (LoadOutcome::Unavailable(defaults(os_language)), false),
             Ok(None) => (LoadOutcome::FirstRun(defaults(os_language)), true),
-            Ok(Some(bytes)) => match serde_json::from_slice::<Settings>(&bytes) {
+            Ok(Some(bytes)) => match parse_file(&bytes) {
                 Ok(settings) => (LoadOutcome::Loaded(settings), false),
                 Err(_) => match deps.file.move_aside(&utc_compact(deps.clock.now())) {
                     Ok(backup_file_name) => (
@@ -373,8 +379,11 @@ impl SettingsService {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
 
-        // (1) Normalize before validate and store.
-        let settings = normalize(req.settings);
+        // (1) Normalize before validate and store; the server-owned call fields come
+        // from the snapshot in force, never from the draft (T-120).
+        let in_force = self.snapshot();
+        let mut settings = normalize(req.settings);
+        keep_server_owned(&mut settings.calls, &in_force.calls);
 
         // (2) The old keys: kept for the undo, and the presence `validate` needs.
         let mut old: Vec<(KeySlot, Option<Secret>)> = Vec::with_capacity(3);
@@ -401,6 +410,24 @@ impl SettingsService {
             return refused(errors, None);
         }
 
+        // (3b) The call storage root (T-120, research R19): probed only when the
+        // effective root changes (an unchanged root on an unplugged drive must not
+        // block an unrelated save), before any side effect. Accepted: the old root
+        // joins `earlier_roots` (once), the new one leaves it.
+        let default_root = self.deps.call_roots.default_root();
+        let old_root = effective_root(&in_force.calls, &default_root);
+        let new_root = effective_root(&settings.calls, &default_root);
+        if new_root != old_root {
+            if let Err(reason) = self.deps.call_roots.probe(&new_root) {
+                return refused(vec![FieldError::storage_unwritable(reason)], None);
+            }
+            let earlier = &mut settings.calls.earlier_roots;
+            if !earlier.contains(&old_root) {
+                earlier.push(old_root);
+            }
+            earlier.retain(|root| *root != new_root);
+        }
+
         // (4) Hotkey (T-055, R-3 step 2): only when the hotkey text differs from the
         // snapshot in force (an unchanged one is never re-registered, T032). The new
         // one is registered next to the old; a failure refuses before anything else
@@ -413,10 +440,10 @@ impl SettingsService {
                 Some(prepared) => Some(prepared),
                 None => {
                     return refused(
-                        vec![FieldError {
-                            field: FieldId::RecordingHotkey,
-                            code: ErrorCode::HotkeyUnavailable,
-                        }],
+                        vec![FieldError::new(
+                            FieldId::RecordingHotkey,
+                            ErrorCode::HotkeyUnavailable,
+                        )],
                         None,
                     )
                 }
@@ -439,10 +466,10 @@ impl SettingsService {
             if self.deps.autostart.set(new_start).is_err() {
                 abort(prepared);
                 return refused(
-                    vec![FieldError {
-                        field: FieldId::GeneralStartWithWindows,
-                        code: ErrorCode::AutostartFailed,
-                    }],
+                    vec![FieldError::new(
+                        FieldId::GeneralStartWithWindows,
+                        ErrorCode::AutostartFailed,
+                    )],
                     None,
                 );
             }
@@ -678,10 +705,18 @@ impl LoadState {
 
 /// Spec 004 data-model "normalize before store": every base URL through
 /// [`normalize_base_url`] and every model name trimmed, selected engine or not
-/// and valid or not; `schema_version` set to the current one. The hotkey,
-/// `speech_language`, the prompt and the microphone are kept as entered.
+/// and valid or not; `schema_version` set to the current one; an empty
+/// `calls.storage_root` becomes `None` (one encoding of the default root). The
+/// hotkeys, the language codes, the prompt and the microphone are kept as entered.
 pub(crate) fn normalize(mut s: Settings) -> Settings {
     s.schema_version = SCHEMA_VERSION;
+    if s.calls
+        .storage_root
+        .as_ref()
+        .is_some_and(|root| root.as_os_str().is_empty())
+    {
+        s.calls.storage_root = None;
+    }
     for url in [
         &mut s.api.base_url,
         &mut s.local_server.base_url,
@@ -724,10 +759,24 @@ fn key_field(slot: KeySlot) -> FieldId {
 }
 
 fn key_store_failed(slot: KeySlot) -> FieldError {
-    FieldError {
-        field: key_field(slot),
-        code: ErrorCode::KeyStoreFailed,
-    }
+    FieldError::new(key_field(slot), ErrorCode::KeyStoreFailed)
+}
+
+/// The fields of `calls` only the app writes (T-120): a save keeps the values in
+/// force whatever the draft says.
+fn keep_server_owned(draft: &mut CallSettings, in_force: &CallSettings) {
+    draft.last_combination = in_force.last_combination;
+    draft.earlier_roots = in_force.earlier_roots.clone();
+    draft.warned_hosts = in_force.warned_hosts.clone();
+    draft.indicator_position = in_force.indicator_position;
+}
+
+/// The root in force for `calls`: the chosen one, or the default.
+fn effective_root(calls: &CallSettings, default_root: &Path) -> PathBuf {
+    calls
+        .storage_root
+        .clone()
+        .unwrap_or_else(|| default_root.to_path_buf())
 }
 
 fn partially_restored(not_restored: Vec<FieldId>) -> FormError {
@@ -829,6 +878,7 @@ mod tests {
                 hotkeys: self.hotkeys.clone(),
                 local_models: Arc::new(FakeDownloadedModels::new(&["base"])),
                 clock: Arc::new(FakeClock::at(t0())),
+                call_roots: Arc::new(crate::settings::roots::FakeCallRoots::new()),
             }
         }
 
@@ -846,6 +896,7 @@ mod tests {
             hotkeys: Arc::new(FakeHotkeyRegistrar::new()),
             local_models: Arc::new(FakeDownloadedModels::new(&["base"])),
             clock: Arc::new(FakeClock::at(t0())),
+            call_roots: Arc::new(crate::settings::roots::FakeCallRoots::new()),
         }
     }
 
@@ -943,7 +994,7 @@ mod tests {
     }
 
     fn field_error(field: FieldId, code: ErrorCode) -> FieldError {
-        FieldError { field, code }
+        FieldError::new(field, code)
     }
 
     // ---- load_or_init -------------------------------------------------------
@@ -3726,10 +3777,10 @@ mod tests {
             (
                 "invalid",
                 R::Invalid {
-                    errors: vec![FieldError {
-                        field: FieldId::EngineApiBaseUrl,
-                        code: ErrorCode::UrlMalformed,
-                    }],
+                    errors: vec![FieldError::new(
+                        FieldId::EngineApiBaseUrl,
+                        ErrorCode::UrlMalformed,
+                    )],
                 },
             ),
             ("key_store_unavailable", R::KeyStoreUnavailable),
@@ -3808,14 +3859,8 @@ mod tests {
             serde_json::from_str(E2E_WIRE_FIXTURE).expect("settings-wire.json is valid JSON");
         let result = R::Invalid {
             errors: vec![
-                FieldError {
-                    field: FieldId::EngineApiBaseUrl,
-                    code: ErrorCode::UrlMalformed,
-                },
-                FieldError {
-                    field: FieldId::TimeoutsConnect,
-                    code: ErrorCode::TimeoutRange,
-                },
+                FieldError::new(FieldId::EngineApiBaseUrl, ErrorCode::UrlMalformed),
+                FieldError::new(FieldId::TimeoutsConnect, ErrorCode::TimeoutRange),
             ],
         };
         let core = serde_json::to_value(&result).expect("ConnectionTestResult serializes");

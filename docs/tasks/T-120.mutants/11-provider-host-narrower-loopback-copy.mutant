@@ -1,0 +1,10 @@
+guarantee: AC-6: one loopback test decides provider_host and is_insecure_remote
+file: crates/voicen-core/src/settings/url.rs
+added_by: test-writer
+--- old
+    if is_loopback_host(&host) {
+        return None;
+--- new
+    if matches!(host, url::Host::Domain("localhost")) {
+        return None;
+--- end

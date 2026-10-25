@@ -1,0 +1,8 @@
+guarantee: AC-3: an unwritable root refuses the whole save
+file: crates/voicen-core/src/settings/service.rs
+added_by: test-writer
+--- old
+                return refused(vec![FieldError::storage_unwritable(reason)], None);
+--- new
+                let _ = reason;
+--- end

@@ -53,7 +53,7 @@ interface IndicatorState { recording: boolean; reminderVisible: boolean; reminde
 
 Paths cross the wire only as opaque `root` strings that Rust returned in `calls_list`. Every command checks that `root` is the current or a remembered earlier root and that `id` is a folder name of the call-id grammar. Anything else is `notFound`, never a filesystem access (P-009).
 
-Settings commands are unchanged: the `calls` section is part of the existing settings wire (`get_settings` / `save_settings`, settings-wire fixture extended). Save errors add `FieldId`s `callHotkey` (equal to the dictation hotkey, or a registration conflict), `storageRoot` (`unwritable{reason}`), `primaryLanguage` (unknown).
+Settings commands are unchanged: the `calls` section is part of the existing settings wire (`get_settings` / `save_settings`, settings-wire fixture extended). Save errors add `FieldId`s `calls.hotkey` (code `hotkey.equals_dictation`; a registration conflict stays `hotkey.unavailable`), `calls.reminder`, `calls.primary_language` (unknown: `language.unsupported`), `calls.storage_root` (code `storage.unwritable`). `FieldError` gains an optional snake_case `reason`, present only for `storage.unwritable`, one of `missing`, `not_a_folder`, `relative`, `access_denied`, `disk_full`, `other`; omitted otherwise (decision #196, T-120).
 
 ## Events (Rust → UI)
 

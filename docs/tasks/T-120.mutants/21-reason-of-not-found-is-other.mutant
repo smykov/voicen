@@ -1,0 +1,8 @@
+guarantee: AC-3: io NotFound maps to missing
+file: crates/voicen-core/src/settings/roots.rs
+added_by: test-writer
+--- old
+        io::ErrorKind::NotFound => UnwritableReason::Missing,
+--- new
+        io::ErrorKind::NotFound => UnwritableReason::Other,
+--- end

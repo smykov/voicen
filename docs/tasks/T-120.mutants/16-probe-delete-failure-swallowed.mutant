@@ -1,0 +1,10 @@
+guarantee: AC-3: a root where the probe cannot be deleted is unwritable
+file: crates/voicen-core/src/settings/roots.rs
+added_by: test-writer
+equivalent: not distinguishable on the Linux gate: tests run as root in Docker, so an unlink that fails after a create that succeeds cannot be arranged; the delete-failure refusal is pinned at the service level through the fake CallRoots (an_unwritable_root_is_refused_..., six reasons) - residual risk, FsCallRoots' own delete branch is unpinned
+--- old
+        fs::remove_file(&probe).map_err(|e| reason_of(e.kind()))
+--- new
+        let _ = fs::remove_file(&probe);
+        Ok(())
+--- end

@@ -1,0 +1,8 @@
+guarantee: AC-6: a host is never logged (Debug does not print it)
+file: crates/voicen-core/src/settings/url.rs
+added_by: test-writer
+--- old
+        f.write_str("ProviderHost(..)")
+--- new
+        write!(f, "ProviderHost({})", self.0)
+--- end

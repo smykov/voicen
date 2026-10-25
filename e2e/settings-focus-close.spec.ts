@@ -483,6 +483,16 @@ const NON_DEFAULT: Settings = {
   },
   start_with_windows: true,
   ui_language: "ru",
+  calls: {
+    hotkey: "Ctrl+Shift+F10",
+    last_combination: { record: false },
+    reminder: false,
+    primary_language: "de",
+    storage_root: "D:\\Fake\\Calls",
+    earlier_roots: ["D:\\Fake\\OldCalls"],
+    warned_hosts: ["stt.example.com"],
+    indicator_position: { x: 120, y: 80 },
+  },
 };
 
 type Json = null | boolean | number | string | Json[] | { [key: string]: Json };

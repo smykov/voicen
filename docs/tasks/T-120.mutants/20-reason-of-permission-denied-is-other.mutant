@@ -1,0 +1,8 @@
+guarantee: AC-3: io PermissionDenied maps to access_denied
+file: crates/voicen-core/src/settings/roots.rs
+added_by: test-writer
+--- old
+        io::ErrorKind::PermissionDenied => UnwritableReason::AccessDenied,
+--- new
+        io::ErrorKind::PermissionDenied => UnwritableReason::Other,
+--- end

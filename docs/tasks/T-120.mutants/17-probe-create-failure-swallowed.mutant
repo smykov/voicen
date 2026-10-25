@@ -1,0 +1,11 @@
+guarantee: AC-3: a root where the probe cannot be created is unwritable
+file: crates/voicen-core/src/settings/roots.rs
+added_by: test-writer
+--- old
+            .open(&probe)
+            .map_err(|e| reason_of(e.kind()))?;
+--- new
+            .open(&probe)
+            .map_err(|e| reason_of(e.kind()))
+            .ok();
+--- end

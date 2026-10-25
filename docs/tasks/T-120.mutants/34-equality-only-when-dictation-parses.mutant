@@ -1,0 +1,8 @@
+guarantee: AC-2: equality refused from either side
+file: crates/voicen-core/src/settings/validate.rs
+added_by: test-writer
+--- old
+        Ok(call) if dictation_hotkey == Ok(call) => {
+--- new
+        Ok(call) if dictation_hotkey == Ok(call) && s.calls.hotkey != "Ctrl+Alt+R" => {
+--- end

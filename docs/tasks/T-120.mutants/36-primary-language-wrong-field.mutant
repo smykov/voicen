@@ -1,0 +1,8 @@
+guarantee: AC-5: refused on PrimaryLanguage
+file: crates/voicen-core/src/settings/validate.rs
+added_by: test-writer
+--- old
+        refuse(FieldId::PrimaryLanguage, ErrorCode::LanguageUnsupported);
+--- new
+        refuse(FieldId::EngineSpeechLanguage, ErrorCode::LanguageUnsupported);
+--- end

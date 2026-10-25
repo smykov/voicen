@@ -1,0 +1,8 @@
+guarantee: AC-4: last_combination is server-owned
+file: crates/voicen-core/src/settings/service.rs
+added_by: test-writer
+--- old
+    draft.last_combination = in_force.last_combination;
+--- new
+    let _ = in_force.last_combination;
+--- end

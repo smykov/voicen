@@ -1,0 +1,8 @@
+guarantee: AC-4: A->B->A keeps no duplicate; the current root never in earlier_roots
+file: crates/voicen-core/src/settings/service.rs
+added_by: test-writer
+--- old
+            earlier.retain(|root| *root != new_root);
+--- new
+
+--- end

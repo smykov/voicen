@@ -45,22 +45,19 @@ pub fn validate(s: &PostProcessingSettings) -> Vec<FieldError> {
         return errors;
     }
     if let Err(code) = base_url_rule(&s.base_url) {
-        errors.push(FieldError {
-            field: FieldId::PostProcessingBaseUrl,
-            code,
-        });
+        errors.push(FieldError::new(FieldId::PostProcessingBaseUrl, code));
     }
     if s.model.trim().is_empty() {
-        errors.push(FieldError {
-            field: FieldId::PostProcessingModel,
-            code: ErrorCode::Required,
-        });
+        errors.push(FieldError::new(
+            FieldId::PostProcessingModel,
+            ErrorCode::Required,
+        ));
     }
     if s.prompt.trim().is_empty() {
-        errors.push(FieldError {
-            field: FieldId::PostProcessingPrompt,
-            code: ErrorCode::Required,
-        });
+        errors.push(FieldError::new(
+            FieldId::PostProcessingPrompt,
+            ErrorCode::Required,
+        ));
     }
     errors
 }
@@ -114,7 +111,7 @@ mod tests {
     }
 
     fn err(field: FieldId, code: ErrorCode) -> FieldError {
-        FieldError { field, code }
+        FieldError::new(field, code)
     }
 
     #[test]

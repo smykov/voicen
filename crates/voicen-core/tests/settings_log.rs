@@ -58,6 +58,7 @@ fn deps(file: Arc<FakeSettingsFile>, autostart: Arc<FakeAutostart>) -> SettingsD
         clock: Arc::new(FakeClock::at(
             UNIX_EPOCH + Duration::from_secs(1_791_115_200),
         )),
+        call_roots: Arc::new(voicen_core::settings::roots::FakeCallRoots::new()),
     }
 }
 
@@ -225,13 +226,13 @@ fn a_refused_outcome_lists_field_ids_and_codes_in_order() {
     };
     assert_eq!(form_error, &None);
     assert!(
-        errors.contains(&FieldError {
-            field: FieldId::EngineApiBaseUrl,
-            code: ErrorCode::UrlCredentials
-        }) && errors.contains(&FieldError {
-            field: FieldId::HistorySize,
-            code: ErrorCode::HistorySizeRange
-        }),
+        errors.contains(&FieldError::new(
+            FieldId::EngineApiBaseUrl,
+            ErrorCode::UrlCredentials
+        )) && errors.contains(&FieldError::new(
+            FieldId::HistorySize,
+            ErrorCode::HistorySizeRange
+        )),
         "premise: {errors:?}"
     );
 
@@ -323,10 +324,10 @@ fn form_errors_map_to_failed_or_refused_with_their_kind() {
     // The undo failure is built directly: the fakes reach it only through a
     // multi-step failure sequence that settings tests already pin.
     let partial = SaveOutcome::Refused {
-        errors: vec![FieldError {
-            field: FieldId::PostProcessingKey,
-            code: ErrorCode::KeyStoreFailed,
-        }],
+        errors: vec![FieldError::new(
+            FieldId::PostProcessingKey,
+            ErrorCode::KeyStoreFailed,
+        )],
         form_error: Some(FormError::PartiallyRestored {
             not_restored: vec![FieldId::GeneralStartWithWindows, FieldId::EngineApiKey],
         }),
@@ -428,10 +429,10 @@ fn every_test_connection_result_maps_to_its_line_without_host() {
         ),
         (
             ConnectionTestResult::Invalid {
-                errors: vec![FieldError {
-                    field: FieldId::EngineApiBaseUrl,
-                    code: ErrorCode::UrlMalformed,
-                }],
+                errors: vec![FieldError::new(
+                    FieldId::EngineApiBaseUrl,
+                    ErrorCode::UrlMalformed,
+                )],
             },
             vec![("result", s("invalid"))],
         ),

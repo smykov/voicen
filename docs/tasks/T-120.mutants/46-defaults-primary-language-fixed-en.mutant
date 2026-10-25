@@ -1,0 +1,8 @@
+guarantee: AC-1: first run takes primary_language from the resolved ui language
+file: crates/voicen-core/src/settings/mod.rs
+added_by: test-writer
+--- old
+            primary_language: ui_language_code(ui_language).to_string(),
+--- new
+            primary_language: "en".to_string(),
+--- end

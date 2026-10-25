@@ -1,0 +1,8 @@
+guarantee: AC-1: calls:{} without primary_language is filled from ui_language
+file: crates/voicen-core/src/settings/mod.rs
+added_by: test-writer
+--- old
+        .is_some_and(|calls| calls.primary_language.is_some());
+--- new
+        .is_some_and(|_| true);
+--- end

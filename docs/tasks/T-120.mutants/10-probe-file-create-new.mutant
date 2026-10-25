@@ -1,0 +1,9 @@
+guarantee: AC-3: a stale probe file does not block the probe
+file: crates/voicen-core/src/settings/roots.rs
+added_by: test-writer
+--- old
+            .create(true)
+            .truncate(true)
+--- new
+            .create_new(true)
+--- end

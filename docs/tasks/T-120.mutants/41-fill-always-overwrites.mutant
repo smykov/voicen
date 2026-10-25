@@ -1,0 +1,11 @@
+guarantee: AC-1: an explicit primary_language in the file is kept
+file: crates/voicen-core/src/settings/mod.rs
+added_by: test-writer
+--- old
+    if !has_primary_language {
+        settings.calls
+--- new
+    let _ = has_primary_language;
+    if true {
+        settings.calls
+--- end

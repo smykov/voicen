@@ -1,0 +1,8 @@
+guarantee: AC-4: a new root appends the old one to earlier_roots
+file: crates/voicen-core/src/settings/service.rs
+added_by: test-writer
+--- old
+            if !earlier.contains(&old_root) {
+--- new
+            if false {
+--- end

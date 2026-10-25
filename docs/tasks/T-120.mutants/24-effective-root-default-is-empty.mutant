@@ -1,0 +1,8 @@
+guarantee: AC-4: the default root is a root like any other (written out or left empty)
+file: crates/voicen-core/src/settings/service.rs
+added_by: test-writer
+--- old
+        .unwrap_or_else(|| default_root.to_path_buf())
+--- new
+        .unwrap_or_default()
+--- end

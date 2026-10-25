@@ -1,0 +1,10 @@
+guarantee: AC-3: the UnwritableReason is in the error's reason on the wire
+file: crates/voicen-core/src/settings/mod.rs
+added_by: test-writer
+--- old
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason:
+--- new
+    #[serde(skip)]
+    pub reason:
+--- end

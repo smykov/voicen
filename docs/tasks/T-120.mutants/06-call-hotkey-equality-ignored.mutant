@@ -1,0 +1,8 @@
+guarantee: AC-2: a call hotkey equal to the dictation hotkey is refused from either side
+file: crates/voicen-core/src/settings/validate.rs
+added_by: test-writer
+--- old
+        Ok(call) if dictation_hotkey == Ok(call) => {
+--- new
+        Ok(call) if false && dictation_hotkey == Ok(call) => {
+--- end

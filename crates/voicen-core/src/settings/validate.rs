@@ -5,11 +5,16 @@
 //! history size, the timeouts (decision #99) and post-processing (003's
 //! [`crate::post_process::settings::validate`], T-021) are checked for every
 //! engine. `hotkey.unavailable`, `autostart.failed` and `key.store_failed` come
-//! from the save steps (T-010, T-014, T-032), not from here.
+//! from the save steps (T-010, T-014, T-032), not from here; so does
+//! `storage.unwritable` (the root probe of T-120 is a side effect). The `calls`
+//! section (spec 007 FR-004, FR-038) is checked for every engine: the call hotkey's
+//! grammar and its inequality to the dictation hotkey (compared parsed, over the
+//! whole draft, so a change of either side is refused, always on `calls.hotkey`),
+//! and the primary language.
 
 use super::hotkey::{parse_hotkey, HotkeyError};
 use super::url::{check_base_url, UrlError};
-use super::{EngineKind, ErrorCode, FieldError, FieldId, Settings, WHISPER_ISO_639_1};
+use super::{is_lang_code, EngineKind, ErrorCode, FieldError, FieldId, Settings};
 use crate::models::DownloadedModels;
 use crate::secrets::{KeyEdit, KeyEdits, KeyPresence, KeySlot};
 use crate::timeouts::TimeoutRole;
@@ -44,7 +49,7 @@ pub fn validate(
     models: &dyn DownloadedModels,
 ) -> Vec<FieldError> {
     let mut errors = Vec::new();
-    let mut refuse = |field, code| errors.push(FieldError { field, code });
+    let mut refuse = |field, code| errors.push(FieldError::new(field, code));
 
     match s.engine {
         EngineKind::None => {}
@@ -81,7 +86,7 @@ pub fn validate(
 
     // Not a field of one engine, so checked whatever engine is selected.
     if let Some(code) = s.speech_language.as_deref() {
-        if !WHISPER_ISO_639_1.contains(&code) {
+        if !is_lang_code(code) {
             refuse(
                 FieldId::EngineSpeechLanguage,
                 ErrorCode::LanguageUnsupported,
@@ -89,8 +94,22 @@ pub fn validate(
         }
     }
 
-    if let Err(e) = parse_hotkey(&s.hotkey) {
+    let dictation_hotkey = parse_hotkey(&s.hotkey);
+    if let Err(e) = dictation_hotkey {
         refuse(FieldId::RecordingHotkey, hotkey_code(e));
+    }
+
+    // The call hotkey: its own grammar, then never the dictation hotkey (FR-004).
+    match parse_hotkey(&s.calls.hotkey) {
+        Err(e) => refuse(FieldId::CallHotkey, hotkey_code(e)),
+        Ok(call) if dictation_hotkey == Ok(call) => {
+            refuse(FieldId::CallHotkey, ErrorCode::HotkeyEqualsDictation)
+        }
+        Ok(_) => {}
+    }
+
+    if !is_lang_code(&s.calls.primary_language) {
+        refuse(FieldId::PrimaryLanguage, ErrorCode::LanguageUnsupported);
     }
 
     if !HISTORY_SIZE.contains(&s.history.size) {
@@ -145,7 +164,7 @@ fn hotkey_code(e: HotkeyError) -> ErrorCode {
 #[cfg(test)]
 mod tests {
     use super::super::fixtures::sample;
-    use super::super::{EngineKind, ErrorCode, FieldId};
+    use super::super::{EngineKind, ErrorCode, FieldId, WHISPER_ISO_639_1};
     use super::*;
     use crate::models::FakeDownloadedModels;
     use crate::secrets::{KeyEdit, Secret};
@@ -417,10 +436,10 @@ mod tests {
             s.hotkey = raw.into();
             assert_eq!(
                 run(&s, &edits, presence, &[]),
-                vec![FieldError {
-                    field: FieldId::RecordingHotkey,
-                    code: ErrorCode::HotkeyInvalid,
-                }],
+                vec![FieldError::new(
+                    FieldId::RecordingHotkey,
+                    ErrorCode::HotkeyInvalid
+                )],
                 "{raw:?}"
             );
         }
@@ -510,18 +529,9 @@ mod tests {
             assert_eq!(
                 run(&s, &no_keys(), api_key_stored(), &["base"]),
                 vec![
-                    FieldError {
-                        field: FieldId::PostProcessingBaseUrl,
-                        code: ErrorCode::Required
-                    },
-                    FieldError {
-                        field: FieldId::PostProcessingModel,
-                        code: ErrorCode::Required
-                    },
-                    FieldError {
-                        field: FieldId::PostProcessingPrompt,
-                        code: ErrorCode::Required
-                    },
+                    FieldError::new(FieldId::PostProcessingBaseUrl, ErrorCode::Required),
+                    FieldError::new(FieldId::PostProcessingModel, ErrorCode::Required),
+                    FieldError::new(FieldId::PostProcessingPrompt, ErrorCode::Required),
                 ],
                 "{engine:?}"
             );
@@ -709,10 +719,10 @@ mod tests {
                 };
                 assert_eq!(
                     run(&s, &edits, presence, &[]),
-                    vec![FieldError {
-                        field: FieldId::EngineApiKey,
-                        code: ErrorCode::KeyRequired,
-                    }],
+                    vec![FieldError::new(
+                        FieldId::EngineApiKey,
+                        ErrorCode::KeyRequired
+                    )],
                     "{raw:?}, stored = {}",
                     presence.transcription_api
                 );
@@ -856,10 +866,10 @@ mod tests {
                 s.speech_language = Some(raw.into());
                 assert_eq!(
                     run(&s, &no_keys(), api_key_stored(), &["base"]),
-                    vec![FieldError {
-                        field: SPEECH_LANGUAGE,
-                        code: ErrorCode::LanguageUnsupported,
-                    }],
+                    vec![FieldError::new(
+                        SPEECH_LANGUAGE,
+                        ErrorCode::LanguageUnsupported
+                    )],
                     "{engine:?} {raw:?}"
                 );
             }
@@ -1005,21 +1015,35 @@ mod tests {
         // Invariant I4: one membership test. For every candidate, the speech-language
         // rule, the primary-language rule and `is_lang_code` agree. Bite: either rule
         // on its own copy of the test (a code accepted by one and refused by the other).
-        let mut candidates: Vec<String> = crate::settings::WHISPER_ISO_639_1.iter().map(|c| c.to_string()).collect();
+        let mut candidates: Vec<String> = crate::settings::WHISPER_ISO_639_1
+            .iter()
+            .map(|c| c.to_string())
+            .collect();
         candidates.extend(
-            ["", "xx", "EN", "en ", " en", "jw", "haw", "yue", "eng", "e", "en-US", "ру"]
-                .map(String::from),
+            [
+                "", "xx", "EN", "en ", " en", "jw", "haw", "yue", "eng", "e", "en-US", "ру",
+            ]
+            .map(String::from),
         );
         for code in candidates {
             let mut s = sample(EngineKind::Api);
             s.speech_language = Some(code.clone());
             s.calls.primary_language = code.clone();
             let errors = pairs(&api_run(&s));
-            let speech_refused = errors.contains(&("engine.speech_language", "language.unsupported"));
+            let speech_refused =
+                errors.contains(&("engine.speech_language", "language.unsupported"));
             let primary_refused =
                 errors.contains(&("calls.primary_language", "language.unsupported"));
-            assert_eq!(speech_refused, !crate::settings::is_lang_code(&code), "{code:?}");
-            assert_eq!(primary_refused, !crate::settings::is_lang_code(&code), "{code:?}");
+            assert_eq!(
+                speech_refused,
+                !crate::settings::is_lang_code(&code),
+                "{code:?}"
+            );
+            assert_eq!(
+                primary_refused,
+                !crate::settings::is_lang_code(&code),
+                "{code:?}"
+            );
         }
     }
 

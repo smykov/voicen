@@ -70,13 +70,54 @@ pub fn is_insecure_remote(url: &NormalizedUrl) -> bool {
     };
     // The `url` crate lower-cases the scheme and a special URL's domain, and
     // decodes IPv4 shorthand (`127.1`, `0x7f.1`, `2130706433`) into `Ipv4`.
-    let loopback = match parsed.host() {
-        Some(url::Host::Domain(domain)) => domain == "localhost",
-        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
-        Some(url::Host::Ipv6(ip)) => ip == std::net::Ipv6Addr::LOCALHOST,
-        None => false,
-    };
+    let loopback = parsed.host().is_some_and(|host| is_loopback_host(&host));
     parsed.scheme() == "http" && !loopback
+}
+
+/// The one loopback test (T-120, invariant I4): `Domain("localhost")`, `Ipv4` in
+/// 127.0.0.0/8, `Ipv6` == `::1`, over a host parsed by the `url` crate (which
+/// lower-cases a special URL's domain and decodes IPv4 shorthand). Used by
+/// [`is_insecure_remote`] and [`provider_host`]; `localhost.`, `foo.localhost`,
+/// `::ffff:127.0.0.1` and the unspecified addresses are not loopback.
+pub fn is_loopback_host(host: &url::Host<&str>) -> bool {
+    match host {
+        url::Host::Domain(domain) => *domain == "localhost",
+        url::Host::Ipv4(ip) => ip.is_loopback(),
+        url::Host::Ipv6(ip) => *ip == std::net::Ipv6Addr::LOCALHOST,
+    }
+}
+
+/// A non-loopback host a base URL sends audio or text to (spec 007 FR-031): the
+/// `url` crate's host text, lower case, without port or path. It has no `Display`
+/// and its `Debug` does not print the value, so a host never reaches a log line by
+/// accident; [`ProviderHost::as_str`] is the one way to read it (the notice and
+/// `calls.warned_hosts`).
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct ProviderHost(String);
+
+impl ProviderHost {
+    /// The host text (`api.openai.com`, `192.168.1.5`).
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for ProviderHost {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ProviderHost(..)")
+    }
+}
+
+/// The provider-host rule (spec 007 FR-031): `None` for a loopback host
+/// ([`is_loopback_host`]), the host otherwise, whatever the scheme.
+pub fn provider_host(url: &NormalizedUrl) -> Option<ProviderHost> {
+    // As in `is_insecure_remote`: a `NormalizedUrl` always parses.
+    let parsed = url::Url::parse(url.as_str()).ok()?;
+    let host = parsed.host()?;
+    if is_loopback_host(&host) {
+        return None;
+    }
+    parsed.host_str().map(|text| ProviderHost(text.to_string()))
 }
 
 #[cfg(test)]
@@ -263,7 +304,10 @@ mod tests {
         let mut wrong = Vec::new();
         for raw in LOOPBACK {
             if let Some(host) = provider_host(&normalized(raw)) {
-                wrong.push(format!("{raw:?}: expected none, got a host ({})", host.as_str()));
+                wrong.push(format!(
+                    "{raw:?}: expected none, got a host ({})",
+                    host.as_str()
+                ));
             }
         }
         for raw in INSECURE.iter().chain(SECURE_REMOTE.iter()) {
@@ -311,8 +355,10 @@ mod tests {
         impl<T: ?Sized + Display> Probe<T> {
             const IS: bool = true;
         }
+        // black_box: the probe is a constant by design (it asks the type system);
+        // the assertion still runs at test time.
         assert!(
-            !Probe::<ProviderHost>::IS,
+            !std::hint::black_box(Probe::<ProviderHost>::IS),
             "ProviderHost implements Display"
         );
         fn debug_of<T: Debug>(value: &T) -> String {

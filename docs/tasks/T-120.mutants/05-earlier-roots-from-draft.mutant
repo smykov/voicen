@@ -1,0 +1,8 @@
+guarantee: AC-4: earlier_roots is server-owned (a draft cannot overwrite it)
+file: crates/voicen-core/src/settings/service.rs
+added_by: test-writer
+--- old
+    draft.earlier_roots = in_force.earlier_roots.clone();
+--- new
+    let _ = &in_force.earlier_roots;
+--- end

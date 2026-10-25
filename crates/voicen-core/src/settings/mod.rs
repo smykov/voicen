@@ -8,7 +8,11 @@
 //!
 //! A container default cannot know the OS language, so a file without
 //! `ui_language` loads the language of `defaults(None)` (`en`); release-1 files
-//! always contain the field.
+//! always contain the field. For the same reason the container default of
+//! `calls.primary_language` is `en`; the one exception to "every missing value comes
+//! from `defaults`" is [`parse_file`], the load path of the settings file, which
+//! fills a missing `calls.primary_language` from the file's `ui_language` (decision
+//! #196 (1), spec 007 FR-038).
 
 pub mod file;
 pub mod gate;
@@ -17,6 +21,8 @@ pub mod roots;
 pub mod service;
 pub mod url;
 pub mod validate;
+
+use std::path::PathBuf;
 
 use serde::{Deserialize, Deserializer, Serialize};
 
@@ -41,6 +47,42 @@ pub const WHISPER_ISO_639_1: [&str; 97] = [
     "ht", "ps", "tk", "nn", "mt", "sa", "lb", "my", "bo", "tl", "mg", "as", "tt", "ln", "ha", "ba",
     "su",
 ];
+
+/// Whether `code` is a language code of [`WHISPER_ISO_639_1`]: the one membership
+/// test of every language code (`speech_language`, `calls.primary_language`,
+/// [`LangCode::parse`]). Exact match: case-sensitive, no trimming.
+pub fn is_lang_code(code: &str) -> bool {
+    WHISPER_ISO_639_1.contains(&code)
+}
+
+/// A language code of [`WHISPER_ISO_639_1`] (decision #196 (4)); serialized as the
+/// bare code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct LangCode(&'static str);
+
+impl LangCode {
+    /// `Some` exactly when [`is_lang_code`] accepts `code`.
+    pub fn parse(code: &str) -> Option<LangCode> {
+        if !is_lang_code(code) {
+            return None;
+        }
+        // The list's own `'static` text of the accepted code.
+        WHISPER_ISO_639_1
+            .iter()
+            .find(|known| **known == code)
+            .map(|known| LangCode(known))
+    }
+
+    pub fn as_str(self) -> &'static str {
+        self.0
+    }
+}
+
+impl Serialize for LangCode {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.0)
+    }
+}
 
 /// Selected transcription engine; serialized `none` | `api` | `builtin_local` | `local_server`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -108,6 +150,48 @@ pub struct TimeoutSettings {
     pub builtin_local_s: u32,
 }
 
+/// The toggles of the call widget (spec 007 data-model "Toggles").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default = "default_toggles")]
+pub struct Toggles {
+    pub record: bool,
+}
+
+/// Where the call indicator was last placed (screen pixels). Both fields are
+/// required: the default is no position (`null`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IndicatorPosition {
+    pub x: i32,
+    pub y: i32,
+}
+
+/// The call-mode settings (spec 007 data-model "CallSettings").
+///
+/// `hotkey` and `primary_language` are stored as text, like `Settings.hotkey` and
+/// `speech_language`, so a bad hand-edited value is a field error at save, not a
+/// whole-file reset. `last_combination`, `earlier_roots`, `warned_hosts` and
+/// `indicator_position` are server-owned: a save takes them from the snapshot in
+/// force, never from the draft.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default = "default_calls")]
+pub struct CallSettings {
+    /// Canonical hotkey text (`Ctrl+Alt+R`); checked by `validate`, never equal to
+    /// the dictation hotkey.
+    pub hotkey: String,
+    pub last_combination: Toggles,
+    pub reminder: bool,
+    /// One of [`WHISPER_ISO_639_1`]; checked by `validate`. `null` in a file reads
+    /// as the default (and [`parse_file`] fills it from `ui_language`).
+    #[serde(deserialize_with = "deserialize_primary_language")]
+    pub primary_language: String,
+    /// `None` = the default root (`<data_dir>/calls`, [`roots::CallRoots::default_root`]).
+    pub storage_root: Option<PathBuf>,
+    /// Every effective root ever replaced, no duplicates, never the current one.
+    pub earlier_roots: Vec<PathBuf>,
+    pub warned_hosts: Vec<String>,
+    pub indicator_position: Option<IndicatorPosition>,
+}
+
 /// Every persisted setting (data-model.md › Settings). No key field.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default = "default_settings")]
@@ -132,6 +216,9 @@ pub struct Settings {
     pub ui_language: UiLanguage,
     /// Checked by `validate`; clamped when converted for a job.
     pub timeouts: TimeoutSettings,
+    /// Call mode (spec 007); a file without it loads `defaults(None).calls`, with the
+    /// primary language filled by [`parse_file`].
+    pub calls: CallSettings,
 }
 
 fn deserialize_schema_version<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u32, D::Error> {
@@ -146,6 +233,7 @@ fn deserialize_schema_version<'de, D: Deserializer<'de>>(deserializer: D) -> Res
 
 /// The one source of defaults (FR-21 v4, spec 004 FR-005).
 pub fn defaults(os_tag: Option<&str>) -> Settings {
+    let ui_language = resolve_ui_language(os_tag);
     Settings {
         schema_version: SCHEMA_VERSION,
         engine: EngineKind::None,
@@ -169,9 +257,56 @@ pub fn defaults(os_tag: Option<&str>) -> Settings {
             size: 20,
         },
         start_with_windows: false,
-        ui_language: resolve_ui_language(os_tag),
+        ui_language,
         timeouts: crate::timeouts::default_settings(),
+        calls: CallSettings {
+            hotkey: "Ctrl+Alt+R".to_string(),
+            last_combination: Toggles { record: true },
+            reminder: true,
+            primary_language: ui_language_code(ui_language).to_string(),
+            storage_root: None,
+            earlier_roots: Vec::new(),
+            warned_hosts: Vec::new(),
+            indicator_position: None,
+        },
     }
+}
+
+/// The language code of a UI language (both are in [`WHISPER_ISO_639_1`]).
+fn ui_language_code(language: UiLanguage) -> &'static str {
+    match language {
+        UiLanguage::En => "en",
+        UiLanguage::Ru => "ru",
+    }
+}
+
+/// The one parse of a settings file (`SettingsService::load_or_init`): the plain
+/// `Settings` parse, then, when the file has no `calls.primary_language` (absent or
+/// `null`), the primary language from the file's `ui_language` (decision #196 (1)).
+/// An unreadable file stays an error. A save request is never filled: the window
+/// sends the whole view.
+pub fn parse_file(bytes: &[u8]) -> Result<Settings, serde_json::Error> {
+    let mut settings: Settings = serde_json::from_slice(bytes)?;
+    let presence: FilePresence = serde_json::from_slice(bytes)?;
+    let has_primary_language = presence
+        .calls
+        .is_some_and(|calls| calls.primary_language.is_some());
+    if !has_primary_language {
+        settings.calls.primary_language = ui_language_code(settings.ui_language).to_string();
+    }
+    Ok(settings)
+}
+
+/// What [`parse_file`] needs to know of the file beyond `Settings`: whether
+/// `calls.primary_language` is there with a value.
+#[derive(Deserialize)]
+struct FilePresence {
+    calls: Option<CallsPresence>,
+}
+
+#[derive(Deserialize)]
+struct CallsPresence {
+    primary_language: Option<serde::de::IgnoredAny>,
 }
 
 // Container defaults for serde: each one is a part of `defaults(None)`, so there is
@@ -198,6 +333,23 @@ fn default_history() -> HistorySettings {
 
 fn default_timeouts() -> TimeoutSettings {
     defaults(None).timeouts
+}
+
+fn default_calls() -> CallSettings {
+    defaults(None).calls
+}
+
+/// `null` counts as missing: the default of `defaults(None)`; any other non-string
+/// value stays an error.
+fn deserialize_primary_language<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<String, D::Error> {
+    let value = Option::<String>::deserialize(deserializer)?;
+    Ok(value.unwrap_or_else(|| defaults(None).calls.primary_language))
+}
+
+fn default_toggles() -> Toggles {
+    defaults(None).calls.last_combination
 }
 
 /// A field as named in validation errors, the UI highlight and log lines.
@@ -234,6 +386,11 @@ pub enum FieldId {
     TimeoutsLocalServer,
     TimeoutsPostProcessing,
     TimeoutsBuiltinLocal,
+    CallHotkey,
+    /// The reminder toggle (never refused).
+    CallReminder,
+    PrimaryLanguage,
+    StorageRoot,
 }
 
 impl FieldId {
@@ -267,6 +424,10 @@ impl FieldId {
             FieldId::TimeoutsLocalServer => "timeouts.local_server",
             FieldId::TimeoutsPostProcessing => "timeouts.post_processing",
             FieldId::TimeoutsBuiltinLocal => "timeouts.builtin_local",
+            FieldId::CallHotkey => "calls.hotkey",
+            FieldId::CallReminder => "calls.reminder",
+            FieldId::PrimaryLanguage => "calls.primary_language",
+            FieldId::StorageRoot => "calls.storage_root",
         }
     }
 }
@@ -280,7 +441,7 @@ impl FieldId {
 /// part of the type); `field_ids_match_data_model` checks that no entry is listed twice.
 #[cfg(test)]
 impl FieldId {
-    pub(crate) const ALL: [FieldId; 27] = [
+    pub(crate) const ALL: [FieldId; 31] = [
         FieldId::EngineKind,
         FieldId::EngineApiBaseUrl,
         FieldId::EngineApiModel,
@@ -308,6 +469,10 @@ impl FieldId {
         FieldId::TimeoutsLocalServer,
         FieldId::TimeoutsPostProcessing,
         FieldId::TimeoutsBuiltinLocal,
+        FieldId::CallHotkey,
+        FieldId::CallReminder,
+        FieldId::PrimaryLanguage,
+        FieldId::StorageRoot,
     ];
 }
 
@@ -342,6 +507,11 @@ pub enum ErrorCode {
     /// A timeouts field outside its bounds (decision #99); the range is in the
     /// field's hint, the error has no parameters.
     TimeoutRange,
+    /// The call hotkey equals the dictation hotkey (spec 007 FR-004).
+    HotkeyEqualsDictation,
+    /// The storage root failed the write probe; the error carries an
+    /// [`roots::UnwritableReason`].
+    StorageUnwritable,
 }
 
 impl ErrorCode {
@@ -363,6 +533,8 @@ impl ErrorCode {
             ErrorCode::UrlCredentials => "url.credentials",
             ErrorCode::LanguageUnsupported => "language.unsupported",
             ErrorCode::TimeoutRange => "timeout.range",
+            ErrorCode::HotkeyEqualsDictation => "hotkey.equals_dictation",
+            ErrorCode::StorageUnwritable => "storage.unwritable",
         }
     }
 }
@@ -376,7 +548,7 @@ impl ErrorCode {
 /// no entry is listed twice.
 #[cfg(test)]
 impl ErrorCode {
-    pub(crate) const ALL: [ErrorCode; 15] = [
+    pub(crate) const ALL: [ErrorCode; 17] = [
         ErrorCode::Required,
         ErrorCode::UrlMalformed,
         ErrorCode::KeyRequired,
@@ -392,6 +564,8 @@ impl ErrorCode {
         ErrorCode::UrlCredentials,
         ErrorCode::LanguageUnsupported,
         ErrorCode::TimeoutRange,
+        ErrorCode::HotkeyEqualsDictation,
+        ErrorCode::StorageUnwritable,
     ];
 }
 
@@ -402,12 +576,37 @@ impl Serialize for ErrorCode {
     }
 }
 
-/// On the wire: `{"field": "<FieldId::as_str>", "code": "<ErrorCode::as_str>"}`; the
-/// UI shows message `error.<code>` on the field.
+/// On the wire: `{"field": "<FieldId::as_str>", "code": "<ErrorCode::as_str>"}`, plus
+/// `"reason": "<UnwritableReason>"` for `storage.unwritable` only; the UI shows
+/// message `error.<code>` on the field. The log line names `field:code` only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 pub struct FieldError {
     pub field: FieldId,
     pub code: ErrorCode,
+    /// Set only by [`FieldError::storage_unwritable`] (a closed reason, never a path
+    /// or OS text).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<roots::UnwritableReason>,
+}
+
+impl FieldError {
+    /// An error without a reason.
+    pub fn new(field: FieldId, code: ErrorCode) -> FieldError {
+        FieldError {
+            field,
+            code,
+            reason: None,
+        }
+    }
+
+    /// `calls.storage_root` / `storage.unwritable` with its reason.
+    pub fn storage_unwritable(reason: roots::UnwritableReason) -> FieldError {
+        FieldError {
+            field: FieldId::StorageRoot,
+            code: ErrorCode::StorageUnwritable,
+            reason: Some(reason),
+        }
+    }
 }
 
 /// How startup found the settings (data-model.md › LoadOutcome). Produced by T-032's
@@ -485,7 +684,7 @@ pub(crate) mod fixtures {
     /// `primary_language` differ from the defaults.
     pub(crate) fn sample_calls() -> CallSettings {
         CallSettings {
-            hotkey: "Ctrl+Shift+F10".into(),
+            hotkey: "Ctrl+Shift+F11".into(),
             last_combination: Toggles { record: true },
             reminder: false,
             primary_language: "de".into(),
@@ -1204,19 +1403,34 @@ mod tests {
             (r#"{"ui_language":"ru"}"#, "ru"),
             (r#"{"ui_language":"ru","calls":{}}"#, "ru"),
             (r#"{"calls":{},"ui_language":"ru"}"#, "ru"),
-            (r#"{"ui_language":"ru","calls":{"primary_language":null}}"#, "ru"),
+            (
+                r#"{"ui_language":"ru","calls":{"primary_language":null}}"#,
+                "ru",
+            ),
             (r#"{"ui_language":"ru","calls":{"reminder":false}}"#, "ru"),
             (r#"{"ui_language":"en"}"#, "en"),
             (r#"{}"#, "en"),
             // An explicit value is kept, valid or not (validate decides at save).
-            (r#"{"ui_language":"ru","calls":{"primary_language":"en"}}"#, "en"),
-            (r#"{"ui_language":"en","calls":{"primary_language":"de"}}"#, "de"),
-            (r#"{"ui_language":"ru","calls":{"primary_language":"xx"}}"#, "xx"),
-            (r#"{"ui_language":"ru","calls":{"primary_language":""}}"#, ""),
+            (
+                r#"{"ui_language":"ru","calls":{"primary_language":"en"}}"#,
+                "en",
+            ),
+            (
+                r#"{"ui_language":"en","calls":{"primary_language":"de"}}"#,
+                "de",
+            ),
+            (
+                r#"{"ui_language":"ru","calls":{"primary_language":"xx"}}"#,
+                "xx",
+            ),
+            (
+                r#"{"ui_language":"ru","calls":{"primary_language":""}}"#,
+                "",
+            ),
         ];
         for (text, language) in cases {
-            let loaded = parse_file(text.as_bytes())
-                .unwrap_or_else(|e| panic!("{text} must load: {e}"));
+            let loaded =
+                parse_file(text.as_bytes()).unwrap_or_else(|e| panic!("{text} must load: {e}"));
             assert_eq!(loaded.calls.primary_language, language, "{text}");
             // Nothing but primary_language differs from the plain parse.
             let mut plain = parse(text);
@@ -1263,6 +1477,14 @@ mod tests {
             parse(r#"{"ui_language":"ru"}"#).calls.primary_language,
             "en"
         );
+        // An explicit `null` counts as missing: the `defaults(None)` value, not a
+        // second literal (bite: `deserialize_primary_language`'s fallback changed).
+        assert_eq!(
+            parse(r#"{"ui_language":"ru","calls":{"primary_language":null}}"#)
+                .calls
+                .primary_language,
+            defaults(None).calls.primary_language
+        );
     }
 
     #[test]
@@ -1280,8 +1502,22 @@ mod tests {
             );
         }
         for bad in [
-            "", " ", "EN", "En", "en ", " en", "en\n", "eng", "e", "jw", "haw", "yue", "xx",
-            "ру", "русский", "en-US",
+            "",
+            " ",
+            "EN",
+            "En",
+            "en ",
+            " en",
+            "en\n",
+            "eng",
+            "e",
+            "jw",
+            "haw",
+            "yue",
+            "xx",
+            "ру",
+            "русский",
+            "en-US",
         ] {
             assert!(!is_lang_code(bad), "{bad:?}");
             assert!(LangCode::parse(bad).is_none(), "{bad:?}");

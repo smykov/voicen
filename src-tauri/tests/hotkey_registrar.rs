@@ -136,10 +136,10 @@ impl Started {
 
 fn hotkey_unavailable() -> SaveOutcome {
     SaveOutcome::Refused {
-        errors: vec![FieldError {
-            field: FieldId::RecordingHotkey,
-            code: ErrorCode::HotkeyUnavailable,
-        }],
+        errors: vec![FieldError::new(
+            FieldId::RecordingHotkey,
+            ErrorCode::HotkeyUnavailable,
+        )],
         form_error: None,
     }
 }

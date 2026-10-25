@@ -1,0 +1,10 @@
+guarantee: AC-3: an unchanged unwritable root does not block an unrelated save (probe only on a changed effective root)
+file: crates/voicen-core/src/settings/service.rs
+added_by: test-writer
+--- old
+        if new_root != old_root {
+            if let Err(reason)
+--- new
+        if true {
+            if let Err(reason)
+--- end

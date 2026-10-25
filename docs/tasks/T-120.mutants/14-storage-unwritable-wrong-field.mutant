@@ -1,0 +1,10 @@
+guarantee: AC-3: refused on FieldId::StorageRoot
+file: crates/voicen-core/src/settings/mod.rs
+added_by: test-writer
+--- old
+            field: FieldId::StorageRoot,
+            code: ErrorCode::StorageUnwritable,
+--- new
+            field: FieldId::CallHotkey,
+            code: ErrorCode::StorageUnwritable,
+--- end

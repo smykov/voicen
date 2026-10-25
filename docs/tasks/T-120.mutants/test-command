@@ -1,0 +1,2 @@
+# T-120: the task's tests only (settings seam, lib + call_settings + settings_apply + settings_log).
+cargo test -j 2 -p voicen-core --lib --test call_settings --test settings_apply --test settings_log

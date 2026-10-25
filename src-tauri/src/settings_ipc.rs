@@ -38,6 +38,7 @@ use voicen_core::local_models::store::ModelStore;
 use voicen_core::platform::AudioSource;
 use voicen_core::secrets::CredentialStore;
 use voicen_core::settings::file::FsSettingsFile;
+use voicen_core::settings::roots::FsCallRoots;
 use voicen_core::settings::service::{
     SaveOutcome, SaveRequest, SettingsDeps, SettingsService, SettingsView,
 };
@@ -94,6 +95,7 @@ pub fn load_settings_with(
     log: &Log,
 ) -> (Arc<SettingsService>, LoadOutcome) {
     let deps = SettingsDeps {
+        call_roots: Arc::new(FsCallRoots::new(data_dir.join("calls"))),
         file: Arc::new(FsSettingsFile::new(data_dir)),
         credentials,
         autostart,

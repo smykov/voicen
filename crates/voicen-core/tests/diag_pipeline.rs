@@ -220,6 +220,7 @@ fn settings_service(stored: &Settings) -> (SettingsService, LoadOutcome) {
         clock: Arc::new(FakeClock::at(
             UNIX_EPOCH + Duration::from_secs(1_791_115_200),
         )),
+        call_roots: Arc::new(voicen_core::settings::roots::FakeCallRoots::new()),
     };
     SettingsService::load_or_init(deps, OS)
 }

@@ -1,0 +1,8 @@
+guarantee: AC-3: a relative root is refused as relative
+file: crates/voicen-core/src/settings/roots.rs
+added_by: test-writer
+--- old
+        if !root.is_absolute() {
+--- new
+        if false {
+--- end

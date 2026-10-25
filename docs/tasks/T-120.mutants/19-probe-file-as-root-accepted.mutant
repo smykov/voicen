@@ -1,0 +1,9 @@
+guarantee: AC-3: a root that is a regular file is refused as not_a_folder
+file: crates/voicen-core/src/settings/roots.rs
+added_by: test-writer
+equivalent: equivalent on Linux: without the is_dir check the probe file open under a regular file fails with ENOTDIR, which reason_of maps to not_a_folder, the same result; on Windows the error differs, so the guard stays
+--- old
+        if !meta.is_dir() {
+--- new
+        if false {
+--- end

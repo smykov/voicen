@@ -1,0 +1,8 @@
+guarantee: AC-6: ::1 only is loopback for IPv6
+file: crates/voicen-core/src/settings/url.rs
+added_by: test-writer
+--- old
+        url::Host::Ipv6(ip) => *ip == std::net::Ipv6Addr::LOCALHOST,
+--- new
+        url::Host::Ipv6(ip) => ip.is_loopback() || ip.is_unspecified(),
+--- end

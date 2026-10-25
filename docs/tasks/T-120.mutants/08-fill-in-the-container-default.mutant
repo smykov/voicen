@@ -1,0 +1,8 @@
+guarantee: AC-1: the container default of primary_language stays the defaults(None) value
+file: crates/voicen-core/src/settings/mod.rs
+added_by: test-writer
+--- old
+    Ok(value.unwrap_or_else(|| defaults(None).calls.primary_language))
+--- new
+    Ok(value.unwrap_or_else(|| "ru".to_string()))
+--- end

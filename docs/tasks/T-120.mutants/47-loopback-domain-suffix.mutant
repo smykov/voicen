@@ -1,0 +1,8 @@
+guarantee: AC-6: only the exact host localhost is loopback
+file: crates/voicen-core/src/settings/url.rs
+added_by: test-writer
+--- old
+        url::Host::Domain(domain) => *domain == "localhost",
+--- new
+        url::Host::Domain(domain) => domain.ends_with("localhost"),
+--- end

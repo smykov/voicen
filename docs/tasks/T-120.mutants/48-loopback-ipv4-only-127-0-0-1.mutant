@@ -1,0 +1,8 @@
+guarantee: AC-6: all of 127.0.0.0/8 is loopback
+file: crates/voicen-core/src/settings/url.rs
+added_by: test-writer
+--- old
+        url::Host::Ipv4(ip) => ip.is_loopback(),
+--- new
+        url::Host::Ipv4(ip) => *ip == std::net::Ipv4Addr::LOCALHOST,
+--- end

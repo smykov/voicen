@@ -21,6 +21,8 @@ pub enum SettingsTab {
     PostProcessing,
     History,
     General,
+    /// The call-mode settings (spec 007 FR-040).
+    Calls,
 }
 
 impl SettingsTab {
@@ -34,6 +36,7 @@ impl SettingsTab {
             SettingsTab::PostProcessing => "post_processing",
             SettingsTab::History => "history",
             SettingsTab::General => "general",
+            SettingsTab::Calls => "calls",
         }
     }
 }

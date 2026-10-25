@@ -1,0 +1,8 @@
+guarantee: AC-1: data-model default calls.hotkey is Ctrl+Alt+R
+file: crates/voicen-core/src/settings/mod.rs
+added_by: test-writer
+--- old
+            hotkey: "Ctrl+Alt+R".to_string(),
+--- new
+            hotkey: "Ctrl+Alt+T".to_string(),
+--- end

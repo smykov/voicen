@@ -1,0 +1,8 @@
+guarantee: AC-3: io StorageFull maps to disk_full
+file: crates/voicen-core/src/settings/roots.rs
+added_by: test-writer
+--- old
+        io::ErrorKind::StorageFull | io::ErrorKind::QuotaExceeded => UnwritableReason::DiskFull,
+--- new
+        io::ErrorKind::QuotaExceeded => UnwritableReason::DiskFull,
+--- end

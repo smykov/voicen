@@ -1,0 +1,10 @@
+guarantee: AC-1: a file without calls.primary_language gets the ui_language (FR-038)
+file: crates/voicen-core/src/settings/mod.rs
+added_by: test-writer
+--- old
+    if !has_primary_language {
+        settings.calls
+--- new
+    if false && !has_primary_language {
+        settings.calls
+--- end
