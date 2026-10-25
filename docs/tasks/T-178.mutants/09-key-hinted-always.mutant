@@ -1,0 +1,9 @@
+guarantee: line 1 (T-072 r1#3): aria-describedby names the hint id only when a hint is rendered (no dangling idref)
+file: src/lib/settings/KeyField.svelte
+added_by: test-writer
+test: pnpm e2e --workers=2 e2e/settings-first-run.spec.ts -g "T-178 \(1\)"
+--- old
+  const hinted = $derived(edit === "Clear" || Boolean(present));
+--- new
+  const hinted = $derived(true);
+--- end

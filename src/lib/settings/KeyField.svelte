@@ -4,7 +4,7 @@
   // Clear; a Saved resets the slot to Untouched, which empties the input.
   import { t, type MessageId } from "$lib/i18n";
   import { clearKey, resetKey, typeKey, type Draft } from "./draft";
-  import { controlId, describedBy } from "./fields";
+  import { controlId, describedBy, hintId } from "./fields";
   import FieldMessage from "./FieldMessage.svelte";
   import type { KeySlot } from "./settingsApi";
 
@@ -18,6 +18,8 @@
   const edit = $derived(draft.keys[slot]);
   const typed = $derived(typeof edit === "object" ? edit.Replace : "");
   const present = $derived(draft.baseline.keys[slot]);
+  // A state hint is rendered for Clear or a stored key; it is then in the description.
+  const hinted = $derived(edit === "Clear" || Boolean(present));
 
   function onInput(event: Event & { currentTarget: HTMLInputElement }) {
     const value = event.currentTarget.value;
@@ -36,12 +38,12 @@
     value={typed}
     oninput={onInput}
     aria-invalid={draft.errors[field] ? "true" : undefined}
-    aria-describedby={describedBy(field, draft.errors, warnings)}
+    aria-describedby={describedBy(field, draft.errors, warnings, hinted)}
   />
   {#if edit === "Clear"}
-    <p class="hint">{t("settings.key.cleared")}</p>
+    <p class="hint" id={hintId(field)}>{t("settings.key.cleared")}</p>
   {:else if present}
-    <p class="hint">{t("settings.key.saved")}</p>
+    <p class="hint" id={hintId(field)}>{t("settings.key.saved")}</p>
     <button type="button" onclick={() => (draft = clearKey(draft, slot))}>{t("settings.key.clear")}</button>
   {/if}
   <FieldMessage errors={draft.errors} {warnings} {field} />

@@ -752,38 +752,96 @@ test("a partially_restored refusal lists by label only the not_restored fields w
   await page.getByTestId("settings-save").click();
   const alert = page.getByRole("alert");
   await expect(alert).toContainText(en("settings.partially_restored"));
-  const listed = alert.getByRole("listitem");
+  // T-178 (#201, U2/L closed): the region holds two lists. The not_restored list (L) is
+  // scoped apart from the form-level error list (`settings-errors`), which names the
+  // field errors whose control is not rendered (here engine.local_server.key,
+  // key.store_failed, until the local_server engine renders its key control).
+  const lists = alert.getByRole("list");
+  const listed = lists.and(alert.locator(':not([data-testid="settings-errors"])')).getByRole("listitem");
+  const errorItems = page.getByTestId("settings-errors").getByRole("listitem");
   const apiKeyLabel = en("settings.field_label.engine.api.key");
   const startLabel = en("settings.field_label.general.start_with_windows");
+  const localKeyItem = `${en("settings.field_label.engine.local_server.key")} ${en("error.key.store_failed")}`;
+  const localKey = field(page, "engine.local_server.key");
 
   // Engine tab: the API key has its control, so only start-with-Windows is listed; the
-  // control keeps its field-level highlight.
+  // control keeps its field-level highlight. The local_server key has no control on the
+  // api engine, so the form-level error list names it, by label and reason.
   await expect(listed).toHaveText([startLabel]);
   await expect(alert).not.toContainText(apiKeyLabel);
   await expect(field(page, "engine.api.key")).toHaveAttribute("aria-invalid", "true");
+  await expect(localKey).toHaveCount(0);
+  await expect(errorItems).toHaveText([localKeyItem]);
+  await expect(lists).toHaveCount(2);
 
   // Recording tab: the API key control is gone, so its label joins the list.
   await tab(page, "recording").click();
   await expect(field(page, "engine.api.key")).toHaveCount(0);
   await expect(listed).toHaveText([apiKeyLabel, startLabel]);
+  await expect(errorItems).toHaveText([localKeyItem]);
+  await expect(lists).toHaveCount(2);
 
   // Back on Engine: the control is rendered again and leaves the list.
   await tab(page, "engine").click();
   await expect(field(page, "engine.api.key")).toHaveAttribute("aria-invalid", "true");
   await expect(listed).toHaveText([startLabel]);
+  await expect(errorItems).toHaveText([localKeyItem]);
+  await expect(lists).toHaveCount(2);
 
   // Same tab, another engine: the API key control is unmounted, so it is listed again.
+  // The local_server key control renders now and carries its error itself, so the
+  // form-level error list is gone (named exactly once).
   await field(page, "engine.kind").selectOption("local_server");
   await expect(field(page, "engine.api.key")).toHaveCount(0);
   await expect(listed).toHaveText([apiKeyLabel, startLabel]);
+  await expect(localKey).toHaveAttribute("aria-invalid", "true");
+  await expect(localKey).toHaveAccessibleDescription(en("error.key.store_failed"));
+  await expect(page.getByTestId("settings-errors")).toHaveCount(0);
+  await expect(lists).toHaveCount(1);
 
   // General tab (T-034): the start-with-Windows toggle is rendered, so it leaves the list
-  // and carries the field-level highlight (settings.field.not_restored) instead.
+  // and carries the field-level highlight (settings.field.not_restored) instead. The
+  // local_server key has no control here, so the form-level error list names it again.
   await tab(page, "general").click();
   const start = field(page, "general.start_with_windows");
   await expect(start).toHaveCount(1);
   await expect(start).toHaveAttribute("aria-invalid", "true");
   await expect(start).toHaveAccessibleDescription(en("settings.field.not_restored"));
   await expect(listed).toHaveText([apiKeyLabel]);
+  await expect(errorItems).toHaveText([localKeyItem]);
+  await expect(lists).toHaveCount(2);
+  // By label, never by the raw FieldId.
+  await expect(alert).not.toContainText("engine.local_server.key");
+  await expect(alert).not.toContainText("engine.api.key");
+  expect(errors).toEqual([]);
+});
+
+test("T-178 (U2/L closed): a refused field that is also not_restored and has no control on the tab is named once, by the not_restored list, not by the form-level error list", async ({ page }) => {
+  const errors = pageErrors(page);
+  const view = apiView();
+  view.keys.transcription_api = true;
+  await open(page, "/settings", view);
+  await expect(field(page, "engine.api.key")).toBeVisible();
+  await queueSaveOutcome(page, {
+    Refused: {
+      errors: [{ field: "general.start_with_windows", code: "autostart.failed" }],
+      form_error: {
+        kind: "partially_restored",
+        message: "settings.partially_restored",
+        not_restored: ["general.start_with_windows"],
+      },
+    },
+  });
+
+  await page.getByTestId("settings-save").click();
+  const alert = page.getByRole("alert");
+  await expect(alert).toContainText(en("settings.partially_restored"));
+  const startLabel = en("settings.field_label.general.start_with_windows");
+  // Engine tab: the toggle is not rendered; one list, one item, the label once.
+  await expect(field(page, "general.start_with_windows")).toHaveCount(0);
+  await expect(alert.getByRole("list")).toHaveCount(1);
+  await expect(alert.getByRole("listitem")).toHaveText([startLabel]);
+  await expect(page.getByTestId("settings-errors")).toHaveCount(0);
+  await expect(alert).not.toContainText(en("error.autostart.failed"));
   expect(errors).toEqual([]);
 });

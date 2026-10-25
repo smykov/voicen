@@ -199,32 +199,23 @@ interface WireFixture {
   test_connection_invalid_off_tab: ConnectionTestResult;
 }
 
-/** The kinds of `ConnectionTestResult` the fixture holds, one value each. */
-export type TestResultKind =
-  | "ok"
-  | "cannot_reach"
-  | "invalid_key"
-  | "timeout"
-  | "http"
-  | "unexpected_response"
-  | "invalid"
-  | "key_store_unavailable";
-
-/** Every kind of the fixture, in core's declaration order. */
-export const TEST_RESULT_KINDS: readonly TestResultKind[] = [
-  "ok",
-  "cannot_reach",
-  "invalid_key",
-  "timeout",
-  "http",
-  "unexpected_response",
-  "invalid",
-  "key_store_unavailable",
-];
+/**
+ * The kinds of `ConnectionTestResult` (the wire type, declared once in settingsApi.ts);
+ * the fixture holds one value of each (T-178).
+ */
+export type TestResultKind = ConnectionTestResult["kind"];
 
 const fixture = JSON.parse(
   readFileSync(new URL("../fixtures/settings-wire.json", import.meta.url), "utf8"),
 ) as WireFixture;
+
+/**
+ * Every kind of core's fixture (the keys of `test_connection_results`, pinned by core),
+ * in the fixture's order, not core's declaration order. Frozen.
+ */
+export const TEST_RESULT_KINDS: readonly TestResultKind[] = Object.freeze(
+  Object.keys(fixture.test_connection_results ?? {}) as TestResultKind[],
+);
 
 /** Core's first-run view: `defaults(None)`, no keys, `first_run: true` (a fresh copy). */
 export function firstRunView(): SettingsView {
@@ -266,8 +257,8 @@ export function testConnectionResult(kind: TestResultKind): ConnectionTestResult
 /**
  * Core's `invalid` ConnectionTestResult with one field that has a control on the Engine
  * tab (engine.api.base_url url.malformed) and one that has a control only on General
- * (timeouts.connect timeout.range), in validate's order (a fresh copy, for
- * `queueTestResult`; T-013).
+ * (timeouts.connect timeout.range) (a fresh copy, for `queueTestResult`; T-013). Core's
+ * pin test pins the wire shape; the order is the fixture's, not checked against validate.
  */
 export function testConnectionInvalidOffTab(): ConnectionTestResult {
   const result = fixture.test_connection_invalid_off_tab;

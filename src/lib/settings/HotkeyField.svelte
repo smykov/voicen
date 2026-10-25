@@ -3,7 +3,7 @@
   // (hotkey.ts, no allowlist); core decides whether it is valid and available.
   import { t, type MessageId } from "$lib/i18n";
   import type { Draft } from "./draft";
-  import { controlId, describedBy } from "./fields";
+  import { controlId, describedBy, hintId } from "./fields";
   import FieldMessage from "./FieldMessage.svelte";
   import { hotkeyText, isFocusMove } from "./hotkey";
 
@@ -28,8 +28,8 @@
     value={draft.settings.hotkey}
     onkeydown={onKeydown}
     aria-invalid={draft.errors[field] ? "true" : undefined}
-    aria-describedby={describedBy(field, draft.errors, warnings)}
+    aria-describedby={describedBy(field, draft.errors, warnings, true)}
   />
-  <p class="hint">{t("settings.hotkey.hint")}</p>
+  <p class="hint" id={hintId(field)}>{t("settings.hotkey.hint")}</p>
   <FieldMessage errors={draft.errors} {warnings} {field} />
 </div>

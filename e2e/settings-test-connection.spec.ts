@@ -369,6 +369,8 @@ test("failure branch: invalid naming a field on another tab -> the result lists 
   await expect(result(page).getByText(INVALID_EN, { exact: true })).toBeVisible();
   await expect(result(page).getByRole("listitem")).toHaveText([connectLabel]);
   await expect(result(page)).not.toContainText(urlLabel);
+  // T-178 (U2 closed): named once, by the result; the form-level error list stays absent.
+  await expect(page.getByTestId("settings-errors")).toHaveCount(0);
   await expect(field(page, "engine.api.base_url")).toHaveAttribute("aria-invalid", "true");
   await expect(field(page, "timeouts.connect")).toHaveCount(0);
   expect((await requests(page))[0].timeouts.connect_s).toBe(0);
@@ -383,6 +385,7 @@ test("failure branch: invalid naming a field on another tab -> the result lists 
   // Back on Engine: the same list (the result belongs to the page, not to the tab).
   await page.getByTestId("tab-engine").click();
   await expect(result(page).getByRole("listitem")).toHaveText([connectLabel]);
+  await expect(page.getByTestId("settings-errors")).toHaveCount(0);
   expect(await calls(page, "settings_save")).toEqual([]);
   expect(await requests(page)).toHaveLength(1);
   expect(errors).toEqual([]);
@@ -642,5 +645,37 @@ test(`T-178 (7): after an invalid test result on a clean draft, a rebuilt view (
 
   await expect(page.getByText(INVALID_EN)).toHaveCount(0);
   expect(await resultText(page)).not.toContain(INVALID_EN);
+  expect(errors).toEqual([]);
+});
+
+test(`T-178 (7), #51 as amended: a view received on a dirty draft keeps its highlights, so the invalid result stays shown`, async ({ page }) => {
+  // applyView on a dirty draft keeps draft.errors; the result must outlive nothing it
+  // describes, and must not be dropped while its highlights are still there.
+  const errors = pageErrors(page);
+  const view = viewWith("api", { key: true });
+  await showInvalidResult(page, { dirty: true });
+
+  await emit(page, "settings://changed", view);
+  await settle(page);
+
+  await expect(result(page).getByText(INVALID_EN, { exact: true })).toBeVisible();
+  await expect(field(page, "engine.api.base_url")).toHaveAttribute("aria-invalid", "true");
+  await expect(field(page, "engine.api.base_url")).toHaveValue("not a url (fake)");
+  expect(errors).toEqual([]);
+});
+
+test(`T-178 (7), #51 as amended: a Save does not clear a result of another kind (ok stays shown after Saved)`, async ({ page }) => {
+  const errors = pageErrors(page);
+  await open(page, viewWith("api", { key: true }));
+  await field(page, "engine.api.model").fill("whisper-fake-0178");
+  await queueTestResult(page, testConnectionResult("ok"));
+  await testButton(page).click();
+  await expect(result(page)).toHaveText(OK_EN);
+
+  await page.getByTestId("settings-save").click();
+  await expect.poll(async () => (await calls(page, "settings_save")).length).toBe(1);
+  await settle(page);
+
+  await expect(result(page)).toHaveText(OK_EN);
   expect(errors).toEqual([]);
 });

@@ -1,0 +1,9 @@
+guarantee: line 7 (T, #51 as amended): only an invalid result is cleared by a save; other kinds (ok, failures) stay shown
+file: src/routes/settings/+page.svelte
+added_by: test-writer
+test: pnpm e2e --workers=2 e2e/settings-test-connection.spec.ts
+--- old
+    if (testShown?.message.id === "settings.test_connection.invalid") testShown = null;
+--- new
+    testShown = null;
+--- end

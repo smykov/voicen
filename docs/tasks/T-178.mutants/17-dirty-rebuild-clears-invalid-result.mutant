@@ -1,0 +1,9 @@
+guarantee: line 7 (T, #51 as amended): a view received on a dirty draft keeps draft.errors, so it keeps the shown invalid result
+file: src/routes/settings/+page.svelte
+added_by: test-writer
+test: pnpm e2e --workers=2 e2e/settings-test-connection.spec.ts
+--- old
+    if (!isDirty(draft)) clearInvalidTest();
+--- new
+    clearInvalidTest();
+--- end

@@ -11,7 +11,8 @@
   // selects `tabOf(tab)` and focuses the control whose data-field equals the field (F);
   // the window closes only through destroy, after an in-page discard prompt when the
   // draft is dirty (D); a not_restored field with no control on the page is named in the
-  // form-level message by its label, `settings.field_label.<FieldId>` (L).
+  // form-level message by its label, `settings.field_label.<FieldId>` (L). T-178: so is a
+  // field error whose control is not on the panel and that nothing else names (#201).
   //
   // T-023, T-019: the discard prompt wins over every in-page modal (About, the delete
   // confirmation): onClose dismisses each one registered through $lib/settings/modals
@@ -31,7 +32,8 @@
   // while its generation is current; every close the page does not prevent, a discard
   // and the unmount advance it, so nothing of the run is shown after a close. A run never
   // saves and never changes the baseline or the key edits; an `invalid` result highlights
-  // its fields through `applyTestErrors` (U2).
+  // its fields through `applyTestErrors` (U2), and is cleared when a save starts or a
+  // clean draft is rebuilt, since both replace those highlights (T-178).
   import { onMount } from "svelte";
   import { page } from "$app/state";
   import { setLanguage, t, type MessageId } from "$lib/i18n";
@@ -166,6 +168,21 @@
     (draft?.formError?.not_restored ?? []).filter((field) => !renderedFields.includes(field)),
   );
 
+  /**
+   * T-178 (U2, L; decision #201): the field errors named nowhere else, listed at form level
+   * by label and reason. Every field in draft.errors is named exactly once: by its
+   * control's FieldMessage when the panel renders it, else by the not_restored list, else
+   * by the shown invalid test result (its fields), else here.
+   */
+  const unrenderedErrors = $derived(
+    Object.entries(draft?.errors ?? {}).filter(
+      ([field]) =>
+        !renderedFields.includes(field) &&
+        !(draft?.formError?.not_restored ?? []).includes(field) &&
+        !(testShown?.fields ?? []).includes(field),
+    ),
+  );
+
   $effect(() => {
     if (confirmDiscard) keepButton?.focus();
   });
@@ -247,8 +264,23 @@
     if (draft) setLanguage(draft.baseline.settings.ui_language);
   });
 
+  /**
+   * T-178 (T, amends #51): an `invalid` result is shown only while its highlights are
+   * draft.errors, so it is cleared whenever something other than applyTestErrors
+   * replaces them (a save starts, a clean draft is rebuilt). Other kinds stay shown.
+   */
+  function clearInvalidTest() {
+    if (testShown?.message.id === "settings.test_connection.invalid") testShown = null;
+  }
+
   function receive(view: SettingsView) {
-    draft = draft === null ? draftFromView(view) : applyView(draft, view);
+    if (draft === null) {
+      draft = draftFromView(view);
+      return;
+    }
+    // applyView rebuilds a clean draft from the view (its errors too).
+    if (!isDirty(draft)) clearInvalidTest();
+    draft = applyView(draft, view);
   }
 
   async function save() {
@@ -257,6 +289,7 @@
     saved = false;
     warnings = {};
     ipcFailed = false;
+    clearInvalidTest();
     try {
       const outcome = await saveSettings(saveRequest(draft));
       draft = applyOutcome(draft, outcome);
@@ -310,7 +343,7 @@
 <main class="settings" inert={confirmDiscard}>
   <h1>{t("settings.title")}</h1>
 
-  {#if ipcFailed || draft?.formError}
+  {#if ipcFailed || draft?.formError || unrenderedErrors.length > 0}
     <div class="message error" role="alert">
       {#if ipcFailed}
         <p>{t("error.ipc_unavailable")}</p>
@@ -324,6 +357,13 @@
             {/each}
           </ul>
         {/if}
+      {/if}
+      {#if unrenderedErrors.length > 0}
+        <ul data-testid="settings-errors">
+          {#each unrenderedErrors as [field, message] (field)}
+            <li><strong>{t(fieldLabelId(field))}</strong> {t(message)}</li>
+          {/each}
+        </ul>
       {/if}
     </div>
   {/if}

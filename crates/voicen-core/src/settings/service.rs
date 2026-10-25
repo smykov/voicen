@@ -3800,8 +3800,9 @@ mod tests {
         // field has no control on the Engine tab scripts core's real wire.
         // `test_connection_invalid_off_tab` is Invalid with engine.api.base_url
         // url.malformed (a control on Engine) and timeouts.connect timeout.range (a
-        // control on General only), in validate's order. Bite: a field or code
-        // renamed without regenerating e2e/fixtures/settings-wire.json.
+        // control on General only). This pins the wire shape; the order is the
+        // fixture's, not checked against validate (the value is built by hand). Bite: a
+        // field or code renamed without regenerating e2e/fixtures/settings-wire.json.
         use crate::connection_test::ConnectionTestResult as R;
         let fixture: serde_json::Value =
             serde_json::from_str(E2E_WIRE_FIXTURE).expect("settings-wire.json is valid JSON");

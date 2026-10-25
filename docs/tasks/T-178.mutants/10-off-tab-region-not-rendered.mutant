@@ -1,0 +1,9 @@
+guarantee: line 3 + 11 (T-021 r1#3, #201): a Refused field error with no rendered control and no form_error is shown in the role=alert region
+file: src/routes/settings/+page.svelte
+added_by: test-writer
+test: pnpm e2e --workers=2 e2e/settings-post-processing.spec.ts e2e/settings-focus-close.spec.ts
+--- old
+  {#if ipcFailed || draft?.formError || unrenderedErrors.length > 0}
+--- new
+  {#if ipcFailed || draft?.formError}
+--- end

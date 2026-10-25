@@ -1,2 +1,2 @@
 # T-178: the task's e2e specs only, as the ui area runs them (narrow per mutant with `test:`).
-pnpm e2e --workers=2 e2e/settings-autostart.spec.ts e2e/local-models.spec.ts e2e/about.spec.ts
+pnpm e2e --workers=2 e2e/settings-autostart.spec.ts e2e/local-models.spec.ts e2e/about.spec.ts e2e/settings-first-run.spec.ts e2e/settings-post-processing.spec.ts e2e/settings-test-connection.spec.ts e2e/settings-focus-close.spec.ts

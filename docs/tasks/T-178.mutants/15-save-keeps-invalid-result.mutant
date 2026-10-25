@@ -1,0 +1,10 @@
+guarantee: line 7 (T-013 r1#3): a save start clears a shown invalid test result
+file: src/routes/settings/+page.svelte
+added_by: test-writer
+test: pnpm e2e --workers=2 e2e/settings-test-connection.spec.ts
+--- old
+    ipcFailed = false;
+    clearInvalidTest();
+--- new
+    ipcFailed = false;
+--- end

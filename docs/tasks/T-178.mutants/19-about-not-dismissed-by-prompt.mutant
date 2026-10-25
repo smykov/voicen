@@ -1,0 +1,11 @@
+guarantee: line 6 (T-019 r2): About is closed when the discard prompt shows (no :modal behind the prompt)
+file: src/lib/settings/tabs/General.svelte
+added_by: test-writer
+test: pnpm e2e --workers=2 e2e/about.spec.ts -g "discard prompt wins"
+--- old
+  dismissOnDiscardPrompt(() => {
+    aboutOpen = false;
+  });
+--- new
+  void dismissOnDiscardPrompt;
+--- end

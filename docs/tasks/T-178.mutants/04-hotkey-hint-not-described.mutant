@@ -1,0 +1,9 @@
+guarantee: line 1 (T-072 r1#3): the hotkey hint is in the hotkey input's aria-describedby
+file: src/lib/settings/HotkeyField.svelte
+added_by: test-writer
+test: pnpm e2e --workers=2 e2e/settings-first-run.spec.ts -g "T-178 \(1\)"
+--- old
+    aria-describedby={describedBy(field, draft.errors, warnings, true)}
+--- new
+    aria-describedby={describedBy(field, draft.errors, warnings)}
+--- end

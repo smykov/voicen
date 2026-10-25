@@ -1,0 +1,10 @@
+guarantee: line 3 (U2/L closed): a not_restored field is named by the not_restored list only, not also in the form-level error list
+file: src/routes/settings/+page.svelte
+added_by: test-writer
+test: pnpm e2e --workers=2 e2e/settings-post-processing.spec.ts e2e/settings-focus-close.spec.ts
+--- old
+        !renderedFields.includes(field) &&
+        !(draft?.formError?.not_restored ?? []).includes(field) &&
+--- new
+        !renderedFields.includes(field) &&
+--- end

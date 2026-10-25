@@ -12,7 +12,9 @@
   // <fieldset disabled={saving}> nor inside <main>, which goes inert under the discard
   // prompt. `open` is bindable so the page can close About when the discard prompt
   // shows (the discard prompt wins, settings-ui D); About sets it false when it is
-  // destroyed, so a torn-down About never reopens by itself.
+  // destroyed. That teardown is defensive: today General's aboutOpen dies with About
+  // when the tab {#if} unmounts General; it guards a parent whose bound open outlives
+  // the instance.
   import { onDestroy } from "svelte";
   import type { Action } from "svelte/action";
   import { formatBuildInfo, loadBuildInfo, type BuildInfo } from "$lib/buildInfo";
@@ -69,10 +71,12 @@
   }
 
   // Teardown (a settings://focus request switches the tab away from General while About
-  // is open): removing an open modal fires no `close`, so the bound `open` would stay
-  // true and the next instance would show the dialog unasked, with no get_build_info
-  // call. About ends with its instance; the next showing comes only from the button,
-  // and an answer still pending for this instance is dropped.
+  // is open): removing an open modal fires no `close`. Defensive, both statements: today
+  // General's aboutOpen dies with About when the tab {#if} unmounts General, and a
+  // destroyed instance's pending answer has nowhere to show. They guard a parent whose
+  // bound `open` outlives the instance: without `open = false` its next About would show
+  // the dialog unasked, with no get_build_info call; `opening++` drops this instance's
+  // pending answer.
   onDestroy(() => {
     opening++;
     open = false;

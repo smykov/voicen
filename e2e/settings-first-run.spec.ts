@@ -476,6 +476,22 @@ test("T-178 (1): the key input's accessible description contains settings.key.sa
   await expect(key).not.toHaveAccessibleDescription(escapeRegExp(en("settings.key.saved")));
 });
 
+test("T-178 (1): with no stored key and no edit no key hint is rendered, and every id in the key input's aria-describedby names an element on the page", async ({ page }) => {
+  const view = apiWithStoredKey();
+  view.keys.transcription_api = false;
+  await openSettings(page, view);
+  const key = field(page, "engine.api.key");
+  await expect(key).toHaveCount(1);
+  await expect(page.getByText(en("settings.key.saved"))).toHaveCount(0);
+  await expect(page.getByText(en("settings.key.cleared"))).toHaveCount(0);
+  const dangling = await key.evaluate((input) =>
+    (input.getAttribute("aria-describedby") ?? "")
+      .split(/\s+/)
+      .filter((id) => id !== "" && document.getElementById(id) === null),
+  );
+  expect(dangling).toEqual([]);
+});
+
 // ---- T-004 review r1 #9, #10 (Low) ----------------------------------------------------
 
 test("clearing the history size and typing a digit gives that digit, not a leading 0", async ({ page }) => {

@@ -1,0 +1,9 @@
+guarantee: line 3 (U2 closed): a field named by the shown invalid test result is not also in the form-level error list
+file: src/routes/settings/+page.svelte
+added_by: test-writer
+test: pnpm e2e --workers=2 e2e/settings-test-connection.spec.ts
+--- old
+        !(testShown?.fields ?? []).includes(field),
+--- new
+        true,
+--- end

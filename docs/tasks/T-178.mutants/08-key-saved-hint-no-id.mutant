@@ -1,0 +1,9 @@
+guarantee: line 1 (T-072 r1#3, second path): the settings.key.saved hint carries hintId(field)
+file: src/lib/settings/KeyField.svelte
+added_by: test-writer
+test: pnpm e2e --workers=2 e2e/settings-first-run.spec.ts -g "T-178 \(1\)"
+--- old
+    <p class="hint" id={hintId(field)}>{t("settings.key.saved")}</p>
+--- new
+    <p class="hint">{t("settings.key.saved")}</p>
+--- end

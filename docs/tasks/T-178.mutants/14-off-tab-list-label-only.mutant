@@ -1,0 +1,11 @@
+guarantee: line 11: the form-level list names the field by label and the error's reason (t(message))
+file: src/routes/settings/+page.svelte
+added_by: test-writer
+test: pnpm e2e --workers=2 e2e/settings-post-processing.spec.ts e2e/settings-focus-close.spec.ts
+--- old
+          {#each unrenderedErrors as [field, message] (field)}
+            <li><strong>{t(fieldLabelId(field))}</strong> {t(message)}</li>
+--- new
+          {#each unrenderedErrors as [field, message] (field)}
+            <li><strong>{t(fieldLabelId(field))}</strong></li>
+--- end
