@@ -214,7 +214,7 @@ const fixture = JSON.parse(
  * in the fixture's order, not core's declaration order. Frozen.
  */
 export const TEST_RESULT_KINDS: readonly TestResultKind[] = Object.freeze(
-  Object.keys(fixture.test_connection_results ?? {}) as TestResultKind[],
+  Object.keys(fixture.test_connection_results) as TestResultKind[],
 );
 
 /** Core's first-run view: `defaults(None)`, no keys, `first_run: true` (a fresh copy). */

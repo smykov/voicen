@@ -391,6 +391,59 @@ test("failure branch: invalid naming a field on another tab -> the result lists 
   expect(errors).toEqual([]);
 });
 
+// ---- T-178 review 1 #1: the result names its fields only where it is rendered ----------
+// The result region exists on the Engine tab while the engine is api or local_server. On
+// any other tab, or on Engine after a switch to none or builtin_local (the result is kept,
+// #51), its fields are named by the form-level list `settings-errors` (U2, L; once each).
+
+/** An invalid off-tab result (engine.api.base_url, timeouts.connect) shown on Engine (api). */
+async function showInvalidOffTab(page: Page): Promise<void> {
+  await open(page, viewWith("api", { key: true }));
+  await queueTestResult(page, testConnectionInvalidOffTab());
+  await testButton(page).click();
+  await expect(result(page).getByText(INVALID_EN, { exact: true })).toBeVisible();
+  // Where the result region shows the result, it names its fields; the list stays absent.
+  await expect(page.getByTestId("settings-errors")).toHaveCount(0);
+}
+
+const urlItem = (): string =>
+  `${text(EN, "settings.field_label.engine.api.base_url")} ${text(EN, "error.url.malformed")}`;
+const connectItem = (): string =>
+  `${text(EN, "settings.field_label.timeouts.connect")} ${text(EN, "error.timeout.range")}`;
+
+test("T-178 r1#1 failure branch: an invalid off-tab result is named by settings-errors on Recording (both fields, with their reasons)", async ({ page }) => {
+  const errors = pageErrors(page);
+  await showInvalidOffTab(page);
+  await page.getByTestId("tab-recording").click();
+  await expect(result(page)).toHaveCount(0);
+  await expect(page.getByTestId("settings-errors").getByRole("listitem")).toHaveText([urlItem(), connectItem()]);
+  // Back on Engine: named by the result again, the list is gone (named once).
+  await page.getByTestId("tab-engine").click();
+  await expect(result(page).getByText(INVALID_EN, { exact: true })).toBeVisible();
+  await expect(page.getByTestId("settings-errors")).toHaveCount(0);
+  expect(errors).toEqual([]);
+});
+
+test("T-178 r1#1 failure branch: an invalid off-tab result is named on General: the base URL by settings-errors, the connect timeout by its own control", async ({ page }) => {
+  const errors = pageErrors(page);
+  await showInvalidOffTab(page);
+  await page.getByTestId("tab-general").click();
+  await expect(page.getByTestId("settings-errors").getByRole("listitem")).toHaveText([urlItem()]);
+  await expect(field(page, "timeouts.connect")).toHaveAttribute("aria-invalid", "true");
+  expect(errors).toEqual([]);
+});
+
+for (const engine of ["none", "builtin_local"] as const) {
+  test(`T-178 r1#1 failure branch: on Engine after a switch to ${engine}, the kept invalid result's fields are named by settings-errors`, async ({ page }) => {
+    const errors = pageErrors(page);
+    await showInvalidOffTab(page);
+    await field(page, "engine.kind").selectOption(engine);
+    await expect(result(page)).toHaveCount(0);
+    await expect(page.getByTestId("settings-errors").getByRole("listitem")).toHaveText([urlItem(), connectItem()]);
+    expect(errors).toEqual([]);
+  });
+}
+
 // ---- (5) one test at a time, owned by the page -----------------------------------------
 
 test("while a test runs the button is disabled and busy, a second click sends nothing, and a tab round trip keeps it running", async ({ page }) => {

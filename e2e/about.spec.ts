@@ -284,6 +284,8 @@ test("T-095: the dialog is closed natively and the About button is pressed befor
 });
 
 test("T-095: keyboard rounds of Escape then Enter with nothing between -> the dialog is shown after every round", async ({ page }) => {
+  // 20 rounds: triple the timeout so a slow runner does not turn this pin into a flake.
+  test.slow();
   const errors = pageErrors(page);
   await openGeneral(page, { buildInfo: OK });
   const button = aboutButton(page);

@@ -145,7 +145,7 @@
         {#if unrenderedTestFields.length > 0}
           <ul>
             {#each unrenderedTestFields as field (field)}
-              <li>{t(fieldLabelId(field))}</li>
+              <li data-named-field={field}>{t(fieldLabelId(field))}</li>
             {/each}
           </ul>
         {/if}

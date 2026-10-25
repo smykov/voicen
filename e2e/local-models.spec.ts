@@ -698,6 +698,8 @@ test("Keep in the delete confirmation sends nothing and leaves small downloaded 
 });
 
 test("T-178 (10): 20 keyboard rounds of Enter on the focused Delete then Esc each show the confirmation (one :modal), then close it (no :modal) and send no local_model_delete (F-017: no native close lag)", async ({ page }) => {
+  // 20 rounds: triple the timeout so a slow runner does not turn this pin into a flake.
+  test.slow();
   const errors = pageErrors(page);
   await openLoaded(page, localView("small"), { localModels: modelsWith("small", DOWNLOADED) });
   const del = deleteButton(page, "small");

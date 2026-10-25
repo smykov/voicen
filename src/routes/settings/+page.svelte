@@ -101,6 +101,11 @@
   let focusRequest = $state<{ field: string } | null>(fieldRequest(page.url.searchParams.get("field")));
   /** The FieldIds of the controls the panel renders now (kept by a MutationObserver). */
   let renderedFields = $state<readonly string[]>([]);
+  /**
+   * The FieldIds the rendered test result names (its `[data-named-field]` items, kept by
+   * the same MutationObserver): empty while the result region is not on the page.
+   */
+  let resultNamedFields = $state<readonly string[]>([]);
   /** The discard prompt is shown (a close was requested with a dirty draft). */
   let confirmDiscard = $state(false);
   let keepButton = $state<HTMLButtonElement | undefined>();
@@ -140,17 +145,26 @@
       ?.focus();
   });
 
-  // What "has a control on the page" means for the form-level list (L): the panel's
-  // [data-field] elements, whatever tab, engine or later rule decided to render them.
+  // What "has a control on the page" and "is named by the shown test result" mean for the
+  // form-level list (L): the panel's [data-field] elements and the result's
+  // [data-named-field] items, whatever tab, engine or later rule decided to render them.
   $effect(() => {
     const root = panel;
     if (root === undefined) return;
     const collect = () => {
       renderedFields = fieldControls(root).map((control) => control.dataset.field ?? "");
+      resultNamedFields = Array.from(root.querySelectorAll<HTMLElement>("[data-named-field]")).map(
+        (item) => item.dataset.namedField ?? "",
+      );
     };
     collect();
     const observer = new MutationObserver(collect);
-    observer.observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: ["data-field"] });
+    observer.observe(root, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ["data-field", "data-named-field"],
+    });
     return () => observer.disconnect();
   });
 
@@ -172,14 +186,15 @@
    * T-178 (U2, L; decision #201): the field errors named nowhere else, listed at form level
    * by label and reason. Every field in draft.errors is named exactly once: by its
    * control's FieldMessage when the panel renders it, else by the not_restored list, else
-   * by the shown invalid test result (its fields), else here.
+   * by the rendered invalid test result (the fields it lists on the page: Engine tab, engine
+   * api or local_server), else here. A result kept off that region names nothing.
    */
   const unrenderedErrors = $derived(
     Object.entries(draft?.errors ?? {}).filter(
       ([field]) =>
         !renderedFields.includes(field) &&
         !(draft?.formError?.not_restored ?? []).includes(field) &&
-        !(testShown?.fields ?? []).includes(field),
+        !resultNamedFields.includes(field),
     ),
   );
 
