@@ -229,6 +229,57 @@ pub fn classify(err: &TransportError, host: &str) -> FailureReason {
     }
 }
 
+/// Every variant once, `Timeout` once per [`TimeoutSource`] (each origin has
+/// its own message). The exhaustive matches make a new variant or origin a
+/// compile error here until it is added to this list (and so to
+/// `message_ids_per_reason`). Also the one every-variant list of the
+/// `SkipReason` table test (T-168).
+#[cfg(test)]
+pub(crate) fn every_reason() -> Vec<FailureReason> {
+    let all = vec![
+        FailureReason::InvalidApiKey,
+        FailureReason::NetworkUnavailable,
+        FailureReason::CannotReach {
+            host: "api.example.com:8443".to_string(),
+        },
+        FailureReason::Timeout {
+            origin: TimeoutSource::Server,
+        },
+        FailureReason::Timeout {
+            origin: TimeoutSource::Builtin,
+        },
+        FailureReason::ServerError { status: 503 },
+        FailureReason::UnexpectedResponse,
+        FailureReason::KeyStoreUnavailable,
+        FailureReason::EngineNotConfigured,
+        FailureReason::ClipboardUnavailable,
+        FailureReason::MicrophoneUnavailable {
+            cause: MicCause::NoDevice,
+        },
+        FailureReason::NoLocalModel,
+        FailureReason::LocalEngineFailed,
+    ];
+    for r in &all {
+        match r {
+            FailureReason::InvalidApiKey
+            | FailureReason::NetworkUnavailable
+            | FailureReason::CannotReach { .. }
+            | FailureReason::Timeout {
+                origin: TimeoutSource::Server | TimeoutSource::Builtin,
+            }
+            | FailureReason::ServerError { .. }
+            | FailureReason::UnexpectedResponse
+            | FailureReason::KeyStoreUnavailable
+            | FailureReason::EngineNotConfigured
+            | FailureReason::ClipboardUnavailable
+            | FailureReason::MicrophoneUnavailable { .. }
+            | FailureReason::NoLocalModel
+            | FailureReason::LocalEngineFailed => {}
+        }
+    }
+    all
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -255,6 +306,17 @@ mod tests {
     fn cannot_reach() -> FailureReason {
         FailureReason::CannotReach {
             host: HOST.to_string(),
+        }
+    }
+
+    #[test]
+    fn timeout_display_names_no_stage() {
+        // T-168: Timeout is built for transcription, post-processing chat and the
+        // connection test, so its text names no stage. Bite: a Display text that
+        // keeps "the transcription" for either origin.
+        for origin in [TimeoutSource::Server, TimeoutSource::Builtin] {
+            let r = FailureReason::Timeout { origin };
+            assert_eq!(r.to_string(), "did not finish in time", "{r:?}");
         }
     }
 
@@ -401,53 +463,6 @@ mod tests {
             }
         }
         assert!(wrong.is_empty(), "misclassified:\n{}", wrong.join("\n"));
-    }
-
-    /// Every variant once, `Timeout` once per [`TimeoutSource`] (each origin has
-    /// its own message). The exhaustive matches make a new variant or origin a
-    /// compile error here until it is added to this list (and so to
-    /// `message_ids_per_reason`).
-    fn every_reason() -> Vec<FailureReason> {
-        let all = vec![
-            FailureReason::InvalidApiKey,
-            FailureReason::NetworkUnavailable,
-            FailureReason::CannotReach {
-                host: HOST.to_string(),
-            },
-            server_timeout(),
-            FailureReason::Timeout {
-                origin: TimeoutSource::Builtin,
-            },
-            FailureReason::ServerError { status: 503 },
-            FailureReason::UnexpectedResponse,
-            FailureReason::KeyStoreUnavailable,
-            FailureReason::EngineNotConfigured,
-            FailureReason::ClipboardUnavailable,
-            FailureReason::MicrophoneUnavailable {
-                cause: MicCause::NoDevice,
-            },
-            FailureReason::NoLocalModel,
-            FailureReason::LocalEngineFailed,
-        ];
-        for r in &all {
-            match r {
-                FailureReason::InvalidApiKey
-                | FailureReason::NetworkUnavailable
-                | FailureReason::CannotReach { .. }
-                | FailureReason::Timeout {
-                    origin: TimeoutSource::Server | TimeoutSource::Builtin,
-                }
-                | FailureReason::ServerError { .. }
-                | FailureReason::UnexpectedResponse
-                | FailureReason::KeyStoreUnavailable
-                | FailureReason::EngineNotConfigured
-                | FailureReason::ClipboardUnavailable
-                | FailureReason::MicrophoneUnavailable { .. }
-                | FailureReason::NoLocalModel
-                | FailureReason::LocalEngineFailed => {}
-            }
-        }
-        all
     }
 
     /// (code, message id, en text, ru text) per reason: data-model "FailureReason",

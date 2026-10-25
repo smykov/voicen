@@ -192,7 +192,7 @@ impl PostProcessor for PassThrough {
 mod tests {
     use super::*;
     use crate::delivery::DeliveryResult;
-    use crate::failure::{FailureReason, TimeoutSource};
+    use crate::failure::{every_reason as every_failure_reason, FailureReason, TimeoutSource};
     use crate::i18n::{self, text, UiLanguage, MESSAGE_IDS};
     use crate::secrets::FakeCredentialStore;
     use crate::secrets::KeySlot;
@@ -449,14 +449,33 @@ mod tests {
                 FailureReason::UnexpectedResponse,
                 SkipReason::InvalidResponse,
             ),
+            // T-168: the developer adds the 6 rows classify never produces on this
+            // path (from_failure keeps them total; the mapping does not change):
+            //   KeyStoreUnavailable -> InvalidKey
+            //   EngineNotConfigured -> NotConfigured
+            //   ClipboardUnavailable, MicrophoneUnavailable{cause: NoDevice},
+            //   NoLocalModel, LocalEngineFailed -> InvalidResponse
+            //   Timeout{origin: Builtin} -> Timeout
         ];
-        for (failure, want) in rows {
+        for (failure, want) in &rows {
             assert_eq!(
-                SkipReason::from_failure(&failure, HOST),
+                &SkipReason::from_failure(failure, HOST),
                 want,
                 "{failure:?}"
             );
         }
+        // Every FailureReason (each Timeout origin too) has a row: a new variant
+        // or a dropped row fails here, naming the reason.
+        let missing: Vec<String> = every_failure_reason()
+            .into_iter()
+            .filter(|r| !rows.iter().any(|(f, _)| f == r))
+            .map(|r| format!("{r:?}"))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "FailureReason without a SkipReason row: {}",
+            missing.join(", ")
+        );
     }
 
     #[test]
