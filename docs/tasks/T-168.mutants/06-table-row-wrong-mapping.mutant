@@ -1,0 +1,14 @@
+guarantee: T-020 r1#3: each SkipReason row is checked against from_failure (Timeout{Builtin} row with a wrong skip)
+file: crates/voicen-core/src/post_process/mod.rs
+added_by: test-writer
+--- old
+                FailureReason::Timeout {
+                    origin: TimeoutOrigin::Builtin,
+                },
+                SkipReason::Timeout,
+--- new
+                FailureReason::Timeout {
+                    origin: TimeoutOrigin::Builtin,
+                },
+                SkipReason::InvalidResponse,
+--- end

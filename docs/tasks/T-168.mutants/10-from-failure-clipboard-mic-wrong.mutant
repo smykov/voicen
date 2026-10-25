@@ -1,0 +1,14 @@
+guarantee: T-020 r1#3: from_failure maps ClipboardUnavailable and MicrophoneUnavailable to InvalidResponse (every arm tested)
+file: crates/voicen-core/src/post_process/mod.rs
+added_by: test-writer
+--- old
+            FailureReason::EngineNotConfigured => SkipReason::NotConfigured,
+            FailureReason::UnexpectedResponse
+            | FailureReason::ClipboardUnavailable
+            | FailureReason::MicrophoneUnavailable { .. }
+--- new
+            FailureReason::EngineNotConfigured
+            | FailureReason::ClipboardUnavailable
+            | FailureReason::MicrophoneUnavailable { .. } => SkipReason::NotConfigured,
+            FailureReason::UnexpectedResponse
+--- end

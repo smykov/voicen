@@ -1,0 +1,8 @@
+guarantee: AC failure branch: Timeout Display text names no stage (both origins)
+file: crates/voicen-core/src/failure.rs
+added_by: test-writer
+--- old
+    #[error("did not finish in time")]
+--- new
+    #[error("the transcription did not finish in time")]
+--- end

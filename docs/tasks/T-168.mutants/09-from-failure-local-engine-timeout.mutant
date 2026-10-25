@@ -1,0 +1,10 @@
+guarantee: T-020 r1#3: from_failure maps LocalEngineFailed to InvalidResponse (every arm tested)
+file: crates/voicen-core/src/post_process/mod.rs
+added_by: test-writer
+--- old
+            | FailureReason::NoLocalModel
+            | FailureReason::LocalEngineFailed => SkipReason::InvalidResponse,
+--- new
+            | FailureReason::NoLocalModel => SkipReason::InvalidResponse,
+            FailureReason::LocalEngineFailed => SkipReason::Timeout,
+--- end

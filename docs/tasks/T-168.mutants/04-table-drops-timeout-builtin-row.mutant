@@ -1,0 +1,12 @@
+guarantee: AC failure branch: a FailureReason with no SkipReason row (Timeout{Builtin}) fails the table test
+file: crates/voicen-core/src/post_process/mod.rs
+added_by: test-writer
+--- old
+            (
+                FailureReason::Timeout {
+                    origin: TimeoutOrigin::Builtin,
+                },
+                SkipReason::Timeout,
+            ),
+--- new
+--- end

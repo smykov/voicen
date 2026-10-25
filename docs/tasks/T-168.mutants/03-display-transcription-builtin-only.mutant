@@ -1,0 +1,8 @@
+guarantee: AC failure branch: Timeout Display text names no stage (origin Builtin)
+file: crates/voicen-core/src/failure.rs
+added_by: test-writer
+--- old
+    #[error("did not finish in time")]
+--- new
+    #[error("{}", match .origin { TimeoutOrigin::Builtin => "the transcription did not finish in time", TimeoutOrigin::Server => "did not finish in time" })]
+--- end

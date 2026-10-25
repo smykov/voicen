@@ -1,0 +1,8 @@
+guarantee: AC failure branch: a post-processing (origin Server) timeout's Display text does not name transcription
+file: crates/voicen-core/src/failure.rs
+added_by: test-writer
+--- old
+    #[error("did not finish in time")]
+--- new
+    #[error("{}", match .origin { TimeoutOrigin::Server => "the transcription did not finish in time", TimeoutOrigin::Builtin => "did not finish in time" })]
+--- end

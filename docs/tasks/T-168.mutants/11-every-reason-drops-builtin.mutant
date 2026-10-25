@@ -1,0 +1,11 @@
+guarantee: -
+file: crates/voicen-core/src/failure.rs
+added_by: test-writer
+--- old
+        FailureReason::Timeout {
+            origin: TimeoutOrigin::Builtin,
+        },
+        FailureReason::ServerError { status: 503 },
+--- new
+        FailureReason::ServerError { status: 503 },
+--- end

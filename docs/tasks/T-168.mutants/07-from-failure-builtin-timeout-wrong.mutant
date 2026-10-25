@@ -1,0 +1,11 @@
+guarantee: T-020 r1#3: from_failure maps Timeout{Builtin} to Timeout (every arm tested)
+file: crates/voicen-core/src/post_process/mod.rs
+added_by: test-writer
+--- old
+            FailureReason::Timeout { .. } => SkipReason::Timeout,
+--- new
+            FailureReason::Timeout {
+                origin: crate::failure::TimeoutOrigin::Builtin,
+            } => SkipReason::InvalidResponse,
+            FailureReason::Timeout { .. } => SkipReason::Timeout,
+--- end

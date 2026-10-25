@@ -1,0 +1,2 @@
+# T-168: the task's tests only (Timeout Display text and the SkipReason table).
+cargo test -j 2 -p voicen-core --lib -- timeout_display_names_no_stage failure_reasons_map_to_skip_reasons
