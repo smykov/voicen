@@ -6,7 +6,7 @@
 //! carries a rule and a segment index only.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
-use serde::{Deserialize, Serialize};
+use serde::{de, Deserialize, Deserializer, Serialize};
 
 use crate::call::{CallId, InvalidRule, Track};
 use crate::settings::{is_lang_code, LangCode};
@@ -35,6 +35,7 @@ impl EngineRef {
 
 /// A speaker of the call: `{id, name}`; in 1a exactly `me` and `s1`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Speaker {
     pub id: String,
     pub name: String,
@@ -74,15 +75,30 @@ pub struct SegmentV1 {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EnginesV1 {
+    /// `"api:<model>"` as written by [`merge`] from an [`EngineRef`]; the model is free text, so
+    /// this form is not parsed on read.
     pub transcription: EngineRef,
-    /// Always `null` in 1a.
+    /// Refused unless `null` at parse (a missing key reads as `null`); [`merge`] writes `null`.
+    #[serde(default, deserialize_with = "null_only")]
     pub diarization: Option<EngineRef>,
+}
+
+/// A parse error for any value but `null`; never carries the value.
+fn null_only<'de, D>(deserializer: D) -> Result<Option<EngineRef>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    match Option::<EngineRef>::deserialize(deserializer)? {
+        None => Ok(None),
+        Some(_) => Err(de::Error::custom("engines.diarization is not null")),
+    }
 }
 
 /// Why a `transcript.json` text is not a schema-1 value at all (no R17 rule applies).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TranscriptParseError {
-    /// Not JSON, an unknown key (`hidden`, `confidence`, ...), a missing required key, a wrong type.
+    /// Not JSON, an unknown key (`hidden`, `confidence`, ...), a missing required key, a wrong
+    /// type, a non-null `engines.diarization`.
     Malformed,
     /// A well-formed document whose `schema` is not 1.
     UnsupportedSchema(i64),
@@ -346,13 +362,30 @@ fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// `YYYY-MM-DD HH:MM` of an ISO-8601 text; a shorter or other text is shown as it is, because
-/// `started_at` is not one of the R17 rules and the renderer must not fail on it.
+/// `YYYY-MM-DD HH:MM` of a text that starts with `YYYY-MM-DDTHH:MM`; any other text is shown whole,
+/// its whitespace folded to stay on one line, because `started_at` is not one of the R17 rules and
+/// the renderer must not fail on it.
 fn wall_clock(started_at: &str) -> String {
     match (started_at.get(..10), started_at.get(11..16)) {
-        (Some(date), Some(time)) => format!("{date} {time}"),
+        (Some(date), Some(time)) if starts_with_wall_clock(started_at) => {
+            format!("{date} {time}")
+        }
         _ => one_line(started_at),
     }
+}
+
+/// ASCII digits and separators at the positions of `YYYY-MM-DDTHH:MM`.
+fn starts_with_wall_clock(text: &str) -> bool {
+    const SHAPE: &[u8; 16] = b"0000-00-00T00:00";
+    text.as_bytes().get(..SHAPE.len()).is_some_and(|head| {
+        head.iter().zip(SHAPE).all(|(byte, expected)| {
+            if *expected == b'0' {
+                byte.is_ascii_digit()
+            } else {
+                byte == expected
+            }
+        })
+    })
 }
 
 /// Whole seconds, rounded down; a negative time is 0.
@@ -590,6 +623,43 @@ mod tests {
     }
 
     #[test]
+    fn an_unknown_key_in_a_speaker_is_refused() {
+        // Bite: dropping deny_unknown_fields on Speaker; the key would be lost on the next write.
+        let text = FULL.replacen(r#""name":"Me""#, r#""name":"Me","extra":true"#, 1);
+        assert_ne!(text, FULL);
+        assert_eq!(
+            TranscriptV1::from_json(&text),
+            Err(TranscriptParseError::Malformed)
+        );
+    }
+
+    #[test]
+    fn a_non_null_diarization_is_refused_on_read() {
+        // Bite: reading `diarization` as a plain Option; `hidden` is refused the same way in 1a.
+        let text = FULL.replacen(r#""diarization":null"#, r#""diarization":"api:x""#, 1);
+        assert_ne!(text, FULL);
+        assert_eq!(
+            TranscriptV1::from_json(&text),
+            Err(TranscriptParseError::Malformed)
+        );
+    }
+
+    #[test]
+    fn a_missing_diarization_key_reads_as_null() {
+        // Bite: `deserialize_with` without `default`, which would make the key required.
+        let text = FULL.replacen(r#","diarization":null"#, "", 1);
+        assert_ne!(text, FULL);
+        assert_eq!(load(&text).engines.diarization, None);
+    }
+
+    #[test]
+    fn a_transcription_of_any_text_is_accepted_on_read() {
+        // The model name is free text: the `api:<model>` form is not parsed on read.
+        let text = FULL.replacen("api:whisper-1", "no colon here", 1);
+        assert_eq!(load(&text).engines.transcription.as_str(), "no colon here");
+    }
+
+    #[test]
     fn schema_2_is_refused() {
         // Bite: not checking `schema`.
         let text = FULL.replacen(r#""schema":1"#, r#""schema":2"#, 1);
@@ -650,6 +720,18 @@ mod tests {
         // Pinned by tests/diag_format.rs (`track=` lines). Bite: any other spelling.
         assert_eq!(Track::Mic.as_str(), "mic");
         assert_eq!(Track::System.as_str(), "system");
+    }
+
+    #[test]
+    fn track_serde_name_is_its_as_str_name() {
+        // `meta.json` and IPC use serde's name, `transcript.json` and logs use `as_str`.
+        // Bite: renaming a variant or changing one table alone.
+        for track in [Track::Mic, Track::System] {
+            assert_eq!(
+                serde_json::to_value(track).ok(),
+                Some(serde_json::Value::from(track.as_str()))
+            );
+        }
     }
 
     #[test]
@@ -1454,6 +1536,78 @@ mod tests {
             let t = md_doc(&[], 1000, odd);
             assert!(render_markdown(&t, "T", &[]).starts_with("# T\n"));
         }
+    }
+
+    /// The Markdown of an empty transcript whose `started_at` is `json_text`, as written in JSON.
+    fn markdown_with_started_at(json_text: &str) -> String {
+        render_markdown(&md_doc(&[], 1000, json_text), "T", &[])
+    }
+
+    #[test]
+    fn a_short_odd_started_at_is_the_whole_date_line() {
+        // Bite: the fallback emptied (mutant 70).
+        assert_eq!(
+            markdown_with_started_at("short"),
+            "# T\nshort · 0:00:01\n\n"
+        );
+    }
+
+    #[test]
+    fn a_long_odd_started_at_is_kept_whole() {
+        // 16+ bytes with no ISO shape. Bite: slicing without the shape check drops `at all`.
+        assert_eq!(
+            markdown_with_started_at("not an iso date at all"),
+            "# T\nnot an iso date at all · 0:00:01\n\n"
+        );
+    }
+
+    #[test]
+    fn a_line_break_in_the_first_16_bytes_of_started_at_starts_no_second_line() {
+        // The JSON escape decodes to a line feed. Bite: slicing, or the fallback without folding.
+        assert_eq!(
+            markdown_with_started_at("2026-10\\n-30T14:05:09Z"),
+            "# T\n2026-10 -30T14:05:09Z · 0:00:01\n\n"
+        );
+    }
+
+    #[test]
+    fn a_multibyte_started_at_is_kept_whole() {
+        // In the first text byte 10 falls inside a two-byte letter, in the second text byte 16.
+        assert_eq!(
+            markdown_with_started_at("2026-10-3\u{e9}T14:05:09Z"),
+            "# T\n2026-10-3\u{e9}T14:05:09Z · 0:00:01\n\n"
+        );
+        assert_eq!(
+            markdown_with_started_at("\u{442}\u{435}\u{43a}\u{441}\u{442} \u{431}\u{435}\u{437} \u{434}\u{430}\u{442}\u{44b}"),
+            "# T\n\u{442}\u{435}\u{43a}\u{441}\u{442} \u{431}\u{435}\u{437} \u{434}\u{430}\u{442}\u{44b} · 0:00:01\n\n"
+        );
+    }
+
+    #[test]
+    fn a_started_at_off_the_shape_at_any_position_is_kept_whole() {
+        // One wrong byte per kind of position. Bite: a shape check that skips digits or separators.
+        for odd in [
+            "2026-1x-30T14:05:09Z",
+            "2026/10-30T14:05:09Z",
+            "2026-10/30T14:05:09Z",
+            "2026-10-30 14:05:09Z",
+            "2026-10-30T14-05:09Z",
+            "2026-10-30T14:0x:09Z",
+        ] {
+            assert_eq!(
+                markdown_with_started_at(odd),
+                format!("# T\n{odd} · 0:00:01\n\n")
+            );
+        }
+    }
+
+    #[test]
+    fn exactly_the_16_bytes_of_the_shape_are_a_date_and_time() {
+        // Bite: requiring more than the shape (the seconds or the offset).
+        assert_eq!(
+            markdown_with_started_at("2026-10-30T14:05"),
+            "# T\n2026-10-30 14:05 · 0:00:01\n\n"
+        );
     }
 
     // ---- failure-branch bite: survivors of the catalog ------------------------------------
