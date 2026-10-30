@@ -35,7 +35,7 @@ use std::sync::mpsc::{channel, Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, UNIX_EPOCH};
 
-use common::os_answer::OS_ANSWER_BUDGET;
+use common::os_answer::{in_time, OS_ANSWER_BUDGET};
 use common::timing::{deadline, left};
 use serde_json::{json, Value};
 use voicen_core::autostart::FakeAutostart;
@@ -62,14 +62,10 @@ use voicen_core::timeouts::Timeouts;
 
 const OS: Option<&str> = Some("en-US");
 /// Long enough for any local end event; a hang fails the test instead of the run.
-const END_WAIT: Duration = Duration::from_secs(10);
+const END_WAIT: Duration = OS_ANSWER_BUDGET;
 
 fn timeouts() -> Timeouts {
-    Timeouts {
-        connect: Duration::from_secs(2),
-        download_no_data: Duration::from_secs(5),
-        ..Timeouts::default()
-    }
+    in_time()
 }
 
 #[test]

@@ -21,8 +21,8 @@ use common::download::{
     fixture_with, fixture_with_timeouts, timeouts, Events, Fixture, Seen, END_WAIT, FILE, PART,
 };
 use common::held::Held;
-use common::os_answer::OS_ANSWER_BUDGET;
-use common::timing::{at_least, at_most_per_second, between, now, Took};
+use common::os_answer::{in_time, OS_ANSWER_BUDGET};
+use common::timing::{at_least, at_most_per_second, between, now, passed, with_premise, Took, M};
 use common::{dir_entries, entry, model_bytes, FakeDisk, Serve, Server, NEEDED, SIZE};
 use voicen_core::local_models::catalog::ModelId;
 use voicen_core::local_models::download::{DownloadError, DownloadEvent, DownloadFailure};
@@ -32,47 +32,61 @@ use voicen_core::settings::validate::{validate, KeyEditsWithPresence};
 use voicen_core::settings::{defaults, EngineKind, ErrorCode, FieldId};
 use voicen_core::timeouts::Timeouts;
 
-/// How long a stalling or silent server holds the connection: three times
-/// [`END_WAIT`], so a client that waits for the hold (no read timeout, reqwest's
-/// 30 s default, a cancel that waits for the read) ends after `END_WAIT` and the
-/// test fails on "no end event", not on a wall-clock ceiling (T-080 I2).
+/// How long a stalling or silent server holds the connection: past [`END_WAIT`], so a
+/// client that waits for the hold (no read timeout, reqwest's 30 s default, a cancel
+/// that waits for the read) ends after `END_WAIT` and the test fails on "no end
+/// event", not on a wall-clock ceiling (T-080 I2).
 const HOLD: Duration = Duration::from_secs(30);
 
 /// The no-data limit of every scenario that expects the download to go on and whose
-/// limit is not the subject (T-111: the in-time leg; widened to the budget scale).
+/// limit is not the subject (T-111: the in-time leg, budget scale).
 fn in_time_no_data() -> Duration {
-    Duration::from_secs(2)
+    in_time().download_no_data
 }
 
-/// The stall legs' no-data limit (the stall is the subject: the end comes after it).
+/// The stall legs' no-data limit. Bite-bound (T-111 residual at `M`, named in
+/// docs/decisions/core-tests.md): the stall is the subject and the end comes after
+/// it, and the retry shares the `Downloader` and this limit.
 fn stall_no_data() -> Duration {
-    Duration::from_millis(300)
+    M
 }
 
-/// The trickle test's no-data limit and the trickle's chunk and gap.
+/// The trickle test's no-data limit, `M` above its gap (T-111 residual), and the
+/// trickle's chunk and gap: 66 chunks, about 16.5 s, at least 3 x the limit.
 fn trickle_no_data() -> Duration {
-    Duration::from_millis(400)
+    TRICKLE_EVERY + M
 }
-const TRICKLE_CHUNK: usize = 2_000;
-const TRICKLE_EVERY: Duration = Duration::from_millis(50);
+const TRICKLE_CHUNK: usize = 1_000;
+const TRICKLE_EVERY: Duration = Duration::from_millis(250);
 
-/// The no-data limit of the cancel-during-stall test, which the cancel must beat.
+/// The no-data limit of the cancel-during-stall test, which the cancel must beat;
+/// a host stall past it is a missed premise (`with_premise`), never a red.
 fn cancel_no_data() -> Duration {
-    Duration::from_millis(800)
+    M
 }
 
-/// A test-thread pause past every limit of the cancel tests above (a host stall).
+/// A test-thread pause (a host stall) past the old 3 s hold and the old ~4 s trickle
+/// of the cancel tests, still below `M`.
 const LATE: Duration = Duration::from_millis(4_500);
+
+/// A transfer that outlasts any test thread: chunks spread over at least the budget,
+/// under the in-time limit. For the tests that act on a running download and whose
+/// subject is not its end (T-111: the race with the end of the transfer is removed).
+/// A client that misses the cancel shows as "no end event within `END_WAIT`".
+fn long_trickle() -> Serve {
+    const CHUNK: usize = 1_000;
+    Serve::Trickle {
+        chunk: CHUNK,
+        every: OS_ANSWER_BUDGET / (SIZE.div_ceil(CHUNK as u64) as u32),
+    }
+}
 
 /// `base` served by `server`, with `download_no_data = no_data` and every other
 /// deadline (connect included) longer than [`END_WAIT`]: a client that takes its
 /// read timeout from another field ends after `END_WAIT`, and the test fails on
 /// "no end event" (T-080 I2: the outcome, not a ceiling, catches a longer limit).
 fn stall_fixture(server: &Server, no_data: Duration) -> Fixture {
-    let t = Timeouts {
-        connect: HOLD,
-        ..timeouts(no_data)
-    };
+    let t = timeouts(no_data);
     assert!(
         HOLD > END_WAIT,
         "HOLD {HOLD:?} must exceed END_WAIT {END_WAIT:?}"
@@ -319,7 +333,7 @@ fn http_500_fails_http_status_then_retry_succeeds() {
 
 #[test]
 fn stall_past_no_data_fails_interrupted_within_the_timeout_then_retry_succeeds() {
-    // 4 KiB, then HOLD (30 s) of silence; no_data = 300 ms. Bite: no read timeout
+    // 4 KiB, then HOLD (30 s) of silence; no_data = M. Bite: no read timeout
     // (reqwest's 30 s default, or none) or the timeout taken from another field (all
     // longer than END_WAIT here): no end event within END_WAIT; another reason; a
     // shorter limit (the end before no_data).
@@ -336,7 +350,7 @@ fn stall_past_no_data_fails_interrupted_within_the_timeout_then_retry_succeeds()
 
 #[test]
 fn no_response_headers_within_no_data_fails_then_retry_succeeds() {
-    // The server accepts and never answers for HOLD (30 s); no_data = 300 ms also
+    // The server accepts and never answers for HOLD (30 s); no_data = M also
     // bounds the wait for the headers (ClientBuilder::timeout). Bite: a client
     // without a timeout on the response wait, or one taken from another field (all
     // longer than END_WAIT here): no end event within END_WAIT; a shorter limit (the end
@@ -389,18 +403,18 @@ fn part_file_that_cannot_be_created_fails_disk_error_then_retry_succeeds() {
 
 #[test]
 fn trickle_longer_than_no_data_succeeds_and_stall_fails() {
-    // T-016 Investigation "Recommended" first test. A chunk every 50 ms for ~1.6 s
-    // with no_data = 400 ms must finish: the no-data timeout is per read, not a
+    // T-016 Investigation "Recommended" first test. A chunk every 250 ms for ~16.5 s
+    // with no_data = 5.25 s must finish: the no-data timeout is per read, not a
     // total. The same no_data fails a stall. Bite: RequestBuilder::timeout(no_data)
-    // (a total timeout ends the trickle at ~400 ms), no timeout at all (the stall
+    // (a total timeout ends the trickle at ~5.25 s), no timeout at all (the stall
     // half gives no end event within END_WAIT: the hold is HOLD), progress only at
     // the end, a temp name other than `<file>.part` (cleanup_at_start would miss
     // it).
     //
-    // Margins: each gap leaves 350 ms of scheduling slack below no_data, and the
-    // whole trickle lasts 4x no_data. The earlier 60 ms / 150 ms pair left 90 ms,
-    // and a loaded host stretched one gap past 150 ms (2 failures in 50 runs,
-    // T-016 review round 1 loop).
+    // Margins (T-111, residual at M): each gap leaves M of scheduling slack below
+    // no_data, and the whole trickle lasts at least 3x no_data. The earlier
+    // 60 ms / 150 ms pair left 90 ms, and a loaded host stretched one gap past 150 ms
+    // (2 failures in 50 runs, T-016 review round 1 loop).
     let no_data = trickle_no_data();
     let server = Server::start(vec![Serve::Trickle {
         chunk: TRICKLE_CHUNK,
@@ -573,7 +587,9 @@ fn cancel_after_first_progress_late(f: &Fixture, label: &str, pause: Duration) -
 
 #[test]
 fn cancel_during_stall_ends_cancelled_only_after_the_part_is_gone() {
-    cancel_during_stall_body(Duration::ZERO);
+    with_premise("cancel before the read timeout", OS_ANSWER_BUDGET, || {
+        cancel_during_stall_body(Duration::ZERO)
+    });
 }
 
 /// The scenario with the test thread paused `pause` after the first Progress.
@@ -581,7 +597,7 @@ fn cancel_during_stall_ends_cancelled_only_after_the_part_is_gone() {
 /// T-111: it must return false, not panic, when it did not.
 fn cancel_during_stall_body(pause: Duration) -> bool {
     // Design point 4: the flag takes effect when the current read returns
-    // (≤ no_data = 800 ms here); the end is Cancelled, not Failed, and comes after
+    // (≤ no_data = M here); the end is Cancelled, not Failed, and comes after
     // the `.part` is removed. Bite: Cancelled emitted before the remove, the read
     // timeout reported as Failed{DownloadInterrupted}, the `.part` left, cancel
     // waiting for the hold (HOLD, so no end event within END_WAIT).
@@ -589,8 +605,23 @@ fn cancel_during_stall_body(pause: Duration) -> bool {
         after: 4096,
         hold: HOLD,
     }]);
-    let f = stall_fixture(&server, cancel_no_data());
-    let (end, mut ev) = cancel_after_first_progress_late(&f, "stall", pause);
+    let no_data = cancel_no_data();
+    let f = stall_fixture(&server, no_data);
+    let mut ev = f.start(ModelId::Base).expect("start");
+    let first = ev.wait_progress();
+    assert!(
+        first.dir.contains(&PART.to_string()),
+        "stall: no .part while downloading"
+    );
+    std::thread::sleep(pause);
+    let cancelled = f.dl.cancel(ModelId::Base);
+    // Read after the act: the read that stalls starts after this Progress, so a
+    // cancel inside no_data of it came before the read timeout could end the download.
+    if passed(first.at, no_data) {
+        return false;
+    }
+    assert!(cancelled, "stall: cancel of the running download");
+    let end = ev.wait_end();
     assert_eq!(end.event, DownloadEvent::Cancelled { id: ModelId::Base });
     assert!(end.dir.is_empty(), "dir at Cancelled: {:?}", end.dir);
     let more = ev.drain_for(Duration::from_millis(300));
@@ -621,13 +652,10 @@ fn cancel_during_stall_is_no_verdict_when_the_stall_outlasts_no_data() {
 
 #[test]
 fn cancel_during_steady_transfer_ends_cancelled_quickly() {
-    // Small chunks every 60 ms (~4 s in total): the flag is seen between reads.
-    // Bite: cancel not checked in the read loop (the download finishes instead, so
-    // the end is Finished, not Cancelled).
-    let server = Server::start(vec![Serve::Trickle {
-        chunk: 1_000,
-        every: Duration::from_millis(60),
-    }]);
+    // Small chunks over at least the budget: the flag is seen between reads. Bite:
+    // cancel not checked in the read loop (the download runs on: no end event within
+    // END_WAIT).
+    let server = Server::start(vec![long_trickle()]);
     let f = fixture(&server, in_time_no_data());
     let (end, _ev) = cancel_after_first_progress(&f, "steady");
     assert_eq!(end.event, DownloadEvent::Cancelled { id: ModelId::Base });
@@ -711,10 +739,7 @@ fn cancel_ends_a_trickle_that_outlasts_end_wait_before_its_end() {
 fn cancel_of_another_model_or_when_idle_returns_false_and_changes_nothing() {
     // Bite: cancel ignoring the id (stops the running `base` when asked for `tiny`),
     // cancel returning true with nothing running.
-    let server = Server::start(vec![Serve::Stall {
-        after: 4096,
-        hold: Duration::from_secs(3),
-    }]);
+    let server = Server::start(vec![long_trickle()]);
     let f = fixture(&server, in_time_no_data());
     assert!(!f.dl.cancel(ModelId::Base), "idle cancel");
     let mut ev = f.start(ModelId::Base).expect("start");
@@ -741,10 +766,7 @@ fn cancel_of_another_model_or_when_idle_returns_false_and_changes_nothing() {
 fn second_start_while_one_runs_is_busy_and_sends_no_request() {
     // At most one download (invariant). Bite: a second thread started, Busy only for
     // the same id, a request sent before the refusal.
-    let first = Server::start(vec![Serve::Stall {
-        after: 4096,
-        hold: Duration::from_secs(3),
-    }]);
+    let first = Server::start(vec![long_trickle()]);
     let other = Server::start(vec![]);
     let f = fixture_with(
         vec![

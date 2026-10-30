@@ -243,13 +243,16 @@ fn dictate(settings: Settings) -> Run {
 /// (seconds). T-111: the connect limit must stay M below the limit, so a connect
 /// value read as the request limit ends the job early and `at_least` sees it, and a
 /// host stall of less than M cannot make the connect timer the verdict.
-const PP_LIMIT_S: u32 = 5;
-const PP_CONNECT_S: u32 = 2;
+const PP_LIMIT_S: u32 = 10;
+const PP_CONNECT_S: u32 = 5;
 
 /// The snapshot of the control leg: the same server, a post-processing limit that
-/// the answer must beat. T-111 widens it (the answer is not the subject there).
+/// the answer must beat. T-111 widens it (the answer is not the subject there; the
+/// 15 s default is pinned by `default_deadline_skips_*`).
 fn control_snapshot(base: &str) -> Settings {
-    snapshot(base)
+    let mut s = snapshot(base);
+    s.timeouts.post_processing_s = 60;
+    s
 }
 
 #[test]
@@ -284,16 +287,17 @@ async fn control_leg_survives_a_chat_answer_stalled_past_the_default_limit() {
 
 #[tokio::test]
 async fn configured_post_processing_timeout_delivers_the_raw_transcript() {
-    // Acceptance 2 with #99: a job whose snapshot says post_processing_s = 5 (the
-    // #99 minimum), against a chat endpoint answering after 5.5 s (the end of
-    // SC-003's 0.5 s tolerance: an outcome bracket, decision #149, T-110), is
+    // Acceptance 2 with #99: a job whose snapshot says post_processing_s = 10
+    // (T-111: M above connect_s; the #99 minimum is pinned by `TimeoutRole::bounds`),
+    // against a chat endpoint answering after 10.5 s (the end of SC-003's 0.5 s
+    // tolerance: an outcome bracket, decision #149, T-110), is
     // delivered with the raw transcript byte for byte, ends as
     // DeliveredSkipped(Timeout), no pending recording, JobFinished outcome text,
-    // and takes at least 5 s; no wall-clock ceiling (F-021). connect_s = 2, so
-    // the connect value read as the request limit would end it at about 2 s
-    // (at_least). The same server with the default snapshot (15 s) is applied, so
+    // and takes at least 10 s; no wall-clock ceiling (F-021). connect_s = 5, so
+    // the connect value read as the request limit would end it at about 5 s
+    // (at_least). The same server with post_processing_s = 60 is applied, so
     // the server does answer. Bite: the processor on Timeouts::default() or any
-    // limit past 5.5 s (the answer applied), on the pipeline's test
+    // limit past 10.5 s (the answer applied), on the pipeline's test
     // override field (None in production), on the connect value, or the pipeline
     // deriving a second Timeouts for the processor that ignores the snapshot; the
     // processed text or nothing delivered on a skip; the skip ended as Delivered
@@ -343,7 +347,7 @@ async fn configured_post_processing_timeout_delivers_the_raw_transcript() {
         "{finished:?}"
     );
 
-    // The same server, the default snapshot (post_processing 15 s): applied.
+    // The same server, the control snapshot (post_processing 60 s): applied.
     let run = dictate(control_snapshot(&base));
     assert_eq!(
         run.report,
@@ -351,7 +355,7 @@ async fn configured_post_processing_timeout_delivers_the_raw_transcript() {
             end: JobEnd::Delivered { notice: None },
             pending: None,
         },
-        "default limit"
+        "control limit"
     );
     assert_eq!(run.clipboard, vec![PROCESSED.to_string()]);
 }

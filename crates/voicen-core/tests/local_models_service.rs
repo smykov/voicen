@@ -24,7 +24,7 @@ use std::sync::mpsc::{channel, Receiver, RecvTimeoutError};
 use std::sync::Arc;
 use std::time::Duration;
 
-use common::os_answer::OS_ANSWER_BUDGET;
+use common::os_answer::{in_time, OS_ANSWER_BUDGET};
 use common::timing::{deadline, left};
 use serde_json::{json, Value};
 use voicen_core::i18n::{self, MessageId, MESSAGE_IDS};
@@ -45,18 +45,14 @@ use voicen_core::timeouts::Timeouts;
 
 /// Long enough for any local end event; a hang (a lock held across `emit`) fails
 /// the test instead of the run.
-const END_WAIT: Duration = Duration::from_secs(10);
+const END_WAIT: Duration = OS_ANSWER_BUDGET;
 /// How long "nothing more happens" is watched.
 const QUIET: Duration = Duration::from_millis(300);
 /// `Downloader::start`'s worker thread name (download.rs).
 const DOWNLOAD_THREAD: &str = "voicen-model-download";
 
 fn timeouts() -> Timeouts {
-    Timeouts {
-        connect: Duration::from_secs(2),
-        download_no_data: Duration::from_secs(5),
-        ..Timeouts::default()
-    }
+    in_time()
 }
 
 #[test]
@@ -73,11 +69,13 @@ fn helper_deadlines_and_end_wait_are_at_the_budget_scale() {
     assert!(END_WAIT >= OS_ANSWER_BUDGET, "END_WAIT {END_WAIT:?}");
 }
 
-/// Slow enough to look at and cancel mid-body: 1 KiB every 50 ms (~3.2 s).
+/// Slow enough to look at and cancel mid-body: 1 KiB every second (~64 s, past
+/// `END_WAIT`), so no test thread races the end of the transfer (T-111) and a cancel
+/// that does not reach the downloader shows as "no end event".
 fn trickle() -> Serve {
     Serve::Trickle {
         chunk: 1024,
-        every: Duration::from_millis(50),
+        every: Duration::from_secs(1),
     }
 }
 

@@ -7,8 +7,10 @@
 //!   tests since T-044, P-010; the download harness is in [`download`]);
 //! - [`os_answer`] (T-080, I1): the only source of a target whose outcome is an OS
 //!   answer (refused, unresolvable), and of the never-answered blackhole
-//!   (`Unanswered`), together with its deadlines;
-//! - [`timing`] (T-080, I2): the only place a core test reads the wall clock;
+//!   (`Unanswered`), together with its deadlines, and `in_time()` (T-111), the
+//!   deadlines of a leg that expects an answer;
+//! - [`timing`] (T-080, I2): the only place a core test reads the wall clock, with
+//!   `M`, `with_premise` and `skip` (T-111);
 //! - [`held`] (T-079): a lookup held without an answer until the test releases it,
 //!   and the ordering check "the call returned while the lookup was held".
 //!

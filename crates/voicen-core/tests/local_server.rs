@@ -23,7 +23,7 @@ mod refused_addr_tests;
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
-use common::os_answer::{OsAnswer, OS_ANSWER_BUDGET};
+use common::os_answer::{in_time, OsAnswer, OS_ANSWER_BUDGET};
 use common::timing::{ago, at_least, measure};
 use serde_json::json;
 use voicen_core::audio::{wav, AudioBuffer};
@@ -69,10 +69,9 @@ fn audio() -> AudioBuffer {
 /// local-server deadlines differ, so a client that reads the wrong field shows.
 fn timeouts(api_transcription: Duration, local_server: Duration) -> Timeouts {
     Timeouts {
-        connect: Duration::from_secs(2),
         api_transcription,
         local_server,
-        ..Timeouts::default()
+        ..in_time()
     }
 }
 
@@ -86,7 +85,7 @@ fn req_with(t: Timeouts) -> TranscribeRequest {
 /// The whole-request limit of a leg that expects an answer and whose deadline is not
 /// the subject (T-111).
 fn in_time_total() -> Duration {
-    Duration::from_secs(5)
+    in_time().local_server
 }
 
 fn req() -> TranscribeRequest {

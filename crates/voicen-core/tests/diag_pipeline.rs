@@ -28,7 +28,7 @@ mod refused_addr_tests;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use common::os_answer::{OsAnswer, OS_ANSWER_BUDGET};
+use common::os_answer::{in_time, OsAnswer, OS_ANSWER_BUDGET};
 use common::timing::{ago, at_least, now};
 use diag_support::{
     all_lines, closed, contains, dictation_lines, files_under, open_log, utf16le, Line,
@@ -230,22 +230,13 @@ fn settings_service(stored: &Settings) -> (SettingsService, LoadOutcome) {
 /// The deadlines of the scenarios that expect an answer at once: the deadline is
 /// not their subject, so a host stall must not decide them (T-111).
 fn immediate_timeouts() -> Timeouts {
-    Timeouts {
-        connect: Duration::from_secs(2),
-        api_transcription: Duration::from_millis(300),
-        ..Timeouts::default()
-    }
+    in_time()
 }
 
 /// The deadlines of the post-processing outcome scenarios except the timeout one
 /// (`t_pp_short` derives from it and only shortens `post_processing`).
 fn pp_outcome_timeouts() -> Timeouts {
-    Timeouts {
-        connect: Duration::from_secs(2),
-        api_transcription: Duration::from_secs(5),
-        post_processing: Duration::from_secs(5),
-        ..Timeouts::default()
-    }
+    in_time()
 }
 
 #[test]

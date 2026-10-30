@@ -34,7 +34,7 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, Weak};
 use std::thread::{self, ThreadId};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
-use common::timing::{ago, at_least, between, now, passed, try_ago};
+use common::timing::{ago, at_least, between, now, passed, skip, try_ago, with_premise};
 
 use voicen_core::audio::{wav, AudioBuffer};
 use voicen_core::autostart::FakeAutostart;
@@ -64,7 +64,7 @@ use voicen_core::recording::{
 };
 use voicen_core::secrets::{CredentialStore, FakeCredentialStore, KeyEdits, KeySlot};
 use voicen_core::settings::file::FakeSettingsFile;
-use voicen_core::settings::gate::SettingsTab;
+use voicen_core::settings::gate::{Blocked, SettingsTab};
 use voicen_core::settings::service::{SaveOutcome, SaveRequest, SettingsDeps, SettingsService};
 use voicen_core::settings::{defaults, EngineKind, FieldId, LoadOutcome, Mode, Settings};
 use voicen_core::test_support::realtime::{read_wav, RealtimeSource};
@@ -138,31 +138,6 @@ fn settled<T: PartialEq>(mut calls: Vec<T>, hidden: T, raised: Instant) -> Vec<T
         calls.pop();
     }
     calls
-}
-
-/// Runs a real-time scenario whose verdict needs the test thread to act before a
-/// product timer fires (B's press before A's message expires; T-110 review 1 #1).
-/// `run` builds its own rig, checks that premise with `passed` right after the
-/// act, and returns `false` when a host stall made the test thread miss it; it is
-/// then re-run on a fresh rig while `BUDGET` since the first start allows. When
-/// every run missed, the test is skipped with the reason printed: a missed premise
-/// gives no verdict, never a red. The verdict is the assertions inside `run`.
-fn with_premise(what: &str, mut run: impl FnMut() -> bool) {
-    let start = now();
-    let mut missed = 0;
-    loop {
-        if run() {
-            return;
-        }
-        missed += 1;
-        if passed(start, BUDGET) {
-            eprintln!(
-                "skipped: {what}: the premise was missed {missed} time(s) within {BUDGET:?} \
-                 (a host stall), no verdict"
-            );
-            return;
-        }
-    }
 }
 
 /// The "microphone unavailable" overlay with the catalog id of its reason
@@ -1282,7 +1257,7 @@ fn engine_none_opens_no_capture_and_asks_for_the_engine_tab() {
     // Row 6, Acceptance 2 (FR-007; blocked_actions: notice, then open settings on
     // Engine). No capture is started; the overlay shows notice.choose_engine for
     // 3 s from the press before the shell is asked to open settings on the Engine
-    // tab; the tray is not touched; no event; the release does nothing. Bite: a
+    // tab; the tray is not touched; one `PressBlocked` event; the release does nothing. Bite: a
     // capture opened before the gate, the wrong tab, the request before the
     // notice, the notice shown outside the controller (no overlay message), a
     // tray change.
@@ -1324,12 +1299,11 @@ fn engine_none_opens_no_capture_and_asks_for_the_engine_tab() {
     // T-006 Refresh 5 (changed contract; was "no event for a blocked press"): the
     // press emits exactly one blocked event with its reason, the release none, so
     // a blocked press leaves a trace in the log (the LogObserver writes it).
-    // Compared through Debug so this binary compiles before the variant exists
-    // (red on the assertion, not on the build): `DictationEvent::PressBlocked {
-    // reason: settings::gate::Blocked::NoEngine }`.
     assert_eq!(
-        format!("{:?}", rig.events()),
-        "[PressBlocked { reason: NoEngine }]",
+        rig.events(),
+        vec![DictationEvent::PressBlocked {
+            reason: Blocked::NoEngine,
+        }],
         "exactly one blocked event for a blocked press, none for its release"
     );
     assert_eq!(rig.engine.factory_calls(), 0);
@@ -1703,7 +1677,7 @@ fn timer_follows_the_latest_deadline() {
     // `until`; checked with `passed`, not timed by the 1 s sleep, so a host stall
     // past A's deadline re-runs the scenario (`with_premise`) instead of turning a
     // correct timer red.
-    with_premise("B's press before A's until", || {
+    with_premise("B's press before A's until", BUDGET, || {
         let rig = Rig::new(api_settings(), always(TEXT));
         rig.audio.set_start_error(Some(CaptureError::AccessDenied));
         let ta = now();
@@ -1765,7 +1739,7 @@ fn a_job_failure_during_a_recording_shows_after_its_release_for_the_rest_of_its_
     // earliest instant `until` can be counted from), not timed by the 1 s sleep,
     // so a host stall past A's deadline re-runs the scenario (`with_premise`)
     // instead of turning a correct expiry red.
-    with_premise("B's release before A's until", || {
+    with_premise("B's release before A's until", BUDGET, || {
         let [a, b, _] = three_recordings();
         let (a_entered_tx, a_entered) = mpsc::channel::<()>();
         let (go_a, go_a_rx) = mpsc::channel::<()>();
@@ -2223,7 +2197,7 @@ fn the_session_timer_stops_a_recording_at_its_max_length() {
     // deadline (it sleeps on the message deadline only), the timer ticking without
     // the stop path (the recording stays on).
     let Some(t0) = try_ago(MAX_LENGTH - ms(500)) else {
-        eprintln!("skipped: the monotonic clock is younger than 10 minutes on this host");
+        skip("the monotonic clock is younger than 10 minutes on this host");
         return;
     };
     let rig = Rig::new(api_settings(), always(TEXT));

@@ -10,6 +10,7 @@ use std::sync::mpsc::{channel, Receiver, RecvTimeoutError};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use super::os_answer::in_time;
 use super::{
     catalog, dir_entries, entry, model_bytes, FakeDisk, Server, NEEDED, QUERY_SECRET, URL_PATH_MARK,
 };
@@ -22,8 +23,11 @@ use voicen_core::timeouts::Timeouts;
 
 pub const FILE: &str = "ggml-base.bin";
 pub const PART: &str = "ggml-base.bin.part";
-/// Long enough for any local end event; a hang fails the test instead of the run.
-pub const END_WAIT: Duration = Duration::from_secs(10);
+/// Long enough for any local end event, the ~16.5 s trickle of
+/// `local_download::trickle_*` by at least `timing::M`; a hang fails the test instead
+/// of the run. Below reqwest's 30 s default, so a client without a read timeout shows
+/// as "no end event" (T-111).
+pub const END_WAIT: Duration = Duration::from_secs(25);
 
 // ---- harness ------------------------------------------------------------------
 
@@ -154,11 +158,11 @@ impl Fixture {
     }
 }
 
+/// The in-time deadlines (T-111) with `download_no_data = no_data`.
 pub fn timeouts(no_data: Duration) -> Timeouts {
     Timeouts {
-        connect: Duration::from_secs(2),
         download_no_data: no_data,
-        ..Timeouts::default()
+        ..in_time()
     }
 }
 
@@ -168,8 +172,8 @@ pub fn fixture_with(entries: Vec<CatalogEntry>, disk: Arc<FakeDisk>, no_data: Du
 }
 
 /// [`fixture_with`] under the given deadlines. A refused-port test passes the
-/// deadlines of its `super::os_answer::OsAnswer` case: the 2 s connect and no-data
-/// of [`timeouts`] are below a refused connect's ~2.17 s on windows-latest (T-048).
+/// deadlines of its `super::os_answer::OsAnswer` case (T-048: a refused connect takes
+/// ~2.17 s on windows-latest; the case's probe checks it within the budget).
 pub fn fixture_with_timeouts(
     entries: Vec<CatalogEntry>,
     disk: Arc<FakeDisk>,

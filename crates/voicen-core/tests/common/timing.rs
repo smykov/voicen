@@ -18,10 +18,57 @@
 //! `hotkey_pressed(at)`), and [`deadline`] / [`left`] / [`eventually`] (how long a
 //! test waits for something that should already have happened; the verdict is the
 //! awaited outcome, the wait only ends a hung test).
-//! Contract tests: `common/timing_tests.rs`, run by `tests/common_helpers.rs`.
+//!
+//! T-111 adds what a test needs when a verdict could depend on a clock it does not
+//! control: [`M`], the minimum in-time margin of a bite-bound deadline; [`with_premise`],
+//! which re-runs or skips a scenario whose test thread missed a product timer; and
+//! [`skip`], the one writer of the line a test that returns without a verdict prints.
+//! Contract tests: `common/timing_tests.rs`, run by `tests/common_helpers.rs`, and
+//! `common/timing_seam_tests.rs`, run by `tests/common_in_time.rs`.
 
+use std::io::Write;
 use std::thread;
 use std::time::{Duration, Instant};
+
+/// The minimum in-time margin of a deadline whose size the test's bite or cost caps
+/// (decision #200; the T1 residual list is in docs/decisions/core-tests.md): the
+/// counterparty it must beat, or that must come after it, stays at least this far
+/// from it. Every other in-time leg takes `os_answer::in_time()`.
+pub const M: Duration = Duration::from_secs(5);
+
+/// Says on the real stderr that a test returns without a verdict. Written with
+/// `std::io::stderr()`, not `eprintln!`, which libtest captures for a passing test,
+/// so a skip would look exactly like a pass in the gate and in CI (T-110 review 2 #1).
+pub fn skip(why: &str) {
+    let line = format!("skipped: {why}\n");
+    // Nothing to do if stderr is gone: the verdict is the test's return either way.
+    let _ = std::io::stderr().write_all(line.as_bytes());
+}
+
+/// Runs a real-time scenario whose verdict needs the test thread to act before a
+/// product timer fires or a transfer ends (T-110 review 1 #1, T-111). `run` builds its
+/// own rig, checks that premise with [`passed`] right after the act, and returns
+/// `false` when a host stall made the test thread miss it; it is then re-run on a
+/// fresh rig while `budget` since the first start allows. When every run missed, the
+/// test says so through [`skip`]: a missed premise gives no verdict, never a red. The
+/// verdict is the assertions inside `run`.
+pub fn with_premise(what: &str, budget: Duration, mut run: impl FnMut() -> bool) {
+    let start = now();
+    let mut missed = 0;
+    loop {
+        if run() {
+            return;
+        }
+        missed += 1;
+        if passed(start, budget) {
+            skip(&format!(
+                "{what}: the premise was missed {missed} time(s) within {budget:?} (a host \
+                 stall), no verdict"
+            ));
+            return;
+        }
+    }
+}
 
 /// The current instant, as a timestamp handed to a product API (a press, a
 /// release, a frame's `at`). Not a measurement: a duration is taken with

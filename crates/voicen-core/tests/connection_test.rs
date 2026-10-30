@@ -32,7 +32,7 @@ use std::sync::{mpsc, Arc};
 use std::time::{Duration, UNIX_EPOCH};
 
 use common::held::{returns_while_held, Held};
-use common::os_answer::{OsAnswer, OS_ANSWER_BUDGET};
+use common::os_answer::{in_time, OsAnswer, OS_ANSWER_BUDGET};
 use common::timing::{at_least, measure};
 use serde_json::json;
 use voicen_core::autostart::FakeAutostart;
@@ -203,14 +203,10 @@ fn run_with(w: &World, req: ConnectionTestRequest, timeouts: Timeouts) -> Connec
         .expect("test_connection_with_timeouts must not panic")
 }
 
-/// Short test durations for a mock that answers at once (never the defaults).
+/// Test durations for a mock that answers at once: the in-time deadlines (T-111),
+/// never the defaults.
 fn quick() -> Timeouts {
-    Timeouts {
-        connect: Duration::from_secs(2),
-        api_transcription: Duration::from_secs(5),
-        local_server: Duration::from_secs(5),
-        ..Timeouts::default()
-    }
+    in_time()
 }
 
 #[test]

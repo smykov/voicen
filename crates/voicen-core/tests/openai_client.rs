@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::held::{returns_while_held, Held};
-use common::os_answer::{OsAnswer, Unanswered, OS_ANSWER_BUDGET};
+use common::os_answer::{in_time, OsAnswer, Unanswered, OS_ANSWER_BUDGET};
 use common::timing::{at_least, measure, Took};
 use serde_json::json;
 use voicen_core::audio::{wav, AudioBuffer};
@@ -46,25 +46,22 @@ fn audio() -> AudioBuffer {
     AudioBuffer::from_16k_mono((0..1600).map(|i| ((i % 64) as i16 - 32) * 512).collect())
 }
 
-/// Test durations: set explicitly, never the production defaults.
+/// Test durations: the in-time deadlines (T-111), never the production defaults; a
+/// timeout leg overrides only its own field.
 fn timeouts() -> Timeouts {
-    Timeouts {
-        connect: Duration::from_secs(2),
-        api_transcription: Duration::from_secs(5),
-        ..Timeouts::default()
-    }
+    in_time()
 }
 
 /// The whole-request limit of the cases that expect an answer and whose deadline is
 /// not the subject (`no_failure_contains_query_key_or_transcript`'s http cases but
 /// the delayed one; T-111).
 fn in_time_total() -> Duration {
-    Duration::from_secs(5)
+    in_time().api_transcription
 }
 
 /// How long `partial_body_server` waits for the request head before it gives up: a
 /// test-owned deadline (T-111: the same kind as the in-time limits).
-const SERVER_READ_TIMEOUT: Duration = Duration::from_secs(5);
+const SERVER_READ_TIMEOUT: Duration = OS_ANSWER_BUDGET;
 
 #[test]
 fn in_time_deadlines_of_this_file_are_at_the_budget_scale() {

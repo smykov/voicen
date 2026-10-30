@@ -142,14 +142,19 @@ impl OsAnswer {
         );
         OsAnswer {
             host,
-            timeouts: budget_timeouts(),
+            timeouts: in_time(),
             answer_took: took,
         }
     }
 }
 
-/// The deadlines of every OS-answer case (see [`OsAnswer::timeouts`]).
-fn budget_timeouts() -> Timeouts {
+/// The deadlines of every leg that expects an answer and whose deadline is not the
+/// subject (T-111, docs/decisions/core-tests.md), and of every OS-answer case: the I1
+/// shape without a target or a probe. connect = [`OS_ANSWER_BUDGET`]; every
+/// whole-request and no-data deadline = 2 x the budget, so it cannot fire before the
+/// connect ends; `builtin` (no network) keeps the production default. A timeout leg
+/// overrides only its own field, so a host stall cannot end an in-time leg.
+pub fn in_time() -> Timeouts {
     Timeouts {
         connect: OS_ANSWER_BUDGET,
         api_transcription: 2 * OS_ANSWER_BUDGET,
@@ -171,9 +176,11 @@ fn budget_timeouts() -> Timeouts {
 pub struct Unanswered {
     /// The authority to put in a URL: TEST-NET-1 (RFC 5737), `192.0.2.1`.
     pub host: String,
-    /// connect = 300 ms; every whole-request and no-data deadline is ten times
-    /// that (3 s), so a connect limit that does not reach the client ends the
-    /// request as `Timeout`; `builtin` keeps the production default.
+    /// connect = 300 ms; every whole-request and no-data deadline is twenty times
+    /// that (6 s), so a connect limit that does not reach the client ends the
+    /// request as `Timeout`, and a host freeze of up to 5.7 s (above `timing::M`)
+    /// cannot make both timers due at once (T-111); `builtin` keeps the production
+    /// default.
     pub timeouts: Timeouts,
 }
 
@@ -187,10 +194,10 @@ impl Unanswered {
             host: "192.0.2.1".to_string(),
             timeouts: Timeouts {
                 connect,
-                api_transcription: 10 * connect,
-                local_server: 10 * connect,
-                post_processing: 10 * connect,
-                download_no_data: 10 * connect,
+                api_transcription: 20 * connect,
+                local_server: 20 * connect,
+                post_processing: 20 * connect,
+                download_no_data: 20 * connect,
                 ..Timeouts::default()
             },
         }

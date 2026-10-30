@@ -15,6 +15,7 @@ use std::io::ErrorKind;
 use std::net::{Ipv4Addr, SocketAddr, TcpStream};
 
 use crate::common::os_answer::{OsAnswer, OS_ANSWER_BUDGET};
+use crate::common::timing::skip;
 use voicen_core::timeouts::Timeouts;
 
 /// Linux: the range `bind(0)` and `connect()` pick local ports from.
@@ -49,7 +50,9 @@ fn refused_addr_port_is_below_the_ephemeral_range() {
     // that proves nothing (T-047 review 1 #4). Other OSes (the Windows CI) have no
     // such file and skip; the doc of `OsAnswer::refused()` covers their range.
     if !cfg!(target_os = "linux") {
-        eprintln!("skipped: the ephemeral range is read from {PORT_RANGE} on Linux only");
+        skip(&format!(
+            "the ephemeral range is read from {PORT_RANGE} on Linux only"
+        ));
         return;
     }
     let low = ephemeral_low_bound()

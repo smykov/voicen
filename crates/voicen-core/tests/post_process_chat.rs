@@ -17,7 +17,7 @@ mod refused_addr_tests;
 use std::time::Duration;
 
 use common::held::{returns_while_held, Held};
-use common::os_answer::{OsAnswer, OS_ANSWER_BUDGET};
+use common::os_answer::{in_time, OsAnswer, OS_ANSWER_BUDGET};
 use common::timing::{at_least, measure};
 use serde_json::{json, Value};
 use voicen_core::i18n;
@@ -52,13 +52,10 @@ fn pp_settings(base: &str) -> PostProcessingSettings {
     }
 }
 
-/// Test durations: set explicitly, never the production defaults.
+/// Test durations: the in-time deadlines (T-111), never the production defaults; a
+/// timeout leg overrides only its own field.
 fn timeouts() -> Timeouts {
-    Timeouts {
-        connect: Duration::from_secs(2),
-        post_processing: Duration::from_secs(5),
-        ..Timeouts::default()
-    }
+    in_time()
 }
 
 #[test]

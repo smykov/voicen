@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
 use common::held::{returns_while_held, Held};
-use common::os_answer::{OsAnswer, Unanswered, OS_ANSWER_BUDGET};
+use common::os_answer::{in_time, OsAnswer, Unanswered, OS_ANSWER_BUDGET};
 use common::timing::{ago, at_least, measure, now, Took};
 use serde_json::json;
 use voicen_core::audio::{wav, AudioBuffer};
@@ -745,14 +745,15 @@ async fn no_answer_within_timeout_is_timeout() {
     assert_eq!(h.paster.calls(), vec![]);
 }
 
-/// The server's answer delay for the T-073 cases: above the configured 5 s limit
-/// (the API minimum of decision #99), well under the 30 s default.
-const T073_DELAY: Duration = Duration::from_secs(7);
+/// The server's answer delay for the T-073 cases: M above the configured limit,
+/// well under the 30 s default (T-111).
+const T073_DELAY: Duration = Duration::from_secs(15);
 /// The configured request limit and connect limit (seconds) of
 /// `configured_api_timeout_fails_the_job_with_timeout` (T-111: the connect value is
-/// bite-bound, so both keep the in-time margin M = 5 s).
-const API_LIMIT_S: u32 = 5;
-const API_CONNECT_S: u32 = 2;
+/// bite-bound, so both keep the in-time margin M = 5 s). The #99 minimum (5 s) is
+/// pinned by `TimeoutRole::bounds` and its tests in `timeouts.rs`.
+const API_LIMIT_S: u32 = 10;
+const API_CONNECT_S: u32 = 5;
 
 #[test]
 fn configured_api_timeout_legs_keep_the_in_time_margin_m() {
@@ -778,16 +779,16 @@ fn configured_api_timeout_legs_keep_the_in_time_margin_m() {
 async fn configured_api_timeout_fails_the_job_with_timeout() {
     // T-073 Acceptance failure branch, through the production pipeline
     // (`Pipeline::new`, no test override): a job whose settings snapshot says
-    // api_transcription_s = 5 fails with Timeout against a server answering after
-    // 7 s, about 5 s after the request started, with failure=Timeout in the job
+    // api_transcription_s = 10 fails with Timeout against a server answering after
+    // 15 s, about 10 s after the request started, with failure=Timeout in the job
     // event and the audio kept; the same server with the default snapshot (30 s)
-    // is delivered. connect_s = 2 (in range, not 5) so that the connect value
-    // read as the request limit ends the job at about 2 s, outside the window.
-    // Bite: the pipeline's fixed Timeouts::default() (the 7 s answer arrives and
+    // is delivered. connect_s = 5 (M below the limit) so that the connect value
+    // read as the request limit ends the job at about 5 s, outside the window.
+    // Bite: the pipeline's fixed Timeouts::default() (the 15 s answer arrives and
     // is delivered), the local-server value used for the API request (60 s:
-    // delivered), the connect value used for it (2 s: too early), or
+    // delivered), the connect value used for it (5 s: too early), or
     // milliseconds. No upper bound (T-080 I2): every longer wrong limit is
-    // caught by the outcome (Delivered at 7 s).
+    // caught by the outcome (Delivered at 15 s).
     let server = server_with(ok_text("late but in time").set_delay(T073_DELAY)).await;
 
     let mut h = harness();
@@ -802,7 +803,7 @@ async fn configured_api_timeout_fails_the_job_with_timeout() {
             origin: TimeoutOrigin::Server
         })
     );
-    at_least(took, Duration::from_secs(5));
+    at_least(took, Duration::from_secs(u64::from(API_LIMIT_S)));
     assert!(report.pending.is_some(), "{report:?}");
     assert_eq!(h.clipboard.texts(), Vec::<String>::new());
     assert_eq!(h.paster.calls(), vec![]);
@@ -1107,11 +1108,7 @@ async fn pending_store_failure_reports_without_pending() {
 /// copied only, clipboard fails, 401, 500, bad body): the deadline is not their
 /// subject, so a host stall must not decide them (T-111).
 fn immediate_timeouts() -> Timeouts {
-    Timeouts {
-        connect: Duration::from_secs(2),
-        api_transcription: Duration::from_millis(300),
-        ..Timeouts::default()
-    }
+    in_time()
 }
 
 #[tokio::test]
