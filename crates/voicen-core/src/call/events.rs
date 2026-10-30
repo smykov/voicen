@@ -3,8 +3,9 @@
 //!
 //! Every value here is a closed enum, an integer, a [`CallId`] or an [`EndpointId`]; none
 //! holds free text, so a call log line (written only by `diag::format`) is closed. The
-//! literal of each log field value is in `diag::format`'s tables, not here; the serde names
-//! here are the `meta.json` / IPC wire of data-model.md.
+//! literal of each log field value is in `diag::format`'s tables, not here, except
+//! [`Track::as_str`] and [`InvalidRule::as_str`], which `transcript.json` shares (T-123); the
+//! serde names here are the `meta.json` / IPC wire of data-model.md.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
 use std::fmt;
@@ -22,7 +23,10 @@ pub enum Track {
 impl Track {
     /// The wire name (`mic` | `system`) of the log lines and `transcript.json`.
     pub fn as_str(self) -> &'static str {
-        todo!("T-123: the one name table; diag::format delegates to it")
+        match self {
+            Track::Mic => "mic",
+            Track::System => "system",
+        }
     }
 }
 
@@ -163,7 +167,15 @@ pub enum InvalidRule {
 impl InvalidRule {
     /// The closed rule name of the `transcript_invalid rule=` log line.
     pub fn as_str(self) -> &'static str {
-        todo!("T-123: the one name table; diag::format delegates to it")
+        match self {
+            InvalidRule::Unsorted => "unsorted",
+            InvalidRule::OutOfRange => "out_of_range",
+            InvalidRule::UnknownSpeaker => "unknown_speaker",
+            InvalidRule::UnknownTrack => "unknown_track",
+            InvalidRule::BadSource => "bad_source",
+            InvalidRule::BadLang => "bad_lang",
+            InvalidRule::EmptyText => "empty_text",
+        }
     }
 }
 

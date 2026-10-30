@@ -2,13 +2,19 @@
 //! `merge()` of both tracks' engine output, and the one Markdown renderer
 //! (contracts/core-call.md "`transcript.json`", "`transcript.md`"; T-123, decision #196).
 //!
-//! RED STAGE: the bodies below are `todo!()` stubs so the tests compile and fail for the
-//! missing behaviour. The developer replaces them; the signatures are what the tests pin.
+//! Every value here may hold transcript text: nothing in this module logs, and an error
+//! carries a rule and a segment index only.
+#![deny(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
 use serde::{Deserialize, Serialize};
 
 use crate::call::{CallId, InvalidRule, Track};
-use crate::settings::LangCode;
+use crate::settings::{is_lang_code, LangCode};
+
+/// The only `schema` value of this type.
+const SCHEMA: u32 = 1;
+/// The only `source` value of a segment in 1a.
+const SOURCE_FINAL: &str = "final";
 
 /// One engine reference, serialized as the one string `"<kind>:<model>"` (`"api:whisper-1"`);
 /// the same form in `meta.json` and in `transcript.json` `engines.transcription`.
@@ -19,12 +25,11 @@ pub struct EngineRef(String);
 impl EngineRef {
     /// `"<kind>:<model>"`.
     pub fn new(kind: &str, model: &str) -> EngineRef {
-        let _ = (kind, model);
-        todo!("T-123")
+        EngineRef(format!("{kind}:{model}"))
     }
 
     pub fn as_str(&self) -> &str {
-        todo!("T-123")
+        &self.0
     }
 }
 
@@ -86,19 +91,70 @@ pub enum TranscriptParseError {
 impl TranscriptV1 {
     /// Parses a `transcript.json` text: unknown keys and `schema != 1` are refused.
     pub fn from_json(text: &str) -> Result<TranscriptV1, TranscriptParseError> {
-        let _ = text;
-        todo!("T-123")
+        // The schema is read first: a later schema may have keys this type refuses.
+        let probe: SchemaProbe =
+            serde_json::from_str(text).map_err(|_| TranscriptParseError::Malformed)?;
+        if probe.schema != i64::from(SCHEMA) {
+            return Err(TranscriptParseError::UnsupportedSchema(probe.schema));
+        }
+        serde_json::from_str(text).map_err(|_| TranscriptParseError::Malformed)
     }
 
     /// The compact JSON text, keys in §7 order.
     pub fn to_json(&self) -> String {
-        todo!("T-123")
+        // Strings, integers and sequences only: serialization has no failing path, and an
+        // empty text would be refused by `from_json`.
+        serde_json::to_string(self).unwrap_or_default()
     }
 
     /// The first broken R17 rule and the index of its segment, never the text.
     pub fn validate(&self) -> Result<(), (InvalidRule, u32)> {
-        todo!("T-123")
+        let mut previous_start = i64::MIN;
+        for (index, segment) in self.segments.iter().enumerate() {
+            if let Err(rule) = self.check_segment(segment, previous_start) {
+                return Err((rule, u32::try_from(index).unwrap_or(u32::MAX)));
+            }
+            previous_start = segment.start_ms;
+        }
+        Ok(())
     }
+
+    fn check_segment(&self, segment: &SegmentV1, previous_start: i64) -> Result<(), InvalidRule> {
+        if segment.start_ms < previous_start {
+            return Err(InvalidRule::Unsorted);
+        }
+        if segment.start_ms < 0
+            || segment.start_ms > segment.end_ms
+            || segment.end_ms > self.duration_ms
+        {
+            return Err(InvalidRule::OutOfRange);
+        }
+        if !self.speakers.iter().any(|s| s.id == segment.speaker) {
+            return Err(InvalidRule::UnknownSpeaker);
+        }
+        if ![Track::Mic, Track::System]
+            .iter()
+            .any(|t| t.as_str() == segment.track)
+        {
+            return Err(InvalidRule::UnknownTrack);
+        }
+        if segment.source.as_deref() != Some(SOURCE_FINAL) {
+            return Err(InvalidRule::BadSource);
+        }
+        if segment.lang.as_deref().is_some_and(|l| !is_lang_code(l)) {
+            return Err(InvalidRule::BadLang);
+        }
+        if segment.text.trim().is_empty() {
+            return Err(InvalidRule::EmptyText);
+        }
+        Ok(())
+    }
+}
+
+/// Reads only `schema`, whatever else the document holds.
+#[derive(Deserialize)]
+struct SchemaProbe {
+    schema: i64,
 }
 
 /// An engine segment, in seconds from the chunk start (research R10).
@@ -141,18 +197,178 @@ pub struct MergeInput {
     pub tracks: Vec<TrackInput>,
 }
 
-/// Both tracks' lines as one transcript; total over any engine output, and the result always
-/// passes [`TranscriptV1::validate`].
+/// Both tracks' lines as one transcript, in the order (start, mic before system, input order).
+/// Total over any engine output, and the result passes [`TranscriptV1::validate`] as long as
+/// `input.speakers` holds the ids `me` and `s1`, as a call's `meta.json` does.
+///
+/// A line's time is `offset + clamp(chunk_start + engine_time, chunk)`, then clamped to
+/// `duration_ms` with the text kept (#196 (3)). A non-finite or negative engine time counts as 0;
+/// an end before its start is the start. A blank text is dropped.
 pub fn merge(input: &MergeInput) -> TranscriptV1 {
-    let _ = input;
-    todo!("T-123")
+    let duration_ms = input.duration_ms;
+    let mut lines: Vec<(Track, SegmentV1)> = Vec::new();
+    for track in &input.tracks {
+        for chunk in &track.chunks {
+            for line in chunk_lines(chunk) {
+                if line.text.trim().is_empty() {
+                    continue;
+                }
+                let on_call =
+                    |ms: u64| wire_ms(ms.saturating_add(track.start_offset_ms).min(duration_ms));
+                let segment = SegmentV1 {
+                    start_ms: on_call(line.start_ms),
+                    end_ms: on_call(line.end_ms),
+                    track: track.track.as_str().to_string(),
+                    speaker: speaker_id(track.track).to_string(),
+                    lang: line.lang.map(|l| l.as_str().to_string()),
+                    text: line.text.to_string(),
+                    source: Some(SOURCE_FINAL.to_string()),
+                };
+                lines.push((track.track, segment));
+            }
+        }
+    }
+    // Stable, so lines with the same key keep the input order.
+    lines.sort_by_key(|(track, segment)| (segment.start_ms, track_rank(*track)));
+    TranscriptV1 {
+        schema: SCHEMA,
+        call_id: input.call_id.clone(),
+        title: input.title.clone(),
+        started_at: input.started_at.clone(),
+        duration_ms: wire_ms(duration_ms),
+        speakers: input.speakers.clone(),
+        segments: lines.into_iter().map(|(_, segment)| segment).collect(),
+        engines: EnginesV1 {
+            transcription: input.engine.clone(),
+            diarization: None,
+        },
+    }
+}
+
+/// A line of a chunk with its times in track time, inside the chunk.
+struct ChunkLine<'a> {
+    start_ms: u64,
+    end_ms: u64,
+    text: &'a str,
+    lang: Option<LangCode>,
+}
+
+fn chunk_lines(chunk: &ChunkInput) -> Vec<ChunkLine<'_>> {
+    let chunk_start = chunk.start_ms;
+    // Not `clamp`: a reversed chunk would panic it, and merge is total.
+    let chunk_end = chunk.end_ms.max(chunk_start);
+    let Some(segments) = &chunk.segments else {
+        return vec![ChunkLine {
+            start_ms: chunk_start,
+            end_ms: chunk_end,
+            text: &chunk.text,
+            lang: chunk.lang,
+        }];
+    };
+    segments
+        .iter()
+        .map(|segment| {
+            let in_chunk = |seconds: f64| {
+                chunk_start
+                    .saturating_add(engine_ms(seconds))
+                    .min(chunk_end)
+            };
+            let start_ms = in_chunk(segment.start_s);
+            ChunkLine {
+                start_ms,
+                end_ms: in_chunk(segment.end_s).max(start_ms),
+                text: &segment.text,
+                lang: segment.lang.or(chunk.lang),
+            }
+        })
+        .collect()
+}
+
+/// An engine time in whole milliseconds, rounded; a non-finite or negative one is 0.
+fn engine_ms(seconds: f64) -> u64 {
+    if seconds.is_finite() && seconds > 0.0 {
+        // `as` saturates a value too large for u64; the chunk clamp then applies.
+        (seconds * 1000.0).round() as u64
+    } else {
+        0
+    }
+}
+
+fn wire_ms(ms: u64) -> i64 {
+    i64::try_from(ms).unwrap_or(i64::MAX)
+}
+
+/// The fixed speaker of a track until diarization (plan.md, 1c).
+fn speaker_id(track: Track) -> &'static str {
+    match track {
+        Track::Mic => "me",
+        Track::System => "s1",
+    }
+}
+
+fn track_rank(track: Track) -> u8 {
+    match track {
+        Track::Mic => 0,
+        Track::System => 1,
+    }
 }
 
 /// The only Markdown producer. `title` and the speaker `names` come from `meta.json`, never from
-/// the transcript's own copies.
+/// the transcript's own copies. A speaker missing from `names` is shown by its id.
+///
+/// The layout is line-based, so every whitespace run in a title, a name or a line's text is one
+/// space here (and an edge run is removed); `transcript.json` keeps the original text. The date
+/// and time are the wall-clock part of `started_at`, with no conversion from its offset. A
+/// transcript without segments ends after the blank line.
 pub fn render_markdown(transcript: &TranscriptV1, title: &str, names: &[Speaker]) -> String {
-    let _ = (transcript, title, names);
-    todo!("T-123")
+    let mut out = format!(
+        "# {}\n{} \u{b7} {}\n\n",
+        one_line(title),
+        wall_clock(&transcript.started_at),
+        duration_text(transcript.duration_ms),
+    );
+    for segment in &transcript.segments {
+        let name = names
+            .iter()
+            .find(|s| s.id == segment.speaker)
+            .map_or(segment.speaker.as_str(), |s| s.name.as_str());
+        out.push_str(&format!(
+            "**[{}] {}:** {}\n",
+            clock_text(segment.start_ms),
+            one_line(name),
+            one_line(&segment.text),
+        ));
+    }
+    out
+}
+
+fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// `YYYY-MM-DD HH:MM` of an ISO-8601 text; a shorter or other text is shown as it is, because
+/// `started_at` is not one of the R17 rules and the renderer must not fail on it.
+fn wall_clock(started_at: &str) -> String {
+    match (started_at.get(..10), started_at.get(11..16)) {
+        (Some(date), Some(time)) => format!("{date} {time}"),
+        _ => one_line(started_at),
+    }
+}
+
+/// Whole seconds, rounded down; a negative time is 0.
+fn hours_minutes_seconds(ms: i64) -> (i64, i64, i64) {
+    let seconds = ms.max(0) / 1000;
+    (seconds / 3600, seconds / 60 % 60, seconds % 60)
+}
+
+fn clock_text(ms: i64) -> String {
+    let (h, m, s) = hours_minutes_seconds(ms);
+    format!("{h:02}:{m:02}:{s:02}")
+}
+
+fn duration_text(ms: i64) -> String {
+    let (h, m, s) = hours_minutes_seconds(ms);
+    format!("{h}:{m:02}:{s:02}")
 }
 
 #[cfg(test)]
@@ -1153,5 +1369,90 @@ mod tests {
         );
         let short = md_doc(&[], 42_000, "2026-01-02T03:04:05Z");
         assert!(render_markdown(&short, "Weekly", &meta_names()).contains(" · 0:00:42\n"));
+    }
+
+    // ---- developer choices (the record leaves them open) --------------------------------
+
+    #[test]
+    fn an_infinite_engine_time_counts_as_zero() {
+        let t = merge(&mic_one(
+            0,
+            10_000,
+            20_000,
+            60_000,
+            vec![es(f64::INFINITY, f64::INFINITY, "a")],
+        ));
+        assert_eq!(rows(&t), vec![(10_000, 10_000, "mic", "me", "a")]);
+    }
+
+    #[test]
+    fn a_reversed_chunk_does_not_panic_and_passes_validate() {
+        // Bite: `u64::clamp(start, end)` panics when the chunk's end is before its start.
+        let tr = track(
+            Track::Mic,
+            0,
+            vec![
+                timed(5000, 1000, vec![es(1.0, 2.0, "timed")]),
+                timeless(5000, 1000, "whole"),
+            ],
+        );
+        let t = merge(&input(60_000, vec![tr]));
+        assert_eq!(
+            rows(&t),
+            vec![
+                (5000, 5000, "mic", "me", "timed"),
+                (5000, 5000, "mic", "me", "whole")
+            ]
+        );
+        assert_eq!(t.validate(), Ok(()));
+    }
+
+    #[test]
+    fn the_markdown_folds_whitespace_and_the_json_keeps_the_original() {
+        // Bite: a line break in the engine text starting a second Markdown line.
+        let segs = [seg(
+            1000,
+            2000,
+            "mic",
+            "me",
+            "null",
+            " one\\n two\\tthree ",
+            r#""final""#,
+        )];
+        let t = md_doc(&segs, 60_000, STARTED);
+        assert_eq!(
+            t.segments.first().map(|s| s.text.as_str()),
+            Some(" one\n two\tthree ")
+        );
+        assert!(t.to_json().contains(r#""text":" one\n two\tthree ""#));
+        assert_eq!(
+            render_markdown(&t, "Two\nlines", &meta_names()),
+            "# Two lines\n2026-10-30 14:05 · 0:01:00\n\n**[00:00:01] Alice:** one two three\n"
+        );
+    }
+
+    #[test]
+    fn a_transcript_without_segments_ends_after_the_blank_line() {
+        let t = md_doc(&[], 42_000, STARTED);
+        assert_eq!(
+            render_markdown(&t, "Weekly", &meta_names()),
+            "# Weekly\n2026-10-30 14:05 · 0:00:42\n\n"
+        );
+    }
+
+    #[test]
+    fn a_speaker_missing_from_the_names_is_shown_by_id_not_by_the_stale_copy() {
+        let segs = [seg(0, 10, "system", "s1", "null", "x", r#""final""#)];
+        let t = md_doc(&segs, 1000, STARTED);
+        assert!(render_markdown(&t, "T", &[]).contains("**[00:00:00] s1:** x\n"));
+    }
+
+    #[test]
+    fn a_started_at_that_is_not_iso_does_not_panic_the_renderer() {
+        // Bite: slicing with `[..10]`, or `get` on a multi-byte boundary unwrapped.
+        for odd in ["short", "2026-10-3\u{e9}T14:05:09Z"] {
+            let t = md_doc(&[], 1000, odd);
+            assert!(render_markdown(&t, "T", &[]).starts_with("# T\n"));
+        }
     }
 }
