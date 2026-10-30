@@ -1,0 +1,8 @@
+guarantee: AC-2: a redirect to another origin (another scheme on the same host and port) is refused
+file: crates/voicen-core/src/engine/http.rs
+added_by: test-writer
+--- old
+    next.origin() == first.origin()
+--- new
+    next.host_str() == first.host_str() && next.port_or_known_default() == first.port_or_known_default()
+--- end

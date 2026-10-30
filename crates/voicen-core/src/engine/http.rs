@@ -376,6 +376,12 @@ mod tests {
         ));
         assert!(!same_origin(&url("https://other.example.com/v1"), &first));
         assert!(!same_origin(&url("http://api.example.com/v1"), &first));
+        // Bite: comparing host and `port_or_known_default()` only (scheme ignored);
+        // the explicit equal port keeps the default-port difference out of it.
+        assert!(!same_origin(
+            &url("http://api.example.com:8443/v1"),
+            &url("https://api.example.com:8443/v1")
+        ));
         assert!(!same_origin(
             &url("http://127.0.0.1:8081/x"),
             &url("http://127.0.0.1:8080/x")
