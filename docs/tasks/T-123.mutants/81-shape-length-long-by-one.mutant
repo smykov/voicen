@@ -1,0 +1,8 @@
+guarantee: AC-4: a started_at of that shape renders as its date and time
+file: crates/voicen-core/src/call/transcript.rs
+added_by: test-writer
+--- old
+text.as_bytes().get(..SHAPE.len()).is_some_and(|head| {
+--- new
+text.as_bytes().get(..SHAPE.len() + 1).is_some_and(|head| {
+--- end

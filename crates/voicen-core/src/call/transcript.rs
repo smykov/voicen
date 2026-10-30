@@ -645,6 +645,21 @@ mod tests {
     }
 
     #[test]
+    fn a_diarization_of_another_type_is_refused_by_a_direct_serde_read() {
+        // Mutant 74: the type error of `null_only` dropped. Through `from_json` the unread value
+        // still breaks the JSON stream, so only a read from a `Value` tells them apart; T-125's
+        // and later readers of these types may use one.
+        for value in [
+            serde_json::json!(5),
+            serde_json::json!({ "a": 1 }),
+            serde_json::json!(["api:x"]),
+        ] {
+            let engines = serde_json::json!({ "transcription": "api:x", "diarization": value });
+            assert!(serde_json::from_value::<EnginesV1>(engines).is_err());
+        }
+    }
+
+    #[test]
     fn a_missing_diarization_key_reads_as_null() {
         // Bite: `deserialize_with` without `default`, which would make the key required.
         let text = FULL.replacen(r#","diarization":null"#, "", 1);
@@ -1596,6 +1611,23 @@ mod tests {
         ] {
             assert_eq!(
                 markdown_with_started_at(odd),
+                format!("# T\n{odd} · 0:00:01\n\n")
+            );
+        }
+    }
+
+    #[test]
+    fn one_wrong_byte_at_each_of_the_16_positions_keeps_the_text_whole() {
+        // The invariant over every position. Bite: mutant 79, a shape check that skips a byte.
+        let good = "2026-10-30T14:05:09Z";
+        for position in 0..16 {
+            let odd: String = good
+                .chars()
+                .enumerate()
+                .map(|(i, c)| if i == position { 'x' } else { c })
+                .collect();
+            assert_eq!(
+                markdown_with_started_at(&odd),
                 format!("# T\n{odd} · 0:00:01\n\n")
             );
         }

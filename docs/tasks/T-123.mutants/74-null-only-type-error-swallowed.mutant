@@ -1,0 +1,8 @@
+guarantee: AC-1: engines.diarization is null, a non-null value is refused at parse (review 1 #5)
+file: crates/voicen-core/src/call/transcript.rs
+added_by: test-writer
+--- old
+match Option::<EngineRef>::deserialize(deserializer)? {
+--- new
+match Option::<EngineRef>::deserialize(deserializer).unwrap_or(None) {
+--- end

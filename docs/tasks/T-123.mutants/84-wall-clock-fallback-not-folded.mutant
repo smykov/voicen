@@ -1,0 +1,8 @@
+guarantee: AC-4: a started_at off the YYYY-MM-DDTHH:MM shape is shown whole, on one line (review 1 #3)
+file: crates/voicen-core/src/call/transcript.rs
+added_by: test-writer
+--- old
+_ => one_line(started_at),
+--- new
+_ => started_at.to_string(),
+--- end
