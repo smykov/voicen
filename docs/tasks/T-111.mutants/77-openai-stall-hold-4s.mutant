@@ -1,0 +1,9 @@
+guarantee: review 1 #2, openai_client mid-body stall: the hold is M after the limit
+file: crates/voicen-core/tests/openai_client.rs
+added_by: test-writer
+test: cargo test -j 2 -p voicen-core --test openai_client -- timeout_legs_answer
+--- old
+const STALL_HOLD: Duration = late_answer(STALL_LIMIT);
+--- new
+const STALL_HOLD: Duration = Duration::from_secs(4);
+--- end

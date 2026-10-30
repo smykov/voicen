@@ -537,24 +537,23 @@ fn download_limits_keep_the_in_time_margin_m() {
     //   (the retry's 1 s gap, the trickle's own gap);
     // - the hang-ender END_WAIT is above the whole trickle by M and below HOLD (the
     //   30 s reqwest default sits in between).
-    let m = Duration::from_secs(5);
     assert_eq!(timeouts(stall_no_data()).connect, OS_ANSWER_BUDGET);
     assert!(in_time_no_data() >= 2 * OS_ANSWER_BUDGET, "in-time no_data");
-    assert!(stall_no_data() >= m, "stall no_data {:?}", stall_no_data());
+    assert!(stall_no_data() >= M, "stall no_data {:?}", stall_no_data());
     assert!(
-        cancel_no_data() >= m,
+        cancel_no_data() >= M,
         "cancel no_data {:?}",
         cancel_no_data()
     );
     assert!(
-        trickle_no_data() >= TRICKLE_EVERY + m,
+        trickle_no_data() >= TRICKLE_EVERY + M,
         "trickle no_data {:?} vs gap {TRICKLE_EVERY:?}",
         trickle_no_data()
     );
     let chunks = SIZE.div_ceil(TRICKLE_CHUNK as u64) as u32;
     let trickle = TRICKLE_EVERY * chunks;
     assert!(
-        END_WAIT >= trickle + m && END_WAIT < HOLD,
+        END_WAIT >= trickle + M && END_WAIT < HOLD,
         "END_WAIT {END_WAIT:?}, trickle {trickle:?}, HOLD {HOLD:?}"
     );
     assert!(

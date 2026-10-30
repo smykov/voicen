@@ -1,0 +1,9 @@
+guarantee: review 1 #2, configured_local_server_timeout: the connect limit is M from the limit
+file: crates/voicen-core/tests/local_server.rs
+added_by: test-writer
+test: cargo test -j 2 -p voicen-core --test local_server -- timeout_legs_answer
+--- old
+const LOCAL_CONNECT_S: u32 = 60;
+--- new
+const LOCAL_CONNECT_S: u32 = 5;
+--- end

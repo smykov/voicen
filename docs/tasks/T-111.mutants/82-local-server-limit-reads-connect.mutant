@@ -1,0 +1,9 @@
+guarantee: wrong deadline stays red: the connect value read as the local server limit (configured_local_server_timeout_*)
+file: crates/voicen-core/src/engine/openai.rs
+added_by: test-writer
+test: cargo test -j 2 -p voicen-core --test local_server -- configured_local_server no_answer_within
+--- old
+            Endpoint::LocalServer => req.timeouts.local_server,
+--- new
+            Endpoint::LocalServer => req.timeouts.connect,
+--- end

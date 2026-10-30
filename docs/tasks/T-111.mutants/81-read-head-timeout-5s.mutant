@@ -1,0 +1,9 @@
+guarantee: -
+file: crates/voicen-core/src/test_support/local_models.rs
+added_by: test-writer
+test: cargo test -j 2 -p voicen-core --test local_download
+--- old
+const READ_HEAD_TIMEOUT: Duration = Duration::from_secs(60);
+--- new
+const READ_HEAD_TIMEOUT: Duration = Duration::from_secs(5);
+--- end

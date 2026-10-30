@@ -1,7 +1,7 @@
 //! T-020: the post-processing deadline (FR-24, spec 003 FR-004 / SC-003, decision
 //! #99). Its own binary because both cases take real seconds: the production
 //! default (15 s) against a server that answers after 15.5 s, and a configured
-//! `post_processing_s = 5` read from the job's settings snapshot through the
+//! `post_processing_s = 10` read from the job's settings snapshot through the
 //! production pipeline (`Pipeline::new`), the reader T-073 left to T-020.
 //!
 //! The processor and the pipeline run on plain std threads (the blocking reqwest
@@ -24,7 +24,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::held::{returns_while_held, Held};
-use common::timing::{ago, at_least, measure, Took};
+use common::timing::{ago, at_least, late_answer, measure, Took, M};
 
 use serde_json::json;
 use voicen_core::delivery::DeliveryResult;
@@ -245,6 +245,12 @@ fn dictate(settings: Settings) -> Run {
 /// host stall of less than M cannot make the connect timer the verdict.
 const PP_LIMIT_S: u32 = 10;
 const PP_CONNECT_S: u32 = 5;
+/// When the server of `configured_post_processing_timeout_*` answers. M after the limit
+/// (kind (1) of the T-111 invariant), plus SC-003's tolerance so the answer also comes
+/// after the 15 s default: a processor on `Timeouts::default()` ends the same test's
+/// control leg as Skipped(Timeout).
+const PP_LATE_ANSWER: Duration =
+    late_answer(Duration::from_secs(PP_LIMIT_S as u64)).saturating_add(TOLERANCE);
 
 /// The snapshot of the control leg: the same server, a post-processing limit that
 /// the answer must beat. T-111 widens it (the answer is not the subject there; the
@@ -258,13 +264,24 @@ fn control_snapshot(base: &str) -> Settings {
 #[test]
 fn configured_timeout_legs_keep_the_in_time_margin_m() {
     // T-111: connect >= M (a loopback connect finishing within it is not a race) and
-    // the limit M above the connect. Bite: the old connect_s = 2.
-    // M = 5 s (#200), spelled out here so this binary builds before `timing::M`.
-    let m = 5;
-    assert!(PP_CONNECT_S >= m, "connect {PP_CONNECT_S} s < M {m} s");
+    // the limit M above the connect; the answer M above the limit and past the 15 s
+    // default. Bite: the old connect_s = 2, the old answer at 10.5 s.
+    let (connect, limit) = (
+        Duration::from_secs(u64::from(PP_CONNECT_S)),
+        Duration::from_secs(u64::from(PP_LIMIT_S)),
+    );
+    assert!(connect >= M, "connect {connect:?} < M {M:?}");
     assert!(
-        PP_LIMIT_S >= PP_CONNECT_S + m,
-        "limit {PP_LIMIT_S} s is not M above connect {PP_CONNECT_S} s"
+        limit >= connect + M,
+        "limit {limit:?} is not M above connect {connect:?}"
+    );
+    assert!(
+        PP_LATE_ANSWER >= limit + M,
+        "answer {PP_LATE_ANSWER:?} is not M above limit {limit:?}"
+    );
+    assert!(
+        PP_LATE_ANSWER > Timeouts::default().post_processing,
+        "answer {PP_LATE_ANSWER:?} does not come after the default limit"
     );
 }
 
@@ -289,21 +306,21 @@ async fn control_leg_survives_a_chat_answer_stalled_past_the_default_limit() {
 async fn configured_post_processing_timeout_delivers_the_raw_transcript() {
     // Acceptance 2 with #99: a job whose snapshot says post_processing_s = 10
     // (T-111: M above connect_s; the #99 minimum is pinned by `TimeoutRole::bounds`),
-    // against a chat endpoint answering after 10.5 s (the end of SC-003's 0.5 s
-    // tolerance: an outcome bracket, decision #149, T-110), is
+    // against a chat endpoint answering after 15.5 s (`PP_LATE_ANSWER`; T-111: SC-003's
+    // bracket is `default_deadline_skips_*`), is
     // delivered with the raw transcript byte for byte, ends as
     // DeliveredSkipped(Timeout), no pending recording, JobFinished outcome text,
     // and takes at least 10 s; no wall-clock ceiling (F-021). connect_s = 5, so
     // the connect value read as the request limit would end it at about 5 s
     // (at_least). The same server with post_processing_s = 60 is applied, so
-    // the server does answer. Bite: the processor on Timeouts::default() or any
-    // limit past 10.5 s (the answer applied), on the pipeline's test
-    // override field (None in production), on the connect value, or the pipeline
-    // deriving a second Timeouts for the processor that ignores the snapshot; the
-    // processed text or nothing delivered on a skip; the skip ended as Delivered
-    // or Failed.
+    // the server does answer. Bite: the processor on Timeouts::default() (its 15 s
+    // ends the control leg as Skipped), on any limit past 15.5 s (the answer applied),
+    // on the pipeline's test override field (None in production), on the connect
+    // value, or the pipeline deriving a second Timeouts for the processor that ignores
+    // the snapshot; the processed text or nothing delivered on a skip; the skip ended
+    // as Delivered or Failed.
     let want = Duration::from_secs(u64::from(PP_LIMIT_S));
-    let server = transcribe_then_chat(want + TOLERANCE).await;
+    let server = transcribe_then_chat(PP_LATE_ANSWER).await;
     let base = format!("{}/v1", server.uri());
     let mut s = snapshot(&base);
     s.timeouts.post_processing_s = PP_LIMIT_S;

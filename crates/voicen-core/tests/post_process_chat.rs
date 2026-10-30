@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use common::held::{returns_while_held, Held};
 use common::os_answer::{in_time, OsAnswer, OS_ANSWER_BUDGET};
-use common::timing::{at_least, measure};
+use common::timing::{at_least, late_answer, measure, M};
 use serde_json::{json, Value};
 use voicen_core::i18n;
 use voicen_core::post_process::chat::ChatPostProcessor;
@@ -64,6 +64,27 @@ fn helper_connect_is_the_os_answer_budget() {
     // helper is pinned by its value (the in-time connect, the budget). Bite: the
     // old 2 s.
     assert_eq!(timeouts().connect, OS_ANSWER_BUDGET);
+}
+
+/// The post-processing limit of the short timeout leg, and its server's answer.
+const SHORT_LIMIT: Duration = Duration::from_millis(300);
+const SHORT_LATE_ANSWER: Duration = late_answer(SHORT_LIMIT);
+
+/// The deadlines of the short timeout leg: only the post-processing total is short.
+fn short_total() -> Timeouts {
+    Timeouts {
+        post_processing: SHORT_LIMIT,
+        ..in_time()
+    }
+}
+
+#[test]
+fn the_short_timeout_leg_answers_at_least_m_after_its_deadline() {
+    // T-111 review 1 #2, a value pin: kind (1) of the invariant. Bite: the old answer
+    // at 5 s, the old connect 2 s (of the leg itself, catalog entry 75).
+    let t = short_total();
+    assert!(SHORT_LATE_ANSWER >= t.post_processing + M, "answer");
+    assert!(t.connect >= t.post_processing + M, "connect");
 }
 
 #[tokio::test]
@@ -502,18 +523,14 @@ fn refused_port_is_unreachable_with_host_port() {
 #[tokio::test]
 async fn late_reply_past_the_input_deadline_is_timeout() {
     // FR-24 / contract guarantee 4: the whole request is bounded by
-    // input.timeouts.post_processing (here 300 ms against a 5 s answer), so the
+    // input.timeouts.post_processing (here 300 ms against an answer M later), so the
     // call returns Timeout, not the answer. Bite: Timeouts::default() (15 s,
-    // the 5 s answer is applied), the transcription or connect deadline instead of
+    // the late answer is applied), the transcription or connect deadline instead of
     // post_processing, a read without the request timeout, Timeout mapped to
     // Unreachable.
-    let server = server_with(chat_reply(json!(REPLY)).set_delay(Duration::from_secs(5))).await;
-    let short = Timeouts {
-        connect: Duration::from_secs(2),
-        post_processing: Duration::from_millis(300),
-        ..Timeouts::default()
-    };
-    // No upper bound (T-080 I2): every longer wrong limit lets the 5 s answer
+    let server = server_with(chat_reply(json!(REPLY)).set_delay(SHORT_LATE_ANSWER)).await;
+    let short = short_total();
+    // No upper bound (T-080 I2): every longer wrong limit lets the late answer
     // through as Applied, which the Timeout assertion catches.
     let (got, took) = measure(|| {
         run(

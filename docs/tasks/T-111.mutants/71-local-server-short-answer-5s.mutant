@@ -1,0 +1,9 @@
+guarantee: review 1 #2, local_server injected short legs: answer M after 300 ms
+file: crates/voicen-core/tests/local_server.rs
+added_by: test-writer
+test: cargo test -j 2 -p voicen-core --test local_server -- timeout_legs_answer
+--- old
+const SHORT_LATE_ANSWER: Duration = late_answer(SHORT_LIMIT);
+--- new
+const SHORT_LATE_ANSWER: Duration = Duration::from_secs(5);
+--- end

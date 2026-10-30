@@ -1,0 +1,9 @@
+guarantee: review 1 #2, configured_local_server_timeout: answer M after the limit
+file: crates/voicen-core/tests/local_server.rs
+added_by: test-writer
+test: cargo test -j 2 -p voicen-core --test local_server -- timeout_legs_answer
+--- old
+const LOCAL_LATE_ANSWER: Duration = late_answer(Duration::from_secs(LOCAL_LIMIT_S as u64));
+--- new
+const LOCAL_LATE_ANSWER: Duration = Duration::from_secs(7);
+--- end

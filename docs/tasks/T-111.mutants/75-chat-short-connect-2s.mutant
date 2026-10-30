@@ -1,0 +1,12 @@
+guarantee: review 1 #2, post_process_chat short leg: no other timer within M of the total
+file: crates/voicen-core/tests/post_process_chat.rs
+added_by: test-writer
+test: cargo test -j 2 -p voicen-core --test post_process_chat -- the_short_timeout_leg late_reply
+--- old
+        post_processing: SHORT_LIMIT,
+        ..in_time()
+--- new
+        post_processing: SHORT_LIMIT,
+        connect: Duration::from_secs(2),
+        ..in_time()
+--- end

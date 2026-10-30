@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use common::held::{returns_while_held, Held};
 use common::os_answer::{in_time, OsAnswer, Unanswered, OS_ANSWER_BUDGET};
-use common::timing::{at_least, measure, Took};
+use common::timing::{at_least, late_answer, measure, Took, M};
 use serde_json::json;
 use voicen_core::audio::{wav, AudioBuffer};
 use voicen_core::engine::lookup::{install, FixedLookup};
@@ -62,6 +62,21 @@ fn in_time_total() -> Duration {
 /// How long `partial_body_server` waits for the request head before it gives up: a
 /// test-owned deadline (T-111: the same kind as the in-time limits).
 const SERVER_READ_TIMEOUT: Duration = OS_ANSWER_BUDGET;
+
+/// The whole-request limit of the short timeout legs, and their server's answer.
+const SHORT_LIMIT: Duration = Duration::from_millis(300);
+const SHORT_LATE_ANSWER: Duration = late_answer(SHORT_LIMIT);
+/// The limit of the mid-body stall, and how long the server holds the body back.
+const STALL_LIMIT: Duration = Duration::from_millis(500);
+const STALL_HOLD: Duration = late_answer(STALL_LIMIT);
+
+#[test]
+fn timeout_legs_answer_at_least_m_after_their_deadline() {
+    // T-111 review 1 #2, a value pin: kind (1) of the invariant. Bite: the old answer
+    // at 5 s, the old stall of 4 s.
+    assert!(SHORT_LATE_ANSWER >= SHORT_LIMIT + M, "answer");
+    assert!(STALL_HOLD >= STALL_LIMIT + M, "stall");
+}
 
 #[test]
 fn in_time_deadlines_of_this_file_are_at_the_budget_scale() {
@@ -703,14 +718,14 @@ async fn same_origin_redirect_loop_stops_at_the_hop_limit() {
 #[tokio::test]
 async fn delay_past_ms_timeout_is_timeout() {
     // FR-24: the whole-request duration comes from the request's Timeouts.
-    // A 5 s delay against a 300 ms limit is Timeout, well before 5 s.
+    // An answer M after a 300 ms limit is Timeout, well before the answer.
     // Bite: the client's 30 s default or Timeouts::default() used instead of
-    // req.timeouts (the call then succeeds after 5 s), or a timeout mapped to
+    // req.timeouts (the call then succeeds at the late answer), or a timeout mapped to
     // CannotReach.
-    let server = server_with(ok_text("late").set_delay(Duration::from_secs(5))).await;
-    // No upper bound (T-080 I2): a longer wrong limit lets the 5 s answer through
+    let server = server_with(ok_text("late").set_delay(SHORT_LATE_ANSWER)).await;
+    // No upper bound (T-080 I2): a longer wrong limit lets the late answer through
     // as Ok, which the Timeout assertion catches.
-    let total = Duration::from_millis(300);
+    let total = SHORT_LIMIT;
     let (got, took) = measure(|| {
         transcribe(
             api_engine(&format!("{}/v1", server.uri()), Some(KEY)),
@@ -733,10 +748,10 @@ async fn an_api_timeout_still_shows_the_server_did_not_answer_in_time() {
     // "Timeout", and the server text in en and ru (contracts/messages.md, spelled
     // here). Bite: every Timeout mapped to the new local text, or `classify`
     // building the built-in timeout.
-    let server = server_with(ok_text("late").set_delay(Duration::from_secs(5))).await;
+    let server = server_with(ok_text("late").set_delay(SHORT_LATE_ANSWER)).await;
     let reason = transcribe(
         api_engine(&format!("{}/v1", server.uri()), Some(KEY)),
-        req_with_total(Duration::from_millis(300)),
+        req_with_total(SHORT_LIMIT),
     )
     .expect_err("past the deadline");
     assert_eq!(reason.code(), "Timeout");
@@ -876,12 +891,12 @@ fn stall_mid_body_is_timeout_and_cut_mid_body_is_unexpected_response() {
     // is the same wrapper without timeout -> UnexpectedResponse.
     // Bite: the adapter not downcasting io::Error::get_ref() to reqwest::Error
     // (stall -> UnexpectedResponse), or treating every body error as Timeout.
-    // No upper bound (T-080 I2): a longer wrong limit lets the 4 s stall end as
+    // No upper bound (T-080 I2): a longer wrong limit lets the stall end as
     // the closed body (UnexpectedResponse), which the Timeout assertion catches.
-    let total = Duration::from_millis(500);
+    let total = STALL_LIMIT;
     let (got, took) = measure(|| {
         transcribe(
-            api_engine(&partial_body_server(Duration::from_secs(4)), Some(KEY)),
+            api_engine(&partial_body_server(STALL_HOLD), Some(KEY)),
             req_with_total(total),
         )
     });
@@ -947,8 +962,8 @@ async fn no_failure_contains_query_key_or_transcript() {
         ),
         (
             "delay",
-            ok_text(TRANSCRIPT).set_delay(Duration::from_secs(5)),
-            Duration::from_millis(300),
+            ok_text(TRANSCRIPT).set_delay(SHORT_LATE_ANSWER),
+            SHORT_LIMIT,
             FailureReason::Timeout {
                 origin: TimeoutOrigin::Server,
             },

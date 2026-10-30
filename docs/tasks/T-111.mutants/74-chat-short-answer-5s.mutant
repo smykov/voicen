@@ -1,0 +1,9 @@
+guarantee: review 1 #2, post_process_chat short leg: answer M after 300 ms
+file: crates/voicen-core/tests/post_process_chat.rs
+added_by: test-writer
+test: cargo test -j 2 -p voicen-core --test post_process_chat -- the_short_timeout_leg
+--- old
+const SHORT_LATE_ANSWER: Duration = late_answer(SHORT_LIMIT);
+--- new
+const SHORT_LATE_ANSWER: Duration = Duration::from_secs(5);
+--- end

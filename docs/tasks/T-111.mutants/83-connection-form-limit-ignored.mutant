@@ -1,0 +1,9 @@
+guarantee: wrong deadline stays red: the connection test ignores the form's limits (US4-5, FR-017)
+file: crates/voicen-core/src/settings/service.rs
+added_by: test-writer
+test: cargo test -j 2 -p voicen-core --test connection_test -- uses_the_forms
+--- old
+        let timeouts = request_timeouts(&req);
+--- new
+        let timeouts = Timeouts::default();
+--- end

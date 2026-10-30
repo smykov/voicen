@@ -36,6 +36,13 @@ use std::time::{Duration, Instant};
 /// from it. Every other in-time leg takes `os_answer::in_time()`.
 pub const M: Duration = Duration::from_secs(5);
 
+/// When the counterparty of a timeout leg answers: at least [`M`] after the leg's
+/// `deadline`, so a host stall only delays the outcome (kind (1) of the T-111
+/// invariant). A leg's file names the result and pins it against its deadline.
+pub const fn late_answer(deadline: Duration) -> Duration {
+    deadline.saturating_add(M)
+}
+
 /// Says on the real stderr that a test returns without a verdict. Written with
 /// `std::io::stderr()`, not `eprintln!`, which libtest captures for a passing test,
 /// so a skip would look exactly like a pass in the gate and in CI (T-110 review 2 #1).

@@ -36,7 +36,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, UNIX_EPOCH};
 
 use common::os_answer::{in_time, OS_ANSWER_BUDGET};
-use common::timing::{deadline, left};
+use common::timing::{deadline, left, M};
 use serde_json::{json, Value};
 use voicen_core::autostart::FakeAutostart;
 use voicen_core::clock::FakeClock;
@@ -55,7 +55,7 @@ use voicen_core::settings::file::{FakeSettingsFile, FileCall};
 use voicen_core::settings::service::{SettingsDeps, SettingsService};
 use voicen_core::settings::{defaults, EngineKind, LoadOutcome, Settings};
 use voicen_core::test_support::local_models::{
-    dir_entries, five_entries, model_bytes, FakeDisk, Serve, Server, NEEDED,
+    dir_entries, five_entries, model_bytes, FakeDisk, Serve, Server, NEEDED, SIZE,
 };
 use voicen_core::test_support::TempDir;
 use voicen_core::timeouts::Timeouts;
@@ -80,6 +80,26 @@ fn helper_deadlines_and_end_wait_are_at_the_budget_scale() {
         "download_no_data"
     );
     assert!(END_WAIT >= OS_ANSWER_BUDGET, "END_WAIT {END_WAIT:?}");
+}
+
+/// The transfer a delete lands in the middle of: 1 KiB every second (about 65 s). It
+/// outlasts the budget, so no test thread races its end (T-111 review 1 #1), and its
+/// test waits for the end, so it must end within [`TRICKLE_END_WAIT`].
+const TRICKLE_CHUNK: usize = 1024;
+const TRICKLE_EVERY: Duration = Duration::from_secs(1);
+const TRICKLE_END_WAIT: Duration = Duration::from_secs(2 * OS_ANSWER_BUDGET.as_secs());
+
+#[test]
+fn the_trickle_outlasts_the_budget_and_ends_within_its_end_wait() {
+    // T-111 review 1 #1. Bite: the old 1 KiB every 50 ms (~3.2 s); a trickle the test
+    // would not see the end of.
+    let chunks = SIZE.div_ceil(TRICKLE_CHUNK as u64) as u32;
+    let trickle = TRICKLE_EVERY * chunks;
+    assert!(trickle > OS_ANSWER_BUDGET, "the trickle lasts {trickle:?}");
+    assert!(
+        TRICKLE_END_WAIT >= trickle + M,
+        "the trickle lasts {trickle:?}, its end wait {TRICKLE_END_WAIT:?}"
+    );
 }
 
 // ---- harness ------------------------------------------------------------------
@@ -545,15 +565,22 @@ fn a_model_being_downloaded_is_not_downloaded_and_its_download_goes_on() {
     // running download is neither cancelled nor its `.part` removed. Bite: a delete
     // that cancels the download or removes the `.part` (the end is not Downloaded),
     // Ok, the residency asked.
+    delete_during_a_download(Duration::ZERO);
+}
+
+#[test]
+fn a_delete_stalled_past_the_old_trickle_still_lands_during_the_download() {
+    // T-111 review 1 #1: the test thread stalls 4.5 s before the delete, past the end
+    // of the old 3.2 s trickle, and the verdict is the same. Bite: a trickle that ends
+    // before the delete (`Ok` instead of `not_downloaded`).
+    delete_during_a_download(Duration::from_millis(4_500));
+}
+
+/// The running download with a delete `stall` after its first Progress.
+fn delete_during_a_download(stall: Duration) {
     let stored = settings(EngineKind::None, None);
-    let w = world(
-        vec![Serve::Trickle {
-            chunk: 1024,
-            every: Duration::from_millis(50),
-        }],
-        &[],
-        Some(&stored),
-    );
+    let (chunk, every) = (TRICKLE_CHUNK, TRICKLE_EVERY);
+    let w = world(vec![Serve::Trickle { chunk, every }], &[], Some(&stored));
     let (tx, rx) = channel();
     w.models
         .download("base", move |event: LocalModelEvent| {
@@ -565,6 +592,7 @@ fn a_model_being_downloaded_is_not_downloaded_and_its_download_goes_on() {
         other => panic!("precondition: no progress first: {other:?}"),
     }
     let residency = FakeResidency::new(&w.dir, false);
+    std::thread::sleep(stall);
 
     let got = w.models.delete("base", &residency, &w.service);
 
@@ -578,7 +606,7 @@ fn a_model_being_downloaded_is_not_downloaded_and_its_download_goes_on() {
         "the delete changed the running download: {:?}",
         w.state_of(ModelId::Base)
     );
-    let end = deadline(END_WAIT);
+    let end = deadline(TRICKLE_END_WAIT);
     let last = loop {
         match rx.recv_timeout(left(end)) {
             Ok(LocalModelEvent::State { state, .. }) => break state,

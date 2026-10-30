@@ -15,6 +15,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
 use crate::common::os_answer::{OsAnswer, Unanswered, OS_ANSWER_BUDGET};
+use crate::common::timing::M;
 use voicen_core::failure::{FailureReason, TimeoutOrigin};
 use voicen_core::timeouts::Timeouts;
 
@@ -181,8 +182,8 @@ fn unanswered_totals_leave_the_in_time_margin_between_the_connect_timer_and_the_
             "{name} = {total:?} is not at least 20 times the connect {connect:?}"
         );
         assert!(
-            total - connect >= Duration::from_secs(5),
-            "{name} = {total:?}: less than 5 s above the connect {connect:?}"
+            total - connect >= M,
+            "{name} = {total:?}: less than M above the connect {connect:?}"
         );
     }
     assert_eq!(builtin, Timeouts::default().builtin, "builtin");

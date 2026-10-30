@@ -1,0 +1,9 @@
+guarantee: review 1 #1: the delete test sees the end of its trickle, M above it
+file: crates/voicen-core/tests/local_model_delete.rs
+added_by: test-writer
+test: cargo test -j 2 -p voicen-core --test local_model_delete -- the_trickle_outlasts
+--- old
+const TRICKLE_END_WAIT: Duration = Duration::from_secs(2 * OS_ANSWER_BUDGET.as_secs());
+--- new
+const TRICKLE_END_WAIT: Duration = END_WAIT;
+--- end

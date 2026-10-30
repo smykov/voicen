@@ -1,0 +1,9 @@
+guarantee: review 1 #2, invariant kind (1): a late answer comes at least M after the deadline
+file: crates/voicen-core/tests/common/timing.rs
+added_by: test-writer
+test: cargo test -j 2 -p voicen-core --test common_in_time -- a_late_answer
+--- old
+    deadline.saturating_add(M)
+--- new
+    deadline
+--- end

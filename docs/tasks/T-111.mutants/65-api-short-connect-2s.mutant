@@ -1,0 +1,12 @@
+guarantee: review 1 #2, api_pipeline short timeout legs: no other timer within M of the total
+file: crates/voicen-core/tests/api_pipeline.rs
+added_by: test-writer
+test: cargo test -j 2 -p voicen-core --test api_pipeline -- short_timeout_legs
+--- old
+        api_transcription: SHORT_LIMIT,
+        ..in_time()
+--- new
+        api_transcription: SHORT_LIMIT,
+        connect: Duration::from_secs(2),
+        ..in_time()
+--- end

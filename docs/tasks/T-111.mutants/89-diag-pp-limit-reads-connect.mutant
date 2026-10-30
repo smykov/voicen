@@ -1,0 +1,9 @@
+guarantee: wrong deadline stays red: the connect value read as the post-processing limit in the diag_pipeline timeout scenario
+file: crates/voicen-core/src/post_process/chat.rs
+added_by: test-writer
+test: cargo test -j 2 -p voicen-core --test diag_pipeline -- post_processing_outcome
+--- old
+        .timeout(timeouts.post_processing)
+--- new
+        .timeout(timeouts.connect)
+--- end

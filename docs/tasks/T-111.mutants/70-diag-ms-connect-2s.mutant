@@ -1,0 +1,12 @@
+guarantee: review 1 #2, diag_pipeline `ms` scenario: no other timer within M of the total
+file: crates/voicen-core/tests/diag_pipeline.rs
+added_by: test-writer
+test: cargo test -j 2 -p voicen-core --test diag_pipeline -- short_timeout_legs log_holds_no_key
+--- old
+        api_transcription: SHORT_LIMIT,
+        ..in_time()
+--- new
+        api_transcription: SHORT_LIMIT,
+        connect: Duration::from_secs(2),
+        ..in_time()
+--- end

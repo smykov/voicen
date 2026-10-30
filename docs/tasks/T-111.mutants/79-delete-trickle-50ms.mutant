@@ -1,0 +1,9 @@
+guarantee: review 1 #1: the delete lands during the transfer even when the test thread stalls
+file: crates/voicen-core/tests/local_model_delete.rs
+added_by: test-writer
+test: cargo test -j 2 -p voicen-core --test local_model_delete -- the_trickle_outlasts a_delete_stalled a_model_being_downloaded
+--- old
+const TRICKLE_EVERY: Duration = Duration::from_secs(1);
+--- new
+const TRICKLE_EVERY: Duration = Duration::from_millis(50);
+--- end

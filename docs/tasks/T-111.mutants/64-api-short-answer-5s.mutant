@@ -1,0 +1,9 @@
+guarantee: review 1 #2, api_pipeline short timeout legs: answer M after 300 ms
+file: crates/voicen-core/tests/api_pipeline.rs
+added_by: test-writer
+test: cargo test -j 2 -p voicen-core --test api_pipeline -- short_timeout_legs
+--- old
+const SHORT_LATE_ANSWER: Duration = late_answer(SHORT_LIMIT);
+--- new
+const SHORT_LATE_ANSWER: Duration = Duration::from_secs(5);
+--- end

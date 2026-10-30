@@ -1,0 +1,9 @@
+guarantee: wrong deadline stays red: the connect value read as the API limit in the openai_client short legs
+file: crates/voicen-core/src/engine/openai.rs
+added_by: test-writer
+test: cargo test -j 2 -p voicen-core --test openai_client -- delay_past_ms stall_mid_body
+--- old
+            Endpoint::Api => req.timeouts.api_transcription,
+--- new
+            Endpoint::Api => req.timeouts.connect,
+--- end

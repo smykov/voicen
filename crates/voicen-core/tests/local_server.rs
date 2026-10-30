@@ -24,7 +24,7 @@ use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
 use common::os_answer::{in_time, OsAnswer, OS_ANSWER_BUDGET};
-use common::timing::{ago, at_least, measure};
+use common::timing::{ago, at_least, late_answer, measure, M};
 use serde_json::json;
 use voicen_core::audio::{wav, AudioBuffer};
 use voicen_core::autostart::FakeAutostart;
@@ -101,6 +101,28 @@ fn the_helpers_connect_is_the_os_answer_budget() {
     assert_eq!(
         timeouts(Duration::ZERO, Duration::ZERO).connect,
         OS_ANSWER_BUDGET
+    );
+}
+
+/// The local-server deadline of the injected timeout legs, and their server's answer.
+const SHORT_LIMIT: Duration = Duration::from_millis(300);
+const SHORT_LATE_ANSWER: Duration = late_answer(SHORT_LIMIT);
+/// `configured_local_server_timeout_*`: the #99 minimum as the limit (seconds), a
+/// connect limit far from it, and the server's answer.
+const LOCAL_LIMIT_S: u32 = 5;
+const LOCAL_CONNECT_S: u32 = 60;
+const LOCAL_LATE_ANSWER: Duration = late_answer(Duration::from_secs(LOCAL_LIMIT_S as u64));
+
+#[test]
+fn timeout_legs_answer_at_least_m_after_their_deadline() {
+    // T-111 review 1 #2, a value pin: kind (1) of the invariant. Bite: the old answers
+    // at 5 s and 7 s, a connect limit next to the request limit.
+    let limit = Duration::from_secs(u64::from(LOCAL_LIMIT_S));
+    assert!(SHORT_LATE_ANSWER >= SHORT_LIMIT + M, "injected answer");
+    assert!(LOCAL_LATE_ANSWER >= limit + M, "configured answer");
+    assert!(
+        Duration::from_secs(u64::from(LOCAL_CONNECT_S)) >= limit + M,
+        "configured connect"
     );
 }
 
@@ -379,15 +401,15 @@ async fn request_deadline_test_holds_when_the_answer_stalls_past_the_old_local_s
 
 #[tokio::test]
 async fn no_answer_within_local_server_deadline_is_timeout() {
-    // Acceptance 2 "no answer in 60 s -> timeout", with the deadline injected: a
-    // 5 s delay against a 300 ms local-server deadline is Timeout, not the answer
+    // Acceptance 2 "no answer in 60 s -> timeout", with the deadline injected: an
+    // answer M after a 300 ms local-server deadline is Timeout, not the answer
     // (the API deadline is 10 s here). Bite: api_transcription or
-    // Timeouts::default() used (the call succeeds after 5 s), or the timeout
+    // Timeouts::default() used (the call succeeds at the late answer), or the timeout
     // mapped to CannotReach. No upper bound (T-080 I2): the outcome catches every
     // longer limit.
-    let server = server_with(ok_text("too late").set_delay(Duration::from_secs(5))).await;
+    let server = server_with(ok_text("too late").set_delay(SHORT_LATE_ANSWER)).await;
     let engine = local_engine(&local_settings(&base(&server), ""), &creds(None));
-    let deadline = Duration::from_millis(300);
+    let deadline = SHORT_LIMIT;
     let (got, took) = measure(|| {
         transcribe(
             engine,
@@ -410,14 +432,11 @@ async fn a_local_server_timeout_still_shows_the_server_did_not_answer_in_time() 
     // en and ru (contracts/messages.md, spelled here), not the built-in engine's
     // `failure.local_timeout`. Bite: the local-server engine or every Timeout
     // given the built-in text.
-    let server = server_with(ok_text("too late").set_delay(Duration::from_secs(5))).await;
+    let server = server_with(ok_text("too late").set_delay(SHORT_LATE_ANSWER)).await;
     let engine = local_engine(&local_settings(&base(&server), ""), &creds(None));
     let reason = transcribe(
         engine,
-        req_with(timeouts(
-            Duration::from_secs(10),
-            Duration::from_millis(300),
-        )),
+        req_with(timeouts(Duration::from_secs(10), SHORT_LIMIT)),
     )
     .expect_err("past the local-server deadline");
     assert_eq!(reason.code(), "Timeout");
@@ -605,18 +624,19 @@ async fn configured_local_server_timeout_fails_the_job_with_timeout() {
     // T-073 (the owner's case: long dictations on a slow local server), through
     // the production pipeline (`Pipeline::new`, no test override): a snapshot with
     // local_server_s = 5 (the #99 minimum) fails with Timeout against a server
-    // answering after 7 s, about 5 s after the request started, failure=Timeout in
+    // answering M later, about 5 s after the request started, failure=Timeout in
     // the job event, the audio kept; the API limit in the same snapshot is set long
     // (600 s) so reading it instead shows. The same server with the default
     // snapshot (60 s) is delivered. Bite: the pipeline's fixed Timeouts::default(),
-    // the API value used for the local server, or milliseconds. No upper bound
-    // (T-080 I2): every longer wrong limit is caught by the outcome (Delivered at
-    // 7 s).
-    let server = server_with(ok_text("late local text").set_delay(Duration::from_secs(7))).await;
+    // the API or connect value used for the local server, or milliseconds. No upper
+    // bound (T-080 I2): every longer wrong limit is caught by the outcome (Delivered
+    // at the late answer).
+    let server = server_with(ok_text("late local text").set_delay(LOCAL_LATE_ANSWER)).await;
 
     let mut h = harness(Arc::new(creds(None)), None);
     let mut s = local_settings(&base(&server), "");
-    s.timeouts.local_server_s = 5;
+    s.timeouts.local_server_s = LOCAL_LIMIT_S;
+    s.timeouts.connect_s = LOCAL_CONNECT_S;
     s.timeouts.api_transcription_s = 600;
     let rec = h.record(fixtures::speech_3s(), Arc::new(s));
     let (report, took) = measure(|| h.run(rec));
@@ -626,7 +646,7 @@ async fn configured_local_server_timeout_fails_the_job_with_timeout() {
             origin: TimeoutOrigin::Server
         })
     );
-    at_least(took, Duration::from_secs(5));
+    at_least(took, Duration::from_secs(u64::from(LOCAL_LIMIT_S)));
     assert!(report.pending.is_some(), "{report:?}");
     assert_eq!(h.clipboard.texts(), Vec::<String>::new());
     assert_eq!(h.job_engines(), vec![Some("local_server")]);

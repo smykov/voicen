@@ -29,7 +29,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use common::os_answer::{in_time, OsAnswer, OS_ANSWER_BUDGET};
-use common::timing::{ago, at_least, now};
+use common::timing::{ago, at_least, late_answer, now, M};
 use diag_support::{
     all_lines, closed, contains, dictation_lines, files_under, open_log, utf16le, Line,
 };
@@ -239,6 +239,28 @@ fn pp_outcome_timeouts() -> Timeouts {
     in_time()
 }
 
+/// The short deadline of the "timeout" scenarios (transcription and post-processing),
+/// and their server's answer.
+const SHORT_LIMIT: Duration = Duration::from_millis(300);
+const SHORT_LATE_ANSWER: Duration = late_answer(SHORT_LIMIT);
+
+/// The deadlines of the "timeout" scenario of the log test: only the total is short.
+fn short_total() -> Timeouts {
+    Timeouts {
+        api_transcription: SHORT_LIMIT,
+        ..in_time()
+    }
+}
+
+#[test]
+fn short_timeout_legs_answer_at_least_m_after_their_deadline() {
+    // T-111 review 1 #2, a value pin: kind (1) of the invariant. Bite: the old answers
+    // at 5 s and 3 s, the old connect 2 s (of the leg itself, catalog entry 70).
+    let t = short_total();
+    assert!(SHORT_LATE_ANSWER >= t.api_transcription + M, "answer");
+    assert!(t.connect >= t.api_transcription + M, "connect");
+}
+
 #[test]
 fn in_time_scenarios_of_the_log_tests_use_the_in_time_deadlines() {
     // T-111 (value pin: a loopback connect cannot be delayed, and a 5 s total needs
@@ -306,15 +328,11 @@ async fn log_holds_no_key_query_or_transcript_on_any_path() {
         ),
     ))
     .await;
-    let slow = server_with(ok_text(TRANSCRIPT).set_delay(Duration::from_secs(5))).await;
+    let slow = server_with(ok_text(TRANSCRIPT).set_delay(SHORT_LATE_ANSWER)).await;
     let with_query = |base: &str| format!("{base}?api-version={QUERY_SECRET}");
     let refused_case = OsAnswer::refused();
     let refused = format!("http://{}/v1", refused_case.host);
-    let ms = Timeouts {
-        connect: Duration::from_secs(2),
-        api_transcription: Duration::from_millis(300),
-        ..Timeouts::default()
-    };
+    let ms = short_total();
     // Every scenario that expects an answer takes `immediate` (T-111); only
     // "timeout" keeps `ms`.
     let immediate = immediate_timeouts();
@@ -628,7 +646,7 @@ async fn post_processing_outcome_is_logged_without_prompt_reply_host_or_key() {
     let chat_bad =
         chat_with(ResponseTemplate::new(200).set_body_json(json!({ "choices": [], "echo": echo })))
             .await;
-    let chat_slow = chat_with(chat_reply(PP_REPLY).set_delay(Duration::from_secs(3))).await;
+    let chat_slow = chat_with(chat_reply(PP_REPLY).set_delay(SHORT_LATE_ANSWER)).await;
     let chat_off = chat_with(chat_reply(PP_REPLY)).await;
     let chat_unused = chat_with(chat_reply(PP_REPLY)).await;
     let refused_case = OsAnswer::refused();
@@ -636,7 +654,7 @@ async fn post_processing_outcome_is_logged_without_prompt_reply_host_or_key() {
     let unparsable = format!("ftp://{PP_HOST}/v1?api-version={PP_QUERY}");
 
     let t = pp_outcome_timeouts();
-    let pp_deadline = Duration::from_millis(300);
+    let pp_deadline = SHORT_LIMIT;
     let t_pp_short = Timeouts {
         post_processing: pp_deadline,
         ..t

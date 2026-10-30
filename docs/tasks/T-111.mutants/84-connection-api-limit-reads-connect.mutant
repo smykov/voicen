@@ -1,0 +1,9 @@
+guarantee: wrong deadline stays red: the connection test reads the form's connect value as the API limit
+file: crates/voicen-core/src/engine/openai.rs
+added_by: test-writer
+test: cargo test -j 2 -p voicen-core --test connection_test -- api_test_uses_the_forms
+--- old
+            Endpoint::Api => req.timeouts.api_transcription,
+--- new
+            Endpoint::Api => req.timeouts.connect,
+--- end

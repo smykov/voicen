@@ -221,9 +221,14 @@ pub fn url_for(port: u16, file: &str) -> String {
     format!("http://127.0.0.1:{port}/{URL_PATH_MARK}/{file}?download=true&sig={QUERY_SECRET}")
 }
 
+/// How long the server waits for a request head before it answers anyway: a test-owned
+/// deadline, at the scale of `OS_ANSWER_BUDGET` in `tests/common/os_answer.rs`, which
+/// this crate cannot import (T-111), so a stalled client is not answered early.
+const READ_HEAD_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// Reads the request head (a GET has no body).
 fn read_head(s: &mut TcpStream) {
-    let _ = s.set_read_timeout(Some(Duration::from_secs(5)));
+    let _ = s.set_read_timeout(Some(READ_HEAD_TIMEOUT));
     let mut buf = Vec::new();
     let mut chunk = [0u8; 4096];
     while !buf.windows(4).any(|w| w == b"\r\n\r\n") {

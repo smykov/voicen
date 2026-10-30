@@ -19,7 +19,7 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use common::held::{returns_while_held, Held};
 use common::os_answer::{in_time, OsAnswer, Unanswered, OS_ANSWER_BUDGET};
-use common::timing::{ago, at_least, measure, now, Took};
+use common::timing::{ago, at_least, late_answer, measure, now, Took, M};
 use serde_json::json;
 use voicen_core::audio::{wav, AudioBuffer};
 use voicen_core::autostart::FakeAutostart;
@@ -718,15 +718,11 @@ async fn status_401_is_invalid_api_key_nothing_pasted_audio_pending() {
 #[tokio::test]
 async fn no_answer_within_timeout_is_timeout() {
     // FR-24 through the pipeline: the pipeline's Timeouts reach the request (a
-    // 300 ms limit against a 5 s delay). Bite: run_job using Timeouts::default()
-    // (the 5 s answer would arrive and be delivered), Timeout not kept pending.
+    // 300 ms limit against an answer M later). Bite: run_job using Timeouts::default()
+    // (the late answer would arrive and be delivered), Timeout not kept pending.
     // No upper bound (T-080 I2): the outcome catches every longer limit.
-    let server = server_with(ok_text("late").set_delay(Duration::from_secs(5))).await;
-    let t = Timeouts {
-        connect: Duration::from_secs(2),
-        api_transcription: Duration::from_millis(300),
-        ..Timeouts::default()
-    };
+    let server = server_with(ok_text("late").set_delay(SHORT_LATE_ANSWER)).await;
+    let t = short_total();
     let mut h = harness_with(energy_gate(), Some(t), creds_with_key());
     let rec = h.record(
         fixtures::speech_3s(),
@@ -743,6 +739,28 @@ async fn no_answer_within_timeout_is_timeout() {
     assert!(report.pending.is_some(), "{report:?}");
     assert_eq!(h.clipboard.texts(), Vec::<String>::new());
     assert_eq!(h.paster.calls(), vec![]);
+}
+
+/// The whole-request limit of the short timeout legs, and their server's answer.
+const SHORT_LIMIT: Duration = Duration::from_millis(300);
+const SHORT_LATE_ANSWER: Duration = late_answer(SHORT_LIMIT);
+
+/// The deadlines of a short timeout leg: only the total is short, so no other timer
+/// lies within M of it (T-111).
+fn short_total() -> Timeouts {
+    Timeouts {
+        api_transcription: SHORT_LIMIT,
+        ..in_time()
+    }
+}
+
+#[test]
+fn short_timeout_legs_answer_at_least_m_after_their_deadline() {
+    // T-111 review 1 #2, a value pin: kind (1) of the invariant. Bite: the old answer
+    // at 5 s, the old connect 2 s.
+    let t = short_total();
+    assert!(SHORT_LATE_ANSWER >= t.api_transcription + M, "answer");
+    assert!(t.connect >= t.api_transcription + M, "connect");
 }
 
 /// The server's answer delay for the T-073 cases: M above the configured limit,
@@ -763,15 +781,18 @@ fn configured_api_timeout_legs_keep_the_in_time_margin_m() {
     // sees) stays and a stall of M in the connect cannot flip the verdict. The
     // answer comes after the limit (a timeout leg: a stall only delays it). Bite:
     // `connect_s` or the limit left at the old 2 s / 5 s (3 s apart, 2 s of margin).
-    let (connect, limit) = (u64::from(API_CONNECT_S), u64::from(API_LIMIT_S));
-    assert!(connect >= 5, "connect_s {connect} s is below M = 5 s");
+    let (connect, limit) = (
+        Duration::from_secs(u64::from(API_CONNECT_S)),
+        Duration::from_secs(u64::from(API_LIMIT_S)),
+    );
+    assert!(connect >= M, "connect_s {connect:?} is below M");
     assert!(
-        limit >= connect + 5,
-        "limit {limit} s is not M = 5 s above the connect {connect} s"
+        limit >= connect + M,
+        "limit {limit:?} is not M above the connect {connect:?}"
     );
     assert!(
-        T073_DELAY > Duration::from_secs(limit),
-        "the answer {T073_DELAY:?} must come after the {limit} s limit"
+        T073_DELAY >= limit + M,
+        "the answer {T073_DELAY:?} must come M after the {limit:?} limit"
     );
 }
 
@@ -1197,17 +1218,13 @@ async fn no_event_or_failure_carries_key_query_or_transcript() {
             .set_delay(stall),
     )
     .await;
-    let slow = server_with(ok_text(TRANSCRIPT).set_delay(Duration::from_secs(5))).await;
+    let slow = server_with(ok_text(TRANSCRIPT).set_delay(SHORT_LATE_ANSWER)).await;
     let with_query = |base: &str| format!("{base}?api-version={QUERY_SECRET}");
     let refused_case = OsAnswer::refused();
     let refused = format!("http://{}/v1", refused_case.host);
-    // Only the "timeout" scenario keeps the short deadline (300 ms against a 5 s
-    // answer); every scenario that expects an answer takes `immediate` (T-111).
-    let ms = Timeouts {
-        connect: Duration::from_secs(2),
-        api_transcription: Duration::from_millis(300),
-        ..Timeouts::default()
-    };
+    // Only the "timeout" scenario keeps the short deadline (300 ms against an answer
+    // M later); every scenario that expects an answer takes `immediate` (T-111).
+    let ms = short_total();
     let immediate = immediate_timeouts();
     // The refused scenario must not run under `ms`: on windows-latest the refusal
     // takes ~2.17 s, so the 300 ms total would fire first and end it `Timeout`

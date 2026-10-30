@@ -33,7 +33,7 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use common::held::{returns_while_held, Held};
 use common::os_answer::{in_time, OsAnswer, OS_ANSWER_BUDGET};
-use common::timing::{at_least, measure};
+use common::timing::{at_least, late_answer, measure, M};
 use serde_json::json;
 use voicen_core::autostart::FakeAutostart;
 use voicen_core::clock::FakeClock;
@@ -215,6 +215,30 @@ fn quick_connect_is_the_os_answer_budget() {
     // helper is pinned by its value (the in-time connect, the budget). Bite: the
     // old 2 s.
     assert_eq!(quick().connect, OS_ANSWER_BUDGET);
+}
+
+/// The form limit of the two "form's limit" timeout legs (the #99 minimum, seconds).
+const FORM_LIMIT_S: u32 = 5;
+/// Their connect limit, far from the request limit, so a stall cannot make the connect
+/// timer the verdict and the connect value read as the limit lets the answer through.
+const FORM_CONNECT_S: u32 = 60;
+/// When their server answers.
+const FORM_LATE_ANSWER: Duration = late_answer(Duration::from_secs(FORM_LIMIT_S as u64));
+/// The injected limit of `injected_short_timeout_is_timeout`, and its server's answer.
+const SHORT_LIMIT: Duration = Duration::from_millis(300);
+const SHORT_LATE_ANSWER: Duration = late_answer(SHORT_LIMIT);
+
+#[test]
+fn timeout_legs_answer_at_least_m_after_their_deadline() {
+    // T-111 review 1 #2, a value pin: kind (1) of the invariant. Bite: the old answers
+    // at 6 s and 5 s, a connect limit next to the request limit.
+    let form_limit = Duration::from_secs(u64::from(FORM_LIMIT_S));
+    assert!(FORM_LATE_ANSWER >= form_limit + M, "form answer");
+    assert!(
+        Duration::from_secs(u64::from(FORM_CONNECT_S)) >= form_limit + M,
+        "form connect"
+    );
+    assert!(SHORT_LATE_ANSWER >= SHORT_LIMIT + M, "injected answer");
 }
 
 #[tokio::test]
@@ -525,23 +549,23 @@ fn request_timeouts_clamp_like_from_settings() {
 async fn local_server_test_uses_the_forms_local_server_limit() {
     // US4-5 / FR-017 / SC-006: the local-server test's request limit is the form's
     // `local_server_s` (5 s), not the API limit (600 s here), the snapshot's (60 s)
-    // or the default (60 s). A server that answers after 6 s is a Timeout, and not
+    // or the default (60 s). A server that answers M after it is a Timeout, and not
     // before ~5 s (a hard-coded short limit is not the form's either). Through the
     // public entry, which takes no durations. Bite: Timeout::default() or the
-    // snapshot's timeouts (Ok after 6 s), the API deadline (Ok after 6 s), a fixed
-    // test deadline (Timeout far too early).
-    let server = server_with(ok_text("late").set_delay(Duration::from_secs(6))).await;
+    // snapshot's timeouts (Ok at the late answer), the API deadline or the connect
+    // limit (Ok as well), a fixed test deadline (Timeout far too early).
+    let server = server_with(ok_text("late").set_delay(FORM_LATE_ANSWER)).await;
     let w = world(stored_keys());
     let mut req = local_req(&base(&server), "", KeyEdit::Untouched);
-    req.timeouts = form_timeouts(5, 600, 5);
+    req.timeouts = form_timeouts(FORM_CONNECT_S, 600, FORM_LIMIT_S);
     let (got, took) = measure(|| run(&w, req));
     assert_eq!(got, ConnectionTestResult::Timeout);
     // No upper bound (T-046 review 1 #2): every longer wrong limit (the snapshot's,
-    // the default, the other role's) lets the 6 s answer through as Ok, so the
+    // the default, the other role's) lets the late answer through as Ok, so the
     // Timeout assertion catches it; a ceiling caught nothing more and tripped
     // under host load (T-078 class; T-080 I2: the clock decides only this lower
     // bound, the form's 5 s).
-    at_least(took, Duration::from_secs(5));
+    at_least(took, Duration::from_secs(u64::from(FORM_LIMIT_S)));
 }
 
 #[tokio::test]
@@ -549,18 +573,18 @@ async fn api_test_uses_the_forms_api_limit() {
     // FR-017: the API test's request limit is the form's `api_transcription_s`
     // (5 s), not the local-server limit (1800 s here), the snapshot's (30 s) or the
     // default (30 s). Bite: as above, for the API role.
-    let server = server_with(ok_text("late").set_delay(Duration::from_secs(6))).await;
+    let server = server_with(ok_text("late").set_delay(FORM_LATE_ANSWER)).await;
     let w = world(stored_keys());
     let mut req = api_req(&base(&server), KeyEdit::Untouched);
-    req.timeouts = form_timeouts(5, 5, 1800);
+    req.timeouts = form_timeouts(FORM_CONNECT_S, FORM_LIMIT_S, 1800);
     let (got, took) = measure(|| run(&w, req));
     assert_eq!(got, ConnectionTestResult::Timeout);
     // No upper bound (T-046 review 1 #2): every longer wrong limit (the snapshot's,
-    // the default, the other role's) lets the 6 s answer through as Ok, so the
+    // the default, the other role's) lets the late answer through as Ok, so the
     // Timeout assertion catches it; a ceiling caught nothing more and tripped
     // under host load (T-078 class; T-080 I2: the clock decides only this lower
     // bound, the form's 5 s).
-    at_least(took, Duration::from_secs(5));
+    at_least(took, Duration::from_secs(u64::from(FORM_LIMIT_S)));
 }
 
 #[tokio::test]
@@ -582,14 +606,14 @@ async fn saved_limit_does_not_override_the_forms_limit() {
 #[tokio::test]
 async fn injected_short_timeout_is_timeout() {
     // T052: no answer within an injected short total timeout -> Timeout, before
-    // the server's 5 s delay. Bite: the injected durations ignored
+    // the server's late answer. Bite: the injected durations ignored
     // (test_connection_with_timeouts calling the form conversion: the request's
-    // default 30 s lets the 5 s answer through as Ok), a shorter limit (the end
+    // default 30 s lets the late answer through as Ok), a shorter limit (the end
     // before 300 ms), or a timeout mapped to CannotReach / UnexpectedResponse.
-    let server = server_with(ok_text("late").set_delay(Duration::from_secs(5))).await;
+    let server = server_with(ok_text("late").set_delay(SHORT_LATE_ANSWER)).await;
     let w = world(stored_keys());
     let t = Timeouts {
-        api_transcription: Duration::from_millis(300),
+        api_transcription: SHORT_LIMIT,
         ..quick()
     };
     let (got, took) = measure(|| run_with(&w, api_req(&base(&server), KeyEdit::Untouched), t));

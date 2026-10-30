@@ -8,7 +8,7 @@ use std::cell::Cell;
 use std::process::Command;
 use std::time::Duration;
 
-use crate::common::timing::{skip, with_premise, M};
+use crate::common::timing::{late_answer, skip, with_premise, M};
 
 /// Set by the parent tests below; the two `child_*` tests do nothing without it, so
 /// a plain run of this binary only checks that they pass.
@@ -20,6 +20,15 @@ fn m_is_five_seconds() {
     // widened test states its margin as a multiple of this constant, so it is one
     // named value, not a literal per file. Bite: another value, a constant per file.
     assert_eq!(M, Duration::from_secs(5));
+}
+
+#[test]
+fn a_late_answer_comes_m_after_the_deadline() {
+    // T-111 review 1 #2, kind (1) of the invariant. Bite: an answer closer than M, or
+    // one that ignores the deadline.
+    let deadline = Duration::from_millis(300);
+    assert_eq!(late_answer(deadline), deadline + M);
+    assert_eq!(late_answer(Duration::ZERO), M);
 }
 
 /// Runs the named `child_*` test of this binary as a separate process, under
