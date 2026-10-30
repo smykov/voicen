@@ -1,0 +1,10 @@
+guarantee: AC-2: a redirect to another origin is refused on every hop of a chain, nothing reaches that origin (validation round 3, S10)
+file: crates/voicen-core/src/engine/http.rs
+added_by: test-writer
+--- old
+        let follow = attempt
+            .previous()
+--- new
+        let follow = attempt.previous().len() > 1 || attempt
+            .previous()
+--- end

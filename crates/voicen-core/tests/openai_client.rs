@@ -601,6 +601,43 @@ async fn followed_redirect_carries_no_referer() {
 }
 
 #[tokio::test]
+async fn cross_origin_307_on_the_second_hop_is_refused_and_nothing_reaches_the_target() {
+    // T-186 invariant and acceptance 2, on a later hop of a chain: a same-origin 307
+    // is followed, then a 307 from there to another origin is refused, so the audio
+    // is not re-sent. Characterization: the policy holds this today. Bite: mutant
+    // 12, the origin check skipped from the second hop on (the target gets the audio
+    // and its text is the result).
+    use wiremock::matchers::path;
+    let target = server_with(ok_text(TRANSCRIPT)).await;
+    let origin = MockServer::start().await;
+    Mock::given(path("/v1/audio/transcriptions"))
+        .respond_with(ResponseTemplate::new(307).insert_header("location", "/moved/here"))
+        .mount(&origin)
+        .await;
+    Mock::given(path("/moved/here"))
+        .respond_with(ResponseTemplate::new(307).insert_header(
+            "location",
+            format!("{}/v1/audio/transcriptions", target.uri()),
+        ))
+        .mount(&origin)
+        .await;
+    let got = transcribe(
+        api_engine(&format!("{}/v1", origin.uri()), Some(KEY)),
+        req(None),
+    );
+    assert_eq!(got, Err(FailureReason::ServerError { status: 307 }));
+    let all = origin.received_requests().await.expect("recording is on");
+    assert_eq!(all.len(), 2, "A then the same-origin hop");
+    assert_eq!(all[1].url.path(), "/moved/here");
+    let reached = target.received_requests().await.expect("recording is on");
+    assert_eq!(
+        reached.len(),
+        0,
+        "the refused redirect still sent a request"
+    );
+}
+
+#[tokio::test]
 async fn same_origin_redirect_loop_stops_at_the_hop_limit() {
     // T-186 approach: a followed same-origin redirect keeps reqwest's default
     // 10-hop limit, so a redirect loop ends fast as a classified failure
