@@ -1,0 +1,8 @@
+guarantee: shared wire names: InvalidRule::as_str
+file: crates/voicen-core/src/call/events.rs
+added_by: test-writer
+--- old
+InvalidRule::OutOfRange => "out_of_range",
+--- new
+InvalidRule::OutOfRange => "outofrange",
+--- end

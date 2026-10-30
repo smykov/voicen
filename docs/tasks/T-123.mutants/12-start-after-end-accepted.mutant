@@ -1,0 +1,8 @@
+guarantee: AC-2: start <= end
+file: crates/voicen-core/src/call/transcript.rs
+added_by: test-writer
+--- old
+s.start_ms > s.end_ms
+--- new
+false
+--- end

@@ -1,0 +1,11 @@
+guarantee: #196 (3): text kept
+file: crates/voicen-core/src/call/transcript.rs
+added_by: test-writer
+--- old
+let start = to_i64(tr.start_offset_ms.saturating_add(a)).min(duration);
+--- new
+let start = to_i64(tr.start_offset_ms.saturating_add(a)).min(duration);
+                if tr.start_offset_ms.saturating_add(a) > input.duration_ms {
+                    continue;
+                }
+--- end

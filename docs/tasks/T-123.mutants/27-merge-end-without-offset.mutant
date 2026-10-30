@@ -1,0 +1,8 @@
+guarantee: AC-3: offset + chunk + engine
+file: crates/voicen-core/src/call/transcript.rs
+added_by: test-writer
+--- old
+to_i64(tr.start_offset_ms.saturating_add(b))
+--- new
+to_i64(b)
+--- end

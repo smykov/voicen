@@ -1,0 +1,8 @@
+guarantee: AC-2: unsorted (swallowed at the origin)
+file: crates/voicen-core/src/call/transcript.rs
+added_by: test-writer
+--- old
+return Err((InvalidRule::Unsorted, i));
+--- new
+continue;
+--- end

@@ -1,0 +1,9 @@
+guarantee: AC-1: unknown key refused
+file: crates/voicen-core/src/call/transcript.rs
+added_by: test-writer
+--- old
+#[serde(deny_unknown_fields)]
+pub struct TranscriptV1 {
+--- new
+pub struct TranscriptV1 {
+--- end

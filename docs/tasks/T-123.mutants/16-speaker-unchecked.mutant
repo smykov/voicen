@@ -1,0 +1,8 @@
+guarantee: AC-2: unknown speaker
+file: crates/voicen-core/src/call/transcript.rs
+added_by: test-writer
+--- old
+if !self.speakers.iter().any(|p| p.id == s.speaker) {
+--- new
+if false {
+--- end

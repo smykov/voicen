@@ -1,0 +1,8 @@
+guarantee: AC-3: clamped to the chunk
+file: crates/voicen-core/src/call/transcript.rs
+added_by: test-writer
+--- old
+(cs.saturating_add(secs_ms(s.end_s))).min(ce).max(cs)
+--- new
+(cs.saturating_add(secs_ms(s.end_s))).max(cs)
+--- end

@@ -1,0 +1,8 @@
+guarantee: AC-4: HH:MM:SS = floor
+file: crates/voicen-core/src/call/transcript.rs
+added_by: test-writer
+--- old
+let t = s.start_ms.max(0) / 1000;
+--- new
+let t = (s.start_ms.max(0) + 500) / 1000;
+--- end

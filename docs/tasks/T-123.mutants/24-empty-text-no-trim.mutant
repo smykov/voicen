@@ -1,0 +1,8 @@
+guarantee: AC-2: empty text
+file: crates/voicen-core/src/call/transcript.rs
+added_by: test-writer
+--- old
+if s.text.trim().is_empty() {
+--- new
+if s.text.is_empty() {
+--- end
