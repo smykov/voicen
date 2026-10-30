@@ -101,7 +101,7 @@ Exactly the §7 keys. In 1a:
 **[00:00:05] Other party:** text
 ```
 
-Times are `start_ms` as `HH:MM:SS`, and names come from `meta.json`. "Copy as Markdown" and the Markdown export use the same renderer.
+Times are `start_ms` as `HH:MM:SS`, and names come from `meta.json`. `render_markdown` folds every whitespace run in a line's text, the title and the names to one space; `transcript.json` keeps the original text. A speaker id with no name in `meta.json` renders as the id itself. "Copy as Markdown" and the Markdown export use the same renderer.
 
 ## Final-pass engine call
 
