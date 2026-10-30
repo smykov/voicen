@@ -668,10 +668,7 @@ fn cancel_during_steady_transfer_holds_when_the_test_thread_stalls_past_the_old_
     // of today's ~4 s trickle. A transfer that lasts at least the budget under the
     // in-time limit is still running, so the cancel still beats the end. Bite: the
     // short trickle (the download Finished, cancel returned false).
-    let server = Server::start(vec![Serve::Trickle {
-        chunk: 1_000,
-        every: Duration::from_millis(60),
-    }]);
+    let server = Server::start(vec![long_trickle()]);
     let f = fixture(&server, in_time_no_data());
     let (end, _ev) = cancel_after_first_progress_late(&f, "steady late", LATE);
     assert_eq!(end.event, DownloadEvent::Cancelled { id: ModelId::Base });
@@ -684,10 +681,7 @@ fn cancel_of_another_model_holds_when_the_test_thread_stalls_past_the_old_hold()
     // the base download must still be running (a long trickle, not a stall), so
     // `cancel(Base)` is true. Bite: the 3 s stall (the read timeout ended it, cancel
     // returned false).
-    let server = Server::start(vec![Serve::Stall {
-        after: 4096,
-        hold: Duration::from_secs(3),
-    }]);
+    let server = Server::start(vec![long_trickle()]);
     let f = fixture(&server, in_time_no_data());
     let mut ev = f.start(ModelId::Base).expect("start");
     ev.wait_progress();
@@ -703,10 +697,7 @@ fn cancel_of_another_model_holds_when_the_test_thread_stalls_past_the_old_hold()
 fn second_start_is_still_busy_when_the_test_thread_stalls_past_the_old_hold() {
     // T-111 (REDESIGN): the second `start` after a pause past the 3 s hold and the
     // 2 s limit is still Busy (the first download runs). Bite: the 3 s stall.
-    let first = Server::start(vec![Serve::Stall {
-        after: 4096,
-        hold: Duration::from_secs(3),
-    }]);
+    let first = Server::start(vec![long_trickle()]);
     let f = fixture(&first, in_time_no_data());
     let mut ev = f.start(ModelId::Base).expect("start");
     ev.wait_progress();

@@ -1,2 +1,1 @@
-# T-111: the three REDESIGN tests below are still red (their bodies keep the old server plan; see the implementer's report), so the baseline skips only them; drop the two --skip once they are fixed (then the catalog runs every task test).
-cargo test -j 2 -p voicen-core --test local_download --test local_server -- --skip holds_when_the_test_thread --skip still_busy_when
+cargo test -j 2 -p voicen-core --test local_download --test local_server
