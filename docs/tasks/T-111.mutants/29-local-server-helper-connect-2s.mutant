@@ -1,0 +1,12 @@
+guarantee: local_server::timeouts row: connect = budget
+file: crates/voicen-core/tests/local_server.rs
+added_by: test-writer
+test: cargo test -j 2 -p voicen-core --test local_server -- helpers_connect request_deadline
+--- old
+        local_server,
+        ..in_time()
+--- new
+        local_server,
+        connect: Duration::from_secs(2),
+        ..in_time()
+--- end

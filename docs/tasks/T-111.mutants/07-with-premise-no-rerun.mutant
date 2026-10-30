@@ -1,0 +1,11 @@
+guarantee: T-111 with_premise: a missed premise is re-run while the budget allows
+file: crates/voicen-core/tests/common/timing.rs
+added_by: test-writer
+test: cargo test -j 2 -p voicen-core --test common_in_time
+--- old
+        if passed(start, budget) {
+            skip(&format!(
+--- new
+        if missed > 0 {
+            skip(&format!(
+--- end

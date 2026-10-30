@@ -542,6 +542,11 @@ fn download_limits_keep_the_in_time_margin_m() {
     assert!(in_time_no_data() >= 2 * OS_ANSWER_BUDGET, "in-time no_data");
     assert!(stall_no_data() >= m, "stall no_data {:?}", stall_no_data());
     assert!(
+        cancel_no_data() >= m,
+        "cancel no_data {:?}",
+        cancel_no_data()
+    );
+    assert!(
         trickle_no_data() >= TRICKLE_EVERY + m,
         "trickle no_data {:?} vs gap {TRICKLE_EVERY:?}",
         trickle_no_data()

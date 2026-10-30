@@ -1,0 +1,12 @@
+guarantee: common::download::timeouts row: connect
+file: crates/voicen-core/tests/common/download.rs
+added_by: test-writer
+test: cargo test -j 2 -p voicen-core --test local_download
+--- old
+        download_no_data: no_data,
+        ..in_time()
+--- new
+        download_no_data: no_data,
+        connect: Duration::from_secs(2),
+        ..in_time()
+--- end

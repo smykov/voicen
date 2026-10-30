@@ -1,0 +1,13 @@
+guarantee: openai_client helper row: connect
+file: crates/voicen-core/tests/openai_client.rs
+added_by: test-writer
+test: cargo test -j 2 -p voicen-core --test openai_client -- in_time_deadlines the_helper_total
+--- old
+fn timeouts() -> Timeouts {
+    in_time()
+}
+--- new
+fn timeouts() -> Timeouts {
+    Timeouts { connect: Duration::from_secs(2), ..in_time() }
+}
+--- end

@@ -1,0 +1,9 @@
+guarantee: diag_pipeline t row: the listed test itself runs under in_time
+file: crates/voicen-core/tests/diag_pipeline.rs
+added_by: test-writer
+test: cargo test -j 2 -p voicen-core --test diag_pipeline -- in_time_scenarios log_holds post_processing_outcome
+--- old
+    let t = pp_outcome_timeouts();
+--- new
+    let t = Timeouts { connect: Duration::from_secs(2), post_processing: Duration::from_secs(5), ..in_time() };
+--- end

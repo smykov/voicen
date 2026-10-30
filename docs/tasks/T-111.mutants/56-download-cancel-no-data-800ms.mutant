@@ -1,0 +1,13 @@
+guarantee: cancel_during_stall row: no_data = M
+file: crates/voicen-core/tests/local_download.rs
+added_by: test-writer
+test: cargo test -j 2 -p voicen-core --test local_download
+--- old
+fn cancel_no_data() -> Duration {
+    M
+}
+--- new
+fn cancel_no_data() -> Duration {
+    Duration::from_millis(800)
+}
+--- end

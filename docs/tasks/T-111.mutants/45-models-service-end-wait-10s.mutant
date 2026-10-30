@@ -1,0 +1,9 @@
+guarantee: local_models_service END_WAIT row
+file: crates/voicen-core/tests/local_models_service.rs
+added_by: test-writer
+test: cargo test -j 2 -p voicen-core --test local_models_service
+--- old
+const END_WAIT: Duration = OS_ANSWER_BUDGET;
+--- new
+const END_WAIT: Duration = Duration::from_secs(10);
+--- end

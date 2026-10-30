@@ -1174,12 +1174,27 @@ async fn no_event_or_failure_carries_key_query_or_transcript() {
     // controls: the key and the query were sent, and the transcript did reach the
     // clipboard. Bite: a String field in an event, a FailureReason built from a
     // reqwest error or a body, the text kept in JobReport.
+    // T-111: every scenario that expects an answer gets it 700 ms late, past the 300 ms
+    // of `ms`, so one of them run under `ms` ends Timeout and goes red here.
+    let stall = Duration::from_millis(700);
     let marker_body = format!("{TRANSCRIPT} {KEY}");
-    let ok = server_with(ok_text(TRANSCRIPT)).await;
-    let s401 = server_with(ResponseTemplate::new(401).set_body_string(marker_body.clone())).await;
-    let s500 = server_with(ResponseTemplate::new(500).set_body_string(marker_body.clone())).await;
+    let ok = server_with(ok_text(TRANSCRIPT).set_delay(stall)).await;
+    let s401 = server_with(
+        ResponseTemplate::new(401)
+            .set_body_string(marker_body.clone())
+            .set_delay(stall),
+    )
+    .await;
+    let s500 = server_with(
+        ResponseTemplate::new(500)
+            .set_body_string(marker_body.clone())
+            .set_delay(stall),
+    )
+    .await;
     let bad = server_with(
-        ResponseTemplate::new(200).set_body_json(json!({ "txt": TRANSCRIPT, "key": KEY })),
+        ResponseTemplate::new(200)
+            .set_body_json(json!({ "txt": TRANSCRIPT, "key": KEY }))
+            .set_delay(stall),
     )
     .await;
     let slow = server_with(ok_text(TRANSCRIPT).set_delay(Duration::from_secs(5))).await;

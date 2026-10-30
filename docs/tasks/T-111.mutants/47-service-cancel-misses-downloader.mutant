@@ -1,0 +1,9 @@
+guarantee: local_models_service trickle: a cancel not reaching the downloader shows as no end event
+file: crates/voicen-core/src/local_models/service.rs
+added_by: test-writer
+test: cargo test -j 2 -p voicen-core --test local_models_service
+--- old
+        ModelId::parse(id).is_some_and(|id| self.downloader.cancel(id))
+--- new
+        ModelId::parse(id).is_some()
+--- end

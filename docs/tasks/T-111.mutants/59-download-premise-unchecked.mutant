@@ -1,0 +1,12 @@
+guarantee: cancel_during_stall PREMISE: the premise is checked before the cancel assert
+file: crates/voicen-core/tests/local_download.rs
+added_by: test-writer
+test: cargo test -j 2 -p voicen-core --test local_download
+--- old
+    if passed(first.at, no_data) {
+        return false;
+    }
+    assert!(cancelled, "stall: cancel of the running download");
+--- new
+    assert!(cancelled, "stall: cancel of the running download");
+--- end

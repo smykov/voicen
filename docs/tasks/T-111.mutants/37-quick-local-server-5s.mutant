@@ -1,0 +1,13 @@
+guarantee: connection_test quick row: local server total
+file: crates/voicen-core/tests/connection_test.rs
+added_by: test-writer
+test: cargo test -j 2 -p voicen-core --test connection_test -- quick_
+--- old
+fn quick() -> Timeouts {
+    in_time()
+}
+--- new
+fn quick() -> Timeouts {
+    Timeouts { local_server: Duration::from_secs(5), ..in_time() }
+}
+--- end

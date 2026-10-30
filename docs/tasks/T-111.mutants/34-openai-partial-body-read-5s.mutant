@@ -1,0 +1,9 @@
+guarantee: partial_body_server row
+file: crates/voicen-core/tests/openai_client.rs
+added_by: test-writer
+test: cargo test -j 2 -p voicen-core --test openai_client -- in_time_deadlines the_helper_total
+--- old
+const SERVER_READ_TIMEOUT: Duration = OS_ANSWER_BUDGET;
+--- new
+const SERVER_READ_TIMEOUT: Duration = Duration::from_secs(5);
+--- end

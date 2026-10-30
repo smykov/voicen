@@ -1,0 +1,9 @@
+guarantee: Unanswered row: totals 20 x connect
+file: crates/voicen-core/tests/common/os_answer.rs
+added_by: test-writer
+test: cargo test -j 2 -p voicen-core --test common_helpers unanswered
+--- old
+                api_transcription: 20 * connect,
+--- new
+                api_transcription: 10 * connect,
+--- end

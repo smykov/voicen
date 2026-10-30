@@ -1,0 +1,9 @@
+guarantee: api_pipeline connect_s row: limit 10, connect 5
+file: crates/voicen-core/tests/api_pipeline.rs
+added_by: test-writer
+test: cargo test -j 2 -p voicen-core --test api_pipeline -- immediate_scenarios configured_api no_event_or_failure
+--- old
+const API_CONNECT_S: u32 = 5;
+--- new
+const API_CONNECT_S: u32 = 2;
+--- end

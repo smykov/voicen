@@ -1,0 +1,13 @@
+guarantee: post_process_chat helper row: connect
+file: crates/voicen-core/tests/post_process_chat.rs
+added_by: test-writer
+test: cargo test -j 2 -p voicen-core --test post_process_chat -- helper_
+--- old
+fn timeouts() -> Timeouts {
+    in_time()
+}
+--- new
+fn timeouts() -> Timeouts {
+    Timeouts { connect: Duration::from_secs(2), ..in_time() }
+}
+--- end

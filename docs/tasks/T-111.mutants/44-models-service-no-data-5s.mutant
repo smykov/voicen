@@ -1,0 +1,13 @@
+guarantee: local_models_service helper row: no-data
+file: crates/voicen-core/tests/local_models_service.rs
+added_by: test-writer
+test: cargo test -j 2 -p voicen-core --test local_models_service
+--- old
+fn timeouts() -> Timeouts {
+    in_time()
+}
+--- new
+fn timeouts() -> Timeouts {
+    Timeouts { download_no_data: Duration::from_secs(5), ..in_time() }
+}
+--- end

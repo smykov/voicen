@@ -1,0 +1,9 @@
+guarantee: local_download redesign rows: a trickle of at least the budget
+file: crates/voicen-core/tests/local_download.rs
+added_by: test-writer
+test: cargo test -j 2 -p voicen-core --test local_download
+--- old
+        every: OS_ANSWER_BUDGET / (SIZE.div_ceil(CHUNK as u64) as u32),
+--- new
+        every: Duration::from_secs(4) / (SIZE.div_ceil(CHUNK as u64) as u32),
+--- end

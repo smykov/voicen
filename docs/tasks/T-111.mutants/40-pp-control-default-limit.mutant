@@ -1,0 +1,18 @@
+guarantee: D3: the control leg stands above the default limit
+file: crates/voicen-core/tests/post_process_timeout.rs
+added_by: test-writer
+test: cargo test -j 2 -p voicen-core --test post_process_timeout -- control_leg configured_
+--- old
+    s.timeouts.post_processing_s = 60;
+    s
+}
+
+#[test]
+fn configured_timeout_legs_keep_the_in_time_margin_m() {
+--- new
+    s
+}
+
+#[test]
+fn configured_timeout_legs_keep_the_in_time_margin_m() {
+--- end

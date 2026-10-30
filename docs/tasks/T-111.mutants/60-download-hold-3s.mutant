@@ -1,0 +1,9 @@
+guarantee: local_download HOLD row: above END_WAIT
+file: crates/voicen-core/tests/local_download.rs
+added_by: test-writer
+test: cargo test -j 2 -p voicen-core --test local_download
+--- old
+const HOLD: Duration = Duration::from_secs(30);
+--- new
+const HOLD: Duration = Duration::from_secs(3);
+--- end

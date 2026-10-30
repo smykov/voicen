@@ -1,0 +1,13 @@
+guarantee: local_model_delete helper row: connect
+file: crates/voicen-core/tests/local_model_delete.rs
+added_by: test-writer
+test: cargo test -j 2 -p voicen-core --test local_model_delete -- helper_deadlines
+--- old
+fn timeouts() -> Timeouts {
+    in_time()
+}
+--- new
+fn timeouts() -> Timeouts {
+    Timeouts { connect: Duration::from_secs(2), ..in_time() }
+}
+--- end

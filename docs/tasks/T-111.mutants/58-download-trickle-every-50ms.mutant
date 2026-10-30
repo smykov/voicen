@@ -1,0 +1,9 @@
+guarantee: local_download trickle row: lasts at least 3 x no_data
+file: crates/voicen-core/tests/local_download.rs
+added_by: test-writer
+test: cargo test -j 2 -p voicen-core --test local_download
+--- old
+const TRICKLE_EVERY: Duration = Duration::from_millis(250);
+--- new
+const TRICKLE_EVERY: Duration = Duration::from_millis(50);
+--- end

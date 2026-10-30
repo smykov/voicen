@@ -272,12 +272,27 @@ async fn log_holds_no_key_query_or_transcript_on_any_path() {
     // other &str echoed into the line, a FailureReason (CannotReach's host,
     // Display text) formatted into the log, a settings value (base URL, model)
     // on the save or load line, the transcript kept anywhere the log reads.
-    let ok = server_with(ok_text(TRANSCRIPT)).await;
+    // T-111: every scenario that expects an answer gets it 700 ms late, past the 300 ms
+    // of `ms`, so one of them run under `ms` ends Timeout and goes red here.
+    let stall = Duration::from_millis(700);
+    let ok = server_with(ok_text(TRANSCRIPT).set_delay(stall)).await;
     let marker_body = format!("{TRANSCRIPT} {KEY}");
-    let s401 = server_with(ResponseTemplate::new(401).set_body_string(marker_body.clone())).await;
-    let s500 = server_with(ResponseTemplate::new(500).set_body_string(marker_body.clone())).await;
+    let s401 = server_with(
+        ResponseTemplate::new(401)
+            .set_body_string(marker_body.clone())
+            .set_delay(stall),
+    )
+    .await;
+    let s500 = server_with(
+        ResponseTemplate::new(500)
+            .set_body_string(marker_body.clone())
+            .set_delay(stall),
+    )
+    .await;
     let bad = server_with(
-        ResponseTemplate::new(200).set_body_json(json!({ "txt": TRANSCRIPT, "key": KEY })),
+        ResponseTemplate::new(200)
+            .set_body_json(json!({ "txt": TRANSCRIPT, "key": KEY }))
+            .set_delay(stall),
     )
     .await;
     // T-186: a cross-origin 307 whose Location carries a marker query; the target
@@ -604,7 +619,9 @@ async fn post_processing_outcome_is_logged_without_prompt_reply_host_or_key() {
     let api = base(&transcribe);
     let failing_api = server_with(ResponseTemplate::new(500)).await;
     let echo = format!("{TRANSCRIPT} {PP_PROMPT} {PP_KEY} {PP_REPLY} {PP_MODEL} {PP_QUERY}");
-    let chat_delay = Duration::from_millis(150);
+    // T-111: 5.5 s, past the old 5 s post-processing total, so these scenarios run
+    // under `t` or go red (a connect limit cannot be delayed: pinned by its value).
+    let chat_delay = Duration::from_millis(5_500);
     let chat_ok = chat_with(chat_reply(PP_REPLY).set_delay(chat_delay)).await;
     let chat_500 = chat_with(ResponseTemplate::new(500).set_body_string(echo.clone())).await;
     let chat_401 = chat_with(ResponseTemplate::new(401).set_body_string(echo.clone())).await;

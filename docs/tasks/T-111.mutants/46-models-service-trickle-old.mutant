@@ -1,0 +1,9 @@
+guarantee: local_models_service trickle: outlasts END_WAIT, so no test thread races its end
+file: crates/voicen-core/tests/local_models_service.rs
+added_by: test-writer
+test: cargo test -j 2 -p voicen-core --test local_models_service
+--- old
+        every: Duration::from_secs(1),
+--- new
+        every: Duration::from_millis(50),
+--- end

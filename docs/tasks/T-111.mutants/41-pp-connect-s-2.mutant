@@ -1,0 +1,9 @@
+guarantee: post_process_timeout connect_s row
+file: crates/voicen-core/tests/post_process_timeout.rs
+added_by: test-writer
+test: cargo test -j 2 -p voicen-core --test post_process_timeout -- control_leg configured_
+--- old
+const PP_CONNECT_S: u32 = 5;
+--- new
+const PP_CONNECT_S: u32 = 2;
+--- end

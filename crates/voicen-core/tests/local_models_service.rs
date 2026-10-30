@@ -69,6 +69,22 @@ fn helper_deadlines_and_end_wait_are_at_the_budget_scale() {
     assert!(END_WAIT >= OS_ANSWER_BUDGET, "END_WAIT {END_WAIT:?}");
 }
 
+#[test]
+fn the_trickle_outlasts_end_wait() {
+    // T-111: no test thread races the end of the transfer, and a cancel that does not
+    // reach the downloader ends in "no end event". Bite: the old 1 KiB every 50 ms
+    // (~3.2 s).
+    let Serve::Trickle { chunk, every } = trickle() else {
+        panic!("trickle() is not a Serve::Trickle");
+    };
+    let chunks = SIZE.div_ceil(chunk as u64) as u32;
+    assert!(
+        every * chunks > END_WAIT,
+        "the trickle lasts {:?}, END_WAIT {END_WAIT:?}",
+        every * chunks
+    );
+}
+
 /// Slow enough to look at and cancel mid-body: 1 KiB every second (~64 s, past
 /// `END_WAIT`), so no test thread races the end of the transfer (T-111) and a cancel
 /// that does not reach the downloader shows as "no end event".

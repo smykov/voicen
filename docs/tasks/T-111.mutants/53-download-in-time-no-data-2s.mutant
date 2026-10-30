@@ -1,0 +1,9 @@
+guarantee: local_download 19 fixture sites row
+file: crates/voicen-core/tests/local_download.rs
+added_by: test-writer
+test: cargo test -j 2 -p voicen-core --test local_download
+--- old
+    in_time().download_no_data
+--- new
+    Duration::from_secs(2)
+--- end

@@ -1,0 +1,9 @@
+guarantee: decision 200: M = 5 s
+file: crates/voicen-core/tests/common/timing.rs
+added_by: test-writer
+test: cargo test -j 2 -p voicen-core --test common_in_time
+--- old
+pub const M: Duration = Duration::from_secs(5);
+--- new
+pub const M: Duration = Duration::from_secs(4);
+--- end

@@ -1,0 +1,9 @@
+guarantee: T-110 r2#1 / T-009 r1: the skip is visible (swallowed)
+file: crates/voicen-core/tests/common/timing.rs
+added_by: test-writer
+test: cargo test -j 2 -p voicen-core --test common_in_time
+--- old
+    let _ = std::io::stderr().write_all(line.as_bytes());
+--- new
+    let _ = line;
+--- end

@@ -1,0 +1,9 @@
+guarantee: local_download trickle row at M
+file: crates/voicen-core/tests/local_download.rs
+added_by: test-writer
+test: cargo test -j 2 -p voicen-core --test local_download
+--- old
+    TRICKLE_EVERY + M
+--- new
+    Duration::from_millis(400)
+--- end

@@ -1,0 +1,9 @@
+guarantee: in_time row: no-data = 2 x budget
+file: crates/voicen-core/tests/common/os_answer.rs
+added_by: test-writer
+test: cargo test -j 2 -p voicen-core --test common_in_time
+--- old
+        download_no_data: 2 * OS_ANSWER_BUDGET,
+--- new
+        download_no_data: Duration::from_secs(2),
+--- end

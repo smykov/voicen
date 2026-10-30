@@ -1,0 +1,9 @@
+guarantee: local_server request_deadline row
+file: crates/voicen-core/tests/local_server.rs
+added_by: test-writer
+test: cargo test -j 2 -p voicen-core --test local_server -- helpers_connect request_deadline
+--- old
+    in_time().local_server
+--- new
+    Duration::from_secs(5)
+--- end

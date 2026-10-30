@@ -1,0 +1,13 @@
+guarantee: diag_pipeline redaction row: in-time total
+file: crates/voicen-core/tests/diag_pipeline.rs
+added_by: test-writer
+test: cargo test -j 2 -p voicen-core --test diag_pipeline -- in_time_scenarios log_holds post_processing_outcome
+--- old
+fn immediate_timeouts() -> Timeouts {
+    in_time()
+}
+--- new
+fn immediate_timeouts() -> Timeouts {
+    Timeouts { api_transcription: Duration::from_millis(300), ..in_time() }
+}
+--- end

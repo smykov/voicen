@@ -1,0 +1,9 @@
+guarantee: local_model_delete END_WAIT row
+file: crates/voicen-core/tests/local_model_delete.rs
+added_by: test-writer
+test: cargo test -j 2 -p voicen-core --test local_model_delete -- helper_deadlines
+--- old
+const END_WAIT: Duration = OS_ANSWER_BUDGET;
+--- new
+const END_WAIT: Duration = Duration::from_secs(10);
+--- end

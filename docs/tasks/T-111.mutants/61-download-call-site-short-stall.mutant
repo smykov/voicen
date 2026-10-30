@@ -1,0 +1,13 @@
+guarantee: -
+file: crates/voicen-core/tests/local_download.rs
+added_by: test-writer
+test: cargo test -j 2 -p voicen-core --test local_download
+--- old
+    let server = Server::start(vec![long_trickle()]);
+    let f = fixture(&server, in_time_no_data());
+    assert!(!f.dl.cancel(ModelId::Base), "idle cancel");
+--- new
+    let server = Server::start(vec![Serve::Stall { after: 4096, hold: Duration::from_secs(3) }]);
+    let f = fixture(&server, Duration::from_secs(2));
+    assert!(!f.dl.cancel(ModelId::Base), "idle cancel");
+--- end

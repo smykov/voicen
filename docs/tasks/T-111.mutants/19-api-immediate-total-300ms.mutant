@@ -1,0 +1,13 @@
+guarantee: api_pipeline redaction row: in-time total, not the 300 ms of ms
+file: crates/voicen-core/tests/api_pipeline.rs
+added_by: test-writer
+test: cargo test -j 2 -p voicen-core --test api_pipeline -- immediate_scenarios configured_api no_event_or_failure
+--- old
+fn immediate_timeouts() -> Timeouts {
+    in_time()
+}
+--- new
+fn immediate_timeouts() -> Timeouts {
+    Timeouts { api_transcription: Duration::from_millis(300), ..in_time() }
+}
+--- end

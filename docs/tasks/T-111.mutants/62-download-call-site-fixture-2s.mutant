@@ -1,0 +1,11 @@
+guarantee: -
+file: crates/voicen-core/tests/local_download.rs
+added_by: test-writer
+test: cargo test -j 2 -p voicen-core --test local_download
+--- old
+    let f = fixture(&server, in_time_no_data());
+    std::fs::remove_dir(&f.models).expect("remove models dir");
+--- new
+    let f = fixture(&server, Duration::from_secs(2));
+    std::fs::remove_dir(&f.models).expect("remove models dir");
+--- end

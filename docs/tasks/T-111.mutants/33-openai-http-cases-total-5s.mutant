@@ -1,0 +1,9 @@
+guarantee: openai_client http_cases row
+file: crates/voicen-core/tests/openai_client.rs
+added_by: test-writer
+test: cargo test -j 2 -p voicen-core --test openai_client -- in_time_deadlines the_helper_total
+--- old
+    in_time().api_transcription
+--- new
+    Duration::from_secs(5)
+--- end

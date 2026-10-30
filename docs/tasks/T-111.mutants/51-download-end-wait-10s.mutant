@@ -1,0 +1,9 @@
+guarantee: common::download END_WAIT row
+file: crates/voicen-core/tests/common/download.rs
+added_by: test-writer
+test: cargo test -j 2 -p voicen-core --test local_download
+--- old
+pub const END_WAIT: Duration = Duration::from_secs(25);
+--- new
+pub const END_WAIT: Duration = Duration::from_secs(10);
+--- end
