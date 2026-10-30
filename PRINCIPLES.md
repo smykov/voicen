@@ -118,6 +118,11 @@ Each **Why** names, in one generic sentence, the kind of incident that produced 
 
   Mechanical trigger (T3, decisions #154): the git pre-commit hook (`scripts/hooks/pre-commit`, test `make check-guard-trigger`) refuses a commit that stages a guard change, decided on the raw staged paths with no Make or shell parsing (decisions #154, #155): any path under `scripts/ci/` or `scripts/licenses/`, the path `Makefile`, or a path ending in `.mk`, of any status (added, changed, deleted, renamed) — unless the active task (`$TEAMWRIGHT_TASK`, else `.teamwright/current-task`) has `checker: true` and a non-empty `analysis.decides_on`. A task record without a `checker:` key counts as `checker: false`; no active task, or no record for it, refuses too. The `decides_on` cell of the guard table in `docs/decisions/ci-toolchain.md` is copied from the task's analysis, not chosen by the writer.
 
+### P-021 — Verification before new starts
+- **Why:** with `ready.after: code_complete` new work starts on top of unverified tasks, so a verify failure reopens more each day. At the review of 2026-10-30, 15 tasks waited at `CODE_COMPLETE` and 1 of 27 tasks seen since 2026-10-24 was done. Origin: process review 2026-10-30 (decisions #217).
+- **Tier:** T1
+- **How checked:** in `/teamwright:parallel auto` the orchestrator starts no new `TODO` task while more than 5 tasks wait at `CODE_COMPLETE` for verification; it verifies first. Pipelines already running finish. A verification that waits for the owner's `main` push is asked as that question at once, not at the end of the pass. Each process review reports the `CODE_COMPLETE` count.
+
 ---
 
 ## Registry
@@ -144,3 +149,4 @@ Each **Why** names, in one generic sentence, the kind of incident that produced 
 | P-018 | Writer pass before review when code named by docs changes | T1 | Accepted |
 | P-019 | Task record under 40 KB | T0 | Accepted |
 | P-020 | A guard decides on a switch, an owned literal or a raw token | T1+T3 | Accepted |
+| P-021 | Verification before new starts | T1 | Accepted |
