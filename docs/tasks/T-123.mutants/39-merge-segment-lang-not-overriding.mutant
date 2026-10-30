@@ -2,7 +2,7 @@ guarantee: AC-3: segment lang overrides chunk lang
 file: crates/voicen-core/src/call/transcript.rs
 added_by: test-writer
 --- old
-s.lang.or(chunk.lang))
+lang: segment.lang.or(chunk.lang),
 --- new
-chunk.lang.or(s.lang))
+lang: chunk.lang.or(segment.lang),
 --- end

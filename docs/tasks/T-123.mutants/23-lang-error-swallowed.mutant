@@ -2,7 +2,7 @@ guarantee: AC-2: bad lang (swallowed at the origin)
 file: crates/voicen-core/src/call/transcript.rs
 added_by: test-writer
 --- old
-return Err((InvalidRule::BadLang, i));
+return Err(InvalidRule::BadLang);
 --- new
-continue;
+return Ok(());
 --- end

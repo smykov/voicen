@@ -2,7 +2,7 @@ guarantee: AC-4: contract layout
 file: crates/voicen-core/src/call/transcript.rs
 added_by: test-writer
 --- old
-{:02}\n\n",
+"# {}\n{} \u{b7} {}\n\n",
 --- new
-{:02}\n",
+"# {}\n{} \u{b7} {}\n",
 --- end

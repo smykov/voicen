@@ -1,0 +1,8 @@
+guarantee: AC-3: a non-finite engine time counts as 0 (infinity), not the chunk end
+file: crates/voicen-core/src/call/transcript.rs
+added_by: test-writer
+--- old
+if seconds.is_finite() && seconds > 0.0 {
+--- new
+if seconds > 0.0 {
+--- end

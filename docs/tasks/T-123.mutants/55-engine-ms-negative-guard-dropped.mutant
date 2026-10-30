@@ -1,0 +1,9 @@
+guarantee: AC-3: a negative engine time counts as 0
+file: crates/voicen-core/src/call/transcript.rs
+added_by: test-writer
+equivalent: `as u64` saturates every finite negative value (and -0.0) to 0, so dropping `seconds > 0.0` gives 0 for the same inputs; the is_finite half is entry 54
+--- old
+if seconds.is_finite() && seconds > 0.0 {
+--- new
+if seconds.is_finite() {
+--- end

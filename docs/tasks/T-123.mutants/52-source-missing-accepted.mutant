@@ -1,0 +1,8 @@
+guarantee: AC-2: source must be final (a missing source is bad_source)
+file: crates/voicen-core/src/call/transcript.rs
+added_by: test-writer
+--- old
+if segment.source.as_deref() != Some(SOURCE_FINAL) {
+--- new
+if segment.source.as_deref().is_some_and(|s| s != SOURCE_FINAL) {
+--- end

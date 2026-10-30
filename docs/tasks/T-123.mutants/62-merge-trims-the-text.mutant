@@ -1,0 +1,8 @@
+guarantee: #196 (3): text kept; transcript.json keeps the original text
+file: crates/voicen-core/src/call/transcript.rs
+added_by: test-writer
+--- old
+text: line.text.to_string(),
+--- new
+text: line.text.trim().to_string(),
+--- end

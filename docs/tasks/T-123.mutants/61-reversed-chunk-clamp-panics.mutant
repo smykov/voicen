@@ -1,0 +1,12 @@
+guarantee: invariant: merge is total (a reversed chunk does not panic the clamp)
+file: crates/voicen-core/src/call/transcript.rs
+added_by: test-writer
+--- old
+chunk_start
+                    .saturating_add(engine_ms(seconds))
+                    .min(chunk_end)
+--- new
+chunk_start
+                    .saturating_add(engine_ms(seconds))
+                    .clamp(chunk_start, chunk.end_ms)
+--- end

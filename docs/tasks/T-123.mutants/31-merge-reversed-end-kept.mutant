@@ -2,7 +2,7 @@ guarantee: AC-3: end >= start
 file: crates/voicen-core/src/call/transcript.rs
 added_by: test-writer
 --- old
-(a, b.max(a), s.text.as_str(), s.lang.or(chunk.lang))
+end_ms: in_chunk(segment.end_s).max(start_ms),
 --- new
-(a, b, s.text.as_str(), s.lang.or(chunk.lang))
+end_ms: in_chunk(segment.end_s),
 --- end

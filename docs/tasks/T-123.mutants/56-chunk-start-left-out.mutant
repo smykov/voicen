@@ -1,0 +1,10 @@
+guarantee: AC-3: segment time = offset + chunk start + engine time; never before the chunk start
+file: crates/voicen-core/src/call/transcript.rs
+added_by: test-writer
+--- old
+chunk_start
+                    .saturating_add(engine_ms(seconds))
+                    .min(chunk_end)
+--- new
+engine_ms(seconds).min(chunk_end)
+--- end

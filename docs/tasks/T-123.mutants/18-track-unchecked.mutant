@@ -2,7 +2,10 @@ guarantee: AC-2: unknown track
 file: crates/voicen-core/src/call/transcript.rs
 added_by: test-writer
 --- old
-if s.track != Track::Mic.as_str() && s.track != Track::System.as_str() {
+if ![Track::Mic, Track::System]
+            .iter()
+            .any(|t| t.as_str() == segment.track)
+        {
 --- new
 if false {
 --- end

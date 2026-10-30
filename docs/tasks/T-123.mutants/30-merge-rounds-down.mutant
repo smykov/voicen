@@ -2,7 +2,7 @@ guarantee: AC-3: nearest millisecond
 file: crates/voicen-core/src/call/transcript.rs
 added_by: test-writer
 --- old
-(s * 1000.0).round() as u64
+(seconds * 1000.0).round() as u64
 --- new
-(s * 1000.0).floor() as u64
+(seconds * 1000.0).floor() as u64
 --- end

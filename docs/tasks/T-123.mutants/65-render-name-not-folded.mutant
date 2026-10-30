@@ -1,0 +1,8 @@
+guarantee: AC-4: one line per segment (a line break in a speaker name is folded)
+file: crates/voicen-core/src/call/transcript.rs
+added_by: test-writer
+--- old
+one_line(name),
+--- new
+name,
+--- end

@@ -2,7 +2,7 @@ guarantee: AC-2: bad lang
 file: crates/voicen-core/src/call/transcript.rs
 added_by: test-writer
 --- old
-if !is_lang_code(l) {
+if segment.lang.as_deref().is_some_and(|l| !is_lang_code(l)) {
 --- new
-if l.len() != 2 {
+if segment.lang.as_deref().is_some_and(|l| l.len() != 2) {
 --- end

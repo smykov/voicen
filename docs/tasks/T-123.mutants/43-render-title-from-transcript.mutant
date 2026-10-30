@@ -2,8 +2,7 @@ guarantee: AC-4: title from meta.json
 file: crates/voicen-core/src/call/transcript.rs
 added_by: test-writer
 --- old
-let total = transcript.duration_ms.max(0) / 1000;
+one_line(title),
 --- new
-let title = transcript.title.as_str();
-    let total = transcript.duration_ms.max(0) / 1000;
+one_line(&transcript.title),
 --- end

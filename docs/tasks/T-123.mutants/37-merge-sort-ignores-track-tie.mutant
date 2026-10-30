@@ -2,7 +2,7 @@ guarantee: AC-3: tie order
 file: crates/voicen-core/src/call/transcript.rs
 added_by: test-writer
 --- old
-(*start, *rank));
+lines.sort_by_key(|(track, segment)| (segment.start_ms, track_rank(*track)));
 --- new
-(*start, 0u8));
+lines.sort_by_key(|(_, segment)| (segment.start_ms, 0u8));
 --- end

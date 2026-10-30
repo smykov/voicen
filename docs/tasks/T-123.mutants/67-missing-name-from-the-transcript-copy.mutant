@@ -1,0 +1,9 @@
+guarantee: AC-4: names from meta.json; a missing name is the id, never the transcript's copy
+file: crates/voicen-core/src/call/transcript.rs
+added_by: test-writer
+--- old
+.map_or(segment.speaker.as_str(), |s| s.name.as_str());
+--- new
+.or_else(|| transcript.speakers.iter().find(|s| s.id == segment.speaker))
+            .map_or(segment.speaker.as_str(), |s| s.name.as_str());
+--- end
