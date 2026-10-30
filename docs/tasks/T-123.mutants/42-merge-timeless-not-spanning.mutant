@@ -1,0 +1,8 @@
+guarantee: AC-3: time-less line spans its chunk
+file: crates/voicen-core/src/call/transcript.rs
+added_by: test-writer
+--- old
+None => vec![(cs, ce.max(cs), chunk.text.as_str(), chunk.lang)],
+--- new
+None => vec![(cs, cs, chunk.text.as_str(), chunk.lang)],
+--- end

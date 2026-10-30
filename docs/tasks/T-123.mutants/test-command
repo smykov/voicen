@@ -1,0 +1,4 @@
+# T-123: the task's tests only (call::transcript fixtures in the lib).
+# NOTE: the old text of every transcript.rs / events.rs entry is the text of the test-writer's reference
+# sketch (throwaway copy, never committed). The developer's code differs; rebase entries that exit 2.
+cargo test -j 2 -p voicen-core --lib call::transcript

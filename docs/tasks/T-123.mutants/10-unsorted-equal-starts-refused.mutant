@@ -1,0 +1,8 @@
+guarantee: AC-2: equal starts are sorted
+file: crates/voicen-core/src/call/transcript.rs
+added_by: test-writer
+--- old
+s.start_ms < p)
+--- new
+s.start_ms <= p)
+--- end

@@ -1,0 +1,8 @@
+guarantee: AC-3: empty segment dropped
+file: crates/voicen-core/src/call/transcript.rs
+added_by: test-writer
+--- old
+if text.trim().is_empty() {
+--- new
+if text.is_empty() {
+--- end

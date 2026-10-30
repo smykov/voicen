@@ -19,6 +19,13 @@ pub enum Track {
     System,
 }
 
+impl Track {
+    /// The wire name (`mic` | `system`) of the log lines and `transcript.json`.
+    pub fn as_str(self) -> &'static str {
+        todo!("T-123: the one name table; diag::format delegates to it")
+    }
+}
+
 /// Where a call start request came from (`call_requested source=`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CallSource {
@@ -151,6 +158,13 @@ pub enum InvalidRule {
     BadSource,
     BadLang,
     EmptyText,
+}
+
+impl InvalidRule {
+    /// The closed rule name of the `transcript_invalid rule=` log line.
+    pub fn as_str(self) -> &'static str {
+        todo!("T-123: the one name table; diag::format delegates to it")
+    }
 }
 
 /// The stored state of a call (data-model "Call" `state`). `ready-to-transcribe` keeps the

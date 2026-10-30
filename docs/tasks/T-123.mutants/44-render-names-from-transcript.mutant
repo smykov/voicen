@@ -1,0 +1,11 @@
+guarantee: AC-4: names from meta.json
+file: crates/voicen-core/src/call/transcript.rs
+added_by: test-writer
+--- old
+let name = names
+            .iter()
+--- new
+let name = transcript
+            .speakers
+            .iter()
+--- end

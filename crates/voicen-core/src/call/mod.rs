@@ -2,11 +2,17 @@
 
 pub mod codec;
 pub mod events;
+pub mod transcript;
 
 pub use events::{
     CallId, CallNotice, CallSource, CallState, CallWarning, DeviceCause, EndpointId, FailReason,
     FinalOutcome, FinalStage, InvalidRule, PassMode, RefusedPart, RefusedReason, SilentRule,
     StopReason, StorageKind, SwitchRefusal, Track, VadFallbackCause,
+};
+
+pub use transcript::{
+    merge, render_markdown, ChunkInput, EngineRef, EngineSegment, EnginesV1, MergeInput, SegmentV1,
+    Speaker, TrackInput, TranscriptParseError, TranscriptV1,
 };
 
 use std::fmt;
