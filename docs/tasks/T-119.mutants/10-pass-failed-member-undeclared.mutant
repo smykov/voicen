@@ -1,0 +1,8 @@
+guarantee: I3: notice.pass_failed.<reason> has an id for every FailReason
+file: crates/voicen-core/src/i18n.rs
+added_by: test-writer
+--- old
+    /// A final pass failed: `FailReason::Storage`.
+    NOTICE_PASS_FAILED_STORAGE = "notice.pass_failed.storage",
+--- new
+--- end

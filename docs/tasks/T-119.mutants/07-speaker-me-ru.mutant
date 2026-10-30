@@ -1,0 +1,8 @@
+guarantee: AC 2: the RU speaker labels are "Я" / "Собеседник"
+file: i18n/ru.json
+added_by: test-writer
+--- old
+  "speaker.me": "Я",
+--- new
+  "speaker.me": "Me",
+--- end

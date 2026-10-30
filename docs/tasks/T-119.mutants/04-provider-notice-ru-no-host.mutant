@@ -1,0 +1,8 @@
+guarantee: AC 1: every catalog id exists in EN and RU, including warning.provider_notice with {host}
+file: i18n/ru.json
+added_by: test-writer
+--- old
+  "warning.provider_notice": "Звук собеседника отправляется провайдеру {host}",
+--- new
+  "warning.provider_notice": "Звук собеседника отправляется провайдеру",
+--- end

@@ -1,0 +1,8 @@
+guarantee: I3: warning.track_lost.<track> has an id for every Track
+file: crates/voicen-core/src/i18n.rs
+added_by: test-writer
+--- old
+    /// `IndicatorWarning.text`: `Track::System` lost, silence is being recorded.
+    WARNING_TRACK_LOST_SYSTEM = "warning.track_lost.system",
+--- new
+--- end

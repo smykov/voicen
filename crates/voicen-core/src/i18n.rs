@@ -241,6 +241,112 @@ messages! {
     /// through `diag::LogsNotice` and `DictationSession::notice_with`; placeholder
     /// `{reason}` = a `logs_reason.*` id, rendered in the same language.
     NOTICE_LOGS_UNWRITABLE = "notice.logs_unwritable",
+    // ---- Call mode (T-119, spec 007 contracts/ipc.md "Message catalog", #197, #198).
+    // The enum-to-id mapping of refusals, notices and warnings is T-126's. ----
+    /// Tray submenu `Call` (T-122).
+    TRAY_CALL = "tray.call",
+    /// Tray item `Call › Record` (T-122).
+    TRAY_CALL_RECORD = "tray.call.record",
+    /// Tray item `Call › Stop` (T-122).
+    TRAY_CALL_STOP = "tray.call.stop",
+    /// Tray item `Calls`, opens the Calls window (T-122).
+    TRAY_CALLS = "tray.calls",
+    /// Tray tooltip while a call is recording (#197).
+    TRAY_TOOLTIP_CALL_RECORDING = "tray.tooltip.call_recording",
+    /// `IndicatorState.reminderText`, rendered in Rust.
+    INDICATOR_REMINDER = "indicator.reminder",
+    /// `IndicatorState.headphonesHint`, rendered in Rust.
+    INDICATOR_HEADPHONES = "indicator.headphones",
+    /// `IndicatorWarning.text`: calls may use another output device than the recorded one.
+    WARNING_COMMUNICATIONS_DEVICE = "warning.communications_device",
+    /// `IndicatorWarning.text`: `Track::Mic` lost, silence is being recorded.
+    WARNING_TRACK_LOST_MIC = "warning.track_lost.mic",
+    /// `IndicatorWarning.text`: `Track::System` lost, silence is being recorded.
+    WARNING_TRACK_LOST_SYSTEM = "warning.track_lost.system",
+    /// `IndicatorWarning.text`: the mic track moved to the Windows default.
+    WARNING_MIC_CHANGED = "warning.mic_changed",
+    /// `IndicatorWarning.text`: the system track stays silent.
+    WARNING_CANT_HEAR_OTHER_PARTY = "warning.cant_hear_other_party",
+    /// `IndicatorWarning.text`: the mic track stays silent.
+    WARNING_CANT_HEAR_YOU = "warning.cant_hear_you",
+    /// `IndicatorWarning.text`: under 1 GB free in the calls folder.
+    WARNING_LOW_DISK = "warning.low_disk",
+    /// `IndicatorWarning.text` of kind `providerNotice`; placeholder `{host}` =
+    /// `host[:port]`.
+    WARNING_PROVIDER_NOTICE = "warning.provider_notice",
+    /// `RefusedPart::Mic` x `RefusedReason::NoDevice`.
+    NOTICE_CALL_REFUSED_MIC_NO_DEVICE = "notice.call_refused.mic.no_device",
+    /// `RefusedPart::Mic` x `RefusedReason::AccessDenied`.
+    NOTICE_CALL_REFUSED_MIC_ACCESS_DENIED = "notice.call_refused.mic.access_denied",
+    /// `RefusedPart::Mic` x `RefusedReason::Busy`.
+    NOTICE_CALL_REFUSED_MIC_BUSY = "notice.call_refused.mic.busy",
+    /// `RefusedPart::Mic` x `RefusedReason::Unwritable`.
+    NOTICE_CALL_REFUSED_MIC_UNWRITABLE = "notice.call_refused.mic.unwritable",
+    /// `RefusedPart::Mic` x `RefusedReason::Missing`.
+    NOTICE_CALL_REFUSED_MIC_MISSING = "notice.call_refused.mic.missing",
+    /// `RefusedPart::Mic` x `RefusedReason::Other`.
+    NOTICE_CALL_REFUSED_MIC_OTHER = "notice.call_refused.mic.other",
+    /// `RefusedPart::System` x `RefusedReason::NoDevice`.
+    NOTICE_CALL_REFUSED_SYSTEM_NO_DEVICE = "notice.call_refused.system.no_device",
+    /// `RefusedPart::System` x `RefusedReason::AccessDenied`.
+    NOTICE_CALL_REFUSED_SYSTEM_ACCESS_DENIED = "notice.call_refused.system.access_denied",
+    /// `RefusedPart::System` x `RefusedReason::Busy`.
+    NOTICE_CALL_REFUSED_SYSTEM_BUSY = "notice.call_refused.system.busy",
+    /// `RefusedPart::System` x `RefusedReason::Unwritable`.
+    NOTICE_CALL_REFUSED_SYSTEM_UNWRITABLE = "notice.call_refused.system.unwritable",
+    /// `RefusedPart::System` x `RefusedReason::Missing`.
+    NOTICE_CALL_REFUSED_SYSTEM_MISSING = "notice.call_refused.system.missing",
+    /// `RefusedPart::System` x `RefusedReason::Other`.
+    NOTICE_CALL_REFUSED_SYSTEM_OTHER = "notice.call_refused.system.other",
+    /// `RefusedPart::Root` x `RefusedReason::NoDevice`.
+    NOTICE_CALL_REFUSED_ROOT_NO_DEVICE = "notice.call_refused.root.no_device",
+    /// `RefusedPart::Root` x `RefusedReason::AccessDenied`.
+    NOTICE_CALL_REFUSED_ROOT_ACCESS_DENIED = "notice.call_refused.root.access_denied",
+    /// `RefusedPart::Root` x `RefusedReason::Busy`.
+    NOTICE_CALL_REFUSED_ROOT_BUSY = "notice.call_refused.root.busy",
+    /// `RefusedPart::Root` x `RefusedReason::Unwritable`.
+    NOTICE_CALL_REFUSED_ROOT_UNWRITABLE = "notice.call_refused.root.unwritable",
+    /// `RefusedPart::Root` x `RefusedReason::Missing`.
+    NOTICE_CALL_REFUSED_ROOT_MISSING = "notice.call_refused.root.missing",
+    /// `RefusedPart::Root` x `RefusedReason::Other`.
+    NOTICE_CALL_REFUSED_ROOT_OTHER = "notice.call_refused.root.other",
+    /// A call was saved and its final pass is queued (T-139).
+    NOTICE_CALL_SAVED = "notice.call_saved",
+    /// A final pass ended ready (T-139).
+    NOTICE_TRANSCRIPT_READY = "notice.transcript_ready",
+    /// The action of the transcript-ready toast (T-139).
+    NOTICE_OPEN = "notice.open",
+    /// A final pass failed: `FailReason::Key`.
+    NOTICE_PASS_FAILED_KEY = "notice.pass_failed.key", // a catalog id, not a key: teamwright:allow-secret
+    /// A final pass failed: `FailReason::Network`.
+    NOTICE_PASS_FAILED_NETWORK = "notice.pass_failed.network",
+    /// A final pass failed: `FailReason::Timeout`.
+    NOTICE_PASS_FAILED_TIMEOUT = "notice.pass_failed.timeout",
+    /// A final pass failed: `FailReason::Provider`.
+    NOTICE_PASS_FAILED_PROVIDER = "notice.pass_failed.provider",
+    /// A final pass failed: `FailReason::Storage`.
+    NOTICE_PASS_FAILED_STORAGE = "notice.pass_failed.storage",
+    /// A final pass failed: `FailReason::EngineNotSetUp`.
+    NOTICE_PASS_FAILED_ENGINE_NOT_SET_UP = "notice.pass_failed.engine_not_set_up",
+    /// Recording stopped: `StopReason::Sleep`.
+    NOTICE_STOPPED_SLEEP = "notice.stopped.sleep",
+    /// Recording stopped: `StopReason::MaxLength`.
+    NOTICE_STOPPED_MAX_LENGTH = "notice.stopped.max_length",
+    /// Recording stopped: `StopReason::LowDisk`.
+    NOTICE_STOPPED_LOW_DISK = "notice.stopped.low_disk",
+    /// Recording stopped: `StopReason::StorageError`.
+    NOTICE_STOPPED_STORAGE = "notice.stopped.storage",
+    /// The call hotkey could not be registered (T-129).
+    NOTICE_CALL_HOTKEY_CONFLICT = "notice.call_hotkey_conflict",
+    /// The question of the exit dialog while a call records (T-145).
+    EXIT_RECORDING_QUESTION = "exit.recording.question",
+    /// Default `Call.title`, rendered once at creation (T-125); placeholders `{day}`,
+    /// `{month}`, `{hour}`, `{minute}` = two-digit values the caller pads.
+    CALLS_TITLE_DEFAULT = "calls.title_default",
+    /// Default name of the mic speaker, rendered once at creation (T-125).
+    SPEAKER_ME = "speaker.me",
+    /// Default name of the system-track speaker, rendered once at creation (T-125).
+    SPEAKER_OTHER = "speaker.other",
     ;
     nested:
     /// `MicCause::NoDevice`.

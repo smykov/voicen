@@ -1,0 +1,2 @@
+# T-119: the task's tests only (the i18n catalog checks, in the lib).
+cargo test -j 2 -p voicen-core --lib i18n

@@ -1,0 +1,8 @@
+guarantee: AC 4: notice.call_refused.{part}.{reason} covers every part x reason of CallRefused
+file: crates/voicen-core/src/i18n.rs
+added_by: test-writer
+--- old
+    /// `RefusedPart::Root` x `RefusedReason::Missing`.
+    NOTICE_CALL_REFUSED_ROOT_MISSING = "notice.call_refused.root.missing",
+--- new
+--- end

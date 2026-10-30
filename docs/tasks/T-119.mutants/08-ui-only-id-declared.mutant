@@ -1,0 +1,10 @@
+guarantee: I2: UI-only ids are not declared with messages! (decision #198 D4)
+file: crates/voicen-core/src/i18n.rs
+added_by: test-writer
+--- old
+    CALLS_TITLE_DEFAULT = "calls.title_default",
+--- new
+    CALLS_TITLE_DEFAULT = "calls.title_default",
+    /// Mutant: a UI-only id declared in Rust.
+    CALLS_FAILED_KEY = "calls.failed.key",
+--- end

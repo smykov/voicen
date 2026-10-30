@@ -89,7 +89,7 @@ Playwright specs (`e2e/calls.spec.ts`, `e2e/call-indicator.spec.ts`, `e2e/settin
 
 ## Message catalog (EN + RU, `messages!`)
 
-The texts live in the one catalog at the repository root, `i18n/en.json` and `i18n/ru.json` (decision #13); the ids are declared in `messages!` in `crates/voicen-core/src/i18n.rs`, the only Rust code that parses and renders them. `i18n/conformance.json` is the shared render-rule fixture of the Rust and UI suites and gains no call ids.
+The texts live in the one catalog at the repository root, `i18n/en.json` and `i18n/ru.json` (decision #13); Rust-originated ids are declared in `messages!` in `crates/voicen-core/src/i18n.rs`, the only Rust code that parses and renders them; UI-only ids are `t()` literals. `i18n/conformance.json` is the shared render-rule fixture of the Rust and UI suites and gains no call ids.
 
 | Id | English |
 |---|---|
@@ -124,6 +124,6 @@ The texts live in the one catalog at the repository root, `i18n/en.json` and `i1
 | `speaker.me` / `speaker.other` | Me / Other party (RU: Я / Собеседник) |
 | `settings.tab.calls` + one label per new `FieldId` | Calls / Call hotkey / Reminder / Primary language / Storage folder |
 | `settings.calls.provider_notice` | The other party's audio goes to provider {host} |
-| `settings.calls.storage_unwritable` | This folder can't be written: {reason} |
+| `error.storage.unwritable` (T-120, no placeholder) | An unwritable storage folder uses this id; there is no `settings.calls.storage_unwritable` (#198) |
 
 RU texts are added with the EN ones in the same task; the existing catalog checks (`Catalog::parity_problems` and the ids-exist-in-both-catalogs tests in `i18n.rs`) enforce parity. Byte counts use `formatSize`.

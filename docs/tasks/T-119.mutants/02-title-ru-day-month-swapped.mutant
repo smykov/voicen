@@ -1,0 +1,8 @@
+guarantee: AC 3: calls.title_default renders the call's day, month and time in EN and RU
+file: i18n/ru.json
+added_by: test-writer
+--- old
+  "calls.title_default": "Звонок {day}.{month} {hour}:{minute}",
+--- new
+  "calls.title_default": "Звонок {month}.{day} {hour}:{minute}",
+--- end

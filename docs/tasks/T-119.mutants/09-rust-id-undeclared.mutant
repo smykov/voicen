@@ -1,0 +1,8 @@
+guarantee: I2: every Rust-originated id is a MessageId declared with messages!
+file: crates/voicen-core/src/i18n.rs
+added_by: test-writer
+--- old
+    /// Tray item `Calls`, opens the Calls window (T-122).
+    TRAY_CALLS = "tray.calls",
+--- new
+--- end

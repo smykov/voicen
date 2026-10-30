@@ -1,0 +1,8 @@
+guarantee: AC 3: calls.title_default renders a call of 5 March 09:07 as "Call 05.03 09:07"
+file: i18n/en.json
+added_by: test-writer
+--- old
+  "calls.title_default": "Call {day}.{month} {hour}:{minute}",
+--- new
+  "calls.title_default": "Call {month}.{day} {hour}:{minute}",
+--- end

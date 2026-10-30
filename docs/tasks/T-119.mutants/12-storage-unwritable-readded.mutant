@@ -1,0 +1,9 @@
+guarantee: Decision #198 D2: settings.calls.storage_unwritable stays out of the catalog
+file: i18n/en.json
+added_by: test-writer
+--- old
+  "settings.calls.provider_notice": "The other party's audio goes to provider {host}",
+--- new
+  "settings.calls.provider_notice": "The other party's audio goes to provider {host}",
+  "settings.calls.storage_unwritable": "This folder can't be written: {reason}",
+--- end
