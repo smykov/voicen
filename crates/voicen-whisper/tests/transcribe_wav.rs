@@ -297,7 +297,8 @@ fn load_tiny_with_threads(threads: usize) -> WhisperModel {
 /// already requested leaves whisper.cpp's segment count of that run at 0, while the same
 /// audio unaborted on the same model leaves more than 0. `whisper_full` clears its result
 /// at the start of a run and asks the encoder-begin callback before the first window, so
-/// with both stop callbacks removed the aborted run equals the baseline (segments > 0).
+/// with both stop callbacks removed the aborted run computes on and leaves segments > 0
+/// (not the baseline's count: run 40175631024 left 12 against 24).
 ///
 /// Not covered by design: the mel spectrogram of the whole input is computed before any
 /// callback runs, so it cannot be aborted and is not what this asserts. Durations are

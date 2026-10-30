@@ -33,10 +33,10 @@ use whisper_rs::{
 };
 
 /// B of the thread policy ([`thread_count_for`], T-109 I2, decision #200 D1): the best ggml
-/// thread count of one transcription. Placeholder: this is T-099's former upper bound (8);
-/// T-109 step 2 sets it from the measured windows-latest `whisper-timing` table (the count
-/// with the lowest 30 s figure, ties to fewer threads).
-const BEST_THREADS: usize = 8;
+/// thread count of one transcription. 2 by decision #213: the lowest 30 s figure of the
+/// windows-latest `whisper-timing` table (ties to fewer threads). Measured on 4 vCPUs only;
+/// a stronger PC stays at 2 threads.
+const BEST_THREADS: usize = 2;
 
 /// Loads a whisper model file (`ggml-*.bin`) for the CPU.
 #[derive(Debug, Default)]
