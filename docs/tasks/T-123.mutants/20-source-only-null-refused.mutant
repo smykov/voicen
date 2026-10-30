@@ -2,7 +2,7 @@ guarantee: AC-2: source must be final
 file: crates/voicen-core/src/call/transcript.rs
 added_by: test-writer
 --- old
-if s.source.as_deref() != Some("final") {
+if segment.source.as_deref() != Some(SOURCE_FINAL) {
 --- new
-if s.source.is_none() {
+if segment.source.is_none() {
 --- end

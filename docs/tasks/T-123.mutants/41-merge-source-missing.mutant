@@ -2,7 +2,7 @@ guarantee: AC-1: source final
 file: crates/voicen-core/src/call/transcript.rs
 added_by: test-writer
 --- old
-source: Some("final".to_string()),
+source: Some(SOURCE_FINAL.to_string()),
 --- new
 source: None,
 --- end

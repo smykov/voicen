@@ -2,7 +2,7 @@ guarantee: #196 (3): clamp to duration_ms
 file: crates/voicen-core/src/call/transcript.rs
 added_by: test-writer
 --- old
-to_i64(tr.start_offset_ms.saturating_add(a)).min(duration)
+start_ms: on_call(line.start_ms),
 --- new
-to_i64(tr.start_offset_ms.saturating_add(a))
+start_ms: wire_ms(line.start_ms.saturating_add(track.start_offset_ms)),
 --- end

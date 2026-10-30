@@ -1,0 +1,8 @@
+guarantee: AC-4: a missing name is the id
+file: crates/voicen-core/src/call/transcript.rs
+added_by: test-writer
+--- old
+.map_or(segment.speaker.as_str(), |s| s.name.as_str());
+--- new
+.map_or("", |s| s.name.as_str());
+--- end

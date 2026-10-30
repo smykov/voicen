@@ -1,0 +1,8 @@
+guarantee: AC-2: unsorted
+file: crates/voicen-core/src/call/transcript.rs
+added_by: test-writer
+--- old
+previous_start = segment.start_ms;
+--- new
+previous_start = previous_start.min(segment.start_ms);
+--- end

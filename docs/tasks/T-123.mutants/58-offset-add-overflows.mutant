@@ -1,0 +1,8 @@
+guarantee: invariant: merge is total (additions saturate at the offset site)
+file: crates/voicen-core/src/call/transcript.rs
+added_by: test-writer
+--- old
+|ms: u64| wire_ms(ms.saturating_add(track.start_offset_ms).min(duration_ms));
+--- new
+|ms: u64| wire_ms((ms + track.start_offset_ms).min(duration_ms));
+--- end

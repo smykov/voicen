@@ -2,7 +2,7 @@ guarantee: AC-3: clamped to the chunk
 file: crates/voicen-core/src/call/transcript.rs
 added_by: test-writer
 --- old
-(cs.saturating_add(secs_ms(s.end_s))).min(ce).max(cs)
+end_ms: in_chunk(segment.end_s).max(start_ms),
 --- new
-(cs.saturating_add(secs_ms(s.end_s))).max(cs)
+end_ms: chunk_start.saturating_add(engine_ms(segment.end_s)).max(start_ms),
 --- end

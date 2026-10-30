@@ -1455,4 +1455,79 @@ mod tests {
             assert!(render_markdown(&t, "T", &[]).starts_with("# T\n"));
         }
     }
+
+    // ---- failure-branch bite: survivors of the catalog ------------------------------------
+
+    #[test]
+    fn a_huge_finite_engine_time_is_clamped_to_the_chunk() {
+        // Bite: `chunk_start + engine_ms(..)`, which overflows once `as u64` has saturated.
+        let t = merge(&mic_one(
+            5000,
+            10_000,
+            20_000,
+            60_000,
+            vec![es(1e300, 1e300, "a")],
+        ));
+        assert_eq!(rows(&t), vec![(25_000, 25_000, "mic", "me", "a")]);
+    }
+
+    #[test]
+    fn a_huge_track_offset_saturates_and_is_clamped_to_the_duration() {
+        // Bite: `ms + start_offset_ms` overflows.
+        let t = merge(&mic_one(
+            u64::MAX,
+            1000,
+            2000,
+            60_000,
+            vec![es(0.0, 1.0, "a")],
+        ));
+        assert_eq!(rows(&t), vec![(60_000, 60_000, "mic", "me", "a")]);
+        assert_eq!(t.validate(), Ok(()));
+    }
+
+    #[test]
+    fn a_time_past_the_wire_range_stays_positive_and_passes_validate() {
+        // Bite: `ms as i64` wraps u64::MAX to -1, which validate refuses.
+        let t = merge(&mic_one(
+            0,
+            0,
+            u64::MAX,
+            u64::MAX,
+            vec![es(1e300, 1e300, "a")],
+        ));
+        assert_eq!(t.duration_ms, i64::MAX);
+        assert_eq!(rows(&t), vec![(i64::MAX, i64::MAX, "mic", "me", "a")]);
+        assert_eq!(t.validate(), Ok(()));
+    }
+
+    #[test]
+    fn a_merged_line_keeps_the_engine_text_unchanged() {
+        // Bite: trimming or folding in merge; only the renderer folds, the JSON keeps the original.
+        let t = merge(&mic_one(
+            0,
+            0,
+            10_000,
+            10_000,
+            vec![es(1.0, 2.0, " one\n two\tthree ")],
+        ));
+        assert_eq!(
+            rows(&t),
+            vec![(1000, 2000, "mic", "me", " one\n two\tthree ")]
+        );
+    }
+
+    #[test]
+    fn a_line_break_in_a_speaker_name_does_not_start_a_second_markdown_line() {
+        // Bite: writing the meta.json name without folding it.
+        let segs = [seg(0, 10, "mic", "me", "null", "x", r#""final""#)];
+        let t = md_doc(&segs, 1000, STARTED);
+        let names = [Speaker {
+            id: "me".into(),
+            name: " Al\nice ".into(),
+        }];
+        assert_eq!(
+            render_markdown(&t, "T", &names),
+            "# T\n2026-10-30 14:05 · 0:00:01\n\n**[00:00:00] Al ice:** x\n"
+        );
+    }
 }

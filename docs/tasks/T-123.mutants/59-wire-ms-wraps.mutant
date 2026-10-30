@@ -1,0 +1,8 @@
+guarantee: invariant: merge output passes validate (a value past i64 does not wrap negative)
+file: crates/voicen-core/src/call/transcript.rs
+added_by: test-writer
+--- old
+i64::try_from(ms).unwrap_or(i64::MAX)
+--- new
+ms as i64
+--- end

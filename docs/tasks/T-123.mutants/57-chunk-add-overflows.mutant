@@ -1,0 +1,10 @@
+guarantee: invariant: merge is total over any engine output (a huge finite time)
+file: crates/voicen-core/src/call/transcript.rs
+added_by: test-writer
+--- old
+chunk_start
+                    .saturating_add(engine_ms(seconds))
+                    .min(chunk_end)
+--- new
+(chunk_start + engine_ms(seconds)).min(chunk_end)
+--- end

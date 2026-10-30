@@ -2,7 +2,7 @@ guarantee: AC-2: bad source (swallowed at the origin)
 file: crates/voicen-core/src/call/transcript.rs
 added_by: test-writer
 --- old
-return Err((InvalidRule::BadSource, i));
+return Err(InvalidRule::BadSource);
 --- new
-continue;
+return Ok(());
 --- end

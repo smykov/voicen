@@ -2,7 +2,7 @@ guarantee: AC-3: mic->me
 file: crates/voicen-core/src/call/transcript.rs
 added_by: test-writer
 --- old
-Track::Mic => (0u8, "me"),
+Track::Mic => "me",
 --- new
-Track::Mic => (0u8, "s1"),
+Track::Mic => "s1",
 --- end

@@ -2,7 +2,7 @@ guarantee: AC-2: unsorted
 file: crates/voicen-core/src/call/transcript.rs
 added_by: test-writer
 --- old
-if prev.is_some_and(|p| s.start_ms < p) {
+if segment.start_ms < previous_start {
 --- new
 if false {
 --- end

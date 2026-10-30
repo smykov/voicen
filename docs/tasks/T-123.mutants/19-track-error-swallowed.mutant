@@ -2,7 +2,7 @@ guarantee: AC-2: unknown track (swallowed at the origin)
 file: crates/voicen-core/src/call/transcript.rs
 added_by: test-writer
 --- old
-return Err((InvalidRule::UnknownTrack, i));
+return Err(InvalidRule::UnknownTrack);
 --- new
-continue;
+return Ok(());
 --- end

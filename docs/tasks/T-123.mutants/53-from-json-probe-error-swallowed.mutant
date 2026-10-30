@@ -1,0 +1,11 @@
+guarantee: AC-1: text that is not schema 1 is refused (the probe's parse error swallowed)
+file: crates/voicen-core/src/call/transcript.rs
+added_by: test-writer
+equivalent: every text the probe cannot read also fails the full parse (a `schema` that is not an i64 is not a u32 either), so the last line returns the same Malformed
+--- old
+let probe: SchemaProbe =
+            serde_json::from_str(text).map_err(|_| TranscriptParseError::Malformed)?;
+--- new
+let probe: SchemaProbe =
+            serde_json::from_str(text).unwrap_or(SchemaProbe { schema: 1 });
+--- end

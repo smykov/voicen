@@ -2,7 +2,7 @@ guarantee: AC-2: end <= duration (boundary)
 file: crates/voicen-core/src/call/transcript.rs
 added_by: test-writer
 --- old
-s.end_ms > self.duration_ms
+|| segment.end_ms > self.duration_ms
 --- new
-s.end_ms >= self.duration_ms
+|| segment.end_ms >= self.duration_ms
 --- end

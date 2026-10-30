@@ -1,0 +1,8 @@
+guarantee: AC-4: contract layout (a line break in the title is folded)
+file: crates/voicen-core/src/call/transcript.rs
+added_by: test-writer
+--- old
+one_line(title),
+--- new
+title,
+--- end

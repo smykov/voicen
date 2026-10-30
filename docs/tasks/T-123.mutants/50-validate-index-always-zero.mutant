@@ -1,0 +1,9 @@
+guarantee: AC-2: the refusal names the segment index
+file: crates/voicen-core/src/call/transcript.rs
+added_by: test-writer
+--- old
+return Err((rule, u32::try_from(index).unwrap_or(u32::MAX)));
+--- new
+let _ = index;
+                return Err((rule, 0));
+--- end

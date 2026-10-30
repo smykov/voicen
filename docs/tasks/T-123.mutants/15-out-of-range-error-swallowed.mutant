@@ -2,7 +2,7 @@ guarantee: AC-2: out_of_range (swallowed at the origin)
 file: crates/voicen-core/src/call/transcript.rs
 added_by: test-writer
 --- old
-return Err((InvalidRule::OutOfRange, i));
+return Err(InvalidRule::OutOfRange);
 --- new
-continue;
+return Ok(());
 --- end

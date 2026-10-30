@@ -1,0 +1,8 @@
+guarantee: AC-2: validate refuses each rule (swallowed at the propagation in validate)
+file: crates/voicen-core/src/call/transcript.rs
+added_by: test-writer
+--- old
+return Err((rule, u32::try_from(index).unwrap_or(u32::MAX)));
+--- new
+let _ = rule;
+--- end

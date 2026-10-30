@@ -1,0 +1,8 @@
+guarantee: invariant: merge is total and validates on a reversed chunk
+file: crates/voicen-core/src/call/transcript.rs
+added_by: test-writer
+--- old
+let chunk_end = chunk.end_ms.max(chunk_start);
+--- new
+let chunk_end = chunk.end_ms;
+--- end

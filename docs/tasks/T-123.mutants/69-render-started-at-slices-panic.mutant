@@ -1,0 +1,8 @@
+guarantee: AC-4: one renderer, it does not fail on an odd started_at (not an R17 rule)
+file: crates/voicen-core/src/call/transcript.rs
+added_by: test-writer
+--- old
+match (started_at.get(..10), started_at.get(11..16)) {
+--- new
+match (Some(&started_at[..10]), Some(&started_at[11..16])) {
+--- end
