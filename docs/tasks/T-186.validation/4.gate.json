@@ -1,0 +1,13 @@
+{
+ "agent_id": "abcbb65aa17b77478",
+ "agent_type": "task-validator",
+ "commit": "b64268cdcf9ed17a9638b0410343295b8a4850ad",
+ "gate": "validation",
+ "path": "docs/tasks/T-186.validation/4.md",
+ "round": 4,
+ "session_id": "e136a9f6-80a6-465a-a6ca-2a581f557a81",
+ "sha256": "b9a6b117ea70a215bdaa07b02d44f7556f36b10c1fc4530d9cd9fd12768e6e52",
+ "task": "T-186",
+ "ts": "2026-10-30T22:06:26Z",
+ "verdict": "FAIL"
+}
