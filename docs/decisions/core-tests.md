@@ -1,8 +1,8 @@
 # voicen-core test network and timing
 
 **Code:** `crates/voicen-core/tests/common/`:
-- `os_answer.rs`: `OsAnswer::refused()`, `OsAnswer::unresolvable()`, `OsAnswer::refused_released_port()`, `OS_ANSWER_BUDGET`, `Unanswered::blackhole()`;
-- `timing.rs`: `Took` (an opaque measured time), `measure`, `between`, `at_least`, `at_most_per_second`, `now`, `ago`, `try_ago` (T-009's 10-minute timer test skips on a young clock), `deadline`, `left`, `passed`, `eventually`;
+- `os_answer.rs`: `OsAnswer::refused()`, `OsAnswer::unresolvable()`, `OsAnswer::refused_released_port()`, `OS_ANSWER_BUDGET`, `in_time()` (T-111: the deadlines of a leg that expects an answer, the I1 shape without a target or a probe), `Unanswered::blackhole()`;
+- `timing.rs`: `Took` (an opaque measured time), `measure`, `between`, `at_least`, `at_most_per_second`, `now`, `ago`, `try_ago` (T-009's 10-minute timer test skips on a young clock), `deadline`, `left`, `passed`, `eventually`, and (T-111) `M`, `with_premise`, `skip`;
 - `refused_addr_tests.rs` and `download.rs`.
 
 Also: `scripts/ci/core-test-os-answer.sh` (the I1 tripwire, run by `make check-core-test-os-answer`; its self-test `scripts/ci/core-test-os-answer.test.sh` uses the fixtures in `scripts/ci/fixtures/core-test-os-answer/`), the I2 call ban (`crates/voicen-core/clippy.toml`, `[lints.clippy]` in `crates/voicen-core/Cargo.toml`, the owned crate-level allow of `tests/common/mod.rs`; `make check-core`, proven by `make check-ban-canary`, owned lines held by `make check-clippy-lines`; T-089, `docs/decisions/ci-toolchain.md`), and `.github/workflows/ci.yml` (the windows job, `--no-fail-fast`).
@@ -12,7 +12,7 @@ Also: `scripts/ci/core-test-os-answer.sh` (the I1 tripwire, run by `make check-c
 - The shell test `src-tauri/tests/settings_ipc.rs`. It includes `common/mod.rs` and `common/refused_addr_tests.rs` through `#[path]`, so a change to `common` must keep it building. It is type-checked by `check-shell-windows` and runs only in the Windows job.
 
 **Tests that pin it:**
-- `common_helpers` (`common/timing_tests.rs`, `common/os_answer_tests.rs`).
+- `common_helpers` (`common/timing_tests.rs`, `common/os_answer_tests.rs`) and `common_in_time` (`common/in_time_tests.rs`: the `in_time()` destructure; `common/timing_seam_tests.rs`: `M`, `skip` in a child process under libtest capture, `with_premise`).
 - `refused_addr_tests::*` in each binary that takes a refused case. They check:
   - the port is below the ephemeral range;
   - the address is IPv4 loopback;
@@ -21,9 +21,9 @@ Also: `scripts/ci/core-test-os-answer.sh` (the I1 tripwire, run by `make check-c
 - `timing_tests::a_measured_time_cannot_be_compared_or_read_back_so_no_ceiling_compiles`: a compile-time check that `Took` has no comparison, `==`, deref or conversion back to a `Duration`.
 - The I1 tripwire self-test `core-test-os-answer.test.sh`: 24 cases, including the real tests dir. The I2 ban's canary `ban-canary.sh` (probes k01-k13 and k15-k17, k19, k20 in `tests/ban_canary.rs`, feature `ban-canary-tests`; k14 and k18 in `src/ban_canary.rs`, feature `ban-canary-lib`).
 
-**Tasks:** T-016; T-047 (F-004); T-048 (F-005); T-078 (F-013; deferred and absorbed by T-080); T-080 (rca, class `os-answer-deadline-race`); T-089 (I2 moved to a compiler ban, I1 a raw-token tripwire); T-107 (F-021; deferred and absorbed by T-110); T-110 (rca, class `os-answer-deadline-race`: no wall-clock ceiling in any core test).
+**Tasks:** T-111 (in-time legs, both actors); T-016; T-047 (F-004); T-048 (F-005); T-078 (F-013; deferred and absorbed by T-080); T-080 (rca, class `os-answer-deadline-race`); T-089 (I2 moved to a compiler ban, I1 a raw-token tripwire); T-107 (F-021; deferred and absorbed by T-110); T-110 (rca, class `os-answer-deadline-race`: no wall-clock ceiling in any core test).
 **Classes** in `docs/failures.md`: `test-port-race` and `os-answer-deadline-race`.
-**Decisions:** #53, #56, #100, #106, #107, #112, #113, #149.
+**Decisions:** #53, #56, #100, #106, #107, #112, #113, #149, #200, #201.
 **Open questions:** none. OQ-22 (which product reason a lookup cut by the connect timer gives) is answered by decisions #106, #113 and built in T-079 (`docs/decisions/engine-http.md`).
 
 ## Invariants
@@ -51,17 +51,17 @@ This is one rule for every kind of uncontrolled clock: the OS refusal time, the 
   - a request count;
   - the overlay sequence.
 - There is no wall-clock ceiling in any core test. A spec tolerance (SC-003) is checked by its outcome: a server that answers 200 with a valid body at deadline + tolerance must still give the timeout outcome, and a sibling with a generous deadline proves the server answers (decision #149, which amends #107's measurement wording). A host stall can then delay such a test but cannot turn a correct deadline red. `within_spec`, `REFERENCE_LOAD`, `fastest` and `Took::less` were retired in T-110.
-  - Its users: `post_process_timeout::default_deadline_skips_a_silent_server_at_15_s` (answer at 15.5 s, `Timeouts::default()` → `Skipped(Timeout)`; a 60 s sibling leg → `Applied`) and `post_process_timeout::configured_post_processing_timeout_delivers_the_raw_transcript` (answer at 5.5 s, `post_processing_s = 5` → `DeliveredSkipped(Timeout)`; the default snapshot → `Delivered`).
+  - Its users: `post_process_timeout::default_deadline_skips_a_silent_server_at_15_s` (answer at 15.5 s, `Timeouts::default()` → `Skipped(Timeout)`; a 60 s sibling leg → `Applied`) and `post_process_timeout::configured_post_processing_timeout_delivers_the_raw_transcript` (answer at 5.5 s, `post_processing_s = 5` → `DeliveredSkipped(Timeout)`; the control leg at `post_processing_s = 60` → `Delivered`; the 15 s default is pinned by the first user).
 
 **Other clock uses in tests:**
 - Instants handed to a product API as input (a press, a release, a frame's `at`) come from `common::timing::now()` or `ago()`.
 - Waits that only end a hung test use `deadline`, `left` or `eventually`. They are sized far above the time the awaited outcome needs.
-- A target that never answers (TEST-NET-1, `192.0.2.1`) comes only from `common::os_answer::Unanswered::blackhole()`, together with its deadlines (connect 300 ms, every total ten times that) and the endings it accepts (`ended_by_connect_or_os`: `CannotReach` for its host, or `NetworkUnavailable` where there is no route). Its users are the test that pins the connect timer (`api_pipeline::blackhole_connect_is_bounded_by_connect_timeout`) and `openai_client::answered_lookup_then_unanswered_connect_stays_cannot_reach` (T-079: a lookup answered at once with the blackhole address, so the connect timer, not the lookup, ends the call); both bite on the reason, not on a ceiling. It is not an `OsAnswer`: no OS answer is awaited, so there is no probe and no budget.
+- A target that never answers (TEST-NET-1, `192.0.2.1`) comes only from `common::os_answer::Unanswered::blackhole()`, together with its deadlines (connect 300 ms, every total twenty times that, 6 s) and the endings it accepts (`ended_by_connect_or_os`: `CannotReach` for its host, or `NetworkUnavailable` where there is no route). Its users are the test that pins the connect timer (`api_pipeline::blackhole_connect_is_bounded_by_connect_timeout`) and `openai_client::answered_lookup_then_unanswered_connect_stays_cannot_reach` (T-079: a lookup answered at once with the blackhole address, so the connect timer, not the lookup, ends the call); both bite on the reason, not on a ceiling. It is not an `OsAnswer`: no OS answer is awaited, so there is no probe and no budget.
 - A lookup with no answer (T-079) is not a host resolver target: it comes from `tests/common/held.rs` (`Held::install` puts a `test-fakes` `engine::lookup::HeldLookup` in front of the OS resolver for one test-only `*.t079.example.com` name). The verdict is the ordering "the call returned while the lookup was still held" (`returns_while_held`); the clock gives only the lower bound `at_least(took, connect)`. `HELD_WAIT` (`OS_ANSWER_BUDGET`) only ends a hung test.
 - A settings value a fake engine records but nothing contacts (`dictation_session`) is a TEST-NET-2 literal (`198.51.100.9`), not an OS-answer target.
 - `dictation_session::realtime_source_paces_frames_by_real_time_and_pads_with_silence` holds the capture until about 1 s of audio arrived (`eventually`), not for a fixed sleep, and checks only that the capture lasted at least the audio less one chunk (`at_least(between(..))`).
 - `dictation_session::realtime_source_pushes_nothing_after_stop_or_drop` awaits its premise (the first push) with `eventually`, not after a fixed sleep (T-110); only the absence check after the stop sleeps, and a stall can only make an absence check pass.
-- A real-time verdict that needs the test thread to act before a product timer fires checks that premise, it does not time it (T-110 review 1 #1). Right after the act the test asks `passed(raised, MESSAGE_DURATION)`; when a host stall made it miss the premise, `dictation_session::with_premise` re-runs the scenario on a fresh rig while `BUDGET` since the first start allows, and skips with the reason printed when every run missed. `passed` there decides only "no verdict", never a red, so it is not a ceiling. Its users: `timer_follows_the_latest_deadline` (B's press before A's `until`) and `a_job_failure_during_a_recording_shows_after_its_release_for_the_rest_of_its_3s` (B's release, and the overlay read after it, before A's `until`). The other real-time tests of `dictation_session` drop a possible expiry once its 3 s have passed (`settled`), stamp their instants in the past or ahead of the clock (`past()`, `audio_device`'s `ahead()`), or stamp a 10-minute deadline that the timer fires at once when it is already due (`the_session_timer_stops_a_recording_at_its_max_length`).
+- A real-time verdict that needs the test thread to act before a product timer fires, or before the end of a transfer, checks that premise, it does not time it (T-110 review 1 #1, T-111). Right after the act the test asks `passed(raised, ..)`; when a host stall made it miss the premise, `common::timing::with_premise(what, budget, run)` re-runs the scenario on a fresh rig while `budget` since the first start allows, and skips when every run missed, writing the reason to the real stderr through `common::timing::skip` (`std::io::stderr().write_all`; `eprintln!` is captured by libtest for a passing test, so a skip would look like a pass; pinned in a child process by `timing_seam_tests`). `passed` there decides only "no verdict", never a red, so it is not a ceiling. Its users: `dictation_session::timer_follows_the_latest_deadline` (B's press before A's `until`) and `a_job_failure_during_a_recording_shows_after_its_release_for_the_rest_of_its_3s` (B's release, and the overlay read after it, before A's `until`), both with the file's local `BUDGET` (10 s); `local_download::cancel_during_stall_*` (the cancel before `no_data`) with `OS_ANSWER_BUDGET`. The other real-time tests of `dictation_session` drop a possible expiry once its 3 s have passed (`settled`), stamp their instants in the past or ahead of the clock (`past()`, `audio_device`'s `ahead()`), or stamp a 10-minute deadline that the timer fires at once when it is already due (`the_session_timer_stops_a_recording_at_its_max_length`). That test skips through `skip` on a host whose monotonic clock is younger than 10 min (a fresh CI runner, Linux too). Coverage gap: on such a clock nothing tests the timer-to-stop path, and how often CI skips is not measured.
 
 **Defects that produced it:**
 - F-005: a refused loopback connect takes about 2.17 s on windows-latest, so a 300 ms total gave `Timeout`, not `CannotReach`.
@@ -98,7 +98,7 @@ This is one rule for every kind of uncontrolled clock: the OS refusal time, the 
   - `Unanswered`'s deadlines are destructured exhaustively in `os_answer_tests`;
   - `common_helpers` pins both modules.
 - By review only (T1):
-  - no ceiling written as instant arithmetic, as `!passed(..)` or `D - left(..)`, or in a unit test under `src` or a shell test slips in; no real-time verdict that needs the test thread to act before a product timer without a premise check (`with_premise`), and no premise check that goes red instead of re-running or skipping (T-110); no `catch_unwind(at_least)`; no edit of a case's `pub` deadline fields after construction (decisions #112); no new public reader of `Took` in `common::timing` besides `at_least` and `at_most_per_second` (T-110);
+  - no ceiling written as instant arithmetic, as `!passed(..)` or `D - left(..)`, or in a unit test under `src` or a shell test slips in; no real-time verdict that needs the test thread to act before a product timer without a premise check (`with_premise`), and no premise check that goes red instead of re-running or skipping (T-110); no `catch_unwind(at_least)`; no in-time leg on a short value and no test-thread act that races a product timer without `with_premise` (class `os-answer-deadline-race`, until T-165); no edit of a case's `pub` deadline fields after construction (decisions #112); no new public reader of `Took` in `common::timing` besides `at_least` and `at_most_per_second` (T-110);
   - when a ceiling is removed, an outcome catches its bite, named in the test's comment.
 - `ci.yml` runs the Windows workspace tests with `--no-fail-fast`, so one red binary does not hide the others.
 
@@ -108,6 +108,22 @@ This is one rule for every kind of uncontrolled clock: the OS refusal time, the 
 - test a timeout with a refused or unroutable address. Use a server that accepts and answers late;
 - add a `took <` ceiling. Find the outcome that catches the wrong limit; a spec tolerance too is checked by an outcome bracket (decision #149);
 - remove `--no-fail-fast`.
+
+### An in-time leg never depends on a host-scheduled actor beating a short deadline
+
+T-111 (class `os-answer-deadline-race`; T-110's Open item, F-021) extends the rule above to the actor that must act before a product deadline: a loopback mock or `common::Server` thread answering, or the test thread (a cancel). Every product deadline a core test sets is exactly one of:
+1. **A timeout leg.** The counterparty acts later than the deadline by at least `M` (5 s, `common::timing::M`, decision #200) or never, and no other product timer it must precede lies within `M`. A stall only delays the outcome. Such a leg overrides only its own field of `in_time()`.
+2. **The in-time value.** `common::os_answer::in_time()` (connect `OS_ANSWER_BUDGET`, every total and no-data 2 x the budget, `builtin` at its default; pinned by an exhaustive destructure in `common/in_time_tests.rs`) serves every leg that expects an answer and whose deadline is not the subject, every helper's `timeouts` and `common::download::timeouts` included.
+3. **A bite-bound deadline.** The deadline is the subject, and test cost or reqwest's 30 s default caps its size. Its in-time margin is at least `M`, and it is a T1 residual accepted by #200 (list below).
+
+A test-thread act that must come before a product timer or the end of a transfer goes through `with_premise`, or the race is removed (a transfer that outlasts the budget: `local_download::long_trickle()`). Test-owned holds and hang-ending waits keep `M` above what they await (`END_WAIT` above the trickle, `HOLD` above `END_WAIT`).
+
+**T1 residuals at `M`** (values as in the code):
+- `local_download`: `stall_past_no_data_*`, `no_response_headers_*`, the stall legs and their retries (the retry shares the `Downloader` and its limit): `no_data` 5 s (`stall_no_data()`); `cancel_during_stall_*`: `no_data` 5 s (`cancel_no_data()`, with the premise check); `trickle_*`: `no_data` 5.25 s, 1000 bytes every 250 ms (about 16.5 s, at least 3 x `no_data`); `common::download::END_WAIT` 25 s (`M` above the trickle, below the 30 s default); `HOLD` stays 30 s.
+- `api_pipeline::configured_api_timeout_*` and `post_process_timeout::configured_post_processing_timeout_*`: `connect_s` 5, limit 10 s, the answer past the limit (a loopback connect must finish within the connect value; a connect read as the limit ends the job early and `at_least` sees it); the `API_*` / `PP_*` consts are pinned by `*_keep_the_in_time_margin_m`.
+- `Unanswered::blackhole()`: connect 300 ms, totals 20 x connect (margin 5.7 s).
+
+**Not caught by any test (T1 until T-165):** a single fixture site, redesigned test or helper value put back on a short value. The helper values and `in_time()` are pinned and sibling tests carry the injected stall, but no test binds each of the 19 `local_download` fixture sites: catalog follow-ups 61 (`cancel_of_another_model_or_when_idle_*` back on a 3 s `Stall` under `no_data` 2 s) and 62 (`part_file_that_cannot_be_created_*` back on `fixture(.., 2 s)`) survive (T-111's Failure branches). Mechanical enforcement is T-165.
 
 ### A refused address never comes from a released port
 
@@ -122,13 +138,5 @@ This is one rule for every kind of uncontrolled clock: the OS refusal time, the 
 
 ## Open
 
-- In-time legs against a loopback server (T-110 review 1 #1, the grep of hypothesis 3 redone): a test that expects an answer, not a timeout, from a local mock under a finite product deadline still needs that answer before the deadline, so a host stall longer than the margin turns it red on correct code. This is the presence-before-a-deadline shape on the server side, not the test thread's; no premise check covers it yet. T1 residual, not fixed in T-110 (follow-up for the orchestrator). The margins found, smallest first:
-  - about 300 ms: the immediate-answer scenarios (`pasted`, `copied only`, `clipboard fails`, `401`, `500`, bad body) of `api_pipeline::no_event_or_failure_carries_key_query_or_transcript` and `diag_pipeline::log_holds_no_key_query_or_transcript_on_any_path` run under the `ms` timeouts (300 ms whole request); `local_download`'s retry after a stall (`assert_retry_succeeds` in `stall_past_no_data_fails_interrupted_within_the_timeout_then_retry_succeeds` and `no_response_headers_within_no_data_fails_then_retry_succeeds`) downloads the whole model under `no_data = 300 ms`;
-  - 350 ms per gap: `local_download::trickle_longer_than_no_data_succeeds_and_stall_fails` (a chunk every 50 ms, `no_data = 400 ms`);
-  - about 2 s: every loopback call under a test helper's `connect: 2 s` (`openai_client::timeouts`, `connection_test::quick`, `post_process_chat::timeouts`, `local_models_service::timeouts`, `local_model_delete::timeouts`, `common::download::timeouts`); `local_download::cancel_during_steady_transfer_ends_cancelled_quickly` (60 ms gaps, `no_data = 2 s`);
-  - 3.5 s: `local_server::request_deadline_is_local_server_not_api_transcription` (an answer at 1.5 s, a 5 s local-server deadline);
-  - about 5 s: the same helpers' 5 s whole-request and no-data limits; `diag_pipeline::post_processing_outcome_is_logged_without_prompt_reply_host_or_key` (a chat answer at 150 ms under 5 s);
-  - 9.5 s: `post_process_timeout::configured_post_processing_timeout_delivers_the_raw_transcript`'s default-snapshot leg (answer at 5.5 s, default 15 s; accepted in T-110 review 1).
-  Margins of `BUDGET` scale and above (the 44.5 s sibling leg of the SC-003 bracket, the 23-58 s siblings of `api_pipeline`, `local_server` and `connection_test`) only end a hung test.
 - The ~2 s user-facing refusal on Windows: OQ-07 (non-blocking).
 - `src-tauri/tests/settings_ipc.rs` keeps one `took < 30 s` ceiling on its refused invoke. The shell tests are outside the I1 tripwire's and the I2 ban's scope.
