@@ -117,7 +117,7 @@ Invariant: after any sequence of blocks and gaps, `|written_mic − written_syst
 
 ## Segment (line)
 
-As in §7 schema 1: `start_ms`, `end_ms` (relative to `started_at` = track `start_offset_ms` + chunk `start_ms` + engine segment time, clamped to the chunk), `track`, `speaker`, `lang` (`LangCode` or `null`, FR-025), `text` (non-empty after trim; an empty engine segment is dropped), `source: "final"`. `hidden` and `confidence` are absent in 1a. In time-less mode a line spans its chunk's start and end (FR-024).
+As in §7 schema 1: `start_ms`, `end_ms` (relative to `started_at` = track `start_offset_ms` + `clamp(chunk start_ms + engine segment time, chunk start_ms, chunk end_ms)`: the chunk clamp is in track time and the offset is added after it, saturating; then clamped to the call's `duration_ms` with the text kept, #196 (3)), `track`, `speaker`, `lang` (`LangCode` or `null`, FR-025), `text` (non-empty after trim; an empty engine segment is dropped), `source: "final"`. `hidden` and `confidence` are absent in 1a. In time-less mode a line spans its chunk's start and end (FR-024).
 
 ## Speaker
 

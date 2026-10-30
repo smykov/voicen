@@ -89,7 +89,11 @@ Exactly the §7 keys. In 1a:
 - every segment has `source: "final"`;
 - no `hidden` or `confidence`.
 
-`validate()` (research R17) runs before every write, and a failure is a programming error logged as `transcript_invalid rule=<…> segment=<n>` (see "Log lines") that leaves the call `failed: storage`. Writes use temp + rename, so a crash never leaves a partial file.
+Line times, including the clamps to the chunk and to `duration_ms`: `data-model.md` "Segment".
+
+On read, an unknown key in any schema-1 object (`speakers` entries included) is a parse error. A non-null `engines.diarization` is also a parse error (no R17 rule); a missing key reads as `null`. `engines.transcription` is not parsed on read: its `api:<model>` form comes from `merge`/`EngineRef`.
+
+`validate()` (research R17) checks each line's `speaker` against the value's own `speakers` ids (`merge` copies them from the caller's `meta.json` speakers), not against `meta.json` directly. It runs before every write, and a failure is a programming error logged as `transcript_invalid rule=<…> segment=<n>` (see "Log lines") that leaves the call `failed: storage`. Writes use temp + rename, so a crash never leaves a partial file.
 
 ## `transcript.md`
 
@@ -101,7 +105,7 @@ Exactly the §7 keys. In 1a:
 **[00:00:05] Other party:** text
 ```
 
-Times are `start_ms` as `HH:MM:SS`, and names come from `meta.json`. `render_markdown` folds every whitespace run in a line's text, the title and the names to one space; `transcript.json` keeps the original text. A speaker id with no name in `meta.json` renders as the id itself. "Copy as Markdown" and the Markdown export use the same renderer.
+Times are `start_ms` as `HH:MM:SS`, and names come from `meta.json`. `render_markdown` folds every whitespace run in a line's text, the title and the names to one space; `transcript.json` keeps the original text. A speaker id with no name in `meta.json` renders as the id itself. A `started_at` not of the `YYYY-MM-DDTHH:MM` shape is shown whole on the date line, whitespace folded. "Copy as Markdown" and the Markdown export use the same renderer.
 
 ## Final-pass engine call
 
