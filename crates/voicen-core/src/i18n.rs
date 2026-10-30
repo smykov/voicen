@@ -1227,4 +1227,467 @@ mod tests {
             }
         }
     }
+
+    // ---- T-119: the call-mode vocabulary (contracts/ipc.md "Message catalog", #198) ----
+    //
+    // Every lookup below is by string, through the catalog map and MESSAGE_IDS, so
+    // each test fails by its own assertion while the ids are missing and the
+    // existing tests keep running (no `MessageId` constant is named here).
+
+    /// Fixed (not rule-built) call ids: `(id, placeholders, rust)`. `rust` = the id
+    /// is Rust-originated, so it is declared with `messages!` (and is in
+    /// `MESSAGE_IDS`); `false` = a UI-only `t()` literal, JSON only (i18n.md,
+    /// #198 D4). 25 Rust + 28 UI-only here; the four families add 26 + 6.
+    const CALL_FIXED_IDS: [(&str, &[&str], bool); 53] = [
+        ("tray.call", &[], true),
+        ("tray.call.record", &[], true),
+        ("tray.call.stop", &[], true),
+        ("tray.calls", &[], true),
+        ("tray.tooltip.call_recording", &[], true),
+        ("indicator.reminder", &[], true),
+        ("indicator.headphones", &[], true),
+        ("warning.communications_device", &[], true),
+        ("warning.mic_changed", &[], true),
+        ("warning.cant_hear_other_party", &[], true),
+        ("warning.cant_hear_you", &[], true),
+        ("warning.low_disk", &[], true),
+        ("warning.provider_notice", &["host"], true),
+        ("notice.call_saved", &[], true),
+        ("notice.transcript_ready", &[], true),
+        ("notice.open", &[], true),
+        ("notice.stopped.sleep", &[], true),
+        ("notice.stopped.max_length", &[], true),
+        ("notice.stopped.low_disk", &[], true),
+        ("notice.stopped.storage", &[], true),
+        ("notice.call_hotkey_conflict", &[], true),
+        ("exit.recording.question", &[], true),
+        (
+            "calls.title_default",
+            &["day", "month", "hour", "minute"],
+            true,
+        ),
+        ("speaker.me", &[], true),
+        ("speaker.other", &[], true),
+        ("indicator.recording", &[], false),
+        ("indicator.stop", &[], false),
+        ("indicator.dismiss", &[], false),
+        ("calls.empty", &["hotkey"], false),
+        ("calls.state.recording", &[], false),
+        ("calls.state.queued", &[], false),
+        ("calls.state.transcribing", &[], false),
+        ("calls.state.ready", &[], false),
+        ("calls.state.failed", &[], false),
+        ("calls.state.recovered", &[], false),
+        ("calls.state.damaged", &[], false),
+        ("calls.root_unavailable", &["root"], false),
+        ("calls.search", &[], false),
+        ("calls.no_matches", &[], false),
+        ("calls.transcribe", &[], false),
+        ("calls.transcribe_again", &[], false),
+        ("calls.copy", &[], false),
+        ("calls.export_md", &[], false),
+        ("calls.export_json", &[], false),
+        ("calls.open_folder", &[], false),
+        ("calls.delete", &[], false),
+        ("calls.delete_confirm", &[], false),
+        ("calls.error.in_use", &["file"], false),
+        ("calls.error.empty_name", &[], false),
+        ("calls.error.recording", &[], false),
+        ("calls.error.io", &[], false),
+        ("settings.tab.calls", &[], false),
+        ("settings.calls.provider_notice", &["host"], false),
+    ];
+
+    /// Problems of a family's ids: origin (`rust`: declared with messages!) and text.
+    fn family_problems(c: &Catalog, ids: &[String], rust: bool) -> Vec<String> {
+        let mut wrong = Vec::new();
+        for id in ids {
+            let declared = MESSAGE_IDS.iter().any(|m| m.0 == id);
+            if rust && !declared {
+                wrong.push(format!("{id}: not declared with messages!"));
+            }
+            if !rust && declared {
+                wrong.push(format!("{id}: UI-only, but declared with messages!"));
+            }
+            for lang in LANGS {
+                match own_text(c, lang, id) {
+                    None => wrong.push(format!("{id} ({lang:?}): no text")),
+                    Some(t) if !placeholder_names(t).is_empty() => wrong.push(format!(
+                        "{id} ({lang:?}): placeholders {:?}, expected none",
+                        placeholder_names(t)
+                    )),
+                    Some(_) => {}
+                }
+            }
+        }
+        wrong
+    }
+
+    /// The family is exactly `expected` ids: every id is present with text in both
+    /// languages, and no other key of either catalog carries the prefix (a typo, a
+    /// stale pair).
+    fn assert_family(prefix: &str, ids: Vec<String>, expected: usize, rust: bool) {
+        let distinct: BTreeSet<&str> = ids.iter().map(String::as_str).collect();
+        assert_eq!(
+            distinct.len(),
+            expected,
+            "{prefix}*: the variants must map to {expected} distinct ids: {ids:?}"
+        );
+        let c = catalog(EN_JSON, RU_JSON);
+        let wrong = family_problems(&c, &ids, rust);
+        assert!(wrong.is_empty(), "\n{}", wrong.join("\n"));
+        for lang in LANGS {
+            let map = match lang {
+                UiLanguage::En => &c.en,
+                UiLanguage::Ru => &c.ru,
+            };
+            let stray: Vec<&str> = map
+                .keys()
+                .map(String::as_str)
+                .filter(|k| k.starts_with(prefix) && !distinct.contains(k))
+                .collect();
+            assert!(
+                stray.is_empty(),
+                "{prefix}* ({lang:?}) stray ids: {stray:?}"
+            );
+        }
+    }
+
+    fn refused_part_suffix(part: crate::call::RefusedPart) -> &'static str {
+        use crate::call::RefusedPart;
+        match part {
+            RefusedPart::Mic => "mic",
+            RefusedPart::System => "system",
+            RefusedPart::Root => "root",
+        }
+    }
+
+    fn refused_reason_suffix(reason: crate::call::RefusedReason) -> &'static str {
+        use crate::call::RefusedReason;
+        match reason {
+            RefusedReason::NoDevice => "no_device",
+            RefusedReason::AccessDenied => "access_denied",
+            RefusedReason::Busy => "busy",
+            RefusedReason::Unwritable => "unwritable",
+            RefusedReason::Missing => "missing",
+            RefusedReason::Other => "other",
+        }
+    }
+
+    fn fail_reason_suffix(reason: crate::call::FailReason) -> &'static str {
+        use crate::call::FailReason;
+        match reason {
+            FailReason::Key => "key",
+            FailReason::Network => "network",
+            FailReason::Timeout => "timeout",
+            FailReason::Provider => "provider",
+            FailReason::Storage => "storage",
+            FailReason::EngineNotSetUp => "engine_not_set_up",
+        }
+    }
+
+    fn track_suffix(track: crate::call::Track) -> &'static str {
+        use crate::call::Track;
+        match track {
+            Track::Mic => "mic",
+            Track::System => "system",
+        }
+    }
+
+    fn refused_parts() -> [crate::call::RefusedPart; 3] {
+        use crate::call::RefusedPart;
+        [RefusedPart::Mic, RefusedPart::System, RefusedPart::Root]
+    }
+
+    fn refused_reasons() -> [crate::call::RefusedReason; 6] {
+        use crate::call::RefusedReason;
+        [
+            RefusedReason::NoDevice,
+            RefusedReason::AccessDenied,
+            RefusedReason::Busy,
+            RefusedReason::Unwritable,
+            RefusedReason::Missing,
+            RefusedReason::Other,
+        ]
+    }
+
+    fn fail_reasons() -> [crate::call::FailReason; 6] {
+        use crate::call::FailReason;
+        [
+            FailReason::Key,
+            FailReason::Network,
+            FailReason::Timeout,
+            FailReason::Provider,
+            FailReason::Storage,
+            FailReason::EngineNotSetUp,
+        ]
+    }
+
+    fn tracks() -> [crate::call::Track; 2] {
+        use crate::call::Track;
+        [Track::Mic, Track::System]
+    }
+
+    #[test]
+    fn call_fixed_ids_have_own_text_with_their_placeholders_and_the_right_origin() {
+        // T-119 Acceptance 1 (contracts/ipc.md "Message catalog", #198 D4): each
+        // fixed call id has its own non-empty, different text in en and ru, naming
+        // exactly its placeholders; a Rust-originated id is declared with messages!
+        // (so it is in MESSAGE_IDS and the parity tests cover it), a UI-only id is
+        // not. Bite: an id missing from a catalog, a placeholder dropped or renamed
+        // in one language, a RU text copied from EN, a UI-only id moved into
+        // messages!, a Rust id left out of it.
+        assert_eq!(CALL_FIXED_IDS.iter().filter(|r| r.2).count(), 25);
+        assert_eq!(CALL_FIXED_IDS.iter().filter(|r| !r.2).count(), 28);
+        let c = catalog(EN_JSON, RU_JSON);
+        let mut wrong = Vec::new();
+        for (id, names, rust) in CALL_FIXED_IDS {
+            let declared = MESSAGE_IDS.iter().any(|m| m.0 == id);
+            if rust && !declared {
+                wrong.push(format!(
+                    "{id}: Rust-originated, not declared with messages!"
+                ));
+            }
+            if !rust && declared {
+                wrong.push(format!("{id}: UI-only, but declared with messages!"));
+            }
+            let want: BTreeSet<&str> = names.iter().copied().collect();
+            for lang in LANGS {
+                match own_text(&c, lang, id) {
+                    None => wrong.push(format!("{id} ({lang:?}): no text")),
+                    Some(t) if placeholder_names(t) != want => wrong.push(format!(
+                        "{id} ({lang:?}): placeholders {:?}, expected {want:?}",
+                        placeholder_names(t)
+                    )),
+                    Some(_) => {}
+                }
+            }
+            if let (Some(en), Some(ru)) = (
+                own_text(&c, UiLanguage::En, id),
+                own_text(&c, UiLanguage::Ru, id),
+            ) {
+                if en == ru {
+                    wrong.push(format!("{id}: the ru text is the en text: {en:?}"));
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "\n{}", wrong.join("\n"));
+    }
+
+    #[test]
+    fn call_texts_the_contract_spells_out_are_exact() {
+        // T-119 Acceptance 1 and 2: the English texts the contract table spells
+        // out (the ones it leaves as "…" are the developer's wording, D5) and the
+        // two RU speaker labels. Bite: any of these drifting from the contract, the
+        // RU labels translated differently.
+        let c = catalog(EN_JSON, RU_JSON);
+        let en: [(&str, &str); 25] = [
+            ("tray.call", "Call"),
+            ("tray.call.record", "Record"),
+            ("tray.call.stop", "Stop"),
+            ("tray.calls", "Calls"),
+            ("tray.tooltip.call_recording", "Voicen — recording a call"),
+            ("indicator.recording", "● Recording"),
+            ("indicator.stop", "Stop"),
+            (
+                "indicator.reminder",
+                "Tell the other party the call is being recorded",
+            ),
+            ("indicator.headphones", "Better with headphones"),
+            ("indicator.dismiss", "Dismiss"),
+            (
+                "warning.communications_device",
+                "Calls may use a different output device than the one being recorded",
+            ),
+            (
+                "warning.track_lost.mic",
+                "Microphone lost — recording silence",
+            ),
+            (
+                "warning.track_lost.system",
+                "Output device lost — recording silence",
+            ),
+            (
+                "warning.mic_changed",
+                "Microphone changed to the Windows default",
+            ),
+            (
+                "warning.cant_hear_other_party",
+                "Can't hear the other party — check the output device",
+            ),
+            (
+                "warning.cant_hear_you",
+                "Can't hear you — check the microphone",
+            ),
+            (
+                "warning.low_disk",
+                "Less than 1 GB free in the calls folder",
+            ),
+            (
+                "warning.provider_notice",
+                "The other party's audio goes to provider {host}",
+            ),
+            ("notice.call_saved", "Call saved — transcribing"),
+            ("notice.transcript_ready", "Transcript ready"),
+            ("notice.open", "Open"),
+            (
+                "notice.call_hotkey_conflict",
+                "The call hotkey is in use by another program",
+            ),
+            (
+                "exit.recording.question",
+                "A call is being recorded. Save it and exit?",
+            ),
+            ("speaker.me", "Me"),
+            ("speaker.other", "Other party"),
+        ];
+        let mut wrong = Vec::new();
+        for (id, want) in en {
+            if own_text(&c, UiLanguage::En, id) != Some(want) {
+                wrong.push(format!(
+                    "{id} (En): {:?}, expected {want:?}",
+                    own_text(&c, UiLanguage::En, id)
+                ));
+            }
+        }
+        for (id, want) in [("speaker.me", "Я"), ("speaker.other", "Собеседник")] {
+            if own_text(&c, UiLanguage::Ru, id) != Some(want) {
+                wrong.push(format!(
+                    "{id} (Ru): {:?}, expected {want:?}",
+                    own_text(&c, UiLanguage::Ru, id)
+                ));
+            }
+        }
+        for (id, want) in [
+            ("calls.search", "Search"),
+            ("calls.no_matches", "No matches"),
+            ("calls.root_unavailable", "Folder not available: {root}"),
+            (
+                "settings.calls.provider_notice",
+                "The other party's audio goes to provider {host}",
+            ),
+        ] {
+            if own_text(&c, UiLanguage::En, id) != Some(want) {
+                wrong.push(format!(
+                    "{id} (En): {:?}, expected {want:?}",
+                    own_text(&c, UiLanguage::En, id)
+                ));
+            }
+        }
+        assert!(wrong.is_empty(), "\n{}", wrong.join("\n"));
+    }
+
+    #[test]
+    fn call_default_title_renders_the_day_month_and_time_in_both_languages() {
+        // T-119 Acceptance 3 (data-model Call.title; the two-digit padding is the
+        // caller's, T-125): a call of 5 March 09:07 is "Call 05.03 09:07". The RU
+        // text carries the same four values in the same order. Looked up by
+        // string, through the catalog, so a missing id fails here and not as a
+        // compile error. Bite: a placeholder renamed or dropped, the day and month
+        // swapped, a separator changed, the RU text without a value.
+        let c = catalog(EN_JSON, RU_JSON);
+        let args = [
+            ("day", "05"),
+            ("month", "03"),
+            ("hour", "09"),
+            ("minute", "07"),
+        ];
+        assert_eq!(
+            own_text(&c, UiLanguage::En, "calls.title_default"),
+            Some("Call {day}.{month} {hour}:{minute}"),
+            "the EN template is the contract's"
+        );
+        assert_eq!(
+            c.text(UiLanguage::En, "calls.title_default", &args),
+            "Call 05.03 09:07"
+        );
+        assert!(
+            own_text(&c, UiLanguage::Ru, "calls.title_default").is_some(),
+            "calls.title_default has no ru text"
+        );
+        let ru = c.text(UiLanguage::Ru, "calls.title_default", &args);
+        assert!(!ru.contains('{'), "unrendered placeholder: {ru:?}");
+        let digits: String = ru.chars().filter(char::is_ascii_digit).collect();
+        assert_eq!(digits, "05030907", "ru render: {ru:?}");
+        let order: Vec<usize> = ["05", "03", "09", "07"]
+            .iter()
+            .map(|v| ru.find(v).unwrap_or(usize::MAX))
+            .collect();
+        assert!(
+            order.windows(2).all(|w| w[0] < w[1]),
+            "ru render {ru:?} does not show day, month, hour, minute in order"
+        );
+    }
+
+    #[test]
+    fn every_refused_part_and_reason_has_a_call_refused_notice() {
+        // T-119 Acceptance 4, I3: `notice.call_refused.<part>.<reason>` for every
+        // RefusedPart x RefusedReason (3 x 6 = 18), Rust-originated (the toast takes
+        // a MessageId), text in en and ru without placeholders (D6: generic text
+        // for pairs the session cannot produce). The suffix fns are exhaustive
+        // matches: a new variant does not compile until it is named here. Bite: a
+        // dropped pair, a pair missing from messages!, a pair missing in one
+        // language, an id outside the product.
+        let mut ids = Vec::new();
+        for part in refused_parts() {
+            for reason in refused_reasons() {
+                ids.push(format!(
+                    "notice.call_refused.{}.{}",
+                    refused_part_suffix(part),
+                    refused_reason_suffix(reason)
+                ));
+            }
+        }
+        assert_family("notice.call_refused.", ids, 18, true);
+    }
+
+    #[test]
+    fn every_fail_reason_has_a_pass_failed_notice() {
+        // T-119 I3: `notice.pass_failed.<FailReason>` (6), Rust-originated (the
+        // transcription-failed toast), en and ru text, no placeholder. Bite: a
+        // reason without an id, an id missing from messages! or a catalog.
+        let ids = fail_reasons()
+            .into_iter()
+            .map(|r| format!("notice.pass_failed.{}", fail_reason_suffix(r)))
+            .collect();
+        assert_family("notice.pass_failed.", ids, 6, true);
+    }
+
+    #[test]
+    fn every_fail_reason_has_a_calls_failed_text_that_is_ui_only() {
+        // T-119 I3, #198 D4: `calls.failed.<FailReason>` (6) is shown by the Calls
+        // page from the wire code, so it is a UI-only `t()` literal: in both JSON
+        // files, not in messages!. Bite: a reason without text, the family moved
+        // into messages!.
+        let ids = fail_reasons()
+            .into_iter()
+            .map(|r| format!("calls.failed.{}", fail_reason_suffix(r)))
+            .collect();
+        assert_family("calls.failed.", ids, 6, false);
+    }
+
+    #[test]
+    fn every_track_has_a_track_lost_warning() {
+        // T-119 I3: `warning.track_lost.<Track>` (2), Rust-originated
+        // (`IndicatorWarning.text` is rendered in Rust), en and ru text, no
+        // placeholder. Bite: a track without an id, an id missing from messages!
+        // or a catalog.
+        let ids = tracks()
+            .into_iter()
+            .map(|t| format!("warning.track_lost.{}", track_suffix(t)))
+            .collect();
+        assert_family("warning.track_lost.", ids, 2, true);
+    }
+
+    #[test]
+    fn dropped_call_storage_unwritable_id_stays_out_of_the_catalog() {
+        // Decision #198 D2: `settings.calls.storage_unwritable` {reason} is dropped
+        // (`error.storage.unwritable` of T-120 covers the refusal). Guard, green
+        // today: it must not come back in a catalog or in messages!.
+        let c = catalog(EN_JSON, RU_JSON);
+        let id = "settings.calls.storage_unwritable";
+        assert!(!MESSAGE_IDS.iter().any(|m| m.0 == id));
+        assert!(!c.en.contains_key(id), "{id} is in en.json");
+        assert!(!c.ru.contains_key(id), "{id} is in ru.json");
+    }
 }
