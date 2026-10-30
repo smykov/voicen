@@ -747,10 +747,7 @@ fn refused_reason(reason: RefusedReason) -> &'static str {
 }
 
 fn track_name(track: Track) -> &'static str {
-    match track {
-        Track::Mic => "mic",
-        Track::System => "system",
-    }
+    track.as_str()
 }
 
 fn device_cause(cause: DeviceCause) -> &'static str {
@@ -837,13 +834,5 @@ fn vad_fallback_cause(cause: VadFallbackCause) -> &'static str {
 }
 
 fn invalid_rule(rule: InvalidRule) -> &'static str {
-    match rule {
-        InvalidRule::Unsorted => "unsorted",
-        InvalidRule::OutOfRange => "out_of_range",
-        InvalidRule::UnknownSpeaker => "unknown_speaker",
-        InvalidRule::UnknownTrack => "unknown_track",
-        InvalidRule::BadSource => "bad_source",
-        InvalidRule::BadLang => "bad_lang",
-        InvalidRule::EmptyText => "empty_text",
-    }
+    rule.as_str()
 }
