@@ -6,7 +6,134 @@ added_by: test-writer
             params.set_abort_callback_user_data(user_data);
             params.set_start_encoder_callback(Some(encoder_may_start));
             params.set_start_encoder_callback_user_data(user_data);
+        }
+        let ran = self.state.full(params, pcm);
+        // Recorded before any early return: the abort and error paths count too (T-109 I3).
+        self.last_segments = usize::try_from(self.state.full_n_segments()).unwrap_or(0);
+        if abort.requested() {
+            // Ignored by the engine, which reports Timeout (decision #133).
+            return Err(FailureReason::LocalEngineFailed);
+        }
+        ran.map_err(|_| FailureReason::LocalEngineFailed)?;
+        let mut text = String::new();
+        for i in 0..self.state.full_n_segments() {
+            let segment = self
+                .state
+                .get_segment(i)
+                .ok_or(FailureReason::LocalEngineFailed)?;
+            let part = segment
+                .to_str_lossy()
+                .map_err(|_| FailureReason::LocalEngineFailed)?;
+            text.push_str(&part);
+        }
+        Ok(text.trim().to_owned())
+    }
+}
+
+/// The engine's ggml thread policy (T-109 I2, decision #200 D1), its single source:
+/// `max(1, min(B, P - 1))` for `parallelism` P, B = [`BEST_THREADS`]. Below P whenever
+/// P > 1 (ggml's barrier spins, so a thread per CPU stalls whenever anything else needs a
+/// core) and at least 1. Public only for the tests.
+#[doc(hidden)]
+pub fn thread_count_for(parallelism: usize) -> usize {
+    BEST_THREADS.min(parallelism.saturating_sub(1)).max(1)
+}
+
+/// [`thread_count_for`] on this machine's available parallelism (1 when the OS does not say).
+fn thread_count() -> c_int {
+    let p = std::thread::available_parallelism().map_or(1, |n| n.get());
+    c_int::try_from(thread_count_for(p)).unwrap_or(1)
+}
+
+/// Whether `user_data` (an `&Abort`) asks to stop; a panic counts as a stop.
+fn requested(user_data: *mut c_void) -> bool {
+    // SAFETY: `transcribe` sets `user_data` to an `&Abort` that lives through `full`.
+    let Some(abort) = (unsafe { (user_data as *const Abort).as_ref() }) else {
+        return true;
+    };
+    catch_unwind(AssertUnwindSafe(|| abort.requested())).unwrap_or(true)
+}
+
+/// ggml's abort callback: true stops the running graph. whisper.cpp checks it only after the
+/// encoder graph, so [`encoder_may_start`] stops a transcription before the next encode.
+unsafe extern "C" fn abort_requested(user_data: *mut c_void) -> bool {
+    requested(user_data)
+}
+
+/// whisper.cpp's encoder-begin callback: false ends `whisper_full` before the next window.
+unsafe extern "C" fn encoder_may_start(
+    _ctx: *mut WhisperSysContext,
+    _state: *mut WhisperSysState,
+    user_data: *mut c_void,
+) -> bool {
+    !requested(user_data)
+}
 --- new
             params.set_abort_callback_user_data(user_data);
             params.set_start_encoder_callback_user_data(user_data);
+        }
+        let ran = self.state.full(params, pcm);
+        // Recorded before any early return: the abort and error paths count too (T-109 I3).
+        self.last_segments = usize::try_from(self.state.full_n_segments()).unwrap_or(0);
+        if abort.requested() {
+            // Ignored by the engine, which reports Timeout (decision #133).
+            return Err(FailureReason::LocalEngineFailed);
+        }
+        ran.map_err(|_| FailureReason::LocalEngineFailed)?;
+        let mut text = String::new();
+        for i in 0..self.state.full_n_segments() {
+            let segment = self
+                .state
+                .get_segment(i)
+                .ok_or(FailureReason::LocalEngineFailed)?;
+            let part = segment
+                .to_str_lossy()
+                .map_err(|_| FailureReason::LocalEngineFailed)?;
+            text.push_str(&part);
+        }
+        Ok(text.trim().to_owned())
+    }
+}
+
+/// The engine's ggml thread policy (T-109 I2, decision #200 D1), its single source:
+/// `max(1, min(B, P - 1))` for `parallelism` P, B = [`BEST_THREADS`]. Below P whenever
+/// P > 1 (ggml's barrier spins, so a thread per CPU stalls whenever anything else needs a
+/// core) and at least 1. Public only for the tests.
+#[doc(hidden)]
+pub fn thread_count_for(parallelism: usize) -> usize {
+    BEST_THREADS.min(parallelism.saturating_sub(1)).max(1)
+}
+
+/// [`thread_count_for`] on this machine's available parallelism (1 when the OS does not say).
+fn thread_count() -> c_int {
+    let p = std::thread::available_parallelism().map_or(1, |n| n.get());
+    c_int::try_from(thread_count_for(p)).unwrap_or(1)
+}
+
+/// Whether `user_data` (an `&Abort`) asks to stop; a panic counts as a stop.
+#[allow(dead_code)]
+fn requested(user_data: *mut c_void) -> bool {
+    // SAFETY: `transcribe` sets `user_data` to an `&Abort` that lives through `full`.
+    let Some(abort) = (unsafe { (user_data as *const Abort).as_ref() }) else {
+        return true;
+    };
+    catch_unwind(AssertUnwindSafe(|| abort.requested())).unwrap_or(true)
+}
+
+/// ggml's abort callback: true stops the running graph. whisper.cpp checks it only after the
+/// encoder graph, so [`encoder_may_start`] stops a transcription before the next encode.
+#[allow(dead_code)]
+unsafe extern "C" fn abort_requested(user_data: *mut c_void) -> bool {
+    requested(user_data)
+}
+
+/// whisper.cpp's encoder-begin callback: false ends `whisper_full` before the next window.
+#[allow(dead_code)]
+unsafe extern "C" fn encoder_may_start(
+    _ctx: *mut WhisperSysContext,
+    _state: *mut WhisperSysState,
+    user_data: *mut c_void,
+) -> bool {
+    !requested(user_data)
+}
 --- end

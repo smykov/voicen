@@ -1,0 +1,8 @@
+guarantee: I2: thread_count_for(P) < P when P > 1 (AC-2/AC-3, T-043 r2#1: engine below the CPU count)
+file: crates/voicen-whisper/src/lib.rs
+added_by: test-writer
+--- old
+    BEST_THREADS.min(parallelism.saturating_sub(1)).max(1)
+--- new
+    BEST_THREADS.min(parallelism).max(1)
+--- end
