@@ -213,6 +213,37 @@ fn quick() -> Timeouts {
     }
 }
 
+#[test]
+fn quick_connect_is_the_os_answer_budget() {
+    // T-111: a loopback connect cannot be delayed, so the connect limit of the
+    // helper is pinned by its value (the in-time connect, the budget). Bite: the
+    // old 2 s.
+    assert_eq!(quick().connect, OS_ANSWER_BUDGET);
+}
+
+#[tokio::test]
+async fn quick_totals_survive_an_answer_stalled_past_their_old_margin() {
+    // T-111: both whole-request limits of `quick()` are in-time ones: an answer
+    // 5.5 s late (past the old 5 s) is still `Ok`, for the API role and the local
+    // server role. Bite: either total left at 5 s (Timeout).
+    let server = server_with(ok_text("hi").set_delay(Duration::from_millis(5500))).await;
+    let w = world(stored_keys());
+    let got = run_with(&w, api_req(&base(&server), KeyEdit::Untouched), quick());
+    assert!(
+        matches!(got, ConnectionTestResult::Ok { .. }),
+        "api role: {got:?}"
+    );
+    let got = run_with(
+        &w,
+        local_req(&base(&server), "", KeyEdit::Untouched),
+        quick(),
+    );
+    assert!(
+        matches!(got, ConnectionTestResult::Ok { .. }),
+        "local server role: {got:?}"
+    );
+}
+
 async fn server_with(response: ResponseTemplate) -> MockServer {
     let server = MockServer::start().await;
     Mock::given(any())

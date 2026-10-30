@@ -1,0 +1,9 @@
+guarantee: T-111 swallowed error: a read error (the no-data timeout of a stall) ends the download Failed{DownloadInterrupted}, never silently as a short body
+file: crates/voicen-core/src/local_models/download.rs
+added_by: test-writer
+equivalent: a read error ends the loop with received < size, and the size check fails DownloadInterrupted, the reason TransportError::BodyRead maps to; the cancel check sits before both
+--- old
+                Err(e) => return Err(transport(&body_error(&e))),
+--- new
+                Err(_) => break,
+--- end

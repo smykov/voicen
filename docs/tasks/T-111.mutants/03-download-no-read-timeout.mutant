@@ -1,0 +1,11 @@
+guarantee: T-111 bite: a stalled download ends at no_data (no read timeout: no end event within END_WAIT)
+file: crates/voicen-core/src/engine/http.rs
+added_by: test-writer
+--- old
+        Client::builder().connect_timeout(connect).timeout(read),
+--- new
+        {
+            let _ = read;
+            Client::builder().connect_timeout(connect)
+        },
+--- end

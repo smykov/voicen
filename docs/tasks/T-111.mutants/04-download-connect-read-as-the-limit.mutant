@@ -1,0 +1,8 @@
+guarantee: T-111 bite: the read limit is download_no_data, not the connect value
+file: crates/voicen-core/src/local_models/download.rs
+added_by: test-writer
+--- old
+            http::client_with_read_timeout(self.timeouts.connect, self.timeouts.download_no_data)
+--- new
+            http::client_with_read_timeout(self.timeouts.connect, self.timeouts.connect)
+--- end

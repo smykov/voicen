@@ -23,7 +23,7 @@ mod refused_addr_tests;
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
-use common::os_answer::OsAnswer;
+use common::os_answer::{OsAnswer, OS_ANSWER_BUDGET};
 use common::timing::{ago, at_least, measure};
 use serde_json::json;
 use voicen_core::audio::{wav, AudioBuffer};
@@ -83,8 +83,26 @@ fn req_with(t: Timeouts) -> TranscribeRequest {
     }
 }
 
+/// The whole-request limit of a leg that expects an answer and whose deadline is not
+/// the subject (T-111).
+fn in_time_total() -> Duration {
+    Duration::from_secs(5)
+}
+
 fn req() -> TranscribeRequest {
-    req_with(timeouts(Duration::from_secs(5), Duration::from_secs(5)))
+    req_with(timeouts(in_time_total(), in_time_total()))
+}
+
+#[test]
+fn the_helpers_connect_is_the_os_answer_budget() {
+    // T-111: a loopback connect cannot be delayed, so the connect limit of the
+    // helper every test here takes is pinned by its value (the in-time connect,
+    // `common::os_answer::in_time()`). The two totals are the parameters. Bite: the
+    // old 2 s.
+    assert_eq!(
+        timeouts(Duration::ZERO, Duration::ZERO).connect,
+        OS_ANSWER_BUDGET
+    );
 }
 
 /// Settings with engine = local server at `base` and `model`; the API section
@@ -339,7 +357,23 @@ async fn request_deadline_is_local_server_not_api_transcription() {
     let engine = local_engine(&local_settings(&base(&server), ""), &creds(None));
     let got = transcribe(
         engine,
-        req_with(timeouts(Duration::from_millis(300), Duration::from_secs(5))),
+        req_with(timeouts(Duration::from_millis(300), in_time_total())),
+    );
+    assert_eq!(got, Ok("late but in time".to_string()));
+}
+
+#[tokio::test]
+async fn request_deadline_test_holds_when_the_answer_stalls_past_the_old_local_server_margin() {
+    // T-111: the same scenario with the answer 5.5 s late, past the old 5 s
+    // local-server deadline (a 3.5 s margin at the 1.5 s answer). The api deadline
+    // stays 300 ms, so the bite (the engine reading api_transcription) stays: it
+    // gives Timeout at 300 ms. Bite: the local-server limit left at 5 s.
+    let server =
+        server_with(ok_text("late but in time").set_delay(Duration::from_millis(5500))).await;
+    let engine = local_engine(&local_settings(&base(&server), ""), &creds(None));
+    let got = transcribe(
+        engine,
+        req_with(timeouts(Duration::from_millis(300), in_time_total())),
     );
     assert_eq!(got, Ok("late but in time".to_string()));
 }

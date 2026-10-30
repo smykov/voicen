@@ -61,6 +61,29 @@ fn timeouts() -> Timeouts {
     }
 }
 
+#[test]
+fn helper_connect_is_the_os_answer_budget() {
+    // T-111: a loopback connect cannot be delayed, so the connect limit of the
+    // helper is pinned by its value (the in-time connect, the budget). Bite: the
+    // old 2 s.
+    assert_eq!(timeouts().connect, OS_ANSWER_BUDGET);
+}
+
+#[tokio::test]
+async fn helper_total_survives_a_reply_stalled_past_its_old_margin() {
+    // T-111: the helper's post-processing limit is an in-time one: a reply 5.5 s
+    // late (past the old 5 s) is still applied. Bite: the total left at 5 s
+    // (Skipped(Timeout)).
+    let server = server_with(chat_reply(json!(REPLY)).set_delay(Duration::from_millis(5500))).await;
+    let got = run(
+        &pp_settings(&format!("{}/v1", server.uri())),
+        &creds_with_key(KEY),
+        timeouts(),
+        RAW,
+    );
+    assert_eq!(got, PostProcessOutcome::Applied(REPLY.to_string()));
+}
+
 fn creds_with_key(key: &str) -> FakeCredentialStore {
     FakeCredentialStore::new().with_key(KeySlot::PostProcessing, key)
 }

@@ -748,6 +748,31 @@ async fn no_answer_within_timeout_is_timeout() {
 /// The server's answer delay for the T-073 cases: above the configured 5 s limit
 /// (the API minimum of decision #99), well under the 30 s default.
 const T073_DELAY: Duration = Duration::from_secs(7);
+/// The configured request limit and connect limit (seconds) of
+/// `configured_api_timeout_fails_the_job_with_timeout` (T-111: the connect value is
+/// bite-bound, so both keep the in-time margin M = 5 s).
+const API_LIMIT_S: u32 = 5;
+const API_CONNECT_S: u32 = 2;
+
+#[test]
+fn configured_api_timeout_legs_keep_the_in_time_margin_m() {
+    // T-111: the connect value is a loopback connect that must finish within it
+    // (else CannotReach, not Timeout), and it must lie at least M below the request
+    // limit, so the connect-as-limit bite (it ends the job early, which `at_least`
+    // sees) stays and a stall of M in the connect cannot flip the verdict. The
+    // answer comes after the limit (a timeout leg: a stall only delays it). Bite:
+    // `connect_s` or the limit left at the old 2 s / 5 s (3 s apart, 2 s of margin).
+    let (connect, limit) = (u64::from(API_CONNECT_S), u64::from(API_LIMIT_S));
+    assert!(connect >= 5, "connect_s {connect} s is below M = 5 s");
+    assert!(
+        limit >= connect + 5,
+        "limit {limit} s is not M = 5 s above the connect {connect} s"
+    );
+    assert!(
+        T073_DELAY > Duration::from_secs(limit),
+        "the answer {T073_DELAY:?} must come after the {limit} s limit"
+    );
+}
 
 #[tokio::test]
 async fn configured_api_timeout_fails_the_job_with_timeout() {
@@ -767,8 +792,8 @@ async fn configured_api_timeout_fails_the_job_with_timeout() {
 
     let mut h = harness();
     let mut s = api_settings(&base(&server));
-    s.timeouts.api_transcription_s = 5;
-    s.timeouts.connect_s = 2;
+    s.timeouts.api_transcription_s = API_LIMIT_S;
+    s.timeouts.connect_s = API_CONNECT_S;
     let rec = h.record(fixtures::speech_3s(), Arc::new(s));
     let (report, took) = h.run(rec);
     assert_eq!(
@@ -1078,6 +1103,73 @@ async fn pending_store_failure_reports_without_pending() {
 
 // ---- redaction ----------------------------------------------------------------------
 
+/// The deadlines of the redaction scenarios that expect an answer at once (pasted,
+/// copied only, clipboard fails, 401, 500, bad body): the deadline is not their
+/// subject, so a host stall must not decide them (T-111).
+fn immediate_timeouts() -> Timeouts {
+    Timeouts {
+        connect: Duration::from_secs(2),
+        api_transcription: Duration::from_millis(300),
+        ..Timeouts::default()
+    }
+}
+
+#[tokio::test]
+async fn immediate_scenarios_hold_when_the_server_stalls_past_their_old_margin() {
+    // T-111, hypothesis 1: the redaction scenarios that expect an answer ran under
+    // the 300 ms deadline of the "timeout" scenario, so a server (or host) stall of
+    // 300 ms turned correct code red. Injected here: every answer comes 700 ms late,
+    // and each scenario must still end as it does at once. A timeout leg is not
+    // affected (it waits for the deadline anyway). Bite: `immediate_timeouts()` left
+    // at the 300 ms total (Timeout instead of the end below).
+    let stall = Duration::from_millis(700);
+    let marker_body = format!("{TRANSCRIPT} {KEY}");
+    let cases: Vec<(&str, ResponseTemplate, JobEnd)> = vec![
+        (
+            "pasted",
+            ok_text(TRANSCRIPT).set_delay(stall),
+            JobEnd::Delivered { notice: None },
+        ),
+        (
+            "401",
+            ResponseTemplate::new(401)
+                .set_body_string(marker_body.clone())
+                .set_delay(stall),
+            JobEnd::Failed(FailureReason::InvalidApiKey),
+        ),
+        (
+            "500",
+            ResponseTemplate::new(500)
+                .set_body_string(marker_body)
+                .set_delay(stall),
+            JobEnd::Failed(FailureReason::ServerError { status: 500 }),
+        ),
+        (
+            "bad body",
+            ResponseTemplate::new(200)
+                .set_body_json(json!({ "txt": TRANSCRIPT, "key": KEY }))
+                .set_delay(stall),
+            JobEnd::Failed(FailureReason::UnexpectedResponse),
+        ),
+    ];
+    for (label, template, want) in cases {
+        let server = server_with(template).await;
+        let mut h = harness_with(energy_gate(), Some(immediate_timeouts()), creds_with_key());
+        let mut s = api_settings(&base(&server));
+        s.auto_paste = true;
+        let (_, report) = h.dictate(fixtures::speech_3s(), s);
+        assert_eq!(report.end, want, "{label}: a 700 ms stalled answer");
+    }
+}
+
+#[test]
+fn immediate_scenarios_connect_is_the_os_answer_budget() {
+    // T-111: a loopback connect cannot be delayed, so the connect leg of the
+    // immediate scenarios is pinned by its value: the in-time connect, the budget
+    // (`common::os_answer::in_time()`). Bite: the 2 s of the old `ms`.
+    assert_eq!(immediate_timeouts().connect, OS_ANSWER_BUDGET);
+}
+
 #[tokio::test]
 async fn no_event_or_failure_carries_key_query_or_transcript() {
     // FR-20 / NFR-04 / P-009: the key, the base URL's query and the transcript
@@ -1097,11 +1189,14 @@ async fn no_event_or_failure_carries_key_query_or_transcript() {
     let with_query = |base: &str| format!("{base}?api-version={QUERY_SECRET}");
     let refused_case = OsAnswer::refused();
     let refused = format!("http://{}/v1", refused_case.host);
+    // Only the "timeout" scenario keeps the short deadline (300 ms against a 5 s
+    // answer); every scenario that expects an answer takes `immediate` (T-111).
     let ms = Timeouts {
         connect: Duration::from_secs(2),
         api_transcription: Duration::from_millis(300),
         ..Timeouts::default()
     };
+    let immediate = immediate_timeouts();
     // The refused scenario must not run under `ms`: on windows-latest the refusal
     // takes ~2.17 s, so the 300 ms total would fire first and end it `Timeout`
     // (T-048, CI run 37204170764): it takes the case's deadlines (T-080 I1). The
@@ -1116,7 +1211,7 @@ async fn no_event_or_failure_carries_key_query_or_transcript() {
             true,
             false,
             JobEnd::Delivered { notice: None },
-            ms,
+            immediate,
         ),
         (
             "copied only",
@@ -1126,7 +1221,7 @@ async fn no_event_or_failure_carries_key_query_or_transcript() {
             JobEnd::Delivered {
                 notice: Some(i18n::NOTICE_COPIED),
             },
-            ms,
+            immediate,
         ),
         (
             "clipboard fails",
@@ -1134,7 +1229,7 @@ async fn no_event_or_failure_carries_key_query_or_transcript() {
             true,
             true,
             JobEnd::Failed(FailureReason::ClipboardUnavailable),
-            ms,
+            immediate,
         ),
         (
             "401",
@@ -1142,7 +1237,7 @@ async fn no_event_or_failure_carries_key_query_or_transcript() {
             true,
             false,
             JobEnd::Failed(FailureReason::InvalidApiKey),
-            ms,
+            immediate,
         ),
         (
             "500",
@@ -1150,7 +1245,7 @@ async fn no_event_or_failure_carries_key_query_or_transcript() {
             true,
             false,
             JobEnd::Failed(FailureReason::ServerError { status: 500 }),
-            ms,
+            immediate,
         ),
         (
             "bad body",
@@ -1158,7 +1253,7 @@ async fn no_event_or_failure_carries_key_query_or_transcript() {
             true,
             false,
             JobEnd::Failed(FailureReason::UnexpectedResponse),
-            ms,
+            immediate,
         ),
         (
             "timeout",

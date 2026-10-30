@@ -1,0 +1,8 @@
+guarantee: T-111 bite: local_server request deadline is the local_server value, not api_transcription (wrong deadline in a widened local_server test stays red)
+file: crates/voicen-core/src/engine/openai.rs
+added_by: test-writer
+--- old
+            Endpoint::LocalServer => req.timeouts.local_server,
+--- new
+            Endpoint::LocalServer => req.timeouts.api_transcription,
+--- end

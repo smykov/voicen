@@ -239,6 +239,49 @@ fn dictate(settings: Settings) -> Run {
     }
 }
 
+/// The configured post-processing limit and connect limit of the timeout leg below
+/// (seconds). T-111: the connect limit must stay M below the limit, so a connect
+/// value read as the request limit ends the job early and `at_least` sees it, and a
+/// host stall of less than M cannot make the connect timer the verdict.
+const PP_LIMIT_S: u32 = 5;
+const PP_CONNECT_S: u32 = 2;
+
+/// The snapshot of the control leg: the same server, a post-processing limit that
+/// the answer must beat. T-111 widens it (the answer is not the subject there).
+fn control_snapshot(base: &str) -> Settings {
+    snapshot(base)
+}
+
+#[test]
+fn configured_timeout_legs_keep_the_in_time_margin_m() {
+    // T-111: connect >= M (a loopback connect finishing within it is not a race) and
+    // the limit M above the connect. Bite: the old connect_s = 2.
+    // M = 5 s (#200), spelled out here so this binary builds before `timing::M`.
+    let m = 5;
+    assert!(PP_CONNECT_S >= m, "connect {PP_CONNECT_S} s < M {m} s");
+    assert!(
+        PP_LIMIT_S >= PP_CONNECT_S + m,
+        "limit {PP_LIMIT_S} s is not M above connect {PP_CONNECT_S} s"
+    );
+}
+
+#[tokio::test]
+async fn control_leg_survives_a_chat_answer_stalled_past_the_default_limit() {
+    // T-111 D3: an answer 15.5 s late (past the 15 s default limit) is applied by the
+    // control snapshot, whose limit is far above any answer the test waits for.
+    // Bite: the control snapshot left on the default 15 s (Skipped(Timeout)).
+    let server = transcribe_then_chat(Duration::from_millis(15_500)).await;
+    let run = dictate(control_snapshot(&format!("{}/v1", server.uri())));
+    assert_eq!(
+        run.report,
+        JobReport {
+            end: JobEnd::Delivered { notice: None },
+            pending: None,
+        }
+    );
+    assert_eq!(run.clipboard, vec![PROCESSED.to_string()]);
+}
+
 #[tokio::test]
 async fn configured_post_processing_timeout_delivers_the_raw_transcript() {
     // Acceptance 2 with #99: a job whose snapshot says post_processing_s = 5 (the
@@ -255,12 +298,12 @@ async fn configured_post_processing_timeout_delivers_the_raw_transcript() {
     // deriving a second Timeouts for the processor that ignores the snapshot; the
     // processed text or nothing delivered on a skip; the skip ended as Delivered
     // or Failed.
-    let want = Duration::from_secs(5);
+    let want = Duration::from_secs(u64::from(PP_LIMIT_S));
     let server = transcribe_then_chat(want + TOLERANCE).await;
     let base = format!("{}/v1", server.uri());
     let mut s = snapshot(&base);
-    s.timeouts.post_processing_s = 5;
-    s.timeouts.connect_s = 2;
+    s.timeouts.post_processing_s = PP_LIMIT_S;
+    s.timeouts.connect_s = PP_CONNECT_S;
 
     let run = dictate(s);
     assert_eq!(
@@ -301,7 +344,7 @@ async fn configured_post_processing_timeout_delivers_the_raw_transcript() {
     );
 
     // The same server, the default snapshot (post_processing 15 s): applied.
-    let run = dictate(snapshot(&base));
+    let run = dictate(control_snapshot(&base));
     assert_eq!(
         run.report,
         JobReport {

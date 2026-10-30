@@ -1,0 +1,2 @@
+# T-111: today the new tests are red, so the baseline skips them; the implementer drops the --skip list once they are green (then the catalog runs every task test).
+cargo test -j 2 -p voicen-core --test local_download --test local_server -- --skip survives_a_gap --skip one_second_gap --skip keep_the_in_time_margin --skip no_verdict_when --skip holds_when_the_test_thread --skip still_busy_when --skip stalls_past_the_old_local_server_margin --skip helpers_connect_is_the --skip gap_of_two_and_a_half

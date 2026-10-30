@@ -24,6 +24,7 @@ use std::sync::mpsc::{channel, Receiver, RecvTimeoutError};
 use std::sync::Arc;
 use std::time::Duration;
 
+use common::os_answer::OS_ANSWER_BUDGET;
 use common::timing::{deadline, left};
 use serde_json::{json, Value};
 use voicen_core::i18n::{self, MessageId, MESSAGE_IDS};
@@ -56,6 +57,20 @@ fn timeouts() -> Timeouts {
         download_no_data: Duration::from_secs(5),
         ..Timeouts::default()
     }
+}
+
+#[test]
+fn helper_deadlines_and_end_wait_are_at_the_budget_scale() {
+    // T-111: connect and no-data limits are in-time ones (a loopback connect cannot be
+    // delayed, so the value is pinned) and the hang-ender wait is far above what any
+    // awaited end needs. Bite: the old connect 2 s, no-data 5 s, END_WAIT 10 s.
+    let t = timeouts();
+    assert_eq!(t.connect, OS_ANSWER_BUDGET, "connect");
+    assert!(
+        t.download_no_data >= 2 * OS_ANSWER_BUDGET,
+        "download_no_data"
+    );
+    assert!(END_WAIT >= OS_ANSWER_BUDGET, "END_WAIT {END_WAIT:?}");
 }
 
 /// Slow enough to look at and cancel mid-body: 1 KiB every 50 ms (~3.2 s).

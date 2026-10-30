@@ -28,7 +28,7 @@ mod refused_addr_tests;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use common::os_answer::OsAnswer;
+use common::os_answer::{OsAnswer, OS_ANSWER_BUDGET};
 use common::timing::{ago, at_least, now};
 use diag_support::{
     all_lines, closed, contains, dictation_lines, files_under, open_log, utf16le, Line,
@@ -227,6 +227,54 @@ fn settings_service(stored: &Settings) -> (SettingsService, LoadOutcome) {
 
 // ---- the run ----------------------------------------------------------------------------
 
+/// The deadlines of the scenarios that expect an answer at once: the deadline is
+/// not their subject, so a host stall must not decide them (T-111).
+fn immediate_timeouts() -> Timeouts {
+    Timeouts {
+        connect: Duration::from_secs(2),
+        api_transcription: Duration::from_millis(300),
+        ..Timeouts::default()
+    }
+}
+
+/// The deadlines of the post-processing outcome scenarios except the timeout one
+/// (`t_pp_short` derives from it and only shortens `post_processing`).
+fn pp_outcome_timeouts() -> Timeouts {
+    Timeouts {
+        connect: Duration::from_secs(2),
+        api_transcription: Duration::from_secs(5),
+        post_processing: Duration::from_secs(5),
+        ..Timeouts::default()
+    }
+}
+
+#[test]
+fn in_time_scenarios_of_the_log_tests_use_the_in_time_deadlines() {
+    // T-111 (value pin: a loopback connect cannot be delayed, and a 5 s total needs
+    // a 5 s stall to show). The scenarios of the log tests that expect an answer
+    // (the six immediate ones and cross-origin 307 of
+    // `log_holds_no_key_query_or_transcript_on_any_path`; every post-processing
+    // outcome but the short timeout one) take the in-time deadline shape of
+    // `common::os_answer::in_time()`: connect = the budget, every total twice
+    // the budget. Bite: the old 2 s connect, the 300 ms / 5 s totals.
+    for (name, t) in [
+        ("immediate", immediate_timeouts()),
+        ("pp outcome", pp_outcome_timeouts()),
+    ] {
+        assert_eq!(t.connect, OS_ANSWER_BUDGET, "{name}: connect");
+        assert_eq!(
+            t.api_transcription,
+            2 * OS_ANSWER_BUDGET,
+            "{name}: api_transcription"
+        );
+    }
+    assert_eq!(
+        pp_outcome_timeouts().post_processing,
+        2 * OS_ANSWER_BUDGET,
+        "pp outcome: post_processing"
+    );
+}
+
 #[tokio::test]
 async fn log_holds_no_key_query_or_transcript_on_any_path() {
     // Analysis approach 3. Bite: an engine kind, detector, failure code or any
@@ -261,6 +309,9 @@ async fn log_holds_no_key_query_or_transcript_on_any_path() {
         api_transcription: Duration::from_millis(300),
         ..Timeouts::default()
     };
+    // Every scenario that expects an answer takes `immediate` (T-111); only
+    // "timeout" keeps `ms`.
+    let immediate = immediate_timeouts();
     // As in api_pipeline (T-048): the refused scenario never runs under `ms`.
     let refused_t = refused_case.timeouts;
 
@@ -292,7 +343,7 @@ async fn log_holds_no_key_query_or_transcript_on_any_path() {
             true,
             false,
             JobEnd::Delivered { notice: None },
-            ms,
+            immediate,
             "delivered",
             ("result", "pasted"),
         ),
@@ -304,7 +355,7 @@ async fn log_holds_no_key_query_or_transcript_on_any_path() {
             JobEnd::Delivered {
                 notice: Some(i18n::NOTICE_COPIED),
             },
-            ms,
+            immediate,
             "delivered",
             ("result", "copied_only"),
         ),
@@ -314,7 +365,7 @@ async fn log_holds_no_key_query_or_transcript_on_any_path() {
             true,
             true,
             JobEnd::Failed(FailureReason::ClipboardUnavailable),
-            ms,
+            immediate,
             "failed",
             ("failure", "clipboard_unavailable"),
         ),
@@ -324,7 +375,7 @@ async fn log_holds_no_key_query_or_transcript_on_any_path() {
             true,
             false,
             JobEnd::Failed(FailureReason::InvalidApiKey),
-            ms,
+            immediate,
             "failed",
             ("failure", "invalid_api_key"),
         ),
@@ -334,7 +385,7 @@ async fn log_holds_no_key_query_or_transcript_on_any_path() {
             true,
             false,
             JobEnd::Failed(FailureReason::ServerError { status: 500 }),
-            ms,
+            immediate,
             "failed",
             ("failure", "server_error"),
         ),
@@ -344,7 +395,7 @@ async fn log_holds_no_key_query_or_transcript_on_any_path() {
             true,
             false,
             JobEnd::Failed(FailureReason::UnexpectedResponse),
-            ms,
+            immediate,
             "failed",
             ("failure", "unexpected_response"),
         ),
@@ -354,7 +405,7 @@ async fn log_holds_no_key_query_or_transcript_on_any_path() {
             true,
             false,
             JobEnd::Failed(FailureReason::ServerError { status: 307 }),
-            ms,
+            immediate,
             "failed",
             ("failure", "server_error"),
         ),
@@ -576,12 +627,7 @@ async fn post_processing_outcome_is_logged_without_prompt_reply_host_or_key() {
     let refused = format!("http://{}/v1?api-version={PP_QUERY}", refused_case.host);
     let unparsable = format!("ftp://{PP_HOST}/v1?api-version={PP_QUERY}");
 
-    let t = Timeouts {
-        connect: Duration::from_secs(2),
-        api_transcription: Duration::from_secs(5),
-        post_processing: Duration::from_secs(5),
-        ..Timeouts::default()
-    };
+    let t = pp_outcome_timeouts();
     let pp_deadline = Duration::from_millis(300);
     let t_pp_short = Timeouts {
         post_processing: pp_deadline,

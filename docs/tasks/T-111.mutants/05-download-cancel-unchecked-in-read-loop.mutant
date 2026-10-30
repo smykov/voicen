@@ -1,0 +1,13 @@
+guarantee: T-111 bite: cancel is checked between reads (a steady transfer ends Cancelled, not Finished)
+file: crates/voicen-core/src/local_models/download.rs
+added_by: test-writer
+--- old
+        loop {
+            if self.cancelled() {
+                return Err(End::Cancelled);
+            }
+            let n = match response.read(&mut buf) {
+--- new
+        loop {
+            let n = match response.read(&mut buf) {
+--- end

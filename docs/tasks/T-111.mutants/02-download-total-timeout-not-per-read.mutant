@@ -1,0 +1,8 @@
+guarantee: T-111 bite: the download no-data limit is per read, not a total (a trickle longer than no_data must finish)
+file: crates/voicen-core/src/local_models/download.rs
+added_by: test-writer
+--- old
+        let sent = client.send(client.get(url));
+--- new
+        let sent = client.send(client.get(url).timeout(self.timeouts.download_no_data));
+--- end

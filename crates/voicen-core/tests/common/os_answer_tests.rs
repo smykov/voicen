@@ -155,6 +155,40 @@ fn unanswered_case_carries_a_connect_far_below_every_total() {
 }
 
 #[test]
+fn unanswered_totals_leave_the_in_time_margin_between_the_connect_timer_and_the_total() {
+    // T-111: after a host freeze both timers can be due at once, and the poll order
+    // is not fixed, so the total must lie far above the connect timer: at least 20
+    // times the connect (300 ms), a margin of 5.7 s (M = 5 s, #200). The earlier
+    // 10 times left 2.7 s. The destructure is exhaustive. Bite: any total at 10 times
+    // (the old value) or below, one total left out of the raise.
+    let case = Unanswered::blackhole();
+    let Timeouts {
+        connect,
+        api_transcription,
+        local_server,
+        post_processing,
+        builtin,
+        download_no_data,
+    } = case.timeouts;
+    for (name, total) in [
+        ("api_transcription", api_transcription),
+        ("local_server", local_server),
+        ("post_processing", post_processing),
+        ("download_no_data", download_no_data),
+    ] {
+        assert!(
+            total >= 20 * connect,
+            "{name} = {total:?} is not at least 20 times the connect {connect:?}"
+        );
+        assert!(
+            total - connect >= Duration::from_secs(5),
+            "{name} = {total:?}: less than 5 s above the connect {connect:?}"
+        );
+    }
+    assert_eq!(builtin, Timeouts::default().builtin, "builtin");
+}
+
+#[test]
 fn unanswered_case_is_test_net_1_and_accepts_only_the_connect_or_os_ending() {
     // RFC 5737 TEST-NET-1, never answered. Both endings the OS may give are
     // accepted (the connect timer firing: CannotReach for this host; no route at

@@ -55,6 +55,46 @@ fn timeouts() -> Timeouts {
     }
 }
 
+/// The whole-request limit of the cases that expect an answer and whose deadline is
+/// not the subject (`no_failure_contains_query_key_or_transcript`'s http cases but
+/// the delayed one; T-111).
+fn in_time_total() -> Duration {
+    Duration::from_secs(5)
+}
+
+/// How long `partial_body_server` waits for the request head before it gives up: a
+/// test-owned deadline (T-111: the same kind as the in-time limits).
+const SERVER_READ_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[test]
+fn in_time_deadlines_of_this_file_are_at_the_budget_scale() {
+    // T-111: a loopback connect cannot be delayed, so the connect limit of the
+    // helper is pinned by its value (the in-time connect, the budget); the
+    // in-time total of the http cases and the partial-body server's read timeout
+    // (a test-owned deadline: the request must reach it in time) are twice / once
+    // the budget. Bite: the old 2 s connect, the 5 s totals, the 5 s server read.
+    assert_eq!(timeouts().connect, OS_ANSWER_BUDGET, "helper connect");
+    assert_eq!(in_time_total(), 2 * OS_ANSWER_BUDGET, "http cases total");
+    assert!(
+        SERVER_READ_TIMEOUT >= OS_ANSWER_BUDGET,
+        "partial_body_server read timeout {SERVER_READ_TIMEOUT:?}"
+    );
+}
+
+#[tokio::test]
+async fn the_helper_total_survives_an_answer_stalled_past_its_old_margin() {
+    // T-111: the helper's whole-request limit is an in-time one, so an answer 5.5 s
+    // late (past the old 5 s total) is still delivered. Bite: the helper's total
+    // left at 5 s (Timeout).
+    let server =
+        server_with(ok_text("late but in time").set_delay(Duration::from_millis(5500))).await;
+    let got = transcribe(
+        api_engine(&format!("{}/v1", server.uri()), Some(KEY)),
+        req(None),
+    );
+    assert_eq!(got, Ok("late but in time".to_string()));
+}
+
 fn req(language: Option<&str>) -> TranscribeRequest {
     TranscribeRequest {
         language: language.map(str::to_string),
@@ -256,7 +296,7 @@ fn partial_body_server(hold: Duration) -> String {
         let Ok((mut s, _)) = listener.accept() else {
             return;
         };
-        let _ = s.set_read_timeout(Some(Duration::from_secs(5)));
+        let _ = s.set_read_timeout(Some(SERVER_READ_TIMEOUT));
         read_request(&mut s);
         let head =
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n";
@@ -884,19 +924,19 @@ async fn no_failure_contains_query_key_or_transcript() {
         (
             "401",
             ResponseTemplate::new(401).set_body_string(leaky.clone()),
-            Duration::from_secs(5),
+            in_time_total(),
             FailureReason::InvalidApiKey,
         ),
         (
             "500",
             ResponseTemplate::new(500).set_body_string(leaky.clone()),
-            Duration::from_secs(5),
+            in_time_total(),
             FailureReason::ServerError { status: 500 },
         ),
         (
             "200 without text",
             ResponseTemplate::new(200).set_body_string(leaky.clone()),
-            Duration::from_secs(5),
+            in_time_total(),
             FailureReason::UnexpectedResponse,
         ),
         (
@@ -905,7 +945,7 @@ async fn no_failure_contains_query_key_or_transcript() {
                 "{{\"text\":\"{}\"}}",
                 TRANSCRIPT.repeat(MIB / TRANSCRIPT.len() + 1)
             )),
-            Duration::from_secs(5),
+            in_time_total(),
             FailureReason::UnexpectedResponse,
         ),
         (
