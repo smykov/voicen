@@ -1,0 +1,9 @@
+guarantee: AC-4: a started_at off the YYYY-MM-DDTHH:MM shape is shown whole, on one line (review 1 #3)
+file: crates/voicen-core/src/call/transcript.rs
+added_by: test-writer
+equivalent: a text under 16 bytes passes the guard here, but `started_at.get(11..16)` is then None, so the match still takes the fallback arm
+--- old
+text.as_bytes().get(..SHAPE.len()).is_some_and(|head| {
+--- new
+text.as_bytes().get(..SHAPE.len()).map_or(true, |head| {
+--- end
