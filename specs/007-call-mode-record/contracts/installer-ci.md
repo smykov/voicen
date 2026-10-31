@@ -19,10 +19,12 @@ There is no stop switch in 1a.
 | `/S`, `/P` | as today (`/S` removes data) | never asked; keep | **kept** |
 | `/S /PURGECALLS`, `/P /PURGECALLS` | as today | never asked; remove | removed |
 | `/S /KEEPDATA` | keep | keep | kept |
+| `/S /KEEPDATA /PURGECALLS` | keep | never asked; remove (decisions #197) | removed, the rest of the data folder stays |
+| bare `/PURGECALLS` | as `/P`: data removed, nothing asked (the fork's `/P` also matches it) | never asked; remove | removed. **Unconfirmed on the runner**: read in the NSIS 3.11 source, no CI step runs it (OQ-75, `docs/decisions/installer.md`) |
 | update mode | keep | keep | kept |
 
 - **Decision point**: `$VoicenPurgeCalls` is computed in PREUNINSTALL next to `$VoicenPurgeData`, the one decision point (installer.md). Question strings are LangStrings 1033/1049.
-- **POSTUNINSTALL**: it never runs `RMDir /r` on `%LOCALAPPDATA%\Voicen` while calls are kept. It removes the other entries one by one and leaves `calls\`.
+- **POSTUNINSTALL**: it never runs `RMDir /r`, anywhere. Every removal goes through the hooks' walker `un.VoicenRemoveEntry`, which removes a junction or symlink as a link only and never enters it (decisions #197; `docs/decisions/installer.md`). While calls are kept it removes the other entries one by one and leaves `calls\`.
 - **Other roots**: no root other than the default is ever deleted (FR-041, SC-010).
 
 ## Windows CI (`.github/workflows/ci.yml`, windows job)
@@ -34,8 +36,10 @@ There is no stop switch in 1a.
 | `crt-imports.sh` | `voicen.exe` and the call test exes import no `MSVCP140` / `VCRUNTIME140` (the list gains the call exes with T-127 / T-139; the libopus `/MT` proof is `opus-cmake-cache.sh`, decisions #197) | R5 |
 | `opus-cmake-cache.sh` (new) | opus `CMakeCache.txt`: `OPUS_STATIC_RUNTIME:BOOL=ON`, `CMAKE_BUILD_TYPE:STRING=Release`, no line naming `CMAKE_MSVC_RUNTIME_LIBRARY`; `dumpbin -directives` of each `opus.lib`: `/DEFAULTLIB:LIBCMT`, never `/DEFAULTLIB:MSVCRT` (decisions #197) | R5 |
 | install smoke (existing step "Install silently, launch, check the start, settings-load and reconcile log lines, the first-run settings.json, the Run value and the settings window", extended) | after the start line: `voicen.exe --call record` → log has `call_requested source=switch` and `call_refused part=system reason=no_device` (the "no output device" refusal of FR-043; the session opens the system track before the mic, so this holds whatever capture endpoints the runner has), the process is still running, no call folder exists, the window census is unchanged | FR-043, FR-002 |
-| uninstall `/S` (existing step "uninstall.exe /S removes the data folder, every Voicen/ credential, the Run value and the shortcut, and keeps other credentials (T-025)", extended) | a planted `calls\2026-01-01_000000\meta.json` exists after uninstall; the step's current assertion that the whole data folder is gone becomes "gone except `calls\`" | FR-041 |
-| uninstall `/S /PURGECALLS` (new, after a reinstall) | the planted folder is gone; a planted folder in a non-default root (`$RUNNER_TEMP\calls-elsewhere`) still exists | FR-041, SC-010 |
+| W4 uninstall `/S` (existing step "uninstall.exe /S removes the data except calls\, every Voicen/ credential, the Run value and the shortcut, and keeps calls\ and other credentials (T-025, T-156)", extended) | a planted `calls\2026-01-01_000000\meta.json` exists after uninstall; the former assertion that the whole data folder is gone is now "only `calls\` is left" | FR-041 |
+| W5 uninstall `/S /KEEPDATA /PURGECALLS` (new, after W4; step "uninstall.exe /S /KEEPDATA /PURGECALLS removes calls\ and keeps the rest of the data folder (T-156)") | `calls\` is gone; `settings.json` and `ci-keep.txt` remain; then a silent reinstall | FR-041, decisions #197 |
+| W5b (new, added after the red run): a `/P` reinstall, a user-started `uninstall.exe /P`, and `uninstall.exe /S /KEEPDATA` | each keeps a planted `calls\2026-01-01_000000\meta.json` (`/P` reinstall and `/S /KEEPDATA` keep the data too; a user `/P` removes it as W4 does); then a silent reinstall. No red run of its own | FR-041 |
+| W6 uninstall `/S /PURGECALLS` (new, after W5b; its step ends the sequence) | with a nested and a top-level junction planted, the data folder is gone and every sentinel file behind each junction, `$RUNNER_TEMP\calls-elsewhere` included, still exists | FR-041, SC-010, decisions #197 |
 
 New CI tests run red first on `wip/<ID>` (P-016, windows-ci-runner.md). The runner has no capture-endpoint probe fact, so no step asserts real capture.
 
