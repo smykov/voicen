@@ -1,0 +1,8 @@
+guarantee: AC-2: --call <other> gives CallSwitch::Unknown (wrong case: RECORD accepted)
+file: crates/voicen-core/src/settings/gate.rs
+added_by: test-writer
+--- old
+                parsed.call = Some(if arg == OsStr::new("record") {
+--- new
+                parsed.call = Some(if arg.eq_ignore_ascii_case("record") {
+--- end

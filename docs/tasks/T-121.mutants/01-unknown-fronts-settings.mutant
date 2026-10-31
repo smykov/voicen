@@ -1,0 +1,8 @@
+guarantee: AC-2: --call <other> gives TrayOnly with no action (Unknown acts: fronts settings)
+file: crates/voicen-core/src/settings/gate.rs
+added_by: test-writer
+--- old
+        Some(CallSwitch::Unknown) => SecondLaunchAction::TrayOnly,
+--- new
+        Some(CallSwitch::Unknown) => SecondLaunchAction::FrontSettings,
+--- end

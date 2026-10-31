@@ -439,6 +439,18 @@ mod tests {
                 Some(Unknown),
             ),
             (
+                "call value only starts with record",
+                vec![EXE, "--call", "recording"],
+                false,
+                Some(Unknown),
+            ),
+            (
+                "call empty value",
+                vec![EXE, "--call", ""],
+                false,
+                Some(Unknown),
+            ),
+            (
                 "call swallows --autostart as value, autostart still true",
                 vec![EXE, "--call", "--autostart"],
                 true,

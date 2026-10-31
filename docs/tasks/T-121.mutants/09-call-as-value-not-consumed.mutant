@@ -1,0 +1,8 @@
+guarantee: AC-2: --call <other> gives CallSwitch::Unknown (the value --call is not taken as the value: --call --call record reads as Record)
+file: crates/voicen-core/src/settings/gate.rs
+added_by: test-writer
+--- old
+                value_expected = false;
+--- new
+                value_expected = arg == OsStr::new("--call");
+--- end

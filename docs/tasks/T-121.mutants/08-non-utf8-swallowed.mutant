@@ -1,0 +1,18 @@
+guarantee: AC-2: --call <other> gives CallSwitch::Unknown (non-UTF-8 value: to_str failure dropped, reads as no switch)
+file: crates/voicen-core/src/settings/gate.rs
+added_by: test-writer
+--- old
+                parsed.call = Some(if arg == OsStr::new("record") {
+                    CallSwitch::Record
+                } else {
+                    CallSwitch::Unknown
+                });
+--- new
+                parsed.call = arg.to_str().map(|value| {
+                    if value == "record" {
+                        CallSwitch::Record
+                    } else {
+                        CallSwitch::Unknown
+                    }
+                });
+--- end

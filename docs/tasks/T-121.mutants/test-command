@@ -1,0 +1,1 @@
+cargo test -j2 -p voicen-core settings::gate

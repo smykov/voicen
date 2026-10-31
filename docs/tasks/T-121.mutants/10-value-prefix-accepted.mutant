@@ -1,0 +1,8 @@
+guarantee: AC-2: --call <other> gives CallSwitch::Unknown (near miss: a value that only starts with record is accepted)
+file: crates/voicen-core/src/settings/gate.rs
+added_by: test-writer
+--- old
+                parsed.call = Some(if arg == OsStr::new("record") {
+--- new
+                parsed.call = Some(if arg.to_string_lossy().starts_with("record") {
+--- end
