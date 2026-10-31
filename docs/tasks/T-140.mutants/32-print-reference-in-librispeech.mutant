@@ -1,0 +1,9 @@
+guarantee: Analysis invariant (review 3 #1): the example never prints transcript text, reference text or the key, in librispeech mode too
+file: crates/voicen-core/examples/wer.rs
+added_by: developer review round 3
+--- old
+        match load_wav(&chapter_dir.join(format!("{id}.wav"))) {
+--- new
+        println!("{reference}");
+        match load_wav(&chapter_dir.join(format!("{id}.wav"))) {
+--- end

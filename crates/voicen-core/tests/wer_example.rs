@@ -1,11 +1,12 @@
 //! T-140 (validation r1): the owner-run `wer` example never prints transcript text,
 //! reference text or the API key (analysis invariant; NFR-04, FR-20).
 //!
-//! The example is run as a child process in `pairs` mode against a loopback wiremock
-//! server and a temp directory holding one fake WAV and one fake reference. Nothing
-//! leaves the host; every value is an obvious fake marker. The child's stdout and
-//! stderr are the "output" the invariant speaks of. The gate still never runs a real
-//! measurement (#185): the server and the audio are fakes.
+//! The example is run as a child process against a loopback wiremock server and a temp
+//! directory holding one fake WAV and one fake reference: in `pairs` mode through every
+//! path of the shared `run()`, in `librispeech` mode through its own lines up to the
+//! 30-minute refusal. Nothing leaves the host; every value is an obvious fake marker.
+//! The child's stdout and stderr are the "output" the invariant speaks of. The gate
+//! runs the example only like this and never the real measurement (research R23, T051).
 //!
 //! These tests are green on a correct example; they guard it by mutation (the catalog
 //! `docs/tasks/T-140.mutants/` entries `25..`): printing the transcript, the reference
@@ -13,6 +14,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::OnceLock;
 
 use serde_json::json;
 use voicen_core::audio::{wav, AudioBuffer};
@@ -55,30 +57,34 @@ impl Drop for Dir {
 
 /// The built example: `cargo build --example wer` (a no-op when fresh; `cargo test`
 /// of a single target does not build examples), then the binary next to `deps/`.
-fn example() -> PathBuf {
-    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    let status = Command::new(cargo)
-        .args([
-            "build",
-            "-j2",
-            "--quiet",
-            "-p",
-            "voicen-core",
-            "--example",
-            "wer",
-        ])
-        .status()
-        .expect("cargo starts");
-    assert!(status.success(), "cargo build --example wer failed");
-    let exe = std::env::current_exe().expect("test exe path");
-    let profile_dir = exe
-        .parent()
-        .and_then(Path::parent)
-        .expect("target/<profile>/deps/<test>");
-    let name = if cfg!(windows) { "wer.exe" } else { "wer" };
-    let path = profile_dir.join("examples").join(name);
-    assert!(path.is_file(), "example binary missing: {}", path.display());
-    path
+/// Built once per test binary, so parallel tests share one cargo run.
+fn example() -> &'static Path {
+    static EXAMPLE: OnceLock<PathBuf> = OnceLock::new();
+    EXAMPLE.get_or_init(|| {
+        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+        let status = Command::new(cargo)
+            .args([
+                "build",
+                "-j2",
+                "--quiet",
+                "-p",
+                "voicen-core",
+                "--example",
+                "wer",
+            ])
+            .status()
+            .expect("cargo starts");
+        assert!(status.success(), "cargo build --example wer failed");
+        let exe = std::env::current_exe().expect("test exe path");
+        let profile_dir = exe
+            .parent()
+            .and_then(Path::parent)
+            .expect("target/<profile>/deps/<test>");
+        let name = if cfg!(windows) { "wer.exe" } else { "wer" };
+        let path = profile_dir.join("examples").join(name);
+        assert!(path.is_file(), "example binary missing: {}", path.display());
+        path
+    })
 }
 
 /// Runs `wer pairs <dir> [ru]` against `base_url` with the fake key; stdout and stderr
@@ -88,10 +94,18 @@ fn run_pairs(dir: &Dir, base_url: &str, with_reference: bool) -> (Output, String
     if with_reference {
         std::fs::write(dir.0.join("item1.txt"), REFERENCE).expect("write reference");
     }
+    run_example(&["pairs", path_arg(dir), "ru"], base_url)
+}
+
+fn path_arg(dir: &Dir) -> &str {
+    dir.0.to_str().expect("temp dir path is UTF-8")
+}
+
+/// Runs the example with `args` against `base_url` with the fake key; stdout and stderr
+/// joined, lowercased.
+fn run_example(args: &[&str], base_url: &str) -> (Output, String) {
     let out = Command::new(example())
-        .arg("pairs")
-        .arg(&dir.0)
-        .arg("ru")
+        .args(args)
         .env("VOICEN_WER_KEY", KEY)
         .env("VOICEN_WER_BASE_URL", base_url)
         .env("VOICEN_WER_MODEL", "fake-model")
@@ -178,6 +192,34 @@ async fn wer_example_output_has_no_transcript_or_key_when_the_reference_is_missi
     assert!(all.contains("item1 skipped"), "no skip line:\n{all}");
     let seen = server.received_requests().await.expect("recording is on");
     assert!(seen.is_empty(), "a skipped item sends no request");
+    assert_no_secrets(&all, &[]);
+}
+
+#[tokio::test]
+async fn wer_example_librispeech_refusal_has_no_reference_or_key() {
+    let server =
+        server_with(ResponseTemplate::new(200).set_body_json(json!({ "text": TRANSCRIPT }))).await;
+    let dir = Dir::new("librispeech");
+    // One real manifest id: `read_transcripts` and the item loop run before the refusal.
+    let chapter = dir.0.join("1089").join("134686");
+    std::fs::create_dir_all(&chapter).expect("chapter dir");
+    std::fs::write(
+        chapter.join("1089-134686.trans.txt"),
+        format!("1089-134686-0000 {REFERENCE}\n"),
+    )
+    .expect("write trans.txt");
+    std::fs::write(chapter.join("1089-134686-0000.wav"), fake_wav()).expect("write wav");
+    let (out, all) = run_example(&["librispeech", path_arg(&dir)], &server.uri());
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "too little audio exits 1:\n{all}"
+    );
+    // The run really loaded the fake item (else the checks below prove nothing).
+    assert!(all.contains("wer: 1 of "), "no found count of 1:\n{all}");
+    assert!(all.contains("wer: refused:"), "no refusal line:\n{all}");
+    let seen = server.received_requests().await.expect("recording is on");
+    assert!(seen.is_empty(), "a refused set sends no request");
     assert_no_secrets(&all, &[]);
 }
 

@@ -1,6 +1,7 @@
 //! Word error rate of an OpenAI-compatible transcription engine (T-140; spec 007
-//! FR-047, SC-004, research R23, decisions #185, #186). Owner-run: the gate and CI
-//! compile and lint this example, never run it.
+//! FR-047, SC-004, research R23, decisions #185, #186). The real measurement is
+//! owner-run. The gate and CI compile and lint this example, and run it only against
+//! a loopback server with fake data, for the output invariant (`tests/wer_example.rs`).
 //!
 //! Scoring is `voicen_core::wer` (one computation); WAV goes through
 //! `test_support::realtime::read_wav` and `AudioBuffer::from_frames`; each item is
