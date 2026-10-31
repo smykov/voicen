@@ -610,6 +610,29 @@ async fn cross_origin_302_is_refused_too() {
     assert_eq!(reached.len(), 0, "a request reached the other origin");
 }
 
+#[tokio::test]
+async fn cross_origin_301_is_refused_too() {
+    // T-186 decision #222 (S13): 301 is refused like 302/307/308. Bite: an origin
+    // check skipped for 301 (the bodiless GET gets the target's 200 reply).
+    let (got, reached) = cross_origin_redirect(301).await;
+    assert_eq!(
+        got,
+        PostProcessOutcome::Skipped(SkipReason::Http { status: 301 })
+    );
+    assert_eq!(reached.len(), 0, "a request reached the other origin");
+}
+
+#[tokio::test]
+async fn cross_origin_303_is_refused_too() {
+    // As the 301 case, for 303. Bite: an origin check skipped for 303.
+    let (got, reached) = cross_origin_redirect(303).await;
+    assert_eq!(
+        got,
+        PostProcessOutcome::Skipped(SkipReason::Http { status: 303 })
+    );
+    assert_eq!(reached.len(), 0, "a request reached the other origin");
+}
+
 // ---- off or not set up: no key read, no request ---------------------------------
 
 #[tokio::test]
