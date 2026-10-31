@@ -7,6 +7,11 @@
 #   "cannot run". Then the real repository must pass (exit 0): that case is red until T-025's fork
 #   and pin land.
 #
+# Contract change (T-156, decisions #197): every rmdir line of the fork and of installer-hooks.nsh
+# must be on the owned list scripts/ci/nsis-rmdir-lines.txt (see the header of nsis-fork.sh); the
+# mk helper writes the hooks file and a copy of the list into every tree. real-repo is red until
+# T-083 removes the hooks' RMDir /r (installer-hooks.nsh).
+#
 # Contract change (T-093, P-020, as T-092/T-038 did for their guards): the installed version is
 # the "version" of <root>/node_modules/@tauri-apps/cli/package.json (the manifest pnpm wrote from
 # the lockfile it read; its "name" must be "@tauri-apps/cli", its version an exact X.Y.Z), read
@@ -55,8 +60,16 @@ mk() {
       for i in $(seq 1 30); do printf '; filler %s\n' "$i"; done
       printf '; upstream: tauri-cli 9.9.9 %s\n' "$up"
       printf 'Function PageLeaveReinstall\nFunctionEnd\n'
+      printf '%s\n' '  RMDir /REBOOTOK "$INSTDIR\\{{this}}"' '  RMDir "$INSTDIR"' '      RMDir "$SMPROGRAMS\$AppStartMenuFolder"'
     } > "$d/src-tauri/windows/installer.nsi"
   fi
+  # The hooks file and the owned rmdir list (T-156): the list is the repository's own, the hooks
+  # file holds the two lines the list owns for it.
+  printf '%s\n' 'Function un.VoicenRemoveEntry' '    RMDir "$R0"' 'FunctionEnd' \
+    'Function un.VoicenPostUninstall' '      RMDir "$LOCALAPPDATA\Voicen"' 'FunctionEnd' \
+    > "$d/src-tauri/windows/installer-hooks.nsh"
+  mkdir -p "$d/scripts/ci"
+  cp "$root/scripts/ci/nsis-rmdir-lines.txt" "$d/scripts/ci/nsis-rmdir-lines.txt"
   local tline=""
   [ "$tpl" = - ] || tline="\"template\": \"$tpl\","
   cat > "$d/src-tauri/tauri.conf.json" <<EOF
@@ -192,6 +205,7 @@ mk ok-other-version "; upstream: tauri-cli 2.13.0 $up" 2.13.0 2.13.0 2.13.0
 check ok-other-version 0 "ok:" "2.13.0"
 mk ok-crlf "$H" 2.12.1 2.12.1 2.12.1
 sed -i 's/$/\r/' "$tmp/ok-crlf/src-tauri/windows/installer.nsi" "$tmp/ok-crlf/pnpm-lock.yaml" \
+  "$tmp/ok-crlf/src-tauri/windows/installer-hooks.nsh" "$tmp/ok-crlf/scripts/ci/nsis-rmdir-lines.txt" \
   "$tmp/ok-crlf/node_modules/@tauri-apps/cli/package.json"
 check ok-crlf 0 "ok:"
 mk ok-lock-quoted "$H" 2.12.1 "'2.12.1'" "2.12.1(decoy@1.0.0)"
@@ -279,6 +293,53 @@ mk v-template-unset "$H" 2.12.1 2.12.1 2.12.1 -
 check v-template-unset 1 "bundle.windows.nsis.template is not set"
 mk v-template-other "$H" 2.12.1 2.12.1 2.12.1 installer.nsi
 check v-template-other 1 "template is \"installer.nsi\""
+
+# ---- rmdir lines (T-156, decisions #197): the owned list scripts/ci/nsis-rmdir-lines.txt ---------
+F=src-tauri/windows/installer.nsi
+K=src-tauri/windows/installer-hooks.nsh
+# rmdir_case <case> <file> <line> <needle>...: a good tree plus <line> appended to <file>; exit 1.
+rmdir_case() {
+  local c="$1" f="$2" line="$3"
+  shift 3
+  mk "$c" "$H" 2.12.1 2.12.1 2.12.1
+  printf '%s\n' "$line" >> "$tmp/$c/$f"
+  check "$c" 1 "rmdir line not on the owned list" "$@"
+}
+mk ok-hooks-without-rmdir "$H" 2.12.1 2.12.1 2.12.1
+printf 'Function un.X\nFunctionEnd\n' > "$tmp/ok-hooks-without-rmdir/$K"
+check ok-hooks-without-rmdir 0 "ok:"
+rmdir_case v-rmdir-fork-recursive "$F" '  RMDir /r "$INSTDIR"' "$F:" '/r "$INSTDIR"'
+rmdir_case v-rmdir-fork-lowercase "$F" '  rmdir /r "$INSTDIR"' "$F:"
+rmdir_case v-rmdir-fork-mixed-case "$F" '  RmDir /R "$INSTDIR"' "$F:"
+rmdir_case v-rmdir-fork-reboot-r "$F" '  RMDir /REBOOTOK /r "$INSTDIR"' "$F:" '/REBOOTOK /r'
+rmdir_case v-rmdir-fork-other-indent "$F" 'RMDir "$INSTDIR"' "$F:"
+rmdir_case v-rmdir-fork-trailing-blank "$F" '  RMDir "$INSTDIR" ' "$F:"
+# A prefix of a listed line is not the line (whole-line match): '  RMDir' alone, then its target on a continuation.
+rmdir_case v-rmdir-fork-prefix-of-listed "$F" '  RMDir' "$F:"
+rmdir_case v-rmdir-fork-prefix-of-listed-2 "$F" '  RMDir "$INSTDIR' "$F:"
+rmdir_case v-rmdir-fork-comment "$F" '; never RMDir /r $INSTDIR' "$F:" 'never RMDir'
+rmdir_case v-rmdir-hooks-recursive "$K" '      RMDir /r "$LOCALAPPDATA\Voicen"' "$K:" '/r "$LOCALAPPDATA'
+rmdir_case v-rmdir-hooks-comment "$K" '; RMDir is not used here' "$K:"
+rmdir_case v-rmdir-hooks-other-root "$K" '    RMDir "$INSTDIR"' "$K:"
+# The prefix bites: a line owned for the hooks is not owned for the fork, and the other way round.
+rmdir_case v-rmdir-hooks-line-in-fork "$F" '    RMDir "$R0"' "$F:"
+rmdir_case v-rmdir-fork-line-in-hooks "$K" '  RMDir "$INSTDIR"' "$K:"
+# Both files at once: both are listed.
+mk v-rmdir-both "$H" 2.12.1 2.12.1 2.12.1
+printf '%s\n' '  RMDir /r "$INSTDIR"' >> "$tmp/v-rmdir-both/$F"
+printf '%s\n' '      RMDir /r "$LOCALAPPDATA\Voicen"' >> "$tmp/v-rmdir-both/$K"
+check v-rmdir-both 1 "$F:" "$K:"
+# The hooks file is missing: a listed violation, as for the fork.
+mk v-hooks-missing "$H" 2.12.1 2.12.1 2.12.1
+rm "$tmp/v-hooks-missing/$K"
+check v-hooks-missing 1 "$K: missing"
+# The list is missing or empty: cannot run (missing) / every rmdir line refused (empty).
+mk c-rmdir-list-missing "$H" 2.12.1 2.12.1 2.12.1
+rm "$tmp/c-rmdir-list-missing/scripts/ci/nsis-rmdir-lines.txt"
+check c-rmdir-list-missing 3 "cannot run" "nsis-rmdir-lines.txt"
+mk v-rmdir-list-empty "$H" 2.12.1 2.12.1 2.12.1
+: > "$tmp/v-rmdir-list-empty/scripts/ci/nsis-rmdir-lines.txt"
+check v-rmdir-list-empty 1 "rmdir line not on the owned list"
 
 # ---- cannot run ---------------------------------------------------------------------------------------
 # No installed CLI (pnpm install not run): the guard cannot tell what builds the installer.

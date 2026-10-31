@@ -20,12 +20,23 @@
 #   - The header version, the package.json version and the installed version are equal.
 #   pnpm-lock.yaml is not read (T-093, P-020): an own reading of YAML decides on a model of it;
 #   the lockfile specifier equals package.json by pnpm's own --frozen-lockfile refusal.
+#   - rmdir lines (T-156, FR-041, decisions #197): every line of the fork and of
+#     <root>/src-tauri/windows/installer-hooks.nsh that contains the case-insensitive raw token
+#     'rmdir', comments included, must, CR stripped and prefixed with '<repo-relative file>:', be
+#     byte-identical to a line of the owned list <root>/scripts/ci/nsis-rmdir-lines.txt (CR in the
+#     list tolerated). The list owns five lines, none with /r, so no listed line is a recursive
+#     delete, which follows a junction (NSIS 3.11 util.c myDelete). Any other rmdir line is a
+#     violation (fail-closed); a listed line absent from its file is not. No reading of NSIS flags
+#     or argument order. A missing hooks file is a violation, as for the fork.
+#     Not caught: a deletion through a header included from outside these two files, through
+#     ExecWait cmd /c rd, or through a token split with !define; a walker that is wrong but keeps
+#     the listed lines (the Windows CI uninstall steps W4 to W6 prove that).
 #   Every violation is listed (one line each, naming the file and the values), not only the first.
 #
 # Usage: scripts/ci/nsis-fork.sh [root]   (root: the repository)
-# Exit 0: ok. Exit 1: violation(s) listed. Exit 3: cannot run (package.json, tauri.conf.json or
-# the installed node_modules/@tauri-apps/cli/package.json missing, unreadable or not valid JSON,
-# python3 missing); never reported as a pass.
+# Exit 0: ok. Exit 1: violation(s) listed. Exit 3: cannot run (package.json, tauri.conf.json,
+# scripts/ci/nsis-rmdir-lines.txt or the installed node_modules/@tauri-apps/cli/package.json
+# missing, unreadable or not valid JSON, python3 missing); never reported as a pass.
 # Host bash, python3 (stdlib json only).
 set -uo pipefail
 root="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
@@ -34,7 +45,9 @@ cannot_run() { echo "nsis-fork: cannot run: $1" >&2; exit 3; }
 fork="src-tauri/windows/installer.nsi"
 conf="src-tauri/tauri.conf.json"
 pkg="package.json"
-for f in "$pkg" "$conf"; do
+hooks="src-tauri/windows/installer-hooks.nsh"
+rmlist="scripts/ci/nsis-rmdir-lines.txt"
+for f in "$pkg" "$conf" "$rmlist"; do
   [ -f "$root/$f" ] && [ -r "$root/$f" ] || cannot_run "$root/$f not found or not readable"
 done
 command -v python3 > /dev/null || cannot_run "python3 not found"
@@ -124,6 +137,21 @@ elif [ -n "$header" ] && [ -n "$iver" ] && [ "$header" != "$iver" ]; then
   add "versions differ: $fork header tauri-cli $header, installed $im $iver"
 fi
 
+# ---- rmdir lines of the fork and the hooks (T-156) ---------------------------------------------------
+owned="$(tr -d '\r' < "$root/$rmlist")" || cannot_run "$root/$rmlist could not be read"
+for f in "$fork" "$hooks"; do
+  if [ ! -f "$root/$f" ]; then
+    [ "$f" = "$fork" ] || add "$f: missing (the hooks file whose rmdir lines the list $rmlist owns)"
+    continue
+  fi
+  while IFS= read -r hit || [ -n "$hit" ]; do
+    n="${hit%%:*}"
+    text="${hit#*:}"
+    grep -qxF -- "$f:$text" <<<"$owned" ||
+      add "$f:$n: rmdir line not on the owned list $rmlist (a recursive delete follows junctions, FR-041): $text"
+  done < <(tr -d '\r' < "$root/$f" | grep -n -i -F 'rmdir')
+done
+
 if [ -n "$found" ]; then
   {
     echo "nsis-fork: FAIL: the NSIS template fork must match the exactly pinned tauri-cli (decisions #76):"
@@ -131,4 +159,4 @@ if [ -n "$found" ]; then
   } >&2
   exit 1
 fi
-echo "nsis-fork: ok: $fork is the fork of tauri-cli $header, pinned exactly in $pkg and installed ($im)"
+echo "nsis-fork: ok: $fork is the fork of tauri-cli $header, pinned exactly in $pkg and installed ($im); every rmdir line of the fork and the hooks is on $rmlist"
