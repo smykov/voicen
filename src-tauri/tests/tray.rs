@@ -36,7 +36,7 @@ use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread::{self, ThreadId};
 use std::time::{Duration, Instant};
 
-use tauri::menu::{MenuEvent, MenuId};
+use tauri::menu::{ContextMenu, MenuEvent, MenuId};
 use tauri::test::{mock_builder, mock_context, noop_assets, MockRuntime};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconEvent, TrayIconId};
 use tauri::{App, AppHandle, Context, Manager, PhysicalPosition, Rect, Runtime};
@@ -61,20 +61,20 @@ use voicen_core::settings::EngineKind;
 use voicen_core::test_support::local_models::FakeDisk;
 use voicen_core::test_support::TempDir;
 use voicen_core::timeouts::Timeouts;
-use voicen_core::tray::{self as table, TrayAction};
+use voicen_core::tray::{self as table, TrayAction, TrayRow};
 use voicen_core::vad::{EnergyDetector, SpeechDetector, SpeechGate};
 use voicen_lib::logs_folder::{self, FolderOpener};
 use voicen_lib::settings_ipc::load_settings;
 use voicen_lib::settings_window::{self, OpenTarget, LABEL};
-use voicen_lib::tray::{self, Applied, TrayPart, TRAY_ID};
+use voicen_lib::tray::{self, Applied, AppliedRow, TrayPart, TRAY_ID};
 use voicen_lib::win::shell_open::ShellOpener;
 use windows::core::{w, BOOL};
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::Shell::{Shell_NotifyIconW, NIM_DELETE, NOTIFYICONDATAW};
 use windows::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, EnumThreadWindows, GetClassNameW, PeekMessageW, RegisterWindowMessageW,
-    SendMessageW, TranslateMessage, MSG, PM_REMOVE,
+    DispatchMessageW, EnumThreadWindows, GetClassNameW, GetMenuItemID, PeekMessageW,
+    RegisterWindowMessageW, SendMessageW, TranslateMessage, HMENU, MSG, PM_REMOVE, WM_COMMAND,
 };
 
 /// How long a test waits for an asynchronous change (Windows-sized, F-005).
@@ -258,24 +258,55 @@ fn expected(state: TrayState, retry_available: bool, lang: UiLanguage) -> Applie
         lang,
         icon: table::icon(state),
         tooltip: i18n::text(lang, table::tooltip(state), &[]),
-        menu: table::menu(retry_available)
-            .into_iter()
-            .map(|a| (a.as_str().to_string(), i18n::text(lang, a.label(), &[])))
-            .collect(),
+        // T-122: until T-128 the shell passes `call_recording = false`.
+        menu: applied_rows(&table::menu(retry_available, false), lang),
     }
 }
 
+/// The row-shaped read-back of core's menu rows in `lang` (T-122): leaf items carry
+/// their id (`TrayAction::as_str`), the submenu only its text.
+fn applied_rows(rows: &[TrayRow], lang: UiLanguage) -> Vec<AppliedRow> {
+    rows.iter()
+        .map(|row| match row {
+            TrayRow::Item { action, enabled } => AppliedRow::Item {
+                id: action.as_str().to_string(),
+                text: i18n::text(lang, action.label(), &[]),
+                enabled: *enabled,
+            },
+            TrayRow::Check {
+                action,
+                checked,
+                enabled,
+            } => AppliedRow::Check {
+                id: action.as_str().to_string(),
+                text: i18n::text(lang, action.label(), &[]),
+                checked: *checked,
+                enabled: *enabled,
+            },
+            TrayRow::Submenu { label, rows } => AppliedRow::Submenu {
+                text: i18n::text(lang, *label, &[]),
+                rows: applied_rows(rows, lang),
+            },
+        })
+        .collect()
+}
+
 /// Every tray state, by a wildcard-free match.
-fn all_states() -> [TrayState; 4] {
+fn all_states() -> [TrayState; 5] {
     let all = [
         TrayState::Idle,
         TrayState::Recording,
+        TrayState::CallRecording,
         TrayState::Error,
         TrayState::HotkeyError,
     ];
     for state in all {
         match state {
-            TrayState::Idle | TrayState::Recording | TrayState::Error | TrayState::HotkeyError => {}
+            TrayState::Idle
+            | TrayState::Recording
+            | TrayState::CallRecording
+            | TrayState::Error
+            | TrayState::HotkeyError => {}
         }
     }
     all
@@ -765,6 +796,46 @@ fn an_unknown_menu_id_does_nothing() {
     );
 }
 
+#[test]
+fn the_call_menu_ids_do_nothing_until_the_call_session_is_wired() {
+    // T-122 D1 (decision #197): the new Call / Calls items are explicit no-op arms of
+    // `on_menu_event` until T-128 wires them. Clicking each of the three ids opens no
+    // window, calls no opener, leaves the tray as it was and the app running (an
+    // exit would panic in the mock). Bite: a catch-all arm that opens settings, an
+    // arm that opens the logs folder, `Exit` reached for a new id, a new id
+    // unmapped by `from_id` (then it is the unknown-id no-op, so this passes) is
+    // caught by core's id tests, not here.
+    let _serial = serial();
+    let rig = rig(None);
+    let dir = TempDir::new();
+    let opener = Arc::new(FakeOpener::default());
+    logs_folder::install(rig.handle(), dir.path().join("logs"), opener.clone());
+
+    for action in [
+        TrayAction::CallRecord,
+        TrayAction::CallStop,
+        TrayAction::OpenCalls,
+    ] {
+        tray::on_menu_event(rig.handle(), menu_item(action));
+    }
+
+    assert!(
+        holds_for_a_while(|| rig.labels().is_empty()),
+        "a call item opened a window: {:?}",
+        rig.labels()
+    );
+    assert!(
+        opener.calls().is_empty(),
+        "a call item opened the logs folder: {:?}",
+        opener.calls()
+    );
+    assert_eq!(
+        rig.applied(),
+        Some(expected(TrayState::Idle, false, UiLanguage::En)),
+        "a call item changed the tray (the CallRecord rebuild must render the same table)"
+    );
+}
+
 // ---- T-006: the applied record follows only setters that succeeded --------------
 
 /// Collects the `tray_icon_app` windows (tray-icon's window class) of the enumerated
@@ -891,6 +962,80 @@ fn tray_windows() -> Vec<isize> {
         )
     };
     windows
+}
+
+/// The live "Record" check item: `live_menu` > items > submenu > items > check item.
+fn live_record_item(
+    rig: &Rig,
+) -> (
+    tauri::menu::Submenu<MockRuntime>,
+    tauri::menu::CheckMenuItem<MockRuntime>,
+) {
+    let menu = tray::live_menu(rig.handle()).expect("the menu last set on the tray icon");
+    for kind in menu.items().expect("menu items") {
+        if let Some(submenu) = kind.as_submenu() {
+            for inner in submenu.items().expect("submenu items") {
+                if let Some(check) = inner.as_check_menuitem() {
+                    return (submenu.clone(), check.clone());
+                }
+            }
+        }
+    }
+    panic!("no Call submenu with a check item in the live menu");
+}
+
+#[test]
+fn a_click_on_record_with_nothing_recording_leaves_the_mark_off() {
+    // T-122 D6 (decision #223): muda flips a check item's native mark on WM_COMMAND
+    // before it sends the MenuEvent. With nothing recording, the `CallRecord` arm is a
+    // no-op for the session but forces a menu rebuild from the table, so "Record"
+    // never stays checked. Order: premise unchecked; flip it for real with WM_COMMAND
+    // (the mock drops the resulting MenuEvent, so the handler has not run) and check
+    // the flip happened; then run the handler and read the live item again.
+    // Bite: no forced rebuild in the arm (the same item stays checked; `Applied`
+    // alone would not show it: it is a value record written only by a rebuild), a
+    // rebuild that keeps the old Menu in `live_menu`, a mark that is not taken from the
+    // table. If the WM_COMMAND send proves impossible on the runner, the fallback is
+    // `set_checked(true)` on the live item (to be said under `## Tests`).
+    let _serial = serial();
+    let rig = rig(None);
+    let (submenu, record) = live_record_item(&rig);
+    assert!(
+        !record.is_checked().expect("is_checked"),
+        "premise: unchecked"
+    );
+
+    let hmenu = submenu.hpopupmenu().expect("the submenu's HMENU");
+    // SAFETY: the HMENU is valid as long as `submenu` is; position 0 is Record.
+    let command_id = unsafe { GetMenuItemID(HMENU(hmenu as *mut std::ffi::c_void), 0) };
+    let windows = tray_windows();
+    let hwnd = *windows.first().expect("runner precondition: a tray window");
+    // SAFETY: a window of this thread; muda's subclass procedure runs inline.
+    let _ = unsafe {
+        SendMessageW(
+            HWND(hwnd as *mut std::ffi::c_void),
+            WM_COMMAND,
+            Some(WPARAM(command_id as usize)),
+            Some(LPARAM(0)),
+        )
+    };
+    assert!(
+        record.is_checked().expect("is_checked"),
+        "premise: muda's click flip did not mark Record"
+    );
+
+    tray::on_menu_event(rig.handle(), menu_item(TrayAction::CallRecord));
+
+    let (_, after) = live_record_item(&rig);
+    assert!(
+        !after.is_checked().expect("is_checked"),
+        "Record stays checked with nothing recording"
+    );
+    assert_eq!(
+        rig.applied(),
+        Some(expected(TrayState::Idle, false, UiLanguage::En)),
+        "the rebuilt menu differs from the table"
+    );
 }
 
 #[test]

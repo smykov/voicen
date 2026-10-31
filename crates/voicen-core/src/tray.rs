@@ -124,10 +124,11 @@ mod tests {
 
     /// Every tray state, by a wildcard-free match: a new variant fails to compile
     /// here until it is added to the tables below.
-    fn all_states() -> [TrayState; 4] {
+    fn all_states() -> [TrayState; 5] {
         let all = [
             TrayState::Idle,
             TrayState::Recording,
+            TrayState::CallRecording,
             TrayState::Error,
             TrayState::HotkeyError,
         ];
@@ -135,6 +136,7 @@ mod tests {
             match state {
                 TrayState::Idle
                 | TrayState::Recording
+                | TrayState::CallRecording
                 | TrayState::Error
                 | TrayState::HotkeyError => {}
             }
@@ -143,15 +145,23 @@ mod tests {
     }
 
     /// Every menu action, by a wildcard-free match (as above).
-    fn all_actions() -> [TrayAction; 3] {
+    fn all_actions() -> [TrayAction; 6] {
         let all = [
+            TrayAction::CallRecord,
+            TrayAction::CallStop,
+            TrayAction::OpenCalls,
             TrayAction::OpenSettings,
             TrayAction::OpenLogs,
             TrayAction::Exit,
         ];
         for action in all {
             match action {
-                TrayAction::OpenSettings | TrayAction::OpenLogs | TrayAction::Exit => {}
+                TrayAction::CallRecord
+                | TrayAction::CallStop
+                | TrayAction::OpenCalls
+                | TrayAction::OpenSettings
+                | TrayAction::OpenLogs
+                | TrayAction::Exit => {}
             }
         }
         all
@@ -165,26 +175,61 @@ mod tests {
         }
     }
 
+    /// The expected menu of D2/D3 (decision #197), spelled out from the spec, not
+    /// derived from the code under test.
+    fn want_menu(call_recording: bool) -> Vec<TrayRow> {
+        vec![
+            TrayRow::Submenu {
+                label: i18n::TRAY_CALL,
+                rows: vec![
+                    TrayRow::Check {
+                        action: TrayAction::CallRecord,
+                        checked: call_recording,
+                        enabled: true,
+                    },
+                    TrayRow::Item {
+                        action: TrayAction::CallStop,
+                        enabled: call_recording,
+                    },
+                ],
+            },
+            TrayRow::Item {
+                action: TrayAction::OpenCalls,
+                enabled: true,
+            },
+            TrayRow::Item {
+                action: TrayAction::OpenSettings,
+                enabled: true,
+            },
+            TrayRow::Item {
+                action: TrayAction::OpenLogs,
+                enabled: true,
+            },
+            TrayRow::Item {
+                action: TrayAction::Exit,
+                enabled: true,
+            },
+        ]
+    }
+
     #[test]
-    fn menu_is_settings_open_logs_then_exit_whether_or_not_a_retry_is_available() {
-        // spec 001 FR-001 / T-052 analysis design 3, T-071: the menu is [Settings,
-        // Open logs folder, Exit], for both values of retry_available (T-007 changes
-        // the `true` row: Retry while the pending slot holds a recording). Bite: the
-        // Open logs item missing from either row (the variant exists but is never
-        // shown), Exit missing (the process could never be ended once prevent_exit
-        // is in), the order changed (Exit no longer last), an item for a later task
-        // already present, or the two rows differing now.
-        let want = vec![
-            TrayAction::OpenSettings,
-            TrayAction::OpenLogs,
-            TrayAction::Exit,
-        ];
-        assert_eq!(menu(false), want, "retry_available = false");
-        assert_eq!(
-            menu(true),
-            want,
-            "retry_available = true (T-007 adds Retry here)"
-        );
+    fn menu_is_call_submenu_calls_settings_open_logs_then_exit_for_every_input_pair() {
+        // Spec 007 FR-003, decision #197 D2/D3: Submenu "Call" {Record = Check,
+        // checked iff call_recording; Stop = Item, enabled iff call_recording},
+        // "Calls", Settings, Open logs folder, Exit last; for both values of
+        // retry_available (T-007 changes the `true` rows) and of call_recording.
+        // Bite: Record's mark inverted or constant, Stop always enabled, the order
+        // changed (Exit no longer last), a row missing, Record outside the submenu,
+        // the call input ignored.
+        for retry in [false, true] {
+            for call in [false, true] {
+                assert_eq!(
+                    menu(retry, call),
+                    want_menu(call),
+                    "retry_available = {retry}, call_recording = {call}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -213,6 +258,10 @@ mod tests {
             "logs",
             "retry",
             "history",
+            "call",
+            "record",
+            "stop",
+            "CALLS",
             " exit",
         ] {
             assert_eq!(
@@ -240,6 +289,9 @@ mod tests {
         // test checks both catalogs. Bite: a wrong id (`tray.open_settings`), the
         // two items swapped, or an id built outside the `messages!` list.
         let table = [
+            (TrayAction::CallRecord, "tray.call.record"),
+            (TrayAction::CallStop, "tray.call.stop"),
+            (TrayAction::OpenCalls, "tray.calls"),
             (TrayAction::OpenSettings, "tray.settings"),
             (TrayAction::OpenLogs, "tray.open_logs"),
             (TrayAction::Exit, "tray.exit"),
@@ -264,6 +316,7 @@ mod tests {
         let table = [
             (TrayState::Idle, "tray.tooltip.idle"),
             (TrayState::Recording, "tray.tooltip.recording"),
+            (TrayState::CallRecording, "tray.tooltip.call_recording"),
             (TrayState::Error, "tray.tooltip.error"),
             (TrayState::HotkeyError, "tray.tooltip.hotkey_error"),
         ];
@@ -285,7 +338,16 @@ mod tests {
         // catalog (rendered as the id itself, or ru falling back to the English
         // text), or a text that is not the contract's. "Voicen" is the product name
         // in both languages (T-005).
-        let rows: [(MessageId, &str, &str); 7] = [
+        let rows: [(MessageId, &str, &str); 12] = [
+            (i18n::TRAY_CALL, "Call", "Звонок"),
+            (TrayAction::CallRecord.label(), "Record", "Записать"),
+            (TrayAction::CallStop.label(), "Stop", "Остановить"),
+            (TrayAction::OpenCalls.label(), "Calls", "Звонки"),
+            (
+                tooltip(TrayState::CallRecording),
+                "Voicen — recording a call",
+                "Voicen — запись звонка",
+            ),
             (TrayAction::OpenSettings.label(), "Settings", "Настройки"),
             (
                 TrayAction::OpenLogs.label(),
@@ -325,12 +387,89 @@ mod tests {
         let table = [
             (TrayState::Idle, TrayIconKind::Idle),
             (TrayState::Recording, TrayIconKind::Recording),
+            (TrayState::CallRecording, TrayIconKind::Recording),
             (TrayState::Error, TrayIconKind::Error),
             (TrayState::HotkeyError, TrayIconKind::HotkeyError),
         ];
         assert_eq!(table.map(|(s, _)| s), all_states());
         for (state, expected) in table {
             assert_eq!(icon(state), expected, "{state:?}");
+        }
+    }
+
+    #[test]
+    fn menu_submenu_label_is_the_call_id_and_rows_are_in_message_ids() {
+        // contracts/ipc.md `tray.call`: the submenu's text id is declared; every
+        // leaf action of the table is declared and has the id `as_str` maps back.
+        // Bite: a submenu with another label, an undeclared id.
+        for row in menu(false, false) {
+            if let TrayRow::Submenu { label, .. } = row {
+                assert_eq!(id_str(label), "tray.call");
+                assert!(MESSAGE_IDS.contains(&label));
+            }
+        }
+    }
+
+    #[test]
+    fn shown_follows_fr006_precedence_over_every_dictation_and_call_state() {
+        // Spec 007 FR-006: dictation HotkeyError > dictation Recording >
+        // CallRecording > Error > Idle. All 4 x 2 values spelled out. Bite:
+        // CallRecording above dictation Recording or HotkeyError, below Error, the
+        // flag ignored, a dictation state ignored.
+        use TrayState::{
+            CallRecording as C, Error as E, HotkeyError as H, Idle as I, Recording as R,
+        };
+        let table = [
+            (I, false, I),
+            (I, true, C),
+            (R, false, R),
+            (R, true, R),
+            (E, false, E),
+            (E, true, C),
+            (H, false, H),
+            (H, true, H),
+        ];
+        for (dictation, call, want) in table {
+            assert_eq!(
+                shown(dictation, call),
+                want,
+                "dictation {dictation:?}, call_recording {call}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_call_side_input_never_yields_hotkey_error() {
+        // Spec 007 FR-004 failure branch: a call-hotkey conflict never sets the
+        // hotkey-error state. HotkeyError is shown iff the dictation state is
+        // HotkeyError, whatever the call flag; the dictation controller's own four
+        // states are the only dictation inputs. Bite: the call flag mapped to
+        // HotkeyError, HotkeyError shown for a non-HotkeyError dictation state,
+        // HotkeyError hidden by the flag.
+        for dictation in all_states() {
+            for call in [false, true] {
+                assert_eq!(
+                    shown(dictation, call) == TrayState::HotkeyError,
+                    dictation == TrayState::HotkeyError,
+                    "dictation {dictation:?}, call_recording {call}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_dictation_side_never_shows_call_recording_without_the_call_flag() {
+        // CallRecording is shown only while the call flag is set. Bite: CallRecording
+        // returned for a dictation state with the flag off.
+        for dictation in all_states() {
+            if dictation == TrayState::CallRecording {
+                continue;
+            }
+            assert_ne!(
+                shown(dictation, false),
+                TrayState::CallRecording,
+                "{dictation:?}"
+            );
         }
     }
 }
