@@ -910,11 +910,13 @@ jobs:
           if ($blockedNew.Count -ne 1) { throw "a 3 s hold on a first launch (engine none) gave $($blockedNew.Count) new '$blockedLine' lines, expected exactly 1" }
           if ($recNew -ne 0) { throw "a blocked hold wrote $recNew 'dictation rec=' line(s)" }
           Write-Output "first launch: one blocked hold, one blocked line after $([int]$seenAt) s, no dictation rec= line, voicen.exe still running"
-      # T-025 (FR-28 v4, spec 006 FR-021..024, decisions #76), T-156 (FR-041): the five install/uninstall steps
+      # T-025 (FR-28 v4, spec 006 FR-021..024, decisions #76), T-156 (FR-041): the six install/uninstall steps
       # below come after every step that launches the app, in this order: W2 reinstall, W3
       # uninstall /S /KEEPDATA (then a silent reinstall), W4 uninstall /S (only calls\ is left,
       # the program is gone), W5 reinstall and uninstall /S /KEEPDATA /PURGECALLS (then a silent
-      # reinstall), W6 uninstall /S /PURGECALLS with two junctions planted (W6 ends the sequence:
+      # reinstall), W5b calls\ kept by a /P reinstall, a user-started uninstall /P and uninstall
+      # /S /KEEPDATA (then a silent reinstall),
+      # W6 uninstall /S /PURGECALLS with two junctions planted (W6 ends the sequence:
       # the install and $LOCALAPPDATA\Voicen are gone afterwards). Credential Manager is planted and observed only through
       # scripts/ci/credentials.ps1 (docs/decisions/windows-ci-runner.md); no step launches
       # voicen.exe, so no window predicate is involved. Raw facts only (F-003).
@@ -1257,7 +1259,7 @@ jobs:
       # W5 (T-156, FR-041, decisions #197): a silent install, then uninstall.exe /S /KEEPDATA
       # /PURGECALLS removes calls\ and keeps everything else in %LOCALAPPDATA%\Voicen
       # (ci-keep.txt, settings.json). The step plants calls\ itself. Then a silent reinstall for
-      # W6. Red on a hook that keeps calls\ under /KEEPDATA.
+      # W5b. Red on a hook that keeps calls\ under /KEEPDATA.
       - name: uninstall.exe /S /KEEPDATA /PURGECALLS removes calls\ and keeps the rest of the data folder (T-156)
         shell: pwsh
         run: |
@@ -1297,11 +1299,99 @@ jobs:
           if (Test-Path -LiteralPath $callsDir) { $bad += "/PURGECALLS: $callsDir is still present (left: $((@(Get-ChildItem -LiteralPath $callsDir -Recurse -Force -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName.Substring($dir.Length) }) | Select-Object -First 20) -join ', '))" }
           if (-not (Test-Path -LiteralPath $marker -PathType Leaf)) { $bad += "/KEEPDATA: the data marker $marker was deleted" }
           if (-not (Test-Path -LiteralPath $settings -PathType Leaf)) { $bad += "/KEEPDATA: settings.json was deleted" }
-          # Reinstall for W6, before this step's verdict.
+          # Reinstall for W5b, before this step's verdict.
           Start-Process $setup.FullName -ArgumentList '/S' -Wait
           foreach ($q in @($exe, $uninstaller, $shortcut)) { if (-not (Test-Path -LiteralPath $q -PathType Leaf)) { $bad += "after the silent reinstall: $q not found" } }
           if ($bad) { throw ($bad -join '; ') }
           Write-Output "uninstall /S /KEEPDATA /PURGECALLS: calls\ gone; settings.json and ci-keep.txt kept; silent reinstall: voicen.exe, uninstall.exe and the shortcut present"
+      # W5b (T-156, FR-041): the modes that keep calls\ with no /PURGECALLS, each with a planted
+      # calls\2026-01-01_000000\meta.json. A same-version /P reinstall (its uninstaller runs with
+      # /UPDATE /P) keeps it and the data. A user-started uninstall.exe /P keeps it and removes the
+      # other data, as W4 does for /S. uninstall.exe /S /KEEPDATA keeps it and ci-keep.txt. Then a
+      # silent reinstall for W6, which plants its own files and removes calls\ and ci-keep.txt.
+      # Added after the red run of W4 to W6, so it has no red run of its own.
+      - name: A /P reinstall, a user-started uninstall.exe /P and uninstall.exe /S /KEEPDATA all keep calls\ (T-156)
+        shell: pwsh
+        run: |
+          . ./scripts/ci/hotkey-hold.ps1
+          $dir = Join-Path $env:LOCALAPPDATA 'Voicen'
+          $exe = Join-Path $dir 'voicen.exe'
+          $uninstaller = Join-Path $dir 'uninstall.exe'
+          $settings = Join-Path $dir 'settings.json'
+          $marker = Join-Path $dir 'ci-keep.txt'
+          $meta = Join-Path $dir 'calls\2026-01-01_000000\meta.json'
+          $shortcut = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Voicen.lnk'
+          $uninstKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Voicen'
+          function Get-DirNames { @(Get-ChildItem -LiteralPath $dir -Force -ErrorAction SilentlyContinue | ForEach-Object { $_.Name }) }
+          function Get-UninstallerCopies { @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path.StartsWith([IO.Path]::GetTempPath(), [StringComparison]::OrdinalIgnoreCase) -and $_.Path -like '*\~nsu*' }) }
+          function Set-Plant([string]$p, [string]$text) { New-Item -ItemType Directory -Force -Path (Split-Path -Parent $p) | Out-Null; Set-Content -LiteralPath $p -Value $text -NoNewline; if (-not (Test-Path -LiteralPath $p -PathType Leaf)) { throw "premise: $p was not written" } }
+          $setup = Get-ChildItem target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
+          $bad = @()
+          # The installed state W5 leaves.
+          Stop-AllVoicen
+          foreach ($q in @($exe, $uninstaller, $shortcut)) { if (-not (Test-Path -LiteralPath $q -PathType Leaf)) { throw "premise: $q not found before the /P reinstall" } }
+          if (-not (Test-Path -LiteralPath $uninstKey)) { throw "premise: the uninstall key $uninstKey not found before the /P reinstall" }
+          if (-not (Test-Path -LiteralPath $settings -PathType Leaf)) { Set-Plant $settings '{}' }
+          Set-Plant $marker "ci-keep-calls $env:VOICEN_COMMIT"
+          Set-Plant $meta '{"ci":"planted by the keep-calls step"}'
+          Write-Output "premise: installed, settings.json, ci-keep.txt and planted $meta in place"
+          # Update: bounded as in W2, because a question here blocks the reinstall.
+          $p = Start-Process $setup.FullName -ArgumentList '/P' -PassThru
+          $null = $p.Handle
+          if (-not $p.WaitForExit(120000)) {
+            Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+            Get-Process -Name uninstall -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+            throw "the /P reinstall did not finish within 120 s: a question blocked it"
+          }
+          Stop-AllVoicen
+          if ($p.ExitCode -ne 0) { $bad += "the /P reinstall exited with $($p.ExitCode), expected 0" }
+          if (-not (Test-Path -LiteralPath $meta -PathType Leaf)) { $bad += "update: the planted $meta did not survive the /P reinstall (/UPDATE /P must keep calls\)" }
+          if (-not (Test-Path -LiteralPath $marker -PathType Leaf)) { $bad += "update: the data marker $marker did not survive the /P reinstall" }
+          foreach ($q in @($exe, $uninstaller, $shortcut)) { if (-not (Test-Path -LiteralPath $q -PathType Leaf)) { throw "premise: $q not found before the user-started uninstall.exe /P; $($bad -join '; ')" } }
+          # A user-started /P: the same end state as W4's /S. The wait must not end before the data
+          # is gone, or a kept ci-keep.txt would be read too early.
+          if (-not (Test-Path -LiteralPath $meta -PathType Leaf)) { Set-Plant $meta '{"ci":"planted again by the keep-calls step"}' }
+          Set-Plant $marker "ci-keep-calls $env:VOICEN_COMMIT"
+          if (-not (Test-Path -LiteralPath $settings -PathType Leaf)) { Set-Plant $settings '{}' }
+          $p = Start-Process -FilePath $uninstaller -ArgumentList '/P' -PassThru
+          $done = $false
+          $clock = [Diagnostics.Stopwatch]::StartNew()
+          while ($clock.Elapsed.TotalSeconds -lt 60 -and -not $done) {
+            Start-Sleep -Seconds 1
+            $names = Get-DirNames
+            $done = (($names.Count -eq 0) -or (($names -join ',') -ceq 'calls')) -and -not (Test-Path -LiteralPath $uninstKey) -and -not (Test-Path -LiteralPath $shortcut) -and ((Get-UninstallerCopies).Count -eq 0)
+          }
+          while ($clock.Elapsed.TotalSeconds -lt 60 -and (Get-UninstallerCopies).Count -gt 0) { Start-Sleep -Seconds 1 }
+          Start-Sleep -Seconds 3
+          if (-not $done) { $bad += "uninstall.exe /P did not reach its end state within 60 s (left in ${dir}: $((Get-DirNames) -join ', '), uninstall key present: $(Test-Path -LiteralPath $uninstKey), shortcut present: $(Test-Path -LiteralPath $shortcut), uninstaller copies running: $((Get-UninstallerCopies).Count))" }
+          if (-not (Test-Path -LiteralPath $meta -PathType Leaf)) { $bad += "/P: the planted $meta did not survive a user-started uninstall.exe /P (calls\ must be kept)" }
+          if (Test-Path -LiteralPath $marker) { $bad += "/P: the data marker $marker is still present (a user-started /P removes the data)" }
+          if (Test-Path -LiteralPath $settings) { $bad += "/P: settings.json is still present (a user-started /P removes the data)" }
+          # A question left open would hold the copy and fail the next install for the wrong reason.
+          Get-UninstallerCopies | Stop-Process -Force -ErrorAction SilentlyContinue
+          # /S /KEEPDATA, over the calls-only folder /P leaves.
+          Start-Process $setup.FullName -ArgumentList '/S' -Wait
+          Stop-AllVoicen
+          foreach ($q in @($exe, $uninstaller)) { if (-not (Test-Path -LiteralPath $q -PathType Leaf)) { throw "premise: $q not found after the silent install; $($bad -join '; ')" } }
+          if (-not (Test-Path -LiteralPath $meta -PathType Leaf)) { Set-Plant $meta '{"ci":"planted again by the keep-calls step"}' }
+          Set-Plant $marker "ci-keep-calls $env:VOICEN_COMMIT"
+          $p = Start-Process -FilePath $uninstaller -ArgumentList '/S', '/KEEPDATA' -PassThru
+          $done = $false
+          $clock = [Diagnostics.Stopwatch]::StartNew()
+          while ($clock.Elapsed.TotalSeconds -lt 60 -and -not $done) {
+            Start-Sleep -Seconds 1
+            $done = -not (Test-Path -LiteralPath $exe) -and -not (Test-Path -LiteralPath $uninstaller) -and -not (Test-Path -LiteralPath $uninstKey) -and ((Get-UninstallerCopies).Count -eq 0)
+          }
+          while ($clock.Elapsed.TotalSeconds -lt 60 -and (Get-UninstallerCopies).Count -gt 0) { Start-Sleep -Seconds 1 }
+          Start-Sleep -Seconds 3
+          if (-not $done) { $bad += "uninstall.exe /S /KEEPDATA did not reach its end state within 60 s (voicen.exe present: $(Test-Path -LiteralPath $exe), uninstall.exe present: $(Test-Path -LiteralPath $uninstaller), uninstall key present: $(Test-Path -LiteralPath $uninstKey), uninstaller copies running: $((Get-UninstallerCopies).Count))" }
+          if (-not (Test-Path -LiteralPath $meta -PathType Leaf)) { $bad += "/KEEPDATA: the planted $meta did not survive uninstall.exe /S /KEEPDATA" }
+          if (-not (Test-Path -LiteralPath $marker -PathType Leaf)) { $bad += "/KEEPDATA: the data marker $marker was deleted" }
+          # Reinstall for W6, before this step's verdict.
+          Start-Process $setup.FullName -ArgumentList '/S' -Wait
+          foreach ($q in @($exe, $uninstaller, $shortcut)) { if (-not (Test-Path -LiteralPath $q -PathType Leaf)) { $bad += "after the silent reinstall: $q not found" } }
+          if ($bad) { throw ($bad -join '; ') }
+          Write-Output "calls\ kept by the /P reinstall, by a user-started uninstall.exe /P (data gone) and by uninstall.exe /S /KEEPDATA; silent reinstall: voicen.exe, uninstall.exe and the shortcut present"
       # W6 (T-156, FR-041, decisions #197): uninstall.exe /S /PURGECALLS with two junctions planted
       # removes calls\ and the rest of %LOCALAPPDATA%\Voicen and never goes through a reparse point:
       # the junction under calls\2026-01-01_000000 and the one at the top level lose the link only,
