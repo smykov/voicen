@@ -23,6 +23,7 @@ use windows::Win32::System::Registry::{
 };
 
 use voicen_core::autostart::{Autostart, AutostartError};
+use voicen_core::settings::gate::LaunchArgs;
 
 /// The release value name under the Run key.
 pub const RUN_VALUE_NAME: &str = "Voicen";
@@ -34,14 +35,14 @@ pub const AUTOSTART_ARG: &str = "--autostart";
 pub const RUN_SUBKEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 
 /// `true` when the process was started by the Run value (`--autostart` among the
-/// arguments). `settings_window::on_ready` (T-037) passes it to `startup_action`.
+/// arguments), as read by the one parser, core's `LaunchArgs::parse`.
+/// `settings_window::on_ready` (T-037) passes it to `startup_action`.
 pub fn launched_by_autostart<I, S>(args: I) -> bool
 where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    args.into_iter()
-        .any(|arg| arg.as_ref() == OsStr::new(AUTOSTART_ARG))
+    LaunchArgs::parse(args).autostart
 }
 
 /// Run-key autostart. Value name = [`RUN_VALUE_NAME`] for the release app.

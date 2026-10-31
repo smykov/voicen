@@ -1,6 +1,8 @@
 //! Startup and dictation gate: pure decisions the shell executes
 //! (spec 004 FR-005..FR-007, FR-010, US5-3; decision #19).
 
+use std::ffi::OsStr;
+
 use super::EngineKind;
 use super::{LoadOutcome, Settings};
 use crate::i18n::{MessageId, NOTICE_CHOOSE_ENGINE};
@@ -63,17 +65,75 @@ pub enum SecondLaunchAction {
     /// The settings window to the front on the tab it shows (unminimized, shown,
     /// focused, no tab switch), or opened on Engine when none is open.
     FrontSettings,
-    /// Nothing: a logon start (`--autostart`) opens no window.
+    /// Nothing: a logon start (`--autostart`) opens no window, and an unknown `--call`
+    /// value takes no action.
     TrayOnly,
+    /// `--call record` reached the running instance (spec 007 FR-003, FR-043).
+    StartCallRecord,
 }
 
-/// The second-launch decision, from whether the second process was started by the
-/// Run value. Pure.
-pub fn second_launch_action(launched_by_autostart: bool) -> SecondLaunchAction {
-    if launched_by_autostart {
-        SecondLaunchAction::TrayOnly
-    } else {
-        SecondLaunchAction::FrontSettings
+/// The value of a `--call` argument.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallSwitch {
+    /// Exactly `record`.
+    Record,
+    /// Anything else: another word, other case, not valid Unicode, or no value.
+    Unknown,
+}
+
+/// The launch arguments the product reads. [`LaunchArgs::parse`] is the one parser of
+/// `--autostart` and `--call` (spec 007 contracts/core-call.md "Launch arguments").
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LaunchArgs {
+    /// An argument exactly equal to `--autostart`, at any position: argv\[0\] and a
+    /// `--call` value count.
+    pub autostart: bool,
+    /// Decided by the first argument exactly equal to `--call` and the argument after
+    /// it, whatever that is; later occurrences are ignored. `--call=record` and
+    /// `--CALL` are not occurrences: unknown arguments are ignored.
+    pub call: Option<CallSwitch>,
+}
+
+impl LaunchArgs {
+    /// Parses an argv, the executable included. Arguments are compared as `OsStr`,
+    /// exactly and case-sensitively, with no lossy conversion. Pure and total.
+    pub fn parse<I, S>(args: I) -> LaunchArgs
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        let mut parsed = LaunchArgs::default();
+        let mut value_expected = false;
+        for arg in args {
+            let arg = arg.as_ref();
+            parsed.autostart |= arg == OsStr::new("--autostart");
+            if value_expected {
+                value_expected = false;
+                parsed.call = Some(if arg == OsStr::new("record") {
+                    CallSwitch::Record
+                } else {
+                    CallSwitch::Unknown
+                });
+            } else if parsed.call.is_none() && arg == OsStr::new("--call") {
+                value_expected = true;
+            }
+        }
+        if value_expected {
+            parsed.call = Some(CallSwitch::Unknown);
+        }
+        parsed
+    }
+}
+
+/// The second-launch decision, from the second process's arguments: `--call record`
+/// wins over `--autostart`, an unknown `--call` value is no action, and otherwise a
+/// start by the Run value opens nothing. Pure.
+pub fn second_launch_action(args: &LaunchArgs) -> SecondLaunchAction {
+    match args.call {
+        Some(CallSwitch::Record) => SecondLaunchAction::StartCallRecord,
+        Some(CallSwitch::Unknown) => SecondLaunchAction::TrayOnly,
+        None if args.autostart => SecondLaunchAction::TrayOnly,
+        None => SecondLaunchAction::FrontSettings,
     }
 }
 
