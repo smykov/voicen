@@ -23,7 +23,7 @@ Also: `scripts/ci/core-test-os-answer.sh` (the I1 tripwire, run by `make check-c
 
 **Tasks:** T-111 (in-time legs, both actors); T-016; T-047 (F-004); T-048 (F-005); T-078 (F-013; deferred and absorbed by T-080); T-080 (rca, class `os-answer-deadline-race`); T-089 (I2 moved to a compiler ban, I1 a raw-token tripwire); T-107 (F-021; deferred and absorbed by T-110); T-110 (rca, class `os-answer-deadline-race`: no wall-clock ceiling in any core test).
 **Classes** in `docs/failures.md`: `test-port-race` and `os-answer-deadline-race`.
-**Decisions:** #53, #56, #100, #106, #107, #112, #113, #149, #200, #201.
+**Decisions:** #53, #56, #100, #106, #107, #112, #113, #149, #200, #201, #224 (the seven `silero_model.rs` fetch legs at `timeouts(5 s)` stay a follow-up).
 **Open questions:** none. OQ-22 (which product reason a lookup cut by the connect timer gives) is answered by decisions #106, #113 and built in T-079 (`docs/decisions/engine-http.md`).
 
 ## Invariants
@@ -51,7 +51,7 @@ This is one rule for every kind of uncontrolled clock: the OS refusal time, the 
   - a request count;
   - the overlay sequence.
 - There is no wall-clock ceiling in any core test. A spec tolerance (SC-003) is checked by its outcome: a server that answers 200 with a valid body at deadline + tolerance must still give the timeout outcome, and a sibling with a generous deadline proves the server answers (decision #149, which amends #107's measurement wording). A host stall can then delay such a test but cannot turn a correct deadline red. `within_spec`, `REFERENCE_LOAD`, `fastest` and `Took::less` were retired in T-110.
-  - Its users: `post_process_timeout::default_deadline_skips_a_silent_server_at_15_s` (answer at 15.5 s, `Timeouts::default()` → `Skipped(Timeout)`; a 60 s sibling leg → `Applied`) and `post_process_timeout::configured_post_processing_timeout_delivers_the_raw_transcript` (answer at 5.5 s, `post_processing_s = 5` → `DeliveredSkipped(Timeout)`; the control leg at `post_processing_s = 60` → `Delivered`; the 15 s default is pinned by the first user).
+  - Its user: `post_process_timeout::default_deadline_skips_a_silent_server_at_15_s` (answer at 15.5 s, `Timeouts::default()` → `Skipped(Timeout)`; a 60 s sibling leg → `Applied`). `post_process_timeout::configured_post_processing_timeout_delivers_the_raw_transcript` is no longer a user (T-111): its limit is `PP_LIMIT_S` = 10 s and its answer `PP_LATE_ANSWER` = 15.5 s (limit + `M` + the tolerance, so a processor left on `Timeouts::default()` also skips), `post_processing_s = 10` → `DeliveredSkipped(Timeout)`; the control leg at `post_processing_s = 60` → `Delivered`. The 15 s default is pinned by the user above.
 
 **Other clock uses in tests:**
 - Instants handed to a product API as input (a press, a release, a frame's `at`) come from `common::timing::now()` or `ago()`.
@@ -120,7 +120,7 @@ A test-thread act that must come before a product timer or the end of a transfer
 
 **T1 residuals at `M`** (values as in the code):
 - `local_download`: `stall_past_no_data_*`, `no_response_headers_*`, the stall legs and their retries (the retry shares the `Downloader` and its limit): `no_data` 5 s (`stall_no_data()`); `cancel_during_stall_*`: `no_data` 5 s (`cancel_no_data()`, with the premise check); `trickle_*`: `no_data` 5.25 s, 1000 bytes every 250 ms (about 16.5 s, at least 3 x `no_data`); `common::download::END_WAIT` 25 s (`M` above the trickle, below the 30 s default); `HOLD` stays 30 s.
-- `api_pipeline::configured_api_timeout_*` and `post_process_timeout::configured_post_processing_timeout_*`: `connect_s` 5, limit 10 s, the answer `M` after the limit (a loopback connect must finish within the connect value; a connect read as the limit ends the job early and `at_least` sees it); the `API_*` / `PP_*` consts are pinned by `*_keep_the_in_time_margin_m`.
+- `api_pipeline::configured_api_timeout_*` and `post_process_timeout::configured_post_processing_timeout_*`: `connect_s` 5, limit 10 s, the answer 15 s = the limit + `M` for the API (`T073_DELAY`), 15.5 s = the limit + `M` + SC-003's 0.5 s for post-processing (`PP_LATE_ANSWER`) (a loopback connect must finish within the connect value; a connect read as the limit ends the job early and `at_least` sees it); the `API_*` / `PP_*` consts are pinned by `*_keep_the_in_time_margin_m`.
 - `Unanswered::blackhole()`: connect 300 ms, totals 20 x connect (margin 5.7 s).
 - `post_process_timeout::default_deadline_skips_a_silent_server_at_15_s`: the production 15 s default against an answer at 15.5 s, margin 0.5 s (SC-003's tolerance), under `M`. Accepted as a named residual by decision #149 (the spec's tolerance is checked by an outcome bracket), not by #200; widening it would drop the bracket. A host stall longer than the margin can turn it red on correct code (F-021, the case #149 recorded).
 
