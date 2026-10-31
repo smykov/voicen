@@ -1,1 +1,1 @@
-cargo test -p voicen-core --lib wer::
+cargo test -p voicen-core --lib --test wer_example -- wer::tests wer_example

@@ -1,0 +1,8 @@
+guarantee: Analysis invariant (validation r1): the example never prints transcript text, reference text or the key
+file: crates/voicen-core/examples/wer.rs
+added_by: test-writer
+--- old
+                println!("{} failed {}", item.id, reason.code());
+--- new
+                println!("{} failed {} {:?}", item.id, reason.code(), item.reference);
+--- end
