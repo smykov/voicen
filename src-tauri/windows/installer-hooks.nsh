@@ -3,11 +3,20 @@
 ;
 ; Invariant (docs/decisions/installer.md): user data, %LOCALAPPDATA%\Voicen and every Credential
 ; Manager entry whose target starts with voicen_core::secrets::CREDENTIAL_TARGET_PREFIX ("Voicen/"),
-; is removed at exactly one decision point, NSIS_HOOK_PREUNINSTALL below:
-;   - started by an installer: the fork passes /UPDATE /P ($UpdateMode = 1) -> keep, ask nothing;
-;   - /KEEPDATA -> keep;
-;   - /S, or /P started by the user (OQ-19 (a)) -> remove (the default answer Yes);
-;   - interactive -> ask, default button Yes.
+; is removed at exactly one decision point, NSIS_HOOK_PREUNINSTALL below. Two decisions are taken
+; there, independently (T-156, FR-041, decisions #197):
+;   Invocation                       $VoicenPurgeData (all but calls)  $VoicenPurgeCalls (calls)
+;   started by an installer          keep, ask nothing                 keep, ask nothing
+;     (the fork passes /UPDATE /P, $UpdateMode = 1)
+;   /KEEPDATA                        keep                              keep (interactive: asked)
+;   /S, or /P started by the user    remove (OQ-19 (a))                keep, ask nothing
+;   /S or /P, with /PURGECALLS       remove                            remove, ask nothing
+;   /KEEPDATA /PURGECALLS            keep                              remove, ask nothing
+;   bare /PURGECALLS                 remove, ask nothing               remove, ask nothing
+;     (same as /P /PURGECALLS: the fork's "/P" also matches it, NSIS FileFunc.nsh GetOptions)
+;   interactive                      ask, default Yes                  ask if the folder exists, default No
+; The only calls folder ever touched is the literal $LOCALAPPDATA\Voicen\calls.
+; No deletion descends through a reparse point (junction, symlink): see un.VoicenRemoveEntry.
 ; The Run value and the shortcuts are left to the stock template (removed unless /UPDATE).
 ;
 ; This file is included before MUI_LANGUAGE, so ${LANG_ENGLISH} / ${LANG_RUSSIAN} are not defined
@@ -15,6 +24,8 @@
 
 LangString VoicenRemoveData 1033 "Remove settings, history, models, logs and saved keys?"
 LangString VoicenRemoveData 1049 "Удалить настройки, историю, модели, журналы и сохранённые ключи?"
+LangString VoicenRemoveCalls 1033 "Remove recorded calls in this folder?"
+LangString VoicenRemoveCalls 1049 "Удалить записи звонков в этой папке?"
 LangString VoicenKeysLeft 1033 "Saved keys could not be removed. Remove the entries starting with Voicen/ in Windows Credential Manager."
 LangString VoicenKeysLeft 1049 "Не удалось удалить сохранённые ключи. Удалите в диспетчере учётных данных Windows записи, начинающиеся с Voicen/."
 LangString VoicenFilesLeft 1033 "Some files in %LOCALAPPDATA%\Voicen could not be removed."
@@ -22,8 +33,58 @@ LangString VoicenFilesLeft 1049 "Не удалось удалить некото
 
 ; 1 = remove user data in this uninstall, decided once in NSIS_HOOK_PREUNINSTALL.
 Var VoicenPurgeData
-; Scratch for /KEEPDATA and the purge exit code.
+; 1 = remove the calls folder in this uninstall, decided once in NSIS_HOOK_PREUNINSTALL.
+Var VoicenPurgeCalls
+; Scratch for /KEEPDATA, /PURGECALLS, the purge exit code and the files-left check.
 Var VoicenScratch
+
+; Unlike the macros below, a Function is parsed here, at the include, so LogicLib must be in scope
+; already. x64.nsh brings it in too; the include is guarded, so this repeats nothing.
+!include LogicLib.nsh
+
+; The one way anything under the data folder is removed (T-156, decisions #197). Takes a path on
+; the stack and pops it; keeps every register. The attributes are the entry's own (GetFileAttributes
+; does not follow a link):
+;   - invalid: nothing;
+;   - no directory bit: Delete, which for a file symlink removes the link;
+;   - directory bit and reparse point (0x400): the non-recursive directory removal below, which
+;     removes the link only and never enters it;
+;   - real folder: every entry through this function, then that same removal, which fails on a
+;     folder still holding something and so leaves it for the files-left check.
+; NSIS's own recursive form of that removal follows junctions at any depth (3.11 util.c myDelete),
+; so it is never used: the owned list of make check-nsis-fork holds the line below byte for byte.
+Function un.VoicenRemoveEntry
+  Exch $R0
+  Push $R1
+  Push $R2
+  Push $R3
+  System::Call 'kernel32::GetFileAttributesW(w R0) i .R1'
+  IntOp $R2 $R1 & 0x10
+  ${If} $R1 = -1
+    ; INVALID_FILE_ATTRIBUTES has every bit set, so it is ruled out first.
+  ${ElseIf} $R2 = 0
+    Delete "$R0"
+  ${Else}
+    IntOp $R2 $R1 & 0x400
+    ${If} $R2 = 0
+      FindFirst $R2 $R3 "$R0\*.*"
+      ${DoWhile} $R3 != ""
+        ${If} $R3 != "."
+        ${AndIf} $R3 != ".."
+          Push "$R0\$R3"
+          Call un.VoicenRemoveEntry
+        ${EndIf}
+        FindNext $R2 $R3
+      ${Loop}
+      FindClose $R2
+    ${EndIf}
+    RMDir "$R0"
+  ${EndIf}
+  Pop $R3
+  Pop $R2
+  Pop $R1
+  Pop $R0
+FunctionEnd
 
 ; Every install records its language, silent ones included. The uninstaller's un.onInit runs
 ; MUI_UNGETLANGUAGE (installer.nsi): with no "Installer Language" value under
@@ -95,6 +156,30 @@ Var VoicenScratch
     ${EndIf}
   ${EndIf}
 
+  ; The calls folder, independently of the data answer: only /PURGECALLS (with /KEEPDATA too,
+  ; decisions #197) or an explicit Yes removes it. The path is appended to the question rather than
+  ; expanded inside the LangString.
+  StrCpy $VoicenPurgeCalls 0
+  ${If} $UpdateMode <> 1
+    ClearErrors
+    ${GetOptions} $CMDLINE "/PURGECALLS" $VoicenScratch
+    ${IfNot} ${Errors}
+      StrCpy $VoicenPurgeCalls 1
+    ${Else}
+      ${If} ${Silent}
+      ${OrIf} $PassiveMode = 1
+        ; Keep: a passive question would block, and /SD applies only to silent.
+      ${Else}
+        SetShellVarContext current
+        ${If} $LOCALAPPDATA != ""
+        ${AndIf} ${FileExists} "$LOCALAPPDATA\Voicen\calls"
+          MessageBox MB_YESNO|MB_ICONQUESTION|MB_DEFBUTTON2 "$(VoicenRemoveCalls)$\r$\n$LOCALAPPDATA\Voicen\calls" /SD IDNO IDNO +2
+          StrCpy $VoicenPurgeCalls 1
+        ${EndIf}
+      ${EndIf}
+    ${EndIf}
+  ${EndIf}
+
   ; The credentials go first, while voicen.exe still exists (the stock section deletes it next).
   ; voicen.exe --purge-credentials (T-061): exit 0 = every "Voicen/" entry removed or none,
   ; 2 = at least one could not be removed; no window, no log. A missing voicen.exe is not skipped:
@@ -123,19 +208,75 @@ Var VoicenScratch
     DeleteRegValue HKCU "${MANUPRODUCTKEY}" "Installer Language"
     DeleteRegKey /ifempty HKCU "${MANUPRODUCTKEY}"
     DeleteRegKey /ifempty HKCU "${MANUKEY}"
+  ${EndIf}
 
-    ; The data folder is the literal %LOCALAPPDATA%\Voicen (paths::data_dir), not $INSTDIR: the
-    ; interactive directory page may have put the program elsewhere. An empty $LOCALAPPDATA
-    ; would turn the path into "\Voicen", so nothing is removed then.
-    SetShellVarContext current
-    ${If} $LOCALAPPDATA != ""
-      RMDir /r "$LOCALAPPDATA\Voicen"
-      ${If} ${FileExists} "$LOCALAPPDATA\Voicen\*.*"
-        ${If} $PassiveMode = 1
-          DetailPrint "$(VoicenFilesLeft)"
-        ${Else}
-          MessageBox MB_OK|MB_ICONEXCLAMATION "$(VoicenFilesLeft)" /SD IDOK
+  ; The data folder is the literal %LOCALAPPDATA%\Voicen (paths::data_dir), not $INSTDIR: the
+  ; interactive directory page may have put the program elsewhere. An empty $LOCALAPPDATA
+  ; would turn the path into "\Voicen", so nothing is removed then. Clobbers $0..$4.
+  SetShellVarContext current
+  ${If} $LOCALAPPDATA != ""
+    ; $2 <> 0: the data folder is itself a reparse point, so every path under it lies behind the
+    ; link and nothing there is removed. A missing folder (-1, every bit set) is not one.
+    StrCpy $0 "$LOCALAPPDATA\Voicen"
+    System::Call 'kernel32::GetFileAttributesW(w r0) i .r1'
+    IntOp $2 $1 & 0x400
+    ${If} $1 = -1
+      StrCpy $2 0
+    ${EndIf}
+
+    ${If} $VoicenPurgeCalls = 1
+    ${AndIf} $2 = 0
+      Push "$LOCALAPPDATA\Voicen\calls"
+      Call un.VoicenRemoveEntry
+    ${EndIf}
+
+    ; The folder itself goes only when empty, so kept calls keep it.
+    ${If} $VoicenPurgeData = 1
+    ${AndIf} $2 = 0
+      FindFirst $3 $4 "$LOCALAPPDATA\Voicen\*.*"
+      ${DoWhile} $4 != ""
+        ${If} $4 != "."
+        ${AndIf} $4 != ".."
+        ${AndIf} $4 != "calls"
+          Push "$LOCALAPPDATA\Voicen\$4"
+          Call un.VoicenRemoveEntry
         ${EndIf}
+        FindNext $3 $4
+      ${Loop}
+      FindClose $3
+      RMDir "$LOCALAPPDATA\Voicen"
+    ${EndIf}
+
+    ; Files left: only what this run set out to remove, so kept calls or kept data never count.
+    StrCpy $VoicenScratch 0
+    ${If} $2 <> 0
+      ${If} $VoicenPurgeData = 1
+      ${OrIf} $VoicenPurgeCalls = 1
+        StrCpy $VoicenScratch 1
+      ${EndIf}
+    ${Else}
+      ${If} $VoicenPurgeCalls = 1
+      ${AndIf} ${FileExists} "$LOCALAPPDATA\Voicen\calls"
+        StrCpy $VoicenScratch 1
+      ${EndIf}
+      ${If} $VoicenPurgeData = 1
+        FindFirst $3 $4 "$LOCALAPPDATA\Voicen\*.*"
+        ${DoWhile} $4 != ""
+          ${If} $4 != "."
+          ${AndIf} $4 != ".."
+          ${AndIf} $4 != "calls"
+            StrCpy $VoicenScratch 1
+          ${EndIf}
+          FindNext $3 $4
+        ${Loop}
+        FindClose $3
+      ${EndIf}
+    ${EndIf}
+    ${If} $VoicenScratch = 1
+      ${If} $PassiveMode = 1
+        DetailPrint "$(VoicenFilesLeft)"
+      ${Else}
+        MessageBox MB_OK|MB_ICONEXCLAMATION "$(VoicenFilesLeft)" /SD IDOK
       ${EndIf}
     ${EndIf}
   ${EndIf}

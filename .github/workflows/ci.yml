@@ -1256,12 +1256,9 @@ jobs:
           Write-Output "uninstall /S: $dir holds only calls\ with the planted meta.json; every Voicen/ credential, the Run value, the shortcut and the uninstall key gone; $outsider kept"
       # W5 (T-156, FR-041, decisions #197): a silent install, then uninstall.exe /S /KEEPDATA
       # /PURGECALLS removes calls\ and keeps everything else in %LOCALAPPDATA%\Voicen
-      # (ci-keep.txt, settings.json). The step plants calls\ itself, so a failed W4 (folder
-      # already gone) does not turn this step red on its premise. Then a silent reinstall for W6.
-      # Red on a hook that keeps calls\ under /KEEPDATA. The if: below is there in the red commit
-      # only, so that a red W4 does not skip this step.
+      # (ci-keep.txt, settings.json). The step plants calls\ itself. Then a silent reinstall for
+      # W6. Red on a hook that keeps calls\ under /KEEPDATA.
       - name: uninstall.exe /S /KEEPDATA /PURGECALLS removes calls\ and keeps the rest of the data folder (T-156)
-        if: ${{ !cancelled() }}
         shell: pwsh
         run: |
           . ./scripts/ci/hotkey-hold.ps1
@@ -1300,8 +1297,7 @@ jobs:
           if (Test-Path -LiteralPath $callsDir) { $bad += "/PURGECALLS: $callsDir is still present (left: $((@(Get-ChildItem -LiteralPath $callsDir -Recurse -Force -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName.Substring($dir.Length) }) | Select-Object -First 20) -join ', '))" }
           if (-not (Test-Path -LiteralPath $marker -PathType Leaf)) { $bad += "/KEEPDATA: the data marker $marker was deleted" }
           if (-not (Test-Path -LiteralPath $settings -PathType Leaf)) { $bad += "/KEEPDATA: settings.json was deleted" }
-          # Reinstall for W6 before any verdict: W6 needs the install even when this step is red, so
-          # that it goes red on its sentinels and not on its premise.
+          # Reinstall for W6, before this step's verdict.
           Start-Process $setup.FullName -ArgumentList '/S' -Wait
           foreach ($q in @($exe, $uninstaller, $shortcut)) { if (-not (Test-Path -LiteralPath $q -PathType Leaf)) { $bad += "after the silent reinstall: $q not found" } }
           if ($bad) { throw ($bad -join '; ') }
@@ -1314,9 +1310,8 @@ jobs:
       # calls-elsewhere as calls.storage_root; the app is not started. The step ends the sequence:
       # $dir, the Run value and every Voicen/ credential are gone. Credential Manager is planted and
       # observed only through scripts/ci/credentials.ps1. Red on a hook that removes the folder with
-      # a recursive delete (a sentinel is gone). The if: below is there in the red commit only.
+      # a recursive delete (a sentinel is gone).
       - name: uninstall.exe /S /PURGECALLS removes the data folder and leaves what two junctions point to (T-156)
-        if: ${{ !cancelled() }}
         shell: pwsh
         run: |
           . ./scripts/ci/hotkey-hold.ps1

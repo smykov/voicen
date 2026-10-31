@@ -1,28 +1,41 @@
 # Installer and uninstaller
 
-**Code:** `src-tauri/windows/installer.nsi` (fork of the tauri-cli NSIS template), `src-tauri/windows/installer-hooks.nsh`, `src-tauri/tauri.conf.json` › `bundle.resources`, `bundle.windows.nsis`, `package.json` / `pnpm-lock.yaml` › `@tauri-apps/cli` · **Tests that pin it:** `make check-nsis-fork` (`scripts/ci/nsis-fork.sh`, `nsis-fork.test.sh`); the `windows` job of `.github/workflows/ci.yml`: size and notices before the first launch (W1), the same-version `/P` reinstall (W2), `uninstall.exe /S /KEEPDATA` (W3), `uninstall.exe /S` (W4)
+**Code:** `src-tauri/windows/installer.nsi` (fork of the tauri-cli NSIS template), `src-tauri/windows/installer-hooks.nsh`, `src-tauri/tauri.conf.json` › `bundle.resources`, `bundle.windows.nsis`, `package.json` / `pnpm-lock.yaml` › `@tauri-apps/cli` · **Tests that pin it:** `make check-nsis-fork` (`scripts/ci/nsis-fork.sh`, `nsis-fork.test.sh`); the `windows` job of `.github/workflows/ci.yml`: size and notices before the first launch (W1), the same-version `/P` reinstall (W2), `uninstall.exe /S /KEEPDATA` (W3), `uninstall.exe /S` (W4), `/S /KEEPDATA /PURGECALLS` (W5), `/S /PURGECALLS` with two junctions planted (W6)
 
-Tasks: T-025 (this seam), T-061 (`voicen.exe --purge-credentials`), T-062 (WebView2 data, open). Decisions: #10, #76, #98. Spec: `specs/006-diagnostics-and-release` (US4, `contracts/installer-ci.md`, research R9/R10). Open question: OQ-19.
+Tasks: T-025 (this seam), T-061 (`voicen.exe --purge-credentials`), T-062 (WebView2 data, open). Decisions: #10, #76, #98, #197. T-156 (calls, reparse points). Spec: `specs/006-diagnostics-and-release` (US4, `contracts/installer-ci.md`, research R9/R10). Open question: OQ-19.
 
 ## Invariants
 
 ### User data is removed at exactly one decision point, the PREUNINSTALL hook
 
-User data is `%LOCALAPPDATA%\Voicen` and every Credential Manager entry whose target starts with `voicen_core::secrets::CREDENTIAL_TARGET_PREFIX` (`Voicen/`). `NSIS_HOOK_PREUNINSTALL` decides once (`$VoicenPurgeData`):
+User data is `%LOCALAPPDATA%\Voicen` and every Credential Manager entry whose target starts with `voicen_core::secrets::CREDENTIAL_TARGET_PREFIX` (`Voicen/`). `NSIS_HOOK_PREUNINSTALL` decides once, the data (`$VoicenPurgeData`) and then, independently, the calls folder `%LOCALAPPDATA%\Voicen\calls` (`$VoicenPurgeCalls`; FR-041, decisions #197):
 
-| Uninstall | Data | Question |
-|---|---|---|
-| started by an installer (`/UPDATE /P`, fork edit 1) | kept | none |
-| `/KEEPDATA` (with `/S`, `/P` or interactive) | kept | none |
-| `/S`, or `/P` started by the user (OQ-19 (a)) | removed | none (default Yes) |
-| interactive | removed on Yes | Yes/No, default Yes, EN/RU (`LangString` 1033/1049) |
+| Uninstall | Data (all but `calls\`) | Calls | Question |
+|---|---|---|---|
+| started by an installer (`/UPDATE /P`, fork edit 1) | kept | kept | none |
+| `/KEEPDATA` with `/S` or `/P` | kept | kept | none |
+| `/KEEPDATA`, interactive | kept | removed on Yes | calls only, as in the interactive row |
+| `/S`, or `/P` started by the user (OQ-19 (a)) | removed | kept | none (default Yes for data) |
+| `/S /PURGECALLS`, `/P /PURGECALLS` | removed | removed | none |
+| `/KEEPDATA /PURGECALLS` | kept | removed | none |
+| bare `/PURGECALLS` | removed | removed | none: same as `/P /PURGECALLS`, because the fork's `/P` also matches it (`GetOptions` compares the option's length; read in the NSIS 3.11 source, unconfirmed on the runner, no CI step runs it; OQ-75) |
+| interactive | removed on Yes (Yes/No, default Yes) | removed on Yes (Yes/No, default **No**, asked only if the folder exists, the folder named under the question) | EN/RU (`LangString` 1033/1049) |
 
-On Yes the hook runs `"$INSTDIR\voicen.exe" --purge-credentials` while the exe still exists (the stock section deletes it next). Any failure shows the manual-removal message (`VoicenKeysLeft`, naming the `Voicen/` prefix): a non-zero exit (2 = an entry could not be removed), and a `voicen.exe` that cannot be started, missing included (`ExecWait` sets the error flag; the call is deliberately not guarded by a file-exists check, which would leave the keys silently, T-025 review 1 #1). Under `/S` the message is skipped and under `/P` it goes to the progress log only (OQ-19). Then `NSIS_HOOK_POSTUNINSTALL` runs `RMDir /r "$LOCALAPPDATA\Voicen"` (never when `$LOCALAPPDATA` is empty) and removes the installer bookkeeping key `HKCU\${MANUPRODUCTKEY}`. Nothing else in the uninstaller deletes anything outside the install folder and `%LOCALAPPDATA%\Voicen`. The Run value `Voicen` (T-014/T-034) and the shortcuts stay with the stock template: removed on every uninstall without `/UPDATE`, kept with it.
+On Yes the hook runs `"$INSTDIR\voicen.exe" --purge-credentials` while the exe still exists (the stock section deletes it next). Any failure shows the manual-removal message (`VoicenKeysLeft`, naming the `Voicen/` prefix): a non-zero exit (2 = an entry could not be removed), and a `voicen.exe` that cannot be started, missing included (`ExecWait` sets the error flag; the call is deliberately not guarded by a file-exists check, which would leave the keys silently, T-025 review 1 #1). Under `/S` the message is skipped and under `/P` it goes to the progress log only (OQ-19). Then `NSIS_HOOK_POSTUNINSTALL` (never when `$LOCALAPPDATA` is empty) removes, through the walker `un.VoicenRemoveEntry`, `calls\` when `$VoicenPurgeCalls = 1` and every other top-level entry when `$VoicenPurgeData = 1`, then runs a plain `RMDir "$LOCALAPPDATA\Voicen"`, which removes the folder only when it is empty. With `$VoicenPurgeData = 1` it also removes the installer bookkeeping key `HKCU\${MANUPRODUCTKEY}`. The files-left message checks only what this run set out to remove, never a kept `calls\` or kept data. Nothing else in the uninstaller deletes anything outside the install folder and `%LOCALAPPDATA%\Voicen`. The Run value `Voicen` (T-014/T-034) and the shortcuts stay with the stock template: removed on every uninstall without `/UPDATE`, kept with it.
 
 - **Defect that produced it:** found in the T-025 analysis (no F-entry; nothing shipped). In the stock tauri-cli 2.12.1 template an installer passes `/UPDATE` to the old uninstaller only when it got `/UPDATE` itself (the updater plugin, which Voicen does not use). So every manual upgrade ran the old uninstaller as a real uninstall: it deleted the Start-with-Windows Run value, deleted and recreated the shortcuts and showed the confirm page with a "Delete the application data" checkbox; a data question keyed on `$UpdateMode` would have purged settings, models and keys on its default Yes. Under #98 every CI build has a new version, so every Telegram build installed over another is such an upgrade.
 - **What breaks if you violate it:** an upgrade deletes the user's settings, models and saved keys, or turns off Start with Windows (FR-024); or a second deletion path removes something outside the folder (FR-023).
 - **Where it is enforced:** fork edit 1 (`PageLeaveReinstall` always appends ` /UPDATE /P` to the NSIS uninstall string, the only place an installer starts the uninstaller; the WiX branch is untouched), fork edit 2 (stock checkbox and its removal block deleted), the hooks file. CI: W2 (a same-version `/P` reinstall runs the old uninstaller and must keep data, credential and Run value within 120 s), W3, W4. The `/UPDATE /P` mark is added by the **new** installer, so it also reaches the stock uninstallers of builds installed before T-025.
-- **Don't:** key a deletion on anything but the hook's decision; add data removal to the fork; let the hook ask under `/P` or `/S` (a passive question blocks: `/SD` applies only to silent); delete `$INSTDIR` recursively (the interactive directory page may point it elsewhere; the data folder is the literal `%LOCALAPPDATA%\Voicen`, `paths::data_dir`).
+- **Don't:** key a deletion on anything but the hook's decision; add data removal to the fork; let the hook ask under `/P` or `/S` (a passive question blocks: `/SD` applies only to silent); delete `$INSTDIR` recursively (the interactive directory page may point it elsewhere; the data folder is the literal `%LOCALAPPDATA%\Voicen`, `paths::data_dir`, and `$INSTDIR` is the parent of `calls\`); use `RMDir /r` anywhere (next invariant); let `$VoicenPurgeCalls` follow the data answer, `/S` or `/P`; touch a calls root other than the literal `$LOCALAPPDATA\Voicen\calls` (the uninstaller never reads settings).
+
+### No deletion descends through a reparse point
+
+Every removal under `%LOCALAPPDATA%\Voicen` goes through the one recursive walker in the hooks file, `un.VoicenRemoveEntry`, which reads the entry's own attributes (`GetFileAttributesW`): invalid, nothing; a reparse point (`0x400`) with the directory bit, plain `RMDir`, which removes the link only; without it, `Delete`; a real folder, walk, then plain `RMDir`; a file, `Delete`. If `$LOCALAPPDATA\Voicen` is itself a reparse point, nothing under it is removed and the files-left message shows. A reparse point of another kind (a cloud placeholder folder) is treated as a link: its `RMDir` fails when non-empty, which keeps data rather than loses it.
+
+- **Defect that produced it:** found in the T-156 analysis (no F-entry; nothing shipped). `RMDir /r` follows a junction at any depth (NSIS 3.11 `exehead/util.c` `myDelete` tests only `FILE_ATTRIBUTE_DIRECTORY`), and CI run 41224417006 @ 6f545654 showed a sentinel behind a planted junction deleted.
+- **What breaks if you violate it:** an uninstall empties a folder outside the data folder that a link points to (decisions #197).
+- **Where it is enforced:** W6 (a nested and a top-level junction, sentinel files asserted); `make check-nsis-fork` owns every `rmdir` line of the fork and the hooks (`scripts/ci/nsis-rmdir-lines.txt`, none with `/r`; comments count, so a comment in those files must not hold the word).
+- **Don't:** add a second deletion path (`ExecWait cmd /c rd`, a top-level attribute check followed by `RMDir /r`); assert the target folder instead of a file behind it in a test (a recursive delete through a link leaves the folder).
 
 ### The fork follows exactly one tauri-cli version
 
