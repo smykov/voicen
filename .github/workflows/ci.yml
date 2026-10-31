@@ -910,10 +910,12 @@ jobs:
           if ($blockedNew.Count -ne 1) { throw "a 3 s hold on a first launch (engine none) gave $($blockedNew.Count) new '$blockedLine' lines, expected exactly 1" }
           if ($recNew -ne 0) { throw "a blocked hold wrote $recNew 'dictation rec=' line(s)" }
           Write-Output "first launch: one blocked hold, one blocked line after $([int]$seenAt) s, no dictation rec= line, voicen.exe still running"
-      # T-025 (FR-28 v4, spec 006 FR-021..024, decisions #76): the three install/uninstall steps
+      # T-025 (FR-28 v4, spec 006 FR-021..024, decisions #76), T-156 (FR-041): the five install/uninstall steps
       # below come after every step that launches the app, in this order: W2 reinstall, W3
-      # uninstall /S /KEEPDATA (then a silent reinstall), W4 uninstall /S (the install is gone
-      # afterwards). Credential Manager is planted and observed only through
+      # uninstall /S /KEEPDATA (then a silent reinstall), W4 uninstall /S (only calls\ is left,
+      # the program is gone), W5 reinstall and uninstall /S /KEEPDATA /PURGECALLS (then a silent
+      # reinstall), W6 uninstall /S /PURGECALLS with two junctions planted (W6 ends the sequence:
+      # the install and $LOCALAPPDATA\Voicen are gone afterwards). Credential Manager is planted and observed only through
       # scripts/ci/credentials.ps1 (docs/decisions/windows-ci-runner.md); no step launches
       # voicen.exe, so no window predicate is involved. Raw facts only (F-003).
       #
@@ -1183,11 +1185,13 @@ jobs:
           foreach ($q in @($exe, $uninstaller, $shortcut, $marker)) { if (-not (Test-Path -LiteralPath $q -PathType Leaf)) { [void](Remove-All); throw "after the silent reinstall: $q not found" } }
           if ((Remove-All) -ne 0) { throw "cleanup: a Remove-VoicenCredential above failed (Win32 error printed)" }
           Write-Output "silent reinstall over the kept data: voicen.exe, uninstall.exe, the shortcut and ci-keep.txt present"
-      # W4: a user-started silent uninstall (the default answer Yes) removes %LOCALAPPDATA%\Voicen
-      # and every Voicen/ credential (voicen.exe --purge-credentials from the PREUNINSTALL hook,
-      # T-061), keeps a credential outside the prefix, and removes the Run value, the shortcut and
-      # the uninstall key. Red on the stock uninstaller (the folder and the credential stay).
-      - name: uninstall.exe /S removes the data folder, every Voicen/ credential, the Run value and the shortcut, and keeps other credentials (T-025)
+      # W4: a user-started silent uninstall (the default answer Yes) removes the program and the
+      # data in %LOCALAPPDATA%\Voicen except calls\ (a planted calls\2026-01-01_000000\meta.json
+      # must survive, T-156 / FR-041) and every Voicen/ credential (voicen.exe --purge-credentials
+      # from the PREUNINSTALL hook, T-061), keeps a credential outside the prefix, and removes the
+      # Run value, the shortcut and the uninstall key. Red on the stock uninstaller (the folder and
+      # the credential stay) and on a hook that removes the whole folder (calls\ gone).
+      - name: uninstall.exe /S removes the data except calls\, every Voicen/ credential, the Run value and the shortcut, and keeps calls\ and other credentials (T-025, T-156)
         shell: pwsh
         run: |
           . ./scripts/ci/hotkey-hold.ps1
@@ -1203,6 +1207,8 @@ jobs:
           $fake = 'sk-test-ci-uninstall-0000-not-a-real-key'
           $gone = 'Voicen/ci-uninstall'
           $outsider = 'VoicenOther/ci-uninstall-keep'
+          $meta = Join-Path $dir 'calls\2026-01-01_000000\meta.json'
+          function Get-DirNames { @(Get-ChildItem -LiteralPath $dir -Force -ErrorAction SilentlyContinue | ForEach-Object { $_.Name }) }
           function Get-RunValue { (Get-ItemProperty -Path $run -Name 'Voicen' -ErrorAction SilentlyContinue).Voicen }
           function Get-UninstallerCopies { @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path.StartsWith([IO.Path]::GetTempPath(), [StringComparison]::OrdinalIgnoreCase) -and $_.Path -like '*\~nsu*' }) }
           function Format-Listed { (@(Get-VoicenCredentials -Prefix 'Voicen/') | ForEach-Object { "$($_.Target) (type $($_.Type))" }) -join ', ' }
@@ -1211,6 +1217,10 @@ jobs:
           foreach ($p in @($exe, $uninstaller, $settings, $marker, $shortcut)) { if (-not (Test-Path -LiteralPath $p -PathType Leaf)) { throw "premise: $p not found before the uninstall" } }
           if (-not (Test-Path -LiteralPath $uninstKey)) { throw "premise: the uninstall key $uninstKey not found before the uninstall" }
           New-ItemProperty -Path $run -Name 'Voicen' -PropertyType String -Value ('"' + $exe + '" --autostart') -Force | Out-Null
+          # A recorded call (fake content), planted here so the step does not depend on an earlier one.
+          New-Item -ItemType Directory -Force -Path (Split-Path -Parent $meta) | Out-Null
+          Set-Content -LiteralPath $meta -Value '{"ci":"planted by the uninstall step"}' -NoNewline
+          if (-not (Test-Path -LiteralPath $meta -PathType Leaf)) { throw "premise: $meta was not written" }
           try {
             foreach ($t in @($gone, $outsider)) {
               Add-VoicenCredential -Target $t -Secret $fake
@@ -1218,18 +1228,21 @@ jobs:
             }
             if (@(Get-VoicenCredentials -Prefix 'Voicen/' | Where-Object { $_.Target -ceq $gone }).Count -ne 1) { throw "premise: Get-VoicenCredentials 'Voicen/' does not list $gone (listed: $(Format-Listed))" }
           } catch { [void](Remove-All); throw }
-          Write-Output "premise: installed, settings.json, ci-keep.txt, the Run value, $gone and $outsider in place"
+          Write-Output "premise: installed, settings.json, ci-keep.txt, planted $meta, the Run value, $gone and $outsider in place"
           $p = Start-Process -FilePath $uninstaller -ArgumentList '/S' -PassThru
           $done = $false
           $clock = [Diagnostics.Stopwatch]::StartNew()
           while ($clock.Elapsed.TotalSeconds -lt 60 -and -not $done) {
             Start-Sleep -Seconds 1
-            $done = -not (Test-Path -LiteralPath $dir) -and -not (Test-Path -LiteralPath $uninstKey) -and ($null -eq (Get-RunValue)) -and -not (Test-Path -LiteralPath $shortcut) -and (@(Get-VoicenCredentials -Prefix 'Voicen/').Count -eq 0) -and ((Get-UninstallerCopies).Count -eq 0)
+            $names = Get-DirNames
+            $done = (($names.Count -eq 0) -or (($names -join ',') -ceq 'calls')) -and -not (Test-Path -LiteralPath $uninstKey) -and ($null -eq (Get-RunValue)) -and -not (Test-Path -LiteralPath $shortcut) -and (@(Get-VoicenCredentials -Prefix 'Voicen/').Count -eq 0) -and ((Get-UninstallerCopies).Count -eq 0)
           }
           while ($clock.Elapsed.TotalSeconds -lt 60 -and (Get-UninstallerCopies).Count -gt 0) { Start-Sleep -Seconds 1 }
           Start-Sleep -Seconds 3
           $bad = @()
-          if (Test-Path -LiteralPath $dir) { $bad += "$dir is still present 60 s after uninstall.exe /S (left: $((@(Get-ChildItem -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName.Substring($dir.Length) }) | Select-Object -First 20) -join ', '))" }
+          if (-not (Test-Path -LiteralPath $meta -PathType Leaf)) { $bad += "the planted $meta did not survive uninstall.exe /S (calls\ must be kept; $dir left: $((@(Get-ChildItem -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName.Substring($dir.Length) }) | Select-Object -First 20) -join ', '))" }
+          $other = @(Get-DirNames | Where-Object { $_ -cne 'calls' })
+          if ($other.Count -ne 0) { $bad += "$dir holds more than calls\ 60 s after uninstall.exe /S (left: $($other -join ', '))" }
           $left = @(Get-VoicenCredentials -Prefix 'Voicen/')
           if ($left.Count -ne 0) { $bad += "Voicen/ credentials left after uninstall.exe /S: $(Format-Listed)" }
           if (-not (Test-VoicenCredential -Target $outsider)) { $bad += "$outsider (outside Voicen/) was deleted by the uninstall" }
@@ -1240,7 +1253,151 @@ jobs:
           $cleanup = Remove-All
           if ($bad) { throw ($bad -join '; ') }
           if ($cleanup -ne 0) { throw "cleanup: a Remove-VoicenCredential above failed (Win32 error printed)" }
-          Write-Output "uninstall /S: $dir, every Voicen/ credential, the Run value, the shortcut and the uninstall key gone; $outsider kept"
+          Write-Output "uninstall /S: $dir holds only calls\ with the planted meta.json; every Voicen/ credential, the Run value, the shortcut and the uninstall key gone; $outsider kept"
+      # W5 (T-156, FR-041, decisions #197): a silent install, then uninstall.exe /S /KEEPDATA
+      # /PURGECALLS removes calls\ and keeps everything else in %LOCALAPPDATA%\Voicen
+      # (ci-keep.txt, settings.json). The step plants calls\ itself, so a failed W4 (folder
+      # already gone) does not turn this step red on its premise. Then a silent reinstall for W6.
+      # Red on a hook that keeps calls\ under /KEEPDATA. The if: below is there in the red commit
+      # only, so that a red W4 does not skip this step.
+      - name: uninstall.exe /S /KEEPDATA /PURGECALLS removes calls\ and keeps the rest of the data folder (T-156)
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          . ./scripts/ci/hotkey-hold.ps1
+          $dir = Join-Path $env:LOCALAPPDATA 'Voicen'
+          $exe = Join-Path $dir 'voicen.exe'
+          $uninstaller = Join-Path $dir 'uninstall.exe'
+          $settings = Join-Path $dir 'settings.json'
+          $marker = Join-Path $dir 'ci-keep.txt'
+          $callsDir = Join-Path $dir 'calls'
+          $meta = Join-Path $callsDir '2026-01-01_000000\meta.json'
+          $shortcut = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Voicen.lnk'
+          $uninstKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Voicen'
+          function Get-UninstallerCopies { @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path.StartsWith([IO.Path]::GetTempPath(), [StringComparison]::OrdinalIgnoreCase) -and $_.Path -like '*\~nsu*' }) }
+          $setup = Get-ChildItem target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
+          Start-Process $setup.FullName -ArgumentList '/S' -Wait
+          foreach ($q in @($exe, $uninstaller, $shortcut)) { if (-not (Test-Path -LiteralPath $q -PathType Leaf)) { throw "premise: $q not found after the silent install" } }
+          if (-not (Test-Path -LiteralPath $uninstKey)) { throw "premise: the uninstall key $uninstKey not found after the silent install" }
+          Stop-AllVoicen
+          Set-Content -LiteralPath $marker -Value "ci-purgecalls-keepdata $env:VOICEN_COMMIT" -NoNewline
+          if (-not (Test-Path -LiteralPath $settings -PathType Leaf)) { Set-Content -LiteralPath $settings -Value '{}' -NoNewline }
+          New-Item -ItemType Directory -Force -Path (Split-Path -Parent $meta) | Out-Null
+          Set-Content -LiteralPath $meta -Value '{"ci":"planted by the purge-calls step"}' -NoNewline
+          foreach ($q in @($marker, $settings, $meta)) { if (-not (Test-Path -LiteralPath $q -PathType Leaf)) { throw "premise: $q was not written" } }
+          Write-Output "premise: installed, settings.json, ci-keep.txt and planted $meta in place"
+          $p = Start-Process -FilePath $uninstaller -ArgumentList '/S', '/KEEPDATA', '/PURGECALLS' -PassThru
+          $done = $false
+          $clock = [Diagnostics.Stopwatch]::StartNew()
+          while ($clock.Elapsed.TotalSeconds -lt 60 -and -not $done) {
+            Start-Sleep -Seconds 1
+            $done = -not (Test-Path -LiteralPath $callsDir) -and -not (Test-Path -LiteralPath $exe) -and -not (Test-Path -LiteralPath $uninstaller) -and -not (Test-Path -LiteralPath $uninstKey) -and ((Get-UninstallerCopies).Count -eq 0)
+          }
+          while ($clock.Elapsed.TotalSeconds -lt 60 -and (Get-UninstallerCopies).Count -gt 0) { Start-Sleep -Seconds 1 }
+          Start-Sleep -Seconds 3
+          $bad = @()
+          if (-not $done) { $bad += "the uninstall did not reach its end state within 60 s (calls\ present: $(Test-Path -LiteralPath $callsDir), voicen.exe present: $(Test-Path -LiteralPath $exe), uninstall.exe present: $(Test-Path -LiteralPath $uninstaller), uninstall key present: $(Test-Path -LiteralPath $uninstKey), uninstaller copies running: $((Get-UninstallerCopies).Count))" }
+          if (Test-Path -LiteralPath $callsDir) { $bad += "/PURGECALLS: $callsDir is still present (left: $((@(Get-ChildItem -LiteralPath $callsDir -Recurse -Force -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName.Substring($dir.Length) }) | Select-Object -First 20) -join ', '))" }
+          if (-not (Test-Path -LiteralPath $marker -PathType Leaf)) { $bad += "/KEEPDATA: the data marker $marker was deleted" }
+          if (-not (Test-Path -LiteralPath $settings -PathType Leaf)) { $bad += "/KEEPDATA: settings.json was deleted" }
+          # Reinstall for W6 before any verdict: W6 needs the install even when this step is red, so
+          # that it goes red on its sentinels and not on its premise.
+          Start-Process $setup.FullName -ArgumentList '/S' -Wait
+          foreach ($q in @($exe, $uninstaller, $shortcut)) { if (-not (Test-Path -LiteralPath $q -PathType Leaf)) { $bad += "after the silent reinstall: $q not found" } }
+          if ($bad) { throw ($bad -join '; ') }
+          Write-Output "uninstall /S /KEEPDATA /PURGECALLS: calls\ gone; settings.json and ci-keep.txt kept; silent reinstall: voicen.exe, uninstall.exe and the shortcut present"
+      # W6 (T-156, FR-041, decisions #197): uninstall.exe /S /PURGECALLS with two junctions planted
+      # removes calls\ and the rest of %LOCALAPPDATA%\Voicen and never goes through a reparse point:
+      # the junction under calls\2026-01-01_000000 and the one at the top level lose the link only,
+      # and the sentinel FILE behind each still exists (a recursive delete through a link empties the
+      # target and leaves its folder, so the folder alone proves nothing). settings.json also names
+      # calls-elsewhere as calls.storage_root; the app is not started. The step ends the sequence:
+      # $dir, the Run value and every Voicen/ credential are gone. Credential Manager is planted and
+      # observed only through scripts/ci/credentials.ps1. Red on a hook that removes the folder with
+      # a recursive delete (a sentinel is gone). The if: below is there in the red commit only.
+      - name: uninstall.exe /S /PURGECALLS removes the data folder and leaves what two junctions point to (T-156)
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          . ./scripts/ci/hotkey-hold.ps1
+          . ./scripts/ci/credentials.ps1
+          $dir = Join-Path $env:LOCALAPPDATA 'Voicen'
+          $exe = Join-Path $dir 'voicen.exe'
+          $uninstaller = Join-Path $dir 'uninstall.exe'
+          $settings = Join-Path $dir 'settings.json'
+          $callsDir = Join-Path $dir 'calls'
+          $callFolder = Join-Path $callsDir '2026-01-01_000000'
+          $meta = Join-Path $callFolder 'meta.json'
+          $nestedLink = Join-Path $callFolder 'link'
+          $topLink = Join-Path $dir 'data-link'
+          $callsElsewhere = Join-Path $env:RUNNER_TEMP 'calls-elsewhere'
+          $dataElsewhere = Join-Path $env:RUNNER_TEMP 'data-elsewhere'
+          $callsSentinel = Join-Path $callsElsewhere 'meta.json'
+          $dataSentinel = Join-Path $dataElsewhere 'sentinel.txt'
+          $shortcut = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Voicen.lnk'
+          $uninstKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Voicen'
+          $run = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+          $fake = 'sk-test-ci-purgecalls-0000-not-a-real-key'
+          $gone = 'Voicen/ci-purgecalls'
+          function Get-RunValue { (Get-ItemProperty -Path $run -Name 'Voicen' -ErrorAction SilentlyContinue).Voicen }
+          function Get-UninstallerCopies { @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path.StartsWith([IO.Path]::GetTempPath(), [StringComparison]::OrdinalIgnoreCase) -and $_.Path -like '*\~nsu*' }) }
+          function Format-Listed { (@(Get-VoicenCredentials -Prefix 'Voicen/') | ForEach-Object { "$($_.Target) (type $($_.Type))" }) -join ', ' }
+          function Remove-Link([string]$p) { if (Test-Path -LiteralPath $p) { $i = Get-Item -LiteralPath $p -Force; if ($i.LinkType) { $i.Delete() } } }
+          function Remove-All {
+            $failed = 0
+            try { Remove-VoicenCredential -Target $gone } catch { $failed++; Write-Host "cleanup: $($_.Exception.Message)" }
+            Remove-ItemProperty -Path $run -Name 'Voicen' -ErrorAction SilentlyContinue
+            Remove-Link $nestedLink
+            Remove-Link $topLink
+            foreach ($d in @($callsElsewhere, $dataElsewhere)) { Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue }
+            $failed
+          }
+          Stop-AllVoicen
+          foreach ($p in @($exe, $uninstaller, $shortcut)) { if (-not (Test-Path -LiteralPath $p -PathType Leaf)) { throw "premise: $p not found before the uninstall" } }
+          if (-not (Test-Path -LiteralPath $uninstKey)) { throw "premise: the uninstall key $uninstKey not found before the uninstall" }
+          New-Item -ItemType Directory -Force -Path $callFolder, $callsElsewhere, $dataElsewhere | Out-Null
+          Set-Content -LiteralPath $meta -Value '{"ci":"planted by the purge-calls junction step"}' -NoNewline
+          Set-Content -LiteralPath $callsSentinel -Value 'sentinel behind the nested junction' -NoNewline
+          Set-Content -LiteralPath $dataSentinel -Value 'sentinel behind the top-level junction' -NoNewline
+          New-Item -ItemType Junction -Path $nestedLink -Target $callsElsewhere | Out-Null
+          New-Item -ItemType Junction -Path $topLink -Target $dataElsewhere | Out-Null
+          $settingsText = @{ calls = @{ storage_root = $callsElsewhere } } | ConvertTo-Json -Compress
+          Set-Content -LiteralPath $settings -Value $settingsText -NoNewline
+          New-ItemProperty -Path $run -Name 'Voicen' -PropertyType String -Value ('"' + $exe + '" --autostart') -Force | Out-Null
+          try {
+            foreach ($l in @($nestedLink, $topLink)) {
+              if ((Get-Item -LiteralPath $l -Force).LinkType -cne 'Junction') { throw "premise: $l is not a junction (LinkType '$((Get-Item -LiteralPath $l -Force).LinkType)')" }
+            }
+            foreach ($q in @($meta, $callsSentinel, $dataSentinel, $settings)) { if (-not (Test-Path -LiteralPath $q -PathType Leaf)) { throw "premise: $q not found" } }
+            if (-not (Test-Path -LiteralPath (Join-Path $nestedLink 'meta.json') -PathType Leaf)) { throw "premise: $callsSentinel is not reachable through $nestedLink" }
+            if (-not (Test-Path -LiteralPath (Join-Path $topLink 'sentinel.txt') -PathType Leaf)) { throw "premise: $dataSentinel is not reachable through $topLink" }
+            Add-VoicenCredential -Target $gone -Secret $fake
+            if (-not (Test-VoicenCredential -Target $gone)) { throw "premise: $gone was written but Test-VoicenCredential does not find it" }
+          } catch { [void](Remove-All); throw }
+          Write-Output "premise: installed, planted $meta, a junction $nestedLink -> $callsElsewhere, a junction $topLink -> $dataElsewhere, settings.json with calls.storage_root, the Run value and $gone in place"
+          $p = Start-Process -FilePath $uninstaller -ArgumentList '/S', '/PURGECALLS' -PassThru
+          $done = $false
+          $clock = [Diagnostics.Stopwatch]::StartNew()
+          while ($clock.Elapsed.TotalSeconds -lt 60 -and -not $done) {
+            Start-Sleep -Seconds 1
+            $done = -not (Test-Path -LiteralPath $dir) -and -not (Test-Path -LiteralPath $uninstKey) -and ($null -eq (Get-RunValue)) -and -not (Test-Path -LiteralPath $shortcut) -and (@(Get-VoicenCredentials -Prefix 'Voicen/').Count -eq 0) -and ((Get-UninstallerCopies).Count -eq 0)
+          }
+          while ($clock.Elapsed.TotalSeconds -lt 60 -and (Get-UninstallerCopies).Count -gt 0) { Start-Sleep -Seconds 1 }
+          Start-Sleep -Seconds 3
+          $bad = @()
+          if (Test-Path -LiteralPath $dir) { $bad += "$dir is still present 60 s after uninstall.exe /S /PURGECALLS (left: $((@(Get-ChildItem -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName.Substring($dir.Length) }) | Select-Object -First 20) -join ', '))" }
+          if (-not (Test-Path -LiteralPath $callsSentinel -PathType Leaf)) { $bad += "the sentinel $callsSentinel behind the junction $nestedLink was deleted: a deletion went through a reparse point" }
+          if (-not (Test-Path -LiteralPath $dataSentinel -PathType Leaf)) { $bad += "the sentinel $dataSentinel behind the junction $topLink was deleted: a deletion went through a reparse point" }
+          $left = @(Get-VoicenCredentials -Prefix 'Voicen/')
+          if ($left.Count -ne 0) { $bad += "Voicen/ credentials left after uninstall.exe /S /PURGECALLS: $(Format-Listed)" }
+          if ($null -ne (Get-RunValue)) { $bad += "the HKCU Run value Voicen ('$(Get-RunValue)') is still present after the uninstall" }
+          if (Test-Path -LiteralPath $shortcut) { $bad += "the shortcut $shortcut is still present after the uninstall" }
+          if (Test-Path -LiteralPath $uninstKey) { $bad += "the uninstall key $uninstKey is still present after the uninstall" }
+          if ((Get-UninstallerCopies).Count -gt 0) { $bad += "an uninstaller copy in %TEMP% is still running 60 s after the start" }
+          $cleanup = Remove-All
+          if ($bad) { throw ($bad -join '; ') }
+          if ($cleanup -ne 0) { throw "cleanup: a Remove-VoicenCredential above failed (Win32 error printed)" }
+          Write-Output "uninstall /S /PURGECALLS: $dir, the Run value, the shortcut, the uninstall key and every Voicen/ credential gone; both sentinels behind the junctions kept"
       # T-070 (decisions #93): the installer goes to the owner's Telegram chat on main and v* tags.
       # The premises run on every ref (wip included, P-016): red when there is not exactly one
       # *-setup.exe, its name lacks _<tauri.conf.json version>_ or that version is not the stamped
