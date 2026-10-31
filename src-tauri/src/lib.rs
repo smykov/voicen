@@ -34,6 +34,7 @@ pub mod paths;
 pub mod settings_ipc;
 pub mod settings_window;
 pub mod tray;
+pub mod vad;
 #[cfg(windows)]
 pub mod win;
 
@@ -300,7 +301,9 @@ fn release_launched_by_autostart() -> bool {
 /// the same source as `settings_list_microphones`), the clipboard, the paster, the engine of the settings (`engine::engine_for`), the
 /// tray and the overlay through [`dictation::ShellIndicator`], and the
 /// `SettingsService`'s own instances: `credentials`, its key store, and `hotkeys`,
-/// its hotkey registrar (T-055).
+/// its hotkey registrar (T-055). The speech detector is loaded here, once per process, from
+/// the app's resource directory (T-102); an unresolvable directory counts as an unavailable
+/// model, so the app still starts on the energy detector.
 #[cfg(windows)]
 fn release_ports<R: Runtime>(app: &AppHandle<R>, shared: SharedPorts) -> dictation::DictationPorts {
     dictation::DictationPorts {
@@ -313,6 +316,11 @@ fn release_ports<R: Runtime>(app: &AppHandle<R>, shared: SharedPorts) -> dictati
         indicator: Arc::new(dictation::ShellIndicator::new(app)),
         credentials: shared.credentials,
         hotkeys: shared.hotkeys,
+        detector: app
+            .path()
+            .resource_dir()
+            .map_err(|_| voicen_core::vad::VadError::Unavailable)
+            .and_then(|dir| vad::load_bundled(&dir)),
     }
 }
 

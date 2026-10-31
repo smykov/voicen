@@ -228,7 +228,8 @@ fn level(event: &LogEvent) -> &'static str {
         | LogEvent::CallStarted { .. }
         | LogEvent::CallStopped { .. }
         | LogEvent::CallRecovered { .. }
-        | LogEvent::FinalPassStage { .. } => INFO,
+        | LogEvent::FinalPassStage { .. }
+        | LogEvent::VadDetector { .. } => INFO,
         LogEvent::CallRefused { .. }
         | LogEvent::CallTrackSilent { .. }
         | LogEvent::CallStorageFailed { .. }
@@ -403,6 +404,10 @@ fn write_message(out: &mut String, event: &LogEvent) {
             out.push_str("transcript_invalid");
             pair(out, "rule", invalid_rule(*rule));
             pair(out, "segment", segment);
+        }
+        LogEvent::VadDetector { detector: tag } => {
+            out.push_str("vad");
+            pair(out, "detector", detector(*tag));
         }
     }
 }

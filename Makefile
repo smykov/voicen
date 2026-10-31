@@ -239,9 +239,12 @@ check-whisper:
 # have test = false, so there are no unit-test crates (T-092). --tests alone would check the lib
 # only with test-fakes on and pass a release-only error, and not check the bin. cargo check never links and builds no doctest;
 # linking, starting and running the shell stay the windows job's. Needs the gnu target and
-# mingw gcc baked into the core image (docker/rust.Dockerfile; `make core-image`).
+# mingw gcc baked into the core image (docker/rust.Dockerfile; `make core-image`). The shell links
+# voicen-whisper (T-102) and the image has no mingw g++: DOCS_RS=1, scoped to these two invocations
+# as in check-whisper, makes whisper-rs-sys skip its cmake build; only whisper-rs and whisper-rs-sys
+# read it, so the other crates' gnu builds stay checked.
 check-shell-windows:
-	scripts/tw-run core -- 'cargo check -p voicen --target x86_64-pc-windows-gnu && cargo check -p voicen --target x86_64-pc-windows-gnu --tests'
+	scripts/tw-run core -- 'DOCS_RS=1 cargo check -p voicen --target x86_64-pc-windows-gnu && DOCS_RS=1 cargo check -p voicen --target x86_64-pc-windows-gnu --tests'
 
 # The e2e step goes through the e2e entry (package.json scripts.e2e) on the host: it checks the
 # ui image is present and re-enters it through scripts/tw-run ui with --network none (T-064).

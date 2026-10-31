@@ -43,6 +43,12 @@ pub static SILERO_MODEL: ModelPin = ModelPin {
     sha256: "2aa269b785eeb53a82983a20501ddf7c1d9c48e33ab63a41391ac6c9f7fb6987",
 };
 
+/// Where the installer puts the model (T-102 invariant 1):
+/// `<resource_dir>/vad/<SILERO_MODEL.file_name>`. Never the data or the models directory.
+pub fn bundled_path(resource_dir: &Path) -> PathBuf {
+    resource_dir.join("vad").join(SILERO_MODEL.file_name)
+}
+
 /// Checks `path` against [`SILERO_MODEL`]; see [`verify_against`].
 pub fn verify(path: &Path) -> Result<(), VadError> {
     verify_against(path, &SILERO_MODEL)

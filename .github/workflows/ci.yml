@@ -170,11 +170,12 @@ jobs:
       # streaming, .part then rename), so this file repeats no value of the pin. Fetched on every
       # run, never kept between runs (885 KB; T-043 decides_on). Its own cargo invocation (T-033,
       # F-001). The test reads the directory from VOICEN_SILERO_TEST_MODEL; a missing model is red
-      # there, never a skip.
+      # there, never a skip. T-102: the directory is also the installer's model source, the one
+      # src-tauri/tauri.bundle-vad.json names (in the workspace, outside the build cache's target/).
       - name: Fetch the Silero VAD model (T-043)
         shell: bash
         env:
-          SILERO_DIR: ${{ runner.temp }}/voicen-silero
+          SILERO_DIR: ${{ github.workspace }}/.ci-vad-model
         run: |
           cargo run -p voicen-core --example fetch_model -- "$SILERO_DIR" silero
           echo "VOICEN_SILERO_TEST_MODEL=$SILERO_DIR" >> "$GITHUB_ENV"
@@ -190,7 +191,9 @@ jobs:
           path: ${{ runner.temp }}/voicen-whisper-models
           key: ${{ steps.whisper-tiny.outputs.cache-primary-key }}
       - run: cargo test -p voicen --no-fail-fast
-      - run: pnpm tauri build
+      # T-102 (invariant 4): the model reaches the installer only through this overlay; a merge
+      # patch that adds one key to bundle.resources, so tauri.conf.json never names the model.
+      - run: pnpm tauri build --config src-tauri/tauri.bundle-vad.json
       # T-099 (decisions #142, invariant 3): the effective whisper.cpp configuration cmake wrote,
       # in every whisper-rs-sys build dir under target/ (debug for cargo test, release for the
       # installer; a restored build cache can hold an older one). !cancelled(): runs after a red
@@ -209,12 +212,12 @@ jobs:
         shell: bash
         run: bash scripts/ci/opus-cmake-cache.sh target
       # T-099 (invariant 4, F-001 class): the exes that link whisper.cpp (the voicen-whisper test
-      # exes; voicen.exe from T-017 on) import no MSVCP140 / VCRUNTIME140 DLL. The runner has the
+      # exes, the shell's dictation_e2e, voicen.exe) import no MSVCP140 / VCRUNTIME140 DLL. The runner has the
       # VC redistributable, so only the import table proves it. make check: check-crt-imports.
       - name: C runtime of every exe linking whisper.cpp (dumpbin dependents, T-099)
         if: ${{ !cancelled() }}
         shell: bash
-        run: bash scripts/ci/crt-imports.sh target/debug/deps/transcribe_wav-*.exe target/debug/deps/silero_clips-*.exe target/release/voicen.exe
+        run: bash scripts/ci/crt-imports.sh target/debug/deps/transcribe_wav-*.exe target/debug/deps/silero_clips-*.exe target/debug/deps/dictation_e2e-*.exe target/release/voicen.exe
       - name: Install silently, launch, check the start, settings-load and reconcile log lines, the first-run settings.json, the Run value and the settings window
         shell: pwsh
         run: |

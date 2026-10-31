@@ -4932,6 +4932,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-single-instance",
  "voicen-core",
+ "voicen-whisper",
  "windows",
 ]
 

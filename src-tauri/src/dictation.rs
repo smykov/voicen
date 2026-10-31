@@ -2,8 +2,8 @@
 //! one function `run()` and the tests use to build the only `DictationSession` of an
 //! app. It builds the session from the managed `SettingsService`, one `LogObserver`
 //! over the managed `Log`, the given ports (the credential store must be the
-//! `SettingsService`'s own instance), the release-1 speech gate
-//! (`SpeechGate(Err(Unavailable), energy)`), `ChatPostProcessor` (T-074: stateless,
+//! `SettingsService`'s own instance), the speech gate over the given detector with the
+//! energy fallback (T-102), `ChatPostProcessor` (T-074: stateless,
 //! settings, key and timeouts come from each job, so the app and the tests run the
 //! same processor), an interim pending-audio store whose `put` fails (until T-007)
 //! and [`SettingsRequests`]; manages it as
@@ -25,7 +25,9 @@ use std::sync::Arc;
 
 use tauri::{AppHandle, Manager, Runtime};
 use voicen_core::audio::AudioBuffer;
-use voicen_core::diag::{Log, LogEvent, LogObserver, LogsNotice, LogsNoticeSink, WarningKind};
+use voicen_core::diag::{
+    DetectorTag, Log, LogEvent, LogObserver, LogsNotice, LogsNoticeSink, WarningKind,
+};
 use voicen_core::dictation::{DictationSession, SessionDeps};
 use voicen_core::pipeline::{EngineFactory, PipelineDeps};
 use voicen_core::platform::{
@@ -37,7 +39,7 @@ use voicen_core::secrets::CredentialStore;
 use voicen_core::settings::gate::SettingsTab;
 use voicen_core::settings::service::SettingsService;
 use voicen_core::settings::FieldId;
-use voicen_core::vad::{EnergyDetector, SpeechGate, VadError};
+use voicen_core::vad::{EnergyDetector, SpeechDetector, SpeechGate, VadError};
 
 use crate::overlay::{self, OverlayPart};
 use crate::settings_window::{self, OpenTarget};
@@ -57,6 +59,9 @@ pub struct DictationPorts {
     /// The `SettingsService`'s own hotkey registrar (`SettingsDeps::hotkeys`, T-055):
     /// the started hotkey thread is attached to it.
     pub hotkeys: Arc<HotkeyRegistrarHandle>,
+    /// The gate's primary detector: `vad::load_bundled` in `run()`, explicit in the tests.
+    /// An `Err` makes the energy detector decide (one `vad_fallback` at the first decision).
+    pub detector: Result<Box<dyn SpeechDetector>, VadError>,
 }
 
 /// The started dictation of an app: owns the hotkey thread. Dropping it stops the
@@ -114,13 +119,16 @@ pub fn start_dictation<R: Runtime>(
         indicator,
         credentials,
         hotkeys,
+        detector,
     } = ports;
     let cancel_key = CancelKeyHandle::new();
+    let gate = SpeechGate::new(detector, EnergyDetector::new());
+    let start_line = LogEvent::VadDetector {
+        detector: DetectorTag::from_name(gate.detector_name()),
+    };
     let session = DictationSession::start(SessionDeps {
         pipeline: PipelineDeps {
-            // Release 1 has no Silero (#62, T-043): the energy detector decides and
-            // the first decision writes the one `vad_fallback` line (FR-016).
-            gate: SpeechGate::new(Err(VadError::Unavailable), EnergyDetector::new()),
+            gate,
             credentials,
             clipboard,
             paster,
@@ -143,6 +151,9 @@ pub fn start_dictation<R: Runtime>(
             "the app already has a dictation session",
         )));
     }
+    // T-102 (#198): the one start line. The runner has no capture endpoint, so a hold
+    // never reaches the gate there; this line is the install smoke's observable.
+    log.write(start_line);
     // T-054: the logs notice reaches the user through this session. A failure the
     // log reported before (at start) is shown here, on this thread; it comes before
     // the hotkey thread starts, so a startup `notice.hotkey_unavailable` replaces it

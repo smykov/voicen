@@ -97,6 +97,15 @@ impl SpeechGate {
         }
     }
 
+    /// `name()` of the detector the next decision goes to first: the primary, or the
+    /// fallback when the primary is unavailable or has failed once. Runs no detector.
+    pub fn detector_name(&self) -> &'static str {
+        match &self.primary {
+            Some(primary) if !self.primary_failed.load(Ordering::Acquire) => primary.name(),
+            _ => SpeechDetector::name(&self.fallback),
+        }
+    }
+
     /// Infallible: the primary's answer, or the fallback's when the primary is
     /// unavailable or has failed once (latched for the gate's lifetime).
     ///
@@ -181,6 +190,21 @@ mod tests {
 
     fn calls(c: &Arc<AtomicUsize>) -> usize {
         c.load(Ordering::SeqCst)
+    }
+
+    #[test]
+    fn detector_name_is_the_detector_the_next_decision_goes_to() {
+        // T-102 (#198): the start line names what the gate holds. Bite: the primary's name
+        // after a failed load or after its latched failure; a name that runs a detector.
+        let (primary, n) = fake(vec![Err(VadError::Failed)], Ok(true));
+        let gate = SpeechGate::new(Ok(primary), EnergyDetector::new());
+        assert_eq!(gate.detector_name(), PRIMARY);
+        assert_eq!(calls(&n), 0);
+        gate.decide(&fixtures::speech_3s());
+        assert_eq!(gate.detector_name(), "energy");
+
+        let gate = SpeechGate::new(Err(VadError::Unavailable), EnergyDetector::new());
+        assert_eq!(gate.detector_name(), "energy");
     }
 
     #[test]

@@ -122,6 +122,10 @@ pub enum LogEvent {
     },
     /// `transcript_invalid rule=<…> segment=<n>` (WARN): the index, never the text.
     TranscriptInvalid { rule: InvalidRule, segment: u32 },
+    /// `vad detector=<silero|energy|other>` (T-102, decision #198): the one start line of
+    /// a process that starts dictation, naming the detector its speech gate holds. A
+    /// closed tag, never the model's path.
+    VadDetector { detector: DetectorTag },
 }
 
 /// A logged previous-session verdict (T-100): `PreviousSession` without `Clean`.
