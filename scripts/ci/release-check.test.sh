@@ -14,6 +14,11 @@
 #     run number (e.g. 99 and 100).
 #   - <installer dir> must hold exactly one *-setup.exe, and its name must contain _X.Y.Z_, else
 #     exit 1 (a wrong version names the installer's version and the tag's).
+#   - T-101 (decisions #135, #200): <installer dir> must also hold exactly one non-empty
+#     voicen-X.Y.Z-symbols.zip (the literal name, X.Y.Z of the tag), else exit 1 naming the
+#     expected file name. A zip of another version, an empty zip, or the right zip beside another
+#     version's symbols zip is refused. The zip's contents are not read (any non-empty bytes pass).
+#     gh is not asked while the zip is wrong.
 #   - With GH_TOKEN set: `gh release view <tag>` decides whether the release exists. Exit 0 ->
 #     exit 1 naming the tag (never overwrite); exit non-zero with "release not found" -> no release;
 #     any other gh failure -> exit 1 (cannot tell, never a pass), also one that says "Not Found"
@@ -121,7 +126,10 @@ EOF
 }
 
 # mk_dir <dir> <file names...>: an installer dir holding the named files (fake bytes) plus decoys
-# that are not *-setup.exe.
+# that are not *-setup.exe. T-101: for every file name carrying _X.Y.Z_ it also writes
+# voicen-X.Y.Z-symbols.zip (arbitrary non-empty bytes, not a real zip: the contents are not read),
+# unless nozip=1.
+nozip=0
 mk_dir() {
   local d="$1"
   shift
@@ -130,7 +138,12 @@ mk_dir() {
   printf 'decoy' > "$d/notes.txt"
   printf 'decoy' > "$d/Voicen_9.9.9_x64-setup.exe.sig"
   local f
-  for f in "$@"; do printf 'MZ' > "$d/$f"; done
+  for f in "$@"; do
+    printf 'MZ' > "$d/$f"
+    if [ "$nozip" = 0 ] && [[ "$f" =~ _([0-9]+\.[0-9]+\.[0-9]+)_ ]]; then
+      printf 'not a zip, never read %s\n' "$f" > "$d/voicen-${BASH_REMATCH[1]}-symbols.zip"
+    fi
+  done
 }
 
 failed=0
@@ -388,6 +401,57 @@ done_case
 call refuse-gh-error-echoes-token error-echo "$token" v0.1.200 100 "$tmp/repo" "$tmp/i"
 want_rc 1; gh_viewed v0.1.200
 says "Bad credentials for token *** (retry with token ***;" "gh's error with every token occurrence masked (C10)"
+done_case
+
+# ---- T-101: the symbols zip (decisions #135, #200) -----------------------------------------
+# Everything else is right: tag, run number, installer, release absent. Only the zip varies, and gh
+# (with a token) must not be asked while it is wrong.
+zname=voicen-0.1.200-symbols.zip
+zip_refused() { # <label>: exit 1, the expected file name named, no gh call, no pass
+  want_rc 1; says "$zname" "the expected symbols zip"; gh_not_called
+  ! grep -qF -- "release-check: ok" <<<"$out" || fail "a pass was reported with a wrong symbols zip"
+}
+nozip=1
+mk_dir "$tmp/i" Voicen_0.1.200_x64-setup.exe
+call refuse-symbols-zip-missing missing "$token" v0.1.200 100 "$tmp/repo" "$tmp/i"
+zip_refused
+done_case
+# A zip of another version only (the tag's name is not there).
+mk_dir "$tmp/i" Voicen_0.1.200_x64-setup.exe
+printf 'PK' > "$tmp/i/voicen-0.1.199-symbols.zip"
+call refuse-symbols-zip-other-version missing "$token" v0.1.200 100 "$tmp/repo" "$tmp/i"
+zip_refused
+done_case
+# Same version, other file name (case and prefix are part of the literal).
+mk_dir "$tmp/i" Voicen_0.1.200_x64-setup.exe
+printf 'PK' > "$tmp/i/Voicen-0.1.200-symbols.zip"
+call refuse-symbols-zip-other-name missing "$token" v0.1.200 100 "$tmp/repo" "$tmp/i"
+zip_refused
+done_case
+# The right name, empty.
+mk_dir "$tmp/i" Voicen_0.1.200_x64-setup.exe
+: > "$tmp/i/$zname"
+call refuse-symbols-zip-empty missing "$token" v0.1.200 100 "$tmp/repo" "$tmp/i"
+zip_refused
+done_case
+# The right zip beside another version's symbols zip: two symbols zips, refused.
+mk_dir "$tmp/i" Voicen_0.1.200_x64-setup.exe
+printf 'PK-right' > "$tmp/i/$zname"
+printf 'PK-old' > "$tmp/i/voicen-0.1.199-symbols.zip"
+call refuse-symbols-zip-two missing "$token" v0.1.200 100 "$tmp/repo" "$tmp/i"
+zip_refused
+done_case
+# The windows job's failure branch shape: the installer only, no token, a stamped tree.
+mk_dir "$tmp/i" Voicen_0.1.100_x64-setup.exe
+call refuse-symbols-zip-missing-failure-branch missing - v0.1.100 100 "$tmp/stamped" "$tmp/i"
+want_rc 1; says voicen-0.1.100-symbols.zip "the expected symbols zip"
+done_case
+nozip=0
+# Contents are not read: any non-empty bytes pass, and an unrelated file beside them does not matter.
+mk_dir "$tmp/i" Voicen_0.1.200_x64-setup.exe
+printf '\000\001 not a zip at all' > "$tmp/i/$zname"
+call pass-symbols-zip-arbitrary-bytes missing "$token" v0.1.200 100 "$tmp/repo" "$tmp/i"
+want_rc 0; says "$tmp/i/Voicen_0.1.200_x64-setup.exe" "the installer path"; gh_viewed v0.1.200
 done_case
 
 # ---- usage ---------------------------------------------------------------------------------

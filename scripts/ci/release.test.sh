@@ -19,6 +19,10 @@
 #     gh release create, no "release: ok" (a release never carries a missing or empty SHA-256).
 #   - Never prints GH_TOKEN, not even when gh echoes it: gh's output (`gh --version` and
 #     `gh release create`, success or failure) reaches the log with the token masked as `***`.
+#   - T-101 (decisions #135, #200): the installer dir also holds voicen-X.Y.Z-symbols.zip
+#     (release-check.sh refuses without it: no gh write call, nothing written). The one
+#     `gh release create` gets exactly three assets: the installer, that zip and SHA256SUMS.txt;
+#     SHA256SUMS.txt lists both the installer and the zip with their sha256sum hashes.
 #   - Exit 2: wrong number of arguments, nothing called.
 # Stub gh first on PATH (offline): it logs every call and, at the moment of `release create`,
 # copies the SHA256SUMS.txt and notes files it is given, so the test sees what gh would upload.
@@ -70,9 +74,14 @@ if [ "${1:-}" = release ] && [ "${2:-}" = create ]; then
     case "$a" in
       *SHA256SUMS.txt) [ -f "$a" ] && cp -- "$a" "$STUB_DIR/sums.at-create" ;;
       *-setup.exe) [ -f "$a" ] && basename -- "$a" >> "$STUB_DIR/installers.at-create" ;;
+      *-symbols.zip) [ -f "$a" ] && basename -- "$a" >> "$STUB_DIR/zips.at-create" ;;
       --notes-file=*) [ -f "${a#--notes-file=}" ] && cp -- "${a#--notes-file=}" "$STUB_DIR/notes.at-create" ;;
     esac
     if [ "$prev" = --notes-file ] && [ -f "$a" ]; then cp -- "$a" "$STUB_DIR/notes.at-create"; fi
+    # every existing file argument is an asset (flag values like --notes-file's are not assets)
+    if [ -f "$a" ] && [ "$prev" != --notes-file ] && [ "${a#--notes-file=}" = "$a" ]; then
+      basename -- "$a" >> "$STUB_DIR/assets.at-create"
+    fi
     prev="$a"
   done
   case "${STUB_CREATE:-ok}" in
@@ -105,11 +114,15 @@ mk_tree() {
   printf 'version = 4\n\n[[package]]\nname = "voicen"\nversion = "%s"\n\n[[package]]\nname = "voicen-core"\nversion = "%s"\n' "$v" "$v" > "$d/Cargo.lock"
 }
 
-# mk_dist <dir> <installer name>: an installer with bytes unique to its name.
+# mk_dist <dir> <installer name> [nozip]: an installer with bytes unique to its name, and (T-101)
+# voicen-X.Y.Z-symbols.zip for the installer's _X.Y.Z_ (arbitrary non-empty bytes), unless "nozip".
 mk_dist() {
   rm -rf "$1"
   mkdir -p "$1"
   printf 'MZ fake installer %s\n' "$2" > "$1/$2"
+  if [ "${3:-}" != nozip ] && [[ "$2" =~ _([0-9]+\.[0-9]+\.[0-9]+)_ ]]; then
+    printf 'not a zip, fake symbols %s\n' "${BASH_REMATCH[1]}" > "$1/voicen-${BASH_REMATCH[1]}-symbols.zip"
+  fi
 }
 
 failed=0
@@ -125,7 +138,7 @@ call() {
   label="$1"; ok=1
   local view="$2" create="$3" tok="$4"
   shift 4
-  rm -f "$tmp/gh.log" "$tmp/sums.at-create" "$tmp/notes.at-create" "$tmp/installers.at-create"
+  rm -f "$tmp/gh.log" "$tmp/sums.at-create" "$tmp/notes.at-create" "$tmp/installers.at-create" "$tmp/zips.at-create" "$tmp/assets.at-create"
   : > "$tmp/gh.log"
   ls -A "$tmp/dist" > "$tmp/dist.before" 2>/dev/null || : > "$tmp/dist.before"
   local -a envs=(env -u GH_TOKEN -u GITHUB_TOKEN PATH="${extra_path:+$extra_path:}$tmp/bin:$PATH" STUB_DIR="$tmp" STUB_VIEW="$view" STUB_CREATE="$create" STUB_VERSION="$stub_version")
@@ -159,7 +172,8 @@ inst=Voicen_0.1.200_x64-setup.exe
 
 # ---- pass: check, SHA256SUMS.txt, notes, one gh release create ------------------------------
 mk_dist "$tmp/dist" "$inst"
-want_sums="$(cd "$tmp/dist" && sha256sum -- "$inst")"
+zipn=voicen-0.1.200-symbols.zip
+want_sums="$(cd "$tmp/dist" && sha256sum -- "$inst" "$zipn" | LC_ALL=C sort)"
 call pass-v0.1.200-run-100 missing ok "$token" v0.1.200 100 "$tmp/repo" "$tmp/dist"
 want_rc 0
 # the release-exists check ran (release-check.sh with the token), before the one create
@@ -179,8 +193,12 @@ fi
 [ "$(cat "$tmp/installers.at-create" 2>/dev/null)" = "$inst" ] ||
   fail "the create did not get exactly the installer $inst (got: $(tr '\n' '|' < "$tmp/installers.at-create" 2>/dev/null))"
 [ -f "$tmp/sums.at-create" ] || fail "the create did not get an existing SHA256SUMS.txt"
-[ "$(cat "$tmp/sums.at-create" 2>/dev/null)" = "$want_sums" ] ||
-  fail "SHA256SUMS.txt is not sha256sum's line for the installer (want: $want_sums; got: $(cat "$tmp/sums.at-create" 2>/dev/null))"
+[ "$(LC_ALL=C sort "$tmp/sums.at-create" 2>/dev/null)" = "$want_sums" ] ||
+  fail "SHA256SUMS.txt is not sha256sum's lines for the installer and the symbols zip (want: $want_sums; got: $(cat "$tmp/sums.at-create" 2>/dev/null))"
+[ "$(cat "$tmp/zips.at-create" 2>/dev/null)" = "$zipn" ] ||
+  fail "the create did not get exactly the symbols zip $zipn (got: $(tr '\n' '|' < "$tmp/zips.at-create" 2>/dev/null))"
+[ "$(LC_ALL=C sort "$tmp/assets.at-create" 2>/dev/null)" = "$(printf '%s\n' "$inst" SHA256SUMS.txt "$zipn" | LC_ALL=C sort)" ] ||
+  fail "the create's assets are not exactly installer, symbols zip, SHA256SUMS.txt (got: $(tr '\n' '|' < "$tmp/assets.at-create" 2>/dev/null))"
 [ -f "$tmp/dist/SHA256SUMS.txt" ] || fail "no SHA256SUMS.txt in the installer dir"
 [ -f "$tmp/notes.at-create" ] || fail "the create did not get an existing --notes-file"
 grep -qF -- 0.1.200 "$tmp/notes.at-create" 2>/dev/null || fail "the notes do not name the version 0.1.200"
@@ -232,6 +250,18 @@ call refuse-gh-view-not-found-other error-404 ok "$token" v0.1.200 100 "$tmp/rep
 want_nonzero; gh_no_write; dist_unchanged
 grep -qE -- '^release view v0\.1\.200' "$tmp/gh.log" || fail "the release-exists check did not run"
 ! grep -qE -- '^release create ' "$tmp/gh.log" || fail "gh release create was called after a 404 from release view: $(tr '\n' '|' < "$tmp/gh.log")"
+done_case
+# T-101: no symbols zip beside the installer: release-check.sh refuses, no write.
+mk_dist "$tmp/dist" "$inst" nozip
+call refuse-check-symbols-zip-missing missing ok "$token" v0.1.200 100 "$tmp/repo" "$tmp/dist"
+want_nonzero; gh_no_write; dist_unchanged; says voicen-0.1.200-symbols.zip "the expected zip"
+! grep -qE -- '^release (view|create) ' "$tmp/gh.log" || fail "gh was asked although the symbols zip is missing: $(tr '\n' '|' < "$tmp/gh.log")"
+done_case
+# T-101: an empty symbols zip is refused too.
+mk_dist "$tmp/dist" "$inst"
+: > "$tmp/dist/voicen-0.1.200-symbols.zip"
+call refuse-check-symbols-zip-empty missing ok "$token" v0.1.200 100 "$tmp/repo" "$tmp/dist"
+want_nonzero; gh_no_write; dist_unchanged
 done_case
 # A bad tag.
 mk_dist "$tmp/dist" "$inst"
