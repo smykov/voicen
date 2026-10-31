@@ -4,6 +4,10 @@
     "TEAMWRIGHT_CLAUDE_MD_MAX_KB": "40"
   },
   "permissions": {
+    "allow": [
+      "Bash(scripts/tw-wip-push)",
+      "Bash(scripts/tw-wip-push *)"
+    ],
     "deny": [
       "Bash(git checkout -- *)",
       "Bash(git checkout .)",
@@ -17,6 +21,8 @@
       "Bash(git push * --force*)",
       "Bash(git push * -f)",
       "Bash(git push * -f *)",
+      "Bash(git -C * push*)",
+      "Bash(git -c * push*)",
       "Bash(rm -rf *)",
       "Bash(rm -fr *)"
     ]
@@ -69,6 +75,10 @@
           {
             "type": "command",
             "command": "bash \"$CLAUDE_PROJECT_DIR/scripts/hooks/test-guard.sh\""
+          },
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/scripts/hooks/wip-push-guard.sh\""
           }
         ]
       }

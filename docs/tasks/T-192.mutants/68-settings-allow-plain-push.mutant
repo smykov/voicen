@@ -1,0 +1,9 @@
+guarantee: AC-1: settings allow the push through scripts/tw-wip-push only
+file: .claude/settings.json
+added_by: test-writer
+--- old
+"Bash(scripts/tw-wip-push)",
+--- new
+"Bash(scripts/tw-wip-push)",
+      "Bash(git push *)",
+--- end

@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# tw-wip-push [<commit>] - the only push an agent may make: the CI-only wip/<ID> push of P-016
+# (T-192, decisions #202, #208, #219).
+#
+# Writes refs/heads/wip/<ID> on origin and nothing else. <ID> comes from the current branch tw/<ID>,
+# never from an argument. <commit> (default HEAD) must descend from the fork point of this branch
+# from main. wip/<ID> may move back: the ref is CI's, and a red run on a later commit needs that.
+#
+# Refused, with no ref moved: any other branch (main included: the main-tree orchestrator keeps the
+# plain `git push origin HEAD:wip/<ID>` of #202), a detached HEAD, more than one argument, an option
+# or refspec as the argument, a foreign commit, and TEAMWRIGHT_PAUSE.
+#
+# The pre-push hook runs, but it is not this script's pause check. It looks only at the top of the
+# tree it runs in, so a linked worktree misses a pause set in the main tree, and it exits early on
+# TEAMWRIGHT_ALLOW_PUSH, a human override this path does not honour.
+#
+# Exit 0: pushed. Any other exit: refused or the push failed; the push's own error is printed.
+set -uo pipefail
+
+refuse() {
+  echo "tw-wip-push: REFUSED - $1" >&2
+  exit 2
+}
+
+# No repository, config or hook override comes in through the environment.
+unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_PREFIX
+unset GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT TEAMWRIGHT_ALLOW_PUSH
+
+[ "$#" -le 1 ] || refuse "takes one commit at most, got $# arguments"
+arg="${1-HEAD}"
+case "$arg" in
+  "") refuse "an empty commit argument" ;;
+  -*) refuse "takes no options: $arg" ;;
+  *:*) refuse "takes a commit, not a refspec: $arg" ;;
+esac
+
+top="$(git rev-parse --show-toplevel 2>/dev/null)" || refuse "not in a git working tree"
+cd "$top" || refuse "cannot enter $top"
+
+# The pause first. Each place counts on its own: the variable adds a file, it does not replace one.
+common="$(git rev-parse --git-common-dir 2>/dev/null)" || refuse "cannot find the main tree"
+main_tree="$(cd "$common/.." 2>/dev/null && pwd)" || refuse "cannot find the main tree"
+for pause in "${TEAMWRIGHT_PAUSE_FILE:-}" "$top/TEAMWRIGHT_PAUSE" "$main_tree/TEAMWRIGHT_PAUSE"; do
+  [ -z "$pause" ] || [ ! -e "$pause" ] || refuse "team is paused ($pause exists)"
+done
+
+branch="$(git symbolic-ref -q HEAD)" || refuse "detached HEAD, not on a tw/<ID> branch"
+[[ "$branch" =~ ^refs/heads/tw/([A-Z][A-Z0-9]*-[0-9]+)$ ]] || refuse "not on a tw/<ID> branch: $branch"
+id="${BASH_REMATCH[1]}"
+
+sha="$(git rev-parse --verify -q "$arg^{commit}")" || refuse "not a commit: $arg"
+base=""
+for ref in refs/heads/main refs/remotes/origin/main; do
+  if git rev-parse --verify -q "$ref^{commit}" >/dev/null; then
+    base="$ref"
+    break
+  fi
+done
+[ -n "$base" ] || refuse "no main branch to find the fork point from"
+fork="$(git merge-base "$base" HEAD)" || refuse "$branch has no fork point from main"
+git merge-base --is-ancestor "$fork" "$sha" || refuse "$arg does not descend from the fork point $fork"
+
+# The refspec is explicit, so a configured push refspec and push.default do not apply; the two flags
+# stop push.followTags and push.recurseSubmodules from writing anything else.
+git push --no-follow-tags --no-recurse-submodules origin "+$sha:refs/heads/wip/$id"

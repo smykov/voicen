@@ -1,0 +1,8 @@
+guarantee: AC-3: a PreToolUse hook refuses the git -C and git -c push forms
+file: scripts/hooks/wip-push-guard.sh
+added_by: test-writer
+--- old
+lex.whitespace = " \t\r"
+--- new
+lex.whitespace = " \t\r\n"
+--- end

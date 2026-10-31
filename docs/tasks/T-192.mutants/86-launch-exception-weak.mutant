@@ -1,0 +1,8 @@
+guarantee: #219: the launch keeps the kit's denials and states the exception; a kit without them is refused
+file: scripts/tw-launch
+added_by: test-writer
+--- old
+no other push is allowed, by any command.
+--- new
+other pushes are up to you.
+--- end

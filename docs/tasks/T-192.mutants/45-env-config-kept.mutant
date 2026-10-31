@@ -1,0 +1,10 @@
+guarantee: AC-2: runs the hooks
+file: scripts/tw-wip-push
+added_by: test-writer
+--- old
+unset GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT TEAMWRIGHT_ALLOW_PUSH
+
+--- new
+unset TEAMWRIGHT_ALLOW_PUSH
+
+--- end

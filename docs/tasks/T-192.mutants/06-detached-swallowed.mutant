@@ -1,0 +1,8 @@
+guarantee: AC-2: failure branch: a non-tw branch is refused and no ref moves
+file: scripts/tw-wip-push
+added_by: test-writer
+--- old
+branch="$(git symbolic-ref -q HEAD)" || refuse "detached HEAD, not on a tw/<ID> branch"
+--- new
+branch="$(git symbolic-ref -q HEAD)" || branch=refs/heads/tw/T-900
+--- end

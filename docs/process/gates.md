@@ -26,6 +26,7 @@ them as `python3 <kit>/scripts/tw-install.py ...`, where `<kit>` is the plugin d
 | [Deny list](#deny-list) | `.claude/settings.json` permissions | T3 | Destroying uncommitted work or shared history |
 | [Patch guard](#patch-guard) | git `commit-msg` | T2 (warns; blocking is opt-in) | "One more `if`" fixes in an area already fixed before |
 | [DRAIN / pause](#drain-and-pause) | git `pre-push` | T3 | Unapproved work leaving the machine; pushes during a pause |
+| [WIP push guard](#wip-push-guard) | Claude Code `PreToolUse` (Bash), project hook | T3 (best effort) | The `git -C` / `git -c` push forms that the push denies and `pre-push` miss |
 | [Secret scan](#secret-scan) | git `pre-commit` (CI only if the project adds it) | T3 | Tokens, keys, `.env`, local settings in history |
 | [CLAUDE.md budget](#claudemd-budget) | Claude Code `SessionStart` + git `pre-commit` | T2 | A context file that grows into a second docs folder |
 | [Gate runs](#gate-runs-tw-gate) | `scripts/tw-gate <area>`, called by the developer, the flow, the reviewer and the validator | T1 (tooling) | The same full gate run by four roles on the same code; gate output lost to `\| tail`; a docs commit invalidating the cache; a gate cut by the 10-minute Bash limit; the server suite run for a CI-only change |
@@ -542,6 +543,22 @@ still undelivered: the DRAIN range of a later push ignores wip branches.
 
 **Deliberate exits:** `tail_code: ratified` in the task record (owner's decision, stays
 in history); human, one-off: `TEAMWRIGHT_ALLOW_PUSH=1 git push`.
+
+## WIP push guard
+
+`scripts/hooks/wip-push-guard.sh`, `scripts/tw-wip-push`, `scripts/tw-launch` · T3, best effort · project addition (T-192, decisions #219), not a kit gate
+
+**Incident it prevents.** A headless stage session in a worktree must make the CI-only `wip/<ID>` push of P-016, but the kit's launch denies `git push` and tells the session not to push. A plain allow rule cannot override that deny, and a wildcard rule for the push also matches extra refspecs and `git -C <other repo>`. Only a program can pin source and destination.
+
+**The sanctioned push.** `scripts/tw-wip-push [<commit>]`, from a worktree on branch `tw/<ID>`: it writes `refs/heads/wip/<ID>` on `origin` and no other ref (refspec `+<commit>:refs/heads/wip/<ID>`, so wip may move back). `<ID>` comes from the branch, never from an argument. The commit (default `HEAD`) must descend from the fork point from `main`. It refuses, with no ref moved: any other branch (the main-tree orchestrator keeps the plain `git push origin HEAD:wip/<ID>`, #202), a detached HEAD, more than one argument, an option or refspec as the argument, a foreign commit, and a `TEAMWRIGHT_PAUSE` in the worktree or the main tree. The `pre-push` hook still runs; `TEAMWRIGHT_ALLOW_PUSH` is not honoured. `.claude/settings.json` allows `Bash(scripts/tw-wip-push)` and `Bash(scripts/tw-wip-push *)` and no other push.
+
+**Launch.** Parallel stage sessions are started with `scripts/tw-launch <ID>...`, which runs the kit's `launch` with `TEAMWRIGHT_CLAUDE_ARGS` set to the kit's defaults, denials kept, and the one prompt sentence changed to allow only `scripts/tw-wip-push`. It reads the arguments from the installed kit and refuses to start if the kit's sentence or a denial is gone. A launch through the kit's own `launch` keeps "Do not push" and the session stops at the push as before.
+
+**Hook refuses** a Bash command in which git runs `push` with any git option before the subcommand (`-C`, `-c`, `--git-dir` ...), also behind an env prefix, in a chain, a subshell, a command substitution, `sh -c`, `eval` or a heredoc script. The settings also deny `Bash(git -C * push*)` and `Bash(git -c * push*)`. A plain `git push` is left to the push denies and `pre-push`; `scripts/tw-wip-push` and `git -C . stash push` or `commit -m "... push"` pass. A refusal blocks in every gate mode; an internal error fails open.
+
+**Limits.** A deny is no boundary: the hook is a best-effort read of the command text and does not see a command built at run time (`$X push`), a script file that pushes, `git -c alias.p=push p`, or `find -exec`. `git push --no-verify` and `-c core.hooksPath` remain outside every gate here; CI repeats the checks (Known limitations).
+
+**Deliberate exits:** a human, one-off: `TEAMWRIGHT_ALLOW_PUSH=1 git push` (DRAIN); the hook has no override, remove its entry from `.claude/settings.json` (owner). `make check-wip-push` pins the script, the hook and the settings (`docs/decisions/ci-toolchain.md` › Guard table).
 
 ## Secret scan
 

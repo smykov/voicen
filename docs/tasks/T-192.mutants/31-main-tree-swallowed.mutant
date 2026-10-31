@@ -1,0 +1,8 @@
+guarantee: AC-2: stops on TEAMWRIGHT_PAUSE
+file: scripts/tw-wip-push
+added_by: test-writer
+--- old
+main_tree="$(cd "$common/.." 2>/dev/null && pwd)" || refuse "cannot find the main tree"
+--- new
+main_tree="$top"
+--- end

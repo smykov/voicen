@@ -1,0 +1,8 @@
+guarantee: AC-3: the hook leaves the rest alone, an escaped backtick is literal
+file: scripts/hooks/wip-push-guard.sh
+added_by: orchestrator
+--- old
+        if c == "\\":
+--- new
+        if False:
+--- end

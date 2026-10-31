@@ -1,0 +1,8 @@
+guarantee: AC-2: writes only refs/heads/wip/<ID> on origin
+file: scripts/tw-wip-push
+added_by: test-writer
+--- old
+"+$sha:refs/heads/wip/$id"
+--- new
+"+$sha:refs/heads/wip/$id-x"
+--- end

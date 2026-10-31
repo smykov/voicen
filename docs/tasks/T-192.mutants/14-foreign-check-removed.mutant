@@ -1,0 +1,8 @@
+guarantee: AC-2: failure branch: a foreign commit is refused and no ref moves
+file: scripts/tw-wip-push
+added_by: test-writer
+--- old
+git merge-base --is-ancestor "$fork" "$sha" || refuse "$arg does not descend from the fork point $fork"
+--- new
+
+--- end

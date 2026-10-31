@@ -1,0 +1,8 @@
+guarantee: #219: the launch keeps the kit's denials and states the exception; a kit without them is refused
+file: scripts/tw-launch
+added_by: test-writer
+--- old
+KIT_DENIALS = ("Bash(git push:*)", "Bash(git merge:*)", "Bash(gh:*)")
+--- new
+KIT_DENIALS = ("Bash(git merge:*)", "Bash(gh:*)")
+--- end

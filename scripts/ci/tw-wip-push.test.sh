@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # T-192 (decisions #208, #219; docs/tasks/T-192.md): host test of the only sanctioned CI push.
 #
-# Three subjects, one guarantee each:
+# Four subjects, one guarantee each:
 #   A. scripts/tw-wip-push [<commit>] writes refs/heads/wip/<ID> on origin and nothing else, <ID>
 #      from branch tw/<ID>, <commit> (default HEAD) descending from the fork point from main;
 #      anything else is refused with no ref moved; the pre-push hook runs; TEAMWRIGHT_PAUSE stops it.
@@ -10,6 +10,8 @@
 #      object with permissionDecision=deny, exit 0; allow = no output, exit 0).
 #   C. .claude/settings.json: allow holds the two script rules only, deny holds the push forms,
 #      PreToolUse wires the hook.
+#   D. scripts/tw-launch keeps the kit's denials and states the exception, against a fake kit; a kit
+#      without the sentence or a denial is refused and nothing starts.
 #
 # Safety (A): the script under test is COPIED into a temporary clone and run from there, so neither
 # its own location nor the working directory leads back to this repository. Its origin is a
@@ -234,6 +236,20 @@ before="$(refs "$bare")"
 push_run "$wt"
 want_wip a-linked-worktree "$c2" "$before"
 
+# An annotated tag names the commit it points at: the ref written is a branch, so it holds the commit.
+fixture a-annotated-tag
+g tag -a -m tagged t1 "$c1"
+before="$(refs "$bare")"
+push_run "$clone" t1
+want_wip a-explicit-annotated-tag "$c1" "$before"
+
+# A worktree's clone may have no local main: the fork point then comes from origin/main.
+fixture a-no-local-main
+g branch -q -D main
+before="$(refs "$bare")"
+push_run "$clone" "$c1"
+want_wip a-no-local-main-uses-origin-main "$c1" "$before"
+
 # ---- Refused: the branch ----------------------------------------------------------------------
 refuse_on_branch() {
   local c="$1" branch="$2"
@@ -253,6 +269,7 @@ refuse_on_branch r-branch-prefix-like "xtw/T-900"
 refuse_on_branch r-branch-wip "wip/T-900"
 refuse_on_branch r-branch-not-an-id "tw/not-an-id"
 refuse_on_branch r-branch-nested "tw/T-901/extra" # T-900 exists as a ref: git forbids tw/T-900/x
+refuse_on_branch r-branch-embedded "x/refs/heads/tw/T-902"
 fixture r-detached
 g switch -q --detach "$c2"
 before="$(refs "$bare")"
@@ -316,6 +333,35 @@ before="$(refs "$bare")"
 push_run "$clone" "$(g rev-parse "HEAD^{tree}")"
 want_refused r-foreign-tree-object "$before"
 
+# Local main is ahead of origin/main and the branch forked from it: the fork point is the local one,
+# so origin/main's tip (below it) is foreign.
+fixture r-foreign-local-main-ahead
+g switch -q main
+printf 'local\n' >"$clone/file"
+g commit -q -am "chore: main, not pushed yet"
+g switch -q -C tw/T-900
+printf 'five\n' >"$clone/file"
+g commit -q -am "T-900 on the new fork"
+before="$(refs "$bare")"
+push_run "$clone" "$fork"
+want_refused r-foreign-below-local-fork-point "$before"
+
+# No main anywhere: there is no fork point to descend from.
+fixture r-no-main
+g branch -q -D main
+g update-ref -d refs/remotes/origin/main
+before="$(refs "$bare")"
+push_run "$clone"
+want_refused r-no-main-at-all "$before"
+
+# A tw/ branch with no history shared with main: no fork point, so even its own HEAD is foreign.
+fixture r-no-fork
+g checkout -q --orphan tw/T-901
+g commit -q -m "T-901 unrelated"
+before="$(refs "$bare")"
+push_run "$clone"
+want_refused r-no-fork-point "$before"
+
 # ---- TEAMWRIGHT_PAUSE -------------------------------------------------------------------------
 fixture p-pause
 touch "$clone/TEAMWRIGHT_PAUSE"
@@ -348,6 +394,33 @@ touch "$clone/TEAMWRIGHT_PAUSE"
 before="$(refs "$bare")"
 push_run "$wt"
 want_refused p-pause-in-main-tree-stops-linked-worktree "$before"
+
+# The script's own check, not pre-push's: with no pre-push hook at all, each place still stops it.
+fixture p-nohook-root
+g config --unset core.hooksPath
+touch "$clone/TEAMWRIGHT_PAUSE"
+before="$(refs "$bare")"
+push_run "$clone"
+want_refused p-pause-at-root-without-hook "$before"
+
+fixture p-nohook-file
+g config --unset core.hooksPath
+touch "$tmp/p-nohook-file/pause"
+before="$(refs "$bare")"
+TEAMWRIGHT_PAUSE_FILE="$tmp/p-nohook-file/pause" push_run "$clone"
+want_refused p-pause-file-env-without-hook "$before"
+
+fixture p-nohook-own-linked
+g config --unset core.hooksPath
+wt="$tmp/p-nohook-own-linked/wt"
+g switch -q main
+g worktree add -q "$wt" tw/T-900
+mkdir -p "$wt/scripts"
+[ ! -e "$script" ] || cp -p "$script" "$wt/scripts/tw-wip-push"
+touch "$wt/TEAMWRIGHT_PAUSE"
+before="$(refs "$bare")"
+push_run "$wt"
+want_refused p-pause-in-own-linked-tree-without-hook "$before"
 
 # ---- No other ref, whatever the clone's config says -------------------------------------------
 # Remote fixed: another remote configured as the default gets nothing, origin gets the wip ref.
@@ -391,6 +464,61 @@ g branch -q tw/T-901 "$msg"
 before="$(refs "$bare")"
 push_run "$clone" "$msg"
 want_wip o-id-is-the-current-branch "$msg" "$before"
+
+# With push.recurseSubmodules=on-demand git would also push the submodule's commit to its own remote.
+fixture o-submodule
+subbare="$tmp/o-submodule/sub.git"
+git init -q --bare -b main "$subbare"
+subwork="$tmp/o-submodule/subwork"
+git clone -q "$subbare" "$subwork" 2>/dev/null
+git -C "$subwork" symbolic-ref HEAD refs/heads/main
+git -C "$subwork" commit -q --allow-empty -m "sub one"
+git -C "$subwork" push -q origin main
+g -c protocol.file.allow=always submodule --quiet add "$subbare" sub
+git -C "$clone/sub" commit -q --allow-empty -m "sub, not pushed"
+g add -A
+g commit -q -m "T-900 moves the submodule"
+c3="$(g rev-parse HEAD)"
+g config push.recurseSubmodules on-demand
+subbefore="$(refs "$subbare")"
+before="$(refs "$bare")"
+push_run "$clone"
+want_wip o-no-submodule-push-exit "$c3" "$before"
+if [ "$(refs "$subbare")" = "$subbefore" ]; then
+  pass o-submodule-remote-untouched
+else
+  fail o-submodule-remote-untouched "$(refs "$subbare")"
+fi
+
+# ---- No repository, config or hook override through the environment ---------------------------
+# Another repository named by GIT_DIR: the script still acts on the tree it runs in.
+fixture o-env-git-dir
+otherbare="$tmp/o-env-git-dir/other.git"
+git init -q --bare -b main "$otherbare"
+git clone -q "$otherbare" "$tmp/o-env-git-dir/otherclone" 2>/dev/null
+git -C "$tmp/o-env-git-dir/otherclone" symbolic-ref HEAD refs/heads/tw/T-901
+git -C "$tmp/o-env-git-dir/otherclone" commit -q --allow-empty -m "other"
+before="$(refs "$bare")"
+GIT_DIR="$tmp/o-env-git-dir/otherclone/.git" push_run "$clone"
+want_wip o-env-git-dir-ignored "$c2" "$before"
+if [ -z "$(refs "$otherbare")" ]; then
+  pass o-env-git-dir-other-remote-untouched
+else
+  fail o-env-git-dir-other-remote-untouched "$(refs "$otherbare")"
+fi
+
+# A config override of core.hooksPath must not drop the pre-push hook, whose refusal then stops it.
+fixture o-env-config-parameters
+touch "$hooks/refuse"
+before="$(refs "$bare")"
+GIT_CONFIG_PARAMETERS="'core.hooksPath=/dev/null'" push_run "$clone"
+want_refused o-env-config-parameters-keep-the-hook "$before"
+
+fixture o-env-config-count
+touch "$hooks/refuse"
+before="$(refs "$bare")"
+GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null push_run "$clone"
+want_refused o-env-config-count-keeps-the-hook "$before"
 
 # ==== B. scripts/hooks/wip-push-guard.sh, fed Claude Code hook JSON ============================
 hookdir="$tmp/hook-cwd"
@@ -463,8 +591,29 @@ FOO=1 git -C . push origin main
 env FOO=1 git -c x=y push origin main
 sh -c 'git -C . push origin main'
 bash -c "git -c x=y push origin main"
+git --git-dir .git push origin main
+git --work-tree . push origin main
+git --git-dir=.git push origin main
+command git -C . push origin main
+timeout 5 git -c x=y push origin main
+sudo git -C . push origin main
+eval git -C . push origin main
+! git -C . push origin main
+if git -C . push origin main; then true; fi
+git -C . push origin main >/dev/null 2>&1
+>out git -C . push origin main
+echo "$(git -C . push origin main)"
+echo $(git -c x=y push origin main)
+echo "`git -C . push origin main`"
+echo `git -C . push origin main`
+echo `sh -c 'git -C . push origin main'`
+echo "it's `git -C . push origin main`"
+echo 'plain' `git -C . push origin main`
+echo "$(sh -c 'git -C . push origin main')"
+git -C . push origin 'unbalanced
 CMDS
 hook_case deny "$(printf 'true\ngit -C . push origin main')"
+hook_case deny "$(printf 'bash <<EOF\ngit -C . push origin main\nEOF')"
 hook_case deny "$(printf 'true\ngit -c x=y push origin main')"
 
 # Not refused: the script, and git with the same options doing something else.
@@ -480,9 +629,18 @@ git -C . stash push
 git -C . remote get-url --push origin
 git -C docs status && echo push
 git -C . commit -m "do not push"
+git push origin main
+echo git -C . push origin main
+echo 'git -C . push origin main'
+echo 'a `git -C . push origin main` b'
+echo '$(git -C . push origin main)'
+echo \`git -C . push origin main\`
+git -C . status > push
 git status
 echo git
 CMDS
+
+hook_case silent "$(printf 'cat <<EOF\ngit -C . push origin main\nEOF')"
 
 # Only a PreToolUse of Bash is its business; a broken input follows the fail-open contract.
 hook_other() {
@@ -569,6 +727,190 @@ while IFS= read -r line; do
     "FAIL "*) l="${line#FAIL }"; fail "settings: ${l%% :: *}" "${l#* :: }" ;;
   esac
 done <<<"$settings_out"
+
+# ==== D. scripts/tw-launch, dry: a fake kit records what it is started with =====================
+# No claude session starts: TEAMWRIGHT_KIT_DIR points at a fake kit, whose launcher writes its
+# arguments and $TEAMWRIGHT_CLAUDE_ARGS to a file and exits. Nothing but the fake kit is executed.
+launch="$root/scripts/tw-launch"
+GOOD_DENY='Bash(git push:*) Bash(git merge:*) Bash(gh:*)'
+GOOD_PROMPT='AUTONOMOUS RUN. Stop on a question. Do not push, do not merge. The end.'
+
+# fake_kit <dir> <disallowedTools value> <prompt>
+fake_kit() {
+  mkdir -p "$1/scripts"
+  DENY="$2" PROMPT="$3" python3 -I -c '
+import os, sys
+sys.stdout.write("""import json, os, sys
+DEFAULT_ARGS = ["--permission-mode", "acceptEdits", "--allowedTools", "Bash Read",
+                "--disallowedTools", %r, "--append-system-prompt", %r]
+if __name__ == "__main__":
+    with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "started"), "w") as f:
+        json.dump({"argv": sys.argv[1:], "args": os.environ.get("TEAMWRIGHT_CLAUDE_ARGS")}, f)
+""" % (os.environ["DENY"], os.environ["PROMPT"]))' >"$1/scripts/tw-parallel.py"
+}
+
+# launch_run <kit dir> <args...>: sets $lout, $lgot.
+launch_run() {
+  local kit="$1"
+  shift
+  lout="$(TEAMWRIGHT_KIT_DIR="$kit" timeout 30 "$launch" "$@" 2>"$tmp/launch.err" </dev/null)"
+  lgot=$?
+}
+
+# Refused: exit 2 (not a crash), no value printed, the kit's launcher not started.
+want_launch_refused() {
+  local c="$1" kit="$2"
+  shift 2
+  rm -f "$kit/scripts/started"
+  launch_run "$kit" "$@"
+  if [ ! -x "$launch" ]; then
+    fail "$c: scripts/tw-launch missing or not executable"
+  elif [ "$lgot" -ne 2 ]; then
+    fail "$c: exit $lgot (want 2)" "$lout$(cat "$tmp/launch.err")"
+  elif [ -n "$lout" ]; then
+    fail "$c: printed a value" "$lout"
+  elif [ -e "$kit/scripts/started" ]; then
+    fail "$c: the kit's launcher started" "$(cat "$kit/scripts/started")"
+  else
+    pass "$c"
+  fi
+}
+
+# print_args_check <case> <value>: the value keeps every denial and every other argument, and the
+# only prompt change is the sentence: the kit's gone, the exception there.
+print_args_check() {
+  local r
+  r="$(VALUE="$2" python3 -I -c '
+import os, shlex
+a = shlex.split(os.environ["VALUE"])
+opt = {k: v for k, v in zip(a[::2], a[1::2])}
+bad = []
+deny = opt.get("--disallowedTools", "")
+for d in ("Bash(git push:*)", "Bash(git merge:*)", "Bash(gh:*)"):
+    if d not in deny:
+        bad.append("denial lost: " + d)
+p = opt.get("--append-system-prompt", "")
+if "Do not push, do not merge." in p:
+    bad.append("the kit sentence is still there")
+if "scripts/tw-wip-push" not in p or "no other push" not in p or "Do not merge." not in p:
+    bad.append("the exception sentence is missing: " + p)
+if len(a) % 2 or opt.get("--permission-mode") != "acceptEdits" or "Bash" not in opt.get("--allowedTools", "").split():
+    bad.append("other arguments changed: " + repr(a))
+print("; ".join(bad))' 2>&1)"
+  if [ -z "$r" ]; then pass "$1"; else fail "$1" "$r"; fi
+}
+
+if [ ! -x "$launch" ]; then
+  fail "launch: scripts/tw-launch missing or not executable"
+fi
+
+kit="$tmp/kit-good"
+fake_kit "$kit" "$GOOD_DENY" "$GOOD_PROMPT"
+launch_run "$kit" --print-args
+if [ "$lgot" -ne 0 ]; then
+  fail "launch print-args: exit $lgot" "$(cat "$tmp/launch.err")"
+else
+  print_args_check "launch print-args: denials kept, exception stated" "$lout"
+  if [ -e "$kit/scripts/started" ]; then
+    fail "launch print-args: starts nothing" "$(cat "$kit/scripts/started")"
+  else
+    pass "launch print-args: starts nothing"
+  fi
+  case "$lout" in
+    *"AUTONOMOUS RUN. Stop on a question."*"The end."*) pass "launch print-args: the rest of the prompt stays" ;;
+    *) fail "launch print-args: the rest of the prompt stays" "$lout" ;;
+  esac
+fi
+printargs="$lout"
+
+# The launch itself: the kit's launcher gets these ids, this project and the same value.
+launch_run "$kit" T-900 T-901
+started="$(WANT="$printargs" ROOT_DIR="$root" python3 -I -c '
+import json, os, sys
+d = json.load(open(sys.argv[1]))
+want = ["launch", "T-900", "T-901", "--project", os.environ["ROOT_DIR"]]
+print("ok" if d["argv"] == want and d["args"] == os.environ["WANT"] else repr(d))' "$kit/scripts/started" 2>&1)"
+if [ "$lgot" -eq 0 ] && [ "$started" = ok ]; then
+  pass "launch: the kit gets the ids, the project and the changed args"
+else
+  fail "launch: the kit gets the ids, the project and the changed args" "exit $lgot; $started"
+fi
+
+# A kit without the sentence, or with it twice, or short of a denial: nothing starts, either mode.
+kit="$tmp/kit-no-sentence"
+fake_kit "$kit" "$GOOD_DENY" 'AUTONOMOUS RUN. Do not merge.'
+want_launch_refused "launch refused: kit without the sentence, print-args" "$kit" --print-args
+want_launch_refused "launch refused: kit without the sentence, launch" "$kit" T-900
+kit="$tmp/kit-two-sentences"
+fake_kit "$kit" "$GOOD_DENY" "$GOOD_PROMPT"
+python3 -I -c '
+import sys
+p = sys.argv[1]; t = open(p).read()
+open(p, "w").write(t.replace("\"--permission-mode\", \"acceptEdits\",", "\"--permission-mode\", \"Do not push, do not merge.\","))' "$kit/scripts/tw-parallel.py"
+want_launch_refused "launch refused: the sentence in two arguments" "$kit" T-900
+for d in 'Bash(git push:*)' 'Bash(git merge:*)' 'Bash(gh:*)'; do
+  kit="$tmp/kit-short-$d"
+  fake_kit "$kit" "${GOOD_DENY/"$d"/}" "$GOOD_PROMPT"
+  want_launch_refused "launch refused: kit does not deny $d, print-args" "$kit" --print-args
+  want_launch_refused "launch refused: kit does not deny $d, launch" "$kit" T-900
+done
+# A denial only named in the prompt denies nothing.
+kit="$tmp/kit-deny-in-prompt"
+fake_kit "$kit" 'Bash(git merge:*) Bash(gh:*)' "$GOOD_PROMPT Bash(git push:*)"
+want_launch_refused "launch refused: a denial only in the prompt" "$kit" T-900
+# No launcher in the kit; no arguments; an option among the ids.
+want_launch_refused "launch refused: no kit launcher" "$tmp/kit-empty" T-900
+want_launch_refused "launch refused: no arguments" "$tmp/kit-good"
+want_launch_refused "launch refused: an option among the ids" "$tmp/kit-good" T-900 --force
+want_launch_refused "launch refused: an option with print-args" "$tmp/kit-good" --print-args --force
+
+# Without $TEAMWRIGHT_KIT_DIR the kit is the version in .teamwright/installed.json, under $HOME.
+lroot="$tmp/launch-root"
+lhome="$tmp/launch-home"
+mkdir -p "$lroot/scripts" "$lroot/.teamwright"
+if [ -x "$launch" ]; then cp -p "$launch" "$lroot/scripts/tw-launch"; fi
+fake_kit "$lhome/.claude/plugins/cache/teamwright/teamwright/9.9.9" "$GOOD_DENY" "$GOOD_PROMPT"
+printf '{"@kit": {"version": "9.9.9"}}\n' >"$lroot/.teamwright/installed.json"
+lout="$(env -u TEAMWRIGHT_KIT_DIR HOME="$lhome" timeout 30 "$lroot/scripts/tw-launch" --print-args 2>&1 </dev/null)"
+lgot=$?
+if [ "$lgot" -eq 0 ]; then
+  print_args_check "launch installed version: the kit under HOME is read" "$lout"
+else
+  fail "launch installed version: the kit under HOME is read" "exit $lgot; $lout"
+fi
+env -u TEAMWRIGHT_KIT_DIR HOME="$lhome" timeout 30 "$lroot/scripts/tw-launch" T-900 >/dev/null 2>&1 </dev/null
+if grep -q "\"$lroot\"" "$lhome/.claude/plugins/cache/teamwright/teamwright/9.9.9/scripts/started" 2>/dev/null; then
+  pass "launch installed version: the project is the tree the script is in"
+else
+  fail "launch installed version: the project is the tree the script is in"
+fi
+for broken in '' '{"@kit": {}}' 'not json'; do
+  printf '%s' "$broken" >"$lroot/.teamwright/installed.json"
+  lout="$(env -u TEAMWRIGHT_KIT_DIR HOME="$lhome" timeout 30 "$lroot/scripts/tw-launch" --print-args 2>/dev/null </dev/null)"
+  lgot=$?
+  if [ "$lgot" -eq 2 ] && [ -z "$lout" ]; then
+    pass "launch refused: installed.json is [$broken]"
+  else
+    fail "launch refused: installed.json is [$broken]" "exit $lgot; $lout"
+  fi
+done
+
+# The kit actually installed here, when there is one (not in CI): a kit update that drops the
+# sentence or a denial turns this red, which is the signal to look at tw-launch again.
+ver="$(python3 -I -c '
+import json
+print(json.load(open(".teamwright/installed.json"))["@kit"]["version"])' 2>/dev/null || true)"
+real_kit="$HOME/.claude/plugins/cache/teamwright/teamwright/$ver"
+if [ -n "$ver" ] && [ -f "$real_kit/scripts/tw-parallel.py" ]; then
+  launch_run "$real_kit" --print-args
+  if [ "$lgot" -eq 0 ]; then
+    print_args_check "launch print-args: the installed kit $ver" "$lout"
+  else
+    fail "launch print-args: the installed kit $ver" "exit $lgot; $(cat "$tmp/launch.err")"
+  fi
+else
+  echo "skip launch print-args: no installed kit here"
+fi
 
 echo "tw-wip-push.test: $passed passed, $failed failed"
 [ "$failed" -eq 0 ] || exit 1

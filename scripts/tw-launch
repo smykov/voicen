@@ -1,0 +1,83 @@
+#!/usr/bin/env python3
+"""tw-launch - start the headless stage sessions of worktrees, with the CI-only push allowed (stdlib only).
+
+The launch side of decisions #219 (T-192). The kit's tw-parallel.py prompt says "Do not push", while
+the kit's red-tests stage orders the wip/<ID> push of P-016. This entry runs the kit's own `launch`
+with $TEAMWRIGHT_CLAUDE_ARGS set to the kit's defaults and one sentence of the prompt changed.
+
+The arguments are read from the installed kit, not copied, so a kit update carries its tools and
+denials here. If the kit no longer has that sentence or one of the denials, this refuses and starts
+nothing: a launch with the wrong prompt or without a denial is worse than no launch.
+
+  scripts/tw-launch <ID> [<ID> ...]   run the kit's `tw-parallel.py launch` for these worktrees
+  scripts/tw-launch --print-args      print the value of TEAMWRIGHT_CLAUDE_ARGS and exit
+
+Run it from the main tree's copy; the project is the tree this file is in. The kit is the version in
+.teamwright/installed.json under ~/.claude/plugins/cache/teamwright/teamwright/, or
+$TEAMWRIGHT_KIT_DIR. A launch without this entry falls back to the kit's defaults: the session is told
+not to push, and stops as before.
+"""
+import importlib.util
+import json
+import os
+import shlex
+import sys
+
+sys.dont_write_bytecode = True
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+KIT_SENTENCE = "Do not push, do not merge."
+OUR_SENTENCE = ("Do not merge. Do not push, with one exception: the CI-only wip/<ID> push a stage asks "
+                "for is allowed only through scripts/tw-wip-push [<commit>], run from this worktree; "
+                "no other push is allowed, by any command.")
+KIT_DENIALS = ("Bash(git push:*)", "Bash(git merge:*)", "Bash(gh:*)")
+
+
+def refuse(reason):
+    print("tw-launch: REFUSED - %s; nothing started" % reason, file=sys.stderr)
+    sys.exit(2)
+
+
+def kit_script():
+    kit = os.environ.get("TEAMWRIGHT_KIT_DIR")
+    if not kit:
+        try:
+            with open(os.path.join(ROOT, ".teamwright", "installed.json"), encoding="utf-8") as fh:
+                version = json.load(fh)["@kit"]["version"]
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            refuse("cannot read the kit version from .teamwright/installed.json (%s)" % e)
+        kit = os.path.join(os.path.expanduser("~"), ".claude", "plugins", "cache", "teamwright", "teamwright", version)
+    path = os.path.join(kit, "scripts", "tw-parallel.py")
+    if not os.path.isfile(path):
+        refuse("no kit launcher at %s" % path)
+    return path
+
+
+def launch_args(script):
+    spec = importlib.util.spec_from_file_location("tw_parallel", script)
+    kit = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(kit)
+    args = list(kit.DEFAULT_ARGS)
+    denied = " ".join(a for prev, a in zip(args, args[1:]) if prev == "--disallowedTools")
+    missing = [d for d in KIT_DENIALS if d not in denied]
+    if missing:
+        refuse("the kit's defaults no longer deny %s" % ", ".join(missing))
+    if sum(KIT_SENTENCE in a for a in args) != 1:
+        refuse("the kit's prompt no longer says %r" % KIT_SENTENCE)
+    return [a.replace(KIT_SENTENCE, OUR_SENTENCE) for a in args]
+
+
+def main(argv):
+    if not argv or (argv != ["--print-args"] and any(a.startswith("-") for a in argv)):
+        print(__doc__.split("\n\n")[3], file=sys.stderr)
+        return 2
+    script = kit_script()
+    value = shlex.join(launch_args(script))
+    if argv == ["--print-args"]:
+        print(value)
+        return 0
+    os.environ["TEAMWRIGHT_CLAUDE_ARGS"] = value
+    os.execv(sys.executable, [sys.executable, script, "launch", *argv, "--project", ROOT])
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

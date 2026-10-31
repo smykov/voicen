@@ -1,0 +1,13 @@
+guarantee: #219: the launch keeps the kit's denials and states the exception; a kit without them is refused
+file: scripts/tw-launch
+added_by: test-writer
+--- old
+    if argv == ["--print-args"]:
+        print(value)
+        return 0
+
+--- new
+    if argv == ["--print-args"]:
+        print(value)
+
+--- end

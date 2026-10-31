@@ -1,0 +1,11 @@
+guarantee: AC-2: stops on TEAMWRIGHT_PAUSE
+file: scripts/tw-wip-push
+added_by: test-writer
+equivalent: the script checks the pause itself before the push, and the variable only opens DRAIN in pre-push, which never applies to a wip ref
+--- old
+unset GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT TEAMWRIGHT_ALLOW_PUSH
+
+--- new
+unset GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT
+
+--- end

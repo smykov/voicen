@@ -1,0 +1,8 @@
+guarantee: #219: the launch keeps the kit's denials and states the exception; a kit without them is refused
+file: scripts/tw-launch
+added_by: test-writer
+--- old
+return [a.replace(KIT_SENTENCE, OUR_SENTENCE) for a in args]
+--- new
+return [a.replace(KIT_SENTENCE, OUR_SENTENCE).replace("Bash(git push:*) ", "") for a in args]
+--- end

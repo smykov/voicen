@@ -1,0 +1,8 @@
+guarantee: AC-2: runs the hooks
+file: scripts/tw-wip-push
+added_by: test-writer
+--- old
+git push --no-follow-tags --no-recurse-submodules origin "+$sha:refs/heads/wip/$id"
+--- new
+git push --no-follow-tags --no-recurse-submodules origin "+$sha:refs/heads/wip/$id" || true
+--- end

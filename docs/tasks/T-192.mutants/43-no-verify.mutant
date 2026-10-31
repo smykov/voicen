@@ -1,0 +1,8 @@
+guarantee: AC-2: runs the hooks
+file: scripts/tw-wip-push
+added_by: test-writer
+--- old
+git push --no-follow-tags
+--- new
+git push --no-verify --no-follow-tags
+--- end

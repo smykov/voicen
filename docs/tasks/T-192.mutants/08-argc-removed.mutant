@@ -1,0 +1,8 @@
+guarantee: AC-2: failure branch: an extra argument is refused and no ref moves
+file: scripts/tw-wip-push
+added_by: test-writer
+--- old
+[ "$#" -le 1 ] || refuse "takes one commit at most, got $# arguments"
+--- new
+
+--- end

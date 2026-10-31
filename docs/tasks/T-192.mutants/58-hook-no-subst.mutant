@@ -1,0 +1,8 @@
+guarantee: AC-3: a PreToolUse hook refuses the git -C and git -c push forms
+file: scripts/hooks/wip-push-guard.sh
+added_by: test-writer
+--- old
+if refused(m.group(1) or m.group(2) or "", depth + 1):
+--- new
+if False:
+--- end

@@ -1,0 +1,8 @@
+guarantee: AC-2: failure branch: a non-tw branch is refused and no ref moves
+file: scripts/tw-wip-push
+added_by: test-writer
+--- old
+[[ "$branch" =~ ^refs/heads/tw/([A-Z][A-Z0-9]*-[0-9]+)$ ]] || refuse "not on a tw/<ID> branch: $branch"
+--- new
+[[ "$branch" =~ ^refs/heads/tw/([A-Z][A-Z0-9]*-[0-9]+)$ ]] || BASH_REMATCH=(x "${branch##*/}")
+--- end

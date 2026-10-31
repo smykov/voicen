@@ -1,0 +1,8 @@
+guarantee: AC-2: stops on TEAMWRIGHT_PAUSE
+file: scripts/tw-wip-push
+added_by: test-writer
+--- old
+|| refuse "team is paused ($pause exists)"
+--- new
+|| true
+--- end

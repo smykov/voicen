@@ -1,0 +1,9 @@
+guarantee: AC-2: failure branch: an extra argument is refused and no ref moves
+file: scripts/tw-wip-push
+added_by: test-writer
+equivalent: no ref name starts with -, so the next guard (rev-parse --verify of <arg>^{commit}) refuses every option; r-arg-force and the like stay green by that guard
+--- old
+  -*) refuse "takes no options: $arg" ;;
+--- new
+
+--- end
