@@ -1,0 +1,8 @@
+guarantee: Invariant: --push, pre-push and scripts/tw-wip-push stay silent (analysis.decides_on)
+file: scripts/hooks/wip-push-guard.sh
+added_by: test-writer
+--- old
+(?<![\w/-])push
+--- new
+(?<![\w/])push
+--- end

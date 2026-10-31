@@ -1,0 +1,8 @@
+guarantee: Invariant: a path ending in /push stays silent, docs/push.md (analysis.decides_on)
+file: scripts/hooks/wip-push-guard.sh
+added_by: test-writer
+--- old
+(?<![\w/-])push
+--- new
+(?<![\w-])push
+--- end

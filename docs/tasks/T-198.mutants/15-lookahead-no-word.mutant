@@ -1,0 +1,8 @@
+guarantee: Invariant: the word push, so pushed stays silent (analysis.decides_on)
+file: scripts/hooks/wip-push-guard.sh
+added_by: test-writer
+--- old
+push(?![\w-])
+--- new
+push(?![-])
+--- end

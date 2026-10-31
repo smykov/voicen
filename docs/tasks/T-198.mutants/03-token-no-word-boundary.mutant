@@ -1,0 +1,8 @@
+guarantee: Invariant: the word git starts the token (analysis.decides_on)
+file: scripts/hooks/wip-push-guard.sh
+added_by: test-writer
+--- old
+\bgit(?:
+--- new
+git(?:
+--- end

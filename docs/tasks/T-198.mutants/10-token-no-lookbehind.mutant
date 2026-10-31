@@ -1,0 +1,8 @@
+guarantee: Invariant: the word push, so --push, pre-push and docs/push.md stay silent (analysis.decides_on)
+file: scripts/hooks/wip-push-guard.sh
+added_by: test-writer
+--- old
+(?<![\w/-])push
+--- new
+push
+--- end

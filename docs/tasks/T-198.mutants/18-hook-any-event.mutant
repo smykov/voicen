@@ -1,0 +1,8 @@
+guarantee: -
+file: scripts/hooks/wip-push-guard.sh
+added_by: test-writer
+--- old
+ or io.event(data) != "PreToolUse"
+--- new
+
+--- end

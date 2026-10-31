@@ -1,0 +1,8 @@
+guarantee: A plain git push is not this hook's business: the token needs a dash after git (analysis.decides_on)
+file: scripts/hooks/wip-push-guard.sh
+added_by: test-writer
+--- old
+)+-(?:[^\n]
+--- new
+)+(?:[^\n]
+--- end

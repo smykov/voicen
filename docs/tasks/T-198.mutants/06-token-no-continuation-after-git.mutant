@@ -1,0 +1,8 @@
+guarantee: Invariant: a backslash-newline after git still forms the token (analysis.decides_on)
+file: scripts/hooks/wip-push-guard.sh
+added_by: test-writer
+--- old
+git(?:[ \t]|\\\n)+-
+--- new
+git(?:[ \t])+-
+--- end

@@ -1,0 +1,8 @@
+guarantee: Invariant: a backslash-newline keeps the same logical line (analysis.decides_on)
+file: scripts/hooks/wip-push-guard.sh
+added_by: test-writer
+--- old
+(?:[^\n]|\\\n)*?
+--- new
+(?:[^\n])*?
+--- end

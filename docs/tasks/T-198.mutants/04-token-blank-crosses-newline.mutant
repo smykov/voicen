@@ -1,0 +1,8 @@
+guarantee: Invariant: only blanks or a backslash-newline separate git from the dash (analysis.decides_on)
+file: scripts/hooks/wip-push-guard.sh
+added_by: test-writer
+--- old
+git(?:[ \t]|\\\n)+-
+--- new
+git(?:\s|\\\n)+-
+--- end

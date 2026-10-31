@@ -6,8 +6,9 @@
 #      from branch tw/<ID>, <commit> (default HEAD) descending from the fork point from main;
 #      anything else is refused with no ref moved; the pre-push hook runs; TEAMWRIGHT_PAUSE stops it.
 #   B. scripts/hooks/wip-push-guard.sh, a PreToolUse hook, refuses the `git -C` and `git -c` push
-#      forms by reading the command (project hook contract, scripts/hooks/_hookio.py: deny = one JSON
-#      object with permissionDecision=deny, exit 0; allow = no output, exit 0).
+#      forms on one raw token over the whole command text and reads no shell (T-198,
+#      analysis.decides_on; project hook contract, scripts/hooks/_hookio.py: deny = one JSON object
+#      with permissionDecision=deny, exit 0; allow = no output, exit 0).
 #   C. .claude/settings.json: allow holds the two script rules only, deny holds the push forms,
 #      PreToolUse wires the hook.
 #   D. scripts/tw-launch keeps the kit's denials and states the exception, against a fake kit; a kit
@@ -616,31 +617,112 @@ hook_case deny "$(printf 'true\ngit -C . push origin main')"
 hook_case deny "$(printf 'bash <<EOF\ngit -C . push origin main\nEOF')"
 hook_case deny "$(printf 'true\ngit -c x=y push origin main')"
 
-# Not refused: the script, and git with the same options doing something else.
+# T-198, the Acceptance shapes and what the model never read: refused because the raw text holds the
+# token, whatever runs it.
 while IFS= read -r c; do
-  [ -z "$c" ] || hook_case silent "$c"
+  [ -z "$c" ] || hook_case deny "$c"
 done <<'CMDS'
-scripts/tw-wip-push
-scripts/tw-wip-push 0123456789abcdef
-git -C . status
-git -c color.ui=never log --oneline
+function f { git -C . push origin main; }; f
+bash <<< 'git -C . push origin main'
+echo 'git -C . push origin main' | sh
+sh <(echo 'git -C . push origin main')
+echo "$(true $(x); git -C . push o)"
+coproc git -C . push o
+setsid git -C . push o
+flock /tmp/x git -C . push o
+env -S 'git -C . push o'
+echo 'git -C . push origin main' | bash -s
+git -c alias.p=push p
+never-named-wrapper git -C . push o
+find . -exec git -C . push \;
+CMDS
+# A wrapper no hook text can name: the name changes every run, so a clause cannot list it.
+hook_case deny "wrapper_$$_$RANDOM git -C . push o"
+
+# T-198, the 11 commands the model let through: the token is in the text, so they are refused too. A
+# session splits the call or uses another tool (T-198 Investigation, 0.17% of measured calls).
+while IFS= read -r c; do
+  [ -z "$c" ] || hook_case deny "$c"
+done <<'CMDS'
 git -C . log --grep=push
 git -C . stash push
-git -C . remote get-url --push origin
 git -C docs status && echo push
 git -C . commit -m "do not push"
-git push origin main
 echo git -C . push origin main
 echo 'git -C . push origin main'
 echo 'a `git -C . push origin main` b'
 echo '$(git -C . push origin main)'
 echo \`git -C . push origin main\`
 git -C . status > push
+CMDS
+hook_case deny "$(printf 'cat <<EOF\ngit -C . push origin main\nEOF')"
+
+# T-198, the edges of the token (analysis.decides_on), each one part of the regex.
+while IFS= read -r c; do
+  [ -z "$c" ] || hook_case deny "$c"
+done <<'CMDS'
+git -C . status; git push origin HEAD:wip/T-1
+git -c push.default=simple status
+git -C . 'push' o
+git status; git -C . push o
+CMDS
+hook_case deny "$(printf 'git\t-C . push o')"
+hook_case deny "$(printf 'git -C .\tpush o')"
+hook_case deny "$(printf 'git \\\n  -C . push o')"
+hook_case deny "$(printf 'git -C . \\\n  push o')"
+hook_case deny "$(printf 'git -C .\ngit -C . push o')"
+
+# T-198: no reader of shell is left in the hook.
+if [ ! -f "$hook" ]; then
+  fail "hook holds no shlex" "scripts/hooks/wip-push-guard.sh missing"
+elif grep -q shlex "$hook"; then
+  fail "hook holds no shlex" "$(grep -n shlex "$hook")"
+else
+  pass "hook holds no shlex"
+fi
+
+# Not refused: the script, git with no option before the subcommand, and git with the same options
+# whose text does not hold the token.
+while IFS= read -r c; do
+  [ -z "$c" ] || hook_case silent "$c"
+done <<'CMDS'
+scripts/tw-wip-push
+scripts/tw-wip-push 0123456789abcdef
+git -C . log; scripts/tw-wip-push
+git -C . status
+git -c color.ui=never log --oneline
+git -C . remote get-url --push origin
+git -C . diff -- scripts/hooks/pre-push
+git -C . log -- docs/push.md
+git -C . log --grep=pushed
+git -C . unpush
+git -C . push-notes
+git push origin main
+git push origin HEAD:wip/T-1
+git push origin --delete wip/T-109
+git push -f origin main
+git stash push
+git log -p push
+git-foo -x push
+legit -C . push origin
 git status
 echo git
 CMDS
+# The token stays on one logical line: a real newline ends it.
+hook_case silent "$(printf 'git -C .\npush origin main')"
+hook_case silent "$(printf 'git\n-C . push origin main')"
 
-hook_case silent "$(printf 'cat <<EOF\ngit -C . push origin main\nEOF')"
+# T-198, the stated limits (docs/process/gates.md): the text does not hold the token. Refusing one of
+# these takes a reader of quotes or variables, which is the model this rule replaced.
+while IFS= read -r c; do
+  [ -z "$c" ] || hook_case silent "$c"
+done <<'CMDS'
+git "-C" . push origin main
+git -C . pu""sh origin main
+X=push; git -C . $X
+G=git; $G -C . push origin main
+git -C . send-pack origin main
+CMDS
 
 # Only a PreToolUse of Bash is its business; a broken input follows the fail-open contract.
 hook_other() {
