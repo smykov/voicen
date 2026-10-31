@@ -94,6 +94,7 @@ The texts live in the one catalog at the repository root, `i18n/en.json` and `i1
 | Id | English |
 |---|---|
 | `tray.call` / `tray.call.record` / `tray.call.stop` / `tray.calls` | Call / Record / Stop / Calls |
+| `tray.tooltip.call_recording` | Voicen — recording a call (RU: Voicen — запись звонка; decision #197 D4) |
 | `indicator.recording` | ● Recording |
 | `indicator.stop` | Stop |
 | `indicator.reminder` | Tell the other party the call is being recorded |

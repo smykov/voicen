@@ -178,7 +178,7 @@ Warnings stay in the indicator's list until dismissed (FR-006); a dismissed kind
 
 ## Tray state
 
-`TrayState` gains `CallRecording`. The shown state is a pure function with precedence dictation `HotkeyError` > dictation `Recording` > `CallRecording` > `Error` > `Idle` (FR-006), tested over every combination. The tray menu table gains "Call" › "Record" (check) / "Stop" and "Calls".
+`TrayState` gains `CallRecording`. The shown state is a pure function with precedence dictation `HotkeyError` > dictation `Recording` > `CallRecording` > `Error` > `Idle` (FR-006), tested over every combination (core `tray::shown(dictation, call_recording)`; no call-side input yields `HotkeyError`, FR-004). `CallRecording` shows the red-dot Recording icon and its own tooltip (`tray.tooltip.call_recording`). The tray menu table, top to bottom (decision #197 D2, D3): submenu "Call" { "Record" (check, checked iff `call_recording`), "Stop" (enabled iff `call_recording`) }, "Calls", "Settings", "Open logs folder", "Exit" last; core `tray::menu(retry_available, call_recording)`.
 
 ## Log events
 
