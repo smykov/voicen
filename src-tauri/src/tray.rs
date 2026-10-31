@@ -35,7 +35,7 @@ use voicen_core::diag::{Log, LogEvent, WarningKind};
 use voicen_core::dictation::DictationSession;
 use voicen_core::i18n::{self, UiLanguage};
 use voicen_core::recording::TrayState;
-use voicen_core::settings::gate::{second_launch_action, SecondLaunchAction};
+use voicen_core::settings::gate::{second_launch_action, LaunchArgs, SecondLaunchAction};
 use voicen_core::settings::service::SettingsService;
 use voicen_core::settings::Settings;
 use voicen_core::tray::{self as table, TrayAction, TrayIconKind, TrayRow};
@@ -569,31 +569,17 @@ pub fn on_tray_icon_event<R: Runtime>(tray: &TrayIcon<R>, event: TrayIconEvent) 
 }
 
 /// The single-instance callback (in the primary, on its main thread, while the
-/// second process waits): `second_launch_action(launched_by_autostart(argv))`;
+/// second process waits): `second_launch_action(&LaunchArgs::parse(&argv))`;
 /// `FrontSettings` posts `settings_window::request(Front)` and returns its receipt,
-/// `TrayOnly` posts nothing (`None`). Writes no log line and touches no file.
+/// `TrayOnly` and `StartCallRecord` post nothing (`None`; the call-record request is
+/// T-128's). Writes no log line and touches no file.
 pub fn on_second_instance<R: Runtime>(
     app: &AppHandle<R>,
     argv: Vec<String>,
     _cwd: String,
 ) -> Option<Receipt> {
-    match second_launch_action(second_launched_by_autostart(&argv)) {
+    match second_launch_action(&LaunchArgs::parse(&argv)) {
         SecondLaunchAction::FrontSettings => Some(settings_window::request(app, OpenTarget::Front)),
-        SecondLaunchAction::TrayOnly => None,
+        SecondLaunchAction::TrayOnly | SecondLaunchAction::StartCallRecord => None,
     }
-}
-
-/// `true` when the second process's `argv` carries the Run value's `--autostart`
-/// (T-014).
-#[cfg(windows)]
-fn second_launched_by_autostart(argv: &[String]) -> bool {
-    crate::autostart::launched_by_autostart(argv)
-}
-
-#[cfg(not(windows))]
-fn second_launched_by_autostart(_argv: &[String]) -> bool {
-    compile_error!(
-        "the Voicen app runs on Windows only: the autostart flag comes from the HKCU \
-         Run value"
-    )
 }
