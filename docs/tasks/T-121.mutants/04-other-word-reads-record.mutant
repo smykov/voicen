@@ -1,0 +1,12 @@
+guarantee: AC-2: --call <other> gives CallSwitch::Unknown (refusal skipped: any value is Record)
+file: crates/voicen-core/src/settings/gate.rs
+added_by: test-writer
+--- old
+                } else {
+                    CallSwitch::Unknown
+                });
+--- new
+                } else {
+                    CallSwitch::Record
+                });
+--- end

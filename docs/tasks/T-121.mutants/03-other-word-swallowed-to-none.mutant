@@ -1,0 +1,16 @@
+guarantee: AC-2: --call <other> gives CallSwitch::Unknown (swallowed: another value reads as no switch)
+file: crates/voicen-core/src/settings/gate.rs
+added_by: test-writer
+--- old
+                parsed.call = Some(if arg == OsStr::new("record") {
+                    CallSwitch::Record
+                } else {
+                    CallSwitch::Unknown
+                });
+--- new
+                parsed.call = if arg == OsStr::new("record") {
+                    Some(CallSwitch::Record)
+                } else {
+                    None
+                };
+--- end

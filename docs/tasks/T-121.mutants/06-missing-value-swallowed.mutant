@@ -1,0 +1,9 @@
+guarantee: AC-2: --call <other> gives CallSwitch::Unknown (swallowed: --call with no value reads as no switch)
+file: crates/voicen-core/src/settings/gate.rs
+added_by: test-writer
+--- old
+        if value_expected {
+            parsed.call = Some(CallSwitch::Unknown);
+        }
+--- new
+--- end
