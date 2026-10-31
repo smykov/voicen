@@ -10,10 +10,11 @@
 #   - scripts/ci/release-check.sh <tag> <run_number> <root> <installer dir> (the one release
 #     verdict, unchanged; the committed, unstamped checkout gives the repository's MAJOR.MINOR):
 #     a refusal exits 1 with no gh write call and nothing written.
-#   - On its pass: <installer dir>/SHA256SUMS.txt in sha256sum format ("<sha256>  <name>"),
+#   - On its pass: <installer dir>/SHA256SUMS.txt in sha256sum format ("<sha256>  <name>", the
+#     installer and voicen-X.Y.Z-symbols.zip; T-101),
 #     <installer dir>/release-notes.md (version X.Y.Z, the commit from VOICEN_COMMIT when set, the
 #     installer's name, the SmartScreen note of FR-030, how to check the hash), then exactly one
-#     `gh release create <tag> <installer> <dir>/SHA256SUMS.txt --verify-tag --title ...
+#     `gh release create <tag> <installer> <zip> <dir>/SHA256SUMS.txt --verify-tag --title ...
 #     --notes-file <notes>` (gh uploads to a draft and publishes it last). A failed create exits
 #     non-zero. The repository is GH_REPO's (or the checkout's).
 #   - GH_TOKEN is never printed: release-check.sh masks it in gh's output, and the output of
@@ -55,8 +56,10 @@ if [ "${#files[@]}" -ne 1 ]; then
 fi
 installer="$(basename -- "${files[0]}")"
 version="${tag#v}"
+# release-check.sh passed: this one non-empty zip is in $dist.
+symbols="voicen-${version}-symbols.zip"
 
-(cd "$dist" && sha256sum -- "$installer" > SHA256SUMS.txt)
+(cd "$dist" && sha256sum -- "$installer" "$symbols" > SHA256SUMS.txt)
 cat -- "$dist/SHA256SUMS.txt"
 
 commit=""
@@ -87,8 +90,8 @@ gh_masked() {
 }
 
 gh_masked --version
-if ! gh_masked release create "$tag" "$dist/$installer" "$dist/SHA256SUMS.txt" --verify-tag --title "Voicen $tag" --notes-file "$notes"; then
+if ! gh_masked release create "$tag" "$dist/$installer" "$dist/$symbols" "$dist/SHA256SUMS.txt" --verify-tag --title "Voicen $tag" --notes-file "$notes"; then
   echo "::error::release: gh release create $tag failed; the release is not published (a draft may remain)" >&2
   exit 1
 fi
-echo "release: ok: $tag published with $installer and SHA256SUMS.txt"
+echo "release: ok: $tag published with $installer, $symbols and SHA256SUMS.txt"

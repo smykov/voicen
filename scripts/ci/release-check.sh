@@ -16,13 +16,17 @@
 #     Z and the run number.
 #   - <installer dir> must hold exactly one *-setup.exe whose name contains _X.Y.Z_, else exit 1
 #     (a wrong version names the installer's version and the tag's).
+#   - <installer dir> must hold a non-empty voicen-X.Y.Z-symbols.zip (X.Y.Z from the tag, the name
+#     case-sensitive) and no other voicen-*-symbols.zip, else exit 1 naming it (T-101, #135, #200).
+#     Its contents are not read: the windows job's zip step names its two files.
 #   - With GH_TOKEN set: `gh release view <tag>` (repository from GH_REPO or the checkout) decides
 #     whether the release exists: exit 0 -> exit 1 (never overwrite); a failure saying "release not
 #     found" -> no release; any other failure -> exit 1 (cannot tell, never a pass). Without
 #     GH_TOKEN (the windows premise) gh is not called and the output says so.
 #   - gh is asked only after every other check passed; no gh write subcommand is ever called and
 #     GH_TOKEN is never printed (masked in gh's own output).
-#   - Exit 0: the release may be published; prints "installer: <dir>/<file>".
+#   - Exit 0: the release may be published; prints "installer: <dir>/<file>" and
+#     "symbols: <dir>/<zip>".
 # Every refusal reason is printed as a ::error:: line; all reasons found are listed.
 #
 # Usage: scripts/ci/release-check.sh <tag> <run_number> <root> <installer dir>
@@ -115,6 +119,25 @@ else
   fi
 fi
 
+# ---- the symbols zip (T-101, decisions #135, #200): a name and a size, its contents are not read ---
+symbols=""
+if [ -n "$tx" ] && [ -d "$dir" ]; then
+  want="voicen-$tx.$ty.$tz-symbols.zip"
+  if [ ! -f "$dir/$want" ]; then
+    refuse "symbols zip $want not found in $dir (the tag $tag wants exactly this file)"
+  elif [ ! -s "$dir/$want" ]; then
+    refuse "symbols zip $want in $dir is empty"
+  else
+    symbols="$dir/$want"
+  fi
+  shopt -s nullglob
+  zips=("$dir"/voicen-*-symbols.zip)
+  shopt -u nullglob
+  for z in "${zips[@]}"; do
+    [ "$(basename "$z")" = "$want" ] || refuse "another symbols zip $(basename "$z") beside $want in $dir (the tag $tag wants exactly one)"
+  done
+fi
+
 if [ "$refused" != 0 ]; then
   echo "release-check: refused: nothing may be published for '$tag'" >&2
   exit 1
@@ -141,3 +164,4 @@ fi
 
 echo "release-check: ok: tag $tag, repository MAJOR.MINOR $repo_mm, run number $run_number"
 echo "installer: $installer"
+echo "symbols: $symbols"

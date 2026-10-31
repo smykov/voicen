@@ -14,4 +14,16 @@ codegen-units = 1
 lto = true
 opt-level = 3
 panic = "abort"
-strip = true
+strip = "none"
+
+# T-101 (decisions #135, #200 D1): line tables for the workspace packages only, so crash frames map
+# to lines through the PDB. Never profile-wide and never package."*": a dependency's build script
+# would see DEBUG=true and cmake would build libopus as RelWithDebInfo.
+[profile.release.package.voicen]
+debug = "line-tables-only"
+
+[profile.release.package.voicen-core]
+debug = "line-tables-only"
+
+[profile.release.package.voicen-whisper]
+debug = "line-tables-only"

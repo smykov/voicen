@@ -194,6 +194,54 @@ jobs:
       # T-102 (invariant 4): the model reaches the installer only through this overlay; a merge
       # patch that adds one key to bundle.resources, so tauri.conf.json never names the model.
       - run: pnpm tauri build --config src-tauri/tauri.bundle-vad.json
+      # T-101 (decisions #135, #200): on every ref, the zip of voicen.pdb and voicen.exe of the one
+      # release link above, beside the installer, where release-check.sh wants it; red when either
+      # file is missing. Then the first PDB reader this runner has (llvm-pdbutil, llvm-symbolizer,
+      # cdb; none is red, never a skip) lists the line information, and each workspace package must
+      # appear in it: Cargo.toml's debug = "line-tables-only" is proven here and nowhere else. The
+      # second and third readers take addresses, so they sample the image's whole range.
+      - name: Symbols zip and the line information of the PDB (T-101)
+        timeout-minutes: 30
+        shell: pwsh
+        run: |
+          $pdb = 'target/release/voicen.pdb'
+          $bin = 'target/release/voicen.exe'
+          foreach ($f in @($pdb, $bin)) { if (-not (Test-Path -LiteralPath $f -PathType Leaf)) { throw "symbols zip: $f not found after the release build" } }
+          if (-not $env:VOICEN_VERSION) { throw 'symbols zip: VOICEN_VERSION is not set (step Version of this build)' }
+          $zip = "target/release/bundle/nsis/voicen-$($env:VOICEN_VERSION)-symbols.zip"
+          Compress-Archive -LiteralPath @($pdb, $bin) -DestinationPath $zip
+          Write-Output "symbols zip: $zip, $((Get-Item -LiteralPath $zip).Length) bytes; voicen.pdb $((Get-Item -LiteralPath $pdb).Length) bytes, voicen.exe $((Get-Item -LiteralPath $bin).Length) bytes"
+          function Find-Reader([string[]]$names) { foreach ($n in $names) { $c = Get-Command $n -ErrorAction SilentlyContinue | Select-Object -First 1; if ($c) { return $c.Source } } }
+          $llvm = 'C:/Program Files/LLVM/bin'
+          $size = (Get-Item -LiteralPath $bin).Length
+          $list = Join-Path $env:RUNNER_TEMP 'pdb-lines.txt'
+          $pdbutil = Find-Reader @('llvm-pdbutil', "$llvm/llvm-pdbutil.exe")
+          $symbolizer = Find-Reader @('llvm-symbolizer', "$llvm/llvm-symbolizer.exe")
+          $cdb = Find-Reader @('cdb', 'C:/Program Files (x86)/Windows Kits/10/Debuggers/x64/cdb.exe')
+          if ($pdbutil) {
+            Write-Output "PDB reader: $pdbutil"
+            & $pdbutil dump -l -il $pdb > $list
+          } elseif ($symbolizer) {
+            Write-Output "PDB reader: $symbolizer"
+            $base = 0x140000000
+            $addresses = for ($rva = 0x1000; $rva -lt $size; $rva += 0x40) { '0x{0:x}' -f ($base + $rva) }
+            $addresses | & $symbolizer "--obj=$bin" > $list
+          } elseif ($cdb) {
+            Write-Output "PDB reader: $cdb"
+            $walk = ".lines -e; .for (r `$t0 = 0x1000; @`$t0 < 0x$('{0:x}' -f $size); r `$t0 = @`$t0 + 0x100) { ln voicen+@`$t0 }; q"
+            & $cdb -z $bin -y (Split-Path -Parent (Resolve-Path -LiteralPath $pdb).Path) -lines -c $walk > $list
+          } else {
+            throw 'no PDB reader on this runner (llvm-pdbutil, llvm-symbolizer, cdb): the line information of the PDB cannot be listed'
+          }
+          if ($LASTEXITCODE -ne 0) { throw "the PDB reader exited $LASTEXITCODE" }
+          $missing = @()
+          foreach ($package in @('crates.voicen-core.src', 'crates.voicen-whisper.src', 'src-tauri.src')) {
+            $hits = @(Select-String -LiteralPath $list -Pattern $package)
+            Write-Output "line information for ${package}: $($hits.Count) lines; the first ones:"
+            $hits | Select-Object -First 3 | ForEach-Object { Write-Output $_.Line }
+            if ($hits.Count -eq 0) { $missing += $package }
+          }
+          if ($missing) { throw "no line information in voicen.pdb for: $($missing -join ', ')" }
       # T-099 (decisions #142, invariant 3): the effective whisper.cpp configuration cmake wrote,
       # in every whisper-rs-sys build dir under target/ (debug for cargo test, release for the
       # installer; a restored build cache can hold an older one). !cancelled(): runs after a red
@@ -249,6 +297,11 @@ jobs:
           $got = (Get-FileHash -LiteralPath $notices -Algorithm SHA256).Hash
           if ($got -ne $want) { throw "the installed THIRD-PARTY-NOTICES.txt (SHA256 $got) differs from the committed one (SHA256 $want)" }
           Write-Output "found THIRD-PARTY-NOTICES.txt at $notices, equal to the committed file"
+          # T-101 (#200 D2): the installed exe is the exe of the symbols zip, the one release link.
+          $wantExe = (Get-FileHash -LiteralPath 'target/release/voicen.exe' -Algorithm SHA256).Hash
+          $gotExe = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash
+          if ($gotExe -ne $wantExe) { throw "the installed voicen.exe (SHA256 $gotExe) differs from target/release/voicen.exe (SHA256 $wantExe), the exe of the symbols zip" }
+          Write-Output "installed voicen.exe equals target/release/voicen.exe"
           # T-014: a leftover Run value (e.g. from an older install) must be removed by the
           # reconcile at first launch, whose defaults say start_with_windows = off.
           $run = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
@@ -1589,13 +1642,16 @@ jobs:
       # premise step's outputs, and its if: has no status function, so it never runs after a red step.
       # T-084 (decisions #119): the installer artifact is uploaded only on a v* tag push, the runs
       # where the release job runs and downloads it by this name; kept 1 day. main and wip runs
-      # upload nothing. The step is byte-identical to scripts/ci/release-upload.yml (release-guard.sh
+      # upload nothing. T-101 (#200 D4): the symbols zip is in the same artifact, from the same
+      # directory, so the artifact stays flat. The step is byte-identical to scripts/ci/release-upload.yml (release-guard.sh
       # R9, make check); edit both together.
       - uses: actions/upload-artifact@v4
         if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
         with:
           name: voicen-installer-${{ env.VOICEN_COMMIT }}
-          path: target/release/bundle/nsis/*-setup.exe
+          path: |
+            target/release/bundle/nsis/*-setup.exe
+            target/release/bundle/nsis/voicen-${{ env.VOICEN_VERSION }}-symbols.zip
           retention-days: 1
           if-no-files-found: error
       - name: Installer for Telegram
@@ -1697,6 +1753,24 @@ jobs:
           fi
           [ "$bad" = 0 ] || exit 1
           echo "release check failure branch: every synthetic tag refused, naming both values"
+      # T-101: red unless release-check.sh refuses (exit 1) a directory holding the installer only
+      # and names the symbols zip the tag wants.
+      - name: Release check failure branch (installer without the symbols zip; not on v* tags)
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        shell: bash
+        env:
+          RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          dir="$(mktemp -d)"
+          trap 'rm -rf "$dir"' EXIT
+          : > "$dir/Voicen_${VOICEN_VERSION:-}_x64-setup.exe"
+          want="voicen-${VOICEN_VERSION:-}-symbols.zip"
+          rc=0
+          out="$(env -u GH_TOKEN bash scripts/ci/release-check.sh "v${VOICEN_VERSION:-}" "$RUN_NUMBER" . "$dir" 2>&1)" || rc=$?
+          sed 's/^/symbols-zip-missing: /' <<<"$out"
+          if [ "$rc" != 1 ]; then echo "::error::release check failure branch: installer without the symbols zip, exit $rc, want 1"; exit 1; fi
+          grep -qF -- "$want" <<<"$out" || { echo "::error::release check failure branch: the refusal does not name $want"; exit 1; }
+          echo "release check failure branch: installer without the symbols zip refused, naming $want"
       # T-059: runner capability facts for later Windows CI tests (docs/decisions/windows-ci-runner.md).
       # A missing capability is a result line, never a red step; red only when the probe is defective:
       # its test fails (pipefail), there is not exactly one end line, or the number of well-formed fact
@@ -1721,11 +1795,11 @@ jobs:
           echo "runner probe: $facts fact lines, as the end line says"
 
   # T-026 (spec 006 US5, decisions #102, #103), T-085 (decisions #120, P-020): a pushed vX.Y.Z tag
-  # becomes GitHub Release vX.Y.Z with the installer and SHA256SUMS.txt, only after gate and
-  # windows passed. The one step is scripts/ci/release.sh (host test release.test.sh): it stops
+  # becomes GitHub Release vX.Y.Z with the installer, voicen-X.Y.Z-symbols.zip (T-101) and
+  # SHA256SUMS.txt, only after gate and windows passed. The one step is scripts/ci/release.sh (host test release.test.sh): it stops
   # without GH_TOKEN, runs scripts/ci/release-check.sh (X.Y = the committed MAJOR.MINOR (#102),
-  # Z >= this run's github.run_number (#103), exactly one installer carrying _X.Y.Z_, no release
-  # for the tag yet: never overwritten; a refusal exits 1 naming both values and writes nothing),
+  # Z >= this run's github.run_number (#103), exactly one installer carrying _X.Y.Z_, exactly one
+  # non-empty voicen-X.Y.Z-symbols.zip, no release for the tag yet: never overwritten; a refusal exits 1 naming both values and writes nothing),
   # then writes SHA256SUMS.txt and the notes and creates the release with --verify-tag (uploaded
   # to a draft that is published last, so a failed upload leaves a draft, not a half release).
   # The only job whose token can write contents. Skipped on every other ref, so wip/** runs never

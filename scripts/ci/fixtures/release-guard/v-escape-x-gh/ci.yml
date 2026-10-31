@@ -53,7 +53,9 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: voicen-installer-abc1234
-          path: target/release/bundle/nsis/*-setup.exe
+          path: |
+            target/release/bundle/nsis/*-setup.exe
+            target/release/bundle/nsis/voicen-${{ env.VOICEN_VERSION }}-symbols.zip
   release:
     name: GitHub Release (v* tags only)
     needs: [gate, windows]
