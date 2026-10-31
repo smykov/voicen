@@ -1,8 +1,0 @@
-guarantee: AC-3: the hook leaves the rest alone, a substitution inside single quotes is literal
-file: scripts/hooks/wip-push-guard.sh
-added_by: orchestrator
---- old
-        elif c == "'" and not dquoted:
---- new
-        elif c == "'" and False:
---- end

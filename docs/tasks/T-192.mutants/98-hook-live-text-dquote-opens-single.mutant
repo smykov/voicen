@@ -1,8 +1,0 @@
-guarantee: AC-3: the hook refuses a substitution after a single quote inside double quotes
-file: scripts/hooks/wip-push-guard.sh
-added_by: orchestrator
---- old
-        elif c == "'" and not dquoted:
---- new
-        elif c == "'":
---- end

@@ -554,9 +554,18 @@ in history); human, one-off: `TEAMWRIGHT_ALLOW_PUSH=1 git push`.
 
 **Launch.** Parallel stage sessions are started with `scripts/tw-launch <ID>...`, which runs the kit's `launch` with `TEAMWRIGHT_CLAUDE_ARGS` set to the kit's defaults, denials kept, and the one prompt sentence changed to allow only `scripts/tw-wip-push`. It reads the arguments from the installed kit and refuses to start if the kit's sentence or a denial is gone. A launch through the kit's own `launch` keeps "Do not push" and the session stops at the push as before.
 
-**Hook refuses** a Bash command in which git runs `push` with any git option before the subcommand (`-C`, `-c`, `--git-dir` ...), also behind an env prefix, in a chain, a subshell, a command substitution, `sh -c`, `eval` or a heredoc script. The settings also deny `Bash(git -C * push*)` and `Bash(git -c * push*)`. A plain `git push` is left to the push denies and `pre-push`; `scripts/tw-wip-push` and `git -C . stash push` or `commit -m "... push"` pass. A refusal blocks in every gate mode; an internal error fails open.
+**Hook refuses** a Bash command whose raw text holds one token, at any occurrence: the word `git`, blanks or a backslash-newline, a dash, then on the same logical line the word `push` (T-198, P-020; the regex is `analysis.decides_on` of T-198 and lives only in the hook). No quote, separator, wrapper or heredoc is read, so a wrapper never named needs no clause: `setsid`, `flock`, `coproc`, a function, `<<<`, a pipe into `sh`, `env -S`, `find -exec` and `git -c alias.p=push p` are all refused. So is text that only mentions the token (`git -C . stash push`, `commit -m "do not push"`, an `echo`, a heredoc body, a `grep`, a chain such as `git -C . status; git push origin HEAD:wip/T-1`): split the call, or use `git commit -F` or the Write tool. Measured on 11250 past Bash calls, 19 (0.17%) were such new refusals (T-198 › Investigation). The settings also deny `Bash(git -C * push*)` and `Bash(git -c * push*)`. A refusal blocks in every gate mode; an internal error fails open.
 
-**Limits.** A deny is no boundary: the hook is a best-effort read of the command text and does not see a command built at run time (`$X push`), a script file that pushes, `git -c alias.p=push p`, or `find -exec`. `git push --no-verify` and `-c core.hooksPath` remain outside every gate here; CI repeats the checks (Known limitations).
+**Hook passes** `scripts/tw-wip-push`; a plain `git push`, which is left to the push denies and `pre-push`; the word inside another (`--push`, `pre-push`, `docs/push.md`, `pushed`); and a real newline after `git` or before `push`. Passing the hook does not mean a command runs: the settings denies are a separate layer and refuse some of the same text.
+
+**Limits.** A deny is no boundary: the hook is a best-effort match on the command text. What the rule gives up, because refusing it takes a reader of quotes or variables, or another word in the token:
+
+- `git "-C" . push origin main` and `git -C . pu""sh origin main`: the shell model this rule replaced refused these two; the rule does not (T-198, the orchestrator's decision on the test-writer's finding).
+- `X=push; git -C . $X` and `G=git; $G -C . push`: a command built at run time.
+- `git -C . send-pack origin main`: no word `push`.
+- A script file that pushes: its text is not in the command.
+
+`git push --no-verify` and `-c core.hooksPath` remain outside every gate here; CI repeats the checks (Known limitations).
 
 **Deliberate exits:** a human, one-off: `TEAMWRIGHT_ALLOW_PUSH=1 git push` (DRAIN); the hook has no override, remove its entry from `.claude/settings.json` (owner). `make check-wip-push` pins the script, the hook and the settings (`docs/decisions/ci-toolchain.md` › Guard table).
 
