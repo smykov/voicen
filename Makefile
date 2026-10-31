@@ -5,14 +5,14 @@
 	check-core-test-os-answer check-ci-wip check-telegram-send check-telegram-failure-branch \
 	check-version-stamp check-release-check check-release check-release-guard check-nsis-fork check-e2e-entry-fixtures \
 	check-whisper-cmake-cache check-opus-cmake-cache check-whisper-model-key check-crt-imports check-whisper \
-	check-shell-windows check-ban-canary check-role-tools check-guard-trigger \
+	check-shell-windows check-ban-canary check-role-tools check-guard-trigger check-wip-push \
 	check-ui core-image ui-image \
 	licenses licenses-check licenses-unit licenses-fixture licenses-rust licenses-bundle \
 	licenses-npm licenses-generate licenses-stale licenses-stale-guard
 
 # check-ban-canary and check-shell-windows after check-core: both build voicen-core, so a core
 # error is reported first by the faster native check-core, before the slower runs.
-check: check-shell-layout check-shell-layout-fixtures check-helper-windows-fixtures check-ci-credentials check-role-tools check-guard-trigger \
+check: check-shell-layout check-shell-layout-fixtures check-helper-windows-fixtures check-ci-credentials check-role-tools check-guard-trigger check-wip-push \
 	check-clippy-lines \
 	check-core-test-os-answer check-ci-wip check-telegram-send check-telegram-failure-branch check-version-stamp check-release-check check-release check-release-guard check-nsis-fork check-whisper-cmake-cache check-opus-cmake-cache check-whisper-model-key check-crt-imports check-core check-whisper \
 	check-ban-canary check-shell-windows check-e2e-entry-fixtures check-ui \
@@ -84,6 +84,14 @@ check-role-tools:
 # Host bash, git, python3.
 check-guard-trigger:
 	scripts/ci/guard-trigger.test.sh
+
+# check-wip-push (T-192, decisions #208, #219): scripts/tw-wip-push writes only refs/heads/wip/<ID>
+# on origin, <ID> from branch tw/<ID>, and refuses anything else with no ref moved; the PreToolUse
+# hook scripts/hooks/wip-push-guard.sh refuses the git -C and git -c push forms; .claude/settings.json
+# allows the script only, denies those forms and wires the hook. The self-test copies the script into
+# a temporary clone of a temporary bare remote; no network transport is allowed. Host bash, git, python3.
+check-wip-push:
+	scripts/ci/tw-wip-push.test.sh
 
 # check-core-test-os-answer (T-080 rca, class os-answer-deadline-race; T-089, decides_on: token):
 # no core test outside crates/voicen-core/tests/common names an OS-answer target (.invalid,
