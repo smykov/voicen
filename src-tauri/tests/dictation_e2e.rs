@@ -28,12 +28,15 @@
 
 mod win32_support;
 
+use std::fs;
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use voicen_core::audio::AudioBuffer;
 use voicen_core::platform::FakeIndicator;
 use voicen_core::post_process::settings::PostProcessingSettings;
 use voicen_core::recording::TrayState;
@@ -42,11 +45,15 @@ use voicen_core::settings::service::{SaveOutcome, SaveRequest};
 use voicen_core::settings::EngineKind;
 use voicen_core::test_support::fixtures;
 use voicen_core::test_support::realtime::RealtimeSource;
+use voicen_core::test_support::TempDir;
+use voicen_core::vad::silero_model::SILERO_MODEL;
+use voicen_core::vad::{SpeechDetector, VadError};
 use voicen_lib::dictation::{start_dictation, DictationPorts};
 use voicen_lib::win::clipboard::WinClipboard;
 use voicen_lib::win::paste::WinPaster;
+use voicen_whisper::SileroDetector;
 use win32_support::{
-    assert_hotkey_free, dictation_lines, engine_factory, eventually, has_pair, lock,
+    assert_hotkey_free, dictation_lines, engine_factory, eventually, has_pair, headed, lock,
     read_clipboard, serial, shown, AppRig, ClipboardState, Keys, Shape, Shown, TestWindow,
     TextEngine, BUDGET, HOLD, HOTKEY_KEYS, SETTLE, VK_CONTROL, VK_ESCAPE, VK_MENU, VK_SPACE, WAIT,
 };
@@ -85,6 +92,7 @@ fn a_hotkey_hold_through_the_real_wiring_pastes_the_transcript_into_the_window()
             indicator: indicator.clone(),
             credentials: Arc::clone(&rig.creds),
             hotkeys: Arc::clone(&rig.hotkeys),
+            detector: Err(voicen_core::vad::VadError::Unavailable),
         },
     )
     .expect("start_dictation");
@@ -172,6 +180,7 @@ fn esc_through_the_real_wiring_discards_the_recording() {
             indicator: indicator.clone(),
             credentials: Arc::clone(&rig.creds),
             hotkeys: Arc::clone(&rig.hotkeys),
+            detector: Err(voicen_core::vad::VadError::Unavailable),
         },
     )
     .expect("start_dictation");
@@ -410,6 +419,7 @@ fn dictate_once(
             indicator: indicator.clone(),
             credentials: Arc::clone(&rig.creds),
             hotkeys: Arc::clone(&rig.hotkeys),
+            detector: Err(voicen_core::vad::VadError::Unavailable),
         },
     )
     .expect("start_dictation");
@@ -590,4 +600,235 @@ fn post_processing_server_refusing_still_pastes_the_raw_transcript_with_tray_err
     assert_one_pasted_dictation_line(&rig);
     assert_eq!(engine.calls(), 1, "engine calls");
     assert_no_canary(&rig.log_lines());
+}
+
+// ---- T-102: the Silero detector through the real wiring ----------------------------------
+//
+// The injected audio is real speech (`crates/voicen-whisper/tests/clips/speech-id-phrase.s16le`,
+// 16 kHz mono s16le, 2.7 s), not `fixtures::speech_3s`, which is a synthetic signal for the
+// energy rule. The model is the CI-fetched one (`VOICEN_SILERO_TEST_MODEL/<SILERO_MODEL.file_name>`,
+// a missing variable or file is red, never a skip); the detector goes in through
+// `DictationPorts::detector`, loaded by `SileroDetector::load` as the shell's loader does.
+// The corrupt model is a real, truncated copy of the file (F-024: no fake that fails every
+// call). The log is the real log: `vad detector=<tag>` once per `start_dictation`, the
+// `dictation` line's `detector=`, and `warning kind=vad_fallback` once per process.
+
+const SPEECH_CLIP: &[u8] =
+    include_bytes!("../../crates/voicen-whisper/tests/clips/speech-id-phrase.s16le");
+/// Holds the whole 2.7 s clip: the real-time source plays it from the press.
+const CLIP_HOLD: Duration = Duration::from_millis(3000);
+const MODEL_VAR: &str = "VOICEN_SILERO_TEST_MODEL";
+
+fn speech_clip() -> AudioBuffer {
+    assert_eq!(SPEECH_CLIP.len() % 2, 0, "the clip is whole s16le samples");
+    AudioBuffer::from_16k_mono(
+        SPEECH_CLIP
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&b| i16::from_le_bytes(b))
+            .collect(),
+    )
+}
+
+/// The fetched model, which must exist.
+fn fetched_model() -> PathBuf {
+    let dir = std::env::var_os(MODEL_VAR)
+        .unwrap_or_else(|| panic!("{MODEL_VAR} is not set: the CI fetch step must run first"));
+    let path = PathBuf::from(dir).join(SILERO_MODEL.file_name);
+    assert!(
+        path.is_file(),
+        "{MODEL_VAR} has no {}",
+        SILERO_MODEL.file_name
+    );
+    path
+}
+
+/// A real copy of the fetched model cut to half its size (a corrupt file on disk).
+fn truncated_model(dir: &TempDir) -> PathBuf {
+    let path = dir.path().join(SILERO_MODEL.file_name);
+    fs::copy(fetched_model(), &path).expect("copy the model");
+    let file = fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .expect("open the copy");
+    file.set_len(SILERO_MODEL.size_bytes / 2).expect("truncate");
+    path
+}
+
+fn load(path: &Path) -> Result<Box<dyn SpeechDetector>, VadError> {
+    SileroDetector::load(path)
+}
+
+/// The ports of the T-006 test over the real clip and `detector`.
+fn clip_ports(
+    rig: &AppRig,
+    engine: &Arc<TextEngine>,
+    indicator: &Arc<FakeIndicator>,
+    detector: Result<Box<dyn SpeechDetector>, VadError>,
+) -> DictationPorts {
+    DictationPorts {
+        audio: Arc::new(RealtimeSource::from_buffer(&speech_clip())),
+        clipboard: Arc::new(WinClipboard::new()),
+        paster: Arc::new(WinPaster::new()),
+        engine_factory: Some(engine_factory(engine)),
+        indicator: indicator.clone(),
+        credentials: Arc::clone(&rig.creds),
+        hotkeys: Arc::clone(&rig.hotkeys),
+        detector,
+    }
+}
+
+fn recordings(indicator: &FakeIndicator) -> usize {
+    shown(&indicator.overlays())
+        .iter()
+        .filter(|s| **s == Shown::Recording)
+        .count()
+}
+
+/// One synthetic Ctrl+Alt+Space hold of [`CLIP_HOLD`], then waits until the log holds
+/// `lines` dictation lines.
+fn clip_hold(rig: &AppRig, indicator: &FakeIndicator, lines: usize) {
+    let before = recordings(indicator);
+    let mut keys = Keys::press(&HOTKEY_KEYS);
+    assert!(
+        eventually(WAIT, || recordings(indicator) > before),
+        "no Recording within {WAIT:?} of the injected Ctrl+Alt+Space: {:?}",
+        indicator.overlays()
+    );
+    thread::sleep(CLIP_HOLD);
+    keys.release(&[VK_SPACE, VK_CONTROL, VK_MENU]);
+    assert!(
+        eventually(BUDGET, || dictation_lines(&rig.log_lines()).len() >= lines),
+        "fewer than {lines} dictation lines {BUDGET:?} after the release: {:?}",
+        rig.log_lines()
+    );
+}
+
+fn warning_fallbacks(lines: &[String]) -> Vec<String> {
+    headed(lines, "warning")
+        .into_iter()
+        .filter(|l| has_pair(l, "kind", "vad_fallback"))
+        .collect()
+}
+
+#[test]
+fn a_hold_with_the_loaded_silero_detector_logs_detector_silero_and_no_vad_fallback() {
+    // T-102 Acceptance 2 (first half): real speech through the real wiring with the
+    // detector the shell's loader gives (`SileroDetector::load` on the fetched model)
+    // ends with one `vad detector=silero` start line, one `dictation` line with
+    // `detector=silero outcome=delivered`, and no `vad_fallback` of any kind.
+    // Bite: the gate still built from `Err(Unavailable)` (detector=energy and a
+    // vad_fallback), the port ignored, the start line missing or naming the wrong tag.
+    let _serial = serial();
+    assert_hotkey_free();
+    let window = TestWindow::open(Shape::TopLevel);
+    window.front();
+    let rig = AppRig::new(EngineKind::Api);
+    let engine = TextEngine::new(TRANSCRIPT);
+    let indicator = Arc::new(FakeIndicator::new());
+    let detector = load(&fetched_model());
+    assert!(detector.is_ok(), "loading the fetched model failed");
+    let _dictation = start_dictation(
+        rig.app.handle(),
+        clip_ports(&rig, &engine, &indicator, detector),
+    )
+    .expect("start_dictation");
+    clip_hold(&rig, &indicator, 1);
+
+    thread::sleep(SETTLE);
+    let lines = rig.log_lines();
+    let dictation = dictation_lines(&lines);
+    assert_eq!(dictation.len(), 1, "dictation lines: {dictation:?}");
+    for (key, value) in [("detector", "silero"), ("outcome", "delivered")] {
+        assert!(
+            has_pair(&dictation[0], key, value),
+            "{key}={value}: {}",
+            dictation[0]
+        );
+    }
+    let start = headed(&lines, "vad");
+    assert_eq!(start.len(), 1, "vad start lines: {start:?}");
+    assert!(has_pair(&start[0], "detector", "silero"), "{}", start[0]);
+    let fallbacks: Vec<&String> = lines
+        .iter()
+        .filter(|l| l.contains("vad_fallback"))
+        .collect();
+    assert!(
+        fallbacks.is_empty(),
+        "vad_fallback in the log: {fallbacks:?}"
+    );
+    assert_eq!(engine.calls(), 1, "engine calls");
+}
+
+#[test]
+fn a_truncated_model_falls_back_to_energy_with_one_vad_fallback_over_two_holds() {
+    // T-102 Acceptance 2 (failure half) and invariant 2: a real, truncated copy of the
+    // model makes the loader give `Err(Unavailable)`; the app still starts, `vad
+    // detector=energy` is the start line, both holds are decided by the energy detector
+    // (`detector=energy outcome=delivered`) and exactly one `warning kind=vad_fallback`
+    // is written over the two (the first decision only).
+    // Bite: a load that panics or aborts, a fallback warning per decision (two), none at
+    // all, a start line naming silero, the second hold refused after the first fallback.
+    let _serial = serial();
+    assert_hotkey_free();
+    let window = TestWindow::open(Shape::TopLevel);
+    window.front();
+    let rig = AppRig::new(EngineKind::Api);
+    let engine = TextEngine::new(TRANSCRIPT);
+    let indicator = Arc::new(FakeIndicator::new());
+    let models = TempDir::new();
+    let detector = load(&truncated_model(&models));
+    assert!(
+        matches!(detector, Err(VadError::Unavailable)),
+        "a truncated model must be Err(Unavailable)"
+    );
+    let _dictation = start_dictation(
+        rig.app.handle(),
+        clip_ports(&rig, &engine, &indicator, detector),
+    )
+    .expect("start_dictation");
+    clip_hold(&rig, &indicator, 1);
+    clip_hold(&rig, &indicator, 2);
+
+    thread::sleep(SETTLE);
+    let lines = rig.log_lines();
+    let dictation = dictation_lines(&lines);
+    assert_eq!(dictation.len(), 2, "dictation lines: {dictation:?}");
+    for line in &dictation {
+        for (key, value) in [("detector", "energy"), ("outcome", "delivered")] {
+            assert!(has_pair(line, key, value), "{key}={value}: {line}");
+        }
+    }
+    let start = headed(&lines, "vad");
+    assert_eq!(start.len(), 1, "vad start lines: {start:?}");
+    assert!(has_pair(&start[0], "detector", "energy"), "{}", start[0]);
+    let fallbacks = warning_fallbacks(&lines);
+    assert_eq!(
+        fallbacks.len(),
+        1,
+        "vad_fallback warnings over two holds: {fallbacks:?}"
+    );
+    assert_eq!(engine.calls(), 2, "engine calls: the app kept running");
+    let _session = rig.session();
+}
+
+#[test]
+fn the_silero_model_loads_from_a_non_ascii_directory() {
+    // T-102 re-check finding: %LOCALAPPDATA% under a Cyrillic user name. whisper.cpp
+    // opens the VAD model through a UTF-8 to wide conversion; a failure would be silent
+    // (energy with one warning), so the load itself is checked: the detector is
+    // `silero`, and it decides real speech as speech.
+    // Bite: a load that rejects or lossily rewrites a non-ASCII path (Err(Unavailable)).
+    let dir = TempDir::new();
+    let nested = dir.path().join("Пользователь").join("Voicen").join("vad");
+    fs::create_dir_all(&nested).expect("create the Cyrillic directory");
+    let copy = nested.join(SILERO_MODEL.file_name);
+    fs::copy(fetched_model(), &copy).expect("copy the model");
+    let detector = match load(&copy) {
+        Ok(d) => d,
+        Err(e) => panic!("loading from a Cyrillic-named directory failed: {e:?}"),
+    };
+    assert_eq!(detector.name(), "silero");
+    assert_eq!(detector.contains_speech(&speech_clip()), Ok(true));
 }

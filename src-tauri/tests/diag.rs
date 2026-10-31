@@ -598,6 +598,7 @@ fn a_write_denied_logs_folder_shows_one_notice_and_the_dictation_still_delivers(
             indicator: indicator.clone(),
             credentials: Arc::clone(&creds),
             hotkeys: Arc::clone(&hotkeys),
+            detector: Err(voicen_core::vad::VadError::Unavailable),
         },
     )
     .expect("start_dictation");

@@ -80,6 +80,7 @@ fn start(rig: AppRig) -> Started {
             indicator: indicator.clone(),
             credentials: Arc::clone(&rig.creds),
             hotkeys: Arc::clone(&rig.hotkeys),
+            detector: Err(voicen_core::vad::VadError::Unavailable),
         },
     )
     .expect("start_dictation");

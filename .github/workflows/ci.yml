@@ -1124,6 +1124,92 @@ jobs:
           if ($hits -ne 1) { throw "the line '$want' occurs $hits times after kill + /P, expected 1 (new lines: $($lines -join ' | '))" }
           Assert-CrashKeys (Get-CrashNames)
           Write-Output "kill, then /P with no app running: no note, one abnormal_end file $name, ended_abnormally logged"
+      # T-102 (decision #198): the installer carries the Silero model under vad/ and the launch
+      # names the detector the speech gate holds. The runner has no capture endpoint, so a hold
+      # never reaches the gate; the start line `vad detector=<silero|energy>` is the observable
+      # (the hold-level proof is tests/dictation_e2e.rs). The file name is read from the
+      # install, never repeated here.
+      - name: The install holds exactly one vad model and the launch writes vad detector=silero and no vad_fallback (T-102)
+        shell: pwsh
+        run: |
+          . ./scripts/ci/hotkey-hold.ps1
+          . ./scripts/ci/crash-records.ps1
+          $vad = Join-Path $env:LOCALAPPDATA 'Voicen\vad'
+          $models = @(Get-ChildItem -Path (Join-Path $vad '*.bin') -File -ErrorAction SilentlyContinue)
+          if ($models.Count -ne 1) { throw "the install holds $($models.Count) file(s) vad/*.bin, expected exactly 1 (in $vad)" }
+          Stop-AllVoicen
+          $mark = Get-CrashLogMark
+          $app = Start-VoicenSession
+          $detector = @()
+          for ($i = 0; $i -lt 30 -and $detector.Count -eq 0; $i++) {
+            $new = Get-CrashLogLinesSince $mark
+            $detector = @($new | Where-Object { $_ -match ' INFO vad detector=' })
+            if ($detector.Count -eq 0) { Start-Sleep -Seconds 1 }
+          }
+          Start-Sleep -Seconds 3
+          $running = -not $app.HasExited
+          $new = Get-CrashLogLinesSince $mark
+          Stop-AllVoicen
+          if ($detector.Count -ne 1) { throw "the launch wrote $($detector.Count) 'vad detector=' line(s) within 30 s, expected 1 (new lines: $($new -join ' | '))" }
+          if (-not $detector[0].EndsWith(' vad detector=silero')) { throw "the start line names another detector: '$($detector[0])' (the installed model $($models[0].Name) was not loaded)" }
+          $fallback = @($new | Where-Object { $_.Contains('vad_fallback') })
+          if ($fallback.Count -ne 0) { throw "the launch wrote vad_fallback: $($fallback -join ' | ')" }
+          if (-not $running) { throw "the app (pid $($app.Id)) did not keep running after the launch" }
+          Write-Output "one vad model ($($models[0].Name), $($models[0].Length) bytes); the launch wrote: $($detector[0])"
+      - name: A corrupt, then a missing installed vad model, and the launch writes vad detector=energy, the app keeps running and no crash file is written (T-102 failure branch)
+        shell: pwsh
+        run: |
+          . ./scripts/ci/hotkey-hold.ps1
+          . ./scripts/ci/crash-records.ps1
+          $vad = Join-Path $env:LOCALAPPDATA 'Voicen\vad'
+          $models = @(Get-ChildItem -Path (Join-Path $vad '*.bin') -File -ErrorAction SilentlyContinue)
+          if ($models.Count -ne 1) { throw "premise: the install holds $($models.Count) file(s) vad/*.bin, expected exactly 1" }
+          $model = $models[0].FullName
+          $backup = Join-Path $env:RUNNER_TEMP 'vad-model-backup'
+          Copy-Item -LiteralPath $model -Destination $backup -Force
+          $size = $models[0].Length
+          $bad = @()
+          try {
+            foreach ($mode in @('corrupt', 'missing')) {
+              Stop-AllVoicen
+              Copy-Item -LiteralPath $backup -Destination $model -Force
+              if ($mode -eq 'corrupt') {
+                $fs = [System.IO.File]::Open($model, 'Open', 'Write')
+                try { $fs.SetLength([int64]($size / 2)) } finally { $fs.Dispose() }
+                if ((Get-Item -LiteralPath $model).Length -ne [int64]($size / 2)) { throw "premise: the truncated model has the wrong size" }
+              } else {
+                Remove-Item -LiteralPath $model -Force
+                if (Test-Path -LiteralPath $model) { throw "premise: the model is still there after Remove-Item" }
+              }
+              $crashBefore = Get-CrashNames
+              $mark = Get-CrashLogMark
+              $app = Start-VoicenSession
+              $detector = @()
+              for ($i = 0; $i -lt 30 -and $detector.Count -eq 0; $i++) {
+                $new = Get-CrashLogLinesSince $mark
+                $detector = @($new | Where-Object { $_ -match ' INFO vad detector=' })
+                if ($detector.Count -eq 0) { Start-Sleep -Seconds 1 }
+              }
+              Start-Sleep -Seconds 3
+              $running = -not $app.HasExited
+              $new = Get-CrashLogLinesSince $mark
+              $crashAfter = Get-CrashNames
+              Stop-AllVoicen
+              # The kill of the previous launch leaves an abnormal_end file for this one; any
+              # other kind (panic, exception) is a crash of this launch.
+              $crashed = @((Get-NewCrashNames $crashBefore $crashAfter) | Where-Object { (Get-CrashValue $_ 'kind') -cne 'abnormal_end' })
+              if ($detector.Count -ne 1) { $bad += "$mode model: $($detector.Count) 'vad detector=' line(s), expected 1 (new lines: $($new -join ' | '))" }
+              elseif (-not $detector[0].EndsWith(' vad detector=energy')) { $bad += "$mode model: the start line is '$($detector[0])', expected vad detector=energy" }
+              if (-not $running) { $bad += "$mode model: the app (pid $($app.Id)) did not keep running" }
+              if ($crashed.Count -ne 0) { $bad += "$mode model: crash file(s) $($crashed -join ', ')" }
+              Write-Output "$mode model: $($detector -join ' | '); running=$running; crash files other than abnormal_end: $($crashed.Count)"
+            }
+          } finally {
+            Stop-AllVoicen
+            Copy-Item -LiteralPath $backup -Destination $model -Force
+          }
+          if ((Get-Item -LiteralPath $model).Length -ne $size) { throw "the installed model was not restored" }
+          if ($bad) { throw ($bad -join '; ') }
       # W3: uninstall.exe /S /KEEPDATA keeps the data folder and the Voicen/ credentials and still
       # removes the Run value, the Start-menu shortcut and the uninstall key (a regression pin of
       # the hook's /KEEPDATA branch; green on the stock uninstaller). Without _?= the uninstaller

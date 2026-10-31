@@ -582,6 +582,8 @@ pub fn check_closed(line: &Line) -> Result<(), String> {
         "call_switch_refused" => &["reason"],
         "vad_fallback" => &["track", "cause"],
         "transcript_invalid" => &["rule", "segment"],
+        // T-102: the start line naming the detector the gate holds.
+        "vad" => &["detector"],
         other => return Err(format!("unknown head {other:?} in {:?}", line.raw)),
     };
     for k in required {
@@ -658,6 +660,7 @@ pub fn check_closed(line: &Line) -> Result<(), String> {
             ("final_finished", "mode") => one_of(k, v, &["timed", "timeless"])?,
             ("final_finished", "ms") => check(unsigned(v), k, v)?,
             ("call_switch_refused", "reason") => one_of(k, v, &["unknown_value"])?,
+            ("vad", "detector") => one_of(k, v, DETECTORS)?,
             ("vad_fallback", "cause") => one_of(k, v, &["unavailable", "error"])?,
             ("transcript_invalid", "rule") => one_of(k, v, INVALID_RULES)?,
             ("transcript_invalid", "segment") => check(unsigned(v), k, v)?,

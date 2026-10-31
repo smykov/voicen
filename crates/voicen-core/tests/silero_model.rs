@@ -34,7 +34,7 @@ use voicen_core::local_models::download::DownloadFailure;
 use voicen_core::test_support::TempDir;
 use voicen_core::timeouts::Timeouts;
 use voicen_core::vad::silero_model::{
-    fetch, fetch_against, verify, verify_against, ModelPin, SILERO_MODEL,
+    bundled_path, fetch, fetch_against, verify, verify_against, ModelPin, SILERO_MODEL,
 };
 use voicen_core::vad::VadError;
 
@@ -431,4 +431,22 @@ fn fetch_http_error_status_is_reported_and_leaves_nothing() {
     let got = fetch_against(tmp.path(), &pin, &timeouts(Duration::from_secs(5)));
     assert_eq!(got, Err(DownloadFailure::HttpStatus { code: 404 }), "404");
     assert_eq!(dir_entries(tmp.path()), Vec::<String>::new(), "left a file");
+}
+
+// ---- T-102: where the installer puts the bundled model ---------------------------------
+
+#[test]
+fn bundled_path_is_vad_dir_under_the_resource_dir_with_the_pinned_file_name() {
+    // T-102 invariant 1: resource_dir/vad/<SILERO_MODEL.file_name>, the file name from the
+    // pin (never a second copy of it), nothing under models/ or the data dir.
+    let want = Path::new("res").join("vad").join(SILERO_MODEL.file_name);
+    assert_eq!(bundled_path(Path::new("res")), want);
+}
+
+#[test]
+fn bundled_path_keeps_a_non_ascii_resource_dir_whole() {
+    // A Cyrillic user name under %LOCALAPPDATA% (T-102 re-check finding): no lossy rewrite.
+    let dir = PathBuf::from("Пользователь").join("Voicen");
+    let want = dir.join("vad").join(SILERO_MODEL.file_name);
+    assert_eq!(bundled_path(&dir), want);
 }

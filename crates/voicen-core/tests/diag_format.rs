@@ -597,9 +597,10 @@ fn every_event() -> Vec<LogEvent> {
             LogEvent::CallSwitchRefused { .. } => 21,
             LogEvent::VadFallback { .. } => 22,
             LogEvent::TranscriptInvalid { .. } => 23,
+            LogEvent::VadDetector { .. } => 24,
         })
         .collect();
-    assert_eq!(seen.len(), 24, "every LogEvent variant is enumerated");
+    assert_eq!(seen.len(), 25, "every LogEvent variant is enumerated");
     all
 }
 
@@ -779,6 +780,9 @@ fn call_events() -> Vec<LogEvent> {
             all.push(LogEvent::TranscriptInvalid { rule, segment });
         }
     }
+    for detector in [DetectorTag::Silero, DetectorTag::Energy, DetectorTag::Other] {
+        all.push(LogEvent::VadDetector { detector });
+    }
     all
 }
 
@@ -918,6 +922,14 @@ fn every_call_line_formats_exactly_as_the_contract_with_its_level() {
         (
             LogEvent::TranscriptInvalid { rule: InvalidRule::OutOfRange, segment: 17 },
             "WARN transcript_invalid rule=out_of_range segment=17".into(),
+        ),
+        (
+            LogEvent::VadDetector { detector: DetectorTag::Silero },
+            "INFO vad detector=silero".into(),
+        ),
+        (
+            LogEvent::VadDetector { detector: DetectorTag::Energy },
+            "INFO vad detector=energy".into(),
         ),
     ];
     for (event, want) in cases {
