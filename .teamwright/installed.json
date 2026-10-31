@@ -57,6 +57,6 @@
   "scripts/tw-test": "b85b7064dbe1b0ce24f3e3ee9ae042ea7dba35a16b64ae6df7caba35b7d6b89f",
   "@kit": {
     "plugin": "teamwright@teamwright",
-    "version": "0.13.1"
+    "version": "0.14.1"
   }
 }
