@@ -560,12 +560,13 @@ in history); human, one-off: `TEAMWRIGHT_ALLOW_PUSH=1 git push`.
 
 **Limits.** A deny is no boundary: the hook is a best-effort match on the command text. What the rule gives up, because refusing it takes a reader of quotes or variables, or another word in the token:
 
-- `git "-C" . push origin main` and `git -C . pu""sh origin main`: the shell model this rule replaced refused these two; the rule does not (T-198, the orchestrator's decision on the test-writer's finding).
-- `X=push; git -C . $X` and `G=git; $G -C . push`: a command built at run time.
+- **The class: any spelling whose text does not hold the token literally**, because a quote, a backslash or an expansion sits in or before the word `git`, the dash or the word `push`, or between them in place of a blank. Quotes and backslashes: `"git" -C . push`, `'git' -C . push`, `g""it -C . push`, `g\it -C . push`, `git "-C" . push`, `git '-C' . push`, `git \-C . push`, `git -C . p\ush`, `git -C . pu""sh`, `git -C . pu's'h`. Expansions, a command built at run time: `git $'-C' . push`, `git${IFS}-C . push`, `git -C . ${X:-push}`, `git $OPT . push`, `X=push; git -C . $X`, `G=git; $G -C . push`. These are samples, the limit is the class (T-198 review 1 #1; the orchestrator's decision covers it, decisions #226).
+- **Its worst case: the quoted `core.hooksPath` spelling**, `git "-c" core.hooksPath=/dev/null push` and `"git" -c core.hooksPath=/dev/null push`. It passes this hook and also drops `pre-push`, the hook this guard exists to keep. The settings deny `Bash(git -c * push*)` does not literally match it either (the real matcher was not probed on it).
+- What the shell model this rule replaced did: it refused the quote and backslash spellings, read from its code and not run (T-198 review 1 #1), so those are refusals given up; the expansions passed both. Refusing either takes a reader of quotes or variables, which P-020 forbids.
 - `git -C . send-pack origin main`: no word `push`.
-- A script file that pushes: its text is not in the command.
+- A script file that pushes, or a program that passes git its arguments apart: the token is not in the command text.
 
-`git push --no-verify` and `-c core.hooksPath` remain outside every gate here; CI repeats the checks (Known limitations).
+`git push --no-verify` and a `core.hooksPath` override that reaches git as above remain outside every gate here; CI repeats the checks (Known limitations).
 
 **Deliberate exits:** a human, one-off: `TEAMWRIGHT_ALLOW_PUSH=1 git push` (DRAIN); the hook has no override, remove its entry from `.claude/settings.json` (owner). `make check-wip-push` pins the script, the hook and the settings (`docs/decisions/ci-toolchain.md` › Guard table).
 

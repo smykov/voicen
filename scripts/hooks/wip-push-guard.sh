@@ -15,9 +15,14 @@
 # it), the word inside another (`--push`, `pre-push`, `docs/push.md`, `pushed`), and a real newline
 # after git or before push.
 #
-# NOT SEEN, what the rule gives up (docs/process/gates.md, WIP push guard): `git "-C" . push` and
-# `git -C . pu""sh` (the previous shell model refused these two; refusing them takes a reader of
-# quotes), `X=push; git -C . $X`, `G=git; $G -C . push`, `git -C . send-pack`, a script file.
+# NOT SEEN, what the rule gives up (docs/process/gates.md, WIP push guard), a class: any spelling whose
+# text does not hold the token literally, because a quote, a backslash or an expansion sits in or
+# before the word git, the dash or the word push, or between them in place of a blank: `"git" -C . push`,
+# `git "-C" . push`, `git \-C . push`, `git -C . pu""sh`, `git${IFS}-C . push`, `X=push; git -C . $X`,
+# `G=git; $G -C . push`. Worst case: `git "-c" core.hooksPath=/dev/null push`, which also drops the
+# pre-push hook. The previous shell model refused the quote and backslash spellings; refusing them
+# takes a reader of quotes. Also not seen: `git -C . send-pack`, a script file, a program that passes
+# git its arguments apart.
 #
 # A refusal blocks in every gate mode. SAFETY: fail-open on an internal error; silent on allow.
 set -uo pipefail
@@ -46,8 +51,9 @@ if re.compile(r"\bgit(?:[ \t]|\\\n)+-(?:[^\n]|\\\n)*?(?<![\w/-])push(?![\w-])").
             "logical line: the shape of `git push` with a git option before the subcommand, which the "
             "push rules do not match and which can drop the pre-push hook. Quotes and wrappers are not "
             "read, so a mention counts too: split the call, or use `git commit -F` or the Write tool. "
-            "The only push an agent makes is the CI-only one: `scripts/tw-wip-push [<commit>]` from "
-            "the task's worktree (branch tw/<ID>). See docs/decisions.md #219.",
+            "The CI-only wip push goes through `scripts/tw-wip-push [<commit>]` from the task's worktree "
+            "(branch tw/<ID>), or the plain `git push origin HEAD:wip/<ID>` from the main-tree "
+            "orchestrator. See docs/decisions.md #219, #202.",
             "wip-push-guard", data, hard=True)
 PY
 python3 -c "$_tw_py"

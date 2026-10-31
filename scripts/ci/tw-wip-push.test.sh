@@ -716,7 +716,10 @@ hook_case silent "$(printf 'git -C .\npush origin main')"
 hook_case silent "$(printf 'git\n-C . push origin main')"
 
 # T-198, the stated limits (docs/process/gates.md): the text does not hold the token. Refusing one of
-# these takes a reader of quotes or variables, which is the model this rule replaced.
+# these takes a reader of quotes or variables, which is the model this rule replaced. A class, these
+# are samples: a quote, a backslash or an expansion in or before the word git, the dash or the word
+# push, or between them in place of a blank (review 1 #1). The two core.hooksPath lines are its worst
+# case: they also drop the pre-push hook.
 while IFS= read -r c; do
   [ -z "$c" ] || hook_case silent "$c"
 done <<'CMDS'
@@ -725,6 +728,20 @@ git -C . pu""sh origin main
 X=push; git -C . $X
 G=git; $G -C . push origin main
 git -C . send-pack origin main
+"git" -C . push
+'git' -C . push
+g""it -C . push
+g\it -C . push
+git '-C' . push
+git \-C . push
+git -C . p\ush
+git -C . pu's'h
+git "-c" core.hooksPath=/dev/null push
+"git" -c core.hooksPath=/dev/null push
+git $'-C' . push
+git${IFS}-C . push
+git -C . ${X:-push}
+git $OPT . push
 CMDS
 
 # Only a PreToolUse of Bash is its business; a broken input follows the fail-open contract.
