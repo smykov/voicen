@@ -1,0 +1,8 @@
+guarantee: Invariant: blanks or a backslash-newline after the word git, one or more (analysis.decides_on)
+file: scripts/hooks/wip-push-guard.sh
+added_by: test-writer
+--- old
+|\\\n)+-
+--- new
+|\\\n)-
+--- end

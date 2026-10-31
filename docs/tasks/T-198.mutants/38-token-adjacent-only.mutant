@@ -1,0 +1,8 @@
+guarantee: Invariant: any text on the logical line between the dash and the word push (analysis.decides_on)
+file: scripts/hooks/wip-push-guard.sh
+added_by: test-writer
+--- old
+(?:[^\n]|\\\n)*?
+--- new
+(?:\\\n)*?
+--- end

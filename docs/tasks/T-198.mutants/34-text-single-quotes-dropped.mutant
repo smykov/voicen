@@ -1,0 +1,8 @@
+guarantee: Invariant: no quote is read, the token is searched on the raw text
+file: scripts/hooks/wip-push-guard.sh
+added_by: test-writer
+--- old
+.search(cmd):
+--- new
+.search(re.sub(r"'[^']*'", "", cmd)):
+--- end

@@ -672,6 +672,9 @@ hook_case deny "$(printf 'git \\\n  -C . push o')"
 hook_case deny "$(printf 'git -C . \\\n  push o')"
 hook_case deny "$(printf 'git -C .\ngit -C . push o')"
 
+# T-198: a refusal blocks in every gate mode (hard=True); gate-first mode only warns on a soft deny.
+TEAMWRIGHT_GATE_MODE=warn hook_case deny "setsid git -C . push o"
+
 # T-198: no reader of shell is left in the hook.
 if [ ! -f "$hook" ]; then
   fail "hook holds no shlex" "scripts/hooks/wip-push-guard.sh missing"

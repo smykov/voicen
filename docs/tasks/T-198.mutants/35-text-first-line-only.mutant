@@ -1,0 +1,8 @@
+guarantee: Invariant: any occurrence in the whole command text refuses (analysis.decides_on)
+file: scripts/hooks/wip-push-guard.sh
+added_by: test-writer
+--- old
+.search(cmd):
+--- new
+.search(cmd.split("\n")[0]):
+--- end

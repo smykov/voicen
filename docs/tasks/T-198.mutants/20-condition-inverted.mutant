@@ -1,0 +1,8 @@
+guarantee: Failure branch: each listed command is refused, verified by the hook pipe test
+file: scripts/hooks/wip-push-guard.sh
+added_by: test-writer
+--- old
+if re.compile(
+--- new
+if not re.compile(
+--- end

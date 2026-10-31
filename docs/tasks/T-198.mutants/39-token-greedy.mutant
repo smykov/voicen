@@ -1,0 +1,9 @@
+guarantee: -
+file: scripts/hooks/wip-push-guard.sh
+added_by: test-writer
+equivalent: only whether the regex matches is used, and greedy and lazy repetition try the same set of lengths, so the verdict is the same on every input
+--- old
+|\\\n)*?(?<!
+--- new
+|\\\n)*(?<!
+--- end

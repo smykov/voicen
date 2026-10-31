@@ -1,0 +1,8 @@
+guarantee: Invariant: the refusal is decided on a raw token, never on a reading of shell grammar
+file: scripts/hooks/wip-push-guard.sh
+added_by: test-writer
+--- old
+import os, re, sys
+--- new
+import os, re, shlex, sys
+--- end

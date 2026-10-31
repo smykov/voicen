@@ -1,0 +1,8 @@
+guarantee: Failure branch: each listed command is refused, in every gate mode (hook header, hard=True)
+file: scripts/hooks/wip-push-guard.sh
+added_by: test-writer
+--- old
+hard=True)
+--- new
+hard=False)
+--- end

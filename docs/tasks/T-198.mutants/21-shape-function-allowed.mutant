@@ -1,0 +1,8 @@
+guarantee: Failure branch: the shape `function f { ...; }; f` is refused
+file: scripts/hooks/wip-push-guard.sh
+added_by: test-writer
+--- old
+.search(cmd):
+--- new
+.search(cmd) and "function f" not in cmd:
+--- end

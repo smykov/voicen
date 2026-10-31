@@ -1,0 +1,8 @@
+guarantee: Failure branch: the shape `coproc ...` is refused
+file: scripts/hooks/wip-push-guard.sh
+added_by: test-writer
+--- old
+.search(cmd):
+--- new
+.search(cmd) and "coproc" not in cmd:
+--- end

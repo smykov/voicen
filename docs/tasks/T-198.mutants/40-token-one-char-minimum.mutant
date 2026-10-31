@@ -1,0 +1,9 @@
+guarantee: -
+file: scripts/hooks/wip-push-guard.sh
+added_by: test-writer
+equivalent: zero characters puts push right after the dash, which the lookbehind (?<![\w/-]) already rejects, so requiring one character changes no verdict
+--- old
+|\\\n)*?(?<!
+--- new
+|\\\n)+?(?<!
+--- end

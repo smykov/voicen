@@ -1,0 +1,8 @@
+guarantee: Invariant: no separator is read, the token runs to the end of the logical line (analysis.decides_on)
+file: scripts/hooks/wip-push-guard.sh
+added_by: test-writer
+--- old
+(?:[^\n]|\\\n)*?
+--- new
+(?:[^\n;&|]|\\\n)*?
+--- end

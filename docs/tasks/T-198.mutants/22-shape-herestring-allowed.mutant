@@ -1,0 +1,8 @@
+guarantee: Failure branch: the shape `bash <<< '...'` is refused
+file: scripts/hooks/wip-push-guard.sh
+added_by: test-writer
+--- old
+.search(cmd):
+--- new
+.search(cmd) and "<<<" not in cmd:
+--- end

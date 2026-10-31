@@ -1,0 +1,8 @@
+guarantee: A new shell shape needs no new clause: the rule holds for a wrapper the test has never named
+file: scripts/hooks/wip-push-guard.sh
+added_by: test-writer
+--- old
+.search(cmd):
+--- new
+.search(cmd) and "never-named-wrapper" not in cmd:
+--- end
