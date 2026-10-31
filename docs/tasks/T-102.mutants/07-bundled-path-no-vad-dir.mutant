@@ -1,0 +1,9 @@
+guarantee: AC-1: the installed model is found under vad/ (invariant 1: bundled_path without vad)
+file: crates/voicen-core/src/vad/silero_model.rs
+added_by: test-writer
+test: cargo test -j2 -p voicen-core --test silero_model
+--- old
+    resource_dir.join("vad").join(SILERO_MODEL.file_name)
+--- new
+    resource_dir.join(SILERO_MODEL.file_name)
+--- end

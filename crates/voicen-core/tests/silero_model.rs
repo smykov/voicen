@@ -450,3 +450,20 @@ fn bundled_path_keeps_a_non_ascii_resource_dir_whole() {
     let want = dir.join("vad").join(SILERO_MODEL.file_name);
     assert_eq!(bundled_path(&dir), want);
 }
+
+/// A read that fails after the size check passed must not count as verified (T-102 invariant
+/// 2). The core image runs as root, so a mode 000 file still opens; `/proc/self/mem` is a
+/// regular file of length 0 whose first read at offset 0 is an I/O error, so a pin of 0 bytes
+/// passes the size check and only `sha256_of` can refuse it.
+/// Bite: the `sha256_of(path)` `?` in `verify_against` swallowed into `Ok`.
+#[cfg(target_os = "linux")]
+#[test]
+fn verify_against_read_error_after_the_size_check_is_unavailable() {
+    let path = Path::new("/proc/self/mem");
+    let meta = std::fs::metadata(path).expect("premise: /proc/self/mem exists");
+    assert!(meta.is_file() && meta.len() == 0, "premise: {meta:?}");
+    let mut buf = [0u8; 1];
+    let read = std::io::Read::read(&mut std::fs::File::open(path).expect("open"), &mut buf);
+    assert!(read.is_err(), "premise: the first read fails, got {read:?}");
+    assert_unavailable(verify_against(path, &pin_for(&[])), "a read error");
+}

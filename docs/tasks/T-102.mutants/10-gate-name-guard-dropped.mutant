@@ -1,0 +1,9 @@
+guarantee: invariant 3: the start line names the detector the gate holds (SpeechGate::detector_name ignores the failure latch)
+file: crates/voicen-core/src/vad/mod.rs
+added_by: test-writer
+test: cargo test -j2 -p voicen-core --lib vad::
+--- old
+            Some(primary) if !self.primary_failed.load(Ordering::Acquire) => primary.name(),
+--- new
+            Some(primary) => primary.name(),
+--- end

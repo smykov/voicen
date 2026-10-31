@@ -1,0 +1,11 @@
+guarantee: AC-1: the launch logs vad detector=silero (the line loses its detector pair)
+file: crates/voicen-core/src/diag/format.rs
+added_by: test-writer
+test: cargo test -j2 -p voicen-core --test diag_format
+--- old
+            out.push_str("vad");
+            pair(out, "detector", detector(*tag));
+--- new
+            out.push_str("vad");
+            let _ = tag;
+--- end

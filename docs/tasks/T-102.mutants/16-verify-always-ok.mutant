@@ -1,0 +1,10 @@
+guarantee: AC-4: a corrupt or missing model never reaches whisper.cpp (verify's result replaced by Ok)
+file: crates/voicen-core/src/vad/silero_model.rs
+added_by: test-writer
+test: cargo test -j2 -p voicen-core --test silero_model
+--- old
+    verify_against(path, &SILERO_MODEL)
+--- new
+    let _ = verify_against(path, &SILERO_MODEL);
+    Ok(())
+--- end

@@ -1,0 +1,2 @@
+# Linux-replayable part only. The shell, voicen-whisper and ci.yml mutations need Windows CI and are rows under ## Tests, not entries here.
+cargo test -j2 -p voicen-core --lib --test diag_format --test silero_model

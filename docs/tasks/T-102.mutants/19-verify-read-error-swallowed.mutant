@@ -1,0 +1,11 @@
+guarantee: invariant 2: a model that is unverifiable (a read error after the size check) -> Err(Unavailable) (verify_against, the sha256_of propagation site swallowed)
+file: crates/voicen-core/src/vad/silero_model.rs
+added_by: test-writer
+test: cargo test -j2 -p voicen-core --test silero_model
+--- old
+    let digest = sha256_of(path).map_err(|_| VadError::Unavailable)?;
+--- new
+    let Ok(digest) = sha256_of(path) else {
+        return Ok(());
+    };
+--- end

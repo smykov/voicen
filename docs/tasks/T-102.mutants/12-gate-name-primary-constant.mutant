@@ -1,0 +1,17 @@
+guarantee: AC-4: a corrupt or missing model -> the launch logs vad detector=energy (SpeechGate::detector_name answers silero without a primary)
+file: crates/voicen-core/src/vad/mod.rs
+added_by: test-writer
+test: cargo test -j2 -p voicen-core --lib vad::
+--- old
+            _ => SpeechDetector::name(&self.fallback),
+        }
+    }
+
+    /// Infallible: the primary's answer, or the fallback's when the primary is
+--- new
+            _ => "silero",
+        }
+    }
+
+    /// Infallible: the primary's answer, or the fallback's when the primary is
+--- end

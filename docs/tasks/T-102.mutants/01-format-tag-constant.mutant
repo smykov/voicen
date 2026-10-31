@@ -1,0 +1,12 @@
+guarantee: AC-4: a corrupt or missing model -> the launch logs vad detector=energy (tag constant in the start line)
+file: crates/voicen-core/src/diag/format.rs
+added_by: test-writer
+test: cargo test -j2 -p voicen-core --test diag_format
+--- old
+            out.push_str("vad");
+            pair(out, "detector", detector(*tag));
+--- new
+            out.push_str("vad");
+            let _ = tag;
+            pair(out, "detector", "silero");
+--- end

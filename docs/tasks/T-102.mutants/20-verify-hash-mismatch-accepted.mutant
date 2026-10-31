@@ -1,0 +1,9 @@
+guarantee: AC-4: a corrupt model of the right size -> Err(Unavailable) (verify_against, the hash refusal turned into Ok)
+file: crates/voicen-core/src/vad/silero_model.rs
+added_by: test-writer
+test: cargo test -j2 -p voicen-core --test silero_model
+--- old
+    if hex_eq(&digest, pin.sha256) {
+--- new
+    if hex_eq(&digest, pin.sha256) || !digest.is_empty() {
+--- end

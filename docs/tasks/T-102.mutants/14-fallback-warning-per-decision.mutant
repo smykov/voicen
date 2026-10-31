@@ -1,0 +1,12 @@
+guarantee: AC-2: truncated model -> exactly one vad_fallback over two holds (a warning per decision)
+file: crates/voicen-core/src/vad/mod.rs
+added_by: test-writer
+test: cargo test -j2 -p voicen-core --lib vad::
+--- old
+            fallback_warning: !self.warned.swap(true, Ordering::AcqRel),
+--- new
+            fallback_warning: {
+                let _ = self.warned.swap(true, Ordering::AcqRel);
+                true
+            },
+--- end
