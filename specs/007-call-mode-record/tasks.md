@@ -292,7 +292,7 @@
 ### G26 — WER scoring and harness (area: core) <a id="g26"></a>
 
 - [ ] T050 [P] [US2] [area core] Red tests in `crates/voicen-core/src/wer.rs`: normalization (lowercase, punctuation stripped, numbers as written, `ё` → `е`), word-level Levenshtein WER on fixtures, and empty-reference handling (spec FR-047; R23).
-- [ ] T051 [US2] [area core] Implement `wer.rs` and `crates/voicen-core/examples/wer.rs` until T050 is green. The example reads WAV only, with no `claxon` (#186: the owner converts the FLAC files once with an external tool, and the command is documented in the example's usage). It takes a committed LibriSpeech test-clean manifest of utterance ids (≥ 30 min, archive MD5 `32fa31d27d2e1cad72775fee3f4849a9`, our own SHA-256 pinned at the first fetch) and the key from that one command's environment. Neither the gate nor CI runs it (#185).
+- [ ] T051 [US2] [area core] Implement `wer.rs` and `crates/voicen-core/examples/wer.rs` until T050 is green. The example reads WAV only, with no `claxon` (#186: the owner converts the FLAC files once with an external tool, and the command is documented in the example's usage). It takes a committed LibriSpeech test-clean manifest of utterance ids (≥ 30 min, archive MD5 `32fa31d27d2e1cad72775fee3f4849a9`, our own SHA-256 pinned at the first fetch) and the key from that one command's environment. Neither the gate nor CI runs the real measurement (the real key and the real sets, #185); a test may run the built example against a loopback server with fake data (#221).
 
 **Checkpoint**: US2 is verifiable. The Linux pass is green against wiremock; the Windows chain gives a transcript.
 

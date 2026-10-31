@@ -261,7 +261,7 @@ Crate facts were read from the published sources of `opus` 0.4.0 / `opusic-sys` 
 ## R23 — WER harness (FR-047, outside CI)
 
 - **Decision**:
-  - **Location**: a `voicen-core` example `wer` that the owner runs on their PC with their key. Neither the gate nor CI runs it.
+  - **Location**: a `voicen-core` example `wer` that the owner runs on their PC with their key. Neither the gate nor CI runs the real measurement (the real key and the real sets); a test may run the built example against a loopback server with fake data (#221).
   - **Scoring**: core's `wer` module computes word error rate (normalization: lowercase, punctuation stripped, numbers as written, `ё`→`е` for Russian; word-level Levenshtein) and is unit-tested on the Linux host.
   - **English set**: a pinned subset of LibriSpeech test-clean (CC BY 4.0, #185).
     - The archive is `test-clean.tar.gz`, 346 663 984 bytes. OpenSLR publishes MD5 `32fa31d27d2e1cad72775fee3f4849a9` only, so the first fetch also pins our own SHA-256.
