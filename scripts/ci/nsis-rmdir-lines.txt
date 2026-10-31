@@ -1,0 +1,5 @@
+src-tauri/windows/installer.nsi:  RMDir /REBOOTOK "$INSTDIR\\{{this}}"
+src-tauri/windows/installer.nsi:  RMDir "$INSTDIR"
+src-tauri/windows/installer.nsi:      RMDir "$SMPROGRAMS\$AppStartMenuFolder"
+src-tauri/windows/installer-hooks.nsh:    RMDir "$R0"
+src-tauri/windows/installer-hooks.nsh:      RMDir "$LOCALAPPDATA\Voicen"

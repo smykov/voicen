@@ -173,7 +173,10 @@ check-release-guard:
 # '; upstream: tauri-cli X.Y.Z' header, the exact @tauri-apps/cli in package.json and the
 # version of the installed node_modules/@tauri-apps/cli/package.json differ, or tauri.conf.json
 # does not use the fork; pnpm-lock.yaml is not read (T-093, P-020: the specifier equality is
-# pnpm --frozen-lockfile's). No installed CLI: cannot run. The self-test runs it on fixture trees
+# pnpm --frozen-lockfile's). No installed CLI: cannot run. T-156 (decisions #197): every line of
+# the fork and of installer-hooks.nsh holding the raw token 'rmdir' (any case, comments included)
+# must be a line of scripts/ci/nsis-rmdir-lines.txt, prefixed with its file, so no recursive delete
+# (which follows junctions) can enter; the list missing: cannot run. The self-test runs it on fixture trees
 # built in a temp dir and on the real repo. Host bash, python3 (stdlib json).
 check-nsis-fork:
 	scripts/ci/nsis-fork.test.sh
