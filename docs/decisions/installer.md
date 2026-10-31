@@ -1,6 +1,6 @@
 # Installer and uninstaller
 
-**Code:** `src-tauri/windows/installer.nsi` (fork of the tauri-cli NSIS template), `src-tauri/windows/installer-hooks.nsh`, `src-tauri/tauri.conf.json` › `bundle.resources`, `bundle.windows.nsis`, `package.json` / `pnpm-lock.yaml` › `@tauri-apps/cli` · **Tests that pin it:** `make check-nsis-fork` (`scripts/ci/nsis-fork.sh`, `nsis-fork.test.sh`); the `windows` job of `.github/workflows/ci.yml`: size and notices before the first launch (W1), the same-version `/P` reinstall (W2), `uninstall.exe /S /KEEPDATA` (W3), `uninstall.exe /S` (W4)
+**Code:** `src-tauri/windows/installer.nsi` (fork of the tauri-cli NSIS template), `src-tauri/windows/installer-hooks.nsh`, `src-tauri/tauri.conf.json` › `bundle.resources`, `src-tauri/tauri.bundle-vad.json` (T-102), `bundle.windows.nsis`, `package.json` / `pnpm-lock.yaml` › `@tauri-apps/cli` · **Tests that pin it:** `make check-nsis-fork` (`scripts/ci/nsis-fork.sh`, `nsis-fork.test.sh`); the `windows` job of `.github/workflows/ci.yml`: size and notices before the first launch (W1), the same-version `/P` reinstall (W2), `uninstall.exe /S /KEEPDATA` (W3), `uninstall.exe /S` (W4)
 
 Tasks: T-025 (this seam), T-061 (`voicen.exe --purge-credentials`), T-062 (WebView2 data, open). Decisions: #10, #76, #98. Spec: `specs/006-diagnostics-and-release` (US4, `contracts/installer-ci.md`, research R9/R10). Open question: OQ-19.
 
@@ -23,6 +23,14 @@ On Yes the hook runs `"$INSTDIR\voicen.exe" --purge-credentials` while the exe s
 - **What breaks if you violate it:** an upgrade deletes the user's settings, models and saved keys, or turns off Start with Windows (FR-024); or a second deletion path removes something outside the folder (FR-023).
 - **Where it is enforced:** fork edit 1 (`PageLeaveReinstall` always appends ` /UPDATE /P` to the NSIS uninstall string, the only place an installer starts the uninstaller; the WiX branch is untouched), fork edit 2 (stock checkbox and its removal block deleted), the hooks file. CI: W2 (a same-version `/P` reinstall runs the old uninstaller and must keep data, credential and Run value within 120 s), W3, W4. The `/UPDATE /P` mark is added by the **new** installer, so it also reaches the stock uninstallers of builds installed before T-025.
 - **Don't:** key a deletion on anything but the hook's decision; add data removal to the fork; let the hook ask under `/P` or `/S` (a passive question blocks: `/SD` applies only to silent); delete `$INSTDIR` recursively (the interactive directory page may point it elsewhere; the data folder is the literal `%LOCALAPPDATA%\Voicen`, `paths::data_dir`).
+
+### The Silero model reaches the installer only through the `--config` overlay (T-102)
+
+- **Invariant:** `tauri.conf.json` never names the model. The windows job builds with `pnpm tauri build --config src-tauri/tauri.bundle-vad.json`, a merge patch that adds one key to `bundle.resources` (the existing notices entry stays), with the CI fetch directory as source and `vad/` under `resource_dir` as destination. The shell resolves the file from there, with the file name from `voicen_core::vad::silero_model::SILERO_MODEL` (`silero_model::bundled_path`), so neither the overlay nor `ci.yml` repeats the name or any pin value.
+- **What breaks if you violate it:** tauri-build canonicalizes every resource source on each shell build, so a model entry in `tauri.conf.json` without the file present breaks the Linux gate and `cargo test -p voicen`.
+- **Where it is checked:** the CI fetch directory is in the workspace outside `target/` (git-ignored), and `check-shell-windows` goes red on a missing source. Whether the installed file lands where the shell looks is checked by the install smoke step of `.github/workflows/ci.yml` (exactly one `vad/*.bin`, then the launch's start line); it had not run at this code when this was written.
+- **Removal:** the fork's resource loops install and delete it (`installer.nsi` copy and delete resources), so the uninstaller and `/KEEPDATA` need no hook change; with `/KEEPDATA` it goes with the program files, not the data folder.
+- **Don't:** put the model under `models/` (`LocalModels` owns it) or in the data directory (the install directory can be moved on the directory page).
 
 ### The fork follows exactly one tauri-cli version
 

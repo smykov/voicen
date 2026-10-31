@@ -68,4 +68,5 @@ A run whose `Abort` is already requested leaves whisper.cpp's segment count for 
 
 ## Open
 
-- A third ggml user next to a transcription (T-102 shell VAD gate, T-135 Silero speech spans) shows the same symptom: open an rca for a process-wide ggml thread budget.
+- A third ggml user next to a transcription shows the same symptom: open an rca for a process-wide ggml thread budget. The candidate is T-135 (Silero speech spans); the shell VAD gate of T-102 is not one: on the dictation path `Pipeline::process` decides and then transcribes on the session's one FIFO worker, so a decision never overlaps a transcription there, and the gate keeps `VAD_THREADS` (1) without routing it through `thread_count`. That is read from the code, not measured.
+- Non-AVX2 CPUs: since T-102 `voicen.exe` itself contains the `/arch:AVX2` ggml code (decisions #198). `SileroDetector::load` refuses such a CPU before any native call, but a start of the process on one is not tested (no CI runner lacks AVX2), and #142 accepted the illegal-instruction failure only for the built-in engine. Residual risk accepted by #198; see `docs/decisions/dictation-session.md` for the `panic = "abort"` side.

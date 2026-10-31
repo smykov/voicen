@@ -50,6 +50,7 @@ pub enum LogEvent {
     SettingsSave(SaveLine),                                 // LogEvent::settings_save(&SaveOutcome)
     AutostartReconcile(ReconcileAction),
     LogsRecovered,                                          // written by the log itself
+    VadDetector { detector: DetectorTag },                  // `vad detector=<silero|energy|other>`, INFO (T-102, decisions #198): the one start line of a process that starts dictation, written by `src-tauri` `dictation::start_dictation`; a closed tag, never a path
 }   // later tasks add variants (data-model.md "LogEvent"); a variant is the only way to log something new
 
 pub struct DictationLine { pub recording: u64, pub engine: Option<EngineTag>, pub outcome: DictationOutcome,
