@@ -1,0 +1,9 @@
+guarantee: AC-1/D4: CallRecording shows the recording icon
+file: crates/voicen-core/src/tray.rs
+added_by: test-writer
+--- old
+        TrayState::Recording | TrayState::CallRecording => TrayIconKind::Recording,
+--- new
+        TrayState::Recording => TrayIconKind::Recording,
+        TrayState::CallRecording => TrayIconKind::Idle,
+--- end

@@ -1,0 +1,8 @@
+guarantee: AC-2: a call-hotkey conflict never yields HotkeyError
+file: crates/voicen-core/src/tray.rs
+added_by: test-writer
+--- old
+        (_, true) => TrayState::CallRecording,
+--- new
+        (_, true) => TrayState::HotkeyError,
+--- end

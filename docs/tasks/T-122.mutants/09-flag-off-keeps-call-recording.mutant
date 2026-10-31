@@ -1,0 +1,9 @@
+guarantee: AC-1: CallRecording only while the flag is set
+file: crates/voicen-core/src/tray.rs
+added_by: test-writer
+--- old
+        (TrayState::Idle | TrayState::CallRecording, false) => TrayState::Idle,
+--- new
+        (TrayState::Idle, false) => TrayState::Idle,
+        (TrayState::CallRecording, false) => TrayState::CallRecording,
+--- end

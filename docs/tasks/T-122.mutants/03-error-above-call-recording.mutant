@@ -1,0 +1,11 @@
+guarantee: AC-1: CallRecording > Error
+file: crates/voicen-core/src/tray.rs
+added_by: test-writer
+--- old
+        (_, true) => TrayState::CallRecording,
+        (TrayState::Error, false)
+--- new
+        (TrayState::Error, _) => TrayState::Error,
+        (_, true) => TrayState::CallRecording,
+        (TrayState::Error, false)
+--- end

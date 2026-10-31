@@ -1,16 +1,18 @@
 //! The tray icon's menu, tooltips and icons (T-052; spec 001 FR-001, FR-008 /
-//! FR-028; spec 004 FR-013; contracts/messages.md `tray.*`).
+//! FR-028; spec 004 FR-013; spec 007 FR-003, FR-006; contracts/messages.md `tray.*`).
 //!
 //! The one table the shell's tray adapter (`src-tauri/src/tray.rs`) renders: which
-//! items the menu has and in which order, the id each item carries (its
-//! `MenuEvent` id), the catalog id of each item's text and of each state's
-//! tooltip, and which of the four icons a state shows. The shell renders the texts
-//! with [`i18n::text`](crate::i18n::text) in the settings' `ui_language` and maps a
-//! clicked id back with [`TrayAction::from_id`]; it decides nothing itself (P-010).
+//! rows the menu has and in which order (with their mark and enabled flag), the id
+//! each item carries (its `MenuEvent` id), the catalog id of each row's text and of
+//! each state's tooltip, and which of the four icons a state shows. The shell renders
+//! the texts with [`i18n::text`](crate::i18n::text) in the settings' `ui_language` and
+//! maps a clicked id back with [`TrayAction::from_id`]; it decides nothing itself
+//! (P-010).
 //!
-//! The tray's state itself is the controller's ([`TrayState`], derived by
-//! `RecordingController`, published by the dictation session together with
-//! `retry_available`); nothing here keeps state.
+//! The dictation side of the tray's state is the controller's ([`TrayState`], derived
+//! by `RecordingController`, published by the dictation session together with
+//! `retry_available`); [`shown`] combines it with the call session's recording flag.
+//! Nothing here keeps state.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
 use crate::i18n::{self, MessageId};
@@ -20,6 +22,13 @@ use crate::recording::TrayState;
 /// feature 005 History.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TrayAction {
+    /// "Call" > "Record": the check item that starts or stops recording a call
+    /// (spec 007 FR-003).
+    CallRecord,
+    /// "Call" > "Stop": stops the call recording.
+    CallStop,
+    /// "Calls": opens the calls list.
+    OpenCalls,
     /// "Settings": the settings window to the front on the tab it shows, or opened
     /// on Engine when none is open (OQ-11 Q2 default).
     OpenSettings,
@@ -35,6 +44,9 @@ impl TrayAction {
     /// action.
     pub fn as_str(self) -> &'static str {
         match self {
+            TrayAction::CallRecord => "call_record",
+            TrayAction::CallStop => "call_stop",
+            TrayAction::OpenCalls => "calls",
             TrayAction::OpenSettings => "settings",
             TrayAction::OpenLogs => "open_logs",
             TrayAction::Exit => "exit",
@@ -49,6 +61,9 @@ impl TrayAction {
     /// The catalog id of the item's text (contracts/messages.md).
     pub fn label(self) -> MessageId {
         match self {
+            TrayAction::CallRecord => i18n::TRAY_CALL_RECORD,
+            TrayAction::CallStop => i18n::TRAY_CALL_STOP,
+            TrayAction::OpenCalls => i18n::TRAY_CALLS,
             TrayAction::OpenSettings => i18n::TRAY_SETTINGS,
             TrayAction::OpenLogs => i18n::TRAY_OPEN_LOGS,
             TrayAction::Exit => i18n::TRAY_EXIT,
@@ -58,7 +73,10 @@ impl TrayAction {
 
 /// Every action, so [`TrayAction::from_id`] maps back exactly the ids
 /// [`TrayAction::as_str`] gives (a new variant is added here and to `as_str`).
-const ALL: [TrayAction; 3] = [
+const ALL: [TrayAction; 6] = [
+    TrayAction::CallRecord,
+    TrayAction::CallStop,
+    TrayAction::OpenCalls,
     TrayAction::OpenSettings,
     TrayAction::OpenLogs,
     TrayAction::Exit,
@@ -66,7 +84,7 @@ const ALL: [TrayAction; 3] = [
 
 /// The four tray icons (OQ-11 Q1 default: the app icon plain, with a red dot, with
 /// an amber "!", with an amber "!" and a key mark). The shell embeds one image per
-/// kind.
+/// kind. `TrayState::CallRecording` shares the red dot (decision #197 D4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TrayIconKind {
     Idle,
@@ -75,17 +93,72 @@ pub enum TrayIconKind {
     HotkeyError,
 }
 
-/// The menu items, top to bottom. `retry_available` is the session's (the pending
-/// slot, dictation-session.md); T-007 adds Retry while it is true. Pure.
-pub fn menu(retry_available: bool) -> Vec<TrayAction> {
+/// A row of the tray menu.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TrayRow {
+    /// A plain item.
+    Item { action: TrayAction, enabled: bool },
+    /// An item with a check mark.
+    Check {
+        action: TrayAction,
+        checked: bool,
+        enabled: bool,
+    },
+    /// A submenu; it carries no action, so no click maps to it.
+    Submenu {
+        label: MessageId,
+        rows: Vec<TrayRow>,
+    },
+}
+
+/// The menu rows, top to bottom (decision #197 D2, D3): "Call" > {"Record", checked
+/// iff `call_recording`; "Stop", enabled iff `call_recording`}, "Calls", Settings,
+/// Open logs folder, Exit last. `retry_available` is the session's (the pending slot,
+/// dictation-session.md); T-007 adds Retry while it is true. Pure.
+pub fn menu(retry_available: bool, call_recording: bool) -> Vec<TrayRow> {
     // T-007 inserts Retry before Exit while `retry_available`; until then both rows
     // are the same.
     let _ = retry_available;
+    let item = |action| TrayRow::Item {
+        action,
+        enabled: true,
+    };
     vec![
-        TrayAction::OpenSettings,
-        TrayAction::OpenLogs,
-        TrayAction::Exit,
+        TrayRow::Submenu {
+            label: i18n::TRAY_CALL,
+            rows: vec![
+                TrayRow::Check {
+                    action: TrayAction::CallRecord,
+                    checked: call_recording,
+                    enabled: true,
+                },
+                TrayRow::Item {
+                    action: TrayAction::CallStop,
+                    enabled: call_recording,
+                },
+            ],
+        },
+        item(TrayAction::OpenCalls),
+        item(TrayAction::OpenSettings),
+        item(TrayAction::OpenLogs),
+        item(TrayAction::Exit),
     ]
+}
+
+/// The state the tray shows for the dictation session's state and the call session's
+/// recording flag (spec 007 FR-006): dictation `HotkeyError` > dictation `Recording` >
+/// `CallRecording` while `call_recording` > dictation `Error` > `Idle`. `HotkeyError`
+/// is shown iff `dictation` is `HotkeyError`, so no call-side input can produce it
+/// (FR-004). The dictation controller never produces `CallRecording`; passed in with
+/// the flag off, it shows `Idle`. Pure.
+pub fn shown(dictation: TrayState, call_recording: bool) -> TrayState {
+    match (dictation, call_recording) {
+        (TrayState::HotkeyError, _) => TrayState::HotkeyError,
+        (TrayState::Recording, _) => TrayState::Recording,
+        (_, true) => TrayState::CallRecording,
+        (TrayState::Error, false) => TrayState::Error,
+        (TrayState::Idle | TrayState::CallRecording, false) => TrayState::Idle,
+    }
 }
 
 /// The catalog id of the tooltip `state` shows. Pure.
@@ -93,6 +166,7 @@ pub fn tooltip(state: TrayState) -> MessageId {
     match state {
         TrayState::Idle => i18n::TRAY_TOOLTIP_IDLE,
         TrayState::Recording => i18n::TRAY_TOOLTIP_RECORDING,
+        TrayState::CallRecording => i18n::TRAY_TOOLTIP_CALL_RECORDING,
         TrayState::Error => i18n::TRAY_TOOLTIP_ERROR,
         TrayState::HotkeyError => i18n::TRAY_TOOLTIP_HOTKEY_ERROR,
     }
@@ -102,7 +176,7 @@ pub fn tooltip(state: TrayState) -> MessageId {
 pub fn icon(state: TrayState) -> TrayIconKind {
     match state {
         TrayState::Idle => TrayIconKind::Idle,
-        TrayState::Recording => TrayIconKind::Recording,
+        TrayState::Recording | TrayState::CallRecording => TrayIconKind::Recording,
         TrayState::Error => TrayIconKind::Error,
         TrayState::HotkeyError => TrayIconKind::HotkeyError,
     }
@@ -459,12 +533,10 @@ mod tests {
 
     #[test]
     fn the_dictation_side_never_shows_call_recording_without_the_call_flag() {
-        // CallRecording is shown only while the call flag is set. Bite: CallRecording
-        // returned for a dictation state with the flag off.
+        // CallRecording is shown only while the call flag is set, whatever the
+        // dictation input (CallRecording included: the flag, not the input, decides).
+        // Bite: CallRecording returned for a dictation state with the flag off.
         for dictation in all_states() {
-            if dictation == TrayState::CallRecording {
-                continue;
-            }
             assert_ne!(
                 shown(dictation, false),
                 TrayState::CallRecording,

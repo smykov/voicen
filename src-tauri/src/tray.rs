@@ -5,7 +5,8 @@
 //!   `app.trayIcon`, which tauri builds before the plugins decide), with id
 //!   [`TRAY_ID`], the `TrayState::Idle` icon and tooltip, and the menu in the
 //!   language of the settings snapshot taken after its own `subscribe()`.
-//! - Menu items, ids, texts and icons come from core `voicen_core::tray` only.
+//! - Menu rows, ids, texts, marks, enabled flags and icons come from core
+//!   `voicen_core::tray` only.
 //! - The tray changes only in one fire-and-forget main-thread task that applies the
 //!   latest `(TrayState, retry_available, ui_language)`: [`TrayPart::set_tray`]
 //!   (called by the dictation session under its lock, through T-006's composite
@@ -15,7 +16,9 @@
 //!   instant and hands `DictationSession::tray_menu_opened` to another thread.
 //! - "Settings" posts `settings_window::request(Front)`; "Open logs folder" calls
 //!   `logs_folder::request` (its own thread, T-071); "Exit" calls
-//!   `AppHandle::exit(0)`, the only user exit.
+//!   `AppHandle::exit(0)`, the only user exit. "Record", "Stop" and "Calls" reach no
+//!   session until T-128; "Record" rebuilds the menu, because muda flips a check
+//!   item's native mark on a click and only the table may decide it (decision #223).
 //! - Only tauri keeps the `TrayIcon` (in its resources), so tauri's exit cleanup
 //!   drops the last copy and tray-icon removes the icon from the notification
 //!   area; this module looks the icon up for each render.
@@ -25,7 +28,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Instant;
 
 use tauri::image::Image;
-use tauri::menu::{IsMenuItem, Menu, MenuEvent, MenuItem};
+use tauri::menu::{CheckMenuItem, IsMenuItem, Menu, MenuEvent, MenuItem, MenuItemKind, Submenu};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Manager, Runtime};
 use voicen_core::diag::{Log, LogEvent, WarningKind};
@@ -35,7 +38,7 @@ use voicen_core::recording::TrayState;
 use voicen_core::settings::gate::{second_launch_action, SecondLaunchAction};
 use voicen_core::settings::service::SettingsService;
 use voicen_core::settings::Settings;
-use voicen_core::tray::{self as table, TrayAction, TrayIconKind};
+use voicen_core::tray::{self as table, TrayAction, TrayIconKind, TrayRow};
 
 use crate::diag::io_os_code;
 use crate::logs_folder;
@@ -70,9 +73,29 @@ pub struct Applied {
     pub icon: TrayIconKind,
     /// The tooltip text of the last `set_tooltip` that returned `Ok`.
     pub tooltip: String,
-    /// The menu set on the icon, as `(item id, item text)` read back from its
-    /// items, top to bottom.
-    pub menu: Vec<(String, String)>,
+    /// The menu set on the icon, as rows read back from its items, top to bottom.
+    pub menu: Vec<AppliedRow>,
+}
+
+/// A row of the menu on the icon, read back from the built menu. The submenu has no
+/// id here: its id is generated and no action maps to it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AppliedRow {
+    Item {
+        id: String,
+        text: String,
+        enabled: bool,
+    },
+    Check {
+        id: String,
+        text: String,
+        checked: bool,
+        enabled: bool,
+    },
+    Submenu {
+        text: String,
+        rows: Vec<AppliedRow>,
+    },
 }
 
 /// What the tray is to show: the session's `(TrayState, retry_available)` and the
@@ -82,6 +105,9 @@ struct View {
     state: TrayState,
     retry_available: bool,
     lang: UiLanguage,
+    /// Bumped to rebuild the menu from the table with nothing else changed (decision
+    /// #223: a click on "Record" leaves muda's flipped mark on the item until then).
+    menu_epoch: u64,
 }
 
 /// The latest wanted view, bumped by every change, and whether an apply task is
@@ -101,10 +127,14 @@ struct Shared<R: Runtime> {
     app: AppHandle<R>,
     log: Arc<Log>,
     wanted: Mutex<Wanted>,
-    /// `(lang, retry_available)` of the menu on the icon; read and written by the
-    /// apply task only.
-    menu_key: Mutex<(UiLanguage, bool)>,
+    /// `(lang, retry_available, menu_epoch)` of the menu on the icon; read and written
+    /// by the apply task only.
+    menu_key: Mutex<(UiLanguage, bool, u64)>,
     applied: Mutex<Applied>,
+    /// The menu last set on the icon, for [`live_menu`] (tauri 2.12.1 has no getter
+    /// for a tray's menu). Unlike a `TrayIcon` copy it keeps no icon in the
+    /// notification area.
+    live_menu: Mutex<Option<Menu<R>>>,
 }
 
 /// The managed tray of an app (absent when the tray could not be built).
@@ -152,8 +182,8 @@ impl<R: Runtime> Shared<R> {
         }
     }
 
-    /// Sets the icon and the tooltip of `view`, and a new menu when its language or
-    /// `retry_available` changed, then records the rendered view. Does nothing once
+    /// Sets the icon and the tooltip of `view`, and a new menu when its language,
+    /// `retry_available` or `menu_epoch` changed, then records the rendered view. Does nothing once
     /// tauri no longer has the icon (after the exit cleanup). No lock is held across
     /// a setter. The first failure writes one `tray_failed` warning: the kind, and
     /// the OS code only for a `tauri::Error::Io` (tray-icon's own OS errors arrive as
@@ -183,15 +213,18 @@ impl<R: Runtime> Shared<R> {
                 None
             }
         };
-        let key = (view.lang, view.retry_available);
+        let key = (view.lang, view.retry_available, view.menu_epoch);
         let previous_key = *lock(&self.menu_key);
         let new_menu = if key == previous_key {
             None
         } else {
             match build_menu(&self.app, view.lang, view.retry_available) {
-                Ok((menu, items)) => match icon.set_menu(Some(menu)) {
+                Ok((menu, items)) => match icon.set_menu(Some(menu.clone())) {
                     Ok(()) => {
                         *lock(&self.menu_key) = key;
+                        // The replaced menu drops after the guard: its drop runs a
+                        // main-thread task, never under this lock.
+                        let _replaced = lock(&self.live_menu).replace(menu);
                         Some(items)
                     }
                     Err(err) => {
@@ -239,36 +272,90 @@ fn image(kind: TrayIconKind) -> Image<'static> {
     }
 }
 
-/// Core's menu for `retry_available`, its texts in `lang`, and the `(id, text)` of
-/// its items read back from the built menu.
+/// Core's menu for `retry_available`, its texts in `lang`, and its rows read back from
+/// the built menu. `call_recording` is `false` until T-128 supplies the call session's
+/// flag (and adds it to `View` and the menu key).
 fn build_menu<R: Runtime>(
     app: &AppHandle<R>,
     lang: UiLanguage,
     retry_available: bool,
-) -> tauri::Result<(Menu<R>, Vec<(String, String)>)> {
-    let items = table::menu(retry_available)
-        .into_iter()
-        .map(|action| {
-            MenuItem::with_id(
-                app,
-                action.as_str(),
-                i18n::text(lang, action.label(), &[]),
-                true,
-                None::<&str>,
-            )
-        })
-        .collect::<tauri::Result<Vec<MenuItem<R>>>>()?;
+) -> tauri::Result<(Menu<R>, Vec<AppliedRow>)> {
+    let items = render_rows(app, lang, &table::menu(retry_available, false))?;
     let refs: Vec<&dyn IsMenuItem<R>> = items.iter().map(|i| i as &dyn IsMenuItem<R>).collect();
     let menu = Menu::with_items(app, &refs)?;
-    let read = menu
-        .items()?
-        .iter()
-        .map(|kind| match kind.as_menuitem() {
-            Some(item) => Ok((item.id().as_ref().to_string(), item.text()?)),
-            None => Err(tauri::Error::UnexpectedMenuKind),
-        })
-        .collect::<tauri::Result<Vec<_>>>()?;
+    let read = read_rows(&menu.items()?)?;
     Ok((menu, read))
+}
+
+/// The menu items of core's `rows`, texts in `lang`.
+fn render_rows<R: Runtime>(
+    app: &AppHandle<R>,
+    lang: UiLanguage,
+    rows: &[TrayRow],
+) -> tauri::Result<Vec<MenuItemKind<R>>> {
+    rows.iter()
+        .map(|row| {
+            Ok(match row {
+                TrayRow::Item { action, enabled } => MenuItemKind::MenuItem(MenuItem::with_id(
+                    app,
+                    action.as_str(),
+                    i18n::text(lang, action.label(), &[]),
+                    *enabled,
+                    None::<&str>,
+                )?),
+                TrayRow::Check {
+                    action,
+                    checked,
+                    enabled,
+                } => MenuItemKind::Check(CheckMenuItem::with_id(
+                    app,
+                    action.as_str(),
+                    i18n::text(lang, action.label(), &[]),
+                    *enabled,
+                    *checked,
+                    None::<&str>,
+                )?),
+                TrayRow::Submenu { label, rows } => {
+                    let items = render_rows(app, lang, rows)?;
+                    let refs: Vec<&dyn IsMenuItem<R>> =
+                        items.iter().map(|i| i as &dyn IsMenuItem<R>).collect();
+                    MenuItemKind::Submenu(Submenu::with_items(
+                        app,
+                        i18n::text(lang, *label, &[]),
+                        true,
+                        &refs,
+                    )?)
+                }
+            })
+        })
+        .collect()
+}
+
+/// The rows of a built menu's `items`; a kind the table never asks for is an error.
+fn read_rows<R: Runtime>(items: &[MenuItemKind<R>]) -> tauri::Result<Vec<AppliedRow>> {
+    items
+        .iter()
+        .map(|kind| match kind {
+            MenuItemKind::MenuItem(item) => Ok(AppliedRow::Item {
+                id: item.id().as_ref().to_string(),
+                text: item.text()?,
+                enabled: item.is_enabled()?,
+            }),
+            MenuItemKind::Check(item) => Ok(AppliedRow::Check {
+                id: item.id().as_ref().to_string(),
+                text: item.text()?,
+                checked: item.is_checked()?,
+                enabled: item.is_enabled()?,
+            }),
+            MenuItemKind::Submenu(submenu) => Ok(AppliedRow::Submenu {
+                text: submenu.text()?,
+                rows: read_rows(&submenu.items()?)?,
+            }),
+            MenuItemKind::Predefined(_) | MenuItemKind::Icon(_) => {
+                Err(tauri::Error::UnexpectedMenuKind)
+            }
+        })
+        .collect()
 }
 
 /// Builds the one tray icon of `app` (called once by `assemble`'s wiring, after
@@ -288,8 +375,9 @@ pub(crate) fn install<R: Runtime>(app: &AppHandle<R>, service: &SettingsService,
         state: TrayState::Idle,
         retry_available: false,
         lang: service.snapshot().ui_language,
+        menu_epoch: 0,
     };
-    let applied = match build(app, view) {
+    let (applied, menu) = match build(app, view) {
         Ok(built) => built,
         Err(err) => {
             log.write(LogEvent::Warning {
@@ -307,8 +395,9 @@ pub(crate) fn install<R: Runtime>(app: &AppHandle<R>, service: &SettingsService,
             version: 0,
             posted: false,
         }),
-        menu_key: Mutex::new((view.lang, view.retry_available)),
+        menu_key: Mutex::new((view.lang, view.retry_available, view.menu_epoch)),
         applied: Mutex::new(applied),
+        live_menu: Mutex::new(Some(menu)),
     });
     app.manage(Tray(Arc::clone(&shared)));
     if let Err(err) = spawn_follower(shared, changes, view.lang) {
@@ -320,9 +409,9 @@ pub(crate) fn install<R: Runtime>(app: &AppHandle<R>, service: &SettingsService,
 }
 
 /// Builds the tray icon for `view` with its handlers and returns the record of that
-/// first apply. The `TrayIcon` the builder returns is dropped here, on the building
+/// first apply and the menu set on the icon. The `TrayIcon` the builder returns is dropped here, on the building
 /// (main) thread: tauri's resources keep the only copy.
-fn build<R: Runtime>(app: &AppHandle<R>, view: View) -> tauri::Result<Applied> {
+fn build<R: Runtime>(app: &AppHandle<R>, view: View) -> tauri::Result<(Applied, Menu<R>)> {
     let (menu, items) = build_menu(app, view.lang, view.retry_available)?;
     let kind = table::icon(view.state);
     let tooltip = i18n::text(view.lang, table::tooltip(view.state), &[]);
@@ -334,14 +423,15 @@ fn build<R: Runtime>(app: &AppHandle<R>, view: View) -> tauri::Result<Applied> {
         .on_menu_event(|app, event| on_menu_event(app, event))
         .on_tray_icon_event(|tray, event| on_tray_icon_event(tray, event))
         .build(app)?;
-    Ok(Applied {
+    let applied = Applied {
         state: view.state,
         retry_available: view.retry_available,
         lang: view.lang,
         icon: kind,
         tooltip,
         menu: items,
-    })
+    };
+    Ok((applied, menu))
 }
 
 /// The language follower: one `SettingsService::subscribe()` of its own (decision
@@ -405,12 +495,32 @@ pub fn applied<R: Runtime>(app: &AppHandle<R>) -> Option<Applied> {
         .map(|tray| lock(&tray.0.applied).clone())
 }
 
+/// The menu last set on the tray icon; `None` when the tray was not built. A test-read
+/// accessor like [`applied`]: `Applied` is a value record, and tauri has no getter for
+/// the tray's menu, so this is the only way to read the live items (decision #223).
+pub fn live_menu<R: Runtime>(app: &AppHandle<R>) -> Option<Menu<R>> {
+    app.try_state::<Tray<R>>()
+        .and_then(|tray| lock(&tray.0.live_menu).clone())
+}
+
 /// The tray menu's handler (`TrayIconBuilder::on_menu_event`): the item id mapped by
 /// `TrayAction::from_id`; `OpenSettings` posts `settings_window::request(Front)`
 /// and drops the receipt, `OpenLogs` calls `logs_folder::request` (returns at
-/// once), `Exit` calls `app.exit(0)`, any other id does nothing.
+/// once), `Exit` calls `app.exit(0)`, any other id does nothing. The call items reach
+/// no session until T-128: `CallRecord` only rebuilds the menu from the table, undoing
+/// muda's flip of the mark, and T-128 keeps that for a refused start (decision #223);
+/// `CallStop` and `OpenCalls` do nothing.
 pub fn on_menu_event<R: Runtime>(app: &AppHandle<R>, event: MenuEvent) {
     match TrayAction::from_id(event.id().as_ref()) {
+        // T-128: also `CallSession::toggle_record`; the rebuild stays.
+        Some(TrayAction::CallRecord) => {
+            if let Some(part) = part(app) {
+                part.shared
+                    .want(|view| view.menu_epoch = view.menu_epoch.wrapping_add(1));
+            }
+        }
+        // T-128: stop the recording, open the Calls window.
+        Some(TrayAction::CallStop | TrayAction::OpenCalls) => {}
         Some(TrayAction::OpenSettings) => {
             let _ = settings_window::request(app, OpenTarget::Front);
         }

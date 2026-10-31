@@ -1,0 +1,9 @@
+guarantee: AC-3: the menu has Calls
+file: crates/voicen-core/src/tray.rs
+added_by: test-writer
+--- old
+        item(TrayAction::OpenCalls),
+
+--- new
+
+--- end

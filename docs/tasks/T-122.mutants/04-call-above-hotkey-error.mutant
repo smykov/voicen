@@ -1,0 +1,8 @@
+guarantee: AC-1: dictation HotkeyError > CallRecording
+file: crates/voicen-core/src/tray.rs
+added_by: test-writer
+--- old
+        (TrayState::HotkeyError, _) => TrayState::HotkeyError,
+--- new
+        (TrayState::HotkeyError, false) => TrayState::HotkeyError,
+--- end

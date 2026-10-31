@@ -1,0 +1,10 @@
+guarantee: AC-3: Stop enabled only while recording
+file: crates/voicen-core/src/tray.rs
+added_by: test-writer
+--- old
+                    action: TrayAction::CallStop,
+                    enabled: call_recording,
+--- new
+                    action: TrayAction::CallStop,
+                    enabled: true,
+--- end

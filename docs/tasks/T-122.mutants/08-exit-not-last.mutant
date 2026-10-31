@@ -1,0 +1,10 @@
+guarantee: AC-3: Exit is the last row
+file: crates/voicen-core/src/tray.rs
+added_by: test-writer
+--- old
+        item(TrayAction::OpenLogs),
+        item(TrayAction::Exit),
+--- new
+        item(TrayAction::Exit),
+        item(TrayAction::OpenLogs),
+--- end

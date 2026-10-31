@@ -1,0 +1,2 @@
+# T-122: the tray precedence/menu tests only (core tray:: filter).
+cargo test -j 2 -p voicen-core --no-fail-fast --lib tray::

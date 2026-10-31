@@ -1,0 +1,8 @@
+guarantee: AC-1: CallRecording has its own tooltip
+file: crates/voicen-core/src/tray.rs
+added_by: test-writer
+--- old
+        TrayState::CallRecording => i18n::TRAY_TOOLTIP_CALL_RECORDING,
+--- new
+        TrayState::CallRecording => i18n::TRAY_TOOLTIP_RECORDING,
+--- end

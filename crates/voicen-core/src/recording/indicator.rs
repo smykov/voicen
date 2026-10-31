@@ -16,11 +16,15 @@ use crate::post_process::SkipReason;
 /// How long a failure or notice message stays on the overlay.
 pub const MESSAGE_DURATION: Duration = Duration::from_secs(3);
 
-/// Tray icon. Priority: `HotkeyError > Recording > Error > Idle`.
+/// Tray icon. Priority: `HotkeyError > Recording > CallRecording > Error > Idle`
+/// (spec 007 FR-006, applied by [`crate::tray::shown`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrayState {
     Idle,
     Recording,
+    /// A call is being recorded. Only [`crate::tray::shown`] returns it; the dictation
+    /// controller never produces it.
+    CallRecording,
     Error,
     HotkeyError,
 }

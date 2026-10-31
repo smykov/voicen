@@ -1,0 +1,10 @@
+guarantee: AC-3: Record checked while recording
+file: crates/voicen-core/src/tray.rs
+added_by: test-writer
+--- old
+                    action: TrayAction::CallRecord,
+                    checked: call_recording,
+--- new
+                    action: TrayAction::CallRecord,
+                    checked: false,
+--- end
