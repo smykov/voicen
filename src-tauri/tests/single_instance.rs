@@ -387,3 +387,42 @@ fn a_second_launch_by_autostart_opens_no_window() {
     std::thread::sleep(Duration::from_millis(300));
     assert!(labels(&app).is_empty(), "windows: {:?}", labels(&app));
 }
+
+#[test]
+fn a_second_launch_with_call_record_opens_no_window() {
+    // spec 007 FR-003/FR-043 (T-121): `--call record` reaching the running instance
+    // is `StartCallRecord`: no settings window, nothing posted to the opener (the
+    // recording request itself is T-128's). Red before T-121: today's code reads
+    // it as a plain launch and opens settings. Bite: the arm fronting settings.
+    let dir = TempDir::new();
+    let app = fresh_app(dir.path());
+
+    let posted = voicen_lib::tray::on_second_instance(
+        app.handle(),
+        argv(&[EXE, "--call", "record"]),
+        CWD.into(),
+    );
+
+    assert!(posted.is_none(), "a --call record second launch posted a settings request");
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(labels(&app).is_empty(), "windows: {:?}", labels(&app));
+}
+
+#[test]
+fn a_second_launch_with_an_unknown_call_value_opens_no_window() {
+    // spec 007 FR-043 failure branch (T-121): `--call <other>` is no action.
+    // Red before T-121 (a plain launch fronts settings). Bite: Unknown mapped to
+    // FrontSettings.
+    let dir = TempDir::new();
+    let app = fresh_app(dir.path());
+
+    let posted = voicen_lib::tray::on_second_instance(
+        app.handle(),
+        argv(&[EXE, "--call", "bogus"]),
+        CWD.into(),
+    );
+
+    assert!(posted.is_none(), "an unknown --call second launch posted a request");
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(labels(&app).is_empty(), "windows: {:?}", labels(&app));
+}

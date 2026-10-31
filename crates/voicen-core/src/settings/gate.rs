@@ -291,11 +291,190 @@ mod tests {
         // window). Bite: a second launch with `--autostart` opening a window (the
         // Run value firing while the app already runs, e.g. after a sign-out
         // without exit), or a plain second launch ignored.
+        // T-121 (spec 007 FR-003, FR-043): rewritten over `LaunchArgs`; the pre-007
+        // rows are kept, `--call record` wins over autostart, an unknown value is
+        // no action. Bite: `Record` mapped to FrontSettings/TrayOnly, `Record`
+        // losing to autostart, `Unknown` fronting settings.
+        let rows: [(&str, bool, Option<CallSwitch>, SecondLaunchAction); 6] = [
+            ("default", false, None, SecondLaunchAction::FrontSettings),
+            ("autostart", true, None, SecondLaunchAction::TrayOnly),
+            (
+                "record",
+                false,
+                Some(CallSwitch::Record),
+                SecondLaunchAction::StartCallRecord,
+            ),
+            (
+                "record+autostart",
+                true,
+                Some(CallSwitch::Record),
+                SecondLaunchAction::StartCallRecord,
+            ),
+            (
+                "unknown",
+                false,
+                Some(CallSwitch::Unknown),
+                SecondLaunchAction::TrayOnly,
+            ),
+            (
+                "unknown+autostart",
+                true,
+                Some(CallSwitch::Unknown),
+                SecondLaunchAction::TrayOnly,
+            ),
+        ];
+        for (label, autostart, call, want) in rows {
+            let args = LaunchArgs { autostart, call };
+            assert_eq!(second_launch_action(&args), want, "row {label}");
+        }
+    }
+
+    const EXE: &str = r"C:\Program Files\Voicen\voicen.exe";
+
+    #[test]
+    fn launch_args_parse_table() {
+        // T-121 (contracts/core-call.md "Launch arguments", invariants I1, I3, I5).
+        // Bite: a prefix/case-insensitive match, `--call=record` read as a switch,
+        // the value of `--call` swallowed from the `--autostart` scan, a later
+        // `--call` overriding the first, a missing value read as None or Record.
+        use CallSwitch::{Record, Unknown};
+        let rows: Vec<(&str, Vec<&str>, bool, Option<CallSwitch>)> = vec![
+            ("empty argv", vec![], false, None),
+            ("exe only", vec![EXE], false, None),
+            ("autostart", vec![EXE, "--autostart"], true, None),
+            (
+                "call record",
+                vec![EXE, "--call", "record"],
+                false,
+                Some(Record),
+            ),
+            (
+                "autostart then call",
+                vec![EXE, "--autostart", "--call", "record"],
+                true,
+                Some(Record),
+            ),
+            (
+                "call then autostart",
+                vec![EXE, "--call", "record", "--autostart"],
+                true,
+                Some(Record),
+            ),
+            (
+                "call bogus",
+                vec![EXE, "--call", "bogus"],
+                false,
+                Some(Unknown),
+            ),
+            (
+                "call without value",
+                vec![EXE, "--call"],
+                false,
+                Some(Unknown),
+            ),
+            (
+                "call RECORD",
+                vec![EXE, "--call", "RECORD"],
+                false,
+                Some(Unknown),
+            ),
+            (
+                "call swallows --autostart as value, autostart still true",
+                vec![EXE, "--call", "--autostart"],
+                true,
+                Some(Unknown),
+            ),
+            (
+                "autostart-later",
+                vec![EXE, "--autostart-later"],
+                false,
+                None,
+            ),
+            ("AUTOSTART", vec![EXE, "--AUTOSTART"], false, None),
+            ("call=record", vec![EXE, "--call=record"], false, None),
+            ("CALL record", vec![EXE, "--CALL", "record"], false, None),
+            (
+                "first call decides: record then bogus",
+                vec![EXE, "--call", "record", "--call", "bogus"],
+                false,
+                Some(Record),
+            ),
+            (
+                "first call decides: bogus then record",
+                vec![EXE, "--call", "bogus", "--call", "record"],
+                false,
+                Some(Unknown),
+            ),
+            (
+                "call --call record: value is the second --call",
+                vec![EXE, "--call", "--call", "record"],
+                false,
+                Some(Unknown),
+            ),
+            // I5: argv[0] is scanned like any other argument.
+            (
+                "autostart as the only argument",
+                vec!["--autostart"],
+                true,
+                None,
+            ),
+        ];
+        for (label, argv, autostart, call) in rows {
+            let parsed = LaunchArgs::parse(argv.iter().copied());
+            assert_eq!(parsed.autostart, autostart, "row {label}: autostart");
+            assert_eq!(parsed.call, call, "row {label}: call");
+        }
+    }
+
+    #[test]
+    fn launch_args_parse_accepts_owned_strings_and_os_strings() {
+        // The generic bound: the plugin callback's `Vec<String>` (by reference) and
+        // `std::env::args_os()` (`OsString`) both go through the one parser.
+        let owned: Vec<String> = [EXE, "--autostart", "--call", "record"]
+            .iter()
+            .map(|a| a.to_string())
+            .collect();
+        let from_ref = LaunchArgs::parse(&owned);
+        assert!(from_ref.autostart, "Vec<String> by reference: autostart");
         assert_eq!(
-            second_launch_action(false),
-            SecondLaunchAction::FrontSettings
+            from_ref.call,
+            Some(CallSwitch::Record),
+            "Vec<String> by ref"
         );
-        assert_eq!(second_launch_action(true), SecondLaunchAction::TrayOnly);
+        let from_owned = LaunchArgs::parse(owned.clone());
+        assert_eq!(
+            from_owned.call,
+            Some(CallSwitch::Record),
+            "Vec<String> owned"
+        );
+
+        let os: Vec<std::ffi::OsString> = owned.iter().map(std::ffi::OsString::from).collect();
+        let from_os = LaunchArgs::parse(os);
+        assert!(from_os.autostart, "OsString: autostart");
+        assert_eq!(from_os.call, Some(CallSwitch::Record), "OsString");
+    }
+
+    #[test]
+    fn launch_args_parse_non_utf8_value_is_unknown() {
+        // I3: compared as `OsStr`, never through a lossy conversion. A value that is
+        // not valid Unicode is `Unknown`, never `Record` and never `None`; an
+        // `--autostart` after it is still found (I5).
+        #[cfg(unix)]
+        let bad: std::ffi::OsString = {
+            use std::os::unix::ffi::OsStringExt;
+            std::ffi::OsString::from_vec(vec![b'r', 0xFF, b'c'])
+        };
+        #[cfg(windows)]
+        let bad: std::ffi::OsString = {
+            use std::os::windows::ffi::OsStringExt;
+            std::ffi::OsString::from_wide(&[0x72, 0xD800, 0x63])
+        };
+        assert!(bad.to_str().is_none(), "premise: not valid Unicode");
+        let argv: Vec<std::ffi::OsString> =
+            vec![EXE.into(), "--call".into(), bad, "--autostart".into()];
+        let parsed = LaunchArgs::parse(argv);
+        assert_eq!(parsed.call, Some(CallSwitch::Unknown), "non-UTF-8 value");
+        assert!(parsed.autostart, "autostart after a non-UTF-8 value");
     }
 
     #[test]
