@@ -1,0 +1,8 @@
+guarantee: AC-5: a 301 or 303 to another origin is refused, and nothing reaches that origin (validation round 4, S13)
+file: crates/voicen-core/src/engine/http.rs
+added_by: test-writer
+--- old
+        let follow = attempt
+--- new
+        let follow = matches!(attempt.status().as_u16(), 301 | 303) || attempt
+--- end
