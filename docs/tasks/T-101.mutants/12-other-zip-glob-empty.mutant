@@ -1,0 +1,8 @@
+guarantee: Invariant: exactly one voicen-<X.Y.Z>-symbols.zip, non-empty, named from the tag
+file: scripts/ci/release-check.sh
+added_by: test-writer
+--- old
+zips=("$dir"/voicen-*-symbols.zip)
+--- new
+zips=()
+--- end

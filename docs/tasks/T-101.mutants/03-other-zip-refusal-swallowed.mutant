@@ -1,0 +1,8 @@
+guarantee: Invariant: exactly one voicen-<X.Y.Z>-symbols.zip, non-empty, named from the tag
+file: scripts/ci/release-check.sh
+added_by: test-writer
+--- old
+|| refuse "another symbols zip $(basename "$z") beside $want in $dir (the tag $tag wants exactly one)"
+--- new
+|| :
+--- end

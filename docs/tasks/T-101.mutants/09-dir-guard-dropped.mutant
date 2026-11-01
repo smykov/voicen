@@ -1,0 +1,10 @@
+guarantee: -
+file: scripts/ci/release-check.sh
+added_by: test-writer
+--- old
+if [ -n "$tx" ] && [ -d "$dir" ]; then
+  want=
+--- new
+if [ -n "$tx" ]; then
+  want=
+--- end

@@ -434,6 +434,13 @@ mk_dir "$tmp/i" Voicen_0.1.200_x64-setup.exe
 call refuse-symbols-zip-empty missing "$token" v0.1.200 100 "$tmp/repo" "$tmp/i"
 zip_refused
 done_case
+# The right name, a non-empty directory: a file is wanted (`-s` alone would pass it).
+mk_dir "$tmp/i" Voicen_0.1.200_x64-setup.exe
+mkdir "$tmp/i/$zname"
+printf 'PK' > "$tmp/i/$zname/inner"
+call refuse-symbols-zip-directory missing "$token" v0.1.200 100 "$tmp/repo" "$tmp/i"
+zip_refused
+done_case
 # The right zip beside another version's symbols zip: two symbols zips, refused.
 mk_dir "$tmp/i" Voicen_0.1.200_x64-setup.exe
 printf 'PK-right' > "$tmp/i/$zname"
@@ -452,6 +459,7 @@ mk_dir "$tmp/i" Voicen_0.1.200_x64-setup.exe
 printf '\000\001 not a zip at all' > "$tmp/i/$zname"
 call pass-symbols-zip-arbitrary-bytes missing "$token" v0.1.200 100 "$tmp/repo" "$tmp/i"
 want_rc 0; says "$tmp/i/Voicen_0.1.200_x64-setup.exe" "the installer path"; gh_viewed v0.1.200
+says "symbols: $tmp/i/$zname" "the symbols zip path"
 done_case
 
 # ---- usage ---------------------------------------------------------------------------------

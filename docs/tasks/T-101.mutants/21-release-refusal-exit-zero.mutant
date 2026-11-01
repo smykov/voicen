@@ -1,0 +1,10 @@
+guarantee: Failure branch: a tag run whose symbols zip is missing -> release-check.sh fails before publishing
+file: scripts/ci/release.sh
+added_by: test-writer
+--- old
+nothing was written or published" >&2
+  exit 1
+--- new
+nothing was written or published" >&2
+  exit 0
+--- end

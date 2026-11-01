@@ -1,0 +1,8 @@
+guarantee: On a v* tag run the GitHub Release carries voicen-<version>-symbols.zip
+file: scripts/ci/release.sh
+added_by: test-writer
+--- old
+sha256sum -- "$installer" "$symbols" >
+--- new
+sha256sum -- "$symbols" >
+--- end

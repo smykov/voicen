@@ -637,6 +637,10 @@ expect "owned upload copy starts with the upload-artifact@v4 uses line" \
   test "$(head -n 1 "$upl")" = "      - uses: actions/upload-artifact@v4"
 expect "owned upload copy: its if: is the release job's if:" test "$(upl_if)" = "$(job_if)"
 expect "owned upload copy: retention-days: 1" grep -q -x '          retention-days: 1' "$upl"
+# T-101 (#200 D4): the one artifact carries the symbols zip. R9 compares bytes only, so without this
+# line dropping the zip from the copy, ci.yml and the fixtures together would stay green.
+expect "owned upload copy: its path holds the symbols zip" \
+  grep -q -x -F '            target/release/bundle/nsis/voicen-${{ env.VOICEN_VERSION }}-symbols.zip' "$upl"
 tok_count() { cat "$1"/* "$1"/.[!.]* 2>/dev/null | grep -i -o -F 'upload-artifact' | wc -l | tr -d ' '; }
 expect "real: the token upload-artifact occurs once in $real" test "$(tok_count "$real")" = 1
 expect "real: the upload step is the owned copy $upl" test -z "$(first_udiff "$real/ci.yml")" -a -n "$(tok_lines "$real/ci.yml")"

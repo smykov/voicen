@@ -1,0 +1,10 @@
+guarantee: On a v* tag run the GitHub Release carries voicen-<version>-symbols.zip
+file: .github/workflows/ci.yml
+added_by: test-writer
+test: bash scripts/ci/release-guard.test.sh
+--- old
+*-setup.exe
+            target/release/bundle/nsis/voicen-${{ env.VOICEN_VERSION }}-symbols.zip
+--- new
+*-setup.exe
+--- end

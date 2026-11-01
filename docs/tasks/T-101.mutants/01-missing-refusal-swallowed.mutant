@@ -1,0 +1,8 @@
+guarantee: Failure branch: a tag run whose symbols zip is missing -> release-check.sh fails before publishing
+file: scripts/ci/release-check.sh
+added_by: test-writer
+--- old
+    refuse "symbols zip $want not found in $dir (the tag $tag wants exactly this file)"
+--- new
+    :
+--- end

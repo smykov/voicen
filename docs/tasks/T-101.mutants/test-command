@@ -1,0 +1,2 @@
+# bash tests, outside tw-test's core/ui; run in the core area's container by tw-mutants. Mutants of the owned upload copy use `test:` (release-guard).
+bash scripts/ci/release-check.test.sh && bash scripts/ci/release.test.sh

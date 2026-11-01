@@ -1,0 +1,8 @@
+guarantee: Failure branch: a tag run whose symbols zip is missing -> release-check.sh fails before publishing
+file: scripts/ci/release.sh
+added_by: test-writer
+--- old
+if ! bash "$here/release-check.sh" "$tag" "$run_number" "$root" "$dist"; then
+--- new
+if ! { bash "$here/release-check.sh" "$tag" "$run_number" "$root" "$dist"; true; }; then
+--- end
