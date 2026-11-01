@@ -154,7 +154,7 @@ Crate facts were read from the published sources of `opus` 0.4.0 / `opusic-sys` 
   - drag on an undecorated window;
   - staying above a full-screen app (the owner's PC only; `verify_exception`);
   - which framework helper windows a second webview adds, if any (the census).
-  - If Tauri cannot keep focus, the fallback is a native Win32 layered window with the same IPC events, decided at the spike (OQ-45 stays open until then).
+  - If Tauri cannot keep focus, the fallback is ADR-007's: a topmost window that returns focus (#235). A native Win32 layered window with the same IPC events would need a new owner decision.
 - **Alternatives**: reusing the dictation overlay (non-interactive by design, overlay.md §3); a native window first (more shell code before the spike says it is needed).
 
 ## R13 — `--call record`: a core-decided launch action

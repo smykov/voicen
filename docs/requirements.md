@@ -376,7 +376,7 @@ Release column: `2 / <increment>` (§3). The ВФ → FR map is in §10.
 | OpenAI `gpt-4o-transcribe-diarize` (Transcription API) | FR-62 cloud final engine | user's own key, paid per use | Speakers guaranteed only for a system track that fits one upload chunk; longer → local diarization (decisions #162). Limits and price unverified (OQ-60). Never used for subtitles. |
 | OpenAI-compatible transcription API / local server / built-in whisper.cpp (release 1) | FR-54, FR-60 | as in release 1 | Phrase times and language need a richer response than today's client: the final pass asks for `verbose_json` and uploads 16 kHz WAV chunks of ≤ 120 s cut at VAD pauses (FR-60, r3#4, OQ-54 (a); v7, r4#2); models such as `gpt-4o-transcribe` may return no segment times or reject `verbose_json` (verified in the spike), then the pass falls back to `json` with single-phrase chunks (v7, r4#3). In 1a the final engine is the dictation settings' API engine (r3#11). Built-in engine: T-017 (1d). |
 | OpenAI-compatible chat API (release 1 post-processing) | FR-68…FR-70 | user's own key | Summaries; cloud LLM sends call text out (NFR-16), warned per FR-67 (r3#24); own timeout (FR-82, r3#14). |
-| WebRTC echo suppression (e.g. `webrtc-audio-processing`) | FR-43 (Could) | none | Windows build and BSD licence unverified (OQ-46). |
+| WebRTC echo suppression (e.g. `webrtc-audio-processing`) | FR-43 (Could) | none | Accepted (ADR-008, decisions #236); Windows build and BSD licence still unverified, proven in spec 1d. |
 | Open corpora of real recordings (AMI Meeting Corpus, VoxConverse; a Russian set to be found) | success criterion 2, FR-60 tests | none | Outside git, fetched in CI by checksum; licences unverified (OQ-59). |
 
 ## 9. Technical decisions
@@ -453,7 +453,7 @@ Open questions: none; OQ-01 → decisions #82, OQ-02 → #83, OQ-03 → #84, OQ-
 | CA-7 | WER of the final ≤ 15 % Russian / ≤ 10 % English on the API engine (tz ВФ-40) | FR-60 |
 | CA-8 | Recording without subtitles: CPU ≤ 5 %, memory growth ≤ 50 MB/h (tz ВН-02) | NFR-14 |
 | CA-9 | Both Opus tracks ≤ 40 MB per hour (tz ВН-06) | NFR-18 |
-| CA-10 | The proposed parts of ADR-002, 003, 005, 006, 007, 008, 009, 011, 012 hold as written until the owner confirms or the spec refines them (OQ-42, OQ-44…OQ-46, OQ-48 open; OQ-41, OQ-43, OQ-47, OQ-49 answered in round 3, decisions #177, #178) | FR-39…FR-64, NFR-20 |
+| CA-10 | The proposed parts of ADR-002, 003, 005, 006, 009, 011, 012 hold as written until the owner confirms or the spec refines them (OQ-42, OQ-44, OQ-48 open; OQ-41, OQ-43, OQ-47, OQ-49 answered in round 3, decisions #177, #178; ADR-007 and ADR-008 accepted, decisions #235, #236) | FR-39…FR-64, NFR-20 |
 
 **Risks (tz §9, roast-pkg):**
 
@@ -466,13 +466,13 @@ Open questions: none; OQ-01 → decisions #82, OQ-02 → #83, OQ-03 → #84, OQ-
 | API cost: two tracks × an hour, subtitles plus final. | risk; only VAD speech segments are recognised; quick final (FR-61); a cost estimate in settings was named as Could but is not a requirement (roast) | FR-54, FR-60 |
 | Local diarization quality on real voices; the clustering threshold is calibrated on synthetic data. | risk; threshold in settings for debugging; calibration on the owner's own set | FR-62 |
 | Laws on recording conversations (consent). | risk for the user; mitigated by FR-35 and the docs (decisions #165) | FR-35 |
-| Subtitle window: "non-activating" and "draggable" at once may fail (it steals focus or will not move). | risk; spike first, fallback: topmost window that returns focus (ADR-007, OQ-45) | FR-53 |
+| Subtitle window: "non-activating" and "draggable" at once may fail (it steals focus or will not move). | risk; spike first, fallback: topmost window that returns focus (ADR-007, decisions #235) | FR-53 |
 | Clock drift between microphone and output device. | risk; mitigated by FR-40 | FR-40, FR-43 |
 | A Bluetooth headset switches to its headset profile when its mic opens → frequent output-device changes. | risk; mitigated by FR-41, FR-46, NFR-19 | FR-41 |
 | Cloud diarization of long calls: speaker labels do not match across chunks. | risk; cloud diarization only for one chunk until a spike (decisions #162, OQ-60) | FR-62 |
 | The built-in engine (T-017) is not ready → "local by default" delays the release. | risk; mitigated by delivering 1a–1c on the API engine (decisions #171); Silero (T-102) is decoupled from T-017 and ships in 1a (r3#3, OQ-51 (a)) | 1d |
 | No audio devices in CI → capture is not checked automatically. | risk; fake sources plus the owner's manual check (NFR-22, OQ-62) | FR-39…FR-42 |
-| Full-screen exclusive apps and games may cover the subtitle window. | accepted limitation (ADR-007, proposed) | FR-53 |
+| Full-screen exclusive apps and games may cover the subtitle window. | accepted limitation (ADR-007, decisions #235) | FR-53 |
 | Two people speaking into the user's own headset both get "Me". | accepted limitation (ADR-003) | FR-55, FR-62 |
 | An unsigned app that captures the microphone and system audio and registers hotkeys is more likely to be flagged by antivirus or SmartScreen than the dictation release was. | risk; mitigated by the always-visible call indicator (FR-34) and the decision #83 note (r3#38) | NFR-09, FR-34 |
 | 1a is heavy for "first usable" (about 35 FRs, two new native dependencies, a new interactive window, the T-007 and T-102 prerequisites). | risk; candidates to move out of 1a are listed in OQ-64 (round 3, scope against time) | 1a |

@@ -192,7 +192,7 @@
   - It is shown with `SW_SHOWNOACTIVATE`: the foreground window is unchanged after show.
   - After a stop-control click, the shell returns the foreground.
   - Window census: a second webview adds no unlisted helper window. If it does, record the evidence and decide here whether to add it to `scripts/ci/helper-windows.txt`; that addition makes the group **checker**.
-  - **Owner**: the indicator stays above a full-screen app, and dragging works (`verify_exception`). If Tauri cannot keep the focus, stop and record the native-window fallback for the owner. OQ-45 closes only with this result.
+  - **Owner**: the indicator stays above a full-screen app, and dragging works (`verify_exception`). If Tauri cannot keep the focus, use ADR-007's fallback (a topmost window that returns focus); if that fails too, stop and ask the owner about a native window (#235).
 - [ ] T033 [US1] [area shell] Implement the window and the commands and events of contracts/ipc.md (`call_indicator_stop`, `call_indicator_dismiss`, `call_indicator_moved`, `call_indicator_state`, `indicator://tick` ≤ 10 Hz, `indicator://state`). The position is saved in `calls.indicator_position` and clamped to a visible monitor. Until T032 and these are green (spec FR-005, FR-006; req FR-34).
 
 ### G17 — Indicator route (area: ui) <a id="g17"></a>
@@ -503,7 +503,7 @@
   - SC-004 via the `wer` example (EN ≤ 10 %, RU ≤ 15 %);
   - SC-005;
   - SC-011, the NFR-19 short set;
-  - the indicator above a full-screen app (closes OQ-45).
+  - the indicator above a full-screen app (ADR-007, #235).
 
 ---
 
@@ -512,7 +512,7 @@
 - **Outside this feature**:
   - **T-102** blocks G21 and G25.
   - **T-007** blocks the toast parts of G14, G15, G25, G28 and G31. Their log and indicator parts may land first, but the teamwright task stays open until T-007 is DONE.
-  - OQ-66 blocks G03 only on its failure branch. OQ-45 is closed by G16 / T087.
+  - OQ-66 blocks G03 only on its failure branch.
 - **Phase 1**: G01 → G02 → G03 (G03's T005/T006 can start alongside G02).
 - **Phase 2** (after G02 for `call/mod.rs`): G04, G05, G06, G07, G08, G09 are independent of each other.
 - **US1**: G10 and G11 (after G02, G04) → G12 (also needs G06) → G13 ∥ G15 ∥ G16 → G14 (needs G07, G08, G12, G13) → G18. G17 needs G12's fixture. G19 is independent.

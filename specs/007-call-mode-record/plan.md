@@ -235,12 +235,12 @@ README.md (consent section EN/RU, FR-045), docs/architecture.md, docs/decisions/
 3. **Silero unavailable during a pass** (research R8): use energy spans with a logged `vad_fallback`, which may send music (against SC-008); or fail the track with a new reason that FR-027's list lacks. **Decided (#188)**: energy spans with `vad_fallback`.
 4. **Fallback codec** if libopus cannot be built `/MT` (research R5): pure-Rust `ropus` (young), or a prebuilt `/MT` library. Open: OQ-66.
 5. **Constitution amendment** for principle II and the v3 references (Constitution Check note). **Decided (#189)**: amended, constitution v1.5.0.
-6. **OQ-45** stays open until the indicator spike. **OQ-48** is answered here as amended ADR-011, for owner confirmation. **OQ-44** needs nothing in 1a (FR-61 is 1d).
+6. **OQ-45** is answered: ADR-007 accepted (#235), the indicator spike still runs first. **OQ-48** is answered here as amended ADR-011, for owner confirmation. **OQ-44** needs nothing in 1a (FR-61 is 1d).
 
 ## Risks
 
 - The libopus static CRT is unproven: opus's CMake defaults to `/MD` (research R5).
-- The indicator mechanism (focus, full-screen apps) is open until the spike (OQ-45).
+- The indicator mechanism (focus, full-screen apps) is unproven until the spike (ADR-007, #235).
 - The runner has no capture endpoint (windows-ci-runner.md). Real capture, device switches and the drift on real hardware are proven only on the owner's PC.
 - The QPC semantics of `StreamInstant` and loopback silence-as-no-callbacks need confirmation on Windows (research R1, R2).
 - OpenAI's `gpt-4o(-mini)-transcribe` refuse `verbose_json`. Those models always take the time-less path, with coarser line times.
