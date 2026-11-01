@@ -1441,12 +1441,15 @@ jobs:
           Write-Output "uninstall /S: $dir holds only calls\ with the planted meta.json; every Voicen/ credential, the Run value, the shortcut and the uninstall key gone; $outsider kept"
       # W5 (T-156, FR-041, decisions #197): a silent install, then uninstall.exe /S /KEEPDATA
       # /PURGECALLS removes calls\ and keeps everything else in %LOCALAPPDATA%\Voicen
-      # (ci-keep.txt, settings.json). The step plants calls\ itself. Then a silent reinstall for
-      # W5b. Red on a hook that keeps calls\ under /KEEPDATA.
+      # (ci-keep.txt, settings.json, a Voicen/ credential planted and observed only through
+      # scripts/ci/credentials.ps1). The step plants calls\ itself. Then a silent reinstall for
+      # W5b. Red on a hook that keeps calls\ under /KEEPDATA, and on one that ties the credentials
+      # purge to the calls decision.
       - name: uninstall.exe /S /KEEPDATA /PURGECALLS removes calls\ and keeps the rest of the data folder (T-156)
         shell: pwsh
         run: |
           . ./scripts/ci/hotkey-hold.ps1
+          . ./scripts/ci/credentials.ps1
           $dir = Join-Path $env:LOCALAPPDATA 'Voicen'
           $exe = Join-Path $dir 'voicen.exe'
           $uninstaller = Join-Path $dir 'uninstall.exe'
@@ -1456,7 +1459,10 @@ jobs:
           $meta = Join-Path $callsDir '2026-01-01_000000\meta.json'
           $shortcut = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Voicen.lnk'
           $uninstKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Voicen'
+          $fake = 'sk-test-ci-keepdata-purgecalls-0000-not-a-real-key'
+          $savedKey = 'Voicen/ci-keepdata-purgecalls'
           function Get-UninstallerCopies { @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path.StartsWith([IO.Path]::GetTempPath(), [StringComparison]::OrdinalIgnoreCase) -and $_.Path -like '*\~nsu*' }) }
+          function Remove-All { $failed = 0; try { Remove-VoicenCredential -Target $savedKey } catch { $failed++; Write-Host "cleanup: $($_.Exception.Message)" }; $failed }
           $setup = Get-ChildItem target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
           Start-Process $setup.FullName -ArgumentList '/S' -Wait
           foreach ($q in @($exe, $uninstaller, $shortcut)) { if (-not (Test-Path -LiteralPath $q -PathType Leaf)) { throw "premise: $q not found after the silent install" } }
@@ -1467,7 +1473,11 @@ jobs:
           New-Item -ItemType Directory -Force -Path (Split-Path -Parent $meta) | Out-Null
           Set-Content -LiteralPath $meta -Value '{"ci":"planted by the purge-calls step"}' -NoNewline
           foreach ($q in @($marker, $settings, $meta)) { if (-not (Test-Path -LiteralPath $q -PathType Leaf)) { throw "premise: $q was not written" } }
-          Write-Output "premise: installed, settings.json, ci-keep.txt and planted $meta in place"
+          try {
+            Add-VoicenCredential -Target $savedKey -Secret $fake
+            if (-not (Test-VoicenCredential -Target $savedKey)) { throw "premise: $savedKey was written but Test-VoicenCredential does not find it" }
+          } catch { [void](Remove-All); throw }
+          Write-Output "premise: installed, settings.json, ci-keep.txt, planted $meta and $savedKey in place"
           $p = Start-Process -FilePath $uninstaller -ArgumentList '/S', '/KEEPDATA', '/PURGECALLS' -PassThru
           $done = $false
           $clock = [Diagnostics.Stopwatch]::StartNew()
@@ -1482,11 +1492,15 @@ jobs:
           if (Test-Path -LiteralPath $callsDir) { $bad += "/PURGECALLS: $callsDir is still present (left: $((@(Get-ChildItem -LiteralPath $callsDir -Recurse -Force -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName.Substring($dir.Length) }) | Select-Object -First 20) -join ', '))" }
           if (-not (Test-Path -LiteralPath $marker -PathType Leaf)) { $bad += "/KEEPDATA: the data marker $marker was deleted" }
           if (-not (Test-Path -LiteralPath $settings -PathType Leaf)) { $bad += "/KEEPDATA: settings.json was deleted" }
+          if (-not (Test-VoicenCredential -Target $savedKey)) { $bad += "/KEEPDATA: the saved key $savedKey was deleted by uninstall.exe /S /KEEPDATA /PURGECALLS" }
+          # Before the reinstall, so nothing that follows can leave the test credential behind.
+          $cleanup = Remove-All
           # Reinstall for W5b, before this step's verdict.
           Start-Process $setup.FullName -ArgumentList '/S' -Wait
           foreach ($q in @($exe, $uninstaller, $shortcut)) { if (-not (Test-Path -LiteralPath $q -PathType Leaf)) { $bad += "after the silent reinstall: $q not found" } }
           if ($bad) { throw ($bad -join '; ') }
-          Write-Output "uninstall /S /KEEPDATA /PURGECALLS: calls\ gone; settings.json and ci-keep.txt kept; silent reinstall: voicen.exe, uninstall.exe and the shortcut present"
+          if ($cleanup -ne 0) { throw "cleanup: a Remove-VoicenCredential above failed (Win32 error printed)" }
+          Write-Output "uninstall /S /KEEPDATA /PURGECALLS: calls\ gone; settings.json, ci-keep.txt and $savedKey kept; silent reinstall: voicen.exe, uninstall.exe and the shortcut present"
       # W5b (T-156, FR-041): the modes that keep calls\ with no /PURGECALLS, each with a planted
       # calls\2026-01-01_000000\meta.json. A same-version /P reinstall (its uninstaller runs with
       # /UPDATE /P) keeps it and the data. A user-started uninstall.exe /P keeps it and removes the
