@@ -564,9 +564,11 @@ in history); human, one-off: `TEAMWRIGHT_ALLOW_PUSH=1 git push`.
 - **Its worst case: the quoted `core.hooksPath` spelling**, `git "-c" core.hooksPath=/dev/null push` and `"git" -c core.hooksPath=/dev/null push`. It passes this hook and also drops `pre-push`, the hook this guard exists to keep. The settings deny `Bash(git -c * push*)` does not literally match it either (the real matcher was not probed on it).
 - What the shell model this rule replaced did: it refused the quote and backslash spellings, read from its code and not run (T-198 review 1 #1), so those are refusals given up; the expansions passed both. Refusing either takes a reader of quotes or variables, which P-020 forbids.
 - `git -C . send-pack origin main`: no word `push`.
+- **An alias or override set outside the command's own option list**, so the push command holds no `-c` and the token does not match: an alias set by `git config alias.<name> push` and used as `git -C . <name> ...`, `git config core.hooksPath ...` run before a plain push, the `GIT_CONFIG_*` environment form, or a config file. Of these, the ones that set `core.hooksPath` drop `pre-push`, the hook this guard exists to keep; an alias alone does not (from git's documented behaviour, review 2). Not run: no real push was made through these spellings, and the verdicts come from applying the hook's regex to strings (T-198 validation 1).
+- The direct program `git-core/git-push` (under git's exec path): the word `git` is not followed by blanks and a dash. Same evidence: regex on a string, no push run.
 - A script file that pushes, or a program that passes git its arguments apart: the token is not in the command text.
 
-`git push --no-verify` and a `core.hooksPath` override that reaches git as above remain outside every gate here; CI repeats the checks (Known limitations).
+`git push --no-verify` and a `core.hooksPath` override, whether in the command's own option list (the quoted spelling above) or set outside it (the bullet above), remain outside every gate here; CI repeats the checks (Known limitations).
 
 **Deliberate exits:** a human, one-off: `TEAMWRIGHT_ALLOW_PUSH=1 git push` (DRAIN); the hook has no override, remove its entry from `.claude/settings.json` (owner). `make check-wip-push` pins the script, the hook and the settings (`docs/decisions/ci-toolchain.md` › Guard table).
 
