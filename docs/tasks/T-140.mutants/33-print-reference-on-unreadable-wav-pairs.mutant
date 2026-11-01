@@ -1,0 +1,14 @@
+guarantee: Analysis invariant (validation r2 H1): the example never prints transcript text, reference text or the key, with a readable reference next to an unreadable WAV in pairs mode
+file: crates/voicen-core/examples/wer.rs
+added_by: test-writer
+--- old
+            _ => {
+                println!("{id} skipped: no readable reference .txt or PCM16 WAV");
+--- new
+            (Ok(reference), None) => {
+                println!("{id} skipped {reference}");
+                missing += 1;
+            }
+            _ => {
+                println!("{id} skipped: no readable reference .txt or PCM16 WAV");
+--- end

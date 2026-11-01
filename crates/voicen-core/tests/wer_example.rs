@@ -4,8 +4,9 @@
 //! The example is run as a child process against a loopback wiremock server and a temp
 //! directory holding one fake WAV and one fake reference: in `pairs` mode through every
 //! path of the shared `run()`, in `librispeech` mode through its own lines up to the
-//! 30-minute refusal. Nothing leaves the host; every value is an obvious fake marker.
-//! The child's stdout and stderr are the "output" the invariant speaks of. The gate and
+//! 30-minute refusal; in both modes also through the branch where a readable reference
+//! sits next to an unreadable WAV (validation r2, H1 and H2). Nothing leaves the host;
+//! every value is an obvious fake marker. The child's stdout and stderr are the "output" the invariant speaks of. The gate and
 //! CI run the example only like this and never the real measurement (decision #221;
 //! research R23, T051 as amended).
 //!
@@ -218,6 +219,58 @@ async fn wer_example_librispeech_refusal_has_no_reference_or_key() {
     );
     // The run really loaded the fake item (else the checks below prove nothing).
     assert!(all.contains("wer: 1 of "), "no found count of 1:\n{all}");
+    assert!(all.contains("wer: refused:"), "no refusal line:\n{all}");
+    let seen = server.received_requests().await.expect("recording is on");
+    assert!(seen.is_empty(), "a refused set sends no request");
+    assert_no_secrets(&all, &[]);
+}
+
+/// Validation r2, H1: the reference is read, the WAV next to it is not, so the item is
+/// skipped with its reference at hand.
+#[tokio::test]
+async fn wer_example_pairs_output_has_no_reference_when_the_wav_is_unreadable() {
+    let server =
+        server_with(ResponseTemplate::new(200).set_body_json(json!({ "text": TRANSCRIPT }))).await;
+    let dir = Dir::new("pairs-bad-wav");
+    std::fs::write(dir.0.join("item1.wav"), b"not a wav").expect("write wav");
+    std::fs::write(dir.0.join("item1.txt"), REFERENCE).expect("write reference");
+    let (out, all) = run_example(&["pairs", path_arg(&dir), "ru"], &server.uri());
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "nothing to score exits 1:\n{all}"
+    );
+    // The run really skipped this item (else the checks below prove nothing).
+    assert!(all.contains("item1 skipped"), "no skip line:\n{all}");
+    assert!(all.contains("wer: 0 pairs found (1 skipped)"), "{all}");
+    let seen = server.received_requests().await.expect("recording is on");
+    assert!(seen.is_empty(), "a skipped item sends no request");
+    assert_no_secrets(&all, &[]);
+}
+
+/// Validation r2, H2: the manifest id has its reference in `trans.txt`, its WAV is
+/// unreadable, so it counts as missing with its reference at hand.
+#[tokio::test]
+async fn wer_example_librispeech_output_has_no_reference_when_the_wav_is_unreadable() {
+    let server =
+        server_with(ResponseTemplate::new(200).set_body_json(json!({ "text": TRANSCRIPT }))).await;
+    let dir = Dir::new("librispeech-bad-wav");
+    let chapter = dir.0.join("1089").join("134686");
+    std::fs::create_dir_all(&chapter).expect("chapter dir");
+    std::fs::write(
+        chapter.join("1089-134686.trans.txt"),
+        format!("1089-134686-0000 {REFERENCE}\n"),
+    )
+    .expect("write trans.txt");
+    std::fs::write(chapter.join("1089-134686-0000.wav"), b"not a wav").expect("write wav");
+    let (out, all) = run_example(&["librispeech", path_arg(&dir)], &server.uri());
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "too little audio exits 1:\n{all}"
+    );
+    // The item was not loaded (else this is the other librispeech test).
+    assert!(all.contains("wer: 0 of "), "no found count of 0:\n{all}");
     assert!(all.contains("wer: refused:"), "no refusal line:\n{all}");
     let seen = server.received_requests().await.expect("recording is on");
     assert!(seen.is_empty(), "a refused set sends no request");

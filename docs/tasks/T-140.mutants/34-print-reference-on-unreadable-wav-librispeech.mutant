@@ -1,0 +1,11 @@
+guarantee: Analysis invariant (validation r2 H2): the example never prints transcript text, reference text or the key, with a readable reference next to an unreadable WAV in librispeech mode
+file: crates/voicen-core/examples/wer.rs
+added_by: test-writer
+--- old
+            None => missing += 1,
+--- new
+            None => {
+                println!("{id} {reference}");
+                missing += 1;
+            }
+--- end
