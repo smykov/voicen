@@ -1,6 +1,6 @@
 # PRINCIPLES.md
 
-**Version:** 1.4.1 — bumped in a separate commit on every amendment, recorded in `docs/decisions.md` (major: removed or reversed · minor: added or moved up a tier · patch: wording). Amendments made in one task before its version reaches `origin/main` share one version: the bump takes the highest kind among them, and each amendment still gets its own `docs/decisions.md` row. Amendments are owner decisions; see `docs/process/principles.md` §2a.
+**Version:** 1.4.2 — bumped in a separate commit on every amendment, recorded in `docs/decisions.md` (major: removed or reversed · minor: added or moved up a tier · patch: wording). Amendments made in one task before its version reaches `origin/main` share one version: the bump takes the highest kind among them, and each amendment still gets its own `docs/decisions.md` row. Amendments are owner decisions; see `docs/process/principles.md` §2a.
 
 Engineering principles for this project. Each is enforced at a tier:
 **T0** written guidance · **T1** reviewer checklist · **T2** hook warns · **T3** hook/CI blocks.
