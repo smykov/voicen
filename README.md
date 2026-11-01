@@ -75,7 +75,7 @@ Details: [`docs/architecture.md`](docs/architecture.md).
 
 ## Build from source
 
-On Windows 10/11 with Rust (stable, MSVC toolchain), Node.js, pnpm and the [Tauri prerequisites](https://tauri.app/start/prerequisites/):
+On Windows 10/11 with Rust (stable, MSVC toolchain), Node.js, pnpm, CMake, LLVM (libclang) and the [Tauri prerequisites](https://tauri.app/start/prerequisites/):
 
 ```powershell
 pnpm install
