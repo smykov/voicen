@@ -338,6 +338,35 @@ jobs:
             if ($records.Count -ne 1) { throw "$path holds $($records.Count) CodeView records naming voicen.pdb, exactly one is required" }
             [pscustomobject]@{ Id = [BitConverter]::ToString($bytes, $records[0] + 4, 20).Replace('-', ''); Length = $bytes.Length }
           }
+          $biteDir = Join-Path $env:RUNNER_TEMP 'codeview-bite'
+          New-Item -ItemType Directory -Force -Path $biteDir | Out-Null
+          $biteBytes = [IO.File]::ReadAllBytes((Resolve-Path -LiteralPath $exe).Path)
+          $biteAt = [Text.Encoding]::GetEncoding(28591).GetString($biteBytes).IndexOf("voicen.pdb$([char]0)", [StringComparison]::Ordinal) - 24
+          $biteCases = @(
+            @{ Name = 'control'; Want = 'no throw'; Edit = { param($b) $b } },
+            @{ Name = 'no-record'; Want = 'holds 0 CodeView records'; Edit = { param($b) $c = $b.Clone(); $c[$biteAt] = 0x58; $c } },
+            @{ Name = 'two-records'; Want = 'holds 2 CodeView records'; Edit = { param($b) [byte[]]($b + $b[$biteAt..($biteAt + 34)]) } },
+            @{ Name = 'guid'; Want = 'is not the link of'; Edit = { param($b) $c = $b.Clone(); $c[$biteAt + 4] = $c[$biteAt + 4] -bxor 0xFF; $c } },
+            @{ Name = 'age'; Want = 'is not the link of'; Edit = { param($b) $c = $b.Clone(); $c[$biteAt + 20] = $c[$biteAt + 20] -bxor 0xFF; $c } },
+            @{ Name = 'length'; Want = 'same link, another layout'; Edit = { param($b) [byte[]]($b + [byte]0) } }
+          )
+          $biteSaved = $exe
+          $biteBad = 0
+          foreach ($case in $biteCases) {
+            $exe = Join-Path $biteDir "$($case.Name).exe"
+            [IO.File]::WriteAllBytes($exe, [byte[]](& $case.Edit $biteBytes))
+            try {
+              $builtLink = Get-CodeViewLink 'target/release/voicen.exe'
+              $installedLink = Get-CodeViewLink $exe
+              if ($installedLink.Id -cne $builtLink.Id) { throw "the installed voicen.exe (CodeView GUID and age $($installedLink.Id)) is not the link of target/release/voicen.exe ($($builtLink.Id))" }
+              if ($installedLink.Length -ne $builtLink.Length) { throw "the installed voicen.exe is $($installedLink.Length) bytes, target/release/voicen.exe $($builtLink.Length) bytes: same link, another layout, so a frame's offset cannot be mapped" }
+              $biteGot = 'no throw'
+            } catch { $biteGot = $_.Exception.Message }
+            Write-Output "codeview bite $($case.Name): $biteGot"
+            if (-not $biteGot.Contains($case.Want)) { $biteBad++ }
+          }
+          $exe = $biteSaved
+          if ($biteBad) { throw "codeview bite: $biteBad cases not as wanted" }
           $builtLink = Get-CodeViewLink 'target/release/voicen.exe'
           $installedLink = Get-CodeViewLink $exe
           if ($installedLink.Id -cne $builtLink.Id) { throw "the installed voicen.exe (CodeView GUID and age $($installedLink.Id)) is not the link of target/release/voicen.exe ($($builtLink.Id))" }
