@@ -259,6 +259,31 @@ jobs:
         if: ${{ !cancelled() }}
         shell: bash
         run: bash scripts/ci/opus-cmake-cache.sh target
+      # T-101 (#200 D1): a profile-wide debug would flip DEBUG for the build scripts, and cmake-rs
+      # would then build libopus as RelWithDebInfo. opus-cmake-cache.sh cannot see it: the cache
+      # still says Release. cmake-rs prints its command on stderr, which cargo keeps in this file.
+      - name: libopus built as Release, not RelWithDebInfo (T-101)
+        shell: bash
+        run: |
+          found=0
+          for f in target/release/build/opusic-sys-*/stderr; do
+            [ -f "$f" ] || continue
+            found=$((found + 1))
+            line=$(grep -F -e '"--build"' -- "$f" | grep -F -e '"--config" "Release"' || true)
+            if [ -z "$line" ]; then
+              echo "::error::$f has no cmake --build line with --config Release"
+              exit 1
+            fi
+            if grep -F -q -e 'RelWithDebInfo' -- "$f"; then
+              echo "::error::$f names RelWithDebInfo: libopus was not built as Release"
+              exit 1
+            fi
+            echo "$f: $line"
+          done
+          if [ "$found" -eq 0 ]; then
+            echo "::error::no target/release/build/opusic-sys-*/stderr: the libopus build configuration cannot be read"
+            exit 1
+          fi
       # T-099 (invariant 4, F-001 class): the exes that link whisper.cpp (the voicen-whisper test
       # exes, the shell's dictation_e2e, voicen.exe) import no MSVCP140 / VCRUNTIME140 DLL. The runner has the
       # VC redistributable, so only the import table proves it. make check: check-crt-imports.
@@ -297,11 +322,27 @@ jobs:
           $got = (Get-FileHash -LiteralPath $notices -Algorithm SHA256).Hash
           if ($got -ne $want) { throw "the installed THIRD-PARTY-NOTICES.txt (SHA256 $got) differs from the committed one (SHA256 $want)" }
           Write-Output "found THIRD-PARTY-NOTICES.txt at $notices, equal to the committed file"
-          # T-101 (#200 D2): the installed exe is the exe of the symbols zip, the one release link.
-          $wantExe = (Get-FileHash -LiteralPath 'target/release/voicen.exe' -Algorithm SHA256).Hash
-          $gotExe = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash
-          if ($gotExe -ne $wantExe) { throw "the installed voicen.exe (SHA256 $gotExe) differs from target/release/voicen.exe (SHA256 $wantExe), the exe of the symbols zip" }
-          Write-Output "installed voicen.exe equals target/release/voicen.exe"
+          # T-101 (#200 D2): the symbols zip keeps target/release/voicen.exe (its step runs before this
+          # install). The shipped exe differs from it by the bundler's in-place patch only (the bundle
+          # type), so the bytes are not compared: the same link is proved by the GUID and age of the
+          # CodeView record (RSDS, then 20 bytes, then the PDB name) and by the file length, since a
+          # frame's offset can be mapped only with the same layout. Not exactly one record: red.
+          function Get-CodeViewLink([string]$path) {
+            $bytes = [IO.File]::ReadAllBytes((Resolve-Path -LiteralPath $path).Path)
+            $text = [Text.Encoding]::GetEncoding(28591).GetString($bytes)
+            $name = "voicen.pdb$([char]0)"
+            $records = @()
+            for ($at = $text.IndexOf('RSDS', [StringComparison]::Ordinal); $at -ge 0; $at = $text.IndexOf('RSDS', $at + 1, [StringComparison]::Ordinal)) {
+              if ($at + 24 + $name.Length -le $text.Length -and [string]::CompareOrdinal($text, $at + 24, $name, 0, $name.Length) -eq 0) { $records += $at }
+            }
+            if ($records.Count -ne 1) { throw "$path holds $($records.Count) CodeView records naming voicen.pdb, exactly one is required" }
+            [pscustomobject]@{ Id = [BitConverter]::ToString($bytes, $records[0] + 4, 20).Replace('-', ''); Length = $bytes.Length }
+          }
+          $builtLink = Get-CodeViewLink 'target/release/voicen.exe'
+          $installedLink = Get-CodeViewLink $exe
+          if ($installedLink.Id -cne $builtLink.Id) { throw "the installed voicen.exe (CodeView GUID and age $($installedLink.Id)) is not the link of target/release/voicen.exe ($($builtLink.Id))" }
+          if ($installedLink.Length -ne $builtLink.Length) { throw "the installed voicen.exe is $($installedLink.Length) bytes, target/release/voicen.exe $($builtLink.Length) bytes: same link, another layout, so a frame's offset cannot be mapped" }
+          Write-Output "installed voicen.exe is the link of target/release/voicen.exe: CodeView GUID and age $($builtLink.Id), length $($installedLink.Length) and $($builtLink.Length) bytes"
           # T-014: a leftover Run value (e.g. from an older install) must be removed by the
           # reconcile at first launch, whose defaults say start_with_windows = off.
           $run = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
