@@ -1,5 +1,5 @@
 //! Word error rate of an OpenAI-compatible transcription engine (T-140; spec 007
-//! FR-047, SC-004, research R23, decisions #185, #186). The real measurement is
+//! FR-047, SC-004, research R23, decisions #185, #186, #221). The real measurement is
 //! owner-run. The gate and CI compile and lint this example, and run it only against
 //! a loopback server with fake data, for the output invariant (`tests/wer_example.rs`).
 //!

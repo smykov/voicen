@@ -5,8 +5,9 @@
 //! directory holding one fake WAV and one fake reference: in `pairs` mode through every
 //! path of the shared `run()`, in `librispeech` mode through its own lines up to the
 //! 30-minute refusal. Nothing leaves the host; every value is an obvious fake marker.
-//! The child's stdout and stderr are the "output" the invariant speaks of. The gate
-//! runs the example only like this and never the real measurement (research R23, T051).
+//! The child's stdout and stderr are the "output" the invariant speaks of. The gate and
+//! CI run the example only like this and never the real measurement (decision #221;
+//! research R23, T051 as amended).
 //!
 //! These tests are green on a correct example; they guard it by mutation (the catalog
 //! `docs/tasks/T-140.mutants/` entries `25..`): printing the transcript, the reference
