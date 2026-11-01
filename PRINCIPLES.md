@@ -109,6 +109,7 @@ Each **Why** names, in one generic sentence, the kind of incident that produced 
 ### P-020 — A guard decides on a switch or a literal it owns, never on a model of another tool's parser
 - **Why:** a tripwire that re-reads another tool's grammar passes every shape it does not read, and every patch adds another clause to the model. Here: the first guard rewrite was T-038 (F-003). The class came back in the next guard designed, `release-guard.sh` (T-026, then rca T-085): three patches in two days, and review 4 still found probes that passed. It came back again in `role-tools.sh` (T-082, rca T-113), a guard designed in a task with no `checker:` key, so the design-time step never fired. Origin: F-003, T-085 (decisions #120), T-113 (decisions #154).
 - **Tier:** T1+T3
+- **Scope:** guards this project owns. Kit-owned hooks it cannot rewrite (`scripts/hooks/test-guard.sh`, `_hookio.py`) are outside it (decisions #230).
 - **How checked:** a guard is a `checker: true` task, i.e. a tripwire over text that another tool interprets (workflow YAML, shell, Rust, Cargo, JSON). It may pass only on one of these:
   - a platform-enforced switch pinned as literal text, such as a permission or a compiler or cargo flag;
   - a byte-exact comparison with a block or line the guard owns;
