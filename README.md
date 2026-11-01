@@ -80,7 +80,14 @@ On Windows 10/11 with Rust (stable, MSVC toolchain), Node.js, pnpm and the [Taur
 ```powershell
 pnpm install
 pnpm tauri dev      # run in development mode
-pnpm tauri build    # build the installer
+pnpm tauri build    # build the installer (no Silero model inside, see below)
+```
+
+To bundle the Silero voice-activity model, fetch it into `.ci-vad-model/` first and build with the overlay; a build without them falls back to the energy detector:
+
+```powershell
+cargo run -p voicen-core --example fetch_model -- .ci-vad-model silero
+pnpm tauri build --config src-tauri/tauri.bundle-vad.json
 ```
 
 Checks run with `make check` (Rust and front-end tests, linters, repository checks); CI runs them on Linux and builds and tests the app on Windows.
