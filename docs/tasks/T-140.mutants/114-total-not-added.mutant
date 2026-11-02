@@ -1,0 +1,8 @@
+guarantee: Analysis invariant (validation r3): set-level WER is the sum of edits divided by the sum of reference words
+file: crates/voicen-core/examples/wer.rs
+added_by: test-writer
+--- old
+                total.add(&counts);
+--- new
+                let _ = &mut total;
+--- end

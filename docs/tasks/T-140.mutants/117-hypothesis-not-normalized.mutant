@@ -1,0 +1,9 @@
+guarantee: Analysis invariant (validation r3): one WER computation, wer::score(reference, hypothesis), applied to wer::normalize on both sides
+file: crates/voicen-core/examples/wer.rs
+added_by: test-writer
+--- old
+                let counts = score(&item.reference, &normalize(&text));
+--- new
+                let raw: Vec<String> = text.split_whitespace().map(str::to_string).collect();
+                let counts = score(&item.reference, &raw);
+--- end

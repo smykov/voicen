@@ -4,15 +4,17 @@
 //! The example is run as a child process against a loopback wiremock server and a temp
 //! directory holding one fake WAV and one fake reference: in `pairs` mode through every
 //! path of the shared `run()`, in `librispeech` mode through its own lines up to the
-//! 30-minute refusal; in both modes also through the branch where a readable reference
-//! sits next to an unreadable WAV (validation r2, H1 and H2). Nothing leaves the host;
-//! every value is an obvious fake marker. The child's stdout and stderr are the "output" the invariant speaks of. The gate and
-//! CI run the example only like this and never the real measurement (decision #221;
-//! research R23, T051 as amended).
+//! 30-minute refusal and, with one silent WAV of exactly 30 min, past it; in both modes
+//! also through the branch where a readable reference sits next to an unreadable WAV
+//! (validation r2, H1 and H2). Nothing leaves the host; every value is an obvious fake
+//! marker. The child's stdout and stderr are the "output" the invariant speaks of. The
+//! gate and CI run the example only like this and never the real measurement (decision
+//! #221; research R23, T051 as amended).
 //!
 //! These tests are green on a correct example; they guard it by mutation (the catalog
 //! `docs/tasks/T-140.mutants/` entries `25..`): printing the transcript, the reference
-//! or the key turns them red.
+//! or the key turns them red, and so does a wrong figure or a dropped key (validation
+//! r3, entries `114..`).
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -30,6 +32,15 @@ const REFERENCE: &str = "Refmarkone refmarktwo";
 /// What the fake server transcribes; two substitutions against `REFERENCE`.
 const TRANSCRIPT: &str = "transmarkone transmarktwo";
 const ERROR_BODY: &str = "serverbodymarkq";
+/// Against `SCORED_ANSWER`: the shared words differ only in case and punctuation, and
+/// one reference word has no counterpart, so argument order and normalization both
+/// change the figure.
+const SCORED_REFERENCE: &str = "Hello, World! extra";
+const SCORED_ANSWER: &str = "HELLO, world!";
+/// The counts of `SCORED_ANSWER` against `SCORED_REFERENCE`.
+const SCORED_COUNTS: &str = "s=0 d=1 i=0 n=3 wer=33.33%";
+/// The words of the scored fixtures; none of them may reach the output.
+const SCORED_WORDS: [&str; 3] = ["hello", "world", "extra"];
 
 /// 200 ms of a 16 kHz sawtooth, as a PCM16 WAV.
 fn fake_wav() -> Vec<u8> {
@@ -275,6 +286,111 @@ async fn wer_example_librispeech_output_has_no_reference_when_the_wav_is_unreada
     let seen = server.received_requests().await.expect("recording is on");
     assert!(seen.is_empty(), "a refused set sends no request");
     assert_no_secrets(&all, &[]);
+}
+
+/// `line` is one whole line of `all` (already lowercased): a figure inside a longer line
+/// would not tell the item line from the total.
+fn assert_has_line(all: &str, line: &str) {
+    assert!(
+        all.lines().any(|l| l == line),
+        "no line {line:?} in:\n{all}"
+    );
+}
+
+/// Validation r3 (116, 117, 118, 122, 114): the reported figure is
+/// `score(reference, hypothesis)` over `normalize` on both sides, the total adds it, and
+/// the key from the environment reaches the request.
+#[tokio::test]
+async fn wer_example_pairs_scores_normalized_reference_against_answer_and_sends_the_key() {
+    let server =
+        server_with(ResponseTemplate::new(200).set_body_json(json!({ "text": SCORED_ANSWER })))
+            .await;
+    let dir = Dir::new("scored");
+    std::fs::write(dir.0.join("item1.wav"), fake_wav()).expect("write wav");
+    std::fs::write(dir.0.join("item1.txt"), SCORED_REFERENCE).expect("write reference");
+    let (out, all) = run_example(&["pairs", path_arg(&dir), "ru"], &server.uri());
+    assert!(out.status.success(), "example failed:\n{all}");
+    assert_has_line(&all, &format!("item1 {SCORED_COUNTS}"));
+    assert_has_line(
+        &all,
+        &format!("wer: total over 1 scored items (0 failed): {SCORED_COUNTS}"),
+    );
+    let seen = server.received_requests().await.expect("recording is on");
+    assert_eq!(seen.len(), 1, "one request for one item");
+    let authorization = seen
+        .first()
+        .and_then(|request| request.headers.get("authorization"))
+        .and_then(|value| value.to_str().ok());
+    assert_eq!(authorization, Some(format!("Bearer {KEY}").as_str()));
+    assert_no_secrets(&all, &SCORED_WORDS);
+}
+
+/// Validation r3 (114, 115): the set figure is the sum of edits over the sum of reference
+/// words. 1/3 and 3/5 give 4/8 = 50.00%; the last item alone is 60.00%, the mean of the
+/// rates 46.67%.
+#[tokio::test]
+async fn wer_example_pairs_total_is_sum_of_edits_over_sum_of_reference_words() {
+    let server =
+        server_with(ResponseTemplate::new(200).set_body_json(json!({ "text": SCORED_ANSWER })))
+            .await;
+    let dir = Dir::new("scored-set");
+    for (name, reference) in [
+        ("item1", SCORED_REFERENCE),
+        ("item2", "Hello, World! extra extra extra"),
+    ] {
+        std::fs::write(dir.0.join(format!("{name}.wav")), fake_wav()).expect("write wav");
+        std::fs::write(dir.0.join(format!("{name}.txt")), reference).expect("write reference");
+    }
+    let (out, all) = run_example(&["pairs", path_arg(&dir), "ru"], &server.uri());
+    assert!(out.status.success(), "example failed:\n{all}");
+    assert_has_line(&all, &format!("item1 {SCORED_COUNTS}"));
+    assert_has_line(&all, "item2 s=0 d=3 i=0 n=5 wer=60.00%");
+    assert_has_line(
+        &all,
+        "wer: total over 2 scored items (0 failed): s=0 d=4 i=0 n=8 wer=50.00%",
+    );
+    assert_no_secrets(&all, &SCORED_WORDS);
+}
+
+/// Validation r3 (119): `librispeech` normalizes its own reference. The path lies behind
+/// the refusal, so the one fake item holds exactly 30 min: silence, written as a header
+/// and a length, so the file costs no disk where the filesystem has holes. The limit is
+/// the example's own and stays as it is.
+#[tokio::test]
+async fn wer_example_librispeech_past_the_refusal_scores_the_normalized_reference() {
+    const THIRTY_MINUTES_BYTES: u32 = 30 * 60 * 16_000 * 2;
+    let server =
+        server_with(ResponseTemplate::new(200).set_body_json(json!({ "text": SCORED_ANSWER })))
+            .await;
+    let dir = Dir::new("librispeech-30-min");
+    let chapter = dir.0.join("1089").join("134686");
+    std::fs::create_dir_all(&chapter).expect("chapter dir");
+    std::fs::write(
+        chapter.join("1089-134686.trans.txt"),
+        format!("1089-134686-0000 {SCORED_REFERENCE}\n"),
+    )
+    .expect("write trans.txt");
+    // The header of an empty WAV, with its two sizes set to the 30 minutes.
+    let mut header = wav::encode(&AudioBuffer::from_16k_mono(Vec::new()));
+    header.splice(4..8, (THIRTY_MINUTES_BYTES + 36).to_le_bytes());
+    header.splice(40..44, THIRTY_MINUTES_BYTES.to_le_bytes());
+    let path = chapter.join("1089-134686-0000.wav");
+    std::fs::write(&path, &header).expect("write wav header");
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .and_then(|file| file.set_len(44 + u64::from(THIRTY_MINUTES_BYTES)))
+        .expect("extend wav");
+    let (out, all) = run_example(&["librispeech", path_arg(&dir)], &server.uri());
+    assert!(out.status.success(), "example failed:\n{all}");
+    assert!(all.contains("wer: 1 of "), "no found count of 1:\n{all}");
+    assert!(!all.contains("wer: refused:"), "refused:\n{all}");
+    assert_has_line(&all, &format!("1089-134686-0000 {SCORED_COUNTS}"));
+    assert_has_line(
+        &all,
+        &format!("wer: total over 1 scored items (0 failed): {SCORED_COUNTS}"),
+    );
+    assert_no_secrets(&all, &SCORED_WORDS);
 }
 
 #[tokio::test]

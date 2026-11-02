@@ -1,0 +1,8 @@
+guarantee: Decision #185: at least 30 min of LibriSpeech audio; exactly 30 min is not refused
+file: crates/voicen-core/examples/wer.rs
+added_by: test-writer
+--- old
+    if samples < MIN_LIBRISPEECH_SAMPLES {
+--- new
+    if samples <= MIN_LIBRISPEECH_SAMPLES {
+--- end

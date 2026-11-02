@@ -1,0 +1,9 @@
+guarantee: Acceptance: the key from that command's environment (validation r3)
+file: crates/voicen-core/examples/wer.rs
+added_by: test-writer
+--- old
+    Some(OpenAiCompatibleEngine::new(base_url, model, key))
+--- new
+    let _ = key;
+    Some(OpenAiCompatibleEngine::new(base_url, model, None))
+--- end
