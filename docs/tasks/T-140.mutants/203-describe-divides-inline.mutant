@@ -1,0 +1,8 @@
+guarantee: Analysis invariant (validation r4 group A): a rate exists only when reference_words > 0, no code path divides by zero
+file: crates/voicen-core/examples/wer.rs
+added_by: test-writer
+--- old
+        .map_or_else(|| "n/a".to_string(), |rate| format!("{:.2}%", rate * 100.0));
+--- new
+        .map_or_else(|| format!("{:.2}%", (counts.insertions as f64 / counts.reference_words as f64) * 100.0), |rate| format!("{:.2}%", rate * 100.0));
+--- end

@@ -1,0 +1,8 @@
+guarantee: Acceptance 1 (validation r4 group B): a test fails when the example prints the key
+file: crates/voicen-core/examples/wer.rs
+added_by: test-writer
+--- old
+            eprintln!("{USAGE}");
+--- new
+            eprintln!("{USAGE} {:?}", std::env::var("VOICEN_WER_KEY"));
+--- end

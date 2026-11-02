@@ -1,0 +1,9 @@
+guarantee: Acceptance failure branch (T050, validation r4 group A): an empty reference is handled without a panic or a division by zero
+file: crates/voicen-core/examples/wer.rs
+added_by: test-writer
+--- old
+                let counts = score(&item.reference, &normalize(&text));
+--- new
+                assert!(!item.reference.is_empty());
+                let counts = score(&item.reference, &normalize(&text));
+--- end

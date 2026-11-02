@@ -14,7 +14,8 @@
 //! These tests are green on a correct example; they guard it by mutation (the catalog
 //! `docs/tasks/T-140.mutants/` entries `25..`): printing the transcript, the reference
 //! or the key turns them red, and so does a wrong figure or a dropped key (validation
-//! r3, entries `114..`).
+//! r3, entries `114..`), an empty reference mishandled or the key on a path that sends
+//! no request (validation r4, entries `201..`).
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -391,6 +392,60 @@ async fn wer_example_librispeech_past_the_refusal_scores_the_normalized_referenc
         &format!("wer: total over 1 scored items (0 failed): {SCORED_COUNTS}"),
     );
     assert_no_secrets(&all, &SCORED_WORDS);
+}
+
+/// Validation r4, group A (201-204; decision #238): an empty reference runs through the
+/// example. The reference normalizes to no words, so every answer word is an insertion,
+/// no rate exists (`n/a`, never `inf%`, `NaN%` or `0.00%`) and the total still adds the
+/// insertions; the run neither panics nor fails.
+#[tokio::test]
+async fn wer_example_pairs_empty_reference_counts_insertions_without_a_rate() {
+    let server =
+        server_with(ResponseTemplate::new(200).set_body_json(json!({ "text": SCORED_ANSWER })))
+            .await;
+    let dir = Dir::new("empty-reference");
+    std::fs::write(dir.0.join("item1.wav"), fake_wav()).expect("write wav");
+    std::fs::write(dir.0.join("item1.txt"), " ,. ").expect("write reference");
+    let (out, all) = run_example(&["pairs", path_arg(&dir), "ru"], &server.uri());
+    assert_eq!(out.status.code(), Some(0), "example failed:\n{all}");
+    assert_has_line(&all, "item1 s=0 d=0 i=2 n=0 wer=n/a");
+    assert_has_line(
+        &all,
+        "wer: total over 1 scored items (0 failed): s=0 d=0 i=2 n=0 wer=n/a",
+    );
+    let seen = server.received_requests().await.expect("recording is on");
+    assert_eq!(seen.len(), 1, "one request for one item");
+    assert_no_secrets(&all, &SCORED_WORDS);
+}
+
+/// Validation r4, group B (207-209; decision #238): the paths that send no request, the
+/// usage, a `verify-archive` mismatch and a `pairs` directory that cannot be listed,
+/// print no key either, though the key is in their environment.
+#[test]
+fn wer_example_paths_without_a_request_print_no_key() {
+    let dir = Dir::new("no-request");
+    let archive = dir.0.join("fake-archive.tar.gz");
+    std::fs::write(&archive, b"not the test-clean archive").expect("write fake archive");
+    let archive = archive.to_str().expect("temp path is UTF-8");
+    let gone = dir.0.join("gone");
+    let gone = gone.to_str().expect("temp path is UTF-8");
+    // No request is made on these paths; the URL is a closed loopback port all the same.
+    let base_url = "http://127.0.0.1:9/v1";
+    for (args, code, marker) in [
+        (vec!["nonsense"], 2, "usage:"),
+        (
+            vec!["verify-archive", archive],
+            1,
+            "differs from the pinned",
+        ),
+        (vec!["pairs", gone], 2, "wer: cannot list"),
+    ] {
+        let (out, all) = run_example(&args, base_url);
+        assert_eq!(out.status.code(), Some(code), "{args:?}:\n{all}");
+        // The path really ran (else the check below proves nothing).
+        assert!(all.contains(marker), "{args:?}: no {marker:?} in:\n{all}");
+        assert_no_secrets(&all, &[]);
+    }
 }
 
 #[tokio::test]
