@@ -40,6 +40,8 @@ trait DiskSpace { fn free_bytes(&self, root: &Path) -> Result<u64, OsCause>; }
 
 Dictation's `FrameSink` / `AudioSource` stay unchanged (FR-009).
 
+Built (T-124, `call/capture.rs`, `call/wav_source.rs`; the invariants are in the module docs and the task's analysis): the names above are as built, plus `OpenError` → `RefusedReason` (`From`), `LossCause { Invalidated, NotAvailable, Other }`, `ChannelSink::new(capacity)` (bounded, `try_send`, drop counter; the consumer side is one `TrackReceiver` per track yielding `TrackEvent::{Block, Lost, Dropped}`), and `Timeline::{new(track, call_start), push, lost, advance_to}` returning `Step { pcm, reports, levels }` with `Report::{Gap, Dropped}`. `WavTrackSource` (`test-fakes` only) has no thread: the test calls `pump(until)`.
+
 ## Codec
 
 ```text
