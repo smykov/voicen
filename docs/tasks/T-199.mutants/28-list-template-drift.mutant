@@ -3,7 +3,7 @@ file: scripts/tw-wip-run
 added_by: test-writer
 test: bash scripts/ci/tw-wip-run.test.sh
 --- old
-url --limit 20)"
+url,createdAt --limit 20)"
 --- new
-url --limit 30)"
+url,createdAt --limit 30)"
 --- end

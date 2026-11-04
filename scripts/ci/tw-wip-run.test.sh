@@ -10,28 +10,47 @@
 #   knows (the same shape as scripts/tw-wip-push [<commit>]).
 #
 #   gh argv. The program runs no gh command but these two templates, byte-exact (decides_on: literal):
-#     LIST  run list --branch wip/<ID> --workflow ci.yml --json databaseId,headSha,status,conclusion,url --limit 20
+#     LIST  run list --branch wip/<ID> --workflow ci.yml --json databaseId,headSha,status,conclusion,url,createdAt --limit 20
 #     VIEW  run view <databaseId> --json jobs,status,conclusion,headSha,url
 #   LIST answers a JSON array, newest first; the run of the commit is the first element whose headSha
-#   equals the full sha (a run of another sha is never taken). VIEW is called only for a completed run
-#   that is not green, with the databaseId of that run; its "jobs" array holds {name, conclusion}.
+#   equals the full sha (a run of another sha is never taken). Its createdAt is ISO 8601 UTC
+#   (2026-11-04T10:00:00Z). VIEW is called only for a completed run that is not green, with the
+#   databaseId of that run; its "jobs" array holds {name, conclusion}.
 #
 #   Wait. TW_WIP_RUN_WINDOW seconds (whole seconds) (default 540: under the 10-minute Bash limit) is the time one call
 #   waits; TW_WIP_RUN_POLL seconds (default 30; a fraction is allowed) is the time between two LISTs.
 #   Within the window the program lists again while there is no run for the sha or the run is not
 #   completed; a completed run ends the wait at once.
 #
+#   Ceiling. TW_WIP_RUN_CEILING minutes (whole minutes, default 90) is the overall wait for one run,
+#   across calls; the program holds no state, it reads the run's createdAt. On every LIST, when the
+#   run of the sha is not completed and its createdAt is at least CEILING minutes before now, the
+#   program exits 6 at once (no further LIST, no VIEW). A completed run is green or red at any age.
+#
 #   Exit codes and output:
 #     0  completed, conclusion success. stdout holds the line  CI: <url> @ <full sha>
 #     1  completed, conclusion not success (failure, cancelled, timed_out, ...). stdout holds one line
 #        FAILED JOB: <name>  for each job whose conclusion is failure, cancelled, timed_out or
-#        startup_failure, and no job that did not fail; stdout holds no line that starts with  CI:
-#     2  refused (branch, argument, pause, not a commit, not a git tree); gh is never called
-#     3  the window ended with the run of the sha not completed (queued, in_progress, ...); the output
-#        holds the run's url, and no line that starts with  CI:
+#        startup_failure (FAILED JOB: <unnamed job>  when its name is missing or empty), and no job
+#        that did not fail; stdout holds no line that starts with  CI:
+#     2  refused (branch, argument, pause, not a commit, not a git tree, a TW_WIP_RUN_CEILING that is
+#        not whole minutes); gh is never called
+#     3  the window ended with the run of the sha not completed (queued, in_progress, ...) and under
+#        the ceiling; the output holds the run's url, and no line that starts with  CI:
 #     4  the window ended with no run for the sha; the output holds the full sha
-#     5  gh failed (non-zero exit) on either call, or its answer is not the JSON shape above
+#     5  gh failed (non-zero exit) on either call, or its answer is not the JSON shape above (a run of
+#        the sha with a missing or unparsable createdAt included)
+#     6  the run of the sha is not completed and passed the ceiling; the output holds the run's url
+#        and the word "ceiling", and no line that starts with  CI:
 #   TEAMWRIGHT_PAUSE (the tree's root, the main tree's root, $TEAMWRIGHT_PAUSE_FILE) refuses with 2.
+#
+#   Launch sentence (scripts/tw-launch, byte-exact in scripts/ci/tw-wip-push.test.sh section D):
+#     CI is read only through scripts/tw-wip-run, run from this worktree; gh itself stays denied. It
+#     waits for the run of the pushed commit and exits 3 while the run is still pending: call it again
+#     in the same stage. End the stage only with a CI: <run> @ <sha> line in ## Tests, a red run with
+#     its failed jobs named, or an escalation that names why no result came (exit 4: no run for the
+#     sha; exit 5: gh failed; exit 6: the run passed the 90-minute wait ceiling); never with a note
+#     that CI is unread.
 #
 # Safety: the script under test is COPIED into a temporary git repository (no remote) and run from
 # there; `gh` is a fake first on PATH that records its argv and prints canned JSON; nothing reaches
@@ -45,14 +64,14 @@
 set -uo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 script="$root/scripts/tw-wip-run"
-for t in git timeout; do
+for t in git timeout date; do
   command -v "$t" >/dev/null 2>&1 || { echo "tw-wip-run.test: cannot run: $t missing" >&2; exit 3; }
 done
 tmp="$(mktemp -d)" || { echo "tw-wip-run.test: cannot run: mktemp failed" >&2; exit 3; }
 trap 'rm -rf "$tmp"' EXIT
 
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX TEAMWRIGHT_PAUSE_FILE
-unset TW_WIP_RUN_POLL TW_WIP_RUN_WINDOW GH_REPO GH_TOKEN
+unset TW_WIP_RUN_POLL TW_WIP_RUN_WINDOW TW_WIP_RUN_CEILING GH_REPO GH_TOKEN CEILING
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 export GIT_AUTHOR_NAME=fixture GIT_AUTHOR_EMAIL=fixture@example.com
 export GIT_COMMITTER_NAME=fixture GIT_COMMITTER_EMAIL=fixture@example.com
@@ -118,10 +137,14 @@ repo() {
   [ ! -e "$script" ] || cp -p "$script" "$repo/scripts/tw-wip-run"
 }
 
-# obj <id> <sha> <status> <conclusion>: one run object. list <obj>...: the array.
+# ago <seconds>: the ISO 8601 UTC time that many seconds before now (gh's createdAt form).
+ago() { date -u -d "@$(($(date +%s) - $1))" +%Y-%m-%dT%H:%M:%SZ; }
+
+# obj <id> <sha> <status> <conclusion> [<createdAt>]: one run object (createdAt default: a minute
+# ago, well under the ceiling). list <obj>...: the array.
 obj() {
-  printf '{"databaseId":%s,"headSha":"%s","status":"%s","conclusion":"%s","url":"https://example.com/runs/%s"}' \
-    "$1" "$2" "$3" "$4" "$1"
+  printf '{"databaseId":%s,"headSha":"%s","status":"%s","conclusion":"%s","url":"https://example.com/runs/%s","createdAt":"%s"}' \
+    "$1" "$2" "$3" "$4" "$1" "${5:-$(ago 60)}"
 }
 list() {
   local out="[" sep=""
@@ -132,11 +155,15 @@ put_list() { printf '%s' "$2" >"$ghd/list.$1.json"; } # <n> <json>
 put_view() { printf '%s' "$3" >"$ghd/view.$1.$2.json"; } # <id> <n> <json>
 
 # run_it [args...]: runs the copied script in $repo with the fake gh first on PATH, a short window.
-# Sets $out (stdout), $err (stderr), $got.
+# $CEILING, when set, becomes TW_WIP_RUN_CEILING. Sets $out (stdout), $err (stderr), $got, $took
+# (whole seconds the run took).
 run_it() {
-  out="$(cd "$repo" && PATH="$bin:$PATH" FAKE_GH_DIR="$ghd" TW_WIP_RUN_POLL="${POLL:-0.1}" \
+  local t0=$SECONDS
+  out="$(cd "$repo" && { [ -z "${CEILING+x}" ] || export TW_WIP_RUN_CEILING="$CEILING"; } \
+    && PATH="$bin:$PATH" FAKE_GH_DIR="$ghd" TW_WIP_RUN_POLL="${POLL:-0.1}" \
     TW_WIP_RUN_WINDOW="${WINDOW:-2}" timeout 30 scripts/tw-wip-run "$@" 2>"$tmp/err" </dev/null)"
   got=$?
+  took=$((SECONDS - t0))
   err="$(cat "$tmp/err")"
 }
 
@@ -158,7 +185,7 @@ ncalls() { # <prefix>: lines of the calls file starting with it
 argv_ok() {
   if [ ! -f "$ghd/calls" ]; then bad="$bad${bad:+; }gh was never called"; return; fi
   local line stray=""
-  local tmpl_list="run list --branch wip/$wipid --workflow ci.yml --json databaseId,headSha,status,conclusion,url --limit 20"
+  local tmpl_list="run list --branch wip/$wipid --workflow ci.yml --json databaseId,headSha,status,conclusion,url,createdAt --limit 20"
   while IFS= read -r line; do
     [ "$line" = "$tmpl_list" ] && continue
     [[ "$line" =~ ^run\ view\ [0-9]+\ --json\ jobs,status,conclusion,headSha,url$ ]] && continue
@@ -226,6 +253,19 @@ no_ci_line
 argv_ok
 verdict "red: a cancelled run is red (exit 1), not green"
 
+# Review 1 #3: a failed job without a name is still named, as a placeholder.
+repo r-unnamed
+put_list 1 "$(list "$(obj 202 "$sha" completed failure)")"
+put_view 202 1 '{"status":"completed","conclusion":"failure","headSha":"'"$sha"'","url":"https://example.com/runs/202","jobs":[{"name":"","conclusion":"failure"},{"conclusion":"timed_out"},{"name":"lint","conclusion":"success"}]}'
+run_it
+need "exit" "$got" 1
+need "FAILED JOB: <unnamed job> lines" "$(grep -cxF -- "FAILED JOB: <unnamed job>" <<<"$out")" 2
+grep -qE '^FAILED JOB:[[:space:]]*$' <<<"$out" && bad="$bad${bad:+; }a FAILED JOB: line with no name"
+has_line "FAILED JOB: lint" && bad="$bad${bad:+; }a green job named as failed"
+no_ci_line
+argv_ok
+verdict "red: a failed job with an empty or missing name prints FAILED JOB: <unnamed job>, exit 1"
+
 # ==== (4) in_progress then success: waits, no early exit ===========================================
 repo w-wait
 WINDOW=8 # a long window: the run succeeds inside it, so the case ends early
@@ -291,6 +331,115 @@ no_ci_line
 argv_ok
 verdict "no run: a green run of another sha is not the run of HEAD -> exit 4, no CI: line"
 
+# ==== the wait ceiling (review 1 #1): read from the run's createdAt, exit 6 at once ===============
+# ceiling_hit <case>: exit 6, the url and "ceiling" in the output, no CI: line, no view, and it
+# returned without waiting out the window (WINDOW=8 in these cases: a program that waits would exit 3
+# after 8 s).
+ceiling_hit() {
+  need "exit" "$got" 6
+  all_text | grep -qF "https://example.com/runs/202" || bad="$bad${bad:+; }the output does not name the run"
+  all_text | grep -qi "ceiling" || bad="$bad${bad:+; }the output does not say the wait ceiling passed"
+  no_ci_line
+  need "view calls" "$(ncalls 'run view')" 0
+  [ "$took" -lt 5 ] || bad="$bad${bad:+; }it waited ${took}s, not at once"
+  argv_ok
+}
+
+repo c-old-in-progress
+WINDOW=8
+put_list 1 "$(list "$(obj 202 "$sha" in_progress "" "$(ago $((91 * 60)))")")"
+run_it
+ceiling_hit
+need "list calls" "$(ncalls 'run list')" 1
+verdict "ceiling: in_progress, created 91 min ago (default ceiling 90) -> exit 6 at the first list, url named, no view"
+unset WINDOW
+
+repo c-old-queued
+WINDOW=8
+put_list 1 "$(list "$(obj 202 "$sha" queued "" "$(ago $((3 * 3600)))")")"
+run_it
+ceiling_hit
+verdict "ceiling: queued, created 3 h ago -> exit 6, not pending"
+unset WINDOW
+
+# On every listing, not only the first: the run of the sha appears on the second list, already old.
+repo c-later-list
+WINDOW=8
+put_list 1 "[]"
+put_list 2 "$(list "$(obj 202 "$sha" in_progress "" "$(ago $((2 * 3600)))")")"
+run_it
+ceiling_hit
+need "list calls" "$(ncalls 'run list')" 2
+verdict "ceiling: no run, then an in_progress run created 2 h ago -> exit 6 at the second list"
+unset WINDOW
+
+# The run of the sha is judged, not another sha's old run.
+repo c-other-sha-old
+put_list 1 "$(list "$(obj 202 "$sha" in_progress "")" "$(obj 201 "$sha1" in_progress "" "$(ago $((5 * 3600)))")")"
+run_it
+need "exit" "$got" 3
+all_text | grep -qF "https://example.com/runs/202" || bad="$bad${bad:+; }the pending output does not name the run"
+no_ci_line
+argv_ok
+verdict "ceiling: another sha's run is 5 h old, the run of HEAD 1 min -> exit 3, not 6"
+
+repo c-under
+put_list 1 "$(list "$(obj 202 "$sha" in_progress "" "$(ago $((89 * 60)))")")"
+run_it
+need "exit" "$got" 3
+all_text | grep -qF "https://example.com/runs/202" || bad="$bad${bad:+; }the pending output does not name the run"
+no_ci_line
+argv_ok
+verdict "ceiling: in_progress, created 89 min ago -> still pending at the window's end (exit 3)"
+
+repo c-old-green
+put_list 1 "$(list "$(obj 202 "$sha" completed success "$(ago $((4 * 3600)))")")"
+run_it
+need "exit" "$got" 0
+has_line "CI: https://example.com/runs/202 @ $sha" || bad="$bad${bad:+; }no CI: line for an old green run"
+argv_ok
+verdict "ceiling: completed success created 4 h ago -> green (exit 0), age does not matter"
+
+repo c-old-red
+put_list 1 "$(list "$(obj 202 "$sha" completed failure "$(ago $((4 * 3600)))")")"
+put_view 202 1 '{"status":"completed","conclusion":"failure","headSha":"'"$sha"'","url":"https://example.com/runs/202","jobs":[{"name":"windows","conclusion":"failure"}]}'
+run_it
+need "exit" "$got" 1
+has_line "FAILED JOB: windows" || bad="$bad${bad:+; }failed job windows not named"
+no_ci_line
+argv_ok
+verdict "ceiling: completed failure created 4 h ago -> red (exit 1) with the job named, not 6"
+
+# A custom ceiling is honoured, both ways.
+repo c-custom-hit
+WINDOW=8
+CEILING=1
+put_list 1 "$(list "$(obj 202 "$sha" in_progress "" "$(ago 120)")")"
+run_it
+ceiling_hit
+verdict "ceiling: TW_WIP_RUN_CEILING=1, created 2 min ago -> exit 6"
+unset WINDOW CEILING
+
+repo c-custom-under
+CEILING=1
+put_list 1 "$(list "$(obj 202 "$sha" in_progress "" "$(ago 10)")")"
+run_it
+need "exit" "$got" 3
+no_ci_line
+argv_ok
+verdict "ceiling: TW_WIP_RUN_CEILING=1, created 10 s ago -> exit 3"
+unset CEILING
+
+repo c-custom-high
+CEILING=300
+put_list 1 "$(list "$(obj 202 "$sha" in_progress "" "$(ago $((91 * 60)))")")"
+run_it
+need "exit" "$got" 3
+no_ci_line
+argv_ok
+verdict "ceiling: TW_WIP_RUN_CEILING=300, created 91 min ago -> exit 3 (the default 90 is not used)"
+unset CEILING
+
 # ==== gh failed or answered something else: exit 5, never a result ================================
 repo e-list-fails
 : >"$ghd/fail.list"
@@ -338,6 +487,36 @@ need "exit" "$got" 5
 no_ci_line
 need "view calls with a bad run id" "$(ncalls 'run view')" 0
 verdict "gh failure: run list answers a negative databaseId -> exit 5, no run view"
+
+# The run of the sha without a createdAt the ceiling can be read from is not the JSON shape.
+repo e-created-missing
+WINDOW=8
+put_list 1 '[{"databaseId":202,"headSha":"'"$sha"'","status":"in_progress","conclusion":"","url":"https://example.com/runs/202"}]'
+run_it
+need "exit" "$got" 5
+no_ci_line
+[ "$took" -lt 5 ] || bad="$bad${bad:+; }it waited ${took}s on a bad answer"
+verdict "gh failure: the run of HEAD has no createdAt -> exit 5"
+unset WINDOW
+
+repo e-created-garbage
+WINDOW=8
+put_list 1 "$(list "$(obj 202 "$sha" in_progress "" "yesterday")")"
+run_it
+need "exit" "$got" 5
+no_ci_line
+[ "$took" -lt 5 ] || bad="$bad${bad:+; }it waited ${took}s on a bad answer"
+verdict "gh failure: the run of HEAD has createdAt 'yesterday' -> exit 5"
+unset WINDOW
+
+repo e-created-null
+WINDOW=8
+put_list 1 '[{"databaseId":202,"headSha":"'"$sha"'","status":"in_progress","conclusion":"","url":"https://example.com/runs/202","createdAt":null}]'
+run_it
+need "exit" "$got" 5
+no_ci_line
+verdict "gh failure: the run of HEAD has createdAt null -> exit 5"
+unset WINDOW
 
 # ==== (6) refusals: exit 2, gh never called =======================================================
 # Each fixture holds a green answer, so a program that went on would print a CI: line.
@@ -396,6 +575,13 @@ repo f-not-a-commit
 refused "refused: a revision git does not know" no-such-revision
 repo f-word
 refused "refused: a run id as the argument (a word, not a commit)" 12345678
+
+repo f-ceiling-fraction
+CEILING=1.5 refused "refused: TW_WIP_RUN_CEILING=1.5 (not whole minutes)"
+repo f-ceiling-word
+CEILING=x refused "refused: TW_WIP_RUN_CEILING=x"
+repo f-ceiling-negative
+CEILING=-5 refused "refused: TW_WIP_RUN_CEILING=-5"
 
 repo f-pause-root
 touch "$repo/TEAMWRIGHT_PAUSE"

@@ -837,7 +837,7 @@ launch="$root/scripts/tw-launch"
 GOOD_DENY='Bash(git push:*) Bash(git merge:*) Bash(gh:*)'
 GOOD_PROMPT='AUTONOMOUS RUN. Stop on a question. Do not push, do not merge. The end.'
 # T-199 (decisions #241; analysis.decides_on: literal): the sentence that orders the CI read, byte-exact.
-WIP_RUN_SENTENCE='CI is read only through scripts/tw-wip-run, run from this worktree; gh itself stays denied. It waits for the run of the pushed commit and exits 3 while the run is still pending: call it again in the same stage. End the stage only with a CI: <run> @ <sha> line in ## Tests, a red run with its failed jobs named, or an escalation that names why no result came (exit 4: no run for the sha; exit 5: gh failed; or the wait ceiling); never with a note that CI is unread.'
+WIP_RUN_SENTENCE='CI is read only through scripts/tw-wip-run, run from this worktree; gh itself stays denied. It waits for the run of the pushed commit and exits 3 while the run is still pending: call it again in the same stage. End the stage only with a CI: <run> @ <sha> line in ## Tests, a red run with its failed jobs named, or an escalation that names why no result came (exit 4: no run for the sha; exit 5: gh failed; exit 6: the run passed the 90-minute wait ceiling); never with a note that CI is unread.'
 
 # fake_kit <dir> <disallowedTools value> <prompt>
 fake_kit() {
