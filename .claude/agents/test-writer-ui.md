@@ -199,6 +199,7 @@ Red run: N failed — reason: <missing behaviour X | assertion Y>; expected, not
 Bite check: <wrong implementation — test that caught it | wrong implementation — expected, not run: <why>>; … | survived: <wrong implementation> → tests strengthened
 Catalog: docs/tasks/<id>.mutants/ — <tw-mutants summary line> | none (no existing code mutated)
 Request: push wip/<id> at <red commit> to observe <tests> | none
+Pre-check: <command — result>; … (step 5: lint and formatter)
 ```
 
 Second spawn (`mode: failure-branch bite`):

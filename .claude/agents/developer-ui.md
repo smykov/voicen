@@ -19,11 +19,12 @@ Process: `AGENTS.md`, `docs/process/lifecycle.md`, `PRINCIPLES.md`; a hook refus
 |---|---|
 | Stack | TypeScript, Svelte 5, SvelteKit (adapter-static, SPA), Vite; Tauri IPC via @tauri-apps/api; Node 24 in the voicen-ui image |
 | Source dirs | src |
-| Area gate | `make check` |
+| Run tests | `scripts/tw-test ui [<tests>]` (runs the area's test command, `pnpm test`; never the runner directly) |
+| Area gate | `scripts/tw-gate ui` (runs `make check`) |
 | Lint / format | `scripts/tw-run ui -- pnpm lint` |
 | Conventions | Svelte 5 runes; svelte-check --fail-on-warnings; eslint (typescript-eslint, eslint-plugin-svelte); all user-visible strings go through the i18n layer once it exists (FR-15) (see `docs/architecture.md`) |
 
-Run these commands exactly as written: they are rendered as `scripts/tw-run <area> -- <cmd>`, which runs on the host or, for an area with `runner: docker`, in the same container image as CI. Never call the bare tool instead, and never install a toolchain to get around the runner. A command that does not run (missing image, toolchain, device) is reported to the orchestrator as "not runnable" with the error; changing the config is the orchestrator's job (`.teamwright/config.next.yml` + `apply --config`), never yours.
+Tests run **only** through `scripts/tw-test ui [<test files or filters>]`, the gate only through `scripts/tw-gate`, mutants only through `scripts/tw-mutants` — a hook (`test-guard`) refuses a test runner called directly (`pnpm test`, `vitest`, a bare `playwright test`, the gate script …), also inside `scripts/tw-run`, and test output piped into `grep`/`tail`/`head`. tw-test runs the area's configured test command (its workers, its runner) once, keeps the whole output in a log and prints the counts, the failed tests with their first error line and the log path: read that log (`grep`/`sed -n` on the file) instead of running the tests again — the same call answers from its cache until the code changes. Run the other commands exactly as written: they are rendered as `scripts/tw-run <area> -- <cmd>`, which runs on the host or, for an area with `runner: docker`, in the same container image as CI. Never call the bare tool instead, and never install a toolchain to get around the runner. A command that does not run (missing image, toolchain, device) is reported to the orchestrator as "not runnable" with the error; changing the config is the orchestrator's job (`.teamwright/config.next.yml` + `apply --config`), never yours.
 
 ## Context and docs
 
@@ -93,11 +94,12 @@ Configured by teamwright from `.teamwright/config.yml` (spec=spec-kit, context=s
 
 ## Steps
 
-1. Run the task's tests; confirm they fail **for the right reason**.
+1. Run the task's tests; confirm they fail **for the right reason**. While you work, run only the task's tests and the tests of the modules you touch (`scripts/tw-test ui <files>`), not the full gate. A FAIL prints the failed tests and the log: read the log, fix, run again — never the same unchanged call to "see more".
 2. Find every existing path that handles the same concern — every caller of the seam, through the context tool, not a text search alone; the change goes into the shared seam, not beside it.
 3. Check library APIs against the docs of the pinned version (the docs tool, see Tools) before using them.
 4. Implement the minimum for the task. Nothing outside its scope.
-5. Run the full area gate `make check` — all tests green, not only new ones.
+5. Run the full area gate **once**, before handing over: `scripts/tw-gate ui` — all tests green, not only new ones. It runs `generate_command` and the gate, writes the whole output to a log and prints PASS/FAIL, the tail of a failure and the log path; it can take minutes: give the call a long timeout (up to 10 minutes). tw-gate waits up to ~9 minutes; a longer gate keeps running detached and the call ends with `RUNNING: … run the same command again` (exit 75) — then call `scripts/tw-gate ui` again, as is, until it prints PASS or FAIL. Never run it as a background tool call (in a run without an owner the session ends with your turn), never in a `sleep`/`until` loop, never kill its containers to restart it. Never cut its output (`| tail`, `| head` — the test guard refuses it): read the log file it prints. Its PASS is recorded for this content of the area's files, so the orchestrator, the reviewer and the validator reuse it instead of running the gate again. Tests other than the gate: `scripts/tw-test ui <tests>` (same waiting rule: on `RUNNING`, call it again).
+   A red gate is re-run only after a fix: read its log, change the code, then run `scripts/tw-gate ui` again — never the same unchanged tree to "see more".
 6. **Self-check before handing over** (answer yes/no each; this does not replace review):
    - the condition is an invariant, not a list of cases?
    - no second source of truth introduced?

@@ -145,6 +145,7 @@ Verification (VERIFY session) runs committed tests against the running system; i
    **`checker: true` in the task** (the seam's whole guarantee is rejecting bad input): sweep instead of sampling — mutate every condition, guard, return and write **on the lines the task changes or adds** in the seam, one at a time; each must turn a test red or be marked `equivalent: <why no input can tell it apart>`. The sweep needs the implementation, so it runs in the second spawn (below), into the catalog. A whole-seam sweep only when the task is `critical: true` (code whose failure loses or corrupts data: sync, recovery after a restore, data deletion) — a sweep of every line ever written there grows each round and never ends.
    Write the result into the task record body under `## Tests` (never the front matter): one line per wrong implementation — what it did, which test went red — and the catalog's path with the `tw-mutants` summary line. A wrong implementation whose guarding test you could not run here (a `src-tauri/tests` shell test, Windows CI only) is written `<wrong implementation> — <test you expect to go red>: expected, not run: <why>`, never as an observed result; it counts as observed only with a cited run (`wip/<ID>` @ <sha>, step 3). The reviewer reads it, and the task-validator re-runs the catalog every round, so write each line so it can be repeated (file, symbol, the change).
 5. **Fast checks on what you wrote, before handing over:** run the area's lint and formatter, `scripts/tw-run core -- 'cargo fmt --check -p voicen-core && cargo clippy -p voicen-core --all-targets -- -D warnings'`, on the test files you wrote or changed, and fix what they report in those files. A lint failure the developer or the gate finds later in your tests costs a round.
+   Project line (core): first `git add -N <new files>` for every file you created (needed while T-164 is TODO: `scripts/ci/clippy-lines.sh` reads only `git ls-files`, so an untracked file is invisible to it), then run `scripts/ci/clippy-lines.sh` and `scripts/ci/core-test-os-answer.sh`; both need no build and catch what clippy passes (an unowned `clippy` line, a test that relies on an OS answer). Fix what they report in your files. A lint compile error on an item that does not exist yet (the implementation is the developer's) is the red, reported as such under `Pre-check:` — not a lint failure to fix by writing the item.
 
 ## Failure-branch bite (second spawn, before review)
 
@@ -199,6 +200,7 @@ Red run: N failed — reason: <missing behaviour X | assertion Y>; expected, not
 Bite check: <wrong implementation — test that caught it | wrong implementation — expected, not run: <why>>; … | survived: <wrong implementation> → tests strengthened
 Catalog: docs/tasks/<id>.mutants/ — <tw-mutants summary line> | none (no existing code mutated)
 Request: push wip/<id> at <red commit> to observe <tests> | none
+Pre-check: <command — result>; … (step 5: lint and formatter, scripts/ci/clippy-lines.sh, scripts/ci/core-test-os-answer.sh)
 ```
 
 Second spawn (`mode: failure-branch bite`):
