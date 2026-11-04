@@ -5,14 +5,14 @@
 	check-core-test-os-answer check-ci-wip check-telegram-send check-telegram-failure-branch \
 	check-version-stamp check-release-check check-release check-release-guard check-nsis-fork check-e2e-entry-fixtures \
 	check-whisper-cmake-cache check-opus-cmake-cache check-whisper-model-key check-crt-imports check-whisper \
-	check-shell-windows check-ban-canary check-role-tools check-guard-trigger check-wip-push \
+	check-shell-windows check-ban-canary check-role-tools check-guard-trigger check-wip-push check-wip-run \
 	check-ui core-image ui-image \
 	licenses licenses-check licenses-unit licenses-fixture licenses-rust licenses-bundle \
 	licenses-npm licenses-generate licenses-stale licenses-stale-guard
 
 # check-ban-canary and check-shell-windows after check-core: both build voicen-core, so a core
 # error is reported first by the faster native check-core, before the slower runs.
-check: check-shell-layout check-shell-layout-fixtures check-helper-windows-fixtures check-ci-credentials check-role-tools check-guard-trigger check-wip-push \
+check: check-shell-layout check-shell-layout-fixtures check-helper-windows-fixtures check-ci-credentials check-role-tools check-guard-trigger check-wip-push check-wip-run \
 	check-clippy-lines \
 	check-core-test-os-answer check-ci-wip check-telegram-send check-telegram-failure-branch check-version-stamp check-release-check check-release check-release-guard check-nsis-fork check-whisper-cmake-cache check-opus-cmake-cache check-whisper-model-key check-crt-imports check-core check-whisper \
 	check-ban-canary check-shell-windows check-e2e-entry-fixtures check-ui \
@@ -92,6 +92,15 @@ check-guard-trigger:
 # a temporary clone of a temporary bare remote; no network transport is allowed. Host bash, git, python3.
 check-wip-push:
 	scripts/ci/tw-wip-push.test.sh
+
+# check-wip-run (T-199, decisions #228, #241): scripts/tw-wip-run is the only CI read of a stage
+# session. Its gh argv is one of two owned templates (run list --branch wip/<ID> ..., run view <id>
+# ...), the ID from branch tw/<ID>; it prints CI: <url> @ <sha> on a green run of the commit, names the
+# failed jobs on a red one, waits inside its window, has a distinct exit for pending, no run and a gh
+# failure, and refuses off a tw/<ID> branch, with an option or a second argument, and under
+# TEAMWRIGHT_PAUSE, gh never called. The self-test puts a fake gh first on PATH; no network. Host bash, git.
+check-wip-run:
+	scripts/ci/tw-wip-run.test.sh
 
 # check-core-test-os-answer (T-080 rca, class os-answer-deadline-race; T-089, decides_on: token):
 # no core test outside crates/voicen-core/tests/common names an OS-answer target (.invalid,

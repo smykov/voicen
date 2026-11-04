@@ -1,0 +1,8 @@
+guarantee: decides_on switch: the launch keeps the literal 'Bash(gh:*)' denied; tw-launch refuses to start without it
+file: scripts/tw-launch
+added_by: test-writer
+--- old
+KIT_DENIALS = ("Bash(git push:*)", "Bash(git merge:*)", "Bash(gh:*)")
+--- new
+KIT_DENIALS = ("Bash(git push:*)", "Bash(git merge:*)")
+--- end

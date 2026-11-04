@@ -1,0 +1,8 @@
+guarantee: decides_on literal: the launch prompt sentence is in the --append-system-prompt argument, byte-exact
+file: scripts/tw-launch
+added_by: test-writer
+--- old
+    return [a.replace(KIT_SENTENCE, OUR_SENTENCE) for a in args]
+--- new
+    return list(args)
+--- end

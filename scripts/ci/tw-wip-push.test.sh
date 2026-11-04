@@ -11,8 +11,8 @@
 #      with permissionDecision=deny, exit 0; allow = no output, exit 0).
 #   C. .claude/settings.json: allow holds the two script rules only, deny holds the push forms,
 #      PreToolUse wires the hook.
-#   D. scripts/tw-launch keeps the kit's denials and states the exception, against a fake kit; a kit
-#      without the sentence or a denial is refused and nothing starts.
+#   D. scripts/tw-launch keeps the kit's denials and states the exception and (T-199) the CI-read
+#      sentence, against a fake kit; a kit without the sentence or a denial is refused and nothing starts.
 #
 # Safety (A): the script under test is COPIED into a temporary clone and run from there, so neither
 # its own location nor the working directory leads back to this repository. Its origin is a
@@ -836,6 +836,8 @@ done <<<"$settings_out"
 launch="$root/scripts/tw-launch"
 GOOD_DENY='Bash(git push:*) Bash(git merge:*) Bash(gh:*)'
 GOOD_PROMPT='AUTONOMOUS RUN. Stop on a question. Do not push, do not merge. The end.'
+# T-199 (decisions #241; analysis.decides_on: literal): the sentence that orders the CI read, byte-exact.
+WIP_RUN_SENTENCE='CI is read only through scripts/tw-wip-run, run from this worktree; gh itself stays denied. It waits for the run of the pushed commit and exits 3 while the run is still pending: call it again in the same stage. End the stage only with a CI: <run> @ <sha> line in ## Tests, a red run with its failed jobs named, or an escalation that names why no result came (exit 4: no run for the sha; exit 5: gh failed; or the wait ceiling); never with a note that CI is unread.'
 
 # fake_kit <dir> <disallowedTools value> <prompt>
 fake_kit() {
@@ -882,7 +884,7 @@ want_launch_refused() {
 # only prompt change is the sentence: the kit's gone, the exception there.
 print_args_check() {
   local r
-  r="$(VALUE="$2" python3 -I -c '
+  r="$(VALUE="$2" WIP_RUN_SENTENCE="$WIP_RUN_SENTENCE" python3 -I -c '
 import os, shlex
 a = shlex.split(os.environ["VALUE"])
 opt = {k: v for k, v in zip(a[::2], a[1::2])}
@@ -896,6 +898,8 @@ if "Do not push, do not merge." in p:
     bad.append("the kit sentence is still there")
 if "scripts/tw-wip-push" not in p or "no other push" not in p or "Do not merge." not in p:
     bad.append("the exception sentence is missing: " + p)
+if p.count(os.environ["WIP_RUN_SENTENCE"]) != 1:
+    bad.append("the CI-read sentence is not there exactly once: " + p)
 if len(a) % 2 or opt.get("--permission-mode") != "acceptEdits" or "Bash" not in opt.get("--allowedTools", "").split():
     bad.append("other arguments changed: " + repr(a))
 print("; ".join(bad))' 2>&1)"

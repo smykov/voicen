@@ -1,0 +1,2 @@
+# bash tests, outside tw-test's core/ui; run in the core area's container by tw-mutants. Baseline is red until the implementation lands (the CI-read sentence of tw-launch is missing today), so the catalog runs in the second spawn.
+bash scripts/ci/tw-wip-push.test.sh && bash scripts/ci/tw-wip-run.test.sh
