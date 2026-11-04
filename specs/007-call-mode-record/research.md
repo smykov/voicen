@@ -100,7 +100,7 @@ Crate facts were read from the published sources of `opus` 0.4.0 / `opusic-sys` 
 
 ## R9 — The chunker (pure core)
 
-- **Decision**: `call::final_pass::chunk` takes a stream of decoded 16 kHz windows plus their spans and yields `Chunk { track, start_ms, end_ms, mode }` in two modes:
+- **Decision**: `call::final_pass::{RangePlanner, ChunkPlanner}` (T-137; the exact rules are the module docs of `crates/voicen-core/src/call/final_pass.rs`) take contiguous decoded 16 kHz windows plus their spans and yield `Chunk { index, start_ms, end_ms, mode, spans, audio }` (the track is the caller's) in two modes:
   - **Timed mode**:
     - Merge spans whose gap is under 300 ms.
     - In the 120 s window from the current position, cut at the end of the last gap ≥ 300 ms before 120 s; if there is none, cut hard at 120 s and carry the rest (FR-023).

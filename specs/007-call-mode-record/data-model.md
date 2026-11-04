@@ -109,11 +109,11 @@ Invariant: after any sequence of blocks and gaps, `|written_mic − written_syst
 
 | Field | Type | Rule |
 |---|---|---|
-| `track` | `Track` | — |
-| `index` | `u32` | Order within the track. |
-| `start_ms`, `end_ms` | `u64` | Track-relative. `end − start` ≤ 120 000 ms in timed mode and ≤ 30 000 ms in time-less mode (FR-023, FR-024). |
-| `mode` | `timed` \| `timeless` | — |
-| `audio` | 16 kHz mono PCM16 WAV bytes | Built just before the upload and dropped after it. Never written to disk (FR-018). |
+| `index` | `usize` | Order within the planner's lifetime (one track's pass), from 0. The chunk does not carry its track (T-137). |
+| `start_ms`, `end_ms` | `u64` | Track-relative. `0 < end − start` ≤ 120 000 ms in timed mode and ≤ 30 000 ms in time-less mode (FR-023, FR-024). |
+| `mode` | `PassMode` (`Timed` \| `Timeless`) | — |
+| `spans` | `Vec<SpeechSpan>` | The merged speech spans inside the range, track-relative, non-empty. |
+| `audio` | `AudioBuffer` (16 kHz mono PCM16, exactly `[start_ms, end_ms)`) | Sliced from the held audio; the WAV bytes are built just before the upload and dropped after it. Never written to disk (FR-018). |
 
 ## Segment (line)
 
