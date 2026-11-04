@@ -1,0 +1,10 @@
+guarantee: refusal: no refspec
+file: scripts/tw-wip-run
+added_by: test-writer
+test: bash scripts/ci/tw-wip-run.test.sh
+equivalent: a word with ":" is <rev>:<path> (a tree or blob, never peeled to a commit) or :/<regex> (the regex swallows "^{commit}"); git rev-parse --verify "<arg>^{commit}" refuses each (probed: HEAD:, :/two, HEAD^{commit}:x, the test's HEAD:refs/heads/main), so "not a commit" refuses with exit 2 one line later; defence in depth
+--- old
+  *:*) refuse "takes a commit, not a refspec: $arg" ;;
+--- new
+  *:*) ;;
+--- end

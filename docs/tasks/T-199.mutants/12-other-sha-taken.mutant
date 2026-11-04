@@ -1,0 +1,9 @@
+guarantee: AC-2: the CI: line is the run of the pushed sha, never another sha's run
+file: scripts/tw-wip-run
+added_by: test-writer
+test: bash scripts/ci/tw-wip-run.test.sh
+--- old
+    if r.get("headSha") != sys.argv[1]:
+--- new
+    if False:
+--- end

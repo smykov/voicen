@@ -1,0 +1,9 @@
+guarantee: gh failure branch: gh run view exits non-zero on a red run -> exit 5, not a red result without jobs
+file: scripts/tw-wip-run
+added_by: test-writer
+test: bash scripts/ci/tw-wip-run.test.sh
+--- old
+        || gh_failed "gh run view $rid exited non-zero"
+--- new
+        || view='{"jobs":[]}'
+--- end

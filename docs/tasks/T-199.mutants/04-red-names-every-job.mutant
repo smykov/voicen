@@ -1,0 +1,9 @@
+guarantee: AC-3: a red run names each failed job and no job that did not fail
+file: scripts/tw-wip-run
+added_by: test-writer
+test: bash scripts/ci/tw-wip-run.test.sh
+--- old
+    if j.get("conclusion") in ("failure", "cancelled", "timed_out", "startup_failure"):
+--- new
+    if True:
+--- end

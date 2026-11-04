@@ -1,0 +1,9 @@
+guarantee: refusal: no empty word
+file: scripts/tw-wip-run
+added_by: test-writer
+test: bash scripts/ci/tw-wip-run.test.sh
+--- old
+  "") refuse "an empty commit argument" ;;
+--- new
+  "") arg=HEAD ;;
+--- end

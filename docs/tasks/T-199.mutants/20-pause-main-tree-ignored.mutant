@@ -1,0 +1,9 @@
+guarantee: refusal: TEAMWRIGHT_PAUSE in the main tree refuses a linked worktree with 2
+file: scripts/tw-wip-run
+added_by: test-writer
+test: bash scripts/ci/tw-wip-run.test.sh
+--- old
+"$top/TEAMWRIGHT_PAUSE" "$main_tree/TEAMWRIGHT_PAUSE"; do
+--- new
+"$top/TEAMWRIGHT_PAUSE"; do
+--- end

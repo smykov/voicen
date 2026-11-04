@@ -1,0 +1,9 @@
+guarantee: decides_on literal: the gh run view template, byte-exact
+file: scripts/tw-wip-run
+added_by: test-writer
+test: bash scripts/ci/tw-wip-run.test.sh
+--- old
+--json jobs,status,conclusion,headSha,url)"
+--- new
+--json jobs,conclusion,headSha,url)"
+--- end

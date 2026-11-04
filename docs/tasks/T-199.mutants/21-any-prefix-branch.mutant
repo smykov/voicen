@@ -1,0 +1,9 @@
+guarantee: refusal: only a tw/<ID> branch; <ID> from the branch (feature/, wip/, xtw/ refused)
+file: scripts/tw-wip-run
+added_by: test-writer
+test: bash scripts/ci/tw-wip-run.test.sh
+--- old
+[[ "$branch" =~ ^refs/heads/tw/([A-Z][A-Z0-9]*-[0-9]+)$ ]]
+--- new
+[[ "$branch" =~ ^refs/heads/[a-z]*/([A-Z][A-Z0-9]*-[0-9]+)$ ]]
+--- end

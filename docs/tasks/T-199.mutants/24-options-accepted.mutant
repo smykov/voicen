@@ -1,0 +1,10 @@
+guarantee: refusal: no option
+file: scripts/tw-wip-run
+added_by: test-writer
+test: bash scripts/ci/tw-wip-run.test.sh
+equivalent: git rev-parse --verify "<arg>^{commit}" resolves no word that starts with "-" (a ref name cannot start with "-"; "-", "-1", "--", every option in the test refused), so the refusal comes one line later as "not a commit", exit 2 and gh never called; defence in depth, not observable
+--- old
+  -*) refuse "takes no options: $arg" ;;
+--- new
+  -*) ;;
+--- end

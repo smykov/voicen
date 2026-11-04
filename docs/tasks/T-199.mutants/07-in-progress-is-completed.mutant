@@ -1,0 +1,9 @@
+guarantee: AC-1: a run that is not completed is waited for, not judged
+file: scripts/tw-wip-run
+added_by: test-writer
+test: bash scripts/ci/tw-wip-run.test.sh
+--- old
+    if [ "$status" = "completed" ]; then
+--- new
+    if [ "$status" != "queued" ]; then
+--- end

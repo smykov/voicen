@@ -1,0 +1,9 @@
+guarantee: AC-3 failure branch: a red run exits 1 (not green, not pending) with the failed jobs named
+file: scripts/tw-wip-run
+added_by: test-writer
+test: bash scripts/ci/tw-wip-run.test.sh
+--- old
+      exit 1
+--- new
+      exit 0
+--- end

@@ -1,0 +1,9 @@
+guarantee: AC-2: the result is CI: <run> @ <full sha>
+file: scripts/tw-wip-run
+added_by: test-writer
+test: bash scripts/ci/tw-wip-run.test.sh
+--- old
+        echo "CI: $url @ $sha"
+--- new
+        echo "CI: $url @ ${sha:0:12}"
+--- end

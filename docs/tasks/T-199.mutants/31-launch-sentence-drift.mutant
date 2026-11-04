@@ -1,0 +1,8 @@
+guarantee: decides_on literal: the launch prompt sentence, byte-exact (exit 3 -> call again in the same stage)
+file: scripts/tw-launch
+added_by: test-writer
+--- old
+"denied. It waits for the run of the pushed commit and exits 3 while the run is still "
+--- new
+"denied. It waits for the run of the pushed commit and exits 2 while the run is still "
+--- end

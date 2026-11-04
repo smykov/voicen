@@ -200,11 +200,13 @@ verdict "green: an explicit commit argument selects the run of that commit"
 # ==== (3) red: exit 1, the failed jobs named, no CI: line ==========================================
 repo r-red
 put_list 1 "$(list "$(obj 201 "$sha1" completed success)" "$(obj 202 "$sha" completed failure)")"
-put_view 202 1 '{"status":"completed","conclusion":"failure","headSha":"'"$sha"'","url":"https://example.com/runs/202","jobs":[{"name":"windows","status":"completed","conclusion":"failure","steps":[{"name":"Build","conclusion":"failure"}]},{"name":"core-linux","status":"completed","conclusion":"failure"},{"name":"lint","status":"completed","conclusion":"success"},{"name":"smoke","status":"completed","conclusion":"skipped"}]}'
+put_view 202 1 '{"status":"completed","conclusion":"failure","headSha":"'"$sha"'","url":"https://example.com/runs/202","jobs":[{"name":"windows","status":"completed","conclusion":"failure","steps":[{"name":"Build","conclusion":"failure"}]},{"name":"core-linux","status":"completed","conclusion":"failure"},{"name":"lint","status":"completed","conclusion":"success"},{"name":"smoke","status":"completed","conclusion":"skipped"},{"name":"msi","status":"completed","conclusion":"timed_out"},{"name":"setup","status":"completed","conclusion":"startup_failure"}]}'
 run_it
 need "exit" "$got" 1
 has_line "FAILED JOB: windows" || bad="$bad${bad:+; }failed job windows not named"
 has_line "FAILED JOB: core-linux" || bad="$bad${bad:+; }failed job core-linux not named"
+has_line "FAILED JOB: msi" || bad="$bad${bad:+; }timed_out job msi not named"
+has_line "FAILED JOB: setup" || bad="$bad${bad:+; }startup_failure job setup not named"
 has_line "FAILED JOB: lint" && bad="$bad${bad:+; }a green job named as failed"
 has_line "FAILED JOB: smoke" && bad="$bad${bad:+; }a skipped job named as failed"
 no_ci_line
@@ -327,6 +329,15 @@ run_it
 need "exit" "$got" 5
 no_ci_line
 verdict "gh failure: run view prints no JSON on a red run -> exit 5"
+
+# A run id that is not a non-negative integer is not the JSON shape: no run view with it.
+repo e-list-bad-id
+put_list 1 "$(list "$(obj -1 "$sha" completed failure)")"
+run_it
+need "exit" "$got" 5
+no_ci_line
+need "view calls with a bad run id" "$(ncalls 'run view')" 0
+verdict "gh failure: run list answers a negative databaseId -> exit 5, no run view"
 
 # ==== (6) refusals: exit 2, gh never called =======================================================
 # Each fixture holds a green answer, so a program that went on would print a CI: line.

@@ -1,0 +1,8 @@
+guarantee: decides_on literal: the launch prompt sentence is in --append-system-prompt (AC-1: the session waits inside its stage)
+file: scripts/tw-launch
+added_by: test-writer
+--- old
+                "never with a note that CI is unread.")
+--- new
+                "")
+--- end

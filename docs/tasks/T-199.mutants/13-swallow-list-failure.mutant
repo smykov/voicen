@@ -1,0 +1,9 @@
+guarantee: gh failure branch: gh run list exits non-zero -> exit 5, never a result
+file: scripts/tw-wip-run
+added_by: test-writer
+test: bash scripts/ci/tw-wip-run.test.sh
+--- old
+    || gh_failed "gh run list exited non-zero"
+--- new
+    || ans='[]'
+--- end

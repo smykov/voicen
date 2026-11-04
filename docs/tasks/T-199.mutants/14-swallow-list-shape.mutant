@@ -1,0 +1,9 @@
+guarantee: gh failure branch: gh run list answers no JSON array -> exit 5, never a result
+file: scripts/tw-wip-run
+added_by: test-writer
+test: bash scripts/ci/tw-wip-run.test.sh
+--- old
+  found="$(pick "$sha" <<<"$ans")" || gh_failed "gh run list did not answer a JSON array of runs"
+--- new
+  found="$(pick "$sha" <<<"$ans")" || found=none
+--- end

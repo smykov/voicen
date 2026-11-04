@@ -1,0 +1,9 @@
+guarantee: refusal: a commit git knows (unknown revision, a run-id word)
+file: scripts/tw-wip-run
+added_by: test-writer
+test: bash scripts/ci/tw-wip-run.test.sh
+--- old
+|| refuse "not a commit: $arg"
+--- new
+|| sha="$arg"
+--- end

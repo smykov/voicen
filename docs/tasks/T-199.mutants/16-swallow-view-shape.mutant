@@ -1,0 +1,9 @@
+guarantee: gh failure branch: gh run view answers no run with jobs -> exit 5
+file: scripts/tw-wip-run
+added_by: test-writer
+test: bash scripts/ci/tw-wip-run.test.sh
+--- old
+      jobs="$(failed_jobs <<<"$view")" || gh_failed "gh run view $rid did not answer a run with jobs"
+--- new
+      jobs="$(failed_jobs <<<"$view")" || jobs=""
+--- end

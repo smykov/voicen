@@ -1,0 +1,9 @@
+guarantee: refusal: at most one argument
+file: scripts/tw-wip-run
+added_by: test-writer
+test: bash scripts/ci/tw-wip-run.test.sh
+--- old
+[ "$#" -le 1 ] || refuse
+--- new
+[ "$#" -le 2 ] || refuse
+--- end

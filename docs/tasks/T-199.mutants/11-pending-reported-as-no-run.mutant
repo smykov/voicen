@@ -1,0 +1,9 @@
+guarantee: approach (5): a pending run after the window -> exit 3 naming the run, distinct from no run
+file: scripts/tw-wip-run
+added_by: test-writer
+test: bash scripts/ci/tw-wip-run.test.sh
+--- old
+    if [ "$found" = "none" ]; then
+--- new
+    if true; then
+--- end

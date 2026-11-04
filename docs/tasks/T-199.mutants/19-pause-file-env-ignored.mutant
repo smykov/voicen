@@ -1,0 +1,9 @@
+guarantee: refusal: $TEAMWRIGHT_PAUSE_FILE refuses with 2, gh never called
+file: scripts/tw-wip-run
+added_by: test-writer
+test: bash scripts/ci/tw-wip-run.test.sh
+--- old
+for pause in "${TEAMWRIGHT_PAUSE_FILE:-}" "$top/TEAMWRIGHT_PAUSE"
+--- new
+for pause in "$top/TEAMWRIGHT_PAUSE"
+--- end

@@ -1,0 +1,9 @@
+guarantee: decides_on literal: gh argv is one of the two templates (run view <databaseId>, a non-negative integer); a bad shape -> exit 5
+file: scripts/tw-wip-run
+added_by: test-writer
+test: bash scripts/ci/tw-wip-run.test.sh
+--- old
+    if isinstance(rid, bool) or not isinstance(rid, int) or rid < 0:
+--- new
+    if isinstance(rid, bool):
+--- end

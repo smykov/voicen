@@ -1,0 +1,9 @@
+guarantee: AC-3: a completed run that is not success (cancelled) is red, never a CI: line
+file: scripts/tw-wip-run
+added_by: test-writer
+test: bash scripts/ci/tw-wip-run.test.sh
+--- old
+      if [ "$concl" = "success" ]; then
+--- new
+      if [ "$concl" != "failure" ]; then
+--- end

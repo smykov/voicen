@@ -1,0 +1,9 @@
+guarantee: approach (5): no run for the sha after the window -> exit 4 naming the sha, distinct from pending
+file: scripts/tw-wip-run
+added_by: test-writer
+test: bash scripts/ci/tw-wip-run.test.sh
+--- old
+      exit 4
+--- new
+      exit 3
+--- end
