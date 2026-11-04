@@ -406,7 +406,6 @@ pub fn recut_timeless(chunk: &Chunk) -> Vec<Chunk> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
     use crate::audio::wav;
@@ -513,7 +512,10 @@ mod tests {
             &[sp(1_000, 2_000), sp(2_299, 3_000)],
         );
         assert_eq!(merged.len(), 1);
-        assert_eq!(merged[0].spans, vec![sp(1_000, 3_000)], "gap 299 merges");
+        let [m] = merged.as_slice() else {
+            panic!("expected one chunk: {merged:?}")
+        };
+        assert_eq!(m.spans, vec![sp(1_000, 3_000)], "gap 299 merges");
 
         let apart = plan(
             PassMode::Timed,
@@ -521,8 +523,11 @@ mod tests {
             &[sp(1_000, 2_000), sp(2_300, 3_000)],
         );
         assert_eq!(apart.len(), 1, "timed packs both into one chunk");
+        let [a] = apart.as_slice() else {
+            panic!("expected one chunk: {apart:?}")
+        };
         assert_eq!(
-            apart[0].spans,
+            a.spans,
             vec![sp(1_000, 2_000), sp(2_300, 3_000)],
             "gap 300 is a pause: two spans"
         );
@@ -538,9 +543,12 @@ mod tests {
             &[sp(0, 50_000), sp(51_000, 100_000), sp(100_400, 120_000)],
         );
         assert_eq!(first.len(), 1, "the full window decides at once");
-        assert_eq!(first[0].index, 0);
-        assert_eq!((first[0].start_ms, first[0].end_ms), (0, 100_200));
-        assert_eq!(first[0].spans, vec![sp(0, 50_000), sp(51_000, 100_000)]);
+        let [f] = first.as_slice() else {
+            panic!("expected one chunk: {first:?}")
+        };
+        assert_eq!(f.index, 0);
+        assert_eq!((f.start_ms, f.end_ms), (0, 100_200));
+        assert_eq!(f.spans, vec![sp(0, 50_000), sp(51_000, 100_000)]);
         assert_eq!(p.carry_ms(), 120_000 - 100_200, "the rest of S3 is carried");
 
         // The decoder is asked for 120 000 - carry; the track has 20 s left.
@@ -551,10 +559,13 @@ mod tests {
         );
         let last = p.finish();
         assert_eq!(last.len(), 1);
-        assert_eq!(last[0].index, 1);
-        assert_eq!((last[0].start_ms, last[0].end_ms), (100_200, 130_200));
+        let [l] = last.as_slice() else {
+            panic!("expected one chunk: {last:?}")
+        };
+        assert_eq!(l.index, 1);
+        assert_eq!((l.start_ms, l.end_ms), (100_200, 130_200));
         assert_eq!(
-            last[0].spans,
+            l.spans,
             vec![sp(100_400, 130_000)],
             "carried part and new window are one span"
         );
@@ -576,7 +587,7 @@ mod tests {
         let mut p = RangePlanner::new(PassMode::Timed);
         let got = p.feed(0, 120_000, &[sp(1_000, 5_000)]);
         assert_eq!(got.len(), 1);
-        assert_eq!((got[0].start_ms, got[0].end_ms), (800, 5_200));
+        assert_eq!(bounds(&got), vec![(800, 5_200)]);
         assert_eq!(
             p.carry_ms(),
             PAD_MS,
@@ -623,19 +634,25 @@ mod tests {
             1,
             "the first hard cut comes with the first full window"
         );
+        let [c1] = c1.as_slice() else {
+            panic!("expected one chunk: {c1:?}")
+        };
         assert_eq!(
-            (c1[0].start_ms, c1[0].end_ms),
+            (c1.start_ms, c1.end_ms),
             (0, 120_000),
             "no pad past the limit"
         );
-        assert_eq!(c1[0].spans, vec![sp(0, 120_000)]);
+        assert_eq!(c1.spans, vec![sp(0, 120_000)]);
         assert_eq!(p.carry_ms(), 0);
 
         let c2 = p.feed(120_000, &ramp(120_000, 120_000), &[whole]);
         assert_eq!(c2.len(), 1);
-        assert_eq!(c2[0].index, 1);
+        let [c2] = c2.as_slice() else {
+            panic!("expected one chunk: {c2:?}")
+        };
+        assert_eq!(c2.index, 1);
         assert_eq!(
-            (c2[0].start_ms, c2[0].end_ms),
+            (c2.start_ms, c2.end_ms),
             (120_000, 240_000),
             "no pad into chunk 1"
         );
@@ -645,16 +662,19 @@ mod tests {
         assert!(c3.is_empty(), "the last 60 s wait for the end of the track");
         let last = p.finish();
         assert_eq!(last.len(), 1);
-        assert_eq!(last[0].index, 2);
-        assert_eq!((last[0].start_ms, last[0].end_ms), (240_000, 300_000));
-        assert_eq!(last[0].audio.samples().len(), 60_000 * 16);
+        let [l] = last.as_slice() else {
+            panic!("expected one chunk: {last:?}")
+        };
+        assert_eq!(l.index, 2);
+        assert_eq!((l.start_ms, l.end_ms), (240_000, 300_000));
+        assert_eq!(l.audio.samples().len(), 60_000 * 16);
         assert_eq!(
-            last[0].audio,
+            l.audio,
             ramp(240_000, 60_000),
             "the carry kept the right audio"
         );
-        assert_eq!(c1[0].audio, ramp(0, 120_000));
-        assert_eq!(c2[0].audio, ramp(120_000, 120_000));
+        assert_eq!(c1.audio, ramp(0, 120_000));
+        assert_eq!(c2.audio, ramp(120_000, 120_000));
     }
 
     #[test]
@@ -664,14 +684,20 @@ mod tests {
         let mut p = ChunkPlanner::new(PassMode::Timed);
         let c1 = p.feed(0, &ramp(0, 150_000), &[sp(0, 150_000)]);
         assert_eq!(c1.len(), 1);
-        assert_eq!((c1[0].start_ms, c1[0].end_ms), (0, 120_000));
-        assert_eq!(c1[0].spans, vec![sp(0, 120_000)]);
+        let [c1] = c1.as_slice() else {
+            panic!("expected one chunk: {c1:?}")
+        };
+        assert_eq!((c1.start_ms, c1.end_ms), (0, 120_000));
+        assert_eq!(c1.spans, vec![sp(0, 120_000)]);
         assert_eq!(p.carry_ms(), 30_000, "the rest of the span is carried");
         let last = p.finish();
         assert_eq!(last.len(), 1, "the carried rest is not lost");
-        assert_eq!((last[0].start_ms, last[0].end_ms), (120_000, 150_000));
-        assert_eq!(last[0].spans, vec![sp(120_000, 150_000)]);
-        assert_eq!(last[0].audio, ramp(120_000, 30_000));
+        let [l] = last.as_slice() else {
+            panic!("expected one chunk: {last:?}")
+        };
+        assert_eq!((l.start_ms, l.end_ms), (120_000, 150_000));
+        assert_eq!(l.spans, vec![sp(120_000, 150_000)]);
+        assert_eq!(l.audio, ramp(120_000, 30_000));
     }
 
     #[test]
@@ -683,7 +709,10 @@ mod tests {
             vec![(800, 119_900)],
             "300 ms of silence closes"
         );
-        assert_eq!(got[0].spans, vec![sp(1_000, 2_000), sp(50_000, 119_700)]);
+        assert_eq!(
+            got.iter().map(|c| c.spans.clone()).collect::<Vec<_>>(),
+            vec![vec![sp(1_000, 2_000), sp(50_000, 119_700)]]
+        );
 
         let mut open = RangePlanner::new(PassMode::Timed);
         let got = open.feed(0, 120_000, &[sp(1_000, 2_000), sp(50_000, 119_701)]);
@@ -692,7 +721,10 @@ mod tests {
             vec![(800, 2_200)],
             "299 ms leaves the tail span open: cut at the last pause before it"
         );
-        assert_eq!(got[0].spans, vec![sp(1_000, 2_000)]);
+        assert_eq!(
+            got.iter().map(|c| c.spans.clone()).collect::<Vec<_>>(),
+            vec![vec![sp(1_000, 2_000)]]
+        );
     }
 
     #[test]
@@ -724,9 +756,12 @@ mod tests {
             .is_empty());
         let got = p.finish();
         assert_eq!(got.len(), 1);
-        assert_eq!((got[0].start_ms, got[0].end_ms), (119_800, 121_200));
+        let [g] = got.as_slice() else {
+            panic!("expected one chunk: {got:?}")
+        };
+        assert_eq!((g.start_ms, g.end_ms), (119_800, 121_200));
         assert_eq!(
-            got[0].audio,
+            g.audio,
             ramp(119_800, 1_400),
             "the pad comes from the previous window"
         );
@@ -739,7 +774,10 @@ mod tests {
         assert!(p.feed(120_000, 10_000, &[sp(500, 1_000)]).is_empty());
         let got = p.finish();
         assert_eq!(bounds(&got), vec![(120_300, 121_200)]);
-        assert_eq!(got[0].spans, vec![sp(120_500, 121_000)]);
+        assert_eq!(
+            got.iter().map(|c| c.spans.clone()).collect::<Vec<_>>(),
+            vec![vec![sp(120_500, 121_000)]]
+        );
     }
 
     #[test]
@@ -750,7 +788,10 @@ mod tests {
         assert!(p.feed(50_000, 40_000, &[sp(0, 10_000)]).is_empty());
         let got = p.finish();
         assert_eq!(got.len(), 1);
-        assert_eq!(got[0].spans, vec![sp(10_000, 60_000)]);
+        assert_eq!(
+            got.iter().map(|c| c.spans.clone()).collect::<Vec<_>>(),
+            vec![vec![sp(10_000, 60_000)]]
+        );
     }
 
     // ---- input normalisation ----------------------------------------------------------
@@ -770,10 +811,10 @@ mod tests {
         let got = p.finish();
         assert_eq!(got.len(), 1);
         assert_eq!(
-            got[0].spans,
-            vec![sp(1_000, 2_500), sp(5_000, 6_000), sp(9_500, 10_000)]
+            got.iter().map(|c| c.spans.clone()).collect::<Vec<_>>(),
+            vec![vec![sp(1_000, 2_500), sp(5_000, 6_000), sp(9_500, 10_000)]]
         );
-        assert_eq!((got[0].start_ms, got[0].end_ms), (800, 10_000));
+        assert_eq!(bounds(&got), vec![(800, 10_000)]);
     }
 
     #[test]
@@ -860,10 +901,13 @@ mod tests {
         assert!(p.feed(0, &ramp(0, 61_000), &track).is_empty());
         let timed = p.finish();
         assert_eq!(timed.len(), 1);
-        assert_eq!((timed[0].start_ms, timed[0].end_ms), (800, 60_200));
-        assert_eq!(timed[0].spans, track.to_vec());
+        let [t] = timed.as_slice() else {
+            panic!("expected one chunk: {timed:?}")
+        };
+        assert_eq!((t.start_ms, t.end_ms), (800, 60_200));
+        assert_eq!(t.spans, track.to_vec());
 
-        let pieces = recut_timeless(&timed[0]);
+        let pieces = recut_timeless(t);
         let got: Vec<_> = pieces.iter().map(|c| (c.start_ms, c.end_ms)).collect();
         assert_eq!(got, vec![(800, 20_200), (20_300, 50_300), (50_300, 60_200)]);
         for (i, c) in pieces.iter().enumerate() {
@@ -876,8 +920,11 @@ mod tests {
                 "slice of the source"
             );
         }
-        assert_eq!(pieces[1].spans, vec![sp(20_500, 50_300)]);
-        assert_eq!(pieces[2].spans, vec![sp(50_300, 60_000)]);
+        let [_, p1, p2] = pieces.as_slice() else {
+            panic!("expected three pieces: {pieces:?}")
+        };
+        assert_eq!(p1.spans, vec![sp(20_500, 50_300)]);
+        assert_eq!(p2.spans, vec![sp(50_300, 60_000)]);
     }
 
     // ---- WAV --------------------------------------------------------------------------
@@ -887,28 +934,40 @@ mod tests {
         let mut p = ChunkPlanner::new(PassMode::Timed);
         let got = p.feed(0, &ramp(0, 120_000), &[sp(0, 120_000)]);
         assert_eq!(got.len(), 1);
-        assert_eq!(got[0].audio.samples().len(), 1_920_000);
-        let bytes = wav::encode(&got[0].audio);
+        let [g] = got.as_slice() else {
+            panic!("expected one chunk: {got:?}")
+        };
+        assert_eq!(g.audio.samples().len(), 1_920_000);
+        let bytes = wav::encode(&g.audio);
         assert_eq!(bytes.len(), 3_840_044);
-        assert_eq!(
-            bytes.len() as u64,
-            44 + 32 * (got[0].end_ms - got[0].start_ms)
-        );
-        assert_eq!(&bytes[0..4], b"RIFF");
-        assert_eq!(&bytes[8..12], b"WAVE");
-        assert_eq!(u16::from_le_bytes([bytes[20], bytes[21]]), 1, "PCM");
-        assert_eq!(u16::from_le_bytes([bytes[22], bytes[23]]), 1, "mono");
-        assert_eq!(
-            u32::from_le_bytes([bytes[24], bytes[25], bytes[26], bytes[27]]),
-            16_000
-        );
-        assert_eq!(u16::from_le_bytes([bytes[34], bytes[35]]), 16, "16-bit");
+        assert_eq!(bytes.len() as u64, 44 + 32 * (g.end_ms - g.start_ms));
+        assert_eq!(bytes.get(0..4), Some(&b"RIFF"[..]));
+        assert_eq!(bytes.get(8..12), Some(&b"WAVE"[..]));
+        let u16_at = |i: usize| {
+            bytes
+                .get(i..i + 2)
+                .and_then(|b| <[u8; 2]>::try_from(b).ok())
+                .map(u16::from_le_bytes)
+        };
+        let u32_at = |i: usize| {
+            bytes
+                .get(i..i + 4)
+                .and_then(|b| <[u8; 4]>::try_from(b).ok())
+                .map(u32::from_le_bytes)
+        };
+        assert_eq!(u16_at(20), Some(1), "PCM");
+        assert_eq!(u16_at(22), Some(1), "mono");
+        assert_eq!(u32_at(24), Some(16_000));
+        assert_eq!(u16_at(34), Some(16), "16-bit");
         assert!(bytes.len() < 25_000_000);
 
         let mut t = ChunkPlanner::new(PassMode::Timeless);
         let tl = t.feed(0, &ramp(0, 30_000), &[sp(0, 30_000)]);
+        let [tl] = tl.as_slice() else {
+            panic!("expected one chunk: {tl:?}")
+        };
         assert_eq!(
-            wav::encode(&tl[0].audio).len(),
+            wav::encode(&tl.audio).len(),
             960_044,
             "44 + 32 B/ms at 30 s"
         );
