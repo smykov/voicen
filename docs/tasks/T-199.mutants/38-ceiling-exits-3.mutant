@@ -1,0 +1,9 @@
+guarantee: Ceiling: past the ceiling exits 6, not 3 (pending) (review 1 #1)
+file: scripts/tw-wip-run
+added_by: test-writer
+test: bash scripts/ci/tw-wip-run.test.sh
+--- old
+      exit 6
+--- new
+      exit 3
+--- end

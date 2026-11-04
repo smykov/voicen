@@ -1,0 +1,9 @@
+guarantee: Ceiling: a run not completed and at least CEILING min old -> exit 6 at once (review 1 #1)
+file: scripts/tw-wip-run
+added_by: test-writer
+test: bash scripts/ci/tw-wip-run.test.sh
+--- old
+    if [ "$age" -ge $((10#$ceiling * 60)) ]; then
+--- new
+    if false; then
+--- end

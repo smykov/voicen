@@ -1,2 +1,2 @@
-# bash tests, outside tw-test's core/ui; run in the core area's container by tw-mutants. Both self-tests are green with the implementation (16caa357); the tw-wip-run entries (03-30) run only tw-wip-run.test.sh through their own test: line, the tw-launch entries (01, 02, 31, 32) run both.
+# bash tests, outside tw-test's core/ui; run in the core area's container by tw-mutants. Both self-tests are green with the implementation (16caa357); the tw-wip-run entries (03-30) run only tw-wip-run.test.sh through their own test: line, the tw-launch entries (01, 02, 31, 32, 44) run both; round 2 (9dfde346): 33-43 are tw-wip-run entries with their own test: line.
 bash scripts/ci/tw-wip-push.test.sh && bash scripts/ci/tw-wip-run.test.sh

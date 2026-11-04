@@ -1,0 +1,11 @@
+guarantee: gh failure: the run of the sha without createdAt (missing or null) -> exit 5, no wait (swallow at origin)
+file: scripts/tw-wip-run
+added_by: test-writer
+test: bash scripts/ci/tw-wip-run.test.sh
+--- old
+    if not isinstance(created, str):
+        sys.exit(5)
+--- new
+    if not isinstance(created, str):
+        created = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+--- end

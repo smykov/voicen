@@ -1,0 +1,9 @@
+guarantee: Ceiling: TW_WIP_RUN_CEILING minutes honoured, default 90 (review 1 #1)
+file: scripts/tw-wip-run
+added_by: test-writer
+test: bash scripts/ci/tw-wip-run.test.sh
+--- old
+ceiling="${TW_WIP_RUN_CEILING:-90}"
+--- new
+ceiling=90
+--- end

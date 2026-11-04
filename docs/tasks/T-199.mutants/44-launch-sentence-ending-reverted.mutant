@@ -1,0 +1,9 @@
+guarantee: decides_on literal: the launch sentence names exit 6 and the 90-minute wait ceiling (review 1 #1)
+file: scripts/tw-launch
+added_by: test-writer
+--- old
+                "no result came (exit 4: no run for the sha; exit 5: gh failed; exit 6: the run passed the "
+                "90-minute wait ceiling); "
+--- new
+                "no result came (exit 4: no run for the sha; exit 5: gh failed; or the wait ceiling); "
+--- end

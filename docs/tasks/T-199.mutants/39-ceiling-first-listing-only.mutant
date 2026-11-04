@@ -1,0 +1,48 @@
+guarantee: Ceiling: checked on every listing, not only the first (review 1 #1)
+file: scripts/tw-wip-run
+added_by: test-writer
+test: bash scripts/ci/tw-wip-run.test.sh
+--- old
+  found="$(pick "$sha" <<<"$ans")" || gh_failed "gh run list did not answer a JSON array of runs"
+  if [ "$found" != "none" ]; then
+    IFS=$'\x1f' read -r status concl rid url age <<<"$found"
+    if [ "$status" = "completed" ]; then
+      if [ "$concl" = "success" ]; then
+        echo "CI: $url @ $sha"
+        exit 0
+      fi
+      view="$(gh run view "$rid" --json jobs,status,conclusion,headSha,url)" \
+        || gh_failed "gh run view $rid exited non-zero"
+      jobs="$(failed_jobs <<<"$view")" || gh_failed "gh run view $rid did not answer a run with jobs"
+      echo "RED: $url @ $sha (conclusion: ${concl:-none})"
+      if [ -n "$jobs" ]; then
+        while IFS= read -r job; do echo "FAILED JOB: $job"; done <<<"$jobs"
+      else
+        echo "no job failed by name; read the run: $url"
+      fi
+      exit 1
+    fi
+    if [ "$age" -ge $((10#$ceiling * 60)) ]; then
+--- new
+  found="$(pick "$sha" <<<"$ans")" || gh_failed "gh run list did not answer a JSON array of runs"
+  calls="${calls:-0}"; calls=$((calls + 1))
+  if [ "$found" != "none" ]; then
+    IFS=$'\x1f' read -r status concl rid url age <<<"$found"
+    if [ "$status" = "completed" ]; then
+      if [ "$concl" = "success" ]; then
+        echo "CI: $url @ $sha"
+        exit 0
+      fi
+      view="$(gh run view "$rid" --json jobs,status,conclusion,headSha,url)" \
+        || gh_failed "gh run view $rid exited non-zero"
+      jobs="$(failed_jobs <<<"$view")" || gh_failed "gh run view $rid did not answer a run with jobs"
+      echo "RED: $url @ $sha (conclusion: ${concl:-none})"
+      if [ -n "$jobs" ]; then
+        while IFS= read -r job; do echo "FAILED JOB: $job"; done <<<"$jobs"
+      else
+        echo "no job failed by name; read the run: $url"
+      fi
+      exit 1
+    fi
+    if [ "$calls" -eq 1 ] && [ "$age" -ge $((10#$ceiling * 60)) ]; then
+--- end

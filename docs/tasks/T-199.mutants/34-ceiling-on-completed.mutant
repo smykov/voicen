@@ -1,0 +1,13 @@
+guarantee: Ceiling: a completed run is green or red at any age (review 1 #1)
+file: scripts/tw-wip-run
+added_by: test-writer
+test: bash scripts/ci/tw-wip-run.test.sh
+--- old
+    IFS=$'\x1f' read -r status concl rid url age <<<"$found"
+--- new
+    IFS=$'\x1f' read -r status concl rid url age <<<"$found"
+    if [ "$age" -ge $((10#$ceiling * 60)) ]; then
+      echo "CEILING: $url @ $sha"
+      exit 6
+    fi
+--- end

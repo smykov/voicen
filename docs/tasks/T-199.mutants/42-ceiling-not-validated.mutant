@@ -1,0 +1,9 @@
+guarantee: Refusal: TW_WIP_RUN_CEILING not whole minutes -> exit 2, gh never called (review 1 #1)
+file: scripts/tw-wip-run
+added_by: test-writer
+test: bash scripts/ci/tw-wip-run.test.sh
+--- old
+[[ "$ceiling" =~ ^[0-9]+$ ]] || refuse "TW_WIP_RUN_CEILING is not whole minutes: $ceiling"
+--- new
+:
+--- end

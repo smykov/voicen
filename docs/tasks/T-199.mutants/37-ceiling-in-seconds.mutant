@@ -1,0 +1,9 @@
+guarantee: Ceiling: CEILING is minutes (89 min with default 90 -> exit 3) (review 1 #1)
+file: scripts/tw-wip-run
+added_by: test-writer
+test: bash scripts/ci/tw-wip-run.test.sh
+--- old
+    if [ "$age" -ge $((10#$ceiling * 60)) ]; then
+--- new
+    if [ "$age" -ge $((10#$ceiling)) ]; then
+--- end

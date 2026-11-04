@@ -1,0 +1,9 @@
+guarantee: AC-3 / review 1 #3: a failed job without a name is printed as FAILED JOB: <unnamed job>, never a bare FAILED JOB: line
+file: scripts/tw-wip-run
+added_by: test-writer
+test: bash scripts/ci/tw-wip-run.test.sh
+--- old
+        print(name or "<unnamed job>")
+--- new
+        print(name)
+--- end

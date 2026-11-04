@@ -1,0 +1,13 @@
+guarantee: gh failure: the run of the sha with an unparsable createdAt -> exit 5, no wait (swallow at origin)
+file: scripts/tw-wip-run
+added_by: test-writer
+test: bash scripts/ci/tw-wip-run.test.sh
+--- old
+    except ValueError:
+        sys.exit(5)
+    t = t.replace(tzinfo=datetime.timezone.utc)
+--- new
+    except ValueError:
+        t = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+    t = t.replace(tzinfo=datetime.timezone.utc)
+--- end
