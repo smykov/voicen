@@ -1,0 +1,10 @@
+guarantee: AC-3 failure branch (validation 1 M1): a completed, not-success run whose view names no failed job is still red (exit 1, url printed), never green
+file: scripts/tw-wip-run
+added_by: test-writer
+test: bash scripts/ci/tw-wip-run.test.sh
+--- old
+        echo "no job failed by name; read the run: $url"
+--- new
+        echo "no job failed by name; read the run: $url"
+        exit 0
+--- end

@@ -266,6 +266,35 @@ no_ci_line
 argv_ok
 verdict "red: a failed job with an empty or missing name prints FAILED JOB: <unnamed job>, exit 1"
 
+# Validation 1 M1: a red run whose view names no failed job is still red (exit 1), never green; the
+# run's url is printed so the session can read the run; no FAILED JOB line, no CI: line.
+repo r-nojobs-empty
+put_list 1 "$(list "$(obj 202 "$sha" completed failure)")"
+put_view 202 1 '{"status":"completed","conclusion":"failure","headSha":"'"$sha"'","url":"https://example.com/runs/202","jobs":[]}'
+run_it
+need "exit" "$got" 1
+no_ci_line
+grep -qF -- "https://example.com/runs/202" <<<"$out" || bad="$bad${bad:+; }the run url was not printed on stdout"
+grep -q '^FAILED JOB:' <<<"$out" && bad="$bad${bad:+; }a FAILED JOB line was printed"
+argv_ok
+grep -qxF "run view 202 --json jobs,status,conclusion,headSha,url" "$ghd/calls" 2>/dev/null \
+  || bad="$bad${bad:+; }no 'run view 202 --json jobs,status,conclusion,headSha,url'"
+need "view calls" "$(ncalls 'run view')" 1
+verdict "red: a failed run whose view names no failed job (jobs []) -> exit 1, no CI: line, the run url printed"
+
+repo r-nojobs-green-jobs
+put_list 1 "$(list "$(obj 202 "$sha" completed failure)")"
+put_view 202 1 '{"status":"completed","conclusion":"failure","headSha":"'"$sha"'","url":"https://example.com/runs/202","jobs":[{"name":"windows","conclusion":"success"},{"name":"lint","conclusion":"skipped"},{"name":"smoke","conclusion":"neutral"}]}'
+run_it
+need "exit" "$got" 1
+no_ci_line
+grep -qF -- "https://example.com/runs/202" <<<"$out" || bad="$bad${bad:+; }the run url was not printed on stdout"
+grep -q '^FAILED JOB:' <<<"$out" && bad="$bad${bad:+; }a green or skipped job named as failed"
+argv_ok
+grep -qxF "run view 202 --json jobs,status,conclusion,headSha,url" "$ghd/calls" 2>/dev/null \
+  || bad="$bad${bad:+; }no 'run view 202 --json jobs,status,conclusion,headSha,url'"
+verdict "red: a failed run whose jobs are all success/skipped/neutral -> exit 1, no CI: line, the run url printed"
+
 # ==== (4) in_progress then success: waits, no early exit ===========================================
 repo w-wait
 WINDOW=8 # a long window: the run succeeds inside it, so the case ends early
