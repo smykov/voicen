@@ -1,8 +1,16 @@
 //! Call mode (spec 007, contracts/core-call.md "Modules").
 
+pub mod capture;
 pub mod codec;
 pub mod events;
 pub mod transcript;
+#[cfg(any(test, feature = "test-fakes"))]
+pub mod wav_source;
+
+pub use capture::{
+    CaptureStamp, ChannelSink, LossCause, OpenError, Report, Step, Timeline, TrackDevice,
+    TrackEvent, TrackReceiver, TrackSink, TrackSource,
+};
 
 pub use events::{
     CallId, CallNotice, CallSource, CallState, CallWarning, DeviceCause, EndpointId, FailReason,
