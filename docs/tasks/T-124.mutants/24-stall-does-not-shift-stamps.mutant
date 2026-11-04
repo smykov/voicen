@@ -1,0 +1,9 @@
+guarantee: AC-6: WavTrackSource scripted gaps (a stall leaves a hole in the stamps)
+file: crates/voicen-core/src/call/wav_source.rs
+added_by: task-validator round 1
+test: cargo test -p voicen-core call::wav_source
+--- old
+                    st.shift_ns += len_ms * 1_000_000;
+--- new
+                    let _ = len_ms;
+--- end

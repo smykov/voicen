@@ -1,0 +1,10 @@
+guarantee: AC-6: WavTrackSource scripted gaps (after a stall the file audio continues, not skipped)
+file: crates/voicen-core/src/call/wav_source.rs
+added_by: task-validator round 1
+test: cargo test -p voicen-core call::wav_source
+--- old
+                    st.shift_ns += len_ms * 1_000_000;
+--- new
+                    st.shift_ns += len_ms * 1_000_000;
+                    st.frame += usize::try_from(u64::from(self.rate) * len_ms / 1_000).unwrap_or(0);
+--- end

@@ -1,0 +1,8 @@
+guarantee: AC-1: blocks are placed at (stamp - call_start) x 16 kHz
+file: crates/voicen-core/src/call/capture.rs
+added_by: task-validator round 1
+--- old
+        (at.0 as f64 - self.call_start.0 as f64) * PER_NS
+--- new
+        at.0 as f64 * PER_NS
+--- end

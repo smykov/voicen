@@ -1,0 +1,9 @@
+guarantee: AC-6: only 16-bit PCM and f32 are read; other formats are refused with WavError
+file: crates/voicen-core/src/call/wav_source.rs
+added_by: task-validator round 1
+test: cargo test -p voicen-core call::wav_source
+--- old
+        (1, 16) => false,
+--- new
+        (1, _) => false,
+--- end

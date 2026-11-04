@@ -1,0 +1,8 @@
+guarantee: AC-1: blocks are downmixed (channels averaged, not taken as frames)
+file: crates/voicen-core/src/call/capture.rs
+added_by: task-validator round 1
+--- old
+        let result = match mix_to_mono(interleaved, channels, &mut mono) {
+--- new
+        let result = match mix_to_mono(interleaved, 1, &mut mono) {
+--- end

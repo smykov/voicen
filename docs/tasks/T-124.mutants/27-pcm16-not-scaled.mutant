@@ -1,0 +1,9 @@
+guarantee: AC-6: WavTrackSource reads 16-bit PCM (scaled to f32 in [-1, 1])
+file: crates/voicen-core/src/call/wav_source.rs
+added_by: task-validator round 1
+test: cargo test -p voicen-core call::wav_source
+--- old
+            .map(|b| f32::from(i16::from_le_bytes(*b)) / 32_768.0)
+--- new
+            .map(|b| f32::from(i16::from_le_bytes(*b)))
+--- end

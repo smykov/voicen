@@ -1,0 +1,9 @@
+guarantee: AC-6: WavTrackSource reads f32 RIFF
+file: crates/voicen-core/src/call/wav_source.rs
+added_by: task-validator round 1
+test: cargo test -p voicen-core call::wav_source
+--- old
+        (3, 32) => true,
+--- new
+        (3, 32) => return Err(WavError),
+--- end

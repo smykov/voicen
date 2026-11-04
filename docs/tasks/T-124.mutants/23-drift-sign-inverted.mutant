@@ -1,0 +1,9 @@
+guarantee: AC-6: WavTrackSource applies a drift factor to the synthetic stamps
+file: crates/voicen-core/src/call/wav_source.rs
+added_by: task-validator round 1
+test: cargo test -p voicen-core call::wav_source
+--- old
+            / (f64::from(self.rate) * (1.0 + self.drift).max(1e-9));
+--- new
+            / (f64::from(self.rate) * (1.0 - self.drift).max(1e-9));
+--- end

@@ -1,0 +1,8 @@
+guarantee: AC-7: levels are RMS over 100 ms blocks, at most 10 Hz
+file: crates/voicen-core/src/call/capture.rs
+added_by: task-validator round 1
+--- old
+const LEVEL_WINDOW: usize = 1_600;
+--- new
+const LEVEL_WINDOW: usize = 800;
+--- end
