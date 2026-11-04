@@ -35,7 +35,8 @@ OUR_SENTENCE = ("Do not merge. Do not push, with one exception: the CI-only wip/
                 "denied. It waits for the run of the pushed commit and exits 3 while the run is still "
                 "pending: call it again in the same stage. End the stage only with a CI: <run> @ <sha> "
                 "line in ## Tests, a red run with its failed jobs named, or an escalation that names why "
-                "no result came (exit 4: no run for the sha; exit 5: gh failed; or the wait ceiling); "
+                "no result came (exit 4: no run for the sha; exit 5: gh failed; exit 6: the run passed the "
+                "90-minute wait ceiling); "
                 "never with a note that CI is unread.")
 KIT_DENIALS = ("Bash(git push:*)", "Bash(git merge:*)", "Bash(gh:*)")
 

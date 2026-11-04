@@ -5,7 +5,7 @@
 # <ID> comes from the current branch tw/<ID>, never from an argument or the environment. <commit>
 # (default HEAD) is the pushed commit, resolved to a full sha. The program runs no gh command but its
 # two templates (the launch keeps Bash(gh:*) denied; the session runs this program by name):
-#   gh run list --branch wip/<ID> --workflow ci.yml --json databaseId,headSha,status,conclusion,url --limit 20
+#   gh run list --branch wip/<ID> --workflow ci.yml --json databaseId,headSha,status,conclusion,url,createdAt --limit 20
 #   gh run view <databaseId> --json jobs,status,conclusion,headSha,url   (a completed run, not green)
 # The run of the commit is the first listed run whose headSha is the full sha.
 #
@@ -13,14 +13,21 @@
 # the 10-minute Bash limit), listing again every TW_WIP_RUN_POLL seconds (default 30, a fraction is
 # allowed) while there is no run for the sha or the run is not completed.
 #
+# The overall wait for one run, across calls, is TW_WIP_RUN_CEILING minutes (whole minutes, default
+# 90), held by this program: it keeps no state between calls but reads the run's createdAt (ISO 8601
+# UTC) from every listing. A run of the sha that is not completed and was created at least the
+# ceiling before now ends the call at once with exit 6. A completed run is green or red at any age.
+#
 # Exit 0  green; stdout: CI: <url> @ <full sha>
 #      1  red (completed, not success); stdout: one FAILED JOB: <name> per failed job, no CI: line
-#      2  refused (branch, argument, pause, not a commit, not a git tree); gh is not called
+#      2  refused (branch, argument, pause, not a commit, not a git tree, a TW_WIP_RUN_WINDOW,
+#         TW_WIP_RUN_POLL or TW_WIP_RUN_CEILING of the wrong form); gh is not called
 #      3  the run is still pending at the window's end (its url is printed): call again
 #      4  no run for the sha at the window's end (the sha is printed; e.g. a docs/tasks-only push)
-#      5  gh failed, or its answer is not the expected JSON shape
-# The overall wait ceiling (how many exit-3 calls a stage spends) is the session's, stated in the
-# launch prompt (scripts/tw-launch); this program holds no state between calls.
+#      5  gh failed, or its answer is not the expected JSON shape (the run of the sha without a
+#         parsable createdAt included)
+#      6  the run of the sha is not completed and passed the wait ceiling (its url is printed)
+# A failed job without a name is printed as FAILED JOB: <unnamed job>.
 set -uo pipefail
 
 refuse() {
@@ -46,8 +53,10 @@ esac
 
 window="${TW_WIP_RUN_WINDOW:-540}"
 poll="${TW_WIP_RUN_POLL:-30}"
+ceiling="${TW_WIP_RUN_CEILING:-90}"
 [[ "$window" =~ ^[0-9]+$ ]] || refuse "TW_WIP_RUN_WINDOW is not whole seconds: $window"
 [[ "$poll" =~ ^[0-9]+(\.[0-9]+)?$ ]] || refuse "TW_WIP_RUN_POLL is not seconds: $poll"
+[[ "$ceiling" =~ ^[0-9]+$ ]] || refuse "TW_WIP_RUN_CEILING is not whole minutes: $ceiling"
 
 top="$(git rev-parse --show-toplevel 2>/dev/null)" || refuse "not in a git working tree"
 cd "$top" || refuse "cannot enter $top"
@@ -68,11 +77,12 @@ sha="$(git rev-parse --verify -q "$arg^{commit}")" || refuse "not a commit: $arg
 command -v python3 >/dev/null 2>&1 || gh_failed "python3 is missing (it parses gh's JSON)"
 
 # pick <sha>: gh's list answer on stdin -> "none", or the first run of the sha as
-# status, conclusion, databaseId, url joined by 0x1f (not IFS whitespace, so an empty conclusion
-# keeps its field). Exit 5 when the answer is not a JSON array of run objects.
+# status, conclusion, databaseId, url and its age in whole seconds (from createdAt, against now)
+# joined by 0x1f (not IFS whitespace, so an empty conclusion keeps its field). Exit 5 when the answer
+# is not a JSON array of run objects, or the run of the sha has no parsable createdAt.
 pick() {
   python3 -I -c '
-import json, sys
+import datetime, json, sys
 try:
     runs = json.load(sys.stdin)
 except ValueError:
@@ -90,7 +100,16 @@ for r in runs:
         sys.exit(5)
     if not all(isinstance(v, str) and "\x1f" not in v and "\n" not in v for v in (url, status, concl)):
         sys.exit(5)
-    print("%s\x1f%s\x1f%d\x1f%s" % (status, concl, rid, url))
+    created = r.get("createdAt")
+    if not isinstance(created, str):
+        sys.exit(5)
+    try:
+        t = datetime.datetime.strptime(created, "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError:
+        sys.exit(5)
+    t = t.replace(tzinfo=datetime.timezone.utc)
+    age = int((datetime.datetime.now(datetime.timezone.utc) - t).total_seconds())
+    print("%s\x1f%s\x1f%d\x1f%s\x1f%d" % (status, concl, rid, url, age))
     sys.exit(0)
 print("none")
 ' "$1"
@@ -109,17 +128,18 @@ if not isinstance(jobs, list) or not all(isinstance(j, dict) for j in jobs):
     sys.exit(5)
 for j in jobs:
     if j.get("conclusion") in ("failure", "cancelled", "timed_out", "startup_failure"):
-        print(" ".join(str(j.get("name", "")).split()))
+        name = " ".join(str(j.get("name") or "").split())
+        print(name or "<unnamed job>")
 '
 }
 
 SECONDS=0
 while :; do
-  ans="$(gh run list --branch "wip/$id" --workflow ci.yml --json databaseId,headSha,status,conclusion,url --limit 20)" \
+  ans="$(gh run list --branch "wip/$id" --workflow ci.yml --json databaseId,headSha,status,conclusion,url,createdAt --limit 20)" \
     || gh_failed "gh run list exited non-zero"
   found="$(pick "$sha" <<<"$ans")" || gh_failed "gh run list did not answer a JSON array of runs"
   if [ "$found" != "none" ]; then
-    IFS=$'\x1f' read -r status concl rid url <<<"$found"
+    IFS=$'\x1f' read -r status concl rid url age <<<"$found"
     if [ "$status" = "completed" ]; then
       if [ "$concl" = "success" ]; then
         echo "CI: $url @ $sha"
@@ -135,6 +155,10 @@ while :; do
         echo "no job failed by name; read the run: $url"
       fi
       exit 1
+    fi
+    if [ "$age" -ge $((10#$ceiling * 60)) ]; then
+      echo "CEILING: $url @ $sha is $status ${age}s after it was created, past the ${ceiling}-minute wait ceiling"
+      exit 6
     fi
   fi
   if [ "$SECONDS" -ge "$window" ]; then
