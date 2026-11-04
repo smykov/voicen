@@ -1,0 +1,149 @@
+#!/usr/bin/env bash
+# tw-wip-run [<commit>] - the only CI read of a stage session: the ci.yml run of the wip/<ID> push of
+# P-016 (T-199, decisions #228, #241; contract: scripts/ci/tw-wip-run.test.sh).
+#
+# <ID> comes from the current branch tw/<ID>, never from an argument or the environment. <commit>
+# (default HEAD) is the pushed commit, resolved to a full sha. The program runs no gh command but its
+# two templates (the launch keeps Bash(gh:*) denied; the session runs this program by name):
+#   gh run list --branch wip/<ID> --workflow ci.yml --json databaseId,headSha,status,conclusion,url --limit 20
+#   gh run view <databaseId> --json jobs,status,conclusion,headSha,url   (a completed run, not green)
+# The run of the commit is the first listed run whose headSha is the full sha.
+#
+# It waits in the foreground: TW_WIP_RUN_WINDOW seconds per call (whole seconds, default 540, under
+# the 10-minute Bash limit), listing again every TW_WIP_RUN_POLL seconds (default 30, a fraction is
+# allowed) while there is no run for the sha or the run is not completed.
+#
+# Exit 0  green; stdout: CI: <url> @ <full sha>
+#      1  red (completed, not success); stdout: one FAILED JOB: <name> per failed job, no CI: line
+#      2  refused (branch, argument, pause, not a commit, not a git tree); gh is not called
+#      3  the run is still pending at the window's end (its url is printed): call again
+#      4  no run for the sha at the window's end (the sha is printed; e.g. a docs/tasks-only push)
+#      5  gh failed, or its answer is not the expected JSON shape
+# The overall wait ceiling (how many exit-3 calls a stage spends) is the session's, stated in the
+# launch prompt (scripts/tw-launch); this program holds no state between calls.
+set -uo pipefail
+
+refuse() {
+  echo "tw-wip-run: REFUSED - $1" >&2
+  exit 2
+}
+gh_failed() {
+  echo "tw-wip-run: GH FAILED - $1" >&2
+  exit 5
+}
+
+# No repository or config override comes in through the environment; gh reads only its own login.
+unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_PREFIX
+unset GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT GH_REPO
+
+[ "$#" -le 1 ] || refuse "takes one commit at most, got $# arguments"
+arg="${1-HEAD}"
+case "$arg" in
+  "") refuse "an empty commit argument" ;;
+  -*) refuse "takes no options: $arg" ;;
+  *:*) refuse "takes a commit, not a refspec: $arg" ;;
+esac
+
+window="${TW_WIP_RUN_WINDOW:-540}"
+poll="${TW_WIP_RUN_POLL:-30}"
+[[ "$window" =~ ^[0-9]+$ ]] || refuse "TW_WIP_RUN_WINDOW is not whole seconds: $window"
+[[ "$poll" =~ ^[0-9]+(\.[0-9]+)?$ ]] || refuse "TW_WIP_RUN_POLL is not seconds: $poll"
+
+top="$(git rev-parse --show-toplevel 2>/dev/null)" || refuse "not in a git working tree"
+cd "$top" || refuse "cannot enter $top"
+
+# The pause first. Each place counts on its own: the variable adds a file, it does not replace one.
+common="$(git rev-parse --git-common-dir 2>/dev/null)" || refuse "cannot find the main tree"
+main_tree="$(cd "$common/.." 2>/dev/null && pwd)" || refuse "cannot find the main tree"
+for pause in "${TEAMWRIGHT_PAUSE_FILE:-}" "$top/TEAMWRIGHT_PAUSE" "$main_tree/TEAMWRIGHT_PAUSE"; do
+  [ -z "$pause" ] || [ ! -e "$pause" ] || refuse "team is paused ($pause exists)"
+done
+
+branch="$(git symbolic-ref -q HEAD)" || refuse "detached HEAD, not on a tw/<ID> branch"
+[[ "$branch" =~ ^refs/heads/tw/([A-Z][A-Z0-9]*-[0-9]+)$ ]] || refuse "not on a tw/<ID> branch: $branch"
+id="${BASH_REMATCH[1]}"
+
+sha="$(git rev-parse --verify -q "$arg^{commit}")" || refuse "not a commit: $arg"
+
+command -v python3 >/dev/null 2>&1 || gh_failed "python3 is missing (it parses gh's JSON)"
+
+# pick <sha>: gh's list answer on stdin -> "none", or the first run of the sha as
+# status, conclusion, databaseId, url joined by 0x1f (not IFS whitespace, so an empty conclusion
+# keeps its field). Exit 5 when the answer is not a JSON array of run objects.
+pick() {
+  python3 -I -c '
+import json, sys
+try:
+    runs = json.load(sys.stdin)
+except ValueError:
+    sys.exit(5)
+if not isinstance(runs, list):
+    sys.exit(5)
+for r in runs:
+    if not isinstance(r, dict):
+        sys.exit(5)
+    if r.get("headSha") != sys.argv[1]:
+        continue
+    rid, url = r.get("databaseId"), r.get("url")
+    status, concl = r.get("status"), r.get("conclusion") or ""
+    if isinstance(rid, bool) or not isinstance(rid, int) or rid < 0:
+        sys.exit(5)
+    if not all(isinstance(v, str) and "\x1f" not in v and "\n" not in v for v in (url, status, concl)):
+        sys.exit(5)
+    print("%s\x1f%s\x1f%d\x1f%s" % (status, concl, rid, url))
+    sys.exit(0)
+print("none")
+' "$1"
+}
+
+# failed_jobs: gh's view answer on stdin -> one name per failed job. Exit 5 on another shape.
+failed_jobs() {
+  python3 -I -c '
+import json, sys
+try:
+    run = json.load(sys.stdin)
+except ValueError:
+    sys.exit(5)
+jobs = run.get("jobs") if isinstance(run, dict) else None
+if not isinstance(jobs, list) or not all(isinstance(j, dict) for j in jobs):
+    sys.exit(5)
+for j in jobs:
+    if j.get("conclusion") in ("failure", "cancelled", "timed_out", "startup_failure"):
+        print(" ".join(str(j.get("name", "")).split()))
+'
+}
+
+SECONDS=0
+while :; do
+  ans="$(gh run list --branch "wip/$id" --workflow ci.yml --json databaseId,headSha,status,conclusion,url --limit 20)" \
+    || gh_failed "gh run list exited non-zero"
+  found="$(pick "$sha" <<<"$ans")" || gh_failed "gh run list did not answer a JSON array of runs"
+  if [ "$found" != "none" ]; then
+    IFS=$'\x1f' read -r status concl rid url <<<"$found"
+    if [ "$status" = "completed" ]; then
+      if [ "$concl" = "success" ]; then
+        echo "CI: $url @ $sha"
+        exit 0
+      fi
+      view="$(gh run view "$rid" --json jobs,status,conclusion,headSha,url)" \
+        || gh_failed "gh run view $rid exited non-zero"
+      jobs="$(failed_jobs <<<"$view")" || gh_failed "gh run view $rid did not answer a run with jobs"
+      echo "RED: $url @ $sha (conclusion: ${concl:-none})"
+      if [ -n "$jobs" ]; then
+        while IFS= read -r job; do echo "FAILED JOB: $job"; done <<<"$jobs"
+      else
+        echo "no job failed by name; read the run: $url"
+      fi
+      exit 1
+    fi
+  fi
+  if [ "$SECONDS" -ge "$window" ]; then
+    if [ "$found" = "none" ]; then
+      echo "NO RUN: no ci.yml run of wip/$id for $sha after ${window}s (a docs/tasks-only push starts none)"
+      exit 4
+    fi
+    echo "PENDING: $url @ $sha is $status after ${window}s; call scripts/tw-wip-run again"
+    exit 3
+  fi
+  sleep "$poll"
+done

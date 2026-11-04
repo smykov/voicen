@@ -3,7 +3,8 @@
 
 The launch side of decisions #219 (T-192). The kit's tw-parallel.py prompt says "Do not push", while
 the kit's red-tests stage orders the wip/<ID> push of P-016. This entry runs the kit's own `launch`
-with $TEAMWRIGHT_CLAUDE_ARGS set to the kit's defaults and one sentence of the prompt changed.
+with $TEAMWRIGHT_CLAUDE_ARGS set to the kit's defaults and one sentence of the prompt changed: it
+states that exception and orders the CI read through scripts/tw-wip-run (T-199, decisions #241).
 
 The arguments are read from the installed kit, not copied, so a kit update carries its tools and
 denials here. If the kit no longer has that sentence or one of the denials, this refuses and starts
@@ -28,7 +29,14 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 KIT_SENTENCE = "Do not push, do not merge."
 OUR_SENTENCE = ("Do not merge. Do not push, with one exception: the CI-only wip/<ID> push a stage asks "
                 "for is allowed only through scripts/tw-wip-push [<commit>], run from this worktree; "
-                "no other push is allowed, by any command.")
+                "no other push is allowed, by any command. "
+                # T-199 (decisions #241): the stage's only CI read; Bash(gh:*) stays denied.
+                "CI is read only through scripts/tw-wip-run, run from this worktree; gh itself stays "
+                "denied. It waits for the run of the pushed commit and exits 3 while the run is still "
+                "pending: call it again in the same stage. End the stage only with a CI: <run> @ <sha> "
+                "line in ## Tests, a red run with its failed jobs named, or an escalation that names why "
+                "no result came (exit 4: no run for the sha; exit 5: gh failed; or the wait ceiling); "
+                "never with a note that CI is unread.")
 KIT_DENIALS = ("Bash(git push:*)", "Bash(git merge:*)", "Bash(gh:*)")
 
 
