@@ -658,6 +658,44 @@ mod tests {
     }
 
     #[test]
+    fn a_hard_cut_carries_the_rest_of_a_span_beyond_the_limit() {
+        // A window larger than the caller's budget (never asked for, but fed): the span's rest
+        // after the hard cut is kept and comes out at the end of the track.
+        let mut p = ChunkPlanner::new(PassMode::Timed);
+        let c1 = p.feed(0, &ramp(0, 150_000), &[sp(0, 150_000)]);
+        assert_eq!(c1.len(), 1);
+        assert_eq!((c1[0].start_ms, c1[0].end_ms), (0, 120_000));
+        assert_eq!(c1[0].spans, vec![sp(0, 120_000)]);
+        assert_eq!(p.carry_ms(), 30_000, "the rest of the span is carried");
+        let last = p.finish();
+        assert_eq!(last.len(), 1, "the carried rest is not lost");
+        assert_eq!((last[0].start_ms, last[0].end_ms), (120_000, 150_000));
+        assert_eq!(last[0].spans, vec![sp(120_000, 150_000)]);
+        assert_eq!(last[0].audio, ramp(120_000, 30_000));
+    }
+
+    #[test]
+    fn a_trailing_silence_of_exactly_300_ms_closes_the_tail_span_and_299_does_not() {
+        let mut closed = RangePlanner::new(PassMode::Timed);
+        let got = closed.feed(0, 120_000, &[sp(1_000, 2_000), sp(50_000, 119_700)]);
+        assert_eq!(
+            bounds(&got),
+            vec![(800, 119_900)],
+            "300 ms of silence closes"
+        );
+        assert_eq!(got[0].spans, vec![sp(1_000, 2_000), sp(50_000, 119_700)]);
+
+        let mut open = RangePlanner::new(PassMode::Timed);
+        let got = open.feed(0, 120_000, &[sp(1_000, 2_000), sp(50_000, 119_701)]);
+        assert_eq!(
+            bounds(&got),
+            vec![(800, 2_200)],
+            "299 ms leaves the tail span open: cut at the last pause before it"
+        );
+        assert_eq!(got[0].spans, vec![sp(1_000, 2_000)]);
+    }
+
+    #[test]
     fn a_window_with_no_span_yields_no_chunk_in_both_modes() {
         for mode in [PassMode::Timed, PassMode::Timeless] {
             let mut p = ChunkPlanner::new(mode);
