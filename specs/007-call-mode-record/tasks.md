@@ -263,7 +263,7 @@
   - **Timed mode**: spans with gaps under 300 ms merge; a cut falls at the end of the last ≥ 300 ms gap before 120 s; a pause-less 5 min is cut hard at 120 s with the rest carried; chunks are cropped to first span − 200 ms and last span + 200 ms; a window with no span yields no chunk.
   - **Limits**: chunk `end − start` "≤ 120 000 ms in timed mode and ≤ 30 000 ms in time-less mode".
   - **Time-less mode**: every merged span is a chunk, split hard at 30 s.
-  - **WAV**: the encoding is 16 kHz mono PCM16, ≤ 3.84 MB.
+  - **WAV**: the encoding is 16 kHz mono PCM16, ≤ 44 + 32 B/ms (3 840 044 B at 120 s).
   - **1 h track**: no upload exceeds 25 MB, and the chunks stay in call order.
   - (spec FR-023, FR-024; US2 #2, #3, #7; R9)
 - [ ] T045 [US2] [area core] Implement the chunker until T044 is green.

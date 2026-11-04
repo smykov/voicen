@@ -107,7 +107,7 @@ Crate facts were read from the published sources of `opus` 0.4.0 / `opusic-sys` 
     - Crop each chunk to [first span start − 200 ms, last span end + 200 ms].
     - A window with no span yields no chunk: nothing is sent and no line is made (SC-008).
   - **Time-less mode** (FR-024): every merged span is a chunk, split hard at 30 s.
-  - **Upload format**: each chunk is encoded as a 16 kHz mono 16-bit WAV (≤ 3.84 MB) by the existing multipart path.
+  - **Upload format**: each chunk is encoded as a 16 kHz mono 16-bit WAV (≤ 44 + 32 B/ms (3 840 044 B at 120 s)) by the existing multipart path.
 - **Rationale**: FR-023, FR-024, FR-018 (one window in memory). Cropping keeps leading and trailing music out of the request. The 300 ms pause and 200 ms pad are constants, tuned against the WER sets (FR-047), not settings.
 - **Tests (Linux, §9 row)**: ≤ 120 s at pauses; a pause-less 5-min tone with scripted speech gives hard 120 s cuts; a silent window is never sent; time-less ≤ 30 s phrases.
 

@@ -2,9 +2,8 @@
 //! cuts a call track, window by window, at speech pauses into bounded, disjoint, ordered
 //! upload ranges, and slices the held audio into each range's [`AudioBuffer`].
 //!
-//! RED STAGE: the bodies below are `todo!()` stubs so the tests compile and fail for the
-//! missing behaviour. The developer replaces them; the signatures and the doc comments are
-//! what the tests pin. T-138 / T-146 add the pass runner and the queue to this file later.
+//! T-138 / T-146 add the pass runner and the queue to this file later; every cut, pad and bound
+//! of call audio goes through the planners here.
 //!
 //! # Semantics (all times are track-relative milliseconds, spans are half-open `[start, end)`)
 //!
@@ -17,10 +16,13 @@
 //! * **Window and carry.** `known_end` is the end of the last window fed. The planner keeps
 //!   the audio from `base` to `known_end`; `carry_ms() = known_end - base` and is always
 //!   `< max_chunk_ms(mode)`, so the caller asks the decoder for
-//!   `max_chunk_ms(mode) - carry_ms()` ms next. `base` starts at 0, becomes the end of the
-//!   last emitted chunk, and, when nothing is pending, `max(chunk end, known_end - PAD_MS)`
-//!   (so a window without a span leaves `carry_ms() == PAD_MS`, the lead-in of a span that
-//!   starts at the next window's first millisecond).
+//!   `max_chunk_ms(mode) - carry_ms()` ms next. `base` starts at 0 and moves forward only
+//!   after a chunk is emitted or while nothing is pending, never on its own when spans
+//!   arrive: after a chunk it is `max(prev_end, first pending span start - PAD_MS)` (the end
+//!   of that chunk, unless the next span's lead-in starts later), and when nothing is
+//!   pending `max(prev_end, known_end - PAD_MS)` (so a window without a span leaves
+//!   `carry_ms() == PAD_MS`, the lead-in of a span that starts at the next window's first
+//!   millisecond). `base` is never after the start of the next chunk.
 //! * **Timed.** The planner decides only when `known_end >= base + TIMED_MAX_MS` (a full
 //!   window) or at `finish`. Let `prev_end` be the end of the previous chunk (0 at the start).
 //!   If the last merged span is closed (`known_end - span.end >= PAUSE_MS`, always at
@@ -32,14 +34,16 @@
 //!   chunk.
 //! * **Time-less.** Each merged span is its own chunk (never packed with another), emitted as
 //!   soon as it is closed, with the same crop and clamps; a span longer than
-//!   `TIMELESS_MAX_MS` is cut hard every `TIMELESS_MAX_MS` from the chunk's start.
+//!   `TIMELESS_MAX_MS` is cut hard at `base + TIMELESS_MAX_MS` (after the first piece `base`
+//!   is the chunk's start, so every `TIMELESS_MAX_MS` from it), and an open span is cut there
+//!   too once the audio reaches that point, so `carry_ms()` stays below the limit.
 //! * **Invariant.** `0 < end - start <= max_chunk_ms(mode)`; every chunk holds at least one
 //!   span (`spans`: merged, track-relative, clipped to `[start, end)`); chunks are strictly
 //!   ordered and disjoint; every speech millisecond lies in exactly one chunk; `index` counts
 //!   from 0 over the planner's lifetime.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
-use crate::audio::AudioBuffer;
+use crate::audio::{AudioBuffer, SAMPLE_RATE};
 use crate::call::PassMode;
 use crate::vad::SpeechSpan;
 
@@ -54,8 +58,33 @@ pub const TIMELESS_MAX_MS: u64 = 30_000;
 
 /// The chunk length limit of a pass mode: [`TIMED_MAX_MS`] or [`TIMELESS_MAX_MS`].
 pub fn max_chunk_ms(mode: PassMode) -> u64 {
-    let _ = mode;
-    todo!("T-137")
+    match mode {
+        PassMode::Timed => TIMED_MAX_MS,
+        PassMode::Timeless => TIMELESS_MAX_MS,
+    }
+}
+
+/// Samples per millisecond of 16 kHz audio.
+const SAMPLES_PER_MS: usize = (SAMPLE_RATE / 1_000) as usize;
+
+fn ms_to_samples(ms: u64) -> usize {
+    usize::try_from(ms)
+        .unwrap_or(usize::MAX)
+        .saturating_mul(SAMPLES_PER_MS)
+}
+
+/// The audio of `[start_ms, end_ms)` out of `samples`, which begin at track ms `origin_ms`.
+/// Always exactly `(end_ms - start_ms) * 16` samples; the planners only ask for held audio,
+/// so the silence fill for a range outside `samples` is never reached.
+fn slice(samples: &[i16], origin_ms: u64, start_ms: u64, end_ms: u64) -> AudioBuffer {
+    let from = ms_to_samples(start_ms.saturating_sub(origin_ms));
+    let to = ms_to_samples(end_ms.saturating_sub(origin_ms));
+    let mut out = samples
+        .get(from..to.min(samples.len()))
+        .unwrap_or_default()
+        .to_vec();
+    out.resize(to.saturating_sub(from), 0);
+    AudioBuffer::from_16k_mono(out)
 }
 
 /// A cut without audio: what the planner decides.
@@ -85,15 +114,41 @@ pub struct Chunk {
 }
 
 /// The pure range planner: no audio, so a 1 h track is planned without holding it.
-#[allow(dead_code)]
 #[derive(Debug)]
 pub struct RangePlanner {
     mode: PassMode,
+    /// The index of the next chunk.
+    next_index: usize,
+    /// The end of the last emitted chunk (the start of the planned range before the first).
+    prev_end: u64,
+    /// The end of the last window fed.
+    known_end: u64,
+    /// The start of the held audio (module docs, "Window and carry").
+    base: u64,
+    /// Merged, track-relative, sorted spans not yet in a chunk; consecutive gaps `>= PAUSE_MS`.
+    pending: Vec<SpeechSpan>,
 }
 
 impl RangePlanner {
     pub fn new(mode: PassMode) -> RangePlanner {
-        RangePlanner { mode }
+        RangePlanner::resume(mode, 0, 0, &[])
+    }
+
+    /// A planner over the already-known range `[start_ms, end_ms)` with its track-relative
+    /// `spans` (normalised like a window's), nothing emitted yet.
+    fn resume(mode: PassMode, start_ms: u64, end_ms: u64, spans: &[SpeechSpan]) -> RangePlanner {
+        let mut planner = RangePlanner {
+            mode,
+            next_index: 0,
+            prev_end: start_ms,
+            known_end: start_ms,
+            base: start_ms,
+            pending: Vec::new(),
+        };
+        planner.take_spans(start_ms, end_ms, spans.iter().copied());
+        planner.known_end = end_ms.max(start_ms);
+        planner.rebase();
+        planner
     }
 
     /// Feeds the next window `[window_start_ms, window_start_ms + window_len_ms)` with its
@@ -104,32 +159,170 @@ impl RangePlanner {
         window_len_ms: u64,
         spans: &[SpeechSpan],
     ) -> Vec<ChunkRange> {
-        let _ = (window_start_ms, window_len_ms, spans);
-        todo!("T-137")
+        // The one place window-relative spans become track-relative.
+        let window_end = window_start_ms.saturating_add(window_len_ms);
+        let track_relative = spans.iter().map(|s| SpeechSpan {
+            start_ms: window_start_ms.saturating_add(s.start_ms),
+            end_ms: window_start_ms.saturating_add(s.end_ms),
+        });
+        // Clamped to the new part of the window, so nothing before `known_end` is reopened.
+        self.take_spans(
+            window_start_ms.max(self.known_end),
+            window_end,
+            track_relative,
+        );
+        self.known_end = self.known_end.max(window_end);
+        self.decide_all(false)
     }
 
     /// The track ended: decides everything that is pending.
     pub fn finish(&mut self) -> Vec<ChunkRange> {
-        todo!("T-137")
+        self.decide_all(true)
     }
 
     /// The milliseconds of audio the planner keeps (see the module docs).
     pub fn carry_ms(&self) -> u64 {
-        todo!("T-137")
+        self.known_end.saturating_sub(self.base)
+    }
+
+    /// Moves `base` to the earliest track ms the next chunk can start at: the lead-in of the
+    /// first pending span, or of a span starting at `known_end`, never before `prev_end`.
+    /// Called after each chunk and when nothing is pending, so `base` only grows.
+    fn rebase(&mut self) {
+        let lead_in_of = match self.pending.first() {
+            Some(first) => first.start_ms,
+            None => self.known_end,
+        };
+        self.base = lead_in_of
+            .saturating_sub(PAD_MS)
+            .max(self.prev_end)
+            .max(self.base);
+    }
+
+    /// Normalises `spans` (clamp to `[from, to)`, drop empty or inverted, sort) and merges
+    /// them into `pending` (overlaps and gaps `< PAUSE_MS`, also with the last pending span).
+    fn take_spans(&mut self, from: u64, to: u64, spans: impl Iterator<Item = SpeechSpan>) {
+        let mut fresh: Vec<SpeechSpan> = spans
+            .filter_map(|s| {
+                let start_ms = s.start_ms.max(from);
+                let end_ms = s.end_ms.min(to);
+                (start_ms < end_ms).then_some(SpeechSpan { start_ms, end_ms })
+            })
+            .collect();
+        fresh.sort_unstable_by_key(|s| s.start_ms);
+        for span in fresh {
+            match self.pending.last_mut() {
+                Some(last) if span.start_ms < last.end_ms.saturating_add(PAUSE_MS) => {
+                    last.end_ms = last.end_ms.max(span.end_ms);
+                }
+                _ => self.pending.push(span),
+            }
+        }
+    }
+
+    fn decide_all(&mut self, finished: bool) -> Vec<ChunkRange> {
+        let mut out = Vec::new();
+        while let Some(range) = self.decide(finished) {
+            out.push(range);
+            self.rebase();
+        }
+        if self.pending.is_empty() {
+            self.rebase();
+        }
+        out
+    }
+
+    /// The next chunk, if it is decided now (module docs, "Timed" and "Time-less").
+    fn decide(&mut self, finished: bool) -> Option<ChunkRange> {
+        let first = *self.pending.first()?;
+        let last = *self.pending.last()?;
+        let max = max_chunk_ms(self.mode);
+        let start = first.start_ms.saturating_sub(PAD_MS).max(self.prev_end);
+        // `base <= start`, so a chunk ending by `base + max` is within the limit. Only a
+        // window past the caller's budget can put the first span beyond it.
+        let mut limit = self.base.saturating_add(max);
+        if limit <= first.start_ms {
+            limit = start.saturating_add(max);
+        }
+        let full = self.known_end >= limit;
+        if self.mode == PassMode::Timed && !full && !finished {
+            return None;
+        }
+        let closed = finished || self.known_end.saturating_sub(last.end_ms) >= PAUSE_MS;
+        let count = self.pending.len();
+        // A chunk may end after span `k` when `k` fits the limit and is followed by a pause.
+        let ends_chunk = |k: usize, s: &SpeechSpan| s.end_ms <= limit && (k + 1 < count || closed);
+        let pick = match self.mode {
+            PassMode::Timed => self
+                .pending
+                .iter()
+                .enumerate()
+                .filter(|(k, s)| ends_chunk(*k, s))
+                .map(|(k, _)| k)
+                .next_back(),
+            PassMode::Timeless => self.pending.first().filter(|s| ends_chunk(0, s)).map(|_| 0),
+        };
+        let (end, spans) = if let Some(k) = pick {
+            let rest = self.pending.split_off(k + 1);
+            let taken = std::mem::replace(&mut self.pending, rest);
+            let last_end = taken.last().map_or(start, |s| s.end_ms);
+            let end = last_end
+                .saturating_add(PAD_MS)
+                .min(self.known_end)
+                .min(limit);
+            (end, taken)
+        } else if full {
+            // No pause to cut at: hard cut at the limit, no pad, the rest is carried.
+            let mut taken = Vec::new();
+            let mut rest = Vec::new();
+            for s in self.pending.drain(..) {
+                if s.start_ms < limit {
+                    taken.push(SpeechSpan {
+                        start_ms: s.start_ms,
+                        end_ms: s.end_ms.min(limit),
+                    });
+                }
+                if s.end_ms > limit {
+                    rest.push(SpeechSpan {
+                        start_ms: s.start_ms.max(limit),
+                        end_ms: s.end_ms,
+                    });
+                }
+            }
+            self.pending = rest;
+            (limit, taken)
+        } else {
+            return None;
+        };
+        self.prev_end = end;
+        let index = self.next_index;
+        self.next_index += 1;
+        Some(ChunkRange {
+            index,
+            start_ms: start,
+            end_ms: end,
+            mode: self.mode,
+            spans,
+        })
     }
 }
 
 /// [`RangePlanner`] plus the held audio: the same decisions, each with its [`AudioBuffer`].
-#[allow(dead_code)]
+/// It holds only `[base, known_end)`, i.e. at most one window plus its carry.
 #[derive(Debug)]
 pub struct ChunkPlanner {
     ranges: RangePlanner,
+    /// The audio of `[held_start_ms, ranges.known_end)`.
+    held: Vec<i16>,
+    held_start_ms: u64,
 }
 
 impl ChunkPlanner {
     pub fn new(mode: PassMode) -> ChunkPlanner {
         ChunkPlanner {
             ranges: RangePlanner::new(mode),
+            held: Vec::new(),
+            held_start_ms: 0,
         }
     }
 
@@ -140,16 +333,55 @@ impl ChunkPlanner {
         audio: &AudioBuffer,
         spans: &[SpeechSpan],
     ) -> Vec<Chunk> {
-        let _ = (window_start_ms, audio, spans);
-        todo!("T-137")
+        let samples = audio.samples();
+        let len_ms = (samples.len() / SAMPLES_PER_MS) as u64;
+        let whole_ms = samples.get(..ms_to_samples(len_ms)).unwrap_or(samples);
+        // Keep `held` aligned with `[held_start_ms, known_end)` even if a caller breaks the
+        // contiguous-window contract: a gap is held as silence, an overlap is dropped.
+        let known_end = self.ranges.known_end;
+        let gap = ms_to_samples(window_start_ms.saturating_sub(known_end));
+        self.held.resize(self.held.len().saturating_add(gap), 0);
+        let overlap = ms_to_samples(known_end.saturating_sub(window_start_ms));
+        self.held
+            .extend_from_slice(whole_ms.get(overlap..).unwrap_or_default());
+        let ranges = self.ranges.feed(window_start_ms, len_ms, spans);
+        self.attach(ranges)
     }
 
     pub fn finish(&mut self) -> Vec<Chunk> {
-        todo!("T-137")
+        let ranges = self.ranges.finish();
+        self.attach(ranges)
     }
 
     pub fn carry_ms(&self) -> u64 {
-        todo!("T-137")
+        self.ranges.carry_ms()
+    }
+
+    /// Slices each range's audio out of `held`, then drops the audio before `base`.
+    fn attach(&mut self, ranges: Vec<ChunkRange>) -> Vec<Chunk> {
+        let chunks = ranges
+            .into_iter()
+            .map(|r| {
+                let audio = slice(&self.held, self.held_start_ms, r.start_ms, r.end_ms);
+                with_audio(r, audio)
+            })
+            .collect();
+        let base = self.ranges.base.max(self.held_start_ms);
+        let drop = ms_to_samples(base - self.held_start_ms).min(self.held.len());
+        self.held.drain(..drop);
+        self.held_start_ms = base;
+        chunks
+    }
+}
+
+fn with_audio(r: ChunkRange, audio: AudioBuffer) -> Chunk {
+    Chunk {
+        index: r.index,
+        start_ms: r.start_ms,
+        end_ms: r.end_ms,
+        mode: r.mode,
+        spans: r.spans,
+        audio,
     }
 }
 
@@ -158,8 +390,19 @@ impl ChunkPlanner {
 /// source chunk's range, a span over [`TIMELESS_MAX_MS`] cut hard; `index` counts from 0 in the
 /// returned list, `start_ms`/`end_ms` stay track-relative, `mode` is `Timeless`.
 pub fn recut_timeless(chunk: &Chunk) -> Vec<Chunk> {
-    let _ = chunk;
-    todo!("T-137")
+    RangePlanner::resume(
+        PassMode::Timeless,
+        chunk.start_ms,
+        chunk.end_ms,
+        &chunk.spans,
+    )
+    .finish()
+    .into_iter()
+    .map(|r| {
+        let audio = slice(chunk.audio.samples(), chunk.start_ms, r.start_ms, r.end_ms);
+        with_audio(r, audio)
+    })
+    .collect()
 }
 
 #[cfg(test)]
