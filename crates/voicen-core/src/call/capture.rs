@@ -431,14 +431,20 @@ mod tests {
     fn plus_and_minus_50_ppm_sources_stay_within_20_ms_at_minute_60() {
         let fast = run_drifting(Track::Mic, 50e-6, 3_600);
         let slow = run_drifting(Track::System, -50e-6, 3_600);
-        let (wf, ws) = (
-            lock(&fast.timeline).written(),
-            lock(&slow.timeline).written(),
-        );
+        // Both tracks are compared at ONE stamp: each track's placement error is measured
+        // against the position its own last stamp implies (the two sources' last stamps
+        // differ by up to a block, so their raw `written()` values must not be compared),
+        // and the difference of the signed errors is the cross-track offset at one stamp.
+        let signed = |s: &Direct| -> i64 {
+            let last = lock(&s.last).ns() - 1_000_000_000;
+            let expected_end = (last * 16 / 1_000_000 + 1_600) as i64;
+            lock(&s.timeline).written() as i64 - expected_end
+        };
+        let (ef, es) = (signed(&fast), signed(&slow));
         assert!(
-            wf.abs_diff(ws) <= 320,
-            "tracks differ by {} samples",
-            wf.abs_diff(ws)
+            (ef - es).abs() <= 320,
+            "tracks differ by {} samples at one stamp (errors {ef} / {es})",
+            (ef - es).abs()
         );
         assert!(
             end_error(&fast) <= 320,
