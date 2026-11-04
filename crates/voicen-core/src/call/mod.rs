@@ -3,6 +3,7 @@
 pub mod capture;
 pub mod codec;
 pub mod events;
+pub mod storage;
 pub mod transcript;
 #[cfg(any(test, feature = "test-fakes"))]
 pub mod wav_source;
