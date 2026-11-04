@@ -1,13 +1,15 @@
 //! A call-track source that plays a WAV file (spec 007 R22, FR-014; T-124).
 //!
-//! RED-TESTS SKELETON (T-124): only the signatures the tests need; behaviour is `todo!()`.
-//! Test tooling: compiled for tests and the `test-fakes` feature only.
+//! Test tooling: compiled for tests and the `test-fakes` feature only. No thread and no wall
+//! clock: [`WavTrackSource::pump`] pushes the blocks due by a given stamp on the caller's
+//! thread, so a test runs an hour of audio as fast as the timeline can take it.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use super::capture::{CaptureStamp, LossCause, OpenError, TrackDevice, TrackSink, TrackSource};
 use super::events::{EndpointId, Track};
 use crate::platform::CaptureHandle;
+use crate::recording::CaptureError;
 
 /// The file is not a WAV this reader accepts (16-bit PCM or 32-bit IEEE float RIFF).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -25,56 +27,298 @@ pub enum WavGap {
     Lost { at_ms: u64, cause: LossCause },
 }
 
+impl WavGap {
+    fn at_ms(&self) -> u64 {
+        match *self {
+            WavGap::Stall { at_ms, .. } | WavGap::Lost { at_ms, .. } => at_ms,
+        }
+    }
+}
+
+/// The source's progress.
+struct State {
+    sink: Option<(Track, Arc<dyn TrackSink>)>,
+    /// Index of the next block (its stamp slot).
+    next: u64,
+    /// The next file frame to play.
+    frame: usize,
+    /// Stamp shift accumulated by stalls.
+    shift_ns: u64,
+    /// Scripted gaps already handled (they are sorted by time).
+    fired: usize,
+    lost: bool,
+    now: CaptureStamp,
+}
+
+/// What one pump iteration hands to the sink, outside the lock.
+enum Action {
+    Block(Track, Arc<dyn TrackSink>, Vec<f32>, CaptureStamp),
+    Lost(Track, Arc<dyn TrackSink>, LossCause, CaptureStamp),
+}
+
 /// Plays a WAV file as a call track. No thread and no wall clock: `pump` pushes the blocks
 /// whose synthetic stamp is not after `until`, on the caller's thread.
-#[allow(dead_code)]
 pub struct WavTrackSource {
+    /// Interleaved samples in `[-1, 1]`.
+    samples: Vec<f32>,
+    rate: u32,
+    channels: u16,
+    block_ms: u64,
+    drift: f64,
     start: CaptureStamp,
+    gaps: Vec<WavGap>,
+    state: Mutex<State>,
 }
 
 impl WavTrackSource {
-    pub fn from_bytes(_bytes: &[u8]) -> Result<WavTrackSource, WavError> {
-        todo!("T-124")
+    pub fn from_bytes(bytes: &[u8]) -> Result<WavTrackSource, WavError> {
+        let (samples, rate, channels) = read_wav(bytes)?;
+        Ok(WavTrackSource {
+            samples,
+            rate,
+            channels,
+            block_ms: 10,
+            drift: 0.0,
+            start: CaptureStamp(0),
+            gaps: Vec::new(),
+            state: Mutex::new(State {
+                sink: None,
+                next: 0,
+                frame: 0,
+                shift_ns: 0,
+                fired: 0,
+                lost: false,
+                now: CaptureStamp(0),
+            }),
+        })
     }
 
-    /// Block length in ms (default 10).
-    pub fn with_block_ms(self, _ms: u64) -> WavTrackSource {
-        todo!("T-124")
+    /// Block length in ms (default 10; at least 1).
+    pub fn with_block_ms(mut self, ms: u64) -> WavTrackSource {
+        self.block_ms = ms.max(1);
+        self
     }
 
     /// Source clock error: stamp_k = start + k * N / (rate * (1 + d)).
-    pub fn with_drift(self, _d: f64) -> WavTrackSource {
-        todo!("T-124")
+    pub fn with_drift(mut self, d: f64) -> WavTrackSource {
+        self.drift = d;
+        self
     }
 
-    /// The stamp of block 0 (default 0).
-    pub fn with_start(self, _start: CaptureStamp) -> WavTrackSource {
-        todo!("T-124")
+    /// The stamp of block 0 (default 0); `now()` starts there.
+    pub fn with_start(mut self, start: CaptureStamp) -> WavTrackSource {
+        self.start = start;
+        self.state_mut().now = start;
+        self
     }
 
-    pub fn with_gaps(self, _gaps: Vec<WavGap>) -> WavTrackSource {
-        todo!("T-124")
+    pub fn with_gaps(mut self, mut gaps: Vec<WavGap>) -> WavTrackSource {
+        gaps.sort_by_key(WavGap::at_ms);
+        self.gaps = gaps;
+        self
     }
 
     /// Push every not yet pushed block with stamp <= `until`; also moves `now()` to `until`.
-    pub fn pump(&self, _until: CaptureStamp) {
-        todo!("T-124")
+    pub fn pump(&self, until: CaptureStamp) {
+        while let Some(action) = self.next_action(until) {
+            match action {
+                Action::Block(track, sink, data, at) => {
+                    sink.block(track, &data, self.rate, self.channels, at)
+                }
+                Action::Lost(track, sink, cause, at) => sink.lost(track, cause, at),
+            }
+        }
+        let mut st = self.state();
+        st.now = st.now.max(until);
+    }
+
+    /// The next thing due by `until`, with the state advanced past it.
+    fn next_action(&self, until: CaptureStamp) -> Option<Action> {
+        let mut st = self.state();
+        if st.lost {
+            return None;
+        }
+        let (track, sink) = st.sink.clone()?;
+        loop {
+            let at = self.stamp(&st);
+            let rel_ns = at.0.saturating_sub(self.start.0);
+            match self.gaps.get(st.fired) {
+                Some(&WavGap::Stall { at_ms, len_ms }) if rel_ns >= at_ms * 1_000_000 => {
+                    st.shift_ns += len_ms * 1_000_000;
+                    st.fired += 1;
+                    continue;
+                }
+                Some(&WavGap::Lost { at_ms, cause }) if rel_ns >= at_ms * 1_000_000 => {
+                    let lost_at = CaptureStamp(self.start.0 + at_ms * 1_000_000);
+                    if lost_at > until {
+                        return None;
+                    }
+                    st.fired += 1;
+                    st.lost = true;
+                    return Some(Action::Lost(track, sink, cause, lost_at));
+                }
+                _ => {}
+            }
+            if at > until {
+                return None;
+            }
+            let data = self.block_at(st.frame);
+            st.frame += self.block_frames();
+            st.next += 1;
+            return Some(Action::Block(track, sink, data, at));
+        }
+    }
+
+    fn block_frames(&self) -> usize {
+        let frames = u64::from(self.rate) * self.block_ms / 1_000;
+        usize::try_from(frames).unwrap_or(usize::MAX).max(1)
+    }
+
+    /// One block from file frame `frame`; past the end of the file it is silence.
+    fn block_at(&self, frame: usize) -> Vec<f32> {
+        let channels = usize::from(self.channels);
+        let len = self.block_frames() * channels;
+        let from = frame.saturating_mul(channels).min(self.samples.len());
+        let to = from.saturating_add(len).min(self.samples.len());
+        let mut data = self.samples[from..to].to_vec();
+        data.resize(len, 0.0);
+        data
+    }
+
+    /// The stamp of the next block: start + stall shift + k * N / (rate * (1 + d)).
+    fn stamp(&self, st: &State) -> CaptureStamp {
+        let per_block_ns = self.block_frames() as f64 * 1e9
+            / (f64::from(self.rate) * (1.0 + self.drift).max(1e-9));
+        let offset = (st.next as f64 * per_block_ns).round() as u64;
+        CaptureStamp(self.start.0 + st.shift_ns + offset)
+    }
+
+    fn state(&self) -> MutexGuard<'_, State> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn state_mut(&mut self) -> &mut State {
+        self.state.get_mut().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// The handle of an open WAV track: nothing runs, so stopping always succeeds.
+struct WavHandle;
+
+impl CaptureHandle for WavHandle {
+    fn stop(self: Box<Self>) -> Result<(), CaptureError> {
+        Ok(())
     }
 }
 
 impl TrackSource for WavTrackSource {
     fn open(
         &self,
-        _track: Track,
+        track: Track,
         _device: TrackDevice,
-        _sink: Arc<dyn TrackSink>,
+        sink: Arc<dyn TrackSink>,
     ) -> Result<(Box<dyn CaptureHandle>, EndpointId), OpenError> {
-        todo!("T-124")
+        self.state().sink = Some((track, sink));
+        let endpoint = match track {
+            Track::Mic => "{0.0.1.00000000}.{00000000-0000-0000-0000-000000000001}",
+            Track::System => "{0.0.0.00000000}.{00000000-0000-0000-0000-000000000002}",
+        };
+        Ok((Box::new(WavHandle), EndpointId::new(endpoint)))
     }
 
     fn now(&self) -> CaptureStamp {
-        todo!("T-124")
+        self.state().now
     }
+}
+
+/// The `fmt ` fields the reader uses.
+#[derive(Clone, Copy)]
+struct Format {
+    float: bool,
+    channels: u16,
+    rate: u32,
+}
+
+/// Interleaved `f32` samples, rate and channels of a 16-bit PCM or 32-bit float RIFF WAV.
+/// Chunks other than `fmt ` and `data` are skipped; anything malformed is a [`WavError`].
+fn read_wav(bytes: &[u8]) -> Result<(Vec<f32>, u32, u16), WavError> {
+    if bytes.get(0..4) != Some(b"RIFF") || bytes.get(8..12) != Some(b"WAVE") {
+        return Err(WavError);
+    }
+    let mut pos = 12usize;
+    let mut format = None;
+    loop {
+        let header = bytes
+            .get(pos..pos.checked_add(8).ok_or(WavError)?)
+            .ok_or(WavError)?;
+        let size = usize::try_from(le_u32(&header[4..8])).map_err(|_| WavError)?;
+        let body_start = pos + 8;
+        let body_end = body_start.checked_add(size).ok_or(WavError)?;
+        let body = bytes.get(body_start..body_end).ok_or(WavError)?;
+        match &header[..4] {
+            b"fmt " => format = Some(read_format(body)?),
+            b"data" => {
+                let format = format.ok_or(WavError)?;
+                return Ok((decode(format, body)?, format.rate, format.channels));
+            }
+            _ => {}
+        }
+        pos = body_end.checked_add(size & 1).ok_or(WavError)?;
+    }
+}
+
+fn read_format(body: &[u8]) -> Result<Format, WavError> {
+    if body.len() < 16 {
+        return Err(WavError);
+    }
+    let tag = le_u16(&body[0..2]);
+    let channels = le_u16(&body[2..4]);
+    let rate = le_u32(&body[4..8]);
+    let block_align = le_u16(&body[12..14]);
+    let bits = le_u16(&body[14..16]);
+    let float = match (tag, bits) {
+        (1, 16) => false,
+        (3, 32) => true,
+        _ => return Err(WavError),
+    };
+    let frame_bytes = u32::from(channels) * u32::from(bits / 8);
+    if channels == 0 || rate == 0 || u32::from(block_align) != frame_bytes {
+        return Err(WavError);
+    }
+    Ok(Format {
+        float,
+        channels,
+        rate,
+    })
+}
+
+fn decode(format: Format, data: &[u8]) -> Result<Vec<f32>, WavError> {
+    let sample_bytes = if format.float { 4 } else { 2 };
+    let frame_bytes = sample_bytes * usize::from(format.channels);
+    if !data.len().is_multiple_of(frame_bytes) {
+        return Err(WavError);
+    }
+    Ok(if format.float {
+        data.as_chunks::<4>()
+            .0
+            .iter()
+            .map(|b| f32::from_le_bytes(*b))
+            .collect()
+    } else {
+        data.as_chunks::<2>()
+            .0
+            .iter()
+            .map(|b| f32::from(i16::from_le_bytes(*b)) / 32_768.0)
+            .collect()
+    })
+}
+
+fn le_u16(b: &[u8]) -> u16 {
+    u16::from_le_bytes([b[0], b[1]])
+}
+
+fn le_u32(b: &[u8]) -> u32 {
+    u32::from_le_bytes([b[0], b[1], b[2], b[3]])
 }
 
 #[cfg(test)]

@@ -1,12 +1,31 @@
 //! Call-track capture ports and the per-track timeline (spec 007 R2, R3, R21; T-124).
 //!
-//! RED-TESTS SKELETON (T-124): only the signatures the tests need. Every behaviour is
-//! `todo!()` until T-124's implementation (spec task T021) replaces this file's non-test part.
+//! The audio callback hands blocks to a [`TrackSink`] (in the app: [`ChannelSink`], a bounded
+//! queue per track that never blocks). The consumer side places every block on its track's
+//! [`Timeline`]: a 16 kHz mono axis whose position is a function of the capture stamps, so
+//! both tracks share one clock (`(stamp - call_start) x 16 kHz`).
+//!
+//! - Small offsets (device clock drift) are trimmed by a slow PI loop on the resampler's
+//!   ratio, clamped to +/-500 ppm.
+//! - An offset above 40 ms re-anchors at once: ahead -> zeros, behind -> the overlapping head
+//!   of the block is dropped. A run of 200 ms or more inserted or dropped is reported.
+//! - A channel drop is filled with exact silence; a lost track keeps advancing with zeros.
+//!
+//! The timeline never logs and never touches storage: it returns [`Step`]s with the samples,
+//! the [`Report`]s and the levels, and the caller decides what to write or log.
 
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::sync::Arc;
 
+use rubato::audioadapter_buffers::direct::InterleavedSlice;
+use rubato::{
+    Adjustable, Async, FixedAsync, Resampler, SincInterpolationParameters, SincInterpolationType,
+    WindowFunction,
+};
+
 use super::events::{EndpointId, RefusedReason, Track};
-use crate::audio::AudioError;
+use crate::audio::{mix_to_mono, AudioError};
 use crate::platform::{CaptureHandle, DeviceId};
 
 /// A capture instant: nanoseconds on the source's clock (QPC on Windows).
@@ -43,8 +62,13 @@ pub enum OpenError {
 }
 
 impl From<OpenError> for RefusedReason {
-    fn from(_: OpenError) -> RefusedReason {
-        RefusedReason::Other
+    fn from(e: OpenError) -> RefusedReason {
+        match e {
+            OpenError::NoDevice => RefusedReason::NoDevice,
+            OpenError::AccessDenied => RefusedReason::AccessDenied,
+            OpenError::Busy => RefusedReason::Busy,
+            OpenError::Other => RefusedReason::Other,
+        }
     }
 }
 
@@ -54,6 +78,25 @@ pub enum LossCause {
     Invalidated,
     NotAvailable,
     Other,
+}
+
+impl LossCause {
+    fn code(self) -> u8 {
+        match self {
+            LossCause::Invalidated => 1,
+            LossCause::NotAvailable => 2,
+            LossCause::Other => 3,
+        }
+    }
+
+    fn from_code(code: u8) -> Option<LossCause> {
+        match code {
+            1 => Some(LossCause::Invalidated),
+            2 => Some(LossCause::NotAvailable),
+            3 => Some(LossCause::Other),
+            _ => None,
+        }
+    }
 }
 
 /// The audio callback's port: hands blocks and losses over, never blocks.
@@ -93,36 +136,167 @@ pub enum TrackEvent {
     },
 }
 
+/// The drop counter packs the block count (high bits) and the dropped time in microseconds
+/// (low bits) into one atomic, so the consumer never reads one without the other.
+const DROP_US_BITS: u32 = 44;
+const DROP_US_MASK: u64 = (1 << DROP_US_BITS) - 1;
+
+/// What one track's producer and consumer share besides the queue.
+#[derive(Default)]
+struct LaneShared {
+    /// Dropped blocks and time not yet delivered (`blocks << 44 | us`).
+    dropped: AtomicU64,
+    /// A loss that did not fit into the full queue: [`LossCause::code`], 0 = none.
+    lost_cause: AtomicU8,
+    lost_at: AtomicU64,
+}
+
+impl LaneShared {
+    fn take_dropped(&self) -> Option<TrackEvent> {
+        let v = self.dropped.swap(0, Ordering::AcqRel);
+        (v != 0).then(|| unpack_dropped(v))
+    }
+}
+
+fn unpack_dropped(v: u64) -> TrackEvent {
+    let blocks = u32::try_from(v >> DROP_US_BITS).unwrap_or(u32::MAX);
+    let ms = u32::try_from(((v & DROP_US_MASK) + 500) / 1_000).unwrap_or(u32::MAX);
+    TrackEvent::Dropped { blocks, ms }
+}
+
+/// The producer end of one track.
+struct Lane {
+    tx: SyncSender<TrackEvent>,
+    shared: Arc<LaneShared>,
+}
+
+impl Lane {
+    /// Deliver a pending drop before anything queued after it. `false` when the queue is
+    /// still full (the drop stays pending, so what follows must be dropped too).
+    fn flush_dropped(&self) -> bool {
+        let Some(event) = self.shared.take_dropped() else {
+            return true;
+        };
+        match self.tx.try_send(event) {
+            Ok(()) | Err(TrySendError::Disconnected(_)) => true,
+            Err(TrySendError::Full(TrackEvent::Dropped { blocks, ms })) => {
+                let v = (u64::from(blocks) << DROP_US_BITS) | (u64::from(ms) * 1_000);
+                self.shared.dropped.fetch_add(v, Ordering::AcqRel);
+                false
+            }
+            Err(TrySendError::Full(_)) => false,
+        }
+    }
+
+    fn count_drop(&self, frames: u64, rate: u32) {
+        let us = if rate == 0 {
+            0
+        } else {
+            (frames * 1_000_000 + u64::from(rate) / 2) / u64::from(rate)
+        };
+        let v = (1u64 << DROP_US_BITS) | (us & DROP_US_MASK);
+        self.shared.dropped.fetch_add(v, Ordering::AcqRel);
+    }
+}
+
 /// The bounded callback channel (one queue and one drop counter per track).
-#[allow(dead_code)]
+///
+/// `block` and `lost` never wait: a block that does not fit is counted (blocks and time) and
+/// later delivered as one [`TrackEvent::Dropped`]; a loss that does not fit is kept in a flag
+/// and delivered when the queue drains, so a loss is never dropped.
 pub struct ChannelSink {
-    capacity: usize,
+    mic: Lane,
+    system: Lane,
 }
 
 /// The consumer end of one track's channel.
-pub struct TrackReceiver;
+pub struct TrackReceiver {
+    rx: Receiver<TrackEvent>,
+    shared: Arc<LaneShared>,
+}
 
 impl ChannelSink {
-    /// A sink with `capacity` queued events per track, and the mic and system receivers.
-    pub fn new(_capacity: usize) -> (ChannelSink, TrackReceiver, TrackReceiver) {
-        todo!("T-124")
+    /// A sink with `capacity` queued events per track (at least 1), and the mic and system
+    /// receivers.
+    pub fn new(capacity: usize) -> (ChannelSink, TrackReceiver, TrackReceiver) {
+        let (mic, mic_rx) = Self::lane(capacity);
+        let (system, system_rx) = Self::lane(capacity);
+        (ChannelSink { mic, system }, mic_rx, system_rx)
+    }
+
+    fn lane(capacity: usize) -> (Lane, TrackReceiver) {
+        let (tx, rx) = mpsc::sync_channel(capacity.max(1));
+        let shared = Arc::new(LaneShared::default());
+        (
+            Lane {
+                tx,
+                shared: shared.clone(),
+            },
+            TrackReceiver { rx, shared },
+        )
+    }
+
+    fn lane_of(&self, track: Track) -> &Lane {
+        match track {
+            Track::Mic => &self.mic,
+            Track::System => &self.system,
+        }
     }
 }
 
 impl TrackSink for ChannelSink {
-    fn block(&self, _: Track, _: &[f32], _: u32, _: u16, _: CaptureStamp) {
-        todo!("T-124")
+    fn block(&self, track: Track, interleaved: &[f32], rate: u32, channels: u16, at: CaptureStamp) {
+        let lane = self.lane_of(track);
+        let frames = match usize::from(channels) {
+            0 => 0,
+            c => (interleaved.len() / c) as u64,
+        };
+        if !lane.flush_dropped() {
+            lane.count_drop(frames, rate);
+            return;
+        }
+        let event = TrackEvent::Block {
+            interleaved: interleaved.to_vec(),
+            rate,
+            channels,
+            at,
+        };
+        if let Err(TrySendError::Full(_)) = lane.tx.try_send(event) {
+            lane.count_drop(frames, rate);
+        }
     }
-    fn lost(&self, _: Track, _: LossCause, _: CaptureStamp) {
-        todo!("T-124")
+
+    fn lost(&self, track: Track, cause: LossCause, at: CaptureStamp) {
+        let lane = self.lane_of(track);
+        // The drop happened before the loss: deliver it first when there is room.
+        let room = lane.flush_dropped();
+        let sent = room
+            && match lane.tx.try_send(TrackEvent::Lost { cause, at }) {
+                Ok(()) | Err(TrySendError::Disconnected(_)) => true,
+                Err(TrySendError::Full(_)) => false,
+            };
+        if !sent {
+            lane.shared.lost_at.store(at.0, Ordering::Release);
+            lane.shared
+                .lost_cause
+                .store(cause.code(), Ordering::Release);
+        }
     }
 }
 
 impl TrackReceiver {
     /// The next event, or `None` when nothing is pending. A pending drop comes after the
-    /// blocks queued before it.
+    /// blocks queued before it; a loss kept in the flag comes after the drop.
     pub fn try_recv(&self) -> Option<TrackEvent> {
-        todo!("T-124")
+        if let Ok(event) = self.rx.try_recv() {
+            return Some(event);
+        }
+        if let Some(event) = self.shared.take_dropped() {
+            return Some(event);
+        }
+        let cause = LossCause::from_code(self.shared.lost_cause.swap(0, Ordering::AcqRel))?;
+        let at = CaptureStamp(self.shared.lost_at.load(Ordering::Acquire));
+        Some(TrackEvent::Lost { cause, at })
     }
 }
 
@@ -145,62 +319,533 @@ pub struct Step {
     pub levels: Vec<f32>,
 }
 
+/// The output rate of every track.
+const OUT_RATE: f64 = 16_000.0;
+/// Output samples per nanosecond of stamp time.
+const PER_NS: f64 = OUT_RATE / 1e9;
+/// Offsets above this re-anchor at once (40 ms).
+const STEP_SAMPLES: f64 = 40.0 * 16.0;
+/// Runs inserted or dropped from this length on are reported (200 ms).
+const GAP_SAMPLES: f64 = 200.0 * 16.0;
+/// A live track is filled by `advance_to` only this far behind the stamp (200 ms).
+const HOLD_OFF_SAMPLES: f64 = 200.0 * 16.0;
+/// The slow loop's trim limit (500 ppm).
+const MAX_ADJ: f64 = 500e-6;
+/// The resampler's ratio range around the nominal one (above `1 + MAX_ADJ`).
+const MAX_RELATIVE: f64 = 1.001;
+/// PI gains on the offset in seconds: natural frequency 0.1 rad/s, damping 0.7.
+const KP: f64 = 0.14;
+const KI: f64 = 0.01;
+/// The loop's time step is capped so a long pause does not kick the integrator.
+const MAX_DT_S: f64 = 1.0;
+/// One level per 100 ms of output.
+const LEVEL_WINDOW: usize = 1_600;
+/// The sinc filter length (input frames).
+const SINC_LEN: usize = 64;
+
+/// One input rate's streaming resampler to 16 kHz, with its input queue.
+struct Converter {
+    rate: u32,
+    resampler: Async<f32>,
+    /// Input frames per `process` call (10 ms).
+    chunk: usize,
+    /// Mono input not yet handed to the resampler.
+    fifo: Vec<f32>,
+    /// Output position (on the track's axis) of `fifo[0]`.
+    proc_pos: f64,
+    /// Leading output samples to discard (the start lands before the filter delay).
+    skip: usize,
+    /// Nominal output samples per input frame (`16000 / rate`).
+    per_frame: f64,
+    /// The relative ratio in force (`1 + ratio_adj`).
+    rel: f64,
+    out: Vec<f32>,
+}
+
+impl Converter {
+    fn new(rate: u32, rel: f64) -> Result<Converter, AudioError> {
+        let per_frame = OUT_RATE / f64::from(rate);
+        let chunk = usize::try_from(rate / 100).unwrap_or(1).max(1);
+        let params = SincInterpolationParameters::new(SINC_LEN, WindowFunction::BlackmanHarris2)
+            .interpolation(SincInterpolationType::Linear);
+        let mut resampler = Async::<f32>::new_sinc(
+            per_frame,
+            MAX_RELATIVE,
+            &params,
+            chunk,
+            1,
+            FixedAsync::Input,
+        )
+        .map_err(|_| AudioError::Resample)?;
+        resampler
+            .set_resample_ratio_relative(rel, false)
+            .map_err(|_| AudioError::Resample)?;
+        let out = vec![0.0; resampler.output_frames_max()];
+        Ok(Converter {
+            rate,
+            resampler,
+            chunk,
+            fifo: Vec::new(),
+            proc_pos: 0.0,
+            skip: 0,
+            per_frame,
+            rel,
+            out,
+        })
+    }
+
+    /// The resampler's delay in output samples.
+    fn delay(&self) -> f64 {
+        self.resampler.output_delay() as f64
+    }
+
+    /// Output samples per input frame at the current trim.
+    fn out_per_in(&self) -> f64 {
+        self.per_frame * self.rel
+    }
+
+    /// Output position of the next input frame appended.
+    fn in_pos(&self) -> f64 {
+        self.proc_pos + self.fifo.len() as f64 * self.out_per_in()
+    }
+
+    fn set_rel(&mut self, rel: f64) -> Result<(), AudioError> {
+        self.resampler
+            .set_resample_ratio_relative(rel, false)
+            .map_err(|_| AudioError::Resample)?;
+        self.rel = rel;
+        Ok(())
+    }
+
+    /// Resample every full chunk of the queue, appending the output to `dst`.
+    fn run(&mut self, dst: &mut Vec<f32>) -> Result<(), AudioError> {
+        let mut off = 0;
+        let mut result = Ok(());
+        while self.fifo.len() - off >= self.chunk {
+            let input = &self.fifo[off..off + self.chunk];
+            let produced = match process(&mut self.resampler, input, &mut self.out) {
+                Ok(n) => n,
+                Err(e) => {
+                    result = Err(e);
+                    break;
+                }
+            };
+            self.proc_pos += self.chunk as f64 * self.out_per_in();
+            let skipped = self.skip.min(produced);
+            self.skip -= skipped;
+            dst.extend_from_slice(&self.out[skipped..produced]);
+            off += self.chunk;
+        }
+        self.fifo.drain(..off);
+        result
+    }
+}
+
+/// One `process_into_buffer` call on mono slices; the number of output frames.
+fn process(
+    resampler: &mut Async<f32>,
+    input: &[f32],
+    out: &mut [f32],
+) -> Result<usize, AudioError> {
+    let input = InterleavedSlice::new(input, 1, input.len()).map_err(|_| AudioError::Resample)?;
+    let frames = out.len();
+    let mut output = InterleavedSlice::new_mut(out, 1, frames).map_err(|_| AudioError::Resample)?;
+    let (_, produced) = resampler
+        .process_into_buffer(&input, &mut output, None)
+        .map_err(|_| AudioError::Resample)?;
+    Ok(produced)
+}
+
+/// A contiguous span inserted or dropped, on the output axis.
+#[derive(Debug, Clone, Copy, Default)]
+struct Run {
+    start: f64,
+    len: f64,
+}
+
+impl Run {
+    fn add(&mut self, start: f64, len: f64) {
+        if self.len <= 0.0 {
+            self.start = start;
+            self.len = 0.0;
+        }
+        self.len += len;
+    }
+
+    /// The report for a run of 200 ms or more; the run ends either way.
+    fn close(&mut self) -> Option<Report> {
+        let run = std::mem::take(self);
+        (run.len + 0.5 >= GAP_SAMPLES).then(|| Report::Gap {
+            at_ms: (run.start.max(0.0) / 16.0).round() as u64,
+            gap_ms: (run.len / 16.0).round() as u64,
+        })
+    }
+}
+
 /// One track's 16 kHz axis, placed from capture stamps.
-#[allow(dead_code)]
+///
+/// Invariant: after any call, `written()` is within the resampler's delay (a few ms) of
+/// `(S - call_start) x 16 kHz` for the latest stamp `S` handled, unless the slow loop is
+/// still absorbing an offset below 40 ms. Every sample comes from a block or is a zero the
+/// timeline inserted.
 pub struct Timeline {
     track: Track,
     call_start: CaptureStamp,
+    written: u64,
+    lost: bool,
+    conv: Option<Converter>,
+    adj: f64,
+    integ: f64,
+    loop_at: Option<CaptureStamp>,
+    reanchors: u32,
+    fill: Run,
+    drop: Run,
+    level_sum: f64,
+    level_len: usize,
+    mono: Vec<f32>,
+    scratch: Vec<f32>,
 }
 
 impl Timeline {
     pub fn new(track: Track, call_start: CaptureStamp) -> Timeline {
-        Timeline { track, call_start }
+        Timeline {
+            track,
+            call_start,
+            written: 0,
+            lost: false,
+            conv: None,
+            adj: 0.0,
+            integ: 0.0,
+            loop_at: None,
+            reanchors: 0,
+            fill: Run::default(),
+            drop: Run::default(),
+            level_sum: 0.0,
+            level_len: 0,
+            mono: Vec::new(),
+            scratch: Vec::new(),
+        }
+    }
+
+    /// The track this timeline places.
+    pub fn track(&self) -> Track {
+        self.track
     }
 
     /// Place a block whose first frame was captured at `at`.
+    ///
+    /// A block after a loss revives the track. On `Err` nothing was emitted.
     pub fn push(
         &mut self,
-        _interleaved: &[f32],
-        _rate: u32,
-        _channels: u16,
-        _at: CaptureStamp,
+        interleaved: &[f32],
+        rate: u32,
+        channels: u16,
+        at: CaptureStamp,
     ) -> Result<Step, AudioError> {
-        todo!("T-124")
+        let mut mono = std::mem::take(&mut self.mono);
+        mono.clear();
+        let result = match mix_to_mono(interleaved, channels, &mut mono) {
+            Err(e) => Err(e),
+            Ok(()) if rate == 0 => Err(AudioError::ZeroRate),
+            Ok(()) => {
+                let saved = (self.written, self.level_sum, self.level_len);
+                let placed = self.place(&mono, rate, at);
+                if placed.is_err() {
+                    // A resampler failure: forget the converter and what this call emitted;
+                    // the next block starts afresh at its own stamp.
+                    self.conv = None;
+                    (self.written, self.level_sum, self.level_len) = saved;
+                }
+                placed
+            }
+        };
+        self.mono = mono;
+        result
+    }
+
+    fn place(&mut self, mono: &[f32], rate: u32, at: CaptureStamp) -> Result<Step, AudioError> {
+        let mut step = Step::default();
+        let expected = self.pos(at);
+        let fresh = match &self.conv {
+            Some(c) if c.rate == rate => None,
+            _ => Some(Converter::new(rate, 1.0 + self.adj)?),
+        };
+        let mut head = 0usize;
+        if let Some(mut conv) = fresh {
+            // A new start (first block, after a loss, or a new rate): flush the old
+            // converter, then put the block's first frame exactly at its stamp position.
+            self.retire(&mut step);
+            if self.lost {
+                self.lost = false;
+                self.fill = Run::default();
+                self.drop = Run::default();
+            }
+            let floor = self.written as f64;
+            let target = expected.max(floor);
+            let per = conv.out_per_in();
+            head = frames_for(target - expected, per);
+            if target > expected.max(0.0) {
+                self.drop.add(target, target - expected.max(0.0));
+            }
+            let lead = target - conv.delay() - floor;
+            if lead >= 0.5 {
+                let zeros = lead.round() as u64;
+                self.fill.add(floor, zeros as f64);
+                self.emit_zeros(&mut step, zeros);
+            } else if lead < 0.0 {
+                conv.skip = (-lead).round() as usize;
+            }
+            conv.proc_pos = target;
+            self.conv = Some(conv);
+            self.loop_at = Some(at);
+        } else if let Some(conv) = self.conv.as_mut() {
+            let in_pos = conv.in_pos();
+            let error = expected - in_pos;
+            let per = conv.out_per_in();
+            if error > STEP_SAMPLES {
+                let zeros = frames_for(error, per);
+                conv.fifo.resize(conv.fifo.len() + zeros, 0.0);
+                self.fill.add(in_pos, zeros as f64 * per);
+                self.reanchor(at)?;
+            } else if error < -STEP_SAMPLES {
+                head = frames_for(-error, per).min(mono.len());
+                self.drop.add(in_pos, head as f64 * per);
+                self.reanchor(at)?;
+            } else {
+                self.steer(error, at)?;
+            }
+        }
+        let kept = mono.get(head..).unwrap_or(&[]);
+        if !kept.is_empty() {
+            step.reports.extend(self.fill.close());
+            step.reports.extend(self.drop.close());
+        }
+        if let Some(conv) = self.conv.as_mut() {
+            conv.fifo.extend_from_slice(kept);
+        }
+        self.drain(&mut step)?;
+        Ok(step)
     }
 
     /// Zero-fill exactly `ms` for `blocks` blocks the channel dropped.
-    pub fn dropped(&mut self, _blocks: u32, _ms: u32) -> Step {
-        todo!("T-124")
+    ///
+    /// The zeros go out at once; audio still inside the resampler follows them, and the next
+    /// block's expected position moves by the same span, so placement stays exact.
+    pub fn dropped(&mut self, blocks: u32, ms: u32) -> Step {
+        let mut step = Step::default();
+        let zeros = u64::from(ms) * 16;
+        self.emit_zeros(&mut step, zeros);
+        if let Some(conv) = self.conv.as_mut() {
+            conv.proc_pos += zeros as f64;
+        }
+        step.reports.push(Report::Dropped { blocks, ms });
+        step
     }
 
-    /// Mark the track lost at `at`.
-    pub fn lost(&mut self, _cause: LossCause, _at: CaptureStamp) -> Step {
-        todo!("T-124")
+    /// Mark the track lost at `at`: what is still inside the resampler is flushed, then zeros
+    /// up to `at`. Later [`advance_to`](Timeline::advance_to) calls fill zeros without a
+    /// hold-off.
+    pub fn lost(&mut self, _cause: LossCause, at: CaptureStamp) -> Step {
+        let mut step = Step::default();
+        self.retire(&mut step);
+        self.lost = true;
+        self.fill = Run::default();
+        self.drop = Run::default();
+        self.adj = 0.0;
+        self.integ = 0.0;
+        let target = self.pos(at);
+        self.fill_direct(&mut step, target);
+        step
     }
 
     /// The other track's stamp, or the session tick: advance this track to `at`.
-    pub fn advance_to(&mut self, _at: CaptureStamp) -> Step {
-        todo!("T-124")
+    ///
+    /// A lost track is filled with zeros up to `at`; a live one only up to 200 ms before it,
+    /// so a block that arrives late is never clipped.
+    pub fn advance_to(&mut self, at: CaptureStamp) -> Step {
+        let mut step = Step::default();
+        let expected = self.pos(at);
+        if self.lost {
+            self.fill_direct(&mut step, expected);
+            return step;
+        }
+        let target = expected - HOLD_OFF_SAMPLES;
+        match self.conv.as_mut() {
+            None => {
+                let floor = self.written as f64;
+                if target - floor >= 0.5 {
+                    self.fill.add(floor, (target - floor).round());
+                    self.fill_direct(&mut step, target);
+                }
+            }
+            Some(conv) => {
+                let in_pos = conv.in_pos();
+                let per = conv.out_per_in();
+                let zeros = frames_for(target - in_pos, per);
+                if zeros > 0 {
+                    conv.fifo.resize(conv.fifo.len() + zeros, 0.0);
+                    self.fill.add(in_pos, zeros as f64 * per);
+                    if self.drain(&mut step).is_err() {
+                        self.conv = None;
+                        self.fill_direct(&mut step, target);
+                    }
+                }
+            }
+        }
+        step
     }
 
     /// 16 kHz samples emitted so far.
     pub fn written(&self) -> u64 {
-        todo!("T-124")
+        self.written
     }
 
     /// The slow loop's relative ratio trim, in ppm (positive = output stretched).
     pub fn ratio_adj_ppm(&self) -> f64 {
-        todo!("T-124")
+        self.adj * 1e6
     }
 
     /// How many times the offset exceeded 40 ms and the timeline re-anchored at once.
     pub fn reanchors(&self) -> u32 {
-        todo!("T-124")
+        self.reanchors
     }
 
     pub fn is_lost(&self) -> bool {
-        todo!("T-124")
+        self.lost
     }
+
+    /// The output position of `at` (negative before the call start).
+    fn pos(&self, at: CaptureStamp) -> f64 {
+        (at.0 as f64 - self.call_start.0 as f64) * PER_NS
+    }
+
+    /// A step re-anchor: count it and restart the slow loop from zero.
+    fn reanchor(&mut self, at: CaptureStamp) -> Result<(), AudioError> {
+        self.reanchors = self.reanchors.saturating_add(1);
+        self.integ = 0.0;
+        self.adj = 0.0;
+        self.loop_at = Some(at);
+        match self.conv.as_mut() {
+            Some(conv) => conv.set_rel(1.0),
+            None => Ok(()),
+        }
+    }
+
+    /// One PI update on an offset below the step threshold (`error` in output samples,
+    /// positive = the block belongs later than the output has reached).
+    fn steer(&mut self, error: f64, at: CaptureStamp) -> Result<(), AudioError> {
+        let dt = self
+            .loop_at
+            .map_or(0.0, |prev| at.0.saturating_sub(prev.0) as f64 / 1e9)
+            .min(MAX_DT_S);
+        self.loop_at = Some(at);
+        let e = error / OUT_RATE;
+        let proportional = KP * e;
+        let candidate = self.integ + KI * e * dt;
+        let unclamped = proportional + candidate;
+        // Anti-windup: the integrator does not grow while the output is saturated in the
+        // direction the offset pushes.
+        if unclamped.abs() <= MAX_ADJ || unclamped.signum() != e.signum() {
+            self.integ = candidate.clamp(-MAX_ADJ, MAX_ADJ);
+        }
+        self.adj = (proportional + self.integ).clamp(-MAX_ADJ, MAX_ADJ);
+        match self.conv.as_mut() {
+            Some(conv) => conv.set_rel(1.0 + self.adj),
+            None => Ok(()),
+        }
+    }
+
+    /// Resample what is queued and emit it.
+    fn drain(&mut self, step: &mut Step) -> Result<(), AudioError> {
+        let Some(conv) = self.conv.as_mut() else {
+            return Ok(());
+        };
+        let mut out = std::mem::take(&mut self.scratch);
+        out.clear();
+        let result = conv.run(&mut out);
+        self.emit(step, &out);
+        self.scratch = out;
+        result
+    }
+
+    /// Flush the converter exactly up to its input position and drop it.
+    fn retire(&mut self, step: &mut Step) {
+        let Some(mut conv) = self.conv.take() else {
+            return;
+        };
+        let end = conv.in_pos().round().max(0.0);
+        let need = (end - self.written as f64).max(0.0) as usize;
+        let mut out = std::mem::take(&mut self.scratch);
+        out.clear();
+        // The tail needs at most the filter delay plus one chunk; bounded in any case.
+        for _ in 0..64 {
+            if out.len() >= need {
+                break;
+            }
+            let pad = conv.chunk - conv.fifo.len() % conv.chunk;
+            conv.fifo.resize(conv.fifo.len() + pad, 0.0);
+            if conv.run(&mut out).is_err() {
+                break;
+            }
+        }
+        out.truncate(need);
+        self.emit(step, &out);
+        self.scratch = out;
+        self.fill_direct(step, end);
+    }
+
+    /// Emit zeros up to `target` (output position), if it is ahead.
+    fn fill_direct(&mut self, step: &mut Step, target: f64) {
+        let floor = self.written as f64;
+        if target - floor >= 0.5 {
+            self.emit_zeros(step, (target - floor).round() as u64);
+        }
+    }
+
+    fn emit(&mut self, step: &mut Step, samples: &[f32]) {
+        for &x in samples {
+            let x = f64::from(x);
+            self.level_sum += x * x;
+            self.level_len += 1;
+            if self.level_len == LEVEL_WINDOW {
+                self.push_level(step);
+            }
+        }
+        step.pcm.extend_from_slice(samples);
+        self.written += samples.len() as u64;
+    }
+
+    fn emit_zeros(&mut self, step: &mut Step, count: u64) {
+        let Ok(count) = usize::try_from(count) else {
+            return;
+        };
+        let mut left = count;
+        while left > 0 {
+            let take = (LEVEL_WINDOW - self.level_len).min(left);
+            self.level_len += take;
+            left -= take;
+            if self.level_len == LEVEL_WINDOW {
+                self.push_level(step);
+            }
+        }
+        step.pcm.resize(step.pcm.len() + count, 0.0);
+        self.written += count as u64;
+    }
+
+    fn push_level(&mut self, step: &mut Step) {
+        let rms = (self.level_sum / LEVEL_WINDOW as f64).sqrt().min(1.0);
+        step.levels.push(rms as f32);
+        self.level_sum = 0.0;
+        self.level_len = 0;
+    }
+}
+
+/// Input frames that cover `span` output samples at `per` samples per frame (0 if none).
+fn frames_for(span: f64, per: f64) -> usize {
+    if span <= 0.0 || per <= 0.0 {
+        return 0;
+    }
+    (span / per).round() as usize
 }
 
 #[cfg(test)]

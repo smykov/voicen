@@ -27,3 +27,9 @@ debug = "line-tables-only"
 
 [profile.release.package.voicen-whisper]
 debug = "line-tables-only"
+
+# T-124: the call timeline streams every sample through rubato's sinc resampler; unoptimized,
+# the 60-minute drift test takes over 10 minutes. Only this pure-Rust dependency is optimized
+# in dev/test builds (no build script, so nothing else sees the change).
+[profile.dev.package.rubato]
+opt-level = 3
