@@ -1,0 +1,9 @@
+guarantee: AC-5: the drop is reported
+file: crates/voicen-core/src/call/capture.rs
+added_by: test-writer
+--- old
+        step.reports.push(Report::Dropped { blocks, ms });
+        step
+--- new
+        step
+--- end

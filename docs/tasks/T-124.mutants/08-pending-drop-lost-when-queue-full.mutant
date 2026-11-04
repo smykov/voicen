@@ -1,0 +1,10 @@
+guarantee: AC-5: the drop is reported once delivered
+file: crates/voicen-core/src/call/capture.rs
+added_by: test-writer
+--- old
+                self.shared.dropped.fetch_add(v, Ordering::AcqRel);
+                false
+--- new
+                let _ = v;
+                false
+--- end

@@ -1,0 +1,10 @@
+guarantee: AC-1: push propagates the mixdown error
+file: crates/voicen-core/src/call/capture.rs
+added_by: test-writer
+--- old
+            Err(e) => Err(e),
+            Ok(()) if rate == 0
+--- new
+            Err(_) => Ok(Step::default()),
+            Ok(()) if rate == 0
+--- end

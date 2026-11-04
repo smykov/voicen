@@ -1,0 +1,10 @@
+guarantee: AC-5: a loss is never dropped on a full channel
+file: crates/voicen-core/src/call/capture.rs
+added_by: test-writer
+--- old
+        if !sent {
+            lane.shared.lost_at
+--- new
+        if false {
+            lane.shared.lost_at
+--- end

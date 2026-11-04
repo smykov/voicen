@@ -1,0 +1,8 @@
+guarantee: AC-3: an offset of 39 ms does not re-anchor
+file: crates/voicen-core/src/call/capture.rs
+added_by: test-writer
+--- old
+const STEP_SAMPLES: f64 = 40.0 * 16.0;
+--- new
+const STEP_SAMPLES: f64 = 38.0 * 16.0;
+--- end

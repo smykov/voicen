@@ -1,0 +1,10 @@
+guarantee: AC-4: a lost track keeps advancing with zeros (no hold-off)
+file: crates/voicen-core/src/call/capture.rs
+added_by: test-writer
+--- old
+        if self.lost {
+            self.fill_direct(&mut step, expected);
+--- new
+        if false {
+            self.fill_direct(&mut step, expected);
+--- end

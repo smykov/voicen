@@ -1,0 +1,8 @@
+guarantee: AC-3: a gap of 199 ms is not reported
+file: crates/voicen-core/src/call/capture.rs
+added_by: test-writer
+--- old
+const GAP_SAMPLES: f64 = 200.0 * 16.0;
+--- new
+const GAP_SAMPLES: f64 = 199.0 * 16.0;
+--- end

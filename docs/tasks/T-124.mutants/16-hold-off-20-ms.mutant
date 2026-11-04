@@ -1,0 +1,8 @@
+guarantee: AC-4: a live track keeps a 30 ms late block
+file: crates/voicen-core/src/call/capture.rs
+added_by: test-writer
+--- old
+const HOLD_OFF_SAMPLES: f64 = 200.0 * 16.0;
+--- new
+const HOLD_OFF_SAMPLES: f64 = 20.0 * 16.0;
+--- end

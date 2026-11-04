@@ -1,0 +1,11 @@
+guarantee: AC-5: blocks refused behind a pending drop are counted
+file: crates/voicen-core/src/call/capture.rs
+added_by: test-writer
+--- old
+        if !lane.flush_dropped() {
+            lane.count_drop(frames, rate);
+            return;
+--- new
+        if !lane.flush_dropped() {
+            return;
+--- end

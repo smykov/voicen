@@ -1,0 +1,8 @@
+guarantee: AC-3: a gap of 200 ms or more is reported
+file: crates/voicen-core/src/call/capture.rs
+added_by: test-writer
+--- old
+        (run.len + 0.5 >= GAP_SAMPLES).then(|| Report::Gap {
+--- new
+        (false && run.len + 0.5 >= GAP_SAMPLES).then(|| Report::Gap {
+--- end

@@ -1,0 +1,10 @@
+guarantee: AC-5: a dropped block is counted
+file: crates/voicen-core/src/call/capture.rs
+added_by: test-writer
+--- old
+        if let Err(TrySendError::Full(_)) = lane.tx.try_send(event) {
+            lane.count_drop(frames, rate);
+        }
+--- new
+        let _ = lane.tx.try_send(event);
+--- end

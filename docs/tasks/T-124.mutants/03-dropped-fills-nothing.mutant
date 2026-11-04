@@ -1,0 +1,9 @@
+guarantee: AC-5: a full channel drops blocks and the time is filled with silence
+file: crates/voicen-core/src/call/capture.rs
+added_by: test-writer
+--- old
+        let zeros = u64::from(ms) * 16;
+        self.emit_zeros(&mut step, zeros);
+--- new
+        let zeros = u64::from(ms) * 16;
+--- end

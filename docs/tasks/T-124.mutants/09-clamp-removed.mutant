@@ -1,0 +1,8 @@
+guarantee: AC-2: ratio_adj is clamped to +/-500 ppm
+file: crates/voicen-core/src/call/capture.rs
+added_by: test-writer
+--- old
+        self.adj = (proportional + self.integ).clamp(-MAX_ADJ, MAX_ADJ);
+--- new
+        self.adj = proportional + self.integ;
+--- end
