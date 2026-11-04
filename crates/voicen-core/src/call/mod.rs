@@ -4,6 +4,7 @@ pub mod capture;
 pub mod codec;
 pub mod events;
 pub mod final_pass;
+pub mod storage;
 pub mod transcript;
 #[cfg(any(test, feature = "test-fakes"))]
 pub mod wav_source;
