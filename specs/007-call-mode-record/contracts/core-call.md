@@ -9,7 +9,7 @@ The core API (`crates/voicen-core`) that the shell and the tests build on. Every
 | `call::session` | `CallSession`: toggles, single session, start checks, stop reasons, tray state input | fake track sources, fake store, fake clock |
 | `call::capture` | `TrackSink`, `TrackSource` ports; `Timeline` (drift, re-anchor, silence fill); levels; activity / FR-013 rule; `WavTrackSource` | WAV files, scripted drift and gaps |
 | `call::codec` | `TrackEncoder` / `TrackDecoder` traits; `OpusOgg` implementation (`opus` + `ogg`) | real libopus in the core image |
-| `call::storage` | `CallStore`: roots, folder creation, `meta.json`, track writers, recovery, listing (incl. `damaged`), rename, delete, disk thresholds | temp dirs, fault-injecting writer, fake `DiskSpace` |
+| `call::storage` | `CallStore`: roots, folder creation, `meta.json`, track writers, recovery, listing (incl. `damaged`), rename, delete, disk thresholds | temp dirs, fault-injecting writer, `FakeDisk` (the existing `DiskSpace` fake) |
 | `call::final_pass` | queue, chunker, `SpeechSpans` use, timed/time-less mode, per-track results, cancel | scripted spans, wiremock server |
 | `call::transcript` | merge, schema 1 types + `validate`, Markdown render, export, speaker/title rename (pure functions) | fixtures |
 | `call::events` | the call value types (`Track`, `CallId`, `EndpointId`, `CallState`, `StopReason`, `FailReason`, the closed log field enums), `CallNotice`, `CallWarning`; the `LogEvent` variants are in `diag::event`, the line bodies in `diag::format` (T-118) | `diag_format`, `call_events` tests |
@@ -35,12 +35,16 @@ enum TrackDevice { Selected(DeviceId), DefaultInput, DefaultOutputLoopback }
 struct CaptureStamp(u64);                             // ns on the QPC timeline
 trait DeviceEvents { fn next(&self) -> Option<DeviceEvent>; }   // fed by the shell's IMMNotificationClient
 trait CommunicationsCheck { fn differs(&self) -> Result<bool, OsCause>; }
-trait DiskSpace { fn free_bytes(&self, root: &Path) -> Result<u64, OsCause>; }
+// no call-side disk-space port: the call side reuses `local_models::download::DiskSpace`
+// (`fn available_bytes(&self, dir: &Path) -> io::Result<u64>`, T-016); the OS code is
+// `io::Error::raw_os_error()`, as in `CallStorageFailed { os }` (no `OsCause` type).
 ```
 
 Dictation's `FrameSink` / `AudioSource` stay unchanged (FR-009).
 
 Built (T-124, `call/capture.rs`, `call/wav_source.rs`; the invariants are in the module docs and the task's analysis): the names above are as built, plus `OpenError` → `RefusedReason` (`From`), `LossCause { Invalidated, NotAvailable, Other }`, `ChannelSink::new(capacity)` (bounded, `try_send`, drop counter; the consumer side is one `TrackReceiver` per track yielding `TrackEvent::{Block, Lost, Dropped}`), and `Timeline::{new(track, call_start), push, lost, advance_to}` returning `Step { pcm, reports, levels }` with `Report::{Gap, Dropped}`. `WavTrackSource` (`test-fakes` only) has no thread: the test calls `pump(until)`.
+
+Built (T-125, `call/storage.rs`; invariants in `docs/decisions/call-storage.md`): `CallStore::new(roots: Arc<dyn CallRoots>, clock: Arc<dyn MonotonicClock>)`; `create(&CallSettings, &NewCall) -> Result<ActiveCallFiles, CreateError>` and `create_with(.., open)` (the opener of a track file, for a fault-injecting writer); `list(&CallSettings) -> CallList { entries: Vec<CallEntry>, unavailable: Vec<PathBuf> }`. `NewCall { started: SystemTime, seconds_east, mic, system, lang, app_version }`. `CreateError::{Root(UnwritableReason), Storage(StorageKind)}`; `ActiveCallFiles { mic, system: OpusOgg<W> }` with `dir()`, `meta()` and `write_meta(&CallMeta)`. `CallMeta` (and `Failure`, `Mode`, `TrackMeta`, `DeviceChange`, `Engines`, `Results`, `TrackResult`) is `meta.json` schema 1 with `deny_unknown_fields`. `ListState` = `Recording | Queued | Transcribing | Ready | Failed(FailReason) | Recovered | Damaged`. Also `pub fn write_meta(dir, &CallMeta)`, `pub(crate) fn write_atomic(dir, name, bytes)` (T-138 and T-141 reuse it) and `pub fn storage_kind(StorageOp) -> StorageKind`. Not built yet: recovery, rename, delete, disk thresholds and their polling (later tasks).
 
 ## Codec
 

@@ -1,0 +1,11 @@
+guarantee: AC5/D3: a missing earlier root gives one unavailable line (also when no root is chosen)
+file: crates/voicen-core/src/call/storage.rs
+added_by: test-writer
+--- old
+                    let unborn_default = calls.storage_root.is_none()
+                        && *root == current
+                        && e.kind() == io::ErrorKind::NotFound;
+--- new
+                    let unborn_default = calls.storage_root.is_none()
+                        && e.kind() == io::ErrorKind::NotFound;
+--- end

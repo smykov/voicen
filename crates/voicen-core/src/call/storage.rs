@@ -1,10 +1,23 @@
 //! Call folders on disk (spec 007 FR-015, FR-033, FR-039; T-125): [`CallStore`] creates
 //! `<root>/<CallId>`, writes `meta.json` atomically and lists the calls of every root.
 //!
-//! RED STAGE: the public surface only; every body is `todo!()` until the developer fills it.
+//! - [`CallStore::create`] probes the current root ([`CallRoots::probe`], the one probe)
+//!   before anything else, then makes the folder with `create_dir` (never an existing
+//!   folder; clash suffixes `-1` … `-99`, past that the start is refused as root `other`),
+//!   writes `meta.json` and opens both tracks through [`OpusOgg::create`]. Any failure
+//!   after the folder exists removes the folder, so a refusal leaves nothing new on disk.
+//! - [`write_meta`] is the one `meta.json` writer: `meta.json.tmp` written and synced,
+//!   then renamed over `meta.json`; never in place.
+//! - [`CallStore::list`] reads the current root ([`effective_root`]) and every earlier
+//!   root. A name outside the [`CallId`] grammar is not a call and is not listed; a call
+//!   folder whose `meta.json` is missing, unparsable, of another schema or carries an
+//!   unknown key, or whose track file is missing, lists as [`ListState::Damaged`]. Entries
+//!   are newest first by (start stamp, numeric suffix), not by `CallId`'s string order.
 
-use std::fs::File;
-use std::io;
+use std::cmp::Ordering;
+use std::fmt::Write as _;
+use std::fs::{self, File};
+use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -16,14 +29,34 @@ use super::events::{CallId, CallState, EndpointId, FailReason, StopReason, Stora
 use super::transcript::{EngineRef, Speaker};
 use super::StorageOp;
 use crate::clock::MonotonicClock;
-use crate::i18n::UiLanguage;
-use crate::settings::roots::{CallRoots, UnwritableReason};
+use crate::diag::format::LocalTime;
+use crate::i18n::{text, UiLanguage, CALLS_TITLE_DEFAULT, SPEAKER_ME, SPEAKER_OTHER};
+use crate::settings::roots::{effective_root, reason_of, CallRoots, UnwritableReason};
 use crate::settings::CallSettings;
+
+/// The `meta.json` schema this build writes and reads.
+pub const META_SCHEMA: u32 = 1;
+/// The file name of a call's metadata.
+pub const META_FILE: &str = "meta.json";
+const MIC_FILE: &str = "mic.opus";
+const SYSTEM_FILE: &str = "system.opus";
+/// The sample rate of both tracks (contracts/core-call.md).
+const TRACK_RATE: u32 = 16_000;
+/// The highest clash suffix (`-99`, #242 D5).
+const MAX_SUFFIX: u32 = 99;
+/// Ogg stream serials; each track file holds one logical stream.
+const MIC_SERIAL: u32 = 1;
+const SYSTEM_SERIAL: u32 = 2;
+const MIC_SPEAKER: &str = "me";
+const SYSTEM_SPEAKER: &str = "s1";
 
 /// The one mapping of a failed track step to the log's storage kind (`Encode` -> `Write`, #242 D1).
 pub fn storage_kind(op: StorageOp) -> StorageKind {
-    let _ = op;
-    todo!("T-125: storage_kind")
+    match op {
+        StorageOp::Write | StorageOp::Encode => StorageKind::Write,
+        StorageOp::Flush => StorageKind::Flush,
+        StorageOp::Sync => StorageKind::Sync,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -108,8 +141,25 @@ pub struct CallMeta {
 
 /// The one `meta.json` writer: `meta.json.tmp` written and synced, then renamed over `meta.json`.
 pub fn write_meta(dir: &Path, meta: &CallMeta) -> io::Result<()> {
-    let _ = (dir, meta);
-    todo!("T-125: write_meta")
+    let bytes = serde_json::to_vec_pretty(meta).map_err(io::Error::other)?;
+    write_atomic(dir, META_FILE, &bytes)
+}
+
+/// Writes `bytes` as `<dir>/<name>` whole: `<name>.tmp` created, written and synced, then
+/// renamed over `<name>`. On failure the previous `<name>` is untouched and a tmp file this
+/// call created is removed (best effort); a tmp path it could not create is left as found.
+pub(crate) fn write_atomic(dir: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
+    let target = dir.join(name);
+    let tmp = dir.join(format!("{name}.tmp"));
+    let mut file = File::create(&tmp)?;
+    let synced = file.write_all(bytes).and_then(|()| file.sync_all());
+    drop(file);
+    let written = synced.and_then(|()| fs::rename(&tmp, &target));
+    if written.is_err() {
+        // Best effort: the tmp file is ours; the error returned is the write's own.
+        let _ = fs::remove_file(&tmp);
+    }
+    written
 }
 
 /// What a start needs to name and describe the call.
@@ -148,9 +198,11 @@ impl<W: SyncWrite> ActiveCallFiles<W> {
     }
 
     /// Writes `meta` through [`write_meta`] into this call's folder.
+    /// [`ActiveCallFiles::meta`] becomes `meta` only when the write succeeded.
     pub fn write_meta(&mut self, meta: &CallMeta) -> io::Result<()> {
-        let _ = meta;
-        todo!("T-125: ActiveCallFiles::write_meta")
+        write_meta(&self.dir, meta)?;
+        self.meta = meta.clone();
+        Ok(())
     }
 }
 
@@ -202,20 +254,280 @@ impl CallStore {
     }
 
     /// Creates the call; `open` opens a track file (a test hands in a fault-injecting writer).
+    ///
+    /// Order: the probe of the current root, the folder (`create_dir`, suffixed on a
+    /// clash), `meta.json` (state `recording`), `mic.opus`, `system.opus`. A refused probe
+    /// touches nothing; any later failure removes the folder it made.
     pub fn create_with<W: SyncWrite>(
         &self,
         calls: &CallSettings,
         new: &NewCall,
-        open: impl FnMut(&Path) -> io::Result<W>,
+        mut open: impl FnMut(&Path) -> io::Result<W>,
     ) -> Result<ActiveCallFiles<W>, CreateError> {
-        let _ = (&self.roots, &self.clock, calls, new, open);
-        todo!("T-125: CallStore::create_with")
+        let root = effective_root(calls, &self.roots.default_root());
+        self.roots.probe(&root).map_err(CreateError::Root)?;
+        let local = LocalTime::of(new.started, new.seconds_east);
+        let (id, dir) = make_call_dir(&root, &folder_stamp(&local))?;
+        let meta = initial_meta(id, &local, new);
+        let made = write_meta(&dir, &meta)
+            .map_err(|_| CreateError::Storage(StorageKind::Meta))
+            .and_then(|()| self.open_track(&mut open, &dir.join(MIC_FILE), MIC_SERIAL))
+            .and_then(|mic| {
+                let system = self.open_track(&mut open, &dir.join(SYSTEM_FILE), SYSTEM_SERIAL)?;
+                Ok((mic, system))
+            });
+        match made {
+            Ok((mic, system)) => Ok(ActiveCallFiles {
+                mic,
+                system,
+                meta,
+                dir,
+            }),
+            Err(e) => {
+                // Every track writer is dropped (closed) by now. Best effort: the folder
+                // is the one this call created; the error returned is the step's own.
+                let _ = fs::remove_dir_all(&dir);
+                Err(e)
+            }
+        }
     }
 
-    pub fn list(&self, calls: &CallSettings) -> CallList {
-        let _ = (&self.roots, calls);
-        todo!("T-125: CallStore::list")
+    fn open_track<W: SyncWrite>(
+        &self,
+        open: &mut impl FnMut(&Path) -> io::Result<W>,
+        path: &Path,
+        serial: u32,
+    ) -> Result<OpusOgg<W>, CreateError> {
+        let inner = open(path).map_err(|_| CreateError::Storage(StorageKind::Write))?;
+        OpusOgg::create(inner, serial, Arc::clone(&self.clock))
+            .map_err(|e| CreateError::Storage(storage_kind(e.op)))
     }
+
+    /// Every call of the current root and of every earlier root, newest first; a root
+    /// that cannot be read is one `unavailable` line. A missing default root (created
+    /// only at the first start) lists as empty. Never creates anything.
+    pub fn list(&self, calls: &CallSettings) -> CallList {
+        let default_root = self.roots.default_root();
+        let current = effective_root(calls, &default_root);
+        let mut entries = Vec::new();
+        let mut unavailable = Vec::new();
+        let roots = std::iter::once(&current).chain(calls.earlier_roots.iter());
+        for root in roots {
+            let read = match fs::read_dir(root) {
+                Ok(read) => read,
+                Err(e) => {
+                    let unborn_default = calls.storage_root.is_none()
+                        && *root == current
+                        && e.kind() == io::ErrorKind::NotFound;
+                    if !unborn_default {
+                        unavailable.push(root.clone());
+                    }
+                    continue;
+                }
+            };
+            let mut readable = true;
+            for item in read {
+                let Ok(item) = item else {
+                    readable = false;
+                    continue;
+                };
+                let Some(id) = item.file_name().to_str().and_then(CallId::parse) else {
+                    continue;
+                };
+                entries.push(load_entry(root, id));
+            }
+            if !readable {
+                unavailable.push(root.clone());
+            }
+        }
+        // Stable: equal ids keep root order (current first, then earlier roots in order).
+        entries.sort_by(|a, b| newest_first(&a.id, &b.id));
+        CallList {
+            entries,
+            unavailable,
+        }
+    }
+}
+
+/// `YYYY-MM-DD_HHMMSS` of the local start.
+fn folder_stamp(t: &LocalTime) -> String {
+    format!(
+        "{:04}-{:02}-{:02}_{:02}{:02}{:02}",
+        t.year, t.month, t.day, t.hour, t.minute, t.second
+    )
+}
+
+/// `YYYY-MM-DDTHH:MM:SS±HH:MM` of the local start (whole seconds).
+fn started_at(t: &LocalTime) -> String {
+    let sign = if t.offset < 0 { '-' } else { '+' };
+    let abs = t.offset.unsigned_abs();
+    let mut out = String::with_capacity(25);
+    let _ = write!(
+        out,
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}{sign}{:02}:{:02}",
+        t.year,
+        t.month,
+        t.day,
+        t.hour,
+        t.minute,
+        t.second,
+        abs / 3_600,
+        abs % 3_600 / 60
+    );
+    out
+}
+
+/// Creates `<root>/<stamp>`, else `<stamp>-1` … `<stamp>-99`, never an existing folder.
+fn make_call_dir(root: &Path, stamp: &str) -> Result<(CallId, PathBuf), CreateError> {
+    let names =
+        std::iter::once(stamp.to_string()).chain((1..=MAX_SUFFIX).map(|n| format!("{stamp}-{n}")));
+    for name in names {
+        let Some(id) = CallId::parse(&name) else {
+            return Err(CreateError::Root(UnwritableReason::Other));
+        };
+        let dir = root.join(&name);
+        match fs::create_dir(&dir) {
+            Ok(()) => return Ok((id, dir)),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(CreateError::Root(reason_of(e.kind()))),
+        }
+    }
+    Err(CreateError::Root(UnwritableReason::Other))
+}
+
+fn two(n: u64) -> String {
+    format!("{n:02}")
+}
+
+fn initial_meta(id: CallId, local: &LocalTime, new: &NewCall) -> CallMeta {
+    let (day, month, hour, minute) = (
+        two(local.day),
+        two(local.month),
+        two(local.hour),
+        two(local.minute),
+    );
+    let title = text(
+        new.lang,
+        CALLS_TITLE_DEFAULT,
+        &[
+            ("day", &day),
+            ("month", &month),
+            ("hour", &hour),
+            ("minute", &minute),
+        ],
+    );
+    let track = |track, file: &str, endpoint: &EndpointId, speaker: &str| TrackMeta {
+        track,
+        file: file.to_string(),
+        rate: TRACK_RATE,
+        start_offset_ms: 0,
+        endpoint: endpoint.clone(),
+        speaker: speaker.to_string(),
+    };
+    CallMeta {
+        schema: META_SCHEMA,
+        id,
+        title,
+        started_at: started_at(local),
+        ended_at: None,
+        duration_ms: None,
+        state: CallState::Recording,
+        failure: None,
+        stop_reason: None,
+        mode: Mode {
+            record: true,
+            subtitles: false,
+        },
+        tracks: [
+            track(Track::Mic, MIC_FILE, &new.mic, MIC_SPEAKER),
+            track(Track::System, SYSTEM_FILE, &new.system, SYSTEM_SPEAKER),
+        ],
+        device_changes: Vec::new(),
+        engines: Engines {
+            transcription: None,
+            diarization: None,
+        },
+        app_version: new.app_version.clone(),
+        speakers: vec![
+            Speaker {
+                id: MIC_SPEAKER.to_string(),
+                name: text(new.lang, SPEAKER_ME, &[]),
+            },
+            Speaker {
+                id: SYSTEM_SPEAKER.to_string(),
+                name: text(new.lang, SPEAKER_OTHER, &[]),
+            },
+        ],
+        results: Results {
+            mic: TrackResult::Pending,
+            system: TrackResult::Pending,
+        },
+        pass_mode: None,
+    }
+}
+
+/// The listed entry of the call folder `<root>/<id>`: its meta, or damaged.
+fn load_entry(root: &Path, id: CallId) -> CallEntry {
+    let dir = root.join(id.as_str());
+    match read_meta(&dir, &id) {
+        Some((meta, state)) => CallEntry {
+            id,
+            root: root.to_path_buf(),
+            state,
+            meta: Some(meta),
+        },
+        None => CallEntry {
+            id,
+            root: root.to_path_buf(),
+            state: ListState::Damaged,
+            meta: None,
+        },
+    }
+}
+
+/// `None` (damaged) for a missing or unparsable `meta.json` (an unknown key included), an
+/// unknown schema, an id that is not the folder's, tracks other than `mic.opus` /
+/// `system.opus`, a missing track file, or `failed` without its reason.
+fn read_meta(dir: &Path, id: &CallId) -> Option<(CallMeta, ListState)> {
+    let bytes = fs::read(dir.join(META_FILE)).ok()?;
+    let meta: CallMeta = serde_json::from_slice(&bytes).ok()?;
+    if meta.schema != META_SCHEMA || meta.id != *id {
+        return None;
+    }
+    let [mic, system] = &meta.tracks;
+    let tracks_ok = mic.track == Track::Mic
+        && mic.file == MIC_FILE
+        && system.track == Track::System
+        && system.file == SYSTEM_FILE
+        && dir.join(MIC_FILE).is_file()
+        && dir.join(SYSTEM_FILE).is_file();
+    if !tracks_ok {
+        return None;
+    }
+    let state = match meta.state {
+        CallState::Recording => ListState::Recording,
+        CallState::ReadyToTranscribe => ListState::Queued,
+        CallState::Transcribing => ListState::Transcribing,
+        CallState::Ready => ListState::Ready,
+        CallState::Failed => ListState::Failed(meta.failure.as_ref()?.reason),
+        CallState::Recovered => ListState::Recovered,
+    };
+    Some((meta, state))
+}
+
+/// Newest first: the start stamp descending, then the clash suffix descending by its
+/// numeric value (`-10` before `-2`, any suffix before none).
+fn newest_first(a: &CallId, b: &CallId) -> Ordering {
+    sort_key(b).cmp(&sort_key(a))
+}
+
+/// `(stamp, suffix digits without leading zeros by length, then text)`; the grammar
+/// fixes the stamp at 17 bytes and the suffix at `-<digits>`.
+fn sort_key(id: &CallId) -> (&str, usize, &str) {
+    let text = id.as_str();
+    let (stamp, suffix) = text.split_at(text.len().min(17));
+    let digits = suffix.trim_start_matches('-').trim_start_matches('0');
+    (stamp, digits.len(), digits)
 }
 
 #[cfg(test)]
@@ -1074,6 +1386,97 @@ mod tests {
         let list = f.store.list(&calls_in(Some(&root), &[]));
         assert_eq!(ids(&list), vec!["2026-10-30_000001".to_string()]);
         assert_eq!(list.entries[0].state, ListState::Damaged);
+    }
+
+    #[test]
+    fn damaged_for_a_foreign_id_odd_tracks_a_nested_unknown_key_or_failed_without_failure() {
+        // The implementation's further damaged conditions (failure-branch bite). Bite: the
+        // meta id not compared with the folder name; track names/kinds not checked; an
+        // unknown key inside a track accepted; `failed` without its reason given a default.
+        let f = fixture();
+        let root = f.dir.path().join("calls");
+        fs::create_dir(&root).expect("root");
+        plant(&root, "2026-10-30_000001", CallState::Ready);
+
+        let v = meta_value("2026-10-31_101010", CallState::Ready);
+        plant_value(&root, "2026-10-30_000002", Some(&v), true, true);
+
+        let mut v = meta_value("2026-10-30_000003", CallState::Ready);
+        v["tracks"][0]["file"] = serde_json::json!("other.opus");
+        plant_value(&root, "2026-10-30_000003", Some(&v), true, true);
+        fs::write(root.join("2026-10-30_000003").join("other.opus"), b"x").expect("other");
+
+        let mut v = meta_value("2026-10-30_000004", CallState::Ready);
+        v["tracks"][0]["track"] = serde_json::json!("system");
+        v["tracks"][1]["track"] = serde_json::json!("mic");
+        plant_value(&root, "2026-10-30_000004", Some(&v), true, true);
+
+        let mut v = meta_value("2026-10-30_000005", CallState::Ready);
+        v["tracks"][0]["extra"] = serde_json::json!(1);
+        plant_value(&root, "2026-10-30_000005", Some(&v), true, true);
+
+        let v = meta_value("2026-10-30_000006", CallState::Failed);
+        assert_eq!(v["failure"], Value::Null);
+        plant_value(&root, "2026-10-30_000006", Some(&v), true, true);
+
+        let list = f.store.list(&calls_in(Some(&root), &[]));
+        assert_eq!(list.entries.len(), 6);
+        for entry in &list.entries {
+            if entry.id.as_str() == "2026-10-30_000001" {
+                assert_eq!(entry.state, ListState::Ready);
+            } else {
+                assert_eq!(entry.state, ListState::Damaged, "{}", entry.id);
+                assert!(entry.meta.is_none(), "{}", entry.id);
+            }
+        }
+        assert!(list.unavailable.is_empty());
+    }
+
+    #[test]
+    fn unreadable_default_root_and_missing_earlier_root_give_unavailable_lines() {
+        // D3: only a *missing* default current root lists as empty. Bite: any read_dir error
+        // of the default root hidden (here it is a file); a missing earlier root hidden when
+        // no root is chosen.
+        let f = fixture();
+        fs::create_dir_all(f.default_root.parent().expect("parent")).expect("data");
+        fs::write(&f.default_root, b"x").expect("default root as a file");
+        let gone = f.dir.path().join("gone");
+        let list = f.store.list(&calls_in(None, &[&gone]));
+        assert!(list.entries.is_empty());
+        assert_eq!(list.unavailable, vec![f.default_root.clone(), gone]);
+    }
+
+    #[test]
+    fn create_dir_failure_other_than_a_clash_refuses_with_its_reason() {
+        // A probe that passes over a root that is gone by the time the folder is made.
+        // Bite: any create_dir error treated as a clash (the suffixes tried, then `other`);
+        // the error kind not mapped through reason_of; the root created.
+        let dir = TempDir::new();
+        let store = CallStore::new(
+            Arc::new(crate::settings::roots::FakeCallRoots::new()),
+            Arc::new(SystemMonotonic),
+        );
+        let gone = dir.path().join("gone");
+        let got = store.create(&calls_in(Some(&gone), &[]), &moscow_call());
+        assert_eq!(
+            got.err(),
+            Some(CreateError::Root(UnwritableReason::Missing))
+        );
+        assert!(!gone.exists(), "the root was created");
+    }
+
+    #[test]
+    fn write_meta_failed_rename_removes_its_tmp() {
+        // `meta.json` is a folder, so the tmp is written and synced but the rename fails.
+        // Bite: the tmp this write created left behind.
+        let dir = TempDir::new();
+        fs::create_dir(dir.path().join("meta.json")).expect("meta as folder");
+        let got = write_meta(
+            dir.path(),
+            &sample_meta("2026-10-30_101010", CallState::Recording),
+        );
+        assert!(got.is_err(), "{got:?}");
+        assert_eq!(names(dir.path()), vec!["meta.json".to_string()]);
     }
 
     // ---- storage_kind -------------------------------------------------------------

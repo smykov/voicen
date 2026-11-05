@@ -24,7 +24,7 @@ Technical approach (see [research.md](research.md)):
 - **Shell (`src-tauri`)**:
   - `CpalTrackSource` (mic, plus loopback on the default output device; QPC stamps);
   - `win/audio_notify.rs` (IMMNotificationClient) and the communications-device check;
-  - `DiskSpace`;
+  - free disk space through the existing `WinDiskSpace` (`local_models::download::DiskSpace`, T-016; no second port, T-125);
   - the call-hotkey slot on the existing hotkey thread;
   - the `--call record` route through the single-instance callback;
   - exit confirmation, `WM_ENDSESSION` and sleep finalization;
@@ -113,7 +113,7 @@ ADR-011's capture / segmentation / recognition / speakers / session / storage / 
 | Track capture | core `call::capture` ↔ shell `CpalTrackSource` | `TrackSource`, `TrackSink`, `CaptureStamp` |
 | Device events | shell `win/audio_notify.rs` → core | `DeviceEvents`, `CommunicationsCheck` |
 | Encoding | core `call::codec` | `TrackEncoder` / `TrackDecoder` |
-| Storage | core `call::storage` | `CallStore`, `DiskSpace` |
+| Storage | core `call::storage` | `CallStore` (free space via the existing `local_models::download::DiskSpace`) |
 | Final pass | core `call::final_pass` → `engine`, `vad` | `transcribe_timed`, `SpeechSpans` (Silero in `voicen-whisper`) |
 | Transcript | core `call::transcript` | pure functions |
 | Launch | core `settings::gate` ↔ shell single-instance callback | `LaunchArgs`, `SecondLaunchAction::StartCallRecord`; `second_launch_action` changes signature (contracts/core-call.md "Launch arguments") |
@@ -176,7 +176,7 @@ crates/voicen-core/src/
 │   ├── capture.rs        # TrackSource/TrackSink, CaptureStamp, Timeline, levels, activity
 │   ├── wav_source.rs     # WavTrackSource (FR-014)
 │   ├── codec.rs          # TrackEncoder/Decoder, OpusOgg
-│   ├── storage.rs        # CallStore, roots, meta.json, recovery, listing, DiskSpace
+│   ├── storage.rs        # CallStore, roots, meta.json, recovery, listing (free space: existing local_models DiskSpace)
 │   ├── final_pass.rs     # queue, chunker, modes, results
 │   ├── transcript.rs     # schema 1, validate, merge, Markdown, renames
 │   └── events.rs         # CallNotice, CallWarning
@@ -194,7 +194,7 @@ src-tauri/
 ├── src/call.rs              # wiring: session, windows, commands (not in build_app)
 ├── src/win/track_capture.rs # CpalTrackSource (mic, loopback)
 ├── src/win/audio_notify.rs  # IMMNotificationClient, communications check
-├── src/win/disk.rs          # DiskSpace
+├── src/local_models.rs      # WinDiskSpace, reused for call roots (T-125)
 ├── src/win/hotkey.rs        # + call-hotkey slot, suspend → stop
 ├── src/tray.rs              # + --call record route, Call menu
 ├── tests/call_*.rs

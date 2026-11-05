@@ -1,0 +1,8 @@
+guarantee: invariant 1: a create_dir error other than a clash maps through reason_of (NotFound -> missing)
+file: crates/voicen-core/src/call/storage.rs
+added_by: test-writer
+--- old
+            Err(e) => return Err(CreateError::Root(reason_of(e.kind()))),
+--- new
+            Err(_) => return Err(CreateError::Root(UnwritableReason::Other)),
+--- end

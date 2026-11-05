@@ -11,6 +11,8 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
+use super::CallSettings;
+
 /// The file the probe creates and deletes in a root (research R19).
 pub const WRITE_PROBE_FILE: &str = ".voicen-write-probe";
 
@@ -124,6 +126,15 @@ impl CallRoots for FakeCallRoots {
     fn probe(&self, _root: &Path) -> Result<(), UnwritableReason> {
         Ok(())
     }
+}
+
+/// The root in force for `calls`: the chosen one, or the default. The one resolution
+/// of the current root (`SettingsService::save` and `CallStore` both go through it).
+pub fn effective_root(calls: &CallSettings, default_root: &Path) -> PathBuf {
+    calls
+        .storage_root
+        .clone()
+        .unwrap_or_else(|| default_root.to_path_buf())
 }
 
 /// The one mapping of a probe's io error to its reason (as

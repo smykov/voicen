@@ -1,0 +1,11 @@
+guarantee: AC2: a write_meta failure keeps the previous meta.json (temp + rename, never in place)
+file: crates/voicen-core/src/call/storage.rs
+added_by: test-writer
+--- old
+    let mut file = File::create(&tmp)?;
+--- new
+    let mut file = match File::create(&tmp) {
+        Ok(file) => file,
+        Err(_) => return fs::write(&target, bytes),
+    };
+--- end
