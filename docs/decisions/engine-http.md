@@ -35,6 +35,11 @@ Tasks: T-079 (found by T-078), T-186. Decisions: #106, #113, #201, #211. Contrac
 - **Consequence:** an endpoint that redirects to another origin, or from `http://` to `https://` on one host, now fails with "HTTP 3xx"; the user enters the final URL.
 - **Don't:** use `Policy::none()` (a same-origin redirect must still work), compare the host only (another port is another origin), refuse only 307/308, or put the same-origin policy on `client_with_read_timeout`: the model and Silero downloads (`huggingface.co/.../resolve/<commit>/<file>`, answered with a 302 to a CDN host) keep reqwest's default redirects on purpose, being a pinned GET with no key and no body whose file is kept only at the pinned size and SHA-256 (`local_download::download_follows_a_cross_origin_redirect_to_a_second_server`).
 
+### `transcribe_timed` goes through the same client, key rule and capped read as `transcribe` (T-136)
+
+- **What breaks if you violate it:** a second request path would skip the same-origin policy, the `Authorization` rule or the 1 MiB cap, and the time-less rule (FR-024) would be decided by the caller from a raw status.
+- **Where it is enforced:** `OpenAiCompatibleEngine::transcribe_timed` uses `http::client`, `http::authorization` and `send_capped`; `timed_outcome` in `engine::openai` alone maps the `TransportError` and `ResponseShape` to `Ok(Timed)`, `Err(Timeless)` (shape `Segments` only: 400/422, or a 2xx without usable `segments`; never 401/403) or `Err(Failed(FailReason))`. Contract: `specs/007-call-mode-record/contracts/core-call.md` (Final-pass engine call).
+
 ## Rejected approaches
 
 | Approach | Why rejected | Ref |
