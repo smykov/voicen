@@ -113,10 +113,13 @@ Times are `start_ms` as `HH:MM:SS`, and names come from `meta.json`. `render_mar
 
 ```text
 fn transcribe_timed(&self, audio: &AudioBuffer, req: &TranscribeRequest, shape: ResponseShape)
-    -> Result<Timed, FailureReason>;
+    -> Result<Timed, TimedFailure>;
 enum ResponseShape { Segments /* verbose_json + timestamp_granularities[]=segment */, Plain /* json */ }
 struct Timed { text: String, language: Option<LangCode>, segments: Option<Vec<EngineSegment>> }
+enum TimedFailure { Timeless, Failed(FailReason) }
 ```
+
+`transcribe_timed` (on `OpenAiCompatibleEngine`, not the `Engine` trait, T-136) decides the row of the table below itself: `Timeless` only for `Segments` on 400/422 or a 2xx whose `segments` is absent/null (or empty while `text` is not blank; empty with blank text is `Ok(Some([]))`); every other failure is `Failed(reason)` through `failure::classify` (`InvalidApiKey` → `key`, `NetworkUnavailable`/`CannotReach` → `network`, `Timeout` → `timeout`, `EngineNotConfigured` → `engine_not_set_up`, the rest → `provider`). A `segments` value that is not an array of objects with finite non-negative numeric `start <= end` and string `text` is `provider`. Language values (top-level onto `Timed.language`, per segment onto `EngineSegment.lang`) are ASCII-lowercased, then a `WHISPER_ISO_639_1` code or one of whisper.cpp's 97 names, else `None`.
 
 Mapping to the pass:
 

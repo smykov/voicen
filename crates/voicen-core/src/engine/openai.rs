@@ -13,7 +13,9 @@
 //! `POST {base}/audio/transcriptions` (or the stored URL as is when it already
 //! ends in `audio/transcriptions`: [`transcription_url`], decision #96), multipart `file` (`audio.wav`, `audio/wav`),
 //! `model` (omitted when the engine has none: an unset local-server model),
-//! `language` (omitted for auto), `response_format=json`;
+//! `language` (omitted for auto), `response_format=json` ([`ResponseShape::Plain`])
+//! or `response_format=verbose_json` plus `timestamp_granularities[]=segment`
+//! ([`ResponseShape::Segments`], the call final pass: [`OpenAiCompatibleEngine::transcribe_timed`]);
 //! `Authorization: Bearer <key>` only when a key is stored; a key whose
 //! `Bearer <key>` text fails `HeaderValue` validation is `InvalidApiKey` with no
 //! request sent ([`TransportError::UnusableKey`]). The URL is joined on the
@@ -31,13 +33,152 @@ use reqwest::header::{HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 
 use super::{http, Engine, TranscribeRequest};
 use crate::audio::{wav, AudioBuffer};
+use crate::call::events::FailReason;
+use crate::call::transcript::EngineSegment;
 use crate::failure::{classify, FailureReason, TransportError};
 use crate::secrets::Secret;
 use crate::settings::url::NormalizedUrl;
+use crate::settings::LangCode;
 
-/// Room for the multipart framing around the WAV and the text parts: four part
-/// headers with a 67-character boundary and the closing boundary are under 1 KiB.
+/// Room for the multipart framing around the WAV and the text parts: five part
+/// headers with a 67-character boundary, the fixed `response_format` and
+/// `timestamp_granularities[]` values and the closing boundary are under 1 KiB.
 const MULTIPART_OVERHEAD: usize = 1024;
+
+/// What a [`OpenAiCompatibleEngine::transcribe_timed`] request asks the server for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResponseShape {
+    /// `response_format=verbose_json` and `timestamp_granularities[]=segment`.
+    Segments,
+    /// `response_format=json`, the dictation request.
+    Plain,
+}
+
+/// A transcription with its optional segment times. `segments` is `Some` exactly
+/// for an OK [`ResponseShape::Segments`] reply (possibly empty: silence) and always
+/// `None` for [`ResponseShape::Plain`]. `language` is the reply's top-level
+/// language mapped onto [`LangCode`] (`None` when absent or unknown); `text` is
+/// trimmed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Timed {
+    pub text: String,
+    pub language: Option<LangCode>,
+    pub segments: Option<Vec<EngineSegment>>,
+}
+
+/// Why [`OpenAiCompatibleEngine::transcribe_timed`] returned no [`Timed`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimedFailure {
+    /// A [`ResponseShape::Segments`] request the server answered without segment
+    /// times (status 400 or 422, or a 2xx whose `segments` is absent, null, or
+    /// empty while the text is not blank): the caller re-sends as `Plain` (FR-024).
+    Timeless,
+    /// Any other failure, as the final pass's reason.
+    Failed(FailReason),
+}
+
+/// The whisper.cpp language names (`g_lang` of whisper-rs-sys 0.15.0) with their
+/// codes, in the order of [`crate::settings::WHISPER_ISO_639_1`]; `haw`, `jw` and
+/// `yue` (not in that list) left out.
+const WHISPER_NAMES: [(&str, &str); 97] = [
+    ("en", "english"),
+    ("zh", "chinese"),
+    ("de", "german"),
+    ("es", "spanish"),
+    ("ru", "russian"),
+    ("ko", "korean"),
+    ("fr", "french"),
+    ("ja", "japanese"),
+    ("pt", "portuguese"),
+    ("tr", "turkish"),
+    ("pl", "polish"),
+    ("ca", "catalan"),
+    ("nl", "dutch"),
+    ("ar", "arabic"),
+    ("sv", "swedish"),
+    ("it", "italian"),
+    ("id", "indonesian"),
+    ("hi", "hindi"),
+    ("fi", "finnish"),
+    ("vi", "vietnamese"),
+    ("he", "hebrew"),
+    ("uk", "ukrainian"),
+    ("el", "greek"),
+    ("ms", "malay"),
+    ("cs", "czech"),
+    ("ro", "romanian"),
+    ("da", "danish"),
+    ("hu", "hungarian"),
+    ("ta", "tamil"),
+    ("no", "norwegian"),
+    ("th", "thai"),
+    ("ur", "urdu"),
+    ("hr", "croatian"),
+    ("bg", "bulgarian"),
+    ("lt", "lithuanian"),
+    ("la", "latin"),
+    ("mi", "maori"),
+    ("ml", "malayalam"),
+    ("cy", "welsh"),
+    ("sk", "slovak"),
+    ("te", "telugu"),
+    ("fa", "persian"),
+    ("lv", "latvian"),
+    ("bn", "bengali"),
+    ("sr", "serbian"),
+    ("az", "azerbaijani"),
+    ("sl", "slovenian"),
+    ("kn", "kannada"),
+    ("et", "estonian"),
+    ("mk", "macedonian"),
+    ("br", "breton"),
+    ("eu", "basque"),
+    ("is", "icelandic"),
+    ("hy", "armenian"),
+    ("ne", "nepali"),
+    ("mn", "mongolian"),
+    ("bs", "bosnian"),
+    ("kk", "kazakh"),
+    ("sq", "albanian"),
+    ("sw", "swahili"),
+    ("gl", "galician"),
+    ("mr", "marathi"),
+    ("pa", "punjabi"),
+    ("si", "sinhala"),
+    ("km", "khmer"),
+    ("sn", "shona"),
+    ("yo", "yoruba"),
+    ("so", "somali"),
+    ("af", "afrikaans"),
+    ("oc", "occitan"),
+    ("ka", "georgian"),
+    ("be", "belarusian"),
+    ("tg", "tajik"),
+    ("sd", "sindhi"),
+    ("gu", "gujarati"),
+    ("am", "amharic"),
+    ("yi", "yiddish"),
+    ("lo", "lao"),
+    ("uz", "uzbek"),
+    ("fo", "faroese"),
+    ("ht", "haitian creole"),
+    ("ps", "pashto"),
+    ("tk", "turkmen"),
+    ("nn", "nynorsk"),
+    ("mt", "maltese"),
+    ("sa", "sanskrit"),
+    ("lb", "luxembourgish"),
+    ("my", "myanmar"),
+    ("bo", "tibetan"),
+    ("tl", "tagalog"),
+    ("mg", "malagasy"),
+    ("as", "assamese"),
+    ("tt", "tatar"),
+    ("ln", "lingala"),
+    ("ha", "hausa"),
+    ("ba", "bashkir"),
+    ("su", "sundanese"),
+];
 
 /// Which server the engine talks to; set once at construction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,7 +235,9 @@ impl OpenAiCompatibleEngine {
     }
 
     /// The multipart body of the contract (`file`, `model` and `language` only
-    /// when set, `response_format=json`) and its `Content-Type`.
+    /// when set, then `response_format=json` for [`ResponseShape::Plain`] or
+    /// `response_format=verbose_json` and `timestamp_granularities[]=segment` for
+    /// [`ResponseShape::Segments`]) and its `Content-Type`.
     ///
     /// Encoded into one buffer instead of `RequestBuilder::multipart`: reqwest's
     /// blocking client streams a multipart reader through a channel and reports a
@@ -110,6 +253,7 @@ impl OpenAiCompatibleEngine {
         &self,
         audio: &AudioBuffer,
         req: &TranscribeRequest,
+        shape: ResponseShape,
     ) -> Option<(String, Vec<u8>)> {
         let wav = wav::encode(audio);
         let capacity = body_capacity(wav.len(), self.model.as_deref(), req.language.as_deref());
@@ -124,7 +268,12 @@ impl OpenAiCompatibleEngine {
         if let Some(language) = &req.language {
             form = form.text("language", language.clone());
         }
-        let form = form.text("response_format", "json");
+        let form = match shape {
+            ResponseShape::Plain => form.text("response_format", "json"),
+            ResponseShape::Segments => form
+                .text("response_format", "verbose_json")
+                .text("timestamp_granularities[]", "segment"),
+        };
         let content_type = format!("multipart/form-data; boundary={}", form.boundary());
         let mut body = Vec::with_capacity(capacity);
         form.into_reader().read_to_end(&mut body).ok()?;
@@ -139,18 +288,20 @@ impl OpenAiCompatibleEngine {
         http::authorization(self.key.as_ref())
     }
 
-    /// Sends the request and reads the body; every failure as a [`TransportError`].
+    /// Sends the request for `shape` and reads the 2xx body through the 1 MiB cap;
+    /// every failure as a [`TransportError`].
     fn send(
         &self,
         url: url::Url,
         audio: &AudioBuffer,
         req: &TranscribeRequest,
-    ) -> Result<String, TransportError> {
+        shape: ResponseShape,
+    ) -> Result<Vec<u8>, TransportError> {
         // The key is checked before anything is built or sent.
         let authorization = self.authorization()?;
         let client = http::client(req.timeouts.connect)?;
         let (content_type, body) = self
-            .multipart_body(audio, req)
+            .multipart_body(audio, req, shape)
             .ok_or(TransportError::Setup)?;
         // The per-request timeout covers connect to the last body byte (FR-24); the
         // endpoint role picks which deadline.
@@ -167,18 +318,172 @@ impl OpenAiCompatibleEngine {
             request = request.header(AUTHORIZATION, value);
         }
         // A non-2xx body is never read (P-009); a 2xx one through the 1 MiB cap.
-        let body = client.send_capped(request)?;
-        // An object with a string `text`; other fields are ignored. (A derived struct
-        // would also accept a JSON array whose first element is a string.)
-        let parsed: serde_json::Value =
-            serde_json::from_slice(&body).map_err(|_| TransportError::BadBody)?;
-        let text = parsed
-            .as_object()
-            .and_then(|object| object.get("text"))
-            .and_then(serde_json::Value::as_str)
-            .ok_or(TransportError::BadBody)?;
-        Ok(text.trim().to_string())
+        client.send_capped(request)
     }
+
+    /// The call final pass's engine call (contracts/core-call.md): one request for
+    /// `shape`, through the same client, key rule and capped read as `transcribe`.
+    /// Exactly one of `Ok(Timed)`, `Err(Timeless)` or `Err(Failed(reason))`, decided
+    /// by [`timed_outcome`]; never a retry inside the call.
+    pub fn transcribe_timed(
+        &self,
+        audio: &AudioBuffer,
+        req: &TranscribeRequest,
+        shape: ResponseShape,
+    ) -> Result<Timed, TimedFailure> {
+        let not_set_up = || TimedFailure::Failed(fail_reason(&FailureReason::EngineNotConfigured));
+        let base = url::Url::parse(self.base_url.as_str()).map_err(|_| not_set_up())?;
+        let url = transcription_url(&base).ok_or_else(not_set_up)?;
+        let result = self
+            .send(url, audio, req, shape)
+            .and_then(|body| match shape {
+                ResponseShape::Plain => parse_plain(&body).map(Some),
+                ResponseShape::Segments => parse_verbose(&body),
+            });
+        timed_outcome(result, shape, &host_port(&base))
+    }
+}
+
+/// The one decision of a `transcribe_timed` outcome. `Ok(None)` is a 2xx
+/// `Segments` reply without usable times. Time-less only for `Segments`, and only
+/// for that reply or status 400 | 422; everything else goes through
+/// `failure::classify` and [`fail_reason`] (401/403 is `Key`, never time-less).
+fn timed_outcome(
+    result: Result<Option<Timed>, TransportError>,
+    shape: ResponseShape,
+    host: &str,
+) -> Result<Timed, TimedFailure> {
+    match result {
+        Ok(Some(timed)) => Ok(timed),
+        Ok(None) => Err(TimedFailure::Timeless),
+        Err(TransportError::Status(400 | 422)) if shape == ResponseShape::Segments => {
+            Err(TimedFailure::Timeless)
+        }
+        Err(e) => Err(TimedFailure::Failed(fail_reason(&classify(&e, host)))),
+    }
+}
+
+/// A [`FailureReason`] as the final pass's [`FailReason`] (decides_on 4): the
+/// reasons `transcribe_timed` cannot produce are `Provider`.
+fn fail_reason(reason: &FailureReason) -> FailReason {
+    match reason {
+        FailureReason::InvalidApiKey => FailReason::Key,
+        FailureReason::NetworkUnavailable | FailureReason::CannotReach { .. } => {
+            FailReason::Network
+        }
+        FailureReason::Timeout { .. } => FailReason::Timeout,
+        FailureReason::EngineNotConfigured => FailReason::EngineNotSetUp,
+        FailureReason::ServerError { .. }
+        | FailureReason::UnexpectedResponse
+        | FailureReason::KeyStoreUnavailable
+        | FailureReason::ClipboardUnavailable
+        | FailureReason::MicrophoneUnavailable { .. }
+        | FailureReason::NoLocalModel
+        | FailureReason::LocalEngineFailed => FailReason::Provider,
+    }
+}
+
+/// An engine language value onto [`LangCode`], the one mapping (decides_on 3):
+/// ASCII-lowercased, then a code of `WHISPER_ISO_639_1`, else a whisper.cpp name
+/// of [`WHISPER_NAMES`], else `None`. No trimming, no aliases.
+fn engine_lang(raw: &str) -> Option<LangCode> {
+    let lower = raw.to_ascii_lowercase();
+    LangCode::parse(&lower).or_else(|| {
+        WHISPER_NAMES
+            .iter()
+            .find(|(_, name)| *name == lower)
+            .and_then(|(code, _)| LangCode::parse(code))
+    })
+}
+
+/// A JSON value's language through [`engine_lang`]; a non-string is `None`.
+fn value_lang(value: Option<&serde_json::Value>) -> Option<LangCode> {
+    value
+        .and_then(serde_json::Value::as_str)
+        .and_then(engine_lang)
+}
+
+/// The body as a JSON object with a string `text`. (A derived struct would also
+/// accept a JSON array whose first element is a string.)
+fn reply_object(
+    body: &[u8],
+) -> Result<(serde_json::Map<String, serde_json::Value>, String), TransportError> {
+    let parsed: serde_json::Value =
+        serde_json::from_slice(body).map_err(|_| TransportError::BadBody)?;
+    let serde_json::Value::Object(object) = parsed else {
+        return Err(TransportError::BadBody);
+    };
+    let text = object
+        .get("text")
+        .and_then(serde_json::Value::as_str)
+        .ok_or(TransportError::BadBody)?
+        .trim()
+        .to_string();
+    Ok((object, text))
+}
+
+/// A `json` reply: the trimmed `text`, the mapped top-level `language`, no
+/// segments (whatever else the reply carries).
+fn parse_plain(body: &[u8]) -> Result<Timed, TransportError> {
+    let (object, text) = reply_object(body)?;
+    Ok(Timed {
+        text,
+        language: value_lang(object.get("language")),
+        segments: None,
+    })
+}
+
+/// A `verbose_json` reply. `Ok(None)` when it has no usable times: `segments`
+/// absent or null, or empty while `text` is not blank. A `segments` value that is
+/// not an array of objects with finite, non-negative numeric `start <= end` and a
+/// string `text` is [`TransportError::BadBody`].
+fn parse_verbose(body: &[u8]) -> Result<Option<Timed>, TransportError> {
+    let (object, text) = reply_object(body)?;
+    let raw = match object.get("segments") {
+        None | Some(serde_json::Value::Null) => return Ok(None),
+        Some(serde_json::Value::Array(raw)) => raw,
+        Some(_) => return Err(TransportError::BadBody),
+    };
+    let segments = raw
+        .iter()
+        .map(parse_segment)
+        .collect::<Result<Vec<_>, _>>()?;
+    if segments.is_empty() && !text.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(Timed {
+        text,
+        language: value_lang(object.get("language")),
+        segments: Some(segments),
+    }))
+}
+
+/// One `verbose_json` segment (seconds); see [`parse_verbose`] for what is malformed.
+fn parse_segment(value: &serde_json::Value) -> Result<EngineSegment, TransportError> {
+    let object = value.as_object().ok_or(TransportError::BadBody)?;
+    let seconds = |key: &str| {
+        object
+            .get(key)
+            .and_then(serde_json::Value::as_f64)
+            .filter(|s| s.is_finite() && *s >= 0.0)
+            .ok_or(TransportError::BadBody)
+    };
+    let start_s = seconds("start")?;
+    let end_s = seconds("end")?;
+    if end_s < start_s {
+        return Err(TransportError::BadBody);
+    }
+    let text = object
+        .get("text")
+        .and_then(serde_json::Value::as_str)
+        .ok_or(TransportError::BadBody)?
+        .to_string();
+    Ok(EngineSegment {
+        start_s,
+        end_s,
+        text,
+        lang: value_lang(object.get("language")),
+    })
 }
 
 impl Engine for OpenAiCompatibleEngine {
@@ -199,7 +504,9 @@ impl Engine for OpenAiCompatibleEngine {
         let base = url::Url::parse(self.base_url.as_str())
             .map_err(|_| FailureReason::EngineNotConfigured)?;
         let url = transcription_url(&base).ok_or(FailureReason::EngineNotConfigured)?;
-        self.send(url, audio, req)
+        self.send(url, audio, req, ResponseShape::Plain)
+            .and_then(|body| parse_plain(&body))
+            .map(|timed| timed.text)
             .map_err(|e| classify(&e, &host_port(&base)))
     }
 }
