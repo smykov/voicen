@@ -7,13 +7,50 @@
 
 use super::{SpeechSpan, VadError};
 
+/// Milliseconds per centisecond: spans land on 10 ms steps.
+const MS_PER_CS: u64 = 10;
+
 /// The spans of a native answer over a buffer of `duration_ms`.
+///
+/// - An incoming `Err` comes back unchanged.
+/// - A malformed segment (a non-finite or negative bound, `end <= start`, or a start before
+///   the previous segment's end) makes the whole answer `Err(VadError::Failed)`; it is judged
+///   on the native values, before the clamp.
+/// - Each bound is rounded to whole centiseconds and turned into ms, so spans lie on 10 ms
+///   steps; the end is clamped to the last 10 ms step within `duration_ms`.
+/// - A span empty after rounding and the clamp (only padding past the buffer) is dropped.
+///
+/// The result is sorted, non-overlapping, non-empty and within `[0, duration_ms]`.
 pub fn spans_from_centiseconds(
     native: Result<impl IntoIterator<Item = (f32, f32)>, VadError>,
     duration_ms: u64,
 ) -> Result<Vec<SpeechSpan>, VadError> {
-    let _ = (native, duration_ms);
-    Ok(Vec::new())
+    let limit_ms = duration_ms - duration_ms % MS_PER_CS;
+    let mut spans = Vec::new();
+    let mut previous_end = 0.0_f32;
+    for (start, end) in native? {
+        let well_formed = start.is_finite()
+            && end.is_finite()
+            && start >= 0.0
+            && end > start
+            && start >= previous_end;
+        if !well_formed {
+            return Err(VadError::Failed);
+        }
+        previous_end = end;
+        let start_ms = to_ms(start).min(limit_ms);
+        let end_ms = to_ms(end).min(limit_ms);
+        if start_ms < end_ms {
+            spans.push(SpeechSpan { start_ms, end_ms });
+        }
+    }
+    Ok(spans)
+}
+
+/// A finite, non-negative centisecond value in ms on the 10 ms step (saturating).
+fn to_ms(cs: f32) -> u64 {
+    // `as` saturates a float above u64::MAX; the caller checked finite and non-negative.
+    (cs.round() as u64).saturating_mul(MS_PER_CS)
 }
 
 #[cfg(test)]
