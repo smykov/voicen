@@ -9188,6 +9188,12 @@ Source: https://commons.wikimedia.org/wiki/File:Resident_air-conditioned_out_doo
 Test clip of the FR-12 speech-detector check (T-043, decision #59); not shipped. "Resident air-conditioned out door unit.ogg" by Ranch9613 (own work), published on Wikimedia Commons under Creative Commons Zero (Public Domain Dedication). Converted with ffmpeg to raw 16 kHz mono signed 16-bit little-endian PCM, the excerpt 0-3 s, as crates/voicen-whisper/tests/clips/room-tone-ac-unit.s16le.
 
 --------------------------------------------------------------------------------
+Music test clip ("Blessed is the Wood" by Daniel William Lawrence)
+License: CC0-1.0
+Source: https://commons.wikimedia.org/wiki/File:Blessed_is_the_Wood_-_Full_Album_-_Daniel_William_Lawrence_-_Instrumental_Americana,_Blues,_Folk.wav
+Test clip of the call-mode final-pass speech-span check (T-135, decision #59); not shipped. "Blessed is the Wood - Full Album" by Daniel William Lawrence (own work; instrumental electric-guitar album, no vocals), published on Wikimedia Commons under Creative Commons Zero v1.0 Universal. Converted with ffmpeg to mono Ogg Opus at 28 kbps, the excerpt 20-145 s, as crates/voicen-whisper/tests/clips/music-instrumental.opus.
+
+--------------------------------------------------------------------------------
 Whisper ggml models (OpenAI Whisper weights)
 License: MIT
 Source: https://huggingface.co/ggerganov/whisper.cpp

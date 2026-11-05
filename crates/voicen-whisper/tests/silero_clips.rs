@@ -27,19 +27,32 @@
 //! - Fallback (T-041 gate): `SpeechGate::new(SileroDetector::load(bad), EnergyDetector::new())`
 //!   decides with `"energy"` and carries `fallback_warning` on its first decision only; with the
 //!   good model it decides with `"silero"` and never warns.
+//! - Speech spans (T-135; spec 007 FR-023, SC-008): `SileroDetector::open(path)` returns the
+//!   shareable detector (`Clone`, one native context); `load` is `open` boxed. Its
+//!   `SpeechSpans::speech_spans` is `Ok(spans)` (sorted, non-empty, within the buffer, found with
+//!   the same fixed parameters as `contains_speech`) or `Err`, never `Ok(empty)` for a failure.
+//!   The native `Err` branch cannot be driven from here (the task's Investigation);
+//!   `voicen_core::vad::segments` pins it on Linux. Fixtures: speech labels are hand-set
+//!   millisecond constants checked against the energy detector (P-005); music is
+//!   `clips/music-instrumental.opus` (CC0-1.0, see licenses/manual.json), decoded as the final
+//!   pass does.
 //! - Nothing of whisper.cpp / ggml reaches stdout or stderr (checked in a child process, as
 //!   `transcribe_wav.rs::whisper_and_ggml_print_nothing`).
 //!
 //! FR-20 / NFR-04: no assertion message carries audio; only clip names, lengths and booleans.
 
 use std::fs;
+use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Barrier};
 
 use voicen_core::audio::AudioBuffer;
+use voicen_core::call::codec::{OpusOggReader, TrackDecoder};
 use voicen_core::vad::silero_model::{verify, SILERO_MODEL};
-use voicen_core::vad::{EnergyDetector, SpeechDetector, SpeechGate, VadError};
+use voicen_core::vad::{
+    EnergyDetector, SpeechDetector, SpeechGate, SpeechSpan, SpeechSpans, VadError,
+};
 use voicen_whisper::SileroDetector;
 
 /// The directory the CI fetch step filled (contract above).
@@ -545,4 +558,266 @@ fn silero_prints_nothing() {
             assert_eq!(n, 0, "the child's {name} holds '{token}' {n} time(s)");
         }
     }
+}
+
+// ---- T-135: speech spans of the final pass (FR-023, SC-008) ----------------------------
+
+const MUSIC_OPUS: &[u8] = include_bytes!("clips/music-instrumental.opus");
+
+/// Speech bounds of each speech clip as `[start, end)` ms inside the clip, set by hand from
+/// the clip's level curve (30 ms RMS frames) and checked against the energy detector in
+/// `composite_labels_agree_with_the_energy_detector` (never derived from Silero).
+const SPEECH_LABELS_MS: [(u64, u64); 3] = [
+    (300, 1_800), // speech-id-phrase
+    (240, 1_100), // speech-ru-lingualibre
+    (60, 930),    // connection-test-speech
+];
+/// Digital zero before the first clip, between the clips, and after the last, in ms.
+const COMPOSITE_GAPS_MS: [u64; 4] = [1_000, 1_500, 2_000, 1_000];
+/// Spans must match the labels within this many ms (the Acceptance line).
+const SPAN_TOLERANCE_MS: u64 = 200;
+/// The energy detector's premise tolerance on a clean clip (30 ms frames, 3-frame runs).
+const ENERGY_TOLERANCE_MS: u64 = 90;
+const TWO_MINUTES: usize = 2 * 60 * SAMPLE_RATE;
+
+fn ms_of(samples: usize) -> u64 {
+    samples as u64 * 1000 / SAMPLE_RATE as u64
+}
+
+fn open_good() -> SileroDetector {
+    match SileroDetector::open(&model_path()) {
+        Ok(d) => d,
+        Err(e) => panic!("opening the fetched Silero model failed: {e:?}"),
+    }
+}
+
+fn spans_of(d: &dyn SpeechSpans, name: &str, audio: &AudioBuffer) -> Vec<SpeechSpan> {
+    match d.speech_spans(audio) {
+        Ok(v) => v,
+        Err(e) => panic!("{name}: speech_spans failed: {e:?}"),
+    }
+}
+
+/// The three speech clips with their silence, and per clip its label in composite ms
+/// (placement offset + the clip's speech bounds).
+fn composite() -> (AudioBuffer, Vec<(u64, u64)>) {
+    let mut pcm: Vec<i16> = Vec::new();
+    let mut labels = Vec::new();
+    for (i, gap_ms) in COMPOSITE_GAPS_MS.iter().enumerate() {
+        pcm.resize(pcm.len() + (*gap_ms as usize) * SAMPLE_RATE / 1000, 0);
+        if let Some((name, raw)) = SPEECH.get(i) {
+            let offset = ms_of(pcm.len());
+            let (start, end) = SPEECH_LABELS_MS[i];
+            labels.push((offset + start, offset + end));
+            pcm.extend(samples(name, raw));
+        }
+    }
+    (AudioBuffer::from_16k_mono(pcm), labels)
+}
+
+/// Union matching, not counts (an internal word gap may split a phrase): every span lies
+/// within some label widened by `tol`, and every label has spans whose first start and last
+/// end are within `tol` of its bounds.
+fn assert_spans_match_labels(spans: &[SpeechSpan], labels: &[(u64, u64)], tol: u64) {
+    for s in spans {
+        assert!(
+            s.start_ms < s.end_ms,
+            "an empty or reversed span {}-{} ms",
+            s.start_ms,
+            s.end_ms
+        );
+        assert!(
+            labels
+                .iter()
+                .any(|&(a, b)| s.start_ms + tol >= a && s.end_ms <= b + tol),
+            "span {}-{} ms lies outside every label +-{tol} ms ({labels:?})",
+            s.start_ms,
+            s.end_ms
+        );
+    }
+    for &(a, b) in labels {
+        let inside: Vec<&SpeechSpan> = spans
+            .iter()
+            .filter(|s| s.start_ms + tol >= a && s.end_ms <= b + tol)
+            .collect();
+        let first = inside.iter().map(|s| s.start_ms).min();
+        let last = inside.iter().map(|s| s.end_ms).max();
+        assert!(
+            first.is_some_and(|f| f.abs_diff(a) <= tol),
+            "label {a}-{b} ms: first span start {first:?} is not within {tol} ms"
+        );
+        assert!(
+            last.is_some_and(|l| l.abs_diff(b) <= tol),
+            "label {a}-{b} ms: last span end {last:?} is not within {tol} ms"
+        );
+    }
+}
+
+/// Premise (P-005): the hand labels agree with an independent detector on each clean clip.
+#[test]
+fn composite_labels_agree_with_the_energy_detector() {
+    for (i, (name, raw)) in SPEECH.iter().enumerate() {
+        let spans = EnergyDetector::new()
+            .speech_spans(&buffer(name, raw))
+            .expect("the energy detector never fails");
+        let (a, b) = SPEECH_LABELS_MS[i];
+        let first = spans.first().map(|s| s.start_ms);
+        let last = spans.last().map(|s| s.end_ms);
+        assert!(
+            first.is_some_and(|f| f.abs_diff(a) <= ENERGY_TOLERANCE_MS),
+            "{name}: energy first start {first:?} vs label {a} ms"
+        );
+        assert!(
+            last.is_some_and(|l| l.abs_diff(b) <= ENERGY_TOLERANCE_MS),
+            "{name}: energy last end {last:?} vs label {b} ms"
+        );
+    }
+    let (audio, labels) = composite();
+    assert_eq!(labels.len(), 3);
+    let energy = EnergyDetector::new()
+        .speech_spans(&audio)
+        .expect("the energy detector never fails");
+    assert_spans_match_labels(&energy, &labels, ENERGY_TOLERANCE_MS + 30);
+}
+
+#[test]
+fn silero_spans_of_the_speech_composite_lie_within_200_ms_of_the_labels() {
+    let (audio, labels) = composite();
+    let d = open_good();
+    let spans = spans_of(&d, "speech composite", &audio);
+    assert!(!spans.is_empty(), "no span over three speech clips");
+    let duration_ms = ms_of(audio.samples().len());
+    for w in spans.windows(2) {
+        assert!(
+            w[0].end_ms <= w[1].start_ms,
+            "unsorted or overlapping spans"
+        );
+    }
+    for s in &spans {
+        assert!(s.end_ms <= duration_ms, "a span ends past the buffer");
+        assert_eq!(s.start_ms % 10, 0, "a span start is off the 10 ms step");
+        assert_eq!(s.end_ms % 10, 0, "a span end is off the 10 ms step");
+    }
+    assert_spans_match_labels(&spans, &labels, SPAN_TOLERANCE_MS);
+}
+
+#[test]
+fn two_minutes_of_digital_silence_have_no_span() {
+    let audio = AudioBuffer::from_16k_mono(vec![0i16; TWO_MINUTES]);
+    assert_eq!(open_good().speech_spans(&audio), Ok(Vec::new()));
+}
+
+#[test]
+fn two_minutes_of_tiled_room_tone_have_no_span() {
+    let tone = samples("room-tone-ac-unit", ROOM_TONE);
+    let pcm: Vec<i16> = tone.iter().copied().cycle().take(TWO_MINUTES).collect();
+    assert_eq!(pcm.len(), TWO_MINUTES, "premise: the tiled buffer is 120 s");
+    assert_eq!(
+        open_good().speech_spans(&AudioBuffer::from_16k_mono(pcm)),
+        Ok(Vec::new())
+    );
+}
+
+#[test]
+fn two_minutes_of_instrumental_music_have_no_span() {
+    let mut reader = OpusOggReader::open(Cursor::new(MUSIC_OPUS)).expect("open the music clip");
+    let audio = match reader.next_window(120_000) {
+        Ok(Some(a)) => a,
+        other => panic!(
+            "decoding the music clip gave no audio: {:?}",
+            other.map(|o| o.is_some())
+        ),
+    };
+    // Premise: the scan is the 2 min the final pass hands the detector.
+    assert!(
+        audio.samples().len() >= TWO_MINUTES,
+        "the decoded music is {} ms, under 120 s",
+        ms_of(audio.samples().len())
+    );
+    assert_eq!(open_good().speech_spans(&audio), Ok(Vec::new()));
+}
+
+#[test]
+fn empty_audio_has_no_span_and_no_error() {
+    assert_eq!(
+        open_good().speech_spans(&AudioBuffer::from_16k_mono(Vec::new())),
+        Ok(Vec::new())
+    );
+}
+
+#[test]
+fn spans_and_contains_speech_never_disagree() {
+    let d = open_good();
+    let (composite, _) = composite();
+    let cases = [
+        ("composite", composite),
+        ("cough-woman", buffer("cough-woman", COUGH_WOMAN)),
+        (
+            "keyboard-model-m",
+            buffer("keyboard-model-m", KEYBOARD_MODEL_M),
+        ),
+        (
+            "digital silence",
+            AudioBuffer::from_16k_mono(vec![0i16; 2 * SAMPLE_RATE]),
+        ),
+    ];
+    for (name, audio) in &cases {
+        let spans = spans_of(&d, name, audio);
+        let total_ms: u64 = spans.iter().map(|s| s.end_ms - s.start_ms).sum();
+        assert_eq!(
+            SpeechDetector::contains_speech(&d, audio),
+            Ok(total_ms >= 250),
+            "{name}: contains_speech vs spans totalling {total_ms} ms"
+        );
+    }
+}
+
+/// One load, two ports: the dictation gate and the pass share one native context.
+#[test]
+fn one_load_serves_the_gate_and_the_span_port_at_once() {
+    let d = open_good();
+    let gate = SpeechGate::new(Ok(Box::new(d.clone())), EnergyDetector::new());
+    let port: Arc<dyn SpeechSpans> = Arc::new(d);
+    assert_eq!(port.name(), "silero");
+
+    let (speech, _) = composite();
+    let noise = buffer("keyboard-model-m", KEYBOARD_MODEL_M);
+    let decision = gate.decide(&speech);
+    assert_eq!(decision.detector, "silero", "the gate fell back");
+    assert!(
+        !decision.fallback_warning,
+        "the gate warned with a good model"
+    );
+    assert!(decision.speech, "the gate: composite is speech");
+
+    let barrier = Arc::new(Barrier::new(2));
+    let handles: Vec<_> = [(true, speech), (false, noise)]
+        .into_iter()
+        .map(|(want, audio)| {
+            let port = Arc::clone(&port);
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                let got: Vec<_> = (0..3).map(|_| port.speech_spans(&audio)).collect();
+                (want, got)
+            })
+        })
+        .collect();
+    for h in handles {
+        let (want, got) = h.join().expect("a span thread panicked");
+        for r in &got {
+            let spans = r.as_ref().expect("speech_spans failed");
+            assert_eq!(!spans.is_empty(), want, "concurrent spans, speech = {want}");
+        }
+        assert!(
+            got.windows(2).all(|w| w[0] == w[1]),
+            "repeated answers differ"
+        );
+    }
+    // The gate still decides after the port was used, on the same context.
+    assert!(
+        !gate
+            .decide(&buffer("keyboard-model-m", KEYBOARD_MODEL_M))
+            .speech
+    );
 }
