@@ -33,10 +33,10 @@ Tasks: T-125. Contract: `specs/007-call-mode-record/contracts/core-call.md` "Bui
 - **What breaks if you violate it:** a damaged call disappears from the Calls window with its audio still on disk (FR-033), or a user folder, the probe file or `meta.json.tmp` shows as a call.
 - **Where it is enforced:** `CallStore::list` reads the current root, then every earlier root, and never creates anything.
   - Only names in the `CallId` grammar are calls (D2); anything else is skipped.
-  - A call folder whose `meta.json` is missing, unparsable, carries an unknown key (D4, `deny_unknown_fields`), is of another schema, names another id, has other tracks, or lacks a track file lists as `ListState::Damaged` with `meta: None`; so does `failed` without its `failure`.
+  - A call folder whose `meta.json` is missing, unparsable, carries an unknown key (D4, `deny_unknown_fields`) or a value outside a closed set (`device_changes[].cause`, `pass_mode`, `results.<track>`, which is only `pending` until the final-pass write: contract `core-call.md` › Built T-125), is of another schema, names another id, has other tracks, or lacks a track file lists as `ListState::Damaged` with `meta: None`; so does `failed` without its `failure`.
   - A missing default current root lists as empty (it is created at the first start); any other root that cannot be read (missing chosen or earlier root, a file, a `read_dir` error) is one `unavailable` line, and the readable roots still list (D3).
   - Order: newest first by (start stamp, numeric clash suffix), so `-10` precedes `-2`; ties keep root order, current root first. `CallId`'s own `Ord` is string order and is not used.
-  - Tests `list_current_and_earlier_newest_first_with_numeric_suffix_order`, `list_skips_names_that_are_not_a_call_id`, `missing_default_root_lists_empty_without_unavailable`, `missing_chosen_or_earlier_root_gives_one_unavailable_line`, `damaged_*`, `meta_json_with_unknown_key_lists_as_damaged`.
+  - Tests `list_current_and_earlier_newest_first_with_numeric_suffix_order`, `list_skips_names_that_are_not_a_call_id`, `missing_default_root_lists_empty_without_unavailable`, `missing_chosen_or_earlier_root_gives_one_unavailable_line`, `damaged_*`, `meta_json_with_unknown_key_lists_as_damaged`, `meta_json_outside_the_closed_sets_lists_as_damaged`.
 - **Don't:** sort by `CallId`, list non-grammar names as damaged, hide a damaged folder, or let one unreadable root empty the list.
 
 ### A failed track step maps to the log's storage kind in one place; `Encode` is `write`
