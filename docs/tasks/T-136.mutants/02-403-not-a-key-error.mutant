@@ -1,0 +1,8 @@
+guarantee: AC-3: 401 and 403 map to key (403 on Segments/Plain -> Failed(Key))
+file: crates/voicen-core/src/failure.rs
+added_by: test-writer
+--- old
+        TransportError::Status(401 | 403) | TransportError::UnusableKey => {
+--- new
+        TransportError::Status(401) | TransportError::UnusableKey => {
+--- end

@@ -464,12 +464,196 @@ mod tests {
                 timeouts: crate::timeouts::Timeouts::default(),
             };
             let engine = engine(None);
-            let Some((_, body)) = engine.multipart_body(&audio, &req) else {
+            let Some((_, body)) = engine.multipart_body(&audio, &req, ResponseShape::Plain) else {
                 panic!("the body is encoded");
             };
             let expected = body_capacity(wav::encode(&audio).len(), Some("whisper-1"), language);
             assert_eq!(body.capacity(), expected, "language {language:?}");
             assert!(body.len() <= expected);
+        }
+    }
+
+    #[test]
+    fn multipart_body_is_sized_once_from_the_wav_for_both_shapes() {
+        // T-136: the Segments form has a fifth part (`timestamp_granularities[]`);
+        // the buffer is still reserved once from the WAV length, the framing still
+        // fits MULTIPART_OVERHEAD, and the form never regrows it. The shape decides
+        // the `response_format` text and the extra part. Bite: a Segments body
+        // outgrowing `body_capacity` (capacity differs), `Vec::new()`, the shape
+        // ignored (the same text for both).
+        let audio = AudioBuffer::from_16k_mono(vec![0; 16_000 * 10]);
+        for (shape, language) in [
+            (ResponseShape::Segments, None),
+            (ResponseShape::Segments, Some("de")),
+            (ResponseShape::Plain, None),
+            (ResponseShape::Plain, Some("de")),
+        ] {
+            let req = TranscribeRequest {
+                language: language.map(str::to_string),
+                timeouts: crate::timeouts::Timeouts::default(),
+            };
+            let Some((content_type, body)) = engine(None).multipart_body(&audio, &req, shape)
+            else {
+                panic!("the body is encoded");
+            };
+            let expected = body_capacity(wav::encode(&audio).len(), Some("whisper-1"), language);
+            assert_eq!(body.capacity(), expected, "{shape:?} {language:?}");
+            assert!(body.len() <= expected, "{shape:?} {language:?}");
+            assert!(content_type.starts_with("multipart/form-data; boundary="));
+
+            let text = String::from_utf8_lossy(&body);
+            let has_granularity = text.contains("name=\"timestamp_granularities[]\"");
+            let has_verbose = text.contains("verbose_json");
+            match shape {
+                ResponseShape::Segments => {
+                    assert!(
+                        has_verbose && has_granularity,
+                        "{shape:?}: {has_verbose} {has_granularity}"
+                    );
+                }
+                ResponseShape::Plain => {
+                    assert!(
+                        !has_verbose && !has_granularity,
+                        "{shape:?}: {has_verbose} {has_granularity}"
+                    );
+                    assert!(text.contains("name=\"response_format\""));
+                }
+            }
+        }
+    }
+
+    // ---- T-136: the language mapping and the failure mapping (pure) ----------
+
+    fn lang(code: &str) -> Option<crate::settings::LangCode> {
+        crate::settings::LangCode::parse(code)
+    }
+
+    #[test]
+    fn whisper_name_table_code_column_is_whisper_iso_639_1() {
+        // #196(4): the 97 names of whisper.cpp's g_lang carry exactly the codes of
+        // WHISPER_ISO_639_1, in that order, so the two lists cannot drift. Bite: a
+        // dropped or added row (count), a reordered or mistyped code, haw/jw/yue
+        // left in.
+        assert_eq!(
+            WHISPER_NAMES.len(),
+            crate::settings::WHISPER_ISO_639_1.len()
+        );
+        assert_eq!(WHISPER_NAMES.len(), 97);
+        let codes: Vec<&str> = WHISPER_NAMES.iter().map(|(code, _)| *code).collect();
+        assert_eq!(codes, crate::settings::WHISPER_ISO_639_1.to_vec());
+    }
+
+    #[test]
+    fn whisper_names_are_lowercase_unique_and_each_maps_to_its_code() {
+        // Every row round-trips through engine_lang, whatever the case the server
+        // used ("English", "ENGLISH"), and no two rows share a name. Bite: a name
+        // typed with a capital or a trailing space (not found), a duplicate name
+        // shadowing another code, engine_lang matching case-sensitively.
+        let mut seen = std::collections::BTreeSet::new();
+        for (code, name) in WHISPER_NAMES.iter() {
+            assert_eq!(*name, name.to_ascii_lowercase(), "{name:?} is lowercase");
+            assert_eq!(*name, name.trim(), "{name:?} is trimmed");
+            assert!(!name.is_empty());
+            assert!(seen.insert(*name), "{name:?} twice");
+            assert_eq!(engine_lang(name), lang(code), "{name:?}");
+            assert_eq!(
+                engine_lang(&name.to_ascii_uppercase()),
+                lang(code),
+                "{name:?} upper"
+            );
+        }
+        // The spellings of g_lang that differ from the common English name.
+        assert_eq!(engine_lang("haitian creole"), lang("ht"));
+        assert_eq!(engine_lang("myanmar"), lang("my"));
+    }
+
+    #[test]
+    fn engine_lang_maps_names_and_codes_and_drops_the_rest() {
+        // Acceptance: "english", "English" and `en` map to `en`; an unknown value
+        // maps to None. Bite: no ASCII-lowercase, no LangCode::parse arm ('en'), a
+        // fallback to "en" or to the raw text, haw (Hawaiian is not in the 97) mapped.
+        for raw in ["english", "English", "ENGLISH", "en"] {
+            assert_eq!(engine_lang(raw), lang("en"), "{raw:?}");
+        }
+        assert_eq!(engine_lang("german"), lang("de"));
+        // The value is ASCII-lowercased first (decides_on 3), codes included.
+        assert_eq!(engine_lang("DE"), lang("de"));
+        for raw in [
+            "klingon", "haw", "hawaiian", "jw", "yue", "", " ", "english ", "xx",
+        ] {
+            assert_eq!(engine_lang(raw), None, "{raw:?}");
+        }
+    }
+
+    /// Every `FailureReason` once; the exhaustive match makes a new reason a
+    /// compile error here until the mapping table below has a row for it.
+    fn every_reason() -> Vec<FailureReason> {
+        let all = vec![
+            FailureReason::InvalidApiKey,
+            FailureReason::NetworkUnavailable,
+            FailureReason::CannotReach {
+                host: "api.example.com:8443".to_string(),
+            },
+            FailureReason::Timeout {
+                origin: crate::failure::TimeoutOrigin::Server,
+            },
+            FailureReason::ServerError { status: 503 },
+            FailureReason::UnexpectedResponse,
+            FailureReason::KeyStoreUnavailable,
+            FailureReason::EngineNotConfigured,
+            FailureReason::ClipboardUnavailable,
+            FailureReason::MicrophoneUnavailable {
+                cause: crate::recording::MicCause::NoDevice,
+            },
+            FailureReason::NoLocalModel,
+            FailureReason::LocalEngineFailed,
+        ];
+        for reason in &all {
+            match reason {
+                FailureReason::InvalidApiKey
+                | FailureReason::NetworkUnavailable
+                | FailureReason::CannotReach { .. }
+                | FailureReason::Timeout { .. }
+                | FailureReason::ServerError { .. }
+                | FailureReason::UnexpectedResponse
+                | FailureReason::KeyStoreUnavailable
+                | FailureReason::EngineNotConfigured
+                | FailureReason::ClipboardUnavailable
+                | FailureReason::MicrophoneUnavailable { .. }
+                | FailureReason::NoLocalModel
+                | FailureReason::LocalEngineFailed => {}
+            }
+        }
+        all
+    }
+
+    #[test]
+    fn failure_reason_maps_onto_fail_reason_for_every_reason() {
+        // decides_on (4): InvalidApiKey -> Key; NetworkUnavailable and CannotReach ->
+        // Network; Timeout -> Timeout; ServerError and UnexpectedResponse ->
+        // Provider; EngineNotConfigured -> EngineNotSetUp; the variants
+        // transcribe_timed cannot produce -> Provider. Bite: 401 left as Provider,
+        // CannotReach as Provider, a wildcard arm hiding a row, Timeout as Network.
+        use crate::call::events::FailReason;
+        let reasons = every_reason();
+        assert_eq!(reasons.len(), 12);
+        for reason in &reasons {
+            let expected = match reason {
+                FailureReason::InvalidApiKey => FailReason::Key,
+                FailureReason::NetworkUnavailable | FailureReason::CannotReach { .. } => {
+                    FailReason::Network
+                }
+                FailureReason::Timeout { .. } => FailReason::Timeout,
+                FailureReason::EngineNotConfigured => FailReason::EngineNotSetUp,
+                FailureReason::ServerError { .. }
+                | FailureReason::UnexpectedResponse
+                | FailureReason::KeyStoreUnavailable
+                | FailureReason::ClipboardUnavailable
+                | FailureReason::MicrophoneUnavailable { .. }
+                | FailureReason::NoLocalModel
+                | FailureReason::LocalEngineFailed => FailReason::Provider,
+            };
+            assert_eq!(fail_reason(reason), expected, "{reason:?}");
         }
     }
 

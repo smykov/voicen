@@ -1,0 +1,8 @@
+guarantee: AC-4: the response cap stays 1 MiB (a MAX_BODY+1 verbose_json body -> Failed(Provider))
+file: crates/voicen-core/src/engine/http.rs
+added_by: test-writer
+--- old
+        if !u64::try_from(body.len()).is_ok_and(|len| len <= MAX_BODY) {
+--- new
+        if !u64::try_from(body.len()).is_ok_and(|len| len <= MAX_BODY + 1) {
+--- end

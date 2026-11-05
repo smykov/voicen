@@ -22,14 +22,16 @@ use common::os_answer::{in_time, OsAnswer, Unanswered, OS_ANSWER_BUDGET};
 use common::timing::{at_least, late_answer, measure, Took, M};
 use serde_json::json;
 use voicen_core::audio::{wav, AudioBuffer};
+use voicen_core::call::events::FailReason;
+use voicen_core::call::transcript::EngineSegment;
 use voicen_core::engine::lookup::{install, FixedLookup};
-use voicen_core::engine::openai::OpenAiCompatibleEngine;
+use voicen_core::engine::openai::{OpenAiCompatibleEngine, ResponseShape, Timed, TimedFailure};
 use voicen_core::engine::{engine_for, Engine, TranscribeRequest};
 use voicen_core::failure::{FailureReason, TimeoutOrigin};
 use voicen_core::i18n::{text, UiLanguage};
 use voicen_core::secrets::{FakeCredentialStore, KeySlot, Secret};
 use voicen_core::settings::url::check_base_url;
-use voicen_core::settings::{defaults, EngineKind};
+use voicen_core::settings::{defaults, EngineKind, LangCode};
 use voicen_core::timeouts::Timeouts;
 use wiremock::matchers::any;
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1300,4 +1302,590 @@ fn unanswered_lookup_cut_by_a_total_deadline_below_connect_is_network_unavailabl
     );
     assert_eq!(got, Err(FailureReason::NetworkUnavailable));
     at_least(took, total);
+}
+
+// ---- T-136: transcribe_timed (segment times, time-less signal, FailReason) ----------
+//
+// Every leg goes through `transcribe_timed` on a std thread. Timeout and refused
+// legs use only `common` (`in_time`, `late_answer`, `OsAnswer::refused`), per
+// docs/decisions/core-tests.md.
+
+/// `transcribe_timed` on a plain std thread (no runtime context there).
+fn timed(
+    engine: Box<OpenAiCompatibleEngine>,
+    req: TranscribeRequest,
+    shape: ResponseShape,
+) -> Result<Timed, TimedFailure> {
+    std::thread::spawn(move || engine.transcribe_timed(&audio(), &req, shape))
+        .join()
+        .expect("transcribe_timed must not panic")
+}
+
+fn lang(code: &str) -> Option<LangCode> {
+    LangCode::parse(code)
+}
+
+/// A `verbose_json` reply with the given `segments` value.
+fn verbose(text: &str, language: &str, segments: serde_json::Value) -> ResponseTemplate {
+    ResponseTemplate::new(200).set_body_json(json!({
+        "task": "transcribe",
+        "language": language,
+        "duration": 3.5,
+        "text": text,
+        "segments": segments,
+    }))
+}
+
+fn one_segment() -> serde_json::Value {
+    json!([{ "id": 0, "start": 0.0, "end": 1.5, "text": " hello there" }])
+}
+
+#[tokio::test]
+async fn segments_request_has_verbose_json_granularity_language_and_model() {
+    // Acceptance 1 and 5: a Segments request sends response_format=verbose_json and
+    // timestamp_granularities[]=segment, plus model and the request's language, the
+    // file as WAV and the Bearer key, in one POST. Bite: response_format left at
+    // json, the granularity part missing or named without `[]`, the language not
+    // sent, a second request.
+    let server = server_with(verbose("hello there", "english", one_segment())).await;
+    let got = timed(
+        api_engine(&format!("{}/v1", server.uri()), Some(KEY)),
+        req(Some("de")),
+        ResponseShape::Segments,
+    );
+    assert!(got.is_ok(), "{got:?}");
+    let r = only_request(&server).await;
+    assert_eq!(r.method.as_str(), "POST");
+    assert_eq!(r.url.path(), "/v1/audio/transcriptions");
+    assert_eq!(header(&r, "authorization"), Some("Bearer sk-test-SECRET"));
+    let parts = multipart(&r);
+    let mut names: Vec<&str> = parts.iter().map(|p| p.name.as_str()).collect();
+    names.sort_unstable();
+    assert_eq!(
+        names,
+        vec![
+            "file",
+            "language",
+            "model",
+            "response_format",
+            "timestamp_granularities[]"
+        ]
+    );
+    assert_eq!(
+        part_text(&parts, "response_format").as_deref(),
+        Some("verbose_json")
+    );
+    assert_eq!(
+        part_text(&parts, "timestamp_granularities[]").as_deref(),
+        Some("segment")
+    );
+    assert_eq!(part_text(&parts, "language").as_deref(), Some("de"));
+    assert_eq!(part_text(&parts, "model").as_deref(), Some("whisper-1"));
+    let file = part(&parts, "file").expect("file part");
+    assert_eq!(file.filename.as_deref(), Some("audio.wav"));
+    assert!(
+        file.body == wav::encode(&audio()),
+        "file part is not the WAV"
+    );
+}
+
+#[tokio::test]
+async fn segments_request_with_auto_language_omits_the_language_part() {
+    // Acceptance 5: the request carries the dictation speech language, and none for
+    // auto. Bite: an empty or "auto" language part.
+    let server = server_with(verbose("hello", "english", one_segment())).await;
+    let got = timed(
+        api_engine(&format!("{}/v1", server.uri()), Some(KEY)),
+        req(None),
+        ResponseShape::Segments,
+    );
+    assert!(got.is_ok(), "{got:?}");
+    let parts = multipart(&only_request(&server).await);
+    assert!(part(&parts, "language").is_none());
+}
+
+#[tokio::test]
+async fn plain_request_is_json_without_a_granularity_part() {
+    // Plain keeps the dictation request: response_format=json, no
+    // timestamp_granularities[]. Bite: the shape ignored (verbose_json for both).
+    let server = server_with(ok_text("hello world")).await;
+    let got = timed(
+        api_engine(&format!("{}/v1", server.uri()), Some(KEY)),
+        req(Some("de")),
+        ResponseShape::Plain,
+    );
+    let Ok(ok) = got else {
+        panic!("Plain OK expected, got {got:?}");
+    };
+    assert_eq!(ok.text, "hello world");
+    assert_eq!(ok.segments, None);
+    let parts = multipart(&only_request(&server).await);
+    assert_eq!(
+        part_text(&parts, "response_format").as_deref(),
+        Some("json")
+    );
+    assert!(part(&parts, "timestamp_granularities[]").is_none());
+}
+
+#[tokio::test]
+async fn segments_reply_parses_times_text_and_the_top_level_language() {
+    // Acceptance 1 and 5: an OK reply parses its segments (start_s/end_s/text) and
+    // the top-level `language` 'english' maps to en. Bite: start/end swapped or read
+    // as milliseconds, the segment text dropped, segments None, the language left
+    // None or the raw name.
+    let segments = json!([
+        { "id": 0, "start": 0.0, "end": 1.5, "text": " hello there" },
+        { "id": 1, "start": 2.25, "end": 4.0, "text": " general kenobi" },
+    ]);
+    let server = server_with(verbose("hello there general kenobi", "english", segments)).await;
+    let got = timed(
+        api_engine(&format!("{}/v1", server.uri()), Some(KEY)),
+        req(None),
+        ResponseShape::Segments,
+    );
+    let Ok(ok) = got else {
+        panic!("Segments OK expected, got {got:?}");
+    };
+    assert_eq!(ok.language, lang("en"));
+    let Some(segments) = ok.segments else {
+        panic!("Ok on Segments always carries segments");
+    };
+    assert_eq!(segments.len(), 2);
+    assert_eq!(
+        (segments[0].start_s, segments[0].end_s),
+        (0.0, 1.5),
+        "first segment times"
+    );
+    assert_eq!(
+        (segments[1].start_s, segments[1].end_s),
+        (2.25, 4.0),
+        "second segment times"
+    );
+    assert_eq!(segments[0].text.trim(), "hello there");
+    assert_eq!(segments[1].text.trim(), "general kenobi");
+}
+
+#[tokio::test]
+async fn the_engine_language_value_reaches_timed_only_through_the_mapping() {
+    // Acceptance 5: "english", "English" and `en` map to en; an unknown value, an
+    // empty one, a missing field and a non-string map to None (null in the log).
+    // Bite: no lowercase, no code arm, an unknown value passed through or turned
+    // into "en", a missing field defaulting to "en".
+    let cases: Vec<(&str, serde_json::Value, Option<LangCode>)> = vec![
+        ("english", json!("english"), lang("en")),
+        ("English", json!("English"), lang("en")),
+        ("code", json!("en"), lang("en")),
+        ("german", json!("german"), lang("de")),
+        ("unknown", json!("klingon"), None),
+        ("empty", json!(""), None),
+        ("number", json!(7), None),
+        ("null", json!(null), None),
+    ];
+    for (name, language, expected) in cases {
+        let body = json!({ "text": "hi", "language": language, "segments": one_segment() });
+        let server = server_with(ResponseTemplate::new(200).set_body_json(body)).await;
+        let got = timed(
+            api_engine(&format!("{}/v1", server.uri()), Some(KEY)),
+            req(None),
+            ResponseShape::Segments,
+        );
+        match got {
+            Ok(ok) => assert_eq!(ok.language, expected, "{name}"),
+            other => panic!("{name}: {other:?}"),
+        }
+    }
+    // A missing `language` field.
+    let body = json!({ "text": "hi", "segments": one_segment() });
+    let server = server_with(ResponseTemplate::new(200).set_body_json(body)).await;
+    let got = timed(
+        api_engine(&format!("{}/v1", server.uri()), Some(KEY)),
+        req(None),
+        ResponseShape::Segments,
+    );
+    match got {
+        Ok(ok) => assert_eq!(ok.language, None, "missing"),
+        other => panic!("missing: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_segment_language_is_mapped_the_same_way() {
+    // decides_on (3): a per-segment `language` is parsed like the top-level one;
+    // absent or unknown is None. Bite: the segment language ignored, or passed raw.
+    let segments = json!([
+        { "start": 0.0, "end": 1.0, "text": "a", "language": "german" },
+        { "start": 1.0, "end": 2.0, "text": "b", "language": "klingon" },
+        { "start": 2.0, "end": 3.0, "text": "c" },
+    ]);
+    let server = server_with(verbose("a b c", "english", segments)).await;
+    let got = timed(
+        api_engine(&format!("{}/v1", server.uri()), Some(KEY)),
+        req(None),
+        ResponseShape::Segments,
+    );
+    let Ok(Timed {
+        segments: Some(segments),
+        ..
+    }) = got
+    else {
+        panic!("Segments OK expected, got {got:?}");
+    };
+    let langs: Vec<Option<LangCode>> = segments.iter().map(|s: &EngineSegment| s.lang).collect();
+    assert_eq!(langs, vec![lang("de"), None, None]);
+}
+
+#[tokio::test]
+async fn status_400_and_422_to_segments_are_timeless_after_one_request() {
+    // Acceptance 2 (FR-024): a server that does not know verbose_json answers 400 or
+    // 422; the chunk is time-less, and this call does not retry as Plain (the caller
+    // re-sends). Bite: 400/422 as Failed(Provider), a retry inside the call (two
+    // requests), 400 only (422 left as Provider).
+    for status in [400u16, 422] {
+        let server = server_with(
+            ResponseTemplate::new(status).set_body_json(json!({ "error": { "message": KEY } })),
+        )
+        .await;
+        let got = timed(
+            api_engine(&format!("{}/v1", server.uri()), Some(KEY)),
+            req(None),
+            ResponseShape::Segments,
+        );
+        assert!(
+            matches!(got, Err(TimedFailure::Timeless)),
+            "{status}: {got:?}"
+        );
+        only_request(&server).await;
+    }
+}
+
+#[tokio::test]
+async fn status_400_and_422_on_plain_are_provider() {
+    // Acceptance 2: a 400 on Plain is `provider`, never time-less (Plain has no
+    // times to lack). Bite: the Timeless rule applied without looking at the shape.
+    for status in [400u16, 422] {
+        let server = server_with(ResponseTemplate::new(status)).await;
+        let got = timed(
+            api_engine(&format!("{}/v1", server.uri()), Some(KEY)),
+            req(None),
+            ResponseShape::Plain,
+        );
+        assert!(
+            matches!(got, Err(TimedFailure::Failed(FailReason::Provider))),
+            "{status}: {got:?}"
+        );
+        only_request(&server).await;
+    }
+}
+
+#[tokio::test]
+async fn a_2xx_without_segments_is_timeless() {
+    // Acceptance 2: an OK reply with `segments` absent or null (a server that
+    // ignores verbose_json) is time-less, its text discarded. Bite: Ok with
+    // segments None on Segments (the invariant), Failed(Provider), the text used.
+    let bodies: Vec<(&str, serde_json::Value)> = vec![
+        ("absent", json!({ "text": "hello" })),
+        ("null", json!({ "text": "hello", "segments": null })),
+        (
+            "absent with language",
+            json!({ "text": "hello", "language": "english" }),
+        ),
+    ];
+    for (name, body) in bodies {
+        let server = server_with(ResponseTemplate::new(200).set_body_json(body)).await;
+        let got = timed(
+            api_engine(&format!("{}/v1", server.uri()), Some(KEY)),
+            req(None),
+            ResponseShape::Segments,
+        );
+        assert!(
+            matches!(got, Err(TimedFailure::Timeless)),
+            "{name}: {got:?}"
+        );
+        only_request(&server).await;
+    }
+}
+
+#[tokio::test]
+async fn empty_segments_are_silence_only_when_the_text_is_blank() {
+    // decides_on (2): `segments: []` with blank text is Ok(Some([])) (silence);
+    // with non-blank text it is Timeless. Bite: empty segments always Timeless
+    // (silence re-sent as Plain), always Ok (speech lost), blank text not trimmed.
+    for blank in ["", "   \n\t"] {
+        let server = server_with(verbose(blank, "english", json!([]))).await;
+        let got = timed(
+            api_engine(&format!("{}/v1", server.uri()), Some(KEY)),
+            req(None),
+            ResponseShape::Segments,
+        );
+        match got {
+            Ok(ok) => assert_eq!(ok.segments, Some(Vec::new()), "{blank:?}"),
+            other => panic!("{blank:?}: {other:?}"),
+        }
+    }
+    let server = server_with(verbose("said something", "english", json!([]))).await;
+    let got = timed(
+        api_engine(&format!("{}/v1", server.uri()), Some(KEY)),
+        req(None),
+        ResponseShape::Segments,
+    );
+    assert!(matches!(got, Err(TimedFailure::Timeless)), "{got:?}");
+}
+
+#[tokio::test]
+async fn plain_ok_has_no_segments_even_when_the_reply_carries_them() {
+    // Invariant: Ok on Plain always has segments None. Bite: segments parsed on
+    // Plain, the text not trimmed.
+    let server = server_with(verbose("  plain text \n", "english", one_segment())).await;
+    let got = timed(
+        api_engine(&format!("{}/v1", server.uri()), Some(KEY)),
+        req(None),
+        ResponseShape::Plain,
+    );
+    let Ok(ok) = got else {
+        panic!("Plain OK expected, got {got:?}");
+    };
+    assert_eq!(ok.text, "plain text");
+    assert_eq!(ok.segments, None);
+}
+
+#[tokio::test]
+async fn status_401_and_403_are_key_and_never_timeless_with_one_request() {
+    // Acceptance 3: 401 and 403 map to `key` for both shapes and never fall back,
+    // exactly one request. Bite: 401/403 treated as Timeless (the 4xx range), as
+    // Provider, a retry as Plain.
+    for shape in [ResponseShape::Segments, ResponseShape::Plain] {
+        for status in [401u16, 403] {
+            let server = server_with(
+                ResponseTemplate::new(status).set_body_json(json!({ "text": TRANSCRIPT })),
+            )
+            .await;
+            let got = timed(
+                api_engine(&format!("{}/v1", server.uri()), Some(KEY)),
+                req(None),
+                shape,
+            );
+            assert!(
+                matches!(got, Err(TimedFailure::Failed(FailReason::Key))),
+                "{shape:?} {status}: {got:?}"
+            );
+            only_request(&server).await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn an_unusable_stored_key_is_key_and_sends_nothing() {
+    // The key rule is the shared one (http::authorization): a key that cannot be a
+    // header is `key`, no request. Bite: the key dropped and the request sent.
+    let server = server_with(verbose("hello", "english", one_segment())).await;
+    let got = timed(
+        api_engine(&format!("{}/v1", server.uri()), Some("sk-test-a\nb")),
+        req(None),
+        ResponseShape::Segments,
+    );
+    assert!(
+        matches!(got, Err(TimedFailure::Failed(FailReason::Key))),
+        "{got:?}"
+    );
+    let sent = server.received_requests().await.expect("recording is on");
+    assert_eq!(sent.len(), 0, "a request reached the server");
+}
+
+#[test]
+fn a_refused_connect_is_network() {
+    // Acceptance 3: a connect error maps to `network` (CannotReach -> Network), not
+    // Timeless and not Provider. Bite: the transport error mapped to Provider, or
+    // classified as Timeless.
+    let case = OsAnswer::refused();
+    for shape in [ResponseShape::Segments, ResponseShape::Plain] {
+        let got = timed(
+            api_engine(&format!("http://{}/v1", case.host), Some(KEY)),
+            req_os_answer(&case),
+            shape,
+        );
+        assert!(
+            matches!(got, Err(TimedFailure::Failed(FailReason::Network))),
+            "{shape:?}: {got:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_late_answer_is_timeout() {
+    // Acceptance 3: an answer past the FR-24 whole-request limit maps to `timeout`.
+    // Bite: req.timeouts not used (the late answer arrives as Ok), a timeout mapped
+    // to Network or Provider.
+    for shape in [ResponseShape::Segments, ResponseShape::Plain] {
+        let server =
+            server_with(verbose("late", "english", one_segment()).set_delay(SHORT_LATE_ANSWER))
+                .await;
+        let got = timed(
+            api_engine(&format!("{}/v1", server.uri()), Some(KEY)),
+            req_with_total(SHORT_LIMIT),
+            shape,
+        );
+        assert!(
+            matches!(got, Err(TimedFailure::Failed(FailReason::Timeout))),
+            "{shape:?}: {got:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn other_statuses_are_provider_never_timeless() {
+    // Acceptance 3: 429, 404 and other 4xx/5xx map to `provider`, one request, no
+    // retry; only 400/422 on Segments are time-less. Bite: the whole 4xx range
+    // Timeless, a retry on 429/5xx, a status mapped to Network.
+    for shape in [ResponseShape::Segments, ResponseShape::Plain] {
+        for status in [404u16, 413, 429, 500, 503] {
+            let server = server_with(ResponseTemplate::new(status)).await;
+            let got = timed(
+                api_engine(&format!("{}/v1", server.uri()), Some(KEY)),
+                req(None),
+                shape,
+            );
+            assert!(
+                matches!(got, Err(TimedFailure::Failed(FailReason::Provider))),
+                "{shape:?} {status}: {got:?}"
+            );
+            only_request(&server).await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn malformed_bodies_are_provider() {
+    // Acceptance 3: a malformed 2xx body maps to `provider`, never Ok and never
+    // Timeless: not JSON, not an object, a segments value that is not an array of
+    // objects with finite non-negative numeric start <= end and string text. Bite:
+    // a lenient parse (start defaulting to 0, a string start coerced, end < start
+    // accepted), the parse error turned into Timeless.
+    let bad_segments: Vec<(&str, serde_json::Value)> = vec![
+        (
+            "start a string",
+            json!([{ "start": "0.0", "end": 1.0, "text": "a" }]),
+        ),
+        ("start missing", json!([{ "end": 1.0, "text": "a" }])),
+        (
+            "end null",
+            json!([{ "start": 0.0, "end": null, "text": "a" }]),
+        ),
+        (
+            "text a number",
+            json!([{ "start": 0.0, "end": 1.0, "text": 5 }]),
+        ),
+        ("text missing", json!([{ "start": 0.0, "end": 1.0 }])),
+        (
+            "negative start",
+            json!([{ "start": -1.0, "end": 1.0, "text": "a" }]),
+        ),
+        (
+            "end before start",
+            json!([{ "start": 2.0, "end": 1.0, "text": "a" }]),
+        ),
+        ("segment not an object", json!(["a"])),
+        ("segments an object", json!({ "start": 0.0 })),
+        ("segments a string", json!("a")),
+    ];
+    let mut wrong = Vec::new();
+    for (name, segments) in bad_segments {
+        let server = server_with(verbose("a", "english", segments)).await;
+        let got = timed(
+            api_engine(&format!("{}/v1", server.uri()), Some(KEY)),
+            req(None),
+            ResponseShape::Segments,
+        );
+        if !matches!(got, Err(TimedFailure::Failed(FailReason::Provider))) {
+            wrong.push(format!("{name}: {got:?}"));
+        }
+    }
+    let raw: Vec<(&str, ResponseTemplate, ResponseShape)> = vec![
+        (
+            "not JSON",
+            ResponseTemplate::new(200).set_body_string(format!("hello {TRANSCRIPT}")),
+            ResponseShape::Segments,
+        ),
+        (
+            "JSON array",
+            ResponseTemplate::new(200).set_body_json(json!([TRANSCRIPT])),
+            ResponseShape::Segments,
+        ),
+        (
+            "empty body",
+            ResponseTemplate::new(200),
+            ResponseShape::Segments,
+        ),
+        (
+            "text missing",
+            ResponseTemplate::new(200).set_body_json(json!({ "segments": one_segment() })),
+            ResponseShape::Segments,
+        ),
+        (
+            "plain not JSON",
+            ResponseTemplate::new(200).set_body_string("hello"),
+            ResponseShape::Plain,
+        ),
+        (
+            "plain text missing",
+            ResponseTemplate::new(200).set_body_json(json!({ "transcript": "x" })),
+            ResponseShape::Plain,
+        ),
+    ];
+    for (name, template, shape) in raw {
+        let server = server_with(template).await;
+        let got = timed(
+            api_engine(&format!("{}/v1", server.uri()), Some(KEY)),
+            req(None),
+            shape,
+        );
+        if !matches!(got, Err(TimedFailure::Failed(FailReason::Provider))) {
+            wrong.push(format!("{name}: {got:?}"));
+        }
+    }
+    assert!(wrong.is_empty(), "\n{}", wrong.join("\n"));
+}
+
+#[tokio::test]
+async fn a_body_over_one_mib_is_provider_and_the_cap_is_unchanged() {
+    // Acceptance 4: the response cap stays 1 MiB. A valid verbose_json body of
+    // MAX_BODY + 1 bytes is `provider` for both shapes, one of exactly 1 MiB is
+    // read. Bite: the cap removed or raised (the over-size body parses to Ok), an
+    // off-by-one cap refusing exactly 1 MiB.
+    fn body_of_len(total: usize) -> Vec<u8> {
+        let head = b"{\"segments\":[{\"start\":0.0,\"end\":1.0,\"text\":\"a\"}],\"text\":\"";
+        let tail = b"\"}";
+        let filler = "a".repeat(total - head.len() - tail.len());
+        let body = [head.as_slice(), filler.as_bytes(), tail.as_slice()].concat();
+        assert_eq!(body.len(), total);
+        body
+    }
+    for shape in [ResponseShape::Segments, ResponseShape::Plain] {
+        let server = server_with(
+            ResponseTemplate::new(200).set_body_raw(body_of_len(MIB + 1), "application/json"),
+        )
+        .await;
+        let got = timed(
+            api_engine(&format!("{}/v1", server.uri()), Some(KEY)),
+            req(None),
+            shape,
+        );
+        assert!(
+            matches!(got, Err(TimedFailure::Failed(FailReason::Provider))),
+            "{shape:?} 1 MiB + 1: {:?}",
+            got.map(|t| t.text.len())
+        );
+    }
+    let server =
+        server_with(ResponseTemplate::new(200).set_body_raw(body_of_len(MIB), "application/json"))
+            .await;
+    let got = timed(
+        api_engine(&format!("{}/v1", server.uri()), Some(KEY)),
+        req(None),
+        ResponseShape::Segments,
+    );
+    assert!(
+        got.is_ok(),
+        "exactly 1 MiB must be read: {:?}",
+        got.map(|t| t.text.len())
+    );
 }

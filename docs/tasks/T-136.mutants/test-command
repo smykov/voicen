@@ -1,0 +1,2 @@
+# the task's tests, as the area runs them (after the implementation exists)
+cargo test -p voicen-core --test openai_client
