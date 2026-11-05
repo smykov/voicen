@@ -139,4 +139,43 @@ mod tests {
         // duration would then be dropped as empty instead of failing).
         assert_eq!(run(vec![(40.0, 40.0)], 300), Err(VadError::Failed));
     }
+
+    #[test]
+    fn an_overlapping_segment_is_failed_never_merged_or_kept() {
+        // Invariant: spans are sorted and non-overlapping; a start before the previous end is
+        // malformed. Bite: dropping the overlap check, or not tracking the previous end.
+        assert_eq!(
+            run(vec![(0.0, 30.0), (20.0, 40.0)], 10_000),
+            Err(VadError::Failed),
+            "overlap"
+        );
+        assert_eq!(
+            run(vec![(50.0, 60.0), (10.0, 20.0)], 10_000),
+            Err(VadError::Failed),
+            "out of order"
+        );
+        // Touching (start == previous end) is not an overlap.
+        assert_eq!(
+            run(vec![(0.0, 30.0), (30.0, 40.0)], 10_000),
+            Ok(vec![span(0, 300), span(300, 400)])
+        );
+    }
+
+    #[test]
+    fn the_clamp_lands_on_the_last_10_ms_step_within_the_buffer() {
+        // Invariant: spans on 10 ms steps within [0, duration]. A 305 ms buffer clamps to 300.
+        // Bite: clamping to the raw duration (305 is off the 10 ms step).
+        assert_eq!(run(vec![(0.0, 31.0)], 305), Ok(vec![span(0, 300)]));
+        assert_eq!(run(vec![(30.5, 31.0)], 309), Ok(vec![]));
+    }
+
+    #[test]
+    fn fractional_centiseconds_round_to_the_nearest_10_ms_step() {
+        // whisper.cpp's segments are f32 centiseconds. Bite: `(cs * 10) as u64` (off the
+        // 10 ms step) or truncation instead of rounding.
+        assert_eq!(
+            run(vec![(10.4, 35.6), (50.5, 60.49)], 10_000),
+            Ok(vec![span(100, 360), span(510, 600)])
+        );
+    }
 }
