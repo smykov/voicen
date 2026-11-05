@@ -1,0 +1,2 @@
+# T-135: the task's core tests only (vad::segments in the lib).
+cargo test -j 2 -p voicen-core --lib vad::segments

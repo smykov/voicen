@@ -1,0 +1,9 @@
+guarantee: AC1: malformed judged before the clamp
+file: crates/voicen-core/src/vad/segments.rs
+added_by: test-writer
+--- old
+        let well_formed = start.is_finite()
+--- new
+        let (start, end) = (start.min((limit_ms / 10) as f32), end.min((limit_ms / 10) as f32));
+        let well_formed = start.is_finite()
+--- end

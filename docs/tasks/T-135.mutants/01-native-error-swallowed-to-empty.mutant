@@ -1,0 +1,11 @@
+guarantee: AC1: Silero errors come back as Err, never Ok(empty)
+file: crates/voicen-core/src/vad/segments.rs
+added_by: test-writer
+--- old
+    for (start, end) in native? {
+--- new
+    let Ok(native) = native else {
+        return Ok(Vec::new());
+    };
+    for (start, end) in native {
+--- end
