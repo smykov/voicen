@@ -1,0 +1,12 @@
+guarantee: FR-018 invariant: the chunker never holds more than one window plus its carry (<= 120 s) of audio (validation 1 M1)
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: test-writer
+--- old
+        let base = self.ranges.base.max(self.held_start_ms);
+        let drop = ms_to_samples(base - self.held_start_ms).min(self.held.len());
+        self.held.drain(..drop);
+        self.held_start_ms = base;
+        chunks
+--- new
+        chunks
+--- end

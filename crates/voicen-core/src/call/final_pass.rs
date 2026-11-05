@@ -1046,4 +1046,88 @@ mod tests {
             prev_start = Some(c.start_ms);
         }
     }
+
+    /// Feeds a `ChunkPlanner` budget-sized windows like T-138 (`max - carry` ms each) and
+    /// checks after every `feed` and after `finish` that it holds only `[base, known_end)`:
+    /// at most one window plus its carry, i.e. `<= max_chunk_ms(mode)` of audio, exactly
+    /// `carry_ms()` of it. Returns the peak held ms.
+    fn assert_held_audio_is_bounded(mode: PassMode, track_len: u64, track: &[SpeechSpan]) -> u64 {
+        let max = max_chunk_ms(mode);
+        let check = |p: &ChunkPlanner, when: &str| -> u64 {
+            let held_ms = (p.held.len() / SAMPLES_PER_MS) as u64;
+            assert_eq!(p.held.len() % SAMPLES_PER_MS, 0, "{when}: whole ms held");
+            assert!(held_ms <= max, "{when}: {held_ms} ms held, limit {max} ms");
+            assert_eq!(held_ms, p.carry_ms(), "{when}: held audio is the carry");
+            assert_eq!(
+                p.held_start_ms, p.ranges.base,
+                "{when}: held starts at base"
+            );
+            assert_eq!(
+                p.held_start_ms + held_ms,
+                p.ranges.known_end,
+                "{when}: held ends at the end of the last window"
+            );
+            held_ms
+        };
+        let mut planner = ChunkPlanner::new(mode);
+        let (mut pos, mut peak, mut chunks) = (0, 0, 0);
+        while pos < track_len {
+            let len = (max - planner.carry_ms()).min(track_len - pos);
+            chunks += planner
+                .feed(pos, &ramp(pos, len), &window_spans(track, pos, len))
+                .len();
+            pos += len;
+            peak = peak.max(check(&planner, &format!("after feed to {pos} ms")));
+        }
+        chunks += planner.finish().len();
+        peak = peak.max(check(&planner, "after finish"));
+        assert!(chunks > 0, "the track has speech, so chunks came out");
+        peak
+    }
+
+    /// 12 minutes: dense speech, a long span-less stretch, a pause-less run over the limit,
+    /// more silence, then speech with pauses to the end.
+    fn long_track_with_silences() -> (u64, Vec<SpeechSpan>) {
+        let mut track = Vec::new();
+        let mut t = 500;
+        while t + 800 <= 20_000 {
+            track.push(sp(t, t + 800));
+            t += 1_200;
+        }
+        track.push(sp(200_000, 340_000)); // pause-less 140 s
+        let mut t = 400_000;
+        while t + 6_000 <= 720_000 {
+            track.push(sp(t, t + 6_000));
+            t += 6_500;
+        }
+        (720_000, track)
+    }
+
+    #[test]
+    fn timed_planner_never_holds_more_than_one_window_plus_its_carry() {
+        let (track_len, track) = long_track_with_silences();
+        let peak = assert_held_audio_is_bounded(PassMode::Timed, track_len, &track);
+        assert!(peak > 0, "the planner held something");
+        // And a track of silence only: nothing is emitted, the lead-in is all that is kept.
+        let mut planner = ChunkPlanner::new(PassMode::Timed);
+        let mut pos = 0;
+        while pos < 600_000 {
+            let len = (TIMED_MAX_MS - planner.carry_ms()).min(600_000 - pos);
+            assert!(planner.feed(pos, &ramp(pos, len), &[]).is_empty());
+            pos += len;
+            assert!(
+                planner.held.len() <= ms_to_samples(PAD_MS),
+                "silence is not kept"
+            );
+        }
+        assert!(planner.finish().is_empty());
+        assert!(planner.held.len() <= ms_to_samples(PAD_MS));
+    }
+
+    #[test]
+    fn timeless_planner_never_holds_more_than_one_window_plus_its_carry() {
+        let (track_len, track) = long_track_with_silences();
+        let peak = assert_held_audio_is_bounded(PassMode::Timeless, track_len, &track);
+        assert!(peak > 0, "the planner held something");
+    }
 }
