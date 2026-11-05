@@ -1,0 +1,8 @@
+guarantee: AC1: malformed (non-finite) is Err(Failed)
+file: crates/voicen-core/src/vad/segments.rs
+added_by: test-writer
+--- old
+            && end.is_finite()
+--- new
+            && true
+--- end

@@ -1,0 +1,8 @@
+guarantee: invariant: spans on 10 ms steps (bounds rounded to whole cs)
+file: crates/voicen-core/src/vad/segments.rs
+added_by: test-writer
+--- old
+    (cs.round() as u64).saturating_mul(MS_PER_CS)
+--- new
+    ((cs * 10.0) as u64).saturating_mul(1)
+--- end

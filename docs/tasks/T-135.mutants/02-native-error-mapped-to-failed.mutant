@@ -1,0 +1,8 @@
+guarantee: AC1: Silero errors come back as Err unchanged
+file: crates/voicen-core/src/vad/segments.rs
+added_by: test-writer
+--- old
+    for (start, end) in native? {
+--- new
+    for (start, end) in native.map_err(|_| VadError::Failed)? {
+--- end

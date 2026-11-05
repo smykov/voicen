@@ -1,0 +1,8 @@
+guarantee: invariant: spans within [0, buffer ms] (clamp)
+file: crates/voicen-core/src/vad/segments.rs
+added_by: test-writer
+--- old
+        let end_ms = to_ms(end).min(limit_ms);
+--- new
+        let end_ms = to_ms(end);
+--- end

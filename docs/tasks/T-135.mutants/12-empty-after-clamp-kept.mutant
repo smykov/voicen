@@ -1,0 +1,8 @@
+guarantee: invariant: span empty after the clamp is dropped
+file: crates/voicen-core/src/vad/segments.rs
+added_by: test-writer
+--- old
+        if start_ms < end_ms {
+--- new
+        if start_ms <= end_ms {
+--- end

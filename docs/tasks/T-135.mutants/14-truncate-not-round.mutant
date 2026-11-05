@@ -1,0 +1,8 @@
+guarantee: invariant: bounds rounded to the nearest whole cs
+file: crates/voicen-core/src/vad/segments.rs
+added_by: test-writer
+--- old
+    (cs.round() as u64).saturating_mul(MS_PER_CS)
+--- new
+    (cs.trunc() as u64).saturating_mul(MS_PER_CS)
+--- end

@@ -1,0 +1,8 @@
+guarantee: AC1: malformed segment is Err(Failed), never dropped
+file: crates/voicen-core/src/vad/segments.rs
+added_by: test-writer
+--- old
+            return Err(VadError::Failed);
+--- new
+            continue;
+--- end

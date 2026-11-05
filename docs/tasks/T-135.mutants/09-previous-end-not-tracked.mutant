@@ -1,0 +1,8 @@
+guarantee: invariant: spans sorted, non-overlapping; overlap is Err(Failed)
+file: crates/voicen-core/src/vad/segments.rs
+added_by: test-writer
+--- old
+        previous_end = end;
+--- new
+        let _ = end;
+--- end

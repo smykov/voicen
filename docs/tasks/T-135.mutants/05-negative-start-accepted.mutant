@@ -1,0 +1,9 @@
+guarantee: AC1: malformed (negative) is Err(Failed)
+file: crates/voicen-core/src/vad/segments.rs
+added_by: test-writer
+equivalent: previous_end starts at 0.0 and only grows (end > start >= previous_end), so `start >= previous_end` already refuses every negative start (and a negative end implies a negative start); no input tells the two apart
+--- old
+            && start >= 0.0
+--- new
+            && true
+--- end
