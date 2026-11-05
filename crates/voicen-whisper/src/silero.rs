@@ -22,11 +22,11 @@
 use std::ffi::c_int;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use voicen_core::audio::AudioBuffer;
 use voicen_core::vad::silero_model;
-use voicen_core::vad::{SpeechDetector, VadError};
+use voicen_core::vad::{SpeechDetector, SpeechSpan, SpeechSpans, VadError};
 use whisper_rs::{WhisperVadContext, WhisperVadContextParams, WhisperVadParams};
 
 /// Minimum summed segment length, in centiseconds, for a recording to count as speech.
@@ -43,8 +43,9 @@ const MIN_SPEECH_CS: f32 = 25.0;
 const VAD_THREADS: c_int = 1;
 
 /// The Silero detector: one whisper.cpp VAD context behind a lock (`&self`, `Send + Sync`).
+#[derive(Clone)]
 pub struct SileroDetector {
-    context: Mutex<WhisperVadContext>,
+    context: Arc<Mutex<WhisperVadContext>>,
 }
 
 impl std::fmt::Debug for SileroDetector {
@@ -60,6 +61,12 @@ impl SileroDetector {
     /// refuses the file. Never panics. Each call that reaches whisper.cpp leaks the path
     /// string once (whisper-rs, see the module doc).
     pub fn load(path: &Path) -> Result<Box<dyn SpeechDetector>, VadError> {
+        SileroDetector::open(path).map(|d| Box::new(d) as Box<dyn SpeechDetector>)
+    }
+
+    /// Red-stage stub (T-135): the loading logic of [`SileroDetector::load`], returning the
+    /// shareable detector.
+    pub fn open(path: &Path) -> Result<SileroDetector, VadError> {
         silero_model::verify(path)?;
         whisper_rs::install_logging_hooks();
         // whisper-rs panics on a NUL in the path.
@@ -76,9 +83,9 @@ impl SileroDetector {
         let context = catch_unwind(|| WhisperVadContext::new(path, params))
             .map_err(|_| VadError::Unavailable)?
             .map_err(|_| VadError::Unavailable)?;
-        Ok(Box::new(SileroDetector {
-            context: Mutex::new(context),
-        }))
+        Ok(SileroDetector {
+            context: Arc::new(Mutex::new(context)),
+        })
     }
 }
 
@@ -109,6 +116,17 @@ impl SpeechDetector for SileroDetector {
         }))
         .map_err(|_| VadError::Failed)??;
         Ok(total_cs >= MIN_SPEECH_CS)
+    }
+}
+
+/// Red-stage stub (T-135): the implementation returns the real spans.
+impl SpeechSpans for SileroDetector {
+    fn name(&self) -> &'static str {
+        "silero"
+    }
+
+    fn speech_spans(&self, _audio: &AudioBuffer) -> Result<Vec<SpeechSpan>, VadError> {
+        Ok(Vec::new())
     }
 }
 
