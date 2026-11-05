@@ -1558,6 +1558,32 @@ mod tests {
         assert!(!gone.exists(), "the root was created");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn meta_json_write_failure_inside_create_is_reported_and_leaves_nothing() {
+        // Review 1 #3. The root is 4070 bytes: `<root>/<id>` (+18) fits PATH_MAX (4096 with
+        // the NUL), so `create_dir` succeeds, while `<root>/<id>/meta.json.tmp` (+32) does
+        // not, so the first `meta.json` write fails with ENAMETOOLONG. Bite: that error
+        // swallowed or mapped to another kind (the next step, the mic track open, would
+        // then fail as `Write`), and the new folder left behind.
+        const ROOT_LEN: usize = 4070;
+        let dir = TempDir::new();
+        let mut root = dir.path().to_path_buf();
+        while root.as_os_str().len() < ROOT_LEN {
+            let left = ROOT_LEN - root.as_os_str().len();
+            root.push("d".repeat((left - 1).min(200)));
+        }
+        assert_eq!(root.as_os_str().len(), ROOT_LEN);
+        fs::create_dir_all(&root).expect("deep root");
+        let store = CallStore::new(
+            Arc::new(crate::settings::roots::FakeCallRoots::new()),
+            Arc::new(SystemMonotonic),
+        );
+        let got = store.create(&calls_in(Some(&root), &[]), &moscow_call());
+        assert_eq!(got.err(), Some(CreateError::Storage(StorageKind::Meta)));
+        assert_eq!(names(&root), Vec::<String>::new());
+    }
+
     #[test]
     fn write_meta_failed_rename_removes_its_tmp() {
         // `meta.json` is a folder, so the tmp is written and synced but the rename fails.

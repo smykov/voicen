@@ -1,0 +1,13 @@
+guarantee: Review 1 #2: device_changes[].cause is a closed set
+file: crates/voicen-core/src/call/events.rs
+added_by: test-writer
+--- old
+    Reopened,
+    NoDevice,
+}
+--- new
+    Reopened,
+    #[serde(other)]
+    NoDevice,
+}
+--- end

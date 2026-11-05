@@ -1,0 +1,12 @@
+guarantee: Inv. 1: a meta.json write failure inside create is reported and leaves nothing
+file: crates/voicen-core/src/call/storage.rs
+added_by: test-writer
+--- old
+        let made = write_meta(&dir, &meta)
+            .map_err(|_| CreateError::Storage(StorageKind::Meta))
+            .and_then(|()| self.open_track(&mut open, &dir.join(MIC_FILE), MIC_SERIAL))
+--- new
+        let _ = write_meta(&dir, &meta);
+        let made = Ok::<(), CreateError>(())
+            .and_then(|()| self.open_track(&mut open, &dir.join(MIC_FILE), MIC_SERIAL))
+--- end

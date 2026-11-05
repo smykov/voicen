@@ -1,0 +1,13 @@
+guarantee: Review 1 #2: pass_mode is a closed set
+file: crates/voicen-core/src/call/events.rs
+added_by: test-writer
+--- old
+    Timed,
+    Timeless,
+}
+--- new
+    Timed,
+    #[serde(other)]
+    Timeless,
+}
+--- end
