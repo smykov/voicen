@@ -20,6 +20,11 @@ pub use events::{
     StopReason, StorageKind, SwitchRefusal, Track, VadFallbackCause,
 };
 
+pub use storage::{
+    ActiveCallFiles, CallEntry, CallList, CallMeta, CallStore, CreateError, DeviceChange,
+    ListState, NewCall, TrackMeta, TrackResult,
+};
+
 pub use transcript::{
     merge, render_markdown, ChunkInput, EngineRef, EngineSegment, EnginesV1, MergeInput, SegmentV1,
     Speaker, TrackInput, TranscriptParseError, TranscriptV1,

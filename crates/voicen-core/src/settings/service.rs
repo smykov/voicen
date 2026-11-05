@@ -3,14 +3,13 @@
 //! R-4; decisions #19, #22, #23 N5, #30, #33; contracts/core-traits.md#settingsservice).
 
 use std::io;
-use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc, Mutex, PoisonError, RwLock};
 
 use serde::{Deserialize, Serialize};
 
 use super::file::SettingsFile;
 use super::hotkey::parse_hotkey;
-use super::roots::CallRoots;
+use super::roots::{effective_root, CallRoots};
 use super::url::{check_base_url, is_insecure_remote, normalize_base_url};
 use super::validate::{validate, KeyEditsWithPresence};
 use super::{
@@ -769,14 +768,6 @@ fn keep_server_owned(draft: &mut CallSettings, in_force: &CallSettings) {
     draft.earlier_roots = in_force.earlier_roots.clone();
     draft.warned_hosts = in_force.warned_hosts.clone();
     draft.indicator_position = in_force.indicator_position;
-}
-
-/// The root in force for `calls`: the chosen one, or the default.
-fn effective_root(calls: &CallSettings, default_root: &Path) -> PathBuf {
-    calls
-        .storage_root
-        .clone()
-        .unwrap_or_else(|| default_root.to_path_buf())
 }
 
 fn partially_restored(not_restored: Vec<FieldId>) -> FormError {

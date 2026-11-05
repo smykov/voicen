@@ -1,0 +1,10 @@
+guarantee: AC2: a state change's write_meta failure is reported and keeps the previous meta.json
+file: crates/voicen-core/src/call/storage.rs
+added_by: test-writer
+--- old
+        write_meta(&self.dir, meta)?;
+        self.meta = meta.clone();
+--- new
+        let _ = write_meta(&self.dir, meta);
+        self.meta = meta.clone();
+--- end

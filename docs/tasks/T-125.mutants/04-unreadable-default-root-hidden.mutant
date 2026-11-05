@@ -1,0 +1,10 @@
+guarantee: AC5/D3: a default root that exists but cannot be read (any read_dir error but NotFound) gives one unavailable line
+file: crates/voicen-core/src/call/storage.rs
+added_by: test-writer
+--- old
+                        && *root == current
+                        && e.kind() == io::ErrorKind::NotFound;
+--- new
+                        && *root == current;
+                    let _ = e;
+--- end

@@ -1,0 +1,8 @@
+guarantee: invariant 1: a track file that cannot be opened is a storage failure, and nothing is left
+file: crates/voicen-core/src/call/storage.rs
+added_by: test-writer
+--- old
+        let inner = open(path).map_err(|_| CreateError::Storage(StorageKind::Write))?;
+--- new
+        let inner = open(path).map_err(|_| CreateError::Root(UnwritableReason::Other))?;
+--- end

@@ -1,0 +1,9 @@
+guarantee: D4: a meta.json with an unknown key lists as damaged
+file: crates/voicen-core/src/call/storage.rs
+added_by: test-writer
+--- old
+#[serde(deny_unknown_fields)]
+pub struct CallMeta {
+--- new
+pub struct CallMeta {
+--- end

@@ -1,0 +1,8 @@
+guarantee: invariant 1: only AlreadyExists moves to the next suffix; any other create_dir error refuses the start with its root reason
+file: crates/voicen-core/src/call/storage.rs
+added_by: test-writer
+--- old
+            Err(e) => return Err(CreateError::Root(reason_of(e.kind()))),
+--- new
+            Err(_) => continue,
+--- end

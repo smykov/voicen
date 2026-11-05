@@ -1,0 +1,10 @@
+guarantee: AC2: a write_meta failure is reported (rename)
+file: crates/voicen-core/src/call/storage.rs
+added_by: test-writer
+--- old
+    let written = synced.and_then(|()| fs::rename(&tmp, &target));
+--- new
+    let written = synced.map(|()| {
+        let _ = fs::rename(&tmp, &target);
+    });
+--- end

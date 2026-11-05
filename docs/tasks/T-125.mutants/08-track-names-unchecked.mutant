@@ -1,0 +1,13 @@
+guarantee: AC5 (implementation's damaged condition): tracks other than mic.opus / system.opus list as damaged
+file: crates/voicen-core/src/call/storage.rs
+added_by: test-writer
+--- old
+    let tracks_ok = mic.track == Track::Mic
+        && mic.file == MIC_FILE
+        && system.track == Track::System
+        && system.file == SYSTEM_FILE
+        && dir.join(MIC_FILE).is_file()
+--- new
+    let _ = (mic, system);
+    let tracks_ok = dir.join(MIC_FILE).is_file()
+--- end

@@ -1,0 +1,2 @@
+# T-125: the call::storage unit tests only (lib target), as the core area runs them.
+cargo test -j 2 -p voicen-core --lib call::storage

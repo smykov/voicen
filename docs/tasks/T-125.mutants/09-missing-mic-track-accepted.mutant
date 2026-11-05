@@ -1,0 +1,7 @@
+guarantee: AC5: a missing track file (mic.opus) lists as damaged
+file: crates/voicen-core/src/call/storage.rs
+added_by: test-writer
+--- old
+        && dir.join(MIC_FILE).is_file()
+--- new
+--- end

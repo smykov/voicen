@@ -1,0 +1,10 @@
+guarantee: AC5 (implementation's damaged condition): state failed without a failure lists as damaged
+file: crates/voicen-core/src/call/storage.rs
+added_by: test-writer
+--- old
+        CallState::Failed => ListState::Failed(meta.failure.as_ref()?.reason),
+--- new
+        CallState::Failed => {
+            ListState::Failed(meta.failure.as_ref().map_or(FailReason::Storage, |f| f.reason))
+        }
+--- end
