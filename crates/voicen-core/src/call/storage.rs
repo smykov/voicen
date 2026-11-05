@@ -25,7 +25,10 @@ use std::time::SystemTime;
 use serde::{Deserialize, Serialize};
 
 use super::codec::{OpusOgg, SyncWrite};
-use super::events::{CallId, CallState, EndpointId, FailReason, StopReason, StorageKind, Track};
+use super::events::{
+    CallId, CallState, DeviceCause, EndpointId, FailReason, PassMode, StopReason, StorageKind,
+    Track,
+};
 use super::transcript::{EngineRef, Speaker};
 use super::StorageOp;
 use crate::clock::MonotonicClock;
@@ -89,7 +92,7 @@ pub struct TrackMeta {
 pub struct DeviceChange {
     pub at_ms: u64,
     pub track: Track,
-    pub cause: String,
+    pub cause: DeviceCause,
     pub to: Option<EndpointId>,
     pub gap_ms: u64,
 }
@@ -101,12 +104,14 @@ pub struct Engines {
     pub diarization: Option<EngineRef>,
 }
 
+/// A track's final-pass result (data-model "FinalPass and the queue": `pending` |
+/// `done{segments}` | `failed{reason}`). This build writes and reads only `pending`;
+/// `done{segments}` and `failed{reason}` come with the final-pass write (T-138/T-146),
+/// so until then a `meta.json` carrying either lists as damaged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TrackResult {
     Pending,
-    Ready,
-    Failed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -136,7 +141,7 @@ pub struct CallMeta {
     pub app_version: String,
     pub speakers: Vec<Speaker>,
     pub results: Results,
-    pub pass_mode: Option<String>,
+    pub pass_mode: Option<PassMode>,
 }
 
 /// The one `meta.json` writer: `meta.json.tmp` written and synced, then renamed over `meta.json`.
@@ -1386,6 +1391,94 @@ mod tests {
         let list = f.store.list(&calls_in(Some(&root), &[]));
         assert_eq!(ids(&list), vec!["2026-10-30_000001".to_string()]);
         assert_eq!(list.entries[0].state, ListState::Damaged);
+    }
+
+    #[test]
+    fn device_cause_and_pass_mode_serialize_as_the_log_literals() {
+        // Review 1 #2: one vocabulary with diag/format.rs `call_device cause=` and
+        // `final_finished mode=`. Bite: a free string, or another rename rule.
+        let causes = [
+            (DeviceCause::DefaultOutputChanged, "default_output_changed"),
+            (DeviceCause::MicLost, "mic_lost"),
+            (DeviceCause::MicDefaultChanged, "mic_default_changed"),
+            (DeviceCause::TrackLost, "track_lost"),
+            (DeviceCause::Reopened, "reopened"),
+            (DeviceCause::NoDevice, "no_device"),
+        ];
+        for (cause, wire) in causes {
+            assert_eq!(serde_json::to_value(cause).expect("cause"), wire);
+            assert_eq!(
+                serde_json::from_value::<DeviceCause>(Value::from(wire)).expect("parse"),
+                cause
+            );
+        }
+        for (mode, wire) in [(PassMode::Timed, "timed"), (PassMode::Timeless, "timeless")] {
+            assert_eq!(serde_json::to_value(mode).expect("mode"), wire);
+            assert_eq!(
+                serde_json::from_value::<PassMode>(Value::from(wire)).expect("parse"),
+                mode
+            );
+        }
+        assert_eq!(
+            serde_json::to_value(TrackResult::Pending).expect("result"),
+            "pending"
+        );
+    }
+
+    #[test]
+    fn meta_json_outside_the_closed_sets_lists_as_damaged() {
+        // Review 1 #1/#2: `results.<track>` is `pending` until the final-pass write lands
+        // (`done{segments}` / `failed{reason}`, data-model); `cause` and `pass_mode` are
+        // closed sets. Bite: a result, cause or pass mode accepted as free text.
+        let f = fixture();
+        let root = f.dir.path().join("calls");
+        fs::create_dir(&root).expect("root");
+        let change = |cause: &str| {
+            serde_json::json!([{
+                "at_ms": 1_000, "track": "system", "cause": cause, "to": null, "gap_ms": 0
+            }])
+        };
+
+        let mut v = meta_value("2026-10-30_000001", CallState::Ready);
+        v["device_changes"] = change("reopened");
+        v["pass_mode"] = serde_json::json!("timeless");
+        plant_value(&root, "2026-10-30_000001", Some(&v), true, true);
+
+        let mut v = meta_value("2026-10-30_000002", CallState::Ready);
+        v["results"]["mic"] = serde_json::json!("ready");
+        plant_value(&root, "2026-10-30_000002", Some(&v), true, true);
+
+        let mut v = meta_value("2026-10-30_000003", CallState::Ready);
+        v["results"]["system"] = serde_json::json!("failed");
+        plant_value(&root, "2026-10-30_000003", Some(&v), true, true);
+
+        let mut v = meta_value("2026-10-30_000004", CallState::Ready);
+        v["device_changes"] = change("unplugged");
+        plant_value(&root, "2026-10-30_000004", Some(&v), true, true);
+
+        let mut v = meta_value("2026-10-30_000005", CallState::Ready);
+        v["pass_mode"] = serde_json::json!("fast");
+        plant_value(&root, "2026-10-30_000005", Some(&v), true, true);
+
+        let list = f.store.list(&calls_in(Some(&root), &[]));
+        let states: Vec<(String, ListState)> = list
+            .entries
+            .iter()
+            .map(|e| (e.id.to_string(), e.state))
+            .collect();
+        assert_eq!(
+            states,
+            vec![
+                ("2026-10-30_000005".to_string(), ListState::Damaged),
+                ("2026-10-30_000004".to_string(), ListState::Damaged),
+                ("2026-10-30_000003".to_string(), ListState::Damaged),
+                ("2026-10-30_000002".to_string(), ListState::Damaged),
+                ("2026-10-30_000001".to_string(), ListState::Ready),
+            ]
+        );
+        let meta = list.entries[4].meta.as_ref().expect("meta");
+        assert_eq!(meta.device_changes[0].cause, DeviceCause::Reopened);
+        assert_eq!(meta.pass_mode, Some(PassMode::Timeless));
     }
 
     #[test]
