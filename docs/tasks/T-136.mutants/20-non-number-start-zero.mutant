@@ -1,0 +1,11 @@
+guarantee: AC-3: a segment with a non-number start maps to provider (seconds site)
+file: crates/voicen-core/src/engine/openai.rs
+added_by: test-writer
+--- old
+            .filter(|s| s.is_finite() && *s >= 0.0)
+            .ok_or(TransportError::BadBody)
+--- new
+            .filter(|s| s.is_finite() && *s >= 0.0)
+            .or(Some(0.0))
+            .ok_or(TransportError::BadBody)
+--- end

@@ -1,0 +1,8 @@
+guarantee: AC-3: a malformed segments value maps to provider (not time-less)
+file: crates/voicen-core/src/engine/openai.rs
+added_by: test-writer
+--- old
+        Some(_) => return Err(TransportError::BadBody),
+--- new
+        Some(_) => return Ok(None),
+--- end

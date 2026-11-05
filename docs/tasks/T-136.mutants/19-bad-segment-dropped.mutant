@@ -1,0 +1,10 @@
+guarantee: AC-3: a malformed segment maps to provider (collect site)
+file: crates/voicen-core/src/engine/openai.rs
+added_by: test-writer
+--- old
+        .map(parse_segment)
+        .collect::<Result<Vec<_>, _>>()?;
+--- new
+        .filter_map(|s| parse_segment(s).ok())
+        .collect::<Vec<_>>();
+--- end

@@ -1,0 +1,10 @@
+guarantee: AC-3: a late answer maps to timeout
+file: crates/voicen-core/src/engine/openai.rs
+added_by: test-writer
+--- old
+        }
+        FailureReason::Timeout { .. } => FailReason::Timeout,
+--- new
+        }
+        FailureReason::Timeout { .. } => FailReason::Provider,
+--- end

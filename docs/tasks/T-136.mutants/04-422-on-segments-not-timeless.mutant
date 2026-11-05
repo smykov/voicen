@@ -1,0 +1,8 @@
+guarantee: AC-2: a 422 to Segments is time-less
+file: crates/voicen-core/src/engine/openai.rs
+added_by: test-writer
+--- old
+        Err(TransportError::Status(400 | 422)) if shape == ResponseShape::Segments => {
+--- new
+        Err(TransportError::Status(400)) if shape == ResponseShape::Segments => {
+--- end

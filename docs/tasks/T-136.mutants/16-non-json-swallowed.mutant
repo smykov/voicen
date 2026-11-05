@@ -1,0 +1,8 @@
+guarantee: AC-3: a malformed (non-JSON) body maps to provider (reply_object parse site)
+file: crates/voicen-core/src/engine/openai.rs
+added_by: test-writer
+--- old
+        serde_json::from_slice(body).map_err(|_| TransportError::BadBody)?;
+--- new
+        serde_json::from_slice(body).unwrap_or_else(|_| serde_json::json!({"text": ""}));
+--- end

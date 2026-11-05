@@ -1,0 +1,10 @@
+guarantee: AC-3: a malformed body maps to provider (fail_reason site)
+file: crates/voicen-core/src/engine/openai.rs
+added_by: test-writer
+--- old
+        }
+        FailureReason::Timeout { .. } => FailReason::Timeout,
+--- new
+        }
+        FailureReason::Timeout { .. } | FailureReason::UnexpectedResponse => FailReason::Timeout,
+--- end

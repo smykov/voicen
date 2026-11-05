@@ -1,0 +1,10 @@
+guarantee: AC-3: a malformed body (text missing) maps to provider (reply_object text site)
+file: crates/voicen-core/src/engine/openai.rs
+added_by: test-writer
+--- old
+        .ok_or(TransportError::BadBody)?
+        .trim()
+--- new
+        .unwrap_or("")
+        .trim()
+--- end

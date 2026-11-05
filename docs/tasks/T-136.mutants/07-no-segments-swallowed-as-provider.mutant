@@ -1,0 +1,8 @@
+guarantee: AC-2: a 2xx without segments is time-less (outcome site)
+file: crates/voicen-core/src/engine/openai.rs
+added_by: test-writer
+--- old
+        Ok(None) => Err(TimedFailure::Timeless),
+--- new
+        Ok(None) => Err(TimedFailure::Failed(FailReason::Provider)),
+--- end

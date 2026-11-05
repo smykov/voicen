@@ -1,0 +1,12 @@
+guarantee: AC-3: a segment with end < start maps to provider
+file: crates/voicen-core/src/engine/openai.rs
+added_by: test-writer
+--- old
+    if end_s < start_s {
+        return Err(TransportError::BadBody);
+    }
+--- new
+    if end_s < start_s && false {
+        return Err(TransportError::BadBody);
+    }
+--- end

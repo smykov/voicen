@@ -1,0 +1,12 @@
+guarantee: AC-3: a segment without string text maps to provider (segment text site)
+file: crates/voicen-core/src/engine/openai.rs
+added_by: test-writer
+--- old
+        .ok_or(TransportError::BadBody)?
+        .to_string();
+    Ok(EngineSegment {
+--- new
+        .unwrap_or("")
+        .to_string();
+    Ok(EngineSegment {
+--- end

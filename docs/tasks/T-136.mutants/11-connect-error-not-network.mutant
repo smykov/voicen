@@ -1,0 +1,11 @@
+guarantee: AC-3: a connect error maps to network
+file: crates/voicen-core/src/engine/openai.rs
+added_by: test-writer
+--- old
+        FailureReason::NetworkUnavailable | FailureReason::CannotReach { .. } => {
+            FailReason::Network
+        }
+--- new
+        FailureReason::NetworkUnavailable => FailReason::Network,
+        FailureReason::CannotReach { .. } => FailReason::Provider,
+--- end

@@ -1,0 +1,14 @@
+guarantee: AC-3: other 4xx/5xx map to provider
+file: crates/voicen-core/src/engine/openai.rs
+added_by: test-writer
+--- old
+    match reason {
+        FailureReason::InvalidApiKey => FailReason::Key,
+        FailureReason::NetworkUnavailable | FailureReason::CannotReach { .. } => {
+--- new
+    match reason {
+        FailureReason::InvalidApiKey => FailReason::Key,
+        FailureReason::NetworkUnavailable
+        | FailureReason::CannotReach { .. }
+        | FailureReason::ServerError { .. } => {
+--- end

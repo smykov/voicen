@@ -1,0 +1,14 @@
+guarantee: AC-2: a 2xx without segments is time-less (parse site)
+file: crates/voicen-core/src/engine/openai.rs
+added_by: test-writer
+--- old
+        None | Some(serde_json::Value::Null) => return Ok(None),
+--- new
+        None | Some(serde_json::Value::Null) => {
+            return Ok(Some(Timed {
+                text,
+                language: None,
+                segments: Some(Vec::new()),
+            }))
+        }
+--- end

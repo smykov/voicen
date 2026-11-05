@@ -1,0 +1,8 @@
+guarantee: AC-3: key rule (an unusable stored key is key, nothing sent)
+file: crates/voicen-core/src/engine/openai.rs
+added_by: test-writer
+--- old
+        let authorization = self.authorization()?;
+--- new
+        let authorization = self.authorization().unwrap_or(None);
+--- end

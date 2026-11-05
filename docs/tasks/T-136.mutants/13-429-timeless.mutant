@@ -1,0 +1,8 @@
+guarantee: AC-3: 429 maps to provider (never time-less)
+file: crates/voicen-core/src/engine/openai.rs
+added_by: test-writer
+--- old
+        Err(TransportError::Status(400 | 422)) if shape == ResponseShape::Segments => {
+--- new
+        Err(TransportError::Status(400 | 422 | 429)) if shape == ResponseShape::Segments => {
+--- end
