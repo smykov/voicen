@@ -59,8 +59,10 @@ pub enum RefusedReason {
     Other,
 }
 
-/// Why a track's device changed (`call_device cause=`; data-model "DeviceChange").
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Why a track's device changed (`call_device cause=`; data-model "DeviceChange"; the
+/// serde names are the log literals, `meta.json` `device_changes[].cause`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum DeviceCause {
     DefaultOutputChanged,
     MicLost,
@@ -132,8 +134,10 @@ pub enum FinalOutcome {
     Failed { reason: FailReason },
 }
 
-/// Whether the final pass kept segment times (`final_finished mode=`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Whether the final pass kept segment times (`final_finished mode=`; the serde names
+/// are the log literals, `meta.json` `pass_mode`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum PassMode {
     Timed,
     Timeless,
