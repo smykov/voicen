@@ -36,6 +36,9 @@ use voicen_core::vad::{SpeechSpan, SpeechSpans, VadError};
 use wiremock::matchers::any;
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
+#[path = "common/mock_http.rs"]
+mod mock_http;
+
 // ---- helpers ------------------------------------------------------------------------
 
 #[derive(Default)]
@@ -108,7 +111,7 @@ impl Mocked {
             .build()
             .expect("runtime");
         let server = rt.block_on(async {
-            let server = MockServer::start().await;
+            let server = mock_http::start().await;
             Mock::given(any())
                 .respond_with(respond)
                 .mount(&server)
