@@ -354,6 +354,209 @@ impl CallStore {
     }
 }
 
+// ---- T-141 STUBS: signatures only, no behaviour (red-tests stage). The developer replaces
+// every body below and keeps the signatures; see docs/tasks/T-141.md.
+
+/// The opaque `root` string of the wire for a root path: its UTF-8 text.
+#[allow(unused_variables)]
+pub fn wire_root(root: &Path) -> String {
+    unimplemented!("T-141 wire_root")
+}
+
+/// Wire `state` of a [`CallSummary`] (camelCase), one value per [`ListState`] variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum WireState {
+    Recording,
+    Queued,
+    Transcribing,
+    Ready,
+    Failed,
+    Recovered,
+    Damaged,
+}
+
+/// Wire `failReason` (camelCase), one value per [`FailReason`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum WireFailReason {
+    Key,
+    Network,
+    Timeout,
+    Provider,
+    Storage,
+    EngineNotSetUp,
+}
+
+/// `CallSummary` of contracts/ipc.md.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CallSummary {
+    pub id: String,
+    pub root: String,
+    pub title: String,
+    pub started_at: String,
+    pub duration_ms: Option<u64>,
+    pub state: WireState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fail_reason: Option<WireFailReason>,
+}
+
+/// `CallList` of contracts/ipc.md.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CallListWire {
+    pub calls: Vec<CallSummary>,
+    pub unavailable_roots: Vec<String>,
+}
+
+/// `Speaker` of contracts/ipc.md.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WireSpeaker {
+    pub id: String,
+    pub name: String,
+}
+
+/// `Line` of contracts/ipc.md.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Line {
+    pub start_ms: i64,
+    pub end_ms: i64,
+    pub track: String,
+    pub speaker: String,
+    pub lang: Option<String>,
+    pub text: String,
+}
+
+/// `CallDetail` of contracts/ipc.md.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CallDetail {
+    pub summary: CallSummary,
+    pub speakers: Vec<WireSpeaker>,
+    pub lines: Vec<Line>,
+}
+
+/// `CallError.code` of contracts/ipc.md.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CallErrorCode {
+    NotFound,
+    InUse,
+    EmptyName,
+    RecordingCall,
+    IoFailed,
+}
+
+/// `CallError` of contracts/ipc.md; `reason` is the snake_case [`UnwritableReason`] word.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CallError {
+    pub code: CallErrorCode,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<UnwritableReason>,
+}
+
+impl CallError {
+    /// `ioFailed` with `reason = reason_of(kind)`.
+    #[allow(unused_variables)]
+    pub fn io_failed(kind: io::ErrorKind) -> CallError {
+        unimplemented!("T-141 CallError::io_failed")
+    }
+}
+
+/// The export formats of `calls_export` / `calls_copy_markdown`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Format {
+    Md,
+    Json,
+}
+
+/// The guard: `root` must be `wire_root` of the current or an earlier root of `calls`
+/// (`default_root` is the current one when none is chosen) and `id` a [`CallId`]. Pure: no
+/// filesystem call. Anything else is `notFound`.
+#[allow(unused_variables)]
+pub fn resolve_call(
+    calls: &CallSettings,
+    default_root: &Path,
+    root: &str,
+    id: &str,
+) -> Result<PathBuf, CallError> {
+    unimplemented!("T-141 resolve_call")
+}
+
+/// The wire summary of a listed entry; a damaged one gets its default title and a
+/// `startedAt` from its stamp, in `lang`, and `durationMs: null`.
+#[allow(unused_variables)]
+pub fn summary_of(entry: &CallEntry, lang: UiLanguage) -> CallSummary {
+    unimplemented!("T-141 summary_of")
+}
+
+/// The wire list: one summary per entry (same order), one `unavailableRoots` text per root.
+#[allow(unused_variables)]
+pub fn list_wire(list: &CallList, lang: UiLanguage) -> CallListWire {
+    unimplemented!("T-141 list_wire")
+}
+
+/// The wire detail of an entry and its transcript (`None` -> no lines); `speakers` come
+/// from the entry's meta.
+#[allow(unused_variables)]
+pub fn detail_of(
+    entry: &CallEntry,
+    transcript: Option<&super::transcript::TranscriptV1>,
+    lang: UiLanguage,
+) -> CallDetail {
+    unimplemented!("T-141 detail_of")
+}
+
+impl CallStore {
+    /// Guard, then the call's meta and transcript; missing folder `notFound`, damaged or
+    /// broken transcript `ioFailed`, no transcript.json empty `lines`.
+    #[allow(unused_variables)]
+    pub fn get(
+        &self,
+        calls: &CallSettings,
+        root: &str,
+        id: &str,
+        lang: UiLanguage,
+    ) -> Result<CallDetail, CallError> {
+        unimplemented!("T-141 CallStore::get")
+    }
+
+    /// The bytes copy and export share: Markdown or JSON of the call's valid transcript
+    /// with the title and names of meta.json.
+    #[allow(unused_variables)]
+    pub fn export_bytes(
+        &self,
+        calls: &CallSettings,
+        root: &str,
+        id: &str,
+        format: Format,
+    ) -> Result<Vec<u8>, CallError> {
+        unimplemented!("T-141 CallStore::export_bytes")
+    }
+}
+
+/// Writes `bytes` to `target` through a fresh tmp file reserved next to it with `create_new`
+/// and the one tmp+sync+rename tail; leaves nothing of this call on failure.
+#[allow(unused_variables)]
+pub fn export_to(target: &Path, bytes: &[u8]) -> Result<(), CallError> {
+    unimplemented!("T-141 export_to")
+}
+
+/// The one tail: write `bytes` to `file`, sync, rename `tmp` over `target`; on any failure
+/// `tmp` is removed (best effort) and the first error is returned.
+#[allow(unused_variables)]
+pub fn fill_and_rename<W: SyncWrite>(
+    file: W,
+    tmp: &Path,
+    target: &Path,
+    bytes: &[u8],
+) -> io::Result<()> {
+    unimplemented!("T-141 fill_and_rename")
+}
+
 /// `YYYY-MM-DD_HHMMSS` of the local start.
 fn folder_stamp(t: &LocalTime) -> String {
     format!(
@@ -1612,5 +1815,792 @@ mod tests {
         for (op, kind) in table {
             assert_eq!(storage_kind(op), kind, "{op}");
         }
+    }
+
+    // ---- T-141: wire, guard, get, export -------------------------------------------
+
+    use crate::call::transcript::{export_json, export_markdown, TranscriptV1};
+
+    const WIRE_FIXTURE: &str = include_str!("../../../../e2e/fixtures/calls-wire.json");
+    const READY_ID: &str = "2026-10-29_100000";
+
+    /// `transcript.json` of the ready call: its own title and names differ from meta.json's.
+    const TRANSCRIPT_TEXT: &str = concat!(
+        r#"{"schema":1,"call_id":"2026-10-29_100000","title":"Own title","#,
+        r#""started_at":"2026-10-29T10:00:00+03:00","duration_ms":3600000,"#,
+        r#""speakers":[{"id":"me","name":"X"},{"id":"s1","name":"Y"}],"#,
+        r#""segments":[{"start_ms":0,"end_ms":2000,"track":"mic","speaker":"me","lang":"en","text":"Hello there","source":"final"},"#,
+        r#"{"start_ms":1500,"end_ms":4000,"track":"system","speaker":"s1","lang":null,"text":"Hi","source":"final"}],"#,
+        r#""engines":{"transcription":"api:whisper-1","diarization":null}}"#
+    );
+
+    fn transcript() -> TranscriptV1 {
+        match TranscriptV1::from_json(TRANSCRIPT_TEXT) {
+            Ok(t) => t,
+            Err(e) => panic!("fixture transcript does not parse: {e:?}"),
+        }
+    }
+
+    fn not_found() -> CallError {
+        CallError {
+            code: CallErrorCode::NotFound,
+            file: None,
+            reason: None,
+        }
+    }
+
+    fn io_failed(reason: UnwritableReason) -> CallError {
+        CallError {
+            code: CallErrorCode::IoFailed,
+            file: None,
+            reason: Some(reason),
+        }
+    }
+
+    /// A listed entry without touching the disk; `meta.state` follows `state`.
+    fn wire_entry(
+        root: &str,
+        id: &str,
+        state: ListState,
+        title: &str,
+        started_at: &str,
+        duration_ms: Option<u64>,
+    ) -> CallEntry {
+        let stored = match state {
+            ListState::Recording => CallState::Recording,
+            ListState::Queued => CallState::ReadyToTranscribe,
+            ListState::Transcribing => CallState::Transcribing,
+            ListState::Ready => CallState::Ready,
+            ListState::Failed(_) => CallState::Failed,
+            ListState::Recovered | ListState::Damaged => CallState::Recovered,
+        };
+        let mut meta = sample_meta(id, stored);
+        meta.title = title.to_string();
+        meta.started_at = started_at.to_string();
+        meta.duration_ms = duration_ms;
+        if let ListState::Failed(reason) = state {
+            meta.failure = Some(Failure {
+                reason,
+                track: None,
+            });
+        }
+        CallEntry {
+            id: CallId::parse(id).expect("call id"),
+            root: PathBuf::from(root),
+            state,
+            meta: (state != ListState::Damaged).then_some(meta),
+        }
+    }
+
+    fn wire_list() -> CallList {
+        let c = "C:\\Calls";
+        let mut entries = vec![
+            wire_entry(
+                c,
+                "2026-10-30_140509",
+                ListState::Recording,
+                "Call 30.10 14:05",
+                "2026-10-30T14:05:09+03:00",
+                None,
+            ),
+            wire_entry(
+                c,
+                "2026-10-30_130000",
+                ListState::Queued,
+                "Call 30.10 13:00",
+                "2026-10-30T13:00:00+03:00",
+                Some(1_800_000),
+            ),
+            wire_entry(
+                c,
+                "2026-10-30_120000",
+                ListState::Transcribing,
+                "Call 30.10 12:00",
+                "2026-10-30T12:00:00+03:00",
+                Some(2_400_000),
+            ),
+            wire_entry(
+                c,
+                READY_ID,
+                ListState::Ready,
+                "Weekly sync",
+                "2026-10-29T10:00:00+03:00",
+                Some(3_600_000),
+            ),
+        ];
+        let reasons = [
+            FailReason::Key,
+            FailReason::Network,
+            FailReason::Timeout,
+            FailReason::Provider,
+            FailReason::Storage,
+            FailReason::EngineNotSetUp,
+        ];
+        for (n, reason) in reasons.into_iter().enumerate() {
+            entries.push(wire_entry(
+                c,
+                &format!("2026-10-28_10000{n}"),
+                ListState::Failed(reason),
+                "Call 28.10 10:00",
+                &format!("2026-10-28T10:00:0{n}+03:00"),
+                Some(60_000),
+            ));
+        }
+        entries.push(wire_entry(
+            c,
+            "2026-10-27_090000",
+            ListState::Recovered,
+            "Call 27.10 09:00",
+            "2026-10-27T09:00:00+03:00",
+            Some(120_000),
+        ));
+        entries.push(wire_entry(
+            "D:\\Old calls",
+            "2026-10-26_081507-2",
+            ListState::Damaged,
+            "",
+            "",
+            None,
+        ));
+        CallList {
+            entries,
+            unavailable: vec![PathBuf::from("E:\\Gone")],
+        }
+    }
+
+    fn to_value<T: Serialize>(v: &T) -> Value {
+        serde_json::to_value(v).expect("wire value")
+    }
+
+    #[test]
+    fn calls_wire_fixture_matches_core() {
+        // P-010: e2e/fixtures/calls-wire.json is exactly serde_json of the wire builders, every
+        // ListState incl. queued, every FailReason, recovered, damaged, an unavailable root, a
+        // detail with both tracks and a null lang, the CallError shapes. Bite: a field renamed,
+        // a state or reason spelled another way (snake_case for camelCase), `failReason` not
+        // skipped, a damaged title/startedAt rule changed, a key added or dropped.
+        let fixture: Value = serde_json::from_str(WIRE_FIXTURE)
+            .unwrap_or_else(|e| panic!("calls-wire.json is valid JSON: {e}"));
+        let list = wire_list();
+        let ready = list
+            .entries
+            .iter()
+            .find(|e| e.id.as_str() == READY_ID)
+            .expect("ready entry");
+        let damaged = list.entries.last().expect("damaged entry");
+        let mut errors = serde_json::Map::new();
+        errors.insert("notFound".to_string(), to_value(&not_found()));
+        errors.insert(
+            "inUse".to_string(),
+            to_value(&CallError {
+                code: CallErrorCode::InUse,
+                file: Some("mic.opus".to_string()),
+                reason: None,
+            }),
+        );
+        errors.insert(
+            "ioFailed".to_string(),
+            to_value(&io_failed(UnwritableReason::AccessDenied)),
+        );
+        let mut core = serde_json::Map::new();
+        core.insert(
+            "list".to_string(),
+            to_value(&list_wire(&list, UiLanguage::En)),
+        );
+        core.insert(
+            "damagedRu".to_string(),
+            to_value(&summary_of(damaged, UiLanguage::Ru)),
+        );
+        core.insert(
+            "detail".to_string(),
+            to_value(&detail_of(ready, Some(&transcript()), UiLanguage::En)),
+        );
+        core.insert("errors".to_string(), Value::Object(errors));
+        for (key, value) in &core {
+            assert_eq!(
+                fixture.get(key.as_str()),
+                Some(value),
+                "e2e/fixtures/calls-wire.json {key} differs from core; core says:\n{}",
+                serde_json::to_string_pretty(value).unwrap_or_else(|e| e.to_string())
+            );
+        }
+        let fixture_keys: std::collections::BTreeSet<&str> = fixture
+            .as_object()
+            .expect("object")
+            .keys()
+            .map(String::as_str)
+            .filter(|k| *k != "_format")
+            .collect();
+        let core_keys: std::collections::BTreeSet<&str> = core.keys().map(String::as_str).collect();
+        assert_eq!(
+            fixture_keys, core_keys,
+            "the fixture holds exactly core's keys"
+        );
+        assert!(
+            fixture
+                .get("_format")
+                .and_then(Value::as_str)
+                .is_some_and(|f| f.contains("Never edit by hand")),
+            "_format names the builders and says never edit by hand"
+        );
+    }
+
+    #[test]
+    fn a_root_that_is_not_current_or_remembered_is_not_found_without_fs() {
+        // Acceptance: failure branch, `notFound` with no filesystem access (P-009). A real
+        // folder holding a valid call that settings do not list is refused by all three
+        // doors; a listed root that does not exist still resolves (no fs check).
+        // Bite: a guard that canonicalizes/starts_with/exists instead of exact equality, one
+        // that accepts any existing root, a door that skips the guard.
+        let f = fixture();
+        let listed = f.dir.path().join("listed");
+        let stranger = f.dir.path().join("stranger");
+        fs::create_dir(&stranger).expect("stranger");
+        plant(&stranger, READY_ID, CallState::Ready);
+        let calls = calls_in(Some(&listed), &[]);
+        let root = wire_root(&stranger);
+        assert_eq!(
+            resolve_call(&calls, &f.default_root, &root, READY_ID),
+            Err(not_found())
+        );
+        assert_eq!(
+            f.store.get(&calls, &root, READY_ID, UiLanguage::En),
+            Err(not_found())
+        );
+        assert_eq!(
+            f.store.export_bytes(&calls, &root, READY_ID, Format::Md),
+            Err(not_found())
+        );
+        // The listed root is not on disk: the guard is pure, so it still resolves.
+        assert_eq!(
+            resolve_call(&calls, &f.default_root, &wire_root(&listed), READY_ID),
+            Ok(listed.join(READY_ID))
+        );
+        // Near misses of the listed root are other texts.
+        let text = wire_root(&listed);
+        for near in [
+            String::new(),
+            format!("{text}/"),
+            format!("{text}/.."),
+            format!("{text}x"),
+            text.to_uppercase(),
+            wire_root(listed.parent().expect("parent")),
+        ] {
+            assert_eq!(
+                resolve_call(&calls, &f.default_root, &near, READY_ID),
+                Err(not_found()),
+                "{near:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_id_outside_the_grammar_is_not_found() {
+        // Acceptance: failure branch, an `id` outside the call-id grammar is `notFound`.
+        // Bite: the id joined without CallId::parse; a prefix/contains check; `..` allowed.
+        let f = fixture();
+        let root = f.dir.path().join("calls");
+        fs::create_dir(&root).expect("root");
+        plant(&root, "2026-10-30_140509", CallState::Ready);
+        let calls = calls_in(Some(&root), &[]);
+        let text = wire_root(&root);
+        let bad = [
+            "..",
+            ".",
+            "",
+            "a/b",
+            "2026-10-30_140509/..",
+            "../2026-10-30_140509",
+            "2026-10-30_140509\\x",
+            "2026-13-01_000000",
+            "2026-10-30_140509 ",
+            " 2026-10-30_140509",
+            "2026-10-30_140509-",
+            "2026-10-30_140509-x",
+        ];
+        for id in bad {
+            assert_eq!(
+                resolve_call(&calls, &f.default_root, &text, id),
+                Err(not_found()),
+                "{id:?}"
+            );
+            assert_eq!(
+                f.store.get(&calls, &text, id, UiLanguage::En),
+                Err(not_found()),
+                "{id:?}"
+            );
+        }
+        for id in ["2026-10-30_140509", "2026-10-30_140509-2"] {
+            assert_eq!(
+                resolve_call(&calls, &f.default_root, &text, id),
+                Ok(root.join(id)),
+                "{id}"
+            );
+        }
+    }
+
+    #[test]
+    fn guard_accepts_the_current_and_every_earlier_root_and_nothing_else() {
+        // Bite: only the current root accepted; only the first earlier root; the default root
+        // accepted next to a chosen one; the text compared lossy/case-folded.
+        let default = Path::new("/srv/default");
+        let (cur, e1, e2) = (
+            Path::new("/srv/cur"),
+            Path::new("/srv/earlier one"),
+            Path::new("/srv/earlier2"),
+        );
+        assert_eq!(wire_root(Path::new("/srv/earlier one")), "/srv/earlier one");
+        let chosen = calls_in(Some(cur), &[e1, e2]);
+        for p in [cur, e1, e2] {
+            assert_eq!(
+                resolve_call(&chosen, default, &wire_root(p), READY_ID),
+                Ok(p.join(READY_ID)),
+                "{p:?}"
+            );
+        }
+        for other in [default, Path::new("/srv/other")] {
+            assert_eq!(
+                resolve_call(&chosen, default, &wire_root(other), READY_ID),
+                Err(not_found()),
+                "{other:?}"
+            );
+        }
+        let unchosen = calls_in(None, &[e1]);
+        for p in [default, e1] {
+            assert_eq!(
+                resolve_call(&unchosen, default, &wire_root(p), READY_ID),
+                Ok(p.join(READY_ID)),
+                "{p:?}"
+            );
+        }
+        assert_eq!(
+            resolve_call(&unchosen, default, &wire_root(cur), READY_ID),
+            Err(not_found())
+        );
+    }
+
+    /// A ready call folder with its transcript; returns the settings and the root.
+    fn plant_ready(f: &Fixture) -> (CallSettings, PathBuf) {
+        let root = f.dir.path().join("calls");
+        fs::create_dir(&root).expect("root");
+        let mut meta = sample_meta(READY_ID, CallState::Ready);
+        meta.title = "Weekly sync".to_string();
+        meta.started_at = "2026-10-29T10:00:00+03:00".to_string();
+        meta.duration_ms = Some(3_600_000);
+        meta.speakers[0].name = "Alice".to_string();
+        meta.speakers[1].name = "Bob".to_string();
+        plant_value(&root, READY_ID, Some(&to_value(&meta)), true, true);
+        fs::write(root.join(READY_ID).join("transcript.json"), TRANSCRIPT_TEXT)
+            .expect("transcript");
+        (calls_in(Some(&root), &[]), root)
+    }
+
+    #[test]
+    fn get_maps_meta_and_transcript_to_the_detail() {
+        // Bite: title/speakers taken from transcript.json instead of meta.json; a line field
+        // dropped, a lang null turned into a string; the summary not from the listed entry.
+        let f = fixture();
+        let (calls, root) = plant_ready(&f);
+        let got = f
+            .store
+            .get(&calls, &wire_root(&root), READY_ID, UiLanguage::En);
+        let want = CallDetail {
+            summary: CallSummary {
+                id: READY_ID.to_string(),
+                root: wire_root(&root),
+                title: "Weekly sync".to_string(),
+                started_at: "2026-10-29T10:00:00+03:00".to_string(),
+                duration_ms: Some(3_600_000),
+                state: WireState::Ready,
+                fail_reason: None,
+            },
+            speakers: vec![
+                WireSpeaker {
+                    id: "me".to_string(),
+                    name: "Alice".to_string(),
+                },
+                WireSpeaker {
+                    id: "s1".to_string(),
+                    name: "Bob".to_string(),
+                },
+            ],
+            lines: vec![
+                Line {
+                    start_ms: 0,
+                    end_ms: 2000,
+                    track: "mic".to_string(),
+                    speaker: "me".to_string(),
+                    lang: Some("en".to_string()),
+                    text: "Hello there".to_string(),
+                },
+                Line {
+                    start_ms: 1500,
+                    end_ms: 4000,
+                    track: "system".to_string(),
+                    speaker: "s1".to_string(),
+                    lang: None,
+                    text: "Hi".to_string(),
+                },
+            ],
+        };
+        assert_eq!(got, Ok(want));
+    }
+
+    #[test]
+    fn get_without_transcript_has_no_lines() {
+        // D3. Bite: a missing transcript.json reported as ioFailed; the state or failReason
+        // not carried (queued, failed with a reason).
+        let f = fixture();
+        let root = f.dir.path().join("calls");
+        fs::create_dir(&root).expect("root");
+        plant(&root, "2026-10-30_130000", CallState::ReadyToTranscribe);
+        let mut failed = sample_meta("2026-10-30_120000", CallState::Failed);
+        failed.failure = Some(Failure {
+            reason: FailReason::Network,
+            track: None,
+        });
+        plant_value(
+            &root,
+            "2026-10-30_120000",
+            Some(&to_value(&failed)),
+            true,
+            true,
+        );
+        let calls = calls_in(Some(&root), &[]);
+        let text = wire_root(&root);
+        let queued = f
+            .store
+            .get(&calls, &text, "2026-10-30_130000", UiLanguage::En)
+            .expect("queued");
+        assert_eq!(queued.lines, Vec::<Line>::new());
+        assert_eq!(queued.summary.state, WireState::Queued);
+        assert_eq!(queued.summary.fail_reason, None);
+        assert_eq!(queued.speakers.len(), 2);
+        let failed = f
+            .store
+            .get(&calls, &text, "2026-10-30_120000", UiLanguage::En)
+            .expect("failed");
+        assert_eq!(failed.lines, Vec::<Line>::new());
+        assert_eq!(failed.summary.state, WireState::Failed);
+        assert_eq!(failed.summary.fail_reason, Some(WireFailReason::Network));
+    }
+
+    #[test]
+    fn get_refuses_a_gone_damaged_or_broken_call_with_the_right_code() {
+        // D2, D3. Bite: a damaged call opened as fine; a missing folder reported as ioFailed;
+        // a broken or invalid transcript.json shown as no lines.
+        let f = fixture();
+        let (calls, root) = plant_ready(&f);
+        let text = wire_root(&root);
+        let code = |r: Result<CallDetail, CallError>| r.expect_err("refused").code;
+        // Gone: the folder does not exist.
+        assert_eq!(
+            code(
+                f.store
+                    .get(&calls, &text, "2026-10-01_000000", UiLanguage::En)
+            ),
+            CallErrorCode::NotFound
+        );
+        // Damaged: the folder exists, meta.json does not.
+        plant_value(&root, "2026-10-02_000000", None, true, true);
+        assert_eq!(
+            code(
+                f.store
+                    .get(&calls, &text, "2026-10-02_000000", UiLanguage::En)
+            ),
+            CallErrorCode::IoFailed
+        );
+        // Unparsable transcript.json.
+        let path = root.join(READY_ID).join("transcript.json");
+        fs::write(&path, "{").expect("write");
+        assert_eq!(
+            code(f.store.get(&calls, &text, READY_ID, UiLanguage::En)),
+            CallErrorCode::IoFailed
+        );
+        // Parsable but invalid: a line ends after the call.
+        fs::write(
+            &path,
+            TRANSCRIPT_TEXT.replace("\"end_ms\":4000", "\"end_ms\":4000000000"),
+        )
+        .expect("write");
+        assert_eq!(
+            code(f.store.get(&calls, &text, READY_ID, UiLanguage::En)),
+            CallErrorCode::IoFailed
+        );
+    }
+
+    #[test]
+    fn export_bytes_serve_markdown_and_json_with_meta_names_and_refuse_the_rest() {
+        // FR-036: copy and export share these bytes. Bite: the transcript's own title/names;
+        // a second renderer; a missing transcript exported as empty bytes; invalid exported.
+        let f = fixture();
+        let (calls, root) = plant_ready(&f);
+        let text = wire_root(&root);
+        let t = transcript();
+        let names = [
+            Speaker {
+                id: "me".to_string(),
+                name: "Alice".to_string(),
+            },
+            Speaker {
+                id: "s1".to_string(),
+                name: "Bob".to_string(),
+            },
+        ];
+        assert_eq!(
+            f.store.export_bytes(&calls, &text, READY_ID, Format::Md),
+            Ok(export_markdown(&t, "Weekly sync", &names).into_bytes())
+        );
+        assert_eq!(
+            f.store.export_bytes(&calls, &text, READY_ID, Format::Json),
+            Ok(export_json(&t, "Weekly sync", &names).into_bytes())
+        );
+        // No transcript.json: nothing to export.
+        plant(&root, "2026-10-30_130000", CallState::ReadyToTranscribe);
+        for format in [Format::Md, Format::Json] {
+            assert_eq!(
+                f.store
+                    .export_bytes(&calls, &text, "2026-10-30_130000", format),
+                Err(io_failed(UnwritableReason::Missing))
+            );
+        }
+        fs::write(root.join(READY_ID).join("transcript.json"), "{").expect("write");
+        assert_eq!(
+            f.store
+                .export_bytes(&calls, &text, READY_ID, Format::Json)
+                .expect_err("broken")
+                .code,
+            CallErrorCode::IoFailed
+        );
+    }
+
+    // ---- export_to / fill_and_rename ----------------------------------------------
+
+    /// A tmp writer over a real file that fails exactly one call (F-024): the first write or
+    /// the first sync, once, with `PermissionDenied`; every other call succeeds.
+    struct OneFault {
+        file: File,
+        fail_write: bool,
+        fail_sync: bool,
+        synced: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl OneFault {
+        fn open(
+            tmp: &Path,
+            fail_write: bool,
+            fail_sync: bool,
+        ) -> (OneFault, Arc<std::sync::atomic::AtomicBool>) {
+            let synced = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let file = File::create(tmp).expect("tmp");
+            (
+                OneFault {
+                    file,
+                    fail_write,
+                    fail_sync,
+                    synced: Arc::clone(&synced),
+                },
+                synced,
+            )
+        }
+    }
+
+    impl Write for OneFault {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            if std::mem::take(&mut self.fail_write) {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "fake write fault",
+                ));
+            }
+            self.file.write(buf)
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            self.file.flush()
+        }
+    }
+
+    impl SyncWrite for OneFault {
+        fn sync_data(&mut self) -> io::Result<()> {
+            if std::mem::take(&mut self.fail_sync) {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "fake sync fault",
+                ));
+            }
+            self.synced.store(true, std::sync::atomic::Ordering::SeqCst);
+            self.file.sync_data()
+        }
+    }
+
+    #[test]
+    fn export_md_and_json_replace_the_target_via_rename_and_leave_no_tmp() {
+        // Acceptance: export writes with temp + rename into the target's folder. Bite: the
+        // bytes written straight into the target; the target not replaced when it exists; a
+        // tmp left behind; the tmp not synced.
+        let dir = TempDir::new();
+        let md = dir.path().join("call.md");
+        let json = dir.path().join("call.json");
+        fs::write(&md, "old").expect("old");
+        export_to(&md, b"# new\n").expect("md");
+        export_to(&json, b"{\"a\":1}").expect("json");
+        assert_eq!(fs::read(&md).expect("md"), b"# new\n");
+        assert_eq!(fs::read(&json).expect("json"), b"{\"a\":1}");
+        assert_eq!(
+            names(dir.path()),
+            vec!["call.json".to_string(), "call.md".to_string()]
+        );
+        // The shared tail: healthy run syncs before the rename and replaces the target.
+        let tmp = dir.path().join("t.tmp");
+        let (writer, synced) = OneFault::open(&tmp, false, false);
+        fill_and_rename(writer, &tmp, &md, b"third").expect("tail");
+        assert!(
+            synced.load(std::sync::atomic::Ordering::SeqCst),
+            "the data is synced"
+        );
+        assert_eq!(fs::read(&md).expect("md"), b"third");
+        assert!(!tmp.exists());
+    }
+
+    #[test]
+    fn export_into_a_missing_or_non_folder_target_leaves_nothing_and_reports_the_reason() {
+        // Acceptance: failure branch, a target that cannot be written leaves no file and
+        // returns ioFailed{reason}. Real-fs faults that root cannot bypass (chmod does not
+        // bite as root). Bite: a missing folder created; `reason` dropped or always `other`;
+        // a swallowed create error; a tmp left behind when the rename fails.
+        let dir = TempDir::new();
+        let before = names(dir.path());
+        assert_eq!(
+            export_to(&dir.path().join("nope").join("out.md"), b"x"),
+            Err(io_failed(UnwritableReason::Missing))
+        );
+        assert_eq!(names(dir.path()), before, "no folder made");
+        let afile = dir.path().join("afile");
+        fs::write(&afile, "mine").expect("file");
+        assert_eq!(
+            export_to(&afile.join("out.md"), b"x"),
+            Err(io_failed(UnwritableReason::NotAFolder))
+        );
+        assert_eq!(fs::read(&afile).expect("file"), b"mine");
+        // A target that is a folder fails at the rename and leaves no tmp.
+        let adir = dir.path().join("adir");
+        fs::create_dir(&adir).expect("dir");
+        let got = export_to(&adir, b"x");
+        assert_eq!(got.expect_err("a folder").code, CallErrorCode::IoFailed);
+        assert_eq!(fs::read_dir(&adir).expect("dir").count(), 0);
+        assert_eq!(
+            names(dir.path()),
+            vec!["adir".to_string(), "afile".to_string()]
+        );
+        // No parent or no file name: refused as `other`, nothing touched.
+        for bad in [Path::new(""), Path::new("/")] {
+            assert_eq!(
+                export_to(bad, b"x"),
+                Err(io_failed(UnwritableReason::Other)),
+                "{bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn export_write_or_sync_failure_removes_its_tmp_and_reports_the_reason() {
+        // F-024: the fault writer fails exactly one call, the write or the sync, so a swallow
+        // at that call cannot hide behind a later error. The previous target survives, the
+        // tmp is gone, the first error comes back and maps to access_denied.
+        // Bite: `let _ =` on the write or on the sync; the tmp not removed; the rename run
+        // after a failed write; the target written in place.
+        for (fail_write, fail_sync) in [(true, false), (false, true)] {
+            let dir = TempDir::new();
+            let target = dir.path().join("out.md");
+            let tmp = dir.path().join("out.md.voicen-tmp");
+            fs::write(&target, "keep").expect("old");
+            let (writer, _) = OneFault::open(&tmp, fail_write, fail_sync);
+            let err = fill_and_rename(writer, &tmp, &target, b"new").expect_err("fault");
+            assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+            assert_eq!(fs::read(&target).expect("target"), b"keep");
+            assert_eq!(
+                names(dir.path()),
+                vec!["out.md".to_string()],
+                "write={fail_write}"
+            );
+            assert_eq!(
+                CallError::io_failed(err.kind()),
+                io_failed(UnwritableReason::AccessDenied)
+            );
+        }
+    }
+
+    #[test]
+    fn export_never_touches_an_existing_tmp_name() {
+        // Hypothesis 4: the user's own `<name>.voicen-tmp` in the chosen folder is never
+        // opened, truncated, renamed or removed. Bite: File::create instead of create_new
+        // (truncates it); a fixed tmp name; removing the tmp name on failure without owning it;
+        // overwriting when all nine alternatives are taken.
+        let dir = TempDir::new();
+        let target = dir.path().join("out.md");
+        let mine = dir.path().join("out.md.voicen-tmp");
+        fs::write(&mine, "mine").expect("mine");
+        export_to(&target, b"data").expect("export");
+        assert_eq!(fs::read(&target).expect("target"), b"data");
+        assert_eq!(fs::read(&mine).expect("mine"), b"mine");
+        assert_eq!(
+            names(dir.path()),
+            vec!["out.md".to_string(), "out.md.voicen-tmp".to_string()]
+        );
+        // A failed rename (target is a folder) must not remove the user's tmp either.
+        let adir = dir.path().join("adir");
+        fs::create_dir(&adir).expect("dir");
+        let user = dir.path().join("adir.voicen-tmp");
+        fs::write(&user, "user").expect("user");
+        assert!(export_to(&adir, b"x").is_err());
+        assert_eq!(fs::read(&user).expect("user"), b"user");
+        assert_eq!(
+            names(dir.path()),
+            vec![
+                "adir".to_string(),
+                "adir.voicen-tmp".to_string(),
+                "out.md".to_string(),
+                "out.md.voicen-tmp".to_string()
+            ]
+        );
+        // All ten reservable names taken: refused, nothing opened, nothing created.
+        let full = TempDir::new();
+        let target = full.path().join("out.md");
+        let mut taken = vec!["out.md.voicen-tmp".to_string()];
+        taken.extend((1..=9).map(|n| format!("out.md.voicen-tmp-{n}")));
+        for name in &taken {
+            fs::write(full.path().join(name), name).expect("taken");
+        }
+        let got = export_to(&target, b"data");
+        assert_eq!(got.expect_err("all taken").code, CallErrorCode::IoFailed);
+        assert!(!target.exists());
+        for name in &taken {
+            assert_eq!(
+                fs::read(full.path().join(name)).expect("taken"),
+                name.as_bytes()
+            );
+        }
+        assert_eq!(names(full.path()).len(), taken.len());
+    }
+
+    #[test]
+    fn write_atomic_still_replaces_a_stale_meta_tmp() {
+        // Characterization (passes today): the call folder is ours, so write_atomic opens its
+        // tmp with File::create and a tmp left by a crash is replaced, not an error. The split
+        // into an opener and the shared tail must keep this. Bite: write_atomic switched to
+        // create_new.
+        let dir = TempDir::new();
+        fs::write(dir.path().join("meta.json"), "old").expect("old");
+        fs::write(
+            dir.path().join("meta.json.tmp"),
+            "stale crash leftover, longer",
+        )
+        .expect("stale");
+        write_atomic(dir.path(), "meta.json", b"fresh").expect("write");
+        assert_eq!(
+            fs::read(dir.path().join("meta.json")).expect("meta"),
+            b"fresh"
+        );
+        assert_eq!(names(dir.path()), vec!["meta.json".to_string()]);
     }
 }

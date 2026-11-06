@@ -358,6 +358,18 @@ pub fn render_markdown(transcript: &TranscriptV1, title: &str, names: &[Speaker]
     out
 }
 
+/// T-141 STUB. The Markdown of an export: [`render_markdown`] with the meta.json title and names.
+#[allow(unused_variables)]
+pub fn export_markdown(transcript: &TranscriptV1, title: &str, names: &[Speaker]) -> String {
+    unimplemented!("T-141 export_markdown")
+}
+
+/// T-141 STUB. The JSON of an export: the transcript with `title` and `names` replacing its own.
+#[allow(unused_variables)]
+pub fn export_json(transcript: &TranscriptV1, title: &str, names: &[Speaker]) -> String {
+    unimplemented!("T-141 export_json")
+}
+
 fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
@@ -1714,6 +1726,63 @@ mod tests {
         assert_eq!(
             render_markdown(&t, "T", &names),
             "# T\n2026-10-30 14:05 · 0:00:01\n\n**[00:00:00] Al ice:** x\n"
+        );
+    }
+
+    // ---- export (T-141) -----------------------------------------------------------
+
+    fn renamed_names() -> [Speaker; 2] {
+        [
+            Speaker {
+                id: "me".into(),
+                name: "Alice".into(),
+            },
+            Speaker {
+                id: "s1".into(),
+                name: "Bob".into(),
+            },
+        ]
+    }
+
+    #[test]
+    fn export_markdown_is_render_markdown_with_meta_names() {
+        // The one Markdown producer is render_markdown; the export applies the title and the
+        // names of meta.json, never the transcript's own copies (FR-035, FR-036).
+        // Bite: the transcript's own title or speakers used; a second renderer.
+        let t = load(FULL);
+        let names = renamed_names();
+        let got = export_markdown(&t, "Renamed call", &names);
+        assert_eq!(got, render_markdown(&t, "Renamed call", &names));
+        assert!(got.starts_with("# Renamed call\n"), "{got}");
+        assert!(got.contains("Alice:") && got.contains("Bob:"), "{got}");
+        assert!(
+            !got.contains("Weekly sync") && !got.contains("Other party"),
+            "{got}"
+        );
+    }
+
+    #[test]
+    fn export_json_carries_meta_title_and_names_and_validates() {
+        // Bite: the transcript's own title or speakers kept; a line changed or dropped; a text
+        // that does not parse back or fails validate().
+        let t = load(FULL);
+        let names = renamed_names();
+        let text = export_json(&t, "Renamed call", &names);
+        let back = match TranscriptV1::from_json(&text) {
+            Ok(back) => back,
+            Err(e) => panic!("the export does not parse back: {e:?}"),
+        };
+        assert_eq!(back.validate(), Ok(()));
+        assert_eq!(back.title, "Renamed call");
+        assert_eq!(back.speakers, names.to_vec());
+        let mut want = t.clone();
+        want.title = "Renamed call".to_string();
+        want.speakers = names.to_vec();
+        assert_eq!(back, want, "every other field is the transcript's own");
+        assert_eq!(
+            text,
+            want.to_json(),
+            "compact schema-1 text in section 7 order"
         );
     }
 }
