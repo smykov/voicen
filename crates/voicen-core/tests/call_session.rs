@@ -228,6 +228,7 @@ fn the_selected_microphone_is_opened_by_id() {
     // Acceptance 2 / invariant "mic: Selected(id)": a saved microphone is opened by its
     // id, the loopback is the system track. Bite: the default input opened regardless.
     let rig = CallRig::with(|s| {
+        s.calls.warned_hosts = vec!["api.example.com".to_string()];
         s.microphone = Some(Microphone {
             id: "mic-1".to_string(),
             name: "Desk mic".to_string(),
@@ -498,6 +499,7 @@ fn a_missing_selected_mic_starts_on_the_default_input_with_mic_changed() {
     // catalog text. Bite: no retry (refused), a retry without the warning, the retry
     // on the system track, the warning only in the log.
     let rig = CallRig::with(|s| {
+        s.calls.warned_hosts = vec!["api.example.com".to_string()];
         s.microphone = Some(Microphone {
             id: "gone-mic".to_string(),
             name: "Unplugged".to_string(),
@@ -1061,7 +1063,8 @@ fn a_gap_without_a_device_change_leaves_no_line_and_no_entry() {
     // entry (a gap tied to a device change is call_device, a later task). The mic stalls
     // for 500 ms between two blocks (a stamp jump, no channel drop). Bite: a Gap logged
     // or stored as a drop, a Gap recorded as a device change.
-    let rig = CallRig::new();
+    // A capacity above the 65 blocks fed in one burst: no channel drop under load.
+    let rig = CallRig::with_capacity(256, |_| {});
     started(&rig, CallSource::Tray);
     rig.source.feed(Track::System, 0, 1_300, 0.1);
     rig.source.feed(Track::Mic, 0, 400, 0.3);
@@ -1179,6 +1182,7 @@ fn remember_warned_host_keeps_the_snapshot_when_the_write_fails() {
         "the snapshot is unchanged"
     );
     assert_eq!(world.file.bytes(), file_before, "the file is unchanged");
+    world.file.clear_failures();
     assert_eq!(world.service.remember_warned_host(&host()), Ok(()));
     assert_eq!(
         world.service.snapshot().calls.warned_hosts,
