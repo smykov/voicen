@@ -1,0 +1,9 @@
+guarantee: AC5: ioFailed{reason} names the real cause (reserve_export_tmp propagates an open error other than AlreadyExists)
+file: crates/voicen-core/src/call/storage.rs
+added_by: test-writer
+test: cargo test -j2 -p voicen-core --lib call::storage::tests::export_
+--- old
+            Err(e) => return Err(e),
+--- new
+            Err(_) => continue,
+--- end

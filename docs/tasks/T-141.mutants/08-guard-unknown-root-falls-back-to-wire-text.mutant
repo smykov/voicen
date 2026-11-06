@@ -1,0 +1,12 @@
+guarantee: AC3: a root that is not current or remembered gives notFound (guard refuses the root, no path from wire text)
+file: crates/voicen-core/src/call/storage.rs
+added_by: test-writer
+test: cargo test -j2 -p voicen-core --lib call::storage::tests::
+--- old
+        .find(|p| p.to_str() == Some(root))
+        .ok_or_else(CallError::not_found)?;
+--- new
+        .find(|p| p.to_str() == Some(root))
+        .cloned()
+        .unwrap_or_else(|| PathBuf::from(root));
+--- end

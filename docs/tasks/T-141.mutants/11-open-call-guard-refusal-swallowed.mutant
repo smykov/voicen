@@ -1,0 +1,13 @@
+guarantee: AC3: get and export_bytes give notFound for a root that is not current or remembered (open_call propagates the guard refusal)
+file: crates/voicen-core/src/call/storage.rs
+added_by: test-writer
+test: cargo test -j2 -p voicen-core --lib call::storage::tests::
+--- old
+        let (root, id) = guard(calls, &self.roots.default_root(), root, id)?;
+--- new
+        let (root, id) = guard(calls, &self.roots.default_root(), root, id).or_else(|_| {
+            CallId::parse(id)
+                .map(|i| (PathBuf::from(root), i))
+                .ok_or_else(CallError::not_found)
+        })?;
+--- end
