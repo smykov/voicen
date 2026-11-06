@@ -15,8 +15,7 @@
 
 use std::path::Path;
 use std::sync::{Arc, Mutex, PoisonError};
-use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde_json::{json, Value};
 use tauri::ipc::{CallbackFn, InvokeBody};
@@ -38,6 +37,7 @@ use voicen_core::test_support::local_models::FakeDisk;
 use voicen_core::test_support::TempDir;
 use voicen_core::timeouts::Timeouts;
 use voicen_lib::dictation::ShellIndicator;
+use voicen_lib::overlay;
 use voicen_lib::settings_ipc::load_settings;
 
 /// The overlay window's label (contracts/ipc.md).
@@ -46,8 +46,9 @@ const LABEL: &str = "overlay";
 /// The overlay's state event (contracts/ipc.md).
 const STATE_EVENT: &str = "overlay://state";
 
-/// How long a test waits for the overlay thread (Windows-sized, F-005).
-const BUDGET: Duration = Duration::from_secs(10);
+/// A hang bound, not a budget (T-173): how long the overlay's receipt may take. It only
+/// ends a thread that never answers; it stays below the test runner's own limits.
+const HANG: Duration = Duration::from_secs(120);
 
 static SERIAL: Mutex<()> = Mutex::new(());
 
@@ -135,20 +136,6 @@ fn overlay_window(app: &App<MockRuntime>) -> WebviewWindow<MockRuntime> {
     WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("overlay".into()))
         .build()
         .expect("mock webview builds")
-}
-
-/// Polls `cond` every 10 ms until it holds or `budget` has passed.
-fn poll(budget: Duration, mut cond: impl FnMut() -> bool) -> bool {
-    let deadline = Instant::now() + budget;
-    loop {
-        if cond() {
-            return true;
-        }
-        if Instant::now() >= deadline {
-            return false;
-        }
-        thread::sleep(Duration::from_millis(10));
-    }
 }
 
 #[test]
@@ -257,14 +244,20 @@ fn overlay_ready_returns_the_newest_published_state_as_the_last_emit_carries_it(
     let indicator = ShellIndicator::new(app.handle());
 
     indicator.set_overlay(&OverlayState::Recording);
-    let built = poll(BUDGET, || {
-        app.get_webview_window(LABEL).is_some()
-            && last(&events).as_ref().and_then(kind) == Some("recording")
-    });
+    // T-173: decided through the overlay thread's receipt, never a wall-clock ceiling;
+    // the window and the emit are read once, after it.
+    let receipt = overlay::settled(app.handle(), HANG);
     assert!(
-        built,
-        "Recording built no `{LABEL}` window with an {STATE_EVENT} emit within {BUDGET:?} \
-         (emitted: {:?})",
+        receipt.is_some_and(|r| !r.failed),
+        "Recording: the overlay receipt (`overlay::settled`) did not report a handled, \
+         unfailed state within the hang bound {HANG:?}: {receipt:?} (emitted: {:?})",
+        last(&events)
+    );
+    assert!(
+        app.get_webview_window(LABEL).is_some()
+            && last(&events).as_ref().and_then(kind) == Some("recording"),
+        "the receipt settled on Recording but the overlay has no `{LABEL}` window with an \
+         {STATE_EVENT} emit ({receipt:?}; emitted: {:?})",
         last(&events)
     );
     let window = app.get_webview_window(LABEL).expect("the overlay window");
@@ -292,13 +285,18 @@ fn overlay_ready_returns_the_newest_published_state_as_the_last_emit_carries_it(
         .expect("seq is a u64");
 
     indicator.set_overlay(&OverlayState::Processing);
-    let emitted_processing = poll(BUDGET, || {
-        last(&events).as_ref().and_then(kind) == Some("processing")
-    });
+    let receipt = overlay::settled(app.handle(), HANG);
     assert!(
-        emitted_processing,
-        "Processing was not emitted to the live overlay within {BUDGET:?} (last: {:?})",
+        receipt.is_some_and(|r| !r.failed),
+        "Processing: the overlay receipt (`overlay::settled`) did not report a handled, \
+         unfailed state within the hang bound {HANG:?}: {receipt:?} (last: {:?})",
         last(&events)
+    );
+    assert_eq!(
+        last(&events).as_ref().and_then(kind),
+        Some("processing"),
+        "the receipt settled on Processing but it was not emitted to the live overlay \
+         ({receipt:?})"
     );
     let second = invoke(&window, "overlay_ready", json!({}))
         .unwrap_or_else(|e| panic!("overlay_ready rejected for `{LABEL}`: {e}"));
@@ -320,5 +318,63 @@ fn overlay_ready_returns_the_newest_published_state_as_the_last_emit_carries_it(
     assert!(
         second_seq > first_seq,
         "the newer state has no newer seq: {first_seq} then {second_seq}"
+    );
+}
+
+/// The lines the app logged under `dir` so far (none when nothing was written).
+fn logged(dir: &Path) -> Vec<String> {
+    std::fs::read_to_string(dir.join("logs").join("voicen.log"))
+        .map(|text| text.lines().map(str::to_string).collect())
+        .unwrap_or_default()
+}
+
+#[test]
+fn an_overlay_that_cannot_be_built_is_reported_failed_by_the_receipt_and_the_log() {
+    // T-173 failure branch (os-answer-deadline-race): an overlay that never builds
+    // still fails the verdict, with a named cause and without a wall-clock budget. A
+    // window labelled `overlay` already exists, so the overlay thread's build fails
+    // (tauri: WindowLabelAlreadyExists) and writes one `overlay_failed` line. The
+    // overlay's receipt (`overlay::settled`) must report that outcome as `failed` (not
+    // as a hang and not as a success), and the log must hold the line. The assertion
+    // messages name which of the facts is missing. Red while the receipt does not
+    // exist (it answers `None`). Bite: a receipt that reports a failed build as not
+    // failed (the `Ok(Err(_))` arm of `OverlayThread::execute` swallowed), one that
+    // never settles after a failed build, or a build error that writes no line.
+    let _serial = serial();
+    let dir = TempDir::new();
+    let service = load(dir.path());
+    let log = voicen_lib::diag::start(dir.path().join("logs"), Box::new(|_| {}));
+    let app = voicen_lib::build_app(
+        mock_builder(),
+        release_context(),
+        Arc::clone(&service),
+        idle_models(),
+        log,
+    )
+    .expect("mock app builds");
+    let _existing = overlay_window(&app);
+    let indicator = ShellIndicator::new(app.handle());
+
+    indicator.set_overlay(&OverlayState::Recording);
+    let receipt = overlay::settled(app.handle(), HANG);
+
+    let lines = logged(dir.path());
+    let failed_line = lines.iter().any(|l| l.contains("overlay_failed"));
+    let settled = receipt.unwrap_or_else(|| {
+        panic!(
+            "the overlay receipt (`overlay::settled`) did not settle within the hang bound \
+         {HANG:?} although the build had to fail at once (a window labelled `{LABEL}` \
+         already exists); `overlay_failed` logged: {failed_line}; the app's log: {lines:#?}"
+        )
+    });
+    assert!(
+        settled.failed,
+        "the build of a second `{LABEL}` window failed but the receipt says it did not: \
+         {settled:?}; `overlay_failed` logged: {failed_line}; the app's log: {lines:#?}"
+    );
+    assert!(
+        failed_line,
+        "the receipt says the build failed ({settled:?}) but the app logged no \
+         `overlay_failed` line: {lines:#?}"
     );
 }

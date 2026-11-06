@@ -58,11 +58,9 @@ const IDENTIFIER: &str = "dev.voicen.test.lifecycle";
 /// How long the driver waits for a step that is not a window build: a window's
 /// removal (`gone`), the loop ending (`ended`), a tray removal, an apply, the
 /// driver's report after the loop returned. It is not sized for, and must not be
-/// raised for, a cold WebView2 build (T-097, os-answer-deadline-race: a build is
-/// decided through the opener's FIFO in `ready_opened`). One build wait still uses
-/// it as an unaudited ceiling: the overlay poll in
-/// `destroying_the_overlay_as_the_last_window_keeps_the_app_while_the_tray_exists`
-/// (the overlay has no receipt; T-097 follow-up (1)).
+/// raised for, a cold WebView2 build (T-097, os-answer-deadline-race: a settings
+/// window build is decided through the opener's FIFO in `ready_opened`, an overlay
+/// build through the overlay's receipt in `overlay_built`, T-173).
 const BUDGET: Duration = Duration::from_secs(20);
 
 /// How long a main-thread round trip may take on a running loop.
@@ -486,10 +484,72 @@ fn ready_opens_the_first_run_window_when_its_open_queues_behind_a_slow_build() {
 /// The overlay window's label (spec 001 contracts/ipc.md; T-057).
 const OVERLAY: &str = "overlay";
 
+/// What the driver saw of one overlay build: the receipt, and the window read once
+/// after it (T-173).
+#[derive(Debug, Default, Clone, Copy)]
+struct OverlayBuilt {
+    /// The overlay thread settled within `OVERLAY_HANG` (false: still running, hung,
+    /// or the receipt does not exist yet).
+    settled: bool,
+    /// The receipt says handling the state failed (`overlay_failed` was written).
+    failed: bool,
+    /// The overlay window existed when the receipt came (read only then).
+    window: bool,
+    /// How long the receipt took (printed, not judged).
+    waited: Duration,
+}
+
+impl OverlayBuilt {
+    fn built(&self) -> bool {
+        self.settled && !self.failed && self.window
+    }
+}
+
+/// A hang bound, not a budget (T-173): how long the overlay's receipt may take. It
+/// only ends a build that never finishes; it must exceed `OVERLAY_HELD` plus a cold
+/// WebView2 build and stay below `WATCHDOG`.
+const OVERLAY_HANG: Duration = Duration::from_secs(120);
+
+/// Whether the overlay thread has built the overlay window for the newest published
+/// state, decided through the thread's receipt (`overlay::settled`), never through a
+/// wall-clock ceiling on the window: the window is read once, after the receipt.
+fn overlay_built(handle: &AppHandle<Wry>) -> OverlayBuilt {
+    let started = Instant::now();
+    let receipt = voicen_lib::overlay::settled(handle, OVERLAY_HANG);
+    let waited = started.elapsed();
+    let built = OverlayBuilt {
+        settled: receipt.is_some(),
+        failed: receipt.is_some_and(|r| r.failed),
+        window: receipt.is_some() && handle.get_webview_window(OVERLAY).is_some(),
+        waited,
+    };
+    eprintln!("lifecycle: overlay receipt {receipt:?} after {waited:?}");
+    built
+}
+
+/// The message of a red overlay build verdict: which fact failed, and what the app
+/// logged.
+fn overlay_built_message(built: &OverlayBuilt, log: &[String]) -> String {
+    let logged_failure = log.iter().any(|l| l.contains("overlay_failed"));
+    let cause = if !built.settled {
+        format!(
+            "the overlay receipt (`overlay::settled`) did not settle within the hang bound              {OVERLAY_HANG:?} (the build is still running, or the receipt is not implemented)"
+        )
+    } else if built.failed {
+        "the receipt says the overlay build failed".to_string()
+    } else {
+        "the overlay thread settled but no `overlay` window exists".to_string()
+    };
+    format!(
+        "Recording built no `{OVERLAY}` window: {cause}; `overlay_failed` logged: \
+         {logged_failure}; {built:?}; the app's log then: {log:#?}"
+    )
+}
+
 #[derive(Debug, Default)]
 struct OverlayCloseReport {
     tray: bool,
-    shown: bool,
+    shown: OverlayBuilt,
     gone: bool,
     alive_at_once: bool,
     alive_later: bool,
@@ -519,8 +579,8 @@ fn destroying_the_overlay_as_the_last_window_keeps_the_app_while_the_tray_exists
             ..OverlayCloseReport::default()
         };
         indicator.set_overlay(&OverlayState::Recording);
-        report.shown = poll(BUDGET, || handle.get_webview_window(OVERLAY).is_some());
-        if report.shown {
+        report.shown = overlay_built(&handle);
+        if report.shown.built() {
             indicator.set_overlay(&OverlayState::Hidden);
             report.gone = poll(BUDGET, || handle.get_webview_window(OVERLAY).is_none());
             report.alive_at_once = main_round_trip(&handle);
@@ -536,8 +596,9 @@ fn destroying_the_overlay_as_the_last_window_keeps_the_app_while_the_tray_exists
     let report = report.expect("the driver sent no report");
     assert!(report.tray, "premise: the tray exists: {report:?}");
     assert!(
-        report.shown,
-        "Recording built no `{OVERLAY}` window within {BUDGET:?}: {report:#?}"
+        report.shown.built(),
+        "{}",
+        overlay_built_message(&report.shown, &report.log)
     );
     assert!(
         report.gone,
@@ -547,6 +608,92 @@ fn destroying_the_overlay_as_the_last_window_keeps_the_app_while_the_tray_exists
         report.alive_at_once && report.alive_later,
         "the app ended when the overlay, its last window, was destroyed while the tray \
          exists (ExitRequested {{ code: None }} not prevented): {report:?}"
+    );
+    assert_eq!(code, 0, "run_return code after end_loop(0)");
+}
+
+/// How long the T-173 reproduction holds the main thread before the overlay's build
+/// may run: longer than `BUDGET`, as the cold first WebView2 build was on the red run
+/// (about 40 s, run 41861094915).
+const OVERLAY_HELD: Duration = Duration::from_secs(25);
+
+#[derive(Debug, Default)]
+struct HeldOverlayReport {
+    /// The main thread was still held when the overlay state was published (premise).
+    held_at_publish: bool,
+    built: OverlayBuilt,
+    /// The window exists when the driver looks again after the verdict (a raw fact).
+    window_after: bool,
+    log: Vec<String>,
+}
+
+#[test]
+fn the_overlay_build_queued_behind_a_slow_main_thread_is_decided_by_the_receipt() {
+    // T-173 (os-answer-deadline-race, F-019 on the overlay path): the deterministic red
+    // reproduction of the flake of
+    // `destroying_the_overlay_as_the_last_window_keeps_the_app_while_the_tray_exists`.
+    // A cold first WebView2 build can outlast any wall-clock budget (about 40 s on the
+    // red run against `BUDGET`'s 20 s). Here the main thread is held for `OVERLAY_HELD`
+    // (> `BUDGET`) by a task posted before the overlay state is published, so the
+    // overlay thread's window build queues behind it exactly as it waits behind a slow
+    // build. The product is correct (the overlay thread asks at once, the main thread
+    // then builds the window), so "the overlay was built" must hold, decided through
+    // the overlay's receipt (`overlay::settled`), the window read once after it. Red
+    // while the verdict is a ceiling (`poll(BUDGET, ..)`), and red while the receipt
+    // does not exist (it answers `None`); green once the receipt waits for the overlay
+    // thread's own outcome with only a hang bound above `OVERLAY_HELD` plus a build.
+    // Bite: a receipt that settles before the build ran (the window is not there when
+    // read), one that settles on a seq older than the published one, or any ceiling
+    // below `OVERLAY_HELD`.
+    let _serial = serial();
+    let _watchdog =
+        watchdog("the_overlay_build_queued_behind_a_slow_main_thread_is_decided_by_the_receipt");
+    let dir = TempDir::new();
+    let (app, outcome) = wry_app(dir.path(), Start::Loaded);
+    let logs_of = dir.path().to_path_buf();
+
+    let (code, report) = run_with_driver(app, outcome, move |handle| {
+        let indicator = ShellIndicator::new(&handle);
+        let (started_tx, started_rx) = mpsc::channel::<()>();
+        let (done_tx, done_rx) = mpsc::channel::<()>();
+        let posted = handle.run_on_main_thread(move || {
+            let _ = started_tx.send(());
+            thread::sleep(OVERLAY_HELD);
+            let _ = done_tx.send(());
+        });
+        // The hold is running on the main thread before the state is published, so
+        // the build request queues behind it.
+        let holding = posted.is_ok() && started_rx.recv_timeout(ROUND_TRIP).is_ok();
+        indicator.set_overlay(&OverlayState::Recording);
+        let held_at_publish =
+            holding && matches!(done_rx.try_recv(), Err(mpsc::TryRecvError::Empty));
+        let mut report = HeldOverlayReport {
+            held_at_publish,
+            built: overlay_built(&handle),
+            ..HeldOverlayReport::default()
+        };
+        report.window_after = handle.get_webview_window(OVERLAY).is_some();
+        if !report.built.built() {
+            report.log = logged(&logs_of);
+        }
+        end_loop(&handle, 0);
+        report
+    });
+
+    let report = report.expect("the driver sent no report");
+    assert!(
+        report.held_at_publish,
+        "premise: the main thread was still held by the planted task when the overlay \
+         state was published: {report:?}"
+    );
+    assert!(
+        report.built.built(),
+        "{}",
+        overlay_built_message(&report.built, &report.log)
+    );
+    assert!(
+        report.window_after,
+        "the receipt reported an overlay window that the app does not have: {report:?}"
     );
     assert_eq!(code, 0, "run_return code after end_loop(0)");
 }
