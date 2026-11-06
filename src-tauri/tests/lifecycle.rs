@@ -533,12 +533,19 @@ fn overlay_built_message(built: &OverlayBuilt, log: &[String]) -> String {
     let logged_failure = log.iter().any(|l| l.contains("overlay_failed"));
     let cause = if !built.settled {
         format!(
-            "the overlay receipt (`overlay::settled`) did not settle within the hang bound              {OVERLAY_HANG:?} (the build is still running, or the receipt is not implemented)"
+            "the overlay receipt (`overlay::settled`) did not settle within the hang bound \
+             {OVERLAY_HANG:?} (the build is still running, or the receipt is not implemented)"
         )
     } else if built.failed {
-        "the receipt says the overlay build failed".to_string()
+        format!(
+            "the receipt (after {:?}) says the overlay build failed",
+            built.waited
+        )
     } else {
-        "the overlay thread settled but no `overlay` window exists".to_string()
+        format!(
+            "the overlay thread settled (after {:?}) but no `overlay` window exists",
+            built.waited
+        )
     };
     format!(
         "Recording built no `{OVERLAY}` window: {cause}; `overlay_failed` logged: \

@@ -31,6 +31,10 @@
 //!   command, never under the session lock (invariant 4).
 //! - A failed build, emit or destroy, or a failed start of the thread, writes one
 //!   `warning kind=overlay_failed` line (the OS code only, no payload or error text).
+//! - After each wake's window call returned, the thread stores its receipt ([`Settled`]:
+//!   the seq it settled on, whether it holds a window, whether an answer for that seq
+//!   failed) unless the wake left the phase `Destroying`; [`settled`] waits on it (T-173,
+//!   a test seam: no command).
 
 use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
@@ -88,14 +92,19 @@ struct Mailbox {
     destroyed: Vec<u64>,
     /// Something changed since the thread last looked.
     woken: bool,
+    /// The overlay thread's receipt (T-173): what it settled on after its last handled
+    /// wake that did not leave the phase `Destroying` (seq 0: nothing handled yet).
+    settled: Settled,
 }
 
 /// The overlay mailbox of one app: a mutex held only to copy or store an entry,
-/// never across a window operation, and the condvar that wakes the thread.
+/// never across a window operation, the condvar that wakes the thread and the one
+/// that wakes [`settled`] callers.
 #[derive(Default)]
 struct Shared {
     mailbox: Mutex<Mailbox>,
     wake: Condvar,
+    receipt: Condvar,
 }
 
 impl Shared {
@@ -149,6 +158,25 @@ impl Shared {
     fn newest(&self) -> Option<Entry> {
         self.lock().newest.clone()
     }
+
+    /// Stores the overlay thread's receipt and wakes every [`settled`] caller. Called by
+    /// the overlay thread only, after a window call returned (never across one).
+    fn settle(&self, settled: Settled) {
+        self.lock().settled = settled;
+        self.receipt.notify_all();
+    }
+
+    /// Waits until the receipt covers the newest seq published when called, or `hang`
+    /// passed (`None`). Never wakes the overlay thread and never touches a window.
+    fn wait_settled(&self, hang: Duration) -> Option<Settled> {
+        let mailbox = self.lock();
+        let target = mailbox.last_seq;
+        let (mailbox, _) = self
+            .receipt
+            .wait_timeout_while(mailbox, hang, |m| m.settled.seq < target)
+            .unwrap_or_else(PoisonError::into_inner);
+        (mailbox.settled.seq >= target).then_some(mailbox.settled)
+    }
 }
 
 /// The managed overlay mailbox of an app (managed by [`start`]; read by
@@ -179,24 +207,32 @@ pub fn part<R: Runtime>(app: &AppHandle<R>) -> Option<OverlayPart> {
     })
 }
 
-/// What the overlay thread settled on (T-173): the newest seq it handled, whether the
-/// overlay window exists then, and whether handling it failed (a build, emit or destroy
-/// that wrote `overlay_failed`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// What the overlay thread settled on (T-173), stored by the thread after the window
+/// call of a wake returned, only when that wake did not leave the phase `Destroying`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Settled {
+    /// The newest seq the thread had been handed when it settled (0: none yet).
     pub seq: u64,
+    /// The thread holds an overlay window it built (a window labelled `overlay` that
+    /// the thread did not build is not counted).
     pub window: bool,
+    /// A reducer answer for this seq failed: a build, emit or destroy that returned an
+    /// error or panicked (each writes one `overlay_failed` line). A failed first emit
+    /// or show inside a build that returned the window writes its line but does not
+    /// set this.
     pub failed: bool,
 }
 
 /// The overlay receipt (T-173; a test seam like `settings_window::request_with`, no
-/// command): waits until the overlay thread has handled the newest seq published at
-/// call time while not `Destroying`, and returns what it settled on; `None` when `hang`
-/// passed first (the thread is still running, hung).
-// T-173: stub, implemented in the implement stage. Returns `None` at once.
+/// command): waits, without polling, until the overlay thread has settled on a seq at
+/// least the newest one published when this is called (handled it and is not
+/// `Destroying`), and returns what it settled on. `None` when `hang` passed first (the
+/// thread is still in a window call, hung), or at once when `assemble` did not wire
+/// the app. Never wakes the overlay thread and never holds the mailbox across a
+/// window call; `set_overlay` never waits on it.
 pub fn settled<R: Runtime>(app: &AppHandle<R>, hang: Duration) -> Option<Settled> {
-    let _ = (app, hang);
-    None
+    let shared = Arc::clone(&app.try_state::<Overlay>()?.0);
+    shared.wait_settled(hang)
 }
 
 /// The payload of `entry` in the current settings' UI language (`Hidden` with seq 0
@@ -259,6 +295,9 @@ fn run<R: Runtime>(
         current: None,
         window: None,
     };
+    // The receipt's failure flag of the seq last handled: a failed answer for a seq
+    // stays reported through later wakes of the same seq.
+    let mut handled = Settled::default();
     loop {
         let (destroyed, newest) = thread.shared.wait();
         // The current window's Destroyed (requested, or the window went by itself,
@@ -279,7 +318,22 @@ fn run<R: Runtime>(
                 thread.current = Some(entry);
             }
         }
-        thread.execute(action);
+        let failed = thread.execute(action);
+        // The receipt (T-173), after the window call returned and outside it: a wake
+        // that leaves the phase `Destroying` has not settled (the rebuild for a newer
+        // shown state is still to come on the window's Destroyed).
+        let seq = thread.current.as_ref().map_or(0, |c| c.seq);
+        if seq != handled.seq {
+            handled = Settled {
+                seq,
+                ..Settled::default()
+            };
+        }
+        handled.failed |= failed;
+        handled.window = thread.window.is_some();
+        if thread.lifecycle.phase() != WindowPhase::Destroying {
+            thread.shared.settle(handled);
+        }
     }
 }
 
@@ -304,31 +358,43 @@ impl<R: Runtime> OverlayThread<R> {
         });
     }
 
-    /// Runs one reducer answer. A panic inside a window call (where panics unwind:
+    /// Runs one reducer answer and returns whether it failed (each failure writes one
+    /// `overlay_failed` line). A panic inside a window call (where panics unwind:
     /// tests, dev) is caught and written like a failure; release aborts.
-    fn execute(&mut self, action: WindowAction) {
+    fn execute(&mut self, action: WindowAction) -> bool {
         match action {
-            WindowAction::Nothing => {}
+            WindowAction::Nothing => false,
             WindowAction::Build(_) => {
                 let built = std::panic::catch_unwind(AssertUnwindSafe(|| self.build()));
                 match built {
-                    Ok(Ok(window)) => self.window = Some(window),
+                    Ok(Ok(window)) => {
+                        self.window = Some(window);
+                        false
+                    }
                     Ok(Err(err)) => {
                         self.warn(io_os_code(&err));
                         self.lifecycle.on_build_failed();
+                        true
                     }
                     Err(_panic) => {
                         self.warn(None);
                         self.lifecycle.on_build_failed();
+                        true
                     }
                 }
             }
             WindowAction::Emit(_) => {
                 let emitted = std::panic::catch_unwind(AssertUnwindSafe(|| self.emit()));
                 match emitted {
-                    Ok(Ok(())) => {}
-                    Ok(Err(err)) => self.warn(io_os_code(&err)),
-                    Err(_panic) => self.warn(None),
+                    Ok(Ok(())) => false,
+                    Ok(Err(err)) => {
+                        self.warn(io_os_code(&err));
+                        true
+                    }
+                    Err(_panic) => {
+                        self.warn(None);
+                        true
+                    }
                 }
             }
             WindowAction::Destroy => {
@@ -355,6 +421,7 @@ impl<R: Runtime> OverlayThread<R> {
                         self.window = window;
                     }
                 }
+                failed.is_some()
             }
         }
     }

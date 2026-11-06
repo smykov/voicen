@@ -19,8 +19,10 @@
 //! The overlay is reached only the way `run()` reaches it: through
 //! `dictation::ShellIndicator::new(app)`, the session's `Indicator`. Every fact is a
 //! raw Win32 value (F-003): `IsWindowVisible`, `GWL_EXSTYLE`, `GetForegroundWindow`,
-//! the target window's own messages. Every wait polls against a Windows-sized budget
-//! (F-005; runner run B showed ~1 s scheduling gaps).
+//! the target window's own messages. An overlay build or show is decided through the
+//! overlay thread's receipt (`overlay::settled`, a hang bound only; T-173), the facts
+//! read after it; every other wait polls against a Windows-sized budget (F-005; runner
+//! run B showed ~1 s scheduling gaps).
 //!
 //! Runner capabilities (`docs/decisions/windows-ci-runner.md`): the target window is
 //! brought to the front through `win32_support::bring_to_front` (fact
@@ -69,6 +71,7 @@ use voicen_core::test_support::local_models::FakeDisk;
 use voicen_core::test_support::TempDir;
 use voicen_core::timeouts::Timeouts;
 use voicen_lib::dictation::ShellIndicator;
+use voicen_lib::overlay::Settled;
 use voicen_lib::settings_ipc::load_settings;
 use win32_support::{class_of, foreground, Shape, TestWindow};
 use windows::core::BOOL;
@@ -90,9 +93,17 @@ const LABEL: &str = "overlay";
 /// A test identifier: WebView2's profile goes under it, not under the release one.
 const IDENTIFIER: &str = "dev.voicen.test.overlay";
 
-/// How long the driver waits for the overlay to appear or go (Windows-sized: a cold
-/// WebView2 creation on the runner, F-005).
+/// How long the driver waits for a step that is not an overlay build: the overlay's
+/// removal (a handle gone, the label freed), a main-thread task, the driver's report
+/// after the loop returned (Windows-sized, F-005). It is not sized for, and must not be
+/// raised for, a cold WebView2 build (T-173, os-answer-deadline-race): an overlay build
+/// is decided through the overlay's receipt in `shown`.
 const BUDGET: Duration = Duration::from_secs(20);
+
+/// A hang bound, not a budget (T-173): how long the overlay's receipt may take. It only
+/// ends a build that never finishes; it must exceed a cold WebView2 build (about 40 s
+/// seen, F-019) and stay below `WATCHDOG`.
+const OVERLAY_HANG: Duration = Duration::from_secs(120);
 
 /// How long a state is watched after it showed, so a late activation, a late
 /// second window or a late `SW_SHOW` is seen (a bounded negative).
@@ -318,6 +329,38 @@ fn holds_for(within: Duration, mut cond: impl FnMut() -> bool) -> bool {
         thread::sleep(Duration::from_millis(10));
     }
     cond()
+}
+
+/// What the driver saw of one published overlay state: the overlay thread's receipt and,
+/// read once after it, whether the label's window is visible (T-173).
+#[derive(Debug, Default, Clone, Copy)]
+struct Shown {
+    /// The receipt (`None`: not settled within `OVERLAY_HANG`, the build still running).
+    receipt: Option<Settled>,
+    /// The window labelled `overlay` was visible when the receipt came.
+    visible: bool,
+}
+
+impl Shown {
+    /// The thread settled on the state without a failed answer and the overlay is visible.
+    fn ok(&self) -> bool {
+        self.receipt.is_some_and(|r| !r.failed) && self.visible
+    }
+}
+
+/// Whether the newest published state shows the overlay, decided through the overlay
+/// thread's receipt (`overlay::settled`), never through a wall-clock ceiling on the
+/// window build (T-173, os-answer-deadline-race): the thread stores it only after the
+/// build (and its one `ShowWindow`) or the emit returned, so the window is read once,
+/// then.
+fn shown(handle: &AppHandle<Wry>) -> Shown {
+    let started = Instant::now();
+    let receipt = voicen_lib::overlay::settled(handle, OVERLAY_HANG);
+    eprintln!("overlay: receipt {receipt:?} after {:?}", started.elapsed());
+    Shown {
+        receipt,
+        visible: receipt.is_some() && overlay_hwnd(handle).is_some_and(is_visible),
+    }
 }
 
 fn to_hwnd(raw: isize) -> HWND {
@@ -611,7 +654,8 @@ fn warnings(lines: &[String]) -> Vec<String> {
 #[derive(Debug, Default)]
 struct StateStep {
     state: &'static str,
-    shown_within_budget: bool,
+    /// The receipt for the state and the overlay's visibility read after it (T-173).
+    shown: Shown,
     facts: Facts,
     /// Every sample of the overlay's facts during `SETTLE` after it showed matched
     /// the first (still visible, same window, styles kept).
@@ -673,15 +717,13 @@ fn recording_processing_and_message_show_the_overlay_while_the_target_keeps_the_
                 state: name,
                 ..StateStep::default()
             };
-            step.shown_within_budget = poll(BUDGET, || {
-                overlay_hwnd(&handle).is_some_and(|raw| facts(raw).visible)
-            });
+            step.shown = shown(&handle);
             if let Some(raw) = overlay_hwnd(&handle) {
                 step.facts = facts(raw);
                 let first = step.facts;
                 step.stable = holds_for(SETTLE, || facts(raw) == first);
             }
-            let stop = !step.shown_within_budget;
+            let stop = !step.shown.ok();
             report.steps.push(step);
             if stop {
                 break;
@@ -706,10 +748,13 @@ fn recording_processing_and_message_show_the_overlay_while_the_target_keeps_the_
     let steps = &report.steps;
     for step in steps {
         assert!(
-            step.shown_within_budget,
-            "{}: no visible `{LABEL}` window within {BUDGET:?} after set_overlay; the app's \
-             log: {:#?}; report: {report:#?}",
-            step.state, report.log
+            step.shown.ok(),
+            "{}: no visible `{LABEL}` window after the overlay receipt (`overlay::settled`, \
+             hang bound {OVERLAY_HANG:?}; receipt None: still building) after set_overlay: \
+             {:?}; the app's log: {:#?}; report: {report:#?}",
+            step.state,
+            step.shown,
+            report.log
         );
         assert!(
             step.facts.noactivate,
@@ -770,12 +815,18 @@ fn recording_processing_and_message_show_the_overlay_while_the_target_keeps_the_
 
 #[derive(Debug, Default)]
 struct RapidReport {
-    first_shown: bool,
+    /// The first Recording, decided through the receipt (T-173).
+    first: Shown,
     /// Pauses between Hidden and Recording, in ms, in the order run.
     pauses_ms: Vec<u64>,
+    /// The overlay after the rapid pairs, decided through the receipt (T-173).
+    after_pairs: Shown,
     /// The old window was gone (`IsWindow` false) before the last Recording.
     old_gone_before_last: bool,
-    one_within_budget: bool,
+    /// The receipt for the last Recording.
+    last: Shown,
+    /// Exactly the label's window was shown when the last receipt came.
+    one_at_receipt: bool,
     stayed_one: bool,
     shown: Vec<(isize, String)>,
     label_hwnd: Option<isize>,
@@ -806,8 +857,8 @@ fn hidden_then_recording_at_once_leaves_exactly_one_visible_overlay() {
         let indicator = ShellIndicator::new(&handle);
         let mut report = RapidReport::default();
         indicator.set_overlay(&OverlayState::Recording);
-        report.first_shown = poll(BUDGET, || overlay_hwnd(&handle).is_some_and(is_visible));
-        if !report.first_shown {
+        report.first = shown(&handle);
+        if !report.first.ok() {
             report.log = logged(&logs_of);
             return report;
         }
@@ -819,7 +870,8 @@ fn hidden_then_recording_at_once_leaves_exactly_one_visible_overlay() {
             report.pauses_ms.push(pause);
         }
         // Once more, Recording the moment the old window's handle is gone.
-        if poll(BUDGET, || overlay_hwnd(&handle).is_some_and(is_visible)) {
+        report.after_pairs = shown(&handle);
+        if report.after_pairs.ok() {
             let old = overlay_hwnd(&handle).unwrap_or(0);
             indicator.set_overlay(&OverlayState::Hidden);
             let deadline = Instant::now() + BUDGET;
@@ -833,8 +885,9 @@ fn hidden_then_recording_at_once_leaves_exactly_one_visible_overlay() {
             let shown = shown_windows(&[]);
             shown.len() == 1 && overlay_hwnd(handle) == Some(shown[0].0)
         };
-        report.one_within_budget = poll(BUDGET, || one_visible(&handle));
-        report.stayed_one = report.one_within_budget && holds_for(SETTLE, || one_visible(&handle));
+        report.last = shown(&handle);
+        report.one_at_receipt = report.last.ok() && one_visible(&handle);
+        report.stayed_one = report.one_at_receipt && holds_for(SETTLE, || one_visible(&handle));
         report.shown = shown_windows(&[]);
         report.label_hwnd = overlay_hwnd(&handle);
         report.label_facts = report.label_hwnd.map(facts).unwrap_or_default();
@@ -848,10 +901,20 @@ fn hidden_then_recording_at_once_leaves_exactly_one_visible_overlay() {
     });
 
     assert!(
-        report.first_shown,
-        "Recording showed no visible `{LABEL}` window within {BUDGET:?} (nothing to \
-         rebuild); the app's \
-         log: {:#?}",
+        report.first.ok(),
+        "Recording showed no visible `{LABEL}` window after the overlay receipt \
+         (`overlay::settled`, hang bound {OVERLAY_HANG:?}; receipt None: still building) \
+         (nothing to rebuild): {:?}; the app's log: {:#?}",
+        report.first,
+        report.log
+    );
+    assert!(
+        report.after_pairs.ok(),
+        "after the Hidden -> Recording pairs (pauses {:?} ms) no visible `{LABEL}` window \
+         came with the overlay receipt (hang bound {OVERLAY_HANG:?}): {:?}; the app's log: \
+         {:#?}",
+        report.pauses_ms,
+        report.after_pairs,
         report.log
     );
     assert!(
@@ -859,13 +922,14 @@ fn hidden_then_recording_at_once_leaves_exactly_one_visible_overlay() {
         "premise: Hidden did not destroy the overlay within {BUDGET:?}: {report:#?}"
     );
     assert!(
-        report.one_within_budget && report.stayed_one,
+        report.one_at_receipt && report.stayed_one,
         "after Hidden then Recording at once (pauses {:?} ms) the shown windows of the \
-         process are {:?} (want exactly the `{LABEL}` window {:?}, for {SETTLE:?}); the \
-         app's log: {:#?}",
+         process are {:?} (want exactly the `{LABEL}` window {:?} when the overlay \
+         receipt came, and for {SETTLE:?} after; receipt: {:?}); the app's log: {:#?}",
         report.pauses_ms,
         report.shown,
         report.label_hwnd,
+        report.last,
         report.log
     );
     assert!(
@@ -891,17 +955,23 @@ fn hidden_then_recording_at_once_leaves_exactly_one_visible_overlay() {
 
 #[derive(Debug, Default)]
 struct GoneReport {
-    first_shown: bool,
+    /// The first Recording, decided through the receipt (T-173).
+    first: Shown,
     /// The window destroyed from outside the overlay thread was gone and its label
     /// freed.
     outside_gone: bool,
-    /// After the newer shown state: exactly the label's window, visible, for SETTLE.
+    /// The receipt for the newer shown state (T-173).
+    newer: Shown,
+    /// After the newer shown state: exactly the label's window, visible, when its
+    /// receipt came and for SETTLE after.
     one_after_newer: bool,
     shown_after_newer: Vec<(isize, String)>,
     /// T-067: the facts of the window rebuilt after the outside destroy.
     rebuilt_facts: Facts,
     /// Hidden then destroys that window (the reducer owns it; not stuck Destroying).
     hidden_gone: bool,
+    /// The receipt for that Recording (T-173).
+    again: Shown,
     /// And Recording after it shows one again.
     one_after_hidden_and_recording: bool,
     new_warnings: Vec<String>,
@@ -934,8 +1004,8 @@ fn an_overlay_destroyed_from_outside_is_rebuilt_by_a_newer_shown_state() {
             shown.len() == 1 && overlay_hwnd(handle) == Some(shown[0].0)
         };
         indicator.set_overlay(&OverlayState::Recording);
-        report.first_shown = poll(BUDGET, || overlay_hwnd(&handle).is_some_and(is_visible));
-        if !report.first_shown {
+        report.first = shown(&handle);
+        if !report.first.ok() {
             report.log = logged(&logs_of);
             return report;
         }
@@ -949,8 +1019,9 @@ fn an_overlay_destroyed_from_outside_is_rebuilt_by_a_newer_shown_state() {
         });
         // At once: the overlay thread may see the Destroyed and this state together.
         indicator.set_overlay(&OverlayState::Processing);
+        report.newer = shown(&handle);
         report.one_after_newer =
-            poll(BUDGET, || one_visible(&handle)) && holds_for(SETTLE, || one_visible(&handle));
+            report.newer.ok() && one_visible(&handle) && holds_for(SETTLE, || one_visible(&handle));
         report.shown_after_newer = shown_windows(&[]);
         if report.one_after_newer {
             let rebuilt = overlay_hwnd(&handle).unwrap_or(0);
@@ -960,8 +1031,10 @@ fn an_overlay_destroyed_from_outside_is_rebuilt_by_a_newer_shown_state() {
                 !is_window(rebuilt) && handle.get_webview_window(LABEL).is_none()
             });
             indicator.set_overlay(&OverlayState::Recording);
-            report.one_after_hidden_and_recording =
-                poll(BUDGET, || one_visible(&handle)) && holds_for(SETTLE, || one_visible(&handle));
+            report.again = shown(&handle);
+            report.one_after_hidden_and_recording = report.again.ok()
+                && one_visible(&handle)
+                && holds_for(SETTLE, || one_visible(&handle));
         }
         let lines = logged(&logs_of);
         report.new_warnings = warnings(&lines)
@@ -973,9 +1046,11 @@ fn an_overlay_destroyed_from_outside_is_rebuilt_by_a_newer_shown_state() {
     });
 
     assert!(
-        report.first_shown,
-        "Recording showed no visible `{LABEL}` window within {BUDGET:?}; the app's log: \
-         {:#?}",
+        report.first.ok(),
+        "Recording showed no visible `{LABEL}` window after the overlay receipt \
+         (`overlay::settled`, hang bound {OVERLAY_HANG:?}; receipt None: still building): \
+         {:?}; the app's log: {:#?}",
+        report.first,
         report.log
     );
     assert!(
@@ -986,9 +1061,9 @@ fn an_overlay_destroyed_from_outside_is_rebuilt_by_a_newer_shown_state() {
     assert!(
         report.one_after_newer,
         "after the overlay was destroyed from outside, a newer Processing left the shown \
-         windows {:?} (want exactly the `{LABEL}` window, for {SETTLE:?}); the app's log: \
-         {:#?}",
-        report.shown_after_newer, report.log
+         windows {:?} (want exactly the `{LABEL}` window when the overlay receipt came, \
+         and for {SETTLE:?} after; receipt: {:?}); the app's log: {:#?}",
+        report.shown_after_newer, report.newer, report.log
     );
     // T-067: the rebuild after an outside destroy gets the same shape.
     assert_eq!(
@@ -1019,7 +1094,8 @@ struct BlockedReport {
     main_blocked: bool,
     set_overlay_took: Duration,
     released_by_driver: bool,
-    shown_after_release: bool,
+    /// The receipt after the release and the overlay's visibility read then (T-173).
+    shown_after_release: Shown,
 }
 
 #[test]
@@ -1054,7 +1130,7 @@ fn set_overlay_returns_while_the_main_thread_is_blocked() {
         let set_overlay_took = started.elapsed();
         let _ = release_tx.send(());
         let released_by_driver = seen_rx.recv_timeout(HOLD + BUDGET).unwrap_or(false);
-        let shown_after_release = poll(BUDGET, || overlay_hwnd(&handle).is_some_and(is_visible));
+        let shown_after_release = shown(&handle);
         BlockedReport {
             main_blocked,
             set_overlay_took,
@@ -1073,8 +1149,9 @@ fn set_overlay_returns_while_the_main_thread_is_blocked() {
          the main thread): {report:?}"
     );
     assert!(
-        report.shown_after_release,
-        "the overlay did not show once the main thread was released: {report:?}"
+        report.shown_after_release.ok(),
+        "the overlay did not show once the main thread was released (decided through the \
+         overlay receipt, hang bound {OVERLAY_HANG:?}): {report:?}"
     );
     assert_eq!(code, 0, "run_return code after end_loop(0)");
 }
@@ -1084,7 +1161,8 @@ fn set_overlay_returns_while_the_main_thread_is_blocked() {
 #[derive(Debug, Default)]
 struct ClickThroughReport {
     target: isize,
-    shown_within_budget: bool,
+    /// The receipt for Recording and the overlay's visibility read after it (T-173).
+    shown: Shown,
     facts: Facts,
     /// Every sample of the overlay's facts during `SETTLE` matched the first.
     stable: bool,
@@ -1139,10 +1217,8 @@ fn the_overlay_is_click_through_out_of_alt_tab_and_shown_without_activation() {
             ..ClickThroughReport::default()
         };
         indicator.set_overlay(&OverlayState::Recording);
-        report.shown_within_budget = poll(BUDGET, || {
-            overlay_hwnd(&handle).is_some_and(|raw| facts(raw).visible)
-        });
-        if let Some(raw) = overlay_hwnd(&handle).filter(|_| report.shown_within_budget) {
+        report.shown = shown(&handle);
+        if let Some(raw) = overlay_hwnd(&handle).filter(|_| report.shown.ok()) {
             report.facts = facts(raw);
             report.overlay_rect = window_rect(raw);
             if let Some(rect) = report.overlay_rect {
@@ -1172,9 +1248,11 @@ fn the_overlay_is_click_through_out_of_alt_tab_and_shown_without_activation() {
     });
 
     assert!(
-        report.shown_within_budget,
-        "Recording showed no visible `{LABEL}` window within {BUDGET:?}; the app's log: \
-         {:#?}",
+        report.shown.ok(),
+        "Recording showed no visible `{LABEL}` window after the overlay receipt \
+         (`overlay::settled`, hang bound {OVERLAY_HANG:?}; receipt None: still building): \
+         {:?}; the app's log: {:#?}",
+        report.shown,
         report.log
     );
     assert_eq!(
@@ -1231,7 +1309,8 @@ fn the_overlay_is_click_through_out_of_alt_tab_and_shown_without_activation() {
 
 #[derive(Debug, Default)]
 struct DrawnReport {
-    shown_within_budget: bool,
+    /// The receipt for Recording and the overlay's visibility read after it (T-173).
+    shown: Shown,
     facts: Facts,
     centre: POINT,
     covered: bool,
@@ -1269,10 +1348,8 @@ fn the_click_through_overlay_still_paints_its_page() {
             ..DrawnReport::default()
         };
         indicator.set_overlay(&OverlayState::Recording);
-        report.shown_within_budget = poll(BUDGET, || {
-            overlay_hwnd(&handle).is_some_and(|raw| facts(raw).visible)
-        });
-        if let Some(raw) = overlay_hwnd(&handle).filter(|_| report.shown_within_budget) {
+        report.shown = shown(&handle);
+        if let Some(raw) = overlay_hwnd(&handle).filter(|_| report.shown.ok()) {
             report.facts = facts(raw);
             if let Some(rect) = window_rect(raw) {
                 report.centre = centre(&rect);
@@ -1296,9 +1373,11 @@ fn the_click_through_overlay_still_paints_its_page() {
     });
 
     assert!(
-        report.shown_within_budget,
-        "Recording showed no visible `{LABEL}` window within {BUDGET:?}; the app's log: \
-         {:#?}",
+        report.shown.ok(),
+        "Recording showed no visible `{LABEL}` window after the overlay receipt \
+         (`overlay::settled`, hang bound {OVERLAY_HANG:?}; receipt None: still building): \
+         {:?}; the app's log: {:#?}",
+        report.shown,
         report.log
     );
     assert!(
