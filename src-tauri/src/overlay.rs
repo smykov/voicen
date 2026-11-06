@@ -34,7 +34,7 @@
 
 use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use tauri::{
     AppHandle, Emitter, Manager, Runtime, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
@@ -177,6 +177,26 @@ pub fn part<R: Runtime>(app: &AppHandle<R>) -> Option<OverlayPart> {
     app.try_state::<Overlay>().map(|overlay| OverlayPart {
         shared: Arc::clone(&overlay.0),
     })
+}
+
+/// What the overlay thread settled on (T-173): the newest seq it handled, whether the
+/// overlay window exists then, and whether handling it failed (a build, emit or destroy
+/// that wrote `overlay_failed`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Settled {
+    pub seq: u64,
+    pub window: bool,
+    pub failed: bool,
+}
+
+/// The overlay receipt (T-173; a test seam like `settings_window::request_with`, no
+/// command): waits until the overlay thread has handled the newest seq published at
+/// call time while not `Destroying`, and returns what it settled on; `None` when `hang`
+/// passed first (the thread is still running, hung).
+// T-173: stub, implemented in the implement stage. Returns `None` at once.
+pub fn settled<R: Runtime>(app: &AppHandle<R>, hang: Duration) -> Option<Settled> {
+    let _ = (app, hang);
+    None
 }
 
 /// The payload of `entry` in the current settings' UI language (`Hidden` with seq 0
