@@ -12,6 +12,9 @@ verdict: PASS
 # otherwise the verdict is stale and a new round is needed
 commit: <sha>
 validator: task-validator
+# Where tools.context names a provider, required: `used`, or `builtin — <why>` when it did
+# not answer. /teamwright:blockers shows a record that ran without it.
+context_tool: used
 # sample (the catalog re-run + 15-30 new mutants aimed at the guarantees and the task's
 # changed lines) | sweep (the catalog re-run + every condition, guard, return and write on
 # the task's changed lines; the whole seam only for a `critical: true` task).

@@ -247,6 +247,10 @@ if m and rel.startswith("docs/tasks/"):
     if verdict not in VERDICTS:
         io.deny("REVIEW GATE: review record needs front matter with `verdict:` one of "
                 "%s (got %r)." % (" | ".join(VERDICTS), verdict), "review-gate")
+    if _config and hasattr(_config, "context_tool_problem"):
+        problem = _config.context_tool_problem(os.path.join(root, _config.CONFIG), rv.get("context_tool"))
+        if problem:
+            io.deny("REVIEW GATE: review record needs %s." % problem, "review-gate")
     if verdict == "REJECT_RECURRENCE" and not rca_ok(rv.get("rca_task")):
         io.deny("REVIEW GATE: verdict REJECT_RECURRENCE without a linked rca task "
                 "(rca_task: %r does not point to an existing docs/tasks/<ID>.md with "
@@ -370,7 +374,7 @@ if (who["session_id"] and re.match(r"^%s$" % task.TASK_ID, tid)
                 io.deny("REVIEW GATE: the review of %s already created %d new task record(s) in "
                         "this session (%s); %s would be one more. One reviewed task spawns at most "
                         "%d new tasks (lifecycle.md section 6): put the rest into one umbrella task "
-                        "or the sprint's review follow-up task (edit an existing record), or ask "
+                        "or a line in the task's follow-ups, or ask "
                         "the owner. Limit: TEAMWRIGHT_REVIEW_NEW_TASKS." % (
                             reviewed, len(made), ", ".join(made), tid, NEW_LIMIT), "review-gate")
             io.state_dir(data, "sessions")
@@ -400,7 +404,7 @@ if sb == "NEEDS_REVIEW" and who["session_id"]:
         if len(made) > NEW_LIMIT:
             io.deny("REVIEW GATE: the review of %s created %d new task records (%s), however they were "
                     "written; one reviewed task spawns at most %d (lifecycle.md section 6) - fold the "
-                    "rest into one umbrella task or the sprint's review follow-up task, or ask the owner. "
+                    "rest into one umbrella task or the task's follow-ups, or ask the owner. "
                     "Limit: TEAMWRIGHT_REVIEW_NEW_TASKS." % (tid, len(made), ", ".join(made), NEW_LIMIT),
                     "review-gate")
 if sa == "NEEDS_REVIEW" or (sa == "IN_PROGRESS" and sb != "NEEDS_REVIEW"):

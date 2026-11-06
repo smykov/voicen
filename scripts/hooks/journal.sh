@@ -48,7 +48,9 @@
 #       `agent_type` takes it from this agent's own tool-call lines.
 #
 # PRIVACY. `detail` is a short classification, never a replay of the call: the
-# program and subcommand of a shell command (no arguments, no VAR=value prefixes),
+# program of a shell command and its second word only when that looks like a subcommand
+# (letters, digits, dashes; no flag, URL, path or assignment - and a short bare token
+# looks like one, so this narrows the leak, it does not end it; no VAR=value prefixes),
 # a repo-relative file path, an agent type, a skill name, a URL host. No file
 # contents, prompts, command arguments, error texts or denial reasons are stored.
 #
@@ -77,7 +79,8 @@ who = io.actor(data)
 tool = data.get("tool_name") or ""
 ti = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
 ID_RE = re.compile(r"\b" + task.TASK_ID + r"\b")
-SAFE_TOKEN = re.compile(r"^[\w./:@+-]{1,40}$")
+SAFE_PROGRAM = re.compile(r"^[\w./+-]{1,40}$")
+SUBCOMMAND = re.compile(r"^[A-Za-z][A-Za-z0-9-]{0,23}$")  # no -flag, :, /, @, =; long tokens fail on length
 
 def shell_detail(cmd):
     cmd = (cmd or "").replace("\r", ";").replace("\n", ";")
@@ -88,7 +91,11 @@ def shell_detail(cmd):
         cmd = cmd[m.end():]
     first = re.split(r"[;&|]", cmd, 1)[0].split()
     first = [t for t in first if "=" not in t][:2]  # drop VAR=value (may be a secret)
-    return " ".join(t for t in first if SAFE_TOKEN.match(t))
+    if not first or not SAFE_PROGRAM.match(first[0]):
+        return ""
+    # The second word may be a secret (-pSECRET, a URL with a login, a token): kept only
+    # when it looks like a subcommand.
+    return " ".join(first[:1] + [t for t in first[1:] if SUBCOMMAND.match(t)])
 
 def detail():
     if tool == "Bash":
@@ -303,7 +310,7 @@ elif ev in ("Stop", "SubagentStop"):
         return sums
 
     try:
-        tokens = usage(data.get("agent_transcript_path") if ev == "SubagentStop"
+        tokens = usage(data.get("agent_transcript_path") if ev == "SubagentStop"  # gitleaks:allow
                        else data.get("transcript_path"), ev == "SubagentStop")
     except Exception:
         tokens = {}

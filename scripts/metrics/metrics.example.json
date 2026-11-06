@@ -21,6 +21,7 @@
   "sprint_regex": null,
   "sprint_from_id": null,
   "task_period": "end",
+  "escape_window_days": 30,
   "status_aliases": null,
   "reviewer_agent_regex": "^code-reviewer$",
   "claim_join": "auto",

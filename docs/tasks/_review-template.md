@@ -12,6 +12,9 @@ reviewer: code-reviewer
 # APPROVE | REQUEST_CHANGES | REJECT_RECURRENCE | ESCALATE
 # ESCALATE: after 2 rounds of REQUEST_CHANGES (a 3rd is refused), or a decision above the task — waits for a human
 verdict: REQUEST_CHANGES
+# Where tools.context names a provider, required: `used`, or `builtin — <why>` when it did
+# not answer. /teamwright:blockers shows a record that ran without it.
+context_tool: used
 # REJECT_RECURRENCE only: earlier tasks fixed with the same pattern
 recurrence_of: []
 # REQUIRED with REJECT_RECURRENCE: the type: rca task that fixes the root

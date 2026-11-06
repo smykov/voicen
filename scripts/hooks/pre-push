@@ -36,10 +36,15 @@
 #    skips the whole push by the tip's message, so the code under a status commit and the
 #    head a pull request is opened from go unchecked (one project lost ~8 minutes on it).
 #
-# Human override, one-off: TEAMWRIGHT_ALLOW_PUSH=1 git push ...
+# Human override, one-off, in a person's own terminal: TEAMWRIGHT_ALLOW_PUSH=1 git push ...
+# Ignored when CLAUDECODE is set (every Claude Code tool call), like the installer's owner
+# override; the state guard refuses agent commands that set it or unset CLAUDECODE.
 set -uo pipefail
 
-[ "${TEAMWRIGHT_ALLOW_PUSH:-}" = "1" ] && exit 0
+if [ "${TEAMWRIGHT_ALLOW_PUSH:-}" = "1" ]; then
+  if [ -z "${CLAUDECODE:-}" ]; then exit 0; fi
+  echo "pre-push: TEAMWRIGHT_ALLOW_PUSH ignored inside Claude Code: it is a person's, from their own terminal." >&2
+fi
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
 REMOTE="${1:-origin}"
@@ -48,7 +53,7 @@ ZERO="0000000000000000000000000000000000000000"
 
 if [ -e "$PAUSE" ]; then
   echo "pre-push: REFUSED - team is paused ($PAUSE exists). Work stays local." >&2
-  echo "  Remove the file to resume, or (human only) TEAMWRIGHT_ALLOW_PUSH=1 git push" >&2
+  echo "  A person removes the file to resume, or (their own terminal) TEAMWRIGHT_ALLOW_PUSH=1 git push" >&2
   exit 1
 fi
 
@@ -131,7 +136,7 @@ if [ -n "$blocked" ]; then
   for b in $blocked; do echo "    $b" >&2; done
   echo "  Push only when every task owning code in the tail is: $TEAMWRIGHT_PUSH_STATUSES." >&2
   echo "  Owner decision to ship anyway: \`tail_code: ratified\` in the task record." >&2
-  echo "  Human override, one-off: TEAMWRIGHT_ALLOW_PUSH=1 git push" >&2
+  echo "  Human override, one-off, own terminal: TEAMWRIGHT_ALLOW_PUSH=1 git push" >&2
   exit 1
 fi
 exit 0

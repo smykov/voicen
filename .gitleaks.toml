@@ -15,6 +15,16 @@ secretGroup = 2
 entropy = 3.0
 keywords = ["password", "passwd", "secret", "token", "api_key", "apikey", "private_key"]
 
+# Names in code, never a quoted literal. Only this rule, and only when the whole line has the
+# shape: a value in quotes or anything after the name is still a finding.
+[[rules.allowlists]]
+description = "A translation key or a test variable, not a value"
+regexTarget = "line"
+regexes = [
+  '''["']?\w+["']?\s*:\s*strings\.[a-z][A-Za-z0-9]*,?\s*$''',  # 'password_protected': strings.filePasswordProtected,
+  '''\bpassword:\s*password[A-Z]\)[\s;,)]*$''',  # signIn(email: emailA, password: passwordA)
+]
+
 [[rules]]
 id = "url-embedded-credentials"
 description = "Credentials embedded in a connection URL"

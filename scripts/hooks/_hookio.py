@@ -389,7 +389,7 @@ _PREFIX = {"sudo", "command", "builtin", "exec", "nohup", "time", "nice", "xargs
            "stdbuf", "timeout"}
 # writes inside interpreter code (python, node, ruby, perl, awk ...)
 _CODE_WRITE = re.compile(r"write\w*|writeFile|appendFile|open\s*\([^)]*['\"][wax+]|rename|replace|"
-                         r"unlink|remove|rmtree|copy\w*|move|truncate|dump|symlink|chmod|"
+                         r"unlink|remove|rmtree|copy\w*|move|truncate|dump(?!s)|symlink|chmod|"
                          r"-i\b|>\s*['\"]?[^\s'\"]*(config\.yml|installed\.json)")
 _HEREDOC = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
 
@@ -700,19 +700,26 @@ def _git_paths(root, args):
 def shell_writes_records(cmd, root=None, _depth=0, _cwd=""):
     """True when a shell command writes, moves, removes or restores a review / verify /
     validation record or a gate stamp (see the comment above)."""
-    text, bodies = _split_heredocs(cmd)
-    body_text = "\n".join(b for _, b in bodies)
     if not (_REC_TEXT.search(cmd) or "docs" in cmd or "tasks" in cmd or "git" in cmd):
         return False
+    return _shell_writes(cmd, lambda p: bool(_REC_PATH.search(p)), _REC_TEXT, root, _depth, _cwd)
+
+
+def _shell_writes(cmd, is_path, text_re, root=None, _depth=0, _cwd=""):
+    """True when a shell command writes, moves, removes or restores a path `is_path` accepts
+    (given relative to where the command runs, after `cd`); text_re finds such a path in
+    interpreter code and in a command that does not parse."""
+    text, bodies = _split_heredocs(cmd)
+    body_text = "\n".join(b for _, b in bodies)
     try:
         segs = _segments(text)
     except ValueError:
-        return bool(_REC_TEXT.search(cmd) and re.search(
+        return bool(text_re.search(cmd) and re.search(
             r">|\b(tee|cp|mv|rm|sed|perl|python3?|node|ruby|truncate|install|rsync|dd|git|tar|unzip)\b", cmd))
     cwd = _cwd
 
     def hit(tok):
-        return bool(_REC_PATH.search(_at(cwd, tok)))
+        return is_path(_at(cwd, tok))
     for seg in segs:
         words = [w for w in seg if isinstance(w, str)]
         targets = [w[1] for w in seg if isinstance(w, tuple)]
@@ -735,7 +742,7 @@ def shell_writes_records(cmd, root=None, _depth=0, _cwd=""):
         if prog in _SHELLS:
             code = " ".join(args[args.index("-c") + 1:args.index("-c") + 2]) if "-c" in args else \
                 (" ".join(args) if prog == "eval" else body_text)
-            if code and _depth < 3 and shell_writes_records(code, root, _depth + 1, cwd):
+            if code and _depth < 3 and _shell_writes(code, is_path, text_re, root, _depth + 1, cwd):
                 return True
             continue
         if prog in _WRITES_ARGS and any(hit(a) for a in files):
@@ -758,7 +765,7 @@ def shell_writes_records(cmd, root=None, _depth=0, _cwd=""):
         if prog in ("sed", "gsed", "perl", "ruby") and any(_INPLACE.match(a) for a in args) \
                 and any(hit(a) for a in files):
             return True
-        if prog in ("tar", "bsdtar", "unzip") and (cwd and _REC_PATH.search(cwd + "/") or any(
+        if prog in ("tar", "bsdtar", "unzip") and (cwd and is_path(cwd + "/") or any(
                 hit(args[i + 1]) for i, a in enumerate(args[:-1]) if a in ("-C", "-d", "--directory"))):
             return True
         if prog == "find" and any(hit(a) for a in files) and any(a in ("-delete", "-exec", "-execdir")
@@ -770,16 +777,160 @@ def shell_writes_records(cmd, root=None, _depth=0, _cwd=""):
                     files[:1] if sub in ("restore", "rm", "mv") else [])):
                 return True
             if (sub == "stash" and len(args) > 1 and args[1] in ("pop", "apply")) or sub in ("apply", "am"):
-                if any(_REC_PATH.search(p) for p in _git_paths(root, args)):
+                if any(is_path(p) for p in _git_paths(root, args)):
                     return True
             continue
         if _INTERPRETERS.match(prog):
+            if args and _INSTALLER_WORD.search(args[0]):
+                continue                     # tw-install.py: the legitimate writer
             code = " ".join(args) + "\n" + body_text
             if (_CODE_WRITE.search(code) or re.search(r"open\s*\(?[^)]*['\"]\s*\+?>", code)) and (
-                    _REC_TEXT.search(code) or
-                                             (cwd and _REC_PATH.search(cwd + "/"))):
+                    text_re.search(code) or (cwd and is_path(cwd + "/"))):
                 return True
     return False
+
+
+# ---- what runs the gates, and the switches around git hooks --------------------------
+# Hooks, settings, role definitions and MCP servers decide what the gates are and what runs
+# next. They are not the agents' to change unseen; a person may (a prompt, see guard_state).
+# The installer writes them from its own process, so its command is never a shell write here.
+_KIT_FILES = re.compile(r"^(?:scripts/hooks(?:/|$)|\.claude/?$|\.claude/settings(?:\.local)?\.json$|"
+                        r"\.claude/agents(?:/|$)|\.mcp\.json$|\.teamwright/patch-guard\.conf$|"
+                        r"\.git/config$|\.git/hooks(?:/|$))")
+_KIT_TEXT = re.compile(r"scripts/hooks|\.claude/(?:settings|agents)|\.mcp\.json|patch-guard\.conf|\.git/(?:config|hooks)")
+_PUSH_ENV = re.compile(r"^(TEAMWRIGHT_(?:ALLOW_PUSH|PAUSE_FILE|PUSH_STATUSES|WIP_REFS_RE|DOC_PATHS_RE))=")
+_GIT_ENV = re.compile(r"^GIT_CONFIG(?:_COUNT|_PARAMETERS|_KEY_\d+|_GLOBAL|_SYSTEM)?=")
+_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+PAUSE_NAME = "TEAMWRIGHT_PAUSE"
+
+
+def is_kit_file(rel):
+    """Is this repo-relative path one of the files that define the gates?"""
+    return bool(_KIT_FILES.match(rel.replace(os.sep, "/")))
+
+
+def shell_writes_kit(cmd, root=None, cwd=""):
+    """True when a shell command writes, moves or removes a file that defines the gates.
+    Reading and `git add` / `git commit` / `git diff` of them are not writes; tw-install.py
+    is the legitimate path. Same parser and same limits as shell_writes_records: a script
+    file or a path built at run time is not seen."""
+    import posixpath
+    if not _KIT_TEXT.search(cmd) and ".claude" not in cmd:   # `cd .claude && ... settings.json`
+        return False
+    real = os.path.realpath(root) if root else ""
+    if cwd and real:
+        here = os.path.realpath(cwd)
+        cwd = "" if here == real else (here[len(real) + 1:] if here.startswith(real + "/") else cwd)
+    bases = tuple(b.rstrip("/") + "/" for b in (root, real) if b)
+
+    def is_path(p):
+        if p.startswith("/"):
+            if not bases or not p.startswith(bases):
+                return False                 # another repository, ~/.claude of the plugin
+            p = p[len(next(b for b in bases if p.startswith(b))):]
+        p = posixpath.normpath(p) + ("/" if p.endswith("/") else "")
+        return is_kit_file(p)
+
+    return _shell_writes(cmd, is_path, _KIT_TEXT, root, 0, cwd)
+
+
+def _git_switches_hooks(args):
+    """`git -c core.hooksPath=... <cmd>`, or `git config` that sets or unsets it."""
+    i = 0
+    while i < len(args) and args[i].startswith("-"):
+        if args[i] in ("-c", "--config-env") and i + 1 < len(args):
+            if args[i + 1].lower().startswith("core.hookspath"):
+                return True
+            i += 1
+        elif args[i].lower().startswith("--config-env=core.hookspath"):
+            return True
+        elif args[i] in ("-C", "--git-dir", "--work-tree", "--namespace") and i + 1 < len(args):
+            i += 1
+        i += 1
+    rest = args[i:]
+    if not rest or rest[0] != "config":
+        return False
+    rest = rest[1:]
+    if not any(a.lower() == "core.hookspath" or a.lower().startswith("core.hookspath=") for a in rest):
+        return False
+    if any(a in ("--get", "--get-all", "--get-regexp", "--get-urlmatch", "--list", "-l", "get", "list")
+           for a in rest):
+        return False
+    plain = [a for a in rest if not a.startswith("-")]
+    return len(plain) >= 2 or any(a.startswith("--unset") or a in ("set", "unset", "--add", "--replace-all")
+                                  for a in rest)
+
+
+def shell_overrides_push(cmd, _depth=0):
+    """What a command does to the human exits around git hooks, or "": sets a push override
+    (`push`), switches core.hooksPath (`hooks`), removes the pause file (`pause`). Naming
+    them is not doing it: `grep`, `cat`, a commit message and `touch TEAMWRIGHT_PAUSE` pass."""
+    if not re.search(r"TEAMWRIGHT_|GIT_CONFIG|hookspath", cmd, re.I):
+        return ""
+    text, bodies = _split_heredocs(cmd)
+    body_text = "\n".join(b for _, b in bodies)
+    try:
+        segs = _segments(text)
+    except ValueError:
+        if re.search(r"\b(?:TEAMWRIGHT_(?:ALLOW_PUSH|PAUSE_FILE|PUSH_STATUSES|WIP_REFS_RE|DOC_PATHS_RE))=", cmd):
+            return "push"
+        if re.search(r"core\.hookspath", cmd, re.I) and re.search(r"\bgit\b", cmd):
+            return "hooks"
+        return "pause" if re.search(r"\b(rm|mv|unlink)\b[^;&|]*" + PAUSE_NAME, cmd) else ""
+    for seg in segs:
+        words = [w for w in seg if isinstance(w, str)]
+        while words:
+            w = words[0]
+            if _PUSH_ENV.match(w):
+                return "push"
+            if _GIT_ENV.match(w):
+                return "hooks"
+            if _ASSIGN.match(w) or w in _PREFIX or w == "env" or w.isdigit() or \
+                    (w.startswith("-") and len(words) > 1 and w != "-"):
+                words = words[1:]
+                continue
+            break
+        if not words:
+            continue
+        prog, args = os.path.basename(words[0]), words[1:]
+        if prog in ("export", "declare", "typeset", "readonly", "local"):
+            if any(_PUSH_ENV.match(a) for a in args):
+                return "push"
+            if any(_GIT_ENV.match(a) for a in args):
+                return "hooks"
+            continue
+        if prog in _SHELLS:
+            code = " ".join(args[args.index("-c") + 1:args.index("-c") + 2]) if "-c" in args else \
+                (" ".join(args) if prog == "eval" else body_text)
+            found = shell_overrides_push(code, _depth + 1) if code and _depth < 3 else ""
+            if found:
+                return found
+            continue
+        if prog == "git":
+            if _git_switches_hooks(args):
+                return "hooks"
+            if args and args[0] == "rm" and any(os.path.basename(a) == PAUSE_NAME for a in args[1:]):
+                return "pause"
+            continue
+        if prog in ("rm", "unlink", "shred", "mv", "find"):
+            import fnmatch
+            plain = [a for a in args if not a.startswith("-")]
+            if prog == "find" and not any(a in ("-delete", "-exec", "-execdir") for a in args):
+                continue
+            for a in plain[:-1] if prog == "mv" else plain:      # mv's destination is not removed
+                n = os.path.basename(a.rstrip("/"))
+                if "TEAMWRIGHT_PAUSE_FILE" in a or (n != "*" and fnmatch.fnmatchcase(PAUSE_NAME, n)):
+                    return "pause"
+            continue
+        if _INTERPRETERS.match(prog):
+            code = " ".join(args) + "\n" + body_text
+            if re.search(r"TEAMWRIGHT_ALLOW_PUSH", code) and re.search(r"\bpush\b", code):
+                return "push"
+            if re.search(r"core\.hookspath", code, re.I) and re.search(r"\bconfig\b|\s-c\b", code):
+                return "hooks"
+            if PAUSE_NAME in code and re.search(r"unlink|remove|rmtree|rename|replace|move", code):
+                return "pause"
+    return ""
 
 
 def runs_hook_script(cmd, _depth=0, _cwd=""):
@@ -854,6 +1005,20 @@ def guard_state(data):
                  "teamwright setup. Write the proposal to .teamwright/config.next.yml and "
                  "hand it to the main session.", gate, data, hard=True)
         try:
+            override = shell_overrides_push(cmd)
+        except Exception:
+            override = ""
+        if override:
+            deny({"push": "STATE GUARD: push overrides (TEAMWRIGHT_ALLOW_PUSH, TEAMWRIGHT_PAUSE_FILE, "
+                          "TEAMWRIGHT_PUSH_STATUSES ...) are a person's, in their own terminal, not "
+                          "an agent's. The owner's recorded exit is `tail_code: ratified` in the task.",
+                  "hooks": "STATE GUARD: git hooks are not switched by agents (core.hooksPath, "
+                           "GIT_CONFIG_*). To enable them run `bash scripts/install-hooks.sh`; to "
+                           "change them, ask a person to do it outside Claude Code.",
+                  "pause": "STATE GUARD: the pause file is removed by a person, outside Claude Code: "
+                           "they stopped the team. Report that the team is paused and stop. Creating "
+                           "the file is allowed."}[override], gate, data, hard=True)
+        try:
             runs_hook = runs_hook_script(cmd)
         except Exception:
             runs_hook = False
@@ -873,6 +1038,14 @@ def guard_state(data):
                  "and run `tw-install.py apply --config .teamwright/config.next.yml` from the "
                  "main session (it shows the diff, applies and removes the proposal). Reading, "
                  "`git add` and `git commit` of the config are allowed.", gate, data, hard=True)
+        try:
+            kit = shell_writes_kit(cmd, project_root(data), _start_dir(data))
+            # a command that also writes a record goes on to the review gate's refusal
+            kit = kit and not shell_writes_records(cmd, project_root(data))
+        except Exception:
+            kit = False
+        if kit:
+            guard_kit("this command writes", gate, data)
         return
     if tool not in ("Edit", "Write", "MultiEdit", "NotebookEdit"):
         return
@@ -882,15 +1055,38 @@ def guard_state(data):
              ".teamwright/config.next.yml (allowed) and run `tw-install.py apply --config "
              ".teamwright/config.next.yml` from the main session, or a person edits it outside "
              "Claude Code. Agents cannot switch the gates to gate-first." % rel, gate, data, hard=True)
+    if is_kit_file(rel):
+        guard_kit(rel + " is", gate, data)
     if LEDGER_RE.search(rel) or STAMP_RE.search(rel):
         deny("STATE GUARD: %s is written only by the hooks (ledgers, gate stamps and the journal "
              "are facts the gates rely on), never by an agent." % rel, gate, data)
 
 
-def deny(reason, gate, data=None, hard=False, mode=None, warn_note=None):
+def _start_dir(data):
+    """Where a shell command starts: an absolute cwd, "" when the runtime does not say."""
+    cwd = (data or {}).get("cwd")
+    return cwd if isinstance(cwd, str) and cwd.startswith("/") else ""
+
+
+def guard_kit(what, gate, data):
+    """A write to a file that defines the gates (hooks, settings, role definitions, MCP
+    servers, git config): a person decides. enforce asks, which a run with nobody to answer
+    refuses by itself (`claude -p`); dontAsk and bypassPermissions get a refusal here, so the
+    outcome does not depend on how such a mode treats a hook's `ask`. gate-first warns, like
+    every other gate decision there."""
+    reason = ("STATE GUARD: %s part of what runs the gates (scripts/hooks, .claude/settings*.json, "
+              ".claude/agents, .mcp.json, git config). Needs a person: approve this prompt only if "
+              "you asked for this change. Kit updates go through /teamwright:update. With nobody "
+              "to approve, stop and report it." % what)
+    ask = (data or {}).get("permission_mode") not in ("dontAsk", "bypassPermissions")
+    deny(reason, gate, data, ask=ask)
+
+
+def deny(reason, gate, data=None, hard=False, mode=None, warn_note=None, ask=False):
     """Block (enforce) or warn (gate-first). hard=True blocks in every mode; mode
     ('enforce' | 'warn') overrides the project's gate mode for a gate with its own switch
-    (the test guard), warn_note then replaces the gate-first prefix of a warning."""
+    (the test guard), warn_note then replaces the gate-first prefix of a warning. ask=True
+    in enforce mode turns the block into a question to the person."""
     mode = "enforce" if hard else (mode or gate_mode(data))
     if mode == "warn":
         msg = (warn_note or "teamwright gate-first (warn only, run `tw-install.py enforce` to block): ") + reason
@@ -902,7 +1098,7 @@ def deny(reason, gate, data=None, hard=False, mode=None, warn_note=None):
         print(json.dumps({
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
-                "permissionDecision": "deny",
+                "permissionDecision": "ask" if ask else "deny",
                 "permissionDecisionReason": reason,
             }
         }))
@@ -912,7 +1108,7 @@ def deny(reason, gate, data=None, hard=False, mode=None, warn_note=None):
     try:
         who = actor(src)
         append_jsonl(os.path.join(log_dir(src), "gates.jsonl"), {
-            "ts": now(), "event": "gate", "gate": gate, "decision": "warn" if mode == "warn" else "deny",
+            "ts": now(), "event": "gate", "gate": gate, "decision": "warn" if mode == "warn" else ("ask" if ask else "deny"),
             "session_id": who.get("session_id", ""), "agent_id": who.get("agent_id", ""),
             "agent_type": who.get("agent_type", ""), "tool": src.get("tool_name") or "",
             "reason": reason.splitlines()[0][:200]})
@@ -923,7 +1119,7 @@ def deny(reason, gate, data=None, hard=False, mode=None, warn_note=None):
         try:
             ts = now()
             with open(log, "a", encoding="utf-8") as fh:
-                fh.write("%s %s %s %s\n" % (ts, gate, "WARN" if mode == "warn" else "DENY",
+                fh.write("%s %s %s %s\n" % (ts, gate, "WARN" if mode == "warn" else ("ASK" if ask else "DENY"),
                                             reason.splitlines()[0][:160]))
         except OSError:
             pass

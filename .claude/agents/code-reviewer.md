@@ -130,6 +130,7 @@ Configured by teamwright from `.teamwright/config.yml` (spec=spec-kit, context=s
 - **Stale index** (results miss code you can see): tell the orchestrator to run `serena project index`; meanwhile fall back to grep and say so.
 - **Edit with the normal Edit/Write tools**, not Serena's editing tools (`replace_symbol_body`, `insert_*`, `rename_symbol`): the teamwright gates see only Edit/Write. Do not write Serena memories for process facts — those live in `docs/`.
 - **Serena not connected** (no `mcp__serena__*` tools): use grep and file reads, and say so in your report.
+- **Serena not answering** (a call timed out or hung): do not call it again in this session; go on with grep and file reads and say so in your report. A slow tool never ends a stage.
 
 ### docs: context7
 

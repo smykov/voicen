@@ -23,6 +23,7 @@ areas:
     runner: docker
     image: "voicen-ui:1.63.0"        # built from docker/ui.Dockerfile (official mcr.microsoft.com/playwright:v1.63.0-noble + pnpm 8.15.0); `make ui-image`; decisions #89
     test_command: "pnpm test"
+    test_select_command: "node scripts/ui-test-select.mjs {tests}"
     ci_workflow: ci.yml
     lint_command: "pnpm lint"
     api_test_command: ""

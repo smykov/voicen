@@ -84,6 +84,10 @@ try:
     import _hookio as io, _task as task
 except Exception:
     sys.exit(0)
+try:
+    import _config
+except Exception:
+    _config = None
 
 KINDS = ("api", "ui", "smoke", "manual")
 ENVS = ("local", "staging", "production-like")
@@ -350,6 +354,10 @@ if m and rel.startswith("docs/tasks/"):
         p.append("`method:` sample | sweep")
     if w(rec, "validator") != VALIDATOR:
         p.append("`validator: %s`" % VALIDATOR)
+    if _config and hasattr(_config, "context_tool_problem"):
+        problem = _config.context_tool_problem(os.path.join(root, _config.CONFIG), rec.get("context_tool"))
+        if problem:
+            p.append(problem)
     if p:
         deny("validation record %s round %d is incomplete: %s. Template: "
              "docs/tasks/_validation-template.md." % (tid, n, "; ".join(p)))

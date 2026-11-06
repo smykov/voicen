@@ -421,3 +421,23 @@ def severity_blocks(severity, category, blocking):
         return True
     rank = {"low": 0, "medium": 1, "high": 2}
     return sev in rank and rank[sev] >= rank.get(blocking, 0)
+
+
+CONTEXT_TOOL_RE = re.compile(r"^(used|builtin\s*(\u2014|-)\s*\S.*)$")
+
+
+def context_tool_problem(path, value):
+    """A review or acceptance record says which code search it had, where the project names a
+    context provider: a review without it can miss callers, and must not look like one with
+    it. `used`, or `builtin - <why>`. Returns what is wrong, or None."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            tools = parse_yaml(fh.read()).get("tools") or {}
+    except (OSError, ValueError, AttributeError):
+        return None
+    provider = str(tools.get("context") or "builtin").strip() if isinstance(tools, dict) else "builtin"
+    if provider in ("builtin", "none", ""):
+        return None
+    if not CONTEXT_TOOL_RE.match(str(value or "").strip()):
+        return "`context_tool: used` or `context_tool: builtin \u2014 <why>` (tools.context is %s, got %r)" % (provider, value)
+    return None

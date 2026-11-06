@@ -25,6 +25,8 @@ Sources:
   3. .teamwright/logs/*.jsonl (journal.sh) -> outcomes, declared vs actual review,
      permission denials, tool calls per session; per stage (the `Stage:` line a session
      ends with): sessions, duration, tool calls, outcomes, tasks, tokens, cost (--prices)
+  4. 1-3 together -> first-pass acceptance, cost per accepted task, escaped defects
+     (`escaped_from:` in the committed task records)
 
 Options may also come from a JSON file (--config, or .teamwright/metrics.json in the
 repository): keys are the long option names with underscores. Command-line wins.
@@ -97,6 +99,8 @@ START = {"ANALYSIS", "IN_PROGRESS"}
 LATE = {"NEEDS_REVIEW", "CODE_COMPLETE", "DEPLOYED", "VERIFIED", "VERIFY_FAIL"}
 REWORK_FROM = {"NEEDS_REVIEW", "CODE_COMPLETE", "DEPLOYED", "VERIFIED", "VERIFY_FAIL", "VERIFY"}
 REWORK_TO = {"IN_PROGRESS", "ANALYSIS"}
+ACCEPTED = {"CODE_COMPLETE", "DEPLOYED", "VERIFIED", "DONE"}
+NOT_APPROVED = {"REQUEST_CHANGES", "REJECT_RECURRENCE", "ESCALATE"}
 
 
 # ---------------------------------------------------------------- helpers
@@ -622,6 +626,9 @@ def task_records(opt, id_re):
                 created[m.group(1)] = d
     return {
         "sprint": {t: front_value(blobs.get(p, ""), "sprint") for t, p in tasks.items()},
+        "type": {t: front_value(blobs.get(p, ""), "type") for t, p in tasks.items()},
+        "review": {t: front_value(blobs.get(p, ""), "review") for t, p in tasks.items()},
+        "escaped_from": {t: front_value(blobs.get(p, ""), "escaped_from") for t, p in tasks.items()},
         "created": created,
         "reviews": {t: [norm_status(front_value(blobs.get(p, ""), "verdict")) for p in
                         sorted(ps, key=lambda x: int(re.search(r"(\d+)\.md$", x).group(1)))]
@@ -771,6 +778,7 @@ def build_tasks(events, records):
             "review_rounds_transitions": max(sum(1 for e in evs if e["to"] == "NEEDS_REVIEW"),
                                              sum(1 for e in evs if e["from"] == "NEEDS_REVIEW")),
             "approved": any(e["to"] == "CODE_COMPLETE" for e in evs),
+            "accepted": any(e["to"] in ACCEPTED or e["from"] in ACCEPTED for e in evs),
             "approved_at": next((e["date"] for e in evs if e["to"] == "CODE_COMPLETE"), None),
             "escalations": sum(1 for e in evs if e["from"] == "NEEDS_REVIEW" and e["to"] == "BLOCKED"),
             "recurrence_rejects": sum(1 for e in evs if e["from"] == "NEEDS_REVIEW"
@@ -905,7 +913,7 @@ def task_section(opt, periods, commits):
             "sprints": sprints if sprints else {"status": NO_DATA,
                                                 "reason": "no `sprint:` field in task records, no "
                                                           "--sprint-from-id or --sprint-regex match"},
-            "_tasks": tasks}
+            "_tasks": tasks, "_records": records, "_in_range": in_range, "_key_date": key_date}
 
 
 def sprint_key(s):
@@ -1225,6 +1233,27 @@ def load_prices(path):
     return out
 
 
+def session_tokens(rs):
+    """{model: {kind: tokens}} of one session: its own transcript (last Stop, cumulative) plus
+    each subagent's (its last SubagentStop). {} when the session sent none."""
+    key = lambda r: r["ts"].timestamp() if r["ts"] else float("-inf")
+    tok, subs = {}, {}
+    main = [r for r in sorted((r for r in rs if r["event"] == "Stop"), key=key)
+            if isinstance(r["raw"].get("tokens"), dict) and r["raw"]["tokens"]]
+    for r in sorted((r for r in rs if r["event"] == "SubagentStop"), key=key):
+        if isinstance(r["raw"].get("tokens"), dict) and r["raw"]["tokens"]:
+            subs[r["agent_id"]] = r["raw"]["tokens"]
+    for t in ([main[-1]["raw"]["tokens"]] if main else []) + list(subs.values()):
+        for model, u in t.items():
+            m = tok.setdefault(model, dict.fromkeys(TOKEN_KINDS, 0))
+            for k in TOKEN_KINDS:
+                try:
+                    m[k] += int((u or {}).get(k) or 0)
+                except (TypeError, ValueError, AttributeError):
+                    pass
+    return tok
+
+
 def stage_section(recs, opt):
     """Per stage (the `stage` of a session's last Stop with one; `-` for sessions that
     declared none): sessions, duration (first journal record of the session to its last
@@ -1252,25 +1281,12 @@ def stage_section(recs, opt):
         last = stops[-1]
         tss = [r["ts"] for r in rs if r["ts"]]
         dur = (last["ts"] - min(tss)).total_seconds() / 60.0 if last["ts"] and tss else None
-        tok = {}
-        main = [r for r in stops if isinstance(r["raw"].get("tokens"), dict) and r["raw"]["tokens"]]
-        subs = {}
-        for r in sorted((r for r in rs if r["event"] == "SubagentStop"), key=key):
-            if isinstance(r["raw"].get("tokens"), dict) and r["raw"]["tokens"]:
-                subs[r["agent_id"]] = r["raw"]["tokens"]
-        for t in ([main[-1]["raw"]["tokens"]] if main else []) + list(subs.values()):
-            for model, u in t.items():
-                m = tok.setdefault(model, dict.fromkeys(TOKEN_KINDS, 0))
-                for k in TOKEN_KINDS:
-                    try:
-                        m[k] += int((u or {}).get(k) or 0)
-                    except (TypeError, ValueError, AttributeError):
-                        pass
+        tok = session_tokens(rs)
         batch = next((r["raw"].get("batch") for r in reversed(with_stage or stops)
                       if isinstance(r["raw"].get("batch"), list) and r["raw"].get("batch")), [])
         row = rows.setdefault(stage, {"sessions": 0, "durations": [], "tool_calls": [], "outcomes": Counter(),
                                       "tasks": 0, "sessions_with_batch": 0, "sessions_with_tokens": 0,
-                                      "tokens": dict.fromkeys(TOKEN_KINDS, 0), "tokens_by_model": {},
+                                      "tokens": dict.fromkeys(TOKEN_KINDS, 0), "tokens_by_model": {},  # gitleaks:allow
                                       "cost": 0.0, "priced": False})
         row["sessions"] += 1
         if dur is not None:
@@ -1366,7 +1382,238 @@ def journal_section(opt, periods, tasks):
             "subagent_type_since": typed_since.strftime("%Y-%m-%d") if typed_since and
             typed_since.year < 9999 else ("never" if typed_since else None),
             "records_without_ts": sum(1 for r in in_range if r["ts"] is None),
-            "summary": summary, "breakdown": breakdown}
+            "summary": summary, "breakdown": breakdown, "_recs": recs}
+
+
+# ---------------------------------------------------------------- acceptance, cost, escapes
+
+def first_pass_ok(tid, t, records):
+    """Accepted at the first review round, and nothing came back afterwards."""
+    if not t["accepted"] or t["rework_events"] or t["verify_fails"] or t["escalations"] \
+            or t["recurrence_rejects"]:
+        return False
+    rounds = (records or {}).get("reviews", {}).get(tid)
+    return not rounds or (len(rounds) == 1 and rounds[0] not in NOT_APPROVED)
+
+
+def first_pass_summary(ts, records, src):
+    """Tasks of one period -> metrics, plus {type: [first pass, decided]}."""
+    passed = decided = no_record = skipped = open_ = 0
+    by_type = defaultdict(lambda: [0, 0])
+    reviews = (records or {}).get("reviews", {})
+    fields = (records or {}).get("review", {})
+    for tid, t in ts.items():
+        trivial = (fields.get(tid) or "").replace(" ", "").startswith("skipped:trivial") and not reviews.get(tid)
+        if t["accepted"] and (trivial or not t["reached_review"]):
+            skipped += 1
+        elif t["reached_review"] and (t["accepted"] or t["recurrence_rejects"]):
+            decided += 1
+            ok = first_pass_ok(tid, t, records)
+            kind = (records or {}).get("type", {}).get(tid) or "(no type)"
+            by_type[kind][1] += 1
+            if ok:
+                passed += 1
+                by_type[kind][0] += 1
+                no_record += 0 if reviews.get(tid) else 1
+        else:
+            open_ += 1
+    n = len(ts)
+    out = {
+        "first_pass_acceptance": share(passed, decided, src + " - decided tasks approved in one round, "
+                                       "no send-back, no VERIFY_FAIL, no escalation"),
+        "first_pass_without_review_record": count(no_record if n else None, src + " - counted as first pass "
+                                                  "on transitions alone: no committed review record", passed),
+        "tasks_no_review_decision": count(open_ if n else None, src + " - outside the denominator: in flight, "
+                                          "blocked or abandoned before a decision", n),
+        "tasks_review_skipped": count(skipped if n else None, src + " - outside the denominator: accepted "
+                                      "without a review stage or with `review: skipped:trivial`", n),
+    }
+    return out, by_type
+
+
+def task_costs(recs, opt, tasks):
+    """Tokens and list-price cost per task. A session's usage goes to the tasks it names (its
+    `batch`, else `current_task` of its Stop records), split equally: the journal has no finer
+    link. Returns (per task, attribution facts) or (None, reason)."""
+    if not recs:
+        return None, "no journal records"
+    sess = defaultdict(list)
+    for r in recs:
+        if r["session"]:
+            sess[r["session"]].append(r)
+    prices = load_prices(getattr(opt, "prices", None))
+    per, unpriced = {}, set()
+    info = {"sessions_with_tokens": 0, "sessions_attributed": 0, "sessions_split": 0,
+            "tokens_unattributed": 0, "cost_unattributed_usd": 0.0}
+    for rs in sess.values():
+        tok = session_tokens(rs)
+        if not tok:
+            continue
+        info["sessions_with_tokens"] += 1
+        total, cost, priced = 0, 0.0, False
+        for model, u in tok.items():
+            total += sum(u.values())
+            pr = next((p for rx, p in prices if rx.search(model)), None) if prices is not None else None
+            if pr is not None:
+                cost += sum(u[k] * pr[k] for k in TOKEN_KINDS) / 1e6
+                priced = True
+            elif prices is not None:
+                unpriced.add(model)
+        stops = [r for r in rs if r["event"] == "Stop"]
+        ids = []
+        for r in stops:
+            b = r["raw"].get("batch")
+            ids += [x for x in (b if isinstance(b, list) else []) if x not in ids]
+        if not ids:
+            for r in stops:
+                cur = r["raw"].get("current_task")
+                if cur and cur not in ids:
+                    ids.append(cur)
+        known = [x for x in ids if x in tasks]
+        if not known:
+            info["tokens_unattributed"] += total
+            info["cost_unattributed_usd"] += cost
+            continue
+        info["sessions_attributed"] += 1
+        info["sessions_split"] += 1 if len(ids) > 1 else 0
+        info["tokens_unattributed"] += total - total * len(known) // len(ids)
+        info["cost_unattributed_usd"] += cost - cost * len(known) / len(ids)
+        for tid in known:
+            row = per.setdefault(tid, {"tokens": 0.0, "cost": 0.0, "priced": False})
+            row["tokens"] += total / len(ids)
+            row["cost"] += cost / len(ids)
+            row["priced"] = row["priced"] or priced
+    if not info["sessions_with_tokens"]:
+        return None, "no `tokens` in Stop records (journal.sh before 0.12, or the runtime sent no transcript path)"
+    if not info["sessions_attributed"]:
+        return None, "%d session(s) with tokens, none names a known task (`Batch:` line or current_task)" % (
+            info["sessions_with_tokens"])
+    info["cost_unattributed_usd"] = round(info["cost_unattributed_usd"], 2)
+    info["unpriced_models"] = sorted(unpriced)
+    info["priced"] = prices is not None
+    return per, info
+
+
+def cost_summary(ts, costs, why, opt):
+    src = "hook journal tokens, each session split equally over the tasks it names"
+    psrc = src + "; list price from --prices, not what a subscription costs"
+    keys = {"cost_per_accepted_task_median": "number", "cost_per_accepted_task_p75": "number",
+            "tokens_per_accepted_task_median": "number", "tokens_per_accepted_task_p75": "number",
+            "cost_share_not_done": "cost_share"}
+    if costs is None:
+        out = {k: nodata(src + " - " + why, kind) for k, kind in keys.items()}
+        out["accepted_tasks_without_tokens"] = nodata(src + " - " + why)
+        return out
+    done = [t for t, x in ts.items() if x["done"]]
+    with_tok = [t for t in done if t in costs]
+    toks = [costs[t]["tokens"] for t in with_tok]
+    usd = [costs[t]["cost"] for t in with_tok if costs[t]["priced"]]
+    no_price = "pass --prices <json> ($ per million tokens per model) for a cost"
+    if opt.prices:
+        total = sum(costs[t]["cost"] for t in ts if t in costs and costs[t]["priced"])
+        rest = sum(costs[t]["cost"] for t in ts if t in costs and costs[t]["priced"] and not ts[t]["done"])
+    q = lambda xs, f, nd: round(quantile(xs, f), nd) if xs else None   # noqa: E731
+    out = {
+        "cost_per_accepted_task_median": number(q(usd, .5, 2), len(usd), psrc),
+        "cost_per_accepted_task_p75": number(q(usd, .75, 2), len(usd), psrc),
+        "tokens_per_accepted_task_median": number(q(toks, .5, 0), len(toks), src),  # gitleaks:allow
+        "tokens_per_accepted_task_p75": number(q(toks, .75, 0), len(toks), src),  # gitleaks:allow
+        "accepted_tasks_without_tokens": count(len(done) - len(with_tok) if ts else None,  # gitleaks:allow
+                                               src + " - DONE tasks no session names: left out of the n", len(done)),
+    }
+    if opt.prices:
+        out["cost_share_not_done"] = {"kind": "cost_share", "value": (rest / total) if total else None,
+                                      "num": round(rest, 2), "n": round(total, 2),
+                                      "source": psrc + " - tasks not DONE: in flight or abandoned"}
+    else:
+        out["cost_share_not_done"] = nodata(src + " - " + no_price, "cost_share")
+        for k in ("cost_per_accepted_task_median", "cost_per_accepted_task_p75"):
+            out[k] = nodata(src + " - " + no_price, "number")
+    return out
+
+
+def escape_links(records, tasks, id_re, window_days):
+    """{origin: bugs that appeared within the window after its DONE} and the links that
+    cannot count: a fixed window, so an older task has no more time to collect them."""
+    rx = re.compile(id_re)
+    links, ignored = defaultdict(list), Counter()
+    win = dt.timedelta(days=window_days)
+    for bug, raw in records["escaped_from"].items():
+        for m in rx.finditer(raw or ""):
+            origin = m.group(0)
+            if origin == bug or origin not in tasks:
+                ignored["unknown_origin"] += 1
+            elif not tasks[origin]["done"]:
+                ignored["origin_not_done"] += 1
+            else:
+                when = records["created"].get(bug) or (tasks[bug]["first_seen"] if bug in tasks else None)
+                done = tasks[origin]["done"]
+                if when is None:
+                    ignored["undated"] += 1
+                elif when <= done:
+                    ignored["bug_before_done"] += 1
+                elif when > done + win:
+                    ignored["after_window"] += 1
+                else:
+                    links[origin].append(bug)
+    return links, ignored
+
+
+def escaped_summary(ts, links, as_of, opt, why):
+    src = "docs/tasks/<ID>.md `escaped_from:` (filled by a person or an agent: a lower bound)"
+    if why:
+        return {"escaped_defect_rate": nodata(src + " - " + why, "share"),
+                "accepted_tasks_inside_escape_window": nodata(src + " - " + why)}
+    win = dt.timedelta(days=opt.escape_window_days)
+    done = {t: x for t, x in ts.items() if x["done"]}
+    old = {t: x for t, x in done.items() if x["done"] + win <= as_of}
+    hit = sum(1 for t in old if links.get(t))
+    return {"escaped_defect_rate": share(hit, len(old), src + " - DONE at least %d days before %s; a bug task "
+                                         "linked within %d days of DONE" % (opt.escape_window_days,
+                                                                           as_of.strftime("%Y-%m-%d"),
+                                                                           opt.escape_window_days)),
+            "accepted_tasks_inside_escape_window": count(len(done) - len(old) if ts else None,
+                                                         src + " - DONE too recently, outside the denominator",
+                                                         len(done))}
+
+
+def acceptance_section(opt, periods, tsec, recs, commits):
+    """First-pass acceptance, cost per accepted task, escaped defects, per period."""
+    tasks, records = tsec.get("_tasks"), tsec.get("_records")
+    if not tasks:
+        return {"status": NO_DATA, "reason": "no task transitions", "source": tsec.get("source", "")}
+    src = tsec["source"]
+    in_range, key_date = tsec["_in_range"], tsec["_key_date"]
+    costs, why_cost = task_costs(recs, opt, tasks) if recs else (None, "no journal records")
+    attribution = why_cost if isinstance(why_cost, dict) else None
+    as_of = commits[-1]["date"]
+    why_esc = None
+    links, ignored = {}, Counter()
+    if not records:
+        why_esc = "no committed task records"
+    elif not any(records["escaped_from"].values()):
+        why_esc = "the field is used by no task record, which says nothing about defects"
+    else:
+        links, ignored = escape_links(records, tasks, opt.task_id_regex, opt.escape_window_days)
+    summary, types = {}, {}
+    for name, a, b in periods:
+        ts = {k: t for k, t in in_range.items() if in_period(key_date(t), a, b)}
+        fp, by_type = first_pass_summary(ts, records, src)
+        summary[name] = dict(fp)
+        summary[name].update(cost_summary(ts, costs, why_cost, opt))
+        summary[name].update(escaped_summary(ts, links, as_of, opt, why_esc))
+        types[name] = {k: share(v[0], v[1], src) for k, v in by_type.items()}
+    blocking = None
+    cfg = git(opt.repo, "show", "%s:.teamwright/config.yml" % opt.rev, check=False) or ""
+    m = re.search(r"^[ \t]+blocking:[ \t]*['\"]?(\w+)", cfg, re.M)
+    if m:
+        blocking = m.group(1)
+    has_types = bool(records and any(records["type"].values()))
+    return {"source": src, "summary": summary, "first_pass_by_type": types if has_types else {
+        "status": NO_DATA, "reason": "no `type:` field in committed task records"},
+        "review_blocking": blocking, "cost_attribution": attribution,
+        "escape": {"window_days": opt.escape_window_days, "as_of": as_of.strftime("%Y-%m-%d"),
+                   "linked_origins": len(links), "ignored_links": dict(ignored)}}
 
 
 # ---------------------------------------------------------------- rendering
@@ -1380,6 +1627,8 @@ def fmt(m):
     v, k = m["value"], m["kind"]
     if k == "share":
         return "%.1f%% (%d/%d)" % (100 * v, m["num"], m["n"])
+    if k == "cost_share":
+        return "%.1f%% ($%.2f of $%.2f)" % (100 * v, m["num"], m["n"])
     if k == "days":
         return "%s d (n=%d)" % (fmtnum(v), m["n"])
     if k == "count":
@@ -1397,7 +1646,7 @@ def delta(a, b):
     if not a or not b or a.get("value") is None or b.get("value") is None:
         return NO_DATA
     d = b["value"] - a["value"]
-    if a["kind"] == "share":
+    if a["kind"] in ("share", "cost_share"):
         return "%+.1f pp" % (100 * d)
     if a["kind"] == "days":
         return "%+.2f d" % d
@@ -1578,7 +1827,47 @@ def render_md(rep, periods):
             L.append("- Tool calls by tool (top %d): %s" % (rep["params"]["top"], kv(b["calls_by_tool"])))
             L.append("")
         L += stage_lines(j.get("stages") or {})
+    L += acceptance_lines(rep["acceptance"], periods)
     return "\n".join(L).rstrip() + "\n"
+
+
+def acceptance_lines(a, periods):
+    L = ["## 4. Acceptance, cost and escapes", ""]
+    if a.get("status") == NO_DATA:
+        return L + ["%s - %s." % (NO_DATA, a["reason"]), ""]
+    L += ["First pass has no single industry definition; this one is in `docs/process/metrics.md`. "
+          "Review threshold now (`process.review.blocking`): %s. Cost is at the list prices given in "
+          "`--prices`, not what a subscription costs. Escape window: %d days, observed up to %s (the last "
+          "commit)." % (a["review_blocking"] or "not set", a["escape"]["window_days"], a["escape"]["as_of"]), ""]
+    L += summary_table(a["summary"], periods, {
+        "first_pass_without_review_record": "first pass without a review record",
+        "tasks_no_review_decision": "tasks without a review decision (not in the denominator)",
+        "tasks_review_skipped": "tasks with review skipped (not in the denominator)",
+        "cost_per_accepted_task_median": "cost per accepted task, median, $",
+        "cost_per_accepted_task_p75": "cost per accepted task, p75, $",
+        "cost_share_not_done": "share of cost on tasks not DONE",
+        "accepted_tasks_inside_escape_window": "DONE tasks inside the escape window (not in the denominator)",
+    }) + [""]
+    c = a.get("cost_attribution")
+    if c:
+        L += ["Cost attribution: %d of %d sessions with tokens name a known task, %d of them split over several; "
+              "unattributed: %d tokens%s%s." % (
+                  c["sessions_attributed"], c["sessions_with_tokens"], c["sessions_split"], c["tokens_unattributed"],
+                  ", $%.2f" % c["cost_unattributed_usd"] if c["priced"] else "",
+                  "; models without a price, left out of the cost: " + ", ".join(c["unpriced_models"])
+                  if c["unpriced_models"] else ""), ""]
+    ig = a["escape"]["ignored_links"]
+    if ig:
+        L += ["`escaped_from` links that cannot count: %s." % kv(ig), ""]
+    L += ["### First pass by task type", ""]
+    bt = a["first_pass_by_type"]
+    if bt.get("status") == NO_DATA:
+        return L + ["%s - %s." % (NO_DATA, bt["reason"]), ""]
+    names = [p[0] for p in periods]
+    L += ["| Type | " + " | ".join(names) + " |", "|" + "---|" * (len(names) + 1)]
+    for kind in sorted({k for n in names for k in bt[n]}):
+        L.append("| %s | %s |" % (kind, " | ".join(fmt(bt[n].get(kind)) for n in names)))
+    return L + [""]
 
 
 def stage_lines(st):
@@ -1633,7 +1922,7 @@ DEFAULTS = {
     "reviewer_agent_regex": DEFAULT_REVIEWER_RE, "review_claim_field": DEFAULT_CLAIM_FIELDS,
     "review_claim_regex": DEFAULT_CLAIM_VALUE_RE, "claim_join": "auto", "claim_window": 10,
     "json": False, "output": None, "config": None, "debug": False, "debug_sample": 20,
-    "prices": None,
+    "prices": None, "escape_window_days": 30,
 }
 
 
@@ -1692,7 +1981,9 @@ def parse_args(argv):
       "find their session: by session id, or by time for journals without one (auto)")
     a("--claim-window", type=int, help="minutes for --claim-join time (10)")
     a("--prices", help="JSON {model regex: {input, output, cache_read, cache_write}} in $ per "
-                       "million tokens: adds a cost per stage")
+                       "million tokens: adds a cost per stage and per accepted task")
+    a("--escape-window-days", type=int, help="days after DONE in which a task's `escaped_from` bug "
+                                             "counts; younger DONE tasks leave the denominator (30)")
     a("--json", action="store_true", default=None, help="print JSON instead of Markdown")
     a("--output", "-o", help="write to a file instead of stdout")
     a("--debug", action="store_true", default=None, help="add a sample of unparsed ledger "
@@ -1722,6 +2013,8 @@ def parse_args(argv):
     if ns.until_dt:
         ns.until_dt += dt.timedelta(days=1)       # inclusive day
     ns.split_dt = parse_day(ns.split_date, "--split-date")
+    if ns.escape_window_days < 0:
+        die("--escape-window-days must not be negative")
     for k in ("fix_regex", "revert_regex", "exclude_regex", "task_id_regex", "sprint_regex",
               "reviewer_agent_regex", "ledger_regex", "version_bump_regex", "sprint_from_id", "review_claim_regex"):
         try:
@@ -1743,8 +2036,11 @@ def main(argv=None):
     g = git_section(opt, periods)
     commits = g.pop("_commits", None)
     t = task_section(opt, periods, commits)
-    tasks = t.pop("_tasks", None)
+    tasks = t.get("_tasks")
     j = journal_section(opt, periods, tasks)
+    a = acceptance_section(opt, periods, t, j.pop("_recs", None), commits)
+    for k in ("_tasks", "_records", "_in_range", "_key_date"):
+        t.pop(k, None)
     rep = {
         "repo": os.path.basename(os.path.abspath(top)),
         "generated": dt.datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -1752,7 +2048,7 @@ def main(argv=None):
                    "rev": opt.rev, "top": opt.top},
         "periods": [{"name": n, "from": a.strftime("%Y-%m-%d") if a else None,
                      "to_exclusive": b.strftime("%Y-%m-%d") if b else None} for n, a, b in periods],
-        "git": g, "tasks": t, "journal": j,
+        "git": g, "tasks": t, "journal": j, "acceptance": a,
     }
     text = (json.dumps(rep, indent=2, ensure_ascii=False, default=str) + "\n") if opt.json \
         else render_md(rep, periods)

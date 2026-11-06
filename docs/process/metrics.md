@@ -1,7 +1,7 @@
 # Metrics
 
 What the process is actually doing, computed from records the agents cannot rewrite
-after the fact: commits, task-transition commits, review records committed in git, and
+after the fact: commits, task-transition commits, task and review records committed in git, and
 the hook journals. Tool: `scripts/metrics/teamwright-metrics` (Python 3, stdlib only).
 
 ```bash
@@ -185,6 +185,29 @@ Journals of other harnesses need two adjustments, both automatic:
   bound above still covers them. A journal whose spawns never name a task makes the
   task-level approval match `no data`, not 0.
 
+## 4. Acceptance, cost and escapes
+
+Three outcome numbers, split by `--split-date` and grouped into periods like the task metrics. Each prints with its n, and what is left out of a denominator is printed beside it.
+
+| Metric | Meaning |
+|---|---|
+| First-pass acceptance | Of the tasks with a terminal review decision (reached review, then approved onward, or rejected as a recurrence): the share accepted in one round with nothing back: no transition from `NEEDS_REVIEW` / `CODE_COMPLETE` / `DEPLOYED` / `VERIFY` / `VERIFIED` / `VERIFY_FAIL` to `IN_PROGRESS` / `ANALYSIS`, no `VERIFY_FAIL`, no escalation, and, when review records exist, exactly one that is not a send-back. Also by `type` of the task |
+| First pass without a review record | Counted as first pass on transitions alone: the task has no committed record |
+| Tasks without a review decision | Outside the denominator: in flight, blocked or abandoned. Read it with the share: abandoned tasks do not make the rest better |
+| Tasks with review skipped | Outside the denominator: accepted with `review: skipped:trivial` or without a review stage |
+| Tokens per accepted task (median, p75) | Tokens of the sessions naming the task, over `DONE` tasks with any |
+| Cost per accepted task (median, p75) | The same at the list prices in `--prices`. Not what a subscription costs. `no data` without `--prices` |
+| Share of cost on tasks not `DONE` | Their cost over the cost of all tasks in the period. Tasks in flight count too, so this is an upper bound on waste |
+| Accepted tasks without tokens | `DONE` tasks no session names, left out of the n: journals are local, so this is often most of them |
+| Escaped defect rate | Of the `DONE` tasks at least `--escape-window-days` (30) old: the share with a task naming them in `escaped_from:` that appeared after their `DONE` and within the window |
+| `DONE` tasks inside the window | Too recent to have had the chance, outside the denominator |
+
+**There is no single industry definition of first-pass acceptance**; this one is the kit's. Do not compare it with a figure from elsewhere, and a merge rate is a different number: a merged change may have been reworked first.
+
+**Attribution.** A session's tokens go to the tasks it names: its `Batch:` line, else `current_task` in its `Stop` records, split equally (the journal has no finer link). Cost and tokens are taken over the whole journal, so `--since` does not cut off a task's earlier sessions. The report prints how many sessions could be attributed, how many were split, what no task owns, and the models without a price (their cost is left out, so such a task reads low). Sessions that name no known task leave cost `no data` with the reason.
+
+**`escaped_from: <ID>`** is an optional field of a bug's task record, naming the task the defect came from. A person or an agent fills it in and no gate reads it or requires it. It is a committed record but also a judgement, so it undercounts: it is a lower bound on escapes, not their number. A field no record uses prints `no data`, never 0. The window is fixed so that old tasks do not get more time: a link before the origin's `DONE`, after the window, to an unknown task or to one not `DONE` does not count, and the report names how many there were. Time is observed up to the last commit, so the number is reproducible and a quiet repository is not credited with days nobody looked. The bug's date is when its record first appears in git, a stand-in for when the defect was found.
+
 ## Before / after: `--split-date`
 
 `--split-date YYYY-MM-DD` computes every summary metric twice — before that day and from
@@ -241,5 +264,17 @@ day the process (or one gate) was adopted, a model change, a team change.
   hooks by hand. They are not runtime records: leave that session out when reading
   session counts and tool calls per session (T-162 review 1 #2).
 - **Goodhart.** No metric here is a target. Rework rate falls fastest by not sending
-  work back; recurrence rate falls by not calling fixes fixes. Read the numbers
-  together and against the diffs.
+  work back; recurrence rate falls by not calling fixes fixes. First-pass acceptance
+  rises the same way, and by splitting tasks small or calling more of them trivial; escaped
+  defects fall by not filling in the field. Read the numbers together and against the diffs.
+- **The review threshold moves first pass.** Raising `process.review.blocking` turns
+  send-backs into follow-ups with no change in the code. The report prints the threshold at
+  `--rev`, not its history; a split across a change compares two different rules.
+- **Task mix.** Chores and documents pass more often than features. Read the split by
+  type before the total.
+- **Observation window.** A task younger than the window is left out, so the latest weeks
+  are always missing, and a defect found after the window is not counted. Small windows and
+  fresh histories read low.
+- **Small n.** A share over a handful of tasks is an anecdote, a median of cost over three
+  tasks more so. This applies especially to one person's project, which also says nothing about a
+  team.

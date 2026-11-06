@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+# tw-scan — the commit's secret and forbidden-file scan, before the commit. Tool.
+#
+#   scripts/tw-scan [--strict] [BASE]
+#
+# Runs scripts/hooks/pre-commit itself over everything changed in the working tree, staged
+# or not, untracked files included, through a throwaway index and object directory: the real
+# index and .git/objects stay as they were. With BASE, commits in BASE..HEAD are scanned too.
+# An agent finds a value the commit would refuse while it can still fix it. It lives outside
+# scripts/hooks/ because agents may not run those (the state guard).
+#
+# Exit: 0 clean; 1 a finding; 2 the scan could not run (not a repository, a BASE that does
+# not exist, a failing git); 3 clean, but only by the built-in fallback scanner, in a headless
+# run (--strict, CI, TEAMWRIGHT_HEADLESS, or a `claude -p` session). The fallback is weaker
+# than gitleaks: values in test paths and docs only get a note. 3 is not a finding in your
+# code: say so in your report, and whoever owns the runner installs gitleaks.
+set -uo pipefail
+
+strict=""
+base=""
+for a in "$@"; do
+  case "$a" in
+    --strict) strict=1 ;;
+    -*) echo "tw-scan: unknown option $a" >&2; exit 2 ;;
+    *) base="$a" ;;
+  esac
+done
+[ -n "${CI:-}" ] && strict=1
+[ -n "${TEAMWRIGHT_HEADLESS:-}" ] && strict=1
+case "${CLAUDE_CODE_ENTRYPOINT:-}" in sdk-*) strict=1 ;; esac
+
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || { echo "tw-scan: not a git repository" >&2; exit 2; }
+cd "$ROOT" || exit 2
+hook="scripts/hooks/pre-commit"
+[ -f "$hook" ] || { echo "tw-scan: $hook is missing" >&2; exit 2; }
+
+if [ -n "$base" ] && ! git rev-parse -q --verify "$base^{commit}" >/dev/null; then
+  echo "tw-scan: no such revision: $base" >&2
+  exit 2
+fi
+
+weak=""
+if [ -n "${TEAMWRIGHT_NO_GITLEAKS:-}" ] || ! command -v gitleaks >/dev/null 2>&1; then
+  weak=1
+fi
+cfg=()
+[ -f .gitleaks.toml ] && cfg=(--config .gitleaks.toml)
+
+rc=0
+# Commits since BASE already passed their own hook, or did not: scan them as history.
+if [ -n "$base" ] && [ -n "$(git rev-list -n 1 "$base..HEAD")" ]; then
+  if [ -z "$weak" ]; then
+    if gitleaks help git >/dev/null 2>&1; then
+      gitleaks git --log-opts="$base..HEAD" --redact --no-banner ${cfg[@]+"${cfg[@]}"} >&2 || rc=1
+    else
+      gitleaks detect --log-opts="$base..HEAD" --redact --no-banner ${cfg[@]+"${cfg[@]}"} >&2 || rc=1
+    fi
+  else
+    git diff --unified=0 --no-color --no-ext-diff "$base" HEAD | bash "$hook" --scan-stdin
+    st=("${PIPESTATUS[@]}")
+    [ "${st[0]}" -eq 0 ] || { echo "tw-scan: git diff failed" >&2; exit 2; }
+    [ "${st[1]}" -eq 0 ] || rc=1
+  fi
+fi
+
+objects="$(git rev-parse --git-path objects)" || exit 2
+objects="$(cd "$objects" && pwd)" || exit 2
+tmp="$(mktemp -d "${TMPDIR:-/tmp}/tw-scan.XXXXXX")" || exit 2
+trap 'rm -rf "$tmp"' EXIT
+mkdir -p "$tmp/objects"
+export GIT_INDEX_FILE="$tmp/index" GIT_OBJECT_DIRECTORY="$tmp/objects" GIT_ALTERNATE_OBJECT_DIRECTORIES="$objects"
+if git rev-parse -q --verify "HEAD^{tree}" >/dev/null; then
+  git read-tree HEAD || exit 2
+fi
+git add -A . || { echo "tw-scan: could not read the working tree" >&2; exit 2; }
+bash "$hook" || rc=1
+
+[ "$rc" -eq 0 ] || exit "$rc"
+if [ -n "$weak" ]; then
+  echo "tw-scan: only the built-in fallback scanner ran; it is weaker than gitleaks (values in test paths and docs get a note, not a refusal)" >&2
+  if [ -n "$strict" ]; then
+    exit 3
+  fi
+  echo "secrets: clean (fallback scanner)"
+  exit 0
+fi
+echo "secrets: clean"

@@ -300,6 +300,78 @@ def findings(text):
             return rows
     return tables[0][1] if tables else []
 
+FOLLOW_UP_SUFFIX = ".follow-ups"
+FOLLOW_UP_CLASS = "review-follow-up"    # the older shared sprint task: its lines already sit in a task
+FROM_FOLLOW_UP_CLASS = "from-follow-up"  # a task made from a follow-up: its own stay lines
+_FU_SEVERITY = re.compile(r"\b(critical|high|medium|low)\b", re.I)
+_FU_LINK = re.compile(r"(?:\u2192|->)\s*(%s)\s*$" % TASK_ID)
+_FU_MUTANT = re.compile(r"^\S+\s+v\d+\s+mutant\b")
+_FU_SECTION = re.compile(r"^## Follow-ups\s*$(.*?)(?=^## |\Z)", re.M | re.S)
+
+
+def _fu_items(text, task, where, statuses, no_task=False):
+    out = []
+    for line in text.splitlines():
+        m = re.match(r"\s*- \[ \]\s+(.+)$", line)
+        if not m:
+            continue
+        item = m.group(1).strip()
+        sev = None if _FU_MUTANT.match(item) else _FU_SEVERITY.search(item.split(":", 1)[0])
+        severity = sev.group(1).capitalize() if sev else None
+        linked = _FU_LINK.search(item)
+        target = linked.group(1) if linked else None
+        if target and statuses.get(target) in ("DONE", "DEFERRED"):
+            continue                        # the task that took it over is closed
+        tracked = bool(target and target in statuses)
+        out.append({"task": task, "file": where, "text": item, "severity": severity,
+                    "linked": target, "link_broken": bool(target and not tracked),
+                    "needs_task": severity in ("Medium", "High", "Critical") and not tracked and not no_task})
+    return out
+
+
+def follow_ups(tasks_dir):
+    """Open follow-ups: each task's own docs/tasks/<ID>.follow-ups/*.md, a `## Follow-ups`
+    section left in a task record by an older kit, and the unchecked lines of older
+    review-follow-up tasks. `- [x] ... - closed: <why>` is closed. A line ending in `-> T-NNN`
+    is tracked while that task is open and closed with it; a link to no task counts as none.
+    A Medium or higher finding with no task waits for the owner's decision, except in an older
+    review-follow-up task and in a task itself made from a follow-up."""
+    items = []
+    try:
+        names = sorted(os.listdir(tasks_dir))
+    except OSError:
+        return items
+    records = {}
+    for name in names:
+        if is_task_file(name):
+            text = read(os.path.join(tasks_dir, name)) or ""
+            records[name[:-3]] = (text, parse(text))
+    statuses = {tid: status(rec) for tid, (_t, rec) in records.items()}
+    for name in names:
+        path = os.path.join(tasks_dir, name)
+        if name.endswith(FOLLOW_UP_SUFFIX) and os.path.isdir(path):
+            tid = name[:-len(FOLLOW_UP_SUFFIX)]
+            own = records.get(tid, ("", {}))[1]
+            quiet = str(own.get("class") or "").strip() == FROM_FOLLOW_UP_CLASS
+            for f in sorted(os.listdir(path)):
+                if f.endswith(".md"):
+                    items += _fu_items(read(os.path.join(path, f)) or "", tid,
+                                       "docs/tasks/%s/%s" % (name, f), statuses, quiet)
+        elif is_task_file(name):
+            tid = name[:-3]
+            text, rec = records[tid]
+            cls = str(rec.get("class") or "").strip()
+            if cls == FOLLOW_UP_CLASS:
+                if status(rec) not in ("DONE", "DEFERRED"):
+                    items += _fu_items(text, tid, "docs/tasks/" + name, statuses, True)
+            else:
+                sec = _FU_SECTION.search(text)
+                if sec:
+                    items += _fu_items(sec.group(1), tid, "docs/tasks/" + name, statuses,
+                                       cls == FROM_FOLLOW_UP_CLASS)
+    return items
+
+
 def read(path):
     if path == "-":
         return sys.stdin.read()

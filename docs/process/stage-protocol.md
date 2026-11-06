@@ -6,7 +6,7 @@ What every stage session (`/teamwright:analyze`, `red-tests`, `implement`, `revi
 
 `tools.context` (and `tools.docs`) in `.teamwright/config.yml`: an MCP provider's tools (`mcp__<provider>__*`) are in this session and answer one cheap call (Serena: `get_symbols_overview` on a file of the area). Stale index → its index command first (`serena project index`).
 
-Not connected or not answering → **do not spawn a role yet**. Interactive: ask the owner once — restart Claude Code and approve the server, or `continue` with the built-in search. Headless: end with `Outcome: escalate`, saying so. `tools.context: builtin` → nothing to check.
+Not connected or not answering → **do not spawn a role yet**. Interactive: ask the owner once — restart Claude Code and approve the server, or `continue` with the built-in search. Headless: review and verify go on with the built-in search, the spawn prompt says so, the record carries `context_tool: builtin — <why>`; other stages end with `Outcome: escalate`. `tools.context: builtin` → nothing to check.
 
 ## 1. Ask
 

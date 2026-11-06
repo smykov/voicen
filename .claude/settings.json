@@ -24,7 +24,19 @@
       "Bash(git -C * push*)",
       "Bash(git -c * push*)",
       "Bash(rm -rf *)",
-      "Bash(rm -fr *)"
+      "Bash(rm -fr *)",
+      "Bash(TEAMWRIGHT_ALLOW_PUSH=*)",
+      "Bash(export TEAMWRIGHT_ALLOW_PUSH=*)",
+      "Bash(env TEAMWRIGHT_ALLOW_PUSH=*)",
+      "Bash(rm TEAMWRIGHT_PAUSE*)",
+      "Bash(rm -f TEAMWRIGHT_PAUSE*)",
+      "Bash(mv TEAMWRIGHT_PAUSE *)",
+      "Bash(git config core.hooksPath *)",
+      "Bash(git config --local core.hooksPath *)",
+      "Bash(git config --global core.hooksPath *)",
+      "Bash(git config --unset core.hooksPath*)",
+      "Bash(git config --unset-all core.hooksPath*)",
+      "Bash(git -c core.hooksPath=*)"
     ]
   },
   "hooks": {
