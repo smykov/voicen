@@ -1,0 +1,10 @@
+guarantee: Invariant (3): export never opens, truncates or removes a file that was already there (tmp reserved with create_new)
+file: crates/voicen-core/src/call/storage.rs
+added_by: developer
+test: cargo test -j2 -p voicen-core --lib call::storage::tests::export_never_touches_an_existing_tmp_name
+--- old
+            .create_new(true)
+--- new
+            .create(true)
+            .truncate(true)
+--- end

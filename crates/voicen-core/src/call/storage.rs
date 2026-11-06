@@ -17,7 +17,7 @@
 use std::cmp::Ordering;
 use std::fmt::Write as _;
 use std::fs::{self, File};
-use std::io::{self, Write as _};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -29,7 +29,7 @@ use super::events::{
     CallId, CallState, DeviceCause, EndpointId, FailReason, PassMode, StopReason, StorageKind,
     Track,
 };
-use super::transcript::{EngineRef, Speaker};
+use super::transcript::{export_json, export_markdown, EngineRef, Speaker, TranscriptV1};
 use super::StorageOp;
 use crate::clock::MonotonicClock;
 use crate::diag::format::LocalTime;
@@ -153,16 +153,32 @@ pub fn write_meta(dir: &Path, meta: &CallMeta) -> io::Result<()> {
 /// Writes `bytes` as `<dir>/<name>` whole: `<name>.tmp` created, written and synced, then
 /// renamed over `<name>`. On failure the previous `<name>` is untouched and a tmp file this
 /// call created is removed (best effort); a tmp path it could not create is left as found.
+///
+/// The call folder is ours, so the tmp is opened with `File::create`: a `<name>.tmp` left by
+/// a crash is replaced, not an error. The rest is the one tail [`fill_and_rename`].
 pub(crate) fn write_atomic(dir: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
     let target = dir.join(name);
     let tmp = dir.join(format!("{name}.tmp"));
-    let mut file = File::create(&tmp)?;
-    let synced = file.write_all(bytes).and_then(|()| file.sync_all());
+    let file = File::create(&tmp)?;
+    fill_and_rename(file, &tmp, &target, bytes)
+}
+
+/// The one tmp+sync+rename tail of [`write_atomic`] and [`export_to`]: writes `bytes` to
+/// `file` (the open tmp at `tmp`, created by the caller), syncs its data, closes it and
+/// renames `tmp` over `target`. On any failure `tmp` is removed (best effort: the caller
+/// created it) and the first error is returned; `target` is untouched.
+fn fill_and_rename<W: SyncWrite>(
+    mut file: W,
+    tmp: &Path,
+    target: &Path,
+    bytes: &[u8],
+) -> io::Result<()> {
+    let synced = file.write_all(bytes).and_then(|()| file.sync_data());
     drop(file);
-    let written = synced.and_then(|()| fs::rename(&tmp, &target));
+    let written = synced.and_then(|()| fs::rename(tmp, target));
     if written.is_err() {
         // Best effort: the tmp file is ours; the error returned is the write's own.
-        let _ = fs::remove_file(&tmp);
+        let _ = fs::remove_file(tmp);
     }
     written
 }
@@ -354,13 +370,20 @@ impl CallStore {
     }
 }
 
-// ---- T-141 STUBS: signatures only, no behaviour (red-tests stage). The developer replaces
-// every body below and keeps the signatures; see docs/tasks/T-141.md.
+// ---- The Calls IPC wire, its path guard and export (T-141, contracts/ipc.md) -------------
 
-/// The opaque `root` string of the wire for a root path: its UTF-8 text.
-#[allow(unused_variables)]
+/// The file name of a call's transcript.
+const TRANSCRIPT_FILE: &str = "transcript.json";
+/// The suffix of an export's tmp file next to its target; `-1` … `-9` on a clash.
+const EXPORT_TMP_SUFFIX: &str = ".voicen-tmp";
+/// The highest clash suffix of an export's tmp file.
+const MAX_EXPORT_TMP_SUFFIX: u32 = 9;
+
+/// The opaque `root` string of the wire for a root path: its UTF-8 text. A path that is not
+/// valid Unicode gets a lossy text, which [`resolve_call`] never accepts (it lists, but
+/// cannot be opened).
 pub fn wire_root(root: &Path) -> String {
-    unimplemented!("T-141 wire_root")
+    root.to_string_lossy().into_owned()
 }
 
 /// Wire `state` of a [`CallSummary`] (camelCase), one value per [`ListState`] variant.
@@ -460,9 +483,21 @@ pub struct CallError {
 
 impl CallError {
     /// `ioFailed` with `reason = reason_of(kind)`.
-    #[allow(unused_variables)]
     pub fn io_failed(kind: io::ErrorKind) -> CallError {
-        unimplemented!("T-141 CallError::io_failed")
+        CallError {
+            code: CallErrorCode::IoFailed,
+            file: None,
+            reason: Some(reason_of(kind)),
+        }
+    }
+
+    /// `notFound`.
+    pub fn not_found() -> CallError {
+        CallError {
+            code: CallErrorCode::NotFound,
+            file: None,
+            reason: None,
+        }
     }
 }
 
@@ -475,45 +510,156 @@ pub enum Format {
 
 /// The guard: `root` must be `wire_root` of the current or an earlier root of `calls`
 /// (`default_root` is the current one when none is chosen) and `id` a [`CallId`]. Pure: no
-/// filesystem call. Anything else is `notFound`.
-#[allow(unused_variables)]
+/// filesystem call. Anything else is `notFound`; no path is built from wire text.
 pub fn resolve_call(
     calls: &CallSettings,
     default_root: &Path,
     root: &str,
     id: &str,
 ) -> Result<PathBuf, CallError> {
-    unimplemented!("T-141 resolve_call")
+    guard(calls, default_root, root, id).map(|(root, id)| root.join(id.as_str()))
+}
+
+/// The guard itself: the matching settings root (never the wire text) and the parsed id.
+/// A root that is not valid Unicode has no `to_str` and matches nothing.
+fn guard(
+    calls: &CallSettings,
+    default_root: &Path,
+    root: &str,
+    id: &str,
+) -> Result<(PathBuf, CallId), CallError> {
+    let current = effective_root(calls, default_root);
+    let known = std::iter::once(&current)
+        .chain(calls.earlier_roots.iter())
+        .find(|p| p.to_str() == Some(root))
+        .ok_or_else(CallError::not_found)?;
+    let id = CallId::parse(id).ok_or_else(CallError::not_found)?;
+    Ok((known.clone(), id))
+}
+
+/// The one mapping of a listed state to the wire `state` and `failReason`.
+fn wire_state(state: ListState) -> (WireState, Option<WireFailReason>) {
+    match state {
+        ListState::Recording => (WireState::Recording, None),
+        ListState::Queued => (WireState::Queued, None),
+        ListState::Transcribing => (WireState::Transcribing, None),
+        ListState::Ready => (WireState::Ready, None),
+        ListState::Failed(reason) => (WireState::Failed, Some(wire_fail_reason(reason))),
+        ListState::Recovered => (WireState::Recovered, None),
+        ListState::Damaged => (WireState::Damaged, None),
+    }
+}
+
+fn wire_fail_reason(reason: FailReason) -> WireFailReason {
+    match reason {
+        FailReason::Key => WireFailReason::Key,
+        FailReason::Network => WireFailReason::Network,
+        FailReason::Timeout => WireFailReason::Timeout,
+        FailReason::Provider => WireFailReason::Provider,
+        FailReason::Storage => WireFailReason::Storage,
+        FailReason::EngineNotSetUp => WireFailReason::EngineNotSetUp,
+    }
 }
 
 /// The wire summary of a listed entry; a damaged one gets its default title and a
 /// `startedAt` from its stamp, in `lang`, and `durationMs: null`.
-#[allow(unused_variables)]
 pub fn summary_of(entry: &CallEntry, lang: UiLanguage) -> CallSummary {
-    unimplemented!("T-141 summary_of")
+    let (state, fail_reason) = wire_state(entry.state);
+    let (title, started_at, duration_ms) = match &entry.meta {
+        Some(meta) => (
+            meta.title.clone(),
+            meta.started_at.clone(),
+            meta.duration_ms,
+        ),
+        None => {
+            // The grammar fixes `YYYY-MM-DD_HHMMSS` as the first 17 bytes of every id.
+            let stamp = entry.id.as_str();
+            let part = |from: usize, to: usize| stamp.get(from..to).unwrap_or_default();
+            let title = default_title(lang, part(8, 10), part(5, 7), part(11, 13), part(13, 15));
+            let started_at = format!(
+                "{}T{}:{}:{}",
+                part(0, 10),
+                part(11, 13),
+                part(13, 15),
+                part(15, 17)
+            );
+            (title, started_at, None)
+        }
+    };
+    CallSummary {
+        id: entry.id.as_str().to_string(),
+        root: wire_root(&entry.root),
+        title,
+        started_at,
+        duration_ms,
+        state,
+        fail_reason,
+    }
 }
 
 /// The wire list: one summary per entry (same order), one `unavailableRoots` text per root.
-#[allow(unused_variables)]
 pub fn list_wire(list: &CallList, lang: UiLanguage) -> CallListWire {
-    unimplemented!("T-141 list_wire")
+    CallListWire {
+        calls: list.entries.iter().map(|e| summary_of(e, lang)).collect(),
+        unavailable_roots: list.unavailable.iter().map(|p| wire_root(p)).collect(),
+    }
 }
 
 /// The wire detail of an entry and its transcript (`None` -> no lines); `speakers` come
 /// from the entry's meta.
-#[allow(unused_variables)]
 pub fn detail_of(
     entry: &CallEntry,
-    transcript: Option<&super::transcript::TranscriptV1>,
+    transcript: Option<&TranscriptV1>,
     lang: UiLanguage,
 ) -> CallDetail {
-    unimplemented!("T-141 detail_of")
+    let speakers = entry
+        .meta
+        .iter()
+        .flat_map(|meta| meta.speakers.iter())
+        .map(|s| WireSpeaker {
+            id: s.id.clone(),
+            name: s.name.clone(),
+        })
+        .collect();
+    let lines = transcript
+        .iter()
+        .flat_map(|t| t.segments.iter())
+        .map(|s| Line {
+            start_ms: s.start_ms,
+            end_ms: s.end_ms,
+            track: s.track.clone(),
+            speaker: s.speaker.clone(),
+            lang: s.lang.clone(),
+            text: s.text.clone(),
+        })
+        .collect();
+    CallDetail {
+        summary: summary_of(entry, lang),
+        speakers,
+        lines,
+    }
+}
+
+/// `ioFailed` for a call folder or transcript that is there but cannot be used (reason `other`).
+fn unusable() -> CallError {
+    CallError::io_failed(io::ErrorKind::InvalidData)
+}
+
+/// The call's `transcript.json`, parsed and validated; `None` when there is none.
+fn read_transcript(dir: &Path) -> Result<Option<TranscriptV1>, CallError> {
+    let text = match fs::read_to_string(dir.join(TRANSCRIPT_FILE)) {
+        Ok(text) => text,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(CallError::io_failed(e.kind())),
+    };
+    let transcript = TranscriptV1::from_json(&text).map_err(|_| unusable())?;
+    transcript.validate().map_err(|_| unusable())?;
+    Ok(Some(transcript))
 }
 
 impl CallStore {
     /// Guard, then the call's meta and transcript; missing folder `notFound`, damaged or
     /// broken transcript `ioFailed`, no transcript.json empty `lines`.
-    #[allow(unused_variables)]
     pub fn get(
         &self,
         calls: &CallSettings,
@@ -521,12 +667,13 @@ impl CallStore {
         id: &str,
         lang: UiLanguage,
     ) -> Result<CallDetail, CallError> {
-        unimplemented!("T-141 CallStore::get")
+        let (entry, dir) = self.open_call(calls, root, id)?;
+        let transcript = read_transcript(&dir)?;
+        Ok(detail_of(&entry, transcript.as_ref(), lang))
     }
 
     /// The bytes copy and export share: Markdown or JSON of the call's valid transcript
-    /// with the title and names of meta.json.
-    #[allow(unused_variables)]
+    /// with the title and names of meta.json. No transcript is `ioFailed{missing}`.
     pub fn export_bytes(
         &self,
         calls: &CallSettings,
@@ -534,27 +681,71 @@ impl CallStore {
         id: &str,
         format: Format,
     ) -> Result<Vec<u8>, CallError> {
-        unimplemented!("T-141 CallStore::export_bytes")
+        let (entry, dir) = self.open_call(calls, root, id)?;
+        let meta = entry.meta.as_ref().ok_or_else(unusable)?;
+        let transcript =
+            read_transcript(&dir)?.ok_or_else(|| CallError::io_failed(io::ErrorKind::NotFound))?;
+        let text = match format {
+            Format::Md => export_markdown(&transcript, &meta.title, &meta.speakers),
+            Format::Json => export_json(&transcript, &meta.title, &meta.speakers),
+        };
+        Ok(text.into_bytes())
+    }
+
+    /// The guard, then the listed entry of the call folder ([`load_entry`], as the list
+    /// reads it): a folder that is not there is `notFound`, a damaged one `ioFailed`.
+    fn open_call(
+        &self,
+        calls: &CallSettings,
+        root: &str,
+        id: &str,
+    ) -> Result<(CallEntry, PathBuf), CallError> {
+        let (root, id) = guard(calls, &self.roots.default_root(), root, id)?;
+        let dir = root.join(id.as_str());
+        if !dir.is_dir() {
+            return Err(CallError::not_found());
+        }
+        let entry = load_entry(&root, id);
+        if entry.meta.is_none() {
+            return Err(unusable());
+        }
+        Ok((entry, dir))
     }
 }
 
 /// Writes `bytes` to `target` through a fresh tmp file reserved next to it with `create_new`
-/// and the one tmp+sync+rename tail; leaves nothing of this call on failure.
-#[allow(unused_variables)]
+/// and the one tmp+sync+rename tail; leaves nothing of this call on failure. A file that is
+/// already there under a tmp name is never opened, truncated or removed. A target without a
+/// parent or a file name is `ioFailed{other}`; every io error is `ioFailed{reason_of(kind)}`.
 pub fn export_to(target: &Path, bytes: &[u8]) -> Result<(), CallError> {
-    unimplemented!("T-141 export_to")
+    let (Some(dir), Some(name)) = (target.parent(), target.file_name()) else {
+        return Err(CallError::io_failed(io::ErrorKind::InvalidInput));
+    };
+    let (file, tmp) = reserve_export_tmp(dir, name).map_err(|e| CallError::io_failed(e.kind()))?;
+    fill_and_rename(file, &tmp, target, bytes).map_err(|e| CallError::io_failed(e.kind()))
 }
 
-/// The one tail: write `bytes` to `file`, sync, rename `tmp` over `target`; on any failure
-/// `tmp` is removed (best effort) and the first error is returned.
-#[allow(unused_variables)]
-pub fn fill_and_rename<W: SyncWrite>(
-    file: W,
-    tmp: &Path,
-    target: &Path,
-    bytes: &[u8],
-) -> io::Result<()> {
-    unimplemented!("T-141 fill_and_rename")
+/// Creates `<dir>/<name>.voicen-tmp`, else `-1` … `-9`, with `create_new`: never a file that
+/// is already there. All taken is `AlreadyExists`.
+fn reserve_export_tmp(dir: &Path, name: &std::ffi::OsStr) -> io::Result<(File, PathBuf)> {
+    for n in 0..=MAX_EXPORT_TMP_SUFFIX {
+        let mut tmp_name = name.to_os_string();
+        tmp_name.push(EXPORT_TMP_SUFFIX);
+        if n > 0 {
+            tmp_name.push(format!("-{n}"));
+        }
+        let tmp = dir.join(tmp_name);
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+        {
+            Ok(file) => return Ok((file, tmp)),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(io::Error::from(io::ErrorKind::AlreadyExists))
 }
 
 /// `YYYY-MM-DD_HHMMSS` of the local start.
@@ -607,22 +798,27 @@ fn two(n: u64) -> String {
     format!("{n:02}")
 }
 
-fn initial_meta(id: CallId, local: &LocalTime, new: &NewCall) -> CallMeta {
-    let (day, month, hour, minute) = (
-        two(local.day),
-        two(local.month),
-        two(local.hour),
-        two(local.minute),
-    );
-    let title = text(
-        new.lang,
+/// `calls.title_default` in `lang`: the title of a new call, and of a damaged one on the wire.
+fn default_title(lang: UiLanguage, day: &str, month: &str, hour: &str, minute: &str) -> String {
+    text(
+        lang,
         CALLS_TITLE_DEFAULT,
         &[
-            ("day", &day),
-            ("month", &month),
-            ("hour", &hour),
-            ("minute", &minute),
+            ("day", day),
+            ("month", month),
+            ("hour", hour),
+            ("minute", minute),
         ],
+    )
+}
+
+fn initial_meta(id: CallId, local: &LocalTime, new: &NewCall) -> CallMeta {
+    let title = default_title(
+        new.lang,
+        &two(local.day),
+        &two(local.month),
+        &two(local.hour),
+        &two(local.minute),
     );
     let track = |track, file: &str, endpoint: &EndpointId, speaker: &str| TrackMeta {
         track,

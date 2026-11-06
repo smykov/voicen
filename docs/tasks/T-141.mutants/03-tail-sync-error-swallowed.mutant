@@ -1,0 +1,11 @@
+guarantee: AC5: a failed tmp sync leaves no file and returns ioFailed{reason} (fill_and_rename propagates the sync error)
+file: crates/voicen-core/src/call/storage.rs
+added_by: developer
+test: cargo test -j2 -p voicen-core --lib call::storage::tests::export_
+--- old
+    let synced = file.write_all(bytes).and_then(|()| file.sync_data());
+--- new
+    let synced = file.write_all(bytes).map(|()| {
+        let _ = file.sync_data();
+    });
+--- end
