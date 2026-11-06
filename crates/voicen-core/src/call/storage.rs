@@ -721,8 +721,19 @@ pub fn export_to(target: &Path, bytes: &[u8]) -> Result<(), CallError> {
     let (Some(dir), Some(name)) = (target.parent(), target.file_name()) else {
         return Err(CallError::io_failed(io::ErrorKind::InvalidInput));
     };
-    let (file, tmp) = reserve_export_tmp(dir, name).map_err(|e| CallError::io_failed(e.kind()))?;
+    let (file, tmp) = reserve_export_tmp(dir, name).map_err(|e| tmp_open_failed(dir, &e))?;
     fill_and_rename(file, &tmp, target, bytes).map_err(|e| CallError::io_failed(e.kind()))
+}
+
+/// The `ioFailed` of a tmp that could not be opened in `dir`. A `dir` that is a regular file
+/// is `not_a_folder` on every OS: Unix reports a path below a file as "not a directory",
+/// Windows as "path not found" (D4). Runs only after the open failed; it reads metadata and
+/// never creates or opens anything.
+fn tmp_open_failed(dir: &Path, e: &io::Error) -> CallError {
+    if e.kind() == io::ErrorKind::NotFound && fs::metadata(dir).is_ok_and(|m| !m.is_dir()) {
+        return CallError::io_failed(io::ErrorKind::NotADirectory);
+    }
+    CallError::io_failed(e.kind())
 }
 
 /// Creates `<dir>/<name>.voicen-tmp`, else `-1` … `-9`, with `create_new`: never a file that
