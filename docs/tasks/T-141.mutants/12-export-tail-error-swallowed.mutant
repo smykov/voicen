@@ -1,0 +1,12 @@
+guarantee: AC5: a failed export returns ioFailed{reason} (export_to propagates the tail error)
+file: crates/voicen-core/src/call/storage.rs
+added_by: test-writer
+test: cargo test -j2 -p voicen-core --lib call::storage::tests::export_
+--- old
+    fill_and_rename(file, &tmp, target, bytes).map_err(|e| CallError::io_failed(e.kind()))
+}
+--- new
+    let _ = fill_and_rename(file, &tmp, target, bytes);
+    Ok(())
+}
+--- end

@@ -1,0 +1,11 @@
+guarantee: AC3: notFound with no filesystem access (the guard never asks the disk whether a wire root holds the call)
+file: crates/voicen-core/src/call/storage.rs
+added_by: test-writer
+test: cargo test -j2 -p voicen-core --lib call::storage::tests::
+--- old
+        .find(|p| p.to_str() == Some(root))
+        .ok_or_else(CallError::not_found)?;
+--- new
+        .find(|p| p.to_str() == Some(root) || Path::new(root).join(id).is_dir())
+        .ok_or_else(CallError::not_found)?;
+--- end

@@ -1,0 +1,11 @@
+guarantee: AC3: an id outside the call-id grammar gives notFound (the parse refusal is not swallowed)
+file: crates/voicen-core/src/call/storage.rs
+added_by: test-writer
+test: cargo test -j2 -p voicen-core --lib call::storage::tests::
+--- old
+    let id = CallId::parse(id).ok_or_else(CallError::not_found)?;
+--- new
+    let id = CallId::parse(id)
+        .or_else(|| CallId::parse("2026-01-01_000000"))
+        .ok_or_else(CallError::not_found)?;
+--- end

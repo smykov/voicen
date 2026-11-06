@@ -1,0 +1,9 @@
+guarantee: AC5: a target with no parent or file name returns ioFailed{other} and writes nothing
+file: crates/voicen-core/src/call/storage.rs
+added_by: test-writer
+test: cargo test -j2 -p voicen-core --lib call::storage::tests::export_
+--- old
+        return Err(CallError::io_failed(io::ErrorKind::InvalidInput));
+--- new
+        return Ok(());
+--- end
