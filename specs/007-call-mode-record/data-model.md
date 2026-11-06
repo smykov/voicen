@@ -14,6 +14,8 @@ Phase 1 of [plan.md](plan.md). This file adds field types, rules and state trans
 
 Every toggle source (tray, hotkey, `--call record`) calls `toggle_record(on, Source)` under the one session lock. The indicator and tray updates happen inside the lock (the dictation-session invariant, dictation-session.md). A repeated "on" while `record` is already on applies to the current call: no second capture, no second folder.
 
+A refused start (`Refused { part, reason }`) leaves no track open and no folder, and logs one `call_refused`. Every `part=root` refusal, `missing` included, also asks the shell to open the Calls tab, once and after the lock (decision #243 D1); a track refusal never does. A create failure after the probe is `call_storage_failed kind=<kind>` then `call_refused part=root reason=other` (D2). Built in `docs/decisions/call-session.md`.
+
 ```text
             toggle_record(on)                      stop(reason) / failure
   Idle ───────────────────────▶ Starting ──ok──▶ Recording ─────────────────▶ Stopping ──▶ Idle
@@ -40,6 +42,7 @@ Every toggle source (tray, hotkey, `--call record`) calls `toggle_record(on, Sou
 | `mode` | `{record: true, subtitles: bool}` | §7 "mode flags". |
 | `tracks` | `[TrackMeta; 2]` | `mic`, `system`. |
 | `device_changes` | `Vec<DeviceChange>` | Appended while recording (FR-012). |
+| `drops` | `Vec<{at_ms, track, blocks, ms}>` | One entry per channel drop the writer thread receives (decision #244), same facts as the `call_track_dropped` log line; `[]` at create; required, closed shape. A stall gap without a device change is not an entry. |
 | `engines` | `{transcription: Option<EngineRef>, diarization: null}` | Set when a pass starts. `EngineRef` is a typed core value serialized as one string `"<kind>:<model>"`; in 1a always `"api:<model>"` (e.g. `"api:whisper-1"`). The same representation is used in `meta.json` and in `transcript.json` `engines.transcription` (requirements §7 lists `engines.transcription` as one value, not an object). The base URL host is not stored (the provider notice has its own setting). |
 | `app_version` | `String` | `BuildInfo::version`. |
 | `speakers` | `Vec<Speaker>` | In 1a always `me` and `s1`. |
