@@ -1,0 +1,8 @@
+guarantee: AC no API key: failed engine_not_set_up recorded in meta.json (state, failure, per-track results) before any request
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: task-validator round 1
+--- old
+            let reason = write_failed(&dir, meta, reason, None, PassMode::Timed, deps.events);
+--- new
+            let _ = (&dir, meta);
+--- end

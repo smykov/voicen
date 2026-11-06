@@ -1,0 +1,8 @@
+guarantee: AC 400 (D1): a later chunk in flight as timed has its answer dropped and is re-sent plain
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: task-validator round 1
+--- old
+        if !discarded && lane.live() {
+--- new
+        if (!discarded || true) && lane.live() {
+--- end

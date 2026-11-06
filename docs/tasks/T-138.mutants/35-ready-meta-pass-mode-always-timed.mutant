@@ -1,0 +1,10 @@
+guarantee: AC 400: pass_mode timeless is recorded in meta.json
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: task-validator round 1
+--- old
+    meta.failure = None;
+    meta.pass_mode = Some(mode);
+--- new
+    meta.failure = None;
+    meta.pass_mode = Some(PassMode::Timed);
+--- end

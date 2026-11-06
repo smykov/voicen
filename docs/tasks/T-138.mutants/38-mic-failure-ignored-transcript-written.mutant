@@ -1,0 +1,8 @@
+guarantee: AC track failure: no transcript.* unless both tracks are done; per-track results kept
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: task-validator round 1
+--- old
+    let outcome = match (run.mic.failed, run.system.failed) {
+--- new
+    let outcome = match (None::<(FailReason, u64)>, run.system.failed) {
+--- end

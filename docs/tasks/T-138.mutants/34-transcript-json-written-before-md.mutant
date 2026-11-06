@@ -1,0 +1,10 @@
+guarantee: AC/invariant: transcript.md, then transcript.json (the commit point); a failed md write leaves no transcript.json
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: task-validator round 1
+--- old
+        (TRANSCRIPT_MD_FILE, markdown.into_bytes()),
+        (TRANSCRIPT_FILE, transcript.to_json().into_bytes()),
+--- new
+        (TRANSCRIPT_FILE, transcript.to_json().into_bytes()),
+        (TRANSCRIPT_MD_FILE, markdown.into_bytes()),
+--- end

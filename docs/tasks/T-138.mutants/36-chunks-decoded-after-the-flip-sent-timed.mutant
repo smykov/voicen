@@ -1,0 +1,10 @@
+guarantee: AC 400 / invariant: every chunk after chunk k is re-cut and sent Plain, never back to timed
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: task-validator round 1
+--- old
+                if timeless {
+                    self.requeue(&chunk);
+--- new
+                if timeless && false {
+                    self.requeue(&chunk);
+--- end
