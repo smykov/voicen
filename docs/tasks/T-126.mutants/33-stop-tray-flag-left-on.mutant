@@ -1,0 +1,8 @@
+guarantee: I4: tray call_recording follows the call
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+        self.deps.indicator.set_call_recording(false);
+--- new
+        let _ = ();
+--- end

@@ -1,0 +1,8 @@
+guarantee: I7/#244: a Report::Gap gives neither line nor entry
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+                Report::Gap { .. } => {}
+--- new
+                Report::Gap { .. } => self.dropped(track, 0, 0, at_ms),
+--- end

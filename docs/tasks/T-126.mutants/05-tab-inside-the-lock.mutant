@@ -1,0 +1,31 @@
+guarantee: I4: shell requests go out after the lock
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+                    self.deps.log.write(LogEvent::CallRefused {
+                        part: refusal.part,
+                        reason: refusal.reason,
+                    });
+                    (
+                        Toggled::Refused {
+                            part: refusal.part,
+                            reason: refusal.reason,
+                        },
+                        refusal.part == RefusedPart::Root,
+                    )
+--- new
+                    self.deps.log.write(LogEvent::CallRefused {
+                        part: refusal.part,
+                        reason: refusal.reason,
+                    });
+                    if refusal.part == RefusedPart::Root {
+                        self.deps.shell.open_calls_tab();
+                    }
+                    (
+                        Toggled::Refused {
+                            part: refusal.part,
+                            reason: refusal.reason,
+                        },
+                        false,
+                    )
+--- end

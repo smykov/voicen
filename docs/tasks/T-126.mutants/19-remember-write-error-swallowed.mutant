@@ -1,0 +1,10 @@
+guarantee: AC-8: a failed write is reported by remember_warned_host
+file: crates/voicen-core/src/settings/service.rs
+added_by: test-writer
+--- old
+            .map_err(|_| WarnedHostFailed)?;
+        self.swap_and_publish(next);
+--- new
+            .unwrap_or(());
+        self.swap_and_publish(next);
+--- end

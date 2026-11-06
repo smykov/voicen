@@ -1,0 +1,13 @@
+guarantee: I7/#244: one call_track_dropped line per Report::Dropped
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+        self.log.write(LogEvent::CallTrackDropped {
+            track,
+            blocks,
+            ms,
+            at_ms,
+        });
+--- new
+        let _ = (blocks, ms);
+--- end

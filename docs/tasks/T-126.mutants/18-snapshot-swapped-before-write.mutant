@@ -1,0 +1,14 @@
+guarantee: AC-8: remember_warned_host keeps the snapshot when the write fails
+file: crates/voicen-core/src/settings/service.rs
+added_by: test-writer
+--- old
+        encode(&next)
+            .and_then(|bytes| self.deps.file.write_atomic(&bytes))
+            .map_err(|_| WarnedHostFailed)?;
+        self.swap_and_publish(next);
+--- new
+        self.swap_and_publish(next.clone());
+        encode(&next)
+            .and_then(|bytes| self.deps.file.write_atomic(&bytes))
+            .map_err(|_| WarnedHostFailed)?;
+--- end

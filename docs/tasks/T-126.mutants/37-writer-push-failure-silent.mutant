@@ -1,0 +1,13 @@
+guarantee: -
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+            lane.enc = None;
+            self.log.write(LogEvent::CallStorageFailed {
+                kind: storage_kind(e.op),
+                os: None,
+            });
+--- new
+            lane.enc = None;
+            let _ = e;
+--- end

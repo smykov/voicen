@@ -1,0 +1,12 @@
+guarantee: AC-2: a repeated on gives one session
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+            if inner.active.is_some() {
+                return Toggled::AlreadyOn;
+            }
+--- new
+            if false {
+                return Toggled::AlreadyOn;
+            }
+--- end

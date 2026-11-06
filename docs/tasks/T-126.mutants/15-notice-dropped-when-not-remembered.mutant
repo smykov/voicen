@@ -1,0 +1,11 @@
+guarantee: AC-8/FR-031: a host that could not be remembered is announced
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+            let _ = self.deps.settings.remember_warned_host(&host);
+            warnings.push(CallWarning::ProviderNotice { host });
+--- new
+            if self.deps.settings.remember_warned_host(&host).is_ok() {
+                warnings.push(CallWarning::ProviderNotice { host });
+            }
+--- end

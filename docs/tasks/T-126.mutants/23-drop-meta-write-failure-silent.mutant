@@ -1,0 +1,12 @@
+guarantee: I7/#244: a failed drops write logs call_storage_failed kind=meta
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+            // The call goes on; the stop writes the full list again.
+            self.log.write(LogEvent::CallStorageFailed {
+                kind: StorageKind::Meta,
+                os: e.raw_os_error(),
+            });
+--- new
+            let _ = e;
+--- end

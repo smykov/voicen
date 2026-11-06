@@ -1,0 +1,11 @@
+guarantee: I4: indicator ticks reach the port inside the lock
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+                Ok(_inner) => {
+                    self.shared.indicator.set_tick(&tick);
+--- new
+                Ok(inner) => {
+                    drop(inner);
+                    self.shared.indicator.set_tick(&tick);
+--- end

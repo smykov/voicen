@@ -1,0 +1,8 @@
+guarantee: AC-3/#243 D1: root refusal missing opens the Calls tab
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+                        refusal.part == RefusedPart::Root,
+--- new
+                        refusal.part == RefusedPart::Root && refusal.reason != RefusedReason::Missing,
+--- end

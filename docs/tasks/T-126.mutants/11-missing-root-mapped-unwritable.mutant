@@ -1,0 +1,8 @@
+guarantee: AC-3: root missing -> reason=missing
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+        UnwritableReason::Missing => RefusedReason::Missing,
+--- new
+        UnwritableReason::Missing => RefusedReason::Unwritable,
+--- end

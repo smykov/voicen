@@ -1,0 +1,13 @@
+guarantee: AC-6: a failed final meta write logs call_storage_failed kind=meta
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+        if let Err(e) = write_meta(&dir, &meta) {
+            self.deps.log.write(LogEvent::CallStorageFailed {
+                kind: StorageKind::Meta,
+                os: e.raw_os_error(),
+            });
+        }
+--- new
+        let _ = write_meta(&dir, &meta);
+--- end

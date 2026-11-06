@@ -1,0 +1,8 @@
+guarantee: AC-6: stop emits call_saved_transcribing
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+            self.deps.shell.notice(CallNotice::CallSavedTranscribing);
+--- new
+            let _ = ();
+--- end

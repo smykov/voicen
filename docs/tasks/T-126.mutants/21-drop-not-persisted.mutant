@@ -1,0 +1,13 @@
+guarantee: I7/#244: one drops[] entry per Report::Dropped
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+        self.meta.drops.push(TrackDrop {
+            at_ms,
+            track,
+            blocks,
+            ms,
+        });
+--- new
+        let _ = TrackDrop { at_ms, track, blocks, ms };
+--- end

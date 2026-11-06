@@ -1,0 +1,9 @@
+guarantee: AC-4: the fallback gives mic_changed
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+                        warnings.push(CallWarning::MicChanged);
+
+--- new
+
+--- end

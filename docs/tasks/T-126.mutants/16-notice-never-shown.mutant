@@ -1,0 +1,8 @@
+guarantee: AC-8: provider notice on a new host
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+            warnings.push(CallWarning::ProviderNotice { host });
+--- new
+            let _ = host;
+--- end

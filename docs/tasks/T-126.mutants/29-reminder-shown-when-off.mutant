@@ -1,0 +1,8 @@
+guarantee: AC-7: no reminder when calls.reminder is off
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+        let reminder_until = settings.calls.reminder.then(|| mono_start + REMINDER);
+--- new
+        let reminder_until = Some(mono_start + REMINDER);
+--- end

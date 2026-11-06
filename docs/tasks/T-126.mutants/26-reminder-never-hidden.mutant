@@ -1,0 +1,12 @@
+guarantee: AC-7: the reminder shows for 10 s only
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+        if self.deps.mono.now() < until {
+            return;
+        }
+--- new
+        if true || self.deps.mono.now() < until {
+            return;
+        }
+--- end

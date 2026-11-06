@@ -1,0 +1,8 @@
+guarantee: AC-7: the reminder is hidden at 10 s
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+        if self.deps.mono.now() < until {
+--- new
+        if self.deps.mono.now() <= until {
+--- end

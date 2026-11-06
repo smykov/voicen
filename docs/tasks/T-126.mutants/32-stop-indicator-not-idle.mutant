@@ -1,0 +1,8 @@
+guarantee: AC-6: stop sets the indicator to not recording
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+        self.deps.indicator.set_state(&IndicatorState::idle());
+--- new
+        let _ = IndicatorState::idle();
+--- end

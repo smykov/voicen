@@ -1,0 +1,9 @@
+guarantee: AC-7: the hide is one indicator state
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+        let state = IndicatorState::recording(active.lang, false, active.warnings.clone());
+        self.deps.indicator.set_state(&state);
+--- new
+        let _state = IndicatorState::recording(active.lang, false, active.warnings.clone());
+--- end

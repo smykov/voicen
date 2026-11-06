@@ -1,0 +1,10 @@
+guarantee: #243 D2: storage failure then call_refused part=root reason=other
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+                            .write(LogEvent::CallStorageFailed { kind, os: None });
+                        RefusedReason::Other
+--- new
+                            .write(LogEvent::CallStorageFailed { kind, os: None });
+                        RefusedReason::Unwritable
+--- end

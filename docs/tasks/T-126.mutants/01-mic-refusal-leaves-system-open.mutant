@@ -1,0 +1,12 @@
+guarantee: AC-3: a track refusal leaves no track open
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+                stop_handle(system);
+                return Err(Refusal {
+                    part: RefusedPart::Mic,
+--- new
+                std::mem::forget(system);
+                return Err(Refusal {
+                    part: RefusedPart::Mic,
+--- end

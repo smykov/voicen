@@ -1,0 +1,8 @@
+guarantee: AC-8: once per host
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+        (!known).then_some(host)
+--- new
+let _ = known; Some(host)
+--- end
