@@ -1495,6 +1495,72 @@ fn a_chunk_answered_with_times_before_chunk_k_said_no_times_is_sent_again_time_l
 }
 
 #[test]
+fn chunks_cut_after_the_flip_are_sent_time_less_even_when_the_server_would_answer_times() {
+    // A 26-minute mic track: 12 timed chunks of about 100 s. Chunk 1 answers "no times";
+    // chunks 0 and 2 (in flight) wait for that answer, so nothing after them is cut before
+    // the flip. Every later timed request would be answered fine (a flaky server): a chunk
+    // the planner cuts after the flip must still go out as plain pieces, never as timed.
+    let speech: Vec<(u64, u64)> = (0..12u64)
+        .map(|i| (i * 130_000 + 1_000, i * 130_000 + 100_000))
+        .collect();
+    let flipped = Arc::new(AtomicBool::new(false));
+    let flag = flipped.clone();
+    let engine = FakeEngine::new(true, move |r| {
+        if r.shape == ResponseShape::Segments && (100_000..200_000).contains(&r.start) {
+            flag.store(true, Ordering::SeqCst);
+            return Err(TimedFailure::Timeless);
+        }
+        if r.shape == ResponseShape::Segments && r.start < 300_000 {
+            wait_for(&flag);
+        }
+        answer_ok(r)
+    });
+    let out = run_with(
+        Src::marked(0, 1_560_000),
+        Src::marked(1, 0),
+        engine,
+        Opts::new(marked_primary(&speech)),
+    );
+    assert!(flipped.load(Ordering::SeqCst), "scenario reached chunk 1");
+    assert_eq!(
+        out.out,
+        PassOutcome {
+            outcome: FinalOutcome::Ready,
+            mode: PassMode::Timeless
+        }
+    );
+    assert_eq!(out.meta().pass_mode, Some(PassMode::Timeless));
+
+    let log = out.log();
+    assert!(
+        log.iter()
+            .filter(|r| r.shape == ResponseShape::Segments)
+            .all(|r| r.start < 300_000),
+        "a timed request for a chunk cut after the flip: {log:?}"
+    );
+    let plain: Vec<&Req> = log
+        .iter()
+        .filter(|r| r.shape == ResponseShape::Plain)
+        .collect();
+    assert!(plain.iter().all(|r| r.len <= TIMELESS_MAX_MS), "{plain:?}");
+    assert_covered_once(&plain, speech.get(1..).unwrap_or_default());
+
+    let t = some(out.transcript(), "transcript.json");
+    ok(t.validate());
+    let mut want = vec![line(1_800, 2_800, Track::Mic, "mic@800", None)];
+    want.extend(plain.iter().map(|r| {
+        line(
+            r.start,
+            r.start + r.len,
+            Track::Mic,
+            &format!("p{}", r.start),
+            Some("de"),
+        )
+    }));
+    assert_eq!(lines(&t), sorted(want));
+}
+
+#[test]
 fn a_plain_request_that_is_refused_for_times_fails_the_track_with_provider() {
     // Every request says "no times", plain ones too: the server is at fault, the track fails.
     let engine = FakeEngine::new(true, |_| Err(TimedFailure::Timeless));
