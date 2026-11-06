@@ -17,6 +17,9 @@
 //! r3, entries `114..`), an empty reference mishandled or the key on a path that sends
 //! no request (validation r4, entries `201..`).
 
+#[path = "common/mock_http.rs"]
+mod mock_http;
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::OnceLock;
@@ -154,7 +157,7 @@ fn assert_no_secrets(output: &str, also: &[&str]) {
 }
 
 async fn server_with(response: ResponseTemplate) -> MockServer {
-    let server = MockServer::start().await;
+    let server = mock_http::start().await;
     Mock::given(any())
         .respond_with(response)
         .mount(&server)

@@ -18,7 +18,7 @@
 // - the Save button has test id `settings-save`.
 import { readFileSync } from "node:fs";
 import type { Page } from "@playwright/test";
-import { expect, test } from "./support/boot";
+import { bootPage, expect, test } from "./support/boot";
 import {
   calls,
   coreSpeechLanguages,
@@ -78,8 +78,7 @@ async function inputValues(page: Page): Promise<string[]> {
 
 async function openSettings(page: Page, view?: SettingsView, path = "/settings"): Promise<void> {
   await installTauriMock(page, view ? { view } : {});
-  await page.goto(path);
-  await expect(page.getByRole("tab", { selected: true })).toBeVisible();
+  await bootPage(page, path, page.getByRole("tab", { selected: true }));
 }
 
 const FAKE_KEY = "sk-test-FAKE-0000-not-a-real-key";
@@ -129,7 +128,7 @@ test("first run opens on the Engine tab with engine none and the v4 defaults sho
 test("the speech-language picker lists exactly the codes settings_speech_languages returns", async ({ page }) => {
   // U1: the UI keeps no language list of its own (decision #30).
   await installTauriMock(page, { speechLanguages: ["en", "ru", "de"] });
-  await page.goto("/settings");
+  await bootPage(page, "/settings", page.getByRole("tab", { selected: true }));
   const options = field(page, "engine.speech_language").locator("option");
   await expect(options).toHaveCount(4);
   const values = await options.evaluateAll((els) => els.map((e) => (e as HTMLOptionElement).value));

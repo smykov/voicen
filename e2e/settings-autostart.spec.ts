@@ -14,7 +14,7 @@
 //   draft is kept in every case"; T-034 Notes 2026-10-07 on Q1).
 import { readFileSync } from "node:fs";
 import type { Page } from "@playwright/test";
-import { expect, test } from "./support/boot";
+import { bootPage, expect, test } from "./support/boot";
 import {
   calls,
   emitted,
@@ -69,8 +69,7 @@ function savedView(startWithWindows: boolean): SettingsView {
 /** Opens /settings over `view` and selects the General tab. */
 async function openGeneral(page: Page, view: SettingsView): Promise<void> {
   await installTauriMock(page, { view });
-  await page.goto("/settings");
-  await expect(page.getByRole("tab", { selected: true })).toBeVisible();
+  await bootPage(page, "/settings", page.getByRole("tab", { selected: true }));
   await tab(page, "general").click();
   await expect(tab(page, "general")).toHaveAttribute("aria-selected", "true");
 }

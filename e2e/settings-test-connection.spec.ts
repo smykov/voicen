@@ -25,7 +25,7 @@
 //   dropped on every close the page does not prevent and on discard.
 import { readFileSync } from "node:fs";
 import type { Locator, Page } from "@playwright/test";
-import { expect, test } from "./support/boot";
+import { bootPage, expect, test } from "./support/boot";
 import {
   calls,
   emit,
@@ -127,8 +127,7 @@ function viewWith(engine: SettingsView["settings"]["engine"], opts: { key?: bool
 
 async function open(page: Page, view: SettingsView): Promise<void> {
   await installTauriMock(page, { view });
-  await page.goto("/settings");
-  await expect(page.getByRole("tab", { selected: true })).toBeVisible();
+  await bootPage(page, "/settings", page.getByRole("tab", { selected: true }));
   await expect.poll(() => listeners(page, "settings://changed")).toBeGreaterThan(0);
   await expect.poll(() => listeners(page, "tauri://close-requested")).toBeGreaterThan(0);
   await expect(field(page, "engine.kind")).toHaveValue(view.settings.engine);

@@ -33,7 +33,7 @@
 // and which name is shown for a listed device whose saved name differs.
 import { readFileSync } from "node:fs";
 import type { Page } from "@playwright/test";
-import { expect, test } from "./support/boot";
+import { bootPage, expect, test } from "./support/boot";
 import {
   calls,
   fakeMicrophones,
@@ -125,7 +125,7 @@ function savedView(microphone: SettingsView["settings"]["microphone"], lang: Lan
 /** Opens the settings window on the Recording tab. */
 async function openRecording(page: Page, view: SettingsView, options: Omit<MockOptions, "view"> = {}): Promise<void> {
   await installTauriMock(page, { ...options, view });
-  await page.goto("/settings?tab=recording");
+  await bootPage(page, "/settings?tab=recording", page.getByTestId("tab-recording"));
   await expect(page.getByTestId("tab-recording")).toHaveAttribute("aria-selected", "true");
 }
 

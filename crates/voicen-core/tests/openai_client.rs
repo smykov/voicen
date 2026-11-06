@@ -7,6 +7,8 @@
 //! reserved TLD (through `common::os_answer`), `sk-test-SECRET`.
 
 mod common;
+#[path = "common/mock_http.rs"]
+mod mock_http;
 /// The checks of `common::os_answer::OsAnswer::refused()`, in each binary that takes it
 /// (T-047).
 #[path = "common/refused_addr_tests.rs"]
@@ -153,7 +155,7 @@ fn transcribe<E: Engine + ?Sized + 'static>(
 }
 
 async fn server_with(response: ResponseTemplate) -> MockServer {
-    let server = MockServer::start().await;
+    let server = mock_http::start().await;
     Mock::given(any())
         .respond_with(response)
         .mount(&server)
@@ -595,7 +597,7 @@ async fn same_origin_307_is_followed_with_body_and_key() {
     // text is the result. Bite: Policy::none() on the shared client, an origin
     // comparison that includes the path, a policy that stops every redirect.
     use wiremock::matchers::path;
-    let server = MockServer::start().await;
+    let server = mock_http::start().await;
     Mock::given(path("/v1/audio/transcriptions"))
         .respond_with(ResponseTemplate::new(307).insert_header("location", "/moved/here"))
         .mount(&server)
@@ -628,7 +630,7 @@ async fn followed_redirect_carries_no_referer() {
     // may hold a URL secret) as `Referer`. Bite: dropping `.referer(false)` from
     // `client()` (reqwest's default sends the previous URL as Referer).
     use wiremock::matchers::path;
-    let server = MockServer::start().await;
+    let server = mock_http::start().await;
     Mock::given(path("/v1/audio/transcriptions"))
         .respond_with(ResponseTemplate::new(307).insert_header("location", "/moved/here"))
         .mount(&server)
@@ -663,7 +665,7 @@ async fn cross_origin_307_on_the_second_hop_is_refused_and_nothing_reaches_the_t
     // and its text is the result).
     use wiremock::matchers::path;
     let target = server_with(ok_text(TRANSCRIPT)).await;
-    let origin = MockServer::start().await;
+    let origin = mock_http::start().await;
     Mock::given(path("/v1/audio/transcriptions"))
         .respond_with(ResponseTemplate::new(307).insert_header("location", "/moved/here"))
         .mount(&origin)
@@ -701,7 +703,7 @@ async fn same_origin_redirect_loop_stops_at_the_hop_limit() {
     // `Policy::default().redirect(attempt)` (the loop runs until the 5 s deadline:
     // Timeout, and far more requests).
     use wiremock::matchers::path;
-    let server = MockServer::start().await;
+    let server = mock_http::start().await;
     Mock::given(path("/v1/audio/transcriptions"))
         .respond_with(
             ResponseTemplate::new(307).insert_header("location", "/v1/audio/transcriptions"),

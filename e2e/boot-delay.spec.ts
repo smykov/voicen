@@ -12,28 +12,12 @@
 // its own (bounded by the test's timeout only). Every spec routes its navigation through it
 // (the structural test in e2e/boot-failure.spec.ts).
 //
-// Why this is red today for the right reason and not on an import error: until the helper
-// exists, the test falls back to the boot every spec does today (navigate, then wait on the
-// default 5 s expect). It then fails on the 5 s wait of `ready`, which is the defect. Once
-// the helper exists the fallback is never taken (the developer may delete it then).
-import type { Locator, Page } from "@playwright/test";
-import * as boot from "./support/boot";
+// Red before the helper existed: the spec then fell back to the boot every spec did
+// (navigate, then a wait on the default 5 s expect) and failed on that wait (T-195 red runs).
+import { bootPage, expect, test } from "./support/boot";
 import { installTauriMock } from "./support/tauriMock";
 
-const { expect, test } = boot;
-
 const BOOT_DELAY_MS = 6_000;
-
-type BootPage = (page: Page, url: string, ready: Locator) => Promise<void>;
-
-const bootPage: BootPage =
-  (boot as unknown as { bootPage?: BootPage }).bootPage ??
-  (async (page, url, ready) => {
-    // Today's boot: navigation, then a wait on the 5 s expect default.
-    const navigate = page.goto.bind(page);
-    await navigate(url);
-    await expect(ready).toBeVisible();
-  });
 
 test("a page whose entry chunk takes 6 s still boots through the boot helper (no boot wait on the 5 s expect default)", async ({
   page,

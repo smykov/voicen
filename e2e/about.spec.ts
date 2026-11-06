@@ -18,7 +18,7 @@
 // - the discard prompt wins: a close request with a dirty draft closes About first.
 import { readFileSync } from "node:fs";
 import type { Locator, Page } from "@playwright/test";
-import { expect, test } from "./support/boot";
+import { bootPage, expect, test } from "./support/boot";
 import {
   calls,
   emit,
@@ -93,8 +93,7 @@ async function openGeneral(
   view: SettingsView = firstRunView(),
 ): Promise<void> {
   await installTauriMock(page, { ...options, view });
-  await page.goto("/settings");
-  await expect(page.getByRole("tab", { selected: true })).toBeVisible();
+  await bootPage(page, "/settings", page.getByRole("tab", { selected: true }));
   await tab(page, "general").click();
   await expect(tab(page, "general")).toHaveAttribute("aria-selected", "true");
   await expect(field(page, "general.ui_language")).toBeVisible();
@@ -110,8 +109,7 @@ async function focusInside(dialog: Locator): Promise<boolean> {
 test("the General tab's About Voicen button opens a dialog with the version line and MIT License, calling get_build_info only on opening", async ({ page }) => {
   const errors = pageErrors(page);
   await installTauriMock(page, { buildInfo: OK });
-  await page.goto("/settings");
-  await expect(page.getByRole("tab", { selected: true })).toBeVisible();
+  await bootPage(page, "/settings", page.getByRole("tab", { selected: true }));
   // Not on the other tabs (Clarification Q1: the General tab).
   await expect(tab(page, "engine")).toHaveAttribute("aria-selected", "true");
   await expect(aboutButton(page)).toHaveCount(0);
@@ -349,8 +347,7 @@ test("failure branch in Russian: the alert reads the ru about.build_info_error",
 test("the discard prompt wins: About open with a dirty draft, a close request closes About and shows the discard alertdialog with Keep editing focused", async ({ page }) => {
   const errors = pageErrors(page);
   await installTauriMock(page, { view: firstRunView(), buildInfo: OK });
-  await page.goto("/settings");
-  await expect(page.getByRole("tab", { selected: true })).toBeVisible();
+  await bootPage(page, "/settings", page.getByRole("tab", { selected: true }));
   await expect
     .poll(() => listeners(page, "tauri://close-requested"), { message: "the settings page listens to close requests" })
     .toBeGreaterThan(0);

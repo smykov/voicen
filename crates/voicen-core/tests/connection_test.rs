@@ -23,6 +23,8 @@
 //! (T-080 I2).
 
 mod common;
+#[path = "common/mock_http.rs"]
+mod mock_http;
 /// The checks of `OsAnswer::refused()`, in each binary that takes it (T-047, T-080).
 #[path = "common/refused_addr_tests.rs"]
 mod refused_addr_tests;
@@ -265,7 +267,7 @@ async fn quick_totals_survive_an_answer_stalled_past_their_old_margin() {
 }
 
 async fn server_with(response: ResponseTemplate) -> MockServer {
-    let server = MockServer::start().await;
+    let server = mock_http::start().await;
     Mock::given(any())
         .respond_with(response)
         .mount(&server)

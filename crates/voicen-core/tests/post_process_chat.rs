@@ -9,6 +9,8 @@
 //! accepts and answers late. Fake data only: 127.0.0.1, `sk-test-...` keys.
 
 mod common;
+#[path = "common/mock_http.rs"]
+mod mock_http;
 /// The checks of `common::os_answer::OsAnswer::refused()`, in each binary that takes it
 /// (T-047).
 #[path = "common/refused_addr_tests.rs"]
@@ -128,7 +130,7 @@ fn run(
 }
 
 async fn server_with(response: ResponseTemplate) -> MockServer {
-    let server = MockServer::start().await;
+    let server = mock_http::start().await;
     Mock::given(any())
         .respond_with(response)
         .mount(&server)

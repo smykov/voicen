@@ -19,6 +19,8 @@
 //! deadline red (F-021).
 
 mod common;
+#[path = "common/mock_http.rs"]
+mod mock_http;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -62,7 +64,7 @@ const TOLERANCE: Duration = Duration::from_millis(500);
 /// client's timers started (a raw listener that answers without draining the body
 /// risks a RST on Windows).
 async fn chat_answering_after(delay: Duration) -> MockServer {
-    let server = MockServer::start().await;
+    let server = mock_http::start().await;
     Mock::given(path_regex("/chat/completions$"))
         .respond_with(
             ResponseTemplate::new(200)
@@ -143,7 +145,7 @@ async fn default_deadline_skips_a_silent_server_at_15_s() {
 /// A server that answers the transcription at once with `{"text": RAW}` and the
 /// chat request after `chat_delay` with `PROCESSED`.
 async fn transcribe_then_chat(chat_delay: Duration) -> MockServer {
-    let server = MockServer::start().await;
+    let server = mock_http::start().await;
     Mock::given(path_regex("/audio/transcriptions$"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "text": RAW })))
         .mount(&server)

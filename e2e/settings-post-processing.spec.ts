@@ -18,7 +18,7 @@
 //   `refused_post_processing_on_empty`, pinned by a core test).
 import { readFileSync } from "node:fs";
 import type { Page } from "@playwright/test";
-import { expect, test } from "./support/boot";
+import { bootPage, expect, test } from "./support/boot";
 import {
   calls,
   firstRunView,
@@ -80,8 +80,7 @@ function pageErrors(page: Page): Error[] {
 
 async function open(page: Page, view: SettingsView = firstRunView(), path = "/settings"): Promise<void> {
   await installTauriMock(page, { view });
-  await page.goto(path);
-  await expect(page.getByRole("tab", { selected: true })).toBeVisible();
+  await bootPage(page, path, page.getByRole("tab", { selected: true }));
 }
 
 async function openPostProcessing(page: Page, view: SettingsView = firstRunView()): Promise<void> {
@@ -383,7 +382,7 @@ test("?tab=post_processing&field=<FieldId> selects the Post-processing tab and f
   const errors = pageErrors(page);
   await installTauriMock(page, { view: firstRunView() });
   for (const id of PP_FIELDS) {
-    await page.goto(`/settings?tab=post_processing&field=${id}`);
+    await bootPage(page, `/settings?tab=post_processing&field=${id}`, page.getByRole("tab", { selected: true }));
     await expect(tab(page, "post_processing"), id).toHaveAttribute("aria-selected", "true");
     await expect(field(page, id), id).toBeFocused();
   }

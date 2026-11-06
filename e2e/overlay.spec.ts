@@ -32,7 +32,7 @@
 // advance it and fire every due timer.
 import { readFileSync } from "node:fs";
 import type { Page } from "@playwright/test";
-import { expect, test } from "./support/boot";
+import { bootPage, expect, test } from "./support/boot";
 import {
   calls,
   emitted,
@@ -80,11 +80,19 @@ function pageErrors(page: Page): Error[] {
   return errors;
 }
 
-/** Installs the clock (flowing) and the mock for the window labelled overlay, then opens the page. */
+/**
+ * Installs the clock (flowing) and the mock for the window labelled overlay, then opens the
+ * page. The overlay shows nothing before its first state, so the page has booted once it
+ * asked to listen to overlay://state (held, rejected or answered: the call is recorded).
+ */
 async function openOverlay(page: Page, options: MockOptions = {}): Promise<void> {
   await page.clock.install({ time: T0 });
   await installTauriMock(page, { windowLabel: "overlay", ...options });
-  await page.goto("/overlay");
+  await bootPage(page, "/overlay", async () =>
+    (await calls(page, "plugin:event|listen")).some(
+      (call) => (call.args as { event?: string }).event === OVERLAY_STATE_EVENT,
+    ),
+  );
 }
 
 /** The page listens to overlay://state and has invoked overlay_ready once. */

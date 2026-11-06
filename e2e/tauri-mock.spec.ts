@@ -4,7 +4,7 @@
 // { event, target, handler: transformCallback(cb) }), unlisten = unregisterListener +
 // invoke("plugin:event|unlisten", { event, eventId }) (node_modules/@tauri-apps/api/event.js).
 import type { Page } from "@playwright/test";
-import { expect, test } from "./support/boot";
+import { bootPage, expect, test } from "./support/boot";
 import {
   calls,
   deleteOutcome,
@@ -96,9 +96,14 @@ function request(edits: SaveRequest["keys"]): SaveRequest {
   return { settings, keys: edits };
 }
 
+/** Opens "/" (it renders the same heading whatever the mock answers) through the boot helper. */
+async function openRoot(p: Page): Promise<void> {
+  await bootPage(p, "/", p.getByRole("heading", { name: "Voicen" }));
+}
+
 test.beforeEach(async ({ page }) => {
   await installTauriMock(page, { buildInfo: { version: "0.0.0", commit: "mock" } });
-  await page.goto("/");
+  await openRoot(page);
 });
 
 test("settings_get and settings_speech_languages serve core's fixture data", async ({ page }) => {
@@ -191,7 +196,7 @@ test("plugin:window|destroy is recorded and returns null; plugin:window|close re
 test("destroy: { reject } records plugin:window|destroy and rejects with its text", async ({ context }) => {
   const page = await context.newPage();
   await installTauriMock(page, { destroy: { reject: "destroy refused (fake)" } });
-  await page.goto("/");
+  await openRoot(page);
   expect(await invokeInPage(page, "plugin:window|destroy", { label: "settings" })).toEqual({
     err: "destroy refused (fake)",
   });
@@ -203,7 +208,7 @@ test("destroy: { reject } records plugin:window|destroy and rejects with its tex
 test("holdSettingsGet keeps every settings_get in flight (recorded) until releaseSettingsGet", async ({ context }) => {
   const page = await context.newPage();
   await installTauriMock(page, { holdSettingsGet: true });
-  await page.goto("/");
+  await openRoot(page);
   await page.evaluate(() => {
     const w = window as unknown as { __TAURI_INTERNALS__: Internals; __got?: unknown };
     void w.__TAURI_INTERNALS__.invoke("settings_get", {}).then((v) => (w.__got = v));
@@ -229,7 +234,7 @@ test("holdSettingsGet keeps every settings_get in flight (recorded) until releas
 test("rejectListen makes listen of the named event reject and register nothing; other events still listen", async ({ context }) => {
   const page = await context.newPage();
   await installTauriMock(page, { rejectListen: ["settings://focus"] });
-  await page.goto("/");
+  await openRoot(page);
   const result = await invokeInPage(page, "plugin:event|listen", {
     event: "settings://focus",
     target: { kind: "Any" },
@@ -245,7 +250,7 @@ test("holdListen keeps listen of the named event in flight and unregistered unti
   // T-045 (settings-ui.md D): a test can act while the close guard's listen is pending.
   const page = await context.newPage();
   await installTauriMock(page, { holdListen: ["tauri://close-requested"] });
-  await page.goto("/");
+  await openRoot(page);
   await page.evaluate(() => {
     const w = window as unknown as { __TAURI_INTERNALS__: Internals; __heldId?: unknown };
     const handler = w.__TAURI_INTERNALS__.transformCallback(() => undefined);
@@ -274,7 +279,7 @@ test("holdListen keeps listen of the named event in flight and unregistered unti
 test("local_models_list serves core's first-run list by default, or the localModels option", async ({ context }) => {
   const page = await context.newPage();
   await installTauriMock(page);
-  await page.goto("/");
+  await openRoot(page);
   const list = (await invokeInPage(page, "local_models_list")) as { ok: unknown[] };
   expect(list.ok).toEqual(localModelsFirstRun());
   expect(list.ok).toHaveLength(5);
@@ -284,7 +289,7 @@ test("local_models_list serves core's first-run list by default, or the localMod
   const other = await context.newPage();
   const models = modelsWith("base", { kind: "downloaded" });
   await installTauriMock(other, { localModels: models });
-  await other.goto("/");
+  await openRoot(other);
   expect(await invokeInPage(other, "local_models_list")).toEqual({ ok: models });
 });
 
@@ -393,7 +398,7 @@ test("localModelProgress and localModelState update the list first, then emit (a
 test("holdList keeps local_models_list in flight until releaseList and answers with the list as it was when called", async ({ context }) => {
   const page = await context.newPage();
   await installTauriMock(page, { holdList: true });
-  await page.goto("/");
+  await openRoot(page);
   await page.evaluate(() => {
     const w = window as unknown as { __TAURI_INTERNALS__: Internals; __list?: unknown };
     void w.__TAURI_INTERNALS__.invoke("local_models_list", {}).then((v) => (w.__list = v));
@@ -413,7 +418,7 @@ test("holdList keeps local_models_list in flight until releaseList and answers w
 test("listRejection makes local_models_list reject with its text (recorded)", async ({ context }) => {
   const page = await context.newPage();
   await installTauriMock(page, { listRejection: "list refused (fake)" });
-  await page.goto("/");
+  await openRoot(page);
   expect(await invokeInPage(page, "local_models_list")).toEqual({ err: "list refused (fake)" });
   expect(await calls(page, "local_models_list")).toHaveLength(1);
 });
@@ -422,7 +427,7 @@ test("holdDownload keeps local_model_download in flight and not yet run (no row 
   // T-045 review r1 #2: a test can see the UI while a download invoke is pending.
   const page = await context.newPage();
   await installTauriMock(page, { holdDownload: true });
-  await page.goto("/");
+  await openRoot(page);
   await queueDownloadRejection(page, failureReason("download_busy"));
   await page.evaluate(() => {
     const w = window as unknown as { __TAURI_INTERNALS__: Internals; __first?: unknown; __second?: unknown };
@@ -561,7 +566,7 @@ test("queued delete rejections are thrown as is in order and change nothing; the
 test("holdDelete keeps local_model_delete in flight and not yet run (no row changes) until releaseDelete; later calls run at once", async ({ context }) => {
   const page = await context.newPage();
   await installTauriMock(page, { holdDelete: true, localModels: modelsWith("small", { kind: "downloaded" }) });
-  await page.goto("/");
+  await openRoot(page);
   await queueDeleteRejection(page, failureReason("model_in_use"));
   await page.evaluate(() => {
     const w = window as unknown as { __TAURI_INTERNALS__: Internals; __first?: unknown; __second?: unknown };
@@ -615,7 +620,7 @@ test("overlay_ready answers the overlayReady option; windowLabel is the label ta
 
   const overlayPage = await context.newPage();
   await installTauriMock(overlayPage, { overlayReady: overlayWire("recording_ru"), windowLabel: "overlay" });
-  await overlayPage.goto("/");
+  await openRoot(overlayPage);
   expect(await invokeInPage(overlayPage, "overlay_ready")).toEqual({ ok: overlayWire("recording_ru") });
   expect(await label(overlayPage)).toEqual(["overlay", "overlay", "overlay"]);
 });
@@ -623,7 +628,7 @@ test("overlay_ready answers the overlayReady option; windowLabel is the label ta
 test("holdOverlayReady keeps overlay_ready in flight (recorded) until releaseOverlayReady; later calls are answered at once", async ({ context }) => {
   const page = await context.newPage();
   await installTauriMock(page, { overlayReady: overlayWire("processing_en"), holdOverlayReady: true });
-  await page.goto("/");
+  await openRoot(page);
   await page.evaluate(() => {
     const w = window as unknown as { __TAURI_INTERNALS__: Internals; __reply?: unknown };
     void w.__TAURI_INTERNALS__.invoke("overlay_ready", {}).then((v) => (w.__reply = v));
@@ -641,7 +646,7 @@ test("overlayReady: { reject } records every overlay_ready and rejects it with i
   // T-053 r1 #1: the overlay page's rejected-reply branch.
   const page = await context.newPage();
   await installTauriMock(page, { overlayReady: { reject: "overlay_ready refused (fake)" } });
-  await page.goto("/");
+  await openRoot(page);
   expect(await invokeInPage(page, "overlay_ready")).toEqual({ err: "overlay_ready refused (fake)" });
   expect(await invokeInPage(page, "overlay_ready")).toEqual({ err: "overlay_ready refused (fake)" });
   expect(await calls(page, "overlay_ready")).toEqual([
@@ -651,7 +656,7 @@ test("overlayReady: { reject } records every overlay_ready and rejects it with i
 
   const held = await context.newPage();
   await installTauriMock(held, { overlayReady: { reject: "overlay_ready refused (fake)" }, holdOverlayReady: true });
-  await held.goto("/");
+  await openRoot(held);
   await held.evaluate(() => {
     const w = window as unknown as { __TAURI_INTERNALS__: Internals; __answer?: unknown };
     void w.__TAURI_INTERNALS__.invoke("overlay_ready", {}).then(
@@ -672,7 +677,7 @@ test("overlayReady: { reject } records every overlay_ready and rejects it with i
 test("settings_list_microphones serves fakeMicrophones by default (one default, not the first, unique ids), or the microphones option", async ({ context }) => {
   const page = await context.newPage();
   await installTauriMock(page);
-  await page.goto("/");
+  await openRoot(page);
   const list = (await invokeInPage(page, "settings_list_microphones")) as { ok: unknown[] };
   expect(list).toEqual({ ok: fakeMicrophones() });
   const mics = fakeMicrophones();
@@ -684,14 +689,14 @@ test("settings_list_microphones serves fakeMicrophones by default (one default, 
 
   const other = await context.newPage();
   await installTauriMock(other, { microphones: [] });
-  await other.goto("/");
+  await openRoot(other);
   expect(await invokeInPage(other, "settings_list_microphones")).toEqual({ ok: [] });
 });
 
 test("microphones: { reject } records every settings_list_microphones and rejects it with its text", async ({ context }) => {
   const page = await context.newPage();
   await installTauriMock(page, { microphones: { reject: "list_microphones refused (fake)" } });
-  await page.goto("/");
+  await openRoot(page);
   expect(await invokeInPage(page, "settings_list_microphones")).toEqual({ err: "list_microphones refused (fake)" });
   expect(await invokeInPage(page, "settings_list_microphones")).toEqual({ err: "list_microphones refused (fake)" });
   expect(await calls(page, "settings_list_microphones")).toHaveLength(2);
@@ -700,7 +705,7 @@ test("microphones: { reject } records every settings_list_microphones and reject
 test("holdMicrophones keeps settings_list_microphones in flight (recorded) until releaseMicrophones; later calls are answered at once", async ({ context }) => {
   const page = await context.newPage();
   await installTauriMock(page, { holdMicrophones: true });
-  await page.goto("/");
+  await openRoot(page);
   await page.evaluate(() => {
     const w = window as unknown as { __TAURI_INTERNALS__: Internals; __mics?: unknown };
     void w.__TAURI_INTERNALS__.invoke("settings_list_microphones", {}).then((v) => (w.__mics = v));
@@ -735,7 +740,7 @@ test("setBuildInfo replaces the get_build_info answer for every later call: a va
 test("setBuildInfo answers get_build_info on a page installed without the buildInfo option", async ({ context }) => {
   const page = await context.newPage();
   await installTauriMock(page);
-  await page.goto("/");
+  await openRoot(page);
   expect(await invokeInPage(page, "get_build_info")).toEqual({ err: "unexpected command get_build_info" });
   await setBuildInfo(page, { version: "0.1.0", commit: "abc1234" });
   expect(await invokeInPage(page, "get_build_info")).toEqual({ ok: { version: "0.1.0", commit: "abc1234" } });

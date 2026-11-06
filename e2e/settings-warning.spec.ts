@@ -33,7 +33,7 @@
 //   only (T-015 review round 1 #3).
 import { readFileSync } from "node:fs";
 import type { Page } from "@playwright/test";
-import { expect, test } from "./support/boot";
+import { bootPage, expect, test } from "./support/boot";
 import {
   calls,
   emit,
@@ -115,8 +115,7 @@ function pageErrors(page: Page): Error[] {
 
 async function open(page: Page, view: SettingsView = firstRunView()): Promise<void> {
   await installTauriMock(page, { view });
-  await page.goto("/settings");
-  await expect(page.getByRole("tab", { selected: true })).toBeVisible();
+  await bootPage(page, "/settings", page.getByRole("tab", { selected: true }));
   await expect.poll(() => listeners(page, "settings://changed")).toBeGreaterThan(0);
 }
 

@@ -8,7 +8,7 @@
 // failure names exactly that URL. The assertions after the goto are deliberately
 // unrelated to the boot (that is how the flake used to be reported).
 import type { Page, Route } from "@playwright/test";
-import { expect, test } from "../../support/boot";
+import { bootPage, expect, test } from "../../support/boot";
 import { installTauriMock } from "../../support/tauriMock";
 
 // A route node of a page (nodes/2.*.js and up): not the root layout (0) or the error
@@ -29,7 +29,7 @@ test.beforeEach(async ({ page }) => {
 });
 
 test("healthy boot passes", async ({ page }) => {
-  await page.goto("/");
+  await bootPage(page, "/", page.getByRole("heading", { name: "Voicen" }));
   await expect(page.getByTestId("build-info")).toHaveText("Voicen 0.1.0 (abc1234)");
 });
 

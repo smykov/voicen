@@ -25,10 +25,13 @@ use std::time::Duration;
 
 use wiremock::MockServer;
 
+#[path = "common/mock_http.rs"]
+mod mock_http;
+
 /// The one place this file takes a server. The developer replaces the body with the
 /// unpooled helper; nothing else in the file changes.
 async fn borrow() -> MockServer {
-    MockServer::start().await
+    mock_http::start().await
 }
 
 /// Where the late request must not show up: the log of a server the test just borrowed.
@@ -89,7 +92,7 @@ fn token() -> String {
 }
 
 /// True when `src` calls (or names) the pooled constructor. Whitespace is ignored, so
-/// `MockServer :: start ()` and a call split over lines count; `wiremock::` prefixed
+/// spaces around `::` or before `()` and a call split over lines count; `wiremock::` prefixed
 /// paths contain the same text. `MockServer::builder().start()` does not match. An
 /// alias import (`use wiremock::MockServer as Other`) is not seen: out of scope, the
 /// import line would be reviewed with the helper.

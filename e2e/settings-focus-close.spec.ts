@@ -33,7 +33,7 @@
 // cover it too.
 import { readFileSync } from "node:fs";
 import type { Page } from "@playwright/test";
-import { expect, test } from "./support/boot";
+import { bootPage, expect, test } from "./support/boot";
 import {
   calls,
   emit,
@@ -84,8 +84,7 @@ async function open(
   options: Omit<MockOptions, "view"> = {},
 ): Promise<void> {
   await installTauriMock(page, { ...options, view });
-  await page.goto(path);
-  await expect(page.getByRole("tab", { selected: true })).toBeVisible();
+  await bootPage(page, path, page.getByRole("tab", { selected: true }));
 }
 
 /** Two animation frames: pending Svelte updates and effects have run (for "nothing happened" checks). */
@@ -220,7 +219,12 @@ test("a settings://focus sent while settings_get is still pending is honoured on
   // (src-tauri/src/settings_window.rs). The page must listen before the draft arrives.
   const errors = pageErrors(page);
   await installTauriMock(page, { holdSettingsGet: true });
-  await page.goto("/settings?tab=recording&field=recording.hotkey");
+  // Nothing renders while settings_get is held: the page has booted once it asked for it.
+  await bootPage(
+    page,
+    "/settings?tab=recording&field=recording.hotkey",
+    async () => (await calls(page, "settings_get")).length > 0,
+  );
   await expect.poll(async () => (await calls(page, "settings_get")).length).toBe(1);
   await waitForListener(page, "settings://focus");
   // Still loading: no draft, so no tabs and no controls yet.
@@ -398,8 +402,8 @@ test("failure branch: a rejected settings://focus listen never leaves an editabl
   // close-requested listener exists whenever a control can be edited.
   const errors = pageErrors(page);
   await installTauriMock(page, { rejectListen: ["settings://focus"] });
-  await page.goto("/settings");
   // The listen failure is reported; once shown, the page's listener setup has finished.
+  await bootPage(page, "/settings", page.getByRole("alert"));
   await expect(page.getByRole("alert")).toContainText(en("error.ipc_unavailable"));
   await settle(page);
 
@@ -419,14 +423,12 @@ test("failure branch: a settings://changed arriving before the close guard is re
   // with no guard. Hold that listen and send the event in the gap.
   const errors = pageErrors(page);
   await installTauriMock(page, { holdListen: ["tauri://close-requested"] });
-  await page.goto("/settings");
-  await expect
-    .poll(async () =>
-      (await calls(page, "plugin:event|listen")).some(
-        (call) => (call.args as { event?: string }).event === "tauri://close-requested",
-      ),
-    )
-    .toBe(true);
+  // Booted once the page asked for the held listen (nothing else shows the gap).
+  await bootPage(page, "/settings", async () =>
+    (await calls(page, "plugin:event|listen")).some(
+      (call) => (call.args as { event?: string }).event === "tauri://close-requested",
+    ),
+  );
   expect(await listeners(page, "tauri://close-requested")).toBe(0);
 
   // A save from another window: core's view, edited.

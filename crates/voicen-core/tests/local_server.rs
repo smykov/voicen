@@ -15,6 +15,8 @@
 //! Fake data only: 127.0.0.1, `sk-test-…`.
 
 mod common;
+#[path = "common/mock_http.rs"]
+mod mock_http;
 /// The checks of `common::os_answer::OsAnswer::refused()`, in each binary that takes it
 /// (T-047).
 #[path = "common/refused_addr_tests.rs"]
@@ -172,7 +174,7 @@ fn transcribe(engine: Box<dyn Engine>, req: TranscribeRequest) -> Result<String,
 }
 
 async fn server_with(response: ResponseTemplate) -> MockServer {
-    let server = MockServer::start().await;
+    let server = mock_http::start().await;
     Mock::given(any())
         .respond_with(response)
         .mount(&server)
@@ -745,7 +747,7 @@ async fn saved_local_server_settings_reach_the_next_job_without_restart() {
 /// The endpoint the mock serves: POST at `/v1/audio/transcriptions` only; any
 /// other path gets wiremock's unmatched answer, 404 (a server with that one route).
 async fn endpoint_only_server(response: ResponseTemplate) -> MockServer {
-    let server = MockServer::start().await;
+    let server = mock_http::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/audio/transcriptions"))
         .respond_with(response)

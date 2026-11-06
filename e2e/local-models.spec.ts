@@ -37,7 +37,7 @@
 //   like every control (U2).
 import { readFileSync } from "node:fs";
 import type { Page } from "@playwright/test";
-import { expect, test } from "./support/boot";
+import { bootPage, expect, test } from "./support/boot";
 import {
   calls,
   deleteOutcome,
@@ -148,8 +148,7 @@ function localView(modelId: string | null = null, lang: Lang = "en"): SettingsVi
 
 async function open(page: Page, view: SettingsView = localView(), options: Omit<MockOptions, "view"> = {}): Promise<void> {
   await installTauriMock(page, { ...options, view });
-  await page.goto("/settings");
-  await expect(page.getByRole("tab", { selected: true })).toBeVisible();
+  await bootPage(page, "/settings", page.getByRole("tab", { selected: true }));
 }
 
 /** Opens the page and waits for the five rows and both local-model listeners. */

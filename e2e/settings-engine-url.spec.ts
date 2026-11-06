@@ -13,7 +13,7 @@
 // - the input's value is the stored setting as typed (no rewrite of a full endpoint URL).
 import { readFileSync } from "node:fs";
 import type { Page } from "@playwright/test";
-import { expect, test } from "./support/boot";
+import { bootPage, expect, test } from "./support/boot";
 import {
   calls,
   firstRunView,
@@ -66,8 +66,7 @@ function viewWith(engine: string, lang: "en" | "ru"): SettingsView {
 
 async function open(page: Page, view: SettingsView): Promise<void> {
   await installTauriMock(page, { view });
-  await page.goto("/settings");
-  await expect(page.getByRole("tab", { selected: true })).toBeVisible();
+  await bootPage(page, "/settings", page.getByRole("tab", { selected: true }));
   await expect.poll(() => listeners(page, "settings://changed")).toBeGreaterThan(0);
 }
 

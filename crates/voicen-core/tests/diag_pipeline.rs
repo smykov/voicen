@@ -20,6 +20,8 @@
 
 mod common;
 mod diag_support;
+#[path = "common/mock_http.rs"]
+mod mock_http;
 /// The checks of `common::os_answer::OsAnswer::refused()`, in each binary that takes it
 /// (T-047).
 #[path = "common/refused_addr_tests.rs"]
@@ -106,7 +108,7 @@ fn api_settings(base: &str) -> Settings {
 }
 
 async fn server_with(response: ResponseTemplate) -> MockServer {
-    let server = MockServer::start().await;
+    let server = mock_http::start().await;
     Mock::given(any())
         .respond_with(response)
         .mount(&server)
@@ -567,7 +569,7 @@ async fn log_holds_no_key_query_or_transcript_on_any_path() {
 
 /// A chat endpoint (`.../chat/completions`) answering `response`.
 async fn chat_with(response: ResponseTemplate) -> MockServer {
-    let server = MockServer::start().await;
+    let server = mock_http::start().await;
     Mock::given(path_regex("/chat/completions$"))
         .respond_with(response)
         .mount(&server)

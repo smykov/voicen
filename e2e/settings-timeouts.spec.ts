@@ -18,7 +18,7 @@
 //   Refused `timeouts.<role>: timeout.range` is shown on that control (U2).
 import { readFileSync } from "node:fs";
 import type { Page } from "@playwright/test";
-import { expect, test } from "./support/boot";
+import { bootPage, expect, test } from "./support/boot";
 import {
   calls,
   emitted,
@@ -113,8 +113,7 @@ function savedView(timeouts: TimeoutsWire, lang: Lang = "en", engine = "none"): 
 /** Opens /settings over `view` and selects the General tab. */
 async function openGeneral(page: Page, view: SettingsView): Promise<void> {
   await installTauriMock(page, { view });
-  await page.goto("/settings");
-  await expect(page.getByRole("tab", { selected: true })).toBeVisible();
+  await bootPage(page, "/settings", page.getByRole("tab", { selected: true }));
   await tab(page, "general").click();
   await expect(tab(page, "general")).toHaveAttribute("aria-selected", "true");
 }

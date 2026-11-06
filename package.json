@@ -11,7 +11,7 @@
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
     "tauri": "tauri",
-    "test": "vitest run",
+    "test": "node scripts/ui-unit-test.mjs",
     "lint": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --fail-on-warnings && eslint .",
     "e2e": "scripts/e2e.sh"
   },
