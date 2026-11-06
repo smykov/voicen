@@ -1,0 +1,10 @@
+guarantee: invariant (3): on any failure a file that was already there is never removed (the old target survives a failed export)
+file: crates/voicen-core/src/call/storage.rs
+added_by: task-validator round 1
+test: cargo test -j2 -p voicen-core --lib call::storage::tests::
+--- old
+        let _ = fs::remove_file(tmp);
+--- new
+        let _ = fs::remove_file(tmp);
+        let _ = fs::remove_file(target);
+--- end

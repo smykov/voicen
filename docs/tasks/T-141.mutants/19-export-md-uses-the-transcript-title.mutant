@@ -1,0 +1,9 @@
+guarantee: invariant (3) / FR-035/036: export bytes carry the title and names of meta.json (Markdown path)
+file: crates/voicen-core/src/call/storage.rs
+added_by: task-validator round 1
+test: cargo test -j2 -p voicen-core --lib call::storage::tests::
+--- old
+            Format::Md => export_markdown(&transcript, &meta.title, &meta.speakers),
+--- new
+            Format::Md => export_markdown(&transcript, &transcript.title, &transcript.speakers),
+--- end

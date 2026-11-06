@@ -1,0 +1,11 @@
+guarantee: AC3: a root that is not current or remembered gives notFound (the default root is refused when another root is chosen)
+file: crates/voicen-core/src/call/storage.rs
+added_by: task-validator round 1
+test: cargo test -j2 -p voicen-core --lib call::storage::tests::
+--- old
+    let current = effective_root(calls, default_root);
+--- new
+    let current = effective_root(calls, default_root);
+    let fallback = default_root.to_path_buf();
+    let current = if fallback.to_str() == Some(root) { fallback } else { current };
+--- end

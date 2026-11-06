@@ -1,0 +1,9 @@
+guarantee: AC3/invariant (1): root must equal wire_root of the current root or a member of earlier_roots (a remembered root's calls stay reachable)
+file: crates/voicen-core/src/call/storage.rs
+added_by: task-validator round 1
+test: cargo test -j2 -p voicen-core --lib call::storage::tests::
+--- old
+        .chain(calls.earlier_roots.iter())
+--- new
+        .chain(calls.earlier_roots.iter().take(0))
+--- end
