@@ -20,7 +20,7 @@
 // carry the cause, not only the unrelated assertion the scenario ends with.
 import { spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, readdirSync, existsSync } from "node:fs";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import { expect, test } from "@playwright/test";
 
 interface JsonResult {
@@ -236,4 +236,72 @@ test("every spec that uses page or context imports test from ./support/boot", ()
     if (!fromBoot || fromPlaywright) offenders.push(file);
   }
   expect(offenders, "specs that use page or context without the boot fixture").toEqual([]);
+});
+
+// T-195 (invariant I1, decides_on: the navigation call "goto" on a page): no e2e verdict depends on
+// how fast the page boots, so no spec navigates by itself and then waits on Playwright's 5 s
+// expect default. Every navigation goes through the boot helper in e2e/support/boot.ts, whose
+// wait is bounded by the test's own timeout (contract: e2e/boot-delay.spec.ts). So the token
+// of a navigation call appears in no e2e file except e2e/support/boot.ts, with one exemption:
+// the failure-expecting scenarios of e2e/fixtures/boot-failure/boot-failure.inner.ts, whose
+// verdict is that the boot fails and which keep their short waits (Investigation 1). The inner
+// run's healthy scenario is not exempt: it boots through the helper.
+const NAVIGATION = /\.\s*goto\s*\(/;
+const BOOT_HELPER = join("e2e", "support", "boot.ts");
+const FAILURE_SCENARIOS = new Set([
+  "aborted page chunk, unrelated assertion",
+  "page chunk answers 500, unrelated assertion",
+  "aborted page chunk, assertions that pass anyway",
+  "renderer crash, unrelated assertion",
+  "context.newPage: aborted page chunk, unrelated assertion",
+  "context.newPage: page chunk answers 500, assertions that pass anyway",
+  "context.newPage: renderer crash, unrelated assertion",
+]);
+
+// The parts of a source that are not an exempt failure scenario: for a fixture file, the text
+// outside the exempt `test("<title>", ...)` blocks; any other file whole.
+function nonExemptSource(file: string, src: string): string {
+  if (!file.split(sep).includes("fixtures")) return src;
+  return src
+    .split(/^(?=test\()/m)
+    .filter((block) => {
+      const title = /^test\(\s*"([^"]+)"/.exec(block)?.[1];
+      return title === undefined || !FAILURE_SCENARIOS.has(title);
+    })
+    .join("");
+}
+
+function navigationSites(root: string): { files: number; offenders: string[] } {
+  const files = (readdirSync(root, { recursive: true }) as string[])
+    .map((f) => join(root, f))
+    .filter((f) => f.endsWith(".ts") && f !== BOOT_HELPER);
+  const offenders = files.filter((f) => NAVIGATION.test(nonExemptSource(f, readFileSync(f, "utf8"))));
+  return { files: files.length, offenders };
+}
+
+test("no e2e file navigates outside the boot helper (the failure scenarios of the inner run excepted)", () => {
+  const { files, offenders } = navigationSites("e2e");
+  expect(files, "the scan saw the specs, fixtures and support files").toBeGreaterThan(15);
+  expect(offenders, "files that navigate without the boot helper in e2e/support/boot.ts").toEqual([]);
+});
+
+// Characterization of the scan (green today): spellings it must catch, and what it lets by.
+test("the navigation scan catches every spelling of the call and exempts only the named failure scenarios", () => {
+  // Built from parts: this file is scanned too and must not hold the token itself.
+  const go = "go" + "to";
+  for (const spelled of [
+    `await page.${go}("/")`,
+    `await page . ${go} ("/")`,
+    `await page\n    .${go}(\`/settings\`)`,
+    `await context.pages()[0].${go}("/")`,
+  ]) {
+    expect(NAVIGATION.test(spelled), spelled).toBe(true);
+  }
+  expect(NAVIGATION.test(`await page.${go}.bind(page)`)).toBe(false);
+  const fixture = join("e2e", "fixtures", "x.inner.ts");
+  const healthy = `test("healthy boot passes", async ({ page }) => {\n  await page.${go}("/");\n});\n`;
+  const broken = `test("renderer crash, unrelated assertion", async ({ page }) => {\n  await page.${go}("/");\n});\n`;
+  expect(NAVIGATION.test(nonExemptSource(fixture, healthy)), "the healthy scenario is scanned").toBe(true);
+  expect(NAVIGATION.test(nonExemptSource(fixture, broken)), "a named failure scenario is exempt").toBe(false);
+  expect(NAVIGATION.test(nonExemptSource(join("e2e", "a.spec.ts"), broken)), "a spec is never exempt").toBe(true);
 });
