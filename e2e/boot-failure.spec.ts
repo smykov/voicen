@@ -299,8 +299,9 @@ test("the navigation scan catches every spelling of the call and exempts only th
   }
   expect(NAVIGATION.test(`await page.${go}.bind(page)`)).toBe(false);
   const fixture = join("e2e", "fixtures", "x.inner.ts");
-  const healthy = `test("healthy boot passes", async ({ page }) => {\n  await page.${go}("/");\n});\n`;
-  const broken = `test("renderer crash, unrelated assertion", async ({ page }) => {\n  await page.${go}("/");\n});\n`;
+  const args = "{ pa" + "ge }";
+  const healthy = `test("healthy boot passes", async (${args}) => {\n  await page.${go}("/");\n});\n`;
+  const broken = `test("renderer crash, unrelated assertion", async (${args}) => {\n  await page.${go}("/");\n});\n`;
   expect(NAVIGATION.test(nonExemptSource(fixture, healthy)), "the healthy scenario is scanned").toBe(true);
   expect(NAVIGATION.test(nonExemptSource(fixture, broken)), "a named failure scenario is exempt").toBe(false);
   expect(NAVIGATION.test(nonExemptSource(join("e2e", "a.spec.ts"), broken)), "a spec is never exempt").toBe(true);
