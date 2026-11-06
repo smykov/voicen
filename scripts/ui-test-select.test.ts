@@ -157,3 +157,59 @@ describe("scripts/ui-unit-test.mjs refusals (the false PASS of `pnpm test e2e/ab
     expect(r.stdout).not.toContain("RUN");
   });
 });
+
+// The exit code of a runner the scripts started, and the router's own count: `main` is spawned
+// (T-195, invariant I4: the router exits 0 only if every runner it started exits 0; a selector
+// the runner's list cannot count is refused, never taken as a match).
+describe("exit codes of the spawned scripts", () => {
+  const root = fileURLToPath(new URL("..", import.meta.url));
+  const fixture = "scripts/ui-fixture-fail.test.ts";
+  // The nested vitest must not believe it runs inside this one.
+  const cleanEnv = (extra: Record<string, string>) => {
+    const env: NodeJS.ProcessEnv = { ...process.env, ...extra };
+    for (const k of Object.keys(env)) if (k.startsWith("VITEST") || k === "TEST") delete env[k];
+    return env;
+  };
+  const spawn = (script: string, args: string[], extra: Record<string, string> = {}) =>
+    spawnSync(process.execPath, [fileURLToPath(new URL(script, import.meta.url)), ...args], {
+      cwd: root,
+      encoding: "utf8",
+      timeout: 120_000,
+      env: cleanEnv(extra),
+    });
+
+  it("ui-unit-test.mjs exits with vitest's non-zero code when the selected test fails", () => {
+    const r = spawn("./ui-unit-test.mjs", [fixture], { VOICEN_FIXTURE_FAIL: "1" });
+    expect(r.stdout + r.stderr).toContain("fails on purpose");
+    expect(r.status).not.toBe(0);
+    expect(r.status).not.toBe(2);
+  }, 100_000);
+
+  it("ui-unit-test.mjs exits 0 when the same fixture runs without the switch (the fixture is the cause)", () => {
+    expect(spawn("./ui-unit-test.mjs", [fixture]).status).toBe(0);
+  }, 100_000);
+
+  it("ui-test-select.mjs exits non-zero when the unit group it started fails", () => {
+    const r = spawn("./ui-test-select.mjs", [fixture], { VOICEN_FIXTURE_FAIL: "1" });
+    expect(r.stdout + r.stderr).toContain("fails on purpose");
+    expect(r.status).not.toBe(0);
+  }, 100_000);
+
+  it("ui-test-select.mjs exits 0 when every selector matches and the group passes", () => {
+    expect(spawn("./ui-test-select.mjs", [fixture]).status).toBe(0);
+  }, 100_000);
+
+  it("ui-test-select.mjs exits 1 naming an existing file that holds no test (the list counts 0, not a match)", () => {
+    const r = spawn("./ui-test-select.mjs", ["scripts/ui-unit-test.mjs"]);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("selectors that match no test");
+    expect(r.stderr).toContain("scripts/ui-unit-test.mjs (unit)");
+  }, 100_000);
+
+  it("ui-test-select.mjs exits 1 naming a missing file, and runs nothing", () => {
+    const r = spawn("./ui-test-select.mjs", [fixture, "src/nope.test.ts"], { VOICEN_FIXTURE_FAIL: "1" });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("src/nope.test.ts (unit)");
+    expect(r.stdout + r.stderr).not.toContain("fails on purpose");
+  }, 100_000);
+});

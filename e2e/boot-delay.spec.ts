@@ -40,3 +40,24 @@ test("a page whose entry chunk takes 6 s still boots through the boot helper (no
   );
   await expect(page.getByRole("tab", { selected: true })).toBeVisible();
 });
+
+// The probe form of the helper (a page that shows nothing until it is driven: the overlay, a
+// settings page whose settings_get is held) is bounded by the test's timeout too.
+test("a page whose entry chunk takes 6 s still boots through the probe form of the boot helper", async ({
+  page,
+}) => {
+  test.setTimeout(30_000);
+  await page.route(/\/_app\/immutable\/entry\/start\.[\w-]+\.js$/, async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, BOOT_DELAY_MS));
+    await route.continue();
+  });
+  await installTauriMock(page, {});
+
+  const startedAt = Date.now();
+  await bootPage(page, "/settings", async () => (await page.getByRole("tab", { selected: true }).count()) > 0);
+
+  expect(Date.now() - startedAt, "the probe really waited for the delayed chunk").toBeGreaterThanOrEqual(
+    BOOT_DELAY_MS - 500,
+  );
+  await expect(page.getByRole("tab", { selected: true })).toBeVisible();
+});
