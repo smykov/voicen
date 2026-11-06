@@ -2,7 +2,7 @@ guarantee: AC-1: list failure shows the reason
 file: src/routes/calls/+page.svelte
 added_by: test-writer
 --- old
-      if (generation === listGeneration) errorId = callErrorMessageId(error);
+      if (generation === listGeneration) showError(callErrorMessageId(refusal), "list");
 --- new
-      if (generation === listGeneration) errorId = null;
+      if (generation === listGeneration) void refusal;
 --- end
