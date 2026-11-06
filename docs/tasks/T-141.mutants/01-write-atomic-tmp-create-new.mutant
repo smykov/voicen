@@ -1,0 +1,10 @@
+guarantee: Characterization: write_atomic replaces a stale meta.json.tmp (the call folder is ours); the T-141 split must keep File::create there
+file: crates/voicen-core/src/call/storage.rs
+added_by: test-writer
+--- old
+    let mut file = File::create(&tmp)?;
+    let synced = file.write_all(bytes).and_then(|()| file.sync_all());
+--- new
+    let mut file = fs::OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+    let synced = file.write_all(bytes).and_then(|()| file.sync_all());
+--- end
