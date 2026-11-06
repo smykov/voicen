@@ -109,6 +109,20 @@
 //   state: nothing stored, no key presence, no event. After `holdTests()` each call stays
 //   in flight (recorded at once, its script taken only when answered) until
 //   `releaseTest()`, which answers every held call in call order and stops holding.
+// - Calls (specs/007-call-mode-record contracts/ipc.md, T-143). Payloads are core's
+//   (e2e/fixtures/calls-wire.json, pinned by storage::tests::calls_wire_fixture_matches_core);
+//   the fixture helpers below (`callsListAll`, `callsList(n)`, `callsEmptyList`, `callsListRu`,
+//   `callsDetail`, `callsDetailWithTexts`, `callsError`) derive every case from it, so no spec
+//   holds a hand-written wire object:
+//   - `calls_list` returns a copy of the `callsList` option (default `callsListAll()`), taken
+//     when the call is made; `setCallsList(page, list)` replaces it for later calls;
+//   - `calls_get { root, id }` returns a copy of the `callsDetail` option (default
+//     `callsDetail()`), whatever the id (the mock never validates: a refusal is scripted);
+//   - `calls_copy_markdown`, `calls_open_folder`, `calls_delete` return null, `calls_export`
+//     returns `{ saved: true }`, each recorded;
+//   - `queueCallsResult(page, cmd, { outcome } | { reject })` scripts the next answer of that
+//     command only (one shot: the call after it gets the default answer again), so a failing
+//     fake fails exactly one call.
 // - Any other command rejects, so a call outside the contract fails the test.
 //
 // The init script must be self-contained (it is serialized into the page), so it cannot
@@ -128,6 +142,18 @@ import type {
 } from "../../src/lib/settings/settingsApi";
 import type { DeleteOutcome, FailureReason, LocalModelView, ModelState } from "../../src/lib/local-models/localModelsApi";
 import type { OverlayPayload } from "../../src/lib/overlay/overlayApi";
+// The calls wire (spec 007) is declared once, in the window's callsApi.ts.
+import type { CallDetail, CallError, CallList } from "../../src/lib/calls/callsApi";
+export type {
+  CallDetail,
+  CallError,
+  CallList,
+  CallSummary,
+  CallState,
+  FailReason,
+  Line,
+  Speaker,
+} from "../../src/lib/calls/callsApi";
 export type {
   ConnectionTestRequest,
   ConnectionTestResult,
@@ -377,6 +403,69 @@ export function overlayNothingYet(): OverlayPayload {
   return { ...overlayWire("hidden_en"), seq: 0 };
 }
 
+// ---- Core-checked calls data (e2e/fixtures/calls-wire.json, T-141 / T-143) ---------------
+
+interface CallsFixture {
+  list: CallList;
+  damagedRu: CallList["calls"][number];
+  detail: CallDetail;
+  errors: { notFound: CallError; inUse: CallError; ioFailed: CallError };
+}
+
+const callsFixture = JSON.parse(
+  readFileSync(new URL("../fixtures/calls-wire.json", import.meta.url), "utf8"),
+) as CallsFixture;
+
+/** Core's whole `calls_list` answer: 12 calls in core order (every state), one unavailable root (a fresh copy). */
+export function callsListAll(): CallList {
+  return structuredClone(callsFixture.list);
+}
+
+/** The first `n` calls of core's list (its newest `n`), core order kept, with core's unavailable roots. */
+export function callsList(n: number): CallList {
+  const list = callsListAll();
+  if (n > list.calls.length) throw new Error(`calls-wire.json has only ${list.calls.length} calls`);
+  return { calls: list.calls.slice(0, n), unavailableRoots: list.unavailableRoots };
+}
+
+/** No calls, keeping core's unavailable roots. */
+export function callsEmptyList(): CallList {
+  return { calls: [], unavailableRoots: callsListAll().unavailableRoots };
+}
+
+/** Core's whole list with the damaged entry as core renders it in Russian (`damagedRu`). */
+export function callsListRu(): CallList {
+  const list = callsListAll();
+  const at = list.calls.findIndex((c) => c.state === "damaged");
+  if (at === -1) throw new Error("calls-wire.json has no damaged call");
+  list.calls[at] = structuredClone(callsFixture.damagedRu);
+  return list;
+}
+
+/** Core's `calls_get` answer for the ready call (a fresh copy). */
+export function callsDetail(): CallDetail {
+  return structuredClone(callsFixture.detail);
+}
+
+/** `callsDetail()` with only the `text` of the first lines replaced (shape stays core's). */
+export function callsDetailWithTexts(texts: string[]): CallDetail {
+  const detail = callsDetail();
+  if (texts.length > detail.lines.length) {
+    throw new Error(`calls-wire.json detail has only ${detail.lines.length} lines`);
+  }
+  texts.forEach((text, i) => {
+    detail.lines[i].text = text;
+  });
+  return detail;
+}
+
+/** Core's `CallError` `key` (a fresh copy): notFound, inUse (file mic.opus), ioFailed (access_denied). */
+export function callsError(key: keyof CallsFixture["errors"]): CallError {
+  const value = callsFixture.errors[key];
+  if (value === undefined) throw new Error(`calls-wire.json has no errors.${key}`);
+  return structuredClone(value);
+}
+
 // ---- Microphones (settings_list_microphones, T-012) -------------------------------
 
 /**
@@ -449,6 +538,10 @@ export interface MockOptions {
   microphones?: InputDevice[] | { reject: string };
   /** Keep every `settings_list_microphones` in flight until `releaseMicrophones` (recorded at once, copy taken then). */
   holdMicrophones?: boolean;
+  /** What `calls_list` returns first; default `callsListAll()`. */
+  callsList?: CallList;
+  /** What `calls_get` returns; default `callsDetail()`. */
+  callsDetail?: CallDetail;
 }
 
 interface InitArg {
@@ -473,6 +566,8 @@ interface InitArg {
   windowLabel: string;
   microphones: InputDevice[] | { reject: string };
   holdMicrophones: boolean;
+  callsList: CallList;
+  callsDetail: CallDetail;
 }
 
 /** Installs the mock as an init script; call before `page.goto`. */
@@ -498,6 +593,8 @@ export async function installTauriMock(page: Page, options: MockOptions = {}): P
     windowLabel: options.windowLabel ?? "settings",
     microphones: options.microphones ?? fakeMicrophones(),
     holdMicrophones: options.holdMicrophones ?? false,
+    callsList: options.callsList ?? callsListAll(),
+    callsDetail: options.callsDetail ?? callsDetail(),
   };
   await page.addInitScript((init: InitArg) => {
     type Handler = (data: unknown) => void;
@@ -537,6 +634,9 @@ export async function installTauriMock(page: Page, options: MockOptions = {}): P
       holdingBuild: false,
       heldBuild: [] as (() => void)[],
       testScripts: [] as Scripted[],
+      callsList: clone(init.callsList),
+      callsDetail: clone(init.callsDetail),
+      callsScripts: new Map<string, Scripted[]>(),
       holdingTests: false,
       heldTests: [] as (() => void)[],
     };
@@ -687,6 +787,23 @@ export async function installTauriMock(page: Page, options: MockOptions = {}): P
           if ("reject" in next) throw clone(next.reject);
           return clone(next.outcome);
         }
+        case "calls_list":
+        case "calls_get":
+        case "calls_copy_markdown":
+        case "calls_export":
+        case "calls_open_folder":
+        case "calls_delete": {
+          // The answer is the state when the command ran; a script answers one call only.
+          const script = state.callsScripts.get(cmd)?.shift();
+          if (script !== undefined) {
+            if ("reject" in script) throw clone(script.reject);
+            return clone(script.outcome);
+          }
+          if (cmd === "calls_list") return clone(state.callsList);
+          if (cmd === "calls_get") return clone(state.callsDetail);
+          if (cmd === "calls_export") return { saved: true };
+          return null;
+        }
         case "plugin:window|destroy":
           if (init.destroy !== null) throw new Error(init.destroy.reject);
           return null;
@@ -777,6 +894,14 @@ export async function installTauriMock(page: Page, options: MockOptions = {}): P
         for (const resolve of state.heldMics.splice(0)) resolve();
       },
       queueTest: (item: Scripted) => state.testScripts.push(clone(item)),
+      setCallsList: (list: unknown) => {
+        state.callsList = clone(list) as typeof state.callsList;
+      },
+      queueCalls: (cmd: string, item: Scripted) => {
+        const queue = state.callsScripts.get(cmd) ?? [];
+        queue.push(clone(item));
+        state.callsScripts.set(cmd, queue);
+      },
       holdTests: () => {
         state.holdingTests = true;
       },
@@ -826,6 +951,8 @@ interface MockHandle {
   releaseOverlayReady: () => void;
   releaseMicrophones: () => void;
   queueTest: (item: { outcome: unknown } | { reject: unknown }) => void;
+  setCallsList: (list: CallList) => void;
+  queueCalls: (cmd: string, item: { outcome: unknown } | { reject: unknown }) => void;
   holdTests: () => void;
   releaseTest: () => void;
   setBuildInfo: (value: BuildInfo | { reject: string }) => void;
@@ -1069,4 +1196,28 @@ export async function holdTests(page: Page): Promise<void> {
 /** Answers every held `settings_test_connection` in call order, and stops holding. */
 export async function releaseTest(page: Page): Promise<void> {
   await page.evaluate(() => (window as unknown as MockWindow).__VOICEN_MOCK__.releaseTest());
+}
+
+// ---- Calls (spec 007, T-143) ---------------------------------------------------------
+
+/** From now on `calls_list` returns `list` (a copy is taken at each call). */
+export async function setCallsList(page: Page, list: CallList): Promise<void> {
+  await page.evaluate((value) => (window as unknown as MockWindow).__VOICEN_MOCK__.setCallsList(value), list);
+}
+
+/**
+ * The next `cmd` (a `calls_*` command) answers `script` and only that call: `{ outcome }`
+ * resolves with it, `{ reject }` rejects with it as is (`callsError(key)` for a contract
+ * refusal). The call after it gets the mock's default answer again.
+ */
+export async function queueCallsResult(
+  page: Page,
+  cmd: string,
+  script: { outcome: unknown } | { reject: unknown },
+): Promise<void> {
+  await page.evaluate(
+    ([name, item]) =>
+      (window as unknown as MockWindow).__VOICEN_MOCK__.queueCalls(name, item as { outcome: unknown }),
+    [cmd, script] as const,
+  );
 }
