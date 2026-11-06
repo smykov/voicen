@@ -358,16 +358,20 @@ pub fn render_markdown(transcript: &TranscriptV1, title: &str, names: &[Speaker]
     out
 }
 
-/// T-141 STUB. The Markdown of an export: [`render_markdown`] with the meta.json title and names.
-#[allow(unused_variables)]
+/// The Markdown of an export and of a copy (FR-036): [`render_markdown`] with the meta.json
+/// title and names.
 pub fn export_markdown(transcript: &TranscriptV1, title: &str, names: &[Speaker]) -> String {
-    unimplemented!("T-141 export_markdown")
+    render_markdown(transcript, title, names)
 }
 
-/// T-141 STUB. The JSON of an export: the transcript with `title` and `names` replacing its own.
-#[allow(unused_variables)]
+/// The JSON of an export (FR-036): the compact [`TranscriptV1::to_json`] text of the transcript
+/// with `title` and `names` (from meta.json, FR-035) replacing its own; every other field is
+/// the transcript's.
 pub fn export_json(transcript: &TranscriptV1, title: &str, names: &[Speaker]) -> String {
-    unimplemented!("T-141 export_json")
+    let mut named = transcript.clone();
+    named.title = title.to_string();
+    named.speakers = names.to_vec();
+    named.to_json()
 }
 
 fn one_line(text: &str) -> String {
