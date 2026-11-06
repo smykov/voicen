@@ -1,0 +1,15 @@
+guarantee: AC-2: damaged = Open folder and Delete only
+file: src/lib/calls/view.ts
+added_by: test-writer
+--- old
+    case "failed":
+    case "recovered":
+    case "damaged":
+      return ["openFolder", "delete"];
+--- new
+    case "damaged":
+      return ["copy", "openFolder", "delete"];
+    case "failed":
+    case "recovered":
+      return ["openFolder", "delete"];
+--- end

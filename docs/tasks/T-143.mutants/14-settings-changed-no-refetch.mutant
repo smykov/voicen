@@ -1,0 +1,9 @@
+guarantee: AC-7: RU renders after settings change
+file: src/routes/calls/+page.svelte
+added_by: test-writer
+--- old
+            applySettings(view);
+            void refreshList();
+--- new
+            applySettings(view);
+--- end

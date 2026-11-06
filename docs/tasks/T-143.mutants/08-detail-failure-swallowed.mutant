@@ -1,0 +1,9 @@
+guarantee: AC-4: detail failure shows the reason
+file: src/routes/calls/+page.svelte
+added_by: test-writer
+--- old
+        detail = null;
+        errorId = callErrorMessageId(error);
+--- new
+        detail = null;
+--- end

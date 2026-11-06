@@ -1,0 +1,8 @@
+guarantee: AC-6: export failure shows the access_denied reason
+file: src/lib/calls/view.ts
+added_by: test-writer
+--- old
+return isIoReason(reason) ? `calls.error.io.${reason}` : "calls.error.io.other";
+--- new
+return "calls.error.io.other";
+--- end

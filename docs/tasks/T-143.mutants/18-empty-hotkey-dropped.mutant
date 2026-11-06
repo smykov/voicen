@@ -1,0 +1,8 @@
+guarantee: AC-3: empty list shows the hotkey
+file: src/routes/calls/+page.svelte
+added_by: test-writer
+--- old
+{t("calls.empty", { hotkey })}
+--- new
+{t("calls.empty", { hotkey: "" })}
+--- end

@@ -1,0 +1,8 @@
+guarantee: AC-6: unknown reason maps to .other
+file: src/lib/calls/view.ts
+added_by: test-writer
+--- old
+return isIoReason(reason) ? `calls.error.io.${reason}` : "calls.error.io.other";
+--- new
+return isIoReason(reason) ? `calls.error.io.${reason}` : "calls.error.io";
+--- end

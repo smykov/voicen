@@ -1,0 +1,8 @@
+guarantee: AC-5: transcript text only as text nodes
+file: src/routes/calls/+page.svelte
+added_by: test-writer
+--- old
+{:else}{segment.text}{/if}{/each}
+--- new
+{:else}{@html segment.text}{/if}{/each}
+--- end

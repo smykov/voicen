@@ -1,0 +1,9 @@
+guarantee: AC-1: date and time as written
+file: src/lib/calls/view.ts
+added_by: test-writer
+--- old
+  return `${m[3]}.${m[2]}.${m[1]} ${m[4]}:${m[5]}`;
+--- new
+  const d = new Date(startedAt);
+  return `${pad2(d.getUTCDate())}.${pad2(d.getUTCMonth() + 1)}.${d.getUTCFullYear()} ${pad2(d.getUTCHours())}:${pad2(d.getUTCMinutes())}`;
+--- end

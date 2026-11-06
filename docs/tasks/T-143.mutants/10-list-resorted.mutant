@@ -1,0 +1,8 @@
+guarantee: AC-1: core order newest first, never re-sorted
+file: src/routes/calls/+page.svelte
+added_by: test-writer
+--- old
+{#each list.calls as call (`${call.root}\n${call.id}`)}
+--- new
+{#each [...list.calls].reverse() as call (`${call.root}\n${call.id}`)}
+--- end
