@@ -43,19 +43,33 @@
 //!   from 0 over the planner's lifetime.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::fs::File;
+use std::io::{self, BufReader};
+use std::panic::{self, AssertUnwindSafe};
+use std::path::{Path, PathBuf};
+use std::sync::{mpsc, Arc};
+use std::time::{Duration, Instant};
 
 use crate::audio::{AudioBuffer, SAMPLE_RATE};
-use crate::call::codec::TrackDecoder;
-use crate::call::{CallMeta, CallNotice, EngineRef, FinalOutcome, PassMode};
+use crate::call::codec::{OpusOggReader, TrackDecoder};
+use crate::call::storage::{
+    write_atomic, write_meta, Failure, Results, TRANSCRIPT_FILE, TRANSCRIPT_MD_FILE,
+};
+use crate::call::{
+    merge, render_markdown, CallId, CallMeta, CallNotice, CallState, ChunkInput, DecodeEnd,
+    EngineRef, FailReason, FinalOutcome, FinalStage, MergeInput, PassMode, StorageKind, Track,
+    TrackInput, TrackResult, TranscriptV1, VadFallbackCause,
+};
 use crate::clock::MonotonicClock;
 use crate::diag::event::LogEvent;
 use crate::engine::openai::{OpenAiCompatibleEngine, ResponseShape, Timed, TimedFailure};
 use crate::engine::TranscribeRequest;
-use crate::secrets::CredentialStore;
+use crate::secrets::{CredentialStore, KeySlot};
+use crate::settings::url::check_base_url;
 use crate::settings::Settings;
-use crate::vad::{SpeechSpan, SpeechSpans};
+use crate::timeouts::Timeouts;
+use crate::vad::{EnergyDetector, SpeechSpan, SpeechSpans, VadError};
 
 /// A gap between two spans shorter than this merges them.
 pub const PAUSE_MS: u64 = 300;
@@ -343,6 +357,10 @@ impl ChunkPlanner {
         audio: &AudioBuffer,
         spans: &[SpeechSpan],
     ) -> Vec<Chunk> {
+        debug_assert_eq!(
+            window_start_ms, self.ranges.known_end,
+            "windows must be fed contiguously"
+        );
         let samples = audio.samples();
         let len_ms = (samples.len() / SAMPLES_PER_MS) as u64;
         let whole_ms = samples.get(..ms_to_samples(len_ms)).unwrap_or(samples);
@@ -415,7 +433,23 @@ pub fn recut_timeless(chunk: &Chunk) -> Vec<Chunk> {
     .collect()
 }
 
-// ---- T-138 STUBS: compile-only; the developer replaces every body --------------------
+// ---- the pass runner (T-138) -----------------------------------------------------------
+//
+// One pass is a function of (call folder, its `CallMeta`, one settings snapshot, one key
+// read, the detectors). The calling thread is the dispatcher: it owns both decoders, one
+// `ChunkPlanner` and a short queue of ready chunks per track, and sends at most
+// `MAX_IN_FLIGHT` chunks at a time, each on its own scoped thread, in call-time start order
+// (track offset + chunk start, mic first on a tie). Every window goes through the primary
+// detector, or after its first `Err` (or with none) through energy spans for the rest of the
+// track: an error is never an empty span list. Once a chunk answers `Timeless`, that chunk
+// and every chunk dispatched after it are re-cut by `recut_timeless` and sent `Plain` (an
+// answer with times of a later chunk is dropped and re-sent). A track's first failure stops
+// its chunks; the other track runs on. The only files written are `transcript.md`, then
+// `transcript.json`, then `meta.json`, each through `storage::write_atomic`, after
+// `validate()` passed.
+
+/// Requests in flight at once, drawn from both tracks (#187).
+const MAX_IN_FLIGHT: usize = 3;
 
 /// The one engine call the pass makes: a seam so scheduling tests need no HTTP.
 pub trait TimedTranscriber: Send + Sync {
@@ -430,11 +464,12 @@ pub trait TimedTranscriber: Send + Sync {
 impl TimedTranscriber for OpenAiCompatibleEngine {
     fn transcribe_timed(
         &self,
-        _audio: &AudioBuffer,
-        _req: &TranscribeRequest,
-        _shape: ResponseShape,
+        audio: &AudioBuffer,
+        req: &TranscribeRequest,
+        shape: ResponseShape,
     ) -> Result<Timed, TimedFailure> {
-        unimplemented!("T-138 TimedTranscriber for OpenAiCompatibleEngine")
+        // The inherent method (T-136); a path call resolves it before this trait method.
+        OpenAiCompatibleEngine::transcribe_timed(self, audio, req, shape)
     }
 }
 
@@ -472,27 +507,721 @@ pub struct PassSources {
     pub system: Box<dyn TrackDecoder>,
 }
 
-/// The whole pass from `ready-to-transcribe`: builds the engine from `settings` and the key
-/// (once), opens the tracks of `call.dir`, and runs [`run_pass_with`].
+/// The whole pass from `ready-to-transcribe`: builds the API engine (whatever engine is
+/// active) once from `settings` and one read of the key, opens the tracks of `call.dir`, and
+/// runs the pass of [`run_pass_with`] with them.
+///
+/// A base URL `check_base_url` refuses, or a missing or blank key, fails the pass with
+/// `engine_not_set_up` before any request; a key store that cannot be read fails it with
+/// `key`. Either way both track results are `failed{reason}` and `failure.track` is `None`.
 pub fn run_pass(
-    _call: PassCall,
-    _settings: Arc<Settings>,
-    _creds: &dyn CredentialStore,
-    _deps: PassDeps<'_>,
+    call: PassCall,
+    settings: Arc<Settings>,
+    creds: &dyn CredentialStore,
+    deps: PassDeps<'_>,
 ) -> PassOutcome {
-    unimplemented!("T-138 run_pass")
+    let started = deps.clock.now();
+    let engine = match api_engine(&settings, creds) {
+        Ok(engine) => engine,
+        Err(reason) => {
+            let PassCall { dir, mut meta } = call;
+            let failed = TrackResult::Failed { reason };
+            meta.results = Results {
+                mic: failed.clone(),
+                system: failed,
+            };
+            let id = meta.id.clone();
+            let reason = write_failed(&dir, meta, reason, None, PassMode::Timed, deps.events);
+            return conclude(
+                &deps,
+                started,
+                id,
+                FinalOutcome::Failed { reason },
+                PassMode::Timed,
+            );
+        }
+    };
+    let request = TranscribeRequest {
+        language: settings.speech_language.clone(),
+        timeouts: Timeouts::from_settings(&settings.timeouts),
+    };
+    let engine_ref = EngineRef::new("api", &settings.api.model);
+    let sources = PassSources {
+        mic: open_track(&call, Track::Mic),
+        system: open_track(&call, Track::System),
+    };
+    pass(call, &engine, &request, engine_ref, sources, deps, started)
 }
 
 /// The pass from "write meta as transcribing" on, with the engine and the tracks given.
+/// `engine_ref` is written to `meta.json` `engines.transcription` and `transcript.json`.
 pub fn run_pass_with(
-    _call: PassCall,
-    _engine: &dyn TimedTranscriber,
-    _request: &TranscribeRequest,
-    _engine_ref: EngineRef,
-    _sources: PassSources,
-    _deps: PassDeps<'_>,
+    call: PassCall,
+    engine: &dyn TimedTranscriber,
+    request: &TranscribeRequest,
+    engine_ref: EngineRef,
+    sources: PassSources,
+    deps: PassDeps<'_>,
 ) -> PassOutcome {
-    unimplemented!("T-138 run_pass_with")
+    let started = deps.clock.now();
+    pass(call, engine, request, engine_ref, sources, deps, started)
+}
+
+/// The API engine of the snapshot, or why there is none (D3).
+fn api_engine(
+    settings: &Settings,
+    creds: &dyn CredentialStore,
+) -> Result<OpenAiCompatibleEngine, FailReason> {
+    let base_url =
+        check_base_url(&settings.api.base_url).map_err(|_| FailReason::EngineNotSetUp)?;
+    let key = creds
+        .read(KeySlot::TranscriptionApi)
+        .map_err(|_| FailReason::Key)?
+        .filter(|key| !key.expose().trim().is_empty())
+        .ok_or(FailReason::EngineNotSetUp)?;
+    Ok(OpenAiCompatibleEngine::new(
+        base_url,
+        settings.api.model.clone(),
+        Some(key),
+    ))
+}
+
+/// A track that could not be opened: its first read is the error, so it fails the track
+/// through the same path as a decode error.
+struct Unopened(DecodeEnd);
+
+impl TrackDecoder for Unopened {
+    fn next_window(&mut self, _max_ms: u32) -> Result<Option<AudioBuffer>, DecodeEnd> {
+        Err(self.0)
+    }
+}
+
+/// The decoder of `track`'s file in the call folder (its `meta.json` file name, final
+/// component only).
+fn open_track(call: &PassCall, track: Track) -> Box<dyn TrackDecoder> {
+    let name = call
+        .meta
+        .tracks
+        .iter()
+        .find(|t| t.track == track)
+        .and_then(|t| Path::new(&t.file).file_name());
+    let Some(name) = name else {
+        return Box::new(Unopened(DecodeEnd::Unreadable));
+    };
+    match File::open(call.dir.join(name)) {
+        Err(_) => Box::new(Unopened(DecodeEnd::Unreadable)),
+        Ok(file) => match OpusOggReader::open(BufReader::new(file)) {
+            Ok(reader) => Box::new(reader),
+            Err(end) => Box::new(Unopened(end)),
+        },
+    }
+}
+
+fn ms_of(d: Duration) -> u64 {
+    u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
+}
+
+fn since(clock: &dyn MonotonicClock, t0: Instant) -> Duration {
+    clock.now().saturating_duration_since(t0)
+}
+
+/// Logs `final_finished` and sends the notice: the one end of every pass.
+fn conclude(
+    deps: &PassDeps<'_>,
+    started: Instant,
+    call: CallId,
+    outcome: FinalOutcome,
+    mode: PassMode,
+) -> PassOutcome {
+    let ms = ms_of(since(&*deps.clock, started));
+    deps.events
+        .log(LogEvent::FinalPassFinished { outcome, mode, ms });
+    deps.events.notice(match outcome {
+        FinalOutcome::Ready => CallNotice::TranscriptReady { call },
+        FinalOutcome::Failed { reason } => CallNotice::PassFailed { reason },
+    });
+    PassOutcome { outcome, mode }
+}
+
+fn storage_failed(events: &dyn PassEvents, kind: StorageKind, error: &io::Error) {
+    events.log(LogEvent::CallStorageFailed {
+        kind,
+        os: error.raw_os_error(),
+    });
+}
+
+/// Writes `meta` as `failed{reason, track}`; returns the reason the pass ends with:
+/// `reason`, or `storage` when this write fails too (logged, never swallowed).
+fn write_failed(
+    dir: &Path,
+    mut meta: CallMeta,
+    reason: FailReason,
+    track: Option<Track>,
+    mode: PassMode,
+    events: &dyn PassEvents,
+) -> FailReason {
+    meta.state = CallState::Failed;
+    meta.failure = Some(Failure { reason, track });
+    meta.pass_mode = Some(mode);
+    match write_meta(dir, &meta) {
+        Ok(()) => reason,
+        Err(e) => {
+            storage_failed(events, StorageKind::Meta, &e);
+            FailReason::Storage
+        }
+    }
+}
+
+/// A chunk waiting to be sent, and how.
+struct Work {
+    chunk: Arc<Chunk>,
+    shape: ResponseShape,
+}
+
+/// A request in flight.
+struct Sent {
+    track: Track,
+    work: Work,
+    at: Instant,
+}
+
+/// An answered chunk. `chunk` keeps the audio of a timed answer only while a `Timeless`
+/// from an earlier dispatch could still make it be re-sent.
+struct Answer {
+    seq: u64,
+    start_ms: u64,
+    end_ms: u64,
+    shape: ResponseShape,
+    timed: Timed,
+    chunk: Option<Arc<Chunk>>,
+}
+
+/// What a lane needs from the pass to read and cut its track.
+struct Env<'a> {
+    primary: Option<Arc<dyn SpeechSpans>>,
+    energy: EnergyDetector,
+    events: &'a dyn PassEvents,
+    clock: Arc<dyn MonotonicClock>,
+}
+
+/// One track of the pass: its decoder, planner, ready chunks and answers.
+struct Lane {
+    track: Track,
+    offset_ms: u64,
+    decoder: Box<dyn TrackDecoder>,
+    planner: ChunkPlanner,
+    /// The track ms the next window starts at: the sum of the floored window lengths.
+    pos_ms: u64,
+    ended: bool,
+    /// The track's first failure and its place in dispatch order.
+    failed: Option<(FailReason, u64)>,
+    /// The primary detector is no longer asked for this track (D2).
+    fallen_back: bool,
+    /// Ready chunks, sorted by start.
+    queue: VecDeque<Work>,
+    answers: Vec<Answer>,
+    /// Chunks the planner cut for this track.
+    chunks: u32,
+    decode: Duration,
+    vad: Duration,
+    upload: Duration,
+}
+
+impl Lane {
+    fn new(track: Track, offset_ms: u64, decoder: Box<dyn TrackDecoder>) -> Lane {
+        Lane {
+            track,
+            offset_ms,
+            decoder,
+            planner: ChunkPlanner::new(PassMode::Timed),
+            pos_ms: 0,
+            ended: false,
+            failed: None,
+            fallen_back: false,
+            queue: VecDeque::new(),
+            answers: Vec::new(),
+            chunks: 0,
+            decode: Duration::ZERO,
+            vad: Duration::ZERO,
+            upload: Duration::ZERO,
+        }
+    }
+
+    fn live(&self) -> bool {
+        self.failed.is_none()
+    }
+
+    /// The call-time start of the next chunk to send, if any.
+    fn head(&self) -> Option<u64> {
+        if !self.live() {
+            return None;
+        }
+        self.queue
+            .front()
+            .map(|w| self.offset_ms.saturating_add(w.chunk.start_ms))
+    }
+
+    fn fail(&mut self, reason: FailReason, order: u64) {
+        if self.failed.is_none() {
+            self.failed = Some((reason, order));
+        }
+        self.queue.clear();
+    }
+
+    /// Decodes window after window until a chunk is ready, the track ends or fails. One
+    /// window at a time, asked for `TIMED_MAX_MS - carry_ms()` ms.
+    fn refill(&mut self, env: &Env<'_>, timeless: bool, order: u64) {
+        while self.queue.is_empty() && !self.ended && self.live() {
+            let ask = TIMED_MAX_MS.saturating_sub(self.planner.carry_ms()).max(1);
+            let ask = u32::try_from(ask).unwrap_or(u32::MAX);
+            let t0 = env.clock.now();
+            let window = self.decoder.next_window(ask);
+            self.decode += since(&*env.clock, t0);
+            let chunks = match window {
+                Ok(Some(audio)) if !audio.samples().is_empty() => {
+                    let spans = self.spans(env, &audio);
+                    let at = self.pos_ms;
+                    let len_ms = (audio.samples().len() / SAMPLES_PER_MS) as u64;
+                    self.pos_ms = at.saturating_add(len_ms);
+                    self.planner.feed(at, &audio, &spans)
+                }
+                // The end, or a damaged tail after the readable prefix (D5).
+                Ok(_) | Err(DecodeEnd::Damaged) => {
+                    self.ended = true;
+                    self.planner.finish()
+                }
+                Err(DecodeEnd::Unreadable | DecodeEnd::Codec) => {
+                    self.fail(FailReason::Storage, order);
+                    Vec::new()
+                }
+            };
+            self.chunks = self
+                .chunks
+                .saturating_add(u32::try_from(chunks.len()).unwrap_or(u32::MAX));
+            for chunk in chunks {
+                if timeless {
+                    self.requeue(&chunk);
+                } else {
+                    self.queue.push_back(Work {
+                        chunk: Arc::new(chunk),
+                        shape: ResponseShape::Segments,
+                    });
+                }
+            }
+        }
+    }
+
+    /// The window's speech spans (D2): the primary's `Ok`; on its first `Err` (or with no
+    /// primary) one `vad_fallback` and energy spans for this window and the rest of the
+    /// track. An energy error keeps the whole window as speech, never drops it.
+    fn spans(&mut self, env: &Env<'_>, audio: &AudioBuffer) -> Vec<SpeechSpan> {
+        if !self.fallen_back {
+            let cause = match &env.primary {
+                Some(primary) => {
+                    let t0 = env.clock.now();
+                    let got = primary.speech_spans(audio);
+                    self.vad += since(&*env.clock, t0);
+                    match got {
+                        Ok(spans) => return spans,
+                        Err(VadError::Unavailable) => VadFallbackCause::Unavailable,
+                        Err(_) => VadFallbackCause::Error,
+                    }
+                }
+                None => VadFallbackCause::Unavailable,
+            };
+            env.events.log(LogEvent::VadFallback {
+                track: self.track,
+                cause,
+            });
+            self.fallen_back = true;
+        }
+        let t0 = env.clock.now();
+        let got = env.energy.speech_spans(audio);
+        self.vad += since(&*env.clock, t0);
+        got.unwrap_or_else(|_| {
+            vec![SpeechSpan {
+                start_ms: 0,
+                end_ms: (audio.samples().len() / SAMPLES_PER_MS) as u64,
+            }]
+        })
+    }
+
+    /// Queues `chunk` again as time-less pieces sent `Plain`, in start order.
+    fn requeue(&mut self, chunk: &Chunk) {
+        if !self.live() {
+            return;
+        }
+        for piece in recut_timeless(chunk) {
+            self.queue.push_back(Work {
+                chunk: Arc::new(piece),
+                shape: ResponseShape::Plain,
+            });
+        }
+        self.queue
+            .make_contiguous()
+            .sort_by_key(|w| w.chunk.start_ms);
+    }
+
+    /// The chunks of the answers, in start order, as `merge` takes them.
+    fn inputs(&self) -> Vec<ChunkInput> {
+        let mut answers: Vec<&Answer> = self.answers.iter().collect();
+        answers.sort_by_key(|a| a.start_ms);
+        answers
+            .into_iter()
+            .map(|a| ChunkInput {
+                start_ms: a.start_ms,
+                end_ms: a.end_ms,
+                text: a.timed.text.clone(),
+                lang: a.timed.language,
+                segments: match a.shape {
+                    ResponseShape::Segments => a.timed.segments.clone(),
+                    ResponseShape::Plain => None,
+                },
+            })
+            .collect()
+    }
+
+    fn log_stage(&self, events: &dyn PassEvents, stage: FinalStage, d: Duration) {
+        events.log(LogEvent::FinalPassStage {
+            track: self.track,
+            stage,
+            ms: ms_of(d),
+            chunks: self.chunks,
+        });
+    }
+}
+
+/// The dispatcher's state over both lanes.
+struct Run {
+    mic: Lane,
+    system: Lane,
+    mode: PassMode,
+    next_seq: u64,
+    in_flight: BTreeMap<u64, Sent>,
+    /// In-flight requests whose answer is dropped (they were re-queued time-less).
+    discarded: BTreeSet<u64>,
+}
+
+type Reply = (u64, std::thread::Result<Result<Timed, TimedFailure>>);
+
+impl Run {
+    fn lane(&mut self, track: Track) -> &mut Lane {
+        match track {
+            Track::Mic => &mut self.mic,
+            Track::System => &mut self.system,
+        }
+    }
+
+    /// The track whose next chunk starts first on the call timeline; mic first on a tie.
+    fn pick(&self) -> Option<Track> {
+        match (self.mic.head(), self.system.head()) {
+            (Some(mic), Some(system)) if system < mic => Some(Track::System),
+            (Some(_), _) => Some(Track::Mic),
+            (None, Some(_)) => Some(Track::System),
+            (None, None) => None,
+        }
+    }
+
+    fn drive(&mut self, env: &Env<'_>, engine: &dyn TimedTranscriber, request: &TranscribeRequest) {
+        std::thread::scope(|scope| {
+            let (tx, rx) = mpsc::channel::<Reply>();
+            loop {
+                while self.in_flight.len() < MAX_IN_FLIGHT {
+                    let timeless = self.mode == PassMode::Timeless;
+                    let order = self.next_seq;
+                    self.mic.refill(env, timeless, order);
+                    self.system.refill(env, timeless, order);
+                    let Some(track) = self.pick() else { break };
+                    let Some(work) = self.lane(track).queue.pop_front() else {
+                        break;
+                    };
+                    let seq = self.next_seq;
+                    self.next_seq += 1;
+                    let (chunk, shape, tx) = (work.chunk.clone(), work.shape, tx.clone());
+                    scope.spawn(move || {
+                        let reply = panic::catch_unwind(AssertUnwindSafe(|| {
+                            engine.transcribe_timed(&chunk.audio, request, shape)
+                        }));
+                        // The receiver lives until every request is answered.
+                        let _ = tx.send((seq, reply));
+                    });
+                    let at = env.clock.now();
+                    self.in_flight.insert(seq, Sent { track, work, at });
+                }
+                if self.in_flight.is_empty() {
+                    break;
+                }
+                let Ok((seq, reply)) = rx.recv() else { break };
+                match reply {
+                    Ok(answer) => self.on_answer(env, seq, answer),
+                    // An engine panic is the engine's bug: re-raised, not turned into a reason.
+                    Err(payload) => panic::resume_unwind(payload),
+                }
+            }
+        });
+    }
+
+    fn on_answer(&mut self, env: &Env<'_>, seq: u64, answer: Result<Timed, TimedFailure>) {
+        let Some(sent) = self.in_flight.remove(&seq) else {
+            return;
+        };
+        let took = since(&*env.clock, sent.at);
+        let discarded = self.discarded.remove(&seq);
+        let lane = self.lane(sent.track);
+        lane.upload += took;
+        if !discarded && lane.live() {
+            match answer {
+                Ok(timed) => {
+                    let keep = sent.work.shape == ResponseShape::Segments;
+                    lane.answers.push(Answer {
+                        seq,
+                        start_ms: sent.work.chunk.start_ms,
+                        end_ms: sent.work.chunk.end_ms,
+                        shape: sent.work.shape,
+                        timed,
+                        chunk: keep.then_some(sent.work.chunk),
+                    });
+                }
+                Err(TimedFailure::Timeless) if sent.work.shape == ResponseShape::Segments => {
+                    self.go_timeless(seq, &sent);
+                }
+                // A plain request has no times to refuse: the server is at fault.
+                Err(TimedFailure::Timeless) => lane.fail(FailReason::Provider, seq),
+                Err(TimedFailure::Failed(reason)) => lane.fail(reason, seq),
+            }
+        }
+        self.release_audio();
+    }
+
+    /// Chunk `k` answered without times (D1): it and every chunk dispatched after it go
+    /// time-less, answered, in flight or still queued; chunks before it keep their times.
+    fn go_timeless(&mut self, k: u64, sent: &Sent) {
+        self.mode = PassMode::Timeless;
+        self.lane(sent.track).requeue(&sent.work.chunk);
+        let later: Vec<(u64, Track, Arc<Chunk>)> = self
+            .in_flight
+            .iter()
+            .filter(|(seq, s)| {
+                **seq > k
+                    && s.work.shape == ResponseShape::Segments
+                    && !self.discarded.contains(seq)
+            })
+            .map(|(seq, s)| (*seq, s.track, s.work.chunk.clone()))
+            .collect();
+        for (seq, track, chunk) in later {
+            self.discarded.insert(seq);
+            self.lane(track).requeue(&chunk);
+        }
+        for lane in [&mut self.mic, &mut self.system] {
+            let answers = std::mem::take(&mut lane.answers);
+            for answer in answers {
+                match &answer.chunk {
+                    Some(chunk) if answer.seq > k && answer.shape == ResponseShape::Segments => {
+                        let chunk = chunk.clone();
+                        lane.requeue(&chunk);
+                    }
+                    _ => lane.answers.push(answer),
+                }
+            }
+            let queued = std::mem::take(&mut lane.queue);
+            for work in queued {
+                match work.shape {
+                    ResponseShape::Segments => lane.requeue(&work.chunk),
+                    ResponseShape::Plain => lane.queue.push_back(work),
+                }
+            }
+            lane.queue
+                .make_contiguous()
+                .sort_by_key(|w| w.chunk.start_ms);
+        }
+    }
+
+    /// Drops the audio of timed answers no `Timeless` can reach any more: those dispatched
+    /// before the earliest timed request still in flight (or all, with none in flight).
+    fn release_audio(&mut self) {
+        let floor = self
+            .in_flight
+            .iter()
+            .find(|(seq, s)| {
+                s.work.shape == ResponseShape::Segments && !self.discarded.contains(seq)
+            })
+            .map(|(seq, _)| *seq);
+        for lane in [&mut self.mic, &mut self.system] {
+            for answer in &mut lane.answers {
+                if floor.is_none_or(|f| answer.seq < f) {
+                    answer.chunk = None;
+                }
+            }
+        }
+    }
+}
+
+/// The pass from "write meta as transcribing" on.
+fn pass(
+    call: PassCall,
+    engine: &dyn TimedTranscriber,
+    request: &TranscribeRequest,
+    engine_ref: EngineRef,
+    sources: PassSources,
+    deps: PassDeps<'_>,
+    started: Instant,
+) -> PassOutcome {
+    let PassCall { dir, mut meta } = call;
+    let events = deps.events;
+    let id = meta.id.clone();
+    meta.state = CallState::Transcribing;
+    meta.engines.transcription = Some(engine_ref.clone());
+    if let Err(e) = write_meta(&dir, &meta) {
+        storage_failed(events, StorageKind::Meta, &e);
+        let _ = write_failed(
+            &dir,
+            meta,
+            FailReason::Storage,
+            None,
+            PassMode::Timed,
+            events,
+        );
+        let outcome = FinalOutcome::Failed {
+            reason: FailReason::Storage,
+        };
+        return conclude(&deps, started, id, outcome, PassMode::Timed);
+    }
+
+    let offset = |track: Track| {
+        meta.tracks
+            .iter()
+            .find(|t| t.track == track)
+            .map_or(0, |t| t.start_offset_ms)
+    };
+    let mut run = Run {
+        mic: Lane::new(Track::Mic, offset(Track::Mic), sources.mic),
+        system: Lane::new(Track::System, offset(Track::System), sources.system),
+        mode: PassMode::Timed,
+        next_seq: 0,
+        in_flight: BTreeMap::new(),
+        discarded: BTreeSet::new(),
+    };
+    let env = Env {
+        primary: deps.primary.clone(),
+        energy: EnergyDetector::new(),
+        events,
+        clock: deps.clock.clone(),
+    };
+    run.drive(&env, engine, request);
+    let mode = run.mode;
+    for lane in [&run.mic, &run.system] {
+        lane.log_stage(events, FinalStage::Decode, lane.decode);
+        lane.log_stage(events, FinalStage::Vad, lane.vad);
+        lane.log_stage(events, FinalStage::Upload, lane.upload);
+    }
+
+    // Merge the tracks that are done; the lines of each are its result (D4).
+    let t0 = deps.clock.now();
+    let duration_ms = meta.duration_ms.unwrap_or_else(|| {
+        [&run.mic, &run.system]
+            .iter()
+            .map(|l| l.offset_ms.saturating_add(l.pos_ms))
+            .min()
+            .unwrap_or(0)
+    });
+    let merged = merge(&MergeInput {
+        call_id: meta.id.clone(),
+        title: meta.title.clone(),
+        started_at: meta.started_at.clone(),
+        duration_ms,
+        speakers: meta.speakers.clone(),
+        engine: engine_ref,
+        tracks: [&run.mic, &run.system]
+            .into_iter()
+            .filter(|l| l.live())
+            .map(|l| TrackInput {
+                track: l.track,
+                start_offset_ms: l.offset_ms,
+                chunks: l.inputs(),
+            })
+            .collect(),
+    });
+    let result_of = |lane: &Lane| match lane.failed {
+        Some((reason, _)) => TrackResult::Failed { reason },
+        None => TrackResult::Done {
+            segments: merged
+                .segments
+                .iter()
+                .filter(|s| s.track == lane.track.as_str())
+                .cloned()
+                .collect(),
+        },
+    };
+    meta.results = Results {
+        mic: result_of(&run.mic),
+        system: result_of(&run.system),
+    };
+    let merge_took = since(&*deps.clock, t0);
+    for lane in [&run.mic, &run.system] {
+        lane.log_stage(events, FinalStage::Merge, merge_took);
+    }
+
+    let t0 = deps.clock.now();
+    let outcome = match (run.mic.failed, run.system.failed) {
+        (None, None) => write_ready(&dir, meta, &merged, mode, events),
+        (failed_mic, failed_system) => {
+            let (reason, track) = match (failed_mic, failed_system) {
+                (Some((reason, _)), None) => (reason, Some(Track::Mic)),
+                (None, Some((reason, _))) => (reason, Some(Track::System)),
+                (Some(m), Some(s)) => (if s.1 < m.1 { s.0 } else { m.0 }, None),
+                (None, None) => (FailReason::Storage, None),
+            };
+            let reason = write_failed(&dir, meta, reason, track, mode, events);
+            FinalOutcome::Failed { reason }
+        }
+    };
+    let write_took = since(&*deps.clock, t0);
+    for lane in [&run.mic, &run.system] {
+        lane.log_stage(events, FinalStage::Write, write_took);
+    }
+    conclude(&deps, started, id, outcome, mode)
+}
+
+/// Both tracks are done (D6): validate, render, then `transcript.md`, `transcript.json` and
+/// `meta.json` (`ready`), each whole through `write_atomic`. Any failure is logged and gives
+/// `failed: storage` with a best-effort failed `meta.json`.
+fn write_ready(
+    dir: &Path,
+    mut meta: CallMeta,
+    transcript: &TranscriptV1,
+    mode: PassMode,
+    events: &dyn PassEvents,
+) -> FinalOutcome {
+    let failed = |meta: CallMeta| {
+        let _ = write_failed(dir, meta, FailReason::Storage, None, mode, events);
+        FinalOutcome::Failed {
+            reason: FailReason::Storage,
+        }
+    };
+    if let Err((rule, segment)) = transcript.validate() {
+        events.log(LogEvent::TranscriptInvalid { rule, segment });
+        return failed(meta);
+    }
+    let markdown = render_markdown(transcript, &meta.title, &meta.speakers);
+    for (name, bytes) in [
+        (TRANSCRIPT_MD_FILE, markdown.into_bytes()),
+        (TRANSCRIPT_FILE, transcript.to_json().into_bytes()),
+    ] {
+        if let Err(e) = write_atomic(dir, name, &bytes) {
+            storage_failed(events, StorageKind::Transcript, &e);
+            return failed(meta);
+        }
+    }
+    meta.state = CallState::Ready;
+    meta.failure = None;
+    meta.pass_mode = Some(mode);
+    match write_meta(dir, &meta) {
+        Ok(()) => FinalOutcome::Ready,
+        Err(e) => {
+            storage_failed(events, StorageKind::Meta, &e);
+            failed(meta)
+        }
+    }
 }
 
 #[cfg(test)]

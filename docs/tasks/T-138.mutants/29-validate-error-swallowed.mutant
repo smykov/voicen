@@ -1,0 +1,9 @@
+guarantee: AC: transcript validated before write
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: test-writer
+--- old
+        events.log(LogEvent::TranscriptInvalid { rule, segment });
+        return failed(meta);
+--- new
+        events.log(LogEvent::TranscriptInvalid { rule, segment });
+--- end

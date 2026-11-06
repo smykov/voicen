@@ -1,1 +1,1 @@
-cargo test -j2 -p voicen-core --lib -- call::storage::tests::write_ call::final_pass::tests call::final_pass::pass_tests::track_results_have call::final_pass::pass_tests::characterization
+cargo test -j2 -p voicen-core --lib --test final_pass_http -- call::storage::tests call::final_pass a_builtin_engine a_blank_api_key a_refused_base_url an_unreadable_key_store a_key_saved_during

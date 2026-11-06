@@ -1,0 +1,8 @@
+guarantee: AC: vad_fallback cause=unavailable
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: test-writer
+--- old
+Err(VadError::Unavailable) => VadFallbackCause::Unavailable,
+--- new
+Err(VadError::Unavailable) => VadFallbackCause::Error,
+--- end

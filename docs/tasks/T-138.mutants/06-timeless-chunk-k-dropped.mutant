@@ -1,0 +1,9 @@
+guarantee: AC 400: chunk k is re-sent time-less
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: test-writer
+--- old
+        self.lane(sent.track).requeue(&sent.work.chunk);
+        let later
+--- new
+        let later
+--- end

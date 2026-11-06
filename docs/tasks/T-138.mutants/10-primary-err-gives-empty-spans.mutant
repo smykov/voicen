@@ -1,0 +1,8 @@
+guarantee: AC: a primary Err never becomes empty spans
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: test-writer
+--- old
+Err(_) => VadFallbackCause::Error,
+--- new
+Err(_) => return Vec::new(),
+--- end

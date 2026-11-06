@@ -1,0 +1,8 @@
+guarantee: AC: decoding one window at a time (<=120 s plus carry)
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: test-writer
+--- old
+TIMED_MAX_MS.saturating_sub(self.planner.carry_ms())
+--- new
+TIMED_MAX_MS
+--- end

@@ -1,0 +1,12 @@
+guarantee: AC: failed meta write is reported, not swallowed
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: test-writer
+--- old
+            storage_failed(events, StorageKind::Meta, &e);
+            FailReason::Storage
+
+--- new
+            let _ = e;
+            reason
+
+--- end

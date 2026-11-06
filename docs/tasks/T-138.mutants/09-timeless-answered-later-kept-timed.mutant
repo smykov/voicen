@@ -1,0 +1,8 @@
+guarantee: AC 400: every later chunk (answered) goes time-less
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: test-writer
+--- old
+Some(chunk) if answer.seq > k &&
+--- new
+Some(chunk) if answer.seq > u64::MAX &&
+--- end

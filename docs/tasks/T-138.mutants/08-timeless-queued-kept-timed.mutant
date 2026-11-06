@@ -1,0 +1,9 @@
+guarantee: AC 400: every later chunk (queued) goes time-less
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: test-writer
+equivalent: a timed window plus its carry is at most 120 s, so the planner emits one timed chunk per window and a Segments chunk is never queued behind another when a 400 arrives
+--- old
+ResponseShape::Segments => lane.requeue(&work.chunk),
+--- new
+ResponseShape::Segments => lane.queue.push_back(work),
+--- end

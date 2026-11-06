@@ -1,0 +1,8 @@
+guarantee: AC: per-track results kept in meta results
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: test-writer
+--- old
+.filter(|s| s.track == lane.track.as_str())
+--- new
+.filter(|_| true)
+--- end

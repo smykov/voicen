@@ -1,0 +1,8 @@
+guarantee: AC: at most 3 requests in flight
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: test-writer
+--- old
+const MAX_IN_FLIGHT: usize = 3;
+--- new
+const MAX_IN_FLIGHT: usize = 4;
+--- end

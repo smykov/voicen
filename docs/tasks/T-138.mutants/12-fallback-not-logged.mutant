@@ -1,0 +1,11 @@
+guarantee: AC: Silero unavailable -> vad_fallback logged
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: test-writer
+--- old
+            env.events.log(LogEvent::VadFallback {
+                track: self.track,
+                cause,
+            });
+--- new
+            let _ = cause;
+--- end

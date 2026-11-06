@@ -1,0 +1,11 @@
+guarantee: AC: first failure is the one kept
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: test-writer
+equivalent: fail() is only called while the lane is live (on_answer and refill check it), so a second failure never reaches it
+--- old
+if self.failed.is_none() {
+            self.failed = Some((reason, order));
+--- new
+if true {
+            self.failed = Some((reason, order));
+--- end

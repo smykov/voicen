@@ -1,0 +1,8 @@
+guarantee: AC: both tracks failed -> first failure in dispatch order
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: test-writer
+--- old
+(if s.1 < m.1 { s.0 } else { m.0 }, None)
+--- new
+(if s.1 > m.1 { s.0 } else { m.0 }, None)
+--- end

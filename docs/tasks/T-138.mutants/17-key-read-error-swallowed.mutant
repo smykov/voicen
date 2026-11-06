@@ -1,0 +1,10 @@
+guarantee: AC: key store read Err -> failed key
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: test-writer
+--- old
+.map_err(|_| FailReason::Key)?
+        .filter
+--- new
+.unwrap_or(None)
+        .filter
+--- end

@@ -107,10 +107,9 @@ pub struct Engines {
 }
 
 /// A track's final-pass result (data-model "FinalPass and the queue": `pending` |
-/// `done{segments}` | `failed{reason}`). This build writes and reads only `pending`;
-/// `done{segments}` and `failed{reason}` come with the final-pass write (T-138/T-146),
-/// so until then a `meta.json` carrying either lists as damaged.
-// T-138 STUBS (type shape only; the developer owns the docs and the `list` handling)
+/// `done{segments}` | `failed{reason}`). A new call writes `pending`; the final pass
+/// (`call::final_pass`) writes `done` with the track's merged segments or `failed` with the
+/// track's reason, and `list` reads all three.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TrackResult {
@@ -378,7 +377,10 @@ impl CallStore {
 // ---- The Calls IPC wire, its path guard and export (T-141, contracts/ipc.md) -------------
 
 /// The file name of a call's transcript.
-const TRANSCRIPT_FILE: &str = "transcript.json";
+/// The transcript file of a call folder, written by the final pass.
+pub(crate) const TRANSCRIPT_FILE: &str = "transcript.json";
+/// Its Markdown rendering, written by the final pass before `transcript.json`.
+pub(crate) const TRANSCRIPT_MD_FILE: &str = "transcript.md";
 /// The suffix of an export's tmp file next to its target; `-1` … `-9` on a clash.
 const EXPORT_TMP_SUFFIX: &str = ".voicen-tmp";
 /// The highest clash suffix of an export's tmp file.

@@ -1,0 +1,9 @@
+guarantee: AC 400: pass_mode timeless recorded
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: test-writer
+--- old
+        self.mode = PassMode::Timeless;
+        self.lane(sent.track).requeue(&sent.work.chunk);
+--- new
+        self.lane(sent.track).requeue(&sent.work.chunk);
+--- end

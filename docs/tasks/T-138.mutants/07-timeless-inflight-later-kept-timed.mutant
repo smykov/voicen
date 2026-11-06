@@ -1,0 +1,10 @@
+guarantee: AC 400: every later chunk (in flight) goes time-less
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: test-writer
+--- old
+**seq > k
+
+--- new
+**seq > u64::MAX
+
+--- end

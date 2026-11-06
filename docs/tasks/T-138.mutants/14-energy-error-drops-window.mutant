@@ -1,0 +1,14 @@
+guarantee: AC: a detector error never drops audio
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: test-writer
+equivalent: EnergyDetector::speech_spans is always Ok (see its doc in vad energy), so the error branch cannot be reached
+--- old
+        got.unwrap_or_else(|_| {
+            vec![SpeechSpan {
+                start_ms: 0,
+                end_ms: (audio.samples().len() / SAMPLES_PER_MS) as u64,
+            }]
+        })
+--- new
+        got.unwrap_or_default()
+--- end

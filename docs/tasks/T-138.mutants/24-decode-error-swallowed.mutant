@@ -1,0 +1,10 @@
+guarantee: AC: unreadable/codec track fails with storage
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: test-writer
+--- old
+                    self.fail(FailReason::Storage, order);
+                    Vec::new()
+--- new
+                    self.ended = true;
+                    Vec::new()
+--- end

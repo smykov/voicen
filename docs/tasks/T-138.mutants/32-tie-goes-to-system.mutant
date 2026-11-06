@@ -1,0 +1,8 @@
+guarantee: AC: start order, mic first on a tie
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: test-writer
+--- old
+(Some(mic), Some(system)) if system < mic
+--- new
+(Some(mic), Some(system)) if system <= mic
+--- end

@@ -1,0 +1,14 @@
+guarantee: AC: a track's first failure cancels its remaining chunks
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: test-writer
+equivalent: Lane::live() is false after a failure and refill, head and requeue all check it, so the queue is never read again
+--- old
+        self.queue.clear();
+    }
+
+    /// Decodes
+--- new
+    }
+
+    /// Decodes
+--- end

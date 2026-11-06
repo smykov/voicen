@@ -1431,3 +1431,184 @@ fn track_results_have_the_meta_json_shape() {
         assert_eq!(back, value);
     }
 }
+
+// ---- failure-branch bite additions (T-138) ------------------------------------------------
+
+/// Waits (bounded) until `flag` is set, then a moment for the answer to be handed in.
+fn wait_for(flag: &AtomicBool) {
+    for _ in 0..300 {
+        if flag.load(Ordering::SeqCst) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    std::thread::sleep(Duration::from_millis(150));
+}
+
+#[test]
+fn a_chunk_answered_with_times_before_chunk_k_said_no_times_is_sent_again_time_less() {
+    // Chunk 2 (start >= 200 s) is answered with times first; only then does chunk 1 (k)
+    // answer "no times". "Every later chunk" includes the one already answered: it is
+    // re-sent as plain pieces and no line of it comes from the timed answer.
+    let later_done = Arc::new(AtomicBool::new(false));
+    let flag = later_done.clone();
+    let engine = FakeEngine::new(true, move |r| {
+        if r.shape == ResponseShape::Segments && r.start >= 200_000 {
+            flag.store(true, Ordering::SeqCst);
+        }
+        if r.shape == ResponseShape::Segments && (100_000..200_000).contains(&r.start) {
+            wait_for(&flag);
+            return Err(TimedFailure::Timeless);
+        }
+        answer_ok(r)
+    });
+    let out = run_with(
+        Src::marked(0, 400_000),
+        Src::marked(1, 0),
+        engine,
+        Opts::new(marked_primary(&SPEECH)),
+    );
+    assert!(
+        later_done.load(Ordering::SeqCst),
+        "scenario reached chunk 2"
+    );
+    assert_eq!(out.out.mode, PassMode::Timeless);
+    let log = out.log();
+    let plain: Vec<&Req> = log
+        .iter()
+        .filter(|r| r.shape == ResponseShape::Plain)
+        .collect();
+    assert_covered_once(&plain, &SPEECH[1..]);
+    let t = some(out.transcript(), "transcript.json");
+    ok(t.validate());
+    let mut want = vec![line(1_800, 2_800, Track::Mic, "mic@800", None)];
+    want.extend(plain.iter().map(|r| {
+        line(
+            r.start,
+            r.start + r.len,
+            Track::Mic,
+            &format!("p{}", r.start),
+            Some("de"),
+        )
+    }));
+    assert_eq!(lines(&t), sorted(want));
+}
+
+#[test]
+fn a_plain_request_that_is_refused_for_times_fails_the_track_with_provider() {
+    // Every request says "no times", plain ones too: the server is at fault, the track fails.
+    let engine = FakeEngine::new(true, |_| Err(TimedFailure::Timeless));
+    let speech = [(1_000u64, 5_000u64)];
+    let out = run_with(
+        Src::marked(0, 10_000),
+        Src::marked(1, 0),
+        engine,
+        Opts::new(marked_primary(&speech)),
+    );
+    assert_eq!(
+        out.out.outcome,
+        FinalOutcome::Failed {
+            reason: FailReason::Provider
+        }
+    );
+    assert_eq!(
+        out.meta().results.mic,
+        TrackResult::Failed {
+            reason: FailReason::Provider
+        }
+    );
+    assert!(!out.names().iter().any(|n| n.starts_with("transcript")));
+}
+
+#[test]
+fn when_both_tracks_fail_the_reason_is_the_first_failure_in_dispatch_order() {
+    // Mic's chunk is dispatched first (tie, mic first) but fails last, after the system
+    // chunk failed with another reason: the call's reason is mic's, with no single track.
+    let system_failed = Arc::new(AtomicBool::new(false));
+    let flag = system_failed.clone();
+    let engine = FakeEngine::new(true, move |r| {
+        if r.track == Track::System {
+            flag.store(true, Ordering::SeqCst);
+            return Err(TimedFailure::Failed(FailReason::Provider));
+        }
+        wait_for(&flag);
+        Err(TimedFailure::Failed(FailReason::Key))
+    });
+    let speech = [(1_000u64, 5_000u64)];
+    let out = run_with(
+        Src::marked(0, 10_000),
+        Src::marked(1, 10_000),
+        engine,
+        Opts::new(marked_primary(&speech)),
+    );
+    assert!(system_failed.load(Ordering::SeqCst));
+    assert_eq!(
+        out.out.outcome,
+        FinalOutcome::Failed {
+            reason: FailReason::Key
+        }
+    );
+    assert_eq!(
+        out.meta().failure,
+        Some(Failure {
+            reason: FailReason::Key,
+            track: None
+        })
+    );
+    assert_eq!(
+        out.meta().results.system,
+        TrackResult::Failed {
+            reason: FailReason::Provider
+        }
+    );
+}
+
+#[test]
+fn a_failed_meta_write_after_a_track_failure_is_reported_and_ends_with_storage() {
+    // The chunk fails (provider); the `failed` meta then cannot be written: the pass ends
+    // with `storage`, logged, never with the provider reason as if the meta were saved.
+    let dir = Arc::new(Mutex::new(None::<PathBuf>));
+    let planted = dir.clone();
+    let engine = FakeEngine::new(true, |_| Err(TimedFailure::Failed(FailReason::Provider)))
+        .on_request(move |_| {
+            if let Some(d) = lock(&planted).take() {
+                let _ = fs::create_dir(d.join("meta.json.tmp"));
+            }
+        });
+    let speech = [(1_000u64, 5_000u64)];
+    let out = run_with(
+        Src::marked(0, 10_000),
+        Src::marked(1, 0),
+        engine,
+        Opts::new(marked_primary(&speech)).prep({
+            let dir = dir.clone();
+            move |_, d| *lock(&dir) = Some(d.to_path_buf())
+        }),
+    );
+    storage_failed(&out, StorageKind::Meta);
+}
+
+#[test]
+fn a_pauseless_track_is_read_in_windows_that_leave_room_for_the_carry() {
+    // Speech without a pause: every hard cut leaves a carry, so the next window is asked
+    // for less than TIMED_MAX_MS; what the planner holds never exceeds one window.
+    let speech = [(0u64, 400_000u64)];
+    let out = run_with(
+        Src::marked(0, 400_000),
+        Src::marked(1, 0),
+        FakeEngine::new(true, answer_ok),
+        Opts::new(marked_primary(&speech)),
+    );
+    assert_eq!(out.out.outcome, FinalOutcome::Ready);
+    let asks = lock(&out.asks[0]).clone();
+    let log = out.log();
+    assert!(
+        log.iter().all(|r| r.len <= 120_000),
+        "a chunk is at most 120 s: {log:?}"
+    );
+    assert_covered_once(&log.iter().collect::<Vec<_>>(), &speech);
+    assert!(
+        asks.iter().any(|&a| a < 120_000),
+        "a window asked while the planner carries audio is shorter than 120 s: {asks:?}"
+    );
+}

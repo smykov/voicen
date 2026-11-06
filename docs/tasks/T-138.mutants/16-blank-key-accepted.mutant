@@ -1,0 +1,8 @@
+guarantee: AC: no API key -> engine_not_set_up before any request
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: test-writer
+--- old
+.filter(|key| !key.expose().trim().is_empty())
+--- new
+.filter(|_| true)
+--- end

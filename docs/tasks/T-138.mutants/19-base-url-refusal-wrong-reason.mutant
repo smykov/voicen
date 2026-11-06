@@ -1,0 +1,8 @@
+guarantee: AC: refused base url -> engine_not_set_up
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: test-writer
+--- old
+check_base_url(&settings.api.base_url).map_err(|_| FailReason::EngineNotSetUp)?;
+--- new
+check_base_url(&settings.api.base_url).map_err(|_| FailReason::Provider)?;
+--- end

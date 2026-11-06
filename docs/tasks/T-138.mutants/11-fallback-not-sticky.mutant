@@ -1,0 +1,10 @@
+guarantee: AC: Silero unavailable -> energy spans, one vad_fallback per track
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: test-writer
+--- old
+            self.fallen_back = true;
+
+--- new
+            self.fallen_back = false;
+
+--- end
