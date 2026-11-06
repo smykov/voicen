@@ -1,0 +1,9 @@
+guarantee: a refused action's alert is not cleared by a later successful list refetch
+file: src/routes/calls/+page.svelte
+added_by: test-writer
+--- old
+    if (error?.source === source) error = null;
+--- new
+    void source;
+    error = null;
+--- end

@@ -1,0 +1,9 @@
+guarantee: AC-4 failure branch: after a refused calls_get, a successful detail refetch clears the alert
+file: src/routes/calls/+page.svelte
+added_by: test-writer
+--- old
+        detail = next;
+        clearErrorOf("detail");
+--- new
+        detail = next;
+--- end

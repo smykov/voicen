@@ -3,7 +3,7 @@ file: src/routes/calls/+page.svelte
 added_by: test-writer
 --- old
         detail = null;
-        errorId = callErrorMessageId(error);
+        showError(callErrorMessageId(refusal), "detail");
 --- new
         detail = null;
 --- end

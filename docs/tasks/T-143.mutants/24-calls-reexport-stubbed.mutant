@@ -1,0 +1,9 @@
+guarantee: D8 / AC-7: the Calls page subscribes to settings://changed through callsApi's re-export
+file: src/lib/calls/callsApi.ts
+added_by: test-writer
+--- old
+export { onSettingsChanged } from "../settings/settingsApi";
+--- new
+export const onSettingsChanged = (handler: (view: never) => void): Promise<UnlistenFn> =>
+  listen("settings://changed", () => void handler);
+--- end

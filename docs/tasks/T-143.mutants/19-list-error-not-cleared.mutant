@@ -1,0 +1,9 @@
+guarantee: AC-1 failure branch: after a refused calls_list, the next successful refetch clears the alert
+file: src/routes/calls/+page.svelte
+added_by: test-writer
+--- old
+        list = next;
+        clearErrorOf("list");
+--- new
+        list = next;
+--- end

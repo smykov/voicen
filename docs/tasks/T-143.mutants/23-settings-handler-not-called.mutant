@@ -1,0 +1,8 @@
+guarantee: D8 / AC-7: settings://changed reaches the Calls page (language change re-renders, list refetched)
+file: src/lib/settings/settingsApi.ts
+added_by: test-writer
+--- old
+  return listen<P>("settings://changed", (event) => handler(event.payload));
+--- new
+  return listen<P>("settings://changed", () => void handler);
+--- end

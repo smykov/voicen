@@ -2,17 +2,11 @@ guarantee: AC-6: export failure shows the reason
 file: src/routes/calls/+page.svelte
 added_by: test-writer
 --- old
-    } catch (error) {
-      errorId = callErrorMessageId(error);
+    } catch (refusal) {
+      showError(callErrorMessageId(refusal), "other");
     }
-  }
-
-  function speakerName
 --- new
-    } catch (error) {
-      errorId = null;
+    } catch (refusal) {
+      void refusal;
     }
-  }
-
-  function speakerName
 --- end
