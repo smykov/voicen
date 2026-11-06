@@ -576,6 +576,7 @@ pub fn check_closed(line: &Line) -> Result<(), String> {
         "call_track_silent" => &["track", "rule"],
         "call_stopped" => &["reason", "duration_ms", "mic_bytes", "system_bytes"],
         "call_storage_failed" => &["kind"],
+        "call_track_dropped" => &["track", "blocks", "ms", "at_ms"],
         "call_recovered" => &["calls"],
         "final_stage" => &["track", "stage", "ms", "chunks"],
         "final_finished" => &["outcome", "mode", "ms"],
@@ -640,6 +641,7 @@ pub fn check_closed(line: &Line) -> Result<(), String> {
             ("call_started", "mic" | "system") => check(endpoint(v), k, v)?,
             ("call_device", "track")
             | ("call_track_silent", "track")
+            | ("call_track_dropped", "track")
             | ("final_stage", "track")
             | ("vad_fallback", "track") => one_of(k, v, TRACKS)?,
             ("call_device", "cause") => one_of(k, v, DEVICE_CAUSES)?,
@@ -652,6 +654,7 @@ pub fn check_closed(line: &Line) -> Result<(), String> {
             }
             ("call_storage_failed", "kind") => one_of(k, v, STORAGE_KINDS)?,
             ("call_storage_failed", "os") => check(signed(v), k, v)?,
+            ("call_track_dropped", "blocks" | "ms" | "at_ms") => check(unsigned(v), k, v)?,
             ("call_recovered", "calls") => check(unsigned(v), k, v)?,
             ("final_stage", "stage") => one_of(k, v, FINAL_STAGES)?,
             ("final_stage", "ms" | "chunks") => check(unsigned(v), k, v)?,

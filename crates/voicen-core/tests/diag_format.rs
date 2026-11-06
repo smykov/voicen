@@ -598,9 +598,10 @@ fn every_event() -> Vec<LogEvent> {
             LogEvent::VadFallback { .. } => 22,
             LogEvent::TranscriptInvalid { .. } => 23,
             LogEvent::VadDetector { .. } => 24,
+            LogEvent::CallTrackDropped { .. } => 25,
         })
         .collect();
-    assert_eq!(seen.len(), 25, "every LogEvent variant is enumerated");
+    assert_eq!(seen.len(), 26, "every LogEvent variant is enumerated");
     all
 }
 
@@ -753,6 +754,18 @@ fn call_events() -> Vec<LogEvent> {
             all.push(LogEvent::CallStorageFailed { kind, os });
         }
     }
+    for track in [Track::Mic, Track::System] {
+        for n in [0, u32::MAX] {
+            for at_ms in [0, u64::MAX] {
+                all.push(LogEvent::CallTrackDropped {
+                    track,
+                    blocks: n,
+                    ms: u32::MAX - n,
+                    at_ms,
+                });
+            }
+        }
+    }
     for calls in [0, 1, u32::MAX] {
         all.push(LogEvent::CallRecovered { calls });
     }
@@ -890,6 +903,23 @@ fn every_call_line_formats_exactly_as_the_contract_with_its_level() {
             LogEvent::CallStorageFailed { kind: StorageKind::Meta, os: Some(-5) },
             "WARN call_storage_failed kind=meta os=-5".into(),
         ),
+        (
+            LogEvent::CallTrackDropped { track: Track::Mic, blocks: 3, ms: 60, at_ms: 12_340 },
+            "WARN call_track_dropped track=mic blocks=3 ms=60 at_ms=12340".into(),
+        ),
+        (
+            LogEvent::CallTrackDropped { track: Track::System, blocks: 0, ms: 0, at_ms: 0 },
+            "WARN call_track_dropped track=system blocks=0 ms=0 at_ms=0".into(),
+        ),
+        (
+            LogEvent::CallTrackDropped {
+                track: Track::System,
+                blocks: u32::MAX,
+                ms: u32::MAX,
+                at_ms: u64::MAX,
+            },
+            "WARN call_track_dropped track=system blocks=4294967295 ms=4294967295 at_ms=18446744073709551615".into(),
+        ),
         (LogEvent::CallRecovered { calls: 3 }, "INFO call_recovered calls=3".into()),
         (
             LogEvent::FinalPassStage { track: Track::Mic, stage: FinalStage::Upload, ms: 4_200, chunks: 12 },
@@ -986,6 +1016,17 @@ fn every_value_of_every_call_field_has_its_own_literal() {
                 system_bytes: 3
             }),
             format!("call_stopped reason={r} duration_ms=1 mic_bytes=2 system_bytes=3")
+        );
+    }
+    for (track, t) in TRACKS {
+        assert_eq!(
+            line(LogEvent::CallTrackDropped {
+                track,
+                blocks: 1,
+                ms: 2,
+                at_ms: 3
+            }),
+            format!("call_track_dropped track={t} blocks=1 ms=2 at_ms=3")
         );
     }
     for (kind, k) in STORAGE_ALL {

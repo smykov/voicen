@@ -23,6 +23,7 @@
 //! broken session fails instead of hanging.
 //! Fake data only: example.com, `sk-test-SECRET`.
 
+mod call_support;
 mod common;
 mod diag_support;
 
@@ -2287,6 +2288,75 @@ fn esc_discards_nothing_sent_indicator_off_mic_closed() {
         want.extend(pasted_into(W1));
         assert_eq!(rig.paster.calls(), want, "{mode:?}");
     }
+}
+
+#[test]
+fn dictation_and_esc_never_change_a_running_call() {
+    // T-126 Acceptance "Esc and dictation never change the call" (I6): a call is
+    // recording; a dictation hold that Esc cancels and a second hold that is delivered
+    // run through the dictation session. The call keeps recording: no capture opened or
+    // closed, no folder, no indicator call, no shell request, no log line. The other way
+    // too: stopping the call does not move the dictation overlay or tray. Bite: the call
+    // session reading the Esc claim, a shared indicator or tray state, a dictation press
+    // that toggles the call.
+    use call_support::CallRig;
+    use voicen_core::call::session::Toggled;
+    use voicen_core::call::{CallSource, StopReason};
+
+    let call = CallRig::new();
+    assert_eq!(
+        call.session.toggle_record(true, CallSource::Hotkey),
+        Toggled::Started
+    );
+    let snapshot = |c: &CallRig| {
+        (
+            c.indicator.calls(),
+            c.source.opens(),
+            c.source.open_handles(),
+            c.source.stops(),
+            c.folders(),
+            c.shell.calls(),
+            c.call_lines().len(),
+        )
+    };
+    let before = snapshot(&call);
+
+    let rig = Rig::new(api_settings(), always(TEXT));
+    let t0 = past();
+    rig.frames(&fixtures::speech_3s(), t0 + FIRST_FRAME);
+    rig.session.hotkey_pressed(t0);
+    rig.session.esc_pressed(t0 + ms(2000));
+    rig.session.hotkey_released(t0 + ms(2500));
+    let t1 = t0 + ms(5000);
+    rig.frames(&fixtures::speech_3s(), t1 + FIRST_FRAME);
+    rig.session.hotkey_pressed(t1);
+    rig.session.hotkey_released(t1 + ms(3000));
+    rig.wait_jobs(1);
+
+    assert!(
+        call.session.is_recording(),
+        "dictation and Esc left the call on"
+    );
+    assert_eq!(
+        snapshot(&call),
+        before,
+        "the call saw nothing of the dictation"
+    );
+
+    let overlays = rig.indicator.overlays();
+    let trays = rig.indicator.trays();
+    assert!(call.session.stop(StopReason::User));
+    assert_eq!(
+        rig.indicator.overlays(),
+        overlays,
+        "the call stop moved the overlay"
+    );
+    assert_eq!(
+        rig.indicator.trays(),
+        trays,
+        "the call stop moved the dictation tray"
+    );
+    assert_eq!(rig.clipboard.texts(), vec![TEXT.to_string()]);
 }
 
 #[test]

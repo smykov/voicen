@@ -1,0 +1,77 @@
+{
+  "_format": "Core-checked wire data of the call indicator IPC (specs/007-call-mode-record contracts/ipc.md: the indicator://state and indicator://tick event payloads and the call_indicator_state reply) for the Playwright IPC mock, the same pattern as overlay-wire.json. Each key is serde_json of the voicen_core::call::indicator value built as follows: idle = IndicatorState::idle(); recording_reminder_en / recording_reminder_ru = IndicatorState::recording(lang, true, []) (reminder and headphones hint rendered by Rust i18n::text); recording_no_reminder_en = IndicatorState::recording(en, false, []) (both texts empty); warnings_en / warnings_ru = IndicatorState::recording(lang, false, w) with w = IndicatorWarning::of(id, warning, lang) for the ids 1..8 and the warnings communications_device_differs, track_lost mic, track_lost system, mic_changed, cant_hear_other_party, cant_hear_you, low_disk, provider_notice host api.example.com; tick_levels = IndicatorTick {elapsed_ms 61000, mic_level 0.5, system_level 0.25, both silent false}; tick_silent = IndicatorTick {elapsed_ms 0, levels 0.0, both silent true}. Kept in sync by the core test e2e_call_indicator_wire_fixture_matches_core (crates/voicen-core/tests/call_indicator_wire.rs): when it fails, copy the value it prints. Never edit by hand to make an e2e test pass.",
+  "idle": {
+    "recording": false,
+    "reminderVisible": false,
+    "reminderText": "",
+    "headphonesHint": "",
+    "warnings": []
+  },
+  "recording_reminder_en": {
+    "recording": true,
+    "reminderVisible": true,
+    "reminderText": "Tell the other party the call is being recorded",
+    "headphonesHint": "Better with headphones",
+    "warnings": []
+  },
+  "recording_reminder_ru": {
+    "recording": true,
+    "reminderVisible": true,
+    "reminderText": "Предупредите собеседника, что звонок записывается",
+    "headphonesHint": "Лучше в наушниках",
+    "warnings": []
+  },
+  "recording_no_reminder_en": {
+    "recording": true,
+    "reminderVisible": false,
+    "reminderText": "",
+    "headphonesHint": "",
+    "warnings": []
+  },
+  "warnings_en": {
+    "recording": true,
+    "reminderVisible": false,
+    "reminderText": "",
+    "headphonesHint": "",
+    "warnings": [
+      { "id": 1, "kind": "communicationsDevice", "text": "Calls may use a different output device than the one being recorded" },
+      { "id": 2, "kind": "trackLost", "text": "Microphone lost — recording silence" },
+      { "id": 3, "kind": "trackLost", "text": "Output device lost — recording silence" },
+      { "id": 4, "kind": "micChanged", "text": "Microphone changed to the Windows default" },
+      { "id": 5, "kind": "cantHearOtherParty", "text": "Can't hear the other party — check the output device" },
+      { "id": 6, "kind": "cantHearYou", "text": "Can't hear you — check the microphone" },
+      { "id": 7, "kind": "lowDisk", "text": "Less than 1 GB free in the calls folder" },
+      { "id": 8, "kind": "providerNotice", "text": "The other party's audio goes to provider api.example.com" }
+    ]
+  },
+  "warnings_ru": {
+    "recording": true,
+    "reminderVisible": false,
+    "reminderText": "",
+    "headphonesHint": "",
+    "warnings": [
+      { "id": 1, "kind": "communicationsDevice", "text": "Звонки могут использовать не то устройство вывода, которое записывается" },
+      { "id": 2, "kind": "trackLost", "text": "Микрофон потерян — записывается тишина" },
+      { "id": 3, "kind": "trackLost", "text": "Устройство вывода потеряно — записывается тишина" },
+      { "id": 4, "kind": "micChanged", "text": "Микрофон переключён на используемый по умолчанию в Windows" },
+      { "id": 5, "kind": "cantHearOtherParty", "text": "Не слышно собеседника — проверьте устройство вывода" },
+      { "id": 6, "kind": "cantHearYou", "text": "Не слышно вас — проверьте микрофон" },
+      { "id": 7, "kind": "lowDisk", "text": "В папке звонков свободно меньше 1 ГБ" },
+      { "id": 8, "kind": "providerNotice", "text": "Звук собеседника отправляется провайдеру api.example.com" }
+    ]
+  },
+  "tick_levels": {
+    "elapsedMs": 61000,
+    "micLevel": 0.5,
+    "systemLevel": 0.25,
+    "micSilent": false,
+    "systemSilent": false
+  },
+  "tick_silent": {
+    "elapsedMs": 0,
+    "micLevel": 0.0,
+    "systemLevel": 0.0,
+    "micSilent": true,
+    "systemSilent": true
+  }
+}

@@ -1105,6 +1105,7 @@ mod tests {
                 },
             ],
             device_changes: Vec::new(),
+            drops: Vec::new(),
             engines: Engines {
                 transcription: None,
                 diarization: None,
@@ -1337,6 +1338,7 @@ mod tests {
                 "mode",
                 "tracks",
                 "device_changes",
+                "drops",
                 "engines",
                 "app_version",
                 "speakers",
@@ -1356,6 +1358,8 @@ mod tests {
         assert_eq!(v["mode"]["record"], true);
         assert_eq!(v["mode"]["subtitles"], false);
         assert_eq!(v["device_changes"], serde_json::json!([]));
+        // T-126 (#244): `drops` follows `device_changes` and starts as an empty array.
+        assert_eq!(v["drops"], serde_json::json!([]));
         assert_eq!(v["engines"]["transcription"], Value::Null);
         assert_eq!(v["engines"]["diarization"], Value::Null);
         assert_eq!(v["app_version"], "9.9.9");
@@ -1896,6 +1900,66 @@ mod tests {
         let meta = list.entries[4].meta.as_ref().expect("meta");
         assert_eq!(meta.device_changes[0].cause, DeviceCause::Reopened);
         assert_eq!(meta.pass_mode, Some(PassMode::Timeless));
+    }
+
+    #[test]
+    fn meta_json_drops_outside_the_closed_shape_lists_as_damaged() {
+        // T-126 (#244): `drops[]` is `{at_ms, track, blocks, ms}` with `deny_unknown_fields`
+        // and a closed `track`; a well-formed entry round-trips. Bite: an unknown key, a
+        // free-text track, a missing or negative number or a missing `drops` array
+        // accepted (a serde default or an untyped value instead of the closed struct).
+        let f = fixture();
+        let root = f.dir.path().join("calls");
+        fs::create_dir(&root).expect("root");
+        let entry = serde_json::json!({"at_ms": 1_500, "track": "mic", "blocks": 3, "ms": 60});
+
+        let mut v = meta_value("2026-10-30_000001", CallState::Ready);
+        v["drops"] = serde_json::json!([entry.clone()]);
+        plant_value(&root, "2026-10-30_000001", Some(&v), true, true);
+
+        let mut extra = entry.clone();
+        extra["text"] = serde_json::json!("hello");
+        let mut free_track = entry.clone();
+        free_track["track"] = serde_json::json!("both");
+        let mut negative = entry.clone();
+        negative["blocks"] = serde_json::json!(-1);
+        let mut short = entry.clone();
+        short.as_object_mut().expect("object").remove("ms");
+        for (n, bad) in [extra, free_track, negative, short].into_iter().enumerate() {
+            let id = format!("2026-10-30_00001{n}");
+            let mut v = meta_value(&id, CallState::Ready);
+            v["drops"] = serde_json::json!([bad]);
+            plant_value(&root, &id, Some(&v), true, true);
+        }
+        let id = "2026-10-30_000020";
+        let mut v = meta_value(id, CallState::Ready);
+        v.as_object_mut().expect("object").remove("drops");
+        plant_value(&root, id, Some(&v), true, true);
+
+        let list = f.store.list(&calls_in(Some(&root), &[]));
+        let damaged: Vec<String> = list
+            .entries
+            .iter()
+            .filter(|e| e.state == ListState::Damaged)
+            .map(|e| e.id.to_string())
+            .collect();
+        assert_eq!(
+            damaged.len(),
+            5,
+            "every entry outside the shape: {damaged:?}"
+        );
+        let good = list
+            .entries
+            .iter()
+            .find(|e| e.id.to_string() == "2026-10-30_000001")
+            .expect("good entry");
+        assert_eq!(good.state, ListState::Ready);
+        let drops = &good.meta.as_ref().expect("meta").drops;
+        assert_eq!(drops.len(), 1);
+        assert_eq!(
+            (drops[0].at_ms, drops[0].track, drops[0].blocks, drops[0].ms),
+            (1_500, Track::Mic, 3, 60)
+        );
     }
 
     #[test]

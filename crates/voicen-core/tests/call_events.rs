@@ -10,6 +10,7 @@
 use voicen_core::call::{
     CallId, CallNotice, CallState, CallWarning, EndpointId, FailReason, StopReason, Track,
 };
+use voicen_core::settings::url::{check_base_url, provider_host};
 
 fn json<T: serde::Serialize>(v: &T) -> String {
     serde_json::to_string(v).unwrap_or_else(|e| panic!("serialize: {e}"))
@@ -264,9 +265,14 @@ fn endpoint_id_deserialize_goes_through_the_same_rule() {
 
 #[test]
 fn notices_and_warnings_are_built_from_closed_values() {
-    // Decision #195 (2): no `ProviderNotice` (T-126 adds it with a typed host). Every
-    // variant is built from enums and a `CallId`; an exhaustive match pins the set.
+    // Decision #195 (2): `ProviderNotice` is added by T-126 with a typed host
+    // (`ProviderHost`, no free text). Every variant is built from enums, a `CallId` and the
+    // host; an exhaustive match pins the set.
     let call = CallId::parse("2026-10-24_093015").unwrap_or_else(|| panic!("id"));
+    let host = check_base_url("https://api.example.com/v1")
+        .ok()
+        .and_then(|u| provider_host(&u))
+        .unwrap_or_else(|| panic!("a non-loopback host"));
     let warnings = [
         CallWarning::CommunicationsDeviceDiffers,
         CallWarning::TrackLost { track: Track::Mic },
@@ -277,6 +283,7 @@ fn notices_and_warnings_are_built_from_closed_values() {
         CallWarning::CantHearOtherParty,
         CallWarning::CantHearYou,
         CallWarning::LowDisk,
+        CallWarning::ProviderNotice { host },
     ];
     for w in &warnings {
         match w {
@@ -285,11 +292,17 @@ fn notices_and_warnings_are_built_from_closed_values() {
             | CallWarning::MicChanged
             | CallWarning::CantHearOtherParty
             | CallWarning::CantHearYou
-            | CallWarning::LowDisk => {}
+            | CallWarning::LowDisk
+            | CallWarning::ProviderNotice { .. } => {}
         }
         assert_eq!(*w, w.clone());
         assert!(!json(w).is_empty());
     }
+    // The host reaches the wire as its text (serialize_with as_str), not as a debug form.
+    assert_eq!(
+        json(&warnings[warnings.len() - 1]),
+        r#"{"provider_notice":{"host":"api.example.com"}}"#
+    );
     let notices = [
         CallNotice::CallSavedTranscribing,
         CallNotice::TranscriptReady { call: call.clone() },
