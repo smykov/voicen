@@ -1,0 +1,1 @@
+cargo test -j 2 -p voicen-core --test mock_http_pool

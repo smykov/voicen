@@ -1,0 +1,10 @@
+guarantee: I2: the reproduction borrows through the helper
+file: crates/voicen-core/tests/mock_http_pool.rs
+added_by: test-writer
+--- old
+    mock_http::start().await
+}
+--- new
+    MockServer::start().await
+}
+--- end

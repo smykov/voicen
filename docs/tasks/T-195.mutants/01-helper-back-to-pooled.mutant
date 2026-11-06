@@ -1,0 +1,8 @@
+guarantee: I2: a core test reads only the request log of a server no other test has borrowed
+file: crates/voicen-core/tests/common/mock_http.rs
+added_by: test-writer
+--- old
+    MockServer::builder().start().await
+--- new
+    MockServer::start().await
+--- end

@@ -1,0 +1,8 @@
+guarantee: I2: no core test outside the helper takes a pooled server
+file: crates/voicen-core/tests/connection_test.rs
+added_by: test-writer
+--- old
+    let server = mock_http::start().await;
+--- new
+    let server = MockServer::start().await;
+--- end
