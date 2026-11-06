@@ -27,6 +27,11 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+/**
+ * The e2e entry the router spawns for the list and the e2e group's run: `VOICEN_E2E_SCRIPT`
+ * when set and non-empty (the test seam: a stand-in executable), else scripts/e2e.sh.
+ */
+const E2E = process.env.VOICEN_E2E_SCRIPT || join(ROOT, "scripts", "e2e.sh");
 
 /** @typedef {"unit" | "e2e"} Runner */
 /**
@@ -150,7 +155,7 @@ function listE2e(selector) {
   if (!existsSync(join(ROOT, fileOf(selector)))) return 0;
   const env = { ...process.env };
   if (inImage()) env.BASE_URL = "http://localhost:9";
-  const r = spawnSync(join(ROOT, "scripts", "e2e.sh"), ["--list", "--reporter=json", selector], {
+  const r = spawnSync(E2E, ["--list", "--reporter=json", selector], {
     cwd: ROOT,
     encoding: "utf8",
     env,
@@ -191,7 +196,7 @@ function main() {
     codes.push(run(process.execPath, [join(ROOT, "scripts", "ui-unit-test.mjs"), ...result.unit]));
   }
   if (result.e2e.length > 0) {
-    codes.push(run(join(ROOT, "scripts", "e2e.sh"), result.e2e));
+    codes.push(run(E2E, result.e2e));
   }
   process.exit(codes.find((c) => c !== 0) ?? 0);
 }
