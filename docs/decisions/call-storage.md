@@ -2,7 +2,7 @@
 
 **Code:** `crates/voicen-core/src/call/storage.rs` (`CallStore`, `write_meta`, `write_atomic`, `storage_kind`, `CallMeta`), `crates/voicen-core/src/settings/roots.rs` (`effective_root`, `CallRoots::probe`, `reason_of`) · **Tests that pin it:** `call::storage` unit tests (`create_*`, `a_failed_*`, `write_meta_*`, `list_*`, `damaged_*`, `missing_*`, `storage_kind_maps_every_op_encode_to_write`)
 
-Tasks: T-125. Contract: `specs/007-call-mode-record/contracts/core-call.md` "Built (T-125)". Decisions: #195, #196, #242 (D1–D5). Class `call-storage` in `docs/failures.md` has no entry yet (first sighting).
+Tasks: T-125, T-141 (wire, guard, export; `ipc.md` › Built T-141). Contract: `specs/007-call-mode-record/contracts/core-call.md` "Built (T-125)". Decisions: #195, #196, #242 (D1–D5). Class `call-storage` in `docs/failures.md` has no entry yet (first sighting).
 
 ## Invariants
 
@@ -24,7 +24,7 @@ Tasks: T-125. Contract: `specs/007-call-mode-record/contracts/core-call.md` "Bui
 
 - **Defect that produced it:** none yet.
 - **What breaks if you violate it:** a crash or a full disk leaves a partial `meta.json`, so the call lists as `damaged` or loses its state.
-- **Where it is enforced:** `write_meta` (the first write at create and `ActiveCallFiles::write_meta`) goes through `pub(crate) write_atomic(dir, name, bytes)`: `<name>.tmp` created, written and synced, renamed over `<name>`; on failure the previous file is untouched and the tmp this call created is removed. The key order is the data-model "Call" field order, pinned by `meta_json_keys_follow_data_model_order_and_start_recording`. `transcript.*` and export writers (T-138, T-141) reuse `write_atomic`. Tests `write_meta_replaces_meta_json_and_leaves_no_tmp`, `write_meta_failure_keeps_previous_meta_json_and_no_tmp`, `active_call_write_meta_goes_through_the_atomic_writer`.
+- **Where it is enforced:** `write_meta` (the first write at create and `ActiveCallFiles::write_meta`) goes through `pub(crate) write_atomic(dir, name, bytes)`: `<name>.tmp` created, written and synced, renamed over `<name>`; on failure the previous file is untouched and the tmp this call created is removed. The key order is the data-model "Call" field order, pinned by `meta_json_keys_follow_data_model_order_and_start_recording`. The tmp+sync+rename tail exists once, as the private `storage::fill_and_rename` (T-141): write, `sync_data`, close, rename, remove the tmp on any failure. `write_atomic` opens its tmp with `File::create` (the call folder is ours, so a stale `<name>.tmp` from a crash is replaced) and calls the tail; `transcript.*` writers (T-138) reuse `write_atomic`. Tests `write_meta_replaces_meta_json_and_leaves_no_tmp`, `write_meta_failure_keeps_previous_meta_json_and_no_tmp`, `active_call_write_meta_goes_through_the_atomic_writer`.
 - **Don't:** write `meta.json` in place, copy the helper, or swallow a write error at its origin (a failed first write is `Storage(Meta)`).
 
 ### The list shows every call of every root, and hides nothing that is a call
@@ -45,6 +45,17 @@ Tasks: T-125. Contract: `specs/007-call-mode-record/contracts/core-call.md` "Bui
 - **What breaks if you violate it:** a new log literal needs `events.rs`, `diag/format.rs`, the `diag_format` tests and the contract to change together.
 - **Where it is enforced:** `storage::storage_kind(StorageOp)`: `Write` and `Encode` to `Write`, `Flush` to `Flush`, `Sync` to `Sync`. Test `storage_kind_maps_every_op_encode_to_write`.
 - **Don't:** map `Encode` at a call site, or add an `encode` literal without the whole set above.
+
+### An export never opens a file the user already has, and a wire `{root, id}` never becomes a path unchecked
+
+- **Defect that produced it:** none yet (found in analysis, T-141). Rejected: export through `write_atomic` unchanged, because `File::create` would truncate, and then rename over or remove, a user's own `<file>.tmp` in the chosen folder.
+- **What breaks if you violate it:** an export destroys a user file next to the target, or leaves a partial tmp; a crafted `root` or `id` reads or exports a folder outside the settings roots (P-009).
+- **Where it is enforced:**
+  - `export_to` reserves `<file>.voicen-tmp`, then `-1` … `-9`, with `create_new` (`reserve_export_tmp`), and calls `fill_and_rename`; all ten names taken is `ioFailed{other}`. A file under a tmp name is never opened, truncated or removed.
+  - `resolve_call` / `guard` compare the wire `root` for equality with the current or an earlier root of settings and parse `id` with `CallId::parse`; they make no filesystem call and build no path from wire text. A root that is not valid Unicode lists (`wire_root` is lossy) but cannot be opened.
+  - Tests `a_root_that_is_not_current_or_remembered_is_not_found_without_fs`, `an_id_outside_the_grammar_is_not_found`, `export_never_touches_an_existing_tmp_name`, `export_write_or_sync_failure_removes_its_tmp_and_reports_the_reason`.
+- **Don't:** call `write_atomic` for a user-chosen folder, `canonicalize` or `starts_with` the wire root, or copy the tail.
+- **Developer deviation (T-141):** the tail syncs with `sync_data`, not `sync_all`, so `write_atomic` (meta.json) changed too. Contents and size are flushed, which is what a crash-safe rename needs; other metadata (timestamps) may lag. Not an owner decision.
 
 ## Reused, not copied
 
