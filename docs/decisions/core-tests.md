@@ -137,6 +137,16 @@ A test-thread act that must come before a product timer or the end of a transfer
   - `local_download_refused` keeps its own test binary because its test needs refused-then-serve on one port. It is the only user of `OsAnswer::refused_released_port()`.
 - **Don't:** bind port 0 and release it to get a "closed" port.
 
+### A core test takes its mock HTTP server unpooled
+
+- **Defect that produced it:** F-028 (class `test-shares-mock-server-pool`, proposal; T-195). wiremock 0.6.5 `MockServer::start()` lends servers from one pool per process. The next borrower's checkout clears the request log, but the server thread keeps serving connections the previous borrower opened, so a late request of a finished sibling (`injected_short_timeout_is_timeout`: 300 ms client limit, log never read) landed in the next test's log and `local_server_without_key_or_model_sends_neither` counted 2 requests under host load.
+- **What breaks if you violate it:** a rare "left: 2 right: 1" on a request-count assertion, only under load.
+- **Where it is enforced:**
+  - Every wiremock server in `crates/voicen-core/tests` comes from `tests/common/mock_http.rs::start()` (`MockServer::builder().start()`): a server nobody else has borrowed, gone with its test.
+  - The helper is not a `pub mod` of `common/mod.rs`. `src-tauri/tests/settings_ipc.rs` compiles `common/mod.rs` and `src-tauri` has no `wiremock` dev-dependency. Each user includes the file with `#[path = "common/mock_http.rs"] mod mock_http;`, as `refused_addr_tests.rs` is included.
+  - `tests/mock_http_pool.rs` (its own binary, so no other test takes the idle server): a deterministic reproduction (half a request on a raw `TcpStream`, drop the server, borrow again, finish the request: the second borrower's log must be empty; 1 entry with the pool), and a structural scan that refuses `MockServer::start()` in any `.rs` under `tests/**` except the helper (whitespace and line splits ignored; an alias import is not seen). The scan exempts the helper, so only the reproduction catches a helper that pools again.
+- **Don't:** call `MockServer::start()` in a core test, put the helper into `common/mod.rs`, or read a server's request log after a test that may have left a request in flight on a pooled one.
+
 ## Open
 
 - The ~2 s user-facing refusal on Windows: OQ-07 (non-blocking).
