@@ -2,9 +2,9 @@
 // T-143; docs/decisions/calls-ui.md).
 //
 // One IPC module per contract (settings-ui.md › C): this module holds every invoke/listen of
-// the Calls page: the calls_* commands it uses, calls://changed, calls://open, and the
-// settings://changed it needs for the language and the call hotkey (`settings_get` itself is
-// `getSettings` of the settings module, the one declaration of that command). Every value is
+// the Calls page: the calls_* commands it uses, calls://changed and calls://open. The
+// settings://changed it needs for the language and the call hotkey is re-exported from the
+// settings module, as `settings_get` is `getSettings` there (the one declaration of each). Every value is
 // handed over as core sent it: no sort, no re-title, no catch (a rejection is core's
 // `CallError`, given to the caller unchanged).
 //
@@ -13,7 +13,6 @@
 // imports them, so the imports here stay relative, not `$lib`.
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { SettingsView } from "../settings/settingsApi";
 
 export type CallState = "recording" | "queued" | "transcribing" | "ready" | "failed" | "recovered" | "damaged";
 
@@ -114,9 +113,7 @@ export function onCallsOpen<P extends CallRef = CallRef>(handler: (ref: P) => vo
   return listen<P>("calls://open", (event) => handler(event.payload));
 }
 
-/** `settings://changed`: the settings view after every save (language and call hotkey). */
-export function onSettingsChanged<P extends SettingsView = SettingsView>(
-  handler: (view: P) => void,
-): Promise<UnlistenFn> {
-  return listen<P>("settings://changed", (event) => handler(event.payload));
-}
+// `settings://changed` (language and call hotkey) is spec 004's event: its one declaration is
+// in the settings module, re-exported here so the Calls page reaches all its IPC through this
+// module.
+export { onSettingsChanged } from "../settings/settingsApi";

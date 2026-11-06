@@ -330,6 +330,44 @@ test("AC-1 failure branch: a refused calls_list (refetch after calls://changed) 
   await expect(alert(page)).toHaveText(en("calls.error.io.disk_full"));
 });
 
+test("AC-1 failure branch: after a refused calls_list, the next successful refetch clears the alert and shows the list", async ({ page }) => {
+  await openCalls(page);
+  await expect(rows(page)).toHaveCount(12);
+  await expect.poll(() => listeners(page, "calls://changed")).toBeGreaterThan(0);
+  await queueCallsResult(page, "calls_list", { reject: { code: "ioFailed", reason: "disk_full" } });
+  await emit(page, "calls://changed", READY);
+  await expect(alert(page)).toHaveText(en("calls.error.io.disk_full"));
+  await setCallsList(page, callsList(2));
+  await emit(page, "calls://changed", READY);
+  await expect(rows(page)).toHaveCount(2);
+  await expect(alert(page)).toHaveCount(0);
+});
+
+test("AC-4 failure branch: after a refused calls_get, a successful detail refetch (calls://changed) clears the alert and shows the detail", async ({ page }) => {
+  await openCalls(page);
+  await expect(readyRow(page)).toBeVisible();
+  await expect.poll(() => listeners(page, "calls://changed")).toBeGreaterThan(0);
+  await queueCallsResult(page, "calls_get", { reject: { code: "ioFailed", reason: "access_denied" } });
+  await readyRow(page).getByTestId("call-select").click();
+  await expect(alert(page)).toHaveText(en("calls.error.io.access_denied"));
+  await emit(page, "calls://changed", READY);
+  await expect(page.getByTestId("call-detail")).toBeVisible();
+  await expect(alert(page)).toHaveCount(0);
+});
+
+test("a refused action's alert is not cleared by a later successful list refetch", async ({ page }) => {
+  await openCalls(page);
+  await expect(readyRow(page)).toBeVisible();
+  await expect.poll(() => listeners(page, "calls://changed")).toBeGreaterThan(0);
+  await queueCallsResult(page, "calls_copy_markdown", { reject: { code: "ioFailed", reason: "disk_full" } });
+  await readyRow(page).getByRole("button", { name: en("calls.copy") }).click();
+  await expect(alert(page)).toHaveText(en("calls.error.io.disk_full"));
+  await setCallsList(page, callsList(2));
+  await emit(page, "calls://changed", READY);
+  await expect(rows(page)).toHaveCount(2);
+  await expect(alert(page)).toHaveText(en("calls.error.io.disk_full"));
+});
+
 test("AC-6: Open folder invokes calls_open_folder { root, id } of the damaged row's own root", async ({ page }) => {
   await openCalls(page);
   const damaged = rows(page).filter({ hasText: en("calls.state.damaged") });

@@ -184,9 +184,16 @@ export function listMicrophones(): Promise<InputDevice[]> {
   return invoke<InputDevice[]>("settings_list_microphones");
 }
 
-/** `settings://changed`: the view after every save, from any window. */
-export function onSettingsChanged(handler: (view: SettingsView) => void): Promise<UnlistenFn> {
-  return listen<SettingsView>("settings://changed", (event) => handler(event.payload));
+/**
+ * `settings://changed`: the view after every save, from any window. The one declaration of
+ * this event (src/lib/calls/callsApi.ts re-exports it). Generic in the payload type only so
+ * that a handler typed for a subtype (a test's `(p: never) => void`) type-checks; the payload
+ * is always the event's as sent.
+ */
+export function onSettingsChanged<P extends SettingsView = SettingsView>(
+  handler: (view: P) => void,
+): Promise<UnlistenFn> {
+  return listen<P>("settings://changed", (event) => handler(event.payload));
 }
 
 /**

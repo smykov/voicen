@@ -8,7 +8,9 @@
   // - transcript text reaches the DOM only as text nodes, search matches as <mark> around
   //   text segments (D5), never as markup;
   // - a refused action shows one alert with `callErrorMessageId(error)` (D4); a cancelled
-  //   export shows nothing;
+  //   export shows nothing; the alert remembers which load set it (list, detail), and that
+  //   load's next success clears it (a list error is not cleared by a detail reply, nor an
+  //   action error by either);
   // - the language and the call hotkey are the saved settings' (settings_get,
   //   settings://changed); a language change refetches the list, whose damaged titles core
   //   renders in the UI language (D8). calls://changed refetches the list and the open
@@ -52,8 +54,16 @@
   let selected = $state.raw<CallRef | null>(null);
   let detail = $state.raw<CallDetail | null>(null);
   let query = $state("");
-  /** The one shown error (catalog id), or null. */
-  let errorId = $state<MessageId | null>(null);
+  /**
+   * The one shown error (catalog id) and what set it, or null. `list` / `detail`: a refused
+   * calls_list / calls_get, cleared when that fetch next succeeds; `other`: an action or the
+   * IPC setup, cleared only by the next action or selection.
+   */
+  let error = $state.raw<{ id: MessageId; source: "list" | "detail" | "other" } | null>(null);
+  const showError = (id: MessageId, source: "list" | "detail" | "other") => (error = { id, source });
+  const clearErrorOf = (source: "list" | "detail") => {
+    if (error?.source === source) error = null;
+  };
   /** Generations: a reply of an older fetch is dropped. */
   let listGeneration = 0;
   let detailGeneration = 0;
@@ -69,9 +79,12 @@
     const generation = ++listGeneration;
     try {
       const next = await listCalls();
-      if (generation === listGeneration) list = next;
-    } catch (error) {
-      if (generation === listGeneration) errorId = callErrorMessageId(error);
+      if (generation === listGeneration) {
+        list = next;
+        clearErrorOf("list");
+      }
+    } catch (refusal) {
+      if (generation === listGeneration) showError(callErrorMessageId(refusal), "list");
     }
   }
 
@@ -79,11 +92,14 @@
     const generation = ++detailGeneration;
     try {
       const next = await getCall(ref.root, ref.id);
-      if (generation === detailGeneration && sameRef(selected, ref)) detail = next;
-    } catch (error) {
+      if (generation === detailGeneration && sameRef(selected, ref)) {
+        detail = next;
+        clearErrorOf("detail");
+      }
+    } catch (refusal) {
       if (generation === detailGeneration && sameRef(selected, ref)) {
         detail = null;
-        errorId = callErrorMessageId(error);
+        showError(callErrorMessageId(refusal), "detail");
       }
     }
   }
@@ -94,12 +110,12 @@
       detail = null;
       query = "";
     }
-    errorId = null;
+    error = null;
     void loadDetail(ref);
   }
 
   async function run(action: CallAction, call: CallSummary) {
-    errorId = null;
+    error = null;
     try {
       switch (action) {
         case "copy":
@@ -118,8 +134,8 @@
           // T-154: confirmation and calls_delete.
           break;
       }
-    } catch (error) {
-      errorId = callErrorMessageId(error);
+    } catch (refusal) {
+      showError(callErrorMessageId(refusal), "other");
     }
   }
 
@@ -153,12 +169,12 @@
           }),
         );
       } catch {
-        errorId = "error.ipc_unavailable";
+        showError("error.ipc_unavailable", "other");
       }
       try {
         applySettings(await getSettings());
       } catch {
-        errorId = "error.ipc_unavailable";
+        showError("error.ipc_unavailable", "other");
       }
       await refreshList();
     })();
@@ -170,8 +186,8 @@
 </script>
 
 <main class="calls" data-testid="calls-page">
-  {#if errorId !== null}
-    <p class="error" role="alert">{t(errorId)}</p>
+  {#if error !== null}
+    <p class="error" role="alert">{t(error.id)}</p>
   {/if}
 
   {#if list !== null}
