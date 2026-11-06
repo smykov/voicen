@@ -1,0 +1,8 @@
+guarantee: AC-6: a refused action shows the reason
+file: src/routes/calls/+page.svelte
+added_by: test-writer
+--- old
+          await openFolder(call.root, call.id);
+--- new
+          await openFolder(call.root, call.id).catch(() => null);
+--- end

@@ -1,0 +1,8 @@
+guarantee: AC-6: export failure shows the reason
+file: src/routes/calls/+page.svelte
+added_by: test-writer
+--- old
+          await exportCall(call.root, call.id, "json");
+--- new
+          await exportCall(call.root, call.id, "json").catch(() => ({ saved: true }));
+--- end

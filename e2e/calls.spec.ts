@@ -300,6 +300,36 @@ test("AC-6 D4: a cancelled export (saved: false) shows nothing", async ({ page }
   await expect(alert(page)).toHaveCount(0);
 });
 
+test("AC-6 failure branch: a refused Open folder shows its reason", async ({ page }) => {
+  await openCalls(page);
+  await expect(readyRow(page)).toBeVisible();
+  await expect(alert(page)).toHaveCount(0);
+  await queueCallsResult(page, "calls_open_folder", { reject: { code: "ioFailed", reason: "missing" } });
+  await readyRow(page).getByRole("button", { name: en("calls.open_folder") }).click();
+  await expect(alert(page)).toHaveText(en("calls.error.io.missing"));
+  expect((await calls(page, "calls_open_folder")).map((c) => c.args)).toEqual([READY]);
+});
+
+test("AC-4 failure branch: a refused calls_get shows its reason and no detail", async ({ page }) => {
+  await openCalls(page);
+  await expect(readyRow(page)).toBeVisible();
+  await expect(alert(page)).toHaveCount(0);
+  await queueCallsResult(page, "calls_get", { reject: { code: "ioFailed", reason: "access_denied" } });
+  await readyRow(page).getByTestId("call-select").click();
+  await expect(alert(page)).toHaveText(en("calls.error.io.access_denied"));
+  await expect(page.getByTestId("call-detail")).toHaveCount(0);
+});
+
+test("AC-1 failure branch: a refused calls_list (refetch after calls://changed) shows its reason", async ({ page }) => {
+  await openCalls(page);
+  await expect(rows(page)).toHaveCount(12);
+  await expect(alert(page)).toHaveCount(0);
+  await expect.poll(() => listeners(page, "calls://changed")).toBeGreaterThan(0);
+  await queueCallsResult(page, "calls_list", { reject: { code: "ioFailed", reason: "disk_full" } });
+  await emit(page, "calls://changed", READY);
+  await expect(alert(page)).toHaveText(en("calls.error.io.disk_full"));
+});
+
 test("AC-6: Open folder invokes calls_open_folder { root, id } of the damaged row's own root", async ({ page }) => {
   await openCalls(page);
   const damaged = rows(page).filter({ hasText: en("calls.state.damaged") });

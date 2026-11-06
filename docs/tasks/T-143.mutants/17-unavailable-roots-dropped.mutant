@@ -1,0 +1,8 @@
+guarantee: AC-3: unavailable-root lines show
+file: src/routes/calls/+page.svelte
+added_by: test-writer
+--- old
+{#each list.unavailableRoots as root (root)}
+--- new
+{#each [] as root (root)}
+--- end

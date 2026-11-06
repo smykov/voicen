@@ -1,0 +1,8 @@
+guarantee: D8: calls://changed refetches open detail
+file: src/routes/calls/+page.svelte
+added_by: test-writer
+--- old
+            if (sameRef(selected, ref)) void loadDetail(ref);
+--- new
+            void ref;
+--- end

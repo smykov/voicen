@@ -1,0 +1,9 @@
+guarantee: D8: calls://changed refetches
+file: src/routes/calls/+page.svelte
+added_by: test-writer
+--- old
+          await onCallsChanged((ref) => {
+            void refreshList();
+--- new
+          await onCallsChanged((ref) => {
+--- end
