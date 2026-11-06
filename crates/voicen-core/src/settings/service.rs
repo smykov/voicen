@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use super::file::SettingsFile;
 use super::hotkey::parse_hotkey;
 use super::roots::{effective_root, CallRoots};
-use super::url::{check_base_url, is_insecure_remote, normalize_base_url};
+use super::url::{check_base_url, is_insecure_remote, normalize_base_url, ProviderHost};
 use super::validate::{validate, KeyEditsWithPresence};
 use super::{
     defaults, parse_file, CallSettings, EngineKind, ErrorCode, FieldError, FieldId, LoadOutcome,
@@ -232,6 +232,12 @@ pub struct ForgetOutcome {
 /// snapshot in force is unchanged and nothing was published.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ForgetFailed;
+
+/// [`SettingsService::remember_warned_host`] could not write the settings file (or the
+/// service is `Unavailable`); the snapshot in force is unchanged and nothing was
+/// published.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WarnedHostFailed;
 
 /// The fixed deserialize error of [`SaveRequest`].
 const SAVE_REQUEST_WIRE_ERROR: &str =
@@ -568,6 +574,44 @@ impl SettingsService {
             .map_err(|_| ForgetFailed)?;
         self.swap_and_publish(next);
         Ok(ForgetOutcome { engine_reset })
+    }
+
+    /// The narrow writer of `calls.warned_hosts` (T-126, FR-031; the `forget_model`
+    /// pattern): under `save_lock` for the whole read-modify-write, publish included,
+    /// so a concurrent save is never lost and a later save keeps the host
+    /// (`keep_server_owned`).
+    ///
+    /// - A host already in the list: nothing written, `Ok`.
+    /// - Otherwise the host is appended, every other field kept as in force, the file
+    ///   written, then the snapshot swapped and published.
+    ///
+    /// No key is read and nothing is revalidated or normalized. `Unavailable`
+    /// (decision #19) or a write failure keeps the snapshot in force, publishes nothing
+    /// and returns [`WarnedHostFailed`].
+    pub fn remember_warned_host(&self, host: &ProviderHost) -> Result<(), WarnedHostFailed> {
+        if self.load.unavailable {
+            return Err(WarnedHostFailed);
+        }
+        let _guard = self
+            .save_lock
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let current = self.snapshot();
+        if current
+            .calls
+            .warned_hosts
+            .iter()
+            .any(|h| h == host.as_str())
+        {
+            return Ok(());
+        }
+        let mut next = (*current).clone();
+        next.calls.warned_hosts.push(host.as_str().to_string());
+        encode(&next)
+            .and_then(|bytes| self.deps.file.write_atomic(&bytes))
+            .map_err(|_| WarnedHostFailed)?;
+        self.swap_and_publish(next);
+        Ok(())
     }
 
     /// Swaps `settings` in as the snapshot in force and sends it to every live

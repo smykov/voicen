@@ -233,6 +233,7 @@ fn level(event: &LogEvent) -> &'static str {
         LogEvent::CallRefused { .. }
         | LogEvent::CallTrackSilent { .. }
         | LogEvent::CallStorageFailed { .. }
+        | LogEvent::CallTrackDropped { .. }
         | LogEvent::CallSwitchRefused { .. }
         | LogEvent::VadFallback { .. }
         | LogEvent::TranscriptInvalid { .. } => WARN,
@@ -362,6 +363,18 @@ fn write_message(out: &mut String, event: &LogEvent) {
             if let Some(code) = os {
                 pair(out, "os", code);
             }
+        }
+        LogEvent::CallTrackDropped {
+            track,
+            blocks,
+            ms,
+            at_ms,
+        } => {
+            out.push_str("call_track_dropped");
+            pair(out, "track", track_name(*track));
+            pair(out, "blocks", blocks);
+            pair(out, "ms", ms);
+            pair(out, "at_ms", at_ms);
         }
         LogEvent::CallRecovered { calls } => {
             out.push_str("call_recovered");

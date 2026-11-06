@@ -99,6 +99,18 @@ pub struct DeviceChange {
     pub gap_ms: u64,
 }
 
+/// A run of blocks a full track channel dropped (`meta.json` `drops[]`; T-126, decision
+/// #244): where on the track (`at_ms`), which track, how many blocks and the time they
+/// spanned. The same facts as the `call_track_dropped` log line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrackDrop {
+    pub at_ms: u64,
+    pub track: Track,
+    pub blocks: u32,
+    pub ms: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Engines {
@@ -141,6 +153,8 @@ pub struct CallMeta {
     pub mode: Mode,
     pub tracks: [TrackMeta; 2],
     pub device_changes: Vec<DeviceChange>,
+    /// Channel drops (#244); required, `[]` at create.
+    pub drops: Vec<TrackDrop>,
     pub engines: Engines,
     pub app_version: String,
     pub speakers: Vec<Speaker>,
@@ -775,7 +789,7 @@ fn folder_stamp(t: &LocalTime) -> String {
 }
 
 /// `YYYY-MM-DDTHH:MM:SS±HH:MM` of the local start (whole seconds).
-fn started_at(t: &LocalTime) -> String {
+pub(crate) fn started_at(t: &LocalTime) -> String {
     let sign = if t.offset < 0 { '-' } else { '+' };
     let abs = t.offset.unsigned_abs();
     let mut out = String::with_capacity(25);
@@ -865,6 +879,7 @@ fn initial_meta(id: CallId, local: &LocalTime, new: &NewCall) -> CallMeta {
             track(Track::System, SYSTEM_FILE, &new.system, SYSTEM_SPEAKER),
         ],
         device_changes: Vec::new(),
+        drops: Vec::new(),
         engines: Engines {
             transcription: None,
             diarization: None,

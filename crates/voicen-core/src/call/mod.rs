@@ -4,6 +4,8 @@ pub mod capture;
 pub mod codec;
 pub mod events;
 pub mod final_pass;
+pub mod indicator;
+pub mod session;
 pub mod storage;
 pub mod transcript;
 #[cfg(any(test, feature = "test-fakes"))]
@@ -22,7 +24,7 @@ pub use events::{
 
 pub use storage::{
     ActiveCallFiles, CallEntry, CallList, CallMeta, CallStore, CreateError, DeviceChange,
-    ListState, NewCall, TrackMeta, TrackResult,
+    ListState, NewCall, TrackDrop, TrackMeta, TrackResult,
 };
 
 pub use transcript::{

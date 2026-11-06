@@ -12,8 +12,10 @@ use std::fmt;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use crate::settings::url::ProviderHost;
+
 /// One of the two tracks of a call.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Track {
     Mic,
@@ -198,16 +200,30 @@ pub enum CallState {
 }
 
 /// A warning shown in the call indicator (data-model "CallWarning and CallNotice"):
-/// catalog ids and enums only. `provider_notice{host}` is added by T-126 (decision #195).
+/// catalog ids, enums and, for `provider_notice{host}` (T-126, decision #195), the typed
+/// [`ProviderHost`] of the API base URL. The host goes to the indicator only; no log line
+/// carries a `CallWarning`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CallWarning {
     CommunicationsDeviceDiffers,
-    TrackLost { track: Track },
+    TrackLost {
+        track: Track,
+    },
     MicChanged,
     CantHearOtherParty,
     CantHearYou,
     LowDisk,
+    /// The first call on a remote provider host not yet in `calls.warned_hosts` (FR-031).
+    ProviderNotice {
+        #[serde(serialize_with = "host_text")]
+        host: ProviderHost,
+    },
+}
+
+/// The host's text on the wire (`ProviderHost` has no `Serialize` of its own).
+fn host_text<S: Serializer>(host: &ProviderHost, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_str(host.as_str())
 }
 
 /// A toast about a call (data-model "CallWarning and CallNotice"): catalog ids, enums and

@@ -97,6 +97,15 @@ pub enum LogEvent {
     },
     /// `call_storage_failed kind=<…> [os=<code>]` (WARN); `os` is left out when unknown.
     CallStorageFailed { kind: StorageKind, os: Option<i32> },
+    /// `call_track_dropped track=<mic|system> blocks=<n> ms=<n> at_ms=<n>` (WARN; T-126,
+    /// decision #244): a full track channel dropped `blocks` blocks spanning `ms`, at the
+    /// track position `at_ms`. One line per `Report::Dropped`; a stall gap has none.
+    CallTrackDropped {
+        track: Track,
+        blocks: u32,
+        ms: u32,
+        at_ms: u64,
+    },
     /// `call_recovered calls=<n>`.
     CallRecovered { calls: u32 },
     /// `final_stage track=<…> stage=<…> ms=<n> chunks=<n>`.
