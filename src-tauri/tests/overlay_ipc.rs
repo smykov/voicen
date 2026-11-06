@@ -248,9 +248,10 @@ fn overlay_ready_returns_the_newest_published_state_as_the_last_emit_carries_it(
     // the window and the emit are read once, after it.
     let receipt = overlay::settled(app.handle(), HANG);
     assert!(
-        receipt.is_some_and(|r| !r.failed),
+        receipt.is_some_and(|r| !r.failed && r.window),
         "Recording: the overlay receipt (`overlay::settled`) did not report a handled, \
-         unfailed state within the hang bound {HANG:?}: {receipt:?} (emitted: {:?})",
+         unfailed state holding the built window within the hang bound {HANG:?}: \
+         {receipt:?} (emitted: {:?})",
         last(&events)
     );
     assert!(
@@ -376,5 +377,12 @@ fn an_overlay_that_cannot_be_built_is_reported_failed_by_the_receipt_and_the_log
         failed_line,
         "the receipt says the build failed ({settled:?}) but the app logged no \
          `overlay_failed` line: {lines:#?}"
+    );
+    // The window labelled `overlay` is the test's, not one the thread built: the
+    // receipt must not count it (`Settled::window`).
+    assert!(
+        !settled.window,
+        "the build failed but the receipt says the overlay thread holds a window: \
+         {settled:?}"
     );
 }

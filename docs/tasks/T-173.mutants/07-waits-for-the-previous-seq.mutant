@@ -1,0 +1,8 @@
+guarantee: AC-1: an overlay build wait is decided by the overlay receipt (settled on the newest seq published at call time, not while Destroying), never a wall-clock ceiling
+file: src-tauri/src/overlay.rs
+added_by: test-writer
+--- old
+        let target = mailbox.last_seq;
+--- new
+        let target = mailbox.last_seq.saturating_sub(1);
+--- end
