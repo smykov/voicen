@@ -74,6 +74,7 @@ Settings commands are unchanged: the `calls` section is part of the existing set
 
 ## UI components
 
+- The `calls` window also invokes `settings_get` and listens to `settings://changed` (UI language and the call hotkey for the empty list; T-143). Handoff to T-142: grant `allow-settings-get` and the event listen to the `calls` label (`docs/decisions/ipc-acl.md`). Page invariants: `docs/decisions/calls-ui.md`.
 - `src/routes/calls/+page.svelte`:
   - list newest first, with title, date and time, duration and state;
   - "No calls yet" with how to start one; unavailable-root lines;
@@ -130,6 +131,11 @@ The texts live in the one catalog at the repository root, `i18n/en.json` and `i1
 | `calls.search` / `calls.no_matches` | Search / No matches |
 | `calls.transcribe` / `calls.transcribe_again` / `calls.copy` / `calls.export_md` / `calls.export_json` / `calls.open_folder` / `calls.delete` / `calls.delete_confirm` | … |
 | `calls.error.in_use` / `calls.error.empty_name` / `calls.error.recording` / `calls.error.io` | could not delete: {file} is in use / … |
+| `calls.error.io.missing` (T-143) | Could not complete the action: the file or folder is not available |
+| `calls.error.io.not_a_folder` (T-143) | Could not complete the action: the path is not a folder |
+| `calls.error.io.access_denied` (T-143) | Could not complete the action: access denied |
+| `calls.error.io.disk_full` (T-143) | Could not complete the action: the disk is full |
+| `calls.error.io.other` (T-143) | Could not complete the action: the file could not be read or written |
 | `speaker.me` / `speaker.other` | Me / Other party (RU: Я / Собеседник) |
 | `settings.tab.calls` + one label per new `FieldId` | Calls / Call hotkey / Reminder / Primary language / Storage folder |
 | `settings.calls.provider_notice` | The other party's audio goes to provider {host} |
