@@ -1,0 +1,10 @@
+guarantee: AC: per-track results are kept in meta.json as pending | done{segments} | failed{reason}
+file: crates/voicen-core/src/call/storage.rs
+added_by: test-writer
+--- old
+#[serde(rename_all = "snake_case")]
+pub enum TrackResult {
+--- new
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum TrackResult {
+--- end

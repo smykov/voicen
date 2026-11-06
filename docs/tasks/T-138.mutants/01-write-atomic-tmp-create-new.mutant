@@ -1,0 +1,10 @@
+guarantee: AC: a stale tmp from a crash never turns the transcript/meta write into storage failure (write_atomic opens its tmp with File::create)
+file: crates/voicen-core/src/call/storage.rs
+added_by: test-writer
+--- old
+    let file = File::create(&tmp)?;
+    fill_and_rename(file, &tmp, &target, bytes)
+--- new
+    let file = File::create_new(&tmp)?;
+    fill_and_rename(file, &tmp, &target, bytes)
+--- end

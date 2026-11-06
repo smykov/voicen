@@ -43,9 +43,19 @@
 //!   from 0 over the planner's lifetime.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
+use std::path::PathBuf;
+use std::sync::Arc;
+
 use crate::audio::{AudioBuffer, SAMPLE_RATE};
-use crate::call::PassMode;
-use crate::vad::SpeechSpan;
+use crate::call::codec::TrackDecoder;
+use crate::call::{CallMeta, CallNotice, EngineRef, FinalOutcome, PassMode};
+use crate::clock::MonotonicClock;
+use crate::diag::event::LogEvent;
+use crate::engine::openai::{OpenAiCompatibleEngine, ResponseShape, Timed, TimedFailure};
+use crate::engine::TranscribeRequest;
+use crate::secrets::CredentialStore;
+use crate::settings::Settings;
+use crate::vad::{SpeechSpan, SpeechSpans};
 
 /// A gap between two spans shorter than this merges them.
 pub const PAUSE_MS: u64 = 300;
@@ -404,6 +414,89 @@ pub fn recut_timeless(chunk: &Chunk) -> Vec<Chunk> {
     })
     .collect()
 }
+
+// ---- T-138 STUBS: compile-only; the developer replaces every body --------------------
+
+/// The one engine call the pass makes: a seam so scheduling tests need no HTTP.
+pub trait TimedTranscriber: Send + Sync {
+    fn transcribe_timed(
+        &self,
+        audio: &AudioBuffer,
+        req: &TranscribeRequest,
+        shape: ResponseShape,
+    ) -> Result<Timed, TimedFailure>;
+}
+
+impl TimedTranscriber for OpenAiCompatibleEngine {
+    fn transcribe_timed(
+        &self,
+        _audio: &AudioBuffer,
+        _req: &TranscribeRequest,
+        _shape: ResponseShape,
+    ) -> Result<Timed, TimedFailure> {
+        unimplemented!("T-138 TimedTranscriber for OpenAiCompatibleEngine")
+    }
+}
+
+/// Where the pass reports: log lines and the user notice.
+pub trait PassEvents: Send + Sync {
+    fn log(&self, event: LogEvent);
+    fn notice(&self, notice: CallNotice);
+}
+
+/// The call folder and its `meta.json` as read (state `ready-to-transcribe`).
+#[derive(Debug, Clone)]
+pub struct PassCall {
+    pub dir: PathBuf,
+    pub meta: CallMeta,
+}
+
+/// What the pass needs besides the settings snapshot and the key store.
+pub struct PassDeps<'a> {
+    /// The primary detector; `None` = unavailable (energy fallback, cause `unavailable`).
+    pub primary: Option<Arc<dyn SpeechSpans>>,
+    pub events: &'a dyn PassEvents,
+    pub clock: Arc<dyn MonotonicClock>,
+}
+
+/// How the pass ended and in which mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PassOutcome {
+    pub outcome: FinalOutcome,
+    pub mode: PassMode,
+}
+
+/// The two decoded tracks (the lower entry takes them already open).
+pub struct PassSources {
+    pub mic: Box<dyn TrackDecoder>,
+    pub system: Box<dyn TrackDecoder>,
+}
+
+/// The whole pass from `ready-to-transcribe`: builds the engine from `settings` and the key
+/// (once), opens the tracks of `call.dir`, and runs [`run_pass_with`].
+pub fn run_pass(
+    _call: PassCall,
+    _settings: Arc<Settings>,
+    _creds: &dyn CredentialStore,
+    _deps: PassDeps<'_>,
+) -> PassOutcome {
+    unimplemented!("T-138 run_pass")
+}
+
+/// The pass from "write meta as transcribing" on, with the engine and the tracks given.
+pub fn run_pass_with(
+    _call: PassCall,
+    _engine: &dyn TimedTranscriber,
+    _request: &TranscribeRequest,
+    _engine_ref: EngineRef,
+    _sources: PassSources,
+    _deps: PassDeps<'_>,
+) -> PassOutcome {
+    unimplemented!("T-138 run_pass_with")
+}
+
+#[cfg(test)]
+mod pass_tests;
 
 #[cfg(test)]
 mod tests {

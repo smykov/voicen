@@ -1,0 +1,8 @@
+guarantee: AC: 400 gives timeless chunks of at most 30 s (TIMELESS_MAX_MS)
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: test-writer
+--- old
+pub const TIMELESS_MAX_MS: u64 = 30_000;
+--- new
+pub const TIMELESS_MAX_MS: u64 = 31_000;
+--- end

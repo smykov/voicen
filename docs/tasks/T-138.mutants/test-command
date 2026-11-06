@@ -1,0 +1,1 @@
+cargo test -j2 -p voicen-core --lib -- call::storage::tests::write_ call::final_pass::tests call::final_pass::pass_tests::track_results_have call::final_pass::pass_tests::characterization

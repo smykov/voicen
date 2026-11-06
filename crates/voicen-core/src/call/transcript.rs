@@ -59,7 +59,7 @@ pub struct TranscriptV1 {
 }
 
 /// One line. `start_ms`/`end_ms` are relative to `started_at`. No `hidden`, no `confidence` in 1a.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SegmentV1 {
     pub start_ms: i64,

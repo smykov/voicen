@@ -29,7 +29,9 @@ use super::events::{
     CallId, CallState, DeviceCause, EndpointId, FailReason, PassMode, StopReason, StorageKind,
     Track,
 };
-use super::transcript::{export_json, export_markdown, EngineRef, Speaker, TranscriptV1};
+use super::transcript::{
+    export_json, export_markdown, EngineRef, SegmentV1, Speaker, TranscriptV1,
+};
 use super::StorageOp;
 use crate::clock::MonotonicClock;
 use crate::diag::format::LocalTime;
@@ -108,10 +110,13 @@ pub struct Engines {
 /// `done{segments}` | `failed{reason}`). This build writes and reads only `pending`;
 /// `done{segments}` and `failed{reason}` come with the final-pass write (T-138/T-146),
 /// so until then a `meta.json` carrying either lists as damaged.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+// T-138 STUBS (type shape only; the developer owns the docs and the `list` handling)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TrackResult {
     Pending,
+    Done { segments: Vec<SegmentV1> },
+    Failed { reason: FailReason },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
