@@ -27,12 +27,13 @@ The page renders only what the `calls_*` commands and `settings_get` return, thr
 ### D4 — A failed action shows its reason
 
 - `callErrorMessageId(error)`: `ioFailed{reason}` maps to `calls.error.io.<reason>`; an unknown or absent reason maps to `calls.error.io.other`; `notFound` maps to `calls.error.io`. One mapper serves list, detail, copy, export and open-folder failures; one `role=alert` shows the text. A cancelled export (`saved: false`) shows nothing.
+- **Alert scoping:** the error is tagged by its source (`list`, `detail`, `other`). A successful list refetch clears only a `list` error, a successful `calls_get` only a `detail` error; an action or a selection clears any.
 - **Where it is enforced:** `view.test.ts` (mapper, ids exist in EN and RU), the failure-branch e2e tests (T-143 mutant record).
 - **Don't:** swallow a rejection at the call, or map every reason to a constant.
 
 ### D5 — Search is text, never markup
 
-- Case-insensitive substring over `line.text` (`toLowerCase`, covers Cyrillic); all lines stay visible; matches are `<mark>` built from text segments (`segmentsFor`). Zero matches over a non-empty query shows `calls.no_matches`.
+- Case-insensitive substring over `line.text` (`segmentsFor` matches `RegExp(escaped query, "giu")`: Unicode case folding, Cyrillic included, original case kept); all lines stay visible; matches are `<mark>` built from text segments (`segmentsFor`). Zero matches over a non-empty query shows `calls.no_matches`.
 - **Don't:** `{@html}` for marks; transcript text is untrusted.
 
 ### D6 — Speaker colour is never alone
@@ -50,7 +51,7 @@ The page renders only what the `calls_*` commands and `settings_get` return, thr
 ## Deviations the developer made (T-143)
 
 - **Listener payload types are generic** (`onCallsChanged<P extends CallRef = CallRef>`, same for the other listeners), so svelte-check accepts handlers typed on a narrower payload.
-- **`settings://changed` is listened in `callsApi` and again in `settingsApi`.** The calls unit test mocks `@tauri-apps/api/event` and sees only `callsApi`'s `listen`; `settings_get` itself stays `getSettings` of `settingsApi`, the one declaration of that command.
+- **`callsApi.ts` re-exports `onSettingsChanged` from `settingsApi.ts`**, so `settings://changed` and `settings_get` (`getSettings`) are each declared once; the listener is generic in its payload type (`docs/decisions/settings-ui.md` C).
 - **Any non-`ioFailed` code maps to `calls.error.io` for now.** More specific texts belong to T-154 (delete) and the rename tasks.
 - **A failed `settings_get` or a refused listen shows `error.ipc_unavailable`** in the same alert.
 
