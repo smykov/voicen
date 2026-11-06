@@ -804,6 +804,11 @@ fn the_reminder_shows_for_10_seconds_at_each_start() {
     assert_eq!(after[1].reminder_text, "");
     assert_eq!(after[1].headphones_hint, "");
     assert_eq!(rig.session.next_deadline(), None);
+    assert!(
+        rig.indicator.held_flags().iter().all(|held| *held),
+        "the expiry state is published inside the session lock: {:?}",
+        rig.indicator.calls()
+    );
     rig.session.tick();
     assert_eq!(
         rig.indicator.states().len(),
@@ -1043,7 +1048,10 @@ fn dropped_blocks_are_logged_once_and_kept_in_meta() {
         assert_eq!(entry["blocks"], json!(blocks));
         assert_eq!(entry["ms"], json!(span));
         assert_eq!(entry.as_object().expect("an object").len(), 4, "{entry}");
-        assert!(at_ms >= last_at, "drops are in order");
+        assert!(
+            at_ms > last_at || (last_at == 0 && std::ptr::eq(entry, &drops[0])),
+            "drops are in order and the second is later than the first: {at_ms} after {last_at}"
+        );
         assert!(at_ms <= 400, "at_ms is a position in the call: {at_ms}");
         last_at = at_ms;
     }
@@ -1089,6 +1097,62 @@ fn a_call_without_drops_has_an_empty_drops_list() {
     rig.session.stop(StopReason::User);
     assert_eq!(rig.only_meta()["drops"], json!([]));
     assert!(rig.lines_named("call_track_dropped").is_empty());
+}
+
+/// Makes the next `meta.json` write of the only call folder fail: the file becomes a
+/// directory, so the atomic rename onto it is refused (on every OS).
+fn block_meta_writes(rig: &CallRig) {
+    let folders = rig.folders();
+    assert_eq!(folders.len(), 1, "premise: one call folder");
+    std::fs::remove_file(folders[0].join("meta.json")).expect("remove meta.json");
+    std::fs::create_dir(folders[0].join("meta.json")).expect("a directory named meta.json");
+}
+
+fn storage_failed_kinds(rig: &CallRig) -> Vec<String> {
+    rig.lines_named("call_storage_failed")
+        .iter()
+        .map(|l| l.get("kind").unwrap_or("").to_string())
+        .collect()
+}
+
+#[test]
+fn a_failed_final_meta_write_is_logged_and_the_stop_still_completes() {
+    // The stop writes meta.json last; when that write fails the session logs
+    // `call_storage_failed kind=meta`, still logs `call_stopped`, turns the indicator off
+    // and reports the stop (the failure is not swallowed and not fatal). Bite: the error
+    // dropped at the `write_meta` call in `CallSession::finish` (no line), the stop
+    // abandoned after it (no call_stopped, indicator left on).
+    let rig = CallRig::new();
+    started(&rig, CallSource::Tray);
+    feed(&rig, 0, 200);
+    block_meta_writes(&rig);
+    assert!(rig.session.stop(StopReason::User));
+    assert_eq!(storage_failed_kinds(&rig), vec!["meta".to_string()]);
+    assert_eq!(rig.lines_named("call_stopped").len(), 1);
+    assert_eq!(rig.indicator.recording_flags().last(), Some(&false));
+}
+
+#[test]
+fn a_failed_meta_write_at_a_drop_is_logged_and_the_call_goes_on() {
+    // #244: the drop's meta write fails once the file is blocked; the line for the drop
+    // is still written, `call_storage_failed kind=meta` follows while the call runs, and
+    // the call keeps recording. Bite: the write error dropped in `Writer::dropped`
+    // (no call_storage_failed until the stop), the drop line skipped after the failure.
+    let rig = CallRig::with_capacity(4, |_| {});
+    started(&rig, CallSource::Tray);
+    block_meta_writes(&rig);
+    let pause = rig.session.pause_writer();
+    rig.source.feed(Track::Mic, 0, 140, 0.2);
+    drop(pause);
+    assert!(
+        wait(|| !storage_failed_kinds(&rig).is_empty()
+            && rig.lines_named("call_track_dropped").len() == 1),
+        "the drop line and the failed write reach the log while recording: {:?}",
+        rig.call_lines()
+    );
+    assert_eq!(storage_failed_kinds(&rig)[0], "meta");
+    assert!(rig.session.is_recording(), "the call goes on");
+    assert!(rig.session.stop(StopReason::User));
 }
 
 // ---- the narrow settings writer ---------------------------------------------------------
