@@ -1,0 +1,8 @@
+guarantee: -
+file: src-tauri/src/overlay.rs
+added_by: test-writer
+--- old
+        (mailbox.settled.seq >= target).then_some(mailbox.settled)
+--- new
+        Some(mailbox.settled)
+--- end

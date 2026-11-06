@@ -1,0 +1,14 @@
+guarantee: -
+file: src-tauri/src/overlay.rs
+added_by: test-writer
+--- old
+                    Ok(Err(err)) => {
+                        self.warn(io_os_code(&err));
+                        true
+                    }
+--- new
+                    Ok(Err(err)) => {
+                        self.warn(io_os_code(&err));
+                        false
+                    }
+--- end

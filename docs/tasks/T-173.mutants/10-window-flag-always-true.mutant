@@ -1,0 +1,8 @@
+guarantee: -
+file: src-tauri/src/overlay.rs
+added_by: test-writer
+--- old
+        handled.window = thread.window.is_some();
+--- new
+        handled.window = true;
+--- end

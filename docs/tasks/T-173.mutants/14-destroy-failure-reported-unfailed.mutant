@@ -1,0 +1,8 @@
+guarantee: -
+file: src-tauri/src/overlay.rs
+added_by: test-writer
+--- old
+                failed.is_some()
+--- new
+                false
+--- end

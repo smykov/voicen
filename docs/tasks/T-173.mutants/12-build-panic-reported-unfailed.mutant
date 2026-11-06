@@ -1,0 +1,16 @@
+guarantee: -
+file: src-tauri/src/overlay.rs
+added_by: test-writer
+--- old
+                    Err(_panic) => {
+                        self.warn(None);
+                        self.lifecycle.on_build_failed();
+                        true
+                    }
+--- new
+                    Err(_panic) => {
+                        self.warn(None);
+                        self.lifecycle.on_build_failed();
+                        false
+                    }
+--- end
