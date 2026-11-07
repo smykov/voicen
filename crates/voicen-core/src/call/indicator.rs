@@ -347,10 +347,7 @@ mod clamp_tests {
         );
         // Straddling the origin with the larger part (290 px) on `left`: moved fully onto
         // `left`, to a negative x.
-        assert_eq!(
-            clamp_to_monitors(at(-290, 100), SIZE, &both),
-            at(-300, 100)
-        );
+        assert_eq!(clamp_to_monitors(at(-290, 100), SIZE, &both), at(-300, 100));
     }
 
     #[test]
