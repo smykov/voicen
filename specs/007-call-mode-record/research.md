@@ -142,11 +142,11 @@ Crate facts were read from the published sources of `opus` 0.4.0 / `opusic-sys` 
 
 - **Decision**:
   - **Window**: a second Tauri window with label `call-indicator` on its own opener thread and capability (settings-ui.md):
-    - created hidden at first Record, never at app start (overlay.md §5);
-    - undecorated, `always_on_top`, `skip_taskbar`, transparent off, focusable;
+    - built hidden at each Record start and destroyed at stop (NFR-03; T-130), never at app start (overlay.md §5);
+    - undecorated, `always_on_top`, `skip_taskbar`, transparent off, `focusable(false)` (`WS_EX_NOACTIVATE`) yet takes clicks;
     - its route is `/call-indicator`.
-  - **Showing and focus**: it is shown with `SW_SHOWNOACTIVATE`, so the call app keeps the focus at start. Clicking the stop control may activate it; after a click the shell returns the foreground to the window that had it (ADR-007 fallback).
-  - **Moving**: through `data-tauri-drag-region`. The position is saved in `calls.indicator_position` and clamped to a visible monitor at show.
+  - **Showing and focus**: it is shown with `SW_SHOWNOACTIVATE`, so the call app keeps the focus at start. Implemented (T-130) as ADR-007's primary, variant N: `WS_EX_NOACTIVATE` so a click does not activate it. Whether it holds on WebView2 is proven by the Windows CI tests `src-tauri/tests/call_indicator.rs` (S3 show, S4 click, S5 drag), pending a green run on `wip/T-130`, and the owner's check. Variant F (focusable, the shell returns the foreground after a click) is not implemented; it is the fallback if those tests fail.
+  - **Moving**: through `data-tauri-drag-region`. The position is saved in `calls.indicator_position` and clamped to a visible monitor work area at each build.
   - **Text**: shown text comes from the core message catalog (the overlay rule, i18n.md); levels and timer arrive as typed events at most 10 Hz.
   - **Smoke**: it is a product window, never in `scripts/ci/helper-windows.txt`. The install smoke's window census passes because the indicator is not shown at start and a refused start never shows it (FR-043).
 - **Confirm at spike** (the first indicator task, Windows CI plus an owner check):

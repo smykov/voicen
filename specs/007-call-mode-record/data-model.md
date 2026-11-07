@@ -160,7 +160,7 @@ As in §7 schema 1: `start_ms`, `end_ms` (relative to `started_at` = track `star
 | `storage_root` | `Option<PathBuf>` | `None` | Writable check at save (FR-039). |
 | `earlier_roots` | `Vec<PathBuf>` | `[]` | — |
 | `warned_hosts` | `Vec<String>` (hosts) | `[]` | Hosts whose provider notice was shown once (FR-031). A host is never logged. |
-| `indicator_position` | `Option<{x, y}>` | `None` | Clamped to a visible monitor at show. |
+| `indicator_position` | `Option<{x, y}>` | `None` | Physical pixels, the window's top-left. Clamped at each build to a monitor work area (`call::indicator::clamp_to_monitors`: a window not fully inside one work area moves fully onto the monitor it overlaps most). Written only by `SettingsService::remember_indicator_position` (T-130). `None`: top-right of the primary work area, 24 px inside it. |
 
 The settings `SCHEMA_VERSION` stays 1. The section is added with container-level `#[serde(default)]` from `settings::defaults`, so an older file loads with defaults (settings.md). New `FieldId`s: `CallHotkey`, `CallReminder`, `PrimaryLanguage`, `StorageRoot`. New `SettingsTab::Calls`.
 

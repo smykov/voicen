@@ -7,7 +7,7 @@ The UI talks to Rust only through these commands and events, and Playwright mock
 | Label | Route | Created | Focus | Product window (census) |
 |---|---|---|---|---|
 | `calls` | `/calls` | on tray "Calls", a "Transcript ready" → Open, or the indicator's "Open Calls" | normal window | yes |
-| `call-indicator` | `/call-indicator` | hidden at the first Record, shown at each Record start, hidden at stop | shown without activation (research R12) | yes, never in `helper-windows.txt`, never shown at app start |
+| `call-indicator` | `/call-indicator` | built (hidden, then shown without activation) at each Record start, destroyed at stop (NFR-03; T-130) | `WS_EX_NOACTIVATE`, shown with `SW_SHOWNOACTIVATE` (research R12) | yes, never in `helper-windows.txt`, never exists at app start |
 | `settings` (exists) | `/settings` | — | — | yes; gains the Calls tab |
 
 Each window has its own label, capability file and opener thread (settings-ui.md).
@@ -47,9 +47,16 @@ interface IndicatorState { recording: boolean; reminderVisible: boolean; reminde
 | `calls_open_folder` | `{root, id}` | `null` | `ioFailed` | FR-033, FR-036 |
 | `calls_delete` | `{root, id}` | `null` | `recordingCall`, `inUse{file}`, `ioFailed` | FR-037 |
 | `call_indicator_stop` | — | `null` | — | FR-005 |
-| `call_indicator_dismiss` | `{warningId}` | `null` | — | FR-006 |
+| `call_indicator_dismiss` | `{id}` (the warning's `IndicatorWarning.id`) | `null` | — | FR-006 |
 | `call_indicator_moved` | `{x, y}` | `null` | — | FR-005 |
-| `call_indicator_state` | — | `IndicatorState` | — | FR-005 (on load) |
+| `call_indicator_state` | — | `IndicatorState` (the newest published one; idle before any) | — | FR-005 (on load) |
+
+Built (T-130, `src-tauri/src/call_indicator.rs`; why: `docs/decisions/call-indicator.md`). Details the table leaves open:
+
+- **Control.** `call_indicator_stop` and `call_indicator_dismiss` call the `IndicatorControl` slot (filled by the call wiring, T-128); with no control set they resolve `null` and do nothing. Dismiss removes the warning with that `id` from the session (`CallSession::dismiss_warning`); an unknown id changes nothing.
+- **`call_indicator_moved {x, y}`** (physical pixels, the window's top-left): clamped to the monitor work areas, then saved in `calls.indicator_position` (`SettingsService::remember_indicator_position`); a failed write is logged and the window is not moved. It does not move a live window.
+- **Events.** `indicator://state` is emitted at the window's build and at each newer recording state. `indicator://tick` is coalesced, newest wins, and emitted at most every 100 ms (10 Hz); a tick with no live window is dropped.
+- **Lifetime.** The window exists exactly while the newest state has `recording = true`: rebuilt at the next Record start, so a page reads its first state through `call_indicator_state` if it was not listening yet.
 
 Paths cross the wire only as opaque `root` strings that Rust returned in `calls_list`. Every command checks that `root` is the current or a remembered earlier root and that `id` is a folder name of the call-id grammar. Anything else is `notFound`, never a filesystem access (P-009).
 
