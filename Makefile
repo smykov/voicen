@@ -61,7 +61,8 @@ check-ban-canary:
 	scripts/ci/area-image.sh --present core
 	scripts/ci/ban-canary.sh
 
-# The token guard below (decides_on: token + literal): every tracked line holding the lint
+# The token guard below (decides_on: token + literal): every line of a file git does not ignore
+# (in the index or untracked, T-164) holding the lint
 # tool's name (any case, comments included) in a *.rs, Cargo.toml, .cargo config or make file
 # is an owned line of the guard's list, so no allow, cap, config or edit of check-core's lint
 # command can lower the bans unseen; this file's lines holding the name are owned too. The

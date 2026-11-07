@@ -9,7 +9,9 @@
 # file), so this guard holds: every line holding that token is an owned line
 # (docs/decisions/ci-toolchain.md, docs/tasks/T-089.md §4, §5, §12, review 1 #3).
 #
-# Scanned: every file `git -C <root> ls-files` lists whose name ends in .rs, whose base name is
+# Scanned: every file `git -C <root> ls-files --cached --others --exclude-standard` lists (the
+#   work tree's files git does not ignore: in the index or untracked; git decides the ignores,
+#   the guard reads no ignore rules, T-164) whose name ends in .rs, whose base name is
 #   Cargo.toml, or that is config or config.toml in a .cargo directory; and every make file:
 #   base name Makefile, makefile or GNUmakefile, or a name ending in .mk. check-core's clippy
 #   command line in the Makefile is where the bans apply to real code, so it is an owned line
@@ -51,7 +53,7 @@ cd "$root" || cannot_run "cannot enter $root"
 list=scripts/ci/clippy-lines.txt
 [ -f "$list" ] && [ -r "$list" ] || cannot_run "owned list $list not found or not readable"
 
-mapfile -d '' tracked < <(git ls-files -z) || cannot_run "git ls-files failed"
+mapfile -d '' tracked < <(git ls-files -z --cached --others --exclude-standard) || cannot_run "git ls-files failed"
 files=()
 for f in "${tracked[@]}"; do
   case "$f" in
@@ -59,10 +61,10 @@ for f in "${tracked[@]}"; do
     Makefile | */Makefile | makefile | */makefile | GNUmakefile | */GNUmakefile | *.mk) ;;
     *) continue ;;
   esac
-  [ -f "$f" ] && [ -r "$f" ] || cannot_run "$f is tracked but not readable"
+  [ -f "$f" ] && [ -r "$f" ] || cannot_run "$f is listed by git but not readable"
   files+=("$f")
 done
-[ "${#files[@]}" -gt 0 ] || cannot_run "no tracked .rs, Cargo.toml, .cargo config or make file under $root"
+[ "${#files[@]}" -gt 0 ] || cannot_run "no non-ignored .rs, Cargo.toml, .cargo config or make file under $root"
 
 report="$(LC_ALL=C awk -v list="$list" '
 function trim(s) { sub(/^[ \t\r]+/, "", s); sub(/[ \t\r]+$/, "", s); return s }

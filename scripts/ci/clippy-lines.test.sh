@@ -7,7 +7,9 @@
 # config, a config dir set by a build script; docs/tasks/T-089.md Investigation §4, §12), so:
 #
 # Contract of clippy-lines.sh [root]   (default root: the repository)
-#   Scanned: every file `git -C <root> ls-files` lists whose name ends in .rs, whose base name is
+#   Scanned: every file `git -C <root> ls-files --cached --others --exclude-standard` lists (the
+#     work tree's files git does not ignore: in the index or untracked; git decides the ignores,
+#     T-164) whose name ends in .rs, whose base name is
 #     Cargo.toml, or that is config or config.toml in a .cargo directory; and (T-089 review 1 #3)
 #     every make file: base name Makefile, makefile or GNUmakefile, or a name ending in .mk.
 #     check-core's clippy command line is where the bans apply to real code, so it is an owned
