@@ -8,7 +8,9 @@
 //! and waits poll state), F-021 (no wall-clock ceiling: the 10 s reminder runs on the
 //! fake monotonic clock), F-024 (every error fake fails exactly one call).
 //!
-//! "Subtitles-only" (FR-019) is the record-off state of 1a: nothing is written.
+//! "Subtitles-only" (FR-019) is the session state subtitles on, record off. 1a's UI never
+//! turns subtitles on, so the session itself is what is tested: a fake subtitle consumer
+//! (`call_support::FakeSubtitles`) is fed while nothing reaches the calls root.
 
 mod call_support;
 mod common;
@@ -581,8 +583,332 @@ fn the_fallback_is_for_a_missing_mic_only() {
 
 // ---- subtitles-only ---------------------------------------------------------------------
 
+/// The 16 kHz samples `feed_both(from, to, ..)` delivers per track (20 ms = 320 samples).
+fn fed(from: u64, to: u64) -> usize {
+    usize::try_from((to - from) / 20 * 320).expect("fits")
+}
+
+fn consumer_has(rig: &CallRig, samples: usize) -> bool {
+    wait(|| {
+        rig.subtitles.samples(Track::Mic) == samples
+            && rig.subtitles.samples(Track::System) == samples
+    })
+}
+
+/// Every file under the root with its bytes, sorted.
+fn root_snapshot(rig: &CallRig) -> Vec<(std::path::PathBuf, Vec<u8>)> {
+    let mut all: Vec<_> = rig
+        .root_files()
+        .into_iter()
+        .map(|p| {
+            let bytes = std::fs::read(&p).expect("readable");
+            (p, bytes)
+        })
+        .collect();
+    all.sort();
+    all
+}
+
 #[test]
 fn subtitles_only_writes_nothing() {
+    // Acceptance 5 (FR-019, I3): subtitles on, record off. The captures are open and the
+    // fake consumer receives the audio of both tracks, while nothing reaches the root:
+    // no probe, no folder, no file, no call_* line, the recording indicator never on.
+    // A tick and a clock move change nothing. Turning subtitles off closes the captures
+    // and the consumer gets no more. Bite: a subtitles-on path that calls CallStore or
+    // the probe, a tick or an off that writes meta, a consumer that is never fed, a
+    // second open on the repeated on, captures left open by the off.
+    let rig = CallRig::new();
+    assert_eq!(
+        rig.session.toggle_subtitles(true, CallSource::Switch),
+        Toggled::Started
+    );
+    assert!(rig.session.is_subtitles());
+    assert!(!rig.session.is_recording());
+    assert_eq!(rig.source.open_handles(), 2);
+    assert_eq!(
+        *rig.order.lock().expect("order"),
+        ["open system", "open mic"],
+        "two captures, no probe"
+    );
+    rig.source.feed_both(0, 400, 0.3, 0.1);
+    assert!(
+        consumer_has(&rig, fed(0, 400)),
+        "the consumer gets both tracks"
+    );
+    assert_eq!(
+        rig.session.toggle_subtitles(true, CallSource::Hotkey),
+        Toggled::AlreadyOn
+    );
+    assert_eq!(rig.source.opens().len(), 2, "a repeated on opens nothing");
+    rig.mono.advance(ms(30_000));
+    rig.session.tick();
+
+    let no_disk = |what: &str| {
+        assert!(
+            rig.root_files().is_empty(),
+            "{what}: {:?}",
+            rig.root_files()
+        );
+        assert!(rig.folders().is_empty(), "{what}");
+        assert_eq!(rig.roots.probes(), 0, "{what}");
+        assert!(
+            !rig.root
+                .parent()
+                .expect("parent")
+                .join("default-calls")
+                .exists(),
+            "{what}"
+        );
+        assert!(
+            rig.call_lines().is_empty(),
+            "{what}: {:?}",
+            rig.call_lines()
+        );
+        assert!(
+            !rig.indicator.recording_flags().contains(&true),
+            "{what}: the indicator shows no recording"
+        );
+        assert_eq!(rig.shell.tab_opens(), 0, "{what}");
+    };
+    no_disk("while subtitles run");
+
+    assert_eq!(
+        rig.session.toggle_subtitles(false, CallSource::Switch),
+        Toggled::Stopped
+    );
+    assert!(!rig.session.is_subtitles());
+    assert_eq!(rig.source.open_handles(), 0);
+    assert_eq!(rig.source.stops(), 2);
+    assert_eq!(
+        rig.session.toggle_subtitles(false, CallSource::Switch),
+        Toggled::AlreadyOff
+    );
+    assert_eq!(rig.subtitles.samples(Track::Mic), fed(0, 400));
+    assert_eq!(rig.subtitles.samples(Track::System), fed(0, 400));
+    no_disk("after subtitles are off");
+}
+
+#[test]
+fn a_subtitles_start_that_cannot_open_a_track_is_refused_and_leaves_nothing() {
+    // Acceptance 5 failure branch: the system capture, then the mic capture, fails to
+    // open once (F-024). The toggle is Refused at that part, subtitles stay off, what
+    // was opened is stopped, nothing is written; the next toggle works. Bite: a refusal
+    // swallowed into Started, the system capture left open after a mic failure, the flag
+    // set before the opens.
+    for (track, part, name) in [
+        (Track::System, RefusedPart::System, "system"),
+        (Track::Mic, RefusedPart::Mic, "mic"),
+    ] {
+        let rig = CallRig::new();
+        rig.source.fail_next(track, OpenError::Busy);
+        assert_eq!(
+            rig.session.toggle_subtitles(true, CallSource::Switch),
+            Toggled::Refused {
+                part,
+                reason: RefusedReason::Busy
+            },
+            "{name}"
+        );
+        assert!(!rig.session.is_subtitles(), "{name}");
+        assert_eq!(rig.source.open_handles(), 0, "{name}");
+        assert!(rig.root_files().is_empty(), "{name}");
+        assert_eq!(rig.roots.probes(), 0, "{name}");
+        assert_eq!(
+            rig.session.toggle_subtitles(true, CallSource::Switch),
+            Toggled::Started,
+            "{name}: the next toggle works"
+        );
+        assert_eq!(
+            rig.session.toggle_subtitles(false, CallSource::Switch),
+            Toggled::Stopped
+        );
+    }
+}
+
+#[test]
+fn record_shares_the_captures_of_running_subtitles_and_survives_their_record_off() {
+    // FR-019 / FR-37: subtitles on, then record on, then record off, then subtitles off.
+    // Record on opens nothing new (one capture per track) and makes one folder; record
+    // off finishes the folder (readable, ready-to-transcribe) while the captures stay
+    // open and keep feeding the consumer; nothing is written after the record off; the
+    // consumer never misses a block across the transitions. Bite: a second open on
+    // record on, captures closed by the record off, the consumer cut at record on or
+    // off, blocks written after record off, a record-off that leaves the folder open.
+    let rig = CallRig::new();
+    rig.session.toggle_subtitles(true, CallSource::Switch);
+    rig.source.feed_both(0, 200, 0.3, 0.1);
+    assert!(consumer_has(&rig, fed(0, 200)));
+
+    started(&rig, CallSource::Tray);
+    assert_eq!(rig.source.opens().len(), 2, "no second open");
+    assert_eq!(rig.source.open_handles(), 2);
+    assert_eq!(rig.folders().len(), 1);
+    assert_eq!(rig.roots.probes(), 1);
+    assert!(rig.session.is_recording() && rig.session.is_subtitles());
+    rig.source.feed_both(200, 400, 0.3, 0.1);
+    assert!(consumer_has(&rig, fed(0, 400)));
+
+    rig.mono.advance(ms(400));
+    assert_eq!(
+        rig.session.toggle_record(false, CallSource::Tray),
+        Toggled::Stopped
+    );
+    assert!(!rig.session.is_recording());
+    assert!(rig.session.is_subtitles(), "record off leaves subtitles on");
+    assert_eq!(rig.source.open_handles(), 2, "the captures stay open");
+    assert_eq!(rig.source.stops(), 0);
+    assert_eq!(rig.only_meta()["state"], json!("ready-to-transcribe"));
+    for file in ["mic.opus", "system.opus"] {
+        let path = rig.folders()[0].join(file);
+        let scanned = scan(File::open(&path).expect(file)).expect("a readable track");
+        assert_eq!(scanned.end, ReadEnd::Complete, "{file} is finished");
+    }
+    assert_eq!(rig.lines_named("call_stopped").len(), 1);
+    let after_stop = root_snapshot(&rig);
+
+    rig.source.feed_both(400, 600, 0.3, 0.1);
+    assert!(
+        consumer_has(&rig, fed(0, 600)),
+        "the consumer keeps getting audio"
+    );
+    assert_eq!(
+        rig.session.toggle_subtitles(false, CallSource::Switch),
+        Toggled::Stopped
+    );
+    assert_eq!(rig.source.open_handles(), 0);
+    assert_eq!(rig.source.stops(), 2);
+    assert_eq!(
+        root_snapshot(&rig),
+        after_stop,
+        "nothing is written after the record off"
+    );
+    assert_eq!(rig.folders().len(), 1);
+    assert_eq!(rig.subtitles.samples(Track::Mic), fed(0, 600));
+    assert_eq!(rig.subtitles.samples(Track::System), fed(0, 600));
+    // The contract fixes `call_started ... subtitles=0` for 1a (core-call.md); whether a
+    // start with subtitles on says 1 is not decided there, so only the count is pinned.
+    assert_eq!(rig.lines_named("call_started").len(), 1);
+}
+
+#[test]
+fn subtitles_off_while_recording_keeps_the_call_and_the_consumer_stops() {
+    // Record on, subtitles on then off: the call goes on, one folder, the captures stay
+    // open, the consumer receives nothing after the off, and the call is still written
+    // in full. A record-only call never feeds the consumer. Bite: captures closed by the
+    // subtitles off, the consumer fed while subtitles is off (also from a record-only
+    // start), the call stopped by the subtitles off.
+    let plain = CallRig::new();
+    started(&plain, CallSource::Tray);
+    feed(&plain, 0, 400);
+    plain.session.stop(StopReason::User);
+    assert_eq!(
+        plain.subtitles.calls(),
+        0,
+        "a record-only call feeds nobody"
+    );
+
+    let rig = CallRig::new();
+    rig.session.toggle_subtitles(true, CallSource::Switch);
+    started(&rig, CallSource::Tray);
+    rig.source.feed_both(0, 200, 0.3, 0.1);
+    assert!(consumer_has(&rig, fed(0, 200)), "fed while subtitles is on");
+    assert_eq!(
+        rig.session.toggle_subtitles(false, CallSource::Switch),
+        Toggled::Stopped
+    );
+    assert!(rig.session.is_recording());
+    assert_eq!(rig.source.opens().len(), 2);
+    assert_eq!(rig.source.open_handles(), 2);
+    rig.source.feed_both(200, 600, 0.3, 0.1);
+    rig.mono.advance(ms(600));
+    assert!(rig.session.stop(StopReason::User));
+    assert_eq!(rig.subtitles.samples(Track::Mic), fed(0, 200));
+    assert_eq!(rig.subtitles.samples(Track::System), fed(0, 200));
+    let scanned = scan(File::open(rig.folders()[0].join("mic.opus")).expect("mic")).expect("scan");
+    assert_eq!(scanned.end, ReadEnd::Complete);
+    assert!(
+        scanned.duration_48k >= 48_000 * 3 / 5,
+        "the call kept all 600 ms: {}",
+        scanned.duration_48k
+    );
+}
+
+#[test]
+fn subtitles_and_record_toggle_independently_under_one_lock() {
+    // The two toggles never change each other's state, and raced against each other
+    // they still give one capture per track and one folder. Bite: record off that turns
+    // subtitles off (or the reverse), a lock per toggle (two opens per track, two
+    // folders), a subtitles toggle that ignores the record state.
+    let rig = CallRig::new();
+    let states = |r: bool, s: bool, what: &str| {
+        assert_eq!(rig.session.is_recording(), r, "{what}: record");
+        assert_eq!(rig.session.is_subtitles(), s, "{what}: subtitles");
+    };
+    states(false, false, "start");
+    started(&rig, CallSource::Tray);
+    states(true, false, "record on");
+    rig.session.toggle_subtitles(true, CallSource::Switch);
+    states(true, true, "subtitles on");
+    rig.session.toggle_subtitles(false, CallSource::Switch);
+    states(true, false, "subtitles off");
+    rig.session.toggle_subtitles(true, CallSource::Switch);
+    rig.session.toggle_record(false, CallSource::Tray);
+    states(false, true, "record off");
+    rig.session.toggle_subtitles(false, CallSource::Switch);
+    states(false, false, "both off");
+    assert_eq!(rig.source.open_handles(), 0);
+
+    let rig = CallRig::new();
+    let barrier = Barrier::new(8);
+    let results: Vec<(bool, Toggled)> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..8)
+            .map(|i| {
+                let (rig, barrier) = (&rig, &barrier);
+                scope.spawn(move || {
+                    barrier.wait();
+                    if i % 2 == 0 {
+                        (true, rig.session.toggle_record(true, CallSource::Tray))
+                    } else {
+                        (
+                            false,
+                            rig.session.toggle_subtitles(true, CallSource::Switch),
+                        )
+                    }
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("joins"))
+            .collect()
+    });
+    for record in [true, false] {
+        let of: Vec<Toggled> = results
+            .iter()
+            .filter(|(r, _)| *r == record)
+            .map(|(_, t)| *t)
+            .collect();
+        assert_eq!(
+            of.iter().filter(|t| **t == Toggled::Started).count()
+                + of.iter().filter(|t| **t == Toggled::AlreadyOn).count(),
+            4,
+            "record={record}: {of:?}"
+        );
+        assert!(
+            of.iter().filter(|t| **t == Toggled::Started).count() <= 1,
+            "record={record}: {of:?}"
+        );
+    }
+    assert!(rig.session.is_recording() && rig.session.is_subtitles());
+    assert_eq!(rig.source.opens().len(), 2, "one capture per track");
+    assert_eq!(rig.source.open_handles(), 2);
+    assert_eq!(rig.folders().len(), 1);
+    assert_eq!(rig.lines_named("call_started").len(), 1);
+}
+
+#[test]
+fn a_session_that_is_off_writes_nothing() {
     // Acceptance 5 (FR-019, I3): with record off nothing reaches the disk, whatever else
     // the session is asked: a stop, a tick, a clock move, a settings change, a turn-off.
     // The calls root stays empty, the default root is never created, the probe is never

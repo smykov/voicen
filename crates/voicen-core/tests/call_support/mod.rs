@@ -11,6 +11,8 @@
 //!                              CallSettingsPort, Toggled}
 //! CallSession::new(CallDeps) -> CallSession                  // off; Send + Sync
 //! CallSession::toggle_record(&self, on: bool, source: CallSource) -> Toggled
+//! CallSession::toggle_subtitles(&self, on: bool, source: CallSource) -> Toggled   // FR-019; 1a's UI never calls it
+//! CallSession::is_subtitles(&self) -> bool
 //! CallSession::stop(&self, reason: StopReason) -> bool       // true when a call was recording
 //! CallSession::is_recording(&self) -> bool
 //! CallSession::try_is_recording(&self) -> Option<bool>       // None while the session lock is held
@@ -21,6 +23,16 @@
 //!                                                            // the writer is parked, so blocks fed after it stay queued
 //! Toggled::{Started, AlreadyOn, Refused { part: RefusedPart, reason: RefusedReason },
 //!           Stopped, AlreadyOff}                             // Debug, PartialEq
+//! toggle_subtitles uses the same Toggled values and the one session lock as toggle_record. On
+//! turns the track captures on (system, mic; a refusal is Refused { part: System | Mic, .. } and
+//! leaves subtitles off), and NEVER reaches CallStore, the root probe, the calls tab or the
+//! recording indicator; off closes the captures unless record is on. Record on while subtitles
+//! is on reuses the open captures (no second open); record off while subtitles is on finishes
+//! the call folder and keeps the captures feeding the consumer. The captures close when both
+//! toggles are off. active = record || subtitles.
+//! trait SubtitleConsumer: Send + Sync   // fed by the writer thread, only while subtitles is on
+//!     { audio(&self, track: Track, samples: &[f32]) }   // 16 kHz mono blocks in capture order
+//! CallDeps gains `subtitles: Arc<dyn SubtitleConsumer>`.
 //! toggle_record(false, Tray) stops with StopReason::User, (false, Hotkey) with Hotkey
 //!
 //! trait CallIndicator: Send + Sync   // called INSIDE the session lock, never blocks
@@ -51,7 +63,7 @@ use std::time::{Duration, Instant};
 
 use voicen_core::call::indicator::{IndicatorState, IndicatorTick};
 use voicen_core::call::session::{
-    CallDeps, CallIndicator, CallSession, CallSettingsPort, CallShell,
+    CallDeps, CallIndicator, CallSession, CallSettingsPort, CallShell, SubtitleConsumer,
 };
 use voicen_core::call::{
     CallNotice, CallStore, CaptureStamp, EndpointId, OpenError, Track, TrackDevice, TrackSink,
@@ -483,6 +495,40 @@ impl CallSettingsPort for FakePort {
     }
 }
 
+// ---- the subtitle consumer --------------------------------------------------------------
+
+/// A subtitle consumer that records what the session fed it (FR-019).
+pub struct FakeSubtitles {
+    samples: Mutex<HashMap<Track, usize>>,
+    calls: AtomicUsize,
+}
+
+impl FakeSubtitles {
+    pub fn new() -> Arc<FakeSubtitles> {
+        Arc::new(FakeSubtitles {
+            samples: Mutex::new(HashMap::new()),
+            calls: AtomicUsize::new(0),
+        })
+    }
+
+    /// Samples received for `track` so far.
+    pub fn samples(&self, track: Track) -> usize {
+        lock(&self.samples).get(&track).copied().unwrap_or(0)
+    }
+
+    /// `audio` calls so far.
+    pub fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+impl SubtitleConsumer for FakeSubtitles {
+    fn audio(&self, track: Track, samples: &[f32]) {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        *lock(&self.samples).entry(track).or_default() += samples.len();
+    }
+}
+
 // ---- the opener -----------------------------------------------------------------------
 
 /// A track-file opener that fails exactly one call: the `n`-th (1-based) after
@@ -527,6 +573,7 @@ pub struct CallRig {
     pub shell: Arc<FakeShell>,
     pub port: Arc<FakePort>,
     pub opener: Arc<FlakyOpener>,
+    pub subtitles: Arc<FakeSubtitles>,
     pub mono: Arc<FakeMono>,
     pub order: Order,
     pub log: Arc<Log>,
@@ -576,6 +623,7 @@ impl CallRig {
         let shell = FakeShell::new();
         let port = FakePort::new(s);
         let opener = FlakyOpener::new();
+        let subtitles = FakeSubtitles::new();
         let clock = Arc::new(FakeClock::at(diag_support::at(diag_support::NOON_UTC, 0)));
         let offset = Arc::new(diag_support::Offset(0));
         let (log, _, _) = diag_support::open_log(
@@ -598,6 +646,7 @@ impl CallRig {
             app_version: "0.0.0-test".to_string(),
             open_track: Arc::new(move |path| open_with.open(path)),
             channel_capacity: capacity,
+            subtitles: subtitles.clone(),
         }));
         indicator.bind(session.clone());
         shell.bind(session.clone());
@@ -609,6 +658,7 @@ impl CallRig {
             shell,
             port,
             opener,
+            subtitles,
             mono,
             order,
             log,
