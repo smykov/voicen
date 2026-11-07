@@ -5,7 +5,7 @@
 # check on a * entry: one naming a lint group, e.g. clippy::all, is caught by review only, T1).
 # check-core's clippy command line is bound to the Makefile: the bans apply to real code there.
 # T-201: the shell's too (check-shell-windows' second command, src-tauri/Cargo.toml [lints], the one
-# lib allow in src-tauri/src/lib.rs; the tests' module allow joins at the implement stage).
+# lib allow in src-tauri/src/lib.rs, the tests' module allow in timing_support, runner_probe.rs's).
 crates/voicen-core/src/engine/http.rs	#![allow(clippy::disallowed_types)]
 crates/voicen-core/src/clock.rs	#[allow(clippy::disallowed_methods)]
 crates/voicen-core/src/clock.rs	#[allow(clippy::disallowed_methods)]
