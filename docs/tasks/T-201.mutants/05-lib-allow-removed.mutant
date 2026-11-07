@@ -1,0 +1,8 @@
+guarantee: AC-4: the lib exemption holds, only tests are denied (without it the lib stops the build before any test crate)
+file: src-tauri/src/lib.rs
+added_by: test-writer
+--- old
+#![allow(clippy::disallowed_methods)]
+--- new
+
+--- end

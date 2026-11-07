@@ -1,0 +1,8 @@
+guarantee: AC-1/AC-3: the shell clock ban denies Instant::now in a src-tauri/tests crate
+file: src-tauri/clippy.toml
+added_by: test-writer
+--- old
+  { path = "std::time::Instant::now", reason = "T-201 I2: read the clock through tests/timing_support" },
+--- new
+
+--- end

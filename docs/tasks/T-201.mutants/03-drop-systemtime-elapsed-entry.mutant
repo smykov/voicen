@@ -1,0 +1,8 @@
+guarantee: AC-1: the shell clock ban denies SystemTime::elapsed
+file: src-tauri/clippy.toml
+added_by: test-writer
+--- old
+  { path = "std::time::SystemTime::elapsed", reason = "T-201: measure time through tests/timing_support" },
+--- new
+
+--- end

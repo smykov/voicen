@@ -1,0 +1,8 @@
+guarantee: AC-1/AC-3: a violation fails the gate (deny level, not warn)
+file: src-tauri/Cargo.toml
+added_by: test-writer
+--- old
+disallowed_methods = "deny"
+--- new
+disallowed_methods = "warn"
+--- end

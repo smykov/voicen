@@ -4,13 +4,18 @@
 # (crates/voicen-core/clippy.toml) is bound to its file; a * entry never names disallowed (the only
 # check on a * entry: one naming a lint group, e.g. clippy::all, is caught by review only, T1).
 # check-core's clippy command line is bound to the Makefile: the bans apply to real code there.
+# T-201: the shell's too (check-shell-windows' second command, src-tauri/Cargo.toml [lints], the one
+# lib allow in src-tauri/src/lib.rs; the tests' module allow joins at the implement stage).
 crates/voicen-core/src/engine/http.rs	#![allow(clippy::disallowed_types)]
 crates/voicen-core/src/clock.rs	#[allow(clippy::disallowed_methods)]
 crates/voicen-core/src/clock.rs	#[allow(clippy::disallowed_methods)]
 crates/voicen-core/tests/common/mod.rs	#![allow(dead_code, clippy::disallowed_methods)]
 crates/voicen-core/Cargo.toml	[lints.clippy]
+src-tauri/Cargo.toml	[lints.clippy]
+src-tauri/src/lib.rs	#![allow(clippy::disallowed_methods)]
 Makefile	scripts/tw-run core -- 'cargo fmt --check -p voicen-core && cargo clippy -p voicen-core --all-targets -- -D warnings'
 Makefile	scripts/tw-run core -- 'cargo fmt --check -p voicen-whisper && DOCS_RS=1 cargo clippy -p voicen-whisper --all-targets -- -D warnings'
+Makefile	scripts/tw-run core -- 'DOCS_RS=1 cargo check -p voicen --target x86_64-pc-windows-gnu && DOCS_RS=1 cargo clippy -p voicen --target x86_64-pc-windows-gnu --tests'
 Makefile	check-clippy-lines \
 Makefile	check-clippy-lines \
 Makefile	check-clippy-lines:

@@ -255,8 +255,12 @@ check-whisper:
 # voicen-whisper (T-102) and the image has no mingw g++: DOCS_RS=1, scoped to these two invocations
 # as in check-whisper, makes whisper-rs-sys skip its cmake build; only whisper-rs and whisper-rs-sys
 # read it, so the other crates' gnu builds stay checked.
+# T-201 (decisions #247, #248): the second command lints the tests instead of only checking them,
+# with the shell clock ban of the shell package lint config file at deny through src-tauri/Cargo.toml [lints]
+# (no -D warnings and no -A: the other lints stay warnings, T-166 owns them). Its line is owned
+# by the owned-lines list under scripts/ci; make check-ban-canary proves the ban bites.
 check-shell-windows:
-	scripts/tw-run core -- 'DOCS_RS=1 cargo check -p voicen --target x86_64-pc-windows-gnu && DOCS_RS=1 cargo check -p voicen --target x86_64-pc-windows-gnu --tests'
+	scripts/tw-run core -- 'DOCS_RS=1 cargo check -p voicen --target x86_64-pc-windows-gnu && DOCS_RS=1 cargo clippy -p voicen --target x86_64-pc-windows-gnu --tests'
 
 # The e2e step goes through the e2e entry (package.json scripts.e2e) on the host: it checks the
 # ui image is present and re-enters it through scripts/tw-run ui with --network none (T-064).

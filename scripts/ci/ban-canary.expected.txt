@@ -8,7 +8,10 @@
 # disallowed_methods on reqwest::get / reqwest::blocking::get); h21 and k15 under
 # #[allow(warnings)] (the deny level is the package's); k01-k15: Instant::now / elapsed
 # outside crate::clock and tests/common; k16-k18: SystemTime::elapsed (T-089 review 1 #2); k19, k20: tokio::time::Instant::now /
-# elapsed (tokio's time feature is on through feature unification). Rows are keyed by line: a probe-file edit needs this
+# elapsed (tokio's time feature is on through feature unification).
+# s01-s10 (T-201, third run: the voicen shell package, feature ban-canary-tests --test ban_canary, gnu target,
+# no -D warnings): Instant::now / elapsed and SystemTime::elapsed in a src-tauri/tests crate (a wait's deadline,
+# a ceiling, a fn reference, the full path, a blanket allow, a poll helper); only rows of the probe file. Rows are keyed by line: a probe-file edit needs this
 # list regenerated and reviewed row by row. Lines starting with # and blank lines are not rows.
 lib:voicen_core	crates/voicen-core/src/ban_canary.rs:102	error	clippy::disallowed_methods	reqwest::get
 lib:voicen_core	crates/voicen-core/src/ban_canary.rs:108	error	clippy::disallowed_methods	reqwest::blocking::get
@@ -53,3 +56,13 @@ test:ban_canary	crates/voicen-core/tests/ban_canary.rs:100	error	clippy::disallo
 test:ban_canary	crates/voicen-core/tests/ban_canary.rs:105	error	clippy::disallowed_methods	std::time::SystemTime::elapsed
 test:ban_canary	crates/voicen-core/tests/ban_canary.rs:113	error	clippy::disallowed_methods	tokio::time::Instant::now
 test:ban_canary	crates/voicen-core/tests/ban_canary.rs:118	error	clippy::disallowed_methods	tokio::time::Instant::elapsed
+test:ban_canary	src-tauri/tests/ban_canary.rs:17	error	clippy::disallowed_methods	std::time::Instant::now
+test:ban_canary	src-tauri/tests/ban_canary.rs:23	error	clippy::disallowed_methods	std::time::Instant::elapsed
+test:ban_canary	src-tauri/tests/ban_canary.rs:28	error	clippy::disallowed_methods	std::time::Instant::now
+test:ban_canary	src-tauri/tests/ban_canary.rs:33	error	clippy::disallowed_methods	std::time::Instant::elapsed
+test:ban_canary	src-tauri/tests/ban_canary.rs:38	error	clippy::disallowed_methods	std::time::Instant::now
+test:ban_canary	src-tauri/tests/ban_canary.rs:43	error	clippy::disallowed_methods	std::time::Instant::now
+test:ban_canary	src-tauri/tests/ban_canary.rs:48	error	clippy::disallowed_methods	std::time::SystemTime::elapsed
+test:ban_canary	src-tauri/tests/ban_canary.rs:54	error	clippy::disallowed_methods	std::time::Instant::now
+test:ban_canary	src-tauri/tests/ban_canary.rs:60	error	clippy::disallowed_methods	std::time::Instant::now
+test:ban_canary	src-tauri/tests/ban_canary.rs:61	error	clippy::disallowed_methods	std::time::Instant::elapsed

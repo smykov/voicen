@@ -26,6 +26,19 @@ doctest = false
 name = "voicen"
 test = false
 
+[features]
+# tests/ban_canary.rs, the probes that scripts/ci/ban-canary.sh (make check-ban-canary) lints with
+# this package's lint config to prove the clock ban bites (T-201). Test tooling only; never enabled
+# in a build that ships.
+ban-canary-tests = []
+
+# T-201: the one lint that reads the package lint config file (the clock ban) at deny, for every target of
+# this package, without -D warnings: the other lints stay warnings (T-166 owns them). The lib is
+# exempt through one owned crate-level allow in src/lib.rs; the tests are not. Proven to bite by
+# make check-ban-canary; every line naming the lint tool is an owned line (T-089 token guard).
+[lints.clippy]
+disallowed_methods = "deny"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
