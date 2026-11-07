@@ -3,13 +3,19 @@
 //! docs/decisions/windows-shell.md). The package's call ban (the ban list in `src-tauri`, denied
 //! for every target by `src-tauri/Cargo.toml` `[lints]`, run by `make check-shell-windows`) refuses
 //! `Instant::now`, `Instant::elapsed` and `SystemTime::elapsed` under any spelling in every test
-//! crate; this module's allow below is the one test exemption.
+//! crate; this module's allow below is the one shell-owned exemption. The other one is core's
+//! `crates/voicen-core/tests/common`, which `settings_ipc.rs` includes via `#[path]`: it carries
+//! its own allow and a budgeted `eventually` (a review-only residual, not refused by the ban).
 //!
 //! What a test can express through it, and what it cannot:
 //! - a measured time ([`measure`], [`between`]) is an opaque [`Took`]: only [`at_least`] (a
-//!   lower bound: a deadline did not fire early) reads it, so `took < X` does not compile. A
-//!   ceiling races host scheduling and the OS (class `os-answer-deadline-race`, F-005, F-013,
-//!   F-019, T-200); a wrong longer limit is caught by an outcome or an ordering instead.
+//!   lower bound: a deadline did not fire early) reads it, so a ceiling on a `Took` does not
+//!   compile. A ceiling races host scheduling and the OS (class `os-answer-deadline-race`,
+//!   F-005, F-013, F-019, T-200); a wrong longer limit is caught by an outcome or an ordering
+//!   instead. The type does not stop a ceiling written another way: [`now`] returns a plain
+//!   `Instant`, so `now() - t0 < X` or `now().duration_since(t0) < X` still compile, as do an
+//!   asserted `!passed(t0, X)` and a short [`deadline`] / [`passed`] loop used as a ceiling.
+//!   That residual is reviewed, not refused (T1).
 //! - a positive wait ([`eventually`], [`eventually_pumping`]) has no budget parameter: it returns
 //!   as soon as its condition holds and gives up only at [`HANG`], the one hang bound, so a
 //!   cold window build or a slow OS answer only delays a green run.
@@ -42,9 +48,10 @@ pub fn now() -> Instant {
 }
 
 /// A measured time: what [`measure`] and [`between`] return. Opaque on purpose: no comparison,
-/// no `==`, no conversion back to a [`Duration`], so a ceiling on a measured time does not
-/// compile; [`at_least`] is its only reader. `Debug` prints it for messages; `Default` (zero)
-/// fills a report not yet measured. Pinned at compile time by `took_stays_opaque` below.
+/// no `==`, no conversion back to a [`Duration`], so a ceiling on a `Took` does not compile;
+/// [`at_least`] is its only reader. It does not cover instants from [`now`], whose arithmetic
+/// stays open (the module doc's reviewed residual). `Debug` prints it for messages; `Default`
+/// (zero) fills a report not yet measured. Pinned at compile time by `took_stays_opaque` below.
 #[derive(Clone, Copy, Default)]
 pub struct Took(Duration);
 
@@ -88,7 +95,8 @@ pub fn left(end: Instant) -> Duration {
     end.saturating_duration_since(Instant::now())
 }
 
-/// Whether `d` has passed since `since` (an instant from [`now`]).
+/// Whether `d` has passed since `since` (an instant from [`now`]). For bounding a loop; an
+/// asserted `!passed(..)` is a ceiling the types do not refuse (reviewed, T1).
 pub fn passed(since: Instant, d: Duration) -> bool {
     Instant::now() >= since + d
 }
