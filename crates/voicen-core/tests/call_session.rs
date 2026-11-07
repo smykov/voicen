@@ -25,7 +25,7 @@ use call_support::{CallRig, IndicatorCall, ShellCall, BUDGET, OS};
 use serde_json::{json, Value};
 use voicen_core::autostart::FakeAutostart;
 use voicen_core::call::codec::{scan, ReadEnd};
-use voicen_core::call::indicator::{IndicatorState, WarningKind};
+use voicen_core::call::indicator::{IndicatorState, IndicatorTick, WarningKind};
 use voicen_core::call::session::{CallSettingsPort, Toggled};
 use voicen_core::call::{
     CallNotice, CallSource, OpenError, RefusedPart, RefusedReason, StopReason, Track, TrackDevice,
@@ -1066,17 +1066,32 @@ fn indicator_changes_inside_the_lock_and_shell_requests_after_it() {
         rig.session.try_is_recording().is_some(),
         "the lock is free between calls"
     );
-    let mut t = 0;
-    let got = wait(|| {
-        rig.source.feed_both(t, t + 200, 0.5, 0.0);
-        rig.source.set_stamp_ms(t + 200);
-        t += 200;
-        rig.mono.advance(ms(200));
-        rig.indicator
-            .ticks()
+    // F-018: each pass moves the mono clock, feeds one 200 ms span (10 blocks per track)
+    // and waits for the writer's next tick before the next pass, so the test is never
+    // more than one span ahead of the writer and the 64-slot channels never fill (a full
+    // channel turns blocks into drops, zero-filled, and every mic level reads 0.0).
+    let loud = |ticks: &[IndicatorTick]| {
+        ticks
             .iter()
             .any(|tick| tick.mic_level > 0.1 && tick.system_level < 0.01)
-    });
+    };
+    let mut got = false;
+    for pass in 0..20u64 {
+        let before = rig.indicator.ticks().len();
+        let t = pass * 200;
+        rig.mono.advance(ms(200));
+        rig.source.feed_both(t, t + 200, 0.5, 0.0);
+        rig.source.set_stamp_ms(t + 200);
+        assert!(
+            wait(|| rig.indicator.ticks().len() > before),
+            "pass {pass}: the writer published no tick: {:?}",
+            rig.indicator.ticks()
+        );
+        if loud(&rig.indicator.ticks()) {
+            got = true;
+            break;
+        }
+    }
     assert!(
         got,
         "a tick with the mic loud and the system quiet: {:?}",
