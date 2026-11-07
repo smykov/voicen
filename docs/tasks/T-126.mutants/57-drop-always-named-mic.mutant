@@ -1,0 +1,8 @@
+guarantee: I7 / #244: call_track_dropped track=<mic|system> names the track that dropped
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+                Report::Dropped { blocks, ms } => self.dropped(track, blocks, ms, at_ms),
+--- new
+                Report::Dropped { blocks, ms } => self.dropped(Track::Mic, blocks, ms, at_ms),
+--- end
