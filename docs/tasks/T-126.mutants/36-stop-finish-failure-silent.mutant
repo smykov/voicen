@@ -2,12 +2,12 @@ guarantee: -
 file: crates/voicen-core/src/call/session.rs
 added_by: test-writer
 --- old
-                        if let Err(e) = enc.finish() {
-                            self.deps.log.write(LogEvent::CallStorageFailed {
-                                kind: storage_kind(e.op),
-                                os: None,
-                            });
-                        }
+                    if let Err(e) = enc.finish() {
+                        self.deps.log.write(LogEvent::CallStorageFailed {
+                            kind: storage_kind(e.op),
+                            os: None,
+                        });
+                    }
 --- new
-                        let _ = enc.finish();
+                    let _ = enc.finish();
 --- end

@@ -1,0 +1,8 @@
+guarantee: FR-019: a record-only call feeds nobody
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+            sub: subtitles.then(Box::default),
+--- new
+            sub: (subtitles || true).then(Box::default),
+--- end

@@ -1,0 +1,9 @@
+guarantee: AC-5 (FR-019): subtitles-only never reaches CallStore or the probe
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+                    match self.spawn(opened, None, true) {
+--- new
+                    let _ = self.create_files(&settings, &opened.mic_id, &opened.system_id);
+                    match self.spawn(opened, None, true) {
+--- end

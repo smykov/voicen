@@ -1,0 +1,8 @@
+guarantee: AC-5 (FR-019): the subtitle consumer receives both tracks
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+                self.consumer.audio(track, samples);
+--- new
+                let _ = samples;
+--- end

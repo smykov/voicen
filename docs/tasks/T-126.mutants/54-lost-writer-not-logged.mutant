@@ -1,0 +1,12 @@
+guarantee: -
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+                // The writer thread panicked: its encoders are lost unfinished.
+                self.deps.log.write(LogEvent::CallStorageFailed {
+                    kind: StorageKind::Write,
+                    os: None,
+                });
+--- new
+                // The writer thread panicked: its encoders are lost unfinished.
+--- end

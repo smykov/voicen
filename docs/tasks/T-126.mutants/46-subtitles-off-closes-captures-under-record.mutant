@@ -1,0 +1,10 @@
+guarantee: FR-019: subtitles off while recording keeps the call and its captures
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+            inner.subtitles = false;
+            if inner.call.is_some() {
+--- new
+            inner.subtitles = false;
+            if false {
+--- end

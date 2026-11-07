@@ -2,11 +2,12 @@ guarantee: AC-3: a root refusal leaves no track open
 file: crates/voicen-core/src/call/session.rs
 added_by: test-writer
 --- old
-                stop_handle(mic);
-                stop_handle(system);
-                let reason = match e {
+                    Err(refusal) => {
+                        opened.stop();
+                        return Err(refusal);
 --- new
-                std::mem::forget(mic);
-                stop_handle(system);
-                let reason = match e {
+                    Err(refusal) => {
+                        std::mem::forget(opened.mic);
+                        stop_handle(opened.system);
+                        return Err(refusal);
 --- end

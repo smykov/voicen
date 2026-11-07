@@ -1,0 +1,11 @@
+guarantee: FR-019: record off keeps the subtitle consumer fed
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+            Command::Detach => {
+                self.end_recording();
+--- new
+            Command::Detach => {
+                self.sub = None;
+                self.end_recording();
+--- end

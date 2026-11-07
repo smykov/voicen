@@ -1,0 +1,10 @@
+guarantee: FR-019: subtitles off stops the consumer
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+                self.sub = on.then(Box::default);
+--- new
+                if on {
+                    self.sub = Some(Box::default());
+                }
+--- end

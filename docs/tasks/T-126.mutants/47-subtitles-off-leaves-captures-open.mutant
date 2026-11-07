@@ -1,0 +1,8 @@
+guarantee: AC-5 (FR-019): subtitles off with record off closes the captures
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+            } else if let Some(captures) = inner.captures.take() {
+--- new
+            } else if let Some(captures) = None::<Captures> {
+--- end

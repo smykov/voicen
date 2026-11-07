@@ -3,8 +3,8 @@ file: crates/voicen-core/src/call/session.rs
 added_by: test-writer
 --- old
         let at_ms = lane.timeline.written() / SAMPLES_PER_MS;
-        let step = match event {
+        if let Some(step) = step_of(&mut lane.timeline, &event) {
 --- new
         let at_ms = 0;
-        let step = match event {
+        if let Some(step) = step_of(&mut lane.timeline, &event) {
 --- end

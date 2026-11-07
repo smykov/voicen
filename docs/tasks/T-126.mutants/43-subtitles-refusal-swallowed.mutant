@@ -1,0 +1,13 @@
+guarantee: AC-5 failure branch: a subtitles start that cannot open a track is Refused at that part
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+                        Err(r) => {
+                            return Toggled::Refused {
+                                part: r.part,
+                                reason: r.reason,
+                            }
+                        }
+--- new
+                        Err(_r) => return Toggled::Started,
+--- end

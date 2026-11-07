@@ -850,6 +850,13 @@ fn subtitles_and_record_toggle_independently_under_one_lock() {
     states(true, false, "record on");
     rig.session.toggle_subtitles(true, CallSource::Switch);
     states(true, true, "subtitles on");
+    // Subtitles turned on over a running recording feed the consumer too (bite: the
+    // running writer never told to start the feed; mutant 50).
+    rig.source.feed_both(0, 200, 0.3, 0.1);
+    assert!(
+        consumer_has(&rig, fed(0, 200)),
+        "subtitles on during a recording feed the consumer"
+    );
     rig.session.toggle_subtitles(false, CallSource::Switch);
     states(true, false, "subtitles off");
     rig.session.toggle_subtitles(true, CallSource::Switch);

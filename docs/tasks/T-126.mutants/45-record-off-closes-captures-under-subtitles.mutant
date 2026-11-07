@@ -1,0 +1,8 @@
+guarantee: FR-019: record off while subtitles run keeps the captures open
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+                    let rec = if inner.subtitles {
+--- new
+                    let rec = if false {
+--- end

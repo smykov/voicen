@@ -1,0 +1,11 @@
+guarantee: FR-019: record on while subtitles run writes the call on the shared captures
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+                    .command(Command::Attach(recording(files, start, mono_start)))
+--- new
+                    .command({
+                        drop(recording(files, start, mono_start));
+                        Command::Subtitles(true)
+                    })
+--- end

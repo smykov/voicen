@@ -1,0 +1,11 @@
+guarantee: AC-5 (FR-019): subtitles-only writes no call_* line
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+            inner.subtitles = true;
+            Toggled::Started
+--- new
+            self.deps.log.write(LogEvent::CallRequested { source: _source });
+            inner.subtitles = true;
+            Toggled::Started
+--- end

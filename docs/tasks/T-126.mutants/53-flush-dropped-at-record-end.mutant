@@ -1,0 +1,8 @@
+guarantee: AC-6: stop closes both files with the audio up to the last block
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+            let step = lane.timeline.flush();
+--- new
+            let step = Step::default();
+--- end

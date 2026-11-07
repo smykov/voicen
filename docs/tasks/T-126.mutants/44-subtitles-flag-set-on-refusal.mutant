@@ -1,0 +1,19 @@
+guarantee: AC-5 failure branch: a refused subtitles start leaves subtitles off
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+                        Err(r) => {
+                            return Toggled::Refused {
+                                part: r.part,
+                                reason: r.reason,
+                            }
+                        }
+--- new
+                        Err(r) => {
+                            inner.subtitles = true;
+                            return Toggled::Refused {
+                                part: r.part,
+                                reason: r.reason,
+                            };
+                        }
+--- end

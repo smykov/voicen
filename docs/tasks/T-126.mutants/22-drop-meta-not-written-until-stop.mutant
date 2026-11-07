@@ -2,7 +2,7 @@ guarantee: I7/#244: drops written through write_meta
 file: crates/voicen-core/src/call/session.rs
 added_by: test-writer
 --- old
-        if let Err(e) = write_meta(&self.dir, &self.meta) {
+        if let Err(e) = write_meta(&rec.dir, &rec.meta) {
             // The call goes on; the stop writes the full list again.
 --- new
         if let Err(e) = Ok::<(), io::Error>(()) {

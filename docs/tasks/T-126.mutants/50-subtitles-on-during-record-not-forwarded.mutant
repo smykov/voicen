@@ -1,0 +1,8 @@
+guarantee: FR-019: subtitles on during a recording feeds the consumer
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+                    if captures.command(Command::Subtitles(true)).is_err() {
+--- new
+                    if captures.command(Command::Subtitles(false)).is_err() {
+--- end
