@@ -1,4 +1,4 @@
-guarantee: Tests table / D5: an unreadable track fails with storage
+guarantee: Tests table / D5: an unreadable track fails with storage (killed by final_pass_http::a_missing_track_file_fails_the_track_with_storage)
 file: crates/voicen-core/src/call/final_pass.rs
 added_by: task-validator round 3 (sweep)
 test: cargo test -j2 -p voicen-core --lib --test final_pass_http

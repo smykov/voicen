@@ -1,4 +1,4 @@
-guarantee: AC per-track results: each track's result comes from its own file
+guarantee: AC per-track results: each track's result comes from its own file (killed by final_pass_http::each_track_is_transcribed_from_its_own_file)
 file: crates/voicen-core/src/call/final_pass.rs
 added_by: task-validator round 3 (sweep)
 test: cargo test -j2 -p voicen-core --lib --test final_pass_http

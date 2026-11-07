@@ -438,6 +438,8 @@ struct Opts {
     language: Option<String>,
     /// Edits the meta before it is written, and prepares the folder.
     prep: Option<PrepHook>,
+    /// The mic decoder's `next_window` ask log, shared with the test (a fresh one when `None`).
+    mic_asks: Option<Arc<Mutex<Vec<u32>>>>,
 }
 
 impl Opts {
@@ -448,7 +450,13 @@ impl Opts {
             primary,
             language: None,
             prep: None,
+            mic_asks: None,
         }
+    }
+
+    fn mic_asks(mut self, asks: Arc<Mutex<Vec<u32>>>) -> Opts {
+        self.mic_asks = Some(asks);
+        self
     }
 
     fn offset(mut self, ms: u64) -> Opts {
@@ -583,7 +591,8 @@ fn run_with(mic: Src, system: Src, engine: FakeEngine, opts: Opts) -> Out {
     let engine = Arc::new(engine);
     let rec = Arc::new(Rec::default());
     let asks = [
-        Arc::new(Mutex::new(Vec::new())),
+        opts.mic_asks
+            .unwrap_or_else(|| Arc::new(Mutex::new(Vec::new()))),
         Arc::new(Mutex::new(Vec::new())),
     ];
     let sources = PassSources {
@@ -1744,5 +1753,108 @@ fn a_pauseless_track_is_read_in_windows_that_leave_room_for_the_carry() {
     assert!(
         asks.iter().any(|&a| a < 120_000),
         "a window asked while the planner carries audio is shorter than 120 s: {asks:?}"
+    );
+}
+
+// ---- sweep additions (validation 3: mutants 61, 74) ---------------------------------------
+
+#[test]
+fn a_lane_reads_no_more_windows_than_it_needs_for_the_chunks_in_flight() {
+    // A 400 s mic track is five `next_window` calls (four windows and the end). The pass
+    // holds one window plus carry: before any request is answered, at most the windows that
+    // made the three chunks in flight have been read, never the whole track.
+    let asks = Arc::new(Mutex::new(Vec::<u32>::new()));
+    let seen = Arc::new(Mutex::new(Vec::<usize>::new()));
+    let (hook_asks, hook_seen) = (asks.clone(), seen.clone());
+    // The hook runs before the request's answer, so the first value it records is read
+    // before any answer could make the dispatcher decode further.
+    let engine = FakeEngine::new(true, answer_ok).on_request(move |_| {
+        let mut seen = lock(&hook_seen);
+        seen.push(lock(&hook_asks).len());
+    });
+    let out = run_with(
+        Src::marked(0, 400_000),
+        Src::marked(1, 0),
+        engine,
+        Opts::new(marked_primary(&SPEECH)).mic_asks(asks.clone()),
+    );
+    assert_eq!(out.out.outcome, FinalOutcome::Ready);
+    let total = lock(&asks).len();
+    assert!(total >= 5, "the whole track is read in the end: {total}");
+    let seen = lock(&seen).clone();
+    let first = *some(seen.first(), "a request");
+    assert!(
+        first <= 3,
+        "{first} of {total} windows were read before the first request was handled"
+    );
+}
+
+#[test]
+fn a_second_timeless_answer_does_not_requeue_a_chunk_already_sent_again() {
+    // Chunks 0, 1 and 2 are in flight. Chunk 1 answers "no times" first (chunk 2 goes
+    // time-less and its timed request is discarded), then chunk 0 answers "no times" too while
+    // chunk 2's discarded request is still in flight: chunk 2 must not be cut again.
+    let one_said = Arc::new(AtomicBool::new(false));
+    let zero_said = Arc::new(AtomicBool::new(false));
+    let (one, zero) = (one_said.clone(), zero_said.clone());
+    let engine = FakeEngine::new(true, move |r| {
+        if r.shape == ResponseShape::Segments {
+            if (100_000..200_000).contains(&r.start) {
+                one.store(true, Ordering::SeqCst);
+                return Err(TimedFailure::Timeless);
+            }
+            if r.start < 100_000 {
+                wait_for(&one);
+                zero.store(true, Ordering::SeqCst);
+                return Err(TimedFailure::Timeless);
+            }
+            wait_for(&zero);
+        }
+        answer_ok(r)
+    });
+    let out = run_with(
+        Src::marked(0, 400_000),
+        Src::marked(1, 0),
+        engine,
+        Opts::new(marked_primary(&SPEECH)),
+    );
+    assert!(zero_said.load(Ordering::SeqCst), "scenario reached chunk 0");
+    assert_eq!(
+        out.out,
+        PassOutcome {
+            outcome: FinalOutcome::Ready,
+            mode: PassMode::Timeless
+        }
+    );
+    let log = out.log();
+    let plain: Vec<&Req> = log
+        .iter()
+        .filter(|r| r.shape == ResponseShape::Plain)
+        .collect();
+    assert_covered_once(&plain, &SPEECH);
+    let starts: BTreeSet<u64> = plain.iter().map(|r| r.start).collect();
+    assert_eq!(
+        starts.len(),
+        plain.len(),
+        "a piece was sent twice: {plain:?}"
+    );
+    let t = some(out.transcript(), "transcript.json");
+    ok(t.validate());
+    let want: Vec<Line> = plain
+        .iter()
+        .map(|r| {
+            line(
+                r.start,
+                r.start + r.len,
+                Track::Mic,
+                &format!("p{}", r.start),
+                Some("de"),
+            )
+        })
+        .collect();
+    assert_eq!(
+        lines(&t),
+        sorted(want),
+        "each stretch of speech is lined once"
     );
 }

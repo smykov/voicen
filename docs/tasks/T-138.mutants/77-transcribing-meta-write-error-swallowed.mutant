@@ -1,4 +1,4 @@
-guarantee: AC failure branch: a failed write leaves failed: storage
+guarantee: AC failure branch: a failed write leaves failed: storage (killed by final_pass_http::a_failed_transcribing_meta_write_fails_storage_before_any_request)
 file: crates/voicen-core/src/call/final_pass.rs
 added_by: task-validator round 3 (sweep)
 test: cargo test -j2 -p voicen-core --lib --test final_pass_http

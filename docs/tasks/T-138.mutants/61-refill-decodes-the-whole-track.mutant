@@ -1,4 +1,4 @@
-guarantee: AC decoding is one window at a time (<= 120 s plus carry)
+guarantee: AC decoding is one window at a time (<= 120 s plus carry) (killed by pass_tests::a_lane_reads_no_more_windows_than_it_needs_for_the_chunks_in_flight)
 file: crates/voicen-core/src/call/final_pass.rs
 added_by: task-validator round 3 (sweep)
 test: cargo test -j2 -p voicen-core --lib --test final_pass_http
