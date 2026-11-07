@@ -1,0 +1,9 @@
+guarantee: AC-6: negative coordinates on a monitor left of the origin are valid
+file: crates/voicen-core/src/call/indicator.rs
+added_by: test-writer
+test: cargo test -j 2 -p voicen-core --lib call::indicator::clamp_tests
+--- old
+        x: i32::try_from(nx).unwrap_or(position.x),
+--- new
+        x: i32::try_from(nx.max(0)).unwrap_or(position.x),
+--- end

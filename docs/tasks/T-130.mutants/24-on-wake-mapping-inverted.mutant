@@ -1,0 +1,9 @@
+guarantee: T032/NFR-03: on_state keeps its answers after the generalisation
+file: crates/voicen-core/src/overlay.rs
+added_by: test-writer
+test: cargo test -j 2 -p voicen-core --lib overlay::
+--- old
+            newest.map(|(seq, state)| (seq, matches!(state, OverlayState::Hidden))),
+--- new
+            newest.map(|(seq, state)| (seq, !matches!(state, OverlayState::Hidden))),
+--- end

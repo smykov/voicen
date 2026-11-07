@@ -1,0 +1,9 @@
+guarantee: T032/NFR-03: a wake with the destroyed and a newer shown input builds once
+file: crates/voicen-core/src/overlay.rs
+added_by: test-writer
+test: cargo test -j 2 -p voicen-core --lib overlay::
+--- old
+        self.on_wake_visibility(&[], Some((seq, hidden)))
+--- new
+        self.on_wake_visibility(&[self.generation], Some((seq, hidden)))
+--- end

@@ -1,6 +1,7 @@
 guarantee: reducer: the window is destroyed once, on a newer hidden state
 file: crates/voicen-core/src/overlay.rs
 added_by: test-writer
+equivalent: (Live, wanted hidden) with newer == false is unreachable at step 3 of OverlayLifecycle::on_wake_visibility. `wanted` becomes hidden only through a newer input, and in that same call a Live phase goes to Destroying. A Build sets Live only when wanted is shown, and `gone` and on_build_failed only set Absent. So dropping `if newer` changes no answer for any input sequence (T-130 failure-branch bite, 2026-11-07: survived the lifecycle_tests property test and visibility_tests)
 --- old
             (WindowPhase::Live, Some((_, true))) if newer => {
 --- new

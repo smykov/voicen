@@ -1,0 +1,9 @@
+guarantee: AC-6: the target is the monitor with the largest intersection
+file: crates/voicen-core/src/call/indicator.rs
+added_by: test-writer
+test: cargo test -j 2 -p voicen-core --lib call::indicator::clamp_tests
+--- old
+                Some((_, bo, bg)) if !(o > bo || (o == 0 && bo == 0 && g < bg)) => best,
+--- new
+                Some((_, bo, bg)) if !(o < bo || (o == 0 && bo == 0 && g < bg)) => best,
+--- end

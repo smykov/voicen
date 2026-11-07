@@ -1,0 +1,12 @@
+guarantee: AC-6: a failed position write keeps the snapshot (swap only after the write)
+file: crates/voicen-core/src/settings/service.rs
+added_by: test-writer
+test: cargo test -j 2 -p voicen-core --test call_session
+--- old
+        next.calls.indicator_position = Some(position);
+        encode(&next)
+--- new
+        next.calls.indicator_position = Some(position);
+        self.swap_and_publish(next.clone());
+        encode(&next)
+--- end

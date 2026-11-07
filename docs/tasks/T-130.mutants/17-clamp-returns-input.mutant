@@ -1,0 +1,9 @@
+guarantee: AC-6: the position is clamped to a visible monitor
+file: crates/voicen-core/src/call/indicator.rs
+added_by: test-writer
+test: cargo test -j 2 -p voicen-core --lib call::indicator::clamp_tests
+--- old
+    if monitors.is_empty() || monitors.iter().any(inside) {
+--- new
+    if true || monitors.iter().any(inside) {
+--- end

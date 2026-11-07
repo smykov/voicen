@@ -1,0 +1,14 @@
+guarantee: AC-5: an unknown or repeated id changes and publishes nothing
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+test: cargo test -j 2 -p voicen-core --test call_session
+--- old
+        let Some(index) = call.warnings.iter().position(|w| w.id == id) else {
+            return false;
+        };
+        call.warnings.remove(index);
+--- new
+        if let Some(index) = call.warnings.iter().position(|w| w.id == id) {
+            call.warnings.remove(index);
+        }
+--- end

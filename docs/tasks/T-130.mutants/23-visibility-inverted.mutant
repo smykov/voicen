@@ -1,0 +1,9 @@
+guarantee: T032/NFR-03: on_visibility(hidden) is what on_state(Hidden) is
+file: crates/voicen-core/src/overlay.rs
+added_by: test-writer
+test: cargo test -j 2 -p voicen-core --lib overlay::
+--- old
+                self.wanted = Some((seq, state));
+--- new
+                self.wanted = Some((seq, !state));
+--- end

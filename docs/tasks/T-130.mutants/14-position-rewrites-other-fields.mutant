@@ -1,0 +1,10 @@
+guarantee: AC-6: only calls.indicator_position changes
+file: crates/voicen-core/src/settings/service.rs
+added_by: test-writer
+test: cargo test -j 2 -p voicen-core --test call_session
+--- old
+        next.calls.indicator_position = Some(position);
+--- new
+        next.calls.indicator_position = Some(position);
+        next.auto_paste = !next.auto_paste;
+--- end

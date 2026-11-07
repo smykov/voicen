@@ -1,0 +1,9 @@
+guarantee: AC-5: call_indicator_dismiss removes exactly the warning with that id
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+test: cargo test -j 2 -p voicen-core --test call_session
+--- old
+        let Some(index) = call.warnings.iter().position(|w| w.id == id) else {
+--- new
+        let Some(index) = call.warnings.iter().position(|w| w.id != id) else {
+--- end

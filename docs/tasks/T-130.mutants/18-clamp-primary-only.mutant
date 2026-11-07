@@ -1,0 +1,11 @@
+guarantee: AC-6: a position on a removed or secondary monitor goes to the nearest present one
+file: crates/voicen-core/src/call/indicator.rs
+added_by: test-writer
+test: cargo test -j 2 -p voicen-core --lib call::indicator::clamp_tests
+--- old
+    let best = monitors
+        .iter()
+--- new
+    let best = monitors[..1]
+        .iter()
+--- end

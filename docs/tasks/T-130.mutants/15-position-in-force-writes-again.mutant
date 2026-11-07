@@ -1,0 +1,9 @@
+guarantee: AC-6: the position already in force writes nothing
+file: crates/voicen-core/src/settings/service.rs
+added_by: test-writer
+test: cargo test -j 2 -p voicen-core --test call_session
+--- old
+        if current.calls.indicator_position == Some(position) {
+--- new
+        if current.calls.indicator_position == Some(position) && false {
+--- end

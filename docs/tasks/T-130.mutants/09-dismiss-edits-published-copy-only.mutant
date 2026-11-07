@@ -1,0 +1,20 @@
+guarantee: AC-5: a dismissed warning stays gone at the reminder-end republish
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+test: cargo test -j 2 -p voicen-core --test call_session
+--- old
+        call.warnings.remove(index);
+        let state = IndicatorState::recording(
+            call.lang,
+            call.reminder_until.is_some(),
+            call.warnings.clone(),
+        );
+--- new
+        let mut shown = call.warnings.clone();
+        shown.remove(index);
+        let state = IndicatorState::recording(
+            call.lang,
+            call.reminder_until.is_some(),
+            shown,
+        );
+--- end

@@ -1,0 +1,22 @@
+guarantee: AC-6: Unavailable settings write nothing (decision #19)
+file: crates/voicen-core/src/settings/service.rs
+added_by: test-writer
+test: cargo test -j 2 -p voicen-core --test call_session
+--- old
+        if self.load.unavailable {
+            return Err(IndicatorPositionFailed);
+        }
+        let _guard = self
+            .save_lock
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let current = self.snapshot();
+        if current.calls.indicator_position == Some(position) {
+--- new
+        let _guard = self
+            .save_lock
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let current = self.snapshot();
+        if current.calls.indicator_position == Some(position) {
+--- end

@@ -1,0 +1,16 @@
+guarantee: AC-6: a failed position write returns IndicatorPositionFailed
+file: crates/voicen-core/src/settings/service.rs
+added_by: test-writer
+test: cargo test -j 2 -p voicen-core --test call_session
+--- old
+        encode(&next)
+            .and_then(|bytes| self.deps.file.write_atomic(&bytes))
+            .map_err(|_| IndicatorPositionFailed)?;
+--- new
+        if encode(&next)
+            .and_then(|bytes| self.deps.file.write_atomic(&bytes))
+            .is_err()
+        {
+            return Ok(());
+        }
+--- end

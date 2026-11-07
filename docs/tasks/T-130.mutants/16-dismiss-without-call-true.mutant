@@ -1,0 +1,15 @@
+guarantee: AC-5: no recording call: dismiss answers false
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+test: cargo test -j 2 -p voicen-core --test call_session
+--- old
+        let Some(call) = inner.call.as_mut() else {
+            return false;
+        };
+        let Some(index)
+--- new
+        let Some(call) = inner.call.as_mut() else {
+            return true;
+        };
+        let Some(index)
+--- end

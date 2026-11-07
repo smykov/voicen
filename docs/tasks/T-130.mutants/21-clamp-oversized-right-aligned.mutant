@@ -1,0 +1,9 @@
+guarantee: AC-6: an oversized window aligns to the monitor left/top edge
+file: crates/voicen-core/src/call/indicator.rs
+added_by: test-writer
+test: cargo test -j 2 -p voicen-core --lib call::indicator::clamp_tests
+--- old
+        pos.min(end - len).max(i64::from(start))
+--- new
+        pos.max(i64::from(start)).min(end - len)
+--- end
