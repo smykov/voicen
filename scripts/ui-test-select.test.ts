@@ -41,7 +41,7 @@
 //   file (a trailing :line is stripped before the check), exits 2; the e2e/ case says
 //   `pnpm e2e` on stderr. The first failing selector decides; vitest is not started.
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -257,8 +257,12 @@ if (args.includes("--list")) {
   console.log("wrapper noise before");
   console.log(JSON.stringify(report));
   console.log("wrapper noise after");
+  // STAND_DELETE_SELF: the list answer is out, now the file is removed, so the group run cannot start (ENOENT).
+  if (process.env.STAND_DELETE_SELF) fs.unlinkSync(process.env.STAND_DELETE_SELF);
   process.exit(0);
 }
+// STAND_RUN_SIGNAL: the run kills itself with that signal (the child gets status null, signal set).
+if (process.env.STAND_RUN_SIGNAL) process.kill(process.pid, process.env.STAND_RUN_SIGNAL);
 process.exit(Number(process.env.STAND_RUN_EXIT ?? 0));
 `,
   );
@@ -372,5 +376,26 @@ process.exit(Number(process.env.STAND_RUN_EXIT ?? 0));
     expect(r.status).toBe(0);
     expect(lists[0]?.baseUrl).toBe("http://localhost:9");
     expect(runs[0]?.baseUrl).not.toBe("http://localhost:9");
+  }, 100_000);
+
+  it("an e2e group run killed by a signal is a failure: router exits non-zero (a signal counts as 1, never as passed)", () => {
+    const { r, runs } = go([A], { STAND_COUNTS: JSON.stringify({ [A]: 1 }), STAND_RUN_SIGNAL: "SIGKILL" });
+    expect(runs).toHaveLength(1);
+    expect(r.status).toBe(1);
+  }, 100_000);
+
+  it("an e2e group that cannot be started (list answered, then the executable is gone) is a failure: router exits non-zero and says so", () => {
+    const own = join(dir, "e2e-stand-in-self-deleting.cjs");
+    copyFileSync(stand, own);
+    chmodSync(own, 0o755);
+    const { r, lists, runs } = go([A], {
+      VOICEN_E2E_SCRIPT: own,
+      STAND_DELETE_SELF: own,
+      STAND_COUNTS: JSON.stringify({ [A]: 1 }),
+    });
+    expect(lists).toHaveLength(1);
+    expect(runs).toEqual([]);
+    expect(r.stderr).toContain("cannot start");
+    expect(r.status).toBe(1);
   }, 100_000);
 });
