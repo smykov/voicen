@@ -1,0 +1,14 @@
+# T-201 (decisions #247, #248): the shell's clock ban, decided by rustc's path resolution, as
+# crates/voicen-core/clippy.toml is for voicen-core (T-080 I2, T-089). Read by the
+# disallowed-methods lint, which src-tauri/Cargo.toml [lints] pins at deny for every target of
+# the voicen package. The shell lib (src/lib.rs) is exempt through one owned crate-level allow;
+# a src-tauri/tests crate reads the clock only through tests/timing_support (its module-level
+# allow is the one test exemption). A path that does not resolve is only a non-denied warning, so
+# make check-ban-canary proves each entry bites (scripts/ci/ban-canary.expected.txt, the shell
+# rows): an entry change needs that list regenerated and reviewed. No tokio entry: tokio is not a
+# dependency of the shell package, so the path would not resolve.
+disallowed-methods = [
+  { path = "std::time::Instant::now", reason = "T-201 I2: read the clock through tests/timing_support" },
+  { path = "std::time::Instant::elapsed", reason = "T-201 I2: read the clock through tests/timing_support" },
+  { path = "std::time::SystemTime::elapsed", reason = "T-201: measure time through tests/timing_support" },
+]

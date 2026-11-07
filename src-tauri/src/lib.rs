@@ -3,6 +3,9 @@
 // spelling (--lib, --all-targets, --doc, rustdoc -- --test) builds shell code into a test exe that
 // build.rs does not configure. Shell tests live in src-tauri/tests/*.rs. make check compares this
 // line byte for byte (scripts/ci/shell-test-layout.sh, docs/decisions/ci-toolchain.md).
+// T-201: the shell clock ban (the package lint config file) is for the tests; product code reads the clock.
+// This one owned allow (the owned-lines list under scripts/ci) is the lib's whole exemption.
+#![allow(clippy::disallowed_methods)]
 
 use std::sync::Arc;
 

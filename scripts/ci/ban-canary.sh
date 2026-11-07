@@ -18,8 +18,15 @@
 # set of lines in the two probe files that hold the raw token `probe: ` followed by an id, so
 # no probe can be dropped from the list unseen and no row can sit on an unmarked line.
 #
+# T-201: a third run lints the shell package (feature ban-canary-tests on voicen, --test ban_canary,
+# the gnu target, DOCS_RS=1 as make check-shell-windows) with src-tauri/clippy.toml, which compiles
+# src-tauri/tests/ban_canary.rs (probes s01-s10). It runs like the gate line: the ban is denied only
+# through src-tauri/Cargo.toml [lints], never with -D warnings, so the shell's other lints stay
+# warnings (T-166); its warnings that sit outside the probe file are not rows. A lib that is not
+# exempt (src/lib.rs) stops this run with errors that are rows no list has.
+#
 # Clippy runs through scripts/tw-run core (the CI image), -j2 (host load limit), --message-format
-# json, -- -D warnings (as check-core). Not proven here: the lib's own unit-test build (cfg(test)
+# json, -- -D warnings (as check-core; the shell run has none). Not proven here: the lib's own unit-test build (cfg(test)
 # of src), which the lib probes cannot reach while the lib itself is denied. Python 3 (-I, stdlib json) reads the output on the host.
 #
 # Usage: scripts/ci/ban-canary.sh
@@ -30,7 +37,7 @@ set -uo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$root" || exit 3
 expected=scripts/ci/ban-canary.expected.txt
-probes=(crates/voicen-core/src/ban_canary.rs crates/voicen-core/tests/ban_canary.rs)
+probes=(crates/voicen-core/src/ban_canary.rs crates/voicen-core/tests/ban_canary.rs src-tauri/tests/ban_canary.rs)
 cannot_run() { echo "ban-canary: cannot run: $1" >&2; exit 3; }
 [ -f "$expected" ] && [ -r "$expected" ] || cannot_run "$expected not found or not readable"
 for f in "${probes[@]}"; do
@@ -43,7 +50,7 @@ trap 'rm -rf "$tmp"' EXIT
 failed=0
 
 # 1. The owned list covers exactly the marked probe lines.
-grep -nE 'probe: [hk][0-9]+' "${probes[@]}" | cut -d: -f1,2 | sort -u >"$tmp/marked" \
+grep -nE 'probe: [hks][0-9]+' "${probes[@]}" | cut -d: -f1,2 | sort -u >"$tmp/marked" \
   || cannot_run "no line marked probe: in ${probes[*]}"
 grep -vE '^[[:space:]]*(#|$)' "$expected" | sort >"$tmp/want"
 cut -f2 "$tmp/want" | sort -u >"$tmp/listed"
@@ -60,21 +67,28 @@ fi
 # linted apart; their rows are compared as one list.
 : >"$tmp/got.unsorted"
 rcs=""
-for run in "ban-canary-lib --lib" "ban-canary-tests --all-targets"; do
-  feature="${run%% *}"
-  targets="${run#* }"
-  scripts/tw-run core -- cargo clippy -j2 -p voicen-core --features "$feature" $targets \
-    --message-format=json -- -D warnings >"$tmp/run.json" 2>"$tmp/run.err"
+for run in "core ban-canary-lib --lib" "core ban-canary-tests --all-targets" "shell ban-canary-tests --test ban_canary"; do
+  read -r pkg feature targets <<<"$run"
+  if [ "$pkg" = shell ]; then
+    only=src-tauri/tests/ban_canary.rs
+    scripts/tw-run core -- "DOCS_RS=1 cargo clippy -j2 -p voicen --target x86_64-pc-windows-gnu --features $feature $targets --message-format=json" \
+      >"$tmp/run.json" 2>"$tmp/run.err"
+  else
+    only=""
+    scripts/tw-run core -- cargo clippy -j2 -p voicen-core --features "$feature" $targets \
+      --message-format=json -- -D warnings >"$tmp/run.json" 2>"$tmp/run.err"
+  fi
   rc=$?
-  rcs="$rcs $feature=$rc"
+  rcs="$rcs $pkg:$feature=$rc"
   case "$rc" in
     2 | 126 | 127) cannot_run "scripts/tw-run core exited $rc: $(tail -n 3 "$tmp/run.err")" ;;
   esac
   grep -q '"reason":"build-finished"' "$tmp/run.json" \
     || cannot_run "cargo clippy ($feature) did not finish (exit $rc): $(tail -n 5 "$tmp/run.err")"
-  python3 -I - "$tmp/run.json" >>"$tmp/got.unsorted" <<'PY' || cannot_run "reading the clippy output ($feature) failed"
+  python3 -I - "$tmp/run.json" "$only" >>"$tmp/got.unsorted" <<'PY' || cannot_run "reading the clippy output ($feature) failed"
 import json, re, sys
 summary = re.compile(r"^(aborting due to |\d+ warnings? emitted)")
+only = sys.argv[2]
 banned = re.compile(r"^use of a disallowed (?:method|type) `([^`]*)`")
 for line in open(sys.argv[1], encoding="utf-8"):
     try:
@@ -87,6 +101,10 @@ for line in open(sys.argv[1], encoding="utf-8"):
     msg = d.get("message") or ""
     spans = d.get("spans") or []
     if not spans and summary.match(msg):
+        continue
+    if only and d.get("level") == "warning" and not any(
+        s.get("is_primary") and s.get("file_name") == only for s in spans
+    ):
         continue
     t = m.get("target") or {}
     target = "%s:%s" % ((t.get("kind") or ["?"])[0], t.get("name", "?"))

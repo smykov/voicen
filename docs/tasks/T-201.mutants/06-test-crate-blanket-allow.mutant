@@ -1,0 +1,8 @@
+guarantee: AC-3: a test crate cannot lower the ban (a source allow beats the lint table; the probe file proves the owned list sees it)
+file: src-tauri/tests/ban_canary.rs
+added_by: test-writer
+--- old
+#![allow(dead_code)]
+--- new
+#![allow(dead_code, clippy::disallowed_methods)]
+--- end
