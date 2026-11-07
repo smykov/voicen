@@ -1,0 +1,12 @@
+guarantee: invariant: once timeless, chunks are sent Plain, never back
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: task-validator round 3 (sweep)
+test: cargo test -j2 -p voicen-core --lib --test final_pass_http
+--- old
+                    && !self.discarded.contains(seq)
+            })
+            .map(
+--- new
+            })
+            .map(
+--- end

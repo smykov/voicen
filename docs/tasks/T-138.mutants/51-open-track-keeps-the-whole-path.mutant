@@ -1,0 +1,8 @@
+guarantee: -
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: task-validator round 3 (sweep)
+--- old
+        .and_then(|t| Path::new(&t.file).file_name());
+--- new
+        .map(|t| std::ffi::OsStr::new(t.file.as_str()));
+--- end

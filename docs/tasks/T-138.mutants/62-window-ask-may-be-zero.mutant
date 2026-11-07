@@ -1,0 +1,8 @@
+guarantee: -
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: task-validator round 3 (sweep)
+--- old
+TIMED_MAX_MS.saturating_sub(self.planner.carry_ms()).max(1);
+--- new
+TIMED_MAX_MS.saturating_sub(self.planner.carry_ms());
+--- end

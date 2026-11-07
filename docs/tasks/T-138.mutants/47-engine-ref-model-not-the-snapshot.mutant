@@ -1,0 +1,8 @@
+guarantee: -
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: task-validator round 3 (sweep)
+--- old
+    let engine_ref = EngineRef::new("api", &settings.api.model);
+--- new
+    let engine_ref = EngineRef::new("api", "mutant-model");
+--- end

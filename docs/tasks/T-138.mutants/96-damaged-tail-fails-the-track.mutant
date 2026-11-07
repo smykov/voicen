@@ -1,0 +1,12 @@
+guarantee: Tests table / D5: a damaged tail ends the track with its prefix
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: task-validator round 3 (sweep)
+--- old
+                Ok(_) | Err(DecodeEnd::Damaged) => {
+--- new
+                Err(DecodeEnd::Damaged) => {
+                    self.fail(FailReason::Storage, order);
+                    Vec::new()
+                }
+                Ok(_) => {
+--- end

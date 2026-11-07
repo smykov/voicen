@@ -1,0 +1,8 @@
+guarantee: AC per-track results are kept in meta.json results
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: task-validator round 3 (sweep)
+--- old
+        Some((reason, _)) => TrackResult::Failed { reason },
+--- new
+        Some(_) => TrackResult::Failed { reason: FailReason::Provider },
+--- end

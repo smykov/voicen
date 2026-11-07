@@ -1,0 +1,12 @@
+guarantee: -
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: task-validator round 3 (sweep)
+--- old
+            .min()
+            .unwrap_or(0)
+    });
+--- new
+            .max()
+            .unwrap_or(0)
+    });
+--- end

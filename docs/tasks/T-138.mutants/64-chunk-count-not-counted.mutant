@@ -1,0 +1,8 @@
+guarantee: AC log: final_stage lines per stage and track (chunks=)
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: task-validator round 3 (sweep)
+--- old
+                .saturating_add(u32::try_from(chunks.len()).unwrap_or(u32::MAX));
+--- new
+                .saturating_add(0);
+--- end

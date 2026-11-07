@@ -1,0 +1,12 @@
+guarantee: -
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: task-validator round 3 (sweep)
+--- old
+    meta.pass_mode = Some(mode);
+    match write_meta(dir, &meta) {
+        Ok(()) => reason,
+--- new
+    meta.pass_mode = Some({ let _ = mode; PassMode::Timed });
+    match write_meta(dir, &meta) {
+        Ok(()) => reason,
+--- end

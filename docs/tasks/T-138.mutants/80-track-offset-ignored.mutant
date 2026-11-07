@@ -1,0 +1,8 @@
+guarantee: AC at most 3 in flight, drawn from both tracks in start order (call time)
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: task-validator round 3 (sweep)
+--- old
+            .map_or(0, |t| t.start_offset_ms)
+--- new
+            .map_or(0, |_| 0)
+--- end

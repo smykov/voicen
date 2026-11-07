@@ -1,0 +1,9 @@
+guarantee: Tests table: a refused plain request fails the track with provider
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: task-validator round 3 (sweep)
+test: CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER='timeout -s KILL 420' cargo test -j2 -p voicen-core --lib --test final_pass_http -- call::storage::tests call::final_pass a_builtin_engine a_blank_api_key a_refused_base_url an_unreadable_key_store a_key_saved_during
+--- old
+                Err(TimedFailure::Timeless) if sent.work.shape == ResponseShape::Segments => {
+--- new
+                Err(TimedFailure::Timeless) if true => {
+--- end

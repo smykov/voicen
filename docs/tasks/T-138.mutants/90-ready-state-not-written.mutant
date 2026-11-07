@@ -1,0 +1,9 @@
+guarantee: AC: the notice is transcript_ready and meta ends ready
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: task-validator round 3 (sweep)
+--- old
+    meta.state = CallState::Ready;
+
+--- new
+
+--- end

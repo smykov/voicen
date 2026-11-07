@@ -1,0 +1,9 @@
+guarantee: AC 400: chunk k and every later chunk time-less
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: task-validator round 3 (sweep)
+equivalent: the one TimedTranscriber impl (OpenAiCompatibleEngine::transcribe_timed) returns segments None for ResponseShape::Plain (engine/openai.rs doc of Timed.segments)
+--- old
+                    ResponseShape::Plain => None,
+--- new
+                    ResponseShape::Plain => a.timed.segments.clone(),
+--- end

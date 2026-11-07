@@ -1,0 +1,8 @@
+guarantee: AC transcript.md written with temp + rename
+file: crates/voicen-core/src/call/storage.rs
+added_by: task-validator round 3 (sweep)
+--- old
+pub(crate) const TRANSCRIPT_MD_FILE: &str = "transcript.md";
+--- new
+pub(crate) const TRANSCRIPT_MD_FILE: &str = "transcript.txt";
+--- end

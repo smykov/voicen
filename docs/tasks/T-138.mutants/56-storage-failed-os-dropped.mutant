@@ -1,0 +1,8 @@
+guarantee: -
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: task-validator round 3 (sweep)
+--- old
+        os: error.raw_os_error(),
+--- new
+        os: { let _ = error; None },
+--- end

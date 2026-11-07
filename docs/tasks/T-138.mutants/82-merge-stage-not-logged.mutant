@@ -1,0 +1,8 @@
+guarantee: AC log: final_stage lines per stage and track
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: task-validator round 3 (sweep)
+--- old
+        lane.log_stage(events, FinalStage::Merge, merge_took);
+--- new
+        let _ = (lane, merge_took);
+--- end

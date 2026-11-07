@@ -1,0 +1,8 @@
+guarantee: AC notice: pass_failed{reason}
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: task-validator round 3 (sweep)
+--- old
+        FinalOutcome::Failed { reason } => CallNotice::PassFailed { reason },
+--- new
+        FinalOutcome::Failed { reason: _ } => CallNotice::PassFailed { reason: FailReason::Provider },
+--- end

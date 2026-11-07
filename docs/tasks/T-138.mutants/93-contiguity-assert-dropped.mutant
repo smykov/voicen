@@ -1,0 +1,12 @@
+guarantee: -
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: task-validator round 3 (sweep)
+--- old
+        debug_assert_eq!(
+            window_start_ms, self.ranges.known_end,
+            "windows must be fed contiguously"
+        );
+
+--- new
+
+--- end

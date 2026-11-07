@@ -1,0 +1,8 @@
+guarantee: AC log: final_finished outcome= reason= mode= ms=
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: task-validator round 3 (sweep)
+--- old
+        .log(LogEvent::FinalPassFinished { outcome, mode, ms });
+--- new
+        .log(LogEvent::FinalPassFinished { outcome, mode: PassMode::Timed, ms });
+--- end

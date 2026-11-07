@@ -1,0 +1,14 @@
+guarantee: AC at most 3 in flight, drawn from both tracks in start order
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: task-validator round 3 (sweep)
+equivalent: redundant sort: every requeue in go_timeless sorts the whole queue, and the Plain items pushed back after it come from one lane's sorted queue with later starts
+--- old
+            lane.queue
+                .make_contiguous()
+                .sort_by_key(|w| w.chunk.start_ms);
+        }
+    }
+--- new
+        }
+    }
+--- end

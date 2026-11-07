@@ -1,0 +1,9 @@
+guarantee: AC decoding is one window at a time (<= 120 s plus carry)
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: task-validator round 3 (sweep)
+test: cargo test -j2 -p voicen-core --lib --test final_pass_http
+--- old
+        while self.queue.is_empty() && !self.ended && self.live() {
+--- new
+        while !self.ended && self.live() {
+--- end

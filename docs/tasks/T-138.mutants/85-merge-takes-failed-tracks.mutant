@@ -1,0 +1,10 @@
+guarantee: AC per-track results are kept in meta.json results
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: task-validator round 3 (sweep)
+equivalent: merge builds each track's lines from that track's chunks only (no cross-track step but the final sort), result_of filters by track and gives a failed lane Failed, and no transcript is written when a track failed
+--- old
+            .filter(|l| l.live())
+            .map(|l| TrackInput {
+--- new
+            .map(|l| TrackInput {
+--- end

@@ -1,0 +1,10 @@
+guarantee: invariant: every request goes to the API engine built once from the snapshot and the one key read
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: task-validator round 3 (sweep)
+--- old
+        Some(key),
+    ))
+--- new
+        { let _ = key; None },
+    ))
+--- end

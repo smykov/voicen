@@ -1,0 +1,12 @@
+guarantee: invariant: a track's first Failed stops its chunks
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: task-validator round 3 (sweep)
+equivalent: redundant guard: head() returns None for a failed lane, so pieces requeued into it are never dispatched, and merge and result_of skip a failed lane
+--- old
+        if !self.live() {
+            return;
+        }
+        for piece in recut_timeless(chunk) {
+--- new
+        for piece in recut_timeless(chunk) {
+--- end

@@ -1,0 +1,8 @@
+guarantee: AC failure branch: the other track finishes
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: task-validator round 3 (sweep)
+--- old
+            (None, Some(_)) => Some(Track::System),
+--- new
+            (None, Some(_)) => None,
+--- end

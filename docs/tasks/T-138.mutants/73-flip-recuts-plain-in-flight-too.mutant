@@ -1,0 +1,9 @@
+guarantee: invariant: once timeless, chunks are sent Plain, never back
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: task-validator round 3 (sweep)
+--- old
+                    && s.work.shape == ResponseShape::Segments
+
+--- new
+
+--- end

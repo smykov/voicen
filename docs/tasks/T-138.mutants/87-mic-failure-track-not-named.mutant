@@ -1,0 +1,8 @@
+guarantee: AC per-track results / D4: failure.track names the failed track
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: task-validator round 3 (sweep)
+--- old
+            (Some((reason, _)), None) => (reason, Some(Track::Mic)),
+--- new
+            (Some((reason, _)), None) => (reason, None),
+--- end

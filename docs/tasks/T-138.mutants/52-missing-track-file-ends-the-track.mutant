@@ -1,0 +1,9 @@
+guarantee: Tests table / D5: an unreadable track fails with storage
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: task-validator round 3 (sweep)
+test: cargo test -j2 -p voicen-core --lib --test final_pass_http
+--- old
+        Err(_) => Box::new(Unopened(DecodeEnd::Unreadable)),
+--- new
+        Err(_) => Box::new(Unopened(DecodeEnd::Damaged)),
+--- end

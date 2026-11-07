@@ -1,0 +1,9 @@
+guarantee: AC failure branch: a failed write leaves failed: storage
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: task-validator round 3 (sweep)
+test: cargo test -j2 -p voicen-core --lib --test final_pass_http
+--- old
+    if let Err(e) = write_meta(&dir, &meta) {
+--- new
+    if let Err(e) = write_meta(&dir, &meta).or_else(|_| Ok::<(), io::Error>(())) {
+--- end

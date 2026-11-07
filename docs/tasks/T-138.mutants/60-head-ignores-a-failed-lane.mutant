@@ -1,0 +1,12 @@
+guarantee: invariant: a track's first Failed stops its chunks
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: task-validator round 3 (sweep)
+equivalent: redundant guard: Lane::fail clears the queue, and refill and requeue both check live(), so a failed lane's queue is always empty when head() reads it
+--- old
+        if !self.live() {
+            return None;
+        }
+        self.queue
+--- new
+        self.queue
+--- end
