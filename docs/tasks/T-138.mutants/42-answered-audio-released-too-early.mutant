@@ -1,0 +1,8 @@
+guarantee: AC 400 (D1): a later chunk already answered with times is re-sent plain (its audio must still be held when chunk k says no times)
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: task-validator round 2
+--- old
+                if floor.is_none_or(|f| answer.seq < f) {
+--- new
+                if floor.is_none_or(|f| answer.seq < f) || true {
+--- end

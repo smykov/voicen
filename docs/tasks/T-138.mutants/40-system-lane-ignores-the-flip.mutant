@@ -1,0 +1,8 @@
+guarantee: AC 400 / invariant: every chunk after chunk k, on either track, is re-cut and sent Plain, never back to timed
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: task-validator round 2
+--- old
+                    self.system.refill(env, timeless, order);
+--- new
+                    self.system.refill(env, false, order);
+--- end

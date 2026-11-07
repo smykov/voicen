@@ -1,0 +1,8 @@
+guarantee: AC 400 / AC primary Err: no audio is dropped; plain pieces already queued at the flip are still sent
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: task-validator round 2
+--- old
+                    ResponseShape::Plain => lane.queue.push_back(work),
+--- new
+                    ResponseShape::Plain => drop(work),
+--- end

@@ -1,0 +1,8 @@
+guarantee: AC 400 / invariant: every chunk after chunk k is re-cut and sent Plain (must be killed by pass_tests::chunks_cut_after_the_flip_are_sent_time_less_even_when_the_server_would_answer_times)
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: task-validator round 2
+--- old
+                    self.mic.refill(env, timeless, order);
+--- new
+                    self.mic.refill(env, false, order);
+--- end
