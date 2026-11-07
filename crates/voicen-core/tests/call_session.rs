@@ -37,9 +37,11 @@ use voicen_core::platform::DeviceId;
 use voicen_core::secrets::FakeCredentialStore;
 use voicen_core::settings::file::FakeSettingsFile;
 use voicen_core::settings::roots::{FakeCallRoots, UnwritableReason};
-use voicen_core::settings::service::{SettingsDeps, SettingsService, WarnedHostFailed};
+use voicen_core::settings::service::{
+    IndicatorPositionFailed, SettingsDeps, SettingsService, WarnedHostFailed,
+};
 use voicen_core::settings::url::{check_base_url, provider_host};
-use voicen_core::settings::{defaults, Microphone};
+use voicen_core::settings::{defaults, IndicatorPosition, Microphone};
 
 fn wait(cond: impl FnMut() -> bool) -> bool {
     common::timing::eventually(BUDGET, cond)
@@ -1720,4 +1722,285 @@ fn indicator_calls_are_the_closed_set() {
     );
     assert!(!kinds.contains(&"tick"), "{kinds:?}");
     rig.session.stop(StopReason::User);
+}
+
+// ---- T-130: dismissing a warning --------------------------------------------------------
+//
+// Assumed API (T-130 red tests; the developer implements exactly this):
+//   CallSession::dismiss_warning(&self, id: u32) -> bool
+// Under the session lock: removes the warning with that id from the call's warnings and
+// publishes one new `IndicatorState` (same reminder state, the other warnings in order);
+// `true` when a warning was removed. An unknown id, an id already dismissed, or no
+// recording call: `false`, nothing published.
+
+/// A rig whose start has two warnings: `MicChanged` (id 1) and, on the new host,
+/// `ProviderNotice` (id 2).
+fn two_warning_rig() -> CallRig {
+    let rig = CallRig::with(|s| {
+        s.microphone = Some(Microphone {
+            id: "gone-mic".to_string(),
+            name: "Unplugged".to_string(),
+        });
+    });
+    rig.source.fail_next(Track::Mic, OpenError::NoDevice);
+    rig
+}
+
+fn warning_ids(state: &IndicatorState) -> Vec<u32> {
+    state.warnings.iter().map(|w| w.id).collect()
+}
+
+#[test]
+fn dismiss_warning_removes_it_until_reminder_end_republishes() {
+    // T-130 Acceptance (commands: call_indicator_dismiss -> CallSession::dismiss_warning):
+    // dismissing id 1 republishes the state inside the session lock without that warning
+    // and with the reminder untouched; an unknown or repeated id changes and publishes
+    // nothing; the reminder's end (`tick`) republishes a state that still lacks the
+    // dismissed warning (the session's own copy was edited, not only the published one);
+    // dismissing the last warning leaves an empty list. Bite: a dismiss that publishes
+    // without editing `Call.warnings` (the warning returns at the reminder's end), that
+    // edits without publishing, that removes by index instead of id, that publishes for an
+    // unknown id, that publishes outside the lock, that touches the reminder or the
+    // recording flag.
+    let rig = two_warning_rig();
+    started(&rig, CallSource::Tray);
+    let first = rig.indicator.states().last().cloned().expect("a state");
+    assert_eq!(warning_ids(&first), vec![1, 2], "premise: {first:?}");
+    assert_eq!(first.warnings[0].kind, WarningKind::MicChanged);
+    assert_eq!(first.warnings[1].kind, WarningKind::ProviderNotice);
+    assert!(first.reminder_visible, "premise: the reminder shows");
+
+    assert!(rig.session.dismiss_warning(1));
+    let states = rig.indicator.states();
+    assert_eq!(states.len(), 2, "one state per dismissal: {states:?}");
+    let second = &states[1];
+    assert!(second.recording && second.reminder_visible);
+    assert_eq!(second.reminder_text, first.reminder_text);
+    assert_eq!(second.headphones_hint, first.headphones_hint);
+    assert_eq!(second.warnings, vec![first.warnings[1].clone()]);
+    assert!(
+        rig.indicator.held_flags().iter().all(|held| *held),
+        "the dismissal state is published inside the session lock: {:?}",
+        rig.indicator.calls()
+    );
+    assert_eq!(rig.indicator.recording_flags(), vec![true]);
+    assert!(rig.indicator.ticks().is_empty());
+
+    assert!(!rig.session.dismiss_warning(1), "already dismissed");
+    assert!(!rig.session.dismiss_warning(99), "unknown id");
+    assert_eq!(rig.indicator.states().len(), 2, "nothing published");
+
+    rig.mono.advance(ms(10_000));
+    rig.session.tick();
+    let states = rig.indicator.states();
+    assert_eq!(states.len(), 3, "{states:?}");
+    assert!(!states[2].reminder_visible);
+    assert_eq!(
+        warning_ids(&states[2]),
+        vec![2],
+        "the reminder's end must not bring the dismissed warning back"
+    );
+
+    assert!(rig.session.dismiss_warning(2));
+    let last = rig.indicator.states().last().cloned().expect("a state");
+    assert!(last.recording && !last.reminder_visible);
+    assert!(last.warnings.is_empty(), "{last:?}");
+    rig.session.stop(StopReason::User);
+}
+
+#[test]
+fn dismiss_warning_without_a_recording_call_changes_nothing() {
+    // T-130: no call, or a call that was stopped: `false` and no indicator call. Bite: a
+    // dismiss that publishes a recording state after the stop (the window would be
+    // rebuilt), or one that panics without a call.
+    let rig = two_warning_rig();
+    assert!(!rig.session.dismiss_warning(1));
+    assert!(
+        rig.indicator.calls().is_empty(),
+        "{:?}",
+        rig.indicator.calls()
+    );
+    started(&rig, CallSource::Tray);
+    assert!(rig.session.stop(StopReason::User));
+    let before = rig.indicator.calls();
+    assert!(!rig.session.dismiss_warning(1));
+    assert!(!rig.session.dismiss_warning(2));
+    assert_eq!(
+        rig.indicator.calls(),
+        before,
+        "nothing published after the stop"
+    );
+}
+
+#[test]
+fn a_dismissed_warning_does_not_outlive_its_call() {
+    // T-130: dismissal belongs to the call. After a stop and a new start the new call's
+    // warning with the same id (1) is shown again. Bite: a dismissed-ids set kept in the
+    // session across calls.
+    let rig = two_warning_rig();
+    started(&rig, CallSource::Tray);
+    assert!(rig.session.dismiss_warning(1));
+    rig.session.stop(StopReason::User);
+    rig.source.fail_next(Track::Mic, OpenError::NoDevice);
+    started(&rig, CallSource::Tray);
+    let state = rig.indicator.states().last().cloned().expect("a state");
+    assert_eq!(warning_ids(&state), vec![1], "{state:?}");
+    assert_eq!(state.warnings[0].kind, WarningKind::MicChanged);
+    rig.session.stop(StopReason::User);
+}
+
+// ---- T-130: the indicator position writer -----------------------------------------------
+//
+// Assumed API:
+//   SettingsService::remember_indicator_position(&self, position: IndicatorPosition)
+//       -> Result<(), IndicatorPositionFailed>
+//   settings::service::IndicatorPositionFailed (unit struct; Debug, Clone, Copy, PartialEq, Eq)
+// The `remember_warned_host` pattern: `Unavailable` -> Err and no file call; under
+// `save_lock`; the same position as in force writes nothing; otherwise only
+// `calls.indicator_position` changes, one file write, then swap and publish; a write
+// failure keeps the snapshot and publishes nothing.
+
+fn pos(x: i32, y: i32) -> IndicatorPosition {
+    IndicatorPosition { x, y }
+}
+
+#[test]
+fn remember_indicator_position_writes_only_that_field() {
+    let world = real_service();
+    let before = world.service.snapshot();
+    assert_eq!(
+        before.calls.indicator_position, None,
+        "premise: no position yet"
+    );
+    let writes_before = world.file.calls().len();
+    assert_eq!(
+        world.service.remember_indicator_position(pos(-5, 12)),
+        Ok(())
+    );
+    let after = world.service.snapshot();
+    assert_eq!(after.calls.indicator_position, Some(pos(-5, 12)));
+    let mut expected = (*before).clone();
+    expected.calls.indicator_position = Some(pos(-5, 12));
+    assert_eq!(*after, expected, "only indicator_position changed");
+    assert_eq!(
+        world.file.calls().len(),
+        writes_before + 1,
+        "one file write"
+    );
+    let stored: Value = serde_json::from_slice(&world.file.bytes().expect("a file")).expect("json");
+    assert_eq!(
+        stored["calls"]["indicator_position"],
+        json!({ "x": -5, "y": 12 })
+    );
+
+    assert_eq!(
+        world.service.remember_indicator_position(pos(-5, 12)),
+        Ok(())
+    );
+    assert_eq!(
+        world.file.calls().len(),
+        writes_before + 1,
+        "the position in force writes nothing"
+    );
+
+    assert_eq!(
+        world.service.remember_indicator_position(pos(300, 40)),
+        Ok(())
+    );
+    assert_eq!(
+        world.file.calls().len(),
+        writes_before + 2,
+        "a new position writes"
+    );
+    assert_eq!(
+        world.service.snapshot().calls.indicator_position,
+        Some(pos(300, 40))
+    );
+}
+
+#[test]
+fn remember_indicator_position_keeps_the_snapshot_when_the_write_fails() {
+    // Failure branch: the file write fails (once, F-024): the call returns the typed
+    // failure, the snapshot and the file are unchanged, a later call succeeds. Bite: the
+    // error swallowed into Ok, the snapshot swapped before the write, the failure sticky.
+    let world = real_service();
+    let before = world.service.snapshot();
+    let file_before = world.file.bytes();
+    world.file.fail_write(io::ErrorKind::PermissionDenied);
+    assert_eq!(
+        world.service.remember_indicator_position(pos(10, 20)),
+        Err(IndicatorPositionFailed)
+    );
+    assert_eq!(
+        *world.service.snapshot(),
+        *before,
+        "the snapshot is unchanged"
+    );
+    assert_eq!(world.file.bytes(), file_before, "the file is unchanged");
+    world.file.clear_failures();
+    assert_eq!(
+        world.service.remember_indicator_position(pos(10, 20)),
+        Ok(())
+    );
+    assert_eq!(
+        world.service.snapshot().calls.indicator_position,
+        Some(pos(10, 20))
+    );
+}
+
+#[test]
+fn remember_indicator_position_writes_nothing_while_settings_are_unavailable() {
+    // docs/decisions/settings.md "`Unavailable` writes nothing": no file call, snapshot
+    // unchanged, typed failure. Bite: the `self.load.unavailable` guard missing.
+    let file = Arc::new(FakeSettingsFile::new());
+    file.fail_read(io::ErrorKind::PermissionDenied);
+    let (service, outcome) = SettingsService::load_or_init(
+        SettingsDeps {
+            file: file.clone(),
+            credentials: Arc::new(FakeCredentialStore::new()),
+            autostart: Arc::new(FakeAutostart::new()),
+            hotkeys: Arc::new(FakeHotkeyRegistrar::new()),
+            local_models: Arc::new(FakeDownloadedModels::new(&["base"])),
+            clock: Arc::new(FakeClock::at(
+                UNIX_EPOCH + Duration::from_secs(1_709_251_199),
+            )),
+            call_roots: Arc::new(FakeCallRoots::new()),
+        },
+        OS,
+    );
+    assert!(
+        matches!(outcome, voicen_core::settings::LoadOutcome::Unavailable(_)),
+        "precondition: {outcome:?}"
+    );
+    let before = service.snapshot();
+    let calls_before = file.calls();
+    assert_eq!(
+        service.remember_indicator_position(pos(1, 2)),
+        Err(IndicatorPositionFailed)
+    );
+    assert_eq!(file.calls(), calls_before, "no file call, no write");
+    assert_eq!(file.bytes(), None);
+    assert_eq!(*service.snapshot(), *before);
+}
+
+#[test]
+fn a_later_save_keeps_a_remembered_indicator_position() {
+    // The position is server-owned: an ordinary save (draft without it) keeps it. Bite:
+    // the save taking indicator_position from the draft.
+    use voicen_core::secrets::KeyEdits;
+    use voicen_core::settings::service::{SaveOutcome, SaveRequest};
+    let world = real_service();
+    assert_eq!(world.service.remember_indicator_position(pos(7, 9)), Ok(()));
+    let mut draft = (*world.service.snapshot()).clone();
+    draft.calls.indicator_position = None;
+    draft.auto_paste = !draft.auto_paste;
+    let outcome = world.service.save(SaveRequest {
+        settings: draft,
+        keys: KeyEdits::default(),
+    });
+    assert!(matches!(outcome, SaveOutcome::Saved { .. }), "{outcome:?}");
+    assert_eq!(
+        world.service.snapshot().calls.indicator_position,
+        Some(pos(7, 9))
+    );
 }

@@ -1,0 +1,8 @@
+guarantee: reducer: a stale Destroyed (not the current generation) is ignored
+file: crates/voicen-core/src/overlay.rs
+added_by: test-writer
+--- old
+        let gone = self.phase != WindowPhase::Absent && destroyed.contains(&self.generation);
+--- new
+        let gone = self.phase != WindowPhase::Absent && !destroyed.is_empty();
+--- end

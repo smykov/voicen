@@ -1,0 +1,8 @@
+guarantee: reducer: a window gone by itself is rebuilt only for a newer state
+file: crates/voicen-core/src/overlay.rs
+added_by: test-writer
+--- old
+        let rebuild_wanted = gone && self.phase == WindowPhase::Destroying;
+--- new
+        let rebuild_wanted = gone;
+--- end

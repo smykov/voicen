@@ -1,0 +1,9 @@
+guarantee: reducer: every Build gets a new higher generation
+file: crates/voicen-core/src/overlay.rs
+added_by: test-writer
+--- old
+                self.phase = WindowPhase::Live;
+                self.generation += 1;
+--- new
+                self.phase = WindowPhase::Live;
+--- end

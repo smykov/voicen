@@ -1651,3 +1651,104 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod visibility_tests {
+    //! T-130: the call indicator window follows the same lifecycle reducer as the
+    //! dictation overlay (one label reducer for both windows). Assumed API on
+    //! [`OverlayLifecycle`], next to `on_state` / `on_wake` (which stay unchanged and are
+    //! now thin wrappers):
+    //!
+    //! ```text
+    //! pub fn on_visibility(&mut self, seq: u64, hidden: bool) -> WindowAction
+    //! pub fn on_wake_visibility(&mut self, destroyed: &[u64],
+    //!                           newest: Option<(u64, bool)>) -> WindowAction
+    //! ```
+    //!
+    //! `hidden: true` is what `OverlayState::Hidden` is to `on_state` (the indicator's
+    //! `recording == false`).
+
+    use super::*;
+
+    #[test]
+    fn the_indicator_sequence_builds_emits_destroys_and_rebuilds() {
+        // Bite: a reducer that builds on every shown state, emits to a window being
+        // destroyed, or forgets the newest wanted state while Destroying.
+        let mut lifecycle = OverlayLifecycle::new();
+        assert_eq!(lifecycle.on_visibility(1, false), WindowAction::Build(1));
+        assert_eq!(lifecycle.phase(), WindowPhase::Live);
+        assert_eq!(lifecycle.generation(), 1);
+        assert_eq!(lifecycle.on_visibility(2, false), WindowAction::Emit(2));
+        assert_eq!(
+            lifecycle.on_visibility(2, false),
+            WindowAction::Nothing,
+            "stale"
+        );
+        assert_eq!(lifecycle.on_visibility(3, true), WindowAction::Destroy);
+        assert_eq!(lifecycle.phase(), WindowPhase::Destroying);
+        // A new call while the old window is still being destroyed: only recorded.
+        assert_eq!(lifecycle.on_visibility(4, false), WindowAction::Nothing);
+        assert_eq!(lifecycle.on_destroyed(), WindowAction::Build(4));
+        assert_eq!(lifecycle.generation(), 2);
+        assert_eq!(lifecycle.on_visibility(5, true), WindowAction::Destroy);
+        assert_eq!(lifecycle.on_destroyed(), WindowAction::Nothing);
+        assert_eq!(lifecycle.phase(), WindowPhase::Absent);
+    }
+
+    #[test]
+    fn a_wake_with_the_destroyed_and_a_newer_shown_input_builds_once() {
+        // The `on_wake` rules hold for the shown/hidden input: the current window's
+        // Destroyed is applied before the input, a stale generation is ignored.
+        let mut lifecycle = OverlayLifecycle::new();
+        assert_eq!(
+            lifecycle.on_wake_visibility(&[], Some((1, false))),
+            WindowAction::Build(1)
+        );
+        assert_eq!(
+            lifecycle.on_wake_visibility(&[], Some((2, true))),
+            WindowAction::Destroy
+        );
+        let current = lifecycle.generation();
+        assert_eq!(
+            lifecycle.on_wake_visibility(&[current + 7], Some((3, false))),
+            WindowAction::Nothing,
+            "a Destroyed of another generation does not free the label"
+        );
+        assert_eq!(
+            lifecycle.on_wake_visibility(&[current], Some((4, false))),
+            WindowAction::Build(4)
+        );
+        assert_eq!(lifecycle.generation(), current + 1);
+        assert_eq!(
+            lifecycle.on_wake_visibility(&[], None),
+            WindowAction::Nothing
+        );
+    }
+
+    #[test]
+    fn the_overlay_input_and_the_visibility_input_give_the_same_answers() {
+        // `on_state` is `on_visibility` with `hidden = matches!(state, Hidden)`: the
+        // dictation overlay's behaviour is unchanged by the generalisation.
+        let hidden_seq = [false, false, true, false, true, true, false];
+        let mut a = OverlayLifecycle::new();
+        let mut b = OverlayLifecycle::new();
+        let shown = OverlayState::Recording;
+        for (seq, hidden) in (1u64..).zip(hidden_seq) {
+            let state = if hidden {
+                &OverlayState::Hidden
+            } else {
+                &shown
+            };
+            assert_eq!(
+                a.on_state(seq, state),
+                b.on_visibility(seq, hidden),
+                "seq {seq}"
+            );
+            if seq % 2 == 0 {
+                assert_eq!(a.on_destroyed(), b.on_destroyed(), "destroyed after {seq}");
+            }
+            assert_eq!(a.phase(), b.phase());
+            assert_eq!(a.generation(), b.generation());
+        }
+    }
+}

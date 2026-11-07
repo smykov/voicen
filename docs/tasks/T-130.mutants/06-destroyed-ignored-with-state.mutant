@@ -1,0 +1,12 @@
+guarantee: reducer: the current window Destroyed is applied before the state
+file: crates/voicen-core/src/overlay.rs
+added_by: test-writer
+--- old
+        if gone {
+            self.phase = WindowPhase::Absent;
+        }
+--- new
+        if gone && newest.is_none() {
+            self.phase = WindowPhase::Absent;
+        }
+--- end

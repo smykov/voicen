@@ -141,3 +141,144 @@ impl IndicatorWarning {
         IndicatorWarning { id, kind, text }
     }
 }
+
+#[cfg(test)]
+mod clamp_tests {
+    //! T-130 (analysis `approach`): the saved indicator position is clamped to a visible
+    //! monitor work area at each build. Assumed API, pure:
+    //!
+    //! ```text
+    //! /// A monitor work area in screen pixels; Debug, Clone, Copy, PartialEq, Eq.
+    //! pub struct MonitorRect { pub x: i32, pub y: i32, pub width: i32, pub height: i32 }
+    //! pub fn clamp_to_monitors(position: IndicatorPosition, size: (i32, i32),
+    //!                          monitors: &[MonitorRect]) -> IndicatorPosition
+    //! ```
+    //!
+    //! `size` is the window's (width, height). Rule: a window rectangle fully inside one
+    //! work area is returned unchanged; otherwise the target is the monitor with the
+    //! largest intersection with the rectangle (none intersects: the monitor nearest to
+    //! the rectangle; a tie: the first in the slice) and the position is moved the least
+    //! that puts the whole rectangle inside it (a window larger than the monitor is
+    //! aligned to its left/top edge); no monitors: unchanged.
+
+    use super::*;
+    use crate::settings::IndicatorPosition;
+
+    const SIZE: (i32, i32) = (300, 80);
+
+    fn primary() -> MonitorRect {
+        MonitorRect {
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1040,
+        }
+    }
+
+    fn right() -> MonitorRect {
+        MonitorRect {
+            x: 1920,
+            y: 0,
+            width: 1920,
+            height: 1040,
+        }
+    }
+
+    fn left() -> MonitorRect {
+        MonitorRect {
+            x: -1920,
+            y: 0,
+            width: 1920,
+            height: 1080,
+        }
+    }
+
+    fn at(x: i32, y: i32) -> IndicatorPosition {
+        IndicatorPosition { x, y }
+    }
+
+    #[test]
+    fn a_fully_visible_position_is_unchanged() {
+        // Bite: a clamp that always moves to a corner or to the first monitor.
+        for (monitors, saved) in [
+            (vec![primary()], at(100, 100)),
+            (vec![primary()], at(0, 0)),
+            (vec![primary()], at(1620, 960)),
+            (vec![primary(), right()], at(2000, 500)),
+            (vec![left(), primary()], at(-1000, 100)),
+        ] {
+            assert_eq!(
+                clamp_to_monitors(saved, SIZE, &monitors),
+                saved,
+                "{monitors:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_off_screen_position_moves_inside_the_nearest_monitor() {
+        // Bite: no clamp, a clamp of x only, a clamp to the monitor's origin instead of
+        // the nearest edge.
+        let two = [primary(), right()];
+        assert_eq!(clamp_to_monitors(at(5000, 100), SIZE, &two), at(3540, 100));
+        assert_eq!(clamp_to_monitors(at(100, 9000), SIZE, &two), at(100, 960));
+        assert_eq!(
+            clamp_to_monitors(at(-4000, -4000), SIZE, &[primary()]),
+            at(0, 0)
+        );
+    }
+
+    #[test]
+    fn a_partly_visible_position_moves_fully_inside() {
+        // Bite: a clamp that accepts any overlap, or only tests the top-left corner.
+        let one = [primary()];
+        assert_eq!(clamp_to_monitors(at(100, 1000), SIZE, &one), at(100, 960));
+        assert_eq!(clamp_to_monitors(at(-50, 10), SIZE, &one), at(0, 10));
+        assert_eq!(clamp_to_monitors(at(1800, 10), SIZE, &one), at(1620, 10));
+        // Straddling two monitors: the one with the larger part of the window wins.
+        let two = [primary(), right()];
+        assert_eq!(clamp_to_monitors(at(1800, 10), SIZE, &two), at(1920, 10));
+        assert_eq!(clamp_to_monitors(at(1700, 10), SIZE, &two), at(1620, 10));
+    }
+
+    #[test]
+    fn a_position_on_a_removed_monitor_returns_to_a_present_one() {
+        // The window was saved on the second monitor, which is gone. Bite: the saved
+        // position trusted as it is.
+        assert_eq!(
+            clamp_to_monitors(at(2500, 200), SIZE, &[primary()]),
+            at(1620, 200)
+        );
+        assert_eq!(
+            clamp_to_monitors(at(-500, 200), SIZE, &[primary()]),
+            at(0, 200)
+        );
+    }
+
+    #[test]
+    fn negative_coordinates_on_a_monitor_left_of_the_origin_are_valid() {
+        // Bite: a clamp that treats x < 0 as off-screen (max(0, x)), or an unsigned
+        // conversion.
+        let both = [left(), primary()];
+        assert_eq!(clamp_to_monitors(at(-1900, 20), SIZE, &both), at(-1900, 20));
+        assert_eq!(
+            clamp_to_monitors(at(-3000, 100), SIZE, &both),
+            at(-1920, 100)
+        );
+        assert_eq!(
+            clamp_to_monitors(at(-3000, -200), SIZE, &both),
+            at(-1920, 0)
+        );
+        assert_eq!(clamp_to_monitors(at(-10, 100), SIZE, &both), at(-10, 100));
+    }
+
+    #[test]
+    fn an_oversized_window_aligns_to_the_edge_and_no_monitor_changes_nothing() {
+        // Bite: a negative result from `monitor.width - width`; a panic on an empty list.
+        assert_eq!(
+            clamp_to_monitors(at(500, 10), (2000, 100), &[primary()]),
+            at(0, 10)
+        );
+        assert_eq!(clamp_to_monitors(at(-77, 9000), SIZE, &[]), at(-77, 9000));
+    }
+}

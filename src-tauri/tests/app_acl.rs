@@ -324,6 +324,91 @@ fn overlay_ready_is_refused_from_any_window_but_overlay() {
     }
 }
 
+/// The call indicator window's label (spec 007 contracts/ipc.md).
+const INDICATOR: &str = "call-indicator";
+
+/// The indicator's four commands with well-formed arguments.
+fn indicator_commands() -> Vec<(&'static str, Value)> {
+    vec![
+        ("call_indicator_stop", json!({})),
+        ("call_indicator_dismiss", json!({ "id": 1 })),
+        ("call_indicator_moved", json!({ "x": 10, "y": 10 })),
+        ("call_indicator_state", json!({})),
+    ]
+}
+
+#[test]
+fn call_indicator_commands_are_granted_to_the_indicator_label_alone() {
+    // T-130 Acceptance 5 (ipc.md): label `call-indicator` alone is granted
+    // `allow-call-indicator-{stop,dismiss,moved,state}` (red today: the commands do not
+    // exist, so each is "not found"). From the settings window, the overlay label and
+    // `other` each is refused by the ACL, before its handler; from `call-indicator` it is
+    // not refused (it reaches its handler). Bite: a grant missing in
+    // capabilities/call-indicator.json or a command missing from build.rs APP_COMMANDS
+    // (the pass leg), a grant also in default.json or overlay.json (the refusal leg).
+    let _serial = serial();
+    let dir = TempDir::new();
+    let app = release_app(&load(dir.path()));
+    let indicator = window_at(&app, INDICATOR, "call-indicator");
+    let settings = settings_window(&app);
+    let overlay = window_at(&app, OVERLAY, "overlay");
+    let other = window_at(&app, OTHER, "call-indicator");
+
+    for (cmd, args) in indicator_commands() {
+        if let Err(rejection) = invoke(&indicator, cmd, args.clone()) {
+            assert!(
+                !is_acl_refusal(&rejection) && !is_not_found(&rejection),
+                "{cmd} from `{INDICATOR}` is refused or unknown: {rejection}"
+            );
+        }
+        for window in [&settings, &overlay, &other] {
+            assert_refused(window, cmd, args.clone());
+        }
+    }
+}
+
+#[test]
+fn the_indicator_capability_grants_exactly_the_four_commands_events_and_dragging() {
+    // T-130 Acceptance 6 + the invariant "exactly its grants": capabilities/call-indicator.json
+    // applies to the window label `call-indicator` alone and lists exactly the permissions
+    // core:event:allow-listen, core:event:allow-unlisten, the four
+    // allow-call-indicator-* and core:window:allow-start-dragging; nothing broader (no
+    // core:default, no window-wide grant, no settings or overlay command). Bite: an extra
+    // grant, a wildcard window list, a missing start-dragging (drag is refused on Windows).
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("capabilities")
+        .join("call-indicator.json");
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("capabilities/call-indicator.json is missing: {e}"));
+    let capability: Value = serde_json::from_str(&text).expect("the capability is JSON");
+    assert_eq!(
+        capability["windows"],
+        json!([INDICATOR]),
+        "the capability must apply to the `{INDICATOR}` label alone"
+    );
+    let mut granted: Vec<String> = capability["permissions"]
+        .as_array()
+        .expect("permissions is an array")
+        .iter()
+        .map(|p| p.as_str().expect("a permission is a string").to_string())
+        .collect();
+    granted.sort();
+    let mut want: Vec<String> = [
+        "core:event:allow-listen",
+        "core:event:allow-unlisten",
+        "allow-call-indicator-stop",
+        "allow-call-indicator-dismiss",
+        "allow-call-indicator-moved",
+        "allow-call-indicator-state",
+        "core:window:allow-start-dragging",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    want.sort();
+    assert_eq!(granted, want);
+}
+
 /// Set when [`unpermitted_probe`]'s handler runs.
 static PROBE_REACHED: AtomicBool = AtomicBool::new(false);
 

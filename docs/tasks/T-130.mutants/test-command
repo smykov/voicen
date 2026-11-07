@@ -1,0 +1,2 @@
+# T-130: the reducer tests only (overlay::lifecycle_tests, unchanged, and overlay::visibility_tests).
+cargo test -j 2 -p voicen-core --lib overlay::

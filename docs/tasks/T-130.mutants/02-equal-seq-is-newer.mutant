@@ -1,0 +1,8 @@
+guarantee: reducer: a state not newer than one already seen changes nothing
+file: crates/voicen-core/src/overlay.rs
+added_by: test-writer
+--- old
+            Some((seq, state)) if self.wanted.is_none_or(|(seen, _)| seq > seen) => {
+--- new
+            Some((seq, state)) if self.wanted.is_none_or(|(seen, _)| seq >= seen) => {
+--- end

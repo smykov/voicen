@@ -1,0 +1,8 @@
+guarantee: reducer: the window is destroyed once, on a newer hidden state
+file: crates/voicen-core/src/overlay.rs
+added_by: test-writer
+--- old
+            (WindowPhase::Live, Some((_, true))) if newer => {
+--- new
+            (WindowPhase::Live, Some((_, true))) => {
+--- end
