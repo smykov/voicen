@@ -31,7 +31,8 @@
 #     unreadable. Never a pass.
 #
 # Cases are trees built in a temp dir from one base shaped like the repository (each a fresh git
-# repository with every file added): ok-* exit 0 and "ok:"; v-* exit 1 and every needle (a
+# repository with every file added; the untracked and ignored cases write a file after the add,
+# T-164): ok-* exit 0 and "ok:"; v-* exit 1 and every needle (a
 # needle starting with / is <file>:<line> relative to the case tree's root); c-* exit 3 and
 # "cannot run". real-* cases copy the real repository's scanned files and owned list into a case
 # tree and edit the real check-core recipe line (red until the guard scans the Makefile). Then
@@ -189,6 +190,13 @@ run() {
 # check <case> <expected exit> <needle>...: a needle starting with / is <file>:<line> under the
 # case root, followed by ": clippy" unless it names the owned list.
 check() {
+  commit_tree "$1" || { echo "FAIL $1: could not build the case tree" >&2; failed=$((failed + 1)); return; }
+  check_added "$@"
+}
+
+# check_added <case> <expected exit> <needle>...: as check, for a tree the caller already added
+# (commit_tree) and then changed: files written after commit_tree stay untracked (T-164).
+check_added() {
   local c="$1" want="$2" n
   local needles=()
   shift 2
@@ -199,7 +207,6 @@ check() {
       *) needles+=("$n") ;;
     esac
   done
-  commit_tree "$c" || { echo "FAIL $c: could not build the case tree" >&2; failed=$((failed + 1)); return; }
   run "$c" "$want" "$tmp/$c" "${needles[@]}"
 }
 
@@ -293,6 +300,33 @@ check v-build-script-config-dir 1 "/$V/build.rs:2"
 mk v-shell-file   # the whole repository is read, not only voicen-core
 printf '#![cfg(windows)]\n#![allow(clippy::all)]\npub fn run() {}\n' >"$tmp/v-shell-file/src-tauri/src/lib.rs"
 check v-shell-file 1 "/src-tauri/src/lib.rs:2"
+
+# The file set is git's own answer for the work tree (T-164): files in the index and untracked
+# files that are not ignored; the cases add the base, then write the file without adding it.
+mk v-untracked-new-file   # a new file nobody has added: a local gate run must still see it
+commit_tree v-untracked-new-file
+printf 'mod common;\n\n#[allow(clippy::all)]\nfn probe() {}\n' >"$tmp/v-untracked-new-file/$V/tests/new_probe.rs"
+check_added v-untracked-new-file 1 "/$V/tests/new_probe.rs:3"
+
+mk v-untracked-new-dir   # git lists the files under a new directory, not the directory
+commit_tree v-untracked-new-dir
+mkdir -p "$tmp/v-untracked-new-dir/$V/src/fresh/deeper"
+printf '//! Fresh.\n#![allow(clippy::all)]\n' >"$tmp/v-untracked-new-dir/$V/src/fresh/deeper/mod.rs"
+check_added v-untracked-new-dir 1 "/$V/src/fresh/deeper/mod.rs:2"
+
+mk ok-ignored-file   # build output named by .gitignore is not scanned
+printf '/target/\n' >"$tmp/ok-ignored-file/.gitignore"
+commit_tree ok-ignored-file
+mkdir -p "$tmp/ok-ignored-file/target/debug"
+printf '#![allow(clippy::all)]\n' >"$tmp/ok-ignored-file/target/debug/x.rs"
+check_added ok-ignored-file 0 "ok: 10 line(s) owned"
+
+mk ok-info-exclude   # .git/info/exclude is git's ignore too
+commit_tree ok-info-exclude
+printf '/scratch/\n' >>"$tmp/ok-info-exclude/.git/info/exclude"
+mkdir -p "$tmp/ok-info-exclude/scratch"
+printf '#![allow(clippy::all)]\n' >"$tmp/ok-info-exclude/scratch/y.rs"
+check_added ok-info-exclude 0 "ok: 10 line(s) owned"
 
 # The make files (T-089 review 1 #3): check-core's clippy command line is owned, bound to the
 # Makefile (base line 5, owned-list line 7); every other line holding the token is a finding.
