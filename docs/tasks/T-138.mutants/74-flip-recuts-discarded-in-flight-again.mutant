@@ -1,4 +1,4 @@
-guarantee: invariant: once timeless, chunks are sent Plain, never back
+guarantee: invariant: once timeless, chunks are sent Plain, never back (killed by pass_tests::a_second_timeless_answer_does_not_requeue_a_chunk_already_sent_again)
 file: crates/voicen-core/src/call/final_pass.rs
 added_by: task-validator round 3 (sweep)
 test: cargo test -j2 -p voicen-core --lib --test final_pass_http

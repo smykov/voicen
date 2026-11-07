@@ -17,7 +17,7 @@ use voicen_core::call::final_pass::{
 use voicen_core::call::storage::{write_meta, CallStore, Failure, NewCall, TrackResult};
 use voicen_core::call::{
     CallMeta, CallNotice, CallState, DecodeEnd, EndpointId, EngineRef, FailReason, FinalOutcome,
-    PassMode, Track, TranscriptV1,
+    PassMode, StorageKind, Track, TranscriptV1,
 };
 use voicen_core::clock::SystemMonotonic;
 use voicen_core::diag::event::LogEvent;
@@ -64,6 +64,13 @@ impl PassEvents for Rec {
 }
 
 impl Rec {
+    fn logs(&self) -> Vec<LogEvent> {
+        self.logs
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
     fn notices(&self) -> Vec<CallNotice> {
         self.notices
             .lock()
@@ -517,4 +524,188 @@ fn a_key_saved_during_the_pass_is_not_picked_up() {
         meta_of(&call.dir).engines.transcription,
         Some(EngineRef::new("api", "model-a"))
     );
+}
+
+// ---- the real open_track: files, failures, storage (validation 3: 50, 52, 53, 77) -------------
+
+/// One second of a 440 Hz tone when `loud`, else silence.
+fn pulse_block(second: usize, loud: bool) -> Vec<f32> {
+    (0..16_000)
+        .map(|i| {
+            if loud {
+                let t = (second * 16_000 + i) as f32 / 16_000.0;
+                0.4 * (2.0 * std::f32::consts::PI * 440.0 * t).sin()
+            } else {
+                0.0
+            }
+        })
+        .collect()
+}
+
+/// `run_pass` over the call's own files with the mock server as the API.
+fn real_pass(call: &Call, server: &Mocked) -> (PassOutcome, Rec) {
+    let creds = FakeCredentialStore::new().with_key(KeySlot::TranscriptionApi, "key-a");
+    let mut settings = defaults(None);
+    settings.engine = EngineKind::Api;
+    settings.api.base_url = server.uri();
+    settings.api.model = "model-a".to_string();
+    let rec = Rec::default();
+    let out = run_pass(
+        PassCall {
+            dir: call.dir.clone(),
+            meta: call.meta.clone(),
+        },
+        Arc::new(settings),
+        &creds,
+        deps(&rec, Some(Arc::new(AmpSpans))),
+    );
+    (out, rec)
+}
+
+/// A 10 s call: speech on the mic at seconds 1-2, on the system track at seconds 5-8.
+fn distinguishable_call() -> Call {
+    make_call(10_000, |push| {
+        for s in 0..10 {
+            push(Track::Mic, &pulse_block(s, (1..3).contains(&s)));
+            push(Track::System, &pulse_block(s, (5..9).contains(&s)));
+        }
+    })
+}
+
+fn tone_call() -> Call {
+    make_call(6_000, |push| {
+        for s in 0..6 {
+            push(Track::Mic, &pulse_block(s, true));
+            push(Track::System, &pulse_block(s, true));
+        }
+    })
+}
+
+fn no_transcript(dir: &Path) {
+    for name in ["transcript.json", "transcript.md"] {
+        assert!(!dir.join(name).exists(), "{name} must not exist");
+    }
+}
+
+#[test]
+fn each_track_is_transcribed_from_its_own_file() {
+    let server = Mocked::start(TimedReply);
+    let call = distinguishable_call();
+    let (out, _rec) = real_pass(&call, &server);
+    assert_eq!(out.outcome, FinalOutcome::Ready);
+    let meta = meta_of(&call.dir);
+    // The reply is one segment at the start of its chunk, so a line starts where its track's
+    // speech starts (less the 200 ms lead-in): mic about 0.8 s, system about 4.8 s.
+    for (name, result, lo, hi) in [
+        ("mic", &meta.results.mic, 300, 1_500),
+        ("system", &meta.results.system, 4_300, 5_500),
+    ] {
+        let TrackResult::Done { segments } = result else {
+            panic!("{name}: not done: {result:?}");
+        };
+        assert_eq!(segments.len(), 1, "{name}: one chunk, one line");
+        for s in segments {
+            assert_eq!(s.track, name);
+            assert!(
+                (lo..=hi).contains(&s.start_ms),
+                "{name}: line at {} ms is not from its own file",
+                s.start_ms
+            );
+        }
+    }
+    let t = TranscriptV1::from_json(
+        &fs::read_to_string(call.dir.join("transcript.json")).expect("transcript.json"),
+    )
+    .expect("parses");
+    assert_eq!(t.segments.len(), 2);
+}
+
+fn storage_failure_of(call: &Call, track: Track, server: &Mocked) {
+    let (out, rec) = real_pass(call, server);
+    assert_eq!(
+        out.outcome,
+        FinalOutcome::Failed {
+            reason: FailReason::Storage
+        }
+    );
+    let meta = meta_of(&call.dir);
+    assert_eq!(meta.state, CallState::Failed);
+    assert_eq!(
+        meta.failure,
+        Some(Failure {
+            reason: FailReason::Storage,
+            track: Some(track)
+        })
+    );
+    let failed = TrackResult::Failed {
+        reason: FailReason::Storage,
+    };
+    let (bad, good) = if track == Track::Mic {
+        (&meta.results.mic, &meta.results.system)
+    } else {
+        (&meta.results.system, &meta.results.mic)
+    };
+    assert_eq!(bad, &failed);
+    assert!(matches!(good, TrackResult::Done { .. }), "{good:?}");
+    no_transcript(&call.dir);
+    assert_eq!(
+        rec.notices(),
+        vec![CallNotice::PassFailed {
+            reason: FailReason::Storage
+        }]
+    );
+}
+
+#[test]
+fn a_missing_track_file_fails_the_track_with_storage() {
+    let server = Mocked::start(TimedReply);
+    let call = tone_call();
+    fs::remove_file(call.dir.join("mic.opus")).expect("remove mic.opus");
+    storage_failure_of(&call, Track::Mic, &server);
+}
+
+#[test]
+fn a_track_with_a_corrupt_header_fails_with_storage() {
+    let server = Mocked::start(TimedReply);
+    let call = tone_call();
+    fs::write(call.dir.join("system.opus"), [0xFFu8; 96]).expect("corrupt system.opus");
+    storage_failure_of(&call, Track::System, &server);
+}
+
+#[test]
+fn a_failed_transcribing_meta_write_fails_storage_before_any_request() {
+    let server = Mocked::start(TimedReply);
+    let call = tone_call();
+    // An obstacle where `meta.json.tmp` goes: the first write of the pass cannot happen.
+    fs::create_dir(call.dir.join("meta.json.tmp")).expect("plant the obstacle");
+    let (out, rec) = real_pass(&call, &server);
+    assert_eq!(
+        out.outcome,
+        FinalOutcome::Failed {
+            reason: FailReason::Storage
+        }
+    );
+    assert_eq!(
+        server.requests().len(),
+        0,
+        "no request after a failed write"
+    );
+    assert!(
+        rec.logs().iter().any(|e| matches!(
+            e,
+            LogEvent::CallStorageFailed {
+                kind: StorageKind::Meta,
+                ..
+            }
+        )),
+        "call_storage_failed meta in {:?}",
+        rec.logs()
+    );
+    assert_eq!(
+        rec.notices(),
+        vec![CallNotice::PassFailed {
+            reason: FailReason::Storage
+        }]
+    );
+    no_transcript(&call.dir);
 }
