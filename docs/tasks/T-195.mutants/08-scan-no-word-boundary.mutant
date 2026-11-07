@@ -1,0 +1,8 @@
+guarantee: -
+file: crates/voicen-core/tests/mock_http_pool.rs
+added_by: task-validator
+--- old
+        if !next.is_some_and(|c| c.is_alphanumeric() || c == '_') {
+--- new
+        if true {
+--- end

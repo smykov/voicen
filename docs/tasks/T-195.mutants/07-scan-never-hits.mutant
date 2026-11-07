@@ -1,0 +1,8 @@
+guarantee: I2: the structural scan finds the pooled constructor
+file: crates/voicen-core/tests/mock_http_pool.rs
+added_by: task-validator
+--- old
+            return true;
+--- new
+            return false;
+--- end

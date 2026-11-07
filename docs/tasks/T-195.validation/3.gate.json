@@ -1,0 +1,13 @@
+{
+ "agent_id": "acab2112ad03ac39e",
+ "agent_type": "task-validator",
+ "commit": "d70f3d0014",
+ "gate": "validation",
+ "path": "docs/tasks/T-195.validation/3.md",
+ "round": 3,
+ "session_id": "e136a9f6-80a6-465a-a6ca-2a581f557a81",
+ "sha256": "839294c6ad46c5d0e2d2c3a29841e2dc61c89fb8d27c6726b61ae0c4cc8134f9",
+ "task": "T-195",
+ "ts": "2026-11-07T07:34:52Z",
+ "verdict": "FAIL"
+}

@@ -1,0 +1,8 @@
+guarantee: I2: no core test outside the helper takes a pooled server
+file: crates/voicen-core/tests/api_pipeline.rs
+added_by: task-validator
+--- old
+    let server = mock_http::start().await;
+--- new
+    let server = MockServer::start().await;
+--- end
