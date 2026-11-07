@@ -58,7 +58,7 @@ Task: T-126. Contract: `specs/007-call-mode-record/contracts/core-call.md` "Buil
 - At record off the writer flushes both timelines (`Timeline::flush`), so the files keep the audio still inside the resamplers up to the last block.
 - The subtitle consumer gets each block downmixed to mono at 16 kHz, without placement on the call's axis (a 16 kHz block as is, another rate through a streaming FFT resampler); `Lost` and `Dropped` events give it nothing.
 - Subtitles toggles write no log line (the closed grammar has none for them); a subtitles start that cannot open a track returns `Refused { part: system | mic, reason }`, and one whose writer thread cannot be spawned (or is gone) `Refused { part: system, reason: other }`. A record start on running subtitles whose writer is gone is refused `part=root reason=other` and its folder removed.
-- `call_started` keeps `subtitles=0` and `meta.json` `mode.subtitles` stays `false` also for a record start while subtitles run: the contract fixes them for 1a; the 1b task decides.
+- `call_started` keeps `subtitles=0` and `meta.json` `mode.subtitles` stays `false` also for a record start while subtitles run: the contract fixes them for 1a; the 1b task decides (OQ-77).
 - `storage::started_at` is `pub(crate)`, so the stop writes `ended_at` in the one date format.
 - Not covered by a test: the encoder push and finish failures, and the lost writer at record off (the mutants 36 and 37 of T-126 survived; a `File` whose write fails mid-call has no portable fake).
 
