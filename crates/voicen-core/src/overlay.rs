@@ -251,6 +251,27 @@ impl OverlayLifecycle {
         destroyed: &[u64],
         newest: Option<(u64, &OverlayState)>,
     ) -> WindowAction {
+        self.on_wake_visibility(
+            destroyed,
+            newest.map(|(seq, state)| (seq, matches!(state, OverlayState::Hidden))),
+        )
+    }
+
+    /// The newest wanted visibility, numbered `seq`: `hidden = true` is what
+    /// [`OverlayState::Hidden`] is to [`on_state`](Self::on_state) (T-130: the call
+    /// indicator's `recording == false`). `on_state` is this with
+    /// `hidden = matches!(state, Hidden)`, so both windows share one reducer.
+    pub fn on_visibility(&mut self, seq: u64, hidden: bool) -> WindowAction {
+        self.on_wake_visibility(&[], Some((seq, hidden)))
+    }
+
+    /// [`on_wake`](Self::on_wake) with the newest input as `(seq, hidden)` instead of
+    /// an overlay state; the one rule both inputs go through.
+    pub fn on_wake_visibility(
+        &mut self,
+        destroyed: &[u64],
+        newest: Option<(u64, bool)>,
+    ) -> WindowAction {
         // 1. The current window's Destroyed: the label is free.
         let gone = self.phase != WindowPhase::Absent && destroyed.contains(&self.generation);
         // A requested destroy that completed decides again from the wanted state; a
@@ -262,7 +283,7 @@ impl OverlayLifecycle {
         // 2. The state, if newer than any seen.
         let newer = match newest {
             Some((seq, state)) if self.wanted.is_none_or(|(seen, _)| seq > seen) => {
-                self.wanted = Some((seq, matches!(state, OverlayState::Hidden)));
+                self.wanted = Some((seq, state));
                 true
             }
             _ => false,

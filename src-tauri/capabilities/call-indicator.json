@@ -1,0 +1,17 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "call-indicator",
+  "description": "Capability for the call indicator window (label `call-indicator`, created and destroyed only by the indicator thread, src-tauri/src/call_indicator.rs): listen to and stop listening to indicator://state and indicator://tick, invoke the app commands call_indicator_stop, call_indicator_dismiss, call_indicator_moved and call_indicator_state, and start dragging its own window. Nothing else (T-130; least privilege, decision #45; app commands are ACL-checked per label, T-049, docs/decisions/ipc-acl.md).",
+  "windows": [
+    "call-indicator"
+  ],
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "allow-call-indicator-stop",
+    "allow-call-indicator-dismiss",
+    "allow-call-indicator-moved",
+    "allow-call-indicator-state",
+    "core:window:allow-start-dragging"
+  ]
+}

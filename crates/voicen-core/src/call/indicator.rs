@@ -15,6 +15,7 @@ use crate::i18n::{
     WARNING_LOW_DISK, WARNING_MIC_CHANGED, WARNING_PROVIDER_NOTICE, WARNING_TRACK_LOST_MIC,
     WARNING_TRACK_LOST_SYSTEM,
 };
+use crate::settings::IndicatorPosition;
 
 /// What the call indicator window shows (`indicator://state`, `call_indicator_state`).
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -139,6 +140,81 @@ impl IndicatorWarning {
             ),
         };
         IndicatorWarning { id, kind, text }
+    }
+}
+
+/// A monitor work area in physical screen pixels (the shell reads it from Win32).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MonitorRect {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
+impl MonitorRect {
+    fn right(&self) -> i64 {
+        i64::from(self.x) + i64::from(self.width)
+    }
+
+    fn bottom(&self) -> i64 {
+        i64::from(self.y) + i64::from(self.height)
+    }
+}
+
+/// The indicator's saved `position` moved so that a window of `size` (width, height)
+/// lies on a present monitor work area (T-130). A window fully inside one work area
+/// is returned unchanged. Otherwise the target is the monitor with the largest
+/// intersection with the window (none intersects: the nearest one; a tie: the first
+/// in the slice), and the top-left is moved the least that puts the whole window
+/// inside it; a window larger than the monitor is aligned to its left/top edge. No
+/// monitors: unchanged. Pure.
+pub fn clamp_to_monitors(
+    position: IndicatorPosition,
+    size: (i32, i32),
+    monitors: &[MonitorRect],
+) -> IndicatorPosition {
+    let (x, y) = (i64::from(position.x), i64::from(position.y));
+    let (w, h) = (i64::from(size.0.max(0)), i64::from(size.1.max(0)));
+    let (right, bottom) = (x + w, y + h);
+    let inside = |m: &MonitorRect| {
+        x >= i64::from(m.x) && y >= i64::from(m.y) && right <= m.right() && bottom <= m.bottom()
+    };
+    if monitors.is_empty() || monitors.iter().any(inside) {
+        return position;
+    }
+    let overlap = |m: &MonitorRect| {
+        let dx = (right.min(m.right()) - x.max(i64::from(m.x))).max(0);
+        let dy = (bottom.min(m.bottom()) - y.max(i64::from(m.y))).max(0);
+        dx * dy
+    };
+    let gap = |m: &MonitorRect| {
+        let dx = (i64::from(m.x) - right).max(x - m.right()).max(0);
+        let dy = (i64::from(m.y) - bottom).max(y - m.bottom()).max(0);
+        dx * dx + dy * dy
+    };
+    // The first best wins a tie: `fold` keeps the earlier one unless strictly better.
+    let best = monitors
+        .iter()
+        .fold(None::<(&MonitorRect, i64, i64)>, |best, m| {
+            let (o, g) = (overlap(m), gap(m));
+            match best {
+                Some((_, bo, bg)) if !(o > bo || (o == 0 && bo == 0 && g < bg)) => best,
+                _ => Some((m, o, g)),
+            }
+        });
+    let Some((m, _, _)) = best else {
+        return position;
+    };
+    let fit = |pos: i64, len: i64, start: i32, end: i64| {
+        // Larger than the monitor: aligned to its start edge.
+        pos.min(end - len).max(i64::from(start))
+    };
+    let nx = fit(x, w, m.x, m.right());
+    let ny = fit(y, h, m.y, m.bottom());
+    IndicatorPosition {
+        x: i32::try_from(nx).unwrap_or(position.x),
+        y: i32::try_from(ny).unwrap_or(position.y),
     }
 }
 
@@ -269,7 +345,12 @@ mod clamp_tests {
             clamp_to_monitors(at(-3000, -200), SIZE, &both),
             at(-1920, 0)
         );
-        assert_eq!(clamp_to_monitors(at(-10, 100), SIZE, &both), at(-10, 100));
+        // Straddling the origin with the larger part (290 px) on `left`: moved fully onto
+        // `left`, to a negative x.
+        assert_eq!(
+            clamp_to_monitors(at(-290, 100), SIZE, &both),
+            at(-300, 100)
+        );
     }
 
     #[test]

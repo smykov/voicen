@@ -418,6 +418,30 @@ impl CallSession {
         self.deps.indicator.set_state(&state);
     }
 
+    /// Dismisses the recording call's warning `id` (T-130, `call_indicator_dismiss`):
+    /// under the session lock it is removed from the call's own warnings, so no later
+    /// republish brings it back, and one new state is published with the reminder as
+    /// it is now and the other warnings in order. `true` when a warning was removed; an
+    /// unknown or already dismissed id, or no recording call: `false`, nothing
+    /// published. The dismissal belongs to the call and ends with it.
+    pub fn dismiss_warning(&self, id: u32) -> bool {
+        let mut inner = self.lock();
+        let Some(call) = inner.call.as_mut() else {
+            return false;
+        };
+        let Some(index) = call.warnings.iter().position(|w| w.id == id) else {
+            return false;
+        };
+        call.warnings.remove(index);
+        let state = IndicatorState::recording(
+            call.lang,
+            call.reminder_until.is_some(),
+            call.warnings.clone(),
+        );
+        self.deps.indicator.set_state(&state);
+        true
+    }
+
     /// When [`CallSession::tick`] has something to do: the reminder's end, or `None`.
     pub fn next_deadline(&self) -> Option<Instant> {
         self.lock().call.as_ref().and_then(|c| c.reminder_until)

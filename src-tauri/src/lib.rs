@@ -25,6 +25,7 @@ use voicen_core::BuildInfo;
 
 #[cfg(windows)]
 pub mod autostart;
+pub mod call_indicator;
 #[cfg(windows)]
 pub mod credentials;
 pub mod diag;
@@ -59,7 +60,11 @@ fn commands<R: Runtime>(builder: Builder<R>) -> Builder<R> {
         local_models::local_model_download,
         local_models::local_model_cancel_download,
         local_models::local_model_delete,
-        overlay::overlay_ready
+        overlay::overlay_ready,
+        call_indicator::call_indicator_stop,
+        call_indicator::call_indicator_dismiss,
+        call_indicator::call_indicator_moved,
+        call_indicator::call_indicator_state
     ])
 }
 
@@ -149,7 +154,8 @@ impl Parts {
 /// carry one (T-054), the session when they carry one (T-024) and the
 /// microphones (T-012), starts the `settings://changed`
 /// bridge, the settings opener thread (`settings_window::request`), the overlay
-/// thread with its mailbox (`overlay::part`, `overlay_ready`), the tray
+/// thread with its mailbox (`overlay::part`, `overlay_ready`), the call indicator
+/// thread with its mailbox (`call_indicator::part`, its four commands), the tray
 /// (`tray`, built in code, never from `tauri.conf.json`) and its language follower.
 /// A `build()` error is returned and `parts` is never called.
 ///
@@ -168,8 +174,8 @@ pub fn assemble<R: Runtime>(
 
 /// Everything that needs the startup side effects' results, on the built app (on
 /// the thread that built it): the managed state, the `settings://changed` bridge,
-/// the settings opener thread, the overlay thread and the tray with its language
-/// follower. `run()`
+/// the settings opener thread, the overlay thread, the call indicator thread and the
+/// tray with its language follower. `run()`
 /// starts the dictation session after this (`dictation::start_dictation`, T-006),
 /// so the tray exists when it first publishes.
 fn wire<R: Runtime>(app: &AppHandle<R>, parts: Parts) {
@@ -193,6 +199,7 @@ fn wire<R: Runtime>(app: &AppHandle<R>, parts: Parts) {
     settings_ipc::spawn_change_bridge(app.clone(), Arc::clone(&service), &log);
     settings_window::start_opener(app, Arc::clone(&log));
     overlay::start(app, Arc::clone(&service), Arc::clone(&log));
+    call_indicator::start(app, Arc::clone(&service), Arc::clone(&log));
     tray::install(app, &service, &log);
 }
 
