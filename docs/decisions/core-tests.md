@@ -89,7 +89,7 @@ This is one rule for every kind of uncontrolled clock: the OS refusal time, the 
     - a make-level setting without the lint tool's name (`export RUSTFLAGS := --cap-lints allow`) or a `check:` that drops `check-core`: review only (T1);
     - arithmetic on two instants handed out by `common` (`now() - a`), including a ceiling written that way;
     - a clock read in src through `crate::clock::instant()` / `since()` (the unit tests under `src` stamp through it and hold no ceiling today);
-    - the shell tests (another package, no such config).
+    - the shell tests (another package, its own switch since T-201: `docs/decisions/windows-shell.md` "Shell tests read the clock only through timing_support").
   - A ceiling on what `measure` / `between` return is not text it reads: it does not compile (`Took`, above).
 - Automatic checks inside `common`:
   - the `OsAnswer` probes;
@@ -150,4 +150,4 @@ A test-thread act that must come before a product timer or the end of a transfer
 ## Open
 
 - The ~2 s user-facing refusal on Windows: OQ-07 (non-blocking).
-- `src-tauri/tests/settings_ipc.rs` keeps one `took < 30 s` ceiling on its refused invoke. The shell tests are outside the I1 tripwire's and the I2 ban's scope.
+- `src-tauri/tests/settings_ipc.rs` keeps one `took < 30 s` ceiling on its refused invoke. The shell tests are outside the I1 tripwire's and the I2 ban's scope; they have their own clock switch (T-201, `docs/decisions/windows-shell.md`).
