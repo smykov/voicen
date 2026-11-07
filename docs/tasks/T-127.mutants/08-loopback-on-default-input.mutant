@@ -1,0 +1,8 @@
+guarantee: AC5: loopback opens on default_output_device()
+file: src-tauri/src/win/track_capture.rs
+added_by: test-writer
+--- old
+            let device = host.default_output_device().ok_or(CaptureError::NoDevice)?;
+--- new
+            let device = host.default_input_device().ok_or(CaptureError::NoDevice)?;
+--- end

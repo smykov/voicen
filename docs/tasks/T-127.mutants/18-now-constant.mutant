@@ -1,0 +1,9 @@
+guarantee: First acceptance: now() moves on
+file: src-tauri/src/win/track_capture.rs
+added_by: test-writer
+--- old
+    CaptureStamp(u64::try_from(units_100ns * 100).unwrap_or(u64::MAX))
+--- new
+    let _ = units_100ns;
+    CaptureStamp(100)
+--- end

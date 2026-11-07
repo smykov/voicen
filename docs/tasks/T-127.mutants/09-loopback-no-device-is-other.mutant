@@ -1,0 +1,8 @@
+guarantee: AC1 failure branch: no render endpoint -> NoDevice (swallowed at origin)
+file: src-tauri/src/win/track_capture.rs
+added_by: test-writer
+--- old
+            let device = host.default_output_device().ok_or(CaptureError::NoDevice)?;
+--- new
+            let device = host.default_output_device().ok_or(CaptureError::Other(String::new()))?;
+--- end

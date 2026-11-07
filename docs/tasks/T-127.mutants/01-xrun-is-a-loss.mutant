@@ -1,0 +1,8 @@
+guarantee: AC5: Xrun/RealtimeDenied/DeviceChanged are no loss (F-016)
+file: src-tauri/src/win/track_capture.rs
+added_by: test-writer
+--- old
+        ErrorKind::Xrun | ErrorKind::RealtimeDenied | ErrorKind::DeviceChanged => None,
+--- new
+        ErrorKind::RealtimeDenied | ErrorKind::DeviceChanged => None,
+--- end

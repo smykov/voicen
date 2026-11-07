@@ -1,0 +1,8 @@
+guarantee: AC5: StreamInvalidated/DeviceNotAvailable count as track losses (swallowed at lost)
+file: src-tauri/src/win/track_capture.rs
+added_by: test-writer
+--- old
+            sink.lost(track, cause, qpc_now());
+--- new
+            let _ = (cause, &sink);
+--- end

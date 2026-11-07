@@ -1,0 +1,14 @@
+guarantee: AC5: blocks reach the sink with QPC stamps
+file: src-tauri/src/win/track_capture.rs
+added_by: test-writer
+--- old
+            sink.block(
+                track,
+                &buf,
+                rate,
+                channels,
+                stamp_of(info.timestamp().capture),
+            );
+--- new
+            let _ = (&sink, &buf, rate, channels, info);
+--- end

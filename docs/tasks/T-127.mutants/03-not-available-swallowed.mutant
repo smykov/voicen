@@ -1,0 +1,8 @@
+guarantee: AC5: DeviceNotAvailable is a track loss
+file: src-tauri/src/win/track_capture.rs
+added_by: test-writer
+--- old
+        ErrorKind::DeviceNotAvailable => Some(LossCause::NotAvailable),
+--- new
+        ErrorKind::DeviceNotAvailable => None,
+--- end

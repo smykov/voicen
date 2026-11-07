@@ -1,0 +1,8 @@
+guarantee: AC1: CaptureError -> OpenError one-to-one (NoDevice)
+file: src-tauri/src/win/track_capture.rs
+added_by: test-writer
+--- old
+        CaptureError::NoDevice => OpenError::NoDevice,
+--- new
+        CaptureError::NoDevice => OpenError::Other,
+--- end

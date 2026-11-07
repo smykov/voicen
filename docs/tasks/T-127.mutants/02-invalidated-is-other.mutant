@@ -1,0 +1,8 @@
+guarantee: AC5: StreamInvalidated -> Invalidated
+file: src-tauri/src/win/track_capture.rs
+added_by: test-writer
+--- old
+        ErrorKind::StreamInvalidated => Some(LossCause::Invalidated),
+--- new
+        ErrorKind::StreamInvalidated => Some(LossCause::Other),
+--- end

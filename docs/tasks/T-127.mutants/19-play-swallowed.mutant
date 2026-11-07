@@ -1,0 +1,8 @@
+guarantee: AC5: open failure surfaces (play error swallowed)
+file: src-tauri/src/win/track_capture.rs
+added_by: test-writer
+--- old
+    stream.play().map_err(|e| capture_error(&e))?;
+--- new
+    let _ = stream.play();
+--- end

@@ -1,0 +1,8 @@
+guarantee: AC5: loss stamped by the now() clock
+file: src-tauri/src/win/track_capture.rs
+added_by: test-writer
+--- old
+            sink.lost(track, cause, qpc_now());
+--- new
+            sink.lost(track, cause, CaptureStamp(0));
+--- end

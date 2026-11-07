@@ -1,0 +1,10 @@
+guarantee: First acceptance: now() on the 100 ns grid
+file: src-tauri/src/win/track_capture.rs
+added_by: test-writer
+--- old
+    let units_100ns = u128::try_from(counter).unwrap_or(0) * 10_000_000 / qpc_frequency();
+    CaptureStamp(u64::try_from(units_100ns * 100).unwrap_or(u64::MAX))
+--- new
+    let ns = u128::try_from(counter).unwrap_or(0) * 1_000_000_000 / qpc_frequency();
+    CaptureStamp(u64::try_from(ns).unwrap_or(u64::MAX))
+--- end
