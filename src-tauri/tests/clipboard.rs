@@ -14,10 +14,12 @@
 //! written).
 #![cfg(windows)]
 
+mod timing_support;
 mod win32_support;
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+use timing_support::{at_least, measure, now, within_hang, HANG};
 use voicen_core::platform::{Clipboard, ClipboardError};
 use voicen_lib::win::clipboard::WinClipboard;
 use win32_support::{
@@ -74,7 +76,7 @@ fn a_briefly_held_clipboard_is_retried() {
     put_text("before the held write");
     let clipboard = WinClipboard::new();
 
-    let asked = Instant::now();
+    let asked = now();
     let holder = ClipboardHolder::hold(HOLD);
     let refused = try_open_clipboard().is_none();
     precondition(
@@ -82,7 +84,7 @@ fn a_briefly_held_clipboard_is_retried() {
         refused,
         "OpenClipboard succeeded while another thread held the clipboard open",
     );
-    let write_start = Instant::now();
+    let write_start = now();
     let left = (asked + HOLD).saturating_duration_since(write_start);
     precondition(
         "clipboard",
@@ -92,16 +94,14 @@ fn a_briefly_held_clipboard_is_retried() {
              {HOLD:?} left, need {MIN_LEFT:?} (runner too slow for this test)"
         ),
     );
-    let result = clipboard.set_text_excluded_from_history("written after a short hold");
-    let took = write_start.elapsed();
+    let (result, took) =
+        measure(|| clipboard.set_text_excluded_from_history("written after a short hold"));
     holder.release();
 
     assert_eq!(result, Ok(()), "a clipboard held for {HOLD:?}");
-    assert!(
-        took + TICK >= left,
-        "the write took {took:?} but the clipboard was held for at least {left:?} more \
-         when it started: it did not wait across the hold"
-    );
+    // The write took at least the hold left when it started (less one tick): it waited
+    // across the hold.
+    at_least(took, left.saturating_sub(TICK));
     assert_eq!(
         clipboard_text().as_deref(),
         Some("written after a short hold")
@@ -111,14 +111,14 @@ fn a_briefly_held_clipboard_is_retried() {
 #[test]
 fn a_clipboard_held_past_the_retries_is_a_clipboard_error_and_nothing_is_written() {
     // T-006 row 10 (invariant 4; the pipeline turns it into
-    // `Failed(ClipboardUnavailable)`): with the clipboard held for 3 s, the write gives
-    // up with `ClipboardError` before the holder lets go (bounded, it never waits for
-    // the holder), and the clipboard still holds what was there. Bite: an unbounded
-    // retry loop (Ok once the holder lets go, or a hang), a panic or partial write.
+    // `Failed(ClipboardUnavailable)`): with the clipboard held until released (the hold
+    // outlasts the hang bound), the write gives up with `ClipboardError` and returns while
+    // the holder still holds (an ordering, T-201: no ceiling on the time), and the
+    // clipboard still holds what was there. Bite: an unbounded retry loop (a hang), a
+    // write that waits for the holder, a panic or partial write.
     let _serial = serial();
     put_text("untouched by a failed write");
-    let clipboard = WinClipboard::new();
-    let hold = Duration::from_secs(3);
+    let hold = HANG * 2;
 
     let holder = ClipboardHolder::hold(hold);
     let refused = try_open_clipboard().is_none();
@@ -127,15 +127,19 @@ fn a_clipboard_held_past_the_retries_is_a_clipboard_error_and_nothing_is_written
         refused,
         "OpenClipboard succeeded while another thread held the clipboard open",
     );
-    let started = Instant::now();
-    let result = clipboard.set_text_excluded_from_history("must not be written");
-    let took = started.elapsed();
+    let written =
+        within_hang(|| WinClipboard::new().set_text_excluded_from_history("must not be written"));
+    let still_held = try_open_clipboard().is_none();
     holder.release();
 
-    assert_eq!(result, Err(ClipboardError), "held for {hold:?}");
+    let Some((result, took)) = written else {
+        panic!("the write did not return within {HANG:?} while the clipboard was held")
+    };
+    assert_eq!(result, Err(ClipboardError), "held, the write took {took:?}");
     assert!(
-        took < hold,
-        "the write waited {took:?}, as long as the holder held the clipboard ({hold:?})"
+        still_held,
+        "the clipboard was free when the write returned (after {took:?}): it waited for \
+         the holder"
     );
     assert_eq!(
         clipboard_text().as_deref(),

@@ -802,7 +802,9 @@ fn test_connection_refused_loopback_port_is_cannot_reach() {
 
     // F-005 / decision #56 / T-080 I1: the form limits are the case's deadlines
     // (connect = OS_ANSWER_BUDGET, the request limit twice that), so the refusal,
-    // not a timer, ends the connect.
+    // not a timer, ends the connect. The verdict is the result (`CannotReach`), not the
+    // time it took (T-201: no ceiling on a measured time); the case's own deadlines bound
+    // the call.
     let secs = |d: Duration| u32::try_from(d.as_secs()).expect("a case deadline in u32 s");
     let timeouts = voicen_core::settings::TimeoutSettings {
         connect_s: secs(case.timeouts.connect),
@@ -816,15 +818,9 @@ fn test_connection_refused_loopback_port_is_cannot_reach() {
         "key": replace(CANARY),
         "timeouts": timeouts,
     } });
-    let started = std::time::Instant::now();
     let result = h
         .invoke("settings_test_connection", args)
         .unwrap_or_else(|e| panic!("settings_test_connection rejected: {e}"));
-    assert!(
-        started.elapsed() < Duration::from_secs(30),
-        "took {:?}",
-        started.elapsed()
-    );
     let expected = serde_json::to_value(
         voicen_core::connection_test::ConnectionTestResult::CannotReach { host: host.clone() },
     )

@@ -54,6 +54,7 @@ use voicen_core::timeouts::Timeouts;
 use voicen_lib::settings_ipc::load_settings;
 
 #[cfg(windows)]
+mod timing_support;
 mod win32_support;
 
 /// Obviously fake; must never reach the log.
@@ -338,8 +339,9 @@ mod acl {
     use std::process::{Command, Stdio};
     use std::sync::{Arc, Mutex, PoisonError};
     use std::thread::{self, JoinHandle};
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
+    use crate::timing_support::{between, deadline, left, now, passed};
     use windows::Win32::System::Threading::CREATE_NO_WINDOW;
 
     /// One `icacls` at a time in this binary.
@@ -373,8 +375,8 @@ mod acl {
     }
 
     fn drain(readers: [Reader; 2]) -> (String, String) {
-        let deadline = Instant::now() + READER_GRACE;
-        while readers.iter().any(|(_, h)| !h.is_finished()) && Instant::now() < deadline {
+        let end = deadline(READER_GRACE);
+        while readers.iter().any(|(_, h)| !h.is_finished()) && !left(end).is_zero() {
             thread::sleep(Duration::from_millis(10));
         }
         let [out, err] = readers.map(|(buffer, handle)| {
@@ -391,7 +393,7 @@ mod acl {
     /// with what the child wrote.
     pub fn run_icacls(args: &[&str]) -> Result<(), String> {
         let _turn = ICACLS_TURN.lock().unwrap_or_else(PoisonError::into_inner);
-        let started = Instant::now();
+        let started = now();
         let mut child = Command::new("icacls")
             .args(args)
             .stdin(Stdio::null())
@@ -409,14 +411,14 @@ mod acl {
         let status = loop {
             match child.try_wait() {
                 Ok(Some(status)) => break Some(status),
-                Ok(None) if started.elapsed() < ICACLS_BUDGET => thread::sleep(POLL),
+                Ok(None) if !passed(started, ICACLS_BUDGET) => thread::sleep(POLL),
                 Ok(None) | Err(_) => break None,
             }
         };
         let Some(status) = status else {
             let _ = child.kill();
             let _ = child.wait();
-            let elapsed = started.elapsed();
+            let elapsed = between(started, now());
             let (out, err) = drain(readers);
             return Err(format!(
                 "icacls {args:?} stalled: killed after {elapsed:?} (budget {ICACLS_BUDGET:?}); stdout {out:?}; stderr {err:?}"
@@ -512,9 +514,10 @@ fn a_write_denied_logs_folder_shows_one_notice_and_the_dictation_still_delivers(
     // folder. Bite: `start_dictation` not attaching the managed latch (no notice),
     // the latch dropping the pre-attach reason, a notice per write, the log's
     // failure stopping the start or the dictation.
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     use tauri::Manager;
+    use timing_support::{now, HANG};
     use voicen_core::diag::LogsNotice;
     use voicen_core::dictation::DictationSession;
     use voicen_core::platform::{
@@ -526,7 +529,7 @@ fn a_write_denied_logs_folder_shows_one_notice_and_the_dictation_still_delivers(
     use voicen_lib::win::hotkey::HotkeyRegistrarHandle;
     use win32_support::{
         assert_hotkey_free, engine_factory, eventually, keyed_store, serial, settings_with, Shown,
-        TextEngine, BUDGET, HOLD, SETTLE,
+        TextEngine, HOLD, SETTLE,
     };
 
     const TEXT: &str = "logs notice test text";
@@ -583,7 +586,7 @@ fn a_write_denied_logs_folder_shows_one_notice_and_the_dictation_still_delivers(
     let audio = Arc::new(FakeAudioSource::new());
     audio.set_chunks(vec![FrameChunk::from_buffer(
         &fixtures::speech_3s(),
-        Instant::now() + Duration::from_millis(10),
+        now() + Duration::from_millis(10),
     )]);
     let clipboard = Arc::new(FakeClipboard::new());
     let indicator = Arc::new(FakeIndicator::new());
@@ -613,12 +616,12 @@ fn a_write_denied_logs_folder_shows_one_notice_and_the_dictation_still_delivers(
     );
 
     let session = Arc::clone(&app.state::<Arc<DictationSession>>());
-    session.hotkey_pressed(Instant::now());
+    session.hotkey_pressed(now());
     std::thread::sleep(HOLD);
-    session.hotkey_released(Instant::now());
+    session.hotkey_released(now());
     assert!(
-        eventually(BUDGET, || clipboard.texts() == vec![TEXT.to_string()]),
-        "the dictation was not delivered within {BUDGET:?}: clipboard {:?}",
+        eventually(|| clipboard.texts() == vec![TEXT.to_string()]),
+        "the dictation was not delivered within {HANG:?}: clipboard {:?}",
         clipboard.texts()
     );
     for _ in 0..3 {
@@ -666,9 +669,10 @@ fn a_roll_blocked_by_a_reader_without_share_delete_degrades_with_one_notice() {
     use std::os::windows::fs::OpenOptionsExt;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+    use timing_support::HANG;
     use voicen_core::clock::{FakeClock, LocalOffset};
     use voicen_core::diag::{LogConfig, LogEvent, LogsNotice, WarningKind};
-    use win32_support::{eventually, BUDGET, SETTLE};
+    use win32_support::{eventually, SETTLE};
 
     /// FILE_SHARE_READ | FILE_SHARE_WRITE: others may read and write, not delete
     /// or rename.
@@ -726,8 +730,8 @@ fn a_roll_blocked_by_a_reader_without_share_delete_degrades_with_one_notice() {
         log.write(line());
     }
     assert!(
-        eventually(BUDGET, || !seen.reasons().is_empty()),
-        "no notice within {BUDGET:?} for the blocked roll"
+        eventually(|| !seen.reasons().is_empty()),
+        "no notice within {HANG:?} for the blocked roll"
     );
     let len = std::fs::metadata(&active).expect("voicen.log").len();
     assert!(len <= ROLL, "the active file grew past roll_bytes: {len}");

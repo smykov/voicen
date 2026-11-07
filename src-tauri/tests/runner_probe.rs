@@ -14,6 +14,9 @@
 //! `voicen_lib`, so nothing of the app's runtime touches the facts. The clipboard text is fake
 //! and the clipboard is emptied at the end.
 #![cfg(windows)]
+// T-201: a diagnostic (ignored by default, run only by the windows job's last step) that
+// prints how long each OS answer took; it decides no test, so its clock reads are exempt.
+#![allow(clippy::disallowed_methods)]
 
 use std::ffi::c_void;
 use std::io::Write;

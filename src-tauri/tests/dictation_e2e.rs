@@ -26,6 +26,7 @@
 //! reply, the prompt and the key must never reach the log.
 #![cfg(windows)]
 
+mod timing_support;
 mod win32_support;
 
 use std::fs;
@@ -34,7 +35,7 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use voicen_core::audio::AudioBuffer;
 use voicen_core::platform::FakeIndicator;
@@ -55,8 +56,10 @@ use voicen_whisper::SileroDetector;
 use win32_support::{
     assert_hotkey_free, dictation_lines, engine_factory, eventually, has_pair, headed, lock,
     read_clipboard, serial, shown, AppRig, ClipboardState, Keys, Shape, Shown, TestWindow,
-    TextEngine, BUDGET, HOLD, HOTKEY_KEYS, SETTLE, VK_CONTROL, VK_ESCAPE, VK_MENU, VK_SPACE, WAIT,
+    TextEngine, HOLD, HOTKEY_KEYS, SETTLE, VK_CONTROL, VK_ESCAPE, VK_MENU, VK_SPACE,
 };
+
+use timing_support::HANG;
 
 /// The test engine's transcript: non-ASCII, and a canary the log must never contain.
 const TRANSCRIPT: &str = "Voicen e2e TRANSCRIPT-CANARY-5d1 проверка";
@@ -99,17 +102,16 @@ fn a_hotkey_hold_through_the_real_wiring_pastes_the_transcript_into_the_window()
 
     let mut keys = Keys::press(&HOTKEY_KEYS);
     assert!(
-        eventually(WAIT, || shown(&indicator.overlays())
-            .contains(&Shown::Recording)),
-        "no Recording within {WAIT:?} of the injected Ctrl+Alt+Space: {:?}",
+        eventually(|| shown(&indicator.overlays()).contains(&Shown::Recording)),
+        "no Recording within {HANG:?} of the injected Ctrl+Alt+Space: {:?}",
         indicator.overlays()
     );
     thread::sleep(HOLD);
     keys.release(&[VK_SPACE, VK_CONTROL, VK_MENU]);
 
     assert!(
-        eventually(BUDGET, || window.text() == TRANSCRIPT),
-        "the window text {BUDGET:?} after the release: {:?} (engine calls {})",
+        eventually(|| window.text() == TRANSCRIPT),
+        "the window text {HANG:?} after the release: {:?} (engine calls {})",
         window.text(),
         engine.calls()
     );
@@ -123,7 +125,7 @@ fn a_hotkey_hold_through_the_real_wiring_pastes_the_transcript_into_the_window()
         }
     );
     assert!(
-        eventually(WAIT, || !dictation_lines(&rig.log_lines()).is_empty()),
+        eventually(|| !dictation_lines(&rig.log_lines()).is_empty()),
         "no dictation line in the log"
     );
     let lines = rig.log_lines();
@@ -146,7 +148,7 @@ fn a_hotkey_hold_through_the_real_wiring_pastes_the_transcript_into_the_window()
         "the transcript reached the log: {leaked:?}"
     );
     assert!(
-        eventually(WAIT, || shown(&indicator.overlays())
+        eventually(|| shown(&indicator.overlays())
             == vec![Shown::Recording, Shown::Processing, Shown::Hidden]),
         "overlays: {:?}",
         shown(&indicator.overlays())
@@ -187,16 +189,14 @@ fn esc_through_the_real_wiring_discards_the_recording() {
 
     let mut keys = Keys::press(&HOTKEY_KEYS);
     assert!(
-        eventually(WAIT, || shown(&indicator.overlays())
-            .contains(&Shown::Recording)),
-        "no Recording within {WAIT:?} of the injected Ctrl+Alt+Space: {:?}",
+        eventually(|| shown(&indicator.overlays()).contains(&Shown::Recording)),
+        "no Recording within {HANG:?} of the injected Ctrl+Alt+Space: {:?}",
         indicator.overlays()
     );
     thread::sleep(HOLD);
     let mut esc = Keys::press(&[VK_ESCAPE]);
     assert!(
-        eventually(WAIT, || shown(&indicator.overlays())
-            == vec![Shown::Recording, Shown::Hidden]),
+        eventually(|| shown(&indicator.overlays()) == vec![Shown::Recording, Shown::Hidden]),
         "overlays after Esc: {:?}",
         shown(&indicator.overlays())
     );
@@ -204,7 +204,7 @@ fn esc_through_the_real_wiring_discards_the_recording() {
     keys.release(&[VK_SPACE, VK_CONTROL, VK_MENU]);
 
     assert!(
-        eventually(WAIT, || !dictation_lines(&rig.log_lines()).is_empty()),
+        eventually(|| !dictation_lines(&rig.log_lines()).is_empty()),
         "no dictation line for the cancelled recording"
     );
     thread::sleep(SETTLE);
@@ -344,30 +344,10 @@ fn answer_chat(mut s: TcpStream) -> io::Result<ChatRequest> {
     })
 }
 
-/// `127.0.0.1:1`, the one loopback address a test may expect to be refused (decision
-/// #53: below every ephemeral range, never bound and released). Probed at each call:
-/// a plain connect must be refused within `REFUSAL_BUDGET / 2` (decision #56), else
-/// this panics (a runner problem, not a product failure).
+/// `127.0.0.1:1`, refused within `REFUSAL_BUDGET / 2` (decision #53, #56), probed at each
+/// call by `timing_support::refused_loopback` (the module that reads the clock, T-201).
 fn refused_loopback() -> SocketAddr {
-    let addr = SocketAddr::from(([127, 0, 0, 1], 1));
-    let started = Instant::now();
-    let probe = TcpStream::connect_timeout(&addr, REFUSAL_BUDGET);
-    let took = started.elapsed();
-    match probe {
-        Ok(_) => panic!("premise: something listens on {addr} (decision #53)"),
-        Err(e) if e.kind() == io::ErrorKind::ConnectionRefused => {
-            assert!(
-                took < REFUSAL_BUDGET / 2,
-                "premise: the connect to {addr} was refused only after {took:?} (decision #56)"
-            );
-            addr
-        }
-        Err(e) => panic!(
-            "premise: the connect to {addr} was not refused within {REFUSAL_BUDGET:?} \
-             ({:?} after {took:?})",
-            e.kind()
-        ),
-    }
+    timing_support::refused_loopback(REFUSAL_BUDGET)
 }
 
 /// Saves post-processing on, with `base_url`, the test model and prompt, connect 5 s
@@ -425,9 +405,8 @@ fn dictate_once(
     .expect("start_dictation");
     let mut keys = Keys::press(&HOTKEY_KEYS);
     assert!(
-        eventually(WAIT, || shown(&indicator.overlays())
-            .contains(&Shown::Recording)),
-        "no Recording within {WAIT:?} of the injected Ctrl+Alt+Space: {:?}",
+        eventually(|| shown(&indicator.overlays()).contains(&Shown::Recording)),
+        "no Recording within {HANG:?} of the injected Ctrl+Alt+Space: {:?}",
         indicator.overlays()
     );
     thread::sleep(HOLD);
@@ -446,7 +425,7 @@ fn assert_no_canary(lines: &[String]) {
 /// The one `dictation` line of the log, `outcome=delivered result=pasted`.
 fn assert_one_pasted_dictation_line(rig: &AppRig) {
     assert!(
-        eventually(WAIT, || !dictation_lines(&rig.log_lines()).is_empty()),
+        eventually(|| !dictation_lines(&rig.log_lines()).is_empty()),
         "no dictation line in the log"
     );
     let dictation = dictation_lines(&rig.log_lines());
@@ -488,8 +467,8 @@ fn post_processing_on_through_the_real_wiring_pastes_the_chat_reply() {
     let _dictation = dictate_once(&rig, &engine, &indicator);
 
     assert!(
-        eventually(BUDGET, || window.text() == REPLY),
-        "the window text {BUDGET:?} after the release: {:?} (expected the chat reply; \
+        eventually(|| window.text() == REPLY),
+        "the window text {HANG:?} after the release: {:?} (expected the chat reply; \
          engine calls {}, chat requests {})",
         window.text(),
         engine.calls(),
@@ -524,7 +503,7 @@ fn post_processing_on_through_the_real_wiring_pastes_the_chat_reply() {
     );
 
     assert!(
-        eventually(WAIT, || shown(&indicator.overlays())
+        eventually(|| shown(&indicator.overlays())
             == vec![Shown::Recording, Shown::Processing, Shown::Hidden]),
         "overlays: {:?}",
         shown(&indicator.overlays())
@@ -563,8 +542,8 @@ fn post_processing_server_refusing_still_pastes_the_raw_transcript_with_tray_err
     let _dictation = dictate_once(&rig, &engine, &indicator);
 
     assert!(
-        eventually(BUDGET, || window.text() == TRANSCRIPT),
-        "the window text {BUDGET:?} after the release: {:?} (expected the raw transcript; \
+        eventually(|| window.text() == TRANSCRIPT),
+        "the window text {HANG:?} after the release: {:?} (expected the raw transcript; \
          engine calls {})",
         window.text(),
         engine.calls()
@@ -579,7 +558,7 @@ fn post_processing_server_refusing_still_pastes_the_raw_transcript_with_tray_err
         vec![("host", refused.to_string())],
     );
     assert!(
-        eventually(WAIT, || shown(&indicator.overlays()).contains(&skipped)),
+        eventually(|| shown(&indicator.overlays()).contains(&skipped)),
         "no skip message {skipped:?}; overlays: {:?}",
         shown(&indicator.overlays())
     );
@@ -590,7 +569,7 @@ fn post_processing_server_refusing_still_pastes_the_raw_transcript_with_tray_err
         "overlays: {overlays:?}"
     );
     assert!(
-        eventually(WAIT, || indicator
+        eventually(|| indicator
             .trays()
             .last()
             .is_some_and(|(state, _)| *state == TrayState::Error)),
@@ -692,15 +671,15 @@ fn clip_hold(rig: &AppRig, indicator: &FakeIndicator, lines: usize) {
     let before = recordings(indicator);
     let mut keys = Keys::press(&HOTKEY_KEYS);
     assert!(
-        eventually(WAIT, || recordings(indicator) > before),
-        "no Recording within {WAIT:?} of the injected Ctrl+Alt+Space: {:?}",
+        eventually(|| recordings(indicator) > before),
+        "no Recording within {HANG:?} of the injected Ctrl+Alt+Space: {:?}",
         indicator.overlays()
     );
     thread::sleep(CLIP_HOLD);
     keys.release(&[VK_SPACE, VK_CONTROL, VK_MENU]);
     assert!(
-        eventually(BUDGET, || dictation_lines(&rig.log_lines()).len() >= lines),
-        "fewer than {lines} dictation lines {BUDGET:?} after the release: {:?}",
+        eventually(|| dictation_lines(&rig.log_lines()).len() >= lines),
+        "fewer than {lines} dictation lines {HANG:?} after the release: {:?}",
         rig.log_lines()
     );
 }

@@ -11,18 +11,24 @@
 //! The bounded open (`voicen_lib::win::capture::open_bounded`, design 2, invariants 2
 //! and 3; review 1 finding #1) is tested with plain-Rust openers, no device: an opener
 //! that blocks past the budget, one that produces its value after the timeout, one that
-//! fails, one that panics, and one that succeeds. Budgets are short; the upper bounds
-//! carry a margin for the runner's scheduling delays (F-005: run B saw ~1 s).
+//! fails, one that panics, and one that succeeds. No verdict is a ceiling on a measured time
+//! (T-201, os-answer-deadline-race): "returned before the opener" is an ordering on the
+//! opener's own state, and "at once, not after the budget" uses a budget far above
+//! `timing_support::HANG` under that hang bound (`within_hang`), so a wait for the budget is
+//! a hang. A clock reading decides only a lower bound (`at_least`).
 //!
 //! Red-test table row 16; review 1 finding #1.
 #![cfg(windows)]
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+mod timing_support;
+
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc};
 use std::thread::{self, ThreadId};
 use std::time::{Duration, Instant};
 
 use cpal::{Error, ErrorKind};
+use timing_support::{at_least, eventually, holds_for, measure, now, within_hang, HANG};
 use voicen_core::recording::CaptureError;
 use voicen_lib::win::capture::{capture_error, open_bounded};
 
@@ -123,13 +129,16 @@ fn cpal_errors_map_to_capture_causes_and_never_carry_cpal_text() {
 /// The fixed literal of a timed-out open (`OPEN_TIMED_OUT` in src/win/capture.rs).
 const TIMED_OUT: &str = "the microphone did not open in time";
 
-/// Scheduling margin on top of a budget (F-005: ~1 s delays on run B; doubled).
-const MARGIN: Duration = Duration::from_secs(2);
-
 /// How long a blocking opener waits for the test's release before it gives up and
-/// produces its value anyway: long enough that an unbounded or inline open is far
-/// outside `budget + MARGIN`, short enough that such a regression fails, not hangs.
+/// produces its value anyway: far above the budgets of the tests that hold it, so an
+/// unbounded or inline open returns only after the opener did (an ordering the test reads),
+/// short enough that such a regression fails, not hangs.
 const OPENER_WAIT: Duration = Duration::from_secs(10);
+
+/// The budget of a test whose opener answers at once: far above `HANG`, so an
+/// `open_bounded` that waits for its budget instead of the opener's answer is a hang that
+/// `within_hang` reports, not a slow pass.
+const LONG_BUDGET: Duration = Duration::from_secs(HANG.as_secs() * 2);
 
 /// A value that counts its drops (stands in for the cpal stream: dropping it closes
 /// the device).
@@ -146,29 +155,33 @@ impl Drop for Opened {
 #[test]
 fn an_opener_blocking_past_the_budget_is_a_timeout_within_the_budget() {
     // Invariant 2 (finding #1 a): an opener that does not finish within the budget ->
-    // `Err(Other(TIMED_OUT))`, returned after about the budget and before budget +
-    // MARGIN, and the opener ran on another thread. Bite: the opener run on the caller's
-    // thread (blocks OPENER_WAIT, then Ok; also the thread-id check), `recv()` instead
-    // of `recv_timeout` (blocks OPENER_WAIT, then Ok), a zero or wrong budget (elapsed
-    // below half the budget), another literal.
+    // `Err(Other(TIMED_OUT))`, returned after about the budget and while the opener was
+    // still held (an ordering, T-201), and the opener ran on another thread. Bite: the
+    // opener run on the caller's thread (blocks OPENER_WAIT, then Ok; also the thread-id
+    // check and the ordering), `recv()` instead of `recv_timeout` (returns only after the
+    // opener did), a zero or wrong budget (elapsed below half the budget), another literal.
     let budget = Duration::from_millis(300);
     let (release, released) = mpsc::channel::<()>();
     let (ran_on_tx, ran_on) = mpsc::channel::<ThreadId>();
     let drops = Arc::new(AtomicUsize::new(0));
     let opener_drops = drops.clone();
+    let opener_done = Arc::new(AtomicBool::new(false));
+    let done = opener_done.clone();
 
-    let started = Instant::now();
-    let result = open_bounded(budget, move || {
-        let _ = ran_on_tx.send(thread::current().id());
-        let _ = released.recv_timeout(OPENER_WAIT);
-        Ok(Opened {
-            drops: opener_drops,
+    let (result, took) = measure(|| {
+        open_bounded(budget, move || {
+            let _ = ran_on_tx.send(thread::current().id());
+            let _ = released.recv_timeout(OPENER_WAIT);
+            done.store(true, Ordering::SeqCst);
+            Ok(Opened {
+                drops: opener_drops,
+            })
         })
     });
-    let took = started.elapsed();
+    let returned_while_held = !opener_done.load(Ordering::SeqCst);
     let _ = release.send(());
 
-    let ran_on = ran_on.recv_timeout(MARGIN).expect("the opener never ran");
+    let ran_on = ran_on.recv_timeout(HANG).expect("the opener never ran");
     assert_ne!(
         ran_on,
         thread::current().id(),
@@ -179,27 +192,25 @@ fn an_opener_blocking_past_the_budget_is_a_timeout_within_the_budget() {
         Err(other) => panic!("expected Other({TIMED_OUT:?}), got {other:?}"),
         Ok(_) => panic!("a value handed out after {took:?} with a budget of {budget:?}"),
     }
+    at_least(took, budget / 2);
     assert!(
-        took >= budget / 2,
-        "gave up after {took:?}, well before the budget {budget:?}"
-    );
-    assert!(
-        took < budget + MARGIN,
-        "returned after {took:?}, past the budget {budget:?} + {MARGIN:?}"
+        returned_while_held,
+        "returned after {took:?}, only once the held opener had given up (budget {budget:?}, \
+         opener wait {OPENER_WAIT:?})"
     );
 }
 
 #[test]
 fn a_value_produced_after_the_timeout_is_dropped_at_once_and_never_handed_out() {
     // Invariant 3, NFR-02 (finding #1 b): the opener produces its value only after
-    // `open_bounded` gave up; the value is dropped exactly once within MARGIN of being
-    // produced (the device closes at once), and `open_bounded` returned the timeout, not
+    // `open_bounded` gave up; the value is dropped exactly once after being produced (the
+    // device closes; awaited up to the hang bound, T-201), and `open_bounded` returned the timeout, not
     // the value. Bite: no thread or no timeout (the value is handed out after
     // OPENER_WAIT), late values kept alive (a stored receiver, a leaked channel, a
     // `mem::forget`: the drop count stays 0), a value dropped twice.
     let budget = Duration::from_millis(200);
     let (release, released) = mpsc::channel::<()>();
-    let (produced_tx, produced) = mpsc::channel::<Instant>();
+    let (produced_tx, produced) = mpsc::channel::<()>();
     let drops = Arc::new(AtomicUsize::new(0));
     let opener_drops = drops.clone();
 
@@ -208,7 +219,7 @@ fn a_value_produced_after_the_timeout_is_dropped_at_once_and_never_handed_out() 
         let value = Opened {
             drops: opener_drops,
         };
-        let _ = produced_tx.send(Instant::now());
+        let _ = produced_tx.send(());
         Ok(value)
     });
     let handed_out = result.is_ok();
@@ -221,36 +232,31 @@ fn a_value_produced_after_the_timeout_is_dropped_at_once_and_never_handed_out() 
         "the late value was handed out by open_bounded ({returned:?})"
     );
     assert_eq!(returned, Err(CaptureError::Other(TIMED_OUT.to_owned())));
-    let produced_at = produced
-        .recv_timeout(MARGIN)
+    produced
+        .recv_timeout(HANG)
         .expect("the opener never produced its value after the release");
-    while drops.load(Ordering::SeqCst) == 0 && produced_at.elapsed() < MARGIN {
-        thread::sleep(Duration::from_millis(5));
-    }
-    assert_eq!(
-        drops.load(Ordering::SeqCst),
-        1,
-        "the late value's drop count {:?} after it was produced (must be dropped exactly \
-         once, at once)",
-        produced_at.elapsed()
+    assert!(
+        eventually(|| drops.load(Ordering::SeqCst) != 0),
+        "the late value was not dropped within {HANG:?} of being produced (kept alive)"
     );
-    // Nothing drops it a second time later.
-    thread::sleep(Duration::from_millis(100));
-    assert_eq!(
-        drops.load(Ordering::SeqCst),
-        1,
-        "the late value dropped twice"
+    // Exactly once, and nothing drops it a second time later.
+    assert!(
+        holds_for(Duration::from_millis(100), || drops.load(Ordering::SeqCst)
+            == 1),
+        "the late value's drop count is {} (must be dropped exactly once)",
+        drops.load(Ordering::SeqCst)
     );
 }
 
 #[test]
 fn a_failing_opener_gives_its_error_and_a_succeeding_one_its_value() {
     // Invariant 2 (finding #1 c, and the happy path): an opener's own error comes back
-    // unchanged and its value is handed out, not dropped, both at once (far below a long
-    // budget), and the opener ran on another thread. Bite: the opener run on the
-    // caller's thread (thread-id check), errors remapped to Other, a result that waits
-    // for the budget, the value dropped on the opener thread.
-    let budget = Duration::from_secs(10);
+    // unchanged and its value is handed out, not dropped, both before a budget far above the
+    // hang bound (`LONG_BUDGET` under `within_hang`), and the opener ran on another thread.
+    // Bite: the opener run on the caller's thread (thread-id check), errors remapped to
+    // Other, a result that waits for the budget (a hang), the value dropped on the opener
+    // thread.
+    let budget = LONG_BUDGET;
     let errors = [
         CaptureError::NoDevice,
         CaptureError::AccessDenied,
@@ -260,17 +266,20 @@ fn a_failing_opener_gives_its_error_and_a_succeeding_one_its_value() {
     for err in errors {
         let (ran_on_tx, ran_on) = mpsc::channel::<ThreadId>();
         let opener_err = err.clone();
-        let started = Instant::now();
-        let result = open_bounded(budget, move || -> Result<(), CaptureError> {
-            let _ = ran_on_tx.send(thread::current().id());
-            Err(opener_err)
+        let got = within_hang(move || {
+            let result = open_bounded(budget, move || -> Result<(), CaptureError> {
+                let _ = ran_on_tx.send(thread::current().id());
+                Err(opener_err)
+            });
+            (result, thread::current().id())
         });
-        let took = started.elapsed();
+        let Some(((result, called_on), _)) = got else {
+            panic!("{err:?}: open_bounded did not return within {HANG:?} (budget {budget:?})")
+        };
         assert_eq!(result, Err(err.clone()));
-        assert!(took < MARGIN, "{err:?} came back after {took:?}");
         assert_ne!(
-            ran_on.recv_timeout(MARGIN).expect("the opener never ran"),
-            thread::current().id(),
+            ran_on.recv_timeout(HANG).expect("the opener never ran"),
+            called_on,
             "{err:?}: the opener ran on the caller's thread"
         );
     }
@@ -278,18 +287,21 @@ fn a_failing_opener_gives_its_error_and_a_succeeding_one_its_value() {
     let drops = Arc::new(AtomicUsize::new(0));
     let opener_drops = drops.clone();
     let (ran_on_tx, ran_on) = mpsc::channel::<ThreadId>();
-    let started = Instant::now();
-    let result = open_bounded(budget, move || {
-        let _ = ran_on_tx.send(thread::current().id());
-        Ok(Opened {
-            drops: opener_drops,
-        })
+    let got = within_hang(move || {
+        let result = open_bounded(budget, move || {
+            let _ = ran_on_tx.send(thread::current().id());
+            Ok(Opened {
+                drops: opener_drops,
+            })
+        });
+        (result, thread::current().id())
     });
-    let took = started.elapsed();
-    assert!(took < MARGIN, "the value came back after {took:?}");
+    let Some(((result, called_on), _)) = got else {
+        panic!("the value did not come back within {HANG:?} (budget {budget:?})")
+    };
     assert_ne!(
-        ran_on.recv_timeout(MARGIN).expect("the opener never ran"),
-        thread::current().id(),
+        ran_on.recv_timeout(HANG).expect("the opener never ran"),
+        called_on,
         "the opener ran on the caller's thread"
     );
     let value = match result {
@@ -307,17 +319,21 @@ fn a_failing_opener_gives_its_error_and_a_succeeding_one_its_value() {
 
 #[test]
 fn a_panicking_opener_is_an_other_error_not_a_hang() {
-    // Finding #1 c: an opener that panics -> `Err(Other(<fixed literal>))` at once (far
-    // below a long budget), never the timeout literal, never the panic's text (P-009),
-    // and the caller does not panic. Bite: the opener run on the caller's thread (the
-    // panic unwinds into this test), waiting out the budget after the opener died, the
-    // panic payload copied into the error.
-    let budget = Duration::from_secs(10);
-    let started = Instant::now();
-    let result = open_bounded(budget, || -> Result<(), CaptureError> {
-        panic!("PLANTED-PANIC-TEXT opener died")
+    // Finding #1 c: an opener that panics -> `Err(Other(<fixed literal>))` before a budget
+    // far above the hang bound (`LONG_BUDGET` under `within_hang`), never the timeout
+    // literal, never the panic's text (P-009), and the caller does not panic. Bite: the
+    // opener run on the caller's thread (the panic unwinds into the caller, which
+    // `within_hang` resumes here), waiting out the budget after the opener died (a hang),
+    // the panic payload copied into the error.
+    let budget = LONG_BUDGET;
+    let got = within_hang(move || {
+        open_bounded(budget, || -> Result<(), CaptureError> {
+            panic!("PLANTED-PANIC-TEXT opener died")
+        })
     });
-    let took = started.elapsed();
+    let Some((result, _)) = got else {
+        panic!("a dead opener did not come back within {HANG:?} (budget {budget:?})")
+    };
 
     match result {
         Err(CaptureError::Other(text)) => {
@@ -327,10 +343,6 @@ fn a_panicking_opener_is_an_other_error_not_a_hang() {
         }
         other => panic!("expected Other(<literal>), got {other:?}"),
     }
-    assert!(
-        took < MARGIN,
-        "a dead opener came back after {took:?} (budget {budget:?})"
-    );
 }
 
 // ---- T-012: devices by endpoint id and device loss (FR-27, spec 001 FR-030/FR-031) ----
@@ -398,9 +410,9 @@ fn the_error_callback_reports_device_lost_once_for_a_kind_that_ends_the_stream()
     for kind in all_kinds().into_iter().filter(|k| !keeps_running(*k)) {
         let sink = Arc::new(RecordingSink::default());
         let mut callback = device_loss_callback(sink.clone() as Arc<dyn FrameSink>);
-        let before = Instant::now();
+        let before = now();
         callback(Error::with_message(kind, CANARY));
-        let after = Instant::now();
+        let after = now();
         callback(Error::new(ErrorKind::DeviceNotAvailable));
         callback(Error::new(ErrorKind::StreamInvalidated));
         let lost = sink.lost();
@@ -436,9 +448,9 @@ fn an_error_that_keeps_the_stream_running_is_not_a_device_loss() {
             wrong.push(format!("{kind:?}: reported as a device loss"));
             continue;
         }
-        let before = Instant::now();
+        let before = now();
         callback(Error::new(ErrorKind::DeviceNotAvailable));
-        let after = Instant::now();
+        let after = now();
         callback(Error::new(kind));
         callback(Error::new(ErrorKind::StreamInvalidated));
         match sink.lost().as_slice() {
@@ -460,17 +472,12 @@ fn the_device_list_has_unique_endpoint_ids_and_at_most_one_default() {
     // runner has (possibly nothing), `devices()` returns within the open budget without
     // panicking; every entry has a non-empty endpoint id and a non-empty display name, the
     // ids are unique, and at most one entry is the default. An enumeration error carries a
-    // fixed literal, never OS text. Bite: an unbounded enumeration (past OPEN_BUDGET +
-    // MARGIN), the name used as the id (duplicates when two devices share a name, as two
+    // fixed literal, never OS text. Bite: an unbounded enumeration (a hang past
+    // `timing_support::HANG`, T-201: no ceiling on the time), the name used as the id (duplicates when two devices share a name, as two
     // identical USB headsets do), every device flagged default, cpal's text in an error.
-    let source = CpalSource::new();
-    let started = Instant::now();
-    let listed = source.devices();
-    let took = started.elapsed();
-    assert!(
-        took < OPEN_BUDGET + MARGIN,
-        "devices() took {took:?}, past the budget {OPEN_BUDGET:?} + {MARGIN:?}"
-    );
+    let Some((listed, _)) = within_hang(|| CpalSource::new().devices()) else {
+        panic!("devices() did not return within {HANG:?} (open budget {OPEN_BUDGET:?})")
+    };
     match listed {
         Ok(devices) => {
             let mut ids: Vec<&str> = devices.iter().map(|d| d.id.0.as_str()).collect();
@@ -499,8 +506,8 @@ fn the_device_list_has_unique_endpoint_ids_and_at_most_one_default() {
 #[test]
 fn start_on_an_id_no_machine_has_is_no_device_and_reports_nothing() {
     // FR-04 branch / `## Investigation` (`device_by_id` missing -> `NoDevice`): a
-    // well-formed endpoint id of no device and a malformed id both give `NoDevice` within
-    // the open budget, and the sink gets neither frames nor a loss (the session reports
+    // well-formed endpoint id of no device and a malformed id both give `NoDevice` (under
+    // the hang bound, T-201), and the sink gets neither frames nor a loss (the session reports
     // the press's failure itself). Bite: falling back to the default device inside the
     // adapter (Ok, or frames), an unparsable id mapped to Other, a loss reported for a
     // capture that never opened, an unbounded lookup.
@@ -509,19 +516,18 @@ fn start_on_an_id_no_machine_has_is_no_device_and_reports_nothing() {
         "not-an-endpoint-id",
     ] {
         let sink = Arc::new(RecordingSink::default());
-        let source = CpalSource::new();
-        let started = Instant::now();
-        let result = source.start(&DeviceId(raw.to_string()), sink.clone());
-        let took = started.elapsed();
+        let into_start = sink.clone();
+        let id = DeviceId(raw.to_string());
+        let Some((result, _)) =
+            within_hang(move || CpalSource::new().start(&id, into_start).map(|_capture| ()))
+        else {
+            panic!("{raw}: start did not return within {HANG:?} (open budget {OPEN_BUDGET:?})")
+        };
         match result {
             Err(CaptureError::NoDevice) => {}
             Err(other) => panic!("{raw}: expected NoDevice, got {other:?}"),
             Ok(_) => panic!("{raw}: a capture opened on a device that does not exist"),
         }
-        assert!(
-            took < OPEN_BUDGET + MARGIN,
-            "{raw}: took {took:?}, past the budget"
-        );
         thread::sleep(Duration::from_millis(100));
         assert_eq!(sink.frames.load(Ordering::SeqCst), 0, "{raw}: frames");
         assert_eq!(sink.lost(), Vec::<Instant>::new(), "{raw}: a loss reported");
