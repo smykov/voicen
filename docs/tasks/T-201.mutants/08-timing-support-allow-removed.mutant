@@ -1,0 +1,9 @@
+guarantee: AC-1: the ban is denied in every test crate; timing_support's module allow is the one test exemption (without it every crate that includes the module is refused)
+file: src-tauri/tests/timing_support/mod.rs
+added_by: test-writer
+test: DOCS_RS=1 cargo clippy -j2 -p voicen --target x86_64-pc-windows-gnu --tests --message-format=short
+--- old
+#![allow(clippy::disallowed_methods)]
+--- new
+
+--- end

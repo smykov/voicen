@@ -1,0 +1,11 @@
+guarantee: -
+file: src-tauri/tests/timing_support/mod.rs
+added_by: test-writer
+test: DOCS_RS=1 cargo clippy -j2 -p voicen --target x86_64-pc-windows-gnu --tests --message-format=short
+--- old
+#[derive(Clone, Copy, Default)]
+pub struct Took(Duration);
+--- new
+#[derive(Clone, Copy, Default)]
+pub struct Took(pub Duration);
+--- end

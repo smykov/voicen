@@ -1,0 +1,11 @@
+guarantee: AC-3: a planted Instant::now() deadline in a shell test makes the gate red, naming the site
+file: src-tauri/tests/lifecycle.rs
+added_by: test-writer
+test: DOCS_RS=1 cargo clippy -j2 -p voicen --target x86_64-pc-windows-gnu --tests --message-format=short 2>&1 | tee /dev/stderr | grep -c 'src-tauri/tests/lifecycle.rs:[0-9]*:[0-9]*: error: use of a disallowed method `std::time::Instant::now`' | grep -qx 0
+--- old
+fn destroying_the_last_window_keeps_the_app_running() {
+--- new
+fn destroying_the_last_window_keeps_the_app_running() {
+    let deadline = std::time::Instant::now() + BUDGET;
+    let _ = deadline;
+--- end
