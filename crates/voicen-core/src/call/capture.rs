@@ -695,6 +695,14 @@ impl Timeline {
         step
     }
 
+    /// The track ends: what is still inside the resampler is flushed exactly up to the
+    /// last block's end. A later block starts afresh at its own stamp.
+    pub fn flush(&mut self) -> Step {
+        let mut step = Step::default();
+        self.retire(&mut step);
+        step
+    }
+
     /// 16 kHz samples emitted so far.
     pub fn written(&self) -> u64 {
         self.written

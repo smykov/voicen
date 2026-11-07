@@ -7,12 +7,12 @@ Phase 1 of [plan.md](plan.md). This file adds field types, rules and state trans
 | Field | Type | Rule |
 |---|---|---|
 | `record` | `bool` | Off at every start (FR-001). Turning it on starts a new `Call`; turning it off ends that call. |
-| `subtitles` | `bool` | Always off in 1a. The model has it for FR-019 and the 1b UI. A fake subtitle consumer proves that Subtitles-only writes nothing. |
-| `active` | derived: `record \|\| subtitles` | — |
+| `subtitles` | `bool` | Always off from 1a's UI (`toggle_subtitles` exists for FR-019 and the 1b UI). While on, the writer feeds a `SubtitleConsumer`; a fake consumer proves that Subtitles-only writes nothing (`subtitles_only_writes_nothing`). |
+| `active` | derived: `record \|\| subtitles` | The two track captures are open exactly while `active`: the first toggle on opens them, the other reuses them (no second open), and they close when both are off. |
 | `call` | `Option<ActiveCall>` | `Some` exactly while `record`. |
 | `last_combination` | `Toggles` | Persisted in `CallSettings`. The hotkey starts with it; in 1a it is always `{record}`. |
 
-Every toggle source (tray, hotkey, `--call record`) calls `toggle_record(on, Source)` under the one session lock. The indicator and tray updates happen inside the lock (the dictation-session invariant, dictation-session.md). A repeated "on" while `record` is already on applies to the current call: no second capture, no second folder.
+Every toggle source (tray, hotkey, `--call record`) calls `toggle_record(on, Source)` under the one session lock. The indicator and tray updates happen inside the lock (the dictation-session invariant, dictation-session.md). A repeated "on" while `record` is already on applies to the current call: no second capture, no second folder. `toggle_subtitles(on, Source)` runs under the same lock; it opens the captures when record has not (a refusal is `Refused { part: system | mic }`, nothing logged) and never reaches `CallStore`, the root probe, the Calls tab or the recording indicator. Record off while subtitles is on ends the call (its folder finished `ready-to-transcribe`) and keeps the captures feeding the consumer.
 
 A refused start (`Refused { part, reason }`) leaves no track open and no folder, and logs one `call_refused`. Every `part=root` refusal, `missing` included, also asks the shell to open the Calls tab, once and after the lock (decision #243 D1); a track refusal never does. A create failure after the probe is `call_storage_failed kind=<kind>` then `call_refused part=root reason=other` (D2). Built in `docs/decisions/call-session.md`.
 
