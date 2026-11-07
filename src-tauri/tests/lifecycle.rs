@@ -343,7 +343,6 @@ struct CloseReport {
 
 #[test]
 fn destroying_the_last_window_keeps_the_app_running() {
-    let _planted_deadline = std::time::Instant::now() + Duration::from_secs(20);
     // T-052 red-test table row 12 (Acceptance 1, decision #38 Q3): on a first run
     // `Ready` opens the settings window through the opener; destroying it (the last
     // window: tauri emits ExitRequested { code: None }, runtime-wry lib.rs:4255-4270)
