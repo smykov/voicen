@@ -1,0 +1,13 @@
+guarantee: AC5: a kept-running kind does not use up the one report
+file: src-tauri/src/win/track_capture.rs
+added_by: test-writer
+--- old
+        if reported {
+            return;
+        }
+--- new
+        if reported {
+            return;
+        }
+        reported = true;
+--- end

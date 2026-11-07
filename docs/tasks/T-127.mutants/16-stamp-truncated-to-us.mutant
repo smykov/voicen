@@ -1,0 +1,8 @@
+guarantee: First acceptance: stamp is the exact QPC capture ns
+file: src-tauri/src/win/track_capture.rs
+added_by: test-writer
+--- old
+    CaptureStamp(u64::try_from(instant.as_nanos()).unwrap_or(u64::MAX))
+--- new
+    CaptureStamp(u64::try_from(instant.as_nanos() / 1000 * 1000).unwrap_or(u64::MAX))
+--- end

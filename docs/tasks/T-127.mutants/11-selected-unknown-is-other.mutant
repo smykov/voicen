@@ -1,0 +1,8 @@
+guarantee: AC5: unknown selected id -> NoDevice
+file: src-tauri/src/win/track_capture.rs
+added_by: test-writer
+--- old
+                .ok_or(CaptureError::NoDevice)?;
+--- new
+                .ok_or(CaptureError::Other(String::new()))?;
+--- end

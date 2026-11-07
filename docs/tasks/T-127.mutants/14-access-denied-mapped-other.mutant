@@ -1,0 +1,8 @@
+guarantee: AC1: CaptureError -> OpenError one-to-one (AccessDenied)
+file: src-tauri/src/win/track_capture.rs
+added_by: test-writer
+--- old
+        CaptureError::AccessDenied => OpenError::AccessDenied,
+--- new
+        CaptureError::AccessDenied => OpenError::Other,
+--- end
