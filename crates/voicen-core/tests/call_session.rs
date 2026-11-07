@@ -1414,6 +1414,38 @@ fn dropped_blocks_are_logged_once_and_kept_in_meta() {
 }
 
 #[test]
+fn a_system_drop_names_the_system_track() {
+    // Decision #244 (I7), contract literal `call_track_dropped track=<mic|system>`: a
+    // drop on the system track is logged and stored as `system`, and no mic entry
+    // appears. Same mechanics as the mic test: the writer is held while the burst is fed,
+    // so the channel (capacity 4) drops exactly the blocks past the fourth (3 of 20 ms).
+    // Bite: `Writer::apply` passing `Track::Mic` (or any fixed track) to `self.dropped`.
+    let rig = CallRig::with_capacity(4, |_| {});
+    started(&rig, CallSource::Tray);
+
+    let pause = rig.session.pause_writer();
+    rig.source.feed(Track::System, 0, 140, 0.2);
+    drop(pause);
+    assert!(
+        wait(|| meta_drops(&rig).len() == 1 && rig.lines_named("call_track_dropped").len() == 1),
+        "the drop reaches the log and the meta: {:?} / {:?}",
+        meta_drops(&rig),
+        rig.lines_named("call_track_dropped")
+    );
+    rig.session.stop(StopReason::User);
+
+    let lines = rig.lines_named("call_track_dropped");
+    let drops = meta_drops(&rig);
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert_eq!(lines[0].get("track"), Some("system"), "{}", lines[0].raw);
+    assert_eq!(lines[0].get("blocks"), Some("3"));
+    assert_eq!(drops.len(), 1, "no entry for the mic: {drops:?}");
+    assert_eq!(drops[0]["track"], json!("system"));
+    assert_eq!(drops[0]["blocks"], json!(3));
+    assert_eq!(drops[0]["ms"], json!(60));
+}
+
+#[test]
 fn a_gap_without_a_device_change_leaves_no_line_and_no_entry() {
     // Decision #244: Report::Gap gives neither a call_track_dropped line nor a drops[]
     // entry (a gap tied to a device change is call_device, a later task). The mic stalls
@@ -1600,6 +1632,41 @@ fn remember_warned_host_keeps_the_snapshot_when_the_write_fails() {
         world.service.snapshot().calls.warned_hosts,
         vec!["api.example.com".to_string()]
     );
+}
+
+#[test]
+fn remember_warned_host_writes_nothing_while_settings_are_unavailable() {
+    // docs/decisions/settings.md "`Unavailable` (#19) writes nothing": with the settings
+    // file unreadable at load, `remember_warned_host` returns WarnedHostFailed, the file
+    // sees no write (only the load's read), and the snapshot in force is unchanged.
+    // Bite: `SettingsService::remember_warned_host` without its `self.load.unavailable`
+    // guard (the in-memory defaults written over the unreadable file).
+    let file = Arc::new(FakeSettingsFile::new());
+    file.fail_read(io::ErrorKind::PermissionDenied);
+    let (service, outcome) = SettingsService::load_or_init(
+        SettingsDeps {
+            file: file.clone(),
+            credentials: Arc::new(FakeCredentialStore::new()),
+            autostart: Arc::new(FakeAutostart::new()),
+            hotkeys: Arc::new(FakeHotkeyRegistrar::new()),
+            local_models: Arc::new(FakeDownloadedModels::new(&["base"])),
+            clock: Arc::new(FakeClock::at(
+                UNIX_EPOCH + Duration::from_secs(1_709_251_199),
+            )),
+            call_roots: Arc::new(FakeCallRoots::new()),
+        },
+        OS,
+    );
+    assert!(
+        matches!(outcome, voicen_core::settings::LoadOutcome::Unavailable(_)),
+        "precondition: {outcome:?}"
+    );
+    let before = service.snapshot();
+    let calls_before = file.calls();
+    assert_eq!(service.remember_warned_host(&host()), Err(WarnedHostFailed));
+    assert_eq!(file.calls(), calls_before, "no file call, no write");
+    assert_eq!(file.bytes(), None, "the unreadable file is not replaced");
+    assert_eq!(*service.snapshot(), *before, "the snapshot is unchanged");
 }
 
 #[test]

@@ -1,0 +1,28 @@
+guarantee: decisions/settings.md:127: Unavailable (#19) writes nothing (remember_warned_host)
+file: crates/voicen-core/src/settings/service.rs
+added_by: test-writer
+--- old
+        if self.load.unavailable {
+            return Err(WarnedHostFailed);
+        }
+        let _guard = self
+            .save_lock
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let current = self.snapshot();
+        if current
+            .calls
+            .warned_hosts
+--- new
+        if false && self.load.unavailable {
+            return Err(WarnedHostFailed);
+        }
+        let _guard = self
+            .save_lock
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let current = self.snapshot();
+        if current
+            .calls
+            .warned_hosts
+--- end
