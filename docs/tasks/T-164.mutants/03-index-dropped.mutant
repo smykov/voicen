@@ -1,0 +1,8 @@
+guarantee: invariant: every non-ignored file in the tree (index or untracked) is scanned (tracked files keep being scanned)
+file: scripts/ci/clippy-lines.sh
+added_by: test-writer
+--- old
+mapfile -d '' tracked < <(git ls-files -z --cached --others --exclude-standard) || cannot_run "git ls-files failed"
+--- new
+mapfile -d '' tracked < <(git ls-files -z --others --exclude-standard) || cannot_run "git ls-files failed"
+--- end

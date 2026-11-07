@@ -1,0 +1,8 @@
+guarantee: -
+file: scripts/ci/clippy-lines.sh
+added_by: test-writer
+--- old
+mapfile -d '' tracked < <(git ls-files -z --cached --others --exclude-standard) || cannot_run "git ls-files failed"
+--- new
+mapfile -d '' tracked < <(git ls-files -z --cached --others --exclude-per-directory=.gitignore --exclude-from=.git/info/exclude) || cannot_run "git ls-files failed"
+--- end

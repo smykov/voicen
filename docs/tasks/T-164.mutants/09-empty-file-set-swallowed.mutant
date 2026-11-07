@@ -1,0 +1,8 @@
+guarantee: contract: exit 3 "cannot run" when no scanned file is listed, never a pass (c-no-scanned-file)
+file: scripts/ci/clippy-lines.sh
+added_by: test-writer
+--- old
+[ "${#files[@]}" -gt 0 ] || cannot_run "no non-ignored .rs, Cargo.toml, .cargo config or make file under $root"
+--- new
+[ "${#files[@]}" -gt 0 ] || true
+--- end

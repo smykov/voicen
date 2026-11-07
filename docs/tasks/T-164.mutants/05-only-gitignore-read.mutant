@@ -1,0 +1,8 @@
+guarantee: AC-2: ignored files stay out of the scan (git decides the ignores: .git/info/exclude too)
+file: scripts/ci/clippy-lines.sh
+added_by: test-writer
+--- old
+mapfile -d '' tracked < <(git ls-files -z --cached --others --exclude-standard) || cannot_run "git ls-files failed"
+--- new
+mapfile -d '' tracked < <(git ls-files -z --cached --others --exclude-per-directory=.gitignore) || cannot_run "git ls-files failed"
+--- end

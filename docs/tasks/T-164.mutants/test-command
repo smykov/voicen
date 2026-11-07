@@ -1,0 +1,1 @@
+bash scripts/ci/clippy-lines.test.sh

@@ -1,0 +1,8 @@
+guarantee: AC-3: failure branch: the self-test goes red when the scan drops untracked files (AC-1)
+file: scripts/ci/clippy-lines.sh
+added_by: test-writer
+--- old
+mapfile -d '' tracked < <(git ls-files -z --cached --others --exclude-standard) || cannot_run "git ls-files failed"
+--- new
+mapfile -d '' tracked < <(git ls-files -z --cached --exclude-standard) || cannot_run "git ls-files failed"
+--- end

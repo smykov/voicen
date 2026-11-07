@@ -1,0 +1,8 @@
+guarantee: AC-1: a not-owned allow line in an untracked new .rs file under the scanned roots is refused (a file under a new directory)
+file: scripts/ci/clippy-lines.sh
+added_by: test-writer
+--- old
+mapfile -d '' tracked < <(git ls-files -z --cached --others --exclude-standard) || cannot_run "git ls-files failed"
+--- new
+mapfile -d '' tracked < <(git ls-files -z --cached --others --exclude-standard --directory) || cannot_run "git ls-files failed"
+--- end

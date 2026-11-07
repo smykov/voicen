@@ -1,0 +1,9 @@
+guarantee: contract: exit 3 "cannot run" when the file set cannot be listed, never a pass
+file: scripts/ci/clippy-lines.sh
+added_by: test-writer
+equivalent: the status of `mapfile ... < <(git ls-files ...)` is mapfile's, never git's (a process substitution's exit code is not seen), so `|| cannot_run "git ls-files failed"` never fires today; a failing ls-files yields an empty list and ends in the `no non-ignored ...` cannot_run (mutant 09)
+--- old
+mapfile -d '' tracked < <(git ls-files -z --cached --others --exclude-standard) || cannot_run "git ls-files failed"
+--- new
+mapfile -d '' tracked < <(git ls-files -z --cached --others --exclude-standard) || true
+--- end
