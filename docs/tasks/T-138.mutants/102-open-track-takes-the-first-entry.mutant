@@ -1,0 +1,10 @@
+guarantee: AC per-track results: each track's result comes from its own file
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: task-validator round 4 (sweep)
+--- old
+        .find(|t| t.track == track)
+        .and_then(|t| Path::new(&t.file).file_name());
+--- new
+        .find(|_| true)
+        .and_then(|t| Path::new(&t.file).file_name());
+--- end

@@ -1,0 +1,8 @@
+guarantee: -
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: task-validator round 4 (sweep)
+--- old
+        return Box::new(Unopened(DecodeEnd::Unreadable));
+--- new
+        return Box::new(Unopened(DecodeEnd::Damaged));
+--- end

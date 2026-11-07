@@ -1,4 +1,4 @@
-guarantee: invariant: once timeless, chunks are sent Plain, never back
+guarantee: -
 file: crates/voicen-core/src/call/final_pass.rs
 added_by: task-validator round 3 (sweep)
 --- old
