@@ -5,7 +5,9 @@
 //! capture,clipboard,paste}.rs`). `shell_open` is the tray's Explorer opener, the
 //! shell's `logs_folder::FolderOpener` port (T-071, `src-tauri/tests/tray.rs`). `crash` holds
 //! the crash records' frame source, module resolver, exception filter and OS
-//! version (T-024, `src-tauri/tests/crash.rs`).
+//! version (T-024, `src-tauri/tests/crash.rs`). `track_capture` is the call mode's
+//! `TrackSource` (mic and system loopback, QPC capture stamps; T-127,
+//! `src-tauri/tests/call_capture.rs`).
 
 pub mod capture;
 pub mod clipboard;
@@ -14,6 +16,7 @@ pub mod hotkey;
 pub mod paste;
 pub mod purge;
 pub mod shell_open;
+pub mod track_capture;
 
 use windows::Win32::Foundation::WIN32_ERROR;
 
