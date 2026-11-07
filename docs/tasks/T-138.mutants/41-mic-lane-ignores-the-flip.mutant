@@ -1,4 +1,4 @@
-guarantee: AC 400 / invariant: every chunk after chunk k is re-cut and sent Plain (must be killed by pass_tests::chunks_cut_after_the_flip_are_sent_time_less_even_when_the_server_would_answer_times)
+guarantee: AC 400 / invariant: every chunk after chunk k is re-cut and sent Plain (killed by pass_tests::chunks_cut_after_the_flip_are_sent_time_less_even_when_the_server_would_answer_times and by pass_tests::chunks_cut_after_the_flip_on_both_tracks_are_sent_time_less)
 file: crates/voicen-core/src/call/final_pass.rs
 added_by: task-validator round 2
 --- old

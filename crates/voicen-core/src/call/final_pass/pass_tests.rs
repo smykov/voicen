@@ -1561,6 +1561,74 @@ fn chunks_cut_after_the_flip_are_sent_time_less_even_when_the_server_would_answe
 }
 
 #[test]
+fn chunks_cut_after_the_flip_on_both_tracks_are_sent_time_less() {
+    // Both tracks are 26 minutes long (12 timed chunks each). Mic chunk 1 answers "no times";
+    // every timed request of the early chunks (start < 300 s, both tracks) waits for that
+    // answer, so the planners of both lanes cut their later chunks after the flip. Every other
+    // timed request would be answered fine: a chunk of EITHER track cut after the flip must
+    // still go out as plain pieces, never as a timed request.
+    let speech: Vec<(u64, u64)> = (0..12u64)
+        .map(|i| (i * 130_000 + 1_000, i * 130_000 + 100_000))
+        .collect();
+    let flipped = Arc::new(AtomicBool::new(false));
+    let flag = flipped.clone();
+    let engine = FakeEngine::new(true, move |r| {
+        if r.shape == ResponseShape::Segments
+            && r.track == Track::Mic
+            && (100_000..200_000).contains(&r.start)
+        {
+            flag.store(true, Ordering::SeqCst);
+            return Err(TimedFailure::Timeless);
+        }
+        if r.shape == ResponseShape::Segments && r.start < 300_000 {
+            wait_for(&flag);
+        }
+        answer_ok(r)
+    });
+    let out = run_with(
+        Src::marked(0, 1_560_000),
+        Src::marked(1, 1_560_000),
+        engine,
+        Opts::new(marked_primary(&speech)),
+    );
+    assert!(flipped.load(Ordering::SeqCst), "scenario reached chunk 1");
+    assert_eq!(
+        out.out,
+        PassOutcome {
+            outcome: FinalOutcome::Ready,
+            mode: PassMode::Timeless
+        }
+    );
+    assert_eq!(out.meta().pass_mode, Some(PassMode::Timeless));
+
+    let log = out.log();
+    assert!(
+        log.iter()
+            .filter(|r| r.shape == ResponseShape::Segments)
+            .all(|r| r.start < 300_000),
+        "a timed request for a chunk cut after the flip: {log:?}"
+    );
+    let t = some(out.transcript(), "transcript.json");
+    ok(t.validate());
+    for track in [Track::Mic, Track::System] {
+        let plain: Vec<&Req> = log
+            .iter()
+            .filter(|r| r.shape == ResponseShape::Plain && r.track == track)
+            .collect();
+        assert!(plain.iter().all(|r| r.len <= TIMELESS_MAX_MS), "{plain:?}");
+        // Speech after the early chunks is covered by plain pieces, once.
+        assert_covered_once(&plain, speech.get(3..).unwrap_or_default());
+        // No timed line (a "<track>@<ms>" label) belongs to a chunk starting after 300 s.
+        let timed_late = t.segments.iter().filter(|s| {
+            s.track == track.as_str()
+                && s.text.starts_with(&format!("{}@", track.as_str()))
+                && s.start_ms >= 300_000
+        });
+        assert_eq!(timed_late.count(), 0, "a timed line after the flip");
+    }
+}
+
+#[test]
 fn a_plain_request_that_is_refused_for_times_fails_the_track_with_provider() {
     // Every request says "no times", plain ones too: the server is at fault, the track fails.
     let engine = FakeEngine::new(true, |_| Err(TimedFailure::Timeless));
