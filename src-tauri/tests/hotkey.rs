@@ -29,11 +29,14 @@
 //! polls (`esc_released`): a probe cannot block an unregistration.
 #![cfg(windows)]
 
+mod timing_support;
 mod win32_support;
 
 use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
+
+use timing_support::{left, now, HANG};
 
 use voicen_core::diag::Log;
 use voicen_core::dictation::{DictationSession, SessionDeps};
@@ -226,16 +229,15 @@ impl Rig {
         // The keys read down (preconditions `sendinput`, `async_keys` in Keys::press) and
         // the combination was free (`assert_hotkey_free`): a missing press is the code's.
         assert!(
-            eventually(WAIT, || self.audio.start_calls() >= 1),
-            "no press reached the session within {WAIT:?} of the injected Ctrl+Alt+Space"
+            eventually(|| self.audio.start_calls() >= 1),
+            "no press reached the session within {HANG:?} of the injected Ctrl+Alt+Space"
         );
-        (keys, Instant::now())
+        (keys, now())
     }
 }
 
 fn wait_out(since: Instant) {
-    let left = HOLD.saturating_sub(since.elapsed());
-    thread::sleep(left);
+    thread::sleep(left(since + HOLD));
 }
 
 // ---- row 2 ----------------------------------------------------------------------------
@@ -423,10 +425,7 @@ fn a_synthetic_hold_opens_one_capture_and_closes_it_on_release() {
 
     let (mut keys, pressed_at) = rig.press_hotkey();
     assert!(
-        holds_for(HOLD.saturating_sub(pressed_at.elapsed()), || rig
-            .audio
-            .open_handles()
-            == 1),
+        holds_for(left(pressed_at + HOLD), || rig.audio.open_handles() == 1),
         "the capture closed while Ctrl+Alt+Space was still held (open handles {})",
         rig.audio.open_handles()
     );
@@ -434,8 +433,8 @@ fn a_synthetic_hold_opens_one_capture_and_closes_it_on_release() {
     keys.release(&[VK_SPACE, VK_CONTROL, VK_MENU]);
 
     assert!(
-        eventually(WAIT, || rig.audio.open_handles() == 0),
-        "the capture is still open {WAIT:?} after the key-ups"
+        eventually(|| rig.audio.open_handles() == 0),
+        "the capture is still open {HANG:?} after the key-ups"
     );
     assert_eq!(rig.audio.start_calls(), 1, "captures opened by one hold");
 }
@@ -457,8 +456,8 @@ fn releasing_any_key_of_the_hotkey_ends_the_hold() {
     keys.release(&[VK_MENU]);
 
     assert!(
-        eventually(WAIT, || rig.audio.open_handles() == 0),
-        "the capture is still open {WAIT:?} after Alt went up"
+        eventually(|| rig.audio.open_handles() == 0),
+        "the capture is still open {HANG:?} after Alt went up"
     );
     precondition(
         "async_keys",
@@ -491,7 +490,7 @@ fn the_hotkey_reaches_no_app_and_alt_opens_no_menu() {
     keys.release(&[VK_CONTROL]);
     keys.release(&[VK_MENU]);
     assert!(
-        eventually(WAIT, || rig.audio.open_handles() == 0),
+        eventually(|| rig.audio.open_handles() == 0),
         "premise: the hold did not end"
     );
     thread::sleep(SETTLE);
@@ -546,7 +545,7 @@ fn a_taken_hotkey_is_reported_to_the_session_and_logged_with_1409() {
     let _hotkey = rig.start_hotkey();
 
     assert!(
-        eventually(WAIT, || rig
+        eventually(|| rig
             .indicator
             .trays()
             .iter()
@@ -561,7 +560,7 @@ fn a_taken_hotkey_is_reported_to_the_session_and_logged_with_1409() {
             .collect::<Vec<_>>()
     };
     assert!(
-        eventually(WAIT, || !failed().is_empty()),
+        eventually(|| !failed().is_empty()),
         "no hotkey_register_failed line"
     );
     let lines = failed();
@@ -581,7 +580,7 @@ fn dropping_the_hotkey_thread_frees_the_hotkey() {
     let rig = Rig::new();
     let hotkey = rig.start_hotkey();
     assert!(
-        eventually(WAIT, || TakenHotkey::take().is_err()),
+        eventually(|| TakenHotkey::take().is_err()),
         "the running hotkey thread does not hold Ctrl+Alt+Space"
     );
 
@@ -655,8 +654,8 @@ fn esc_while_recording_in_hold_mode_discards_with_the_hotkey_held() {
     }
     let mut esc = Keys::press(&[VK_ESCAPE]);
     assert!(
-        eventually(WAIT, || rig.audio.open_handles() == 0),
-        "the capture is still open {WAIT:?} after Esc"
+        eventually(|| rig.audio.open_handles() == 0),
+        "the capture is still open {HANG:?} after Esc"
     );
     esc.release_all();
     keys.release_all();
@@ -668,7 +667,7 @@ fn esc_while_recording_in_hold_mode_discards_with_the_hotkey_held() {
     assert_eq!(rig.audio.start_calls(), 1);
     assert!(!esc_reached(&window), "the claimed Esc reached the window");
     assert!(
-        eventually(WAIT, esc_released),
+        eventually(esc_released),
         "Esc still claimed after the cancel; observer events: {:?}",
         rig.observer.events()
     );
@@ -700,15 +699,15 @@ fn esc_in_toggle_mode_discards_after_the_hotkey_is_released() {
     let mut esc = Keys::press(&[VK_ESCAPE]);
     esc.release_all();
     assert!(
-        eventually(WAIT, || rig.audio.open_handles() == 0),
-        "the capture is still open {WAIT:?} after Esc"
+        eventually(|| rig.audio.open_handles() == 0),
+        "the capture is still open {HANG:?} after Esc"
     );
     thread::sleep(SETTLE);
     assert_eq!(rig.ends(), vec![RecordingEnd::Cancelled]);
     assert_eq!(rig.jobs(), 0);
     assert!(!esc_reached(&window), "the claimed Esc reached the window");
     assert!(
-        eventually(WAIT, esc_released),
+        eventually(esc_released),
         "Esc still claimed after the cancel; observer events: {:?}",
         rig.observer.events()
     );
@@ -739,7 +738,7 @@ fn esc_while_idle_reaches_the_focused_window() {
     let mut esc = Keys::press(&[VK_ESCAPE]);
     esc.release_all();
     assert!(
-        eventually(WAIT, || esc_reached(&window)),
+        eventually(|| esc_reached(&window)),
         "the window never saw Esc: {:x?}",
         window.messages()
     );
@@ -772,17 +771,17 @@ fn esc_is_released_after_a_max_length_stop() {
     }
     rig.session.tick(pressed_at + MAX_LENGTH);
     assert!(
-        eventually(WAIT, || rig.audio.open_handles() == 0),
+        eventually(|| rig.audio.open_handles() == 0),
         "the capture is still open after the max-length stop"
     );
     assert!(
-        eventually(WAIT, esc_released),
+        eventually(esc_released),
         "Esc still claimed after the max-length stop (hotkey still held); observer events: {:?}",
         rig.observer.events()
     );
     keys.release_all();
     assert!(
-        eventually(WAIT, || rig.jobs() == 1),
+        eventually(|| rig.jobs() == 1),
         "the max-length recording was not processed"
     );
     assert_eq!(rig.ends(), vec![RecordingEnd::MaxLength]);
@@ -821,7 +820,7 @@ fn a_refused_esc_claim_keeps_recording_and_warns_esc_unavailable() {
             .count()
     };
     assert!(
-        eventually(WAIT, || warned() >= 1),
+        eventually(|| warned() >= 1),
         "no Warning{{EscUnavailable}}: {:?}",
         rig.observer.events()
     );
@@ -832,7 +831,7 @@ fn a_refused_esc_claim_keeps_recording_and_warns_esc_unavailable() {
     wait_out(pressed_at);
     keys.release_all();
     assert!(
-        eventually(WAIT, || rig.jobs() == 1),
+        eventually(|| rig.jobs() == 1),
         "the recording was not processed after the refused claim"
     );
     assert_eq!(rig.ends(), vec![RecordingEnd::Released]);
@@ -893,9 +892,9 @@ fn esc_claim(rig: &Rig) -> Result<(), String> {
             .any(|(s, _)| *s == TrayState::Recording)
     };
     // A memory read of the fake, not a registration probe: polling it races nothing.
-    if !eventually(WAIT, recording) {
+    if !eventually(recording) {
         return Err(format!(
-            "Esc not claimed: no Recording indicator within {WAIT:?} of the press \
+            "Esc not claimed: no Recording indicator within {HANG:?} of the press \
              (indicator calls: {:?}); observer events: {:?}",
             rig.indicator.calls(),
             rig.observer.events()
@@ -983,11 +982,11 @@ fn esc_unavailable_warnings(rig: &Rig) -> usize {
 fn end_gated_hold(rig: &Rig, mut keys: Keys) {
     keys.release_all();
     assert!(
-        eventually(WAIT, || rig.audio.open_handles() == 0),
-        "cleanup: the capture is still open {WAIT:?} after the hotkey's release"
+        eventually(|| rig.audio.open_handles() == 0),
+        "cleanup: the capture is still open {HANG:?} after the hotkey's release"
     );
     assert!(
-        eventually(WAIT, esc_released),
+        eventually(esc_released),
         "cleanup: Esc still claimed after the hold ended; observer events: {:?}",
         rig.observer.events()
     );
@@ -1000,7 +999,7 @@ fn a_collision_planted_at_the_esc_claim_is_named_esc_unavailable_by_the_claim_ch
     // Ctrl+Alt+Esc, so the thread's one-shot claim gets bare Esc and is refused the
     // modified one (Warning{EscUnavailable}); then the test frees Ctrl+Alt+Esc. The
     // claim check must not say "not claimed" with no reason: it names the refusal.
-    // Red before T-108: `eventually(WAIT, esc_claimed)` reads Ctrl+Alt+Esc free for the
+    // Red before T-108: `eventually(esc_claimed)` reads Ctrl+Alt+Esc free for the
     // whole WAIT and returns "Esc not claimed" (the CI message) with no events. Bite:
     // a check that does not read the observer's events (no EscUnavailable in its
     // message), a check that reads `Ok` while one combination is free.
@@ -1026,7 +1025,7 @@ fn a_collision_planted_at_the_esc_claim_is_named_esc_unavailable_by_the_claim_ch
         .expect("premise: Ctrl+Alt+Esc is free while the hotkey thread's claim is pending");
     drop(opener);
     assert!(
-        eventually(WAIT, || esc_unavailable_warnings(&rig) >= 1),
+        eventually(|| esc_unavailable_warnings(&rig) >= 1),
         "premise: the planted Ctrl+Alt+Esc did not refuse the thread's claim: {:?}",
         rig.observer.events()
     );
@@ -1085,7 +1084,7 @@ fn an_esc_claim_check_started_while_the_claim_is_pending_waits_for_the_claim() {
         (verdict, returned_while_pending)
     });
     assert!(
-        eventually(WAIT, || esc_unavailable_warnings(&rig) >= 1),
+        eventually(|| esc_unavailable_warnings(&rig) >= 1),
         "premise: the test's own Esc registrations did not refuse the thread's claim: {:?}",
         rig.observer.events()
     );
@@ -1282,12 +1281,12 @@ impl Rig {
     #[track_caller]
     fn assert_started_failing(&self) {
         assert!(
-            eventually(WAIT, || self.last_tray() == Some(TrayState::HotkeyError)),
+            eventually(|| self.last_tray() == Some(TrayState::HotkeyError)),
             "premise: no HotkeyError at start with the hotkey taken: {:?}",
             self.indicator.trays()
         );
         assert!(
-            eventually(WAIT, || self.register_failed().len() == 1),
+            eventually(|| self.register_failed().len() == 1),
             "premise: not one hotkey_register_failed line at start: {:?}",
             self.register_failed()
         );
@@ -1317,8 +1316,8 @@ fn a_freed_hotkey_is_registered_again_on(event: &str, send: fn(HWND)) {
 
     // No probe before the tray changes: a probe's take could win the re-registration.
     assert!(
-        eventually(WAIT, || rig.last_tray() == Some(TrayState::Idle)),
-        "{event}: the tray is still HotkeyError {WAIT:?} after the {event} (no re-register): {:?}",
+        eventually(|| rig.last_tray() == Some(TrayState::Idle)),
+        "{event}: the tray is still HotkeyError {HANG:?} after the {event} (no re-register): {:?}",
         rig.indicator.trays()
     );
     assert_eq!(
@@ -1375,7 +1374,7 @@ fn a_registered_hotkey_stays_registered_across_a_resume_and_an_unlock() {
     let rig = Rig::new();
     let _hotkey = rig.start_hotkey();
     assert!(
-        eventually(WAIT, || held_by_someone_else().is_ok()),
+        eventually(|| held_by_someone_else().is_ok()),
         "premise: the running hotkey thread does not hold Ctrl+Alt+Space"
     );
     let hwnd = hotkey_window();
@@ -1434,7 +1433,7 @@ fn a_retry_while_the_hotkey_is_still_taken_keeps_hotkey_error_and_notifies_once(
         let want = n + 2;
         send(hwnd);
         assert!(
-            eventually(WAIT, || rig.register_failed().len() >= want),
+            eventually(|| rig.register_failed().len() >= want),
             "{event}: no hotkey_register_failed line for the retry: {:?}",
             rig.register_failed()
         );
@@ -1496,12 +1495,12 @@ fn a_suspend_during_a_hold_closes_the_capture_as_suspended() {
     );
     deliver(hwnd, WM_POWERBROADCAST, PBT_APMSUSPEND as usize, 0);
     assert!(
-        eventually(WAIT, || rig.audio.open_handles() == 0),
-        "the capture is still open {WAIT:?} after PBT_APMSUSPEND with the hotkey held"
+        eventually(|| rig.audio.open_handles() == 0),
+        "the capture is still open {HANG:?} after PBT_APMSUSPEND with the hotkey held"
     );
     keys.release_all();
     assert!(
-        eventually(WAIT, || rig.jobs() == 1),
+        eventually(|| rig.jobs() == 1),
         "the suspended recording was not processed"
     );
     thread::sleep(SETTLE);

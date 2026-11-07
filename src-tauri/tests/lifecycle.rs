@@ -19,12 +19,16 @@
 //!   app's. Each test has its own `TempDir`; no keys are used.
 #![cfg(windows)]
 
+mod timing_support;
+
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use timing_support::{eventually, measure, Took, HANG};
 
 use tauri::menu::{MenuEvent, MenuId};
 use tauri::test::{mock_context, noop_assets};
@@ -245,20 +249,6 @@ fn main_round_trip(handle: &AppHandle<Wry>) -> bool {
     rx.recv_timeout(ROUND_TRIP).is_ok()
 }
 
-/// Polls `cond` every 10 ms until it holds or `budget` has passed.
-fn poll(budget: Duration, mut cond: impl FnMut() -> bool) -> bool {
-    let deadline = Instant::now() + budget;
-    loop {
-        if cond() {
-            return true;
-        }
-        if Instant::now() >= deadline {
-            return false;
-        }
-        thread::sleep(Duration::from_millis(10));
-    }
-}
-
 /// A hang bound, not a budget: how long `ready_opened`'s probe may wait for the
 /// opener to reach it. It only ends a build that never finishes (with the
 /// watchdog above it); it must exceed `OPENER_HELD` plus a cold WebView2 build
@@ -277,7 +267,7 @@ struct ReadyOpen {
     window: bool,
     /// How long the probe waited for the opener (the queue ahead of it plus the
     /// window build; printed, not judged).
-    waited: Duration,
+    waited: Took,
 }
 
 impl ReadyOpen {
@@ -299,10 +289,8 @@ impl ReadyOpen {
 /// A probe still unanswered after `OPENER_HANG` (a hung build) reads as
 /// `answered: false`.
 fn ready_opened(handle: &AppHandle<Wry>) -> ReadyOpen {
-    let started = Instant::now();
     let probe = voicen_lib::settings_window::request_with(handle, Box::new(|_| Ok(())));
-    let answered = probe.wait_timeout(OPENER_HANG).is_some();
-    let waited = started.elapsed();
+    let (answered, waited) = measure(|| probe.wait_timeout(OPENER_HANG).is_some());
     let window = answered && handle.get_webview_window(LABEL).is_some();
     eprintln!("lifecycle: Ready's first-run open probe answered={answered} after {waited:?}");
     ReadyOpen {
@@ -379,7 +367,7 @@ fn destroying_the_last_window_keeps_the_app_running() {
             report.destroyed = handle
                 .get_webview_window(LABEL)
                 .is_some_and(|w| w.destroy().is_ok());
-            report.gone = poll(BUDGET, || handle.get_webview_window(LABEL).is_none());
+            report.gone = eventually(|| handle.get_webview_window(LABEL).is_none());
             report.alive_at_once = main_round_trip(&handle);
             thread::sleep(Duration::from_secs(1));
             report.alive_later = main_round_trip(&handle);
@@ -496,7 +484,7 @@ struct OverlayBuilt {
     /// The overlay window existed when the receipt came (read only then).
     window: bool,
     /// How long the receipt took (printed, not judged).
-    waited: Duration,
+    waited: Took,
 }
 
 impl OverlayBuilt {
@@ -514,9 +502,7 @@ const OVERLAY_HANG: Duration = Duration::from_secs(120);
 /// state, decided through the thread's receipt (`overlay::settled`), never through a
 /// wall-clock ceiling on the window: the window is read once, after the receipt.
 fn overlay_built(handle: &AppHandle<Wry>) -> OverlayBuilt {
-    let started = Instant::now();
-    let receipt = voicen_lib::overlay::settled(handle, OVERLAY_HANG);
-    let waited = started.elapsed();
+    let (receipt, waited) = measure(|| voicen_lib::overlay::settled(handle, OVERLAY_HANG));
     let built = OverlayBuilt {
         settled: receipt.is_some(),
         failed: receipt.is_some_and(|r| r.failed),
@@ -589,7 +575,7 @@ fn destroying_the_overlay_as_the_last_window_keeps_the_app_while_the_tray_exists
         report.shown = overlay_built(&handle);
         if report.shown.built() {
             indicator.set_overlay(&OverlayState::Hidden);
-            report.gone = poll(BUDGET, || handle.get_webview_window(OVERLAY).is_none());
+            report.gone = eventually(|| handle.get_webview_window(OVERLAY).is_none());
             report.alive_at_once = main_round_trip(&handle);
             thread::sleep(Duration::from_secs(1));
             report.alive_later = main_round_trip(&handle);
@@ -710,8 +696,8 @@ struct NoTrayReport {
     opened: ReadyOpen,
     tray_removed: bool,
     destroyed: bool,
-    /// A main-thread round trip failed within `BUDGET` after the destroy: the loop
-    /// ended by itself.
+    /// A main-thread round trip failed within `HANG` after the destroy: the loop
+    /// ended (by itself, or by the fallback, which the run's code tells apart).
     ended: bool,
 }
 
@@ -761,7 +747,7 @@ fn without_the_tray_destroying_the_last_window_ends_the_app() {
         report.destroyed = handle
             .get_webview_window(LABEL)
             .is_some_and(|w| w.destroy().is_ok());
-        report.ended = poll(BUDGET, || !main_round_trip(&handle));
+        report.ended = eventually(|| !main_round_trip(&handle));
         report
     });
 
@@ -773,7 +759,7 @@ fn without_the_tray_destroying_the_last_window_ends_the_app() {
     );
     assert!(
         report.ended,
-        "without a tray the loop still answered {BUDGET:?} after its last window was \
+        "without a tray the loop still answered {HANG:?} after its last window was \
          destroyed (ExitRequested {{ code: None }} prevented): {report:?}"
     );
     assert_ne!(
@@ -786,7 +772,6 @@ fn without_the_tray_destroying_the_last_window_ends_the_app() {
 struct SetTrayReport {
     part: bool,
     main_blocked: bool,
-    set_tray_took: Duration,
     released_by_driver: bool,
     applied: bool,
 }
@@ -819,19 +804,15 @@ fn set_tray_returns_while_the_main_thread_is_blocked() {
             let _ = seen_tx.send(released);
         });
         let main_blocked = blocked_rx.recv_timeout(BUDGET).is_ok();
-        let started = Instant::now();
         part.set_tray(TrayState::Recording, false);
-        let set_tray_took = started.elapsed();
         let _ = release_tx.send(());
         let released_by_driver = seen_rx.recv_timeout(HOLD + BUDGET).unwrap_or(false);
-        let applied = poll(BUDGET, || {
-            tray::applied(&handle).map(|a| a.state) == Some(TrayState::Recording)
-        });
+        let applied =
+            eventually(|| tray::applied(&handle).map(|a| a.state) == Some(TrayState::Recording));
         end_loop(&handle, 0);
         SetTrayReport {
             part: true,
             main_blocked,
-            set_tray_took,
             released_by_driver,
             applied,
         }
@@ -844,7 +825,7 @@ fn set_tray_returns_while_the_main_thread_is_blocked() {
         "premise: the main thread ran the blocking task: {report:?}"
     );
     assert!(
-        report.released_by_driver && report.set_tray_took < HOLD,
+        report.released_by_driver,
         "set_tray returned only after the blocked main thread gave up \
          (it waited for the main thread): {report:?}"
     );

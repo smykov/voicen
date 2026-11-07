@@ -15,18 +15,20 @@
 //! 15 (the modifier wait is bounded and polls both Win keys).
 #![cfg(windows)]
 
+mod timing_support;
 mod win32_support;
 
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+use timing_support::{at_least, within_hang, HANG};
 use voicen_core::delivery::{self, DeliveryResult};
 use voicen_core::platform::{Paster, StartWindow, WindowRef};
 use voicen_lib::win::clipboard::WinClipboard;
 use voicen_lib::win::paste::WinPaster;
 use win32_support::{
     bring_to_front, clipboard_text, eventually, holds_for, put_text, serial, window_ref, Keys,
-    Shape, TestWindow, SETTLE, VK_CONTROL, VK_MASK, VK_RWIN, WAIT,
+    Shape, TestWindow, SETTLE, VK_CONTROL, VK_MASK, VK_RWIN,
 };
 
 #[test]
@@ -71,12 +73,12 @@ fn ctrl_v_pastes_the_clipboard_into_the_start_window() {
     assert_eq!(paster.send_ctrl_v(), Ok(()));
 
     assert!(
-        eventually(WAIT, || window.text() == "pasted by T-006 – вставка"),
+        eventually(|| window.text() == "pasted by T-006 – вставка"),
         "the window text after Ctrl+V: {:?}",
         window.text()
     );
     assert!(
-        eventually(WAIT, || !win32_support::is_down(VK_CONTROL)),
+        eventually(|| !win32_support::is_down(VK_CONTROL)),
         "Ctrl is still down after send_ctrl_v"
     );
 }
@@ -156,44 +158,42 @@ fn is_in_front_checks_the_window_and_its_process_and_a_closed_window_is_not_in_f
 fn the_modifier_wait_is_bounded_and_polls_ctrl_and_the_right_win_key() {
     // T-006 row 15 (data-model "DeliveryDecision": wait <= 1 s for Shift/Ctrl/Alt/Win):
     // with Ctrl held, `wait_modifiers_released(1 s)` returns false after at least 1 s
-    // and well before the 3 s budget; with the right Win key held the same; with
-    // everything up it returns true at once. Bite: an unbounded wait, an immediate
-    // false (no wait), only the hotkey's modifiers or only VK_LWIN polled (RWIN held
-    // reads as released).
+    // (and returns at all: a hang bound, T-201, no ceiling on the time); with the right Win
+    // key held the same; with everything up it returns true even with a limit far above
+    // the hang bound (so it did not wait for the limit). Bite: an unbounded wait (a hang),
+    // an immediate false (no wait), only the hotkey's modifiers or only VK_LWIN polled
+    // (RWIN held reads as released), a wait for the limit with nothing held (a hang).
     let _serial = serial();
     let window = TestWindow::open(Shape::TopLevel);
     window.front();
-    let paster = WinPaster::new();
     let max = Duration::from_secs(1);
 
     for vk in [VK_CONTROL, VK_RWIN] {
         let mut keys = Keys::press(&[vk]);
-        let started = Instant::now();
-        let released = paster.wait_modifiers_released(max);
-        let took = started.elapsed();
+        let waited = within_hang(move || WinPaster::new().wait_modifiers_released(max));
         // The mask key first: a Win key released alone would open the Start menu.
         win32_support::send(&[
             win32_support::key(VK_MASK, false),
             win32_support::key(VK_MASK, true),
         ]);
         keys.release(&[vk]);
+        let Some((released, took)) = waited else {
+            panic!(
+                "{vk:#04x} held: wait_modifiers_released({max:?}) did not return within {HANG:?}"
+            )
+        };
         assert!(!released, "{vk:#04x} held: reported released");
-        assert!(
-            took >= max,
-            "{vk:#04x} held: gave up after {took:?}, before {max:?}"
-        );
-        assert!(took < WAIT, "{vk:#04x} held: waited {took:?}");
+        at_least(took, max);
     }
 
     thread::sleep(Duration::from_millis(100));
-    let started = Instant::now();
-    assert!(
-        paster.wait_modifiers_released(max),
-        "nothing held: reported held"
-    );
-    assert!(
-        started.elapsed() < Duration::from_millis(500),
-        "nothing held: took {:?}",
-        started.elapsed()
-    );
+    let unbounded = HANG * 2;
+    let Some((released, _)) =
+        within_hang(move || WinPaster::new().wait_modifiers_released(unbounded))
+    else {
+        panic!(
+            "nothing held: wait_modifiers_released({unbounded:?}) did not return within {HANG:?}"
+        )
+    };
+    assert!(released, "nothing held: reported held");
 }

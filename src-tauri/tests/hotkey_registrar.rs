@@ -25,6 +25,7 @@
 //! beyond the app's own lines.
 #![cfg(windows)]
 
+mod timing_support;
 mod win32_support;
 
 use std::sync::Arc;
@@ -33,6 +34,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 use tauri::{Listener, Manager};
+use timing_support::HANG;
 use voicen_core::autostart::{AutostartError, FakeAutostart};
 use voicen_core::platform::{FakeAudioSource, FakeClipboard, FakeIndicator, FakePaster};
 use voicen_core::recording::TrayState;
@@ -44,7 +46,7 @@ use voicen_lib::dictation::{start_dictation, DictationHandle, DictationPorts};
 use voicen_lib::settings_window::{self, LABEL};
 use win32_support::{
     assert_hotkey_free, combo_is_free, engine_factory, eventually, serial, shown, AppRig, Keys,
-    Shown, TakenHotkey, TextEngine, HOLD, VK_CONTROL, VK_MENU, WAIT,
+    Shown, TakenHotkey, TextEngine, HOLD, VK_CONTROL, VK_MENU,
 };
 
 /// The new hotkey the tests save (free on the runner; checked per test).
@@ -97,7 +99,7 @@ impl Started {
     #[track_caller]
     fn assert_app_holds(&self, combo: &str, why: &str) {
         assert!(
-            eventually(WAIT, || !combo_is_free(combo)),
+            eventually(|| !combo_is_free(combo)),
             "{why}: the app does not hold {combo}"
         );
     }
@@ -117,15 +119,15 @@ impl Started {
         let before = self.audio.start_calls();
         let mut held = Keys::press(keys);
         assert!(
-            eventually(WAIT, || self.audio.start_calls() == before + 1),
-            "{what}: no capture within {WAIT:?} of the press (start calls {} → {})",
+            eventually(|| self.audio.start_calls() == before + 1),
+            "{what}: no capture within {HANG:?} of the press (start calls {} → {})",
             before,
             self.audio.start_calls()
         );
         thread::sleep(HOLD);
         held.release_all();
         assert!(
-            eventually(WAIT, || self.audio.open_handles() == 0),
+            eventually(|| self.audio.open_handles() == 0),
             "{what}: the capture stayed open after the release"
         );
     }
@@ -168,7 +170,7 @@ fn a_saved_new_hotkey_is_registered_and_the_old_one_freed() {
 
     app.assert_app_holds(NEW_HOTKEY, "after the save");
     assert!(
-        eventually(WAIT, || combo_is_free(DEFAULT_HOTKEY)),
+        eventually(|| combo_is_free(DEFAULT_HOTKEY)),
         "the old {DEFAULT_HOTKEY} is still registered after the save"
     );
     app.assert_hold_records(&NEW_KEYS, "the saved hotkey");
@@ -239,7 +241,7 @@ fn a_later_refusal_frees_the_prepared_hotkey() {
     );
 
     assert!(
-        eventually(WAIT, || combo_is_free(NEW_HOTKEY)),
+        eventually(|| combo_is_free(NEW_HOTKEY)),
         "the aborted {NEW_HOTKEY} is still registered by the app"
     );
     app.assert_app_holds(DEFAULT_HOTKEY, "after the abort");
@@ -277,7 +279,7 @@ fn a_taken_hotkey_at_startup_reports_and_opens_the_hotkey_field_and_a_save_recov
     let app = start(rig);
 
     assert!(
-        eventually(WAIT, || app
+        eventually(|| app
             .indicator
             .trays()
             .iter()
@@ -286,9 +288,9 @@ fn a_taken_hotkey_at_startup_reports_and_opens_the_hotkey_field_and_a_save_recov
         app.indicator.trays()
     );
     assert!(
-        eventually(WAIT, || shown(&app.indicator.overlays()).iter().any(
-            |o| matches!(o, Shown::Message(id, _) if *id == HOTKEY_NOTICE)
-        )),
+        eventually(|| shown(&app.indicator.overlays())
+            .iter()
+            .any(|o| matches!(o, Shown::Message(id, _) if *id == HOTKEY_NOTICE))),
         "no {HOTKEY_NOTICE} overlay: {:?}",
         shown(&app.indicator.overlays())
     );
@@ -306,7 +308,7 @@ fn a_taken_hotkey_at_startup_reports_and_opens_the_hotkey_field_and_a_save_recov
         })
     };
     assert!(
-        eventually(OPEN_BUDGET, || query().as_ref() == Some(&hotkey_query)),
+        eventually(|| query().as_ref() == Some(&hotkey_query)),
         "the settings window is not at the hotkey field: {:?}",
         query()
     );
@@ -333,8 +335,7 @@ fn a_taken_hotkey_at_startup_reports_and_opens_the_hotkey_field_and_a_save_recov
     assert!(matches!(saved, SaveOutcome::Saved { .. }), "{saved:?}");
     app.assert_app_holds(NEW_HOTKEY, "after the recovering save");
     assert!(
-        eventually(WAIT, || app.indicator.trays().last().map(|(s, _)| *s)
-            == Some(TrayState::Idle)),
+        eventually(|| app.indicator.trays().last().map(|(s, _)| *s) == Some(TrayState::Idle)),
         "the tray did not leave HotkeyError after the save: {:?}",
         app.indicator.trays()
     );

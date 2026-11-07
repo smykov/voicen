@@ -8,8 +8,10 @@
 //! which names the capability and `docs/decisions/windows-ci-runner.md` (all `ok` in runs A
 //! and B, T-059), or, for `foreground_again` (the probe re-measures it in every job), through
 //! [`precondition_rechecked`]. Timing (F-005, T-006 Refresh 2): `SendInput` and `WM_HOTKEY` took ~1 s
-//! in run B, so every observation waits at least [`WAIT`] (3 s), and holds are timed from
-//! the observed press, never from the `SendInput` call.
+//! in run B, so every positive observation is an [`eventually`] up to `timing_support::HANG`
+//! (no budget, T-201), a channel wait takes at least [`WAIT`] (3 s), and holds are timed from
+//! the observed press, never from the `SendInput` call. Every clock read goes through
+//! `timing_support` (the including crate declares `mod timing_support;`).
 //!
 //! Fake data only: `sk-test-…` keys, texts with an obvious canary.
 #![allow(dead_code)]
@@ -22,7 +24,9 @@ use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, AtomicUsize, Orderin
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use crate::timing_support::{self, HANG};
 
 use tauri::test::{mock_builder, mock_context, noop_assets, MockRuntime};
 use tauri::{App, Manager};
@@ -164,33 +168,15 @@ pub fn pump() {
     }
 }
 
-/// Polls `cond` every 10 ms (pumping this thread) until it holds or `within` passed.
-pub fn eventually(within: Duration, mut cond: impl FnMut() -> bool) -> bool {
-    let deadline = Instant::now() + within;
-    loop {
-        pump();
-        if cond() {
-            return true;
-        }
-        if Instant::now() >= deadline {
-            return false;
-        }
-        thread::sleep(Duration::from_millis(10));
-    }
+/// Polls `cond` (pumping this thread) until it holds, or `timing_support::HANG` passed (a hung
+/// test). No budget: the verdict is the awaited outcome (T-201).
+pub fn eventually(cond: impl FnMut() -> bool) -> bool {
+    timing_support::eventually_pumping(pump, cond)
 }
 
-/// Pumps for `SETTLE`; false as soon as `cond` fails (a bounded negative).
-pub fn holds_for(within: Duration, mut cond: impl FnMut() -> bool) -> bool {
-    let deadline = Instant::now() + within;
-    while Instant::now() < deadline {
-        pump();
-        if !cond() {
-            return false;
-        }
-        thread::sleep(Duration::from_millis(10));
-    }
-    pump();
-    cond()
+/// Pumps for `within`; false as soon as `cond` fails (a bounded negative).
+pub fn holds_for(within: Duration, cond: impl FnMut() -> bool) -> bool {
+    timing_support::holds_for_pumping(pump, within, cond)
 }
 
 // ---- keys ---------------------------------------------------------------------------
@@ -249,11 +235,11 @@ impl Keys {
                 inputs.len()
             ),
         );
-        let all_down = eventually(WAIT, || vks.iter().all(|&vk| is_down(vk)));
+        let all_down = eventually(|| vks.iter().all(|&vk| is_down(vk)));
         precondition(
             "async_keys",
             all_down,
-            format!("GetAsyncKeyState did not read {vks:x?} down within {WAIT:?}"),
+            format!("GetAsyncKeyState did not read {vks:x?} down within {HANG:?}"),
         );
         keys
     }
@@ -269,11 +255,11 @@ impl Keys {
             inserted as usize == inputs.len(),
             format!("SendInput inserted {inserted} of {} key-ups", inputs.len()),
         );
-        let all_up = eventually(WAIT, || vks.iter().all(|&vk| !is_down(vk)));
+        let all_up = eventually(|| vks.iter().all(|&vk| !is_down(vk)));
         precondition(
             "async_keys",
             all_up,
-            format!("GetAsyncKeyState did not read {vks:x?} up within {WAIT:?}"),
+            format!("GetAsyncKeyState did not read {vks:x?} up within {HANG:?}"),
         );
     }
 
@@ -587,7 +573,7 @@ pub fn bring_to_front(hwnd: HWND) {
     let mut alt = Keys::press(&[VK_MENU]);
     // SAFETY: a live window of this process.
     let set = unsafe { SetForegroundWindow(hwnd) }.as_bool();
-    let took = eventually(WAIT, || foreground() == hwnd);
+    let took = eventually(|| foreground() == hwnd);
     let in_front = class_of(foreground());
     let masked = send(&[key(VK_MASK, false), key(VK_MASK, true)]);
     alt.release(&[VK_MENU]);
@@ -602,13 +588,13 @@ pub fn bring_to_front(hwnd: HWND) {
         format!(
             "with an injected Alt held (foreground rights, LockSetForegroundWindow remarks), \
              SetForegroundWindow returned {set} but the test window was not in front within \
-             {WAIT:?} (in front: {in_front})"
+             {HANG:?} (in front: {in_front})"
         ),
     );
     let alt_up = |m: &(isize, u32, usize)| {
         (m.1 == WM_KEYUP || m.1 == WM_SYSKEYUP) && m.2 == usize::from(VK_MENU)
     };
-    let reached = eventually(WAIT, || {
+    let reached = eventually(|| {
         lock(&RECORD)
             .get(seen_before..)
             .is_some_and(|new| new.iter().any(alt_up))
@@ -616,7 +602,7 @@ pub fn bring_to_front(hwnd: HWND) {
     assert!(
         reached,
         "premise: the Alt key-up of the foreground path did not reach a test window within \
-         {WAIT:?} although one is in front, so its keys cannot be told from a test's"
+         {HANG:?} although one is in front, so its keys cannot be told from a test's"
     );
     lock(&RECORD).clear();
 }
@@ -931,10 +917,10 @@ impl ClipboardHolder {
             if ok {
                 // Pump the owner's thread while holding (the clipboard may send its
                 // owner messages), until released or `hold` has passed.
-                let until = Instant::now() + hold;
+                let until = timing_support::deadline(hold);
                 loop {
                     pump();
-                    let left = until.saturating_duration_since(Instant::now());
+                    let left = timing_support::left(until);
                     if left.is_zero() {
                         break;
                     }

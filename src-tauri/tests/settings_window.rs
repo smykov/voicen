@@ -26,12 +26,14 @@
 //! runs inline on the building thread in the mock) and on whether `request` returns
 //! while its open is held.
 
+mod timing_support;
+
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::mpsc;
 use std::sync::{Arc, Barrier, Condvar, Mutex, PoisonError};
 use std::thread::{self, ThreadId};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde_json::{json, Value};
 use tauri::ipc::{CallbackFn, InvokeBody};
@@ -41,6 +43,7 @@ use tauri::webview::InvokeRequest;
 use tauri::{
     App, Builder, Context, Listener, Manager, Url, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
 };
+use timing_support::HANG;
 use voicen_core::autostart::{Autostart, FakeAutostart};
 use voicen_core::diag::Log;
 use voicen_core::local_models::catalog::MODELS;
@@ -59,14 +62,15 @@ use voicen_lib::settings_window::{self, OpenTarget, Receipt, LABEL};
 
 const FOCUS: &str = "settings://focus";
 
-/// How long a test waits for the opener thread (Windows-sized, F-005).
-const BUDGET: Duration = Duration::from_secs(10);
+/// How long a test waits for the opener thread: the one hang bound (T-201; a positive wait
+/// returns as soon as its outcome comes, so only a hung test waits this long).
+const BUDGET: Duration = HANG;
 
-/// A held probe gives up after this, so a failing test cannot hang the exe.
-const HOLD_LIMIT: Duration = Duration::from_secs(30);
-
-/// `request` must return well within this while its open is held.
-const RETURNS_AT_ONCE: Duration = Duration::from_secs(2);
+/// A held probe gives up after this, so a failing test cannot hang the exe. As long as the
+/// hang bound: "returned while held" is decided by whether the hold has let go yet
+/// ([`Hold::exits`]), never by a time, and a shorter limit would let a stalled green run
+/// see the hold expire.
+const HOLD_LIMIT: Duration = HANG;
 
 /// Waits for the opener to run `receipt` and returns the open's result.
 #[track_caller]
@@ -482,6 +486,7 @@ struct Hold {
 #[derive(Default)]
 struct HoldState {
     entries: usize,
+    exits: usize,
     released: bool,
 }
 
@@ -491,11 +496,20 @@ impl Hold {
         st.entries += 1;
         self.changed.notify_all();
         if st.entries == 1 {
-            let _held = self
+            let (mut st, _) = self
                 .changed
                 .wait_timeout_while(st, HOLD_LIMIT, |s| !s.released)
                 .unwrap_or_else(PoisonError::into_inner);
+            st.exits += 1;
         }
+    }
+
+    /// How many held entries have let go (by `release` or `HOLD_LIMIT`).
+    fn exits(&self) -> usize {
+        self.state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .exits
     }
 
     fn entries(&self) -> usize {
@@ -683,8 +697,8 @@ fn open_runs_on_one_thread_that_is_no_callers_thread() {
 fn request_returns_while_its_open_is_held() {
     // T-052 invariant 2: callers post and never wait. The opener is held inside the
     // window creation (the probe's hook); the caller's `request` has already
-    // returned its receipt, and a second `request` from another thread returns at
-    // once while the first is still held. After the release both run, in order:
+    // returned its receipt, and a second `request` from another thread returns while
+    // the first is still held (an ordering: the hold has not let go, T-201). After the release both run, in order:
     // one window, one focus event for the second. Bite: `request` running `open`
     // itself (its caller blocked inside the creation, no receipt), or waiting for
     // the opener to finish the previous request.
@@ -711,16 +725,20 @@ fn request_returns_while_its_open_is_held() {
         "the window creation did not start within {BUDGET:?}"
     );
     let first = rx
-        .recv_timeout(RETURNS_AT_ONCE)
-        .expect("request did not return while its own open was held: it ran open itself");
+        .recv_timeout(HANG)
+        .unwrap_or_else(|e| panic!("request did not return within {HANG:?}: {e}"));
+    assert_eq!(
+        hold.exits(),
+        0,
+        "request returned only after its own open let go: it ran open itself"
+    );
 
-    let started = Instant::now();
     let second =
         settings_window::request(app.handle(), OpenTarget::Tab(SettingsTab::General, None));
-    let took = started.elapsed();
-    assert!(
-        took < RETURNS_AT_ONCE,
-        "request waited {took:?} for the busy opener"
+    assert_eq!(
+        hold.exits(),
+        0,
+        "the second request returned only after the busy opener let go: it waited for it"
     );
     assert_eq!(
         hold.entries(),

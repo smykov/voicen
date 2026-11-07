@@ -28,13 +28,15 @@
 //! (a missing path).
 #![cfg(windows)]
 
+mod timing_support;
+
 use std::collections::BTreeSet;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread::{self, ThreadId};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use tauri::menu::{ContextMenu, MenuEvent, MenuId};
 use tauri::test::{mock_builder, mock_context, noop_assets, MockRuntime};
@@ -110,35 +112,16 @@ fn pump() {
     }
 }
 
-/// Polls `cond` every 5 ms, pumping this thread's messages, until it holds or
-/// `BUDGET` has passed.
-fn eventually(mut cond: impl FnMut() -> bool) -> bool {
-    let deadline = Instant::now() + BUDGET;
-    loop {
-        pump();
-        if cond() {
-            return true;
-        }
-        if Instant::now() >= deadline {
-            return false;
-        }
-        thread::sleep(Duration::from_millis(5));
-    }
+/// Polls `cond`, pumping this thread's messages, until it holds, or `timing_support::HANG`
+/// passed (a hung test; no budget, T-201).
+fn eventually(cond: impl FnMut() -> bool) -> bool {
+    timing_support::eventually_pumping(pump, cond)
 }
 
 /// Pumps for `SETTLE`; false as soon as `cond` fails (a bounded negative: it can
 /// miss a change slower than that, never report one that did not happen).
-fn holds_for_a_while(mut cond: impl FnMut() -> bool) -> bool {
-    let deadline = Instant::now() + SETTLE;
-    while Instant::now() < deadline {
-        pump();
-        if !cond() {
-            return false;
-        }
-        thread::sleep(Duration::from_millis(5));
-    }
-    pump();
-    cond()
+fn holds_for_a_while(cond: impl FnMut() -> bool) -> bool {
+    timing_support::holds_for_pumping(pump, SETTLE, cond)
 }
 
 fn no_keys() -> Arc<dyn CredentialStore> {
@@ -511,7 +494,7 @@ fn opening_the_menu_clears_error_through_the_session_and_keeps_hotkey_error() {
     let session = start_session(&rig, audio.clone());
 
     audio.set_start_error(Some(CaptureError::AccessDenied));
-    session.hotkey_pressed(Instant::now());
+    session.hotkey_pressed(timing_support::now());
     assert!(
         eventually(|| rig.state() == Some(TrayState::Error)),
         "a refused capture: tray {:?}",
@@ -528,7 +511,7 @@ fn opening_the_menu_clears_error_through_the_session_and_keeps_hotkey_error() {
         rig.state()
     );
 
-    session.hotkey_registration(false, Instant::now());
+    session.hotkey_registration(false, timing_support::now());
     assert!(
         eventually(|| rig.state() == Some(TrayState::HotkeyError)),
         "a failed registration: tray {:?}",
@@ -543,7 +526,7 @@ fn opening_the_menu_clears_error_through_the_session_and_keeps_hotkey_error() {
         "opening the menu cleared HotkeyError: tray {:?}",
         rig.state()
     );
-    session.hotkey_registration(true, Instant::now());
+    session.hotkey_registration(true, timing_support::now());
     assert!(
         eventually(|| rig.state() == Some(TrayState::Idle)),
         "a successful registration: tray {:?}",
@@ -563,7 +546,7 @@ fn a_left_click_opens_the_menu_and_clears_error() {
     let audio = Arc::new(FakeAudioSource::new());
     let session = start_session(&rig, audio.clone());
     audio.set_start_error(Some(CaptureError::AccessDenied));
-    session.hotkey_pressed(Instant::now());
+    session.hotkey_pressed(timing_support::now());
     assert!(
         eventually(|| rig.state() == Some(TrayState::Error)),
         "premise: Error; tray {:?}",
@@ -592,7 +575,7 @@ fn hovering_over_the_icon_keeps_the_error() {
     let audio = Arc::new(FakeAudioSource::new());
     let session = start_session(&rig, audio.clone());
     audio.set_start_error(Some(CaptureError::AccessDenied));
-    session.hotkey_pressed(Instant::now());
+    session.hotkey_pressed(timing_support::now());
     assert!(
         eventually(|| rig.state() == Some(TrayState::Error)),
         "premise: Error; tray {:?}",
@@ -651,7 +634,7 @@ fn opening_the_menu_never_waits_for_the_session() {
     let session = start_session(&rig, mic.clone());
 
     let presser = Arc::clone(&session);
-    let press = thread::spawn(move || presser.hotkey_pressed(Instant::now()));
+    let press = thread::spawn(move || presser.hotkey_pressed(timing_support::now()));
     assert!(mic.wait_entered(), "premise: the press reached start");
 
     let (tx, rx) = mpsc::channel();
@@ -1129,6 +1112,9 @@ struct FakeOpener {
     /// `(held, released)`.
     hold: Mutex<(bool, bool)>,
     changed: Condvar,
+    /// How many `open` calls have returned (a held one returns only once released, or after
+    /// `HOLD_LIMIT`).
+    returned: Mutex<usize>,
 }
 
 impl FakeOpener {
@@ -1158,6 +1144,10 @@ impl FakeOpener {
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
     }
+
+    fn returned(&self) -> usize {
+        *self.returned.lock().unwrap_or_else(PoisonError::into_inner)
+    }
 }
 
 impl FolderOpener for FakeOpener {
@@ -1177,6 +1167,7 @@ impl FolderOpener for FakeOpener {
                 .wait_timeout_while(hold, HOLD_LIMIT, |h| !h.1)
                 .unwrap_or_else(PoisonError::into_inner);
         }
+        *self.returned.lock().unwrap_or_else(PoisonError::into_inner) += 1;
         match self
             .fail_next
             .lock()
@@ -1249,14 +1240,16 @@ fn the_open_logs_item_creates_and_opens_the_logs_dir_off_the_main_thread() {
     logs_folder::install(rig.handle(), target.clone(), opener.clone());
     let main = thread::current().id();
 
-    let started = Instant::now();
     tray::on_menu_event(rig.handle(), menu_item(TrayAction::OpenLogs));
-    let took = started.elapsed();
+    // An ordering, not a ceiling (T-201): the handler returned while the held opener had not
+    // (it returns only after the release below, or after HOLD_LIMIT).
+    let returned_before_release = opener.returned();
     opener.release();
 
-    assert!(
-        took < RETURNS_AT_ONCE,
-        "the Open logs handler waited {took:?} for the opener on the main thread"
+    assert_eq!(
+        returned_before_release, 0,
+        "the Open logs handler returned only after the held opener did (it waited for the \
+         opener on the main thread)"
     );
     assert!(
         eventually(|| opener.calls().len() == 1),

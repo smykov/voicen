@@ -13,6 +13,8 @@ crates/voicen-core/tests/common/mod.rs	#![allow(dead_code, clippy::disallowed_me
 crates/voicen-core/Cargo.toml	[lints.clippy]
 src-tauri/Cargo.toml	[lints.clippy]
 src-tauri/src/lib.rs	#![allow(clippy::disallowed_methods)]
+src-tauri/tests/timing_support/mod.rs	#![allow(clippy::disallowed_methods)]
+src-tauri/tests/runner_probe.rs	#![allow(clippy::disallowed_methods)]
 Makefile	scripts/tw-run core -- 'cargo fmt --check -p voicen-core && cargo clippy -p voicen-core --all-targets -- -D warnings'
 Makefile	scripts/tw-run core -- 'cargo fmt --check -p voicen-whisper && DOCS_RS=1 cargo clippy -p voicen-whisper --all-targets -- -D warnings'
 Makefile	scripts/tw-run core -- 'DOCS_RS=1 cargo check -p voicen --target x86_64-pc-windows-gnu && DOCS_RS=1 cargo clippy -p voicen --target x86_64-pc-windows-gnu --tests'

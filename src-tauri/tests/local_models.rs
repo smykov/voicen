@@ -18,10 +18,12 @@
 //! listeners run inside the emit call, on the download thread, so the order seen in a
 //! channel is the emit order. Fake data only: 127.0.0.1.
 
+mod timing_support;
+
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde_json::{json, Value};
 use tauri::ipc::{CallbackFn, InvokeBody};
@@ -53,8 +55,9 @@ const PROGRESS: &str = "local-model://progress";
 const STATE: &str = "local-model://state";
 /// The change bridge's event (settings_ipc::spawn_change_bridge).
 const CHANGED: &str = "settings://changed";
-/// Long enough for any local end event; a hang fails the test instead of the run.
-const END_WAIT: Duration = Duration::from_secs(10);
+/// Long enough for any local end event: the one hang bound (T-201); a hang fails the test
+/// instead of the run.
+const END_WAIT: Duration = timing_support::HANG;
 /// How long "nothing more happens" is watched.
 const QUIET: Duration = Duration::from_millis(500);
 
@@ -289,10 +292,10 @@ fn record<L: Listener<MockRuntime>>(target: &L) -> Receiver<(String, Value)> {
 /// and the state payload.
 #[track_caller]
 fn wait_state(events: &Receiver<(String, Value)>) -> (Vec<Value>, Value) {
-    let deadline = Instant::now() + END_WAIT;
+    let end = timing_support::deadline(END_WAIT);
     let mut progress = Vec::new();
     loop {
-        match events.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+        match events.recv_timeout(timing_support::left(end)) {
             Ok((name, payload)) if name == STATE => return (progress, payload),
             Ok((_, payload)) => progress.push(payload),
             Err(RecvTimeoutError::Timeout) => {
@@ -317,9 +320,9 @@ fn wait_progress(events: &Receiver<(String, Value)>) -> Value {
 
 /// Everything that arrives within `d`.
 fn drain(events: &Receiver<(String, Value)>, d: Duration) -> Vec<(String, Value)> {
-    let deadline = Instant::now() + d;
+    let end = timing_support::deadline(d);
     let mut got = Vec::new();
-    while let Ok(e) = events.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+    while let Ok(e) = events.recv_timeout(timing_support::left(end)) {
         got.push(e);
     }
     got

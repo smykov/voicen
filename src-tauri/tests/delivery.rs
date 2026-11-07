@@ -23,14 +23,16 @@
 //! and 23 need none (tauri's mock runtime). Fake key, fake texts, a `TempDir` per test.
 #![cfg(windows)]
 
+mod timing_support;
 mod win32_support;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use tauri::Manager;
+use timing_support::{now, HANG};
 use voicen_core::dictation::DictationSession;
 use voicen_core::platform::{
     FakeAudioSource, FakeIndicator, FrameChunk, Indicator, PasteError, Paster, StartWindow,
@@ -110,7 +112,7 @@ fn speaking_mic() -> Arc<FakeAudioSource> {
     let audio = Arc::new(FakeAudioSource::new());
     audio.set_chunks(vec![FrameChunk::from_buffer(
         &fixtures::speech_3s(),
-        Instant::now() + Duration::from_millis(10),
+        now() + Duration::from_millis(10),
     )]);
     audio
 }
@@ -140,17 +142,17 @@ fn start(
 
 /// A hold of `HOLD` through the session's inputs.
 fn hold(session: &DictationSession) {
-    session.hotkey_pressed(Instant::now());
+    session.hotkey_pressed(now());
     thread::sleep(HOLD);
-    session.hotkey_released(Instant::now());
+    session.hotkey_released(now());
 }
 
 /// The one dictation line, once written.
 #[track_caller]
 fn one_dictation_line(rig: &AppRig) -> String {
     assert!(
-        eventually(BUDGET, || !dictation_lines(&rig.log_lines()).is_empty()),
-        "no dictation line within {BUDGET:?}"
+        eventually(|| !dictation_lines(&rig.log_lines()).is_empty()),
+        "no dictation line within {HANG:?}"
     );
     let lines = dictation_lines(&rig.log_lines());
     assert_eq!(lines.len(), 1, "{lines:?}");
@@ -218,8 +220,7 @@ fn start_window_replaced_before_delivery_gives_copy_manual_and_no_paste() {
     assert_eq!(paster.sends(), 0, "Ctrl+V sent");
     assert_eq!(clipboard_text().as_deref(), Some(TEXT), "clipboard");
     assert!(
-        eventually(BUDGET, || shown(&indicator.overlays())
-            .contains(&copied_paste_manually())),
+        eventually(|| shown(&indicator.overlays()).contains(&copied_paste_manually())),
         "overlays: {:?}",
         shown(&indicator.overlays())
     );
@@ -266,8 +267,7 @@ fn an_elevated_start_window_gets_no_ctrl_v_and_the_text_stays_in_the_clipboard()
     );
     assert_eq!(clipboard_text().as_deref(), Some(TEXT), "clipboard");
     assert!(
-        eventually(BUDGET, || shown(&indicator.overlays())
-            .contains(&copied_paste_manually())),
+        eventually(|| shown(&indicator.overlays()).contains(&copied_paste_manually())),
         "overlays: {:?}",
         shown(&indicator.overlays())
     );
@@ -307,7 +307,7 @@ fn microphone_access_denied_shows_no_recording_and_the_microphone_unavailable_no
         vec![("reason", "mic_reason.access_denied".to_string())],
     );
     assert!(
-        eventually(BUDGET, || shown(&indicator.overlays()).contains(&want)),
+        eventually(|| shown(&indicator.overlays()).contains(&want)),
         "overlays: {:?}",
         shown(&indicator.overlays())
     );
@@ -358,11 +358,11 @@ fn engine_none_opens_one_settings_window_on_engine_and_never_opens_the_microphon
     );
     let session = rig.session();
 
-    session.hotkey_pressed(Instant::now());
-    session.hotkey_released(Instant::now());
+    session.hotkey_pressed(now());
+    session.hotkey_released(now());
 
     assert!(
-        eventually(BUDGET, || rig.app.get_webview_window(LABEL).is_some()),
+        eventually(|| rig.app.get_webview_window(LABEL).is_some()),
         "no settings window"
     );
     let url = rig
@@ -411,17 +411,16 @@ fn the_session_is_managed_and_the_shell_indicator_drives_the_tray() {
     let session = rig.session();
     let tray_state = || tray::applied(rig.app.handle()).map(|a| (a.state, a.retry_available));
 
-    session.hotkey_pressed(Instant::now());
+    session.hotkey_pressed(now());
     assert!(
-        eventually(BUDGET, || tray_state() == Some((TrayState::Error, false))),
+        eventually(|| tray_state() == Some((TrayState::Error, false))),
         "a refused capture through ShellIndicator: tray {:?}",
         tray_state()
     );
 
     indicator.set_tray(TrayState::Recording, true);
     assert!(
-        eventually(BUDGET, || tray_state()
-            == Some((TrayState::Recording, true))),
+        eventually(|| tray_state() == Some((TrayState::Recording, true))),
         "ShellIndicator::set_tray: tray {:?}",
         tray_state()
     );

@@ -34,6 +34,8 @@
 //! `scripts/ci/helper-windows.sh` in make check.
 #![cfg(windows)]
 
+mod timing_support;
+
 use std::io::Read;
 use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
@@ -42,8 +44,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Barrier, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+use timing_support::{at_least, between, deadline, left, now, passed, within_hang, Took, HANG};
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{
     CloseHandle, COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, WAIT_OBJECT_0, WPARAM,
@@ -397,7 +400,7 @@ struct PwshOutput {
     status: ExitStatus,
     stdout: String,
     stderr: String,
-    elapsed: Duration,
+    elapsed: Took,
 }
 
 /// A pwsh run that did not end within its budget (T-057 VERIFY_FAIL 2, invariant 3):
@@ -407,9 +410,9 @@ struct PwshStall {
     budget: Duration,
     /// How long the call waited for its turn (`PWSH_TURN`, invariant 2) before the
     /// child was spawned; not part of `elapsed`.
-    waited: Duration,
+    waited: Took,
     /// From the spawn (after the turn was taken) to the child killed and waited for.
-    elapsed: Duration,
+    elapsed: Took,
     /// The name of the last stage marker the child wrote to stderr (the first token of
     /// the last line that starts with `stage:`, e.g. `stage:up`); `None` when it wrote
     /// none.
@@ -436,10 +439,11 @@ impl std::fmt::Display for PwshError {
             PwshError::Spawn(err) => write!(f, "pwsh could not be started: {err}"),
             PwshError::Stalled(stall) => write!(
                 f,
-                "pwsh stalled: killed after {:?} (budget {:?}); last stage: {}; \
-                 stdout so far: {:?}; stderr so far: {:?}",
+                "pwsh stalled: killed after {:?} (budget {:?}, after a wait of {:?} for \
+                 its turn); last stage: {}; stdout so far: {:?}; stderr so far: {:?}",
                 stall.elapsed,
                 stall.budget,
+                stall.waited,
                 stall.stage.as_deref().unwrap_or("none"),
                 stall.stdout,
                 stall.stderr
@@ -487,8 +491,8 @@ fn spawn_reader<R: Read + Send + 'static>(mut source: R) -> Reader {
 
 /// Waits up to `READER_GRACE` for both readers, then returns what each has read.
 fn drain(readers: [Reader; 2]) -> (String, String) {
-    let deadline = Instant::now() + READER_GRACE;
-    while readers.iter().any(|(_, h)| !h.is_finished()) && Instant::now() < deadline {
+    let end = deadline(READER_GRACE);
+    while readers.iter().any(|(_, h)| !h.is_finished()) && !left(end).is_zero() {
         thread::sleep(Duration::from_millis(10));
     }
     let [out, err] = readers.map(|(buffer, handle)| {
@@ -520,10 +524,10 @@ fn last_stage(stderr: &str) -> Option<String> {
 /// child is killed and waited for and `Err(PwshError::Stalled)` carries the elapsed
 /// time, the last stage marker and the output read so far.
 fn run_pwsh(command: &str, budget: Duration) -> Result<PwshOutput, PwshError> {
-    let called = Instant::now();
+    let called = now();
     let _turn = PWSH_TURN.lock().unwrap_or_else(|e| e.into_inner());
-    let waited = called.elapsed();
-    let started = Instant::now();
+    let started = now();
+    let waited = between(called, started);
     let mut child = Command::new("pwsh")
         .args(["-NoProfile", "-NonInteractive", "-Command", command])
         .stdin(Stdio::null())
@@ -543,7 +547,7 @@ fn run_pwsh(command: &str, budget: Duration) -> Result<PwshOutput, PwshError> {
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break Some(status),
-            Ok(None) if started.elapsed() < budget => thread::sleep(PWSH_POLL),
+            Ok(None) if !passed(started, budget) => thread::sleep(PWSH_POLL),
             // Out of budget, or the child can no longer be polled: either way it is
             // killed and waited for, never left running.
             Ok(None) | Err(_) => break None,
@@ -556,13 +560,13 @@ fn run_pwsh(command: &str, budget: Duration) -> Result<PwshOutput, PwshError> {
                 status,
                 stdout,
                 stderr,
-                elapsed: started.elapsed(),
+                elapsed: between(started, now()),
             })
         }
         None => {
             let _ = child.kill();
             let _ = child.wait();
-            let elapsed = started.elapsed();
+            let elapsed = between(started, now());
             let (stdout, stderr) = drain(readers);
             Err(PwshError::Stalled(PwshStall {
                 budget,
@@ -690,8 +694,6 @@ fn process_running(pid: u32) -> bool {
 
 /// Budget of the stall tests: small, so a stall is seen quickly.
 const STALL_BUDGET: Duration = Duration::from_secs(15);
-/// How much later than its budget a stalled run may return (kill, wait, readers).
-const STALL_SLACK: Duration = Duration::from_secs(10);
 
 /// A command that reports its pid, writes `markers` to stderr (each with its tick) and
 /// a line to stdout, then sleeps for ten minutes.
@@ -712,21 +714,24 @@ fn stalling_command(markers: &[&str]) -> String {
 }
 
 /// Runs `stalling_command(markers)` with `STALL_BUDGET` and checks the stall exit of
-/// invariant 3: an `Err` within budget + slack of its turn carrying the stdout and
-/// stderr read so far, a Display that names the stall, its stage and both outputs, and
-/// a child that is no longer running. Returns the stall.
+/// invariant 3: an `Err` carrying the stdout and stderr read so far, a Display that names
+/// the stall, its stage and both outputs, and a child that is no longer running. Returns
+/// the stall.
 ///
-/// The helper's own time is measured from outside minus the time it waited for its
-/// turn (invariant 2: the stall tests run in parallel threads of one binary, so one of
-/// them waits a whole stall of the other for the lock). `waited` is reported by the
-/// helper and pinned from both sides: `outside - waited <= budget + slack` (no
-/// blocking on readers or the child past the budget) and `waited + elapsed <= outside`
-/// (an honest wait; an inflated one would hide that blocking).
+/// No blocking on the readers or the child past the budget is an outcome, not a ceiling
+/// on a measured time (T-201): the child sleeps ten minutes, five times the hang bound, so
+/// a helper that waited for it (or for the readers it keeps open) does not return within
+/// [`HANG`]. The reported `elapsed` keeps its lower bound (the kill did not come before
+/// the budget).
 #[track_caller]
 fn stall_of(markers: &[&str]) -> PwshStall {
-    let started = Instant::now();
-    let result = run_pwsh(&stalling_command(markers), STALL_BUDGET);
-    let outside = started.elapsed();
+    let command = stalling_command(markers);
+    let Some((result, outside)) = within_hang(move || run_pwsh(&command, STALL_BUDGET)) else {
+        panic!(
+            "a stalled pwsh held the helper past {HANG:?} (the child sleeps 600 s): it was \
+             not killed at its budget {STALL_BUDGET:?}"
+        )
+    };
     let err = match result {
         Ok(output) => panic!("a ten-minute sleep ended within {STALL_BUDGET:?}: {output:?}"),
         Err(err) => err,
@@ -736,25 +741,10 @@ fn stall_of(markers: &[&str]) -> PwshStall {
         PwshError::Stalled(stall) => stall,
         PwshError::Spawn(err) => panic!("precondition `pwsh` on PATH does not hold: {err}"),
     };
-    assert!(
-        stall.waited + stall.elapsed <= outside,
-        "the stall reports a wait of {:?} and {:?} after it, more than the {outside:?} the \
-         call took",
-        stall.waited,
-        stall.elapsed
-    );
-    let held = outside.saturating_sub(stall.waited);
-    assert!(
-        held <= STALL_BUDGET + STALL_SLACK,
-        "a stalled pwsh held the helper for {held:?} after its turn (budget \
-         {STALL_BUDGET:?}, waited {:?} for the turn)",
-        stall.waited
-    );
-    assert!(
-        stall.elapsed >= STALL_BUDGET && stall.elapsed <= STALL_BUDGET + STALL_SLACK,
-        "the stall reports {:?}, not the time it waited (budget {STALL_BUDGET:?})",
-        stall.elapsed
-    );
+    // The stall reports the time it waited for the child: at least its budget, and the
+    // whole call (turn included) at least that too.
+    at_least(stall.elapsed, STALL_BUDGET);
+    at_least(outside, STALL_BUDGET);
     assert_eq!(
         stall.budget, STALL_BUDGET,
         "the stall reports another budget"

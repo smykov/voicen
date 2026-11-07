@@ -26,6 +26,8 @@
 //! ```
 #![cfg(windows)]
 
+mod timing_support;
+
 use std::ffi::OsString;
 use std::io::Read;
 use std::os::windows::process::CommandExt;
@@ -33,7 +35,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{mpsc, Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, SystemTime};
 
 use tauri::menu::{MenuEvent, MenuId};
 use tauri::test::{mock_context, noop_assets};
@@ -359,11 +361,13 @@ fn spawn_child(mode: &str, logs: &Path) -> (Child, [JoinHandle<String>; 2]) {
 /// Waits for `child` up to `budget`; kills and waits for it at the budget.
 fn finish(mut child: Child, readers: [JoinHandle<String>; 2], budget: Duration) -> Ran {
     let pid = child.id();
-    let started = Instant::now();
+    let started = timing_support::now();
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break Some(status),
-            Ok(None) if started.elapsed() < budget => thread::sleep(Duration::from_millis(20)),
+            Ok(None) if !timing_support::passed(started, budget) => {
+                thread::sleep(Duration::from_millis(20))
+            }
             Ok(None) | Err(_) => break None,
         }
     };
@@ -469,13 +473,13 @@ fn new_names(before: &[String], after: &[String]) -> Vec<String> {
 fn killed_idle_session(logs: &Path) -> u32 {
     let (mut child, readers) = spawn_child("idle", logs);
     let pid = child.id();
-    let deadline = Instant::now() + MARKER_BUDGET;
+    let end = timing_support::deadline(MARKER_BUDGET);
     let marked = loop {
         let text = std::fs::read_to_string(logs.join(MARKER)).unwrap_or_default();
         if text.lines().any(|l| l == format!("pid={pid}")) {
             break true;
         }
-        if Instant::now() >= deadline || matches!(child.try_wait(), Ok(Some(_))) {
+        if timing_support::left(end).is_zero() || matches!(child.try_wait(), Ok(Some(_))) {
             break false;
         }
         thread::sleep(Duration::from_millis(20));
