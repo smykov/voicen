@@ -440,6 +440,9 @@ struct Opts {
     prep: Option<PrepHook>,
     /// The mic decoder's `next_window` ask log, shared with the test (a fresh one when `None`).
     mic_asks: Option<Arc<Mutex<Vec<u32>>>>,
+    /// The system decoder's `next_window` ask log, shared with the test (a fresh one when
+    /// `None`).
+    system_asks: Option<Arc<Mutex<Vec<u32>>>>,
 }
 
 impl Opts {
@@ -451,11 +454,17 @@ impl Opts {
             language: None,
             prep: None,
             mic_asks: None,
+            system_asks: None,
         }
     }
 
     fn mic_asks(mut self, asks: Arc<Mutex<Vec<u32>>>) -> Opts {
         self.mic_asks = Some(asks);
+        self
+    }
+
+    fn system_asks(mut self, asks: Arc<Mutex<Vec<u32>>>) -> Opts {
+        self.system_asks = Some(asks);
         self
     }
 
@@ -593,7 +602,8 @@ fn run_with(mic: Src, system: Src, engine: FakeEngine, opts: Opts) -> Out {
     let asks = [
         opts.mic_asks
             .unwrap_or_else(|| Arc::new(Mutex::new(Vec::new()))),
-        Arc::new(Mutex::new(Vec::new())),
+        opts.system_asks
+            .unwrap_or_else(|| Arc::new(Mutex::new(Vec::new()))),
     ];
     let sources = PassSources {
         mic: Box::new(GenDecoder {
@@ -1821,7 +1831,7 @@ fn windows_to_cut(src: Src, spans: &[(u64, u64)], n: usize) -> usize {
 }
 
 /// Eight speech spans, one in each 120 s of a 960 s track: eight timed chunks, each decided
-/// only when the next span is seen, so a lane that reads ahead reads a window more.
+/// within its own window, so a lane that reads ahead reads a window more.
 const EIGHT: [(u64, u64); 8] = [
     (10_000, 90_000),
     (130_000, 210_000),
@@ -1835,11 +1845,22 @@ const EIGHT: [(u64, u64); 8] = [
 
 #[test]
 fn a_lane_reads_no_window_ahead_of_the_chunks_it_has_dispatched() {
-    // Requests 0 and 1 are held, unanswered, until request 2 has counted the mic windows
-    // read: then all three chunks are dispatched, none is answered and the dispatcher waits
-    // for an answer, so the count is stable (no timing). It must equal the windows a lone
-    // planner needs to cut three chunks: one window per chunk need, none read ahead.
-    let need = windows_to_cut(Src::marked(0, 960_000), &EIGHT, 3);
+    lane_reads_no_window_ahead(Track::Mic);
+}
+
+#[test]
+fn the_system_lane_reads_no_window_ahead_of_the_chunks_it_has_dispatched() {
+    lane_reads_no_window_ahead(Track::System);
+}
+
+/// Requests 0 and 1 are held, unanswered, until request 2 has counted the windows `track`'s
+/// decoder has read (the other track is empty): then all three chunks are dispatched, none is
+/// answered and the dispatcher waits for an answer, so the count is stable (no timing). It
+/// must equal the windows a lone planner needs to cut three chunks: one window per chunk
+/// need, none read ahead.
+fn lane_reads_no_window_ahead(track: Track) {
+    let flag = i16::from(track == Track::System);
+    let need = windows_to_cut(Src::marked(flag, 960_000), &EIGHT, 3);
     let asks = Arc::new(Mutex::new(Vec::<u32>::new()));
     let counted = Arc::new((Mutex::new(None::<usize>), Condvar::new()));
     let (hook_asks, hook_counted) = (asks.clone(), counted.clone());
@@ -1860,19 +1881,26 @@ fn a_lane_reads_no_window_ahead_of_the_chunks_it_has_dispatched() {
         drop(slot);
         answer_ok(r)
     });
-    let out = run_with(
-        Src::marked(0, 960_000),
-        Src::marked(1, 0),
-        engine,
-        Opts::new(marked_primary(&EIGHT)).mic_asks(asks.clone()),
-    );
+    let (src, empty) = (Src::marked(flag, 960_000), Src::marked(1 - flag, 0));
+    let (mic, system, opts) = if track == Track::System {
+        let opts = Opts::new(marked_primary(&EIGHT)).system_asks(asks.clone());
+        (empty, src, opts)
+    } else {
+        let opts = Opts::new(marked_primary(&EIGHT)).mic_asks(asks.clone());
+        (src, empty, opts)
+    };
+    let out = run_with(mic, system, engine, opts);
     assert_eq!(out.out.outcome, FinalOutcome::Ready);
     let log = out.log();
     assert_eq!(log.len(), EIGHT.len(), "one request per chunk: {log:?}");
+    assert!(
+        log.iter().all(|r| r.track == track),
+        "every request is of the {track:?} track: {log:?}"
+    );
     let read = *some(lock(&counted.0).as_ref(), "the third request was counted");
     assert_eq!(
         read, need,
-        "{read} mic windows were read for 3 chunks in flight; cutting them needs {need}"
+        "{read} {track:?} windows were read for 3 chunks in flight; cutting them needs {need}"
     );
     assert!(
         lock(&asks).len() > need,

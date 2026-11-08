@@ -1,0 +1,9 @@
+guarantee: AC decoding is one window at a time (<= 120 s plus carry); invariant: at most one window plus carry is held per track (read ahead right after a dispatch, the second path to 101)
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: task-validator round 5 (sample)
+--- old
+                    self.in_flight.insert(seq, Sent { track, work, at });
+--- new
+                    self.in_flight.insert(seq, Sent { track, work, at });
+                    self.lane(track).refill(env, timeless, order);
+--- end

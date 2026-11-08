@@ -1,0 +1,10 @@
+guarantee: AC a primary Err never becomes empty spans or dropped audio; invariant: every window of each track goes through ChunkPlanner (the carry at the end of a track is cut, not dropped)
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: task-validator round 5 (sample)
+--- old
+                    self.ended = true;
+                    self.planner.finish()
+--- new
+                    self.ended = true;
+                    Vec::new()
+--- end
