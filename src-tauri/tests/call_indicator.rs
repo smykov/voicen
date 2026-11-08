@@ -269,9 +269,14 @@ fn wry_app(dir: &Path, before_build: impl FnOnce(&SettingsService)) -> (App<Wry>
     // The release context: the app's real ACL (capabilities/call-indicator.json grants
     // `core:window:allow-start-dragging`; `mock_context` resolves an ACL that allows nothing,
     // so the drag region's `plugin:window|start_dragging` would be refused). Only the assets
-    // are swapped for the test page (tauri `Context::set_assets`).
+    // are swapped for the test page (tauri `Context::set_assets`). A debug test build
+    // compiles tauri without `custom-protocol` (cfg `dev`), so `WebviewUrl::App` would
+    // resolve to `build.devUrl` (http://localhost:1420), which nothing serves in CI; with
+    // `dev_url` cleared, tauri's `get_app_url` falls back to the tauri protocol
+    // (http://tauri.localhost on Windows), which serves the assets set here.
     let mut context: Context<Wry> = tauri::generate_context!(test = true);
     context.set_assets(Box::new(IndicatorPage));
+    context.config_mut().build.dev_url = None;
     context.config_mut().identifier = IDENTIFIER.to_string();
     let app = voicen_lib::build_app(
         tauri::Builder::default().any_thread(),
