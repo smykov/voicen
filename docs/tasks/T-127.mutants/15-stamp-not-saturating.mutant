@@ -1,0 +1,14 @@
+guarantee: First acceptance: stamp = exact ns, saturating
+file: src-tauri/src/win/track_capture.rs
+added_by: test-writer
+--- old
+unwrap_or(u64::MAX))
+}
+
+/// The open error
+--- new
+unwrap_or(0))
+}
+
+/// The open error
+--- end

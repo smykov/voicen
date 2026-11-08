@@ -1789,6 +1789,97 @@ fn a_lane_reads_no_more_windows_than_it_needs_for_the_chunks_in_flight() {
     );
 }
 
+/// The `next_window` calls a lone planner needs before it has cut `n` chunks of `src` with
+/// `spans`, asking like the pass (`TIMED_MAX_MS - carry_ms()`): the windows dispatch needs.
+fn windows_to_cut(src: Src, spans: &[(u64, u64)], n: usize) -> usize {
+    let primary = some(marked_primary(spans), "the primary");
+    let mut decoder = GenDecoder {
+        src,
+        pos: 0,
+        asks: Arc::new(Mutex::new(Vec::new())),
+    };
+    let mut planner = ChunkPlanner::new(PassMode::Timed);
+    let (mut at, mut cut, mut read) = (0u64, 0usize, 0usize);
+    while cut < n {
+        read += 1;
+        let ask = TIMED_MAX_MS.saturating_sub(planner.carry_ms()).max(1);
+        match ok(decoder.next_window(u32::try_from(ask).unwrap_or(u32::MAX))) {
+            Some(audio) if !audio.samples().is_empty() => {
+                let spans = ok(primary.speech_spans(&audio));
+                let len_ms = (audio.samples().len() / 16) as u64;
+                cut += planner.feed(at, &audio, &spans).len();
+                at += len_ms;
+            }
+            _ => {
+                cut += planner.finish().len();
+                break;
+            }
+        }
+    }
+    assert!(cut >= n, "the track has {cut} chunks, fewer than {n}");
+    read
+}
+
+/// Eight speech spans, one in each 120 s of a 960 s track: eight timed chunks, each decided
+/// only when the next span is seen, so a lane that reads ahead reads a window more.
+const EIGHT: [(u64, u64); 8] = [
+    (10_000, 90_000),
+    (130_000, 210_000),
+    (250_000, 330_000),
+    (370_000, 450_000),
+    (490_000, 570_000),
+    (610_000, 690_000),
+    (730_000, 810_000),
+    (850_000, 930_000),
+];
+
+#[test]
+fn a_lane_reads_no_window_ahead_of_the_chunks_it_has_dispatched() {
+    // Requests 0 and 1 are held, unanswered, until request 2 has counted the mic windows
+    // read: then all three chunks are dispatched, none is answered and the dispatcher waits
+    // for an answer, so the count is stable (no timing). It must equal the windows a lone
+    // planner needs to cut three chunks: one window per chunk need, none read ahead.
+    let need = windows_to_cut(Src::marked(0, 960_000), &EIGHT, 3);
+    let asks = Arc::new(Mutex::new(Vec::<u32>::new()));
+    let counted = Arc::new((Mutex::new(None::<usize>), Condvar::new()));
+    let (hook_asks, hook_counted) = (asks.clone(), counted.clone());
+    // In the answer, not in an `on_request` hook: the fake runs its hooks under one lock.
+    let engine = FakeEngine::new(true, move |r| {
+        let (slot, cv) = &*hook_counted;
+        let mut slot = lock(slot);
+        if r.n == 2 {
+            *slot = Some(lock(&hook_asks).len());
+            cv.notify_all();
+        } else {
+            // Bounded only so a broken pass cannot hang the suite; the count never waits on it.
+            slot = cv
+                .wait_timeout_while(slot, Duration::from_secs(30), |s| s.is_none())
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
+        drop(slot);
+        answer_ok(r)
+    });
+    let out = run_with(
+        Src::marked(0, 960_000),
+        Src::marked(1, 0),
+        engine,
+        Opts::new(marked_primary(&EIGHT)).mic_asks(asks.clone()),
+    );
+    assert_eq!(out.out.outcome, FinalOutcome::Ready);
+    let log = out.log();
+    assert_eq!(log.len(), EIGHT.len(), "one request per chunk: {log:?}");
+    let read = *some(lock(&counted.0).as_ref(), "the third request was counted");
+    assert_eq!(
+        read, need,
+        "{read} mic windows were read for 3 chunks in flight; cutting them needs {need}"
+    );
+    assert!(
+        lock(&asks).len() > need,
+        "the rest of the track is read later"
+    );
+}
+
 #[test]
 fn a_second_timeless_answer_does_not_requeue_a_chunk_already_sent_again() {
     // Chunks 0, 1 and 2 are in flight. Chunk 1 answers "no times" first (chunk 2 goes

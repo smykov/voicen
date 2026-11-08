@@ -1,0 +1,9 @@
+guarantee: AC5: at most one loss per stream
+file: src-tauri/src/win/track_capture.rs
+added_by: test-writer
+--- old
+            reported = true;
+            sink.lost(track, cause, qpc_now());
+--- new
+            sink.lost(track, cause, qpc_now());
+--- end

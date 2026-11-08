@@ -1,0 +1,12 @@
+guarantee: AC failure branch: a failed write leaves failed: storage (the failed transcribing meta write is logged but the pass sends requests anyway)
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: task-validator round 4 (sweep)
+--- old
+    if let Err(e) = write_meta(&dir, &meta) {
+        storage_failed(events, StorageKind::Meta, &e);
+--- new
+    if let Err(e) = write_meta(&dir, &meta) {
+        storage_failed(events, StorageKind::Meta, &e);
+    }
+    if false {
+--- end

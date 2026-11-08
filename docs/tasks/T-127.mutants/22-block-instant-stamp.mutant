@@ -1,0 +1,8 @@
+guarantee: AC5: stamps are cpal's QPC capture instant
+file: src-tauri/src/win/track_capture.rs
+added_by: test-writer
+--- old
+                stamp_of(info.timestamp().capture),
+--- new
+                stamp_of(info.timestamp().callback),
+--- end

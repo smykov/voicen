@@ -217,6 +217,15 @@ describe("exit codes of the spawned scripts", () => {
     expect(r.stderr).toContain("scripts/ui-unit-test.mjs (unit)");
   }, 100_000);
 
+  it("ui-test-select.mjs exits 1 when vitest list writes no list file (a line with no test), and runs nothing", () => {
+    // `vitest list --json=<out> <file>:999` fails with "No test found" and writes no file.
+    const r = spawn("./ui-test-select.mjs", [`${fixture}:999`], { VOICEN_FIXTURE_FAIL: "1" });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("selectors that match no test");
+    expect(r.stderr).toContain(`${fixture}:999 (unit)`);
+    expect(r.stdout + r.stderr).not.toContain("fails on purpose");
+  }, 100_000);
+
   it("ui-test-select.mjs exits 1 naming a missing file, and runs nothing", () => {
     const r = spawn("./ui-test-select.mjs", [fixture, "src/nope.test.ts"], { VOICEN_FIXTURE_FAIL: "1" });
     expect(r.status).toBe(1);
