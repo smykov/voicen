@@ -1047,39 +1047,65 @@ fn no_primary_detector_uses_energy_spans_and_logs_the_fallback_per_track() {
     assert!(log.iter().map(|r| r.len).sum::<u64>() >= 10_000);
 }
 
-/// 132 s of speech (two windows) on the mic track, nothing on the system track; the primary
-/// answers `first` for the first window and `Ok(vec![])` after that.
-fn primary_error_run(first: VadError) -> (Out, Arc<ScriptedSpans>) {
+/// 132 s of speech (two windows) on `track`, nothing on the other track; the primary answers
+/// `first` for the first window and `Ok(vec![])` after that.
+fn primary_error_run(track: Track, first: VadError) -> (Out, Arc<ScriptedSpans>) {
     let primary = Arc::new(ScriptedSpans::new(vec![Err(first)], Ok(Vec::new())));
+    let (speech, empty) = (Src::speech(132), Src::marked(0, 0));
+    let (mic, system) = if track == Track::System {
+        (empty, speech)
+    } else {
+        (speech, empty)
+    };
     let out = run_with(
-        Src::speech(132),
-        Src::marked(1, 0),
+        mic,
+        system,
         FakeEngine::new(false, |_| Ok(timed(vec![seg(0.0, 1.0, "x", None)]))),
         Opts::new(Some(primary.clone())),
     );
     (out, primary)
 }
 
-#[test]
-fn a_primary_error_gives_energy_spans_for_the_window_and_the_rest_of_the_track() {
-    let (out, primary) = primary_error_run(VadError::Failed);
+/// A primary `Err` on the first window of `track` (the other track empty): energy spans for
+/// that window and the rest of the track, never an empty span list.
+fn primary_error_falls_back(track: Track) {
+    let (out, primary) = primary_error_run(track, VadError::Failed);
     assert_eq!(out.out.outcome, FinalOutcome::Ready);
     assert_eq!(
         out.fallbacks(),
-        vec![(Track::Mic, VadFallbackCause::Error)],
+        vec![(track, VadFallbackCause::Error)],
         "one vad_fallback for the track"
     );
     assert_eq!(primary.calls(), 1, "the fallback is sticky for the track");
+    // The engine fake is unmarked here (the speech fixture): the other track is empty, so
+    // every request is of `track`, and its lines say so.
     let sent: u64 = out.log().iter().map(|r| r.len).sum();
     assert!(
         sent >= 60_000,
-        "the error is not an empty span list: {sent} ms sent"
+        "the error is not an empty span list: {sent} ms of {track:?} sent"
+    );
+    let t = some(out.transcript(), "transcript.json");
+    assert!(!t.segments.is_empty(), "the {track:?} speech is lined");
+    assert!(
+        t.segments.iter().all(|s| s.track == track.as_str()),
+        "every line is of the {track:?} track: {:?}",
+        lines(&t)
     );
 }
 
 #[test]
+fn a_primary_error_gives_energy_spans_for_the_window_and_the_rest_of_the_track() {
+    primary_error_falls_back(Track::Mic);
+}
+
+#[test]
+fn a_primary_error_on_the_system_track_gives_energy_spans_for_the_window_and_the_rest() {
+    primary_error_falls_back(Track::System);
+}
+
+#[test]
 fn an_unavailable_primary_on_a_window_logs_cause_unavailable() {
-    let (out, _) = primary_error_run(VadError::Unavailable);
+    let (out, _) = primary_error_run(Track::Mic, VadError::Unavailable);
     assert_eq!(out.out.outcome, FinalOutcome::Ready);
     assert_eq!(
         out.fallbacks(),
@@ -1976,4 +2002,141 @@ fn a_second_timeless_answer_does_not_requeue_a_chunk_already_sent_again() {
         sorted(want),
         "each stretch of speech is lined once"
     );
+}
+
+/// Mic speech, then system-only speech: chunk 0 of each track is cut from its own span, mic 0
+/// first in call time (seq 0), system 0 second (seq 1).
+const MIC_SPEECH: [(u64, u64); 1] = [(1_000, 50_000)];
+const SYSTEM_SPEECH: [(u64, u64); 1] = [(60_000, 110_000)];
+
+#[test]
+fn a_system_chunk_that_says_no_times_is_recut_on_the_system_track() {
+    flip_recut_stays_on_its_track(Track::System);
+}
+
+#[test]
+fn a_later_system_chunk_in_flight_when_a_mic_chunk_says_no_times_is_recut_on_the_system_track() {
+    flip_recut_stays_on_its_track(Track::Mic);
+}
+
+/// Both tracks have audio and speech of their own (`MIC_SPEECH`, `SYSTEM_SPEECH`). Chunk 0 of
+/// `flip` answers "no times"; chunk 0 of the other track is held, unanswered, until the first
+/// plain request arrives, so it is still in flight when the pass handles the flip (the pass
+/// sends a plain piece only after it has gone time-less: no timing). With `flip` = mic the
+/// held system chunk (seq 1) is later than the flip and goes time-less too; with `flip` =
+/// system the held mic chunk (seq 0) is earlier and keeps its times. Either way the system
+/// speech is re-cut as plain pieces of the system track, lined on the system track only.
+fn flip_recut_stays_on_its_track(flip: Track) {
+    let plain_seen = Arc::new((Mutex::new(false), Condvar::new()));
+    let hook = plain_seen.clone();
+    let engine = FakeEngine::new(true, move |r| {
+        let (seen, cv) = &*hook;
+        if r.shape == ResponseShape::Plain {
+            *lock(seen) = true;
+            cv.notify_all();
+            return answer_ok(r);
+        }
+        if r.track == flip {
+            return Err(TimedFailure::Timeless);
+        }
+        // Bounded only so a broken pass cannot hang the suite.
+        let _ = cv
+            .wait_timeout_while(lock(seen), Duration::from_secs(30), |s| !*s)
+            .unwrap_or_else(PoisonError::into_inner);
+        answer_ok(r)
+    });
+    let out = run_with(
+        Src::marked(0, 150_000),
+        Src::marked(1, 150_000),
+        engine,
+        Opts::new(Some(Arc::new(MarkedSpans {
+            mic: MIC_SPEECH.to_vec(),
+            system: SYSTEM_SPEECH.to_vec(),
+        }))),
+    );
+    assert_eq!(
+        out.out,
+        PassOutcome {
+            outcome: FinalOutcome::Ready,
+            mode: PassMode::Timeless
+        }
+    );
+    let log = out.log();
+    let timed_reqs = log
+        .iter()
+        .filter(|r| r.shape == ResponseShape::Segments)
+        .count();
+    assert_eq!(timed_reqs, 2, "one timed request per track: {log:?}");
+    let plain = |track: Track| -> Vec<&Req> {
+        log.iter()
+            .filter(|r| r.shape == ResponseShape::Plain && r.track == track)
+            .collect()
+    };
+    let (mic_plain, system_plain) = (plain(Track::Mic), plain(Track::System));
+    assert!(
+        system_plain.iter().all(|r| r.len <= TIMELESS_MAX_MS),
+        "{system_plain:?}"
+    );
+    assert_covered_once(&system_plain, &SYSTEM_SPEECH);
+    if flip == Track::Mic {
+        assert_covered_once(&mic_plain, &MIC_SPEECH);
+    } else {
+        assert!(mic_plain.is_empty(), "mic chunk 0 keeps its times: {log:?}");
+    }
+    assert!(
+        log.iter().all(|r| r.track == Track::System
+            || SYSTEM_SPEECH
+                .iter()
+                .all(|&(a, b)| r.start + r.len <= a || b <= r.start)),
+        "a mic request in the system-only speech: {log:?}"
+    );
+
+    let t = some(out.transcript(), "transcript.json");
+    ok(t.validate());
+    let mut want: Vec<Line> = mic_plain
+        .iter()
+        .chain(system_plain.iter())
+        .map(|r| {
+            line(
+                r.start,
+                r.start + r.len,
+                r.track,
+                &format!("p{}", r.start),
+                Some("de"),
+            )
+        })
+        .collect();
+    if flip == Track::System {
+        let mic0 = some(
+            log.iter()
+                .find(|r| r.shape == ResponseShape::Segments && r.track == Track::Mic),
+            "the timed mic request",
+        );
+        let at = mic0.start + 1_000;
+        want.push(line(at, at + 1_000, Track::Mic, &label(mic0), None));
+    }
+    assert_eq!(
+        lines(&t),
+        sorted(want),
+        "each track's lines from its own audio"
+    );
+    assert!(
+        !t.segments.iter().any(|s| s.track == "mic"
+            && SYSTEM_SPEECH
+                .iter()
+                .any(|&(a, b)| (s.start_ms as u64) < b && a < s.end_ms as u64)),
+        "a mic line in the system-only speech: {:?}",
+        lines(&t)
+    );
+    let meta = out.meta();
+    for (name, res) in [("mic", &meta.results.mic), ("system", &meta.results.system)] {
+        let own: Vec<SegmentV1> = t
+            .segments
+            .iter()
+            .filter(|s| s.track == name)
+            .cloned()
+            .collect();
+        assert!(!own.is_empty(), "{name} has lines");
+        assert_eq!(res, &TrackResult::Done { segments: own }, "{name} result");
+    }
 }
