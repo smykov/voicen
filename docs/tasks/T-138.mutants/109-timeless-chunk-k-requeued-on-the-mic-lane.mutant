@@ -1,0 +1,8 @@
+guarantee: AC 400 on chunk k (either track) makes chunk k and every later chunk time-less, lines span their chunks; invariant: each track's lines come from its own audio (chunk k is re-cut onto the mic lane whatever its track)
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: task-validator round 6 (sample)
+--- old
+        self.lane(sent.track).requeue(&sent.work.chunk);
+--- new
+        self.lane(Track::Mic).requeue(&sent.work.chunk);
+--- end

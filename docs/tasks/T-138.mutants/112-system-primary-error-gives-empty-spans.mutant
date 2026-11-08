@@ -1,0 +1,9 @@
+guarantee: AC a primary Err never becomes empty spans or dropped audio (mutant 10 on the system lane only)
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: task-validator round 6 (sample)
+--- old
+                        Err(_) => VadFallbackCause::Error,
+--- new
+                        Err(_) if self.track == Track::System => return Vec::new(),
+                        Err(_) => VadFallbackCause::Error,
+--- end
