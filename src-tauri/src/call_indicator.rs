@@ -15,8 +15,9 @@
 //!   `Destroyed` is learned from the window's own event, tagged with its build generation.
 //! - The window is built hidden with `focused(false)`, `focusable(false)` (`WS_EX_NOACTIVATE`),
 //!   `always_on_top`, `decorations(false)`, `resizable(false)` and `shadow(false)`.
-//!   [`show_without_activation`], on the indicator thread, then sets `WS_EX_TOOLWINDOW` (and
-//!   `WS_EX_NOACTIVATE`), clears `WS_EX_APPWINDOW`, moves it to its clamped position with
+//!   [`show_without_activation`], on the indicator thread, then clears `WS_CAPTION` and
+//!   `WS_THICKFRAME` (tao keeps the caption bit on undecorated windows), sets
+//!   `WS_EX_TOOLWINDOW` (and `WS_EX_NOACTIVATE`), clears `WS_EX_APPWINDOW`, moves it to its clamped position with
 //!   `SetWindowPos(SWP_FRAMECHANGED | SWP_NOACTIVATE)` and shows it with one
 //!   `ShowWindow(SW_SHOWNOACTIVATE)`: the only place that shows it. No tao setter touches it
 //!   afterwards (tao would rewrite the style from its own flags and re-show it). It takes
@@ -590,9 +591,11 @@ impl<R: Runtime> IndicatorThread<R> {
 /// `position` (physical pixels; `None`: where it is), then shows it without activating it
 /// (ADR-007 variant N). Runs on the indicator thread and makes no tao call:
 ///
-/// 1. reads `GWL_EXSTYLE`, ORs in `WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE` and clears
+/// 1. reads `GWL_STYLE` and clears `WS_CAPTION | WS_THICKFRAME` (tao keeps `WS_CAPTION` on
+///    an undecorated top-level window and only hides the frame in `WM_NCCALCSIZE`), then
+///    reads `GWL_EXSTYLE`, ORs in `WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE` and clears
 ///    `WS_EX_APPWINDOW` (the creation's `WS_EX_TOPMOST` stays; no click-through bits);
-/// 2. writes it with `SetWindowLongPtrW`, the last error cleared before and read after;
+/// 2. writes each with `SetWindowLongPtrW`, the last error cleared before and read after;
 /// 3. applies it with `SetWindowPos(SWP_FRAMECHANGED | SWP_NOACTIVATE | SWP_NOSIZE |
 ///    SWP_NOZORDER)` at `position` (`SWP_NOMOVE` without one);
 /// 4. shows it with `ShowWindow(SW_SHOWNOACTIVATE)`.
@@ -609,8 +612,9 @@ pub fn show_without_activation(
     use windows::Win32::Foundation::{GetLastError, SetLastError, WIN32_ERROR};
     use windows::Win32::UI::WindowsAndMessaging::{
         GetWindowLongPtrW, IsWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow, GWL_EXSTYLE,
-        SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_SHOWNOACTIVATE,
-        WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+        GWL_STYLE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+        SW_SHOWNOACTIVATE, WINDOW_LONG_PTR_INDEX, WS_CAPTION, WS_EX_APPWINDOW, WS_EX_NOACTIVATE,
+        WS_EX_TOOLWINDOW, WS_THICKFRAME,
     };
 
     fn last_error() -> Option<i32> {
@@ -626,31 +630,54 @@ pub fn show_without_activation(
             .filter(|code| *code != 0)
     }
 
-    fn restyle(
+    /// Reads the `index` style long of `hwnd`, ORs in `add`, clears `clear` and writes it
+    /// back; the last error is cleared before each call and read after a 0 return.
+    fn rewrite(
         hwnd: windows::Win32::Foundation::HWND,
-        position: Option<IndicatorPosition>,
+        index: WINDOW_LONG_PTR_INDEX,
+        add: isize,
+        clear: isize,
     ) -> Result<(), Option<i32>> {
         // SAFETY: clears the calling thread's last error.
         unsafe { SetLastError(WIN32_ERROR(0)) };
         // SAFETY: any handle; a stale one returns 0 with the last error set.
-        let style = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) };
+        let style = unsafe { GetWindowLongPtrW(hwnd, index) };
         if style == 0 {
             if let Some(code) = last_error() {
                 return Err(Some(code));
             }
         }
-        let add = (WS_EX_TOOLWINDOW.0 | WS_EX_NOACTIVATE.0) as isize;
-        let clear = WS_EX_APPWINDOW.0 as isize;
         let wanted = (style | add) & !clear;
         // SAFETY: clears the calling thread's last error.
         unsafe { SetLastError(WIN32_ERROR(0)) };
         // SAFETY: any handle; a failure returns 0 with the last error set.
-        let previous = unsafe { SetWindowLongPtrW(hwnd, GWL_EXSTYLE, wanted) };
+        let previous = unsafe { SetWindowLongPtrW(hwnd, index, wanted) };
         if previous == 0 {
             if let Some(code) = last_error() {
                 return Err(Some(code));
             }
         }
+        Ok(())
+    }
+
+    fn restyle(
+        hwnd: windows::Win32::Foundation::HWND,
+        position: Option<IndicatorPosition>,
+    ) -> Result<(), Option<i32>> {
+        // tao keeps `WS_CAPTION` on an undecorated top-level window (it only hides the frame
+        // in WM_NCCALCSIZE), so the frame bits are cleared here, raw.
+        rewrite(
+            hwnd,
+            GWL_STYLE,
+            0,
+            (WS_CAPTION.0 | WS_THICKFRAME.0) as isize,
+        )?;
+        rewrite(
+            hwnd,
+            GWL_EXSTYLE,
+            (WS_EX_TOOLWINDOW.0 | WS_EX_NOACTIVATE.0) as isize,
+            WS_EX_APPWINDOW.0 as isize,
+        )?;
         let mut flags = SWP_FRAMECHANGED | SWP_NOACTIVATE | SWP_NOSIZE | SWP_NOZORDER;
         let (x, y) = match position {
             Some(p) => (p.x, p.y),
