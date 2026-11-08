@@ -1,0 +1,8 @@
+guarantee: AC failure branch: a failed write leaves failed: storage (meta.json state failed, failure storage) and no partial file
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: task-validator round 7 (sweep)
+--- old
+        let _ = write_failed(dir, meta, FailReason::Storage, None, mode, events);
+--- new
+        let _ = meta;
+--- end

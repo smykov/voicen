@@ -1,0 +1,8 @@
+guarantee: -
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: task-validator round 7 (sweep)
+--- old
+                system: failed,
+--- new
+                system: { let _ = failed; TrackResult::Pending },
+--- end

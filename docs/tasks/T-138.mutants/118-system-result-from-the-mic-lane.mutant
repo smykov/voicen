@@ -1,0 +1,8 @@
+guarantee: AC failure branch: per-track results are kept in meta.json results (results.system is the mic lane's result)
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: task-validator round 7 (sweep)
+--- old
+        system: result_of(&run.system),
+--- new
+        system: result_of(&run.mic),
+--- end

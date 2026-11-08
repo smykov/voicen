@@ -1,0 +1,8 @@
+guarantee: AC language: per-segment, per-request and missing language give en, the request value and null (a timed answer's segments, and their language, are dropped)
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: task-validator round 7 (sweep)
+--- old
+                    ResponseShape::Segments => a.timed.segments.clone(),
+--- new
+                    ResponseShape::Segments => None,
+--- end

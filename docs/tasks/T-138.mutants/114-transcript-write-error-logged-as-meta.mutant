@@ -1,0 +1,8 @@
+guarantee: -
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: task-validator round 7 (sweep)
+--- old
+            storage_failed(events, StorageKind::Transcript, &e);
+--- new
+            storage_failed(events, StorageKind::Meta, &e);
+--- end

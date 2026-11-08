@@ -1,0 +1,8 @@
+guarantee: AC per-track results: each track is transcribed from its own file (the system lane decodes the mic file)
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: task-validator round 7 (sweep)
+--- old
+        system: open_track(&call, Track::System),
+--- new
+        system: open_track(&call, Track::Mic),
+--- end
