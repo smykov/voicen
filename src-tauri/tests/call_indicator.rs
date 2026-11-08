@@ -46,7 +46,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use tauri::ipc::{CallbackFn, InvokeBody};
-use tauri::test::{get_ipc_response, mock_builder, mock_context, MockRuntime};
+use tauri::test::{get_ipc_response, mock_builder, MockRuntime};
 use tauri::utils::assets::{AssetKey, AssetsIter, CspHash};
 use tauri::webview::InvokeRequest;
 use tauri::{App, AppHandle, Assets, Context, Listener, Manager, RunEvent, Url, Wry};
@@ -230,7 +230,12 @@ fn wry_app(dir: &Path, before_build: impl FnOnce(&SettingsService)) -> (App<Wry>
         "premise: {outcome:?}"
     );
     before_build(&service);
-    let mut context: Context<Wry> = mock_context(IndicatorPage);
+    // The release context: the app's real ACL (capabilities/call-indicator.json grants
+    // `core:window:allow-start-dragging`; `mock_context` resolves an ACL that allows nothing,
+    // so the drag region's `plugin:window|start_dragging` would be refused). Only the assets
+    // are swapped for the test page (tauri `Context::set_assets`).
+    let mut context: Context<Wry> = tauri::generate_context!(test = true);
+    context.set_assets(Box::new(IndicatorPage));
     context.config_mut().identifier = IDENTIFIER.to_string();
     let app = voicen_lib::build_app(
         tauri::Builder::default().any_thread(),
@@ -1055,10 +1060,9 @@ fn dragging_the_drag_region_moves_the_window_and_the_target_keeps_the_foreground
     // a SendInput press on the `data-tauri-drag-region` zone, a move of 80 px and a release
     // move the window's rectangle by about that much (tauri's drag.js ->
     // plugin:window|start_dragging -> tao drag_window), and the target keeps the foreground at
-    // every sample. NOTE for the developer: this harness uses `mock_context`, whose ACL may
-    // refuse `core:window:allow-start-dragging`; if the page's drag cannot reach tao here, the
-    // test cannot carry the capability and S5 becomes the owner's check only (record it in the
-    // task, T-130 Investigation S5). The capability itself is pinned by `app_acl.rs`. Bite: a
+    // every sample. NOTE for the developer: this harness (`wry_app`) runs on the release context, so
+    // the real ACL (`core:window:allow-start-dragging`) carries the page's drag to tao; only the
+    // assets are the test page. The capability itself is pinned by `app_acl.rs`. Bite: a
     // page without the drag region, a missing `allow-start-dragging` grant, a window that
     // activates when dragged (foreground lost).
     let _serial = serial();
