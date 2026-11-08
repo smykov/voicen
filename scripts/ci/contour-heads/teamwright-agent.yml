@@ -1,0 +1,45 @@
+# T-202 (decisions #249, #253): the contour's stage job. One stage of one voicen task in one
+# headless Claude session on the self-hosted runner, started by teamwright-next.yml, which it
+# starts again at its end. The header, line 1 to the job map, is the owned copy
+# scripts/ci/contour-heads/teamwright-agent.yml (make check, check-release-guard, R14): one
+# owner-only trigger, one stage at a time, the write scopes. The session never pushes: the push
+# step after it does, with the hooks installed (docs/decisions/ci-toolchain.md).
+name: teamwright agent
+# The dispatcher finds a running stage of a task by this title.
+run-name: "teamwright agent ${{ inputs.task_id }} ${{ inputs.stage }} (hop ${{ inputs.hop }})"
+
+on:
+  workflow_dispatch:
+    inputs:
+      task_id:
+        description: "Task, e.g. T-202"
+        required: true
+      stage:
+        description: "The stage"
+        type: choice
+        required: true
+        options: [analyze, red-tests, implement, review]
+      model:
+        description: "Claude model of the stage"
+        required: true
+        default: opus
+      hop:
+        description: "Chain step (set by the dispatcher)"
+        required: false
+        default: "1"
+      issue:
+        description: "Issue for reports (empty: no reports)"
+        required: false
+        default: ""
+
+# One stage at a time in the repository (one runner). GitHub keeps one pending run per group: the
+# dispatcher starts a stage only when no stage of another task runs.
+concurrency:
+  group: teamwright-agent
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  issues: write
+  actions: write
+jobs:

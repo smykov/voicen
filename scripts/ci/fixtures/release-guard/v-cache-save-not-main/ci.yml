@@ -1,15 +1,15 @@
 name: CI
 
 on:
-  # wip/** (T-066, P-016, decisions #90): the orchestrator's CI-only push of a task's head
-  # (git push origin HEAD:wip/<ID>; pre-push: not a delivery) runs this whole workflow before
-  # review, so a premise only CI can run is never first run on main. Pinned by make check
-  # (check-ci-wip).
+  # wip/** (T-066, P-016, decisions #90; check-ci-wip): a task's CI-only head push (pre-push: not
+  # a delivery) runs this workflow before review; workflow_dispatch (T-202, #253) lets the contour
+  # start that run (a job-token push starts none); release, upload and Telegram stay push-only.
   push:
     branches: [main, "wip/**"]
     tags: ["v*"]
     paths-ignore: ["docs/tasks/**"]
   pull_request:
+  workflow_dispatch:
 
 # A newer push to the same wip/<ID> cancels the run of the older head (P-016 counts only the
 # reviewed head). Other refs (main, tags, pull requests) get a group per run: a shared group

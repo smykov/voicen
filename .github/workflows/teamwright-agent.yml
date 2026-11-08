@@ -1,0 +1,252 @@
+# T-202 (decisions #249, #253): the contour's stage job. One stage of one voicen task in one
+# headless Claude session on the self-hosted runner, started by teamwright-next.yml, which it
+# starts again at its end. The header, line 1 to the job map, is the owned copy
+# scripts/ci/contour-heads/teamwright-agent.yml (make check, check-release-guard, R14): one
+# owner-only trigger, one stage at a time, the write scopes. The session never pushes: the push
+# step after it does, with the hooks installed (docs/decisions/ci-toolchain.md).
+name: teamwright agent
+# The dispatcher finds a running stage of a task by this title.
+run-name: "teamwright agent ${{ inputs.task_id }} ${{ inputs.stage }} (hop ${{ inputs.hop }})"
+
+on:
+  workflow_dispatch:
+    inputs:
+      task_id:
+        description: "Task, e.g. T-202"
+        required: true
+      stage:
+        description: "The stage"
+        type: choice
+        required: true
+        options: [analyze, red-tests, implement, review]
+      model:
+        description: "Claude model of the stage"
+        required: true
+        default: opus
+      hop:
+        description: "Chain step (set by the dispatcher)"
+        required: false
+        default: "1"
+      issue:
+        description: "Issue for reports (empty: no reports)"
+        required: false
+        default: ""
+
+# One stage at a time in the repository (one runner). GitHub keeps one pending run per group: the
+# dispatcher starts a stage only when no stage of another task runs.
+concurrency:
+  group: teamwright-agent
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  issues: write
+  actions: write
+jobs:
+  agent:
+    # Only the owner, or the contour itself (the job token acts as github-actions[bot]).
+    if: github.actor == github.repository_owner || github.actor == 'github-actions[bot]'
+    runs-on: [self-hosted, Linux, X64, claude]
+    timeout-minutes: 330
+    env:
+      TASK_ID: ${{ inputs.task_id }}
+      STAGE: ${{ inputs.stage }}
+      MODEL: ${{ inputs.model }}
+      HOP: ${{ inputs.hop }}
+      ISSUE: ${{ inputs.issue }}
+      REPO: ${{ github.repository }}
+      MAIN: ${{ github.event.repository.default_branch }}
+      RUN_ID: ${{ github.run_id }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      RUNS_DIR: /srv/gha-voicen-runs
+      OUT: .teamwright-agent
+      # The kit at the version .teamwright/installed.json names (0.16.2), checked below.
+      KIT_SHA: bc8133f129b061868e605e6d00cf7e7b96dd2fdb
+      # A background subagent dies with a headless session whose turn ended: foreground only.
+      CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1"
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: The task fits this stage
+        env:
+          AUTH_VAR: ${{ vars.TEAMWRIGHT_AUTH }}
+          OAUTH_SET: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
+        run: |
+          set -euo pipefail
+          [ "${AUTH_VAR:-}" = subscription ] || { echo "::error::repository variable TEAMWRIGHT_AUTH is not 'subscription', the only mode of this contour"; exit 1; }
+          [ "$OAUTH_SET" = true ] || { echo "::error::the repository has no CLAUDE_CODE_OAUTH_TOKEN"; exit 1; }
+          [[ "$TASK_ID" =~ ^T-[0-9]{3,}$ ]] || { echo "::error::task_id must look like T-202"; exit 1; }
+          [[ "$MODEL" =~ ^[a-z0-9][a-z0-9.-]*$ ]] || { echo "::error::bad model name"; exit 1; }
+          [[ "$HOP" =~ ^[0-9]+$ ]] || { echo "::error::bad hop"; exit 1; }
+          [[ "$ISSUE" =~ ^[0-9]*$ ]] || { echo "::error::bad issue number"; exit 1; }
+          case "$STAGE" in
+            analyze) ok="TODO|ANALYSIS|VERIFY_FAIL" ;;
+            red-tests | implement) ok="IN_PROGRESS" ;;
+            review) ok="NEEDS_REVIEW" ;;
+            *) echo "::error::unknown stage"; exit 1 ;;
+          esac
+          ref=HEAD
+          if git ls-remote --exit-code --heads origin "task/$TASK_ID" >/dev/null; then
+            git fetch -q origin "task/$TASK_ID"
+            ref=FETCH_HEAD
+          fi
+          rec="$(git show "$ref:docs/tasks/$TASK_ID.md")" || { echo "::error::no docs/tasks/$TASK_ID.md"; exit 1; }
+          status="$(sed -n 's/^status:[[:space:]]*//p' <<<"$rec" | head -n 1)"
+          [[ "$status" =~ ^($ok)$ ]] || { echo "::error::$TASK_ID is $status, not for stage $STAGE"; exit 1; }
+          echo "START_STATUS=$status" >> "$GITHUB_ENV"
+          echo "$TASK_ID: status $status, stage $STAGE"
+
+      - name: Task branch, git hooks, the kit
+        run: |
+          set -euo pipefail
+          git config user.name "teamwright-agent"
+          git config user.email "teamwright-agent@users.noreply.github.com"
+          branch="task/$TASK_ID"
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null; then
+            git fetch -q origin "$branch"
+            git checkout -q -B "$branch" FETCH_HEAD
+          else
+            git checkout -q -b "$branch"
+          fi
+          echo "BRANCH=$branch" >> "$GITHUB_ENV"
+          echo "BEFORE_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          # core.hooksPath is local config a checkout does not bring: without it the session's
+          # commits pass no gate and a push no pause check.
+          bash scripts/install-hooks.sh
+          bash scripts/install-hooks.sh --check
+          git init -q "$RUNNER_TEMP/teamwright"
+          git -C "$RUNNER_TEMP/teamwright" fetch -q --depth 1 https://github.com/smykov/teamwright.git "$KIT_SHA"
+          git -C "$RUNNER_TEMP/teamwright" checkout -q FETCH_HEAD
+          want="$(jq -r '."@kit".version' .teamwright/installed.json)"
+          got="$(jq -r .version "$RUNNER_TEMP/teamwright/.claude-plugin/plugin.json")"
+          [ "$want" = "$got" ] || { echo "::error::KIT_SHA is kit $got, .teamwright/installed.json wants $want"; exit 1; }
+          echo "TEAMWRIGHT_PLUGIN_DIR=$RUNNER_TEMP/teamwright" >> "$GITHUB_ENV"
+          mkdir -p "$OUT"
+          echo "$OUT/" >> .git/info/exclude
+
+      - name: MCP servers and toolchain images
+        id: preflight
+        run: |
+          set -uo pipefail
+          if command -v serena >/dev/null 2>&1; then
+            jq '{mcpServers: (.mcpServers | {serena, context7})}' .mcp.json > "$RUNNER_TEMP/mcp.json"
+          else
+            echo "::warning::no serena on the runner: the session falls back to grep"
+            jq '{mcpServers: (.mcpServers | {context7})}' .mcp.json > "$RUNNER_TEMP/mcp.json"
+          fi
+          docker info >/dev/null 2>&1 || { echo "No access to Docker on the runner" > "$OUT/preflight.md"; exit 1; }
+          # Rust and the UI run only in these images (CLAUDE.md); a missing one is built here.
+          for pair in core=voicen-rust:1.99 ui=voicen-ui:1.63.0; do
+            docker image inspect "${pair#*=}" >/dev/null 2>&1 && continue
+            if ! timeout 2700 make "${pair%%=*}-image" > "$OUT/image-${pair%%=*}.log" 2>&1; then
+              echo "The image ${pair#*=} was missing and make ${pair%%=*}-image failed ($OUT/image-${pair%%=*}.log on the runner)" > "$OUT/preflight.md"
+              exit 1
+            fi
+          done
+          if command -v pnpm >/dev/null 2>&1; then
+            timeout 900 pnpm install --frozen-lockfile > "$OUT/pnpm.log" 2>&1 || { echo "pnpm install failed ($OUT/pnpm.log on the runner)" > "$OUT/preflight.md"; exit 1; }
+          else
+            echo "::warning::no pnpm on the runner: the ui area cannot run here"
+          fi
+
+      - name: The stage
+        id: claude
+        timeout-minutes: 240
+        env:
+          # The only secret of the contour; the session reads it from its environment.
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          SYSTEM_PROMPT: >-
+            AUTONOMOUS RUN, NO OWNER IN THIS SESSION. Work only on the task of the prompt, nothing
+            else. Never call AskUserQuestion. Run every role agent in the foreground and act on its
+            result in the same session; this session ends when your turn ends. When the process
+            needs the owner (a decision point, an unclear requirement, a missing tool or access),
+            write the question(s), with your recommended option, to .teamwright-agent/questions.md,
+            commit nothing else for it, and stop with Outcome: escalate. Run only the stage command
+            you were given, then stop with its Outcome. Do not push, do not deploy, do not merge:
+            the workflow pushes task/<ID> (and wip/<ID> after implement) and the dispatcher starts
+            the ci.yml run of wip/<ID>. Do not edit .github/. The task record docs/tasks/<ID>.md is
+            the only source of the task.
+        run: |
+          set -euo pipefail
+          # The Claude Code CLI of the runner host (no third-party action in the job).
+          command -v claude >/dev/null 2>&1 || { echo "No claude CLI on the runner" > "$OUT/preflight.md"; exit 1; }
+          claude -p "/teamwright:$STAGE $TASK_ID" --model "$MODEL" --max-turns 200 --plugin-dir "$TEAMWRIGHT_PLUGIN_DIR" --mcp-config "$RUNNER_TEMP/mcp.json" --strict-mcp-config --permission-mode acceptEdits --allowedTools "Bash,Read,Edit,Write,Glob,Grep,Agent,Task,TodoWrite,Skill,mcp__serena,mcp__context7" --append-system-prompt "$SYSTEM_PROMPT" --output-format stream-json --verbose > "$OUT/session.jsonl"
+          echo "The session ended; its stream is in $OUT/session.jsonl on the runner."
+
+      - name: Did the stage commit?
+        id: commits
+        if: always() && steps.claude.outcome == 'success'
+        run: echo "count=$(git rev-list --count "$BEFORE_SHA..HEAD")" >> "$GITHUB_OUTPUT"
+
+      - name: Push task/<ID>, and wip/<ID> after implement
+        if: always() && steps.claude.outcome == 'success' && steps.commits.outputs.count != '0'
+        timeout-minutes: 30
+        env:
+          # decisions #253 (OQ-79 a): a contour push of task/<ID> or wip/<ID> is not a delivery,
+          # so pre-push skips DRAIN for it; its pause check runs first all the same. This step only.
+          TEAMWRIGHT_WIP_REFS_RE: '^refs/heads/(wip|task)/'
+        run: |
+          set -euo pipefail
+          # Again after the session, right before the push: pre-push and its pause check exist.
+          bash scripts/install-hooks.sh
+          bash scripts/install-hooks.sh --check
+          git push origin "HEAD:refs/heads/$BRANCH"
+          if [ "$STAGE" = implement ]; then
+            git push --force origin "HEAD:refs/heads/wip/$TASK_ID"
+          fi
+          echo "PUSHED=1" >> "$GITHUB_ENV"
+
+      - name: "Chain: the next stage"
+        if: always() && steps.claude.outcome == 'success'
+        shell: bash {0}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMMITS: ${{ steps.commits.outputs.count }}
+        run: |
+          say() {
+            echo "$1" >> "$GITHUB_STEP_SUMMARY"
+            [ -z "$ISSUE" ] || gh issue comment "$ISSUE" -R "$REPO" --body "$1" >/dev/null || echo "::warning::no comment on Issue #$ISSUE"
+          }
+          if [ -f "$OUT/questions.md" ]; then
+            say "**$TASK_ID**: chain stopped after $STAGE: questions for the owner in $RUN_URL (step summary)."
+            { echo; echo "**Questions for the owner:**"; cat "$OUT/questions.md"; } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if [ "${COMMITS:-0}" = 0 ]; then
+            say "**$TASK_ID**: chain stopped: stage $STAGE made no commit. $RUN_URL"
+            exit 0
+          fi
+          if [ "${PUSHED:-}" != 1 ]; then
+            say "**$TASK_ID**: chain stopped: task/$TASK_ID was not pushed (a pause, or pre-push refused). $RUN_URL"
+            exit 1
+          fi
+          gh workflow run teamwright-next.yml -R "$REPO" --ref "$MAIN" -f task_id="$TASK_ID" -f hop="$HOP" -f prev_stage="$STAGE" -f prev_status="${START_STATUS:-}" -f issue="$ISSUE" || { say "**$TASK_ID**: the dispatcher was not started. $RUN_URL"; exit 1; }
+          exit 0
+
+      - name: "Chain: the stage failed"
+        if: failure() || steps.claude.outcome != 'success'
+        shell: bash {0}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          msg="**$TASK_ID**: stage $STAGE failed: $RUN_URL. To continue, start teamwright-next.yml for $TASK_ID by hand."
+          [ ! -f "$OUT/preflight.md" ] || msg="$msg $(cat "$OUT/preflight.md")"
+          echo "$msg" >> "$GITHUB_STEP_SUMMARY"
+          [ -z "$ISSUE" ] || gh issue comment "$ISSUE" -R "$REPO" --body "$msg" >/dev/null || true
+          exit 0
+
+      - name: Keep the session for analysis
+        if: always()
+        shell: bash {0}
+        run: |
+          # The journal and the session transcripts go to the run directory of the runner host.
+          [ -d "$RUNS_DIR" ] || exit 0
+          dest="$RUNS_DIR/$RUN_ID"
+          mkdir -p "$dest"
+          cp -r .teamwright/logs "$dest/" 2>/dev/null
+          cp -r "$OUT" "$dest/agent" 2>/dev/null
+          cp -r "$HOME/.claude/projects" "$dest/" 2>/dev/null
+          git log --format='%H %an %aI %s' "origin/$MAIN..HEAD" > "$dest/commits.txt" 2>/dev/null
+          exit 0

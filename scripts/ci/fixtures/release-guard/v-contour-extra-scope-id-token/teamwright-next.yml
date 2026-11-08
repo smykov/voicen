@@ -1,18 +1,46 @@
-name: Teamwright next
+# T-202 (decisions #249, #253): the contour's dispatcher. It reads the task record on task/<ID>,
+# picks the next stage and starts teamwright-agent.yml for it; after implement it starts the
+# P-016 run of ci.yml on wip/<ID> (a push with the job token starts no run); at CODE_COMPLETE it
+# opens the pull request of task/<ID>. The header, line 1 to the job map, is the owned copy
+# scripts/ci/contour-heads/teamwright-next.yml (make check, check-release-guard, R14). It runs
+# no session and pushes nothing (docs/decisions/ci-toolchain.md).
+name: teamwright next
+run-name: "teamwright next ${{ inputs.task_id }} (hop ${{ inputs.hop }})"
 
 on:
   workflow_dispatch:
+    inputs:
+      task_id:
+        description: "Task, e.g. T-202"
+        required: true
+      hop:
+        description: "Chain step of the stage that ended (0: start)"
+        required: false
+        default: "0"
+      prev_stage:
+        description: "The stage that ended (empty: start)"
+        required: false
+        default: ""
+      prev_status:
+        description: "Task status before that stage"
+        required: false
+        default: ""
+      issue:
+        description: "Issue for reports (empty: no reports)"
+        required: false
+        default: ""
 
+# One dispatch of a task at a time; the stage job has its own group.
 concurrency:
   group: teamwright-next
   cancel-in-progress: false
 
 permissions:
-  contents: write
+  contents: read
   issues: write
   actions: write
-  id-token: write
   pull-requests: write
+  id-token: write
 jobs:
   next:
     runs-on: [self-hosted, Linux, X64, claude]

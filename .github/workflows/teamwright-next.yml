@@ -1,0 +1,130 @@
+# T-202 (decisions #249, #253): the contour's dispatcher. It reads the task record on task/<ID>,
+# picks the next stage and starts teamwright-agent.yml for it; after implement it starts the
+# P-016 run of ci.yml on wip/<ID> (a push with the job token starts no run); at CODE_COMPLETE it
+# opens the pull request of task/<ID>. The header, line 1 to the job map, is the owned copy
+# scripts/ci/contour-heads/teamwright-next.yml (make check, check-release-guard, R14). It runs
+# no session and pushes nothing (docs/decisions/ci-toolchain.md).
+name: teamwright next
+run-name: "teamwright next ${{ inputs.task_id }} (hop ${{ inputs.hop }})"
+
+on:
+  workflow_dispatch:
+    inputs:
+      task_id:
+        description: "Task, e.g. T-202"
+        required: true
+      hop:
+        description: "Chain step of the stage that ended (0: start)"
+        required: false
+        default: "0"
+      prev_stage:
+        description: "The stage that ended (empty: start)"
+        required: false
+        default: ""
+      prev_status:
+        description: "Task status before that stage"
+        required: false
+        default: ""
+      issue:
+        description: "Issue for reports (empty: no reports)"
+        required: false
+        default: ""
+
+# One dispatch of a task at a time; the stage job has its own group.
+concurrency:
+  group: teamwright-next
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: write
+  actions: write
+  pull-requests: write
+jobs:
+  next:
+    if: github.actor == github.repository_owner || github.actor == 'github-actions[bot]'
+    runs-on: [self-hosted, Linux, X64, claude]
+    timeout-minutes: 15
+    env:
+      TASK_ID: ${{ inputs.task_id }}
+      HOP: ${{ inputs.hop }}
+      PREV_STAGE: ${{ inputs.prev_stage }}
+      PREV_STATUS: ${{ inputs.prev_status }}
+      ISSUE: ${{ inputs.issue }}
+      REPO: ${{ github.repository }}
+      MAIN: ${{ github.event.repository.default_branch }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      GH_TOKEN: ${{ github.token }}
+      # Stages of one chain at most; the stop when nothing moved comes first.
+      MAX_HOPS: "12"
+      MODEL: opus
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Next stage
+        shell: bash {0}
+        env:
+          AUTH_VAR: ${{ vars.TEAMWRIGHT_AUTH }}
+        run: |
+          set -uo pipefail
+          say() {
+            echo "$1" >> "$GITHUB_STEP_SUMMARY"
+            [ -z "$ISSUE" ] || gh issue comment "$ISSUE" -R "$REPO" --body "$1" >/dev/null || echo "::warning::no comment on Issue #$ISSUE"
+          }
+          [ "${AUTH_VAR:-}" = subscription ] || { echo "::error::repository variable TEAMWRIGHT_AUTH is not 'subscription'"; exit 1; }
+          [[ "$TASK_ID" =~ ^T-[0-9]{3,}$ ]] || { echo "::error::task_id must look like T-202"; exit 1; }
+          [[ "$HOP" =~ ^[0-9]+$ ]] || { echo "::error::bad hop"; exit 1; }
+          [[ "$ISSUE" =~ ^[0-9]*$ ]] || { echo "::error::bad issue number"; exit 1; }
+          case "$PREV_STAGE" in "" | analyze | red-tests | implement | review) ;; *) echo "::error::bad prev_stage"; exit 1 ;; esac
+
+          # One task at a time: an unfinished stage of another task stops this dispatch; the
+          # stage of this task that started it may still be ending (up to 3 minutes).
+          for i in $(seq 1 18); do
+            busy="$(gh run list -R "$REPO" --workflow teamwright-agent.yml --limit 50 --json status,displayTitle | jq -r --arg t "teamwright agent $TASK_ID " '[.[] | select(.status != "completed")] | map(if (.displayTitle | startswith($t)) then "own" else "other" end) | unique | join(",")')" || { say "**$TASK_ID**: the stage runs were not readable. $RUN_URL"; exit 1; }
+            case "$busy" in
+              *other*) say "**$TASK_ID**: chain stopped: a stage of another task runs (one task at a time). $RUN_URL"; exit 0 ;;
+              own) sleep 10 ;;
+              *) break ;;
+            esac
+          done
+          [ "$busy" != own ] || { say "**$TASK_ID**: chain stopped: its previous stage did not end. $RUN_URL"; exit 1; }
+
+          ref="origin/$MAIN"
+          if git ls-remote --exit-code --heads origin "task/$TASK_ID" >/dev/null; then
+            git fetch -q origin "task/$TASK_ID" && ref=FETCH_HEAD
+          fi
+          rec="$(git show "$ref:docs/tasks/$TASK_ID.md")" || { say "**$TASK_ID**: no task record. $RUN_URL"; exit 1; }
+          status="$(sed -n 's/^status:[[:space:]]*//p' <<<"$rec" | head -n 1)"
+          recstage="$(sed -n 's/^stage:[[:space:]]*//p' <<<"$rec" | head -n 1)"
+
+          # The P-016 run of the implemented code: a push with the job token starts no run.
+          if [ "$PREV_STAGE" = implement ]; then
+            gh workflow run ci.yml -R "$REPO" --ref "wip/$TASK_ID" || say "**$TASK_ID**: the ci.yml run of wip/$TASK_ID was not started. $RUN_URL"
+          fi
+
+          case "$status" in
+            TODO | ANALYSIS | VERIFY_FAIL) next=analyze ;;
+            IN_PROGRESS)
+              case "$recstage" in red-tests | implement) next="$recstage" ;; *) next=red-tests ;; esac ;;
+            NEEDS_REVIEW) next=review ;;
+            CODE_COMPLETE | VERIFIED | DONE)
+              gh workflow run ci.yml -R "$REPO" --ref "task/$TASK_ID" || true
+              pr="$(gh pr create -R "$REPO" --base "$MAIN" --head "task/$TASK_ID" --title "$TASK_ID" --body "Contour run of $TASK_ID, status $status. $RUN_URL" 2>&1)" || pr="no pull request: $pr"
+              say "**$TASK_ID**: $status, the chain ends. $pr"
+              exit 0 ;;
+            *) say "**$TASK_ID**: chain stopped at status $status (the owner decides). $RUN_URL"; exit 0 ;;
+          esac
+
+          if [ -n "$PREV_STAGE" ] && [ "$next" = "$PREV_STAGE" ] && [ "$status" = "$PREV_STATUS" ]; then
+            say "**$TASK_ID**: chain stopped: stage $PREV_STAGE moved nothing (status $status). $RUN_URL"
+            exit 0
+          fi
+          hop=$((HOP + 1))
+          if [ "$hop" -gt "$MAX_HOPS" ]; then
+            say "**$TASK_ID**: chain stopped at the hop limit $MAX_HOPS (status $status). $RUN_URL"
+            exit 0
+          fi
+          gh workflow run teamwright-agent.yml -R "$REPO" --ref "$MAIN" -f task_id="$TASK_ID" -f stage="$next" -f model="$MODEL" -f hop="$hop" -f issue="$ISSUE" || { say "**$TASK_ID**: stage $next was not started. $RUN_URL"; exit 1; }
+          say "**$TASK_ID**: status $status, stage $next started (hop $hop)."

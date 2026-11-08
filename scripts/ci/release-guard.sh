@@ -133,12 +133,24 @@
 #      $((1 << 2)) are refused, fail-closed: write <<EOF). A merge
 #      key could pull an owned fragment, anchored elsewhere, into a step with other keys (probe
 #      M2); R11 needs every step's keys to be text on its own lines.
+#   R14 (T-202, decisions #249, #253) the contour exception, keyed by name: a file whose basename
+#      is exactly teamwright-agent.yml or teamwright-next.yml (string equality, no pattern; any
+#      other name, teamwright-agent.yaml or teamwright-agent2.yml included, keeps every rule)
+#      starts with its owned copy scripts/ci/contour-heads/<name>, byte for byte, from line 1 to
+#      its first line that is exactly `jobs:` (comments included). The copy holds its one
+#      `permissions:` block with write scopes, so for these two files R1 does not pin the read-only
+#      block (the word jobs still occurs only on the `jobs:` line) and R3 allows the copy line of
+#      `permissions:`; R4 allows secrets.CLAUDE_CODE_OAUTH_TOKEN in teamwright-agent.yml only (no
+#      secret in teamwright-next.yml) and vars.TEAMWRIGHT_AUTH in both (every other file: no vars);
+#      R5 does not apply to them (they run gh with the job token). R2, R6 and R8-R13 apply as to
+#      every file.
 # R1, R3 and R4 are the capability lock (GitHub enforces the token scope; it also covers gh api
 # and curl); R2 and R7 pin the release job and the header it inherits as two literals; R5 is the
 # early, fail-closed tripwire; R6 and R8 keep R3-R5's raw text the text a YAML reader sees; R9 and
 # R10 pin the upload step and the windows job's send step, the only step the Telegram secrets
 # reach, as literals; R11-R13 pin every action and every cache-saving step to owned text, and
-# R7 on ci.yml its trigger.
+# R7 on ci.yml its trigger; R14 pins the two contour heads, the only write scopes outside the
+# release block, as literals.
 # Not caught (deliberate only): a token written into the workflow as text (the gitleaks
 # pre-commit scan refuses it); release.sh itself exiting 0 on a refusal (release.test.sh covers
 # that); whether GitHub enforces `permissions:` as documented (platform semantics,
@@ -174,7 +186,12 @@
 # not a merge key (PyYAML 6.0.1 reads it as a plain string key; GitHub's parser was not checked);
 # the line before a fragment in ci.yml is not pinned: a scalar opened there that swallows the
 # fragment's first lines either swallows its `      - ` line (no step: nothing runs) or ends on
-# a quote inside the fragment, which leaves text after a closed scalar (invalid, loud).
+# a quote inside the fragment, which leaves text after a closed scalar (invalid, loud);
+# R14's limits (T-202): R14 pins the contour heads, not their steps: a contour step runs gh and
+# any command with the job token of its head (contents write in teamwright-agent.yml) and the
+# OAuth secret, and the checkout persists that token in the git config, so the stage session can
+# push; what keeps main safe is the repository ruleset and the hooks the push step installs, not
+# this guard (docs/decisions/ci-toolchain.md).
 #
 # Usage: scripts/ci/release-guard.sh <workflows-dir>
 # Exit 0: ok. Exit 1: a violation, each listed as "<workflows-dir>/<file>:<line>: R<n>: <why>"
@@ -189,7 +206,8 @@
 # the alignment starts before line 1), the first line met going up from the send step that is not
 # `    steps:`, `  windows:` or `jobs:` as due (the step's first line when none is met), or, with
 # no token, the first file's jobs: line; R11: every token line outside the owned lines and
-# fragments; R12: the column-0 line; R13: the line of the occurrence). Exit 2: usage
+# fragments; R12: the column-0 line; R13: the line of the occurrence; R14: the first header line
+# that differs from scripts/ci/contour-heads/<name>). Exit 2: usage
 # error. Exit 3: cannot run (the dir is missing or not a directory, holds no regular file, a file
 # is unreadable or has no `jobs:` line, an owned copy is missing or malformed: release-job.yml not
 # starting with `  release:`, release-header.yml not ending in its only `jobs:` line,
@@ -197,7 +215,9 @@
 # telegram-send-step.yml missing, empty, holding no secrets.TELEGRAM_ token or not starting with
 # `      - name: Send the installer to Telegram (main and v* tags only)`; action-lines.txt missing or
 # empty; cache-steps/ missing or holding no fragment, or a fragment failing R11's checks of its
-# own text; the dir holding no ci.yml (R7 pins its trigger); awk failed);
+# own text; the dir holding no ci.yml (R7 pins its trigger); with a contour file present,
+# contour-heads/ missing or a head copy missing, unreadable, empty, not ending in its only `jobs:`
+# line or not holding exactly one `permissions:` line; awk failed);
 # never a pass.
 # Host test: scripts/ci/release-guard.test.sh (make check-release-guard).
 set -uo pipefail
@@ -320,14 +340,47 @@ shopt -u nullglob dotglob
 # R7 pins the trigger of ci.yml: a dir without it (the release job and the header moved to another
 # name) is not the workflows dir this guard checks.
 [ -f "$dir/ci.yml" ] || cannot_run "no ci.yml in $dir (R7 pins its trigger to the owned header)"
+# R14 (T-202): the owned contour heads, read only when the dir holds a file whose basename is
+# exactly one of the two owned names (string equality, no pattern).
+chd="$here/contour-heads"
+cha="$chd/teamwright-agent.yml"
+chn="$chd/teamwright-next.yml"
+contour=0
+for f in "${files[@]}"; do
+  b="${f##*/}"
+  if [ "$b" = "teamwright-agent.yml" ] || [ "$b" = "teamwright-next.yml" ]; then contour=1; fi
+done
+if [ "$contour" = 1 ]; then
+  [ -d "$chd" ] || cannot_run "owned contour-heads dir $chd not found or not a directory (R14 pins the headers of teamwright-agent.yml and teamwright-next.yml)"
+  for ch in "$cha" "$chn"; do
+    [ -f "$ch" ] && [ -r "$ch" ] || cannot_run "owned contour head $ch not found or not readable"
+    [ -s "$ch" ] || cannot_run "owned contour head $ch is empty"
+    [ "$(tail -n 1 -- "$ch")" = "jobs:" ] || cannot_run "owned contour head $ch does not end in the line 'jobs:'"
+    [ "$(grep -c -x 'jobs:' -- "$ch")" = "1" ] || cannot_run "owned contour head $ch has more than one line 'jobs:' (only its last line may be)"
+    [ "$(grep -c -x 'permissions:' -- "$ch")" = "1" ] || cannot_run "owned contour head $ch does not hold exactly one line 'permissions:'"
+  done
+fi
 
 # Output lines: "V <file>:<line>: R<n>: <why>"; awk exit 3 = an owned copy could not be read.
-report="$(RG_FRAGS="$fraglist" awk -v owned="$owned" -v ownedh="$ownedh" -v ownedu="$ownedu" -v ownedt="$ownedt" -v ownedl="$ownedl" '
+report="$(RG_FRAGS="$fraglist" awk -v owned="$owned" -v ownedh="$ownedh" -v ownedu="$ownedu" -v ownedt="$ownedt" -v ownedl="$ownedl" -v contour="$contour" -v cha="$cha" -v chn="$chn" '
 function v(k, i, r, why) { print "V " F[k] ":" i ": " r ": " why; nv++ }
 # count(s, t): occurrences of t in s.
 function count(s, t,   n, p) { n = 0; while ((p = index(s, t)) > 0) { n++; s = substr(s, p + length(t)) } return n }
 # word(lo, w): the lower-case line lo holds w bounded by characters outside [a-z0-9_] or its ends.
 function word(lo, w) { return lo ~ ("(^|[^a-z0-9_])" w "([^a-z0-9_]|$)") }
+# varsok(s, ok): every occurrence of the word vars (any case) on line s is vars.TEAMWRIGHT_AUTH
+# ended by a character outside [A-Za-z0-9_] or the end of the line, and ok (the file may name it).
+function varsok(s, ok,   t, c, q, pb, pa) {
+  t = tolower(s); c = 0
+  while ((q = index(t, "vars")) > 0) {
+    pb = (c + q > 1) ? substr(tolower(s), c + q - 1, 1) : ""
+    pa = substr(tolower(s), c + q + 4, 1)
+    if (pb !~ /[a-z0-9_]/ && pa !~ /[a-z0-9_]/)
+      if (!ok || substr(s, c + q) !~ /^vars\.TEAMWRIGHT_AUTH([^A-Za-z0-9_]|$)/) return 0
+    c += q; t = substr(t, q + 1)
+  }
+  return 1
+}
 BEGIN {
   no = 0
   while ((rc = (getline line < owned)) > 0) own[++no] = line
@@ -362,6 +415,20 @@ BEGIN {
     if (rc < 0 || FN[f] < 2) { bad = 1; exit 3 }
     close(FP[f])
   }
+  # R14: the owned contour heads CH[c, i], NC[c] lines each, CP[c] the line of "permissions:"
+  # (c = 1 teamwright-agent.yml, c = 2 teamwright-next.yml); read only with a contour file.
+  if (contour) {
+    CF[1] = cha; CF[2] = chn
+    for (c = 1; c <= 2; c++) {
+      NC[c] = 0; CP[c] = 0
+      while ((rc = (getline line < CF[c])) > 0) {
+        CH[c, ++NC[c]] = line
+        if (line == "permissions:" && !CP[c]) CP[c] = NC[c]
+      }
+      if (rc < 0 || NC[c] == 0 || CH[c, NC[c]] != "jobs:" || !CP[c]) { bad = 1; exit 3 }
+      close(CF[c])
+    }
+  }
 }
 FNR == 1 { nf++; F[nf] = FILENAME }
 { N[nf] = FNR; L[nf, FNR] = $0 }
@@ -376,10 +443,25 @@ END {
         if (!j && L[k, i] == "jobs:") j = i
         else if (!jbad) jbad = i
       }
+    # ck: 1 = the basename is exactly teamwright-agent.yml, 2 = exactly teamwright-next.yml
+    # (string equality with the two owned literals; no glob, suffix, case folding or regex), else 0.
+    bn = F[k]; sub(/.*\//, "", bn)
+    ck = (bn == "teamwright-agent.yml") ? 1 : (bn == "teamwright-next.yml") ? 2 : 0
     r1 = 0
     if (jbad) v(k, jbad, "R1", "the word jobs must occur on exactly one line, and that line must be exactly \"jobs:\"")
+    else if (ck) { if (L[k, CP[ck]] == CH[ck, CP[ck]]) r1 = CP[ck] }
     else if (j >= 3 && L[k, j - 2] == "permissions:" && L[k, j - 1] == "  contents: read") r1 = j - 2
     else v(k, j, "R1", "the two lines before jobs: must be exactly \"permissions:\" and \"  contents: read\" (read-only token at workflow level)")
+    # R14: a contour file starts with the owned head of its name, line 1 to its first "jobs:" line,
+    # byte for byte (the head has "jobs:" only as its last line).
+    if (ck) {
+      for (i = 1; i <= N[k]; i++) {
+        if (i > NC[ck] || L[k, i] != CH[ck, i]) break
+        if (L[k, i] == "jobs:") break
+      }
+      if (i > N[k] || i > NC[ck] || L[k, i] != CH[ck, i])
+        v(k, i, "R14", "the contour workflow header, from line 1 to jobs:, differs from the owned copy scripts/ci/contour-heads/" bn " here (byte for byte; it pins the trigger, concurrency and the write scopes)")
+    }
     # R7: a file holding a "  release:" line starts with the owned header copy, line 1 to its
     # first "jobs:" line, byte for byte (the copy has "jobs:" only as its last line).
     hasrel = 0
@@ -443,15 +525,24 @@ END {
       }
       t = lo; c = 0
       while ((q = index(t, "secrets")) > 0) {
-        if (substr(s, c + q) !~ /^secrets\.TELEGRAM_(BOT_TOKEN|CHAT_ID)([^A-Za-z0-9_]|$)/) {
+        if (ck == 1 && substr(s, c + q) !~ /^secrets\.CLAUDE_CODE_OAUTH_TOKEN([^A-Za-z0-9_]|$)/) {
+          v(k, i, "R4", "a secret other than secrets.CLAUDE_CODE_OAUTH_TOKEN in teamwright-agent.yml (its owned set; no token from outside its permissions)")
+          break
+        }
+        if (ck == 2) {
+          v(k, i, "R4", "a secret in teamwright-next.yml (its owned set holds none; no token from outside its permissions)")
+          break
+        }
+        if (!ck && substr(s, c + q) !~ /^secrets\.TELEGRAM_(BOT_TOKEN|CHAT_ID)([^A-Za-z0-9_]|$)/) {
           v(k, i, "R4", "a secret other than secrets.TELEGRAM_BOT_TOKEN / secrets.TELEGRAM_CHAT_ID (a token from outside the job permissions)")
           break
         }
         c += q + 6; t = substr(t, q + 7)
       }
-      if (word(lo, "vars"))
-        v(k, i, "R4", "the word vars (a repository variable could hold a token from outside the job permissions)")
-      if (!inb && word(lo, "gh"))
+      if (!varsok(s, ck))
+        v(k, i, "R4", (ck ? "the word vars other than vars.TEAMWRIGHT_AUTH (the only repository variable of the contour files)" : "the word vars (a repository variable could hold a token from outside the job permissions)"))
+      # R5 is waived for the two contour names only (their steps call gh with their own token).
+      if (!inb && !ck && word(lo, "gh"))
         v(k, i, "R5", "the word gh outside the release job (only scripts/ci/release.sh in that job may call gh)")
       if (s ~ /\\x[0-9A-Fa-f][0-9A-Fa-f]/ || s ~ /\\[uU][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]/ ||
           s ~ /\\$/ || index(s, "\\0") || s ~ /\\(\r|\302\205|\342\200\250|\342\200\251)/)
