@@ -36,6 +36,7 @@ mod win32_support;
 
 use std::any::Any;
 use std::borrow::Cow;
+use std::io::Write;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -50,7 +51,7 @@ use tauri::test::{get_ipc_response, mock_builder, MockRuntime};
 use tauri::utils::assets::{AssetKey, AssetsIter, CspHash};
 use tauri::webview::InvokeRequest;
 use tauri::{App, AppHandle, Assets, Context, Listener, Manager, RunEvent, Url, Wry};
-use timing_support::{at_least, between, eventually, holds_for, measure, now};
+use timing_support::{at_least, between, eventually, holds_for, measure, now, HANG};
 use voicen_core::call::indicator::{IndicatorState, IndicatorTick};
 use voicen_core::call::session::CallIndicator;
 use voicen_core::diag::Log;
@@ -93,15 +94,44 @@ const IDENTIFIER: &str = "dev.voicen.test.callindicator";
 const BUDGET: Duration = Duration::from_secs(20);
 
 /// A hang bound, not a budget (T-173): how long the indicator's receipt may take; above a cold
-/// WebView2 build, below `WATCHDOG`.
+/// WebView2 build. A test's sequential hang bounds add up (see `WATCHDOG`).
 const INDICATOR_HANG: Duration = Duration::from_secs(120);
 
 /// How long a state is watched after it showed, so a late activation, a late second window or a
 /// late style rewrite is seen (a bounded negative).
 const SETTLE: Duration = Duration::from_secs(2);
 
-/// The exe ends with code 3 if one test's loop has not returned by then.
-const WATCHDOG: Duration = Duration::from_secs(240);
+/// The exe ends with code 3 if one test's loop has not returned by then. It must stay above the
+/// longest chain of sequential hang bounds that one test can spend while every hung wait lets
+/// the test go on to the next one, so a missing fact ends as that test's assertion with its
+/// report and never as a whole-exe exit (run 42446546238: the old 240 s was below the S4
+/// chain, the exe died with code 3 and no result line). A wait that ends the test when it
+/// hangs (a precondition, `move_cursor`, the S4/S5 `page_painted` early return) adds no link.
+/// Chains per watchdog-holding Wry test (`R` = `INDICATOR_HANG`, `H` = `HANG`, `S` = `SETTLE`,
+/// `B` = `BUDGET`, the driver's report wait after the loop returned):
+/// - `no_indicator_window_exists_...`: settled(idle) R + shown R + B = 260 s;
+/// - `the_indicator_is_destroyed_...`: gone H + freed H + shown R + S + B = 382 s;
+/// - `the_indicator_is_topmost_...` (S2): shown R + S + url H + B = 262 s;
+/// - `showing_the_indicator_keeps_...` (S3): shown R + S + B = 142 s;
+/// - S4 `a_click_on_...`: only one link, since an unpainted page returns at once: the click's
+///   pixel H + S + B = 142 s (the receipt R ends the test when it hangs: 140 s);
+/// - S5 `dragging_...`: moved H + B = 140 s;
+/// - `the_indicator_adds_exactly_one_...` (S6): shown R + S + B = 142 s;
+/// - `position_saved_and_clamped`: saved H + file H + shown R + label-gone H + far-saved H +
+///   shown R + B = [`POSITION_CHAIN`] = 740 s, the longest.
+///
+/// The two mock command tests hold no watchdog. `WATCHDOG` is that longest chain + 60 s; the
+/// compile-time check below pins it to the constants.
+const WATCHDOG: Duration = Duration::from_secs(800);
+
+/// The longest chain above: `position_saved_and_clamped`.
+const POSITION_CHAIN: Duration =
+    Duration::from_secs(4 * HANG.as_secs() + 2 * INDICATOR_HANG.as_secs() + BUDGET.as_secs());
+
+const _: () = assert!(
+    WATCHDOG.as_secs() >= POSITION_CHAIN.as_secs() + 60,
+    "WATCHDOG must exceed the longest sequential chain of hang bounds of one test by 60 s"
+);
 
 /// The page's three zones (`IndicatorPage`): the left half is the "button" (turns
 /// `CLICKED_RGB` on mousedown), the right half is the drag region. Far from every system colour.
@@ -128,10 +158,16 @@ fn watchdog(test: &'static str) -> Watchdog {
     let (tx, rx) = mpsc::channel::<()>();
     thread::spawn(move || {
         if let Err(RecvTimeoutError::Timeout) = rx.recv_timeout(WATCHDOG) {
-            eprintln!(
+            // Not `eprintln!`: this thread is spawned inside a test, so libtest captures the
+            // macro's output and `process::exit` drops the buffer (run 42446546238 showed no
+            // message at all). A direct write to the process' stderr is not captured.
+            let line = format!(
                 "call indicator watchdog: `{test}`: the event loop did not return within \
-                 {WATCHDOG:?}; ending the test exe"
+                 {WATCHDOG:?}; ending the test exe with code 3\n"
             );
+            let mut stderr = std::io::stderr();
+            let _ = stderr.write_all(line.as_bytes());
+            let _ = stderr.flush();
             std::process::exit(3);
         }
     });
@@ -799,8 +835,20 @@ struct ShapeReport {
     facts: Facts,
     stable: bool,
     is_helper: bool,
+    /// The last URL the indicator's webview reported (the premise row, round 2026-11-08).
+    url: Option<String>,
+    /// Whether that URL's host is the tauri protocol's.
+    url_is_tauri_protocol: bool,
     /// S8: logged, not asserted.
     build_to_shown: timing_support::Took,
+}
+
+/// The tauri protocol's host on Windows (`http://tauri.localhost/...`): where a page served from
+/// the context's assets (`set_assets`) loads from.
+const TAURI_PROTOCOL_HOST: &str = "tauri.localhost";
+
+fn is_tauri_protocol(url: &Url) -> bool {
+    url.host_str() == Some(TAURI_PROTOCOL_HOST)
 }
 
 #[test]
@@ -834,12 +882,32 @@ fn the_indicator_is_topmost_noactivate_toolwindow_undecorated_and_unowned() {
             report.stable = holds_for(SETTLE, || facts(raw) == first);
             report.is_helper = helper_windows::is_helper(&class_of(to_hwnd(raw)), ex_style(raw));
         }
+        // The premise row: the page must come from the tauri protocol that serves the test
+        // assets, not from the config's devUrl (debug test builds resolve `WebviewUrl::App` to
+        // `build.devUrl` unless the context's `dev_url` is None; nothing listens there in CI).
+        // Waited for, because the webview's source follows the navigation; no pixel is read.
+        report.url_is_tauri_protocol = eventually(|| {
+            let url = handle.get_webview_window(LABEL).and_then(|w| w.url().ok());
+            report.url = url.as_ref().map(Url::to_string);
+            url.as_ref().is_some_and(is_tauri_protocol)
+        });
         report
     });
 
     assert!(
         report.shown.ok(),
         "no visible `{LABEL}` window after the receipt: {report:#?}"
+    );
+    // Asserted before the shape, with the shape's errors in the message, so one failing run
+    // shows both facts (the shape assertion below still runs when the URL is right).
+    assert!(
+        report.url_is_tauri_protocol,
+        "the indicator webview did not load from the tauri protocol (host `{TAURI_PROTOCOL_HOST}`) \
+         but from {:?}: a debug test build resolves WebviewUrl::App to build.devUrl \
+         (http://localhost:1420, unserved in CI) unless the context's dev_url is None, so the \
+         test page never paints; shape errors seen in the same run: {:?}; {report:#?}",
+        report.url,
+        shape_errors(&report.facts)
     );
     assert_eq!(
         shape_errors(&report.facts),
@@ -938,7 +1006,9 @@ struct ClickReport {
     rect: Option<(i32, i32, i32, i32)>,
     hit: isize,
     indicator: isize,
-    idle_pixel_before: bool,
+    /// The premise: the page painted its idle colour within the hang bound. When false the
+    /// report is returned at once (no cursor move, no click, no second wait).
+    page_painted: bool,
     clicked_pixel_after: bool,
     pixel_after: Option<(u8, u8, u8)>,
     samples: u64,
@@ -982,8 +1052,12 @@ fn a_click_on_the_indicator_reaches_the_page_and_the_target_keeps_the_foreground
         let button = zone_point(&rect, 1);
         report.indicator = raw;
         report.hit = hit_root(button);
-        report.idle_pixel_before =
+        report.page_painted =
             eventually(|| screen_pixel(button).is_some_and(|p| near(p, IDLE_RGB)));
+        if !report.page_painted {
+            report.pixel_after = screen_pixel(button);
+            return report;
+        }
         let losses_before = target.focus_losses().len();
         let sampler = ForegroundSampler::start(target_raw);
         move_cursor(button);
@@ -1013,8 +1087,11 @@ fn a_click_on_the_indicator_reaches_the_page_and_the_target_keeps_the_foreground
         "premise: the click point is not over the indicator (another window is on top): {report:#?}"
     );
     assert!(
-        report.idle_pixel_before,
-        "premise: the page never painted its idle colour: {report:#?}"
+        report.page_painted,
+        "page_painted: false: premise: the page never painted its idle colour {IDLE_RGB:?} \
+         within the hang bound (the pixel under the click point is {:?}); the click was not \
+         sent: {report:#?}",
+        report.pixel_after
     );
     assert!(
         report.clicked_pixel_after,
@@ -1049,6 +1126,9 @@ struct DragReport {
     shown: Shown,
     before: Option<(i32, i32, i32, i32)>,
     after: Option<(i32, i32, i32, i32)>,
+    /// The premise: the page painted the drag region's colour within the hang bound. When false
+    /// the report is returned at once (no drag, no second wait).
+    page_painted: bool,
     moved: bool,
     samples: u64,
     away: Vec<(isize, String)>,
@@ -1089,7 +1169,10 @@ fn dragging_the_drag_region_moves_the_window_and_the_target_keeps_the_foreground
         };
         report.before = Some((rect.left, rect.top, rect.right, rect.bottom));
         let grip = zone_point(&rect, 3);
-        let _ = eventually(|| screen_pixel(grip).is_some_and(|p| near(p, DRAG_RGB)));
+        report.page_painted = eventually(|| screen_pixel(grip).is_some_and(|p| near(p, DRAG_RGB)));
+        if !report.page_painted {
+            return report;
+        }
         let (vl, _, vr, _) = virtual_screen();
         let dx = if rect.left - 80 >= vl { -80 } else { 80 };
         let dx = if rect.right + dx > vr { -80 } else { dx };
@@ -1117,6 +1200,11 @@ fn dragging_the_drag_region_moves_the_window_and_the_target_keeps_the_foreground
     assert!(
         report.shown.ok(),
         "no visible `{LABEL}` window after the receipt: {report:#?}"
+    );
+    assert!(
+        report.page_painted,
+        "page_painted: false: premise: the page never painted the drag region's colour \
+         {DRAG_RGB:?} within the hang bound; the drag was not sent: {report:#?}"
     );
     assert!(
         report.moved,
