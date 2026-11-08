@@ -1,0 +1,10 @@
+guarantee: AC-2/failure branch 2: a contour file with a permission beyond its owned head is refused (R14)
+file: scripts/ci/release-guard.sh
+added_by: test-writer
+--- old
+      if (i > N[k] || i > NC[ck] || L[k, i] != CH[ck, i])
+        v(k, i, "R14",
+--- new
+      if (0)
+        v(k, i, "R14",
+--- end

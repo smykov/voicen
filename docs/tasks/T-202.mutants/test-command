@@ -1,0 +1,2 @@
+# bash test, outside tw-test; run in the core area container by tw-mutants.
+bash scripts/ci/release-guard.test.sh

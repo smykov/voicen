@@ -1,0 +1,8 @@
+guarantee: AC-2/failure branch 3: a renamed copy of a contour file is refused (exact basename)
+file: scripts/ci/release-guard.sh
+added_by: test-writer
+--- old
+    ck = (bn == "teamwright-agent.yml") ? 1 : (bn == "teamwright-next.yml") ? 2 : 0
+--- new
+    ck = (bn ~ /teamwright-agent\.yml$/) ? 1 : (bn ~ /teamwright-next\.yml$/) ? 2 : 0
+--- end

@@ -1,0 +1,8 @@
+guarantee: R4: per-name token sets (oauth in teamwright-agent.yml only, vars.TEAMWRIGHT_AUTH only)
+file: scripts/ci/release-guard.sh
+added_by: test-writer
+--- old
+      if (!varsok(s, ck))
+--- new
+      if (!varsok(s, 1))
+--- end

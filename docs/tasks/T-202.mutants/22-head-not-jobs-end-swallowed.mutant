@@ -1,0 +1,8 @@
+guarantee: Exit 3 (cannot run): contour head copy missing/malformed is never a pass
+file: scripts/ci/release-guard.sh
+added_by: test-writer
+--- old
+    [ "$(tail -n 1 -- "$ch")" = "jobs:" ] || cannot_run "owned contour head $ch does not end in the line 'jobs:'"
+--- new
+    [ "$(tail -n 1 -- "$ch")" = "jobs:" ] || :
+--- end

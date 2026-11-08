@@ -172,7 +172,10 @@ check-release:
 # pnpm/action-setup) an owned line of scripts/ci/action-lines.txt or inside a byte-exact owned
 # step fragment of scripts/ci/cache-steps/ (whose own text the guard checks: saves from main
 # only, no setup-node cache) (R11), no column-0 line after jobs: (R12) and no YAML merge key
-# (R13). The self-test runs the tripwire scripts/ci/release-guard.sh on
+# (R13); T-202 (decisions #253) R14: the files teamwright-agent.yml and teamwright-next.yml
+# (exact names) are the only others with a write token; their header is the owned copy
+# scripts/ci/contour-heads/<name>.
+# The self-test runs the tripwire scripts/ci/release-guard.sh on
 # scripts/ci/fixtures/release-guard/ and the real workflows dir (also mutated). Host bash and awk.
 check-release-guard:
 	scripts/ci/release-guard.test.sh

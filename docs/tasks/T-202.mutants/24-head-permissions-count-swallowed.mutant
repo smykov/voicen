@@ -1,0 +1,8 @@
+guarantee: Exit 3 (cannot run): contour head copy missing/malformed is never a pass
+file: scripts/ci/release-guard.sh
+added_by: test-writer
+--- old
+    [ "$(grep -c -x 'permissions:' -- "$ch")" = "1" ] || cannot_run "owned contour head $ch does not hold exactly one line 'permissions:'"
+--- new
+    [ "$(grep -c -x 'permissions:' -- "$ch")" = "1" ] || :
+--- end

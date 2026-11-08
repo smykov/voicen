@@ -1,0 +1,8 @@
+guarantee: R3: permissions only on the head line of a contour file and in the release block
+file: scripts/ci/release-guard.sh
+added_by: test-writer
+--- old
+        if (i == r1) n--
+--- new
+        if (ck || i == r1) n--
+--- end

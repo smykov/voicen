@@ -539,7 +539,10 @@ was stopped. Asking a model to stop is racy; a hook is not.
 `$TEAMWRIGHT_WIP_REFS_RE` (default `^refs/heads/wip/`) skips the DRAIN check and changes
 no status: it runs CI for tests the host cannot run (`areas[].ci_workflow`), so red and
 green are seen before review. Commits that exist on the remote only in wip branches are
-still undelivered: the DRAIN range of a later push ignores wip branches.
+still undelivered: the DRAIN range of a later push ignores wip branches. The teamwright
+contour job sets `TEAMWRIGHT_WIP_REFS_RE='^refs/heads/(wip|task)/'` in its push step only, so
+its `task/<ID>` push is not a delivery either; the pause check runs before this exit and
+still applies (T-202, decisions #253).
 
 **Deliberate exits:** `tail_code: ratified` in the task record (owner's decision, stays
 in history); human, one-off: `TEAMWRIGHT_ALLOW_PUSH=1 git push`.
@@ -907,7 +910,7 @@ guard's variables. Unset means the default.
 | `TEAMWRIGHT_PAUSE_FILE` | `pre-push`, router | pause file (`TEAMWRIGHT_PAUSE` at the repository root) |
 | `TEAMWRIGHT_PUSH_STATUSES` | `pre-push` | statuses whose code may be pushed (`CODE_COMPLETE DEPLOYED VERIFIED DONE`) |
 | `TEAMWRIGHT_DOC_PATHS_RE` | `pre-push` | commits touching only these paths belong to no task (`^(docs\|specs\|openspec)/\|^(PRINCIPLES\|AGENTS\|CLAUDE)\.md$`) |
-| `TEAMWRIGHT_WIP_REFS_RE` | `pre-push` | remote refs that are CI-only pushes, not deliveries (`^refs/heads/wip/`) |
+| `TEAMWRIGHT_WIP_REFS_RE` | `pre-push` | remote refs that are CI-only pushes, not deliveries (`^refs/heads/wip/`; contour push step: `^refs/heads/(wip\|task)/`) |
 | `TEAMWRIGHT_TASK_BRANCH_RE` | router, progress report | a branch that names a task worked in its own worktree, group 1 = the id (`^(?:tw\|task)/(<task id>)(?:$\|[-_/.])`) |
 | `TEAMWRIGHT_ALLOW_PUSH=1` | `pre-push` | one-off human override of DRAIN |
 | `PATCH_GUARD=off` | patch guard | one-off human override |

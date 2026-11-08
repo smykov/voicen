@@ -1,0 +1,8 @@
+guarantee: R4: per-name token sets (oauth in teamwright-agent.yml only, vars.TEAMWRIGHT_AUTH only)
+file: scripts/ci/release-guard.sh
+added_by: test-writer
+--- old
+        if (!ck && substr(s, c + q) !~
+--- new
+        if (0 && !ck && substr(s, c + q) !~
+--- end

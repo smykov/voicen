@@ -1,0 +1,8 @@
+guarantee: R4: per-name token sets (oauth in teamwright-agent.yml only, vars.TEAMWRIGHT_AUTH only)
+file: scripts/ci/release-guard.sh
+added_by: test-writer
+--- old
+        if (ck == 1 && substr(s, c + q) !~ /^secrets\.CLAUDE_CODE_OAUTH_TOKEN([^A-Za-z0-9_]|$)/) {
+--- new
+        if (ck == 1 && substr(s, c + q) !~ /^secrets\.CLAUDE_CODE_OAUTH_TOKEN/) {
+--- end

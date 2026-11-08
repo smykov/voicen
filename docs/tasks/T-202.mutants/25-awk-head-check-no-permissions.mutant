@@ -1,0 +1,9 @@
+guarantee: Exit 3 (cannot run): contour head copy missing/malformed is never a pass
+file: scripts/ci/release-guard.sh
+added_by: test-writer
+equivalent: the shell checks before awk (tail/grep -c on the same head file) already exit 3 on this input; the awk check is defence in depth, unreachable through the CLI
+--- old
+|| !CP[c]) { bad = 1; exit 3 }
+--- new
+) { bad = 1; exit 3 }
+--- end

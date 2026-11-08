@@ -1,0 +1,8 @@
+guarantee: R5 waived for the two contour names only; gh elsewhere still refused
+file: scripts/ci/release-guard.sh
+added_by: test-writer
+--- old
+      if (!inb && !ck && word(lo, "gh"))
+--- new
+      if (0 && !inb && !ck && word(lo, "gh"))
+--- end

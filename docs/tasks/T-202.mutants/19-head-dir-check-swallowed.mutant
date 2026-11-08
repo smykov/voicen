@@ -1,0 +1,8 @@
+guarantee: Exit 3 (cannot run): contour head copy missing/malformed is never a pass
+file: scripts/ci/release-guard.sh
+added_by: test-writer
+--- old
+  [ -d "$chd" ] || cannot_run "owned contour-heads dir
+--- new
+  [ -d "$chd" ] || : "owned contour-heads dir
+--- end

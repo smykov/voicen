@@ -1,0 +1,8 @@
+guarantee: AC-2: every other file still needs contents: read (R1)
+file: scripts/ci/release-guard.sh
+added_by: test-writer
+--- old
+    else if (ck) { if (L[k, CP[ck]] == CH[ck, CP[ck]]) r1 = CP[ck] }
+--- new
+    else if (1) { r1 = CP[1] }
+--- end

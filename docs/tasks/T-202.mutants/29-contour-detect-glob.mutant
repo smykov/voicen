@@ -1,0 +1,8 @@
+guarantee: Lazy head read: heads are read only when a contour-named file is present
+file: scripts/ci/release-guard.sh
+added_by: test-writer
+--- old
+if [ "$b" = "teamwright-agent.yml" ] || [ "$b" = "teamwright-next.yml" ]; then contour=1; fi
+--- new
+case "$b" in *teamwright*) contour=1;; esac
+--- end

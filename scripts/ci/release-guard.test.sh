@@ -739,6 +739,7 @@ ccheck v-contour-other-secret-vars-longer      "" "$A|@vars.TEAMWRIGHT_AUTH_X|R4
 ccheck v-contour-other-secret-prose            "" "$A|@# Secrets here|R4"
 ccheck v-contour-other-secret-oauth-in-next    "" "$N|@secrets.CLAUDE_CODE_OAUTH_TOKEN|R4"
 ccheck v-contour-other-secret-oauth-in-ci      "" "ci.yml|@# \${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}|R4"
+ccheck v-contour-other-secret-vars-in-ci       "" "ci.yml|@# \${{ vars.TEAMWRIGHT_AUTH }}|R4"
 # The Telegram secrets, an escape, an unowned action, prose naming uses and a second release job.
 ccheck v-contour-telegram       "$A:R4" "$A|@secrets.TELEGRAM_BOT_TOKEN|R10"
 ccheck v-contour-escape         ""      "$A|@\\x41|R6"
@@ -1378,33 +1379,40 @@ if cguard g-contour-no-files; then
   run "contour: no contour file in the dir, so the heads are not read (ok-release without the heads dir)" 0 'ok:' "$fx/ok-release"
   guard="$real_guard"
 fi
+if cguard g-contour-lookalike-no-heads; then
+  rm -rf "$tmp/g-contour-lookalike-no-heads/contour-heads"
+  guard="$tmp/g-contour-lookalike-no-heads/release-guard.sh"
+  seen[ok-contour-lookalike-name]=1
+  run "contour: a read-only teamwright-agent2.yml is not a contour file, so the heads are not read (a glob or suffix name test would exit 3)" 0 'ok:' "$fx/ok-contour-lookalike-name"
+  guard="$real_guard"
+fi
 if cguard g-contour-dir-missing; then
   rm -rf "$tmp/g-contour-dir-missing/contour-heads"
-  ccan g-contour-dir-missing "cannot run: contour-heads dir missing" 'cannot run.*contour-heads'
+  ccan g-contour-dir-missing "cannot run: contour-heads dir missing" 'cannot run.*contour-heads.*not found or not a directory'
 fi
 if cguard g-contour-agent-missing; then
   rm -f "$tmp/g-contour-agent-missing/contour-heads/teamwright-agent.yml"
-  ccan g-contour-agent-missing "cannot run: head copy of teamwright-agent.yml missing" 'cannot run.*contour-heads.*teamwright-agent\.yml'
+  ccan g-contour-agent-missing "cannot run: head copy of teamwright-agent.yml missing" 'cannot run.*contour-heads.*teamwright-agent\.yml.*not found or not readable'
 fi
 if cguard g-contour-next-missing; then
   rm -f "$tmp/g-contour-next-missing/contour-heads/teamwright-next.yml"
-  ccan g-contour-next-missing "cannot run: head copy of teamwright-next.yml missing" 'cannot run.*contour-heads.*teamwright-next\.yml'
+  ccan g-contour-next-missing "cannot run: head copy of teamwright-next.yml missing" 'cannot run.*contour-heads.*teamwright-next\.yml.*not found or not readable'
 fi
 if cguard g-contour-agent-empty; then
   : > "$tmp/g-contour-agent-empty/contour-heads/teamwright-agent.yml"
-  ccan g-contour-agent-empty "cannot run: head copy of teamwright-agent.yml empty" 'cannot run.*contour-heads.*teamwright-agent\.yml'
+  ccan g-contour-agent-empty "cannot run: head copy of teamwright-agent.yml empty" 'cannot run.*contour-heads.*teamwright-agent\.yml.*is empty'
 fi
 if cguard g-contour-agent-no-jobs; then
   sed -i '$d' "$tmp/g-contour-agent-no-jobs/contour-heads/teamwright-agent.yml"
-  ccan g-contour-agent-no-jobs "cannot run: head copy of teamwright-agent.yml does not end in jobs:" 'cannot run.*contour-heads.*teamwright-agent\.yml'
+  ccan g-contour-agent-no-jobs "cannot run: head copy of teamwright-agent.yml does not end in jobs:" 'cannot run.*contour-heads.*teamwright-agent\.yml.*does not end in'
 fi
 if cguard g-contour-next-jobs-mid; then
   sed -i '1a jobs:' "$tmp/g-contour-next-jobs-mid/contour-heads/teamwright-next.yml"
-  ccan g-contour-next-jobs-mid "cannot run: head copy of teamwright-next.yml has jobs: before its last line" 'cannot run.*contour-heads.*teamwright-next\.yml'
+  ccan g-contour-next-jobs-mid "cannot run: head copy of teamwright-next.yml has jobs: before its last line" 'cannot run.*contour-heads.*teamwright-next\.yml.*more than one line'
 fi
 if cguard g-contour-next-no-permissions; then
   sed -i '/^permissions:$/d' "$tmp/g-contour-next-no-permissions/contour-heads/teamwright-next.yml"
-  ccan g-contour-next-no-permissions "cannot run: head copy of teamwright-next.yml holds no permissions: line" 'cannot run.*contour-heads.*teamwright-next\.yml'
+  ccan g-contour-next-no-permissions "cannot run: head copy of teamwright-next.yml holds no permissions: line" 'cannot run.*contour-heads.*teamwright-next\.yml.*exactly one line'
 fi
 
 # Every committed fixture dir is in the table.
