@@ -11,10 +11,10 @@ pnpm install && make core-image   # once
 ## 1. Linux host — core with fakes
 
 ```sh
-scripts/tw-run core -- cargo test -p voicen-core settings     # defaults, validation, save transaction, load/reset, live apply
-scripts/tw-run core -- cargo test -p voicen-core i18n         # catalog parity (ids + placeholders), MESSAGE_IDS present, language resolution
-scripts/tw-run core -- cargo test -p voicen-core connection   # Test connection vs mock OpenAI-compatible server
-scripts/tw-run core -- cargo test -p voicen-core secrets      # Secret redaction; settings file and log capture free of a known key
+scripts/tw-test core settings     # defaults, validation, save transaction, load/reset, live apply
+scripts/tw-test core i18n         # catalog parity (ids + placeholders), MESSAGE_IDS present, language resolution
+scripts/tw-test core connection   # Test connection vs mock OpenAI-compatible server
+scripts/tw-test core secrets      # Secret redaction; settings file and log capture free of a known key
 ```
 
 Expected: green. Each failure branch has its own test — refused save leaves file, snapshot, fake hotkey registrar, fake autostart and fake credential store unchanged; unreadable file → backup + defaults + `Reset`; write failure → refusal and undo of keys/autostart/hotkey; Test connection → `CannotReach`, `InvalidKey` (401 and 403), `Timeout` (injected short timeouts), `Http{500}`, `UnexpectedResponse`, `Ok{latency}`.

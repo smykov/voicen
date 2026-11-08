@@ -6,13 +6,13 @@ How to exercise this feature once its tasks are implemented. Commands follow `CL
 
 ```sh
 make core-image                                                   # after cmake is added to docker/rust.Dockerfile (approved, decisions #186)
-scripts/tw-run core -- cargo test -p voicen-core call::session    # toggles, refusals, single session, stop reasons, FR-019
-scripts/tw-run core -- cargo test -p voicen-core call::capture    # timeline: ±50 ppm → ≤ 20 ms at minute 60, gaps, silence fill, FR-013
-scripts/tw-run core -- cargo test -p voicen-core call::codec      # Ogg Opus write, ≤ 40 MB/h for 2 tracks, truncated-tail read
-scripts/tw-run core -- cargo test -p voicen-core call::storage    # meta.json states, recovery, damaged, disk thresholds, write failures, delete
-scripts/tw-run core -- cargo test -p voicen-core call::final_pass # chunker at pauses / hard 120 s / silence not sent; verbose_json → json (wiremock)
-scripts/tw-run core -- cargo test -p voicen-core call::transcript # merge, schema 1 validate, Markdown, renames
-scripts/tw-run core -- cargo test -p voicen-core diag             # new log lines: no text, titles, paths, hosts, friendly names
+scripts/tw-test core call::session    # toggles, refusals, single session, stop reasons, FR-019
+scripts/tw-test core call::capture    # timeline: ±50 ppm → ≤ 20 ms at minute 60, gaps, silence fill, FR-013
+scripts/tw-test core call::codec      # Ogg Opus write, ≤ 40 MB/h for 2 tracks, truncated-tail read
+scripts/tw-test core call::storage    # meta.json states, recovery, damaged, disk thresholds, write failures, delete
+scripts/tw-test core call::final_pass # chunker at pauses / hard 120 s / silence not sent; verbose_json → json (wiremock)
+scripts/tw-test core call::transcript # merge, schema 1 validate, Markdown, renames
+scripts/tw-test core diag             # new log lines: no text, titles, paths, hosts, friendly names
 pnpm test -- src/lib/calls src/lib/callIndicator
 pnpm e2e -- e2e/calls.spec.ts e2e/call-indicator.spec.ts e2e/settings-calls.spec.ts
 make licenses && make check                                       # notices current; the gate

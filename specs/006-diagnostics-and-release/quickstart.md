@@ -6,8 +6,8 @@ How to exercise this feature once its tasks are implemented. Commands follow `CL
 
 ```sh
 make core-image                                             # after cargo-about is added to docker/rust.Dockerfile (owner consent)
-scripts/tw-run core -- cargo test -p voicen-core diag       # log format, redaction, rolling, retention, session, crash files
-scripts/tw-run core -- cargo test -p voicen-core paths
+scripts/tw-test core diag       # log format, redaction, rolling, retention, session, crash files
+scripts/tw-test core paths
 pnpm test -- src/lib/about                                  # About component logic
 pnpm e2e -- e2e/about.spec.ts                               # About with mocked IPC: values, failures, buttons
 make licenses-check                                         # crates + npm against about.toml; notices up to date

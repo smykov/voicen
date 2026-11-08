@@ -51,6 +51,8 @@ Classification (`failure::classify`, one mapping for every transport failure; T-
 
 The `Display` of every reqwest send error contains the request URL with its query, so nothing of a `reqwest::Error`, the URL, a body or the key reaches a `FailureReason` (P-009): the adapter keeps only the flags and the `io::ErrorKind`.
 
+`client()` follows only same-origin redirects; a refused cross-origin redirect is `ServerError{3xx}` (`docs/decisions/engine-http.md`, T-186).
+
 There are no automatic retries (spec edge case). The error body is never read into an error or a log beyond the status code (P-009). Known compatible services: OpenAI (`https://api.openai.com/v1`, `whisper-1`) and Groq (`https://api.groq.com/openai/v1`, `whisper-large-v3-turbo`).
 
 ## Test oracle (wiremock, Linux)

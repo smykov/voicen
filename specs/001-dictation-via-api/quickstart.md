@@ -17,11 +17,11 @@ make check
 Expected: green. Target checks in it:
 
 ```sh
-scripts/tw-run core -- cargo test -p voicen-core openai_client   # every row of the response table, timeouts, no-key, trailing slash, redaction
-scripts/tw-run core -- cargo test -p voicen-core pipeline        # US1 + US2 + US5 flows with fakes
-scripts/tw-run core -- cargo test -p voicen-core recording       # hold/toggle/0.3 s/10 min/Esc/auto-repeat
-scripts/tw-run core -- cargo test -p voicen-core queue           # ordering incl. failure, no speech, retry
-scripts/tw-run core -- cargo test -p voicen-core vad             # energy gate on fixtures; fallback warning
+scripts/tw-test core openai_client   # every row of the response table, timeouts, no-key, trailing slash, redaction
+scripts/tw-test core pipeline        # US1 + US2 + US5 flows with fakes
+scripts/tw-test core recording       # hold/toggle/0.3 s/10 min/Esc/auto-repeat
+scripts/tw-test core queue           # ordering incl. failure, no speech, retry
+scripts/tw-test core vad             # energy gate on fixtures; fallback warning
 pnpm test -- src/lib/overlay/state.test.ts
 pnpm e2e -- e2e/overlay.spec.ts
 ```

@@ -10,9 +10,9 @@
 ## 1. Core on the Linux host (fakes and mock server)
 
 ```sh
-scripts/tw-run core -- cargo test -p voicen-core post_process     # stage: success, every skip reason, trim, auth header
-scripts/tw-run core -- cargo test -p voicen-core pipeline          # off → no request; skipped → raw delivered + notice; ordering
-scripts/tw-run core -- cargo test -p voicen-core --test diag_pipeline post_processing_outcome_is_logged # log capture, redaction run (as built, T-076; no `secrets_not_logged` test)
+scripts/tw-test core post_process     # stage: success, every skip reason, trim, auth header
+scripts/tw-test core pipeline          # off → no request; skipped → raw delivered + notice; ordering
+scripts/tw-test core --test diag_pipeline post_processing_outcome_is_logged # log capture, redaction run (as built, T-076; no `secrets_not_logged` test)
 ```
 
 Expected results:

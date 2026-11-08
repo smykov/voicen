@@ -34,7 +34,7 @@ Note: the docs tool (context7) was unavailable during planning, so exact whisper
 
 ## R-5 Threading and audio format
 
-- **Decision**: The loaded model is used by one transcription at a time (spec FR-016): the engine serializes through the residency guard (a mutex around the model). whisper threads = `min(available_parallelism, 8)`. Audio from 001 (16 kHz mono 16-bit, decisions #1) is converted to `f32` in [-1, 1] in the core before calling `SpeechModel::transcribe`. Language: `None` for auto-detect, otherwise the ISO code from settings.
+- **Decision**: The loaded model is used by one transcription at a time (spec FR-016): the engine serializes through the residency guard (a mutex around the model). whisper threads: see `docs/decisions/builtin-engine.md` (decisions #213; the count is not `min(available_parallelism, 8)`). Audio from 001 (16 kHz mono 16-bit, decisions #1) is converted to `f32` in [-1, 1] in the core before calling `SpeechModel::transcribe`. Language: `None` for auto-detect, otherwise the ISO code from settings.
 - **Rationale**: one model instance, predictable memory; ordering is already guaranteed by 001's pipeline (req FR-23).
 
 ## R-6 Catalog, repository revision and pinned hashes

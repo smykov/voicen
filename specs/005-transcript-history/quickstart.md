@@ -9,7 +9,7 @@ How to prove the feature works, per place it can run. Contracts: [contracts/core
 ## 1. Core on the Linux host
 
 ```sh
-scripts/tw-run core -- cargo test -p voicen-core history
+scripts/tw-test core history
 ```
 
 Expected: the guarantees C1–C11 of the core contract pass. They include:

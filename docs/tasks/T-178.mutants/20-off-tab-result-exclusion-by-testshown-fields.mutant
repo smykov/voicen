@@ -1,0 +1,9 @@
+guarantee: line 3 (U2 closed, review 1 #1): a kept invalid test result whose region is not on the page names nothing, so its fields are named by the form-level error list
+file: src/routes/settings/+page.svelte
+added_by: test-writer
+test: pnpm e2e --workers=2 e2e/settings-test-connection.spec.ts
+--- old
+        !resultNamedFields.includes(field),
+--- new
+        !(testShown?.fields ?? []).includes(field),
+--- end

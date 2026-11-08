@@ -144,7 +144,7 @@ description: "Task list for LLM post-processing (003)"
   - the mock error bodies echo the transcript and the key;
   - the captured log, the `Debug` output of every outcome and notice, and the saved settings file contain none of: key, prompt, raw text, reply, error body (SC-005);
   - each post-processed dictation line carries `pp=`, `pp_reason=` (skipped only) and `pp_ms=` — as built by T-076, see data-model.md "As built (T-076)".
-  - a mock `302` redirect from the configured host to another host does not carry the `Authorization` header to that host (the key is sent only to the configured endpoint, research R5);
+  - a mock `302` redirect from the configured host to another host does not carry the `Authorization` header to that host (the key is sent only to the configured endpoint, research R5); superseded by T-186: the client refuses a cross-origin redirect (decisions #211, `docs/decisions/engine-http.md`), so no request reaches the other host;
   - when 006's crash-file writer is in place, a panic injected in a fake post-processor while a snapshot is alive writes a crash file that contains none of the above.
 
   — req NFR-04, FR-20 — FR-012, FR-014 — L

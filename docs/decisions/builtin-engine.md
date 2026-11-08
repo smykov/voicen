@@ -39,7 +39,7 @@ Limit (#213): measured on 4 vCPUs only, with the tiny model. A stronger PC stays
 
 ### At most one multi-thread whisper.cpp computation runs at a time in a test process (I1)
 
-- **What breaks if you violate it:** libtest runs 4 tests at once; each loads a model with its own threads and the spin barrier multiplies the time (about 90 s per 1 s clip; suite 280.73 s before, 91.26 s after, about 71 s of it the timing child).
+- **What breaks if you violate it:** libtest runs 4 tests at once; each loads a model with its own threads and the spin barrier multiplies the time (about 90 s per 1 s clip; suite 280.73 s before, 91.26 s after, about 71 s of it the timing child; the 91.26 s is from run 40168449583 at the B = 8 placeholder (3 threads), not at B = 2: the `transcribe_wav` result line of run 41073157416 is not recorded, to verify, T-109 r1#6).
 - **Where it is enforced:** a file-level `MODEL_LOCK` taken by `serial()` (recovers a poisoned guard) first in every `transcribe_wav` test that loads a model, and held by the parent of a child process (quiet child, whisper-timing child) for the child's whole run. Load-failure tests build no graph and take no lock. No test asserts "only one at a time" (that would be a clock verdict); the evidence is the suite time in the Windows log.
 - **Don't:** drop the lock for speed, or add a model test without `serial()`. Don't add `--test-threads=1` to `ci.yml` instead (it touches the owned windows job).
 
