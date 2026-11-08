@@ -1,0 +1,24 @@
+name: Teamwright next
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: teamwright-next
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  issues: write
+  actions: write
+  pull-requests: write
+jobs:
+  next:
+    runs-on: [self-hosted, Linux, X64, claude]
+    steps:
+      - uses: actions/checkout@v5
+      - name: Open the pull request
+        env:
+          TEAMWRIGHT_AUTH: ${{ vars.TEAMWRIGHT_AUTH }}
+          GH_TOKEN: ${{ github.token }}
+        run: gh pr create --fill

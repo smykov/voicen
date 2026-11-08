@@ -116,6 +116,20 @@
 #        `cat << EOF` and a shift `$((1 << 2))` are refused, fail-closed).
 #        Probe M2: an anchored step list starting with a byte-exact setup-node fragment, merged
 #        into another job's step with cache: pnpm. Listed line: the occurrence.
+# T-202 (decisions #249, #253; P-020) the contour exception, pinned below (red first):
+#     R14 a file whose basename is exactly teamwright-agent.yml or teamwright-next.yml (string
+#        equality with the two owned literals; no glob, suffix, case folding or regex) is not
+#        subject to R1's block check; instead its header, line 1 to its first `jobs:` line, is
+#        byte-identical to the owned copy <guard dir>/contour-heads/<name> (listed line: the first
+#        header line that differs, as for R7). For those two files only: R3 counts the `permissions`
+#        word only on that header's permissions line, R4 allows only the name's owned tokens
+#        (secrets.CLAUDE_CODE_OAUTH_TOKEN in teamwright-agent.yml, vars.TEAMWRIGHT_AUTH in both,
+#        each ended by a character outside [A-Za-z0-9_]) and R5 (gh) is waived. R2, R6-R13 hold for
+#        them as for every file. Any other name keeps R1/R3/R4/R5 (v-contour-renamed-*,
+#        v-contour-third-write). A head copy missing, empty, not ending in its only `jobs:` line or
+#        holding no `permissions:` line is exit 3 naming contour-heads (read only when a file with
+#        one of the two names is present). ci.yml's header gains `  workflow_dispatch:` (R7's owned
+#        copy, decisions #253).
 #   Exit 0: ok, one line containing "ok:".
 #   Exit 1: a violation; each listed as "<workflows-dir>/<file>:<line>: R<n>: <why>". <line> is
 #           the first line of the block that differs from the owned copy for R2 (for a second
@@ -497,7 +511,7 @@ check v-header-env-bash-env      1 R7 hdiff   # Q1: env: BASH_ENV: "$(curl ... $
 check v-header-defaults-workdir  1 R7 hdiff   # Q2: defaults: run: working-directory: another release.sh runs
 check v-header-env-node-options  1 R7 hdiff   # Q3: env: NODE_OPTIONS: --require (code in download-artifact, which gets github.token)
 check v-header-comment-byte      1 R7 hdiff   # one comment byte (A -> a): no comment reader (P-020)
-check v-header-on-trigger        1 R7 hdiff   # on: gains workflow_dispatch
+check v-header-on-trigger        1 R7 hdiff   # on: gains workflow_call (T-202: workflow_dispatch is now in the owned header, decisions #253)
 # Validation 1 survivors S3, S4: R7 applies to whichever file holds the release job, whatever its
 # name and its place in the dir (ci.yml there has no release job; fake BASH_ENV path).
 check v-header-env-release-file-second 1 R7 hdiff rel.yml     # S3, S4: rel.yml, sorted after ci.yml
@@ -614,6 +628,123 @@ check v-other-file-no-workflow-permissions 1 R1 '*' other.yml
 # Validation 1 survivors S9, S10.
 check v-other-file-env-not-permissions 1 R1 '@jobs:' other.yml   # S9: env: / contents: read / jobs: (the permissions: line replaced)
 check v-r1-jobs-uppercase-key          1 R1 '@JOBS:' other.yml   # S10: the block and jobs: in x-note: "...", the real key JOBS:
+
+# ---- T-202: the contour exception (R14) ----------------------------------------------------------
+# ccheck <case> <allowed> <required...>: the case dir is refused (exit 1) with exactly the listed
+# violations. A required item is "<file>|<where>|<rule>": the guard must list <rule> at <where> of
+# <file> (where: "@text" the first line containing text, "jobs" the jobs: line, "cdiff:<ref>" the
+# first header line that differs from the header of $fx/ok-contour/<ref>). <allowed> is a
+# space-separated list of "<file>:<rule>" pairs that may also be listed (any line). Any other
+# listed violation fails the case, so the two legitimate contour files must come out clean and
+# the exception cannot hide behind a pile of refusals.
+first_cdiff() {
+  local f="$1" ref="$2" i n
+  local -a a b
+  mapfile -t a < <(head_lines "$fx/ok-contour/$ref")
+  mapfile -t b < <(head_lines "$f")
+  n=${#a[@]}
+  [ "${#b[@]}" -gt "$n" ] && n=${#b[@]}
+  for ((i = 0; i < n; i++)); do
+    if [ "${a[i]-<none>}" != "${b[i]-<none>}" ]; then
+      echo $((i + 1))
+      return 0
+    fi
+  done
+}
+ccheck() {
+  local c="$1" allowed=" $2 " d="$fx/$1" out got line rest file tail num rule item f w r l f0 bad=0
+  shift 2
+  seen["$c"]=1
+  if [ ! -x "$guard" ]; then
+    echo "FAIL $c: $guard not found or not executable" >&2
+    failed=$((failed + 1))
+    return
+  fi
+  out="$("$guard" "$d" 2>&1)"
+  got=$?
+  if [ "$got" -ne 1 ]; then
+    echo "FAIL $c: exit $got, want 1" >&2
+    sed 's/^/       | /' <<<"$out" >&2
+    failed=$((failed + 1))
+    return
+  fi
+  for item in "$@"; do
+    IFS='|' read -r f w r <<<"$item"
+    allowed+="$f:$r "
+  done
+  while IFS= read -r line; do
+    [[ "$line" == "$d/"* ]] || continue
+    rest="${line#"$d/"}"
+    file="${rest%%:*}"
+    tail="${rest#*:}"
+    num="${tail%%:*}"
+    tail="${tail#*: }"
+    rule="${tail%%:*}"
+    if [[ "$allowed" != *" $file:$rule "* ]]; then
+      echo "FAIL $c: unexpected violation $file $rule (line $num): only the intended refusal may be listed" >&2
+      bad=1
+    fi
+  done <<<"$out"
+  for item in "$@"; do
+    IFS='|' read -r f w r <<<"$item"
+    f0="$d/$f"
+    case "$w" in
+      @*) l="$(line_of "$f0" "${w#@}")" ;;
+      jobs) l="$(grep -n -m 1 -x 'jobs:' "$f0" | cut -d: -f1)" ;;
+      cdiff:*) l="$(first_cdiff "$f0" "${w#cdiff:}")" ;;
+      *) l="$w" ;;
+    esac
+    if [ -z "$l" ]; then
+      echo "FAIL $c: cannot locate the expected line ($w in $f0; fix the test)" >&2
+      bad=1
+    elif ! grep -qE -- "$(at "$f0" "$l" "$r")" <<<"$out"; then
+      echo "FAIL $c: no $r listed at $f:$l" >&2
+      bad=1
+    fi
+  done
+  if [ "$bad" -ne 0 ]; then
+    sed 's/^/       | /' <<<"$out" >&2
+    failed=$((failed + 1))
+  else
+    echo "ok   $c [$*]: exit 1"
+    passed=$((passed + 1))
+  fi
+}
+A=teamwright-agent.yml
+N=teamwright-next.yml
+check ok-contour 0   # ci.yml plus both contour files with their owned heads: workflow-level contents: write, gh, the OAuth secret and vars.TEAMWRIGHT_AUTH only there
+# A third write-capable file, and renamed copies of the two names, keep R1 (and R3-R5 of any other file).
+ccheck v-contour-third-write "teamwright-third.yml:R3 teamwright-third.yml:R4 teamwright-third.yml:R5" "teamwright-third.yml|jobs|R1"
+ccheck v-contour-renamed-agent2     "teamwright-agent2.yml:R3 teamwright-agent2.yml:R4 teamwright-agent2.yml:R5" "teamwright-agent2.yml|jobs|R1"
+ccheck v-contour-renamed-yaml       "teamwright-agent.yaml:R3 teamwright-agent.yaml:R4 teamwright-agent.yaml:R5" "teamwright-agent.yaml|jobs|R1"
+ccheck v-contour-renamed-prefix     "x-teamwright-agent.yml:R3 x-teamwright-agent.yml:R4 x-teamwright-agent.yml:R5" "x-teamwright-agent.yml|jobs|R1"
+ccheck v-contour-renamed-dotfile    ".teamwright-agent.yml:R3 .teamwright-agent.yml:R4 .teamwright-agent.yml:R5" ".teamwright-agent.yml|jobs|R1"
+ccheck v-contour-renamed-upper      "teamwright-AGENT.yml:R3 teamwright-AGENT.yml:R4 teamwright-AGENT.yml:R5" "teamwright-AGENT.yml|jobs|R1"
+ccheck v-contour-renamed-underscore "teamwright-agent_yml:R3 teamwright-agent_yml:R4 teamwright-agent_yml:R5" "teamwright-agent_yml|jobs|R1"
+ccheck v-contour-renamed-next-copy  "teamwright-next-copy.yml:R3 teamwright-next-copy.yml:R4 teamwright-next-copy.yml:R5" "teamwright-next-copy.yml|jobs|R1"
+# A scope beyond the owned head, or any other byte of it: R14 at the first differing header line.
+ccheck v-contour-extra-scope-pull-requests "" "$A|cdiff:$A|R14"
+ccheck v-contour-extra-scope-id-token      "" "$N|cdiff:$N|R14"
+ccheck v-contour-extra-scope-write-all     "$A:R3" "$A|cdiff:$A|R14"
+ccheck v-contour-extra-scope-comment       "$N:R3" "$N|cdiff:$N|R14"
+# A job-level block stays refused in the two files (R3 counts only the head's line).
+ccheck v-contour-job-permissions "" "$A|@    permissions:|R3"
+# Only the name's owned tokens (R4), whatever the other secrets, variables or prose.
+ccheck v-contour-other-secret-github-token     "" "$A|@secrets.GITHUB_TOKEN|R4"
+ccheck v-contour-other-secret-anthropic-key    "" "$A|@secrets.ANTHROPIC_API_KEY|R4"
+ccheck v-contour-other-secret-tojson           "" "$A|@toJSON(secrets)|R4"
+ccheck v-contour-other-secret-vars-parallel    "" "$A|@vars.TEAMWRIGHT_PARALLEL|R4"
+ccheck v-contour-other-secret-oauth-longer     "" "$A|@secrets.CLAUDE_CODE_OAUTH_TOKEN_2|R4"
+ccheck v-contour-other-secret-vars-longer      "" "$A|@vars.TEAMWRIGHT_AUTH_X|R4"
+ccheck v-contour-other-secret-prose            "" "$A|@# Secrets here|R4"
+ccheck v-contour-other-secret-oauth-in-next    "" "$N|@secrets.CLAUDE_CODE_OAUTH_TOKEN|R4"
+ccheck v-contour-other-secret-oauth-in-ci      "" "ci.yml|@# \${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}|R4"
+# The Telegram secrets, an escape, an unowned action, prose naming uses and a second release job.
+ccheck v-contour-telegram       "$A:R4" "$A|@secrets.TELEGRAM_BOT_TOKEN|R10"
+ccheck v-contour-escape         ""      "$A|@\\x41|R6"
+ccheck v-contour-unowned-uses   ""      "$A|@anthropics/claude-code-action|R11"
+ccheck v-contour-prose-uses     ""      "$A|@# this step uses the runner|R11"
+ccheck v-contour-release        "$A:R2 $A:R7" "$A|@  release:|R2"
 
 # ---- the real workflows dir -------------------------------------------------------------------
 run "real $real" 0 'ok:' "$real"
@@ -778,6 +909,63 @@ mutate trigger-no-paths-ignore '$0 == "    paths-ignore: [\"docs/tasks/**\"]" { 
   run "real with the push paths-ignore line deleted [R7]" 1 "$(at "$tmp/trigger-no-paths-ignore/ci.yml" "$(first_hdiff "$tmp/trigger-no-paths-ignore/ci.yml")" R7)" "$tmp/trigger-no-paths-ignore"
 mutate trigger-paths-wide '$0 == "    paths-ignore: [\"docs/tasks/**\"]" { $0 = "    paths-ignore: [\"docs/**\"]" } { print }' &&
   run "real with push paths-ignore widened to docs/** [R7]" 1 "$(at "$tmp/trigger-paths-wide/ci.yml" "$(first_hdiff "$tmp/trigger-paths-wide/ci.yml")" R7)" "$tmp/trigger-paths-wide"
+
+# T-202 (decisions #249, #253): the contour files in the real dir, and the dispatch trigger.
+# The owned head copies agree with the real files and with the fixtures (R14 cannot pass on a stale
+# copy), the dir holds exactly the three files, and ci.yml's header carries workflow_dispatch.
+chd=scripts/ci/contour-heads
+wd='  workflow_dispatch:'
+expect "real: the workflows dir holds exactly ci.yml, teamwright-agent.yml and teamwright-next.yml" \
+  test "$(ls -A "$real" | tr '\n' ' ')" = "ci.yml teamwright-agent.yml teamwright-next.yml "
+for cn in teamwright-agent.yml teamwright-next.yml; do
+  expect "owned head $chd/$cn exists, ends in its only jobs: line, holds one permissions: line" \
+    bash -c '[ -f "$1" ] && [ "$(tail -n 1 "$1")" = "jobs:" ] && [ "$(grep -c -x "jobs:" "$1")" = 1 ] && [ "$(grep -c -x "permissions:" "$1")" = 1 ]' _ "$chd/$cn"
+  expect "real: $cn header is the owned head $chd/$cn" \
+    bash -c '[ -f "$1" ] && [ -f "$2" ] && [ "$(awk "{ print } \$0 == \"jobs:\" { exit }" "$1")" = "$(cat "$2")" ]' _ "$real/$cn" "$chd/$cn"
+  expect "fixture ok-contour/$cn header is the owned head $chd/$cn" \
+    bash -c '[ -f "$2" ] && [ "$(awk "{ print } \$0 == \"jobs:\" { exit }" "$1")" = "$(cat "$2")" ]' _ "$fx/ok-contour/$cn" "$chd/$cn"
+  expect "real: $cn runs on the self-hosted runner and keeps no glob-able twin" \
+    bash -c 'grep -q -x -F "    runs-on: [self-hosted, Linux, X64, claude]" "$1"' _ "$real/$cn"
+done
+expect "owned head $chd/teamwright-agent.yml: no pull-requests, no id-token, no write-all" \
+  bash -c '[ -f "$1" ] && ! grep -q -E "pull-requests|id-token|write-all" "$1"' _ "$chd/teamwright-agent.yml"
+# A scope added to a real head is refused at the first changed header line (R14).
+for cn in teamwright-agent.yml teamwright-next.yml; do
+  mkdir -p "$tmp/real-scope-$cn"
+  cp -p "$real"/* "$tmp/real-scope-$cn/"
+  if [ -f "$real/$cn" ]; then
+    awk '{ print } !d && $0 == "  actions: write" { print "  packages: write"; d = 1 }' "$real/$cn" > "$tmp/real-scope-$cn/$cn"
+  fi
+  if [ -f "$real/$cn" ] && ! cmp -s "$real/$cn" "$tmp/real-scope-$cn/$cn"; then
+    l="$(grep -n -m 1 -x '  packages: write' "$tmp/real-scope-$cn/$cn" | cut -d: -f1)"
+    run "real $cn with packages: write added to its head [R14]" 1 "$(at "$tmp/real-scope-$cn/$cn" "${l:-0}" R14)" "$tmp/real-scope-$cn"
+  else
+    echo "FAIL real $cn with a scope added: the mutation did not apply ($real/$cn missing or has no '  actions: write' line)" >&2
+    failed=$((failed + 1))
+  fi
+done
+# The dispatch trigger (decisions #253, OQ-78 (a)): the owned header and the real ci.yml carry the
+# one line, every fixture header with the release job carries it (R7 compares bytes), the release
+# job, the upload and the Telegram send still require event_name == push (a dispatch publishes,
+# uploads and sends nothing), and ci.yml alone losing or doubling the line is refused by R7.
+expect "owned header $hdr: the line '$wd' occurs exactly once" test "$(grep -c -x -F -- "$wd" "$hdr")" = 1
+expect "real: ci.yml holds the line '$wd' exactly once, in its header" \
+  test "$(head_lines "$real/ci.yml" | grep -c -x -F -- "$wd")" = 1 -a "$(grep -c -x -F -- "$wd" "$real/ci.yml")" = 1
+nodisp=""
+for f in "$fx"/*/*; do
+  [ -f "$f" ] && grep -q -x '  release:' "$f" && ! head_lines "$f" | grep -q -x -F -- "$wd" && nodisp="$nodisp ${f#"$fx/"}"
+done
+expect "every fixture file holding the release job has '$wd' in its header (missing:${nodisp:- none})" test -z "$nodisp"
+for pf in "$upl" scripts/ci/release-job.yml; do
+  expect "$pf: still requires github.event_name == 'push' (a dispatch publishes and uploads nothing)" grep -q -F "github.event_name == 'push'" "$pf"
+done
+expect "$tgs: still requires github.event_name == 'push' (a dispatch sends nothing)" grep -q -F "github.event_name == 'push'" "$tgs"
+mutate dispatch-removed '$0 == "  workflow_dispatch:" { next } { print }' &&
+  run "real with the '$wd' line deleted from ci.yml alone [R7]" 1 "$(at "$tmp/dispatch-removed/ci.yml" "$(first_hdiff "$tmp/dispatch-removed/ci.yml")" R7)" "$tmp/dispatch-removed"
+mutate dispatch-doubled '{ print } $0 == "  pull_request:" { print "  workflow_dispatch:" }' &&
+  run "real with a second '$wd' line added to ci.yml alone [R7]" 1 "$(at "$tmp/dispatch-doubled/ci.yml" "$(first_hdiff "$tmp/dispatch-doubled/ci.yml")" R7)" "$tmp/dispatch-doubled"
+mutate dispatch-pr-target '{ print } $0 == "  pull_request:" { print "  pull_request_target:" }' &&
+  run "real with pull_request_target added to ci.yml alone [R7]" 1 "$(at "$tmp/dispatch-pr-target/ci.yml" "$(first_hdiff "$tmp/dispatch-pr-target/ci.yml")" R7)" "$tmp/dispatch-pr-target"
 
 # T-088: the owned list and fragments (R11) agree with the real ci.yml, and say what the retired
 # guards said (test-side reads of the guard's own copies; the guard checks them too, see below).
@@ -1157,6 +1345,67 @@ frag_ok g-frag-ok-anchor-alias-outside gate-setup-node.yml "ok: an anchor and an
   '' \
   '      VOICEN_V: &v "20.19"
       VOICEN_W: *v'
+
+# T-202: the owned head copies (R14) are guard inputs too: missing, empty, not ending in their only
+# jobs: line or holding no permissions: line is never a pass. cguard <name> builds the guard next to
+# its owned copies and a contour-heads dir made from the heads of ok-contour (the real copies are the
+# developer's; fixtures and copies are checked against each other above).
+cguard() {
+  mkdir -p "$tmp/$1/contour-heads"
+  if ! cp -p "$real_guard" scripts/ci/release-job.yml scripts/ci/release-header.yml "$upl" "$tgs" "$alines" "$tmp/$1/" ||
+     ! cp -pR "$csd" "$tmp/$1/"; then
+    echo "FAIL $1: cannot copy the guard and its owned copies (fix the test)" >&2
+    failed=$((failed + 1))
+    return 1
+  fi
+  head_lines "$fx/ok-contour/teamwright-agent.yml" > "$tmp/$1/contour-heads/teamwright-agent.yml"
+  head_lines "$fx/ok-contour/teamwright-next.yml" > "$tmp/$1/contour-heads/teamwright-next.yml"
+}
+# ccan <name> <label> <ERE>: the guard copy of $tmp/<name> on ok-contour is exit 3 naming contour-heads.
+ccan() {
+  guard="$tmp/$1/release-guard.sh"
+  run "$2" 3 "$3" "$fx/ok-contour"
+  guard="$real_guard"
+}
+if cguard g-contour-ok; then
+  guard="$tmp/g-contour-ok/release-guard.sh"
+  run "contour: the guard next to well-formed owned heads accepts ok-contour" 0 'ok:' "$fx/ok-contour"
+  guard="$real_guard"
+fi
+if cguard g-contour-no-files; then
+  rm -rf "$tmp/g-contour-no-files/contour-heads"
+  guard="$tmp/g-contour-no-files/release-guard.sh"
+  run "contour: no contour file in the dir, so the heads are not read (ok-release without the heads dir)" 0 'ok:' "$fx/ok-release"
+  guard="$real_guard"
+fi
+if cguard g-contour-dir-missing; then
+  rm -rf "$tmp/g-contour-dir-missing/contour-heads"
+  ccan g-contour-dir-missing "cannot run: contour-heads dir missing" 'cannot run.*contour-heads'
+fi
+if cguard g-contour-agent-missing; then
+  rm -f "$tmp/g-contour-agent-missing/contour-heads/teamwright-agent.yml"
+  ccan g-contour-agent-missing "cannot run: head copy of teamwright-agent.yml missing" 'cannot run.*contour-heads.*teamwright-agent\.yml'
+fi
+if cguard g-contour-next-missing; then
+  rm -f "$tmp/g-contour-next-missing/contour-heads/teamwright-next.yml"
+  ccan g-contour-next-missing "cannot run: head copy of teamwright-next.yml missing" 'cannot run.*contour-heads.*teamwright-next\.yml'
+fi
+if cguard g-contour-agent-empty; then
+  : > "$tmp/g-contour-agent-empty/contour-heads/teamwright-agent.yml"
+  ccan g-contour-agent-empty "cannot run: head copy of teamwright-agent.yml empty" 'cannot run.*contour-heads.*teamwright-agent\.yml'
+fi
+if cguard g-contour-agent-no-jobs; then
+  sed -i '$d' "$tmp/g-contour-agent-no-jobs/contour-heads/teamwright-agent.yml"
+  ccan g-contour-agent-no-jobs "cannot run: head copy of teamwright-agent.yml does not end in jobs:" 'cannot run.*contour-heads.*teamwright-agent\.yml'
+fi
+if cguard g-contour-next-jobs-mid; then
+  sed -i '1a jobs:' "$tmp/g-contour-next-jobs-mid/contour-heads/teamwright-next.yml"
+  ccan g-contour-next-jobs-mid "cannot run: head copy of teamwright-next.yml has jobs: before its last line" 'cannot run.*contour-heads.*teamwright-next\.yml'
+fi
+if cguard g-contour-next-no-permissions; then
+  sed -i '/^permissions:$/d' "$tmp/g-contour-next-no-permissions/contour-heads/teamwright-next.yml"
+  ccan g-contour-next-no-permissions "cannot run: head copy of teamwright-next.yml holds no permissions: line" 'cannot run.*contour-heads.*teamwright-next\.yml'
+fi
 
 # Every committed fixture dir is in the table.
 for d in "$fx"/*/; do

@@ -10,7 +10,7 @@ on:
     tags: ["v*"]
     paths-ignore: ["docs/tasks/**"]
   pull_request:
-  workflow_dispatch:
+  workflow_call:
 
 # A newer push to the same wip/<ID> cancels the run of the older head (P-016 counts only the
 # reviewed head). Other refs (main, tags, pull requests) get a group per run: a shared group

@@ -1,0 +1,25 @@
+name: Teamwright agent
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: teamwright-agent
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  issues: write
+  actions: write
+jobs:
+  agent:
+    runs-on: [self-hosted, Linux, X64, claude]
+    steps:
+      - uses: actions/checkout@v5
+      - name: Dispatch the chain CI run
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          TEAMWRIGHT_AUTH: ${{ vars.TEAMWRIGHT_AUTH }}
+          GH_TOKEN: ${{ github.token }}
+          X: ${{ vars.TEAMWRIGHT_PARALLEL }}
+        run: gh workflow run ci.yml --ref wip/T-000
