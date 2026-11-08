@@ -1,0 +1,8 @@
+guarantee: invariant: window_start_ms = sum of floored window lengths (audio contiguous, no drift on a short or ragged window)
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: task-validator round 6 (sample)
+--- old
+                    let len_ms = (audio.samples().len() / SAMPLES_PER_MS) as u64;
+--- new
+                    let len_ms = u64::from(ask);
+--- end

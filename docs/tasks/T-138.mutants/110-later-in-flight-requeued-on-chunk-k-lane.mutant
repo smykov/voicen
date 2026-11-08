@@ -1,0 +1,9 @@
+guarantee: AC 400 on chunk k makes every later chunk time-less; invariant: each track's lines come from its own audio (a later in-flight chunk of the other track is re-cut onto chunk k's lane)
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: task-validator round 6 (sample)
+--- old
+            self.lane(track).requeue(&chunk);
+--- new
+            let _ = track;
+            self.lane(sent.track).requeue(&chunk);
+--- end
