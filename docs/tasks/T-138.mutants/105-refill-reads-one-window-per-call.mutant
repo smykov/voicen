@@ -1,0 +1,8 @@
+guarantee: AC a primary Err never becomes empty spans or dropped audio; invariant: every window of each track goes through ChunkPlanner (a window that cuts no chunk ends dispatch, the rest of the track is never read)
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: task-validator round 5 (sample)
+--- old
+        while self.queue.is_empty() && !self.ended && self.live() {
+--- new
+        if self.queue.is_empty() && !self.ended && self.live() {
+--- end
