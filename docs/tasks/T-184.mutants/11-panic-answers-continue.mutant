@@ -1,0 +1,9 @@
+guarantee: failure branch: a panic in the abort poll counts as a stop, not as "keep running"
+file: crates/voicen-whisper/src/lib.rs
+added_by: test-writer
+expected: killed by panic_in_the_abort_poll_is_reported_aborted (the run continues and returns Ok instead of Err, 0 segments expected); not run: Windows CI only
+--- old
+    let answer = catch_unwind(AssertUnwindSafe(|| stop.abort.requested())).unwrap_or(true);
+--- new
+    let answer = catch_unwind(AssertUnwindSafe(|| stop.abort.requested())).unwrap_or(false);
+--- end
