@@ -17,13 +17,14 @@
 
 mod silero;
 
-pub use silero::SileroDetector;
+pub use silero::{vad_context_params_debug, SileroDetector};
 
 use std::collections::HashMap;
 use std::ffi::{c_int, c_void};
 use std::num::NonZero;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use voicen_core::engine::speech_model::{Abort, SpeechModel, SpeechModelLoader};
 use voicen_core::failure::FailureReason;
@@ -180,10 +181,18 @@ impl SpeechModel for WhisperModel {
             return Err(FailureReason::LocalEngineFailed);
         }
         let mut params = self.params_for(language)?;
-        let user_data = abort as *const Abort as *mut c_void;
-        // SAFETY: both callbacks only read the `Abort` behind `user_data`, which outlives the
-        // synchronous `full` call below that is the only user of `params`; `Abort` is `Sync`,
-        // so ggml's compute threads may call `abort_requested` concurrently.
+        // T-184: this run's stop latch. Only the stop callbacks read `abort`, and they set
+        // `stopped` on every "stop" they answer; the result is decided on it, never on a
+        // clock read after `full` (that read would latch `Abort::fired` on a finished run).
+        let stop = StopRecord {
+            abort,
+            stopped: AtomicBool::new(false),
+        };
+        let user_data = &stop as *const StopRecord<'_> as *mut c_void;
+        // SAFETY: both callbacks only read the `StopRecord` behind `user_data`, which outlives
+        // the synchronous `full` call below that is the only user of `params`; `StopRecord`
+        // is `Sync` (`&Abort` and an atomic), so ggml's compute threads may call
+        // `abort_requested` concurrently.
         unsafe {
             params.set_abort_callback(Some(abort_requested));
             params.set_abort_callback_user_data(user_data);
@@ -193,8 +202,10 @@ impl SpeechModel for WhisperModel {
         let ran = self.state.full(params, pcm);
         // Recorded before any early return: the abort and error paths count too (T-109 I3).
         self.last_segments = usize::try_from(self.state.full_n_segments()).unwrap_or(0);
-        if abort.requested() {
-            // Ignored by the engine, which reports Timeout (decision #133).
+        if stop.stopped.load(Ordering::SeqCst) {
+            // A callback answered "stop": `Abort::fired` is set, and the engine reports
+            // Timeout (decision #133). whisper.cpp may still have returned 0 (an encoder-begin
+            // stop only ends the window loop), so this is decided before `ran`.
             return Err(FailureReason::LocalEngineFailed);
         }
         ran.map_err(|_| FailureReason::LocalEngineFailed)?;
@@ -228,13 +239,25 @@ fn thread_count() -> c_int {
     c_int::try_from(thread_count_for(p)).unwrap_or(1)
 }
 
-/// Whether `user_data` (an `&Abort`) asks to stop; a panic counts as a stop.
+/// One transcription's stop record (T-184): the `Abort` the stop callbacks poll, and whether
+/// any of them answered "stop" during this run.
+struct StopRecord<'a> {
+    abort: &'a Abort,
+    stopped: AtomicBool,
+}
+
+/// Whether `user_data` (a `&StopRecord`) asks to stop; a panic counts as a stop. Every
+/// "stop" is recorded in the record before it is answered, so `transcribe` sees it.
 fn requested(user_data: *mut c_void) -> bool {
-    // SAFETY: `transcribe` sets `user_data` to an `&Abort` that lives through `full`.
-    let Some(abort) = (unsafe { (user_data as *const Abort).as_ref() }) else {
+    // SAFETY: `transcribe` sets `user_data` to a `&StopRecord` that lives through `full`.
+    let Some(stop) = (unsafe { (user_data as *const StopRecord<'_>).as_ref() }) else {
         return true;
     };
-    catch_unwind(AssertUnwindSafe(|| abort.requested())).unwrap_or(true)
+    let answer = catch_unwind(AssertUnwindSafe(|| stop.abort.requested())).unwrap_or(true);
+    if answer {
+        stop.stopped.store(true, Ordering::SeqCst);
+    }
+    answer
 }
 
 /// ggml's abort callback: true stops the running graph. whisper.cpp checks it only after the

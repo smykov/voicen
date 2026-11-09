@@ -1,0 +1,19 @@
+guarantee: failure branch: a panic in the abort poll counts as a reported stop (stop latch, swallow at origin)
+file: crates/voicen-whisper/src/lib.rs
+added_by: developer
+expected: killed by panic_in_the_abort_poll_is_reported_aborted (Ok("") instead of Err); not run: Windows CI only
+--- old
+    let answer = catch_unwind(AssertUnwindSafe(|| stop.abort.requested())).unwrap_or(true);
+    if answer {
+        stop.stopped.store(true, Ordering::SeqCst);
+    }
+    answer
+--- new
+    let Ok(answer) = catch_unwind(AssertUnwindSafe(|| stop.abort.requested())) else {
+        return true;
+    };
+    if answer {
+        stop.stopped.store(true, Ordering::SeqCst);
+    }
+    answer
+--- end

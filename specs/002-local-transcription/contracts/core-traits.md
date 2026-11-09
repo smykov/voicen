@@ -14,7 +14,8 @@ pub trait SpeechModelLoader: Send + Sync {
 
 pub trait SpeechModel: Send {
     /// Blocking. `pcm`: 16 kHz mono f32 in [-1, 1]. `language`: None = auto-detect, Some("ru") = fixed.
-    /// Polls `abort` while it runs and stops once `abort.requested()` is true (decision #133).
+    /// Polls `abort` while it runs, only at its stop points (never before or after the work, T-184),
+    /// and stops once `abort.requested()` is true (decision #133).
     fn transcribe(&mut self, pcm: &[f32], language: Option<&str>, abort: &Abort)
         -> Result<String, FailureReason>;
 }

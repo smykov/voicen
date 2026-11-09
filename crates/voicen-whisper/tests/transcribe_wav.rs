@@ -446,6 +446,44 @@ fn abort_at_a_stop_point_inside_the_run_is_reported() {
     );
 }
 
+/// A monotonic clock whose every read panics: a broken abort hook.
+struct PanickingClock;
+
+impl MonotonicClock for PanickingClock {
+    fn now(&self) -> Instant {
+        panic!("test clock: no reading")
+    }
+}
+
+/// T-184 failure branch (added by the developer for the stop latch): a panic inside the
+/// abort poll counts as "stop" and is reported as one. The first poll is whisper.cpp's
+/// encoder-begin callback, whose "stop" only ends the window loop (`whisper_full` returns 0),
+/// so only the run's stop record can turn it into an error.
+/// Bite: a panic answered "stop" but not recorded (catalog 09).
+#[test]
+fn panic_in_the_abort_poll_is_reported_aborted() {
+    let _serial = serial();
+    let mut model = load_tiny_with_threads(1);
+    let abort = Abort::new(
+        Arc::new(PanickingClock),
+        SystemMonotonic.now(),
+        Duration::from_secs(1),
+    );
+
+    let result = model.transcribe(&long_audio(60), Some("en"), &abort);
+
+    assert_eq!(
+        result.err(),
+        Some(FailureReason::LocalEngineFailed),
+        "a run stopped by a panicking abort poll must be an error"
+    );
+    assert_eq!(
+        model.last_segment_count(),
+        0,
+        "the panicking poll did not stop whisper_full before its first window"
+    );
+}
+
 // ---- T-184 (T-099 v3#N3): model test gaps ----------------------------------------------
 
 fn mentions(text: &str) -> usize {

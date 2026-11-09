@@ -1,6 +1,6 @@
 # Built-in engine (whisper.cpp threads and abort)
 
-**Code:** `crates/voicen-whisper/src/lib.rs` (`BEST_THREADS`, `thread_count_for`, `thread_count`, `WhisperModel::transcribe`), `crates/voicen-whisper/src/silero.rs` (`VAD_THREADS`) · **Tests that pin it:** `transcribe_wav.rs`: `thread_policy_is_at_least_one_and_below_parallelism`, `loader_uses_the_policy_and_with_threads_overrides_it`, `pre_requested_abort_returns_promptly`, `MODEL_LOCK` / `serial()` on every model test, print-only `whisper_timing_is_printed`
+**Code:** `crates/voicen-whisper/src/lib.rs` (`BEST_THREADS`, `thread_count_for`, `thread_count`, `WhisperModel::transcribe`), `StopRecord`, `requested`), `crates/voicen-whisper/src/silero.rs` (`VAD_THREADS`, `vad_context_params`) · **Tests that pin it:** `transcribe_wav.rs`: `thread_policy_is_at_least_one_and_below_parallelism`, `loader_uses_the_policy_and_with_threads_overrides_it`, `pre_requested_abort_returns_promptly`, `run_that_ends_without_a_stop_point_returns_its_transcript`, `abort_at_a_stop_point_inside_the_run_is_reported`; `MODEL_LOCK` / `serial()` on every model test, print-only `whisper_timing_is_printed`; `silero_clips.rs`: `vad_context_runs_one_ggml_thread`
 
 Why: the engine ran about 16 ggml threads on 4 vCPUs and one 1 s clip took about 90 s (T-109; `transcribe_wav` 280.73 s, run 40030080179). No test went red, so there is no F-entry for this class.
 
@@ -14,7 +14,7 @@ ggml's CPU barrier (`ggml_barrier`, whisper.cpp 1.8.3 in whisper-rs-sys 0.15.0) 
 
 - **Defect that produced it:** T-043 review 1 #1: Silero at 4 threads cost minutes per clip set; on 4 pinned CPUs with 4 detectors at once about 48 s per decision against about 20 ms at 1 thread (figures and conditions in the `VAD_THREADS` doc comment).
 - **What breaks if you violate it:** the decision, which runs next to a transcription, stalls both.
-- **Where it is enforced:** one constant, `VAD_THREADS = 1`, in `silero.rs`; the detector is not routed through `thread_count`.
+- **Where it is enforced:** one constant, `VAD_THREADS = 1`, in `silero.rs`, applied by the one params constructor `vad_context_params` that `SileroDetector::open` uses; the detector is not routed through `thread_count`. `vad_context_params_debug` (`doc(hidden)`, same constructor) lets `vad_context_runs_one_ggml_thread` read `n_threads: 1,` from the params' `Debug` text (whisper.cpp has no getter, T-184). That pins the value handed to whisper.cpp, not the runtime cost, which stays timing-only and printed (F-013).
 - **Don't:** give the detector the engine's count, or "a few threads for speed".
 
 ### The engine's thread count comes from one policy function
@@ -53,6 +53,15 @@ A run whose `Abort` is already requested leaves whisper.cpp's segment count for 
 - **Mel caveat:** `whisper_full_with_state` computes the mel of the whole input before any callback runs, so that part is not abortable and grows with the audio length. The assertion does not cover it, by design. It also does not tell apart "only `encoder_may_start` removed" (the first encoder graph runs to its end, then the abort check after it returns with 0 segments) from the intact code; whisper.cpp exposes no per-state encode count.
 - **Don't:** put a time bound back; count inside the stop callbacks (the counter vanishes with them); use `whisper_get_timings` (null under whisper-rs's no-state init, and wall-clock anyway).
 
+### A run is reported aborted iff a stop callback answered "stop" (T-184)
+
+`WhisperModel::transcribe` hands both stop callbacks a per-run `StopRecord` (`&Abort` plus a `stopped` flag); `requested` sets `stopped` on every "stop" it answers, a panic included, and `transcribe` decides on `stopped` first, then on `whisper_full`'s result. It never reads `Abort::requested` before or after `whisper_full`.
+
+- **Defect that produced it:** T-099 r1#4: a post-`full` `abort.requested()` decided "aborted"; it latched `Abort::fired`, and `ModelGuard::transcribe_within` reports `Timeout` on `fired`, so a run that finished with every callback answering "go on" but returned past the limit lost its transcript. No red run, so no F-entry.
+- **What breaks if you violate it:** any clock read outside a stop callback latches `fired`, and the residency turns a finished run into `Timeout`. Deciding on `whisper_full`'s result alone is also wrong: an encoder-begin "stop" only ends the window loop, and `whisper_full` returns 0 with partial segments.
+- **Where it is enforced:** `run_that_ends_without_a_stop_point_returns_its_transcript` (50 ms of audio, no callback runs, a clock that is always expired: `Ok` and 0 clock reads) and `abort_at_a_stop_point_inside_the_run_is_reported` (expired from the 2nd read: `Err`, reads >= 2); `pre_requested_abort_returns_promptly` pins the encoder-begin stop, `panic_in_the_abort_poll_is_reported_aborted` a panicking poll. Mutants `docs/tasks/T-184.mutants/08`-`10` (a stop not recorded, a panic not recorded, a post-`full` read kept), Windows CI.
+- **Don't:** add a "late check" of the abort after `whisper_full`; decide on `Abort::fired` from the model (a core API change, and a `requested` panic would not be latched).
+
 ## Rejected approaches
 
 | Approach | Why rejected | Ref |
@@ -63,6 +72,7 @@ A run whose `Abort` is already requested leaves whisper.cpp's segment count for 
 | B = 4 | 3182 ms against 3078 ms at 2 threads for 30 s: no gain, one more spinning thread | #213 |
 | Progress-callback counter or encoder counter for the abort test | adds a production callback only for the test; shows nothing the segment count misses | T-109 analysis |
 | Counter inside the stop callbacks | disappears with them: the v3#N2 mutant would read 0 and pass | T-099 v3#N2 |
+| Post-`full` `abort.requested()` as the abort decision | latches `fired` on a finished run, which the residency reports as `Timeout` | T-184 |
 | Test-clock stepping (`Abort::requested` latches) | reads after the stop are not counted, so post-stop work is invisible | T-109 analysis |
 | User setting or env variable for the thread count | product surface for a tuning knob | #200 D2 |
 

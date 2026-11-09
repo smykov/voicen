@@ -25,10 +25,11 @@ pub trait SpeechModelLoader: Send + Sync {
 /// A loaded model. Dropping the box unloads it.
 pub trait SpeechModel: Send {
     /// Transcribes 16 kHz mono f32 samples in `[-1, 1]`. `language` is an ISO
-    /// 639-1 code, `None` = auto-detect. The model polls `abort` while it runs and
-    /// stops as soon as [`Abort::requested`] is true (decision #133: the built-in
-    /// limit covers the transcription only); what it returns then is ignored, the
-    /// engine reports `Timeout`.
+    /// 639-1 code, `None` = auto-detect. The model polls `abort` while it runs, only at
+    /// its stop points (never before or after the work: a read latches the hook, and the
+    /// engine then reports `Timeout` for a finished run, T-184), and stops as soon as
+    /// [`Abort::requested`] is true (decision #133: the built-in limit covers the
+    /// transcription only); what it returns then is ignored, the engine reports `Timeout`.
     fn transcribe(
         &mut self,
         pcm: &[f32],

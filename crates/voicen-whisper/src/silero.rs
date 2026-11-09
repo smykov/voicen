@@ -84,9 +84,7 @@ impl SileroDetector {
         if !cpu_supported() {
             return Err(VadError::Unavailable);
         }
-        let mut params = WhisperVadContextParams::new();
-        params.set_use_gpu(false);
-        params.set_n_threads(VAD_THREADS);
+        let params = vad_context_params();
         let context = catch_unwind(|| WhisperVadContext::new(path, params))
             .map_err(|_| VadError::Unavailable)?
             .map_err(|_| VadError::Unavailable)?;
@@ -146,6 +144,23 @@ impl SileroDetector {
         }))
         .map_err(|_| VadError::Failed)?
     }
+}
+
+/// The native context parameters of every detector, their one constructor: CPU only, and
+/// [`VAD_THREADS`] ggml threads.
+fn vad_context_params() -> WhisperVadContextParams {
+    let mut params = WhisperVadContextParams::new();
+    params.set_use_gpu(false);
+    params.set_n_threads(VAD_THREADS);
+    params
+}
+
+/// Test-only (T-184): the `Debug` text of the context parameters [`SileroDetector::open`]
+/// hands whisper.cpp (built by the same constructor), so a test can read their thread count;
+/// whisper.cpp has no getter for it. Needs no model file and makes no native call.
+#[doc(hidden)]
+pub fn vad_context_params_debug() -> String {
+    format!("{:?}", vad_context_params())
 }
 
 /// Whether this CPU runs the whisper.cpp build (AVX2 baseline on x86, decision #142).

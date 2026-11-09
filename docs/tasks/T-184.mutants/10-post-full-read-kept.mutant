@@ -1,0 +1,9 @@
+guarantee: AC-1: no clock read after whisper_full decides the result
+file: crates/voicen-whisper/src/lib.rs
+added_by: developer
+expected: killed by run_that_ends_without_a_stop_point_returns_its_transcript (Err and 1 clock read); not run: Windows CI only
+--- old
+        if stop.stopped.load(Ordering::SeqCst) {
+--- new
+        if stop.stopped.load(Ordering::SeqCst) || abort.requested() {
+--- end

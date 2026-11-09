@@ -1,0 +1,9 @@
+guarantee: failure branch: a "stop" answered by a callback is reported (stop latch, swallow at origin)
+file: crates/voicen-whisper/src/lib.rs
+added_by: developer
+expected: killed by pre_requested_abort_returns_promptly (Ok("") instead of Err: the encoder-begin stop makes whisper_full return 0) and panic_in_the_abort_poll_is_reported_aborted; not run: Windows CI only
+--- old
+        stop.stopped.store(true, Ordering::SeqCst);
+--- new
+        let _ = &stop.stopped;
+--- end
