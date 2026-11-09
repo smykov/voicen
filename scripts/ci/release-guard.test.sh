@@ -930,6 +930,24 @@ for cn in teamwright-agent.yml teamwright-next.yml; do
 done
 expect "owned head $chd/teamwright-agent.yml: no pull-requests, no id-token, no write-all" \
   bash -c '[ -f "$1" ] && ! grep -q -E "pull-requests|id-token|write-all" "$1"' _ "$chd/teamwright-agent.yml"
+# T-202 review 1 findings 1 and 2: the stage session never holds the job token, and the push
+# step's pause check reads a file the owner controls, with the hooks of the pre-session commit.
+# ag_step <title>: the lines of the agent's step "      - name: <title>" up to the next step.
+ag=$real/teamwright-agent.yml
+ag_step() { awk -v t="      - name: $1" '$0 == t { s = 1; print; next } s && /^      - / { exit } s { print }' "$ag"; }
+ag_push='Push task/<ID>, and wip/<ID> after implement'
+expect "real agent: one checkout, and its with: holds persist-credentials: false (the token stays out of .git/config)" \
+  bash -c '[ "$(grep -c -F "uses: actions/checkout@" "$1")" = 1 ] && awk "/^      - uses: actions\/checkout@/ { s = 1; next } s && /^      - / { exit } s && \$0 == \"          persist-credentials: false\" { f = 1 } END { exit !f }" "$1"' _ "$ag"
+expect "real agent: github.token occurs only in the steps after the stage (push and chain), never at job level" \
+  bash -c 'c="$(grep -n -m 1 -x -F "      - name: Did the stage commit?" "$1" | cut -d: -f1)"; [ -n "$c" ] && ! awk -v c="$c" "NR < c && /github\\.token|GH_TOKEN|GITHUB_TOKEN/ { f = 1 } END { exit !f }" "$1"' _ "$ag"
+expect "real agent: the stage step runs claude without the runner's environment-file paths" \
+  bash -c 'grep -q -E "^ +env -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_OUTPUT -u GITHUB_STATE claude " "$1"' _ "$ag"
+expect "real agent: the push step's env sets TEAMWRIGHT_PAUSE_FILE to the owner's runner-host file /etc/teamwright/voicen.pause" \
+  bash -c 'grep -q -x -F "          TEAMWRIGHT_PAUSE_FILE: /etc/teamwright/voicen.pause" <<<"$1"' _ "$(ag_step "$ag_push")"
+expect "real agent: the push step takes its token from its own env and the hooks from the pre-session commit, not install-hooks.sh" \
+  bash -c 'grep -q -x -F "          PUSH_TOKEN: \${{ github.token }}" <<<"$1" && grep -q -F "git archive \"\$BEFORE\" scripts/hooks" <<<"$1" && grep -q -F "core.hooksPath=" <<<"$1" && ! grep -q -F "install-hooks.sh" <<<"$1"' _ "$(ag_step "$ag_push")"
+expect "real agent: the push step reads BEFORE from the branch step's output (an env file the session can write does not decide)" \
+  bash -c 'grep -q -x -F "          BEFORE: \${{ steps.branch.outputs.before }}" <<<"$1"' _ "$(ag_step "$ag_push")"
 # A scope added to a real head is refused at the first changed header line (R14).
 for cn in teamwright-agent.yml teamwright-next.yml; do
   mkdir -p "$tmp/real-scope-$cn"

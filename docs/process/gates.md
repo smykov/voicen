@@ -544,6 +544,25 @@ contour job sets `TEAMWRIGHT_WIP_REFS_RE='^refs/heads/(wip|task)/'` in its push 
 its `task/<ID>` push is not a delivery either; the pause check runs before this exit and
 still applies (T-202, decisions #253).
 
+**Pausing the contour (T-202 review 1 finding 2).** The contour's checkout never holds a
+`TEAMWRIGHT_PAUSE` (the name is in `.gitignore`, and the checkout's `git clean -ffdx` runs on
+every run), so its push step sets `TEAMWRIGHT_PAUSE_FILE=/etc/teamwright/voicen.pause`, a
+runner-host path in a root-owned directory that the session (the runner's OS user) cannot
+remove. The owner pauses the contour's pushes on the runner host with
+`sudo mkdir -p /etc/teamwright && sudo touch /etc/teamwright/voicen.pause`, and resumes with
+`sudo rm /etc/teamwright/voicen.pause`. A paused push leaves the stage's commits on the runner
+only, and the chain stops ("task/<ID> was not pushed"). `gh workflow disable teamwright-agent.yml`
+(and `teamwright-next.yml`) is the coarse stop: no new stage starts at all. The push step runs
+the `pre-push` of the pre-session commit, taken with `git archive` into a fresh directory and
+named with `-c core.hooksPath`, not the hooks of the session's own tree. So a session commit
+that edits `scripts/hooks/pre-push` does not change the check of its own push.
+
+**Contour review and the `CI:` line (open, OQ-83).** The dispatcher starts the `ci.yml` run of
+`wip/<ID>` after implement. The contour's review session has no sanctioned way to read that run:
+`scripts/tw-wip-run` accepts only branch `tw/<ID>`, while the contour works on `task/<ID>`, and
+the session holds no `GH_TOKEN`. Until OQ-83 is decided, the P-016 `CI: <run> @ <sha>` line of a
+contour task is added in the main tree (the orchestrator's plain `gh`) before `CODE_COMPLETE`.
+
 **Deliberate exits:** `tail_code: ratified` in the task record (owner's decision, stays
 in history); human, one-off: `TEAMWRIGHT_ALLOW_PUSH=1 git push`.
 

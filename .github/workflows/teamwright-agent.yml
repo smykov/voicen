@@ -68,6 +68,10 @@ jobs:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
+          # The token stays out of .git/config: the stage session runs in this tree and holds no
+          # job token (the repository is public, its fetches need none). Only the push step and
+          # the chain steps after the session get it, each in its own env.
+          persist-credentials: false
 
       - name: The task fits this stage
         env:
@@ -99,6 +103,7 @@ jobs:
           echo "$TASK_ID: status $status, stage $STAGE"
 
       - name: Task branch, git hooks, the kit
+        id: branch
         run: |
           set -euo pipefail
           git config user.name "teamwright-agent"
@@ -111,7 +116,8 @@ jobs:
             git checkout -q -b "$branch"
           fi
           echo "BRANCH=$branch" >> "$GITHUB_ENV"
-          echo "BEFORE_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          # A step output, not GITHUB_ENV: the session cannot change it after this step.
+          echo "before=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           # core.hooksPath is local config a checkout does not bring: without it the session's
           # commits pass no gate and a push no pause check.
           bash scripts/install-hooks.sh
@@ -172,31 +178,64 @@ jobs:
           set -euo pipefail
           # The Claude Code CLI of the runner host (no third-party action in the job).
           command -v claude >/dev/null 2>&1 || { echo "No claude CLI on the runner" > "$OUT/preflight.md"; exit 1; }
-          claude -p "/teamwright:$STAGE $TASK_ID" --model "$MODEL" --max-turns 200 --plugin-dir "$TEAMWRIGHT_PLUGIN_DIR" --mcp-config "$RUNNER_TEMP/mcp.json" --strict-mcp-config --permission-mode acceptEdits --allowedTools "Bash,Read,Edit,Write,Glob,Grep,Agent,Task,TodoWrite,Skill,mcp__serena,mcp__context7" --append-system-prompt "$SYSTEM_PROMPT" --output-format stream-json --verbose > "$OUT/session.jsonl"
+          # Without the paths of the runner's environment files: the session sets nothing for the
+          # steps after it (the push step pins its own env).
+          env -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_OUTPUT -u GITHUB_STATE claude -p "/teamwright:$STAGE $TASK_ID" --model "$MODEL" --max-turns 200 --plugin-dir "$TEAMWRIGHT_PLUGIN_DIR" --mcp-config "$RUNNER_TEMP/mcp.json" --strict-mcp-config --permission-mode acceptEdits --allowedTools "Bash,Read,Edit,Write,Glob,Grep,Agent,Task,TodoWrite,Skill,mcp__serena,mcp__context7" --append-system-prompt "$SYSTEM_PROMPT" --output-format stream-json --verbose > "$OUT/session.jsonl"
           echo "The session ended; its stream is in $OUT/session.jsonl on the runner."
 
       - name: Did the stage commit?
         id: commits
         if: always() && steps.claude.outcome == 'success'
-        run: echo "count=$(git rev-list --count "$BEFORE_SHA..HEAD")" >> "$GITHUB_OUTPUT"
+        env:
+          BEFORE: ${{ steps.branch.outputs.before }}
+        run: echo "count=$(git rev-list --count "$BEFORE..HEAD")" >> "$GITHUB_OUTPUT"
 
       - name: Push task/<ID>, and wip/<ID> after implement
+        id: push
         if: always() && steps.claude.outcome == 'success' && steps.commits.outputs.count != '0'
         timeout-minutes: 30
         env:
           # decisions #253 (OQ-79 a): a contour push of task/<ID> or wip/<ID> is not a delivery,
           # so pre-push skips DRAIN for it; its pause check runs first all the same. This step only.
           TEAMWRIGHT_WIP_REFS_RE: '^refs/heads/(wip|task)/'
+          # The owner's pause (docs/process/gates.md): a file on the runner host, in a root-owned
+          # dir outside the checkout, so neither git clean nor the session removes it.
+          TEAMWRIGHT_PAUSE_FILE: /etc/teamwright/voicen.pause
+          TEAMWRIGHT_ALLOW_PUSH: ""
+          BASH_ENV: ""
+          # The job token, in this step only (the checkout does not persist it).
+          PUSH_TOKEN: ${{ github.token }}
+          BEFORE: ${{ steps.branch.outputs.before }}
+          TASK_ID: ${{ inputs.task_id }}
+          STAGE: ${{ inputs.stage }}
+          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          # Again after the session, right before the push: pre-push and its pause check exist.
-          bash scripts/install-hooks.sh
-          bash scripts/install-hooks.sh --check
-          git push origin "HEAD:refs/heads/$BRANCH"
+          export PATH=/usr/local/bin:/usr/bin:/bin GIT_NO_REPLACE_OBJECTS=1
+          [[ "$TASK_ID" =~ ^T-[0-9]{3,}$ ]] || { echo "::error::bad task id"; exit 1; }
+          [[ "$BEFORE" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::bad pre-session commit"; exit 1; }
+          # A fresh repository: no config, hook or replace ref of the session's tree takes part.
+          # The hooks are the pre-session commit's, fetched from GitHub, so a session commit that
+          # edits scripts/hooks/pre-push does not change the check of its own push.
+          pub="$(mktemp -d "$RUNNER_TEMP/push.XXXXXX")"
+          hooks="$(mktemp -d "$RUNNER_TEMP/hooks.XXXXXX")"
+          url="https://github.com/$REPO.git"
+          git init -q "$pub"
+          cd "$pub"
+          git fetch -q "$url" "$BEFORE"
+          git fetch -q "$GITHUB_WORKSPACE" "+HEAD:refs/heads/stage"
+          git merge-base --is-ancestor "$BEFORE" stage || { echo "::error::the stage commits do not descend from $BEFORE"; exit 1; }
+          git archive "$BEFORE" scripts/hooks | tar -x -C "$hooks"
+          [ -x "$hooks/scripts/hooks/pre-push" ] || { echo "::error::no pre-push hook in $BEFORE"; exit 1; }
+          # The token as a one-shot extraheader from the environment: no git config file holds it.
+          auth="$(printf 'x-access-token:%s' "$PUSH_TOKEN" | base64 -w0)"
+          unset PUSH_TOKEN
+          export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $auth"
+          git -c core.hooksPath="$hooks/scripts/hooks" push "$url" "stage:refs/heads/task/$TASK_ID"
           if [ "$STAGE" = implement ]; then
-            git push --force origin "HEAD:refs/heads/wip/$TASK_ID"
+            git -c core.hooksPath="$hooks/scripts/hooks" push --force "$url" "stage:refs/heads/wip/$TASK_ID"
           fi
-          echo "PUSHED=1" >> "$GITHUB_ENV"
+          echo "pushed=1" >> "$GITHUB_OUTPUT"
 
       - name: "Chain: the next stage"
         if: always() && steps.claude.outcome == 'success'
@@ -204,6 +243,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           COMMITS: ${{ steps.commits.outputs.count }}
+          PUSHED: ${{ steps.push.outputs.pushed }}
         run: |
           say() {
             echo "$1" >> "$GITHUB_STEP_SUMMARY"
@@ -234,7 +274,8 @@ jobs:
           msg="**$TASK_ID**: stage $STAGE failed: $RUN_URL. To continue, start teamwright-next.yml for $TASK_ID by hand."
           [ ! -f "$OUT/preflight.md" ] || msg="$msg $(cat "$OUT/preflight.md")"
           echo "$msg" >> "$GITHUB_STEP_SUMMARY"
-          [ -z "$ISSUE" ] || gh issue comment "$ISSUE" -R "$REPO" --body "$msg" >/dev/null || true
+          # This step also runs when the input check failed: an unchecked ISSUE gets no comment.
+          [[ "$ISSUE" =~ ^[0-9]+$ ]] && { gh issue comment "$ISSUE" -R "$REPO" --body "$msg" >/dev/null || true; }
           exit 0
 
       - name: Keep the session for analysis

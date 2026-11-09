@@ -189,9 +189,13 @@
 # a quote inside the fragment, which leaves text after a closed scalar (invalid, loud);
 # R14's limits (T-202): R14 pins the contour heads, not their steps: a contour step runs gh and
 # any command with the job token of its head (contents write in teamwright-agent.yml) and the
-# OAuth secret, and the checkout persists that token in the git config, so the stage session can
-# push; what keeps main safe is the repository ruleset and the hooks the push step installs, not
-# this guard (docs/decisions/ci-toolchain.md).
+# OAuth secret. The stage session holds no job token (the checkout sets persist-credentials:
+# false; only the push and chain steps after the session get it in their own env) and the push
+# step runs the pre-push of the pre-session commit with an owner pause file outside the checkout;
+# release-guard.test.sh pins these in the real file, this guard does not read them. Not caught:
+# a process the session leaves running as the runner's OS user (it can read a later step's
+# token) and the runner's env files written directly; what keeps main safe from a contour step
+# is the repository ruleset, not this guard (docs/decisions/ci-toolchain.md).
 #
 # Usage: scripts/ci/release-guard.sh <workflows-dir>
 # Exit 0: ok. Exit 1: a violation, each listed as "<workflows-dir>/<file>:<line>: R<n>: <why>"
