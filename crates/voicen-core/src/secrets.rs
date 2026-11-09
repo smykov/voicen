@@ -78,23 +78,37 @@ pub struct CredentialEntry {
     pub kind: u32,
 }
 
+/// What [`CredentialNamespace::list`] found (T-167): the entries it could name, and
+/// how many matching targets it could not (a null or not valid UTF-16 target name,
+/// which cannot be passed back to the delete call). Only the count of those is known.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Listing {
+    pub entries: Vec<CredentialEntry>,
+    pub unreadable: usize,
+}
+
 /// The part of the credential store a purge needs (T-061): enumerate by prefix and
 /// remove one entry. The Windows impl (`CredEnumerateW` / `CredDeleteW`) lives in
 /// `src-tauri` (`win::purge`).
 pub trait CredentialNamespace {
-    /// Every entry whose target starts with `prefix`.
-    fn list(&self, prefix: &str) -> Result<Vec<CredentialEntry>, CredentialError>;
+    /// Every entry whose target starts with `prefix`, plus the count of matching
+    /// targets that could not be named. One unnamed target never fails the listing.
+    fn list(&self, prefix: &str) -> Result<Listing, CredentialError>;
     /// Deletes `entry` (its own target and type).
     fn remove(&self, entry: &CredentialEntry) -> Result<(), CredentialError>;
 }
 
 /// Removes every entry whose target starts with `store_prefix` +
-/// [`CREDENTIAL_TARGET_PREFIX`]; the process exit code: 0 = all removed or none
-/// existed, 2 = at least one failed (contracts/installer-ci.md).
+/// [`CREDENTIAL_TARGET_PREFIX`], compared ignoring ASCII case (Credential Manager
+/// target names are case-insensitive, so `voicen/x` is the app's `Voicen/x`); the
+/// process exit code: 0 = all removed or none existed, 2 = at least one failed or
+/// could not be named (contracts/installer-ci.md).
 ///
 /// - A listed entry whose target does not start with the prefix is never removed
-///   (the enumeration filter cannot widen the scope).
-/// - Every entry is tried once, also after a failed one.
+///   (the enumeration filter cannot widen the scope). Only ASCII letters are folded;
+///   every other byte compares exactly.
+/// - Every named entry is tried once, also after a failed one and also when the
+///   listing reported unnamed targets (`Listing::unreadable > 0`, then exit 2).
 /// - `ERROR_NOT_FOUND` from `list` means nothing to remove; from `remove`, the entry
 ///   is already gone. Any other list failure removes nothing and returns 2.
 ///
@@ -103,13 +117,17 @@ pub fn purge_credentials(namespace: &dyn CredentialNamespace, store_prefix: &str
     const OK: i32 = 0;
     const FAILED: i32 = 2;
     let prefix = format!("{store_prefix}{CREDENTIAL_TARGET_PREFIX}");
-    let entries = match namespace.list(&prefix) {
-        Ok(entries) => entries,
+    let listing = match namespace.list(&prefix) {
+        Ok(listing) => listing,
         Err(err) if err.os_code == ERROR_NOT_FOUND => return OK,
         Err(_) => return FAILED,
     };
-    let mut code = OK;
-    for entry in entries.iter().filter(|e| e.target.starts_with(&prefix)) {
+    let mut code = if listing.unreadable > 0 { FAILED } else { OK };
+    for entry in listing
+        .entries
+        .iter()
+        .filter(|e| starts_with_ignoring_ascii_case(&e.target, &prefix))
+    {
         match namespace.remove(entry) {
             Ok(()) => {}
             Err(err) if err.os_code == ERROR_NOT_FOUND => {}
@@ -117,6 +135,15 @@ pub fn purge_credentials(namespace: &dyn CredentialNamespace, store_prefix: &str
         }
     }
     code
+}
+
+/// `target` starts with `prefix`, ASCII letters compared case-insensitively. Byte
+/// based: an ASCII case change keeps the byte length, so no char boundary is cut.
+fn starts_with_ignoring_ascii_case(target: &str, prefix: &str) -> bool {
+    target
+        .as_bytes()
+        .get(..prefix.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(prefix.as_bytes()))
 }
 
 /// Win32 `ERROR_NOT_FOUND`: the credential store's "no such entry".

@@ -9,16 +9,15 @@
 use std::ffi::OsStr;
 
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::{ERROR_INVALID_DATA, WIN32_ERROR};
 use windows::Win32::Security::Credentials::{
     CredDeleteW, CredEnumerateW, CredFree, CREDENTIALW, CRED_TYPE,
 };
 
 use voicen_core::secrets::{
-    purge_credentials, CredentialEntry, CredentialError, CredentialNamespace,
+    purge_credentials, CredentialEntry, CredentialError, CredentialNamespace, Listing,
 };
 
-use super::os_code;
+use super::{os_code, wide, wipe};
 
 /// The argument the uninstaller passes (T-025).
 pub const PURGE_CREDENTIALS_ARG: &str = "--purge-credentials";
@@ -43,8 +42,10 @@ impl Default for WinCredentialNamespace {
 
 impl CredentialNamespace for WinCredentialNamespace {
     /// `CredEnumerateW("<prefix>*")`. No match is `Err(ERROR_NOT_FOUND)` (1168),
-    /// which the policy reads as "nothing to remove".
-    fn list(&self, prefix: &str) -> Result<Vec<CredentialEntry>, CredentialError> {
+    /// which the policy reads as "nothing to remove". A listed target that is null
+    /// or not valid UTF-16 cannot be passed back to `CredDeleteW`: it is counted in
+    /// `Listing::unreadable` and the other entries are still returned (T-167).
+    fn list(&self, prefix: &str) -> Result<Listing, CredentialError> {
         let filter = wide(&format!("{prefix}*"));
         let mut count: u32 = 0;
         let mut creds: *mut *mut CREDENTIALW = std::ptr::null_mut();
@@ -56,10 +57,10 @@ impl CredentialNamespace for WinCredentialNamespace {
             },
         )?;
         if creds.is_null() {
-            return Ok(Vec::new());
+            return Ok(Listing::default());
         }
         let mut entries = Vec::with_capacity(count as usize);
-        let mut bad_name = false;
+        let mut unreadable = 0usize;
         // SAFETY: `creds` is the non-null array of `count` non-null pointers returned
         // by a successful `CredEnumerateW`. Each blob is `CredentialBlobSize` bytes;
         // it is zeroed in place, never copied. The array is freed exactly once, after
@@ -79,7 +80,7 @@ impl CredentialNamespace for WinCredentialNamespace {
                     wipe(blob);
                 }
                 if c.TargetName.is_null() {
-                    bad_name = true;
+                    unreadable += 1;
                     continue;
                 }
                 match c.TargetName.to_string() {
@@ -87,17 +88,15 @@ impl CredentialNamespace for WinCredentialNamespace {
                         target,
                         kind: c.Type.0,
                     }),
-                    Err(_) => bad_name = true,
+                    Err(_) => unreadable += 1,
                 }
             }
             CredFree(creds as *const core::ffi::c_void);
         }
-        if bad_name {
-            // A target that is not valid UTF-16 cannot be named for CredDeleteW;
-            // report it rather than claim the namespace is empty.
-            return Err(credential_error(ERROR_INVALID_DATA));
-        }
-        Ok(entries)
+        Ok(Listing {
+            entries,
+            unreadable,
+        })
     }
 
     /// `CredDeleteW(target, entry's own type)`; the error is the Win32 code.
@@ -109,24 +108,6 @@ impl CredentialNamespace for WinCredentialNamespace {
                 os_code: os_code(&err),
             },
         )
-    }
-}
-
-fn wide(s: &str) -> Vec<u16> {
-    s.encode_utf16().chain(Some(0)).collect()
-}
-
-fn credential_error(code: WIN32_ERROR) -> CredentialError {
-    CredentialError {
-        os_code: code.0 as i32,
-    }
-}
-
-/// Overwrites `bytes` with zeros in a way the compiler keeps (key material).
-fn wipe(bytes: &mut [u8]) {
-    for byte in bytes.iter_mut() {
-        // SAFETY: `byte` is a valid, aligned, exclusive reference.
-        unsafe { std::ptr::write_volatile(byte, 0) };
     }
 }
 

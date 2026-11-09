@@ -40,6 +40,11 @@ use voicen_lib::settings_ipc::load_settings;
 /// docs/decisions/core-tests.md), one copy for the core and the shell tests.
 #[path = "../../crates/voicen-core/tests/common/mod.rs"]
 mod common;
+/// The one Credential Manager test lock (T-069, T-167): `canary_key_never_in_data_dir_or_log`
+/// writes real entries, so it takes `cred_support::serial()` first, and the lock's own
+/// tests run in this binary too (docs/decisions/windows-shell.md).
+#[cfg(windows)]
+mod cred_support;
 /// The checks of `OsAnswer::refused()`, run in the process that relies on it.
 #[path = "../../crates/voicen-core/tests/common/refused_addr_tests.rs"]
 mod refused_addr_tests;
@@ -447,6 +452,7 @@ fn canary_key_never_in_data_dir_or_log() {
     // target prefix. Bite: a key written into settings.json, the log or any other
     // file under the data dir (UTF-8 or UTF-16LE), or into the save response or
     // the settings://changed payload.
+    let _serial = cred_support::serial();
     use voicen_lib::credentials::WinCredentialStore;
 
     let prefix = format!(

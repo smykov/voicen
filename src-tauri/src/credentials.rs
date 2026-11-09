@@ -20,6 +20,8 @@ use windows::Win32::Security::Credentials::{
 
 use voicen_core::secrets::{CredentialError, CredentialStore, KeySlot, Secret};
 
+use crate::win::{credential_error, os_code, wide, wipe};
+
 /// The user name stored with every credential (research R-1).
 const USER_NAME: &str = "voicen";
 
@@ -61,33 +63,8 @@ impl Default for WinCredentialStore {
     }
 }
 
-fn wide(s: &str) -> Vec<u16> {
-    s.encode_utf16().chain(Some(0)).collect()
-}
-
-/// The Win32 code of a failed call (the HRESULT when it is not a Win32 one).
-fn os_code(err: &windows::core::Error) -> i32 {
-    WIN32_ERROR::from_error(err)
-        .map(|code| code.0 as i32)
-        .unwrap_or(err.code().0)
-}
-
 fn is_not_found(err: &windows::core::Error) -> bool {
     WIN32_ERROR::from_error(err).map(|code| code.0) == Some(ERROR_NOT_FOUND.0)
-}
-
-fn credential_error(code: WIN32_ERROR) -> CredentialError {
-    CredentialError {
-        os_code: code.0 as i32,
-    }
-}
-
-/// Overwrites `bytes` with zeros in a way the compiler keeps (key material).
-fn wipe(bytes: &mut [u8]) {
-    for byte in bytes.iter_mut() {
-        // SAFETY: `byte` is a valid, aligned, exclusive reference.
-        unsafe { std::ptr::write_volatile(byte, 0) };
-    }
 }
 
 impl CredentialStore for WinCredentialStore {

@@ -1,13 +1,14 @@
-//! T-069: the Credential Manager test support shared by `credentials.rs` and
-//! `purge_credentials.rs` (each declares `mod cred_support;`), the `win32_support/`
-//! pattern. One copy of the lock and the "gone" rule, so the lock tests below protect the
-//! `serial()` every Credential Manager test in either binary takes first.
+//! T-069: the Credential Manager test support shared by `credentials.rs`,
+//! `purge_credentials.rs` and `settings_ipc.rs` (each declares `mod cred_support;`;
+//! T-167), the `win32_support/` pattern. One copy of the lock and the "gone" rule, so the
+//! lock tests below protect the `serial()` every Credential Manager test in those
+//! binaries takes first (docs/decisions/windows-shell.md).
 //!
-//! How the lock tests cover both binaries: an integration test is its own crate, so each
+//! How the lock tests cover every binary: an integration test is its own crate, so each
 //! binary that declares `mod cred_support;` compiles this file, with its own `SERIAL`
 //! static, and libtest runs the `#[test]` fns below in that binary too. So the exclusion
-//! and poison tests run once in `credentials` and once in `purge_credentials`, each time
-//! against the very lock that binary's tests share. A binary with its own lock copy
+//! and poison tests run once in each of `credentials`, `purge_credentials` and
+//! `settings_ipc`, each time against the very lock that binary's tests share. A binary with its own lock copy
 //! instead of this module would escape them (validation 2, M8): keep it the only one.
 //!
 //! Contract the developer adds above the tests (T-069 validation 2):

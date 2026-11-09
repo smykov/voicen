@@ -31,7 +31,7 @@ Interfaces seen from outside the app: command-line switches, files, CI job names
 Question text (`LangString VoicenRemoveData`): EN "Remove settings, history, models, logs and saved keys?" / RU "Удалить настройки, историю, модели, журналы и сохранённые ключи?".
 Failure texts: EN "Saved keys could not be removed. Remove the entries starting with <prefix> in Windows Credential Manager." / "Some files in %LOCALAPPDATA%\Voicen could not be removed."; RU equivalents.
 
-`voicen.exe --purge-credentials`: exit 0 = all entries with the prefix removed (or none existed); 2 = at least one failed. No window, no log, no marker.
+`voicen.exe --purge-credentials`: exit 0 = all entries with the prefix removed (or none existed); 2 = at least one failed or could not be named (a target that is not valid UTF-16; every other entry is still removed). The prefix is compared ignoring ASCII case, as Credential Manager compares target names. No window, no log, no marker.
 
 Autostart value: the `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` value name is the constant owned by 004 (FR-19): `src-tauri` `autostart::RUN_VALUE_NAME` = `Voicen` (T-014) = the template's `${PRODUCTNAME}`. The stock template code deletes that value on every uninstall without `/UPDATE` and keeps it with `/UPDATE` (an installer-started uninstall); the hook has no autostart code. An absent value is not an error.
 
