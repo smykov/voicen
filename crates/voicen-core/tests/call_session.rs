@@ -1880,7 +1880,8 @@ fn a_default_output_change_reopens_the_system_track_with_its_gap_in_meta_and_log
             let tag = format!("{trigger:?}, gap {gap} ms");
             let rig = CallRig::with_capacity(1_024, quiet);
             started(&rig, CallSource::Tray);
-            feed(&rig, 0, 1_000);
+            rig.source.feed_tone(Track::System, 0, 1_000, 0.2);
+            rig.source.feed(Track::Mic, 0, 1_000, 0.3);
             rig.source.set_stamp_ms(1_000);
             match trigger {
                 Trigger::Event => rig.devices.push(DeviceEvent::DefaultOutputChanged),
@@ -1893,7 +1894,7 @@ fn a_default_output_change_reopens_the_system_track_with_its_gap_in_meta_and_log
                 "{tag}: the system track is reopened"
             );
             let first = 1_000 + gap;
-            rig.source.feed(Track::System, first, first + 200, 0.1);
+            rig.source.feed_tone(Track::System, first, first + 200, 0.2);
             assert!(
                 wait(|| device_lines(&rig).len() == 1 && meta_changes(&rig).len() == 1),
                 "{tag}: one line and one entry while the call runs: {:?} / {:?}",
@@ -1904,7 +1905,7 @@ fn a_default_output_change_reopens_the_system_track_with_its_gap_in_meta_and_log
             let end = first + 800;
             let mut t = first + 200;
             while t < end {
-                rig.source.feed(Track::System, t, t + 100, 0.1);
+                rig.source.feed_tone(Track::System, t, t + 100, 0.2);
                 rig.source.feed(Track::Mic, t, t + 100, 0.3);
                 t += 100;
             }
@@ -2179,7 +2180,8 @@ fn a_track_not_reopened_within_2_s_is_silent_warned_and_retried_every_2_s() {
     // the file short (no zeros while lost).
     let rig = CallRig::with_capacity(2_048, quiet);
     started(&rig, CallSource::Tray);
-    feed(&rig, 0, 1_000);
+    rig.source.feed_tone(Track::System, 0, 1_000, 0.2);
+    rig.source.feed(Track::Mic, 0, 1_000, 0.3);
     rig.source.set_stamp_ms(1_000);
     rig.source.fail_all(Track::System, OpenError::Busy);
     rig.source
@@ -2251,12 +2253,15 @@ fn a_track_not_reopened_within_2_s_is_silent_warned_and_retried_every_2_s() {
         wait(|| rig.source.ok_opens(Track::System) == 2),
         "the 8 s attempt reopens it"
     );
-    rig.source.feed(Track::System, 9_000, 9_200, 0.1);
+    rig.source.feed_tone(Track::System, 9_000, 9_200, 0.2);
     assert!(wait(
         || device_lines(&rig).len() == 2 && meta_changes(&rig).len() == 2
     ));
-    rig.source.feed(Track::System, 9_200, 9_800, 0.1);
+    rig.source.feed_tone(Track::System, 9_200, 9_800, 0.2);
     rig.source.feed(Track::Mic, 9_000, 9_800, 0.3);
+    // The indicator goes idle at stop (it carries no warnings then): read the warning
+    // while the call still runs.
+    let lost_before_stop = kind_count(&rig, WarningKind::TrackLost);
     rig.session.stop(StopReason::User);
 
     let back = &device_lines(&rig)[1];
@@ -2270,11 +2275,7 @@ fn a_track_not_reopened_within_2_s_is_silent_warned_and_retried_every_2_s() {
         .expect("a number");
     assert!((7_000..=9_000).contains(&gap), "the silence it cost: {gap}");
     assert_eq!(meta_changes(&rig)[1]["cause"], json!("reopened"));
-    assert_eq!(
-        kind_count(&rig, WarningKind::TrackLost),
-        1,
-        "the warning stays until dismissed"
-    );
+    assert_eq!(lost_before_stop, 1, "the warning stays until dismissed");
     assert_eq!(rig.lines_named("call_track_silent").len(), 1);
     let duration = rig.only_meta()["duration_ms"].as_u64().expect("a duration");
     assert!(

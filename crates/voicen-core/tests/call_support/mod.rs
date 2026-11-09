@@ -341,6 +341,29 @@ impl FakeSource {
         }
     }
 
+    /// Like `feed`, but a 300 Hz sine of peak `amp` (RMS `amp / sqrt 2`), continuous across
+    /// calls: a track that goes through Opus keeps it (Voip mode removes the DC of a
+    /// constant block, so a constant is stored as silence).
+    pub fn feed_tone(&self, track: Track, from_ms: u64, to_ms: u64, amp: f32) {
+        let sink = lock(&self.state)
+            .sinks
+            .get(&track)
+            .cloned()
+            .expect("the track is open");
+        let mut at = from_ms;
+        while at < to_ms {
+            let first = at * 16;
+            let block: Vec<f32> = (0..320u64)
+                .map(|i| {
+                    let t = (first + i) as f32 / 16_000.0;
+                    amp * (2.0 * std::f32::consts::PI * 300.0 * t).sin()
+                })
+                .collect();
+            sink.block(track, &block, 16_000, 1, CaptureStamp::from_ms(at));
+            at += 20;
+        }
+    }
+
     /// `feed` on both tracks.
     pub fn feed_both(&self, from_ms: u64, to_ms: u64, mic_amp: f32, system_amp: f32) {
         self.feed(Track::System, from_ms, to_ms, system_amp);
