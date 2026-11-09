@@ -255,10 +255,7 @@ fn post<R: Runtime>(app: &AppHandle<R>, work: Work<R>) -> Receipt {
 /// tauri hook (a panicking focus listener or window hook poisons tauri's own
 /// mutexes). No runtime caller.
 #[doc(hidden)]
-pub fn request_with<R: Runtime>(
-    app: &AppHandle<R>,
-    run: Box<dyn FnOnce(&AppHandle<R>) -> tauri::Result<()> + Send>,
-) -> Receipt {
+pub fn request_with<R: Runtime>(app: &AppHandle<R>, run: Run<R>) -> Receipt {
     post(app, Work::Run(run))
 }
 

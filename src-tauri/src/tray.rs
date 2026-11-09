@@ -564,8 +564,10 @@ pub fn on_tray_icon_event<R: Runtime>(tray: &TrayIcon<R>, event: TrayIconEvent) 
     };
     let session = Arc::clone(&session);
     // The session lock may be held across a slow `AudioSource::start`: the handler
-    // (on the main thread) never takes it.
-    let _ = tauri::async_runtime::spawn_blocking(move || session.tray_menu_opened(at));
+    // (on the main thread) never takes it; dropping the handle detaches the task.
+    drop(tauri::async_runtime::spawn_blocking(move || {
+        session.tray_menu_opened(at)
+    }));
 }
 
 /// The single-instance callback (in the primary, on its main thread, while the

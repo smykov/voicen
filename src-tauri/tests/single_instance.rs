@@ -403,7 +403,10 @@ fn a_second_launch_with_call_record_opens_no_window() {
         CWD.into(),
     );
 
-    assert!(posted.is_none(), "a --call record second launch posted a settings request");
+    assert!(
+        posted.is_none(),
+        "a --call record second launch posted a settings request"
+    );
     std::thread::sleep(Duration::from_millis(300));
     assert!(labels(&app).is_empty(), "windows: {:?}", labels(&app));
 }
@@ -422,7 +425,10 @@ fn a_second_launch_with_an_unknown_call_value_opens_no_window() {
         CWD.into(),
     );
 
-    assert!(posted.is_none(), "an unknown --call second launch posted a request");
+    assert!(
+        posted.is_none(),
+        "an unknown --call second launch posted a request"
+    );
     std::thread::sleep(Duration::from_millis(300));
     assert!(labels(&app).is_empty(), "windows: {:?}", labels(&app));
 }

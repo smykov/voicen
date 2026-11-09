@@ -232,7 +232,7 @@ impl Report {
     }
 
     fn is_printed(&self, name: &str) -> bool {
-        self.printed.iter().any(|&printed| printed == name)
+        self.printed.contains(&name)
     }
 
     /// Prints a fact a probe thread sent, once; a second copy or a fact of another thread is a
