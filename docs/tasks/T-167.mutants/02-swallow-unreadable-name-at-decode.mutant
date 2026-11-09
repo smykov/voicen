@@ -1,0 +1,8 @@
+guarantee: AC T-061 r1#3: a purge that meets a bad target name removes the rest and exits 2
+file: src-tauri/src/win/purge.rs
+added_by: test-writer
+--- old
+                    Err(_) => bad_name = true,
+--- new
+                    Err(_) => {}
+--- end

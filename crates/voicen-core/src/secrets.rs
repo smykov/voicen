@@ -729,6 +729,8 @@ mod tests {
     struct FakeNamespace {
         entries: std::cell::RefCell<Vec<(CredentialEntry, String)>>,
         widen: Vec<String>,
+        /// Targets `list` could not name (not valid UTF-16): only their count is known.
+        unreadable: usize,
         list_error: Option<CredentialError>,
         remove_errors: std::collections::HashMap<String, CredentialError>,
         calls: std::cell::RefCell<Vec<NsCall>>,
@@ -784,22 +786,25 @@ mod tests {
     }
 
     impl CredentialNamespace for FakeNamespace {
-        fn list(&self, prefix: &str) -> Result<Vec<CredentialEntry>, CredentialError> {
+        fn list(&self, prefix: &str) -> Result<Listing, CredentialError> {
             self.calls
                 .borrow_mut()
                 .push(NsCall::List(prefix.to_string()));
             if let Some(error) = self.list_error {
                 return Err(error);
             }
-            Ok(self
-                .entries
-                .borrow()
-                .iter()
-                .filter(|(entry, _)| {
-                    entry.target.starts_with(prefix) || self.widen.contains(&entry.target)
-                })
-                .map(|(entry, _)| entry.clone())
-                .collect())
+            Ok(Listing {
+                entries: self
+                    .entries
+                    .borrow()
+                    .iter()
+                    .filter(|(entry, _)| {
+                        entry.target.starts_with(prefix) || self.widen.contains(&entry.target)
+                    })
+                    .map(|(entry, _)| entry.clone())
+                    .collect(),
+                unreadable: self.unreadable,
+            })
         }
 
         /// Like `CredDeleteW`: the target with that type, else `ERROR_NOT_FOUND`.
@@ -818,6 +823,16 @@ mod tests {
             }
         }
     }
+
+    // T-167 contract (the developer adds it above `CredentialNamespace`):
+    //
+    //   pub struct Listing { pub entries: Vec<CredentialEntry>, pub unreadable: usize }
+    //       what `CredentialNamespace::list` returns on success: the entries it could
+    //       name, plus how many matching targets it could not (not valid UTF-16);
+    //   fn list(&self, prefix: &str) -> Result<Listing, CredentialError>
+    //   purge_credentials: the prefix is compared ignoring ASCII case (Credential
+    //       Manager target names are case-insensitive); `unreadable > 0` makes the
+    //       exit code 2 after every named entry was still removed.
 
     #[test]
     fn purge_removes_every_prefixed_entry_and_returns_0() {
@@ -997,5 +1012,97 @@ mod tests {
         );
         assert_eq!(purge_credentials(&fake, ""), 0);
         assert!(!fake.remaining().contains(&"Voicen/b".to_string()));
+    }
+
+    #[test]
+    fn purge_matches_the_namespace_ignoring_ascii_case() {
+        // AC r1#4: `voicen/x` is the app's `Voicen/x` to Credential Manager. The
+        // enumeration lists case variants (`widen`); the policy must remove them and
+        // still keep `VoicenOther/z` (a different name once the case is folded) and
+        // an entry of another store prefix.
+        // Bite: starts_with restored (the variants stay, exit 0 with keys left), or the
+        // comparison folding so far that `VoicenOther/z` goes too.
+        let fake = FakeNamespace {
+            widen: vec![
+                "voicen/x".to_string(),
+                "VOICEN/y".to_string(),
+                "VoicenOther/z".to_string(),
+                "t/other/Voicen/a".to_string(),
+            ],
+            ..FakeNamespace::with(&[
+                ("voicen/x", GENERIC),
+                ("VOICEN/y", GENERIC),
+                ("VoicenOther/z", GENERIC),
+                ("t/other/Voicen/a", GENERIC),
+            ])
+        };
+        assert_eq!(purge_credentials(&fake, ""), 0);
+        assert_eq!(fake.remaining(), ["VoicenOther/z", "t/other/Voicen/a"]);
+        let mut removed = fake.removed_targets();
+        removed.sort();
+        assert_eq!(removed, ["VOICEN/y", "voicen/x"]);
+    }
+
+    #[test]
+    fn purge_case_rule_is_ascii_only_and_byte_safe() {
+        // Non-ASCII bytes compare exactly and a multi-byte character right at the
+        // prefix boundary does not panic. Bite: to_lowercase on both sides with a
+        // slice at the prefix length (a panic on a char boundary), or a Unicode fold.
+        let fake = FakeNamespace {
+            widen: vec![
+                "Voicé/x".to_string(),
+                "Voic\u{212A}/x".to_string(),
+                "VOICEN/ok".to_string(),
+            ],
+            ..FakeNamespace::with(&[
+                ("Voicé/x", GENERIC),
+                ("Voic\u{212A}/x", GENERIC),
+                ("VOICEN/ok", GENERIC),
+            ])
+        };
+        assert_eq!(purge_credentials(&fake, ""), 0);
+        assert_eq!(fake.remaining(), ["Voicé/x", "Voic\u{212A}/x"]);
+        assert_eq!(fake.removed_targets(), ["VOICEN/ok"]);
+    }
+
+    #[test]
+    fn purge_removes_the_named_entries_when_one_is_unreadable_and_returns_2() {
+        // AC r1#3 / FR-021, FR-022: one target the adapter could not name must not stop
+        // the removal of the others, and the exit code says something was left.
+        // Bite: unreadable ignored (exit 0), the purge stopping at it or returning
+        // before the removals (entries stay), or exit 2 without removing.
+        let fake = FakeNamespace {
+            unreadable: 1,
+            ..FakeNamespace::with(&[
+                ("Voicen/a", GENERIC),
+                ("VoicenOther/keep", GENERIC),
+                ("Voicen/b", GENERIC),
+            ])
+        };
+        assert_eq!(purge_credentials(&fake, ""), 2);
+        assert_eq!(fake.remaining(), ["VoicenOther/keep"]);
+        let mut removed = fake.removed_targets();
+        removed.sort();
+        assert_eq!(removed, ["Voicen/a", "Voicen/b"]);
+    }
+
+    #[test]
+    fn purge_with_only_an_unreadable_entry_returns_2() {
+        // Nothing nameable, one unreadable: still not a success (the entry is left).
+        // Bite: exit 2 only when `entries` is non-empty.
+        let fake = FakeNamespace {
+            unreadable: 1,
+            ..FakeNamespace::default()
+        };
+        assert_eq!(purge_credentials(&fake, ""), 2);
+        assert_eq!(fake.removed_targets(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn purge_an_unreadable_count_of_zero_is_a_success() {
+        // Bite: `unreadable` compared with `>= 0`, or any listing treated as partial.
+        let fake = FakeNamespace::with(&[("Voicen/a", GENERIC)]);
+        assert_eq!(purge_credentials(&fake, ""), 0);
+        assert!(fake.remaining().is_empty());
     }
 }

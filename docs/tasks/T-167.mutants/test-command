@@ -1,0 +1,2 @@
+# Windows-only: the shell Credential Manager tests run in the Windows CI job (decision #5); run on wip/T-167 in CI, not on Linux. The core tests run with `scripts/tw-test core secrets`.
+cargo test -p voicen --test purge_credentials --test settings_ipc --test credentials

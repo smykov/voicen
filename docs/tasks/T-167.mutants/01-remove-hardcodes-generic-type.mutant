@@ -1,0 +1,8 @@
+guarantee: AC T-061 r4#10: a type-2 remove leaves the planted generic entry in place
+file: src-tauri/src/win/purge.rs
+added_by: test-writer
+--- old
+        unsafe { CredDeleteW(PCWSTR(target.as_ptr()), CRED_TYPE(entry.kind), None) }.map_err(
+--- new
+        unsafe { CredDeleteW(PCWSTR(target.as_ptr()), CRED_TYPE(1), None) }.map_err(
+--- end

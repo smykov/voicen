@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use cred_support::{is_not_found, serial, ERROR_NOT_FOUND_WIN32};
 use voicen_core::secrets::{
-    purge_credentials, CredentialEntry, CredentialError, CredentialNamespace,
+    purge_credentials, CredentialEntry, CredentialError, CredentialNamespace, Listing,
 };
 use voicen_lib::win::purge::{from_args, WinCredentialNamespace, PURGE_CREDENTIALS_ARG};
 use windows::core::{PCWSTR, PWSTR};
@@ -299,9 +299,11 @@ fn adapter_lists_exactly_the_prefixed_entries_with_their_types() {
     planted.add(format!("{p}VoicenOther/keep"), CRED_TYPE_GENERIC);
 
     let ns = WinCredentialNamespace::new();
-    let mut listed = ns
+    let listing = ns
         .list(&format!("{p}{NS}"))
         .expect("list of a populated prefix");
+    assert_eq!(listing.unreadable, 0, "every planted name is readable");
+    let mut listed = listing.entries;
     listed.sort_by(|x, y| x.target.cmp(&y.target));
     let expected: Vec<CredentialEntry> = [a, b]
         .into_iter()
@@ -314,7 +316,10 @@ fn adapter_lists_exactly_the_prefixed_entries_with_their_types() {
 
     // Nothing under a fresh prefix: empty, or ERROR_NOT_FOUND for the policy to map.
     match ns.list(&format!("{}{NS}", unique_prefix())) {
-        Ok(entries) => assert!(entries.is_empty(), "{entries:?}"),
+        Ok(listing) => {
+            assert!(listing.entries.is_empty(), "{:?}", listing.entries);
+            assert_eq!(listing.unreadable, 0);
+        }
         Err(err) => assert_eq!(err, CredentialError { os_code: 1168 }),
     }
 }
@@ -327,7 +332,7 @@ struct FailOne<'a> {
 }
 
 impl CredentialNamespace for FailOne<'_> {
-    fn list(&self, prefix: &str) -> Result<Vec<CredentialEntry>, CredentialError> {
+    fn list(&self, prefix: &str) -> Result<Listing, CredentialError> {
         self.inner.list(prefix)
     }
 
@@ -531,4 +536,204 @@ fn read_back_is_ok_for_a_planted_target_and_err_1168_once_deleted() {
         windows::core::HRESULT::from_win32(ERROR_NOT_FOUND_WIN32),
         "{err:?}"
     );
+}
+
+// T-167 (Windows CI only, decision #5; expected red today, not run on Linux). Contract
+// the developer adds (core `secrets`, shell `win`):
+//
+//   voicen_core::secrets::Listing { entries: Vec<CredentialEntry>, unreadable: usize }
+//       what `CredentialNamespace::list` returns: the nameable entries plus the number
+//       of matching targets that are not valid UTF-16;
+//   crate::win::{wide, wipe, os_code, credential_error}: the one copy, pub(crate);
+//   `credentials.rs` and `win/purge.rs` keep none (the source scan below reads them).
+
+/// `wide` for a target that is not valid UTF-16: raw units, NUL added.
+fn nul_terminated(units: &[u16]) -> Vec<u16> {
+    units.iter().copied().chain(Some(0)).collect()
+}
+
+/// Raw `CredWriteW` of a generic entry whose target is raw UTF-16 units.
+fn try_write_raw(target: &[u16]) -> windows::core::Result<()> {
+    let mut name = nul_terminated(target);
+    let mut user = wide("voicen");
+    let blob = fake_blob();
+    let cred = CREDENTIALW {
+        Type: CRED_TYPE_GENERIC,
+        TargetName: PWSTR(name.as_mut_ptr()),
+        CredentialBlobSize: blob.len() as u32,
+        CredentialBlob: blob.as_ptr() as *mut u8,
+        Persist: CRED_PERSIST_LOCAL_MACHINE,
+        UserName: PWSTR(user.as_mut_ptr()),
+        ..Default::default()
+    };
+    // SAFETY: every pointer in `cred` is valid for the duration of the call.
+    unsafe { CredWriteW(&cred, 0) }
+}
+
+/// Deletes the raw-unit targets on drop (also when the test panics).
+struct RawPlanted(Vec<Vec<u16>>);
+
+impl Drop for RawPlanted {
+    fn drop(&mut self) {
+        for target in &self.0 {
+            let name = nul_terminated(target);
+            // SAFETY: `name` is NUL-terminated and outlives the call.
+            let _ = unsafe { CredDeleteW(PCWSTR(name.as_ptr()), CRED_TYPE_GENERIC, None) };
+        }
+    }
+}
+
+#[test]
+fn purge_removes_a_case_variant_of_the_namespace() {
+    let _serial = serial();
+    // AC T-061 r1#4: Credential Manager names are case-insensitive, so `<p>voicen/x`
+    // is the app's `<p>Voicen/x`; the purge must remove it and exit 0.
+    // Bite: the policy's case-sensitive starts_with (entry listed and skipped, or the
+    // adapter never listing it), the case fold widened to VoicenOther.
+    let p = unique_prefix();
+    let mut planted = Planted::default();
+    let variant = planted.add(format!("{p}voicen/x"), CRED_TYPE_GENERIC);
+    let upper = planted.add(format!("{p}VOICEN/y"), CRED_TYPE_GENERIC);
+    let outsider = planted.add(format!("{p}VoicenOther/keep"), CRED_TYPE_GENERIC);
+
+    assert_eq!(from_args(purge_args(), &p), Some(0));
+    for target in [&variant, &upper] {
+        let r = read_back(target, CRED_TYPE_GENERIC);
+        assert!(is_not_found(&r), "{target} still present: read-back {r:?}");
+    }
+    let r = read_back(&outsider, CRED_TYPE_GENERIC);
+    assert!(r.is_ok(), "outsider deleted: read-back {r:?}");
+}
+
+#[test]
+fn adapter_lists_a_case_variant_of_the_prefix() {
+    let _serial = serial();
+    // Pins the CredEnumerateW filter's case behaviour for `<p>Voicen/*`: whatever the
+    // filter does, the adapter must return `<p>voicen/x` (the developer lists with a
+    // filter that cannot miss a case variant when the OS filter is case-sensitive and
+    // records which in docs/decisions/settings.md), and must not return the outsider.
+    // Bite: the filter passed through as-is on a case-sensitive OS filter.
+    let p = unique_prefix();
+    let mut planted = Planted::default();
+    let variant = planted.add(format!("{p}voicen/x"), CRED_TYPE_GENERIC);
+    planted.add(format!("{p}VoicenOther/keep"), CRED_TYPE_GENERIC);
+
+    let listing = WinCredentialNamespace::new()
+        .list(&format!("{p}{NS}"))
+        .expect("list of a populated prefix");
+    assert!(
+        listing.entries.iter().any(|e| e.target == variant),
+        "case variant not listed: {:?}",
+        listing.entries
+    );
+}
+
+#[test]
+fn remove_with_another_type_keeps_the_generic_entry() {
+    let _serial = serial();
+    // AC T-061 r4#10: remove deletes only the entry of the given type. A generic entry
+    // stays when the delete names type 2 (CRED_TYPE_DOMAIN_PASSWORD), and the call
+    // fails. Green today; bite: remove hard-coding CRED_TYPE_GENERIC.
+    let p = unique_prefix();
+    let mut planted = Planted::default();
+    let target = planted.add(format!("{p}{NS}x"), CRED_TYPE_GENERIC);
+
+    let result = WinCredentialNamespace::new().remove(&CredentialEntry {
+        target: target.clone(),
+        kind: 2,
+    });
+    assert!(
+        result.is_err(),
+        "a type-2 delete of a generic entry: {result:?}"
+    );
+    let r = read_back(&target, CRED_TYPE_GENERIC);
+    assert!(r.is_ok(), "the generic entry was deleted: read-back {r:?}");
+}
+
+#[test]
+fn purge_with_an_unreadable_name_removes_the_rest_and_exits_2() {
+    let _serial = serial();
+    // AC T-061 r1#3 / FR-021, FR-022: a target that is not valid UTF-16 (a lone
+    // surrogate) is left, the readable entry is removed, the exit code is 2. If
+    // CredWriteW refuses such a name the test fails on its premise: the branch is then
+    // recorded as unreachable in docs/decisions/settings.md with the Win32 code.
+    // Bite: the whole listing failing (nothing removed), the unreadable count ignored
+    // (exit 0), or the purge stopping at it.
+    let p = unique_prefix();
+    let mut bad: Vec<u16> = format!("{p}{NS}").encode_utf16().collect();
+    bad.push(0xD800);
+    bad.extend("x".encode_utf16());
+    let mut raw = RawPlanted(vec![bad.clone()]);
+    if let Err(e) = try_write_raw(&bad) {
+        panic!(
+            "premise: CredWriteW refused a lone-surrogate target: {}",
+            hresult_and_win32(&e)
+        );
+    }
+    raw.0.push(bad);
+    let mut planted = Planted::default();
+    let named = planted.add(format!("{p}{NS}a"), CRED_TYPE_GENERIC);
+
+    assert_eq!(from_args(purge_args(), &p), Some(2));
+    let r = read_back(&named, CRED_TYPE_GENERIC);
+    assert!(is_not_found(&r), "{named} not removed: read-back {r:?}");
+}
+
+/// The text of a file under `src-tauri/`.
+fn source(rel: &str) -> String {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(rel);
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+}
+
+#[test]
+fn credential_helpers_live_once_in_win_mod() {
+    // AC T-061 r1#2 / I1: `wide`, `wipe`, `os_code`, `credential_error` are
+    // pub(crate) in win/mod.rs; credentials.rs and win/purge.rs hold no copy.
+    // (autostart.rs::wide is outside the Credential Manager seam.)
+    // Bite: any of the four left private or duplicated in either caller.
+    let win = source("src/win/mod.rs");
+    for name in ["wide", "wipe", "os_code", "credential_error"] {
+        let item = format!("pub(crate) fn {name}(");
+        assert_eq!(win.matches(&item).count(), 1, "win/mod.rs lacks one {item}");
+        for caller in ["src/credentials.rs", "src/win/purge.rs"] {
+            let text = source(caller);
+            assert!(
+                !text.contains(&format!("fn {name}(")),
+                "{caller} keeps its own {name}"
+            );
+        }
+    }
+}
+
+#[test]
+fn one_credential_manager_lock_and_every_binary_takes_it() {
+    // AC T-069 r2#4 / I5: the three test binaries that touch Credential Manager
+    // declare `mod cred_support;`, none owns a lock of its own, and the canary test of
+    // settings_ipc.rs takes `cred_support::serial()` as its first statement.
+    // Bite: a binary-local Mutex, the canary test without the lock, the module
+    // declaration dropped.
+    for file in [
+        "tests/credentials.rs",
+        "tests/purge_credentials.rs",
+        "tests/settings_ipc.rs",
+    ] {
+        let text = source(file);
+        assert!(
+            text.contains("mod cred_support;"),
+            "{file} lacks mod cred_support;"
+        );
+        assert!(
+            !text.contains(concat!("static ", "SERIAL")),
+            "{file} owns a lock of its own"
+        );
+    }
+    let ipc = source("tests/settings_ipc.rs");
+    let head = "fn canary_key_never_in_data_dir_or_log() {";
+    let body = &ipc[ipc.find(head).expect("canary test") + head.len()..];
+    let first = body
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty() && !l.starts_with("//"))
+        .expect("a first statement");
+    assert_eq!(first, "let _serial = cred_support::serial();");
 }
