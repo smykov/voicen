@@ -500,13 +500,23 @@ fn mentions(text: &str) -> usize {
 }
 
 /// Two windows of 30 s: the clip at 0 s and at 30.5 s of 33 s of audio. The transcript joins
-/// the segments of both: whisper.cpp left at least 2 segments and the text names the clip at
-/// least twice. Bite: join only the first (or last) segment in `transcribe`.
+/// the segments of both: whisper.cpp left at least 2 segments, and the text names the clip
+/// more often than the same model's transcript of the clip alone does. `mentions` counts two
+/// words ("speech", "bubble"), so one clip already scores 2 and a bare `>= 2` passes on the
+/// first segment alone; the single-clip baseline (same model, same language) makes the bound
+/// "more than one clip's content" without fixing the wording tiny chooses.
+/// Bite: join only the first (or last) segment in `transcribe` (catalog 03).
 #[test]
 fn two_windows_are_joined() {
     let _serial = serial();
     let mut model = load_tiny_with_threads(1);
     let clip = clip();
+    let single = match model.transcribe(&clip, Some("en"), &no_abort()) {
+        Ok(t) => t,
+        Err(e) => panic!("transcribing the clip alone failed: {e:?}"),
+    };
+    let one_clip = mentions(&single);
+    assert!(one_clip >= 1, "the clip alone names the clip 0 times");
     let mut audio = vec![0.0f32; 33 * SAMPLE_RATE];
     for start in [0, SAMPLE_RATE * 61 / 2] {
         audio[start..start + clip.len()].copy_from_slice(&clip);
@@ -521,8 +531,8 @@ fn two_windows_are_joined() {
         model.last_segment_count()
     );
     assert!(
-        mentions(&text) >= 2,
-        "the transcript ({} chars) names the clip {} time(s)",
+        mentions(&text) > one_clip,
+        "the transcript ({} chars) names the clip {} time(s), the clip alone {one_clip}",
         text.chars().count(),
         mentions(&text)
     );
