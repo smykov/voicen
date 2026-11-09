@@ -1,0 +1,1 @@
+- [ ] T-202 val1 M6 Low toothless-test: the push step's TEAMWRIGHT_WIP_REFS_RE widened to '^refs/' survives; docs/decisions/ci-toolchain.md:165 says release-guard.test.sh pins it — add an expect on that line inside the push step, or correct the sentence (scripts/ci/release-guard.test.sh, .github/workflows/teamwright-agent.yml:200)
