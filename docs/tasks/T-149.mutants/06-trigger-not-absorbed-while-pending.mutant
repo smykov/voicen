@@ -1,0 +1,13 @@
+guarantee: D1 a trigger that comes while a reopen is pending is absorbed (validation 1, V1)
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+        let lane = self.lane_mut(track);
+        if lane.reopen.is_some() {
+            return;
+        }
+        let live = lane.retire();
+--- new
+        let lane = self.lane_mut(track);
+        let live = lane.retire();
+--- end

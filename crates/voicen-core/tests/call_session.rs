@@ -2292,6 +2292,134 @@ fn a_track_not_reopened_within_2_s_is_silent_warned_and_retried_every_2_s() {
 }
 
 #[test]
+fn a_trigger_while_a_reopen_is_pending_is_absorbed() {
+    // Invariant D1 (validation 1, V1): the system stream dies and every open fails (Busy),
+    // so a reopen stays pending. A `DefaultOutputChanged` that comes 1 s after the loss and
+    // another after the silent declaration are absorbed: no open of their own, the 2 s
+    // deadline counts from the loss (silent exactly at loss + 2 s, not at event + 2 s), one
+    // `call_track_silent`, one `to=none` line and entry, attempts only at the 2 s marks, and
+    // the later success still says `cause=reopened` (not the event's cause). Bite: the guard
+    // in `DeviceThread::trigger` removed (a fresh `Reopen` per event: an extra attempt at
+    // once, the deadline restarted, a second declaration, the success with
+    // `default_output_changed`).
+    let rig = CallRig::with_capacity(2_048, quiet);
+    started(&rig, CallSource::Tray);
+    rig.source.feed(Track::System, 0, 1_000, 0.2);
+    rig.source.feed(Track::Mic, 0, 1_000, 0.3);
+    rig.source.set_stamp_ms(1_000);
+    rig.source.fail_all(Track::System, OpenError::Busy);
+    rig.source
+        .lose(Track::System, LossCause::NotAvailable, 1_000);
+    rig.source.feed(Track::Mic, 1_000, 9_000, 0.3);
+    assert!(
+        wait(|| rig.source.attempts(Track::System) >= 2),
+        "the first attempt comes at once"
+    );
+    polled(&rig);
+    let first = rig.source.attempts(Track::System);
+
+    // 1 s into the pending reopen: the event is absorbed.
+    advance(&rig, ms(1_000));
+    rig.devices.push(DeviceEvent::DefaultOutputChanged);
+    assert!(wait(|| rig.devices.pending() == 0), "the event was taken");
+    polled(&rig);
+    assert_eq!(
+        rig.source.attempts(Track::System),
+        first,
+        "no open for an event while a reopen is pending"
+    );
+    advance(&rig, ms(900));
+    assert!(rig.lines_named("call_track_silent").is_empty());
+    assert!(device_lines(&rig).is_empty());
+
+    // Loss + 2 s (event + 1 s): silent now, on the loss's deadline.
+    advance(&rig, ms(100));
+    assert!(
+        wait(|| {
+            rig.lines_named("call_track_silent").len() == 1
+                && device_lines(&rig).len() == 1
+                && meta_changes(&rig).len() == 1
+        }),
+        "silent at loss + 2 s: {:?} / {:?}",
+        rig.lines_named("call_track_silent"),
+        device_lines(&rig)
+    );
+    assert_eq!(device_lines(&rig)[0].get("to"), Some("none"));
+    assert_eq!(device_lines(&rig)[0].get("cause"), Some("track_lost"));
+    assert!(
+        wait(|| rig.source.attempts(Track::System) == first + 1),
+        "one attempt at the 2 s mark"
+    );
+
+    // After the declaration: the second event is absorbed too.
+    rig.devices.push(DeviceEvent::DefaultOutputChanged);
+    assert!(wait(|| rig.devices.pending() == 0), "the event was taken");
+    polled(&rig);
+    assert_eq!(
+        rig.source.attempts(Track::System),
+        first + 1,
+        "no open for an event after the declaration"
+    );
+    advance(&rig, ms(1_900));
+    assert_eq!(
+        rig.source.attempts(Track::System),
+        first + 1,
+        "none before 4 s"
+    );
+    advance(&rig, ms(100));
+    assert!(
+        wait(|| rig.source.attempts(Track::System) == first + 2),
+        "one attempt at 4 s"
+    );
+    advance(&rig, ms(1_900));
+    assert_eq!(
+        rig.source.attempts(Track::System),
+        first + 2,
+        "none before 6 s"
+    );
+    assert_eq!(
+        rig.lines_named("call_track_silent").len(),
+        1,
+        "declared once"
+    );
+    assert_eq!(device_lines(&rig).len(), 1, "{:?}", device_lines(&rig));
+    assert_eq!(meta_changes(&rig).len(), 1, "{:?}", meta_changes(&rig));
+
+    // The 6 s attempt reopens it: the cause is the reopen, not the absorbed event.
+    rig.source.heal(Track::System);
+    advance(&rig, ms(100));
+    assert!(
+        wait(|| rig.source.ok_opens(Track::System) == 2),
+        "the 6 s attempt reopens it"
+    );
+    assert_eq!(rig.source.attempts(Track::System), first + 3);
+    rig.source.feed(Track::System, 7_000, 7_400, 0.2);
+    assert!(
+        wait(|| device_lines(&rig).len() == 2 && meta_changes(&rig).len() == 2),
+        "{:?}",
+        device_lines(&rig)
+    );
+    rig.session.stop(StopReason::User);
+    let lines = device_lines(&rig);
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert_eq!(lines[1].get("cause"), Some("reopened"));
+    assert_eq!(
+        lines.iter().filter(|l| l.get("to") == Some("none")).count(),
+        1
+    );
+    let changes = meta_changes(&rig);
+    assert_eq!(changes.len(), 2, "{changes:?}");
+    assert_eq!(changes[1]["cause"], json!("reopened"));
+    assert_eq!(
+        changes.iter().filter(|c| c["to"] == Value::Null).count(),
+        1,
+        "{changes:?}"
+    );
+    assert_eq!(rig.lines_named("call_track_silent").len(), 1);
+    assert_eq!(rig.source.ok_opens(Track::System), 2);
+}
+
+#[test]
 fn no_device_left_gives_no_device() {
     // Acceptance 3, failure branch: the track is lost and the open says NoDevice (no output
     // or no input left): at 2 s the same silence, warning and `call_track_silent rule=lost`,
