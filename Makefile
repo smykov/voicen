@@ -244,26 +244,28 @@ check-core:
 check-whisper:
 	scripts/tw-run core -- 'cargo fmt --check -p voicen-whisper && DOCS_RS=1 cargo clippy -p voicen-whisper --all-targets -- -D warnings'
 
-# Windows-target type check of the shell on Linux (T-056, decisions #63;
-# docs/decisions/ci-toolchain.md). First the lib and bin with the release feature set in the
-# dev profile (no dev-dependency features, tauri without custom-protocol: not what
-# `pnpm tauri build` compiles, so its production context and cfg(not(dev)) /
-# cfg(not(debug_assertions)) code stay the windows job's; positive cfg(dev) /
-# cfg(debug_assertions) code is checked here), then with --tests every src-tauri/tests/*.rs, the
-# lib (and voicen-core) checked as their dependency with the dev-dependency features; lib and bin
-# have test = false, so there are no unit-test crates (T-092). --tests alone would check the lib
-# only with test-fakes on and pass a release-only error, and not check the bin. cargo check never links and builds no doctest;
-# linking, starting and running the shell stay the windows job's. Needs the gnu target and
-# mingw gcc baked into the core image (docker/rust.Dockerfile; `make core-image`). The shell links
-# voicen-whisper (T-102) and the image has no mingw g++: DOCS_RS=1, scoped to these two invocations
-# as in check-whisper, makes whisper-rs-sys skip its cmake build; only whisper-rs and whisper-rs-sys
-# read it, so the other crates' gnu builds stay checked.
-# T-201 (decisions #247, #248): the second command lints the tests instead of only checking them,
-# with the shell clock ban of the shell package lint config file at deny through src-tauri/Cargo.toml [lints]
-# (no -D warnings and no -A: the other lints stay warnings, T-166 owns them). Its line is owned
-# by the owned-lines list under scripts/ci; make check-ban-canary proves the ban bites.
+# Windows-target format and lint of the shell on Linux (T-056, decisions #63, T-166;
+# docs/decisions/ci-toolchain.md). One tw-run call, three commands: rustfmt --check of the
+# package, then the lib and bin with the release feature set in the dev profile (no
+# dev-dependency features, tauri without custom-protocol: not what `pnpm tauri build`
+# compiles, so its production context and cfg(not(dev)) / cfg(not(debug_assertions)) code
+# stay the windows job's; positive cfg(dev) / cfg(debug_assertions) code is checked here),
+# then with --all-targets every src-tauri/tests/*.rs, the lib (and voicen-core) built as
+# their dependency with the dev-dependency features; lib and bin have test = false, so
+# there are no unit-test crates (T-092). --all-targets alone would check the lib only with
+# test-fakes on and pass a release-only error. Both lint runs are a full type check and
+# deny every rustc and lint warning (-D warnings, as check-core and check-whisper); nothing
+# links and no doctest is built: linking, starting and running the shell stay the windows
+# job's. Needs the gnu target and mingw gcc baked into the core image
+# (docker/rust.Dockerfile; `make core-image`). The shell links voicen-whisper (T-102) and
+# the image has no mingw g++: DOCS_RS=1, scoped to these two invocations as in
+# check-whisper, makes whisper-rs-sys skip its cmake build; only whisper-rs and
+# whisper-rs-sys read it, so the other crates' gnu builds stay checked.
+# T-201 (decisions #247, #248): the shell clock ban of the shell package lint config file
+# is at deny through src-tauri/Cargo.toml [lints]. The recipe line is owned by the
+# owned-lines list under scripts/ci; make check-ban-canary proves the ban bites.
 check-shell-windows:
-	scripts/tw-run core -- 'DOCS_RS=1 cargo check -p voicen --target x86_64-pc-windows-gnu && DOCS_RS=1 cargo clippy -p voicen --target x86_64-pc-windows-gnu --tests'
+	scripts/tw-run core -- 'cargo fmt --check -p voicen && DOCS_RS=1 cargo clippy -p voicen --target x86_64-pc-windows-gnu -- -D warnings && DOCS_RS=1 cargo clippy -p voicen --target x86_64-pc-windows-gnu --all-targets -- -D warnings'
 
 # The e2e step goes through the e2e entry (package.json scripts.e2e) on the host: it checks the
 # ui image is present and re-enters it through scripts/tw-run ui with --network none (T-064).
