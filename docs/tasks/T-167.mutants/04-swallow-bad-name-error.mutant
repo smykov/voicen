@@ -2,7 +2,9 @@ guarantee: AC T-061 r1#3: a purge that meets a bad target name exits 2 (not 0)
 file: src-tauri/src/win/purge.rs
 added_by: test-writer
 --- old
-            return Err(credential_error(ERROR_INVALID_DATA));
+            unreadable,
+        })
 --- new
-            return Ok(entries);
+            unreadable: 0,
+        })
 --- end

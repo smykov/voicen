@@ -3,7 +3,7 @@ file: src-tauri/src/win/purge.rs
 added_by: test-writer
 --- old
                 if c.TargetName.is_null() {
-                    bad_name = true;
+                    unreadable += 1;
                     continue;
                 }
 --- new
