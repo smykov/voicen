@@ -396,7 +396,7 @@ impl MonotonicClock for CountingClock {
 /// residency's `fired` latch stays false because the clock was never read).
 ///
 /// Red now: `Err(LocalEngineFailed)` and 1 read (the `abort.requested()` after `full`).
-/// Bite: any `abort.requested()` or clock read after `full` (catalog 01).
+/// Bite: any `abort.requested()` or clock read after `full` (catalog 10).
 #[test]
 fn run_that_ends_without_a_stop_point_returns_its_transcript() {
     let _serial = serial();
@@ -422,9 +422,12 @@ fn run_that_ends_without_a_stop_point_returns_its_transcript() {
 
 /// T-184 Acceptance (failure branch, second half): an abort answered at a stop point inside
 /// the run (the clock expires from its 2nd read, after the first encoder graph) is still an
-/// error, and the clock was read at least twice. Guard for the other side of the invariant.
-/// Green on the current code too; bites with catalog 02 (no stop callbacks) and 03 (a stop
-/// is not recorded).
+/// error, the clock was read at least twice, and no segment exists: read 2 is the
+/// `abort_callback` after window 1's encoder graphs, so `whisper_full` fails (-6) before any
+/// decode. Without that callback (catalog 01) window 1 is decoded and only window 2's
+/// encoder-begin stops, so the segment count tells the two apart. Guard for the other side
+/// of the invariant. Green on the current code too; bites with catalog 01 (no abort
+/// callback) and 08 (a stop is not recorded).
 #[test]
 fn abort_at_a_stop_point_inside_the_run_is_reported() {
     let _serial = serial();
@@ -443,6 +446,11 @@ fn abort_at_a_stop_point_inside_the_run_is_reported() {
         clock.reads() >= 2,
         "the clock was read {} time(s): the stop did not come from a callback",
         clock.reads()
+    );
+    assert_eq!(
+        model.last_segment_count(),
+        0,
+        "window 1 was decoded: the stop did not come from the abort callback after its encoder"
     );
 }
 
