@@ -1,0 +1,8 @@
+guarantee: AC-2: transcript free of special tokens
+file: crates/voicen-whisper/src/lib.rs
+added_by: test-writer
+--- old
+p.set_print_special(false);
+--- new
+p.set_print_special(true);
+--- end

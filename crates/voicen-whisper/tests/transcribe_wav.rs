@@ -41,6 +41,7 @@ use std::io::Read;
 use std::num::NonZero;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -58,6 +59,8 @@ const MODELS_DIR_VAR: &str = "VOICEN_WHISPER_TEST_MODELS_DIR";
 const QUIET_CHILD_VAR: &str = "VOICEN_WHISPER_QUIET_CHILD";
 /// Set by `whisper_timing_is_printed` for its child run of `whisper_timing_child_run`.
 const TIMING_CHILD_VAR: &str = "VOICEN_WHISPER_TIMING_CHILD";
+/// Set by `default_loader_prints_nothing` for its child run of `quiet_default_child_run`.
+const QUIET_DEFAULT_CHILD_VAR: &str = "VOICEN_WHISPER_QUIET_DEFAULT_CHILD";
 
 /// I1 (T-109): the one lock of this file. A test that loads a model takes it first and keeps
 /// it to its end; the parent of a child process keeps it across the child's whole run.
@@ -345,6 +348,181 @@ fn pre_requested_abort_returns_promptly() {
     eprintln!("abort-test: baseline {baseline:?}, aborted {aborted_for:?} (printed, not compared)");
 }
 
+// ---- T-184: abort decided by the stop callbacks, not by a clock read after `full` ------
+
+/// A monotonic clock that counts its reads and answers "expired" (an hour past `base`) from
+/// the `expired_from`-th read on (1-based), `base` before.
+struct CountingClock {
+    base: Instant,
+    reads: AtomicUsize,
+    expired_from: usize,
+}
+
+impl CountingClock {
+    fn new(expired_from: usize) -> Arc<CountingClock> {
+        Arc::new(CountingClock {
+            base: SystemMonotonic.now(),
+            reads: AtomicUsize::new(0),
+            expired_from,
+        })
+    }
+
+    fn reads(&self) -> usize {
+        self.reads.load(Ordering::SeqCst)
+    }
+
+    /// An `Abort` with a 1 s limit over this clock.
+    fn abort(self: &Arc<Self>) -> Abort {
+        Abort::new(self.clone(), self.base, Duration::from_secs(1))
+    }
+}
+
+impl MonotonicClock for CountingClock {
+    fn now(&self) -> Instant {
+        let n = self.reads.fetch_add(1, Ordering::SeqCst) + 1;
+        if n >= self.expired_from {
+            self.base + Duration::from_secs(3600)
+        } else {
+            self.base
+        }
+    }
+}
+
+/// T-184 Acceptance 1 and the failure branch's first half (T-099 r1#4): a run that reaches
+/// no stop point returns its transcript. 800 samples (50 ms) make a 4-frame mel, which
+/// whisper.cpp 1.8.3 refuses with "input is too short" and 0 before any callback; the
+/// language is fixed, so no detection pass either. The clock answers "expired" on every read,
+/// so the only way to see it is a read outside a stop callback. Asserts the result (Ok, the
+/// residency's `fired` latch stays false because the clock was never read).
+///
+/// Red now: `Err(LocalEngineFailed)` and 1 read (the `abort.requested()` after `full`).
+/// Bite: any `abort.requested()` or clock read after `full` (catalog 01).
+#[test]
+fn run_that_ends_without_a_stop_point_returns_its_transcript() {
+    let _serial = serial();
+    let mut model = load_tiny_with_threads(1);
+    let clock = CountingClock::new(1);
+    let abort = clock.abort();
+    let audio: Vec<f32> = clip().into_iter().take(800).collect();
+    assert_eq!(audio.len(), 800);
+
+    let result = model.transcribe(&audio, Some("en"), &abort);
+
+    assert!(
+        result.is_ok(),
+        "a run with no stop point was reported aborted: {:?}",
+        result.err()
+    );
+    assert_eq!(
+        clock.reads(),
+        0,
+        "the clock was read outside a stop callback: the residency would report Timeout"
+    );
+}
+
+/// T-184 Acceptance (failure branch, second half): an abort answered at a stop point inside
+/// the run (the clock expires from its 2nd read, after the first encoder graph) is still an
+/// error, and the clock was read at least twice. Guard for the other side of the invariant.
+/// Green on the current code too; bites with catalog 02 (no stop callbacks) and 03 (a stop
+/// is not recorded).
+#[test]
+fn abort_at_a_stop_point_inside_the_run_is_reported() {
+    let _serial = serial();
+    let mut model = load_tiny_with_threads(1);
+    let clock = CountingClock::new(2);
+    let abort = clock.abort();
+
+    let result = model.transcribe(&long_audio(60), Some("en"), &abort);
+
+    assert_eq!(
+        result.err(),
+        Some(FailureReason::LocalEngineFailed),
+        "a run stopped at a stop point must be an error (decision #133)"
+    );
+    assert!(
+        clock.reads() >= 2,
+        "the clock was read {} time(s): the stop did not come from a callback",
+        clock.reads()
+    );
+}
+
+// ---- T-184 (T-099 v3#N3): model test gaps ----------------------------------------------
+
+fn mentions(text: &str) -> usize {
+    let t = text.to_lowercase();
+    t.matches("speech").count() + t.matches("bubble").count()
+}
+
+/// Two windows of 30 s: the clip at 0 s and at 30.5 s of 33 s of audio. The transcript joins
+/// the segments of both: whisper.cpp left at least 2 segments and the text names the clip at
+/// least twice. Bite: join only the first (or last) segment in `transcribe`.
+#[test]
+fn two_windows_are_joined() {
+    let _serial = serial();
+    let mut model = load_tiny_with_threads(1);
+    let clip = clip();
+    let mut audio = vec![0.0f32; 33 * SAMPLE_RATE];
+    for start in [0, SAMPLE_RATE * 61 / 2] {
+        audio[start..start + clip.len()].copy_from_slice(&clip);
+    }
+    let text = match model.transcribe(&audio, Some("en"), &no_abort()) {
+        Ok(t) => t,
+        Err(e) => panic!("transcribing 33 s failed: {e:?}"),
+    };
+    assert!(
+        model.last_segment_count() >= 2,
+        "whisper.cpp left {} segment(s) for two clips in two windows",
+        model.last_segment_count()
+    );
+    assert!(
+        mentions(&text) >= 2,
+        "the transcript ({} chars) names the clip {} time(s)",
+        text.chars().count(),
+        mentions(&text)
+    );
+}
+
+/// A non-English fixed language is accepted and decoded: `Ok` and segments > 0 (the text is
+/// not compared: tiny translates English speech into German unreliably). Bite: refuse every
+/// code but "en". Per-language parameter caching stays unobserved.
+#[test]
+fn clip_is_transcribed_with_fixed_language_de() {
+    let _serial = serial();
+    let mut model = load_tiny_with_threads(1);
+    let result = model.transcribe(&clip(), Some("de"), &no_abort());
+    assert!(
+        result.is_ok(),
+        "transcribe with language de failed: {:?}",
+        result.err()
+    );
+    assert!(
+        model.last_segment_count() > 0,
+        "language de left no segments"
+    );
+}
+
+/// No special token reaches the text: whisper.cpp prints tokens >= eot (`[_BEG_]`, `[_TT_n]`,
+/// `<|...|>`) into segment text when `print_special` is on. Bite: `set_print_special(true)`.
+#[test]
+fn transcript_holds_no_special_tokens() {
+    let _serial = serial();
+    let mut model = load_tiny_with_threads(1);
+    for language in [Some("en"), None] {
+        let text = match model.transcribe(&clip(), language, &no_abort()) {
+            Ok(t) => t,
+            Err(e) => panic!("transcribe (language {language:?}) failed: {e:?}"),
+        };
+        assert!(
+            !text.is_empty(),
+            "empty transcript (language {language:?}): the token check proves nothing"
+        );
+        assert!(
+            !text.contains("[_") && !text.contains("<|"),
+            "transcript (language {language:?}) holds a special token"
+        );
+    }
+}
+
 // ---- I2: the engine's thread count has one policy -------------------------------------
 
 /// Properties of `max(1, min(B, P - 1))` that hold for every B >= 1, so they do not wait
@@ -473,32 +651,33 @@ fn quiet_child_run() {
     let _ = WhisperLoader::new().load(&cut);
 }
 
-#[test]
-fn whisper_and_ggml_print_nothing() {
-    // Held across the child's whole run: its models must not compute beside another test's.
+/// Runs `child` (an ignored test of this file) in a child process with `var` set, so its
+/// first model load is the process's first load, and asserts it passed and printed nothing of
+/// whisper.cpp / ggml / the clip. Holds the model lock across the child's whole run.
+fn assert_child_prints_nothing(child: &str, var: &str) {
     let _serial = serial();
     let exe = std::env::current_exe().expect("current test exe");
     let out = Command::new(exe)
         .args([
             "--exact",
-            "quiet_child_run",
+            child,
             "--ignored",
             "--nocapture",
             "--test-threads=1",
         ])
-        .env(QUIET_CHILD_VAR, "1")
+        .env(var, "1")
         .output()
         .expect("start the child test run");
     let stdout = String::from_utf8_lossy(&out.stdout).to_lowercase();
     let stderr = String::from_utf8_lossy(&out.stderr).to_lowercase();
     assert!(
         out.status.success(),
-        "the child run failed: {:?}",
+        "the child run {child} failed: {:?}",
         out.status
     );
     assert!(
         stdout.contains("1 passed"),
-        "the child run did not run quiet_child_run"
+        "the child run did not run {child}"
     );
     for (name, text) in [("stdout", &stdout), ("stderr", &stderr)] {
         for token in ["whisper", "ggml", "speech", "bubble"] {
@@ -506,6 +685,34 @@ fn whisper_and_ggml_print_nothing() {
             assert_eq!(n, 0, "the child's {name} holds '{token}' {n} time(s)");
         }
     }
+}
+
+#[test]
+fn whisper_and_ggml_print_nothing() {
+    assert_child_prints_nothing("quiet_child_run", QUIET_CHILD_VAR);
+}
+
+/// T-184 (T-099 v3#N3): the first load of a process through `WhisperLoader::default()`, which
+/// never ran `new()`, prints nothing either: `load_whisper` installs the log hooks itself.
+/// Bite: drop `install_logging_hooks` from `load_whisper` (whisper.cpp then prints its model
+/// banner to stderr, which the parent finds).
+#[test]
+fn default_loader_prints_nothing() {
+    assert_child_prints_nothing("quiet_default_child_run", QUIET_DEFAULT_CHILD_VAR);
+}
+
+/// Work of the child process of `default_loader_prints_nothing`; a no-op unless the parent
+/// set `VOICEN_WHISPER_QUIET_DEFAULT_CHILD`. The first and only load goes through `Default`.
+#[test]
+#[ignore = "child of default_loader_prints_nothing"]
+fn quiet_default_child_run() {
+    if std::env::var_os(QUIET_DEFAULT_CHILD_VAR).is_none() {
+        return;
+    }
+    let mut model = WhisperLoader::default()
+        .load_whisper(&tiny_path())
+        .expect("load through the default loader");
+    let _ = model.transcribe(&clip(), Some("en"), &no_abort());
 }
 
 // ---- invariant 1: dependencies --------------------------------------------------------

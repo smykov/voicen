@@ -1,0 +1,8 @@
+guarantee: AC-4b: a run stopped at a stop point inside the run is reported
+file: crates/voicen-whisper/src/lib.rs
+added_by: test-writer
+--- old
+            params.set_abort_callback(Some(abort_requested));
+--- new
+            let _ = abort_requested;
+--- end

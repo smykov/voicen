@@ -1,0 +1,8 @@
+guarantee: AC-2: non-English fixed language is decoded
+file: crates/voicen-whisper/src/lib.rs
+added_by: test-writer
+--- old
+Some(whisper_rs::get_lang_str(id).ok_or(FailureReason::LocalEngineFailed)?)
+--- new
+Some(whisper_rs::get_lang_str(id).filter(|c| *c == "en").ok_or(FailureReason::LocalEngineFailed)?)
+--- end

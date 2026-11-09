@@ -1,0 +1,9 @@
+guarantee: AC-3: VAD context runs one ggml thread
+file: crates/voicen-whisper/src/silero.rs
+added_by: test-writer
+--- old
+        params.set_n_threads(VAD_THREADS);
+
+--- new
+
+--- end

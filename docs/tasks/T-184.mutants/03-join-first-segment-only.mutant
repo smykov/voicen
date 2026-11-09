@@ -1,0 +1,8 @@
+guarantee: AC-2: multi-segment transcript is joined
+file: crates/voicen-whisper/src/lib.rs
+added_by: test-writer
+--- old
+for i in 0..self.state.full_n_segments() {
+--- new
+for i in 0..self.state.full_n_segments().min(1) {
+--- end

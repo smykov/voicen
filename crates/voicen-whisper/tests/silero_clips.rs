@@ -821,3 +821,20 @@ fn one_load_serves_the_gate_and_the_span_port_at_once() {
             .speech
     );
 }
+
+/// T-184 (T-043 r2#2): the native context is built from params whose `n_threads` is 1
+/// (`VAD_THREADS`; the cost of more is timing-only and stays printed, F-013). Reads the Debug
+/// text of the params that `SileroDetector::open` hands whisper.cpp, through the test-only
+/// `voicen_whisper::vad_context_params_debug()` (`#[doc(hidden)]`, built by the one
+/// constructor `open` uses). Needs no model file.
+///
+/// Red now: that function does not exist (compile error in this test binary); once it does,
+/// bite: `VAD_THREADS = 4`, or the `set_n_threads` call removed (whisper-rs default 4).
+#[test]
+fn vad_context_runs_one_ggml_thread() {
+    let text = voicen_whisper::vad_context_params_debug();
+    assert!(
+        text.contains("n_threads: 1,"),
+        "the VAD context params do not carry one thread: {text}"
+    );
+}

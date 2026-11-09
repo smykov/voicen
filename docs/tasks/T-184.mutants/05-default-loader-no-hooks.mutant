@@ -1,0 +1,9 @@
+guarantee: AC-2: Default loader's first load prints nothing
+file: crates/voicen-whisper/src/lib.rs
+added_by: test-writer
+--- old
+        // Also here: a loader built through `Default` has not installed the hooks.
+        whisper_rs::install_logging_hooks();
+--- new
+
+--- end
