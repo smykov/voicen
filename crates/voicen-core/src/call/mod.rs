@@ -12,8 +12,9 @@ pub mod transcript;
 pub mod wav_source;
 
 pub use capture::{
-    CaptureStamp, ChannelSink, LossCause, OpenError, Report, Step, Timeline, TrackDevice,
-    TrackEvent, TrackReceiver, TrackSink, TrackSource,
+    CaptureStamp, ChannelSink, CommunicationsCheck, DeviceEvent, DeviceEvents, DeviceEventsFactory,
+    LossCause, OpenError, Report, Step, Timeline, TrackDevice, TrackEvent, TrackReceiver,
+    TrackSink, TrackSource,
 };
 
 pub use events::{

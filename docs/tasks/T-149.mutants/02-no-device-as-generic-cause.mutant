@@ -1,0 +1,10 @@
+guarantee: AC-3 no device left -> call_device cause=no_device
+file: crates/voicen-core/src/call/session.rs
+added_by: developer
+--- old
+                if reopen.last == Some(OpenError::NoDevice) {
+                    DeviceCause::NoDevice
+--- new
+                if reopen.last == Some(OpenError::NoDevice) {
+                    DeviceCause::TrackLost
+--- end

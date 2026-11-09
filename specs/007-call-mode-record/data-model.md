@@ -177,7 +177,7 @@ The settings `SCHEMA_VERSION` stays 1. The section is added with container-level
 | `stopped{reason}` | sleep, 4 h, < 200 MB, storage error (FR-008, FR-016, FR-018) | toast |
 | `provider_notice{host}` | First session on a new cloud host (FR-031) | indicator (`warning.provider_notice`, wire kind `providerNotice`) |
 
-Warnings stay in the indicator's list until dismissed (FR-006); a dismissed kind re-arms on its next trigger.
+Warnings stay in the indicator's list until dismissed (FR-006); a warning equal to one already listed (same kind, and the same track for `track_lost`) is not added again; a dismissed kind re-arms on its next trigger with a new id (T-149, `WarningList`).
 
 ## Tray state
 

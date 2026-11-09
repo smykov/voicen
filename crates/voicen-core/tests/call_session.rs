@@ -2550,6 +2550,30 @@ fn no_cant_hear_when_nobody_speaks_or_the_silent_track_is_lost() {
     rig.session.stop(StopReason::User);
 }
 
+#[test]
+fn a_lost_track_gives_no_cant_hear_once_its_zeros_are_placed() {
+    // Acceptance 5 failure branch (D4), added by the developer: the lost system track is
+    // filled with zeros up to the mic's last block (D3) - checked after the stop, when the
+    // zeros are surely placed (the duration covers them) - and those zeros never count as
+    // a silent stretch. Bite: lost-track time counted as silence.
+    let rig = CallRig::with_capacity(8_192, quiet);
+    started(&rig, CallSource::Tray);
+    feed(&rig, 0, 1_000);
+    rig.source.set_stamp_ms(1_000);
+    rig.source.fail_all(Track::System, OpenError::NoDevice);
+    rig.source
+        .lose(Track::System, LossCause::NotAvailable, 1_000);
+    rig.source.feed(Track::Mic, 1_000, 65_000, 0.3);
+    rig.session.stop(StopReason::User);
+    let duration = rig.only_meta()["duration_ms"].as_u64().expect("a duration");
+    assert!(duration >= 64_000, "the lost track was filled: {duration}");
+    assert!(
+        cant_hear_lines(&rig).is_empty(),
+        "{:?}",
+        cant_hear_lines(&rig)
+    );
+}
+
 fn feed_silence_both(rig: &CallRig) {
     rig.source.feed_both(0, 65_000, 0.0, 0.0);
 }

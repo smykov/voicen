@@ -1,0 +1,2 @@
+# the task's integration tests (crates/voicen-core/tests/call_session.rs), core area's container
+cargo test -p voicen-core --test call_session

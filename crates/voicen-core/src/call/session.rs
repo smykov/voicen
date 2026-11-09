@@ -34,20 +34,21 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, TryLockError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use crate::audio::{mix_to_mono, SAMPLE_RATE};
+use crate::audio::{mix_to_mono, AudioBuffer, SAMPLE_RATE};
 use crate::call::capture::{
-    CaptureStamp, ChannelSink, Report, Step, Timeline, TrackDevice, TrackEvent, TrackReceiver,
-    TrackSink, TrackSource,
+    CaptureStamp, ChannelSink, CommunicationsCheck, DeviceEvent, DeviceEvents, DeviceEventsFactory,
+    LossCause, Report, Step, Timeline, TrackDevice, TrackEvent, TrackReceiver, TrackSink,
+    TrackSource,
 };
 use crate::call::codec::{OpusOgg, TrackEncoder};
 use crate::call::events::{
-    CallNotice, CallSource, CallState, CallWarning, EndpointId, RefusedPart, RefusedReason,
-    StopReason, StorageKind, Track,
+    CallNotice, CallSource, CallState, CallWarning, DeviceCause, EndpointId, RefusedPart,
+    RefusedReason, SilentRule, StopReason, StorageKind, Track,
 };
-use crate::call::indicator::{IndicatorState, IndicatorTick, IndicatorWarning};
+use crate::call::indicator::{IndicatorState, IndicatorTick, WarningList};
 use crate::call::storage::{
     started_at, storage_kind, write_meta, ActiveCallFiles, CallMeta, CallStore, CreateError,
-    NewCall, TrackDrop,
+    DeviceChange, NewCall, TrackDrop,
 };
 use crate::call::OpenError;
 use crate::clock::{Clock, LocalOffset, MonotonicClock};
@@ -59,6 +60,7 @@ use crate::settings::roots::UnwritableReason;
 use crate::settings::service::{SettingsService, WarnedHostFailed};
 use crate::settings::url::{check_base_url, provider_host, ProviderHost};
 use crate::settings::Settings;
+use crate::vad::EnergyDetector;
 use rubato::audioadapter_buffers::direct::InterleavedSlice;
 use rubato::{Fft, FixedSync, Resampler};
 
@@ -72,6 +74,16 @@ const IDLE: Duration = Duration::from_millis(2);
 const LOCK_RETRY: Duration = Duration::from_millis(1);
 /// 16 kHz samples per millisecond of a track.
 const SAMPLES_PER_MS: u64 = 16;
+/// FR-012: a lost track is reopened within this, or declared silent and retried this often.
+const REOPEN_WITHIN: Duration = Duration::from_secs(2);
+/// A live track that delivered nothing for this long is advanced with the other track (D3).
+const STALL: Duration = Duration::from_millis(500);
+/// A reopened stream that sends nothing for this long has its gap measured where it stands.
+const SETTLE: Duration = Duration::from_secs(2);
+/// FR-013: one speech verdict per second of placed audio.
+const SECOND_SAMPLES: usize = 16_000;
+/// FR-013: more than this many silent seconds in a row while the other track spoke.
+const CANT_HEAR_AFTER_S: u64 = 60;
 
 /// The call indicator window and the tray's call flag. Called INSIDE the session lock;
 /// an implementation must never block or call back into the session.
@@ -133,6 +145,10 @@ pub struct CallDeps {
     pub channel_capacity: usize,
     /// Fed while subtitles is on.
     pub subtitles: Arc<dyn SubtitleConsumer>,
+    /// The device-change stream of each capture lifetime, opened on its device thread.
+    pub devices: Arc<dyn DeviceEventsFactory>,
+    /// FR-010: asked once per record start, before `call_started`.
+    pub comms: Arc<dyn CommunicationsCheck>,
 }
 
 /// What a `toggle_record` or `toggle_subtitles` did.
@@ -174,14 +190,15 @@ struct Inner {
     subtitles: bool,
 }
 
-/// The two open captures and the writer thread draining them.
+/// The two open captures: the device thread that owns their handles, and the writer
+/// thread draining them.
 struct Captures {
-    mic: Box<dyn CaptureHandle>,
-    system: Box<dyn CaptureHandle>,
+    /// The endpoints of the first opens (the call folder's `meta.json` names them).
     mic_id: EndpointId,
     system_id: EndpointId,
     /// The warnings of the opens (`MicChanged`), shown by every call on these captures.
     warnings: Vec<CallWarning>,
+    device: JoinHandle<()>,
     writer: JoinHandle<WriterEnd>,
     control: Arc<Control>,
     commands: Sender<Envelope>,
@@ -190,7 +207,9 @@ struct Captures {
 /// The recording call (record on).
 struct Call {
     lang: UiLanguage,
-    warnings: Vec<IndicatorWarning>,
+    /// The call's one warning list (D4): raised by the session and the writer, dismissed
+    /// by [`CallSession::dismiss_warning`], always under the session lock.
+    warnings: WarningList,
     /// The end of the reminder; `None` once hidden or when the reminder is off.
     reminder_until: Option<Instant>,
     dir: PathBuf,
@@ -198,13 +217,26 @@ struct Call {
     meta: CallMeta,
 }
 
-/// The flags the session sets for the writer thread.
+impl Call {
+    /// What the indicator shows for this call now.
+    fn state(&self) -> IndicatorState {
+        IndicatorState::recording(
+            self.lang,
+            self.reminder_until.is_some(),
+            self.warnings.items(self.lang),
+        )
+    }
+}
+
+/// The flags the session sets for the writer and device threads.
 #[derive(Default)]
 struct Control {
     /// The captures are closing: drain what is queued, then end.
     stop: AtomicBool,
     /// The session holds its lock while it waits for the writer: skip the tick.
     hold: AtomicBool,
+    /// The captures are closing: the device thread stops both handles and ends.
+    devices: AtomicBool,
 }
 
 /// The writer thread is gone (it panicked); what it held is lost.
@@ -216,13 +248,22 @@ struct Refusal {
     reason: RefusedReason,
 }
 
+/// One open capture: its handle, the sink its callback feeds and the endpoint it reports.
+struct OpenTrack {
+    handle: Box<dyn CaptureHandle>,
+    sink: Arc<OpenSink>,
+    endpoint: EndpointId,
+}
+
 /// The tracks a start opened, before a writer drains them.
 struct Opened {
-    mic: Box<dyn CaptureHandle>,
-    system: Box<dyn CaptureHandle>,
-    mic_id: EndpointId,
-    system_id: EndpointId,
+    mic: OpenTrack,
+    system: OpenTrack,
+    /// The saved mic the mic track opened on; `None` when it is on the default input.
+    mic_selected: Option<DeviceId>,
     warnings: Vec<CallWarning>,
+    /// The channel both tracks feed (through their [`OpenSink`]s).
+    channel: Arc<dyn TrackSink>,
     mic_rx: TrackReceiver,
     system_rx: TrackReceiver,
     /// The source's clock just before the opens: where the timelines start.
@@ -231,8 +272,48 @@ struct Opened {
 
 impl Opened {
     fn stop(self) {
-        stop_handle(self.mic);
-        stop_handle(self.system);
+        stop_handle(self.mic.handle);
+        stop_handle(self.system.handle);
+    }
+}
+
+/// The sink of one open capture, in front of the shared [`ChannelSink`]. A stream that is
+/// retired (its device changed, or it died) is cut off here, so nothing it still delivers
+/// reaches the channel after the track's `Lost`. The device thread reads `lost` to learn
+/// that the stream died (D1).
+struct OpenSink {
+    channel: Arc<dyn TrackSink>,
+    live: AtomicBool,
+    lost: AtomicBool,
+}
+
+impl OpenSink {
+    fn new(channel: Arc<dyn TrackSink>) -> Arc<OpenSink> {
+        Arc::new(OpenSink {
+            channel,
+            live: AtomicBool::new(true),
+            lost: AtomicBool::new(false),
+        })
+    }
+
+    /// Cuts the stream off; `true` when it was still live (no `Lost` reached the channel).
+    fn retire(&self) -> bool {
+        self.live.swap(false, Ordering::SeqCst)
+    }
+}
+
+impl TrackSink for OpenSink {
+    fn block(&self, track: Track, interleaved: &[f32], rate: u32, channels: u16, at: CaptureStamp) {
+        if self.live.load(Ordering::SeqCst) {
+            self.channel.block(track, interleaved, rate, channels, at);
+        }
+    }
+
+    fn lost(&self, track: Track, cause: LossCause, at: CaptureStamp) {
+        if self.retire() {
+            self.channel.lost(track, cause, at);
+            self.lost.store(true, Ordering::SeqCst);
+        }
     }
 }
 
@@ -249,11 +330,15 @@ impl Captures {
         result
     }
 
-    /// Closes the captures: both stopped, the writer drained and joined. Returns the
+    /// Closes the captures: the device thread stops both handles (after an open it is
+    /// running, if any) and is joined, then the writer is drained and joined. Returns the
     /// recording the writer still held.
     fn close(self) -> Result<Option<Box<Recording>>, WriterGone> {
-        stop_handle(self.mic);
-        stop_handle(self.system);
+        // The session holds its lock until the writer is joined: no tick, no warning.
+        self.control.hold.store(true, Ordering::SeqCst);
+        self.control.devices.store(true, Ordering::SeqCst);
+        // A device thread that panicked dropped its handles, which closes them.
+        let _ = self.device.join();
         self.control.stop.store(true, Ordering::SeqCst);
         self.writer
             .join()
@@ -414,8 +499,22 @@ impl CallSession {
             return;
         }
         call.reminder_until = None;
-        let state = IndicatorState::recording(call.lang, false, call.warnings.clone());
-        self.deps.indicator.set_state(&state);
+        self.deps.indicator.set_state(&call.state());
+    }
+
+    /// Removes the warning `id` from the recording call's list and republishes the
+    /// indicator state, under the session lock (D4). `false` when no call records or no
+    /// listed warning has that id. The next trigger of the same kind lists it again.
+    pub fn dismiss_warning(&self, id: u32) -> bool {
+        let mut inner = self.lock();
+        let Some(call) = inner.call.as_mut() else {
+            return false;
+        };
+        if !call.warnings.dismiss(id) {
+            return false;
+        }
+        self.deps.indicator.set_state(&call.state());
+        true
     }
 
     /// When [`CallSession::tick`] has something to do: the reminder's end, or `None`.
@@ -512,7 +611,11 @@ impl CallSession {
             }
             None => {
                 let opened = self.open_tracks(&settings)?;
-                let files = match self.create_files(&settings, &opened.mic_id, &opened.system_id) {
+                let files = match self.create_files(
+                    &settings,
+                    &opened.mic.endpoint,
+                    &opened.system.endpoint,
+                ) {
                     Ok(files) => files,
                     Err(refusal) => {
                         opened.stop();
@@ -523,8 +626,8 @@ impl CallSession {
                 dir = files.dir().to_path_buf();
                 meta = files.meta().clone();
                 warnings = opened.warnings.clone();
-                mic_id = opened.mic_id.clone();
-                system_id = opened.system_id.clone();
+                mic_id = opened.mic.endpoint.clone();
+                system_id = opened.system.endpoint.clone();
                 let rec = recording(files, opened.start, mono_start);
                 match self.spawn(opened, Some(rec), false) {
                     Some(captures) => inner.captures = Some(captures),
@@ -543,25 +646,23 @@ impl CallSession {
     /// Opens the system track, then the mic; a mic failure stops the system track.
     fn open_tracks(&self, settings: &Settings) -> Result<Opened, Refusal> {
         let (sink, mic_rx, system_rx) = ChannelSink::new(self.deps.channel_capacity);
-        let sink: Arc<dyn TrackSink> = Arc::new(sink);
+        let channel: Arc<dyn TrackSink> = Arc::new(sink);
         let start = self.deps.source.now();
-        let (system, system_id) = self
-            .deps
-            .source
-            .open(
-                Track::System,
-                TrackDevice::DefaultOutputLoopback,
-                sink.clone(),
-            )
-            .map_err(|e| Refusal {
-                part: RefusedPart::System,
-                reason: e.into(),
-            })?;
+        let system = open_track(
+            &*self.deps.source,
+            Track::System,
+            TrackDevice::DefaultOutputLoopback,
+            &channel,
+        )
+        .map_err(|e| Refusal {
+            part: RefusedPart::System,
+            reason: e.into(),
+        })?;
         let mut warnings = Vec::new();
-        let (mic, mic_id) = match self.open_mic(settings, sink, &mut warnings) {
+        let (mic, mic_selected) = match self.open_mic(settings, &channel, &mut warnings) {
             Ok(opened) => opened,
             Err(e) => {
-                stop_handle(system);
+                stop_handle(system.handle);
                 return Err(Refusal {
                     part: RefusedPart::Mic,
                     reason: e.into(),
@@ -571,9 +672,9 @@ impl CallSession {
         Ok(Opened {
             mic,
             system,
-            mic_id,
-            system_id,
+            mic_selected,
             warnings,
+            channel,
             mic_rx,
             system_rx,
             start,
@@ -630,57 +731,67 @@ impl CallSession {
         meta: CallMeta,
         mono_start: Instant,
     ) -> Call {
+        // FR-010 (D5): only a difference the OS confirms is one; every Err (E_NOTFOUND:
+        // no communications device) is none, and none refuses the start.
+        let comms_differs = matches!(self.deps.comms.differs(), Ok(true));
+        if comms_differs {
+            warnings.push(CallWarning::CommunicationsDeviceDiffers);
+        }
         if let Some(host) = self.new_provider_host(settings) {
             // The notice shows even when the host could not be remembered: it then shows
             // again at the next call (FR-031).
             let _ = self.deps.settings.remember_warned_host(&host);
             warnings.push(CallWarning::ProviderNotice { host });
         }
-        let lang = settings.ui_language;
-        let warnings: Vec<IndicatorWarning> = warnings
-            .iter()
-            .zip(1u32..)
-            .map(|(w, id)| IndicatorWarning::of(id, w, lang))
-            .collect();
-        let reminder_until = settings.calls.reminder.then(|| mono_start + REMINDER);
-        let state = IndicatorState::recording(lang, reminder_until.is_some(), warnings.clone());
-        self.deps.indicator.set_state(&state);
+        let mut list = WarningList::new();
+        for warning in warnings {
+            list.raise(warning);
+        }
+        let call = Call {
+            lang: settings.ui_language,
+            warnings: list,
+            reminder_until: settings.calls.reminder.then(|| mono_start + REMINDER),
+            dir,
+            meta,
+        };
+        self.deps.indicator.set_state(&call.state());
         self.deps.indicator.set_call_recording(true);
         self.deps.log.write(LogEvent::CallStarted {
             mic: mic_id,
             system: system_id,
-            // Placeholder until the communications-device check (G35).
-            comms_differs: false,
+            comms_differs,
         });
-        Call {
-            lang,
-            warnings,
-            reminder_until,
-            dir,
-            meta,
-        }
+        call
     }
 
     /// The mic: the saved one by id, else the default input. A saved mic that is gone
     /// (`NoDevice`) is retried once on the default input with [`CallWarning::MicChanged`].
+    /// Also returns the saved mic's id when the track opened on it.
     fn open_mic(
         &self,
         settings: &Settings,
-        sink: Arc<dyn TrackSink>,
+        channel: &Arc<dyn TrackSink>,
         warnings: &mut Vec<CallWarning>,
-    ) -> Result<(Box<dyn CaptureHandle>, EndpointId), OpenError> {
-        let source = &self.deps.source;
+    ) -> Result<(OpenTrack, Option<DeviceId>), OpenError> {
+        let source = &*self.deps.source;
+        let default = || open_track(source, Track::Mic, TrackDevice::DefaultInput, channel);
         match &settings.microphone {
-            None => source.open(Track::Mic, TrackDevice::DefaultInput, sink),
+            None => Ok((default()?, None)),
             Some(mic) => {
-                let selected = TrackDevice::Selected(DeviceId(mic.id.clone()));
-                match source.open(Track::Mic, selected, sink.clone()) {
+                let id = DeviceId(mic.id.clone());
+                match open_track(
+                    source,
+                    Track::Mic,
+                    TrackDevice::Selected(id.clone()),
+                    channel,
+                ) {
+                    Ok(opened) => Ok((opened, Some(id))),
                     Err(OpenError::NoDevice) => {
-                        let opened = source.open(Track::Mic, TrackDevice::DefaultInput, sink)?;
+                        let opened = default()?;
                         warnings.push(CallWarning::MicChanged);
-                        Ok(opened)
+                        Ok((opened, None))
                     }
-                    other => other,
+                    Err(e) => Err(e),
                 }
             }
         }
@@ -698,7 +809,9 @@ impl CallSession {
         (!known).then_some(host)
     }
 
-    /// Starts the writer over the opened tracks. On failure both tracks are stopped.
+    /// Starts the device thread (it owns both handles from here on) and the writer over
+    /// the opened tracks. Returns once the device thread has opened its event stream. On
+    /// failure both tracks are closed.
     fn spawn(
         &self,
         opened: Opened,
@@ -708,24 +821,54 @@ impl CallSession {
         let Opened {
             mic,
             system,
-            mic_id,
-            system_id,
+            mic_selected,
             warnings,
+            channel,
             mic_rx,
             system_rx,
             ..
         } = opened;
+        let mic_id = mic.endpoint.clone();
+        let system_id = system.endpoint.clone();
         let control = Arc::new(Control::default());
+        let (outcomes_tx, outcomes) = mpsc::channel();
+        let devices = DeviceThread {
+            source: self.deps.source.clone(),
+            mono: self.deps.mono.clone(),
+            channel,
+            control: control.clone(),
+            outcomes: outcomes_tx,
+            mic: DeviceLane::new(mic),
+            system: DeviceLane::new(system),
+            mic_selected,
+        };
+        let factory = self.deps.devices.clone();
+        let (ready_tx, ready) = mpsc::channel();
+        // A spawn that fails drops the closure, and with it both handles (closed).
+        let device = thread::Builder::new()
+            .name("voicen-call-devices".to_string())
+            .spawn(move || devices.run(&*factory, ready_tx))
+            .ok()?;
+        // An Err: the thread is gone (it panicked); the writer still drains what came.
+        let _ = ready.recv();
         let (commands, inbox) = mpsc::channel();
+        let now = self.deps.mono.now();
         let writer = Writer {
             shared: self.shared.clone(),
             log: self.deps.log.clone(),
             mono: self.deps.mono.clone(),
+            source: self.deps.source.clone(),
             consumer: self.deps.subtitles.clone(),
             control: control.clone(),
             inbox,
+            outcomes,
             mic_rx,
             system_rx,
+            seen: Pair {
+                mic: Seen::new(now),
+                system: Seen::new(now),
+            },
+            pending: Vec::new(),
             sub: subtitles.then(Box::default),
             rec,
         };
@@ -734,18 +877,17 @@ impl CallSession {
             .spawn(move || writer.run())
         {
             Ok(writer) => Some(Captures {
-                mic,
-                system,
                 mic_id,
                 system_id,
                 warnings,
+                device,
                 writer,
                 control,
                 commands,
             }),
             Err(_) => {
-                stop_handle(mic);
-                stop_handle(system);
+                control.devices.store(true, Ordering::SeqCst);
+                let _ = device.join();
                 None
             }
         }
@@ -822,6 +964,7 @@ impl Drop for CallSession {
     /// written (a later start finds the call `recording` and recovers it).
     fn drop(&mut self) {
         if let Some(captures) = self.lock().captures.as_ref() {
+            captures.control.devices.store(true, Ordering::SeqCst);
             captures.control.stop.store(true, Ordering::SeqCst);
         }
     }
@@ -845,6 +988,303 @@ fn stop_handle(handle: Box<dyn CaptureHandle>) {
     let _ = handle.stop();
 }
 
+/// Opens `track` on `device` behind a fresh [`OpenSink`] over `channel`.
+fn open_track(
+    source: &(dyn TrackSource + Send + Sync),
+    track: Track,
+    device: TrackDevice,
+    channel: &Arc<dyn TrackSink>,
+) -> Result<OpenTrack, OpenError> {
+    let sink = OpenSink::new(channel.clone());
+    let (handle, endpoint) = source.open(track, device, sink.clone())?;
+    Ok(OpenTrack {
+        handle,
+        sink,
+        endpoint,
+    })
+}
+
+/// The other track of the call.
+fn other(track: Track) -> Track {
+    match track {
+        Track::Mic => Track::System,
+        Track::System => Track::Mic,
+    }
+}
+
+/// One value per track.
+struct Pair<T> {
+    mic: T,
+    system: T,
+}
+
+impl<T> Pair<T> {
+    fn get(&self, track: Track) -> &T {
+        match track {
+            Track::Mic => &self.mic,
+            Track::System => &self.system,
+        }
+    }
+
+    fn get_mut(&mut self, track: Track) -> &mut T {
+        match track {
+            Track::Mic => &mut self.mic,
+            Track::System => &mut self.system,
+        }
+    }
+}
+
+// ---- the device thread ------------------------------------------------------------------
+
+/// What the device thread tells the writer (D1, D2).
+enum Outcome {
+    /// `track` runs again on endpoint `to`; `cause` is the trigger's, or `Reopened` after
+    /// the track was declared silent.
+    Reopened {
+        track: Track,
+        cause: DeviceCause,
+        to: EndpointId,
+    },
+    /// `track` was not reopened within 2 s: it is silent until a retry opens it.
+    Silent { track: Track, cause: DeviceCause },
+}
+
+/// A reopen that has not succeeded yet.
+struct Reopen {
+    /// The trigger, on the session's monotonic clock.
+    since: Instant,
+    cause: DeviceCause,
+    /// The next 2 s mark (counted from `since`) that gets an attempt.
+    next_mark: u32,
+    silent: bool,
+    /// The error of the latest attempt.
+    last: Option<OpenError>,
+}
+
+/// One track on the device thread.
+struct DeviceLane {
+    /// `None` while a reopen has not succeeded.
+    handle: Option<Box<dyn CaptureHandle>>,
+    sink: Arc<OpenSink>,
+    endpoint: EndpointId,
+    reopen: Option<Reopen>,
+}
+
+impl DeviceLane {
+    fn new(opened: OpenTrack) -> DeviceLane {
+        DeviceLane {
+            handle: Some(opened.handle),
+            sink: opened.sink,
+            endpoint: opened.endpoint,
+            reopen: None,
+        }
+    }
+
+    /// Cuts off and stops the current stream. `true` when it was still live.
+    fn retire(&mut self) -> bool {
+        let live = self.sink.retire();
+        if let Some(handle) = self.handle.take() {
+            stop_handle(handle);
+        }
+        live
+    }
+}
+
+/// The one place that stops or opens a track handle while the captures are open (D1):
+/// one state machine per track, fed by the stream's own loss ([`OpenSink`]) and by the
+/// shell's [`DeviceEvents`]. It never takes the session lock.
+struct DeviceThread {
+    source: Arc<dyn TrackSource + Send + Sync>,
+    mono: Arc<dyn MonotonicClock>,
+    /// The channel both tracks feed: a retired stream's `Lost` marker goes here.
+    channel: Arc<dyn TrackSink>,
+    control: Arc<Control>,
+    outcomes: Sender<Outcome>,
+    mic: DeviceLane,
+    system: DeviceLane,
+    /// The saved mic while the mic track is on it (a default-input change leaves it be).
+    mic_selected: Option<DeviceId>,
+}
+
+impl DeviceThread {
+    fn run(mut self, factory: &dyn DeviceEventsFactory, ready: Sender<()>) {
+        let events = factory.open();
+        // The session waits for this before it returns from the start.
+        let _ = ready.send(());
+        while !self.control.devices.load(Ordering::SeqCst) {
+            for track in [Track::Mic, Track::System] {
+                let lane = self.lane(track);
+                if lane.reopen.is_none() && lane.sink.lost.load(Ordering::SeqCst) {
+                    let cause = match track {
+                        Track::Mic => DeviceCause::MicLost,
+                        Track::System => DeviceCause::DefaultOutputChanged,
+                    };
+                    self.trigger(track, cause, &*events);
+                }
+            }
+            while let Some(event) = events.next() {
+                self.event(event, &*events);
+            }
+            self.deadlines(&*events);
+            thread::sleep(IDLE);
+        }
+        for track in [Track::Mic, Track::System] {
+            self.lane_mut(track).retire();
+        }
+        // Dropped here, on this thread: the shell unregisters its client.
+        drop(events);
+    }
+
+    fn lane(&self, track: Track) -> &DeviceLane {
+        match track {
+            Track::Mic => &self.mic,
+            Track::System => &self.system,
+        }
+    }
+
+    fn lane_mut(&mut self, track: Track) -> &mut DeviceLane {
+        match track {
+            Track::Mic => &mut self.mic,
+            Track::System => &mut self.system,
+        }
+    }
+
+    /// The track an event concerns, and why; `None` for a device no track is on.
+    fn route(&self, event: &DeviceEvent) -> Option<(Track, DeviceCause)> {
+        match event {
+            DeviceEvent::DefaultOutputChanged => {
+                Some((Track::System, DeviceCause::DefaultOutputChanged))
+            }
+            // A selected mic is explicit: only a mic on "default" follows the default.
+            DeviceEvent::DefaultInputChanged => self
+                .mic_selected
+                .is_none()
+                .then_some((Track::Mic, DeviceCause::MicDefaultChanged)),
+            DeviceEvent::DeviceRemoved(id) => {
+                let on = |lane: &DeviceLane| lane.endpoint.as_str() == Some(id.0.as_str());
+                if self.mic_selected.as_ref() == Some(id) || on(&self.mic) {
+                    Some((Track::Mic, DeviceCause::MicLost))
+                } else if on(&self.system) {
+                    Some((Track::System, DeviceCause::DefaultOutputChanged))
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    fn event(&mut self, event: DeviceEvent, events: &dyn DeviceEvents) {
+        if let Some((track, cause)) = self.route(&event) {
+            self.trigger(track, cause, events);
+        }
+    }
+
+    /// A device signal for `track`: absorbed while a reopen is pending; otherwise the old
+    /// stream is cut off and stopped (before any new open), its `Lost` reaches the writer
+    /// (unless the stream sent its own), and the first attempt comes at once.
+    fn trigger(&mut self, track: Track, cause: DeviceCause, events: &dyn DeviceEvents) {
+        let since = self.mono.now();
+        let at = self.source.now();
+        let lane = self.lane_mut(track);
+        if lane.reopen.is_some() {
+            return;
+        }
+        let live = lane.retire();
+        lane.reopen = Some(Reopen {
+            since,
+            cause,
+            next_mark: 1,
+            silent: false,
+            last: None,
+        });
+        if live {
+            self.channel.lost(track, LossCause::Other, at);
+        }
+        self.attempt(track, events);
+    }
+
+    /// One open of `track` on its default. On success the writer is told, and the events
+    /// that came meanwhile for the same track are absorbed (the new open already follows
+    /// the change they report).
+    fn attempt(&mut self, track: Track, events: &dyn DeviceEvents) {
+        let device = match track {
+            Track::Mic => TrackDevice::DefaultInput,
+            Track::System => TrackDevice::DefaultOutputLoopback,
+        };
+        match open_track(&*self.source, track, device, &self.channel) {
+            Ok(opened) => {
+                let lane = self.lane_mut(track);
+                let reopen = lane.reopen.take();
+                lane.handle = Some(opened.handle);
+                lane.sink = opened.sink;
+                lane.endpoint = opened.endpoint.clone();
+                if track == Track::Mic {
+                    self.mic_selected = None;
+                }
+                let cause = match reopen {
+                    Some(r) if !r.silent => r.cause,
+                    _ => DeviceCause::Reopened,
+                };
+                // A writer that is gone has nobody to tell.
+                let _ = self.outcomes.send(Outcome::Reopened {
+                    track,
+                    cause,
+                    to: opened.endpoint,
+                });
+                let mut rest = Vec::new();
+                while let Some(event) = events.next() {
+                    if self.route(&event).map(|(t, _)| t) != Some(track) {
+                        rest.push(event);
+                    }
+                }
+                for event in rest {
+                    self.event(event, events);
+                }
+            }
+            Err(e) => {
+                if let Some(reopen) = self.lane_mut(track).reopen.as_mut() {
+                    reopen.last = Some(e);
+                }
+            }
+        }
+    }
+
+    /// The 2 s rule on the monotonic clock: silent at the first round at or after the
+    /// trigger + 2 s, then one attempt per 2 s mark.
+    fn deadlines(&mut self, events: &dyn DeviceEvents) {
+        let now = self.mono.now();
+        for track in [Track::Mic, Track::System] {
+            let Some(reopen) = self.lane_mut(track).reopen.as_mut() else {
+                continue;
+            };
+            let elapsed = now.saturating_duration_since(reopen.since);
+            if elapsed < REOPEN_WITHIN {
+                continue;
+            }
+            let declare = (!reopen.silent).then(|| {
+                reopen.silent = true;
+                if reopen.last == Some(OpenError::NoDevice) {
+                    DeviceCause::NoDevice
+                } else {
+                    DeviceCause::TrackLost
+                }
+            });
+            let mark =
+                u32::try_from(elapsed.as_millis() / REOPEN_WITHIN.as_millis()).unwrap_or(u32::MAX);
+            let due = mark >= reopen.next_mark;
+            if due {
+                reopen.next_mark = mark.saturating_add(1);
+            }
+            if let Some(cause) = declare {
+                let _ = self.outcomes.send(Outcome::Silent { track, cause });
+            }
+            if due {
+                self.attempt(track, events);
+            }
+        }
+    }
+}
+
 /// The writer's side of a new call: both encoders, a timeline per track from `start`.
 fn recording(
     files: ActiveCallFiles<File>,
@@ -858,6 +1298,8 @@ fn recording(
         timeline: Timeline::new(track, start),
         enc: Some(enc),
         level: 0.0,
+        gap: None,
+        activity: Activity::new(),
     };
     Box::new(Recording {
         mic: lane(Track::Mic, mic),
@@ -890,9 +1332,108 @@ struct Envelope {
 /// failed).
 struct RecLane {
     timeline: Timeline,
-    enc: Option<OpusOgg<File>>,
+    enc: Option<OpenOgg>,
     /// The latest 100 ms level.
     level: f32,
+    /// The device change whose gap is still being measured (D3).
+    gap: Option<DeviceGap>,
+    /// The FR-013 speech accounting.
+    activity: Activity,
+}
+
+type OpenOgg = OpusOgg<File>;
+
+/// A device change of one track while record is on: where the track went silent, where
+/// its new stream's audio landed, and what the device thread reported.
+struct DeviceGap {
+    /// The track position (ms) right after the `Lost`.
+    at_ms: u64,
+    /// The track position (ms) where the new stream's first block landed.
+    landed_ms: Option<u64>,
+    /// The reopen: its cause, the new endpoint and when the writer heard of it.
+    reopened: Option<(DeviceCause, EndpointId, Instant)>,
+}
+
+/// FR-013 on one track (D4): a speech verdict per second of placed audio.
+struct Activity {
+    /// The samples of the second being filled.
+    second: Vec<i16>,
+    /// Its index on the track's axis.
+    index: u64,
+    /// Some of it was placed while the track was lost.
+    tainted: bool,
+    /// The first second of the current stretch without speech.
+    stretch: u64,
+    /// The latest second with speech.
+    last_speech: Option<u64>,
+    /// The rule fired in this stretch (the tick's `*_silent`).
+    fired: bool,
+}
+
+impl Activity {
+    fn new() -> Activity {
+        Activity {
+            second: Vec::with_capacity(SECOND_SAMPLES),
+            index: 0,
+            tainted: false,
+            stretch: 0,
+            last_speech: None,
+            fired: false,
+        }
+    }
+
+    /// Takes the placed samples `pcm` and gives each completed second its verdict. `lost`:
+    /// the samples were placed while the track was lost (such a second ends the stretch, so
+    /// a lost track never fires).
+    fn listen(&mut self, pcm: &[f32], lost: bool) {
+        self.tainted |= lost;
+        let mut rest = pcm;
+        while !rest.is_empty() {
+            let take = (SECOND_SAMPLES - self.second.len()).min(rest.len());
+            let (head, tail) = rest.split_at(take);
+            self.second.extend(head.iter().map(|x| to_i16(*x)));
+            rest = tail;
+            if self.second.len() == SECOND_SAMPLES {
+                self.second_done();
+                self.tainted = lost;
+            }
+        }
+    }
+
+    fn second_done(&mut self) {
+        let k = self.index;
+        self.index += 1;
+        let samples = std::mem::replace(&mut self.second, Vec::with_capacity(SECOND_SAMPLES));
+        if self.tainted {
+            self.stretch = k + 1;
+            self.fired = false;
+            return;
+        }
+        let speech = samples.iter().any(|s| *s != 0)
+            && EnergyDetector::new().detect(&AudioBuffer::from_16k_mono(samples));
+        if speech {
+            self.last_speech = Some(k);
+            self.stretch = k + 1;
+            self.fired = false;
+        }
+    }
+
+    /// `true` once per stretch: more than 60 completed seconds without speech and a speech
+    /// second of the other track (`other`) in the stretch. Checked after either track's
+    /// step, so the order the writer drains the tracks in does not matter.
+    fn cant_hear(&mut self, other: Option<u64>) -> bool {
+        let silent_for = self.index.saturating_sub(self.stretch);
+        let other_spoke = other.is_some_and(|s| s >= self.stretch);
+        if self.fired || silent_for <= CANT_HEAR_AFTER_S || !other_spoke {
+            return false;
+        }
+        self.fired = true;
+        true
+    }
+}
+
+fn to_i16(x: f32) -> i16 {
+    (x.clamp(-1.0, 1.0) * f32::from(i16::MAX)) as i16
 }
 
 /// The recording call on the writer.
@@ -912,17 +1453,47 @@ impl Recording {
             Track::System => &mut self.system,
         }
     }
+
+    fn lane_ref(&self, track: Track) -> &RecLane {
+        match track {
+            Track::Mic => &self.mic,
+            Track::System => &self.system,
+        }
+    }
+}
+
+/// What the writer saw of one track's stream, record on or off.
+struct Seen {
+    /// The end stamp of its latest block.
+    last_end: Option<CaptureStamp>,
+    /// When its latest event was taken (monotonic clock).
+    last_event: Instant,
+}
+
+impl Seen {
+    fn new(now: Instant) -> Seen {
+        Seen {
+            last_end: None,
+            last_event: now,
+        }
+    }
 }
 
 struct Writer {
     shared: Arc<Shared>,
     log: Arc<Log>,
     mono: Arc<dyn MonotonicClock>,
+    /// Its clock places a track when neither delivers (D3).
+    source: Arc<dyn TrackSource + Send + Sync>,
     consumer: Arc<dyn SubtitleConsumer>,
     control: Arc<Control>,
     inbox: Receiver<Envelope>,
+    outcomes: Receiver<Outcome>,
     mic_rx: TrackReceiver,
     system_rx: TrackReceiver,
+    seen: Pair<Seen>,
+    /// Warnings raised on this thread, not yet in the call's list (D4).
+    pending: Vec<CallWarning>,
     /// `Some` while subtitles is on: the mic feed, then the system feed.
     sub: Option<Box<(SubtitleFeed, SubtitleFeed)>>,
     /// `Some` while record is on.
@@ -938,12 +1509,16 @@ impl Writer {
     fn run(mut self) -> WriterEnd {
         loop {
             self.shared.pause.park_if_asked();
-            // Read before the drain: every event queued before the stop is drained.
+            // Read before the drain: every event queued before the stop is drained. The
+            // device thread is joined before the stop, so its outcomes are all sent.
             let stopping = self.control.stop.load(Ordering::SeqCst);
             while let Ok(envelope) = self.inbox.try_recv() {
                 self.command(envelope);
             }
-            if !self.drain() {
+            let busy = self.round();
+            self.advance();
+            self.flush_warnings();
+            if !busy {
                 if stopping {
                     break;
                 }
@@ -954,30 +1529,64 @@ impl Writer {
         WriterEnd { rec: self.rec }
     }
 
-    /// Record ends: both timelines hand over what their resamplers still hold, so the
-    /// files keep the audio up to the last block.
+    /// One pass over both channels, then the device outcomes sent before it: a track's
+    /// `Lost` is queued before the device thread reports its reopen, so the writer has it
+    /// when the outcome applies. `true` when an event was handled.
+    fn round(&mut self) -> bool {
+        let outcomes: Vec<Outcome> = self.outcomes.try_iter().collect();
+        let busy = self.drain();
+        for outcome in outcomes {
+            self.outcome(outcome);
+        }
+        busy
+    }
+
+    /// Record ends: both tracks are brought to the other's latest block (D3), a measured
+    /// reopen is written, and both timelines hand over what their resamplers still hold, so
+    /// the files keep the audio up to the last block.
     fn end_recording(&mut self) {
+        for track in [Track::Mic, Track::System] {
+            if let Some(at) = self.seen.get(other(track)).last_end {
+                self.advance_track(track, at);
+            }
+        }
         for track in [Track::Mic, Track::System] {
             let Some(rec) = self.rec.as_mut() else {
                 return;
             };
             let lane = rec.lane(track);
+            if let Some(gap) = lane.gap.as_mut() {
+                gap.landed_ms
+                    .get_or_insert(lane.timeline.written() / SAMPLES_PER_MS);
+            }
+            self.settle(track);
+            let Some(rec) = self.rec.as_mut() else {
+                return;
+            };
+            let lane = rec.lane(track);
+            let lost = lane.timeline.is_lost();
             let at_ms = lane.timeline.written() / SAMPLES_PER_MS;
             let step = lane.timeline.flush();
-            self.apply(track, step, at_ms);
+            self.apply(track, step, at_ms, lost);
         }
     }
 
     /// Everything queued so far goes under the old state, then the command applies.
     fn command(&mut self, envelope: Envelope) {
+        let outcomes: Vec<Outcome> = self.outcomes.try_iter().collect();
         while self.drain() {}
+        for outcome in outcomes {
+            self.outcome(outcome);
+        }
         let answer = match envelope.command {
             Command::Attach(rec) => {
                 self.rec = Some(rec);
+                self.pending.clear();
                 None
             }
             Command::Detach => {
                 self.end_recording();
+                self.pending.clear();
                 self.rec.take()
             }
             Command::Subtitles(on) => {
@@ -1009,6 +1618,21 @@ impl Writer {
     }
 
     fn handle(&mut self, track: Track, event: TrackEvent) {
+        let seen = self.seen.get_mut(track);
+        seen.last_event = self.mono.now();
+        if let TrackEvent::Block {
+            interleaved,
+            rate,
+            channels,
+            at,
+        } = &event
+        {
+            if *rate > 0 && *channels > 0 {
+                let frames = (interleaved.len() / usize::from(*channels)) as u64;
+                let ns = frames.saturating_mul(1_000_000_000) / u64::from(*rate);
+                seen.last_end = Some(CaptureStamp(at.0.saturating_add(ns)));
+            }
+        }
         if let (
             Some(sub),
             TrackEvent::Block {
@@ -1034,13 +1658,38 @@ impl Writer {
         };
         let lane = rec.lane(track);
         // The track position before this step: where a drop happened.
-        let at_ms = lane.timeline.written() / SAMPLES_PER_MS;
-        if let Some(step) = step_of(&mut lane.timeline, &event) {
-            self.apply(track, step, at_ms);
+        let written = lane.timeline.written();
+        let at_ms = written / SAMPLES_PER_MS;
+        let was_lost = lane.timeline.is_lost();
+        let Some(step) = step_of(&mut lane.timeline, &event) else {
+            return;
+        };
+        match &event {
+            // Every `Lost` is a device change (the device thread retires a stream before it
+            // reopens it): its gap starts where the track now stands.
+            TrackEvent::Lost { .. } => {
+                let at_ms = lane.timeline.written() / SAMPLES_PER_MS;
+                lane.gap.get_or_insert(DeviceGap {
+                    at_ms,
+                    landed_ms: None,
+                    reopened: None,
+                });
+            }
+            TrackEvent::Block { at, .. } => {
+                if let Some(gap) = lane.gap.as_mut() {
+                    let landed = lane.timeline.position_ms(*at).max(at_ms);
+                    gap.landed_ms.get_or_insert(landed);
+                }
+            }
+            TrackEvent::Dropped { .. } => {}
         }
+        let lost = was_lost || lane.timeline.is_lost();
+        self.apply(track, step, at_ms, lost);
+        self.settle(track);
     }
 
-    fn apply(&mut self, track: Track, step: Step, at_ms: u64) {
+    /// `lost`: the step was placed while the track was lost (FR-013 ignores it).
+    fn apply(&mut self, track: Track, step: Step, at_ms: u64, lost: bool) {
         let Some(rec) = self.rec.as_mut() else {
             return;
         };
@@ -1057,11 +1706,26 @@ impl Writer {
                 os: None,
             });
         }
+        lane.activity.listen(&step.pcm, lost);
+        for silent in [track, other(track)] {
+            let speech = rec.lane_ref(other(silent)).activity.last_speech;
+            if rec.lane(silent).activity.cant_hear(speech) {
+                self.log.write(LogEvent::CallTrackSilent {
+                    track: silent,
+                    rule: SilentRule::CantHear,
+                });
+                self.pending.push(match silent {
+                    Track::System => CallWarning::CantHearOtherParty,
+                    Track::Mic => CallWarning::CantHearYou,
+                });
+            }
+        }
         for report in &step.reports {
             match *report {
                 Report::Dropped { blocks, ms } => self.dropped(track, blocks, ms, at_ms),
-                // A gap tied to a device change is a `call_device` line (a later task);
-                // a stall gap is neither logged nor stored (#244).
+                // A device change is measured from the track's `Lost` and the device
+                // thread's outcome (`DeviceGap`), not from this report; a gap without a
+                // device change is neither logged nor stored (#244).
                 Report::Gap { .. } => {}
             }
         }
@@ -1069,7 +1733,192 @@ impl Writer {
             if let Some(rec) = self.rec.as_mut() {
                 rec.lane(track).level = *level;
             }
+        }
+        // Placed audio ticks (at most every `TICK_EVERY`), with the latest level: a tick
+        // follows the writer's round whether or not the step closed a level window.
+        if !step.pcm.is_empty() {
             self.maybe_tick();
+        }
+    }
+
+    /// What the device thread reported. Without a recording call nothing is logged,
+    /// stored or shown (D6).
+    fn outcome(&mut self, outcome: Outcome) {
+        let Some(rec) = self.rec.as_mut() else {
+            return;
+        };
+        match outcome {
+            Outcome::Reopened { track, cause, to } => {
+                if track == Track::Mic {
+                    // The mic is on the default input now.
+                    self.pending.push(CallWarning::MicChanged);
+                }
+                let lane = rec.lane(track);
+                let now = self.mono.now();
+                match lane.gap.as_mut() {
+                    Some(gap) => gap.reopened = Some((cause, to, now)),
+                    None => {
+                        // Record started after the loss: no silence of this call.
+                        let at_ms = lane.timeline.written() / SAMPLES_PER_MS;
+                        self.device_change(track, cause, Some(to), at_ms, 0);
+                    }
+                }
+                self.settle(track);
+            }
+            Outcome::Silent { track, cause } => {
+                let lane = rec.lane(track);
+                let now_ms = lane.timeline.written() / SAMPLES_PER_MS;
+                let at_ms = lane.gap.as_ref().map_or(now_ms, |g| g.at_ms);
+                self.log.write(LogEvent::CallTrackSilent {
+                    track,
+                    rule: SilentRule::Lost,
+                });
+                self.device_change(track, cause, None, at_ms, now_ms.saturating_sub(at_ms));
+                self.pending.push(CallWarning::TrackLost { track });
+            }
+        }
+    }
+
+    /// A reopen whose audio has landed: one `call_device` line and one entry (D3).
+    fn settle(&mut self, track: Track) {
+        let Some(rec) = self.rec.as_mut() else {
+            return;
+        };
+        let lane = rec.lane(track);
+        let Some(DeviceGap {
+            at_ms,
+            landed_ms: Some(landed),
+            reopened: Some(_),
+        }) = lane.gap.as_ref()
+        else {
+            return;
+        };
+        let (at_ms, gap_ms) = (*at_ms, landed.saturating_sub(*at_ms));
+        let Some(DeviceGap {
+            reopened: Some((cause, to, _)),
+            ..
+        }) = lane.gap.take()
+        else {
+            return;
+        };
+        self.device_change(track, cause, Some(to), at_ms, gap_ms);
+    }
+
+    /// One `call_device` line and one `device_changes` entry, written at once.
+    fn device_change(
+        &mut self,
+        track: Track,
+        cause: DeviceCause,
+        to: Option<EndpointId>,
+        at_ms: u64,
+        gap_ms: u64,
+    ) {
+        let Some(rec) = self.rec.as_mut() else {
+            return;
+        };
+        self.log.write(LogEvent::CallDeviceChanged {
+            track,
+            cause,
+            gap_ms,
+            to: to.clone(),
+        });
+        rec.meta.device_changes.push(DeviceChange {
+            at_ms,
+            track,
+            cause,
+            to,
+            gap_ms,
+        });
+        if let Err(e) = write_meta(&rec.dir, &rec.meta) {
+            // The call goes on; the stop writes the full list again.
+            self.log.write(LogEvent::CallStorageFailed {
+                kind: StorageKind::Meta,
+                os: e.raw_os_error(),
+            });
+        }
+    }
+
+    /// D3: a lost track follows the other track's latest block at once, a live one that
+    /// delivered nothing for [`STALL`] follows it too (200 ms behind, see
+    /// [`Timeline::advance_to`]); when neither delivers, both follow the source's clock. A
+    /// reopened stream that sent nothing for [`SETTLE`] has its gap measured where the
+    /// track stands.
+    fn advance(&mut self) {
+        if self.rec.is_none() {
+            return;
+        }
+        let now = self.mono.now();
+        let stalled = |seen: &Seen| now.saturating_duration_since(seen.last_event) >= STALL;
+        let both = stalled(&self.seen.mic) && stalled(&self.seen.system);
+        let clock = both.then(|| self.source.now());
+        for track in [Track::Mic, Track::System] {
+            let lost = self
+                .rec
+                .as_ref()
+                .is_some_and(|r| r.lane_ref(track).timeline.is_lost());
+            if !lost && !stalled(self.seen.get(track)) {
+                continue;
+            }
+            let target = self.seen.get(other(track)).last_end.max(clock);
+            if let Some(at) = target {
+                self.advance_track(track, at);
+            }
+            let Some(rec) = self.rec.as_mut() else {
+                return;
+            };
+            let lane = rec.lane(track);
+            let written_ms = lane.timeline.written() / SAMPLES_PER_MS;
+            if let Some(gap) = lane.gap.as_mut() {
+                let quiet = gap
+                    .reopened
+                    .as_ref()
+                    .is_some_and(|(_, _, heard)| now.saturating_duration_since(*heard) >= SETTLE);
+                if quiet {
+                    gap.landed_ms.get_or_insert(written_ms);
+                }
+            }
+            self.settle(track);
+        }
+    }
+
+    fn advance_track(&mut self, track: Track, at: CaptureStamp) {
+        let Some(rec) = self.rec.as_mut() else {
+            return;
+        };
+        let lane = rec.lane(track);
+        let lost = lane.timeline.is_lost();
+        let at_ms = lane.timeline.written() / SAMPLES_PER_MS;
+        let step = lane.timeline.advance_to(at);
+        if !step.pcm.is_empty() || !step.reports.is_empty() {
+            self.apply(track, step, at_ms, lost);
+        }
+    }
+
+    /// Moves the warnings raised here into the call's list and republishes the state,
+    /// under the session lock (D4). A session that holds the lock (or waits for this
+    /// thread) keeps them pending for the next round.
+    fn flush_warnings(&mut self) {
+        if self.pending.is_empty()
+            || self.control.stop.load(Ordering::SeqCst)
+            || self.control.hold.load(Ordering::SeqCst)
+        {
+            return;
+        }
+        let mut inner = match self.shared.inner.try_lock() {
+            Ok(inner) => inner,
+            Err(TryLockError::Poisoned(p)) => p.into_inner(),
+            Err(TryLockError::WouldBlock) => return,
+        };
+        let Some(call) = inner.call.as_mut() else {
+            self.pending.clear();
+            return;
+        };
+        let mut added = false;
+        for warning in self.pending.drain(..) {
+            added |= call.warnings.raise(warning).is_some();
+        }
+        if added {
+            self.shared.indicator.set_state(&call.state());
         }
     }
 
@@ -1116,8 +1965,8 @@ impl Writer {
             elapsed_ms: millis(now.saturating_duration_since(rec.mono_start)),
             mic_level: rec.mic.level,
             system_level: rec.system.level,
-            mic_silent: false,
-            system_silent: false,
+            mic_silent: rec.mic.activity.fired,
+            system_silent: rec.system.activity.fired,
         };
         loop {
             if self.control.stop.load(Ordering::SeqCst) || self.control.hold.load(Ordering::SeqCst)
@@ -1305,5 +2154,70 @@ impl Drop for WriterPause {
         state.requested = false;
         drop(state);
         self.shared.pause.changed.notify_all();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SECOND: usize = SECOND_SAMPLES;
+
+    fn seconds(n: usize, amp: f32) -> Vec<f32> {
+        vec![amp; n * SECOND]
+    }
+
+    #[test]
+    fn cant_hear_fires_once_after_more_than_60_silent_seconds_whatever_the_track_order() {
+        // The silent side placed first: its seconds are all done before the other track
+        // speaks, so the rule fires on the other track's step.
+        let (mut silent, mut other) = (Activity::new(), Activity::new());
+        silent.listen(&seconds(61, 0.0), false);
+        assert!(!silent.cant_hear(other.last_speech), "nobody spoke yet");
+        other.listen(&seconds(61, 0.3), false);
+        assert!(silent.cant_hear(other.last_speech));
+        assert!(!silent.cant_hear(other.last_speech), "once per stretch");
+
+        // The other side placed first; 60 seconds is not more than 60.
+        let (mut silent, mut other) = (Activity::new(), Activity::new());
+        other.listen(&seconds(61, 0.3), false);
+        silent.listen(&seconds(60, 0.0), false);
+        assert!(!silent.cant_hear(other.last_speech));
+        silent.listen(&seconds(1, 0.0), false);
+        assert!(silent.cant_hear(other.last_speech));
+        assert!(silent.fired);
+
+        // A speech second re-arms it and clears the flag.
+        silent.listen(&seconds(1, 0.3), false);
+        assert!(!silent.fired);
+        assert!(
+            !silent.cant_hear(other.last_speech),
+            "the other spoke before"
+        );
+    }
+
+    #[test]
+    fn a_lost_second_ends_the_stretch() {
+        let (mut silent, mut other) = (Activity::new(), Activity::new());
+        other.listen(&seconds(70, 0.3), false);
+        silent.listen(&seconds(35, 0.0), false);
+        silent.listen(&seconds(1, 0.0), true);
+        silent.listen(&seconds(34, 0.0), false);
+        assert!(!silent.cant_hear(other.last_speech), "34 s since the loss");
+        let mut lost = Activity::new();
+        lost.listen(&seconds(70, 0.0), true);
+        assert!(
+            !lost.cant_hear(other.last_speech),
+            "a lost track never fires"
+        );
+    }
+
+    #[test]
+    fn a_partial_second_gives_no_verdict() {
+        let mut a = Activity::new();
+        a.listen(&vec![0.3; SECOND - 1], false);
+        assert_eq!((a.index, a.last_speech), (0, None));
+        a.listen(&[0.3], false);
+        assert_eq!((a.index, a.last_speech), (1, Some(0)));
     }
 }

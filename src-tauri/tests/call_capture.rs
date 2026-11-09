@@ -61,8 +61,9 @@ use voicen_core::call::session::{
 };
 use voicen_core::call::wav_source::WavTrackSource;
 use voicen_core::call::{
-    CallNotice, CallSource, CallStore, CaptureStamp, EndpointId, LossCause, OpenError, StopReason,
-    Track, TrackDevice, TrackSink, TrackSource,
+    CallNotice, CallSource, CallStore, CaptureStamp, CommunicationsCheck, DeviceEvent,
+    DeviceEvents, DeviceEventsFactory, EndpointId, LossCause, OpenError, StopReason, Track,
+    TrackDevice, TrackSink, TrackSource,
 };
 use voicen_core::clock::{FakeClock, LocalOffset, SystemMonotonic};
 use voicen_core::diag::{Log, LogConfig};
@@ -642,6 +643,30 @@ impl SubtitleConsumer for Subtitles {
     fn audio(&self, _track: Track, _samples: &[f32]) {}
 }
 
+/// No device changes: the WAV-backed captures never change endpoint (T-149 ports).
+struct NoDeviceEvents;
+
+impl DeviceEvents for NoDeviceEvents {
+    fn next(&self) -> Option<DeviceEvent> {
+        None
+    }
+}
+
+impl DeviceEventsFactory for NoDeviceEvents {
+    fn open(&self) -> Box<dyn DeviceEvents> {
+        Box::new(NoDeviceEvents)
+    }
+}
+
+/// The communications device is the default one.
+struct SameComms;
+
+impl CommunicationsCheck for SameComms {
+    fn differs(&self) -> Result<bool, i32> {
+        Ok(false)
+    }
+}
+
 struct Utc;
 
 impl LocalOffset for Utc {
@@ -745,6 +770,8 @@ fn a_wav_source_through_the_session_writes_both_track_files_as_ogg_opus() {
         open_track: Arc::new(|path| fs::File::create(path)),
         channel_capacity: 256,
         subtitles: Arc::new(Subtitles),
+        devices: Arc::new(NoDeviceEvents),
+        comms: Arc::new(SameComms),
     });
 
     assert_eq!(

@@ -74,8 +74,8 @@ pub struct IndicatorTick {
     /// Linear RMS (0..1) of the latest 100 ms window of each track.
     pub mic_level: f32,
     pub system_level: f32,
-    /// A track judged silent by the FR-013 rule. The session of T-126 has no silence rule
-    /// yet and always sends `false`.
+    /// A track judged silent by the FR-013 rule (T-149): `true` from the `cant_hear` warning
+    /// of that track until the track's next speech second.
     pub mic_silent: bool,
     pub system_silent: bool,
 }
@@ -139,5 +139,120 @@ impl IndicatorWarning {
             ),
         };
         IndicatorWarning { id, kind, text }
+    }
+}
+
+/// The warnings of one call (data-model "CallWarning and CallNotice", D4 of
+/// docs/decisions/call-session.md): each entry has an id unique within the call, starting
+/// at 1. A warning equal to one still listed (same kind, same track for `TrackLost`) is not
+/// added again; a dismissed one is added again, with a new id, at its next raise.
+#[derive(Debug, Clone)]
+pub struct WarningList {
+    items: Vec<(u32, CallWarning)>,
+    next_id: u32,
+}
+
+impl Default for WarningList {
+    fn default() -> WarningList {
+        WarningList::new()
+    }
+}
+
+impl WarningList {
+    pub fn new() -> WarningList {
+        WarningList {
+            items: Vec::new(),
+            next_id: 1,
+        }
+    }
+
+    /// Adds `warning` at the end; its id, or `None` when an equal warning is listed.
+    pub fn raise(&mut self, warning: CallWarning) -> Option<u32> {
+        if self.items.iter().any(|(_, w)| *w == warning) {
+            return None;
+        }
+        let id = self.next_id;
+        self.next_id = self.next_id.saturating_add(1);
+        self.items.push((id, warning));
+        Some(id)
+    }
+
+    /// Removes the entry with `id`; `false` when no entry has it.
+    pub fn dismiss(&mut self, id: u32) -> bool {
+        let before = self.items.len();
+        self.items.retain(|(i, _)| *i != id);
+        self.items.len() != before
+    }
+
+    /// The listed warnings in raise order, rendered in `lang`.
+    pub fn items(&self, lang: UiLanguage) -> Vec<IndicatorWarning> {
+        self.items
+            .iter()
+            .map(|(id, w)| IndicatorWarning::of(*id, w, lang))
+            .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn kinds(list: &WarningList) -> Vec<(u32, WarningKind)> {
+        list.items(UiLanguage::En)
+            .into_iter()
+            .map(|w| (w.id, w.kind))
+            .collect()
+    }
+
+    #[test]
+    fn ids_start_at_1_and_follow_the_raise_order() {
+        let mut list = WarningList::new();
+        assert_eq!(list.raise(CallWarning::MicChanged), Some(1));
+        assert_eq!(list.raise(CallWarning::CantHearYou), Some(2));
+        assert_eq!(
+            kinds(&list),
+            vec![(1, WarningKind::MicChanged), (2, WarningKind::CantHearYou)]
+        );
+    }
+
+    #[test]
+    fn a_listed_warning_is_not_added_again_but_the_other_track_is() {
+        // Bite: a duplicate per raise; the two lost tracks merged into one entry.
+        let mut list = WarningList::new();
+        assert_eq!(
+            list.raise(CallWarning::TrackLost {
+                track: Track::System
+            }),
+            Some(1)
+        );
+        assert_eq!(
+            list.raise(CallWarning::TrackLost {
+                track: Track::System
+            }),
+            None
+        );
+        assert_eq!(
+            list.raise(CallWarning::TrackLost { track: Track::Mic }),
+            Some(2)
+        );
+        assert_eq!(list.items(UiLanguage::En).len(), 2);
+    }
+
+    #[test]
+    fn dismiss_removes_by_id_and_the_next_raise_gets_a_new_id() {
+        // Bite: dismiss by kind; a dismiss of an unknown id answering true; an id reused.
+        let mut list = WarningList::new();
+        let a = list.raise(CallWarning::MicChanged);
+        let b = list.raise(CallWarning::LowDisk);
+        assert_eq!((a, b), (Some(1), Some(2)));
+        assert!(!list.dismiss(7), "unknown");
+        assert!(list.dismiss(1));
+        assert!(!list.dismiss(1), "already gone");
+        assert_eq!(kinds(&list), vec![(2, WarningKind::LowDisk)]);
+        assert_eq!(list.raise(CallWarning::MicChanged), Some(3));
+        assert_eq!(
+            kinds(&list),
+            vec![(2, WarningKind::LowDisk), (3, WarningKind::MicChanged)]
+        );
     }
 }

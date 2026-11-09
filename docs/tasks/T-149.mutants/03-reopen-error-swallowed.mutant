@@ -1,0 +1,15 @@
+guarantee: AC-3 swallowed reopen error: a failed open is not taken as reopened
+file: crates/voicen-core/src/call/session.rs
+added_by: developer
+--- old
+            Err(e) => {
+                if let Some(reopen) = self.lane_mut(track).reopen.as_mut() {
+                    reopen.last = Some(e);
+                }
+            }
+--- new
+            Err(e) => {
+                let _ = e;
+                self.lane_mut(track).reopen = None;
+            }
+--- end

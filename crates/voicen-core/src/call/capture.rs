@@ -116,6 +116,39 @@ pub trait TrackSource {
     fn now(&self) -> CaptureStamp;
 }
 
+/// A device change the shell reports while a call's captures are open (FR-012; the
+/// shell's `IMMNotificationClient`, T-150). Ids only: no friendly name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeviceEvent {
+    /// The default render device changed: the system track follows it.
+    DefaultOutputChanged,
+    /// The default capture device changed: a mic on "default" follows it, a selected mic
+    /// does not.
+    DefaultInputChanged,
+    /// The device with this id is gone (removed, disabled, unplugged).
+    DeviceRemoved(DeviceId),
+}
+
+/// One capture lifetime's stream of [`DeviceEvent`]s: a non-blocking pull, `None` when
+/// nothing is pending. Owned and polled by the call's device thread, dropped there when
+/// the captures close (the shell unregisters its notification client in `Drop`).
+pub trait DeviceEvents: Send {
+    fn next(&self) -> Option<DeviceEvent>;
+}
+
+/// Opens a [`DeviceEvents`] stream. Called on the call's device thread, once per capture
+/// lifetime, before the thread polls.
+pub trait DeviceEventsFactory: Send + Sync {
+    fn open(&self) -> Box<dyn DeviceEvents>;
+}
+
+/// FR-010: whether the default communications device differs from the default device.
+/// `Err` carries the OS error code (an HRESULT); core treats every `Err`, `E_NOTFOUND`
+/// included, as no difference.
+pub trait CommunicationsCheck: Send + Sync {
+    fn differs(&self) -> Result<bool, i32>;
+}
+
 /// What the consumer side takes out of a track's channel.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TrackEvent {
@@ -720,6 +753,12 @@ impl Timeline {
 
     pub fn is_lost(&self) -> bool {
         self.lost
+    }
+
+    /// Where `at` lies on this track's axis, in whole ms from the call start (0 for a stamp
+    /// before it).
+    pub fn position_ms(&self, at: CaptureStamp) -> u64 {
+        at.0.saturating_sub(self.call_start.0) / 1_000_000
     }
 
     /// The output position of `at` (negative before the call start).
@@ -1500,5 +1539,21 @@ mod tests {
         );
         assert_eq!(RefusedReason::from(OpenError::Busy), RefusedReason::Busy);
         assert_eq!(RefusedReason::from(OpenError::Other), RefusedReason::Other);
+    }
+
+    // ---- position_ms (T-149: the gap of a device change) -----------------------------------
+
+    #[test]
+    fn position_ms_is_the_stamp_on_the_call_axis_whatever_was_written() {
+        // Bite: measured from the clock's zero instead of the call start; the written
+        // position instead of the stamp; a stamp before the start wrapping around.
+        let mut tl = Timeline::new(Track::System, ms(5_000));
+        assert_eq!(tl.position_ms(ms(5_000)), 0);
+        assert_eq!(tl.position_ms(ms(6_250)), 1_250);
+        assert_eq!(tl.position_ms(CaptureStamp(5_000_999_999)), 0);
+        assert_eq!(tl.position_ms(ms(4_000)), 0, "before the start");
+        let _ = tl.lost(LossCause::Other, ms(9_000));
+        assert_eq!(tl.written(), 64_000);
+        assert_eq!(tl.position_ms(ms(7_000)), 2_000, "not the written position");
     }
 }

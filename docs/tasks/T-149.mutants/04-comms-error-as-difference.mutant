@@ -1,0 +1,8 @@
+guarantee: AC-4 E_NOTFOUND (any Err) is no difference
+file: crates/voicen-core/src/call/session.rs
+added_by: developer
+--- old
+        let comms_differs = matches!(self.deps.comms.differs(), Ok(true));
+--- new
+        let comms_differs = !matches!(self.deps.comms.differs(), Ok(false));
+--- end

@@ -1,0 +1,8 @@
+guarantee: AC-3 not reopened within 2 s -> silence, track_lost, call_track_silent rule=lost, retry every 2 s
+file: crates/voicen-core/src/call/session.rs
+added_by: developer
+--- old
+                let _ = self.outcomes.send(Outcome::Silent { track, cause });
+--- new
+                let _ = cause;
+--- end
