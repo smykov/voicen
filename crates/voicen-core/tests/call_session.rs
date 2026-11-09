@@ -21,14 +21,15 @@ use std::io;
 use std::sync::{Arc, Barrier};
 use std::time::{Duration, UNIX_EPOCH};
 
-use call_support::{CallRig, IndicatorCall, ShellCall, BUDGET, OS};
+use call_support::{reopened_id, CallRig, IndicatorCall, ShellCall, BUDGET, E_NOTFOUND, OS};
 use serde_json::{json, Value};
 use voicen_core::autostart::FakeAutostart;
-use voicen_core::call::codec::{scan, ReadEnd};
+use voicen_core::call::codec::{scan, OpusOggReader, ReadEnd, TrackDecoder};
 use voicen_core::call::indicator::{IndicatorState, IndicatorTick, WarningKind};
 use voicen_core::call::session::{CallSettingsPort, Toggled};
 use voicen_core::call::{
-    CallNotice, CallSource, OpenError, RefusedPart, RefusedReason, StopReason, Track, TrackDevice,
+    CallNotice, CallSource, DeviceEvent, LossCause, OpenError, RefusedPart, RefusedReason,
+    StopReason, Track, TrackDevice,
 };
 use voicen_core::clock::FakeClock;
 use voicen_core::hotkey_registrar::FakeHotkeyRegistrar;
@@ -39,7 +40,7 @@ use voicen_core::settings::file::FakeSettingsFile;
 use voicen_core::settings::roots::{FakeCallRoots, UnwritableReason};
 use voicen_core::settings::service::{SettingsDeps, SettingsService, WarnedHostFailed};
 use voicen_core::settings::url::{check_base_url, provider_host};
-use voicen_core::settings::{defaults, Microphone};
+use voicen_core::settings::{defaults, Microphone, Settings as CoreSettings};
 
 fn wait(cond: impl FnMut() -> bool) -> bool {
     common::timing::eventually(BUDGET, cond)
@@ -1720,4 +1721,991 @@ fn indicator_calls_are_the_closed_set() {
     );
     assert!(!kinds.contains(&"tick"), "{kinds:?}");
     rig.session.stop(StopReason::User);
+}
+
+// ---- T-149: device changes and silent-side warnings -------------------------------------
+//
+// Rules that bind these tests: F-018 (waits poll state: the device thread is observed
+// through `FakeDevices::polls`, the writer through the subtitle consumer and the indicator
+// ticks, never through a sleep), F-021 (the 2 s and 60 s rules run on the fake monotonic
+// clock and on stamps; no wall-clock ceiling), F-024 (every error fake fails exactly one
+// call, except `fail_all`, used only where the guarantee is about repeated failures: the
+// retries every 2 s).
+
+fn quiet(s: &mut CoreSettings) {
+    s.calls.warned_hosts = vec!["api.example.com".to_string()];
+}
+
+fn quiet_with_mic(s: &mut CoreSettings) {
+    quiet(s);
+    s.microphone = Some(Microphone {
+        id: "mic-1".to_string(),
+        name: "Desk mic".to_string(),
+    });
+}
+
+fn kind_count(rig: &CallRig, kind: WarningKind) -> usize {
+    rig.indicator
+        .states()
+        .last()
+        .map_or(0, |s| s.warnings.iter().filter(|w| w.kind == kind).count())
+}
+
+fn warning_ids(rig: &CallRig, kind: WarningKind) -> Vec<u32> {
+    rig.indicator.states().last().map_or(Vec::new(), |s| {
+        s.warnings
+            .iter()
+            .filter(|w| w.kind == kind)
+            .map(|w| w.id)
+            .collect()
+    })
+}
+
+/// Every warning kind of the last published state except the provider notice.
+fn warnings_but_provider(rig: &CallRig) -> Vec<WarningKind> {
+    warnings_of(rig)
+        .into_iter()
+        .filter(|k| *k != WarningKind::ProviderNotice)
+        .collect()
+}
+
+/// The device thread has gone round at least four more times.
+fn polled(rig: &CallRig) {
+    let before = rig.devices.polls();
+    assert!(
+        wait(|| rig.devices.polls() >= before + 4),
+        "the device thread keeps polling"
+    );
+}
+
+/// Moves the session's monotonic clock and waits until the device thread has read it.
+fn advance(rig: &CallRig, d: Duration) {
+    rig.mono.advance(d);
+    polled(rig);
+}
+
+/// The consumer has all `upto_ms` of `tracks`, so the writer handled those blocks. Needs
+/// subtitles on.
+fn drained(rig: &CallRig, tracks: &[Track], upto_ms: u64) {
+    let want = fed(0, upto_ms);
+    for track in tracks {
+        assert!(
+            wait(|| rig.subtitles.samples(*track) >= want),
+            "the writer took {track:?} up to {upto_ms} ms"
+        );
+    }
+}
+
+/// A tick that follows the writer's round: ticks are made when a block is handled once
+/// 100 ms of monotonic time passed, so the clock moves and each of `feeds` (track, amplitude)
+/// gets one more 20 ms block at `at` ms (the next block of its stream); the tick returned
+/// was made after everything queued before it was handled on the first of those tracks.
+fn barrier(rig: &CallRig, feeds: &[(Track, f32)], at: u64) -> IndicatorTick {
+    let n = rig.indicator.ticks().len();
+    rig.mono.advance(ms(150));
+    for (track, amp) in feeds {
+        rig.source.feed(*track, at, at + 20, *amp);
+    }
+    assert!(
+        wait(|| rig.indicator.ticks().len() > n),
+        "a tick follows the writer's round"
+    );
+    rig.indicator.ticks().last().cloned().expect("a tick")
+}
+
+fn meta_changes(rig: &CallRig) -> Vec<Value> {
+    let folders = rig.folders();
+    let Some(dir) = folders.first() else {
+        return Vec::new();
+    };
+    let Ok(bytes) = std::fs::read(dir.join("meta.json")) else {
+        return Vec::new();
+    };
+    let meta: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    meta["device_changes"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// A stored track decoded to samples in [-1, 1].
+fn track_samples(rig: &CallRig, file: &str) -> Vec<f32> {
+    let dir = rig.folders().first().cloned().expect("a call folder");
+    let mut reader =
+        OpusOggReader::open(File::open(dir.join(file)).expect(file)).expect("a readable track");
+    let mut out = Vec::new();
+    while let Some(window) = reader.next_window(1_000).expect("the track decodes") {
+        out.extend(window.samples().iter().map(|s| f32::from(*s) / 32_768.0));
+    }
+    out
+}
+
+fn rms_between(samples: &[f32], from_ms: usize, to_ms: usize) -> f32 {
+    let part = samples
+        .get(from_ms * 16..to_ms * 16)
+        .expect("the track reaches there");
+    (part.iter().map(|x| x * x).sum::<f32>() / part.len() as f32).sqrt()
+}
+
+#[derive(Debug, Clone, Copy)]
+enum Trigger {
+    /// The shell reports the change (`DeviceEvents`).
+    Event,
+    /// The stream itself dies (`TrackSink::lost`).
+    Loss,
+}
+
+fn device_lines(rig: &CallRig) -> Vec<voicen_core_support::Line> {
+    rig.lines_named("call_device")
+}
+
+mod voicen_core_support {
+    pub use crate::diag_support::Line;
+}
+
+#[test]
+fn a_default_output_change_reopens_the_system_track_with_its_gap_in_meta_and_log() {
+    // Acceptance 1 (T068/T069): a default-output change, whether the shell reports it or the
+    // stream dies, reopens the system track on the new default (the old handle is stopped
+    // before the new one opens, never two at once); the gap (<= 2 s) is silence in the stored
+    // track and appears once in `call_device track=system cause=default_output_changed
+    // gap_ms= to=<new id>` and once in meta.json `device_changes`, written while the call
+    // runs; the mic is not touched, the call is not stopped, nothing is warned.
+    // Bite: no reopen; the new open before the stop of the old one; gap_ms 0 or taken from
+    // Report::Gap (silent under 200 ms); the line without the entry or the entry only at
+    // stop; the entry's `to` the old id; a duplicate line for the revive's own Gap; a
+    // reopen that stops the call; the mic reopened too.
+    for trigger in [Trigger::Event, Trigger::Loss] {
+        for gap in [120u64, 400, 1_900] {
+            let tag = format!("{trigger:?}, gap {gap} ms");
+            let rig = CallRig::with_capacity(1_024, quiet);
+            started(&rig, CallSource::Tray);
+            feed(&rig, 0, 1_000);
+            rig.source.set_stamp_ms(1_000);
+            match trigger {
+                Trigger::Event => rig.devices.push(DeviceEvent::DefaultOutputChanged),
+                Trigger::Loss => rig
+                    .source
+                    .lose(Track::System, LossCause::NotAvailable, 1_000),
+            }
+            assert!(
+                wait(|| rig.source.ok_opens(Track::System) == 2),
+                "{tag}: the system track is reopened"
+            );
+            let first = 1_000 + gap;
+            rig.source.feed(Track::System, first, first + 200, 0.1);
+            assert!(
+                wait(|| device_lines(&rig).len() == 1 && meta_changes(&rig).len() == 1),
+                "{tag}: one line and one entry while the call runs: {:?} / {:?}",
+                device_lines(&rig),
+                meta_changes(&rig)
+            );
+            rig.source.feed(Track::Mic, 1_000, first + 200, 0.3);
+            let end = first + 800;
+            let mut t = first + 200;
+            while t < end {
+                rig.source.feed(Track::System, t, t + 100, 0.1);
+                rig.source.feed(Track::Mic, t, t + 100, 0.3);
+                t += 100;
+            }
+            assert!(rig.session.is_recording(), "{tag}: the call goes on");
+            rig.session.stop(StopReason::User);
+
+            let trace = rig.source.trace();
+            let stop_old = trace
+                .iter()
+                .position(|e| e == "stop system")
+                .expect("stopped");
+            let reopen = trace
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| *e == "open system")
+                .map(|(i, _)| i)
+                .nth(1)
+                .expect("opened again");
+            assert!(stop_old < reopen, "{tag}: stop before open: {trace:?}");
+            assert_eq!(rig.source.peak_handles(Track::System), 1, "{tag}");
+            assert_eq!(
+                rig.source.ok_opens(Track::Mic),
+                1,
+                "{tag}: the mic is left alone"
+            );
+            assert_eq!(
+                rig.source.opens()[2],
+                (Track::System, TrackDevice::DefaultOutputLoopback),
+                "{tag}"
+            );
+
+            let lines = device_lines(&rig);
+            assert_eq!(lines.len(), 1, "{tag}: {lines:?}");
+            let line = &lines[0];
+            assert_eq!(line.get("track"), Some("system"), "{tag}");
+            assert_eq!(line.get("cause"), Some("default_output_changed"), "{tag}");
+            let new_id = reopened_id(Track::System, 2);
+            assert_eq!(line.get("to"), Some(new_id.as_str()), "{tag}");
+            assert!(!line.raw.contains(" WARN "), "{tag}: {}", line.raw);
+            let gap_ms: u64 = line
+                .get("gap_ms")
+                .expect("gap_ms")
+                .parse()
+                .expect("a number");
+            assert!(
+                gap_ms + 25 >= gap && gap_ms <= gap + 25,
+                "{tag}: gap_ms is the silence inserted: {gap_ms}"
+            );
+
+            let changes = meta_changes(&rig);
+            assert_eq!(changes.len(), 1, "{tag}: {changes:?}");
+            let entry = &changes[0];
+            assert_eq!(entry["track"], json!("system"), "{tag}");
+            assert_eq!(entry["cause"], json!("default_output_changed"), "{tag}");
+            assert_eq!(entry["to"], json!(new_id), "{tag}");
+            assert_eq!(
+                entry["gap_ms"],
+                json!(gap_ms),
+                "{tag}: the line and the entry agree"
+            );
+            let at_ms = entry["at_ms"].as_u64().expect("at_ms");
+            assert!(
+                (950..=1_050).contains(&at_ms),
+                "{tag}: where it happened: {at_ms}"
+            );
+            assert_eq!(
+                entry.as_object().expect("object").len(),
+                5,
+                "{tag}: {entry}"
+            );
+
+            assert!(rig.lines_named("call_track_silent").is_empty(), "{tag}");
+            assert!(rig.lines_named("call_track_dropped").is_empty(), "{tag}");
+            assert!(warnings_but_provider(&rig).is_empty(), "{tag}: no warning");
+            let meta = rig.only_meta();
+            assert_eq!(meta["state"], json!("ready-to-transcribe"), "{tag}");
+            let duration = meta["duration_ms"].as_u64().expect("a duration");
+            assert!(
+                duration + 200 >= end && duration <= end + 100,
+                "{tag}: the call covers the gap: {duration} vs {end}"
+            );
+
+            let system = track_samples(&rig, "system.opus");
+            assert!(rms_between(&system, 100, 900) > 0.03, "{tag}: audio before");
+            if gap >= 400 {
+                let gap_from = 1_150usize;
+                let gap_to = usize::try_from(first).expect("fits") - 150;
+                assert!(
+                    rms_between(&system, gap_from, gap_to) < 0.005,
+                    "{tag}: the gap is silence"
+                );
+            }
+            let after = usize::try_from(first).expect("fits");
+            assert!(
+                rms_between(&system, after + 150, after + 700) > 0.03,
+                "{tag}: audio after"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_default_output_event_and_its_loss_reopen_once() {
+    // Acceptance 1 / D1: one change, two signals. The reopen is running (the open is held
+    // like a slow device) when the shell's event for the same change arrives; the new open
+    // is already on the new default, so the event is absorbed: one reopen, one line, one
+    // entry. Bite: a second reopen for the second signal (three opens, two lines), a trigger
+    // queue that is not absorbed after the open, two handles at once.
+    let rig = CallRig::with_capacity(1_024, quiet);
+    started(&rig, CallSource::Tray);
+    feed(&rig, 0, 1_000);
+    rig.source.set_stamp_ms(1_000);
+    rig.source.hold_opens();
+    rig.source
+        .lose(Track::System, LossCause::NotAvailable, 1_000);
+    assert!(
+        wait(|| rig.source.blocked_opens() == 1),
+        "the reopen is running"
+    );
+    rig.devices.push(DeviceEvent::DefaultOutputChanged);
+    rig.source.release_opens();
+    assert!(wait(|| rig.source.ok_opens(Track::System) == 2));
+    assert!(wait(|| rig.devices.pending() == 0), "the event was taken");
+    rig.source.feed(Track::System, 1_200, 1_400, 0.1);
+    assert!(wait(|| device_lines(&rig).len() == 1));
+    polled(&rig);
+    rig.source.feed(Track::System, 1_400, 1_800, 0.1);
+    rig.source.feed(Track::Mic, 1_000, 1_800, 0.3);
+    polled(&rig);
+    rig.session.stop(StopReason::User);
+    assert_eq!(rig.source.ok_opens(Track::System), 2, "one reopen");
+    assert_eq!(rig.source.attempts(Track::System), 2, "one reopen attempt");
+    assert_eq!(rig.source.peak_handles(Track::System), 1);
+    assert_eq!(device_lines(&rig).len(), 1, "{:?}", device_lines(&rig));
+    assert_eq!(meta_changes(&rig).len(), 1, "{:?}", meta_changes(&rig));
+}
+
+#[test]
+fn a_lost_selected_mic_reopens_on_the_default_input_with_mic_changed_and_keeps_recording() {
+    // Acceptance 2 (T068): the selected mic is removed (the shell says so, or its stream
+    // dies): the mic track reopens on the default input, the indicator shows
+    // `micChanged`, `call_device track=mic cause=mic_lost` and one `device_changes` entry
+    // say so, the call is not stopped and the system track is not touched.
+    // Bite: no reopen; a reopen on `Selected` again; no MicChanged warning; the call
+    // stopped; the system track reopened; the cause `track_lost`.
+    for trigger in [Trigger::Event, Trigger::Loss] {
+        let tag = format!("{trigger:?}");
+        let rig = CallRig::with_capacity(1_024, quiet_with_mic);
+        started(&rig, CallSource::Tray);
+        feed(&rig, 0, 1_000);
+        rig.source.set_stamp_ms(1_000);
+        match trigger {
+            Trigger::Event => rig
+                .devices
+                .push(DeviceEvent::DeviceRemoved(DeviceId("mic-1".to_string()))),
+            Trigger::Loss => rig.source.lose(Track::Mic, LossCause::NotAvailable, 1_000),
+        }
+        assert!(
+            wait(|| rig.source.ok_opens(Track::Mic) == 2),
+            "{tag}: the mic is reopened"
+        );
+        rig.source.feed(Track::Mic, 1_200, 1_400, 0.3);
+        assert!(wait(|| device_lines(&rig).len() == 1), "{tag}");
+        assert!(
+            wait(|| kind_count(&rig, WarningKind::MicChanged) == 1),
+            "{tag}: the notice is shown: {:?}",
+            warnings_of(&rig)
+        );
+        rig.source.feed(Track::System, 1_000, 1_400, 0.1);
+        assert!(rig.session.is_recording(), "{tag}: the call is not stopped");
+        assert!(rig.lines_named("call_stopped").is_empty(), "{tag}");
+        rig.session.stop(StopReason::User);
+
+        assert_eq!(
+            rig.source.opens(),
+            vec![
+                (Track::System, TrackDevice::DefaultOutputLoopback),
+                (
+                    Track::Mic,
+                    TrackDevice::Selected(DeviceId("mic-1".to_string()))
+                ),
+                (Track::Mic, TrackDevice::DefaultInput),
+            ],
+            "{tag}"
+        );
+        let trace = rig.source.trace();
+        let stop_old = trace.iter().position(|e| e == "stop mic").expect("stopped");
+        let reopen = trace.iter().rposition(|e| e == "open mic").expect("opened");
+        assert!(stop_old < reopen, "{tag}: stop before open: {trace:?}");
+        let lines = device_lines(&rig);
+        assert_eq!(lines.len(), 1, "{tag}: {lines:?}");
+        assert_eq!(lines[0].get("track"), Some("mic"), "{tag}");
+        assert_eq!(lines[0].get("cause"), Some("mic_lost"), "{tag}");
+        let new_id = reopened_id(Track::Mic, 2);
+        assert_eq!(lines[0].get("to"), Some(new_id.as_str()), "{tag}");
+        let changes = meta_changes(&rig);
+        assert_eq!(changes.len(), 1, "{tag}: {changes:?}");
+        assert_eq!(changes[0]["track"], json!("mic"), "{tag}");
+        assert_eq!(changes[0]["cause"], json!("mic_lost"), "{tag}");
+        assert_eq!(changes[0]["to"], json!(new_id), "{tag}");
+        assert_eq!(
+            rig.only_meta()["state"],
+            json!("ready-to-transcribe"),
+            "{tag}"
+        );
+    }
+}
+
+#[test]
+fn a_default_mic_follows_a_default_input_change() {
+    // Acceptance 2 / FR-012 ("loss or change ... with a notice"): the mic is on "default"
+    // (no saved microphone) and the default input changes: the mic reopens on the default
+    // input, `call_device track=mic cause=mic_default_changed`, the notice shows, the call
+    // goes on. Bite: the event ignored; the cause `mic_lost`; no notice.
+    let rig = CallRig::with_capacity(1_024, quiet);
+    started(&rig, CallSource::Tray);
+    feed(&rig, 0, 1_000);
+    rig.source.set_stamp_ms(1_000);
+    rig.devices.push(DeviceEvent::DefaultInputChanged);
+    assert!(wait(|| rig.source.ok_opens(Track::Mic) == 2));
+    rig.source.feed(Track::Mic, 1_200, 1_400, 0.3);
+    assert!(wait(|| device_lines(&rig).len() == 1));
+    assert!(wait(|| kind_count(&rig, WarningKind::MicChanged) == 1));
+    rig.session.stop(StopReason::User);
+    assert_eq!(
+        rig.source.opens().last(),
+        Some(&(Track::Mic, TrackDevice::DefaultInput))
+    );
+    let lines = device_lines(&rig);
+    assert_eq!(lines[0].get("track"), Some("mic"));
+    assert_eq!(lines[0].get("cause"), Some("mic_default_changed"));
+    assert_eq!(meta_changes(&rig)[0]["cause"], json!("mic_default_changed"));
+    assert_eq!(rig.source.ok_opens(Track::System), 1);
+}
+
+#[test]
+fn events_that_do_not_concern_the_open_devices_change_nothing() {
+    // D1: a selected mic is explicit, so a default-input change does not touch it; the
+    // removal of a device that is not in use does not either. Bite: every event reopening
+    // something; the selected mic reopened on a default-input change.
+    let rig = CallRig::with_capacity(1_024, quiet_with_mic);
+    started(&rig, CallSource::Tray);
+    feed(&rig, 0, 400);
+    rig.devices.push(DeviceEvent::DefaultInputChanged);
+    rig.devices.push(DeviceEvent::DeviceRemoved(DeviceId(
+        "not-in-use".to_string(),
+    )));
+    assert!(wait(|| rig.devices.pending() == 0), "the events were taken");
+    polled(&rig);
+    advance(&rig, ms(2_500));
+    assert_eq!(rig.source.attempts(Track::Mic), 1);
+    assert_eq!(rig.source.attempts(Track::System), 1);
+    assert!(device_lines(&rig).is_empty());
+    assert!(meta_changes(&rig).is_empty());
+    assert!(warnings_but_provider(&rig).is_empty());
+    assert_eq!(rig.source.open_handles(), 2);
+    rig.session.stop(StopReason::User);
+}
+
+#[test]
+fn a_track_not_reopened_within_2_s_is_silent_warned_and_retried_every_2_s() {
+    // Acceptance 3, failure branch (T068, FR-012, F-021): the system stream dies and every
+    // open fails (Busy). Nothing is declared at 1.9 s; at 2 s: one `track_lost` warning
+    // (published), one `call_track_silent track=system rule=lost` (WARN), one
+    // `call_device cause=track_lost to=none` (WARN) with its entry; then one more open
+    // attempt at 4 s and one at 6 s, none in between, and no second warning or line. When
+    // the device is back the next attempt reopens it (`cause=reopened`, to=<new id>); the
+    // warning stays until dismissed. The stored system track is zeros from the loss to the
+    // new audio, and the call covers it. Bite: the declaration at 1 s or at 3 s; declared
+    // without the warning, the line or the entry; the retries missing (opens stay at the
+    // first attempt) or too fast; a warning per retry; the warning removed by the reopen;
+    // the file short (no zeros while lost).
+    let rig = CallRig::with_capacity(2_048, quiet);
+    started(&rig, CallSource::Tray);
+    feed(&rig, 0, 1_000);
+    rig.source.set_stamp_ms(1_000);
+    rig.source.fail_all(Track::System, OpenError::Busy);
+    rig.source
+        .lose(Track::System, LossCause::NotAvailable, 1_000);
+    rig.source.feed(Track::Mic, 1_000, 9_000, 0.3);
+    assert!(
+        wait(|| rig.source.attempts(Track::System) >= 2),
+        "the first attempt comes at once"
+    );
+
+    advance(&rig, ms(1_900));
+    assert!(rig.lines_named("call_track_silent").is_empty());
+    assert!(device_lines(&rig).is_empty());
+    assert!(warnings_but_provider(&rig).is_empty());
+
+    advance(&rig, ms(100));
+    assert!(
+        wait(|| {
+            rig.lines_named("call_track_silent").len() == 1
+                && device_lines(&rig).len() == 1
+                && kind_count(&rig, WarningKind::TrackLost) == 1
+                && meta_changes(&rig).len() == 1
+        }),
+        "silent at 2 s: {:?} / {:?} / {:?}",
+        rig.lines_named("call_track_silent"),
+        device_lines(&rig),
+        warnings_of(&rig)
+    );
+    let silent = &rig.lines_named("call_track_silent")[0];
+    assert_eq!(silent.get("track"), Some("system"));
+    assert_eq!(silent.get("rule"), Some("lost"));
+    assert!(silent.raw.contains(" WARN "), "{}", silent.raw);
+    let changed = &device_lines(&rig)[0];
+    assert_eq!(changed.get("track"), Some("system"));
+    assert_eq!(changed.get("cause"), Some("track_lost"));
+    assert_eq!(changed.get("to"), Some("none"));
+    assert!(changed.raw.contains(" WARN "), "{}", changed.raw);
+    let entry = &meta_changes(&rig)[0];
+    assert_eq!(entry["track"], json!("system"));
+    assert_eq!(entry["cause"], json!("track_lost"));
+    assert_eq!(entry["to"], Value::Null);
+
+    polled(&rig);
+    let n = rig.source.attempts(Track::System);
+    advance(&rig, ms(1_900));
+    assert_eq!(rig.source.attempts(Track::System), n, "none before 4 s");
+    advance(&rig, ms(100));
+    assert!(
+        wait(|| rig.source.attempts(Track::System) == n + 1),
+        "one attempt at 4 s"
+    );
+    advance(&rig, ms(1_900));
+    assert_eq!(rig.source.attempts(Track::System), n + 1, "none before 6 s");
+    advance(&rig, ms(100));
+    assert!(
+        wait(|| rig.source.attempts(Track::System) == n + 2),
+        "one attempt at 6 s"
+    );
+    polled(&rig);
+    assert_eq!(rig.source.attempts(Track::System), n + 2);
+    assert_eq!(rig.lines_named("call_track_silent").len(), 1, "once");
+    assert_eq!(device_lines(&rig).len(), 1);
+    assert_eq!(kind_count(&rig, WarningKind::TrackLost), 1);
+    assert_eq!(rig.source.ok_opens(Track::System), 1);
+
+    rig.source.heal(Track::System);
+    advance(&rig, ms(2_000));
+    assert!(
+        wait(|| rig.source.ok_opens(Track::System) == 2),
+        "the 8 s attempt reopens it"
+    );
+    rig.source.feed(Track::System, 9_000, 9_200, 0.1);
+    assert!(wait(
+        || device_lines(&rig).len() == 2 && meta_changes(&rig).len() == 2
+    ));
+    rig.source.feed(Track::System, 9_200, 9_800, 0.1);
+    rig.source.feed(Track::Mic, 9_000, 9_800, 0.3);
+    rig.session.stop(StopReason::User);
+
+    let back = &device_lines(&rig)[1];
+    assert_eq!(back.get("cause"), Some("reopened"));
+    let new_id = reopened_id(Track::System, 2);
+    assert_eq!(back.get("to"), Some(new_id.as_str()));
+    let gap: u64 = back
+        .get("gap_ms")
+        .expect("gap_ms")
+        .parse()
+        .expect("a number");
+    assert!((7_000..=9_000).contains(&gap), "the silence it cost: {gap}");
+    assert_eq!(meta_changes(&rig)[1]["cause"], json!("reopened"));
+    assert_eq!(
+        kind_count(&rig, WarningKind::TrackLost),
+        1,
+        "the warning stays until dismissed"
+    );
+    assert_eq!(rig.lines_named("call_track_silent").len(), 1);
+    let duration = rig.only_meta()["duration_ms"].as_u64().expect("a duration");
+    assert!(
+        duration >= 9_600,
+        "the call covers the lost stretch: {duration}"
+    );
+    let system = track_samples(&rig, "system.opus");
+    assert!(rms_between(&system, 100, 900) > 0.03);
+    assert!(
+        rms_between(&system, 1_200, 8_800) < 0.005,
+        "zeros from the loss on"
+    );
+    assert!(rms_between(&system, 9_150, 9_700) > 0.03);
+}
+
+#[test]
+fn no_device_left_gives_no_device() {
+    // Acceptance 3, failure branch: the track is lost and the open says NoDevice (no output
+    // or no input left): at 2 s the same silence, warning and `call_track_silent rule=lost`,
+    // but the device line says `cause=no_device to=none`; each track names its own track
+    // in the line and has its own warning text. Bite: `track_lost` instead of `no_device`;
+    // the mic and the system track sharing one text; a track other than the lost one named.
+    let mut texts = Vec::new();
+    for track in [Track::System, Track::Mic] {
+        let name = track.as_str();
+        let rig = CallRig::with_capacity(1_024, quiet);
+        started(&rig, CallSource::Tray);
+        feed(&rig, 0, 1_000);
+        rig.source.set_stamp_ms(1_000);
+        rig.source.fail_all(track, OpenError::NoDevice);
+        rig.source.lose(track, LossCause::NotAvailable, 1_000);
+        assert!(wait(|| rig.source.attempts(track) >= 2), "{name}");
+        advance(&rig, ms(2_000));
+        assert!(
+            wait(|| rig.lines_named("call_track_silent").len() == 1
+                && device_lines(&rig).len() == 1
+                && kind_count(&rig, WarningKind::TrackLost) == 1),
+            "{name}: {:?} / {:?}",
+            rig.lines_named("call_track_silent"),
+            device_lines(&rig)
+        );
+        let silent = &rig.lines_named("call_track_silent")[0];
+        assert_eq!(silent.get("track"), Some(name));
+        assert_eq!(silent.get("rule"), Some("lost"));
+        let changed = &device_lines(&rig)[0];
+        assert_eq!(changed.get("track"), Some(name));
+        assert_eq!(changed.get("cause"), Some("no_device"));
+        assert_eq!(changed.get("to"), Some("none"));
+        assert_eq!(meta_changes(&rig)[0]["cause"], json!("no_device"), "{name}");
+        assert!(rig.session.is_recording(), "{name}: the call goes on");
+        let state = rig.indicator.states().last().cloned().expect("a state");
+        let warning = state
+            .warnings
+            .iter()
+            .find(|w| w.kind == WarningKind::TrackLost)
+            .expect("the warning");
+        texts.push(warning.text.clone());
+        rig.session.stop(StopReason::User);
+    }
+    assert_ne!(texts[0], texts[1], "one text per track: {texts:?}");
+}
+
+#[test]
+fn a_track_without_packets_still_grows_with_the_other_track() {
+    // D3 / R3 (#244: a paused loopback sends no packets): a track that delivers nothing is
+    // advanced with zeros to the other track's stamps, so both files and `duration_ms`
+    // cover the call and later times never shift. Bite: no advance (the silent track's file
+    // and the duration stay at 0); the advance only for a lost track.
+    for silent in [Track::System, Track::Mic] {
+        let live = match silent {
+            Track::System => Track::Mic,
+            Track::Mic => Track::System,
+        };
+        let name = silent.as_str();
+        let rig = CallRig::with_capacity(1_024, quiet);
+        started(&rig, CallSource::Tray);
+        rig.source.feed(live, 0, 3_000, 0.3);
+        rig.session.stop(StopReason::User);
+        let file = format!("{name}.opus");
+        let dir = rig.folders()[0].clone();
+        let scanned = scan(File::open(dir.join(&file)).expect("file")).expect("readable");
+        assert_eq!(scanned.end, ReadEnd::Complete, "{name}");
+        assert!(
+            scanned.duration_48k >= 48 * 2_600,
+            "{name}: grew with the other track: {}",
+            scanned.duration_48k
+        );
+        let duration = rig.only_meta()["duration_ms"].as_u64().expect("a duration");
+        assert!(duration >= 2_600, "{name}: {duration}");
+        let samples = track_samples(&rig, &file);
+        assert!(rms_between(&samples, 100, 2_500) < 0.002, "{name}: zeros");
+    }
+}
+
+#[test]
+fn the_communications_check_gives_the_warning_only_for_a_difference() {
+    // Acceptance 4 (T068, FR-010): the check runs once per record start, before
+    // `call_started`. Ok(true) is a difference: the `communications_device_differs`
+    // warning is in the first published state and `call_started` says comms_differs=1.
+    // Ok(false), Err(E_NOTFOUND) and any other Err are no difference (no warning, 0, no
+    // extra line, the start succeeds). Bite: E_NOTFOUND (or every Err) as a difference;
+    // an Err that refuses the start; the value not reaching the log; the check after the
+    // start line; no check at all.
+    let cases: [(Result<bool, i32>, bool, &str); 4] = [
+        (Ok(true), true, "Ok(true)"),
+        (Ok(false), false, "Ok(false)"),
+        (Err(E_NOTFOUND), false, "Err(E_NOTFOUND)"),
+        (Err(5), false, "Err(other)"),
+    ];
+    for (answer, differs, tag) in cases {
+        let rig = CallRig::with(quiet);
+        rig.comms.set(answer);
+        started(&rig, CallSource::Tray);
+        assert_eq!(rig.comms.calls(), 1, "{tag}: once per record start");
+        let first = rig.indicator.states().first().cloned().expect("a state");
+        let listed = first
+            .warnings
+            .iter()
+            .filter(|w| w.kind == WarningKind::CommunicationsDevice)
+            .count();
+        assert_eq!(listed, usize::from(differs), "{tag}: {:?}", first.warnings);
+        let lines = rig.lines_named("call_started");
+        assert_eq!(lines.len(), 1, "{tag}");
+        assert_eq!(
+            lines[0].get("comms_differs"),
+            Some(if differs { "1" } else { "0" }),
+            "{tag}"
+        );
+        assert!(rig.lines_named("call_refused").is_empty(), "{tag}");
+        rig.session.stop(StopReason::User);
+        rig.session.toggle_record(true, CallSource::Tray);
+        assert_eq!(rig.comms.calls(), 2, "{tag}: and again at the next start");
+        rig.session.stop(StopReason::User);
+    }
+    // A subtitles start never asks; the record start on its captures asks once.
+    let rig = CallRig::with(quiet);
+    rig.comms.set(Ok(true));
+    assert_eq!(
+        rig.session.toggle_subtitles(true, CallSource::Switch),
+        Toggled::Started
+    );
+    assert_eq!(rig.comms.calls(), 0, "subtitles only: no check");
+    started(&rig, CallSource::Tray);
+    assert_eq!(rig.comms.calls(), 1);
+    rig.session.stop(StopReason::User);
+}
+
+/// FR-013 / R21 on one side: `silent` delivers audio of zeros while the other track speaks.
+fn cant_hear_run(silent: Track) {
+    let (kind, name) = match silent {
+        Track::System => (WarningKind::CantHearOtherParty, "system"),
+        Track::Mic => (WarningKind::CantHearYou, "mic"),
+    };
+    let speaking = match silent {
+        Track::System => Track::Mic,
+        Track::Mic => Track::System,
+    };
+    let rig = CallRig::with_capacity(16_384, quiet);
+    rig.session.toggle_subtitles(true, CallSource::Switch);
+    started(&rig, CallSource::Tray);
+    let both = [Track::Mic, Track::System];
+    let flag = |tick: &IndicatorTick| match silent {
+        Track::System => tick.system_silent,
+        Track::Mic => tick.mic_silent,
+    };
+    let pos = std::cell::Cell::new(0u64);
+    // Feeds `len` ms to both tracks (the silent one at `silent_amp`) and waits for the writer.
+    let run = |len: u64, silent_amp: f32| {
+        rig.source.feed(speaking, pos.get(), pos.get() + len, 0.3);
+        rig.source
+            .feed(silent, pos.get(), pos.get() + len, silent_amp);
+        pos.set(pos.get() + len);
+        drained(&rig, &both, pos.get());
+    };
+    // One more 20 ms of both tracks and the tick that follows it.
+    let probe = |silent_amp: f32| {
+        let tick = barrier(&rig, &[(speaking, 0.3), (silent, silent_amp)], pos.get());
+        pos.set(pos.get() + 20);
+        tick
+    };
+
+    run(59_000, 0.0);
+    assert_eq!(
+        kind_count(&rig, kind),
+        0,
+        "{name}: 59 s is not more than 60 s"
+    );
+    assert!(cant_hear_lines(&rig).is_empty(), "{name}");
+    assert!(!flag(&probe(0.0)), "{name}: not silent yet");
+
+    run(2_980, 0.0);
+    assert!(
+        wait(|| kind_count(&rig, kind) == 1 && cant_hear_lines(&rig).len() == 1),
+        "{name}: after 60 s of silence: {:?} / {:?}",
+        warnings_of(&rig),
+        cant_hear_lines(&rig)
+    );
+    assert_eq!(cant_hear_lines(&rig)[0].get("track"), Some(name));
+    assert!(cant_hear_lines(&rig)[0].raw.contains(" WARN "));
+    assert!(flag(&probe(0.0)), "{name}: the tick says silent");
+
+    run(63_000, 0.0);
+    assert_eq!(kind_count(&rig, kind), 1, "{name}: once per stretch");
+    assert_eq!(cant_hear_lines(&rig).len(), 1, "{name}: once per stretch");
+
+    run(2_000, 0.3);
+    assert!(!flag(&probe(0.3)), "{name}: speech clears the flag");
+    assert_eq!(kind_count(&rig, kind), 1, "{name}: the warning stays");
+    let id = warning_ids(&rig, kind)[0];
+    assert!(rig.session.dismiss_warning(id), "{name}");
+    assert_eq!(kind_count(&rig, kind), 0, "{name}");
+
+    run(63_000, 0.0);
+    assert!(
+        wait(|| kind_count(&rig, kind) == 1 && cant_hear_lines(&rig).len() == 2),
+        "{name}: a second stretch warns again: {:?} / {:?}",
+        warnings_of(&rig),
+        cant_hear_lines(&rig)
+    );
+    assert_ne!(warning_ids(&rig, kind)[0], id, "{name}: a new entry");
+    rig.session.stop(StopReason::User);
+}
+
+#[test]
+fn cant_hear_other_party_after_60_s_once_per_stretch_and_rearmed_by_speech() {
+    // Acceptance 5 (T068, FR-013, R21): the mic has speech and the system track has none for
+    // more than 60 s: one `cant_hear_other_party` warning, one `call_track_silent
+    // rule=cant_hear track=system` line and the tick's `system_silent`; not at 59 s; not
+    // again within the stretch; one speech second re-arms it (and clears the flag); a second
+    // stretch gives a second line and, the first warning being dismissed, a new entry.
+    // Bite: the threshold at 30 s or 90 s; a warning or line per second after 60 s; no
+    // re-arm; `system_silent` always false; mic and system swapped.
+    cant_hear_run(Track::System);
+}
+
+#[test]
+fn cant_hear_you_after_60_s_of_mic_silence_mirrors_the_system_case() {
+    // Acceptance 5, mirror case: the system track has speech and the mic none for more than
+    // 60 s: `cant_hear_you`, `call_track_silent track=mic rule=cant_hear`, `mic_silent`.
+    // Same bites as the system case, plus the kinds swapped.
+    cant_hear_run(Track::Mic);
+}
+
+#[test]
+fn no_cant_hear_when_nobody_speaks_or_the_silent_track_is_lost() {
+    // Acceptance 5 boundaries (D4): 65 s of silence on both tracks gives no warning (the
+    // other party did not speak either); a lost system track (zeros from the loss) gives
+    // `track_lost` territory, never `cant_hear_other_party`. Bite: the rule firing on
+    // silence alone; the rule not excluding a lost track.
+    let rig = CallRig::with_capacity(8_192, quiet);
+    rig.session.toggle_subtitles(true, CallSource::Switch);
+    started(&rig, CallSource::Tray);
+    let both = [Track::Mic, Track::System];
+    feed_silence_both(&rig);
+    drained(&rig, &both, 65_000);
+    barrier(&rig, &[(Track::Mic, 0.0), (Track::System, 0.0)], 65_000);
+    assert!(hear_kinds(&rig).is_empty(), "{:?}", warnings_of(&rig));
+    assert!(cant_hear_lines(&rig).is_empty());
+    rig.session.stop(StopReason::User);
+
+    let rig = CallRig::with_capacity(8_192, quiet);
+    rig.session.toggle_subtitles(true, CallSource::Switch);
+    started(&rig, CallSource::Tray);
+    feed(&rig, 0, 1_000);
+    rig.source.set_stamp_ms(1_000);
+    rig.source.fail_all(Track::System, OpenError::NoDevice);
+    rig.source
+        .lose(Track::System, LossCause::NotAvailable, 1_000);
+    rig.source.feed(Track::Mic, 1_000, 65_000, 0.3);
+    drained(&rig, &[Track::Mic], 65_000);
+    assert!(hear_kinds(&rig).is_empty(), "{:?}", warnings_of(&rig));
+    assert!(cant_hear_lines(&rig).is_empty());
+    rig.session.stop(StopReason::User);
+}
+
+fn feed_silence_both(rig: &CallRig) {
+    rig.source.feed_both(0, 65_000, 0.0, 0.0);
+}
+
+fn hear_kinds(rig: &CallRig) -> Vec<WarningKind> {
+    warnings_of(rig)
+        .into_iter()
+        .filter(|k| {
+            matches!(
+                k,
+                WarningKind::CantHearOtherParty | WarningKind::CantHearYou
+            )
+        })
+        .collect()
+}
+
+fn cant_hear_lines(rig: &CallRig) -> Vec<voicen_core_support::Line> {
+    rig.lines_named("call_track_silent")
+        .into_iter()
+        .filter(|l| l.get("rule") == Some("cant_hear"))
+        .collect()
+}
+
+fn mic_default_change(rig: &CallRig, n: usize, from: u64) {
+    rig.devices.push(DeviceEvent::DefaultInputChanged);
+    assert!(
+        wait(|| rig.source.ok_opens(Track::Mic) == n + 1),
+        "change {n}: the mic is reopened"
+    );
+    rig.source.feed(Track::Mic, from, from + 200, 0.3);
+    assert!(wait(|| device_lines(rig).len() == n), "change {n}: logged");
+}
+
+#[test]
+fn a_dismissed_warning_comes_back_on_its_next_trigger_and_a_listed_one_is_not_duplicated() {
+    // Acceptance 6 (T068, FR-006, D4): a warning stays in the list until dismissed. A second
+    // trigger of a kind that is still listed adds no second entry (but is still a device
+    // change: line and entry). `dismiss_warning(id)` removes that entry, republishes the
+    // indicator state inside the session lock and answers true; an unknown or already
+    // removed id, or a session that does not record, answers false. The next trigger of the
+    // dismissed kind adds a new entry with a new id. Bite: a duplicate entry per trigger; a
+    // dismiss that removes nothing, removes by kind, or does not republish; a dismiss of an
+    // unknown id answering true; a dismissed kind that never comes back.
+    let rig = CallRig::with_capacity(1_024, quiet);
+    assert!(!rig.session.dismiss_warning(1), "no call records");
+    started(&rig, CallSource::Tray);
+    feed(&rig, 0, 400);
+
+    mic_default_change(&rig, 1, 400);
+    assert!(wait(|| kind_count(&rig, WarningKind::MicChanged) == 1));
+    let first = warning_ids(&rig, WarningKind::MicChanged);
+
+    mic_default_change(&rig, 2, 800);
+    barrier(&rig, &[(Track::Mic, 0.3)], 1_000);
+    assert_eq!(
+        warning_ids(&rig, WarningKind::MicChanged),
+        first,
+        "a listed kind is not added again"
+    );
+    assert_eq!(meta_changes(&rig).len(), 2, "every change is an entry");
+
+    assert!(rig.session.dismiss_warning(first[0]));
+    assert_eq!(kind_count(&rig, WarningKind::MicChanged), 0);
+    assert_eq!(
+        rig.indicator.held_flags().last(),
+        Some(&true),
+        "republished inside the lock"
+    );
+    assert!(!rig.session.dismiss_warning(first[0]), "already gone");
+    assert!(!rig.session.dismiss_warning(first[0] + 1_000), "unknown");
+
+    mic_default_change(&rig, 3, 1_200);
+    assert!(wait(|| kind_count(&rig, WarningKind::MicChanged) == 1));
+    let again = warning_ids(&rig, WarningKind::MicChanged);
+    assert_ne!(again, first, "a new entry with a new id");
+    rig.session.stop(StopReason::User);
+    assert!(!rig.session.dismiss_warning(again[0]), "the call is over");
+}
+
+#[test]
+fn subtitles_only_reopens_a_lost_track_silently() {
+    // D6: with subtitles on and record off, a lost track is still reopened (the captions
+    // go on), but nothing reaches the log, the calls root, the indicator or the shell.
+    // Bite: the reopen skipped while record is off; a `call_device` line or a meta entry
+    // without a call; an indicator state or notice.
+    let rig = CallRig::with_capacity(256, quiet);
+    assert_eq!(
+        rig.session.toggle_subtitles(true, CallSource::Switch),
+        Toggled::Started
+    );
+    rig.source.feed_both(0, 400, 0.3, 0.1);
+    assert!(consumer_has(&rig, fed(0, 400)));
+    rig.source.set_stamp_ms(400);
+    rig.source.lose(Track::System, LossCause::NotAvailable, 400);
+    assert!(
+        wait(|| rig.source.ok_opens(Track::System) == 2),
+        "the track is reopened"
+    );
+    rig.source.feed(Track::System, 500, 700, 0.1);
+    assert!(wait(
+        || rig.subtitles.samples(Track::System) >= fed(0, 400) + fed(500, 700)
+    ));
+    let trace = rig.source.trace();
+    let stop_old = trace
+        .iter()
+        .position(|e| e == "stop system")
+        .expect("stopped");
+    let reopen = trace
+        .iter()
+        .rposition(|e| e == "open system")
+        .expect("opened");
+    assert!(stop_old < reopen, "{trace:?}");
+    assert!(rig.call_lines().is_empty(), "{:?}", rig.call_lines());
+    assert!(rig.root_files().is_empty(), "{:?}", rig.root_files());
+    assert!(rig.indicator.calls().is_empty());
+    assert!(rig.shell.calls().is_empty());
+    rig.session.toggle_subtitles(false, CallSource::Switch);
+}
+
+#[test]
+fn closing_while_a_reopen_is_pending_leaves_no_handle_open() {
+    // D1: a stop that comes while a reopen is running (the open is held like a slow
+    // device) waits for it, stops the handle it produced and joins the device thread: no
+    // handle stays open, every success was stopped once, the event stream is dropped, the
+    // call is finished. Bite: the device thread not joined or not stopped at close (a
+    // leaked handle); a handle opened after the stop kept; the stream not dropped.
+    let rig = CallRig::with_capacity(256, quiet);
+    started(&rig, CallSource::Tray);
+    feed(&rig, 0, 400);
+    rig.source.set_stamp_ms(400);
+    assert_eq!(rig.devices.opened(), 1);
+    rig.source.hold_opens();
+    rig.source.lose(Track::System, LossCause::NotAvailable, 400);
+    assert!(
+        wait(|| rig.source.blocked_opens() == 1),
+        "the reopen is running"
+    );
+    let session = rig.session.clone();
+    let stopper = std::thread::spawn(move || session.stop(StopReason::Exit));
+    assert!(
+        wait(|| rig.session.try_is_recording().is_none()),
+        "stop holds the session lock while it closes"
+    );
+    rig.source.release_opens();
+    assert!(
+        stopper.join().expect("stop returns"),
+        "a call was recording"
+    );
+    assert_eq!(rig.source.open_handles(), 0, "{:?}", rig.source.trace());
+    assert_eq!(
+        rig.source.stops(),
+        rig.source.ok_opens(Track::System) + rig.source.ok_opens(Track::Mic),
+        "every handle that opened was stopped once"
+    );
+    assert_eq!(rig.source.peak_handles(Track::System), 1);
+    assert_eq!(rig.devices.alive(), 0, "the event stream is dropped");
+    assert_eq!(rig.only_meta()["state"], json!("ready-to-transcribe"));
+    assert_eq!(rig.lines_named("call_stopped").len(), 1);
 }

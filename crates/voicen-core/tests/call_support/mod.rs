@@ -33,6 +33,37 @@
 //! trait SubtitleConsumer: Send + Sync   // fed by the writer thread, only while subtitles is on
 //!     { audio(&self, track: Track, samples: &[f32]) }   // 16 kHz mono blocks in capture order
 //! CallDeps gains `subtitles: Arc<dyn SubtitleConsumer>`.
+//!
+//! T-149 (device changes and silent-side warnings) pins, in addition:
+//!
+//! ```text
+//! voicen_core::call::{DeviceEvent, DeviceEvents, DeviceEventsFactory, CommunicationsCheck}
+//!                                                   // also at voicen_core::call::capture::*
+//! enum DeviceEvent { DefaultOutputChanged, DefaultInputChanged, DeviceRemoved(DeviceId) }
+//!                                                   // Debug, Clone, PartialEq, Eq
+//! trait DeviceEvents: Send { fn next(&self) -> Option<DeviceEvent>; }   // non-blocking pull
+//! trait DeviceEventsFactory: Send + Sync { fn open(&self) -> Box<dyn DeviceEvents>; }
+//!     // called ON the call's device thread, once per capture lifetime (so the shell registers
+//!     // its IMMNotificationClient there); the box is dropped on that thread when the captures
+//!     // close (unregister). The thread calls `next` in a loop, sleeping a short IDLE between
+//!     // rounds, so `next` is called at least once per round whatever the queue holds.
+//! trait CommunicationsCheck: Send + Sync { fn differs(&self) -> Result<bool, i32>; }
+//!     // Err carries an HRESULT; core maps E_NOTFOUND (0x80070490) and every other Err to "no
+//!     // difference"; called once per record start, before call_started, never on a subtitles
+//!     // start
+//! CallDeps gains `devices: Arc<dyn DeviceEventsFactory>` and `comms: Arc<dyn CommunicationsCheck>`.
+//! CallSession::dismiss_warning(&self, id: u32) -> bool   // removes the warning with that id from
+//!                                                        // the call's list and republishes the
+//!                                                        // indicator state under the lock; false
+//!                                                        // for an unknown id or when no call records
+//! ```
+//!
+//! Behaviour the T-149 tests pin (docs/decisions/call-session.md D1-D6 lands with the code):
+//! the device thread makes the first reopen attempt at once when a trigger comes (a
+//! `TrackEvent::Lost` of a track, or a `DeviceEvent`), measures 2 s on the session's monotonic
+//! clock (`CallDeps::mono`), declares the track silent at the first round with mono >= trigger +
+//! 2 s and then makes one attempt every 2 s from the trigger (at most one attempt per 2 s mark,
+//! none in between). A trigger that comes while an open is running is absorbed.
 //! toggle_record(false, Tray) stops with StopReason::User, (false, Hotkey) with Hotkey
 //!
 //! trait CallIndicator: Send + Sync   // called INSIDE the session lock, never blocks
@@ -58,7 +89,7 @@ use std::fs::File;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use voicen_core::call::indicator::{IndicatorState, IndicatorTick};
@@ -66,7 +97,8 @@ use voicen_core::call::session::{
     CallDeps, CallIndicator, CallSession, CallSettingsPort, CallShell, SubtitleConsumer,
 };
 use voicen_core::call::{
-    CallNotice, CallStore, CaptureStamp, EndpointId, OpenError, Track, TrackDevice, TrackSink,
+    CallNotice, CallStore, CaptureStamp, CommunicationsCheck, DeviceEvent, DeviceEvents,
+    DeviceEventsFactory, EndpointId, LossCause, OpenError, Track, TrackDevice, TrackSink,
     TrackSource,
 };
 use voicen_core::clock::{FakeClock, MonotonicClock};
@@ -126,18 +158,44 @@ impl MonotonicClock for FakeMono {
 
 // ---- the track source ----------------------------------------------------------------
 
+/// Open handles per track: (now, most at once).
+type Peaks = Arc<Mutex<HashMap<Track, (usize, usize)>>>;
+
+/// The in-order trace of `open <track>` / `stop <track>` calls.
+type Trace = Arc<Mutex<Vec<String>>>;
+
 struct Handle {
+    track: Track,
     live: Arc<AtomicUsize>,
     stops: Arc<AtomicUsize>,
+    peaks: Peaks,
+    trace: Trace,
 }
 
 impl CaptureHandle for Handle {
     fn stop(self: Box<Self>) -> Result<(), CaptureError> {
+        lock(&self.trace).push(format!("stop {}", self.track.as_str()));
+        if let Some(count) = lock(&self.peaks).get_mut(&self.track) {
+            count.0 = count.0.saturating_sub(1);
+        }
         self.live.fetch_sub(1, Ordering::SeqCst);
         self.stops.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 }
+
+/// The id the `k`-th successful open (k >= 2) of `track` reports: a reopen lands on
+/// another endpoint.
+pub fn reopened_id(track: Track, k: usize) -> String {
+    let t = match track {
+        Track::Mic => 1,
+        Track::System => 0,
+    };
+    format!("{{0.0.{t}.00000000}}.{{{k:08x}-3333-3333-3333-333333333333}}")
+}
+
+/// HRESULT `E_NOTFOUND` (0x80070490) as the `i32` an `Err` carries.
+pub const E_NOTFOUND: i32 = -2_147_023_728;
 
 #[derive(Default)]
 struct SourceState {
@@ -147,6 +205,11 @@ struct SourceState {
     opens: Vec<(Track, TrackDevice)>,
     sinks: HashMap<Track, Arc<dyn TrackSink>>,
     stamp_ms: u64,
+    /// Opens that fail every time until `heal` (a guarantee about repeated failures: the
+    /// 2 s retries of T-149; every other fake fails exactly one call, F-024).
+    broken: HashMap<Track, OpenError>,
+    /// Successful opens so far, per track.
+    ok_opens: HashMap<Track, usize>,
 }
 
 pub struct FakeSource {
@@ -154,6 +217,11 @@ pub struct FakeSource {
     state: Mutex<SourceState>,
     live: Arc<AtomicUsize>,
     stops: Arc<AtomicUsize>,
+    peaks: Peaks,
+    trace: Trace,
+    /// While `true`, every `open` blocks before it records anything (a slow device).
+    hold: Arc<(Mutex<bool>, Condvar)>,
+    blocked: AtomicUsize,
 }
 
 impl FakeSource {
@@ -163,7 +231,70 @@ impl FakeSource {
             state: Mutex::new(SourceState::default()),
             live: Arc::new(AtomicUsize::new(0)),
             stops: Arc::new(AtomicUsize::new(0)),
+            peaks: Arc::new(Mutex::new(HashMap::new())),
+            trace: Arc::new(Mutex::new(Vec::new())),
+            hold: Arc::new((Mutex::new(false), Condvar::new())),
+            blocked: AtomicUsize::new(0),
         })
+    }
+
+    /// Every open of `track` fails with `error` until `heal(track)`.
+    pub fn fail_all(&self, track: Track, error: OpenError) {
+        lock(&self.state).broken.insert(track, error);
+    }
+
+    /// The opens of `track` work again.
+    pub fn heal(&self, track: Track) {
+        lock(&self.state).broken.remove(&track);
+    }
+
+    /// The track's stream dies at `at_ms` (the audio callback reports the loss).
+    pub fn lose(&self, track: Track, cause: LossCause, at_ms: u64) {
+        let sink = lock(&self.state)
+            .sinks
+            .get(&track)
+            .cloned()
+            .expect("the track is open");
+        sink.lost(track, cause, CaptureStamp::from_ms(at_ms));
+    }
+
+    /// From now on every `open` blocks until `release_opens`.
+    pub fn hold_opens(&self) {
+        *lock(&self.hold.0) = true;
+    }
+
+    pub fn release_opens(&self) {
+        *lock(&self.hold.0) = false;
+        self.hold.1.notify_all();
+    }
+
+    /// Opens blocked right now by `hold_opens`.
+    pub fn blocked_opens(&self) -> usize {
+        self.blocked.load(Ordering::SeqCst)
+    }
+
+    /// `open <track>` / `stop <track>`, in the order they happened.
+    pub fn trace(&self) -> Vec<String> {
+        lock(&self.trace).clone()
+    }
+
+    /// The most handles of `track` that were open at one moment.
+    pub fn peak_handles(&self, track: Track) -> usize {
+        lock(&self.peaks).get(&track).map_or(0, |c| c.1)
+    }
+
+    /// Opens of `track` that succeeded so far.
+    pub fn ok_opens(&self, track: Track) -> usize {
+        lock(&self.state).ok_opens.get(&track).copied().unwrap_or(0)
+    }
+
+    /// Opens of `track` attempted so far (failed ones included).
+    pub fn attempts(&self, track: Track) -> usize {
+        lock(&self.state)
+            .opens
+            .iter()
+            .filter(|(t, _)| *t == track)
+            .count()
     }
 
     /// The next open of `track` fails with `error`; the one after it opens.
@@ -224,29 +355,169 @@ impl TrackSource for FakeSource {
         device: TrackDevice,
         sink: Arc<dyn TrackSink>,
     ) -> Result<(Box<dyn CaptureHandle>, EndpointId), OpenError> {
+        {
+            let mut held = lock(&self.hold.0);
+            if *held {
+                self.blocked.fetch_add(1, Ordering::SeqCst);
+                while *held {
+                    held = self
+                        .hold
+                        .1
+                        .wait(held)
+                        .unwrap_or_else(PoisonError::into_inner);
+                }
+                self.blocked.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
         lock(&self.order).push(format!("open {}", track.as_str()));
         let mut state = lock(&self.state);
         state.opens.push((track, device));
         if let Some(error) = state.script.get_mut(&track).and_then(VecDeque::pop_front) {
             return Err(error);
         }
+        if let Some(error) = state.broken.get(&track) {
+            return Err(*error);
+        }
         state.sinks.insert(track, sink);
+        let nth = {
+            let n = state.ok_opens.entry(track).or_default();
+            *n += 1;
+            *n
+        };
         self.live.fetch_add(1, Ordering::SeqCst);
-        let id = match track {
-            Track::Mic => MIC_ID,
-            Track::System => SYSTEM_ID,
+        lock(&self.trace).push(format!("open {}", track.as_str()));
+        {
+            let mut peaks = lock(&self.peaks);
+            let count = peaks.entry(track).or_default();
+            count.0 += 1;
+            count.1 = count.1.max(count.0);
+        }
+        let id = match (nth, track) {
+            (1, Track::Mic) => MIC_ID.to_string(),
+            (1, Track::System) => SYSTEM_ID.to_string(),
+            (k, t) => reopened_id(t, k),
         };
         Ok((
             Box::new(Handle {
+                track,
                 live: self.live.clone(),
                 stops: self.stops.clone(),
+                peaks: self.peaks.clone(),
+                trace: self.trace.clone(),
             }),
-            EndpointId::new(id),
+            EndpointId::new(&id),
         ))
     }
 
     fn now(&self) -> CaptureStamp {
         CaptureStamp::from_ms(lock(&self.state).stamp_ms)
+    }
+}
+
+// ---- device events and the communications check (T-149) -----------------------------------
+
+/// The factory the call's device thread opens its event stream from, and the stream's queue.
+pub struct FakeDevices {
+    queue: Arc<Mutex<VecDeque<DeviceEvent>>>,
+    polls: Arc<AtomicUsize>,
+    opened: AtomicUsize,
+    alive: Arc<AtomicUsize>,
+}
+
+struct FakeEvents {
+    queue: Arc<Mutex<VecDeque<DeviceEvent>>>,
+    polls: Arc<AtomicUsize>,
+    alive: Arc<AtomicUsize>,
+}
+
+impl DeviceEvents for FakeEvents {
+    fn next(&self) -> Option<DeviceEvent> {
+        self.polls.fetch_add(1, Ordering::SeqCst);
+        lock(&self.queue).pop_front()
+    }
+}
+
+impl Drop for FakeEvents {
+    fn drop(&mut self) {
+        self.alive.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+impl FakeDevices {
+    pub fn new() -> Arc<FakeDevices> {
+        Arc::new(FakeDevices {
+            queue: Arc::new(Mutex::new(VecDeque::new())),
+            polls: Arc::new(AtomicUsize::new(0)),
+            opened: AtomicUsize::new(0),
+            alive: Arc::new(AtomicUsize::new(0)),
+        })
+    }
+
+    /// The shell reports `event`.
+    pub fn push(&self, event: DeviceEvent) {
+        lock(&self.queue).push_back(event);
+    }
+
+    /// Events pushed and not yet taken by the device thread.
+    pub fn pending(&self) -> usize {
+        lock(&self.queue).len()
+    }
+
+    /// `DeviceEvents::next` calls so far.
+    pub fn polls(&self) -> usize {
+        self.polls.load(Ordering::SeqCst)
+    }
+
+    /// Streams the factory handed out.
+    pub fn opened(&self) -> usize {
+        self.opened.load(Ordering::SeqCst)
+    }
+
+    /// Streams handed out and not yet dropped.
+    pub fn alive(&self) -> usize {
+        self.alive.load(Ordering::SeqCst)
+    }
+}
+
+impl DeviceEventsFactory for FakeDevices {
+    fn open(&self) -> Box<dyn DeviceEvents> {
+        self.opened.fetch_add(1, Ordering::SeqCst);
+        self.alive.fetch_add(1, Ordering::SeqCst);
+        Box::new(FakeEvents {
+            queue: self.queue.clone(),
+            polls: self.polls.clone(),
+            alive: self.alive.clone(),
+        })
+    }
+}
+
+/// The communications-device check: answers what the test set, counts its calls.
+pub struct FakeComms {
+    answer: Mutex<Result<bool, i32>>,
+    calls: AtomicUsize,
+}
+
+impl FakeComms {
+    pub fn new() -> Arc<FakeComms> {
+        Arc::new(FakeComms {
+            answer: Mutex::new(Ok(false)),
+            calls: AtomicUsize::new(0),
+        })
+    }
+
+    pub fn set(&self, answer: Result<bool, i32>) {
+        *lock(&self.answer) = answer;
+    }
+
+    pub fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+impl CommunicationsCheck for FakeComms {
+    fn differs(&self) -> Result<bool, i32> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        *lock(&self.answer)
     }
 }
 
@@ -574,6 +845,8 @@ pub struct CallRig {
     pub port: Arc<FakePort>,
     pub opener: Arc<FlakyOpener>,
     pub subtitles: Arc<FakeSubtitles>,
+    pub devices: Arc<FakeDevices>,
+    pub comms: Arc<FakeComms>,
     pub mono: Arc<FakeMono>,
     pub order: Order,
     pub log: Arc<Log>,
@@ -624,6 +897,8 @@ impl CallRig {
         let port = FakePort::new(s);
         let opener = FlakyOpener::new();
         let subtitles = FakeSubtitles::new();
+        let devices = FakeDevices::new();
+        let comms = FakeComms::new();
         let clock = Arc::new(FakeClock::at(diag_support::at(diag_support::NOON_UTC, 0)));
         let offset = Arc::new(diag_support::Offset(0));
         let (log, _, _) = diag_support::open_log(
@@ -647,6 +922,8 @@ impl CallRig {
             open_track: Arc::new(move |path| open_with.open(path)),
             channel_capacity: capacity,
             subtitles: subtitles.clone(),
+            devices: devices.clone(),
+            comms: comms.clone(),
         }));
         indicator.bind(session.clone());
         shell.bind(session.clone());
@@ -659,6 +936,8 @@ impl CallRig {
             port,
             opener,
             subtitles,
+            devices,
+            comms,
             mono,
             order,
             log,
