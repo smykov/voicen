@@ -20,6 +20,9 @@ use crate::i18n::{
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IndicatorState {
+    /// The language of every text in this state, and of the page's own labels: the call's
+    /// language while it records; for idle, the settings language when it was built.
+    pub lang: UiLanguage,
     pub recording: bool,
     pub reminder_visible: bool,
     /// The recording reminder; empty when `reminder_visible` is false.
@@ -30,9 +33,10 @@ pub struct IndicatorState {
 }
 
 impl IndicatorState {
-    /// No call: nothing shown.
-    pub fn idle() -> IndicatorState {
+    /// No call: nothing shown; `lang` is the language the page's own labels use.
+    pub fn idle(lang: UiLanguage) -> IndicatorState {
         IndicatorState {
+            lang,
             recording: false,
             reminder_visible: false,
             reminder_text: String::new(),
@@ -56,6 +60,7 @@ impl IndicatorState {
             }
         };
         IndicatorState {
+            lang,
             recording: true,
             reminder_visible,
             reminder_text: shown(INDICATOR_REMINDER),

@@ -1109,7 +1109,9 @@ impl CallSession {
             mic_bytes: bytes(Track::Mic),
             system_bytes: bytes(Track::System),
         });
-        self.deps.indicator.set_state(&IndicatorState::idle());
+        // The call is over: idle carries the settings language read now, not the call's.
+        let lang = self.deps.settings.snapshot().ui_language;
+        self.deps.indicator.set_state(&IndicatorState::idle(lang));
         self.deps.indicator.set_call_recording(false);
         reason
     }

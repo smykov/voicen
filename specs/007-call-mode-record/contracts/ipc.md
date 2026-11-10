@@ -30,7 +30,8 @@ interface IndicatorTick { elapsedMs: number; micLevel: number; systemLevel: numb
 interface IndicatorWarning { id: number; kind: "communicationsDevice" | "trackLost" | "micChanged" | "cantHearOtherParty"
                              | "cantHearYou" | "lowDisk" | "providerNotice"; text: string }   // text rendered in Rust
 interface IndicatorState { recording: boolean; reminderVisible: boolean; reminderText: string; headphonesHint: string;
-                           warnings: IndicatorWarning[] }
+                           warnings: IndicatorWarning[];
+                           lang: "en" | "ru" }  // the call's UI language while recording; idle: the settings language at that moment
 ```
 
 ## Commands
