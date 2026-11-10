@@ -398,6 +398,14 @@ pub fn parsed(raw: &str) -> Line {
 // ---- closed value sets ---------------------------------------------------------
 
 pub const ENGINES: &[&str] = &["api", "builtin", "local_server", "other"];
+/// T-170: the closed `end=` values of a dictation line.
+pub const END_TAGS: &[&str] = &[
+    "released",
+    "toggled",
+    "max_length",
+    "device_lost",
+    "suspended",
+];
 pub const DETECTORS: &[&str] = &["silero", "energy", "other"];
 pub const RESULTS: &[&str] = &["pasted", "copied_only", "copy_manual"];
 pub const DICTATION_OUTCOMES: &[&str] = &[
@@ -610,6 +618,7 @@ pub fn check_closed(line: &Line) -> Result<(), String> {
             ("dictation", "result") => one_of(k, v, RESULTS)?,
             ("dictation", "failure") => one_of(k, v, FAILURES)?,
             ("dictation", "detector") => one_of(k, v, DETECTORS)?,
+            ("dictation", "end") => one_of(k, v, END_TAGS)?,
             ("dictation", "mic") => one_of(k, v, MIC_CAUSES)?,
             ("dictation", "reason") => one_of(k, v, BLOCK_REASONS)?,
             ("dictation", "pp") => one_of(k, v, PP_RESULTS)?,
@@ -726,6 +735,13 @@ pub fn check_closed(line: &Line) -> Result<(), String> {
         }
         if (outcome == "blocked") != line.get("reason").is_some() {
             return Err(format!("reason= exactly on blocked lines: {:?}", line.raw));
+        }
+        // T-170: too_short / cancelled / blocked are the outcome already.
+        if line.get("end").is_some() && matches!(outcome, "too_short" | "cancelled" | "blocked") {
+            return Err(format!(
+                "end= never on too_short, cancelled or blocked lines: {:?}",
+                line.raw
+            ));
         }
         if (outcome == "capture_failed") != line.get("mic").is_some() {
             return Err(format!(

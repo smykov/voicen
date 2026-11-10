@@ -24,7 +24,7 @@ use voicen_core::call::{
 use voicen_core::connection_test::ConnectionTestResult;
 use voicen_core::delivery::DeliveryResult;
 use voicen_core::diag::{
-    format_line, CrashFileName, DetectorTag, DictationLine, DictationOutcome, EngineTag,
+    format_line, CrashFileName, DetectorTag, DictationLine, DictationOutcome, EndTag, EngineTag,
     FailureTag, LoadKind, LogEvent, OsVersion, PreviousSessionLine, SaveLine, WarningKind,
 };
 use voicen_core::engine::engine_for;
@@ -91,6 +91,7 @@ fn line(
         text_to_paste_ms: timings,
         post_processing: None,
         local: None,
+        end: None,
     }
 }
 
@@ -114,6 +115,33 @@ fn all_engine_tags() -> Vec<EngineTag> {
         .collect();
     assert_eq!(seen.len(), 4, "every EngineTag once");
     all
+}
+
+/// Every `EndTag` with its log literal (T-170); a new variant fails to compile here.
+fn all_end_tags() -> Vec<(EndTag, &'static str)> {
+    let all = vec![
+        EndTag::Released,
+        EndTag::Toggled,
+        EndTag::MaxLength,
+        EndTag::DeviceLost,
+        EndTag::Suspended,
+    ];
+    let pairs: Vec<(EndTag, &'static str)> = all
+        .into_iter()
+        .map(|t| {
+            let literal = match t {
+                EndTag::Released => "released",
+                EndTag::Toggled => "toggled",
+                EndTag::MaxLength => "max_length",
+                EndTag::DeviceLost => "device_lost",
+                EndTag::Suspended => "suspended",
+            };
+            (t, literal)
+        })
+        .collect();
+    let seen: BTreeSet<&str> = pairs.iter().map(|(_, l)| *l).collect();
+    assert_eq!(seen.len(), 5, "every EndTag once");
+    pairs
 }
 
 fn all_detector_tags() -> Vec<DetectorTag> {
@@ -1550,6 +1578,7 @@ fn dictation_line_keys_per_outcome() {
         text_to_paste_ms: Some(95),
         post_processing: None,
         local: None,
+        end: None,
     });
     let l = parsed(&format_line(at(NOON_UTC, 0), 0, &delivered));
     assert_eq!(l.head, "dictation");
@@ -1583,6 +1612,7 @@ fn dictation_line_keys_per_outcome() {
         text_to_paste_ms: None,
         post_processing: None,
         local: None,
+        end: None,
     });
     let l = parsed(&format_line(at(NOON_UTC, 0), 0, &failed));
     assert_eq!(l.level, "WARN");
@@ -1619,6 +1649,7 @@ fn dictation_line_keys_per_outcome() {
                 text_to_paste_ms: None,
                 post_processing: None,
                 local: None,
+                end: None,
             }),
         );
         let l = parsed(&raw);
@@ -1668,6 +1699,7 @@ fn capture_failed_line_has_the_mic_literal_at_warn() {
                 text_to_paste_ms: None,
                 post_processing: None,
                 local: None,
+                end: None,
             }),
         );
         let l = parsed(&raw);
@@ -1774,6 +1806,7 @@ fn delivered_line(post_processing: Option<PostProcessTrace>) -> LogEvent {
         text_to_paste_ms: Some(95),
         post_processing,
         local: None,
+        end: None,
     })
 }
 
@@ -1872,6 +1905,7 @@ fn pp_keys_ride_on_failed_and_no_speech_lines_too() {
             ms: 812,
         }),
         local: None,
+        end: None,
     });
     let raw = format_line(at(NOON_UTC, 0), 0, &failed);
     let l = parsed(&raw);
@@ -1906,6 +1940,7 @@ fn pp_keys_ride_on_failed_and_no_speech_lines_too() {
             ms: 0,
         }),
         local: None,
+        end: None,
     });
     let raw = format_line(at(NOON_UTC, 0), 0, &no_speech);
     let l = parsed(&raw);
@@ -1969,4 +2004,73 @@ fn the_pp_grammar_refuses_keys_outside_their_sets_and_pairings() {
     }
     assert_eq!(PP_RESULTS.len(), 3);
     assert_eq!(PP_REASONS.len(), all_skip_kinds().len());
+}
+
+// ---- T-170: the end= key ----------------------------------------------------------
+
+#[test]
+fn dictation_line_writes_end_per_end_tag() {
+    // T-170 (decisions #201): a dictation line carries `end=<literal>` for the way
+    // its recording ended in a job, one literal per EndTag, after the
+    // outcome-specific keys (result / failure / http_status) and before `detector=`,
+    // never between `dictation` and `rec=` (the install smoke matches
+    // `dictation rec=`); `end: None` writes no key. Bite: a literal mapped to
+    // another (device_lost as released), the key before rec= or after the timings,
+    // None written as a default, a variant missing from the table.
+    let mut written = BTreeSet::new();
+    for (tag, literal) in all_end_tags() {
+        for outcome in [
+            DictationOutcome::Delivered(DeliveryResult::Pasted),
+            DictationOutcome::Failed {
+                failure: FailureTag::ServerError,
+                http_status: Some(503),
+            },
+            DictationOutcome::NoSpeech,
+        ] {
+            let mut event = line(
+                Some(EngineTag::Api),
+                outcome,
+                Some(DetectorTag::Energy),
+                Some(41),
+            );
+            event.end = Some(tag);
+            let raw = format_line(at(NOON_UTC, 0), 0, &LogEvent::Dictation(event));
+            let l = parsed(&raw);
+            assert_eq!(l.get("end"), Some(literal), "{tag:?}: {raw}");
+            check_closed(&l).unwrap();
+            let end = raw.find(" end=").unwrap_or_else(|| panic!("{raw}"));
+            let rec = raw.find(" rec=").unwrap();
+            let detector = raw.find(" detector=").unwrap();
+            assert!(raw.contains("dictation rec="), "{raw}");
+            assert!(rec < end, "end= after rec=: {raw}");
+            assert!(end < detector, "end= before detector=: {raw}");
+            for key in ["result=", "failure=", "http_status=", "outcome="] {
+                if let Some(at) = raw.find(&format!(" {key}")) {
+                    assert!(at < end, "end= after {key}: {raw}");
+                }
+            }
+            written.insert(literal);
+        }
+    }
+    assert_eq!(
+        written,
+        BTreeSet::from([
+            "released",
+            "toggled",
+            "max_length",
+            "device_lost",
+            "suspended"
+        ])
+    );
+
+    let none = line(
+        Some(EngineTag::Api),
+        DictationOutcome::Delivered(DeliveryResult::Pasted),
+        Some(DetectorTag::Energy),
+        Some(41),
+    );
+    assert!(none.end.is_none());
+    let raw = format_line(at(NOON_UTC, 0), 0, &LogEvent::Dictation(none));
+    assert!(!raw.contains("end="), "no end key for None: {raw}");
+    assert_eq!(parsed(&raw).get("end"), None, "{raw}");
 }

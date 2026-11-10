@@ -240,6 +240,7 @@ fn delivered_dictation_is_one_line_with_engine_and_all_timings() {
             ("engine", "api".to_string()),
             ("outcome", "delivered".to_string()),
             ("result", "pasted".to_string()),
+            ("end", "released".to_string()),
             ("detector", "energy".to_string()),
             ("press_to_frame_ms", s(41)),
             ("duration_ms", s(3_000)),
@@ -283,6 +284,7 @@ fn failed_dictation_line_has_the_failure_literal_and_http_status() {
             ("outcome", "failed".to_string()),
             ("failure", "server_error".to_string()),
             ("http_status", s(503)),
+            ("end", "released".to_string()),
             ("detector", "silero".to_string()),
             ("press_to_frame_ms", s(37)),
             ("duration_ms", s(2_500)),
@@ -311,6 +313,7 @@ fn no_speech_line_has_no_engine_and_closes_at_job_finished() {
         pairs(&[
             ("rec", s(a.get())),
             ("outcome", "no_speech".to_string()),
+            ("end", "released".to_string()),
             ("detector", "energy".to_string()),
             ("press_to_frame_ms", s(25)),
             ("duration_ms", s(1_800)),
@@ -393,10 +396,10 @@ fn toggled_and_max_length_recordings_are_closed_by_their_job() {
     ]);
     let lines = f.dictations();
     assert_eq!(lines.len(), 2, "{lines:#?}");
-    for (line, (rec, frame, duration, text, paste)) in lines
-        .iter()
-        .zip([(a, 41, 10_000, 812, 95), (b, 42, 600_000, 900, 90)])
-    {
+    for (line, (rec, frame, duration, text, paste, end)) in lines.iter().zip([
+        (a, 41, 10_000, 812, 95, "toggled"),
+        (b, 42, 600_000, 900, 90, "max_length"),
+    ]) {
         assert_eq!(line.level, "INFO");
         assert_eq!(
             line.pairs,
@@ -405,6 +408,7 @@ fn toggled_and_max_length_recordings_are_closed_by_their_job() {
                 ("engine", "api".to_string()),
                 ("outcome", "delivered".to_string()),
                 ("result", "pasted".to_string()),
+                ("end", end.to_string()),
                 ("detector", "energy".to_string()),
                 ("press_to_frame_ms", s(frame)),
                 ("duration_ms", s(duration)),
@@ -441,6 +445,7 @@ fn a_suspended_recording_is_closed_by_its_job() {
             ("engine", "api".to_string()),
             ("outcome", "delivered".to_string()),
             ("result", "pasted".to_string()),
+            ("end", "suspended".to_string()),
             ("detector", "energy".to_string()),
             ("press_to_frame_ms", s(40)),
             ("duration_ms", s(2_000)),
@@ -512,6 +517,7 @@ fn a_capture_failure_at_stop_closes_the_open_record_in_one_line() {
             ("rec", s(a.get())),
             ("outcome", "capture_failed".to_string()),
             ("mic", "busy".to_string()),
+            ("end", "released".to_string()),
             ("press_to_frame_ms", s(41)),
             ("duration_ms", s(2_000)),
         ])
@@ -522,6 +528,7 @@ fn a_capture_failure_at_stop_closes_the_open_record_in_one_line() {
             ("rec", s(b.get())),
             ("outcome", "capture_failed".to_string()),
             ("mic", "other".to_string()),
+            ("end", "released".to_string()),
             ("duration_ms", s(1_500)),
         ])
     );
@@ -585,6 +592,7 @@ fn interleaved_jobs_are_joined_by_recording_id() {
             ("engine", "api".to_string()),
             ("outcome", "failed".to_string()),
             ("failure", "timeout".to_string()),
+            ("end", "released".to_string()),
             ("detector", "silero".to_string()),
             ("press_to_frame_ms", s(11)),
             ("duration_ms", s(1_100)),
@@ -598,6 +606,7 @@ fn interleaved_jobs_are_joined_by_recording_id() {
             ("engine", "api".to_string()),
             ("outcome", "delivered".to_string()),
             ("result", "copied_only".to_string()),
+            ("end", "released".to_string()),
             ("detector", "energy".to_string()),
             ("press_to_frame_ms", s(22)),
             ("duration_ms", s(2_200)),
@@ -1126,6 +1135,7 @@ fn a_skipped_post_processing_reaches_the_delivered_line() {
             ("engine", "api".to_string()),
             ("outcome", "delivered".to_string()),
             ("result", "pasted".to_string()),
+            ("end", "released".to_string()),
             ("detector", "energy".to_string()),
             ("press_to_frame_ms", s(41)),
             ("duration_ms", s(3_000)),
@@ -1358,4 +1368,180 @@ fn interleaved_jobs_keep_their_own_trace() {
     assert_eq!(get(b, "pp").as_deref(), Some("off"), "{lines:#?}");
     assert_eq!(get(b, "pp_reason"), None, "{lines:#?}");
     assert_eq!(get(b, "pp_ms"), None, "{lines:#?}");
+}
+
+// ---- T-170: the end= key (decisions #201) ------------------------------------------
+
+/// Every `RecordingEnd` that hands the audio to a job, with its `end=` literal; a
+/// new `RecordingEnd` variant fails to compile here and must be classified.
+fn every_job_end() -> Vec<(RecordingEnd, &'static str)> {
+    let all = [
+        RecordingEnd::Released,
+        RecordingEnd::Toggled,
+        RecordingEnd::MaxLength,
+        RecordingEnd::DeviceLost,
+        RecordingEnd::Suspended,
+    ];
+    all.into_iter()
+        .map(|e| {
+            let literal = match e {
+                RecordingEnd::Released => "released",
+                RecordingEnd::Toggled => "toggled",
+                RecordingEnd::MaxLength => "max_length",
+                RecordingEnd::DeviceLost => "device_lost",
+                RecordingEnd::Suspended => "suspended",
+                // No job follows these: the outcome is the line, no end= pair.
+                RecordingEnd::TooShort | RecordingEnd::Cancelled => {
+                    unreachable!("not a job end")
+                }
+            };
+            (e, literal)
+        })
+        .collect()
+}
+
+#[test]
+fn a_device_lost_recording_writes_end_device_lost_not_released() {
+    // T-170 failure branch (T-012 r1#1): a recording the microphone's loss ended
+    // reads `end=device_lost`, never like a normal release. Bite: the observer
+    // dropping the end (no key), mapping every end to Released, DeviceLost
+    // sharing Released's literal.
+    let f = fixture();
+    let [a] = ids(1)[..] else { unreachable!() };
+    f.feed(&[
+        started(a, 41),
+        ended(a, 2_000, RecordingEnd::DeviceLost),
+        gate(a, "energy", true),
+        finished(1, a, Some("api"), 700, OutcomeCode::Text, None, None),
+        delivered(1, 80, DeliveryResult::Pasted),
+    ]);
+    let lines = f.dictations();
+    assert_eq!(lines.len(), 1, "{lines:#?}");
+    assert_eq!(lines[0].get("end"), Some("device_lost"), "{}", lines[0].raw);
+    assert!(!lines[0].raw.contains("end=released"), "{}", lines[0].raw);
+    assert!(lines[0].raw.contains("dictation rec="), "{}", lines[0].raw);
+}
+
+#[test]
+fn every_job_end_reaches_its_line_as_its_end_literal() {
+    // One dictation per job end, each closed by a different path (delivered at
+    // Delivered, failed and no_speech at JobFinished): the line carries that
+    // recording's own end literal, joined by recording id. Bite: one end for all
+    // records (a "last end" on the observer), a variant mapped to another's
+    // literal, an end kept only for delivered lines.
+    let f = fixture();
+    let ends = every_job_end();
+    let recs = ids(ends.len() * 3);
+    let mut want = Vec::new();
+    for (i, (end, literal)) in ends.iter().enumerate() {
+        let (delivered_rec, failed_rec, silent_rec) =
+            (recs[3 * i], recs[3 * i + 1], recs[3 * i + 2]);
+        let seq = 3 * i as u64;
+        f.feed(&[
+            started(delivered_rec, 10),
+            ended(delivered_rec, 2_000, *end),
+            started(failed_rec, 10),
+            ended(failed_rec, 2_000, *end),
+            started(silent_rec, 10),
+            ended(silent_rec, 2_000, *end),
+            gate(delivered_rec, "energy", true),
+            finished(
+                seq + 1,
+                delivered_rec,
+                Some("api"),
+                5,
+                OutcomeCode::Text,
+                None,
+                None,
+            ),
+            finished(
+                seq + 2,
+                failed_rec,
+                Some("api"),
+                5,
+                OutcomeCode::Failed,
+                Some("Timeout"),
+                None,
+            ),
+            finished(
+                seq + 3,
+                silent_rec,
+                None,
+                5,
+                OutcomeCode::NoSpeech,
+                None,
+                None,
+            ),
+            delivered(seq + 1, 5, DeliveryResult::Pasted),
+        ]);
+        want.extend([
+            (delivered_rec, *literal),
+            (failed_rec, *literal),
+            (silent_rec, *literal),
+        ]);
+    }
+    let lines = f.dictations();
+    assert_eq!(lines.len(), want.len(), "{lines:#?}");
+    for (rec, literal) in want {
+        let line = lines
+            .iter()
+            .find(|l| l.get("rec") == Some(s(rec.get()).as_str()))
+            .unwrap_or_else(|| panic!("no line for {rec:?}: {lines:#?}"));
+        assert_eq!(line.get("end"), Some(literal), "{}", line.raw);
+        let (end, detector) = (line.raw.find(" end="), line.raw.find(" detector="));
+        if let (Some(end), Some(detector)) = (end, detector) {
+            assert!(end < detector, "end= before detector=: {}", line.raw);
+        }
+    }
+}
+
+#[test]
+fn too_short_and_cancelled_lines_carry_no_end() {
+    // T-170: TooShort and Cancelled are already the outcome, so they close their
+    // record without an end= pair; the value set stays job ends only. Bite:
+    // end=released (or any literal) written on a too_short / cancelled line.
+    let f = fixture();
+    let [a, b] = ids(2)[..] else { unreachable!() };
+    f.feed(&[
+        started(a, 30),
+        ended(a, 120, RecordingEnd::TooShort),
+        started(b, 35),
+        ended(b, 2_000, RecordingEnd::Cancelled),
+    ]);
+    let lines = f.dictations();
+    assert_eq!(lines.len(), 2, "{lines:#?}");
+    for line in &lines {
+        assert_eq!(line.get("end"), None, "{}", line.raw);
+        assert!(!line.raw.contains("end="), "{}", line.raw);
+    }
+}
+
+#[test]
+fn a_record_without_a_recording_ended_writes_no_end_key() {
+    // T-170: `None` means the event did not come. A job with no recording events,
+    // and a record that saw RecordingStarted but no RecordingEnded, write no end=
+    // (not a default `released`). Bite: Record.end defaulting to Released.
+    let f = fixture();
+    let [a, b] = ids(2)[..] else { unreachable!() };
+    f.feed(&[
+        finished(5, a, Some("api"), 640, OutcomeCode::Text, None, None),
+        delivered(5, 9, DeliveryResult::Pasted),
+        started(b, 20),
+        gate(b, "energy", true),
+        finished(
+            6,
+            b,
+            Some("api"),
+            600,
+            OutcomeCode::Failed,
+            Some("Timeout"),
+            None,
+        ),
+    ]);
+    let lines = f.dictations();
+    assert_eq!(lines.len(), 2, "{lines:#?}");
+    for line in &lines {
+        assert_eq!(line.get("end"), None, "{}", line.raw);
+        assert!(!line.raw.contains("end="), "{}", line.raw);
+    }
 }

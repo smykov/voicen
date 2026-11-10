@@ -51,6 +51,7 @@ fn short(rec: u64) -> LogEvent {
         text_to_paste_ms: None,
         post_processing: None,
         local: None,
+        end: None,
     })
 }
 
@@ -71,6 +72,7 @@ fn long(rec: u64) -> LogEvent {
         text_to_paste_ms: Some(u64::MAX),
         post_processing: None,
         local: None,
+        end: None,
     })
 }
 
