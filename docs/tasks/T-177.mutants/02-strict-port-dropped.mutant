@@ -1,0 +1,8 @@
+guarantee: I2: the preview takes the run's port with --strictPort (E1)
+file: playwright.config.ts
+added_by: test-writer
+--- old
+        command: `pnpm build && pnpm preview --port ${server.port} --strictPort`,
+--- new
+        command: `pnpm build && pnpm preview --port ${server.port}`,
+--- end

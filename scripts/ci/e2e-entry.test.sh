@@ -105,7 +105,9 @@ cat >"$fakebin/pnpm" <<'SH'
 export PATH="$PWD/node_modules/.bin:$PATH"
 if [ "${1:-}" = exec ]; then shift; exec "$@"; fi
 s="$(python3 -c 'import json,sys; print(json.load(open("package.json")).get("scripts",{}).get(sys.argv[1],""))' "${1:-}")"
-if [ -n "$s" ]; then shift; exec sh -c "$s \"\$@\"" sh "$@"; fi
+# pnpm 8 reports a script that exits non-zero as exit 1, whatever its code (T-064 validation 1,
+# T-177): the fake does the same, so an exit code that must survive may not pass through pnpm.
+if [ -n "$s" ]; then shift; sh -c "$s \"\$@\"" sh "$@"; rc=$?; [ "$rc" -eq 0 ] || exit 1; exit 0; fi
 [ -x "node_modules/.bin/${1:-}" ] && exec "$@"
 echo "fake pnpm: unknown command: $*" >&2
 exit 1
@@ -241,7 +243,8 @@ new_case() {
 }
 
 # entry <where: host|image> <CI value or "-" for unset> <images present> [args...]: runs
-# `pnpm e2e args` in the scratch root; sets $out and $got. $ENTRY_BASE_URL, when set, is the
+# `scripts/e2e.sh args` in the scratch root (what pnpm e2e runs and what the gate calls; T-177: a
+# typed `pnpm e2e` reports every non-zero script exit as 1 and cannot be fixed in the repo); sets $out and $got. $ENTRY_BASE_URL, when set, is the
 # caller's BASE_URL.
 out=""
 got=0
@@ -259,7 +262,7 @@ entry() {
   [ "$ci" = "-" ] || envs+=(CI="$ci")
   [ -n "${ENTRY_BASE_URL:-}" ] && envs+=(BASE_URL="$ENTRY_BASE_URL")
   mkdir -p "$log/host-home"
-  out="$(cd "$case_root" && env -i "${envs[@]}" timeout 60 pnpm e2e "$@" 2>&1)"
+  out="$(cd "$case_root" && env -i "${envs[@]}" timeout 60 ./scripts/e2e.sh "$@" 2>&1)"
   got=$?
 }
 
@@ -389,6 +392,24 @@ new_case "$version"
 ENTRY_BASE_URL="http://localhost:4173" entry image - ""
 if [ "$got" -ne 0 ]; then fail "$c" "exit $got, want 0"
 elif ! grep -qx 'BASE_URL=http://localhost:4173' "$log/playwright.log" 2>/dev/null; then fail "$c" "BASE_URL did not reach Playwright inside the image"
+else ok "$c"; fi
+
+c="host: image version != lockfile, seen from the host -> the in-image exit 3 arrives as 3 (T-064 validation 1 note 1: pnpm turns it into 1)"
+new_case "$other"
+entry host - "$image" --retries=0
+if [ "$got" -ne 3 ]; then fail "$c" "exit $got, want 3 (the code of the in-image run was changed on the way)"
+elif ! no_test; then fail "$c" "Playwright was started"
+elif ! has "$other" || ! has "$version"; then fail "$c" "the message does not name both versions ($other, $version)"
+else ok "$c"; fi
+
+c="host: the re-entry runs scripts/e2e.sh itself in the image, with the caller's args, and no pnpm in between"
+new_case "$version"
+entry host - "$image" --retries=0 --grep t177-reentry
+run_line="$(grep -E '^run( |$)' "$log/docker.log" 2>/dev/null | head -1)"
+if [ "$got" -ne 0 ]; then fail "$c" "exit $got, want 0"
+elif [ -z "$run_line" ]; then fail "$c" "no docker run was made"
+elif [[ "$run_line" != *"scripts/e2e.sh"*"--retries=0 --grep t177-reentry"* ]]; then fail "$c" "the container command is not '<root>/scripts/e2e.sh <args>': $run_line"
+elif [[ "$run_line" == *pnpm* ]]; then fail "$c" "pnpm is in the container command: $run_line"
 else ok "$c"; fi
 
 # --- the real playwright.config.ts on this host (review 1 #2) ------------------------------

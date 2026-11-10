@@ -1,0 +1,2 @@
+# the e2e config pin, run in the ui image (the e2e entry's in-image branch runs Playwright directly)
+scripts/e2e.sh e2e/e2e-config.spec.ts

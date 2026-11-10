@@ -11,7 +11,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -234,3 +234,84 @@ test("an emitted asset from node_modules that maps to no package fails the check
   assert.notEqual(r.status, 0, "an unattributed asset must not pass the check");
   assert.ok(r.stderr.includes("node_modules/.vite/example/blob.bin"), `stderr names the asset: ${r.stderr}`);
 });
+
+// --- T-177 (invariants I3): where the list goes and how it is written ----------------------
+
+const E2E_OUT = "VOICEN_E2E_OUT_DIR";
+
+/** Runs `fn` with VOICEN_E2E_OUT_DIR set to `value` (unset when undefined), then restores it. */
+async function withE2eOutDir(value, fn) {
+  const before = process.env[E2E_OUT];
+  if (value === undefined) delete process.env[E2E_OUT];
+  else process.env[E2E_OUT] = value;
+  try {
+    return await fn();
+  } finally {
+    if (before === undefined) delete process.env[E2E_OUT];
+    else process.env[E2E_OUT] = before;
+  }
+}
+
+/** Every file under `dir`, as paths relative to it ([] when it does not exist). */
+function filesUnder(dir) {
+  return existsSync(dir) ? readdirSync(dir, { recursive: true, withFileTypes: true }).filter((e) => e.isFile()).map((e) => join(e.parentPath ?? e.path, e.name)) : [];
+}
+
+test("with VOICEN_E2E_OUT_DIR the bundle list goes under the run dir and target/licenses is untouched", async (t) => {
+  const { root, dirs } = fakeProject(t);
+  const runDir = join(root, "target", "e2e", "run-1-2-abcdef");
+  mkdirSync(runDir, { recursive: true });
+  const shared = join(root, "target", "licenses", "npm-bundled.json");
+  mkdirSync(dirname(shared), { recursive: true });
+  writeFileSync(shared, "SENTINEL: the list of `make licenses-bundle`\n");
+
+  await withE2eOutDir(runDir, () => runPlugin(root, { moduleIds: realShapedModuleIds(root, dirs.svelte), assets: REAL_SHAPED_ASSETS }));
+
+  assert.equal(readFileSync(shared, "utf8"), "SENTINEL: the list of `make licenses-bundle`\n", "an e2e build must not rewrite the shared list");
+  assert.deepEqual(readdirSync(dirname(shared)), ["npm-bundled.json"], "an e2e build must leave nothing else in target/licenses");
+  const written = filesUnder(runDir).filter((f) => f.endsWith("npm-bundled.json"));
+  assert.equal(written.length, 1, `the list is written under the run dir; found: ${filesUnder(runDir).join(", ") || "nothing"}`);
+  const list = JSON.parse(readFileSync(written[0], "utf8"));
+  assert.ok(list.some((e) => e.name === "svelte"), "the run dir's list records the bundle's packages");
+});
+
+test("with VOICEN_E2E_OUT_DIR and no target/licenses yet, an e2e build creates no target/licenses", async (t) => {
+  const { root, dirs } = fakeProject(t);
+  const runDir = join(root, "target", "e2e", "run-1-2-abcdef");
+  mkdirSync(runDir, { recursive: true });
+  await withE2eOutDir(runDir, () => runPlugin(root, { moduleIds: [`${dirs.svelte}/src/index-client.js`] }));
+  assert.equal(existsSync(join(root, "target", "licenses")), false, "target/licenses must not appear");
+});
+
+test("characterization: without VOICEN_E2E_OUT_DIR the list goes to target/licenses/npm-bundled.json", async (t) => {
+  const { root, dirs } = fakeProject(t);
+  const list = await withE2eOutDir(undefined, () => runPlugin(root, { moduleIds: [`${dirs.svelte}/src/index-client.js`] }));
+  assert.equal(list, join(root, "target", "licenses", "npm-bundled.json"));
+  assert.ok(existsSync(list), "the list is written where licenses-check reads it");
+  assert.ok(JSON.parse(readFileSync(list, "utf8")).some((e) => e.name === "svelte"));
+});
+
+// A rename gives the list a new inode; a write in place changes the old one. A hard link to the
+// old file therefore keeps the old content exactly when the new list arrived by rename, so no
+// reader of the old path ever saw a half-written file. No temp file may be left behind.
+for (const [label, e2e] of [["the shared list", false], ["a run dir's list", true]]) {
+  test(`the list is written by rename (no partial file is ever visible): ${label}`, async (t) => {
+    const { root, dirs } = fakeProject(t);
+    const runDir = join(root, "target", "e2e", "run-1-2-abcdef");
+    const dest = e2e ? join(runDir, "npm-bundled.json") : join(root, "target", "licenses", "npm-bundled.json");
+    mkdirSync(dirname(dest), { recursive: true });
+    writeFileSync(dest, "OLD LIST\n");
+    const old = join(root, "old-list-link.json");
+    linkSync(dest, old);
+
+    await withE2eOutDir(e2e ? runDir : undefined, () => runPlugin(root, { moduleIds: [`${dirs.svelte}/src/index-client.js`] }));
+
+    assert.equal(readFileSync(old, "utf8"), "OLD LIST\n", "the old file was rewritten in place instead of replaced by rename");
+    // The run dir's list may sit in a subdirectory of the run dir (the old file is one candidate).
+    const lists = (e2e ? filesUnder(runDir) : [dest]).filter((f) => f.endsWith("npm-bundled.json")).map((f) => readFileSync(f, "utf8")).filter((c) => c !== "OLD LIST\n");
+    assert.equal(lists.length, 1, "exactly one new list was written");
+    assert.ok(JSON.parse(lists[0]).some((e) => e.name === "svelte"), "the new list is complete JSON");
+    const left = filesUnder(e2e ? runDir : dirname(dest)).filter((f) => !f.endsWith("npm-bundled.json"));
+    assert.deepEqual(left, [], "no temp file is left next to the list");
+  });
+}

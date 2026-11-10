@@ -1,0 +1,10 @@
+guarantee: I1: no e2e file opens a browser context of its own
+file: e2e/support/modals.ts
+added_by: test-writer
+test: scripts/e2e.sh e2e/boot-failure.spec.ts -g "no e2e file opens a browser context of its own"
+--- old
+// Shared check for decision A (docs/decisions/settings-ui.md, "the discard prompt wins"):
+--- new
+// const stray = await browser.newContext();
+// Shared check for decision A (docs/decisions/settings-ui.md, "the discard prompt wins"):
+--- end

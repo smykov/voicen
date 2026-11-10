@@ -306,3 +306,63 @@ test("the navigation scan catches every spelling of the call and exempts only th
   expect(NAVIGATION.test(nonExemptSource(fixture, broken)), "a named failure scenario is exempt").toBe(false);
   expect(NAVIGATION.test(nonExemptSource(join("e2e", "a.spec.ts"), broken)), "a spec is never exempt").toBe(true);
 });
+
+// T-177 (invariant I1, decides_on: token): every page of the suite lives in the test's own
+// `context` fixture, which the boot fixture covers. A file that opens a browser context or page
+// by itself (a fixture destructuring that names the browser, a context made by hand, a persistent
+// or attached browser) would be outside that check, so these raw identifiers appear in no e2e
+// file, comments included, case-sensitive. The tokens are built from parts: this file is scanned
+// too and must not hold them itself. A future legitimate own-context test needs a named
+// exemption here, like FAILURE_SCENARIOS above.
+const OWN_CONTEXT_CALLS = ["new" + "Context", "launchPersistent" + "Context", "connectOver" + "CDP"];
+const BROWSER_WORD = "bro" + "wser";
+const OWN_CONTEXT = new RegExp(
+  [
+    ...OWN_CONTEXT_CALLS.map((t) => `\\b${t}\\b`),
+    `\\(\\s*\\{[^}]*\\b${BROWSER_WORD}\\b[^}]*\\}`,
+    `\\b${BROWSER_WORD}\\s*\\.\\s*new${"Page"}\\b`,
+  ].join("|"),
+);
+
+function ownContextSites(root: string): { files: number; offenders: string[] } {
+  const files = (readdirSync(root, { recursive: true }) as string[])
+    .map((f) => join(root, f))
+    .filter((f) => f.endsWith(".ts"));
+  const offenders = files.filter((f) => OWN_CONTEXT.test(readFileSync(f, "utf8")));
+  return { files: files.length, offenders };
+}
+
+test("no e2e file opens a browser context of its own", () => {
+  const { files, offenders } = ownContextSites("e2e");
+  expect(files, "the scan saw the specs, fixtures and support files").toBeGreaterThan(15);
+  expect(offenders, "files that create a context or page outside the test's context fixture").toEqual([]);
+});
+
+// Characterization of the scan (green today): the spellings it must catch, and what it lets by.
+test("the context scan catches a context made by hand, a page of the browser, a persistent or attached browser and a browser fixture", () => {
+  const b = BROWSER_WORD;
+  // Built from parts like the tokens: this file is also scanned for specs that use the page fixture.
+  const pg = "pa" + "ge";
+  const cx = "con" + "text";
+  const [made, persistent, cdp] = OWN_CONTEXT_CALLS;
+  for (const spelled of [
+    `const c = await ${b}.${made}();`,
+    `const c = await ${b} . ${made} ({ viewport: null });`,
+    `test("x", async ({ ${b} }) => { const p = await ${b}.newPage(); });`,
+    `async function f(x: Browser) { return x; }\nawait ${b}.newPage();`,
+    `test("x", async ({ ${pg}, ${b}, request }) => {});`,
+    `test("x", async ({\n  ${b},\n}) => {});`,
+    `const c = await chromium.${persistent}("/tmp/example");`,
+    `const bw = await chromium.${cdp}("http://localhost:9222");`,
+  ]) {
+    expect(OWN_CONTEXT.test(spelled), spelled).toBe(true);
+  }
+  // What stays allowed: the context fixture and its pages, and words that only contain the token.
+  for (const allowed of [
+    `test("x", async ({ ${pg}, ${cx} }) => { await ${cx}.newPage(); });`,
+    `const ${b}Name = "chromium";`,
+    `test("x", async ({ ${b}Name }) => {});`,
+  ]) {
+    expect(OWN_CONTEXT.test(allowed), allowed).toBe(false);
+  }
+});

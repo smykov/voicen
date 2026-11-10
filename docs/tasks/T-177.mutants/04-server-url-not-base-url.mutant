@@ -1,0 +1,8 @@
+guarantee: I2: the webServer url is the tests' baseURL
+file: playwright.config.ts
+added_by: test-writer
+--- old
+        url: baseURL,
+--- new
+        url: `http://localhost:${server.port}/`,
+--- end

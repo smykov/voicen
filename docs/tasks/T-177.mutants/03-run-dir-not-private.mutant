@@ -1,0 +1,8 @@
+guarantee: I2: the build directory is the run's own under target/e2e (E1)
+file: playwright.config.ts
+added_by: test-writer
+--- old
+    process.env.VOICEN_E2E_OUT_DIR = mkdtempSync(join(E2E_ROOT, `run-${ns}-${process.pid}-`));
+--- new
+    process.env.VOICEN_E2E_OUT_DIR = mkdtempSync(join(E2E_ROOT, `shared-`));
+--- end

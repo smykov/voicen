@@ -1,0 +1,8 @@
+guarantee: I2: the gate config never reuses an existing server (E1)
+file: playwright.config.ts
+added_by: test-writer
+--- old
+        reuseExistingServer: false,
+--- new
+        reuseExistingServer: true,
+--- end
