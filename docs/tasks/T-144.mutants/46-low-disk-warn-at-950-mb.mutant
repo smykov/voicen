@@ -1,0 +1,9 @@
+guarantee: AC-5: below 1 GB one low_disk warning
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+test: cargo test -j 2 -p voicen-core --test call_session
+--- old
+const LOW_DISK_WARN_BYTES: u64 = 1_000_000_000;
+--- new
+const LOW_DISK_WARN_BYTES: u64 = 950_000_000;
+--- end

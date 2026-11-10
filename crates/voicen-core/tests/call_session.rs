@@ -3204,6 +3204,50 @@ fn between_200_mb_and_1_gb_the_call_keeps_recording() {
 }
 
 #[test]
+fn a_poll_just_under_200_mb_stops_the_call_with_low_disk() {
+    // Acceptance 5 boundary (validation round 1, mutant 44): one byte under 200 MB is
+    // "below 200 MB", so the call stops with saving. Bite: a lower stop threshold
+    // (150 MB, 199 MB) that the 100 MB poll of the main test lets through.
+    let rig = CallRig::with(quiet);
+    started(&rig, CallSource::Tray);
+    feed(&rig, 0, 2_000);
+    rig.disk.set_free(200 * call_support::MB - 1);
+    tick_secs(&rig, 10);
+    assert!(!rig.session.is_recording(), "one byte under 200 MB stops");
+    let failed = rig.lines_named("call_storage_failed");
+    assert_eq!(failed.len(), 1, "{failed:?}");
+    assert_eq!(failed[0].get("kind"), Some("low_disk"));
+    let stopped = rig.lines_named("call_stopped");
+    assert_eq!(stopped.len(), 1, "{stopped:?}");
+    assert_eq!(stopped[0].get("reason"), Some("low_disk"));
+    assert_eq!(rig.only_meta()["stop_reason"], json!("low_disk"));
+}
+
+#[test]
+fn a_poll_just_under_1_gb_warns_and_exactly_1_gb_does_not() {
+    // Acceptance 5 boundary: exactly 1 GB is not "below 1 GB" (no warning over three
+    // polls); one byte under it gives the one `low_disk` warning and the call keeps
+    // recording. Bite: a lower warn threshold (950 MB, the 900 MB poll of the main test
+    // lets it through), `<=` instead of `<`.
+    let rig = CallRig::with(quiet);
+    started(&rig, CallSource::Tray);
+    rig.disk.set_free(call_support::GB);
+    tick_secs(&rig, 30);
+    assert!(!rig.disk.poll_times().is_empty(), "the disk was polled");
+    assert!(rig.session.is_recording());
+    assert!(
+        warnings_but_provider(&rig).is_empty(),
+        "exactly 1 GB is not below 1 GB"
+    );
+    rig.disk.set_free(call_support::GB - 1);
+    tick_secs(&rig, 10);
+    assert!(rig.session.is_recording(), "a warning, not a stop");
+    assert_eq!(warnings_but_provider(&rig), vec![WarningKind::LowDisk]);
+    assert!(rig.lines_named("call_storage_failed").is_empty());
+    rig.session.stop(StopReason::User);
+}
+
+#[test]
 fn four_hours_stop_with_max_length() {
     // Acceptance 6: at 4 h of mono time since the start the call stops with
     // `max_length`, saved as ready-to-transcribe, notice Stopped{MaxLength}; one second

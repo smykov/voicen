@@ -300,8 +300,11 @@ fn recover_requeues_transcribing_and_queues_ready_to_transcribe_oldest_first() {
     let earlier = e.tmp.path().join("earlier");
     fs::create_dir_all(&earlier).expect("earlier");
     let hour_ago = crashed_call(&e, &earlier, stamp(0), 1, 1);
+    // 12 calls in one start second: suffixes none, -1 ... -11, so the numeric order
+    // (-2 before -10, -11) differs from the text order (-10, -11 before -2). Validation
+    // round 1, mutant 43: with 10 calls the suffixes stopped at -9 and a text sort passed.
     let mut same_second = Vec::new();
-    for _ in 0..10 {
+    for _ in 0..12 {
         same_second.push(crashed_call(&e, &e.root, stamp(3_600), 1, 1));
     }
     let transcribing = crashed_call(&e, &e.root, stamp(7_200), 1, 1);
@@ -321,6 +324,11 @@ fn recover_requeues_transcribing_and_queues_ready_to_transcribe_oldest_first() {
     let out = e.store.recover(&calls_in(&e.root, &[&earlier]), &e.log);
     let ids: Vec<String> = out.queue.iter().map(|c| c.id.to_string()).collect();
     let name = |d: &PathBuf| d.file_name().expect("name").to_string_lossy().into_owned();
+    assert!(
+        same_second.iter().map(name).any(|n| n.ends_with("-10")),
+        "the same-second calls reach a two-digit suffix: {:?}",
+        same_second.iter().map(name).collect::<Vec<_>>()
+    );
     let mut want = vec![name(&hour_ago)];
     want.extend(same_second.iter().map(name));
     want.push(name(&transcribing));

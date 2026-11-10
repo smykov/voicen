@@ -1,0 +1,9 @@
+guarantee: AC-5: below 1 GB one low_disk warning (exactly 1 GB is not below)
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+test: cargo test -j 2 -p voicen-core --test call_session
+--- old
+        if free < LOW_DISK_WARN_BYTES && !call.low_disk_warned {
+--- new
+        if free <= LOW_DISK_WARN_BYTES && !call.low_disk_warned {
+--- end
