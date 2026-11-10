@@ -1,0 +1,9 @@
+guarantee: AC-5: below 200 MB the recording stops with saving
+file: crates/voicen-core/src/call/session.rs
+added_by: task-validator round 1
+test: cargo test -j 2 -p voicen-core --test call_session
+--- old
+const LOW_DISK_STOP_BYTES: u64 = 200_000_000;
+--- new
+const LOW_DISK_STOP_BYTES: u64 = 150_000_000;
+--- end

@@ -1,0 +1,16 @@
+guarantee: AC-3: ready-to-transcribe is queued oldest first
+file: crates/voicen-core/src/call/storage.rs
+added_by: task-validator round 1
+--- old
+                CallState::ReadyToTranscribe => {
+                    queue.push(CallEntry {
+                        meta: Some(meta),
+                        ..entry
+                    });
+                    continue;
+                }
+--- new
+                CallState::ReadyToTranscribe => {
+                    continue;
+                }
+--- end

@@ -1,0 +1,23 @@
+guarantee: AC-8 / I-a: an unreadable track counts 0 in the recovered duration (no overclaimed audio)
+file: crates/voicen-core/src/call/storage.rs
+added_by: task-validator round 1
+test: cargo test -j 2 -p voicen-core --test call_recovery
+--- old
+        .map(|track| {
+            File::open(dir.join(&track.file))
+                .ok()
+                .and_then(|file| scan(file).ok())
+                .map_or(0, |s| {
+                    track.start_offset_ms.saturating_add(s.duration_48k / 48)
+                })
+        })
+--- new
+        .filter_map(|track| {
+            File::open(dir.join(&track.file))
+                .ok()
+                .and_then(|file| scan(file).ok())
+                .map(|s| {
+                    track.start_offset_ms.saturating_add(s.duration_48k / 48)
+                })
+        })
+--- end

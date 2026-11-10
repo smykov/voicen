@@ -1,0 +1,13 @@
+guarantee: AC-3: ready-to-transcribe is queued oldest first (numeric clash suffix: -2 before -10)
+file: crates/voicen-core/src/call/storage.rs
+added_by: task-validator round 1
+test: cargo test -j 2 -p voicen-core --test call_recovery
+--- old
+fn oldest_first(a: &CallId, b: &CallId) -> Ordering {
+    sort_key(a).cmp(&sort_key(b))
+}
+--- new
+fn oldest_first(a: &CallId, b: &CallId) -> Ordering {
+    a.as_str().cmp(b.as_str())
+}
+--- end
