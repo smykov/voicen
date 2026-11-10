@@ -1,0 +1,8 @@
+guarantee: AC-2: the pass mode (timed|timeless) and chunk count are reported per item
+file: crates/voicen-core/examples/wer.rs
+added_by: test-writer
+--- old
+        if let Some(pass) = pass {
+--- new
+        if let (Some(pass), true) = (pass, false) {
+--- end

@@ -1,0 +1,10 @@
+guarantee: FR-022: a missing or blank VOICEN_WER_KEY exits 2 before any request
+file: crates/voicen-core/examples/wer.rs
+added_by: test-writer
+--- old
+    let Some(config) = config(language) else {
+        return ExitCode::from(2);
+--- new
+    let Some(config) = config(language) else {
+        return ExitCode::from(1);
+--- end

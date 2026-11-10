@@ -1,0 +1,8 @@
+guarantee: AC-3: a pass that is not Ready is a failed item, never an empty hypothesis (storage branch, write_meta)
+file: crates/voicen-core/examples/wer.rs
+added_by: test-writer
+--- old
+    write_meta(&dir, &meta).map_err(|_| ())?;
+--- new
+    let _ = write_meta(&dir, &meta);
+--- end

@@ -1,0 +1,8 @@
+guarantee: AC-1: utterances of one <spk>-<ch> group are concatenated in manifest order and scored as one item (reference)
+file: crates/voicen-core/examples/wer.rs
+added_by: test-writer
+--- old
+            item.reference.extend(normalize(reference));
+--- new
+            item.reference.splice(0..0, normalize(reference));
+--- end

@@ -1,0 +1,8 @@
+guarantee: AC-4: no call folder is left behind after an item
+file: crates/voicen-core/examples/wer.rs
+added_by: test-writer
+--- old
+    let tmp = TempDir::new();
+--- new
+    let tmp = std::mem::ManuallyDrop::new(TempDir::new());
+--- end

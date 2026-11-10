@@ -1,0 +1,8 @@
+guarantee: AC-3: a pass that is not Ready is a failed item, never an empty hypothesis
+file: crates/voicen-core/examples/wer.rs
+added_by: test-writer
+--- old
+        FinalOutcome::Failed { reason } => Err(code_of(reason)),
+--- new
+        FinalOutcome::Failed { reason: _ } => Err(code_of(FailReason::Storage)),
+--- end

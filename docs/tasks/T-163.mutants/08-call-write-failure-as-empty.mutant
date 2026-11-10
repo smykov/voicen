@@ -1,0 +1,8 @@
+guarantee: AC-3: a pass that is not Ready is a failed item, never an empty hypothesis (storage branch)
+file: crates/voicen-core/examples/wer.rs
+added_by: test-writer
+--- old
+        Err(()) => return (None, Err(code_of(FailReason::Storage))),
+--- new
+        Err(()) => return (None, Ok(String::new())),
+--- end

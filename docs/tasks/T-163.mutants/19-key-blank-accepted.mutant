@@ -1,0 +1,8 @@
+guarantee: FR-022: a missing or blank VOICEN_WER_KEY exits 2 before any request
+file: crates/voicen-core/examples/wer.rs
+added_by: test-writer
+--- old
+        .filter(|key| !key.trim().is_empty())
+--- new
+        .filter(|key| !key.is_empty())
+--- end

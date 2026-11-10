@@ -1,0 +1,8 @@
+guarantee: AC-2: the pass mode (timed|timeless) and chunk count are reported per item
+file: crates/voicen-core/examples/wer.rs
+added_by: test-writer
+--- old
+            self.0.fetch_max(chunks, Ordering::Relaxed);
+--- new
+            self.0.store(chunks.min(1), Ordering::Relaxed);
+--- end

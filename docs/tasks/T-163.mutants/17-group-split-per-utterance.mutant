@@ -1,0 +1,8 @@
+guarantee: AC-1: utterances of one <spk>-<ch> group are concatenated in manifest order and scored as one item
+file: crates/voicen-core/examples/wer.rs
+added_by: test-writer
+--- old
+        let at = match items.iter().position(|item| item.id == group) {
+--- new
+        let at = match items.iter().position(|_| false) {
+--- end

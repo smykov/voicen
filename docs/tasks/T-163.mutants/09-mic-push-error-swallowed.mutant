@@ -1,0 +1,8 @@
+guarantee: AC-3: a pass that is not Ready is a failed item, never an empty hypothesis (storage branch, mic push)
+file: crates/voicen-core/examples/wer.rs
+added_by: test-writer
+--- old
+        files.mic.push(&block).map_err(|_| ())?;
+--- new
+        let _ = files.mic.push(&block);
+--- end

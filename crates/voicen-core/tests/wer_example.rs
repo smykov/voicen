@@ -1,21 +1,25 @@
-//! T-140 (validation r1): the owner-run `wer` example never prints transcript text,
-//! reference text or the API key (analysis invariant; NFR-04, FR-20).
+//! T-140 (validation r1), T-163: the owner-run `wer` example never prints transcript
+//! text, reference text or the API key (analysis invariant; NFR-04, FR-20).
 //!
 //! The example is run as a child process against a loopback wiremock server and a temp
-//! directory holding one fake WAV and one fake reference: in `pairs` mode through every
-//! path of the shared `run()`, in `librispeech` mode through its own lines up to the
-//! 30-minute refusal and, with one silent WAV of exactly 30 min, past it; in both modes
-//! also through the branch where a readable reference sits next to an unreadable WAV
-//! (validation r2, H1 and H2). Nothing leaves the host; every value is an obvious fake
-//! marker. The child's stdout and stderr are the "output" the invariant speaks of. The
-//! gate and CI run the example only like this and never the real measurement (decision
-//! #221; research R23, T051 as amended).
+//! directory holding fake WAVs and fake references. Every item (a `pairs` file or a
+//! LibriSpeech `<spk>-<ch>` group) goes through one final pass over a temp call folder,
+//! so the mock sees the pass's chunk requests (and, on a 400, its time-less resend), not
+//! one request per file. In `pairs` mode the tests go through every path of the shared
+//! `run()`; in `librispeech` mode through its own lines up to the 30-minute refusal and,
+//! with one silent WAV of exactly 30 min, past it; in both modes also through the branch
+//! where a readable reference sits next to an unreadable WAV (validation r2, H1 and H2).
+//! Nothing leaves the host; every value is an obvious fake marker. The child's stdout
+//! and stderr are the "output" the invariant speaks of. The gate and CI run the example
+//! only like this and never the real measurement (decision #221; research R23, T051 as
+//! amended).
 //!
-//! These tests are green on a correct example; they guard it by mutation (the catalog
-//! `docs/tasks/T-140.mutants/` entries `25..`): printing the transcript, the reference
-//! or the key turns them red, and so does a wrong figure or a dropped key (validation
-//! r3, entries `114..`), an empty reference mishandled or the key on a path that sends
-//! no request (validation r4, entries `201..`).
+//! These tests are green on a correct example; they guard it by mutation (the catalogs
+//! `docs/tasks/T-140.mutants/` entries `25..`, `114..`, `201..` and
+//! `docs/tasks/T-163.mutants/`): printing the transcript, the reference or the key turns
+//! them red, and so does a wrong figure, a dropped key, an empty reference mishandled,
+//! the key on a path that sends no request, a pass that fails scored as an empty
+//! hypothesis, a leaked call folder, a wrong group order or a missing key accepted.
 
 #[path = "common/mock_http.rs"]
 mod mock_http;
@@ -225,7 +229,10 @@ async fn wer_example_output_has_no_server_text_reference_or_key_when_the_server_
     let dir = Dir::new("failed");
     let (out, all) = run_pairs(&dir, &server.uri(), true);
     assert_eq!(out.status.code(), Some(1), "a failed item exits 1:\n{all}");
-    assert!(all.contains("item1 failed"), "no failure line:\n{all}");
+    assert!(
+        all.lines().any(|l| l == "item1 failed provider"),
+        "a 500 is a failed item with the code `provider`:\n{all}"
+    );
     assert_no_secrets(&all, &[ERROR_BODY]);
 }
 
@@ -575,7 +582,11 @@ async fn wer_example_pairs_long_item_goes_out_as_several_chunk_requests() {
         seen.len()
     );
     assert!(all.contains("mode=timed"), "no pass mode:\n{all}");
-    assert!(all.contains("chunks="), "no chunk count:\n{all}");
+    assert_eq!(
+        field_of(&all, "item1 pass", "chunks="),
+        Some(seen.len() as u64),
+        "the reported chunk count is the number of chunk requests:\n{all}"
+    );
     assert_no_secrets(&all, &["hello"]);
 }
 
@@ -637,6 +648,11 @@ async fn wer_example_librispeech_scores_a_speaker_group_as_one_item() {
         seen.len() >= 3,
         "160 s of speech is at least two chunks, plus the other group's one: {} requests",
         seen.len()
+    );
+    let position = |prefix: &str| all.lines().position(|l| l.starts_with(prefix));
+    assert!(
+        position("1089-134686 s=") < position("1188-133604 s="),
+        "groups are scored in the order the manifest first names them:\n{all}"
     );
     assert!(
         all.contains("wer: total over 2 scored items (0 failed)"),
@@ -716,7 +732,10 @@ async fn wer_example_a_pass_that_fails_is_a_failed_item_not_an_empty_hypothesis(
     std::fs::write(dir.0.join("item1.txt"), REFERENCE).expect("write reference");
     let (out, all) = run_example(&["pairs", path_arg(&dir), "ru"], &server.uri());
     assert_eq!(out.status.code(), Some(1), "a failed item exits 1:\n{all}");
-    assert!(all.contains("item1 failed"), "no failure line:\n{all}");
+    assert!(
+        all.lines().any(|l| l == "item1 failed key"),
+        "a 401 is a failed item with the code `key`:\n{all}"
+    );
     assert!(
         !all.lines().any(|l| l.starts_with("item1 s=")),
         "a failed pass was scored:\n{all}"

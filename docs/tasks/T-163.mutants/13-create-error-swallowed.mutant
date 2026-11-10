@@ -1,0 +1,8 @@
+guarantee: AC-3: a pass that is not Ready is a failed item, never an empty hypothesis (storage branch, create)
+file: crates/voicen-core/examples/wer.rs
+added_by: test-writer
+--- old
+    let mut files = store.create(&settings.calls, &new).map_err(|_| ())?;
+--- new
+    let mut files = store.create(&settings.calls, &new).map_err(|_| ()).unwrap_or_else(|()| std::process::exit(0));
+--- end

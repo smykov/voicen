@@ -1,0 +1,8 @@
+guarantee: AC-2: the pass mode (timed|timeless) and chunk count are reported per item
+file: crates/voicen-core/examples/wer.rs
+added_by: test-writer
+--- old
+        chunks: events.0.load(Ordering::Relaxed),
+--- new
+        chunks: 0,
+--- end

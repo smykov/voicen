@@ -1,0 +1,13 @@
+guarantee: AC-1: the hypothesis is every mic line of the pass, joined
+file: crates/voicen-core/examples/wer.rs
+added_by: test-writer
+--- old
+        lines
+            .iter()
+            .map
+--- new
+        lines
+            .iter()
+            .take(1)
+            .map
+--- end

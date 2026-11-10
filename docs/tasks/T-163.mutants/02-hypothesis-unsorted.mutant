@@ -1,0 +1,8 @@
+guarantee: AC-1: the hypothesis is every mic line of the pass, joined (by start_ms)
+file: crates/voicen-core/examples/wer.rs
+added_by: test-writer
+--- old
+    lines.sort_by_key(|segment| segment.start_ms);
+--- new
+    lines.reverse();
+--- end

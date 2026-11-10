@@ -1,0 +1,11 @@
+guarantee: FR-022: a missing or blank VOICEN_WER_KEY exits 2 before any request
+file: crates/voicen-core/examples/wer.rs
+added_by: test-writer
+--- old
+    let Some(key) = std::env::var("VOICEN_WER_KEY")
+        .ok()
+        .filter(|key| !key.trim().is_empty())
+    else {
+--- new
+    let Some(key) = std::env::var("VOICEN_WER_KEY").ok().or(Some(String::new())) else {
+--- end
