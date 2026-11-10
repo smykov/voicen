@@ -1,0 +1,11 @@
+guarantee: I-4: RecordingController::notice shows the message outside a job (one body, notice_with)
+file: crates/voicen-core/src/recording/mod.rs
+added_by: test-writer
+--- old
+        self.expire(at);
+        self.show(id, Vec::new(), at);
+        self.refresh();
+--- new
+        self.expire(at);
+        self.refresh();
+--- end

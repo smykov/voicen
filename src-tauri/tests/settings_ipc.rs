@@ -684,6 +684,72 @@ fn settings_list_microphones_is_registered_and_answers_with_entries_of_that_shap
 }
 
 #[test]
+fn managed_microphones_panics_naming_wire_when_the_state_is_missing() {
+    // T-176 I-3: the dictation ports read the one `AudioSource` only from managed state;
+    // an app where `wire` did not manage `Microphones` fails loudly with a message that
+    // names the wiring, and never builds a second source. Bite: the lookup falling back
+    // to a new source (no panic), `expect` text that does not name `wire`.
+    use tauri::Manager;
+    let app = mock_builder()
+        .build(mock_context(noop_assets()))
+        .expect("mock app builds");
+    let handle = app.handle().clone();
+
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+        || -> Arc<dyn voicen_core::platform::AudioSource> {
+            voicen_lib::settings_ipc::managed_microphones(&handle)
+        },
+    ));
+
+    let payload = match caught {
+        Ok(_) => panic!("a missing Microphones state still produced a source"),
+        Err(payload) => payload,
+    };
+    let message = payload
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| payload.downcast_ref::<&str>().map(|s| (*s).to_string()))
+        .unwrap_or_default();
+    assert!(
+        message.contains("wire"),
+        "the panic does not name the wiring: {message:?}"
+    );
+    assert!(app
+        .try_state::<voicen_lib::settings_ipc::Microphones>()
+        .is_none());
+}
+
+#[test]
+fn managed_microphones_returns_the_managed_source() {
+    // T-176 I-3: the lookup answers the very `Arc` `wire` manages (one source for the
+    // settings list and the press), not an equal-looking second one. Bite: a lookup
+    // that builds a new source even when the state is managed.
+    use tauri::Manager;
+    let dir = TempDir::new();
+    let store = fake_store(FakeCredentialStore::new());
+    let (service, _) = load_settings(
+        dir.path().to_path_buf(),
+        as_port(&store),
+        no_autostart(),
+        idle_store(dir.path()),
+        None,
+        &discard_log(),
+    );
+    let h = harness(&service);
+
+    let looked_up = voicen_lib::settings_ipc::managed_microphones(h.app.handle());
+    let managed = h
+        .app
+        .state::<voicen_lib::settings_ipc::Microphones>()
+        .0
+        .clone();
+    assert!(
+        Arc::ptr_eq(&looked_up, &managed),
+        "managed_microphones returned a source other than the managed one"
+    );
+}
+
+#[test]
 fn first_run_with_russian_os_language_writes_ru() {
     // Acceptance 5 (spec 004 T049), the load half. Bite: load_settings dropping
     // the OS language (defaults(None) = en written on Russian Windows).

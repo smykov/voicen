@@ -1,0 +1,11 @@
+guarantee: I-4: RecordingController::notice refreshes the tray after showing the message
+file: crates/voicen-core/src/recording/mod.rs
+added_by: test-writer
+--- old
+        self.expire(at);
+        self.show(id, Vec::new(), at);
+        self.refresh();
+--- new
+        self.expire(at);
+        self.show(id, Vec::new(), at);
+--- end

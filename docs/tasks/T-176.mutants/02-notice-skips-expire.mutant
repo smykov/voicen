@@ -1,0 +1,12 @@
+guarantee: I-4: RecordingController::notice expires the previous message first (same rule as notice_with)
+file: crates/voicen-core/src/recording/mod.rs
+added_by: test-writer
+equivalent: expire only clears an elapsed message and show then overwrites `message` unconditionally before refresh, so no input tells the two apart
+--- old
+        self.expire(at);
+        self.show(id, Vec::new(), at);
+        self.refresh();
+--- new
+        self.show(id, Vec::new(), at);
+        self.refresh();
+--- end

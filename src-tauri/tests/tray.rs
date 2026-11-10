@@ -1420,6 +1420,51 @@ fn the_shell_opener_refuses_a_missing_folder_with_code_2_and_no_window() {
     assert!(!missing.exists(), "ShellOpener created the folder");
 }
 
+#[test]
+fn the_shell_opener_refuses_a_file_with_error_directory_before_the_shell() {
+    // T-176 I-2: a path that exists and is not a directory is refused by ShellOpener
+    // itself with ERROR_DIRECTORY (267, from the windows crate) before any shell call:
+    // verb "open" on a file would run it. The file has an extension no handler is
+    // registered for, so with the guard gone ShellExecuteExW reports another code
+    // (no association) or hangs on a dialog, which the bounded wait turns red. Bite:
+    // the `exists && !is_dir` guard removed, a different code, the file touched,
+    // anything created next to it.
+    let _serial = serial();
+    let dir = TempDir::new();
+    let file = dir.path().join("not-a-folder.voicen-t176");
+    std::fs::write(&file, b"inert, not a program").expect("write the inert file");
+
+    let (tx, rx) = mpsc::channel();
+    let path = file.clone();
+    thread::spawn(move || {
+        let _ = tx.send(ShellOpener.open(&path));
+    });
+    let result = rx.recv_timeout(BUDGET).unwrap_or_else(|_| {
+        panic!("ShellOpener did not return within {BUDGET:?} for a file (a shell dialog?)")
+    });
+
+    let err = result.expect_err("ShellOpener opened a file as a folder");
+    assert_eq!(
+        err.raw_os_error(),
+        Some(windows::Win32::Foundation::ERROR_DIRECTORY.0 as i32),
+        "{err:?}"
+    );
+    assert_eq!(
+        std::fs::read(&file).ok().as_deref(),
+        Some(&b"inert, not a program"[..]),
+        "the file was changed"
+    );
+    let names: Vec<_> = std::fs::read_dir(dir.path())
+        .expect("read the temp dir")
+        .map(|e| e.expect("entry").file_name())
+        .collect();
+    assert_eq!(
+        names.len(),
+        1,
+        "something was created next to the file: {names:?}"
+    );
+}
+
 /// The release context (tauri.conf.json as tauri-build resolved it).
 fn release_context<R: Runtime>() -> Context<R> {
     tauri::generate_context!(test = true)
