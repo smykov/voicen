@@ -1101,6 +1101,19 @@ fn indicator_changes_inside_the_lock_and_shell_requests_after_it() {
     assert!(rig.session.try_is_recording().is_some());
 }
 
+/// T-144: while a call records, the shell's timer always has a deadline, never more than
+/// 10 s ahead (the disk poll and the 4 h limit are decided in `tick`).
+fn due_within_10s(rig: &CallRig) {
+    let due = rig
+        .session
+        .next_deadline()
+        .expect("a deadline is due while a call records");
+    assert!(
+        due <= rig.mono.read() + ms(10_000),
+        "the deadline is at most 10 s ahead"
+    );
+}
+
 #[test]
 fn the_reminder_shows_for_10_seconds_at_each_start() {
     // Acceptance 7: the reminder and the headphones hint show from the start until
@@ -1110,7 +1123,6 @@ fn the_reminder_shows_for_10_seconds_at_each_start() {
     // deadline kept after expiry, the reminder shown only at the first start, texts kept
     // while hidden.
     let rig = CallRig::new();
-    let t0 = rig.mono.read();
     started(&rig, CallSource::Tray);
     let first = rig.indicator.states();
     assert_eq!(first.len(), 1);
@@ -1120,7 +1132,7 @@ fn the_reminder_shows_for_10_seconds_at_each_start() {
         "Tell the other party the call is being recorded"
     );
     assert_eq!(first[0].headphones_hint, "Better with headphones");
-    assert_eq!(rig.session.next_deadline(), Some(t0 + ms(10_000)));
+    due_within_10s(&rig);
 
     rig.mono.advance(ms(9_999));
     rig.session.tick();
@@ -1129,7 +1141,7 @@ fn the_reminder_shows_for_10_seconds_at_each_start() {
         1,
         "nothing changes before 10 s"
     );
-    assert_eq!(rig.session.next_deadline(), Some(t0 + ms(10_000)));
+    due_within_10s(&rig);
 
     rig.mono.advance(ms(1));
     rig.session.tick();
@@ -1138,7 +1150,7 @@ fn the_reminder_shows_for_10_seconds_at_each_start() {
     assert!(after[1].recording && !after[1].reminder_visible);
     assert_eq!(after[1].reminder_text, "");
     assert_eq!(after[1].headphones_hint, "");
-    assert_eq!(rig.session.next_deadline(), None);
+    due_within_10s(&rig);
     assert!(
         rig.indicator.held_flags().iter().all(|held| *held),
         "the expiry state is published inside the session lock: {:?}",
@@ -1152,7 +1164,6 @@ fn the_reminder_shows_for_10_seconds_at_each_start() {
     );
 
     rig.session.stop(StopReason::User);
-    let t1 = rig.mono.read();
     started(&rig, CallSource::Hotkey);
     let again = rig.indicator.states();
     let last = again.last().expect("a state");
@@ -1160,7 +1171,7 @@ fn the_reminder_shows_for_10_seconds_at_each_start() {
         last.recording && last.reminder_visible,
         "shown again at the next start"
     );
-    assert_eq!(rig.session.next_deadline(), Some(t1 + ms(10_000)));
+    due_within_10s(&rig);
     rig.session.stop(StopReason::User);
     assert_eq!(
         rig.session.next_deadline(),
@@ -1181,7 +1192,7 @@ fn the_reminder_is_not_shown_at_all_when_it_is_off() {
     assert!(states[0].recording && !states[0].reminder_visible);
     assert_eq!(states[0].reminder_text, "");
     assert_eq!(states[0].headphones_hint, "");
-    assert_eq!(rig.session.next_deadline(), None);
+    due_within_10s(&rig);
     rig.mono.advance(ms(60_000));
     rig.session.tick();
     assert_eq!(rig.indicator.states().len(), 1);
@@ -2848,4 +2859,230 @@ fn closing_while_a_reopen_is_pending_leaves_no_handle_open() {
     assert_eq!(rig.devices.alive(), 0, "the event stream is dropped");
     assert_eq!(rig.only_meta()["state"], json!("ready-to-transcribe"));
     assert_eq!(rig.lines_named("call_stopped").len(), 1);
+}
+
+// ---- T-144: storage failure, low disk, the 4 h limit ------------------------------------
+
+fn track_scan(rig: &CallRig, file: &str) -> voicen_core::call::codec::TrackScan {
+    scan(File::open(rig.folders()[0].join(file)).expect(file)).expect("a readable track")
+}
+
+fn track_sizes(rig: &CallRig) -> [u64; 2] {
+    ["mic.opus", "system.opus"].map(|f| std::fs::metadata(rig.folders()[0].join(f)).expect(f).len())
+}
+
+fn call_meta_bytes(rig: &CallRig) -> Vec<u8> {
+    std::fs::read(rig.folders()[0].join("meta.json")).expect("meta.json")
+}
+
+/// Ticks once per mono second for `secs` seconds.
+fn tick_secs(rig: &CallRig, secs: u64) {
+    for _ in 0..secs {
+        rig.mono.advance(ms(1_000));
+        rig.session.tick();
+    }
+}
+
+#[test]
+fn a_write_failure_stops_the_call_keeps_flushed_audio_and_leaves_meta_recording() {
+    // Acceptance 4 (failure branch): the mic file's write fails once (F-024: one call).
+    // The writer stops writing BOTH tracks (the sizes stay), no mid-call meta write
+    // follows (a device change after the failure included), `tick` stops the call:
+    // `meta.json` stays `recording` byte for byte, `call_storage_failed kind=write` and
+    // `call_stopped reason=storage_error` are logged, the only notice is
+    // `Stopped{StorageError}` (never `CallSavedTranscribing`), the indicator is off and the
+    // flushed audio reads back. Bite: the stop swallowed (still recording after tick), the
+    // other track still written, `finish` writing ready-to-transcribe, a mid-call
+    // write_meta after the failure, the saved notice, the failure not logged.
+    let rig = CallRig::with_capacity(8_192, quiet);
+    rig.session.toggle_subtitles(true, CallSource::Switch);
+    started(&rig, CallSource::Tray);
+    let both = [Track::Mic, Track::System];
+    rig.source.feed_both(0, 2_000, 0.3, 0.2);
+    rig.source.set_stamp_ms(2_000);
+    rig.mono.advance(ms(2_000));
+    drained(&rig, &both, 2_000);
+    let meta_before = call_meta_bytes(&rig);
+
+    rig.opener.fail_next_write("mic.opus");
+    rig.source.feed_both(2_000, 6_000, 0.3, 0.2);
+    rig.source.set_stamp_ms(6_000);
+    rig.mono.advance(ms(4_000));
+    drained(&rig, &both, 6_000);
+    assert!(
+        wait(|| !rig.lines_named("call_storage_failed").is_empty()),
+        "the write failure is logged"
+    );
+    let failed = rig.lines_named("call_storage_failed");
+    assert_eq!(failed.len(), 1, "{failed:?}");
+    assert_eq!(failed[0].get("kind"), Some("write"));
+
+    rig.source.feed_both(6_000, 7_000, 0.3, 0.2);
+    rig.source.set_stamp_ms(7_000);
+    drained(&rig, &both, 7_000);
+    let baseline = track_sizes(&rig);
+    // A device change after the failure: the mic reopens and `call_device` is logged, which
+    // is where the session would write `device_changes` into meta.json mid-call.
+    rig.devices.push(DeviceEvent::DefaultInputChanged);
+    assert!(wait(|| rig.source.ok_opens(Track::Mic) == 2));
+    rig.source.feed(Track::Mic, 7_400, 7_800, 0.3);
+    rig.source.feed(Track::System, 7_000, 9_000, 0.2);
+    rig.source.set_stamp_ms(9_000);
+    rig.mono.advance(ms(2_000));
+    drained(&rig, &[Track::System], 9_000);
+    assert!(
+        wait(|| device_lines(&rig).len() == 1),
+        "the change was handled"
+    );
+    assert_eq!(call_meta_bytes(&rig), meta_before, "no mid-call meta write");
+
+    rig.session.tick();
+    assert!(!rig.session.is_recording(), "the tick stopped the call");
+    assert_eq!(track_sizes(&rig), baseline, "no byte after the failure");
+    for file in ["mic.opus", "system.opus"] {
+        let scanned = track_scan(&rig, file);
+        assert_eq!(scanned.end, ReadEnd::Truncated, "{file}");
+        assert!(scanned.duration_48k >= 48_000, "{file}: flushed audio kept");
+    }
+    assert_eq!(call_meta_bytes(&rig), meta_before, "meta.json untouched");
+    let meta = rig.only_meta();
+    assert_eq!(meta["state"], json!("recording"));
+    assert!(rig
+        .root_files()
+        .iter()
+        .all(|p| !p.to_string_lossy().ends_with(".tmp")));
+    let stopped = rig.lines_named("call_stopped");
+    assert_eq!(stopped.len(), 1);
+    assert_eq!(stopped[0].get("reason"), Some("storage_error"));
+    assert_eq!(
+        rig.shell.calls(),
+        vec![ShellCall::Notice(CallNotice::Stopped {
+            reason: StopReason::StorageError
+        })]
+    );
+    assert_eq!(rig.indicator.recording_flags().last(), Some(&false));
+}
+
+#[test]
+fn free_space_is_polled_every_10_s_warns_once_below_1_gb_and_stops_below_200_mb() {
+    // Acceptance 5: the call folder's free space is polled every 10 s of mono time (the
+    // first poll within 10 s of the start); below 1 GB exactly one `low_disk` warning
+    // (not repeated at later polls, not back after a dismissal); below 200 MB the call
+    // stops with saving (`call_storage_failed kind=low_disk`, `call_stopped
+    // reason=low_disk`, ready-to-transcribe, readable tracks, notice Stopped{LowDisk}).
+    // A failing poll is skipped silently. Bite: a poll every 5 s or 20 s, the wrong
+    // threshold, the warning repeated, the stop without a log line, the meta left
+    // `recording`, the poll error stopping the call.
+    let rig = CallRig::with(quiet);
+    started(&rig, CallSource::Tray);
+    let start = rig.mono.read();
+    feed(&rig, 0, 2_000);
+    tick_secs(&rig, 35);
+    let polls = rig.disk.poll_times();
+    assert!(polls.len() >= 3, "{polls:?}");
+    assert!(
+        polls[0] <= start + ms(10_000),
+        "the first poll is due by 10 s"
+    );
+    for pair in polls.windows(2) {
+        assert_eq!(pair[1] - pair[0], ms(10_000), "one poll every 10 s");
+    }
+    for dir in rig.disk.polled_dirs() {
+        assert_eq!(dir, rig.folders()[0], "the call folder is asked");
+    }
+    assert!(warnings_but_provider(&rig).is_empty());
+
+    rig.disk.set_error(io::ErrorKind::PermissionDenied);
+    tick_secs(&rig, 25);
+    assert!(rig.session.is_recording(), "a failed poll is skipped");
+    assert!(rig.lines_named("call_storage_failed").is_empty());
+    assert!(warnings_but_provider(&rig).is_empty());
+
+    rig.disk.set_free(900 * call_support::MB);
+    tick_secs(&rig, 25);
+    assert!(rig.session.is_recording());
+    assert_eq!(warnings_but_provider(&rig), vec![WarningKind::LowDisk]);
+    let id = rig.indicator.states().last().expect("state").warnings[0].id;
+    tick_secs(&rig, 30);
+    let low = rig
+        .indicator
+        .states()
+        .iter()
+        .flat_map(|s| s.warnings.iter())
+        .filter(|w| w.kind == WarningKind::LowDisk)
+        .map(|w| w.id)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(low.len(), 1, "one warning id over the whole call: {low:?}");
+    assert!(rig.session.dismiss_warning(id));
+    tick_secs(&rig, 30);
+    assert!(
+        warnings_but_provider(&rig).is_empty(),
+        "not listed again after a dismissal"
+    );
+    assert!(rig.session.is_recording());
+
+    rig.disk.set_free(100 * call_support::MB);
+    tick_secs(&rig, 10);
+    assert!(!rig.session.is_recording(), "below 200 MB the call stops");
+    let failed = rig.lines_named("call_storage_failed");
+    assert_eq!(failed.len(), 1, "{failed:?}");
+    assert_eq!(failed[0].get("kind"), Some("low_disk"));
+    let stopped = rig.lines_named("call_stopped");
+    assert_eq!(stopped.len(), 1);
+    assert_eq!(stopped[0].get("reason"), Some("low_disk"));
+    let meta = rig.only_meta();
+    assert_eq!(meta["state"], json!("ready-to-transcribe"));
+    assert_eq!(meta["stop_reason"], json!("low_disk"));
+    for file in ["mic.opus", "system.opus"] {
+        let scanned = track_scan(&rig, file);
+        assert_eq!(scanned.end, ReadEnd::Complete, "{file}");
+    }
+    assert!(rig
+        .shell
+        .calls()
+        .contains(&ShellCall::Notice(CallNotice::Stopped {
+            reason: StopReason::LowDisk
+        })));
+    assert_eq!(rig.session.next_deadline(), None, "off: no deadline");
+}
+
+#[test]
+fn between_200_mb_and_1_gb_the_call_keeps_recording() {
+    // Acceptance 5 boundary: 200 MB exactly is not "below 200 MB". Bite: `<=`.
+    let rig = CallRig::with(quiet);
+    started(&rig, CallSource::Tray);
+    rig.disk.set_free(200 * call_support::MB);
+    tick_secs(&rig, 40);
+    assert!(rig.session.is_recording());
+    assert_eq!(warnings_but_provider(&rig), vec![WarningKind::LowDisk]);
+    rig.session.stop(StopReason::User);
+}
+
+#[test]
+fn four_hours_stop_with_max_length() {
+    // Acceptance 6: at 4 h of mono time since the start the call stops with
+    // `max_length`, saved as ready-to-transcribe, notice Stopped{MaxLength}; one second
+    // before it still records. Bite: 3 h or 5 h, no stop, the reason `user`.
+    let rig = CallRig::new();
+    started(&rig, CallSource::Tray);
+    feed(&rig, 0, 2_000);
+    rig.mono.advance(Duration::from_secs(4 * 3_600 - 1));
+    rig.session.tick();
+    assert!(rig.session.is_recording(), "4 h minus 1 s: still recording");
+    rig.mono.advance(ms(1_000));
+    rig.session.tick();
+    assert!(!rig.session.is_recording(), "4 h: stopped");
+    let meta = rig.only_meta();
+    assert_eq!(meta["state"], json!("ready-to-transcribe"));
+    assert_eq!(meta["stop_reason"], json!("max_length"));
+    assert_eq!(
+        rig.lines_named("call_stopped")[0].get("reason"),
+        Some("max_length")
+    );
+    assert!(rig
+        .shell
+        .calls()
+        .contains(&ShellCall::Notice(CallNotice::Stopped {
+            reason: StopReason::MaxLength
+        })));
 }

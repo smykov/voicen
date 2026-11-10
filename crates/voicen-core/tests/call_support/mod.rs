@@ -77,7 +77,10 @@
 //!     settings: Arc<dyn CallSettingsPort>, indicator: Arc<dyn CallIndicator>,
 //!     shell: Arc<dyn CallShell>, log: Arc<Log>, clock: Arc<dyn Clock>,
 //!     offset: Arc<dyn LocalOffset>, mono: Arc<dyn MonotonicClock>, app_version: String,
-//!     open_track: Arc<dyn Fn(&Path) -> io::Result<File> + Send + Sync>,   // the CallStore::create_with opener
+//!     open_track: Arc<dyn Fn(&Path) -> io::Result<Box<dyn SyncWrite + Send>> + Send + Sync>,   // T-144: boxed
+//!     disk: Arc<dyn DiskSpace>,   // T-144: polled every 10 s while recording; < 1 GB warns once, < 200 MB stops
+//!     // T-144: tick() also polls the disk and stops on storage error / low disk / 4 h; next_deadline() is
+//!     // Some(<= now + 10 s) while a call records, None otherwise   // the CallStore::create_with opener
 //!     channel_capacity: usize }                                             // events per track channel
 //! voicen_core::settings::service::WarnedHostFailed        // unit struct, like ForgetFailed (Debug, Clone, Copy, PartialEq, Eq)
 //! SettingsService::remember_warned_host(&self, &ProviderHost) -> Result<(), WarnedHostFailed>
@@ -92,6 +95,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
+use voicen_core::call::codec::SyncWrite;
 use voicen_core::call::indicator::{IndicatorState, IndicatorTick};
 use voicen_core::call::session::{
     CallDeps, CallIndicator, CallSession, CallSettingsPort, CallShell, SubtitleConsumer,
@@ -103,6 +107,7 @@ use voicen_core::call::{
 };
 use voicen_core::clock::{FakeClock, MonotonicClock};
 use voicen_core::diag::{Log, LogConfig};
+use voicen_core::local_models::download::DiskSpace;
 use voicen_core::platform::CaptureHandle;
 use voicen_core::recording::CaptureError;
 use voicen_core::settings::roots::{CallRoots, UnwritableReason};
@@ -830,6 +835,8 @@ impl SubtitleConsumer for FakeSubtitles {
 pub struct FlakyOpener {
     calls: AtomicUsize,
     fail_on: Mutex<Option<(usize, io::ErrorKind)>>,
+    /// The file name whose next write fails, once (T-144, F-024).
+    write_fail: Arc<Mutex<Option<String>>>,
 }
 
 impl FlakyOpener {
@@ -837,6 +844,7 @@ impl FlakyOpener {
         Arc::new(FlakyOpener {
             calls: AtomicUsize::new(0),
             fail_on: Mutex::new(None),
+            write_fail: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -846,14 +854,103 @@ impl FlakyOpener {
         *lock(&self.fail_on) = Some((n, kind));
     }
 
-    pub fn open(&self, path: &Path) -> io::Result<File> {
+    /// The next write to the track file named `file_name` (e.g. `mic.opus`) fails with
+    /// an I/O error, exactly once; every later write succeeds (F-024).
+    pub fn fail_next_write(&self, file_name: &str) {
+        *lock(&self.write_fail) = Some(file_name.to_string());
+    }
+
+    pub fn open(&self, path: &Path) -> io::Result<Box<dyn SyncWrite + Send>> {
         let n = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
         if let Some((target, kind)) = *lock(&self.fail_on) {
             if n == target {
                 return Err(io::Error::from(kind));
             }
         }
-        File::create(path)
+        Ok(Box::new(FlakySink {
+            file: File::create(path)?,
+            name: path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            armed: self.write_fail.clone(),
+        }))
+    }
+}
+
+/// A track file that can fail one write.
+struct FlakySink {
+    file: File,
+    name: String,
+    armed: Arc<Mutex<Option<String>>>,
+}
+
+impl io::Write for FlakySink {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let mut armed = lock(&self.armed);
+        if armed.as_deref() == Some(self.name.as_str()) {
+            *armed = None;
+            return Err(io::Error::other("injected write failure"));
+        }
+        drop(armed);
+        io::Write::write(&mut self.file, buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        io::Write::flush(&mut self.file)
+    }
+}
+
+impl SyncWrite for FlakySink {
+    fn sync_data(&mut self) -> io::Result<()> {
+        File::sync_data(&self.file)
+    }
+}
+
+// ---- the disk -------------------------------------------------------------------------
+
+/// A scriptable `DiskSpace`: answers a settable number of bytes (or an error) and
+/// records, for each poll, the session's mono time and the directory asked.
+pub struct ScriptedDisk {
+    mono: Arc<FakeMono>,
+    answer: Mutex<Result<u64, io::ErrorKind>>,
+    polls: Mutex<Vec<(Instant, PathBuf)>>,
+}
+
+impl ScriptedDisk {
+    pub fn new(mono: Arc<FakeMono>) -> Arc<ScriptedDisk> {
+        Arc::new(ScriptedDisk {
+            mono,
+            answer: Mutex::new(Ok(100 * GB)),
+            polls: Mutex::new(Vec::new()),
+        })
+    }
+
+    pub fn set_free(&self, bytes: u64) {
+        *lock(&self.answer) = Ok(bytes);
+    }
+
+    pub fn set_error(&self, kind: io::ErrorKind) {
+        *lock(&self.answer) = Err(kind);
+    }
+
+    /// The mono time of every poll so far.
+    pub fn poll_times(&self) -> Vec<Instant> {
+        lock(&self.polls).iter().map(|(t, _)| *t).collect()
+    }
+
+    pub fn polled_dirs(&self) -> Vec<PathBuf> {
+        lock(&self.polls).iter().map(|(_, d)| d.clone()).collect()
+    }
+}
+
+pub const GB: u64 = 1_000_000_000;
+pub const MB: u64 = 1_000_000;
+
+impl DiskSpace for ScriptedDisk {
+    fn available_bytes(&self, dir: &Path) -> io::Result<u64> {
+        lock(&self.polls).push((self.mono.read(), dir.to_path_buf()));
+        (*lock(&self.answer)).map_err(io::Error::from)
     }
 }
 
@@ -867,6 +964,7 @@ pub struct CallRig {
     pub shell: Arc<FakeShell>,
     pub port: Arc<FakePort>,
     pub opener: Arc<FlakyOpener>,
+    pub disk: Arc<ScriptedDisk>,
     pub subtitles: Arc<FakeSubtitles>,
     pub devices: Arc<FakeDevices>,
     pub comms: Arc<FakeComms>,
@@ -919,6 +1017,7 @@ impl CallRig {
         let shell = FakeShell::new();
         let port = FakePort::new(s);
         let opener = FlakyOpener::new();
+        let disk = ScriptedDisk::new(mono.clone());
         let subtitles = FakeSubtitles::new();
         let devices = FakeDevices::new();
         let comms = FakeComms::new();
@@ -947,6 +1046,7 @@ impl CallRig {
             subtitles: subtitles.clone(),
             devices: devices.clone(),
             comms: comms.clone(),
+            disk: disk.clone(),
         }));
         indicator.bind(session.clone());
         shell.bind(session.clone());
@@ -958,6 +1058,7 @@ impl CallRig {
             shell,
             port,
             opener,
+            disk,
             subtitles,
             devices,
             comms,

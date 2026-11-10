@@ -1698,9 +1698,11 @@ mod tests {
         fs::create_dir(&root).expect("root");
         let table = [
             (
+                // T-144: only the store's active call lists as Recording; a planted
+                // (unowned) `recording` folder is a crashed call and lists as Recovered.
                 "2026-10-30_000001",
                 CallState::Recording,
-                ListState::Recording,
+                ListState::Recovered,
             ),
             (
                 "2026-10-30_000002",
