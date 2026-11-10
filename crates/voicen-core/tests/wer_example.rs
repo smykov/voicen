@@ -26,6 +26,7 @@ use std::sync::OnceLock;
 
 use serde_json::json;
 use voicen_core::audio::{wav, AudioBuffer};
+use voicen_core::test_support::fixtures;
 use wiremock::matchers::any;
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -46,11 +47,43 @@ const SCORED_COUNTS: &str = "s=0 d=1 i=0 n=3 wer=33.33%";
 /// The words of the scored fixtures; none of them may reach the output.
 const SCORED_WORDS: [&str; 3] = ["hello", "world", "extra"];
 
-/// 200 ms of a 16 kHz sawtooth, as a PCM16 WAV.
+/// `seconds` of synthetic syllabic speech (the energy detector counts it as speech;
+/// the pass cuts and sends only speech), as 16 kHz samples. T-163: the final pass sends
+/// nothing for audio without speech, so a fixture item must hold some.
+fn speech_samples(seconds: u32) -> Vec<i16> {
+    let mut out = Vec::new();
+    for seed in 0..seconds.div_ceil(20) {
+        let piece = fixtures::speech(
+            u64::from(seed) + 1,
+            f64::from((seconds - seed * 20).min(20)),
+            0.0,
+            -12.0,
+        );
+        out.extend_from_slice(piece.samples());
+    }
+    out
+}
+
+/// 3 s of speech as a PCM16 WAV: one chunk, so one request.
 fn fake_wav() -> Vec<u8> {
-    wav::encode(&AudioBuffer::from_16k_mono(
-        (0..3200).map(|i| ((i % 64) as i16 - 32) * 512).collect(),
-    ))
+    wav::encode(&AudioBuffer::from_16k_mono(speech_samples(3)))
+}
+
+/// `seconds` of speech as a PCM16 WAV; past 120 s the pass must cut it into several
+/// requests (`TIMED_MAX_MS`).
+fn long_wav(seconds: u32) -> Vec<u8> {
+    wav::encode(&AudioBuffer::from_16k_mono(speech_samples(seconds)))
+}
+
+/// A timed (`verbose_json`) answer: one segment with `text`.
+fn timed_body(text: &str) -> serde_json::Value {
+    json!({
+        "task": "transcribe",
+        "language": "english",
+        "duration": 1.0,
+        "text": text,
+        "segments": [{"id": 0, "start": 0.0, "end": 1.0, "text": text}]
+    })
 }
 
 /// A temp directory removed on drop.
@@ -168,7 +201,7 @@ async fn server_with(response: ResponseTemplate) -> MockServer {
 #[tokio::test]
 async fn wer_example_output_has_no_transcript_reference_or_key_on_success() {
     let server =
-        server_with(ResponseTemplate::new(200).set_body_json(json!({ "text": TRANSCRIPT }))).await;
+        server_with(ResponseTemplate::new(200).set_body_json(timed_body(TRANSCRIPT))).await;
     let dir = Dir::new("ok");
     let (out, all) = run_pairs(&dir, &server.uri(), true);
     // The run really scored the fake answer (else the checks below prove nothing).
@@ -199,7 +232,7 @@ async fn wer_example_output_has_no_server_text_reference_or_key_when_the_server_
 #[tokio::test]
 async fn wer_example_output_has_no_transcript_or_key_when_the_reference_is_missing() {
     let server =
-        server_with(ResponseTemplate::new(200).set_body_json(json!({ "text": TRANSCRIPT }))).await;
+        server_with(ResponseTemplate::new(200).set_body_json(timed_body(TRANSCRIPT))).await;
     let dir = Dir::new("noref");
     let (out, all) = run_pairs(&dir, &server.uri(), false);
     assert!(
@@ -215,7 +248,7 @@ async fn wer_example_output_has_no_transcript_or_key_when_the_reference_is_missi
 #[tokio::test]
 async fn wer_example_librispeech_refusal_has_no_reference_or_key() {
     let server =
-        server_with(ResponseTemplate::new(200).set_body_json(json!({ "text": TRANSCRIPT }))).await;
+        server_with(ResponseTemplate::new(200).set_body_json(timed_body(TRANSCRIPT))).await;
     let dir = Dir::new("librispeech");
     // One real manifest id: `read_transcripts` and the item loop run before the refusal.
     let chapter = dir.0.join("1089").join("134686");
@@ -245,7 +278,7 @@ async fn wer_example_librispeech_refusal_has_no_reference_or_key() {
 #[tokio::test]
 async fn wer_example_pairs_output_has_no_reference_when_the_wav_is_unreadable() {
     let server =
-        server_with(ResponseTemplate::new(200).set_body_json(json!({ "text": TRANSCRIPT }))).await;
+        server_with(ResponseTemplate::new(200).set_body_json(timed_body(TRANSCRIPT))).await;
     let dir = Dir::new("pairs-bad-wav");
     std::fs::write(dir.0.join("item1.wav"), b"not a wav").expect("write wav");
     std::fs::write(dir.0.join("item1.txt"), REFERENCE).expect("write reference");
@@ -268,7 +301,7 @@ async fn wer_example_pairs_output_has_no_reference_when_the_wav_is_unreadable() 
 #[tokio::test]
 async fn wer_example_librispeech_output_has_no_reference_when_the_wav_is_unreadable() {
     let server =
-        server_with(ResponseTemplate::new(200).set_body_json(json!({ "text": TRANSCRIPT }))).await;
+        server_with(ResponseTemplate::new(200).set_body_json(timed_body(TRANSCRIPT))).await;
     let dir = Dir::new("librispeech-bad-wav");
     let chapter = dir.0.join("1089").join("134686");
     std::fs::create_dir_all(&chapter).expect("chapter dir");
@@ -307,8 +340,7 @@ fn assert_has_line(all: &str, line: &str) {
 #[tokio::test]
 async fn wer_example_pairs_scores_normalized_reference_against_answer_and_sends_the_key() {
     let server =
-        server_with(ResponseTemplate::new(200).set_body_json(json!({ "text": SCORED_ANSWER })))
-            .await;
+        server_with(ResponseTemplate::new(200).set_body_json(timed_body(SCORED_ANSWER))).await;
     let dir = Dir::new("scored");
     std::fs::write(dir.0.join("item1.wav"), fake_wav()).expect("write wav");
     std::fs::write(dir.0.join("item1.txt"), SCORED_REFERENCE).expect("write reference");
@@ -335,8 +367,7 @@ async fn wer_example_pairs_scores_normalized_reference_against_answer_and_sends_
 #[tokio::test]
 async fn wer_example_pairs_total_is_sum_of_edits_over_sum_of_reference_words() {
     let server =
-        server_with(ResponseTemplate::new(200).set_body_json(json!({ "text": SCORED_ANSWER })))
-            .await;
+        server_with(ResponseTemplate::new(200).set_body_json(timed_body(SCORED_ANSWER))).await;
     let dir = Dir::new("scored-set");
     for (name, reference) in [
         ("item1", SCORED_REFERENCE),
@@ -364,8 +395,7 @@ async fn wer_example_pairs_total_is_sum_of_edits_over_sum_of_reference_words() {
 async fn wer_example_librispeech_past_the_refusal_scores_the_normalized_reference() {
     const THIRTY_MINUTES_BYTES: u32 = 30 * 60 * 16_000 * 2;
     let server =
-        server_with(ResponseTemplate::new(200).set_body_json(json!({ "text": SCORED_ANSWER })))
-            .await;
+        server_with(ResponseTemplate::new(200).set_body_json(timed_body(SCORED_ANSWER))).await;
     let dir = Dir::new("librispeech-30-min");
     let chapter = dir.0.join("1089").join("134686");
     std::fs::create_dir_all(&chapter).expect("chapter dir");
@@ -379,6 +409,13 @@ async fn wer_example_librispeech_past_the_refusal_scores_the_normalized_referenc
     header.splice(4..8, (THIRTY_MINUTES_BYTES + 36).to_le_bytes());
     header.splice(40..44, THIRTY_MINUTES_BYTES.to_le_bytes());
     let path = chapter.join("1089-134686-0000.wav");
+    // 3 s of speech at the start, silence (a hole) after it: the pass has one chunk to
+    // send, and the example reads the 30 minutes.
+    let burst: Vec<u8> = speech_samples(3)
+        .iter()
+        .flat_map(|sample| sample.to_le_bytes())
+        .collect();
+    header.extend_from_slice(&burst);
     std::fs::write(&path, &header).expect("write wav header");
     std::fs::OpenOptions::new()
         .write(true)
@@ -389,7 +426,7 @@ async fn wer_example_librispeech_past_the_refusal_scores_the_normalized_referenc
     assert!(out.status.success(), "example failed:\n{all}");
     assert!(all.contains("wer: 1 of "), "no found count of 1:\n{all}");
     assert!(!all.contains("wer: refused:"), "refused:\n{all}");
-    assert_has_line(&all, &format!("1089-134686-0000 {SCORED_COUNTS}"));
+    assert_has_line(&all, &format!("1089-134686 {SCORED_COUNTS}"));
     assert_has_line(
         &all,
         &format!("wer: total over 1 scored items (0 failed): {SCORED_COUNTS}"),
@@ -404,8 +441,7 @@ async fn wer_example_librispeech_past_the_refusal_scores_the_normalized_referenc
 #[tokio::test]
 async fn wer_example_pairs_empty_reference_counts_insertions_without_a_rate() {
     let server =
-        server_with(ResponseTemplate::new(200).set_body_json(json!({ "text": SCORED_ANSWER })))
-            .await;
+        server_with(ResponseTemplate::new(200).set_body_json(timed_body(SCORED_ANSWER))).await;
     let dir = Dir::new("empty-reference");
     std::fs::write(dir.0.join("item1.wav"), fake_wav()).expect("write wav");
     std::fs::write(dir.0.join("item1.txt"), " ,. ").expect("write reference");
@@ -462,4 +498,259 @@ async fn wer_example_output_has_no_key_when_the_base_url_is_refused() {
         "no refusal line:\n{all}"
     );
     assert_no_secrets(&all, &[]);
+}
+
+// ---- T-163: the example measures the final pass ------------------------------------------
+//
+// Every item goes through `call::final_pass::run_pass` over a temp call folder. Observable
+// from outside: the requests the mock sees (chunks, not one per file), the line of the
+// group id, the pass mode and chunk counts on a line of their own (`mode=<timed|timeless>`,
+// `chunks=<n>`), the key refusal and the temp folder removed.
+
+/// Runs the example like `run_example`, with the key and the child's temp directory chosen.
+fn run_custom(
+    args: &[&str],
+    base_url: &str,
+    key: Option<&str>,
+    tmpdir: Option<&Path>,
+) -> (Output, String) {
+    let mut command = Command::new(example());
+    command
+        .args(args)
+        .env_remove("VOICEN_WER_KEY")
+        .env("VOICEN_WER_BASE_URL", base_url)
+        .env("VOICEN_WER_MODEL", "fake-model");
+    if let Some(key) = key {
+        command.env("VOICEN_WER_KEY", key);
+    }
+    if let Some(tmpdir) = tmpdir {
+        command
+            .env("TMPDIR", tmpdir)
+            .env("TEMP", tmpdir)
+            .env("TMP", tmpdir);
+    }
+    let out = command.output().expect("example starts");
+    let all = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    )
+    .to_lowercase();
+    (out, all)
+}
+
+/// The number after `field` (for example `i=`) on the line of `all` that starts with `prefix`.
+fn field_of(all: &str, prefix: &str, field: &str) -> Option<u64> {
+    let line = all.lines().find(|l| l.starts_with(prefix))?;
+    let rest = line.split(field).nth(1)?;
+    rest.split(|c: char| !c.is_ascii_digit())
+        .next()?
+        .parse()
+        .ok()
+}
+
+/// Acceptance 1 (pairs): a pair of 150 s of speech is cut by the chunker, so the mock sees
+/// several requests, and the hypothesis is the joined answers: the reference is one word,
+/// every answer one word, so the extra words are insertions. Bites: a per-file
+/// `Engine::transcribe` (one request), a hypothesis of the first chunk only.
+#[tokio::test]
+async fn wer_example_pairs_long_item_goes_out_as_several_chunk_requests() {
+    let server = server_with(ResponseTemplate::new(200).set_body_json(timed_body("hello"))).await;
+    let dir = Dir::new("long-pair");
+    std::fs::write(dir.0.join("item1.wav"), long_wav(150)).expect("write wav");
+    std::fs::write(dir.0.join("item1.txt"), "hello").expect("write reference");
+    let (out, all) = run_example(&["pairs", path_arg(&dir), "ru"], &server.uri());
+    assert!(out.status.success(), "example failed:\n{all}");
+    let seen = server.received_requests().await.expect("recording is on");
+    assert!(
+        seen.len() >= 2,
+        "150 s of speech is more than one chunk, got {} requests:\n{all}",
+        seen.len()
+    );
+    assert_eq!(field_of(&all, "item1 s=", " n="), Some(1), "{all}");
+    let inserted = field_of(&all, "item1 s=", " i=").expect("score line");
+    assert!(
+        (1..seen.len() as u64).contains(&inserted),
+        "the joined answers of every chunk are the hypothesis ({} requests):\n{all}",
+        seen.len()
+    );
+    assert!(all.contains("mode=timed"), "no pass mode:\n{all}");
+    assert!(all.contains("chunks="), "no chunk count:\n{all}");
+    assert_no_secrets(&all, &["hello"]);
+}
+
+/// Acceptance 1 (librispeech): the utterances of a `<spk>-<ch>` group are concatenated in
+/// manifest order and scored as one item named by the group; the reference is the
+/// utterances' references joined (4 words); the group is cut into several requests. A
+/// 30-minute file of another group lifts the set over the floor. Bites: per-utterance
+/// items (lines `1089-134686-0000`), references of the first utterance only.
+#[tokio::test]
+async fn wer_example_librispeech_scores_a_speaker_group_as_one_item() {
+    const THIRTY_MINUTES_BYTES: u32 = 30 * 60 * 16_000 * 2;
+    let server = server_with(ResponseTemplate::new(200).set_body_json(timed_body("hello"))).await;
+    let dir = Dir::new("librispeech-group");
+    let chapter = dir.0.join("1089").join("134686");
+    std::fs::create_dir_all(&chapter).expect("chapter dir");
+    let ids = [
+        "1089-134686-0000",
+        "1089-134686-0001",
+        "1089-134686-0002",
+        "1089-134686-0003",
+    ];
+    let trans: String = ids.iter().map(|id| format!("{id} hello\n")).collect();
+    std::fs::write(chapter.join("1089-134686.trans.txt"), trans).expect("write trans.txt");
+    for id in ids {
+        std::fs::write(chapter.join(format!("{id}.wav")), long_wav(40)).expect("write wav");
+    }
+    // The other group: 3 s of speech, then silence up to 30 min (a hole).
+    let other = dir.0.join("1188").join("133604");
+    std::fs::create_dir_all(&other).expect("chapter dir");
+    std::fs::write(
+        other.join("1188-133604.trans.txt"),
+        "1188-133604-0000 hello\n",
+    )
+    .expect("write trans.txt");
+    let mut header = wav::encode(&AudioBuffer::from_16k_mono(Vec::new()));
+    header.splice(4..8, (THIRTY_MINUTES_BYTES + 36).to_le_bytes());
+    header.splice(40..44, THIRTY_MINUTES_BYTES.to_le_bytes());
+    header.extend(speech_samples(3).iter().flat_map(|s| s.to_le_bytes()));
+    let path = other.join("1188-133604-0000.wav");
+    std::fs::write(&path, &header).expect("write wav");
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .and_then(|file| file.set_len(44 + u64::from(THIRTY_MINUTES_BYTES)))
+        .expect("extend wav");
+    let (out, all) = run_example(&["librispeech", path_arg(&dir)], &server.uri());
+    assert!(out.status.success(), "example failed:\n{all}");
+    assert_eq!(field_of(&all, "1089-134686 s=", " n="), Some(4), "{all}");
+    assert!(
+        !all.lines().any(|l| l.starts_with("1089-134686-0000")),
+        "no per-utterance line:\n{all}"
+    );
+    assert!(
+        all.lines().any(|l| l.starts_with("1188-133604 s=")),
+        "{all}"
+    );
+    let seen = server.received_requests().await.expect("recording is on");
+    assert!(
+        seen.len() >= 3,
+        "160 s of speech is at least two chunks, plus the other group's one: {} requests",
+        seen.len()
+    );
+    assert!(
+        all.contains("wer: total over 2 scored items (0 failed)"),
+        "{all}"
+    );
+    assert_no_secrets(&all, &["hello"]);
+}
+
+/// Acceptance 1: a provider without times (400 on `verbose_json`) still scores: the pass
+/// re-sends time-less, prints no server text and says `mode=timeless`. The first request
+/// must be the timed one (the example asks the final pass's way, not the plain way).
+#[tokio::test]
+async fn wer_example_scores_through_the_timeless_resend_and_prints_no_server_text() {
+    struct NoTimes;
+    impl wiremock::Respond for NoTimes {
+        fn respond(&self, request: &wiremock::Request) -> ResponseTemplate {
+            if request.body.windows(12).any(|w| w == b"verbose_json") {
+                ResponseTemplate::new(400).set_body_string(ERROR_BODY)
+            } else {
+                ResponseTemplate::new(200).set_body_json(json!({ "text": SCORED_ANSWER }))
+            }
+        }
+    }
+    let server = server_with_responder(NoTimes).await;
+    let dir = Dir::new("timeless");
+    std::fs::write(dir.0.join("item1.wav"), fake_wav()).expect("write wav");
+    std::fs::write(dir.0.join("item1.txt"), SCORED_REFERENCE).expect("write reference");
+    let (out, all) = run_example(&["pairs", path_arg(&dir), "ru"], &server.uri());
+    assert!(out.status.success(), "example failed:\n{all}");
+    assert_has_line(&all, &format!("item1 {SCORED_COUNTS}"));
+    assert!(all.contains("mode=timeless"), "no pass mode:\n{all}");
+    let seen = server.received_requests().await.expect("recording is on");
+    assert!(
+        seen.iter()
+            .any(|r| r.body.windows(12).any(|w| w == b"verbose_json")),
+        "no timed request: the example did not go through the final pass"
+    );
+    assert_no_secrets(&all, &[ERROR_BODY, "hello", "world", "extra"]);
+}
+
+async fn server_with_responder(responder: impl wiremock::Respond + 'static) -> MockServer {
+    let server = mock_http::start().await;
+    Mock::given(any())
+        .respond_with(responder)
+        .mount(&server)
+        .await;
+    server
+}
+
+/// Failure branch (T-163 invariant; FR-022): the final pass needs the key, so a missing or
+/// blank `VOICEN_WER_KEY` is a configuration error (exit 2) before any request, in both
+/// modes, and nothing secret is printed. Bites: a keyless run that sends requests.
+#[tokio::test]
+async fn wer_example_refuses_a_missing_or_blank_key_before_any_request() {
+    let server =
+        server_with(ResponseTemplate::new(200).set_body_json(timed_body(TRANSCRIPT))).await;
+    let dir = Dir::new("no-key");
+    std::fs::write(dir.0.join("item1.wav"), fake_wav()).expect("write wav");
+    std::fs::write(dir.0.join("item1.txt"), REFERENCE).expect("write reference");
+    for key in [None, Some(""), Some("   ")] {
+        let (out, all) = run_custom(&["pairs", path_arg(&dir), "ru"], &server.uri(), key, None);
+        assert_eq!(out.status.code(), Some(2), "key {key:?}:\n{all}");
+        assert!(all.contains("voicen_wer_key"), "no refusal line:\n{all}");
+        assert_no_secrets(&all, &[]);
+    }
+    let seen = server.received_requests().await.expect("recording is on");
+    assert!(seen.is_empty(), "a refused run sends no request");
+}
+
+/// Failure branch: an item whose pass does not end `Ready` is a failed item with a code,
+/// never an empty hypothesis (no score line, not in the total).
+#[tokio::test]
+async fn wer_example_a_pass_that_fails_is_a_failed_item_not_an_empty_hypothesis() {
+    let server = server_with(ResponseTemplate::new(401).set_body_string(ERROR_BODY)).await;
+    let dir = Dir::new("failed-pass");
+    std::fs::write(dir.0.join("item1.wav"), fake_wav()).expect("write wav");
+    std::fs::write(dir.0.join("item1.txt"), REFERENCE).expect("write reference");
+    let (out, all) = run_example(&["pairs", path_arg(&dir), "ru"], &server.uri());
+    assert_eq!(out.status.code(), Some(1), "a failed item exits 1:\n{all}");
+    assert!(all.contains("item1 failed"), "no failure line:\n{all}");
+    assert!(
+        !all.lines().any(|l| l.starts_with("item1 s=")),
+        "a failed pass was scored:\n{all}"
+    );
+    assert!(
+        all.contains("wer: total over 0 scored items (1 failed)"),
+        "{all}"
+    );
+    assert_no_secrets(&all, &[ERROR_BODY]);
+}
+
+/// The temp call folder is removed when the item ends, on success and on failure: the
+/// child's temp directory is empty afterwards.
+#[tokio::test]
+async fn wer_example_leaves_no_call_folder_behind_on_success_or_failure() {
+    let ok = server_with(ResponseTemplate::new(200).set_body_json(timed_body("hello"))).await;
+    let bad = server_with(ResponseTemplate::new(500).set_body_string(ERROR_BODY)).await;
+    for (server, name, code) in [(ok, "tmp-ok", 0), (bad, "tmp-bad", 1)] {
+        let data = Dir::new(&format!("{name}-data"));
+        let tmp = Dir::new(&format!("{name}-tmp"));
+        std::fs::write(data.0.join("item1.wav"), fake_wav()).expect("write wav");
+        std::fs::write(data.0.join("item1.txt"), "hello").expect("write reference");
+        let (out, all) = run_custom(
+            &["pairs", path_arg(&data), "ru"],
+            &server.uri(),
+            Some(KEY),
+            Some(&tmp.0),
+        );
+        assert_eq!(out.status.code(), Some(code), "{name}:\n{all}");
+        // The item really went through the pass (else an empty folder proves nothing).
+        let seen = server.received_requests().await.expect("recording is on");
+        assert!(!seen.is_empty(), "{name}: no request");
+        assert!(all.contains("item1 "), "{name}: no item line:\n{all}");
+        let left: Vec<_> = std::fs::read_dir(&tmp.0).expect("tmp").collect();
+        assert!(left.is_empty(), "{name}: left in the temp dir: {left:?}");
+    }
 }
