@@ -1,0 +1,8 @@
+guarantee: AC-1: only a recording folder with no owning session becomes recovered
+file: crates/voicen-core/src/call/storage.rs
+added_by: test-writer
+--- old
+                CallState::Recording if !self.is_active(&dir) => {
+--- new
+                CallState::Recording => {
+--- end

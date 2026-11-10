@@ -965,6 +965,8 @@ pub struct CallRig {
     pub port: Arc<FakePort>,
     pub opener: Arc<FlakyOpener>,
     pub disk: Arc<ScriptedDisk>,
+    /// The session's own store (T-144: what a stopped call lists as).
+    pub store: Arc<CallStore>,
     pub subtitles: Arc<FakeSubtitles>,
     pub devices: Arc<FakeDevices>,
     pub comms: Arc<FakeComms>,
@@ -1032,7 +1034,7 @@ impl CallRig {
         let open_with = opener.clone();
         let session = Arc::new(CallSession::new(CallDeps {
             source: source.clone(),
-            store,
+            store: store.clone(),
             settings: port.clone(),
             indicator: indicator.clone(),
             shell: shell.clone(),
@@ -1059,6 +1061,7 @@ impl CallRig {
             port,
             opener,
             disk,
+            store,
             subtitles,
             devices,
             comms,

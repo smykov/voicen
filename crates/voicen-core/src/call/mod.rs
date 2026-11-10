@@ -25,7 +25,7 @@ pub use events::{
 
 pub use storage::{
     ActiveCallFiles, CallEntry, CallList, CallMeta, CallStore, CreateError, DeviceChange,
-    ListState, NewCall, TrackDrop, TrackMeta, TrackResult,
+    ListState, NewCall, Recovery, TrackDrop, TrackMeta, TrackResult,
 };
 
 pub use transcript::{

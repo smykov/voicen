@@ -1,0 +1,11 @@
+guarantee: AC-4: a write failure mid-recording stops it, logs call_storage_failed, notices stopped{storage}
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+            Some(enc) => enc.push(&step.pcm),
+--- new
+            Some(enc) => {
+                let _ = enc.push(&step.pcm);
+                Ok(())
+            }
+--- end

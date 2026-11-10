@@ -2,7 +2,7 @@
 
 **Code:** `crates/voicen-core/src/call/storage.rs` (`CallStore`, `write_meta`, `write_atomic`, `storage_kind`, `CallMeta`), `crates/voicen-core/src/settings/roots.rs` (`effective_root`, `CallRoots::probe`, `reason_of`) · **Tests that pin it:** `call::storage` unit tests (`create_*`, `a_failed_*`, `write_meta_*`, `list_*`, `damaged_*`, `missing_*`, `storage_kind_maps_every_op_encode_to_write`)
 
-Tasks: T-125, T-141 (wire, guard, export; `ipc.md` › Built T-141). Contract: `specs/007-call-mode-record/contracts/core-call.md` "Built (T-125)". Decisions: #195, #196, #242 (D1–D5). Class `call-storage` in `docs/failures.md` has no entry yet (first sighting).
+Tasks: T-125, T-141, T-144 (recovery, ownership) (wire, guard, export; `ipc.md` › Built T-141). Contract: `specs/007-call-mode-record/contracts/core-call.md` "Built (T-125)". Decisions: #195, #196, #242 (D1–D5). Class `call-storage` in `docs/failures.md` has no entry yet (first sighting).
 
 ## Invariants
 
@@ -58,6 +58,17 @@ Tasks: T-125, T-141 (wire, guard, export; `ipc.md` › Built T-141). Contract: `
 - **Don't:** call `write_atomic` for a user-chosen folder, `canonicalize` or `starts_with` the wire root, or copy the tail.
 - **Developer deviation (T-141):** the tail syncs with `sync_data`, not `sync_all`, so `write_atomic` (meta.json) changed too. Contents and size are flushed, which is what a crash-safe rename needs; other metadata (timestamps) may lag. Not an owner decision.
 
+### Recovery rewrites only `meta.json`, and only for a call this process is not recording (T-144)
+
+- **Defect that produced it:** none yet (found in analysis, T-144).
+- **What breaks if you violate it:** a crashed call stays `recording` forever, or recovery rewrites the meta (or touches a track) of a call that is being recorded, or a half-rewritten meta loses the call.
+- **Where it is enforced:**
+  - Ownership: `CallStore` keeps a set of active folders. `create_with` adds the folder, `release(&Path)` removes it (the session calls it when a call ends, and on a start that fails after the create). It is a set, not one slot, because two calls can be active in one store. `list` and `open_call` map a `recording` meta to Recording only for an active folder; any other is `Recovered`.
+  - `CallStore::recover(&CallSettings, &Log) -> Recovery { recovered, queue }` runs at start-up over the roots `list` reads. It only reads tracks; the one write is `write_meta` (atomic, above). A `recording` call that is not active becomes `recovered` with `duration_ms` = the shorter track (start offset plus the scanned length; an unreadable track counts 0, offset included) and `ended_at` = `started_at` + that duration (a `started_at` that does not parse keeps the old `ended_at`). A `transcribing` call goes back to `ready-to-transcribe`. `queue` lists every `ready-to-transcribe` call, `recovered` the calls recovered now, both oldest first.
+  - A folder whose meta cannot be rewritten stays as found and is in neither list. An unreadable root or a damaged folder is skipped.
+  - `call_recovered calls=<n>` is logged always, `0` included.
+- **Don't:** recover an active folder, open a track for writing, rewrite anything but `meta.json`, or count a folder whose rewrite failed.
+
 ## Reused, not copied
 
 | Concern | The one place |
@@ -66,7 +77,7 @@ Tasks: T-125, T-141 (wire, guard, export; `ipc.md` › Built T-141). Contract: `
 | Current root | `settings::roots::effective_root` (moved here from `settings/service.rs`, T-125) |
 | Local time for the folder stamp, `started_at` and the default title | `diag::format::LocalTime::of` |
 | `.opus` writing | `OpusOgg::create` only (T-116) |
-| Disk space (polling is a later task) | `local_models::download::DiskSpace`, `FakeDisk`, the shell's `WinDiskSpace`; no call-side port |
+| Disk space | `local_models::download::DiskSpace`, `FakeDisk`, the shell's `WinDiskSpace`; no call-side port type, the session holds it as `CallDeps.disk` and polls it (`docs/decisions/call-session.md` I12) |
 
 ## Rejected approaches
 

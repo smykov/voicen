@@ -1,0 +1,8 @@
+guarantee: AC-8: injected faults never panic and never change the audio (an unreadable track counts 0)
+file: crates/voicen-core/src/call/storage.rs
+added_by: test-writer
+--- old
+                .map_or(0, |s| {
+--- new
+                .map_or(u64::MAX, |s| {
+--- end

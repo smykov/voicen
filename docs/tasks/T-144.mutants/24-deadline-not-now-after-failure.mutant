@@ -1,0 +1,10 @@
+guarantee: -
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+        if failed {
+            return Some(self.deps.mono.now());
+        }
+--- new
+        let _ = failed;
+--- end

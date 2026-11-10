@@ -1,0 +1,8 @@
+guarantee: AC-6: at 4 h the recording stops with max_length
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+const MAX_LENGTH: Duration = Duration::from_secs(4 * 3_600);
+--- new
+const MAX_LENGTH: Duration = Duration::from_secs(5 * 3_600);
+--- end

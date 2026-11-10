@@ -1,0 +1,7 @@
+guarantee: AC-1: only a folder with no owning session is recovered (the active call is skipped)
+file: crates/voicen-core/src/call/storage.rs
+added_by: test-writer
+--- old
+                self.active().push(dir.clone());
+--- new
+--- end

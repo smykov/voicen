@@ -1,0 +1,11 @@
+guarantee: -
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+                        let _ = fs::remove_dir_all(&dir);
+                        self.deps.store.release(&dir);
+                        return Err(root_other);
+--- new
+                        let _ = fs::remove_dir_all(&dir);
+                        return Err(root_other);
+--- end

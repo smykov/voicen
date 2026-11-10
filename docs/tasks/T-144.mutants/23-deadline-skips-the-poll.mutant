@@ -1,0 +1,8 @@
+guarantee: AC-5: free space is polled every 10 s (next_deadline never more than 10 s ahead, I-c)
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+            [call.reminder_until, Some(call.next_poll), Some(limit)]
+--- new
+            [call.reminder_until, Some(limit)]
+--- end

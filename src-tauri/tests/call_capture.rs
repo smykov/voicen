@@ -58,6 +58,7 @@ use timing_support::{eventually, within_hang, HANG};
 use voicen_core::call::indicator::{IndicatorState, IndicatorTick};
 use voicen_core::call::session::{
     CallDeps, CallIndicator, CallSession, CallSettingsPort, CallShell, SubtitleConsumer, Toggled,
+    TrackFile,
 };
 use voicen_core::call::wav_source::WavTrackSource;
 use voicen_core::call::{
@@ -767,11 +768,15 @@ fn a_wav_source_through_the_session_writes_both_track_files_as_ogg_opus() {
         offset: Arc::new(Utc),
         mono,
         app_version: "0.0.0-test".to_string(),
-        open_track: Arc::new(|path| fs::File::create(path)),
+        open_track: Arc::new(|path| {
+            let file: TrackFile = Box::new(fs::File::create(path)?);
+            Ok(file)
+        }),
         channel_capacity: 256,
         subtitles: Arc::new(Subtitles),
         devices: Arc::new(NoDeviceEvents),
         comms: Arc::new(SameComms),
+        disk: Arc::new(WinDiskSpace),
     });
 
     assert_eq!(

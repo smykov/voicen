@@ -1,0 +1,8 @@
+guarantee: AC-4: a write failure leaves meta.json at recording
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+        let keep_meta = reason == StopReason::StorageError;
+--- new
+        let keep_meta = false;
+--- end

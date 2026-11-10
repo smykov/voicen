@@ -1,0 +1,13 @@
+guarantee: AC-4: a write failure notices stopped{storage}
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+            StopReason::MaxLength | StopReason::LowDisk | StopReason::StorageError => {
+                CallNotice::Stopped { reason }
+            }
+            StopReason::User
+--- new
+            StopReason::MaxLength | StopReason::LowDisk => CallNotice::Stopped { reason },
+            StopReason::StorageError
+            | StopReason::User
+--- end

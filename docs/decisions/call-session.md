@@ -2,7 +2,7 @@
 
 **Code:** `crates/voicen-core/src/call/session.rs` (`CallSession`, `CallDeps`, the ports `CallIndicator`, `CallShell`, `CallSettingsPort`, `SubtitleConsumer`; the device thread and the writer's device accounting), `crates/voicen-core/src/call/capture.rs` (the ports `DeviceEvents`, `DeviceEventsFactory`, `CommunicationsCheck`), `crates/voicen-core/src/call/indicator.rs` (the pure indicator model, `WarningList` and its wire types), `CallWarning::ProviderNotice` in `call/events.rs`, `SettingsService::remember_warned_host` · **Tests that pin it:** `tests/call_session.rs` (`one_session_for_repeated_on_from_every_source`, `a_track_that_fails_to_open_refuses_the_start_and_leaves_nothing`, `a_root_refusal_leaves_nothing_and_asks_for_the_calls_tab`, `a_storage_failure_after_the_probe_logs_its_kind_then_refuses_root_other`, `indicator_changes_inside_the_lock_and_shell_requests_after_it`, `provider_notice_once_per_new_non_loopback_host`, `dropped_blocks_are_logged_once_and_kept_in_meta`, `a_gap_without_a_device_change_leaves_no_line_and_no_entry`, `a_failed_final_meta_write_is_logged_and_the_stop_still_completes`, `a_failed_meta_write_at_a_drop_is_logged_and_the_call_goes_on`, `subtitles_only_writes_nothing`, `a_subtitles_start_that_cannot_open_a_track_is_refused_and_leaves_nothing`, `record_shares_the_captures_of_running_subtitles_and_survives_their_record_off`, `subtitles_off_while_recording_keeps_the_call_and_the_consumer_stops`, `subtitles_and_record_toggle_independently_under_one_lock`), `tests/call_indicator_wire.rs` (`e2e_call_indicator_wire_fixture_matches_core`, fixture `e2e/fixtures/call-indicator-wire.json`), `tests/dictation_session.rs` (`dictation_and_esc_never_change_a_running_call`)
 
-Tasks: T-126; T-149 (device changes, silent sides, the communications check, `dismiss_warning`; I8-I11). Contract: `specs/007-call-mode-record/contracts/core-call.md` "Built (T-126)", "Built (T-149)". Decisions: #195 (2) (`ProviderNotice` moved here), #243 (D1/D2), #244. Class `call-session` in `docs/failures.md` has no entry yet (first sighting).
+Tasks: T-126; T-144 (I12); T-149 (device changes, silent sides, the communications check, `dismiss_warning`; I8-I11). Contract: `specs/007-call-mode-record/contracts/core-call.md` "Built (T-126)", "Built (T-149)". Decisions: #195 (2) (`ProviderNotice` moved here), #243 (D1/D2), #244. Class `call-session` in `docs/failures.md` has no entry yet (first sighting).
 
 ## Invariants
 
@@ -69,9 +69,21 @@ Tasks: T-126; T-149 (device changes, silent sides, the communications check, `di
 
 - **Where it is enforced:** `begin_call` calls `CommunicationsCheck::differs` before `call_started`; only `Ok(true)` gives `CallWarning::CommunicationsDeviceDiffers` and `comms_differs=1`; `Ok(false)`, `Err(E_NOTFOUND)` and any other `Err` are no difference and no line (the grammar has none). A subtitles start never asks. With subtitles only (no record) device outcomes and warnings are neither logged, stored nor shown; reopens still happen (I3). Test `the_communications_check_gives_the_warning_only_for_a_difference`.
 
+### I12. `tick` is the one place for non-user stops; the writer only raises a flag (T-144)
+
+- **What breaks if you violate it:** a call that keeps recording after a dead disk, a stop from the writer thread racing the lock (I4), or a warning list entry raised twice.
+- **Where it is enforced:**
+  - `CallSession::tick` (the shell's timer) stops the call, with saving, for: the storage failure flag, 4 h of monotonic time (`MaxLength`), and low disk. The disk is polled every 10 s, rescheduled from when the poll runs; the first poll is due at start. Below 1 GB one `LowDisk` warning per call goes through `WarningList::raise`; below 200 MB `call_storage_failed kind=low_disk` is logged, then the `LowDisk` stop. An `Err` from the disk port is skipped silently.
+  - The writer's first encoder push error drops both encoders, sets the failure flag in `Control`, and logs `call_storage_failed kind=write` once. After it there is no `write_meta` mid-call: device changes and drops stay in memory. A `StorageError` stop leaves `meta.json` at `recording`, so the next start-up recovers it (`docs/decisions/call-storage.md`); the other stops write the final meta.
+  - Notices: `MaxLength`, `LowDisk` and `StorageError` give `CallNotice::Stopped { reason }`; `User`, `Hotkey`, `Exit`, `SystemEnd` and `Sleep` give `CallSavedTranscribing`.
+  - `next_deadline` is now after a failure; otherwise the minimum of the reminder, the next poll and the 4 h limit, never more than 10 s ahead while recording, `None` otherwise.
+  - Every end of a call (`finish`, a start that fails after the create) calls `CallStore::release` on its folder.
+  - `CallDeps.open_track` returns `TrackFile = Box<dyn SyncWrite + Send>` (`impl SyncWrite for Box<W: ?Sized>` in `codec.rs`), so the rig's `FlakyOpener::fail_next_write` injects a write fault.
+- **Don't:** stop a call from the writer thread, write `meta.json` after a write failure, poll the disk on a fixed grid, or raise the low-disk warning twice.
+
 ## Failure handling the developer chose beyond the analysis
 
-- A failed encoder `push` in the writer logs `call_storage_failed kind=<kind>` (kind from `storage_kind(op)`, no `os`) and stops writing that track only; the other track and the call go on.
+- A failed encoder `push` in the writer: since T-144 it stops the whole call (I12); before it, only that track stopped.
 - A failed encoder `finish` at stop logs `call_storage_failed kind=<kind>` and the stop goes on.
 - A failed `meta.json` write at a drop logs `call_storage_failed kind=meta` (with `os` when known) and the call goes on; the stop writes the full `drops` list again. A failed final `meta.json` write at stop is logged the same way and the stop still completes.
 - The writer publishes a tick after any placed audio once 100 ms of the monotonic clock passed (at most 10 per second), with each track's latest level; before T-149 it ticked only on a step that closed a level window.
@@ -85,7 +97,7 @@ Tasks: T-126; T-149 (device changes, silent sides, the communications check, `di
 - Subtitles toggles write no log line (the closed grammar has none for them); a subtitles start that cannot open a track returns `Refused { part: system | mic, reason }`, and one whose writer thread cannot be spawned (or is gone) `Refused { part: system, reason: other }`. A record start on running subtitles whose writer is gone is refused `part=root reason=other` and its folder removed.
 - `call_started` keeps `subtitles=0` and `meta.json` `mode.subtitles` stays `false` also for a record start while subtitles run: the contract fixes them for 1a; the 1b task decides (OQ-77).
 - `storage::started_at` is `pub(crate)`, so the stop writes `ended_at` in the one date format.
-- Not covered by a test: the encoder push and finish failures, and the lost writer at record off (the mutants 36 and 37 of T-126 survived; a `File` whose write fails mid-call has no portable fake).
+- Not covered by a test: the encoder finish failure and the lost writer at record off. The mutants 36 and 37 of T-126 survived because a `File` whose write fails mid-call had no portable fake; since T-144 the write fault is injectable (`FlakyOpener::fail_next_write`, I12).
 
 ## Rejected approaches
 
@@ -95,6 +107,7 @@ Tasks: T-126; T-149 (device changes, silent sides, the communications check, `di
 | `warned_hosts` kept in the session or a shell-side store | FR-031 "once" must hold across restarts; a second settings writer would bypass `save_lock` | T-126 analysis, option C |
 | A drop recorded as a `DeviceChange` with a new `DeviceCause` | puts a non-device fault into the `call_device` cause set; `device_changes` would mean two things | T-126 analysis, option D, #244 |
 | Choosing the fallback mic through `microphone::choose` over `AudioSource::devices()` | needs a second port in the session; the track source already opens "the selected id or the default input" | T-126 investigation |
+| Option C of T-144: the writer wakes the shell's timer at once on a failure | the stop may wait up to 10 s (`next_deadline` bound); accepted, not built | T-144 analysis |
 | Reopening a track on the writer thread under `try_lock` | an open of up to 3 s (`OPEN_BUDGET`) stops the healthy track's drain (channel drops), and the 2 s deadline cannot fire while it blocks | T-149 analysis, option B |
 | Driving reopens from `CallSession::tick` on the shell's timer | the 2 s bound would depend on the shell's cadence; an open under the session lock blocks tray and hotkey for up to 3 s; R4 says core decides | T-149 analysis, option C |
 | The writer forwarding each `Lost` to the device thread over a channel | a second path for the same signal; the `OpenSink` lost flag carries it without the writer | T-149 implementation |

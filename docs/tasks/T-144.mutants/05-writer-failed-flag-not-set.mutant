@@ -1,0 +1,7 @@
+guarantee: AC-4: a write failure leaves meta.json at recording (no mid-call write_meta after it, I-d)
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+            rec.failed = true;
+--- new
+--- end

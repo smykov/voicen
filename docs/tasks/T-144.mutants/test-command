@@ -1,0 +1,2 @@
+# the task's integration tests (call_session.rs, call_recovery.rs) and the storage lib tests, core area's container
+cargo test -j 2 -p voicen-core --test call_session --test call_recovery

@@ -20,12 +20,20 @@
 //! synchronous command: every block queued before the toggle returns is handled under the
 //! old state, every later one under the new state.
 //!
+//! Every stop other than a user, hotkey or exit stop starts in [`CallSession::tick`]
+//! (T-144): a failed track write (the writer drops both encoders at the first failure and
+//! writes nothing more of the call, `meta.json` included) stops with `storage_error` and
+//! leaves `meta.json` at `recording`; 4 h of monotonic time stop with `max_length`; the free
+//! space of the call folder, polled every 10 s, warns once below 1 GB and stops with
+//! `low_disk` below 200 MB. [`CallSession::next_deadline`] is never more than 10 s ahead
+//! while a call records, so the shell's timer drives these.
+//!
 //! Lock rules: the indicator port is called only with the session lock held; the shell
 //! port only after it is released. The call session has no Esc input and shares no state
 //! with the dictation session.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
-use std::fs::{self, File};
+use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -40,7 +48,7 @@ use crate::call::capture::{
     LossCause, Report, Step, Timeline, TrackDevice, TrackEvent, TrackReceiver, TrackSink,
     TrackSource,
 };
-use crate::call::codec::{OpusOgg, TrackEncoder};
+use crate::call::codec::{OpusOgg, SyncWrite, TrackEncoder};
 use crate::call::events::{
     CallNotice, CallSource, CallState, CallWarning, DeviceCause, EndpointId, RefusedPart,
     RefusedReason, SilentRule, StopReason, StorageKind, Track,
@@ -55,6 +63,7 @@ use crate::clock::{Clock, LocalOffset, MonotonicClock};
 use crate::diag::format::LocalTime;
 use crate::diag::{Log, LogEvent};
 use crate::i18n::UiLanguage;
+use crate::local_models::download::DiskSpace;
 use crate::platform::{CaptureHandle, DeviceId};
 use crate::settings::roots::UnwritableReason;
 use crate::settings::service::{SettingsService, WarnedHostFailed};
@@ -84,6 +93,14 @@ const SETTLE: Duration = Duration::from_secs(2);
 const SECOND_SAMPLES: usize = 16_000;
 /// FR-013: more than this many silent seconds in a row while the other track spoke.
 const CANT_HEAR_AFTER_S: u64 = 60;
+/// FR-017 (research R19): the call folder's free space is polled this often while recording.
+const DISK_POLL_EVERY: Duration = Duration::from_secs(10);
+/// FR-017: below this much free space the call shows one `low_disk` warning.
+const LOW_DISK_WARN_BYTES: u64 = 1_000_000_000;
+/// FR-017: below this much free space the call stops with saving.
+const LOW_DISK_STOP_BYTES: u64 = 200_000_000;
+/// FR-018: a call stops with `max_length` after this much time on the monotonic clock.
+const MAX_LENGTH: Duration = Duration::from_secs(4 * 3_600);
 
 /// The call indicator window and the tray's call flag. Called INSIDE the session lock;
 /// an implementation must never block or call back into the session.
@@ -124,8 +141,12 @@ pub trait SubtitleConsumer: Send + Sync {
     fn audio(&self, track: Track, samples: &[f32]);
 }
 
-/// Opens a track file inside the call folder ([`CallStore::create_with`]).
-pub type TrackOpener = Arc<dyn Fn(&Path) -> io::Result<File> + Send + Sync>;
+/// An open track file: what the opener hands to the encoder.
+pub type TrackFile = Box<dyn SyncWrite + Send>;
+
+/// Opens a track file inside the call folder ([`CallStore::create_with`]); a test hands
+/// in a fault-injecting writer (T-144).
+pub type TrackOpener = Arc<dyn Fn(&Path) -> io::Result<TrackFile> + Send + Sync>;
 
 /// What the session is built from.
 pub struct CallDeps {
@@ -149,6 +170,9 @@ pub struct CallDeps {
     pub devices: Arc<dyn DeviceEventsFactory>,
     /// FR-010: asked once per record start, before `call_started`.
     pub comms: Arc<dyn CommunicationsCheck>,
+    /// FR-017: the free space of the call folder, polled by [`CallSession::tick`] every
+    /// 10 s while a call records.
+    pub disk: Arc<dyn DiskSpace>,
 }
 
 /// What a `toggle_record` or `toggle_subtitles` did.
@@ -215,6 +239,13 @@ struct Call {
     dir: PathBuf,
     /// The meta written at create: the fallback when the writer thread is gone.
     meta: CallMeta,
+    /// The start on the monotonic clock (the 4 h limit counts from here).
+    mono_start: Instant,
+    /// When `tick` polls the free space next; the first poll is due at the start.
+    next_poll: Instant,
+    /// The `low_disk` warning was raised in this call (at most once per call, so a
+    /// dismissed one does not come back).
+    low_disk_warned: bool,
 }
 
 impl Call {
@@ -237,6 +268,9 @@ struct Control {
     hold: AtomicBool,
     /// The captures are closing: the device thread stops both handles and ends.
     devices: AtomicBool,
+    /// A track write of the attached call failed: the writer dropped both encoders and
+    /// writes nothing more of the call; the next `tick` stops it (`storage_error`).
+    failed: AtomicBool,
 }
 
 /// The writer thread is gone (it panicked); what it held is lost.
@@ -446,26 +480,48 @@ impl CallSession {
     pub fn stop(&self, reason: StopReason) -> bool {
         let stopped = {
             let mut inner = self.lock();
-            match inner.call.take() {
-                Some(call) => {
-                    let rec = if inner.subtitles {
-                        inner
-                            .captures
-                            .as_ref()
-                            .and_then(|c| c.command(Command::Detach).ok().flatten())
-                    } else {
-                        inner.captures.take().and_then(|c| c.close().ok().flatten())
-                    };
-                    self.finish(call, rec, reason);
-                    true
-                }
-                None => false,
-            }
+            self.stop_locked(&mut inner, reason)
         };
         if stopped {
-            self.deps.shell.notice(CallNotice::CallSavedTranscribing);
+            self.notice_stopped(reason);
         }
         stopped
+    }
+
+    /// The stop under the session lock: the writer hands the call back (or the captures
+    /// close), then [`CallSession::finish`]. `false` when no call was recording.
+    fn stop_locked(&self, inner: &mut Inner, reason: StopReason) -> bool {
+        let Some(call) = inner.call.take() else {
+            return false;
+        };
+        let rec = if inner.subtitles {
+            inner.captures.as_ref().and_then(|c| {
+                let rec = c.command(Command::Detach).ok().flatten();
+                c.control.failed.store(false, Ordering::SeqCst);
+                rec
+            })
+        } else {
+            inner.captures.take().and_then(|c| c.close().ok().flatten())
+        };
+        self.finish(call, rec, reason);
+        true
+    }
+
+    /// The one notice of a stop, after the lock: a stop the session decided itself
+    /// (`max_length`, `low_disk`, `storage_error`) says why; any other says the call is
+    /// saved and goes to transcription.
+    fn notice_stopped(&self, reason: StopReason) {
+        let notice = match reason {
+            StopReason::MaxLength | StopReason::LowDisk | StopReason::StorageError => {
+                CallNotice::Stopped { reason }
+            }
+            StopReason::User
+            | StopReason::Hotkey
+            | StopReason::Exit
+            | StopReason::SystemEnd
+            | StopReason::Sleep => CallNotice::CallSavedTranscribing,
+        };
+        self.deps.shell.notice(notice);
     }
 
     pub fn is_recording(&self) -> bool {
@@ -485,10 +541,73 @@ impl CallSession {
         }
     }
 
-    /// Applies the reminder's end on the monotonic clock: once it is due, one state hides
-    /// the reminder and the hint.
+    /// Every stop that is not a user, hotkey or exit stop starts here (T-144), in this
+    /// order: a failed track write stops with `storage_error` (meta.json left
+    /// `recording`); 4 h on the monotonic clock with `max_length`; the free-space poll of
+    /// the call folder (every 10 s, the first at the start) warns once below 1 GB and stops
+    /// below 200 MB with `low_disk`, after `call_storage_failed kind=low_disk`; a poll that
+    /// fails is skipped until the next one, silently. Then the reminder's end: once it is
+    /// due, one state hides the reminder and the hint.
     pub fn tick(&self) {
-        let mut inner = self.lock();
+        let stopped = {
+            let mut inner = self.lock();
+            let reason = self.due_stop(&mut inner);
+            match reason {
+                Some(reason) => self.stop_locked(&mut inner, reason).then_some(reason),
+                None => {
+                    self.reminder_tick(&mut inner);
+                    None
+                }
+            }
+        };
+        if let Some(reason) = stopped {
+            self.notice_stopped(reason);
+        }
+    }
+
+    /// The stop `tick` has to make now, if any; raises the low-disk warning on the way.
+    fn due_stop(&self, inner: &mut Inner) -> Option<StopReason> {
+        let failed = self.write_failed(inner);
+        let call = inner.call.as_mut()?;
+        if failed {
+            return Some(StopReason::StorageError);
+        }
+        let now = self.deps.mono.now();
+        if now.saturating_duration_since(call.mono_start) >= MAX_LENGTH {
+            return Some(StopReason::MaxLength);
+        }
+        if now < call.next_poll {
+            return None;
+        }
+        call.next_poll = now + DISK_POLL_EVERY;
+        // A failed poll is skipped until the next one (it logs nothing).
+        let free = self.deps.disk.available_bytes(&call.dir).ok()?;
+        if free < LOW_DISK_STOP_BYTES {
+            self.deps.log.write(LogEvent::CallStorageFailed {
+                kind: StorageKind::LowDisk,
+                os: None,
+            });
+            return Some(StopReason::LowDisk);
+        }
+        if free < LOW_DISK_WARN_BYTES && !call.low_disk_warned {
+            call.low_disk_warned = true;
+            if call.warnings.raise(CallWarning::LowDisk).is_some() {
+                self.deps.indicator.set_state(&call.state());
+            }
+        }
+        None
+    }
+
+    /// The writer reported a failed track write of the recording call.
+    fn write_failed(&self, inner: &Inner) -> bool {
+        inner.call.is_some()
+            && inner
+                .captures
+                .as_ref()
+                .is_some_and(|c| c.control.failed.load(Ordering::SeqCst))
+    }
+
+    fn reminder_tick(&self, inner: &mut Inner) {
         let Some(call) = inner.call.as_mut() else {
             return;
         };
@@ -517,9 +636,24 @@ impl CallSession {
         true
     }
 
-    /// When [`CallSession::tick`] has something to do: the reminder's end, or `None`.
+    /// When [`CallSession::tick`] has something to do while a call records: now after a
+    /// failed track write, else the earliest of the reminder's end, the next free-space
+    /// poll and the 4 h limit (never more than 10 s ahead). `None` while no call records.
     pub fn next_deadline(&self) -> Option<Instant> {
-        self.lock().call.as_ref().and_then(|c| c.reminder_until)
+        let inner = self.lock();
+        let failed = self.write_failed(&inner);
+        let call = inner.call.as_ref()?;
+        if failed {
+            return Some(self.deps.mono.now());
+        }
+        let limit = call.mono_start + MAX_LENGTH;
+        Some(
+            [call.reminder_until, Some(call.next_poll), Some(limit)]
+                .into_iter()
+                .flatten()
+                .min()
+                .unwrap_or(limit),
+        )
     }
 
     /// Holds the writer thread off the channels until the guard is dropped. Returns once
@@ -603,6 +737,7 @@ impl CallSession {
                     // No thread to write the call: refused like a create failure after
                     // the probe, and the folder made for it is removed.
                     let _ = fs::remove_dir_all(&dir);
+                    self.deps.store.release(&dir);
                     return Err(root_other);
                 }
                 warnings = captures.warnings.clone();
@@ -633,6 +768,7 @@ impl CallSession {
                     Some(captures) => inner.captures = Some(captures),
                     None => {
                         let _ = fs::remove_dir_all(&dir);
+                        self.deps.store.release(&dir);
                         return Err(root_other);
                     }
                 }
@@ -688,7 +824,7 @@ impl CallSession {
         settings: &Settings,
         mic_id: &EndpointId,
         system_id: &EndpointId,
-    ) -> Result<ActiveCallFiles<File>, Refusal> {
+    ) -> Result<ActiveCallFiles<TrackFile>, Refusal> {
         let started = self.deps.clock.now();
         let new = NewCall {
             started,
@@ -753,6 +889,9 @@ impl CallSession {
             reminder_until: settings.calls.reminder.then(|| mono_start + REMINDER),
             dir,
             meta,
+            mono_start,
+            next_poll: mono_start,
+            low_disk_warned: false,
         };
         self.deps.indicator.set_state(&call.state());
         self.deps.indicator.set_call_recording(true);
@@ -896,11 +1035,14 @@ impl CallSession {
     // ---- stop -----------------------------------------------------------------------
 
     /// The record stop under the lock, after the writer handed the recording back: both
-    /// files finished, `meta.json` ready-to-transcribe, `call_stopped`, the indicator off.
-    /// `rec` is `None` when the writer thread is gone: that is logged, and the meta of the
-    /// create is finished with no audio.
+    /// files finished, `meta.json` ready-to-transcribe, `call_stopped`, the indicator off,
+    /// the store's active slot released. `rec` is `None` when the writer thread is gone:
+    /// that is logged, and the meta of the create is finished with no audio. A
+    /// `storage_error` stop leaves `meta.json` as it is (`recording`): the next start
+    /// recovers the call from what its tracks hold (FR-016).
     fn finish(&self, call: Call, rec: Option<Box<Recording>>, reason: StopReason) {
         let Call { dir, meta, .. } = call;
+        let keep_meta = reason == StopReason::StorageError;
         let (mut meta, mic_written, system_written) = match rec {
             Some(rec) => {
                 let Recording {
@@ -935,12 +1077,15 @@ impl CallSession {
         )));
         meta.duration_ms = Some(duration_ms);
         meta.stop_reason = Some(reason);
-        if let Err(e) = write_meta(&dir, &meta) {
-            self.deps.log.write(LogEvent::CallStorageFailed {
-                kind: StorageKind::Meta,
-                os: e.raw_os_error(),
-            });
+        if !keep_meta {
+            if let Err(e) = write_meta(&dir, &meta) {
+                self.deps.log.write(LogEvent::CallStorageFailed {
+                    kind: StorageKind::Meta,
+                    os: e.raw_os_error(),
+                });
+            }
         }
+        self.deps.store.release(&dir);
         let bytes = |track: Track| {
             meta.tracks
                 .iter()
@@ -1287,14 +1432,14 @@ impl DeviceThread {
 
 /// The writer's side of a new call: both encoders, a timeline per track from `start`.
 fn recording(
-    files: ActiveCallFiles<File>,
+    files: ActiveCallFiles<TrackFile>,
     start: CaptureStamp,
     mono_start: Instant,
 ) -> Box<Recording> {
     let dir = files.dir().to_path_buf();
     let meta = files.meta().clone();
     let ActiveCallFiles { mic, system, .. } = files;
-    let lane = |track: Track, enc: OpusOgg<File>| RecLane {
+    let lane = |track: Track, enc: OpenOgg| RecLane {
         timeline: Timeline::new(track, start),
         enc: Some(enc),
         level: 0.0,
@@ -1308,6 +1453,7 @@ fn recording(
         dir,
         mono_start,
         last_tick: None,
+        failed: false,
     })
 }
 
@@ -1341,7 +1487,7 @@ struct RecLane {
     activity: Activity,
 }
 
-type OpenOgg = OpusOgg<File>;
+type OpenOgg = OpusOgg<TrackFile>;
 
 /// A device change of one track while record is on: where the track went silent, where
 /// its new stream's audio landed, and what the device thread reported.
@@ -1444,6 +1590,9 @@ struct Recording {
     dir: PathBuf,
     mono_start: Instant,
     last_tick: Option<Instant>,
+    /// A track write failed: both encoders are gone and no mid-call `write_meta` follows
+    /// (device changes and drops stay in memory, I-d).
+    failed: bool,
 }
 
 impl Recording {
@@ -1580,6 +1729,7 @@ impl Writer {
         }
         let answer = match envelope.command {
             Command::Attach(rec) => {
+                self.control.failed.store(false, Ordering::SeqCst);
                 self.rec = Some(rec);
                 self.pending.clear();
                 None
@@ -1699,13 +1849,18 @@ impl Writer {
             None => Ok(()),
         };
         if let Err(e) = pushed {
-            // The track stops being written; the other one goes on.
-            lane.enc = None;
+            // FR-016: the first failed write ends the call's audio on both tracks at once
+            // (dropped unfinished, nothing more written); `tick` stops the call.
+            rec.mic.enc = None;
+            rec.system.enc = None;
+            rec.failed = true;
+            self.control.failed.store(true, Ordering::SeqCst);
             self.log.write(LogEvent::CallStorageFailed {
                 kind: storage_kind(e.op),
                 os: None,
             });
         }
+        let lane = rec.lane(track);
         lane.activity.listen(&step.pcm, lost);
         for silent in [track, other(track)] {
             let speech = rec.lane_ref(other(silent)).activity.last_speech;
@@ -1829,6 +1984,10 @@ impl Writer {
             to,
             gap_ms,
         });
+        if rec.failed {
+            // After a failed track write the call's folder is not written again (I-d).
+            return;
+        }
         if let Err(e) = write_meta(&rec.dir, &rec.meta) {
             // The call goes on; the stop writes the full list again.
             self.log.write(LogEvent::CallStorageFailed {
@@ -1939,6 +2098,9 @@ impl Writer {
             blocks,
             ms,
         });
+        if rec.failed {
+            return;
+        }
         if let Err(e) = write_meta(&rec.dir, &rec.meta) {
             // The call goes on; the stop writes the full list again.
             self.log.write(LogEvent::CallStorageFailed {

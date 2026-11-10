@@ -1,0 +1,7 @@
+guarantee: AC-4: a write failure mid-recording stops it
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+            self.control.failed.store(true, Ordering::SeqCst);
+--- new
+--- end

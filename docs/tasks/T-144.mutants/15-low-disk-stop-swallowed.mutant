@@ -1,0 +1,8 @@
+guarantee: AC-5: below 200 MB the recording stops with saving
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+            return Some(StopReason::LowDisk);
+--- new
+            return None;
+--- end

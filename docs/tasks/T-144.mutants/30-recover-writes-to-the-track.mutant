@@ -1,0 +1,15 @@
+guarantee: AC-1: .opus bytes unchanged (hash compare); AC-8 never change the audio
+file: crates/voicen-core/src/call/storage.rs
+added_by: test-writer
+--- old
+            File::open(dir.join(&track.file))
+--- new
+            {
+                let path = dir.join(&track.file);
+                let _ = fs::OpenOptions::new()
+                    .append(true)
+                    .open(&path)
+                    .and_then(|mut f| io::Write::write_all(&mut f, &[0]));
+                File::open(path)
+            }
+--- end

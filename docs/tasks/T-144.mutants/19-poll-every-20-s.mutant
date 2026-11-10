@@ -1,0 +1,8 @@
+guarantee: AC-5: free space is polled every 10 s
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+        call.next_poll = now + DISK_POLL_EVERY;
+--- new
+        call.next_poll = now + DISK_POLL_EVERY + DISK_POLL_EVERY;
+--- end

@@ -28,8 +28,8 @@ use voicen_core::call::codec::{scan, OpusOggReader, ReadEnd, TrackDecoder};
 use voicen_core::call::indicator::{IndicatorState, IndicatorTick, WarningKind};
 use voicen_core::call::session::{CallSettingsPort, Toggled};
 use voicen_core::call::{
-    CallNotice, CallSource, DeviceEvent, LossCause, OpenError, RefusedPart, RefusedReason,
-    StopReason, Track, TrackDevice,
+    CallNotice, CallSource, DeviceEvent, ListState, LossCause, OpenError, RefusedPart,
+    RefusedReason, StopReason, Track, TrackDevice,
 };
 use voicen_core::clock::FakeClock;
 use voicen_core::hotkey_registrar::FakeHotkeyRegistrar;
@@ -2898,16 +2898,24 @@ fn a_write_failure_stops_the_call_keeps_flushed_audio_and_leaves_meta_recording(
     rig.session.toggle_subtitles(true, CallSource::Switch);
     started(&rig, CallSource::Tray);
     let both = [Track::Mic, Track::System];
-    rig.source.feed_both(0, 2_000, 0.3, 0.2);
-    rig.source.set_stamp_ms(2_000);
-    rig.mono.advance(ms(2_000));
-    drained(&rig, &both, 2_000);
+    // 4 s before the fault: the timeline and resampler hold a little back, so a bit under
+    // 4 s reaches each encoder, which is at least two full 1 s Ogg pages on disk (a
+    // 2 s feed put only one there: 47 688 granule, and the next write was the fault).
+    rig.source.feed_both(0, 4_000, 0.3, 0.2);
+    rig.source.set_stamp_ms(4_000);
+    rig.mono.advance(ms(4_000));
+    drained(&rig, &both, 4_000);
     let meta_before = call_meta_bytes(&rig);
+    // What the tracks hold before the fault: the stop must keep at least this.
+    let synced = ["mic.opus", "system.opus"].map(|file| track_scan(&rig, file).duration_48k);
+    for (file, kept) in ["mic.opus", "system.opus"].iter().zip(synced) {
+        assert!(kept >= 2 * 48_000 - 312, "{file}: two pages synced, {kept}");
+    }
 
     rig.opener.fail_next_write("mic.opus");
-    rig.source.feed_both(2_000, 6_000, 0.3, 0.2);
+    rig.source.feed_both(4_000, 6_000, 0.3, 0.2);
     rig.source.set_stamp_ms(6_000);
-    rig.mono.advance(ms(4_000));
+    rig.mono.advance(ms(2_000));
     drained(&rig, &both, 6_000);
     assert!(
         wait(|| !rig.lines_named("call_storage_failed").is_empty()),
@@ -2939,10 +2947,14 @@ fn a_write_failure_stops_the_call_keeps_flushed_audio_and_leaves_meta_recording(
     rig.session.tick();
     assert!(!rig.session.is_recording(), "the tick stopped the call");
     assert_eq!(track_sizes(&rig), baseline, "no byte after the failure");
-    for file in ["mic.opus", "system.opus"] {
+    for (file, kept) in ["mic.opus", "system.opus"].iter().zip(synced) {
         let scanned = track_scan(&rig, file);
         assert_eq!(scanned.end, ReadEnd::Truncated, "{file}");
-        assert!(scanned.duration_48k >= 48_000, "{file}: flushed audio kept");
+        assert!(
+            scanned.duration_48k >= kept,
+            "{file}: flushed audio kept, {} < {kept}",
+            scanned.duration_48k
+        );
     }
     assert_eq!(call_meta_bytes(&rig), meta_before, "meta.json untouched");
     let meta = rig.only_meta();
@@ -2961,6 +2973,49 @@ fn a_write_failure_stops_the_call_keeps_flushed_audio_and_leaves_meta_recording(
         })]
     );
     assert_eq!(rig.indicator.recording_flags().last(), Some(&false));
+    // US4 #5, I-b: the stopped call is no longer the store's active call, so its
+    // `recording` meta lists as Recovered in the same run (bite: `finish` not releasing).
+    let listed = rig.store.list(&call_support::settings(&rig.root).calls);
+    let states: Vec<ListState> = listed.entries.iter().map(|e| e.state).collect();
+    assert_eq!(states, vec![ListState::Recovered]);
+}
+
+#[test]
+fn after_a_write_failure_a_drop_is_not_written_into_meta() {
+    // Acceptance 4 (failure branch), I-d: after the first failed track write the writer
+    // makes no mid-call `write_meta`, a drop included: the drop is still logged
+    // (`call_track_dropped`), but meta.json stays byte-equal to the one of the start until
+    // the stop, which leaves it `recording`. The mic's first audio page write fails once
+    // (F-024). Fed in 80 ms steps the channel (capacity 4) drops nothing until the writer
+    // is held for the burst, which drops exactly the blocks past the fourth. Bite: the
+    // `rec.failed` return in the writer's drop handling removed.
+    let rig = CallRig::with_capacity(4, |_| {});
+    rig.session.toggle_subtitles(true, CallSource::Switch);
+    started(&rig, CallSource::Tray);
+    let meta_before = call_meta_bytes(&rig);
+    rig.opener.fail_next_write("mic.opus");
+    let mut at = 0;
+    while rig.lines_named("call_storage_failed").is_empty() {
+        assert!(at < 4_000, "the mic's first page write fails");
+        rig.source.feed(Track::Mic, at, at + 80, 0.3);
+        at += 80;
+        drained(&rig, &[Track::Mic], at);
+    }
+    assert!(rig.lines_named("call_track_dropped").is_empty());
+
+    let pause = rig.session.pause_writer();
+    rig.source.feed(Track::Mic, at, at + 140, 0.3);
+    drop(pause);
+    assert!(
+        wait(|| rig.lines_named("call_track_dropped").len() == 1),
+        "the drop after the failure is handled"
+    );
+    assert_eq!(call_meta_bytes(&rig), meta_before, "no mid-call meta write");
+
+    rig.session.tick();
+    assert!(!rig.session.is_recording(), "the tick stopped the call");
+    assert_eq!(call_meta_bytes(&rig), meta_before, "meta.json untouched");
+    assert_eq!(rig.only_meta()["state"], json!("recording"));
 }
 
 #[test]

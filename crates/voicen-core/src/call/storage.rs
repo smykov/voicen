@@ -13,18 +13,24 @@
 //!   folder whose `meta.json` is missing, unparsable, of another schema or carries an
 //!   unknown key, or whose track file is missing, lists as [`ListState::Damaged`]. Entries
 //!   are newest first by (start stamp, numeric suffix), not by `CallId`'s string order.
+//!   A `recording` call lists as Recording only while it is active (created by this store
+//!   and not yet [`CallStore::release`]d); any other `recording` is a crashed call and lists
+//!   as Recovered (T-144).
+//! - [`CallStore::recover`] runs at start: an inactive `recording` call becomes `recovered`
+//!   from the shorter readable track, a `transcribing` one `ready-to-transcribe`; it reads
+//!   the tracks only and changes nothing but `meta.json` (research R7, SC-005, SC-006).
 
 use std::cmp::Ordering;
 use std::fmt::Write as _;
 use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::SystemTime;
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-use super::codec::{OpusOgg, SyncWrite};
+use super::codec::{scan, OpusOgg, SyncWrite};
 use super::events::{
     CallId, CallState, DeviceCause, EndpointId, FailReason, PassMode, StopReason, StorageKind,
     Track,
@@ -33,8 +39,9 @@ use super::transcript::{
     export_json, export_markdown, EngineRef, SegmentV1, Speaker, TranscriptV1,
 };
 use super::StorageOp;
-use crate::clock::MonotonicClock;
+use crate::clock::{days_from_civil, MonotonicClock};
 use crate::diag::format::LocalTime;
+use crate::diag::{Log, LogEvent};
 use crate::i18n::{text, UiLanguage, CALLS_TITLE_DEFAULT, SPEAKER_ME, SPEAKER_OTHER};
 use crate::settings::roots::{effective_root, reason_of, CallRoots, UnwritableReason};
 use crate::settings::CallSettings;
@@ -273,14 +280,47 @@ pub struct CallList {
     pub unavailable: Vec<PathBuf>,
 }
 
+/// What [`CallStore::recover`] did at start (T-144).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Recovery {
+    /// The calls that were `recording` without being an active call, now `recovered`.
+    pub recovered: Vec<CallEntry>,
+    /// Every `ready-to-transcribe` call (a `transcribing` one set back to it first), oldest
+    /// first by (start stamp, numeric suffix).
+    pub queue: Vec<CallEntry>,
+}
+
 pub struct CallStore {
     roots: Arc<dyn CallRoots>,
     clock: Arc<dyn MonotonicClock>,
+    /// The folders of the calls this process records now: set by a successful
+    /// [`CallStore::create_with`], cleared by [`CallStore::release`]. Only these list as
+    /// Recording, and recovery never touches them.
+    active: Mutex<Vec<PathBuf>>,
 }
 
 impl CallStore {
     pub fn new(roots: Arc<dyn CallRoots>, clock: Arc<dyn MonotonicClock>) -> CallStore {
-        CallStore { roots, clock }
+        CallStore {
+            roots,
+            clock,
+            active: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn active(&self) -> std::sync::MutexGuard<'_, Vec<PathBuf>> {
+        self.active.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn is_active(&self, dir: &Path) -> bool {
+        self.active().iter().any(|d| d == dir)
+    }
+
+    /// The call in `dir` is no longer recorded by this process: from now on a `recording`
+    /// meta there is a crashed (or write-failed) call, listed as Recovered and recovered by
+    /// the next [`CallStore::recover`]. A folder that is not active changes nothing.
+    pub fn release(&self, dir: &Path) {
+        self.active().retain(|d| d != dir);
     }
 
     /// [`CallStore::create_with`] over real files.
@@ -316,12 +356,15 @@ impl CallStore {
                 Ok((mic, system))
             });
         match made {
-            Ok((mic, system)) => Ok(ActiveCallFiles {
-                mic,
-                system,
-                meta,
-                dir,
-            }),
+            Ok((mic, system)) => {
+                self.active().push(dir.clone());
+                Ok(ActiveCallFiles {
+                    mic,
+                    system,
+                    meta,
+                    dir,
+                })
+            }
             Err(e) => {
                 // Every track writer is dropped (closed) by now. Best effort: the folder
                 // is the one this call created; the error returned is the step's own.
@@ -373,7 +416,8 @@ impl CallStore {
                 let Some(id) = item.file_name().to_str().and_then(CallId::parse) else {
                     continue;
                 };
-                entries.push(load_entry(root, id));
+                let active = self.is_active(&root.join(id.as_str()));
+                entries.push(load_entry(root, id, active));
             }
             if !readable {
                 unavailable.push(root.clone());
@@ -386,6 +430,134 @@ impl CallStore {
             unavailable,
         }
     }
+
+    /// The start-up recovery of every root [`CallStore::list`] reads (T-144, research R7):
+    /// a `recording` call that is not active becomes `recovered`, with `duration_ms` the
+    /// shorter track (its start offset plus its scanned length; an unreadable track counts
+    /// 0) and `ended_at` = `started_at` + that duration; a `transcribing` call goes back to
+    /// `ready-to-transcribe`. Only `meta.json` changes, through [`write_meta`]; a track is
+    /// only opened for reading. A folder whose meta cannot be rewritten is left as found
+    /// and not counted; an unreadable root or a damaged folder is skipped. Logs
+    /// `call_recovered calls=<n>`.
+    pub fn recover(&self, calls: &CallSettings, log: &Log) -> Recovery {
+        let mut recovered = Vec::new();
+        let mut queue = Vec::new();
+        for entry in self.list(calls).entries {
+            let Some(mut meta) = entry.meta else {
+                continue;
+            };
+            let dir = entry.root.join(entry.id.as_str());
+            let state = match meta.state {
+                CallState::Recording if !self.is_active(&dir) => {
+                    let duration_ms = recovered_duration_ms(&dir, &meta);
+                    meta.state = CallState::Recovered;
+                    meta.duration_ms = Some(duration_ms);
+                    if let Some(ended) = ended_at(&meta.started_at, duration_ms) {
+                        meta.ended_at = Some(ended);
+                    }
+                    ListState::Recovered
+                }
+                CallState::Transcribing => {
+                    meta.state = CallState::ReadyToTranscribe;
+                    ListState::Queued
+                }
+                CallState::ReadyToTranscribe => {
+                    queue.push(CallEntry {
+                        meta: Some(meta),
+                        ..entry
+                    });
+                    continue;
+                }
+                _ => continue,
+            };
+            if write_meta(&dir, &meta).is_err() {
+                // Left as found: the next start tries again.
+                continue;
+            }
+            let entry = CallEntry {
+                state,
+                meta: Some(meta),
+                ..entry
+            };
+            match state {
+                ListState::Recovered => recovered.push(entry),
+                _ => queue.push(entry),
+            }
+        }
+        // Stable: equal ids keep root order.
+        queue.sort_by(|a, b| oldest_first(&a.id, &b.id));
+        recovered.sort_by(|a, b| oldest_first(&a.id, &b.id));
+        log.write(LogEvent::CallRecovered {
+            calls: u32::try_from(recovered.len()).unwrap_or(u32::MAX),
+        });
+        Recovery { recovered, queue }
+    }
+}
+
+/// The recovered length of a crashed call: the shorter of its two tracks, each its start
+/// offset plus the length [`scan`] reads; a track that cannot be opened or scanned counts 0.
+fn recovered_duration_ms(dir: &Path, meta: &CallMeta) -> u64 {
+    meta.tracks
+        .iter()
+        .map(|track| {
+            File::open(dir.join(&track.file))
+                .ok()
+                .and_then(|file| scan(file).ok())
+                .map_or(0, |s| {
+                    track.start_offset_ms.saturating_add(s.duration_48k / 48)
+                })
+        })
+        .min()
+        .unwrap_or(0)
+}
+
+/// `started_at` (the crate's own `YYYY-MM-DDTHH:MM:SS±HH:MM`) plus `duration_ms`, in the
+/// same offset; `None` for a stamp outside that format.
+fn ended_at(started: &str, duration_ms: u64) -> Option<String> {
+    let (local_secs, offset) = parse_started_at(started)?;
+    let utc = local_secs.checked_sub(i64::from(offset))?;
+    let at = UNIX_EPOCH
+        .checked_add(Duration::from_secs(u64::try_from(utc).ok()?))?
+        .checked_add(Duration::from_millis(duration_ms))?;
+    Some(started_at(&LocalTime::of(at, offset)))
+}
+
+/// The local wall time of a `started_at` stamp in seconds since 1970, and its offset in
+/// seconds east.
+fn parse_started_at(text: &str) -> Option<(i64, i32)> {
+    let b = text.as_bytes();
+    let shape = b.len() == 25
+        && b.get(4) == Some(&b'-')
+        && b.get(7) == Some(&b'-')
+        && b.get(10) == Some(&b'T')
+        && b.get(13) == Some(&b':')
+        && b.get(16) == Some(&b':')
+        && b.get(22) == Some(&b':');
+    if !shape {
+        return None;
+    }
+    let num = |from: usize, to: usize| -> Option<u64> {
+        let part = text.get(from..to)?;
+        if !part.bytes().all(|c| c.is_ascii_digit()) {
+            return None;
+        }
+        part.parse().ok()
+    };
+    let sign: i32 = match b.get(19) {
+        Some(b'+') => 1,
+        Some(b'-') => -1,
+        _ => return None,
+    };
+    let (hour, minute, second) = (num(11, 13)?, num(14, 16)?, num(17, 19)?);
+    if hour > 23 || minute > 59 || second > 59 {
+        return None;
+    }
+    let days = days_from_civil(num(0, 4)?, num(5, 7)?, num(8, 10)?)?;
+    let local = days
+        .checked_mul(86_400)?
+        .checked_add(hour * 3_600 + minute * 60 + second)?;
+    let offset = i32::try_from(num(20, 22)? * 3_600 + num(23, 25)? * 60).ok()? * sign;
+    Some((i64::try_from(local).ok()?, offset))
 }
 
 // ---- The Calls IPC wire, its path guard and export (T-141, contracts/ipc.md) -------------
@@ -726,7 +898,7 @@ impl CallStore {
         if !dir.is_dir() {
             return Err(CallError::not_found());
         }
-        let entry = load_entry(&root, id);
+        let entry = load_entry(&root, id, self.is_active(&dir));
         if entry.meta.is_none() {
             return Err(unusable());
         }
@@ -903,10 +1075,11 @@ fn initial_meta(id: CallId, local: &LocalTime, new: &NewCall) -> CallMeta {
     }
 }
 
-/// The listed entry of the call folder `<root>/<id>`: its meta, or damaged.
-fn load_entry(root: &Path, id: CallId) -> CallEntry {
+/// The listed entry of the call folder `<root>/<id>`: its meta, or damaged. `active`: the
+/// folder is a call this process records now.
+fn load_entry(root: &Path, id: CallId, active: bool) -> CallEntry {
     let dir = root.join(id.as_str());
-    match read_meta(&dir, &id) {
+    match read_meta(&dir, &id, active) {
         Some((meta, state)) => CallEntry {
             id,
             root: root.to_path_buf(),
@@ -924,8 +1097,9 @@ fn load_entry(root: &Path, id: CallId) -> CallEntry {
 
 /// `None` (damaged) for a missing or unparsable `meta.json` (an unknown key included), an
 /// unknown schema, an id that is not the folder's, tracks other than `mic.opus` /
-/// `system.opus`, a missing track file, or `failed` without its reason.
-fn read_meta(dir: &Path, id: &CallId) -> Option<(CallMeta, ListState)> {
+/// `system.opus`, a missing track file, or `failed` without its reason. A `recording` meta
+/// lists as Recording only when `active`; any other is a crashed call, Recovered (T-144).
+fn read_meta(dir: &Path, id: &CallId, active: bool) -> Option<(CallMeta, ListState)> {
     let bytes = fs::read(dir.join(META_FILE)).ok()?;
     let meta: CallMeta = serde_json::from_slice(&bytes).ok()?;
     if meta.schema != META_SCHEMA || meta.id != *id {
@@ -942,7 +1116,8 @@ fn read_meta(dir: &Path, id: &CallId) -> Option<(CallMeta, ListState)> {
         return None;
     }
     let state = match meta.state {
-        CallState::Recording => ListState::Recording,
+        CallState::Recording if active => ListState::Recording,
+        CallState::Recording => ListState::Recovered,
         CallState::ReadyToTranscribe => ListState::Queued,
         CallState::Transcribing => ListState::Transcribing,
         CallState::Ready => ListState::Ready,
@@ -950,6 +1125,11 @@ fn read_meta(dir: &Path, id: &CallId) -> Option<(CallMeta, ListState)> {
         CallState::Recovered => ListState::Recovered,
     };
     Some((meta, state))
+}
+
+/// Oldest first: the reverse of [`newest_first`].
+fn oldest_first(a: &CallId, b: &CallId) -> Ordering {
+    sort_key(a).cmp(&sort_key(b))
 }
 
 /// Newest first: the start stamp descending, then the clash suffix descending by its

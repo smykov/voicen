@@ -1,0 +1,8 @@
+guarantee: AC-8: injected faults never panic
+file: crates/voicen-core/src/call/storage.rs
+added_by: test-writer
+--- old
+                .and_then(|file| scan(file).ok())
+--- new
+                .map(|file| scan(file).unwrap_or_else(|_| panic!("unreadable track")))
+--- end

@@ -1,0 +1,8 @@
+guarantee: AC-4: a write failure mid-recording stops it
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+            return Some(StopReason::StorageError);
+--- new
+            return None;
+--- end

@@ -1,0 +1,11 @@
+guarantee: AC-5: below 200 MB the recording stops with saving (ready-to-transcribe); AC-6
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+        let keep_meta = reason == StopReason::StorageError;
+--- new
+        let keep_meta = matches!(
+            reason,
+            StopReason::StorageError | StopReason::LowDisk | StopReason::MaxLength
+        );
+--- end

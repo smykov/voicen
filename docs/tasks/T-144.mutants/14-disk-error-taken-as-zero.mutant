@@ -1,0 +1,8 @@
+guarantee: AC-5: free space polled every 10 s (a failed poll is skipped, never a stop); AC-8 faults
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+        let free = self.deps.disk.available_bytes(&call.dir).ok()?;
+--- new
+        let free = self.deps.disk.available_bytes(&call.dir).unwrap_or(0);
+--- end

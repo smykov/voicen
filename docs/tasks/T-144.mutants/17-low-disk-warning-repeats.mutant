@@ -1,0 +1,7 @@
+guarantee: AC-5: below 1 GB one low_disk warning
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+            call.low_disk_warned = true;
+--- new
+--- end

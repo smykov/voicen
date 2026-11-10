@@ -9,7 +9,7 @@
 //   `DecodeEnd` (Debug; at least `Unreadable` and `Damaged`).
 // - `call::codec`:
 //   - `trait SyncWrite: Write { fn sync_data(&mut self) -> io::Result<()>; }`, implemented
-//     for `std::fs::File`;
+//     for `std::fs::File` and for `Box<W: SyncWrite + ?Sized>` (T-144);
 //   - `trait TrackEncoder { fn push(&mut self, pcm16k: &[f32]) -> Result<(), StorageError>;
 //     fn finish(self) -> Result<(), StorageError>; }`;
 //   - `trait TrackDecoder { fn next_window(&mut self, max_ms: u32)
@@ -66,6 +66,13 @@ pub trait SyncWrite: Write {
 impl SyncWrite for std::fs::File {
     fn sync_data(&mut self) -> io::Result<()> {
         std::fs::File::sync_data(self)
+    }
+}
+
+/// A boxed writer syncs through what it holds (the session's track opener hands one out).
+impl<W: SyncWrite + ?Sized> SyncWrite for Box<W> {
+    fn sync_data(&mut self) -> io::Result<()> {
+        (**self).sync_data()
     }
 }
 

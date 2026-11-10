@@ -1,0 +1,10 @@
+guarantee: AC-4: a write failure leaves meta.json at recording (device change after the failure, I-d)
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+        if rec.failed {
+            // After a failed track write the call's folder is not written again (I-d).
+            return;
+        }
+--- new
+--- end

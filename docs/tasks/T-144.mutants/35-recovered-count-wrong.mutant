@@ -1,0 +1,8 @@
+guarantee: AC-1: an unowned recording becomes recovered (call_recovered calls=<n>)
+file: crates/voicen-core/src/call/storage.rs
+added_by: test-writer
+--- old
+            calls: u32::try_from(recovered.len()).unwrap_or(u32::MAX),
+--- new
+            calls: u32::try_from(recovered.len() + queue.len()).unwrap_or(u32::MAX),
+--- end

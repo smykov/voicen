@@ -1,0 +1,8 @@
+guarantee: AC-1: a recording folder with no owning session becomes recovered (a released call is unowned)
+file: crates/voicen-core/src/call/storage.rs
+added_by: test-writer
+--- old
+        self.active().retain(|d| d != dir);
+--- new
+        let _ = dir;
+--- end

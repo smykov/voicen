@@ -1,0 +1,13 @@
+guarantee: AC-4: a write failure logs call_storage_failed
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+            self.control.failed.store(true, Ordering::SeqCst);
+            self.log.write(LogEvent::CallStorageFailed {
+                kind: storage_kind(e.op),
+                os: None,
+            });
+--- new
+            self.control.failed.store(true, Ordering::SeqCst);
+            let _ = e;
+--- end

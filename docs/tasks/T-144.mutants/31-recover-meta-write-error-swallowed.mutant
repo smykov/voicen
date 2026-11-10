@@ -1,0 +1,8 @@
+guarantee: AC-8: injected faults never panic (a meta.json that cannot be rewritten is left as found and not counted)
+file: crates/voicen-core/src/call/storage.rs
+added_by: test-writer
+--- old
+            if write_meta(&dir, &meta).is_err() {
+--- new
+            if write_meta(&dir, &meta).is_err() && false {
+--- end

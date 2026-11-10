@@ -1,0 +1,12 @@
+guarantee: AC-4: a write failure stops it (both tracks stop; no byte after the failure, I-d)
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+            rec.mic.enc = None;
+            rec.system.enc = None;
+--- new
+            match track {
+                Track::Mic => rec.mic.enc = None,
+                Track::System => rec.system.enc = None,
+            }
+--- end
