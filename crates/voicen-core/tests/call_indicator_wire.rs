@@ -8,12 +8,13 @@
 //! ```text
 //! voicen_core::call::indicator::{IndicatorState, IndicatorTick, IndicatorWarning, WarningKind}
 //! IndicatorState { recording: bool, reminder_visible: bool, reminder_text: String,
-//!                  headphones_hint: String, warnings: Vec<IndicatorWarning> }  // Serialize camelCase
-//! IndicatorState::idle() -> IndicatorState
+//!                  headphones_hint: String, warnings: Vec<IndicatorWarning>,
+//!                  lang: UiLanguage }  // Serialize camelCase; `lang` is "en" | "ru" (T-204)
+//! IndicatorState::idle(lang: UiLanguage) -> IndicatorState   // lang = the settings language
 //! IndicatorState::recording(lang: UiLanguage, reminder_visible: bool,
 //!                           warnings: Vec<IndicatorWarning>) -> IndicatorState
-//!     // reminder_text / headphones_hint = i18n INDICATOR_REMINDER / INDICATOR_HEADPHONES in `lang`
-//!     // when reminder_visible, else both empty
+//!     // .lang == `lang`; reminder_text / headphones_hint = i18n INDICATOR_REMINDER /
+//!     // INDICATOR_HEADPHONES in `lang` when reminder_visible, else both empty
 //! IndicatorTick { elapsed_ms: u64, mic_level: f32, system_level: f32, mic_silent: bool,
 //!                 system_silent: bool }  // Serialize camelCase
 //! IndicatorWarning { id: u32, kind: WarningKind, text: String }  // Serialize
@@ -76,7 +77,8 @@ fn e2e_call_indicator_wire_fixture_matches_core() {
     let fixture: Value = serde_json::from_str(FIXTURE)
         .unwrap_or_else(|e| panic!("call-indicator-wire.json is valid JSON: {e}"));
     let cases: Vec<(&str, Value)> = vec![
-        ("idle", wire(&IndicatorState::idle())),
+        ("idle_en", wire(&IndicatorState::idle(UiLanguage::En))),
+        ("idle_ru", wire(&IndicatorState::idle(UiLanguage::Ru))),
         (
             "recording_reminder_en",
             wire(&IndicatorState::recording(UiLanguage::En, true, Vec::new())),
@@ -167,8 +169,9 @@ fn the_reminder_is_blank_when_hidden_and_rendered_when_shown() {
     assert!(hidden.recording && !hidden.reminder_visible);
     assert_eq!(hidden.reminder_text, "");
     assert_eq!(hidden.headphones_hint, "");
-    let idle = IndicatorState::idle();
+    let idle = IndicatorState::idle(UiLanguage::Ru);
     assert!(!idle.recording && !idle.reminder_visible && idle.warnings.is_empty());
+    assert_eq!(idle.lang, UiLanguage::Ru);
 }
 
 #[test]

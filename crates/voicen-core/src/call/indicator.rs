@@ -205,6 +205,26 @@ mod tests {
     }
 
     #[test]
+    fn every_constructor_carries_the_language_it_is_given() {
+        // T-204: the field cannot drift from the texts rendered in the same language.
+        // Bite: a fixed language, `idle` or `recording` ignoring its argument.
+        for lang in [UiLanguage::En, UiLanguage::Ru] {
+            assert_eq!(IndicatorState::idle(lang).lang, lang);
+            for visible in [true, false] {
+                let state = IndicatorState::recording(lang, visible, Vec::new());
+                assert_eq!(state.lang, lang);
+                if visible {
+                    assert_eq!(state.reminder_text, text(lang, INDICATOR_REMINDER, &[]));
+                }
+            }
+        }
+        assert_ne!(
+            IndicatorState::idle(UiLanguage::En),
+            IndicatorState::idle(UiLanguage::Ru)
+        );
+    }
+
+    #[test]
     fn ids_start_at_1_and_follow_the_raise_order() {
         let mut list = WarningList::new();
         assert_eq!(list.raise(CallWarning::MicChanged), Some(1));

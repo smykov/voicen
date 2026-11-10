@@ -33,6 +33,7 @@ use voicen_core::call::{
 };
 use voicen_core::clock::FakeClock;
 use voicen_core::hotkey_registrar::FakeHotkeyRegistrar;
+use voicen_core::i18n::UiLanguage;
 use voicen_core::models::FakeDownloadedModels;
 use voicen_core::platform::DeviceId;
 use voicen_core::secrets::FakeCredentialStore;
@@ -1044,7 +1045,7 @@ fn stop_closes_both_files_readable_and_reports_it() {
         assert_eq!(rig.indicator.recording_flags(), vec![true, false], "{name}");
         assert_eq!(
             rig.indicator.states().last(),
-            Some(&IndicatorState::idle()),
+            Some(&IndicatorState::idle(UiLanguage::En)),
             "{name}"
         );
     }
@@ -1197,6 +1198,67 @@ fn the_reminder_is_not_shown_at_all_when_it_is_off() {
     rig.session.tick();
     assert_eq!(rig.indicator.states().len(), 1);
     rig.session.stop(StopReason::User);
+}
+
+#[test]
+fn a_settings_language_change_mid_call_keeps_the_call_language() {
+    // T-204 (decision #256), Acceptance 1-3 and the failure branch: while a call records,
+    // every published state carries the call's language (the settings language at the start)
+    // and its Rust-rendered texts are in that language, whatever the settings say later;
+    // the idle state published at the stop carries the settings language of that moment.
+    // Bite: `Call::state()` reading the settings snapshot's language, a state built with
+    // the wrong language, `idle` given the call's language or a fixed one, a missing field.
+    let rig = CallRig::with(|s| {
+        s.ui_language = UiLanguage::En;
+        s.calls.reminder = true;
+    });
+    started(&rig, CallSource::Tray);
+    let first = rig.indicator.states();
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].lang, UiLanguage::En);
+    assert!(first[0].reminder_visible, "the reminder is on");
+    let notice_id = first[0]
+        .warnings
+        .iter()
+        .find(|w| w.kind == WarningKind::ProviderNotice)
+        .map(|w| w.id)
+        .expect("a non-loopback provider lists its notice");
+
+    rig.port.edit(|s| s.ui_language = UiLanguage::Ru);
+
+    // Republish 1: a dismiss (the reminder still shows, the notice goes).
+    assert!(rig.session.dismiss_warning(notice_id));
+    // Republish 2: the reminder ends on the fake mono clock.
+    rig.mono.advance(ms(10_000));
+    rig.session.tick();
+
+    let during = rig.indicator.states();
+    assert!(during.len() >= 3, "two republishes happened: {during:?}");
+    for (i, state) in during.iter().enumerate() {
+        assert!(state.recording, "state {i}");
+        assert_eq!(state.lang, UiLanguage::En, "state {i}: {state:?}");
+    }
+    assert_eq!(
+        during[0].reminder_text,
+        "Tell the other party the call is being recorded"
+    );
+    assert_eq!(
+        during[1].reminder_text, "Tell the other party the call is being recorded",
+        "the republish after the settings change is still English"
+    );
+    assert_eq!(
+        during[0].warnings[0].text,
+        "The other party's audio goes to provider api.example.com"
+    );
+    let ended = during.last().expect("a state");
+    assert!(!ended.reminder_visible, "the reminder ended");
+
+    rig.session.stop(StopReason::User);
+    assert_eq!(
+        rig.indicator.states().last(),
+        Some(&IndicatorState::idle(UiLanguage::Ru)),
+        "idle carries the settings language read at the stop"
+    );
 }
 
 // ---- the provider notice ----------------------------------------------------------------

@@ -1,32 +1,44 @@
 {
-  "_format": "Core-checked wire data of the call indicator IPC (specs/007-call-mode-record contracts/ipc.md: the indicator://state and indicator://tick event payloads and the call_indicator_state reply) for the Playwright IPC mock, the same pattern as overlay-wire.json. Each key is serde_json of the voicen_core::call::indicator value built as follows: idle = IndicatorState::idle(); recording_reminder_en / recording_reminder_ru = IndicatorState::recording(lang, true, []) (reminder and headphones hint rendered by Rust i18n::text); recording_no_reminder_en = IndicatorState::recording(en, false, []) (both texts empty); warnings_en / warnings_ru = IndicatorState::recording(lang, false, w) with w = IndicatorWarning::of(id, warning, lang) for the ids 1..8 and the warnings communications_device_differs, track_lost mic, track_lost system, mic_changed, cant_hear_other_party, cant_hear_you, low_disk, provider_notice host api.example.com; tick_levels = IndicatorTick {elapsed_ms 61000, mic_level 0.5, system_level 0.25, both silent false}; tick_silent = IndicatorTick {elapsed_ms 0, levels 0.0, both silent true}. Kept in sync by the core test e2e_call_indicator_wire_fixture_matches_core (crates/voicen-core/tests/call_indicator_wire.rs): when it fails, copy the value it prints. Never edit by hand to make an e2e test pass.",
-  "idle": {
+  "_format": "Core-checked wire data of the call indicator IPC (specs/007-call-mode-record contracts/ipc.md: the indicator://state and indicator://tick event payloads and the call_indicator_state reply) for the Playwright IPC mock, the same pattern as overlay-wire.json. Every state carries lang (en or ru: the UI language of the call; idle: the settings language). Each key is serde_json of the voicen_core::call::indicator value built as follows: idle_en / idle_ru = IndicatorState::idle(lang); recording_reminder_en / recording_reminder_ru = IndicatorState::recording(lang, true, []) (reminder and headphones hint rendered by Rust i18n::text); recording_no_reminder_en = IndicatorState::recording(en, false, []) (both texts empty); warnings_en / warnings_ru = IndicatorState::recording(lang, false, w) with w = IndicatorWarning::of(id, warning, lang) for the ids 1..8 and the warnings communications_device_differs, track_lost mic, track_lost system, mic_changed, cant_hear_other_party, cant_hear_you, low_disk, provider_notice host api.example.com; tick_levels = IndicatorTick {elapsed_ms 61000, mic_level 0.5, system_level 0.25, both silent false}; tick_silent = IndicatorTick {elapsed_ms 0, levels 0.0, both silent true}. Kept in sync by the core test e2e_call_indicator_wire_fixture_matches_core (crates/voicen-core/tests/call_indicator_wire.rs): when it fails, copy the value it prints. Never edit by hand to make an e2e test pass.",
+  "idle_en": {
     "recording": false,
     "reminderVisible": false,
     "reminderText": "",
     "headphonesHint": "",
-    "warnings": []
+    "warnings": [],
+    "lang": "en"
+  },
+  "idle_ru": {
+    "recording": false,
+    "reminderVisible": false,
+    "reminderText": "",
+    "headphonesHint": "",
+    "warnings": [],
+    "lang": "ru"
   },
   "recording_reminder_en": {
     "recording": true,
     "reminderVisible": true,
     "reminderText": "Tell the other party the call is being recorded",
     "headphonesHint": "Better with headphones",
-    "warnings": []
+    "warnings": [],
+    "lang": "en"
   },
   "recording_reminder_ru": {
     "recording": true,
     "reminderVisible": true,
     "reminderText": "Предупредите собеседника, что звонок записывается",
     "headphonesHint": "Лучше в наушниках",
-    "warnings": []
+    "warnings": [],
+    "lang": "ru"
   },
   "recording_no_reminder_en": {
     "recording": true,
     "reminderVisible": false,
     "reminderText": "",
     "headphonesHint": "",
-    "warnings": []
+    "warnings": [],
+    "lang": "en"
   },
   "warnings_en": {
     "recording": true,
@@ -42,7 +54,8 @@
       { "id": 6, "kind": "cantHearYou", "text": "Can't hear you — check the microphone" },
       { "id": 7, "kind": "lowDisk", "text": "Less than 1 GB free in the calls folder" },
       { "id": 8, "kind": "providerNotice", "text": "The other party's audio goes to provider api.example.com" }
-    ]
+    ],
+    "lang": "en"
   },
   "warnings_ru": {
     "recording": true,
@@ -58,7 +71,8 @@
       { "id": 6, "kind": "cantHearYou", "text": "Не слышно вас — проверьте микрофон" },
       { "id": 7, "kind": "lowDisk", "text": "В папке звонков свободно меньше 1 ГБ" },
       { "id": 8, "kind": "providerNotice", "text": "Звук собеседника отправляется провайдеру api.example.com" }
-    ]
+    ],
+    "lang": "ru"
   },
   "tick_levels": {
     "elapsedMs": 61000,
