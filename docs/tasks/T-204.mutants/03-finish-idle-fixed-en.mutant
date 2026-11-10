@@ -1,0 +1,10 @@
+guarantee: AC-3: the idle state after stop carries the current settings language
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+        let lang = self.deps.settings.snapshot().ui_language;
+        self.deps.indicator.set_state(&IndicatorState::idle(lang));
+--- new
+        let _lang = self.deps.settings.snapshot().ui_language;
+        self.deps.indicator.set_state(&IndicatorState::idle(UiLanguage::En));
+--- end

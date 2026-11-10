@@ -1,0 +1,2 @@
+# Narrowed to the task's tests: the mid-call language test, the stop test, the wire test, the indicator unit test.
+cargo test -j2 -p voicen-core --lib --test call_indicator_wire --test call_session

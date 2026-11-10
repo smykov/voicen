@@ -1,0 +1,12 @@
+guarantee: AC-2 / failure branch: reminder_tick republishing with the settings language mid-call fails a core test
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+        call.reminder_until = None;
+        self.deps.indicator.set_state(&call.state());
+--- new
+        call.reminder_until = None;
+        let mut state = call.state();
+        state.lang = self.deps.settings.snapshot().ui_language;
+        self.deps.indicator.set_state(&state);
+--- end
