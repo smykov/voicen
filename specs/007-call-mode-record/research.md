@@ -267,7 +267,8 @@ Crate facts were read from the published sources of `opus` 0.4.0 / `opusic-sys` 
   - **Scoring**: core's `wer` module computes word error rate (normalization: lowercase, punctuation stripped, numbers as written, `ё`→`е` for Russian; word-level Levenshtein) and is unit-tested on the Linux host.
   - **English set**: a pinned subset of LibriSpeech test-clean (CC BY 4.0, #185).
     - The archive is `test-clean.tar.gz`, 346 663 984 bytes. OpenSLR publishes MD5 `32fa31d27d2e1cad72775fee3f4849a9` only, so the first fetch also pins our own SHA-256.
-    - The subset is a committed manifest of utterance ids totalling ≥ 30 min. They are concatenated in manifest order into one 16 kHz mono WAV per speaker group, so the chunker and VAD are exercised.
+    - The subset is a committed manifest of utterance ids totalling ≥ 30 min. They are concatenated in manifest order into one 16 kHz mono item per speaker group (`<spk>-<ch>`), so the chunker and VAD are exercised.
+  - **Path measured (T-163, #252)**: every item of both sets goes through one `call::final_pass::run_pass` over a temp call folder (mic = the item, system = empty) with `primary: None`, so the SC-004 figure is "final pass, energy spans (the fallback path)"; no Silero figure is claimed. The key is required (the pass refuses a missing key, FR-022).
   - **FLAC (decided, #186)**: the archive is FLAC. The owner converts the subset once to 16 kHz mono WAV with an external tool; the command is documented in the example's usage. The example reads WAV only and adds no dependency (no `claxon`).
   - **Russian set**: the owner's 2 × 10-min labelled calls with word-for-word transcripts, kept outside the repository (customer data rule).
 - **Rationale**: FR-047, SC-004, CA-7. Nothing of the sets or the key enters the repository or CI.

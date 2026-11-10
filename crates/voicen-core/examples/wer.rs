@@ -1,13 +1,19 @@
-//! Word error rate of an OpenAI-compatible transcription engine (T-140; spec 007
-//! FR-047, SC-004, research R23, decisions #185, #186, #221). The real measurement is
-//! owner-run. The gate and CI compile and lint this example, and run it only against
-//! a loopback server with fake data, for the output invariant (`tests/wer_example.rs`).
+//! Word error rate of the call final pass (T-140, T-163; spec 007 FR-047, SC-004,
+//! research R23, decisions #185, #186, #221, #252). The real measurement is owner-run.
+//! The gate and CI compile and lint this example, and run it only against a loopback
+//! server with fake data, for the output invariant (`tests/wer_example.rs`).
 //!
 //! Scoring is `voicen_core::wer` (one computation); WAV goes through
-//! `test_support::realtime::read_wav` and `AudioBuffer::from_frames`; each item is
-//! one `Engine::transcribe` of `OpenAiCompatibleEngine`. Only WAV is read (no FLAC
-//! decoder, #186). The output is ids and counts only: never transcript text,
-//! reference text or the key.
+//! `test_support::realtime::read_wav` and `AudioBuffer::from_frames`. Every item (a
+//! LibriSpeech `<spk>-<ch>` group or a pairs file) is transcribed only by one
+//! `call::final_pass::run_pass` over a temp call folder written through `CallStore` and
+//! the track encoders (mic = the item's audio, system = empty), with `primary: None`, so
+//! the spans are the energy detector's (the fallback path, #252): the chunker, the VAD
+//! and the merge run as in the app. The hypothesis is the mic lines of the pass's
+//! `transcript.json` by `start_ms`, joined; a pass that does not end ready is a failed
+//! item. The folder is removed when the item ends. Only WAV is read (no FLAC decoder,
+//! #186). The output is ids, counts, the pass mode and chunk count only: never
+//! transcript text, reference text or the key.
 //!
 //! Modes:
 //!
@@ -17,7 +23,9 @@
 //! - `librispeech <test-clean-dir>`: every utterance id of the committed manifest
 //!   `examples/wer-librispeech-test-clean.txt`, read as
 //!   `<dir>/<spk>/<ch>/<id>.wav` with the reference from `<dir>/<spk>/<ch>/<spk>-<ch>.trans.txt`,
-//!   language `en`. Refused when the WAVs found hold less than 30 min of audio.
+//!   language `en`. The utterances of one `<spk>-<ch>` group are concatenated in
+//!   manifest order and scored as one item named by the group. Refused when the WAVs
+//!   found hold less than 30 min of audio.
 //! - `pairs <dir> [language]`: every `<name>.wav` in `<dir>` with a `<name>.txt`
 //!   reference next to it (for example the owner's Russian calls, language `ru`).
 //!
@@ -53,12 +61,16 @@
 //!   cargo run -p voicen-core --example wer -- pairs /data ru
 //! ```
 //!
-//! Environment: `VOICEN_WER_KEY` (the API key; unset or empty = no
-//! `Authorization` header), `VOICEN_WER_BASE_URL` (default
-//! `https://api.openai.com/v1`, checked by `check_base_url`), `VOICEN_WER_MODEL`
-//! (default `whisper-1`). A variable not forwarded by `-e` (or not set in the
-//! calling shell) is unset inside the container, so its default applies; for the
-//! key that means requests without `Authorization`.
+//! Environment: `VOICEN_WER_KEY` (the API key, required: the final pass refuses a
+//! missing or blank key, FR-022, so the example exits 2 before any request),
+//! `VOICEN_WER_BASE_URL` (default `https://api.openai.com/v1`, checked by
+//! `check_base_url`), `VOICEN_WER_MODEL` (default `whisper-1`). A variable not
+//! forwarded by `-e` (or not set in the calling shell) is unset inside the container,
+//! so its default applies; for the key that is the refusal.
+//!
+//! Output per item: `<id> pass mode=<timed|timeless> chunks=<n>` (the mic track's
+//! chunks), then `<id> S= D= I= N= WER=` or `<id> failed <reason>`; at the end
+//! `wer: total over N scored items (F failed): ...`.
 //!
 //! Exit 0: scored, no item failed. Exit 1: refused (too little audio, checksum
 //! mismatch, nothing to score) or at least one item failed. Exit 2: wrong usage or
@@ -69,16 +81,28 @@ use std::fs::File;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::time::Duration;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
+use std::time::SystemTime;
 
 use sha2::{Digest, Sha256};
 use voicen_core::audio::AudioBuffer;
-use voicen_core::engine::openai::OpenAiCompatibleEngine;
-use voicen_core::engine::{Engine, TranscribeRequest};
-use voicen_core::secrets::Secret;
+use voicen_core::call::codec::TrackEncoder;
+use voicen_core::call::final_pass::{run_pass, PassCall, PassDeps, PassEvents};
+use voicen_core::call::storage::write_meta;
+use voicen_core::call::{
+    CallNotice, CallState, CallStore, EndpointId, FailReason, FinalOutcome, NewCall, Track,
+    TranscriptV1,
+};
+use voicen_core::clock::SystemMonotonic;
+use voicen_core::diag::event::LogEvent;
+use voicen_core::i18n::UiLanguage;
+use voicen_core::secrets::{FakeCredentialStore, KeySlot};
+use voicen_core::settings::roots::FsCallRoots;
 use voicen_core::settings::url::check_base_url;
+use voicen_core::settings::{defaults, Settings};
 use voicen_core::test_support::realtime::read_wav;
-use voicen_core::timeouts::Timeouts;
+use voicen_core::test_support::TempDir;
 use voicen_core::wer::{normalize, score, WerCounts};
 
 /// The committed LibriSpeech manifest: header comments, then one utterance id per line.
@@ -89,8 +113,9 @@ const DEFAULT_MODEL: &str = "whisper-1";
 const RATE: usize = 16_000;
 /// Decision #185: at least 30 min of LibriSpeech audio.
 const MIN_LIBRISPEECH_SAMPLES: usize = 30 * 60 * RATE;
-/// One utterance is at most about 35 s; the default 30 s API deadline is too tight.
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+/// The per-request deadline of the pass (`timeouts.api_transcription_s`): a timed chunk
+/// is up to 120 s of audio, so the default 30 s is too tight.
+const REQUEST_TIMEOUT_S: u32 = 120;
 
 const USAGE: &str = "usage:
   wer verify-archive <test-clean.tar.gz>
@@ -110,13 +135,15 @@ Prepare LibriSpeech test-clean (on the host):
   tar -xzf test-clean.tar.gz
   ffmpeg -i X.flac -ar 16000 -ac 1 -c:a pcm_s16le X.wav   (once per FLAC file)
 
-Environment: VOICEN_WER_KEY, VOICEN_WER_BASE_URL (default https://api.openai.com/v1),
-VOICEN_WER_MODEL (default whisper-1); a variable not passed with -e is unset in the container.";
+Environment: VOICEN_WER_KEY (required), VOICEN_WER_BASE_URL (default
+https://api.openai.com/v1), VOICEN_WER_MODEL (default whisper-1); a variable not passed
+with -e is unset in the container.";
 
-/// One scored item: its id, audio and normalized reference.
+/// One scored item: its id (a `<spk>-<ch>` group or a pairs file stem), its 16 kHz mono
+/// audio and its normalized reference.
 struct Item {
     id: String,
-    audio: AudioBuffer,
+    audio: Vec<i16>,
     reference: Vec<String>,
 }
 
@@ -197,7 +224,11 @@ fn sha256_hex(path: &Path) -> io::Result<String> {
 }
 
 fn librispeech(dir: &Path) -> ExitCode {
-    let mut items = Vec::new();
+    // One item per `<spk>-<ch>` group, in the order the manifest first names it; its
+    // audio is the found utterances concatenated in manifest order, its reference their
+    // references joined.
+    let mut items: Vec<Item> = Vec::new();
+    let mut found = 0usize;
     let mut missing = 0usize;
     let mut chapters: HashMap<(String, String), HashMap<String, String>> = HashMap::new();
     for id in manifest_ids() {
@@ -218,20 +249,34 @@ fn librispeech(dir: &Path) -> ExitCode {
             missing += 1;
             continue;
         };
-        match load_wav(&chapter_dir.join(format!("{id}.wav"))) {
-            Some(audio) => items.push(Item {
-                id: id.to_string(),
-                audio,
-                reference: normalize(reference),
-            }),
-            None => missing += 1,
+        let Some(audio) = load_wav(&chapter_dir.join(format!("{id}.wav"))) else {
+            missing += 1;
+            continue;
+        };
+        found += 1;
+        let group = format!("{spk}-{ch}");
+        let at = match items.iter().position(|item| item.id == group) {
+            Some(at) => at,
+            None => {
+                items.push(Item {
+                    id: group,
+                    audio: Vec::new(),
+                    reference: Vec::new(),
+                });
+                items.len() - 1
+            }
+        };
+        if let Some(item) = items.get_mut(at) {
+            item.audio.extend_from_slice(audio.samples());
+            item.reference.extend(normalize(reference));
         }
     }
-    let samples: usize = items.iter().map(|item| item.audio.samples().len()).sum();
+    let samples: usize = items.iter().map(|item| item.audio.len()).sum();
     println!(
-        "wer: {} of {} manifest utterances found ({missing} missing), {:.1} min of audio",
+        "wer: {found} of {} manifest utterances found ({missing} missing) in {} speaker \
+         groups, {:.1} min of audio",
+        found + missing,
         items.len(),
-        items.len() + missing,
         minutes(samples)
     );
     if samples < MIN_LIBRISPEECH_SAMPLES {
@@ -284,7 +329,7 @@ fn pairs(dir: &Path, language: Option<String>) -> ExitCode {
         match (reference, load_wav(&wav)) {
             (Ok(reference), Some(audio)) => items.push(Item {
                 id,
-                audio,
+                audio: audio.samples().to_vec(),
                 reference: normalize(&reference),
             }),
             _ => {
@@ -293,7 +338,7 @@ fn pairs(dir: &Path, language: Option<String>) -> ExitCode {
             }
         }
     }
-    let samples: usize = items.iter().map(|item| item.audio.samples().len()).sum();
+    let samples: usize = items.iter().map(|item| item.audio.len()).sum();
     println!(
         "wer: {} pairs found ({missing} skipped), {:.1} min of audio",
         items.len(),
@@ -313,32 +358,32 @@ fn minutes(samples: usize) -> f64 {
     samples as f64 / RATE as f64 / 60.0
 }
 
-/// Transcribes and scores every item; prints one line per item and the set totals.
+/// Transcribes every item through the final pass and scores it; prints one score line
+/// and one pass line per item and the set totals.
 fn run(items: &[Item], language: Option<String>) -> ExitCode {
     if items.is_empty() {
         eprintln!("wer: nothing to score");
         return ExitCode::from(1);
     }
-    let Some(engine) = engine() else {
+    let Some(config) = config(language) else {
         return ExitCode::from(2);
     };
-    let timeouts = Timeouts {
-        api_transcription: REQUEST_TIMEOUT,
-        ..Timeouts::default()
-    };
-    let request = TranscribeRequest { language, timeouts };
     let mut total = WerCounts::default();
     let mut failed = 0usize;
     for item in items {
-        match engine.transcribe(&item.audio, &request) {
-            Ok(text) => {
-                let counts = score(&item.reference, &normalize(&text));
+        let (pass, result) = transcribe_item(&config, item);
+        if let Some(pass) = pass {
+            println!("{} pass mode={} chunks={}", item.id, pass.mode, pass.chunks);
+        }
+        match result {
+            Ok(hypothesis) => {
+                let counts = score(&item.reference, &normalize(&hypothesis));
                 println!("{} {}", item.id, describe(&counts));
                 total.add(&counts);
             }
-            Err(reason) => {
-                // The code only: a reason's details may carry server text.
-                println!("{} failed {}", item.id, reason.code());
+            Err(code) => {
+                // The code only: never server text.
+                println!("{} failed {code}", item.id);
                 failed += 1;
             }
         }
@@ -365,23 +410,160 @@ fn describe(counts: &WerCounts) -> String {
     )
 }
 
-/// The engine from `VOICEN_WER_*`; `None` (reason printed, never the key) when the
-/// base URL is refused.
-fn engine() -> Option<OpenAiCompatibleEngine> {
+/// What every item's pass reads: one settings snapshot and a key store holding only
+/// `VOICEN_WER_KEY`.
+struct Config {
+    settings: Arc<Settings>,
+    creds: FakeCredentialStore,
+}
+
+/// The pass configuration from `VOICEN_WER_*`; `None` (reason printed, never the key)
+/// when the base URL is refused or the key is missing or blank.
+fn config(language: Option<String>) -> Option<Config> {
     let raw_url =
         std::env::var("VOICEN_WER_BASE_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
-    let Ok(base_url) = check_base_url(&raw_url) else {
+    if check_base_url(&raw_url).is_err() {
         eprintln!("wer: VOICEN_WER_BASE_URL is not an http(s) URL without userinfo");
         return None;
-    };
+    }
     let model = std::env::var("VOICEN_WER_MODEL")
         .ok()
         .map(|model| model.trim().to_string())
         .filter(|model| !model.is_empty())
         .unwrap_or_else(|| DEFAULT_MODEL.to_string());
-    let key = std::env::var("VOICEN_WER_KEY")
+    let Some(key) = std::env::var("VOICEN_WER_KEY")
         .ok()
         .filter(|key| !key.trim().is_empty())
-        .map(Secret::new);
-    Some(OpenAiCompatibleEngine::new(base_url, model, key))
+    else {
+        // The final pass refuses a missing or blank key (engine_not_set_up, FR-022).
+        eprintln!("wer: VOICEN_WER_KEY is unset or blank; the final pass needs the API key");
+        return None;
+    };
+    let mut settings = defaults(None);
+    settings.api.base_url = raw_url;
+    settings.api.model = model;
+    settings.speech_language = language;
+    settings.timeouts.api_transcription_s = REQUEST_TIMEOUT_S;
+    Some(Config {
+        settings: Arc::new(settings),
+        creds: FakeCredentialStore::new().with_key(KeySlot::TranscriptionApi, &key),
+    })
+}
+
+/// What the item's pass reported: its mode and the mic track's chunk count.
+struct PassLine {
+    mode: String,
+    chunks: u32,
+}
+
+/// Keeps only the mic track's chunk count of `final_stage` events; drops the rest.
+#[derive(Default)]
+struct ChunkCount(AtomicU32);
+
+impl PassEvents for ChunkCount {
+    fn log(&self, event: LogEvent) {
+        if let LogEvent::FinalPassStage {
+            track: Track::Mic,
+            chunks,
+            ..
+        } = event
+        {
+            self.0.fetch_max(chunks, Ordering::Relaxed);
+        }
+    }
+
+    fn notice(&self, _notice: CallNotice) {}
+}
+
+/// The one transcription path of the example: a temp call folder with `item`'s audio as
+/// the mic track and an empty system track, one `run_pass` over it (energy spans, the
+/// fallback path, #252), and the hypothesis from its `transcript.json`. The folder is
+/// removed when this returns. `Err` is the failure code only.
+fn transcribe_item(config: &Config, item: &Item) -> (Option<PassLine>, Result<String, String>) {
+    let tmp = TempDir::new();
+    let call = match write_call(tmp.path(), &config.settings, &item.audio) {
+        Ok(call) => call,
+        Err(()) => return (None, Err(code_of(FailReason::Storage))),
+    };
+    let dir = call.dir.clone();
+    let events = ChunkCount::default();
+    let outcome = run_pass(
+        call,
+        Arc::clone(&config.settings),
+        &config.creds,
+        PassDeps {
+            primary: None,
+            events: &events,
+            clock: Arc::new(SystemMonotonic),
+        },
+    );
+    let line = PassLine {
+        mode: code_of(outcome.mode),
+        chunks: events.0.load(Ordering::Relaxed),
+    };
+    let result = match outcome.outcome {
+        FinalOutcome::Ready => hypothesis(&dir).ok_or_else(|| code_of(FailReason::Storage)),
+        FinalOutcome::Failed { reason } => Err(code_of(reason)),
+    };
+    (Some(line), result)
+}
+
+/// A call folder under `root` in state `ready-to-transcribe`: `mic` = `samples`, system
+/// empty, written through `CallStore` and the track encoders as the app writes them.
+fn write_call(root: &Path, settings: &Settings, samples: &[i16]) -> Result<PassCall, ()> {
+    let store = CallStore::new(
+        Arc::new(FsCallRoots::new(root.join("calls"))),
+        Arc::new(SystemMonotonic),
+    );
+    let new = NewCall {
+        started: SystemTime::now(),
+        seconds_east: 0,
+        mic: EndpointId::new("wer-mic"),
+        system: EndpointId::new("wer-system"),
+        lang: UiLanguage::En,
+        app_version: env!("CARGO_PKG_VERSION").to_string(),
+    };
+    let mut files = store.create(&settings.calls, &new).map_err(|_| ())?;
+    let dir = files.dir().to_path_buf();
+    let mut meta = files.meta().clone();
+    let mut block = Vec::with_capacity(RATE);
+    for piece in samples.chunks(RATE) {
+        block.clear();
+        block.extend(piece.iter().map(|&s| f32::from(s) / 32_768.0));
+        files.mic.push(&block).map_err(|_| ())?;
+    }
+    files.mic.finish().map_err(|_| ())?;
+    files.system.finish().map_err(|_| ())?;
+    store.release(&dir);
+    meta.state = CallState::ReadyToTranscribe;
+    meta.duration_ms = Some(samples.len() as u64 * 1_000 / RATE as u64);
+    write_meta(&dir, &meta).map_err(|_| ())?;
+    Ok(PassCall { dir, meta })
+}
+
+/// The mic lines of the pass's `transcript.json`, by `start_ms`, their text joined.
+fn hypothesis(dir: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(dir.join("transcript.json")).ok()?;
+    let transcript = TranscriptV1::from_json(&text).ok()?;
+    let mut lines: Vec<_> = transcript
+        .segments
+        .into_iter()
+        .filter(|segment| segment.track == Track::Mic.as_str())
+        .collect();
+    lines.sort_by_key(|segment| segment.start_ms);
+    Some(
+        lines
+            .iter()
+            .map(|segment| segment.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
+}
+
+/// The serde name of `value` (`meta.json`'s literal for a fail reason or pass mode).
+fn code_of(value: impl serde::Serialize) -> String {
+    match serde_json::to_value(value) {
+        Ok(serde_json::Value::String(code)) => code,
+        _ => "unknown".to_string(),
+    }
 }
