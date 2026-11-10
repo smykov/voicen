@@ -17,7 +17,7 @@ Tasks: T-027, T-063 (bundling the file into the installer: T-025, spec 006 T029/
 
 - **Defect that produced it:** found in T-027 analysis: Svelte and SvelteKit are devDependencies but their runtime ships in `build/_app`; `pnpm licenses list --prod` lists only `@tauri-apps/api`. Checking all packages instead fails on dev tools that never ship (minimatch BlueOak-1.0.0, lightningcss MPL-2.0).
 - **What breaks if you violate it:** shipped code goes unchecked and unlisted, or the gate fails on code we do not ship.
-- **Where it is enforced:** the Vite plugin writes `target/licenses/npm-bundled.json` from the modules actually bundled; `check.mjs --require svelte` fails on an empty or missing list. `make licenses-bundle` deletes the previous list before `pnpm build`, so a build that records nothing cannot pass on a stale list.
+- **Where it is enforced:** the Vite plugin writes `target/licenses/npm-bundled.json` from the modules actually bundled (with `VOICEN_E2E_OUT_DIR` set, i.e. an e2e build, it writes `<run dir>/npm-bundled.json` and leaves `target/licenses` untouched, so a run cannot slip a list in between `licenses-bundle`'s delete and its build; every write is a temp file plus rename; T-177); `check.mjs --require svelte` fails on an empty or missing list. `make licenses-bundle` deletes the previous list before `pnpm build`, so a build that records nothing cannot pass on a stale list.
 - **Don't:** go back to `pnpm licenses --prod` or to `dependencies` vs `devDependencies`.
 
 ### The bundle check fails closed for what the plugin sees: every bundled module and file-backed asset is ours or a package's
