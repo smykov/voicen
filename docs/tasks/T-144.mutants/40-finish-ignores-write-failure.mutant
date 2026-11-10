@@ -1,0 +1,11 @@
+guarantee: AC-4 (review 1 #1): any stop after a failed track write is a storage-error stop (finish ignores the write-failure flag; old text pinned to the expected fix shape, re-pin after the fix)
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+                    mic, system, meta, failed, ..
+                } = *rec;
+--- new
+                    mic, system, meta, ..
+                } = *rec;
+                let failed = false;
+--- end

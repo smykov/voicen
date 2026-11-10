@@ -3018,6 +3018,96 @@ fn after_a_write_failure_a_drop_is_not_written_into_meta() {
     assert_eq!(rig.only_meta()["state"], json!("recording"));
 }
 
+/// What any stop after a failed track write leaves (Acceptance 4, FR-016, I-d; review
+/// round 1 #1): whatever reason was asked, the stop is a storage-error stop. meta.json is
+/// byte-equal to `meta_before` (still `recording`, no duration that counts audio never
+/// written), `call_stopped reason=storage_error`, the only notice `Stopped{StorageError}`
+/// (never `CallSavedTranscribing`), the indicator off, and the call lists as Recovered.
+#[track_caller]
+fn stopped_as_storage_error(rig: &CallRig, meta_before: &[u8]) {
+    assert!(!rig.session.is_recording(), "the stop ended the call");
+    // Compared as text so a rewrite reads in the failure (state, duration, stop reason).
+    assert_eq!(
+        String::from_utf8_lossy(&call_meta_bytes(rig)),
+        String::from_utf8_lossy(meta_before),
+        "meta.json untouched after a write failure"
+    );
+    assert_eq!(rig.only_meta()["state"], json!("recording"));
+    let stopped = rig.lines_named("call_stopped");
+    assert_eq!(stopped.len(), 1, "{stopped:?}");
+    assert_eq!(stopped[0].get("reason"), Some("storage_error"));
+    assert_eq!(
+        rig.shell.calls(),
+        vec![ShellCall::Notice(CallNotice::Stopped {
+            reason: StopReason::StorageError
+        })]
+    );
+    assert_eq!(rig.indicator.recording_flags().last(), Some(&false));
+    let listed = rig.store.list(&call_support::settings(&rig.root).calls);
+    let states: Vec<ListState> = listed.entries.iter().map(|e| e.state).collect();
+    assert_eq!(states, vec![ListState::Recovered]);
+}
+
+#[test]
+fn a_user_stop_after_a_write_failure_is_a_storage_error_stop() {
+    // Review round 1 #1 (second path): the writer's failure only raises a flag that `tick`
+    // acts on later; a user stop in that window (no tick at all here) must still stop as
+    // `storage_error` from the writer's own fact, not rewrite meta.json ready-to-transcribe.
+    // Subtitles on: the stop goes through the writer's Detach. The mic's write fails once
+    // (F-024); progress is read from the log line and the consumer, never from ticks
+    // (F-031). Bite: `finish` deciding keep_meta / the logged reason from the asked
+    // reason only, `stop` noticing from the asked reason.
+    let rig = CallRig::with_capacity(8_192, quiet);
+    rig.session.toggle_subtitles(true, CallSource::Switch);
+    started(&rig, CallSource::Tray);
+    let both = [Track::Mic, Track::System];
+    rig.source.feed_both(0, 4_000, 0.3, 0.2);
+    rig.source.set_stamp_ms(4_000);
+    rig.mono.advance(ms(4_000));
+    drained(&rig, &both, 4_000);
+    let meta_before = call_meta_bytes(&rig);
+
+    rig.opener.fail_next_write("mic.opus");
+    rig.source.feed_both(4_000, 6_000, 0.3, 0.2);
+    rig.source.set_stamp_ms(6_000);
+    drained(&rig, &both, 6_000);
+    assert!(
+        wait(|| !rig.lines_named("call_storage_failed").is_empty()),
+        "the write failure is logged"
+    );
+    let baseline = track_sizes(&rig);
+
+    assert_eq!(
+        rig.session.toggle_record(false, CallSource::Tray),
+        Toggled::Stopped
+    );
+    stopped_as_storage_error(&rig, &meta_before);
+    assert_eq!(track_sizes(&rig), baseline, "no byte after the failure");
+    assert!(rig.session.is_subtitles(), "subtitles go on");
+}
+
+#[test]
+fn an_exit_stop_after_a_write_failure_is_a_storage_error_stop() {
+    // Review round 1 #1 (second path): the quit-time `stop(Exit)` in the window between
+    // the writer's failure and the next tick (no tick here). Subtitles off: the stop goes
+    // through the captures' close. The mic's write fails once (F-024); the failure is
+    // observed on the log line only (F-031). Bite: as above, through the close path.
+    let rig = CallRig::with_capacity(8_192, quiet);
+    started(&rig, CallSource::Tray);
+    let meta_before = call_meta_bytes(&rig);
+    rig.opener.fail_next_write("mic.opus");
+    rig.source.feed_both(0, 4_000, 0.3, 0.2);
+    rig.source.set_stamp_ms(4_000);
+    rig.mono.advance(ms(4_000));
+    assert!(
+        wait(|| !rig.lines_named("call_storage_failed").is_empty()),
+        "the write failure is logged"
+    );
+
+    assert!(rig.session.stop(StopReason::Exit));
+    stopped_as_storage_error(&rig, &meta_before);
+}
+
 #[test]
 fn free_space_is_polled_every_10_s_warns_once_below_1_gb_and_stops_below_200_mb() {
     // Acceptance 5: the call folder's free space is polled every 10 s of mono time (the

@@ -29,8 +29,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use voicen_core::call::codec::{scan, TrackEncoder};
-use voicen_core::call::storage::{write_meta, META_FILE};
-use voicen_core::call::{CallMeta, CallState, CallStore, EndpointId, ListState, NewCall};
+use voicen_core::call::storage::{write_meta, Failure, META_FILE};
+use voicen_core::call::{
+    CallMeta, CallState, CallStore, EndpointId, FailReason, ListState, NewCall, Track,
+};
 use voicen_core::clock::{MonotonicClock, SystemMonotonic};
 use voicen_core::diag::{Log, LogConfig};
 use voicen_core::i18n::UiLanguage;
@@ -160,6 +162,15 @@ fn set_state(dir: &Path, state: CallState) {
     let mut meta: CallMeta =
         serde_json::from_slice(&fs::read(dir.join(META_FILE)).expect("meta")).expect("meta");
     meta.state = state;
+    write_meta(dir, &meta).expect("write_meta");
+}
+
+/// A `failed` call as a final pass leaves it: the state with its `failure` reason.
+fn set_failed(dir: &Path, reason: FailReason, track: Option<Track>) {
+    let mut meta: CallMeta =
+        serde_json::from_slice(&fs::read(dir.join(META_FILE)).expect("meta")).expect("meta");
+    meta.state = CallState::Failed;
+    meta.failure = Some(Failure { reason, track });
     write_meta(dir, &meta).expect("write_meta");
 }
 
@@ -304,7 +315,8 @@ fn recover_requeues_transcribing_and_queues_ready_to_transcribe_oldest_first() {
     set_state(&transcribing, CallState::Transcribing);
     set_state(&ready, CallState::Ready);
     set_state(&recovered, CallState::Recovered);
-    set_state(&failed, CallState::Recovered);
+    set_failed(&failed, FailReason::Network, Some(Track::Mic));
+    let failed_before = fs::read(failed.join(META_FILE)).expect("meta");
 
     let out = e.store.recover(&calls_in(&e.root, &[&earlier]), &e.log);
     let ids: Vec<String> = out.queue.iter().map(|c| c.id.to_string()).collect();
@@ -321,6 +333,12 @@ fn recover_requeues_transcribing_and_queues_ready_to_transcribe_oldest_first() {
     assert_eq!(meta_of(&transcribing)["state"], "ready-to-transcribe");
     assert_eq!(meta_of(&ready)["state"], "ready");
     assert_eq!(meta_of(&recovered)["state"], "recovered");
+    assert_eq!(
+        fs::read(failed.join(META_FILE)).expect("meta"),
+        failed_before,
+        "a `failed` call is left as it is, its failure reason included"
+    );
+    assert_eq!(meta_of(&failed)["state"], "failed");
     assert!(out.recovered.is_empty(), "no `recording` call was found");
     assert_eq!(recovered_lines(&e), vec!["0".to_string()]);
 }
