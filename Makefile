@@ -3,10 +3,10 @@
 	check-ci-credentials \
 	check-clippy-lines \
 	check-core-test-os-answer check-ci-wip check-telegram-send check-telegram-failure-branch \
-	check-version-stamp check-release-check check-release check-release-guard check-nsis-fork check-e2e-entry-fixtures \
+	check-version-stamp check-release-check check-release check-release-guard check-nsis-fork check-e2e-entry-fixtures check-area-image-fixtures \
 	check-whisper-cmake-cache check-opus-cmake-cache check-whisper-model-key check-crt-imports check-whisper \
 	check-shell-windows check-ban-canary check-role-tools check-guard-trigger check-wip-push check-wip-run \
-	check-ui core-image ui-image \
+	check-ui core-image ui-image core-image-present \
 	licenses licenses-check licenses-unit licenses-fixture licenses-rust licenses-bundle \
 	licenses-npm licenses-generate licenses-stale licenses-stale-guard
 
@@ -15,7 +15,7 @@
 check: check-shell-layout check-shell-layout-fixtures check-helper-windows-fixtures check-ci-credentials check-role-tools check-guard-trigger check-wip-push check-wip-run \
 	check-clippy-lines \
 	check-core-test-os-answer check-ci-wip check-telegram-send check-telegram-failure-branch check-version-stamp check-release-check check-release check-release-guard check-nsis-fork check-whisper-cmake-cache check-opus-cmake-cache check-whisper-model-key check-crt-imports check-core check-whisper \
-	check-ban-canary check-shell-windows check-e2e-entry-fixtures check-ui \
+	check-ban-canary check-shell-windows check-e2e-entry-fixtures check-area-image-fixtures check-ui \
 	licenses-check
 
 # Shell tests only in src-tauri/tests/*.rs (T-035, T-038, T-092, F-002; docs/decisions/ci-toolchain.md):
@@ -23,12 +23,14 @@ check: check-shell-layout check-shell-layout-fixtures check-helper-windows-fixtu
 # bin test = false, doctest = false; no example, bench or extra target), and line 1 of the lib and
 # bin crate roots is the crate-level cfg pin. cargo metadata in the core image, host python3 -I.
 check-shell-layout:
+	scripts/ci/area-image.sh --present core
 	scripts/ci/shell-test-layout.sh
 
 # Guard: the layout check must give its documented exit code on every fixture shell dir in
 # scripts/ci/fixtures/shell-test-layout/ (0 allowed, 1 violation, 3 cannot run), and the pins
 # must empty the crate under every cargo test selector (mechanism crate). Host bash, core image.
 check-shell-layout-fixtures:
+	scripts/ci/area-image.sh --present core
 	scripts/ci/shell-test-layout.test.sh
 
 # T-065 (rca smoke-window-predicate): the helper-window tripwire scripts/ci/helper-windows.sh
@@ -36,6 +38,7 @@ check-shell-layout-fixtures:
 # real Windows dependency graph with scripts/ci/helper-windows.txt, and the predicate's copies
 # must read that one manifest. Host bash; the real-graph case reaches the core image.
 check-helper-windows-fixtures:
+	scripts/ci/area-image.sh --present core
 	scripts/ci/helper-windows.test.sh
 
 # T-061, T-066: CI reaches Credential Manager only through scripts/ci/credentials.ps1: no other
@@ -55,6 +58,7 @@ check-ci-credentials:
 # (features ban-canary-lib, ban-canary-tests) in the core image and compares every diagnostic
 # with scripts/ci/ban-canary.expected.txt, so each config entry and the deny level are proven.
 check-ban-canary:
+	scripts/ci/area-image.sh --present core
 	scripts/ci/ban-canary.sh
 
 # The token guard below (decides_on: token + literal): every tracked line holding the lint
@@ -200,6 +204,15 @@ check-nsis-fork:
 check-e2e-entry-fixtures:
 	scripts/ci/e2e-entry.test.sh
 
+# T-177 (I5, I7, I4): scripts/ci/area-image.sh, the one reader of an area's image tag (the
+# area's `image` in the teamwright config, through the kit parser), its `--present` check
+# (`docker image inspect` only, missing -> exit 3 naming `make <area>-image`) and the ui tag
+# pinned to the installed @playwright/test; plus no literal toolchain tag in the Makefile,
+# docker/ui.Dockerfile or the contour workflow, and check-ui's presence check and --workers.
+# Fixture roots with a fake docker. Host bash, python3, make.
+check-area-image-fixtures:
+	scripts/ci/area-image.test.sh
+
 # T-099 (decisions #142, invariant 3): scripts/ci/whisper-cmake-cache.sh, the windows job's
 # verdict on every whisper-rs-sys CMakeCache.txt under target/ (decides_on: token + literal),
 # passes only when each holds GGML_NATIVE:BOOL=OFF, GGML_AVX2:BOOL=ON, GGML_AVX512:BOOL=OFF,
@@ -231,6 +244,14 @@ check-whisper-model-key:
 check-crt-imports:
 	scripts/ci/crt-imports.test.sh
 
+# check-core's image check is a prerequisite, not a recipe line: the owned lint line stays the
+# first recipe line under `check-core:` (T-089, its guard pins that position). A prerequisite
+# is made before the recipe starts, also under -j (T-177 I5).
+check-core: core-image-present
+
+core-image-present:
+	scripts/ci/area-image.sh --present core
+
 check-core:
 	scripts/tw-run core -- 'cargo fmt --check -p voicen-core && cargo clippy -p voicen-core --all-targets -- -D warnings'
 	scripts/tw-run core -- cargo test -p voicen-core
@@ -242,6 +263,7 @@ check-core:
 # no C++ toolchain for whisper.cpp. Building, linking and running the crate's tests stay the
 # windows job's (tests/transcribe_wav.rs, the CMakeCache and dumpbin steps).
 check-whisper:
+	scripts/ci/area-image.sh --present core
 	scripts/tw-run core -- 'cargo fmt --check -p voicen-whisper && DOCS_RS=1 cargo clippy -p voicen-whisper --all-targets -- -D warnings'
 
 # Windows-target format and lint of the shell on Linux (T-056, decisions #63, T-166;
@@ -265,23 +287,45 @@ check-whisper:
 # is at deny through src-tauri/Cargo.toml [lints]. The recipe line is owned by the
 # owned-lines list under scripts/ci; make check-ban-canary proves the ban bites.
 check-shell-windows:
+	scripts/ci/area-image.sh --present core
 	scripts/tw-run core -- 'cargo fmt --check -p voicen && DOCS_RS=1 cargo clippy -p voicen --target x86_64-pc-windows-gnu -- -D warnings && DOCS_RS=1 cargo clippy -p voicen --target x86_64-pc-windows-gnu --all-targets -- -D warnings'
 
-# The e2e step goes through the e2e entry (package.json scripts.e2e) on the host: it checks the
-# ui image is present and re-enters it through scripts/tw-run ui with --network none (T-064).
+# Playwright workers of the gate's e2e run (T-177 I4): the owner's host limit is 2, and on CI's
+# 4-vCPU runner Playwright's own default (half the logical cores) is 2 as well. Override on the
+# command line: `make check-ui WORKERS=1`.
+WORKERS ?= 2
+
+# The toolchain image tags, read from the areas' `image` in the teamwright config (T-177 I7):
+# no tag is written in this file. Recursive (`=`): read only by a recipe that uses them.
+UI_IMAGE = $(shell scripts/ci/area-image.sh ui)
+CORE_IMAGE = $(shell scripts/ci/area-image.sh core)
+
+# The ui image must be present before the first container (T-177 I5): a `docker run` of a
+# missing tag pulls implicitly and fails as a gate error (exit 125); the check stops with exit 3
+# and `make ui-image`. Every recipe of `make check` that starts a toolchain container (directly
+# or through its script) has this check for its area before its first container. The e2e step goes through the e2e entry (package.json scripts.e2e) on
+# the host: it checks the ui image is present and re-enters it through scripts/tw-run ui with
+# --network none (T-064), with an explicit worker count.
 check-ui:
+	scripts/ci/area-image.sh --present ui
 	scripts/tw-run ui -- pnpm lint
 	scripts/tw-run ui -- pnpm test
-	scripts/e2e.sh
+	scripts/e2e.sh --workers=$(WORKERS)
 
-# Toolchain image of the `core` area (CI builds the same one).
+# Toolchain image of the `core` area (CI builds the same one). The first line stops on an
+# unreadable tag with the reader's message.
 core-image:
-	docker build -t voicen-rust:1.99 -f docker/rust.Dockerfile docker
+	scripts/ci/area-image.sh core >/dev/null
+	docker build -t $(CORE_IMAGE) -f docker/rust.Dockerfile docker
 
 # Toolchain image of the `ui` area: the official Playwright image at the lockfile's
 # @playwright/test version plus pnpm (docker/ui.Dockerfile; CI builds the same one, T-064).
+# The tag comes from the config; the reader has checked that its version is the installed
+# @playwright/test, the base image's Playwright version (the Dockerfile's digest default pins
+# that base).
 ui-image:
-	docker build -t voicen-ui:1.63.0 -f docker/ui.Dockerfile docker
+	scripts/ci/area-image.sh ui >/dev/null
+	docker build -t $(UI_IMAGE) --build-arg PLAYWRIGHT_VERSION=$(patsubst voicen-ui:%,%,$(UI_IMAGE)) --build-arg VOICEN_UI_IMAGE=$(UI_IMAGE) -f docker/ui.Dockerfile docker
 
 # --- Licenses (T-027, decisions #9 #24) -------------------------------------------------
 # One accepted list: about.toml `accepted`. Rust: cargo-about 0.9.2 (Windows target only).
@@ -299,10 +343,12 @@ licenses-check: licenses-unit licenses-fixture licenses-stale-guard licenses-rus
 # Unit tests of the npm/manual checker. The files are named: since Node 22 (the ui image has
 # Node 24) `node --test <dir>` runs the directory as a module instead of finding its tests.
 licenses-unit:
+	scripts/ci/area-image.sh --present ui
 	scripts/tw-run ui -- 'node --test scripts/licenses/*.test.mjs'
 
 # Guard: cargo-about with the real about.toml must reject licenses/fixtures/gpl.
 licenses-fixture:
+	scripts/ci/area-image.sh --present core
 	scripts/licenses/fixture-check.sh
 
 # T-063 guard: the real licenses-stale recipe, run without the generation on
@@ -313,16 +359,19 @@ licenses-stale-guard:
 
 # Rust crates of the workspace, Windows target, against about.toml; writes rust.txt.
 licenses-rust:
+	scripts/ci/area-image.sh --present core
 	scripts/licenses/rust.sh
 
 # Client build; its Vite plugin writes $(LICENSES_DIR)/npm-bundled.json. The previous list
 # is deleted first, so a build that records nothing cannot pass on a stale list.
 licenses-bundle:
+	scripts/ci/area-image.sh --present ui
 	scripts/tw-run ui -- 'rm -f $(LICENSES_DIR)/npm-bundled.json && pnpm build'
 
 # npm packages of the client bundle and the hand-kept list, against about.toml.
 # --require svelte: the bundle list must hold the Svelte runtime, or the plugin saw nothing.
 licenses-npm: licenses-bundle
+	scripts/ci/area-image.sh --present ui
 	scripts/tw-run ui -- node scripts/licenses/check.mjs --about about.toml \
 		--bundle $(LICENSES_DIR)/npm-bundled.json --manual licenses/manual.json --require svelte
 
@@ -330,6 +379,7 @@ licenses-npm: licenses-bundle
 # the Rust part only when every crate is accepted; npm and manual entries are listed
 # whatever their license (licenses-npm judges them), so a notice is never dropped.
 licenses-generate: licenses-rust licenses-bundle
+	scripts/ci/area-image.sh --present ui
 	scripts/tw-run ui -- node scripts/licenses/notices.mjs --rust $(LICENSES_DIR)/rust.txt \
 		--bundle $(LICENSES_DIR)/npm-bundled.json --manual licenses/manual.json \
 		--out $(LICENSES_DIR)/THIRD-PARTY-NOTICES.txt

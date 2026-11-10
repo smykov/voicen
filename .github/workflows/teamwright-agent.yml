@@ -144,10 +144,16 @@ jobs:
           fi
           docker info >/dev/null 2>&1 || { echo "No access to Docker on the runner" > "$OUT/preflight.md"; exit 1; }
           # Rust and the UI run only in these images (CLAUDE.md); a missing one is built here.
-          for pair in core=voicen-rust:1.99 ui=voicen-ui:1.63.0; do
-            docker image inspect "${pair#*=}" >/dev/null 2>&1 && continue
-            if ! timeout 2700 make "${pair%%=*}-image" > "$OUT/image-${pair%%=*}.log" 2>&1; then
-              echo "The image ${pair#*=} was missing and make ${pair%%=*}-image failed ($OUT/image-${pair%%=*}.log on the runner)" > "$OUT/preflight.md"
+          # The tags come from the areas' image in the teamwright config, through the one
+          # reader (T-177 I7).
+          for area in core ui; do
+            img="$(scripts/ci/area-image.sh "$area" 2> "$OUT/image-$area.log")" || {
+              echo "The $area image tag cannot be read (scripts/ci/area-image.sh; $OUT/image-$area.log on the runner)" > "$OUT/preflight.md"
+              exit 1
+            }
+            docker image inspect "$img" >/dev/null 2>&1 && continue
+            if ! timeout 2700 make "$area-image" > "$OUT/image-$area.log" 2>&1; then
+              echo "The image $img was missing and make $area-image failed ($OUT/image-$area.log on the runner)" > "$OUT/preflight.md"
               exit 1
             fi
           done

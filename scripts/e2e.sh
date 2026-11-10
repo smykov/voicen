@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # The ui e2e entry point: package.json `scripts.e2e`, so `pnpm e2e [playwright test args...]`
-# on the host, `scripts/tw-run ui -- pnpm e2e` and Makefile check-ui all come here (T-064,
+# on the host, `scripts/tw-run ui -- pnpm e2e`, this script's own re-entry and Makefile check-ui
+# all come here (T-064,
 # decisions #77 #89; docs/decisions/ui-e2e.md E3).
 #
 # Invariant: no e2e browser shares the host's network namespace. Playwright, its webServer and
@@ -16,7 +17,8 @@
 # On the host:
 #   image = the ui area's `image` in the teamwright config (read like scripts/tw-run);
 #   `$TW_DOCKER image inspect` fails -> exit 3 (never pulled: `docker run` would pull it);
-#   present -> re-enter through scripts/tw-run ui with TW_DOCKER_ARGS `--network none`, and
+#   present -> re-enter through `scripts/tw-run ui -- ./scripts/e2e.sh <args>` (no pnpm in
+#   between, so the in-image exit code arrives unchanged) with TW_DOCKER_ARGS `--network none`, and
 #   `-e CI` only when the caller has CI (tw-run passes no environment but HOME; CI drives
 #   forbidOnly and retries in playwright.config.ts).
 #   BASE_URL set on the host -> exit 3 before any docker call (it would not reach the
@@ -91,4 +93,8 @@ command -v "$docker" >/dev/null 2>&1 || stop "$docker not found; e2e runs only i
 dargs="--network none -e VOICEN_E2E_REENTERED=1 -e VOICEN_E2E_IMAGE=$image"
 [ -n "${CI+x}" ] && dargs="$dargs -e CI"
 export TW_DOCKER_ARGS="$dargs"
-exec "$root/scripts/tw-run" ui -- pnpm e2e "$@"
+# Re-enter with this script itself, not `pnpm e2e`: pnpm 8 reports a script's non-zero exit as 1,
+# which would turn the in-image exit 3 into a test failure (T-177 I6). The path is relative to
+# the container's working directory: tw-run mounts the repository root there (at /work), so the
+# host's absolute $root does not exist inside it.
+exec "$root/scripts/tw-run" ui -- ./scripts/e2e.sh "$@"

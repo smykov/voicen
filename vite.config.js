@@ -3,14 +3,15 @@ import { sveltekit } from "@sveltejs/kit/vite";
 // @ts-expect-error type error without @types/node package
 import process from "node:process";
 // @ts-expect-error type error without @types/node package
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 // @ts-expect-error type error without @types/node package
 import { join } from "node:path";
 import { classifyBundle, readPackageLicense } from "./scripts/licenses/bundle.mjs";
 const host = process.env.TAURI_DEV_HOST;
 
 /**
- * Records what the client bundle ships (T-027) in target/licenses/npm-bundled.json, which
+ * Records what the client bundle ships (T-027) in target/licenses/npm-bundled.json (an e2e
+ * build, VOICEN_E2E_OUT_DIR set: <that dir>/npm-bundled.json instead; T-177), which
  * `make licenses-check` checks against about.toml and `make licenses` lists in
  * THIRD-PARTY-NOTICES.txt: one entry per npm package with a module or an emitted asset in
  * the bundle (Vite's and rolldown's own helper modules count as vite and rolldown), and one
@@ -50,9 +51,22 @@ function bundledPackages() {
         }),
         ...unattributed.map(({ kind, id }) => ({ unattributed: id, kind })),
       ];
-      const out = join(root, "target", "licenses");
+      // An e2e build (VOICEN_E2E_OUT_DIR, set by playwright.config.ts) records its list in its
+      // own run dir and never touches target/licenses, so it cannot slip a list in between
+      // `make licenses-bundle`'s `rm -f` and its build (T-177 I3).
+      const e2eOutDir = process.env.VOICEN_E2E_OUT_DIR;
+      const out = e2eOutDir ? e2eOutDir : join(root, "target", "licenses");
       mkdirSync(out, { recursive: true });
-      writeFileSync(join(out, "npm-bundled.json"), `${JSON.stringify(list, null, 2)}\n`);
+      // Temp file + rename in the same dir: a reader of the list never sees a partial file.
+      const dest = join(out, "npm-bundled.json");
+      const tmp = join(out, `.npm-bundled.json.${process.pid}-${Date.now()}.tmp`);
+      try {
+        writeFileSync(tmp, `${JSON.stringify(list, null, 2)}\n`);
+        renameSync(tmp, dest);
+      } catch (e) {
+        rmSync(tmp, { force: true });
+        throw e;
+      }
     },
   };
 }
