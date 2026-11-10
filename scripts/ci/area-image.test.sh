@@ -13,7 +13,9 @@
 #       `docker pull` (a run would pull implicitly).
 #   ui area with an image `voicen-ui:<tag>`: <tag> must equal `version` of
 #       <root>/node_modules/@playwright/test/package.json, else exit 1 naming both versions
-#       (in both modes, before any docker call). Other image names are not version-checked.
+#       (in both modes, before any docker call). Not installed (before `pnpm install`): the
+#       importer entry of @playwright/test in <root>/pnpm-lock.yaml stands in, same exits.
+#       Other image names are not version-checked.
 #   Unknown area or unreadable config: exit 2, nothing on stdout.
 # <root> is the directory two levels above the script, so a copy of the script in a scratch root
 # reads that root's config and node_modules.
@@ -146,6 +148,66 @@ if [ "$got" -ne 1 ]; then fail "$c" "exit $got, want 1"
 elif [ -f "$tmp/docker.log" ]; then fail "$c" "docker was called before the version check"
 else ok "$c"; fi
 
+# --- before `pnpm install`: the lockfile stands in for node_modules ------------------------------
+# ci.yml runs `make ui-image` before `pnpm install`, the contour preflight before its install:
+# with no node_modules/@playwright/test the tag is compared with the lockfile's importer entry.
+# lockfile_only <lock version>: the scratch root loses node_modules and gets a pnpm-lock.yaml
+# excerpt in the real shape (lockfileVersion 6.0, devDependencies importer entry, a neighbour with
+# a peer suffix, the packages entry).
+lockfile_only() {
+  rm -rf "$sroot/node_modules"
+  cat >"$sroot/pnpm-lock.yaml" <<YML
+lockfileVersion: '6.0'
+
+settings:
+  autoInstallPeers: true
+  excludeLinksFromLockfile: false
+
+dependencies:
+  '@tauri-apps/api':
+    specifier: ^2
+    version: 2.12.1
+
+devDependencies:
+  '@eslint/js':
+    specifier: ^10.0.1
+    version: 10.0.1(eslint@10.11.0)
+  '@playwright/test':
+    specifier: ^$1
+    version: $1
+  '@sveltejs/adapter-static':
+    specifier: ^3.0.10
+    version: 3.0.10(@sveltejs/kit@2.70.3)
+
+packages:
+
+  /@playwright/test@$1:
+    resolution: {integrity: sha512-fixture}
+    engines: {node: '>=20'}
+    hasBin: true
+    dependencies:
+      playwright: $1
+    dev: true
+YML
+}
+
+c="no node_modules, lockfile @playwright/test == ui tag -> prints the tag, exit 0"
+scratch "voicen-ui:$ver" "voicen-rust:1.99"
+lockfile_only "$ver"
+reader ui
+if [ "$got" -ne 0 ]; then fail "$c" "exit $got, want 0"
+elif [ "$out" != "voicen-ui:$ver" ]; then fail "$c" "stdout is not the config's image voicen-ui:$ver"
+else ok "$c"; fi
+
+c="no node_modules, lockfile @playwright/test != ui tag -> exit 1 naming both versions, nothing on stdout"
+scratch "voicen-ui:$ver" "voicen-rust:1.99"
+lockfile_only "1.2.3"
+reader ui
+if [ "$got" -ne 1 ]; then fail "$c" "exit $got, want 1"
+elif [ -n "$out" ]; then fail "$c" "an image was printed for a mismatching tag"
+elif [[ "$err" != *1.2.3* || "$err" != *$ver* ]]; then fail "$c" "the message does not name both versions (1.2.3, $ver)"
+else ok "$c"; fi
+
 c="unknown area -> exit 2, nothing on stdout"
 scratch "voicen-ui:$ver" "voicen-rust:1.99"
 reader nosuch
@@ -248,7 +310,7 @@ from_line="$(grep -n '^FROM ' "$df" | head -1)"
 from_n="${from_line%%:*}"
 if [ "${from_line#*:}" != 'FROM mcr.microsoft.com/playwright:v${PLAYWRIGHT_VERSION}-noble@sha256:${PLAYWRIGHT_DIGEST}' ]; then fail "$c" "FROM is not the owned literal: ${from_line#*:}"
 elif ! grep -qE '^ARG PLAYWRIGHT_VERSION' "$df" || [ "$(grep -nE '^ARG PLAYWRIGHT_VERSION' "$df" | head -1 | cut -d: -f1)" -gt "$from_n" ]; then fail "$c" "no ARG PLAYWRIGHT_VERSION before FROM"
-elif ! grep -qE '^ARG PLAYWRIGHT_DIGEST=sha256:[0-9a-f]{64}$' "$df" || [ "$(grep -nE '^ARG PLAYWRIGHT_DIGEST' "$df" | head -1 | cut -d: -f1)" -gt "$from_n" ]; then fail "$c" "no ARG PLAYWRIGHT_DIGEST=sha256:<64 hex> before FROM"
+elif ! grep -qE '^ARG PLAYWRIGHT_DIGEST=[0-9a-f]{64}$' "$df" || [ "$(grep -nE '^ARG PLAYWRIGHT_DIGEST' "$df" | head -1 | cut -d: -f1)" -gt "$from_n" ]; then fail "$c" "no ARG PLAYWRIGHT_DIGEST=<64 hex, no sha256: prefix: FROM adds @sha256:> before FROM"
 elif ! grep -qE '^ARG VOICEN_UI_IMAGE' "$df" || ! grep -qE '^ENV VOICEN_UI_IMAGE=\$\{?VOICEN_UI_IMAGE\}?$' "$df"; then fail "$c" "ENV VOICEN_UI_IMAGE is not taken from ARG VOICEN_UI_IMAGE"
 else ok "$c"; fi
 
