@@ -300,6 +300,28 @@ pub struct DictationLine {
     /// T-098): `local=cold load_ms=<n>` or `local=warm`, written only on an
     /// `engine=builtin` line; `None` writes neither key.
     pub local: Option<Warmth>,
+    /// How the recording ended when its audio went on to a job
+    /// (`RecordingEnded.end`, T-170): `end=<literal>`. `None` (no
+    /// `RecordingEnded` came, or the end was `TooShort` / `Cancelled`, which
+    /// is the outcome itself) writes no key.
+    pub end: Option<EndTag>,
+}
+
+/// The ways a recording hands its audio to a job, as written in `end=`
+/// (T-170). A closed set: no free text and no `Other`; the observer maps
+/// `recording::RecordingEnd` onto it with one exhaustive match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EndTag {
+    /// The hold hotkey was released.
+    Released,
+    /// The toggle hotkey was pressed again.
+    Toggled,
+    /// The recording reached its length limit.
+    MaxLength,
+    /// The microphone was lost (T-012); the audio so far went on.
+    DeviceLost,
+    /// The system went to sleep (T-010); the audio so far went on.
+    Suspended,
 }
 
 /// How a dictation ended.

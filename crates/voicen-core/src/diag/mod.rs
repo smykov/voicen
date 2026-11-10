@@ -54,6 +54,7 @@
 //!         text_to_paste_ms: None,
 //!         post_processing: None,
 //!         local: None,
+//!         end: None,
 //!     }
 //! }
 //! ```
@@ -72,6 +73,7 @@
 //!         text_to_paste_ms: None,
 //!         post_processing: None,
 //!         local: None,
+//!         end: None,
 //!     }
 //! }
 //! ```
@@ -105,6 +107,7 @@
 //!         text_to_paste_ms: None,
 //!         post_processing: None,
 //!         local: None,
+//!         end: None,
 //!     }));
 //! }
 //! ```
@@ -169,8 +172,8 @@ pub use crash::{
     ModuleResolver, OsVersion, ThreadName, CRASH_MAX_AGE_DAYS, CRASH_MAX_FILES,
 };
 pub use event::{
-    DetectorTag, DictationLine, DictationOutcome, EngineTag, FailureTag, LoadKind, LogEvent,
-    PreviousSessionLine, SaveLine, TestConnectionLine, WarningKind,
+    DetectorTag, DictationLine, DictationOutcome, EndTag, EngineTag, FailureTag, LoadKind,
+    LogEvent, PreviousSessionLine, SaveLine, TestConnectionLine, WarningKind,
 };
 pub use format::format_line;
 pub use log::{Log, LogConfig, LogsUnwritableReason, OnUnwritable};

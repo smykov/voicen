@@ -11,8 +11,8 @@
 //! date math of `clock.rs`).
 //!
 //! ```text
-//! 2026-10-04T23:59:00.123+02:00 INFO voicen 0.1.0 (abc1234) started pid=4242
-//! 2026-10-04T23:59:04.020+02:00 INFO dictation rec=0 engine=api outcome=delivered result=pasted detector=energy pp=applied press_to_frame_ms=41 duration_ms=3000 stop_to_text_ms=2390 pp_ms=1544 text_to_paste_ms=95
+//! 2026-10-04T23:59:00.123+02:00 INFO voicen 0.1.0 (abc1234) started pid=4242 os=10.0.26100
+//! 2026-10-04T23:59:04.020+02:00 INFO dictation rec=0 engine=api outcome=delivered result=pasted end=released detector=energy pp=applied press_to_frame_ms=41 duration_ms=3000 stop_to_text_ms=2390 pp_ms=1544 text_to_paste_ms=95
 //! 2026-10-04T23:59:12.020+02:00 INFO dictation rec=3 engine=builtin outcome=delivered result=pasted detector=energy local=cold load_ms=1234 pp=off press_to_frame_ms=37 duration_ms=3000 stop_to_text_ms=4100 text_to_paste_ms=90
 //! 2026-10-04T23:59:30.020+02:00 INFO dictation rec=2 engine=api outcome=delivered result=pasted detector=energy pp=skipped pp_reason=timeout press_to_frame_ms=38 duration_ms=2500 stop_to_text_ms=15900 pp_ms=15004 text_to_paste_ms=90
 //! 2026-10-04T23:59:04.500+02:00 WARN dictation rec=1 outcome=capture_failed mic=access_denied
@@ -28,8 +28,8 @@ use std::fmt::{Display, Write as _};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::event::{
-    DetectorTag, DictationLine, DictationOutcome, EngineTag, FailureTag, LoadKind, LogEvent,
-    PreviousSessionLine, SaveLine, TestConnectionLine, WarningKind,
+    DetectorTag, DictationLine, DictationOutcome, EndTag, EngineTag, FailureTag, LoadKind,
+    LogEvent, PreviousSessionLine, SaveLine, TestConnectionLine, WarningKind,
 };
 use crate::autostart::ReconcileAction;
 use crate::build_info::BuildInfo;
@@ -445,6 +445,17 @@ fn write_test_connection(out: &mut String, line: TestConnectionLine) {
     }
 }
 
+/// The `end=` literal of a dictation line (T-170); one per [`EndTag`].
+fn recording_end(tag: EndTag) -> &'static str {
+    match tag {
+        EndTag::Released => "released",
+        EndTag::Toggled => "toggled",
+        EndTag::MaxLength => "max_length",
+        EndTag::DeviceLost => "device_lost",
+        EndTag::Suspended => "suspended",
+    }
+}
+
 fn write_dictation(out: &mut String, line: &DictationLine) {
     let DictationLine {
         recording,
@@ -457,6 +468,7 @@ fn write_dictation(out: &mut String, line: &DictationLine) {
         text_to_paste_ms,
         post_processing,
         local,
+        end,
     } = line;
     out.push_str("dictation");
     pair(out, "rec", recording);
@@ -485,6 +497,11 @@ fn write_dictation(out: &mut String, line: &DictationLine) {
             pair(out, "outcome", "capture_failed");
             pair(out, "mic", mic(*cause));
         }
+    }
+    // After the outcome's own keys, never between `dictation` and `rec=` (the
+    // install smoke matches `dictation rec=`).
+    if let Some(tag) = end {
+        pair(out, "end", recording_end(*tag));
     }
     if let Some(tag) = detector_tag {
         pair(out, "detector", detector(*tag));

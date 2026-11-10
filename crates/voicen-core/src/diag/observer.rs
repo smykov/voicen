@@ -20,7 +20,8 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use super::event::{
-    DetectorTag, DictationLine, DictationOutcome, EngineTag, FailureTag, LogEvent, WarningKind,
+    DetectorTag, DictationLine, DictationOutcome, EndTag, EngineTag, FailureTag, LogEvent,
+    WarningKind,
 };
 use super::log::Log;
 use crate::events::{DictationEvent, OutcomeCode, PipelineObserver, PostProcessTrace, WarningCode};
@@ -54,6 +55,7 @@ struct Record {
     stop_to_text_ms: Option<u64>,
     post_processing: Option<PostProcessTrace>,
     local: Option<Warmth>,
+    end: Option<EndTag>,
 }
 
 impl Record {
@@ -74,6 +76,7 @@ impl Record {
             text_to_paste_ms,
             post_processing: self.post_processing,
             local: self.local,
+            end: self.end,
         })
     }
 }
@@ -120,10 +123,21 @@ impl Open {
                 duration_ms,
                 end,
             } => {
-                self.record(recording).duration_ms = Some(duration_ms);
+                // A job follows and closes the record for the five job ends (a
+                // device loss, T-012, and a suspend, T-010, send the audio so far
+                // on); the line says which one (`end=`, T-170).
+                let job_end = match end {
+                    RecordingEnd::Released => Some(EndTag::Released),
+                    RecordingEnd::Toggled => Some(EndTag::Toggled),
+                    RecordingEnd::MaxLength => Some(EndTag::MaxLength),
+                    RecordingEnd::DeviceLost => Some(EndTag::DeviceLost),
+                    RecordingEnd::Suspended => Some(EndTag::Suspended),
+                    RecordingEnd::TooShort | RecordingEnd::Cancelled => None,
+                };
+                let record = self.record(recording);
+                record.duration_ms = Some(duration_ms);
+                record.end = job_end;
                 match end {
-                    // A job follows and closes the record (a device loss, T-012,
-                    // and a suspend, T-010, send the audio so far on).
                     RecordingEnd::Released
                     | RecordingEnd::Toggled
                     | RecordingEnd::MaxLength
