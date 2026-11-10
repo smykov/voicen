@@ -1,0 +1,2 @@
+# the task's tests, core area's container
+cargo test -j 2 -p voicen-core --test diag_format --test diag_observer --test diag_log

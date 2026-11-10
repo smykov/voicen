@@ -1,0 +1,14 @@
+guarantee: AC-1: end= on the dictation line for every way a recording ends in a job
+file: crates/voicen-core/src/diag/format.rs
+added_by: test-writer
+--- old
+    match outcome {
+        DictationOutcome::Delivered(result) => {
+--- new
+    if let Some(tag) = end {
+        pair(out, "end", recording_end(*tag));
+    }
+    let end = &None;
+    match outcome {
+        DictationOutcome::Delivered(result) => {
+--- end

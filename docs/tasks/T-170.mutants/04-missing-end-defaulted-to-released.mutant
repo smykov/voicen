@@ -1,0 +1,8 @@
+guarantee: Failure branch: a value outside the closed set cannot be written (end only for the five job ends)
+file: crates/voicen-core/src/diag/observer.rs
+added_by: test-writer
+--- old
+            end: self.end,
+--- new
+            end: self.end.or(Some(EndTag::Released)),
+--- end

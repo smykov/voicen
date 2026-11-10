@@ -1,0 +1,14 @@
+guarantee: AC-1: end= on the dictation line for every way a recording ends in a job
+file: crates/voicen-core/src/diag/observer.rs
+added_by: test-writer
+--- old
+                    RecordingEnd::Toggled => Some(EndTag::Toggled),
+                    RecordingEnd::MaxLength => Some(EndTag::MaxLength),
+                    RecordingEnd::DeviceLost => Some(EndTag::DeviceLost),
+                    RecordingEnd::Suspended => Some(EndTag::Suspended),
+--- new
+                    RecordingEnd::Toggled => Some(EndTag::Released),
+                    RecordingEnd::MaxLength => Some(EndTag::Released),
+                    RecordingEnd::DeviceLost => Some(EndTag::Released),
+                    RecordingEnd::Suspended => Some(EndTag::Released),
+--- end

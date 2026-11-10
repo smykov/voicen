@@ -1,0 +1,8 @@
+guarantee: AC-1: end= on the dictation line for every way a recording ends in a job
+file: crates/voicen-core/src/diag/observer.rs
+added_by: test-writer
+--- old
+                    RecordingEnd::Suspended => Some(EndTag::Suspended),
+--- new
+                    RecordingEnd::Suspended => None,
+--- end

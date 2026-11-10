@@ -1,0 +1,8 @@
+guarantee: Failure branch: a recording ended by device loss writes end=device_lost, not end=released
+file: crates/voicen-core/src/diag/observer.rs
+added_by: test-writer
+--- old
+                    RecordingEnd::DeviceLost => Some(EndTag::DeviceLost),
+--- new
+                    RecordingEnd::DeviceLost => Some(EndTag::Released),
+--- end
