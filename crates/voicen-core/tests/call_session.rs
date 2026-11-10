@@ -1062,40 +1062,26 @@ fn indicator_changes_inside_the_lock_and_shell_requests_after_it() {
     // shell call inside the lock, ticks published from the writer without the lock, a
     // tick that swaps the tracks' levels, no tick at all.
     let rig = CallRig::new();
+    // Subtitles on: the consumer's sample counts prove what the writer handled (`drained`).
+    rig.session.toggle_subtitles(true, CallSource::Switch);
     started(&rig, CallSource::Tray);
     assert!(
         rig.session.try_is_recording().is_some(),
         "the lock is free between calls"
     );
-    // F-018: each pass moves the mono clock, feeds one 200 ms span (10 blocks per track)
-    // and waits for the writer's next tick before the next pass, so the test is never
-    // more than one span ahead of the writer and the 64-slot channels never fill (a full
-    // channel turns blocks into drops, zero-filled, and every mic level reads 0.0).
-    let loud = |ticks: &[IndicatorTick]| {
-        ticks
-            .iter()
-            .any(|tick| tick.mic_level > 0.1 && tick.system_level < 0.01)
-    };
-    let mut got = false;
-    for pass in 0..20u64 {
-        let before = rig.indicator.ticks().len();
-        let t = pass * 200;
-        rig.mono.advance(ms(200));
-        rig.source.feed_both(t, t + 200, 0.5, 0.0);
-        rig.source.set_stamp_ms(t + 200);
-        assert!(
-            wait(|| rig.indicator.ticks().len() > before),
-            "pass {pass}: the writer published no tick: {:?}",
-            rig.indicator.ticks()
-        );
-        if loud(&rig.indicator.ticks()) {
-            got = true;
-            break;
-        }
-    }
+    // F-031: a tick proves only that one block of one track was handled after a 100 ms
+    // mono step, and the writer empties one track's channel before it reads the other, so
+    // a tick is never the proof that the mic lane was read. Feed one 200 ms span (10 blocks
+    // per track, under the 64-slot capacity: no drop), wait until the writer has handled
+    // all of it on both tracks, then take the tick that follows (no loop, no tick count).
+    let both = [Track::Mic, Track::System];
+    rig.source.feed_both(0, 200, 0.5, 0.0);
+    rig.source.set_stamp_ms(200);
+    drained(&rig, &both, 200);
+    let tick = barrier(&rig, &[(Track::Mic, 0.5), (Track::System, 0.0)], 200);
     assert!(
-        got,
-        "a tick with the mic loud and the system quiet: {:?}",
+        tick.mic_level > 0.1 && tick.system_level < 0.01,
+        "the mic loud, the system quiet: {:?}",
         rig.indicator.ticks()
     );
     rig.session.stop(StopReason::User);
@@ -1796,10 +1782,11 @@ fn drained(rig: &CallRig, tracks: &[Track], upto_ms: u64) {
     }
 }
 
-/// A tick that follows the writer's round: ticks are made when a block is handled once
+/// A tick made after the blocks fed here: ticks are made when a block is handled once
 /// 100 ms of monotonic time passed, so the clock moves and each of `feeds` (track, amplitude)
-/// gets one more 20 ms block at `at` ms (the next block of its stream); the tick returned
-/// was made after everything queued before it was handled on the first of those tracks.
+/// gets one more 20 ms block at `at` ms (the next block of its stream). A tick proves only
+/// that one block of one track was handled, so this proves the consumption of earlier
+/// blocks only when the queues were empty before it: call it right after `drained()`.
 fn barrier(rig: &CallRig, feeds: &[(Track, f32)], at: u64) -> IndicatorTick {
     let n = rig.indicator.ticks().len();
     rig.mono.advance(ms(150));
