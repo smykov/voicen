@@ -4,13 +4,16 @@
 //! error dialog), under `CoInitializeEx(COINIT_APARTMENTTHREADED)` on the calling
 //! thread (balanced by `CoUninitialize`). No command line and no shell parsing.
 //! It opens the folder only (nothing selected) and never creates it: a missing
-//! path is `Err` with Win32 code 2 (`ERROR_FILE_NOT_FOUND`).
+//! path is `Err` with Win32 code 2 (`ERROR_FILE_NOT_FOUND`), and a path that
+//! exists but is not a directory is `Err` with Win32 code 267 (`ERROR_DIRECTORY`,
+//! from the `windows` crate) before any shell call.
 
 use std::io;
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 
 use windows::core::{w, PCWSTR};
+use windows::Win32::Foundation::ERROR_DIRECTORY;
 use windows::Win32::System::Com::{
     CoInitializeEx, CoUninitialize, COINIT, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE,
 };
@@ -22,9 +25,6 @@ use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 use super::os_code;
 use crate::logs_folder::FolderOpener;
 
-/// Win32 `ERROR_DIRECTORY`: the path is not a directory.
-const ERROR_DIRECTORY: i32 = 267;
-
 /// The Explorer as a [`FolderOpener`].
 pub struct ShellOpener;
 
@@ -33,7 +33,7 @@ impl FolderOpener for ShellOpener {
         // Verb "open" on a file would run it: only a directory (or a missing path,
         // which the shell refuses with code 2) goes to the shell.
         if dir.exists() && !dir.is_dir() {
-            return Err(io::Error::from_raw_os_error(ERROR_DIRECTORY));
+            return Err(io::Error::from_raw_os_error(ERROR_DIRECTORY.0 as i32));
         }
         let file: Vec<u16> = dir
             .as_os_str()

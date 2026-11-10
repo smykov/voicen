@@ -28,7 +28,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Weak};
 
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Runtime, State};
+use tauri::{AppHandle, Emitter, Manager, Runtime, State};
 use voicen_core::autostart::Autostart;
 use voicen_core::clock::SystemClock;
 use voicen_core::connection_test::{ConnectionTestRequest, ConnectionTestResult};
@@ -224,6 +224,16 @@ pub fn settings_speech_languages() -> Vec<&'static str> {
 /// The microphones the settings list (T-012): the same `AudioSource` the
 /// dictation session opens, managed by `wire` (one list for a press and the UI).
 pub struct Microphones(pub Arc<dyn AudioSource>);
+
+/// The one `AudioSource` of the process (T-176): the [`Microphones`] `wire`
+/// manages, the dictation ports' only read of it. Panics when the state is
+/// missing (a wiring regression) instead of building a second source.
+pub fn managed_microphones<R: Runtime>(app: &AppHandle<R>) -> Arc<dyn AudioSource> {
+    let microphones = app
+        .try_state::<Microphones>()
+        .expect("`wire` manages `Microphones` before the dictation ports are built");
+    Arc::clone(&microphones.0)
+}
 
 /// One entry of `settings_list_microphones` (contracts/ipc.md
 /// `[{ id, name, is_default }]`).

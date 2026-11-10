@@ -505,9 +505,7 @@ impl<C> RecordingController<C> {
     /// message for 3 s from `at`, tray unchanged, by the same rule as
     /// `JobEnd::Notice`.
     pub fn notice(&mut self, id: MessageId, at: Instant) {
-        self.expire(at);
-        self.show(id, Vec::new(), at);
-        self.refresh();
+        self.notice_with(id, Vec::new(), at);
     }
 
     /// A notice with message parameters (T-012: `notice.mic_fallback` with

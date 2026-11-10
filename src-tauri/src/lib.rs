@@ -310,9 +310,7 @@ fn release_launched_by_autostart() -> bool {
 #[cfg(windows)]
 fn release_ports<R: Runtime>(app: &AppHandle<R>, shared: SharedPorts) -> dictation::DictationPorts {
     dictation::DictationPorts {
-        audio: app
-            .try_state::<settings_ipc::Microphones>()
-            .map_or_else(release_microphones, |m| Arc::clone(&m.0)),
+        audio: settings_ipc::managed_microphones(app),
         clipboard: Arc::new(win::clipboard::WinClipboard::new()),
         paster: Arc::new(win::paste::WinPaster::new()),
         engine_factory: None,
@@ -338,14 +336,6 @@ fn release_ports<R: Runtime>(
     )
 }
 
-/// The startup side effects of the primary, in this order (T-052 invariant 1:
-/// `assemble` calls this only after tauri's `build()`, so a second instance, which
-/// exits inside the single-instance plugin's setup, never runs it): the one log
-/// (`Started` first), the session and the crash records (`diag::begin_session`,
-/// T-024), the one `LocalModels` (its `.part` cleanup), the settings
-/// load (a first run writes `settings.json`; the Run value is reconciled). Returns
-/// the parts, the load outcome for `Ready` and the instances the `SettingsService`
-/// was given that the dictation session shares (T-006 invariant 5, T-055).
 /// Installs `paths::log_dir()` with the Explorer opener (T-071) for the tray's
 /// "Open logs folder"; off Windows nothing is installed and the item does nothing.
 #[cfg(windows)]
@@ -368,6 +358,14 @@ struct SharedPorts {
     hotkeys: Arc<win::hotkey::HotkeyRegistrarHandle>,
 }
 
+/// The startup side effects of the primary, in this order (T-052 invariant 1:
+/// `assemble` calls this only after tauri's `build()`, so a second instance, which
+/// exits inside the single-instance plugin's setup, never runs it): the one log
+/// (`Started` first), the session and the crash records (`diag::begin_session`,
+/// T-024), the one `LocalModels` (its `.part` cleanup), the settings
+/// load (a first run writes `settings.json`; the Run value is reconciled). Returns
+/// the parts, the load outcome for `Ready` and the instances the `SettingsService`
+/// was given that the dictation session shares (T-006 invariant 5, T-055).
 fn release_parts() -> (Parts, LoadOutcome, SharedPorts) {
     // The one log (T-008), Started first; every later diagnostic is a typed line on
     // it. Its unwritable callback is the latch of T-054's one-time notice: a

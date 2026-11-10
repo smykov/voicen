@@ -3,7 +3,7 @@ file: crates/voicen-core/src/recording/mod.rs
 added_by: test-writer
 --- old
         self.expire(at);
-        self.show(id, Vec::new(), at);
+        self.show(id, params, at);
         self.refresh();
 --- new
         self.expire(at);

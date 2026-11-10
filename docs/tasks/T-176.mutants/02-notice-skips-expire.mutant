@@ -4,9 +4,9 @@ added_by: test-writer
 equivalent: expire only clears an elapsed message and show then overwrites `message` unconditionally before refresh, so no input tells the two apart
 --- old
         self.expire(at);
-        self.show(id, Vec::new(), at);
+        self.show(id, params, at);
         self.refresh();
 --- new
-        self.show(id, Vec::new(), at);
+        self.show(id, params, at);
         self.refresh();
 --- end
