@@ -1,0 +1,13 @@
+guarantee: Failure branch: a spec that opens its own browser.newContext() page fails the structural check (I1)
+file: e2e/about.spec.ts
+added_by: test-writer
+test: scripts/e2e.sh e2e/boot-failure.spec.ts -g "no e2e file opens a browser context of its own"
+--- old
+test("the General tab's About Voicen button opens a dialog with the version line and MIT License, calling get_build_info only on opening", async ({ page }) => {
+  const errors = pageErrors(page);
+--- new
+test("the General tab's About Voicen button opens a dialog with the version line and MIT License, calling get_build_info only on opening", async ({ page, browser }) => {
+  const own = await browser.newContext();
+  await own.close();
+  const errors = pageErrors(page);
+--- end

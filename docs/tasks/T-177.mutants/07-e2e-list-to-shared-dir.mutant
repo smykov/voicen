@@ -1,0 +1,9 @@
+guarantee: I3 (T-050 r2#4): a build with VOICEN_E2E_OUT_DIR never writes under target/licenses/
+file: vite.config.js
+added_by: test-writer
+test: node --test scripts/licenses/plugin.test.mjs
+--- old
+      const out = e2eOutDir ? e2eOutDir : join(root, "target", "licenses");
+--- new
+      const out = join(root, "target", "licenses");
+--- end

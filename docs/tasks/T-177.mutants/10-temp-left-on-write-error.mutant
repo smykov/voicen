@@ -1,0 +1,10 @@
+guarantee: I3: no temp file is left next to the list, also when the rename fails
+file: vite.config.js
+added_by: test-writer
+test: node --test scripts/licenses/plugin.test.mjs
+--- old
+        rmSync(tmp, { force: true });
+        throw e;
+--- new
+        throw e;
+--- end

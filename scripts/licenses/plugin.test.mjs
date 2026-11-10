@@ -315,3 +315,21 @@ for (const [label, e2e] of [["the shared list", false], ["a run dir's list", tru
     assert.deepEqual(left, [], "no temp file is left next to the list");
   });
 }
+
+// Failure branch of the write (T-177 failure-branch bite): the rename fails once (the
+// destination is a directory, so rename(2) refuses with EISDIR on the first and only call).
+// The build must fail, not pass without a list (the stale-list guard of
+// docs/decisions/licenses.md), and the temp file must not stay behind.
+test("a list that cannot be written fails the build and leaves no temp file", async (t) => {
+  const { root, dirs } = fakeProject(t);
+  const out = join(root, "target", "licenses");
+  const blocker = join(out, "npm-bundled.json");
+  mkdirSync(join(blocker, "not-a-list"), { recursive: true });
+
+  await assert.rejects(
+    withE2eOutDir(undefined, () => runPlugin(root, { moduleIds: [`${dirs.svelte}/src/index-client.js`] })),
+    "a failed write of the list must fail the build",
+  );
+  const left = readdirSync(out).filter((f) => f !== "npm-bundled.json");
+  assert.deepEqual(left, [], "no temp file is left next to the list after a failed write");
+});

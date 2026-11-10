@@ -1,0 +1,10 @@
+guarantee: I3 (T-050 r2#4): every write of npm-bundled.json is temp file + rename in the same dir
+file: vite.config.js
+added_by: test-writer
+test: node --test scripts/licenses/plugin.test.mjs
+--- old
+        writeFileSync(tmp, `${JSON.stringify(list, null, 2)}\n`);
+        renameSync(tmp, dest);
+--- new
+        writeFileSync(dest, `${JSON.stringify(list, null, 2)}\n`);
+--- end
