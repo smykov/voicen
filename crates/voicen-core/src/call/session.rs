@@ -475,25 +475,25 @@ impl CallSession {
         }
     }
 
-    /// Stops the recording call for `reason`; `true` when a call was recording. Subtitles,
-    /// when on, go on with the captures.
+    /// Stops the recording call for `reason`; `true` when a call was recording. A call
+    /// whose track write failed stops as `storage_error` whatever `reason` asked (the
+    /// log line and the notice say so, I12). Subtitles, when on, go on with the captures.
     pub fn stop(&self, reason: StopReason) -> bool {
         let stopped = {
             let mut inner = self.lock();
             self.stop_locked(&mut inner, reason)
         };
-        if stopped {
-            self.notice_stopped(reason);
+        if let Some(effective) = stopped {
+            self.notice_stopped(effective);
         }
-        stopped
+        stopped.is_some()
     }
 
     /// The stop under the session lock: the writer hands the call back (or the captures
-    /// close), then [`CallSession::finish`]. `false` when no call was recording.
-    fn stop_locked(&self, inner: &mut Inner, reason: StopReason) -> bool {
-        let Some(call) = inner.call.take() else {
-            return false;
-        };
+    /// close), then [`CallSession::finish`]. The reason the call stopped with (see
+    /// `finish`); `None` when no call was recording.
+    fn stop_locked(&self, inner: &mut Inner, reason: StopReason) -> Option<StopReason> {
+        let call = inner.call.take()?;
         let rec = if inner.subtitles {
             inner.captures.as_ref().and_then(|c| {
                 let rec = c.command(Command::Detach).ok().flatten();
@@ -503,8 +503,7 @@ impl CallSession {
         } else {
             inner.captures.take().and_then(|c| c.close().ok().flatten())
         };
-        self.finish(call, rec, reason);
-        true
+        Some(self.finish(call, rec, reason))
     }
 
     /// The one notice of a stop, after the lock: a stop the session decided itself
@@ -553,7 +552,7 @@ impl CallSession {
             let mut inner = self.lock();
             let reason = self.due_stop(&mut inner);
             match reason {
-                Some(reason) => self.stop_locked(&mut inner, reason).then_some(reason),
+                Some(reason) => self.stop_locked(&mut inner, reason),
                 None => {
                     self.reminder_tick(&mut inner);
                     None
@@ -1036,18 +1035,28 @@ impl CallSession {
 
     /// The record stop under the lock, after the writer handed the recording back: both
     /// files finished, `meta.json` ready-to-transcribe, `call_stopped`, the indicator off,
-    /// the store's active slot released. `rec` is `None` when the writer thread is gone:
-    /// that is logged, and the meta of the create is finished with no audio. A
+    /// the folder released from the store's active set. `rec` is `None` when the writer
+    /// thread is gone: that is logged, and the meta of the create is finished with no
+    /// audio. A
     /// `storage_error` stop leaves `meta.json` as it is (`recording`): the next start
-    /// recovers the call from what its tracks hold (FR-016).
-    fn finish(&self, call: Call, rec: Option<Box<Recording>>, reason: StopReason) {
+    /// recovers the call from what its tracks hold (FR-016). A recording the writer hands
+    /// back as failed makes any stop a `storage_error` stop (I12): that is the reason
+    /// logged and returned, the one the caller notices.
+    fn finish(&self, call: Call, rec: Option<Box<Recording>>, reason: StopReason) -> StopReason {
         let Call { dir, meta, .. } = call;
-        let keep_meta = reason == StopReason::StorageError;
+        let mut reason = reason;
         let (mut meta, mic_written, system_written) = match rec {
             Some(rec) => {
                 let Recording {
-                    mic, system, meta, ..
+                    mic,
+                    system,
+                    meta,
+                    failed,
+                    ..
                 } = *rec;
+                if failed {
+                    reason = StopReason::StorageError;
+                }
                 let written = (mic.timeline.written(), system.timeline.written());
                 for enc in [mic.enc, system.enc].into_iter().flatten() {
                     if let Err(e) = enc.finish() {
@@ -1068,6 +1077,7 @@ impl CallSession {
                 (meta, 0, 0)
             }
         };
+        let keep_meta = reason == StopReason::StorageError;
         let now = self.deps.clock.now();
         let duration_ms = mic_written.min(system_written) / SAMPLES_PER_MS;
         meta.state = CallState::ReadyToTranscribe;
@@ -1101,6 +1111,7 @@ impl CallSession {
         });
         self.deps.indicator.set_state(&IndicatorState::idle());
         self.deps.indicator.set_call_recording(false);
+        reason
     }
 }
 

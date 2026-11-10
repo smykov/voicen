@@ -13,11 +13,14 @@
 //! CallSession::toggle_record(&self, on: bool, source: CallSource) -> Toggled
 //! CallSession::toggle_subtitles(&self, on: bool, source: CallSource) -> Toggled   // FR-019; 1a's UI never calls it
 //! CallSession::is_subtitles(&self) -> bool
-//! CallSession::stop(&self, reason: StopReason) -> bool       // true when a call was recording
+//! CallSession::stop(&self, reason: StopReason) -> bool       // true when a call was recording;
+//!                                                            // after a write failure it stops as storage_error (T-144)
 //! CallSession::is_recording(&self) -> bool
 //! CallSession::try_is_recording(&self) -> Option<bool>       // None while the session lock is held
-//! CallSession::tick(&self)                                   // reminder expiry (mono clock)
-//! CallSession::next_deadline(&self) -> Option<Instant>       // reminder end; None when nothing is due
+//! CallSession::tick(&self)                                   // reminder expiry (mono clock); T-144: also the non-user stops
+//! CallSession::next_deadline(&self) -> Option<Instant>       // T-144: now after a write failure, else the earliest of
+//!                                                            // reminder end, next disk poll and 4 h (<= now + 10 s)
+//!                                                            // while a call records; None while none records
 //! CallSession::pause_writer(&self) -> WriterPause            // test-fakes: holds the writer thread
 //!                                                            // off the channels until dropped; returns once
 //!                                                            // the writer is parked, so blocks fed after it stay queued
@@ -77,10 +80,9 @@
 //!     settings: Arc<dyn CallSettingsPort>, indicator: Arc<dyn CallIndicator>,
 //!     shell: Arc<dyn CallShell>, log: Arc<Log>, clock: Arc<dyn Clock>,
 //!     offset: Arc<dyn LocalOffset>, mono: Arc<dyn MonotonicClock>, app_version: String,
-//!     open_track: Arc<dyn Fn(&Path) -> io::Result<Box<dyn SyncWrite + Send>> + Send + Sync>,   // T-144: boxed
+//!     open_track: Arc<dyn Fn(&Path) -> io::Result<Box<dyn SyncWrite + Send>> + Send + Sync>,
+//!                                 // the CallStore::create_with opener; T-144: boxed
 //!     disk: Arc<dyn DiskSpace>,   // T-144: polled every 10 s while recording; < 1 GB warns once, < 200 MB stops
-//!     // T-144: tick() also polls the disk and stops on storage error / low disk / 4 h; next_deadline() is
-//!     // Some(<= now + 10 s) while a call records, None otherwise   // the CallStore::create_with opener
 //!     channel_capacity: usize }                                             // events per track channel
 //! voicen_core::settings::service::WarnedHostFailed        // unit struct, like ForgetFailed (Debug, Clone, Copy, PartialEq, Eq)
 //! SettingsService::remember_warned_host(&self, &ProviderHost) -> Result<(), WarnedHostFailed>
