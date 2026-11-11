@@ -139,7 +139,7 @@ fn api_engine(base: &str, key: Option<&str>) -> Box<OpenAiCompatibleEngine> {
         check_base_url(base).unwrap_or_else(|e| panic!("test base URL {base:?} refused: {e:?}"));
     Box::new(OpenAiCompatibleEngine::new(
         base,
-        "whisper-1",
+        Some("whisper-1".to_string()),
         key.map(Secret::new),
     ))
 }

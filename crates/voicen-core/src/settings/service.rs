@@ -13,8 +13,8 @@ use super::roots::{effective_root, CallRoots};
 use super::url::{check_base_url, is_insecure_remote, normalize_base_url, ProviderHost};
 use super::validate::{validate, KeyEditsWithPresence};
 use super::{
-    defaults, parse_file, CallSettings, EngineKind, ErrorCode, FieldError, FieldId, LoadOutcome,
-    Settings, SCHEMA_VERSION,
+    defaults, model_name, parse_file, CallSettings, EngineKind, ErrorCode, FieldError, FieldId,
+    LoadOutcome, Settings, SCHEMA_VERSION,
 };
 use crate::autostart::{Autostart, ReconcileAction};
 use crate::clock::{utc_compact, Clock};
@@ -747,7 +747,8 @@ impl LoadState {
 }
 
 /// Spec 004 data-model "normalize before store": every base URL through
-/// [`normalize_base_url`] and every model name trimmed, selected engine or not
+/// [`normalize_base_url`] and every model name stored as
+/// `model_name(..).unwrap_or("")` ([`model_name`]), selected engine or not
 /// and valid or not; `schema_version` set to the current one; an empty
 /// `calls.storage_root` becomes `None` (one encoding of the default root). The
 /// hotkeys, the language codes, the prompt and the microphone are kept as entered.
@@ -773,8 +774,8 @@ pub(crate) fn normalize(mut s: Settings) -> Settings {
         &mut s.local_server.model,
         &mut s.post_processing.model,
     ] {
-        let trimmed = model.trim().to_string();
-        *model = trimmed;
+        let stored = model_name(model).unwrap_or("").to_string();
+        *model = stored;
     }
     s
 }

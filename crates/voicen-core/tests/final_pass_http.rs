@@ -377,7 +377,7 @@ fn a_thirty_minute_pair_is_decoded_in_windows_and_uploaded_in_bounded_chunks() {
     ];
     let engine = OpenAiCompatibleEngine::new(
         check_base_url(&server.uri()).expect("url"),
-        "model-a",
+        Some("model-a".to_string()),
         Some(Secret::new("key-a")),
     );
     let rec = Rec::default();

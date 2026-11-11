@@ -32,6 +32,15 @@ use crate::post_process::settings::{self as post_process_settings, PostProcessin
 /// Current (and only known) `schema_version`; a greater one is rejected.
 pub const SCHEMA_VERSION: u32 = 1;
 
+/// The one rule for a transcription or post-processing model name: the name
+/// trimmed when it is non-empty after trim, else `None` (unset). Save stores
+/// `model_name(..).unwrap_or("")`, validation's "required" is `is_none()`, and
+/// the engine factory sends no `model` part for `None`.
+pub fn model_name(raw: &str) -> Option<&str> {
+    let name = raw.trim();
+    (!name.is_empty()).then_some(name)
+}
+
 /// The accepted values of `speech_language` besides `null` (decisions #27(3), #28):
 /// every two-letter (ISO 639-1) code of the Whisper language list, `LANGUAGES` in
 /// openai/whisper `whisper/tokenizer.py` at commit 86098128c0b4 (the list

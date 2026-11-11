@@ -23,7 +23,7 @@ use crate::failure::FailureReason;
 use crate::local_models::residency::Warmth;
 use crate::secrets::{CredentialStore, KeySlot};
 use crate::settings::url::check_base_url;
-use crate::settings::{EngineKind, Settings};
+use crate::settings::{model_name, EngineKind, Settings};
 use crate::timeouts::Timeouts;
 
 /// A transcription engine (NFR-11; shared with specs 002 and 003).
@@ -60,12 +60,14 @@ pub struct TranscribeRequest {
 ///
 /// - `Api`: `check_base_url(api.base_url)` (else `EngineNotConfigured`, no key
 ///   read) -> `creds.read(TranscriptionApi)` once (`Err` -> `KeyStoreUnavailable`;
-///   `Ok(None)` = no `Authorization` header) -> [`openai::OpenAiCompatibleEngine`].
+///   `Ok(None)` = no `Authorization` header) -> [`openai::OpenAiCompatibleEngine::new`]
+///   with [`model_name`] of `api.model`: the model trimmed, or no model (the part
+///   omitted) when it is empty or whitespace-only.
 /// - `LocalServer`: `check_base_url(local_server.base_url)` (else
 ///   `EngineNotConfigured`, no key read) -> `creds.read(LocalServer)` once (`Err`
 ///   -> `KeyStoreUnavailable`; `Ok(None)` = no `Authorization` header) ->
-///   [`openai::OpenAiCompatibleEngine::local_server`] with the model trimmed, or
-///   no model (the part omitted) when it is empty or whitespace-only.
+///   [`openai::OpenAiCompatibleEngine::local_server`] with [`model_name`] of
+///   `local_server.model`, the same rule as the API arm.
 /// - `BuiltinLocal` (T-098): with `builtin` -> [`builtin::BuiltinEngine`] over the
 ///   snapshot's `builtin_local.model_id` and the given residency and store, no key
 ///   read, nothing loaded (the model is resolved and loaded at `transcribe`);
@@ -84,10 +86,9 @@ pub fn engine_for(
             let key = creds
                 .read(KeySlot::TranscriptionApi)
                 .map_err(|_| FailureReason::KeyStoreUnavailable)?;
+            let model = model_name(&settings.api.model).map(str::to_string);
             Ok(Box::new(openai::OpenAiCompatibleEngine::new(
-                base_url,
-                settings.api.model.clone(),
-                key,
+                base_url, model, key,
             )))
         }
         EngineKind::LocalServer => {
@@ -96,8 +97,7 @@ pub fn engine_for(
             let key = creds
                 .read(KeySlot::LocalServer)
                 .map_err(|_| FailureReason::KeyStoreUnavailable)?;
-            let model = settings.local_server.model.trim();
-            let model = (!model.is_empty()).then(|| model.to_string());
+            let model = model_name(&settings.local_server.model).map(str::to_string);
             Ok(Box::new(openai::OpenAiCompatibleEngine::local_server(
                 base_url, model, key,
             )))

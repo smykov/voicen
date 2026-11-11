@@ -12,7 +12,8 @@
 //!
 //! `POST {base}/audio/transcriptions` (or the stored URL as is when it already
 //! ends in `audio/transcriptions`: [`transcription_url`], decision #96), multipart `file` (`audio.wav`, `audio/wav`),
-//! `model` (omitted when the engine has none: an unset local-server model),
+//! `model` (omitted when the engine has none: a model that is blank after trim,
+//! [`crate::settings::model_name`]),
 //! `language` (omitted for auto), `response_format=json` ([`ResponseShape::Plain`])
 //! or `response_format=verbose_json` plus `timestamp_granularities[]=segment`
 //! ([`ResponseShape::Segments`], the call final pass: [`OpenAiCompatibleEngine::transcribe_timed`]);
@@ -201,26 +202,29 @@ pub struct OpenAiCompatibleEngine {
 
 impl OpenAiCompatibleEngine {
     /// The transcription-API engine: `kind() == "api"`, request deadline
-    /// `Timeouts::api_transcription`, `model` always sent. `base_url` passed
+    /// `Timeouts::api_transcription`. `model: None` omits the `model` part; a
+    /// `Some` model is sent as given (the caller, [`super::engine_for`], passes
+    /// [`crate::settings::model_name`] of the stored model). `base_url` passed
     /// `check_base_url` (the one URL rule); `key: None` (or an empty key) sends no
     /// `Authorization` header.
     pub fn new(
         base_url: NormalizedUrl,
-        model: impl Into<String>,
+        model: Option<String>,
         key: Option<Secret>,
     ) -> OpenAiCompatibleEngine {
         OpenAiCompatibleEngine {
             endpoint: Endpoint::Api,
             base_url,
-            model: Some(model.into()),
+            model,
             key,
         }
     }
 
     /// The local-server engine: `kind() == "local_server"`, request deadline
     /// `Timeouts::local_server`. `model: None` omits the `model` part; a `Some`
-    /// model is sent as given (the caller, [`super::engine_for`], trims it and
-    /// passes `None` for an empty one). Same URL and key rules as [`Self::new`].
+    /// model is sent as given (the caller, [`super::engine_for`], passes
+    /// [`crate::settings::model_name`] of the stored model). Same URL and key
+    /// rules as [`Self::new`].
     pub fn local_server(
         base_url: NormalizedUrl,
         model: Option<String>,
@@ -756,7 +760,7 @@ mod tests {
             Ok(u) => u,
             Err(e) => panic!("accepted by the URL rule: {e:?}"),
         };
-        OpenAiCompatibleEngine::new(base, "whisper-1", key.map(Secret::new))
+        OpenAiCompatibleEngine::new(base, Some("whisper-1".to_string()), key.map(Secret::new))
     }
 
     #[test]

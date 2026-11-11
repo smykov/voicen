@@ -581,7 +581,7 @@ fn api_engine(
         .ok_or(FailReason::EngineNotSetUp)?;
     Ok(OpenAiCompatibleEngine::new(
         base_url,
-        settings.api.model.clone(),
+        Some(settings.api.model.clone()),
         Some(key),
     ))
 }

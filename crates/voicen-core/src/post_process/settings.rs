@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::settings::validate::base_url_rule;
-use crate::settings::{ErrorCode, FieldError, FieldId};
+use crate::settings::{model_name, ErrorCode, FieldError, FieldId};
 
 /// The built-in starter prompt (specs/003 data-model.md › STARTER_PROMPT; 003 FR-011).
 pub const STARTER_PROMPT: &str = "Correct punctuation, capitalization and obvious \
@@ -37,8 +37,9 @@ pub fn defaults() -> PostProcessingSettings {
 
 /// Every post-processing field error, all at once, in the order base URL, model,
 /// prompt (empty = valid). While `enabled` is false nothing is refused (004 FR-004:
-/// kept as entered). The base URL goes through the engines' URL rule; the model
-/// and the prompt are required after `trim()`; a key is never required (003 FR-011).
+/// kept as entered). The base URL goes through the engines' URL rule; the model is
+/// required by [`crate::settings::model_name`] and the prompt after `trim()`; a key
+/// is never required (003 FR-011).
 pub fn validate(s: &PostProcessingSettings) -> Vec<FieldError> {
     let mut errors = Vec::new();
     if !s.enabled {
@@ -47,7 +48,7 @@ pub fn validate(s: &PostProcessingSettings) -> Vec<FieldError> {
     if let Err(code) = base_url_rule(&s.base_url) {
         errors.push(FieldError::new(FieldId::PostProcessingBaseUrl, code));
     }
-    if s.model.trim().is_empty() {
+    if model_name(&s.model).is_none() {
         errors.push(FieldError::new(
             FieldId::PostProcessingModel,
             ErrorCode::Required,

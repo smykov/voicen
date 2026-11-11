@@ -14,7 +14,7 @@
 
 use super::hotkey::{parse_hotkey, HotkeyError};
 use super::url::{check_base_url, UrlError};
-use super::{is_lang_code, EngineKind, ErrorCode, FieldError, FieldId, Settings};
+use super::{is_lang_code, model_name, EngineKind, ErrorCode, FieldError, FieldId, Settings};
 use crate::models::DownloadedModels;
 use crate::secrets::{KeyEdit, KeyEdits, KeyPresence, KeySlot};
 use crate::timeouts::TimeoutRole;
@@ -57,7 +57,7 @@ pub fn validate(
             if let Err(code) = base_url_rule(&s.api.base_url) {
                 refuse(FieldId::EngineApiBaseUrl, code);
             }
-            if s.api.model.trim().is_empty() {
+            if model_name(&s.api.model).is_none() {
                 refuse(FieldId::EngineApiModel, ErrorCode::Required);
             }
             if !keys.has_key_after_save(KeySlot::TranscriptionApi) {
