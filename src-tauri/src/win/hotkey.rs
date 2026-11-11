@@ -248,19 +248,43 @@ impl HotkeyRegistrarHandle {
         post(&self.link, request)
     }
 
-    /// Posts a commit or an abort and waits (bounded) until the thread ran it.
-    /// Not answered within [`REQUEST_BUDGET`] (the thread is busy, e.g. inside
+    /// [`HotkeyRegistrar::commit`] waiting up to `budget` instead of `REQUEST_BUDGET`
+    /// (the seam the shell tests reach, T-174; `commit` calls it with
+    /// `REQUEST_BUDGET`). A timeout writes one `Warning{HotkeyRequestTimeout}` line;
+    /// an ended thread or an unattached handle writes nothing (see `finish`).
+    #[doc(hidden)]
+    pub fn commit_within(&self, budget: Duration, prepared: Prepared) {
+        self.finish(budget, |done| Request::Commit {
+            token: prepared.token,
+            done,
+        });
+    }
+
+    /// [`HotkeyRegistrar::abort`] waiting up to `budget` instead of `REQUEST_BUDGET`
+    /// (the seam the shell tests reach, T-174; `abort` calls it with
+    /// `REQUEST_BUDGET`). A timeout writes one `Warning{HotkeyRequestTimeout}` line;
+    /// an ended thread or an unattached handle writes nothing (see `finish`).
+    #[doc(hidden)]
+    pub fn abort_within(&self, budget: Duration, prepared: Prepared) {
+        self.finish(budget, |done| Request::Abort {
+            token: prepared.token,
+            done,
+        });
+    }
+
+    /// Posts a commit or an abort and waits up to `budget` until the thread ran it.
+    /// Not answered within `budget` (the thread is busy, e.g. inside
     /// `hotkey_pressed`): one `Warning{HotkeyRequestTimeout}` line with no OS code
     /// and no key, to the attached thread's log (T-174); the request stays queued
     /// and runs late, so until then the registered hotkey may differ from the
     /// saved one. A thread that ended before answering writes nothing here (its
     /// end released every registration). Unattached: nothing is posted or written.
-    fn finish(&self, request: impl FnOnce(mpsc::Sender<()>) -> Request) {
+    fn finish(&self, budget: Duration, request: impl FnOnce(mpsc::Sender<()>) -> Request) {
         let (done, ran) = mpsc::channel();
         if !self.post(request(done)) {
             return;
         }
-        if let Err(mpsc::RecvTimeoutError::Timeout) = ran.recv_timeout(REQUEST_BUDGET) {
+        if let Err(mpsc::RecvTimeoutError::Timeout) = ran.recv_timeout(budget) {
             let log = self
                 .link
                 .lock()
@@ -341,17 +365,11 @@ impl HotkeyRegistrar for HotkeyRegistrarHandle {
     }
 
     fn commit(&self, prepared: Prepared) {
-        self.finish(|done| Request::Commit {
-            token: prepared.token,
-            done,
-        });
+        self.commit_within(REQUEST_BUDGET, prepared);
     }
 
     fn abort(&self, prepared: Prepared) {
-        self.finish(|done| Request::Abort {
-            token: prepared.token,
-            done,
-        });
+        self.abort_within(REQUEST_BUDGET, prepared);
     }
 }
 
