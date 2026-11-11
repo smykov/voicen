@@ -1,0 +1,2 @@
+# Linux-replayable part only (core diag kind). The shell mutations (src-tauri/src/win/hotkey.rs: finish's timeout write, the LIFECYCLE_RESUME/UNLOCK arm) need Windows CI and are rows under ## Tests, not entries here.
+cargo test -j 2 -p voicen-core --test diag_format

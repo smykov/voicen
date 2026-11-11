@@ -1,0 +1,8 @@
+guarantee: Failure branch: a commit/abort timeout in `finish` writes one typed warning line (no key text) — the line's kind is `hotkey_request_timeout`
+file: crates/voicen-core/src/diag/format.rs
+added_by: test-writer
+--- old
+        WarningKind::HotkeyRequestTimeout => "hotkey_request_timeout",
+--- new
+        WarningKind::HotkeyRequestTimeout => "hotkey_timeout",
+--- end
