@@ -652,7 +652,7 @@ first_cdiff() {
   done
 }
 ccheck() {
-  local c="$1" allowed=" $2 " d="$fx/$1" out got line rest file tail num rule item f w r l f0 bad=0
+  local c="$1" allowed=" $2 teamwright-agent.yml:R9 " d="$fx/$1" out got line rest file tail num rule item f w r l f0 bad=0
   shift 2
   seen["$c"]=1
   if [ ! -x "$guard" ]; then
@@ -712,7 +712,10 @@ ccheck() {
 }
 A=teamwright-agent.yml
 N=teamwright-next.yml
-check ok-contour 0   # ci.yml plus both contour files with their owned heads: workflow-level contents: write, gh, the OAuth secret and vars.TEAMWRIGHT_AUTH only there
+# T-206: ok-contour is the base of the runtime-built dirs of the T-206 section below (its agent file plus the
+# owned tail scripts/ci/contour-upload.yml, which this test does not hold as text): ci.yml plus both contour
+# files with their owned heads, workflow-level contents: write, gh, the OAuth secret and vars.TEAMWRIGHT_AUTH only there.
+seen[ok-contour]=1
 # A third write-capable file, and renamed copies of the two names, keep R1 (and R3-R5 of any other file).
 ccheck v-contour-third-write "teamwright-third.yml:R3 teamwright-third.yml:R4 teamwright-third.yml:R5" "teamwright-third.yml|jobs|R1"
 ccheck v-contour-renamed-agent2     "teamwright-agent2.yml:R3 teamwright-agent2.yml:R4 teamwright-agent2.yml:R5" "teamwright-agent2.yml|jobs|R1"
@@ -774,7 +777,8 @@ expect "owned upload copy: retention-days: 1" grep -q -x '          retention-da
 expect "owned upload copy: its path holds the symbols zip" \
   grep -q -x -F '            target/release/bundle/nsis/voicen-${{ env.VOICEN_VERSION }}-symbols.zip' "$upl"
 tok_count() { cat "$1"/* "$1"/.[!.]* 2>/dev/null | grep -i -o -F 'upload-artifact' | wc -l | tr -d ' '; }
-expect "real: the token upload-artifact occurs once in $real" test "$(tok_count "$real")" = 1
+# T-206: one per owned copy: the installer upload (release-upload.yml) and the contour tail (contour-upload.yml).
+expect "real: the token upload-artifact occurs twice in $real, one per owned copy" test "$(tok_count "$real")" = 2
 expect "real: the upload step is the owned copy $upl" test -z "$(first_udiff "$real/ci.yml")" -a -n "$(tok_lines "$real/ci.yml")"
 expect "ok-release: the upload step is the owned copy $upl" test -z "$(first_udiff "$owned_src")" -a -n "$(tok_lines "$owned_src")"
 # T-087: the owned send-step copy, the real dir and the ok-* fixtures agree (R10 cannot pass on a
@@ -985,6 +989,592 @@ mutate dispatch-doubled '{ print } $0 == "  pull_request:" { print "  workflow_d
   run "real with a second '$wd' line added to ci.yml alone [R7]" 1 "$(at "$tmp/dispatch-doubled/ci.yml" "$(first_hdiff "$tmp/dispatch-doubled/ci.yml")" R7)" "$tmp/dispatch-doubled"
 mutate dispatch-pr-target '{ print } $0 == "  pull_request:" { print "  pull_request_target:" }' &&
   run "real with pull_request_target added to ci.yml alone [R7]" 1 "$(at "$tmp/dispatch-pr-target/ci.yml" "$(first_hdiff "$tmp/dispatch-pr-target/ci.yml")" R7)" "$tmp/dispatch-pr-target"
+
+# ---- T-206 (decisions #265, #266): the contour's owned scan-and-upload tail ----------------------------
+# The tail of teamwright-agent.yml, from the step 'Stage the session for upload' to the end of the file, is
+# a byte-identical copy of scripts/ci/contour-upload.yml (R9, keyed by the basename like R14). The copy is
+# the developer's text, so the dirs below are built at run time from the static base ok-contour plus that
+# copy, and every case that needs the copy says "missing scripts/ci/contour-upload.yml" when it is not
+# there, never a bash error. No tracked file holds a string that matches a secret format: every fake
+# value is assembled here from split literals (the self-test of the scan is the point of the task).
+cu=scripts/ci/contour-upload.yml
+cu_step='      - name: Stage the session for upload'
+cu_need() { # <label>: 0 (and a FAIL) when the owned copy does not exist yet
+  [ -f "$cu" ] && return 1
+  echo "FAIL $1: missing $cu (the owned copy of the contour's scan and upload tail; the developer creates it)" >&2
+  failed=$((failed + 1))
+  return 0
+}
+cu_expect() { # <label> <expect args...>
+  local l="$1"
+  shift
+  if [ ! -f "$cu" ]; then
+    echo "FAIL $l: missing $cu (the owned copy of the contour's scan and upload tail; the developer creates it)" >&2
+    failed=$((failed + 1))
+  else
+    expect "$l" "$@"
+  fi
+}
+cu_tail() { awk -v t="$cu_step" '$0 == t { s = 1 } s { print }' "$cu"; }
+agent_base() { awk -v t="$cu_step" '$0 == t { exit } { print }' "$1"; }
+
+# ---- (b) the guard: R9 per name -------------------------------------------------------------------
+# mk_ct <name> [filter...]: $tmp/<name> = ok-contour with its agent file's tail (the owned copy) passed
+# through the filter, a command that reads the tail on stdin and writes the changed tail.
+mk_ct() {
+  local d="$tmp/$1"
+  shift
+  mkdir -p "$d" && cp -p "$fx/ok-contour"/* "$d/" || return 1
+  agent_base "$fx/ok-contour/teamwright-agent.yml" > "$d/teamwright-agent.yml"
+  if [ "$#" -gt 0 ]; then cu_tail | "$@" >> "$d/teamwright-agent.yml"; else cu_tail >> "$d/teamwright-agent.yml"; fi
+}
+# dcheck <label> <dir> [<allowed other rules>]: exit 1, R9 listed at least once and no other rule listed.
+dcheck() {
+  local label="$1" d="$2" extra=" ${3:-} " out got line rule n9=0 bad=""
+  if [ ! -x "$guard" ]; then
+    echo "FAIL $label: $guard not found or not executable" >&2
+    failed=$((failed + 1))
+    return
+  fi
+  out="$("$guard" "$d" 2>&1)"
+  got=$?
+  if [ "$got" -ne 1 ]; then
+    echo "FAIL $label: exit $got, want 1 (an R9 refusal)" >&2
+    sed 's/^/       | /' <<<"$out" >&2
+    failed=$((failed + 1))
+    return
+  fi
+  while IFS= read -r line; do
+    [[ "$line" == "$d/"* ]] || continue
+    rule="$(sed -E 's/^.*:[0-9]+: (R[0-9]+): .*$/\1/' <<<"$line")"
+    if [ "$rule" = R9 ]; then n9=$((n9 + 1)); elif [[ "$extra" != *" $rule "* ]]; then bad="$bad $rule"; fi
+  done <<<"$out"
+  if [ "$n9" -eq 0 ] || [ -n "$bad" ]; then
+    echo "FAIL $label: want R9 listed (listed $n9 times) and no other rule (unexpected:${bad:- none})" >&2
+    sed 's/^/       | /' <<<"$out" >&2
+    failed=$((failed + 1))
+  else
+    echo "ok   $label [R9]: exit 1"
+    passed=$((passed + 1))
+  fi
+}
+f_none() { cat > /dev/null; }
+f_no_always() { awk '!d && $0 == "        if: always()" { d = 1; next } { print }'; }
+f_up_no_always() { awk '!d && /^        if: always\(\) && / { sub(/always\(\) && /, ""); d = 1 } { print }'; }
+f_ret90() { sed 's/^\( *retention-days:\) 3$/\1 90/'; }
+f_hidden() { awk '{ print } /^ *retention-days: / { print "          include-hidden-files: true" }'; }
+f_path_home() { sed 's|^          path: .*|          path: /root/.claude|'; }
+f_no_scan() { grep -v 'grep'; }
+f_drop_scan() { awk -v t="$cu_step" '$0 == t { s = 1; next } s && /^      - / { s = 0 } !s { print }'; }
+f_key_appended() { cat; echo '          overwrite: true'; }
+f_step_appended() { cat; printf '%s\n' '      - name: Extra' '        run: true'; }
+f_comment_first() { echo '      # a second upload-artifact'; cat; }
+f_twice() { local t; t="$(cat)"; printf '%s\n%s\n' "$t" "$t"; }
+f_outside_job() { printf '%s\n' '  other:' '    runs-on: [self-hosted, Linux, X64, claude]' '    steps:'; cat; }
+# vct <name> <allowed other rules> <filter...>: the dir with the changed tail is refused by R9.
+vct() {
+  local label="v-contour-upload-$1" extra="$2"
+  shift 2
+  cu_need "$label" && return
+  if ! mk_ct "$label" "$@"; then
+    echo "FAIL $label: cannot build the dir (fix the test)" >&2
+    failed=$((failed + 1))
+    return
+  fi
+  if cmp -s "$tmp/$label/teamwright-agent.yml" "$tmp/ok-contour-tail/teamwright-agent.yml"; then
+    echo "FAIL $label: the mutation of the tail did not apply (fix the test or the copy)" >&2
+    failed=$((failed + 1))
+    return
+  fi
+  dcheck "$label" "$tmp/$label" "$extra"
+}
+if ! cu_need "ok-contour-tail"; then
+  mk_ct ok-contour-tail
+  run "ok-contour with the owned tail $cu (the guard's R9 per name)" 0 'ok:' "$tmp/ok-contour-tail"
+  expect "ok-contour-tail: exactly two upload-artifact tokens in the dir (the installer upload and the tail)" test "$(tok_count "$tmp/ok-contour-tail")" = 2
+fi
+vct tail-missing "" f_none
+vct no-always "" f_no_always
+vct if-no-always "" f_up_no_always
+vct retention-90 "" f_ret90
+vct include-hidden-files "" f_hidden
+vct path-home "" f_path_home
+vct scan-removed "" f_no_scan
+vct scan-step-removed "" f_drop_scan
+vct key-appended "" f_key_appended
+vct step-appended "" f_step_appended
+vct token-in-comment-first "" f_comment_first
+vct tail-twice "" f_twice
+vct tail-outside-agent-job "" f_outside_job
+# The tail in a job other than agent: (the up-walk from the copy's first line meets '  stage:').
+if ! cu_need "v-contour-upload-job-renamed"; then
+  mk_ct v-contour-upload-job-renamed && sed -i 's/^  agent:$/  stage:/' "$tmp/v-contour-upload-job-renamed/teamwright-agent.yml"
+  if cmp -s "$tmp/v-contour-upload-job-renamed/teamwright-agent.yml" "$tmp/ok-contour-tail/teamwright-agent.yml"; then
+    echo "FAIL v-contour-upload-job-renamed: the mutation did not apply (no '  agent:' line)" >&2
+    failed=$((failed + 1))
+  else
+    dcheck v-contour-upload-job-renamed "$tmp/v-contour-upload-job-renamed"
+  fi
+fi
+# Only the exact name carries the tail: it in teamwright-next.yml, with none in the agent file, is refused
+# (R4 also lists the secret there, which the guard may report beside R9).
+if ! cu_need "v-contour-upload-in-next-only"; then
+  d="$tmp/v-contour-upload-in-next-only"
+  mk_ct v-contour-upload-in-next-only f_none && cu_tail >> "$d/teamwright-next.yml"
+  dcheck v-contour-upload-in-next-only "$d" "R4"
+fi
+# The installer upload of ci.yml is still required: the tail alone is one token, not two.
+if ! cu_need "v-contour-upload-installer-upload-missing"; then
+  d="$tmp/v-contour-upload-installer-upload-missing"
+  mk_ct v-contour-upload-installer-upload-missing
+  awk -v up="$upl" 'BEGIN { while ((getline l < up) > 0) U[++n] = l } { L[++m] = $0 }
+    END { for (i = 1; i <= m; i++) { ok = 1; for (k = 1; k <= n; k++) if (L[i + k - 1] != U[k]) { ok = 0; break } if (ok) { s = i; break } }
+          for (i = 1; i <= m; i++) if (!s || i < s || i > s + n - 2) print L[i] }' "$d/ci.yml" > "$d/ci.yml.new" && mv "$d/ci.yml.new" "$d/ci.yml"
+  if cmp -s "$d/ci.yml" "$fx/ok-contour/ci.yml"; then
+    echo "FAIL v-contour-upload-installer-upload-missing: the installer upload block was not found in ok-contour/ci.yml (fix the test)" >&2
+    failed=$((failed + 1))
+  else
+    dcheck v-contour-upload-installer-upload-missing "$d"
+  fi
+fi
+
+# ---- (b) pins of the owned copy and of the real files (c) -----------------------------------------
+cu_expect "$cu starts with the step line '$cu_step'" test "$(head -n 1 "$cu")" = "$cu_step"
+cu_expect "$cu: the scan step runs under if: always()" grep -q -x -F '        if: always()' "$cu"
+cu_expect "$cu: the owned upload action line occurs once and no other line names upload-artifact" \
+  bash -c '[ "$(grep -c -x -F "      - uses: actions/upload-artifact@v4" "$1")" = 1 ] && [ "$(grep -i -o -F upload-artifact "$1" | wc -l | tr -d " ")" = 1 ]' _ "$cu"
+cu_expect "$cu: the upload runs only after the stage ran (if: always() && steps.claude.outcome == 'success')" \
+  grep -q -x -F "        if: always() && steps.claude.outcome == 'success'" "$cu"
+cu_expect "$cu: retention-days: 3 and if-no-files-found: error, no include-hidden-files, no overwrite" \
+  bash -c 'grep -q -x -F "          retention-days: 3" "$1" && grep -q -x -F "          if-no-files-found: error" "$1" && ! grep -q -i -E "include-hidden-files|overwrite" "$1"' _ "$cu"
+cu_expect "$cu: the artifact path is the staging dir session-upload, not a path under HOME" \
+  bash -c 'l="$(grep -E "^          path:" "$1")"; [ "$(grep -c -E "^          path:" "$1")" = 1 ] && [[ "$l" == *session-upload* ]] && ! grep -q -E "\.claude|HOME" <<<"$l"' _ "$cu"
+cu_expect "$cu: the artifact is named after the task, the run and the attempt" \
+  bash -c 'l="$(grep -E "^          name:" "$1")"; [[ "$l" == *teamwright-agent-* && "$l" == *github.run_id* && "$l" == *github.run_attempt* && ( "$l" == *task_id* || "$l" == *TASK_ID* ) ]]' _ "$cu"
+cu_expect "$cu: the scan step env holds the OAuth secret and the job token (the values pass 1 matches)" \
+  bash -c 'grep -q -F "\${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}" "$1" && grep -q -F "\${{ github.token }}" "$1"' _ "$cu"
+cu_expect "$cu: the four format patterns are written in the step text (decision 266)" \
+  bash -c 'for p in "-----BEGIN [A-Z0-9 ]*PRIVATE KEY( BLOCK)?-----" "gh[pousr]_[A-Za-z0-9]{36,}" "github_pat_[A-Za-z0-9_]{20,}" "sk-ant-[A-Za-z0-9_-]{20,}"; do grep -q -F -e "$p" "$1" || exit 1; done' _ "$cu"
+cu_expect "$cu: no set -x (a trace would print the values) and no RUNS_DIR" bash -c '! grep -q -E "set -[a-z]*x|RUNS_DIR" "$1"' _ "$cu"
+cu_expect "real agent: from the line '$cu_step' to the end of the file it is $cu, byte for byte" \
+  bash -c 'cmp -s <(awk -v t="$3" "\$0 == t { s = 1 } s { print }" "$1") "$2"' _ "$ag" "$cu" "$cu_step"
+expect "real agent: the token upload-artifact occurs once (the tail), the installer upload stays in ci.yml" \
+  test "$(grep -i -o -F upload-artifact "$ag" | wc -l | tr -d ' ')" = 1
+expect "real agent: no RUNS_DIR (the host-only copy of the session is gone)" bash -c '! grep -q -F RUNS_DIR "$1"' _ "$ag"
+expect "real agent: no step 'Keep the session for analysis' (it exited 0 having kept nothing)" bash -c '! grep -q -F "Keep the session for analysis" "$1"' _ "$ag"
+expect "real agent: the tail steps come after 'Did the stage commit?' (the job token appears only there)" \
+  bash -c 'c="$(grep -n -m 1 -x -F "      - name: Did the stage commit?" "$1" | cut -d: -f1)"; s="$(grep -n -m 1 -x -F "$2" "$1" | cut -d: -f1)"; [ -n "$c" ] && [ -n "$s" ] && [ "$s" -gt "$c" ]' _ "$ag" "$cu_step"
+
+# ---- (a) the scan step, run: its run: body extracted from the owned copy and executed ---------------
+# sc_prep reads the step 'Stage the session for upload' of the copy: its run: body, its env: (name: value
+# lines) and its shell:. The env values are the fakes below: the expression of secrets.CLAUDE_CODE_OAUTH_TOKEN
+# becomes C_OAUTH, that of github.token becomes C_JOB (both obvious fakes that match none of the four format
+# patterns, so that only pass 1 can refuse them), any other expression a plain word. Without a shell: line the
+# body runs as GitHub runs it by default, bash -e.
+sc_state=""
+sc_err=""
+sc_prep() {
+  if [ -z "$sc_state" ]; then
+    sc_state=bad
+    if [ ! -f "$cu" ]; then
+      sc_err="missing $cu (the owned copy of the contour's scan and upload tail; the developer creates it)"
+    else
+      mkdir -p "$tmp/sc/shim"
+      awk -v t="$cu_step" '
+        $0 == t { s = 1; next }
+        s && /^      - / { exit }
+        s && !r { if ($0 ~ /^        run: \|[-+]?$/) r = 1; next }
+        s && r { if ($0 ~ /^          /) print substr($0, 11); else if ($0 ~ /^ *$/) print ""; else exit }' "$cu" > "$tmp/sc/body.sh"
+      awk -v t="$cu_step" '
+        $0 == t { s = 1; next }
+        s && /^      - / { exit }
+        s && $0 == "        env:" { e = 1; next }
+        s && e { if ($0 ~ /^          [A-Za-z_][A-Za-z0-9_]*:/) { sub(/^          /, ""); print } else if ($0 ~ /^ *#/ || $0 ~ /^ *$/) next; else e = 0 }' "$cu" > "$tmp/sc/env.txt"
+      awk -v t="$cu_step" '
+        $0 == t { s = 1; next }
+        s && /^      - / { exit }
+        s && /^        shell: / { sub(/^        shell: /, ""); print; exit }' "$cu" > "$tmp/sc/shell.txt"
+      if [ ! -s "$tmp/sc/body.sh" ]; then
+        sc_err="$cu: no step '${cu_step#      - name: }' with a 'run: |' body"
+      elif ! grep -q -F 'secrets.CLAUDE_CODE_OAUTH_TOKEN' "$tmp/sc/env.txt"; then
+        sc_err="$cu: the scan step's env: holds no \${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }} value"
+      elif ! grep -q -F 'github.token' "$tmp/sc/env.txt"; then
+        sc_err="$cu: the scan step's env: holds no \${{ github.token }} value"
+      elif grep -q -F '${{' "$tmp/sc/body.sh"; then
+        sc_err="$cu: the run: body holds a \${{ }} expression (values reach the scan only through the step env:)"
+      else
+        sc_state=ok
+      fi
+      cat > "$tmp/sc/shim/grep" <<'SHIM'
+#!/usr/bin/env bash
+# The scan with one pass removed: a grep that finds nothing when it is that pass (value pass: fixed strings
+# read from a file; format pass: a pattern naming one of the four secret formats), the real grep otherwise.
+a=""; hasF=0; hasf=0; hasc=0; pk=0
+for a in "$@"; do
+  case "$a" in
+    --fixed-strings) hasF=1 ;;
+    --file=*) hasf=1 ;;
+    --count) hasc=1 ;;
+    --*) ;;
+    -[A-Za-z]*) f="${a#-}"; [[ "$f" == *F* ]] && hasF=1; [[ "$f" == *f* ]] && hasf=1; [[ "$f" == *c* ]] && hasc=1 ;;
+  esac
+  case "$a" in *"PRIVATE KEY"* | *"gh[pousr]"* | *github_pat_* | *sk-ant-*) pk=1 ;; esac
+done
+if [ "${SC_MUT:-}" = value ] && [ "$hasF" = 1 ] && [ "$hasf" = 1 ]; then [ "$hasc" = 1 ] && echo 0; exit 1; fi
+if [ "${SC_MUT:-}" = format ] && [ "$pk" = 1 ]; then [ "$hasc" = 1 ] && echo 0; exit 1; fi
+exec "$GREP_REAL" "$@"
+SHIM
+      chmod +x "$tmp/sc/shim/grep"
+    fi
+  fi
+  [ "$sc_state" = ok ]
+}
+rep() { head -c "$2" /dev/zero | tr '\0' "$1"; }
+C_WHY=""
+SC_MUT=""
+# sc_new <name> [<slug length>]: a workspace (a git repo with origin/main), a HOME, a RUNNER_TEMP and the three
+# sources with a marker each, plus the things that must never be staged. With a length, GITHUB_WORKSPACE is a
+# path whose slug (every char outside [A-Za-z0-9] becomes '-') has that many chars.
+sc_new() {
+  C="$tmp/sc-$1"
+  rm -rf "$C"
+  C_H="$C/home"
+  C_RT="$C/rt"
+  C_OUTSIDE="$C/outside"
+  C_WS="$C/ws"
+  [ -n "${2:-}" ] && C_WS="$C/ws/$(rep x $(($2 - ${#C} - 4)))"
+  C_SLUG="$(printf '%s' "$C_WS" | tr -c 'A-Za-z0-9' '-')"
+  C_ID=0a1b2c3d-1111-4222-8333-444455556666
+  C_OTHER=9f8e7d6c-5555-4444-8333-222211110000
+  C_PD="$C_H/.claude/projects/$C_SLUG"
+  C_OAUTH="zzcanary-oauth-$RANDOM$RANDOM$RANDOM"
+  C_JOB="zzcanary-job-$RANDOM$RANDOM$RANDOM"
+  mkdir -p "$C_WS/.teamwright-agent" "$C_WS/.teamwright/logs" "$C_PD/$C_ID/subagents" "$C_PD/$C_OTHER/subagents" \
+    "$C_PD-other" "$C_H/.claude/projects/-tmp-x" "$C_RT" "$C_OUTSIDE/dir" "$C/tmpdir"
+  (cd "$C_WS" && env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE git init -q . &&
+    env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE git -c user.name=t -c user.email=t@example.com -c commit.gpgsign=false commit -q --allow-empty -m x &&
+    env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE git update-ref refs/remotes/origin/main HEAD) > /dev/null 2>&1
+  sc_init "$C_ID" "$C_WS"
+  echo MARK-session >> "$C_WS/.teamwright-agent/session.jsonl"
+  echo MARK-preflight > "$C_WS/.teamwright-agent/preflight.md"
+  echo MARK-tools > "$C_WS/.teamwright/logs/tools.jsonl"
+  echo MARK-pj-main > "$C_PD/$C_ID.jsonl"
+  echo MARK-pj-sub > "$C_PD/$C_ID/subagents/agent-a1.jsonl"
+  echo MARK-pj-other > "$C_PD/$C_OTHER.jsonl"
+  echo MARK-pj-other-sub > "$C_PD/$C_OTHER/subagents/agent-b1.jsonl"
+  echo MARK-pj-sibling > "$C_PD-other/$C_ID.jsonl"
+  echo MARK-pj-unrelated > "$C_H/.claude/projects/-tmp-x/$C_ID.jsonl"
+  echo MARK-home-cred > "$C_H/.claude/.credentials.json"
+  echo MARK-home-settings > "$C_H/.claude/settings.json"
+  echo MARK-outside > "$C_OUTSIDE/file.txt"
+  echo MARK-outside-dir > "$C_OUTSIDE/dir/inner.txt"
+  ln -s "$C_OUTSIDE/file.txt" "$C_PD/link-pj.jsonl"
+  ln -s "$C_OUTSIDE/file.txt" "$C_PD/$C_ID/subagents/link-sub.jsonl"
+}
+# sc_init <id> <cwd>: the first line of session.jsonl, the stream-json init event (session_id and cwd).
+sc_init() {
+  printf '{"type":"system","subtype":"init","cwd":"%s","session_id":"%s"}\n' "$2" "$1" > "$C_WS/.teamwright-agent/session.jsonl"
+  echo MARK-session >> "$C_WS/.teamwright-agent/session.jsonl"
+}
+# sc_plant <where> <value>: the value as contents or as a file name in one of the sources.
+sc_plant() {
+  case "$1" in
+    session) printf '%s\n' "$2" >> "$C_WS/.teamwright-agent/session.jsonl" ;;
+    out) printf '%s\n' "$2" > "$C_WS/.teamwright-agent/extra.txt" ;;
+    outname) : > "$C_WS/.teamwright-agent/n-$2.txt" ;;
+    logs) printf '%s\n' "$2" >> "$C_WS/.teamwright/logs/tools.jsonl" ;;
+    logname) : > "$C_WS/.teamwright/logs/n-$2.log" ;;
+    pj) printf '%s\n' "$2" >> "$C_PD/$C_ID.jsonl" ;;
+    sub) printf '%s\n' "$2" >> "$C_PD/$C_ID/subagents/agent-a1.jsonl" ;;
+    pjname) : > "$C_PD/$C_ID/subagents/n-$2.jsonl" ;;
+  esac
+}
+# sc_exec: run the extracted body in the workspace with a clean environment; C_RC is its exit code, $C/out.txt
+# its stdout and stderr, C_STAGE the staging dir ($RUNNER_TEMP/session-upload).
+sc_exec() {
+  local line name val flags sh
+  local -a args
+  C_STAGE="$C_RT/session-upload"
+  if ! sc_prep; then C_WHY="$sc_err"; return 1; fi
+  args=(PATH="$PATH" HOME="$C_H" GITHUB_WORKSPACE="$C_WS" RUNNER_TEMP="$C_RT" TMPDIR="$C/tmpdir" LC_ALL=C
+    GITHUB_OUTPUT="$C/gh_output" GITHUB_ENV="$C/gh_env" GITHUB_STEP_SUMMARY="$C/gh_summary" GITHUB_RUN_ATTEMPT=1
+    OUT=.teamwright-agent TASK_ID=T-999 STAGE=analyze RUN_ID=1 HOP=1 MAIN=main REPO=example/repo ISSUE= RUN_URL=https://example.com/run)
+  while IFS= read -r line; do
+    name="${line%%:*}"
+    val="${line#*:}"
+    val="${val# }"
+    val="${val#\"}"
+    val="${val%\"}"
+    case "$val" in
+      *secrets.CLAUDE_CODE_OAUTH_TOKEN*) val="$C_OAUTH" ;;
+      *github.token*) val="$C_JOB" ;;
+      *'${{'*) val="$(sed -e 's/\${{ *steps\.[^}]*}}/success/g' -e 's/\${{ *github\.workspace *}}/'"${C_WS//\//\\/}"'/g' -e 's/\${{ *github\.run_id *}}/1/g' -e 's/\${{[^}]*}}/x/g' <<<"$val")" ;;
+    esac
+    args+=("$name=$val")
+  done < "$tmp/sc/env.txt"
+  if [ -n "$SC_MUT" ]; then
+    args=("${args[@]}" "SC_MUT=$SC_MUT" "GREP_REAL=$(command -v grep)")
+    args[0]="PATH=$tmp/sc/shim:$PATH"
+  fi
+  sh="$(cat "$tmp/sc/shell.txt")"
+  if [ -z "$sh" ]; then flags="-e"
+  elif [ "$sh" = bash ]; then flags="--noprofile --norc -eo pipefail"
+  else flags="${sh#bash}"; flags="${flags//\{0\}/}"; fi
+  (cd "$C_WS" && env -i "${args[@]}" timeout 120 bash $flags "$tmp/sc/body.sh") > "$C/out.txt" 2>&1
+  C_RC=$?
+  return 0
+}
+sc_staged_has() { grep -r -q -F -- "$1" "$C_STAGE" 2>/dev/null; }
+# sc_no_leak: neither fake secret value in the step's output or in the runner's files.
+sc_no_leak() {
+  local f v
+  for f in out.txt gh_output gh_env gh_summary; do
+    [ -e "$C/$f" ] || continue
+    for v in "$C_OAUTH" "$C_JOB"; do
+      [ -n "$v" ] || continue
+      if grep -q -F -- "$v" "$C/$f"; then C_WHY="a secret value of the job is in $f"; return 1; fi
+    done
+  done
+  return 0
+}
+sc_check() { # <label> <fn> [args...]: a test function returns 0 or sets C_WHY and returns 1
+  local label="$1"
+  shift
+  C_WHY=""
+  if "$@"; then
+    echo "ok   $label"
+    passed=$((passed + 1))
+    return 0
+  fi
+  echo "FAIL $label: $C_WHY" >&2
+  failed=$((failed + 1))
+  return 1
+}
+declare -A sc_pass=()
+# sc_mut_check <label> <mutation> <fn> [args...]: with one pass of the scan removed (the grep shim), the case
+# that guards that pass must come out red; the case is only judged when it is green unmutated.
+sc_mut_check() {
+  local label="$1" mut="$2" id="$3"
+  shift 2
+  if [ "${sc_pass[$id]:-0}" != 1 ]; then
+    echo "FAIL mutated ($mut pass removed) $label: the unmutated case is not green, so the mutation cannot be judged" >&2
+    failed=$((failed + 1))
+    return
+  fi
+  shift
+  SC_MUT="$mut"
+  C_WHY=""
+  if "$@"; then
+    SC_MUT=""
+    echo "FAIL mutated ($mut pass removed) $label: the case stays green, the scan line is not pinned by it" >&2
+    failed=$((failed + 1))
+  else
+    SC_MUT=""
+    echo "ok   mutated ($mut pass removed) $label: red as wanted ($C_WHY)"
+    passed=$((passed + 1))
+  fi
+}
+
+t_canary() { # <oauth|job> <where>: the job's own secret value in a source: refused, nothing left, nothing printed
+  local v
+  sc_new "canary-$1-$2"
+  if [ "$1" = oauth ]; then v="$C_OAUTH"; else v="$C_JOB"; fi
+  sc_plant "$2" "$v"
+  sc_exec || return 1
+  [ "$C_RC" = 1 ] || { C_WHY="exit $C_RC, want 1 (a refusal)"; return 1; }
+  [ ! -e "$C_STAGE" ] || { C_WHY="the staging dir is still there after a refusal"; return 1; }
+  sc_no_leak
+}
+belt_val() { # <kind>: a fake of one secret format, assembled from split literals
+  case "$1" in
+    ghp | ghs | gho | ghu | ghr) printf 'gh%s_%s' "${1#gh}" "$(rep A 36)" ;;
+    ghp35) printf 'gh%s_%s' p "$(rep A 35)" ;;
+    ghx) printf 'gh%s_%s' x "$(rep A 40)" ;;
+    pat) printf 'github_%s_%s' pat A1b2C3d4E5f6G7h8I9j0K1 ;;
+    pat19) printf 'github_%s_%s' pat A1b2C3d4E5f6G7h8I9j ;;
+    ant) printf 'sk%sant%s%s' - - api03_ABCDEFGH-ijklmnopqrstuv ;;
+    ant19) printf 'sk%sant%s%s' - - abcdefghijklmnopqrs ;;
+    key-rsa) printf '%s%s' '-----BEG' 'IN RSA PRIVATE KEY-----' ;;
+    key-plain) printf '%s%s' '-----BEG' 'IN PRIVATE KEY-----' ;;
+    key-ssh) printf '%s%s' '-----BEG' 'IN OPENSSH PRIVATE KEY-----' ;;
+    key-block) printf '%s%s' '-----BEG' 'IN PGP PRIVATE KEY BLOCK-----' ;;
+    key-four-dashes) printf '%s%s' '----BEG' 'IN PRIVATE KEY-----' ;;
+    key-public) printf '%s%s' '-----BEG' 'IN PUBLIC KEY-----' ;;
+  esac
+}
+t_belt() { # <kind> <where>: a value of a known secret format, not the job's own: refused, only a count printed
+  local v
+  v="$(belt_val "$1")"
+  sc_new "belt-$1-$2"
+  sc_plant "$2" "$v"
+  sc_exec || return 1
+  [ "$C_RC" = 1 ] || { C_WHY="exit $C_RC, want 1 (a refusal)"; return 1; }
+  [ ! -e "$C_STAGE" ] || { C_WHY="the staging dir is still there after a refusal"; return 1; }
+  ! grep -q -F -- "$v" "$C/out.txt" || { C_WHY="the matching value is in the output"; return 1; }
+  ! grep -q -F -- "${v:5:20}" "$C/out.txt" || { C_WHY="a part of the matching value or file name is in the output"; return 1; }
+  grep -q '[0-9]' "$C/out.txt" || { C_WHY="no count printed"; return 1; }
+}
+t_near() { # <kind>: a near miss of a format (one char short, another prefix): not a match, the run goes on
+  sc_new "near-$1"
+  sc_plant logs "$(belt_val "$1")"
+  sc_exec || return 1
+  [ "$C_RC" = 0 ] || { C_WHY="exit $C_RC, want 0 (not a secret format)"; return 1; }
+  [ -d "$C_STAGE" ] || { C_WHY="no staging dir"; return 1; }
+}
+t_clean() {
+  local m f
+  sc_new clean
+  sc_exec || return 1
+  [ "$C_RC" = 0 ] || { C_WHY="exit $C_RC, want 0 for a clean tree"; return 1; }
+  [ -d "$C_STAGE" ] || { C_WHY="no staging dir $C_STAGE"; return 1; }
+  [ -f "$C_STAGE/manifest.txt" ] || { C_WHY="no manifest.txt in the staging dir"; return 1; }
+  [ -f "$C_STAGE/commits.txt" ] || { C_WHY="no commits.txt in the staging dir"; return 1; }
+  for m in MARK-session MARK-preflight MARK-tools MARK-pj-main MARK-pj-sub; do
+    sc_staged_has "$m" || { C_WHY="$m was not staged"; return 1; }
+  done
+  [ -z "$(find "$C_STAGE" -mindepth 1 \( -name '.*' -o -type l \) | head -n 1)" ] || { C_WHY="a staged name starts with a dot (upload-artifact skips hidden files) or a symlink was staged"; return 1; }
+  [ -z "$(find "$C_STAGE" -mindepth 1 ! -type f ! -type d | head -n 1)" ] || { C_WHY="a staged entry is not a regular file"; return 1; }
+  ! grep -q -F '::warning' "$C/out.txt" || { C_WHY="a ::warning with nothing missing"; return 1; }
+  sc_no_leak
+}
+t_symlink() {
+  local m
+  sc_new symlink
+  ln -s "$C_OUTSIDE/file.txt" "$C_WS/.teamwright-agent/link-file.txt"
+  ln -s "$C_OUTSIDE/dir" "$C_WS/.teamwright-agent/link-dir"
+  ln -s "$C_OUTSIDE/file.txt" "$C_WS/.teamwright/logs/link-log.txt"
+  sc_exec || return 1
+  [ "$C_RC" = 0 ] || { C_WHY="exit $C_RC, want 0"; return 1; }
+  for m in MARK-outside MARK-outside-dir MARK-outside-dir; do
+    ! sc_staged_has "$m" || { C_WHY="the content behind a symlink ($m) was staged"; return 1; }
+  done
+  [ -z "$(find "$C_STAGE" -name 'link-*' | head -n 1)" ] || { C_WHY="a symlink was staged"; return 1; }
+  sc_staged_has MARK-session && sc_staged_has MARK-tools || { C_WHY="the regular files beside the symlinks were not staged"; return 1; }
+}
+t_out_missing() {
+  sc_new out-missing
+  rm -rf "$C_WS/.teamwright-agent"
+  sc_exec || return 1
+  [ "$C_RC" = 0 ] || { C_WHY="exit $C_RC, want 0"; return 1; }
+  grep -F -- '.teamwright-agent' "$C_STAGE/manifest.txt" 2>/dev/null | grep -q -i -E 'miss|absent|not |no |none|skip|lack' || { C_WHY="manifest.txt does not name the missing .teamwright-agent"; return 1; }
+  grep -q -F '::warning' "$C/out.txt" || { C_WHY="no ::warning for the missing source"; return 1; }
+  sc_staged_has MARK-tools || { C_WHY="the journal was not staged"; return 1; }
+  ! sc_staged_has MARK-pj-main || { C_WHY="the project dir was staged without a session id"; return 1; }
+}
+t_logs_missing() {
+  sc_new logs-missing
+  rm -rf "$C_WS/.teamwright"
+  sc_exec || return 1
+  [ "$C_RC" = 0 ] || { C_WHY="exit $C_RC, want 0"; return 1; }
+  grep -F -- '.teamwright/logs' "$C_STAGE/manifest.txt" 2>/dev/null | grep -q -i -E 'miss|absent|not |no |none|skip|lack' || { C_WHY="manifest.txt does not name the missing .teamwright/logs"; return 1; }
+  grep -q -F '::warning' "$C/out.txt" || { C_WHY="no ::warning for the missing source"; return 1; }
+  sc_staged_has MARK-session || { C_WHY="the session was not staged"; return 1; }
+}
+t_empty_oauth() { # an empty secret value is dropped, not matched against everything
+  sc_new empty-oauth
+  C_OAUTH=""
+  sc_exec || return 1
+  [ "$C_RC" = 0 ] || { C_WHY="exit $C_RC, want 0 (an empty value must be dropped, not matched)"; return 1; }
+  sc_staged_has MARK-session || { C_WHY="nothing staged"; return 1; }
+}
+t_empty_job() { # an empty job token: the scan cannot cover it, the step refuses
+  sc_new empty-job
+  C_JOB=""
+  sc_exec || return 1
+  [ "$C_RC" = 1 ] || { C_WHY="exit $C_RC, want 1 (an empty job token is refused)"; return 1; }
+  [ ! -e "$C_STAGE" ] || { C_WHY="the staging dir is still there"; return 1; }
+}
+t_pd_ok() { # [<slug length>]: the project dir of this checkout, this run's session only
+  local m
+  sc_new "pd-ok${1:-}" "${1:-}"
+  sc_exec || return 1
+  [ "$C_RC" = 0 ] || { C_WHY="exit $C_RC, want 0"; return 1; }
+  sc_staged_has MARK-pj-main || { C_WHY="<slug>/<id>.jsonl was not staged"; return 1; }
+  sc_staged_has MARK-pj-sub || { C_WHY="<slug>/<id>/subagents/ was not staged"; return 1; }
+  for m in MARK-pj-other MARK-pj-other-sub MARK-pj-sibling MARK-pj-unrelated MARK-home-cred MARK-home-settings MARK-outside; do
+    ! sc_staged_has "$m" || { C_WHY="$m was staged (another session, a sibling or foreign dir, a symlink target or a file of ~/.claude)"; return 1; }
+  done
+  [ -z "$(find "$C_STAGE" -name 'link-*' | head -n 1)" ] || { C_WHY="a symlink inside the project dir was staged"; return 1; }
+  ! grep -q -F '::warning' "$C/out.txt" || { C_WHY="a ::warning with nothing missing"; return 1; }
+}
+t_pd_miss() { # <variant> [<slug length>]: no project dir is staged; the miss is in manifest.txt and a ::warning
+  local m
+  sc_new "pd-$1" "${2:-}"
+  mkdir -p "$C_H/.claude/projects"
+  echo MARK-trav > "$C_H/.claude/projects/x.jsonl"
+  case "$1" in
+    symdir) mv "$C_PD" "$C/realpd" && ln -s "$C/realpd" "$C_PD" ;;
+    nodir) rm -rf "$C_PD" ;;
+    badid-word) sc_init "session-1" "$C_WS" ;;
+    badid-upper) sc_init "0A1B2C3D-1111-4222-8333-444455556666" "$C_WS" ;;
+    badid-trail) sc_init "${C_ID}x" "$C_WS" ;;
+    badid-trav) sc_init "../x" "$C_WS" ;;
+    badid-glob) sc_init "*" "$C_WS" ;;
+    cwd) sc_init "$C_ID" "/somewhere/else" ;;
+    long) ;;
+  esac
+  sc_exec || return 1
+  [ "$C_RC" = 0 ] || { C_WHY="exit $C_RC, want 0 (a miss is not a refusal)"; return 1; }
+  for m in MARK-pj-main MARK-pj-sub MARK-pj-other MARK-pj-other-sub MARK-pj-sibling MARK-pj-unrelated MARK-home-cred MARK-home-settings MARK-trav; do
+    ! sc_staged_has "$m" || { C_WHY="$m was staged from HOME"; return 1; }
+  done
+  sc_staged_has MARK-session || { C_WHY="the session dir was not staged: the miss must not stop the rest"; return 1; }
+  grep -i -E 'claude|project|session' "$C_STAGE/manifest.txt" 2>/dev/null | grep -q -i -E 'miss|absent|not |no |none|skip|lack|refus|reject|invalid' || { C_WHY="manifest.txt does not name the miss"; return 1; }
+  grep -q -F '::warning' "$C/out.txt" || { C_WHY="no ::warning for the miss"; return 1; }
+}
+
+sc_run() { # <label> <fn> [args...]: the case, then its result is remembered for the mutation runs
+  local label="$1"
+  shift
+  if sc_check "scan: $label" "$@"; then sc_pass["$label"]=1; else sc_pass["$label"]=0; fi
+}
+canary_specs=("oauth session" "oauth outname" "oauth logs" "oauth logname" "oauth pj" "oauth sub" "oauth pjname" "job session" "job outname" "job logs" "job pj")
+belt_kinds=(ghp ghs gho ghu ghr pat ant key-rsa key-plain key-ssh key-block)
+for spec in "${canary_specs[@]}"; do
+  set -- $spec
+  sc_run "canary $1 in $2 refuses the upload (exit 1, no staging dir, no value in the output)" t_canary "$1" "$2"
+done
+for k in "${belt_kinds[@]}"; do
+  for w in out outname; do
+    sc_run "format $k in $w refuses the upload (exit 1, no staging dir, only a count)" t_belt "$k" "$w"
+  done
+done
+for k in ghp ant key-rsa; do
+  for w in session logs logname pj sub pjname; do
+    sc_run "format $k in $w refuses the upload" t_belt "$k" "$w"
+  done
+done
+for k in ghp35 ghx pat19 ant19 key-four-dashes key-public; do
+  sc_run "near miss $k is not a secret format (exit 0)" t_near "$k"
+done
+sc_run "clean tree: exit 0, manifest.txt, commits.txt, the three sources staged, no dot name, no symlink, no output of a value" t_clean
+sc_run "a symlink in the sources is not copied or followed" t_symlink
+sc_run "missing .teamwright-agent: exit 0, named in manifest.txt, a ::warning" t_out_missing
+sc_run "missing .teamwright/logs: exit 0, named in manifest.txt, a ::warning" t_logs_missing
+sc_run "an empty OAuth value is dropped (an empty pattern would match every file)" t_empty_oauth
+sc_run "an empty job token value is refused (exit 1)" t_empty_job
+sc_run "project dir: <slug>/<id>.jsonl and <id>/subagents copied; other session, sibling and foreign dirs, symlinks, ~/.claude files not" t_pd_ok
+sc_run "project dir with a slug of exactly 200 chars is copied" t_pd_ok 200
+for v in symdir nodir badid-word badid-upper badid-trail badid-trav badid-glob cwd; do
+  sc_run "project dir miss ($v): exit 0, nothing from HOME staged, miss in manifest.txt and a ::warning" t_pd_miss "$v"
+done
+sc_run "project dir miss (slug of 201 chars): exit 0, nothing from HOME staged, miss in manifest.txt and a ::warning" t_pd_miss long 201
+
+# The self-test of the scan: the same cases against the step with one pass removed must be red.
+for spec in "${canary_specs[@]}"; do
+  set -- $spec
+  sc_mut_check "canary $1 in $2" value "canary $1 in $2 refuses the upload (exit 1, no staging dir, no value in the output)" t_canary "$1" "$2"
+done
+for k in "${belt_kinds[@]}"; do
+  for w in out outname; do
+    sc_mut_check "format $k in $w" format "format $k in $w refuses the upload (exit 1, no staging dir, only a count)" t_belt "$k" "$w"
+  done
+done
+for k in ghp ant key-rsa; do
+  for w in session logs logname pj sub pjname; do
+    sc_mut_check "format $k in $w" format "format $k in $w refuses the upload" t_belt "$k" "$w"
+  done
+done
 
 # T-088: the owned list and fragments (R11) agree with the real ci.yml, and say what the retired
 # guards said (test-side reads of the guard's own copies; the guard checks them too, see below).
@@ -1372,7 +1962,7 @@ frag_ok g-frag-ok-anchor-alias-outside gate-setup-node.yml "ok: an anchor and an
 cguard() {
   mkdir -p "$tmp/$1/contour-heads"
   if ! cp -p "$real_guard" scripts/ci/release-job.yml scripts/ci/release-header.yml "$upl" "$tgs" "$alines" "$tmp/$1/" ||
-     ! cp -pR "$csd" "$tmp/$1/"; then
+     ! cp -pR "$csd" "$tmp/$1/" || { [ -f "$cu" ] && ! cp -p "$cu" "$tmp/$1/"; }; then
     echo "FAIL $1: cannot copy the guard and its owned copies (fix the test)" >&2
     failed=$((failed + 1))
     return 1
@@ -1388,8 +1978,40 @@ ccan() {
 }
 if cguard g-contour-ok; then
   guard="$tmp/g-contour-ok/release-guard.sh"
-  run "contour: the guard next to well-formed owned heads accepts ok-contour" 0 'ok:' "$fx/ok-contour"
+  if [ -d "$tmp/ok-contour-tail" ]; then
+    run "contour: the guard next to well-formed owned heads and the owned tail copy accepts ok-contour with the tail" 0 'ok:' "$tmp/ok-contour-tail"
+  else
+    echo "FAIL contour: the guard next to well-formed owned heads accepts ok-contour with the tail: the dir is not built (missing $cu)" >&2
+    failed=$((failed + 1))
+  fi
   guard="$real_guard"
+fi
+# T-206: the owned copy contour-upload.yml is a guard input (preamble: cannot run, exit 3), like the heads.
+cucan() { # <name> <label> <ERE>
+  guard="$tmp/$1/release-guard.sh"
+  run "$2" 3 "$3" "$fx/ok-contour"
+  guard="$real_guard"
+}
+if [ -f "$cu" ]; then
+  if cguard g-cu-missing; then
+    rm -f "$tmp/g-cu-missing/contour-upload.yml"
+    cucan g-cu-missing "cannot run: owned copy contour-upload.yml missing" 'cannot run.*contour-upload'
+  fi
+  if cguard g-cu-empty; then
+    : > "$tmp/g-cu-empty/contour-upload.yml"
+    cucan g-cu-empty "cannot run: owned copy contour-upload.yml empty" 'cannot run.*contour-upload'
+  fi
+  if cguard g-cu-bad-first; then
+    sed -i '1s/.*/      - name: Something else/' "$tmp/g-cu-bad-first/contour-upload.yml"
+    cucan g-cu-bad-first "cannot run: owned copy contour-upload.yml does not start with the step line" 'cannot run.*contour-upload'
+  fi
+  if cguard g-cu-no-token; then
+    sed -i 's/upload-artifact/upload-thing/g' "$tmp/g-cu-no-token/contour-upload.yml"
+    cucan g-cu-no-token "cannot run: owned copy contour-upload.yml names no upload-artifact" 'cannot run.*contour-upload'
+  fi
+else
+  echo "FAIL cannot-run cases of contour-upload.yml: missing $cu (the developer creates it)" >&2
+  failed=$((failed + 1))
 fi
 if cguard g-contour-no-files; then
   rm -rf "$tmp/g-contour-no-files/contour-heads"
