@@ -430,7 +430,11 @@ pub fn run() {
         tauri::Builder::default().plugin(tauri_plugin_single_instance::init(|app, argv, cwd| {
             let _ = tray::on_second_instance(app, argv, cwd);
         }));
-    let app = assemble(builder, tauri::generate_context!(), || {
+    // WebView2 data of every window under `%LOCALAPPDATA%\Voicen\webview` (T-062), on the
+    // release context only: tests build through `assemble`/`build_app` and keep theirs.
+    let mut context = tauri::generate_context!();
+    paths::route_app_local_data(&mut context, &paths::data_dir());
+    let app = assemble(builder, context, || {
         let (parts, outcome, ports) = release_parts();
         load_outcome = Some(outcome);
         shared = Some(ports);
