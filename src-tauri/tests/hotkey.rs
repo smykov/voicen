@@ -34,7 +34,7 @@ mod win32_support;
 
 use std::sync::Arc;
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use timing_support::{left, now, HANG};
 
@@ -1407,6 +1407,13 @@ fn a_registered_hotkey_stays_registered_across_a_resume_and_an_unlock() {
             Ok(()),
             "{event}: Ctrl+Alt+Space is not held by the hotkey thread after the {event}"
         );
+        // A reassert that ran but whose RegisterHotKey was refused also leaves
+        // HotkeyError: name that cause, not a missing reassert (T-174 review 1 #2).
+        assert_eq!(
+            rig.register_failed(),
+            Vec::<String>::new(),
+            "{event}: the reassert ran but its RegisterHotKey was refused"
+        );
         // The round trip ordered the reassert before this read: its success report
         // has cleared the injected HotkeyError.
         assert!(
@@ -1430,6 +1437,145 @@ fn a_registered_hotkey_stays_registered_across_a_resume_and_an_unlock() {
             &ONE_HOTKEY_FIELD_REQUEST[1..ONE_HOTKEY_FIELD_REQUEST.len() - 1]
         )
     );
+}
+
+// ---- T-174: the registrar's commit / abort wait ------------------------------------------
+//
+// `HotkeyRegistrarHandle::commit` / `abort` wait `REQUEST_BUDGET` (10 s) for the hotkey
+// thread. The seam a test reaches (T-174 review 1 #1; the precedent is
+// `win::capture::open_bounded(budget, opener)`):
+//   `#[doc(hidden)] pub fn commit_within(&self, budget: Duration, prepared: Prepared)`
+//   `#[doc(hidden)] pub fn abort_within(&self, budget: Duration, prepared: Prepared)`
+// and `commit` / `abort` call them with `REQUEST_BUDGET`. A request not answered within
+// `budget` writes one `warning kind=hotkey_request_timeout` line (no `os_code`, no key
+// text) to the attached thread's log; a thread that ended, or an unattached handle,
+// writes nothing. The verdicts are the log lines, never a duration.
+
+/// A budget the held thread cannot meet (the thread is gated for as long as the test
+/// wants); a budget, not a measured bound.
+const SMALL_BUDGET: Duration = Duration::from_millis(200);
+
+/// The `warning kind=hotkey_request_timeout` lines so far.
+fn request_timeout_lines(rig: &Rig) -> Vec<String> {
+    headed(&log_lines(&rig.logs), "warning")
+        .into_iter()
+        .filter(|l| has_pair(l, "kind", "hotkey_request_timeout"))
+        .collect()
+}
+
+/// The spare combination, prepared on the (free) hotkey thread.
+#[track_caller]
+fn prepared_spare(rig: &Rig) -> voicen_core::hotkey_registrar::Prepared {
+    let spare = parse_hotkey(ROUND_TRIP_COMBO).expect("premise: the spare combination parses");
+    rig.registrar
+        .prepare(spare, Mode::Hold)
+        .expect("premise: prepare of the spare combination on a free hotkey thread")
+}
+
+#[test]
+fn an_abort_the_held_hotkey_thread_does_not_answer_writes_one_typed_timeout_line() {
+    // T-174 Acceptance failure branch (T-055 r1#4): the hotkey thread is held inside
+    // `hotkey_pressed` (the gated indicator, as in the Esc-claim tests); an abort not
+    // answered within the budget writes exactly one `hotkey_request_timeout` line whose
+    // only pair is the kind (no os_code, no key or combination text). Bite: the write
+    // removed (`let _ = recv_timeout`), a second write, an os_code, the kind of another
+    // line, the budget parameter ignored (the 10 s REQUEST_BUDGET used: the line still
+    // comes, so that one is caught by review of the seam, not by this test).
+    let _serial = serial();
+    assert_hotkey_free();
+    assert_esc_free();
+    let window = TestWindow::open(Shape::TopLevel);
+    window.front();
+    let gate = Arc::new(Gate::default());
+    let rig = Rig::gated(&gate);
+    let _hotkey = rig.start_hotkey();
+    // Declared after the thread: a panic opens the gate before the thread is joined.
+    let opener = OpenOnDrop(Arc::clone(&gate));
+    let prepared = prepared_spare(&rig);
+    let (keys, _pressed_at) = rig.press_hotkey();
+    assert!(
+        gate.wait_entered(WAIT),
+        "premise: the session's set_tray(Recording) never came: {:?}",
+        rig.indicator.calls()
+    );
+
+    rig.registrar.abort_within(SMALL_BUDGET, prepared);
+
+    assert!(
+        eventually(|| !request_timeout_lines(&rig).is_empty()),
+        "no hotkey_request_timeout line after an abort the held thread did not answer: {:?}",
+        log_lines(&rig.logs)
+    );
+    let lines = request_timeout_lines(&rig);
+    assert_eq!(lines.len(), 1, "one line per timed-out request: {lines:?}");
+    let pairs: Vec<&str> = lines[0].split_whitespace().skip(3).collect();
+    assert_eq!(
+        pairs,
+        ["kind=hotkey_request_timeout"],
+        "the line carries only its kind (no os_code, no key text): {}",
+        lines[0]
+    );
+    drop(opener);
+    // The queued abort runs late and answers nobody; it writes nothing more.
+    end_gated_hold(&rig, keys);
+    assert_eq!(request_timeout_lines(&rig).len(), 1);
+}
+
+#[test]
+fn a_commit_or_abort_the_hotkey_thread_answers_in_time_writes_no_timeout_line() {
+    // T-174: the other side of the branch: a free thread answers within the budget,
+    // so nothing is written. Bite: a write on every commit / abort (the write outside
+    // the `Timeout` arm).
+    let _serial = serial();
+    assert_hotkey_free();
+    let rig = Rig::new();
+    let _hotkey = rig.start_hotkey();
+    let aborted = prepared_spare(&rig);
+    rig.registrar.abort_within(HANG, aborted);
+    let committed = prepared_spare(&rig);
+    rig.registrar.commit_within(HANG, committed);
+    assert!(
+        holds_for(SETTLE, || request_timeout_lines(&rig).is_empty()),
+        "a hotkey_request_timeout line for requests the thread answered: {:?}",
+        request_timeout_lines(&rig)
+    );
+}
+
+#[test]
+fn a_commit_or_abort_to_an_ended_hotkey_thread_writes_no_timeout_line() {
+    // T-174: a thread that ended before answering is not a timeout (its end released
+    // every registration): the request is not taken (`false`), nothing is written, and
+    // the call returns. Bite: a write when no thread takes the request.
+    let _serial = serial();
+    assert_hotkey_free();
+    let rig = Rig::new();
+    let hotkey = rig.start_hotkey();
+    let aborted = prepared_spare(&rig);
+    let committed = prepared_spare(&rig);
+    drop(hotkey);
+
+    rig.registrar.abort_within(SMALL_BUDGET, aborted);
+    rig.registrar.commit_within(SMALL_BUDGET, committed);
+
+    assert!(
+        holds_for(SETTLE, || request_timeout_lines(&rig).is_empty()),
+        "a hotkey_request_timeout line for a thread that had ended: {:?}",
+        request_timeout_lines(&rig)
+    );
+}
+
+#[test]
+fn a_commit_or_abort_on_an_unattached_handle_writes_nothing_and_returns() {
+    // T-174: no thread attached, so no log either: `abort_within` / `commit_within`
+    // post nothing and return at once. Bite: a panic or a write on the unattached path.
+    let handle = HotkeyRegistrarHandle::new();
+    let prepared = |token| voicen_core::hotkey_registrar::Prepared {
+        hotkey: parse_hotkey(ROUND_TRIP_COMBO).expect("premise"),
+        mode: Mode::Hold,
+        token,
+    };
+    handle.abort_within(SMALL_BUDGET, prepared(1));
+    handle.commit_within(SMALL_BUDGET, prepared(2));
 }
 
 #[test]
