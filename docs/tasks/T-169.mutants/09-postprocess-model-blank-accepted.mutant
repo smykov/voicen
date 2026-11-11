@@ -1,0 +1,8 @@
+guarantee: AC-1: post-processing model required after trim
+file: crates/voicen-core/src/post_process/settings.rs
+added_by: test-writer
+--- old
+    if model_name(&s.model).is_none() {
+--- new
+    if s.model.is_empty() {
+--- end

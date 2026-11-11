@@ -1,0 +1,8 @@
+guarantee: AC-1: validate API model required after trim
+file: crates/voicen-core/src/settings/validate.rs
+added_by: test-writer
+--- old
+            if model_name(&s.api.model).is_none() {
+--- new
+            if s.api.model.is_empty() {
+--- end

@@ -1,0 +1,8 @@
+guarantee: AC-3: API engine whitespace-only model is unset (failure branch)
+file: crates/voicen-core/src/engine/mod.rs
+added_by: test-writer
+--- old
+            let model = model_name(&settings.api.model).map(str::to_string);
+--- new
+            let model = Some(settings.api.model.trim().to_string());
+--- end

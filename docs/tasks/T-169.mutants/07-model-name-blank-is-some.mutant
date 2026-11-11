@@ -1,0 +1,8 @@
+guarantee: AC-1/AC-3: blank after trim is unset
+file: crates/voicen-core/src/settings/mod.rs
+added_by: test-writer
+--- old
+    (!name.is_empty()).then_some(name)
+--- new
+    Some(name)
+--- end

@@ -1,2 +1,1 @@
-# Characterization tests only (green today); the two openai_client tests are red until the fix.
-cargo test -j2 -p voicen-core --lib -- save_keeps_full_endpoint_url_as_typed save_stores_whitespace_only_models_as_empty check_base_url_table
+cargo test -j2 -p voicen-core --lib --test openai_client -- save_keeps_full_endpoint_url_as_typed save_stores_whitespace_only_models_as_empty check_base_url_table api_whitespace_only_model_omits_model_part api_set_model_is_sent_trimmed validate

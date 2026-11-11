@@ -1,0 +1,8 @@
+guarantee: AC-1: one helper trims the model name
+file: crates/voicen-core/src/settings/mod.rs
+added_by: test-writer
+--- old
+    let name = raw.trim();
+--- new
+    let name = raw;
+--- end

@@ -2,9 +2,7 @@ guarantee: AC-1: a model is stored trimmed, blank as empty
 file: crates/voicen-core/src/settings/service.rs
 added_by: test-writer
 --- old
-        let trimmed = model.trim().to_string();
-        *model = trimmed;
+        let stored = model_name(model).unwrap_or("").to_string();
 --- new
-        let trimmed = model.to_string();
-        *model = trimmed;
+        let stored = model.to_string();
 --- end
