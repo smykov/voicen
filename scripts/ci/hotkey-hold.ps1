@@ -106,13 +106,27 @@ function Get-VoicenLogLines([string]$LogGlob, [string]$Text) {
   , @(Select-String -Path $LogGlob -SimpleMatch $Text | ForEach-Object { $_.Line })
 }
 
+# The msedgewebview2.exe processes whose command line names the app's WebView2 data folder
+# (%LOCALAPPDATA%\Voicen\webview, T-062): they outlive a killed voicen for a moment and lock that
+# folder, which the uninstall steps remove.
+function Get-VoicenWebViewProcesses {
+  @(Get-CimInstance -ClassName Win32_Process -Filter "Name = 'msedgewebview2.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -and $_.CommandLine.IndexOf('\Voicen\webview', [StringComparison]::OrdinalIgnoreCase) -ge 0 })
+}
+
 # Stops every voicen.exe (a running primary would take a launch through single instance) and
-# throws when one is still there 10 s later.
+# throws when one is still there 10 s later; then waits up to 10 s for the app's msedgewebview2
+# children to end (T-062) and throws when one is still there.
 function Stop-AllVoicen {
   Get-Process -Name voicen -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+  $gone = $false
+  for ($i = 0; $i -lt 20 -and -not $gone; $i++) {
+    if (@(Get-Process -Name voicen -ErrorAction SilentlyContinue).Count -eq 0) { $gone = $true } else { Start-Sleep -Milliseconds 500 }
+  }
+  if (-not $gone) { throw "premise: a voicen process is still running 10 s after Stop-Process" }
   for ($i = 0; $i -lt 20; $i++) {
-    if (@(Get-Process -Name voicen -ErrorAction SilentlyContinue).Count -eq 0) { return }
+    if ((Get-VoicenWebViewProcesses).Count -eq 0) { return }
     Start-Sleep -Milliseconds 500
   }
-  throw "premise: a voicen process is still running 10 s after Stop-Process"
+  throw "premise: an msedgewebview2 process of the app's webview folder is still running 10 s after the app ended"
 }

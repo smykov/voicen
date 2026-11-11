@@ -2,7 +2,7 @@
 .PHONY: check check-shell-layout check-shell-layout-fixtures check-helper-windows-fixtures check-core \
 	check-ci-credentials \
 	check-clippy-lines \
-	check-core-test-os-answer check-ci-wip check-telegram-send check-telegram-failure-branch \
+	check-core-test-os-answer check-webview-data check-ci-wip check-telegram-send check-telegram-failure-branch \
 	check-version-stamp check-release-check check-release check-release-guard check-nsis-fork check-e2e-entry-fixtures check-area-image-fixtures \
 	check-whisper-cmake-cache check-opus-cmake-cache check-whisper-model-key check-crt-imports check-whisper \
 	check-shell-windows check-ban-canary check-role-tools check-guard-trigger check-wip-push check-wip-run \
@@ -14,7 +14,7 @@
 # error is reported first by the faster native check-core, before the slower runs.
 check: check-shell-layout check-shell-layout-fixtures check-helper-windows-fixtures check-ci-credentials check-role-tools check-guard-trigger check-wip-push check-wip-run \
 	check-clippy-lines \
-	check-core-test-os-answer check-ci-wip check-telegram-send check-telegram-failure-branch check-version-stamp check-release-check check-release check-release-guard check-nsis-fork check-whisper-cmake-cache check-opus-cmake-cache check-whisper-model-key check-crt-imports check-core check-whisper \
+	check-core-test-os-answer check-webview-data check-ci-wip check-telegram-send check-telegram-failure-branch check-version-stamp check-release-check check-release check-release-guard check-nsis-fork check-whisper-cmake-cache check-opus-cmake-cache check-whisper-model-key check-crt-imports check-core check-whisper \
 	check-ban-canary check-shell-windows check-e2e-entry-fixtures check-area-image-fixtures check-ui \
 	licenses-check
 
@@ -114,6 +114,15 @@ check-wip-run:
 # tests dir. Host bash.
 check-core-test-os-answer:
 	scripts/ci/core-test-os-answer.test.sh
+
+# T-062 (P-020, decides_on: token; docs/decisions/ci-toolchain.md guard table): every webview keeps
+# its WebView2 data under Voicen\webview through the one app-level override
+# (paths::route_app_local_data): scripts/ci/webview-data.sh refuses the raw token data_directory in
+# src-tauri/src/**/*.rs and dataDirectory in src-tauri/*.json, and requires app_directories_override
+# exactly once in src-tauri/src, in paths.rs. The self-test runs the tripwire on
+# scripts/ci/fixtures/webview-data/ and on the real shell dir. Host bash.
+check-webview-data:
+	scripts/ci/webview-data.test.sh
 
 # T-066 (rca, P-016, decisions #90): .github/workflows/ci.yml runs on push to main and wip/**
 # (the pre-review run of every non-docs task) unless the push changes only docs/tasks/** (T-083,

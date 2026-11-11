@@ -1007,6 +1007,70 @@ jobs:
           if ($blockedNew.Count -ne 1) { throw "a 3 s hold on a first launch (engine none) gave $($blockedNew.Count) new '$blockedLine' lines, expected exactly 1" }
           if ($recNew -ne 0) { throw "a blocked hold wrote $recNew 'dictation rec=' line(s)" }
           Write-Output "first launch: one blocked hold, one blocked line after $([int]$seenAt) s, no dictation rec= line, voicen.exe still running"
+      # T-062 (FR-28 v4, decisions #76): the WebView2 data of every window lives under
+      # %LOCALAPPDATA%\Voicen\webview, never in tauri's default %LOCALAPPDATA%\dev.voicen.app. A
+      # leftover dev.voicen.app (the earlier cargo test step builds windows on the mock runtime) is
+      # removed first and its earlier existence is logged, so the verdict speaks only about the
+      # installed app. Loaded launch with engine local_server at a refused loopback endpoint (as the
+      # loaded hold above): a 3 s hold of Ctrl+Alt+Space makes the overlay window, a second launch
+      # goes through single instance and makes the settings window. Then every voicen.exe and its
+      # msedgewebview2 children are stopped (Stop-AllVoicen) and Voicen\webview\EBWebView must exist
+      # and dev.voicen.app must not. settings.json is restored on every path.
+      - name: The settings window and the overlay keep their WebView2 data under Voicen\webview and nothing under dev.voicen.app (T-062)
+        shell: pwsh
+        run: |
+          . ./scripts/ci/hotkey-hold.ps1
+          $exe = Join-Path $env:LOCALAPPDATA 'Voicen\voicen.exe'
+          $settings = Join-Path $env:LOCALAPPDATA 'Voicen\settings.json'
+          $log = Join-Path $env:LOCALAPPDATA 'Voicen\logs\voicen*.log'
+          $webview = Join-Path $env:LOCALAPPDATA 'Voicen\webview\EBWebView'
+          $legacy = Join-Path $env:LOCALAPPDATA 'dev.voicen.app'
+          $started = "($env:VOICEN_COMMIT) started"
+          $loadLine = 'settings load outcome=loaded'
+          Stop-AllVoicen
+          if (-not (Test-Path -LiteralPath $settings -PathType Leaf)) { throw "premise: settings.json not found at $settings before the webview-data launch" }
+          $free = Test-HotkeyFree
+          if ($free -ne 0) { throw "premise: Ctrl+Alt+Space is not free before the launch (RegisterHotKey error $free)" }
+          Write-Output "before the launch: $legacy existed: $(Test-Path -LiteralPath $legacy)"
+          if (Test-Path -LiteralPath $legacy) { Remove-Item -LiteralPath $legacy -Recurse -Force }
+          if (Test-Path -LiteralPath $legacy) { throw "premise: $legacy could not be removed" }
+          $original = [System.IO.File]::ReadAllBytes($settings)
+          $proc = $null
+          try {
+            $json = [System.IO.File]::ReadAllText($settings) | ConvertFrom-Json
+            $json.engine = 'local_server'
+            $json.local_server.base_url = 'http://127.0.0.1:1/v1'
+            [System.IO.File]::WriteAllText($settings, ($json | ConvertTo-Json -Depth 20))
+            $startsBefore = (Get-VoicenLogLines $log $started).Count
+            $loadsBefore = (Get-VoicenLogLines $log $loadLine).Count
+            $proc = Start-Process -FilePath $exe -PassThru
+            $null = $proc.Handle
+            $ready = $false
+            for ($i = 0; $i -lt 30 -and -not $ready -and -not $proc.HasExited; $i++) {
+              Start-Sleep -Seconds 1
+              $ready = ((Get-VoicenLogLines $log $started).Count -gt $startsBefore) -and ((Get-VoicenLogLines $log $loadLine).Count -gt $loadsBefore)
+            }
+            if (-not $ready) { throw "the launch did not write its start line and '$loadLine' within 30 s (exited: $($proc.HasExited))" }
+            $held = Wait-HotkeyHeld $proc
+            if ($held -ne 1409) { throw "the running app does not hold Ctrl+Alt+Space within 15 s of its load line (last RegisterHotKey result: $held, exited: $($proc.HasExited))" }
+            Write-Output (Invoke-HotkeyHold -Seconds 3)
+            # The second launch hands over to the primary through single instance, which opens
+            # the settings window; the webview folder appears with the first window built.
+            $second = Start-Process -FilePath $exe -PassThru
+            [void]$second.WaitForExit(30000)
+            for ($i = 0; $i -lt 30 -and -not (Test-Path -LiteralPath $webview); $i++) { Start-Sleep -Seconds 1 }
+            Start-Sleep -Seconds 3
+          } finally {
+            if ($proc) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue }
+            Stop-AllVoicen
+            [System.IO.File]::WriteAllBytes($settings, $original)
+          }
+          $webviewOk = Test-Path -LiteralPath $webview
+          $legacyFound = Test-Path -LiteralPath $legacy
+          Write-Output "after the app and its msedgewebview2 children ended: $webview exists: $webviewOk; $legacy exists: $legacyFound"
+          if (-not $webviewOk) { throw "no WebView2 data at $webview after the settings window and the overlay were opened" }
+          if ($legacyFound) { throw "the installed app wrote WebView2 data to $legacy, outside the data folder" }
+          Write-Output "WebView2 data of the settings window and the overlay is under Voicen\webview, $legacy is absent"
       # T-025 (FR-28 v4, spec 006 FR-021..024, decisions #76), T-156 (FR-041): the six install/uninstall steps
       # below come after every step that launches the app, in this order: W2 reinstall, W3
       # uninstall /S /KEEPDATA (then a silent reinstall), W4 uninstall /S (only calls\ is left,

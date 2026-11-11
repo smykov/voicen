@@ -1,0 +1,1 @@
+{ "app": { "windows": [{ "label": "main", "dataDirectory": "x" }] } }
