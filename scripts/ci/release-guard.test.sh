@@ -1143,8 +1143,11 @@ cu_expect "$cu starts with the step line '$cu_step'" test "$(head -n 1 "$cu")" =
 cu_expect "$cu: the scan step runs under if: always()" grep -q -x -F '        if: always()' "$cu"
 cu_expect "$cu: the owned upload action line occurs once and no other line names upload-artifact" \
   bash -c '[ "$(grep -c -x -F "      - uses: actions/upload-artifact@v4" "$1")" = 1 ] && [ "$(grep -i -o -F upload-artifact "$1" | wc -l | tr -d " ")" = 1 ]' _ "$cu"
-cu_expect "$cu: the upload runs only after the stage ran (if: always() && steps.claude.outcome == 'success')" \
-  grep -q -x -F "        if: always() && steps.claude.outcome == 'success'" "$cu"
+cu_expect "$cu: the upload runs whenever the staging step passed (if: always() && steps.staged.outcome == 'success')" \
+  bash -c 'grep -q -x -F "        id: staged" "$1" && grep -q -x -F "        if: always() && steps.staged.outcome == '"'"'success'"'"'" "$1"' _ "$cu"
+# Acceptance 1: success or failure of The stage (id claude) -> the upload still runs; no condition names it.
+cu_expect "$cu: no condition names steps.claude (a failed stage still uploads)" \
+  bash -c '! grep -q -F "steps.claude" "$1"' _ "$cu"
 cu_expect "$cu: retention-days: 3 and if-no-files-found: error, no include-hidden-files, no overwrite" \
   bash -c 'grep -q -x -F "          retention-days: 3" "$1" && grep -q -x -F "          if-no-files-found: error" "$1" && ! grep -q -i -E "include-hidden-files|overwrite" "$1"' _ "$cu"
 cu_expect "$cu: the artifact path is the staging dir session-upload, not a path under HOME" \
