@@ -19,7 +19,7 @@ pub struct TranscribeRequest {
 }
 ```
 
-`OpenAiCompatibleEngine` implements `Engine` (contract: [openai-transcription.md](openai-transcription.md)); it builds its blocking client per call from `req.timeouts`. Its endpoint role is fixed by the constructor (T-018): `OpenAiCompatibleEngine::new(base_url: NormalizedUrl, model, key: Option<Secret>)` is the API engine (`kind() == "api"`, deadline `Timeouts::api_transcription`, `model` always sent); `OpenAiCompatibleEngine::local_server(base_url, model: Option<String>, key: Option<Secret>)` is the local-server engine (`kind() == "local_server"`, deadline `Timeouts::local_server`, `model: None` omits the part). Both share the one `Authorization` rule.
+`OpenAiCompatibleEngine` implements `Engine` (contract: [openai-transcription.md](openai-transcription.md)); it builds its blocking client per call from `req.timeouts`. Its endpoint role is fixed by the constructor (T-018): `OpenAiCompatibleEngine::new(base_url: NormalizedUrl, model: Option<String>, key: Option<Secret>)` is the API engine (`kind() == "api"`, deadline `Timeouts::api_transcription`, `model: None` omits the part; T-169); `OpenAiCompatibleEngine::local_server(base_url, model: Option<String>, key: Option<Secret>)` is the local-server engine (`kind() == "local_server"`, deadline `Timeouts::local_server`, `model: None` omits the part). Both share the one `Authorization` rule.
 
 The factory is one total function in core (T-040, decision #44):
 
@@ -30,7 +30,7 @@ pub fn engine_for(settings: &Settings, creds: &dyn CredentialStore, builtin: Opt
 
 It takes 004's `Settings` snapshot (`engine`, `api.base_url`, `api.model`, `local_server.base_url`, `local_server.model`; no `DictationSettings` projection) and is called per job, so a retry uses the current settings and key (Clarification 4). It never panics and sends no request:
 
-- `Api`: `check_base_url(api.base_url)` (else `EngineNotConfigured`, no key read) → `creds.read(KeySlot::TranscriptionApi)` once (`Err` → `KeyStoreUnavailable`; `Ok(None)` → no `Authorization` header) → `OpenAiCompatibleEngine`.
+- `Api`: `check_base_url(api.base_url)` (else `EngineNotConfigured`, no key read) → `creds.read(KeySlot::TranscriptionApi)` once (`Err` → `KeyStoreUnavailable`; `Ok(None)` → no `Authorization` header) → `OpenAiCompatibleEngine::new` with `settings::model_name(api.model)` (trimmed, or no model when blank; T-169).
 - `LocalServer` (T-018; 002's "register in src-tauri factory" became this arm): `check_base_url(local_server.base_url)` (else `EngineNotConfigured`, no key read) → `creds.read(KeySlot::LocalServer)` once (`Err` → `KeyStoreUnavailable`; `Ok(None)` → no `Authorization` header) → `OpenAiCompatibleEngine::local_server` with `local_server.model` trimmed, or no model (the part omitted) when it is empty or whitespace-only.
 - `BuiltinLocal` (T-098): with `Some(deps)` (the app's one `ModelResidency` and `ModelStore`, 002 contracts/core-traits.md "BuiltinEngine") → `BuiltinEngine`, no key read, nothing loaded; the model is resolved at `transcribe`. With `None` → `EngineNotConfigured`. The whisper loader stays outside core (decision #12).
 - `None`: `EngineNotConfigured`, no key read.
