@@ -298,6 +298,8 @@ fn all_warning_kinds() -> Vec<(WarningKind, &'static str)> {
         (WarningKind::OverlayFailed, "overlay_failed"),
         (WarningKind::LogsFolderFailed, "logs_folder_failed"),
         (WarningKind::TestConnectionFailed, "test_connection_failed"),
+        // T-174: a hotkey-thread commit/abort not answered within the registrar's budget.
+        (WarningKind::HotkeyRequestTimeout, "hotkey_request_timeout"),
     ];
     let seen: BTreeSet<usize> = all
         .iter()
@@ -317,9 +319,10 @@ fn all_warning_kinds() -> Vec<(WarningKind, &'static str)> {
             WarningKind::OverlayFailed => 12,
             WarningKind::LogsFolderFailed => 13,
             WarningKind::TestConnectionFailed => 14,
+            WarningKind::HotkeyRequestTimeout => 15,
         })
         .collect();
-    assert_eq!(seen.len(), 15, "every WarningKind once");
+    assert_eq!(seen.len(), 16, "every WarningKind once");
     all
 }
 

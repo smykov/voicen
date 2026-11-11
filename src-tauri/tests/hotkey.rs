@@ -947,7 +947,8 @@ fn hotkey_round_trip(rig: &Rig) -> Result<(), String> {
     rig.registrar.abort(prepared);
     if TakenHotkey::take().is_ok() {
         return Err(format!(
-            "the round trip released the active hotkey Ctrl+Alt+Space; observer events: {:?}",
+            "Ctrl+Alt+Space is free after the round trip (a reassert queued before it, or \
+             the round trip, released it); observer events: {:?}",
             rig.observer.events()
         ));
     }
@@ -1364,11 +1365,17 @@ fn a_registered_hotkey_stays_registered_across_a_resume_and_an_unlock() {
     // T-010 Acceptance 3, second half (invariant 1 "unregister if registered, then
     // register under the same id"): with the hotkey registered, a resume and then an
     // unlock leave it registered (1409 from the test after each), with no
-    // hotkey_register_failed line, no HotkeyError, no notice and no settings request.
-    // Expected green today (nothing reacts yet); it guards the re-register. Bite: a
-    // re-register without the unregister (RegisterHotKey on the same id refuses: a
-    // failed line and HotkeyError), an unregister with no register after it (the probe
-    // finds the hotkey free), the spare id used instead of the active one.
+    // hotkey_register_failed line. T-174: a successful reassert on a registered hotkey
+    // has no observable effect of its own (`hotkey_registration(true)` publishes only on
+    // a tray change), so before each event the test injects a failed report
+    // (`hotkey_registration(false)`: tray HotkeyError, one notice, one settings
+    // request); the reassert's success report is then the observable: HotkeyError
+    // clears. Bite: no reassert at all (a deleted LIFECYCLE_RESUME / LIFECYCLE_UNLOCK
+    // arm: the session still reports HotkeyError, "no reassert ran"), a re-register
+    // without the unregister (RegisterHotKey on the same id refuses: a failed line and
+    // HotkeyError), an unregister with no register after it (the round trip's read-back
+    // finds Ctrl+Alt+Space free), the spare id used instead of the active one, a
+    // reassert that does not report its result to the session.
     let _serial = serial();
     assert_hotkey_free();
     let rig = Rig::new();
@@ -1379,6 +1386,12 @@ fn a_registered_hotkey_stays_registered_across_a_resume_and_an_unlock() {
     );
     let hwnd = hotkey_window();
     for (event, send) in [("resume", resume as fn(HWND)), ("unlock", unlock)] {
+        // Make the reassert observable: the session reports a failed registration.
+        rig.session.hotkey_registration(false, now());
+        assert!(
+            !rig.session.hotkey_registered(),
+            "premise: {event}: the injected failure did not put the session in HotkeyError"
+        );
         send(hwnd);
         // The re-register runs from the loop after the procedure re-posted it. T-108:
         // the probe below must not overlap that pending reassert (its take between the
@@ -1394,19 +1407,29 @@ fn a_registered_hotkey_stays_registered_across_a_resume_and_an_unlock() {
             Ok(()),
             "{event}: Ctrl+Alt+Space is not held by the hotkey thread after the {event}"
         );
+        // The round trip ordered the reassert before this read: its success report
+        // has cleared the injected HotkeyError.
+        assert!(
+            rig.session.hotkey_registered(),
+            "{event}: no reassert ran (the session still reports HotkeyError)"
+        );
     }
     assert_eq!(rig.register_failed(), Vec::<String>::new());
-    assert!(
-        !rig.indicator
-            .trays()
-            .iter()
-            .any(|(s, _)| *s == TrayState::HotkeyError),
+    assert_eq!(
+        rig.last_tray(),
+        Some(TrayState::Idle),
         "{:?}",
         rig.indicator.trays()
     );
-    assert_eq!(rig.hotkey_notices(), 0);
-    assert_eq!(format!("{:?}", rig.requests.calls()), "[]");
-    assert!(rig.session.hotkey_registered());
+    // One notice and one settings request per injected failure, none from the thread.
+    assert_eq!(rig.hotkey_notices(), 2);
+    assert_eq!(
+        format!("{:?}", rig.requests.calls()),
+        format!(
+            "[{0}, {0}]",
+            &ONE_HOTKEY_FIELD_REQUEST[1..ONE_HOTKEY_FIELD_REQUEST.len() - 1]
+        )
+    );
 }
 
 #[test]

@@ -457,6 +457,7 @@ pub const WARNING_KINDS: &[&str] = &[
     "overlay_failed",
     "logs_folder_failed",
     "test_connection_failed",
+    "hotkey_request_timeout",
 ];
 /// `pp=<...>` on a dictation line (T-076, spec 003 FR-014): one literal per
 /// `events::PostProcessResult` kind.
