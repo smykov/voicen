@@ -544,6 +544,18 @@ contour job sets `TEAMWRIGHT_WIP_REFS_RE='^refs/heads/(wip|task)/'` in its push 
 its `task/<ID>` push is not a delivery either; the pause check runs before this exit and
 still applies (T-202, decisions #253).
 
+**Contour session artifact (T-206, decisions #265, #266).** The agent job ends with the owned
+tail `scripts/ci/contour-upload.yml` (byte-pinned by release-guard R9, per name). Whatever the
+stage's outcome, it stages regular files into `$RUNNER_TEMP/session-upload` from `.teamwright-agent/`,
+`.teamwright/logs/` and this run's session in this checkout's Claude CLI project dir (nothing
+else under `~/.claude`), with `manifest.txt` naming every miss (each also a `::warning`), and
+uploads that dir as artifact `teamwright-agent-<task>-<run_id>-<run_attempt>`, kept 3 days. The
+repository is public, so a two-pass scan runs first, over contents and file names: pass 1 the
+job's own secret values, pass 2 four secret formats (private-key header, GitHub token forms,
+`github_pat_`, long `sk-ant-` runs). A match deletes the staging dir and fails the step; only
+counts are printed, never a name or a line, and the upload is skipped. Why and the limits:
+`docs/decisions/ci-toolchain.md` (R9 per name, contour limits).
+
 **Pausing the contour (T-202 review 1 finding 2).** The contour's checkout never holds a
 `TEAMWRIGHT_PAUSE` (the name is in `.gitignore`, and the checkout's `git clean -ffdx` runs on
 every run), so its push step sets `TEAMWRIGHT_PAUSE_FILE=/etc/teamwright/voicen.pause`, a

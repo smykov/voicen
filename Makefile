@@ -176,7 +176,7 @@ check-release:
 # job (R5), no YAML escape that spells a character or joins two lines (R6), the header of the
 # file holding the release job, line 1 to jobs:, byte-identical to scripts/ci/release-header.yml
 # (R7; decisions #121), no YAML tag: the raw texts !!, !< and %TAG nowhere (R8; decisions
-# #122), the one installer upload byte-identical to scripts/ci/release-upload.yml (R9), and the
+# #122), the one installer upload byte-identical to scripts/ci/release-upload.yml (R9; per name, T-206: teamwright-agent.yml's one upload is the tail scripts/ci/contour-upload.yml, to EOF), and the
 # raw token secrets.TELEGRAM_ (any case, comments included) only in the one Telegram send step,
 # byte-identical to scripts/ci/telegram-send-step.yml (R10; replaces telegram-guard, T-087:
 # T-070 validation 1 M6 and probes T1-T4 are its fixtures); and (T-088, replaces ci-wip and
