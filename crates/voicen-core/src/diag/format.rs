@@ -740,6 +740,7 @@ fn warning_kind(kind: WarningKind) -> &'static str {
         WarningKind::OverlayFailed => "overlay_failed",
         WarningKind::LogsFolderFailed => "logs_folder_failed",
         WarningKind::TestConnectionFailed => "test_connection_failed",
+        WarningKind::HotkeyRequestTimeout => "hotkey_request_timeout",
     }
 }
 

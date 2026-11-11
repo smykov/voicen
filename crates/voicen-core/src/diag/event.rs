@@ -230,7 +230,7 @@ pub enum SaveLine {
 
 /// The kinds of a `Warning` line: the pipeline's `WarningCode`s and the shell's
 /// start, settings-window, tray, hotkey, dictation-start, overlay and
-/// logs-folder failures.
+/// logs-folder failures, and a hotkey-thread request timeout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WarningKind {
     /// `events::WarningCode::VadFallback`.
@@ -273,6 +273,10 @@ pub enum WarningKind {
     /// panicked or was cancelled (T-046), so no `settings test_connection` line was
     /// written; the window gets `ipc.unavailable`.
     TestConnectionFailed,
+    /// A hotkey-thread commit or abort was not answered within the registrar's
+    /// budget (T-174); the request stays queued and runs late, so until then
+    /// the registered hotkey may differ from the saved one.
+    HotkeyRequestTimeout,
 }
 
 /// One dictation: the engine, the outcome and the FR-20 timings plus the

@@ -8,7 +8,8 @@
 //! release and calls `hotkey_released`. Nothing else: no repeat count, no hold
 //! timing, no mode. Failures are typed warning lines (`hotkey_thread_failed`,
 //! also when the release poll's `SetTimer` fails, and `hotkey_register_failed`, with
-//! the OS code).
+//! the OS code; `hotkey_request_timeout`, with none, when a save's commit or abort
+//! is not answered in time).
 //!
 //! Lock contract: the thread holds no lock of its own across a session call. While
 //! `hotkey_pressed` opens the device the poll cannot run; a release meanwhile is
@@ -34,7 +35,10 @@
 //! reports the result with `DictationSession::cancel_key_result`; a release
 //! unregisters both. `WM_HOTKEY` on an Esc id calls `esc_pressed`. The thread does
 //! not decide when a recording is on: the session asks (it follows
-//! `RecordingController::live_id`).
+//! `RecordingController::live_id`). Premise (T-174): a recording starts only in
+//! `hotkey_pressed`, called only on this thread, so while the thread serves a claim
+//! the live recording the session sees is the claim's own (see
+//! `Registrations::cancel_key`; a second, call hotkey must re-check it).
 //!
 //! T-010 (FR-26, spec 001 US4): the window has a class of our own whose procedure
 //! only re-posts the power and session events to this thread's queue (`WM_LIFECYCLE`):
@@ -118,6 +122,9 @@ pub struct HotkeyThread {
     thread_id: u32,
     requests: mpsc::Sender<Request>,
     thread: Option<JoinHandle<()>>,
+    /// The log the thread writes to; an attached handle writes its own lines
+    /// (a request timeout, T-174) to the same log.
+    log: Arc<Log>,
 }
 
 /// One registrar request into the hotkey thread (T-055).
@@ -171,6 +178,7 @@ impl HotkeyThread {
                 thread_id,
                 requests,
                 thread: Some(thread),
+                log,
             }),
             // The window failed (logged by the thread, which has ended) or the
             // thread ended without an answer.
@@ -202,11 +210,24 @@ pub struct HotkeyRegistrarHandle {
     link: Mutex<Option<Link>>,
 }
 
-/// Where the requests of an attached thread go.
+/// Where the requests of an attached thread go, and the thread's log (for the
+/// lines the handle writes itself: a request timeout, T-174).
 #[derive(Clone)]
 struct Link {
     thread_id: u32,
     requests: mpsc::Sender<Request>,
+    log: Arc<Log>,
+}
+
+impl Link {
+    /// The link to `thread`.
+    fn to(thread: &HotkeyThread) -> Link {
+        Link {
+            thread_id: thread.thread_id,
+            requests: thread.requests.clone(),
+            log: Arc::clone(&thread.log),
+        }
+    }
 }
 
 impl HotkeyRegistrarHandle {
@@ -219,10 +240,7 @@ impl HotkeyRegistrarHandle {
 
     /// Sends the later registrar calls to `thread` (`start_dictation`).
     pub fn attach(&self, thread: &HotkeyThread) {
-        *self.link.lock().unwrap_or_else(PoisonError::into_inner) = Some(Link {
-            thread_id: thread.thread_id,
-            requests: thread.requests.clone(),
-        });
+        *self.link.lock().unwrap_or_else(PoisonError::into_inner) = Some(Link::to(thread));
     }
 
     /// Queues `request` and wakes the thread; `false` when no thread takes it.
@@ -231,10 +249,30 @@ impl HotkeyRegistrarHandle {
     }
 
     /// Posts a commit or an abort and waits (bounded) until the thread ran it.
+    /// Not answered within [`REQUEST_BUDGET`] (the thread is busy, e.g. inside
+    /// `hotkey_pressed`): one `Warning{HotkeyRequestTimeout}` line with no OS code
+    /// and no key, to the attached thread's log (T-174); the request stays queued
+    /// and runs late, so until then the registered hotkey may differ from the
+    /// saved one. A thread that ended before answering writes nothing here (its
+    /// end released every registration). Unattached: nothing is posted or written.
     fn finish(&self, request: impl FnOnce(mpsc::Sender<()>) -> Request) {
         let (done, ran) = mpsc::channel();
-        if self.post(request(done)) {
-            let _ = ran.recv_timeout(REQUEST_BUDGET);
+        if !self.post(request(done)) {
+            return;
+        }
+        if let Err(mpsc::RecvTimeoutError::Timeout) = ran.recv_timeout(REQUEST_BUDGET) {
+            let log = self
+                .link
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .as_ref()
+                .map(|link| Arc::clone(&link.log));
+            if let Some(log) = log {
+                log.write(LogEvent::Warning {
+                    kind: WarningKind::HotkeyRequestTimeout,
+                    os_code: None,
+                });
+            }
         }
     }
 }
@@ -272,10 +310,7 @@ impl CancelKeyHandle {
 
     /// Sends the later claims to `thread` (`start_dictation`).
     pub fn attach(&self, thread: &HotkeyThread) {
-        *self.link.lock().unwrap_or_else(PoisonError::into_inner) = Some(Link {
-            thread_id: thread.thread_id,
-            requests: thread.requests.clone(),
-        });
+        *self.link.lock().unwrap_or_else(PoisonError::into_inner) = Some(Link::to(thread));
     }
 }
 
@@ -382,8 +417,10 @@ unsafe extern "system" fn hotkey_window_proc(
         _ => return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
     };
     if let Some(kind) = kind {
-        // SAFETY: a post to this thread's own window. A full queue loses the event
-        // (no retry then; the next one comes with the next event).
+        // SAFETY: a post to this thread's own window. A refused post (the queue at
+        // its 10 000-message quota) loses the event with no line: an accepted loss,
+        // docs/decisions/windows-shell.md invariant 1 (T-174); the next lifecycle
+        // event retries the reassert.
         let _ = unsafe { PostMessageW(Some(hwnd), WM_LIFECYCLE, WPARAM(kind), LPARAM(0)) };
     }
     // WM_POWERBROADCAST: TRUE (processed); WM_WTSSESSION_CHANGE: the return is unused.
@@ -563,6 +600,13 @@ impl Registrations<'_> {
     /// line; what was registered stays, so bare Esc still cancels when only the
     /// modified one is taken). A release unregisters what is registered and
     /// reports nothing.
+    ///
+    /// Premise (T-009, T-174): `cancel_key_result` warns while *any* recording is
+    /// live, and that equals "while the claim's own recording is live" only
+    /// because a recording starts only in `hotkey_pressed`, which is called only
+    /// on this thread (the `WM_HOTKEY` arm of `run`); while this thread serves
+    /// a claim no later recording can start. A second hotkey that starts a
+    /// recording elsewhere (a call hotkey) must re-check this.
     fn cancel_key(&mut self, claimed: bool) {
         if !claimed {
             self.release_esc();
