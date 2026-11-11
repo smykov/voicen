@@ -521,6 +521,44 @@ async fn engine_for_api_settings_sends_stored_key_and_model() {
     assert_eq!(part_text(&parts, "language").as_deref(), Some("ru"));
 }
 
+/// An API-engine factory run against `server` with `model` as stored (a hand-edited
+/// settings file bypasses the save-time trim), and the one request it sent.
+async fn api_request_for_model(model: &str) -> Vec<Part> {
+    let server = server_with(ok_text("hi")).await;
+    let mut settings = defaults(None);
+    settings.engine = EngineKind::Api;
+    settings.api.base_url = format!("{}/v1", server.uri());
+    settings.api.model = model.to_string();
+    let creds = FakeCredentialStore::new().with_key(KeySlot::TranscriptionApi, KEY);
+    let engine = match engine_for(&settings, &creds, None) {
+        Ok(engine) => engine,
+        Err(e) => panic!("API engine expected, got {e:?}"),
+    };
+    assert_eq!(transcribe(engine, req(None)), Ok("hi".to_string()));
+    multipart(&only_request(&server).await)
+}
+
+#[tokio::test]
+async fn api_whitespace_only_model_omits_model_part() {
+    // T-169: a whitespace-only API model counts as unset, as for the local server
+    // (tests/local_server.rs). Bite: the API arm of engine_for sending the raw text
+    // (" \t "), or treating only the exact empty string as unset.
+    let parts = api_request_for_model(" \t ").await;
+    assert_eq!(
+        part_text(&parts, "model"),
+        None,
+        "model part sent for an unset model"
+    );
+}
+
+#[tokio::test]
+async fn api_set_model_is_sent_trimmed() {
+    // T-169: a set API model is sent trimmed. Bite: the stored text sent with its
+    // spaces, or the model dropped altogether.
+    let parts = api_request_for_model(" whisper-test ").await;
+    assert_eq!(part_text(&parts, "model").as_deref(), Some("whisper-test"));
+}
+
 // ---- Acceptance 3: failure branch -------------------------------------------
 
 #[tokio::test]

@@ -149,6 +149,21 @@ mod tests {
             ("http://127.0.0.1:8080/v1", "http://127.0.0.1:8080/v1"),
             ("http://[::1]:8000/v1", "http://[::1]:8000/v1"),
             ("http://192.0.2.10:8000/v1", "http://192.0.2.10:8000/v1"),
+            // T-072 / T-169 (characterization): a full endpoint URL keeps its path;
+            // only trim and one trailing `/` go. Bite: a normalizer that strips
+            // `/audio/transcriptions` (M5).
+            (
+                "https://api.example.com/v1/audio/transcriptions",
+                "https://api.example.com/v1/audio/transcriptions",
+            ),
+            (
+                " http://192.0.2.10:8000/v1/audio/transcriptions/ ",
+                "http://192.0.2.10:8000/v1/audio/transcriptions",
+            ),
+            (
+                "https://api.example.com/v1/audio/transcriptions?api-version=2024-06-01",
+                "https://api.example.com/v1/audio/transcriptions?api-version=2024-06-01",
+            ),
         ];
         for (raw, normalized) in accepted {
             match check_base_url(raw) {

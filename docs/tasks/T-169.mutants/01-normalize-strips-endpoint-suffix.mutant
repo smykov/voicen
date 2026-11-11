@@ -1,0 +1,11 @@
+guarantee: AC-2: a full endpoint URL is stored as typed (M5)
+file: crates/voicen-core/src/settings/url.rs
+added_by: test-writer
+--- old
+    let trimmed = raw.trim();
+    trimmed.strip_suffix('/').unwrap_or(trimmed)
+--- new
+    let trimmed = raw.trim();
+    let trimmed = trimmed.strip_suffix('/').unwrap_or(trimmed);
+    trimmed.strip_suffix("/audio/transcriptions").unwrap_or(trimmed)
+--- end

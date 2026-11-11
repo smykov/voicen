@@ -1625,6 +1625,62 @@ mod tests {
         assert_eq!(parse(&world.file.bytes().expect("file written")), expected);
     }
 
+    #[test]
+    fn save_keeps_full_endpoint_url_as_typed() {
+        // T-169 characterization (green today; T-072: the stored URL is kept as
+        // typed, only trim and one trailing `/` go). Bite: a normalizer that strips
+        // `/audio/transcriptions` (M5), or one that drops the query string.
+        let world = World::new(FakeSettingsFile::new(), FakeCredentialStore::new());
+        let (service, _) = world.load();
+
+        let mut draft = sample(EngineKind::Api);
+        draft.api.base_url =
+            "https://api.example.com/v1/audio/transcriptions?api-version=2024-06-01".into();
+        draft.local_server.base_url = " http://192.0.2.10:8000/v1/audio/transcriptions/ ".into();
+        draft.post_processing.enabled = false;
+        draft.post_processing.base_url = " http://192.0.2.10:8000/v1/audio/transcriptions/ ".into();
+
+        let mut expected = draft.clone();
+        expected.local_server.base_url = "http://192.0.2.10:8000/v1/audio/transcriptions".into();
+        expected.post_processing.base_url = "http://192.0.2.10:8000/v1/audio/transcriptions".into();
+
+        let keys = KeyEdits {
+            transcription_api: replace("sk-test-api"),
+            ..KeyEdits::default()
+        };
+        let view = expect_saved(service.save(req(draft, keys)), &[]);
+        assert_eq!(view.settings, expected);
+        assert_eq!(*service.snapshot(), expected);
+        assert_eq!(parse(&world.file.bytes().expect("file written")), expected);
+    }
+
+    #[test]
+    fn save_stores_whitespace_only_models_as_empty() {
+        // T-169 characterization (green today): a blank model is stored as "".
+        // Bite: normalize storing the raw blank text, or trimming only non-blank.
+        let world = World::new(FakeSettingsFile::new(), FakeCredentialStore::new());
+        let (service, _) = world.load();
+
+        let mut draft = sample(EngineKind::Api);
+        draft.api.model = " whisper-test ".into();
+        draft.local_server.model = " \t ".into();
+        draft.post_processing.enabled = false;
+        draft.post_processing.model = "  ".into();
+
+        let mut expected = draft.clone();
+        expected.api.model = "whisper-test".into();
+        expected.local_server.model = String::new();
+        expected.post_processing.model = String::new();
+
+        let keys = KeyEdits {
+            transcription_api: replace("sk-test-api"),
+            ..KeyEdits::default()
+        };
+        let view = expect_saved(service.save(req(draft, keys)), &[]);
+        assert_eq!(view.settings, expected);
+        assert_eq!(parse(&world.file.bytes().expect("file written")), expected);
+    }
+
     // ---- T-015: endpoint.insecure warnings on save -------------------------------
 
     /// A save over a fresh first-run service with an API key in the store (so an
