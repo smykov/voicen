@@ -2,7 +2,7 @@
 
 **Code:** `src-tauri/windows/installer.nsi` (fork of the tauri-cli NSIS template), `src-tauri/windows/installer-hooks.nsh`, `src-tauri/tauri.conf.json` › `bundle.resources`, `src-tauri/tauri.bundle-vad.json` (T-102), `bundle.windows.nsis`, `package.json` / `pnpm-lock.yaml` › `@tauri-apps/cli` · **Tests that pin it:** `make check-nsis-fork` (`scripts/ci/nsis-fork.sh`, `nsis-fork.test.sh`); the `windows` job of `.github/workflows/ci.yml`: size and notices before the first launch (W1), the same-version `/P` reinstall (W2), `uninstall.exe /S /KEEPDATA` (W3), `uninstall.exe /S` (W4), `/S /KEEPDATA /PURGECALLS` (W5), a `/P` reinstall, a user-started `/P` and `/S /KEEPDATA` keeping `calls\` (W5b), `/S /PURGECALLS` with two junctions planted (W6)
 
-Tasks: T-025 (this seam), T-061 (`voicen.exe --purge-credentials`), T-062 (WebView2 data, open). Decisions: #10, #76, #98, #197. T-156 (calls, reparse points). Spec: `specs/006-diagnostics-and-release` (US4, `contracts/installer-ci.md`, research R9/R10). Open question: OQ-19.
+Tasks: T-025 (this seam), T-061 (`voicen.exe --purge-credentials`), T-062 (WebView2 data under the data folder). Decisions: #10, #76, #98, #197. T-156 (calls, reparse points). Spec: `specs/006-diagnostics-and-release` (US4, `contracts/installer-ci.md`, research R9/R10). Open question: OQ-19.
 
 ## Invariants
 
@@ -66,7 +66,7 @@ The hooks also write the `logs/installer-ended` note (PREINSTALL, and the start 
 - **Language value missing.** If the "Installer Language" value is gone (deleted by hand, or an install from a build without the POSTINSTALL hook, e.g. afd5352), a passive uninstall still waits on the language dialog: `un.onInit` runs before any hook.
 
 - **Downgrade to a pre-T-025 build.** Installing an older (stock-template) build over a T-025 build runs our uninstaller without `/UPDATE`, so the question shows with default Yes. That is the old installer's code and cannot be fixed; the owner can answer No.
-- **WebView2 data** goes to `%LOCALAPPDATA%\dev.voicen.app` until T-062 lands, and nothing removes it: the stock checkbox was the only path that could, and it deleted outside the folder (FR-023).
+- **WebView2 data** lives in `%LOCALAPPDATA%\Voicen\webview` since T-062 (the app-level override, `docs/architecture.md` Seams), so the PREUNINSTALL/POSTUNINSTALL walker removes it with the rest of the folder (no hook change). A `%LOCALAPPDATA%\dev.voicen.app` left by a build before T-062 is not cleaned up by the app or the installer (OQ-85).
 - **`$LOCALAPPDATA` vs `%LOCALAPPDATA%`.** NSIS takes `$LOCALAPPDATA` from the shell folder, the app takes the env var; they are equal on a normal profile (assumption).
 - **App running at uninstall.** The purge runs before the stock "app is running" check (PREUNINSTALL is the last point where `voicen.exe` exists). If the user then cancels closing the app, the uninstall aborts with the keys already removed.
 - **Language IDs before `MUI_LANGUAGE`.** The hooks file is included before the language macros, so its `LangString`s use 1033/1049; makensis on the Windows runner is the proof that this compiles.
