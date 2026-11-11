@@ -60,7 +60,15 @@
 #      so no key can be appended to it. Zero occurrences = a tag release with nothing to
 #      download, two or more = a second upload. R9 finds the literal by the token's line and
 #      cannot tell which job or YAML node holds it, so it pins the upload text, not its place
-#      (see Not caught). A raw token plus an owned literal, no step reader.
+#      (see Not caught). A raw token plus an owned literal, no step reader. Keyed by name like
+#      R14 (T-206, decisions #265, #266): a file whose basename is exactly teamwright-agent.yml
+#      is counted apart and holds the token exactly once, and its lines from that token line minus
+#      the token offset of the owned tail scripts/ci/contour-upload.yml to the end of the file
+#      are that copy byte for byte (the session's scan-and-upload tail: copy, two scan passes,
+#      the upload of the scanned dir, retention-days: 3), and going up from the tail's first line
+#      (lines of spaces only skipped) the first line with fewer than 6, 4, 2 leading spaces is
+#      `    steps:`, `  agent:`, `jobs:` (as R10). Zero tokens there is refused too. Every other
+#      file keeps the single installer upload above.
 #   R10 (T-087, decisions #93, #124; replaces telegram-guard.sh) the raw token secrets.telegram_
 #      (any case, comments included) occurs in the dir (files in glob order, then line order)
 #      exactly as often as in the guard's fourth owned copy, scripts/ci/telegram-send-step.yml
@@ -221,7 +229,9 @@
 # empty; cache-steps/ missing or holding no fragment, or a fragment failing R11's checks of its
 # own text; the dir holding no ci.yml (R7 pins its trigger); with a contour file present,
 # contour-heads/ missing or a head copy missing, unreadable, empty, not ending in its only `jobs:`
-# line or not holding exactly one `permissions:` line; awk failed);
+# line or not holding exactly one `permissions:` line, or contour-upload.yml missing, empty, not
+# starting with `      - name: Stage the session for upload` or not naming upload-artifact exactly
+# once; awk failed);
 # never a pass.
 # Host test: scripts/ci/release-guard.test.sh (make check-release-guard).
 set -uo pipefail
@@ -364,9 +374,19 @@ if [ "$contour" = 1 ]; then
     [ "$(grep -c -x 'permissions:' -- "$ch")" = "1" ] || cannot_run "owned contour head $ch does not hold exactly one line 'permissions:'"
   done
 fi
+# R9 per name (T-206): the owned scan-and-upload tail of teamwright-agent.yml, read only with a contour file.
+ownedc="$here/contour-upload.yml"
+if [ "$contour" = 1 ]; then
+  [ -f "$ownedc" ] && [ -r "$ownedc" ] || cannot_run "owned tail copy $ownedc (contour-upload.yml) not found or not readable"
+  [ -s "$ownedc" ] || cannot_run "owned tail copy $ownedc (contour-upload.yml) is empty"
+  [ "$(head -n 1 -- "$ownedc")" = "      - name: Stage the session for upload" ] ||
+    cannot_run "owned tail copy $ownedc (contour-upload.yml) does not start with the line '      - name: Stage the session for upload'"
+  [ "$(grep -i -o -F 'upload-artifact' -- "$ownedc" | wc -l)" -eq 1 ] ||
+    cannot_run "owned tail copy $ownedc (contour-upload.yml) does not name upload-artifact exactly once (nothing to align on)"
+fi
 
 # Output lines: "V <file>:<line>: R<n>: <why>"; awk exit 3 = an owned copy could not be read.
-report="$(RG_FRAGS="$fraglist" awk -v owned="$owned" -v ownedh="$ownedh" -v ownedu="$ownedu" -v ownedt="$ownedt" -v ownedl="$ownedl" -v contour="$contour" -v cha="$cha" -v chn="$chn" '
+report="$(RG_FRAGS="$fraglist" awk -v owned="$owned" -v ownedh="$ownedh" -v ownedu="$ownedu" -v ownedt="$ownedt" -v ownedl="$ownedl" -v contour="$contour" -v cha="$cha" -v chn="$chn" -v ownedc="$ownedc" '
 function v(k, i, r, why) { print "V " F[k] ":" i ": " r ": " why; nv++ }
 # count(s, t): occurrences of t in s.
 function count(s, t,   n, p) { n = 0; while ((p = index(s, t)) > 0) { n++; s = substr(s, p + length(t)) } return n }
@@ -432,13 +452,23 @@ BEGIN {
       if (rc < 0 || NC[c] == 0 || CH[c, NC[c]] != "jobs:" || !CP[c]) { bad = 1; exit 3 }
       close(CF[c])
     }
+    # R9 per name: the owned tail OC[m], nco lines, its one token line cto.
+    nco = 0; cto = 0; cco = 0
+    while ((rc = (getline line < ownedc)) > 0) {
+      OC[++nco] = line
+      c = count(tolower(line), "upload-artifact")
+      if (c && !cto) cto = nco
+      cco += c
+    }
+    if (rc < 0 || nco == 0 || cco != 1) { bad = 1; exit 3 }
+    close(ownedc)
   }
 }
 FNR == 1 { nf++; F[nf] = FILENAME }
 { N[nf] = FNR; L[nf, FNR] = $0 }
 END {
   if (bad) exit 3
-  nrel = 0; ntok = 0; ttc = 0
+  nrel = 0; ntok = 0; ttc = 0; atok = 0; ak = 0
   for (k = 1; k <= nf; k++) {
     # R1: one line with the word jobs, exactly "jobs:", right after the read-only block.
     j = 0; jbad = 0
@@ -451,6 +481,7 @@ END {
     # (string equality with the two owned literals; no glob, suffix, case folding or regex), else 0.
     bn = F[k]; sub(/.*\//, "", bn)
     ck = (bn == "teamwright-agent.yml") ? 1 : (bn == "teamwright-next.yml") ? 2 : 0
+    if (ck == 1) ak = k
     r1 = 0
     if (jbad) v(k, jbad, "R1", "the word jobs must occur on exactly one line, and that line must be exactly \"jobs:\"")
     else if (ck) { if (L[k, CP[ck]] == CH[ck, CP[ck]]) r1 = CP[ck] }
@@ -555,7 +586,13 @@ END {
         v(k, i, "R8", "a YAML tag (the raw text !!, !< or %TAG) could turn other text into secrets, vars, gh or permissions")
       # R9: the raw token upload-artifact, any case, comments included, once in the dir.
       n = count(lo, "upload-artifact")
-      if (n > 0) {
+      # R9 per name: in teamwright-agent.yml the token is counted apart, once, as the owned tail.
+      if (n > 0 && ck == 1) {
+        if (atok == 0) atl = i
+        if (atok < 2 && atok + n >= 2)
+          v(k, i, "R9", "a second upload-artifact in teamwright-agent.yml (its one upload is the owned tail scripts/ci/contour-upload.yml)")
+        atok += n
+      } else if (n > 0) {
         if (ntok == 0) { tk = k; ti = i }
         if (ntok < 2 && ntok + n >= 2)
           v(k, i, "R9", "a second upload-artifact in the workflows dir (the installer upload occurs once, as the owned copy scripts/ci/release-upload.yml)")
@@ -627,6 +664,39 @@ END {
         break
       }
     }
+  # R9 per name (T-206): teamwright-agent.yml holds the token once, and from that line minus the
+  # token offset of the owned tail to the end of the file it is scripts/ci/contour-upload.yml, byte
+  # for byte; going up from the tail (lines of spaces only skipped), the first line with fewer than
+  # 6, then 4, then 2 leading spaces is "    steps:", "  agent:", "jobs:" (as R10).
+  if (ak) {
+    if (atok == 0) {
+      for (i = 1; i <= N[ak]; i++) if (L[ak, i] == "jobs:") break
+      v(ak, i, "R9", "no upload-artifact in teamwright-agent.yml (its scan-and-upload tail is the owned copy scripts/ci/contour-upload.yml)")
+    } else if (atok == 1) {
+      s0 = atl - cto + 1; cbad = 0
+      for (m = 1; m <= nco; m++) {
+        i = s0 + m - 1
+        if (i < 1 || i > N[ak] || L[ak, i] != OC[m]) { cbad = (i < 1 ? 1 : i); break }
+      }
+      if (!cbad && s0 + nco - 1 < N[ak]) cbad = s0 + nco
+      if (cbad)
+        v(ak, cbad, "R9", "the scan-and-upload tail of teamwright-agent.yml, from \"      - name: Stage the session for upload\" to the end of the file, differs from the owned copy scripts/ci/contour-upload.yml here (byte for byte; edit both together)")
+      else {
+        lim[1] = 6; want[1] = "    steps:"; lim[2] = 4; want[2] = "  agent:"; lim[3] = 2; want[3] = "jobs:"
+        lv = 1
+        for (i = s0 - 1; i >= 1 && lv <= 3; i--) {
+          s = L[ak, i]
+          if (s ~ /^ *$/) continue
+          match(s, /^ */)
+          if (RLENGTH >= lim[lv]) continue
+          if (s != want[lv]) break
+          lv++
+        }
+        if (lv <= 3)
+          v(ak, (i >= 1 ? i : s0), "R9", "the scan-and-upload tail is not a step of the agent job here: going up from it, the first line with fewer than " lim[lv] " leading spaces must be \"" want[lv] "\"")
+      }
+    }
+  }
   exit (nv > 0 ? 1 : 0)
 }
 ' "${files[@]}")"
@@ -638,7 +708,7 @@ case "$rc" in
     echo "release-guard: FAIL: a token other than the release job's could write contents, the release job or the ci.yml header is not the owned copy, the installer upload is not the owned tag-only step, the Telegram secrets reach a step other than the owned send step, or an action is not an owned line or step fragment (T-085, T-084, T-087, T-088, P-020)" >&2
     exit 1
     ;;
-  *) cannot_run "awk failed (exit $rc) on $dir or an owned copy ($owned, $ownedh, $ownedu, $ownedt, $ownedl, $csd)" ;;
+  *) cannot_run "awk failed (exit $rc) on $dir or an owned copy ($owned, $ownedh, $ownedu, $ownedt, $ownedl, $csd, $ownedc)" ;;
 esac
 grep -q '^V ' <<<"$report" && cannot_run "awk listed violations but exited 0"
 echo "release-guard: ok: $dir: ${#files[@]} file(s); token read-only but in the release job, which is the owned copy; no other secret, permissions or gh; one installer upload, the owned tag-only step; the Telegram secrets only in the owned send step of the windows job; every action an owned line or step fragment, no column-0 line after jobs:, no merge key"

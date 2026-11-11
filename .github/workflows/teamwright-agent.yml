@@ -58,7 +58,6 @@ jobs:
       MAIN: ${{ github.event.repository.default_branch }}
       RUN_ID: ${{ github.run_id }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-      RUNS_DIR: /srv/gha-voicen-runs
       OUT: .teamwright-agent
       # The kit at the version .teamwright/installed.json names (0.16.2), checked below.
       KIT_SHA: bc8133f129b061868e605e6d00cf7e7b96dd2fdb
@@ -284,16 +283,141 @@ jobs:
           [[ "$ISSUE" =~ ^[0-9]+$ ]] && { gh issue comment "$ISSUE" -R "$REPO" --body "$msg" >/dev/null || true; }
           exit 0
 
-      - name: Keep the session for analysis
+      - name: Stage the session for upload
+        id: staged
         if: always()
-        shell: bash {0}
+        timeout-minutes: 30
+        shell: bash
+        env:
+          # The values pass 1 of the scan looks for; they reach the scan only here.
+          OAUTH_VALUE: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          JOB_TOKEN: ${{ github.token }}
         run: |
-          # The journal and the session transcripts go to the run directory of the runner host.
-          [ -d "$RUNS_DIR" ] || exit 0
-          dest="$RUNS_DIR/$RUN_ID"
-          mkdir -p "$dest"
-          cp -r .teamwright/logs "$dest/" 2>/dev/null
-          cp -r "$OUT" "$dest/agent" 2>/dev/null
-          cp -r "$HOME/.claude/projects" "$dest/" 2>/dev/null
-          git log --format='%H %an %aI %s' "origin/$MAIN..HEAD" > "$dest/commits.txt" 2>/dev/null
-          exit 0
+          # T-206 (decisions #265, #266): the stage session's files, copied to a staging dir that is
+          # scanned before the next step takes exactly that dir. Regular files only, no symlink
+          # followed or copied; three sources: $OUT, the journal .teamwright/logs and this run's
+          # session in this checkout's own Claude CLI project dir. Every miss is a ::warning and a
+          # line of manifest.txt. A match of a value of the job or of a known key format deletes the
+          # staging dir and fails the step; only counts are printed, never a name or a line.
+          set -u
+          cd -- "$GITHUB_WORKSPACE"
+          stage="$RUNNER_TEMP/session-upload"
+          rm -rf -- "$stage"
+          # An empty value would be an empty pattern, which matches every file: an empty OAuth value
+          # is dropped, an empty job token is refused (the scan could not cover it).
+          if [ -z "${JOB_TOKEN:-}" ]; then
+            echo "::error::the job token value is empty, so the scan cannot cover it: nothing is staged or uploaded"
+            exit 1
+          fi
+          mkdir -p -- "$stage"
+          notes=()
+          miss() {
+            notes+=("missing: $1")
+            echo "::warning::session upload: missing $1"
+          }
+          # copy_tree <src> <dest> <label>: the regular files under <src>; find without -L neither
+          # follows nor lists a symlink as a file. Names are never printed (the session chose them).
+          copy_tree() {
+            local rel n=0 skipped=0
+            mkdir -p -- "$2"
+            while IFS= read -r -d '' rel; do
+              rel="${rel#./}"
+              if mkdir -p -- "$2/$(dirname -- "$rel")" 2>/dev/null && cp -P -- "$1/$rel" "$2/$rel" 2>/dev/null; then
+                n=$((n + 1))
+              else
+                skipped=$((skipped + 1))
+              fi
+            done < <(cd -- "$1" && find . -type f -print0 2>/dev/null)
+            notes+=("kept: $3 ($n file(s))")
+            [ "$skipped" = 0 ] || miss "$skipped file(s) of $3 (not copied)"
+          }
+          src_tree() { # <path> <dest name> <label>
+            if [ -d "$1" ] && [ ! -L "$1" ]; then copy_tree "$1" "$stage/$2" "$3"; else miss "$3 (not a directory)"; fi
+          }
+          src_tree "$OUT" agent "$OUT"
+          src_tree .teamwright/logs logs .teamwright/logs
+          # This run's session in the CLI project dir: the slug is the workspace path with every char
+          # outside [A-Za-z0-9] replaced by '-' (the CLI hashes a slug longer than 200 chars); the
+          # session id and cwd come from the init event, the first line of $OUT/session.jsonl.
+          sid=""
+          cwd=""
+          if [ -f "$OUT/session.jsonl" ] && [ ! -L "$OUT/session.jsonl" ]; then
+            first="$(head -n 1 -- "$OUT/session.jsonl")"
+            sid="$(printf '%s' "$first" | jq -r 'if type == "object" then (.session_id // "" | tostring) else "" end' 2>/dev/null)" || sid=""
+            cwd="$(printf '%s' "$first" | jq -r 'if type == "object" then (.cwd // "" | tostring) else "" end' 2>/dev/null)" || cwd=""
+          fi
+          slug="$(printf '%s' "$GITHUB_WORKSPACE" | tr -c 'A-Za-z0-9' '-')"
+          pd="$HOME/.claude/projects/$slug"
+          uuid='^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$'
+          if [ "${#slug}" -gt 200 ]; then
+            miss "the Claude project dir (the workspace slug is longer than 200 chars)"
+          elif [ ! -d "$pd" ] || [ -L "$pd" ]; then
+            miss "the Claude project dir ~/.claude/projects/<slug> (not a real directory)"
+          elif ! [[ "$sid" =~ $uuid ]]; then
+            miss "the Claude project session (no UUID session_id in the first line of $OUT/session.jsonl)"
+          elif [ "$cwd" != "$GITHUB_WORKSPACE" ]; then
+            miss "the Claude project session (the init cwd is not this workspace)"
+          else
+            mkdir -p -- "$stage/claude-project"
+            if [ -f "$pd/$sid.jsonl" ] && [ ! -L "$pd/$sid.jsonl" ] && cp -P -- "$pd/$sid.jsonl" "$stage/claude-project/$sid.jsonl" 2>/dev/null; then
+              notes+=("kept: the Claude project session $sid.jsonl")
+            else
+              miss "the Claude project session file $sid.jsonl"
+            fi
+            if [ -d "$pd/$sid" ] && [ ! -L "$pd/$sid" ]; then
+              copy_tree "$pd/$sid" "$stage/claude-project/$sid" "the Claude project session dir $sid/"
+            fi
+          fi
+          # The commits of the stage; git runs in the session's tree, so without the values in its env.
+          if ! env -u OAUTH_VALUE -u JOB_TOKEN git --no-pager -c log.showSignature=false log --no-show-signature --format='%H %an %aI %s' "origin/$MAIN..HEAD" > "$stage/commits.txt" 2>/dev/null; then
+            miss "commits.txt (git log origin/$MAIN..HEAD failed)"
+          fi
+          # Only regular files and dirs go up (a file swapped for a symlink during the copy is dropped).
+          find "$stage" -mindepth 1 ! -type f ! -type d -delete
+          printf '%s\n' "${notes[@]}" > "$stage/manifest.txt"
+          refuse() {
+            rm -rf -- "$stage"
+            echo "::error::$1: the staging dir is deleted, nothing is uploaded"
+            exit 1
+          }
+          # scan_content / scan_names <grep args...>: how many staged files match by content, how many
+          # staged names (paths below the staging dir) match; exit 2 when the copy cannot be read.
+          scan_content() {
+            grep -a -r -l "$@" -- "$stage" 2>/dev/null | wc -l
+            return "${PIPESTATUS[0]}"
+          }
+          scan_names() {
+            local names
+            names="$(find "$stage" -mindepth 1 -printf '%P\n')" || return 2
+            grep -a -c "$@" 2>/dev/null <<<"$names"
+          }
+          vals=()
+          [ -z "${OAUTH_VALUE:-}" ] || vals+=("$OAUTH_VALUE")
+          vals+=("$JOB_TOKEN")
+          # Pass 1: the job's own values, as fixed strings (printf is a builtin: no argv holds them).
+          r=0; v1="$(scan_content -F -f <(printf '%s\n' "${vals[@]}"))" || r=$?
+          [ "$r" -le 1 ] || refuse "pass 1 could not read the staged copy"
+          r=0; v2="$(scan_names -F -f <(printf '%s\n' "${vals[@]}"))" || r=$?
+          [ "$r" -le 1 ] || refuse "pass 1 could not read the staged names"
+          # Pass 2: known key formats (decision #266), owned here.
+          fmt=(-e '-----BEGIN [A-Z0-9 ]*PRIVATE KEY( BLOCK)?-----' -e 'gh[pousr]_[A-Za-z0-9]{36,}' -e 'github_pat_[A-Za-z0-9_]{20,}' -e 'sk-ant-[A-Za-z0-9_-]{20,}')
+          r=0; f1="$(scan_content -E "${fmt[@]}")" || r=$?
+          [ "$r" -le 1 ] || refuse "pass 2 could not read the staged copy"
+          r=0; f2="$(scan_names -E "${fmt[@]}")" || r=$?
+          [ "$r" -le 1 ] || refuse "pass 2 could not read the staged names"
+          echo "scan pass 1 (the job's values): $((v1)) file(s) by content, $((v2)) by name"
+          echo "scan pass 2 (known key formats): $((f1)) file(s) by content, $((f2)) by name"
+          total=$((v1 + v2 + f1 + f2))
+          [ "$total" = 0 ] || refuse "the staged session matches a value of the job or a known key format ($total hit(s))"
+          echo "staged for upload: $(find "$stage" -type f | wc -l) file(s); manifest.txt lists what was kept and missed"
+
+      # The staging dir exactly as scanned; the step runs only when the scan passed, whatever the
+      # outcome of the stage itself, so a failed stage keeps its session too.
+      - uses: actions/upload-artifact@v4
+        name: Upload the scanned session
+        if: always() && steps.staged.outcome == 'success'
+        with:
+          name: teamwright-agent-${{ inputs.task_id }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/session-upload
+          retention-days: 3
+          if-no-files-found: error
