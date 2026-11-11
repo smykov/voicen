@@ -1486,6 +1486,9 @@ t_empty_job() { # an empty job token: the scan cannot cover it, the step refuses
   sc_exec || return 1
   [ "$C_RC" = 1 ] || { C_WHY="exit $C_RC, want 1 (an empty job token is refused)"; return 1; }
   [ ! -e "$C_STAGE" ] || { C_WHY="the staging dir is still there"; return 1; }
+  # Refused up front, not by accident: an empty pattern would match every file and refuse too
+  # (failure-branch bite: the empty-token 'exit 1' dropped stayed green without this line).
+  ! grep -q -i 'scan pass' "$C/out.txt" || { C_WHY="the scan ran with an empty job token (refused only because an empty pattern matched everything)"; return 1; }
 }
 t_pd_ok() { # [<slug length>]: the project dir of this checkout, this run's session only
   local m
@@ -1525,6 +1528,18 @@ t_pd_miss() { # <variant> [<slug length>]: no project dir is staged; the miss is
   grep -i -E 'claude|project|session' "$C_STAGE/manifest.txt" 2>/dev/null | grep -q -i -E 'miss|absent|not |no |none|skip|lack|refus|reject|invalid' || { C_WHY="manifest.txt does not name the miss"; return 1; }
   grep -q -F '::warning' "$C/out.txt" || { C_WHY="no ::warning for the miss"; return 1; }
 }
+t_pd_symfile() { # this run's <slug>/<id>.jsonl is itself a symlink: not followed or copied, a miss (failure-branch bite)
+  sc_new pd-symfile
+  rm -f "$C_PD/$C_ID.jsonl"
+  ln -s "$C_OUTSIDE/file.txt" "$C_PD/$C_ID.jsonl"
+  sc_exec || return 1
+  [ "$C_RC" = 0 ] || { C_WHY="exit $C_RC, want 0 (a miss is not a refusal)"; return 1; }
+  ! sc_staged_has MARK-outside || { C_WHY="the target of the session-file symlink was staged"; return 1; }
+  [ -z "$(find "$C_STAGE" -mindepth 1 ! -type f ! -type d | head -n 1)" ] || { C_WHY="a staged entry is not a regular file"; return 1; }
+  sc_staged_has MARK-pj-sub || { C_WHY="<id>/subagents/ was not staged beside the refused session file"; return 1; }
+  grep -i -E 'claude|project|session' "$C_STAGE/manifest.txt" 2>/dev/null | grep -q -i -E 'miss|absent|not |no |none|skip|lack|refus|reject|invalid' || { C_WHY="manifest.txt does not name the miss"; return 1; }
+  grep -q -F '::warning' "$C/out.txt" || { C_WHY="no ::warning for the miss"; return 1; }
+}
 
 sc_run() { # <label> <fn> [args...]: the case, then its result is remembered for the mutation runs
   local label="$1"
@@ -1558,6 +1573,7 @@ sc_run "an empty OAuth value is dropped (an empty pattern would match every file
 sc_run "an empty job token value is refused (exit 1)" t_empty_job
 sc_run "project dir: <slug>/<id>.jsonl and <id>/subagents copied; other session, sibling and foreign dirs, symlinks, ~/.claude files not" t_pd_ok
 sc_run "project dir with a slug of exactly 200 chars is copied" t_pd_ok 200
+sc_run "project dir: a session file <id>.jsonl that is a symlink is not followed or copied, a miss" t_pd_symfile
 for v in symdir nodir badid-word badid-upper badid-trail badid-trav badid-glob cwd; do
   sc_run "project dir miss ($v): exit 0, nothing from HOME staged, miss in manifest.txt and a ::warning" t_pd_miss "$v"
 done
