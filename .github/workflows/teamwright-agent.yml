@@ -58,6 +58,8 @@ jobs:
       MAIN: ${{ github.event.repository.default_branch }}
       RUN_ID: ${{ github.run_id }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      # The runner host's run directory, mounted into the runner container at the same path (#267).
+      RUNS_DIR: /srv/gha-voicen-runs
       OUT: .teamwright-agent
       # The kit at the version .teamwright/installed.json names (0.16.2), checked below.
       KIT_SHA: bc8133f129b061868e605e6d00cf7e7b96dd2fdb
@@ -282,6 +284,35 @@ jobs:
           # This step also runs when the input check failed: an unchecked ISSUE gets no comment.
           [[ "$ISSUE" =~ ^[0-9]+$ ]] && { gh issue comment "$ISSUE" -R "$REPO" --body "$msg" >/dev/null || true; }
           exit 0
+
+      - name: Keep the session for analysis
+        if: always()
+        shell: bash {0}
+        run: |
+          # Decision #267 ("keep both"): the runner host's copy, in RUNS_DIR/<run id> on the runner
+          # host, readable only there; the copy GitHub keeps is the artifact of the owned tail below.
+          # The step never turns the job red, and never stays silent: a missing RUNS_DIR, a missing
+          # source or a failed copy is a ::warning naming what was not kept.
+          keep() { # <source> <dest> <label>
+            if [ ! -e "$1" ]; then
+              echo "::warning::runner host copy: $3 not kept (it does not exist)"
+            elif ! cp -R -P -- "$1" "$2"; then
+              echo "::warning::runner host copy: $3 not kept (the copy into $2 failed)"
+            fi
+          }
+          if [ -z "${RUNS_DIR:-}" ] || [ ! -d "$RUNS_DIR" ]; then
+            echo "::warning::runner host copy: nothing kept, RUNS_DIR '${RUNS_DIR:-}' is not a directory"
+          elif ! mkdir -p -- "$RUNS_DIR/$RUN_ID"; then
+            echo "::warning::runner host copy: nothing kept, $RUNS_DIR/$RUN_ID (under RUNS_DIR) cannot be created"
+          else
+            dest="$RUNS_DIR/$RUN_ID"
+            keep .teamwright/logs "$dest/logs" "the journal .teamwright/logs"
+            keep "$OUT" "$dest/agent" "the session files $OUT (agent)"
+            keep "$HOME/.claude/projects" "$dest/projects" "the Claude CLI projects ~/.claude/projects"
+            if ! git --no-pager log --format='%H %an %aI %s' "origin/$MAIN..HEAD" > "$dest/commits.txt"; then
+              echo "::warning::runner host copy: commits.txt not kept (git log origin/$MAIN..HEAD failed)"
+            fi
+          fi
 
       - name: Stage the session for upload
         id: staged
