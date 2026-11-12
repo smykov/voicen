@@ -68,7 +68,9 @@ pub trait Paster: Send + Sync {
     fn send_ctrl_v(&self) -> Result<(), PasteError>;
 }
 
-/// Where the pending recording's audio is kept (R-18; T-007 builds the file store).
+/// Where the pending recording's audio is kept (R-18). The file store is
+/// `pending::FsTempAudioStore` (T-209): `pending-<id>.wav` in one folder, atomic
+/// put, own-pattern deletes, never under a calls root (decision #251).
 pub trait TempAudioStore: Send + Sync {
     fn put_pending(&self, id: PendingId, audio: &AudioBuffer) -> std::io::Result<()>;
     fn get_pending(&self, id: PendingId) -> std::io::Result<AudioBuffer>;

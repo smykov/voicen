@@ -83,6 +83,7 @@ fn start(rig: AppRig) -> Started {
             credentials: Arc::clone(&rig.creds),
             hotkeys: Arc::clone(&rig.hotkeys),
             detector: Err(voicen_core::vad::VadError::Unavailable),
+            temp_audio: Arc::new(voicen_core::platform::FakeTempAudioStore::new()),
         },
     )
     .expect("start_dictation");

@@ -5,8 +5,11 @@
 //! `SettingsService`'s own instance), the speech gate over the given detector with the
 //! energy fallback (T-102), `ChatPostProcessor` (T-074: stateless,
 //! settings, key and timeouts come from each job, so the app and the tests run the
-//! same processor), an interim pending-audio store whose `put` fails (until T-007)
-//! and [`SettingsRequests`]; manages it as
+//! same processor), the given pending-audio store (T-209: `run()` passes
+//! `voicen_core::pending::FsTempAudioStore` over `paths::temp_audio_dir()`; its
+//! `delete_all` runs before the session starts, and the store is managed as
+//! [`PendingAudio`] for the `RunEvent::Exit` cleanup) and [`SettingsRequests`];
+//! manages it as
 //! `Arc<DictationSession>` (the type the tray's menu-open handler looks up),
 //! starts the hotkey thread for the settings' hotkey and attaches it to the
 //! `HotkeyRegistrarHandle` the `SettingsService` was given (T-055), so a save's
@@ -24,14 +27,13 @@ use std::io;
 use std::sync::Arc;
 
 use tauri::{AppHandle, Manager, Runtime};
-use voicen_core::audio::AudioBuffer;
 use voicen_core::diag::{
     DetectorTag, Log, LogEvent, LogObserver, LogsNotice, LogsNoticeSink, WarningKind,
 };
 use voicen_core::dictation::{DictationSession, SessionDeps};
 use voicen_core::pipeline::{EngineFactory, PipelineDeps};
 use voicen_core::platform::{
-    AudioSource, Clipboard, Indicator, Paster, PendingId, ShellRequests, TempAudioStore,
+    AudioSource, Clipboard, Indicator, Paster, ShellRequests, TempAudioStore,
 };
 use voicen_core::post_process::chat::ChatPostProcessor;
 use voicen_core::recording::{OverlayState, TrayState};
@@ -62,7 +64,14 @@ pub struct DictationPorts {
     /// The gate's primary detector: `vad::load_bundled` in `run()`, explicit in the tests.
     /// An `Err` makes the energy detector decide (one `vad_fallback` at the first decision).
     pub detector: Result<Box<dyn SpeechDetector>, VadError>,
+    /// The pending recording's audio (T-209, FR-032): `FsTempAudioStore` over
+    /// `paths::temp_audio_dir()` and the managed service's `call_roots` in `run()`.
+    pub temp_audio: Arc<dyn TempAudioStore>,
 }
+
+/// The app's pending-audio store, managed by [`start_dictation`] so the
+/// `RunEvent::Exit` arm of `on_run_event` can run its `delete_all` (FR-032).
+pub struct PendingAudio(pub Arc<dyn TempAudioStore>);
 
 /// The started dictation of an app: owns the hotkey thread. Dropping it stops the
 /// hotkey thread and frees the hotkey (also one a save committed); the session
@@ -120,7 +129,13 @@ pub fn start_dictation<R: Runtime>(
         credentials,
         hotkeys,
         detector,
+        temp_audio,
     } = ports;
+    // FR-032: the stale files of an earlier session go before the session exists, so
+    // no put can race it. A failure (the calls-roots guard refused, an I/O error) is
+    // not fatal: nothing is deleted and the next start retries.
+    let _ = temp_audio.delete_all();
+    let _ = app.manage(PendingAudio(Arc::clone(&temp_audio)));
     let cancel_key = CancelKeyHandle::new();
     let gate = SpeechGate::new(detector, EnergyDetector::new());
     let start_line = LogEvent::VadDetector {
@@ -132,7 +147,7 @@ pub fn start_dictation<R: Runtime>(
             credentials,
             clipboard,
             paster,
-            temp_audio: Arc::new(NoPendingAudio),
+            temp_audio,
             observer: Arc::new(LogObserver::new(Arc::clone(&log))),
             post_processor: Arc::new(ChatPostProcessor::new()),
         },
@@ -166,35 +181,6 @@ pub fn start_dictation<R: Runtime>(
     hotkeys.attach(&hotkey);
     cancel_key.attach(&hotkey);
     Ok(DictationHandle { _hotkey: hotkey })
-}
-
-/// The interim pending-audio store (until T-007's file store): keeps nothing, so a
-/// failed dictation leaves no pending recording (T-001 Notes).
-struct NoPendingAudio;
-
-fn not_kept() -> io::Error {
-    io::Error::new(
-        io::ErrorKind::Unsupported,
-        "no pending audio store until T-007",
-    )
-}
-
-impl TempAudioStore for NoPendingAudio {
-    fn put_pending(&self, _id: PendingId, _audio: &AudioBuffer) -> io::Result<()> {
-        Err(not_kept())
-    }
-
-    fn get_pending(&self, _id: PendingId) -> io::Result<AudioBuffer> {
-        Err(io::Error::from(io::ErrorKind::NotFound))
-    }
-
-    fn delete_pending(&self, _id: PendingId) -> io::Result<()> {
-        Ok(())
-    }
-
-    fn delete_all(&self) -> io::Result<()> {
-        Ok(())
-    }
 }
 
 /// `run()`'s `Indicator`: the tray half to the tray part of the app, the overlay

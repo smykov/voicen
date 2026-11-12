@@ -2,10 +2,12 @@
 //! directly in one folder, written atomically, deleted only by their own name pattern
 //! and never under a calls root (decision #251, invariant I3).
 
-use crate::audio::AudioBuffer;
+use crate::audio::{wav, AudioBuffer, SAMPLE_RATE};
 use crate::platform::{PendingId, TempAudioStore};
-use std::io;
-use std::path::{Path, PathBuf};
+use std::ffi::OsStr;
+use std::fs;
+use std::io::{self, ErrorKind, Write};
+use std::path::{Component, Path, PathBuf, Prefix};
 use std::sync::Arc;
 
 /// The calls roots known now, the current one first, then the earlier ones; `None`
@@ -15,47 +17,276 @@ pub type CallRootsFn = Arc<dyn Fn() -> Option<Vec<PathBuf>> + Send + Sync>;
 /// Writes `bytes` to the file at `path` (create or truncate). A test fails it midway.
 pub type WriteFn = Arc<dyn Fn(&Path, &[u8]) -> io::Result<()> + Send + Sync>;
 
-/// STUB (T-209 red-tests stage): the compile surface the tests use. The developer
-/// replaces every body; nothing here is behaviour.
+const PREFIX: &str = "pending-";
+const WAV: &str = ".wav";
+const PART: &str = ".wav.part";
+/// The size of the header [`wav::encode`] writes.
+const HEADER_LEN: usize = 44;
+
+/// The pending-audio store over one folder (invariant I3).
+///
+/// - It writes, reads and deletes only regular files named `pending-<u64>.wav` or
+///   `pending-<u64>.wav.part` directly in its folder: never recursively, never
+///   through a link.
+/// - Every write and delete first passes [`guard`]: the calls roots are known and
+///   the folder neither equals, lies inside nor contains any of them. Otherwise
+///   `put_pending` returns `Err` and the deletes delete nothing (and return `Err`).
+/// - The roots closure is called at every write and delete, so a root changed
+///   during the session counts at exit.
+/// - `put_pending` writes `pending-<id>.wav.part`, then renames it onto
+///   `pending-<id>.wav`; on any `Err` the `.part` is removed, so either the whole
+///   file or none of the new one is left.
 #[derive(Clone)]
 pub struct FsTempAudioStore {
-    _dir: PathBuf,
-    _roots: CallRootsFn,
-    _writer: WriteFn,
+    dir: PathBuf,
+    roots: CallRootsFn,
+    writer: WriteFn,
 }
 
 impl FsTempAudioStore {
+    /// A store over `dir` (created at the first put), guarded by `roots`.
     pub fn new(dir: PathBuf, roots: CallRootsFn) -> FsTempAudioStore {
-        let writer: WriteFn = Arc::new(|_, _| unimplemented!("T-209"));
+        let writer: WriteFn = Arc::new(write_synced);
         FsTempAudioStore::with_writer(dir, roots, writer)
     }
 
     /// The same store with an injected writer (tests).
     pub fn with_writer(dir: PathBuf, roots: CallRootsFn, writer: WriteFn) -> FsTempAudioStore {
-        FsTempAudioStore {
-            _dir: dir,
-            _roots: roots,
-            _writer: writer,
+        FsTempAudioStore { dir, roots, writer }
+    }
+
+    fn file(&self, id: PendingId) -> PathBuf {
+        self.dir.join(format!("{PREFIX}{}{WAV}", id.0))
+    }
+
+    fn part(&self, id: PendingId) -> PathBuf {
+        self.dir.join(format!("{PREFIX}{}{PART}", id.0))
+    }
+
+    /// `Ok` only when [`guard`] passes for the roots read now.
+    fn check(&self) -> io::Result<()> {
+        if guard(&self.dir, (self.roots)().as_deref()) {
+            Ok(())
+        } else {
+            Err(io::Error::new(
+                ErrorKind::PermissionDenied,
+                "pending audio folder refused by the calls-roots guard",
+            ))
         }
+    }
+
+    fn write_then_rename(&self, id: PendingId, bytes: &[u8]) -> io::Result<()> {
+        let part = self.part(id);
+        let result = (self.writer)(&part, bytes).and_then(|()| fs::rename(&part, self.file(id)));
+        if result.is_err() {
+            let _ = fs::remove_file(&part);
+        }
+        result
     }
 }
 
 impl TempAudioStore for FsTempAudioStore {
-    fn put_pending(&self, _id: PendingId, _audio: &AudioBuffer) -> io::Result<()> {
-        unimplemented!("T-209")
+    fn put_pending(&self, id: PendingId, audio: &AudioBuffer) -> io::Result<()> {
+        self.check()?;
+        fs::create_dir_all(&self.dir)?;
+        self.write_then_rename(id, &wav::encode(audio))
     }
 
-    fn get_pending(&self, _id: PendingId) -> io::Result<AudioBuffer> {
-        unimplemented!("T-209")
+    fn get_pending(&self, id: PendingId) -> io::Result<AudioBuffer> {
+        let bytes = fs::read(self.file(id))?;
+        decode(&bytes)
+            .map(AudioBuffer::from_16k_mono)
+            .ok_or_else(|| io::Error::new(ErrorKind::InvalidData, "not a pending audio file"))
     }
 
-    fn delete_pending(&self, _id: PendingId) -> io::Result<()> {
-        unimplemented!("T-209")
+    fn delete_pending(&self, id: PendingId) -> io::Result<()> {
+        self.check()?;
+        remove_regular(&self.file(id))
     }
 
     fn delete_all(&self) -> io::Result<()> {
-        unimplemented!("T-209")
+        self.check()?;
+        let entries = match fs::read_dir(&self.dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e),
+        };
+        let mut first_err = None;
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(e) => {
+                    first_err.get_or_insert(e);
+                    continue;
+                }
+            };
+            if !is_own_name(&entry.file_name()) {
+                continue;
+            }
+            // The entry's own type, not followed: a link or a directory never counts.
+            match entry.file_type() {
+                Ok(t) if t.is_file() => {}
+                Ok(_) => continue,
+                Err(e) => {
+                    first_err.get_or_insert(e);
+                    continue;
+                }
+            }
+            match fs::remove_file(entry.path()) {
+                Ok(()) => {}
+                Err(e) if e.kind() == ErrorKind::NotFound => {}
+                Err(e) => {
+                    first_err.get_or_insert(e);
+                }
+            }
+        }
+        first_err.map_or(Ok(()), Err)
     }
+}
+
+/// The default writer: create or truncate, write, flush to disk.
+fn write_synced(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let mut f = fs::File::create(path)?;
+    f.write_all(bytes)?;
+    f.sync_all()
+}
+
+/// Removes `path` when it is a regular file (not followed); a missing file is `Ok`.
+fn remove_regular(path: &Path) -> io::Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(m) if m.file_type().is_file() => match fs::remove_file(path) {
+            Err(e) if e.kind() != ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        },
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+/// `pending-<u64>.wav` or `pending-<u64>.wav.part`, the id ASCII digits only.
+fn is_own_name(name: &OsStr) -> bool {
+    let Some(rest) = name.to_str().and_then(|n| n.strip_prefix(PREFIX)) else {
+        return false;
+    };
+    let Some(id) = rest.strip_suffix(PART).or_else(|| rest.strip_suffix(WAV)) else {
+        return false;
+    };
+    !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()) && id.parse::<u64>().is_ok()
+}
+
+/// The samples of a file [`wav::encode`] wrote (PCM 16-bit, mono, 16 kHz, the
+/// canonical 44-byte header); `None` for anything else.
+fn decode(bytes: &[u8]) -> Option<Vec<i16>> {
+    let u16_at = |i: usize| -> Option<u16> {
+        Some(u16::from_le_bytes(bytes.get(i..i + 2)?.try_into().ok()?))
+    };
+    let u32_at = |i: usize| -> Option<u32> {
+        Some(u32::from_le_bytes(bytes.get(i..i + 4)?.try_into().ok()?))
+    };
+    let header_ok = bytes.get(0..4)? == b"RIFF"
+        && bytes.get(8..16)? == b"WAVEfmt "
+        && u32_at(16)? == 16
+        && u16_at(20)? == 1
+        && u16_at(22)? == 1
+        && u32_at(24)? == SAMPLE_RATE
+        && u16_at(34)? == 16
+        && bytes.get(36..40)? == b"data";
+    if !header_ok {
+        return None;
+    }
+    let data_len = usize::try_from(u32_at(40)?).ok()?;
+    let data = bytes.get(HEADER_LEN..HEADER_LEN.checked_add(data_len)?)?;
+    let (pairs, odd) = data.as_chunks::<2>();
+    if !odd.is_empty() {
+        return None;
+    }
+    Some(pairs.iter().map(|&c| i16::from_le_bytes(c)).collect())
+}
+
+/// The one calls-roots guard (decision #251): true only when `roots` is known and
+/// `dir` neither equals, lies inside nor contains any root. Each path is compared
+/// both canonicalised (its longest existing ancestor resolved, links and junctions
+/// included) and lexically, component-wise and ASCII case-insensitively; any
+/// relation in either form blocks, so the guard fails closed.
+fn guard(dir: &Path, roots: Option<&[PathBuf]>) -> bool {
+    let Some(roots) = roots else {
+        return false;
+    };
+    let dir_forms = forms(dir);
+    roots.iter().all(|root| {
+        let root_forms = forms(root);
+        !dir_forms
+            .iter()
+            .any(|d| root_forms.iter().any(|r| related(d, r)))
+    })
+}
+
+/// The canonical form (when one can be made) and the lexical form of `path`.
+fn forms(path: &Path) -> Vec<Vec<String>> {
+    let mut out = vec![key(&lexical(path))];
+    if let Some(c) = canonical(path) {
+        out.push(key(&c));
+    }
+    out
+}
+
+/// `path` with its longest existing ancestor canonicalised and the missing rest
+/// appended lexically; `None` when no ancestor can be canonicalised.
+fn canonical(path: &Path) -> Option<PathBuf> {
+    let path = lexical(path);
+    let mut existing = path.as_path();
+    let mut rest: Vec<&OsStr> = Vec::new();
+    loop {
+        if let Ok(c) = fs::canonicalize(existing) {
+            let mut out = c;
+            for part in rest.iter().rev() {
+                out.push(part);
+            }
+            return Some(out);
+        }
+        rest.push(existing.file_name()?);
+        existing = existing.parent()?;
+    }
+}
+
+/// `path` with `.` dropped and `..` applied lexically.
+fn lexical(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for c in path.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !out.pop() {
+                    out.push(c);
+                }
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// The comparison key: one ASCII-lower-cased string per component, a verbatim
+/// disk prefix (`\\?\C:`) folded into the plain one (`c:`).
+fn key(path: &Path) -> Vec<String> {
+    path.components()
+        .map(|c| match c {
+            Component::Prefix(p) => match p.kind() {
+                Prefix::VerbatimDisk(d) | Prefix::Disk(d) => {
+                    format!("{}:", char::from(d).to_ascii_lowercase())
+                }
+                _ => p.as_os_str().to_string_lossy().to_ascii_lowercase(),
+            },
+            Component::RootDir => "/".to_string(),
+            other => other.as_os_str().to_string_lossy().to_ascii_lowercase(),
+        })
+        .collect()
+}
+
+/// Equal, or one a component-wise prefix of the other.
+fn related(a: &[String], b: &[String]) -> bool {
+    a.starts_with(b) || b.starts_with(a)
 }
 
 #[cfg(test)]

@@ -206,7 +206,9 @@ fn wire<R: Runtime>(app: &AppHandle<R>, parts: Parts) {
 ///   tray "Exit" item) passes, and without a tray nothing is prevented;
 /// - `Exit` (the loop ended: after the tray "Exit" item, and on `WM_ENDSESSION(TRUE)`
 ///   through tao): the managed `diag::SessionEnd`, if any, ends the session once
-///   (marker deleted, one `exited` line; T-024 invariant 2, the only clean end);
+///   (marker deleted, one `exited` line; T-024 invariant 2, the only clean end),
+///   then the managed `dictation::PendingAudio`, if any, deletes its files
+///   (FR-032, T-209);
 /// - everything else: nothing.
 pub fn on_run_event<R: Runtime>(
     app: &AppHandle<R>,
@@ -232,6 +234,11 @@ pub fn on_run_event<R: Runtime>(
         RunEvent::Exit => {
             if let Some(session_end) = app.try_state::<diag::SessionEnd>() {
                 session_end.end();
+            }
+            // FR-032 (T-209): this session's pending audio. A failure is ignored; the
+            // next start's cleanup retries.
+            if let Some(pending) = app.try_state::<dictation::PendingAudio>() {
+                let _ = pending.0.delete_all();
             }
         }
         _ => {}
@@ -322,7 +329,27 @@ fn release_ports<R: Runtime>(app: &AppHandle<R>, shared: SharedPorts) -> dictati
             .resource_dir()
             .map_err(|_| voicen_core::vad::VadError::Unavailable)
             .and_then(|dir| vad::load_bundled(&dir)),
+        temp_audio: release_temp_audio(app),
     }
+}
+
+/// The pending-audio store (T-209, FR-032): `paths::temp_audio_dir()`, guarded by
+/// the managed `SettingsService`'s `call_roots` (read at every write and delete, the
+/// one resolution of the roots). Without a managed service the roots are unknown and
+/// the store fails closed.
+#[cfg(windows)]
+fn release_temp_audio<R: Runtime>(
+    app: &AppHandle<R>,
+) -> Arc<dyn voicen_core::platform::TempAudioStore> {
+    let service = app
+        .try_state::<Arc<SettingsService>>()
+        .map(|service| Arc::clone(&service));
+    let roots: voicen_core::pending::CallRootsFn =
+        Arc::new(move || service.as_ref().and_then(|service| service.call_roots()));
+    Arc::new(voicen_core::pending::FsTempAudioStore::new(
+        paths::temp_audio_dir(),
+        roots,
+    ))
 }
 
 #[cfg(not(windows))]

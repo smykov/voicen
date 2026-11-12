@@ -419,7 +419,8 @@ impl Pipeline {
             (stored, std::mem::replace(&mut *slot, entry))
         };
         if let Some(older) = older {
-            // Errors are ignored: the start/exit delete_all (T-007) removes leftovers.
+            // Errors are ignored: the shell's start/exit delete_all (T-209) removes
+            // leftovers.
             let _ = self.deps.temp_audio.delete_pending(older.id);
         }
         stored

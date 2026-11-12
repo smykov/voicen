@@ -340,11 +340,19 @@ impl SettingsService {
         (service, outcome)
     }
 
-    /// STUB (T-209 red-tests stage; the developer replaces it): the calls roots in
-    /// force, the current one first, then `calls.earlier_roots`; `None` while
-    /// `Unavailable` (decision #19).
+    /// The calls roots in force (T-209): the current one first (through
+    /// [`effective_root`] over the deps' default root, the one resolution), then
+    /// `calls.earlier_roots`. `None` while `Unavailable` (decision #19): the file
+    /// could not be read, so the real roots are unknown.
     pub fn call_roots(&self) -> Option<Vec<std::path::PathBuf>> {
-        Some(Vec::new())
+        if self.load.unavailable {
+            return None;
+        }
+        let snapshot = self.snapshot();
+        let default_root = self.deps.call_roots.default_root();
+        let mut roots = vec![effective_root(&snapshot.calls, &default_root)];
+        roots.extend(snapshot.calls.earlier_roots.iter().cloned());
+        Some(roots)
     }
 
     /// The settings in force now. The value behind the `Arc` never changes.

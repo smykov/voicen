@@ -24,6 +24,12 @@ pub fn models_dir() -> PathBuf {
     data_dir().join("models")
 }
 
+/// `data_dir()\tmp\audio`: the pending recording's audio (T-209, FR-032; the one
+/// resolver, P-010). `voicen_core::pending::FsTempAudioStore` keeps its files there.
+pub fn temp_audio_dir() -> PathBuf {
+    data_dir().join("tmp").join("audio")
+}
+
 /// `data_dir()\webview`: the WebView2 data of every window (T-062, FR-28 v4), so the
 /// uninstaller's removal of the data folder takes it too.
 pub fn webview_dir() -> PathBuf {

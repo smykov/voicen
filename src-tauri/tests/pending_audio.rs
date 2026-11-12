@@ -98,7 +98,10 @@ fn start_dictation_removes_the_stale_pending_files_of_an_earlier_session() {
     assert_hotkey_free();
     let rig = AppRig::new(EngineKind::Api);
     let (store, folder) = store_of(&rig);
-    plant(&folder, &["pending-7.wav", "pending-8.wav.part", "notes.txt"]);
+    plant(
+        &folder,
+        &["pending-7.wav", "pending-8.wav.part", "notes.txt"],
+    );
 
     let _dictation = start(&rig, store);
 
@@ -123,7 +126,12 @@ fn the_exit_event_removes_the_pending_files_of_this_session() {
 
     plant(
         &folder,
-        &["pending-1.wav", "pending-9.wav", "pending-9.wav.part", "notes.txt"],
+        &[
+            "pending-1.wav",
+            "pending-9.wav",
+            "pending-9.wav.part",
+            "notes.txt",
+        ],
     );
     assert!(
         names(&folder).contains(&"pending-1.wav".to_string()),
@@ -154,10 +162,12 @@ fn a_calls_root_equal_to_the_store_folder_stops_both_cleanups() {
     let mut draft = (*rig.service.snapshot()).clone();
     draft.calls.storage_root = Some(folder.clone());
     plant(&folder, &["pending-5.wav"]);
-    let saved = rig.service.save(voicen_core::settings::service::SaveRequest {
-        settings: draft,
-        keys: voicen_core::secrets::KeyEdits::default(),
-    });
+    let saved = rig
+        .service
+        .save(voicen_core::settings::service::SaveRequest {
+            settings: draft,
+            keys: voicen_core::secrets::KeyEdits::default(),
+        });
     assert!(
         matches!(
             saved,
