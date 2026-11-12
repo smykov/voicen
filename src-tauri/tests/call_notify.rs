@@ -217,8 +217,8 @@ fn every_callback_maps_to_at_most_one_typed_event() {
             fmtid: GUID::zeroed(),
             pid: 0,
         };
-        // SAFETY: as above; `key` outlives the call.
-        let got = unsafe { client.OnPropertyValueChanged(pw, &key) };
+        // SAFETY: as above; `key` is passed by value.
+        let got = unsafe { client.OnPropertyValueChanged(pw, key) };
         let events = drain(&notify);
         if got.is_err() || !events.is_empty() {
             wrong.push(format!(
