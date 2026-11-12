@@ -1,0 +1,8 @@
+guarantee: AC-2: every message show sets is offered to the Notifier exactly once, outside the session lock (exactly once: outbox not cleared)
+file: crates/voicen-core/src/recording/mod.rs
+added_by: test-writer
+--- old
+        std::mem::take(&mut self.outbox)
+--- new
+        self.outbox.clone()
+--- end

@@ -1,0 +1,11 @@
+guarantee: AC-6: retry with an absent or stale id is a no-op; current settings; failed retry keeps the audio; FR-10 delivery (settings read on the worker, not at the click)
+file: crates/voicen-core/src/dictation.rs
+added_by: test-writer
+--- old
+            } => Done::Retry(key, pipeline.retry(id, &settings, at)),
+--- new
+            } => Done::Retry(key, {
+                let _ = &settings;
+                pipeline.retry(id, &shared.settings.snapshot(), at)
+            }),
+--- end

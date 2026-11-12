@@ -1,0 +1,10 @@
+guarantee: AC-6: retry with an absent or stale id is a no-op; current settings; failed retry keeps the audio; FR-10 delivery (a failed retry shows the reason again: result dropped, no message, no offer)
+file: crates/voicen-core/src/dictation.rs
+added_by: test-writer
+--- old
+            Done::Retry(key, Some(report)) => {
+                st.ctrl.retry_finished(key, report.end, report.pending, now)
+            }
+--- new
+            Done::Retry(key, Some(_report)) => st.ctrl.retry_dropped(key, now),
+--- end

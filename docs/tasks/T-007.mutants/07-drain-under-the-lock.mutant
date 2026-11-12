@@ -1,0 +1,20 @@
+guarantee: AC-2: every message show sets is offered to the Notifier exactly once, outside the session lock (notify under the lock)
+file: crates/voicen-core/src/dictation.rs
+added_by: test-writer
+--- old
+        let offers = guard.ctrl.take_offers();
+        drop(guard);
+        for offer in offers {
+            self.shared
+                .notifier
+                .notify(offer.id, &offer.params, offer.retry);
+        }
+--- new
+        let offers = guard.ctrl.take_offers();
+        for offer in offers {
+            self.shared
+                .notifier
+                .notify(offer.id, &offer.params, offer.retry);
+        }
+        drop(guard);
+--- end

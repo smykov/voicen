@@ -1,0 +1,11 @@
+guarantee: AC-2: every message show sets is offered to the Notifier exactly once, outside the session lock (drain missing at drain-missing-stop-recording)
+file: crates/voicen-core/src/dictation.rs
+added_by: test-writer
+equivalent: a message shown in this section is drained by the finish section of the same stop_recording call, before it returns (a Dropped end and a decide-None tick show none), so only the offer's timing inside the call differs
+--- old
+        let mut st = shared.lock();
+        // Shutdown dropped the capture: nothing is ended or reported any more.
+--- new
+        let mut st = lock(&shared.state);
+        // Shutdown dropped the capture: nothing is ended or reported any more.
+--- end

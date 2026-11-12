@@ -1,0 +1,10 @@
+guarantee: AC-2: every message show sets is offered to the Notifier exactly once, outside the session lock (drain missing on the worker, failed job)
+file: crates/voicen-core/src/dictation.rs
+added_by: test-writer
+--- old
+        let retry_available = pipeline.pending().is_some();
+        let mut st = shared.lock();
+--- new
+        let retry_available = pipeline.pending().is_some();
+        let mut st = lock(&shared.state);
+--- end

@@ -1,0 +1,8 @@
+guarantee: AC-6: retry with an absent or stale id is a no-op; current settings; failed retry keeps the audio; FR-10 delivery
+file: crates/voicen-core/src/recording/mod.rs
+added_by: test-writer
+--- old
+        if !self.queued.remove(&QueueKey::Retry(key)) {
+--- new
+        if !self.queued.contains(&QueueKey::Retry(key)) {
+--- end

@@ -1,0 +1,11 @@
+guarantee: AC-2: retry = Some(id) only for a retryable Failed whose job is in the pending slot (failed put_pending turned into Some(id))
+file: crates/voicen-core/src/pipeline.rs
+added_by: test-writer
+--- old
+                .is_ok()
+                .then_some(id);
+--- new
+                .is_ok()
+                .then_some(id)
+                .or(Some(id));
+--- end

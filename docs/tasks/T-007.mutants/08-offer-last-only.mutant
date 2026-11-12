@@ -1,0 +1,9 @@
+guarantee: AC-2: every message show sets is offered to the Notifier exactly once, outside the session lock (a later message replaces an earlier one before it is offered)
+file: crates/voicen-core/src/recording/mod.rs
+added_by: test-writer
+equivalent: every lock section shows at most one message (one Notify per blocked press, one fail/notice per stop, one job end per worker section), so the outbox never holds two offers at a drain
+--- old
+        std::mem::take(&mut self.outbox)
+--- new
+        self.outbox.pop().into_iter().collect()
+--- end

@@ -1,0 +1,8 @@
+guarantee: AC-6: retry with an absent or stale id is a no-op; current settings; failed retry keeps the audio; FR-10 delivery (FR-10: paste only into the stored window)
+file: crates/voicen-core/src/pipeline.rs
+added_by: test-writer
+--- old
+            start_window: entry.start_window.as_ref(),
+--- new
+            start_window: None,
+--- end

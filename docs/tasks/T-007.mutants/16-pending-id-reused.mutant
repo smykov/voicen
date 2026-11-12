@@ -1,0 +1,14 @@
+guarantee: AC-1: a newer failure replaces the pending recording with a new id
+file: crates/voicen-core/src/pipeline.rs
+added_by: test-writer
+--- old
+                    .fetch_add(1, Ordering::Relaxed)
+                    .wrapping_add(1),
+            );
+            let stored = self
+--- new
+                    .fetch_add(0, Ordering::Relaxed)
+                    .wrapping_add(1),
+            );
+            let stored = self
+--- end

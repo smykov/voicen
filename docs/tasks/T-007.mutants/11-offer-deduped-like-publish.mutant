@@ -1,0 +1,18 @@
+guarantee: AC-2: every message show sets is offered to the Notifier exactly once, outside the session lock (offer per changed overlay message, not per show)
+file: crates/voicen-core/src/recording/mod.rs
+added_by: test-writer
+--- old
+        self.outbox.push(Offer {
+            id,
+            params: params.clone(),
+            retry,
+        });
+--- new
+        if self.message.as_ref().map(|m| m.id) != Some(id) {
+            self.outbox.push(Offer {
+                id,
+                params: params.clone(),
+                retry,
+            });
+        }
+--- end

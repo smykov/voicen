@@ -3441,6 +3441,19 @@ fn wait_offers(rig: &Rig, n: usize) {
     );
 }
 
+/// An input that shows a message on the caller's own thread has offered it by the
+/// time it returns: no waiting, so a drain left to a later lock section or to the
+/// timer's expiry tick (the message's 3 s) cannot pass for it.
+#[track_caller]
+fn assert_offered_on_return(rig: &Rig, n: usize) {
+    assert_eq!(
+        rig.notifier.calls().len(),
+        n,
+        "the input returned without offering its message: {:?}",
+        offers(rig)
+    );
+}
+
 /// The one id in the store (a failed job keeps exactly one pending recording).
 #[track_caller]
 fn only_stored(rig: &Rig) -> PendingId {
@@ -3531,16 +3544,19 @@ fn a_capture_failure_is_offered_once_without_a_retry_id_at_the_press_and_at_the_
     // of the error in the params.
     let rig = Rig::new(api_settings(), always(TEXT));
     let speech = fixtures::speech_3s();
+    // The failure steps run at `now()`, so their 3 s messages have not expired and the
+    // timer's expiry tick cannot drain them; each offer must be there on return.
+    let t1 = now();
     let t0 = past();
 
     rig.audio.set_start_error(Some(CaptureError::AccessDenied));
-    rig.session.hotkey_pressed(t0);
-    wait_offers(&rig, 1);
+    rig.session.hotkey_pressed(t1);
+    assert_offered_on_return(&rig, 1);
     rig.audio.set_start_error(None);
 
     rig.audio.set_stop_error(Some(CaptureError::DeviceBusy));
-    rig.hold(&speech, t0 + ms(10_000), ms(3000));
-    wait_offers(&rig, 2);
+    rig.hold(&speech, t1 + ms(10_000), ms(3000));
+    assert_offered_on_return(&rig, 2);
     rig.audio.set_stop_error(None);
 
     rig.hold(&speech, t0 + ms(20_000), ms(3000));
@@ -3578,7 +3594,7 @@ fn a_blocked_press_offers_the_choose_engine_notice_once() {
     let rig = Rig::new(s, always(TEXT));
     let tp = now();
     rig.session.hotkey_pressed(tp);
-    wait_offers(&rig, 1);
+    assert_offered_on_return(&rig, 1);
     rig.session.hotkey_released(tp + ms(50));
     assert_eq!(
         offers(&rig),
@@ -3598,11 +3614,11 @@ fn a_failed_hotkey_registration_offers_the_one_hotkey_notice_once_per_transition
     let id = declared(HOTKEY_NOTICE);
     let t = now();
     rig.session.hotkey_registration(false, t);
-    wait_offers(&rig, 1);
+    assert_offered_on_return(&rig, 1);
     rig.session.hotkey_registration(false, t + ms(10));
     rig.session.hotkey_registration(true, t + ms(20));
     rig.session.hotkey_registration(false, t + ms(30));
-    wait_offers(&rig, 2);
+    assert_offered_on_return(&rig, 2);
     // Barrier: a later input has been served, so a wrong third offer would be there.
     rig.session.tray_menu_opened(t + ms(40));
     assert_eq!(offers(&rig), vec![(id, vec![], None), (id, vec![], None)]);
@@ -3617,7 +3633,7 @@ fn notice_with_is_offered_once_with_its_params() {
     let id = declared(LOGS_NOTICE);
     let params = vec![("reason", "logs_reason.disk_full".to_string())];
     rig.session.notice_with(id, params.clone(), now());
-    wait_offers(&rig, 1);
+    assert_offered_on_return(&rig, 1);
     assert_eq!(offers(&rig), vec![(id, params, None)]);
 }
 
@@ -3628,11 +3644,13 @@ fn the_max_length_stop_offers_its_notice_once() {
     // gives one offer, no params, no retry; the job that follows is delivered (no more
     // offers). Bite: no drain in tick/run_timer, a second offer from the worker.
     let rig = Rig::new(api_settings(), always(TEXT));
-    let t0 = past();
+    // At `now()`, so the notice's 3 s have not expired and the timer's expiry tick
+    // cannot be what drains it: the tick that stops the recording offers it on return.
+    let t0 = now();
     rig.frames(&fixtures::speech_3s(), t0 + FIRST_FRAME);
     rig.session.hotkey_pressed(t0);
     rig.session.tick(t0 + MAX_LENGTH);
-    wait_offers(&rig, 1);
+    assert_offered_on_return(&rig, 1);
     rig.wait_jobs(1);
     assert_eq!(offers(&rig), vec![(i18n::NOTICE_MAX_LENGTH, vec![], None)]);
 }

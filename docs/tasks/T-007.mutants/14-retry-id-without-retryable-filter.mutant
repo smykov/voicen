@@ -1,0 +1,9 @@
+guarantee: AC-2: retry = Some(id) only for a retryable Failed whose job is in the pending slot
+file: crates/voicen-core/src/recording/mod.rs
+added_by: test-writer
+equivalent: release gives pending Some only for a retryable reason (keep_pending / keep_retried), so dropping the retryable filter changes no reachable output
+--- old
+                let retry = pending.filter(|_| reason.retryable());
+--- new
+                let retry = pending;
+--- end

@@ -1,0 +1,10 @@
+guarantee: AC-6: retry with an absent or stale id is a no-op; current settings; failed retry keeps the audio; FR-10 delivery (failed retry keeps the same id)
+file: crates/voicen-core/src/pipeline.rs
+added_by: test-writer
+--- old
+        let pending = match job.retry_of {
+            Some(id) => self.keep_retried(id, &reason),
+--- new
+        let pending = match job.retry_of {
+            Some(_) => self.keep_pending(job, &reason),
+--- end

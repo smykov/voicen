@@ -1,0 +1,10 @@
+guarantee: AC-2: every message show sets is offered to the Notifier exactly once, outside the session lock (drain missing at drain-missing-hotkey-pressed)
+file: crates/voicen-core/src/dictation.rs
+added_by: test-writer
+--- old
+            let mut st = shared.lock();
+            // Ended on another thread since the check: a press from idle is a new
+--- new
+            let mut st = lock(&shared.state);
+            // Ended on another thread since the check: a press from idle is a new
+--- end

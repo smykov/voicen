@@ -1,0 +1,14 @@
+guarantee: AC-5: tray::menu has a Retry row before Exit while retry_available
+file: crates/voicen-core/src/tray.rs
+added_by: test-writer
+--- old
+    if retry_available {
+        rows.push(item(TrayAction::Retry));
+    }
+    rows.push(item(TrayAction::Exit));
+--- new
+    if true {
+        rows.push(item(TrayAction::Retry));
+    }
+    rows.push(item(TrayAction::Exit));
+--- end

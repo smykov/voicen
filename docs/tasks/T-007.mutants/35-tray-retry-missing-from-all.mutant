@@ -1,0 +1,23 @@
+guarantee: AC-5: tray::menu has a Retry row before Exit while retry_available
+file: crates/voicen-core/src/tray.rs
+added_by: test-writer
+--- old
+const ALL: [TrayAction; 7] = [
+    TrayAction::CallRecord,
+    TrayAction::CallStop,
+    TrayAction::OpenCalls,
+    TrayAction::OpenSettings,
+    TrayAction::OpenLogs,
+    TrayAction::Retry,
+    TrayAction::Exit,
+];
+--- new
+const ALL: [TrayAction; 6] = [
+    TrayAction::CallRecord,
+    TrayAction::CallStop,
+    TrayAction::OpenCalls,
+    TrayAction::OpenSettings,
+    TrayAction::OpenLogs,
+    TrayAction::Exit,
+];
+--- end
