@@ -1,0 +1,8 @@
+guarantee: AC-3: a calls root that is an ancestor of the temp folder blocks the cleanup
+file: crates/voicen-core/src/pending.rs
+added_by: test-writer
+--- old
+    a.starts_with(b) || b.starts_with(a)
+--- new
+    b.starts_with(a)
+--- end

@@ -1,0 +1,8 @@
+guarantee: AC-3: any earlier calls root is guarded like the current one
+file: crates/voicen-core/src/pending.rs
+added_by: test-writer
+--- old
+    roots.iter().all(|root| {
+--- new
+    roots.iter().take(1).all(|root| {
+--- end

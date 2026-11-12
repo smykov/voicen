@@ -1,0 +1,13 @@
+guarantee: AC-2: the cleanup is never recursive (a subfolder named like the pattern survives)
+file: crates/voicen-core/src/pending.rs
+added_by: test-writer
+--- old
+                Ok(t) if t.is_file() => {}
+                Ok(_) => continue,
+--- new
+                Ok(t) if t.is_file() => {}
+                Ok(_) => {
+                    let _ = fs::remove_dir_all(entry.path());
+                    continue;
+                }
+--- end

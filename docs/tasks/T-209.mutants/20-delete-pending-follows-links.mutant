@@ -1,0 +1,8 @@
+guarantee: I3: deletes touch only regular files, never following a link (delete_pending)
+file: crates/voicen-core/src/pending.rs
+added_by: test-writer
+--- old
+    match fs::symlink_metadata(path) {
+--- new
+    match fs::metadata(path) {
+--- end

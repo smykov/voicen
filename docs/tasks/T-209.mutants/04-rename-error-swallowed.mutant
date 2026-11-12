@@ -1,0 +1,11 @@
+guarantee: AC-1 / failure branch: a failed rename is Err and the .part is removed
+file: crates/voicen-core/src/pending.rs
+added_by: test-writer
+--- old
+        let result = (self.writer)(&part, bytes).and_then(|()| fs::rename(&part, self.file(id)));
+--- new
+        let result = (self.writer)(&part, bytes).and_then(|()| {
+            let _ = fs::rename(&part, self.file(id));
+            Ok(())
+        });
+--- end

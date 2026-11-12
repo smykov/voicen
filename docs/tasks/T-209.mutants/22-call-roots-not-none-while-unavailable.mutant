@@ -1,0 +1,11 @@
+guarantee: I3 / decision #19: call_roots is None while settings are Unavailable (the guard fails closed)
+file: crates/voicen-core/src/settings/service.rs
+added_by: test-writer
+--- old
+        if self.load.unavailable {
+            return None;
+        }
+        let snapshot = self.snapshot();
+--- new
+        let snapshot = self.snapshot();
+--- end

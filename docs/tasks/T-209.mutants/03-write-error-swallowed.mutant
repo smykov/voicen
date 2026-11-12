@@ -1,0 +1,9 @@
+guarantee: AC-1 / failure branch: a write error reaches the caller as Err and leaves no partial file
+file: crates/voicen-core/src/pending.rs
+added_by: test-writer
+--- old
+        let result = (self.writer)(&part, bytes).and_then(|()| fs::rename(&part, self.file(id)));
+--- new
+        let _ = (self.writer)(&part, bytes);
+        let result = fs::rename(&part, self.file(id));
+--- end

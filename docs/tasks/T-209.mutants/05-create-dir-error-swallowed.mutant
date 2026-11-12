@@ -1,0 +1,8 @@
+guarantee: failure branch: the store's folder cannot be created -> put_pending returns Err, no partial file
+file: crates/voicen-core/src/pending.rs
+added_by: test-writer
+--- old
+        fs::create_dir_all(&self.dir)?;
+--- new
+        let _ = fs::create_dir_all(&self.dir);
+--- end

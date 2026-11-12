@@ -1,0 +1,9 @@
+guarantee: I3: paths compared canonicalised where they exist (a link or junction to the folder or its ancestor as a root blocks)
+file: crates/voicen-core/src/pending.rs
+added_by: test-writer
+--- old
+    if let Some(c) = canonical(path) {
+        out.push(key(&c));
+    }
+--- new
+--- end

@@ -1,0 +1,9 @@
+guarantee: AC-3 / I3: every delete passes the calls-roots guard (delete_pending deletes nothing under a failed guard)
+file: crates/voicen-core/src/pending.rs
+added_by: test-writer
+--- old
+        self.check()?;
+        remove_regular(&self.file(id))
+--- new
+        remove_regular(&self.file(id))
+--- end

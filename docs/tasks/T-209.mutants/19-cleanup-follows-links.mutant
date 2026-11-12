@@ -1,0 +1,8 @@
+guarantee: AC-2 / I3: the cleanup deletes only regular files, never following a link
+file: crates/voicen-core/src/pending.rs
+added_by: test-writer
+--- old
+            match entry.file_type() {
+--- new
+            match fs::metadata(entry.path()).map(|m| m.file_type()) {
+--- end

@@ -1,0 +1,8 @@
+guarantee: AC-1: a write that fails midway leaves no partial file (no write straight onto pending-<id>.wav)
+file: crates/voicen-core/src/pending.rs
+added_by: test-writer
+--- old
+        let part = self.part(id);
+--- new
+        let part = self.file(id);
+--- end

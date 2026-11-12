@@ -1,0 +1,8 @@
+guarantee: I3: paths compared lexically ASCII case-insensitively where they do not exist
+file: crates/voicen-core/src/pending.rs
+added_by: test-writer
+--- old
+            other => other.as_os_str().to_string_lossy().to_ascii_lowercase(),
+--- new
+            other => other.as_os_str().to_string_lossy().into_owned(),
+--- end

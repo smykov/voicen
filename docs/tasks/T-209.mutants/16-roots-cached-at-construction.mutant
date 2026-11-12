@@ -1,0 +1,10 @@
+guarantee: I3 / seam: the roots are read at every put and delete (a root changed during the session counts at exit)
+file: crates/voicen-core/src/pending.rs
+added_by: test-writer
+--- old
+        FsTempAudioStore { dir, roots, writer }
+--- new
+        let snap = roots();
+        let roots: CallRootsFn = Arc::new(move || snap.clone());
+        FsTempAudioStore { dir, roots, writer }
+--- end

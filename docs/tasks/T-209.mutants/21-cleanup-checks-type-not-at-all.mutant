@@ -1,0 +1,9 @@
+guarantee: AC-2: only regular files are deleted (a directory named like the pattern is never removed as a file)
+file: crates/voicen-core/src/pending.rs
+added_by: test-writer
+--- old
+                Ok(t) if t.is_file() => {}
+                Ok(_) => continue,
+--- new
+                Ok(_) => {}
+--- end

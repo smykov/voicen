@@ -1,0 +1,2 @@
+# Core part only (crates/voicen-core lib tests of the store and the call_roots accessor). The shell's start/exit cleanup (src-tauri/tests/pending_audio.rs) runs only in Windows CI and is a row under ## Tests, not an entry here.
+cargo test -j2 -p voicen-core --lib -- pending:: call_roots

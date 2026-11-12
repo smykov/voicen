@@ -1,0 +1,9 @@
+guarantee: AC-3: the guard covers the current calls root (effective_root over the default root)
+file: crates/voicen-core/src/settings/service.rs
+added_by: test-writer
+--- old
+        let mut roots = vec![effective_root(&snapshot.calls, &default_root)];
+--- new
+        let _ = (effective_root(&snapshot.calls, &default_root), &default_root);
+        let mut roots = Vec::new();
+--- end

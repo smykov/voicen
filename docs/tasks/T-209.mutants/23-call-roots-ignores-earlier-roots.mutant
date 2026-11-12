@@ -1,0 +1,7 @@
+guarantee: AC-3: the guard covers every earlier calls root (calls.earlier_roots)
+file: crates/voicen-core/src/settings/service.rs
+added_by: test-writer
+--- old
+        roots.extend(snapshot.calls.earlier_roots.iter().cloned());
+--- new
+--- end

@@ -1,0 +1,12 @@
+guarantee: I3: unknown calls roots (settings Unavailable) fail closed
+file: crates/voicen-core/src/pending.rs
+added_by: test-writer
+--- old
+    let Some(roots) = roots else {
+        return false;
+    };
+--- new
+    let Some(roots) = roots else {
+        return true;
+    };
+--- end

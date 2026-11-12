@@ -1,0 +1,9 @@
+guarantee: AC-1 / failure branch: put_pending leaves the whole file or none (no .part on Err)
+file: crates/voicen-core/src/pending.rs
+added_by: test-writer
+--- old
+        if result.is_err() {
+            let _ = fs::remove_file(&part);
+        }
+--- new
+--- end

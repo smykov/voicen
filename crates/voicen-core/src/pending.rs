@@ -471,12 +471,26 @@ mod tests {
 
     #[test]
     fn a_parent_that_is_a_regular_file_fails_the_put_and_leaves_no_file() {
-        // Bite: create_dir_all error swallowed, or a file written elsewhere.
+        // Bite: create_dir_all error swallowed, or a file written elsewhere. The
+        // writer counts its calls: a swallowed folder error would still end in Err
+        // (the .part cannot be opened in the missing folder, F-024: a later call
+        // re-raising the same cause), so the Err must come before any write.
         let w = World::new();
         let tmp = w.base.path().join("tmp");
         fs::write(&tmp, b"not a folder").expect("file at tmp");
-        let store = w.store();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let seen = calls.clone();
+        let writer: WriteFn = Arc::new(move |path, bytes| {
+            seen.fetch_add(1, Ordering::SeqCst);
+            fs::write(path, bytes)
+        });
+        let store = FsTempAudioStore::with_writer(w.folder(), roots(vec![w.calls()]), writer);
         assert!(store.put_pending(PendingId(1), &audio(1)).is_err());
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "a folder that cannot be created must stop the put before any write"
+        );
         assert_eq!(fs::read(&tmp).expect("tmp"), b"not a folder");
         assert_eq!(names(w.base.path()), vec!["tmp".to_string()]);
     }
@@ -531,14 +545,27 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn delete_all_does_not_follow_a_link_named_like_the_pattern() {
-        // Bite: metadata() instead of the entry's own file type: the link's target
-        // outside the folder deleted.
+        // Bite: metadata() instead of the entry's own file type (delete_all) or
+        // instead of symlink_metadata (delete_pending): the link followed, counted
+        // as a regular file and deleted. A link never counts (I3): the link itself
+        // and its target outside the folder both survive.
         let w = World::new();
         fs::create_dir_all(w.folder()).expect("folder");
         let outside = w.base.path().join("outside.txt");
         fs::write(&outside, b"keep").expect("outside");
-        std::os::unix::fs::symlink(&outside, w.folder().join("pending-4.wav")).expect("link");
-        w.store().delete_all().expect("delete_all");
+        let link = w.folder().join("pending-4.wav");
+        std::os::unix::fs::symlink(&outside, &link).expect("link");
+        let store = w.store();
+        store.delete_all().expect("delete_all");
+        assert!(
+            fs::symlink_metadata(&link).is_ok_and(|m| m.file_type().is_symlink()),
+            "delete_all removed a link"
+        );
+        store.delete_pending(PendingId(4)).expect("delete_pending");
+        assert!(
+            fs::symlink_metadata(&link).is_ok_and(|m| m.file_type().is_symlink()),
+            "delete_pending removed a link"
+        );
         assert_eq!(fs::read(&outside).expect("target"), b"keep");
     }
 

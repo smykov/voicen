@@ -1,0 +1,8 @@
+guarantee: AC-2: the cleanup deletes only files of its own name pattern
+file: crates/voicen-core/src/pending.rs
+added_by: test-writer
+--- old
+            if !is_own_name(&entry.file_name()) {
+--- new
+            if !entry.file_name().to_string_lossy().starts_with(PREFIX) {
+--- end
