@@ -364,8 +364,6 @@ mod tests {
     }
 
     #[test]
-    // The positions are the assertion; a short menu fails the test by panicking.
-    #[allow(clippy::indexing_slicing)]
     fn retry_is_an_enabled_item_directly_before_exit_only_while_a_retry_is_available() {
         // T-007 Acceptance (tray; FR-11: "Retry last failed dictation" in the tray menu,
         // dictation-session.md: `retry_available` is the pending slot): with the slot
@@ -377,8 +375,14 @@ mod tests {
         for call in [false, true] {
             let with = menu(true, call);
             let n = with.len();
+            let Some((exit, rest)) = with.split_last() else {
+                panic!("call_recording = {call}: empty menu");
+            };
+            let Some((retry, head)) = rest.split_last() else {
+                panic!("call_recording = {call}: no row before Exit: {with:?}");
+            };
             assert_eq!(
-                with[n - 2],
+                *retry,
                 TrayRow::Item {
                     action: TrayAction::Retry,
                     enabled: true
@@ -386,13 +390,14 @@ mod tests {
                 "call_recording = {call}: {with:?}"
             );
             assert_eq!(
-                with[n - 1],
+                *exit,
                 TrayRow::Item {
                     action: TrayAction::Exit,
                     enabled: true
                 }
             );
-            assert_eq!(with[..n - 2], want_menu(false, call)[..n - 2]);
+            let plain = want_menu(false, call);
+            assert_eq!(Some(head), plain.get(..n.saturating_sub(2)));
             let without = menu(false, call);
             let flat = format!("{without:?}");
             assert!(!flat.contains("Retry"), "{without:?}");
