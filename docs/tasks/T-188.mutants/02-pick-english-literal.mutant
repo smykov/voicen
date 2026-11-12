@@ -1,0 +1,8 @@
+guarantee: AC-3: the RU notice for a nameless fallback device reads the RU text, not the English literal
+file: crates/voicen-core/src/dictation.rs
+added_by: test-writer
+--- old
+                .map_or_else(|| MIC_NAME_UNNAMED.nested_arg(), str::to_owned);
+--- new
+                .map_or_else(|| { let _ = MIC_NAME_UNNAMED; "Microphone".to_owned() }, str::to_owned);
+--- end

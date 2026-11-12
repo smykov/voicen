@@ -1,0 +1,2 @@
+# T-188: the task's core tests only (i18n catalog checks in the lib, the fallback notice in audio_device). UI mutants carry `test:` and run with `scripts/tw-mutants ui T-188 --only <name>`; core ones with `scripts/tw-mutants core T-188 --only <name>`.
+cargo test -j 2 -p voicen-core --lib i18n:: && cargo test -j 2 -p voicen-core --test audio_device

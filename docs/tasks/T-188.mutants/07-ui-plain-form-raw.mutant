@@ -1,0 +1,9 @@
+guarantee: AC-3: settings, plain option of a listed nameless device reads the fallback text
+file: src/lib/settings/MicrophoneField.svelte
+added_by: test-writer
+test: pnpm e2e --workers=2 e2e/settings-microphone.spec.ts -g "nameless"
+--- old
+          : displayName(device.name)}</option
+--- new
+          : device.name}</option
+--- end

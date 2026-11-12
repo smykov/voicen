@@ -1,0 +1,9 @@
+guarantee: AC-2/AC-3: catalog id mic_name.unnamed has RU text "Микрофон" (settings side)
+file: i18n/ru.json
+added_by: test-writer
+test: pnpm e2e --workers=2 e2e/settings-microphone.spec.ts -g "nameless"
+--- old
+  "mic_name.unnamed": "Микрофон",
+--- new
+  "mic_name.unnamed": "Microphone",
+--- end
