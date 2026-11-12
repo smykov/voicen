@@ -147,7 +147,7 @@ Rules (NFR-06, FR-026, FR-027):
   - On `Text`: deliver, then delete the pending recording.
   - On `Failed`: report again, and update the reason (same audio).
   - On `NoSpeech` (the engine now returns empty text): delete the pending recording and show "no speech detected".
-- Deleted on exit; at start, all of `<data>/tmp/audio/` is deleted (FR-032).
+- Deleted on exit; at start, the stale files of the store's own pattern are deleted (FR-032): regular files named `pending-<u64>.wav` or `pending-<u64>.wav.part`, directly in `<data>/tmp/audio/`, never recursively; other files and subfolders stay. Nothing is written or deleted when the folder equals, lies inside or contains a calls root (current or earlier), or when the roots are unknown (T-209, decisions #251, invariant in `docs/decisions/dictation-session.md`).
 
 ## FailureReason
 
