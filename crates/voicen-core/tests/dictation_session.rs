@@ -4192,6 +4192,11 @@ fn a_retry_does_not_run_the_speech_gate_again() {
 /// text.
 #[track_caller]
 fn assert_retry_is_a_no_op(rig: &Rig, id: Option<PendingId>, barrier_at: Instant) {
+    // A failure left tray Error on; the product clears it by opening the tray menu (the
+    // user opens it to click Retry). Clear it first, so that any Error after the click
+    // is the click's: the barrier hold itself derives Recording, then Idle (a delivery
+    // clears Error), never Error, once it is off.
+    rig.session.tray_menu_opened(now());
     let factory_before = rig.engine.factory_calls();
     let offers_before = offers(rig);
     let texts_before = rig.clipboard.texts();
@@ -4232,7 +4237,8 @@ fn assert_retry_is_a_no_op(rig: &Rig, id: Option<PendingId>, barrier_at: Instant
             .any(|o| matches!(o, OverlayState::Message { .. })),
         "the no-op retry showed a message: {shown:?}"
     );
-    let trays = &rig.indicator.trays()[trays_before..];
+    let all_trays = rig.indicator.trays();
+    let trays = &all_trays[trays_before..];
     assert!(
         !trays.iter().any(|(s, _)| *s == TrayState::Error),
         "the no-op retry set tray Error: {trays:?}"
