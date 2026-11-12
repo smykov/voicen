@@ -1,0 +1,9 @@
+guarantee: choose guard: choosing a nameless listed device saves { id, name: "" }, never the display text (invariant: name is display-only, matched by id)
+file: src/lib/settings/MicrophoneField.svelte
+added_by: test-writer
+test: pnpm e2e --workers=2 e2e/settings-microphone.spec.ts -g "nameless"
+--- old
+    const mic = listed ? { id: listed.id, name: listed.name } : unlisted.find((m) => m.id === value);
+--- new
+    const mic = listed ? { id: listed.id, name: displayName(listed.name) } : unlisted.find((m) => m.id === value);
+--- end

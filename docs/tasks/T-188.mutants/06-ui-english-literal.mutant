@@ -1,0 +1,9 @@
+guarantee: AC-3: the RU settings options for a nameless device read the RU text, not the English literal
+file: src/lib/settings/MicrophoneField.svelte
+added_by: test-writer
+test: pnpm e2e --workers=2 e2e/settings-microphone.spec.ts -g "nameless"
+--- old
+    return name === "" ? t("mic_name.unnamed") : name;
+--- new
+    return name === "" ? "Microphone" : name;
+--- end

@@ -1,0 +1,9 @@
+guarantee: AC-3: settings, not_connected option of a saved nameless device reads the fallback text
+file: src/lib/settings/MicrophoneField.svelte
+added_by: test-writer
+test: pnpm e2e --workers=2 e2e/settings-microphone.spec.ts -g "nameless"
+--- old
+          : t("settings.microphone.not_connected", { name: displayName(mic.name) })}</option
+--- new
+          : t("settings.microphone.not_connected", { name: mic.name })}</option
+--- end

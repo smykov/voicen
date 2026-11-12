@@ -1,0 +1,9 @@
+guarantee: AC-3: settings, windows_default option of a listed nameless device reads the fallback text
+file: src/lib/settings/MicrophoneField.svelte
+added_by: test-writer
+test: pnpm e2e --workers=2 e2e/settings-microphone.spec.ts -g "nameless"
+--- old
+          ? t("settings.microphone.windows_default", { name: displayName(device.name) })
+--- new
+          ? t("settings.microphone.windows_default", { name: device.name })
+--- end

@@ -357,6 +357,10 @@ messages! {
     MIC_REASON_BUSY = "mic_reason.busy",
     /// `MicCause::Other`.
     MIC_REASON_OTHER = "mic_reason.other",
+    /// The name of an input device the OS gives no name for (`InputDevice.name`
+    /// empty, T-188): the `{device}` of `notice.mic_fallback`; the settings UI
+    /// renders the same id with `t()`.
+    MIC_NAME_UNNAMED = "mic_name.unnamed",
     /// `diag::LogsUnwritableReason::PermissionDenied`.
     LOGS_REASON_PERMISSION_DENIED = "logs_reason.permission_denied",
     /// `diag::LogsUnwritableReason::DiskFull`.
@@ -772,13 +776,16 @@ mod tests {
         // the nested text taken from English for ru, any declared id (or any
         // catalog key) resolved, which would reopen the `&str` id path.
         let c = catalog(
-            r#"{"m":"Mic: {reason}","mic_reason.busy":"busy {x}","failure.timeout":"T"}"#,
-            r#"{"m":"Мик: {reason}","mic_reason.busy":"занято {x}","failure.timeout":"Т"}"#,
+            r#"{"m":"Mic: {reason}","mic_reason.busy":"busy {x}","mic_name.unnamed":"Microphone","failure.timeout":"T"}"#,
+            r#"{"m":"Мик: {reason}","mic_reason.busy":"занято {x}","mic_name.unnamed":"Микрофон","failure.timeout":"Т"}"#,
         );
         let m = MessageId("m");
         let rows = [
             (UiLanguage::En, "mic_reason.busy", "Mic: busy {x}"),
             (UiLanguage::Ru, "mic_reason.busy", "Мик: занято {x}"),
+            // T-188: the unnamed-microphone id is nested too (decisions #203).
+            (UiLanguage::En, "mic_name.unnamed", "Mic: Microphone"),
+            (UiLanguage::Ru, "mic_name.unnamed", "Мик: Микрофон"),
             (UiLanguage::En, "failure.timeout", "Mic: failure.timeout"),
             (UiLanguage::Ru, "disk", "Мик: disk"),
         ];
@@ -960,6 +967,36 @@ mod tests {
         assert!(
             missing.is_empty(),
             "MESSAGE_IDS not in i18n/*.json: {missing:?}"
+        );
+    }
+
+    #[test]
+    fn mic_name_unnamed_is_a_declared_nested_id_with_en_and_ru_text() {
+        // T-188 (decisions #203): the name of a device the OS gave no name is the
+        // catalog id `mic_name.unnamed` (EN "Microphone", RU "Микрофон"), in the
+        // `nested:` group so the notice renders it in the overlay's language, and
+        // covered by `message_ids_exist_in_both_catalogs` through MESSAGE_IDS. Bite:
+        // the id missing from `messages!`, from the nested group, from either
+        // json file, or the ru text left English.
+        let id = "mic_name.unnamed";
+        assert!(
+            MESSAGE_IDS.iter().any(|m| m.0 == id),
+            "{id} not in MESSAGE_IDS"
+        );
+        assert!(
+            NESTED_IDS.iter().any(|m| m.0 == id),
+            "{id} not in NESTED_IDS"
+        );
+        let c = catalog(EN_JSON, RU_JSON);
+        assert_eq!(own_text(&c, UiLanguage::En, id), Some("Microphone"));
+        assert_eq!(own_text(&c, UiLanguage::Ru, id), Some("Микрофон"));
+        assert_eq!(
+            render_with_nested(&c, UiLanguage::En, NOTICE_MIC_FALLBACK, &[("device", id)]),
+            "Using Microphone"
+        );
+        assert_eq!(
+            render_with_nested(&c, UiLanguage::Ru, NOTICE_MIC_FALLBACK, &[("device", id)]),
+            "Используется Микрофон"
         );
     }
 

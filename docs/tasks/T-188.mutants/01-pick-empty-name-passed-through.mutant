@@ -1,0 +1,11 @@
+guarantee: AC-3: a nameless device in the RU UI shows the RU fallback text in the notice (pick maps "" to mic_name.unnamed)
+file: crates/voicen-core/src/dictation.rs
+added_by: test-writer
+--- old
+                .map(|d| d.name.as_str())
+                .filter(|n| !n.is_empty())
+                .map_or_else
+--- new
+                .map(|d| d.name.as_str())
+                .map_or_else
+--- end

@@ -1,0 +1,8 @@
+guarantee: AC-2: catalog id mic_name.unnamed has RU text "Микрофон" (notice side)
+file: i18n/ru.json
+added_by: test-writer
+--- old
+  "mic_name.unnamed": "Микрофон",
+--- new
+  "mic_name.unnamed": "Microphone",
+--- end

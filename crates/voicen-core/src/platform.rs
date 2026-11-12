@@ -103,7 +103,10 @@ pub struct DeviceId(pub String);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InputDevice {
     pub id: DeviceId,
-    /// The display name (what `notice.mic_fallback` and the settings show).
+    /// The OS-given device name, or empty when the OS gives none (T-188). Shown
+    /// verbatim by `notice.mic_fallback` and the settings; an empty name is shown
+    /// as the catalog text `mic_name.unnamed` in the renderer's language (never a
+    /// text the shell spells).
     pub name: String,
     /// The Windows default input device; at most one entry is.
     pub is_default: bool,

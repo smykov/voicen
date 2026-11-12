@@ -52,8 +52,9 @@ use voicen_core::engine::{Engine, TranscribeRequest};
 use voicen_core::events::{DeviceKind, DictationEvent, RecordingObserver};
 use voicen_core::failure::FailureReason;
 use voicen_core::hotkey_registrar::FakeHotkeyRegistrar;
-use voicen_core::i18n;
+use voicen_core::i18n::{self, UiLanguage};
 use voicen_core::models::FakeDownloadedModels;
+use voicen_core::overlay::{overlay_payload, OverlayView};
 use voicen_core::pipeline::{EngineFactory, PipelineDeps};
 use voicen_core::platform::{
     AudioSource, CaptureHandle, DeviceId, FakeAudioSource, FakeCancelKey, FakeClipboard,
@@ -466,6 +467,67 @@ fn selected_microphone_missing_falls_back_to_the_default_with_one_notice_naming_
     assert_eq!(capture_failures(&rig.events()), vec![]);
     assert_eq!(rig.clipboard.texts(), vec![TEXT.to_string()]);
     assert_eq!(rig.audio.open_handles(), 0);
+}
+
+/// The text of every published `notice.mic_fallback` overlay as the shell renders it
+/// in `lang` (`overlay_payload`, the one renderer).
+fn fallback_texts(indicator: &FakeIndicator, lang: UiLanguage) -> Vec<String> {
+    indicator
+        .overlays()
+        .iter()
+        .filter(
+            |o| matches!(o, OverlayState::Message { id, .. } if *id == i18n::NOTICE_MIC_FALLBACK),
+        )
+        .filter_map(
+            |o| match overlay_payload(o, lang, 1, Duration::ZERO).state {
+                OverlayView::Message { text } => Some(text),
+                _ => None,
+            },
+        )
+        .collect()
+}
+
+/// One press on a missing selected microphone whose fallback default is `default`.
+fn fallback_rig_with(default: InputDevice) -> Rig {
+    let rig = Rig::new(settings(Mode::Hold, selected_usb()));
+    rig.audio.set_devices(vec![default]);
+    rig.hold(ahead());
+    assert_eq!(started_kinds(&rig.events()), vec![DeviceKind::Fallback]);
+    rig
+}
+
+#[test]
+fn a_nameless_fallback_device_is_named_by_the_catalog_in_the_overlays_language() {
+    // T-188 (decisions #203): the fallback default has no OS name (`name` = ""); the
+    // notice renders the catalog's `mic_name.unnamed`: "Using Microphone" in en,
+    // "Используется Микрофон" in ru; never "Using " with an empty name and never the
+    // English "Microphone" in ru. Bite: the empty name passed on as "" (en text
+    // "Using "), a fixed English fallback name (ru "Используется Microphone"),
+    // the nested id not localised.
+    let rig = fallback_rig_with(device(ARRAY_ID, "", true));
+    assert_eq!(
+        fallback_texts(&rig.indicator, UiLanguage::En),
+        vec!["Using Microphone".to_string()]
+    );
+    assert_eq!(
+        fallback_texts(&rig.indicator, UiLanguage::Ru),
+        vec!["Используется Микрофон".to_string()]
+    );
+}
+
+#[test]
+fn a_named_fallback_device_keeps_its_name_verbatim_in_both_languages() {
+    // T-188 regression guard: a real OS name is user content, rendered as it is.
+    // Bite: every fallback named by the catalog's unnamed text.
+    let rig = fallback_rig_with(array_default());
+    assert_eq!(
+        fallback_texts(&rig.indicator, UiLanguage::En),
+        vec![format!("Using {ARRAY_NAME}")]
+    );
+    assert_eq!(
+        fallback_texts(&rig.indicator, UiLanguage::Ru),
+        vec![format!("Используется {ARRAY_NAME}")]
+    );
 }
 
 #[test]

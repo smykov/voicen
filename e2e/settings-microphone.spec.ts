@@ -296,3 +296,66 @@ test("failure branch: a rejected settings_list_microphones shows error.ipc_unava
   await expect(page.locator("body")).not.toContainText(CANARY);
   expect(errors).toEqual([]);
 });
+
+// ---- (5) A nameless device (T-188; decisions #201, #203) ------------------------------------
+//
+// The OS gave a device no name: the shell sends `name: ""` (core's InputDevice.name contract)
+// and the UI renders it as the one catalog id `mic_name.unnamed` in the UI language, never as
+// an empty option and never as an English literal in the RU UI. The unnamed texts are pinned
+// as literals (EN "Microphone", RU "Микрофон", decisions #203): the id is new, the catalog
+// has no entry yet. The saved name stays "" (the text is display only, never stored).
+const UNNAMED: Record<Lang, string> = { en: "Microphone", ru: "Микрофон" };
+
+const NAMELESS_PLAIN: InputDevice = { id: "{0.0.1.00000000}.{00000000-0000-4000-8000-00000000a001}", name: "", is_default: false };
+const NAMELESS_DEFAULT: InputDevice = { id: "{0.0.1.00000000}.{00000000-0000-4000-8000-00000000a002}", name: "", is_default: true };
+const NAMELESS_SAVED = { id: "{0.0.1.00000000}.{00000000-0000-4000-8000-00000000a003}", name: "" };
+
+for (const lang of ["en", "ru"] as const) {
+  test(`failure branch: nameless listed devices read the catalog fallback text, plain and Windows default (${lang})`, async ({ page }) => {
+    const errors = pageErrors(page);
+    await openListed(page, savedView(null, lang), { microphones: [NAMELESS_PLAIN, NAMELESS_DEFAULT] });
+
+    expect(await options(page)).toEqual([
+      { value: "", text: msg(lang, "settings.microphone.system_default") },
+      { value: NAMELESS_PLAIN.id, text: UNNAMED[lang] },
+      { value: NAMELESS_DEFAULT.id, text: msg(lang, "settings.microphone.windows_default", { name: UNNAMED[lang] }) },
+    ]);
+    expect(errors).toEqual([]);
+  });
+
+  test(`failure branch: a saved nameless microphone that is not listed reads the fallback text as not connected (${lang})`, async ({ page }) => {
+    const errors = pageErrors(page);
+    await openListed(page, savedView(NAMELESS_SAVED, lang));
+
+    await expect(micSelect(page)).toHaveValue(NAMELESS_SAVED.id);
+    const shown = await options(page);
+    expect(shown.filter((o) => o.value === NAMELESS_SAVED.id)).toEqual([
+      { value: NAMELESS_SAVED.id, text: msg(lang, "settings.microphone.not_connected", { name: UNNAMED[lang] }) },
+    ]);
+    // An untouched Save keeps the stored name empty: the fallback text is display only.
+    const request = await saveRequest(page);
+    expect(request.settings.microphone).toEqual(NAMELESS_SAVED);
+    expect(errors).toEqual([]);
+  });
+
+  test(`failure branch: a saved nameless microphone reads the fallback text while the list is pending (${lang})`, async ({ page }) => {
+    const errors = pageErrors(page);
+    await openRecording(page, savedView(NAMELESS_SAVED, lang), { holdMicrophones: true });
+    await expect.poll(async () => (await calls(page, "settings_list_microphones")).length).toBeGreaterThan(0);
+
+    await expect(micSelect(page).locator(`option[value="${NAMELESS_SAVED.id}"]`)).toHaveCount(1);
+    expect((await options(page)).find((o) => o.value === NAMELESS_SAVED.id)?.text).toBe(UNNAMED[lang]);
+    expect(errors).toEqual([]);
+  });
+}
+
+test("choosing a nameless listed device saves it by id with its empty name, not the fallback text", async ({ page }) => {
+  const errors = pageErrors(page);
+  await openListed(page, savedView(null, "ru"), { microphones: [NAMELESS_PLAIN, NAMELESS_DEFAULT] });
+
+  await micSelect(page).selectOption(NAMELESS_PLAIN.id);
+
+  const request = await saveRequest(page);
+  expect(request.settings.microphone).toEqual({ id: NAMELESS_PLAIN.id, name: "" });
+  expect(errors).toEqual([]);
+});

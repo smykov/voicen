@@ -1,0 +1,9 @@
+guarantee: AC-3: a nameless device in the RU UI shows the RU fallback text in settings (all option forms)
+file: src/lib/settings/MicrophoneField.svelte
+added_by: test-writer
+test: pnpm e2e --workers=2 e2e/settings-microphone.spec.ts -g "nameless"
+--- old
+    return name === "" ? t("mic_name.unnamed") : name;
+--- new
+    return name;
+--- end

@@ -6,7 +6,8 @@
   //   order by id, the one with `is_default` marked. A device the draft or the saved
   //   settings name that the list does not have is one more option by its id: "not
   //   connected" once the list is known, its saved name while the list is pending or
-  //   could not be read. Matching is by the whole id; the name is for display.
+  //   could not be read. Matching is by the whole id; the name is for display, and an
+  //   empty name (nameless device) displays as `mic_name.unnamed` in every form.
   // - The draft (R): a function binding reads `microphone?.id ?? ""` (never undefined,
   //   so mounting writes nothing) and writes only on the user's change: "" -> null, a
   //   listed device -> `{ id, listed name }`, an unlisted one -> the `{ id, name }` it
@@ -38,6 +39,15 @@
     }
     return out;
   });
+
+  /**
+   * The text shown for a device name: an empty name means the OS gave none
+   * (`InputDevice.name` contract, T-188) and reads the catalog's `mic_name.unnamed`.
+   * Display only: the saved `{ id, name }` keeps the name as listed.
+   */
+  function displayName(name: string): string {
+    return name === "" ? t("mic_name.unnamed") : name;
+  }
 
   function selected(): string {
     return draft.settings.microphone?.id ?? "";
@@ -83,12 +93,16 @@
     <option value="">{t("settings.microphone.system_default")}</option>
     {#each devices ?? [] as device (device.id)}
       <option value={device.id}
-        >{device.is_default ? t("settings.microphone.windows_default", { name: device.name }) : device.name}</option
+        >{device.is_default
+          ? t("settings.microphone.windows_default", { name: displayName(device.name) })
+          : displayName(device.name)}</option
       >
     {/each}
     {#each unlisted as mic (mic.id)}
       <option value={mic.id}
-        >{devices === null ? mic.name : t("settings.microphone.not_connected", { name: mic.name })}</option
+        >{devices === null
+          ? displayName(mic.name)
+          : t("settings.microphone.not_connected", { name: displayName(mic.name) })}</option
       >
     {/each}
   </select>
