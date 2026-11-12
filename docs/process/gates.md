@@ -544,7 +544,7 @@ contour job sets `TEAMWRIGHT_WIP_REFS_RE='^refs/heads/(wip|task)/'` in its push 
 its `task/<ID>` push is not a delivery either; the pause check runs before this exit and
 still applies (T-202, decisions #253).
 
-**Contour session artifact (T-206, decisions #265, #266).** The agent job ends with the owned
+**Contour session artifact (T-206, decisions #265, #266, #267).** The agent job ends with the owned
 tail `scripts/ci/contour-upload.yml` (byte-pinned by release-guard R9, per name). Whatever the
 stage's outcome, it stages regular files into `$RUNNER_TEMP/session-upload` from `.teamwright-agent/`,
 `.teamwright/logs/` and this run's session in this checkout's Claude CLI project dir (nothing
@@ -553,7 +553,12 @@ uploads that dir as artifact `teamwright-agent-<task>-<run_id>-<run_attempt>`, k
 repository is public, so a two-pass scan runs first, over contents and file names: pass 1 the
 job's own secret values, pass 2 four secret formats (private-key header, GitHub token forms,
 `github_pat_`, long `sk-ant-` runs). A match deletes the staging dir and fails the step; only
-counts are printed, never a name or a line, and the upload is skipped. Why and the limits:
+counts are printed, never a name or a line, and the upload is skipped. The artifact is one of two
+copies (decision #267, "keep both"): the other is the runner host's, written by the step
+`Keep the session for analysis` into `$RUNS_DIR/<run id>` (`RUNS_DIR=/srv/gha-voicen-runs`, which the
+gha-pool mounts into the runner container), readable only on that host and not scanned. That step
+never turns the job red and never keeps nothing silently: a missing `RUNS_DIR`, a missing source or
+a failed copy is a `::warning` naming what was not kept. Why and the limits:
 `docs/decisions/ci-toolchain.md` (R9 per name, contour limits).
 
 **Pausing the contour (T-202 review 1 finding 2).** The contour's checkout never holds a
