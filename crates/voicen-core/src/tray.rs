@@ -219,13 +219,14 @@ mod tests {
     }
 
     /// Every menu action, by a wildcard-free match (as above).
-    fn all_actions() -> [TrayAction; 6] {
+    fn all_actions() -> [TrayAction; 7] {
         let all = [
             TrayAction::CallRecord,
             TrayAction::CallStop,
             TrayAction::OpenCalls,
             TrayAction::OpenSettings,
             TrayAction::OpenLogs,
+            TrayAction::Retry,
             TrayAction::Exit,
         ];
         for action in all {
@@ -235,6 +236,7 @@ mod tests {
                 | TrayAction::OpenCalls
                 | TrayAction::OpenSettings
                 | TrayAction::OpenLogs
+                | TrayAction::Retry
                 | TrayAction::Exit => {}
             }
         }
@@ -251,8 +253,8 @@ mod tests {
 
     /// The expected menu of D2/D3 (decision #197), spelled out from the spec, not
     /// derived from the code under test.
-    fn want_menu(call_recording: bool) -> Vec<TrayRow> {
-        vec![
+    fn want_menu(retry_available: bool, call_recording: bool) -> Vec<TrayRow> {
+        let mut rows = vec![
             TrayRow::Submenu {
                 label: i18n::TRAY_CALL,
                 rows: vec![
@@ -279,11 +281,18 @@ mod tests {
                 action: TrayAction::OpenLogs,
                 enabled: true,
             },
-            TrayRow::Item {
-                action: TrayAction::Exit,
+        ];
+        if retry_available {
+            rows.push(TrayRow::Item {
+                action: TrayAction::Retry,
                 enabled: true,
-            },
-        ]
+            });
+        }
+        rows.push(TrayRow::Item {
+            action: TrayAction::Exit,
+            enabled: true,
+        });
+        rows
     }
 
     #[test]
@@ -299,7 +308,7 @@ mod tests {
             for call in [false, true] {
                 assert_eq!(
                     menu(retry, call),
-                    want_menu(call),
+                    want_menu(retry, call),
                     "retry_available = {retry}, call_recording = {call}"
                 );
             }
@@ -330,7 +339,8 @@ mod tests {
             "OPEN_LOGS",
             "open_logs_folder",
             "logs",
-            "retry",
+            "Retry",
+            "retry_last",
             "history",
             "call",
             "record",
@@ -344,6 +354,51 @@ mod tests {
                 "{unknown:?} is not an item of the menu"
             );
         }
+    }
+
+    #[test]
+    fn retry_is_an_enabled_item_directly_before_exit_only_while_a_retry_is_available() {
+        // T-007 Acceptance (tray; FR-11: "Retry last failed dictation" in the tray menu,
+        // dictation-session.md: `retry_available` is the pending slot): with the slot
+        // full, Retry sits directly before Exit (after Open logs folder) and is enabled;
+        // with it empty there is no Retry row anywhere, nested rows included. Both
+        // call states. Bite: Retry always present or never, after Exit, before Open
+        // logs, disabled instead of absent, `retry_available` read inverted, Retry put
+        // inside the Call submenu.
+        for call in [false, true] {
+            let with = menu(true, call);
+            let n = with.len();
+            assert_eq!(
+                with[n - 2],
+                TrayRow::Item {
+                    action: TrayAction::Retry,
+                    enabled: true
+                },
+                "call_recording = {call}: {with:?}"
+            );
+            assert_eq!(
+                with[n - 1],
+                TrayRow::Item {
+                    action: TrayAction::Exit,
+                    enabled: true
+                }
+            );
+            assert_eq!(with[..n - 2], want_menu(false, call)[..n - 2]);
+            let without = menu(false, call);
+            let flat = format!("{without:?}");
+            assert!(!flat.contains("Retry"), "{without:?}");
+            assert_eq!(without.len(), n - 1);
+        }
+    }
+
+    #[test]
+    fn the_retry_item_has_id_retry_and_maps_back() {
+        // T-007: the Retry item carries the MenuEvent id `retry` and `from_id` maps it
+        // back (the shell routes the click to `DictationSession::retry(at, None)`).
+        // Bite: another spelling (`retry_last`), `ALL` without Retry (the click does
+        // nothing), Retry mapping to another action.
+        assert_eq!(TrayAction::Retry.as_str(), "retry");
+        assert_eq!(TrayAction::from_id("retry"), Some(TrayAction::Retry));
     }
 
     #[test]
@@ -368,6 +423,7 @@ mod tests {
             (TrayAction::OpenCalls, "tray.calls"),
             (TrayAction::OpenSettings, "tray.settings"),
             (TrayAction::OpenLogs, "tray.open_logs"),
+            (TrayAction::Retry, "tray.retry_last"),
             (TrayAction::Exit, "tray.exit"),
         ];
         assert_eq!(table.map(|(a, _)| a), all_actions());
@@ -412,7 +468,7 @@ mod tests {
         // catalog (rendered as the id itself, or ru falling back to the English
         // text), or a text that is not the contract's. "Voicen" is the product name
         // in both languages (T-005).
-        let rows: [(MessageId, &str, &str); 12] = [
+        let rows: [(MessageId, &str, &str); 13] = [
             (i18n::TRAY_CALL, "Call", "Звонок"),
             (TrayAction::CallRecord.label(), "Record", "Записать"),
             (TrayAction::CallStop.label(), "Stop", "Остановить"),
@@ -427,6 +483,11 @@ mod tests {
                 TrayAction::OpenLogs.label(),
                 "Open logs folder",
                 "Открыть папку журналов",
+            ),
+            (
+                TrayAction::Retry.label(),
+                "Retry last failed dictation",
+                "Повторить последнюю неудачную диктовку",
             ),
             (TrayAction::Exit.label(), "Exit", "Выход"),
             (tooltip(TrayState::Idle), "Voicen", "Voicen"),

@@ -1024,6 +1024,47 @@ mod tests {
     }
 
     #[test]
+    fn the_retry_ids_are_declared_and_have_their_contract_texts_in_both_catalogs() {
+        // T-007 Acceptance (catalog): `action.retry` (the toast button) and
+        // `tray.retry_last` (the tray item) carry the contracts/messages.md texts;
+        // `error.open_logs_folder` (specs/006 contracts/ipc.md, listed there since the
+        // About button, not yet declared) is declared with `messages!` and has an en text
+        // of the contract and a ru text with the same `{reason}` placeholder. The
+        // generic parity tests cannot fail for an id nobody declared, so each id is
+        // named here. Bite: an id missing from `messages!` (no toast text, the tray
+        // item rendered as its raw id), from en.json or from ru.json, ru falling back
+        // to the English text, the ru text without its placeholder.
+        let c = catalog(EN_JSON, RU_JSON);
+        for (id, en, ru) in [
+            ("action.retry", "Retry", "Повторить"),
+            (
+                "tray.retry_last",
+                "Retry last failed dictation",
+                "Повторить последнюю неудачную диктовку",
+            ),
+        ] {
+            assert!(
+                MESSAGE_IDS.iter().any(|m| m.0 == id),
+                "{id} not in MESSAGE_IDS"
+            );
+            assert_eq!(own_text(&c, UiLanguage::En, id), Some(en), "{id} en");
+            assert_eq!(own_text(&c, UiLanguage::Ru, id), Some(ru), "{id} ru");
+        }
+        let id = "error.open_logs_folder";
+        assert!(
+            MESSAGE_IDS.iter().any(|m| m.0 == id),
+            "{id} not in MESSAGE_IDS"
+        );
+        assert_eq!(
+            own_text(&c, UiLanguage::En, id),
+            Some("Cannot open the logs folder: {reason}")
+        );
+        let ru = own_text(&c, UiLanguage::Ru, id).expect("error.open_logs_folder has a ru text");
+        assert!(ru.contains("{reason}"), "ru text without {{reason}}: {ru}");
+        assert_ne!(ru, "Cannot open the logs folder: {reason}");
+    }
+
+    #[test]
     fn failure_local_timeout_is_declared_with_its_contract_text_and_listed_in_messages_md() {
         // T-106 Acceptance 3 (decision #147): the built-in engine's timeout id
         // `failure.local_timeout` is declared with messages! (so

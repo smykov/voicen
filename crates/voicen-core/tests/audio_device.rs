@@ -58,8 +58,8 @@ use voicen_core::overlay::{overlay_payload, OverlayView};
 use voicen_core::pipeline::{EngineFactory, PipelineDeps};
 use voicen_core::platform::{
     AudioSource, CaptureHandle, DeviceId, FakeAudioSource, FakeCancelKey, FakeClipboard,
-    FakeIndicator, FakePaster, FakeShellRequests, FakeTempAudioStore, FrameChunk, FrameSink,
-    IndicatorCall, InputDevice, StartWindow, WindowRef,
+    FakeIndicator, FakeNotifier, FakePaster, FakeShellRequests, FakeTempAudioStore, FrameChunk,
+    FrameSink, IndicatorCall, InputDevice, StartWindow, WindowRef,
 };
 use voicen_core::post_process::PassThrough;
 use voicen_core::recording::{CaptureError, MicCause, OverlayState, RecordingEnd, TrayState};
@@ -263,6 +263,8 @@ struct Rig {
     session: Option<Arc<DictationSession>>,
     audio: Arc<FakeAudioSource>,
     indicator: Arc<FakeIndicator>,
+    /// T-007: every message the session offered to the toast port.
+    notifier: Arc<FakeNotifier>,
     clipboard: Arc<FakeClipboard>,
     observer: Arc<RecordingObserver>,
     settings: Arc<SettingsService>,
@@ -300,6 +302,7 @@ impl Rig {
         let settings = Arc::new(service);
         let audio = Arc::new(FakeAudioSource::new());
         let indicator = Arc::new(FakeIndicator::new());
+        let notifier = Arc::new(FakeNotifier::new());
         let clipboard = Arc::new(FakeClipboard::new());
         let paster = Arc::new(FakePaster::new().with_start_window(Some(StartWindow {
             handle: W1,
@@ -326,6 +329,7 @@ impl Rig {
             },
             indicator: indicator.clone(),
             requests: Arc::new(FakeShellRequests::new()),
+            notifier: notifier.clone(),
             settings: settings.clone(),
             cancel_key: cancel.clone(),
         })
@@ -334,6 +338,7 @@ impl Rig {
             session: Some(Arc::new(session)),
             audio,
             indicator,
+            notifier,
             clipboard,
             observer,
             settings,
@@ -467,6 +472,40 @@ fn selected_microphone_missing_falls_back_to_the_default_with_one_notice_naming_
     assert_eq!(capture_failures(&rig.events()), vec![]);
     assert_eq!(rig.clipboard.texts(), vec![TEXT.to_string()]);
     assert_eq!(rig.audio.open_handles(), 0);
+}
+
+#[test]
+fn the_fallback_notice_is_offered_to_the_notifier_once_without_retry() {
+    // T-007 Acceptance "notice.mic_fallback is offered to the Notifier" (decisions
+    // #108, #214; invariant I1: every message `show` sets is offered exactly once).
+    // Same press as above: the offer is [notice.mic_fallback, device = the default's
+    // display name, retry None], one, not two (one per show, not one per publish),
+    // and only that: the dictation itself is delivered, so no other message. Bite:
+    // the notice shown but not offered (the drain missing at the press lock site), an
+    // offer per publish, a retry id on a notice, the device id instead of its name.
+    let rig = Rig::new(settings(Mode::Hold, selected_usb()));
+    rig.audio.set_devices(vec![array_default()]);
+    rig.hold(ahead());
+    assert_eq!(
+        fallback_notices(&rig.indicator),
+        vec![ARRAY_NAME.to_string()],
+        "premise: the notice was shown"
+    );
+
+    let offered: Vec<_> = rig
+        .notifier
+        .calls()
+        .into_iter()
+        .map(|c| (c.id, c.params, c.retry))
+        .collect();
+    assert_eq!(
+        offered,
+        vec![(
+            i18n::NOTICE_MIC_FALLBACK,
+            vec![("device", ARRAY_NAME.to_string())],
+            None
+        )]
+    );
 }
 
 /// The text of every published `notice.mic_fallback` overlay as the shell renders it

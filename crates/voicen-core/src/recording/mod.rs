@@ -1149,6 +1149,33 @@ mod tests {
     }
 
     #[test]
+    fn every_failure_reason_ends_a_job_as_its_message_and_tray_error() {
+        // T-007 Acceptance (indicator, characterization: green today and must stay so
+        // when the notifier drain is added): for every `FailureReason::every_reason()`,
+        // `job_finished(Failed)` shows exactly that reason's message id and params for
+        // 3 s and sets tray Error, whatever the reason (retryable or not). The expected
+        // pair is read from the reason's own accessors, so a reason whose message the
+        // controller handles apart (a match on a subset) turns it red. Bite: a
+        // `Failed` arm that matches only some reasons, tray left at Idle for a
+        // non-retryable reason (MicrophoneUnavailable), params dropped.
+        for reason in crate::failure::every_reason() {
+            let t0 = crate::clock::instant();
+            let mut c = RecordingController::<Ctx>::new();
+            let f = record(&mut c, t0, ms(1000));
+            let at = t0 + ms(2000);
+            c.job_finished(f.id(), JobEnd::Failed(reason.clone()), at);
+            assert_eq!(
+                c.indicator(),
+                &IndicatorState {
+                    tray: TrayState::Error,
+                    overlay: message(reason.message_id(), reason.message_params(), at),
+                },
+                "{reason:?}"
+            );
+        }
+    }
+
+    #[test]
     fn job_finished_for_unknown_or_repeated_id_changes_nothing() {
         // An unknown id changes nothing (not even tray Error); a repeated id cannot
         // underflow the queue and hide a later job. Bite: a decrementing counter

@@ -54,9 +54,9 @@ use voicen_core::models::FakeDownloadedModels;
 use voicen_core::pipeline::{EngineFactory, PipelineDeps};
 use voicen_core::platform::{
     AudioSource, Clipboard, ClipboardError, FakeAudioSource, FakeCancelKey, FakeClipboard,
-    FakeIndicator, FakePaster, FakeShellRequests, FakeTempAudioStore, FrameChunk, FrameSink,
-    Indicator, IndicatorCall, PasteError, Paster, PasterCall, PendingId, ShellRequestCall,
-    ShellRequests, StartWindow, TempAudioStore, WindowRef,
+    FakeIndicator, FakeNotifier, FakePaster, FakeShellRequests, FakeTempAudioStore, FrameChunk,
+    FrameSink, Indicator, IndicatorCall, Notifier, PasteError, Paster, PasterCall, PendingId,
+    ShellRequestCall, ShellRequests, StartWindow, StoreCall, TempAudioStore, WindowRef,
 };
 use voicen_core::platform::{DeviceId, InputDevice};
 use voicen_core::post_process::PassThrough;
@@ -218,6 +218,8 @@ struct EngineLog {
     settings: Mutex<Vec<Settings>>,
     /// The sample count of each audio `transcribe` got, in call order.
     transcribed: Mutex<Vec<usize>>,
+    /// The request of each `transcribe` (T-007: the durations a retry used).
+    requests: Mutex<Vec<TranscribeRequest>>,
 }
 
 impl EngineLog {
@@ -229,6 +231,9 @@ impl EngineLog {
     }
     fn transcribed(&self) -> Vec<usize> {
         lock(&self.transcribed).clone()
+    }
+    fn requests(&self) -> Vec<TranscribeRequest> {
+        lock(&self.requests).clone()
     }
 }
 
@@ -244,8 +249,9 @@ impl Engine for FnEngine {
     fn transcribe(
         &self,
         audio: &AudioBuffer,
-        _req: &TranscribeRequest,
+        req: &TranscribeRequest,
     ) -> Result<String, FailureReason> {
+        lock(&self.log.requests).push(req.clone());
         lock(&self.log.transcribed).push(audio.samples().len());
         (self.reply)(audio)
     }
@@ -587,6 +593,12 @@ struct Custom {
     /// T-054: the indicator port alone (the shell requests stay the rig's); wins
     /// over `ui`'s indicator half.
     indicator: Option<Arc<dyn Indicator>>,
+    /// T-007: the toast port (default: the rig's `FakeNotifier`).
+    notifier: Option<Arc<dyn Notifier>>,
+    /// T-007: the speech gate (default: `energy_gate()`).
+    gate: Option<SpeechGate>,
+    /// T-007: the paster (default: a `FakePaster` whose start window is `W1`).
+    paster: Option<Arc<FakePaster>>,
 }
 
 /// Feeds every event to both observers, in order (the session takes one).
@@ -603,6 +615,8 @@ struct Rig {
     session: Arc<DictationSession>,
     audio: Arc<FakeAudioSource>,
     indicator: Arc<FakeIndicator>,
+    /// T-007: every message the session offered to the toast port.
+    notifier: Arc<FakeNotifier>,
     requests: Arc<FakeShellRequests>,
     clipboard: Arc<FakeClipboard>,
     paster: Arc<FakePaster>,
@@ -656,7 +670,11 @@ impl Rig {
         let indicator = Arc::new(FakeIndicator::new());
         let requests = Arc::new(FakeShellRequests::new());
         let clipboard = Arc::new(FakeClipboard::new());
-        let paster = Arc::new(FakePaster::new().with_start_window(Some(window(W1))));
+        let notifier = Arc::new(FakeNotifier::new());
+        let paster = custom
+            .paster
+            .clone()
+            .unwrap_or_else(|| Arc::new(FakePaster::new().with_start_window(Some(window(W1)))));
         let store = Arc::new(FakeTempAudioStore::new());
         let observer = Arc::new(RecordingObserver::new());
         let engine = Arc::new(EngineLog::default());
@@ -680,9 +698,13 @@ impl Rig {
             Some(a) => a.clone(),
             None => audio.clone(),
         };
+        let notifier_port: Arc<dyn Notifier> = match &custom.notifier {
+            Some(n) => n.clone(),
+            None => notifier.clone(),
+        };
         let session = DictationSession::start(SessionDeps {
             pipeline: PipelineDeps {
-                gate: energy_gate(),
+                gate: custom.gate.unwrap_or_else(energy_gate),
                 credentials: creds,
                 clipboard: clipboard_port,
                 paster: paster_port,
@@ -697,6 +719,7 @@ impl Rig {
             audio: audio_port,
             indicator: indicator_port,
             requests: requests_port,
+            notifier: notifier_port,
             settings: settings.clone(),
             cancel_key: cancel.clone(),
         })
@@ -705,6 +728,7 @@ impl Rig {
             session: Arc::new(session),
             audio,
             indicator,
+            notifier,
             requests,
             clipboard,
             paster,
@@ -3383,6 +3407,955 @@ fn a_log_failing_under_the_session_lock_shows_one_notice_without_deadlock() {
     assert_eq!(logs_notices(&shown.overlays()), 1, "{:?}", shown.overlays());
 }
 
+// ---- T-007: the Notifier port (invariant I1) --------------------------------------------
+//
+// Pinned API (docs/tasks/T-007.md ## Tests): `platform::Notifier` with
+// `fn notify(&self, id: MessageId, params: &[(&'static str, String)], retry: Option<PendingId>)`
+// (core-traits.md `Notifier::notify(key, params, retry)`; this tree names the key type
+// `MessageId` and the parameters as the controller and the overlay carry them),
+// `platform::FakeNotifier` (`new()`, `calls() -> Vec<NotifyCall>`; `NotifyCall { id, params,
+// retry }`, `Debug + Clone + PartialEq + Eq`) and `SessionDeps::notifier:
+// Arc<dyn Notifier>`. The tests read a call through its three fields only.
+
+/// What one `Notifier::notify` call carried.
+type Offer = (
+    i18n::MessageId,
+    Vec<(&'static str, String)>,
+    Option<PendingId>,
+);
+
+fn offers(rig: &Rig) -> Vec<Offer> {
+    rig.notifier
+        .calls()
+        .into_iter()
+        .map(|c| (c.id, c.params, c.retry))
+        .collect()
+}
+
+#[track_caller]
+fn wait_offers(rig: &Rig, n: usize) {
+    assert!(
+        eventually(|| rig.notifier.calls().len() >= n),
+        "{n} offer(s) not made within {BUDGET:?}: {:?}",
+        offers(rig)
+    );
+}
+
+/// The one id in the store (a failed job keeps exactly one pending recording).
+#[track_caller]
+fn only_stored(rig: &Rig) -> PendingId {
+    let ids = rig.store.stored_ids();
+    assert_eq!(ids.len(), 1, "premise: one pending recording: {ids:?}");
+    ids[0]
+}
+
+/// The offer a failed job makes: its message, with the pending id it left (or none).
+fn failure_offer(reason: &FailureReason, retry: Option<PendingId>) -> Offer {
+    (reason.message_id(), reason.message_params(), retry)
+}
+
+#[test]
+fn failed_jobs_are_offered_once_each_with_the_pending_id_only_when_it_was_stored() {
+    // T-007 Acceptance 2 (I1; Failure-reason rule: retry = Some(id) only for a retryable
+    // JobEnd::Failed whose job left id in the pending slot). Three failing jobs and a
+    // delivered one behind them: a 503 (stored: Some(id1)), a timeout (replaces it:
+    // Some(id2), id2 != id1), a failure whose audio cannot be stored (the slot is empty:
+    // None). Each message is offered exactly once, in order; the delivered job after
+    // them is the FIFO barrier for "no later duplicate" and makes no offer. Bite: no
+    // drain after job_finished (no offers), the drain on the worker only for the first
+    // job, `retry` always None or always Some, the id taken from the previous job
+    // (id1 on the second offer) or from the slot after the failed store (a stale id
+    // on the third), two offers per message (one per publish).
+    let rig = Rig::new(
+        api_settings(),
+        in_order(vec![
+            Err(FailureReason::ServerError { status: 503 }),
+            Err(FailureReason::Timeout {
+                origin: TimeoutOrigin::Server,
+            }),
+            Err(FailureReason::CannotReach {
+                host: "api.example.com:8443".to_string(),
+            }),
+            Ok(TEXT.to_string()),
+        ]),
+    );
+    let speech = fixtures::speech_3s();
+    let t0 = past();
+
+    rig.hold(&speech, t0, ms(3000));
+    wait_offers(&rig, 1);
+    let first = only_stored(&rig);
+    rig.hold(&speech, t0 + ms(10_000), ms(3000));
+    wait_offers(&rig, 2);
+    let second = only_stored(&rig);
+    assert_ne!(first, second, "premise: a newer failure takes a new id");
+    rig.store.set_fail_put(true);
+    rig.hold(&speech, t0 + ms(20_000), ms(3000));
+    wait_offers(&rig, 3);
+    rig.store.set_fail_put(false);
+    rig.hold(&speech, t0 + ms(30_000), ms(3000));
+    assert!(
+        eventually(|| rig.clipboard.texts() == vec![TEXT.to_string()]),
+        "the delivered job did not end: {:?}",
+        rig.clipboard.texts()
+    );
+
+    assert_eq!(
+        offers(&rig),
+        vec![
+            failure_offer(&FailureReason::ServerError { status: 503 }, Some(first)),
+            failure_offer(
+                &FailureReason::Timeout {
+                    origin: TimeoutOrigin::Server
+                },
+                Some(second)
+            ),
+            failure_offer(
+                &FailureReason::CannotReach {
+                    host: "api.example.com:8443".to_string()
+                },
+                None
+            ),
+        ]
+    );
+}
+
+#[test]
+fn a_capture_failure_is_offered_once_without_a_retry_id_at_the_press_and_at_the_stop() {
+    // T-007 Acceptance 2 (I1; `RecordingController::fail`, two lock sites:
+    // hotkey_pressed and stop_recording; MicrophoneUnavailable is not retryable and has
+    // no audio, so retry is None). A start error (access denied) and a stop error (busy)
+    // give one offer each, with the closed `reason` id; a delivered hold behind them is
+    // the barrier for "no duplicate". Bite: the drain missing at the press site or at
+    // the stop site (one offer short), `retry` Some for a capture failure, the OS text
+    // of the error in the params.
+    let rig = Rig::new(api_settings(), always(TEXT));
+    let speech = fixtures::speech_3s();
+    let t0 = past();
+
+    rig.audio.set_start_error(Some(CaptureError::AccessDenied));
+    rig.session.hotkey_pressed(t0);
+    wait_offers(&rig, 1);
+    rig.audio.set_start_error(None);
+
+    rig.audio.set_stop_error(Some(CaptureError::DeviceBusy));
+    rig.hold(&speech, t0 + ms(10_000), ms(3000));
+    wait_offers(&rig, 2);
+    rig.audio.set_stop_error(None);
+
+    rig.hold(&speech, t0 + ms(20_000), ms(3000));
+    assert!(
+        eventually(|| rig.clipboard.texts() == vec![TEXT.to_string()]),
+        "the delivered job did not end: {:?}",
+        rig.clipboard.texts()
+    );
+    let reason = |r: &str| vec![("reason", r.to_string())];
+    assert_eq!(
+        offers(&rig),
+        vec![
+            (
+                i18n::FAILURE_MICROPHONE_UNAVAILABLE,
+                reason("mic_reason.access_denied"),
+                None
+            ),
+            (
+                i18n::FAILURE_MICROPHONE_UNAVAILABLE,
+                reason("mic_reason.busy"),
+                None
+            ),
+        ]
+    );
+}
+
+#[test]
+fn a_blocked_press_offers_the_choose_engine_notice_once() {
+    // T-007 Acceptance 2 (I1; the `notice` caller, from hotkey_pressed under the lock):
+    // engine = none blocks the press with notice.choose_engine; one offer, no params,
+    // no retry; the release adds none. Bite: no drain at the blocked-press site, the
+    // notice offered again by the release.
+    let mut s = api_settings();
+    s.engine = EngineKind::None;
+    let rig = Rig::new(s, always(TEXT));
+    let tp = now();
+    rig.session.hotkey_pressed(tp);
+    wait_offers(&rig, 1);
+    rig.session.hotkey_released(tp + ms(50));
+    assert_eq!(
+        offers(&rig),
+        vec![(i18n::NOTICE_CHOOSE_ENGINE, vec![], None)]
+    );
+}
+
+#[test]
+fn a_failed_hotkey_registration_offers_the_one_hotkey_notice_once_per_transition() {
+    // T-007 Acceptance 3/2 (#274 Q4: one id, `notice.hotkey_unavailable`, for overlay and
+    // toast; I1: one offer per show, and decision #131 shows once per transition
+    // registered -> failed). failed, failed (silent), registered, failed: two offers,
+    // no params, no retry. Bite: no drain in hotkey_registration (none), an offer per
+    // call while failing (three), a second id (`failure.hotkey_unavailable`,
+    // `notice.hotkey_failed_startup`) or a `{hotkey}` param on the toast.
+    let rig = Rig::new(api_settings(), always(TEXT));
+    let id = declared(HOTKEY_NOTICE);
+    let t = now();
+    rig.session.hotkey_registration(false, t);
+    wait_offers(&rig, 1);
+    rig.session.hotkey_registration(false, t + ms(10));
+    rig.session.hotkey_registration(true, t + ms(20));
+    rig.session.hotkey_registration(false, t + ms(30));
+    wait_offers(&rig, 2);
+    // Barrier: a later input has been served, so a wrong third offer would be there.
+    rig.session.tray_menu_opened(t + ms(40));
+    assert_eq!(offers(&rig), vec![(id, vec![], None), (id, vec![], None)]);
+}
+
+#[test]
+fn notice_with_is_offered_once_with_its_params() {
+    // T-007 Acceptance 2 (I1; `notice_with`, the path of notice.logs_unwritable and,
+    // after T-210, error.open_logs_folder): one offer carrying the id and the params as
+    // given, retry None. Bite: no drain in notice_with, params dropped, retry Some.
+    let rig = Rig::new(api_settings(), always(TEXT));
+    let id = declared(LOGS_NOTICE);
+    let params = vec![("reason", "logs_reason.disk_full".to_string())];
+    rig.session.notice_with(id, params.clone(), now());
+    wait_offers(&rig, 1);
+    assert_eq!(offers(&rig), vec![(id, params, None)]);
+}
+
+#[test]
+fn the_max_length_stop_offers_its_notice_once() {
+    // T-007 Acceptance 2 (I1; the max-length stop in `tick`, which shows
+    // notice.max_length itself, not through a job): the tick at exactly MAX_LENGTH
+    // gives one offer, no params, no retry; the job that follows is delivered (no more
+    // offers). Bite: no drain in tick/run_timer, a second offer from the worker.
+    let rig = Rig::new(api_settings(), always(TEXT));
+    let t0 = past();
+    rig.frames(&fixtures::speech_3s(), t0 + FIRST_FRAME);
+    rig.session.hotkey_pressed(t0);
+    rig.session.tick(t0 + MAX_LENGTH);
+    wait_offers(&rig, 1);
+    rig.wait_jobs(1);
+    assert_eq!(offers(&rig), vec![(i18n::NOTICE_MAX_LENGTH, vec![], None)]);
+}
+
+#[test]
+fn job_notices_are_offered_once_each_without_a_retry_id() {
+    // T-007 Acceptance 2 (I1; job_finished's Notice and Delivered{notice} ends): a
+    // silent recording ends as notice.no_speech, and a text whose start window is not in
+    // front ends as notice.copied_paste_manually (FR-10); one offer each, no params,
+    // retry None (neither leaves a pending recording). A delivered, pasted job after
+    // them is the barrier and offers nothing. Bite: the drain only for Failed ends,
+    // `retry` Some for a notice.
+    let paster = Arc::new(
+        FakePaster::new()
+            .with_start_window(Some(window(W1)))
+            .with_in_front(false),
+    );
+    let rig = Rig::with(
+        api_settings(),
+        always(TEXT),
+        Custom {
+            paster: Some(paster),
+            ..Custom::default()
+        },
+    );
+    let t0 = past();
+    rig.hold(&fixtures::silence_3s(), t0, ms(3000));
+    wait_offers(&rig, 1);
+    rig.hold(&fixtures::speech_3s(), t0 + ms(10_000), ms(3000));
+    wait_offers(&rig, 2);
+    assert_eq!(rig.clipboard.texts(), vec![TEXT.to_string()]);
+    assert_eq!(
+        offers(&rig),
+        vec![
+            (i18n::NOTICE_NO_SPEECH, vec![], None),
+            (i18n::NOTICE_COPIED_PASTE_MANUALLY, vec![], None),
+        ]
+    );
+}
+
+#[test]
+fn a_failure_that_ends_while_a_recording_is_live_is_offered_though_it_is_never_published() {
+    // T-007 Acceptance 2 "also when a later press drops it from the overlay" (I1,
+    // approach option C rejected: toasts derived from published overlay states).
+    // A's job fails (503) on the worker while B records: the overlay keeps Recording
+    // and the message is not published (T-053 pin above), yet the offer, with A's
+    // pending id, is made at once, while B is still recording. Bite: the offer made from
+    // the published overlay state, or in `publish` (deduplicated: nothing published,
+    // nothing offered), or only at B's release.
+    let [a, b, _] = three_recordings();
+    let (a_entered_tx, a_entered) = mpsc::channel::<()>();
+    let (go_a, go_a_rx) = mpsc::channel::<()>();
+    let a_entered_tx = Mutex::new(a_entered_tx);
+    let go_a_rx = Mutex::new(go_a_rx);
+    let reply: Reply = Box::new(move |audio: &AudioBuffer| match audio.samples().len() {
+        48_000 => {
+            let _ = lock(&a_entered_tx).send(());
+            let _ = lock(&go_a_rx).recv_timeout(BUDGET);
+            Err(FailureReason::ServerError { status: 503 })
+        }
+        _ => Ok("B".to_string()),
+    });
+    let rig = Rig::new(api_settings(), reply);
+
+    rig.hold(&a, past(), ms(3000));
+    assert!(
+        a_entered.recv_timeout(BUDGET).is_ok(),
+        "A's job never reached the engine"
+    );
+    let tb = now();
+    rig.frames(&b, tb + FIRST_FRAME);
+    rig.session.hotkey_pressed(tb);
+    go_a.send(()).expect("A's engine is waiting");
+
+    wait_offers(&rig, 1);
+    let id = only_stored(&rig);
+    assert_eq!(
+        offers(&rig),
+        vec![failure_offer(
+            &FailureReason::ServerError { status: 503 },
+            Some(id)
+        )]
+    );
+    assert_eq!(
+        rig.indicator.overlays().last(),
+        Some(&OverlayState::Recording),
+        "premise: A's message was not published while B records: {:?}",
+        rig.indicator.overlays()
+    );
+    rig.session.hotkey_released(tb + ms(1000));
+    rig.wait_jobs(2);
+}
+
+#[test]
+fn a_failure_that_ends_while_the_next_stop_is_in_flight_is_offered_at_once() {
+    // T-007 Acceptance 2 "a message shown while stopping" (I1; `publish` sends nothing
+    // between a stop's release and its finish, so a drain inside publish would hold the
+    // offer back). A's job fails (503) while B's capture is stopping (B's `stop` is
+    // blocked): the offer is made before B's stop returns. Bite: the drain inside
+    // `publish` (or after it, behind the `stopping` early return), the offer made only
+    // at B's finish.
+    let [a, b, _] = three_recordings();
+    let (a_entered_tx, a_entered) = mpsc::channel::<()>();
+    let (go_a, go_a_rx) = mpsc::channel::<()>();
+    let a_entered_tx = Mutex::new(a_entered_tx);
+    let go_a_rx = Mutex::new(go_a_rx);
+    let reply: Reply = Box::new(move |audio: &AudioBuffer| match audio.samples().len() {
+        48_000 => {
+            let _ = lock(&a_entered_tx).send(());
+            let _ = lock(&go_a_rx).recv_timeout(BUDGET);
+            Err(FailureReason::ServerError { status: 503 })
+        }
+        _ => Ok("B".to_string()),
+    });
+    let (source, stop_entered, stop_go) = BlockingStopSource::new();
+    let rig = Rig::with(
+        api_settings(),
+        reply,
+        Custom {
+            audio: Some(source.clone()),
+            ..Custom::default()
+        },
+    );
+    let t0 = past();
+    *lock(&source.chunks) = vec![FrameChunk::from_buffer(&a, t0 + FIRST_FRAME)];
+    rig.session.hotkey_pressed(t0);
+    rig.session.hotkey_released(t0 + ms(3000));
+    assert!(
+        a_entered.recv_timeout(BUDGET).is_ok(),
+        "A's job never reached the engine"
+    );
+
+    let tb = t0 + ms(4000);
+    *lock(&source.chunks) = vec![FrameChunk::from_buffer(&b, tb + FIRST_FRAME)];
+    source.block_stop.store(true, Ordering::SeqCst);
+    rig.session.hotkey_pressed(tb);
+    let session = &rig.session;
+    thread::scope(|s| {
+        let releasing = s.spawn(move || session.hotkey_released(tb + ms(2000)));
+        assert!(
+            stop_entered.recv_timeout(BUDGET).is_ok(),
+            "B's capture was never stopped"
+        );
+        go_a.send(()).expect("A's engine is waiting");
+        let offered = eventually(|| !rig.notifier.calls().is_empty());
+        // Let B's release finish whatever the verdict, so the scope ends.
+        stop_go.send(()).expect("B's stop is waiting");
+        assert!(
+            offered,
+            "A's failure was not offered while B's stop was in flight"
+        );
+        releasing.join().expect("B's release must not panic");
+    });
+    rig.wait_jobs(2);
+    let id = rig
+        .store
+        .stored_ids()
+        .first()
+        .copied()
+        .expect("A's audio is pending");
+    assert_eq!(
+        offers(&rig),
+        vec![failure_offer(
+            &FailureReason::ServerError { status: 503 },
+            Some(id)
+        )]
+    );
+}
+
+/// A notifier that calls back into the session from inside `notify`, as a shell
+/// notifier may (the session lock is not reentrant: under the lock this never returns).
+#[derive(Default)]
+struct ReenteringNotifier {
+    session: OnceLock<Weak<DictationSession>>,
+    calls: AtomicUsize,
+}
+
+impl Notifier for ReenteringNotifier {
+    fn notify(
+        &self,
+        _id: i18n::MessageId,
+        _params: &[(&'static str, String)],
+        _retry: Option<PendingId>,
+    ) {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        if let Some(session) = self.session.get().and_then(Weak::upgrade) {
+            session.tray_menu_opened(now());
+        }
+    }
+}
+
+/// The inputs whose lock sections can reach `show`.
+#[derive(Debug, Clone, Copy)]
+enum Site {
+    BlockedPress,
+    CaptureFailedAtPress,
+    HotkeyRegistration,
+    NoticeWith,
+    MaxLengthStop,
+    FailedJobOnTheWorker,
+}
+
+#[test]
+fn the_notifier_is_called_outside_the_session_lock_from_every_site() {
+    // T-007 Acceptance 2 "outside the session lock" (I1; the Notifier doc rule: no
+    // blocking, may call back). The notifier takes the session lock inside `notify`;
+    // each input that can reach `show` runs on a helper thread bounded by BUDGET (and
+    // the worker's job end is awaited the same way). A notify under the lock never
+    // returns. Bite: the drain inside `publish` or on the lock guard's drop before the
+    // lock is released, at any one of the six sites (the loop names the site).
+    for site in [
+        Site::BlockedPress,
+        Site::CaptureFailedAtPress,
+        Site::HotkeyRegistration,
+        Site::NoticeWith,
+        Site::MaxLengthStop,
+        Site::FailedJobOnTheWorker,
+    ] {
+        let mut s = api_settings();
+        if matches!(site, Site::BlockedPress) {
+            s.engine = EngineKind::None;
+        }
+        let notifier = Arc::new(ReenteringNotifier::default());
+        let rig = Rig::with(
+            s,
+            in_order(vec![Err(FailureReason::ServerError { status: 503 })]),
+            Custom {
+                notifier: Some(notifier.clone()),
+                ..Custom::default()
+            },
+        );
+        notifier
+            .session
+            .set(Arc::downgrade(&rig.session))
+            .unwrap_or_else(|_| panic!("session set twice"));
+        let t0 = past();
+        rig.frames(&fixtures::speech_3s(), t0 + FIRST_FRAME);
+        if matches!(site, Site::CaptureFailedAtPress) {
+            rig.audio.set_start_error(Some(CaptureError::AccessDenied));
+        }
+        let notice_id = declared(LOGS_NOTICE);
+        let session = Arc::clone(&rig.session);
+        let (done_tx, done_rx) = mpsc::channel();
+        thread::spawn(move || {
+            match site {
+                Site::BlockedPress | Site::CaptureFailedAtPress => session.hotkey_pressed(t0),
+                Site::HotkeyRegistration => session.hotkey_registration(false, t0),
+                Site::NoticeWith => session.notice_with(notice_id, vec![], t0),
+                Site::MaxLengthStop => {
+                    session.hotkey_pressed(t0);
+                    session.tick(t0 + MAX_LENGTH);
+                }
+                Site::FailedJobOnTheWorker => {
+                    session.hotkey_pressed(t0);
+                    session.hotkey_released(t0 + ms(3000));
+                }
+            }
+            let _ = done_tx.send(());
+        });
+        if done_rx.recv_timeout(BUDGET).is_err() {
+            // The helper holds the session lock forever: dropping the rig would wait
+            // for it too.
+            std::mem::forget(rig);
+            panic!("{site:?}: the input did not return within {BUDGET:?}: notify was called under the session lock");
+        }
+        if !eventually(|| notifier.calls.load(Ordering::SeqCst) >= 1) {
+            std::mem::forget(rig);
+            panic!("{site:?}: no offer within {BUDGET:?} (a notify under the lock on the worker never returns)");
+        }
+    }
+}
+
+// ---- T-007: DictationSession::retry (invariant I2) --------------------------------------
+//
+// Pinned API: `DictationSession::retry(&self, at: Instant, id: Option<PendingId>)`.
+// `Some(id)` retries the pending recording only while `id` is still the one in the slot;
+// `None` (the tray's Retry, which cannot read the slot) retries whatever is pending.
+// A retry is a job on the FIFO worker, queued at the click, with the settings snapshot
+// of the click; it skips the speech gate; the audio and the start window are the stored
+// ones. The fake engine and the fake network are the rig's: a network that is off is
+// `Err(FailureReason::NetworkUnavailable)` from the engine factory's engine, so no
+// connect is made and the REFUSAL_* budgets of the transport tests have no use here.
+
+fn network_off() -> FailureReason {
+    FailureReason::NetworkUnavailable
+}
+
+/// A rig whose first job fails with the network off and whose later jobs follow `then`,
+/// after that failure: its pending id.
+fn failed_once(then: Vec<Result<String, FailureReason>>, custom: Custom) -> (Rig, PendingId) {
+    let mut replies = vec![Err(network_off())];
+    replies.extend(then);
+    let rig = Rig::with(api_settings(), in_order(replies), custom);
+    rig.hold(&fixtures::speech_3s(), past(), ms(3000));
+    wait_offers(&rig, 1);
+    let id = only_stored(&rig);
+    assert_eq!(
+        offers(&rig),
+        vec![failure_offer(&network_off(), Some(id))],
+        "premise: the network failure is offered with its pending id"
+    );
+    assert!(
+        eventually(|| rig.indicator.trays().last() == Some(&(TrayState::Error, true))),
+        "premise: tray Error with Retry: {:?}",
+        rig.indicator.trays()
+    );
+    (rig, id)
+}
+
+#[test]
+fn retry_after_a_network_failure_uses_the_click_settings_and_delivers_to_the_stored_window() {
+    // T-007 Acceptance failure branch (FR-11, Clarification 4, FR-10, FR-18): network off
+    // -> notice with the retry id -> base URL and timeouts saved -> retry -> the engine
+    // is built from, and the request carries, the new values; the text is pasted into
+    // the STORED start window (W1, in front) though the foreground window is W2 now;
+    // the pending recording is deleted; the tray drops Error and Retry. The audio is the
+    // stored one. Bite: the press-time snapshot reused (old base URL / old limits),
+    // Timeouts not derived from the click snapshot, the window captured again at the
+    // click (IsInFront(W2), a second CaptureStartWindow), another audio, the pending
+    // audio kept after a delivered retry, the retry offering a message.
+    let (rig, id) = failed_once(vec![Ok(TEXT.to_string())], Custom::default());
+    rig.paster.set_start_window(Some(window(W2)));
+    rig.save(|s| {
+        s.api.base_url = "https://api-new.example.com/v1".to_string();
+        s.timeouts.api_transcription_s = 77;
+        s.timeouts.connect_s = 9;
+    });
+    rig.session.retry(now(), Some(id));
+
+    assert!(
+        eventually(|| rig.clipboard.texts() == vec![TEXT.to_string()]),
+        "the retry did not deliver: {:?}, offers {:?}",
+        rig.clipboard.texts(),
+        offers(&rig)
+    );
+    assert!(
+        eventually(|| rig.indicator.trays().last() == Some(&(TrayState::Idle, false))),
+        "tray after the delivered retry: {:?}",
+        rig.indicator.trays()
+    );
+    let seen = rig.engine.settings();
+    assert_eq!(seen.len(), 2, "one engine per job");
+    assert_eq!(seen[0].api.base_url, "https://api.example.com/v1");
+    assert_eq!(seen[1].api.base_url, "https://api-new.example.com/v1");
+    let requests = rig.engine.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests[0].timeouts.api_transcription,
+        Duration::from_secs(30)
+    );
+    assert_eq!(
+        requests[1].timeouts.api_transcription,
+        Duration::from_secs(77)
+    );
+    assert_eq!(requests[1].timeouts.connect, Duration::from_secs(9));
+    assert_eq!(
+        rig.engine.transcribed(),
+        vec![48_000, 48_000],
+        "the retry transcribes the stored audio"
+    );
+    assert_eq!(
+        rig.paster.calls(),
+        pasted_into(W1),
+        "one start window captured (the press), the stored one checked and pasted into"
+    );
+    assert_eq!(
+        rig.store.stored_ids(),
+        Vec::<PendingId>::new(),
+        "a delivered retry deletes the pending recording"
+    );
+    assert!(rig.store.calls().contains(&StoreCall::Delete(id)));
+    assert_eq!(offers(&rig).len(), 1, "a pasted retry offers nothing new");
+}
+
+#[test]
+fn retry_without_an_id_retries_the_pending_recording() {
+    // T-007 seam (the tray's Retry carries no id: it cannot read the slot, and the
+    // worker checks): `retry(at, None)` after a failure delivers the pending recording
+    // once and empties the slot. Bite: `None` treated as "nothing to retry".
+    let (rig, _id) = failed_once(vec![Ok(TEXT.to_string())], Custom::default());
+    rig.session.retry(now(), None);
+    assert!(
+        eventually(|| rig.clipboard.texts() == vec![TEXT.to_string()]),
+        "the retry did not deliver: {:?}",
+        rig.clipboard.texts()
+    );
+    assert!(eventually(|| rig.store.stored_ids().is_empty()));
+}
+
+#[test]
+fn retry_copies_only_when_the_stored_window_is_not_in_front_and_offers_the_notice() {
+    // T-007 Acceptance failure branch (FR-10: pasted only if the start window is in
+    // front again, else copied with "copied - paste manually"): the stored window is not
+    // in front at the retry; the text reaches the clipboard, no Ctrl+V is sent, and
+    // notice.copied_paste_manually is offered (retry None: nothing pending any more).
+    // Bite: the retry always pasting, never checking the window, a notice not offered
+    // for a retry's job end.
+    let paster = Arc::new(
+        FakePaster::new()
+            .with_start_window(Some(window(W1)))
+            .with_in_front(false),
+    );
+    let (rig, id) = failed_once(
+        vec![Ok(TEXT.to_string())],
+        Custom {
+            paster: Some(paster),
+            ..Custom::default()
+        },
+    );
+    rig.session.retry(now(), Some(id));
+    wait_offers(&rig, 2);
+    assert_eq!(rig.clipboard.texts(), vec![TEXT.to_string()]);
+    let calls = rig.paster.calls();
+    assert!(calls.contains(&PasterCall::IsInFront(W1)), "{calls:?}");
+    assert!(!calls.contains(&PasterCall::SendCtrlV), "{calls:?}");
+    assert_eq!(
+        offers(&rig)[1],
+        (i18n::NOTICE_COPIED_PASTE_MANUALLY, vec![], None)
+    );
+    assert!(eventually(|| rig.store.stored_ids().is_empty()));
+}
+
+#[test]
+fn a_failed_retry_shows_the_reason_again_keeps_the_same_id_and_audio_and_can_be_retried() {
+    // T-007 Acceptance failure branch "a failed retry shows the reason again and keeps
+    // the audio" (I2: Failed keeps the same id and audio, updates the reason; no new id
+    // through keep_pending). The retry fails with a 503: the message is offered with
+    // the SAME id, the slot still holds that id with the same 48000 samples, exactly one
+    // put (the first failure's) and no delete happened, the tray is still Error + Retry;
+    // a second retry with the same id then delivers. Bite: a new PendingId from
+    // keep_pending (the offer carries id2, the old audio deleted), the audio deleted on
+    // failure, the failure not offered (Notifier skipped for a retry), the slot emptied.
+    let (rig, id) = failed_once(
+        vec![
+            Err(FailureReason::ServerError { status: 503 }),
+            Ok(TEXT.to_string()),
+        ],
+        Custom::default(),
+    );
+    rig.session.retry(now(), Some(id));
+    wait_offers(&rig, 2);
+    assert_eq!(
+        offers(&rig)[1],
+        failure_offer(&FailureReason::ServerError { status: 503 }, Some(id)),
+        "the reason is shown again with the same id"
+    );
+    assert_eq!(rig.store.stored_ids(), vec![id]);
+    let calls = rig.store.calls();
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|c| matches!(c, StoreCall::Put(_)))
+            .count(),
+        1,
+        "{calls:?}"
+    );
+    assert!(!calls.contains(&StoreCall::Delete(id)), "{calls:?}");
+    assert_eq!(
+        rig.store.get_pending(id).map(|a| a.samples().len()).ok(),
+        Some(48_000)
+    );
+    assert!(
+        eventually(|| rig.indicator.trays().last() == Some(&(TrayState::Error, true))),
+        "tray after the failed retry: {:?}",
+        rig.indicator.trays()
+    );
+    assert!(rig.clipboard.texts().is_empty());
+
+    rig.session.retry(now(), Some(id));
+    assert!(
+        eventually(|| rig.clipboard.texts() == vec![TEXT.to_string()]),
+        "the second retry did not deliver: {:?}",
+        rig.clipboard.texts()
+    );
+    assert!(eventually(|| rig.store.stored_ids().is_empty()));
+}
+
+#[test]
+fn a_retry_that_finds_no_speech_deletes_the_pending_recording() {
+    // T-007 I2 (NoSpeech: delete it; data-model "Retry": NoSpeech is "the engine now
+    // returns empty text"): notice.no_speech is offered (retry None), nothing reaches
+    // the clipboard, the slot is empty. Bite: the pending audio kept after NoSpeech
+    // (Retry stays on the tray), the release branch for a retry missing NoSpeech.
+    let (rig, id) = failed_once(vec![Ok(String::new())], Custom::default());
+    rig.session.retry(now(), Some(id));
+    wait_offers(&rig, 2);
+    assert_eq!(offers(&rig)[1], (i18n::NOTICE_NO_SPEECH, vec![], None));
+    assert!(rig.clipboard.texts().is_empty());
+    assert!(
+        eventually(|| rig.store.stored_ids().is_empty()),
+        "pending after a NoSpeech retry: {:?}",
+        rig.store.stored_ids()
+    );
+    assert!(eventually(
+        || rig.indicator.trays().last() == Some(&(TrayState::Idle, false))
+    ));
+}
+
+/// A detector that finds speech in the first recording only: a speech gate run on the
+/// retry (second decision) would end it as NoSpeech.
+struct SpeechOnce(AtomicUsize);
+
+impl SpeechDetector for SpeechOnce {
+    fn name(&self) -> &'static str {
+        "energy"
+    }
+    fn contains_speech(&self, _audio: &AudioBuffer) -> Result<bool, voicen_core::vad::VadError> {
+        Ok(self.0.fetch_add(1, Ordering::SeqCst) == 0)
+    }
+}
+
+#[test]
+fn a_retry_does_not_run_the_speech_gate_again() {
+    // T-007 I2 ("It skips the speech gate": the audio passed it at its first run;
+    // data-model "Retry"). The gate says speech once and silence after: the retry
+    // still delivers, and the gate was asked exactly once (by the first job). Bite: the
+    // retry built into the same `process` with the gate (NoSpeech, nothing delivered,
+    // gate asked twice).
+    let detector = Arc::new(SpeechOnce(AtomicUsize::new(0)));
+    struct Shared(Arc<SpeechOnce>);
+    impl SpeechDetector for Shared {
+        fn name(&self) -> &'static str {
+            self.0.name()
+        }
+        fn contains_speech(&self, audio: &AudioBuffer) -> Result<bool, voicen_core::vad::VadError> {
+            self.0.contains_speech(audio)
+        }
+    }
+    let gate = SpeechGate::new(
+        Ok(Box::new(Shared(Arc::clone(&detector))) as Box<dyn SpeechDetector>),
+        EnergyDetector::new(),
+    );
+    let (rig, id) = failed_once(
+        vec![Ok(TEXT.to_string())],
+        Custom {
+            gate: Some(gate),
+            ..Custom::default()
+        },
+    );
+    rig.session.retry(now(), Some(id));
+    assert!(
+        eventually(|| rig.clipboard.texts() == vec![TEXT.to_string()]),
+        "the retry did not deliver: {:?}",
+        rig.clipboard.texts()
+    );
+    assert_eq!(
+        detector.0.load(Ordering::SeqCst),
+        1,
+        "the gate ran on the retry"
+    );
+}
+
+/// Clicks Retry with `id`, then runs one normal hold behind it (the FIFO makes the
+/// worker serve the click first), and checks that the click changed nothing: no engine
+/// ran for it, no message was shown or offered, no Error on the tray, nothing
+/// delivered, and the overlay is not left on Processing. The rig's last reply is a
+/// text.
+#[track_caller]
+fn assert_retry_is_a_no_op(rig: &Rig, id: Option<PendingId>, barrier_at: Instant) {
+    let factory_before = rig.engine.factory_calls();
+    let offers_before = offers(rig);
+    let texts_before = rig.clipboard.texts();
+    let overlays_before = rig.indicator.overlays().len();
+    let trays_before = rig.indicator.trays().len();
+
+    rig.session.retry(now(), id);
+    rig.hold(&fixtures::speech_3s(), barrier_at, ms(3000));
+    let want_texts: Vec<String> = texts_before
+        .iter()
+        .cloned()
+        .chain([TEXT.to_string()])
+        .collect();
+    assert!(
+        eventually(|| rig.clipboard.texts() == want_texts),
+        "the barrier job did not deliver: {:?}",
+        rig.clipboard.texts()
+    );
+    assert!(
+        eventually(|| rig.indicator.overlays().last() == Some(&OverlayState::Hidden)),
+        "the overlay is stuck: {:?}",
+        rig.indicator.overlays()
+    );
+    assert_eq!(
+        rig.engine.factory_calls(),
+        factory_before + 1,
+        "an engine ran for the no-op retry"
+    );
+    assert_eq!(
+        offers(rig),
+        offers_before,
+        "the no-op retry offered a message"
+    );
+    let shown = &rig.indicator.overlays()[overlays_before..];
+    assert!(
+        !shown
+            .iter()
+            .any(|o| matches!(o, OverlayState::Message { .. })),
+        "the no-op retry showed a message: {shown:?}"
+    );
+    let trays = &rig.indicator.trays()[trays_before..];
+    assert!(
+        !trays.iter().any(|(s, _)| *s == TrayState::Error),
+        "the no-op retry set tray Error: {trays:?}"
+    );
+}
+
+#[test]
+fn a_retry_with_a_stale_id_runs_no_engine_and_changes_nothing() {
+    // T-007 Acceptance "an absent or stale id is a no-op" (data-model "Retry: if no
+    // pending recording exists or the id is stale, nothing happens"; I2: the queued
+    // entry is cleared with no message, no offer and no tray change). Stale twice over:
+    // an id replaced by a newer failure (id1 while id2 is pending: id2's audio stays),
+    // and an id already retried and delivered. Bite: the id not compared (the retry runs
+    // the pending recording, a second engine run and a second text), a no-op that leaves
+    // the overlay on Processing (the queued entry kept), a message or an offer for the
+    // no-op, a retry of id1 that deletes id2's audio.
+    let rig = Rig::new(
+        api_settings(),
+        in_order(vec![
+            Err(FailureReason::ServerError { status: 503 }),
+            Err(FailureReason::Timeout {
+                origin: TimeoutOrigin::Server,
+            }),
+            Ok(TEXT.to_string()),
+        ]),
+    );
+    let speech = fixtures::speech_3s();
+    let t0 = past();
+    rig.hold(&speech, t0, ms(3000));
+    wait_offers(&rig, 1);
+    let id1 = only_stored(&rig);
+    rig.hold(&speech, t0 + ms(10_000), ms(3000));
+    wait_offers(&rig, 2);
+    let id2 = only_stored(&rig);
+    assert_ne!(id1, id2, "premise: a newer failure takes a new id");
+
+    assert_retry_is_a_no_op(&rig, Some(id1), t0 + ms(20_000));
+    assert_eq!(
+        rig.store.stored_ids(),
+        vec![id2],
+        "the stale retry touched the pending recording"
+    );
+
+    // id2 is retried and delivered (the rig's last reply is a text); then it is stale.
+    rig.session.retry(now(), Some(id2));
+    assert!(
+        eventually(|| rig.clipboard.texts().len() == 2),
+        "the retry of the current id did not deliver: {:?}",
+        rig.clipboard.texts()
+    );
+    assert!(eventually(|| rig.store.stored_ids().is_empty()));
+    assert_retry_is_a_no_op(&rig, Some(id2), t0 + ms(30_000));
+}
+
+#[test]
+fn a_retry_with_nothing_pending_runs_no_engine_and_changes_nothing() {
+    // T-007 Acceptance "an absent id is a no-op": a Retry click with no pending
+    // recording (the tray's `None`, or a toast from before a restart) runs nothing.
+    // Same checks as the stale id. Bite: `None` with an empty slot starting a job (an
+    // engine run on empty audio), the queued entry left (overlay stuck on Processing).
+    let rig = Rig::new(api_settings(), always(TEXT));
+    assert_retry_is_a_no_op(&rig, None, past());
+}
+
+#[test]
+fn a_retry_is_ordered_after_the_jobs_queued_before_the_click_and_keeps_the_click_settings() {
+    // T-007 Acceptance / I2 (spec 001 Clarification 3, FR-029: a retry enters the order
+    // at the click; Clarification 4: the settings current at the click). A fails (503,
+    // pending). B is in the engine (blocked). The user saves a new base URL X, clicks
+    // Retry (queued behind B), saves Y, and records C (its press takes Y). Delivery
+    // order is B, A (retry), C, on the one worker; the retry's engine got X (the
+    // snapshot of the click on the input thread: not the press-time original, not Y,
+    // which is current when the worker gets to it). Bite: a retry on its own thread (A
+    // delivered while B is blocked: order A, B, C), the retry queued after C, the
+    // snapshot read on the worker (Y) or kept from the press (original), a retry that
+    // takes the next sequence number at the worker instead of at the click.
+    let [a, b, c] = three_recordings();
+    let g = gated(32_000, &[(32_000, "B"), (24_000, "C")]);
+    let a_runs = AtomicUsize::new(0);
+    let other = g.reply;
+    let reply: Reply = Box::new(move |audio: &AudioBuffer| {
+        if audio.samples().len() == 48_000 {
+            if a_runs.fetch_add(1, Ordering::SeqCst) == 0 {
+                Err(FailureReason::ServerError { status: 503 })
+            } else {
+                Ok("A".to_string())
+            }
+        } else {
+            other(audio)
+        }
+    });
+    let rig = Rig::new(api_settings(), reply);
+    let t0 = past();
+
+    rig.hold(&a, t0, ms(3000));
+    wait_offers(&rig, 1);
+    let id = only_stored(&rig);
+    rig.hold(&b, t0 + ms(10_000), ms(3000));
+    assert!(
+        g.entered.recv_timeout(BUDGET).is_ok(),
+        "B's job never reached the engine"
+    );
+    rig.save(|s| s.api.base_url = "https://x.example.com/v1".to_string());
+    rig.session.retry(now(), Some(id));
+    rig.save(|s| s.api.base_url = "https://y.example.com/v1".to_string());
+    rig.hold(&c, t0 + ms(20_000), ms(3000));
+    g.go.send(()).expect("B's engine is waiting");
+
+    let want: Vec<String> = ["B", "A", "C"].iter().map(|t| t.to_string()).collect();
+    assert!(
+        eventually(|| rig.clipboard.texts() == want),
+        "delivery order: {:?}",
+        rig.clipboard.texts()
+    );
+    let seen = rig.engine.settings();
+    assert_eq!(seen.len(), 4, "A, B, the retry, C");
+    assert_eq!(
+        seen[2].api.base_url, "https://x.example.com/v1",
+        "the retry"
+    );
+    assert_eq!(seen[3].api.base_url, "https://y.example.com/v1", "C");
+}
+
 // ---- shutdown --------------------------------------------------------------------------
 
 #[test]
@@ -3417,6 +4390,7 @@ fn drop_finishes_the_job_in_flight_drops_the_queued_one_and_joins_threads() {
         settings,
         engine,
         cancel: _,
+        notifier: _,
     } = rig;
     // The dropper reports what the clipboard held at the moment drop returned.
     let (dropped_tx, dropped_rx) = mpsc::channel();
