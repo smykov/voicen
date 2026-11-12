@@ -1709,6 +1709,39 @@ t_kp_destfail() { # the per-run dir RUNS_DIR/<run id> is a regular file: every c
   kp_warn_names 'RUNS_DIR|424242|not kept|failed' || { C_WHY="the ::warning does not name what was not kept"; return 1; }
   return 0
 }
+# Failure-branch bite of the keep step (third spawn, on 20731cc9): the per-run dir exists, so every branch below is
+# reached past the mkdir; each case fails exactly one call (one source's copy, the git log) and the rest still runs.
+t_kp_cpfail() { # the per-run dir exists, but RUNS_DIR/<run id>/agent is a regular file: only the copy of $OUT fails
+  sc_new kp-cpfail
+  mkdir -p "$C/runs/424242"
+  : > "$C/runs/424242/agent"
+  kp_exec "$C/runs" || return 1
+  kp_ok || return 1
+  kp_warned || { C_WHY="no ::warning: the failed copy of \$OUT into an existing per-run dir went unreported"; return 1; }
+  kp_warn_names 'agent|OUT' || { C_WHY="the ::warning does not name the source whose copy failed (\$OUT, agent)"; return 1; }
+  kp_kept MARK-tools && kp_kept MARK-pj-main || { C_WHY="the other sources were not kept after one copy failed"; return 1; }
+  return 0
+}
+t_kp_gitlog() { # origin/<main> is missing: git log fails, commits.txt is not kept, a ::warning names it
+  sc_new kp-gitlog
+  mkdir -p "$C/runs"
+  (cd "$C_WS" && env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE git update-ref -d refs/remotes/origin/main) > /dev/null 2>&1
+  kp_exec "$C/runs" || return 1
+  kp_ok || return 1
+  kp_warned || { C_WHY="no ::warning: the failed git log (commits.txt not kept) went unreported"; return 1; }
+  kp_warn_names 'commits' || { C_WHY="the ::warning does not name commits.txt"; return 1; }
+  kp_kept MARK-session && kp_kept MARK-tools && kp_kept MARK-pj-main || { C_WHY="the sources were not kept"; return 1; }
+  return 0
+}
+t_kp_links() { # sc_new plants symlinks to $C_OUTSIDE in the CLI project dir: copied as links, never followed
+  sc_new kp-links
+  mkdir -p "$C/runs"
+  kp_exec "$C/runs" || return 1
+  kp_ok || return 1
+  kp_kept MARK-outside && { C_WHY="a symlink was followed: the content outside the sources was copied under RUNS_DIR"; return 1; }
+  [ -L "$C/runs/424242/projects/$C_SLUG/link-pj.jsonl" ] || { C_WHY="the symlink link-pj.jsonl was not kept as a symlink"; return 1; }
+  return 0
+}
 kp_run() { sc_check "keep step: $1" "${@:2}"; }
 kp_run "everything is kept under RUNS_DIR/<run id> (session, preflight, logs, CLI project), exit 0, no ::warning" t_kp_clean
 for v in missing empty file; do
@@ -1718,6 +1751,9 @@ for v in out logs projects; do
   kp_run "source $v missing: exit 0, a ::warning naming it, the other sources still kept" t_kp_src "$v"
 done
 kp_run "a failed copy into RUNS_DIR/<run id>: exit 0 and a ::warning (not swallowed by 2>/dev/null)" t_kp_destfail
+kp_run "one copy into an existing RUNS_DIR/<run id> fails (\$OUT): exit 0, a ::warning naming it, the others kept" t_kp_cpfail
+kp_run "git log origin/<main>..HEAD fails: exit 0, a ::warning naming commits.txt, the sources kept" t_kp_gitlog
+kp_run "symlinks in the sources are kept as symlinks, never followed (no outside content under RUNS_DIR)" t_kp_links
 
 # T-088: the owned list and fragments (R11) agree with the real ci.yml, and say what the retired
 # guards said (test-side reads of the guard's own copies; the guard checks them too, see below).
