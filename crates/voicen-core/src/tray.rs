@@ -18,8 +18,7 @@
 use crate::i18n::{self, MessageId};
 use crate::recording::TrayState;
 
-/// An item of the tray menu. T-007 adds Retry (only while `retry_available`),
-/// feature 005 History.
+/// An item of the tray menu. Feature 005 adds History.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TrayAction {
     /// "Call" > "Record": the check item that starts or stops recording a call
@@ -35,6 +34,10 @@ pub enum TrayAction {
     /// "Open logs folder": the logs folder in Explorer, created when missing
     /// (T-071; spec 006 FR-017). The shell opens it off the main thread.
     OpenLogs,
+    /// "Retry last failed dictation" (T-007, FR-11): shown only while
+    /// `retry_available`; the shell routes it to `DictationSession::retry(at, None)`
+    /// off the main thread (T-210).
+    Retry,
     /// "Exit": ends the process (the only user exit, T-052 invariant 4).
     Exit,
 }
@@ -49,6 +52,7 @@ impl TrayAction {
             TrayAction::OpenCalls => "calls",
             TrayAction::OpenSettings => "settings",
             TrayAction::OpenLogs => "open_logs",
+            TrayAction::Retry => "retry",
             TrayAction::Exit => "exit",
         }
     }
@@ -66,6 +70,7 @@ impl TrayAction {
             TrayAction::OpenCalls => i18n::TRAY_CALLS,
             TrayAction::OpenSettings => i18n::TRAY_SETTINGS,
             TrayAction::OpenLogs => i18n::TRAY_OPEN_LOGS,
+            TrayAction::Retry => i18n::TRAY_RETRY_LAST,
             TrayAction::Exit => i18n::TRAY_EXIT,
         }
     }
@@ -73,12 +78,13 @@ impl TrayAction {
 
 /// Every action, so [`TrayAction::from_id`] maps back exactly the ids
 /// [`TrayAction::as_str`] gives (a new variant is added here and to `as_str`).
-const ALL: [TrayAction; 6] = [
+const ALL: [TrayAction; 7] = [
     TrayAction::CallRecord,
     TrayAction::CallStop,
     TrayAction::OpenCalls,
     TrayAction::OpenSettings,
     TrayAction::OpenLogs,
+    TrayAction::Retry,
     TrayAction::Exit,
 ];
 
@@ -113,17 +119,14 @@ pub enum TrayRow {
 
 /// The menu rows, top to bottom (decision #197 D2, D3): "Call" > {"Record", checked
 /// iff `call_recording`; "Stop", enabled iff `call_recording`}, "Calls", Settings,
-/// Open logs folder, Exit last. `retry_available` is the session's (the pending slot,
-/// dictation-session.md); T-007 adds Retry while it is true. Pure.
+/// Open logs folder, Retry (enabled, only while `retry_available`; T-007), Exit last.
+/// `retry_available` is the session's (the pending slot, dictation-session.md). Pure.
 pub fn menu(retry_available: bool, call_recording: bool) -> Vec<TrayRow> {
-    // T-007 inserts Retry before Exit while `retry_available`; until then both rows
-    // are the same.
-    let _ = retry_available;
     let item = |action| TrayRow::Item {
         action,
         enabled: true,
     };
-    vec![
+    let mut rows = vec![
         TrayRow::Submenu {
             label: i18n::TRAY_CALL,
             rows: vec![
@@ -141,8 +144,12 @@ pub fn menu(retry_available: bool, call_recording: bool) -> Vec<TrayRow> {
         item(TrayAction::OpenCalls),
         item(TrayAction::OpenSettings),
         item(TrayAction::OpenLogs),
-        item(TrayAction::Exit),
-    ]
+    ];
+    if retry_available {
+        rows.push(item(TrayAction::Retry));
+    }
+    rows.push(item(TrayAction::Exit));
+    rows
 }
 
 /// The state the tray shows for the dictation session's state and the call session's
@@ -357,6 +364,8 @@ mod tests {
     }
 
     #[test]
+    // The positions are the assertion; a short menu fails the test by panicking.
+    #[allow(clippy::indexing_slicing)]
     fn retry_is_an_enabled_item_directly_before_exit_only_while_a_retry_is_available() {
         // T-007 Acceptance (tray; FR-11: "Retry last failed dictation" in the tray menu,
         // dictation-session.md: `retry_available` is the pending slot): with the slot

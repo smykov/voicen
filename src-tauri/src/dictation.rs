@@ -33,10 +33,11 @@ use voicen_core::diag::{
     DetectorTag, Log, LogEvent, LogObserver, LogsNotice, LogsNoticeSink, WarningKind,
 };
 use voicen_core::dictation::{DictationSession, SessionDeps};
+use voicen_core::i18n::MessageId;
 use voicen_core::pending::{CallRootsFn, FsTempAudioStore};
 use voicen_core::pipeline::{EngineFactory, PipelineDeps};
 use voicen_core::platform::{
-    AudioSource, Clipboard, Indicator, Paster, ShellRequests, TempAudioStore,
+    AudioSource, Clipboard, Indicator, Notifier, Paster, PendingId, ShellRequests, TempAudioStore,
 };
 use voicen_core::post_process::chat::ChatPostProcessor;
 use voicen_core::recording::{OverlayState, TrayState};
@@ -181,6 +182,7 @@ pub fn start_dictation<R: Runtime>(
         requests: Arc::new(SettingsRequests::new(app)),
         settings: Arc::clone(&service),
         cancel_key: cancel_key.clone(),
+        notifier: Arc::new(NoToasts),
     })
     .map_err(failed)?;
     let session = Arc::new(session);
@@ -205,6 +207,20 @@ pub fn start_dictation<R: Runtime>(
     hotkeys.attach(&hotkey);
     cancel_key.attach(&hotkey);
     Ok(DictationHandle { _hotkey: hotkey })
+}
+
+/// The interim notifier (until T-210's toasts): the offers are dropped; the overlay
+/// and the tray still show every message.
+struct NoToasts;
+
+impl Notifier for NoToasts {
+    fn notify(
+        &self,
+        _id: MessageId,
+        _params: &[(&'static str, String)],
+        _retry: Option<PendingId>,
+    ) {
+    }
 }
 
 /// `run()`'s `Indicator`: the tray half to the tray part of the app, the overlay

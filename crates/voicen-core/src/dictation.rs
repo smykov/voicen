@@ -28,14 +28,22 @@
 //! through the same stop path (end `Suspended`); a failed hotkey registration
 //! notifies only on the transition working → failed (decision #131).
 //!
+//! T-007: every message the controller shows is offered once to the
+//! [`Notifier`] port, with the session lock released: each lock section is a
+//! [`Locked`] guard, whose drop takes the controller's outbox, unlocks, then calls
+//! the port. A Retry ([`DictationSession::retry`]) is a job on the same worker,
+//! queued at the click with that click's settings snapshot.
+//!
 //! Threads: the callers' input threads (hotkey, tray), one worker (owns the
-//! [`Pipeline`]; no other thread can reach `run_job` or `Pipeline::pending`), one
+//! [`Pipeline`]; no other thread can reach `run_job`, `Pipeline::retry` or
+//! `Pipeline::pending`), one
 //! timer (message expiry and the recording's maximum length) and one loss thread
 //! (device losses reported by the captures' sinks). The why of each rule:
 //! `docs/decisions/dictation-session.md`.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
 use std::io;
+use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
@@ -50,18 +58,19 @@ use crate::i18n::{
     NOTICE_MIC_FALLBACK,
 };
 use crate::microphone::{choose, Choice, MicrophoneState};
-use crate::pipeline::{EngineFactory, Pipeline, PipelineDeps, PressContext};
+use crate::pipeline::{EngineFactory, JobReport, Pipeline, PipelineDeps, PressContext};
 use crate::platform::{
-    AudioSource, CancelKey, CaptureHandle, DeviceId, FrameSink, Indicator, InputDevice, Paster,
-    ShellRequests,
+    AudioSource, CancelKey, CaptureHandle, DeviceId, FrameSink, Indicator, InputDevice, Notifier,
+    Paster, PendingId, ShellRequests,
 };
 use crate::recording::{
     CaptureError, FinishedRecording, MicCause, OverlayState, PressOutcome, RecordingController,
-    RecordingEnd, RecordingId, Release, StopTicket, TrayState,
+    RecordingEnd, RecordingId, Release, RetryKey, StopTicket, TrayState,
 };
 use crate::settings::gate::{blocked_actions, dictation_gate, SettingsTab, ShellAction};
 use crate::settings::service::SettingsService;
 use crate::settings::FieldId;
+use crate::settings::Settings;
 
 /// Everything the session talks to. The session builds its one `Pipeline` from
 /// `pipeline` (so the observer and the paster it uses are the pipeline's own).
@@ -79,6 +88,9 @@ pub struct SessionDeps {
     pub settings: Arc<SettingsService>,
     /// The Esc claim (T-009): claimed while a recording is on.
     pub cancel_key: Arc<dyn CancelKey>,
+    /// The toast port (T-007): offered every message the controller shows, once,
+    /// outside the session lock.
+    pub notifier: Arc<dyn Notifier>,
 }
 
 /// The one dictation session. Inputs take `&self` and the instant the shell
@@ -100,8 +112,20 @@ enum Loss {
     Shutdown,
 }
 
-/// A recording on its way to the worker.
-type Job = FinishedRecording<PressContext>;
+/// What the worker runs, in queue order.
+enum Job {
+    /// A finished recording.
+    Recording(FinishedRecording<PressContext>),
+    /// A Retry click (T-007): the controller's queue entry `key`, the pending id
+    /// it names (`None`: whatever is pending), the click's settings snapshot and
+    /// instant.
+    Retry {
+        key: RetryKey,
+        id: Option<PendingId>,
+        settings: Arc<Settings>,
+        at: Instant,
+    },
+}
 
 /// The text of a `CaptureError::Other` the session raises itself: the adapter
 /// delivered frames that cannot become audio (an adapter bug, never OS text).
@@ -124,6 +148,8 @@ struct Shared {
     cancel_key: Arc<dyn CancelKey>,
     requests: Arc<dyn ShellRequests>,
     settings: Arc<SettingsService>,
+    /// Called only by [`Locked`]'s drop, after the unlock.
+    notifier: Arc<dyn Notifier>,
     /// The pipeline's own instances (cloned from `PipelineDeps` before the build).
     observer: Arc<dyn PipelineObserver>,
     paster: Arc<dyn Paster>,
@@ -180,9 +206,57 @@ fn spawn(name: &str, f: impl FnOnce() + Send + 'static) -> io::Result<JoinHandle
         .map_err(|e| io::Error::from(e.kind()))
 }
 
+/// A session-lock section (T-007 I1). On drop it takes the messages the
+/// controller showed in it (`RecordingController::take_offers`), releases the lock
+/// and only then offers each to the [`Notifier`], so a notifier may call back into
+/// the session. The drain does not depend on `publish` (its dedup, `stopping`):
+/// a message shown and dropped in the same section is still offered.
+struct Locked<'a> {
+    shared: &'a Shared,
+    /// `None` only inside `drop`.
+    guard: Option<MutexGuard<'a, State>>,
+}
+
+impl Deref for Locked<'_> {
+    type Target = State;
+    fn deref(&self) -> &State {
+        match &self.guard {
+            Some(g) => g,
+            None => unreachable!("the guard is taken only by drop"),
+        }
+    }
+}
+
+impl DerefMut for Locked<'_> {
+    fn deref_mut(&mut self) -> &mut State {
+        match &mut self.guard {
+            Some(g) => g,
+            None => unreachable!("the guard is taken only by drop"),
+        }
+    }
+}
+
+impl Drop for Locked<'_> {
+    fn drop(&mut self) {
+        let Some(mut guard) = self.guard.take() else {
+            return;
+        };
+        let offers = guard.ctrl.take_offers();
+        drop(guard);
+        for offer in offers {
+            self.shared
+                .notifier
+                .notify(offer.id, &offer.params, offer.retry);
+        }
+    }
+}
+
 impl Shared {
-    fn lock(&self) -> MutexGuard<'_, State> {
-        lock(&self.state)
+    fn lock(&self) -> Locked<'_> {
+        Locked {
+            shared: self,
+            guard: Some(lock(&self.state)),
+        }
     }
 
     fn emit(&self, e: DictationEvent) {
@@ -252,6 +326,7 @@ impl DictationSession {
             requests,
             settings,
             cancel_key,
+            notifier,
         } = deps;
         let observer = Arc::clone(&pipeline.observer);
         let paster = Arc::clone(&pipeline.paster);
@@ -285,6 +360,7 @@ impl DictationSession {
             cancel_key,
             requests,
             settings,
+            notifier,
             observer,
             paster,
             losses,
@@ -540,13 +616,42 @@ impl DictationSession {
     pub fn suspended(&self, at: Instant) {
         stop_recording(&self.shared, at, |ctrl| ctrl.suspend(at).map(Ended::Stop));
     }
+
+    /// Retry clicked at `at` (T-007, FR-11; the toast's button with its pending id,
+    /// the tray's row with `None`). The settings snapshot is taken now and the retry
+    /// is queued now, as a job behind the ones already queued, and the controller
+    /// counts it as queued (overlay Processing). The worker then runs
+    /// `Pipeline::retry`: `Some(id)` only while `id` is still pending, `None`
+    /// whatever is pending; nothing pending or a stale id clears the queue entry
+    /// with no message, no offer and no tray change. It does not wait for a stop in
+    /// flight: a recording whose audio is still being converted queues behind it.
+    /// After shutdown began nothing happens.
+    pub fn retry(&self, at: Instant, id: Option<PendingId>) {
+        let settings = self.shared.settings.snapshot();
+        let mut st = self.shared.lock();
+        let Some(queue) = st.queue.clone() else {
+            return;
+        };
+        let key = st.ctrl.retry_queued(at);
+        let job = Job::Retry {
+            key,
+            id,
+            settings,
+            at,
+        };
+        if queue.send(job).is_err() {
+            st.ctrl.retry_dropped(key, at);
+        }
+        self.shared.publish(&mut st);
+    }
 }
 
 impl DictationSession {
     /// Shows the notice `id` with `params` on the overlay for
     /// [`MESSAGE_DURATION`](crate::recording::MESSAGE_DURATION) from `at`, through
     /// the controller under the session lock, and publishes it (the
-    /// `hotkey_registration` notice path). The newest message wins the one slot; the
+    /// `hotkey_registration` notice path); it is offered to the [`Notifier`] once the
+    /// lock is released. The newest message wins the one slot; the
     /// tray is left as it is; the next press drops it. Takes the session lock: never
     /// call it from a thread that holds it (an `Indicator` call).
     pub fn notice_with(&self, id: MessageId, params: Vec<(&'static str, String)>, at: Instant) {
@@ -702,7 +807,7 @@ fn stop_recording(
         if let Ok(job) = st.ctrl.finish(ticket, audio, at) {
             // Under the lock, so the queue order is the finish order.
             if let Some(queue) = &st.queue {
-                let _ = queue.send(job);
+                let _ = queue.send(Job::Recording(job));
             }
         }
         st.stopping = false;
@@ -756,21 +861,49 @@ fn run_losses(shared: &Shared, losses: &mpsc::Receiver<Loss>) {
     }
 }
 
-/// The one worker: the only caller of `run_job` and `job_finished`, in queue
-/// order, with no lock held during `run_job`. After shutdown began it takes no
-/// further job; the queued ones are dropped with the receiver.
+/// How a worker job ended, for the controller.
+enum Done {
+    Recording(RecordingId, JobReport),
+    /// `None`: the retry ran nothing (nothing pending, a stale id).
+    Retry(RetryKey, Option<JobReport>),
+}
+
+/// The one worker: the only caller of `run_job`, `Pipeline::retry` and the
+/// controller's job ends, in queue order, with no lock held during a job. A
+/// retry that runs nothing (`Pipeline::retry` returned `None`) only clears its
+/// queue entry. After shutdown began it takes no further job; the queued ones are
+/// dropped with the receiver.
 fn run_worker(shared: &Shared, pipeline: &Pipeline, jobs: &mpsc::Receiver<Job>) {
     while let Ok(job) = jobs.recv() {
         if shared.lock().shutdown {
             return;
         }
-        let id = job.id();
-        let report = pipeline.run_job(job);
+        let done = match job {
+            Job::Recording(job) => {
+                let id = job.id();
+                Done::Recording(id, pipeline.run_job(job))
+            }
+            Job::Retry {
+                key,
+                id,
+                settings,
+                at,
+            } => Done::Retry(key, pipeline.retry(id, &settings, at)),
+        };
         // The slot itself, read here: only this thread changes it.
         let retry_available = pipeline.pending().is_some();
         let mut st = shared.lock();
-        st.ctrl
-            .job_finished(id, report.end, crate::clock::instant());
+        let now = crate::clock::instant();
+        match done {
+            Done::Recording(id, report) => {
+                st.ctrl
+                    .job_finished_pending(id, report.end, report.pending, now)
+            }
+            Done::Retry(key, Some(report)) => {
+                st.ctrl.retry_finished(key, report.end, report.pending, now)
+            }
+            Done::Retry(key, None) => st.ctrl.retry_dropped(key, now),
+        }
         st.retry_available = retry_available;
         shared.publish(&mut st);
     }
@@ -780,8 +913,11 @@ fn run_worker(shared: &Shared, pipeline: &Pipeline, jobs: &mpsc::Receiver<Job>) 
 /// expiry or a recording's maximum length) is reached, and re-reads the deadline
 /// after every change (`Shared::changed`). The tick runs with the session lock
 /// released, because a max-length stop takes the stop path (`releasing` first).
+///
+/// It holds the raw mutex (the condvar needs its guard), not a [`Locked`]
+/// section: nothing it does under it shows a message.
 fn run_timer(shared: &Shared) {
-    let mut st = shared.lock();
+    let mut st = lock(&shared.state);
     loop {
         if st.shutdown {
             return;
@@ -796,7 +932,7 @@ fn run_timer(shared: &Shared) {
                 if now >= deadline {
                     drop(st);
                     tick(shared, now);
-                    shared.lock()
+                    lock(&shared.state)
                 } else {
                     shared
                         .changed

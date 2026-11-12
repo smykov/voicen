@@ -227,6 +227,15 @@ messages! {
     TRAY_SETTINGS = "tray.settings",
     /// Tray menu item `TrayAction::OpenLogs` (T-071).
     TRAY_OPEN_LOGS = "tray.open_logs",
+    /// Tray menu item `TrayAction::Retry`, shown while a retry is available (T-007,
+    /// FR-11).
+    TRAY_RETRY_LAST = "tray.retry_last",
+    /// The toast's Retry button (T-007, FR-11; the toast itself is T-210's).
+    ACTION_RETRY = "action.retry",
+    /// The tray's "Open logs folder" failed (spec 006 FR-017, contracts/ipc.md);
+    /// placeholder `{reason}` = a `logs_reason.*` id. Declared by T-007, raised by
+    /// T-210 through `DictationSession::notice_with`.
+    ERROR_OPEN_LOGS_FOLDER = "error.open_logs_folder",
     /// Tray menu item `TrayAction::Exit` (T-052).
     TRAY_EXIT = "tray.exit",
     /// Tray tooltip of `TrayState::Idle` (T-052).

@@ -44,7 +44,7 @@ use voicen_core::events::{DictationEvent, RecordingObserver, WarningCode};
 use voicen_core::hotkey_registrar::HotkeyRegistrar;
 use voicen_core::pipeline::PipelineDeps;
 use voicen_core::platform::{
-    FakeAudioSource, FakeClipboard, FakeIndicator, FakePaster, FakeShellRequests,
+    FakeAudioSource, FakeClipboard, FakeIndicator, FakeNotifier, FakePaster, FakeShellRequests,
     FakeTempAudioStore, Indicator,
 };
 use voicen_core::post_process::PassThrough;
@@ -171,6 +171,7 @@ impl Rig {
             requests: requests.clone(),
             settings: service,
             cancel_key: cancel.clone(),
+            notifier: Arc::new(FakeNotifier::new()),
         })
         .expect("the session starts");
         Rig {

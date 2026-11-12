@@ -27,6 +27,12 @@
 //! 3 s, and not at all if they have passed. A press drops the message (it is
 //! not shown again); a later failure or notice replaces it.
 //!
+//! Every message the controller shows is also put in its outbox, once, as an
+//! [`Offer`] (T-007, invariant I1): the dictation session drains it with
+//! [`take_offers`](RecordingController::take_offers) after each locked call and
+//! hands it to the `platform::Notifier` outside its lock, so a message a later
+//! press drops from the overlay is still offered.
+//!
 //! The dictation session (`crate::dictation`, T-051) calls
 //! `settings::gate::dictation_gate` before a press that starts a recording; the
 //! engine = none check is not repeated here.
@@ -40,6 +46,7 @@ use std::time::{Duration, Instant};
 use crate::audio::AudioBuffer;
 use crate::failure::FailureReason;
 use crate::i18n::{self, MessageId};
+use crate::platform::PendingId;
 use crate::settings::Mode;
 
 use indicator::{IndicatorInputs, ShownMessage};
@@ -51,6 +58,30 @@ pub const MIN_HOLD: Duration = Duration::from_millis(300);
 /// The longest recording, in either mode (FR-03, decision #1): at exactly this
 /// length it is stopped, sent on and `notice.max_length` is shown.
 pub const MAX_LENGTH: Duration = Duration::from_secs(600);
+
+/// A message the controller showed, for the notifier (T-007): its id and params as
+/// the overlay carries them, and `retry = Some(id)` only for a retryable
+/// [`JobEnd::Failed`] whose job left `id` as the pending recording.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Offer {
+    pub id: MessageId,
+    pub params: Vec<(&'static str, String)>,
+    pub retry: Option<PendingId>,
+}
+
+/// A Retry click's place in the job queue (T-007), issued by
+/// [`RecordingController::retry_queued`] at the click, so the overlay shows
+/// `Processing` until the worker ends it. Not a [`RecordingId`]: a retry is no new
+/// recording (the log keeps the original recording's number).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RetryKey(u64);
+
+/// What the controller counts as a queued job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum QueueKey {
+    Recording(RecordingId),
+    Retry(RetryKey),
+}
 
 /// One recording, monotonic per controller.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -280,8 +311,10 @@ impl<C> Live<C> {
 pub struct RecordingController<C> {
     live: Option<Live<C>>,
     next_id: u64,
-    /// Recordings handed to a job (counted at `finish(Ok)`) whose job has not ended.
-    queued: BTreeSet<RecordingId>,
+    /// Recordings handed to a job (counted at `finish(Ok)`) and Retry clicks
+    /// (counted at `retry_queued`) whose job has not ended.
+    queued: BTreeSet<QueueKey>,
+    next_retry: u64,
     /// Tray `Error`: the last job or capture failed; cleared by a delivery or the
     /// tray menu.
     error: bool,
@@ -289,6 +322,8 @@ pub struct RecordingController<C> {
     /// successful one.
     hotkey_error: bool,
     message: Option<ShownMessage>,
+    /// Every message shown since the last `take_offers`, in order.
+    outbox: Vec<Offer>,
     indicator: IndicatorState,
 }
 
@@ -304,9 +339,11 @@ impl<C> RecordingController<C> {
             live: None,
             next_id: 0,
             queued: BTreeSet::new(),
+            next_retry: 0,
             error: false,
             hotkey_error: false,
             message: None,
+            outbox: Vec::new(),
             indicator: IndicatorState::default(),
         };
         c.refresh();
@@ -435,7 +472,7 @@ impl<C> RecordingController<C> {
         self.expire(at);
         match audio {
             Ok(audio) => {
-                self.queued.insert(id);
+                self.queued.insert(QueueKey::Recording(id));
                 self.refresh();
                 Ok(FinishedRecording {
                     id,
@@ -455,9 +492,76 @@ impl<C> RecordingController<C> {
     }
 
     /// The job of recording `id` ended. An id with no queued job (unknown, or
-    /// already ended) changes nothing.
+    /// already ended) changes nothing. Like
+    /// [`job_finished_pending`](Self::job_finished_pending) with no pending
+    /// recording.
     pub fn job_finished(&mut self, id: RecordingId, end: JobEnd, at: Instant) {
-        if !self.queued.remove(&id) {
+        self.job_finished_pending(id, end, None, at);
+    }
+
+    /// The job of recording `id` ended with `end`, leaving `pending` as the pending
+    /// recording (`pipeline::JobReport::pending`): the message of the end is
+    /// offered with `retry = pending` when the end is a retryable `Failed`, and
+    /// with no retry id otherwise. An id with no queued job changes nothing.
+    pub fn job_finished_pending(
+        &mut self,
+        id: RecordingId,
+        end: JobEnd,
+        pending: Option<PendingId>,
+        at: Instant,
+    ) {
+        self.end_job(QueueKey::Recording(id), end, pending, at);
+    }
+
+    /// A Retry click at `at` (T-007): counts a queued job under a new key, so the
+    /// overlay shows `Processing` until the worker ends it with
+    /// [`retry_finished`](Self::retry_finished) or
+    /// [`retry_dropped`](Self::retry_dropped).
+    pub fn retry_queued(&mut self, at: Instant) -> RetryKey {
+        let key = RetryKey(self.next_retry);
+        self.next_retry = self.next_retry.saturating_add(1);
+        self.expire(at);
+        self.queued.insert(QueueKey::Retry(key));
+        self.refresh();
+        key
+    }
+
+    /// The retry job `key` ran and ended with `end`, leaving `pending`: by the same
+    /// rule as [`job_finished_pending`](Self::job_finished_pending), except that a
+    /// `Notice` end (the engine now finds no speech: the pending recording is
+    /// deleted, the failure it retried is over) also clears tray `Error`, as a
+    /// delivery does.
+    pub fn retry_finished(
+        &mut self,
+        key: RetryKey,
+        end: JobEnd,
+        pending: Option<PendingId>,
+        at: Instant,
+    ) {
+        if matches!(end, JobEnd::Notice(_)) && self.queued.contains(&QueueKey::Retry(key)) {
+            self.error = false;
+        }
+        self.end_job(QueueKey::Retry(key), end, pending, at);
+    }
+
+    /// The retry `key` found nothing to retry (no pending recording, or a stale
+    /// id): its queued entry ends with no message, no offer and no tray change.
+    pub fn retry_dropped(&mut self, key: RetryKey, at: Instant) {
+        if !self.queued.remove(&QueueKey::Retry(key)) {
+            return;
+        }
+        self.expire(at);
+        self.refresh();
+    }
+
+    /// The messages shown since the last call, in order, each once (the session's
+    /// notifier drain).
+    pub fn take_offers(&mut self) -> Vec<Offer> {
+        std::mem::take(&mut self.outbox)
+    }
+
+    fn end_job(&mut self, key: QueueKey, end: JobEnd, pending: Option<PendingId>, at: Instant) {
+        if !self.queued.remove(&key) {
             return;
         }
         self.expire(at);
@@ -476,7 +580,8 @@ impl<C> RecordingController<C> {
             JobEnd::Notice(notice) => self.show(notice, Vec::new(), at),
             JobEnd::Failed(reason) => {
                 self.error = true;
-                self.show(reason.message_id(), reason.message_params(), at);
+                let retry = pending.filter(|_| reason.retryable());
+                self.show_offer(reason.message_id(), reason.message_params(), retry, at);
             }
         }
         self.refresh();
@@ -605,6 +710,23 @@ impl<C> RecordingController<C> {
     }
 
     fn show(&mut self, id: MessageId, params: Vec<(&'static str, String)>, at: Instant) {
+        self.show_offer(id, params, None, at);
+    }
+
+    /// The one setter of the overlay message; every message it sets is also put in
+    /// the outbox (I1).
+    fn show_offer(
+        &mut self,
+        id: MessageId,
+        params: Vec<(&'static str, String)>,
+        retry: Option<PendingId>,
+        at: Instant,
+    ) {
+        self.outbox.push(Offer {
+            id,
+            params: params.clone(),
+            retry,
+        });
         self.message = Some(ShownMessage {
             id,
             params,

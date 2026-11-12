@@ -90,22 +90,31 @@ pub struct Pipeline {
 }
 
 /// The pending slot's entry; its audio is in the [`TempAudioStore`] under `id`.
-/// T-007 adds the start window when retry reads it.
 #[derive(Debug, Clone)]
 struct PendingRecording {
     id: PendingId,
     reason: FailureReason,
+    /// The recording the audio came from: a retry's events carry it, so its log
+    /// line keeps the recording's number (T-007 Q7).
+    recording: RecordingId,
+    /// The window the recording started in: a retry delivers here (FR-10).
+    start_window: Option<StartWindow>,
 }
 
-/// One job's inputs, borrowed from the recording (T-007 adds a second
-/// constructor, from the pending slot, into the same `process` -> `release`).
+/// One job's inputs, borrowed from the recording ([`Pipeline::run_job`]) or from
+/// the pending slot ([`Pipeline::retry`]), into the same `process` -> `release`.
 struct Job<'a> {
     recording: RecordingId,
     audio: &'a AudioBuffer,
     start_window: Option<&'a StartWindow>,
     settings: &'a Settings,
+    /// The stopping event of a recording, or the Retry click of a retry (the
+    /// start of `JobFinished.stop_to_text_ms`).
     stopped_at: Instant,
     seq: u64,
+    /// `Some(id)` for a retry of the pending recording `id` (data-model
+    /// "DictationJob" origin `Retry{pending_id}`).
+    retry_of: Option<PendingId>,
 }
 
 /// What `process` decided, before anything is delivered or kept.
@@ -207,19 +216,65 @@ impl Pipeline {
             start_window: ctx.start_window.as_ref(),
             settings: &ctx.settings,
             stopped_at: rec.stopped_at(),
-            seq: self
-                .last_seq
-                .fetch_add(1, Ordering::Relaxed)
-                .wrapping_add(1),
+            seq: self.next_seq(),
+            retry_of: None,
         };
         let done = self.process(&job);
         self.release(&job, done)
     }
 
+    /// Retries the pending recording (T-007, FR-11, data-model "PendingRecording"):
+    /// `id = Some(p)` only while `p` is the pending id, `None` whatever is pending.
+    /// Nothing pending, a stale id or audio the store cannot give back runs nothing
+    /// and returns `None` (unreadable audio also empties the slot: it can never be
+    /// retried). Otherwise the stored audio goes, with `settings` (the snapshot of
+    /// the click, its `Timeouts::from_settings` included) and the stored start
+    /// window, through the engine, post-processing and the same `release`, without
+    /// the speech gate (the audio passed it at its first run): `Text` is delivered
+    /// per [`deliver`] and then the pending recording is deleted; `NoSpeech`
+    /// deletes it; `Failed` keeps the same id and audio with the new reason
+    /// (`JobReport::pending` is that id). `at` is the click. Blocking, on the job
+    /// thread, like [`run_job`](Self::run_job).
+    pub fn retry(
+        &self,
+        id: Option<PendingId>,
+        settings: &Settings,
+        at: Instant,
+    ) -> Option<JobReport> {
+        let entry = lock(&self.pending).clone()?;
+        if id.is_some_and(|id| id != entry.id) {
+            return None;
+        }
+        let audio = match self.deps.temp_audio.get_pending(entry.id) {
+            Ok(audio) => audio,
+            Err(_) => {
+                self.drop_pending(entry.id);
+                return None;
+            }
+        };
+        let job = Job {
+            recording: entry.recording,
+            audio: &audio,
+            start_window: entry.start_window.as_ref(),
+            settings,
+            stopped_at: at,
+            seq: self.next_seq(),
+            retry_of: Some(entry.id),
+        };
+        let done = self.transcribe(&job);
+        Some(self.release(&job, done))
+    }
+
+    fn next_seq(&self) -> u64 {
+        self.last_seq
+            .fetch_add(1, Ordering::Relaxed)
+            .wrapping_add(1)
+    }
+
     /// The pending recording and its last reason (tray `retry_available`, read
-    /// by the dictation session's worker after each job, T-051; T-007: the toast's
-    /// retry id). It takes the slot lock, which `keep_pending` holds across
-    /// `put_pending`: call it on the job thread, not on an input thread.
+    /// by the dictation session's worker after each job, T-051). It takes the slot
+    /// lock, which `keep_pending` holds across `put_pending`: call it on the job
+    /// thread, not on an input thread.
     pub fn pending(&self) -> Option<(PendingId, FailureReason)> {
         lock(&self.pending)
             .as_ref()
@@ -230,8 +285,8 @@ impl Pipeline {
         self.deps.observer.event(&e);
     }
 
-    /// Gate, engine, post-processor. No side effects besides the `Warning` and
-    /// `SpeechGate` events: no clipboard, paste or pending slot.
+    /// Gate, then [`transcribe`](Self::transcribe). No side effects besides the
+    /// `Warning` and `SpeechGate` events: no clipboard, paste or pending slot.
     fn process(&self, job: &Job<'_>) -> JobOutcome {
         let decision = self.deps.gate.decide(job.audio);
         if decision.fallback_warning {
@@ -253,7 +308,12 @@ impl Pipeline {
                 at: crate::clock::instant(),
             };
         }
+        self.transcribe(job)
+    }
 
+    /// Engine, post-processor (a retry enters here: no speech gate). No side
+    /// effects: no clipboard, paste or pending slot.
+    fn transcribe(&self, job: &Job<'_>) -> JobOutcome {
         let engine = match (self.factory)(job.settings, &*self.deps.credentials) {
             Ok(engine) => engine,
             Err(reason) => {
@@ -316,7 +376,9 @@ impl Pipeline {
         }
     }
 
-    /// Clipboard, paste, pending slot, `JobFinished` / `Delivered`.
+    /// Clipboard, paste, pending slot, `JobFinished` / `Delivered`. A retry's
+    /// pending recording is deleted after a delivery or `NoSpeech` and kept under
+    /// the same id after a retryable failure (`keep_retried`).
     fn release(&self, job: &Job<'_>, done: JobOutcome) -> JobReport {
         let stop_to_text_ms = millis(done.at.saturating_duration_since(job.stopped_at));
         let finished =
@@ -339,6 +401,9 @@ impl Pipeline {
         let reason = match done.outcome {
             Outcome::NoSpeech => {
                 self.emit(finished(OutcomeCode::NoSpeech, None));
+                if let Some(id) = job.retry_of {
+                    self.drop_pending(id);
+                }
                 return JobReport {
                     end: JobEnd::Notice(i18n::NOTICE_NO_SPEECH),
                     pending: None,
@@ -363,6 +428,9 @@ impl Pipeline {
                         // A skip is still a delivery (spec 003 FR-007): no pending
                         // recording, `JobFinished` outcome text; the controller
                         // picks the one message by decision #91(3).
+                        if let Some(id) = job.retry_of {
+                            self.drop_pending(id);
+                        }
                         let end = match skipped {
                             Some(reason) => JobEnd::DeliveredSkipped {
                                 reason,
@@ -380,10 +448,10 @@ impl Pipeline {
         };
 
         self.emit(finished(OutcomeCode::Failed, Some(&reason)));
-        let pending = if reason.retryable() {
-            self.keep_pending(job.audio, &reason)
-        } else {
-            None
+        let pending = match job.retry_of {
+            Some(id) => self.keep_retried(id, &reason),
+            None if reason.retryable() => self.keep_pending(job, &reason),
+            None => None,
         };
         JobReport {
             end: JobEnd::Failed(reason),
@@ -398,7 +466,7 @@ impl Pipeline {
     /// safeguard; it is not a concurrency guarantee (`release` runs on one thread
     /// at a time, see [`Pipeline`]). The replaced audio is deleted after the lock
     /// is released: its id has left the slot and is never handed out again.
-    fn keep_pending(&self, audio: &AudioBuffer, reason: &FailureReason) -> Option<PendingId> {
+    fn keep_pending(&self, job: &Job<'_>, reason: &FailureReason) -> Option<PendingId> {
         let (stored, older) = {
             let mut slot = lock(&self.pending);
             let id = PendingId(
@@ -409,12 +477,14 @@ impl Pipeline {
             let stored = self
                 .deps
                 .temp_audio
-                .put_pending(id, audio)
+                .put_pending(id, job.audio)
                 .is_ok()
                 .then_some(id);
             let entry = stored.map(|id| PendingRecording {
                 id,
                 reason: reason.clone(),
+                recording: job.recording,
+                start_window: job.start_window.cloned(),
             });
             (stored, std::mem::replace(&mut *slot, entry))
         };
@@ -424,6 +494,40 @@ impl Pipeline {
             let _ = self.deps.temp_audio.delete_pending(older.id);
         }
         stored
+    }
+
+    /// A retry of the pending recording `id` failed with `reason`: a retryable
+    /// reason stays on the same id and audio (the slot's reason updated, nothing
+    /// stored again); any other deletes it. Returns the id still pending.
+    fn keep_retried(&self, id: PendingId, reason: &FailureReason) -> Option<PendingId> {
+        if !reason.retryable() {
+            self.drop_pending(id);
+            return None;
+        }
+        let mut slot = lock(&self.pending);
+        match slot.as_mut() {
+            Some(entry) if entry.id == id => {
+                entry.reason = reason.clone();
+                Some(id)
+            }
+            _ => None,
+        }
+    }
+
+    /// Empties the slot if it still holds `id` and deletes that audio (errors
+    /// ignored, like `keep_pending`'s delete).
+    fn drop_pending(&self, id: PendingId) {
+        let removed = {
+            let mut slot = lock(&self.pending);
+            if slot.as_ref().is_some_and(|p| p.id == id) {
+                slot.take()
+            } else {
+                None
+            }
+        };
+        if removed.is_some() {
+            let _ = self.deps.temp_audio.delete_pending(id);
+        }
     }
 }
 

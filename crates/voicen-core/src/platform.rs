@@ -2,11 +2,12 @@
 //! contracts/core-traits.md "Platform traits", T-001).
 //!
 //! The Windows implementations live in `src-tauri` (T-006: capture, clipboard and
-//! paste; T-052/T-053: the tray and the overlay behind `Indicator`); the
-//! file-system audio store is core's `pending::FsTempAudioStore` (T-209). The
-//! capture, indicator and shell-request ports are called only by the dictation
-//! session (`crate::dictation`, T-051). Errors carry no OS text (P-009). The
-//! public fakes (feature `test-fakes`, decision #23 N4)
+//! paste; T-052/T-053: the tray and the overlay behind `Indicator`; T-210: the
+//! toast behind `Notifier`); the file-system audio store is core's
+//! `pending::FsTempAudioStore` (T-209). The capture, indicator, notifier and
+//! shell-request ports are called only by the dictation session
+//! (`crate::dictation`, T-051). Errors carry no OS text (P-009). The public fakes
+//! (feature `test-fakes`, decision #23 N4)
 //! sit next to the traits.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
@@ -14,6 +15,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::audio::AudioBuffer;
+use crate::i18n::MessageId;
 use crate::recording::{CaptureError, OverlayState, TrayState};
 use crate::settings::gate::SettingsTab;
 use crate::settings::FieldId;
@@ -160,9 +162,22 @@ pub trait Indicator: Send + Sync {
     fn set_overlay(&self, state: &OverlayState);
 }
 
+/// The toast (contracts/core-traits.md `Notifier`, T-007; the Windows toast is
+/// T-210's). The session offers it every message the recording controller shows
+/// (a failure or a notice), exactly once, in the order shown, and calls it outside
+/// its lock, so an implementation may call back into the session; it must still not
+/// block (hand the toast to its own thread), because an input that ends a recording
+/// may be waiting behind it. `retry` is `Some(pending_id)` only for a retryable
+/// failure whose audio is the pending recording (the toast's Retry button carries
+/// it back to `DictationSession::retry`). A toast that cannot be shown is not an
+/// error for the session: the overlay and the tray carry the message.
+pub trait Notifier: Send + Sync {
+    fn notify(&self, id: MessageId, params: &[(&'static str, String)], retry: Option<PendingId>);
+}
+
 /// What the session asks the shell to do (T-051: the open-settings action of
 /// `settings::gate::blocked_actions`; T-055: the field to focus, for a failed
-/// hotkey registration; T-007 adds the notifier). The session calls it outside its
+/// hotkey registration). The session calls it outside its
 /// lock, so an implementation may call back into the session.
 pub trait ShellRequests: Send + Sync {
     /// Open (or raise) the settings window on `tab`, focusing `field` when given.
@@ -192,9 +207,9 @@ mod fakes {
 
     use super::{
         AudioBuffer, AudioSource, CancelKey, CaptureError, CaptureHandle, Clipboard,
-        ClipboardError, DeviceId, FieldId, FrameSink, Indicator, InputDevice, OverlayState,
-        PasteError, Paster, PendingId, SettingsTab, ShellRequests, StartWindow, TempAudioStore,
-        TrayState, WindowRef,
+        ClipboardError, DeviceId, FieldId, FrameSink, Indicator, InputDevice, MessageId, Notifier,
+        OverlayState, PasteError, Paster, PendingId, SettingsTab, ShellRequests, StartWindow,
+        TempAudioStore, TrayState, WindowRef,
     };
 
     fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -699,6 +714,46 @@ mod fakes {
                 crate::clock::instant(),
                 IndicatorCall::Overlay(state.clone()),
             ));
+        }
+    }
+
+    /// One recorded call on [`FakeNotifier`].
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct NotifyCall {
+        pub id: MessageId,
+        pub params: Vec<(&'static str, String)>,
+        pub retry: Option<PendingId>,
+    }
+
+    /// [`Notifier`] that records every offer in order.
+    #[derive(Default)]
+    pub struct FakeNotifier {
+        calls: Mutex<Vec<NotifyCall>>,
+    }
+
+    impl FakeNotifier {
+        pub fn new() -> FakeNotifier {
+            FakeNotifier::default()
+        }
+
+        /// Every offer so far, in order.
+        pub fn calls(&self) -> Vec<NotifyCall> {
+            lock(&self.calls).clone()
+        }
+    }
+
+    impl Notifier for FakeNotifier {
+        fn notify(
+            &self,
+            id: MessageId,
+            params: &[(&'static str, String)],
+            retry: Option<PendingId>,
+        ) {
+            lock(&self.calls).push(NotifyCall {
+                id,
+                params: params.to_vec(),
+                retry,
+            });
         }
     }
 

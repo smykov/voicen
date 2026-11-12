@@ -509,7 +509,7 @@ pub fn live_menu<R: Runtime>(app: &AppHandle<R>) -> Option<Menu<R>> {
 /// once), `Exit` calls `app.exit(0)`, any other id does nothing. The call items reach
 /// no session until T-128: `CallRecord` only rebuilds the menu from the table, undoing
 /// muda's flip of the mark, and T-128 keeps that for a refused start (decision #223);
-/// `CallStop` and `OpenCalls` do nothing.
+/// `CallStop` and `OpenCalls` do nothing; `Retry` does nothing until T-210.
 pub fn on_menu_event<R: Runtime>(app: &AppHandle<R>, event: MenuEvent) {
     match TrayAction::from_id(event.id().as_ref()) {
         // T-128: also `CallSession::toggle_record`; the rebuild stays.
@@ -525,6 +525,8 @@ pub fn on_menu_event<R: Runtime>(app: &AppHandle<R>, event: MenuEvent) {
             let _ = settings_window::request(app, OpenTarget::Front);
         }
         Some(TrayAction::OpenLogs) => logs_folder::request(app),
+        // T-210: `DictationSession::retry(at, None)`.
+        Some(TrayAction::Retry) => {}
         Some(TrayAction::Exit) => app.exit(0),
         None => {}
     }
