@@ -116,6 +116,7 @@
   "logs_reason.not_a_directory": "путь к журналам — не папка",
   "logs_reason.other": "не удалось записать файл",
   "logs_reason.permission_denied": "доступ запрещён",
+  "mic_name.unnamed": "Микрофон",
   "mic_reason.access_denied": "доступ запрещён в настройках конфиденциальности Windows",
   "mic_reason.busy": "устройство занято",
   "mic_reason.no_device": "нет устройства ввода",

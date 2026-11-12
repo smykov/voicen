@@ -116,6 +116,7 @@
   "logs_reason.not_a_directory": "the logs path is not a folder",
   "logs_reason.other": "the file could not be written",
   "logs_reason.permission_denied": "access denied",
+  "mic_name.unnamed": "Microphone",
   "mic_reason.access_denied": "access denied in Windows privacy settings",
   "mic_reason.busy": "the device is busy",
   "mic_reason.no_device": "no input device",

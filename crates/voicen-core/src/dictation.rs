@@ -46,7 +46,8 @@ use crate::audio::{mix_to_mono, AudioBuffer};
 use crate::diag::{LogsNoticeSink, LogsUnwritableReason};
 use crate::events::{DeviceKind, DictationEvent, PipelineObserver, WarningCode};
 use crate::i18n::{
-    MessageId, NOTICE_HOTKEY_UNAVAILABLE, NOTICE_LOGS_UNWRITABLE, NOTICE_MIC_FALLBACK,
+    MessageId, MIC_NAME_UNNAMED, NOTICE_HOTKEY_UNAVAILABLE, NOTICE_LOGS_UNWRITABLE,
+    NOTICE_MIC_FALLBACK,
 };
 use crate::microphone::{choose, Choice, MicrophoneState};
 use crate::pipeline::{EngineFactory, Pipeline, PipelineDeps, PressContext};
@@ -580,8 +581,11 @@ enum Ended {
     },
 }
 
-/// The device a press opens, with its kind and display name: the
-/// `microphone::choose` decision over `devices`; no device is `NoDevice`.
+/// The device a press opens, with its kind and the `{device}` argument of
+/// `notice.mic_fallback`: the `microphone::choose` decision over `devices`; no
+/// device is `NoDevice`. The argument is the OS-given name verbatim, or the
+/// nested id `mic_name.unnamed` when the name is empty (T-188), so the notice
+/// renders the fallback text in the overlay's language.
 fn pick(
     selected: Option<&str>,
     devices: &[InputDevice],
@@ -591,8 +595,9 @@ fn pick(
             let name = devices
                 .iter()
                 .find(|d| d.id == id)
-                .map(|d| d.name.clone())
-                .unwrap_or_default();
+                .map(|d| d.name.as_str())
+                .filter(|n| !n.is_empty())
+                .map_or_else(|| MIC_NAME_UNNAMED.nested_arg(), str::to_owned);
             Ok((id, kind, name))
         }
         Choice::NoDevice => Err(CaptureError::NoDevice),

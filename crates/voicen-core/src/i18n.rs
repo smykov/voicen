@@ -357,6 +357,10 @@ messages! {
     MIC_REASON_BUSY = "mic_reason.busy",
     /// `MicCause::Other`.
     MIC_REASON_OTHER = "mic_reason.other",
+    /// The name of an input device the OS gives no name for (`InputDevice.name`
+    /// empty, T-188): the `{device}` of `notice.mic_fallback`; the settings UI
+    /// renders the same id with `t()`.
+    MIC_NAME_UNNAMED = "mic_name.unnamed",
     /// `diag::LogsUnwritableReason::PermissionDenied`.
     LOGS_REASON_PERMISSION_DENIED = "logs_reason.permission_denied",
     /// `diag::LogsUnwritableReason::DiskFull`.

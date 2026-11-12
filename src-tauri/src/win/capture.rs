@@ -44,8 +44,6 @@ const OPEN_TIMED_OUT: &str = "the microphone did not open in time";
 const OPENER_FAILED: &str = "the microphone opener could not be started";
 const OPENER_ENDED: &str = "the microphone opener ended without a result";
 const UNSUPPORTED_FORMAT: &str = "the microphone's sample format is not supported";
-/// The display name of a device whose name cannot be read (never empty).
-const UNNAMED: &str = "Microphone";
 
 /// The input devices by WASAPI endpoint id (T-012).
 pub struct CpalSource {
@@ -125,8 +123,10 @@ pub fn device_loss_callback(sink: Arc<dyn FrameSink>) -> impl FnMut(Error) + Sen
 }
 
 /// The active input devices (runs on the opener thread): the endpoint id, the
-/// display name and whether it is the Windows default (compared by id). A device
-/// whose id cannot be read, or an id already listed, is skipped.
+/// OS-given name (empty when the OS gives none; the renderers show the catalog's
+/// `mic_name.unnamed` text for it, T-188) and whether it is the Windows default
+/// (compared by id). A device whose id cannot be read, or an id already listed,
+/// is skipped.
 fn list() -> Result<Vec<InputDevice>, CaptureError> {
     let host = cpal::default_host();
     let default_id = host
@@ -146,8 +146,7 @@ fn list() -> Result<Vec<InputDevice>, CaptureError> {
             .description()
             .ok()
             .map(|d| d.name().to_owned())
-            .filter(|n| !n.is_empty())
-            .unwrap_or_else(|| UNNAMED.to_owned());
+            .unwrap_or_default();
         devices.push(InputDevice {
             is_default: default_id.as_deref() == Some(id.as_str()),
             id: DeviceId(id),
