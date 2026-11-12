@@ -340,6 +340,13 @@ impl SettingsService {
         (service, outcome)
     }
 
+    /// STUB (T-209 red-tests stage; the developer replaces it): the calls roots in
+    /// force, the current one first, then `calls.earlier_roots`; `None` while
+    /// `Unavailable` (decision #19).
+    pub fn call_roots(&self) -> Option<Vec<std::path::PathBuf>> {
+        Some(Vec::new())
+    }
+
     /// The settings in force now. The value behind the `Arc` never changes.
     pub fn snapshot(&self) -> Arc<Settings> {
         self.current
@@ -1205,6 +1212,52 @@ mod tests {
         assert_eq!(form, Some(FormError::SettingsUnavailable));
         assert_eq!(world.file.calls(), after_load, "file touched after load");
         assert!(world.creds.calls().is_empty());
+    }
+
+    #[test]
+    fn call_roots_lists_effective_root_then_earlier_roots() {
+        // Bite: only the earlier roots (the current root missing), the default root
+        // ignored, the order swapped, or the roots of a second resolution.
+        let mut s = defaults(OS);
+        s.calls.storage_root = Some("/srv/calls-now".into());
+        s.calls.earlier_roots = vec!["/srv/calls-old-a".into(), "/srv/calls-old-b".into()];
+        let world = World::new(
+            FakeSettingsFile::with_bytes(&json(&s)),
+            FakeCredentialStore::new(),
+        );
+        let (service, outcome) = world.load();
+        assert!(matches!(outcome, LoadOutcome::Loaded(_)), "{outcome:?}");
+        assert_eq!(
+            service.call_roots(),
+            Some(vec![
+                Path::new("/srv/calls-now").to_path_buf(),
+                Path::new("/srv/calls-old-a").to_path_buf(),
+                Path::new("/srv/calls-old-b").to_path_buf(),
+            ])
+        );
+    }
+
+    #[test]
+    fn call_roots_uses_the_default_root_when_none_is_chosen() {
+        // Bite: an empty list, or a second resolution of the default root.
+        let world = World::new(
+            FakeSettingsFile::with_bytes(&json(&defaults(OS))),
+            FakeCredentialStore::new(),
+        );
+        let (service, _) = world.load();
+        let default_root = crate::settings::roots::FakeCallRoots::new().default_root();
+        assert_eq!(service.call_roots(), Some(vec![default_root]));
+    }
+
+    #[test]
+    fn call_roots_is_none_while_unavailable() {
+        // Bite (#19): the defaults (an unknown real root) reported as the roots.
+        let dir = TempDir::new();
+        fs::create_dir(dir.path().join(SETTINGS_FILE)).expect("dir at settings.json");
+        let creds = Arc::new(FakeCredentialStore::new());
+        let (service, outcome) = SettingsService::load_or_init(fs_deps(&dir, &creds), OS);
+        assert_eq!(outcome, LoadOutcome::Unavailable(defaults(OS)));
+        assert_eq!(service.call_roots(), None);
     }
 
     #[test]

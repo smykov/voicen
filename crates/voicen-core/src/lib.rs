@@ -20,6 +20,7 @@ pub mod local_models;
 pub mod microphone;
 pub mod models;
 pub mod overlay;
+pub mod pending;
 pub mod pipeline;
 pub mod platform;
 pub mod post_process;
