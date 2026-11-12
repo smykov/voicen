@@ -1163,8 +1163,31 @@ cu_expect "real agent: from the line '$cu_step' to the end of the file it is $cu
   bash -c 'cmp -s <(awk -v t="$3" "\$0 == t { s = 1 } s { print }" "$1") "$2"' _ "$ag" "$cu" "$cu_step"
 expect "real agent: the token upload-artifact occurs once (the tail), the installer upload stays in ci.yml" \
   test "$(grep -i -o -F upload-artifact "$ag" | wc -l | tr -d ' ')" = 1
-expect "real agent: no RUNS_DIR (the host-only copy of the session is gone)" bash -c '! grep -q -F RUNS_DIR "$1"' _ "$ag"
-expect "real agent: no step 'Keep the session for analysis' (it exited 0 having kept nothing)" bash -c '! grep -q -F "Keep the session for analysis" "$1"' _ "$ag"
+# Decision #267 ("keep both"): RUNS_DIR and the step 'Keep the session for analysis' stay, the runner host's copy,
+# before the owned tail; the step no longer exits 0 silently (a missing RUNS_DIR or a failed copy is a ::warning).
+kp_title='Keep the session for analysis'
+kp_line="      - name: $kp_title"
+kp_text() { ag_step "$kp_title"; }
+# kp_body: the run: body of the keep step (10 spaces of indent stripped).
+kp_body() { kp_text | awk '/^        run: \|[-+]?$/ { r = 1; next } r { if ($0 ~ /^          /) print substr($0, 11); else if ($0 ~ /^ *$/) print ""; else exit }'; }
+expect "real agent: the job env holds RUNS_DIR: /srv/gha-voicen-runs (mounted into the runner container, #267)" \
+  grep -q -x -F "      RUNS_DIR: /srv/gha-voicen-runs" "$ag"
+expect "real agent: the step '$kp_title' exists once, under if: always()" \
+  bash -c '[ "$(grep -c -x -F "$2" "$1")" = 1 ] && grep -q -x -F "        if: always()" <<<"$3"' _ "$ag" "$kp_line" "$(kp_text)"
+expect "real agent: '$kp_title' comes after 'Did the stage commit?' and before the owned tail ('${cu_step#      - name: }')" \
+  bash -c 'c="$(grep -n -m 1 -x -F "      - name: Did the stage commit?" "$1" | cut -d: -f1)"; k="$(grep -n -m 1 -x -F "$2" "$1" | cut -d: -f1)"; t="$(grep -n -m 1 -x -F "$3" "$1" | cut -d: -f1)"; [ -n "$c" ] && [ -n "$k" ] && [ -n "$t" ] && [ "$c" -lt "$k" ] && [ "$k" -lt "$t" ]' _ "$ag" "$kp_line" "$cu_step"
+expect "real agent: '$kp_title' is documented as the runner host's copy (a comment in the step says so)" \
+  bash -c 'grep -q -i -E "^ +#.*runner host" <<<"$1"' _ "$(kp_text)"
+expect "real agent: '$kp_title' has a run: body that names RUNS_DIR" \
+  bash -c '[ -n "$1" ] && grep -q -F "RUNS_DIR" <<<"$1"' _ "$(kp_body)"
+expect "real agent: '$kp_title' has no silent exit 0 ('|| exit 0', no last line exit 0) and no '|| true' on a copy" \
+  bash -c '[ -n "$1" ] && ! grep -q -E "\|\| *(exit 0|true|:)( |$|;)" <<<"$1" && [ "$(grep -v -E "^ *(#.*)?$" <<<"$1" | tail -n 1 | sed "s/^ *//")" != "exit 0" ]' _ "$(kp_body)"
+expect "real agent: '$kp_title': no copy hides its error (no 2>/dev/null, no &>/dev/null on a cp, mkdir or git line)" \
+  bash -c '[ -n "$1" ] && ! grep -E "(^|[^a-z])(cp|mkdir|git|mv|rsync|tar) " <<<"$1" | grep -q -E "2> */dev/null|&> */dev/null|>& */dev/null"' _ "$(kp_body)"
+expect "real agent: '$kp_title' emits a ::warning (what was not kept)" \
+  bash -c 'grep -q -F "::warning" <<<"$1"' _ "$(kp_body)"
+expect "real agent: '$kp_title' holds no token (no github.token, GH_TOKEN, GITHUB_TOKEN, secrets.)" \
+  bash -c '! grep -q -E "github\.token|GH_TOKEN|GITHUB_TOKEN|secrets\." <<<"$1"' _ "$(kp_text)"
 expect "real agent: the tail steps come after 'Did the stage commit?' (the job token appears only there)" \
   bash -c 'c="$(grep -n -m 1 -x -F "      - name: Did the stage commit?" "$1" | cut -d: -f1)"; s="$(grep -n -m 1 -x -F "$2" "$1" | cut -d: -f1)"; [ -n "$c" ] && [ -n "$s" ] && [ "$s" -gt "$c" ]' _ "$ag" "$cu_step"
 
@@ -1594,6 +1617,107 @@ for k in ghp ant key-rsa; do
     sc_mut_check "format $k in $w" format "format $k in $w refuses the upload" t_belt "$k" "$w"
   done
 done
+
+# ---- the keep step ('Keep the session for analysis'), run: its run: body extracted from the real workflow ----
+# Decision #267: the copy in RUNS_DIR is the runner host's; the step stays green (exit 0) whatever the host dir
+# does, but it never stays silent: a missing RUNS_DIR, a missing source or a failed copy is a ::warning naming
+# what was not kept. (Exit-code semantics are pinned as warning + exit 0: the analysis names a ::warning only.)
+kp_state=""
+kp_err=""
+kp_prep() {
+  if [ -z "$kp_state" ]; then
+    kp_state=bad
+    mkdir -p "$tmp/kp"
+    kp_body > "$tmp/kp/body.sh"
+    kp_text | awk '/^        shell: / { sub(/^        shell: /, ""); print; exit }' > "$tmp/kp/shell.txt"
+    if [ ! -s "$tmp/kp/body.sh" ]; then
+      kp_err="$ag: no step '$kp_title' with a 'run: |' body (decision #267: the keep step stays before the owned tail)"
+    elif grep -q -F '${{' "$tmp/kp/body.sh"; then
+      kp_err="$ag: the keep step's run: body holds a \${{ }} expression (values reach it through env:)"
+    else
+      kp_state=ok
+    fi
+  fi
+  [ "$kp_state" = ok ]
+}
+# kp_exec <runs dir value>: run the body in the sc_new workspace; C_RC, $C/out.txt, the host dir $C/runs.
+kp_exec() {
+  local sh flags
+  if ! kp_prep; then C_WHY="$kp_err"; return 1; fi
+  sh="$(cat "$tmp/kp/shell.txt")"
+  if [ -z "$sh" ]; then flags="-e"
+  elif [ "$sh" = bash ]; then flags="--noprofile --norc -eo pipefail"
+  else flags="${sh#bash}"; flags="${flags//\{0\}/}"; fi
+  (cd "$C_WS" && env -i PATH="$PATH" HOME="$C_H" GITHUB_WORKSPACE="$C_WS" RUNNER_TEMP="$C_RT" TMPDIR="$C/tmpdir" LC_ALL=C \
+    OUT=.teamwright-agent RUN_ID=424242 MAIN=main RUNS_DIR="$1" TASK_ID=T-999 STAGE=analyze HOP=1 REPO=example/repo \
+    timeout 60 bash $flags "$tmp/kp/body.sh") > "$C/out.txt" 2>&1
+  C_RC=$?
+  return 0
+}
+kp_warned() { grep -q -E '^::warning' "$C/out.txt"; }
+kp_warn_names() { grep -E '^::warning' "$C/out.txt" | grep -q -i -E -- "$1"; }
+kp_kept() { grep -r -q -F -- "$1" "$C/runs" 2>/dev/null; }
+kp_ok() { # exit 0 and no bash error text
+  if [ "$C_RC" != 0 ]; then C_WHY="exit $C_RC, not 0 (the host copy must not turn the job red)"; return 1; fi
+  if grep -q -i -E 'syntax error|command not found|unbound variable' "$C/out.txt"; then C_WHY="a bash error in the output"; return 1; fi
+  return 0
+}
+t_kp_clean() {
+  sc_new kp-clean
+  mkdir -p "$C/runs"
+  kp_exec "$C/runs" || return 1
+  kp_ok || return 1
+  kp_kept MARK-session && kp_kept MARK-preflight && kp_kept MARK-tools && kp_kept MARK-pj-main || { C_WHY="a source was not copied under RUNS_DIR (session, preflight, logs or the CLI project)"; return 1; }
+  kp_warned && { C_WHY="a ::warning although everything was kept"; return 1; }
+  return 0
+}
+t_kp_nodir() { # <missing|empty|file>: RUNS_DIR is not a directory
+  sc_new "kp-nodir-$1"
+  local v="$C/nope"
+  [ "$1" = empty ] && v=""
+  [ "$1" = file ] && { : > "$C/runs"; v="$C/runs"; }
+  kp_exec "$v" || return 1
+  kp_ok || return 1
+  kp_warned || { C_WHY="no ::warning: the step ended green having kept nothing, silently"; return 1; }
+  kp_warn_names 'RUNS_DIR|not kept|nothing' || { C_WHY="the ::warning does not name RUNS_DIR or that nothing was kept"; return 1; }
+  [ -e "$C/nope" ] && { C_WHY="the step created the missing RUNS_DIR itself"; return 1; }
+  return 0
+}
+t_kp_src() { # <out|logs|projects>: one source is missing, the others are still kept, a ::warning names it
+  sc_new "kp-src-$1"
+  mkdir -p "$C/runs"
+  local pat gone
+  case "$1" in
+    out) rm -rf "$C_WS/.teamwright-agent"; pat='agent|OUT'; gone=MARK-tools ;;
+    logs) rm -rf "$C_WS/.teamwright/logs"; pat='logs'; gone=MARK-session ;;
+    projects) rm -rf "$C_H/.claude/projects"; pat='projects|\.claude'; gone=MARK-session ;;
+  esac
+  kp_exec "$C/runs" || return 1
+  kp_ok || return 1
+  kp_warned || { C_WHY="no ::warning for the missing source ($1): the step went on silently"; return 1; }
+  kp_warn_names "$pat" || { C_WHY="the ::warning does not name the missing source ($1)"; return 1; }
+  kp_kept "$gone" || { C_WHY="the other sources were not kept after one source was missing"; return 1; }
+  return 0
+}
+t_kp_destfail() { # the per-run dir RUNS_DIR/<run id> is a regular file: every copy into it fails
+  sc_new kp-destfail
+  mkdir -p "$C/runs"
+  : > "$C/runs/424242"
+  kp_exec "$C/runs" || return 1
+  kp_ok || return 1
+  kp_warned || { C_WHY="no ::warning: a failed copy went unreported"; return 1; }
+  kp_warn_names 'RUNS_DIR|424242|not kept|failed' || { C_WHY="the ::warning does not name what was not kept"; return 1; }
+  return 0
+}
+kp_run() { sc_check "keep step: $1" "${@:2}"; }
+kp_run "everything is kept under RUNS_DIR/<run id> (session, preflight, logs, CLI project), exit 0, no ::warning" t_kp_clean
+for v in missing empty file; do
+  kp_run "RUNS_DIR $v: exit 0 and a ::warning naming RUNS_DIR / that nothing was kept" t_kp_nodir "$v"
+done
+for v in out logs projects; do
+  kp_run "source $v missing: exit 0, a ::warning naming it, the other sources still kept" t_kp_src "$v"
+done
+kp_run "a failed copy into RUNS_DIR/<run id>: exit 0 and a ::warning (not swallowed by 2>/dev/null)" t_kp_destfail
 
 # T-088: the owned list and fragments (R11) agree with the real ci.yml, and say what the retired
 # guards said (test-side reads of the guard's own copies; the guard checks them too, see below).
