@@ -1306,14 +1306,15 @@ sc_init() {
 # hook_response lines (session_id, no cwd) come BEFORE the init event (T-206 review 1 #1). Variants: one (one hook
 # pair), two (two pairs, as .claude/settings.json has), deep (20 pairs, init on line 41), decoy-sid (a first line with a
 # DIFFERENT session_id and the workspace cwd), decoy-cwd (a first line with this session_id and a foreign cwd),
-# noinit (hook and other events, no init event at all).
+# noinit (hook and other events, no init event at all), garbage (non-JSON lines and non-object JSON values first), manyinit (150 more large init events after the first).
 sc_init_pre() {
-  local v="$1" id="$2" cwd="$3" f="$C_WS/.teamwright-agent/session.jsonl" i n=1
+  local v="$1" id="$2" cwd="$3" f="$C_WS/.teamwright-agent/session.jsonl" i n=1 pad
   case "$v" in two) n=2 ;; deep) n=20 ;; esac
   : > "$f"
   case "$v" in
     decoy-sid) printf '{"type":"system","subtype":"hook_started","hook_id":"d0","hook_event":"SessionStart","cwd":"%s","session_id":"%s"}\n' "$cwd" "$C_OTHER" >> "$f" ;;
     decoy-cwd) printf '{"type":"system","subtype":"hook_started","hook_id":"d0","hook_event":"SessionStart","cwd":"/somewhere/else","session_id":"%s"}\n' "$id" >> "$f" ;;
+    garbage) printf 'this line is not json {\n[1, 2\n"a string"\n42\n' >> "$f" ;;
   esac
   for ((i = 1; i <= n; i++)); do
     printf '{"type":"system","subtype":"hook_started","hook_id":"h%s","hook_name":"SessionStart:startup","hook_event":"SessionStart","session_id":"%s"}\n' "$i" "$id" >> "$f"
@@ -1323,6 +1324,12 @@ sc_init_pre() {
     printf '{"type":"assistant","message":{"role":"assistant"},"session_id":"%s"}\n' "$id" >> "$f"
   else
     printf '{"type":"system","subtype":"init","cwd":"%s","session_id":"%s"}\n' "$cwd" "$id" >> "$f"
+  fi
+  if [ "$v" = manyinit ]; then # 150 more init events of ~1.3 KB: the step's output is over a pipe buffer, its second head closes the pipe early
+    pad="$(head -c 1300 /dev/zero | tr '\0' x)"
+    for ((i = 1; i <= 150; i++)); do
+      printf '{"type":"system","subtype":"init","cwd":"%s","session_id":"%s","pad":"%s"}\n' "$cwd" "$id" "$pad" >> "$f"
+    done
   fi
   echo MARK-session >> "$f"
 }
@@ -1631,7 +1638,7 @@ sc_run "an empty job token value is refused (exit 1)" t_empty_job
 sc_run "project dir: <slug>/<id>.jsonl and <id>/subagents copied; other session, sibling and foreign dirs, symlinks, ~/.claude files not" t_pd_ok
 sc_run "project dir with a slug of exactly 200 chars is copied" t_pd_ok 200
 sc_run "project dir: a session file <id>.jsonl that is a symlink is not followed or copied, a miss" t_pd_symfile
-for v in one two deep decoy-sid decoy-cwd; do
+for v in one two deep decoy-sid decoy-cwd garbage manyinit; do
   sc_run "project dir with hook events before the init event ($v): the init event decides, <id>.jsonl and <id>/subagents copied, no ::warning" t_pd_hooks "$v"
 done
 for v in symdir nodir badid-word badid-upper badid-trail badid-trav badid-glob cwd noinit hooks-cwd; do

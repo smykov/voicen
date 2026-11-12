@@ -53,11 +53,13 @@
           src_tree .teamwright/logs logs .teamwright/logs
           # This run's session in the CLI project dir: the slug is the workspace path with every char
           # outside [A-Za-z0-9] replaced by '-' (the CLI hashes a slug longer than 200 chars); the
-          # session id and cwd come from the init event, the first line of $OUT/session.jsonl.
+          # session id and cwd come from the init event: the first line with type "system" and subtype
+          # "init" in the first 200 lines of $OUT/session.jsonl (SessionStart hook lines come before it;
+          # a non-JSON line is skipped).
           sid=""
           cwd=""
           if [ -f "$OUT/session.jsonl" ] && [ ! -L "$OUT/session.jsonl" ]; then
-            first="$(head -n 1 -- "$OUT/session.jsonl")"
+            first="$(head -n 200 -- "$OUT/session.jsonl" | jq -R -c 'fromjson? | select(type == "object" and .type == "system" and .subtype == "init")' 2>/dev/null | head -n 1 || true)"
             sid="$(printf '%s' "$first" | jq -r 'if type == "object" then (.session_id // "" | tostring) else "" end' 2>/dev/null)" || sid=""
             cwd="$(printf '%s' "$first" | jq -r 'if type == "object" then (.cwd // "" | tostring) else "" end' 2>/dev/null)" || cwd=""
           fi
@@ -69,7 +71,7 @@
           elif [ ! -d "$pd" ] || [ -L "$pd" ]; then
             miss "the Claude project dir ~/.claude/projects/<slug> (not a real directory)"
           elif ! [[ "$sid" =~ $uuid ]]; then
-            miss "the Claude project session (no UUID session_id in the first line of $OUT/session.jsonl)"
+            miss "the Claude project session (no UUID session_id in the init event of $OUT/session.jsonl)"
           elif [ "$cwd" != "$GITHUB_WORKSPACE" ]; then
             miss "the Claude project session (the init cwd is not this workspace)"
           else
