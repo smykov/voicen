@@ -7,8 +7,11 @@
 //! the crash records' frame source, module resolver, exception filter and OS
 //! version (T-024, `src-tauri/tests/crash.rs`). `track_capture` is the call mode's
 //! `TrackSource` (mic and system loopback, QPC capture stamps; T-127,
-//! `src-tauri/tests/call_capture.rs`).
+//! `src-tauri/tests/call_capture.rs`). `audio_notify` is the call mode's `DeviceEventsFactory`
+//! (an `IMMNotificationClient` that only posts typed events) and `CommunicationsCheck` (T-150,
+//! `src-tauri/tests/call_notify.rs`).
 
+pub mod audio_notify;
 pub mod capture;
 pub mod clipboard;
 pub mod crash;
