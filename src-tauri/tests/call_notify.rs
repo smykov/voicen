@@ -55,6 +55,7 @@ mod timing_support;
 use std::thread;
 use std::time::Duration;
 
+use cpal::traits::HostTrait;
 use timing_support::{holds_for, within_hang, HANG};
 use voicen_core::call::{CommunicationsCheck, DeviceEvent, DeviceEvents, DeviceEventsFactory};
 use voicen_core::platform::DeviceId;
@@ -264,11 +265,28 @@ fn the_communications_check_returns_a_value_or_none_without_error() {
     // (no panic, no hang: `within_hang` reports one), and an `Err` carries a real, non-zero OS
     // code. The branch taken is printed. Bite: an `unwrap` / `expect` on GetDefaultAudioEndpoint
     // (the panic fails the test on a device-less runner), an `Err(0)` for a failed call, a
-    // check that blocks on a device activation, a lost error turned into `Ok(true)` is invisible
-    // here and is pinned by the decision table below.
+    // check that blocks on a device activation. A lookup error swallowed at its origin
+    // (`GetDefaultAudioEndpoint` failing turned into an empty id, so `Ok(false)`) is caught by
+    // the oracle below on a runner without a render endpoint: cpal's own lookup of the eConsole
+    // render default (`GetDefaultAudioEndpoint(eRender, eConsole)`, the same call the check
+    // makes) finds none, so the check must answer `Err`. With a render endpoint that branch is
+    // not reached; a lost error in `differs_of` is pinned by the decision table below.
     let Some((answer, _)) = within_hang(|| ComCheck.differs()) else {
         panic!("the communications check did not return within {HANG:?}");
     };
+    let Some((has_render_default, _)) =
+        within_hang(|| cpal::default_host().default_output_device().is_some())
+    else {
+        panic!("cpal's default output lookup did not return within {HANG:?}");
+    };
+    println!("T-150 fact: eConsole render default present (cpal) = {has_render_default}");
+    if !has_render_default {
+        assert!(
+            answer.is_err(),
+            "no eConsole render default on this runner, yet the check answered {answer:?}: \
+             a failed lookup was turned into a verdict"
+        );
+    }
     match answer {
         Ok(differs) => {
             println!("T-150 fact: communications check: Ok({differs}) (the runner has a render endpoint)");

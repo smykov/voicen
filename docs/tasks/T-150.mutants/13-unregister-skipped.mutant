@@ -1,0 +1,12 @@
+guarantee: AC-2 register and unregister run on the call-session capture thread (Drop unregisters)
+file: src-tauri/src/win/audio_notify.rs
+added_by: test-writer
+--- old
+            let _ = unsafe {
+                registration
+                    .enumerator
+                    .UnregisterEndpointNotificationCallback(&registration.client)
+            };
+--- new
+            let _ = &registration.client;
+--- end

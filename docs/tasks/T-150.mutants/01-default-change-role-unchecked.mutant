@@ -1,0 +1,8 @@
+guarantee: AC-4 callbacks only post typed events (N1: only the eConsole default of render maps to DefaultOutputChanged)
+file: src-tauri/src/win/audio_notify.rs
+added_by: test-writer
+--- old
+        Notice::DefaultChanged(flow, role) if role == eConsole && flow == eRender => {
+--- new
+        Notice::DefaultChanged(flow, _role) if flow == eRender => {
+--- end

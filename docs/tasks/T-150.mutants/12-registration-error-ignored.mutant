@@ -1,0 +1,11 @@
+guarantee: - (N3: a failed registration yields registered() == false and holds nothing to unregister; no Acceptance line, needs fault injection)
+file: src-tauri/src/win/audio_notify.rs
+added_by: test-writer
+--- old
+            unsafe { enumerator.RegisterEndpointNotificationCallback(&client) }
+                .ok()
+                .map(|()| Registration { enumerator, client })
+--- new
+            let _ = unsafe { enumerator.RegisterEndpointNotificationCallback(&client) };
+            Some(Registration { enumerator, client })
+--- end

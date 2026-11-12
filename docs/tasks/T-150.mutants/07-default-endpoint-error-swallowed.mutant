@@ -1,0 +1,11 @@
+guarantee: AC-3 failure branch: no render endpoint on the device-less runner -> none (Err), not a verdict
+file: src-tauri/src/win/audio_notify.rs
+added_by: test-writer
+--- old
+    let device = unsafe { enumerator.GetDefaultAudioEndpoint(eRender, role) }
+        .map_err(|err| os_code(&err))?;
+--- new
+    let Ok(device) = (unsafe { enumerator.GetDefaultAudioEndpoint(eRender, role) }) else {
+        return Ok(String::new());
+    };
+--- end

@@ -1,0 +1,8 @@
+guarantee: AC-3 failure branch: a check that does not answer within the budget -> Err(ERROR_TIMEOUT), not a verdict
+file: src-tauri/src/win/audio_notify.rs
+added_by: test-writer
+--- old
+            Err(RecvTimeoutError::Timeout) => Err(ERROR_TIMEOUT.0 as i32),
+--- new
+            Err(RecvTimeoutError::Timeout) => Ok(false),
+--- end

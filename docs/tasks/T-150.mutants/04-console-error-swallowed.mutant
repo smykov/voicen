@@ -1,0 +1,8 @@
+guarantee: AC-3 failure branch: no console device -> none (Err with its code), never a verdict
+file: src-tauri/src/win/audio_notify.rs
+added_by: test-writer
+--- old
+    let console = console?;
+--- new
+    let console = console.unwrap_or_default();
+--- end

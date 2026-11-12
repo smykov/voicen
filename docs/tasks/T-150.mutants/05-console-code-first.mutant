@@ -1,0 +1,10 @@
+guarantee: AC-3 failure branch: both lookups failed -> the communications code
+file: src-tauri/src/win/audio_notify.rs
+added_by: test-writer
+--- old
+    let comms = comms?;
+    let console = console?;
+--- new
+    let console = console?;
+    let comms = comms?;
+--- end

@@ -1,0 +1,11 @@
+guarantee: AC-2 no callback (no event) on the runner after register
+file: src-tauri/src/win/audio_notify.rs
+added_by: test-writer
+--- old
+        let client: IMMNotificationClient = NotifyClient { sender }.into();
+        // SAFETY: COM is initialised on this thread
+--- new
+        let _ = sender.send(DeviceEvent::DefaultOutputChanged);
+        let client: IMMNotificationClient = NotifyClient { sender }.into();
+        // SAFETY: COM is initialised on this thread
+--- end

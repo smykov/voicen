@@ -1,0 +1,8 @@
+guarantee: AC-3 failure branch: a helper that ended without an answer -> Err(E_UNEXPECTED), not a verdict
+file: src-tauri/src/win/audio_notify.rs
+added_by: test-writer
+--- old
+            Err(RecvTimeoutError::Disconnected) => Err(E_UNEXPECTED.0),
+--- new
+            Err(RecvTimeoutError::Disconnected) => Ok(false),
+--- end

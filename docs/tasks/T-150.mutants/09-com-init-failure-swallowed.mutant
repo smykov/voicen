@@ -1,0 +1,12 @@
+guarantee: AC-3 failure branch: COM that cannot be initialised on the helper -> Err, not a verdict
+file: src-tauri/src/win/audio_notify.rs
+added_by: test-writer
+--- old
+    let Some(_com) = ComGuard::init() else {
+        return Err(E_UNEXPECTED.0);
+    };
+--- new
+    let Some(_com) = ComGuard::init() else {
+        return Ok(false);
+    };
+--- end

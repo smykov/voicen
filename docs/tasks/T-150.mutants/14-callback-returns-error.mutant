@@ -1,0 +1,10 @@
+guarantee: AC-4 callbacks only post typed events and return success
+file: src-tauri/src/win/audio_notify.rs
+added_by: test-writer
+--- old
+        }));
+        Ok(())
+--- new
+        }));
+        Err(E_UNEXPECTED.into())
+--- end

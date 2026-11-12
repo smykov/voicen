@@ -1,0 +1,8 @@
+guarantee: AC-4 callbacks only post typed events (N1: state ACTIVE -> none, any other state -> DeviceRemoved(id))
+file: src-tauri/src/win/audio_notify.rs
+added_by: test-writer
+--- old
+        Notice::StateChanged(_, state) if state == DEVICE_STATE_ACTIVE => None,
+--- new
+        Notice::StateChanged(_, state) if state != DEVICE_STATE_ACTIVE => None,
+--- end

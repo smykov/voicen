@@ -1,0 +1,10 @@
+guarantee: AC-3 failure branch: an endpoint id that cannot be read -> Err, not a verdict
+file: src-tauri/src/win/audio_notify.rs
+added_by: test-writer
+--- old
+    let id = unsafe { device.GetId() }.map_err(|err| os_code(&err))?;
+--- new
+    let Ok(id) = (unsafe { device.GetId() }) else {
+        return Ok(String::new());
+    };
+--- end

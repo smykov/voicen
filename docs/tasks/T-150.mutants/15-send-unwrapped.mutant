@@ -1,0 +1,9 @@
+guarantee: AC-4 a callback after the receiver is gone still returns success, no panic across FFI
+file: src-tauri/src/win/audio_notify.rs
+added_by: test-writer
+equivalent: the send sits inside post's catch_unwind, so a panicking unwrap after the receiver is gone is caught and the callback still returns Ok; no caller can tell it apart (only the default panic hook's stderr line). Removing catch_unwind alone is equivalent too (nothing in the closure panics); only both together break AC-4, and test every_callback_maps_to_at_most_one_typed_event's after-drop rows pin that pair
+--- old
+                let _ = self.sender.send(event);
+--- new
+                self.sender.send(event).unwrap();
+--- end

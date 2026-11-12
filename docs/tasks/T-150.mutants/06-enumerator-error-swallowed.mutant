@@ -1,0 +1,14 @@
+guarantee: AC-3 failure branch: the check returns a value or none (an enumerator that cannot be created -> Err, not a verdict)
+file: src-tauri/src/win/audio_notify.rs
+added_by: test-writer
+--- old
+    let enumerator: IMMDeviceEnumerator =
+        unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }
+            .map_err(|err| os_code(&err))?;
+--- new
+    let enumerator: WinResult<IMMDeviceEnumerator> =
+        unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) };
+    let Ok(enumerator) = enumerator else {
+        return Ok(false);
+    };
+--- end
