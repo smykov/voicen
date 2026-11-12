@@ -1302,6 +1302,30 @@ sc_init() {
   printf '{"type":"system","subtype":"init","cwd":"%s","session_id":"%s"}\n' "$2" "$1" > "$C_WS/.teamwright-agent/session.jsonl"
   echo MARK-session >> "$C_WS/.teamwright-agent/session.jsonl"
 }
+# sc_init_pre <variant> <id> <cwd>: session.jsonl as the real CLI writes it when SessionStart hooks run: hook_started and
+# hook_response lines (session_id, no cwd) come BEFORE the init event (T-206 review 1 #1). Variants: one (one hook
+# pair), two (two pairs, as .claude/settings.json has), deep (20 pairs, init on line 41), decoy-sid (a first line with a
+# DIFFERENT session_id and the workspace cwd), decoy-cwd (a first line with this session_id and a foreign cwd),
+# noinit (hook and other events, no init event at all).
+sc_init_pre() {
+  local v="$1" id="$2" cwd="$3" f="$C_WS/.teamwright-agent/session.jsonl" i n=1
+  case "$v" in two) n=2 ;; deep) n=20 ;; esac
+  : > "$f"
+  case "$v" in
+    decoy-sid) printf '{"type":"system","subtype":"hook_started","hook_id":"d0","hook_event":"SessionStart","cwd":"%s","session_id":"%s"}\n' "$cwd" "$C_OTHER" >> "$f" ;;
+    decoy-cwd) printf '{"type":"system","subtype":"hook_started","hook_id":"d0","hook_event":"SessionStart","cwd":"/somewhere/else","session_id":"%s"}\n' "$id" >> "$f" ;;
+  esac
+  for ((i = 1; i <= n; i++)); do
+    printf '{"type":"system","subtype":"hook_started","hook_id":"h%s","hook_name":"SessionStart:startup","hook_event":"SessionStart","session_id":"%s"}\n' "$i" "$id" >> "$f"
+    printf '{"type":"system","subtype":"hook_response","hook_id":"h%s","hook_name":"SessionStart:startup","hook_event":"SessionStart","outcome":"success","session_id":"%s"}\n' "$i" "$id" >> "$f"
+  done
+  if [ "$v" = noinit ]; then
+    printf '{"type":"assistant","message":{"role":"assistant"},"session_id":"%s"}\n' "$id" >> "$f"
+  else
+    printf '{"type":"system","subtype":"init","cwd":"%s","session_id":"%s"}\n' "$cwd" "$id" >> "$f"
+  fi
+  echo MARK-session >> "$f"
+}
 # sc_plant <where> <value>: the value as contents or as a file name in one of the sources.
 sc_plant() {
   case "$1" in
@@ -1513,9 +1537,17 @@ t_empty_job() { # an empty job token: the scan cannot cover it, the step refuses
   # (failure-branch bite: the empty-token 'exit 1' dropped stayed green without this line).
   ! grep -q -i 'scan pass' "$C/out.txt" || { C_WHY="the scan ran with an empty job token (refused only because an empty pattern matched everything)"; return 1; }
 }
+t_pd_hooks() { # <variant>: hook events before the init event in session.jsonl; the init event decides, the session is staged
+  sc_new "pd-hooks-$1"
+  sc_init_pre "$1" "$C_ID" "$C_WS"
+  sc_pd_assert
+}
 t_pd_ok() { # [<slug length>]: the project dir of this checkout, this run's session only
-  local m
   sc_new "pd-ok${1:-}" "${1:-}"
+  sc_pd_assert
+}
+sc_pd_assert() {
+  local m
   sc_exec || return 1
   [ "$C_RC" = 0 ] || { C_WHY="exit $C_RC, want 0"; return 1; }
   sc_staged_has MARK-pj-main || { C_WHY="<slug>/<id>.jsonl was not staged"; return 1; }
@@ -1540,6 +1572,8 @@ t_pd_miss() { # <variant> [<slug length>]: no project dir is staged; the miss is
     badid-trav) sc_init "../x" "$C_WS" ;;
     badid-glob) sc_init "*" "$C_WS" ;;
     cwd) sc_init "$C_ID" "/somewhere/else" ;;
+    noinit) sc_init_pre noinit "$C_ID" "$C_WS" ;;
+    hooks-cwd) sc_init_pre one "$C_ID" "/somewhere/else" ;;
     long) ;;
   esac
   sc_exec || return 1
@@ -1597,7 +1631,10 @@ sc_run "an empty job token value is refused (exit 1)" t_empty_job
 sc_run "project dir: <slug>/<id>.jsonl and <id>/subagents copied; other session, sibling and foreign dirs, symlinks, ~/.claude files not" t_pd_ok
 sc_run "project dir with a slug of exactly 200 chars is copied" t_pd_ok 200
 sc_run "project dir: a session file <id>.jsonl that is a symlink is not followed or copied, a miss" t_pd_symfile
-for v in symdir nodir badid-word badid-upper badid-trail badid-trav badid-glob cwd; do
+for v in one two deep decoy-sid decoy-cwd; do
+  sc_run "project dir with hook events before the init event ($v): the init event decides, <id>.jsonl and <id>/subagents copied, no ::warning" t_pd_hooks "$v"
+done
+for v in symdir nodir badid-word badid-upper badid-trail badid-trav badid-glob cwd noinit hooks-cwd; do
   sc_run "project dir miss ($v): exit 0, nothing from HOME staged, miss in manifest.txt and a ::warning" t_pd_miss "$v"
 done
 sc_run "project dir miss (slug of 201 chars): exit 0, nothing from HOME staged, miss in manifest.txt and a ::warning" t_pd_miss long 201
