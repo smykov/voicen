@@ -123,6 +123,19 @@
 //   - `queueCallsResult(page, cmd, { outcome } | { reject })` scripts the next answer of that
 //     command only (one shot: the call after it gets the default answer again), so a failing
 //     fake fails exactly one call.
+// - Call indicator (specs/007-call-mode-record contracts/ipc.md, T-131). Payloads are core's
+//   (e2e/fixtures/call-indicator-wire.json, `indicatorWire(key)`, `indicatorTickWire(key)`):
+//   - `call_indicator_state` returns a copy of the `indicatorState` option (default: core's
+//     `idle_en`), taken when the call is made; with `{ reject }` every call is recorded and
+//     rejects with that text. With `holdIndicatorState` every call stays in flight (recorded,
+//     its reply already taken) until `releaseIndicatorState()`, so a test can emit a newer
+//     `indicator://state` before the (then stale) reply arrives; `indicatorRepliesAnswered`
+//     counts the replies delivered;
+//   - `call_indicator_stop` and `call_indicator_dismiss { warningId }` are recorded and
+//     return null: the mock never removes a warning (only a state the test emits does), so
+//     a page that hides a dismissed warning by itself is visible;
+//   - `indicatorState(page, s)` / `indicatorTick(page, t)` emit `indicator://state` /
+//     `indicator://tick` as the shell does.
 // - Any other command rejects, so a call outside the contract fails the test.
 //
 // The init script must be self-contained (it is serialized into the page), so it cannot
@@ -154,6 +167,17 @@ export type {
   Line,
   Speaker,
 } from "../../src/lib/calls/callsApi";
+// The call-indicator wire (spec 007) is declared once, in indicatorApi.ts.
+import type {
+  IndicatorState,
+  IndicatorTick,
+} from "../../src/lib/callIndicator/indicatorApi";
+export type {
+  IndicatorState,
+  IndicatorTick,
+  IndicatorWarning,
+  WarningKind,
+} from "../../src/lib/callIndicator/indicatorApi";
 export type {
   ConnectionTestRequest,
   ConnectionTestResult,
@@ -466,6 +490,43 @@ export function callsError(key: keyof CallsFixture["errors"]): CallError {
   return structuredClone(value);
 }
 
+// ---- Core-checked call-indicator data (e2e/fixtures/call-indicator-wire.json, T-126 / T-131) ----
+
+/** The state values the fixture holds (every one carries `lang`). */
+export type IndicatorWireKey =
+  | "idle_en"
+  | "idle_ru"
+  | "recording_reminder_en"
+  | "recording_reminder_ru"
+  | "recording_no_reminder_en"
+  | "warnings_en"
+  | "warnings_ru";
+
+/** The tick values the fixture holds. */
+export type IndicatorTickWireKey = "tick_levels" | "tick_silent";
+
+const indicatorFixture = JSON.parse(
+  readFileSync(new URL("../fixtures/call-indicator-wire.json", import.meta.url), "utf8"),
+) as Record<string, unknown>;
+
+/** contracts/ipc.md: the events the shell emits to the window labelled `call-indicator`. */
+export const INDICATOR_STATE_EVENT = "indicator://state";
+export const INDICATOR_TICK_EVENT = "indicator://tick";
+
+/** Core's `IndicatorState` `key` (a fresh copy); a key the fixture lacks fails here, by name. */
+export function indicatorWire(key: IndicatorWireKey): IndicatorState {
+  const value = indicatorFixture[key];
+  if (value === undefined) throw new Error(`call-indicator-wire.json has no ${key}`);
+  return structuredClone(value) as IndicatorState;
+}
+
+/** Core's `IndicatorTick` `key` (a fresh copy); a key the fixture lacks fails here, by name. */
+export function indicatorTickWire(key: IndicatorTickWireKey): IndicatorTick {
+  const value = indicatorFixture[key];
+  if (value === undefined) throw new Error(`call-indicator-wire.json has no ${key}`);
+  return structuredClone(value) as IndicatorTick;
+}
+
 // ---- Microphones (settings_list_microphones, T-012) -------------------------------
 
 /**
@@ -542,6 +603,13 @@ export interface MockOptions {
   callsList?: CallList;
   /** What `calls_get` returns; default `callsDetail()`. */
   callsDetail?: CallDetail;
+  /**
+   * What `call_indicator_state` returns, or `{ reject }` to make every call reject with that
+   * text (still recorded); default: `indicatorWire("idle_en")`.
+   */
+  indicatorState?: IndicatorState | { reject: string };
+  /** Keep every `call_indicator_state` in flight until `releaseIndicatorState` (recorded at once, reply taken then). */
+  holdIndicatorState?: boolean;
 }
 
 interface InitArg {
@@ -568,6 +636,8 @@ interface InitArg {
   holdMicrophones: boolean;
   callsList: CallList;
   callsDetail: CallDetail;
+  indicatorState: IndicatorState | { reject: string };
+  holdIndicatorState: boolean;
 }
 
 /** Installs the mock as an init script; call before `page.goto`. */
@@ -595,6 +665,8 @@ export async function installTauriMock(page: Page, options: MockOptions = {}): P
     holdMicrophones: options.holdMicrophones ?? false,
     callsList: options.callsList ?? callsListAll(),
     callsDetail: options.callsDetail ?? callsDetail(),
+    indicatorState: options.indicatorState ?? indicatorWire("idle_en"),
+    holdIndicatorState: options.holdIndicatorState ?? false,
   };
   await page.addInitScript((init: InitArg) => {
     type Handler = (data: unknown) => void;
@@ -630,6 +702,9 @@ export async function installTauriMock(page: Page, options: MockOptions = {}): P
       heldReady: [] as (() => void)[],
       holdingMics: init.holdMicrophones,
       heldMics: [] as (() => void)[],
+      holdingIndicator: init.holdIndicatorState,
+      heldIndicator: [] as (() => void)[],
+      indicatorReplies: 0,
       buildInfo: clone(init.buildInfo),
       holdingBuild: false,
       heldBuild: [] as (() => void)[],
@@ -772,6 +847,18 @@ export async function installTauriMock(page: Page, options: MockOptions = {}): P
           if ("reject" in reply) throw new Error(reply.reject);
           return reply;
         }
+        case "call_indicator_state": {
+          // The answer is the state when the shell ran the command (or its refusal); a hold
+          // only delays it.
+          const reply = clone(init.indicatorState);
+          if (state.holdingIndicator) await new Promise<void>((resolve) => state.heldIndicator.push(resolve));
+          state.indicatorReplies += 1;
+          if ("reject" in reply) throw new Error(reply.reject);
+          return reply;
+        }
+        case "call_indicator_stop":
+        case "call_indicator_dismiss":
+          return null;
         case "settings_list_microphones": {
           // The answer is the device list when the shell ran the command; a hold only delays it.
           const reply = clone(init.microphones);
@@ -893,6 +980,10 @@ export async function installTauriMock(page: Page, options: MockOptions = {}): P
         state.holdingMics = false;
         for (const resolve of state.heldMics.splice(0)) resolve();
       },
+      releaseIndicatorState: () => {
+        state.holdingIndicator = false;
+        for (const resolve of state.heldIndicator.splice(0)) resolve();
+      },
       queueTest: (item: Scripted) => state.testScripts.push(clone(item)),
       setCallsList: (list: unknown) => {
         state.callsList = clone(list) as typeof state.callsList;
@@ -935,6 +1026,7 @@ interface MockHandle {
     emitted: EmittedEvent[];
     listeners: Map<string, number[]>;
     models: LocalModelView[];
+    indicatorReplies: number;
   };
   emit: (event: string, payload: unknown) => void;
   queue: (item: { outcome: unknown } | { reject: unknown }) => void;
@@ -950,6 +1042,7 @@ interface MockHandle {
   releaseDelete: () => void;
   releaseOverlayReady: () => void;
   releaseMicrophones: () => void;
+  releaseIndicatorState: () => void;
   queueTest: (item: { outcome: unknown } | { reject: unknown }) => void;
   setCallsList: (list: CallList) => void;
   queueCalls: (cmd: string, item: { outcome: unknown } | { reject: unknown }) => void;
@@ -1161,6 +1254,28 @@ export async function overlayState(page: Page, payload: OverlayPayload): Promise
 /** Answers every held `overlay_ready` with the reply taken at its call, and stops holding. */
 export async function releaseOverlayReady(page: Page): Promise<void> {
   await page.evaluate(() => (window as unknown as MockWindow).__VOICEN_MOCK__.releaseOverlayReady());
+}
+
+// ---- Call indicator (spec 007, T-131) ------------------------------------------------
+
+/** The shell sends `state` to the indicator: `indicator://state` reaches every registered handler. */
+export async function indicatorState(page: Page, state: IndicatorState): Promise<void> {
+  await emit(page, INDICATOR_STATE_EVENT, state);
+}
+
+/** The shell sends `tick` to the indicator: `indicator://tick` reaches every registered handler. */
+export async function indicatorTick(page: Page, tick: IndicatorTick): Promise<void> {
+  await emit(page, INDICATOR_TICK_EVENT, tick);
+}
+
+/** Answers every held `call_indicator_state` with the reply taken at its call, and stops holding. */
+export async function releaseIndicatorState(page: Page): Promise<void> {
+  await page.evaluate(() => (window as unknown as MockWindow).__VOICEN_MOCK__.releaseIndicatorState());
+}
+
+/** How many `call_indicator_state` replies (or rejections) the mock has delivered to the page. */
+export async function indicatorRepliesAnswered(page: Page): Promise<number> {
+  return page.evaluate(() => (window as unknown as MockWindow).__VOICEN_MOCK__.state.indicatorReplies);
 }
 
 // ---- Microphones (spec 004, T-012) ---------------------------------------------------
