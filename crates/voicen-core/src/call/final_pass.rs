@@ -1228,6 +1228,9 @@ fn write_ready(
 mod pass_tests;
 
 #[cfg(test)]
+mod queue_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::audio::wav;

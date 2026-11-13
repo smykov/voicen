@@ -12,7 +12,8 @@ use std::time::{Duration, UNIX_EPOCH};
 use voicen_core::audio::AudioBuffer;
 use voicen_core::call::codec::{OpusOggReader, TrackDecoder, TrackEncoder};
 use voicen_core::call::final_pass::{
-    run_pass, run_pass_with, PassCall, PassDeps, PassEvents, PassOutcome, PassSources,
+    run_pass, run_pass_with, ApiPassRunner, PassCall, PassDeps, PassEvents, PassOutcome, PassQueue,
+    PassSources,
 };
 use voicen_core::call::storage::{write_meta, CallStore, Failure, NewCall, TrackResult};
 use voicen_core::call::{
@@ -708,4 +709,114 @@ fn a_failed_transcribing_meta_write_fails_storage_before_any_request() {
         }]
     );
     no_transcript(&call.dir);
+}
+
+// ---- T-146: a 401, a fixed key, "Transcribe again" ---------------------------------------------
+
+/// A timed reply for `key-b`, a 401 for any other key.
+struct OnlyKeyB;
+
+impl Respond for OnlyKeyB {
+    fn respond(&self, req: &Request) -> ResponseTemplate {
+        if bearer_of(req).as_deref() == Some("Bearer key-b") {
+            TimedReply.respond(req)
+        } else {
+            ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "error": {"message": "Incorrect API key provided", "type": "invalid_request_error"}
+            }))
+        }
+    }
+}
+
+fn bearer_of(r: &Request) -> Option<String> {
+    r.headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
+}
+
+/// Failure branch of T-146 (T062): a 401 ends the pass `failed: key` with no transcript; the
+/// key is saved again; "Transcribe again" (no restart, the same queue) then reads the new key
+/// at the start of its pass and the call becomes ready.
+#[test]
+fn a_401_gives_failed_key_and_after_the_key_is_fixed_transcribe_again_succeeds() {
+    let server = Mocked::start(OnlyKeyB);
+    let call = tone_call();
+    let creds = Arc::new(FakeCredentialStore::new().with_key(KeySlot::TranscriptionApi, "key-a"));
+    let mut settings = defaults(None);
+    settings.engine = EngineKind::Api;
+    settings.api.base_url = server.uri();
+    settings.api.model = "model-a".to_string();
+    let settings = Arc::new(settings);
+    let rec = Arc::new(Rec::default());
+    let runner = ApiPassRunner::new(
+        Arc::new(move || settings.clone()),
+        creds.clone(),
+        Some(Arc::new(AmpSpans)),
+        rec.clone(),
+        Arc::new(SystemMonotonic),
+    );
+    let store = Arc::new(CallStore::new(
+        Arc::new(FsCallRoots::new(call.tmp.path().join("calls"))),
+        Arc::new(SystemMonotonic),
+    ));
+    let queue = PassQueue::new(store, Arc::new(runner));
+
+    queue.enqueue(&call.dir);
+    queue.wait_idle();
+    let meta = meta_of(&call.dir);
+    assert_eq!(meta.state, CallState::Failed);
+    assert_eq!(
+        meta.failure.as_ref().map(|f| f.reason),
+        Some(FailReason::Key),
+        "a 401 is the key"
+    );
+    let key_failed = TrackResult::Failed {
+        reason: FailReason::Key,
+    };
+    assert_eq!(meta.results.mic, key_failed);
+    assert_eq!(meta.results.system, key_failed);
+    no_transcript(&call.dir);
+    assert_eq!(
+        rec.notices(),
+        vec![CallNotice::PassFailed {
+            reason: FailReason::Key
+        }]
+    );
+    let first = server.requests();
+    assert!(!first.is_empty(), "the server was asked");
+    assert!(first
+        .iter()
+        .all(|r| bearer_of(r).as_deref() == Some("Bearer key-a")));
+
+    // The user fixes the key in Settings; the call is redone.
+    creds
+        .write(KeySlot::TranscriptionApi, &Secret::new("key-b"))
+        .expect("save the new key");
+    assert_eq!(queue.transcribe(&call.dir), Ok(()));
+    queue.wait_idle();
+
+    let meta = meta_of(&call.dir);
+    assert_eq!(meta.state, CallState::Ready);
+    assert_eq!(meta.failure, None);
+    let text = fs::read_to_string(call.dir.join("transcript.json")).expect("transcript.json");
+    TranscriptV1::from_json(&text)
+        .expect("parses")
+        .validate()
+        .expect("valid");
+    let all = server.requests();
+    let later = all.get(first.len()..).unwrap_or_default();
+    assert!(!later.is_empty(), "the redo asked the server again");
+    assert!(
+        later
+            .iter()
+            .all(|r| bearer_of(r).as_deref() == Some("Bearer key-b")),
+        "the redo uses the key as saved when its pass started"
+    );
+    let reads = creds
+        .calls()
+        .into_iter()
+        .filter(|c| c.op == CredentialOp::Read && c.slot == KeySlot::TranscriptionApi)
+        .count();
+    assert_eq!(reads, 2, "one key read per pass");
 }
