@@ -1,0 +1,11 @@
+guarantee: transcribe on a folder that is gone is notFound (the is_dir check dropped)
+file: crates/voicen-core/src/call/storage.rs
+added_by: test-writer
+--- old
+    if !dir.is_dir() {
+        return Err(CallError::not_found());
+    }
+    read_meta(dir, &id, active).ok_or_else(unusable)
+--- new
+    read_meta(dir, &id, active).ok_or_else(unusable)
+--- end

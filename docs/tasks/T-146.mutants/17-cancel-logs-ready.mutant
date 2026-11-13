@@ -1,0 +1,8 @@
+guarantee: Deleting a transcribing call cancels the pass first (Q1: final_finished outcome=cancelled)
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: test-writer
+--- old
+        return conclude(&deps, started, id, FinalOutcome::Cancelled, mode);
+--- new
+        return conclude(&deps, started, id, FinalOutcome::Ready, mode);
+--- end

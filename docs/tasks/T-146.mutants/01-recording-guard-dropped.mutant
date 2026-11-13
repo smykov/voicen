@@ -1,0 +1,9 @@
+guarantee: Failure branch: transcribe on a recording call is refused recordingCall (both refusal sites skipped: the store never reports an active call; either site alone is equivalent, the other refuses)
+file: crates/voicen-core/src/call/storage.rs
+added_by: test-writer
+--- old
+        self.active().iter().any(|d| d == dir)
+--- new
+        let _ = dir;
+        false
+--- end

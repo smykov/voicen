@@ -1,0 +1,7 @@
+guarantee: Deleting a transcribing call cancels the pass first (PassQueue::cancel never sets the token)
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: test-writer
+--- old
+        token.cancel();
+--- new
+--- end

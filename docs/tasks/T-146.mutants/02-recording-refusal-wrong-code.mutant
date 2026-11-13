@@ -1,0 +1,12 @@
+guarantee: Failure branch: transcribe on a recording call is refused recordingCall (wrong code)
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: test-writer
+--- old
+        if self.store.is_active(dir) {
+            return Err(CallError {
+                code: CallErrorCode::RecordingCall,
+--- new
+        if self.store.is_active(dir) {
+            return Err(CallError {
+                code: CallErrorCode::NotFound,
+--- end

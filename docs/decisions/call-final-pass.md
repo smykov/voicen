@@ -2,7 +2,7 @@
 
 **Code:** `crates/voicen-core/src/call/final_pass.rs` (`run_pass`, `run_pass_with`, `TimedTranscriber`, `PassEvents`, `PassCall`, `PassDeps`, `PassOutcome`, `PassSources`; the T-137 planners `ChunkPlanner`, `RangePlanner`, `recut_timeless` live in the same file), `crates/voicen-core/src/call/storage.rs` (`TrackResult::{Pending, Done, Failed}`) · **Tests that pin it:** `call::final_pass::pass_tests` (unit, fakes), `crates/voicen-core/tests/final_pass_http.rs` (wiremock, real Opus, real key path)
 
-Tasks: T-138 (class `call-final-pass`; the queue, cancel and "Transcribe again" are T-146, the shell wiring T-139). Contract: `specs/007-call-mode-record/contracts/core-call.md` "Built (T-138)". Decisions: #187, #188, #197. Class `call-final-pass` in `docs/failures.md` has no entry yet (first sighting).
+Tasks: T-138 (class `call-final-pass`), T-146 (the queue, cancel and "Transcribe again": `PassQueue`, `PassRunner`, `ApiPassRunner`, `CancelToken`, `run_pass_with_cancel`; tests `call::final_pass::queue_tests`); the shell wiring is T-139 / T-147. Contract: `specs/007-call-mode-record/contracts/core-call.md` "Built (T-138)". Decisions: #187, #188, #197. Class `call-final-pass` in `docs/failures.md` has no entry yet (first sighting).
 
 ## Invariants
 
@@ -48,12 +48,24 @@ Tasks: T-138 (class `call-final-pass`; the queue, cancel and "Transcribe again" 
 - **Where it is enforced:** `write_ready` (D6) and `write_failed`; every error is logged as `call_storage_failed kind=transcript | meta` or `transcript_invalid`, never swallowed. Tests `a_failed_markdown_write_leaves_failed_storage_and_no_transcript`, `a_failed_json_write_leaves_failed_storage_and_no_transcript_json`, `a_failed_meta_write_is_reported_not_swallowed`, `a_failed_meta_write_after_a_track_failure_is_reported_and_ends_with_storage`, `a_transcript_that_fails_validation_is_logged_and_not_written`.
 - **Don't:** write a file in place, write `meta.json` `ready` before both transcript files, `let _ =` a write result without a log, or log transcript text.
 
-### One `final_finished` and one notice end every pass
+### One `final_finished` ends every pass, and one notice unless the pass was cancelled
 
 - **Defect that produced it:** none yet.
 - **What breaks if you violate it:** the Calls window never learns the pass ended; a second line double-counts a pass.
-- **Where it is enforced:** `conclude` is the only place that writes `FinalPassFinished` and the notice (`TranscriptReady { call }` or `PassFailed { reason }`); every exit of `run_pass` and `pass` goes through it.
+- **Where it is enforced:** `conclude` is the only place that writes `FinalPassFinished` and the notice (`TranscriptReady { call }` or `PassFailed { reason }`; a `Cancelled` pass logs `final_finished outcome=cancelled` and sends no notice, Q1); every exit of `run_pass` and `pass` goes through it.
 - **Don't:** return a `PassOutcome` without `conclude`.
+
+### Passes run one at a time from one queue; what a pass redoes is read from `meta.json` when it starts (T-146)
+
+- **Defect that produced it:** none yet (feature gap found in T-146 analysis).
+- **What breaks if you violate it:** two passes at once exceed the 3-request bound and race on one call folder; a call is transcribed twice; a restart after a crash redoes a different track set than the interrupted pass (done work thrown away or a failed track skipped); a key fixed while a call waits is not used; a deleted call is still uploaded.
+- **Where it is enforced:** `PassQueue` (one worker thread over a FIFO of folder paths, with the running folder and its `CancelToken`) in `final_pass.rs`; every pass goes through it (stop path, `calls_transcribe`, the start-up `Recovery.queue`, delete's cancel), never a direct `run_pass`. Tests in `call::final_pass::queue_tests`, and `final_pass_http::a_401_gives_failed_key_and_after_the_key_is_fixed_transcribe_again_succeeds`.
+  1. At most one pass runs; the queued plus running set holds each call folder at most once, in FIFO order of request (`enqueue` and `transcribe` of a held call are no-ops).
+  2. The tracks a pass uploads are those whose `meta.json` `results.<track>` is not `done`, read when the pass starts, never from queue state; a `done` track's decoder is not opened and its kept segments are spliced into the merge in the same (start, mic first) order, so the result still passes `validate()`.
+  3. Settings, speakers and the key are read when the pass starts (`ApiPassRunner`: one settings snapshot and one key read per pass, not per queue entry).
+  4. Cancel: a queued call is removed and never runs; for the running call `PassQueue::cancel` sets its `CancelToken` and returns only after the pass has ended. A cancelled pass dispatches no further request (checked before each dispatch and on each answer), writes no `transcript.*`, and may wait for in-flight HTTP up to the FR-24 timeout.
+  5. `transcribe` on a call this process records is `recordingCall` and changes nothing. The meta transition (`transcribe_transition`) is the one place a request becomes a `meta.json` change: `ready` clears both results and removes `transcript.*`; `failed` clears `failure` and keeps the `done` result; `recovered` sets both pending; speakers are kept.
+- **Don't:** keep the track set, key or settings in a queue entry, call `run_pass` outside the queue, hold the queue lock in `CallStore` or the session (recording during a pass must work), or write `transcript.*` after the token is set.
 
 ## Developer-level choices (no owner decision; recorded so a reviewer can overturn them)
 
@@ -64,6 +76,15 @@ Tasks: T-138 (class `call-final-pass`; the queue, cancel and "Transcribe again" 
 - **D5 Decode ends.** `Ok(None)` and `Err(Damaged)` end the track (the CRC-valid prefix was already returned, R7). `Unreadable` and `Codec` fail the track with `storage`.
 - **D6 Write order.** Validate, render, `transcript.md`, `transcript.json` (the commit point; T-141 reads lines from it), then `meta.json` (`ready`). A failure at any step gives `CallStorageFailed { kind: transcript | meta, os }`, a best-effort failed `meta.json`, and `PassFailed { storage }`. A `validate()` `Err` logs `TranscriptInvalid { rule, segment }` and gives `failed: storage`.
 - **D7 Log lines.** `final_stage` for `decode`, `vad` and `upload` per track (summed ms, `chunks` = the track's chunks); `merge` and `write` run once over both tracks and are logged once per track with the shared ms, because `FinalPassStage.track` is required. One `final_finished` per pass, `mode` = the mode the pass ended in.
+
+### Queue, cancel and "Transcribe again" (T-146; developer-level, a reviewer may overturn)
+
+- **Q1 A cancelled pass** logs `final_finished outcome=cancelled` at INFO (`FinalOutcome::Cancelled`), sends no notice, and writes `meta.json` back to `ready-to-transcribe` with the results the pass started with. Contract row amended in `core-call.md`.
+- **Q2 `transcribe` on a `recording` meta this process does not record** (listed Recovered after a write failure) recovers it in place with the same per-folder step as `CallStore::recover` (`storage::mark_recovered`), then queues it, rather than refusing `recordingCall` on a row the UI calls Recovered. If the reviewer reads this as product behaviour it becomes an OQ for the owner.
+- **Q3 `transcribe` on a call already queued or transcribing** is a no-op that returns Ok (the caller shows `queued`).
+- **Q4 A meta write failure** (or a `transcript.*` that cannot be removed) in the transcribe transition is `ioFailed` and queues nothing; a folder that is not a call, or is gone, is `notFound` (`storage::read_folder_meta`). `ioFailed` is added to the `calls_transcribe` row of `contracts/ipc.md`.
+- **Q5 A redo of one track** records that pass's `engines.transcription` and `pass_mode` for the whole call, even though the kept track was made by an earlier pass.
+- **Known gap (for T-152):** a pass writes the `meta.json` it read at its start, so a rename during `transcribing` would be overwritten; renames must go through the queue or re-read before the final write.
 
 ### Deviations found in the implementation (verified against `final_pass.rs` at cb66041e)
 
@@ -99,4 +120,4 @@ Tasks: T-138 (class `call-final-pass`; the queue, cancel and "Transcribe again" 
 
 ## Open
 
-- Not covered by tests: held-audio memory is not measured; the temp-file check covers the call folder only; a `duration_ms: None` call has no test; Windows-only parts are out of scope. Queue, cancel and "Transcribe again" are T-146.
+- Not covered by tests: held-audio memory is not measured; the temp-file check covers the call folder only; a `duration_ms: None` call has no test; Windows-only parts are out of scope. The cancel racing a pass that has already finished its work has no deterministic test hook (T-146).

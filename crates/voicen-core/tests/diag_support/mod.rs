@@ -669,7 +669,7 @@ pub fn check_closed(line: &Line) -> Result<(), String> {
             ("call_recovered", "calls") => check(unsigned(v), k, v)?,
             ("final_stage", "stage") => one_of(k, v, FINAL_STAGES)?,
             ("final_stage", "ms" | "chunks") => check(unsigned(v), k, v)?,
-            ("final_finished", "outcome") => one_of(k, v, &["ready", "failed"])?,
+            ("final_finished", "outcome") => one_of(k, v, &["ready", "failed", "cancelled"])?,
             ("final_finished", "reason") => one_of(k, v, FAIL_REASONS)?,
             ("final_finished", "mode") => one_of(k, v, &["timed", "timeless"])?,
             ("final_finished", "ms") => check(unsigned(v), k, v)?,

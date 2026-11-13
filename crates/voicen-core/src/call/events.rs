@@ -129,11 +129,13 @@ pub enum FailReason {
 }
 
 /// How a final pass ended (`final_finished outcome= [reason=]`). The reason exists only
-/// on a failed pass, so a ready pass cannot carry one.
+/// on a failed pass, so a ready pass cannot carry one. `Cancelled`: the pass's cancel token
+/// was set (T-146 Q1); it sends no notice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FinalOutcome {
     Ready,
     Failed { reason: FailReason },
+    Cancelled,
 }
 
 /// Whether the final pass kept segment times (`final_finished mode=`; the serde names

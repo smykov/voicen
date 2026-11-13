@@ -1,0 +1,8 @@
+guarantee: Failure branch: after the key is fixed a retry (transcribe again on a failed call) succeeds
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: test-writer
+--- old
+        ListState::Queued | ListState::Transcribing => return Ok(()),
+--- new
+        ListState::Queued | ListState::Transcribing | ListState::Failed(_) => return Ok(()),
+--- end

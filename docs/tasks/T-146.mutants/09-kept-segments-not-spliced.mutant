@@ -1,0 +1,8 @@
+guarantee: Transcribe again on a failed call redoes only the failed track (the kept lines are lost from the transcript)
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: test-writer
+--- old
+            merged.segments.extend(kept.iter().cloned());
+--- new
+            let _ = kept;
+--- end

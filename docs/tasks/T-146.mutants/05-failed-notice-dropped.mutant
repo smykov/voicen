@@ -1,0 +1,8 @@
+guarantee: Failure branch: a 401 gives failed: key (the failed pass sends no notice)
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: test-writer
+--- old
+        FinalOutcome::Failed { reason } => Some(CallNotice::PassFailed { reason }),
+--- new
+        FinalOutcome::Failed { .. } => None,
+--- end

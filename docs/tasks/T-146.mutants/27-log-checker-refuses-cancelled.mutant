@@ -1,0 +1,8 @@
+guarantee: Q1 a cancelled pass logs final_finished outcome=cancelled (the closed-line checker allows it)
+file: crates/voicen-core/tests/diag_support/mod.rs
+added_by: test-writer
+--- old
+one_of(k, v, &["ready", "failed", "cancelled"])?,
+--- new
+one_of(k, v, &["ready", "failed"])?,
+--- end

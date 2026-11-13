@@ -1,0 +1,9 @@
+guarantee: Transcribe again on a failed call redoes only the failed track (the failure record is cleared)
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: test-writer
+--- old
+    meta.state = CallState::ReadyToTranscribe;
+    meta.failure = None;
+--- new
+    meta.state = CallState::ReadyToTranscribe;
+--- end

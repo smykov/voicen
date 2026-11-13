@@ -1,0 +1,1 @@
+cargo test -j2 -p voicen-core --lib --test final_pass_http --test diag_format -- queue_tests a_401_gives_failed_key every_log_event_formats_to_one_closed_line every_call_line_formats_exactly_as_the_contract_with_its_level every_value_of_every_call_field_has_its_own_literal

@@ -2,7 +2,7 @@
 //! cuts a call track, window by window, at speech pauses into bounded, disjoint, ordered
 //! upload ranges, and slices the held audio into each range's [`AudioBuffer`].
 //!
-//! T-138 / T-146 add the pass runner and the queue to this file later; every cut, pad and bound
+//! The pass runner (T-138) and the pass queue (T-146) follow below; every cut, pad and bound
 //! of call audio goes through the planners here.
 //!
 //! # Semantics (all times are track-relative milliseconds, spans are half-open `[start, end)`)
@@ -44,22 +44,25 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{self, BufReader};
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
-use std::sync::{mpsc, Arc};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crate::audio::{AudioBuffer, SAMPLE_RATE};
 use crate::call::codec::{OpusOggReader, TrackDecoder};
 use crate::call::storage::{
-    write_atomic, write_meta, Failure, Results, TRANSCRIPT_FILE, TRANSCRIPT_MD_FILE,
+    mark_recovered, read_folder_meta, write_atomic, write_meta, CallError, CallErrorCode,
+    CallStore, Failure, ListState, Results, META_FILE, TRANSCRIPT_FILE, TRANSCRIPT_MD_FILE,
 };
 use crate::call::{
     merge, render_markdown, CallId, CallMeta, CallNotice, CallState, ChunkInput, DecodeEnd,
-    EngineRef, FailReason, FinalOutcome, FinalStage, MergeInput, PassMode, StorageKind, Track,
-    TrackInput, TrackResult, TranscriptV1, VadFallbackCause,
+    EngineRef, FailReason, FinalOutcome, FinalStage, MergeInput, PassMode, SegmentV1, StorageKind,
+    Track, TrackInput, TrackResult, TranscriptV1, VadFallbackCause,
 };
 use crate::clock::MonotonicClock;
 use crate::diag::event::LogEvent;
@@ -507,9 +510,29 @@ pub struct PassSources {
     pub system: Box<dyn TrackDecoder>,
 }
 
+/// The cancel token of one pass (FR-037): once set, the pass dispatches no request, writes
+/// no `transcript.*` and ends `cancelled` with `meta.json` back as `ready-to-transcribe` and
+/// the results it started with. Clones share the flag.
+#[derive(Debug, Clone, Default)]
+pub struct CancelToken(Arc<AtomicBool>);
+
+impl CancelToken {
+    pub fn new() -> CancelToken {
+        CancelToken::default()
+    }
+
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
 /// The whole pass from `ready-to-transcribe`: builds the API engine (whatever engine is
-/// active) once from `settings` and one read of the key, opens the tracks of `call.dir`, and
-/// runs the pass of [`run_pass_with`] with them.
+/// active) once from `settings` and one read of the key, opens the tracks of `call.dir` whose
+/// result is not `done`, and runs the pass of [`run_pass_with`] with them.
 ///
 /// A base URL `check_base_url` refuses, or a missing or blank key, fails the pass with
 /// `engine_not_set_up` before any request; a key store that cannot be read fails it with
@@ -520,7 +543,27 @@ pub fn run_pass(
     creds: &dyn CredentialStore,
     deps: PassDeps<'_>,
 ) -> PassOutcome {
+    run_api_pass(call, settings, creds, deps, &CancelToken::new())
+}
+
+/// [`run_pass`] with a cancel token.
+fn run_api_pass(
+    call: PassCall,
+    settings: Arc<Settings>,
+    creds: &dyn CredentialStore,
+    deps: PassDeps<'_>,
+    cancel: &CancelToken,
+) -> PassOutcome {
     let started = deps.clock.now();
+    if cancel.is_cancelled() {
+        return conclude(
+            &deps,
+            started,
+            call.meta.id.clone(),
+            FinalOutcome::Cancelled,
+            PassMode::Timed,
+        );
+    }
     let engine = match api_engine(&settings, creds) {
         Ok(engine) => engine,
         Err(reason) => {
@@ -546,11 +589,22 @@ pub fn run_pass(
         timeouts: Timeouts::from_settings(&settings.timeouts),
     };
     let engine_ref = EngineRef::new("api", &settings.api.model);
-    let sources = PassSources {
-        mic: open_track(&call, Track::Mic),
-        system: open_track(&call, Track::System),
+    // A done track is never opened: its decoder is never asked for a window.
+    let source = |track: Track, result: &TrackResult| -> Box<dyn TrackDecoder> {
+        match result {
+            TrackResult::Done { .. } => Box::new(Unopened(DecodeEnd::Unreadable)),
+            _ => open_track(&call, track),
+        }
     };
-    pass(call, &engine, &request, engine_ref, sources, deps, started)
+    let sources = PassSources {
+        mic: source(Track::Mic, &call.meta.results.mic),
+        system: source(Track::System, &call.meta.results.system),
+    };
+    let start = PassStart {
+        at: started,
+        cancel,
+    };
+    pass(call, &engine, &request, engine_ref, sources, deps, start)
 }
 
 /// The pass from "write meta as transcribing" on, with the engine and the tracks given.
@@ -563,8 +617,35 @@ pub fn run_pass_with(
     sources: PassSources,
     deps: PassDeps<'_>,
 ) -> PassOutcome {
+    run_pass_with_cancel(
+        call,
+        engine,
+        request,
+        engine_ref,
+        sources,
+        deps,
+        &CancelToken::new(),
+    )
+}
+
+/// [`run_pass_with`] with a cancel token. The tracks it uploads are those whose
+/// `call.meta.results.<track>` is not `done`; a `done` track's source is never read, its
+/// segments are spliced into the merge in (start, mic first) order and stay its result.
+pub fn run_pass_with_cancel(
+    call: PassCall,
+    engine: &dyn TimedTranscriber,
+    request: &TranscribeRequest,
+    engine_ref: EngineRef,
+    sources: PassSources,
+    deps: PassDeps<'_>,
+    cancel: &CancelToken,
+) -> PassOutcome {
     let started = deps.clock.now();
-    pass(call, engine, request, engine_ref, sources, deps, started)
+    let start = PassStart {
+        at: started,
+        cancel,
+    };
+    pass(call, engine, request, engine_ref, sources, deps, start)
 }
 
 /// The API engine of the snapshot, or why there is none (D3).
@@ -625,7 +706,8 @@ fn since(clock: &dyn MonotonicClock, t0: Instant) -> Duration {
     clock.now().saturating_duration_since(t0)
 }
 
-/// Logs `final_finished` and sends the notice: the one end of every pass.
+/// Logs `final_finished` and sends the notice (none for a cancelled pass, Q1): the one end
+/// of every pass.
 fn conclude(
     deps: &PassDeps<'_>,
     started: Instant,
@@ -636,10 +718,14 @@ fn conclude(
     let ms = ms_of(since(&*deps.clock, started));
     deps.events
         .log(LogEvent::FinalPassFinished { outcome, mode, ms });
-    deps.events.notice(match outcome {
-        FinalOutcome::Ready => CallNotice::TranscriptReady { call },
-        FinalOutcome::Failed { reason } => CallNotice::PassFailed { reason },
-    });
+    let notice = match outcome {
+        FinalOutcome::Ready => Some(CallNotice::TranscriptReady { call }),
+        FinalOutcome::Failed { reason } => Some(CallNotice::PassFailed { reason }),
+        FinalOutcome::Cancelled => None,
+    };
+    if let Some(notice) = notice {
+        deps.events.notice(notice);
+    }
     PassOutcome { outcome, mode }
 }
 
@@ -725,17 +811,30 @@ struct Lane {
     decode: Duration,
     vad: Duration,
     upload: Duration,
+    /// The track's `done` segments from `meta.json` at the pass start: the lane is not
+    /// uploaded (its decoder is never asked), these are spliced into the merge and stay its
+    /// result.
+    kept: Option<Vec<SegmentV1>>,
 }
 
 impl Lane {
-    fn new(track: Track, offset_ms: u64, decoder: Box<dyn TrackDecoder>) -> Lane {
+    fn new(
+        track: Track,
+        offset_ms: u64,
+        decoder: Box<dyn TrackDecoder>,
+        result: &TrackResult,
+    ) -> Lane {
+        let kept = match result {
+            TrackResult::Done { segments } => Some(segments.clone()),
+            TrackResult::Pending | TrackResult::Failed { .. } => None,
+        };
         Lane {
             track,
             offset_ms,
             decoder,
             planner: ChunkPlanner::new(PassMode::Timed),
             pos_ms: 0,
-            ended: false,
+            ended: kept.is_some(),
             failed: None,
             fallen_back: false,
             queue: VecDeque::new(),
@@ -744,6 +843,7 @@ impl Lane {
             decode: Duration::ZERO,
             vad: Duration::ZERO,
             upload: Duration::ZERO,
+            kept,
         }
     }
 
@@ -922,15 +1022,27 @@ impl Run {
         }
     }
 
-    fn drive(&mut self, env: &Env<'_>, engine: &dyn TimedTranscriber, request: &TranscribeRequest) {
+    /// Dispatches and collects until every lane is through or the token is set; once it is
+    /// set nothing more is decoded or dispatched, and the answers still in flight are
+    /// awaited and dropped.
+    fn drive(
+        &mut self,
+        env: &Env<'_>,
+        engine: &dyn TimedTranscriber,
+        request: &TranscribeRequest,
+        cancel: &CancelToken,
+    ) {
         std::thread::scope(|scope| {
             let (tx, rx) = mpsc::channel::<Reply>();
             loop {
-                while self.in_flight.len() < MAX_IN_FLIGHT {
+                while self.in_flight.len() < MAX_IN_FLIGHT && !cancel.is_cancelled() {
                     let timeless = self.mode == PassMode::Timeless;
                     let order = self.next_seq;
                     self.mic.refill(env, timeless, order);
                     self.system.refill(env, timeless, order);
+                    if cancel.is_cancelled() {
+                        break;
+                    }
                     let Some(track) = self.pick() else { break };
                     let Some(work) = self.lane(track).queue.pop_front() else {
                         break;
@@ -953,6 +1065,9 @@ impl Run {
                 }
                 let Ok((seq, reply)) = rx.recv() else { break };
                 match reply {
+                    Ok(_) if cancel.is_cancelled() => {
+                        self.in_flight.remove(&seq);
+                    }
                     Ok(answer) => self.on_answer(env, seq, answer),
                     // An engine panic is the engine's bug: re-raised, not turned into a reason.
                     Err(payload) => panic::resume_unwind(payload),
@@ -1056,6 +1171,12 @@ impl Run {
     }
 }
 
+/// When the pass started and its cancel token.
+struct PassStart<'c> {
+    at: Instant,
+    cancel: &'c CancelToken,
+}
+
 /// The pass from "write meta as transcribing" on.
 fn pass(
     call: PassCall,
@@ -1064,11 +1185,22 @@ fn pass(
     engine_ref: EngineRef,
     sources: PassSources,
     deps: PassDeps<'_>,
-    started: Instant,
+    start: PassStart<'_>,
 ) -> PassOutcome {
+    let PassStart {
+        at: started,
+        cancel,
+    } = start;
     let PassCall { dir, mut meta } = call;
     let events = deps.events;
     let id = meta.id.clone();
+    if cancel.is_cancelled() {
+        // Cancelled before it began: nothing is touched.
+        return conclude(&deps, started, id, FinalOutcome::Cancelled, PassMode::Timed);
+    }
+    // What a cancel writes back: the meta as the pass found it, `ready-to-transcribe`.
+    let mut at_start = meta.clone();
+    at_start.state = CallState::ReadyToTranscribe;
     meta.state = CallState::Transcribing;
     meta.engines.transcription = Some(engine_ref.clone());
     if let Err(e) = write_meta(&dir, &meta) {
@@ -1094,8 +1226,18 @@ fn pass(
             .map_or(0, |t| t.start_offset_ms)
     };
     let mut run = Run {
-        mic: Lane::new(Track::Mic, offset(Track::Mic), sources.mic),
-        system: Lane::new(Track::System, offset(Track::System), sources.system),
+        mic: Lane::new(
+            Track::Mic,
+            offset(Track::Mic),
+            sources.mic,
+            &meta.results.mic,
+        ),
+        system: Lane::new(
+            Track::System,
+            offset(Track::System),
+            sources.system,
+            &meta.results.system,
+        ),
         mode: PassMode::Timed,
         next_seq: 0,
         in_flight: BTreeMap::new(),
@@ -1107,24 +1249,40 @@ fn pass(
         events,
         clock: deps.clock.clone(),
     };
-    run.drive(&env, engine, request);
+    run.drive(&env, engine, request, cancel);
     let mode = run.mode;
     for lane in [&run.mic, &run.system] {
         lane.log_stage(events, FinalStage::Decode, lane.decode);
         lane.log_stage(events, FinalStage::Vad, lane.vad);
         lane.log_stage(events, FinalStage::Upload, lane.upload);
     }
+    if cancel.is_cancelled() {
+        // Q1: no transcript, the meta back as it was, no notice.
+        if let Err(e) = write_meta(&dir, &at_start) {
+            storage_failed(events, StorageKind::Meta, &e);
+        }
+        return conclude(&deps, started, id, FinalOutcome::Cancelled, mode);
+    }
 
-    // Merge the tracks that are done; the lines of each are its result (D4).
+    // Merge the tracks this pass uploaded and splice in the kept ones; the lines of each are
+    // its result (D4).
     let t0 = deps.clock.now();
     let duration_ms = meta.duration_ms.unwrap_or_else(|| {
-        [&run.mic, &run.system]
+        let uploaded = [&run.mic, &run.system]
             .iter()
+            .filter(|l| l.kept.is_none())
             .map(|l| l.offset_ms.saturating_add(l.pos_ms))
-            .min()
-            .unwrap_or(0)
+            .min();
+        uploaded.unwrap_or_else(|| {
+            [&run.mic, &run.system]
+                .iter()
+                .flat_map(|l| l.kept.iter().flatten())
+                .map(|s| u64::try_from(s.end_ms).unwrap_or(0))
+                .max()
+                .unwrap_or(0)
+        })
     });
-    let merged = merge(&MergeInput {
+    let mut merged = merge(&MergeInput {
         call_id: meta.id.clone(),
         title: meta.title.clone(),
         started_at: meta.started_at.clone(),
@@ -1133,7 +1291,7 @@ fn pass(
         engine: engine_ref,
         tracks: [&run.mic, &run.system]
             .into_iter()
-            .filter(|l| l.live())
+            .filter(|l| l.live() && l.kept.is_none())
             .map(|l| TrackInput {
                 track: l.track,
                 start_offset_ms: l.offset_ms,
@@ -1141,9 +1299,13 @@ fn pass(
             })
             .collect(),
     });
-    let result_of = |lane: &Lane| match lane.failed {
-        Some((reason, _)) => TrackResult::Failed { reason },
-        None => TrackResult::Done {
+    splice_kept(&mut merged, [&run.mic, &run.system]);
+    let result_of = |lane: &Lane| match (&lane.failed, &lane.kept) {
+        (Some((reason, _)), _) => TrackResult::Failed { reason: *reason },
+        (None, Some(kept)) => TrackResult::Done {
+            segments: kept.clone(),
+        },
+        (None, None) => TrackResult::Done {
             segments: merged
                 .segments
                 .iter()
@@ -1180,6 +1342,23 @@ fn pass(
         lane.log_stage(events, FinalStage::Write, write_took);
     }
     conclude(&deps, started, id, outcome, mode)
+}
+
+/// Adds the kept segments of the lanes that were not uploaded to `merged`, in the order
+/// `merge` sorts by: start, mic before system, input order (a sort that keeps equal keys).
+fn splice_kept(merged: &mut TranscriptV1, lanes: [&Lane; 2]) {
+    let mut any = false;
+    for lane in lanes {
+        if let Some(kept) = &lane.kept {
+            merged.segments.extend(kept.iter().cloned());
+            any = true;
+        }
+    }
+    if any {
+        merged
+            .segments
+            .sort_by_key(|s| (s.start_ms, s.track != Track::Mic.as_str()));
+    }
 }
 
 /// Both tracks are done (D6): validate, render, then `transcript.md`, `transcript.json` and
@@ -1222,6 +1401,347 @@ fn write_ready(
             failed(meta)
         }
     }
+}
+
+// ---- the queue (T-146) ----------------------------------------------------------------
+//
+// Every pass goes through one `PassQueue`: a FIFO of call folders and one worker thread that
+// runs them one at a time through a `PassRunner`. The queue holds folder paths only; what a
+// pass uploads, which key and which settings it uses are read by the runner when the pass
+// starts (from `meta.json`, the settings snapshot and the key store), so a restart after an
+// exit or crash redoes the same tracks. The meta transition of "Transcribe again" is
+// `transcribe_transition`, the one place that turns a request into a `meta.json` change.
+
+/// Runs one pass over a call folder: reads its `meta.json`, the settings and the key when it
+/// starts, and honours `cancel`.
+pub trait PassRunner: Send + Sync {
+    fn run(&self, dir: &Path, cancel: &CancelToken) -> PassOutcome;
+}
+
+/// The production runner: [`run_pass`] with a fresh settings snapshot and one key read per
+/// pass.
+pub struct ApiPassRunner {
+    settings: Arc<dyn Fn() -> Arc<Settings> + Send + Sync>,
+    creds: Arc<dyn CredentialStore>,
+    primary: Option<Arc<dyn SpeechSpans>>,
+    events: Arc<dyn PassEvents>,
+    clock: Arc<dyn MonotonicClock>,
+}
+
+impl ApiPassRunner {
+    pub fn new(
+        settings: Arc<dyn Fn() -> Arc<Settings> + Send + Sync>,
+        creds: Arc<dyn CredentialStore>,
+        primary: Option<Arc<dyn SpeechSpans>>,
+        events: Arc<dyn PassEvents>,
+        clock: Arc<dyn MonotonicClock>,
+    ) -> ApiPassRunner {
+        ApiPassRunner {
+            settings,
+            creds,
+            primary,
+            events,
+            clock,
+        }
+    }
+}
+
+impl PassRunner for ApiPassRunner {
+    fn run(&self, dir: &Path, cancel: &CancelToken) -> PassOutcome {
+        let deps = PassDeps {
+            primary: self.primary.clone(),
+            events: &*self.events,
+            clock: self.clock.clone(),
+        };
+        let meta = fs::read(dir.join(META_FILE))
+            .and_then(|bytes| serde_json::from_slice::<CallMeta>(&bytes).map_err(io::Error::other));
+        let meta = match meta {
+            Ok(meta) => meta,
+            Err(e) => {
+                // No meta to write the failure into: logged, ended `failed: storage`.
+                storage_failed(&*self.events, StorageKind::Meta, &e);
+                let outcome = FinalOutcome::Failed {
+                    reason: FailReason::Storage,
+                };
+                self.events.log(LogEvent::FinalPassFinished {
+                    outcome,
+                    mode: PassMode::Timed,
+                    ms: 0,
+                });
+                self.events.notice(CallNotice::PassFailed {
+                    reason: FailReason::Storage,
+                });
+                return PassOutcome {
+                    outcome,
+                    mode: PassMode::Timed,
+                };
+            }
+        };
+        let call = PassCall {
+            dir: dir.to_path_buf(),
+            meta,
+        };
+        run_api_pass(call, (self.settings)(), &*self.creds, deps, cancel)
+    }
+}
+
+/// Where a call folder is in the queue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueuePosition {
+    Absent,
+    Queued,
+    Running,
+}
+
+/// The queue's state: the folders waiting, in request order, and the one running.
+#[derive(Default)]
+struct Slots {
+    queued: VecDeque<PathBuf>,
+    running: Option<(PathBuf, CancelToken)>,
+    closing: bool,
+}
+
+impl Slots {
+    fn holds(&self, dir: &Path) -> bool {
+        self.queued.iter().any(|d| d == dir) || self.running.as_ref().is_some_and(|(d, _)| d == dir)
+    }
+}
+
+struct Shared {
+    slots: Mutex<Slots>,
+    /// Signalled on every change of `slots`.
+    changed: Condvar,
+}
+
+impl Shared {
+    fn slots(&self) -> MutexGuard<'_, Slots> {
+        self.slots.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn wait<'a>(&self, guard: MutexGuard<'a, Slots>) -> MutexGuard<'a, Slots> {
+        self.changed
+            .wait(guard)
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// The final-pass queue (FR-027, FR-028, FR-037): at most one pass runs at a time, and the
+/// queued and running folders hold each call at most once, in FIFO order of request. Dropping
+/// it lets the running pass end and drops what is still queued.
+pub struct PassQueue {
+    store: Arc<CallStore>,
+    shared: Arc<Shared>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl PassQueue {
+    pub fn new(store: Arc<CallStore>, runner: Arc<dyn PassRunner>) -> PassQueue {
+        let shared = Arc::new(Shared {
+            slots: Mutex::new(Slots::default()),
+            changed: Condvar::new(),
+        });
+        let worker = {
+            let shared = shared.clone();
+            std::thread::spawn(move || work(&shared, &*runner))
+        };
+        PassQueue {
+            store,
+            shared,
+            worker: Some(worker),
+        }
+    }
+
+    /// Queues `dir` as it is (the stop path, the start-up `Recovery.queue`): no meta change; a
+    /// call queued or running is not queued twice.
+    pub fn enqueue(&self, dir: &Path) {
+        let mut slots = self.shared.slots();
+        push(&mut slots, dir);
+        drop(slots);
+        self.shared.changed.notify_all();
+    }
+
+    /// "Transcribe again": a call this process records is refused `recordingCall` and nothing
+    /// changes; a call queued or running is a no-op `Ok`; otherwise the meta transition
+    /// (`transcribe_transition`), then the call is queued. A meta that cannot be written is
+    /// `ioFailed` and nothing is queued.
+    pub fn transcribe(&self, dir: &Path) -> Result<(), CallError> {
+        if self.store.is_active(dir) {
+            return Err(CallError {
+                code: CallErrorCode::RecordingCall,
+                file: None,
+                reason: None,
+            });
+        }
+        // Held across the transition so the call cannot be queued or started meanwhile.
+        let mut slots = self.shared.slots();
+        if slots.holds(dir) {
+            return Ok(());
+        }
+        transcribe_transition(dir, self.store.is_active(dir))?;
+        push(&mut slots, dir);
+        drop(slots);
+        self.shared.changed.notify_all();
+        Ok(())
+    }
+
+    /// Removes a queued `dir`; for the running one sets its cancel token and returns only
+    /// after its pass has ended. Anything else changes nothing.
+    pub fn cancel(&self, dir: &Path) {
+        let mut slots = self.shared.slots();
+        slots.queued.retain(|d| d != dir);
+        let token = match &slots.running {
+            Some((d, token)) if d == dir => token.clone(),
+            _ => {
+                drop(slots);
+                self.shared.changed.notify_all();
+                return;
+            }
+        };
+        token.cancel();
+        while slots
+            .running
+            .as_ref()
+            .is_some_and(|(d, t)| d == dir && t.is_cancelled())
+        {
+            slots = self.shared.wait(slots);
+        }
+    }
+
+    /// Returns when nothing is queued or running.
+    pub fn wait_idle(&self) {
+        let mut slots = self.shared.slots();
+        while !slots.queued.is_empty() || slots.running.is_some() {
+            slots = self.shared.wait(slots);
+        }
+    }
+
+    pub fn position(&self, dir: &Path) -> QueuePosition {
+        let slots = self.shared.slots();
+        if slots.running.as_ref().is_some_and(|(d, _)| d == dir) {
+            QueuePosition::Running
+        } else if slots.queued.iter().any(|d| d == dir) {
+            QueuePosition::Queued
+        } else {
+            QueuePosition::Absent
+        }
+    }
+}
+
+impl Drop for PassQueue {
+    fn drop(&mut self) {
+        let mut slots = self.shared.slots();
+        slots.closing = true;
+        slots.queued.clear();
+        drop(slots);
+        self.shared.changed.notify_all();
+        if let Some(worker) = self.worker.take() {
+            // The worker catches a runner's panic, so a join error cannot carry one.
+            let _ = worker.join();
+        }
+    }
+}
+
+/// Appends `dir` unless it is queued or running.
+fn push(slots: &mut Slots, dir: &Path) {
+    if !slots.holds(dir) {
+        slots.queued.push_back(dir.to_path_buf());
+    }
+}
+
+/// The worker: takes the oldest request, runs its pass with a fresh token, repeats.
+fn work(shared: &Shared, runner: &dyn PassRunner) {
+    loop {
+        let mut slots = shared.slots();
+        let (dir, token) = loop {
+            if slots.closing {
+                return;
+            }
+            if let Some(dir) = slots.queued.pop_front() {
+                let token = CancelToken::new();
+                slots.running = Some((dir.clone(), token.clone()));
+                break (dir, token);
+            }
+            slots = shared.wait(slots);
+        };
+        drop(slots);
+        shared.changed.notify_all();
+        // A runner panic ends that pass only; the queue goes on (the call stays as the pass
+        // left it on disk and is queued again at the next start if it is still pending).
+        let _ = panic::catch_unwind(AssertUnwindSafe(|| runner.run(&dir, &token)));
+        shared.slots().running = None;
+        shared.changed.notify_all();
+    }
+}
+
+/// The meta transition of "Transcribe again" (`active`: this process records the call):
+/// - `ready` -> `ready-to-transcribe`, failure cleared, both results `pending`, then
+///   `transcript.md` and `transcript.json` removed;
+/// - `failed` -> `ready-to-transcribe`, failure cleared, `done` results kept, the others
+///   `pending`;
+/// - `recovered`, or a `recording` meta no process records (Q2: recovered in place first, as
+///   [`CallStore::recover`] does) -> `ready-to-transcribe`, both results `pending`;
+/// - `ready-to-transcribe` or `transcribing` -> unchanged;
+/// - a `recording` call this process records -> `recordingCall`.
+///
+/// Speakers and title are kept. A folder that is not a call is `notFound`, a damaged one or a
+/// failed write `ioFailed` (Q4).
+fn transcribe_transition(dir: &Path, active: bool) -> Result<(), CallError> {
+    let (mut meta, state) = read_folder_meta(dir, active)?;
+    let pending_unless_done = |r: &TrackResult| match r {
+        TrackResult::Done { .. } => r.clone(),
+        TrackResult::Pending | TrackResult::Failed { .. } => TrackResult::Pending,
+    };
+    let clear_transcript = match state {
+        ListState::Recording => {
+            return Err(CallError {
+                code: CallErrorCode::RecordingCall,
+                file: None,
+                reason: None,
+            })
+        }
+        ListState::Queued | ListState::Transcribing => return Ok(()),
+        // `read_folder_meta` never lists a folder it returns as damaged.
+        ListState::Damaged => return Err(CallError::io_failed(io::ErrorKind::InvalidData)),
+        ListState::Ready => {
+            meta.results = Results {
+                mic: TrackResult::Pending,
+                system: TrackResult::Pending,
+            };
+            true
+        }
+        ListState::Failed(_) => {
+            meta.results = Results {
+                mic: pending_unless_done(&meta.results.mic),
+                system: pending_unless_done(&meta.results.system),
+            };
+            false
+        }
+        ListState::Recovered => {
+            if meta.state == CallState::Recording {
+                mark_recovered(dir, &mut meta);
+            }
+            meta.results = Results {
+                mic: TrackResult::Pending,
+                system: TrackResult::Pending,
+            };
+            false
+        }
+    };
+    meta.state = CallState::ReadyToTranscribe;
+    meta.failure = None;
+    write_meta(dir, &meta).map_err(|e| CallError::io_failed(e.kind()))?;
+    if clear_transcript {
+        for name in [TRANSCRIPT_MD_FILE, TRANSCRIPT_FILE] {
+            match fs::remove_file(dir.join(name)) {
+                Ok(()) => {}
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                // The meta already says `ready-to-transcribe`: the next start queues it and
+                // its pass replaces the file.
+                Err(e) => return Err(CallError::io_failed(e.kind())),
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

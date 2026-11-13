@@ -813,6 +813,11 @@ fn call_events() -> Vec<LogEvent> {
                 mode,
                 ms,
             });
+            all.push(LogEvent::FinalPassFinished {
+                outcome: FinalOutcome::Cancelled,
+                mode,
+                ms,
+            });
             for (reason, _) in FAILS_ALL {
                 all.push(LogEvent::FinalPassFinished {
                     outcome: FinalOutcome::Failed { reason },
@@ -965,6 +970,10 @@ fn every_call_line_formats_exactly_as_the_contract_with_its_level() {
         (
             LogEvent::FinalPassFinished { outcome: FinalOutcome::Ready, mode: PassMode::Timed, ms: 9_000 },
             "INFO final_finished outcome=ready mode=timed ms=9000".into(),
+        ),
+        (
+            LogEvent::FinalPassFinished { outcome: FinalOutcome::Cancelled, mode: PassMode::Timed, ms: 12 },
+            "INFO final_finished outcome=cancelled mode=timed ms=12".into(),
         ),
         (
             LogEvent::FinalPassFinished {

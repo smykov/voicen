@@ -1,0 +1,9 @@
+guarantee: Q5 a redo of one track records that pass's pass_mode
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: test-writer
+--- old
+    meta.failure = None;
+    meta.pass_mode = Some(mode);
+--- new
+    meta.failure = None;
+--- end

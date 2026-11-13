@@ -242,7 +242,7 @@ fn level(event: &LogEvent) -> &'static str {
             None => WARN,
         },
         LogEvent::FinalPassFinished { outcome, .. } => match outcome {
-            FinalOutcome::Ready => INFO,
+            FinalOutcome::Ready | FinalOutcome::Cancelled => INFO,
             FinalOutcome::Failed { .. } => WARN,
         },
     }
@@ -396,6 +396,7 @@ fn write_message(out: &mut String, event: &LogEvent) {
             out.push_str("final_finished");
             match outcome {
                 FinalOutcome::Ready => pair(out, "outcome", "ready"),
+                FinalOutcome::Cancelled => pair(out, "outcome", "cancelled"),
                 FinalOutcome::Failed { reason } => {
                     pair(out, "outcome", "failed");
                     pair(out, "reason", fail_reason(*reason));

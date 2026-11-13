@@ -42,7 +42,7 @@ interface IndicatorState { recording: boolean; reminderVisible: boolean; reminde
 | `calls_get` | `{root, id}` | `CallDetail` | `notFound`, `ioFailed` | FR-034 |
 | `calls_rename` | `{root, id, title}` | `CallSummary` | `emptyName`, `ioFailed` | FR-035 |
 | `calls_rename_speaker` | `{root, id, speaker, name}` | `CallDetail` | `emptyName`, `ioFailed` | FR-035 |
-| `calls_transcribe` | `{root, id}` | `CallSummary` (now `queued`) | `recordingCall`, `notFound` | FR-017, FR-027 |
+| `calls_transcribe` | `{root, id}` | `CallSummary` (now `queued`) | `recordingCall`, `notFound`, `ioFailed` | FR-017, FR-027 |
 | `calls_copy_markdown` | `{root, id}` | `null` | `ioFailed` | FR-036 |
 | `calls_export` | `{root, id, format: "md" \| "json"}` | `{saved: boolean}` (false = dialog cancelled) | `ioFailed{reason}` | FR-036 |
 | `calls_open_folder` | `{root, id}` | `null` | `ioFailed` | FR-033, FR-036 |
@@ -51,6 +51,8 @@ interface IndicatorState { recording: boolean; reminderVisible: boolean; reminde
 | `call_indicator_dismiss` | `{warningId}` | `null` | — | FR-006 |
 | `call_indicator_moved` | `{x, y}` | `null` | — | FR-005 |
 | `call_indicator_state` | — | `IndicatorState` | — | FR-005 (on load) |
+
+`calls_transcribe` (T-146, `docs/decisions/call-final-pass.md` Q2–Q4): `ioFailed` when the meta change cannot be written (nothing is queued); a `recording` call that this process no longer records (listed Recovered) is recovered in place, then queued; a call already queued or transcribing is a no-op that returns `queued`.
 
 Paths cross the wire only as opaque `root` strings that Rust returned in `calls_list`. Every command checks that `root` is the current or a remembered earlier root and that `id` is a folder name of the call-id grammar. Anything else is `notFound`, never a filesystem access (P-009).
 

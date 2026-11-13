@@ -1,0 +1,8 @@
+guarantee: Deleting a transcribing call cancels the pass first (cancel returns before the pass ended)
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: test-writer
+--- old
+            .is_some_and(|(d, t)| d == dir && t.is_cancelled())
+--- new
+            .is_some_and(|(d, t)| d != dir && t.is_cancelled())
+--- end

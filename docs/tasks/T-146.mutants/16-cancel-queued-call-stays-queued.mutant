@@ -1,0 +1,7 @@
+guarantee: Deleting a transcribing call cancels the pass first (a queued call is removed by cancel)
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: test-writer
+--- old
+        slots.queued.retain(|d| d != dir);
+--- new
+--- end

@@ -1,0 +1,8 @@
+guarantee: Q4 a failure in the transcribe transition is ioFailed (swallowed at the transcript removal)
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: test-writer
+--- old
+                Err(e) => return Err(CallError::io_failed(e.kind())),
+--- new
+                Err(_) => {}
+--- end

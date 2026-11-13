@@ -1,0 +1,8 @@
+guarantee: Deleting a transcribing call cancels the pass first (meta.json is left as transcribing)
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: test-writer
+--- old
+        if let Err(e) = write_meta(&dir, &at_start) {
+--- new
+        if let Err(e) = Ok::<(), io::Error>(()) {
+--- end

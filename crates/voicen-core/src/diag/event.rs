@@ -115,8 +115,8 @@ pub enum LogEvent {
         ms: u64,
         chunks: u32,
     },
-    /// `final_finished outcome=<ready|failed> [reason=<FailReason>] mode=<timed|timeless>
-    /// ms=<n>`; `reason` only on `failed` (WARN).
+    /// `final_finished outcome=<ready|failed|cancelled> [reason=<FailReason>]
+    /// mode=<timed|timeless> ms=<n>`; `reason` only on `failed` (WARN).
     FinalPassFinished {
         outcome: FinalOutcome,
         mode: PassMode,

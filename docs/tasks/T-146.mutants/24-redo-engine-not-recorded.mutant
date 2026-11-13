@@ -1,0 +1,7 @@
+guarantee: Q5 a redo of one track records that pass's engines.transcription
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: test-writer
+--- old
+    meta.engines.transcription = Some(engine_ref.clone());
+--- new
+--- end

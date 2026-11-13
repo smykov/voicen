@@ -1,0 +1,10 @@
+guarantee: Failure branch: a 401 gives failed: key (the failed meta is not written as failed)
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: test-writer
+--- old
+    meta.state = CallState::Failed;
+    meta.failure = Some(Failure { reason, track });
+--- new
+    meta.state = CallState::Transcribing;
+    meta.failure = Some(Failure { reason, track });
+--- end

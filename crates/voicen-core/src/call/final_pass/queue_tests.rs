@@ -666,7 +666,130 @@ fn transcribe_on_a_failed_call_resets_only_the_failed_track_and_keeps_the_done_o
     q.wait_idle();
 }
 
+#[test]
+fn transcribe_on_a_released_recording_meta_recovers_it_in_place_and_queues_it() {
+    // Q2: a write failure ended this process's recording (the store released the folder) and
+    // left `meta.json` as `recording`: listed Recovered, "Transcribe" offered. It is recovered
+    // the way `CallStore::recover` does (duration and end from the tracks), then queued.
+    let w = world();
+    let files = w.recording();
+    let dir = files.dir().to_path_buf();
+    w.store.release(&dir);
+    let before = read_meta(&dir);
+    assert_eq!(before.state, CallState::Recording);
+    assert_eq!(before.duration_ms, None);
+    assert_eq!(before.ended_at, None);
+
+    let runner = PureRunner::new(false);
+    let q = queue_of(&w, &runner);
+    assert_eq!(q.transcribe(&dir), Ok(()));
+    wait_for("the pass to start", || runner.started().len() == 1);
+    let meta = read_meta(&dir);
+    assert_eq!(meta.state, CallState::ReadyToTranscribe);
+    assert_eq!(meta.failure, None);
+    assert!(meta.duration_ms.is_some(), "recovered in place: a duration");
+    assert!(meta.ended_at.is_some(), "recovered in place: an end");
+    assert_eq!(meta.results.mic, TrackResult::Pending);
+    assert_eq!(meta.results.system, TrackResult::Pending);
+    runner.gate.open();
+    q.wait_idle();
+    drop(files);
+}
+
+#[test]
+fn a_meta_write_that_fails_in_the_transcribe_transition_is_io_failed_and_queues_nothing() {
+    // Q4. A directory where the atomic write creates its tmp file makes the write fail.
+    let w = world();
+    let dir = w.call(failed_mic_done_system);
+    let before = meta_bytes(&dir);
+    ok(fs::create_dir(dir.join("meta.json.tmp")));
+    let runner = PureRunner::new(true);
+    let q = queue_of(&w, &runner);
+    let err = match q.transcribe(&dir) {
+        Err(e) => e,
+        Ok(()) => panic!("a meta that cannot be written must be refused"),
+    };
+    assert_eq!(err.code, CallErrorCode::IoFailed);
+    q.wait_idle();
+    assert_eq!(meta_bytes(&dir), before, "meta.json is untouched");
+    assert_eq!(q.position(&dir), QueuePosition::Absent);
+    assert!(runner.started().is_empty(), "no pass was started");
+}
+
+#[test]
+fn a_transcript_file_that_cannot_be_removed_is_io_failed_and_queues_nothing() {
+    // Q4, the second write of a `ready` call's transition: the removal of `transcript.md`.
+    let w = world();
+    let dir = w.call(|_| {});
+    let mut meta = read_meta(&dir);
+    ready_with_files(&dir, &mut meta);
+    ok(write_meta(&dir, &meta));
+    ok(fs::remove_file(dir.join("transcript.md")));
+    ok(fs::create_dir(dir.join("transcript.md")));
+    ok(fs::write(dir.join("transcript.md").join("held"), "x"));
+    let runner = PureRunner::new(true);
+    let q = queue_of(&w, &runner);
+    let err = match q.transcribe(&dir) {
+        Err(e) => e,
+        Ok(()) => panic!("a transcript that cannot be removed must be refused"),
+    };
+    assert_eq!(err.code, CallErrorCode::IoFailed);
+    q.wait_idle();
+    assert_eq!(q.position(&dir), QueuePosition::Absent);
+    assert!(runner.started().is_empty(), "no pass was started");
+}
+
+#[test]
+fn transcribe_on_a_folder_that_is_not_a_call_is_not_found() {
+    let w = world();
+    let dir = w._tmp.path().join("calls").join("not-a-call");
+    ok(fs::create_dir_all(&dir));
+    let runner = PureRunner::new(true);
+    let q = queue_of(&w, &runner);
+    let err = match q.transcribe(&dir) {
+        Err(e) => e,
+        Ok(()) => panic!("a folder that is not a call must be refused"),
+    };
+    assert_eq!(err.code, CallErrorCode::NotFound);
+
+    // A call folder (its name is a call id) that is gone.
+    let gone = w.call(|_| {});
+    ok(fs::remove_dir_all(&gone));
+    let err = match q.transcribe(&gone) {
+        Err(e) => e,
+        Ok(()) => panic!("a folder that is gone must be refused"),
+    };
+    assert_eq!(err.code, CallErrorCode::NotFound);
+    q.wait_idle();
+    assert!(runner.started().is_empty());
+}
+
 // ---- guarantee: a redo uploads only what is not done ---------------------------------------------
+
+#[test]
+fn a_redo_of_one_track_records_that_passs_engine_and_mode() {
+    // Q5: the call's `engines.transcription` and `pass_mode` are those of the latest pass,
+    // also when it redid one track only.
+    let w = world();
+    let dir = w.call(|meta| {
+        failed_mic_done_system(meta);
+        meta.engines.transcription = Some(EngineRef::new("api", "old-model"));
+        meta.pass_mode = Some(PassMode::Timeless);
+    });
+    let engine = Engine::new(None);
+    let runner = TestRunner::new(&engine, CALL_MS);
+    let q = PassQueue::new(w.store.clone(), runner.clone());
+    assert_eq!(q.transcribe(&dir), Ok(()));
+    q.wait_idle();
+    let meta = read_meta(&dir);
+    assert_eq!(meta.state, CallState::Ready);
+    assert_eq!(
+        meta.engines.transcription,
+        Some(EngineRef::new("api", "m1")),
+        "this pass's engine"
+    );
+    assert_eq!(meta.pass_mode, Some(PassMode::Timed), "this pass's mode");
+}
 
 #[test]
 fn a_redo_of_a_failed_mic_sends_only_mic_chunks_and_keeps_the_system_lines_and_speaker_names() {

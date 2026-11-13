@@ -1,0 +1,19 @@
+guarantee: Deleting a transcribing call cancels the pass first (a cancelled pass still dispatches requests)
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: test-writer
+--- old
+                while self.in_flight.len() < MAX_IN_FLIGHT && !cancel.is_cancelled() {
+                    let timeless = self.mode == PassMode::Timeless;
+                    let order = self.next_seq;
+                    self.mic.refill(env, timeless, order);
+                    self.system.refill(env, timeless, order);
+                    if cancel.is_cancelled() {
+                        break;
+                    }
+--- new
+                while self.in_flight.len() < MAX_IN_FLIGHT {
+                    let timeless = self.mode == PassMode::Timeless;
+                    let order = self.next_seq;
+                    self.mic.refill(env, timeless, order);
+                    self.system.refill(env, timeless, order);
+--- end

@@ -1,0 +1,8 @@
+guarantee: Transcribe again on a failed call redoes only the failed track (a done track is uploaded again)
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: test-writer
+--- old
+            TrackResult::Done { segments } => Some(segments.clone()),
+--- new
+            TrackResult::Done { .. } => None,
+--- end

@@ -1,0 +1,10 @@
+guarantee: Deleting a transcribing call cancels the pass first (a cancelled pass writes a transcript)
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: test-writer
+--- old
+    if cancel.is_cancelled() {
+        // Q1: no transcript, the meta back as it was, no notice.
+--- new
+    if false {
+        // Q1: no transcript, the meta back as it was, no notice.
+--- end

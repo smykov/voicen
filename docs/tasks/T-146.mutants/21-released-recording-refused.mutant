@@ -1,0 +1,12 @@
+guarantee: Q2 transcribe of a released recording meta recovers it in place and queues it (refused instead)
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: test-writer
+--- old
+            if meta.state == CallState::Recording {
+                mark_recovered(dir, &mut meta);
+            }
+--- new
+            if meta.state == CallState::Recording {
+                return Err(CallError::not_found());
+            }
+--- end

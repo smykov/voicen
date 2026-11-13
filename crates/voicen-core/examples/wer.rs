@@ -504,6 +504,8 @@ fn transcribe_item(config: &Config, item: &Item) -> (Option<PassLine>, Result<St
     let result = match outcome.outcome {
         FinalOutcome::Ready => hypothesis(&dir).ok_or_else(|| code_of(FailReason::Storage)),
         FinalOutcome::Failed { reason } => Err(code_of(reason)),
+        // `run_pass` takes no cancel token, so its pass is never cancelled.
+        FinalOutcome::Cancelled => Err("cancelled".to_string()),
     };
     (Some(line), result)
 }

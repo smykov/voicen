@@ -1,0 +1,8 @@
+guarantee: Q4 a meta write failure in the transcribe transition is ioFailed (swallowed at the write)
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: test-writer
+--- old
+    write_meta(dir, &meta).map_err(|e| CallError::io_failed(e.kind()))?;
+--- new
+    let _ = write_meta(dir, &meta);
+--- end

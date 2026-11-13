@@ -1,0 +1,7 @@
+guarantee: Q2 transcribe of a released recording meta recovers it in place and queues it (no recovery step)
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: test-writer
+--- old
+                mark_recovered(dir, &mut meta);
+--- new
+--- end

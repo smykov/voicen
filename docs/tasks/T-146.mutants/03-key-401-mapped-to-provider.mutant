@@ -1,0 +1,10 @@
+guarantee: Failure branch: a 401 gives failed: key
+file: crates/voicen-core/src/engine/openai.rs
+added_by: test-writer
+--- old
+    match reason {
+        FailureReason::InvalidApiKey => FailReason::Key,
+--- new
+    match reason {
+        FailureReason::InvalidApiKey => FailReason::Provider,
+--- end

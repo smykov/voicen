@@ -312,7 +312,7 @@ impl CallStore {
         self.active.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn is_active(&self, dir: &Path) -> bool {
+    pub(crate) fn is_active(&self, dir: &Path) -> bool {
         self.active().iter().any(|d| d == dir)
     }
 
@@ -449,12 +449,7 @@ impl CallStore {
             let dir = entry.root.join(entry.id.as_str());
             let state = match meta.state {
                 CallState::Recording if !self.is_active(&dir) => {
-                    let duration_ms = recovered_duration_ms(&dir, &meta);
-                    meta.state = CallState::Recovered;
-                    meta.duration_ms = Some(duration_ms);
-                    if let Some(ended) = ended_at(&meta.started_at, duration_ms) {
-                        meta.ended_at = Some(ended);
-                    }
+                    mark_recovered(&dir, &mut meta);
                     ListState::Recovered
                 }
                 CallState::Transcribing => {
@@ -492,6 +487,36 @@ impl CallStore {
         });
         Recovery { recovered, queue }
     }
+}
+
+/// The per-folder step of [`CallStore::recover`] for a `recording` call that is not active:
+/// `meta` becomes `recovered`, `duration_ms` the shorter readable track and `ended_at`
+/// `started_at` plus that duration. Reads the tracks only; the caller writes `meta`.
+pub(crate) fn mark_recovered(dir: &Path, meta: &mut CallMeta) {
+    let duration_ms = recovered_duration_ms(dir, meta);
+    meta.state = CallState::Recovered;
+    meta.duration_ms = Some(duration_ms);
+    if let Some(ended) = ended_at(&meta.started_at, duration_ms) {
+        meta.ended_at = Some(ended);
+    }
+}
+
+/// The meta of the call folder `dir` and how it lists, read and checked as
+/// [`CallStore::list`] reads it (`active`: this process records it). A path that is not a
+/// call folder is `notFound`, a damaged folder `ioFailed`.
+pub(crate) fn read_folder_meta(
+    dir: &Path,
+    active: bool,
+) -> Result<(CallMeta, ListState), CallError> {
+    let id = dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .and_then(CallId::parse)
+        .ok_or_else(CallError::not_found)?;
+    if !dir.is_dir() {
+        return Err(CallError::not_found());
+    }
+    read_meta(dir, &id, active).ok_or_else(unusable)
 }
 
 /// The recovered length of a crashed call: the shorter of its two tracks, each its start

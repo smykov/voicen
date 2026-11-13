@@ -133,7 +133,7 @@ As in §7 schema 1: `start_ms`, `end_ms` (relative to `started_at` = track `star
 
 | Field | Type | Rule |
 |---|---|---|
-| `queue` | FIFO of `(root, CallId, TrackSet)` | One pass at a time (FR-028). New calls are appended at stop. At start, `ready-to-transcribe` calls are enqueued oldest first. |
+| `queue` | FIFO of call folders | One pass at a time (FR-028). The track set is not queued: it is read from `meta.json` `results` when the pass starts (T-146, `docs/decisions/call-final-pass.md`). New calls are appended at stop. At start, `ready-to-transcribe` calls are enqueued oldest first. |
 | `in_flight` | ≤ 3 chunk requests | Decided (#187): at most 3 requests in flight; the decoder and the chunker still hold one chunk at a time (FR-018 applies to decoding). |
 | `engine_mode` | `timed` → `timeless` (one way, per pass) | FR-024. |
 | `cancel` | token | Deleting a transcribing call cancels its pass first (FR-037). |
