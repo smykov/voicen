@@ -1,0 +1,8 @@
+guarantee: I3: get_pending never follows a link named like the pattern
+file: crates/voicen-core/src/pending.rs
+added_by: test-writer
+--- old
+    if !fs::symlink_metadata(path)?.file_type().is_file() {
+--- new
+    if !fs::metadata(path)?.file_type().is_file() {
+--- end

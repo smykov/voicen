@@ -1,0 +1,8 @@
+guarantee: I3: get_pending reads regular files only
+file: crates/voicen-core/src/pending.rs
+added_by: test-writer
+--- old
+    if !fs::symlink_metadata(path)?.file_type().is_file() {
+--- new
+    if false {
+--- end
