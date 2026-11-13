@@ -12,8 +12,11 @@
 //!
 //! The API these tests pin (the developer may rename, the tests follow):
 //! - `DictationPorts { .., temp_audio: Arc<dyn TempAudioStore> }`;
-//! - `voicen_core::pending::FsTempAudioStore::new(dir, roots)`, with `roots` the
-//!   service's `SettingsService::call_roots()`.
+//! - `voicen_lib::dictation::pending_store<R: Runtime>(app: &AppHandle<R>, dir: PathBuf)
+//!   -> Arc<dyn TempAudioStore>`: the one constructor of the shipped store, called by
+//!   `run()`'s `release_ports` (with `paths::temp_audio_dir()`) and by these tests. It reads
+//!   the managed `Arc<SettingsService>` (`try_state`) for `call_roots()` at every call and
+//!   fails closed (no delete, no write) when none is managed.
 //!
 //! Data: a `TempDir` per test (the rig's data dir); the store's folder is
 //! `<data>/tmp/audio`. No network, no real audio.
@@ -26,21 +29,24 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use tauri::RunEvent;
-use voicen_core::pending::FsTempAudioStore;
+use tauri::test::{mock_builder, mock_context, noop_assets};
+use tauri::{Manager, RunEvent};
 use voicen_core::platform::{
     FakeAudioSource, FakeClipboard, FakeIndicator, FakePaster, TempAudioStore,
 };
 use voicen_core::settings::{EngineKind, LoadOutcome};
-use voicen_lib::dictation::{start_dictation, DictationHandle, DictationPorts};
+use voicen_core::test_support::TempDir;
+use voicen_lib::dictation::{pending_store, start_dictation, DictationHandle, DictationPorts};
 use win32_support::{assert_hotkey_free, engine_factory, serial, AppRig, TextEngine};
 
-/// The store over `<data>/tmp/audio`, with the roots of the rig's own settings service.
+/// The store over `<data>/tmp/audio`, from the shell's own constructor (the one `run()`'s
+/// `release_ports` calls with `paths::temp_audio_dir()`). The rig's app manages the same
+/// `Arc<SettingsService>` as `rig.service` (`build_app` -> `assemble` -> `app.manage(
+/// Arc::clone(&service))`), so `pending_store`'s `try_state` finds the roots of that service.
 fn store_of(rig: &AppRig) -> (Arc<dyn TempAudioStore>, PathBuf) {
     let folder = rig.dir.path().join("tmp").join("audio");
-    let service = Arc::clone(&rig.service);
-    let store = FsTempAudioStore::new(folder.clone(), Arc::new(move || service.call_roots()));
-    (Arc::new(store), folder)
+    let store = pending_store(rig.app.handle(), folder.clone());
+    (store, folder)
 }
 
 fn start(rig: &AppRig, store: Arc<dyn TempAudioStore>) -> DictationHandle {
@@ -185,5 +191,34 @@ fn a_calls_root_equal_to_the_store_folder_stops_both_cleanups() {
     assert!(
         folder.join("pending-5.wav").is_file(),
         "the Exit cleanup deleted a file under a calls root"
+    );
+}
+
+#[test]
+fn the_shipped_store_fails_closed_without_a_managed_settings_service() {
+    // T-209 invariant I3 (review #1): an app with no managed `Arc<SettingsService>` gives the
+    // store no roots, so it cannot tell a calls folder from its own and neither cleanup
+    // nor `delete_pending` removes anything. The app is a bare mock app (no `build_app`).
+    // Bite: `pending_store` treating a missing service as "no roots" (allow all), a
+    // `unwrap_or_default()` on the roots.
+    let dir = TempDir::new();
+    let app = mock_builder()
+        .build(mock_context(noop_assets()))
+        .expect("bare mock app builds");
+    assert!(
+        app.try_state::<Arc<voicen_core::settings::service::SettingsService>>()
+            .is_none(),
+        "premise: no settings service is managed"
+    );
+    let folder = dir.path().join("tmp").join("audio");
+    plant(&folder, &["pending-3.wav", "notes.txt"]);
+
+    let store = pending_store(app.handle(), folder.clone());
+    let _ = store.delete_all();
+
+    assert_eq!(
+        names(&folder),
+        vec!["notes.txt".to_string(), "pending-3.wav".to_string()],
+        "a store without roots deleted a file"
     );
 }
