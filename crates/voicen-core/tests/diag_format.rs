@@ -300,6 +300,11 @@ fn all_warning_kinds() -> Vec<(WarningKind, &'static str)> {
         (WarningKind::TestConnectionFailed, "test_connection_failed"),
         // T-174: a hotkey-thread commit/abort not answered within the registrar's budget.
         (WarningKind::HotkeyRequestTimeout, "hotkey_request_timeout"),
+        // T-209: the start cleanup of the pending-audio store failed.
+        (
+            WarningKind::PendingAudioCleanupFailed,
+            "pending_audio_cleanup_failed",
+        ),
     ];
     let seen: BTreeSet<usize> = all
         .iter()
@@ -320,9 +325,10 @@ fn all_warning_kinds() -> Vec<(WarningKind, &'static str)> {
             WarningKind::LogsFolderFailed => 13,
             WarningKind::TestConnectionFailed => 14,
             WarningKind::HotkeyRequestTimeout => 15,
+            WarningKind::PendingAudioCleanupFailed => 16,
         })
         .collect();
-    assert_eq!(seen.len(), 16, "every WarningKind once");
+    assert_eq!(seen.len(), 17, "every WarningKind once");
     all
 }
 

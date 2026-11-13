@@ -37,7 +37,9 @@ use voicen_core::platform::{
 use voicen_core::settings::{EngineKind, LoadOutcome};
 use voicen_core::test_support::TempDir;
 use voicen_lib::dictation::{pending_store, start_dictation, DictationHandle, DictationPorts};
-use win32_support::{assert_hotkey_free, engine_factory, serial, AppRig, TextEngine};
+use win32_support::{
+    assert_hotkey_free, engine_factory, has_pair, headed, serial, AppRig, TextEngine,
+};
 
 /// The store over `<data>/tmp/audio`, from the shell's own constructor (the one `run()`'s
 /// `release_ports` calls with `paths::temp_audio_dir()`). The rig's app manages the same
@@ -221,4 +223,53 @@ fn the_shipped_store_fails_closed_without_a_managed_settings_service() {
         vec!["notes.txt".to_string(), "pending-3.wav".to_string()],
         "a store without roots deleted a file"
     );
+}
+
+#[test]
+fn a_refused_start_cleanup_writes_one_warning_line_without_the_path() {
+    // T-209 review #1 finding #2: a failed start cleanup (here the calls-roots guard refuses,
+    // the root equal to the store folder) is not silent. `start_dictation` writes exactly one
+    // `warning kind=pending_audio_cleanup_failed` line, the kind and the OS code only: no path
+    // of the folder, no file name. The session still starts. Bite: `let _ = delete_all()`
+    // (no line), the line written per file, or the error text formatted into it.
+    let _serial = serial();
+    assert_hotkey_free();
+    let rig = AppRig::new(EngineKind::Api);
+    let (store, folder) = store_of(&rig);
+    let mut draft = (*rig.service.snapshot()).clone();
+    draft.calls.storage_root = Some(folder.clone());
+    plant(&folder, &["pending-6.wav", "pending-7.wav"]);
+    let saved = rig
+        .service
+        .save(voicen_core::settings::service::SaveRequest {
+            settings: draft,
+            keys: voicen_core::secrets::KeyEdits::default(),
+        });
+    assert!(
+        matches!(
+            saved,
+            voicen_core::settings::service::SaveOutcome::Saved { .. }
+        ),
+        "premise: the root is saved"
+    );
+
+    let _dictation = start(&rig, store);
+
+    let lines = rig.log_lines();
+    let warnings: Vec<String> = headed(&lines, "warning")
+        .into_iter()
+        .filter(|l| has_pair(l, "kind", "pending_audio_cleanup_failed"))
+        .collect();
+    assert_eq!(
+        warnings.len(),
+        1,
+        "one pending_audio_cleanup_failed line per failed start cleanup: {warnings:?}"
+    );
+    let folder_text = folder.to_string_lossy().to_string();
+    for line in &lines {
+        assert!(
+            !line.contains(&folder_text) && !line.contains("pending-6"),
+            "a log line names the pending-audio folder or a file: {line}"
+        );
+    }
 }

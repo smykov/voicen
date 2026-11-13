@@ -6,8 +6,9 @@
 //! energy fallback (T-102), `ChatPostProcessor` (T-074: stateless,
 //! settings, key and timeouts come from each job, so the app and the tests run the
 //! same processor), the given pending-audio store (T-209: `run()` passes
-//! `voicen_core::pending::FsTempAudioStore` over `paths::temp_audio_dir()`; its
-//! `delete_all` runs before the session starts, and the store is managed as
+//! [`pending_store`] over `paths::temp_audio_dir()`; its `delete_all` runs before
+//! the session starts, a failure writes one `pending_audio_cleanup_failed` line, and
+//! the store is managed as
 //! [`PendingAudio`] for the `RunEvent::Exit` cleanup) and [`SettingsRequests`];
 //! manages it as
 //! `Arc<DictationSession>` (the type the tray's menu-open handler looks up),
@@ -24,6 +25,7 @@
 //! post.
 
 use std::io;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use tauri::{AppHandle, Manager, Runtime};
@@ -31,6 +33,7 @@ use voicen_core::diag::{
     DetectorTag, Log, LogEvent, LogObserver, LogsNotice, LogsNoticeSink, WarningKind,
 };
 use voicen_core::dictation::{DictationSession, SessionDeps};
+use voicen_core::pending::{CallRootsFn, FsTempAudioStore};
 use voicen_core::pipeline::{EngineFactory, PipelineDeps};
 use voicen_core::platform::{
     AudioSource, Clipboard, Indicator, Paster, ShellRequests, TempAudioStore,
@@ -64,9 +67,24 @@ pub struct DictationPorts {
     /// The gate's primary detector: `vad::load_bundled` in `run()`, explicit in the tests.
     /// An `Err` makes the energy detector decide (one `vad_fallback` at the first decision).
     pub detector: Result<Box<dyn SpeechDetector>, VadError>,
-    /// The pending recording's audio (T-209, FR-032): `FsTempAudioStore` over
-    /// `paths::temp_audio_dir()` and the managed service's `call_roots` in `run()`.
+    /// The pending recording's audio (T-209, FR-032): [`pending_store`] over
+    /// `paths::temp_audio_dir()` in `run()`.
     pub temp_audio: Arc<dyn TempAudioStore>,
+}
+
+/// The pending-audio store of `app` (T-209, FR-032): `FsTempAudioStore` over `dir`,
+/// guarded by the managed `Arc<SettingsService>`'s `call_roots`, looked up through
+/// `try_state` at every write and delete (the one resolution of the roots, P-010).
+/// Without a managed service the roots are unknown and the store fails closed: it
+/// writes and deletes nothing. The one constructor of the shipped store: `run()`
+/// passes `paths::temp_audio_dir()`, the shell tests their own folder.
+pub fn pending_store<R: Runtime>(app: &AppHandle<R>, dir: PathBuf) -> Arc<dyn TempAudioStore> {
+    let app = app.clone();
+    let roots: CallRootsFn = Arc::new(move || {
+        app.try_state::<Arc<SettingsService>>()
+            .and_then(|service| service.call_roots())
+    });
+    Arc::new(FsTempAudioStore::new(dir, roots))
 }
 
 /// The app's pending-audio store, managed by [`start_dictation`] so the
@@ -133,8 +151,14 @@ pub fn start_dictation<R: Runtime>(
     } = ports;
     // FR-032: the stale files of an earlier session go before the session exists, so
     // no put can race it. A failure (the calls-roots guard refused, an I/O error) is
-    // not fatal: nothing is deleted and the next start retries.
-    let _ = temp_audio.delete_all();
+    // not fatal: one warning line with the kind and the OS code only (no path, no OS
+    // text, P-009), and the next start retries.
+    if let Err(err) = temp_audio.delete_all() {
+        log.write(LogEvent::Warning {
+            kind: WarningKind::PendingAudioCleanupFailed,
+            os_code: err.raw_os_error(),
+        });
+    }
     let _ = app.manage(PendingAudio(Arc::clone(&temp_audio)));
     let cancel_key = CancelKeyHandle::new();
     let gate = SpeechGate::new(detector, EnergyDetector::new());

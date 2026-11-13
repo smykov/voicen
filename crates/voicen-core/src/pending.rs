@@ -93,7 +93,7 @@ impl TempAudioStore for FsTempAudioStore {
     }
 
     fn get_pending(&self, id: PendingId) -> io::Result<AudioBuffer> {
-        let bytes = fs::read(self.file(id))?;
+        let bytes = read_regular(&self.file(id))?;
         decode(&bytes)
             .map(AudioBuffer::from_16k_mono)
             .ok_or_else(|| io::Error::new(ErrorKind::InvalidData, "not a pending audio file"))
@@ -149,6 +149,18 @@ fn write_synced(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let mut f = fs::File::create(path)?;
     f.write_all(bytes)?;
     f.sync_all()
+}
+
+/// Reads `path` when it is a regular file (not followed, like [`remove_regular`]); a
+/// link, a directory or anything else is `InvalidData`, a missing file `NotFound`.
+fn read_regular(path: &Path) -> io::Result<Vec<u8>> {
+    if !fs::symlink_metadata(path)?.file_type().is_file() {
+        return Err(io::Error::new(
+            ErrorKind::InvalidData,
+            "not a regular pending audio file",
+        ));
+    }
+    fs::read(path)
 }
 
 /// Removes `path` when it is a regular file (not followed); a missing file is `Ok`.
@@ -567,6 +579,24 @@ mod tests {
             "delete_pending removed a link"
         );
         assert_eq!(fs::read(&outside).expect("target"), b"keep");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn get_pending_does_not_follow_a_link_named_like_the_pattern() {
+        // Bite: fs::read on the name (followed): the target outside the folder, a
+        // valid pending WAV, is read back as the recording. A link never counts (I3).
+        let w = World::new();
+        fs::create_dir_all(w.folder()).expect("folder");
+        let outside = w.base.path().join("outside.wav");
+        fs::write(&outside, wav::encode(&audio(5))).expect("outside");
+        let link = w.folder().join("pending-5.wav");
+        std::os::unix::fs::symlink(&outside, &link).expect("link");
+        let store = w.store();
+        assert!(
+            store.get_pending(PendingId(5)).is_err(),
+            "get_pending read through a link"
+        );
     }
 
     // ---- the calls-roots guard -----------------------------------------------

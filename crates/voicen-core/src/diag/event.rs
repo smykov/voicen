@@ -277,6 +277,10 @@ pub enum WarningKind {
     /// budget (T-174); the request stays queued and runs late, so until then
     /// the registered hotkey may differ from the saved one.
     HotkeyRequestTimeout,
+    /// The pending-audio files of an earlier session could not be removed when
+    /// dictation started (T-209, FR-032): an I/O error or the calls-roots guard
+    /// refused; the next start retries.
+    PendingAudioCleanupFailed,
 }
 
 /// One dictation: the engine, the outcome and the FR-20 timings plus the

@@ -329,27 +329,8 @@ fn release_ports<R: Runtime>(app: &AppHandle<R>, shared: SharedPorts) -> dictati
             .resource_dir()
             .map_err(|_| voicen_core::vad::VadError::Unavailable)
             .and_then(|dir| vad::load_bundled(&dir)),
-        temp_audio: release_temp_audio(app),
+        temp_audio: dictation::pending_store(app, paths::temp_audio_dir()),
     }
-}
-
-/// The pending-audio store (T-209, FR-032): `paths::temp_audio_dir()`, guarded by
-/// the managed `SettingsService`'s `call_roots` (read at every write and delete, the
-/// one resolution of the roots). Without a managed service the roots are unknown and
-/// the store fails closed.
-#[cfg(windows)]
-fn release_temp_audio<R: Runtime>(
-    app: &AppHandle<R>,
-) -> Arc<dyn voicen_core::platform::TempAudioStore> {
-    let service = app
-        .try_state::<Arc<SettingsService>>()
-        .map(|service| Arc::clone(&service));
-    let roots: voicen_core::pending::CallRootsFn =
-        Arc::new(move || service.as_ref().and_then(|service| service.call_roots()));
-    Arc::new(voicen_core::pending::FsTempAudioStore::new(
-        paths::temp_audio_dir(),
-        roots,
-    ))
 }
 
 #[cfg(not(windows))]
