@@ -1,0 +1,13 @@
+guarantee: AC-6 / review 1 #1 (P-004/P-005, P-009): a retry whose pending audio cannot be read back empties the slot, deletes the audio and emits one Warning{pending_audio_unreadable}; no engine, no message, no offer (read error swallowed into empty audio: the engine runs)
+file: crates/voicen-core/src/pipeline.rs
+added_by: test-writer
+--- old
+            Ok(audio) => audio,
+            Err(_) => {
+                // The audio can never be retried
+--- new
+            Ok(audio) => audio,
+            Err(_) if true => AudioBuffer::from_16k_mono(vec![0; 16_000]),
+            Err(_) => {
+                // The audio can never be retried
+--- end

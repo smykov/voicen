@@ -1,0 +1,8 @@
+guarantee: AC-6 / review 1 #1 (P-009): Warning{pending_audio_unreadable} is its own closed WARN line `warning kind=pending_audio_unreadable` (format writes the wrong literal)
+file: crates/voicen-core/src/diag/format.rs
+added_by: test-writer
+--- old
+        WarningKind::PendingAudioUnreadable => "pending_audio_unreadable",
+--- new
+        WarningKind::PendingAudioUnreadable => "pending_audio",
+--- end

@@ -1,0 +1,16 @@
+guarantee: AC-6 / review 1 #1 (P-004/P-005, P-009): a retry whose pending audio cannot be read back empties the slot, deletes the audio and emits one Warning{pending_audio_unreadable}; no engine, no message, no offer (slot emptied, audio left in the store)
+file: crates/voicen-core/src/pipeline.rs
+added_by: test-writer
+--- old
+                self.drop_pending(entry.id);
+                self.emit(DictationEvent::Warning {
+                    code: WarningCode::PendingAudioUnreadable,
+                });
+                return None;
+--- new
+                lock(&self.pending).take();
+                self.emit(DictationEvent::Warning {
+                    code: WarningCode::PendingAudioUnreadable,
+                });
+                return None;
+--- end

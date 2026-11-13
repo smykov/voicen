@@ -1,0 +1,15 @@
+guarantee: T-007 Q7 / review 1 #3: a retry writes its own dictation line under the original rec=, without press_to_frame_ms, duration_ms, end or detector (a JobFinished without an open record writes no line: the retry line dropped)
+file: crates/voicen-core/src/diag/observer.rs
+added_by: test-writer
+--- old
+            } => {
+                let record = self.record(recording);
+                record.local = local;
+--- new
+            } => {
+                if !self.records.contains_key(&recording) {
+                    return None;
+                }
+                let record = self.record(recording);
+                record.local = local;
+--- end
