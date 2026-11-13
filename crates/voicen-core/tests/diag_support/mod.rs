@@ -445,6 +445,7 @@ pub const WARNING_KINDS: &[&str] = &[
     "vad_fallback",
     "esc_unavailable",
     "toast_failed",
+    "pending_audio_unreadable",
     "models_cleanup_failed",
     "settings_window_failed",
     "change_bridge_failed",

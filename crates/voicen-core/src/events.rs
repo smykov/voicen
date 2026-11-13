@@ -30,12 +30,17 @@ pub enum OutcomeCode {
     Failed,
 }
 
-/// The code of a `Warning`: `vad_fallback`, `esc_unavailable`, `toast_failed`.
+/// The code of a `Warning`: `vad_fallback`, `esc_unavailable`, `toast_failed`,
+/// `pending_audio_unreadable`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WarningCode {
     VadFallback,
     EscUnavailable,
     ToastFailed,
+    /// A retry found a pending recording whose audio the store could not give
+    /// back (`TempAudioStore::get_pending` failed, T-007): the slot is emptied and
+    /// the audio deleted; nothing is transcribed. No OS text, no audio.
+    PendingAudioUnreadable,
 }
 
 /// What the post-processing stage did for one job (T-076, spec 003 FR-014): its

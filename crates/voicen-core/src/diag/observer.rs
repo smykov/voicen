@@ -1,5 +1,12 @@
-//! The release `PipelineObserver` (T-008): one dictation line per recording,
+//! The release `PipelineObserver` (T-008): one dictation line per recording run,
 //! joined by `RecordingId`, never by event order.
+//!
+//! A retry of the pending recording (T-007 Q7) reuses the original `RecordingId`:
+//! its job closes a record of its own and writes its own `dictation rec=<n>` line
+//! under the original `rec=`. That line has no start fields (`press_to_frame_ms`,
+//! `duration_ms`, `end`: the recording's own line carried them), no `detector`
+//! (a retry skips the speech gate) and no extra key;
+//! a reader tells it apart by the repeated `rec=` without start fields.
 //!
 //! Closing rules: `Delivered` for a text outcome (it follows `JobFinished{Text}`,
 //! joined by `seq`); `JobFinished` for no-speech or failed; `RecordingEnded{TooShort}`
@@ -227,6 +234,7 @@ impl Open {
                     WarningCode::VadFallback => WarningKind::VadFallback,
                     WarningCode::EscUnavailable => WarningKind::EscUnavailable,
                     WarningCode::ToastFailed => WarningKind::ToastFailed,
+                    WarningCode::PendingAudioUnreadable => WarningKind::PendingAudioUnreadable,
                 },
                 os_code: None,
             }),

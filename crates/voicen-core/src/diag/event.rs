@@ -239,6 +239,9 @@ pub enum WarningKind {
     EscUnavailable,
     /// `events::WarningCode::ToastFailed`.
     ToastFailed,
+    /// `events::WarningCode::PendingAudioUnreadable` (T-007): a retry's pending
+    /// audio could not be read back; the pending recording is gone.
+    PendingAudioUnreadable,
     /// Unfinished model downloads could not be removed at start.
     ModelsCleanupFailed,
     /// The settings window could not be opened at start.

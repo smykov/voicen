@@ -4322,6 +4322,44 @@ fn a_retry_with_nothing_pending_runs_no_engine_and_changes_nothing() {
 }
 
 #[test]
+fn a_retry_whose_audio_cannot_be_read_back_empties_the_slot_and_warns() {
+    // T-007 review 1 #1 (P-004/P-005, P-009): the store holds the pending id but
+    // `get_pending` fails. The retry runs no engine, shows and offers nothing, sets
+    // no tray Error and leaves the overlay off Processing (the no-op checks); the
+    // slot is emptied (tray without Retry), the audio delete is attempted, and one
+    // `Warning{pending_audio_unreadable}` is emitted, after the failed read. The
+    // user-facing notice is T-209's. Bite: the read error swallowed without a
+    // warning, the slot kept (Retry stays on the tray), the audio left behind, an
+    // engine run on missing audio, a message or offer for it.
+    let (rig, id) = failed_once(vec![Ok(TEXT.to_string())], Custom::default());
+    rig.store.set_fail_get(true);
+    assert_retry_is_a_no_op(&rig, Some(id), past() + ms(20_000));
+
+    let calls = rig.store.calls();
+    let get_at = calls.iter().position(|c| *c == StoreCall::Get(id));
+    let delete_at = calls.iter().position(|c| *c == StoreCall::Delete(id));
+    assert!(
+        get_at.is_some() && delete_at.is_some() && get_at < delete_at,
+        "the read is tried, then the audio deleted: {calls:?}"
+    );
+    assert_eq!(
+        rig.store.stored_ids(),
+        Vec::<PendingId>::new(),
+        "the unreadable audio is left in the store"
+    );
+    assert!(
+        eventually(|| rig.indicator.trays().last() == Some(&(TrayState::Idle, false))),
+        "the slot is not empty after the unreadable retry (Retry still on the tray): {:?}",
+        rig.indicator.trays()
+    );
+    assert_eq!(
+        warnings(&rig.events()),
+        vec![WarningCode::PendingAudioUnreadable],
+        "exactly one typed warning for the unreadable pending audio"
+    );
+}
+
+#[test]
 fn a_retry_is_ordered_after_the_jobs_queued_before_the_click_and_keeps_the_click_settings() {
     // T-007 Acceptance / I2 (spec 001 Clarification 3, FR-029: a retry enters the order
     // at the click; Clarification 4: the settings current at the click). A fails (503,

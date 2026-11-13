@@ -369,12 +369,14 @@ mod fakes {
         DeleteAll,
     }
 
-    /// In-memory [`TempAudioStore`] with a call log and a put-fail switch.
+    /// In-memory [`TempAudioStore`] with a call log and put-fail and get-fail
+    /// switches.
     #[derive(Default)]
     pub struct FakeTempAudioStore {
         audio: Mutex<BTreeMap<PendingId, AudioBuffer>>,
         calls: Mutex<Vec<StoreCall>>,
         fail_put: Mutex<bool>,
+        fail_get: Mutex<bool>,
     }
 
     fn not_found() -> std::io::Error {
@@ -390,6 +392,12 @@ mod fakes {
         /// recorded).
         pub fn set_fail_put(&self, fail: bool) {
             *lock(&self.fail_put) = fail;
+        }
+
+        /// While on, `get_pending` returns an error even for a stored id (still
+        /// recorded; the audio stays stored).
+        pub fn set_fail_get(&self, fail: bool) {
+            *lock(&self.fail_get) = fail;
         }
 
         /// Every trait call so far, in order.
@@ -419,6 +427,9 @@ mod fakes {
 
         fn get_pending(&self, id: PendingId) -> std::io::Result<AudioBuffer> {
             self.record(StoreCall::Get(id));
+            if *lock(&self.fail_get) {
+                return Err(std::io::Error::other("fake get failure"));
+            }
             lock(&self.audio).get(&id).cloned().ok_or_else(not_found)
         }
 

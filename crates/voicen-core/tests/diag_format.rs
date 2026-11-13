@@ -286,6 +286,11 @@ fn all_warning_kinds() -> Vec<(WarningKind, &'static str)> {
         (WarningKind::VadFallback, "vad_fallback"),
         (WarningKind::EscUnavailable, "esc_unavailable"),
         (WarningKind::ToastFailed, "toast_failed"),
+        // T-007: a retry whose pending audio the store could not give back.
+        (
+            WarningKind::PendingAudioUnreadable,
+            "pending_audio_unreadable",
+        ),
         (WarningKind::ModelsCleanupFailed, "models_cleanup_failed"),
         (WarningKind::SettingsWindowFailed, "settings_window_failed"),
         (WarningKind::ChangeBridgeFailed, "change_bridge_failed"),
@@ -326,9 +331,10 @@ fn all_warning_kinds() -> Vec<(WarningKind, &'static str)> {
             WarningKind::TestConnectionFailed => 14,
             WarningKind::HotkeyRequestTimeout => 15,
             WarningKind::PendingAudioCleanupFailed => 16,
+            WarningKind::PendingAudioUnreadable => 17,
         })
         .collect();
-    assert_eq!(seen.len(), 17, "every WarningKind once");
+    assert_eq!(seen.len(), 18, "every WarningKind once");
     all
 }
 

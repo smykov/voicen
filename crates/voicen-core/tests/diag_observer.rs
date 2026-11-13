@@ -294,6 +294,56 @@ fn failed_dictation_line_has_the_failure_literal_and_http_status() {
 }
 
 #[test]
+fn a_retry_writes_its_own_line_under_the_original_rec_without_start_fields() {
+    // T-007 Q7 (review 1 #3): a retry reuses the original RecordingId and its job
+    // emits only JobFinished (+ Delivered): no RecordingStarted / RecordingEnded
+    // (no recording), no SpeechGate (a retry skips the gate). The original failed
+    // job's line is written at its JobFinished; the retry's job then opens a new
+    // record for the same id and writes its own line under the same `rec=`, with
+    // no press_to_frame_ms, duration_ms, end or detector, and no extra key. Bite:
+    // the retry's line dropped (a closed id ignored), merged into the first line,
+    // carrying the first run's start fields, or an unannounced key on it.
+    let f = fixture();
+    let [a] = ids(1)[..] else { unreachable!() };
+    f.feed(&[
+        started(a, 37),
+        ended(a, 2_500, RecordingEnd::Released),
+        gate(a, "silero", true),
+        finished(
+            1,
+            a,
+            Some("api"),
+            9,
+            OutcomeCode::Failed,
+            Some("NetworkUnavailable"),
+            None,
+        ),
+        finished(2, a, Some("api"), 640, OutcomeCode::Text, None, None),
+        delivered(2, 31, DeliveryResult::Pasted),
+    ]);
+    let lines = f.dictations();
+    assert_eq!(lines.len(), 2, "{lines:#?}");
+    assert_eq!(
+        lines[0].get("press_to_frame_ms"),
+        Some("37"),
+        "premise: the first line is the recording's own: {lines:#?}"
+    );
+    assert_eq!(lines[1].level, "INFO");
+    assert_eq!(
+        lines[1].pairs,
+        pairs(&[
+            ("rec", s(a.get())),
+            ("engine", "api".to_string()),
+            ("outcome", "delivered".to_string()),
+            ("result", "pasted".to_string()),
+            ("stop_to_text_ms", s(640)),
+            ("text_to_paste_ms", s(31)),
+        ])
+    );
+    assert_eq!(f.lines().len(), 2, "nothing but the two dictation lines");
+}
+
+#[test]
 fn no_speech_line_has_no_engine_and_closes_at_job_finished() {
     // No speech: no engine was built (engine None), the record closes at
     // JobFinished{NoSpeech}. Bite: engine=other / engine= for None, the line never
@@ -821,23 +871,31 @@ fn text_jobs_awaiting_delivery_are_bounded_and_the_oldest_get_no_line() {
 
 #[test]
 fn a_pipeline_warning_is_its_own_line_at_once() {
-    // Warning events (vad_fallback, esc_unavailable, toast_failed) are not part
-    // of a dictation record. Bite: a warning dropped, folded into the next
-    // dictation line, or held until a record closes.
+    // Warning events (vad_fallback, esc_unavailable, toast_failed,
+    // pending_audio_unreadable) are not part of a dictation record. Bite: a warning
+    // dropped, folded into the next dictation line, or held until a record closes.
     let f = fixture();
     let codes = [
         (WarningCode::VadFallback, "vad_fallback"),
         (WarningCode::EscUnavailable, "esc_unavailable"),
         (WarningCode::ToastFailed, "toast_failed"),
+        // T-007: a retry whose pending audio the store could not give back.
+        (
+            WarningCode::PendingAudioUnreadable,
+            "pending_audio_unreadable",
+        ),
     ];
     for (code, _) in codes {
         match code {
-            WarningCode::VadFallback | WarningCode::EscUnavailable | WarningCode::ToastFailed => {}
+            WarningCode::VadFallback
+            | WarningCode::EscUnavailable
+            | WarningCode::ToastFailed
+            | WarningCode::PendingAudioUnreadable => {}
         }
         f.obs.event(&DictationEvent::Warning { code });
     }
     let lines: Vec<Line> = f.lines().iter().map(|l| closed(l)).collect();
-    assert_eq!(lines.len(), 3, "{lines:#?}");
+    assert_eq!(lines.len(), codes.len(), "{lines:#?}");
     for (line, (_, literal)) in lines.iter().zip(codes) {
         assert_eq!(line.head, "warning");
         assert_eq!(line.level, "WARN");
@@ -950,6 +1008,9 @@ fn every_dictation_event_with_planted_strings_gives_closed_lines() {
         },
         DictationEvent::Warning {
             code: WarningCode::ToastFailed,
+        },
+        DictationEvent::Warning {
+            code: WarningCode::PendingAudioUnreadable,
         },
         DictationEvent::PressBlocked {
             reason: Blocked::NoEngine,

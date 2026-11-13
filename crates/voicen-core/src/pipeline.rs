@@ -226,7 +226,8 @@ impl Pipeline {
     /// Retries the pending recording (T-007, FR-11, data-model "PendingRecording"):
     /// `id = Some(p)` only while `p` is the pending id, `None` whatever is pending.
     /// Nothing pending, a stale id or audio the store cannot give back runs nothing
-    /// and returns `None` (unreadable audio also empties the slot: it can never be
+    /// and returns `None` (unreadable audio also empties the slot, deletes the
+    /// audio and emits `Warning{pending_audio_unreadable}`: it can never be
     /// retried). Otherwise the stored audio goes, with `settings` (the snapshot of
     /// the click, its `Timeouts::from_settings` included) and the stored start
     /// window, through the engine, post-processing and the same `release`, without
@@ -248,7 +249,13 @@ impl Pipeline {
         let audio = match self.deps.temp_audio.get_pending(entry.id) {
             Ok(audio) => audio,
             Err(_) => {
+                // The audio can never be retried: empty the slot, delete it, and
+                // say so in the log (closed kind only, no OS text, P-009). Nothing
+                // is shown to the user here (the visible notice is T-209's).
                 self.drop_pending(entry.id);
+                self.emit(DictationEvent::Warning {
+                    code: WarningCode::PendingAudioUnreadable,
+                });
                 return None;
             }
         };

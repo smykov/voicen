@@ -729,6 +729,7 @@ fn warning_kind(kind: WarningKind) -> &'static str {
         WarningKind::VadFallback => "vad_fallback",
         WarningKind::EscUnavailable => "esc_unavailable",
         WarningKind::ToastFailed => "toast_failed",
+        WarningKind::PendingAudioUnreadable => "pending_audio_unreadable",
         WarningKind::ModelsCleanupFailed => "models_cleanup_failed",
         WarningKind::SettingsWindowFailed => "settings_window_failed",
         WarningKind::ChangeBridgeFailed => "change_bridge_failed",
