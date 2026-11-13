@@ -389,4 +389,22 @@ test.describe("call indicator: reply versus event (I3, failure branches)", () =>
     await expect(recordingLabel(page)).toBeVisible();
     expect(errors.map((e) => e.message)).toEqual([]);
   });
+
+  test("a refused indicator://state listen shows nothing, raises no page error and asks for no reply", async ({ page }) => {
+    const errors = pageErrors(page);
+    await installTauriMock(page, {
+      windowLabel: "call-indicator",
+      rejectListen: [INDICATOR_STATE_EVENT],
+      indicatorState: indicatorWire("recording_reminder_en"),
+    });
+    await bootPage(page, "/call-indicator", async () => {
+      const events = (await calls(page, "plugin:event|listen")).map((c) => (c.args as { event?: string }).event);
+      return events.includes(INDICATOR_STATE_EVENT);
+    });
+    await settle(page);
+    // A reply with no listener behind it would show a state nothing can update.
+    expect(await calls(page, "call_indicator_state")).toHaveLength(0);
+    await expect(recordingLabel(page)).toHaveCount(0);
+    expect(errors.map((e) => e.message)).toEqual([]);
+  });
 });
