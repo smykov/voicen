@@ -40,7 +40,7 @@ invoke("set_hotkey", { binding: { modifiers: ("ctrl"|"alt"|"shift"|"win")[], key
   → { ok: true } | { ok: false, error: "hotkey_unavailable" }
 ```
 
-The shell registers the new binding before it unregisters the old one. On failure the old binding stays active, and the UI shows `failure.hotkey_unavailable` (spec FR-012). On success the binding is persisted through 004's settings store. A success also clears the tray `HotkeyError` state (FR-011).
+The shell registers the new binding before it unregisters the old one. On failure the old binding stays active, and the settings field shows its own error `hotkey.unavailable` (`settings::ErrorCode::HotkeyUnavailable`; the wire value above is the command's own); a registration failure outside the settings field (start, resume) shows `notice.hotkey_unavailable` on the overlay and the toast, one id for both (decision #274 Q4) (spec FR-012). On success the binding is persisted through 004's settings store. A success also clears the tray `HotkeyError` state (FR-011).
 
 ## Not IPC
 

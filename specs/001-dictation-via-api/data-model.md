@@ -165,11 +165,10 @@ Rules (NFR-06, FR-026, FR-027):
 | `LocalEngineFailed` | `failure.local_engine` | built-in engine: a model load or transcription error other than the abort; a run stopped by the built-in limit is `Timeout` (T-098, decision #133) |
 | `ClipboardUnavailable` | `failure.clipboard_unavailable` | clipboard open failed after retries |
 | `MicrophoneUnavailable{cause}` | `failure.microphone_unavailable` | no device, access denied, open error — not retryable, no pending |
-| `HotkeyUnavailable` | `failure.hotkey_unavailable` | registration failed — not retryable |
 
 Retryable (creates a pending recording): every code from `InvalidApiKey` through `ClipboardUnavailable`.
 
-In code: `voicen_core::failure::FailureReason` with `code()` (the Code column without fields), `message_id()` and `message_params()` (`host`, `status`; `reason` for `MicrophoneUnavailable`, the cause's `mic_reason.*` id, which the Rust `i18n::text` renders in the message's language). Every transport failure is mapped by the one `failure::classify` (order in [contracts/openai-transcription.md](contracts/openai-transcription.md)); a transport reason is built only from the status, the classification flags and `host[:port]`, never from a `reqwest::Error`, a URL, a body or a key. `MicrophoneUnavailable{cause}` is built only from the closed `recording::MicCause` set (`NoDevice`, `AccessDenied`, `Busy`, `Other`), never from the OS error text of a `CaptureError`. T-040 has the first eight variants; `ClipboardUnavailable` and `retryable()` (an exhaustive match) since T-001, `MicrophoneUnavailable` since T-042, `HotkeyUnavailable` with T-006, `NoLocalModel` and `LocalEngineFailed` with T-098, `Timeout`'s closed `origin` (`failure::TimeoutOrigin`: `Server`, `Builtin`) with T-106.
+In code: `voicen_core::failure::FailureReason` with `code()` (the Code column without fields), `message_id()` and `message_params()` (`host`, `status`; `reason` for `MicrophoneUnavailable`, the cause's `mic_reason.*` id, which the Rust `i18n::text` renders in the message's language). Every transport failure is mapped by the one `failure::classify` (order in [contracts/openai-transcription.md](contracts/openai-transcription.md)); a transport reason is built only from the status, the classification flags and `host[:port]`, never from a `reqwest::Error`, a URL, a body or a key. `MicrophoneUnavailable{cause}` is built only from the closed `recording::MicCause` set (`NoDevice`, `AccessDenied`, `Busy`, `Other`), never from the OS error text of a `CaptureError`. T-040 has the first eight variants; `ClipboardUnavailable` and `retryable()` (an exhaustive match) since T-001, `MicrophoneUnavailable` since T-042, `NoLocalModel` and `LocalEngineFailed` with T-098, `Timeout`'s closed `origin` (`failure::TimeoutOrigin`: `Server`, `Builtin`) with T-106.
 
 ## IndicatorState
 
@@ -205,7 +204,7 @@ Inputs: the selected `DeviceId`, and the device list at recording start.
 | `SpeechGate` | recording id, `detector` (`silero`/`energy`), `speech: bool` |
 | `JobFinished` | seq, recording id (T-008: the log joins the job to its recording by it), `engine` (kind name), `stop_to_text_ms`, outcome code (`text`/`no_speech`/`failed`), failure code, HTTP status |
 | `Delivered` | seq, `text_to_paste_ms`, result (`pasted`/`copied_only`/`copy_manual`) |
-| `Warning` | code (`vad_fallback`, `esc_unavailable`, `toast_failed`) |
+| `Warning` | code (`vad_fallback`, `esc_unavailable`, `toast_failed`, `pending_audio_unreadable`) |
 | `CaptureFailed` | recording id, `cause` (`no_device`/`access_denied`/`busy`/`other`; the closed `MicCause`, never OS text) — the capture could not open at press, or failed at stop |
 | `PressBlocked` | `reason` (the closed `settings::gate::Blocked`: `no_engine`) — a press the dictation gate blocked; one per press, at the press, no recording id (T-006) |
 

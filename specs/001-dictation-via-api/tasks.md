@@ -159,8 +159,8 @@ description: "Task list for feature 001 — dictation via an OpenAI-compatible A
 **Independent Test**: Core registration state-machine tests; [win-ci] a helper process holds the combo; simulated power/session/TaskbarCreated messages; [owner] quickstart §3 step 6.
 
 - [ ] T047 [P] [US4] Red tests for `HotkeyRegistration`:
-  - start failure → tray `HotkeyError` + `notice.hotkey_failed_startup` + open settings on the hotkey field
-  - change to a taken combo → `failure.hotkey_unavailable`, the old one stays `Active`
+  - start failure → tray `HotkeyError` + `notice.hotkey_unavailable` + open settings on the hotkey field
+  - change to a taken combo → the field error `hotkey.unavailable` (`ErrorCode::HotkeyUnavailable`), the old one stays `Active`
   - re-register failure after resume → `Failed`
   - `HotkeyError` cleared only by a successful registration, not by opening the menu
 

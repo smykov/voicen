@@ -39,7 +39,7 @@ Tasks: T-051 (split from T-006 by decision #64), T-009 (toggle, 10-minute maximu
 - **Defect that produced it:** none here (T-007 analysis: a toast call under the lock could block a press, the timer and job ends, or deadlock when a toast handler calls `retry`).
 - **What breaks if you violate it:** notify under the lock: a notifier that re-enters the session (the Retry button) never returns; notify from the published overlay state instead of from `show`: a message a later press drops before publish, or one shown while a stop is in flight, gets no toast, and a message republished gets two.
 - **Where it is enforced:** `RecordingController::show` appends to an outbox; every lock section is a `Locked` guard whose drop takes the outbox, unlocks, then calls `Notifier::notify` (`retry = Some(id)` only for a retryable failure whose audio is pending). Tests `the_notifier_is_called_outside_the_session_lock_from_every_site` (six sites), `failed_jobs_are_offered_once_each_with_the_pending_id_only_when_it_was_stored`, `a_failure_that_ends_while_a_recording_is_live_is_offered_though_it_is_never_published`.
-- **Don't:** call the notifier from inside a lock section or from `publish`; take a lock without the `Locked` guard; let a `Notifier` implementation block (hand the toast to its own thread).
+- **Don't:** call the notifier from inside a lock section or from `publish`; take a lock without the `Locked` guard (the one exemption is `run_timer`: its condvar wait needs the raw guard, and nothing in that section calls `show`; a later `show` there would be offered only at the next section's drain); let a `Notifier` implementation block (hand the toast to its own thread).
 
 ### `retry_available` is the pending slot, read on the worker after each job
 
