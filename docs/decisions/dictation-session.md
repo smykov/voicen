@@ -10,8 +10,8 @@ Tasks: T-051 (split from T-006 by decision #64), T-009 (toggle, 10-minute maximu
 
 - **Defect that produced it:** none here (design risk: decision #48 left "`run_job` on one thread at a time" as a precondition for the code that builds the threads; research R-10).
 - **What breaks if you violate it:** with a thread per job, two `deliver`s overlap and one transcript is pasted into another job's window, or jobs finish out of recording order; with `run_job` under the lock or on the input thread, a press waits for a slow engine (FR-029).
-- **Where it is enforced:** the worker thread owns the `Pipeline` (no other thread holds a reference, so nothing else can call `run_job` or `Pipeline::pending`). Tests `jobs_never_overlap_in_delivery_and_finish_in_recording_order`, `press_during_a_slow_job_starts_recording_at_once`.
-- **Don't:** spawn a thread per job; call `run_job` from `hotkey_released`; keep the session lock across `run_job`; give the pipeline to a second thread (T-011 replaces the worker with its delivery thread, it does not add one).
+- **Where it is enforced:** the worker thread owns the `Pipeline` (no other thread holds a reference, so nothing else can call `run_job`, `Pipeline::retry` or `Pipeline::pending`). A Retry (T-007) is a `Job::Retry` on the same queue, not a second thread: `DictationSession::retry` takes the settings snapshot and queues at the click, so a retry runs after the jobs queued before it and never overlaps a delivery. Tests `a_retry_is_ordered_after_the_jobs_queued_before_the_click_and_keeps_the_click_settings`, Tests `jobs_never_overlap_in_delivery_and_finish_in_recording_order`, `press_during_a_slow_job_starts_recording_at_once`.
+- **Don't:** spawn a thread per job; call `run_job` from `hotkey_released`; keep the session lock across `run_job`; give the pipeline to a second thread (T-011 replaces the worker with its delivery thread, it does not add one); run a retry on the click's thread.
 
 ### Queue order is finish order is recording order
 
@@ -33,6 +33,13 @@ Tasks: T-051 (split from T-006 by decision #64), T-009 (toggle, 10-minute maximu
 - **What breaks if you violate it:** the tray and overlay flash Recording for a microphone that never opened.
 - **Where it is enforced:** the press publishes once, after `AudioSource::start` returned (`capture_failed` first on an error). Tests `access_denied_publishes_no_recording_state_and_queues_no_job`, `timer_follows_the_latest_deadline`.
 - **Don't:** publish between `press` and the capture result; release the lock between them (another thread's publish would show the controller's Recording). Because the lock is held across them, don't let `Paster::capture_start_window` or `AudioSource::start`, nor dropping a `CaptureHandle` (the session's `Drop` does it under the lock while a recording is on), block, call back into the session or wait for another call on the same port: a capture adapter whose error or device-loss path calls a session input inside `start` deadlocks, and a paster that holds one mutex across its methods makes a press wait up to `MODIFIER_WAIT` (1 s) behind the worker's delivery, with the tray, the timer and job ends waiting too. T-006 and T-012 implement these ports against this rule (the trait docs in `platform.rs`, core-traits.md "Platform traits").
+
+### The `Notifier` is called once per shown message, outside the session lock
+
+- **Defect that produced it:** none here (T-007 analysis: a toast call under the lock could block a press, the timer and job ends, or deadlock when a toast handler calls `retry`).
+- **What breaks if you violate it:** notify under the lock: a notifier that re-enters the session (the Retry button) never returns; notify from the published overlay state instead of from `show`: a message a later press drops before publish, or one shown while a stop is in flight, gets no toast, and a message republished gets two.
+- **Where it is enforced:** `RecordingController::show` appends to an outbox; every lock section is a `Locked` guard whose drop takes the outbox, unlocks, then calls `Notifier::notify` (`retry = Some(id)` only for a retryable failure whose audio is pending). Tests `the_notifier_is_called_outside_the_session_lock_from_every_site` (six sites), `failed_jobs_are_offered_once_each_with_the_pending_id_only_when_it_was_stored`, `a_failure_that_ends_while_a_recording_is_live_is_offered_though_it_is_never_published`.
+- **Don't:** call the notifier from inside a lock section or from `publish`; take a lock without the `Locked` guard; let a `Notifier` implementation block (hand the toast to its own thread).
 
 ### `retry_available` is the pending slot, read on the worker after each job
 
