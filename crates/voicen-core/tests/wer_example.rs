@@ -773,3 +773,160 @@ async fn wer_example_leaves_no_call_folder_behind_on_success_or_failure() {
         assert!(left.is_empty(), "{name}: left in the temp dir: {left:?}");
     }
 }
+
+// ---- T-163 round 2: the order of what is scored ------------------------------------------
+//
+// An item is its utterances' audio in manifest order, scored against their references in
+// the same order, and its hypothesis is the pass's mic lines by `start_ms`. The mock below
+// answers each chunk by the *length* of the chunk's WAV (never by a request counter: the
+// pass sends chunks from several threads, so arrival order is not chunk order), and each
+// utterance has its own length and its own words, so a wrong audio order, a wrong
+// reference order or an unsorted hypothesis changes the printed counts.
+
+/// Utterances of one item: seconds of speech and the words the mock answers for the chunk
+/// of that length. Each is over 60 s, so no two share a chunk (`TIMED_MAX_MS` = 120 s), and
+/// a second of silence after each is a pause the chunker cuts at: one chunk per utterance.
+/// Lengths 8 s apart keep the nearest-length match unambiguous.
+const ORDERED: [(u32, &str); 3] = [
+    (62, "alpha bravo"),
+    (70, "charlie delta"),
+    (78, "echo foxtrot"),
+];
+/// The words of `ORDERED` in order: the reference of the whole item.
+const ORDERED_REFERENCE: &str = "alpha bravo charlie delta echo foxtrot";
+/// The counts of a correctly ordered item against `ORDERED_REFERENCE`.
+const ORDERED_COUNTS: &str = "s=0 d=0 i=0 n=6 wer=0.00%";
+const ORDERED_WORDS: [&str; 6] = ["alpha", "bravo", "charlie", "delta", "echo", "foxtrot"];
+
+/// `seconds` of speech and a second of silence, as 16 kHz samples.
+fn utterance_samples(seconds: u32) -> Vec<i16> {
+    let mut out = speech_samples(seconds);
+    out.extend(std::iter::repeat_n(0i16, 16_000));
+    out
+}
+
+/// Answers a timed body with the words of the entry whose length is nearest the chunk's
+/// WAV length (the `data` size of the RIFF part of the multipart body), whatever the
+/// order the requests arrive in.
+struct ByChunkLength(Vec<(f64, &'static str)>);
+
+impl wiremock::Respond for ByChunkLength {
+    fn respond(&self, request: &wiremock::Request) -> ResponseTemplate {
+        let words = request
+            .body
+            .windows(4)
+            .position(|w| w == b"RIFF")
+            .and_then(|at| request.body.get(at + 40..at + 44))
+            .and_then(|size| <[u8; 4]>::try_from(size).ok())
+            .map(|size| f64::from(u32::from_le_bytes(size)) / 32_000.0)
+            .and_then(|seconds| {
+                self.0
+                    .iter()
+                    .filter(|(length, _)| (length - seconds).abs() < 2.0)
+                    .min_by(|a, b| (a.0 - seconds).abs().total_cmp(&(b.0 - seconds).abs()))
+                    .map(|(_, words)| *words)
+            })
+            .unwrap_or("unknownmark");
+        ResponseTemplate::new(200).set_body_json(timed_body(words))
+    }
+}
+
+fn ordered_server_answers() -> ByChunkLength {
+    ByChunkLength(
+        ORDERED
+            .iter()
+            .map(|(seconds, words)| (f64::from(*seconds), *words))
+            .collect(),
+    )
+}
+
+/// Acceptance 1 (hypothesis order): one item of three utterances goes out as three chunk
+/// requests, each answered with its own words, and the hypothesis is the answers in chunk
+/// order, so it equals the reference. Bites: a hypothesis not ordered by `start_ms`
+/// (catalog 02: reversed), a first-chunk-only hypothesis (catalog 01).
+#[tokio::test]
+async fn wer_example_pairs_hypothesis_is_the_chunk_answers_in_start_order() {
+    let server = server_with_responder(ordered_server_answers()).await;
+    let dir = Dir::new("ordered-pair");
+    let audio: Vec<i16> = ORDERED
+        .iter()
+        .flat_map(|(seconds, _)| utterance_samples(*seconds))
+        .collect();
+    std::fs::write(
+        dir.0.join("item1.wav"),
+        wav::encode(&AudioBuffer::from_16k_mono(audio)),
+    )
+    .expect("write wav");
+    std::fs::write(dir.0.join("item1.txt"), ORDERED_REFERENCE).expect("write reference");
+    let (out, all) = run_example(&["pairs", path_arg(&dir), "en"], &server.uri());
+    assert!(out.status.success(), "example failed:\n{all}");
+    let seen = server.received_requests().await.expect("recording is on");
+    assert_eq!(
+        seen.len(),
+        3,
+        "one chunk per utterance (the fixture's design):\n{all}"
+    );
+    assert_has_line(&all, &format!("item1 {ORDERED_COUNTS}"));
+    assert_no_secrets(&all, &ORDERED_WORDS);
+}
+
+/// Acceptance 1 (group order): the utterances of a `<spk>-<ch>` group are concatenated in
+/// manifest order, their references joined in the same order, so a correctly ordered group
+/// scores zero edits. The group's utterance files are written in reverse of their manifest
+/// order, so a directory-order read would also fail. Bites: group audio spliced at the front
+/// (catalog 15), group reference spliced at the front (16), an unsorted hypothesis (02).
+#[tokio::test]
+async fn wer_example_librispeech_group_audio_and_reference_keep_manifest_order() {
+    const THIRTY_MINUTES_BYTES: u32 = 30 * 60 * 16_000 * 2;
+    let mut answers = ordered_server_answers();
+    answers.0.push((3.0, "hello"));
+    let server = server_with_responder(answers).await;
+    let dir = Dir::new("librispeech-ordered");
+    let chapter = dir.0.join("1089").join("134686");
+    std::fs::create_dir_all(&chapter).expect("chapter dir");
+    let ids = ["1089-134686-0000", "1089-134686-0001", "1089-134686-0002"];
+    let trans: String = ids
+        .iter()
+        .zip(ORDERED)
+        .map(|(id, (_, words))| format!("{id} {words}\n"))
+        .collect();
+    std::fs::write(chapter.join("1089-134686.trans.txt"), trans).expect("write trans.txt");
+    for (id, (seconds, _)) in ids.iter().zip(ORDERED).rev() {
+        let bytes = wav::encode(&AudioBuffer::from_16k_mono(utterance_samples(seconds)));
+        std::fs::write(chapter.join(format!("{id}.wav")), bytes).expect("write wav");
+    }
+    // The other group lifts the set over the 30 min floor: 3 s of speech, then silence.
+    let other = dir.0.join("1188").join("133604");
+    std::fs::create_dir_all(&other).expect("chapter dir");
+    std::fs::write(
+        other.join("1188-133604.trans.txt"),
+        "1188-133604-0000 hello\n",
+    )
+    .expect("write trans.txt");
+    let mut header = wav::encode(&AudioBuffer::from_16k_mono(Vec::new()));
+    header.splice(4..8, (THIRTY_MINUTES_BYTES + 36).to_le_bytes());
+    header.splice(40..44, THIRTY_MINUTES_BYTES.to_le_bytes());
+    header.extend(speech_samples(3).iter().flat_map(|s| s.to_le_bytes()));
+    let path = other.join("1188-133604-0000.wav");
+    std::fs::write(&path, &header).expect("write wav");
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .and_then(|file| file.set_len(44 + u64::from(THIRTY_MINUTES_BYTES)))
+        .expect("extend wav");
+    let (out, all) = run_example(&["librispeech", path_arg(&dir)], &server.uri());
+    assert!(out.status.success(), "example failed:\n{all}");
+    let seen = server.received_requests().await.expect("recording is on");
+    assert_eq!(
+        seen.len(),
+        4,
+        "one chunk per utterance and the other group's one:\n{all}"
+    );
+    assert_has_line(&all, &format!("1089-134686 {ORDERED_COUNTS}"));
+    assert_has_line(&all, "1188-133604 s=0 d=0 i=0 n=1 wer=0.00%");
+    assert_has_line(
+        &all,
+        "wer: total over 2 scored items (0 failed): s=0 d=0 i=0 n=7 wer=0.00%",
+    );
+    assert_no_secrets(&all, &ORDERED_WORDS);
+}
