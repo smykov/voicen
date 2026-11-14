@@ -1,4 +1,4 @@
-guarantee: AC-3: a pass that is not Ready is a failed item, never an empty hypothesis
+guarantee: invariant: a pass that is not Ready is a failed item, never an empty hypothesis
 file: crates/voicen-core/examples/wer.rs
 added_by: test-writer
 --- old

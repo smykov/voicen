@@ -1,4 +1,4 @@
-guarantee: AC-3: a pass that is not Ready is a failed item, never an empty hypothesis (storage branch, system finish)
+guarantee: -
 file: crates/voicen-core/examples/wer.rs
 added_by: test-writer
 --- old
