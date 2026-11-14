@@ -1,0 +1,8 @@
+guarantee: AC-1: a recovered call's duration comes from the shorter readable track (duration_ms written into meta.json)
+file: crates/voicen-core/src/call/storage.rs
+added_by: task-validator round 2
+test: cargo test -j 2 -p voicen-core --test call_recovery
+--- old
+    meta.duration_ms = Some(duration_ms);
+--- new
+--- end

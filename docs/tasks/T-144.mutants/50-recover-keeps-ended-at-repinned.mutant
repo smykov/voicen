@@ -1,0 +1,8 @@
+guarantee: AC-1: end and duration from the shorter readable track (32 re-pinned: T-146 moved the arm into `mark_recovered`)
+file: crates/voicen-core/src/call/storage.rs
+added_by: task-validator round 2
+--- old
+        meta.ended_at = Some(ended);
+--- new
+        let _ = ended;
+--- end

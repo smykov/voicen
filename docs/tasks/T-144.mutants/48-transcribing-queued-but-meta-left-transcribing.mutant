@@ -1,0 +1,12 @@
+guarantee: AC-3: `transcribing` becomes `ready-to-transcribe` (meta.json rewritten) and is queued
+file: crates/voicen-core/src/call/storage.rs
+added_by: task-validator round 2
+test: cargo test -j 2 -p voicen-core --test call_recovery
+--- old
+                CallState::Transcribing => {
+                    meta.state = CallState::ReadyToTranscribe;
+                    ListState::Queued
+--- new
+                CallState::Transcribing => {
+                    ListState::Queued
+--- end
