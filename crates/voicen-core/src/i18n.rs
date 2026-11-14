@@ -1074,6 +1074,56 @@ mod tests {
     }
 
     #[test]
+    fn notice_retry_unavailable_is_declared_with_its_decision_280_texts_in_both_catalogs() {
+        // T-210 I9 (decision #280): a Retry whose stored audio cannot be read back shows
+        // `notice.retry_unavailable`. The id is declared with `messages!` (so the generic
+        // parity tests cover it and the session can show it) and both catalogs carry
+        // the texts of the decision, spelled here, not derived from the code under test.
+        // The generic tests cannot fail for an id nobody declared, so it is named. Bite:
+        // the id missing from `messages!` (no overlay, no toast), from en.json or from
+        // ru.json, ru falling back to English, a text other than the decision's.
+        let c = catalog(EN_JSON, RU_JSON);
+        let id = "notice.retry_unavailable";
+        assert!(
+            MESSAGE_IDS.iter().any(|m| m.0 == id),
+            "{id} not in MESSAGE_IDS"
+        );
+        assert_eq!(
+            own_text(&c, UiLanguage::En, id),
+            Some("The failed dictation could not be read back, so it cannot be retried"),
+            "{id} en"
+        );
+        assert_eq!(
+            own_text(&c, UiLanguage::Ru, id),
+            Some("Не удалось прочитать неудавшуюся диктовку, повторить её нельзя"),
+            "{id} ru"
+        );
+    }
+
+    #[test]
+    fn the_toast_surface_is_every_message_except_the_overlay_only_logs_notice() {
+        // T-210 I5 (contracts/messages.md "Where": every message is toast + overlay
+        // except `notice.logs_unwritable`, overlay only). One predicate next to the
+        // catalog, `is_toast_surface(MessageId) -> bool`, is the shell notifier's filter.
+        // The property is over the whole of MESSAGE_IDS, so a message added later is on
+        // the surface unless it is that one. Bite: a predicate that is always true (the
+        // logs notice toasts), always false, true for the first ids only, or an
+        // allow-list that misses a later id.
+        for id in MESSAGE_IDS {
+            assert_eq!(
+                is_toast_surface(*id),
+                id.0 != "notice.logs_unwritable",
+                "{}",
+                id.0
+            );
+        }
+        assert!(
+            MESSAGE_IDS.iter().any(|m| m.0 == "notice.logs_unwritable"),
+            "premise: the overlay-only id exists"
+        );
+    }
+
+    #[test]
     fn failure_local_timeout_is_declared_with_its_contract_text_and_listed_in_messages_md() {
         // T-106 Acceptance 3 (decision #147): the built-in engine's timeout id
         // `failure.local_timeout` is declared with messages! (so
