@@ -1,0 +1,11 @@
+guarantee: I8: diag::log::unwritable delegates to the one map
+file: crates/voicen-core/src/diag/log.rs
+added_by: test-writer
+--- old
+    LogsUnwritableReason::of(dir, err)
+}
+--- new
+    let _ = dir;
+    LogsUnwritableReason::Other(err.raw_os_error())
+}
+--- end

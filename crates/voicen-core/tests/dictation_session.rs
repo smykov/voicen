@@ -4420,6 +4420,13 @@ fn assert_unreadable_retry_shows_the_notice(rig: &Rig, id: PendingId, factory_be
         "the slot is not empty after the unreadable retry (Retry still on the tray): {:?}",
         rig.indicator.trays()
     );
+    // The retry's queued entry ended (`retry_dropped`): once the notice's 3 s are over
+    // the overlay is Hidden, not Processing for a job that never ends.
+    assert!(
+        eventually(|| rig.indicator.overlays().last() == Some(&OverlayState::Hidden)),
+        "the overlay does not return to Hidden after the notice (the retry stays queued): {:?}",
+        rig.indicator.overlays()
+    );
     assert_eq!(
         warnings(&rig.events()),
         vec![WarningCode::PendingAudioUnreadable],

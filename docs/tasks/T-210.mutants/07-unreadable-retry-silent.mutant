@@ -1,0 +1,8 @@
+guarantee: I9: an unreadable retry shows notice.retry_unavailable once
+file: crates/voicen-core/src/dictation.rs
+added_by: test-writer
+--- old
+                st.ctrl.notice_with(NOTICE_RETRY_UNAVAILABLE, vec![], now);
+--- new
+                let _ = NOTICE_RETRY_UNAVAILABLE;
+--- end

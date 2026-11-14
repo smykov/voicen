@@ -1,0 +1,8 @@
+guarantee: I9: 'other:1' parses to None
+file: crates/voicen-core/src/platform.rs
+added_by: test-writer
+--- old
+        let digits = arg.strip_prefix(TOAST_ARG_PREFIX)?;
+--- new
+        let digits = arg.rsplit(':').next()?;
+--- end

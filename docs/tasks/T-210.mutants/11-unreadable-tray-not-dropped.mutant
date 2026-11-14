@@ -1,0 +1,8 @@
+guarantee: I9: tray as after any dropped retry
+file: crates/voicen-core/src/dictation.rs
+added_by: test-writer
+--- old
+                st.ctrl.retry_dropped(key, now);
+--- new
+                let _ = key;
+--- end

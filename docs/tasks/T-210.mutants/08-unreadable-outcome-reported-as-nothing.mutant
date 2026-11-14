@@ -1,0 +1,8 @@
+guarantee: I9: unreadable is told apart from nothing-to-retry
+file: crates/voicen-core/src/pipeline.rs
+added_by: test-writer
+--- old
+                return RetryOutcome::Unreadable;
+--- new
+                return RetryOutcome::Nothing;
+--- end

@@ -1,0 +1,9 @@
+guarantee: I5: notice.logs_unwritable is not a toast
+file: crates/voicen-core/src/i18n.rs
+added_by: test-writer
+--- old
+    id != NOTICE_LOGS_UNWRITABLE
+--- new
+    let _ = NOTICE_LOGS_UNWRITABLE;
+    true
+--- end

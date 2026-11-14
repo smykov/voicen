@@ -1,0 +1,9 @@
+guarantee: I9: an unreadable retry leaves the slot empty
+file: crates/voicen-core/src/pipeline.rs
+added_by: test-writer
+--- old
+                self.drop_pending(entry.id);
+                self.emit(DictationEvent::Warning {
+--- new
+                self.emit(DictationEvent::Warning {
+--- end

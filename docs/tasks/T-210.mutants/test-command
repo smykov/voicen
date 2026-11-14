@@ -1,1 +1,1 @@
-cargo test -p voicen-core -j2 --test dictation_session a_retry_over_the_real_file_store
+cargo test -p voicen-core -j2 --lib --test toast_support --test dictation_session --test diag_log -- toast logs_reason unmapped regular_file parses_to_none degrades retry

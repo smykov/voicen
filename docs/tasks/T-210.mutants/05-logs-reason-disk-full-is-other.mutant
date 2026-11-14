@@ -1,0 +1,10 @@
+guarantee: I8: the reason follows the ErrorKind (StorageFull -> disk_full)
+file: crates/voicen-core/src/diag/log.rs
+added_by: test-writer
+--- old
+            io::ErrorKind::StorageFull | io::ErrorKind::QuotaExceeded => {
+                LogsUnwritableReason::DiskFull
+            }
+--- new
+            io::ErrorKind::QuotaExceeded => LogsUnwritableReason::DiskFull,
+--- end

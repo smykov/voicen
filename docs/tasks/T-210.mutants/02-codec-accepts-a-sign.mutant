@@ -1,0 +1,11 @@
+guarantee: I9: 'retry:+1' parses to None
+file: crates/voicen-core/src/platform.rs
+added_by: test-writer
+--- old
+        if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+
+--- new
+
+--- end

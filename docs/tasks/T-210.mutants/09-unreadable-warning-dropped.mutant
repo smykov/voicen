@@ -1,0 +1,11 @@
+guarantee: I9: the pending_audio_unreadable warning is kept (swallowed at the origin)
+file: crates/voicen-core/src/pipeline.rs
+added_by: test-writer
+--- old
+                self.emit(DictationEvent::Warning {
+                    code: WarningCode::PendingAudioUnreadable,
+                });
+                return RetryOutcome::Unreadable;
+--- new
+                return RetryOutcome::Unreadable;
+--- end
