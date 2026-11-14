@@ -66,6 +66,19 @@ pub struct JobReport {
     pub pending: Option<PendingId>,
 }
 
+/// What [`Pipeline::retry`] did (T-210, decision #280).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RetryOutcome {
+    /// The pending recording went through the engine; how that job ended.
+    Ran(JobReport),
+    /// Nothing ran: nothing was pending or the id was stale. Nothing changed.
+    Nothing,
+    /// Nothing ran: the pending audio could not be read back. The slot was
+    /// emptied, the audio delete attempted and `Warning{pending_audio_unreadable}`
+    /// emitted; the session shows `notice.retry_unavailable`.
+    Unreadable,
+}
+
 /// The job sequencer. `Send + Sync`, but `release` (and so `run_job`, until
 /// T-011 splits it) must run on one thread at a time: `deliver` (clipboard
 /// write, modifier wait, Ctrl+V) is not serialized across jobs, so concurrent
@@ -225,10 +238,11 @@ impl Pipeline {
 
     /// Retries the pending recording (T-007, FR-11, data-model "PendingRecording"):
     /// `id = Some(p)` only while `p` is the pending id, `None` whatever is pending.
-    /// Nothing pending, a stale id or audio the store cannot give back runs nothing
-    /// and returns `None` (unreadable audio also empties the slot, deletes the
-    /// audio and emits `Warning{pending_audio_unreadable}`: it can never be
-    /// retried). Otherwise the stored audio goes, with `settings` (the snapshot of
+    /// Nothing pending or a stale id runs nothing and returns
+    /// [`RetryOutcome::Nothing`]. Audio the store cannot give back runs nothing,
+    /// empties the slot, deletes the audio, emits `Warning{pending_audio_unreadable}`
+    /// (it can never be retried) and returns [`RetryOutcome::Unreadable`].
+    /// Otherwise (returned as [`RetryOutcome::Ran`]) the stored audio goes, with `settings` (the snapshot of
     /// the click, its `Timeouts::from_settings` included) and the stored start
     /// window, through the engine, post-processing and the same `release`, without
     /// the speech gate (the audio passed it at its first run): `Text` is delivered
@@ -236,27 +250,24 @@ impl Pipeline {
     /// deletes it; `Failed` keeps the same id and audio with the new reason
     /// (`JobReport::pending` is that id). `at` is the click. Blocking, on the job
     /// thread, like [`run_job`](Self::run_job).
-    pub fn retry(
-        &self,
-        id: Option<PendingId>,
-        settings: &Settings,
-        at: Instant,
-    ) -> Option<JobReport> {
-        let entry = lock(&self.pending).clone()?;
+    pub fn retry(&self, id: Option<PendingId>, settings: &Settings, at: Instant) -> RetryOutcome {
+        let Some(entry) = lock(&self.pending).clone() else {
+            return RetryOutcome::Nothing;
+        };
         if id.is_some_and(|id| id != entry.id) {
-            return None;
+            return RetryOutcome::Nothing;
         }
         let audio = match self.deps.temp_audio.get_pending(entry.id) {
             Ok(audio) => audio,
             Err(_) => {
                 // The audio can never be retried: empty the slot, delete it, and
-                // say so in the log (closed kind only, no OS text, P-009). Nothing
-                // is shown to the user here (the visible notice is T-210's, OQ-86).
+                // say so in the log (closed kind only, no OS text, P-009). The
+                // session's worker shows `notice.retry_unavailable` (decision #280).
                 self.drop_pending(entry.id);
                 self.emit(DictationEvent::Warning {
                     code: WarningCode::PendingAudioUnreadable,
                 });
-                return None;
+                return RetryOutcome::Unreadable;
             }
         };
         let job = Job {
@@ -269,7 +280,7 @@ impl Pipeline {
             retry_of: Some(entry.id),
         };
         let done = self.transcribe(&job);
-        Some(self.release(&job, done))
+        RetryOutcome::Ran(self.release(&job, done))
     }
 
     fn next_seq(&self) -> u64 {

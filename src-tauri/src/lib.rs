@@ -390,8 +390,8 @@ fn install_logs_folder<R: Runtime>(_app: &AppHandle<R>) {}
 /// The instances the `SettingsService` and the dictation session share: the one key
 /// store and the one hotkey registrar (T-055: the save's hotkey step is served by
 /// the hotkey thread `start_dictation` attaches to it); and the one notifier the
-/// dictation session and the call part share (T-128; it drops every offer until
-/// T-210's toasts).
+/// dictation session and the call part share (T-128): `win::toast::ShellNotifier` over
+/// the WinRT sink, on the service's language and the one log (T-210).
 struct SharedPorts {
     credentials: Arc<dyn CredentialStore>,
     hotkeys: Arc<win::hotkey::HotkeyRegistrarHandle>,
@@ -446,16 +446,21 @@ fn release_parts() -> (Parts, LoadOutcome, SharedPorts) {
         os_language.as_deref(),
         &log,
     );
+    let shared = SharedPorts {
+        credentials,
+        hotkeys,
+        notifier: Arc::new(win::toast::ShellNotifier::new(
+            Arc::clone(&service),
+            Arc::clone(&log),
+            Arc::new(win::toast::WinRtSink),
+        )),
+    };
     (
         Parts::new(service, local_models, log)
             .with_logs_notice(logs_notice)
             .with_session_end(session_end),
         load_outcome,
-        SharedPorts {
-            credentials,
-            hotkeys,
-            notifier: Arc::new(dictation::NoToasts),
-        },
+        shared,
     )
 }
 

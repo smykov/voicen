@@ -1,7 +1,7 @@
 //! T-210: failure feedback in the shell (spec 001 US2, FR-027 / FR-028; contracts/messages.md
 //! "Where"; decisions #274, #279, #280). Windows CI only (decision #5): the file does not
 //! compile on Linux, and without the change it does not compile on Windows either (no
-//! `DictationPorts::notifier`, no `win::toast`).
+//! `win::toast`).
 //!
 //! What is under test, through the real wiring (`build_app` on the mock runtime, the real
 //! core `DictationSession` over core fakes, the real tray and logs-folder handlers):
@@ -19,7 +19,7 @@
 //! The API this file assumes (docs/tasks/T-210.md `## Tests`; the developer implements it):
 //!
 //! ```text
-//! voicen_lib::dictation::DictationPorts { .., notifier: Arc<dyn Notifier> }
+//! voicen_lib::dictation::start_dictation_with(app, ports: DictationPorts, notifier: Arc<dyn Notifier>)
 //! voicen_lib::win::toast::ToastSink: Send + Sync {
 //!     fn show(&self, xml: &str) -> Result<(), windows::core::Error>;   // the toast's XML
 //! }
@@ -71,7 +71,7 @@ use voicen_core::settings::{EngineKind, Settings};
 use voicen_core::test_support::fixtures;
 use voicen_core::tray::TrayAction;
 use voicen_core::vad::{EnergyDetector, SpeechDetector, SpeechGate};
-use voicen_lib::dictation::{start_dictation, DictationPorts};
+use voicen_lib::dictation::{start_dictation_with, DictationPorts};
 use voicen_lib::logs_folder::{self, FolderOpener};
 use voicen_lib::tray::{self, TrayPart};
 use voicen_lib::win::toast::{ShellNotifier, SpawnFn, ToastSink};
@@ -654,11 +654,11 @@ fn a_ui_language_change_between_offers_changes_the_next_toasts_language() {
 
 #[test]
 fn the_dictation_ports_notifier_is_the_one_the_session_offers_to() {
-    // T-210 wiring (DictationPorts gains `notifier`, `release_ports` builds the
-    // ShellNotifier): through `start_dictation`, a press with a refused microphone is
-    // shown on the ports' indicator and arrives at the ports' notifier as one toast
-    // with that message's text. Bite: `start_dictation` ignoring `ports.notifier` (a
-    // built-in no-op: no toast), a second inline notifier.
+    // T-210 wiring over T-128's shape (`run()` builds the one ShellNotifier as
+    // `SharedPorts.notifier` and hands it to `start_dictation_with`): a press with a
+    // refused microphone is shown on the ports' indicator and arrives at the given
+    // notifier as one toast with that message's text. Bite: `start_dictation_with`
+    // ignoring its notifier (a built-in no-op: no toast), a second inline notifier.
     let _serial = serial();
     assert_hotkey_free();
     let rig = AppRig::new(EngineKind::Api);
@@ -667,7 +667,7 @@ fn the_dictation_ports_notifier_is_the_one_the_session_offers_to() {
     let audio = Arc::new(FakeAudioSource::new());
     audio.set_start_error(Some(CaptureError::AccessDenied));
     let indicator = Arc::new(FakeIndicator::new());
-    let _dictation = start_dictation(
+    let _dictation = start_dictation_with(
         rig.app.handle(),
         DictationPorts {
             audio,
@@ -679,10 +679,10 @@ fn the_dictation_ports_notifier_is_the_one_the_session_offers_to() {
             hotkeys: Arc::clone(&rig.hotkeys),
             detector: Err(voicen_core::vad::VadError::Unavailable),
             temp_audio: Arc::new(FakeTempAudioStore::new()),
-            notifier: notifier(&rig, &sink),
         },
+        notifier(&rig, &sink),
     )
-    .expect("start_dictation");
+    .expect("start_dictation_with");
 
     rig.session().hotkey_pressed(timing_support::now());
     wait_toasts(&sink, 1);

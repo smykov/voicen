@@ -39,6 +39,30 @@ pub struct StartWindow {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PendingId(pub(crate) u64);
 
+/// The literal prefix of a toast's retry argument.
+const TOAST_ARG_PREFIX: &str = "retry:";
+
+impl PendingId {
+    /// The toast's activation argument for this id: `retry:<u64>` in decimal, and
+    /// nothing else (FR-20, NFR-04). The one writer; [`PendingId::from_toast_arg`]
+    /// is the one reader.
+    pub fn to_toast_arg(self) -> String {
+        format!("{TOAST_ARG_PREFIX}{}", self.0)
+    }
+
+    /// The id of a toast argument written by [`PendingId::to_toast_arg`]: the exact
+    /// prefix `retry:` followed by one or more ASCII digits that fit a `u64`. Any
+    /// other string (a sign, whitespace, another prefix or case, trailing text,
+    /// overflow) is `None`.
+    pub fn from_toast_arg(arg: &str) -> Option<PendingId> {
+        let digits = arg.strip_prefix(TOAST_ARG_PREFIX)?;
+        if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        digits.parse::<u64>().ok().map(PendingId)
+    }
+}
+
 /// The clipboard could not be written (no OS text).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ClipboardError;

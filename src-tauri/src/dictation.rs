@@ -9,7 +9,9 @@
 //! [`pending_store`] over `paths::temp_audio_dir()`; its `delete_all` runs before
 //! the session starts, a failure writes one `pending_audio_cleanup_failed` line, and
 //! the store is managed as
-//! [`PendingAudio`] for the `RunEvent::Exit` cleanup) and [`SettingsRequests`];
+//! [`PendingAudio`] for the `RunEvent::Exit` cleanup), the given notifier
+//! ([`start_dictation_with`]: `run()` passes the process's one `win::toast::ShellNotifier`,
+//! T-210, which the call part shares, T-128) and [`SettingsRequests`];
 //! manages it as
 //! `Arc<DictationSession>` (the type the tray's menu-open handler looks up),
 //! starts the hotkey thread for the settings' hotkey and attaches it to the
@@ -118,7 +120,9 @@ pub fn start_dictation<R: Runtime>(
 }
 
 /// [`start_dictation`] with the process's one notifier: `run()` hands the same instance
-/// to the call part (T-128), so the two sessions offer their messages to one notifier.
+/// to the call part (T-128), so the two sessions offer their messages to one notifier
+/// (T-210: `win::toast::ShellNotifier`; the tests pass a recording or the shell
+/// notifier over a fake sink).
 pub fn start_dictation_with<R: Runtime>(
     app: &AppHandle<R>,
     ports: DictationPorts,
@@ -220,9 +224,10 @@ pub fn start_dictation_with<R: Runtime>(
     Ok(DictationHandle { _hotkey: hotkey })
 }
 
-/// The interim notifier (until T-210's toasts): the offers are dropped; the overlay
-/// and the tray still show every message.
-pub(crate) struct NoToasts;
+/// [`start_dictation`]'s notifier, for the tests that look at no toast: the offers are
+/// dropped; the overlay and the tray still show every message. `run()` passes
+/// `win::toast::ShellNotifier` through [`start_dictation_with`] (T-210).
+struct NoToasts;
 
 impl Notifier for NoToasts {
     fn notify(

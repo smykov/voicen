@@ -250,6 +250,10 @@ messages! {
     /// through `diag::LogsNotice` and `DictationSession::notice_with`; placeholder
     /// `{reason}` = a `logs_reason.*` id, rendered in the same language.
     NOTICE_LOGS_UNWRITABLE = "notice.logs_unwritable",
+    /// A Retry whose pending audio cannot be read back (decision #280, T-210): the
+    /// slot is emptied and the session's worker shows this notice instead of
+    /// running an engine.
+    NOTICE_RETRY_UNAVAILABLE = "notice.retry_unavailable",
     // ---- Call mode (T-119, spec 007 contracts/ipc.md "Message catalog", #197, #198).
     // The enum-to-id mapping of refusals, notices and warnings is T-126's. ----
     /// Tray submenu `Call` (T-122).
@@ -383,7 +387,9 @@ messages! {
 impl MessageId {
     /// This id as an argument value of another message; [`text`] renders it in
     /// the same language when the id is in the `nested:` group of [`messages!`].
-    pub(crate) fn nested_arg(self) -> String {
+    /// Public for the shell's notices with a nested reason (T-210: the logs-folder
+    /// notice's `{reason}`).
+    pub fn nested_arg(self) -> String {
         self.0.to_string()
     }
 }
@@ -646,6 +652,13 @@ fn embedded() -> &'static Catalog {
 /// `lang` first (module docs).
 pub fn text(lang: UiLanguage, id: MessageId, args: &[(&str, &str)]) -> String {
     render_with_nested(embedded(), lang, id, args)
+}
+
+/// Whether a shown message is also a toast (contracts/messages.md "Where"): every
+/// message is toast + overlay except `notice.logs_unwritable`, which is overlay
+/// only. The shell notifier's filter (T-210); the session offers every message.
+pub fn is_toast_surface(id: MessageId) -> bool {
+    id != NOTICE_LOGS_UNWRITABLE
 }
 
 fn render_with_nested(

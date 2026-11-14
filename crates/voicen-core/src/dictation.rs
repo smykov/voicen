@@ -55,10 +55,12 @@ use crate::diag::{LogsNoticeSink, LogsUnwritableReason};
 use crate::events::{DeviceKind, DictationEvent, PipelineObserver, WarningCode};
 use crate::i18n::{
     MessageId, MIC_NAME_UNNAMED, NOTICE_HOTKEY_UNAVAILABLE, NOTICE_LOGS_UNWRITABLE,
-    NOTICE_MIC_FALLBACK,
+    NOTICE_MIC_FALLBACK, NOTICE_RETRY_UNAVAILABLE,
 };
 use crate::microphone::{choose, Choice, MicrophoneState};
-use crate::pipeline::{EngineFactory, JobReport, Pipeline, PipelineDeps, PressContext};
+use crate::pipeline::{
+    EngineFactory, JobReport, Pipeline, PipelineDeps, PressContext, RetryOutcome,
+};
 use crate::platform::{
     AudioSource, CancelKey, CaptureHandle, DeviceId, FrameSink, Indicator, InputDevice, Notifier,
     Paster, PendingId, ShellRequests,
@@ -623,7 +625,9 @@ impl DictationSession {
     /// counts it as queued (overlay Processing). The worker then runs
     /// `Pipeline::retry`: `Some(id)` only while `id` is still pending, `None`
     /// whatever is pending; nothing pending or a stale id clears the queue entry
-    /// with no message, no offer and no tray change. It does not wait for a stop in
+    /// with no message, no offer and no tray change; pending audio that cannot be
+    /// read back clears it too and shows `notice.retry_unavailable` (overlay and
+    /// one offer, no retry id; decision #280). It does not wait for a stop in
     /// flight: a recording whose audio is still being converted queues behind it.
     /// After shutdown began nothing happens.
     pub fn retry(&self, at: Instant, id: Option<PendingId>) {
@@ -864,14 +868,17 @@ fn run_losses(shared: &Shared, losses: &mpsc::Receiver<Loss>) {
 /// How a worker job ended, for the controller.
 enum Done {
     Recording(RecordingId, JobReport),
-    /// `None`: the retry ran nothing (nothing pending, a stale id).
-    Retry(RetryKey, Option<JobReport>),
+    /// What `Pipeline::retry` did: ran, nothing (nothing pending, a stale id) or
+    /// unreadable pending audio (decision #280).
+    Retry(RetryKey, RetryOutcome),
 }
 
 /// The one worker: the only caller of `run_job`, `Pipeline::retry` and the
 /// controller's job ends, in queue order, with no lock held during a job. A
-/// retry that runs nothing (`Pipeline::retry` returned `None`) only clears its
-/// queue entry. After shutdown began it takes no further job; the queued ones are
+/// retry that runs nothing (`RetryOutcome::Nothing`) only clears its queue entry;
+/// one whose pending audio is unreadable (`RetryOutcome::Unreadable`) clears it
+/// and shows `notice.retry_unavailable` under the same lock (decision #280), so
+/// every Retry input gets the same notice. After shutdown began it takes no further job; the queued ones are
 /// dropped with the receiver.
 fn run_worker(shared: &Shared, pipeline: &Pipeline, jobs: &mpsc::Receiver<Job>) {
     while let Ok(job) = jobs.recv() {
@@ -899,10 +906,16 @@ fn run_worker(shared: &Shared, pipeline: &Pipeline, jobs: &mpsc::Receiver<Job>) 
                 st.ctrl
                     .job_finished_pending(id, report.end, report.pending, now)
             }
-            Done::Retry(key, Some(report)) => {
+            Done::Retry(key, RetryOutcome::Ran(report)) => {
                 st.ctrl.retry_finished(key, report.end, report.pending, now)
             }
-            Done::Retry(key, None) => st.ctrl.retry_dropped(key, now),
+            Done::Retry(key, RetryOutcome::Nothing) => st.ctrl.retry_dropped(key, now),
+            Done::Retry(key, RetryOutcome::Unreadable) => {
+                // The tray as after any dropped retry (not `retry_finished`, whose
+                // `JobEnd::Notice` would clear tray Error), then the notice.
+                st.ctrl.retry_dropped(key, now);
+                st.ctrl.notice_with(NOTICE_RETRY_UNAVAILABLE, vec![], now);
+            }
         }
         st.retry_available = retry_available;
         shared.publish(&mut st);

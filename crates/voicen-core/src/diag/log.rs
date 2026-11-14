@@ -77,6 +77,30 @@ pub enum LogsUnwritableReason {
 }
 
 impl LogsUnwritableReason {
+    /// The reason of a failed operation on `dir` (the log's open, write or roll; the
+    /// shell's "Open logs folder", T-210): the one `io::Error` -> reason map.
+    /// `NotADirectory` when the nearest existing part of `dir` is not a directory,
+    /// whatever the error says (`create_dir_all` over a file reports `AlreadyExists`;
+    /// on Windows a file in the middle of the path reports `NotFound` or
+    /// `AlreadyExists`). Reads the file system (one `metadata` per path part).
+    pub fn of(dir: &Path, err: &io::Error) -> LogsUnwritableReason {
+        let blocked_by_file = dir
+            .ancestors()
+            .find_map(|part| fs::metadata(part).ok())
+            .is_some_and(|meta| !meta.is_dir());
+        if blocked_by_file {
+            return LogsUnwritableReason::NotADirectory;
+        }
+        match err.kind() {
+            io::ErrorKind::PermissionDenied => LogsUnwritableReason::PermissionDenied,
+            io::ErrorKind::StorageFull | io::ErrorKind::QuotaExceeded => {
+                LogsUnwritableReason::DiskFull
+            }
+            io::ErrorKind::NotADirectory => LogsUnwritableReason::NotADirectory,
+            _ => LogsUnwritableReason::Other(err.raw_os_error()),
+        }
+    }
+
     /// The `logs_reason.*` text, the `{reason}` of `notice.logs_unwritable`. The OS
     /// code of `Other` is never shown: every `Other` is `logs_reason.other`.
     pub fn message_id(self) -> MessageId {
@@ -378,22 +402,8 @@ fn rolled_order(stem: &str) -> (String, u64) {
     }
 }
 
-/// The reason of a failed open, write or roll under `dir`. `NotADirectory` when
-/// the nearest existing part of `dir` is not a directory, whatever the error says
-/// (`create_dir_all` over a file reports `AlreadyExists`; on Windows a file in the
-/// middle of the path reports `NotFound` or `AlreadyExists`).
+/// The reason of a failed open, write or roll under `dir`: the one map,
+/// [`LogsUnwritableReason::of`].
 fn unwritable(dir: &Path, err: &io::Error) -> LogsUnwritableReason {
-    let blocked_by_file = dir
-        .ancestors()
-        .find_map(|part| fs::metadata(part).ok())
-        .is_some_and(|meta| !meta.is_dir());
-    if blocked_by_file {
-        return LogsUnwritableReason::NotADirectory;
-    }
-    match err.kind() {
-        io::ErrorKind::PermissionDenied => LogsUnwritableReason::PermissionDenied,
-        io::ErrorKind::StorageFull | io::ErrorKind::QuotaExceeded => LogsUnwritableReason::DiskFull,
-        io::ErrorKind::NotADirectory => LogsUnwritableReason::NotADirectory,
-        _ => LogsUnwritableReason::Other(err.raw_os_error()),
-    }
+    LogsUnwritableReason::of(dir, err)
 }

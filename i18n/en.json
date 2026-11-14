@@ -164,6 +164,7 @@
   "notice.post_processing_skipped.not_configured": "Post-processing skipped — not set up. Check the Post-processing settings.",
   "notice.post_processing_skipped.timeout": "Post-processing skipped — timeout",
   "notice.post_processing_skipped.unreachable": "Post-processing skipped — cannot reach {host}",
+  "notice.retry_unavailable": "The failed dictation could not be read back, so it cannot be retried",
   "notice.settings_reset": "The settings file could not be read, so it was set aside and the defaults are in use. Choose a transcription engine to continue.",
   "notice.settings_unavailable": "Settings could not be read, so Voicen is using the defaults and cannot save changes. Check access to the settings folder and restart Voicen.",
   "notice.stopped.low_disk": "Recording stopped: not enough free disk space",

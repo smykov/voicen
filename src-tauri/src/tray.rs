@@ -557,7 +557,8 @@ pub fn live_menu<R: Runtime>(app: &AppHandle<R>) -> Option<Menu<R>> {
 /// it unchecked; decision #223), and posts `CallRequest::Record(Tray)`, whose intent the
 /// call worker reads from the session; `CallStop` posts `CallRequest::Stop(Tray)`;
 /// `OpenCalls` calls `call::open_calls`. Without a call part the posts do nothing.
-/// `Retry` does nothing until T-210.
+/// `Retry` stamps the click and runs `DictationSession::retry(at, None)` on another
+/// thread (T-210).
 pub fn on_menu_event<R: Runtime>(app: &AppHandle<R>, event: MenuEvent) {
     match TrayAction::from_id(event.id().as_ref()) {
         Some(TrayAction::CallRecord) => {
@@ -573,11 +574,26 @@ pub fn on_menu_event<R: Runtime>(app: &AppHandle<R>, event: MenuEvent) {
             let _ = settings_window::request(app, OpenTarget::Front);
         }
         Some(TrayAction::OpenLogs) => logs_folder::request(app),
-        // T-210: `DictationSession::retry(at, None)`.
-        Some(TrayAction::Retry) => {}
+        Some(TrayAction::Retry) => retry(app),
         Some(TrayAction::Exit) => app.exit(0),
         None => {}
     }
+}
+
+/// The tray's Retry (T-210, FR-028): the instant is stamped here and
+/// `retry(at, None)` (the newest pending recording) runs on another thread, on the
+/// session managed as `Arc<DictationSession>`; without one it does nothing. The core
+/// decides everything else (nothing pending, a busy session, an unreadable file).
+fn retry<R: Runtime>(app: &AppHandle<R>) {
+    let at = Instant::now();
+    let Some(session) = app.try_state::<Arc<DictationSession>>() else {
+        return;
+    };
+    let session = Arc::clone(&session);
+    // As for the menu-open handler: the main thread never takes the session lock.
+    drop(tauri::async_runtime::spawn_blocking(move || {
+        session.retry(at, None)
+    }));
 }
 
 /// `true` for the events after which the menu shows: `Click { Right, Up }`, and

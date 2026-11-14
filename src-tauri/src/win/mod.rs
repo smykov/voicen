@@ -9,7 +9,8 @@
 //! `TrackSource` (mic and system loopback, QPC capture stamps; T-127,
 //! `src-tauri/tests/call_capture.rs`). `audio_notify` is the call mode's `DeviceEventsFactory`
 //! (an `IMMNotificationClient` that only posts typed events) and `CommunicationsCheck` (T-150,
-//! `src-tauri/tests/call_notify.rs`).
+//! `src-tauri/tests/call_notify.rs`). `toast` is the dictation's `Notifier`: one `toast`
+//! thread showing WinRT toasts (T-210, `src-tauri/tests/feedback.rs`).
 
 pub mod audio_notify;
 pub mod capture;
@@ -19,10 +20,15 @@ pub mod hotkey;
 pub mod paste;
 pub mod purge;
 pub mod shell_open;
+pub mod toast;
 pub mod track_capture;
 
+use std::marker::PhantomData;
+
 use voicen_core::secrets::CredentialError;
-use windows::Win32::Foundation::WIN32_ERROR;
+use windows::core::HRESULT;
+use windows::Win32::Foundation::{RPC_E_CHANGED_MODE, WIN32_ERROR};
+use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED};
 
 /// The Win32 code of a failed call (the HRESULT when it is not a Win32 one): the
 /// only part of an OS error a log line carries (#45; never its text).
@@ -50,5 +56,39 @@ pub(crate) fn wipe(bytes: &mut [u8]) {
     for byte in bytes.iter_mut() {
         // SAFETY: `byte` is a valid, aligned, exclusive reference.
         unsafe { std::ptr::write_volatile(byte, 0) };
+    }
+}
+
+/// COM on the current thread (MTA): `CoUninitialize` on drop only after a successful
+/// `CoInitializeEx`; `RPC_E_CHANGED_MODE` (the thread is already an STA) is usable as is.
+/// Not `Send`: it must drop on the thread that made it. The one guard of the threads that
+/// call COM or WinRT (`audio_notify`, `toast`).
+pub(crate) struct ComGuard {
+    owns: bool,
+    _thread_bound: PhantomData<*mut ()>,
+}
+
+impl ComGuard {
+    /// COM initialised on this thread, or the failed `CoInitializeEx` result.
+    pub(crate) fn init() -> Result<ComGuard, HRESULT> {
+        // SAFETY: no reserved pointer; balanced by `Drop` when it succeeded.
+        let result: HRESULT = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+        if result.is_ok() || result == RPC_E_CHANGED_MODE {
+            Ok(ComGuard {
+                owns: result.is_ok(),
+                _thread_bound: PhantomData,
+            })
+        } else {
+            Err(result)
+        }
+    }
+}
+
+impl Drop for ComGuard {
+    fn drop(&mut self) {
+        if self.owns {
+            // SAFETY: balances this thread's successful `CoInitializeEx`.
+            unsafe { CoUninitialize() };
+        }
     }
 }

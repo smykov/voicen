@@ -26,27 +26,23 @@
 //! `E_NOTFOUND` constant of the windows crate's HtmlHelp module). Nothing here logs; ids
 //! never leave the core ports.
 
-use std::marker::PhantomData;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
 
 use voicen_core::call::{CommunicationsCheck, DeviceEvent, DeviceEvents, DeviceEventsFactory};
 use voicen_core::platform::DeviceId;
-use windows::core::{implement, Result as WinResult, HRESULT, PCWSTR};
-use windows::Win32::Foundation::{ERROR_TIMEOUT, E_UNEXPECTED, PROPERTYKEY, RPC_E_CHANGED_MODE};
+use windows::core::{implement, Result as WinResult, PCWSTR};
+use windows::Win32::Foundation::{ERROR_TIMEOUT, E_UNEXPECTED, PROPERTYKEY};
 use windows::Win32::Media::Audio::{
     eCapture, eCommunications, eConsole, eRender, EDataFlow, ERole, IMMDeviceEnumerator,
     IMMNotificationClient, IMMNotificationClient_Impl, MMDeviceEnumerator, DEVICE_STATE,
     DEVICE_STATE_ACTIVE,
 };
-use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_ALL,
-    COINIT_MULTITHREADED,
-};
+use windows::Win32::System::Com::{CoCreateInstance, CoTaskMemFree, CLSCTX_ALL};
 
 use super::capture::OPEN_BUDGET;
-use super::os_code;
+use super::{os_code, ComGuard};
 
 /// Core's [`DeviceEventsFactory`]: each `open` is one [`AudioNotify::open`] on the calling
 /// (device) thread.
@@ -85,7 +81,7 @@ impl AudioNotify {
     /// whose `next()` is always `None`.
     pub fn open() -> AudioNotify {
         let (sender, receiver) = mpsc::channel();
-        let Some(com) = ComGuard::init() else {
+        let Ok(com) = ComGuard::init() else {
             return AudioNotify {
                 registration: None,
                 receiver,
@@ -149,38 +145,6 @@ impl Drop for AudioNotify {
             drop(registration);
         }
         // `_com` drops after this body: COM is uninitialised last.
-    }
-}
-
-/// COM on the current thread (MTA): `CoUninitialize` on drop only after a successful
-/// `CoInitializeEx`; `RPC_E_CHANGED_MODE` (the thread is already an STA) is usable as is.
-/// Not `Send`: it must drop on the thread that made it.
-struct ComGuard {
-    owns: bool,
-    _thread_bound: PhantomData<*mut ()>,
-}
-
-impl ComGuard {
-    fn init() -> Option<ComGuard> {
-        // SAFETY: no reserved pointer; balanced by `Drop` when it succeeded.
-        let result: HRESULT = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
-        if result.is_ok() || result == RPC_E_CHANGED_MODE {
-            Some(ComGuard {
-                owns: result.is_ok(),
-                _thread_bound: PhantomData,
-            })
-        } else {
-            None
-        }
-    }
-}
-
-impl Drop for ComGuard {
-    fn drop(&mut self) {
-        if self.owns {
-            // SAFETY: balances this thread's successful `CoInitializeEx`.
-            unsafe { CoUninitialize() };
-        }
     }
 }
 
@@ -296,7 +260,7 @@ impl CommunicationsCheck for ComCheck {
 
 /// The check on the helper thread: COM, the enumerator, the two render defaults' ids.
 fn check() -> Result<bool, i32> {
-    let Some(_com) = ComGuard::init() else {
+    let Ok(_com) = ComGuard::init() else {
         return Err(E_UNEXPECTED.0);
     };
     // SAFETY: COM is initialised on this thread for the whole call (`_com`, dropped last).

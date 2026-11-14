@@ -8,7 +8,12 @@
 //! is a directory (verb "open" on a file would execute it), and ends every failure
 //! (thread spawn, create, not a directory, open) in exactly one
 //! `warning kind=logs_folder_failed [os_code=N]` line: the kind and the OS code
-//! only, never the path or the OS text (#45). The app keeps running.
+//! only, never the path or the OS text (#45). The app keeps running. A failure on
+//! that thread (create, not a directory, open) also shows `error.open_logs_folder`
+//! through the dictation session managed at the click (T-210 I8, FR-027): its
+//! `{reason}` is the `logs_reason.*` id of `LogsUnwritableReason::of` (core's one
+//! map of the error, never the OS text), stamped at the failure; the session's
+//! notifier turns it into the one toast. Without a session only the line is written.
 //!
 //! `run()` installs `paths::log_dir()` with the Win32 `win::shell_open::ShellOpener`;
 //! tests install a fake opener over a temp dir. Without [`install`] a click does
@@ -18,9 +23,12 @@
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 
 use tauri::{AppHandle, Manager, Runtime};
-use voicen_core::diag::{Log, LogEvent, WarningKind};
+use voicen_core::diag::{Log, LogEvent, LogsUnwritableReason, WarningKind};
+use voicen_core::dictation::DictationSession;
+use voicen_core::i18n;
 
 /// The port that shows a folder to the user (the Explorer on Windows). Called off
 /// the main thread, with a path that was a directory just before the call; it may
@@ -48,7 +56,8 @@ pub fn install<R: Runtime>(app: &AppHandle<R>, dir: PathBuf, opener: Arc<dyn Fol
 
 /// Opens the installed logs folder on a new thread named `logs-folder` and
 /// returns at once; does nothing when nothing is installed. A failed spawn writes
-/// the one `logs_folder_failed` line here.
+/// the one `logs_folder_failed` line here; a failed open writes it on that thread
+/// and shows the notice on the session managed now (if any).
 pub fn request<R: Runtime>(app: &AppHandle<R>) {
     let Some(folder) = app.try_state::<LogsFolder>() else {
         return;
@@ -57,11 +66,23 @@ pub fn request<R: Runtime>(app: &AppHandle<R>) {
     let opener = Arc::clone(&folder.opener);
     let log = folder.log.clone();
     let spawn_log = log.clone();
+    let session = app
+        .try_state::<Arc<DictationSession>>()
+        .map(|session| Arc::clone(&session));
     let spawned = std::thread::Builder::new()
         .name("logs-folder".into())
         .spawn(move || {
             if let Err(err) = open(&dir, opener.as_ref()) {
+                let at = Instant::now();
                 warn(log.as_deref(), &err);
+                if let Some(session) = session {
+                    let reason = LogsUnwritableReason::of(&dir, &err).message_id();
+                    session.notice_with(
+                        i18n::ERROR_OPEN_LOGS_FOLDER,
+                        vec![("reason", reason.nested_arg())],
+                        at,
+                    );
+                }
             }
         });
     if let Err(err) = spawned {
