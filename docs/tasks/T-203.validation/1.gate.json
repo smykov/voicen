@@ -1,0 +1,13 @@
+{
+ "agent_id": "ab4f44d74bd2ed12f",
+ "agent_type": "task-validator",
+ "commit": "2d9d771392c8e417bc4dbe2d9d7b9d4362b136fb",
+ "gate": "validation",
+ "path": "docs/tasks/T-203.validation/1.md",
+ "round": 1,
+ "session_id": "bfe02960-5d18-4641-a2c8-5baf2d339f8a",
+ "sha256": "d6ded381f0a82afc8a70749d221723f14af1b224a913d062f8248b1bacf723f2",
+ "task": "T-203",
+ "ts": "2026-11-14T13:47:20Z",
+ "verdict": "PASS"
+}
