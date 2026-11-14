@@ -642,6 +642,79 @@ fn the_overlay_only_logs_notice_gives_no_toast_and_the_next_offer_still_does() {
     );
 }
 
+/// The messages the call part offers to the one shared notifier (T-128, spec 007:
+/// `CallPorts.notifier` is `run()`'s `SharedPorts.notifier`, the same instance the
+/// dictation session gets through `start_dictation_with`).
+const CALL_NOTICES: [i18n::MessageId; 30] = [
+    i18n::NOTICE_CALL_REFUSED_MIC_NO_DEVICE,
+    i18n::NOTICE_CALL_REFUSED_MIC_ACCESS_DENIED,
+    i18n::NOTICE_CALL_REFUSED_MIC_BUSY,
+    i18n::NOTICE_CALL_REFUSED_MIC_UNWRITABLE,
+    i18n::NOTICE_CALL_REFUSED_MIC_MISSING,
+    i18n::NOTICE_CALL_REFUSED_MIC_OTHER,
+    i18n::NOTICE_CALL_REFUSED_SYSTEM_NO_DEVICE,
+    i18n::NOTICE_CALL_REFUSED_SYSTEM_ACCESS_DENIED,
+    i18n::NOTICE_CALL_REFUSED_SYSTEM_BUSY,
+    i18n::NOTICE_CALL_REFUSED_SYSTEM_UNWRITABLE,
+    i18n::NOTICE_CALL_REFUSED_SYSTEM_MISSING,
+    i18n::NOTICE_CALL_REFUSED_SYSTEM_OTHER,
+    i18n::NOTICE_CALL_REFUSED_ROOT_NO_DEVICE,
+    i18n::NOTICE_CALL_REFUSED_ROOT_ACCESS_DENIED,
+    i18n::NOTICE_CALL_REFUSED_ROOT_BUSY,
+    i18n::NOTICE_CALL_REFUSED_ROOT_UNWRITABLE,
+    i18n::NOTICE_CALL_REFUSED_ROOT_MISSING,
+    i18n::NOTICE_CALL_REFUSED_ROOT_OTHER,
+    i18n::NOTICE_CALL_SAVED,
+    i18n::NOTICE_TRANSCRIPT_READY,
+    i18n::NOTICE_PASS_FAILED_KEY,
+    i18n::NOTICE_PASS_FAILED_NETWORK,
+    i18n::NOTICE_PASS_FAILED_TIMEOUT,
+    i18n::NOTICE_PASS_FAILED_PROVIDER,
+    i18n::NOTICE_PASS_FAILED_STORAGE,
+    i18n::NOTICE_PASS_FAILED_ENGINE_NOT_SET_UP,
+    i18n::NOTICE_STOPPED_SLEEP,
+    i18n::NOTICE_STOPPED_MAX_LENGTH,
+    i18n::NOTICE_STOPPED_LOW_DISK,
+    i18n::NOTICE_STOPPED_STORAGE,
+];
+
+#[test]
+fn every_call_notice_offered_to_the_shared_notifier_becomes_one_toast_with_its_text() {
+    // T-210 over T-128's shared notifier: the call part's offers (`notice.call_refused.*`,
+    // `notice.call_saved`, `notice.transcript_ready`, `notice.pass_failed.*`,
+    // `notice.stopped.*`) are on the toast surface; each becomes exactly one toast, in
+    // order, with its catalog text in the settings' language and no action. Bite: a
+    // toast-surface filter that keeps only the dictation's ids (no toast), a filter by
+    // prefix that drops one family (fewer toasts), a toast per family (wrong text).
+    let _serial = serial();
+    let rig = AppRig::new(EngineKind::Api);
+    let sink = Arc::new(FakeSink::default());
+    let n = notifier(&rig, &sink);
+    let lang = rig.service.snapshot().ui_language;
+
+    for id in CALL_NOTICES {
+        n.notify(id, &[], None);
+    }
+    wait_toasts(&sink, CALL_NOTICES.len());
+
+    assert!(
+        holds_for(SETTLE, || sink.shown().len() == CALL_NOTICES.len()),
+        "not one toast per call notice: {:?}",
+        sink.shown()
+    );
+    let shown = sink.shown();
+    for (id, toast) in CALL_NOTICES.iter().zip(&shown) {
+        let text = escaped(&i18n::text(lang, *id, &[]));
+        assert!(
+            toast.xml.contains(&text),
+            "{}: the toast lacks {text:?}: {}",
+            id_str(*id),
+            toast.xml
+        );
+        assert_no_action(&toast.xml);
+    }
+}
+
 #[test]
 fn a_ui_language_change_between_offers_changes_the_next_toasts_language() {
     // T-210 I5: the language is read from the settings at each toast, not at start. Bite:
