@@ -157,6 +157,41 @@ pub fn within_hang<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) ->
     }
 }
 
+/// A whole-test hang guard (T-128): ends the process with a named message when the test that
+/// made it is still running `2 * HANG` later. It covers what no positive wait can: a call that
+/// blocks for good in a rig build, a join or a drop. Dropping it (the test ended, in whatever
+/// way) cancels it. It is a hang guard, never a verdict on a measured time.
+pub struct HangWatch {
+    cancel: Option<mpsc::Sender<()>>,
+}
+
+/// Starts a [`HangWatch`] for the test running on this thread (libtest names the thread after
+/// the test); `what` names the stage that is guarded.
+pub fn watch_for_hang(what: &str) -> HangWatch {
+    let (cancel, ended) = mpsc::channel::<()>();
+    let test = thread::current().name().unwrap_or("<unnamed>").to_string();
+    let what = what.to_string();
+    thread::spawn(move || {
+        if let Err(RecvTimeoutError::Timeout) = ended.recv_timeout(HANG * 2) {
+            eprintln!(
+                "HANG: test `{test}` was still running {:?} after {what} started; a wait or a \
+                 drop never returned (T-128 hang guard)",
+                HANG * 2
+            );
+            std::process::exit(101);
+        }
+    });
+    HangWatch {
+        cancel: Some(cancel),
+    }
+}
+
+impl Drop for HangWatch {
+    fn drop(&mut self) {
+        drop(self.cancel.take());
+    }
+}
+
 /// A bounded negative: `cond` keeps holding for `within` (`false` as soon as it fails). A stall
 /// only makes it pass, so `within` is sized by the bite, not by the host.
 pub fn holds_for(within: Duration, cond: impl FnMut() -> bool) -> bool {

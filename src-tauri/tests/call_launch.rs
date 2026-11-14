@@ -14,6 +14,11 @@
 //! No verdict is a ceiling on a measured time (F-019, F-021, T-201): every wait is a positive
 //! wait on an outcome; the bounded negatives only watch for something that must not come. The 10 s
 //! reminder and the 4 h limit are core's `call_session` tests on a fake clock.
+//!
+//! Hang bound (T-128 re-entry): the test thread never parks on the session lock (the rig's
+//! `recording` polls `try_is_recording` while pumping, `stop_call` runs the stop on a helper
+//! thread), every wait is `timing_support::eventually*` (a named panic at the hang bound), and
+//! each rig carries a whole-test `HangWatch` that ends the process with the test's name.
 #![cfg(windows)]
 
 mod call_shell_support;
@@ -94,9 +99,7 @@ fn a_second_launch_with_call_record_posts_one_request_and_logs_call_requested_so
         "a started call offered a notice: {:?}",
         rig.notifier.calls()
     );
-    if let Some(session) = rig.session() {
-        let _ = session.stop(StopReason::User);
-    }
+    rig.stop_call();
 }
 
 #[test]
@@ -182,9 +185,7 @@ fn a_first_launch_with_the_switch_applies_it_once_after_the_tray_exists() {
             .is_some_and(|a| { a.state == voicen_core::recording::TrayState::CallRecording })),
         "the tray never showed the call"
     );
-    if let Some(session) = rig.session() {
-        let _ = session.stop(StopReason::User);
-    }
+    rig.stop_call();
 }
 
 #[test]
