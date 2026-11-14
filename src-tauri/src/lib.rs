@@ -16,8 +16,9 @@ use voicen_core::hotkey_registrar::HotkeyRegistrar;
 use voicen_core::local_models::catalog::MODELS;
 use voicen_core::local_models::download::DiskSpace;
 use voicen_core::local_models::service::LocalModels;
-use voicen_core::platform::AudioSource;
+use voicen_core::platform::{AudioSource, Notifier};
 use voicen_core::secrets::CredentialStore;
+use voicen_core::settings::gate::LaunchArgs;
 use voicen_core::settings::service::SettingsService;
 use voicen_core::settings::LoadOutcome;
 use voicen_core::timeouts::Timeouts;
@@ -25,6 +26,7 @@ use voicen_core::BuildInfo;
 
 #[cfg(windows)]
 pub mod autostart;
+pub mod call;
 #[cfg(windows)]
 pub mod credentials;
 pub mod diag;
@@ -293,14 +295,15 @@ fn release_disk_space() -> Arc<dyn DiskSpace> {
     compile_error!("the Voicen app runs on Windows only: the disk probe is GetDiskFreeSpaceExW")
 }
 
-/// `true` when the Run value started this process (`--autostart`, T-014).
+/// This process's launch arguments, parsed once (T-128): `--autostart` (the Run value
+/// started it, T-014) and the `--call` switch (spec 007 FR-043).
 #[cfg(windows)]
-fn release_launched_by_autostart() -> bool {
-    autostart::launched_by_autostart(std::env::args_os())
+fn release_launch_args() -> LaunchArgs {
+    LaunchArgs::parse(std::env::args_os())
 }
 
 #[cfg(not(windows))]
-fn release_launched_by_autostart() -> bool {
+fn release_launch_args() -> LaunchArgs {
     compile_error!(
         "the Voicen app runs on Windows only: the autostart flag comes from the HKCU \
          Run value"
@@ -315,15 +318,19 @@ fn release_launched_by_autostart() -> bool {
 /// the app's resource directory (T-102); an unresolvable directory counts as an unavailable
 /// model, so the app still starts on the energy detector.
 #[cfg(windows)]
-fn release_ports<R: Runtime>(app: &AppHandle<R>, shared: SharedPorts) -> dictation::DictationPorts {
+fn release_ports<R: Runtime>(
+    app: &AppHandle<R>,
+    credentials: Arc<dyn CredentialStore>,
+    hotkeys: Arc<win::hotkey::HotkeyRegistrarHandle>,
+) -> dictation::DictationPorts {
     dictation::DictationPorts {
         audio: settings_ipc::managed_microphones(app),
         clipboard: Arc::new(win::clipboard::WinClipboard::new()),
         paster: Arc::new(win::paste::WinPaster::new()),
         engine_factory: None,
         indicator: Arc::new(dictation::ShellIndicator::new(app)),
-        credentials: shared.credentials,
-        hotkeys: shared.hotkeys,
+        credentials,
+        hotkeys,
         detector: app
             .path()
             .resource_dir()
@@ -336,12 +343,34 @@ fn release_ports<R: Runtime>(app: &AppHandle<R>, shared: SharedPorts) -> dictati
 #[cfg(not(windows))]
 fn release_ports<R: Runtime>(
     _app: &AppHandle<R>,
-    _shared: SharedPorts,
+    _credentials: Arc<dyn CredentialStore>,
+    _hotkeys: Arc<win::hotkey::HotkeyRegistrarHandle>,
 ) -> dictation::DictationPorts {
     compile_error!(
         "the Voicen app runs on Windows only: the hotkey, microphone, clipboard and paste \
          are Win32 adapters"
     )
+}
+
+/// The release call ports (T-128): the two WASAPI track captures, the free-space probe
+/// (`GetDiskFreeSpaceExW`), the system monotonic clock, plain track files, the process's
+/// one notifier (`notifier`, shared with the dictation session) and `<data_dir>/calls`
+/// as the default call root.
+#[cfg(windows)]
+fn release_call_ports(notifier: Arc<dyn Notifier>) -> call::CallPorts {
+    call::CallPorts {
+        source: Arc::new(win::track_capture::CpalTrackSource::new()),
+        disk: release_disk_space(),
+        mono: Arc::new(voicen_core::clock::SystemMonotonic),
+        open_track: call::file_opener(),
+        notifier,
+        calls_root: paths::data_dir().join("calls"),
+    }
+}
+
+#[cfg(not(windows))]
+fn release_call_ports(_notifier: Arc<dyn Notifier>) -> call::CallPorts {
+    compile_error!("the Voicen app runs on Windows only: the call tracks are WASAPI captures")
 }
 
 /// Installs `paths::log_dir()` with the Explorer opener (T-071) for the tray's
@@ -360,10 +389,13 @@ fn install_logs_folder<R: Runtime>(_app: &AppHandle<R>) {}
 
 /// The instances the `SettingsService` and the dictation session share: the one key
 /// store and the one hotkey registrar (T-055: the save's hotkey step is served by
-/// the hotkey thread `start_dictation` attaches to it).
+/// the hotkey thread `start_dictation` attaches to it); and the one notifier the
+/// dictation session and the call part share (T-128; it drops every offer until
+/// T-210's toasts).
 struct SharedPorts {
     credentials: Arc<dyn CredentialStore>,
     hotkeys: Arc<win::hotkey::HotkeyRegistrarHandle>,
+    notifier: Arc<dyn Notifier>,
 }
 
 /// The startup side effects of the primary, in this order (T-052 invariant 1:
@@ -422,13 +454,15 @@ fn release_parts() -> (Parts, LoadOutcome, SharedPorts) {
         SharedPorts {
             credentials,
             hotkeys,
+            notifier: Arc::new(dictation::NoToasts),
         },
     )
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let launched_by_autostart = release_launched_by_autostart();
+    let launch_args = release_launch_args();
+    let launched_by_autostart = launch_args.autostart;
     let mut load_outcome = None;
     let mut shared = None;
     // The single-instance plugin is registered first and only here (never in
@@ -463,8 +497,19 @@ pub fn run() {
     // hotkey field), so `Ready`'s startup executor runs after it (T-055 Q1). The
     // handle lives as long as the loop: the hotkey stays registered until the
     // process ends.
-    let ports = release_ports(app.handle(), shared);
-    let dictation = dictation::start_dictation(app.handle(), ports).ok();
+    let SharedPorts {
+        credentials,
+        hotkeys,
+        notifier,
+    } = shared;
+    let ports = release_ports(app.handle(), credentials, hotkeys);
+    let dictation =
+        dictation::start_dictation_with(app.handle(), ports, Arc::clone(&notifier)).ok();
+    // The call part (T-128), after the tray exists: the one call session, its request
+    // worker and its tick thread. It starts no call; a failed start leaves the call
+    // entries no-ops. The first launch's `--call` switch is applied after it.
+    let _ = call::start_calls(app.handle(), release_call_ports(notifier));
+    call::apply_launch(app.handle(), &launch_args);
     app.run(move |app, event| {
         let _dictation = &dictation;
         on_run_event(app, event, &load_outcome, launched_by_autostart)

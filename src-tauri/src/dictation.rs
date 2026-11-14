@@ -108,10 +108,21 @@ pub struct DictationHandle {
 /// (`assemble`'s wiring). `Err` when the session or the hotkey thread could not be
 /// started, or when the app already has a session (then nothing is started): a
 /// failed session start (or a second one) writes `dictation_start_failed`, a failed
-/// hotkey thread `hotkey_thread_failed`.
+/// hotkey thread `hotkey_thread_failed`. The session's notifier drops every offer
+/// ([`start_dictation_with`] takes one).
 pub fn start_dictation<R: Runtime>(
     app: &AppHandle<R>,
     ports: DictationPorts,
+) -> io::Result<DictationHandle> {
+    start_dictation_with(app, ports, Arc::new(NoToasts))
+}
+
+/// [`start_dictation`] with the process's one notifier: `run()` hands the same instance
+/// to the call part (T-128), so the two sessions offer their messages to one notifier.
+pub fn start_dictation_with<R: Runtime>(
+    app: &AppHandle<R>,
+    ports: DictationPorts,
+    notifier: Arc<dyn Notifier>,
 ) -> io::Result<DictationHandle> {
     let log = app
         .try_state::<Arc<Log>>()
@@ -182,7 +193,7 @@ pub fn start_dictation<R: Runtime>(
         requests: Arc::new(SettingsRequests::new(app)),
         settings: Arc::clone(&service),
         cancel_key: cancel_key.clone(),
-        notifier: Arc::new(NoToasts),
+        notifier,
     })
     .map_err(failed)?;
     let session = Arc::new(session);
@@ -211,7 +222,7 @@ pub fn start_dictation<R: Runtime>(
 
 /// The interim notifier (until T-210's toasts): the offers are dropped; the overlay
 /// and the tray still show every message.
-struct NoToasts;
+pub(crate) struct NoToasts;
 
 impl Notifier for NoToasts {
     fn notify(

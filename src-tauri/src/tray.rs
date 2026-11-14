@@ -8,17 +8,23 @@
 //! - Menu rows, ids, texts, marks, enabled flags and icons come from core
 //!   `voicen_core::tray` only.
 //! - The tray changes only in one fire-and-forget main-thread task that applies the
-//!   latest `(TrayState, retry_available, ui_language)`: [`TrayPart::set_tray`]
-//!   (called by the dictation session under its lock, through T-006's composite
-//!   `Indicator`) and the language follower only store the value and post that
-//!   task; neither calls a `TrayIcon` setter (they wait for the main thread).
+//!   latest `(TrayState, retry_available, call_recording, ui_language)`:
+//!   [`TrayPart::set_tray`] (called by the dictation session under its lock, through
+//!   T-006's composite `Indicator`), [`TrayPart::set_call_recording`] (called by the
+//!   call session under its lock, through `call::ShellCallIndicator`; T-128) and the
+//!   language follower only store the value and post that task; none calls a
+//!   `TrayIcon` setter (they wait for the main thread). The icon and tooltip show
+//!   `voicen_core::tray::shown(dictation, call_recording)`, the menu
+//!   `voicen_core::tray::menu(retry_available, call_recording)`.
 //! - The main thread never calls a session input: opening the menu stamps the
 //!   instant and hands `DictationSession::tray_menu_opened` to another thread.
 //! - "Settings" posts `settings_window::request(Front)`; "Open logs folder" calls
 //!   `logs_folder::request` (its own thread, T-071); "Exit" calls
-//!   `AppHandle::exit(0)`, the only user exit. "Record", "Stop" and "Calls" reach no
-//!   session until T-128; "Record" rebuilds the menu, because muda flips a check
-//!   item's native mark on a click and only the table may decide it (decision #223).
+//!   `AppHandle::exit(0)`, the only user exit. "Record" and "Stop" post a
+//!   `call::CallRequest` to the call worker (T-128; nothing without a call part) and
+//!   "Calls" calls `call::open_calls`; "Record" also rebuilds the menu, because muda
+//!   flips a check item's native mark on a click and only the table may decide it
+//!   (decision #223).
 //! - Only tauri keeps the `TrayIcon` (in its resources), so tauri's exit cleanup
 //!   drops the last copy and tray-icon removes the icon from the notification
 //!   area; this module looks the icon up for each render.
@@ -31,6 +37,7 @@ use tauri::image::Image;
 use tauri::menu::{CheckMenuItem, IsMenuItem, Menu, MenuEvent, MenuItem, MenuItemKind, Submenu};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Manager, Runtime};
+use voicen_core::call::CallSource;
 use voicen_core::diag::{Log, LogEvent, WarningKind};
 use voicen_core::dictation::DictationSession;
 use voicen_core::i18n::{self, UiLanguage};
@@ -40,6 +47,7 @@ use voicen_core::settings::service::SettingsService;
 use voicen_core::settings::Settings;
 use voicen_core::tray::{self as table, TrayAction, TrayIconKind, TrayRow};
 
+use crate::call::{self, CallRequest};
 use crate::diag::io_os_code;
 use crate::logs_folder;
 use crate::settings_window::{self, OpenTarget, Receipt};
@@ -98,12 +106,14 @@ pub enum AppliedRow {
     },
 }
 
-/// What the tray is to show: the session's `(TrayState, retry_available)` and the
-/// settings' UI language.
+/// What the tray is to show: the dictation session's `(TrayState, retry_available)`,
+/// the call session's recording flag (only what `CallIndicator::set_call_recording`
+/// last published) and the settings' UI language.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct View {
     state: TrayState,
     retry_available: bool,
+    call_recording: bool,
     lang: UiLanguage,
     /// Bumped to rebuild the menu from the table with nothing else changed (decision
     /// #223: a click on "Record" leaves muda's flipped mark on the item until then).
@@ -127,14 +137,30 @@ struct Shared<R: Runtime> {
     app: AppHandle<R>,
     log: Arc<Log>,
     wanted: Mutex<Wanted>,
-    /// `(lang, retry_available, menu_epoch)` of the menu on the icon; read and written
-    /// by the apply task only.
-    menu_key: Mutex<(UiLanguage, bool, u64)>,
+    /// `(lang, retry_available, call_recording, menu_epoch)` of the menu on the icon;
+    /// read and written by the apply task only.
+    menu_key: Mutex<MenuKey>,
     applied: Mutex<Applied>,
     /// The menu last set on the icon, for [`live_menu`] (tauri 2.12.1 has no getter
     /// for a tray's menu). Unlike a `TrayIcon` copy it keeps no icon in the
     /// notification area.
     live_menu: Mutex<Option<Menu<R>>>,
+}
+
+/// What the menu on the icon was built from: `(lang, retry_available, call_recording,
+/// menu_epoch)`.
+type MenuKey = (UiLanguage, bool, bool, u64);
+
+impl View {
+    /// The key of the menu this view asks for.
+    fn menu_key(&self) -> MenuKey {
+        (
+            self.lang,
+            self.retry_available,
+            self.call_recording,
+            self.menu_epoch,
+        )
+    }
 }
 
 /// The managed tray of an app (absent when the tray could not be built).
@@ -182,8 +208,9 @@ impl<R: Runtime> Shared<R> {
         }
     }
 
-    /// Sets the icon and the tooltip of `view`, and a new menu when its language,
-    /// `retry_available` or `menu_epoch` changed, then records the rendered view. Does nothing once
+    /// Sets the icon and the tooltip of `shown(view.state, view.call_recording)`, and a
+    /// new menu when its language, `retry_available`, `call_recording` or `menu_epoch`
+    /// changed, then records the rendered view. Does nothing once
     /// tauri no longer has the icon (after the exit cleanup). No lock is held across
     /// a setter. The first failure writes one `tray_failed` warning: the kind, and
     /// the OS code only for a `tauri::Error::Io` (tray-icon's own OS errors arrive as
@@ -197,7 +224,8 @@ impl<R: Runtime> Shared<R> {
         let mut note = |err: tauri::Error| {
             failure.get_or_insert(io_os_code(&err));
         };
-        let kind = table::icon(view.state);
+        let state = table::shown(view.state, view.call_recording);
+        let kind = table::icon(state);
         let set_kind = match icon.set_icon(Some(image(kind))) {
             Ok(()) => Some(kind),
             Err(err) => {
@@ -205,7 +233,7 @@ impl<R: Runtime> Shared<R> {
                 None
             }
         };
-        let tooltip = i18n::text(view.lang, table::tooltip(view.state), &[]);
+        let tooltip = i18n::text(view.lang, table::tooltip(state), &[]);
         let set_tooltip = match icon.set_tooltip(Some(&tooltip)) {
             Ok(()) => Some(tooltip),
             Err(err) => {
@@ -213,12 +241,17 @@ impl<R: Runtime> Shared<R> {
                 None
             }
         };
-        let key = (view.lang, view.retry_available, view.menu_epoch);
+        let key = view.menu_key();
         let previous_key = *lock(&self.menu_key);
         let new_menu = if key == previous_key {
             None
         } else {
-            match build_menu(&self.app, view.lang, view.retry_available) {
+            match build_menu(
+                &self.app,
+                view.lang,
+                view.retry_available,
+                view.call_recording,
+            ) {
                 Ok((menu, items)) => match icon.set_menu(Some(menu.clone())) {
                     Ok(()) => {
                         *lock(&self.menu_key) = key;
@@ -240,7 +273,7 @@ impl<R: Runtime> Shared<R> {
         };
         {
             let mut applied = lock(&self.applied);
-            applied.state = view.state;
+            applied.state = state;
             applied.retry_available = view.retry_available;
             applied.lang = view.lang;
             if let Some(kind) = set_kind {
@@ -272,15 +305,15 @@ fn image(kind: TrayIconKind) -> Image<'static> {
     }
 }
 
-/// Core's menu for `retry_available`, its texts in `lang`, and its rows read back from
-/// the built menu. `call_recording` is `false` until T-128 supplies the call session's
-/// flag (and adds it to `View` and the menu key).
+/// Core's menu for `retry_available` and `call_recording`, its texts in `lang`, and its
+/// rows read back from the built menu.
 fn build_menu<R: Runtime>(
     app: &AppHandle<R>,
     lang: UiLanguage,
     retry_available: bool,
+    call_recording: bool,
 ) -> tauri::Result<(Menu<R>, Vec<AppliedRow>)> {
-    let items = render_rows(app, lang, &table::menu(retry_available, false))?;
+    let items = render_rows(app, lang, &table::menu(retry_available, call_recording))?;
     let refs: Vec<&dyn IsMenuItem<R>> = items.iter().map(|i| i as &dyn IsMenuItem<R>).collect();
     let menu = Menu::with_items(app, &refs)?;
     let read = read_rows(&menu.items()?)?;
@@ -374,6 +407,7 @@ pub(crate) fn install<R: Runtime>(app: &AppHandle<R>, service: &SettingsService,
     let view = View {
         state: TrayState::Idle,
         retry_available: false,
+        call_recording: false,
         lang: service.snapshot().ui_language,
         menu_epoch: 0,
     };
@@ -395,7 +429,7 @@ pub(crate) fn install<R: Runtime>(app: &AppHandle<R>, service: &SettingsService,
             version: 0,
             posted: false,
         }),
-        menu_key: Mutex::new((view.lang, view.retry_available, view.menu_epoch)),
+        menu_key: Mutex::new(view.menu_key()),
         applied: Mutex::new(applied),
         live_menu: Mutex::new(Some(menu)),
     });
@@ -412,9 +446,10 @@ pub(crate) fn install<R: Runtime>(app: &AppHandle<R>, service: &SettingsService,
 /// first apply and the menu set on the icon. The `TrayIcon` the builder returns is dropped here, on the building
 /// (main) thread: tauri's resources keep the only copy.
 fn build<R: Runtime>(app: &AppHandle<R>, view: View) -> tauri::Result<(Applied, Menu<R>)> {
-    let (menu, items) = build_menu(app, view.lang, view.retry_available)?;
-    let kind = table::icon(view.state);
-    let tooltip = i18n::text(view.lang, table::tooltip(view.state), &[]);
+    let (menu, items) = build_menu(app, view.lang, view.retry_available, view.call_recording)?;
+    let state = table::shown(view.state, view.call_recording);
+    let kind = table::icon(state);
+    let tooltip = i18n::text(view.lang, table::tooltip(state), &[]);
     TrayIconBuilder::with_id(TRAY_ID)
         .icon(image(kind))
         .tooltip(&tooltip)
@@ -424,7 +459,7 @@ fn build<R: Runtime>(app: &AppHandle<R>, view: View) -> tauri::Result<(Applied, 
         .on_tray_icon_event(|tray, event| on_tray_icon_event(tray, event))
         .build(app)?;
     let applied = Applied {
-        state: view.state,
+        state,
         retry_available: view.retry_available,
         lang: view.lang,
         icon: kind,
@@ -456,7 +491,8 @@ fn spawn_follower<R: Runtime>(
 }
 
 /// The tray half of the core `Indicator` port (T-006's composite `Indicator`
-/// forwards `set_tray` here).
+/// forwards `set_tray` here) and of the call session's `CallIndicator`
+/// (`call::ShellCallIndicator` forwards `set_call_recording` here; T-128).
 pub struct TrayPart<R: Runtime> {
     shared: Arc<Shared<R>>,
 }
@@ -479,6 +515,15 @@ impl<R: Runtime> TrayPart<R> {
             view.state = state;
             view.retry_available = retry_available;
         });
+    }
+
+    /// Stores the call session's recording flag and, unless an apply task is already
+    /// pending, posts one, exactly like [`TrayPart::set_tray`]: it returns at once and
+    /// never calls into a session (called under the call session lock). The flag is
+    /// part of the menu key, so a change rebuilds the menu (Record's mark, Stop's
+    /// enabled flag).
+    pub fn set_call_recording(&self, recording: bool) {
+        self.shared.want(|view| view.call_recording = recording);
     }
 }
 
@@ -506,21 +551,24 @@ pub fn live_menu<R: Runtime>(app: &AppHandle<R>) -> Option<Menu<R>> {
 /// The tray menu's handler (`TrayIconBuilder::on_menu_event`): the item id mapped by
 /// `TrayAction::from_id`; `OpenSettings` posts `settings_window::request(Front)`
 /// and drops the receipt, `OpenLogs` calls `logs_folder::request` (returns at
-/// once), `Exit` calls `app.exit(0)`, any other id does nothing. The call items reach
-/// no session until T-128: `CallRecord` only rebuilds the menu from the table, undoing
-/// muda's flip of the mark, and T-128 keeps that for a refused start (decision #223);
-/// `CallStop` and `OpenCalls` do nothing; `Retry` does nothing until T-210.
+/// once), `Exit` calls `app.exit(0)`, any other id does nothing. The call items only
+/// post (T-128; no session lock here): `CallRecord` rebuilds the menu from the table,
+/// undoing muda's flip of the mark (so a refused start, which publishes no flag, leaves
+/// it unchecked; decision #223), and posts `CallRequest::Record(Tray)`, whose intent the
+/// call worker reads from the session; `CallStop` posts `CallRequest::Stop(Tray)`;
+/// `OpenCalls` calls `call::open_calls`. Without a call part the posts do nothing.
+/// `Retry` does nothing until T-210.
 pub fn on_menu_event<R: Runtime>(app: &AppHandle<R>, event: MenuEvent) {
     match TrayAction::from_id(event.id().as_ref()) {
-        // T-128: also `CallSession::toggle_record`; the rebuild stays.
         Some(TrayAction::CallRecord) => {
             if let Some(part) = part(app) {
                 part.shared
                     .want(|view| view.menu_epoch = view.menu_epoch.wrapping_add(1));
             }
+            call::request(app, CallRequest::Record(CallSource::Tray));
         }
-        // T-128: stop the recording, open the Calls window.
-        Some(TrayAction::CallStop | TrayAction::OpenCalls) => {}
+        Some(TrayAction::CallStop) => call::request(app, CallRequest::Stop(CallSource::Tray)),
+        Some(TrayAction::OpenCalls) => call::open_calls(app),
         Some(TrayAction::OpenSettings) => {
             let _ = settings_window::request(app, OpenTarget::Front);
         }
@@ -574,16 +622,23 @@ pub fn on_tray_icon_event<R: Runtime>(tray: &TrayIcon<R>, event: TrayIconEvent) 
 
 /// The single-instance callback (in the primary, on its main thread, while the
 /// second process waits): `second_launch_action(&LaunchArgs::parse(&argv))`;
-/// `FrontSettings` posts `settings_window::request(Front)` and returns its receipt,
-/// `TrayOnly` and `StartCallRecord` post nothing (`None`; the call-record request is
-/// T-128's). Writes no log line and touches no file.
+/// `FrontSettings` posts `settings_window::request(Front)` and returns its receipt;
+/// `StartCallRecord` and `TrayOnly` return `None` and hand the parsed arguments to
+/// `call::apply_launch`, the one `--call` mapping of a first and a second launch
+/// (T-128): `--call record` posts `CallRequest::Record(Switch)`, an unknown `--call`
+/// value posts `CallRequest::RefuseSwitch` (the call worker writes its line), no
+/// `--call` posts nothing. Writes no log line itself and touches no file.
 pub fn on_second_instance<R: Runtime>(
     app: &AppHandle<R>,
     argv: Vec<String>,
     _cwd: String,
 ) -> Option<Receipt> {
-    match second_launch_action(&LaunchArgs::parse(&argv)) {
+    let args = LaunchArgs::parse(&argv);
+    match second_launch_action(&args) {
         SecondLaunchAction::FrontSettings => Some(settings_window::request(app, OpenTarget::Front)),
-        SecondLaunchAction::TrayOnly | SecondLaunchAction::StartCallRecord => None,
+        SecondLaunchAction::TrayOnly | SecondLaunchAction::StartCallRecord => {
+            call::apply_launch(app, &args);
+            None
+        }
     }
 }

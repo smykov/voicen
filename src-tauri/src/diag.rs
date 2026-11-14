@@ -194,7 +194,7 @@ pub fn io_os_code(err: &tauri::Error) -> Option<i32> {
 
 /// The offset of the active Windows time zone at an instant, daylight saving
 /// included; UTC (0) when the instant cannot be converted.
-struct OsLocalOffset;
+pub(crate) struct OsLocalOffset;
 
 impl LocalOffset for OsLocalOffset {
     fn seconds_east(&self, t: SystemTime) -> i32 {
