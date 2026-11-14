@@ -1123,6 +1123,24 @@ if ! cu_need "v-contour-upload-in-next-only"; then
   mk_ct v-contour-upload-in-next-only f_none && cu_tail >> "$d/teamwright-next.yml"
   dcheck v-contour-upload-in-next-only "$d" "R4"
 fi
+# The owned tail correctly in teamwright-agent.yml, and a further upload-artifact token (a secret-free step,
+# or a comment) in teamwright-next.yml: the token is counted there too, so R9 fires on that file's line
+# (M6, validation r1: `else if (n > 0 && ck != 2)` left it uncounted and the agent file's own miss hid it).
+for v in step comment; do
+  if ! cu_need "v-contour-upload-in-next-$v-with-tail"; then
+    l="v-contour-upload-in-next-$v-with-tail"
+    d="$tmp/$l"
+    mk_ct "$l"
+    if [ "$v" = step ]; then
+      printf '%s\n' '      - uses: actions/upload-artifact@v4' '        with:' '          path: /etc' >> "$d/teamwright-next.yml"
+    else
+      printf '%s\n' '      # an upload-artifact step' >> "$d/teamwright-next.yml"
+    fi
+    dcheck "$l" "$d"
+    expect "$l: R9 is listed at a line of teamwright-next.yml" \
+      bash -c 'out="$("$1" "$2" 2>&1)"; grep -q -E "teamwright-next\.yml:[0-9]+: R9: " <<<"$out"' _ "$guard" "$d"
+  fi
+done
 # The installer upload of ci.yml is still required: the tail alone is one token, not two.
 if ! cu_need "v-contour-upload-installer-upload-missing"; then
   d="$tmp/v-contour-upload-installer-upload-missing"
