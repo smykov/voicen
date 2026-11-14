@@ -12,6 +12,7 @@ use std::fmt;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use crate::i18n::{self, MessageId};
 use crate::settings::url::ProviderHost;
 
 /// One of the two tracks of a call.
@@ -237,6 +238,66 @@ pub enum CallNotice {
     TranscriptReady { call: CallId },
     PassFailed { reason: FailReason },
     Stopped { reason: StopReason },
+}
+
+impl CallNotice {
+    /// The catalog id and parameters of this notice's toast (T-128; T-139's pass notices
+    /// reuse it). Total over every variant: a stop the user or the system asked for
+    /// (`User`, `Hotkey`, `Exit`, `SystemEnd`) is the plain "call saved" notice; a stop the
+    /// session forced names its reason. No call notice text has a placeholder, so the
+    /// parameters are empty.
+    pub fn message(&self) -> (MessageId, Vec<(&'static str, String)>) {
+        let id = match self {
+            CallNotice::CallSavedTranscribing => i18n::NOTICE_CALL_SAVED,
+            CallNotice::TranscriptReady { .. } => i18n::NOTICE_TRANSCRIPT_READY,
+            CallNotice::PassFailed { reason } => match reason {
+                FailReason::Key => i18n::NOTICE_PASS_FAILED_KEY,
+                FailReason::Network => i18n::NOTICE_PASS_FAILED_NETWORK,
+                FailReason::Timeout => i18n::NOTICE_PASS_FAILED_TIMEOUT,
+                FailReason::Provider => i18n::NOTICE_PASS_FAILED_PROVIDER,
+                FailReason::Storage => i18n::NOTICE_PASS_FAILED_STORAGE,
+                FailReason::EngineNotSetUp => i18n::NOTICE_PASS_FAILED_ENGINE_NOT_SET_UP,
+            },
+            CallNotice::Stopped { reason } => match reason {
+                StopReason::Sleep => i18n::NOTICE_STOPPED_SLEEP,
+                StopReason::MaxLength => i18n::NOTICE_STOPPED_MAX_LENGTH,
+                StopReason::LowDisk => i18n::NOTICE_STOPPED_LOW_DISK,
+                StopReason::StorageError => i18n::NOTICE_STOPPED_STORAGE,
+                StopReason::User
+                | StopReason::Hotkey
+                | StopReason::Exit
+                | StopReason::SystemEnd => i18n::NOTICE_CALL_SAVED,
+            },
+        };
+        (id, Vec::new())
+    }
+}
+
+/// The catalog id of the toast for a refused call start (`notice.call_refused.<part>.<reason>`;
+/// T-128). Total over every part and reason; the text has no placeholder.
+pub fn refused_notice(part: RefusedPart, reason: RefusedReason) -> MessageId {
+    use RefusedPart as P;
+    use RefusedReason as R;
+    match (part, reason) {
+        (P::Mic, R::NoDevice) => i18n::NOTICE_CALL_REFUSED_MIC_NO_DEVICE,
+        (P::Mic, R::AccessDenied) => i18n::NOTICE_CALL_REFUSED_MIC_ACCESS_DENIED,
+        (P::Mic, R::Busy) => i18n::NOTICE_CALL_REFUSED_MIC_BUSY,
+        (P::Mic, R::Unwritable) => i18n::NOTICE_CALL_REFUSED_MIC_UNWRITABLE,
+        (P::Mic, R::Missing) => i18n::NOTICE_CALL_REFUSED_MIC_MISSING,
+        (P::Mic, R::Other) => i18n::NOTICE_CALL_REFUSED_MIC_OTHER,
+        (P::System, R::NoDevice) => i18n::NOTICE_CALL_REFUSED_SYSTEM_NO_DEVICE,
+        (P::System, R::AccessDenied) => i18n::NOTICE_CALL_REFUSED_SYSTEM_ACCESS_DENIED,
+        (P::System, R::Busy) => i18n::NOTICE_CALL_REFUSED_SYSTEM_BUSY,
+        (P::System, R::Unwritable) => i18n::NOTICE_CALL_REFUSED_SYSTEM_UNWRITABLE,
+        (P::System, R::Missing) => i18n::NOTICE_CALL_REFUSED_SYSTEM_MISSING,
+        (P::System, R::Other) => i18n::NOTICE_CALL_REFUSED_SYSTEM_OTHER,
+        (P::Root, R::NoDevice) => i18n::NOTICE_CALL_REFUSED_ROOT_NO_DEVICE,
+        (P::Root, R::AccessDenied) => i18n::NOTICE_CALL_REFUSED_ROOT_ACCESS_DENIED,
+        (P::Root, R::Busy) => i18n::NOTICE_CALL_REFUSED_ROOT_BUSY,
+        (P::Root, R::Unwritable) => i18n::NOTICE_CALL_REFUSED_ROOT_UNWRITABLE,
+        (P::Root, R::Missing) => i18n::NOTICE_CALL_REFUSED_ROOT_MISSING,
+        (P::Root, R::Other) => i18n::NOTICE_CALL_REFUSED_ROOT_OTHER,
+    }
 }
 
 // ---- CallId ----------------------------------------------------------------------
