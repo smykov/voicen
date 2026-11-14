@@ -33,7 +33,9 @@ use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, TryRecvError};
 use std::sync::{Arc, Mutex, PoisonError};
+use std::thread;
 
 use tauri::test::{mock_builder, mock_context, noop_assets, MockRuntime};
 use tauri::{App, AppHandle, Manager};
@@ -42,7 +44,7 @@ use voicen_core::call::codec::SyncWrite;
 use voicen_core::call::session::{CallSession, TrackFile, TrackOpener};
 use voicen_core::call::wav_source::WavTrackSource;
 use voicen_core::call::{
-    CaptureStamp, EndpointId, OpenError, Track, TrackDevice, TrackSink, TrackSource,
+    CaptureStamp, EndpointId, OpenError, StopReason, Track, TrackDevice, TrackSink, TrackSource,
 };
 use voicen_core::clock::SystemMonotonic;
 use voicen_core::diag::Log;
@@ -278,11 +280,15 @@ pub struct CallRig {
     pub app: App<MockRuntime>,
     pub service: Arc<SettingsService>,
     pub notifier: Arc<FakeNotifier>,
+    /// Ends the process with a named message when the test outlives `2 * HANG` (a build, a join
+    /// or a drop that never returns). Declared last so it is dropped after the app.
+    _watch: timing_support::HangWatch,
 }
 
 impl CallRig {
     /// An app with no call part (what `build_app` alone gives).
     pub fn bare() -> CallRig {
+        let watch = timing_support::watch_for_hang("the call rig was built");
         let dir = TempDir::new();
         let logs = dir.path().join("logs");
         let log: Arc<Log> = voicen_lib::diag::start(logs.clone(), Box::new(|_| {}));
@@ -309,6 +315,7 @@ impl CallRig {
             app,
             service,
             notifier: Arc::new(FakeNotifier::new()),
+            _watch: watch,
         }
     }
 
@@ -369,8 +376,49 @@ impl CallRig {
             .map(|s| Arc::clone(&s))
     }
 
+    /// Whether a call records. Never blocks on the session lock: the call worker holds it while
+    /// it opens captures and publishes the tray flag, and that publish may need this thread to
+    /// pump its messages, so a test thread parked on the lock would wait for a worker that waits
+    /// for it (T-128 hang, run 43577968221). It polls `try_is_recording`, pumping between polls,
+    /// and panics with a named message at the hang bound.
+    #[track_caller]
     pub fn recording(&self) -> bool {
-        self.session().is_some_and(|s| s.is_recording())
+        let Some(session) = self.session() else {
+            return false;
+        };
+        let mut known = None;
+        let answered = eventually(|| {
+            known = session.try_is_recording();
+            known.is_some()
+        });
+        assert!(
+            answered,
+            "HANG: the session lock stayed held for the whole hang bound while the test read \
+             `is_recording` (test `{}`); a call worker is blocked under the lock",
+            thread::current().name().unwrap_or("<unnamed>")
+        );
+        known.unwrap_or(false)
+    }
+
+    /// Stops a recording call like the user would (`StopReason::User`), on a helper thread, while
+    /// this thread keeps pumping; panics with a named message at the hang bound.
+    #[track_caller]
+    pub fn stop_call(&self) {
+        let Some(session) = self.session() else {
+            return;
+        };
+        let (done, finished) = mpsc::channel();
+        thread::spawn(move || {
+            let _ = session.stop(StopReason::User);
+            let _ = done.send(());
+        });
+        // A helper that panicked drops its sender: that also ends the wait.
+        let returned = eventually(|| !matches!(finished.try_recv(), Err(TryRecvError::Empty)));
+        assert!(
+            returned,
+            "HANG: `CallSession::stop` did not return within the hang bound (test `{}`)",
+            thread::current().name().unwrap_or("<unnamed>")
+        );
     }
 
     /// The lines of `<logs>/voicen.log` that have every one of `words` as a whole word.
