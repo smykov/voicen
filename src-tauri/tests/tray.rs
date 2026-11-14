@@ -464,13 +464,18 @@ fn each_state_and_retry_flag_reaches_the_tray_with_its_icon_tooltip_and_menu() {
     // tooltip and menu. Bite: a state not applied, the wrong icon or tooltip for a
     // state (Error shown as Idle), retry_available dropped, or the menu not
     // following core's `menu(retry_available)`.
+    // T-128 (I-b): the shell shows `table::shown(state, call_recording)`. These rigs
+    // have no call part, so the call flag is off, and core's `shown(CallRecording,
+    // false)` is `Idle`: the dictation controller never produces `CallRecording`, and
+    // fed through `set_tray` it shows Idle. The call-flag path to `CallRecording` is
+    // `call_tray.rs::a_call_in_progress_shows_call_recording` (T-128 AC7).
     let _serial = serial();
     let rig = rig(None);
     let part = rig.part();
     for retry in [false, true] {
         for state in all_states() {
             part.set_tray(state, retry);
-            let want = expected(state, retry, UiLanguage::En);
+            let want = expected(table::shown(state, false), retry, UiLanguage::En);
             assert!(
                 eventually(|| rig.applied() == Some(want.clone())),
                 "after set_tray({state:?}, {retry}): applied {:?}",
