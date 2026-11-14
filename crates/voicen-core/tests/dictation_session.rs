@@ -4328,7 +4328,7 @@ fn a_retry_whose_audio_cannot_be_read_back_empties_the_slot_and_warns() {
     // no tray Error and leaves the overlay off Processing (the no-op checks); the
     // slot is emptied (tray without Retry), the audio delete is attempted, and one
     // `Warning{pending_audio_unreadable}` is emitted, after the failed read. The
-    // user-facing notice is T-209's. Bite: the read error swallowed without a
+    // user-facing notice is T-210's (OQ-86). Bite: the read error swallowed without a
     // warning, the slot kept (Retry stays on the tray), the audio left behind, an
     // engine run on missing audio, a message or offer for it.
     let (rig, id) = failed_once(vec![Ok(TEXT.to_string())], Custom::default());

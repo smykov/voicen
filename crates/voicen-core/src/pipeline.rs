@@ -251,7 +251,7 @@ impl Pipeline {
             Err(_) => {
                 // The audio can never be retried: empty the slot, delete it, and
                 // say so in the log (closed kind only, no OS text, P-009). Nothing
-                // is shown to the user here (the visible notice is T-209's).
+                // is shown to the user here (the visible notice is T-210's, OQ-86).
                 self.drop_pending(entry.id);
                 self.emit(DictationEvent::Warning {
                     code: WarningCode::PendingAudioUnreadable,
