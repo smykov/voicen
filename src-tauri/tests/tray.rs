@@ -242,7 +242,7 @@ fn expected(state: TrayState, retry_available: bool, lang: UiLanguage) -> Applie
         lang,
         icon: table::icon(state),
         tooltip: i18n::text(lang, table::tooltip(state), &[]),
-        // T-122: until T-128 the shell passes `call_recording = false`.
+        // No call part in these rigs: the call flag is off.
         menu: applied_rows(&table::menu(retry_available, false), lang),
     }
 }
@@ -782,14 +782,16 @@ fn an_unknown_menu_id_does_nothing() {
 }
 
 #[test]
-fn the_call_menu_ids_do_nothing_until_the_call_session_is_wired() {
-    // T-122 D1 (decision #197): the new Call / Calls items are explicit no-op arms of
-    // `on_menu_event` until T-128 wires them. Clicking each of the three ids opens no
-    // window, calls no opener, leaves the tray as it was and the app running (an
-    // exit would panic in the mock). Bite: a catch-all arm that opens settings, an
-    // arm that opens the logs folder, `Exit` reached for a new id, a new id
-    // unmapped by `from_id` (then it is the unknown-id no-op, so this passes) is
-    // caught by core's id tests, not here.
+fn the_call_menu_ids_do_nothing_when_the_app_has_no_call_part() {
+    // T-122 D1 (decision #197), kept by T-128: on an app `build_app` built and nobody called
+    // `call::start_calls` on, the Call / Calls items post requests to no worker
+    // (`call::request` is a no-op without a call part) and do nothing else. Clicking each of the
+    // three ids opens no window, calls no opener, leaves the tray as it was and the app running
+    // (an exit would panic in the mock). The routes with a call part are `call_tray.rs`.
+    // Bite: a catch-all arm that opens settings, an arm that opens the logs folder, `Exit`
+    // reached for a new id, a `request` that panics or builds a part when none is managed; a
+    // new id unmapped by `from_id` (then it is the unknown-id no-op, so this passes) is caught
+    // by core's id tests, not here.
     let _serial = serial();
     let rig = rig(None);
     let dir = TempDir::new();
