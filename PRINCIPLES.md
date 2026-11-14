@@ -124,6 +124,11 @@ Each **Why** names, in one generic sentence, the kind of incident that produced 
 - **Tier:** T1
 - **How checked:** in `/teamwright:parallel auto` the orchestrator starts no new `TODO` task while more than 5 tasks wait at `CODE_COMPLETE` for verification; it verifies first. Pipelines already running finish. A verification that waits for the owner's `main` push is asked as that question at once, not at the end of the pass. Each process review reports the `CODE_COMPLETE` count.
 
+### P-022 — One acceptance round, a bounded mutant catalogue
+- **Why:** on 2026-11-14 five tasks went back from acceptance on surviving mutants that were gaps in tests, not wrong behaviour (T-127 for the second time), and catalogues grew without a bound (T-144: 50 mutants); each round repeats red-tests, implement, review, CI and verify. Origin: pipeline cost relayed by the monitoring session (decisions #281, #282).
+- **Tier:** T1
+- **How checked:** the task-validator runs one acceptance round per task. A surviving mutant that shows a test gap is written to `docs/tasks/<ID>.follow-ups/` (Medium when it covers an Acceptance line) and does not by itself make the verdict FAIL; FAIL needs a behaviour defect — the code does the wrong thing, or the Acceptance failure branch is not met — with the observation that shows it. A task's mutant catalogue (`docs/tasks/<ID>.mutants/`, or the catalogue list in the record) holds at most 15 mutants; the test-writer picks the 15 that cover the Acceptance lines and failure branches first. The orchestrator spawns every role with `model` from `process.models` of its stage. Each process review reports acceptance rounds per task.
+
 ---
 
 ## Registry
@@ -151,3 +156,4 @@ Each **Why** names, in one generic sentence, the kind of incident that produced 
 | P-019 | Task record under 40 KB | T0 | Accepted |
 | P-020 | A guard decides on a switch, an owned literal or a raw token | T1+T3 | Accepted |
 | P-021 | Verification before new starts | T1 | Accepted |
+| P-022 | One acceptance round, a bounded mutant catalogue | T1 | Accepted |
