@@ -1,0 +1,8 @@
+guarantee: AC6: every refusal and CallNotice reaches the notifier through one total core mapping
+file: crates/voicen-core/src/call/events.rs
+added_by: test-writer
+--- old
+                StopReason::LowDisk => i18n::NOTICE_STOPPED_LOW_DISK,
+--- new
+                StopReason::LowDisk => i18n::NOTICE_STOPPED_MAX_LENGTH,
+--- end

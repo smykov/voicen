@@ -1,0 +1,8 @@
+guarantee: AC6: every refusal and CallNotice reaches the notifier through one total core mapping
+file: crates/voicen-core/src/call/events.rs
+added_by: test-writer
+--- old
+            CallNotice::TranscriptReady { .. } => i18n::NOTICE_TRANSCRIPT_READY,
+--- new
+            CallNotice::TranscriptReady { .. } => i18n::NOTICE_CALL_SAVED,
+--- end

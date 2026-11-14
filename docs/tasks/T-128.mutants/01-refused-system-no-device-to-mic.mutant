@@ -1,0 +1,8 @@
+guarantee: AC6: every refusal and CallNotice reaches the notifier through one total core mapping
+file: crates/voicen-core/src/call/events.rs
+added_by: test-writer
+--- old
+        (P::System, R::NoDevice) => i18n::NOTICE_CALL_REFUSED_SYSTEM_NO_DEVICE,
+--- new
+        (P::System, R::NoDevice) => i18n::NOTICE_CALL_REFUSED_MIC_NO_DEVICE,
+--- end

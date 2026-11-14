@@ -1,0 +1,1 @@
+cargo test -p voicen-core -j2 --test call_notice_map
