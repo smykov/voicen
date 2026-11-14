@@ -33,7 +33,10 @@ use voicen_core::call::{
 };
 use voicen_core::clock::FakeClock;
 use voicen_core::hotkey_registrar::FakeHotkeyRegistrar;
-use voicen_core::i18n::UiLanguage;
+use voicen_core::i18n::{
+    text, MessageId, UiLanguage, INDICATOR_REMINDER, WARNING_LOW_DISK, WARNING_MIC_CHANGED,
+    WARNING_PROVIDER_NOTICE,
+};
 use voicen_core::models::FakeDownloadedModels;
 use voicen_core::platform::DeviceId;
 use voicen_core::secrets::FakeCredentialStore;
@@ -1258,6 +1261,142 @@ fn a_settings_language_change_mid_call_keeps_the_call_language() {
         rig.indicator.states().last(),
         Some(&IndicatorState::idle(UiLanguage::Ru)),
         "idle carries the settings language read at the stop"
+    );
+}
+
+/// The states published while `kind` is listed, the first of which is the republish that
+/// raised it. Found by kind, so a missing republish fails here and not on an index.
+#[track_caller]
+fn states_listing(rig: &CallRig, kind: WarningKind) -> Vec<IndicatorState> {
+    let found: Vec<IndicatorState> = rig
+        .indicator
+        .states()
+        .into_iter()
+        .filter(|s| s.warnings.iter().any(|w| w.kind == kind))
+        .collect();
+    assert!(!found.is_empty(), "a state lists {kind:?}");
+    found
+}
+
+#[track_caller]
+fn assert_call_language(rig: &CallRig, kind: WarningKind, id: MessageId, lang: UiLanguage) {
+    let other = match lang {
+        UiLanguage::En => UiLanguage::Ru,
+        UiLanguage::Ru => UiLanguage::En,
+    };
+    assert_ne!(
+        text(lang, id, &[]),
+        text(other, id, &[]),
+        "premise: the two texts differ"
+    );
+    for state in states_listing(rig, kind) {
+        assert_eq!(state.lang, lang, "{kind:?}: {state:?}");
+        let warning = state
+            .warnings
+            .iter()
+            .find(|w| w.kind == kind)
+            .expect("listed");
+        assert_eq!(warning.text, text(lang, id, &[]), "{kind:?}: {state:?}");
+    }
+}
+
+#[test]
+fn a_low_disk_warning_after_a_settings_language_change_keeps_the_call_language() {
+    // T-204 (validation r1, O3): the low-disk raise of the free-space poll is one of the
+    // five publishers of a recording state; after a mid-call switch to Ru its state still
+    // carries the call's language (En) and the English warning text.
+    // Bite: the poll's republish reading the settings snapshot's language.
+    let rig = CallRig::with(|s| s.ui_language = UiLanguage::En);
+    started(&rig, CallSource::Tray);
+    feed(&rig, 0, 2_000);
+    rig.port.edit(|s| s.ui_language = UiLanguage::Ru);
+    rig.disk.set_free(900 * call_support::MB);
+    tick_secs(&rig, 25);
+    assert!(rig.session.is_recording());
+    assert_call_language(&rig, WarningKind::LowDisk, WARNING_LOW_DISK, UiLanguage::En);
+    for state in rig.indicator.states() {
+        assert_eq!(state.lang, UiLanguage::En, "{state:?}");
+    }
+    rig.session.stop(StopReason::User);
+}
+
+#[test]
+fn a_writer_warning_after_a_settings_language_change_keeps_the_call_language() {
+    // T-204 (validation r1, O4): the writer's pending-warning flush republishes the state
+    // under the session lock; after a mid-call switch to Ru the state listing the
+    // mic-changed warning carries lang En and the English text.
+    // Bite: the flush publishing another `lang` than `Call.lang` (a fixed Ru, the settings).
+    let rig = CallRig::with_capacity(1_024, |s| {
+        quiet_with_mic(s);
+        s.ui_language = UiLanguage::En;
+    });
+    started(&rig, CallSource::Tray);
+    feed(&rig, 0, 1_000);
+    rig.source.set_stamp_ms(1_000);
+    rig.port.edit(|s| s.ui_language = UiLanguage::Ru);
+    rig.devices
+        .push(DeviceEvent::DeviceRemoved(DeviceId("mic-1".to_string())));
+    assert!(
+        wait(|| rig.source.ok_opens(Track::Mic) == 2),
+        "the mic is reopened"
+    );
+    rig.source.feed(Track::Mic, 1_200, 1_400, 0.3);
+    assert!(
+        wait(|| kind_count(&rig, WarningKind::MicChanged) == 1),
+        "the notice is shown: {:?}",
+        warnings_of(&rig)
+    );
+    rig.session.stop(StopReason::User);
+    assert_call_language(
+        &rig,
+        WarningKind::MicChanged,
+        WARNING_MIC_CHANGED,
+        UiLanguage::En,
+    );
+    let during: Vec<IndicatorState> = rig
+        .indicator
+        .states()
+        .into_iter()
+        .filter(|s| s.recording)
+        .collect();
+    for state in during {
+        assert_eq!(state.lang, UiLanguage::En, "{state:?}");
+    }
+}
+
+#[test]
+fn a_call_started_in_russian_publishes_russian_states() {
+    // T-204 (validation r1, O5): the call's language is the settings language at the start;
+    // a call started with `ui_language = Ru` carries Ru in its first state, with the
+    // Russian texts, and the idle state after the stop carries Ru too.
+    // Bite: `begin_call` fixing the call's language to En.
+    let rig = CallRig::with(|s| s.ui_language = UiLanguage::Ru);
+    started(&rig, CallSource::Tray);
+    let first = rig.indicator.states();
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].lang, UiLanguage::Ru);
+    assert_eq!(
+        first[0].reminder_text,
+        text(UiLanguage::Ru, INDICATOR_REMINDER, &[])
+    );
+    assert_ne!(
+        first[0].reminder_text,
+        text(UiLanguage::En, INDICATOR_REMINDER, &[]),
+        "premise: the two texts differ"
+    );
+    assert_eq!(
+        first[0].warnings[0].text,
+        text(
+            UiLanguage::Ru,
+            WARNING_PROVIDER_NOTICE,
+            &[("host", "api.example.com")]
+        ),
+        "the provider notice is Russian too"
+    );
+    rig.session.stop(StopReason::User);
+    assert_eq!(
+        rig.indicator.states().last(),
+        Some(&IndicatorState::idle(UiLanguage::Ru))
     );
 }
 

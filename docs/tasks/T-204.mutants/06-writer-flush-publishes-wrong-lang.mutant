@@ -1,0 +1,14 @@
+guarantee: AC-2 / invariant: the writer's pending-warning flush publishes the call's language with texts in that language
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+        if added {
+            self.shared.indicator.set_state(&call.state());
+        }
+--- new
+        if added {
+            let mut s = call.state();
+            s.lang = UiLanguage::Ru;
+            self.shared.indicator.set_state(&s);
+        }
+--- end

@@ -1,0 +1,14 @@
+guarantee: AC-2 / failure branch: the low-disk republish of the free-space poll builds its state with the settings language read mid-call
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+            if call.warnings.raise(CallWarning::LowDisk).is_some() {
+                self.deps.indicator.set_state(&call.state());
+            }
+--- new
+            if call.warnings.raise(CallWarning::LowDisk).is_some() {
+                let mut s = call.state();
+                s.lang = self.deps.settings.snapshot().ui_language;
+                self.deps.indicator.set_state(&s);
+            }
+--- end
