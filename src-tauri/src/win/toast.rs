@@ -18,7 +18,10 @@
 //! a toast that cannot be built or shown writes one `warning kind=toast_failed
 //! os_code=N` line (the Win32 code or HRESULT, never the OS text or the XML) and the next
 //! offer is still shown; a toast thread that cannot start, or whose COM init fails,
-//! writes one such line and the offers are dropped.
+//! writes one such line and the offers are dropped. With the app's notifications off
+//! `Show` does not fail, so [`WinRtSink`] first passes `ToastNotifier::Setting()`
+//! through [`setting_gate`]: a toast refused by the setting writes the same one line
+//! per refused toast, `os_code=1223` ([`REFUSED_OS_CODE`], `ERROR_CANCELLED`).
 
 use std::io;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -28,15 +31,35 @@ use voicen_core::diag::{Log, LogEvent, WarningKind};
 use voicen_core::i18n::{self, MessageId};
 use voicen_core::platform::{Notifier, PendingId};
 use voicen_core::settings::service::SettingsService;
-use windows::core::{h, Error as WinError, HSTRING};
+use windows::core::{h, Error as WinError, HRESULT, HSTRING};
 use windows::Data::Xml::Dom::XmlDocument;
-use windows::UI::Notifications::{ToastNotification, ToastNotificationManager};
+use windows::Win32::Foundation::ERROR_CANCELLED;
+use windows::UI::Notifications::{
+    NotificationSetting, ToastNotification, ToastNotificationManager,
+};
 
 use super::{os_code, ComGuard};
 
 /// The app's AppUserModelID: `identifier` of `tauri.conf.json`, set on the installed
 /// Start-menu shortcut (`SetLnkAppUserModelId` in the NSIS installer).
 pub const APP_USER_MODEL_ID: &str = "dev.voicen.app";
+
+/// The `os_code` logged for a toast refused by the notification setting:
+/// `ERROR_CANCELLED`, the code of [`setting_gate`]'s error.
+pub const REFUSED_OS_CODE: i32 = 1223;
+
+/// Lets a toast through only when the app's notification setting is `Enabled`; every
+/// other value (off for the app or the user, group policy, manifest) is refused with
+/// `HRESULT_FROM_WIN32(ERROR_CANCELLED)`, logged as `os_code=1223`.
+pub fn setting_gate(setting: NotificationSetting) -> Result<(), WinError> {
+    if setting == NotificationSetting::Enabled {
+        Ok(())
+    } else {
+        Err(WinError::from_hresult(HRESULT::from_win32(
+            ERROR_CANCELLED.0,
+        )))
+    }
+}
 
 /// The toast thread's name.
 const THREAD_NAME: &str = "toast";
@@ -160,9 +183,10 @@ fn failed(log: &Log, os_code: Option<i32>) {
 }
 
 /// The shipped sink: the XML loaded into a toast and shown by the toast notifier of
-/// [`APP_USER_MODEL_ID`]. Without the installed shortcut (a dev build, a `/NS`
-/// install, a test exe) `CreateToastNotifierWithId` or `Show` fails: the failure
-/// branch.
+/// [`APP_USER_MODEL_ID`], after the notifier's `Setting()` passed [`setting_gate`].
+/// Without the installed shortcut (a dev build, a `/NS` install, a test exe)
+/// `CreateToastNotifierWithId`, `Setting` or `Show` fails, and a setting other than
+/// `Enabled` is refused: the failure branch.
 pub struct WinRtSink;
 
 impl ToastSink for WinRtSink {
@@ -172,6 +196,7 @@ impl ToastSink for WinRtSink {
         let toast = ToastNotification::CreateToastNotification(&doc)?;
         let notifier =
             ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from(APP_USER_MODEL_ID))?;
+        setting_gate(notifier.Setting()?)?;
         notifier.Show(&toast)
     }
 }
