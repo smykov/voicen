@@ -1,0 +1,10 @@
+guarantee: AC-6 (characterization): a retry over the real file store delivers the stored audio and removes the file
+file: crates/voicen-core/src/pending.rs
+added_by: test-writer
+--- old
+        self.check()?;
+        remove_regular(&self.file(id))
+--- new
+        self.check()?;
+        Ok(())
+--- end

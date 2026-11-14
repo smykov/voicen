@@ -585,6 +585,8 @@ struct Custom {
     ui: Option<Arc<Sequence>>,
     /// The pending-audio store.
     store: Option<Arc<BlockingStore>>,
+    /// T-210: the real file store over a test folder (wins over `store`).
+    fs_store: Option<Arc<voicen_core::pending::FsTempAudioStore>>,
     /// The microphone (default: the rig's `FakeAudioSource`).
     audio: Option<Arc<dyn AudioSource>>,
     /// A second observer fed every event next to the rig's `RecordingObserver`
@@ -690,9 +692,10 @@ impl Rig {
                 None => (indicator.clone(), requests.clone()),
             };
         let indicator_port = custom.indicator.clone().unwrap_or(indicator_port);
-        let store_port: Arc<dyn TempAudioStore> = match &custom.store {
-            Some(b) => b.clone(),
-            None => store.clone(),
+        let store_port: Arc<dyn TempAudioStore> = match (&custom.fs_store, &custom.store) {
+            (Some(f), _) => f.clone(),
+            (None, Some(b)) => b.clone(),
+            (None, None) => store.clone(),
         };
         let audio_port: Arc<dyn AudioSource> = match &custom.audio {
             Some(a) => a.clone(),
@@ -4321,19 +4324,124 @@ fn a_retry_with_nothing_pending_runs_no_engine_and_changes_nothing() {
     assert_retry_is_a_no_op(&rig, None, past());
 }
 
+/// The catalog id string of a message id (the id's field is private to the crate).
+fn id_str(id: i18n::MessageId) -> String {
+    serde_json::to_value(id)
+        .expect("a message id serializes")
+        .as_str()
+        .expect("as a string")
+        .to_string()
+}
+
+const RETRY_UNAVAILABLE: &str = "notice.retry_unavailable";
+
+/// What an unreadable retry leaves: one `notice.retry_unavailable` on the overlay for 3 s
+/// from the worker's instant, exactly one offer of it with no retry id (after the
+/// failure's own), no engine run, the slot empty (tray without Retry) and no tray Error,
+/// the one typed warning. `click` is an instant taken before the retry, and the barrier
+/// job behind it proves no later offer or message followed.
+fn assert_unreadable_retry_shows_the_notice(rig: &Rig, id: PendingId, factory_before: usize) {
+    // A failure left tray Error on; opening the tray menu (to click Retry) clears it, so
+    // an Error after the click is the click's.
+    rig.session.tray_menu_opened(now());
+    let offers_before = offers(rig);
+    assert_eq!(offers_before.len(), 1, "premise: the failure's offer only");
+    let trays_before = rig.indicator.trays().len();
+    let click = now();
+    rig.session.retry(click, Some(id));
+
+    wait_offers(rig, 2);
+    let seen = now();
+    let all = offers(rig);
+    let (nid, params, retry) = &all[1];
+    assert_eq!(id_str(*nid), RETRY_UNAVAILABLE, "the second offer: {all:?}");
+    assert!(params.is_empty(), "no parameters: {params:?}");
+    assert_eq!(*retry, None, "the notice offers no retry id");
+
+    assert!(
+        eventually(|| rig.indicator.overlays().iter().any(
+            |o| matches!(o, OverlayState::Message { id, .. } if id_str(*id) == RETRY_UNAVAILABLE)
+        )),
+        "no notice.retry_unavailable on the overlay: {:?}",
+        rig.indicator.overlays()
+    );
+    let shown: Vec<_> = rig
+        .indicator
+        .overlays()
+        .into_iter()
+        .filter_map(|o| match o {
+            OverlayState::Message { id, params, until } => Some((id_str(id), params, until)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        shown.len(),
+        1,
+        "exactly one message on the overlay: {shown:?}"
+    );
+    let (mid, mparams, until) = &shown[0];
+    assert_eq!(mid, RETRY_UNAVAILABLE);
+    assert!(mparams.is_empty(), "{mparams:?}");
+    assert!(
+        *until >= click + MESSAGE_DURATION && *until <= seen + MESSAGE_DURATION,
+        "the notice is not shown for 3 s from the worker's instant: {:?} after the click, {:?} after the offer",
+        until.saturating_duration_since(click),
+        until.saturating_duration_since(seen)
+    );
+
+    // The FIFO barrier: a delivered job behind the retry. The retry ran no engine.
+    rig.hold(&fixtures::speech_3s(), past() + ms(20_000), ms(3000));
+    assert!(
+        eventually(|| rig.clipboard.texts() == vec![TEXT.to_string()]),
+        "the barrier job did not deliver: {:?}",
+        rig.clipboard.texts()
+    );
+    assert_eq!(
+        rig.engine.factory_calls(),
+        factory_before + 1,
+        "an engine ran for the unreadable retry"
+    );
+    assert_eq!(
+        offers(rig).len(),
+        2,
+        "more than one offer for the unreadable retry: {:?}",
+        offers(rig)
+    );
+    let all_trays = rig.indicator.trays();
+    let trays = &all_trays[trays_before..];
+    assert!(
+        !trays.iter().any(|(s, _)| *s == TrayState::Error),
+        "the unreadable retry set tray Error: {trays:?}"
+    );
+    assert!(
+        eventually(|| rig.indicator.trays().last() == Some(&(TrayState::Idle, false))),
+        "the slot is not empty after the unreadable retry (Retry still on the tray): {:?}",
+        rig.indicator.trays()
+    );
+    assert_eq!(
+        warnings(&rig.events()),
+        vec![WarningCode::PendingAudioUnreadable],
+        "exactly one typed warning for the unreadable pending audio"
+    );
+}
+
 #[test]
 fn a_retry_whose_audio_cannot_be_read_back_empties_the_slot_and_warns() {
-    // T-007 review 1 #1 (P-004/P-005, P-009): the store holds the pending id but
-    // `get_pending` fails. The retry runs no engine, shows and offers nothing, sets
-    // no tray Error and leaves the overlay off Processing (the no-op checks); the
-    // slot is emptied (tray without Retry), the audio delete is attempted, and one
-    // `Warning{pending_audio_unreadable}` is emitted, after the failed read. The
-    // user-facing notice is T-210's (OQ-86). Bite: the read error swallowed without a
-    // warning, the slot kept (Retry stays on the tray), the audio left behind, an
-    // engine run on missing audio, a message or offer for it.
+    // T-007 review 1 #1 (P-004/P-005, P-009), rewritten for decision #280 (OQ-86,
+    // T-210 I9): the store holds the pending id but `get_pending` fails. The retry runs
+    // no engine and shows ONE `notice.retry_unavailable` (overlay 3 s, one Notifier
+    // offer with retry None, offered after the failure's own), sets no tray Error and
+    // leaves the tray as after any dropped retry; the slot is emptied (tray without
+    // Retry), the audio delete is attempted, and one `Warning{pending_audio_unreadable}`
+    // is emitted, after the failed read. Bite: the read error swallowed without a
+    // warning, the slot kept, the audio left behind, an engine run on missing audio, no
+    // notice (the pre-#280 silence), the notice twice, an offer with a retry id, the
+    // notice through `retry_finished(JobEnd::Notice)` (tray Error handling), the notice
+    // for a stale id or nothing pending (those two tests stay silent).
     let (rig, id) = failed_once(vec![Ok(TEXT.to_string())], Custom::default());
     rig.store.set_fail_get(true);
-    assert_retry_is_a_no_op(&rig, Some(id), past() + ms(20_000));
+    let factory_before = rig.engine.factory_calls();
+    assert_unreadable_retry_shows_the_notice(&rig, id, factory_before);
 
     let calls = rig.store.calls();
     let get_at = calls.iter().position(|c| *c == StoreCall::Get(id));
@@ -4347,15 +4455,107 @@ fn a_retry_whose_audio_cannot_be_read_back_empties_the_slot_and_warns() {
         Vec::<PendingId>::new(),
         "the unreadable audio is left in the store"
     );
+}
+
+/// A rig over the real `FsTempAudioStore` in `dir`, whose first job fails with the
+/// network off and whose later jobs follow `then`: the pending id the failure left and
+/// the file it wrote.
+fn failed_once_on_disk(
+    dir: &std::path::Path,
+    then: Vec<Result<String, FailureReason>>,
+) -> (Rig, PendingId, std::path::PathBuf) {
+    let calls_root = dir.join("calls");
+    let store = Arc::new(voicen_core::pending::FsTempAudioStore::new(
+        dir.join("audio"),
+        Arc::new(move || Some(vec![calls_root.clone()])),
+    ));
+    let mut replies = vec![Err(network_off())];
+    replies.extend(then);
+    let rig = Rig::with(
+        api_settings(),
+        in_order(replies),
+        Custom {
+            fs_store: Some(store),
+            ..Custom::default()
+        },
+    );
+    rig.hold(&fixtures::speech_3s(), past(), ms(3000));
+    wait_offers(&rig, 1);
+    let first = offers(&rig);
+    let id = first[0].2.expect("premise: the failure left a pending id");
+    // The store's own name pattern `pending-<id>.wav`, found by listing (the id's
+    // number is crate-private): exactly one file.
+    let files: Vec<std::path::PathBuf> = std::fs::read_dir(dir.join("audio"))
+        .expect("the store's folder exists after the failure")
+        .map(|e| e.expect("entry").path())
+        .collect();
+    assert_eq!(
+        files.len(),
+        1,
+        "premise: one pending file on disk: {files:?}"
+    );
+    let file = files[0].clone();
+    let name = file
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default();
     assert!(
-        eventually(|| rig.indicator.trays().last() == Some(&(TrayState::Idle, false))),
-        "the slot is not empty after the unreadable retry (Retry still on the tray): {:?}",
+        name.starts_with("pending-") && name.ends_with(".wav"),
+        "premise: the pending audio is pending-<id>.wav: {name}"
+    );
+    assert!(
+        eventually(|| rig.indicator.trays().last() == Some(&(TrayState::Error, true))),
+        "premise: tray Error with Retry: {:?}",
         rig.indicator.trays()
     );
-    assert_eq!(
-        warnings(&rig.events()),
-        vec![WarningCode::PendingAudioUnreadable],
-        "exactly one typed warning for the unreadable pending audio"
+    (rig, id, file)
+}
+
+#[test]
+fn a_retry_over_the_real_file_store_delivers_the_stored_audio_and_removes_the_file() {
+    // T-007 review 3 #3 (characterization of the real store behind the session): a
+    // stored `pending-<id>.wav` read back by the retry is transcribed (the text
+    // delivered), and the file is gone afterwards. Bite: a retry that reads nothing
+    // from disk, a file left behind after delivery, an id mapped to another file name.
+    let tmp = TempDir::new();
+    let (rig, id, file) = failed_once_on_disk(tmp.path(), vec![Ok(TEXT.to_string())]);
+    rig.session.retry(now(), Some(id));
+    assert!(
+        eventually(|| rig.clipboard.texts() == vec![TEXT.to_string()]),
+        "the retry did not deliver: {:?}, offers {:?}",
+        rig.clipboard.texts(),
+        offers(&rig)
+    );
+    assert!(
+        eventually(|| !file.exists()),
+        "the delivered recording's file is left: {}",
+        file.display()
+    );
+    assert!(
+        eventually(|| rig.indicator.trays().last() == Some(&(TrayState::Idle, false))),
+        "tray after the delivered retry: {:?}",
+        rig.indicator.trays()
+    );
+}
+
+#[test]
+fn a_retry_over_a_corrupt_stored_file_warns_shows_the_notice_and_removes_the_file() {
+    // T-007 review 3 #3 + decision #280: the stored file is not a readable recording
+    // (the real store's `get_pending` fails). One typed warning, one
+    // `notice.retry_unavailable` (overlay 3 s, one offer with retry None), the slot
+    // empty, no engine run on it, and the corrupt file removed. Bite: the file left on
+    // disk (its audio kept after the slot is emptied), the read error treated as
+    // nothing pending (no notice, no warning), a retry that runs the engine on an
+    // empty buffer.
+    let tmp = TempDir::new();
+    let (rig, id, file) = failed_once_on_disk(tmp.path(), vec![Ok(TEXT.to_string())]);
+    std::fs::write(&file, b"this is not a wav file").expect("corrupt the stored file");
+    let factory_before = rig.engine.factory_calls();
+    assert_unreadable_retry_shows_the_notice(&rig, id, factory_before);
+    assert!(
+        !file.exists(),
+        "the corrupt file is left on disk: {}",
+        file.display()
     );
 }
 
