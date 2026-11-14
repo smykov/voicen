@@ -184,6 +184,9 @@ fn refuse_spawn(_name: &str, _body: Box<dyn FnOnce() + Send>) -> io::Result<()> 
     Err(io::Error::from_raw_os_error(1455))
 }
 
+/// One overlay message as recorded: id string, params, `until`.
+type ShownMessage = (String, Vec<(&'static str, String)>, std::time::Instant);
+
 /// The composite indicator in miniature: tray to the shell's `TrayPart`, overlay recorded.
 struct Recorder {
     tray: TrayPart<MockRuntime>,
@@ -196,7 +199,7 @@ impl Recorder {
     }
 
     /// The messages the overlay showed: id string, params, `until`.
-    fn messages(&self) -> Vec<(String, Vec<(&'static str, String)>, std::time::Instant)> {
+    fn messages(&self) -> Vec<ShownMessage> {
         self.overlays()
             .into_iter()
             .filter_map(|o| match o {

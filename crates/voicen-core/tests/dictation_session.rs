@@ -4347,6 +4347,7 @@ fn assert_unreadable_retry_shows_the_notice(rig: &Rig, id: PendingId, factory_be
     let offers_before = offers(rig);
     assert_eq!(offers_before.len(), 1, "premise: the failure's offer only");
     let trays_before = rig.indicator.trays().len();
+    let overlays_before = rig.indicator.overlays().len();
     let click = now();
     rig.session.retry(click, Some(id));
 
@@ -4369,6 +4370,7 @@ fn assert_unreadable_retry_shows_the_notice(rig: &Rig, id: PendingId, factory_be
         .indicator
         .overlays()
         .into_iter()
+        .skip(overlays_before)
         .filter_map(|o| match o {
             OverlayState::Message { id, params, until } => Some((id_str(id), params, until)),
             _ => None,
@@ -4377,7 +4379,7 @@ fn assert_unreadable_retry_shows_the_notice(rig: &Rig, id: PendingId, factory_be
     assert_eq!(
         shown.len(),
         1,
-        "exactly one message on the overlay: {shown:?}"
+        "exactly one message on the overlay after the click: {shown:?}"
     );
     let (mid, mparams, until) = &shown[0];
     assert_eq!(mid, RETRY_UNAVAILABLE);
