@@ -27,6 +27,9 @@
 //! voicen_lib::win::toast::ShellNotifier: Notifier + Send + Sync
 //!     ::new(settings: Arc<SettingsService>, log: Arc<Log>, sink: Arc<dyn ToastSink>)
 //!     ::with_spawn(settings, log, sink, spawn: SpawnFn)   // the toast thread is spawned here
+//! voicen_lib::win::toast::setting_gate(NotificationSetting) -> Result<(), windows::core::Error>
+//!     // Enabled -> Ok; any other value -> Err(HRESULT_FROM_WIN32(ERROR_CANCELLED))
+//! voicen_lib::win::toast::REFUSED_OS_CODE: i32 = 1223   // the logged code of a refused toast
 //! ```
 //!
 //! The toast thread is named `toast`. `ShellNotifier::new` over the WinRT sink is `release_ports`'
@@ -74,11 +77,13 @@ use voicen_core::vad::{EnergyDetector, SpeechDetector, SpeechGate};
 use voicen_lib::dictation::{start_dictation_with, DictationPorts};
 use voicen_lib::logs_folder::{self, FolderOpener};
 use voicen_lib::tray::{self, TrayPart};
-use voicen_lib::win::toast::{ShellNotifier, SpawnFn, ToastSink};
+use voicen_lib::win::toast::{setting_gate, ShellNotifier, SpawnFn, ToastSink, REFUSED_OS_CODE};
 use win32_support::{
     assert_hotkey_free, eventually, holds_for, serial, AppRig, HOLD_LIMIT, SETTLE,
 };
 use windows::core::HRESULT;
+use windows::Win32::Foundation::ERROR_CANCELLED;
+use windows::UI::Notifications::NotificationSetting;
 
 /// `E_ACCESSDENIED` as a Win32-facility HRESULT: the log's `os_code` is its Win32 code, 5.
 const ACCESS_DENIED: i32 = 0x8007_0005_u32 as i32;
@@ -98,6 +103,8 @@ struct SinkState {
     shown: Vec<Shown>,
     /// 1-based number of the one call that fails (exactly one: F-024).
     fail_call: Option<usize>,
+    /// The code that call fails with; `None` = `E_ACCESSDENIED`.
+    fail_code: Option<HRESULT>,
     /// The first call blocks until `released` (or `HOLD_LIMIT`).
     block_first: bool,
     entered: bool,
@@ -117,6 +124,17 @@ impl FakeSink {
     fn failing_call(n: usize) -> Arc<FakeSink> {
         let sink = FakeSink::default();
         win32_support::lock(&sink.state).fail_call = Some(n);
+        Arc::new(sink)
+    }
+
+    /// Fails exactly call `n` with `err`'s code (a refused show: the setting gate's error).
+    fn refusing_call(n: usize, err: &windows::core::Error) -> Arc<FakeSink> {
+        let sink = FakeSink::default();
+        {
+            let mut st = win32_support::lock(&sink.state);
+            st.fail_call = Some(n);
+            st.fail_code = Some(err.code());
+        }
         Arc::new(sink)
     }
 
@@ -164,7 +182,8 @@ impl ToastSink for FakeSink {
         }
         st.returned += 1;
         if st.fail_call == Some(n) {
-            return Err(windows::core::Error::from_hresult(HRESULT(ACCESS_DENIED)));
+            let code = st.fail_code.unwrap_or(HRESULT(ACCESS_DENIED));
+            return Err(windows::core::Error::from_hresult(code));
         }
         Ok(())
     }
@@ -913,6 +932,104 @@ fn a_toast_that_cannot_be_shown_writes_one_line_and_leaves_the_overlay_tray_and_
     assert_eq!(
         words(&lines[0]),
         vec!["warning", "kind=toast_failed", "os_code=5"],
+        "{:?}",
+        lines[0]
+    );
+    assert!(
+        !recorder.messages().is_empty(),
+        "the failure is not on the overlay: {:?}",
+        recorder.overlays()
+    );
+    assert!(
+        eventually(|| tray::applied(rig.app.handle()).is_some_and(|a| a.state == TrayState::Error)),
+        "the tray is not Error: {:?}",
+        tray::applied(rig.app.handle())
+    );
+
+    mic_fallback(n.as_ref(), "Next Mic");
+    wait_toasts(&sink, 2);
+    assert!(
+        sink.shown()[1].xml.contains("Using Next Mic"),
+        "the next offer is not shown: {}",
+        sink.shown()[1].xml
+    );
+    assert!(
+        holds_for(SETTLE, || lines_of(&rig, "toast_failed").len() == 1),
+        "a second toast_failed line: {:?}",
+        lines_of(&rig, "toast_failed")
+    );
+}
+
+#[test]
+fn the_setting_gate_lets_only_enabled_through_with_one_fixed_code() {
+    // T-210 I5 / Acceptance 5 (review 1 #1): with notifications off for the app `Show`
+    // does not fail, so `WinRtSink::show` reads `ToastNotifier::Setting()` and passes it
+    // through `setting_gate` before `Show`. Only `Enabled` lets the toast through; every
+    // other value is refused with the one documented code, `HRESULT_FROM_WIN32(
+    // ERROR_CANCELLED)`, logged as `os_code=1223` (`REFUSED_OS_CODE`). Bite: the gate
+    // `Ok` for every value (or `Err` for `Enabled`), a gate that lets one disabled value
+    // through (a match on some variants only), a per-value or a generic code (`E_FAIL`,
+    // `E_ACCESSDENIED`), a constant other than 1223.
+    assert_eq!(REFUSED_OS_CODE, 1223);
+    assert!(
+        setting_gate(NotificationSetting::Enabled).is_ok(),
+        "Enabled is refused"
+    );
+    let refused = HRESULT::from_win32(ERROR_CANCELLED.0);
+    assert_eq!(
+        refused,
+        HRESULT(0x8007_04C7_u32 as i32),
+        "premise: the Win32 HRESULT form"
+    );
+    for setting in [
+        NotificationSetting::DisabledForApplication,
+        NotificationSetting::DisabledForUser,
+        NotificationSetting::DisabledByGroupPolicy,
+        NotificationSetting::DisabledByManifest,
+    ] {
+        match setting_gate(setting) {
+            Ok(()) => panic!("{setting:?} is let through"),
+            Err(e) => assert_eq!(e.code(), refused, "{setting:?} is refused with {e:?}"),
+        }
+    }
+}
+
+#[test]
+fn a_toast_refused_by_the_notification_setting_writes_one_line_and_leaves_the_overlay_tray_and_next_toast(
+) {
+    // T-210 I5 / Acceptance 5 "notifications off for the app" (review 1 #1): the sink
+    // refuses exactly one call (the first, F-024) with the setting gate's error for
+    // `DisabledForApplication`, the error `WinRtSink::show` returns when the app's
+    // notifications are off. The refused microphone is still on the overlay and the tray
+    // shows Error; the log has exactly one `warning kind=toast_failed os_code=1223` line
+    // (one line per refused toast, like a failed one); the next offer is shown. Bite: the
+    // gate's code not the Win32 ERROR_CANCELLED (another `os_code`, or none), the refused
+    // show swallowed by the toast thread (no line), a line per layer (two), a latch
+    // "refused once, never again" (the next offer not shown). The call of `setting_gate`
+    // inside `WinRtSink::show` is not reached here (the fake sink stands in for the WinRT
+    // one, which needs the installed shortcut): review and the owner's manual check.
+    let _serial = serial();
+    let rig = AppRig::new(EngineKind::Api);
+    select_local_server(&rig);
+    let refusal = setting_gate(NotificationSetting::DisabledForApplication)
+        .expect_err("premise: DisabledForApplication is refused");
+    let sink = FakeSink::refusing_call(1, &refusal);
+    let n = notifier(&rig, &sink);
+    let audio = Arc::new(FakeAudioSource::new());
+    audio.set_start_error(Some(CaptureError::AccessDenied));
+    let (session, recorder) = start_session(&rig, audio.clone(), n.clone(), None);
+
+    session.hotkey_pressed(timing_support::now());
+    assert!(
+        eventually(|| !lines_of(&rig, "toast_failed").is_empty()),
+        "no toast_failed line after the refused show: {:?}",
+        sink.shown()
+    );
+    let lines = lines_of(&rig, "toast_failed");
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert_eq!(
+        words(&lines[0]),
+        vec!["warning", "kind=toast_failed", "os_code=1223"],
         "{:?}",
         lines[0]
     );
