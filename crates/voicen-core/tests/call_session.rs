@@ -3476,3 +3476,35 @@ fn four_hours_stop_with_max_length() {
             reason: StopReason::MaxLength
         })));
 }
+
+#[test]
+fn a_call_started_late_on_the_capture_clock_has_no_leading_silence() {
+    // T-127 invariant "all stamps and the call start share one timeline" (validation r2,
+    // V5): the call start is the source's `now()` and anchors each track's timeline. The
+    // clock of a real source is the machine's uptime (QPC), never 0, so the fake's clock
+    // is two minutes in before the start and the blocks are stamped from there. A track
+    // places its first block at (stamp - start): with the right start the audio begins at
+    // offset 0 and the stored track is as long as the call, not two minutes longer.
+    // Bite (V5): `let start = CaptureStamp(0);` in `CallSession::open_tracks` prepends the
+    // whole uptime as zeros to both tracks (length ~121 s, no tone in the first second).
+    const UPTIME_MS: u64 = 120_000;
+    let rig = CallRig::new();
+    rig.source.set_stamp_ms(UPTIME_MS);
+    started(&rig, CallSource::Tray);
+    rig.source.feed_tone(Track::Mic, UPTIME_MS, UPTIME_MS + 1_000, 0.5);
+    rig.source.feed_tone(Track::System, UPTIME_MS, UPTIME_MS + 1_000, 0.5);
+    rig.source.set_stamp_ms(UPTIME_MS + 1_000);
+    rig.session.stop(StopReason::User);
+    for file in ["mic.opus", "system.opus"] {
+        let samples = track_samples(&rig, file);
+        assert!(
+            samples.len() < 2 * 16_000,
+            "{file}: the track is as long as the call, not the uptime: {} samples",
+            samples.len()
+        );
+        assert!(
+            rms_between(&samples, 100, 900) > 0.03,
+            "{file}: the first audio is at offset 0, no leading zero fill"
+        );
+    }
+}

@@ -1,0 +1,11 @@
+guarantee: Invariant: all stamps and the call start share one timeline (call start = source.now())
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+test: cargo test -p voicen-core --test call_session a_call_started_late_on_the_capture_clock_has_no_leading_silence
+--- old
+        let channel: Arc<dyn TrackSink> = Arc::new(sink);
+        let start = self.deps.source.now();
+--- new
+        let channel: Arc<dyn TrackSink> = Arc::new(sink);
+        let start = CaptureStamp(0);
+--- end
