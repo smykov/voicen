@@ -1,0 +1,8 @@
+guarantee: r1#3: Voip pinned on its own
+file: crates/voicen-core/src/call/codec.rs
+added_by: test-writer
+--- old
+        let mut encoder = opus::Encoder::new(RATE, opus::Channels::Mono, opus::Application::Voip)
+--- new
+        let mut encoder = opus::Encoder::new(RATE, opus::Channels::Mono, opus::Application::Audio)
+--- end

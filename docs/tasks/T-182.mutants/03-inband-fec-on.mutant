@@ -1,0 +1,8 @@
+guarantee: r1#3: FEC off
+file: crates/voicen-core/src/call/codec.rs
+added_by: test-writer
+--- old
+        encoder.set_inband_fec(false).map_err(encode_failed)?;
+--- new
+        encoder.set_inband_fec(true).map_err(encode_failed)?;
+--- end

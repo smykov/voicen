@@ -1,0 +1,8 @@
+guarantee: r1#3: complexity 9
+file: crates/voicen-core/src/call/codec.rs
+added_by: test-writer
+--- old
+        encoder.set_complexity(COMPLEXITY).map_err(encode_failed)?;
+--- new
+        encoder.set_complexity(10).map_err(encode_failed)?;
+--- end

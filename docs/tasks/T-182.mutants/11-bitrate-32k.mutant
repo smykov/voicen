@@ -1,0 +1,8 @@
+guarantee: r1#3: bitrate 24 kbit/s
+file: crates/voicen-core/src/call/codec.rs
+added_by: test-writer
+--- old
+            .set_bitrate(opus::Bitrate::Bits(BITRATE))
+--- new
+            .set_bitrate(opus::Bitrate::Bits(32_000))
+--- end

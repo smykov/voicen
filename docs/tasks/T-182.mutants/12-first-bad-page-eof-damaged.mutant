@@ -1,0 +1,8 @@
+guarantee: r1#2: a first bad page running past EOF reads as Truncated, not Damaged
+file: crates/voicen-core/src/call/codec.rs
+added_by: test-writer
+--- old
+                Err(_) => self.end = Some(ReadEnd::Truncated),
+--- new
+                Err(_) => self.end = Some(ReadEnd::Damaged),
+--- end

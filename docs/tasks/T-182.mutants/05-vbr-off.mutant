@@ -1,0 +1,8 @@
+guarantee: r1#3: VBR on
+file: crates/voicen-core/src/call/codec.rs
+added_by: test-writer
+--- old
+        encoder.set_vbr(true).map_err(encode_failed)?;
+--- new
+        encoder.set_vbr(false).map_err(encode_failed)?;
+--- end

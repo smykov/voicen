@@ -1,0 +1,8 @@
+guarantee: r4#1: OpusHead version 0-15 accepted
+file: crates/voicen-core/src/call/codec.rs
+added_by: test-writer
+--- old
+    let valid = version >> 4 == 0 && (1..=2).contains(channels) && *mapping == 0;
+--- new
+    let valid = *version == 1 && (1..=2).contains(channels) && *mapping == 0;
+--- end
