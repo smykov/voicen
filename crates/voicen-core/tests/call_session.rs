@@ -3491,8 +3491,10 @@ fn a_call_started_late_on_the_capture_clock_has_no_leading_silence() {
     let rig = CallRig::new();
     rig.source.set_stamp_ms(UPTIME_MS);
     started(&rig, CallSource::Tray);
-    rig.source.feed_tone(Track::Mic, UPTIME_MS, UPTIME_MS + 1_000, 0.5);
-    rig.source.feed_tone(Track::System, UPTIME_MS, UPTIME_MS + 1_000, 0.5);
+    rig.source
+        .feed_tone(Track::Mic, UPTIME_MS, UPTIME_MS + 1_000, 0.5);
+    rig.source
+        .feed_tone(Track::System, UPTIME_MS, UPTIME_MS + 1_000, 0.5);
     rig.source.set_stamp_ms(UPTIME_MS + 1_000);
     rig.session.stop(StopReason::User);
     for file in ["mic.opus", "system.opus"] {
