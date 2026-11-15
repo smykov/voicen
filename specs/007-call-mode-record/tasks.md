@@ -42,7 +42,7 @@
   - Granules advance by "+960 per packet". A page ends every 50 packets, with an inner-writer flush after each page (counting fake writer) and `sync_data` every 5 s (fake clock).
   - The last page carries EOS and its final granule trims the tail.
   - 60 min of encoded speech-like signal on both tracks takes ≤ 40 MB (SC-007, CA-9).
-  - The reader treats `UnexpectedEof` or a CRC mismatch on the last page as the end of recoverable data. A mismatch before the last page gives a damaged file whose readable prefix is still returned. No valid `OpusHead` → unreadable. Duration = last good granule − pre-skip.
+  - The reader treats `UnexpectedEof` or a CRC mismatch on the last page as the end of recoverable data. A mismatch before the last page gives a damaged file whose readable prefix is still returned (exact rule: `contracts/core-call.md`). No valid `OpusHead` → unreadable. Duration = last good granule − pre-skip.
   - An `io::Error` from write, flush or sync maps to `StorageError` (FR-016).
   - `TrackDecoder::next_window(max_ms)` returns at most `max_ms` of 16 kHz audio.
   - (spec FR-015, FR-016, FR-017, SC-005; R5, R6, R7)

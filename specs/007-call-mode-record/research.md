@@ -82,7 +82,7 @@ Crate facts were read from the published sources of `opus` 0.4.0 / `opusic-sys` 
   - **Reader**: the core `OpusOggReader` walks pages with `ogg::PacketReader`.
     - It treats `Ok(None)` and `Err(ReadError(UnexpectedEof))` after at least one audio page as "end of recoverable data".
     - It treats `HashMismatch` on the last page as the same.
-    - `HashMismatch` before the last page is a damaged file. Its readable prefix is still used.
+    - `HashMismatch` before the last page is a damaged file when the walk then reaches a CRC-valid page (exact rule: `contracts/core-call.md`). Its readable prefix is still used.
     - A file with no valid `OpusHead` page is unreadable.
   - **Duration**: last good granule − pre-skip.
   - **Recovery** (FR-017) only reads and updates `meta.json`. It sets state `recovered`, end and duration from the shorter readable track, and a `recovered: true` mark. It never truncates, appends or rewrites an `.opus` file: the recorded bytes stay as they were (NFR-15, FR-032), and the final pass and the reader both stop at the last good page.

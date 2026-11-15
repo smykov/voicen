@@ -23,8 +23,10 @@
 //     `ReadEnd { Complete, Truncated, Damaged }` (Debug, Clone, Copy, PartialEq, Eq).
 //
 // Reader rules (the task's invariant): the packets of the longest prefix of CRC-valid pages
-// after a valid OpusHead; any read error ends the data; Damaged iff a CRC-valid page follows
-// an invalid one; duration = last good granule - pre-skip.
+// after a valid OpusHead; any read error ends the data; Damaged iff the reader's forward walk
+// reaches a CRC-valid page after an invalid one (a bad page whose segment count or lacing
+// runs past the end of the file reads as Truncated, same prefix); duration = last good
+// granule - pre-skip.
 
 use std::collections::VecDeque;
 use std::io::{self, Read, Seek, Write};
@@ -37,14 +39,21 @@ use crate::audio::AudioBuffer;
 use crate::call::{DecodeEnd, StorageError, StorageOp};
 use crate::clock::MonotonicClock;
 
-/// The encoder's sample rate: call tracks are 16 kHz mono (research R5).
-const RATE: u32 = 16_000;
-/// 20 ms at 16 kHz: the samples of one Opus packet.
-const FRAME: usize = 320;
+/// The encoder's sample rate: call tracks are 16 kHz mono (research R5), the app's one
+/// audio rate.
+const RATE: u32 = crate::audio::SAMPLE_RATE;
+/// Ogg Opus counts granules at 48 kHz (RFC 7845); the input rate must divide it.
+const GRANULE_RATE: u32 = 48_000;
+const _: () =
+    assert!(RATE >= 1_000 && RATE.is_multiple_of(1_000) && GRANULE_RATE.is_multiple_of(RATE));
+/// Samples of one millisecond at `RATE`.
+const SAMPLES_PER_MS: usize = (RATE / 1_000) as usize;
+/// 20 ms at `RATE`: the samples of one Opus packet.
+const FRAME: usize = 20 * SAMPLES_PER_MS;
 /// One packet in the 48 kHz granule units of Ogg Opus (RFC 7845).
 const GRANULE_PER_PACKET: u64 = 960;
-/// 16 kHz samples per 48 kHz granule unit, inverted: granule = 3 x samples.
-const GRANULE_PER_SAMPLE: u64 = 3;
+/// Granule units per sample at `RATE` (granule = 3 x samples at 16 kHz).
+const GRANULE_PER_SAMPLE: u64 = (GRANULE_RATE / RATE) as u64;
 /// A page ends after this many packets (1 s, research R6).
 const PACKETS_PER_PAGE: u64 = 50;
 /// `sync_data` runs once this much clock time passed since the last one (research R6).
@@ -54,8 +63,8 @@ const BITRATE: i32 = 24_000;
 const COMPLEXITY: i32 = 9;
 /// libopus's recommended output buffer for one packet.
 const MAX_PACKET: usize = 4_000;
-/// The longest Opus packet (120 ms) at 16 kHz.
-const MAX_DECODED: usize = 1_920;
+/// The longest Opus packet (120 ms) at `RATE`.
+const MAX_DECODED: usize = 120 * SAMPLES_PER_MS;
 
 /// A writer whose written data can be made durable: `File::sync_data` in production, a
 /// counting fake in tests.
@@ -88,8 +97,8 @@ pub trait TrackEncoder {
 /// Reads one call track back as 16 kHz audio.
 pub trait TrackDecoder {
     /// The next window of at most `max_ms` (at least 1 ms) of 16 kHz audio; `Ok(None)` at
-    /// the end of the recoverable data, `Err(DecodeEnd::Damaged)` instead of it when a bad
-    /// page sits before the end of the file.
+    /// the end of the recoverable data, `Err(DecodeEnd::Damaged)` instead of it when the
+    /// forward walk reaches a CRC-valid page after a bad one (see [`ReadEnd::Damaged`]).
     fn next_window(&mut self, max_ms: u32) -> Result<Option<AudioBuffer>, DecodeEnd>;
 }
 
@@ -285,9 +294,12 @@ impl<W: SyncWrite> TrackEncoder for OpusOgg<W> {
 pub enum ReadEnd {
     /// The EOS page was read.
     Complete,
-    /// The data ends early (a cut, a zero tail, a bad last page): recoverable up to there.
+    /// The data ends early (a cut, a zero tail, a bad last page, a bad page whose length
+    /// fields run past the end of the file): recoverable up to there.
     Truncated,
-    /// A bad page is followed by a valid one: only the prefix before it was read.
+    /// Damaged iff the reader's forward walk reaches a CRC-valid page after a bad one: only
+    /// the prefix before the bad page was read. A bad page whose segment count or lacing
+    /// runs past the end of the file reads as Truncated, with the same recoverable prefix.
     Damaged,
 }
 
@@ -362,8 +374,10 @@ impl<R: Read + Seek> Pages<R> {
         None
     }
 
-    /// Damaged iff a CRC-valid page follows the bad one. Each mismatch consumes its page,
-    /// so this walks forward to the end of the file at most.
+    /// Damaged iff the reader's forward walk reaches a CRC-valid page after a bad one. A bad
+    /// page whose segment count or lacing runs past the end of the file reads as Truncated,
+    /// with the same recoverable prefix (no rescan from inside the bad page). Each mismatch
+    /// consumes its page, so this walks forward to the end of the file at most.
     fn after_bad_page(&mut self) -> ReadEnd {
         loop {
             match self.reader.read_packet() {
@@ -442,7 +456,7 @@ impl<R: Read + Seek> TrackDecoder for OpusOggReader<R> {
     fn next_window(&mut self, max_ms: u32) -> Result<Option<AudioBuffer>, DecodeEnd> {
         let want = usize::try_from(max_ms.max(1))
             .unwrap_or(usize::MAX)
-            .saturating_mul(16);
+            .saturating_mul(SAMPLES_PER_MS);
         while self.queue.len() < want {
             let Some(packet) = self.pages.next_audio() else {
                 break;

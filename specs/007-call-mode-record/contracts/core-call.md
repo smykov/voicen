@@ -91,7 +91,7 @@ fn scan<R: Read + Seek>(inner: R) -> Result<TrackScan, DecodeEnd>
 ```
 
 - `StorageOp::Encode` is libopus refusing to set up the encoder or to encode a frame; it is not an I/O error and its `kind` is `Other`.
-- `DecodeEnd::Unreadable`: no valid `OpusHead` on the first page. `Damaged`: a bad page is followed by a valid one; the readable prefix before it was returned first. `Codec`: libopus refused to set up the decoder or to decode a packet of a CRC-valid page (not an I/O error).
+- `DecodeEnd::Unreadable`: no valid `OpusHead` on the first page. `Damaged` iff the reader's forward walk reaches a CRC-valid page after a bad one; the readable prefix before it was returned first. A bad page whose segment count or lacing runs past the end of the file reads as `Truncated`, with the same recoverable prefix. `Codec`: libopus refused to set up the decoder or to decode a packet of a CRC-valid page (not an I/O error).
 - `next_window(max_ms)` treats `0` as 1 ms. After a damaged end the reader keeps returning `Err(DecodeEnd::Damaged)`.
 - `OpusOgg::create(inner: impl SyncWrite, serial, clock)` is the encoder; `OpusOggReader::open(inner: impl Read + Seek)` is the decoder. `scan` reads a track without decoding: `duration_48k` = last good granule - pre-skip, `end` = how the readable data ended (`Complete` EOS page read, `Truncated` data ends early, `Damaged` as above).
 

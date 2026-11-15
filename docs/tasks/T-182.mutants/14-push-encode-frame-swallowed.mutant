@@ -1,0 +1,8 @@
+guarantee: Failure branch / r2#1: one failed write in encode_frame makes push return StorageError{op: Write}
+file: crates/voicen-core/src/call/codec.rs
+added_by: test-writer
+--- old
+                self.encode_frame(None)?;
+--- new
+                let _ = self.encode_frame(None);
+--- end
