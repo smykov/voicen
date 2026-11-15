@@ -690,6 +690,69 @@ mod tests {
         assert_refused(&w, vec![link], "link to ancestor");
     }
 
+    /// `<base>/real` (the root, created) and `<base>/link -> real`; the store
+    /// folder is `<base>/link/tmp/audio`, reached through the link.
+    #[cfg(unix)]
+    fn linked_store_world(base: &Path) -> (PathBuf, PathBuf) {
+        let real = base.join("real");
+        fs::create_dir_all(&real).expect("real root");
+        std::os::unix::fs::symlink(&real, base.join("link")).expect("link");
+        (real, base.join("link").join("tmp").join("audio"))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_store_folder_reached_through_a_link_into_a_root_blocks_the_cleanup() {
+        // Bite: the store folder compared lexically only (`guard`: `forms(dir)`
+        // replaced by the lexical form). The folder exists, so this does not
+        // depend on the walk to an existing ancestor. The root is the real path;
+        // only the folder side carries the link (I3).
+        let w = World::new();
+        let (real, folder) = linked_store_world(w.base.path());
+        fs::create_dir_all(real.join("tmp").join("audio")).expect("folder");
+        let planted = folder.join("pending-1.wav");
+        fs::write(&planted, b"stale").expect("plant");
+        let store = FsTempAudioStore::new(folder.clone(), roots(vec![real.clone()]));
+        let _ = store.delete_all();
+        let _ = store.delete_pending(PendingId(1));
+        assert!(
+            planted.is_file(),
+            "pending-1.wav inside the root was deleted"
+        );
+        assert!(
+            store.put_pending(PendingId(2), &audio(2)).is_err(),
+            "put must be refused"
+        );
+        assert_eq!(
+            pattern_files(&real.join("tmp").join("audio")),
+            vec!["pending-1.wav".to_string()],
+            "a file was written inside the root"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_missing_store_folder_under_a_linked_ancestor_into_a_root_is_refused() {
+        // Bite: `canonical` without the walk to the longest existing ancestor
+        // (None unless the whole path exists): the folder does not exist yet, its
+        // existing ancestor `link` resolves into the root, and the first put would
+        // create the folder and write inside the root. (The lexical-only folder
+        // form also lets this through, so it is killed by both mutants.)
+        let w = World::new();
+        let (real, folder) = linked_store_world(w.base.path());
+        let store = FsTempAudioStore::new(folder, roots(vec![real.clone()]));
+        assert!(
+            store.put_pending(PendingId(1), &audio(1)).is_err(),
+            "put must be refused"
+        );
+        assert!(store.delete_all().is_err(), "delete_all must be refused");
+        assert!(
+            names(&real).is_empty(),
+            "something was created under the root: {:?}",
+            names(&real)
+        );
+    }
+
     #[test]
     fn unknown_roots_fail_closed() {
         // Bite: None treated as "no roots", so everything is allowed.

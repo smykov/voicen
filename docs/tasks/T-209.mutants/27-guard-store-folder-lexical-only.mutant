@@ -1,0 +1,8 @@
+guarantee: I3: paths compared canonicalised where they exist (a store folder reached through a link or junction into a calls root blocks)
+file: crates/voicen-core/src/pending.rs
+added_by: test-writer
+--- old
+    let dir_forms = forms(dir);
+--- new
+    let dir_forms = vec![key(&lexical(dir))];
+--- end
