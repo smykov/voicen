@@ -155,6 +155,11 @@ messages! {
     /// `FailureReason::Timeout` from the built-in engine (`TimeoutOrigin::Builtin`:
     /// the transcription ran past `timeouts.builtin`; T-106, decision #147).
     FAILURE_LOCAL_TIMEOUT = "failure.local_timeout",
+    /// The dictation worker ended without a shutdown (T-211, decision #274 Q1):
+    /// shown once at the death and again at every later input that needs the
+    /// worker (a press, a stop that keeps audio, a Retry). Not a `FailureReason`:
+    /// it belongs to no job and cannot be retried.
+    FAILURE_INTERNAL = "failure.internal",
     /// A job without speech (`JobEnd::Notice`, T-001).
     NOTICE_NO_SPEECH = "notice.no_speech",
     /// A recording stopped at `recording::MAX_LENGTH` and sent on (T-009, FR-03).
@@ -989,6 +994,31 @@ mod tests {
         assert!(
             missing.is_empty(),
             "MESSAGE_IDS not in i18n/*.json: {missing:?}"
+        );
+    }
+
+    #[test]
+    fn failure_internal_is_declared_with_the_owner_texts_and_is_a_toast_surface() {
+        // T-211 (decisions #274 Q1): `failure.internal`, shown when the dictation
+        // worker ended. The texts are the owner's, spelled here. Bite: the id not
+        // declared, a text changed or missing in one language, an id outside the
+        // toast surface (the shell would show no toast).
+        let id = MESSAGE_IDS
+            .iter()
+            .copied()
+            .find(|m| m.0 == "failure.internal")
+            .expect("failure.internal is declared with messages!");
+        assert_eq!(
+            text(UiLanguage::En, id, &[]),
+            "Dictation stopped because of an internal error. Restart Voicen."
+        );
+        assert_eq!(
+            text(UiLanguage::Ru, id, &[]),
+            "Диктовка остановилась из-за внутренней ошибки. Перезапустите Voicen."
+        );
+        assert!(
+            is_toast_surface(id),
+            "failure.internal is offered as a toast"
         );
     }
 

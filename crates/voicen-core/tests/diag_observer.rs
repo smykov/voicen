@@ -884,13 +884,19 @@ fn a_pipeline_warning_is_its_own_line_at_once() {
             WarningCode::PendingAudioUnreadable,
             "pending_audio_unreadable",
         ),
+        // T-211: the dictation worker ended without a shutdown.
+        (
+            WarningCode::DictationWorkerStopped,
+            "dictation_worker_stopped",
+        ),
     ];
     for (code, _) in codes {
         match code {
             WarningCode::VadFallback
             | WarningCode::EscUnavailable
             | WarningCode::ToastFailed
-            | WarningCode::PendingAudioUnreadable => {}
+            | WarningCode::PendingAudioUnreadable
+            | WarningCode::DictationWorkerStopped => {}
         }
         f.obs.event(&DictationEvent::Warning { code });
     }

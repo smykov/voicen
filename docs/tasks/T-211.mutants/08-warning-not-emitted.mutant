@@ -1,0 +1,12 @@
+guarantee: AC-1: one warning kind=dictation_worker_stopped line
+file: crates/voicen-core/src/dictation.rs
+added_by: test-writer
+--- old
+    fn warn_worker_stopped(&self) {
+        self.emit(DictationEvent::Warning {
+            code: WarningCode::DictationWorkerStopped,
+        });
+    }
+--- new
+    fn warn_worker_stopped(&self) {}
+--- end

@@ -1,0 +1,1 @@
+cargo test -p voicen-core -j2 --test dictation_session --test diag_observer --test diag_format --lib

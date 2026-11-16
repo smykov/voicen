@@ -235,6 +235,7 @@ impl Open {
                     WarningCode::EscUnavailable => WarningKind::EscUnavailable,
                     WarningCode::ToastFailed => WarningKind::ToastFailed,
                     WarningCode::PendingAudioUnreadable => WarningKind::PendingAudioUnreadable,
+                    WarningCode::DictationWorkerStopped => WarningKind::DictationWorkerStopped,
                 },
                 os_code: None,
             }),

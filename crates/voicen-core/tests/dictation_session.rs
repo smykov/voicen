@@ -4947,3 +4947,336 @@ fn read_wav_rejects_what_is_not_pcm16() {
     }
     assert!(RealtimeSource::from_wav(b"junk").is_err());
 }
+
+// ---- T-211: a dead dictation worker is visible -----------------------------------------
+//
+// Decisions #274 Q1/Q2, docs/tasks/T-211.md. A `panic!` inside the engine reply runs in
+// `Pipeline::run_job` on `dictation-worker` (tests unwind; the panic message goes to
+// stderr, the test thread is not affected). Pinned (the names the analysis gives, matched
+// here by catalog id / `Debug` form so this binary compiles before they exist and the
+// tests fail on the behaviour): the catalog id `failure.internal`, `WarningCode::
+// DictationWorkerStopped`. After the worker ended without a shutdown: one
+// `failure.internal` offer + overlay message for the death, tray Error that nothing
+// clears, a warning event, and every input that needs the worker (a press, a stop that
+// keeps audio, a Retry) ends in one `failure.internal` and does nothing else.
+
+const INTERNAL: &str = "failure.internal";
+
+/// The offer the worker's death and each blocked input make.
+fn internal_offer() -> Offer {
+    (declared(INTERNAL), Vec::new(), None)
+}
+
+fn panicking() -> Reply {
+    Box::new(|_| panic!("planted engine panic (T-211)"))
+}
+
+/// The overlay states as labels: a message by its catalog id, the rest by name.
+fn overlay_trace(overlays: &[OverlayState]) -> Vec<String> {
+    overlays
+        .iter()
+        .map(|o| match o {
+            OverlayState::Message { id, .. } => format!("message:{}", catalog_id(*id)),
+            other => format!("{other:?}"),
+        })
+        .collect()
+}
+
+fn worker_stopped_warnings(events: &[DictationEvent]) -> usize {
+    warnings(events)
+        .iter()
+        .filter(|w| format!("{w:?}") == "DictationWorkerStopped")
+        .count()
+}
+
+/// Waits for the death to show: the offer made and the warning emitted, then lets a
+/// second (wrong) one show up.
+#[track_caller]
+fn wait_dead(rig: &Rig) {
+    wait_offers(rig, 1);
+    assert!(
+        eventually(|| worker_stopped_warnings(&rig.events()) >= 1),
+        "no dictation_worker_stopped warning: {:?}",
+        rig.events()
+    );
+    thread::sleep(NOTICE_SETTLE);
+}
+
+/// The overlay has left every state but Hidden (the message's 3 s passed).
+#[track_caller]
+fn wait_overlay_hidden(rig: &Rig) {
+    assert!(
+        eventually(|| rig.indicator.overlays().last() == Some(&OverlayState::Hidden)),
+        "the overlay never left Processing / the message: {:?}",
+        rig.indicator.overlays()
+    );
+}
+
+/// A reply that signals `entered` when it gets the audio of `slow_len` samples, waits
+/// for `go` (bounded), then panics; any other audio gets `TEXT`.
+fn gated_panic(slow_len: usize) -> (Reply, mpsc::Receiver<()>, mpsc::Sender<()>) {
+    let (entered_tx, entered) = mpsc::channel::<()>();
+    let (go, go_rx) = mpsc::channel::<()>();
+    let entered_tx = Mutex::new(entered_tx);
+    let go_rx = Mutex::new(go_rx);
+    let reply: Reply = Box::new(move |audio: &AudioBuffer| {
+        if audio.samples().len() == slow_len {
+            let _ = lock(&entered_tx).send(());
+            let _ = lock(&go_rx).recv_timeout(BUDGET);
+            panic!("planted engine panic (T-211)");
+        }
+        Ok(TEXT.to_string())
+    });
+    (reply, entered, go)
+}
+
+#[test]
+fn a_panic_in_run_job_offers_failure_internal_once_with_tray_error_and_one_warning() {
+    // T-211 Acceptance 1. One hold; the engine panics on the worker. Exactly one
+    // `failure.internal` offer (no retry id), the overlay Recording -> Processing ->
+    // the message -> Hidden (never left on Processing), the tray ends in Error with no
+    // Retry, one `Warning{DictationWorkerStopped}`, no job finished, nothing pasted.
+    // Bite: no drop guard in `run_worker` (nothing offered, overlay stuck), the offer
+    // made twice (guard and `send` Err both report), the message not shown on the
+    // overlay, no warning, the warning emitted twice.
+    let rig = Rig::new(api_settings(), panicking());
+    rig.hold(&fixtures::speech_3s(), past(), ms(3000));
+    wait_dead(&rig);
+
+    assert_eq!(offers(&rig), vec![internal_offer()]);
+    wait_overlay_hidden(&rig);
+    assert_eq!(
+        overlay_trace(&rig.indicator.overlays()),
+        vec![
+            "Recording".to_string(),
+            "Processing".to_string(),
+            format!("message:{INTERNAL}"),
+            "Hidden".to_string(),
+        ]
+    );
+    assert_eq!(
+        rig.indicator.trays().last(),
+        Some(&(TrayState::Error, false)),
+        "{:?}",
+        rig.indicator.trays()
+    );
+    assert_eq!(
+        worker_stopped_warnings(&rig.events()),
+        1,
+        "{:?}",
+        rig.events()
+    );
+    assert_eq!(job_count(&rig.events()), 0, "{:?}", rig.events());
+    assert!(rig.clipboard.texts().is_empty());
+}
+
+#[test]
+fn after_the_worker_died_the_menu_keeps_tray_error_and_a_press_records_nothing() {
+    // T-211 Acceptance 2. Opening the tray menu does not clear the Error; a press
+    // opens no capture (no `start`, no Esc claim, no event), shows `failure.internal`
+    // again (overlay + offer, on the caller's thread), and its release changes
+    // nothing; a second press does the same. Bite: no press check in the idle branch
+    // (the capture opens, `Recording` shown), the Error cleared by `tray_menu_opened`,
+    // the press blocked silently (no offer), a `PressBlocked` event.
+    let rig = Rig::new(api_settings(), panicking());
+    rig.hold(&fixtures::speech_3s(), past(), ms(3000));
+    wait_dead(&rig);
+    let starts = rig.audio.start_calls();
+    let claims = rig.cancel.calls();
+    let events = rig.events();
+
+    rig.session.tray_menu_opened(now());
+    assert_eq!(
+        rig.indicator.trays().last(),
+        Some(&(TrayState::Error, false)),
+        "the menu opening cleared the Error: {:?}",
+        rig.indicator.trays()
+    );
+
+    for n in 2..=3usize {
+        let t = now();
+        rig.session.hotkey_pressed(t);
+        assert_offered_on_return(&rig, n);
+        assert_eq!(offers(&rig).last(), Some(&internal_offer()));
+        assert!(
+            matches!(rig.indicator.overlays().last(),
+                Some(OverlayState::Message { id, .. }) if catalog_id(*id) == INTERNAL),
+            "the press did not show the notice: {:?}",
+            rig.indicator.overlays()
+        );
+        rig.session.hotkey_released(t + ms(10));
+    }
+    thread::sleep(NOTICE_SETTLE);
+    assert_eq!(rig.audio.start_calls(), starts, "a capture was opened");
+    assert_eq!(rig.cancel.calls(), claims, "Esc was claimed");
+    assert_eq!(rig.events(), events, "a blocked press emitted an event");
+    assert_eq!(offers(&rig).len(), 3, "{:?}", offers(&rig));
+    assert_eq!(
+        overlay_trace(&rig.indicator.overlays())
+            .iter()
+            .filter(|l| *l == "Recording")
+            .count(),
+        1,
+        "only the first hold recorded: {:?}",
+        rig.indicator.overlays()
+    );
+    assert_eq!(
+        rig.indicator.trays().last(),
+        Some(&(TrayState::Error, false))
+    );
+}
+
+#[test]
+fn a_worker_dying_with_a_job_queued_drops_it_and_leaves_processing() {
+    // T-211 Acceptance 3 (failure branch). Job 1 blocks in the engine, job 2 is
+    // queued behind it (overlay Processing), then job 1 panics: job 2 is never
+    // transcribed, nothing is delivered, exactly one offer (the death's), the overlay
+    // ends Processing -> the message -> Hidden, the tray Error. Bite: `queued` not
+    // cleared by the transition (overlay back on Processing for ever), the guard
+    // missing (job 2 is dropped silently, no offer), one offer per dropped job.
+    let (reply, entered, go) = gated_panic(48_000);
+    let rig = Rig::new(api_settings(), reply);
+    let [one, two, _] = three_recordings();
+    let t0 = past();
+    rig.hold(&one, t0, ms(3000));
+    assert!(entered.recv_timeout(BUDGET).is_ok(), "job 1 never started");
+    rig.hold(&two, t0 + ms(10_000), ms(3000));
+    assert_eq!(
+        rig.indicator.overlays().last(),
+        Some(&OverlayState::Processing),
+        "premise: job 2 is queued behind job 1"
+    );
+    assert_eq!(rig.engine.transcribed(), vec![48_000], "premise");
+
+    let _ = go.send(());
+    wait_dead(&rig);
+    wait_overlay_hidden(&rig);
+    let trace = overlay_trace(&rig.indicator.overlays());
+    assert_eq!(
+        trace[trace.len() - 3..],
+        [
+            "Processing".to_string(),
+            format!("message:{INTERNAL}"),
+            "Hidden".to_string(),
+        ],
+        "{trace:?}"
+    );
+    assert_eq!(offers(&rig), vec![internal_offer()]);
+    assert_eq!(
+        rig.engine.transcribed(),
+        vec![48_000],
+        "job 2 was transcribed"
+    );
+    assert!(rig.clipboard.texts().is_empty());
+    assert_eq!(job_count(&rig.events()), 0, "{:?}", rig.events());
+    assert_eq!(worker_stopped_warnings(&rig.events()), 1);
+    assert_eq!(
+        rig.indicator.trays().last(),
+        Some(&(TrayState::Error, false))
+    );
+}
+
+#[test]
+fn a_recording_live_at_the_death_offers_failure_internal_at_its_stop_and_queues_nothing() {
+    // T-211 investigation: the worker dies while a second recording is live. Its stop
+    // (the release) keeps audio that has no worker to go to: one more
+    // `failure.internal` offer on the releasing thread, no job queued (the overlay
+    // never shows a second Processing, the engine never gets the audio, no event for
+    // a finished job), and the overlay ends Hidden. Bite: `finish` before the
+    // stopped check (the job is counted, overlay Processing for ever), the stop
+    // silent (`let _ = queue.send(..)` swallowed), the recording dropped without the
+    // notice.
+    let (reply, entered, go) = gated_panic(48_000);
+    let rig = Rig::new(api_settings(), reply);
+    let [one, two, _] = three_recordings();
+    let t0 = past();
+    rig.hold(&one, t0, ms(3000));
+    assert!(entered.recv_timeout(BUDGET).is_ok(), "job 1 never started");
+    rig.frames(&two, t0 + ms(10_000) + FIRST_FRAME);
+    rig.session.hotkey_pressed(t0 + ms(10_000));
+    assert_eq!(
+        rig.indicator.overlays().last(),
+        Some(&OverlayState::Recording),
+        "premise: a recording is live"
+    );
+
+    let _ = go.send(());
+    wait_dead(&rig);
+    assert_eq!(offers(&rig), vec![internal_offer()], "the death's offer");
+
+    rig.session.hotkey_released(t0 + ms(13_000));
+    assert_offered_on_return(&rig, 2);
+    assert_eq!(offers(&rig)[1], internal_offer());
+    wait_overlay_hidden(&rig);
+    thread::sleep(NOTICE_SETTLE);
+    assert_eq!(offers(&rig).len(), 2, "{:?}", offers(&rig));
+    assert_eq!(
+        overlay_trace(&rig.indicator.overlays())
+            .iter()
+            .filter(|l| *l == "Processing")
+            .count(),
+        1,
+        "the stop queued a job: {:?}",
+        rig.indicator.overlays()
+    );
+    assert_eq!(rig.engine.transcribed(), vec![48_000]);
+    assert_eq!(job_count(&rig.events()), 0, "{:?}", rig.events());
+    assert_eq!(
+        rig.indicator.trays().last(),
+        Some(&(TrayState::Error, false))
+    );
+}
+
+#[test]
+fn a_retry_after_the_worker_died_offers_failure_internal_and_runs_nothing() {
+    // T-211 investigation point (i): a Retry click (the toast button, with the
+    // pending id of an earlier 503) after the death shows `failure.internal` once
+    // instead of the silent `retry_dropped`; the pending audio is not transcribed
+    // again. Also (iii): the tray's Retry is withdrawn by the death
+    // ((Error, true) before, (Error, false) after). Bite: `retry` not consulting the
+    // stopped state (send Err -> silent drop, no offer), the offer made twice
+    // (guard + send Err), the tray Retry left on.
+    let calls = AtomicUsize::new(0);
+    let reply: Reply = Box::new(move |_| {
+        if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            Err(FailureReason::ServerError { status: 503 })
+        } else {
+            panic!("planted engine panic (T-211)")
+        }
+    });
+    let rig = Rig::new(api_settings(), reply);
+    let speech = fixtures::speech_3s();
+    let t0 = past();
+    rig.hold(&speech, t0, ms(3000));
+    wait_offers(&rig, 1);
+    let id = only_stored(&rig);
+    assert!(eventually(
+        || rig.indicator.trays().last() == Some(&(TrayState::Error, true))
+    ));
+
+    rig.hold(&speech, t0 + ms(10_000), ms(3000));
+    assert!(
+        eventually(|| worker_stopped_warnings(&rig.events()) >= 1),
+        "premise: the second job's panic ended the worker: {:?}",
+        rig.events()
+    );
+    wait_offers(&rig, 2);
+    thread::sleep(NOTICE_SETTLE);
+    assert_eq!(offers(&rig)[1], internal_offer());
+    assert_eq!(offers(&rig).len(), 2, "{:?}", offers(&rig));
+    assert_eq!(
+        rig.indicator.trays().last(),
+        Some(&(TrayState::Error, false)),
+        "the tray Retry stayed on: {:?}",
+        rig.indicator.trays()
+    );
+    let transcribed = rig.engine.transcribed();
+
+    rig.session.retry(now(), Some(id));
+    wait_offers(&rig, 3);
+    thread::sleep(NOTICE_SETTLE);
+    assert_eq!(offers(&rig).len(), 3, "{:?}", offers(&rig));
+    assert_eq!(offers(&rig)[2], internal_offer());
+    assert_eq!(rig.engine.transcribed(), transcribed, "the retry ran");
+    assert!(rig.clipboard.texts().is_empty());
+}

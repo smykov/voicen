@@ -1,0 +1,9 @@
+guarantee: Point (iii): tray Retry withdrawn at the transition
+file: crates/voicen-core/src/dictation.rs
+added_by: test-writer
+--- old
+    st.retry_available = false;
+    shared.publish(st);
+--- new
+    shared.publish(st);
+--- end

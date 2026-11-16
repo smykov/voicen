@@ -34,6 +34,13 @@
 //! the port. A Retry ([`DictationSession::retry`]) is a job on the same worker,
 //! queued at the click with that click's settings snapshot.
 //!
+//! T-211: a worker that ends without a shutdown (a panic in a job, unwind builds
+//! only: release aborts, decision #274 Q2) is stopped for good in one lock
+//! section ([`WorkerExit`], `worker_ended`): queued jobs dropped, the queue
+//! closed, `failure.internal` shown, tray `Error` until restart, one
+//! `Warning{DictationWorkerStopped}`; every later press from idle, stop that
+//! keeps audio and Retry shows `failure.internal` and queues nothing.
+//!
 //! Threads: the callers' input threads (hotkey, tray), one worker (owns the
 //! [`Pipeline`]; no other thread can reach `run_job`, `Pipeline::retry` or
 //! `Pipeline::pending`), one
@@ -164,7 +171,8 @@ struct State {
     ctrl: RecordingController<PressContext>,
     /// The open capture of the live recording.
     capture: Option<LiveCapture>,
-    /// The FIFO to the worker; `None` once shutdown began.
+    /// The FIFO to the worker; `None` once shutdown began or the worker ended
+    /// ([`worker_ended`]).
     queue: Option<mpsc::Sender<Job>>,
     /// The pending slot as the worker last read it after a job.
     retry_available: bool,
@@ -265,6 +273,15 @@ impl Shared {
         self.observer.event(&e);
     }
 
+    /// The one `Warning{DictationWorkerStopped}` of a stopped worker (T-211);
+    /// called outside the session lock by the caller of the first
+    /// [`worker_ended`].
+    fn warn_worker_stopped(&self) {
+        self.emit(DictationEvent::Warning {
+            code: WarningCode::DictationWorkerStopped,
+        });
+    }
+
     /// Hands every indicator change since the last call to the port, then wakes
     /// the timer. Called with the lock held, right after the controller call that
     /// made the change; an unchanged value is not sent again. While a stop is in
@@ -314,6 +331,44 @@ impl Drop for StopInFlight<'_> {
             self.shared.publish(&mut st);
         }
     }
+}
+
+/// The worker's exit (T-211): dropped when `run_worker` returns or unwinds,
+/// before the worker closure drops the queue's receiver. Without a shutdown it
+/// marks the worker stopped ([`worker_ended`]); with one it does nothing. Declare
+/// it first in `run_worker`, so a session-lock guard of the same scope is
+/// released before this one locks.
+struct WorkerExit<'a> {
+    shared: &'a Shared,
+}
+
+impl Drop for WorkerExit<'_> {
+    fn drop(&mut self) {
+        let first = {
+            let mut st = self.shared.lock();
+            if st.shutdown {
+                return;
+            }
+            worker_ended(self.shared, &mut st, crate::clock::instant())
+        };
+        if first {
+            self.shared.warn_worker_stopped();
+        }
+    }
+}
+
+/// The one transition to a stopped worker (T-211), under the session lock: the
+/// controller drops every queued job and shows `failure.internal` (offered once
+/// the lock is released), the queue is closed (`State::queue = None`, so no input
+/// sends into the receiver about to drop), the tray Retry is withdrawn, and the
+/// change is published. Idempotent; returns `true` only for the first call, whose
+/// caller emits [`Shared::warn_worker_stopped`] after releasing the lock.
+fn worker_ended(shared: &Shared, st: &mut State, at: Instant) -> bool {
+    let first = st.ctrl.worker_stopped(at);
+    st.queue = None;
+    st.retry_available = false;
+    shared.publish(st);
+    first
 }
 
 impl DictationSession {
@@ -404,7 +459,8 @@ impl DictationSession {
     /// that cannot open, without a `start` call); a fallback that opened raises
     /// `notice.mic_fallback` when it is due. The indicator is published only once
     /// the capture result is known, so a capture that fails never shows a
-    /// recording state.
+    /// recording state. Once the worker ended (T-211), a press from idle opens
+    /// nothing, emits nothing and shows `failure.internal` again.
     pub fn hotkey_pressed(&self, at: Instant) {
         let shared = &*self.shared;
         if shared.lock().ctrl.live_id().is_some() {
@@ -422,6 +478,13 @@ impl DictationSession {
             // recording, but only the hotkey thread presses, so this one is
             // dropped rather than racing it.
             if st.ctrl.live_id().is_some() {
+                return;
+            }
+            // T-211: no worker for the audio, so nothing is recorded; the notice
+            // again (offered once this section ends), no event, no gate.
+            if st.ctrl.is_worker_stopped() {
+                st.ctrl.worker_refused(at);
+                shared.publish(&mut st);
                 return;
             }
             let settings = shared.settings.snapshot();
@@ -564,7 +627,8 @@ impl DictationSession {
         }
     }
 
-    /// The tray menu was opened at `at` (clears tray `Error`).
+    /// The tray menu was opened at `at` (clears tray `Error`, but not a stopped
+    /// worker's).
     pub fn tray_menu_opened(&self, at: Instant) {
         let mut st = self.shared.lock();
         st.ctrl.tray_menu_opened(at);
@@ -629,24 +693,36 @@ impl DictationSession {
     /// read back clears it too and shows `notice.retry_unavailable` (overlay and
     /// one offer, no retry id; decision #280). It does not wait for a stop in
     /// flight: a recording whose audio is still being converted queues behind it.
-    /// After shutdown began nothing happens.
+    /// After shutdown began nothing happens. Once the worker ended (T-211) nothing
+    /// is queued and `failure.internal` is shown again (overlay and one offer).
     pub fn retry(&self, at: Instant, id: Option<PendingId>) {
         let settings = self.shared.settings.snapshot();
-        let mut st = self.shared.lock();
-        let Some(queue) = st.queue.clone() else {
-            return;
+        let first_stop = {
+            let mut st = self.shared.lock();
+            if st.ctrl.is_worker_stopped() {
+                st.ctrl.worker_refused(at);
+                self.shared.publish(&mut st);
+                return;
+            }
+            let Some(queue) = st.queue.clone() else {
+                return;
+            };
+            let key = st.ctrl.retry_queued(at);
+            let job = Job::Retry {
+                key,
+                id,
+                settings,
+                at,
+            };
+            // The receiver is gone: the worker ended; the transition drops the
+            // entry just queued with every other one.
+            let first = queue.send(job).is_err() && worker_ended(&self.shared, &mut st, at);
+            self.shared.publish(&mut st);
+            first
         };
-        let key = st.ctrl.retry_queued(at);
-        let job = Job::Retry {
-            key,
-            id,
-            settings,
-            at,
-        };
-        if queue.send(job).is_err() {
-            st.ctrl.retry_dropped(key, at);
+        if first_stop {
+            self.shared.warn_worker_stopped();
         }
-        self.shared.publish(&mut st);
     }
 }
 
@@ -806,17 +882,31 @@ fn stop_recording(
     // On the caller's thread (T-051 analysis Q6).
     let audio = audio.and_then(Recorded::into_audio);
     let cause = audio.as_ref().err().map(MicCause::of);
+    let mut first_stop = false;
     {
         let mut st = shared.lock();
-        if let Ok(job) = st.ctrl.finish(ticket, audio, at) {
+        if audio.is_ok() && st.ctrl.is_worker_stopped() {
+            // T-211: no worker to take the audio. Refused before `finish`, which
+            // would count a job nothing ends; the ticket and audio are dropped.
+            drop(ticket);
+            st.ctrl.worker_refused(at);
+        } else if let Ok(job) = st.ctrl.finish(ticket, audio, at) {
             // Under the lock, so the queue order is the finish order.
-            if let Some(queue) = &st.queue {
-                let _ = queue.send(Job::Recording(job));
+            let sent = st
+                .queue
+                .as_ref()
+                .map(|queue| queue.send(Job::Recording(job)).is_ok());
+            if sent == Some(false) {
+                // The receiver is gone: the worker ended (T-211).
+                first_stop = worker_ended(shared, &mut st, at);
             }
         }
         st.stopping = false;
         stop_in_flight.armed = false;
         shared.publish(&mut st);
+    }
+    if first_stop {
+        shared.warn_worker_stopped();
     }
     if let Some(cause) = cause {
         shared.emit(DictationEvent::CaptureFailed {
@@ -879,8 +969,11 @@ enum Done {
 /// one whose pending audio is unreadable (`RetryOutcome::Unreadable`) clears it
 /// and shows `notice.retry_unavailable` under the same lock (decision #280), so
 /// every Retry input gets the same notice. After shutdown began it takes no further job; the queued ones are
-/// dropped with the receiver.
+/// dropped with the receiver. Ended any other way (a panic in a job, T-211), its
+/// exit guard ([`WorkerExit`]) stops the worker for good before the receiver drops.
 fn run_worker(shared: &Shared, pipeline: &Pipeline, jobs: &mpsc::Receiver<Job>) {
+    // First, so it drops after every lock guard below and before the receiver.
+    let _exit = WorkerExit { shared };
     while let Ok(job) = jobs.recv() {
         if shared.lock().shutdown {
             return;

@@ -79,6 +79,7 @@
   "failure.cannot_reach": "Не удаётся подключиться к {host}",
   "failure.clipboard_unavailable": "Буфер обмена недоступен",
   "failure.engine_not_configured": "Движок распознавания не настроен. Проверьте настройки движка.",
+  "failure.internal": "Диктовка остановилась из-за внутренней ошибки. Перезапустите Voicen.",
   "failure.invalid_api_key": "Неверный API-ключ",
   "failure.key_store_unavailable": "Не удалось прочитать API-ключ из диспетчера учётных данных Windows.",
   "failure.local_engine": "Ошибка встроенного движка",

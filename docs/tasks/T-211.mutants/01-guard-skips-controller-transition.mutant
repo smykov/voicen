@@ -1,0 +1,8 @@
+guarantee: AC-1: a worker that ends -> failure.internal shown once, tray Error
+file: crates/voicen-core/src/dictation.rs
+added_by: test-writer
+--- old
+    let first = st.ctrl.worker_stopped(at);
+--- new
+    let first = true;
+--- end
