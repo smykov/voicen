@@ -155,6 +155,11 @@ messages! {
     /// `FailureReason::Timeout` from the built-in engine (`TimeoutOrigin::Builtin`:
     /// the transcription ran past `timeouts.builtin`; T-106, decision #147).
     FAILURE_LOCAL_TIMEOUT = "failure.local_timeout",
+    /// The dictation worker ended without a shutdown (T-211, decision #274 Q1):
+    /// shown once at the death and again at every later input that needs the
+    /// worker (a press, a stop that keeps audio, a Retry). Not a `FailureReason`:
+    /// it belongs to no job and cannot be retried.
+    FAILURE_INTERNAL = "failure.internal",
     /// A job without speech (`JobEnd::Notice`, T-001).
     NOTICE_NO_SPEECH = "notice.no_speech",
     /// A recording stopped at `recording::MAX_LENGTH` and sent on (T-009, FR-03).

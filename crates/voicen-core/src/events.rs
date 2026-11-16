@@ -31,7 +31,7 @@ pub enum OutcomeCode {
 }
 
 /// The code of a `Warning`: `vad_fallback`, `esc_unavailable`, `toast_failed`,
-/// `pending_audio_unreadable`.
+/// `pending_audio_unreadable`, `dictation_worker_stopped`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WarningCode {
     VadFallback,
@@ -41,6 +41,9 @@ pub enum WarningCode {
     /// back (`TempAudioStore::get_pending` failed, T-007): the slot is emptied and
     /// the audio deleted; nothing is transcribed. No OS text, no audio.
     PendingAudioUnreadable,
+    /// The dictation session's worker ended without a shutdown (T-211: a panic in
+    /// `Pipeline::run_job` in an unwind build); emitted once, by the session.
+    DictationWorkerStopped,
 }
 
 /// What the post-processing stage did for one job (T-076, spec 003 FR-014): its

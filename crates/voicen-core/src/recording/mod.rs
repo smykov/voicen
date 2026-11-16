@@ -321,6 +321,10 @@ pub struct RecordingController<C> {
     /// Tray `HotkeyError`: the last hotkey registration failed; cleared only by a
     /// successful one.
     hotkey_error: bool,
+    /// The session's worker ended without a shutdown (T-211): sticky until the
+    /// process ends. Keeps tray `Error` whatever clears `error`, and no job is
+    /// counted any more.
+    worker_stopped: bool,
     message: Option<ShownMessage>,
     /// Every message shown since the last `take_offers`, in order.
     outbox: Vec<Offer>,
@@ -342,6 +346,7 @@ impl<C> RecordingController<C> {
             next_retry: 0,
             error: false,
             hotkey_error: false,
+            worker_stopped: false,
             message: None,
             outbox: Vec::new(),
             indicator: IndicatorState::default(),
@@ -587,10 +592,49 @@ impl<C> RecordingController<C> {
         self.refresh();
     }
 
-    /// The tray menu was opened: clears tray `Error`.
+    /// The tray menu was opened: clears tray `Error`, except the one of a stopped
+    /// worker ([`worker_stopped`](Self::worker_stopped)), which stays until restart.
     pub fn tray_menu_opened(&mut self, at: Instant) {
         self.expire(at);
         self.error = false;
+        self.refresh();
+    }
+
+    /// The session's worker ended without a shutdown at `at` (T-211, decision
+    /// #274 Q1). The first call drops every queued job (recordings and retries),
+    /// shows [`FAILURE_INTERNAL`](i18n::FAILURE_INTERNAL) for 3 s from `at` (one
+    /// offer, no retry id) and sets tray `Error` for good: neither the tray menu
+    /// nor a later job end clears it (`HotkeyError` still outranks it). Returns
+    /// `true` for that first call; a later call changes nothing and returns
+    /// `false`.
+    pub fn worker_stopped(&mut self, at: Instant) -> bool {
+        if self.worker_stopped {
+            return false;
+        }
+        self.worker_stopped = true;
+        self.queued.clear();
+        self.expire(at);
+        self.show(i18n::FAILURE_INTERNAL, Vec::new(), at);
+        self.refresh();
+        true
+    }
+
+    /// `true` once [`worker_stopped`](Self::worker_stopped) was called: no input
+    /// may queue a job or open a capture any more.
+    pub fn is_worker_stopped(&self) -> bool {
+        self.worker_stopped
+    }
+
+    /// An input that needed the stopped worker (a press from idle, a stop that
+    /// keeps audio, a Retry) was refused at `at`: shows
+    /// [`FAILURE_INTERNAL`](i18n::FAILURE_INTERNAL) again (overlay and one offer),
+    /// nothing else changes. Does nothing while the worker runs.
+    pub fn worker_refused(&mut self, at: Instant) {
+        if !self.worker_stopped {
+            return;
+        }
+        self.expire(at);
+        self.show(i18n::FAILURE_INTERNAL, Vec::new(), at);
         self.refresh();
     }
 
@@ -745,7 +789,8 @@ impl<C> RecordingController<C> {
         self.indicator = IndicatorState::derive(&IndicatorInputs {
             hotkey_error: self.hotkey_error,
             recording: self.live.is_some(),
-            error: self.error,
+            // A stopped worker's Error is sticky: no `error = false` clears it.
+            error: self.error || self.worker_stopped,
             message: self.message.clone(),
             queued_jobs: self.queued.len(),
         });
@@ -1022,7 +1067,7 @@ mod tests {
             .iter()
             .copied()
             .find(|m| serde_json::to_value(m).is_ok_and(|v| v == "failure.internal"))
-            .expect("failure.internal is declared with messages!")
+            .unwrap_or_else(|| panic!("failure.internal is declared with messages!"))
     }
 
     #[test]
@@ -1041,9 +1086,10 @@ mod tests {
         c.worker_stopped(tf);
         let offers = c.take_offers();
         assert_eq!(offers.len(), 1, "{offers:?}");
-        assert_eq!(offers[0].id, failure_internal());
-        assert!(offers[0].params.is_empty(), "{:?}", offers[0].params);
-        assert_eq!(offers[0].retry, None);
+        let offer = offers.first().unwrap_or_else(|| panic!("{offers:?}"));
+        assert_eq!(offer.id, failure_internal());
+        assert!(offer.params.is_empty(), "{:?}", offer.params);
+        assert_eq!(offer.retry, None);
         let shown = IndicatorState {
             tray: TrayState::Error,
             overlay: message(failure_internal(), Vec::new(), tf),

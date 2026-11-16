@@ -242,6 +242,9 @@ pub enum WarningKind {
     /// `events::WarningCode::PendingAudioUnreadable` (T-007): a retry's pending
     /// audio could not be read back; the pending recording is gone.
     PendingAudioUnreadable,
+    /// `events::WarningCode::DictationWorkerStopped` (T-211): the dictation
+    /// worker ended without a shutdown; dictation is off until restart.
+    DictationWorkerStopped,
     /// Unfinished model downloads could not be removed at start.
     ModelsCleanupFailed,
     /// The settings window could not be opened at start.
