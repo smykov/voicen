@@ -66,7 +66,7 @@
   - Every new `LogEvent` formats exactly as the line bodies in contracts/core-call.md "Log lines": `call_requested`, `call_refused`, `call_started`, `call_device`, `call_track_silent`, `call_stopped`, `call_storage_failed`, `call_recovered`, `final_stage`, `final_finished`, `call_switch_refused`, `vad_fallback track=<mic|system> cause=<unavailable|error>` (#188) and `transcript_invalid rule=<…> segment=<n>` (R17 rule names; never the segment text).
   - `EndpointId` accepts only "`{`, `}`, `.`, hex digits, `-`" and "at most 128 characters"; anything else formats as `endpoint=invalid`.
   - The exhaustive matches in diag/format.rs (`level`, `write_message`) and the `diag_format` tests cover every variant (`LogObserver` gets no call arm; decision #195).
-  - `CallNotice` / `CallWarning` hold catalog ids and enums only, never free text.
+  - `CallNotice` / `CallWarning` hold catalog ids and enums only, never free text (T-139: `transcript_ready` also carries the calls root path beside the call id).
   - `Track`, `CallId` (grammar `YYYY-MM-DD_HHMMSS[-n]`), `StopReason`, `FailReason` and `CallState` serialize with the names of data-model.md (snake_case; `CallState` keeps data-model's hyphenated `ready-to-transcribe`; decision #195).
   - (spec FR-042, SC-009; R20; P-009)
 - [ ] T009 [area core] Implement the types in `crates/voicen-core/src/call/{mod,events}.rs`, the `LogEvent` variants, `format.rs` and `EndpointId` until T008 is green.
@@ -279,7 +279,7 @@
   - **Engine not set up**: a built-in dictation engine with no API key gives `failed: engine_not_set_up` before any request.
   - **Track failure**: the first failure of a track cancels that track's remaining chunks and the other track finishes; per-track results are kept in `meta.json` `results`.
   - **Write**: `transcript.json` is validated, then written with temp + rename, and so is `transcript.md`. A failed write leaves `failed: storage` and no partial file.
-  - **Logs and notices**: `final_stage` lines per stage and track, and `final_finished outcome= reason= mode= ms=`. Notices are `transcript_ready{call}` or `pass_failed{reason}`.
+  - **Logs and notices**: `final_stage` lines per stage and track, and `final_finished outcome= reason= mode= ms=`. Notices are `transcript_ready{call, root}` or `pass_failed{reason}`.
   - **Engine settings**: a change to the API engine settings during a pass is not picked up by the running pass.
   - (spec FR-018, FR-022…FR-030, FR-032, SC-008; US2 #1, #4, #6, #8, #11; R8, R9, R10, R11)
 - [ ] T047 [US2] [area core] Implement the pass runner (decode → spans → chunks → requests → merge → write) until T046 is green. Depends on T004, T019, T039, T043, T045.
