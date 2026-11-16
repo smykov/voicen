@@ -2,7 +2,7 @@
 
 **Code:** `crates/voicen-core/src/dictation.rs` (`DictationSession`), the controller inputs in `crates/voicen-core/src/recording/mod.rs` (`hotkey_registration`, `notice`, `live_id`, `Release::held`), the ports and fakes in `crates/voicen-core/src/platform.rs`, `audio::mix_to_mono`, `crates/voicen-core/src/test_support/realtime.rs`, `crates/voicen-core/src/win32_data.rs`, `crates/voicen-core/src/microphone.rs` (T-012), `crates/voicen-core/src/pending.rs` (T-209) · **Tests that pin it:** `crates/voicen-core/tests/dictation_session.rs` (all), `crates/voicen-core/tests/audio_device.rs` (all, T-012), `microphone::tests::*`, `recording::tests::device_lost_*`, `recording::tests::suspend_*` (T-010), `recording::tests::{failed_hotkey_registration_is_tray_hotkey_error_above_every_state_until_registered, successful_registration_clears_only_hotkey_error, notice_*, press_drops_a_notice_and_it_is_not_reshown, live_id_is_the_recording_on_and_none_otherwise}`, `win32_data::tests::*`, `tests/fakes.rs` (the session fakes)
 
-Tasks: T-051 (split from T-006 by decision #64), T-009 (toggle, 10-minute maximum, Esc), T-012 (microphone choice, fallback notice, device loss). Decisions: #1, #47, #48, #63 (superseded for the mode by T-009), #64. Class `dictation-session`; no `docs/failures.md` entry of this class yet, so the defects below are the risks the T-051 analysis named, not incidents.
+Tasks: T-051 (split from T-006 by decision #64), T-009 (toggle, 10-minute maximum, Esc), T-012 (microphone choice, fallback notice, device loss), T-211 (dead worker). Decisions: #1, #274, #47, #48, #63 (superseded for the mode by T-009), #64. Class `dictation-session`; no `docs/failures.md` entry of this class yet, so the defects below are the risks the T-051 analysis named, not incidents.
 
 ## Invariants
 
@@ -99,6 +99,13 @@ Tasks: T-051 (split from T-006 by decision #64), T-009 (toggle, 10-minute maximu
 - **Not on the app's exit path (T-052):** the shell keeps the session as managed state and the process ends by tao's `process::exit` after `RunEvent::Exit` (only the tray "Exit" item ends it, `docs/decisions/windows-shell.md`), so `Drop` never runs at app exit: an in-flight or queued dictation is dropped with the process (spec 001 spec.md:155, "exit while processing"). Deleting the pending audio on exit (FR-032) is T-209's, on `RunEvent::Exit` (see the pending-audio invariant below).
 - **Don't:** rely on dropping the sender alone; wait at app exit for the job in flight.
 
+### A worker that ended without shutdown is a sticky `worker_stopped`, set under the session lock with `queue = None` (T-211, decision #274 Q1)
+
+- **Defect that produced it:** none observed (T-051 review round 1 #2: a `run_job` unwind on a test or dev build ended the worker, later jobs were dropped at the queue, the overlay stayed on Processing, nothing was shown or logged).
+- **What breaks if you violate it:** a dead worker that is not a state leaves the user pressing a hotkey that records into nothing, with Processing on the overlay and no trace.
+- **Where it is enforced:** the drop guard in `run_worker` (declared first, so it drops before the channel's receiver) takes the session lock; unless shutting down, it calls `RecordingController::worker_stopped`, sets `State::queue = None`, publishes, and emits one `warning kind=dictation_worker_stopped`. The state is sticky: `refresh` computes the tray as `error || worker_stopped`, so Error stays until restart whatever the tray menu or a job end does; `HotkeyError` still outranks it. The queued jobs are dropped and `queued` cleared, so the overlay leaves Processing. A press, a stop that keeps audio and a retry are refused with `failure.internal` (`worker_refused`, `is_worker_stopped`); a stop whose audio failed after the death takes the normal microphone-failure path. Tests in `crates/voicen-core/tests/dictation_session.rs`.
+- **Don't:** set `worker_stopped` outside the lock or apart from `queue = None`; clear it on a menu open or a job end; restart the worker; treat the end during shutdown as a death.
+
 ### The pending-audio store touches only its own files, and never under a calls root (T-209, I3)
 
 - **Defect that produced it:** T-001 review round 1 (a failed `put_pending` could leave a partial file); decision #251 / OQ-80 (the cleanup must never delete under any call root, spec 007 FR-020, req NFR-06). No `docs/failures.md` entry.
@@ -141,4 +148,4 @@ Tasks: T-051 (split from T-006 by decision #64), T-009 (toggle, 10-minute maximu
 ## Open
 
 - Converting the frames runs on the thread that stops the recording: the hotkey thread at a release or toggle press, the timer thread at a max-length stop (up to 10 min of audio; the 3 s message expiry waits meanwhile, T-009 analysis risk) (analysis Q6); T-006 built the hotkey thread without measuring it (the optional 30 s / 48 kHz stereo timing was not done): still open, measure on Windows before a converter thread is decided.
-- If `run_job` ever panicked, the worker would end: later recordings are dropped at the queue and the overlay stays Processing. `run_job` is written not to panic (no `unwrap` on engine or server data); no restart is built.
+- A `run_job` panic: release builds keep `panic = "abort"` (decision #274 Q2 (a)), so it ends the process; the crash file and the next start's previous-session verdict are the trace; no crash notice, no watchdog. Only an unwinding build (tests, dev) reaches the worker's exit guard (the invariant above). `run_job` is written not to panic (no `unwrap` on engine or server data); no restart is built.
