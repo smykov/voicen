@@ -1,0 +1,1 @@
+- [ ] T-101 v2#1 Low unproven-publication: after the first real `v*` release, confirm its page lists `voicen-<X.Y.Z>-symbols.zip` and `SHA256SUMS.txt` with a line for both; tag-run test v0.0.901 (run 43747362799) proved upload and the flat `dist` only (decision #287)
