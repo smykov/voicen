@@ -18,6 +18,8 @@
 //! voicen_lib::vad::load_shared(resource_dir: &Path)
 //!     -> (Result<Box<dyn SpeechDetector>, VadError>, Option<Arc<dyn SpeechSpans>>)
 //!                        // one SileroDetector::open, both halves clones of it
+//! voicen_lib::vad::load_shared_with(resource_dir: &Path, open: FnOnce(&Path) -> Result<D, VadError>)
+//!                        // round 2 (review 1 #2): load_shared over an injectable opener
 //! ```
 //!
 //! The mock server is a hand-rolled `TcpListener` (as `dictation_e2e.rs`: no new dependency);
@@ -28,6 +30,12 @@
 //! Risk (docs/tasks/T-139.md): `tone_wav()` may not be speech to Silero, so the main chain runs
 //! with no primary detector (the energy fallback finds the tone) and the Silero legs use the
 //! real speech clip of `voicen-whisper`.
+//!
+//! Round 2 (CI run 43866105070 red in `cargo test -p voicen`): the mock server, the request
+//! checks, the transcript and notice expectations and the `vad_fallback` lines of these tests
+//! were replayed on the Linux core gate with the same session, store, `PassQueue` and
+//! `ApiPassRunner` (a throwaway copy, never committed); what differed on Windows was the
+//! settings save (see `save_api`).
 #![cfg(windows)]
 
 mod call_shell_support;
@@ -48,6 +56,7 @@ use call_shell_support::{
 };
 use serde_json::{json, Value};
 use tauri::{Listener, Manager};
+use voicen_core::audio::AudioBuffer;
 use voicen_core::call::final_pass::PassQueue;
 use voicen_core::call::storage::wire_root;
 use voicen_core::call::transcript::TranscriptV1;
@@ -61,8 +70,8 @@ use voicen_core::settings::service::{SaveOutcome, SaveRequest};
 use voicen_core::settings::EngineKind;
 use voicen_core::test_support::local_models::FakeDisk;
 use voicen_core::test_support::TempDir;
-use voicen_core::vad::silero_model::SILERO_MODEL;
-use voicen_core::vad::SpeechSpans;
+use voicen_core::vad::silero_model::{bundled_path, SILERO_MODEL};
+use voicen_core::vad::{SpeechDetector, SpeechSpan, SpeechSpans, VadError};
 use voicen_lib::call::{self, CallRequest};
 use voicen_lib::credentials::WinCredentialStore;
 use voicen_lib::vad;
@@ -261,11 +270,19 @@ impl Opts {
     }
 }
 
-/// Saves the engine settings (BuiltinLocal active: the pass must not depend on the dictation
-/// engine choice) with the mock as the API, and the key through the service's own store.
+/// Where the local server engine points: a loopback port no test serves. A pass that read
+/// `local_server.base_url` instead of `api.base_url` would reach nothing the mock records.
+const LOCAL_SERVER_URL: &str = "http://127.0.0.1:9/v1";
+
+/// Saves the engine settings with the mock as the API, and the key through the service's own
+/// store. The dictation engine is the local server, not the API: the pass must not depend on
+/// the dictation engine choice (FR-022). Round 2: the first version chose `BuiltinLocal`,
+/// which the service refuses with no downloaded model (`engine.builtin_local.model_id`
+/// `model_not_downloaded`), so every chain test ended at this premise.
 fn save_api(rig: &CallRig, mock: &Mock, key: bool) {
     let mut settings = (*rig.service.snapshot()).clone();
-    settings.engine = EngineKind::BuiltinLocal;
+    settings.engine = EngineKind::LocalServer;
+    settings.local_server.base_url = LOCAL_SERVER_URL.to_string();
     settings.api.base_url = mock.base_url();
     settings.api.model = MODEL.to_string();
     let keys = KeyEdits {
@@ -286,6 +303,13 @@ fn save_api(rig: &CallRig, mock: &Mock, key: bool) {
 /// queue to go idle and returns what the tests look at.
 #[track_caller]
 fn run_chain(opts: Opts) -> Chain {
+    run_chain_with(opts, |_| {})
+}
+
+/// [`run_chain`] with `before` run on the started rig before the call is recorded (e.g. to
+/// attach an event listener that must see the whole chain).
+#[track_caller]
+fn run_chain_with(opts: Opts, before: impl FnOnce(&CallRig)) -> Chain {
     let serial = cred_support::serial();
     let prefix = format!(
         "voicen-test-{}-chain-{}/",
@@ -304,6 +328,7 @@ fn run_chain(opts: Opts) -> Chain {
         plain_opener(),
         opts.detector,
     );
+    before(&rig);
 
     call::request(rig.handle(), CallRequest::Record(CallSource::Tray));
     assert!(eventually(|| rig.recording()), "the call never started");
@@ -525,19 +550,102 @@ fn resource_dir_with_model() -> TempDir {
 
 #[test]
 fn load_shared_gives_both_halves_for_the_bundled_model_and_neither_without_it() {
-    // Acceptance 6: the one load is one product helper whose two halves come from one
-    // `SileroDetector::open`. With the model: the dictation half is `Ok` and the pass half
-    // `Some`. Without it: `Err` and `None` (the energy fallback on both sides). Bite: one half
-    // loaded separately or dropped, `Some` over a missing model, `Err` with `Some`.
+    // Acceptance 6: `load_shared` is the product helper over `SileroDetector::open`. With the
+    // model: the dictation half is `Ok` and the pass half `Some`, both Silero. Without it:
+    // `Err` and `None` (the energy fallback on both sides). Bite: one half dropped, a half that
+    // is not Silero, `Some` over a missing model, `Err` with `Some`. That the two halves come
+    // from one open is `load_shared_with_opens_once_and_both_halves_share_what_it_opened`.
     let dir = resource_dir_with_model();
     let (detector, spans) = vad::load_shared(dir.path());
-    assert!(detector.is_ok(), "the dictation half: {:?}", detector.err());
-    assert!(spans.is_some(), "the pass half");
+    let detector = detector.unwrap_or_else(|e| panic!("the dictation half: {e:?}"));
+    let spans = spans.expect("the pass half");
+    assert_eq!(detector.name(), "silero", "the dictation half");
+    assert_eq!(SpeechSpans::name(&*spans), "silero", "the pass half");
 
     let empty = TempDir::new();
     let (detector, spans) = vad::load_shared(empty.path());
     assert!(detector.is_err(), "no model: the dictation half is Err");
     assert!(spans.is_none(), "no model: the pass half is None");
+}
+
+/// A detector whose clones share one counter of decisions, as `SileroDetector`'s clones share
+/// one native context.
+#[derive(Clone)]
+struct Counted {
+    asked: Arc<AtomicUsize>,
+}
+
+impl SpeechDetector for Counted {
+    fn name(&self) -> &'static str {
+        "counted"
+    }
+
+    fn contains_speech(&self, _audio: &AudioBuffer) -> Result<bool, VadError> {
+        self.asked.fetch_add(1, Ordering::SeqCst);
+        Ok(false)
+    }
+}
+
+impl SpeechSpans for Counted {
+    fn name(&self) -> &'static str {
+        "counted"
+    }
+
+    fn speech_spans(&self, _audio: &AudioBuffer) -> Result<Vec<SpeechSpan>, VadError> {
+        self.asked.fetch_add(1, Ordering::SeqCst);
+        Ok(Vec::new())
+    }
+}
+
+#[test]
+fn load_shared_with_opens_once_and_both_halves_share_what_it_opened() {
+    // Acceptance 6 (review 1 #2): the one load is one call of the opener `load_shared` passes
+    // (`SileroDetector::open`), with the bundled path, and both halves are handles to what that
+    // call returned: one decision through each half reaches the one opened value (its counter
+    // reads 2). A failed open gives `Err` and `None` after one call. Bite: a half built from
+    // anything but the one opened value (a second detector: the counter reads 1), the path not
+    // the bundled one, `Some` after a failed open. A second call of the opener does not
+    // compile (`FnOnce`); `load_shared` calling `SileroDetector::open` itself instead of going
+    // through `load_shared_with` is left to review (it is one line).
+    let dir = TempDir::new();
+    let opened: Mutex<Vec<(PathBuf, Arc<AtomicUsize>)>> = Mutex::new(Vec::new());
+    let (detector, spans) = vad::load_shared_with(dir.path(), |path| {
+        let asked = Arc::new(AtomicUsize::new(0));
+        lock(&opened).push((path.to_path_buf(), Arc::clone(&asked)));
+        Ok(Counted { asked })
+    });
+    let opened = lock(&opened).clone();
+    assert_eq!(opened.len(), 1, "one open per load");
+    assert_eq!(
+        opened[0].0,
+        bundled_path(dir.path()),
+        "the bundled model path"
+    );
+
+    let audio = AudioBuffer::from_16k_mono(vec![0; 320]);
+    let detector = detector.unwrap_or_else(|e| panic!("the dictation half: {e:?}"));
+    let spans = spans.expect("the pass half");
+    detector
+        .contains_speech(&audio)
+        .expect("the dictation half decides");
+    spans.speech_spans(&audio).expect("the pass half decides");
+    assert_eq!(
+        opened[0].1.load(Ordering::SeqCst),
+        2,
+        "both halves are handles to the one opened detector"
+    );
+
+    let opens = AtomicUsize::new(0);
+    let (detector, spans) = vad::load_shared_with(dir.path(), |_| {
+        opens.fetch_add(1, Ordering::SeqCst);
+        Err::<Counted, _>(VadError::Unavailable)
+    });
+    assert_eq!(opens.load(Ordering::SeqCst), 1, "one open per load");
+    assert!(
+        detector.is_err(),
+        "a failed open: the dictation half is Err"
+    );
+    assert!(spans.is_none(), "a failed open: the pass half is None");
 }
 
 #[test]
@@ -582,23 +690,39 @@ fn a_call_with_no_detector_falls_back_to_energy_and_logs_vad_fallback_unavailabl
 }
 
 #[test]
-fn open_transcript_emits_exactly_one_calls_open_with_the_calls_root_and_id() {
+fn open_transcript_emits_exactly_one_calls_open_with_the_root_and_id_it_is_given() {
     // Acceptance 3: `call::open_transcript(app, root, id)` is the one emitter of
-    // `calls://open`, payload `{root: wire_root(root), id}` with the chain call's own root and
-    // id (that this root is the notice's is core's `final_pass_http` test). Nothing is emitted
-    // by the chain itself. Bite: no emit, two emits, the root read from the current settings,
-    // the root as a different string, an id from anywhere else.
-    let chain = run_chain(Opts::tone(200, true));
+    // `calls://open`, payload `{root: wire_root(root), id}` with the root and id it is given
+    // (that the root T-213's caller passes is the notice's is core's `final_pass_http` test).
+    // The root passed is not the one the settings resolve to (review 1 #3), so a version that
+    // reads the settings' root sends the chain's root instead. The listener is attached before
+    // the call is recorded, so "the stop and the pass emit no calls://open" is observed over
+    // the whole chain. Bite: no emit, two emits, an emit by the stop or the pass, the root read
+    // from the current settings, the root as a different string, an id from anywhere else.
     let (tx, events) = mpsc::channel::<String>();
-    chain.rig.handle().listen("calls://open", move |event| {
-        let _ = tx.send(event.payload().to_string());
+    let chain = run_chain_with(Opts::tone(200, true), |rig| {
+        rig.handle().listen_any(call::CALLS_OPEN, move |event| {
+            let _ = tx.send(event.payload().to_string());
+        });
     });
+    assert_eq!(
+        chain.offered(),
+        vec![NOTICE_CALL_SAVED, NOTICE_TRANSCRIPT_READY],
+        "premise: the chain ran to a ready transcript"
+    );
     assert!(
         holds_for_a_while(|| events.try_recv().is_err()),
-        "premise: a stop and a pass emit no calls://open"
+        "a stop and a pass emit no calls://open"
     );
 
-    call::open_transcript(chain.rig.handle(), &chain.root, &chain.id);
+    let elsewhere = TempDir::new();
+    let other_root = elsewhere.path().join("moved-calls");
+    assert_ne!(
+        wire_root(&other_root),
+        wire_root(&chain.root),
+        "premise: the passed root is not the settings' root"
+    );
+    call::open_transcript(chain.rig.handle(), &other_root, &chain.id);
 
     let mut got = Vec::new();
     assert!(
@@ -622,6 +746,6 @@ fn open_transcript_emits_exactly_one_calls_open_with_the_calls_root_and_id() {
     let payload: Value = serde_json::from_str(&got[0]).expect("a JSON payload");
     assert_eq!(
         payload,
-        json!({"root": wire_root(&chain.root), "id": chain.id.to_string()})
+        json!({"root": wire_root(&other_root), "id": chain.id.to_string()})
     );
 }

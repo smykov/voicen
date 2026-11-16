@@ -34,7 +34,7 @@ use call_shell_support::{
 };
 use voicen_core::call::events::refused_notice;
 use voicen_core::call::{
-    CallNotice, CallSource, OpenError, RefusedPart, RefusedReason, StopReason,
+    CallNotice, CallSource, FailReason, OpenError, RefusedPart, RefusedReason, StopReason,
 };
 use voicen_core::local_models::download::DiskSpace;
 use voicen_core::platform::NotifyCall;
@@ -296,10 +296,13 @@ fn a_refusal_reaches_the_notifier_once() {
 
 #[test]
 fn a_stop_reaches_the_notifier_once() {
-    // AC6 (T029; I-d): a user stop offers exactly one message, `CallNotice::CallSavedTranscribing`
-    // through core's `message()`, `retry: None`; the log has one `call_stopped reason=user`.
-    // Bite: the stop notice never routed to the shared notifier (`ShellCallShell::notice`
-    // dropping it), routed twice, an id other than core's mapping.
+    // AC6 (T029; I-d): a user stop offers exactly one stop message, `CallNotice::CallSavedTranscribing`
+    // through core's `message()`, `retry: None`, before anything else; the log has one
+    // `call_stopped reason=user`. Since T-139 the stopped folder is passed, so the pass's own
+    // notice follows it (`pass_failed_unset_offer`: the rig has no key); the premise "nothing
+    // but the stop message" of T-128 no longer holds. Bite: the stop notice never routed to
+    // the shared notifier (`ShellCallShell::notice` dropping it), routed twice, an id other
+    // than core's mapping, the pass notice before the stop's.
     let _serial = serial();
     let (rig, source) = CallRig::with_wav();
     call::request(rig.handle(), CallRequest::Record(CallSource::Tray));
@@ -309,18 +312,35 @@ fn a_stop_reaches_the_notifier_once() {
     call::request(rig.handle(), CallRequest::Stop(CallSource::Tray));
 
     assert!(eventually(|| !rig.recording()), "the call did not stop");
-    let (id, params) = CallNotice::CallSavedTranscribing.message();
-    let want = offer(id, params);
+    let want = vec![saved_offer(), pass_failed_unset_offer()];
     assert!(
-        eventually(|| !rig.notifier.calls().is_empty()),
-        "no offer reached the notifier"
+        eventually(|| rig.notifier.calls().len() >= want.len()),
+        "the stop notice and the pass notice did not both reach the notifier: {:?}",
+        rig.notifier.calls()
     );
     assert!(
-        holds_for_a_while(|| rig.notifier.calls() == vec![want.clone()]),
+        holds_for_a_while(|| rig.notifier.calls() == want),
         "expected exactly {want:?}, got {:?}",
         rig.notifier.calls()
     );
     assert_eq!(rig.count(&["call_stopped", "reason=user"]), 1);
+}
+
+/// `notice.call_saved` through core's mapping, `retry: None`.
+fn saved_offer() -> NotifyCall {
+    let (id, params) = CallNotice::CallSavedTranscribing.message();
+    offer(id, params)
+}
+
+/// The notice of the pass T-139's shell worker runs after every stop that leaves the folder
+/// ready-to-transcribe: the rig's key store is empty, so that pass fails `engine_not_set_up`
+/// before any request (core's `final_pass::api_engine`).
+fn pass_failed_unset_offer() -> NotifyCall {
+    let (id, params) = CallNotice::PassFailed {
+        reason: FailReason::EngineNotSetUp,
+    }
+    .message();
+    offer(id, params)
 }
 
 #[test]
@@ -377,7 +397,8 @@ fn the_call_tick_thread_stops_a_call_whose_track_write_failed() {
     // (`retry: None`). Without the thread the call keeps recording. The error fake fails one
     // write (F-024), so a later retry cannot hide a swallow. Bite: no tick thread (the call
     // keeps recording), a thread that waits for the 10 s poll instead of `next_deadline`,
-    // a thread that ticks once and never re-reads the deadline, a stop whose notice is dropped.
+    // a thread that ticks once and never re-reads the deadline, a stop whose notice is dropped,
+    // and (T-139) a storage_error stop handed to the pass worker (a pass notice would follow).
     let _serial = serial();
     let armed = Arc::new(AtomicBool::new(false));
     let source = WavSource::new();
@@ -444,13 +465,17 @@ fn the_call_tick_thread_stops_below_200_mb_at_the_first_poll() {
         reason: StopReason::LowDisk,
     }
     .message();
+    // A low-disk stop leaves the folder ready-to-transcribe, so T-139's pass worker passes it
+    // and offers its own notice after the stop's (see `pass_failed_unset_offer`).
+    let want = vec![offer(id, params), pass_failed_unset_offer()];
     assert!(
-        eventually(|| !rig.notifier.calls().is_empty()),
-        "no stop notice reached the notifier"
+        eventually(|| rig.notifier.calls().len() >= want.len()),
+        "the stop notice and the pass notice did not both reach the notifier: {:?}",
+        rig.notifier.calls()
     );
     assert!(
-        holds_for_a_while(|| rig.notifier.calls() == vec![offer(id, params.clone())]),
-        "expected one `notice.stopped.low_disk`, got {:?}",
+        holds_for_a_while(|| rig.notifier.calls() == want),
+        "expected `notice.stopped.low_disk`, then the pass notice, got {:?}",
         rig.notifier.calls()
     );
 }

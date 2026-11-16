@@ -725,6 +725,8 @@ fn conclude(
     let notice = match outcome {
         FinalOutcome::Ready => Some(CallNotice::TranscriptReady {
             call,
+            // Unreachable default: every folder a pass gets is `CallStore`'s `root.join(id)`,
+            // so it has a parent; an empty root would be refused by `resolve_call`.
             root: dir.parent().map(Path::to_path_buf).unwrap_or_default(),
         }),
         FinalOutcome::Failed { reason } => Some(CallNotice::PassFailed { reason }),
