@@ -1014,6 +1014,87 @@ mod tests {
         );
     }
 
+    /// The declared `failure.internal` (T-211), looked up by its catalog id so this
+    /// module compiles before the constant exists: the lookup panics, red on the
+    /// assertion.
+    fn failure_internal() -> MessageId {
+        i18n::MESSAGE_IDS
+            .iter()
+            .copied()
+            .find(|m| serde_json::to_value(m).is_ok_and(|v| v == "failure.internal"))
+            .expect("failure.internal is declared with messages!")
+    }
+
+    #[test]
+    fn worker_stopped_shows_failure_internal_once_and_keeps_tray_error_until_restart() {
+        // T-211 (decisions #274 Q1): the worker ended. The controller shows
+        // `failure.internal` for 3 s (one offer, no retry id), tray Error, and the
+        // Error is sticky: opening the tray menu, a hotkey registration result, a
+        // later job end and the message's expiry never clear it. Bite:
+        // `error` set but cleared by `tray_menu_opened` (the plain failure rule), the
+        // message not offered, offered twice, a retry id on the offer.
+        let t0 = crate::clock::instant();
+        let mut c = RecordingController::<Ctx>::new();
+        let a = record(&mut c, t0, ms(1000)).id();
+        let tf = t0 + ms(2000);
+        assert!(c.take_offers().is_empty(), "premise: nothing offered yet");
+        c.worker_stopped(tf);
+        let offers = c.take_offers();
+        assert_eq!(offers.len(), 1, "{offers:?}");
+        assert_eq!(offers[0].id, failure_internal());
+        assert!(offers[0].params.is_empty(), "{:?}", offers[0].params);
+        assert_eq!(offers[0].retry, None);
+        let shown = IndicatorState {
+            tray: TrayState::Error,
+            overlay: message(failure_internal(), Vec::new(), tf),
+        };
+        assert_eq!(c.indicator(), &shown);
+
+        c.tray_menu_opened(tf + ms(500));
+        assert_eq!(c.indicator(), &shown, "the menu opening cleared the Error");
+        c.hotkey_registration(true, tf + ms(600));
+        assert_eq!(c.indicator(), &shown, "a registration cleared the Error");
+        c.job_finished(a, JobEnd::Delivered { notice: None }, tf + ms(700));
+        assert_eq!(c.indicator(), &shown, "a job end cleared the Error");
+
+        assert!(c.tick(tf + ms(3000)).is_none());
+        assert_eq!(
+            c.indicator(),
+            &IndicatorState {
+                tray: TrayState::Error,
+                overlay: OverlayState::Hidden,
+            },
+            "after the message: Error stays, the overlay is not left on Processing"
+        );
+        c.tray_menu_opened(tf + ms(4000));
+        assert_eq!(c.indicator().tray, TrayState::Error);
+        assert!(c.take_offers().is_empty(), "nothing else was offered");
+    }
+
+    #[test]
+    fn worker_stopped_clears_every_queued_job_and_retry() {
+        // T-211 failure branch "the worker dies while a job is queued": the queued
+        // recordings and the queued retry are dropped with the notice, so the
+        // overlay leaves Processing when the message expires. Bite: `queued` not
+        // cleared (overlay back on Processing after the message, for ever), only the
+        // recordings cleared, only the first entry cleared.
+        let t0 = crate::clock::instant();
+        let mut c = RecordingController::<Ctx>::new();
+        record(&mut c, t0, ms(1000));
+        record(&mut c, t0 + ms(5000), ms(1000));
+        c.retry_queued(t0 + ms(8000));
+        assert_eq!(c.indicator().overlay, OverlayState::Processing);
+        let tf = t0 + ms(9000);
+        c.worker_stopped(tf);
+        assert!(c.tick(tf + ms(3000)).is_none());
+        assert_eq!(
+            c.indicator().overlay,
+            OverlayState::Hidden,
+            "a queued job was left behind"
+        );
+        assert_eq!(c.next_deadline(), None);
+    }
+
     #[test]
     fn notice_shows_message_without_tray_error() {
         // Notice (no speech, paste manually) -> Message for 3 s, tray unchanged.

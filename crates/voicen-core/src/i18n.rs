@@ -993,6 +993,31 @@ mod tests {
     }
 
     #[test]
+    fn failure_internal_is_declared_with_the_owner_texts_and_is_a_toast_surface() {
+        // T-211 (decisions #274 Q1): `failure.internal`, shown when the dictation
+        // worker ended. The texts are the owner's, spelled here. Bite: the id not
+        // declared, a text changed or missing in one language, an id outside the
+        // toast surface (the shell would show no toast).
+        let id = MESSAGE_IDS
+            .iter()
+            .copied()
+            .find(|m| m.0 == "failure.internal")
+            .expect("failure.internal is declared with messages!");
+        assert_eq!(
+            text(UiLanguage::En, id, &[]),
+            "Dictation stopped because of an internal error. Restart Voicen."
+        );
+        assert_eq!(
+            text(UiLanguage::Ru, id, &[]),
+            "Диктовка остановилась из-за внутренней ошибки. Перезапустите Voicen."
+        );
+        assert!(
+            is_toast_surface(id),
+            "failure.internal is offered as a toast"
+        );
+    }
+
+    #[test]
     fn mic_name_unnamed_is_a_declared_nested_id_with_en_and_ru_text() {
         // T-188 (decisions #203): the name of a device the OS gave no name is the
         // catalog id `mic_name.unnamed` (EN "Microphone", RU "Микрофон"), in the
