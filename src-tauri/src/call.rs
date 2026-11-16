@@ -38,7 +38,8 @@
 //!   resolve `{root, id}` only through core's guard (`CallStore` methods, P-009). Copy
 //!   writes `CallStore::export_bytes(Md)` through the one [`Clipboard`] port, the
 //!   dictation's (P-011, R18); export takes its target only from the [`SaveDialog`] port
-//!   (a cancel writes nothing) and writes only through `export_to`; open folder hands the
+//!   (a cancel writes nothing) and writes only through `export_to`, the guard, the modal
+//!   dialog and the write on `spawn_blocking`, never on a runtime worker; open folder hands the
 //!   guarded folder (a damaged call's too) to the [`FolderOpener`] port.
 //! - [`ShellCallShell::changed`] emits `calls://changed {root, id}` to the Calls window only
 //!   (`emit_to`), after the session lock, once per start and once per stop.
@@ -694,32 +695,40 @@ pub fn calls_copy_markdown<R: Runtime>(
 
 /// `calls_export {root, id, format}` → `{saved}` (FR-036): the guard and the bytes first,
 /// then the save dialog; a cancel is `{saved: false}` and writes nothing, a picked target
-/// gets the bytes through `export_to` only.
-#[tauri::command(async)]
-pub fn calls_export<R: Runtime>(
+/// gets the bytes through `export_to` only. The guard, the modal dialog and the write run
+/// on `spawn_blocking` (the dialog blocks until the user answers), never on an async
+/// runtime worker (#42); a blocking task that cannot finish is `ioFailed{other}`.
+#[tauri::command]
+pub async fn calls_export<R: Runtime>(
     app: AppHandle<R>,
     root: String,
     id: String,
     format: ExportFormat,
 ) -> Result<ExportOutcome, CallError> {
-    let Served {
-        store,
-        settings,
-        part,
-    } = call_part(&app)?;
+    let (store, settings, save) = {
+        let Served {
+            store,
+            settings,
+            part,
+        } = call_part(&app)?;
+        (store, settings, Arc::clone(&part.save))
+    };
     let format = Format::from(format);
-    let bytes = store.export_bytes(&settings.calls, &root, &id, format)?;
-    let picked = part
-        .save
-        .pick(&suggested_name(&id, format), format)
-        .map_err(|e| CallError::io_failed(e.kind()))?;
-    match picked {
-        None => Ok(ExportOutcome { saved: false }),
-        Some(target) => {
-            export_to(&target, &bytes)?;
-            Ok(ExportOutcome { saved: true })
+    tauri::async_runtime::spawn_blocking(move || {
+        let bytes = store.export_bytes(&settings.calls, &root, &id, format)?;
+        let picked = save
+            .pick(&suggested_name(&id, format), format)
+            .map_err(|e| CallError::io_failed(e.kind()))?;
+        match picked {
+            None => Ok(ExportOutcome { saved: false }),
+            Some(target) => {
+                export_to(&target, &bytes)?;
+                Ok(ExportOutcome { saved: true })
+            }
         }
-    }
+    })
+    .await
+    .map_err(|_join_error| CallError::io_failed(io::ErrorKind::Other))?
 }
 
 /// The file name the save dialog offers: the call id (already checked by the guard, so a
