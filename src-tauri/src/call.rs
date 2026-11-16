@@ -25,6 +25,15 @@
 //!   `CallNotice::message` to the shared notifier and opens Settings on its Calls tab.
 //! - [`open_calls`] is the tray "Calls" route; the Calls window is T-142's, so it only
 //!   counts (`calls_opened`).
+//! - The pass worker (T-139): [`start_calls`] also builds and manages the one
+//!   `Arc<PassQueue>` over the same store, its one `ApiPassRunner` reading the managed
+//!   `SettingsService`'s snapshot per pass, [`CallPorts::credentials`] (the service's own
+//!   key store) and [`CallPorts::detector`] (the pass half of `vad::load_shared`; `None`:
+//!   core's energy fallback). Every folder a stop leaves ready-to-transcribe reaches it
+//!   through `CallShell::call_ready` ([`ShellCallShell`] enqueues it); the pass's notices
+//!   go to the shared notifier as the session's do ([`ShellPassEvents`]).
+//! - [`open_transcript`] is the only `calls://open` emitter (T-213's toast button calls it
+//!   with the root and id of core's `TranscriptReady` notice).
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -33,21 +42,28 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, Weak};
 use std::thread;
 
-use tauri::{AppHandle, Manager, Runtime};
+use serde::Serialize;
+use tauri::{AppHandle, Emitter, Manager, Runtime};
 use voicen_core::call::events::refused_notice;
+use voicen_core::call::final_pass::{ApiPassRunner, PassEvents, PassQueue};
 use voicen_core::call::indicator::{IndicatorState, IndicatorTick};
 use voicen_core::call::session::{
     CallDeps, CallIndicator, CallSession, CallShell, SubtitleConsumer, Toggled, TrackFile,
     TrackOpener,
 };
-use voicen_core::call::{CallNotice, CallSource, CallStore, SwitchRefusal, Track, TrackSource};
+use voicen_core::call::storage::wire_root;
+use voicen_core::call::{
+    CallId, CallNotice, CallSource, CallStore, SwitchRefusal, Track, TrackSource,
+};
 use voicen_core::clock::{MonotonicClock, SystemClock};
 use voicen_core::diag::{Log, LogEvent};
 use voicen_core::local_models::download::DiskSpace;
 use voicen_core::platform::Notifier;
+use voicen_core::secrets as key_store;
 use voicen_core::settings::gate::{CallSwitch, LaunchArgs, SettingsTab};
 use voicen_core::settings::roots::FsCallRoots;
 use voicen_core::settings::service::SettingsService;
+use voicen_core::vad::SpeechSpans;
 
 use crate::settings_window::{self, OpenTarget};
 use crate::tray::{self, TrayPart};
@@ -70,7 +86,16 @@ pub struct CallPorts {
     pub notifier: Arc<dyn Notifier>,
     /// The root in force while `calls.storage_root` is unset (`<data_dir>/calls` in `run()`).
     pub calls_root: PathBuf,
+    /// The key store the pass reads the `TranscriptionApi` key from: the `SettingsService`'s
+    /// own instance in `run()` (`SharedPorts.credentials`).
+    pub credentials: Arc<dyn key_store::CredentialStore>,
+    /// The pass's primary detector: the pass half of `vad::load_shared` in `run()`; `None`
+    /// makes core's energy detector decide (`vad_fallback cause=unavailable` per track).
+    pub detector: Option<Arc<dyn SpeechSpans>>,
 }
+
+/// The `calls://open` event (T-139): the shell asks the Calls window to show one call.
+pub const CALLS_OPEN: &str = "calls://open";
 
 /// One shell start or stop of a call, posted with [`request`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -128,9 +153,10 @@ pub fn file_opener() -> TrackOpener {
     })
 }
 
-/// Builds the one call session of `app` over `ports`, manages it as `Arc<CallSession>`
-/// and its store as `Arc<CallStore>`, and starts the `call-requests` worker and the
-/// `call-tick` thread. Needs the managed `Arc<SettingsService>` and `Arc<Log>`
+/// Builds the one call session of `app` over `ports`, manages it as `Arc<CallSession>`,
+/// its store as `Arc<CallStore>` and the one pass queue over that store as
+/// `Arc<PassQueue>` (T-139), and starts the `call-requests` worker and the `call-tick`
+/// thread. Needs the managed `Arc<SettingsService>` and `Arc<Log>`
 /// (`assemble`'s wiring) and, for the tray flag, the tray (`run()` calls this after
 /// `start_dictation`, so the tray exists). Starts no call. `Err` when a managed part is
 /// missing, the app already has a call part (then nothing is started) or a thread could
@@ -149,7 +175,10 @@ pub fn start_calls<R: Runtime>(app: &AppHandle<R>, ports: CallPorts) -> io::Resu
                 "the app manages no settings service",
             )
         })?;
-    if app.try_state::<CallPart>().is_some() || app.try_state::<Arc<CallSession>>().is_some() {
+    if app.try_state::<CallPart>().is_some()
+        || app.try_state::<Arc<CallSession>>().is_some()
+        || app.try_state::<Arc<PassQueue>>().is_some()
+    {
         return Err(io::Error::new(
             io::ErrorKind::AlreadyExists,
             "the app already has a call part",
@@ -162,17 +191,35 @@ pub fn start_calls<R: Runtime>(app: &AppHandle<R>, ports: CallPorts) -> io::Resu
         open_track,
         notifier,
         calls_root,
+        credentials,
+        detector,
     } = ports;
     let store = Arc::new(CallStore::new(
         Arc::new(FsCallRoots::new(calls_root)),
         Arc::clone(&mono),
     ));
+    let snapshot = Arc::clone(&service);
+    let runner = ApiPassRunner::new(
+        Arc::new(move || snapshot.snapshot()),
+        credentials,
+        detector,
+        Arc::new(ShellPassEvents::new(
+            Arc::clone(&log),
+            Arc::clone(&notifier),
+        )),
+        Arc::clone(&mono),
+    );
+    let queue = Arc::new(PassQueue::new(Arc::clone(&store), Arc::new(runner)));
     let session = Arc::new(CallSession::new(CallDeps {
         source,
         store: Arc::clone(&store),
         settings: service,
         indicator: Arc::new(ShellCallIndicator::new(app)),
-        shell: Arc::new(ShellCallShell::new(app, Arc::clone(&notifier))),
+        shell: Arc::new(ShellCallShell::new(
+            app,
+            Arc::clone(&notifier),
+            Arc::clone(&queue),
+        )),
         log: Arc::clone(&log),
         clock: Arc::new(SystemClock),
         offset: Arc::new(crate::diag::OsLocalOffset),
@@ -186,17 +233,18 @@ pub fn start_calls<R: Runtime>(app: &AppHandle<R>, ports: CallPorts) -> io::Resu
         disk,
     }));
     let wake = Arc::new(Wake::default());
-    let (requests, queue) = mpsc::channel();
+    let (requests, received) = mpsc::channel();
     spawn_tick(Arc::downgrade(&session), Arc::clone(&wake), mono)?;
     spawn_worker(
         Arc::clone(&session),
-        queue,
+        received,
         Arc::clone(&wake),
         log,
         notifier,
     )
     .inspect_err(|_| wake.close())?;
     app.manage(store);
+    app.manage(queue);
     app.manage(session);
     app.manage(CallPart {
         requests,
@@ -334,6 +382,26 @@ pub fn calls_opened<R: Runtime>(app: &AppHandle<R>) -> u32 {
         .map_or(0, |part| part.opened.load(Ordering::SeqCst))
 }
 
+/// The `calls://open` payload: the call folder `root.join(id)` as the wire names it.
+#[derive(Clone, Serialize)]
+struct OpenCall {
+    root: String,
+    id: String,
+}
+
+/// Asks the Calls window to show the call `id` under `root` (T-139, FR-030): emits one
+/// `calls://open` with `{root: wire_root(root), id}`, the only emitter of that event.
+/// `root` is the one core's `TranscriptReady` notice carries, never the current settings'.
+pub fn open_transcript<R: Runtime>(app: &AppHandle<R>, root: &Path, id: &CallId) {
+    let _ = app.emit(
+        CALLS_OPEN,
+        OpenCall {
+            root: wire_root(root),
+            id: id.to_string(),
+        },
+    );
+}
+
 /// `run()`'s `CallIndicator` (called inside the call session lock): the call flag goes
 /// to the tray part (store and post only); `set_state` and `set_tick` do nothing until
 /// T-130's indicator window forwards them (#277).
@@ -364,31 +432,71 @@ impl<R: Runtime> CallIndicator for ShellCallIndicator<R> {
     }
 }
 
+/// A call notice to the shared notifier: core's `CallNotice::message` id, `retry: None`.
+fn offer(notifier: &dyn Notifier, notice: &CallNotice) {
+    let (id, params) = notice.message();
+    notifier.notify(id, &params, None);
+}
+
 /// `run()`'s `CallShell` (called after the call session lock): a notice goes to the
-/// shared notifier with core's `CallNotice::message` id and `retry: None`; the Calls tab
-/// request posts `settings_window::request(Tab(Calls, None))` and drops the receipt.
+/// shared notifier ([`offer`]); the Calls tab request posts
+/// `settings_window::request(Tab(Calls, None))` and drops the receipt; a folder a stop
+/// left ready-to-transcribe is enqueued on the one pass queue (T-139), the only enqueue
+/// on a stop.
 pub struct ShellCallShell<R: Runtime> {
     app: AppHandle<R>,
     notifier: Arc<dyn Notifier>,
+    queue: Arc<PassQueue>,
 }
 
 impl<R: Runtime> ShellCallShell<R> {
-    pub fn new(app: &AppHandle<R>, notifier: Arc<dyn Notifier>) -> ShellCallShell<R> {
+    pub fn new(
+        app: &AppHandle<R>,
+        notifier: Arc<dyn Notifier>,
+        queue: Arc<PassQueue>,
+    ) -> ShellCallShell<R> {
         ShellCallShell {
             app: app.clone(),
             notifier,
+            queue,
         }
     }
 }
 
 impl<R: Runtime> CallShell for ShellCallShell<R> {
     fn notice(&self, notice: CallNotice) {
-        let (id, params) = notice.message();
-        self.notifier.notify(id, &params, None);
+        offer(self.notifier.as_ref(), &notice);
     }
 
     fn open_calls_tab(&self) {
         let _ = settings_window::request(&self.app, OpenTarget::Tab(SettingsTab::Calls, None));
+    }
+
+    fn call_ready(&self, dir: &Path) {
+        self.queue.enqueue(dir);
+    }
+}
+
+/// The pass worker's `PassEvents` (T-139): log lines to the one log, every notice to the
+/// shared notifier through [`offer`], as the session's own notices.
+pub struct ShellPassEvents {
+    log: Arc<Log>,
+    notifier: Arc<dyn Notifier>,
+}
+
+impl ShellPassEvents {
+    pub fn new(log: Arc<Log>, notifier: Arc<dyn Notifier>) -> ShellPassEvents {
+        ShellPassEvents { log, notifier }
+    }
+}
+
+impl PassEvents for ShellPassEvents {
+    fn log(&self, event: LogEvent) {
+        self.log.write(event);
+    }
+
+    fn notice(&self, notice: CallNotice) {
+        offer(self.notifier.as_ref(), &notice);
     }
 }
 

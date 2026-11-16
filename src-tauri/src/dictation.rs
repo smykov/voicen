@@ -67,7 +67,8 @@ pub struct DictationPorts {
     /// The `SettingsService`'s own hotkey registrar (`SettingsDeps::hotkeys`, T-055):
     /// the started hotkey thread is attached to it.
     pub hotkeys: Arc<HotkeyRegistrarHandle>,
-    /// The gate's primary detector: `vad::load_bundled` in `run()`, explicit in the tests.
+    /// The gate's primary detector: the dictation half of `vad::load_shared` in `run()`,
+    /// explicit in the tests.
     /// An `Err` makes the energy detector decide (one `vad_fallback` at the first decision).
     pub detector: Result<Box<dyn SpeechDetector>, VadError>,
     /// The pending recording's audio (T-209, FR-032): [`pending_store`] over

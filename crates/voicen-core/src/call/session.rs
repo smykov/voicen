@@ -115,6 +115,11 @@ pub trait CallShell: Send + Sync {
     fn notice(&self, notice: CallNotice);
     /// Opens the Settings window on its Calls tab (every `part=root` refusal, #243).
     fn open_calls_tab(&self);
+    /// The folder of a call a stop just left ready-to-transcribe (its `meta.json`
+    /// written): once per such stop, after the stop's [`CallShell::notice`]. A stop that
+    /// left the meta `recording` (a `storage_error` stop, a failed meta write) hands
+    /// nothing out; the next start recovers that call.
+    fn call_ready(&self, dir: &Path);
 }
 
 /// The settings the session reads, and the one narrow writer it uses (FR-031).
@@ -483,16 +488,16 @@ impl CallSession {
             let mut inner = self.lock();
             self.stop_locked(&mut inner, reason)
         };
-        if let Some(effective) = stopped {
-            self.notice_stopped(effective);
+        if let Some(stop) = &stopped {
+            self.after_stop(stop);
         }
         stopped.is_some()
     }
 
     /// The stop under the session lock: the writer hands the call back (or the captures
-    /// close), then [`CallSession::finish`]. The reason the call stopped with (see
-    /// `finish`); `None` when no call was recording.
-    fn stop_locked(&self, inner: &mut Inner, reason: StopReason) -> Option<StopReason> {
+    /// close), then [`CallSession::finish`]. What the stop did (see `finish`); `None`
+    /// when no call was recording.
+    fn stop_locked(&self, inner: &mut Inner, reason: StopReason) -> Option<Stopped> {
         let call = inner.call.take()?;
         let rec = if inner.subtitles {
             inner.captures.as_ref().and_then(|c| {
@@ -521,6 +526,15 @@ impl CallSession {
             | StopReason::Sleep => CallNotice::CallSavedTranscribing,
         };
         self.deps.shell.notice(notice);
+    }
+
+    /// What every stop does after the lock, in this order: the one notice, then the
+    /// ready folder to the shell (so a pass notice never overtakes "call saved").
+    fn after_stop(&self, stop: &Stopped) {
+        self.notice_stopped(stop.reason);
+        if let Some(dir) = &stop.ready {
+            self.deps.shell.call_ready(dir);
+        }
     }
 
     pub fn is_recording(&self) -> bool {
@@ -559,8 +573,8 @@ impl CallSession {
                 }
             }
         };
-        if let Some(reason) = stopped {
-            self.notice_stopped(reason);
+        if let Some(stop) = &stopped {
+            self.after_stop(stop);
         }
     }
 
@@ -1041,8 +1055,9 @@ impl CallSession {
     /// `storage_error` stop leaves `meta.json` as it is (`recording`): the next start
     /// recovers the call from what its tracks hold (FR-016). A recording the writer hands
     /// back as failed makes any stop a `storage_error` stop (I12): that is the reason
-    /// logged and returned, the one the caller notices.
-    fn finish(&self, call: Call, rec: Option<Box<Recording>>, reason: StopReason) -> StopReason {
+    /// logged and returned, the one the caller notices. The folder comes back as ready
+    /// only when its `meta.json` was written ready-to-transcribe.
+    fn finish(&self, call: Call, rec: Option<Box<Recording>>, reason: StopReason) -> Stopped {
         let Call { dir, meta, .. } = call;
         let mut reason = reason;
         let (mut meta, mic_written, system_written) = match rec {
@@ -1087,12 +1102,14 @@ impl CallSession {
         )));
         meta.duration_ms = Some(duration_ms);
         meta.stop_reason = Some(reason);
+        let mut written = false;
         if !keep_meta {
-            if let Err(e) = write_meta(&dir, &meta) {
-                self.deps.log.write(LogEvent::CallStorageFailed {
+            match write_meta(&dir, &meta) {
+                Ok(()) => written = true,
+                Err(e) => self.deps.log.write(LogEvent::CallStorageFailed {
                     kind: StorageKind::Meta,
                     os: e.raw_os_error(),
-                });
+                }),
             }
         }
         self.deps.store.release(&dir);
@@ -1113,8 +1130,18 @@ impl CallSession {
         let lang = self.deps.settings.snapshot().ui_language;
         self.deps.indicator.set_state(&IndicatorState::idle(lang));
         self.deps.indicator.set_call_recording(false);
-        reason
+        Stopped {
+            reason,
+            ready: written.then_some(dir),
+        }
     }
+}
+
+/// What a stop did: the reason it stopped with, and the folder it left
+/// ready-to-transcribe (`None` when its meta stayed `recording`).
+struct Stopped {
+    reason: StopReason,
+    ready: Option<PathBuf>,
 }
 
 impl Drop for CallSession {
