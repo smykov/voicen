@@ -1,0 +1,8 @@
+guarantee: r1#3: DTX off
+file: crates/voicen-core/src/call/codec.rs
+added_by: test-writer
+--- old
+        encoder.set_dtx(false).map_err(encode_failed)?;
+--- new
+        encoder.set_dtx(true).map_err(encode_failed)?;
+--- end

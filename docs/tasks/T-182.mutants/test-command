@@ -1,0 +1,2 @@
+# T-182: the call codec tests only (core call::codec:: filter).
+cargo test -j 2 -p voicen-core --no-fail-fast --lib call::codec::

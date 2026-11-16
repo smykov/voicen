@@ -23,8 +23,10 @@
 //     `ReadEnd { Complete, Truncated, Damaged }` (Debug, Clone, Copy, PartialEq, Eq).
 //
 // Reader rules (the task's invariant): the packets of the longest prefix of CRC-valid pages
-// after a valid OpusHead; any read error ends the data; Damaged iff a CRC-valid page follows
-// an invalid one; duration = last good granule - pre-skip.
+// after a valid OpusHead; any read error ends the data; Damaged iff the reader's forward walk
+// reaches a CRC-valid page after an invalid one (a bad page whose segment count or lacing
+// runs past the end of the file reads as Truncated, same prefix); duration = last good
+// granule - pre-skip.
 
 use std::collections::VecDeque;
 use std::io::{self, Read, Seek, Write};
@@ -37,14 +39,21 @@ use crate::audio::AudioBuffer;
 use crate::call::{DecodeEnd, StorageError, StorageOp};
 use crate::clock::MonotonicClock;
 
-/// The encoder's sample rate: call tracks are 16 kHz mono (research R5).
-const RATE: u32 = 16_000;
-/// 20 ms at 16 kHz: the samples of one Opus packet.
-const FRAME: usize = 320;
+/// The encoder's sample rate: call tracks are 16 kHz mono (research R5), the app's one
+/// audio rate.
+const RATE: u32 = crate::audio::SAMPLE_RATE;
+/// Ogg Opus counts granules at 48 kHz (RFC 7845); the input rate must divide it.
+const GRANULE_RATE: u32 = 48_000;
+const _: () =
+    assert!(RATE >= 1_000 && RATE.is_multiple_of(1_000) && GRANULE_RATE.is_multiple_of(RATE));
+/// Samples of one millisecond at `RATE`.
+const SAMPLES_PER_MS: usize = (RATE / 1_000) as usize;
+/// 20 ms at `RATE`: the samples of one Opus packet.
+const FRAME: usize = 20 * SAMPLES_PER_MS;
 /// One packet in the 48 kHz granule units of Ogg Opus (RFC 7845).
 const GRANULE_PER_PACKET: u64 = 960;
-/// 16 kHz samples per 48 kHz granule unit, inverted: granule = 3 x samples.
-const GRANULE_PER_SAMPLE: u64 = 3;
+/// Granule units per sample at `RATE` (granule = 3 x samples at 16 kHz).
+const GRANULE_PER_SAMPLE: u64 = (GRANULE_RATE / RATE) as u64;
 /// A page ends after this many packets (1 s, research R6).
 const PACKETS_PER_PAGE: u64 = 50;
 /// `sync_data` runs once this much clock time passed since the last one (research R6).
@@ -54,8 +63,8 @@ const BITRATE: i32 = 24_000;
 const COMPLEXITY: i32 = 9;
 /// libopus's recommended output buffer for one packet.
 const MAX_PACKET: usize = 4_000;
-/// The longest Opus packet (120 ms) at 16 kHz.
-const MAX_DECODED: usize = 1_920;
+/// The longest Opus packet (120 ms) at `RATE`.
+const MAX_DECODED: usize = 120 * SAMPLES_PER_MS;
 
 /// A writer whose written data can be made durable: `File::sync_data` in production, a
 /// counting fake in tests.
@@ -88,8 +97,8 @@ pub trait TrackEncoder {
 /// Reads one call track back as 16 kHz audio.
 pub trait TrackDecoder {
     /// The next window of at most `max_ms` (at least 1 ms) of 16 kHz audio; `Ok(None)` at
-    /// the end of the recoverable data, `Err(DecodeEnd::Damaged)` instead of it when a bad
-    /// page sits before the end of the file.
+    /// the end of the recoverable data, `Err(DecodeEnd::Damaged)` instead of it when the
+    /// forward walk reaches a CRC-valid page after a bad one (see [`ReadEnd::Damaged`]).
     fn next_window(&mut self, max_ms: u32) -> Result<Option<AudioBuffer>, DecodeEnd>;
 }
 
@@ -285,9 +294,12 @@ impl<W: SyncWrite> TrackEncoder for OpusOgg<W> {
 pub enum ReadEnd {
     /// The EOS page was read.
     Complete,
-    /// The data ends early (a cut, a zero tail, a bad last page): recoverable up to there.
+    /// The data ends early (a cut, a zero tail, a bad last page, a bad page whose length
+    /// fields run past the end of the file): recoverable up to there.
     Truncated,
-    /// A bad page is followed by a valid one: only the prefix before it was read.
+    /// Damaged iff the reader's forward walk reaches a CRC-valid page after a bad one: only
+    /// the prefix before the bad page was read. A bad page whose segment count or lacing
+    /// runs past the end of the file reads as Truncated, with the same recoverable prefix.
     Damaged,
 }
 
@@ -362,8 +374,10 @@ impl<R: Read + Seek> Pages<R> {
         None
     }
 
-    /// Damaged iff a CRC-valid page follows the bad one. Each mismatch consumes its page,
-    /// so this walks forward to the end of the file at most.
+    /// Damaged iff the reader's forward walk reaches a CRC-valid page after a bad one. A bad
+    /// page whose segment count or lacing runs past the end of the file reads as Truncated,
+    /// with the same recoverable prefix (no rescan from inside the bad page). Each mismatch
+    /// consumes its page, so this walks forward to the end of the file at most.
     fn after_bad_page(&mut self) -> ReadEnd {
         loop {
             match self.reader.read_packet() {
@@ -442,7 +456,7 @@ impl<R: Read + Seek> TrackDecoder for OpusOggReader<R> {
     fn next_window(&mut self, max_ms: u32) -> Result<Option<AudioBuffer>, DecodeEnd> {
         let want = usize::try_from(max_ms.max(1))
             .unwrap_or(usize::MAX)
-            .saturating_mul(16);
+            .saturating_mul(SAMPLES_PER_MS);
         while self.queue.len() < want {
             let Some(packet) = self.pages.next_audio() else {
                 break;
@@ -1206,6 +1220,27 @@ mod tests {
     }
 
     #[test]
+    fn encoder_is_configured_with_the_r5_settings() {
+        // Complexity and FEC are not observable in the bitstream, and Voip only together
+        // with VBR and DTX: pin each setting through libopus's getters, one assertion each.
+        let mut enc =
+            OpusOgg::create(Sink::default(), SERIAL, dyn_clock(&StepClock::new())).expect("create");
+        let e = &mut enc.encoder;
+        assert_eq!(e.get_complexity().unwrap(), 9, "complexity");
+        assert!(!e.get_inband_fec().unwrap(), "in-band FEC");
+        assert!(
+            e.get_application().unwrap() == opus::Application::Voip,
+            "application"
+        );
+        assert!(e.get_vbr().unwrap(), "VBR");
+        assert!(!e.get_dtx().unwrap(), "DTX");
+        assert!(
+            e.get_bitrate().unwrap() == opus::Bitrate::Bits(24_000),
+            "bitrate"
+        );
+    }
+
+    #[test]
     fn next_window_returns_at_most_max_ms_of_16k_audio_and_the_whole_track() {
         let n = 7 * RATE + 123;
         let sig = speech(n);
@@ -1365,6 +1400,8 @@ mod tests {
 
     /// Corrupts pages `from..from + run`: the body of even-numbered pages, a header byte
     /// (granule) of odd-numbered ones, so a run mixes both kinds of CRC mismatch.
+    /// Length-preserving: capture pattern, segment count and lacing stay intact, so every
+    /// page of the run fails by CRC (`HashMismatch`), never by running past the end.
     fn corrupt_run(f: &Fixture, from: usize, run: usize) -> Vec<u8> {
         let mut bytes = f.bytes.clone();
         for (i, p) in f.pages.iter().enumerate().skip(from).take(run) {
@@ -1400,8 +1437,61 @@ mod tests {
         for k in 3..last {
             let bytes = corrupt_run(&f, k, last + 1 - k);
             let what = format!("bad pages {k}..{last}");
+            // The dependency as oracle: the first error of the run is a CRC failure, not
+            // an EOF overrun, so `Truncated` here means "no valid page after the run".
+            let mut reader = ogg::PacketReader::new(Cursor::new(bytes.clone()));
+            let first_err = loop {
+                match reader.read_packet() {
+                    Ok(Some(_)) => {}
+                    Ok(None) => break None,
+                    Err(e) => break Some(e),
+                }
+            };
+            assert!(
+                matches!(first_err, Some(ogg::OggReadError::HashMismatch(..))),
+                "{what}: first error {first_err:?}"
+            );
             assert_prefix(&f, &bytes, k - 1, ReadEnd::Truncated, &what);
         }
+    }
+
+    #[test]
+    fn a_bad_page_whose_lacing_runs_past_the_end_reads_as_truncated_with_the_same_prefix() {
+        // Contract: Damaged iff the forward walk reaches a CRC-valid page after a bad one.
+        // A segment count grown so the page runs past EOF ends in a read error (not a CRC
+        // failure), which reads as Truncated, with the recoverable prefix through page
+        // last - 2 (decisions: no consumer branches on the label).
+        let f = fixture();
+        let last = f.pages.len() - 1;
+        let mut bytes = f.bytes.clone();
+        let bad = &f.pages[last - 1];
+        bytes[bad.start + 26] = 255;
+        // Precondition: the grown table plus the body it now announces run past the end.
+        let table = &bytes[bad.start + 27..bad.start + 27 + 255];
+        let body: usize = table.iter().map(|&l| usize::from(l)).sum();
+        assert!(
+            bad.start + 27 + 255 + body > bytes.len(),
+            "the page must run past EOF"
+        );
+        let mut reader = ogg::PacketReader::new(Cursor::new(bytes.clone()));
+        let first_err = loop {
+            match reader.read_packet() {
+                Ok(Some(_)) => {}
+                Ok(None) => break None,
+                Err(e) => break Some(e),
+            }
+        };
+        assert!(
+            matches!(first_err, Some(ogg::OggReadError::ReadError(_))),
+            "an EOF overrun, not a CRC failure: {first_err:?}"
+        );
+        assert_prefix(
+            &f,
+            &bytes,
+            last - 2,
+            ReadEnd::Truncated,
+            "page last-1 runs past EOF",
+        );
     }
 
     #[test]
@@ -1478,6 +1568,35 @@ mod tests {
             seq += 1;
         }
         out
+    }
+
+    #[test]
+    fn a_valid_non_fixture_opus_head_is_readable() {
+        // RFC 7845 5.1: a version below 16 is compatible (the reader does not narrow it to
+        // the writer's 1), and 1 or 2 channels are allowed with mapping family 0. Each
+        // field changed alone, CRC fixed; the rows are the accept side of the table of
+        // `each_opus_head_field_check_makes_the_file_unreadable`.
+        let f = fixture();
+        let head = &f.pages[0];
+        let body = head.start + 27 + usize::from(f.bytes[head.start + 26]);
+        let want = scan_of(&f.bytes).expect("fixture scan");
+        for (what, offset, value) in [
+            ("version 0", 8, 0),
+            ("version 2", 8, 2),
+            ("version 15", 8, 15),
+            ("2 channels", 9, 2),
+        ] {
+            let mut bytes = f.bytes.clone();
+            bytes[body + offset] = value;
+            fix_crc(&mut bytes, head);
+            let s = scan_of(&bytes).unwrap_or_else(|e| panic!("{what}: scan {e:?}"));
+            assert_eq!(s.end, ReadEnd::Complete, "{what}");
+            assert_eq!(s.duration_48k, want.duration_48k, "{what}: duration");
+            assert!(
+                OpusOggReader::open(Cursor::new(bytes)).is_ok(),
+                "{what}: open"
+            );
+        }
     }
 
     #[test]
@@ -1691,6 +1810,45 @@ mod tests {
                         .iter()
                         .any(|e| matches!(e, Ev::Sync(_))),
                 "flush {only} fails: the page's bytes stay unflushed and unsynced: {events:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn push_fails_on_the_page_whose_write_fails() {
+        // FR-016: only the one write fails (a one-shot fake: later writes, flushes and syncs
+        // succeed), so a swallowed error at the push-time write is not re-raised later and
+        // is caught by this assertion, not by an ogg internal panic. `at` is the start of
+        // audio page k (pages[2 + k]), so the first write storing past it is that page's
+        // header, written by the push of its last packet: packet 50 (k + 1), push index
+        // (k + 1) * 50 - 1.
+        let reference = pages(&encode(&speech(8 * RATE)));
+        for (k, kind) in [
+            (0, ErrorKind::StorageFull),
+            (2, ErrorKind::PermissionDenied),
+        ] {
+            let at = reference[2 + k].start;
+            let sink = Sink::default();
+            sink.state().fail_write_once_at = Some((at, kind));
+            let (idx, e, events) = first_failing_push(&sink, 8);
+            assert_eq!(
+                (idx, e.op, e.kind),
+                ((k + 1) * 50 - 1, StorageOp::Write, kind),
+                "write of audio page {k} fails"
+            );
+            assert_eq!(sink.state().fail_write_once_at, None, "the fake fired");
+            // Nothing after the failed page: its bytes were not stored, and no flush or sync
+            // ran for it.
+            assert!(
+                events
+                    .iter()
+                    .all(|ev| !matches!(ev, Ev::Write(n) if *n > at)),
+                "write of audio page {k} fails: bytes stored past the page start: {events:?}"
+            );
+            assert_eq!(
+                events.last(),
+                Some(&Ev::Flush(at)),
+                "write of audio page {k} fails: the last event is the previous page's flush"
             );
         }
     }
