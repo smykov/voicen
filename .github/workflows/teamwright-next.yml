@@ -30,9 +30,9 @@ on:
         required: false
         default: ""
 
-# One dispatch of a task at a time; the stage job has its own group.
+# One dispatch of a task at a time: a group per task (decisions #292); the stage job has its own.
 concurrency:
-  group: teamwright-next
+  group: teamwright-next-${{ inputs.task_id }}
   cancel-in-progress: false
 
 permissions:
@@ -57,6 +57,9 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       # Stages of one chain at most; the stop when nothing moved comes first.
       MAX_HOPS: "12"
+      # Tasks with an unfinished stage at once, at most (decisions #292, #296): 5. The one place of
+      # the limit (docs/decisions/ci-toolchain.md); the count is scripts/ci/contour-busy.sh.
+      MAX_PARALLEL: "5"
       MODEL: opus
     steps:
       - uses: actions/checkout@v5
@@ -79,14 +82,16 @@ jobs:
           [[ "$ISSUE" =~ ^[0-9]*$ ]] || { echo "::error::bad issue number"; exit 1; }
           case "$PREV_STAGE" in "" | analyze | red-tests | implement | review) ;; *) echo "::error::bad prev_stage"; exit 1 ;; esac
 
-          # One task at a time: an unfinished stage of another task stops this dispatch; the
-          # stage of this task that started it may still be ending (up to 3 minutes).
+          # Up to MAX_PARALLEL tasks at a time: scripts/ci/contour-busy.sh counts the other tasks with
+          # an unfinished stage (full: this dispatch starts nothing and says so); the stage of this
+          # task that started it may still be ending (own: wait, up to 3 minutes).
           for i in $(seq 1 18); do
-            busy="$(gh run list -R "$REPO" --workflow teamwright-agent.yml --limit 50 --json status,displayTitle | jq -r --arg t "teamwright agent $TASK_ID " '[.[] | select(.status != "completed")] | map(if (.displayTitle | startswith($t)) then "own" else "other" end) | unique | join(",")')" || { say "**$TASK_ID**: the stage runs were not readable. $RUN_URL"; exit 1; }
+            busy="$(gh run list -R "$REPO" --workflow teamwright-agent.yml --limit 50 --json status,displayTitle | scripts/ci/contour-busy.sh "$TASK_ID" "$MAX_PARALLEL")" || { say "**$TASK_ID**: the stage runs were not counted (gh run list or scripts/ci/contour-busy.sh failed). $RUN_URL"; exit 1; }
             case "$busy" in
-              *other*) say "**$TASK_ID**: chain stopped: a stage of another task runs (one task at a time). $RUN_URL"; exit 0 ;;
               own) sleep 10 ;;
-              *) break ;;
+              "full "*) say "**$TASK_ID**: chain stopped: ${busy#full } other tasks have unfinished stages (the limit is $MAX_PARALLEL, MAX_PARALLEL in teamwright-next.yml); start teamwright-next.yml for $TASK_ID again when one ends. $RUN_URL"; exit 0 ;;
+              "free "*) break ;;
+              *) say "**$TASK_ID**: the stage runs were not counted (no verdict). $RUN_URL"; exit 1 ;;
             esac
           done
           [ "$busy" != own ] || { say "**$TASK_ID**: chain stopped: its previous stage did not end. $RUN_URL"; exit 1; }

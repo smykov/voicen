@@ -2,7 +2,7 @@
 # headless Claude session on the self-hosted runner, started by teamwright-next.yml, which it
 # starts again at its end. The header, line 1 to the job map, is the owned copy
 # scripts/ci/contour-heads/teamwright-agent.yml (make check, check-release-guard, R14): one
-# owner-only trigger, one stage at a time, the write scopes. The session never pushes: the push
+# owner-only trigger, one stage per task at a time, the write scopes. The session never pushes: the push
 # step after it does, with the hooks installed (docs/decisions/ci-toolchain.md).
 name: teamwright agent
 # The dispatcher finds a running stage of a task by this title.
@@ -32,10 +32,11 @@ on:
         required: false
         default: ""
 
-# One stage at a time in the repository (one runner). GitHub keeps one pending run per group: the
-# dispatcher starts a stage only when no stage of another task runs.
+# One stage of a task at a time: a group per task (decisions #292), and GitHub keeps one pending run
+# per group, so only a second dispatch of the same task can replace its pending run. How many tasks
+# run at once is the dispatcher's count (MAX_PARALLEL in teamwright-next.yml, contour-busy.sh).
 concurrency:
-  group: teamwright-agent
+  group: teamwright-agent-${{ inputs.task_id }}
   cancel-in-progress: false
 
 permissions:
