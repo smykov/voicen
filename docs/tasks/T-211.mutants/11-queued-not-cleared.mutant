@@ -1,0 +1,9 @@
+guarantee: AC-3: queued cleared at the death, overlay leaves Processing
+file: crates/voicen-core/src/recording/mod.rs
+added_by: test-writer
+--- old
+        self.worker_stopped = true;
+        self.queued.clear();
+--- new
+        self.worker_stopped = true;
+--- end

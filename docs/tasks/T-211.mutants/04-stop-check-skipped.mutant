@@ -1,0 +1,8 @@
+guarantee: AC-1: a recording live at death -> its stop offers failure.internal, queues nothing
+file: crates/voicen-core/src/dictation.rs
+added_by: test-writer
+--- old
+        if audio.is_ok() && st.ctrl.is_worker_stopped() {
+--- new
+        if false && audio.is_ok() && st.ctrl.is_worker_stopped() {
+--- end

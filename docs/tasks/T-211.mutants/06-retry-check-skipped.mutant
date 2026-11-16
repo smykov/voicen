@@ -1,0 +1,12 @@
+guarantee: Point (i): a Retry after the death shows failure.internal
+file: crates/voicen-core/src/dictation.rs
+added_by: test-writer
+--- old
+            if st.ctrl.is_worker_stopped() {
+                st.ctrl.worker_refused(at);
+                self.shared.publish(&mut st);
+--- new
+            if false && st.ctrl.is_worker_stopped() {
+                st.ctrl.worker_refused(at);
+                self.shared.publish(&mut st);
+--- end

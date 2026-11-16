@@ -1,0 +1,9 @@
+guarantee: AC-1: stop_recording send Err (dead receiver) ignored instead of routed to worker_ended
+file: crates/voicen-core/src/dictation.rs
+added_by: test-writer
+equivalent: the sent == Some(false) branch needs a receiver dropped while worker_stopped is still false, but the only way a worker ends without shutdown is WorkerExit, which sets worker_stopped under the lock before the receiver drops (and a shutdown leaves queue None, so sent is None); the branch is unreachable, kept as defence in depth
+--- old
+            if sent == Some(false) {
+--- new
+            if false && sent == Some(false) {
+--- end
