@@ -21,8 +21,16 @@
 //!   CallRequest::{Record(CallSource), Stop(CallSource), RefuseSwitch}
 //!   request(app: &AppHandle<R>, request: CallRequest)     // posts and returns; no-op without a call part
 //!   apply_launch(app: &AppHandle<R>, args: &LaunchArgs)    // the first launch's `--call` switch
-//!   open_calls(app: &AppHandle<R>)                         // the tray "Calls" route (no-op until T-142)
+//!   open_calls(app: &AppHandle<R>, target: Option<CallRef>)   // T-142: the tray "Calls" route (None) and
+//!                                                          // a targeted open; posts to the `calls` opener thread
 //!   calls_opened(app: &AppHandle<R>) -> u32                // test-read: how many times `open_calls` ran
+//!                                                          // (T-142: it still counts every request)
+//!   CallRef { root: String, id: String }                   // T-142: the `{root, id}` of `calls://open`
+//!   trait SaveDialog: Send + Sync                          // T-142: the native save dialog port
+//!       { fn pick(&self, suggested_name: &str, format: Format) -> io::Result<Option<PathBuf>> }
+//!                                                          // Ok(None) = cancelled; Format = core storage::Format
+//!   CallPorts gains clipboard: Arc<dyn Clipboard>, folder: Arc<dyn FolderOpener>,
+//!                   save: Arc<dyn SaveDialog>              // T-142
 //! voicen_lib::tray::TrayPart::set_call_recording(&self, bool)
 //! voicen_core::call::events::{refused_notice, CallNotice::message}   // tests/call_notice_map.rs (core)
 //! ```
@@ -42,6 +50,7 @@ use tauri::{App, AppHandle, Manager};
 use voicen_core::autostart::{Autostart, FakeAutostart};
 use voicen_core::call::codec::SyncWrite;
 use voicen_core::call::session::{CallSession, TrackFile, TrackOpener};
+use voicen_core::call::storage::Format;
 use voicen_core::call::wav_source::WavTrackSource;
 use voicen_core::call::{
     CaptureStamp, EndpointId, OpenError, StopReason, Track, TrackDevice, TrackSink, TrackSource,
@@ -52,13 +61,14 @@ use voicen_core::local_models::catalog::MODELS;
 use voicen_core::local_models::download::DiskSpace;
 use voicen_core::local_models::service::LocalModels;
 use voicen_core::local_models::store::ModelStore;
-use voicen_core::platform::{CaptureHandle, FakeNotifier};
+use voicen_core::platform::{CaptureHandle, Clipboard, FakeClipboard, FakeNotifier};
 use voicen_core::secrets::{CredentialStore, FakeCredentialStore};
 use voicen_core::settings::service::SettingsService;
 use voicen_core::test_support::local_models::FakeDisk;
 use voicen_core::test_support::TempDir;
 use voicen_core::timeouts::Timeouts;
-use voicen_lib::call::CallPorts;
+use voicen_lib::call::{CallPorts, SaveDialog};
+use voicen_lib::logs_folder::FolderOpener;
 use voicen_lib::settings_ipc::load_settings;
 use windows::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, PeekMessageW, TranslateMessage, MSG, PM_REMOVE,
@@ -338,6 +348,26 @@ impl CallRig {
         disk: Arc<dyn DiskSpace>,
         open_track: TrackOpener,
     ) {
+        self.start_with(
+            source,
+            disk,
+            open_track,
+            Arc::new(FakeClipboard::new()),
+            Arc::new(FakeFolder::default()),
+            Arc::new(FakeSave::default()),
+        );
+    }
+
+    /// [`CallRig::start`] with the three T-142 ports given by the test.
+    pub fn start_with(
+        &self,
+        source: Arc<dyn TrackSource + Send + Sync>,
+        disk: Arc<dyn DiskSpace>,
+        open_track: TrackOpener,
+        clipboard: Arc<dyn Clipboard>,
+        folder: Arc<dyn FolderOpener>,
+        save: Arc<dyn SaveDialog>,
+    ) {
         let calls_root = self.dir.path().join("calls");
         fs::create_dir_all(&calls_root).expect("the calls root");
         voicen_lib::call::start_calls(
@@ -349,6 +379,9 @@ impl CallRig {
                 open_track,
                 notifier: self.notifier.clone(),
                 calls_root,
+                clipboard,
+                folder,
+                save,
             },
         )
         .expect("the call part starts");
@@ -435,5 +468,53 @@ impl CallRig {
 
     pub fn count(&self, words: &[&str]) -> usize {
         self.lines(words).len()
+    }
+}
+
+// ---- the T-142 ports ------------------------------------------------------------------------
+
+/// A [`FolderOpener`] that records every folder it was asked to open and opens nothing.
+#[derive(Default)]
+pub struct FakeFolder {
+    opened: Mutex<Vec<PathBuf>>,
+}
+
+impl FakeFolder {
+    pub fn opened(&self) -> Vec<PathBuf> {
+        lock(&self.opened).clone()
+    }
+}
+
+impl FolderOpener for FakeFolder {
+    fn open(&self, dir: &Path) -> io::Result<()> {
+        lock(&self.opened).push(dir.to_path_buf());
+        Ok(())
+    }
+}
+
+/// A [`SaveDialog`] that never shows a dialog: it answers `answer` (a picked target, or `None`
+/// = cancelled) and records every ask.
+#[derive(Default)]
+pub struct FakeSave {
+    answer: Mutex<Option<PathBuf>>,
+    asked: Mutex<Vec<(String, Format)>>,
+}
+
+impl FakeSave {
+    /// The next and every later ask is answered with `target` (`None`: cancelled).
+    pub fn answer(&self, target: Option<PathBuf>) {
+        *lock(&self.answer) = target;
+    }
+
+    /// Every ask: the suggested file name and the format.
+    pub fn asked(&self) -> Vec<(String, Format)> {
+        lock(&self.asked).clone()
+    }
+}
+
+impl SaveDialog for FakeSave {
+    fn pick(&self, suggested_name: &str, format: Format) -> io::Result<Option<PathBuf>> {
+        lock(&self.asked).push((suggested_name.to_string(), format));
+        Ok(lock(&self.answer).clone())
     }
 }

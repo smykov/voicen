@@ -42,6 +42,24 @@ use voicen_lib::settings_window::{self, LABEL as SETTINGS};
 /// The overlay window's label (spec 001 contracts/ipc.md).
 const OVERLAY: &str = "overlay";
 
+/// The Calls window's label (T-142, `capabilities/calls.json`).
+const CALLS: &str = "calls";
+
+/// The five commands of the Calls page (T-142, contracts/ipc.md), each with args that have no
+/// side effect: a root no setting lists, so the guard answers `notFound` before any port.
+fn calls_commands() -> Vec<(&'static str, Value)> {
+    let foreign = json!({ "root": "Z:\\not-a-calls-root", "id": "2026-10-29_100000" });
+    let mut export = foreign.clone();
+    export["format"] = json!("md");
+    vec![
+        ("calls_list", json!({})),
+        ("calls_get", foreign.clone()),
+        ("calls_copy_markdown", foreign.clone()),
+        ("calls_export", export),
+        ("calls_open_folder", foreign),
+    ]
+}
+
 /// A label no capability names; its page is the settings page (the ACL decides by
 /// label, not by URL).
 const OTHER: &str = "other";
@@ -354,5 +372,84 @@ fn a_command_without_a_permission_is_refused_even_from_the_settings_window() {
     assert!(
         !PROBE_REACHED.load(Ordering::SeqCst),
         "unpermitted_probe's handler ran"
+    );
+}
+
+#[test]
+fn the_calls_window_reaches_its_commands_and_settings_get_past_the_acl() {
+    // T-142 I1, pass branch (red today: no `calls` capability, no calls_* command): from a window
+    // labelled `calls` at `/calls`, each of the five calls_* commands and `settings_get` (the page
+    // reads the call hotkey and the UI language) reach their handler: a value or the command's
+    // own `notFound`, never an ACL refusal or "not found". Its other settings commands stay
+    // refused. Bite: `allow-calls-*` missing from capabilities/calls.json, a command missing from
+    // APP_COMMANDS or from `generate_handler!`, `allow-settings-get` not granted to `calls`,
+    // or `calls.json` granting `allow-settings-save` and the rest.
+    let _serial = serial();
+    let dir = TempDir::new();
+    let app = release_app(&load(dir.path()));
+    let window = window_at(&app, CALLS, "calls");
+
+    for (cmd, args) in calls_commands() {
+        if let Err(rejection) = invoke(&window, cmd, args) {
+            assert!(
+                !is_acl_refusal(&rejection),
+                "{cmd} refused by the ACL for `{CALLS}`: {rejection}"
+            );
+            assert!(
+                !is_not_found(&rejection),
+                "{cmd} is not registered: {rejection}"
+            );
+        }
+    }
+    let view = invoke(&window, "settings_get", json!({}))
+        .unwrap_or_else(|e| panic!("settings_get rejected for `{CALLS}`: {e}"));
+    assert!(view.get("settings").is_some(), "settings_get: {view}");
+
+    for (cmd, args) in settings_commands() {
+        if cmd != "settings_get" {
+            assert_refused(&window, cmd, args);
+        }
+    }
+}
+
+#[test]
+fn calls_commands_are_refused_from_settings_overlay_and_any_other_window() {
+    // T-142 I1, refusal branch (red today: the commands are not registered, so the refusal is
+    // "not found", not the ACL's): each calls_* command from the `settings` window, from
+    // `overlay` and from a window labelled `other` is refused by the ACL before its handler.
+    // Bite: `allow-calls-*` also in capabilities/default.json or overlay.json, a window wildcard
+    // in calls.json, a command granted to no label at all while registered (then every label
+    // is refused and the pass test above is the one that bites).
+    let _serial = serial();
+    let dir = TempDir::new();
+    let app = release_app(&load(dir.path()));
+    let settings = settings_window(&app);
+    let overlay = window_at(&app, OVERLAY, "overlay");
+    let other = window_at(&app, OTHER, "calls");
+
+    for window in [&settings, &overlay, &other] {
+        for (cmd, args) in calls_commands() {
+            assert_refused(window, cmd, args);
+        }
+    }
+}
+
+#[test]
+fn settings_get_is_still_refused_from_other_and_overlay_and_passes_from_calls() {
+    // T-142 I1 (the changed assertion of T-049): `settings_get` passes from `settings` and from
+    // `calls` only; from `overlay` and `other` it is refused. Bite: `allow-settings-get` granted
+    // with a wildcard window list, or to `overlay`.
+    let _serial = serial();
+    let dir = TempDir::new();
+    let app = release_app(&load(dir.path()));
+    let overlay = window_at(&app, OVERLAY, "overlay");
+    let other = window_at(&app, OTHER, "settings");
+    let calls = window_at(&app, CALLS, "calls");
+
+    assert_refused(&overlay, "settings_get", json!({}));
+    assert_refused(&other, "settings_get", json!({}));
+    assert!(
+        invoke(&calls, "settings_get", json!({})).is_ok(),
+        "settings_get must pass from `calls`"
     );
 }

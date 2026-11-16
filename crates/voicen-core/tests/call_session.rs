@@ -3510,3 +3510,176 @@ fn a_call_started_late_on_the_capture_clock_has_no_leading_silence() {
         );
     }
 }
+
+// ---- T-142: CallShell::changed ------------------------------------------------------------
+//
+// Assumed trait method: `CallShell::changed(&self, root: &Path, id: &CallId)`, called AFTER the
+// session lock is released, once at Started and once per stop on the one stop-notice path
+// (worker and tick stops alike), never on Refused / AlreadyOn / AlreadyOff / a stop while off.
+// `FakeShell::changed` records (root, id, lock held) and, when the lock is free, takes the lock
+// itself (T-007 pattern).
+
+/// The id text of the only call folder (the folder name is the call id).
+fn only_id(rig: &CallRig) -> String {
+    let folders = rig.folders();
+    assert_eq!(folders.len(), 1, "exactly one call folder: {folders:?}");
+    folders[0]
+        .file_name()
+        .expect("a folder name")
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// `changed` was requested exactly `n` times, every time for the rig's one call under the
+/// rig's root and after the lock.
+#[track_caller]
+fn assert_changes(rig: &CallRig, n: usize) {
+    let id = only_id(rig);
+    assert_eq!(
+        rig.shell.changes(),
+        vec![(rig.root.clone(), id); n],
+        "changed(root, id) x{n}"
+    );
+    assert_eq!(
+        rig.shell.change_held_flags(),
+        vec![false; n],
+        "changed runs after the session lock"
+    );
+}
+
+#[test]
+fn a_start_requests_one_changed_for_the_new_call() {
+    // T-142 I6: Started -> one changed(root, id) of the new folder, after the lock. A repeated
+    // on (AlreadyOn) adds none. Bite: no call at Started; called under the lock; called
+    // twice; the id of another folder or the default root instead of the effective root.
+    let rig = CallRig::new();
+    started(&rig, CallSource::Tray);
+    assert_changes(&rig, 1);
+    assert_eq!(
+        rig.session.toggle_record(true, CallSource::Hotkey),
+        Toggled::AlreadyOn
+    );
+    assert_changes(&rig, 1);
+    rig.session.stop(StopReason::User);
+}
+
+#[test]
+fn every_stop_reason_requests_one_changed_more() {
+    // T-142 I6: each StopReason path through `stop` (user, hotkey, exit, system end, sleep)
+    // ends with exactly one more changed(root, id), after the lock; a second stop (the call
+    // is already off) adds none. Bite: changed only on the user stop; changed in `stop`
+    // and again in `notice_stopped`; changed skipped on a reason that has no notice.
+    for reason in [
+        StopReason::User,
+        StopReason::Hotkey,
+        StopReason::Exit,
+        StopReason::SystemEnd,
+        StopReason::Sleep,
+    ] {
+        let rig = CallRig::new();
+        started(&rig, CallSource::Tray);
+        feed(&rig, 0, 1_000);
+        assert!(rig.session.stop(reason), "{reason:?}");
+        assert_changes(&rig, 2);
+        assert!(!rig.session.stop(reason), "{reason:?}: already off");
+        assert_changes(&rig, 2);
+    }
+}
+
+#[test]
+fn a_toggle_off_requests_one_changed_and_a_second_off_none() {
+    // T-142 I6: the Stopped path of toggle_record; AlreadyOff adds none.
+    let rig = CallRig::new();
+    started(&rig, CallSource::Tray);
+    feed(&rig, 0, 1_000);
+    assert_eq!(
+        rig.session.toggle_record(false, CallSource::Tray),
+        Toggled::Stopped
+    );
+    assert_changes(&rig, 2);
+    assert_eq!(
+        rig.session.toggle_record(false, CallSource::Tray),
+        Toggled::AlreadyOff
+    );
+    assert_changes(&rig, 2);
+}
+
+#[test]
+fn a_tick_stop_requests_one_changed_for_max_length_and_for_low_disk() {
+    // T-142 I6: stops made on the tick thread (max_length, low_disk) never reach the worker,
+    // so the hook sits on the one stop-notice path. Bite: changed only in the worker's stop.
+    let rig = CallRig::new();
+    started(&rig, CallSource::Tray);
+    feed(&rig, 0, 2_000);
+    rig.mono.advance(Duration::from_secs(4 * 3_600));
+    rig.session.tick();
+    assert!(!rig.session.is_recording(), "max_length stopped the call");
+    assert_changes(&rig, 2);
+
+    let rig = CallRig::with(quiet);
+    started(&rig, CallSource::Tray);
+    feed(&rig, 0, 2_000);
+    rig.disk.set_free(100 * call_support::MB);
+    tick_secs(&rig, 10);
+    assert!(!rig.session.is_recording(), "low_disk stopped the call");
+    assert_changes(&rig, 2);
+}
+
+#[test]
+fn a_storage_error_stop_requests_one_changed() {
+    // T-142 I6: a write failure stops on the next tick as storage_error (F-024: the mic's
+    // write fails once). Bite: changed skipped on the storage-error path.
+    let rig = CallRig::with_capacity(8_192, quiet);
+    rig.session.toggle_subtitles(true, CallSource::Switch);
+    started(&rig, CallSource::Tray);
+    rig.opener.fail_next_write("mic.opus");
+    let mut at = 0;
+    while rig.lines_named("call_storage_failed").is_empty() {
+        assert!(at < 4_000, "the mic's first page write fails");
+        rig.source.feed(Track::Mic, at, at + 80, 0.3);
+        at += 80;
+        drained(&rig, &[Track::Mic], at);
+    }
+    rig.session.tick();
+    assert!(!rig.session.is_recording(), "the tick stopped the call");
+    assert_changes(&rig, 2);
+}
+
+#[test]
+fn a_refused_start_and_a_stop_while_off_request_no_changed() {
+    // T-142 I6: nothing changed, nothing announced: a Refused start (root part), a stop and a
+    // tick while off. Bite: changed called before the start is known to succeed.
+    let rig = CallRig::new();
+    rig.roots.refuse_next(UnwritableReason::NotAFolder);
+    assert!(matches!(
+        rig.session.toggle_record(true, CallSource::Tray),
+        Toggled::Refused { .. }
+    ));
+    assert!(!rig.session.stop(StopReason::User));
+    rig.session.tick();
+    assert_eq!(rig.shell.changes(), vec![], "no change was announced");
+}
+
+#[test]
+fn two_calls_announce_each_their_own_id() {
+    // T-142 I6: the second call's changed carries the second folder's id, not a cached one.
+    // Bite: the id remembered from the first start.
+    let rig = CallRig::new();
+    started(&rig, CallSource::Tray);
+    feed(&rig, 0, 1_000);
+    rig.session.stop(StopReason::User);
+    started(&rig, CallSource::Tray);
+    rig.session.stop(StopReason::User);
+    let ids: Vec<String> = rig.shell.changes().into_iter().map(|(_, id)| id).collect();
+    assert_eq!(ids.len(), 4, "{ids:?}");
+    assert_eq!(ids[0], ids[1], "start and stop of the first call");
+    assert_eq!(ids[2], ids[3], "start and stop of the second call");
+    assert_ne!(ids[0], ids[2], "two calls, two ids");
+    let folders: Vec<String> = rig
+        .folders()
+        .iter()
+        .map(|p| p.file_name().expect("name").to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(folders.len(), 2, "{folders:?}");
+    assert!(folders.contains(&ids[0]) && folders.contains(&ids[2]));
+}
