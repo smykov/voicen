@@ -3510,3 +3510,181 @@ fn a_call_started_late_on_the_capture_clock_has_no_leading_silence() {
         );
     }
 }
+
+// ---- T-139: the stop hand-off (`CallShell::call_ready`) ---------------------------------
+
+/// What every stop that wrote meta ready-to-transcribe hands out (T-139 invariant): one
+/// `call_ready` with the call's folder, after the lock (the fake's blocking
+/// `is_recording()` read inside the call answers "off" instead of hanging), and after the
+/// stop's own notice, so the user's "call saved" never trails a pass notice.
+#[track_caller]
+fn assert_handed_out_once(rig: &CallRig, name: &str) {
+    assert!(!rig.session.is_recording(), "{name}: premise: stopped");
+    assert_eq!(
+        rig.only_meta()["state"],
+        json!("ready-to-transcribe"),
+        "{name}: premise"
+    );
+    assert_eq!(
+        rig.shell.readied(),
+        rig.folders(),
+        "{name}: the call's dir, once"
+    );
+    assert_eq!(rig.shell.readied().len(), 1, "{name}");
+    assert_eq!(
+        rig.shell.ready_held_flags(),
+        vec![false],
+        "{name}: after the lock"
+    );
+    assert_eq!(
+        rig.shell.ready_saw_off(),
+        vec![true],
+        "{name}: inside call_ready"
+    );
+    assert_eq!(
+        rig.shell.order(),
+        vec!["notice", "ready"],
+        "{name}: the notice first, then the hand-off"
+    );
+}
+
+#[test]
+fn every_stop_by_request_hands_the_folder_to_the_shell_once() {
+    // T-139 (B): user, hotkey, exit, system_end and sleep stops each call `call_ready`
+    // exactly once with the call folder. Bite: no call, a call per path but `stop`, two
+    // calls, a call inside the lock, the call before the notice, the wrong dir.
+    for (how, reason, name) in [
+        (Some(CallSource::Tray), StopReason::User, "user"),
+        (Some(CallSource::Hotkey), StopReason::Hotkey, "hotkey"),
+        (None, StopReason::Exit, "exit"),
+        (None, StopReason::SystemEnd, "system_end"),
+        (None, StopReason::Sleep, "sleep"),
+    ] {
+        let rig = CallRig::new();
+        started(&rig, CallSource::Tray);
+        feed(&rig, 0, 2000);
+        rig.mono.advance(ms(2000));
+        match how {
+            Some(source) => assert_eq!(
+                rig.session.toggle_record(false, source),
+                Toggled::Stopped,
+                "{name}"
+            ),
+            None => assert!(rig.session.stop(reason), "{name}"),
+        }
+        assert_handed_out_once(&rig, name);
+    }
+}
+
+#[test]
+fn a_max_length_stop_by_tick_hands_the_folder_to_the_shell_once() {
+    // T-139 (B): the tick path (no `stop` call) hands out too. Bite: the hand-off only in
+    // `CallSession::stop`.
+    let rig = CallRig::new();
+    started(&rig, CallSource::Tray);
+    feed(&rig, 0, 2_000);
+    rig.mono.advance(Duration::from_secs(4 * 3_600));
+    rig.session.tick();
+    assert_handed_out_once(&rig, "max_length");
+    assert_eq!(rig.only_meta()["stop_reason"], json!("max_length"));
+}
+
+#[test]
+fn a_low_disk_stop_by_tick_hands_the_folder_to_the_shell_once() {
+    // T-139 (B): as above for the disk poll's stop. Bite: the hand-off only in `stop`.
+    let rig = CallRig::with(quiet);
+    started(&rig, CallSource::Tray);
+    feed(&rig, 0, 2_000);
+    rig.disk.set_free(100 * call_support::MB);
+    tick_secs(&rig, 10);
+    assert_handed_out_once(&rig, "low_disk");
+    assert_eq!(rig.only_meta()["stop_reason"], json!("low_disk"));
+}
+
+#[test]
+fn a_storage_error_stop_hands_nothing_to_the_shell() {
+    // T-139 (B) failure branch: a write failure leaves meta `recording` (recovery's, T-147);
+    // the folder must not reach the pass queue. Bite: the dir handed out whatever the
+    // reason, or whenever `finish` ran. The mic write fails once (F-024).
+    let rig = CallRig::with_capacity(8_192, quiet);
+    rig.session.toggle_subtitles(true, CallSource::Switch);
+    started(&rig, CallSource::Tray);
+    let both = [Track::Mic, Track::System];
+    rig.source.feed_both(0, 4_000, 0.3, 0.2);
+    rig.source.set_stamp_ms(4_000);
+    rig.mono.advance(ms(4_000));
+    drained(&rig, &both, 4_000);
+    rig.opener.fail_next_write("mic.opus");
+    rig.source.feed_both(4_000, 6_000, 0.3, 0.2);
+    rig.source.set_stamp_ms(6_000);
+    drained(&rig, &both, 6_000);
+    assert!(
+        wait(|| !rig.lines_named("call_storage_failed").is_empty()),
+        "premise: the write failure is logged"
+    );
+    rig.session.tick();
+    assert!(
+        !rig.session.is_recording(),
+        "premise: the tick stopped the call"
+    );
+    assert_eq!(rig.only_meta()["state"], json!("recording"), "premise");
+    assert_eq!(rig.shell.order(), vec!["notice"], "only the stop notice");
+    assert!(rig.shell.readied().is_empty());
+}
+
+#[test]
+fn a_user_stop_after_a_write_failure_hands_nothing_to_the_shell() {
+    // T-139 (B): the second path of the storage-error stop (the asked reason is `user`,
+    // the writer's own fact wins): still no hand-off. Bite: the hand-off decided from the
+    // asked reason.
+    let rig = CallRig::with_capacity(8_192, quiet);
+    started(&rig, CallSource::Tray);
+    rig.opener.fail_next_write("mic.opus");
+    rig.source.feed_both(0, 4_000, 0.3, 0.2);
+    rig.source.set_stamp_ms(4_000);
+    rig.mono.advance(ms(4_000));
+    assert!(
+        wait(|| !rig.lines_named("call_storage_failed").is_empty()),
+        "premise: the write failure is logged"
+    );
+    assert_eq!(
+        rig.session.toggle_record(false, CallSource::Tray),
+        Toggled::Stopped
+    );
+    assert_eq!(rig.only_meta()["state"], json!("recording"), "premise");
+    assert!(rig.shell.readied().is_empty());
+}
+
+#[test]
+fn a_stop_whose_meta_write_fails_hands_nothing_to_the_shell() {
+    // T-139 (B) failure branch: meta.json is a directory, so `finish`'s write fails once:
+    // the stop still completes and notices, but meta stays `recording` on disk, and a
+    // folder handed out would be passed while recovery sees it as recording. Bite: the dir
+    // handed out whenever `finish` ran, the `write_meta` result ignored.
+    let rig = CallRig::new();
+    started(&rig, CallSource::Tray);
+    feed(&rig, 0, 200);
+    block_meta_writes(&rig);
+    assert!(rig.session.stop(StopReason::User));
+    assert_eq!(
+        storage_failed_kinds(&rig),
+        vec!["meta".to_string()],
+        "premise"
+    );
+    assert!(!rig.session.is_recording(), "premise");
+    assert!(rig.shell.readied().is_empty(), "{:?}", rig.shell.order());
+}
+
+#[test]
+fn a_toggle_off_with_nothing_recording_hands_nothing_to_the_shell() {
+    // T-139 (B): no call, no hand-off, for a toggle off and a stop alike. Bite: a call to
+    // `call_ready` outside the stopped branch.
+    let rig = CallRig::new();
+    assert_eq!(
+        rig.session.toggle_record(false, CallSource::Tray),
+        Toggled::AlreadyOff
+    );
+    assert!(!rig.session.stop(StopReason::Exit));
+    assert!(rig.shell.readied().is_empty());
+    assert!(rig.shell.order().is_empty());
+}
