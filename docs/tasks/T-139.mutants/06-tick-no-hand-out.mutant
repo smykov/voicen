@@ -1,0 +1,18 @@
+guarantee: tick stops (max_length, low_disk) hand the folder out
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+        if let Some(stop) = &stopped {
+            self.after_stop(stop);
+        }
+    }
+
+    /// The stop `tick` has to make now
+--- new
+        if let Some(stop) = &stopped {
+            self.notice_stopped(stop.reason);
+        }
+    }
+
+    /// The stop `tick` has to make now
+--- end

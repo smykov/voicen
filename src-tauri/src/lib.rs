@@ -22,6 +22,7 @@ use voicen_core::settings::gate::LaunchArgs;
 use voicen_core::settings::service::SettingsService;
 use voicen_core::settings::LoadOutcome;
 use voicen_core::timeouts::Timeouts;
+use voicen_core::vad::{SpeechDetector, SpeechSpans, VadError};
 use voicen_core::BuildInfo;
 
 #[cfg(windows)]
@@ -314,14 +315,14 @@ fn release_launch_args() -> LaunchArgs {
 /// the same source as `settings_list_microphones`), the clipboard, the paster, the engine of the settings (`engine::engine_for`), the
 /// tray and the overlay through [`dictation::ShellIndicator`], and the
 /// `SettingsService`'s own instances: `credentials`, its key store, and `hotkeys`,
-/// its hotkey registrar (T-055). The speech detector is loaded here, once per process, from
-/// the app's resource directory (T-102); an unresolvable directory counts as an unavailable
-/// model, so the app still starts on the energy detector.
+/// its hotkey registrar (T-055). `detector` is the dictation half of the one
+/// [`release_detector`] load (T-102, T-139).
 #[cfg(windows)]
 fn release_ports<R: Runtime>(
     app: &AppHandle<R>,
     credentials: Arc<dyn CredentialStore>,
     hotkeys: Arc<win::hotkey::HotkeyRegistrarHandle>,
+    detector: Result<Box<dyn SpeechDetector>, VadError>,
 ) -> dictation::DictationPorts {
     dictation::DictationPorts {
         audio: settings_ipc::managed_microphones(app),
@@ -331,11 +332,7 @@ fn release_ports<R: Runtime>(
         indicator: Arc::new(dictation::ShellIndicator::new(app)),
         credentials,
         hotkeys,
-        detector: app
-            .path()
-            .resource_dir()
-            .map_err(|_| voicen_core::vad::VadError::Unavailable)
-            .and_then(|dir| vad::load_bundled(&dir)),
+        detector,
         temp_audio: dictation::pending_store(app, paths::temp_audio_dir()),
     }
 }
@@ -345,6 +342,7 @@ fn release_ports<R: Runtime>(
     _app: &AppHandle<R>,
     _credentials: Arc<dyn CredentialStore>,
     _hotkeys: Arc<win::hotkey::HotkeyRegistrarHandle>,
+    _detector: Result<Box<dyn SpeechDetector>, VadError>,
 ) -> dictation::DictationPorts {
     compile_error!(
         "the Voicen app runs on Windows only: the hotkey, microphone, clipboard and paste \
@@ -355,9 +353,14 @@ fn release_ports<R: Runtime>(
 /// The release call ports (T-128): the two WASAPI track captures, the free-space probe
 /// (`GetDiskFreeSpaceExW`), the system monotonic clock, plain track files, the process's
 /// one notifier (`notifier`, shared with the dictation session) and `<data_dir>/calls`
-/// as the default call root.
+/// as the default call root; for the pass worker (T-139) the `SettingsService`'s own key
+/// store (`credentials`) and the pass half of the one [`release_detector`] load.
 #[cfg(windows)]
-fn release_call_ports(notifier: Arc<dyn Notifier>) -> call::CallPorts {
+fn release_call_ports(
+    notifier: Arc<dyn Notifier>,
+    credentials: Arc<dyn CredentialStore>,
+    detector: Option<Arc<dyn SpeechSpans>>,
+) -> call::CallPorts {
     call::CallPorts {
         source: Arc::new(win::track_capture::CpalTrackSource::new()),
         disk: release_disk_space(),
@@ -365,12 +368,29 @@ fn release_call_ports(notifier: Arc<dyn Notifier>) -> call::CallPorts {
         open_track: call::file_opener(),
         notifier,
         calls_root: paths::data_dir().join("calls"),
+        credentials,
+        detector,
     }
 }
 
 #[cfg(not(windows))]
-fn release_call_ports(_notifier: Arc<dyn Notifier>) -> call::CallPorts {
+fn release_call_ports(
+    _notifier: Arc<dyn Notifier>,
+    _credentials: Arc<dyn CredentialStore>,
+    _detector: Option<Arc<dyn SpeechSpans>>,
+) -> call::CallPorts {
     compile_error!("the Voicen app runs on Windows only: the call tracks are WASAPI captures")
+}
+
+/// The one load of the bundled speech detector per process (T-102, T-139), from the app's
+/// resource directory through [`vad::load_shared`]: the dictation half and the call pass
+/// half are clones of one `SileroDetector`. An unresolvable directory counts as an
+/// unavailable model, so both sides start on the energy detector.
+fn release_detector<R: Runtime>(app: &AppHandle<R>) -> vad::SharedDetector {
+    match app.path().resource_dir() {
+        Ok(dir) => vad::load_shared(&dir),
+        Err(_) => (Err(VadError::Unavailable), None),
+    }
 }
 
 /// Installs `paths::log_dir()` with the Explorer opener (T-071) for the tray's
@@ -507,13 +527,19 @@ pub fn run() {
         hotkeys,
         notifier,
     } = shared;
-    let ports = release_ports(app.handle(), credentials, hotkeys);
+    // The one detector load (T-139): one half to dictation, one to the call pass worker.
+    let (detector, spans) = release_detector(app.handle());
+    let call_credentials = Arc::clone(&credentials);
+    let ports = release_ports(app.handle(), credentials, hotkeys, detector);
     let dictation =
         dictation::start_dictation_with(app.handle(), ports, Arc::clone(&notifier)).ok();
     // The call part (T-128), after the tray exists: the one call session, its request
     // worker and its tick thread. It starts no call; a failed start leaves the call
     // entries no-ops. The first launch's `--call` switch is applied after it.
-    let _ = call::start_calls(app.handle(), release_call_ports(notifier));
+    let _ = call::start_calls(
+        app.handle(),
+        release_call_ports(notifier, call_credentials, spans),
+    );
     call::apply_launch(app.handle(), &launch_args);
     app.run(move |app, event| {
         let _dictation = &dictation;

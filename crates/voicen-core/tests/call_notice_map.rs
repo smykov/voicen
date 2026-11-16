@@ -79,7 +79,10 @@ fn call_notice_message_is_total() {
     );
     let call = CallId::parse("2026-11-14_101500").unwrap_or_else(|| panic!("call id"));
     assert_eq!(
-        message_id(&CallNotice::TranscriptReady { call }),
+        message_id(&CallNotice::TranscriptReady {
+            call,
+            root: std::path::PathBuf::from("calls-root")
+        }),
         "notice.transcript_ready"
     );
     let fails = [

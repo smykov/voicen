@@ -25,6 +25,11 @@
 //!   calls_opened(app: &AppHandle<R>) -> u32                // test-read: how many times `open_calls` ran
 //! voicen_lib::tray::TrayPart::set_call_recording(&self, bool)
 //! voicen_core::call::events::{refused_notice, CallNotice::message}   // tests/call_notice_map.rs (core)
+//!
+//! T-139 adds to `CallPorts`: `credentials: Arc<dyn CredentialStore>` (the store the settings
+//! service writes; the rig's [`CallRig::creds`]) and `detector: Option<Arc<dyn SpeechSpans>>`
+//! (`None`: core's energy fallback); `start_calls` then also manages the one
+//! `Arc<voicen_core::call::final_pass::PassQueue>` the stop hand-off feeds.
 //! ```
 #![cfg(windows)]
 #![allow(dead_code)]
@@ -58,6 +63,7 @@ use voicen_core::settings::service::SettingsService;
 use voicen_core::test_support::local_models::FakeDisk;
 use voicen_core::test_support::TempDir;
 use voicen_core::timeouts::Timeouts;
+use voicen_core::vad::SpeechSpans;
 use voicen_lib::call::CallPorts;
 use voicen_lib::settings_ipc::load_settings;
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -133,17 +139,61 @@ fn tone_wav() -> Vec<u8> {
     v
 }
 
+/// A 16-bit mono 16 kHz WAV of `samples` (T-139: a speech clip for the Silero leg).
+fn wav_of(samples: &[i16]) -> Vec<u8> {
+    let data: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
+    let mut v = Vec::new();
+    v.extend_from_slice(b"RIFF");
+    v.extend_from_slice(&(36 + data.len() as u32).to_le_bytes());
+    v.extend_from_slice(b"WAVEfmt ");
+    v.extend_from_slice(&16u32.to_le_bytes());
+    v.extend_from_slice(&1u16.to_le_bytes());
+    v.extend_from_slice(&1u16.to_le_bytes());
+    v.extend_from_slice(&16_000u32.to_le_bytes());
+    v.extend_from_slice(&32_000u32.to_le_bytes());
+    v.extend_from_slice(&2u16.to_le_bytes());
+    v.extend_from_slice(&16u16.to_le_bytes());
+    v.extend_from_slice(b"data");
+    v.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    v.extend_from_slice(&data);
+    v
+}
+
 /// A `TrackSource` that plays the tone on both tracks: every `open` makes a fresh
 /// `WavTrackSource`, so a second call in the same test opens like the first. Nothing runs
 /// until the test calls [`WavSource::pump`].
-#[derive(Default)]
 pub struct WavSource {
     opened: Mutex<Vec<Arc<WavTrackSource>>>,
+    wav: Vec<u8>,
+}
+
+impl Default for WavSource {
+    fn default() -> WavSource {
+        WavSource {
+            opened: Mutex::new(Vec::new()),
+            wav: tone_wav(),
+        }
+    }
 }
 
 impl WavSource {
     pub fn new() -> Arc<WavSource> {
         Arc::new(WavSource::default())
+    }
+
+    /// T-139: both tracks play `samples` (16 kHz mono) instead of the tone.
+    pub fn with_pcm(samples: &[i16]) -> Arc<WavSource> {
+        Arc::new(WavSource {
+            opened: Mutex::new(Vec::new()),
+            wav: wav_of(samples),
+        })
+    }
+
+    /// T-139: pushes the due blocks of every track opened so far, up to `START_MS + ms`.
+    pub fn pump_for(&self, ms: u64) {
+        for source in lock(&self.opened).iter() {
+            source.pump(CaptureStamp::from_ms(START_MS + ms));
+        }
     }
 
     /// Pushes the due blocks of every track opened so far, up to `START_MS + PUMP_MS`.
@@ -166,7 +216,7 @@ impl TrackSource for WavSource {
         device: TrackDevice,
         sink: Arc<dyn TrackSink>,
     ) -> Result<(Box<dyn CaptureHandle>, EndpointId), OpenError> {
-        let source = WavTrackSource::from_bytes(&tone_wav())
+        let source = WavTrackSource::from_bytes(&self.wav)
             .map_err(|_| OpenError::Other)?
             .with_block_ms(20)
             .with_start(CaptureStamp::from_ms(START_MS));
@@ -279,6 +329,8 @@ pub struct CallRig {
     pub logs: PathBuf,
     pub app: App<MockRuntime>,
     pub service: Arc<SettingsService>,
+    /// T-139: the credential store the service writes and the call part's passes read.
+    pub creds: Arc<dyn CredentialStore>,
     pub notifier: Arc<FakeNotifier>,
     /// Ends the process with a named message when the test outlives `2 * HANG` (a build, a join
     /// or a drop that never returns). Declared last so it is dropped after the app.
@@ -288,6 +340,11 @@ pub struct CallRig {
 impl CallRig {
     /// An app with no call part (what `build_app` alone gives).
     pub fn bare() -> CallRig {
+        CallRig::bare_with(no_keys())
+    }
+
+    /// T-139: [`bare`](Self::bare) over `creds` as the settings service's store.
+    pub fn bare_with(creds: Arc<dyn CredentialStore>) -> CallRig {
         let watch = timing_support::watch_for_hang("the call rig was built");
         let dir = TempDir::new();
         let logs = dir.path().join("logs");
@@ -295,7 +352,7 @@ impl CallRig {
         let store = Arc::new(ModelStore::new(dir.path().join("models"), MODELS));
         let (service, _) = load_settings(
             dir.path().to_path_buf(),
-            no_keys(),
+            Arc::clone(&creds),
             no_autostart(),
             store,
             None,
@@ -314,6 +371,7 @@ impl CallRig {
             logs,
             app,
             service,
+            creds,
             notifier: Arc::new(FakeNotifier::new()),
             _watch: watch,
         }
@@ -338,6 +396,17 @@ impl CallRig {
         disk: Arc<dyn DiskSpace>,
         open_track: TrackOpener,
     ) {
+        self.start_with(source, disk, open_track, None);
+    }
+
+    /// T-139: [`start`](Self::start) with the pass worker's primary detector.
+    pub fn start_with(
+        &self,
+        source: Arc<dyn TrackSource + Send + Sync>,
+        disk: Arc<dyn DiskSpace>,
+        open_track: TrackOpener,
+        detector: Option<Arc<dyn SpeechSpans>>,
+    ) {
         let calls_root = self.dir.path().join("calls");
         fs::create_dir_all(&calls_root).expect("the calls root");
         voicen_lib::call::start_calls(
@@ -349,6 +418,8 @@ impl CallRig {
                 open_track,
                 notifier: self.notifier.clone(),
                 calls_root,
+                credentials: Arc::clone(&self.creds),
+                detector,
             },
         )
         .expect("the call part starts");

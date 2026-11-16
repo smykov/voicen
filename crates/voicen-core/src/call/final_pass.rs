@@ -559,6 +559,7 @@ fn run_api_pass(
         return conclude(
             &deps,
             started,
+            &call.dir,
             call.meta.id.clone(),
             FinalOutcome::Cancelled,
             PassMode::Timed,
@@ -578,6 +579,7 @@ fn run_api_pass(
             return conclude(
                 &deps,
                 started,
+                &dir,
                 id,
                 FinalOutcome::Failed { reason },
                 PassMode::Timed,
@@ -707,10 +709,12 @@ fn since(clock: &dyn MonotonicClock, t0: Instant) -> Duration {
 }
 
 /// Logs `final_finished` and sends the notice (none for a cancelled pass, Q1): the one end
-/// of every pass.
+/// of every pass. A ready notice names the root `dir` lies under (the store lays a call out
+/// as `root.join(id)`), as the pass found it (decisions #298 Q3).
 fn conclude(
     deps: &PassDeps<'_>,
     started: Instant,
+    dir: &Path,
     call: CallId,
     outcome: FinalOutcome,
     mode: PassMode,
@@ -719,7 +723,12 @@ fn conclude(
     deps.events
         .log(LogEvent::FinalPassFinished { outcome, mode, ms });
     let notice = match outcome {
-        FinalOutcome::Ready => Some(CallNotice::TranscriptReady { call }),
+        FinalOutcome::Ready => Some(CallNotice::TranscriptReady {
+            call,
+            // Unreachable default: every folder a pass gets is `CallStore`'s `root.join(id)`,
+            // so it has a parent; an empty root would be refused by `resolve_call`.
+            root: dir.parent().map(Path::to_path_buf).unwrap_or_default(),
+        }),
         FinalOutcome::Failed { reason } => Some(CallNotice::PassFailed { reason }),
         FinalOutcome::Cancelled => None,
     };
@@ -1196,7 +1205,14 @@ fn pass(
     let id = meta.id.clone();
     if cancel.is_cancelled() {
         // Cancelled before it began: nothing is touched.
-        return conclude(&deps, started, id, FinalOutcome::Cancelled, PassMode::Timed);
+        return conclude(
+            &deps,
+            started,
+            &dir,
+            id,
+            FinalOutcome::Cancelled,
+            PassMode::Timed,
+        );
     }
     // What a cancel writes back: the meta as the pass found it, `ready-to-transcribe`.
     let mut at_start = meta.clone();
@@ -1216,7 +1232,7 @@ fn pass(
         let outcome = FinalOutcome::Failed {
             reason: FailReason::Storage,
         };
-        return conclude(&deps, started, id, outcome, PassMode::Timed);
+        return conclude(&deps, started, &dir, id, outcome, PassMode::Timed);
     }
 
     let offset = |track: Track| {
@@ -1261,7 +1277,7 @@ fn pass(
         if let Err(e) = write_meta(&dir, &at_start) {
             storage_failed(events, StorageKind::Meta, &e);
         }
-        return conclude(&deps, started, id, FinalOutcome::Cancelled, mode);
+        return conclude(&deps, started, &dir, id, FinalOutcome::Cancelled, mode);
     }
 
     // Merge the tracks this pass uploaded and splice in the kept ones; the lines of each are
@@ -1341,7 +1357,7 @@ fn pass(
     for lane in [&run.mic, &run.system] {
         lane.log_stage(events, FinalStage::Write, write_took);
     }
-    conclude(&deps, started, id, outcome, mode)
+    conclude(&deps, started, &dir, id, outcome, mode)
 }
 
 /// Adds the kept segments of the lanes that were not uploaded to `merged`, in the order

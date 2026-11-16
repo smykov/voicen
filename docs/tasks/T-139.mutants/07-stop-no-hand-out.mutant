@@ -1,0 +1,14 @@
+guarantee: user/hotkey/exit/system_end/sleep stops hand the folder out
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+        if let Some(stop) = &stopped {
+            self.after_stop(stop);
+        }
+        stopped.is_some()
+--- new
+        if let Some(stop) = &stopped {
+            self.notice_stopped(stop.reason);
+        }
+        stopped.is_some()
+--- end

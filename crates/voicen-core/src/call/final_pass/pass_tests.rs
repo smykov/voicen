@@ -788,9 +788,15 @@ fn assert_ready_timed(out: &Out, offset: u64) {
         e,
         LogEvent::TranscriptInvalid { .. } | LogEvent::CallStorageFailed { .. }
     )));
+    // T-139 (decisions #298 Q3): the ready notice carries the root the folder was created
+    // under, the folder's parent as the pass found it (`<root>/<id>`). Bite: no root, the
+    // folder itself, a root from anywhere but the call's dir.
     assert_eq!(
         out.notices(),
-        vec![CallNotice::TranscriptReady { call: meta.id }]
+        vec![CallNotice::TranscriptReady {
+            call: meta.id,
+            root: out._tmp.path().join("calls"),
+        }]
     );
     assert!(
         lock(&out.engine.strays).is_empty(),

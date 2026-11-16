@@ -1,0 +1,8 @@
+guarantee: ready notice carries the root
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: test-writer
+--- old
+            root: dir.parent().map(Path::to_path_buf).unwrap_or_default(),
+--- new
+            root: PathBuf::new(),
+--- end

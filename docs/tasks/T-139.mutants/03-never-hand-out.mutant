@@ -1,0 +1,8 @@
+guarantee: every stop hands the folder out once
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+            self.deps.shell.call_ready(dir);
+--- new
+            let _ = dir;
+--- end

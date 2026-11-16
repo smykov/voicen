@@ -173,7 +173,7 @@ The settings `SCHEMA_VERSION` stays 1. The section is added with container-level
 | `mic_changed` | Mic fell back to the default input (FR-012, FR-002) | indicator + toast |
 | `cant_hear_other_party` / `cant_hear_you` | > 60 s rule (FR-013) | indicator + toast |
 | `low_disk` | < 1 GB (FR-018) | indicator + toast |
-| `call_saved_transcribing`, `transcript_ready{call}`, `pass_failed{reason}` | FR-030 | toast |
+| `call_saved_transcribing`, `transcript_ready{call, root}`, `pass_failed{reason}` | FR-030 | toast |
 | `stopped{reason}` | sleep, 4 h, < 200 MB, storage error (FR-008, FR-016, FR-018) | toast |
 | `provider_notice{host}` | First session on a new cloud host (FR-031) | indicator (`warning.provider_notice`, wire kind `providerNotice`) |
 

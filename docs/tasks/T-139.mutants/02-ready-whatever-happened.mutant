@@ -1,0 +1,8 @@
+guarantee: storage_error / failed meta write hand out nothing
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+            ready: written.then_some(dir),
+--- new
+            ready: Some(dir),
+--- end

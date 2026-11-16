@@ -625,6 +625,7 @@ struct Shell;
 impl CallShell for Shell {
     fn notice(&self, _notice: CallNotice) {}
     fn open_calls_tab(&self) {}
+    fn call_ready(&self, _dir: &Path) {}
 }
 
 struct Port(Arc<Settings>);

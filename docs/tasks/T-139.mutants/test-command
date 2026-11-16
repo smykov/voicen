@@ -1,0 +1,1 @@
+cargo test -p voicen-core -j2 --test call_session --test call_events --test call_notice_map --test final_pass_http --lib
