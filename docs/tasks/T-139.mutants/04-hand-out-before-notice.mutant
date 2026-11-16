@@ -1,0 +1,14 @@
+guarantee: call_ready after the notice
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+        self.notice_stopped(stop.reason);
+        if let Some(dir) = &stop.ready {
+            self.deps.shell.call_ready(dir);
+        }
+--- new
+        if let Some(dir) = &stop.ready {
+            self.deps.shell.call_ready(dir);
+        }
+        self.notice_stopped(stop.reason);
+--- end

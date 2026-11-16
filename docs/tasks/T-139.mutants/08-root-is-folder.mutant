@@ -1,0 +1,8 @@
+guarantee: ready notice root = the creating root (parent of the folder)
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: test-writer
+--- old
+            root: dir.parent().map(Path::to_path_buf).unwrap_or_default(),
+--- new
+            root: dir.to_path_buf(),
+--- end
