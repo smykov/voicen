@@ -556,7 +556,8 @@ pub fn live_menu<R: Runtime>(app: &AppHandle<R>) -> Option<Menu<R>> {
 /// undoing muda's flip of the mark (so a refused start, which publishes no flag, leaves
 /// it unchecked; decision #223), and posts `CallRequest::Record(Tray)`, whose intent the
 /// call worker reads from the session; `CallStop` posts `CallRequest::Stop(Tray)`;
-/// `OpenCalls` calls `call::open_calls`. Without a call part the posts do nothing.
+/// `OpenCalls` calls `call::open_calls(app, None)` (posts to the Calls window's opener
+/// thread and returns at once). Without a call part the posts do nothing.
 /// `Retry` stamps the click and runs `DictationSession::retry(at, None)` on another
 /// thread (T-210).
 pub fn on_menu_event<R: Runtime>(app: &AppHandle<R>, event: MenuEvent) {
@@ -569,7 +570,7 @@ pub fn on_menu_event<R: Runtime>(app: &AppHandle<R>, event: MenuEvent) {
             call::request(app, CallRequest::Record(CallSource::Tray));
         }
         Some(TrayAction::CallStop) => call::request(app, CallRequest::Stop(CallSource::Tray)),
-        Some(TrayAction::OpenCalls) => call::open_calls(app),
+        Some(TrayAction::OpenCalls) => call::open_calls(app, None),
         Some(TrayAction::OpenSettings) => {
             let _ = settings_window::request(app, OpenTarget::Front);
         }

@@ -50,7 +50,7 @@ use crate::call::capture::{
 };
 use crate::call::codec::{OpusOgg, SyncWrite, TrackEncoder};
 use crate::call::events::{
-    CallNotice, CallSource, CallState, CallWarning, DeviceCause, EndpointId, RefusedPart,
+    CallId, CallNotice, CallSource, CallState, CallWarning, DeviceCause, EndpointId, RefusedPart,
     RefusedReason, SilentRule, StopReason, StorageKind, Track,
 };
 use crate::call::indicator::{IndicatorState, IndicatorTick, WarningList};
@@ -115,6 +115,9 @@ pub trait CallShell: Send + Sync {
     fn notice(&self, notice: CallNotice);
     /// Opens the Settings window on its Calls tab (every `part=root` refusal, #243).
     fn open_calls_tab(&self);
+    /// The call `id` under `root` changed state (T-142): once when it starts recording and
+    /// once when it stops, whatever stopped it. Never for a refused or repeated toggle.
+    fn changed(&self, root: &Path, id: &CallId);
 }
 
 /// The settings the session reads, and the one narrow writer it uses (FR-031).
@@ -483,17 +486,19 @@ impl CallSession {
             let mut inner = self.lock();
             self.stop_locked(&mut inner, reason)
         };
-        if let Some(effective) = stopped {
-            self.notice_stopped(effective);
+        let was = stopped.is_some();
+        if let Some((effective, dir)) = stopped {
+            self.notice_stopped(effective, &dir);
         }
-        stopped.is_some()
+        was
     }
 
     /// The stop under the session lock: the writer hands the call back (or the captures
     /// close), then [`CallSession::finish`]. The reason the call stopped with (see
-    /// `finish`); `None` when no call was recording.
-    fn stop_locked(&self, inner: &mut Inner, reason: StopReason) -> Option<StopReason> {
+    /// `finish`) and the call's folder; `None` when no call was recording.
+    fn stop_locked(&self, inner: &mut Inner, reason: StopReason) -> Option<(StopReason, PathBuf)> {
         let call = inner.call.take()?;
+        let dir = call.dir.clone();
         let rec = if inner.subtitles {
             inner.captures.as_ref().and_then(|c| {
                 let rec = c.command(Command::Detach).ok().flatten();
@@ -503,13 +508,14 @@ impl CallSession {
         } else {
             inner.captures.take().and_then(|c| c.close().ok().flatten())
         };
-        Some(self.finish(call, rec, reason))
+        Some((self.finish(call, rec, reason), dir))
     }
 
     /// The one notice of a stop, after the lock: a stop the session decided itself
     /// (`max_length`, `low_disk`, `storage_error`) says why; any other says the call is
-    /// saved and goes to transcription.
-    fn notice_stopped(&self, reason: StopReason) {
+    /// saved and goes to transcription. Then the one `changed` of the stop (T-142), so worker
+    /// and tick stops alike announce it.
+    fn notice_stopped(&self, reason: StopReason, dir: &Path) {
         let notice = match reason {
             StopReason::MaxLength | StopReason::LowDisk | StopReason::StorageError => {
                 CallNotice::Stopped { reason }
@@ -521,6 +527,18 @@ impl CallSession {
             | StopReason::Sleep => CallNotice::CallSavedTranscribing,
         };
         self.deps.shell.notice(notice);
+        self.announce(dir);
+    }
+
+    /// Tells the shell that the call in `dir` changed state; after the session lock.
+    fn announce(&self, dir: &Path) {
+        let id = dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(CallId::parse);
+        if let (Some(root), Some(id)) = (dir.parent(), id) {
+            self.deps.shell.changed(root, &id);
+        }
     }
 
     pub fn is_recording(&self) -> bool {
@@ -559,8 +577,8 @@ impl CallSession {
                 }
             }
         };
-        if let Some(reason) = stopped {
-            self.notice_stopped(reason);
+        if let Some((reason, dir)) = stopped {
+            self.notice_stopped(reason, &dir);
         }
     }
 
@@ -680,7 +698,7 @@ impl CallSession {
     // ---- start ----------------------------------------------------------------------
 
     fn start(&self, source: CallSource) -> Toggled {
-        let (toggled, ask_tab) = {
+        let (toggled, ask_tab, started) = {
             let mut inner = self.lock();
             if inner.call.is_some() {
                 return Toggled::AlreadyOn;
@@ -688,8 +706,9 @@ impl CallSession {
             self.deps.log.write(LogEvent::CallRequested { source });
             match self.open_call(&mut inner) {
                 Ok(call) => {
+                    let dir = call.dir.clone();
                     inner.call = Some(call);
-                    (Toggled::Started, false)
+                    (Toggled::Started, false, Some(dir))
                 }
                 Err(refusal) => {
                     self.deps.log.write(LogEvent::CallRefused {
@@ -702,12 +721,16 @@ impl CallSession {
                             reason: refusal.reason,
                         },
                         refusal.part == RefusedPart::Root,
+                        None,
                     )
                 }
             }
         };
         if ask_tab {
             self.deps.shell.open_calls_tab();
+        }
+        if let Some(dir) = started {
+            self.announce(&dir);
         }
         toggled
     }

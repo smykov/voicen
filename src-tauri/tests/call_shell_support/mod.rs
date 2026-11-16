@@ -477,9 +477,15 @@ impl CallRig {
 #[derive(Default)]
 pub struct FakeFolder {
     opened: Mutex<Vec<PathBuf>>,
+    fail_next: Mutex<Option<io::ErrorKind>>,
 }
 
 impl FakeFolder {
+    /// The next `open` (only that one) is recorded and then fails with `kind`.
+    pub fn fail_next(&self, kind: io::ErrorKind) {
+        *lock(&self.fail_next) = Some(kind);
+    }
+
     pub fn opened(&self) -> Vec<PathBuf> {
         lock(&self.opened).clone()
     }
@@ -488,7 +494,10 @@ impl FakeFolder {
 impl FolderOpener for FakeFolder {
     fn open(&self, dir: &Path) -> io::Result<()> {
         lock(&self.opened).push(dir.to_path_buf());
-        Ok(())
+        match lock(&self.fail_next).take() {
+            Some(kind) => Err(io::Error::from(kind)),
+            None => Ok(()),
+        }
     }
 }
 
@@ -498,9 +507,15 @@ impl FolderOpener for FakeFolder {
 pub struct FakeSave {
     answer: Mutex<Option<PathBuf>>,
     asked: Mutex<Vec<(String, Format)>>,
+    fail_next: Mutex<Option<io::ErrorKind>>,
 }
 
 impl FakeSave {
+    /// The next ask (only that one) is recorded and then fails with `kind`.
+    pub fn fail_next(&self, kind: io::ErrorKind) {
+        *lock(&self.fail_next) = Some(kind);
+    }
+
     /// The next and every later ask is answered with `target` (`None`: cancelled).
     pub fn answer(&self, target: Option<PathBuf>) {
         *lock(&self.answer) = target;
@@ -515,6 +530,9 @@ impl FakeSave {
 impl SaveDialog for FakeSave {
     fn pick(&self, suggested_name: &str, format: Format) -> io::Result<Option<PathBuf>> {
         lock(&self.asked).push((suggested_name.to_string(), format));
+        if let Some(kind) = lock(&self.fail_next).take() {
+            return Err(io::Error::from(kind));
+        }
         Ok(lock(&self.answer).clone())
     }
 }

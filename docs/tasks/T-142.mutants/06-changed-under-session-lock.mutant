@@ -1,0 +1,9 @@
+guarantee: I6: changed is called after the session lock
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+                    (Toggled::Started, false, Some(dir))
+--- new
+                    self.announce(&dir);
+                    (Toggled::Started, false, None::<PathBuf>)
+--- end

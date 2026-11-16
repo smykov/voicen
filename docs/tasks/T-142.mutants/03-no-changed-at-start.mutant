@@ -1,0 +1,10 @@
+guarantee: I6: one calls://changed at Started
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+        if let Some(dir) = started {
+            self.announce(&dir);
+        }
+--- new
+        let _ = started;
+--- end

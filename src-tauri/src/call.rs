@@ -23,35 +23,77 @@
 //!   `set_tick` are no-ops until T-130's indicator window (#277: a call shows only the
 //!   tray icon until then). [`ShellCallShell`] maps each `CallNotice` through core's
 //!   `CallNotice::message` to the shared notifier and opens Settings on its Calls tab.
-//! - [`open_calls`] is the tray "Calls" route; the Calls window is T-142's, so it only
-//!   counts (`calls_opened`).
+//! - The Calls window (T-142; contracts/ipc.md "Windows", FR-033, FR-034, FR-036): at
+//!   most one window labelled [`LABEL`] at `/calls`, created only on the call part's own
+//!   opener thread ("calls-window", the `settings_window` pattern, #223). [`open_calls`]
+//!   (the tray "Calls", and the entry a "Transcript ready" toast's Open will call) counts
+//!   the request (`calls_opened`) and posts it, never waiting. An open with a [`CallRef`]
+//!   reaches the page as exactly one `calls://open {root, id}`: on a window whose page has
+//!   not yet listed (a window just built, whose listeners may not exist), the target is
+//!   held and emitted by the window's first `calls_list`, which the page sends only after
+//!   it registered its listeners; on a window that listed, it is emitted at once.
+//! - The five commands `calls_list`, `calls_get`, `calls_copy_markdown`, `calls_export`
+//!   and `calls_open_folder` read the managed `Arc<CallStore>` and `Arc<SettingsService>`
+//!   with `try_state` (an app without a call part answers an empty list / `notFound`) and
+//!   resolve `{root, id}` only through core's guard (`CallStore` methods, P-009). Copy
+//!   writes `CallStore::export_bytes(Md)` through the one [`Clipboard`] port, the
+//!   dictation's (P-011, R18); export takes its target only from the [`SaveDialog`] port
+//!   (a cancel writes nothing) and writes only through `export_to`; open folder hands the
+//!   guarded folder (a damaged call's too) to the [`FolderOpener`] port.
+//! - [`ShellCallShell::changed`] emits `calls://changed {root, id}` to the Calls window only
+//!   (`emit_to`), after the session lock, once per start and once per stop.
 
 use std::io;
+use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, Weak};
 use std::thread;
 
-use tauri::{AppHandle, Manager, Runtime};
+use serde::{Deserialize, Serialize};
+use tauri::{
+    AppHandle, Emitter, Manager, Runtime, Webview, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
+};
 use voicen_core::call::events::refused_notice;
 use voicen_core::call::indicator::{IndicatorState, IndicatorTick};
 use voicen_core::call::session::{
     CallDeps, CallIndicator, CallSession, CallShell, SubtitleConsumer, Toggled, TrackFile,
     TrackOpener,
 };
-use voicen_core::call::{CallNotice, CallSource, CallStore, SwitchRefusal, Track, TrackSource};
+use voicen_core::call::storage::{
+    export_to, list_wire, wire_root, CallDetail, CallError, CallListWire, Format,
+};
+use voicen_core::call::{
+    CallId, CallNotice, CallSource, CallStore, SwitchRefusal, Track, TrackSource,
+};
 use voicen_core::clock::{MonotonicClock, SystemClock};
 use voicen_core::diag::{Log, LogEvent};
 use voicen_core::local_models::download::DiskSpace;
-use voicen_core::platform::Notifier;
+use voicen_core::platform::{Clipboard, Notifier};
 use voicen_core::settings::gate::{CallSwitch, LaunchArgs, SettingsTab};
 use voicen_core::settings::roots::FsCallRoots;
 use voicen_core::settings::service::SettingsService;
+use voicen_core::settings::Settings;
 
+use crate::logs_folder::FolderOpener;
 use crate::settings_window::{self, OpenTarget};
 use crate::tray::{self, TrayPart};
 use crate::win::audio_notify::{ComCheck, NotifyFactory};
+
+/// The label of the one Calls window; `capabilities/calls.json` is granted to it only.
+pub const LABEL: &str = "calls";
+
+/// Emitted to the Calls window when a call changed state (contracts/ipc.md "Events").
+pub const CHANGED_EVENT: &str = "calls://changed";
+
+/// Emitted to the Calls window to select a call (contracts/ipc.md "Events").
+pub const OPEN_EVENT: &str = "calls://open";
+
+/// The window title and its initial size.
+const TITLE: &str = "Voicen";
+const WIDTH: f64 = 900.0;
+const HEIGHT: f64 = 640.0;
 
 /// Queued events per track channel: about 5 s of 10 ms capture blocks.
 const CHANNEL_CAPACITY: usize = 512;
@@ -70,6 +112,30 @@ pub struct CallPorts {
     pub notifier: Arc<dyn Notifier>,
     /// The root in force while `calls.storage_root` is unset (`<data_dir>/calls` in `run()`).
     pub calls_root: PathBuf,
+    /// The one clipboard writer of the process, the dictation's (`WinClipboard` in `run()`):
+    /// `calls_copy_markdown` writes only through it (P-011, R18).
+    pub clipboard: Arc<dyn Clipboard>,
+    /// Shows a call folder (`win::shell_open::ShellOpener` in `run()`).
+    pub folder: Arc<dyn FolderOpener>,
+    /// The native save dialog of `calls_export` (`win::save_dialog::WinSaveDialog` in `run()`).
+    pub save: Arc<dyn SaveDialog>,
+}
+
+/// The `{root, id}` of a call on the wire (`calls://open`, `calls://changed`): `root` is an
+/// opaque root text `calls_list` returned, `id` the call's folder name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CallRef {
+    pub root: String,
+    pub id: String,
+}
+
+/// The native save dialog of `calls_export` (research R18: in Rust, no dialog plugin).
+/// Called off the main thread, after the guard; it may block until the user answers.
+pub trait SaveDialog: Send + Sync {
+    /// Asks where to save a `format` export, offering `suggested_name`: `Ok(Some(target))`
+    /// for a picked full path, `Ok(None)` when the user cancelled, `Err` when the dialog
+    /// could not be shown.
+    fn pick(&self, suggested_name: &str, format: Format) -> io::Result<Option<PathBuf>>;
 }
 
 /// One shell start or stop of a call, posted with [`request`].
@@ -83,11 +149,26 @@ pub enum CallRequest {
     RefuseSwitch,
 }
 
-/// The call part of an app: the worker's queue, the tick thread's wake-up and the
-/// "Calls" route's counter.
+/// The call part of an app: the worker's queue, the "Calls" route's counter, the Calls
+/// window's state and the ports of its commands.
 struct CallPart {
     requests: Sender<CallRequest>,
     opened: AtomicU32,
+    window: Mutex<WindowState>,
+    clipboard: Arc<dyn Clipboard>,
+    folder: Arc<dyn FolderOpener>,
+    save: Arc<dyn SaveDialog>,
+}
+
+/// What the Calls window's page is ready for, under one mutex shared by the opener thread
+/// and `calls_list`.
+#[derive(Default)]
+struct WindowState {
+    /// The page of the current window sent `calls_list`, so its listeners exist.
+    listening: bool,
+    /// The target of an open that came before the page listened; emitted by its first
+    /// `calls_list`. A later open replaces it.
+    pending: Option<CallRef>,
 }
 
 /// The `call-tick` thread's wake-up: set by the worker after each request, cleared by
@@ -162,6 +243,9 @@ pub fn start_calls<R: Runtime>(app: &AppHandle<R>, ports: CallPorts) -> io::Resu
         open_track,
         notifier,
         calls_root,
+        clipboard,
+        folder,
+        save,
     } = ports;
     let store = Arc::new(CallStore::new(
         Arc::new(FsCallRoots::new(calls_root)),
@@ -196,11 +280,17 @@ pub fn start_calls<R: Runtime>(app: &AppHandle<R>, ports: CallPorts) -> io::Resu
         notifier,
     )
     .inspect_err(|_| wake.close())?;
+    let opener = spawn_opener::<R>()?;
     app.manage(store);
     app.manage(session);
+    app.manage(opener);
     app.manage(CallPart {
         requests,
         opened: AtomicU32::new(0),
+        window: Mutex::new(WindowState::default()),
+        clipboard,
+        folder,
+        save,
     });
     Ok(())
 }
@@ -319,12 +409,96 @@ pub fn apply_launch<R: Runtime>(app: &AppHandle<R>, args: &LaunchArgs) {
     }
 }
 
-/// The tray "Calls" route. The Calls window is T-142's: until then it only counts the
-/// opens of an app with a call part (nothing without one).
-pub fn open_calls<R: Runtime>(app: &AppHandle<R>) {
-    if let Some(part) = app.try_state::<CallPart>() {
-        part.opened.fetch_add(1, Ordering::SeqCst);
+/// Opens the Calls window (the tray "Calls": `target` `None`), and with a `target` selects
+/// that call through one `calls://open`. Counts the request, posts it to the opener thread
+/// and returns at once; does nothing on an app without a call part.
+pub fn open_calls<R: Runtime>(app: &AppHandle<R>, target: Option<CallRef>) {
+    let Some(part) = app.try_state::<CallPart>() else {
+        return;
+    };
+    part.opened.fetch_add(1, Ordering::SeqCst);
+    if let Some(opener) = app.try_state::<CallsOpener<R>>() {
+        // A refused send (the opener thread is gone) drops the request.
+        let _ = opener.jobs.send(OpenJob {
+            app: app.clone(),
+            target,
+        });
     }
+}
+
+/// One posted [`open_calls`]. The handle travels with the request, so the opener thread
+/// holds no app handle of its own between requests.
+struct OpenJob<R: Runtime> {
+    app: AppHandle<R>,
+    target: Option<CallRef>,
+}
+
+/// The managed queue of the Calls window's one opener thread.
+struct CallsOpener<R: Runtime> {
+    jobs: Sender<OpenJob<R>>,
+}
+
+/// Starts the "calls-window" opener thread: it runs the posted opens one at a time, in
+/// posting order, so the label check and the window build never race. Ends when the
+/// app's queue is dropped. A panic inside one open (an unwinding build, as in the tests)
+/// is caught and the next open runs; the release profile aborts on panic.
+fn spawn_opener<R: Runtime>() -> io::Result<CallsOpener<R>> {
+    let (jobs, queue) = mpsc::channel::<OpenJob<R>>();
+    thread::Builder::new()
+        .name("calls-window".into())
+        .spawn(move || {
+            for OpenJob { app, target } in queue {
+                let _ = std::panic::catch_unwind(AssertUnwindSafe(|| open_window(&app, target)));
+            }
+        })
+        .map(|_| CallsOpener { jobs })
+}
+
+/// One open, on the opener thread only. An open window is brought forward; a missing one
+/// is built at `/calls` with a fresh state (its page has not listed yet). The target is
+/// emitted at once when the page listens, else held for its first `calls_list`. A failed
+/// build leaves no window; the next open tries again.
+fn open_window<R: Runtime>(app: &AppHandle<R>, target: Option<CallRef>) {
+    let Some(part) = app.try_state::<CallPart>() else {
+        return;
+    };
+    match app.get_webview_window(LABEL) {
+        Some(window) => {
+            let _ = bring_forward(&window);
+            let Some(target) = target else {
+                return;
+            };
+            let emit_now = {
+                let mut state = lock(&part.window);
+                if state.listening {
+                    Some(target)
+                } else {
+                    state.pending = Some(target);
+                    None
+                }
+            };
+            if let Some(target) = emit_now {
+                let _ = app.emit_to(LABEL, OPEN_EVENT, target);
+            }
+        }
+        None => {
+            *lock(&part.window) = WindowState {
+                listening: false,
+                pending: target,
+            };
+            let _ = WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("calls".into()))
+                .title(TITLE)
+                .inner_size(WIDTH, HEIGHT)
+                .build();
+        }
+    }
+}
+
+/// Unminimizes, shows and focuses the open window (the first error is returned).
+fn bring_forward<R: Runtime>(window: &WebviewWindow<R>) -> tauri::Result<()> {
+    window.unminimize()?;
+    window.show()?;
+    window.set_focus()
 }
 
 /// How many times [`open_calls`] ran on `app`'s call part (0 without one); a test-read
@@ -390,6 +564,192 @@ impl<R: Runtime> CallShell for ShellCallShell<R> {
     fn open_calls_tab(&self) {
         let _ = settings_window::request(&self.app, OpenTarget::Tab(SettingsTab::Calls, None));
     }
+
+    /// One `calls://changed {root, id}` to the Calls window only; nothing hears it while no
+    /// Calls window exists.
+    fn changed(&self, root: &Path, id: &CallId) {
+        let _ = self.app.emit_to(
+            LABEL,
+            CHANGED_EVENT,
+            CallRef {
+                root: wire_root(root),
+                id: id.as_str().to_string(),
+            },
+        );
+    }
+}
+
+// ---- the Calls window's commands ----------------------------------------------------------
+
+/// The `format` of `calls_export` on the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ExportFormat {
+    Md,
+    Json,
+}
+
+impl From<ExportFormat> for Format {
+    fn from(format: ExportFormat) -> Format {
+        match format {
+            ExportFormat::Md => Format::Md,
+            ExportFormat::Json => Format::Json,
+        }
+    }
+}
+
+/// The answer of `calls_export`: `saved: false` when the dialog was cancelled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct ExportOutcome {
+    pub saved: bool,
+}
+
+/// The managed store and the current settings; `None` on an app without a call part.
+fn store_and_settings<R: Runtime>(app: &AppHandle<R>) -> Option<(Arc<CallStore>, Arc<Settings>)> {
+    let store = app.try_state::<Arc<CallStore>>()?;
+    let service = app.try_state::<Arc<SettingsService>>()?;
+    Some((Arc::clone(&store), service.snapshot()))
+}
+
+/// What a call command works with: the store, the current settings and the call part's
+/// ports.
+struct Served<'a> {
+    store: Arc<CallStore>,
+    settings: Arc<Settings>,
+    part: tauri::State<'a, CallPart>,
+}
+
+/// The store, the settings and the call part; `notFound` on an app without a call part.
+fn call_part<R: Runtime>(app: &AppHandle<R>) -> Result<Served<'_>, CallError> {
+    let (store, settings) = store_and_settings(app).ok_or_else(CallError::not_found)?;
+    let part = app
+        .try_state::<CallPart>()
+        .ok_or_else(CallError::not_found)?;
+    Ok(Served {
+        store,
+        settings,
+        part,
+    })
+}
+
+/// `calls_list` → `CallList` (FR-033): every call of the current and earlier roots, in the
+/// UI language. An app without a call part lists nothing. The first list from the Calls
+/// window's page marks it listening and emits the target an open held for it.
+#[tauri::command(async)]
+pub fn calls_list<R: Runtime>(app: AppHandle<R>, webview: Webview<R>) -> CallListWire {
+    let wire = match store_and_settings(&app) {
+        Some((store, settings)) => list_wire(&store.list(&settings.calls), settings.ui_language),
+        None => CallListWire {
+            calls: Vec::new(),
+            unavailable_roots: Vec::new(),
+        },
+    };
+    if webview.label() == LABEL {
+        if let Some(part) = app.try_state::<CallPart>() {
+            let pending = {
+                let mut state = lock(&part.window);
+                state.listening = true;
+                state.pending.take()
+            };
+            if let Some(target) = pending {
+                let _ = app.emit_to(LABEL, OPEN_EVENT, target);
+            }
+        }
+    }
+    wire
+}
+
+/// `calls_get {root, id}` → `CallDetail` (FR-034); `notFound`, `ioFailed`.
+#[tauri::command(async)]
+pub fn calls_get<R: Runtime>(
+    app: AppHandle<R>,
+    root: String,
+    id: String,
+) -> Result<CallDetail, CallError> {
+    let (store, settings) = store_and_settings(&app).ok_or_else(CallError::not_found)?;
+    store.get(&settings.calls, &root, &id, settings.ui_language)
+}
+
+/// `calls_copy_markdown {root, id}` → `null` (FR-036): the call's Markdown export, written
+/// once through the dictation's clipboard writer (the FR-10 exclusion formats); a failed
+/// write is `ioFailed{other}`.
+#[tauri::command(async)]
+pub fn calls_copy_markdown<R: Runtime>(
+    app: AppHandle<R>,
+    root: String,
+    id: String,
+) -> Result<(), CallError> {
+    let Served {
+        store,
+        settings,
+        part,
+    } = call_part(&app)?;
+    let bytes = store.export_bytes(&settings.calls, &root, &id, Format::Md)?;
+    let text =
+        String::from_utf8(bytes).map_err(|_| CallError::io_failed(io::ErrorKind::InvalidData))?;
+    part.clipboard
+        .set_text_excluded_from_history(&text)
+        .map_err(|_| CallError::io_failed(io::ErrorKind::Other))
+}
+
+/// `calls_export {root, id, format}` → `{saved}` (FR-036): the guard and the bytes first,
+/// then the save dialog; a cancel is `{saved: false}` and writes nothing, a picked target
+/// gets the bytes through `export_to` only.
+#[tauri::command(async)]
+pub fn calls_export<R: Runtime>(
+    app: AppHandle<R>,
+    root: String,
+    id: String,
+    format: ExportFormat,
+) -> Result<ExportOutcome, CallError> {
+    let Served {
+        store,
+        settings,
+        part,
+    } = call_part(&app)?;
+    let format = Format::from(format);
+    let bytes = store.export_bytes(&settings.calls, &root, &id, format)?;
+    let picked = part
+        .save
+        .pick(&suggested_name(&id, format), format)
+        .map_err(|e| CallError::io_failed(e.kind()))?;
+    match picked {
+        None => Ok(ExportOutcome { saved: false }),
+        Some(target) => {
+            export_to(&target, &bytes)?;
+            Ok(ExportOutcome { saved: true })
+        }
+    }
+}
+
+/// The file name the save dialog offers: the call id (already checked by the guard, so a
+/// plain file name) with the format's extension.
+fn suggested_name(id: &str, format: Format) -> String {
+    let extension = match format {
+        Format::Md => "md",
+        Format::Json => "json",
+    };
+    format!("{id}.{extension}")
+}
+
+/// `calls_open_folder {root, id}` → `null` (FR-033, FR-036): the guarded call folder, also
+/// of a damaged call, to the folder opener; a gone call is `notFound`, a failed open
+/// `ioFailed`.
+#[tauri::command(async)]
+pub fn calls_open_folder<R: Runtime>(
+    app: AppHandle<R>,
+    root: String,
+    id: String,
+) -> Result<(), CallError> {
+    let Served {
+        store,
+        settings,
+        part,
+    } = call_part(&app)?;
+    let dir = store.folder(&settings.calls, &root, &id)?;
+    part.folder
+        .open(&dir)
+        .map_err(|e| CallError::io_failed(e.kind()))
 }
 
 /// 1a has no subtitle engine (FR-019: nothing turns subtitles on); the audio is dropped.

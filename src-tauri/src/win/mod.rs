@@ -10,7 +10,9 @@
 //! `src-tauri/tests/call_capture.rs`). `audio_notify` is the call mode's `DeviceEventsFactory`
 //! (an `IMMNotificationClient` that only posts typed events) and `CommunicationsCheck` (T-150,
 //! `src-tauri/tests/call_notify.rs`). `toast` is the dictation's `Notifier`: one `toast`
-//! thread showing WinRT toasts (T-210, `src-tauri/tests/feedback.rs`).
+//! thread showing WinRT toasts (T-210, `src-tauri/tests/feedback.rs`). `save_dialog` is the Calls
+//! window's `call::SaveDialog`: `IFileSaveDialog` on its own STA thread per pick (T-142,
+//! `src-tauri/tests/save_dialog.rs` for the cancel mapping).
 
 pub mod audio_notify;
 pub mod capture;
@@ -19,6 +21,7 @@ pub mod crash;
 pub mod hotkey;
 pub mod paste;
 pub mod purge;
+pub mod save_dialog;
 pub mod shell_open;
 pub mod toast;
 pub mod track_capture;

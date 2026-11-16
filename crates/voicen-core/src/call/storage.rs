@@ -910,6 +910,18 @@ impl CallStore {
         Ok(text.into_bytes())
     }
 
+    /// The guard, then the call folder itself (`calls_open_folder`, FR-033): a damaged call
+    /// (no meta.json) is allowed; a folder that is not there (or is not a folder) is
+    /// `notFound`. A guard miss is `notFound` before any filesystem call; no root is probed.
+    pub fn folder(&self, calls: &CallSettings, root: &str, id: &str) -> Result<PathBuf, CallError> {
+        let (root, id) = guard(calls, &self.roots.default_root(), root, id)?;
+        let dir = root.join(id.as_str());
+        if !dir.is_dir() {
+            return Err(CallError::not_found());
+        }
+        Ok(dir)
+    }
+
     /// The guard, then the listed entry of the call folder ([`load_entry`], as the list
     /// reads it): a folder that is not there is `notFound`, a damaged one `ioFailed`.
     fn open_call(

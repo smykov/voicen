@@ -64,7 +64,15 @@ Built (T-141, `call/storage.rs`; fixture `e2e/fixtures/calls-wire.json`; `docs/d
 - **`ioFailed.reason` (D4)** is the `UnwritableReason` snake_case word of `reason_of(io error kind)` (`missing`, `not_a_folder`, `access_denied`, `disk_full`, `other`; never `relative`), the vocabulary of `FieldError.reason` above. `ioFailed` on an unusable call (damaged, broken transcript) has `reason: other`.
 - **Export bytes and write.** Copy and export share `CallStore::export_bytes(calls, root, id, Format::{Md, Json})` (the title and names of `meta.json`). A call with no transcript is `ioFailed{reason: missing}`. `export_to(target, bytes)` takes the full path from the save dialog: a target with no parent or no file name is `ioFailed{other}`; the bytes reach the target only by rename of a tmp reserved with `create_new` as `<file>.voicen-tmp`, `-1` … `-9` (a file already there is never opened or removed); all ten names taken is `ioFailed{other}`; on any failure no tmp of this call remains and the previous target is kept. A target that is a folder fails at rename as `ioFailed`.
 
-Settings commands are unchanged: the `calls` section is part of the existing settings wire (`get_settings` / `save_settings`, settings-wire fixture extended). Save errors add `FieldId`s `calls.hotkey` (code `hotkey.equals_dictation`; a registration conflict stays `hotkey.unavailable`), `calls.reminder`, `calls.primary_language` (unknown: `language.unsupported`), `calls.storage_root` (code `storage.unwritable`). `FieldError` gains an optional snake_case `reason`, present only for `storage.unwritable`, one of `missing`, `not_a_folder`, `relative`, `access_denied`, `disk_full`, `other`; omitted otherwise (decision #196, T-120).
+Settings commands are unchanged: the `calls` section is part of the existing settings wire (`settings_get` / `settings_save`, settings-wire fixture extended). Save errors add `FieldId`s `calls.hotkey` (code `hotkey.equals_dictation`; a registration conflict stays `hotkey.unavailable`), `calls.reminder`, `calls.primary_language` (unknown: `language.unsupported`), `calls.storage_root` (code `storage.unwritable`). `FieldError` gains an optional snake_case `reason`, present only for `storage.unwritable`, one of `missing`, `not_a_folder`, `relative`, `access_denied`, `disk_full`, `other`; omitted otherwise (decision #196, T-120).
+
+Built (T-142, `src-tauri/src/call.rs`; `docs/decisions/calls-window.md`). Shell details the table above leaves open:
+
+- **Commands.** `calls_list`, `calls_get`, `calls_copy_markdown`, `calls_export` and `calls_open_folder` are async commands over the managed `CallStore` and settings; an app without a call part answers an empty list / `notFound`. `calls_open_folder` uses `CallStore::folder` (the guard, then an `is_dir` check; a damaged call's folder is allowed, a gone one is `notFound`).
+- **Copy.** Writes `export_bytes(Md)` once through the dictation's clipboard writer (FR-10 exclusion formats); a failed write is `ioFailed`.
+- **Export.** `export_bytes` (the guard) runs first, then the native save dialog (`IFileSaveDialog`, own STA thread, no owner window). A cancel is `{saved: false}` and writes nothing; a dialog failure is `ioFailed`, not a cancel; a pick is written only by `export_to`.
+- **`calls://changed`.** `{root, id}` with `root` as `wire_root`; sent with `emit_to("calls")` at a call's start and at every stop (user, hotkey, exit, system end, sleep, max length, low disk, storage), after the session lock. Pass progress, rename and delete emits are later tasks'.
+- **`calls://open`.** The shell entry is `call::open_calls(app, Some({root, id}))`. On a window just built it is emitted once, after the page's first `calls_list` (the page registers its listeners first); on a window that already listed, at once. The toast "Open" trigger itself is T-139 and T-213.
 
 ## Events (Rust → UI)
 
@@ -77,7 +85,7 @@ Settings commands are unchanged: the `calls` section is part of the existing set
 
 ## UI components
 
-- The `calls` window also invokes `settings_get` and listens to `settings://changed` (UI language and the call hotkey for the empty list; T-143). Handoff to T-142: grant `allow-settings-get` and the event listen to the `calls` label (`docs/decisions/ipc-acl.md`). Page invariants: `docs/decisions/calls-ui.md`.
+- The `calls` window also invokes `settings_get` and listens to `settings://changed` (UI language and the call hotkey for the empty list; T-143). Handoff to T-142: grant `allow-settings-get` and the event listen to the `calls` label (`docs/decisions/ipc-acl.md`). Built (T-142): `capabilities/calls.json` grants both. Page invariants: `docs/decisions/calls-ui.md`.
 - `src/routes/calls/+page.svelte`:
   - list newest first, with title, date and time, duration and state;
   - "No calls yet" with how to start one; unavailable-root lines;

@@ -43,6 +43,7 @@ mod timing_support;
 mod win32_support;
 
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::Arc;
@@ -114,7 +115,7 @@ fn ipc() -> Ipc {
     let folder = Arc::new(FakeFolder::default());
     let save = Arc::new(FakeSave::default());
     rig.start_with(
-        Arc::new(call_shell_support::WavSource::new()),
+        call_shell_support::WavSource::new(),
         FakeDisk::with_available(100_000_000_000),
         plain_opener(),
         clipboard.clone(),
@@ -583,6 +584,28 @@ fn open_folder_opens_the_guarded_folder_also_of_a_damaged_call() {
 }
 
 #[test]
+fn a_failing_folder_opener_is_io_failed() {
+    // FR-033 (swallowed error, T054): the opener fails once for a guarded folder; the command
+    // answers the contract's `ioFailed` (fixture `errors.ioFailed`: access_denied for
+    // PermissionDenied), not null; the opener was asked for exactly `<root>/<id>`. The next
+    // open answers null. Bite: `let _ = opener.open(..); Ok(())`, a failure mapped to
+    // `notFound`.
+    let _serial = serial();
+    let ipc = recorded_ipc();
+    ipc.plant_ready();
+    let window = ipc.open_window(None);
+    let args = json!({ "root": ipc.root_text(), "id": READY_ID });
+    ipc.folder.fail_next(io::ErrorKind::PermissionDenied);
+
+    assert_eq!(
+        invoke(&window, "calls_open_folder", args.clone()),
+        Err(fixture()["errors"]["ioFailed"].clone())
+    );
+    assert_eq!(ipc.folder.opened(), vec![ipc.root.join(READY_ID)]);
+    assert_eq!(ok(&window, "calls_open_folder", args), Value::Null);
+}
+
+#[test]
 fn an_app_without_a_call_part_answers_an_empty_list_and_not_found() {
     // T-142 analysis (open design points): `build_app` alone manages no call part; a `calls`
     // window made by hand there gets an empty list and `notFound`, not a panic or a refusal of
@@ -798,7 +821,56 @@ fn a_picked_target_gets_exactly_the_export_bytes_of_the_format() {
     assert_eq!(Ipc::tmp_files(out.path()), Vec::<PathBuf>::new());
 }
 
-// ---- calls://changed ----------------------------------------------------------------------
+#[test]
+fn a_failing_save_dialog_is_io_failed_not_a_cancel_and_writes_nothing() {
+    // I5 (swallowed error, T054): a dialog that fails (the port's `Err`) is the contract's
+    // `ioFailed` (fixture `errors.ioFailed`: access_denied for PermissionDenied), not
+    // `{saved: false}` and not `{saved: true}`; the dialog failed once (one ask), the target
+    // folder and the calls root are unchanged, no `*.voicen-tmp`. A later ask works again.
+    // Bite: `pick(..).unwrap_or(None)` (a cancel), an error turned into success, `export_to` on
+    // a default target after the failure.
+    let _serial = serial();
+    let ipc = recorded_ipc();
+    ipc.plant_ready();
+    let window = ipc.open_window(None);
+    let out = TempDir::new();
+    let root = ipc.root_text();
+    let listing = |dir: &Path| {
+        let mut v: Vec<String> = fs::read_dir(dir)
+            .expect("list")
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        v.sort();
+        v
+    };
+    let (root_before, out_before) = (listing(&ipc.root), listing(out.path()));
+    ipc.save.answer(Some(out.path().join("never.md")));
+    ipc.save.fail_next(io::ErrorKind::PermissionDenied);
+
+    let failed = invoke(
+        &window,
+        "calls_export",
+        json!({ "root": root, "id": READY_ID, "format": "md" }),
+    )
+    .expect_err("a failing dialog is an error");
+    assert_eq!(failed, fixture()["errors"]["ioFailed"].clone());
+    assert_eq!(ipc.save.asked().len(), 1, "the dialog was asked once");
+    assert_eq!(listing(out.path()), out_before, "the target folder changed");
+    assert_eq!(listing(&ipc.root), root_before, "the calls root changed");
+    assert_eq!(Ipc::tmp_files(&ipc.root), Vec::<PathBuf>::new());
+    assert_eq!(Ipc::tmp_files(out.path()), Vec::<PathBuf>::new());
+
+    assert_eq!(
+        ok(
+            &window,
+            "calls_export",
+            json!({ "root": root, "id": READY_ID, "format": "md" })
+        ),
+        json!({ "saved": true }),
+        "the next ask works"
+    );
+}
 
 #[test]
 fn a_start_and_a_stop_emit_one_changed_each_to_the_calls_window_only() {
