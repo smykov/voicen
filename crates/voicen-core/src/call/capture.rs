@@ -662,15 +662,15 @@ impl Timeline {
 
     /// Zero-fill exactly `ms` for `blocks` blocks the channel dropped.
     ///
-    /// The zeros go out at once; audio still inside the resampler follows them, and the next
-    /// block's expected position moves by the same span, so placement stays exact.
+    /// The converter is flushed exactly up to its input position and retired first, so every
+    /// frame handed to it before the drop is written before the silence; then exactly `ms * 16`
+    /// zeros follow. The next block re-enters through [`place`](Timeline::place)'s
+    /// fresh-converter path and lands at its own stamp position.
     pub fn dropped(&mut self, blocks: u32, ms: u32) -> Step {
         let mut step = Step::default();
         let zeros = u64::from(ms) * 16;
+        self.retire(&mut step);
         self.emit_zeros(&mut step, zeros);
-        if let Some(conv) = self.conv.as_mut() {
-            conv.proc_pos += zeros as f64;
-        }
         step.reports.push(Report::Dropped { blocks, ms });
         step
     }
