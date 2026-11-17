@@ -315,6 +315,11 @@ fn all_warning_kinds() -> Vec<(WarningKind, &'static str)> {
             WarningKind::DictationWorkerStopped,
             "dictation_worker_stopped",
         ),
+        // T-129: the call hotkey's own slot could not be registered.
+        (
+            WarningKind::CallHotkeyRegisterFailed,
+            "call_hotkey_register_failed",
+        ),
     ];
     let seen: BTreeSet<usize> = all
         .iter()
@@ -338,9 +343,10 @@ fn all_warning_kinds() -> Vec<(WarningKind, &'static str)> {
             WarningKind::PendingAudioCleanupFailed => 16,
             WarningKind::PendingAudioUnreadable => 17,
             WarningKind::DictationWorkerStopped => 18,
+            WarningKind::CallHotkeyRegisterFailed => 19,
         })
         .collect();
-    assert_eq!(seen.len(), 19, "every WarningKind once");
+    assert_eq!(seen.len(), 20, "every WarningKind once");
     all
 }
 

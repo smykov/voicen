@@ -471,9 +471,35 @@ impl SettingsService {
         } else {
             None
         };
-        // Every refusal from here on releases the prepared registration, last.
+        // (4b) The call hotkey (T-129): the same two steps on its own slot, only when
+        // `calls.hotkey` differs from the snapshot in force. A failure refuses on
+        // `calls.hotkey` before anything else is touched and releases the dictation
+        // registration prepared in (4).
+        let prepared_call = if settings.calls.hotkey != self.snapshot().calls.hotkey {
+            let prepared_call = parse_hotkey(&settings.calls.hotkey)
+                .ok()
+                .and_then(|hotkey| self.deps.hotkeys.prepare_call(hotkey).ok());
+            match prepared_call {
+                Some(prepared_call) => Some(prepared_call),
+                None => {
+                    if let Some(prepared) = prepared {
+                        self.deps.hotkeys.abort(prepared);
+                    }
+                    return refused(
+                        vec![FieldError::new(
+                            FieldId::CallHotkey,
+                            ErrorCode::HotkeyUnavailable,
+                        )],
+                        None,
+                    );
+                }
+            }
+        } else {
+            None
+        };
+        // Every refusal from here on releases the prepared registrations, last.
         let abort = |prepared: Option<Prepared>| {
-            if let Some(prepared) = prepared {
+            for prepared in [prepared, prepared_call].into_iter().flatten() {
                 self.deps.hotkeys.abort(prepared);
             }
         };
@@ -534,11 +560,11 @@ impl SettingsService {
             return refused(Vec::new(), Some(form_error));
         }
 
-        // (8) Commit: the new hotkey becomes the active one and the old one is
+        // (8) Commit: each new hotkey becomes the active one of its slot and the old one is
         // released (R-3 step 6) before any reader can see the new snapshot; then swap
         // the snapshot and publish to every live subscriber. The warnings are decided
         // here, once, over what was saved (T-015).
-        if let Some(prepared) = prepared {
+        for prepared in [prepared, prepared_call].into_iter().flatten() {
             self.deps.hotkeys.commit(prepared);
         }
         let warnings = save_warnings(&settings);
