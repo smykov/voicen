@@ -3194,7 +3194,8 @@ mod tests {
                 .as_ref()
                 .and_then(std::sync::Weak::upgrade);
             if let Some(service) = service {
-                if service.snapshot().hotkey == hotkey {
+                let snapshot = service.snapshot();
+                if snapshot.hotkey == hotkey || snapshot.calls.hotkey == hotkey {
                     note(journal, Step::Swapped);
                 }
             }
@@ -3221,6 +3222,14 @@ mod tests {
         {
             note(&self.1, Step::Hotkey(RegistrarCall::Prepare(hotkey, mode)));
             self.0.prepare(hotkey, mode)
+        }
+        fn prepare_call(
+            &self,
+            hotkey: crate::settings::hotkey::Hotkey,
+        ) -> Result<crate::hotkey_registrar::Prepared, crate::hotkey_registrar::Unavailable>
+        {
+            note(&self.1, Step::Hotkey(RegistrarCall::PrepareCall(hotkey)));
+            self.0.prepare_call(hotkey)
         }
         fn commit(&self, prepared: crate::hotkey_registrar::Prepared) {
             self.2.note_state(&self.1, &prepared.hotkey.to_string());
@@ -3498,6 +3507,417 @@ mod tests {
         );
         assert!(hotkey_steps(&journal).is_empty());
         assert_eq!(service.snapshot().mode, crate::settings::Mode::Hold);
+    }
+
+    // ---- T-129: call hotkey step of save (approach A: `prepare_call`) -----------------
+    //
+    // `calls.hotkey` is registered like the dictation hotkey: prepared next to the
+    // old one after validate and before autostart / keys / file, aborted on every
+    // later refusal, committed after the file and before the swap and the publish.
+    // The sample's call hotkey is Ctrl+Shift+F11; every T-129 draft saves another.
+
+    const NEW_CALL_HOTKEY: &str = "Ctrl+Alt+F10";
+
+    /// Every prepare of `calls` (either slot) is finished by exactly one commit or
+    /// abort of the same hotkey.
+    fn assert_prepares_settled(calls: &[RegistrarCall], committed: bool) {
+        use crate::hotkey_registrar::RegistrarCall as C;
+        for call in calls {
+            let hotkey = match call {
+                C::Prepare(h, _) | C::PrepareCall(h) => *h,
+                _ => continue,
+            };
+            let finish: Vec<_> = calls
+                .iter()
+                .filter(|c| matches!(c, C::Commit(h) | C::Abort(h) if *h == hotkey))
+                .collect();
+            assert_eq!(finish.len(), 1, "{hotkey:?} not settled once: {calls:?}");
+            assert_eq!(
+                matches!(finish[0], C::Commit(_)),
+                committed,
+                "{hotkey:?}: {calls:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_changed_call_hotkey_is_prepared_then_committed_after_the_file_and_before_the_swap() {
+        // Acceptance "saving a new call hotkey re-registers it without a restart":
+        // prepare_call(new) before the autostart step, commit after write_atomic and
+        // before the snapshot swap and the publish; the dictation slot untouched.
+        // Bite: no call step (today), prepare after autostart / keys, commit before
+        // the file write, commit after the swap or publish, commit skipped, a
+        // dictation `prepare` made for the unchanged dictation hotkey.
+        let world = World::new(
+            FakeSettingsFile::with_bytes(&json(&with_start(sample(EngineKind::None), false))),
+            FakeCredentialStore::new(),
+        );
+        let (service, journal, probe) = world.load_journaled_hotkeys();
+
+        let mut draft = with_start(sample(EngineKind::None), true);
+        draft.calls.hotkey = NEW_CALL_HOTKEY.into();
+        let keys = KeyEdits {
+            transcription_api: replace("sk-test-new-api"),
+            ..KeyEdits::default()
+        };
+        let view = expect_saved(service.save(req(draft, keys)), &[]);
+        assert_eq!(view.settings.calls.hotkey, NEW_CALL_HOTKEY);
+        probe.note_state(&journal, "never a hotkey");
+
+        let new = hotkey_of(NEW_CALL_HOTKEY);
+        assert_eq!(
+            steps(&journal),
+            vec![
+                Step::Hotkey(RegistrarCall::PrepareCall(new)),
+                Step::Autostart(true),
+                Step::Key(CredentialOp::Write, API),
+                Step::WriteFile,
+                Step::Hotkey(RegistrarCall::Commit(new)),
+                Step::Published,
+            ]
+        );
+        assert_eq!(service.snapshot().calls.hotkey, NEW_CALL_HOTKEY);
+    }
+
+    #[test]
+    fn a_taken_call_hotkey_refuses_with_hotkey_unavailable_and_changes_nothing() {
+        // Acceptance failure branch (contracts/ipc.md: a save-time conflict on
+        // calls.hotkey is hotkey.unavailable): prepare_call fails → Refused with the
+        // field error calls.hotkey / hotkey.unavailable, no form error; the registrar
+        // saw that one prepare only; no autostart call, no key change, no file write;
+        // snapshot kept, nothing published. Bite: no call step (Saved), the error on
+        // another field or code, the prepare after autostart / keys / file, the
+        // failure swallowed (`.ok()` dropped, the save goes on), a commit on failure.
+        let on_disk = with_start(sample(EngineKind::None), false);
+        let bytes = json(&on_disk);
+        let world = World::new(
+            FakeSettingsFile::with_bytes(&bytes),
+            FakeCredentialStore::new().with_key(API, "sk-test-old-api"),
+        );
+        world.hotkeys.fail_prepare_call(true);
+        let (service, _) = world.load();
+        let rx = service.subscribe();
+        let before = service.snapshot();
+
+        let mut draft = with_start(sample(EngineKind::None), true);
+        draft.calls.hotkey = NEW_CALL_HOTKEY.into();
+        draft.history.size = 42;
+        let keys = KeyEdits {
+            transcription_api: replace("sk-test-new-api"),
+            local_server: replace("sk-test-new-local"),
+            post_processing: KeyEdit::Untouched,
+        };
+        assert_eq!(
+            service.save(req(draft, keys)),
+            SaveOutcome::Refused {
+                errors: vec![field_error(
+                    FieldId::CallHotkey,
+                    ErrorCode::HotkeyUnavailable
+                )],
+                form_error: None,
+            }
+        );
+        assert_eq!(
+            world.hotkeys.calls(),
+            vec![RegistrarCall::PrepareCall(hotkey_of(NEW_CALL_HOTKEY))]
+        );
+        assert!(
+            world.autostart.calls().is_empty(),
+            "{:?}",
+            world.autostart.calls()
+        );
+        assert!(
+            changes(&world.creds).is_empty(),
+            "{:?}",
+            changes(&world.creds)
+        );
+        assert_eq!(world.file.calls(), vec![FileCall::Read]);
+        assert_eq!(world.file.bytes(), Some(bytes));
+        assert!(Arc::ptr_eq(&before, &service.snapshot()));
+        assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[test]
+    fn every_later_refusal_aborts_the_prepared_call_hotkey_and_the_dictation_one() {
+        // A refusal by the autostart step, a key write or the file write releases the
+        // prepared call registration, and the dictation one when both hotkeys
+        // changed: every prepare is aborted after the last other step, never
+        // committed; all prepares come before the first other step. One-shot
+        // failures (the fakes fail once). Bite: an abort missing in any branch for
+        // the call slot, an abort only for the dictation slot, a commit on a refusal,
+        // an abort before the undo of the later steps.
+        for both in [false, true] {
+            for case in [
+                LaterRefusal::Autostart,
+                LaterRefusal::KeyWrite,
+                LaterRefusal::FileWrite,
+            ] {
+                let world = World::new(
+                    FakeSettingsFile::with_bytes(&json(&with_start(
+                        sample(EngineKind::None),
+                        false,
+                    ))),
+                    FakeCredentialStore::new(),
+                );
+                match case {
+                    LaterRefusal::Autostart => world.autostart.fail_set(true, RUN_ERR),
+                    LaterRefusal::KeyWrite => {
+                        world.creds.fail(CredentialOp::Write, LOCAL, STORE_ERR)
+                    }
+                    LaterRefusal::FileWrite => {
+                        world.file.fail_write(io::ErrorKind::PermissionDenied)
+                    }
+                }
+                let (service, journal, _probe) = world.load_journaled_hotkeys();
+                let before = service.snapshot();
+
+                let mut draft = with_start(sample(EngineKind::None), true);
+                draft.calls.hotkey = NEW_CALL_HOTKEY.into();
+                if both {
+                    draft.hotkey = NEW_HOTKEY.into();
+                }
+                let keys = KeyEdits {
+                    transcription_api: replace("sk-test-new-api"),
+                    local_server: replace("sk-test-new-local"),
+                    post_processing: KeyEdit::Untouched,
+                };
+                let outcome = service.save(req(draft.clone(), keys));
+                let label = format!("{case:?} both={both}");
+                assert!(
+                    matches!(outcome, SaveOutcome::Refused { .. }),
+                    "{label}: {outcome:?}"
+                );
+
+                let all = steps(&journal);
+                let others: Vec<Step> = all
+                    .iter()
+                    .copied()
+                    .filter(|s| !matches!(s, Step::Hotkey(_)))
+                    .collect();
+                let expected_others = match case {
+                    LaterRefusal::Autostart => vec![Step::Autostart(true)],
+                    LaterRefusal::KeyWrite => vec![
+                        Step::Autostart(true),
+                        Step::Key(CredentialOp::Write, API),
+                        Step::Key(CredentialOp::Write, LOCAL),
+                        Step::Key(CredentialOp::Delete, API),
+                        Step::Autostart(false),
+                    ],
+                    LaterRefusal::FileWrite => vec![
+                        Step::Autostart(true),
+                        Step::Key(CredentialOp::Write, API),
+                        Step::Key(CredentialOp::Write, LOCAL),
+                        Step::WriteFile,
+                        Step::Key(CredentialOp::Delete, LOCAL),
+                        Step::Key(CredentialOp::Delete, API),
+                        Step::Autostart(false),
+                    ],
+                };
+                assert_eq!(others, expected_others, "{label}: {all:?}");
+                let first = all
+                    .iter()
+                    .position(|s| !matches!(s, Step::Hotkey(_)))
+                    .expect("another step");
+                let last = all
+                    .iter()
+                    .rposition(|s| !matches!(s, Step::Hotkey(_)))
+                    .expect("another step");
+                let (pre, post): (Vec<_>, Vec<_>) = all
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, s)| match s {
+                        Step::Hotkey(call) => Some((i, *call)),
+                        _ => None,
+                    })
+                    .partition(|(i, _)| *i < first);
+                assert!(
+                    pre.iter().all(|(_, c)| matches!(
+                        c,
+                        RegistrarCall::Prepare(..) | RegistrarCall::PrepareCall(_)
+                    )) && post
+                        .iter()
+                        .all(|(i, c)| *i > last && matches!(c, RegistrarCall::Abort(_))),
+                    "{label}: {all:?}"
+                );
+                let call_hotkey = hotkey_of(NEW_CALL_HOTKEY);
+                let mut want_pre = vec![RegistrarCall::PrepareCall(call_hotkey)];
+                let mut want_post = vec![RegistrarCall::Abort(call_hotkey)];
+                if both {
+                    let dictation = hotkey_of(NEW_HOTKEY);
+                    want_pre.push(RegistrarCall::Prepare(dictation, draft.mode));
+                    want_post.push(RegistrarCall::Abort(dictation));
+                }
+                for want in &want_pre {
+                    assert!(pre.iter().any(|(_, c)| c == want), "{label}: {all:?}");
+                }
+                for want in &want_post {
+                    assert!(post.iter().any(|(_, c)| c == want), "{label}: {all:?}");
+                }
+                assert_eq!(pre.len(), want_pre.len(), "{label}: {all:?}");
+                assert_eq!(post.len(), want_post.len(), "{label}: {all:?}");
+                assert!(Arc::ptr_eq(&before, &service.snapshot()), "{label}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_refused_dictation_hotkey_releases_a_prepared_call_hotkey() {
+        // Both hotkeys changed and the dictation prepare fails: Refused on
+        // recording.hotkey only; whatever was prepared for the call slot is aborted
+        // (no leak, no commit); no autostart, key or file step. Bite: the call slot
+        // prepared before the dictation one and never aborted on this refusal, a
+        // commit, the error on calls.hotkey.
+        let world = World::new(
+            FakeSettingsFile::with_bytes(&json(&with_start(sample(EngineKind::None), false))),
+            FakeCredentialStore::new(),
+        );
+        world.hotkeys.fail_prepare(true);
+        let (service, journal, _probe) = world.load_journaled_hotkeys();
+        let before = service.snapshot();
+
+        let mut draft = with_start(sample(EngineKind::None), true);
+        draft.hotkey = NEW_HOTKEY.into();
+        draft.calls.hotkey = NEW_CALL_HOTKEY.into();
+        assert_eq!(
+            service.save(req(draft, KeyEdits::default())),
+            SaveOutcome::Refused {
+                errors: vec![field_error(
+                    FieldId::RecordingHotkey,
+                    ErrorCode::HotkeyUnavailable
+                )],
+                form_error: None,
+            }
+        );
+        let calls = world.hotkeys.calls();
+        assert!(
+            !calls.iter().any(|c| matches!(c, RegistrarCall::Commit(_))),
+            "{calls:?}"
+        );
+        assert_prepares_settled_by_abort(&calls);
+        assert!(
+            steps(&journal).iter().all(|s| matches!(s, Step::Hotkey(_))),
+            "{:?}",
+            steps(&journal)
+        );
+        assert!(Arc::ptr_eq(&before, &service.snapshot()));
+    }
+
+    /// Every successful prepare is aborted once (the failed dictation prepare has
+    /// no token to settle).
+    fn assert_prepares_settled_by_abort(calls: &[RegistrarCall]) {
+        let call_prepares: Vec<_> = calls
+            .iter()
+            .filter_map(|c| match c {
+                RegistrarCall::PrepareCall(h) => Some(*h),
+                _ => None,
+            })
+            .collect();
+        for hotkey in call_prepares {
+            let aborts = calls
+                .iter()
+                .filter(|c| **c == RegistrarCall::Abort(hotkey))
+                .count();
+            assert_eq!(aborts, 1, "{hotkey:?} not aborted once: {calls:?}");
+        }
+    }
+
+    #[test]
+    fn an_unchanged_call_hotkey_never_calls_the_registrar_for_it() {
+        // An unchanged calls.hotkey is not re-registered by a save (also after a
+        // startup failure): a save that changes the dictation mode, autostart, a key
+        // and a plain field is Saved with no registrar call at all, although every
+        // prepare_call would fail. Bite: prepare_call on every save, the comparison
+        // against the draft instead of the snapshot in force.
+        let world = World::new(
+            FakeSettingsFile::with_bytes(&json(&with_start(sample(EngineKind::None), false))),
+            FakeCredentialStore::new(),
+        );
+        world.hotkeys.fail_prepare_call(true);
+        let (service, journal, _probe) = world.load_journaled_hotkeys();
+
+        let mut draft = with_start(sample(EngineKind::None), true);
+        assert_eq!(draft.calls.hotkey, service.snapshot().calls.hotkey);
+        draft.mode = crate::settings::Mode::Hold;
+        draft.history.size = 42;
+        let keys = KeyEdits {
+            transcription_api: replace("sk-test-new-api"),
+            ..KeyEdits::default()
+        };
+        expect_saved(service.save(req(draft, keys)), &[]);
+        assert!(
+            world.hotkeys.calls().is_empty(),
+            "{:?}",
+            world.hotkeys.calls()
+        );
+        assert!(hotkey_steps(&journal).is_empty());
+    }
+
+    #[test]
+    fn a_dictation_hotkey_only_save_makes_no_call_slot_call() {
+        // Characterization of today's step (4) plus the new guarantee: a changed
+        // dictation hotkey with the call hotkey unchanged is prepared and committed
+        // for the dictation slot only (no PrepareCall), even while prepare_call
+        // would fail. Bite: a call-slot prepare on every hotkey change.
+        let world = World::new(
+            FakeSettingsFile::with_bytes(&json(&with_start(sample(EngineKind::None), false))),
+            FakeCredentialStore::new(),
+        );
+        world.hotkeys.fail_prepare_call(true);
+        let (service, journal, _probe) = world.load_journaled_hotkeys();
+
+        let mut draft = with_start(sample(EngineKind::None), true);
+        draft.hotkey = NEW_HOTKEY.into();
+        expect_saved(service.save(req(draft.clone(), KeyEdits::default())), &[]);
+        let new = hotkey_of(NEW_HOTKEY);
+        assert_eq!(
+            hotkey_steps(&journal),
+            vec![
+                RegistrarCall::Prepare(new, draft.mode),
+                RegistrarCall::Commit(new)
+            ]
+        );
+    }
+
+    #[test]
+    fn both_hotkeys_changed_are_both_prepared_and_both_committed_after_the_file() {
+        // Both slots in one save: two prepares before the autostart step, then after
+        // the file write exactly the two commits (either order), before the
+        // publish. Bite: only the dictation slot handled, the call commit skipped
+        // or placed before the file write.
+        let world = World::new(
+            FakeSettingsFile::with_bytes(&json(&with_start(sample(EngineKind::None), false))),
+            FakeCredentialStore::new(),
+        );
+        let (service, journal, probe) = world.load_journaled_hotkeys();
+        let mut draft = with_start(sample(EngineKind::None), true);
+        draft.hotkey = NEW_HOTKEY.into();
+        draft.calls.hotkey = NEW_CALL_HOTKEY.into();
+        expect_saved(service.save(req(draft.clone(), KeyEdits::default())), &[]);
+        probe.note_state(&journal, "never a hotkey");
+
+        let all = steps(&journal);
+        let file = all
+            .iter()
+            .position(|s| *s == Step::WriteFile)
+            .expect("file written");
+        let autostart = all
+            .iter()
+            .position(|s| *s == Step::Autostart(true))
+            .expect("autostart");
+        let dictation = hotkey_of(NEW_HOTKEY);
+        let call = hotkey_of(NEW_CALL_HOTKEY);
+        let at = |step: RegistrarCall| {
+            all.iter()
+                .position(|s| *s == Step::Hotkey(step))
+                .unwrap_or_else(|| panic!("{step:?} missing: {all:?}"))
+        };
+        assert!(at(RegistrarCall::Prepare(dictation, draft.mode)) < autostart);
+        assert!(at(RegistrarCall::PrepareCall(call)) < autostart);
+        assert!(at(RegistrarCall::Commit(dictation)) > file);
+        assert!(at(RegistrarCall::Commit(call)) > file);
+        assert!(!all.contains(&Step::Swapped), "{all:?}");
+        assert_eq!(all.last(), Some(&Step::Published), "{all:?}");
+        assert_prepares_settled(&world.hotkeys.calls(), true);
     }
 
     // ---- T-030: IPC wire form, shell -> UI (contracts/ipc.md, data-model.md) ----
