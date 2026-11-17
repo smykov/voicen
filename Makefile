@@ -5,14 +5,14 @@
 	check-core-test-os-answer check-webview-data check-ci-wip check-telegram-send check-telegram-failure-branch \
 	check-version-stamp check-release-check check-release check-release-guard check-nsis-fork check-e2e-entry-fixtures check-area-image-fixtures \
 	check-whisper-cmake-cache check-opus-cmake-cache check-whisper-model-key check-crt-imports check-whisper \
-	check-shell-windows check-ban-canary check-role-tools check-guard-trigger check-wip-push check-wip-run \
+	check-shell-windows check-ban-canary check-role-tools check-guard-trigger check-wip-push check-wip-run check-contour-busy \
 	check-ui core-image ui-image core-image-present \
 	licenses licenses-check licenses-unit licenses-fixture licenses-rust licenses-bundle \
 	licenses-npm licenses-generate licenses-stale licenses-stale-guard
 
 # check-ban-canary and check-shell-windows after check-core: both build voicen-core, so a core
 # error is reported first by the faster native check-core, before the slower runs.
-check: check-shell-layout check-shell-layout-fixtures check-helper-windows-fixtures check-ci-credentials check-role-tools check-guard-trigger check-wip-push check-wip-run \
+check: check-shell-layout check-shell-layout-fixtures check-helper-windows-fixtures check-ci-credentials check-role-tools check-guard-trigger check-wip-push check-wip-run check-contour-busy \
 	check-clippy-lines \
 	check-core-test-os-answer check-webview-data check-ci-wip check-telegram-send check-telegram-failure-branch check-version-stamp check-release-check check-release check-release-guard check-nsis-fork check-whisper-cmake-cache check-opus-cmake-cache check-whisper-model-key check-crt-imports check-core check-whisper \
 	check-ban-canary check-shell-windows check-e2e-entry-fixtures check-area-image-fixtures check-ui \
@@ -105,6 +105,15 @@ check-wip-push:
 # TEAMWRIGHT_PAUSE, gh never called. The self-test puts a fake gh first on PATH; no network. Host bash, git.
 check-wip-run:
 	scripts/ci/tw-wip-run.test.sh
+
+# check-contour-busy (T-216, decisions #292, #293, #295, #296): scripts/ci/contour-busy.sh is the only busy
+# decision of the contour dispatcher: gh run list JSON on stdin, prints own | full <n> | free <n> for
+# <TASK_ID> <LIMIT> (distinct other tasks with an unfinished teamwright-agent run, an unparsable title
+# counted as one more), exit 3 on bad JSON, 2 on bad arguments. The self-test feeds faked JSON and
+# pins that teamwright-next.yml calls it with "$MAX_PARALLEL", that MAX_PARALLEL is set once in
+# .github/workflows and that both owned contour heads hold per-task concurrency groups. Host bash, jq.
+check-contour-busy:
+	scripts/ci/contour-busy.test.sh
 
 # check-core-test-os-answer (T-080 rca, class os-answer-deadline-race; T-089, decides_on: token):
 # no core test outside crates/voicen-core/tests/common names an OS-answer target (.invalid,

@@ -1,0 +1,10 @@
+guarantee: AC-2: after the death a press records nothing and shows failure.internal again
+file: crates/voicen-core/src/dictation.rs
+added_by: test-writer
+--- old
+            // again (offered once this section ends), no event, no gate.
+            if st.ctrl.is_worker_stopped() {
+--- new
+            // again (offered once this section ends), no event, no gate.
+            if false && st.ctrl.is_worker_stopped() {
+--- end

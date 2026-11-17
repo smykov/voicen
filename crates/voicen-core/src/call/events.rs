@@ -9,6 +9,7 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
 use std::fmt;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -229,15 +230,32 @@ fn host_text<S: Serializer>(host: &ProviderHost, s: S) -> Result<S::Ok, S::Error
     s.serialize_str(host.as_str())
 }
 
-/// A toast about a call (data-model "CallWarning and CallNotice"): catalog ids, enums and
-/// a [`CallId`] only.
+/// The root's text on the wire: [`crate::call::storage::wire_root`], the form
+/// `calls://open` and `resolve_call` use.
+fn root_text<S: Serializer>(root: &Path, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_str(&crate::call::storage::wire_root(root))
+}
+
+/// A toast about a call (data-model "CallWarning and CallNotice"): catalog ids, enums, a
+/// [`CallId`] and, on the ready notice, the calls root the pass found the folder under
+/// (never free text).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CallNotice {
     CallSavedTranscribing,
-    TranscriptReady { call: CallId },
-    PassFailed { reason: FailReason },
-    Stopped { reason: StopReason },
+    /// The pass wrote the transcript of `call`, whose folder is `root.join(call)`: the
+    /// root as the pass found it (decisions #298 Q3), not the current settings' root.
+    TranscriptReady {
+        call: CallId,
+        #[serde(serialize_with = "root_text")]
+        root: PathBuf,
+    },
+    PassFailed {
+        reason: FailReason,
+    },
+    Stopped {
+        reason: StopReason,
+    },
 }
 
 impl CallNotice {

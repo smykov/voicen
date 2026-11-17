@@ -205,7 +205,7 @@ Inputs: the selected `DeviceId`, and the device list at recording start.
 | `SpeechGate` | recording id, `detector` (`silero`/`energy`), `speech: bool` |
 | `JobFinished` | seq, recording id (T-008: the log joins the job to its recording by it), `engine` (kind name), `stop_to_text_ms`, outcome code (`text`/`no_speech`/`failed`), failure code, HTTP status |
 | `Delivered` | seq, `text_to_paste_ms`, result (`pasted`/`copied_only`/`copy_manual`) |
-| `Warning` | code (`vad_fallback`, `esc_unavailable`, `toast_failed`, `pending_audio_unreadable`) |
+| `Warning` | code (`vad_fallback`, `esc_unavailable`, `toast_failed`, `pending_audio_unreadable`, `dictation_worker_stopped`) |
 | `CaptureFailed` | recording id, `cause` (`no_device`/`access_denied`/`busy`/`other`; the closed `MicCause`, never OS text) — the capture could not open at press, or failed at stop |
 | `PressBlocked` | `reason` (the closed `settings::gate::Blocked`: `no_engine`) — a press the dictation gate blocked; one per press, at the press, no recording id (T-006) |
 

@@ -310,6 +310,11 @@ fn all_warning_kinds() -> Vec<(WarningKind, &'static str)> {
             WarningKind::PendingAudioCleanupFailed,
             "pending_audio_cleanup_failed",
         ),
+        // T-211: the dictation worker ended without a shutdown (a panic in run_job).
+        (
+            WarningKind::DictationWorkerStopped,
+            "dictation_worker_stopped",
+        ),
     ];
     let seen: BTreeSet<usize> = all
         .iter()
@@ -332,9 +337,10 @@ fn all_warning_kinds() -> Vec<(WarningKind, &'static str)> {
             WarningKind::HotkeyRequestTimeout => 15,
             WarningKind::PendingAudioCleanupFailed => 16,
             WarningKind::PendingAudioUnreadable => 17,
+            WarningKind::DictationWorkerStopped => 18,
         })
         .collect();
-    assert_eq!(seen.len(), 18, "every WarningKind once");
+    assert_eq!(seen.len(), 19, "every WarningKind once");
     all
 }
 

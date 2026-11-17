@@ -31,9 +31,9 @@ on:
         required: false
         default: ""
 
-# One dispatch of a task at a time; the stage job has its own group.
+# One dispatch of a task at a time: a group per task (decisions #292); the stage job has its own.
 concurrency:
-  group: teamwright-next
+  group: teamwright-next-${{ inputs.task_id }}
   cancel-in-progress: false
 
 permissions:

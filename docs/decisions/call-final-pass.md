@@ -52,7 +52,7 @@ Tasks: T-138 (class `call-final-pass`), T-146 (the queue, cancel and "Transcribe
 
 - **Defect that produced it:** none yet.
 - **What breaks if you violate it:** the Calls window never learns the pass ended; a second line double-counts a pass.
-- **Where it is enforced:** `conclude` is the only place that writes `FinalPassFinished` and the notice (`TranscriptReady { call }` or `PassFailed { reason }`; a `Cancelled` pass logs `final_finished outcome=cancelled` and sends no notice, Q1); every exit of `run_pass` and `pass` goes through it.
+- **Where it is enforced:** `conclude` is the only place that writes `FinalPassFinished` and the notice (`TranscriptReady { call, root }`, `root` = `dir.parent()` as the pass found it, T-139 and #298 Q3, built from the `dir` that `conclude(dir, ...)` takes; or `PassFailed { reason }`; a `Cancelled` pass logs `final_finished outcome=cancelled` and sends no notice, Q1); every exit of `run_pass` and `pass` goes through it.
 - **Don't:** return a `PassOutcome` without `conclude`.
 
 ### Passes run one at a time from one queue; what a pass redoes is read from `meta.json` when it starts (T-146)

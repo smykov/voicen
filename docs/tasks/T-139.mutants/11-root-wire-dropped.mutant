@@ -1,0 +1,10 @@
+guarantee: wire names id and root
+file: crates/voicen-core/src/call/events.rs
+added_by: test-writer
+--- old
+        #[serde(serialize_with = "root_text")]
+        root: PathBuf,
+--- new
+        #[serde(skip)]
+        root: PathBuf,
+--- end

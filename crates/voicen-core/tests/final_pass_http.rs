@@ -820,3 +820,38 @@ fn a_401_gives_failed_key_and_after_the_key_is_fixed_transcribe_again_succeeds()
         .count();
     assert_eq!(reads, 2, "one key read per pass");
 }
+
+#[test]
+fn the_ready_notice_carries_the_creating_root_after_the_settings_root_changed() {
+    // T-139 (decisions #298 Q3): the root of a ready notice is the folder's parent as the
+    // pass found it, never `calls.storage_root` of the settings the pass runs with (the
+    // root can change between the stop and the pass end). Bite: the root taken from the
+    // settings (the changed one, or the default), a notice without the creating root.
+    let server = Mocked::start(TimedReply);
+    let call = tone_call();
+    let created_under = call.tmp.path().join("calls");
+    let creds = FakeCredentialStore::new().with_key(KeySlot::TranscriptionApi, "key-a");
+    let mut settings = defaults(None);
+    settings.engine = EngineKind::Api;
+    settings.api.base_url = server.uri();
+    settings.api.model = "model-a".to_string();
+    settings.calls.storage_root = Some(call.tmp.path().join("moved-elsewhere"));
+    let rec = Rec::default();
+    let out = run_pass(
+        PassCall {
+            dir: call.dir.clone(),
+            meta: call.meta.clone(),
+        },
+        Arc::new(settings),
+        &creds,
+        deps(&rec, Some(Arc::new(AmpSpans))),
+    );
+    assert_eq!(out.outcome, FinalOutcome::Ready, "premise");
+    assert_eq!(
+        rec.notices(),
+        vec![CallNotice::TranscriptReady {
+            call: call.meta.id.clone(),
+            root: created_under,
+        }]
+    );
+}

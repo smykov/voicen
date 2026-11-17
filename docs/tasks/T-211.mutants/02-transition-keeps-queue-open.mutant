@@ -1,0 +1,10 @@
+guarantee: AC-3: queued job dropped, no send into a dead channel (queue = None)
+file: crates/voicen-core/src/dictation.rs
+added_by: test-writer
+equivalent: every send in dictation.rs is preceded, under the same lock, by an is_worker_stopped() refusal (press never sends; stop_recording refuses Ok audio before finish; retry refuses before queue.clone()), and the guard sets worker_stopped and queue = None in one section, so no send can reach a stopped worker's queue; the stop path with Err audio never sends (finish returns Err). Defence in depth only
+--- old
+    st.queue = None;
+    st.retry_available = false;
+--- new
+    st.retry_available = false;
+--- end

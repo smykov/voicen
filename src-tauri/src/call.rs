@@ -26,8 +26,7 @@
 //! - The Calls window (T-142; contracts/ipc.md "Windows", FR-033, FR-034, FR-036): at
 //!   most one window labelled [`LABEL`] at `/calls`, created only on the call part's own
 //!   opener thread ("calls-window", the `settings_window` pattern, #223). [`open_calls`]
-//!   (the tray "Calls", and the entry a "Transcript ready" toast's Open will call) counts
-//!   the request (`calls_opened`) and posts it, never waiting. An open with a [`CallRef`]
+//!   (the tray "Calls") counts the request (`calls_opened`) and posts it, never waiting. An open with a [`CallRef`]
 //!   reaches the page as exactly one `calls://open {root, id}`: on a window whose page has
 //!   not yet listed (a window just built, whose listeners may not exist), the target is
 //!   held and emitted by the window's first `calls_list`, which the page sends only after
@@ -43,6 +42,17 @@
 //!   guarded folder (a damaged call's too) to the [`FolderOpener`] port.
 //! - [`ShellCallShell::changed`] emits `calls://changed {root, id}` to the Calls window only
 //!   (`emit_to`), after the session lock, once per start and once per stop.
+//! - The pass worker (T-139): [`start_calls`] also builds and manages the one
+//!   `Arc<PassQueue>` over the same store, its one `ApiPassRunner` reading the managed
+//!   `SettingsService`'s snapshot per pass, [`CallPorts::credentials`] (the service's own
+//!   key store) and [`CallPorts::detector`] (the pass half of `vad::load_shared`; `None`:
+//!   core's energy fallback). Every folder a stop leaves ready-to-transcribe reaches it
+//!   through `CallShell::call_ready` ([`ShellCallShell`] enqueues it); the pass's notices
+//!   go to the shared notifier as the session's do ([`ShellPassEvents`]).
+//! - [`open_transcript`] (T-139; T-213's toast button calls it with the root and id of
+//!   core's `TranscriptReady` notice) emits `calls://open` at once. Every `calls://open`,
+//!   its and the Calls window's held or immediate target alike, goes out through the one
+//!   private `emit_open` (decisions #298).
 
 use std::io;
 use std::panic::AssertUnwindSafe;
@@ -57,6 +67,7 @@ use tauri::{
     AppHandle, Emitter, Manager, Runtime, Webview, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
 };
 use voicen_core::call::events::refused_notice;
+use voicen_core::call::final_pass::{ApiPassRunner, PassEvents, PassQueue};
 use voicen_core::call::indicator::{IndicatorState, IndicatorTick};
 use voicen_core::call::session::{
     CallDeps, CallIndicator, CallSession, CallShell, SubtitleConsumer, Toggled, TrackFile,
@@ -72,10 +83,12 @@ use voicen_core::clock::{MonotonicClock, SystemClock};
 use voicen_core::diag::{Log, LogEvent};
 use voicen_core::local_models::download::DiskSpace;
 use voicen_core::platform::{Clipboard, Notifier};
+use voicen_core::secrets as key_store;
 use voicen_core::settings::gate::{CallSwitch, LaunchArgs, SettingsTab};
 use voicen_core::settings::roots::FsCallRoots;
 use voicen_core::settings::service::SettingsService;
 use voicen_core::settings::Settings;
+use voicen_core::vad::SpeechSpans;
 
 use crate::logs_folder::FolderOpener;
 use crate::settings_window::{self, OpenTarget};
@@ -87,9 +100,6 @@ pub const LABEL: &str = "calls";
 
 /// Emitted to the Calls window when a call changed state (contracts/ipc.md "Events").
 pub const CHANGED_EVENT: &str = "calls://changed";
-
-/// Emitted to the Calls window to select a call (contracts/ipc.md "Events").
-pub const OPEN_EVENT: &str = "calls://open";
 
 /// The window title and its initial size.
 const TITLE: &str = "Voicen";
@@ -120,6 +130,12 @@ pub struct CallPorts {
     pub folder: Arc<dyn FolderOpener>,
     /// The native save dialog of `calls_export` (`win::save_dialog::WinSaveDialog` in `run()`).
     pub save: Arc<dyn SaveDialog>,
+    /// The key store the pass reads the `TranscriptionApi` key from: the `SettingsService`'s
+    /// own instance in `run()` (`SharedPorts.credentials`).
+    pub credentials: Arc<dyn key_store::CredentialStore>,
+    /// The pass's primary detector: the pass half of `vad::load_shared` in `run()`; `None`
+    /// makes core's energy detector decide (`vad_fallback cause=unavailable` per track).
+    pub detector: Option<Arc<dyn SpeechSpans>>,
 }
 
 /// The `{root, id}` of a call on the wire (`calls://open`, `calls://changed`): `root` is an
@@ -138,6 +154,10 @@ pub trait SaveDialog: Send + Sync {
     /// could not be shown.
     fn pick(&self, suggested_name: &str, format: Format) -> io::Result<Option<PathBuf>>;
 }
+
+/// Emitted to the Calls window to select a call (contracts/ipc.md "Events"; T-139, T-142):
+/// only through `emit_open`.
+pub const CALLS_OPEN: &str = "calls://open";
 
 /// One shell start or stop of a call, posted with [`request`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -210,9 +230,10 @@ pub fn file_opener() -> TrackOpener {
     })
 }
 
-/// Builds the one call session of `app` over `ports`, manages it as `Arc<CallSession>`
-/// and its store as `Arc<CallStore>`, and starts the `call-requests` worker and the
-/// `call-tick` thread. Needs the managed `Arc<SettingsService>` and `Arc<Log>`
+/// Builds the one call session of `app` over `ports`, manages it as `Arc<CallSession>`,
+/// its store as `Arc<CallStore>` and the one pass queue over that store as
+/// `Arc<PassQueue>` (T-139), and starts the `call-requests` worker and the `call-tick`
+/// thread. Needs the managed `Arc<SettingsService>` and `Arc<Log>`
 /// (`assemble`'s wiring) and, for the tray flag, the tray (`run()` calls this after
 /// `start_dictation`, so the tray exists). Starts no call. `Err` when a managed part is
 /// missing, the app already has a call part (then nothing is started) or a thread could
@@ -231,7 +252,10 @@ pub fn start_calls<R: Runtime>(app: &AppHandle<R>, ports: CallPorts) -> io::Resu
                 "the app manages no settings service",
             )
         })?;
-    if app.try_state::<CallPart>().is_some() || app.try_state::<Arc<CallSession>>().is_some() {
+    if app.try_state::<CallPart>().is_some()
+        || app.try_state::<Arc<CallSession>>().is_some()
+        || app.try_state::<Arc<PassQueue>>().is_some()
+    {
         return Err(io::Error::new(
             io::ErrorKind::AlreadyExists,
             "the app already has a call part",
@@ -247,17 +271,35 @@ pub fn start_calls<R: Runtime>(app: &AppHandle<R>, ports: CallPorts) -> io::Resu
         clipboard,
         folder,
         save,
+        credentials,
+        detector,
     } = ports;
     let store = Arc::new(CallStore::new(
         Arc::new(FsCallRoots::new(calls_root)),
         Arc::clone(&mono),
     ));
+    let snapshot = Arc::clone(&service);
+    let runner = ApiPassRunner::new(
+        Arc::new(move || snapshot.snapshot()),
+        credentials,
+        detector,
+        Arc::new(ShellPassEvents::new(
+            Arc::clone(&log),
+            Arc::clone(&notifier),
+        )),
+        Arc::clone(&mono),
+    );
+    let queue = Arc::new(PassQueue::new(Arc::clone(&store), Arc::new(runner)));
     let session = Arc::new(CallSession::new(CallDeps {
         source,
         store: Arc::clone(&store),
         settings: service,
         indicator: Arc::new(ShellCallIndicator::new(app)),
-        shell: Arc::new(ShellCallShell::new(app, Arc::clone(&notifier))),
+        shell: Arc::new(ShellCallShell::new(
+            app,
+            Arc::clone(&notifier),
+            Arc::clone(&queue),
+        )),
         log: Arc::clone(&log),
         clock: Arc::new(SystemClock),
         offset: Arc::new(crate::diag::OsLocalOffset),
@@ -271,11 +313,11 @@ pub fn start_calls<R: Runtime>(app: &AppHandle<R>, ports: CallPorts) -> io::Resu
         disk,
     }));
     let wake = Arc::new(Wake::default());
-    let (requests, queue) = mpsc::channel();
+    let (requests, received) = mpsc::channel();
     spawn_tick(Arc::downgrade(&session), Arc::clone(&wake), mono)?;
     spawn_worker(
         Arc::clone(&session),
-        queue,
+        received,
         Arc::clone(&wake),
         log,
         notifier,
@@ -283,6 +325,7 @@ pub fn start_calls<R: Runtime>(app: &AppHandle<R>, ports: CallPorts) -> io::Resu
     .inspect_err(|_| wake.close())?;
     let opener = spawn_opener::<R>()?;
     app.manage(store);
+    app.manage(queue);
     app.manage(session);
     app.manage(opener);
     app.manage(CallPart {
@@ -479,7 +522,7 @@ fn open_window<R: Runtime>(app: &AppHandle<R>, target: Option<CallRef>) {
                 }
             };
             if let Some(target) = emit_now {
-                let _ = app.emit_to(LABEL, OPEN_EVENT, target);
+                emit_open(app, target);
             }
         }
         None => {
@@ -507,6 +550,28 @@ fn bring_forward<R: Runtime>(window: &WebviewWindow<R>) -> tauri::Result<()> {
 pub fn calls_opened<R: Runtime>(app: &AppHandle<R>) -> u32 {
     app.try_state::<CallPart>()
         .map_or(0, |part| part.opened.load(Ordering::SeqCst))
+}
+
+/// Asks the Calls window to show the call `id` under `root` (T-139, FR-030): emits one
+/// `calls://open` with `{root: wire_root(root), id}` at once, through `emit_open`.
+/// `root` is the one core's `TranscriptReady` notice carries, never the current settings'.
+/// It neither opens the window nor waits for its page (that is [`open_calls`] with a
+/// target).
+pub fn open_transcript<R: Runtime>(app: &AppHandle<R>, root: &Path, id: &CallId) {
+    emit_open(
+        app,
+        CallRef {
+            root: wire_root(root),
+            id: id.to_string(),
+        },
+    );
+}
+
+/// The one emit site of `calls://open` (decisions #298): [`open_transcript`], an open on a
+/// listening Calls window and the first `calls_list` of a fresh one all deliver here, to
+/// the Calls window only.
+fn emit_open<R: Runtime>(app: &AppHandle<R>, target: CallRef) {
+    let _ = app.emit_to(LABEL, CALLS_OPEN, target);
 }
 
 /// `run()`'s `CallIndicator` (called inside the call session lock): the call flag goes
@@ -539,27 +604,40 @@ impl<R: Runtime> CallIndicator for ShellCallIndicator<R> {
     }
 }
 
+/// A call notice to the shared notifier: core's `CallNotice::message` id, `retry: None`.
+fn offer(notifier: &dyn Notifier, notice: &CallNotice) {
+    let (id, params) = notice.message();
+    notifier.notify(id, &params, None);
+}
+
 /// `run()`'s `CallShell` (called after the call session lock): a notice goes to the
-/// shared notifier with core's `CallNotice::message` id and `retry: None`; the Calls tab
-/// request posts `settings_window::request(Tab(Calls, None))` and drops the receipt.
+/// shared notifier ([`offer`]); the Calls tab request posts
+/// `settings_window::request(Tab(Calls, None))` and drops the receipt; a folder a stop
+/// left ready-to-transcribe is enqueued on the one pass queue (T-139), the only enqueue
+/// on a stop.
 pub struct ShellCallShell<R: Runtime> {
     app: AppHandle<R>,
     notifier: Arc<dyn Notifier>,
+    queue: Arc<PassQueue>,
 }
 
 impl<R: Runtime> ShellCallShell<R> {
-    pub fn new(app: &AppHandle<R>, notifier: Arc<dyn Notifier>) -> ShellCallShell<R> {
+    pub fn new(
+        app: &AppHandle<R>,
+        notifier: Arc<dyn Notifier>,
+        queue: Arc<PassQueue>,
+    ) -> ShellCallShell<R> {
         ShellCallShell {
             app: app.clone(),
             notifier,
+            queue,
         }
     }
 }
 
 impl<R: Runtime> CallShell for ShellCallShell<R> {
     fn notice(&self, notice: CallNotice) {
-        let (id, params) = notice.message();
-        self.notifier.notify(id, &params, None);
+        offer(self.notifier.as_ref(), &notice);
     }
 
     fn open_calls_tab(&self) {
@@ -577,6 +655,10 @@ impl<R: Runtime> CallShell for ShellCallShell<R> {
                 id: id.as_str().to_string(),
             },
         );
+    }
+
+    fn call_ready(&self, dir: &Path) {
+        self.queue.enqueue(dir);
     }
 }
 
@@ -653,7 +735,7 @@ pub fn calls_list<R: Runtime>(app: AppHandle<R>, webview: Webview<R>) -> CallLis
                 state.pending.take()
             };
             if let Some(target) = pending {
-                let _ = app.emit_to(LABEL, OPEN_EVENT, target);
+                emit_open(&app, target);
             }
         }
     }
@@ -759,6 +841,29 @@ pub fn calls_open_folder<R: Runtime>(
     part.folder
         .open(&dir)
         .map_err(|e| CallError::io_failed(e.kind()))
+}
+
+/// The pass worker's `PassEvents` (T-139): log lines to the one log, every notice to the
+/// shared notifier through [`offer`], as the session's own notices.
+pub struct ShellPassEvents {
+    log: Arc<Log>,
+    notifier: Arc<dyn Notifier>,
+}
+
+impl ShellPassEvents {
+    pub fn new(log: Arc<Log>, notifier: Arc<dyn Notifier>) -> ShellPassEvents {
+        ShellPassEvents { log, notifier }
+    }
+}
+
+impl PassEvents for ShellPassEvents {
+    fn log(&self, event: LogEvent) {
+        self.log.write(event);
+    }
+
+    fn notice(&self, notice: CallNotice) {
+        offer(self.notifier.as_ref(), &notice);
+    }
 }
 
 /// 1a has no subtitle engine (FR-019: nothing turns subtitles on); the audio is dropped.

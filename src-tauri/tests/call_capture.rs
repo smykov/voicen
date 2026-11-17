@@ -627,6 +627,7 @@ impl CallShell for Shell {
     fn open_calls_tab(&self) {}
     // T-142: the trait gains `changed`; this shell ignores it.
     fn changed(&self, _root: &Path, _id: &CallId) {}
+    fn call_ready(&self, _dir: &Path) {}
 }
 
 struct Port(Arc<Settings>);

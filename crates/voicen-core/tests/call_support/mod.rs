@@ -701,6 +701,11 @@ pub struct FakeShell {
     changes: Mutex<Vec<(PathBuf, String, bool)>>,
     /// The first notice or change seen, in order: `true` = a change (T-142 ordering).
     trace: Mutex<Vec<bool>>,
+    /// T-139: every `call_ready(dir)`: the dir, whether the session lock was held, whether
+    /// `is_recording()` (the blocking read) answered false from inside the call.
+    ready: Mutex<Vec<(PathBuf, bool, bool)>>,
+    /// T-139: `"notice"` / `"ready"` / `"tab"` in the order the shell port was called.
+    order: Mutex<Vec<&'static str>>,
 }
 
 impl FakeShell {
@@ -710,6 +715,8 @@ impl FakeShell {
             calls: Mutex::new(Vec::new()),
             changes: Mutex::new(Vec::new()),
             trace: Mutex::new(Vec::new()),
+            ready: Mutex::new(Vec::new()),
+            order: Mutex::new(Vec::new()),
         })
     }
 
@@ -719,6 +726,10 @@ impl FakeShell {
 
     fn record(&self, call: ShellCall) {
         lock(&self.trace).push(false);
+        lock(&self.order).push(match call {
+            ShellCall::Notice(_) => "notice",
+            ShellCall::OpenCallsTab => "tab",
+        });
         let session = lock(&self.session).clone();
         let held = session.is_some_and(|s| s.try_is_recording().is_none());
         lock(&self.calls).push((call, held));
@@ -751,6 +762,30 @@ impl FakeShell {
         lock(&self.trace).clone()
     }
 
+    /// T-139: the dirs `call_ready` was called with, in order.
+    pub fn readied(&self) -> Vec<PathBuf> {
+        lock(&self.ready)
+            .iter()
+            .map(|(d, _, _)| d.clone())
+            .collect()
+    }
+
+    /// T-139: `true` for each `call_ready` that ran with the session lock held.
+    pub fn ready_held_flags(&self) -> Vec<bool> {
+        lock(&self.ready).iter().map(|(_, h, _)| *h).collect()
+    }
+
+    /// T-139: `true` for each `call_ready` whose blocking `is_recording()` read (made
+    /// inside the call, so a hand-off still under the lock would hang) answered "off".
+    pub fn ready_saw_off(&self) -> Vec<bool> {
+        lock(&self.ready).iter().map(|(_, _, off)| *off).collect()
+    }
+
+    /// T-139: `"notice"`, `"ready"` and `"tab"` in call order.
+    pub fn order(&self) -> Vec<&'static str> {
+        lock(&self.order).clone()
+    }
+
     pub fn tab_opens(&self) -> usize {
         self.calls()
             .iter()
@@ -781,6 +816,16 @@ impl CallShell for FakeShell {
         }
         lock(&self.trace).push(true);
         lock(&self.changes).push((root.to_path_buf(), id.as_str().to_string(), held));
+    }
+
+    fn call_ready(&self, dir: &Path) {
+        lock(&self.order).push("ready");
+        let session = lock(&self.session).clone();
+        let held = session
+            .as_ref()
+            .is_some_and(|s| s.try_is_recording().is_none());
+        let off = session.is_some_and(|s| !s.is_recording());
+        lock(&self.ready).push((dir.to_path_buf(), held, off));
     }
 }
 

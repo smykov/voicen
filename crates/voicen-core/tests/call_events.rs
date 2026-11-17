@@ -305,7 +305,10 @@ fn notices_and_warnings_are_built_from_closed_values() {
     );
     let notices = [
         CallNotice::CallSavedTranscribing,
-        CallNotice::TranscriptReady { call: call.clone() },
+        CallNotice::TranscriptReady {
+            call: call.clone(),
+            root: std::path::PathBuf::from("calls-root"),
+        },
         CallNotice::PassFailed {
             reason: FailReason::Network,
         },
@@ -322,9 +325,27 @@ fn notices_and_warnings_are_built_from_closed_values() {
         }
         assert_eq!(*n, n.clone());
     }
-    // The ready notice names the call by its id and nothing else of the call.
+    // The ready notice names the call by its id and the root it lies under, nothing else
+    // of the call (T-139, decisions #298 Q3): the body's keys are exactly `call` and `root`.
     let text = json(&notices[1]);
-    assert!(text.contains("2026-10-24_093015"), "{text}");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&text).unwrap_or_else(|e| panic!("{text}: {e}"));
+    let body = parsed
+        .get("transcript_ready")
+        .and_then(serde_json::Value::as_object)
+        .unwrap_or_else(|| panic!("a transcript_ready object: {text}"));
+    let keys: Vec<&str> = body.keys().map(String::as_str).collect();
+    assert_eq!(keys, vec!["call", "root"], "{text}");
+    assert_eq!(
+        body["call"],
+        serde_json::Value::from("2026-10-24_093015"),
+        "{text}"
+    );
+    assert_eq!(
+        body["root"],
+        serde_json::Value::from("calls-root"),
+        "{text}"
+    );
     // Distinct warnings stay distinct on the wire (a collapsed enum would not).
     let wire: std::collections::BTreeSet<String> = warnings.iter().map(json).collect();
     assert_eq!(wire.len(), warnings.len());

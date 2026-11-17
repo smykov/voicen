@@ -1,0 +1,14 @@
+guarantee: meta write fails -> nothing handed out (swallow at write_meta Err arm)
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+                Err(e) => self.deps.log.write(LogEvent::CallStorageFailed {
+                    kind: StorageKind::Meta,
+                    os: e.raw_os_error(),
+                }),
+--- new
+                Err(e) => { written = true; self.deps.log.write(LogEvent::CallStorageFailed {
+                    kind: StorageKind::Meta,
+                    os: e.raw_os_error(),
+                }) }
+--- end

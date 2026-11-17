@@ -1,0 +1,8 @@
+guarantee: AC-2: the tray Error is not cleared by opening the menu
+file: crates/voicen-core/src/recording/mod.rs
+added_by: test-writer
+--- old
+            error: self.error || self.worker_stopped,
+--- new
+            error: self.error,
+--- end
