@@ -1,0 +1,11 @@
+guarantee: the Dropped report is kept (existing test)
+file: crates/voicen-core/src/call/capture.rs
+added_by: test-writer
+--- old
+        self.retire(&mut step);
+        self.emit_zeros(&mut step, zeros);
+        step.reports.push(Report::Dropped { blocks, ms });
+--- new
+        self.retire(&mut step);
+        self.emit_zeros(&mut step, zeros);
+--- end
