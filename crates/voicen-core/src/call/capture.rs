@@ -1422,6 +1422,7 @@ mod tests {
         let mut tl = mic();
         let mut out = Out::default();
         let mut dropped_step = None;
+        let mut pre_drop = (0usize, 0usize);
         for e in events {
             match e {
                 TrackEvent::Block {
@@ -1433,6 +1434,8 @@ mod tests {
                     out.add(tl.push(&interleaved, rate, channels, at).unwrap());
                 }
                 TrackEvent::Dropped { blocks, ms } => {
+                    let end = in_pos_of(&tl);
+                    pre_drop = (end - usize::try_from(tl.written()).unwrap(), end);
                     let step = tl.dropped(blocks, ms);
                     dropped_step = Some(step.clone());
                     out.add(step);
@@ -1441,9 +1444,19 @@ mod tests {
             }
         }
         let step = dropped_step.unwrap();
-        // 30 ms is below the 40 ms step threshold, yet the fill is exact, not left to the loop.
-        assert_eq!(step.pcm.len(), 480);
-        assert!(step.pcm.iter().all(|x| *x == 0.0));
+        // T-219: the drop first flushes what the resampler holds (up to the pre-drop
+        // round(in_pos)), then exactly 30 ms of zeros. 30 ms is below the 40 ms step
+        // threshold, yet the fill is exact, not left to the loop.
+        let (tail_len, _) = pre_drop;
+        assert!(tail_len > 0, "the resampler holds a latent tail");
+        assert_eq!(step.pcm.len(), tail_len + 480);
+        assert!(step.pcm[tail_len..].iter().all(|x| *x == 0.0));
+        assert!(
+            step.pcm[..tail_len.saturating_sub(8)]
+                .iter()
+                .all(|x| *x > 0.4),
+            "the pre-drop tail comes first"
+        );
         assert_eq!(step.reports, vec![Report::Dropped { blocks: 3, ms: 30 }]);
         // The next block lands where the dropped ones would have ended.
         feed(&mut tl, &mut out, 50, 100, 10, 0.5);
@@ -1453,6 +1466,82 @@ mod tests {
             tl.written()
         );
         assert_eq!(tl.reanchors(), 0);
+    }
+
+    /// The converter's input position, rounded: where the drop's silence must start.
+    fn in_pos_of(tl: &Timeline) -> usize {
+        tl.conv.as_ref().expect("a live converter").in_pos().round() as usize
+    }
+
+    #[test]
+    fn a_drop_writes_the_resampler_tail_before_its_silence() {
+        // 16 kHz: 20 ms of tone, so the sinc delay is the whole latent tail.
+        let mut tl = mic();
+        let mut out = Out::default();
+        feed(&mut tl, &mut out, 0, 20, 10, 0.5);
+        let written = usize::try_from(tl.written()).unwrap();
+        let end = in_pos_of(&tl);
+        let delay = tl.conv.as_ref().unwrap().delay().ceil() as usize;
+        assert!(end > written, "the resampler holds a latent tail");
+
+        let step = tl.dropped(3, 30);
+        assert_eq!(step.pcm.len(), end - written + 480);
+        out.add(step);
+        feed(&mut tl, &mut out, 50, 100, 10, 0.0);
+        out.add(tl.flush());
+
+        let pcm = &out.pcm;
+        // The tail is written first, before any of the silence.
+        assert!(
+            pcm[written..end - 8].iter().all(|x| (x - 0.5).abs() < 0.1),
+            "tail {:?}",
+            &pcm[written..end]
+        );
+        // Then exactly 30 ms of silence from the pre-drop in_pos.
+        assert!(pcm[end..end + 480].iter().all(|x| *x == 0.0));
+        // No tone fragment after the silence starts (plus the filter delay).
+        assert!(
+            pcm[end + delay + 2..].iter().all(|x| x.abs() < 0.01),
+            "a pre-drop fragment plays after the gap"
+        );
+        assert!(near(tl.written(), 1_600, 1), "written {}", tl.written());
+        assert_eq!(pcm.len() as u64, tl.written());
+    }
+
+    #[test]
+    fn a_48k_drop_writes_the_fifo_remainder_and_the_tail_before_its_silence() {
+        // 15 ms blocks at 48 kHz: one 10 ms chunk runs, 5 ms (80 output samples) stay queued.
+        let mut tl = mic();
+        let mut out = Out::default();
+        let tone = vec![0.5f32; 720];
+        out.add(tl.push(&tone, 48_000, 1, ms(0)).unwrap());
+        let written = usize::try_from(tl.written()).unwrap();
+        let end = in_pos_of(&tl);
+        let delay = tl.conv.as_ref().unwrap().delay().ceil() as usize;
+        assert!(end >= written + 80, "the fifo and the delay hold a tail");
+
+        let step = tl.dropped(2, 20);
+        assert_eq!(step.pcm.len(), end - written + 320);
+        out.add(step);
+        let quiet = vec![0.0f32; 720];
+        for t in [35, 50, 65, 80] {
+            out.add(tl.push(&quiet, 48_000, 1, ms(t)).unwrap());
+        }
+        out.add(tl.flush());
+
+        let pcm = &out.pcm;
+        assert!(
+            pcm[written..end - 8].iter().all(|x| (x - 0.5).abs() < 0.1),
+            "tail {:?}",
+            &pcm[written..end]
+        );
+        assert!(pcm[end..end + 320].iter().all(|x| *x == 0.0));
+        assert!(
+            pcm[end + delay + 2..].iter().all(|x| x.abs() < 0.01),
+            "a pre-drop fragment plays after the gap"
+        );
+        assert!(near(tl.written(), 1_520, 1), "written {}", tl.written());
+        assert_eq!(pcm.len() as u64, tl.written());
     }
 
     #[test]
