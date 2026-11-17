@@ -72,7 +72,8 @@
 //! trait CallIndicator: Send + Sync   // called INSIDE the session lock, never blocks
 //!     { set_state(&self, &IndicatorState); set_tick(&self, &IndicatorTick); set_call_recording(&self, bool) }
 //! trait CallShell: Send + Sync       // called AFTER the lock is released
-//!     { notice(&self, CallNotice); open_calls_tab(&self) }
+//!     { notice(&self, CallNotice); open_calls_tab(&self);
+//!       changed(&self, root: &Path, id: &CallId) }   // T-142: once per Started and once per stop
 //! trait CallSettingsPort: Send + Sync
 //!     { snapshot(&self) -> Arc<Settings>;
 //!       remember_warned_host(&self, &ProviderHost) -> Result<(), WarnedHostFailed> }
@@ -103,7 +104,7 @@ use voicen_core::call::session::{
     CallDeps, CallIndicator, CallSession, CallSettingsPort, CallShell, SubtitleConsumer,
 };
 use voicen_core::call::{
-    CallNotice, CallStore, CaptureStamp, CommunicationsCheck, DeviceEvent, DeviceEvents,
+    CallId, CallNotice, CallStore, CaptureStamp, CommunicationsCheck, DeviceEvent, DeviceEvents,
     DeviceEventsFactory, EndpointId, LossCause, OpenError, Track, TrackDevice, TrackSink,
     TrackSource,
 };
@@ -695,6 +696,11 @@ pub enum ShellCall {
 pub struct FakeShell {
     session: Mutex<Option<Arc<CallSession>>>,
     calls: Mutex<Vec<(ShellCall, bool)>>,
+    /// T-142: every `changed(root, id)`: (root, id text, session lock held). Kept apart
+    /// from `calls` so the exact-vector assertions on notices stay as they are.
+    changes: Mutex<Vec<(PathBuf, String, bool)>>,
+    /// The first notice or change seen, in order: `true` = a change (T-142 ordering).
+    trace: Mutex<Vec<bool>>,
     /// T-139: every `call_ready(dir)`: the dir, whether the session lock was held, whether
     /// `is_recording()` (the blocking read) answered false from inside the call.
     ready: Mutex<Vec<(PathBuf, bool, bool)>>,
@@ -707,6 +713,8 @@ impl FakeShell {
         Arc::new(FakeShell {
             session: Mutex::new(None),
             calls: Mutex::new(Vec::new()),
+            changes: Mutex::new(Vec::new()),
+            trace: Mutex::new(Vec::new()),
             ready: Mutex::new(Vec::new()),
             order: Mutex::new(Vec::new()),
         })
@@ -717,6 +725,7 @@ impl FakeShell {
     }
 
     fn record(&self, call: ShellCall) {
+        lock(&self.trace).push(false);
         lock(&self.order).push(match call {
             ShellCall::Notice(_) => "notice",
             ShellCall::OpenCallsTab => "tab",
@@ -733,6 +742,24 @@ impl FakeShell {
     /// `true` for each request that ran with the session lock held.
     pub fn held_flags(&self) -> Vec<bool> {
         lock(&self.calls).iter().map(|(_, h)| *h).collect()
+    }
+
+    /// T-142: the `changed(root, id)` requests, in order.
+    pub fn changes(&self) -> Vec<(PathBuf, String)> {
+        lock(&self.changes)
+            .iter()
+            .map(|(r, i, _)| (r.clone(), i.clone()))
+            .collect()
+    }
+
+    /// T-142: `true` for each `changed` that ran with the session lock held.
+    pub fn change_held_flags(&self) -> Vec<bool> {
+        lock(&self.changes).iter().map(|(_, _, h)| *h).collect()
+    }
+
+    /// T-142: the order of notices (`false`) and changes (`true`).
+    pub fn order_trace(&self) -> Vec<bool> {
+        lock(&self.trace).clone()
     }
 
     /// T-139: the dirs `call_ready` was called with, in order.
@@ -774,6 +801,21 @@ impl CallShell for FakeShell {
 
     fn open_calls_tab(&self) {
         self.record(ShellCall::OpenCallsTab);
+    }
+
+    fn changed(&self, root: &Path, id: &CallId) {
+        let session = lock(&self.session).clone();
+        // The T-007 pattern: a shell that takes the session lock must not deadlock. The
+        // blocking read runs only when the lock is free, so a violation fails the held
+        // flag below instead of hanging the suite.
+        let held = session
+            .as_ref()
+            .is_some_and(|s| s.try_is_recording().is_none());
+        if let Some(s) = session.filter(|_| !held) {
+            let _ = s.is_recording();
+        }
+        lock(&self.trace).push(true);
+        lock(&self.changes).push((root.to_path_buf(), id.as_str().to_string(), held));
     }
 
     fn call_ready(&self, dir: &Path) {

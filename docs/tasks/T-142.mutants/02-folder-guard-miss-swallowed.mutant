@@ -1,0 +1,16 @@
+guarantee: I3, P-009: a foreign root or bad id is notFound before any fs access
+file: crates/voicen-core/src/call/storage.rs
+added_by: test-writer
+--- old
+    pub fn folder(&self, calls: &CallSettings, root: &str, id: &str) -> Result<PathBuf, CallError> {
+        let (root, id) = guard(calls, &self.roots.default_root(), root, id)?;
+--- new
+    pub fn folder(&self, calls: &CallSettings, root: &str, id: &str) -> Result<PathBuf, CallError> {
+        let (root, id) = match guard(calls, &self.roots.default_root(), root, id) {
+            Ok(v) => v,
+            Err(_) => {
+                let dir = PathBuf::from(root).join(id);
+                return if dir.is_dir() { Ok(dir) } else { Err(CallError::not_found()) };
+            }
+        };
+--- end

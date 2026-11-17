@@ -57,4 +57,4 @@ The page renders only what the `calls_*` commands and `settings_get` return, thr
 
 ## Open
 
-- T-142 must grant `allow-settings-get` and the event listen to the `calls` label (`docs/decisions/ipc-acl.md`); T-143's tests use the mocked IPC and do not prove the grant.
+- none. Closed by T-142 (2026-11-16): `capabilities/calls.json` grants `allow-settings-get` and the event listen to the `calls` label (`docs/decisions/ipc-acl.md`; pinned by `src-tauri/tests/app_acl.rs`, Windows CI). T-143's own tests use the mocked IPC. D8's order (all listeners, then the first `calls_list`) is what the shell's `calls://open` delivery relies on: `docs/decisions/calls-window.md`.

@@ -16,7 +16,7 @@ use voicen_core::hotkey_registrar::HotkeyRegistrar;
 use voicen_core::local_models::catalog::MODELS;
 use voicen_core::local_models::download::DiskSpace;
 use voicen_core::local_models::service::LocalModels;
-use voicen_core::platform::{AudioSource, Notifier};
+use voicen_core::platform::{AudioSource, Clipboard, Notifier};
 use voicen_core::secrets::CredentialStore;
 use voicen_core::settings::gate::LaunchArgs;
 use voicen_core::settings::service::SettingsService;
@@ -62,7 +62,12 @@ fn commands<R: Runtime>(builder: Builder<R>) -> Builder<R> {
         local_models::local_model_download,
         local_models::local_model_cancel_download,
         local_models::local_model_delete,
-        overlay::overlay_ready
+        overlay::overlay_ready,
+        call::calls_list,
+        call::calls_get,
+        call::calls_copy_markdown,
+        call::calls_export,
+        call::calls_open_folder
     ])
 }
 
@@ -312,7 +317,8 @@ fn release_launch_args() -> LaunchArgs {
 }
 
 /// The release dictation ports (T-006): the microphones `wire` manages (T-012:
-/// the same source as `settings_list_microphones`), the clipboard, the paster, the engine of the settings (`engine::engine_for`), the
+/// the same source as `settings_list_microphones`), the process's one clipboard writer
+/// (`clipboard`, shared with the call part, T-142), the paster, the engine of the settings (`engine::engine_for`), the
 /// tray and the overlay through [`dictation::ShellIndicator`], and the
 /// `SettingsService`'s own instances: `credentials`, its key store, and `hotkeys`,
 /// its hotkey registrar (T-055). `detector` is the dictation half of the one
@@ -322,11 +328,12 @@ fn release_ports<R: Runtime>(
     app: &AppHandle<R>,
     credentials: Arc<dyn CredentialStore>,
     hotkeys: Arc<win::hotkey::HotkeyRegistrarHandle>,
+    clipboard: Arc<dyn Clipboard>,
     detector: Result<Box<dyn SpeechDetector>, VadError>,
 ) -> dictation::DictationPorts {
     dictation::DictationPorts {
         audio: settings_ipc::managed_microphones(app),
-        clipboard: Arc::new(win::clipboard::WinClipboard::new()),
+        clipboard,
         paster: Arc::new(win::paste::WinPaster::new()),
         engine_factory: None,
         indicator: Arc::new(dictation::ShellIndicator::new(app)),
@@ -342,6 +349,7 @@ fn release_ports<R: Runtime>(
     _app: &AppHandle<R>,
     _credentials: Arc<dyn CredentialStore>,
     _hotkeys: Arc<win::hotkey::HotkeyRegistrarHandle>,
+    _clipboard: Arc<dyn Clipboard>,
     _detector: Result<Box<dyn SpeechDetector>, VadError>,
 ) -> dictation::DictationPorts {
     compile_error!(
@@ -352,12 +360,15 @@ fn release_ports<R: Runtime>(
 
 /// The release call ports (T-128): the two WASAPI track captures, the free-space probe
 /// (`GetDiskFreeSpaceExW`), the system monotonic clock, plain track files, the process's
-/// one notifier (`notifier`, shared with the dictation session) and `<data_dir>/calls`
-/// as the default call root; for the pass worker (T-139) the `SettingsService`'s own key
-/// store (`credentials`) and the pass half of the one [`release_detector`] load.
+/// one notifier (`notifier`, shared with the dictation session), `<data_dir>/calls`
+/// as the default call root, for the Calls window (T-142) the process's one clipboard
+/// writer (`clipboard`, the dictation's), the Explorer opener and the native save dialog,
+/// and for the pass worker (T-139) the `SettingsService`'s own key store (`credentials`)
+/// and the pass half of the one [`release_detector`] load.
 #[cfg(windows)]
 fn release_call_ports(
     notifier: Arc<dyn Notifier>,
+    clipboard: Arc<dyn Clipboard>,
     credentials: Arc<dyn CredentialStore>,
     detector: Option<Arc<dyn SpeechSpans>>,
 ) -> call::CallPorts {
@@ -368,6 +379,9 @@ fn release_call_ports(
         open_track: call::file_opener(),
         notifier,
         calls_root: paths::data_dir().join("calls"),
+        clipboard,
+        folder: Arc::new(win::shell_open::ShellOpener),
+        save: Arc::new(win::save_dialog::WinSaveDialog),
         credentials,
         detector,
     }
@@ -376,10 +390,22 @@ fn release_call_ports(
 #[cfg(not(windows))]
 fn release_call_ports(
     _notifier: Arc<dyn Notifier>,
+    _clipboard: Arc<dyn Clipboard>,
     _credentials: Arc<dyn CredentialStore>,
     _detector: Option<Arc<dyn SpeechSpans>>,
 ) -> call::CallPorts {
     compile_error!("the Voicen app runs on Windows only: the call tracks are WASAPI captures")
+}
+
+/// The process's one clipboard writer (T-142): the FR-10 exclusion formats on every write.
+#[cfg(windows)]
+fn release_clipboard() -> Arc<dyn Clipboard> {
+    Arc::new(win::clipboard::WinClipboard::new())
+}
+
+#[cfg(not(windows))]
+fn release_clipboard() -> Arc<dyn Clipboard> {
+    compile_error!("the Voicen app runs on Windows only: the clipboard is the Win32 clipboard")
 }
 
 /// The one load of the bundled speech detector per process (T-102, T-139), from the app's
@@ -527,10 +553,19 @@ pub fn run() {
         hotkeys,
         notifier,
     } = shared;
+    // The one clipboard writer of the process (T-142, P-011): the dictation and the Calls
+    // window's copy share this instance.
+    let clipboard = release_clipboard();
     // The one detector load (T-139): one half to dictation, one to the call pass worker.
     let (detector, spans) = release_detector(app.handle());
     let call_credentials = Arc::clone(&credentials);
-    let ports = release_ports(app.handle(), credentials, hotkeys, detector);
+    let ports = release_ports(
+        app.handle(),
+        credentials,
+        hotkeys,
+        Arc::clone(&clipboard),
+        detector,
+    );
     let dictation =
         dictation::start_dictation_with(app.handle(), ports, Arc::clone(&notifier)).ok();
     // The call part (T-128), after the tray exists: the one call session, its request
@@ -538,7 +573,7 @@ pub fn run() {
     // entries no-ops. The first launch's `--call` switch is applied after it.
     let _ = call::start_calls(
         app.handle(),
-        release_call_ports(notifier, call_credentials, spans),
+        release_call_ports(notifier, clipboard, call_credentials, spans),
     );
     call::apply_launch(app.handle(), &launch_args);
     app.run(move |app, event| {

@@ -1,0 +1,16 @@
+guarantee: I6: never on a repeated toggle (AlreadyOn)
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+            if inner.call.is_some() {
+                return Toggled::AlreadyOn;
+            }
+            self.deps.log.write(LogEvent::CallRequested { source });
+--- new
+            if let Some(c) = inner.call.as_ref() {
+                let d = c.dir.clone();
+                self.announce(&d);
+                return Toggled::AlreadyOn;
+            }
+            self.deps.log.write(LogEvent::CallRequested { source });
+--- end

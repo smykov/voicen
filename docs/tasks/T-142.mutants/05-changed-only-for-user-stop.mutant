@@ -1,0 +1,12 @@
+guarantee: I6: tick stops (max_length, low_disk, storage) and every stop reason announce changed
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+        self.deps.shell.notice(notice);
+        self.announce(dir);
+--- new
+        self.deps.shell.notice(notice);
+        if matches!(reason, StopReason::User) {
+            self.announce(dir);
+        }
+--- end

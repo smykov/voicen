@@ -50,7 +50,7 @@ use crate::call::capture::{
 };
 use crate::call::codec::{OpusOgg, SyncWrite, TrackEncoder};
 use crate::call::events::{
-    CallNotice, CallSource, CallState, CallWarning, DeviceCause, EndpointId, RefusedPart,
+    CallId, CallNotice, CallSource, CallState, CallWarning, DeviceCause, EndpointId, RefusedPart,
     RefusedReason, SilentRule, StopReason, StorageKind, Track,
 };
 use crate::call::indicator::{IndicatorState, IndicatorTick, WarningList};
@@ -115,6 +115,9 @@ pub trait CallShell: Send + Sync {
     fn notice(&self, notice: CallNotice);
     /// Opens the Settings window on its Calls tab (every `part=root` refusal, #243).
     fn open_calls_tab(&self);
+    /// The call `id` under `root` changed state (T-142): once when it starts recording and
+    /// once when it stops, whatever stopped it. Never for a refused or repeated toggle.
+    fn changed(&self, root: &Path, id: &CallId);
     /// The folder of a call a stop just left ready-to-transcribe (its `meta.json`
     /// written): once per such stop, after the stop's [`CallShell::notice`]. A stop that
     /// left the meta `recording` (a `storage_error` stop, a failed meta write) hands
@@ -488,17 +491,18 @@ impl CallSession {
             let mut inner = self.lock();
             self.stop_locked(&mut inner, reason)
         };
-        if let Some(stop) = &stopped {
-            self.after_stop(stop);
+        if let Some((stop, dir)) = &stopped {
+            self.after_stop(stop, dir);
         }
         stopped.is_some()
     }
 
     /// The stop under the session lock: the writer hands the call back (or the captures
-    /// close), then [`CallSession::finish`]. What the stop did (see `finish`); `None`
-    /// when no call was recording.
-    fn stop_locked(&self, inner: &mut Inner, reason: StopReason) -> Option<Stopped> {
+    /// close), then [`CallSession::finish`]. What the stop did (see `finish`) and the
+    /// call's folder; `None` when no call was recording.
+    fn stop_locked(&self, inner: &mut Inner, reason: StopReason) -> Option<(Stopped, PathBuf)> {
         let call = inner.call.take()?;
+        let dir = call.dir.clone();
         let rec = if inner.subtitles {
             inner.captures.as_ref().and_then(|c| {
                 let rec = c.command(Command::Detach).ok().flatten();
@@ -508,13 +512,14 @@ impl CallSession {
         } else {
             inner.captures.take().and_then(|c| c.close().ok().flatten())
         };
-        Some(self.finish(call, rec, reason))
+        Some((self.finish(call, rec, reason), dir))
     }
 
     /// The one notice of a stop, after the lock: a stop the session decided itself
     /// (`max_length`, `low_disk`, `storage_error`) says why; any other says the call is
-    /// saved and goes to transcription.
-    fn notice_stopped(&self, reason: StopReason) {
+    /// saved and goes to transcription. Then the one `changed` of the stop (T-142), so worker
+    /// and tick stops alike announce it.
+    fn notice_stopped(&self, reason: StopReason, dir: &Path) {
         let notice = match reason {
             StopReason::MaxLength | StopReason::LowDisk | StopReason::StorageError => {
                 CallNotice::Stopped { reason }
@@ -526,12 +531,25 @@ impl CallSession {
             | StopReason::Sleep => CallNotice::CallSavedTranscribing,
         };
         self.deps.shell.notice(notice);
+        self.announce(dir);
     }
 
-    /// What every stop does after the lock, in this order: the one notice, then the
-    /// ready folder to the shell (so a pass notice never overtakes "call saved").
-    fn after_stop(&self, stop: &Stopped) {
-        self.notice_stopped(stop.reason);
+    /// Tells the shell that the call in `dir` changed state; after the session lock.
+    fn announce(&self, dir: &Path) {
+        let id = dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(CallId::parse);
+        if let (Some(root), Some(id)) = (dir.parent(), id) {
+            self.deps.shell.changed(root, &id);
+        }
+    }
+
+    /// What every stop does after the lock, in this order: the one notice and the one
+    /// `changed` of the stop (T-142), then the ready folder to the shell (so a pass
+    /// notice never overtakes "call saved"). `dir` is the stopped call's folder.
+    fn after_stop(&self, stop: &Stopped, dir: &Path) {
+        self.notice_stopped(stop.reason, dir);
         if let Some(dir) = &stop.ready {
             self.deps.shell.call_ready(dir);
         }
@@ -573,8 +591,8 @@ impl CallSession {
                 }
             }
         };
-        if let Some(stop) = &stopped {
-            self.after_stop(stop);
+        if let Some((stop, dir)) = &stopped {
+            self.after_stop(stop, dir);
         }
     }
 
@@ -694,7 +712,7 @@ impl CallSession {
     // ---- start ----------------------------------------------------------------------
 
     fn start(&self, source: CallSource) -> Toggled {
-        let (toggled, ask_tab) = {
+        let (toggled, ask_tab, started) = {
             let mut inner = self.lock();
             if inner.call.is_some() {
                 return Toggled::AlreadyOn;
@@ -702,8 +720,9 @@ impl CallSession {
             self.deps.log.write(LogEvent::CallRequested { source });
             match self.open_call(&mut inner) {
                 Ok(call) => {
+                    let dir = call.dir.clone();
                     inner.call = Some(call);
-                    (Toggled::Started, false)
+                    (Toggled::Started, false, Some(dir))
                 }
                 Err(refusal) => {
                     self.deps.log.write(LogEvent::CallRefused {
@@ -716,12 +735,16 @@ impl CallSession {
                             reason: refusal.reason,
                         },
                         refusal.part == RefusedPart::Root,
+                        None,
                     )
                 }
             }
         };
         if ask_tab {
             self.deps.shell.open_calls_tab();
+        }
+        if let Some(dir) = started {
+            self.announce(&dir);
         }
         toggled
     }

@@ -910,6 +910,18 @@ impl CallStore {
         Ok(text.into_bytes())
     }
 
+    /// The guard, then the call folder itself (`calls_open_folder`, FR-033): a damaged call
+    /// (no meta.json) is allowed; a folder that is not there (or is not a folder) is
+    /// `notFound`. A guard miss is `notFound` before any filesystem call; no root is probed.
+    pub fn folder(&self, calls: &CallSettings, root: &str, id: &str) -> Result<PathBuf, CallError> {
+        let (root, id) = guard(calls, &self.roots.default_root(), root, id)?;
+        let dir = root.join(id.as_str());
+        if !dir.is_dir() {
+            return Err(CallError::not_found());
+        }
+        Ok(dir)
+    }
+
     /// The guard, then the listed entry of the call folder ([`load_entry`], as the list
     /// reads it): a folder that is not there is `notFound`, a damaged one `ioFailed`.
     fn open_call(
@@ -2693,6 +2705,87 @@ mod tests {
         fs::write(root.join(READY_ID).join("transcript.json"), TRANSCRIPT_TEXT)
             .expect("transcript");
         (calls_in(Some(&root), &[]), root)
+    }
+
+    // ---- T-142: CallStore::folder ----------------------------------------------------
+    // Assumed signature: `CallStore::folder(&self, calls: &CallSettings, root: &str,
+    // id: &str) -> Result<PathBuf, CallError>`: the guard, then `is_dir`; a damaged call
+    // (no meta.json) is allowed (FR-033 offers Open folder on it).
+
+    #[test]
+    fn folder_returns_the_folder_of_a_ready_and_of_a_damaged_call() {
+        // T-142 I3, Acceptance 2 (calls_open_folder). Bite: folder() built on open_call
+        // (refuses the damaged call with ioFailed); a folder that returns the root; the id
+        // not joined.
+        let f = fixture();
+        let (calls, root) = plant_ready(&f);
+        let text = wire_root(&root);
+        assert_eq!(
+            f.store.folder(&calls, &text, READY_ID),
+            Ok(root.join(READY_ID))
+        );
+        // Damaged: the folder exists, meta.json does not.
+        plant_value(&root, "2026-10-02_000000", None, true, true);
+        assert_eq!(
+            f.store.folder(&calls, &text, "2026-10-02_000000"),
+            Ok(root.join("2026-10-02_000000"))
+        );
+        // An earlier root resolves the same way.
+        let current = f.dir.path().join("current");
+        let later = calls_in(Some(&current), &[&root]);
+        assert_eq!(
+            f.store.folder(&later, &text, READY_ID),
+            Ok(root.join(READY_ID))
+        );
+    }
+
+    #[test]
+    fn folder_of_a_gone_call_is_not_found() {
+        // T-142 I3: a listed root whose call folder is not there (or is a plain file) is
+        // notFound, not a path to nothing. Bite: folder() = guard only, without `is_dir`.
+        let f = fixture();
+        let (calls, root) = plant_ready(&f);
+        let text = wire_root(&root);
+        assert_eq!(
+            f.store.folder(&calls, &text, "2026-10-01_000000"),
+            Err(not_found())
+        );
+        fs::write(root.join("2026-10-03_000000"), b"x").expect("a file under the id");
+        assert_eq!(
+            f.store.folder(&calls, &text, "2026-10-03_000000"),
+            Err(not_found())
+        );
+    }
+
+    #[test]
+    fn folder_refuses_a_foreign_root_and_a_bad_id_without_fs() {
+        // T-142 I3, P-009: a guard miss is notFound before any filesystem call. The stranger
+        // root holds a real call folder, so a folder() that tests the wire text as a path
+        // (or checks the disk first) would answer Ok. No probe is made either. Bite: wire
+        // root used as the path; `is_dir` before the guard; the id joined unparsed.
+        let f = fixture();
+        let (calls, root) = plant_ready(&f);
+        let stranger = f.dir.path().join("stranger");
+        fs::create_dir(&stranger).expect("stranger");
+        plant(&stranger, READY_ID, CallState::Ready);
+        assert_eq!(
+            f.store.folder(&calls, &wire_root(&stranger), READY_ID),
+            Err(not_found())
+        );
+        let text = wire_root(&root);
+        for id in ["..", "", "a/b", "2026-10-29_100000/..", "../calls"] {
+            assert_eq!(
+                f.store.folder(&calls, &text, id),
+                Err(not_found()),
+                "{id:?}"
+            );
+        }
+        assert_eq!(
+            f.store.folder(&calls, "", READY_ID),
+            Err(not_found()),
+            "an empty root"
+        );
+        assert!(f.roots.probed().is_empty(), "folder() probes no root");
     }
 
     #[test]

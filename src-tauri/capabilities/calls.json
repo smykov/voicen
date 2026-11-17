@@ -1,0 +1,18 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "calls",
+  "description": "Capability for the Calls window (label `calls`, created only by the call part's opener thread, src-tauri/src/call.rs, T-142): listen to and stop listening to events (calls://changed, calls://open, settings://changed), invoke the five calls_* commands its page uses, and settings_get (the page reads the UI language and the call hotkey, T-143). Nothing else: the page never shows, closes or destroys its window (least privilege, decision #45; app commands are ACL-checked per label, T-049, docs/decisions/ipc-acl.md).",
+  "windows": [
+    "calls"
+  ],
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "allow-settings-get",
+    "allow-calls-list",
+    "allow-calls-get",
+    "allow-calls-copy-markdown",
+    "allow-calls-export",
+    "allow-calls-open-folder"
+  ]
+}

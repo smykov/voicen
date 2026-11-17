@@ -1,0 +1,10 @@
+guarantee: I6: one changed per stop, whatever stopped it
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+        self.deps.shell.notice(notice);
+        self.announce(dir);
+--- new
+        self.deps.shell.notice(notice);
+        let _ = dir;
+--- end

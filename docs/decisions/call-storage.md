@@ -54,6 +54,7 @@ Tasks: T-125, T-141, T-144 (recovery, ownership) (wire, guard, export; `ipc.md` 
 - **Where it is enforced:**
   - `export_to` reserves `<file>.voicen-tmp`, then `-1` … `-9`, with `create_new` (`reserve_export_tmp`), and calls `fill_and_rename`; all ten names taken is `ioFailed{other}`. A file under a tmp name is never opened, truncated or removed.
   - `resolve_call` / `guard` compare the wire `root` for equality with the current or an earlier root of settings and parse `id` with `CallId::parse`; they make no filesystem call and build no path from wire text. A root that is not valid Unicode lists (`wire_root` is lossy) but cannot be opened.
+  - `CallStore::folder(calls, root, id)` (`calls_open_folder`, FR-033, T-142) runs the same `guard` first, then `is_dir` on `root/id`: a damaged call (no `meta.json`) is allowed, a folder that is gone (or not a folder) is `notFound`. A guard miss is `notFound` before any filesystem call.
   - Tests `a_root_that_is_not_current_or_remembered_is_not_found_without_fs`, `an_id_outside_the_grammar_is_not_found`, `export_never_touches_an_existing_tmp_name`, `export_write_or_sync_failure_removes_its_tmp_and_reports_the_reason`.
 - **Don't:** call `write_atomic` for a user-chosen folder, `canonicalize` or `starts_with` the wire root, or copy the tail.
 - **Developer deviation (T-141):** the tail syncs with `sync_data`, not `sync_all`, so `write_atomic` (meta.json) changed too. Contents and size are flushed, which is what a crash-safe rename needs; other metadata (timestamps) may lag. Not an owner decision.

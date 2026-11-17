@@ -322,7 +322,7 @@ fn run_chain_with(opts: Opts, before: impl FnOnce(&CallRig)) -> Chain {
     let mock = Mock::start(opts.status);
     let rig = CallRig::bare_with(as_port);
     save_api(&rig, &mock, opts.key);
-    rig.start_with(
+    rig.start_with_detector(
         opts.source.clone(),
         FakeDisk::with_available(100_000_000_000),
         plain_opener(),

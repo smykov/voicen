@@ -4,9 +4,9 @@
 /// `__app-acl__` ACL manifest, tauri 2.12.1 checks every app command against the capabilities:
 /// a command is invoked only from a window whose label a capability grants its
 /// `allow-<command>` (`capabilities/default.json` → `settings`, `capabilities/overlay.json` →
-/// `overlay`); a command missing here is refused from every window (T-049,
+/// `overlay`, `capabilities/calls.json` → `calls`, T-142); a command missing here is refused from every window (T-049,
 /// docs/decisions/ipc-acl.md; `tests/app_acl.rs` pins it on Windows CI).
-const APP_COMMANDS: [&str; 11] = [
+const APP_COMMANDS: [&str; 16] = [
     "get_build_info",
     "settings_get",
     "settings_save",
@@ -18,6 +18,11 @@ const APP_COMMANDS: [&str; 11] = [
     "local_model_cancel_download",
     "local_model_delete",
     "overlay_ready",
+    "calls_list",
+    "calls_get",
+    "calls_copy_markdown",
+    "calls_export",
+    "calls_open_folder",
 ];
 
 fn main() {
