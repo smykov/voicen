@@ -1,0 +1,12 @@
+guarantee: AC-1: pre-drop resampler samples are written before the silence
+file: crates/voicen-core/src/call/capture.rs
+added_by: test-writer
+--- old
+        self.retire(&mut step);
+        self.emit_zeros(&mut step, zeros);
+        step.reports.push(Report::Dropped { blocks, ms });
+--- new
+        self.conv = None;
+        self.emit_zeros(&mut step, zeros);
+        step.reports.push(Report::Dropped { blocks, ms });
+--- end

@@ -1,0 +1,12 @@
+guarantee: AC-2 failure branch: tone then dropped span -> no tone fragment after the silence
+file: crates/voicen-core/src/call/capture.rs
+added_by: test-writer
+--- old
+        self.retire(&mut step);
+        self.emit_zeros(&mut step, zeros);
+        step.reports.push(Report::Dropped { blocks, ms });
+--- new
+        self.emit_zeros(&mut step, zeros);
+        self.retire(&mut step);
+        step.reports.push(Report::Dropped { blocks, ms });
+--- end

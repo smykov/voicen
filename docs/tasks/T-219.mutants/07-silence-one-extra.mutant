@@ -1,0 +1,12 @@
+guarantee: AC-1: the write position stays exact (ms*16 zeros)
+file: crates/voicen-core/src/call/capture.rs
+added_by: test-writer
+--- old
+        self.retire(&mut step);
+        self.emit_zeros(&mut step, zeros);
+        step.reports.push(Report::Dropped { blocks, ms });
+--- new
+        self.retire(&mut step);
+        self.emit_zeros(&mut step, zeros + 1);
+        step.reports.push(Report::Dropped { blocks, ms });
+--- end
