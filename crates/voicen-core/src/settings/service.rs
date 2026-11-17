@@ -3828,6 +3828,61 @@ mod tests {
         assert!(Arc::ptr_eq(&before, &service.snapshot()));
     }
 
+    #[test]
+    fn a_taken_call_hotkey_releases_the_prepared_dictation_hotkey() {
+        // Both hotkeys changed and the call prepare fails: Refused on calls.hotkey
+        // only; the dictation registration prepared in step (4) is aborted once (no
+        // leak, no commit); no autostart, key or file step. Bite: the abort in step
+        // (4b) dropped (the dictation hotkey stays held by the hotkey thread).
+        let world = World::new(
+            FakeSettingsFile::with_bytes(&json(&with_start(sample(EngineKind::None), false))),
+            FakeCredentialStore::new(),
+        );
+        world.hotkeys.fail_prepare_call(true);
+        let (service, journal, _probe) = world.load_journaled_hotkeys();
+        let before = service.snapshot();
+
+        let mut draft = with_start(sample(EngineKind::None), true);
+        draft.hotkey = NEW_HOTKEY.into();
+        draft.calls.hotkey = NEW_CALL_HOTKEY.into();
+        assert_eq!(
+            service.save(req(draft, KeyEdits::default())),
+            SaveOutcome::Refused {
+                errors: vec![field_error(
+                    FieldId::CallHotkey,
+                    ErrorCode::HotkeyUnavailable
+                )],
+                form_error: None,
+            }
+        );
+        let calls = world.hotkeys.calls();
+        let dictation = calls
+            .iter()
+            .find_map(|c| match c {
+                RegistrarCall::Prepare(h, _) => Some(*h),
+                _ => None,
+            })
+            .expect("the dictation hotkey was prepared");
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|c| **c == RegistrarCall::Abort(dictation))
+                .count(),
+            1,
+            "{calls:?}"
+        );
+        assert!(
+            !calls.iter().any(|c| matches!(c, RegistrarCall::Commit(_))),
+            "{calls:?}"
+        );
+        assert!(
+            steps(&journal).iter().all(|s| matches!(s, Step::Hotkey(_))),
+            "{:?}",
+            steps(&journal)
+        );
+        assert!(Arc::ptr_eq(&before, &service.snapshot()));
+    }
+
     /// Every successful prepare is aborted once (the failed dictation prepare has
     /// no token to settle).
     fn assert_prepares_settled_by_abort(calls: &[RegistrarCall]) {

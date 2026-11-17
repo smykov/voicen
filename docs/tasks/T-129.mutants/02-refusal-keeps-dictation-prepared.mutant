@@ -1,0 +1,15 @@
+guarantee: I4: a refused call hotkey releases the dictation registration prepared in step 4
+file: crates/voicen-core/src/settings/service.rs
+added_by: test-writer
+--- old
+                    if let Some(prepared) = prepared {
+                        self.deps.hotkeys.abort(prepared);
+                    }
+                    return refused(
+                        vec![FieldError::new(
+                            FieldId::CallHotkey,
+--- new
+                    return refused(
+                        vec![FieldError::new(
+                            FieldId::CallHotkey,
+--- end
