@@ -149,6 +149,16 @@ else
   echo "SKIP  C3 missing/unwritable (real shared dir present)"
 fi
 
+# C3d: the server does not start (a shim mounted over /usr/local/bin/sccache refuses --start-server)
+make_shared
+printf '#!/bin/sh\ncase "$1" in --start-server) echo "shim: refusing to start" >&2; exit 1 ;; esac\nexit 0\n' >"$WORK/sccache-shim"
+chmod 755 "$WORK/sccache-shim"
+run "$MAIN" "$WORK/c3d" "-e TW_SCCACHE_STATS=1 -v $WORK/sccache-shim:/usr/local/bin/sccache:ro" -- 'echo "w=${RUSTC_WRAPPER-}"; rustc --version; exit 5'
+n="$(tw_lines "$ERR")"
+{ [ "$RC" = 5 ] && [ "$n" = 1 ] && grep -q '^tw-sccache: .*plain rustc' "$ERR" \
+    && grep -qx 'w=' "$OUT" && grep -q '^rustc ' "$OUT"; }
+check C3d "server start fails: command still runs, its exit code (5) kept, exactly one 'tw-sccache: ... plain rustc' line, RUSTC_WRAPPER empty (rc=$RC, lines=$n)" "$?"
+
 stdout_exit_case() { # <label> <extra docker args> <TW_SCCACHE_STATS value or "">
   local label="$1" dargs="$2" st="$3" envs=""
   [ -n "$st" ] && dargs="-e TW_SCCACHE_STATS=1 $dargs"
