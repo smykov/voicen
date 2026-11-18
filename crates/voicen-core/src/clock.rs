@@ -18,8 +18,10 @@
 //! let _ = voicen_core::clock::since(std::time::Instant::now());
 //! ```
 //!
-//! The same path to a public item of this module compiles, so the blocks above fail
-//! only because the two functions are `pub(crate)`:
+//! Stable rustdoc checks only that each block fails to compile, not the E0603 code
+//! (error numbers are nightly-only). The same path to a public item of this module
+//! compiles, which proves the module path is right; a rename of `instant` / `since`
+//! must update both blocks (T-089):
 //!
 //! ```
 //! let _ = voicen_core::clock::utc_compact(std::time::UNIX_EPOCH);
