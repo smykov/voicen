@@ -1,21 +1,23 @@
-//! T-171 (T-023 analysis (ii), spec 006 T010/T011): the commit that `build.rs`
-//! embeds as `VOICEN_COMMIT`, chosen by one pure function.
+//! The commit that `build.rs` embeds as `VOICEN_COMMIT`, chosen by one pure
+//! function (T-171; spec 006 T010/T011).
 //!
 //! Contract: the trim of the first non-blank of (the `VOICEN_COMMIT` env value, the
 //! stdout of a successful `git rev-parse`), else `"unknown"`: never empty, never
 //! padded.
 //!
-//! RED STAGE: `pick_commit` below is a characterization stub of what `build.rs`
-//! does today (the env value is filtered on its trim but returned untrimmed; git
-//! stdout is trimmed but may stay empty). It is the behaviour to be fixed in the
-//! implement stage, which also moves this file into `build.rs`'s use.
+//! `build.rs` includes this file with `#[path = "src/build_commit.rs"]` and runs the
+//! git call itself; the library compiles it only under `#[cfg(test)]` (`lib.rs`), for
+//! the unit tests below.
 
-/// CURRENT BEHAVIOUR of `build.rs` (to be fixed): see the module doc.
+/// The commit to embed: the trim of the first of `env`, `git` that is not blank,
+/// else `"unknown"`. `git` is the raw stdout of a successful `git rev-parse`.
 pub fn pick_commit(env: Option<&str>, git: Option<&str>) -> String {
-    env.filter(|c| !c.trim().is_empty())
-        .map(str::to_string)
-        .or_else(|| git.map(|s| s.trim().to_string()))
-        .unwrap_or_else(|| "unknown".to_string())
+    env.into_iter()
+        .chain(git)
+        .map(str::trim)
+        .find(|c| !c.is_empty())
+        .unwrap_or("unknown")
+        .to_string()
 }
 
 #[cfg(test)]
