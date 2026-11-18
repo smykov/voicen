@@ -743,6 +743,11 @@ ccheck v-contour-other-secret-prose            "" "$A|@# Secrets here|R4"
 ccheck v-contour-other-secret-oauth-in-next    "" "$N|@secrets.CLAUDE_CODE_OAUTH_TOKEN|R4"
 ccheck v-contour-other-secret-oauth-in-ci      "" "ci.yml|@# \${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}|R4"
 ccheck v-contour-other-secret-vars-in-ci       "" "ci.yml|@# \${{ vars.TEAMWRIGHT_AUTH }}|R4"
+# T-215: vars.TEAMWRIGHT_CONTOUR_PAUSE is the second owned variable (the passes are built at run time below, next to
+# ok-contour-tail); a longer name, another case and the other files are still R4.
+ccheck v-contour-other-secret-vars-pause-longer "" "$A|@vars.TEAMWRIGHT_CONTOUR_PAUSE_X|R4"
+ccheck v-contour-other-secret-vars-pause-lower  "" "$A|@vars.teamwright_contour_pause|R4"
+ccheck v-contour-other-secret-vars-pause-in-ci  "" "ci.yml|@# \${{ vars.TEAMWRIGHT_CONTOUR_PAUSE }}|R4"
 # The Telegram secrets, an escape, an unowned action, prose naming uses and a second release job.
 ccheck v-contour-telegram       "$A:R4" "$A|@secrets.TELEGRAM_BOT_TOKEN|R10"
 ccheck v-contour-escape         ""      "$A|@\\x41|R6"
@@ -1133,6 +1138,28 @@ if ! cu_need "ok-contour-tail"; then
   mk_ct ok-contour-tail
   run "ok-contour with the owned tail $cu (the guard's R9 per name)" 0 'ok:' "$tmp/ok-contour-tail"
   expect "ok-contour-tail: exactly two upload-artifact tokens in the dir (the installer upload and the tail)" test "$(tok_count "$tmp/ok-contour-tail")" = 2
+fi
+# T-215 R4: vars.TEAMWRIGHT_CONTOUR_PAUSE next to vars.TEAMWRIGHT_AUTH is accepted in the two contour files.
+# mk_pause <name> <file> <after line>: $tmp/<name> = ok-contour-tail with the variable's line inserted in <file>.
+mk_pause() {
+  local d="$tmp/$1"
+  mkdir -p "$d" && cp -p "$tmp/ok-contour-tail"/* "$d/" || return 1
+  sed -i "$3a\\          TEAMWRIGHT_CONTOUR_PAUSE: \${{ vars.TEAMWRIGHT_CONTOUR_PAUSE }}" "$d/$2"
+  grep -q -F 'vars.TEAMWRIGHT_CONTOUR_PAUSE }}' "$d/$2"
+}
+if ! cu_need "ok-contour-pause"; then
+  if mk_pause ok-contour-pause-agent teamwright-agent.yml 54; then
+    run "contour: vars.TEAMWRIGHT_CONTOUR_PAUSE in teamwright-agent.yml passes (R4 owns two variables)" 0 'ok:' "$tmp/ok-contour-pause-agent"
+  else
+    echo "FAIL ok-contour-pause-agent: cannot build the dir (fix the test)" >&2
+    failed=$((failed + 1))
+  fi
+  if mk_pause ok-contour-pause-next teamwright-next.yml 50; then
+    run "contour: vars.TEAMWRIGHT_CONTOUR_PAUSE in teamwright-next.yml passes (R4 owns two variables)" 0 'ok:' "$tmp/ok-contour-pause-next"
+  else
+    echo "FAIL ok-contour-pause-next: cannot build the dir (fix the test)" >&2
+    failed=$((failed + 1))
+  fi
 fi
 vct tail-missing "" f_none
 vct no-always "" f_no_always
