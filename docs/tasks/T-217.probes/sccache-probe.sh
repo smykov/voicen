@@ -170,6 +170,16 @@ n="$(tw_lines "$ERR")"
     && grep -qx 'w=' "$OUT" && grep -q '^rustc ' "$OUT"; }
 check C3d "server start fails: command still runs, its exit code (5) kept, exactly one 'tw-sccache: ... plain rustc' line, RUSTC_WRAPPER empty (rc=$RC, lines=$n)" "$?"
 
+# C3f (round 2): the mount is writable but the cache subdirectory cannot be created (a regular
+# file sits at $SHARED/cache) -> fallback, not a server on a missing cache dir
+if [ "$OWN" = 1 ]; then
+  chmod -R u+rwX "$SHARED/cache" 2>/dev/null; rm -rf "$SHARED/cache"; : >"$SHARED/cache"
+  fallback_case "cache directory not creatable (regular file at the path)" ""
+  rm -f "$SHARED/cache"
+else
+  echo "SKIP  C3f cache dir not creatable (real shared dir present)"
+fi
+
 # C3e: the server start hangs (a shim sleeps on --start-server); the entry must bound it
 make_shared
 printf '#!/bin/sh\ncase "$1" in --start-server) sleep 300 ;; esac\nexit 0\n' >"$WORK/sccache-hang"

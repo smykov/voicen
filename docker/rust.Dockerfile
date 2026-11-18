@@ -32,10 +32,13 @@ ENV CARGO_HOME=/usr/local/cargo
 # sccache cache for every tree's core runs"): sccache, pinned, from the official static musl
 # release tarball (a build tool of a never-published image, not a shipped dependency); the
 # sha256 is the release's own .sha256 asset, checked again on every build. The entry script is
-# the only place RUSTC_WRAPPER is set: it uses /tw-sccache when scripts/tw-run mounts the
-# shared host dir there (single writer by flock, readers READ_ONLY) and otherwise runs plain
-# rustc after one stderr line, so CI (which never has the dir) builds exactly as before.
-# SCCACHE_CACHE_SIZE caps the shared dir.
+# the only place RUSTC_WRAPPER is set: when scripts/tw-run mounts the shared host dir at
+# /tw-sccache it keeps sccache's cache in the subdirectory SCCACHE_DIR=/tw-sccache/cache and the
+# single-writer lock at /tw-sccache/.rw.lock, outside it (sccache's LRU eviction deletes every
+# file under SCCACHE_DIR); readers run READ_ONLY. Otherwise, or when the server does not start
+# within TW_SCCACHE_START_TIMEOUT (coreutils timeout), it runs plain rustc after one stderr
+# line, so CI (which never has the dir) builds exactly as before. SCCACHE_CACHE_SIZE caps the
+# cache.
 ARG SCCACHE_VERSION=v0.19.0
 ARG SCCACHE_SHA256=aa73c7270c997894038c0d8f0d297865f57569e1687883322bc431713d4bb9dd
 RUN set -e; t="sccache-${SCCACHE_VERSION}-x86_64-unknown-linux-musl" \
@@ -46,8 +49,8 @@ RUN set -e; t="sccache-${SCCACHE_VERSION}-x86_64-unknown-linux-musl" \
  && install -m 0755 "$t/sccache" /usr/local/bin/sccache \
  && rm -rf "$t" "$t.tar.gz" \
  && sccache --version \
- && command -v flock
-ENV SCCACHE_DIR=/tw-sccache SCCACHE_CACHE_SIZE=10G
+ && command -v flock && command -v timeout
+ENV SCCACHE_DIR=/tw-sccache/cache SCCACHE_CACHE_SIZE=10G
 COPY voicen-core-entry.sh /usr/local/bin/voicen-core-entry.sh
 RUN chmod 0755 /usr/local/bin/voicen-core-entry.sh
 ENTRYPOINT ["/usr/local/bin/voicen-core-entry.sh"]

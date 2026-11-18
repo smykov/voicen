@@ -4,13 +4,18 @@
 #
 #   voicen-core-entry.sh <command> [args...]      (scripts/tw-run passes `sh -c '<cmd>' sh ...`)
 #
-# The only place RUSTC_WRAPPER is set. With a usable shared cache directory ($SCCACHE_DIR,
-# /tw-sccache, mounted by scripts/tw-run from <main checkout>/.teamwright/cache/core/shared/
-# _tw-sccache only when that host dir exists) the command's rustc runs go through sccache:
-# the container holding `flock -n $SCCACHE_DIR/.rw.lock` for its whole life runs its server
-# READ_WRITE, every other container READ_ONLY (sccache's local cache allows one writer at a
-# time). Otherwise (dir absent, not writable by the container user, lock or server failure)
-# it prints exactly one `tw-sccache: ... plain rustc ...` line and runs the command as is.
+# The only place RUSTC_WRAPPER is set. Layout: scripts/tw-run mounts <main checkout>/
+# .teamwright/cache/core/shared/_tw-sccache at the mount root /tw-sccache ($TW_SCCACHE_MOUNT)
+# only when that host dir exists. sccache's cache is the subdirectory $SCCACHE_DIR
+# (/tw-sccache/cache, image ENV; created here); the single-writer lock is /tw-sccache/.rw.lock,
+# OUTSIDE $SCCACHE_DIR, because sccache's LRU eviction deletes every file under $SCCACHE_DIR and
+# a lock that is never accessed would be its first victim (review round 1, finding 1). With a
+# usable mount the command's rustc runs go through sccache: the container holding `flock -n` on
+# the lock for its whole life runs its server READ_WRITE, every other container READ_ONLY
+# (sccache's local cache allows one writer at a time). Otherwise (mount absent, not writable by
+# the container user, cache dir, lock or server failure, a server start that takes longer than
+# $TW_SCCACHE_START_TIMEOUT seconds, default 20) it prints exactly one
+# `tw-sccache: ... plain rustc ...` line and runs the command as is.
 #
 # Contract: every stderr line it adds starts with `tw-sccache: ` (the stats table of
 # TW_SCCACHE_STATS=1 is sccache's own output); it never writes to stdout (scripts/licenses/
@@ -20,22 +25,27 @@
 
 say() { printf 'tw-sccache: %s\n' "$*" >&2; }
 
-# Fallback: one line, no wrapper, the command replaces this shell (exit code unchanged).
+# Fallback: one line, no wrapper, the command replaces this shell (exit code unchanged). The
+# lock is given back, except after a failed server start (keep_lock=1): a half-started server
+# of this container may still be alive, so the writer role stays here until the container ends.
+keep_lock=0
 plain() {
   say "$1; running plain rustc (no compiler cache)"
   shift
   unset RUSTC_WRAPPER SCCACHE_LOCAL_RW_MODE
-  exec 9>&-
+  [ "$keep_lock" = 1 ] || exec 9>&-
   exec "$@"
 }
 
 [ $# -gt 0 ] || set -- bash
 
-dir="${SCCACHE_DIR:-/tw-sccache}"
-lock="$dir/.rw.lock"
+mount="${TW_SCCACHE_MOUNT:-/tw-sccache}"
+dir="${SCCACHE_DIR:-$mount/cache}"
+lock="$mount/.rw.lock"
 command -v sccache >/dev/null 2>&1 || plain "sccache not installed" "$@"
-[ -d "$dir" ] || plain "no shared cache directory $dir" "$@"
-[ -w "$dir" ] || plain "shared cache directory $dir is not writable" "$@"
+[ -d "$mount" ] || plain "no shared cache directory $mount" "$@"
+[ -w "$mount" ] || plain "shared cache directory $mount is not writable" "$@"
+mkdir -p "$dir" 2>/dev/null && [ -w "$dir" ] || plain "cannot create cache directory $dir" "$@"
 { [ -e "$lock" ] || : >>"$lock"; } 2>/dev/null
 [ -r "$lock" ] || plain "cannot open $lock" "$@"
 # `command exec`: a failed redirection must not end the shell before the fallback line. The
@@ -53,8 +63,16 @@ export SCCACHE_DIR="$dir" SCCACHE_LOCAL_RW_MODE="$mode"
 # A server I/O failure falls back to a local compile instead of failing the build; the server
 # lives as long as this container (no idle shutdown before the final stats).
 export SCCACHE_IGNORE_SERVER_IO_ERROR=1 SCCACHE_IDLE_TIMEOUT=0
-# Only this shell holds the lock: neither the server nor the command inherits fd 9.
-sccache --start-server >/dev/null 2>&1 </dev/null 9>&- || plain "sccache server did not start" "$@"
+# Only this shell holds the lock: neither the server nor the command inherits fd 9. The start
+# is bounded (coreutils timeout signals its whole process group, KILL 2 s after TERM); on a
+# failure or timeout a bounded best-effort stop, then the fallback. Any server left over dies
+# with the container, which ends when the command (PID 1 after exec) ends.
+t="${TW_SCCACHE_START_TIMEOUT:-20}"
+if ! timeout -k 2 "$t" sccache --start-server >/dev/null 2>&1 </dev/null 9>&-; then
+  keep_lock=1
+  timeout -k 1 5 sccache --stop-server >/dev/null 2>&1 </dev/null 9>&-
+  plain "sccache server did not start within ${t}s" "$@"
+fi
 
 [ "${TW_SCCACHE_STATS:-}" = 1 ] && say "mode=$mode"
 export RUSTC_WRAPPER=sccache
