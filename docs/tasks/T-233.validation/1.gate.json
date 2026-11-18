@@ -1,0 +1,13 @@
+{
+ "agent_id": "a8bbf02c4e2a0de83",
+ "agent_type": "task-validator",
+ "commit": "69931a4ee4587cf3fc4e62a22daedddd162e6cdb",
+ "gate": "validation",
+ "path": "docs/tasks/T-233.validation/1.md",
+ "round": 1,
+ "session_id": "e136a9f6-80a6-465a-a6ca-2a581f557a81",
+ "sha256": "f244e555a91b693732cc2141feecbfde554238111bf414c2db2192fe39bf165c",
+ "task": "T-233",
+ "ts": "2026-11-18T10:47:31Z",
+ "verdict": "NEEDS_OWNER"
+}
