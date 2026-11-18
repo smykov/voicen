@@ -20,7 +20,8 @@
 //!     creds: Arc<dyn CredentialStore>, primary: Option<Arc<dyn SpeechSpans>>,
 //!     events: Arc<dyn PassEvents>, clock: Arc<dyn MonotonicClock>)   the production runner
 //! PassQueue::new(store: Arc<CallStore>, runner: Arc<dyn PassRunner>)  one worker thread; Drop
-//!                                  lets the running pass end and drops what is still queued
+//!                                  drops what is still queued, cancels the running pass and
+//!                                  joins: it returns once the requests in flight answer (T-221)
 //!   enqueue(&self, dir: &Path)                    the stop path / start-up `Recovery.queue`:
 //!                                                  no meta change; a call queued or running is
 //!                                                  not queued twice
@@ -1084,13 +1085,14 @@ fn dropping_the_queue_with_a_running_pass_cancels_it_and_the_next_start_queues_i
 
 #[test]
 fn drop_while_the_engine_call_is_blocked_dispatches_nothing_more_and_returns_when_it_answers() {
+    // `w` owns the call folder's TempDir: it stays bound until the end of the test.
     let BlockedPass {
+        w: _w,
         dir,
         gate,
         engine,
         runner,
         q,
-        ..
     } = blocked_pass();
     let _open = OpenOnExit(gate.clone());
 
