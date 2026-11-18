@@ -35,6 +35,8 @@ use std::sync::mpsc::{channel, Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, UNIX_EPOCH};
 
+use common::deadlines::production_defaults;
+use common::download::{slow_trickle, trickle_lasts};
 use common::os_answer::{in_time, OS_ANSWER_BUDGET};
 use common::timing::{deadline, left, M};
 use serde_json::{json, Value};
@@ -55,25 +57,20 @@ use voicen_core::settings::file::{FakeSettingsFile, FileCall};
 use voicen_core::settings::service::{SettingsDeps, SettingsService};
 use voicen_core::settings::{defaults, EngineKind, LoadOutcome, Settings};
 use voicen_core::test_support::local_models::{
-    dir_entries, five_entries, model_bytes, FakeDisk, Serve, Server, NEEDED, SIZE,
+    dir_entries, five_entries, model_bytes, FakeDisk, Serve, Server, NEEDED,
 };
 use voicen_core::test_support::TempDir;
-use voicen_core::timeouts::Timeouts;
 
 const OS: Option<&str> = Some("en-US");
 /// Long enough for any local end event; a hang fails the test instead of the run.
 const END_WAIT: Duration = OS_ANSWER_BUDGET;
-
-fn timeouts() -> Timeouts {
-    in_time()
-}
 
 #[test]
 fn helper_deadlines_and_end_wait_are_at_the_budget_scale() {
     // T-111: connect and no-data limits are in-time ones (a loopback connect cannot be
     // delayed, so the value is pinned) and the hang-ender wait is far above what any
     // awaited end needs. Bite: the old connect 2 s, no-data 5 s, END_WAIT 10 s.
-    let t = timeouts();
+    let t = in_time();
     assert_eq!(t.connect, OS_ANSWER_BUDGET, "connect");
     assert!(
         t.download_no_data >= 2 * OS_ANSWER_BUDGET,
@@ -82,19 +79,17 @@ fn helper_deadlines_and_end_wait_are_at_the_budget_scale() {
     assert!(END_WAIT >= OS_ANSWER_BUDGET, "END_WAIT {END_WAIT:?}");
 }
 
-/// The transfer a delete lands in the middle of: 1 KiB every second (about 65 s). It
-/// outlasts the budget, so no test thread races its end (T-111 review 1 #1), and its
-/// test waits for the end, so it must end within [`TRICKLE_END_WAIT`].
-const TRICKLE_CHUNK: usize = 1024;
-const TRICKLE_EVERY: Duration = Duration::from_secs(1);
+/// The transfer a delete lands in the middle of is `common::download::slow_trickle()`
+/// (1 KiB every second, about 65 s). It outlasts the budget, so no test thread races
+/// its end (T-111 review 1 #1), and its test waits for the end, so it must end within
+/// [`TRICKLE_END_WAIT`].
 const TRICKLE_END_WAIT: Duration = Duration::from_secs(2 * OS_ANSWER_BUDGET.as_secs());
 
 #[test]
 fn the_trickle_outlasts_the_budget_and_ends_within_its_end_wait() {
     // T-111 review 1 #1. Bite: the old 1 KiB every 50 ms (~3.2 s); a trickle the test
     // would not see the end of.
-    let chunks = SIZE.div_ceil(TRICKLE_CHUNK as u64) as u32;
-    let trickle = TRICKLE_EVERY * chunks;
+    let trickle = trickle_lasts(&slow_trickle()).expect("slow_trickle() is a trickle");
     assert!(trickle > OS_ANSWER_BUDGET, "the trickle lasts {trickle:?}");
     assert!(
         TRICKLE_END_WAIT >= trickle + M,
@@ -140,7 +135,7 @@ fn world_with_creds(
     let server = Server::start(plan);
     let catalog: &'static [CatalogEntry] = five_entries(&server);
     let probe: Arc<dyn DiskSpace> = FakeDisk::with_available(10 * NEEDED);
-    let (models, cleanup) = LocalModels::open(dir.clone(), probe, timeouts(), catalog);
+    let (models, cleanup) = LocalModels::open(dir.clone(), probe, in_time(), catalog);
     if let Err(e) = cleanup {
         panic!("cleanup_at_start failed at open: {e}");
     }
@@ -579,8 +574,7 @@ fn a_delete_stalled_past_the_old_trickle_still_lands_during_the_download() {
 /// The running download with a delete `stall` after its first Progress.
 fn delete_during_a_download(stall: Duration) {
     let stored = settings(EngineKind::None, None);
-    let (chunk, every) = (TRICKLE_CHUNK, TRICKLE_EVERY);
-    let w = world(vec![Serve::Trickle { chunk, every }], &[], Some(&stored));
+    let w = world(vec![slow_trickle()], &[], Some(&stored));
     let (tx, rx) = channel();
     w.models
         .download("base", move |event: LocalModelEvent| {
@@ -836,7 +830,7 @@ fn after_deleting_the_loaded_model_a_retry_of_its_job_is_no_local_model_without_
             &voicen_core::test_support::fixtures::speech_3s(),
             &voicen_core::engine::TranscribeRequest {
                 language: None,
-                timeouts: Timeouts::default(),
+                timeouts: production_defaults(),
             },
         )
     });

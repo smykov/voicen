@@ -17,8 +17,12 @@ mod common;
 use std::time::Duration;
 
 use common::download::{
-    assert_no_url_in, assert_retry_succeeds, assert_verified_file_only, events, fixture,
-    fixture_with, fixture_with_timeouts, timeouts, Events, Fixture, Seen, END_WAIT, FILE, PART,
+    assert_no_url_in, assert_retry_succeeds, assert_verified_file_only, cancel_no_data,
+    cancel_stall_fixture, events, fixture, fixture_with, fixture_with_timeouts,
+    held_lookup_timeouts, in_time_gap_trickle, long_trickle, one_second_gap_trickle,
+    silent_headers_plan, stall_fixture, stall_no_data, stall_plan, stall_timeouts, trickle_fixture,
+    trickle_no_data, trickle_past_end_wait, trickle_plan, trickle_stall_fixture, Events, Fixture,
+    Seen, END_WAIT, FILE, HOLD, PART, TRICKLE_CHUNK, TRICKLE_EVERY,
 };
 use common::held::Held;
 use common::os_answer::{in_time, OS_ANSWER_BUDGET};
@@ -30,85 +34,10 @@ use voicen_core::models::DownloadedModels;
 use voicen_core::secrets::{KeyEdits, KeyPresence};
 use voicen_core::settings::validate::{validate, KeyEditsWithPresence};
 use voicen_core::settings::{defaults, EngineKind, ErrorCode, FieldId};
-use voicen_core::timeouts::Timeouts;
-
-/// How long a stalling or silent server holds the connection: past [`END_WAIT`], so a
-/// client that waits for the hold (no read timeout, reqwest's 30 s default, a cancel
-/// that waits for the read) ends after `END_WAIT` and the test fails on "no end
-/// event", not on a wall-clock ceiling (T-080 I2).
-const HOLD: Duration = Duration::from_secs(30);
-
-/// The no-data limit of every scenario that expects the download to go on and whose
-/// limit is not the subject (T-111: the in-time leg, budget scale).
-fn in_time_no_data() -> Duration {
-    in_time().download_no_data
-}
-
-/// The stall legs' no-data limit. Bite-bound (T-111 residual at `M`, named in
-/// docs/decisions/core-tests.md): the stall is the subject and the end comes after
-/// it, and the retry shares the `Downloader` and this limit.
-fn stall_no_data() -> Duration {
-    M
-}
-
-/// The trickle test's no-data limit, `M` above its gap (T-111 residual), and the
-/// trickle's chunk and gap: 66 chunks, about 16.5 s, at least 3 x the limit.
-fn trickle_no_data() -> Duration {
-    TRICKLE_EVERY + M
-}
-const TRICKLE_CHUNK: usize = 1_000;
-const TRICKLE_EVERY: Duration = Duration::from_millis(250);
-
-/// The no-data limit of the cancel-during-stall test, which the cancel must beat;
-/// a host stall past it is a missed premise (`with_premise`), never a red.
-fn cancel_no_data() -> Duration {
-    M
-}
 
 /// A test-thread pause (a host stall) past the old 3 s hold and the old ~4 s trickle
 /// of the cancel tests, still below `M`.
 const LATE: Duration = Duration::from_millis(4_500);
-
-/// A transfer that outlasts any test thread: chunks spread over at least the budget,
-/// under the in-time limit. For the tests that act on a running download and whose
-/// subject is not its end (T-111: the race with the end of the transfer is removed).
-/// A client that misses the cancel shows as "no end event within `END_WAIT`".
-fn long_trickle() -> Serve {
-    const CHUNK: usize = 1_000;
-    Serve::Trickle {
-        chunk: CHUNK,
-        every: OS_ANSWER_BUDGET / (SIZE.div_ceil(CHUNK as u64) as u32),
-    }
-}
-
-/// `base` served by `server`, with `download_no_data = no_data` and every other
-/// deadline (connect included) longer than [`END_WAIT`]: a client that takes its
-/// read timeout from another field ends after `END_WAIT`, and the test fails on
-/// "no end event" (T-080 I2: the outcome, not a ceiling, catches a longer limit).
-fn stall_fixture(server: &Server, no_data: Duration) -> Fixture {
-    let t = timeouts(no_data);
-    assert!(
-        HOLD > END_WAIT,
-        "HOLD {HOLD:?} must exceed END_WAIT {END_WAIT:?}"
-    );
-    for (name, v) in [
-        ("connect", t.connect),
-        ("api_transcription", t.api_transcription),
-        ("local_server", t.local_server),
-        ("post_processing", t.post_processing),
-        ("builtin", t.builtin),
-    ] {
-        assert!(
-            v > END_WAIT,
-            "stall fixture: {name} {v:?} is not above END_WAIT"
-        );
-    }
-    fixture_with_timeouts(
-        vec![entry(ModelId::Base, FILE, &server.url(FILE))],
-        FakeDisk::with_available(10 * NEEDED),
-        t,
-    )
-}
 
 /// Settings validation accepts `builtin_local` with `base` through `store`.
 fn validation_accepts_base(store: &dyn DownloadedModels) -> bool {
@@ -190,7 +119,7 @@ fn download_follows_a_cross_origin_redirect_to_a_second_server() {
     // error and no file is kept).
     let cdn = Server::start(vec![]);
     let hub = Server::start(vec![Serve::Redirect { to: cdn.url(FILE) }]);
-    let f = fixture(&hub, in_time_no_data());
+    let f = fixture(&hub);
     let mut ev = f.start(ModelId::Base).expect("start");
     let end = ev.wait_end();
     assert_eq!(end.event, DownloadEvent::Finished { id: ModelId::Base });
@@ -206,7 +135,7 @@ fn happy_path_reports_progress_then_finished_and_the_verified_file_is_downloaded
     // there yet, or `.part` still there), a second end event, the disk probe not
     // asked about the models dir, the store or validation not seeing the file.
     let server = Server::start(vec![]);
-    let f = fixture(&server, in_time_no_data());
+    let f = fixture(&server);
     let mut ev = f.start(ModelId::Base).expect("start");
     let end = ev.wait_end();
 
@@ -256,7 +185,7 @@ fn cut_off_body_fails_interrupted_then_retry_succeeds() {
     // `.part` left behind, another reason, no retry possible (busy flag not cleared
     // before the end event).
     let server = Server::start(vec![Serve::CutOff]);
-    let f = fixture(&server, in_time_no_data());
+    let f = fixture(&server);
     fails_then_retry_succeeds("cut off", &f, |r| {
         *r == DownloadFailure::DownloadInterrupted
     });
@@ -266,7 +195,7 @@ fn cut_off_body_fails_interrupted_then_retry_succeeds() {
 fn dropped_chunked_body_fails_interrupted_then_retry_succeeds() {
     // A chunked body closed without its last chunk (connection drop mid-body).
     let server = Server::start(vec![Serve::DropChunked]);
-    let f = fixture(&server, in_time_no_data());
+    let f = fixture(&server);
     fails_then_retry_succeeds("drop mid-body", &f, |r| {
         *r == DownloadFailure::DownloadInterrupted
     });
@@ -277,7 +206,7 @@ fn one_altered_byte_fails_checksum_mismatch_then_retry_succeeds() {
     // All SIZE bytes arrive, one flipped. Bite: no hash check, a hash over another
     // range, a comparison against anything but the entry's pinned value.
     let server = Server::start(vec![Serve::Altered]);
-    let f = fixture(&server, in_time_no_data());
+    let f = fixture(&server);
     fails_then_retry_succeeds("altered byte", &f, |r| {
         *r == DownloadFailure::ChecksumMismatch
     });
@@ -292,7 +221,7 @@ fn short_complete_body_fails_interrupted_then_retry_succeeds() {
     // reported as ChecksumMismatch (hashing a short file instead of stopping at the
     // byte count).
     let server = Server::start(vec![Serve::Short]);
-    let f = fixture(&server, in_time_no_data());
+    let f = fixture(&server);
     fails_then_retry_succeeds("short body", &f, |r| {
         *r == DownloadFailure::DownloadInterrupted
     });
@@ -305,7 +234,7 @@ fn overlong_body_fails_checksum_mismatch_then_retry_succeeds() {
     // stopping at the catalog size and accepting a body that is not the pinned file,
     // hashing only the first SIZE bytes, the overrun reported as DownloadInterrupted.
     let server = Server::start(vec![Serve::Long]);
-    let f = fixture(&server, in_time_no_data());
+    let f = fixture(&server);
     fails_then_retry_succeeds("overlong body", &f, |r| {
         *r == DownloadFailure::ChecksumMismatch
     });
@@ -316,7 +245,7 @@ fn http_404_fails_http_status_then_retry_succeeds() {
     // Bite: the error body written as the model, a status not reported, a 4xx
     // mapped to another reason.
     let server = Server::start(vec![Serve::Status(404)]);
-    let f = fixture(&server, in_time_no_data());
+    let f = fixture(&server);
     fails_then_retry_succeeds("HTTP 404", &f, |r| {
         *r == DownloadFailure::HttpStatus { code: 404 }
     });
@@ -325,7 +254,7 @@ fn http_404_fails_http_status_then_retry_succeeds() {
 #[test]
 fn http_500_fails_http_status_then_retry_succeeds() {
     let server = Server::start(vec![Serve::Status(500)]);
-    let f = fixture(&server, in_time_no_data());
+    let f = fixture(&server);
     fails_then_retry_succeeds("HTTP 500", &f, |r| {
         *r == DownloadFailure::HttpStatus { code: 500 }
     });
@@ -338,11 +267,8 @@ fn stall_past_no_data_fails_interrupted_within_the_timeout_then_retry_succeeds()
     // longer than END_WAIT here): no end event within END_WAIT; another reason; a
     // shorter limit (the end before no_data).
     let no_data = stall_no_data();
-    let server = Server::start(vec![Serve::Stall {
-        after: 4096,
-        hold: HOLD,
-    }]);
-    let f = stall_fixture(&server, no_data);
+    let server = Server::start(vec![stall_plan()]);
+    let f = stall_fixture(&server);
     let took =
         fails_then_retry_succeeds("stall", &f, |r| *r == DownloadFailure::DownloadInterrupted);
     at_least(took, no_data);
@@ -356,8 +282,8 @@ fn no_response_headers_within_no_data_fails_then_retry_succeeds() {
     // longer than END_WAIT here): no end event within END_WAIT; a shorter limit (the end
     // before no_data).
     let no_data = stall_no_data();
-    let server = Server::start(vec![Serve::SilentHeaders { hold: HOLD }]);
-    let f = stall_fixture(&server, no_data);
+    let server = Server::start(vec![silent_headers_plan()]);
+    let f = stall_fixture(&server);
     let took = fails_then_retry_succeeds("silent headers", &f, |r| {
         matches!(
             r,
@@ -376,7 +302,7 @@ fn part_file_that_cannot_be_created_fails_disk_error_then_retry_succeeds() {
     // The models "dir" is a regular file, so `<file>.part` cannot be created. Bite:
     // a panic or a hang on the write error, another reason, a final file anyway.
     let server = Server::start(vec![]);
-    let f = fixture(&server, in_time_no_data());
+    let f = fixture(&server);
     std::fs::remove_dir(&f.models).expect("remove models dir");
     std::fs::write(&f.models, b"not a dir").expect("file in place of the dir");
 
@@ -416,11 +342,8 @@ fn trickle_longer_than_no_data_succeeds_and_stall_fails() {
     // 60 ms / 150 ms pair left 90 ms, and a loaded host stretched one gap past 150 ms
     // (2 failures in 50 runs, T-016 review round 1 loop).
     let no_data = trickle_no_data();
-    let server = Server::start(vec![Serve::Trickle {
-        chunk: TRICKLE_CHUNK,
-        every: TRICKLE_EVERY,
-    }]);
-    let f = fixture(&server, no_data);
+    let server = Server::start(vec![trickle_plan()]);
+    let f = trickle_fixture(&server);
     let started = now();
     let mut ev = f.start(ModelId::Base).expect("start");
     let first = ev.wait_progress();
@@ -447,11 +370,8 @@ fn trickle_longer_than_no_data_succeeds_and_stall_fails() {
     at_most_per_second(n, 4, took, "Progress events");
     assert_verified_file_only(&f, "trickle");
 
-    let stall = Server::start(vec![Serve::Stall {
-        after: 4096,
-        hold: HOLD,
-    }]);
-    let g = stall_fixture(&stall, no_data);
+    let stall = Server::start(vec![stall_plan()]);
+    let g = trickle_stall_fixture(&stall);
     let started = now();
     let mut ev = g.start(ModelId::Base).expect("start stall");
     let end = ev.wait_end();
@@ -472,17 +392,8 @@ fn retry_after_a_stall_survives_a_gap_past_the_stall_no_data() {
     // stall leg, so the retry's own gap (1 s, a host stall inside the transfer) must
     // stay far below it. Plan: a stall (fails), then two chunks 1 s apart. Bite: the
     // stall leg's limit left at 300 ms (the retry fails Interrupted).
-    let server = Server::start(vec![
-        Serve::Stall {
-            after: 4096,
-            hold: HOLD,
-        },
-        Serve::Trickle {
-            chunk: 40_000,
-            every: Duration::from_secs(1),
-        },
-    ]);
-    let f = stall_fixture(&server, stall_no_data());
+    let server = Server::start(vec![stall_plan(), one_second_gap_trickle()]);
+    let f = stall_fixture(&server);
     fails_then_retry_succeeds("stall then slow retry", &f, |r| {
         *r == DownloadFailure::DownloadInterrupted
     });
@@ -493,11 +404,8 @@ fn a_trickle_with_a_one_second_gap_succeeds_under_the_trickle_no_data() {
     // T-111 (residual at M): the trickle's gap leaves M of slack below its no_data.
     // A 1 s gap (a host stall in the sender) must not end the download. Bite:
     // no_data 400 ms.
-    let server = Server::start(vec![Serve::Trickle {
-        chunk: 40_000,
-        every: Duration::from_secs(1),
-    }]);
-    let f = fixture(&server, trickle_no_data());
+    let server = Server::start(vec![one_second_gap_trickle()]);
+    let f = trickle_fixture(&server);
     let mut ev = f.start(ModelId::Base).expect("start");
     let end = ev.wait_end();
     assert_eq!(
@@ -512,11 +420,8 @@ fn a_trickle_with_a_one_second_gap_succeeds_under_the_trickle_no_data() {
 fn an_in_time_download_survives_a_gap_of_two_and_a_half_seconds() {
     // T-111: the 19 in-time fixtures' limit; a gap of 2.5 s (past the old 2 s) in
     // the sender must not end the download. Bite: any in-time fixture left at 2 s.
-    let server = Server::start(vec![Serve::Trickle {
-        chunk: 40_000,
-        every: Duration::from_millis(2_500),
-    }]);
-    let f = fixture(&server, in_time_no_data());
+    let server = Server::start(vec![in_time_gap_trickle()]);
+    let f = fixture(&server);
     let mut ev = f.start(ModelId::Base).expect("start");
     let end = ev.wait_end();
     assert_eq!(
@@ -537,8 +442,11 @@ fn download_limits_keep_the_in_time_margin_m() {
     //   (the retry's 1 s gap, the trickle's own gap);
     // - the hang-ender END_WAIT is above the whole trickle by M and below HOLD (the
     //   30 s reqwest default sits in between).
-    assert_eq!(timeouts(stall_no_data()).connect, OS_ANSWER_BUDGET);
-    assert!(in_time_no_data() >= 2 * OS_ANSWER_BUDGET, "in-time no_data");
+    assert_eq!(stall_timeouts().connect, OS_ANSWER_BUDGET);
+    assert!(
+        in_time().download_no_data >= 2 * OS_ANSWER_BUDGET,
+        "in-time no_data"
+    );
     assert!(stall_no_data() >= M, "stall no_data {:?}", stall_no_data());
     assert!(
         cancel_no_data() >= M,
@@ -605,12 +513,9 @@ fn cancel_during_stall_body(pause: Duration) -> bool {
     // the `.part` is removed. Bite: Cancelled emitted before the remove, the read
     // timeout reported as Failed{DownloadInterrupted}, the `.part` left, cancel
     // waiting for the hold (HOLD, so no end event within END_WAIT).
-    let server = Server::start(vec![Serve::Stall {
-        after: 4096,
-        hold: HOLD,
-    }]);
+    let server = Server::start(vec![stall_plan()]);
     let no_data = cancel_no_data();
-    let f = stall_fixture(&server, no_data);
+    let f = cancel_stall_fixture(&server);
     let mut ev = f.start(ModelId::Base).expect("start");
     let first = ev.wait_progress();
     assert!(
@@ -660,7 +565,7 @@ fn cancel_during_steady_transfer_ends_cancelled_quickly() {
     // cancel not checked in the read loop (the download runs on: no end event within
     // END_WAIT).
     let server = Server::start(vec![long_trickle()]);
-    let f = fixture(&server, in_time_no_data());
+    let f = fixture(&server);
     let (end, _ev) = cancel_after_first_progress(&f, "steady");
     assert_eq!(end.event, DownloadEvent::Cancelled { id: ModelId::Base });
     assert!(end.dir.is_empty(), "dir at Cancelled: {:?}", end.dir);
@@ -673,7 +578,7 @@ fn cancel_during_steady_transfer_holds_when_the_test_thread_stalls_past_the_old_
     // in-time limit is still running, so the cancel still beats the end. Bite: the
     // short trickle (the download Finished, cancel returned false).
     let server = Server::start(vec![long_trickle()]);
-    let f = fixture(&server, in_time_no_data());
+    let f = fixture(&server);
     let (end, _ev) = cancel_after_first_progress_late(&f, "steady late", LATE);
     assert_eq!(end.event, DownloadEvent::Cancelled { id: ModelId::Base });
     assert!(end.dir.is_empty(), "dir at Cancelled: {:?}", end.dir);
@@ -686,7 +591,7 @@ fn cancel_of_another_model_holds_when_the_test_thread_stalls_past_the_old_hold()
     // `cancel(Base)` is true. Bite: the 3 s stall (the read timeout ended it, cancel
     // returned false).
     let server = Server::start(vec![long_trickle()]);
-    let f = fixture(&server, in_time_no_data());
+    let f = fixture(&server);
     let mut ev = f.start(ModelId::Base).expect("start");
     ev.wait_progress();
     std::thread::sleep(LATE);
@@ -702,7 +607,7 @@ fn second_start_is_still_busy_when_the_test_thread_stalls_past_the_old_hold() {
     // T-111 (REDESIGN): the second `start` after a pause past the 3 s hold and the
     // 2 s limit is still Busy (the first download runs). Bite: the 3 s stall.
     let first = Server::start(vec![long_trickle()]);
-    let f = fixture(&first, in_time_no_data());
+    let f = fixture(&first);
     let mut ev = f.start(ModelId::Base).expect("start");
     ev.wait_progress();
     std::thread::sleep(LATE);
@@ -720,12 +625,8 @@ fn cancel_ends_a_trickle_that_outlasts_end_wait_before_its_end() {
     // is ended by the cancel inside END_WAIT. Bite: no cancel check in the read loop
     // (the download runs to the end of the trickle: no end event within END_WAIT).
     // Characterization of today's behaviour; the outcome, not a ceiling (T-080 I2).
-    let chunks = SIZE.div_ceil(1_000) as u32;
-    let server = Server::start(vec![Serve::Trickle {
-        chunk: 1_000,
-        every: (END_WAIT + Duration::from_secs(3)) / chunks,
-    }]);
-    let f = fixture(&server, in_time_no_data());
+    let server = Server::start(vec![trickle_past_end_wait()]);
+    let f = fixture(&server);
     let (end, _ev) = cancel_after_first_progress(&f, "long trickle");
     assert_eq!(end.event, DownloadEvent::Cancelled { id: ModelId::Base });
 }
@@ -735,7 +636,7 @@ fn cancel_of_another_model_or_when_idle_returns_false_and_changes_nothing() {
     // Bite: cancel ignoring the id (stops the running `base` when asked for `tiny`),
     // cancel returning true with nothing running.
     let server = Server::start(vec![long_trickle()]);
-    let f = fixture(&server, in_time_no_data());
+    let f = fixture(&server);
     assert!(!f.dl.cancel(ModelId::Base), "idle cancel");
     let mut ev = f.start(ModelId::Base).expect("start");
     ev.wait_progress();
@@ -769,7 +670,6 @@ fn second_start_while_one_runs_is_busy_and_sends_no_request() {
             entry(ModelId::Base, FILE, &first.url(FILE)),
         ],
         FakeDisk::with_available(10 * NEEDED),
-        in_time_no_data(),
     );
     let mut ev = f.start(ModelId::Base).expect("start");
     ev.wait_progress();
@@ -804,7 +704,6 @@ fn disk_below_size_plus_1_percent_refuses_with_needed_and_sends_no_request() {
     let f = fixture_with(
         vec![entry(ModelId::Base, FILE, &server.url(FILE))],
         FakeDisk::with_available(NEEDED - 1),
-        in_time_no_data(),
     );
     let (cb, mut ev) = events(&f.models);
     assert_eq!(
@@ -831,7 +730,6 @@ fn disk_with_exactly_size_plus_1_percent_downloads() {
     let f = fixture_with(
         vec![entry(ModelId::Base, FILE, &server.url(FILE))],
         FakeDisk::with_available(NEEDED),
-        in_time_no_data(),
     );
     let mut ev = f
         .start(ModelId::Base)
@@ -851,7 +749,6 @@ fn disk_probe_error_lets_the_download_proceed() {
     let f = fixture_with(
         vec![entry(ModelId::Base, FILE, &server.url(FILE))],
         FakeDisk::failing(),
-        in_time_no_data(),
     );
     let mut ev = f.start(ModelId::Base).expect("start despite a probe error");
     assert_eq!(
@@ -871,7 +768,7 @@ fn model_missing_from_the_catalog_is_refused_without_a_request_or_event() {
     // Bite: another refusal (or none: a request to some URL, a panic on the missing
     // entry), the active slot taken before the catalog check (Busy afterwards).
     let server = Server::start(vec![]);
-    let f = fixture(&server, in_time_no_data());
+    let f = fixture(&server);
     let (cb, mut ev) = events(&f.models);
     assert_eq!(
         f.dl.start(ModelId::Tiny, cb).err(),
@@ -904,7 +801,7 @@ fn already_downloaded_model_is_refused_without_a_request() {
     // contracts/core-traits.md DownloadError::AlreadyDownloaded. Bite: downloading
     // again over a good file.
     let server = Server::start(vec![]);
-    let f = fixture(&server, in_time_no_data());
+    let f = fixture(&server);
     std::fs::write(f.final_path(), model_bytes()).expect("place the model");
     assert_eq!(
         f.start(ModelId::Base).err(),
@@ -920,7 +817,7 @@ fn wrong_size_final_file_is_downloaded_again_and_replaced() {
     // re-download overwrites it via rename. Bite: AlreadyDownloaded for any file
     // with the final name, a rename that fails because the target exists.
     let server = Server::start(vec![]);
-    let f = fixture(&server, in_time_no_data());
+    let f = fixture(&server);
     std::fs::write(f.final_path(), b"stale partial model").expect("place a wrong file");
     let mut ev = f
         .start(ModelId::Base)
@@ -946,11 +843,7 @@ fn unanswered_lookup_fails_source_unreachable_while_the_lookup_is_held() {
     // asked); the lookup joined at drop.
     let held = Held::install("models.t079.example.com", Vec::new());
     let host = format!("{}:8443", held.host);
-    let t = Timeouts {
-        connect: Duration::from_millis(300),
-        download_no_data: OS_ANSWER_BUDGET,
-        ..timeouts(OS_ANSWER_BUDGET)
-    };
+    let t = held_lookup_timeouts();
     let f = fixture_with_timeouts(
         vec![entry(
             ModelId::Base,

@@ -18,6 +18,7 @@ mod refused_addr_tests;
 
 use std::time::Duration;
 
+use common::deadlines::{held_lookup_post_processing, short_post_processing_total, SHORT_LIMIT};
 use common::held::{returns_while_held, Held};
 use common::os_answer::{in_time, OsAnswer, OS_ANSWER_BUDGET};
 use common::timing::{at_least, late_answer, measure, M};
@@ -54,37 +55,23 @@ fn pp_settings(base: &str) -> PostProcessingSettings {
     }
 }
 
-/// Test durations: the in-time deadlines (T-111), never the production defaults; a
-/// timeout leg overrides only its own field.
-fn timeouts() -> Timeouts {
-    in_time()
-}
-
 #[test]
 fn helper_connect_is_the_os_answer_budget() {
     // T-111: a loopback connect cannot be delayed, so the connect limit of the
     // helper is pinned by its value (the in-time connect, the budget). Bite: the
     // old 2 s.
-    assert_eq!(timeouts().connect, OS_ANSWER_BUDGET);
+    assert_eq!(in_time().connect, OS_ANSWER_BUDGET);
 }
 
-/// The post-processing limit of the short timeout leg, and its server's answer.
-const SHORT_LIMIT: Duration = Duration::from_millis(300);
+/// The server's answer of the short timeout leg, M after its post-processing limit
+/// (`common::deadlines::short_post_processing_total`: only that total is short).
 const SHORT_LATE_ANSWER: Duration = late_answer(SHORT_LIMIT);
-
-/// The deadlines of the short timeout leg: only the post-processing total is short.
-fn short_total() -> Timeouts {
-    Timeouts {
-        post_processing: SHORT_LIMIT,
-        ..in_time()
-    }
-}
 
 #[test]
 fn the_short_timeout_leg_answers_at_least_m_after_its_deadline() {
     // T-111 review 1 #2, a value pin: kind (1) of the invariant. Bite: the old answer
     // at 5 s, the old connect 2 s (of the leg itself, catalog entry 75).
-    let t = short_total();
+    let t = short_post_processing_total();
     assert!(SHORT_LATE_ANSWER >= t.post_processing + M, "answer");
     assert!(t.connect >= t.post_processing + M, "connect");
 }
@@ -98,7 +85,7 @@ async fn helper_total_survives_a_reply_stalled_past_its_old_margin() {
     let got = run(
         &pp_settings(&format!("{}/v1", server.uri())),
         &creds_with_key(KEY),
-        timeouts(),
+        in_time(),
         RAW,
     );
     assert_eq!(got, PostProcessOutcome::Applied(REPLY.to_string()));
@@ -197,7 +184,7 @@ async fn reply_is_applied_trimmed_from_one_chat_completions_request() {
     let got = run(
         &pp_settings(&format!("{}/v1", server.uri())),
         &creds,
-        timeouts(),
+        in_time(),
         RAW,
     );
     assert_eq!(got, PostProcessOutcome::Applied(REPLY.to_string()));
@@ -245,7 +232,7 @@ async fn trailing_slash_and_query_of_the_base_url_are_kept() {
         format!("{}/v1/?api-version={QUERY_SECRET}", server.uri()),
         format!("{}/v1?api-version={QUERY_SECRET}", server.uri()),
     ] {
-        let got = run(&pp_settings(&base), &creds_with_key(KEY), timeouts(), RAW);
+        let got = run(&pp_settings(&base), &creds_with_key(KEY), in_time(), RAW);
         assert_eq!(
             got,
             PostProcessOutcome::Applied(REPLY.to_string()),
@@ -276,7 +263,7 @@ async fn no_key_or_empty_key_sends_no_authorization() {
         let got = run(
             &pp_settings(&format!("{}/v1", server.uri())),
             &creds,
-            timeouts(),
+            in_time(),
             RAW,
         );
         assert_eq!(
@@ -308,7 +295,7 @@ async fn key_read_error_is_no_key_and_still_applies() {
     let got = run(
         &pp_settings(&format!("{}/v1", server.uri())),
         &creds,
-        timeouts(),
+        in_time(),
         RAW,
     );
     assert_eq!(got, PostProcessOutcome::Applied(REPLY.to_string()));
@@ -328,7 +315,7 @@ async fn unusable_key_is_invalid_key_and_sends_nothing() {
         let got = run(
             &pp_settings(&format!("{}/v1", server.uri())),
             &creds_with_key(key),
-            timeouts(),
+            in_time(),
             RAW,
         );
         assert_eq!(
@@ -354,7 +341,7 @@ async fn status_401_and_403_are_invalid_key() {
         let got = run(
             &pp_settings(&format!("{}/v1", server.uri())),
             &creds_with_key(KEY),
-            timeouts(),
+            in_time(),
             RAW,
         );
         assert_eq!(
@@ -378,7 +365,7 @@ async fn other_status_is_http_with_that_status() {
         let got = run(
             &pp_settings(&format!("{}/v1", server.uri())),
             &creds_with_key(KEY),
-            timeouts(),
+            in_time(),
             RAW,
         );
         assert_eq!(
@@ -447,7 +434,7 @@ async fn unusable_reply_is_invalid_response() {
         let got = run(
             &pp_settings(&format!("{}/v1", server.uri())),
             &creds_with_key(KEY),
-            timeouts(),
+            in_time(),
             RAW,
         );
         if got != PostProcessOutcome::Skipped(SkipReason::InvalidResponse) {
@@ -469,7 +456,7 @@ async fn reply_body_is_capped_at_1_mib() {
     let got = run(
         &pp_settings(&format!("{}/v1", server.uri())),
         &creds_with_key(KEY),
-        timeouts(),
+        in_time(),
         RAW,
     );
     assert_eq!(
@@ -484,7 +471,7 @@ async fn reply_body_is_capped_at_1_mib() {
     let got = run(
         &pp_settings(&format!("{}/v1", server.uri())),
         &creds_with_key(KEY),
-        timeouts(),
+        in_time(),
         RAW,
     );
     assert!(
@@ -526,12 +513,12 @@ fn refused_port_is_unreachable_with_host_port() {
 async fn late_reply_past_the_input_deadline_is_timeout() {
     // FR-24 / contract guarantee 4: the whole request is bounded by
     // input.timeouts.post_processing (here 300 ms against an answer M later), so the
-    // call returns Timeout, not the answer. Bite: Timeouts::default() (15 s,
+    // call returns Timeout, not the answer. Bite: the production defaults (15 s,
     // the late answer is applied), the transcription or connect deadline instead of
     // post_processing, a read without the request timeout, Timeout mapped to
     // Unreachable.
     let server = server_with(chat_reply(json!(REPLY)).set_delay(SHORT_LATE_ANSWER)).await;
-    let short = short_total();
+    let short = short_post_processing_total();
     // No upper bound (T-080 I2): every longer wrong limit lets the late answer
     // through as Applied, which the Timeout assertion catches.
     let (got, took) = measure(|| {
@@ -559,7 +546,7 @@ async fn cross_origin_redirect(status: u16) -> (PostProcessOutcome, Vec<wiremock
     let got = run(
         &pp_settings(&format!("{}/v1", origin.uri())),
         &creds_with_key(KEY),
-        timeouts(),
+        in_time(),
         RAW,
     );
     let first = only_request(&origin).await;
@@ -647,7 +634,7 @@ async fn disabled_reads_no_key_and_sends_nothing() {
     let mut s = pp_settings(&format!("{}/v1", server.uri()));
     s.enabled = false;
     let creds = creds_with_key(KEY);
-    let got = run(&s, &creds, timeouts(), RAW);
+    let got = run(&s, &creds, in_time(), RAW);
     assert_eq!(got, PostProcessOutcome::NotRun);
     assert_eq!(creds.calls(), vec![]);
     assert_eq!(requests(&server).await.len(), 0);
@@ -671,7 +658,7 @@ async fn unusable_base_url_is_not_configured_without_key_read() {
         format!("http://user:pw@127.0.0.1:{port}/v1"),
     ] {
         let creds = creds_with_key(KEY);
-        let got = run(&pp_settings(&base), &creds, timeouts(), RAW);
+        let got = run(&pp_settings(&base), &creds, in_time(), RAW);
         if got != PostProcessOutcome::Skipped(SkipReason::NotConfigured) {
             wrong.push(format!("{base:?}: {got:?}"));
         }
@@ -707,9 +694,9 @@ async fn no_skip_carries_key_prompt_raw_text_query_or_body() {
             format!("http://{}/v1{query}", refused.host),
             refused.timeouts,
         ),
-        (format!("{}/v1{query}", status_500.uri()), timeouts()),
-        (format!("{}/v1{query}", bad_body.uri()), timeouts()),
-        (format!("{}/v1{query}", unauthorized.uri()), timeouts()),
+        (format!("{}/v1{query}", status_500.uri()), in_time()),
+        (format!("{}/v1{query}", bad_body.uri()), in_time()),
+        (format!("{}/v1{query}", unauthorized.uri()), in_time()),
     ];
     let mut wrong = Vec::new();
     for (base, t) in cases {
@@ -745,14 +732,10 @@ fn unanswered_lookup_skips_as_unreachable_at_the_connect_deadline_and_keeps_the_
     // return while held); the processor's client built without the shared
     // resolver (the seam never asked).
     let held = Held::install("pp-held.t079.example.com", Vec::new());
-    let connect = Duration::from_millis(300);
+    let t = held_lookup_post_processing();
+    let connect = t.connect;
     let settings = pp_settings(&format!("http://{}/v1", held.host));
     let creds = creds_with_key(KEY);
-    let t = Timeouts {
-        connect,
-        post_processing: OS_ANSWER_BUDGET,
-        ..Timeouts::default()
-    };
     let (got, took) = returns_while_held(&held, || run(&settings, &creds, t, RAW));
     assert_eq!(
         got,

@@ -4,11 +4,14 @@
 //! reqwest client panics inside a tokio context). The runtime here only drives the async calls
 //! to the mock server. Fake data only: 127.0.0.1, `key-a`/`key-b`, tone audio.
 
+mod common;
+
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, UNIX_EPOCH};
 
+use common::deadlines::from_default_settings;
 use voicen_core::audio::AudioBuffer;
 use voicen_core::call::codec::{OpusOggReader, TrackDecoder, TrackEncoder};
 use voicen_core::call::final_pass::{
@@ -32,7 +35,6 @@ use voicen_core::settings::roots::FsCallRoots;
 use voicen_core::settings::url::check_base_url;
 use voicen_core::settings::{defaults, EngineKind};
 use voicen_core::test_support::TempDir;
-use voicen_core::timeouts::Timeouts;
 use voicen_core::vad::{SpeechSpan, SpeechSpans, VadError};
 use wiremock::matchers::any;
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
@@ -201,10 +203,6 @@ fn make_call(duration_ms: u64, fill: impl FnOnce(&mut dyn FnMut(Track, &[f32])))
 fn meta_of(dir: &Path) -> CallMeta {
     serde_json::from_slice(&fs::read(dir.join("meta.json")).expect("meta.json"))
         .expect("meta.json parses")
-}
-
-fn request() -> Timeouts {
-    Timeouts::from_settings(&defaults(None).timeouts)
 }
 
 fn deps<'a>(rec: &'a Rec, primary: Option<Arc<dyn SpeechSpans>>) -> PassDeps<'a> {
@@ -390,7 +388,7 @@ fn a_thirty_minute_pair_is_decoded_in_windows_and_uploaded_in_bounded_chunks() {
         &engine,
         &TranscribeRequest {
             language: None,
-            timeouts: request(),
+            timeouts: from_default_settings(),
         },
         EngineRef::new("api", "model-a"),
         PassSources {
