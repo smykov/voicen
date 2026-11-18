@@ -1,0 +1,15 @@
+guarantee: T-171 (T-023 ii): an empty git stdout is never embedded (falls back to "unknown")
+file: crates/voicen-core/src/build_commit.rs
+added_by: test-writer
+--- old
+    env.into_iter()
+        .chain(git)
+        .map(str::trim)
+        .find(|c| !c.is_empty())
+        .unwrap_or("unknown")
+--- new
+    env.map(str::trim)
+        .filter(|c| !c.is_empty())
+        .or(git.map(str::trim))
+        .unwrap_or("unknown")
+--- end
