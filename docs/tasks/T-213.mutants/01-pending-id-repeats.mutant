@@ -1,0 +1,10 @@
+guarantee: I11: a PendingId is never handed out twice (within one process, across seeds)
+file: crates/voicen-core/src/pipeline.rs
+added_by: test-writer
+--- old
+                self.last_pending_id
+                    .fetch_add(1, Ordering::Relaxed)
+--- new
+                self.last_pending_id
+                    .fetch_add(0, Ordering::Relaxed)
+--- end

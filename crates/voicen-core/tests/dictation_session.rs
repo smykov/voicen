@@ -56,7 +56,8 @@ use voicen_core::platform::{
     AudioSource, Clipboard, ClipboardError, FakeAudioSource, FakeCancelKey, FakeClipboard,
     FakeIndicator, FakeNotifier, FakePaster, FakeShellRequests, FakeTempAudioStore, FrameChunk,
     FrameSink, Indicator, IndicatorCall, Notifier, PasteError, Paster, PasterCall, PendingId,
-    ShellRequestCall, ShellRequests, StartWindow, StoreCall, TempAudioStore, WindowRef,
+    ShellRequestCall, ShellRequests, StartWindow, StoreCall, TempAudioStore, ToastAction,
+    WindowRef,
 };
 use voicen_core::platform::{DeviceId, InputDevice};
 use voicen_core::post_process::PassThrough;
@@ -3431,7 +3432,16 @@ fn offers(rig: &Rig) -> Vec<Offer> {
     rig.notifier
         .calls()
         .into_iter()
-        .map(|c| (c.id, c.params, c.retry))
+        .map(|c| {
+            // T-213: the port carries a `ToastAction`; the session's outbox offers `Retry`
+            // only (Open comes from call notices), so every assertion below keeps its
+            // meaning: the third field is the retry id, or None for no action.
+            let retry = c.action.map(|a| match a {
+                ToastAction::Retry(id) => id,
+                other => panic!("the session offered a non-retry action: {other:?}"),
+            });
+            (c.id, c.params, retry)
+        })
         .collect()
 }
 
@@ -3836,7 +3846,7 @@ impl Notifier for ReenteringNotifier {
         &self,
         _id: i18n::MessageId,
         _params: &[(&'static str, String)],
-        _retry: Option<PendingId>,
+        _action: Option<ToastAction>,
     ) {
         self.calls.fetch_add(1, Ordering::SeqCst);
         if let Some(session) = self.session.get().and_then(Weak::upgrade) {

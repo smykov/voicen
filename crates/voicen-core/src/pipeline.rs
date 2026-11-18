@@ -1194,6 +1194,77 @@ mod tests {
         );
     }
 
+    /// The ids of `n` consecutive retryable failures through `p`.
+    fn pending_ids(p: &Pipeline, n: usize) -> Vec<PendingId> {
+        (0..n)
+            .map(|i| {
+                let report = p.run_job(finished(fixtures::speech_3s(), settings()));
+                report
+                    .pending
+                    .unwrap_or_else(|| panic!("job {i}: a retryable failure keeps a pending id"))
+            })
+            .collect()
+    }
+
+    fn failing_pipeline(f: &Fakes) -> Pipeline {
+        let seen = Arc::new(Seen::default());
+        Pipeline::new(deps(f, Arc::new(PassThrough))).with_engine_factory(fake_factory(
+            Err(FailureReason::ServerError { status: 503 }),
+            &seen,
+        ))
+    }
+
+    #[test]
+    fn pending_ids_of_two_pipelines_with_different_seeds_are_disjoint() {
+        // T-213 I11: a desktop toast outlives the process in Action Center, so a PendingId
+        // is never handed out twice for the same user, across processes (two pipelines
+        // here) as well as within one. Pinned API: `Pipeline::with_pending_id_seed(self,
+        // seed: u64) -> Pipeline` (the injected seed; ids rise from it). Red today: no such
+        // seed, every pipeline starts at 1. Bite: the seed ignored (both start at 1), the
+        // seed used for one of two pipelines, an id repeated within one pipeline.
+        // Seeds far above any clock reading in microseconds, so a seed that is ignored (the
+        // wall-clock default stands) cannot pass for the injected one.
+        const SEED_A: u64 = 1 << 60;
+        const SEED_B: u64 = 1 << 61;
+        let (fa, fb) = (fakes(), fakes());
+        let a = failing_pipeline(&fa).with_pending_id_seed(SEED_A);
+        let b = failing_pipeline(&fb).with_pending_id_seed(SEED_B);
+        let (ids_a, ids_b) = (pending_ids(&a, 3), pending_ids(&b, 3));
+        for (label, ids, seed) in [("a", &ids_a, SEED_A), ("b", &ids_b, SEED_B)] {
+            let mut sorted = ids.clone();
+            sorted.sort();
+            sorted.dedup();
+            assert_eq!(&sorted, ids, "pipeline {label}: ids rise and never repeat");
+            assert!(ids[0].0 >= seed, "pipeline {label}: ids start at the seed");
+        }
+        for id in &ids_a {
+            assert!(!ids_b.contains(id), "{id:?} handed out by both pipelines");
+        }
+    }
+
+    #[test]
+    fn pending_ids_of_a_later_production_pipeline_are_above_an_earlier_ones() {
+        // T-213 I11, release path: `Pipeline::new` seeds from the wall clock in
+        // microseconds, so a restart (a later pipeline) never reuses an id an old toast
+        // still carries. Red today: both start at 1. Bite: a constant seed, the seed in
+        // seconds (two pipelines built 5 ms apart get the same seed).
+        let (fa, fb) = (fakes(), fakes());
+        let a = failing_pipeline(&fa);
+        let first_a = pending_ids(&a, 1)[0];
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let b = failing_pipeline(&fb);
+        let first_b = pending_ids(&b, 1)[0];
+        assert!(
+            first_b > first_a,
+            "a later pipeline's first id {first_b:?} is not above the earlier one's {first_a:?}"
+        );
+        let more = pending_ids(&a, 3);
+        assert!(
+            !more.contains(&first_b),
+            "the earlier pipeline's later ids {more:?} reach the later pipeline's first id"
+        );
+    }
+
     #[test]
     fn non_retryable_failure_is_not_kept_pending() {
         // Only a retryable Failed creates a pending recording (data-model

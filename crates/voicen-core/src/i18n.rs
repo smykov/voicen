@@ -1117,6 +1117,23 @@ mod tests {
     }
 
     #[test]
+    fn the_open_button_label_is_declared_with_its_texts_in_both_catalogs() {
+        // T-213 (decisions #298, #312): the toast's Open button on "Transcript ready" is
+        // `action.open`, in the pattern of `action.retry`. The generic parity tests cannot
+        // fail for an id nobody declared, so it is named. Bite: the id missing from
+        // `messages!` (no button label), from en.json or from ru.json, ru falling back to
+        // English, another text.
+        let c = catalog(EN_JSON, RU_JSON);
+        let id = "action.open";
+        assert!(
+            MESSAGE_IDS.iter().any(|m| m.0 == id),
+            "{id} not in MESSAGE_IDS"
+        );
+        assert_eq!(own_text(&c, UiLanguage::En, id), Some("Open"), "en");
+        assert_eq!(own_text(&c, UiLanguage::Ru, id), Some("Открыть"), "ru");
+    }
+
+    #[test]
     fn notice_retry_unavailable_is_declared_with_its_decision_280_texts_in_both_catalogs() {
         // T-210 I9 (decision #280): a Retry whose stored audio cannot be read back shows
         // `notice.retry_unavailable`. The id is declared with `messages!` (so the generic

@@ -54,7 +54,7 @@ fn offer(id: voicen_core::i18n::MessageId, params: Vec<(&'static str, String)>) 
     NotifyCall {
         id,
         params,
-        retry: None,
+        action: None,
     }
 }
 
