@@ -140,6 +140,8 @@ jobs:
           set -uo pipefail
           if command -v serena >/dev/null 2>&1; then
             jq '{mcpServers: (.mcpServers | {serena, context7})}' .mcp.json > "$RUNNER_TEMP/mcp.json"
+            # A cold Serena start outlasts the session's MCP startup timeout (T-233): build the index first.
+            timeout 600 serena project index . >/dev/null 2>&1 || echo "::warning::no Serena index built in advance"
           else
             echo "::warning::no serena on the runner: the session falls back to grep"
             jq '{mcpServers: (.mcpServers | {context7})}' .mcp.json > "$RUNNER_TEMP/mcp.json"
@@ -171,6 +173,8 @@ jobs:
         env:
           # The only secret of the contour; the session reads it from its environment.
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # MCP server startup timeout, ms: Serena needs more than the default 30 s (T-233).
+          MCP_TIMEOUT: "120000"
           SYSTEM_PROMPT: >-
             AUTONOMOUS RUN, NO OWNER IN THIS SESSION. Work only on the task of the prompt, nothing
             else. Never call AskUserQuestion. Run every role agent in the foreground and act on its
