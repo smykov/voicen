@@ -653,8 +653,7 @@ pub fn on_second_instance<R: Runtime>(
     let args = LaunchArgs::parse(&argv);
     match second_launch_action(&args) {
         SecondLaunchAction::FrontSettings => Some(settings_window::request(app, OpenTarget::Front)),
-        SecondLaunchAction::StartCallRecord => None,
-        SecondLaunchAction::TrayOnly => {
+        SecondLaunchAction::TrayOnly | SecondLaunchAction::StartCallRecord => {
             call::apply_launch(app, &args);
             None
         }
