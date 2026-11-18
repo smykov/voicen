@@ -451,6 +451,94 @@ jobs:
             }
             if ($closedAlive -and -not $gone) { $closedAlive = $false; $closeSeen = "the settings window did not close ($closeSeen)" }
           }
+          # T-132 (spec 007 FR-043, FR-002, FR-042): the installed app on the runner (no render
+          # endpoint, run 43598234999) gets `voicen.exe --call record` as a second launch: the
+          # primary logs one call_requested source=switch and one call_refused part=system
+          # reason=no_device, keeps running, shows no new window, leaves no call folder and logs no
+          # planted value. Raw facts are collected here; one throw per failed fact follows the
+          # existing throws. The planted fake key is tripwire-only (a refused start reads no key) and
+          # is removed in the finally, so the purge step starts from its own plants.
+          . ./scripts/ci/credentials.ps1
+          $callFails = @()
+          $callRan = 'not run (no running app with no shown window after the close)'
+          $callLines = 'none'
+          $callExit = 'not run'
+          $callSw = $null
+          $callFacts = @()
+          if ($closedAlive) {
+            $callRan = 'ran'
+            $fakeKey = 'sk-test-ci-callswitch-0000-not-a-real-key'
+            $keyTarget = 'Voicen/transcription-api'
+            $callsDir = Join-Path $env:LOCALAPPDATA 'Voicen\calls'
+            $reqLine = 'call_requested source=switch'
+            $refLine = 'call_refused part=system reason=no_device'
+            $planted = @($fakeKey)
+            try {
+              Add-VoicenCredential -Target $keyTarget -Secret $fakeKey
+              if (-not (Test-VoicenCredential -Target $keyTarget)) { throw "premise: the planted fake key at $keyTarget is not readable back" }
+              # The runner's audio endpoints as observed values (may be none; the count is printed).
+              $endpoints = @(Get-CimInstance Win32_SoundDevice -ErrorAction SilentlyContinue | ForEach-Object { $_.Name } | Where-Object { $_ })
+              $planted += $endpoints
+              Write-Output "--call record: runner audio devices (Win32_SoundDevice): $($endpoints.Count)"
+              $before = Get-ShownWindows $proc.Id
+              $beforeKey = (($before | ForEach-Object { $_.Handle.ToInt64() }) -join ',')
+              $callSw = Start-Process -FilePath $exe -ArgumentList '--call', 'record' -PassThru
+              $null = $callSw.Handle
+              if ($callSw.WaitForExit(30000)) { $callExit = "exit code $($callSw.ExitCode)" }
+              else { Stop-Process -Id $callSw.Id -Force -ErrorAction SilentlyContinue; $callExit = 'did not exit within 30 s' }
+              $reqCount = 0
+              $refCount = 0
+              for ($i = 0; $i -lt 20; $i++) {
+                $reqCount = if (Test-Path $logs) { @(Select-String -Path $logs -SimpleMatch $reqLine).Count } else { 0 }
+                $refCount = if (Test-Path $logs) { @(Select-String -Path $logs -SimpleMatch $refLine).Count } else { 0 }
+                if ($reqCount -ge 1 -and $refCount -ge 1) { break }
+                Start-Sleep -Seconds 1
+              }
+              # 5 s after the lines: the primary stays, no window appears.
+              $aliveSeen = $true
+              $winSeen = 'unchanged'
+              for ($i = 0; $i -lt 5; $i++) {
+                Start-Sleep -Seconds 1
+                if ($proc.HasExited) { $aliveSeen = $false; break }
+                $nowShown = Get-ShownWindows $proc.Id
+                if ((($nowShown | ForEach-Object { $_.Handle.ToInt64() }) -join ',') -cne $beforeKey) { $winSeen = "changed: $(Format-ShownWindows $nowShown) (before: $(Format-ShownWindows $before))" }
+              }
+              $callDrift = @()
+              if ($aliveSeen) {
+                for ($i = 0; $i -lt 10; $i++) {
+                  $callDrift = @(Get-HelperDrift $proc.Id)
+                  if ($callDrift.Count -eq 0 -or $proc.HasExited) { break }
+                  Start-Sleep -Seconds 1
+                }
+              }
+              $reqCount = if (Test-Path $logs) { @(Select-String -Path $logs -SimpleMatch $reqLine).Count } else { 0 }
+              $refCount = if (Test-Path $logs) { @(Select-String -Path $logs -SimpleMatch $refLine).Count } else { 0 }
+              $callChildren = @()
+              if (Test-Path -LiteralPath $callsDir) { $callChildren = @(Get-ChildItem -LiteralPath $callsDir -Force | ForEach-Object { $_.Name }) }
+              $leaks = @()
+              if (Test-Path $logs) { foreach ($v in $planted) { if (@(Select-String -Path $logs -SimpleMatch $v).Count -gt 0) { $leaks += 'a planted value' } } }
+              $callLinesAll = @()
+              if (Test-Path $logs) { $callLinesAll = @(Select-String -Path $logs -SimpleMatch 'call_' | ForEach-Object { $_.Line }) }
+              foreach ($v in $planted) { $callLinesAll = @($callLinesAll | ForEach-Object { $_.Replace($v, '<planted>') }) }
+              $callLines = if ($callLinesAll.Count -gt 0) { $callLinesAll -join ' | ' } else { 'none' }
+              if ($callExit -cne 'exit code 0') { $callFacts += "the second process: $callExit (expected exit code 0 within 30 s)" }
+              if ($reqCount -ne 1) { $callFacts += "'$reqLine' occurs $reqCount times in voicen*.log, expected 1" }
+              if ($refCount -ne 1) { $callFacts += "'$refLine' occurs $refCount times in voicen*.log, expected 1" }
+              if (-not $aliveSeen) { $callFacts += "the primary (pid $($proc.Id)) exited (code $($proc.ExitCode)) within 5 s of the refusal" }
+              if ($winSeen -cne 'unchanged') { $callFacts += "shown windows after the switch $winSeen" }
+              if ($callDrift.Count -gt 0) { $callFacts += (Format-HelperDrift $callDrift) }
+              if ($callChildren.Count -gt 0) { $callFacts += "$callsDir has $($callChildren.Count) entries, expected none: $($callChildren -join ', ')" }
+              if ($leaks.Count -gt 0) { $callFacts += "voicen*.log holds $($leaks.Count) planted value(s) (the fake key or a runner audio device name)" }
+            } catch {
+              $callFacts += "error: $($_.Exception.Message)"
+            } finally {
+              try {
+                Remove-VoicenCredential -Target $keyTarget
+                if (Test-VoicenCredential -Target $keyTarget) { $callFacts += "the planted fake key at $keyTarget is still present after Remove-VoicenCredential" }
+              } catch { $callFacts += "cleanup error: $($_.Exception.Message)" }
+              if ($callSw -and -not $callSw.HasExited) { Stop-Process -Id $callSw.Id -Force -ErrorAction SilentlyContinue }
+            }
+          }
           Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
           if (-not $found) { if (Test-Path $logs) { Get-Content $logs }; throw "start log line '$expected' (version $env:VOICEN_VERSION, commit $env:VOICEN_COMMIT) not found" }
           Get-Content $logs
@@ -485,6 +573,9 @@ jobs:
           Write-Output "found the tray window after the first launch"
           if (-not $closedAlive) { throw "closing the first-run settings window did not leave the app running with no shown window: $closeSeen" }
           Write-Output "WM_CLOSE to the first-run settings window: $closeSeen, for 10 s"
+          if ($callFacts.Count -gt 0) { throw "--call record: $($callFacts -join '; '). call_* log lines: $callLines" }
+          if ($callRan -cne 'ran') { throw "--call record: $callRan" }
+          Write-Output "--call record: one call_requested source=switch and one call_refused part=system reason=no_device, second process $callExit, primary running, shown windows unchanged, no helper drift, no call folder, no planted value in the log; call_* lines: $callLines"
       - name: Start with Windows on writes the Run value, off removes it (T-014 reconcile at start)
         shell: pwsh
         run: |
