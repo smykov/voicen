@@ -946,8 +946,49 @@ expect "real agent: github.token occurs only in the steps after the stage (push 
   bash -c 'c="$(grep -n -m 1 -x -F "      - name: Did the stage commit?" "$1" | cut -d: -f1)"; [ -n "$c" ] && ! awk -v c="$c" "NR < c && /github\\.token|GH_TOKEN|GITHUB_TOKEN/ { f = 1 } END { exit !f }" "$1"' _ "$ag"
 expect "real agent: the stage step runs claude without the runner's environment-file paths" \
   bash -c 'grep -q -E "^ +env -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_OUTPUT -u GITHUB_STATE claude " "$1"' _ "$ag"
-expect "real agent: the push step's env sets TEAMWRIGHT_PAUSE_FILE to the owner's runner-host file /etc/teamwright/voicen.pause" \
-  bash -c 'grep -q -x -F "          TEAMWRIGHT_PAUSE_FILE: /etc/teamwright/voicen.pause" <<<"$1"' _ "$(ag_step "$ag_push")"
+# T-215 (decisions #288): the contour's pause is the repository variable TEAMWRIGHT_CONTOUR_PAUSE,
+# read in the step that pushes (agent) or dispatches (next), before its first push / dispatch line.
+# step_of <file> <title>: the lines of the step "      - name: <title>" up to the next step.
+step_of() { awk -v t="      - name: $2" '$0 == t { s = 1; print; next } s && /^      - / { exit } s { print }' "$1"; }
+pause_env='          TEAMWRIGHT_CONTOUR_PAUSE: ${{ vars.TEAMWRIGHT_CONTOUR_PAUSE }}'
+pause_chk='          if [ -n "${TEAMWRIGHT_CONTOUR_PAUSE:-}" ]; then'
+# pause_ok <file> <step title> <first push/dispatch text>: env line and check line present exactly
+# inside the step, the check's line number lower than the first line holding the push text.
+pause_ok() {
+  local blk c p
+  blk="$(step_of "$1" "$2")"
+  grep -q -x -F "$pause_env" <<<"$blk" || return 1
+  c="$(grep -n -m 1 -x -F "$pause_chk" <<<"$blk" | cut -d: -f1)"
+  p="$(grep -n -m 1 -F "$3" <<<"$blk" | cut -d: -f1)"
+  [ -n "$c" ] && [ -n "$p" ] && [ "$c" -lt "$p" ]
+}
+not_pause_ok() { ! pause_ok "$@"; }
+nx=$real/teamwright-next.yml
+nx_title='Next stage'
+expect "real agent: the push step's env reads vars.TEAMWRIGHT_CONTOUR_PAUSE and its pause check comes before the first push \"\$url\" line" \
+  pause_ok "$ag" "$ag_push" ' push "$url"'
+expect "real next: 'Next stage' env reads vars.TEAMWRIGHT_CONTOUR_PAUSE and its pause check comes before the first gh workflow run line" \
+  pause_ok "$nx" "$nx_title" 'gh workflow run'
+for pt in /etc/teamwright TEAMWRIGHT_PAUSE_FILE; do
+  for cn in teamwright-agent.yml teamwright-next.yml; do
+    expect "real $cn: the runner-host pause token $pt does not occur (the pause is the repository variable)" \
+      bash -c '! grep -q -F -- "$1" "$2"' _ "$pt" "$real/$cn"
+  done
+done
+# Failure branch (T-215 Acceptance 4): with the check line deleted, the same predicate must fail; a
+# mutation that did not apply is itself a FAIL.
+for pm in "teamwright-agent.yml|$ag_push| push \"\$url\"" "teamwright-next.yml|$nx_title|gh workflow run"; do
+  IFS='|' read -r pcn ptitle ppush <<<"$pm"
+  mkdir -p "$tmp/pause-nochk-$pcn"
+  awk -v l="$pause_chk" '$0 != l { print }' "$real/$pcn" > "$tmp/pause-nochk-$pcn/$pcn"
+  if [ -f "$real/$pcn" ] && grep -q -x -F -- "$pause_chk" "$real/$pcn" && ! cmp -s "$real/$pcn" "$tmp/pause-nochk-$pcn/$pcn"; then
+    expect "mutation: real $pcn without the pause check line fails the pause predicate" \
+      not_pause_ok "$tmp/pause-nochk-$pcn/$pcn" "$ptitle" "$ppush"
+  else
+    echo "FAIL mutation: real $pcn without the pause check line did not apply (the real file has no '$pause_chk' line)" >&2
+    failed=$((failed + 1))
+  fi
+done
 expect "real agent: the push step takes its token from its own env and the hooks from the pre-session commit, not install-hooks.sh" \
   bash -c 'grep -q -x -F "          PUSH_TOKEN: \${{ github.token }}" <<<"$1" && grep -q -F "git archive \"\$BEFORE\" scripts/hooks" <<<"$1" && grep -q -F "core.hooksPath=" <<<"$1" && ! grep -q -F "install-hooks.sh" <<<"$1"' _ "$(ag_step "$ag_push")"
 expect "real agent: the push step reads BEFORE from the branch step's output (an env file the session can write does not decide)" \
