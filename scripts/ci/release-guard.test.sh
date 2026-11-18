@@ -960,12 +960,17 @@ pause_chk='          if [ -n "${TEAMWRIGHT_CONTOUR_PAUSE:-}" ]; then'
 # pause_ok <file> <step title> <first push/dispatch text>: env line and check line present exactly
 # inside the step, the check's line number lower than the first line holding the push text.
 pause_ok() {
-  local blk c p
+  local blk c p f
   blk="$(step_of "$1" "$2")"
   grep -q -x -F "$pause_env" <<<"$blk" || return 1
   c="$(grep -n -m 1 -x -F "$pause_chk" <<<"$blk" | cut -d: -f1)"
   p="$(grep -n -m 1 -F "$3" <<<"$blk" | cut -d: -f1)"
-  [ -n "$c" ] && [ -n "$p" ] && [ "$c" -lt "$p" ]
+  [ -n "$c" ] && [ -n "$p" ] && [ "$c" -lt "$p" ] || return 1
+  # Body: between the check line and its first line exactly 10 spaces + fi, one line exactly 12 spaces + exit 0,
+  # and that fi comes before the first push / dispatch line.
+  f="$(awk -v c="$c" 'NR > c && $0 == "          fi" { print NR; exit }' <<<"$blk")"
+  [ -n "$f" ] && [ "$f" -lt "$p" ] || return 1
+  awk -v c="$c" -v f="$f" 'NR > c && NR < f && $0 == "            exit 0" { ok = 1 } END { exit !ok }' <<<"$blk"
 }
 not_pause_ok() { ! pause_ok "$@"; }
 nx=$real/teamwright-next.yml
@@ -991,6 +996,21 @@ for pm in "teamwright-agent.yml|$ag_push| push \"\$url\"" "teamwright-next.yml|$
       not_pause_ok "$tmp/pause-nochk-$pcn/$pcn" "$ptitle" "$ppush"
   else
     echo "FAIL mutation: real $pcn without the pause check line did not apply (the real file has no '$pause_chk' line)" >&2
+    failed=$((failed + 1))
+  fi
+  # The check's body (T-215): the same step with the check's `exit 0` line deleted must fail the predicate.
+  mkdir -p "$tmp/pause-noexit-$pcn"
+  awk -v t="      - name: $ptitle" -v l="$pause_chk" '
+    $0 == t { s = 1; print; next }
+    s && /^      - / { s = 0 }
+    s && $0 == l { k = 1 }
+    s && k && !d && $0 == "            exit 0" { d = 1; next }
+    { print }' "$real/$pcn" > "$tmp/pause-noexit-$pcn/$pcn"
+  if [ -f "$real/$pcn" ] && ! cmp -s "$real/$pcn" "$tmp/pause-noexit-$pcn/$pcn"; then
+    expect "mutation: real $pcn without the pause check's exit 0 line fails the pause predicate" \
+      not_pause_ok "$tmp/pause-noexit-$pcn/$pcn" "$ptitle" "$ppush"
+  else
+    echo "FAIL mutation: real $pcn without the pause check's exit 0 line did not apply (the check has no '            exit 0' line)" >&2
     failed=$((failed + 1))
   fi
 done
