@@ -32,7 +32,7 @@ mod win32_support;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use call_shell_support::{plain_opener, FakeFolder, FakeSave, WavSource};
+use call_shell_support::{plain_opener, FakeExit, FakeFolder, FakeSave, WavSource};
 use serde_json::Value;
 use tauri::{Listener, Manager};
 use timing_support::HANG;
@@ -134,6 +134,7 @@ fn start(rig: AppRig) -> Started {
             save: Arc::new(FakeSave::default()),
             credentials: Arc::clone(&rig.creds),
             detector: None,
+            exit_confirm: Arc::new(FakeExit::default()),
         },
     )
     .expect("the call part starts");

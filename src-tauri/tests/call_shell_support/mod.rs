@@ -34,6 +34,10 @@
 //! voicen_lib::tray::TrayPart::set_call_recording(&self, bool)
 //! voicen_core::call::events::{refused_notice, CallNotice::message}   // tests/call_notice_map.rs (core)
 //!
+//! T-145 adds to `CallPorts`: `exit_confirm: Arc<dyn ExitConfirm>` (`voicen_lib::call::ExitConfirm`:
+//! `trait ExitConfirm: Send + Sync { fn ask(&self, text: &str) -> bool }`, true = Yes; the
+//! native Yes/No box of the tray's Exit while a call records). The rig's [`FakeExit`] is it.
+//!
 //! T-139 adds to `CallPorts`: `credentials: Arc<dyn CredentialStore>` (the store the settings
 //! service writes; the rig's [`CallRig::creds`]) and `detector: Option<Arc<dyn SpeechSpans>>`
 //! (`None`: core's energy fallback); `start_calls` then also manages the one
@@ -47,7 +51,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, TryRecvError};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread;
 
 use tauri::test::{mock_builder, mock_context, noop_assets, MockRuntime};
@@ -73,7 +77,7 @@ use voicen_core::test_support::local_models::FakeDisk;
 use voicen_core::test_support::TempDir;
 use voicen_core::timeouts::Timeouts;
 use voicen_core::vad::SpeechSpans;
-use voicen_lib::call::{CallPorts, SaveDialog};
+use voicen_lib::call::{CallPorts, ExitConfirm, SaveDialog};
 use voicen_lib::logs_folder::FolderOpener;
 use voicen_lib::settings_ipc::load_settings;
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -342,6 +346,8 @@ pub struct CallRig {
     /// T-139: the credential store the service writes and the call part's passes read.
     pub creds: Arc<dyn CredentialStore>,
     pub notifier: Arc<FakeNotifier>,
+    /// T-145: the exit question's port; answers No until told otherwise.
+    pub exit: Arc<FakeExit>,
     /// Ends the process with a named message when the test outlives `2 * HANG` (a build, a join
     /// or a drop that never returns). Declared last so it is dropped after the app.
     _watch: timing_support::HangWatch,
@@ -383,6 +389,7 @@ impl CallRig {
             service,
             creds,
             notifier: Arc::new(FakeNotifier::new()),
+            exit: Arc::new(FakeExit::default()),
             _watch: watch,
         }
     }
@@ -478,6 +485,7 @@ impl CallRig {
                 save,
                 credentials: Arc::clone(&self.creds),
                 detector,
+                exit_confirm: self.exit.clone(),
             },
         )
         .expect("the call part starts");
@@ -630,5 +638,65 @@ impl SaveDialog for FakeSave {
             return Err(io::Error::from(kind));
         }
         Ok(lock(&self.answer).clone())
+    }
+}
+
+// ---- the T-145 exit question --------------------------------------------------------------
+
+#[derive(Default)]
+struct ExitState {
+    asked: Vec<String>,
+    answer: bool,
+    hold: bool,
+    released: bool,
+}
+
+/// An [`ExitConfirm`] that shows no box: it records every ask (the question text) and answers
+/// `false` (No) unless told otherwise. [`hold`](Self::hold) makes an ask block, like the real
+/// box does, until [`release`](Self::release) answers it (bounded by the hang bound).
+#[derive(Default)]
+pub struct FakeExit {
+    state: Mutex<ExitState>,
+    changed: Condvar,
+}
+
+impl FakeExit {
+    /// The next and every later ask answers `yes` at once.
+    pub fn answer(&self, yes: bool) {
+        lock(&self.state).answer = yes;
+    }
+
+    /// Every later ask blocks until [`release`](Self::release).
+    pub fn hold(&self) {
+        lock(&self.state).hold = true;
+    }
+
+    /// Answers the held ask (and any later one) with `yes`.
+    pub fn release(&self, yes: bool) {
+        let mut state = lock(&self.state);
+        state.answer = yes;
+        state.released = true;
+        drop(state);
+        self.changed.notify_all();
+    }
+
+    /// The text of every ask, in order.
+    pub fn asked(&self) -> Vec<String> {
+        lock(&self.state).asked.clone()
+    }
+}
+
+impl ExitConfirm for FakeExit {
+    fn ask(&self, text: &str) -> bool {
+        let mut state = lock(&self.state);
+        state.asked.push(text.to_string());
+        if state.hold {
+            let (guard, _) = self
+                .changed
+                .wait_timeout_while(state, crate::timing_support::HANG, |s| !s.released)
+                .unwrap_or_else(PoisonError::into_inner);
+            state = guard;
+        }
+        state.answer
     }
 }
