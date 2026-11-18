@@ -11,8 +11,13 @@
 # skip: the guard reads no Rust syntax, F-003):
 #   Timeouts {        blanks allowed between, so `-> Timeouts {` and `for Timeouts {` refuse too;
 #   Timeouts::        a path call (Timeouts::default(), Timeouts::from_settings);
+#   Timeouts>::       a qualified-path call (<Timeouts>::.. or <path::Timeouts>::..; not a bare
+#                     Timeouts>, which would match the allowed Option<Timeouts>);
 #   Timeouts as       an alias import;
-#   = Timeouts        followed by a non-identifier character or the line end (a type alias);
+#   = Timeouts        `=`, blanks, zero or more `ident::` path segments, then Timeouts followed by
+#                     a non-identifier character or the line end (a type alias, also
+#                     path-qualified: `= voicen_core::timeouts::Timeouts;`; `= TimeoutsView`,
+#                     `= Timeouts2` and Option<Timeouts> stay allowed);
 #   Default::default  an inferred Timeouts;
 #   Stall, Trickle, SilentHeaders   as words at identifier boundaries (a Serve plan with a hold or
 #                     a gap, with or without the Serve:: path or an alias).
@@ -60,10 +65,12 @@ report="$(LC_ALL=C awk '
     print FILENAME ":" FNR ": deadline: a Timeouts literal or local constructor (Timeouts {); take a named constructor from tests/common (common::os_answer::in_time, common::deadlines)"
   else if (index(line, "Timeouts::") > 0)
     print FILENAME ":" FNR ": deadline: a Timeouts path call (Timeouts::); take a named constructor from tests/common"
+  else if (index(line, "Timeouts>::") > 0)
+    print FILENAME ":" FNR ": deadline: a Timeouts qualified-path call (Timeouts>::); take a named constructor from tests/common"
   else if (index(line, "Timeouts as") > 0)
     print FILENAME ":" FNR ": deadline: a Timeouts alias import (Timeouts as); take a named constructor from tests/common"
-  else if (padded ~ /= Timeouts[^A-Za-z0-9_]/)
-    print FILENAME ":" FNR ": deadline: a Timeouts type alias (= Timeouts); take a named constructor from tests/common"
+  else if (padded ~ /=[ \t]*([A-Za-z_][A-Za-z0-9_]*::)*Timeouts[^A-Za-z0-9_]/)
+    print FILENAME ":" FNR ": deadline: a Timeouts type alias, also path-qualified (= Timeouts, = a::b::Timeouts); take a named constructor from tests/common"
   else if (index(line, "Default::default") > 0)
     print FILENAME ":" FNR ": deadline: an inferred value (Default::default); take a named constructor from tests/common"
   else if (padded ~ /[^A-Za-z0-9_](Stall|Trickle|SilentHeaders)[^A-Za-z0-9_]/)

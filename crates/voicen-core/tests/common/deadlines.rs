@@ -38,8 +38,11 @@ pub fn production_defaults() -> Timeouts {
     Timeouts::default()
 }
 
-/// The one conversion of the settings route, `Timeouts::from_settings` (the subject
-/// of the form-timeout tests; decision #258 keeps the forms themselves where they are).
+/// The one conversion of the settings route, `Timeouts::from_settings`: only the
+/// expected value of a test whose subject is the settings conversion itself (the
+/// settings route, a named T1 residual by decision #258, which keeps the forms where
+/// they are). Not a deadline for an in-time leg: take `os_answer::in_time()` or a
+/// named constructor here for that.
 pub fn from_settings(form: &TimeoutSettings) -> Timeouts {
     Timeouts::from_settings(form)
 }

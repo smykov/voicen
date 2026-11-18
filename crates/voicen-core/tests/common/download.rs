@@ -18,6 +18,7 @@ use std::sync::mpsc::{channel, Receiver, RecvTimeoutError};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use super::deadlines::HELD_LOOKUP_CONNECT;
 use super::os_answer::{in_time, OS_ANSWER_BUDGET};
 use super::timing::M;
 use super::{
@@ -95,11 +96,11 @@ pub fn cancel_timeouts() -> Timeouts {
     }
 }
 
-/// The held-lookup timeout leg (T-079): connect 300 ms (the limit the download must
-/// end by while the lookup is held), `download_no_data` the budget.
+/// The held-lookup timeout leg (T-079): connect [`HELD_LOOKUP_CONNECT`] (the limit the
+/// download must end by while the lookup is held), `download_no_data` the budget.
 pub fn held_lookup_timeouts() -> Timeouts {
     Timeouts {
-        connect: Duration::from_millis(300),
+        connect: HELD_LOOKUP_CONNECT,
         download_no_data: OS_ANSWER_BUDGET,
         ..in_time()
     }
