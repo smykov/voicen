@@ -2,7 +2,7 @@ guarantee: AC-6: self-test goes red when the tripwire misses a literal
 file: scripts/ci/core-test-deadlines.sh
 added_by: test-writer
 --- old
-  else if (padded ~ /= Timeouts[^A-Za-z0-9_]/)
+  else if (padded ~ /=[ \t]*([A-Za-z_][A-Za-z0-9_]*::)*Timeouts[^A-Za-z0-9_]/)
 --- new
   else if (0)
 --- end

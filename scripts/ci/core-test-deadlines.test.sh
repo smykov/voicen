@@ -12,8 +12,11 @@
 #   Timeouts {      blanks allowed between, so `-> Timeouts {` and `for Timeouts {` refuse too;
 #   Timeouts::      a path call (`Timeouts::default()`, `Timeouts::from_settings`);
 #   Timeouts as     an alias import;
-#   = Timeouts      followed by a non-identifier character (a type alias; `= TimeoutsView` is
-#                   another word);
+#   Timeouts>::     a qualified-path call (`<Timeouts>::default()`,
+#                   `<voicen_core::timeouts::Timeouts>::from_settings(..)`);
+#   = Timeouts      with optional blanks after `=` and optional `ident::` segments before
+#                   `Timeouts`, then a non-identifier character or the line end (a type alias,
+#                   `type D = voicen_core::timeouts::Timeouts;`; `= TimeoutsView` is another word);
 #   Default::default   an inferred Timeouts;
 #   Stall, Trickle, SilentHeaders   as words at identifier boundaries (any Serve plan with a
 #                   hold or gap, with or without the `Serve::` path, after `use Serve::*`, under
@@ -96,6 +99,8 @@ check v-timeouts-path                 1 "/post_process_timeout.rs:2: deadline"  
 check v-timeouts-path                 1 "/post_process_timeout.rs:5: deadline"   # Timeouts::from_settings
 check v-timeouts-as                   1 "/connection_test.rs:1: deadline"        # {Timeouts as Deadlines}
 check v-timeouts-type-alias           1 "/final_pass_http.rs:3: deadline"        # type Deadlines = Timeouts;
+check v-timeouts-qualified-path       1 "/post_process_chat.rs:4: deadline"      # handoff(<Timeouts>::default()): only Timeouts>:: matches
+check v-timeouts-path-alias           1 "/connection_test.rs:3: deadline"        # type D = voicen_core::timeouts::Timeouts;: only the widened alias matches
 check v-default-default               1 "/local_engine.rs:2: deadline"           # let t: Timeouts = Default::default();
 check v-serve-stall                   1 "/local_download.rs:2: deadline"         # Serve::Stall { hold }
 check v-serve-trickle                 1 "/local_models_service.rs:2: deadline"   # Serve::Trickle { gap }

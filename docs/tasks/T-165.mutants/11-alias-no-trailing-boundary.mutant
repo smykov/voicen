@@ -2,7 +2,7 @@ guarantee: AC-1: = Timeouts followed by non-identifier only
 file: scripts/ci/core-test-deadlines.sh
 added_by: test-writer
 --- old
-/= Timeouts[^A-Za-z0-9_]/)
+/=[ \t]*([A-Za-z_][A-Za-z0-9_]*::)*Timeouts[^A-Za-z0-9_]/)
 --- new
-/= Timeouts/)
+/=[ \t]*([A-Za-z_][A-Za-z0-9_]*::)*Timeouts/)
 --- end

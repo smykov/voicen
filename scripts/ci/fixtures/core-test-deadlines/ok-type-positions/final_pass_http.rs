@@ -7,3 +7,8 @@ fn request(t: Timeouts, other: Option<Timeouts>) -> Vec<Timeouts> {
 }
 
 struct Holder { t: Timeouts }
+
+fn none() {
+    let t: Option<Timeouts> = None;
+    let _ = t;
+}
