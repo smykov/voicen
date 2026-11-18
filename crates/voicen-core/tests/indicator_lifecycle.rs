@@ -241,7 +241,7 @@ fn the_overlay_and_the_indicator_inputs_drive_one_reducer() {
                 }
             });
             let newest_overlay = state.zip(held.as_ref()).map(|((s, _), st)| (s, st));
-            let act_a = a.on_wake(&destroyed, newest_overlay);
+            let act_a = a.on_wake(&destroyed, newest_overlay).action;
             let act_b = b.on_wake_visible(&destroyed, state);
             trace.push(format!("{destroyed:?} {state:?} -> {act_a:?} / {act_b:?}"));
             assert_eq!(act_a, act_b, "run {run}: {trace:#?}");
