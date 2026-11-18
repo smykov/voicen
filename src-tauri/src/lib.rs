@@ -28,6 +28,7 @@ use voicen_core::BuildInfo;
 #[cfg(windows)]
 pub mod autostart;
 pub mod call;
+pub mod call_indicator;
 #[cfg(windows)]
 pub mod credentials;
 pub mod diag;
@@ -67,7 +68,10 @@ fn commands<R: Runtime>(builder: Builder<R>) -> Builder<R> {
         call::calls_get,
         call::calls_copy_markdown,
         call::calls_export,
-        call::calls_open_folder
+        call::calls_open_folder,
+        call_indicator::call_indicator_state,
+        call_indicator::call_indicator_stop,
+        call_indicator::call_indicator_dismiss
     ])
 }
 

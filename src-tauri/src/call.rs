@@ -19,9 +19,13 @@
 //!   `CallSession::next_deadline` (measured on [`CallPorts::mono`]) or until the worker
 //!   wakes it after a request, then calls `CallSession::tick` and reads the deadline
 //!   again (#278). While no call records it waits for a request only.
-//! - [`ShellCallIndicator`] forwards `set_call_recording` to the tray part; `set_state` /
-//!   `set_tick` are no-ops until T-130's indicator window (#277: a call shows only the
-//!   tray icon until then). [`ShellCallShell`] maps each `CallNotice` through core's
+//! - [`ShellCallIndicator`] forwards `set_call_recording` to the tray part and
+//!   `set_state` / `set_tick` to the indicator part (`call_indicator::IndicatorPart`,
+//!   T-130: store and notify only; the `call-indicator` thread does every window call).
+//!   [`start_calls`] starts that part (`call_indicator::start`) before it builds the
+//!   session. The indicator page's stop and dismiss are [`CallRequest::IndicatorStop`]
+//!   and [`CallRequest::Dismiss`] on the worker (`CallSession::stop(StopReason::User)`,
+//!   `CallSession::dismiss_warning`). [`ShellCallShell`] maps each `CallNotice` through core's
 //!   `CallNotice::message` to the shared notifier and opens Settings on its Calls tab.
 //! - The Calls window (T-142; contracts/ipc.md "Windows", FR-033, FR-034, FR-036): at
 //!   most one window labelled [`LABEL`] at `/calls`, created only on the call part's own
@@ -67,6 +71,7 @@ use tauri::{
     AppHandle, Emitter, Manager, Runtime, Webview, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
 };
 use voicen_core::call::events::refused_notice;
+use voicen_core::call::events::StopReason;
 use voicen_core::call::final_pass::{ApiPassRunner, PassEvents, PassQueue};
 use voicen_core::call::indicator::{IndicatorState, IndicatorTick};
 use voicen_core::call::session::{
@@ -90,6 +95,7 @@ use voicen_core::settings::service::SettingsService;
 use voicen_core::settings::Settings;
 use voicen_core::vad::SpeechSpans;
 
+use crate::call_indicator::{self, IndicatorPart};
 use crate::logs_folder::FolderOpener;
 use crate::settings_window::{self, OpenTarget};
 use crate::tray::{self, TrayPart};
@@ -168,6 +174,10 @@ pub enum CallRequest {
     Stop(CallSource),
     /// An unknown `--call` value: one `call_switch_refused reason=unknown_value`.
     RefuseSwitch,
+    /// The indicator's Stop (`call_indicator_stop`, T-130): `call_stopped reason=user`.
+    IndicatorStop,
+    /// The indicator's Dismiss of the warning with this id (`call_indicator_dismiss`).
+    Dismiss(u32),
 }
 
 /// The call part of an app: the worker's queue, the "Calls" route's counter, the Calls
@@ -233,7 +243,8 @@ pub fn file_opener() -> TrackOpener {
 /// Builds the one call session of `app` over `ports`, manages it as `Arc<CallSession>`,
 /// its store as `Arc<CallStore>` and the one pass queue over that store as
 /// `Arc<PassQueue>` (T-139), and starts the `call-requests` worker and the `call-tick`
-/// thread. Needs the managed `Arc<SettingsService>` and `Arc<Log>`
+/// thread; before the session it starts the indicator part (`call_indicator::start`:
+/// its mailbox and the `call-indicator` thread, no window). Needs the managed `Arc<SettingsService>` and `Arc<Log>`
 /// (`assemble`'s wiring) and, for the tray flag, the tray (`run()` calls this after
 /// `start_dictation`, so the tray exists). Starts no call. `Err` when a managed part is
 /// missing, the app already has a call part (then nothing is started) or a thread could
@@ -290,6 +301,7 @@ pub fn start_calls<R: Runtime>(app: &AppHandle<R>, ports: CallPorts) -> io::Resu
         Arc::clone(&mono),
     );
     let queue = Arc::new(PassQueue::new(Arc::clone(&store), Arc::new(runner)));
+    call_indicator::start(app, Arc::clone(&service), Arc::clone(&log));
     let session = Arc::new(CallSession::new(CallDeps {
         source,
         store: Arc::clone(&store),
@@ -368,6 +380,14 @@ fn serve(session: &CallSession, request: CallRequest, log: &Log, notifier: &dyn 
         CallRequest::Record(CallSource::Switch) => session.toggle_record(true, CallSource::Switch),
         CallRequest::Record(source) => session.toggle_record(!session.is_recording(), source),
         CallRequest::Stop(source) => session.toggle_record(false, source),
+        CallRequest::IndicatorStop => {
+            session.stop(StopReason::User);
+            return;
+        }
+        CallRequest::Dismiss(id) => {
+            session.dismiss_warning(id);
+            return;
+        }
         CallRequest::RefuseSwitch => {
             log.write(LogEvent::CallSwitchRefused {
                 reason: SwitchRefusal::UnknownValue,
@@ -575,27 +595,38 @@ fn emit_open<R: Runtime>(app: &AppHandle<R>, target: CallRef) {
 }
 
 /// `run()`'s `CallIndicator` (called inside the call session lock): the call flag goes
-/// to the tray part (store and post only); `set_state` and `set_tick` do nothing until
-/// T-130's indicator window forwards them (#277).
+/// to the tray part, the state and the tick to the indicator part (T-130); each only
+/// stores and notifies.
 pub struct ShellCallIndicator<R: Runtime> {
     tray: Option<TrayPart<R>>,
+    indicator: Option<Arc<IndicatorPart>>,
 }
 
 impl<R: Runtime> ShellCallIndicator<R> {
-    /// The indicator of `app`: its tray part (`tray::part`), if the tray was built.
+    /// The indicator of `app`: its tray part (`tray::part`), if the tray was built, and
+    /// its indicator part (`call_indicator::part`), if `call_indicator::start` ran.
     pub fn new(app: &AppHandle<R>) -> ShellCallIndicator<R> {
         ShellCallIndicator {
             tray: tray::part(app),
+            indicator: call_indicator::part(app),
         }
     }
 }
 
 impl<R: Runtime> CallIndicator for ShellCallIndicator<R> {
-    /// No indicator window until T-130 (#277).
-    fn set_state(&self, _state: &IndicatorState) {}
+    /// Stores `state` in the indicator mailbox and wakes its thread; never blocks.
+    fn set_state(&self, state: &IndicatorState) {
+        if let Some(indicator) = &self.indicator {
+            indicator.set_state(state);
+        }
+    }
 
-    /// No indicator window until T-130 (#277).
-    fn set_tick(&self, _tick: &IndicatorTick) {}
+    /// Stores `tick` in the indicator mailbox and wakes its thread; never blocks.
+    fn set_tick(&self, tick: &IndicatorTick) {
+        if let Some(indicator) = &self.indicator {
+            indicator.set_tick(tick);
+        }
+    }
 
     fn set_call_recording(&self, recording: bool) {
         if let Some(tray) = &self.tray {
