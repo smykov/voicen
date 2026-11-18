@@ -15,10 +15,11 @@ use std::time::{Duration, UNIX_EPOCH};
 use serde_json::{json, Value};
 use voicen_core::autostart::FakeAutostart;
 use voicen_core::clock::FakeClock;
-use voicen_core::hotkey_registrar::FakeHotkeyRegistrar;
+use voicen_core::hotkey_registrar::{FakeHotkeyRegistrar, RegistrarCall};
 use voicen_core::models::FakeDownloadedModels;
 use voicen_core::secrets::{CredentialOp, FakeCredentialStore, KeyEdits};
 use voicen_core::settings::file::{FakeSettingsFile, FileCall};
+use voicen_core::settings::hotkey::parse_hotkey;
 use voicen_core::settings::roots::{CallRoots, UnwritableReason};
 use voicen_core::settings::service::{SaveOutcome, SaveRequest, SettingsDeps, SettingsService};
 use voicen_core::settings::{defaults, ErrorCode, FieldError, FieldId, LoadOutcome, Settings};
@@ -340,12 +341,21 @@ fn release_1_file_with_dictation_hotkey_ctrl_alt_r_loads_but_saves_are_refused_u
     );
     assert_eq!(world.footprint(), before);
 
-    // Changing the call hotkey is enough (the dictation hotkey is not re-registered).
+    // Changing the call hotkey is enough (the dictation hotkey is not re-registered: the
+    // registrar sees only the call slot prepared and committed, T-129 I4).
     unrelated.calls.hotkey = "Ctrl+Alt+T".into();
     expect_saved(service.save(req(unrelated)));
     assert_eq!(service.snapshot().calls.hotkey, "Ctrl+Alt+T");
     assert_eq!(service.snapshot().hotkey, "Ctrl+Alt+R");
-    assert_eq!(world.hotkeys.calls(), vec![], "dictation hotkey unchanged");
+    let new_call = parse_hotkey("Ctrl+Alt+T").expect("a canonical test hotkey");
+    assert_eq!(
+        world.hotkeys.calls(),
+        vec![
+            RegistrarCall::PrepareCall(new_call),
+            RegistrarCall::Commit(new_call)
+        ],
+        "only the call slot is prepared and committed; the dictation hotkey is not re-registered"
+    );
     assert_eq!(world.stored().calls.hotkey, "Ctrl+Alt+T");
 }
 

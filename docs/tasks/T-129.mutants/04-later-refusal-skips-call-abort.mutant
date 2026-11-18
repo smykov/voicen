@@ -1,0 +1,10 @@
+guarantee: I4: every later refusal aborts the prepared call hotkey
+file: crates/voicen-core/src/settings/service.rs
+added_by: test-writer
+--- old
+            for prepared in [prepared, prepared_call].into_iter().flatten() {
+                self.deps.hotkeys.abort(prepared);
+--- new
+            for prepared in [prepared].into_iter().flatten() {
+                self.deps.hotkeys.abort(prepared);
+--- end

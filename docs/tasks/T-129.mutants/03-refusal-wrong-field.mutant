@@ -1,0 +1,10 @@
+guarantee: A3 failure branch: the refusal names calls.hotkey
+file: crates/voicen-core/src/settings/service.rs
+added_by: test-writer
+--- old
+                            FieldId::CallHotkey,
+                            ErrorCode::HotkeyUnavailable,
+--- new
+                            FieldId::RecordingHotkey,
+                            ErrorCode::HotkeyUnavailable,
+--- end

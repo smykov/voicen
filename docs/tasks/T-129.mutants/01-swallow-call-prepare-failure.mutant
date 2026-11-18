@@ -1,0 +1,11 @@
+guarantee: A3 failure branch: taken new call hotkey -> Refused calls.hotkey/hotkey.unavailable (prepare_call failure swallowed)
+file: crates/voicen-core/src/settings/service.rs
+added_by: test-writer
+--- old
+                Some(prepared_call) => Some(prepared_call),
+                None => {
+--- new
+                Some(prepared_call) => Some(prepared_call),
+                None if true => None,
+                None => {
+--- end

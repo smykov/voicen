@@ -230,7 +230,8 @@ pub enum SaveLine {
 
 /// The kinds of a `Warning` line: the pipeline's `WarningCode`s and the shell's
 /// start, settings-window, tray, hotkey, dictation-start, overlay and
-/// logs-folder failures, and a hotkey-thread request timeout.
+/// logs-folder failures, a hotkey-thread request timeout and a call-hotkey
+/// registration failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WarningKind {
     /// `events::WarningCode::VadFallback`.
@@ -266,6 +267,10 @@ pub enum WarningKind {
     /// `RegisterHotKey` refused the hotkey (T-006); the OS code says why (1409:
     /// another program holds the combination).
     HotkeyRegisterFailed,
+    /// `RegisterHotKey` refused the call hotkey (T-129: its own slot, at start, on a
+    /// resume or unlock, or a save's prepare); the OS code says why. Dictation is
+    /// unaffected.
+    CallHotkeyRegisterFailed,
     /// The dictation session could not be started (T-006); the app runs on
     /// without dictation.
     DictationStartFailed,

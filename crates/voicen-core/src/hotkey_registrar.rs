@@ -26,6 +26,11 @@ pub trait HotkeyRegistrar: Send + Sync {
     fn commit(&self, prepared: Prepared);
     /// Drop `prepared`; the previous hotkey stays active.
     fn abort(&self, prepared: Prepared);
+    /// T-129: prepare the call hotkey (its own slot) next to the one in force;
+    /// `commit` / `abort` finish it by token. The default fails closed.
+    fn prepare_call(&self, _hotkey: Hotkey) -> Result<Prepared, Unavailable> {
+        Err(Unavailable)
+    }
 }
 
 /// One recorded call on [`FakeHotkeyRegistrar`].
@@ -33,6 +38,8 @@ pub trait HotkeyRegistrar: Send + Sync {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RegistrarCall {
     Prepare(Hotkey, Mode),
+    /// T-129: a call-slot prepare.
+    PrepareCall(Hotkey),
     Commit(Hotkey),
     Abort(Hotkey),
 }
@@ -42,6 +49,7 @@ pub enum RegistrarCall {
 struct FakeRegistrarState {
     calls: Vec<RegistrarCall>,
     fail_prepare: bool,
+    fail_prepare_call: bool,
     active: Option<(Hotkey, Mode)>,
     next_token: u64,
 }
@@ -67,6 +75,11 @@ impl FakeHotkeyRegistrar {
 
     pub fn fail_prepare(&self, fail: bool) {
         self.lock().fail_prepare = fail;
+    }
+
+    /// T-129: like [`fail_prepare`](Self::fail_prepare), for `prepare_call` only.
+    pub fn fail_prepare_call(&self, fail: bool) {
+        self.lock().fail_prepare_call = fail;
     }
 
     pub fn calls(&self) -> Vec<RegistrarCall> {
@@ -97,6 +110,21 @@ impl HotkeyRegistrar for FakeHotkeyRegistrar {
             hotkey,
             mode,
             token: state.next_token,
+        })
+    }
+
+    fn prepare_call(&self, hotkey: Hotkey) -> Result<Prepared, Unavailable> {
+        let mut state = self.lock();
+        state.calls.push(RegistrarCall::PrepareCall(hotkey));
+        if state.fail_prepare_call {
+            return Err(Unavailable);
+        }
+        state.next_token += 1;
+        let id = state.next_token;
+        Ok(Prepared {
+            hotkey,
+            mode: Mode::Toggle,
+            token: id,
         })
     }
 

@@ -1,0 +1,10 @@
+guarantee: I4/A3: the prepared call hotkey is committed after the file write
+file: crates/voicen-core/src/settings/service.rs
+added_by: test-writer
+--- old
+        for prepared in [prepared, prepared_call].into_iter().flatten() {
+            self.deps.hotkeys.commit(prepared);
+--- new
+        for prepared in [prepared].into_iter().flatten() {
+            self.deps.hotkeys.commit(prepared);
+--- end

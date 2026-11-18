@@ -1,0 +1,8 @@
+guarantee: I4: an unchanged calls.hotkey is never re-registered
+file: crates/voicen-core/src/settings/service.rs
+added_by: test-writer
+--- old
+settings.calls.hotkey != self.snapshot().calls.hotkey {
+--- new
+settings.calls.hotkey == self.snapshot().calls.hotkey {
+--- end

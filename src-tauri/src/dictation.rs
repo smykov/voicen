@@ -31,6 +31,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use tauri::{AppHandle, Manager, Runtime};
+use voicen_core::call::CallSource;
 use voicen_core::diag::{
     DetectorTag, Log, LogEvent, LogObserver, LogsNotice, LogsNoticeSink, WarningKind,
 };
@@ -49,10 +50,13 @@ use voicen_core::settings::service::SettingsService;
 use voicen_core::settings::FieldId;
 use voicen_core::vad::{EnergyDetector, SpeechDetector, SpeechGate, VadError};
 
+use crate::call::{self, CallRequest};
 use crate::overlay::{self, OverlayPart};
 use crate::settings_window::{self, OpenTarget};
 use crate::tray::{self, TrayPart};
-use crate::win::hotkey::{CancelKeyHandle, HotkeyRegistrarHandle, HotkeyThread};
+use crate::win::hotkey::{
+    CallHotkeyMark, CallPort, CancelKeyHandle, HotkeyRegistrarHandle, HotkeyThread,
+};
 
 /// What the tests replace; `run()` passes the Windows adapters.
 pub struct DictationPorts {
@@ -178,6 +182,7 @@ pub fn start_dictation_with<R: Runtime>(
     }
     let _ = app.manage(PendingAudio(Arc::clone(&temp_audio)));
     let cancel_key = CancelKeyHandle::new();
+    let call_notifier = Arc::clone(&notifier);
     let gate = SpeechGate::new(detector, EnergyDetector::new());
     let start_line = LogEvent::VadDetector {
         detector: DetectorTag::from_name(gate.detector_name()),
@@ -220,9 +225,38 @@ pub fn start_dictation_with<R: Runtime>(
     }
     let hotkey = service.snapshot().hotkey.clone();
     let hotkey = HotkeyThread::start(session, &hotkey, log)?;
+    // T-129: the call slot, before the registrar is attached (a save's `prepare_call`
+    // finds the slot started). Its press only posts to the call worker, a no-op until
+    // `call::start_calls` ran; a conflict is a notice and the mark only (I3).
+    let _ = app.manage(Arc::new(CallHotkeyMark::default()));
+    let mark = app
+        .try_state::<Arc<CallHotkeyMark>>()
+        .map(|mark| Arc::clone(&mark))
+        .unwrap_or_default();
+    let press_app = app.clone();
+    let call_hotkey = service.snapshot().calls.hotkey.clone();
+    hotkey.register_call(
+        &call_hotkey,
+        CallPort {
+            on_press: Box::new(move || {
+                call::request(&press_app, CallRequest::Record(CallSource::Hotkey));
+            }),
+            notifier: call_notifier,
+            mark,
+        },
+    );
     hotkeys.attach(&hotkey);
     cancel_key.attach(&hotkey);
     Ok(DictationHandle { _hotkey: hotkey })
+}
+
+/// The call-hotkey mark of `app`'s Calls tab (T-129, US9 #3): `Some(FieldId::CallHotkey)`
+/// while the call hotkey's registration is failing (at start, or after a resume or
+/// unlock), `None` otherwise and before [`start_dictation_with`] ran. Shell state only:
+/// no wire carries it to the settings window yet.
+pub fn call_hotkey_mark<R: Runtime>(app: &AppHandle<R>) -> Option<FieldId> {
+    app.try_state::<Arc<CallHotkeyMark>>()
+        .and_then(|mark| mark.field())
 }
 
 /// [`start_dictation`]'s notifier, for the tests that look at no toast: the offers are
