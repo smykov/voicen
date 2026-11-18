@@ -1,0 +1,8 @@
+guarantee: AC1: a Destroyed of another window generation is ignored
+file: crates/voicen-core/src/overlay.rs
+added_by: test-writer
+--- old
+destroyed.contains(&self.generation)
+--- new
+!destroyed.is_empty()
+--- end
