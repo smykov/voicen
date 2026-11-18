@@ -144,13 +144,14 @@ Crate facts were read from the published sources of `opus` 0.4.0 / `opusic-sys` 
 
 - **Decision**:
   - **Window**: a second Tauri window with label `call-indicator` on its own opener thread and capability (settings-ui.md):
-    - created hidden at first Record, never at app start (overlay.md §5);
-    - undecorated, `always_on_top`, `skip_taskbar`, transparent off, focusable;
+    - built hidden at each Record start, never at app start (overlay.md §5), and destroyed when recording ends (NFR-03; T-130, decisions #314 context), not hidden and kept;
+    - undecorated, `always_on_top`, `skip_taskbar`, transparent off, non-activating (`focusable(false)` = `WS_EX_NOACTIVATE`, variant N);
     - its route is `/call-indicator`.
-  - **Showing and focus**: it is shown with `SW_SHOWNOACTIVATE`, so the call app keeps the focus at start. Clicking the stop control may activate it; after a click the shell returns the foreground to the window that had it (ADR-007 fallback).
-  - **Moving**: through `data-tauri-drag-region`. The position is saved in `calls.indicator_position` and clamped to a visible monitor at show.
+  - **Showing and focus**: it is shown with `SW_SHOWNOACTIVATE`, so the call app keeps the focus at start. With variant N the window never activates, clicks included; returning the foreground to the window that had it after a click is only the ADR-007 fallback (variant F), built if the spike fails.
+  - **Moving**: through `data-tauri-drag-region`. The shell records the position from the window's own `Moved` events (debounced to the drag's end; no `call_indicator_moved` command, decisions #314), saves it in `calls.indicator_position` and clamps it to a visible monitor work area at show.
   - **Text**: shown text comes from the core message catalog (the overlay rule, i18n.md); levels and timer arrive as typed events at most 10 Hz.
   - **Smoke**: it is a product window, never in `scripts/ci/helper-windows.txt`. The install smoke's window census passes because the indicator is not shown at start and a refused start never shows it (FR-043).
+- **Status (T-130)**: variant N (`WS_EX_NOACTIVATE`, ADR-007 primary) is implemented in `src-tauri/src/call_indicator.rs` and is pending proof by the Windows CI spike (`src-tauri/tests/call_indicator.rs`, rows S1-S8) on `wip/T-130`; it is not proven yet. If it fails, the fallback below applies.
 - **Confirm at spike** (the first indicator task, Windows CI plus an owner check):
   - `SW_SHOWNOACTIVATE` and an interactive click without a focus steal;
   - drag on an undecorated window;

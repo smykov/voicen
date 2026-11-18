@@ -193,7 +193,7 @@
   - After a stop-control click, the shell returns the foreground.
   - Window census: a second webview adds no unlisted helper window. If it does, record the evidence and decide here whether to add it to `scripts/ci/helper-windows.txt`; that addition makes the group **checker**.
   - **Owner**: the indicator stays above a full-screen app, and dragging works (`verify_exception`). If Tauri cannot keep the focus, use ADR-007's fallback (a topmost window that returns focus); if that fails too, stop and ask the owner about a native window (#235).
-- [ ] T033 [US1] [area shell] Implement the window and the commands and events of contracts/ipc.md (`call_indicator_stop`, `call_indicator_dismiss`, `call_indicator_moved`, `call_indicator_state`, `indicator://tick` ≤ 10 Hz, `indicator://state`). The position is saved in `calls.indicator_position` and clamped to a visible monitor. Until T032 and these are green (spec FR-005, FR-006; req FR-34).
+- [ ] T033 [US1] [area shell] Implement the window and the commands and events of contracts/ipc.md (`call_indicator_stop`, `call_indicator_dismiss`, `call_indicator_state`, `indicator://tick` ≤ 10 Hz, `indicator://state`). The position is recorded by the shell from the window's own moves (`call_indicator_moved` is dropped, decisions #314), saved in `calls.indicator_position` and clamped to a visible monitor. Until T032 and these are green (spec FR-005, FR-006; req FR-34).
 
 ### G17 — Indicator route (area: ui) <a id="g17"></a>
 
