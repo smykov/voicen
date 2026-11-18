@@ -1,0 +1,8 @@
+guarantee: NFR-03: stop destroys, the label stays taken until Destroyed
+file: crates/voicen-core/src/overlay.rs
+added_by: test-writer
+--- old
+                self.phase = WindowPhase::Destroying;
+--- new
+                self.phase = WindowPhase::Absent;
+--- end

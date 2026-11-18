@@ -1,0 +1,8 @@
+guarantee: AC5: each newer state is emitted with its own seq
+file: crates/voicen-core/src/overlay.rs
+added_by: test-writer
+--- old
+            (WindowPhase::Live, Some((seq, false))) if newer => WindowAction::Emit(seq),
+--- new
+            (WindowPhase::Live, Some((seq, false))) if newer => WindowAction::Emit(seq.saturating_sub(1)),
+--- end
