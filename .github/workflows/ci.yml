@@ -306,6 +306,17 @@ jobs:
             else { $missing += "$($p[0]) not found at $($p[1])" }
           }
           if ($missing) { throw ($missing -join '; ') }
+          # T-213 (I7, Acceptance 6): the shortcut carries the toast activator CLSID and the HKCU class key
+          # points at the installed voicen.exe. Red until the installer hooks write both.
+          $clsid = '{163266b0-4b55-446a-bbbe-e31cac2c713a}'
+          $clsidKey = 'HKCU:\Software\Classes\CLSID\' + $clsid
+          $lnkItem = (New-Object -ComObject Shell.Application).Namespace((Split-Path -Parent $shortcut)).ParseName('Voicen.lnk')
+          $lnkClsid = "$($lnkItem.ExtendedProperty('System.AppUserModel.ToastActivatorCLSID'))"
+          if ($lnkClsid -ine $clsid) { throw "Voicen.lnk property System.AppUserModel.ToastActivatorCLSID is '$lnkClsid' after the silent install, expected '$clsid'" }
+          $serverKey = Get-Item -LiteralPath ($clsidKey + '\LocalServer32') -ErrorAction SilentlyContinue
+          if (-not $serverKey) { throw "registry key $clsidKey\LocalServer32 not found after the silent install" }
+          if ($serverKey.GetValue('') -ine $exe) { throw "$clsidKey\LocalServer32 default value is '$($serverKey.GetValue(''))' after the silent install, expected '$exe'" }
+          Write-Output "found the toast activator CLSID $clsid on $shortcut and $clsidKey\LocalServer32 = $exe"
           # T-025 (NFR-09, spec 006 FR-019): the installed size is measured before the first
           # launch (no settings, logs or WebView2 data yet) and is at most 100 MB (binary units,
           # OQ-08); the committed THIRD-PARTY-NOTICES.txt (T-027) is installed next to voicen.exe
@@ -1108,6 +1119,9 @@ jobs:
           if (-not (Test-Path -LiteralPath $settings -PathType Leaf)) { throw "premise: settings.json not found at $settings before the reinstall" }
           $settingsHash = (Get-FileHash -LiteralPath $settings -Algorithm SHA256).Hash
           $markerText = "ci-keep $env:VOICEN_COMMIT"
+          $shortcut = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Voicen.lnk'
+          $clsid = '{163266b0-4b55-446a-bbbe-e31cac2c713a}'
+          $clsidKey = 'HKCU:\Software\Classes\CLSID\' + $clsid
           Set-Content -LiteralPath $marker -Value $markerText -NoNewline
           New-ItemProperty -Path $run -Name 'Voicen' -PropertyType String -Value $runValue -Force | Out-Null
           if ((Get-RunValue) -ne $runValue) { [void](Remove-All); throw "premise: the HKCU Run value Voicen reads '$(Get-RunValue)' after writing '$runValue'" }
@@ -1137,6 +1151,13 @@ jobs:
           $bad = @()
           if ($p.ExitCode -ne 0) { $bad += "the /P reinstall exited with $($p.ExitCode), expected 0" }
           if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { $bad += "voicen.exe not found at $exe after the reinstall" }
+          # T-213 (I7, Acceptance 6): an update-mode reinstall leaves the CLSID on the shortcut and the class key at this exe.
+          $lnkItem = (New-Object -ComObject Shell.Application).Namespace((Split-Path -Parent $shortcut)).ParseName('Voicen.lnk')
+          if (-not $lnkItem) { $bad += "Voicen.lnk not found at $shortcut after the /P reinstall" }
+          else { $lnkClsid = "$($lnkItem.ExtendedProperty('System.AppUserModel.ToastActivatorCLSID'))"; if ($lnkClsid -ine $clsid) { $bad += "Voicen.lnk property System.AppUserModel.ToastActivatorCLSID is '$lnkClsid' after the /P reinstall, expected '$clsid'" } }
+          $serverKey = Get-Item -LiteralPath ($clsidKey + '\LocalServer32') -ErrorAction SilentlyContinue
+          if (-not $serverKey) { $bad += "registry key $clsidKey\LocalServer32 not found after the /P reinstall" }
+          elseif ($serverKey.GetValue('') -ine $exe) { $bad += "$clsidKey\LocalServer32 default value is '$($serverKey.GetValue(''))' after the /P reinstall, expected '$exe'" }
           if (-not (Test-Path -LiteralPath $marker -PathType Leaf)) { $bad += "the data marker $marker was deleted by the reinstall" }
           elseif ((Get-Content -LiteralPath $marker -Raw) -ne $markerText) { $bad += "the data marker $marker changed during the reinstall" }
           if (-not (Test-Path -LiteralPath $settings -PathType Leaf)) { $bad += "settings.json was deleted by the reinstall" }
@@ -1393,6 +1414,7 @@ jobs:
           $shortcut = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Voicen.lnk'
           $uninstKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Voicen'
           $run = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+          $clsidKey = 'HKCU:\Software\Classes\CLSID\{163266b0-4b55-446a-bbbe-e31cac2c713a}'
           $fake = 'sk-test-ci-keepdata-0000-not-a-real-key'
           $target = 'Voicen/ci-keepdata'
           function Get-RunValue { (Get-ItemProperty -Path $run -Name 'Voicen' -ErrorAction SilentlyContinue).Voicen }
@@ -1426,6 +1448,8 @@ jobs:
           if (-not (Test-VoicenCredential -Target $target)) { $bad += "/KEEPDATA: $target was deleted" }
           if ($null -ne (Get-RunValue)) { $bad += "the HKCU Run value Voicen ('$(Get-RunValue)') is still present after the uninstall" }
           if (Test-Path -LiteralPath $shortcut) { $bad += "the shortcut $shortcut is still present after the uninstall" }
+          # T-213 (I7, Acceptance 8): /KEEPDATA keeps data, not the toast activator registration.
+          if (Test-Path -LiteralPath $clsidKey) { $bad += "the registry key $clsidKey is still present after uninstall.exe /S /KEEPDATA" }
           if ($bad) { [void](Remove-All); Remove-ItemProperty -Path $run -Name 'Voicen' -ErrorAction SilentlyContinue; throw ($bad -join '; ') }
           Write-Output "uninstall /S /KEEPDATA: data folder, settings.json, ci-keep.txt and $target kept; Run value, shortcut, uninstall key, voicen.exe and uninstall.exe gone"
           # Reinstall for W4: a silent install over the kept data folder.
@@ -1453,6 +1477,7 @@ jobs:
           $shortcut = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Voicen.lnk'
           $uninstKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Voicen'
           $run = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+          $clsidKey = 'HKCU:\Software\Classes\CLSID\{163266b0-4b55-446a-bbbe-e31cac2c713a}'
           $fake = 'sk-test-ci-uninstall-0000-not-a-real-key'
           $gone = 'Voicen/ci-uninstall'
           $outsider = 'VoicenOther/ci-uninstall-keep'
@@ -1495,6 +1520,8 @@ jobs:
           $left = @(Get-VoicenCredentials -Prefix 'Voicen/')
           if ($left.Count -ne 0) { $bad += "Voicen/ credentials left after uninstall.exe /S: $(Format-Listed)" }
           if (-not (Test-VoicenCredential -Target $outsider)) { $bad += "$outsider (outside Voicen/) was deleted by the uninstall" }
+          # T-213 (I7, Acceptance 8): the toast activator registration is gone after uninstall.exe /S.
+          if (Test-Path -LiteralPath $clsidKey) { $bad += "the registry key $clsidKey is still present after uninstall.exe /S" }
           if ($null -ne (Get-RunValue)) { $bad += "the HKCU Run value Voicen ('$(Get-RunValue)') is still present after the uninstall" }
           if (Test-Path -LiteralPath $shortcut) { $bad += "the shortcut $shortcut is still present after the uninstall" }
           if (Test-Path -LiteralPath $uninstKey) { $bad += "the uninstall key $uninstKey is still present after the uninstall" }
