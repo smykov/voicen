@@ -27,6 +27,14 @@ They have no `teamwright:tools` block, so their instructions never tell them to 
 - **Where it is enforced:** nowhere; `.serena/project.yml` stays local (#16). Check with `get_symbols_overview` on one `.svelte` and one `.ts` file. Checked 2026-10-24 (T-114), from the orchestrator session and from a `task-validator` probe run (journal `agent_type=task-validator tool=mcp__serena__get_symbols_overview`, 2026-10-24T21:08:17Z): `src/lib/about/About.svelte` → `{"Field": ["script", "div.about", "style"]}` (svelte language server component outline); `src/lib/buildInfo.ts` → `{"Interface": ["BuildInfo"], "Function": ["formatBuildInfo", "loadBuildInfo"]}`.
 - **Don't:** put `svelte` before `typescript`.
 
+### Serena serves the classic tool interface, and the contour stage session allows only its five read tools
+
+- **Why:** serena-agent 2.1.x writes `agent_interface: REPL` into a new global `~/.serena/serena_config.yml`; a server started with an empty or fresh `HOME` (the contour runner, run 43148171046) then exposes only `initial_instructions` and `serena_repl`. stage-protocol §0 probes with `get_symbols_overview`, and the role heads name the five navigation tools, so in REPL mode §0 stops the stage or every role falls back to grep (defect #272, T-208).
+- **Where it is set:** `.mcp.json` passes `--agent-interface tools` to `serena start-mcp-server`; the flag wins over the global file (`SerenaMCPFactory.create_mcp_server`), and the generated and local `.serena/project.yml` leave `agent_interface:` empty, so nothing overrides it. The contour copies the `serena` entry of `.mcp.json` into its `mcp.json` (preflight `jq`), so the flag reaches the runner; with no serena on the runner the `context7`-only branch is unchanged.
+- **Allowlist:** `teamwright-agent.yml`'s `claude -p` passes `--allowedTools` with exactly `mcp__serena__get_symbols_overview`, `find_symbol`, `find_referencing_symbols`, `find_implementations`, `find_declaration` (the role heads' set), never the server-wide `mcp__serena`: with the classic interface that would auto-allow Serena's edit and memory tools (`replace_symbol_body`, `rename_symbol`, `write_memory`, ...) under `acceptEdits`, and the gate hooks match only `Edit|Write|Bash`. Exposed tools that are not allowed are refused (a `-p` run cannot answer an ask).
+- **Check:** `tools/list` over stdio with an empty `HOME`: without the flag `initial_instructions, serena_repl`; with it the five read tools are present (T-208 ## Tests). Requires a serena with the `--agent-interface` option (2.1.1 on the runner per #272); an older one exits with a usage error and §0 stops the stage visibly.
+- **Not caught:** no checker reads `.mcp.json` or the allowlist text; a review of either file is the only guard.
+
 ## Rejected approaches
 
 | Approach | Why rejected | Ref |
