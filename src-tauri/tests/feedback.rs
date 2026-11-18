@@ -1273,8 +1273,14 @@ fn a_toast_thread_that_cannot_start_drops_the_offers_with_one_line_and_no_crash(
 const CALL_ID: &str = "2026-11-14_101500";
 const OTHER_CALL_ID: &str = "2026-11-15_090000";
 
+/// A COM interface pointer moved across threads by the test.
+struct SendCom<T>(T);
+// SAFETY: the test only calls the free-threaded activator and the agile class factory (both
+// created in the multithreaded apartment), so using them from another thread is sound.
+unsafe impl<T> Send for SendCom<T> {}
+
 /// The class factories the fake register fn was handed, in order.
-static CAPTURED: Mutex<Vec<IClassFactory>> = Mutex::new(Vec::new());
+static CAPTURED: Mutex<Vec<SendCom<IClassFactory>>> = Mutex::new(Vec::new());
 /// How often `failing_register` ran.
 static FAILING_REGISTERS: AtomicUsize = AtomicUsize::new(0);
 /// The one notifier that registered the activator through COM (once per test binary, F-012).
@@ -1282,7 +1288,7 @@ static REGISTERED: OnceLock<Arc<ShellNotifier>> = OnceLock::new();
 
 /// A `RegisterFn` that succeeds without touching COM and keeps the factory for the test.
 fn capture_register(factory: &IClassFactory) -> Result<(), WinError> {
-    win32_support::lock(&CAPTURED).push(factory.clone());
+    win32_support::lock(&CAPTURED).push(SendCom(factory.clone()));
     Ok(())
 }
 
@@ -1310,7 +1316,7 @@ fn attach_capturing(n: &ShellNotifier, route: ToastRoute) {
 fn activator() -> INotificationActivationCallback {
     let factory = win32_support::lock(&CAPTURED)
         .last()
-        .cloned()
+        .map(|f| f.0.clone())
         .expect("premise: a register fn was handed the class factory");
     // SAFETY: a plain COM call on a live factory with no aggregation.
     unsafe { factory.CreateInstance(None::<&IUnknown>) }
@@ -1322,8 +1328,8 @@ fn activator() -> INotificationActivationCallback {
 fn activate(cb: &INotificationActivationCallback, arg: &str) -> Result<(), WinError> {
     let wide: Vec<u16> = arg.encode_utf16().chain(Some(0)).collect();
     let aumid: PCWSTR = w!("dev.voicen.app");
-    // SAFETY: `wide` outlives the call and is NUL-terminated; the input data is null with count 0.
-    unsafe { cb.Activate(aumid, PCWSTR(wide.as_ptr()), std::ptr::null(), 0) }
+    // SAFETY: `wide` outlives the call and is NUL-terminated; the input data is empty.
+    unsafe { cb.Activate(aumid, PCWSTR(wide.as_ptr()), &[]) }
 }
 
 /// One attribute value of an XML start tag.
@@ -1590,9 +1596,10 @@ fn activating_the_offered_retry_argument_reruns_the_pending_recording_with_the_c
     );
     let done = Arc::new(AtomicBool::new(false));
     let activating = {
-        let (cb, arg, done) = (cb.clone(), arg.clone(), Arc::clone(&done));
+        let (cb, arg, done) = (SendCom(cb.clone()), arg.clone(), Arc::clone(&done));
         thread::spawn(move || {
-            let result = activate(&cb, &arg);
+            let cb = cb;
+            let result = activate(&cb.0, &arg);
             done.store(true, Ordering::SeqCst);
             result
         })

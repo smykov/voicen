@@ -1257,7 +1257,10 @@ mod tests {
             sorted.sort();
             sorted.dedup();
             assert_eq!(&sorted, ids, "pipeline {label}: ids rise and never repeat");
-            assert!(ids[0].0 >= seed, "pipeline {label}: ids start at the seed");
+            let Some(first) = ids.first() else {
+                panic!("pipeline {label}: no ids");
+            };
+            assert!(first.0 >= seed, "pipeline {label}: ids start at the seed");
         }
         for id in &ids_a {
             assert!(!ids_b.contains(id), "{id:?} handed out by both pipelines");
@@ -1272,10 +1275,14 @@ mod tests {
         // seconds (two pipelines built 5 ms apart get the same seed).
         let (fa, fb) = (fakes(), fakes());
         let a = failing_pipeline(&fa);
-        let first_a = pending_ids(&a, 1)[0];
+        let Some(&first_a) = pending_ids(&a, 1).first() else {
+            panic!("pipeline a handed out no id");
+        };
         std::thread::sleep(std::time::Duration::from_millis(5));
         let b = failing_pipeline(&fb);
-        let first_b = pending_ids(&b, 1)[0];
+        let Some(&first_b) = pending_ids(&b, 1).first() else {
+            panic!("pipeline b handed out no id");
+        };
         assert!(
             first_b > first_a,
             "a later pipeline's first id {first_b:?} is not above the earlier one's {first_a:?}"

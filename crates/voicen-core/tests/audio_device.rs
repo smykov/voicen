@@ -496,7 +496,7 @@ fn the_fallback_notice_is_offered_to_the_notifier_once_without_retry() {
         .notifier
         .calls()
         .into_iter()
-        .map(|c| (c.id, c.params, c.retry))
+        .map(|c| (c.id, c.params, c.action))
         .collect();
     assert_eq!(
         offered,
