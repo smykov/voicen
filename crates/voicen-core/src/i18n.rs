@@ -237,6 +237,9 @@ messages! {
     TRAY_RETRY_LAST = "tray.retry_last",
     /// The toast's Retry button (T-007, FR-11; the toast itself is T-210's).
     ACTION_RETRY = "action.retry",
+    /// The "Transcript ready" toast's Open button (T-213; spec 007 FR-030, decisions
+    /// #298, #312).
+    ACTION_OPEN = "action.open",
     /// The tray's "Open logs folder" failed (spec 006 FR-017, contracts/ipc.md);
     /// placeholder `{reason}` = a `logs_reason.*` id. Declared by T-007, raised by
     /// T-210 through `DictationSession::notice_with`.

@@ -4,6 +4,7 @@
   "about.close": "Close",
   "about.license": "MIT License",
   "about.title": "About Voicen",
+  "action.open": "Open",
   "action.retry": "Retry",
   "app.build_info": "Voicen {version} ({commit})",
   "app.build_info_error": "Cannot read build info: {reason}",

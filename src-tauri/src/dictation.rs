@@ -40,7 +40,7 @@ use voicen_core::i18n::MessageId;
 use voicen_core::pending::{CallRootsFn, FsTempAudioStore};
 use voicen_core::pipeline::{EngineFactory, PipelineDeps};
 use voicen_core::platform::{
-    AudioSource, Clipboard, Indicator, Notifier, Paster, PendingId, ShellRequests, TempAudioStore,
+    AudioSource, Clipboard, Indicator, Notifier, Paster, ShellRequests, TempAudioStore, ToastAction,
 };
 use voicen_core::post_process::chat::ChatPostProcessor;
 use voicen_core::recording::{OverlayState, TrayState};
@@ -269,7 +269,7 @@ impl Notifier for NoToasts {
         &self,
         _id: MessageId,
         _params: &[(&'static str, String)],
-        _retry: Option<PendingId>,
+        _action: Option<ToastAction>,
     ) {
     }
 }

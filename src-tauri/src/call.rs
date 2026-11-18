@@ -49,10 +49,11 @@
 //!   core's energy fallback). Every folder a stop leaves ready-to-transcribe reaches it
 //!   through `CallShell::call_ready` ([`ShellCallShell`] enqueues it); the pass's notices
 //!   go to the shared notifier as the session's do ([`ShellPassEvents`]).
-//! - [`open_transcript`] (T-139; T-213's toast button calls it with the root and id of
-//!   core's `TranscriptReady` notice) emits `calls://open` at once. Every `calls://open`,
-//!   its and the Calls window's held or immediate target alike, goes out through the one
-//!   private `emit_open` (decisions #298).
+//! - [`open_transcript`] (T-139) emits `calls://open` at once to an open Calls window. The
+//!   "Transcript ready" toast's Open button does not use it: it calls [`open_calls`] with
+//!   the notice's root and id (T-213; decisions #312, #313), which builds or focuses the
+//!   window and selects the call. Every `calls://open`, held or immediate, goes out through
+//!   the one private `emit_open` (decisions #298).
 
 use std::io;
 use std::panic::AssertUnwindSafe;
@@ -604,10 +605,11 @@ impl<R: Runtime> CallIndicator for ShellCallIndicator<R> {
     }
 }
 
-/// A call notice to the shared notifier: core's `CallNotice::message` id, `retry: None`.
+/// A call notice to the shared notifier: core's `CallNotice::message` id and its button,
+/// `CallNotice::action` (Open for "Transcript ready" only, T-213).
 fn offer(notifier: &dyn Notifier, notice: &CallNotice) {
     let (id, params) = notice.message();
-    notifier.notify(id, &params, None);
+    notifier.notify(id, &params, notice.action());
 }
 
 /// `run()`'s `CallShell` (called after the call session lock): a notice goes to the

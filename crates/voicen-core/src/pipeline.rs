@@ -11,9 +11,10 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use crate::audio::AudioBuffer;
+use crate::clock::{Clock, SystemClock};
 use crate::delivery::deliver;
 use crate::engine::{engine_for, Engine, TranscribeRequest};
 use crate::events::{
@@ -96,7 +97,9 @@ pub struct Pipeline {
     factory: Box<EngineFactory>,
     /// `JobFinished.seq`, taken at `run_job` entry (T-011 moves it to the stop).
     last_seq: AtomicU64,
-    /// The last [`PendingId`] handed out; ids are never reused.
+    /// The last [`PendingId`] handed out; ids are never reused, within this pipeline
+    /// or across processes: it starts at a per-pipeline seed (the wall clock in
+    /// microseconds, [`Pipeline::with_pending_id_seed`] in tests; T-213 I11).
     last_pending_id: AtomicU64,
     /// The one pending recording (data-model "PendingRecording": at most one).
     pending: Mutex<Option<PendingRecording>>,
@@ -178,6 +181,16 @@ fn is_blank(text: &str) -> bool {
     text.trim().is_empty()
 }
 
+/// The release seed of the pending ids: microseconds since the Unix epoch, so a later
+/// process starts above every id an earlier one handed out (an old toast in Action
+/// Center never names a new recording; T-213 I11). A clock before the epoch gives 0.
+fn wall_clock_seed() -> u64 {
+    SystemClock
+        .now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_micros()).unwrap_or(u64::MAX))
+}
+
 impl Pipeline {
     fn build(deps: PipelineDeps, timeouts: Option<Timeouts>) -> Pipeline {
         Pipeline {
@@ -185,7 +198,7 @@ impl Pipeline {
             timeouts,
             factory: Box::new(|settings, creds| engine_for(settings, creds, None)),
             last_seq: AtomicU64::new(0),
-            last_pending_id: AtomicU64::new(0),
+            last_pending_id: AtomicU64::new(wall_clock_seed()),
             pending: Mutex::new(None),
         }
     }
@@ -200,6 +213,15 @@ impl Pipeline {
     #[cfg(any(test, feature = "test-fakes"))]
     pub fn with_timeouts(deps: PipelineDeps, timeouts: Timeouts) -> Pipeline {
         Pipeline::build(deps, Some(timeouts))
+    }
+
+    /// Starts this pipeline's [`PendingId`]s above `seed` instead of the wall clock
+    /// (tests: two pipelines with distinct seeds stand for two processes).
+    pub fn with_pending_id_seed(self, seed: u64) -> Pipeline {
+        Pipeline {
+            last_pending_id: AtomicU64::new(seed),
+            ..self
+        }
     }
 
     /// Replaces the engine factory: the shell's closure over [`engine_for`] with

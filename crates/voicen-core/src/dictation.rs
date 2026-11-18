@@ -70,7 +70,7 @@ use crate::pipeline::{
 };
 use crate::platform::{
     AudioSource, CancelKey, CaptureHandle, DeviceId, FrameSink, Indicator, InputDevice, Notifier,
-    Paster, PendingId, ShellRequests,
+    Paster, PendingId, ShellRequests, ToastAction,
 };
 use crate::recording::{
     CaptureError, FinishedRecording, MicCause, OverlayState, PressOutcome, RecordingController,
@@ -254,9 +254,11 @@ impl Drop for Locked<'_> {
         let offers = guard.ctrl.take_offers();
         drop(guard);
         for offer in offers {
-            self.shared
-                .notifier
-                .notify(offer.id, &offer.params, offer.retry);
+            self.shared.notifier.notify(
+                offer.id,
+                &offer.params,
+                offer.retry.map(ToastAction::Retry),
+            );
         }
     }
 }

@@ -165,12 +165,12 @@ Mapping to the pass:
 
 ## Launch arguments
 
-`LaunchArgs::parse(argv)` recognises `--autostart` and `--call record`: `LaunchArgs { autostart: bool, call: Option<CallSwitch> }`, `CallSwitch` = `Record` | `Unknown`. It becomes the one parser of `--autostart`: the shell's `autostart::launched_by_autostart` (`src-tauri/src/autostart.rs`, also read at primary startup in `src-tauri/src/lib.rs`) delegates to it, and `AUTOSTART_ARG` stays the constant pinned by `src-tauri/tests/autostart.rs`.
+`LaunchArgs::parse(argv)` recognises `--autostart` and `--call record`: `LaunchArgs { autostart: bool, call: Option<CallSwitch>, embedding: bool }`, `CallSwitch` = `Record` | `Unknown`; `embedding` is an argument equal to exactly `-Embedding` (T-213: COM starts the app that way for a toast button clicked while Voicen was not running). It becomes the one parser of `--autostart`: the shell's `autostart::launched_by_autostart` (`src-tauri/src/autostart.rs`, also read at primary startup in `src-tauri/src/lib.rs`) delegates to it, and `AUTOSTART_ARG` stays the constant pinned by `src-tauri/tests/autostart.rs`.
 
 **Signature change of an existing function.** Today `crates/voicen-core/src/settings/gate.rs` has `pub fn second_launch_action(launched_by_autostart: bool) -> SecondLaunchAction` (`FrontSettings` | `TrayOnly`). It becomes `pub fn second_launch_action(args: &LaunchArgs) -> SecondLaunchAction`, and `SecondLaunchAction` gains `StartCallRecord`:
 - `call: Some(Record)` → `StartCallRecord` (with or without `--autostart`);
 - `call: Some(Unknown)` → `TrayOnly` (no action), and the primary logs `CallSwitchRefused { reason: unknown_value }`;
-- otherwise the existing table, unchanged: `autostart` → `TrayOnly`, else `FrontSettings`.
+- otherwise the existing table, unchanged: `autostart` or `embedding` (T-213) → `TrayOnly`, else `FrontSettings`.
 
 No `settings_open` argument: whether a settings window is open stays the shell's concern inside `FrontSettings`, as today. The existing callers change with it:
 - `src-tauri/src/tray.rs` `on_second_instance`, which today calls `second_launch_action(second_launched_by_autostart(&argv))`; it calls `second_launch_action(&LaunchArgs::parse(&argv))`, and `StartCallRecord` posts one request to the main loop (exercised by `src-tauri/tests/single_instance.rs`);

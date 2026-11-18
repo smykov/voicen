@@ -131,14 +131,15 @@ pub trait Paster: Send + Sync {
 // the tray, the timer and job ends with it.
 
 pub trait Notifier: Send + Sync {                         // built in T-007, `voicen_core::platform`; fake FakeNotifier
-    /// Toast. `retry` is Some(pending_id) only for a retryable failure whose audio is the pending recording.
+    /// Toast. `action` is Some(ToastAction::Retry(pending_id)) only for a retryable failure whose audio is the
+    /// pending recording, Some(ToastAction::Open { call, root }) only for a call's transcript-ready notice (T-213).
     /// A failure to show is not an error for the session (the overlay and tray carry the message).
-    fn notify(&self, id: MessageId, params: &[(&'static str, String)], retry: Option<PendingId>);
+    fn notify(&self, id: MessageId, params: &[(&'static str, String)], action: Option<ToastAction>);
 }
 // The session offers every message `RecordingController::show` sets (a failure or a notice), once, in the order
 // shown, with its lock released (the controller appends to an outbox; the lock guard's drop drains it), so an
 // implementation may call back into the session; it must still not block (hand the toast to its own thread).
-// `FakeNotifier::calls() -> Vec<NotifyCall { id, params, retry }>`. Windows toast: `src-tauri` `win/toast.rs` `ShellNotifier` (T-210): it drops the overlay-only `notice.logs_unwritable` (`i18n::is_toast_surface`), posts the rest to its one `toast` thread and returns; it ignores `retry` until T-213 (no button).
+// `FakeNotifier::calls() -> Vec<NotifyCall { id, params, action }>`. Windows toast: `src-tauri` `win/toast.rs` `ShellNotifier` (T-210): it drops the overlay-only `notice.logs_unwritable` (`i18n::is_toast_surface`), posts the rest to its one `toast` thread and returns; since T-213 it adds the action's one button, only while its COM toast activator is registered.
 
 pub trait Indicator: Send + Sync {                        // built in T-051, `voicen_core::platform`
     fn set_tray(&self, state: TrayState, retry_available: bool);
@@ -173,8 +174,11 @@ pub trait ShellRequests: Send + Sync {                    // built in T-051, `vo
 // TempAudioStore is `voicen_core::pending::FsTempAudioStore` (T-209). ClipboardError and
 // PasteError are unit structs (no OS text, P-009).
 pub struct StartWindow { pub handle: WindowRef /* opaque HWND */, pub process_id: u32, pub elevated: bool }
-pub struct PendingId(/* u64, monotonic per Pipeline, never reused */);
-// The toast's activation argument (T-210; the button itself is T-213's): `id.to_toast_arg()` is `retry:<u64>` in decimal and
+pub struct PendingId(/* u64, monotonic per Pipeline, never reused; seeded per Pipeline from the wall clock in µs (T-213), so ids of a later process are above an earlier one's; `Pipeline::with_pending_id_seed(u64)` for tests */);
+// `ToastAction::{Retry(PendingId), Open { call: CallId, root: PathBuf }}::to_toast_arg()` writes a button's argument (T-213):
+// `retry:<u64>` or `open:<call id>`, the root never; `ToastArg::parse(&str) -> Option<ToastArg::{Retry(PendingId), Open(CallId)}>`
+// is the one reader (`open:` then `CallId::parse`, else `PendingId::from_toast_arg`).
+// The Retry argument (T-210): `id.to_toast_arg()` is `retry:<u64>` in decimal and
 // nothing else (no text, FR-20); `PendingId::from_toast_arg(&str) -> Option<PendingId>` is the one reader: the exact prefix
 // `retry:` and one or more ASCII digits that fit a u64, else `None` (sign, space, other case or prefix, trailing text, overflow).
 // `LogsUnwritableReason::of(dir: &Path, err: &io::Error)` (`voicen_core::diag`, public since T-210) is the one `io::Error` -> reason

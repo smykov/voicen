@@ -92,6 +92,9 @@ pub struct LaunchArgs {
     /// it, whatever that is; later occurrences are ignored. `--call=record` and
     /// `--CALL` are not occurrences: unknown arguments are ignored.
     pub call: Option<CallSwitch>,
+    /// An argument exactly equal to `-Embedding`, at any position: COM's cold or second
+    /// launch of the toast activator's local server (T-213 I12). Opens no window.
+    pub embedding: bool,
 }
 
 impl LaunchArgs {
@@ -107,6 +110,7 @@ impl LaunchArgs {
         for arg in args {
             let arg = arg.as_ref();
             parsed.autostart |= arg == OsStr::new("--autostart");
+            parsed.embedding |= arg == OsStr::new("-Embedding");
             if value_expected {
                 value_expected = false;
                 parsed.call = Some(if arg == OsStr::new("record") {
@@ -126,13 +130,13 @@ impl LaunchArgs {
 }
 
 /// The second-launch decision, from the second process's arguments: `--call record`
-/// wins over `--autostart`, an unknown `--call` value is no action, and otherwise a
-/// start by the Run value opens nothing. Pure.
+/// wins over `--autostart` and `-Embedding`, an unknown `--call` value is no action, and
+/// otherwise a start by the Run value or by COM (`-Embedding`, T-213) opens nothing. Pure.
 pub fn second_launch_action(args: &LaunchArgs) -> SecondLaunchAction {
     match args.call {
         Some(CallSwitch::Record) => SecondLaunchAction::StartCallRecord,
         Some(CallSwitch::Unknown) => SecondLaunchAction::TrayOnly,
-        None if args.autostart => SecondLaunchAction::TrayOnly,
+        None if args.autostart || args.embedding => SecondLaunchAction::TrayOnly,
         None => SecondLaunchAction::FrontSettings,
     }
 }

@@ -437,11 +437,12 @@ fn install_logs_folder<R: Runtime>(_app: &AppHandle<R>) {}
 /// store and the one hotkey registrar (T-055: the save's hotkey step is served by
 /// the hotkey thread `start_dictation` attaches to it); and the one notifier the
 /// dictation session and the call part share (T-128): `win::toast::ShellNotifier` over
-/// the WinRT sink, on the service's language and the one log (T-210).
+/// the WinRT sink, on the service's language and the one log (T-210), kept concrete so
+/// `run()` can attach the toast activator to it (T-213).
 struct SharedPorts {
     credentials: Arc<dyn CredentialStore>,
     hotkeys: Arc<win::hotkey::HotkeyRegistrarHandle>,
-    notifier: Arc<dyn Notifier>,
+    notifier: Arc<win::toast::ShellNotifier>,
 }
 
 /// The startup side effects of the primary, in this order (T-052 invariant 1:
@@ -566,15 +567,28 @@ pub fn run() {
         Arc::clone(&clipboard),
         detector,
     );
-    let dictation =
-        dictation::start_dictation_with(app.handle(), ports, Arc::clone(&notifier)).ok();
+    let dictation = dictation::start_dictation_with(
+        app.handle(),
+        ports,
+        Arc::clone(&notifier) as Arc<dyn Notifier>,
+    )
+    .ok();
     // The call part (T-128), after the tray exists: the one call session, its request
     // worker and its tick thread. It starts no call; a failed start leaves the call
     // entries no-ops. The first launch's `--call` switch is applied after it.
     let _ = call::start_calls(
         app.handle(),
-        release_call_ports(notifier, clipboard, call_credentials, spans),
+        release_call_ports(
+            Arc::clone(&notifier) as Arc<dyn Notifier>,
+            clipboard,
+            call_credentials,
+            spans,
+        ),
     );
+    // The toast activator (T-213), once the session and the call part a click reaches
+    // exist: registered on the toast thread; offers after it carry their button. A cold
+    // COM start (`-Embedding`) gets here like any start and only starts the app.
+    notifier.attach(win::toast::app_route(app.handle()));
     call::apply_launch(app.handle(), &launch_args);
     app.run(move |app, event| {
         let _dictation = &dictation;
