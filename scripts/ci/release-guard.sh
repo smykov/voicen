@@ -149,7 +149,8 @@
 #      `permissions:` block with write scopes, so for these two files R1 does not pin the read-only
 #      block (the word jobs still occurs only on the `jobs:` line) and R3 allows the copy line of
 #      `permissions:`; R4 allows secrets.CLAUDE_CODE_OAUTH_TOKEN in teamwright-agent.yml only (no
-#      secret in teamwright-next.yml) and vars.TEAMWRIGHT_AUTH in both (every other file: no vars);
+#      secret in teamwright-next.yml) and vars.TEAMWRIGHT_AUTH and vars.TEAMWRIGHT_CONTOUR_PAUSE in
+#      both (every other file: no vars);
 #      R5 does not apply to them (they run gh with the job token). R2, R6 and R8-R13 apply as to
 #      every file.
 # R1, R3 and R4 are the capability lock (GitHub enforces the token scope; it also covers gh api
@@ -392,15 +393,16 @@ function v(k, i, r, why) { print "V " F[k] ":" i ": " r ": " why; nv++ }
 function count(s, t,   n, p) { n = 0; while ((p = index(s, t)) > 0) { n++; s = substr(s, p + length(t)) } return n }
 # word(lo, w): the lower-case line lo holds w bounded by characters outside [a-z0-9_] or its ends.
 function word(lo, w) { return lo ~ ("(^|[^a-z0-9_])" w "([^a-z0-9_]|$)") }
-# varsok(s, ok): every occurrence of the word vars (any case) on line s is vars.TEAMWRIGHT_AUTH
-# ended by a character outside [A-Za-z0-9_] or the end of the line, and ok (the file may name it).
+# varsok(s, ok): every occurrence of the word vars (any case) on line s is vars.TEAMWRIGHT_AUTH or
+# vars.TEAMWRIGHT_CONTOUR_PAUSE ended by a character outside [A-Za-z0-9_] or the end of the
+# line, and ok (the file may name it).
 function varsok(s, ok,   t, c, q, pb, pa) {
   t = tolower(s); c = 0
   while ((q = index(t, "vars")) > 0) {
     pb = (c + q > 1) ? substr(tolower(s), c + q - 1, 1) : ""
     pa = substr(tolower(s), c + q + 4, 1)
     if (pb !~ /[a-z0-9_]/ && pa !~ /[a-z0-9_]/)
-      if (!ok || substr(s, c + q) !~ /^vars\.TEAMWRIGHT_AUTH([^A-Za-z0-9_]|$)/) return 0
+      if (!ok || substr(s, c + q) !~ /^vars\.TEAMWRIGHT_(AUTH|CONTOUR_PAUSE)([^A-Za-z0-9_]|$)/) return 0
     c += q; t = substr(t, q + 1)
   }
   return 1
@@ -575,7 +577,7 @@ END {
         c += q + 6; t = substr(t, q + 7)
       }
       if (!varsok(s, ck))
-        v(k, i, "R4", (ck ? "the word vars other than vars.TEAMWRIGHT_AUTH (the only repository variable of the contour files)" : "the word vars (a repository variable could hold a token from outside the job permissions)"))
+        v(k, i, "R4", (ck ? "the word vars other than vars.TEAMWRIGHT_AUTH / vars.TEAMWRIGHT_CONTOUR_PAUSE (the only repository variables of the contour files)" : "the word vars (a repository variable could hold a token from outside the job permissions)"))
       # R5 is waived for the two contour names only (their steps call gh with their own token).
       if (!inb && !ck && word(lo, "gh"))
         v(k, i, "R5", "the word gh outside the release job (only scripts/ci/release.sh in that job may call gh)")

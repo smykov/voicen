@@ -70,6 +70,8 @@ jobs:
         shell: bash {0}
         env:
           AUTH_VAR: ${{ vars.TEAMWRIGHT_AUTH }}
+          # The owner's pause (decisions #288): non-empty when this job started = no dispatch.
+          TEAMWRIGHT_CONTOUR_PAUSE: ${{ vars.TEAMWRIGHT_CONTOUR_PAUSE }}
         run: |
           set -uo pipefail
           say() {
@@ -81,6 +83,10 @@ jobs:
           [[ "$HOP" =~ ^[0-9]+$ ]] || { echo "::error::bad hop"; exit 1; }
           [[ "$ISSUE" =~ ^[0-9]*$ ]] || { echo "::error::bad issue number"; exit 1; }
           case "$PREV_STAGE" in "" | analyze | red-tests | implement | review) ;; *) echo "::error::bad prev_stage"; exit 1 ;; esac
+          if [ -n "${TEAMWRIGHT_CONTOUR_PAUSE:-}" ]; then
+            say "**$TASK_ID**: chain stopped: the contour is paused (repository variable TEAMWRIGHT_CONTOUR_PAUSE); no stage, ci.yml run or pull request was started. $RUN_URL"
+            exit 0
+          fi
 
           # Up to MAX_PARALLEL tasks at a time: scripts/ci/contour-busy.sh counts the other tasks with
           # an unfinished stage (full: this dispatch starts nothing and says so); the stage of this

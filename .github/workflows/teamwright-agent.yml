@@ -79,8 +79,15 @@ jobs:
         env:
           AUTH_VAR: ${{ vars.TEAMWRIGHT_AUTH }}
           OAUTH_SET: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
+          # The owner's pause (decisions #288): no session runs for a push that cannot happen.
+          TEAMWRIGHT_CONTOUR_PAUSE: ${{ vars.TEAMWRIGHT_CONTOUR_PAUSE }}
         run: |
           set -euo pipefail
+          if [ -n "${TEAMWRIGHT_CONTOUR_PAUSE:-}" ]; then
+            mkdir -p "$OUT"
+            echo "The contour is paused (repository variable TEAMWRIGHT_CONTOUR_PAUSE): no session ran, nothing was pushed." > "$OUT/preflight.md"
+            exit 1
+          fi
           [ "${AUTH_VAR:-}" = subscription ] || { echo "::error::repository variable TEAMWRIGHT_AUTH is not 'subscription', the only mode of this contour"; exit 1; }
           [ "$OAUTH_SET" = true ] || { echo "::error::the repository has no CLAUDE_CODE_OAUTH_TOKEN"; exit 1; }
           [[ "$TASK_ID" =~ ^T-[0-9]{3,}$ ]] || { echo "::error::task_id must look like T-202"; exit 1; }
@@ -210,9 +217,9 @@ jobs:
           # decisions #253 (OQ-79 a): a contour push of task/<ID> or wip/<ID> is not a delivery,
           # so pre-push skips DRAIN for it; its pause check runs first all the same. This step only.
           TEAMWRIGHT_WIP_REFS_RE: '^refs/heads/(wip|task)/'
-          # The owner's pause (docs/process/gates.md): a file on the runner host, in a root-owned
-          # dir outside the checkout, so neither git clean nor the session removes it.
-          TEAMWRIGHT_PAUSE_FILE: /etc/teamwright/voicen.pause
+          # The owner's pause (decisions #288, docs/process/gates.md): non-empty when this job
+          # started = nothing is pushed.
+          TEAMWRIGHT_CONTOUR_PAUSE: ${{ vars.TEAMWRIGHT_CONTOUR_PAUSE }}
           TEAMWRIGHT_ALLOW_PUSH: ""
           BASH_ENV: ""
           # The job token, in this step only (the checkout does not persist it).
@@ -223,6 +230,11 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
+          if [ -n "${TEAMWRIGHT_CONTOUR_PAUSE:-}" ]; then
+            echo "paused=1" >> "$GITHUB_OUTPUT"
+            echo "::notice::the contour is paused (repository variable TEAMWRIGHT_CONTOUR_PAUSE): nothing is pushed"
+            exit 0
+          fi
           export PATH=/usr/local/bin:/usr/bin:/bin GIT_NO_REPLACE_OBJECTS=1
           [[ "$TASK_ID" =~ ^T-[0-9]{3,}$ ]] || { echo "::error::bad task id"; exit 1; }
           [[ "$BEFORE" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::bad pre-session commit"; exit 1; }
@@ -256,6 +268,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           COMMITS: ${{ steps.commits.outputs.count }}
           PUSHED: ${{ steps.push.outputs.pushed }}
+          PAUSED: ${{ steps.push.outputs.paused }}
         run: |
           say() {
             echo "$1" >> "$GITHUB_STEP_SUMMARY"
@@ -270,8 +283,12 @@ jobs:
             say "**$TASK_ID**: chain stopped: stage $STAGE made no commit. $RUN_URL"
             exit 0
           fi
+          if [ "${PAUSED:-}" = 1 ]; then
+            say "**$TASK_ID**: chain stopped: the contour is paused (repository variable TEAMWRIGHT_CONTOUR_PAUSE); task/$TASK_ID was not pushed. $RUN_URL"
+            exit 0
+          fi
           if [ "${PUSHED:-}" != 1 ]; then
-            say "**$TASK_ID**: chain stopped: task/$TASK_ID was not pushed (a pause, or pre-push refused). $RUN_URL"
+            say "**$TASK_ID**: chain stopped: task/$TASK_ID was not pushed (pre-push refused). $RUN_URL"
             exit 1
           fi
           gh workflow run teamwright-next.yml -R "$REPO" --ref "$MAIN" -f task_id="$TASK_ID" -f hop="$HOP" -f prev_stage="$STAGE" -f prev_status="${START_STATUS:-}" -f issue="$ISSUE" || { say "**$TASK_ID**: the dispatcher was not started. $RUN_URL"; exit 1; }
