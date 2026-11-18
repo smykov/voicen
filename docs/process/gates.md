@@ -561,14 +561,17 @@ never turns the job red and never keeps nothing silently: a missing `RUNS_DIR`, 
 a failed copy is a `::warning` naming what was not kept. Why and the limits:
 `docs/decisions/ci-toolchain.md` (R9 per name, contour limits).
 
-**Pausing the contour (T-202 review 1 finding 2).** The contour's checkout never holds a
-`TEAMWRIGHT_PAUSE` (the name is in `.gitignore`, and the checkout's `git clean -ffdx` runs on
-every run), so its push step sets `TEAMWRIGHT_PAUSE_FILE=/etc/teamwright/voicen.pause`, a
-runner-host path in a root-owned directory that the session (the runner's OS user) cannot
-remove. The owner pauses the contour's pushes on the runner host with
-`sudo mkdir -p /etc/teamwright && sudo touch /etc/teamwright/voicen.pause`, and resumes with
-`sudo rm /etc/teamwright/voicen.pause`. A paused push leaves the stage's commits on the runner
-only, and the chain stops ("task/<ID> was not pushed"). `gh workflow disable teamwright-agent.yml`
+**Pausing the contour (T-202 review 1 finding 2; T-215, decisions #288).** The contour's pause is the
+repository variable `TEAMWRIGHT_CONTOUR_PAUSE`, the same for every project on the runner pool: the owner
+pauses with `gh variable set TEAMWRIGHT_CONTOUR_PAUSE --body 1` and resumes with
+`gh variable delete TEAMWRIGHT_CONTOUR_PAUSE`. Any non-empty value pauses. Three places read it: the
+preflight (no session runs; the failure line names the variable), the push step (pushes nothing, the
+chain stops with one line, exit 0, so a pause is not a failure) and `teamwright-next.yml` 'Next stage'
+(dispatches nothing). The value is taken when the job starts, so a pause set mid-stage stops the next
+dispatch, not that stage's push (`docs/decisions/ci-toolchain.md`, Not caught). The contour's checkout
+never holds a `TEAMWRIGHT_PAUSE` (the name is in `.gitignore`, and `git clean -ffdx` runs on every run),
+which is why the local file is not the contour's pause. A paused push leaves the stage's commits on the
+runner only. `gh workflow disable teamwright-agent.yml`
 (and `teamwright-next.yml`) is the coarse stop: no new stage starts at all. The push step runs
 the `pre-push` of the pre-session commit, taken with `git archive` into a fresh directory and
 named with `-c core.hooksPath`, not the hooks of the session's own tree. So a session commit
