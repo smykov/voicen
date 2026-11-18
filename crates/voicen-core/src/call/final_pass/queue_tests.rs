@@ -979,6 +979,146 @@ fn cancel_during_a_blocked_chunk_sends_nothing_more_writes_no_transcript_and_ret
     assert_eq!(q.position(&dir), QueuePosition::Absent);
 }
 
+// ---- guarantee: dropping the queue cancels the running pass (T-221, decisions #307) ------------------
+
+/// Opens its gate when it goes out of scope, so a test that fails while the engine is blocked
+/// does not leave the queue's worker waiting for the gate's 20 s limit.
+struct OpenOnExit(Arc<Gate>);
+
+impl Drop for OpenOnExit {
+    fn drop(&mut self) {
+        self.0.open();
+    }
+}
+
+/// A queue with one 600 s call whose three first requests are blocked on a shut gate.
+struct BlockedPass {
+    w: World,
+    dir: PathBuf,
+    gate: Arc<Gate>,
+    engine: Arc<Engine>,
+    runner: Arc<TestRunner>,
+    q: PassQueue,
+}
+
+fn blocked_pass() -> BlockedPass {
+    let w = world();
+    let dir = w.call(|meta| meta.duration_ms = Some(600_000));
+    let gate = Gate::new(false);
+    let engine = Engine::new(Some(gate.clone()));
+    // Ten minutes per track: far more chunks than the three that fit in flight.
+    let runner = TestRunner::new(&engine, 600_000);
+    let q = PassQueue::new(w.store.clone(), runner.clone());
+    q.enqueue(&dir);
+    let guard = OpenOnExit(gate.clone());
+    wait_for("three requests in flight", || {
+        engine.entered.load(Ordering::SeqCst) == 3
+    });
+    // The wait passed: the gate stays shut for the test body.
+    std::mem::forget(guard);
+    BlockedPass {
+        w,
+        dir,
+        gate,
+        engine,
+        runner,
+        q,
+    }
+}
+
+#[test]
+fn dropping_the_queue_with_a_running_pass_cancels_it_and_the_next_start_queues_it_again() {
+    let BlockedPass {
+        w,
+        dir,
+        gate,
+        engine,
+        runner,
+        q,
+    } = blocked_pass();
+    let _open = OpenOnExit(gate.clone());
+
+    let dropper = thread::spawn(move || drop(q));
+    // The token is set while the requests are still blocked; only then they are answered.
+    wait_for("the cancel token", || runner.cancelled());
+    gate.open();
+    ok(dropper.join().map_err(|_| "drop thread panicked"));
+
+    assert_eq!(engine.sent().len(), 3, "no request after the token was set");
+    no_transcript(&dir);
+    let meta = read_meta(&dir);
+    assert_eq!(meta.state, CallState::ReadyToTranscribe);
+    assert_eq!(meta.results.mic, TrackResult::Pending);
+    assert_eq!(meta.results.system, TrackResult::Pending);
+    assert!(lock(&runner.rec.logs).iter().any(|e| matches!(
+        e,
+        LogEvent::FinalPassFinished {
+            outcome: FinalOutcome::Cancelled,
+            ..
+        }
+    )));
+    assert!(
+        lock(&runner.rec.notices).is_empty(),
+        "a cancelled pass sends no notice"
+    );
+
+    // The next start: recovery queues the call, a fresh queue over an open engine finishes it.
+    let logs = TempDir::new();
+    let log = open_log(logs.path());
+    let recovery = w.store.recover(&defaults(None).calls, &log);
+    assert_eq!(
+        recovery.queue.len(),
+        1,
+        "the cancelled call is queued again"
+    );
+    let engine = Engine::new(None);
+    let runner = TestRunner::new(&engine, CALL_MS);
+    let q = PassQueue::new(w.store.clone(), runner.clone());
+    for entry in &recovery.queue {
+        q.enqueue(&entry.root.join(entry.id.as_str()));
+    }
+    q.wait_idle();
+    assert_eq!(read_meta(&dir).state, CallState::Ready);
+    assert!(transcript_of(&dir).is_some(), "the transcript is written");
+}
+
+#[test]
+fn drop_while_the_engine_call_is_blocked_dispatches_nothing_more_and_returns_when_it_answers() {
+    let BlockedPass {
+        dir,
+        gate,
+        engine,
+        runner,
+        q,
+        ..
+    } = blocked_pass();
+    let _open = OpenOnExit(gate.clone());
+
+    let returned = Arc::new(AtomicUsize::new(0));
+    let dropper = {
+        let returned = returned.clone();
+        thread::spawn(move || {
+            drop(q);
+            returned.store(1, Ordering::SeqCst);
+        })
+    };
+    wait_for("the cancel token", || runner.cancelled());
+    // The three requests are still blocked in the engine: drop waits for them, sends no more.
+    assert_eq!(
+        returned.load(Ordering::SeqCst),
+        0,
+        "drop returned while the engine call was blocked"
+    );
+    assert_eq!(engine.sent().len(), 3, "nothing more dispatched");
+
+    gate.open();
+    ok(dropper.join().map_err(|_| "drop thread panicked"));
+    assert_eq!(returned.load(Ordering::SeqCst), 1);
+    assert_eq!(engine.sent().len(), 3, "no request after the token was set");
+    no_transcript(&dir);
+    assert_eq!(read_meta(&dir).state, CallState::ReadyToTranscribe);
+}
+
 // ---- guarantee: restart after exit or crash ---------------------------------------------------------
 
 struct Wall;

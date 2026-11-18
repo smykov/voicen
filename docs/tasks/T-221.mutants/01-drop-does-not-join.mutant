@@ -1,0 +1,8 @@
+guarantee: Acceptance 2: drop returns only when the in-flight requests answer (join kept, decisions #307)
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: test-writer
+--- old
+            let _ = worker.join();
+--- new
+            drop(worker);
+--- end
