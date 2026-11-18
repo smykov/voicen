@@ -1,0 +1,8 @@
+guarantee: AC-1/AC-2: drop cancels the running pass (no cancel -> drop waits for the whole pass)
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: test-writer
+--- old
+            token.cancel();
+--- new
+            let _ = token;
+--- end

@@ -1543,7 +1543,11 @@ impl Shared {
 
 /// The final-pass queue (FR-027, FR-028, FR-037): at most one pass runs at a time, and the
 /// queued and running folders hold each call at most once, in FIFO order of request. Dropping
-/// it lets the running pass end and drops what is still queued.
+/// it drops what is still queued, sets the running pass's cancel token and joins the worker:
+/// the pass dispatches no further request, so Drop returns once the requests already in flight
+/// have answered (bounded by the engine's own request timeout, FR-24), not after the rest of
+/// the call. The cancelled call is back to `ready-to-transcribe` and `CallStore::recover`
+/// queues it again at the next start (FR-028).
 pub struct PassQueue {
     store: Arc<CallStore>,
     shared: Arc<Shared>,
@@ -1648,6 +1652,12 @@ impl Drop for PassQueue {
         let mut slots = self.shared.slots();
         slots.closing = true;
         slots.queued.clear();
+        // Under the same lock as `closing`: the running pass dispatches nothing more and ends
+        // `cancelled` (as `cancel` does), so the join below waits only for the requests already
+        // in flight, not for the rest of the call.
+        if let Some((_, token)) = &slots.running {
+            token.cancel();
+        }
         drop(slots);
         self.shared.changed.notify_all();
         if let Some(worker) = self.worker.take() {
