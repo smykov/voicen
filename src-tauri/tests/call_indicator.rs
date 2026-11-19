@@ -90,8 +90,8 @@ use windows::Win32::Graphics::Gdi::{
     MONITOR_DEFAULTTOPRIMARY,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEINPUT,
-    MOUSE_EVENT_FLAGS,
+    GetDoubleClickTime, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
+    MOUSEINPUT, MOUSE_EVENT_FLAGS,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetAncestor, GetWindow, GetWindowLongPtrW, GetWindowRect,
@@ -1029,6 +1029,11 @@ fn s7_the_foreground_contract_holds_in_one_variant_or_the_owner_decides() {
     // gets there; the red run's printed evidence (`S7 evidence` lines, the sampler's `away`) is
     // what goes to the owner with the native Win32 window question (#235). It does not pass by
     // weakening S3-S5. Bite: any implementation that lets the foreground end elsewhere.
+    // The drag waits out the OS double-click time after the click (same spot, same window): a
+    // mousedown inside that time arrives with `detail == 2`, and tauri 2.12.1's drag.js (l. 78-104)
+    // then sends `internal_toggle_maximize` (a no-op on a non-resizable window) instead of
+    // `start_dragging`, so the window does not move (CI run 44446192344, `moved false`). Bite:
+    // removing the wait reproduces `moved false`.
     let _serial = serial();
     let _watchdog =
         watchdog("s7_the_foreground_contract_holds_in_one_variant_or_the_owner_decides");
@@ -1041,15 +1046,44 @@ fn s7_the_foreground_contract_holds_in_one_variant_or_the_owner_decides() {
         let before = window_rect(raw).expect("rect");
         click(centre(&before));
         let after_click = eventually(|| foreground().0 as isize == front.raw);
-        drag(centre(&before), 120, 80);
-        let moved = eventually(|| window_rect(raw).is_some_and(|r| r.left != before.left));
+        // SAFETY: a plain query of the system setting, no arguments.
+        let double_click = unsafe { GetDoubleClickTime() };
+        thread::sleep(Duration::from_millis(u64::from(double_click) + 200));
+        let work = primary_work_area();
+        // Toward the work area's middle, so the move is not stopped by an edge (as in S5).
+        let dx = if before.left > (work.left + work.right) / 2 {
+            -160
+        } else {
+            160
+        };
+        let dy = if before.top > (work.top + work.bottom) / 2 {
+            -90
+        } else {
+            90
+        };
+        drag(centre(&before), dx, dy);
+        let moved = eventually(|| {
+            window_rect(raw).is_some_and(|r| (r.left - before.left).abs() >= dx.abs() / 2)
+        });
+        let after = window_rect(raw);
         let after_drag = eventually(|| foreground().0 as isize == front.raw);
         indicator.set_state(&idle_state());
         let gone = eventually(|| handle.get_webview_window(LABEL).is_none());
         let end = holds_for(SETTLE, || foreground().0 as isize == front.raw);
-        (after_click, moved, after_drag, gone, end, front.finish())
+        (
+            after_click,
+            moved,
+            after_drag,
+            gone,
+            end,
+            front.finish(),
+            before,
+            after,
+            dx,
+            dy,
+        )
     });
-    let (after_click, moved, after_drag, gone, end, fg) = report;
+    let (after_click, moved, after_drag, gone, end, fg, before, after, dx, dy) = report;
     eprintln!(
         "S7 evidence: variant {}, away {:?}, focus losses {:?}, samples {}",
         if VARIANT_N { "N" } else { "F" },
@@ -1061,6 +1095,7 @@ fn s7_the_foreground_contract_holds_in_one_variant_or_the_owner_decides() {
         after_click && after_drag && end && moved && gone,
         "neither variant keeps the foreground: foreground after click {after_click}, after drag \
          {after_drag}, at the end {end}, window moved {moved}, destroyed at stop {gone}; \
+         rect before {before:?}, after {after:?}, dragged ({dx}, {dy}); \
          away {:?}. Record this evidence and ask the owner about a native window (#235)",
         fg.away
     );
