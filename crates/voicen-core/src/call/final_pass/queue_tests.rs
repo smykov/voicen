@@ -444,8 +444,11 @@ struct TestRunner {
     ended: AtomicUsize,
     /// Runs right after the pass-start meta was read, before the pass begins (a rename here
     /// is the narrow window between the read and the `transcribing` write).
-    after_meta_read: Mutex<Option<Box<dyn Fn(&Path) + Send>>>,
+    after_meta_read: Mutex<Option<MetaReadHook>>,
 }
+
+/// The `after_meta_read` hook of [`TestRunner`].
+type MetaReadHook = Box<dyn Fn(&Path) + Send>;
 
 impl TestRunner {
     fn new(engine: &Arc<Engine>, length_ms: u64) -> Arc<TestRunner> {
