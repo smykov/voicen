@@ -374,6 +374,37 @@ pub fn export_json(transcript: &TranscriptV1, title: &str, names: &[Speaker]) ->
     named.to_json()
 }
 
+/// Why a call title or a speaker name was refused (T-152, FR-035).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenameError {
+    /// The name is empty or Unicode whitespace only.
+    EmptyName,
+    /// No speaker has the id.
+    UnknownSpeaker,
+}
+
+/// A call title or speaker name must hold at least one character that is not Unicode
+/// whitespace; nothing else is checked (duplicates and edge spaces are allowed, the name is
+/// stored as given).
+pub fn check_name(name: &str) -> Result<(), RenameError> {
+    if name.trim().is_empty() {
+        return Err(RenameError::EmptyName);
+    }
+    Ok(())
+}
+
+/// Sets the name of the speaker `id` to `name`, as given. An empty or whitespace-only `name`
+/// is `EmptyName`, an `id` no speaker has `UnknownSpeaker`; a refused call changes nothing.
+pub fn rename_speaker(speakers: &mut [Speaker], id: &str, name: &str) -> Result<(), RenameError> {
+    check_name(name)?;
+    let speaker = speakers
+        .iter_mut()
+        .find(|s| s.id == id)
+        .ok_or(RenameError::UnknownSpeaker)?;
+    speaker.name = name.to_string();
+    Ok(())
+}
+
 fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }

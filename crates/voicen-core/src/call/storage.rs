@@ -19,13 +19,18 @@
 //! - [`CallStore::recover`] runs at start: an inactive `recording` call becomes `recovered`
 //!   from the shorter readable track, a `transcribing` one `ready-to-transcribe`; it reads
 //!   the tracks only and changes nothing but `meta.json` (research R7, SC-005, SC-006).
+//! - [`CallStore::rename`] / [`CallStore::rename_speaker`] (T-152, FR-035) are the only
+//!   writers of a non-recording call's title and speakers; every other read-modify-write of
+//!   such a `meta.json` holds the one meta lock ([`meta_lock`]) and carries the on-disk names
+//!   over ([`carry_disk_names`]). [`CallStore::delete_folder`] claims every file through a
+//!   [`FolderDeleter`] and removes nothing unless every claim is held.
 
 use std::cmp::Ordering;
 use std::fmt::Write as _;
 use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -36,7 +41,8 @@ use super::events::{
     Track,
 };
 use super::transcript::{
-    export_json, export_markdown, EngineRef, SegmentV1, Speaker, TranscriptV1,
+    check_name, export_json, export_markdown, EngineRef, RenameError, SegmentV1, Speaker,
+    TranscriptV1,
 };
 use super::StorageOp;
 use crate::clock::{days_from_civil, MonotonicClock};
@@ -173,6 +179,32 @@ pub struct CallMeta {
 pub fn write_meta(dir: &Path, meta: &CallMeta) -> io::Result<()> {
     let bytes = serde_json::to_vec_pretty(meta).map_err(io::Error::other)?;
     write_atomic(dir, META_FILE, &bytes)
+}
+
+/// The one meta lock (T-152): every read-modify-write of a non-recording call's `meta.json`
+/// (rename, the final pass's writes, the "Transcribe again" transition, recovery) and every
+/// delete runs under it, so a rename is never overwritten by a meta read before it. It is
+/// process-wide rather than per [`CallStore`] because the pass functions get a folder, not a
+/// store; a process has one store. Held only around file reads and writes, never while
+/// another lock is taken.
+static META_LOCK: Mutex<()> = Mutex::new(());
+
+/// Takes the meta lock ([`META_LOCK`]).
+pub(crate) fn meta_lock() -> MutexGuard<'static, ()> {
+    META_LOCK.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Sets `meta`'s title and speakers to those of `dir`'s `meta.json` as it is on disk, so a
+/// writer of a meta read earlier keeps a rename made since. A `meta.json` that cannot be read
+/// or parsed leaves `meta` as it is. Call it with the meta lock held, right before the write.
+pub(crate) fn carry_disk_names(dir: &Path, meta: &mut CallMeta) {
+    let on_disk = fs::read(dir.join(META_FILE))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<CallMeta>(&bytes).ok());
+    if let Some(on_disk) = on_disk {
+        meta.title = on_disk.title;
+        meta.speakers = on_disk.speakers;
+    }
 }
 
 /// Writes `bytes` as `<dir>/<name>` whole: `<name>.tmp` created, written and synced, then
@@ -465,7 +497,12 @@ impl CallStore {
                 }
                 _ => continue,
             };
-            if write_meta(&dir, &meta).is_err() {
+            let written = {
+                let _names = meta_lock();
+                carry_disk_names(&dir, &mut meta);
+                write_meta(&dir, &meta)
+            };
+            if written.is_err() {
                 // Left as found: the next start tries again.
                 continue;
             }
@@ -711,11 +748,62 @@ impl CallError {
 
     /// `notFound`.
     pub fn not_found() -> CallError {
+        CallError::coded(CallErrorCode::NotFound)
+    }
+
+    /// `recordingCall`: the call this process records now.
+    pub fn recording_call() -> CallError {
+        CallError::coded(CallErrorCode::RecordingCall)
+    }
+
+    /// `inUse{file}`; `file` is a bare file name, never a path.
+    pub fn in_use(file: String) -> CallError {
         CallError {
-            code: CallErrorCode::NotFound,
+            code: CallErrorCode::InUse,
+            file: Some(file),
+            reason: None,
+        }
+    }
+
+    fn coded(code: CallErrorCode) -> CallError {
+        CallError {
+            code,
             file: None,
             reason: None,
         }
+    }
+}
+
+impl From<RenameError> for CallError {
+    /// An empty name is `emptyName`; an unknown speaker id `notFound` (decisions #317).
+    fn from(e: RenameError) -> CallError {
+        match e {
+            RenameError::EmptyName => CallError::coded(CallErrorCode::EmptyName),
+            RenameError::UnknownSpeaker => CallError::not_found(),
+        }
+    }
+}
+
+/// A file of a call folder is held by another process: carries its bare file name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InUse(pub String);
+
+/// The port a delete claims the files of a call folder through (T-152). `claim` gets a path
+/// inside the call folder and returns the claim, held until it is dropped, or [`InUse`] with
+/// the file's bare name when another process holds the file. While a claim is held no other
+/// opener may get the file (the Windows impl, T-153, opens it with delete sharing only).
+pub trait FolderDeleter: Send + Sync {
+    fn claim(&self, file: &Path) -> Result<Box<dyn Send>, InUse>;
+}
+
+/// The core deleter: a claim never refuses and holds nothing (no mandatory file locks off
+/// Windows; used on Linux and in tests).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct StdFolderDeleter;
+
+impl FolderDeleter for StdFolderDeleter {
+    fn claim(&self, _file: &Path) -> Result<Box<dyn Send>, InUse> {
+        Ok(Box::new(()))
     }
 }
 
@@ -922,6 +1010,127 @@ impl CallStore {
         Ok(dir)
     }
 
+    /// Renames the call (FR-035): `title` is stored as given in `meta.json` and, when the call
+    /// has a `transcript.json`, re-rendered into `transcript.md` and `transcript.json`. Refused:
+    /// a guard miss or a missing folder `notFound`, the call this process records
+    /// `recordingCall`, a damaged call `ioFailed`, an empty or whitespace-only title
+    /// `emptyName`; a failed write `ioFailed` with every file at its old bytes.
+    pub fn rename(
+        &self,
+        calls: &CallSettings,
+        root: &str,
+        id: &str,
+        title: &str,
+    ) -> Result<CallSummary, CallError> {
+        let (entry, _) = self.rewrite_names(calls, root, id, |meta| {
+            check_name(title)?;
+            meta.title = title.to_string();
+            Ok(())
+        })?;
+        // The language only names a damaged call, and a renamed call has a meta.
+        Ok(summary_of(&entry, UiLanguage::En))
+    }
+
+    /// Renames the speaker `speaker` of the call to `name`, as given (duplicates allowed),
+    /// and returns the call's detail as [`CallStore::get`] reads it afterwards. Refusals as
+    /// [`CallStore::rename`]; an unknown speaker id is `notFound`.
+    pub fn rename_speaker(
+        &self,
+        calls: &CallSettings,
+        root: &str,
+        id: &str,
+        speaker: &str,
+        name: &str,
+    ) -> Result<CallDetail, CallError> {
+        let (entry, transcript) = self.rewrite_names(calls, root, id, |meta| {
+            super::transcript::rename_speaker(&mut meta.speakers, speaker, name)
+        })?;
+        // The language only names a damaged call, and a renamed call has a meta.
+        Ok(detail_of(&entry, transcript.as_ref(), UiLanguage::En))
+    }
+
+    /// The one rename path, under the meta lock: the guard, `recordingCall` for an active
+    /// call, the meta as listed (damaged `ioFailed`), `edit` on it, then every byte rendered
+    /// before any write, then `transcript.md`, `transcript.json` (only when the call has a
+    /// transcript) and `meta.json` last, the commit point, each whole through
+    /// [`write_atomic`]. A failed write puts back the files already written (best effort)
+    /// and is `ioFailed`. Returns the entry with the new meta and the call's transcript.
+    fn rewrite_names(
+        &self,
+        calls: &CallSettings,
+        root: &str,
+        id: &str,
+        edit: impl FnOnce(&mut CallMeta) -> Result<(), RenameError>,
+    ) -> Result<(CallEntry, Option<TranscriptV1>), CallError> {
+        let _names = meta_lock();
+        let dir = self.folder(calls, root, id)?;
+        if self.is_active(&dir) {
+            return Err(CallError::recording_call());
+        }
+        let (mut entry, dir) = self.open_call(calls, root, id)?;
+        let meta = entry.meta.as_mut().ok_or_else(unusable)?;
+        edit(meta)?;
+        let transcript = read_transcript(&dir)?;
+        let mut files = Vec::with_capacity(3);
+        if let Some(transcript) = &transcript {
+            files.push((
+                TRANSCRIPT_MD_FILE,
+                export_markdown(transcript, &meta.title, &meta.speakers).into_bytes(),
+            ));
+            files.push((
+                TRANSCRIPT_FILE,
+                export_json(transcript, &meta.title, &meta.speakers).into_bytes(),
+            ));
+        }
+        let meta_bytes = serde_json::to_vec_pretty(meta).map_err(|_| unusable())?;
+        files.push((META_FILE, meta_bytes));
+        replace_all(&dir, &files)?;
+        Ok((entry, transcript))
+    }
+
+    /// Deletes the call folder whole (FR-037, FR-033): the guard of [`CallStore::folder`] (a
+    /// damaged call is allowed, a missing folder `notFound`), `recordingCall` for the call
+    /// this process records, then every file in the folder is claimed through `deleter`. Any
+    /// refused claim releases all claims and is `inUse{file}` with nothing removed; only when
+    /// every claim is held are the files removed, the claims dropped and the folders removed.
+    /// The caller takes the call out of the pass queue first ([`PassQueue::delete`]).
+    ///
+    /// [`PassQueue::delete`]: super::final_pass::PassQueue::delete
+    pub fn delete_folder(
+        &self,
+        calls: &CallSettings,
+        root: &str,
+        id: &str,
+        deleter: &dyn FolderDeleter,
+    ) -> Result<(), CallError> {
+        let _names = meta_lock();
+        let dir = self.folder(calls, root, id)?;
+        if self.is_active(&dir) {
+            return Err(CallError::recording_call());
+        }
+        let mut files = Vec::new();
+        let mut dirs = vec![dir.clone()];
+        collect_tree(&dir, &mut files, &mut dirs).map_err(|e| CallError::io_failed(e.kind()))?;
+        let mut claims = Vec::with_capacity(files.len());
+        for file in &files {
+            // A refusal returns with `claims` dropped: every claim is released, nothing removed.
+            claims.push(
+                deleter
+                    .claim(file)
+                    .map_err(|InUse(name)| CallError::in_use(name))?,
+            );
+        }
+        for file in &files {
+            fs::remove_file(file).map_err(|e| CallError::io_failed(e.kind()))?;
+        }
+        drop(claims);
+        // `dirs` is in pre-order: reversed, every folder comes after the folders inside it.
+        for folder in dirs.iter().rev() {
+            fs::remove_dir(folder).map_err(|e| CallError::io_failed(e.kind()))?;
+        }
+        Ok(())
+    }
+
     /// The guard, then the listed entry of the call folder ([`load_entry`], as the list
     /// reads it): a folder that is not there is `notFound`, a damaged one `ioFailed`.
     fn open_call(
@@ -941,6 +1150,50 @@ impl CallStore {
         }
         Ok((entry, dir))
     }
+}
+
+/// Replaces each `(name, bytes)` of `dir` in order through [`write_atomic`], after reading
+/// every file's previous bytes. When a write fails, the files already replaced get their
+/// previous bytes back (a file that was not there is removed), in reverse order and best
+/// effort, and the write's error is `ioFailed`. The last file is the commit point.
+fn replace_all(dir: &Path, files: &[(&str, Vec<u8>)]) -> Result<(), CallError> {
+    let mut previous = Vec::with_capacity(files.len());
+    for (name, _) in files {
+        match fs::read(dir.join(name)) {
+            Ok(bytes) => previous.push(Some(bytes)),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => previous.push(None),
+            Err(e) => return Err(CallError::io_failed(e.kind())),
+        }
+    }
+    for (done, (name, bytes)) in files.iter().enumerate() {
+        if let Err(e) = write_atomic(dir, name, bytes) {
+            for ((name, _), old) in files.iter().zip(&previous).take(done).rev() {
+                // Best effort: the error returned is the failed write's own.
+                let _ = match old {
+                    Some(old) => write_atomic(dir, name, old),
+                    None => fs::remove_file(dir.join(name)),
+                };
+            }
+            return Err(CallError::io_failed(e.kind()));
+        }
+    }
+    Ok(())
+}
+
+/// Every file (and symlink) under `dir` into `files` and every folder under it into `dirs`,
+/// in pre-order; reads only.
+fn collect_tree(dir: &Path, files: &mut Vec<PathBuf>, dirs: &mut Vec<PathBuf>) -> io::Result<()> {
+    for item in fs::read_dir(dir)? {
+        let item = item?;
+        let path = item.path();
+        if item.file_type()?.is_dir() {
+            dirs.push(path.clone());
+            collect_tree(&path, files, dirs)?;
+        } else {
+            files.push(path);
+        }
+    }
+    Ok(())
 }
 
 /// Writes `bytes` to `target` through a fresh tmp file reserved next to it with `create_new`
