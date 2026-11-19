@@ -79,7 +79,7 @@ use crate::recording::{
 use crate::settings::gate::{blocked_actions, dictation_gate, SettingsTab, ShellAction};
 use crate::settings::service::SettingsService;
 use crate::settings::FieldId;
-use crate::settings::Settings;
+use crate::settings::{Mode, Settings};
 
 /// Everything the session talks to. The session builds its one `Pipeline` from
 /// `pipeline` (so the observer and the paster it uses are the pipeline's own).
@@ -612,17 +612,24 @@ impl DictationSession {
         });
     }
 
-    /// The shell's answer at `at` to the last Esc claim. A refusal while a
-    /// recording is on emits `Warning{EscUnavailable}`; the recording goes on (Esc
-    /// just cannot cancel it). A granted claim, or a refusal that arrives after
-    /// the recording ended, emits nothing.
-    pub fn cancel_key_result(&self, claimed: bool, at: Instant) {
+    /// The shell's answer at `at` to the last Esc claim: whether bare Esc
+    /// (`bare`) and Esc under the hotkey's modifiers (`modified`) were granted.
+    /// Only one of them can cancel a given recording, picked by its mode (T-212):
+    /// during a hold the hotkey's keys are down, so only the modified claim can
+    /// fire; in toggle mode they are up, so only the bare one can. A refusal of
+    /// that claim while a recording is on emits `Warning{EscUnavailable}`; the
+    /// recording goes on (Esc just cannot cancel it). A refusal of the other
+    /// claim, a granted one, or a result that arrives after the recording ended
+    /// emits nothing.
+    pub fn cancel_key_result(&self, bare: bool, modified: bool, at: Instant) {
         let _ = at;
-        if claimed {
-            return;
-        }
-        let live = self.shared.lock().ctrl.live_id().is_some();
-        if live {
+        let mode = self.shared.lock().ctrl.live_mode();
+        let refused = match mode {
+            Some(Mode::Hold) => !modified,
+            Some(Mode::Toggle) => !bare,
+            None => false,
+        };
+        if refused {
             self.shared.emit(DictationEvent::Warning {
                 code: WarningCode::EscUnavailable,
             });

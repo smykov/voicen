@@ -704,6 +704,13 @@ impl<C> RecordingController<C> {
         self.live.as_ref().map(|l| l.id)
     }
 
+    /// The mode of the recording that is on, if any: the mode of the press that
+    /// started it, fixed for its whole life (T-212: the session judges an Esc
+    /// claim's result by it).
+    pub fn live_mode(&self) -> Option<Mode> {
+        self.live.as_ref().map(|l| l.mode)
+    }
+
     /// Timer callback: expires the overlay message (at exactly its `until`), and
     /// ends a recording that has reached [`MAX_LENGTH`] (at exactly its length, in
     /// either mode) with a ticket (end `MaxLength`, `stopped_at = at`): the
