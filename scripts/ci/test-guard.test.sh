@@ -96,6 +96,27 @@ deny() {
   pass "$name"
 }
 
+# deny_like <name> <prefixed command> <bare command>: the contract itself, "judged exactly like the
+# command without the prefix": both are denied and the "Run instead" / "Run without the pipe" lines
+# of the two reasons are equal. (Pins no target text: what the bare command's hint is, e.g. for
+# `make -k check` the builtin `scripts/tw-test core -k check`, is a separate defect outside T-189.)
+deny_like() {
+  local name="$1" cmd="$2" bare="$3" r_bare r_pre pat='^  (scripts/|make |pnpm |cargo )'
+  run_hook "$bare" || { fail "$name" "harness could not build the payload"; return; }
+  r_bare=""
+  [ "$rc" = 0 ] && r_bare="$(reason_of)"
+  [ -n "$r_bare" ] || { fail "$name" "the bare command is not denied: $bare"; return; }
+  run_hook "$cmd" || { fail "$name" "harness could not build the payload"; return; }
+  r_pre=""
+  [ "$rc" = 0 ] && r_pre="$(reason_of)"
+  [ -n "$r_pre" ] || { fail "$name" "ALLOWED, want DENY: $cmd"; return; }
+  if [ "$(grep -E "$pat" <<<"$r_pre")" != "$(grep -E "$pat" <<<"$r_bare")" ]; then
+    fail "$name" "prefixed reason differs from the bare one: $r_pre /// $r_bare"
+    return
+  fi
+  pass "$name"
+}
+
 # allow <name> <command>: no output and exit 0.
 allow() {
   local name="$1" cmd="$2"
@@ -120,7 +141,8 @@ allow "control: tw-test core foo"         'scripts/tw-test core foo'
 # ---- DENY: the prefixed forms (red today) -------------------------------------------------------
 deny "deny: prefix cargo test"            "$P cargo test" 'scripts/tw-test core'
 deny "deny: prefix make check"            "$P make check" 'scripts/tw-gate --top'
-deny "deny: prefix make -k check"         "$P make -k check" 'scripts/tw-gate --top'
+# Same decision and "Run instead" line as `make -k check` without the prefix (not a fixed target).
+deny_like "deny: prefix make -k check"    "$P make -k check" 'make -k check'
 deny "deny: prefix pnpm test"             "$P pnpm test" 'scripts/tw-test ui'
 deny "deny: prefix tw-run core cargo test" "$P scripts/tw-run core -- cargo test -p voicen-core" 'scripts/tw-test core'
 deny "deny: prefix tw-test piped to tail (cut)" "$P scripts/tw-test core foo 2>&1 | tail -5" 'scripts/tw-test core foo'
