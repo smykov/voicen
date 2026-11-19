@@ -159,6 +159,18 @@ pub enum WindowAction {
     Nothing,
 }
 
+/// The answer to one wake of the overlay thread (T-172): the window operation to
+/// run, and whether the current window's own `Destroyed` arrived in this wake.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Wake {
+    /// The one window operation to run.
+    pub action: WindowAction,
+    /// The current window's `Destroyed` arrived (and a window existed): the shell
+    /// drops its handle to it. The rule lives only in
+    /// [`OverlayLifecycle::on_wake`]; the shell never re-derives it.
+    pub window_gone: bool,
+}
+
 /// The platform-free overlay window lifecycle (T-057): fed the newest published
 /// state (with the shell's `seq`) and the window's own `Destroyed`, it answers the
 /// one window operation to run. It builds only when no window exists and none is
@@ -206,7 +218,7 @@ impl OverlayLifecycle {
     /// The newest published `state`, numbered `seq` (higher = newer; a `seq` not
     /// newer than one already seen is stale and changes nothing).
     pub fn on_state(&mut self, seq: u64, state: &OverlayState) -> WindowAction {
-        self.on_wake(&[], Some((seq, state)))
+        self.on_wake(&[], Some((seq, state))).action
     }
 
     /// The current window's own `Destroyed` event (tauri has freed the label).
@@ -216,7 +228,7 @@ impl OverlayLifecycle {
     /// like a failed build; one with no window is ignored.
     pub fn on_destroyed(&mut self) -> WindowAction {
         let current = self.generation;
-        self.on_wake(&[current], None)
+        self.on_wake(&[current], None).action
     }
 
     /// The last `Build` returned an error: no window exists. Nothing is retried
@@ -245,12 +257,9 @@ impl OverlayLifecycle {
     /// `Destroyed` is applied before the state, so a window gone by itself plus a
     /// newer shown state builds that state, and a requested `Destroyed` plus a newer
     /// state builds once, for the newer state. Returns the one window operation to
-    /// run.
-    pub fn on_wake(
-        &mut self,
-        destroyed: &[u64],
-        newest: Option<(u64, &OverlayState)>,
-    ) -> WindowAction {
+    /// run, and `window_gone`: the current window's `Destroyed` arrived while a
+    /// window existed (the shell drops its handle exactly then).
+    pub fn on_wake(&mut self, destroyed: &[u64], newest: Option<(u64, &OverlayState)>) -> Wake {
         // 1. The current window's Destroyed: the label is free.
         let gone = self.phase != WindowPhase::Absent && destroyed.contains(&self.generation);
         // A requested destroy that completed decides again from the wanted state; a
@@ -268,7 +277,7 @@ impl OverlayLifecycle {
             _ => false,
         };
         // 3. One action from the phase and what is wanted.
-        match (self.phase, self.wanted) {
+        let action = match (self.phase, self.wanted) {
             (WindowPhase::Absent, Some((seq, false))) if newer || rebuild_wanted => {
                 self.phase = WindowPhase::Live;
                 self.generation += 1;
@@ -282,6 +291,10 @@ impl OverlayLifecycle {
             // Nothing new; or the label is still taken (Destroying): the newest wanted
             // state waits for Destroyed.
             _ => WindowAction::Nothing,
+        };
+        Wake {
+            action,
+            window_gone: gone,
         }
     }
 }

@@ -1,0 +1,1 @@
+cargo test -p voicen-core -j2 --lib -- on_wake_reports any_wake_sequence
