@@ -566,6 +566,11 @@ function shownFor(settings: Settings, offered: readonly string[] = []): Record<s
     "engine.builtin_local.model_id": modelId !== null && offered.includes(modelId) ? modelId : "",
     "engine.speech_language": settings.speech_language ?? "auto",
     "recording.hotkey": settings.hotkey,
+    // T-155: the Calls tab. An empty storage_root (null) shows "", a set one its text.
+    "calls.hotkey": settings.calls.hotkey,
+    "calls.reminder": settings.calls.reminder,
+    "calls.primary_language": settings.calls.primary_language,
+    "calls.storage_root": settings.calls.storage_root ?? "",
     // T-012: the saved device's id, listed or not ("(not connected)"); "" = system default.
     "recording.microphone": settings.microphone?.id ?? "",
     "recording.mode": settings.mode,
@@ -589,7 +594,7 @@ function shownFor(settings: Settings, offered: readonly string[] = []): Record<s
 
 /**
  * The controls each tab must render for engine api, local_server or builtin_local, in the
- * page's tab order (004 FR-001: Engine, Recording, Output, Post-processing, History, General).
+ * page's tab order (004 FR-001: Engine, Recording, Output, Post-processing, History, then T-155's Calls, General).
  */
 function tabFieldsFor(engine: RoundTripEngine): Record<string, string[]> {
   const engineFields =
@@ -608,6 +613,8 @@ function tabFieldsFor(engine: RoundTripEngine): Record<string, string[]> {
       "post_processing.prompt",
     ],
     history: ["history.enabled", "history.size"],
+    // T-155 (settings-ui F): Calls sits between History and General.
+    calls: ["calls.hotkey", "calls.reminder", "calls.primary_language", "calls.storage_root"],
     general: [
       "general.ui_language",
       "general.start_with_windows",
@@ -670,7 +677,7 @@ async function expectRoundTrip(
 
   const tabFields = tabFieldsFor(engine);
   const shown = shownFor(settings, models.offered);
-  // Every tab of the page (T-021: six, Post-processing between Output and History).
+  // Every tab of the page (T-021: six, Post-processing between Output and History; T-155: seven, Calls between History and General).
   const order = await page
     .getByRole("tab")
     .evaluateAll((els) => els.map((e) => (e as HTMLElement).dataset.testid ?? ""));
@@ -862,8 +869,9 @@ test("T-178 (U2/L closed): a refused field that is also not_restored and has no 
 
 // ---- (L) A refused field without a control is named at form level -----------------------
 //
-// T-120 r1 #1: core refuses on fields the window has no control for yet (calls.hotkey,
-// whose Calls tab arrives with G41/T-155). A Refused FieldError whose field has no
+// T-120 r1 #1: core refuses on fields the tab shown has no control for (calls.hotkey; since
+// T-155 its control is on the Calls tab, so it is listed here only while another tab is
+// shown, and marked on the field when Calls is shown: e2e/settings-calls.spec.ts). A Refused FieldError whose field has no
 // `[data-field]` control in the panel is listed in the form-level field-error list of
 // T-178 (`settings-errors`, in the role=alert region) by `settings.field_label.<FieldId>`
 // and `error.<code>`; a field with a control keeps its field-level message and is not
@@ -887,7 +895,7 @@ test("failure branch: a Refused calls.hotkey hotkey.equals_dictation after a Rec
   const [save] = await calls(page, "settings_save");
   expect((save.args as { request: SaveRequest }).request.settings.hotkey).toBe("Ctrl+Alt+R");
 
-  // calls.hotkey has no control on any tab of this window: it is listed at form level.
+  // calls.hotkey has no control on the Recording tab (its control is on Calls, T-155): it is listed at form level.
   await expect(field(page, "calls.hotkey")).toHaveCount(0);
   const refused = page.getByTestId("settings-errors");
   await expect(refused.getByRole("listitem")).toHaveText([
