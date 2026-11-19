@@ -1,0 +1,1 @@
+cargo test -p voicen-core --test dictation_session
