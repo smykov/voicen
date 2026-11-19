@@ -178,7 +178,7 @@ fn polled_counter(every: usize, steps: usize) -> (impl FnMut() -> usize, Rc<Cell
     let c = Rc::clone(&count);
     let progress = move || {
         reads.set(reads.get() + 1);
-        if reads.get() % every == 0 && c.get() < steps {
+        if reads.get().is_multiple_of(every) && c.get() < steps {
             c.set(c.get() + 1);
         }
         c.get()
