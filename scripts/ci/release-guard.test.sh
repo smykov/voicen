@@ -1250,14 +1250,17 @@ fi
 
 # ---- (b) pins of the owned copy and of the real files (c) -----------------------------------------
 cu_expect "$cu starts with the step line '$cu_step'" test "$(head -n 1 "$cu")" = "$cu_step"
-cu_expect "$cu: the scan step runs under if: always()" grep -q -x -F '        if: always()' "$cu"
+# T-230: the copy holds the chain and keep steps too (their if: name steps.claude, the keep step names RUNS_DIR), so
+# the checks of the staging and upload steps read only the copy from the staging step to the end.
+cu_expect "$cu: the scan step runs under if: always() (in the staging step itself)" \
+  bash -c 'p="$(awk -v t="$2" "\$0 == t { s = 1; next } s && /^      - / { exit } s { print }" "$1")"; [ -n "$p" ] && grep -q -x -F "        if: always()" <<<"$p"' _ "$cu" "$cu_stage"
 cu_expect "$cu: the owned upload action line occurs once and no other line names upload-artifact" \
   bash -c '[ "$(grep -c -x -F "      - uses: actions/upload-artifact@v4" "$1")" = 1 ] && [ "$(grep -i -o -F upload-artifact "$1" | wc -l | tr -d " ")" = 1 ]' _ "$cu"
 cu_expect "$cu: the upload runs whenever the staging step passed (if: always() && steps.staged.outcome == 'success')" \
   bash -c 'grep -q -x -F "        id: staged" "$1" && grep -q -x -F "        if: always() && steps.staged.outcome == '"'"'success'"'"'" "$1"' _ "$cu"
 # Acceptance 1: success or failure of The stage (id claude) -> the upload still runs; no condition names it.
 cu_expect "$cu: no condition names steps.claude (a failed stage still uploads)" \
-  bash -c '! grep -q -F "steps.claude" "$1"' _ "$cu"
+  bash -c '! awk -v t="$2" "\$0 == t { s = 1 } s { print }" "$1" | grep -q -F "steps.claude"' _ "$cu" "$cu_stage"
 cu_expect "$cu: retention-days: 3 and if-no-files-found: error, no include-hidden-files, no overwrite" \
   bash -c 'grep -q -x -F "          retention-days: 3" "$1" && grep -q -x -F "          if-no-files-found: error" "$1" && ! grep -q -i -E "include-hidden-files|overwrite" "$1"' _ "$cu"
 cu_expect "$cu: the artifact path is the staging dir session-upload, not a path under HOME" \
@@ -1268,7 +1271,7 @@ cu_expect "$cu: the scan step env holds the OAuth secret and the job token (the 
   bash -c 'grep -q -F "\${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}" "$1" && grep -q -F "\${{ github.token }}" "$1"' _ "$cu"
 cu_expect "$cu: the four format patterns are written in the step text (decision 266)" \
   bash -c 'for p in "-----BEGIN [A-Z0-9 ]*PRIVATE KEY( BLOCK)?-----" "gh[pousr]_[A-Za-z0-9]{36,}" "github_pat_[A-Za-z0-9_]{20,}" "sk-ant-[A-Za-z0-9_-]{20,}"; do grep -q -F -e "$p" "$1" || exit 1; done' _ "$cu"
-cu_expect "$cu: no set -x (a trace would print the values) and no RUNS_DIR" bash -c '! grep -q -E "set -[a-z]*x|RUNS_DIR" "$1"' _ "$cu"
+cu_expect "$cu: no set -x (a trace would print the values) and no RUNS_DIR" bash -c '! awk -v t="$2" "\$0 == t { s = 1 } s { print }" "$1" | grep -q -E "set -[a-z]*x|RUNS_DIR"' _ "$cu" "$cu_stage"
 cu_expect "real agent: from the line '$cu_step' to the end of the file it is $cu, byte for byte" \
   bash -c 'cmp -s <(awk -v t="$3" "\$0 == t { s = 1 } s { print }" "$1") "$2"' _ "$ag" "$cu" "$cu_step"
 expect "real agent: the token upload-artifact occurs once (the tail), the installer upload stays in ci.yml" \
@@ -1348,8 +1351,8 @@ cp_expect "$cpf: the wip/<ID> push is inside an if on the stage implement and th
 cp_expect "$cpf: the push of task/<ID> is not inside any if on the session outcome (it runs on every ending)" \
   bash -c 'v="$(grep -E "^ +[A-Z_]*OUTCOME: " "$1" | sed -E "s/^ +([A-Z_]*OUTCOME):.*/\1/")"; [ -n "$v" ] || exit 1
     awk -v v="$v" "/^ *if .*; then\$/ { d++; o[d] = (index(\$0, v) > 0) } /^ *fi\$/ { o[d] = 0; d-- } /refs\\/heads\\/task\\// && /push/ { f = 1; for (i = 1; i <= d; i++) if (o[i]) f = 2 } END { exit f != 1 }" "$1"' _ "$cpf"
-cp_expect "$cpf: the pause and the pre-push hooks still apply (TEAMWRIGHT_CONTOUR_PAUSE exit, hooks of the pre-session commit, one-shot token header)" \
-  bash -c 'grep -q -F "TEAMWRIGHT_CONTOUR_PAUSE" "$1" && grep -q -F "core.hooksPath=\"\$hooks/scripts/hooks\"" "$1" && grep -q -F "GIT_CONFIG_KEY_0=http.https://github.com/.extraheader" "$1" && grep -q -F "git archive \"\$BEFORE\" scripts/hooks" "$1"' _ "$cpf"
+cp_expect "$cpf: the pause and the pre-push hooks still apply (TEAMWRIGHT_CONTOUR_PAUSE exit, hooks of the dispatched commit HOOKS_FROM, one-shot token header)" \
+  bash -c 'grep -q -F "TEAMWRIGHT_CONTOUR_PAUSE" "$1" && grep -q -F "core.hooksPath=\"\$hooks/scripts/hooks\"" "$1" && grep -q -F "GIT_CONFIG_KEY_0=http.https://github.com/.extraheader" "$1" && grep -q -F "git archive \"\$HOOKS_FROM\" scripts/hooks" "$1"' _ "$cpf"
 # The uncommitted-patch step: in the fragment, a temp index, never the session's index, no push, no token.
 cp_patch() { cp_step_of "$cpf" 'uncommitted.patch'; }
 cp_expect "$cpf: one step writes uncommitted.patch into \$OUT, with a temp index (GIT_INDEX_FILE), git add -A and git diff --cached --binary HEAD" \
@@ -1520,6 +1523,23 @@ vcp git-config-nosystem-removed f_del '^ +GIT_CONFIG_NOSYSTEM:'
 vcp pythonnousersite-removed f_del '^ +PYTHONNOUSERSITE:'
 vcp template-removed sed -E 's/ --template=( |$)/\1/'
 vcp hooks-from-before f_del '^ +HOOKS_FROM:'
+# T-230 I2 (adjacency): the two owned copies cover the range from 'Did the stage commit?' to the end with no gap.
+# A step between the end of the push copy and the chain step (the tail's first line) passes each copy's own check
+# (the fragment wants a next line starting '      - ', the tail is anchored at EOF), so R9 must refuse the pair.
+# Red today (the guard accepts it, the case wants exit 1 and R9); once the adjacency check exists it is refused.
+if [ -f "$cpf" ] && [ -f "$cu" ]; then
+  mk_cpm v-contour-push-gap-before-tail cat
+  printf '%s\n' '      - name: Gap between the owned copies' '        run: true' > "$tmp/gap-step.txt"
+  {
+    agent_base "$fx/ok-contour/teamwright-agent.yml"
+    cat "$cpf" "$tmp/gap-step.txt"
+    cu_tail
+  } > "$tmp/v-contour-push-gap-before-tail/teamwright-agent.yml"
+  dcheck v-contour-push-gap-before-tail "$tmp/v-contour-push-gap-before-tail"
+else
+  echo "FAIL v-contour-push-gap-before-tail: missing $cpf or $cu" >&2
+  failed=$((failed + 1))
+fi
 # The tail: the same, per step (one pin of one step at a time; the other steps keep theirs).
 f_del_in() { awk -v t="$1" -v re="$2" '/^      - / { s = ($0 == t) } s && $0 ~ re { next } { print }'; }
 for st in "$cu_stage" "$cu_step" '      - name: "Chain: the stage failed"'; do
@@ -1766,15 +1786,26 @@ sc_exec() {
     esac
     args+=("$name=$val")
   done < "$tmp/sc/env.txt"
+  sc_body="$tmp/sc/body.sh"
+  sc_badpath=0
   if [ -n "$SC_MUT" ]; then
     args=("${args[@]}" "SC_MUT=$SC_MUT" "GREP_REAL=$(command -v grep)")
     args[0]="PATH=$tmp/sc/shim:$PATH"
+    # T-230: the body's one fixed-PATH line would shadow the shim: with a mutation active the line gets the shim
+    # dir first (body-mut.sh), and a body without exactly one such line is a failure (sc_badpath), never a pass.
+    sc_badpath=0
+    if [ "$(grep -c -x -F 'export PATH=/usr/local/bin:/usr/bin:/bin' "$tmp/sc/body.sh")" = 1 ]; then
+      sed "s|^export PATH=/usr/local/bin:/usr/bin:/bin\$|export PATH=$tmp/sc/shim:/usr/local/bin:/usr/bin:/bin|" "$tmp/sc/body.sh" > "$tmp/sc/body-mut.sh"
+      sc_body="$tmp/sc/body-mut.sh"
+    else
+      sc_badpath=1
+    fi
   fi
   sh="$(cat "$tmp/sc/shell.txt")"
   if [ -z "$sh" ]; then flags="-e"
   elif [ "$sh" = bash ]; then flags="--noprofile --norc -eo pipefail"
   else flags="${sh#bash}"; flags="${flags//\{0\}/}"; fi
-  (cd "$C_WS" && env -i "${args[@]}" timeout 120 bash $flags "$tmp/sc/body.sh") > "$C/out.txt" 2>&1
+  (cd "$C_WS" && env -i "${args[@]}" timeout 120 bash $flags "$sc_body") > "$C/out.txt" 2>&1
   C_RC=$?
   return 0
 }
@@ -1818,7 +1849,14 @@ sc_mut_check() {
   shift
   SC_MUT="$mut"
   C_WHY=""
-  if "$@"; then
+  sc_badpath=0
+  local rc=0
+  "$@" || rc=1
+  if [ "$sc_badpath" = 1 ]; then
+    SC_MUT=""
+    echo "FAIL mutated ($mut pass removed) $label: the staging body has not exactly one line 'export PATH=/usr/local/bin:/usr/bin:/bin', so the grep shim is not in force and the red cannot be judged" >&2
+    failed=$((failed + 1))
+  elif [ "$rc" = 0 ]; then
     SC_MUT=""
     echo "FAIL mutated ($mut pass removed) $label: the case stays green, the scan line is not pinned by it" >&2
     failed=$((failed + 1))
@@ -2380,7 +2418,8 @@ guard="$real_guard"
 r11_guard() {
   mkdir -p "$tmp/$1/g" "$tmp/$1/wf"
   if ! cp -p "$real_guard" scripts/ci/release-job.yml scripts/ci/release-header.yml "$upl" "$tgs" "$alines" "$tmp/$1/g/" ||
-     ! cp -pR "$csd" "$tmp/$1/g/" || ! cp -p "$owned_src" "$tmp/$1/wf/"; then
+     ! cp -pR "$csd" "$tmp/$1/g/" || ! cp -p "$owned_src" "$tmp/$1/wf/" ||
+     { [ -f "$wh" ] && ! cp -p "$wh" "$tmp/$1/g/"; }; then
     echo "FAIL $1: cannot copy the guard and its owned copies (fix the test)" >&2
     failed=$((failed + 1))
     return 1
