@@ -5,14 +5,14 @@
 	check-core-test-os-answer check-core-test-deadlines check-webview-data check-ci-wip check-telegram-send check-telegram-failure-branch \
 	check-version-stamp check-release-check check-release check-release-guard check-nsis-fork check-e2e-entry-fixtures check-area-image-fixtures \
 	check-whisper-cmake-cache check-opus-cmake-cache check-whisper-model-key check-crt-imports check-whisper \
-	check-shell-windows check-ban-canary check-role-tools check-guard-trigger check-wip-push check-wip-run check-contour-busy \
+	check-shell-windows check-ban-canary check-role-tools check-guard-trigger check-wip-push check-wip-run check-contour-busy check-test-guard \
 	check-ui core-image ui-image core-image-present \
 	licenses licenses-check licenses-unit licenses-fixture licenses-rust licenses-bundle \
 	licenses-npm licenses-generate licenses-stale licenses-stale-guard
 
 # check-ban-canary and check-shell-windows after check-core: both build voicen-core, so a core
 # error is reported first by the faster native check-core, before the slower runs.
-check: check-shell-layout check-shell-layout-fixtures check-helper-windows-fixtures check-ci-credentials check-role-tools check-guard-trigger check-wip-push check-wip-run check-contour-busy \
+check: check-shell-layout check-shell-layout-fixtures check-helper-windows-fixtures check-ci-credentials check-role-tools check-guard-trigger check-wip-push check-wip-run check-contour-busy check-test-guard \
 	check-clippy-lines \
 	check-core-test-os-answer check-core-test-deadlines check-webview-data check-ci-wip check-telegram-send check-telegram-failure-branch check-version-stamp check-release-check check-release check-release-guard check-nsis-fork check-whisper-cmake-cache check-opus-cmake-cache check-whisper-model-key check-crt-imports check-core check-whisper \
 	check-ban-canary check-shell-windows check-e2e-entry-fixtures check-area-image-fixtures check-ui \
@@ -97,6 +97,15 @@ check-guard-trigger:
 # a temporary clone of a temporary bare remote; no network transport is allowed. Host bash, git, python3.
 check-wip-push:
 	scripts/ci/tw-wip-push.test.sh
+
+# check-test-guard (T-189, decisions #201): the kit-managed PreToolUse hook scripts/hooks/test-guard.sh
+# judges a command behind the `systemd-run` scope prefix like the command it runs: a direct test or
+# gate run (cargo test, make check, pnpm test, tw-run <area> -- cargo test, a cut of tw-test output)
+# is refused with the same "Run instead" target, an unreadable option is judged by its suffixes, and
+# tw-test, tw-gate, a build and a find stay allowed. The self-test feeds the hook JSON payloads with
+# its log dir in a temporary directory. Host bash, python3.
+check-test-guard:
+	scripts/ci/test-guard.test.sh
 
 # check-wip-run (T-199, decisions #228, #241): scripts/tw-wip-run is the only CI read of a stage
 # session. Its gh argv is one of two owned templates (run list --branch wip/<ID> ..., run view <id>
