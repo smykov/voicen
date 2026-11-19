@@ -202,16 +202,29 @@ jobs:
           env -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_OUTPUT -u GITHUB_STATE claude -p "/teamwright:$STAGE $TASK_ID" --model "$MODEL" --max-turns 200 --plugin-dir "$TEAMWRIGHT_PLUGIN_DIR" --mcp-config "$RUNNER_TEMP/mcp.json" --strict-mcp-config --permission-mode acceptEdits --allowedTools "Bash,Read,Edit,Write,Glob,Grep,Agent,Task,TodoWrite,Skill,mcp__serena__get_symbols_overview,mcp__serena__find_symbol,mcp__serena__find_referencing_symbols,mcp__serena__find_implementations,mcp__serena__find_declaration,mcp__context7" --append-system-prompt "$SYSTEM_PROMPT" --output-format stream-json --verbose > "$OUT/session.jsonl"
           echo "The session ended; its stream is in $OUT/session.jsonl on the runner."
 
+      # T-236 (F-032): the count, the push of task/<ID> and the uncommitted patch run on every
+      # ending of the session (success, failure, timeout, cancel), so a stage that runs out of time
+      # keeps its work; wip/<ID> stays behind a successful implement, inside the push step. From
+      # this step to the line before "Chain: the next stage" the file is the owned copy
+      # scripts/ci/contour-push.yml (release-guard.sh R9; edit both together).
       - name: Did the stage commit?
         id: commits
-        if: always() && steps.claude.outcome == 'success'
+        if: always()
         env:
           BEFORE: ${{ steps.branch.outputs.before }}
-        run: echo "count=$(git rev-list --count "$BEFORE..HEAD")" >> "$GITHUB_OUTPUT"
+        run: |
+          set -euo pipefail
+          # No pre-session commit (the branch step did not run): no stage commit to count or push.
+          if [ -z "${BEFORE:-}" ]; then
+            echo "count=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          n="$(git rev-list --count "$BEFORE..HEAD")"
+          echo "count=$n" >> "$GITHUB_OUTPUT"
 
       - name: Push task/<ID>, and wip/<ID> after implement
         id: push
-        if: always() && steps.claude.outcome == 'success' && steps.commits.outputs.count != '0'
+        if: always() && steps.commits.outputs.count != '0'
         timeout-minutes: 30
         env:
           # decisions #253 (OQ-79 a): a contour push of task/<ID> or wip/<ID> is not a delivery,
@@ -228,6 +241,8 @@ jobs:
           TASK_ID: ${{ inputs.task_id }}
           STAGE: ${{ inputs.stage }}
           REPO: ${{ github.repository }}
+          # The session's outcome: task/<ID> is pushed on every ending, wip/<ID> only after success.
+          SESSION_OUTCOME: ${{ steps.claude.outcome }}
         run: |
           set -euo pipefail
           if [ -n "${TEAMWRIGHT_CONTOUR_PAUSE:-}" ]; then
@@ -256,10 +271,46 @@ jobs:
           unset PUSH_TOKEN
           export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $auth"
           git -c core.hooksPath="$hooks/scripts/hooks" push "$url" "stage:refs/heads/task/$TASK_ID"
-          if [ "$STAGE" = implement ]; then
+          # wip/<ID> starts the ci.yml run of a finished implementation: only after a successful session.
+          if [ "$STAGE" = implement ] && [ "$SESSION_OUTCOME" = success ]; then
             git -c core.hooksPath="$hooks/scripts/hooks" push --force "$url" "stage:refs/heads/wip/$TASK_ID"
           fi
           echo "pushed=1" >> "$GITHUB_OUTPUT"
+
+      - name: Keep the uncommitted tree as a patch
+        id: patch
+        if: always()
+        # A failure here is a warning, not a red job: the chain steps after it still decide.
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          trap 'echo "::warning::the uncommitted tree of the stage was not kept (git failed, see the log above)"' ERR
+          cd -- "$GITHUB_WORKSPACE"
+          # The session's tree beyond HEAD (staged, unstaged, untracked; binary files kept), read
+          # through a temporary index so the session's own index stays as it was. $OUT itself is
+          # left out when it lies in the tree. The owned tail after the chain steps scans and keeps
+          # $OUT; a clean tree writes no file.
+          idx="$RUNNER_TEMP/uncommitted.index"
+          part="$RUNNER_TEMP/uncommitted.part"
+          rm -f -- "$idx" "$part"
+          ex=()
+          case "$OUT" in
+            /*) ;;
+            *) ex=(":(exclude)$OUT") ;;
+          esac
+          export GIT_INDEX_FILE="$idx"
+          git read-tree HEAD
+          git add -A -- . "${ex[@]}"
+          git diff --cached --binary HEAD > "$part"
+          rm -f -- "$idx"
+          if [ -s "$part" ]; then
+            mkdir -p -- "$OUT"
+            mv -- "$part" "$OUT/uncommitted.patch"
+            echo "::notice::the stage left uncommitted changes: kept as uncommitted.patch in the session artifact (agent/)"
+          else
+            rm -f -- "$part"
+            echo "The tree is clean: nothing uncommitted to keep."
+          fi
 
       - name: "Chain: the next stage"
         if: always() && steps.claude.outcome == 'success'
@@ -299,9 +350,28 @@ jobs:
         shell: bash {0}
         env:
           GH_TOKEN: ${{ github.token }}
+          COMMITS: ${{ steps.commits.outputs.count }}
+          PUSHED: ${{ steps.push.outputs.pushed }}
+          PAUSED: ${{ steps.push.outputs.paused }}
         run: |
           msg="**$TASK_ID**: stage $STAGE failed: $RUN_URL. To continue, start teamwright-next.yml for $TASK_ID by hand."
           [ ! -f "$OUT/preflight.md" ] || msg="$msg $(cat "$OUT/preflight.md")"
+          # What the failed stage kept (T-236): its commits on task/<ID>, its uncommitted tree as a patch.
+          if [ "${PUSHED:-}" = 1 ]; then
+            kept="its ${COMMITS:-0} commit(s) are pushed to task/$TASK_ID"
+          elif [ "${PAUSED:-}" = 1 ]; then
+            kept="its ${COMMITS:-0} commit(s) are not pushed to task/$TASK_ID (the contour is paused)"
+          elif [ "${COMMITS:-0}" != 0 ]; then
+            kept="its ${COMMITS} commit(s) were NOT pushed to task/$TASK_ID (see the push step)"
+          else
+            kept="no commit of the stage on task/$TASK_ID"
+          fi
+          if [ -f "$OUT/uncommitted.patch" ]; then
+            kept="$kept; its uncommitted tree is uncommitted.patch in the session artifact"
+          else
+            kept="$kept; no uncommitted change kept"
+          fi
+          msg="$msg Kept: $kept."
           echo "$msg" >> "$GITHUB_STEP_SUMMARY"
           # This step also runs when the input check failed: an unchecked ISSUE gets no comment.
           [[ "$ISSUE" =~ ^[0-9]+$ ]] && { gh issue comment "$ISSUE" -R "$REPO" --body "$msg" >/dev/null || true; }

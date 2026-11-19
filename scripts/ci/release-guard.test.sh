@@ -1086,12 +1086,15 @@ agent_base() { awk -v t="$cu_step" '$0 == t { exit } { print }' "$1"; }
 
 # ---- (b) the guard: R9 per name -------------------------------------------------------------------
 # mk_ct <name> [filter...]: $tmp/<name> = ok-contour with its agent file's tail (the owned copy) passed
-# through the filter, a command that reads the tail on stdin and writes the changed tail.
+# through the filter, a command that reads the tail on stdin and writes the changed tail. T-236: the owned
+# post-session steps scripts/ci/contour-push.yml (R9 per name too) go in before the tail, unfiltered, as in
+# the real file; when that copy is missing the dir has none and the guard refuses it.
 mk_ct() {
   local d="$tmp/$1"
   shift
   mkdir -p "$d" && cp -p "$fx/ok-contour"/* "$d/" || return 1
   agent_base "$fx/ok-contour/teamwright-agent.yml" > "$d/teamwright-agent.yml"
+  if [ -f scripts/ci/contour-push.yml ]; then cat scripts/ci/contour-push.yml >> "$d/teamwright-agent.yml"; fi
   if [ "$#" -gt 0 ]; then cu_tail | "$@" >> "$d/teamwright-agent.yml"; else cu_tail >> "$d/teamwright-agent.yml"; fi
 }
 # dcheck <label> <dir> [<allowed other rules>]: exit 1, R9 listed at least once and no other rule listed.
@@ -2444,7 +2447,8 @@ frag_ok g-frag-ok-anchor-alias-outside gate-setup-node.yml "ok: an anchor and an
 cguard() {
   mkdir -p "$tmp/$1/contour-heads"
   if ! cp -p "$real_guard" scripts/ci/release-job.yml scripts/ci/release-header.yml "$upl" "$tgs" "$alines" "$tmp/$1/" ||
-     ! cp -pR "$csd" "$tmp/$1/" || { [ -f "$cu" ] && ! cp -p "$cu" "$tmp/$1/"; }; then
+     ! cp -pR "$csd" "$tmp/$1/" || { [ -f "$cu" ] && ! cp -p "$cu" "$tmp/$1/"; } ||
+     { [ -f "$cpf" ] && ! cp -p "$cpf" "$tmp/$1/"; }; then
     echo "FAIL $1: cannot copy the guard and its owned copies (fix the test)" >&2
     failed=$((failed + 1))
     return 1
@@ -2493,6 +2497,28 @@ if [ -f "$cu" ]; then
   fi
 else
   echo "FAIL cannot-run cases of contour-upload.yml: missing $cu (the developer creates it)" >&2
+  failed=$((failed + 1))
+fi
+# T-236: the owned copy contour-push.yml is a guard input too (preamble: cannot run, exit 3).
+if [ -f "$cpf" ]; then
+  if cguard g-cp-missing; then
+    rm -f "$tmp/g-cp-missing/contour-push.yml"
+    cucan g-cp-missing "cannot run: owned copy contour-push.yml missing" 'cannot run.*contour-push'
+  fi
+  if cguard g-cp-empty; then
+    : > "$tmp/g-cp-empty/contour-push.yml"
+    cucan g-cp-empty "cannot run: owned copy contour-push.yml empty" 'cannot run.*contour-push'
+  fi
+  if cguard g-cp-bad-first; then
+    sed -i '1s/.*/      - name: Something else/' "$tmp/g-cp-bad-first/contour-push.yml"
+    cucan g-cp-bad-first "cannot run: owned copy contour-push.yml does not start with the step line" 'cannot run.*contour-push'
+  fi
+  if cguard g-cp-first-twice; then
+    head -n 1 "$cpf" >> "$tmp/g-cp-first-twice/contour-push.yml"
+    cucan g-cp-first-twice "cannot run: owned copy contour-push.yml holds its first line twice (nothing to align on)" 'cannot run.*contour-push'
+  fi
+else
+  echo "FAIL cannot-run cases of contour-push.yml: missing $cpf (the developer creates it)" >&2
   failed=$((failed + 1))
 fi
 if cguard g-contour-no-files; then

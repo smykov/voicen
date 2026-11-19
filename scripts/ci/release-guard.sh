@@ -68,7 +68,14 @@
 #      the upload of the scanned dir, retention-days: 3), and going up from the tail's first line
 #      (lines of spaces only skipped) the first line with fewer than 6, 4, 2 leading spaces is
 #      `    steps:`, `  agent:`, `jobs:` (as R10). Zero tokens there is refused too. Every other
-#      file keeps the single installer upload above.
+#      file keeps the single installer upload above. Also by name (T-236, F-032): in
+#      teamwright-agent.yml the line `      - name: Did the stage commit?` occurs exactly once, the
+#      lines from it are the owned copy scripts/ci/contour-push.yml byte for byte (the commit
+#      count, the push of task/<ID> and the uncommitted-patch step, each under an if: free of the
+#      session outcome, so a timed-out stage still pushes and keeps; wip/<ID> stays behind the
+#      outcome inside the push step), the line after them starts the next step (`      - `), and
+#      going up from the first line the first line with fewer than 6, 4, 2 leading spaces is
+#      `    steps:`, `  agent:`, `jobs:`. No such line is refused too.
 #   R10 (T-087, decisions #93, #124; replaces telegram-guard.sh) the raw token secrets.telegram_
 #      (any case, comments included) occurs in the dir (files in glob order, then line order)
 #      exactly as often as in the guard's fourth owned copy, scripts/ci/telegram-send-step.yml
@@ -232,7 +239,8 @@
 # contour-heads/ missing or a head copy missing, unreadable, empty, not ending in its only `jobs:`
 # line or not holding exactly one `permissions:` line, or contour-upload.yml missing, empty, not
 # starting with `      - name: Stage the session for upload` or not naming upload-artifact exactly
-# once; awk failed);
+# once, or contour-push.yml missing, empty, not starting with `      - name: Did the stage commit?`
+# or holding that line more than once; awk failed);
 # never a pass.
 # Host test: scripts/ci/release-guard.test.sh (make check-release-guard).
 set -uo pipefail
@@ -385,9 +393,20 @@ if [ "$contour" = 1 ]; then
   [ "$(grep -i -o -F 'upload-artifact' -- "$ownedc" | wc -l)" -eq 1 ] ||
     cannot_run "owned tail copy $ownedc (contour-upload.yml) does not name upload-artifact exactly once (nothing to align on)"
 fi
+# R9 per name (T-236): the owned post-session fragment of teamwright-agent.yml (count, push, uncommitted
+# patch), read only with a contour file; it is aligned on its first line, which it holds once.
+ownedp="$here/contour-push.yml"
+if [ "$contour" = 1 ]; then
+  [ -f "$ownedp" ] && [ -r "$ownedp" ] || cannot_run "owned push copy $ownedp (contour-push.yml) not found or not readable"
+  [ -s "$ownedp" ] || cannot_run "owned push copy $ownedp (contour-push.yml) is empty"
+  [ "$(head -n 1 -- "$ownedp")" = "      - name: Did the stage commit?" ] ||
+    cannot_run "owned push copy $ownedp (contour-push.yml) does not start with the line '      - name: Did the stage commit?'"
+  [ "$(grep -c -x -F -- "      - name: Did the stage commit?" "$ownedp")" = "1" ] ||
+    cannot_run "owned push copy $ownedp (contour-push.yml) holds its first line more than once (nothing to align on)"
+fi
 
 # Output lines: "V <file>:<line>: R<n>: <why>"; awk exit 3 = an owned copy could not be read.
-report="$(RG_FRAGS="$fraglist" awk -v owned="$owned" -v ownedh="$ownedh" -v ownedu="$ownedu" -v ownedt="$ownedt" -v ownedl="$ownedl" -v contour="$contour" -v cha="$cha" -v chn="$chn" -v ownedc="$ownedc" '
+report="$(RG_FRAGS="$fraglist" awk -v owned="$owned" -v ownedh="$ownedh" -v ownedu="$ownedu" -v ownedt="$ownedt" -v ownedl="$ownedl" -v contour="$contour" -v cha="$cha" -v chn="$chn" -v ownedc="$ownedc" -v ownedp="$ownedp" '
 function v(k, i, r, why) { print "V " F[k] ":" i ": " r ": " why; nv++ }
 # count(s, t): occurrences of t in s.
 function count(s, t,   n, p) { n = 0; while ((p = index(s, t)) > 0) { n++; s = substr(s, p + length(t)) } return n }
@@ -464,6 +483,11 @@ BEGIN {
     }
     if (rc < 0 || nco == 0 || cco != 1) { bad = 1; exit 3 }
     close(ownedc)
+    # R9 per name (T-236): the owned push fragment OP[m], nop lines.
+    nop = 0
+    while ((rc = (getline line < ownedp)) > 0) OP[++nop] = line
+    if (rc < 0 || nop == 0) { bad = 1; exit 3 }
+    close(ownedp)
   }
 }
 FNR == 1 { nf++; F[nf] = FILENAME }
@@ -698,6 +722,44 @@ END {
           v(ak, (i >= 1 ? i : s0), "R9", "the scan-and-upload tail is not a step of the agent job here: going up from it, the first line with fewer than " lim[lv] " leading spaces must be \"" want[lv] "\"")
       }
     }
+    # R9 per name (T-236): the line OP[1] ("      - name: Did the stage commit?") occurs once in
+    # teamwright-agent.yml, the nop lines from it are scripts/ci/contour-push.yml byte for byte, the
+    # line after them starts the next step ("      - "), so no key can be appended to the last
+    # step, and going up from it the first line with fewer than 6, 4, 2 leading spaces is
+    # "    steps:", "  agent:", "jobs:". No if: of these steps names the session outcome, so a
+    # timed-out stage still pushes task/<ID> and keeps its uncommitted tree (the copy holds it).
+    pf = 0; pn = 0; p2 = 0
+    for (i = 1; i <= N[ak]; i++)
+      if (L[ak, i] == OP[1]) { pn++; if (pn == 1) pf = i; else if (pn == 2) p2 = i }
+    if (pn == 0) {
+      for (i = 1; i <= N[ak]; i++) if (L[ak, i] == "jobs:") break
+      v(ak, i, "R9", "no line \"" OP[1] "\" in teamwright-agent.yml (its count, push and uncommitted-patch steps are the owned copy scripts/ci/contour-push.yml)")
+    } else if (pn > 1)
+      v(ak, p2, "R9", "a second line \"" OP[1] "\" in teamwright-agent.yml (the owned copy scripts/ci/contour-push.yml occurs once)")
+    else {
+      pbad = 0
+      for (m = 1; m <= nop; m++) {
+        i = pf + m - 1
+        if (i > N[ak] || L[ak, i] != OP[m]) { pbad = (i > N[ak] ? N[ak] : i); break }
+      }
+      if (!pbad && (pf + nop > N[ak] || L[ak, pf + nop] !~ /^      - /)) pbad = (pf + nop > N[ak] ? N[ak] : pf + nop)
+      if (pbad)
+        v(ak, pbad, "R9", "the count, push and uncommitted-patch steps of teamwright-agent.yml, from \"" OP[1] "\" to the next step, differ from the owned copy scripts/ci/contour-push.yml here (byte for byte, then a line starting the next step; edit both together)")
+      else {
+        lim[1] = 6; want[1] = "    steps:"; lim[2] = 4; want[2] = "  agent:"; lim[3] = 2; want[3] = "jobs:"
+        lv = 1
+        for (i = pf - 1; i >= 1 && lv <= 3; i--) {
+          s = L[ak, i]
+          if (s ~ /^ *$/) continue
+          match(s, /^ */)
+          if (RLENGTH >= lim[lv]) continue
+          if (s != want[lv]) break
+          lv++
+        }
+        if (lv <= 3)
+          v(ak, (i >= 1 ? i : pf), "R9", "the owned steps scripts/ci/contour-push.yml are not steps of the agent job here: going up from them, the first line with fewer than " lim[lv] " leading spaces must be \"" want[lv] "\"")
+      }
+    }
   }
   exit (nv > 0 ? 1 : 0)
 }
@@ -710,7 +772,7 @@ case "$rc" in
     echo "release-guard: FAIL: a token other than the release job's could write contents, the release job or the ci.yml header is not the owned copy, the installer upload is not the owned tag-only step, the Telegram secrets reach a step other than the owned send step, or an action is not an owned line or step fragment (T-085, T-084, T-087, T-088, P-020)" >&2
     exit 1
     ;;
-  *) cannot_run "awk failed (exit $rc) on $dir or an owned copy ($owned, $ownedh, $ownedu, $ownedt, $ownedl, $csd, $ownedc)" ;;
+  *) cannot_run "awk failed (exit $rc) on $dir or an owned copy ($owned, $ownedh, $ownedu, $ownedt, $ownedl, $csd, $ownedc, $ownedp)" ;;
 esac
 grep -q '^V ' <<<"$report" && cannot_run "awk listed violations but exited 0"
 echo "release-guard: ok: $dir: ${#files[@]} file(s); token read-only but in the release job, which is the owned copy; no other secret, permissions or gh; one installer upload, the owned tag-only step; the Telegram secrets only in the owned send step of the windows job; every action an owned line or step fragment, no column-0 line after jobs:, no merge key"
