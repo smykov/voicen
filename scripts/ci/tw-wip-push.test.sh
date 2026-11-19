@@ -1146,6 +1146,19 @@ fi
 printf '%s' "${MAIN_YML%$'\n'}" >"$tw1/.serena/project.yml"
 t196_run T-900
 t196_want "T-196 c: launch, one byte different" refused "$tw1/.serena/project.yml"
+# same size, different bytes, same mtime: only a byte comparison tells it from main's file
+SAME_SIZE_YML="${MAIN_YML/main-fixture/main-fixtuRe}"
+printf '%s' "$SAME_SIZE_YML" >"$tw1/.serena/project.yml"
+touch -r "$tm/.serena/project.yml" "$tw1/.serena/project.yml"
+t196_run T-900
+t196_want "T-196 c: launch, same size and mtime but different bytes" refused "$tw1/.serena/project.yml"
+
+# (e) --prepare, a copy fails although the harness may be root: the destination is a directory.
+t196_setup e
+rm -rf "$tw1/.serena/project.yml"
+mkdir -p "$tw1/.serena/project.yml"
+t196_run --prepare T-900
+t196_want "T-196 e: --prepare, copy fails (destination is a directory)" refused "$tm/.serena/project.yml" "$tw1/.serena/project.yml"
 
 # (d) another context provider, or none: no check, no copy.
 for prov in none '' other; do
