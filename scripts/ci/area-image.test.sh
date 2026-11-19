@@ -276,7 +276,11 @@ c="real config: the ui image tag is the installed @playwright/test version ($pwv
 if [ "$(cfg_image ui)" != "voicen-ui:$pwv" ]; then got=0; out="$(cfg_image ui)"; err=""; fail "$c" "the ui image is not voicen-ui:$pwv"
 else ok "$c"; fi
 
-mk() { make -n "$@" 2>&1; }
+# The nested make starts from a make state cleared of the caller's (T-235): an
+# outer `make ... WORKERS=1` exports MAKEFLAGS/MAKEOVERRIDES, and an environment
+# WORKERS satisfies `WORKERS ?= 2`; either would make the default case measure
+# the caller's override. Overrides a case asserts go on its own command line.
+mk() { env -u MAKEFLAGS -u MFLAGS -u MAKELEVEL -u MAKEOVERRIDES -u WORKERS make -n "$@" 2>&1; }
 
 c="Makefile ui-image builds the config's tag with the installed Playwright version as build-arg"
 out="$(mk ui-image)"; got=$?; err=""
