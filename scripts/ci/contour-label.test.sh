@@ -231,7 +231,7 @@ case "$1" in
   ls-remote) [ "$FAKE_BRANCH" = yes ] && exit 0 || exit 2 ;;
   fetch) exit 0 ;;
   show) printf 'status: %s\nstage: implement\n' "$FAKE_STATUS" ;;
-  rev-list) echo "$FAKE_AHEAD" ;;
+  rev-list) [ "$FAKE_AHEAD" = FAIL ] && exit 1; echo "$FAKE_AHEAD" ;;
 esac
 exit 0
 FAKE
@@ -274,6 +274,15 @@ FAKE
   else
     fail "behaviour: NEEDS_REVIEW still starts the review stage (ahead check is only for the end branch)" "exit $bgot; $bcalls; $bout"
   fi
+  # git failing, or answering junk, for the count: treated as nothing ahead (the end branch, no pull request).
+  for bad_ahead in FAIL "fatal: bad revision 'origin/main..FETCH_HEAD'"; do
+    drive x CODE_COMPLETE free 0 "" yes "$bad_ahead"
+    if [ "$bgot" = 0 ] && ! has 'gh pr create' && ! has 'gh workflow run ci\.yml' && grep -q 'verify locally' <<<"$bsum"; then
+      pass "behaviour: CODE_COMPLETE, rev-list answers '${bad_ahead:0:5}': nothing to merge, exit 0, no pull request, no ci.yml run"
+    else
+      fail "behaviour: CODE_COMPLETE, rev-list answers '${bad_ahead:0:5}': nothing to merge, exit 0, no pull request, no ci.yml run" "exit $bgot; $bcalls; $bsum; $bout"
+    fi
+  done
   # hop 0, an own stage already running: this start does nothing, exit 0, no wait, no stage.
   drive x IN_PROGRESS own 0 "" yes 1
   if [ "$bgot" = 0 ] && grep -q 'already running' <<<"$bsum" && ! has 'sleep' && ! has 'gh workflow run teamwright-agent'; then
@@ -287,6 +296,53 @@ FAKE
     pass "behaviour: hop 3 with an own run keeps waiting, then stops red (unchanged)"
   else
     fail "behaviour: hop 3 with an own run keeps waiting, then stops red (unchanged)" "exit $bgot; $bsum; $bout"
+  fi
+fi
+
+# ---- behaviour: the relay step run against a fake gh ------------------------------------------------------------
+# The step "Start the chain of the labelled Issue" of job start is cut out and run with the real parser (or a
+# stub with no verdict). Its error branches end red; a bad title comments and ends 0.
+rextract() { awk '/^      - name: Start the chain of the labelled Issue/ {on=1} on && /^        run: \|/ {r=1; next} r && ($0 == "" || /^          /) {print; next} r {exit}' "$nx" | sed 's/^          //'; }
+rextract >"$tmp/relay.sh"
+if [ ! -s "$tmp/relay.sh" ]; then
+  fail "behaviour: the relay step script can be extracted"
+else
+  # relay <label> <title> <gh fails: yes|no> <parser: real|stub>; sets $rgot, $rcalls, $rsum.
+  relay() {
+    local d="$tmp/relay"
+    rm -rf "$d"
+    mkdir -p "$d/bin" "$d/scripts/ci"
+    : >"$d/calls"
+    : >"$d/summary"
+    if [ "$4" = real ]; then cp "$root/scripts/ci/contour-label.sh" "$d/scripts/ci/"; else printf '#!/usr/bin/env bash\necho weird\n' >"$d/scripts/ci/contour-label.sh"; fi
+    chmod +x "$d/scripts/ci/contour-label.sh"
+    cat >"$d/bin/gh" <<'FAKE'
+#!/usr/bin/env bash
+echo "gh $*" >>"$FAKE_DIR/calls"
+if [ "$1 $2" = "workflow run" ] && [ "$FAKE_GH_FAIL" = yes ]; then exit 1; fi
+exit 0
+FAKE
+    chmod +x "$d/bin/gh"
+    (cd "$d" && PATH="$d/bin:$PATH" FAKE_DIR="$d" FAKE_GH_FAIL="$3" TITLE="$2" ISSUE=16 REPO=example/repo MAIN=main \
+      RUN_URL=https://example.com/run GH_TOKEN=fake GITHUB_STEP_SUMMARY="$d/summary" bash "$tmp/relay.sh") >"$d/out" 2>&1
+    rgot=$?
+    rcalls="$(cat "$d/calls")" rsum="$(cat "$d/summary")"
+  }
+  relay x "T-231: x" no real
+  if [ "$rgot" = 0 ] && grep -q -E 'gh workflow run teamwright-next\.yml .*task_id=T-231 .*hop=0' <<<"$rcalls"; then
+    pass "behaviour: relay, good title: hop 0 dispatched, exit 0"
+  else
+    fail "behaviour: relay, good title: hop 0 dispatched, exit 0" "exit $rgot; $rcalls; $(cat "$tmp/relay/out")"
+  fi
+  relay x "T-231: x" yes real
+  if [ "$rgot" = 1 ]; then pass "behaviour: relay, hop 0 dispatch fails: exit 1"; else fail "behaviour: relay, hop 0 dispatch fails: exit 1" "exit $rgot; $rcalls"; fi
+  relay x "T-231: x" no stub
+  if [ "$rgot" = 1 ] && ! grep -q 'gh workflow run' <<<"$rcalls"; then pass "behaviour: relay, parser gives no verdict: exit 1, nothing dispatched"; else fail "behaviour: relay, parser gives no verdict: exit 1, nothing dispatched" "exit $rgot; $rcalls"; fi
+  relay x "no id here" no real
+  if [ "$rgot" = 0 ] && grep -q 'gh issue comment' <<<"$rcalls" && ! grep -q 'gh workflow run' <<<"$rcalls"; then
+    pass "behaviour: relay, bad title: comment on the Issue, nothing dispatched, exit 0"
+  else
+    fail "behaviour: relay, bad title: comment on the Issue, nothing dispatched, exit 0" "exit $rgot; $rcalls"
   fi
 fi
 
