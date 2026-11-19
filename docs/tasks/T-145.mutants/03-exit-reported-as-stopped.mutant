@@ -1,0 +1,11 @@
+guarantee: D1: every other non-failure stop (here Exit) still reports CallSavedTranscribing
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+            | StopReason::Sleep => CallNotice::Stopped { reason },
+            StopReason::User | StopReason::Hotkey | StopReason::Exit | StopReason::SystemEnd => {
+--- new
+            | StopReason::Sleep
+            | StopReason::Exit => CallNotice::Stopped { reason },
+            StopReason::User | StopReason::Hotkey | StopReason::SystemEnd => {
+--- end

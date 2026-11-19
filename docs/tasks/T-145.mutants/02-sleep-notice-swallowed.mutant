@@ -1,0 +1,12 @@
+guarantee: D1 / Acceptance 3: the Sleep stop's notice is delivered (not dropped at the origin)
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+        self.deps.shell.notice(notice);
+        self.announce(dir);
+--- new
+        if reason != StopReason::Sleep {
+            self.deps.shell.notice(notice);
+        }
+        self.announce(dir);
+--- end

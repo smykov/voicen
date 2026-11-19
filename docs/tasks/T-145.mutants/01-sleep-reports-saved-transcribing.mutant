@@ -1,0 +1,21 @@
+guarantee: D1 / Acceptance 3: a Sleep stop reports Stopped{Sleep}, held until resume (not CallSavedTranscribing)
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+            StopReason::MaxLength
+            | StopReason::LowDisk
+            | StopReason::StorageError
+            | StopReason::Sleep => CallNotice::Stopped { reason },
+            StopReason::User | StopReason::Hotkey | StopReason::Exit | StopReason::SystemEnd => {
+                CallNotice::CallSavedTranscribing
+            }
+--- new
+            StopReason::MaxLength | StopReason::LowDisk | StopReason::StorageError => {
+                CallNotice::Stopped { reason }
+            }
+            StopReason::User
+            | StopReason::Hotkey
+            | StopReason::Exit
+            | StopReason::SystemEnd
+            | StopReason::Sleep => CallNotice::CallSavedTranscribing,
+--- end

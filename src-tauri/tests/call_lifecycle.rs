@@ -1246,6 +1246,45 @@ fn the_next_call_request_releases_a_held_sleep_notice_without_a_resume() {
     );
 }
 
+#[test]
+fn an_unlock_after_a_suspend_releases_nothing_that_the_shell_holds() {
+    // I4: only PBT_APMRESUMEAUTOMATIC releases the held sleep notice and hand-off; a WTS unlock
+    // of this session between the suspend and the resume must not (the unlock arm re-registers
+    // the hotkeys only). Bite: the unlock arm also running the call port's `on_resume` (a lock
+    // test on a recording call cannot see it: releasing an empty hold changes nothing).
+    let _serial = serial();
+    let hot = start_hot();
+    hot.start_call();
+    let hwnd = hotkey_window();
+    suspend(hwnd);
+    assert!(
+        eventually(|| !hot.recording()),
+        "the suspend did not stop the call"
+    );
+    let dir = only_folder(&hot.root());
+
+    deliver(
+        hwnd,
+        WM_WTSSESSION_CHANGE,
+        WTS_SESSION_UNLOCK as usize,
+        this_session(),
+    );
+    assert!(
+        holds_for(SETTLE, || {
+            hot.offered().is_empty() && meta_of(&dir).state == CallState::ReadyToTranscribe
+        }),
+        "an unlock released the held notice or hand-off: {:?}",
+        hot.offered()
+    );
+
+    resume(hwnd);
+    assert!(
+        eventually(|| hot.offered().first() == Some(&NOTICE_STOPPED_SLEEP)),
+        "the resume offered no notice.stopped.sleep: {:?}",
+        hot.offered()
+    );
+}
+
 // ---- start-up: recover and enqueue ---------------------------------------------------------------
 
 /// Runs a child that records a WAV-backed call and kills it with TerminateProcess; returns the
