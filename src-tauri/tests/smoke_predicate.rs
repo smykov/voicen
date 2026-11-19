@@ -759,6 +759,9 @@ fn stall_of(markers: &[&str]) -> PwshStall {
     );
     for needle in [
         "stalled",
+        // T-172 (T-057 r3#1, fixed by T-201): F-006 says a stall is reported with the
+        // wait; the message prints it. A regression pin, green from the start.
+        "after a wait of",
         "t057-err before the stall",
         "t057-out before the stall",
     ]
@@ -1152,8 +1155,9 @@ fn the_pwsh_child_gets_a_null_stdin_and_no_console_window() {
     // handle's file type (NUL is FILE_TYPE_CHAR = 2 and not a console; an inherited
     // runner pipe is FILE_TYPE_PIPE = 3, a console is char and a console) and its
     // console window (none under CREATE_NO_WINDOW). Red today for stdin on the runner
-    // (inherited pipe). The console-window half is a guard: under the runner, which
-    // starts the step without a console window, it may hold already. Bites:
+    // (inherited pipe). The console-window half: `console_window 0` was observed under
+    // CREATE_NO_WINDOW (run 37419266451, docs/tasks/T-057.verify/3.md:42). Whether it
+    // bites without the flag is unproven: no run without it exists. Bites:
     // Stdio::null() dropped (stdin inherited); creation_flags(CREATE_NO_WINDOW) dropped
     // where this exe has a console window.
     let command = "$q = [char]34; \

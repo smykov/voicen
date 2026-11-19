@@ -1,0 +1,8 @@
+guarantee: r2#1: on_wake reports window_gone only for the current windows Destroyed
+file: crates/voicen-core/src/overlay.rs
+added_by: test-writer
+--- old
+        let gone = self.phase != WindowPhase::Absent && destroyed.contains(&self.generation);
+--- new
+        let gone = destroyed.contains(&self.generation);
+--- end
