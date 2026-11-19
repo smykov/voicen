@@ -228,8 +228,8 @@ FAKE
 #!/usr/bin/env bash
 echo "git $*" >>"$FAKE_DIR/calls"
 case "$1" in
-  ls-remote) [ "$FAKE_BRANCH" = yes ] && exit 0 || exit 2 ;;
-  fetch) exit 0 ;;
+  ls-remote) [ -z "${FAKE_LS_RC:-}" ] || exit "$FAKE_LS_RC"; [ "$FAKE_BRANCH" = yes ] && exit 0 || exit 2 ;;
+  fetch) exit "${FAKE_FETCH_RC:-0}" ;;
   show) printf 'status: %s\nstage: implement\n' "$FAKE_STATUS" ;;
   rev-list) [ "$FAKE_AHEAD" = FAIL ] && exit 1; echo "$FAKE_AHEAD" ;;
 esac
@@ -238,7 +238,7 @@ FAKE
     printf '#!/usr/bin/env bash\necho "sleep $*" >>"$FAKE_DIR/calls"\n' >"$d/bin/sleep"
     chmod +x "$d/bin/"*
     if [ "$3" = own ]; then printf '[{"status":"in_progress","displayTitle":"teamwright agent T-777 review (hop 1)"}]' >"$d/runlist"; else echo '[]' >"$d/runlist"; fi
-    (cd "$d" && PATH="$d/bin:$PATH" FAKE_DIR="$d" FAKE_STATUS="$2" FAKE_BRANCH="$6" FAKE_AHEAD="$7" TASK_ID=T-777 HOP="$4" \
+    (cd "$d" && PATH="$d/bin:$PATH" FAKE_DIR="$d" FAKE_STATUS="$2" FAKE_BRANCH="$6" FAKE_AHEAD="$7" FAKE_LS_RC="${FAKE_LS_RC:-}" FAKE_FETCH_RC="${FAKE_FETCH_RC:-0}" TASK_ID=T-777 HOP="$4" \
       PREV_STAGE="$5" PREV_STATUS="" ISSUE="" REPO=example/repo MAIN=main RUN_URL=https://example.com/run GH_TOKEN=fake \
       MAX_HOPS=12 MAX_PARALLEL=5 MODEL=opus AUTH_VAR=subscription TEAMWRIGHT_CONTOUR_PAUSE="" GITHUB_STEP_SUMMARY="$d/summary" \
       bash "$tmp/step.sh") >"$d/out" 2>&1
@@ -274,15 +274,37 @@ FAKE
   else
     fail "behaviour: NEEDS_REVIEW still starts the review stage (ahead check is only for the end branch)" "exit $bgot; $bcalls; $bout"
   fi
-  # git failing, or answering junk, for the count: treated as nothing ahead (the end branch, no pull request).
+  # Round 2 (review finding 1): "nothing to merge" is only git's positive answer. Any git failure (count, junk
+  # count, ls-remote other than exit 2, fetch) ends red with "could not be counted", no ci.yml run, no pull request.
+  could_not() { # could_not <label> ; reads the last drive's results
+    if [ "$bgot" = 1 ] && ! has 'gh pr create' && ! has 'gh workflow run ci\.yml' && ! grep -q 'verify locally' <<<"$bsum$bout" \
+      && grep -q -E 'could not be counted' <<<"$bsum$bout"; then
+      pass "$1"
+    else
+      fail "$1" "want exit 1, 'could not be counted', no verify locally, no pr, no ci.yml; got exit $bgot; $bcalls; $bsum; $bout"
+    fi
+  }
   for bad_ahead in FAIL "fatal: bad revision 'origin/main..FETCH_HEAD'"; do
     drive x CODE_COMPLETE free 0 "" yes "$bad_ahead"
-    if [ "$bgot" = 0 ] && ! has 'gh pr create' && ! has 'gh workflow run ci\.yml' && grep -q 'verify locally' <<<"$bsum"; then
-      pass "behaviour: CODE_COMPLETE, rev-list answers '${bad_ahead:0:5}': nothing to merge, exit 0, no pull request, no ci.yml run"
-    else
-      fail "behaviour: CODE_COMPLETE, rev-list answers '${bad_ahead:0:5}': nothing to merge, exit 0, no pull request, no ci.yml run" "exit $bgot; $bcalls; $bsum; $bout"
-    fi
+    could_not "behaviour: CODE_COMPLETE, rev-list answers '${bad_ahead:0:5}': exit 1, 'could not be counted', no pull request, no ci.yml run"
   done
+  FAKE_LS_RC=128 drive x CODE_COMPLETE free 0 "" yes 2
+  could_not "behaviour: CODE_COMPLETE, ls-remote exits 128 (not 2): exit 1, 'could not be counted', no pull request, no ci.yml run"
+  FAKE_FETCH_RC=1 drive x CODE_COMPLETE free 0 "" yes 2
+  could_not "behaviour: CODE_COMPLETE, git fetch fails while task/<ID> exists: exit 1, 'could not be counted', no pull request, no ci.yml run"
+  # controls: ls-remote exit 2 is absent (nothing to merge); a numeric 0 is nothing ahead.
+  FAKE_LS_RC=2 drive x CODE_COMPLETE free 0 "" yes 2
+  if [ "$bgot" = 0 ] && ! has 'gh pr create' && ! has 'gh workflow run ci\.yml' && grep -q 'verify locally' <<<"$bsum"; then
+    pass "behaviour: control, ls-remote exits 2 (no branch): nothing to merge, exit 0"
+  else
+    fail "behaviour: control, ls-remote exits 2 (no branch): nothing to merge, exit 0" "exit $bgot; $bcalls; $bsum; $bout"
+  fi
+  drive x CODE_COMPLETE free 0 "" yes 0
+  if [ "$bgot" = 0 ] && ! has 'gh pr create' && grep -q 'verify locally' <<<"$bsum"; then
+    pass "behaviour: control, numeric count 0: nothing to merge, exit 0"
+  else
+    fail "behaviour: control, numeric count 0: nothing to merge, exit 0" "exit $bgot; $bcalls; $bsum; $bout"
+  fi
   # hop 0, an own stage already running: this start does nothing, exit 0, no wait, no stage.
   drive x IN_PROGRESS own 0 "" yes 1
   if [ "$bgot" = 0 ] && grep -q 'already running' <<<"$bsum" && ! has 'sleep' && ! has 'gh workflow run teamwright-agent'; then
