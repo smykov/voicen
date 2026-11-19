@@ -70,14 +70,15 @@ pub enum PostProcessResult {
     Skipped(SkipKind),
 }
 
-/// `SkipReason` without its host or status (`SkipReason::kind()`): one kind per
-/// reason.
+/// `SkipReason` without its host (`SkipReason::kind()`): one kind per reason.
+/// Only `Http` carries data, the response's status code as an integer (T-190,
+/// written as `pp_http_status=`); no kind carries text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SkipKind {
     Timeout,
     Unreachable,
     InvalidKey,
-    Http,
+    Http { status: u16 },
     InvalidResponse,
     NotConfigured,
 }

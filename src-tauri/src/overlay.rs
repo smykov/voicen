@@ -15,14 +15,21 @@
 //!   Each window is tagged with the reducer's build generation and its `Destroyed`
 //!   posts it; one wake hands all `Destroyed` and the newest state to `on_wake`
 //!   together, so a stale `Destroyed` is ignored and the order they arrived in does
-//!   not matter.
+//!   not matter. The thread drops its window handle exactly when `on_wake` reports
+//!   `window_gone` (the current window's `Destroyed`); it never re-derives that rule
+//!   (T-172).
 //! - The window is built hidden with `focused(false)` and `focusable(false)`
 //!   (`WS_EX_NOACTIVATE`, `WS_EX_TOPMOST`). [`show_click_through`], on the overlay
 //!   thread, then writes the click-through and tool-window bits
 //!   (`WS_EX_TRANSPARENT | WS_EX_LAYERED | WS_EX_TOOLWINDOW`, `WS_EX_APPWINDOW`
 //!   cleared) on the hidden window and shows it with one
 //!   `ShowWindow(SW_SHOWNOACTIVATE)`; it is the only place that shows the overlay
-//!   (T-057, T-067). Nothing calls `show`, `set_focus`, `set_ignore_cursor_events`
+//!   (T-057, T-067), reached only through [`reveal_with`] with the window's real
+//!   handle reader. A handle that cannot be read leaves the window hidden, and a
+//!   failed restyle of a live window still shows it without activation; each failure
+//!   writes one `overlay_failed` line (T-172; `reveal_with` and
+//!   [`show_click_through_with`] are test seams with one production path each).
+//!   Nothing calls `show`, `set_focus`, `set_ignore_cursor_events`
 //!   or any other tao setter on it afterwards: tao rewrites `GWL_EXSTYLE` from its
 //!   own flags (dropping the raw bits) and re-shows a window with `SW_SHOW` on every
 //!   flag change. `Hidden` destroys it (invariant 3; NFR-03).
@@ -300,17 +307,15 @@ fn run<R: Runtime>(
     let mut handled = Settled::default();
     loop {
         let (destroyed, newest) = thread.shared.wait();
-        // The current window's Destroyed (requested, or the window went by itself,
-        // e.g. Alt+F4 or exit): its handle is stale. A Destroyed of an older
-        // generation is not this window's; the reducer ignores it too.
-        if thread.lifecycle.phase() != WindowPhase::Absent
-            && destroyed.contains(&thread.lifecycle.generation())
-        {
-            thread.window = None;
-        }
-        let action = thread
+        let wake = thread
             .lifecycle
             .on_wake(&destroyed, newest.as_ref().map(|e| (e.seq, &e.state)));
+        // The current window's Destroyed (requested, or the window went by itself,
+        // e.g. Alt+F4 or exit): its handle is stale. Only the reducer decides which
+        // Destroyed is the current window's (T-172); a stale one leaves the handle.
+        if wake.window_gone {
+            thread.window = None;
+        }
         // The reducer keeps only the newest seq it was given; `current` is that
         // entry, so a `Build(seq)` (now or after a later Destroyed) renders it.
         if let Some(entry) = newest {
@@ -318,7 +323,7 @@ fn run<R: Runtime>(
                 thread.current = Some(entry);
             }
         }
-        let failed = thread.execute(action);
+        let failed = thread.execute(wake.action);
         // The receipt (T-173), after the window call returned and outside it: a wake
         // that leaves the phase `Destroying` has not settled (the rebuild for a newer
         // shown state is still to come on the window's Destroyed).
@@ -351,11 +356,7 @@ struct OverlayThread<R: Runtime> {
 
 impl<R: Runtime> OverlayThread<R> {
     fn warn(&self, os_code: Option<i32>) {
-        // The kind and the OS code only: no payload, no error text (#45, FR-20).
-        self.log.write(LogEvent::Warning {
-            kind: WarningKind::OverlayFailed,
-            os_code,
-        });
+        overlay_failed(&self.log, os_code);
     }
 
     /// Runs one reducer answer and returns whether it failed (each failure writes one
@@ -473,18 +474,11 @@ impl<R: Runtime> OverlayThread<R> {
         self.app.emit_to(LABEL, STATE_EVENT, self.payload())
     }
 
-    /// Shows the freshly built, hidden `window` through [`show_click_through`], the
-    /// one place that shows the overlay. A handle that cannot be read leaves the
-    /// window hidden and writes one `overlay_failed` line (a failed style write
-    /// writes its own line inside `show_click_through`).
+    /// Shows the freshly built, hidden `window` through [`reveal_with`] with the real
+    /// handle reader, the one production path to [`show_click_through`].
     #[cfg(windows)]
     fn reveal(&self, window: &WebviewWindow<R>) {
-        match window.hwnd() {
-            Ok(hwnd) => {
-                show_click_through(hwnd, &self.log);
-            }
-            Err(err) => self.warn(io_os_code(&err)),
-        }
+        reveal_with(window, WebviewWindow::hwnd, &self.log);
     }
 
     /// The shell runs only on Windows; elsewhere the window stays hidden.
@@ -492,9 +486,41 @@ impl<R: Runtime> OverlayThread<R> {
     fn reveal(&self, _window: &WebviewWindow<R>) {}
 }
 
+/// Writes one `warning kind=overlay_failed` line: the kind and the OS code only, no
+/// payload, handle or error text (#45, FR-20).
+fn overlay_failed(log: &Log, os_code: Option<i32>) {
+    log.write(LogEvent::Warning {
+        kind: WarningKind::OverlayFailed,
+        os_code,
+    });
+}
+
+/// Shows the freshly built, hidden `window` through [`show_click_through`], the one
+/// place that shows the overlay, with the handle `hwnd` reads from it (T-172; a test
+/// seam like `settings_window::request_with`: production calls it only from
+/// `OverlayThread::reveal`, with `WebviewWindow::hwnd`). A handle that cannot be read
+/// leaves the window hidden (no show of any kind), writes exactly one
+/// `overlay_failed` line and returns `false`; otherwise it returns what
+/// `show_click_through` returns (a failed style write writes its own one line there).
+#[cfg(windows)]
+pub fn reveal_with<R: Runtime>(
+    window: &WebviewWindow<R>,
+    hwnd: impl FnOnce(&WebviewWindow<R>) -> tauri::Result<windows::Win32::Foundation::HWND>,
+    log: &Log,
+) -> bool {
+    match hwnd(window) {
+        Ok(hwnd) => show_click_through(hwnd, log),
+        Err(err) => {
+            overlay_failed(log, io_os_code(&err));
+            false
+        }
+    }
+}
+
 /// Makes the hidden overlay window `hwnd` click-through and keeps it out of Alt+Tab,
-/// then shows it without activating it (T-067; `docs/decisions/overlay.md` §3). Runs
-/// on the overlay thread and makes no tao call:
+/// then shows it without activating it (T-067; `docs/decisions/overlay.md` §3):
+/// [`show_click_through_with`] with the real `restyle` (steps 1-3), the one
+/// production path. Runs on the overlay thread and makes no tao call:
 ///
 /// 1. reads `GWL_EXSTYLE`, ORs in `WS_EX_TRANSPARENT | WS_EX_LAYERED |
 ///    WS_EX_TOOLWINDOW` and clears `WS_EX_APPWINDOW` (the creation's
@@ -511,11 +537,53 @@ impl<R: Runtime> OverlayThread<R> {
 /// (never with an activating show) and returns `false`.
 #[cfg(windows)]
 pub fn show_click_through(hwnd: windows::Win32::Foundation::HWND, log: &Log) -> bool {
+    show_click_through_with(hwnd, restyle, log)
+}
+
+/// [`show_click_through`] with steps 1-3 done by `restyle` (T-172; a test seam:
+/// production calls it only from `show_click_through`, with the real `restyle`).
+/// Calls `restyle` once, then step 4: shows `hwnd` with one
+/// `ShowWindow(SW_SHOWNOACTIVATE)` when it names a window, whether or not the
+/// restyle succeeded (never with an activating show). Returns `true` when the
+/// restyle succeeded; on its `Err` writes exactly one `warning kind=overlay_failed
+/// os_code=N` and returns `false`.
+#[cfg(windows)]
+pub fn show_click_through_with(
+    hwnd: windows::Win32::Foundation::HWND,
+    restyle: impl FnOnce(windows::Win32::Foundation::HWND) -> Result<(), Option<i32>>,
+    log: &Log,
+) -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::{IsWindow, ShowWindow, SW_SHOWNOACTIVATE};
+
+    let styled = restyle(hwnd);
+
+    // SAFETY: any handle; `IsWindow` only answers whether it names a window.
+    if unsafe { IsWindow(Some(hwnd)) }.as_bool() {
+        // SAFETY: `hwnd` names a window; the return is the previous visibility,
+        // not an error. `SW_SHOWNOACTIVATE` never activates it.
+        let _was_visible = unsafe { ShowWindow(hwnd, SW_SHOWNOACTIVATE) };
+    }
+
+    match styled {
+        Ok(()) => true,
+        Err(os_code) => {
+            overlay_failed(log, os_code);
+            false
+        }
+    }
+}
+
+/// Steps 1-3 of [`show_click_through`]: reads `GWL_EXSTYLE`, writes the
+/// click-through and tool-window bits and applies them with `SetWindowPos`. Each
+/// step runs only when the previous one succeeded; `Err` carries the code of the
+/// first failure.
+#[cfg(windows)]
+fn restyle(hwnd: windows::Win32::Foundation::HWND) -> Result<(), Option<i32>> {
     use windows::Win32::Foundation::{GetLastError, SetLastError, WIN32_ERROR};
     use windows::Win32::UI::WindowsAndMessaging::{
-        GetWindowLongPtrW, IsWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow, GWL_EXSTYLE,
-        SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_SHOWNOACTIVATE,
-        WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
+        GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, GWL_EXSTYLE, SWP_FRAMECHANGED,
+        SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WS_EX_APPWINDOW, WS_EX_LAYERED,
+        WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
     };
 
     /// The calling thread's last error as a log code; `None` when it is 0.
@@ -534,65 +602,40 @@ pub fn show_click_through(hwnd: windows::Win32::Foundation::HWND, log: &Log) -> 
             .filter(|code| *code != 0)
     }
 
-    /// Steps 1-3. Each step runs only when the previous one succeeded; `Err` carries
-    /// the code of the first failure.
-    fn restyle(hwnd: windows::Win32::Foundation::HWND) -> Result<(), Option<i32>> {
-        // SAFETY: clears the calling thread's last error.
-        unsafe { SetLastError(WIN32_ERROR(0)) };
-        // SAFETY: any handle; a stale one returns 0 with the last error set.
-        let style = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) };
-        if style == 0 {
-            if let Some(code) = last_error() {
-                return Err(Some(code));
-            }
-        }
-        let add = (WS_EX_TRANSPARENT.0 | WS_EX_LAYERED.0 | WS_EX_TOOLWINDOW.0) as isize;
-        let clear = WS_EX_APPWINDOW.0 as isize;
-        let wanted = (style | add) & !clear;
-        // SAFETY: clears the calling thread's last error.
-        unsafe { SetLastError(WIN32_ERROR(0)) };
-        // SAFETY: any handle; a failure returns 0 with the last error set.
-        let previous = unsafe { SetWindowLongPtrW(hwnd, GWL_EXSTYLE, wanted) };
-        if previous == 0 {
-            if let Some(code) = last_error() {
-                return Err(Some(code));
-            }
-        }
-        // SAFETY: any handle; no move, size, z-order change or activation.
-        unsafe {
-            SetWindowPos(
-                hwnd,
-                None,
-                0,
-                0,
-                0,
-                0,
-                SWP_FRAMECHANGED | SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER,
-            )
-        }
-        .map_err(|err| win32_code(&err))
-    }
-
-    let styled = restyle(hwnd);
-
-    // SAFETY: any handle; `IsWindow` only answers whether it names a window.
-    if unsafe { IsWindow(Some(hwnd)) }.as_bool() {
-        // SAFETY: `hwnd` names a window; the return is the previous visibility,
-        // not an error. `SW_SHOWNOACTIVATE` never activates it.
-        let _was_visible = unsafe { ShowWindow(hwnd, SW_SHOWNOACTIVATE) };
-    }
-
-    match styled {
-        Ok(()) => true,
-        Err(os_code) => {
-            // The kind and the OS code only: no handle, no error text (#45, FR-20).
-            log.write(LogEvent::Warning {
-                kind: WarningKind::OverlayFailed,
-                os_code,
-            });
-            false
+    // SAFETY: clears the calling thread's last error.
+    unsafe { SetLastError(WIN32_ERROR(0)) };
+    // SAFETY: any handle; a stale one returns 0 with the last error set.
+    let style = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) };
+    if style == 0 {
+        if let Some(code) = last_error() {
+            return Err(Some(code));
         }
     }
+    let add = (WS_EX_TRANSPARENT.0 | WS_EX_LAYERED.0 | WS_EX_TOOLWINDOW.0) as isize;
+    let clear = WS_EX_APPWINDOW.0 as isize;
+    let wanted = (style | add) & !clear;
+    // SAFETY: clears the calling thread's last error.
+    unsafe { SetLastError(WIN32_ERROR(0)) };
+    // SAFETY: any handle; a failure returns 0 with the last error set.
+    let previous = unsafe { SetWindowLongPtrW(hwnd, GWL_EXSTYLE, wanted) };
+    if previous == 0 {
+        if let Some(code) = last_error() {
+            return Err(Some(code));
+        }
+    }
+    // SAFETY: any handle; no move, size, z-order change or activation.
+    unsafe {
+        SetWindowPos(
+            hwnd,
+            None,
+            0,
+            0,
+            0,
+            0,
+            SWP_FRAMECHANGED | SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER,
+        )
+    }
+    .map_err(|err| win32_code(&err))
 }
 
 /// The window's logical top-left: bottom-centre of the work area of the monitor

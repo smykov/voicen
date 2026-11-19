@@ -95,7 +95,8 @@ pub struct Pipeline {
     /// (FR-24, decision #97).
     timeouts: Option<Timeouts>,
     factory: Box<EngineFactory>,
-    /// `JobFinished.seq`, taken at `run_job` entry (T-011 moves it to the stop).
+    /// `JobFinished.seq`, taken at `run_job` entry on the one FIFO worker, so it
+    /// follows the stop order (decision #310).
     last_seq: AtomicU64,
     /// The last [`PendingId`] handed out; ids are never reused, within this pipeline
     /// or across processes: it starts at a per-pipeline seed (the wall clock in
@@ -1470,7 +1471,7 @@ mod tests {
             ),
             (
                 PostProcessOutcome::Skipped(SkipReason::Http { status: 502 }),
-                PostProcessResult::Skipped(SkipKind::Http),
+                PostProcessResult::Skipped(SkipKind::Http { status: 502 }),
             ),
             (
                 PostProcessOutcome::Skipped(SkipReason::InvalidResponse),

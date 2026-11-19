@@ -1,0 +1,12 @@
+guarantee: AC-1: each dictation is delivered to its own start window, taken at press (not read at delivery)
+file: crates/voicen-core/src/pipeline.rs
+added_by: test-writer
+--- old
+                    job.settings.auto_paste,
+                    job.start_window,
+                    &*self.deps.clipboard,
+--- new
+                    job.settings.auto_paste,
+                    self.deps.paster.capture_start_window().as_ref().or(job.start_window),
+                    &*self.deps.clipboard,
+--- end
