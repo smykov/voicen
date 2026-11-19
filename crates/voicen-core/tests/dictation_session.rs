@@ -2004,7 +2004,7 @@ fn input_threads_never_wait_for_the_pending_slot() {
 // ---- T-009: toggle mode, the 10-minute maximum, Esc cancel ----------------------------
 //
 // Pinned API (docs/tasks/T-009.md ## Tests): `DictationSession::{esc_pressed(at),
-// cancel_key_result(claimed, at), tick(at)}`, `SessionDeps::cancel_key:
+// cancel_key_result(bare, modified, at), tick(at)}`, `SessionDeps::cancel_key:
 // Arc<dyn CancelKey>` (`platform::CancelKey::set(claimed)`, fake `FakeCancelKey` with
 // `calls() -> Vec<bool>`), `recording::MAX_LENGTH`, `RecordingEnd::{Toggled,
 // MaxLength, Cancelled}`, `i18n::NOTICE_MAX_LENGTH`. Replaces row 15

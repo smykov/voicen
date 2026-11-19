@@ -1,0 +1,8 @@
+guarantee: AC-1: refusal of the claim the live mode cannot use never warns
+file: crates/voicen-core/src/dictation.rs
+added_by: test-writer
+--- old
+            Some(Mode::Hold) => !modified,
+--- new
+            Some(Mode::Hold) => !bare,
+--- end
