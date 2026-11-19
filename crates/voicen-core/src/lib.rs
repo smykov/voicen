@@ -4,6 +4,8 @@ pub mod audio;
 pub mod autostart;
 #[cfg(feature = "ban-canary-lib")]
 pub mod ban_canary;
+#[cfg(test)]
+mod build_commit;
 pub mod build_info;
 pub mod call;
 pub mod clock;

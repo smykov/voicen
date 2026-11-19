@@ -1,0 +1,11 @@
+guarantee: T-171 (T-023 ii): a padded VOICEN_COMMIT env value is embedded trimmed
+file: crates/voicen-core/src/build_commit.rs
+added_by: test-writer
+--- old
+        .map(str::trim)
+        .find(|c| !c.is_empty())
+        .unwrap_or("unknown")
+--- new
+        .find(|c| !c.trim().is_empty())
+        .unwrap_or("unknown")
+--- end

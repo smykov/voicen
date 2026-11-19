@@ -641,6 +641,85 @@ fn release_for_delete_while_an_acquire_loads_that_model_is_in_use() {
     assert_eq!(r.loader.loads().len(), 1, "one load only");
 }
 
+// ---- T-171 (T-098 v2#1) ---------------------------------------------------------------
+
+#[test]
+fn a_model_deselected_while_its_acquire_loads_is_dropped_when_the_guard_drops() {
+    // FR-014: a load whose model stopped being the selected one while it ran still
+    // serves its own transcription, and is out of memory once that guard drops. The
+    // gated loader holds the acquire inside its load; the selection moves to `tiny`
+    // meanwhile. Bite: `drop_on_release: false` in `acquire` (the model stays
+    // loaded after the guard drops: loaded() Some, dropped() 0).
+    let r = rig();
+    let gate = r.loader.gate();
+    let residency = Arc::clone(&r.residency);
+    let small = r.path(ModelId::Small);
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (end_tx, end_rx) = std::sync::mpsc::channel::<()>();
+    let job = std::thread::spawn(move || {
+        let got = residency.acquire(ModelId::Small, small);
+        let warmth = got.as_ref().map(|(_, w)| *w).map_err(|e| e.clone());
+        let _ = held_tx.send(warmth);
+        // Holds the guard until the test has looked at the loaded model.
+        let _ = end_rx.recv_timeout(HANG);
+        drop(got);
+    });
+    assert_eq!(
+        gate.entered.recv_timeout(HANG),
+        Ok(r.path(ModelId::Small)),
+        "the acquire's load started"
+    );
+
+    r.residency.on_engine_or_model_changed(Some(ModelId::Tiny));
+    gate.release.send(()).expect("let the load finish");
+    drop(gate);
+    let warmth = held_rx.recv_timeout(HANG).expect("the acquire returned");
+    assert_eq!(warmth, Ok(Warmth::Cold { load_ms: 1_234 }));
+    assert_eq!(
+        r.residency.loaded(),
+        Some(ModelId::Small),
+        "the held model serves its transcription"
+    );
+    assert_eq!(r.loader.dropped(), 0, "not dropped while held");
+
+    let _ = end_tx.send(());
+    job.join().expect("acquire thread must not panic");
+    assert_eq!(r.residency.loaded(), None, "dropped with its guard");
+    assert_eq!(r.loader.dropped(), 1);
+    assert_eq!(r.loader.loads().len(), 1, "one load only");
+}
+
+#[test]
+fn a_model_deselected_while_its_prewarm_loads_is_discarded_unused() {
+    // FR-014, prewarm path: the worker finds its load stale and drops the model
+    // instead of installing it. It drops after `notify_all` and outside the lock,
+    // and the fake loader has no drop channel, so the wait is `eventually` (a hang
+    // bound only). Bite: `if false` for the worker's `if stale` (the model is
+    // installed: loaded() Some, dropped() 0).
+    let r = rig();
+    let gate = r.loader.gate();
+    r.residency.prewarm(ModelId::Small, r.path(ModelId::Small));
+    assert_eq!(
+        gate.entered.recv_timeout(HANG),
+        Ok(r.path(ModelId::Small)),
+        "the prewarm load started"
+    );
+
+    r.residency.on_engine_or_model_changed(Some(ModelId::Tiny));
+    gate.release.send(()).expect("let the prewarm load finish");
+    drop(gate);
+    assert!(
+        common::timing::eventually(HANG, || r.loader.dropped() == 1),
+        "the stale prewarm model must be dropped"
+    );
+    assert_eq!(r.residency.loaded(), None, "nothing installed");
+    assert_eq!(
+        r.loader.loads(),
+        vec![r.path(ModelId::Small)],
+        "one load only"
+    );
+}
+
 #[test]
 fn release_for_delete_while_a_prewarm_loads_that_model_is_in_use() {
     // Validation 1 (M5): same guarantee for the prewarm's load (its own thread,
