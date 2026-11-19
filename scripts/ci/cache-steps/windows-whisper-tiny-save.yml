@@ -4,4 +4,4 @@
         with:
           path: ${{ runner.temp }}/voicen-whisper-models
           key: ${{ steps.whisper-tiny.outputs.cache-primary-key }}
-      - run: cargo test -p voicen --no-fail-fast
+      - name: Test the shell

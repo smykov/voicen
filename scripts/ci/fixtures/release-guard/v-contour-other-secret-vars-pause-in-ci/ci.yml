@@ -32,8 +32,12 @@ jobs:
       - run: make check
       # ${{ vars.TEAMWRIGHT_CONTOUR_PAUSE }}
   windows:
-    runs-on: windows-2025
+    name: Windows build, install and smoke test
     needs: gate
+    runs-on: windows-latest
+    # T-230: the job's own bound, 4x the longest windows job of 40 green runs (no step runs past it);
+    # this head is the owned copy scripts/ci/windows-head.yml (release-guard.sh R15; edit both together).
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v5
       - name: Premise - release-check on every ref (no token)

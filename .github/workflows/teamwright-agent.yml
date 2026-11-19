@@ -235,6 +235,14 @@ jobs:
           TEAMWRIGHT_CONTOUR_PAUSE: ${{ vars.TEAMWRIGHT_CONTOUR_PAUSE }}
           TEAMWRIGHT_ALLOW_PUSH: ""
           BASH_ENV: ""
+          # T-230: no git config, template or python user site the session can write (it runs as
+          # the same OS user and can write HOME): git reads neither the global nor the system file,
+          # and pre-push runs python3 without the user site.
+          GIT_CONFIG_GLOBAL: /dev/null
+          GIT_CONFIG_NOSYSTEM: "1"
+          PYTHONNOUSERSITE: "1"
+          # The hooks come from the dispatched main commit, never from a commit a stage wrote.
+          HOOKS_FROM: ${{ github.sha }}
           # The job token, in this step only (the checkout does not persist it).
           PUSH_TOKEN: ${{ github.token }}
           BEFORE: ${{ steps.branch.outputs.before }}
@@ -253,19 +261,22 @@ jobs:
           export PATH=/usr/local/bin:/usr/bin:/bin GIT_NO_REPLACE_OBJECTS=1
           [[ "$TASK_ID" =~ ^T-[0-9]{3,}$ ]] || { echo "::error::bad task id"; exit 1; }
           [[ "$BEFORE" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::bad pre-session commit"; exit 1; }
-          # A fresh repository: no config, hook or replace ref of the session's tree takes part.
-          # The hooks are the pre-session commit's, fetched from GitHub, so a session commit that
-          # edits scripts/hooks/pre-push does not change the check of its own push.
+          [[ "$HOOKS_FROM" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::bad hooks commit"; exit 1; }
+          # A fresh repository with an empty template: no config, hook or replace ref of the
+          # session's tree takes part. The hooks are those of the dispatched main commit
+          # (HOOKS_FROM), fetched from GitHub, so no stage commit, of this stage or an earlier
+          # one on task/<ID>, changes the check of a push.
           pub="$(mktemp -d "$RUNNER_TEMP/push.XXXXXX")"
           hooks="$(mktemp -d "$RUNNER_TEMP/hooks.XXXXXX")"
           url="https://github.com/$REPO.git"
-          git init -q "$pub"
+          git init -q --template= "$pub"
           cd "$pub"
           git fetch -q "$url" "$BEFORE"
+          git fetch -q "$url" "$HOOKS_FROM"
           git fetch -q "$GITHUB_WORKSPACE" "+HEAD:refs/heads/stage"
           git merge-base --is-ancestor "$BEFORE" stage || { echo "::error::the stage commits do not descend from $BEFORE"; exit 1; }
-          git archive "$BEFORE" scripts/hooks | tar -x -C "$hooks"
-          [ -x "$hooks/scripts/hooks/pre-push" ] || { echo "::error::no pre-push hook in $BEFORE"; exit 1; }
+          git archive "$HOOKS_FROM" scripts/hooks | tar -x -C "$hooks"
+          [ -x "$hooks/scripts/hooks/pre-push" ] || { echo "::error::no pre-push hook in $HOOKS_FROM"; exit 1; }
           # The token as a one-shot extraheader from the environment: no git config file holds it.
           auth="$(printf 'x-access-token:%s' "$PUSH_TOKEN" | base64 -w0)"
           unset PUSH_TOKEN
@@ -313,14 +324,22 @@ jobs:
           fi
 
       - name: "Chain: the next stage"
+        # T-230: from this step to the end of the file the job is the owned copy
+        # scripts/ci/contour-upload.yml (release-guard.sh R9; edit both together), on the line right
+        # after the owned copy scripts/ci/contour-push.yml. Each step here that holds a token pins
+        # BASH_ENV '' and sets a fixed PATH first; gh reads a fresh config dir, not the session's HOME.
         if: always() && steps.claude.outcome == 'success'
         shell: bash {0}
         env:
+          BASH_ENV: ""
           GH_TOKEN: ${{ github.token }}
           COMMITS: ${{ steps.commits.outputs.count }}
           PUSHED: ${{ steps.push.outputs.pushed }}
           PAUSED: ${{ steps.push.outputs.paused }}
         run: |
+          export PATH=/usr/local/bin:/usr/bin:/bin
+          GH_CONFIG_DIR="$(mktemp -d "$RUNNER_TEMP/gh-config.XXXXXX")" || { echo "::error::no fresh gh config dir"; exit 1; }
+          export GH_CONFIG_DIR
           say() {
             echo "$1" >> "$GITHUB_STEP_SUMMARY"
             [ -z "$ISSUE" ] || gh issue comment "$ISSUE" -R "$REPO" --body "$1" >/dev/null || echo "::warning::no comment on Issue #$ISSUE"
@@ -349,11 +368,15 @@ jobs:
         if: failure() || steps.claude.outcome != 'success'
         shell: bash {0}
         env:
+          BASH_ENV: ""
           GH_TOKEN: ${{ github.token }}
           COMMITS: ${{ steps.commits.outputs.count }}
           PUSHED: ${{ steps.push.outputs.pushed }}
           PAUSED: ${{ steps.push.outputs.paused }}
         run: |
+          export PATH=/usr/local/bin:/usr/bin:/bin
+          GH_CONFIG_DIR="$(mktemp -d "$RUNNER_TEMP/gh-config.XXXXXX")" || { echo "::error::no fresh gh config dir"; exit 1; }
+          export GH_CONFIG_DIR
           msg="**$TASK_ID**: stage $STAGE failed: $RUN_URL. To continue, start teamwright-next.yml for $TASK_ID by hand."
           [ ! -f "$OUT/preflight.md" ] || msg="$msg $(cat "$OUT/preflight.md")"
           # What the failed stage kept (T-236): its commits on task/<ID>, its uncommitted tree as a patch.
@@ -412,6 +435,7 @@ jobs:
         timeout-minutes: 30
         shell: bash
         env:
+          BASH_ENV: ""
           # The values pass 1 of the scan looks for; they reach the scan only here.
           OAUTH_VALUE: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           JOB_TOKEN: ${{ github.token }}
@@ -423,6 +447,7 @@ jobs:
           # line of manifest.txt. A match of a value of the job or of a known key format deletes the
           # staging dir and fails the step; only counts are printed, never a name or a line.
           set -u
+          export PATH=/usr/local/bin:/usr/bin:/bin
           cd -- "$GITHUB_WORKSPACE"
           stage="$RUNNER_TEMP/session-upload"
           rm -rf -- "$stage"

@@ -573,9 +573,13 @@ never holds a `TEAMWRIGHT_PAUSE` (the name is in `.gitignore`, and `git clean -f
 which is why the local file is not the contour's pause. A paused push leaves the stage's commits on the
 runner only. `gh workflow disable teamwright-agent.yml`
 (and `teamwright-next.yml`) is the coarse stop: no new stage starts at all. The push step runs
-the `pre-push` of the pre-session commit, taken with `git archive` into a fresh directory and
-named with `-c core.hooksPath`, not the hooks of the session's own tree. So a session commit
-that edits `scripts/hooks/pre-push` does not change the check of its own push.
+the `pre-push` of the dispatched main commit (`${{ github.sha }}`, reaching the step only as its
+env value `HOOKS_FROM`, T-230), taken with `git archive` into a fresh directory made with
+`git init --template=` and named with `-c core.hooksPath`, never the hooks of the session's own
+tree or of the `task/<ID>` head an earlier stage pushed. So no stage commit that edits
+`scripts/hooks/pre-push` changes the check of its own push or of a later stage's push. The step
+also reads no git config, template or python user site the session could write
+(`GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM=1`, `PYTHONNOUSERSITE=1`).
 
 **Contour review and the `CI:` line (open, OQ-83).** The dispatcher starts the `ci.yml` run of
 `wip/<ID>` after implement. The contour's review session has no sanctioned way to read that run:

@@ -228,7 +228,7 @@ check-release:
 # job (R5), no YAML escape that spells a character or joins two lines (R6), the header of the
 # file holding the release job, line 1 to jobs:, byte-identical to scripts/ci/release-header.yml
 # (R7; decisions #121), no YAML tag: the raw texts !!, !< and %TAG nowhere (R8; decisions
-# #122), the one installer upload byte-identical to scripts/ci/release-upload.yml (R9; per name, T-206: teamwright-agent.yml's one upload is the tail scripts/ci/contour-upload.yml, to EOF; T-236: its post-session push steps are byte-identical to scripts/ci/contour-push.yml), and the
+# #122), the one installer upload byte-identical to scripts/ci/release-upload.yml (R9; per name, T-206: teamwright-agent.yml's one upload is the tail scripts/ci/contour-upload.yml, from the chain step to EOF since T-230; T-236: its post-session push steps are byte-identical to scripts/ci/contour-push.yml; T-230: the tail starts right after it, no gap), and the
 # raw token secrets.TELEGRAM_ (any case, comments included) only in the one Telegram send step,
 # byte-identical to scripts/ci/telegram-send-step.yml (R10; replaces telegram-guard, T-087:
 # T-070 validation 1 M6 and probes T1-T4 are its fixtures); and (T-088, replaces ci-wip and
@@ -239,7 +239,8 @@ check-release:
 # only, no setup-node cache) (R11), no column-0 line after jobs: (R12) and no YAML merge key
 # (R13); T-202 (decisions #253) R14: the files teamwright-agent.yml and teamwright-next.yml
 # (exact names) are the only others with a write token; their header is the owned copy
-# scripts/ci/contour-heads/<name>.
+# scripts/ci/contour-heads/<name>. T-230 R15: ci.yml's windows job head, from '  windows:' to its
+# first '    steps:', is byte-identical to scripts/ci/windows-head.yml (its timeout-minutes: 120).
 # The self-test runs the tripwire scripts/ci/release-guard.sh on
 # scripts/ci/fixtures/release-guard/ and the real workflows dir (also mutated). Host bash and awk.
 check-release-guard:
