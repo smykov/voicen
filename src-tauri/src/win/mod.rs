@@ -12,12 +12,15 @@
 //! `src-tauri/tests/call_notify.rs`). `toast` is the dictation's `Notifier`: one `toast`
 //! thread showing WinRT toasts (T-210, `src-tauri/tests/feedback.rs`). `save_dialog` is the Calls
 //! window's `call::SaveDialog`: `IFileSaveDialog` on its own STA thread per pick (T-142,
-//! `src-tauri/tests/save_dialog.rs` for the cancel mapping).
+//! `src-tauri/tests/save_dialog.rs` for the cancel mapping). `exit_dialog` is the tray Exit's
+//! `call::ExitConfirm`: the system Yes / No `MessageBoxW` (T-145, `src-tauri/tests/call_lifecycle.rs`
+//! drives the port with a fake).
 
 pub mod audio_notify;
 pub mod capture;
 pub mod clipboard;
 pub mod crash;
+pub mod exit_dialog;
 pub mod hotkey;
 pub mod paste;
 pub mod purge;

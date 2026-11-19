@@ -213,7 +213,9 @@ fn wire<R: Runtime>(app: &AppHandle<R>, parts: Parts) {
 ///   `ExitRequested { code: Some(_) }` (`AppHandle::exit`, the
 ///   tray "Exit" item) passes, and without a tray nothing is prevented;
 /// - `Exit` (the loop ended: after the tray "Exit" item, and on `WM_ENDSESSION(TRUE)`
-///   through tao): the managed `diag::SessionEnd`, if any, ends the session once
+///   through tao, also the installer's Restart Manager close): first
+///   `call::finalize_on_exit` (a recording call stops with `system_end`; T-145), then the
+///   managed `diag::SessionEnd`, if any, ends the session once
 ///   (marker deleted, one `exited` line; T-024 invariant 2, the only clean end),
 ///   then the managed `dictation::PendingAudio`, if any, deletes its files
 ///   (FR-032, T-209);
@@ -240,6 +242,9 @@ pub fn on_run_event<R: Runtime>(
             }
         }
         RunEvent::Exit => {
+            // T-145 (I1): a recording call is finalized first (`stop(SystemEnd)`, the
+            // delivery gate exiting), so its `call_stopped` line precedes `exited`.
+            call::finalize_on_exit(app);
             if let Some(session_end) = app.try_state::<diag::SessionEnd>() {
                 session_end.end();
             }
@@ -364,7 +369,8 @@ fn release_ports<R: Runtime>(
 /// as the default call root, for the Calls window (T-142) the process's one clipboard
 /// writer (`clipboard`, the dictation's), the Explorer opener and the native save dialog,
 /// and for the pass worker (T-139) the `SettingsService`'s own key store (`credentials`)
-/// and the pass half of the one [`release_detector`] load.
+/// and the pass half of the one [`release_detector`] load; the tray Exit's question is the
+/// system Yes / No box (T-145).
 #[cfg(windows)]
 fn release_call_ports(
     notifier: Arc<dyn Notifier>,
@@ -384,6 +390,7 @@ fn release_call_ports(
         save: Arc::new(win::save_dialog::WinSaveDialog),
         credentials,
         detector,
+        exit_confirm: Arc::new(win::exit_dialog::WinExitConfirm),
     }
 }
 

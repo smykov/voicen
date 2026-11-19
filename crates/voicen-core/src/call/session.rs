@@ -521,14 +521,13 @@ impl CallSession {
     /// and tick stops alike announce it.
     fn notice_stopped(&self, reason: StopReason, dir: &Path) {
         let notice = match reason {
-            StopReason::MaxLength | StopReason::LowDisk | StopReason::StorageError => {
-                CallNotice::Stopped { reason }
+            StopReason::MaxLength
+            | StopReason::LowDisk
+            | StopReason::StorageError
+            | StopReason::Sleep => CallNotice::Stopped { reason },
+            StopReason::User | StopReason::Hotkey | StopReason::Exit | StopReason::SystemEnd => {
+                CallNotice::CallSavedTranscribing
             }
-            StopReason::User
-            | StopReason::Hotkey
-            | StopReason::Exit
-            | StopReason::SystemEnd
-            | StopReason::Sleep => CallNotice::CallSavedTranscribing,
         };
         self.deps.shell.notice(notice);
         self.announce(dir);

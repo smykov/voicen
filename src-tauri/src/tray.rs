@@ -19,10 +19,11 @@
 //! - The main thread never calls a session input: opening the menu stamps the
 //!   instant and hands `DictationSession::tray_menu_opened` to another thread.
 //! - "Settings" posts `settings_window::request(Front)`; "Open logs folder" calls
-//!   `logs_folder::request` (its own thread, T-071); "Exit" calls
-//!   `AppHandle::exit(0)`, the only user exit. "Record" and "Stop" post a
-//!   `call::CallRequest` to the call worker (T-128; nothing without a call part) and
-//!   "Calls" calls `call::open_calls`; "Record" also rebuilds the menu, because muda
+//!   `logs_folder::request` (its own thread, T-071); "Exit" is the only user exit: with
+//!   a call part it posts `CallRequest::Exit` (the call worker ends the loop, after a
+//!   Yes when a call records; T-145), without one it calls `AppHandle::exit(0)`.
+//!   "Record" and "Stop" post a `call::CallRequest` to the call worker (T-128; nothing
+//!   without a call part) and "Calls" calls `call::open_calls`; "Record" also rebuilds the menu, because muda
 //!   flips a check item's native mark on a click and only the table may decide it
 //!   (decision #223).
 //! - Only tauri keeps the `TrayIcon` (in its resources), so tauri's exit cleanup
@@ -551,8 +552,9 @@ pub fn live_menu<R: Runtime>(app: &AppHandle<R>) -> Option<Menu<R>> {
 /// The tray menu's handler (`TrayIconBuilder::on_menu_event`): the item id mapped by
 /// `TrayAction::from_id`; `OpenSettings` posts `settings_window::request(Front)`
 /// and drops the receipt, `OpenLogs` calls `logs_folder::request` (returns at
-/// once), `Exit` calls `app.exit(0)`, any other id does nothing. The call items only
-/// post (T-128; no session lock here): `CallRecord` rebuilds the menu from the table,
+/// once), `Exit` posts `CallRequest::Exit` to the call worker (`call::request_exit`;
+/// T-145) and calls `app.exit(0)` only without a call part, any other id does nothing.
+/// The call items only post (T-128; no session lock here): `CallRecord` rebuilds the menu from the table,
 /// undoing muda's flip of the mark (so a refused start, which publishes no flag, leaves
 /// it unchecked; decision #223), and posts `CallRequest::Record(Tray)`, whose intent the
 /// call worker reads from the session; `CallStop` posts `CallRequest::Stop(Tray)`;
@@ -576,8 +578,17 @@ pub fn on_menu_event<R: Runtime>(app: &AppHandle<R>, event: MenuEvent) {
         }
         Some(TrayAction::OpenLogs) => logs_folder::request(app),
         Some(TrayAction::Retry) => retry(app),
-        Some(TrayAction::Exit) => app.exit(0),
+        Some(TrayAction::Exit) => exit(app),
         None => {}
+    }
+}
+
+/// The tray's Exit (T-145, I3): with a call part the call worker decides (a recording call
+/// asks first, on its own question thread, and the main thread never waits for it);
+/// without one, or with its worker gone, the loop ends here as before.
+fn exit<R: Runtime>(app: &AppHandle<R>) {
+    if !call::request_exit(app) {
+        app.exit(0);
     }
 }
 
