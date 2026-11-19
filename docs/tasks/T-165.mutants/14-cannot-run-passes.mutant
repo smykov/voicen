@@ -1,0 +1,8 @@
+guarantee: exit 3 cannot run is never a pass
+file: scripts/ci/core-test-deadlines.sh
+added_by: test-writer
+--- old
+cannot_run() { echo "core-test-deadlines: cannot run: $1" >&2; exit 3; }
+--- new
+cannot_run() { echo "core-test-deadlines: cannot run: $1" >&2; exit 0; }
+--- end

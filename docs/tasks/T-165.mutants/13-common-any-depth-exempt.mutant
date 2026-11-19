@@ -1,0 +1,8 @@
+guarantee: AC-1/2: only top-level common/ exempt (nested common/ refused)
+file: scripts/ci/core-test-deadlines.sh
+added_by: test-writer
+--- old
+    "$dir"/common/*) continue ;;
+--- new
+    "$dir"/common/*|*/common/*) continue ;;
+--- end

@@ -2,7 +2,7 @@
 .PHONY: check check-shell-layout check-shell-layout-fixtures check-helper-windows-fixtures check-core \
 	check-ci-credentials \
 	check-clippy-lines \
-	check-core-test-os-answer check-webview-data check-ci-wip check-telegram-send check-telegram-failure-branch \
+	check-core-test-os-answer check-core-test-deadlines check-webview-data check-ci-wip check-telegram-send check-telegram-failure-branch \
 	check-version-stamp check-release-check check-release check-release-guard check-nsis-fork check-e2e-entry-fixtures check-area-image-fixtures \
 	check-whisper-cmake-cache check-opus-cmake-cache check-whisper-model-key check-crt-imports check-whisper \
 	check-shell-windows check-ban-canary check-role-tools check-guard-trigger check-wip-push check-wip-run check-contour-busy \
@@ -14,7 +14,7 @@
 # error is reported first by the faster native check-core, before the slower runs.
 check: check-shell-layout check-shell-layout-fixtures check-helper-windows-fixtures check-ci-credentials check-role-tools check-guard-trigger check-wip-push check-wip-run check-contour-busy \
 	check-clippy-lines \
-	check-core-test-os-answer check-webview-data check-ci-wip check-telegram-send check-telegram-failure-branch check-version-stamp check-release-check check-release check-release-guard check-nsis-fork check-whisper-cmake-cache check-opus-cmake-cache check-whisper-model-key check-crt-imports check-core check-whisper \
+	check-core-test-os-answer check-core-test-deadlines check-webview-data check-ci-wip check-telegram-send check-telegram-failure-branch check-version-stamp check-release-check check-release check-release-guard check-nsis-fork check-whisper-cmake-cache check-opus-cmake-cache check-whisper-model-key check-crt-imports check-core check-whisper \
 	check-ban-canary check-shell-windows check-e2e-entry-fixtures check-area-image-fixtures check-ui \
 	licenses-check
 
@@ -124,6 +124,16 @@ check-contour-busy:
 # tests dir. Host bash.
 check-core-test-os-answer:
 	scripts/ci/core-test-os-answer.test.sh
+
+# check-core-test-deadlines (T-165, class os-answer-deadline-race; decides_on: token): no core test
+# outside crates/voicen-core/tests/common builds a product deadline or a timed server plan
+# (`Timeouts {`, `Timeouts::`, `Timeouts as`, `= Timeouts`, `Default::default`, the words Stall,
+# Trickle, SilentHeaders), comments included; the constructors live in tests/common
+# (docs/decisions/core-tests.md). The self-test runs scripts/ci/core-test-deadlines.sh on
+# scripts/ci/fixtures/core-test-deadlines/ and the real tests dir. Host bash. A prerequisite of
+# `check:` since the guard script landed (T-165 implement).
+check-core-test-deadlines:
+	scripts/ci/core-test-deadlines.test.sh
 
 # T-062 (P-020, decides_on: token; docs/decisions/ci-toolchain.md guard table): every webview keeps
 # its WebView2 data under Voicen\webview through the one app-level override
