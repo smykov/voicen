@@ -759,6 +759,9 @@ fn stall_of(markers: &[&str]) -> PwshStall {
     );
     for needle in [
         "stalled",
+        // T-172 (T-057 r3#1, fixed by T-201): F-006 says a stall is reported with the
+        // wait; the message prints it. A regression pin, green from the start.
+        "after a wait of",
         "t057-err before the stall",
         "t057-out before the stall",
     ]
