@@ -1057,14 +1057,15 @@ mutate dispatch-pr-target '{ print } $0 == "  pull_request:" { print "  pull_req
   run "real with pull_request_target added to ci.yml alone [R7]" 1 "$(at "$tmp/dispatch-pr-target/ci.yml" "$(first_hdiff "$tmp/dispatch-pr-target/ci.yml")" R7)" "$tmp/dispatch-pr-target"
 
 # ---- T-206 (decisions #265, #266): the contour's owned scan-and-upload tail ----------------------------
-# The tail of teamwright-agent.yml, from the step 'Stage the session for upload' to the end of the file, is
+# The tail of teamwright-agent.yml, from the step 'Chain: the next stage' (T-230: the chain steps, the keep step and the staging step, all after the owned push fragment) to the end of the file, is
 # a byte-identical copy of scripts/ci/contour-upload.yml (R9, keyed by the basename like R14). The copy is
 # the developer's text, so the dirs below are built at run time from the static base ok-contour plus that
 # copy, and every case that needs the copy says "missing scripts/ci/contour-upload.yml" when it is not
 # there, never a bash error. No tracked file holds a string that matches a secret format: every fake
 # value is assembled here from split literals (the self-test of the scan is the point of the task).
 cu=scripts/ci/contour-upload.yml
-cu_step='      - name: Stage the session for upload'
+cu_step='      - name: "Chain: the next stage"'
+cu_stage='      - name: Stage the session for upload'
 cu_need() { # <label>: 0 (and a FAIL) when the owned copy does not exist yet
   [ -f "$cu" ] && return 1
   echo "FAIL $1: missing $cu (the owned copy of the contour's scan and upload tail; the developer creates it)" >&2
@@ -1134,7 +1135,7 @@ f_ret90() { sed 's/^\( *retention-days:\) 3$/\1 90/'; }
 f_hidden() { awk '{ print } /^ *retention-days: / { print "          include-hidden-files: true" }'; }
 f_path_home() { sed 's|^          path: .*|          path: /root/.claude|'; }
 f_no_scan() { grep -v 'grep'; }
-f_drop_scan() { awk -v t="$cu_step" '$0 == t { s = 1; next } s && /^      - / { s = 0 } !s { print }'; }
+f_drop_scan() { awk -v t="$cu_stage" '$0 == t { s = 1; next } s && /^      - / { s = 0 } !s { print }'; }
 f_key_appended() { cat; echo '          overwrite: true'; }
 f_step_appended() { cat; printf '%s\n' '      - name: Extra' '        run: true'; }
 f_comment_first() { echo '      # a second upload-artifact'; cat; }
@@ -1283,8 +1284,8 @@ expect "real agent: the job env holds RUNS_DIR: /srv/gha-voicen-runs (mounted in
   grep -q -x -F "      RUNS_DIR: /srv/gha-voicen-runs" "$ag"
 expect "real agent: the step '$kp_title' exists once, under if: always()" \
   bash -c '[ "$(grep -c -x -F "$2" "$1")" = 1 ] && grep -q -x -F "        if: always()" <<<"$3"' _ "$ag" "$kp_line" "$(kp_text)"
-expect "real agent: '$kp_title' comes after 'Did the stage commit?' and before the owned tail ('${cu_step#      - name: }')" \
-  bash -c 'c="$(grep -n -m 1 -x -F "      - name: Did the stage commit?" "$1" | cut -d: -f1)"; k="$(grep -n -m 1 -x -F "$2" "$1" | cut -d: -f1)"; t="$(grep -n -m 1 -x -F "$3" "$1" | cut -d: -f1)"; [ -n "$c" ] && [ -n "$k" ] && [ -n "$t" ] && [ "$c" -lt "$k" ] && [ "$k" -lt "$t" ]' _ "$ag" "$kp_line" "$cu_step"
+expect "real agent: '$kp_title' comes after 'Did the stage commit?' and before the staging step ('${cu_stage#      - name: }'; T-230: it is inside the owned tail)" \
+  bash -c 'c="$(grep -n -m 1 -x -F "      - name: Did the stage commit?" "$1" | cut -d: -f1)"; k="$(grep -n -m 1 -x -F "$2" "$1" | cut -d: -f1)"; t="$(grep -n -m 1 -x -F "$3" "$1" | cut -d: -f1)"; [ -n "$c" ] && [ -n "$k" ] && [ -n "$t" ] && [ "$c" -lt "$k" ] && [ "$k" -lt "$t" ]' _ "$ag" "$kp_line" "$cu_stage"
 expect "real agent: '$kp_title' is documented as the runner host's copy (a comment in the step says so)" \
   bash -c 'grep -q -i -E "^ +#.*runner host" <<<"$1"' _ "$(kp_text)"
 expect "real agent: '$kp_title' has a run: body that names RUNS_DIR" \
@@ -1453,6 +1454,140 @@ else
   failed=$((failed + 1))
 fi
 
+# ---- T-230: the token-holding steps after the session pin their own environment; the windows job is bounded ---
+# Seam (analysis drift, T-236): the owned tail now starts at 'Chain: the next stage' (cu_step; the chain steps, the
+# keep step and the staging step), the push step is in the owned fragment contour-push.yml (T-236). Pins are text
+# of those two copies, held by R9 per name. A pin removed from either copy is a guard failure (R9), proven below
+# with the real guard on a changed copy. first_cmd <step text>: the first command of a run: body (comments, blank
+# lines, set and trap lines skipped).
+first_cmd() { awk '/^        run: \|[-+]?$/ { r = 1; next } r && $0 !~ /^ *(#.*)?$/ && $0 !~ /^ *(set|trap) / { sub(/^ */, ""); print; exit }'; }
+fixed_path='export PATH=/usr/local/bin:/usr/bin:/bin'
+bash_env_re='^          BASH_ENV: (""|'"''"')$'
+for pin_title in '"Chain: the next stage"' '"Chain: the stage failed"' 'Stage the session for upload'; do
+  cu_expect "$cu: step $pin_title: BASH_ENV: '' in its env (no startup file named by the session runs in a token-holding step)" \
+    bash -c 'grep -q -E "$3" <<<"$2"' _ "$cu" "$(step_of "$cu" "$pin_title")" "$bash_env_re"
+  cu_expect "$cu: step $pin_title: the first command is '$fixed_path' (fixed PATH before any other command)" \
+    bash -c '[[ "$(sed -E "s/ +$//" <<<"$2")" == "$3" ]]' _ "$cu" "$(step_of "$cu" "$pin_title" | first_cmd)" "$fixed_path"
+done
+for pin_title in '"Chain: the next stage"' '"Chain: the stage failed"'; do
+  cu_expect "$cu: step $pin_title: GH_CONFIG_DIR is a fresh mktemp -d dir, set before the first gh call (no gh config of the session's \$HOME)" \
+    bash -c 'b="$2"; c="$(grep -n -m 1 -E "GH_CONFIG_DIR=.*mktemp -d" <<<"$b" | cut -d: -f1)"; g="$(grep -n -m 1 -E "(^|[^A-Za-z_])gh (issue|workflow|run|api)" <<<"$b" | cut -d: -f1)"; [ -n "$c" ] && { [ -z "$g" ] || [ "$c" -lt "$g" ]; }' _ "$cu" "$(step_of "$cu" "$pin_title")"
+done
+# The push step (owned fragment contour-push.yml): no user or system git config, no user site, an empty template,
+# and the hooks of the dispatched main commit, never those of the pre-session commit (the previous stage's head).
+cp_push() { step_of "$cpf" "Push task/<ID>, and wip/<ID> after implement"; }
+cp_expect "$cpf: push step env: GIT_CONFIG_GLOBAL is /dev/null" grep -q -x -F '          GIT_CONFIG_GLOBAL: /dev/null' "$cpf"
+cp_expect "$cpf: push step env: GIT_CONFIG_NOSYSTEM is 1" grep -q -E '^          GIT_CONFIG_NOSYSTEM: ("1"|1|'"'1'"')$' "$cpf"
+cp_expect "$cpf: push step env: PYTHONNOUSERSITE is set (pre-push runs python3)" grep -q -E '^          PYTHONNOUSERSITE: ("1"|1|'"'1'"')$' "$cpf"
+cp_expect "$cpf: push step: git init uses an empty template (--template=)" \
+  bash -c 'grep -q -E "git init .*--template=( |$)" <<<"$1"' _ "$(cp_push)"
+cp_expect "$cpf: push step: the hooks come from HOOKS_FROM, an env value of \${{ github.sha }} (the dispatched main commit)" \
+  bash -c 'grep -q -x -F "          HOOKS_FROM: \${{ github.sha }}" <<<"$1" && grep -q -F "git archive \"\$HOOKS_FROM\" scripts/hooks" <<<"$1" && grep -q -E "git fetch .*\"\\\$HOOKS_FROM\"" <<<"$1"' _ "$(cp_push)"
+cp_expect "$cpf: push step: the hooks are not the pre-session commit's (no git archive of \$BEFORE) and github.sha is not in the run: body" \
+  bash -c '! grep -q -F "git archive \"\$BEFORE\"" <<<"$1" && [ "$(grep -c -F "github.sha" <<<"$1")" = 1 ]' _ "$(cp_push)"
+cp_expect "$cpf: push step: the session's own pre-push of BEFORE is no longer the hook source (the 'pre-session commit hooks' comment is gone)" \
+  bash -c '! grep -q -i -E "hooks are the pre-session commit" <<<"$1"' _ "$(cp_push)"
+
+# Guard: removing a pin from an owned copy is refused (R9). Each case changes one pin of the real copy and is
+# red until the pin exists (the mutation then does not apply: a FAIL), and, once it exists, until R9 holds the copy.
+mk_cpm() { # <name> <filter...>: base + the filtered push fragment + the unchanged tail
+  local d="$tmp/$1"
+  shift
+  mkdir -p "$d" && cp -p "$fx/ok-contour"/* "$d/" || return 1
+  agent_base "$fx/ok-contour/teamwright-agent.yml" > "$d/teamwright-agent.yml"
+  "$@" < "$cpf" >> "$d/teamwright-agent.yml"
+  cu_tail >> "$d/teamwright-agent.yml"
+}
+vcp() { # <name> <filter...>: the changed push fragment is refused by R9
+  local label="v-contour-push-$1"
+  shift
+  if [ ! -f "$cpf" ] || [ ! -f "$cu" ]; then
+    echo "FAIL $label: missing $cpf or $cu" >&2
+    failed=$((failed + 1))
+    return
+  fi
+  mk_cpm "$label" "$@"
+  if cmp -s "$tmp/$label/teamwright-agent.yml" "$tmp/ok-contour-tail/teamwright-agent.yml"; then
+    echo "FAIL $label: the mutation of the push fragment did not apply (the pin is not in $cpf yet)" >&2
+    failed=$((failed + 1))
+    return
+  fi
+  dcheck "$label" "$tmp/$label"
+}
+f_del() { grep -v -E "$1"; }
+vcp git-config-global-removed f_del '^ +GIT_CONFIG_GLOBAL:'
+vcp git-config-nosystem-removed f_del '^ +GIT_CONFIG_NOSYSTEM:'
+vcp pythonnousersite-removed f_del '^ +PYTHONNOUSERSITE:'
+vcp template-removed sed -E 's/ --template=( |$)/\1/'
+vcp hooks-from-before f_del '^ +HOOKS_FROM:'
+# The tail: the same, per step (one pin of one step at a time; the other steps keep theirs).
+f_del_in() { awk -v t="$1" -v re="$2" '/^      - / { s = ($0 == t) } s && $0 ~ re { next } { print }'; }
+for st in "$cu_stage" "$cu_step" '      - name: "Chain: the stage failed"'; do
+  tag="$(sed -E 's/^      - name: //; s/[^A-Za-z]+/-/g' <<<"$st")"
+  vct "pin-bash-env-removed-$tag" "" f_del_in "$st" '^ +BASH_ENV:'
+  vct "pin-path-removed-$tag" "" f_del_in "$st" '^ +export PATH=/usr/local/bin:/usr/bin:/bin'
+done
+for st in "$cu_step" '      - name: "Chain: the stage failed"'; do
+  tag="$(sed -E 's/^      - name: //; s/[^A-Za-z]+/-/g' <<<"$st")"
+  vct "pin-gh-config-dir-removed-$tag" "" f_del_in "$st" 'GH_CONFIG_DIR'
+done
+cu_expect "real agent: the chain steps, the keep step and the staging step are all inside the owned tail (from '${cu_step#      - name: }')" \
+  bash -c 'for n in "$@"; do grep -q -x -F "      - name: $n" "$0" || exit 1; done' "$cu" '"Chain: the next stage"' '"Chain: the stage failed"' 'Keep the session for analysis' 'Stage the session for upload'
+
+# ---- T-230 R15: the windows job head is an owned literal, with its bound ---------------------------------------
+wh=scripts/ci/windows-head.yml
+wh_first='  windows:'
+wh_end='    steps:'
+wh_expect() { # <label> <expect args...>
+  local l="$1"
+  shift
+  if [ ! -f "$wh" ]; then
+    echo "FAIL $l: missing $wh (the owned copy of the windows job head, from '$wh_first' to its first '$wh_end'; the developer creates it)" >&2
+    failed=$((failed + 1))
+  else
+    expect "$l" "$@"
+  fi
+}
+wh_range() { awk -v a="$wh_first" -v b="$wh_end" '$0 == a { s = 1 } s { print } s && $0 == b { exit }' "$1"; }
+wh_expect "$wh starts with '$wh_first' and its last line is '$wh_end' (the only steps: line)" \
+  bash -c '[ "$(head -n 1 "$1")" = "$2" ] && [ "$(tail -n 1 "$1")" = "$3" ] && [ "$(grep -c -x -F "$3" "$1")" = 1 ]' _ "$wh" "$wh_first" "$wh_end"
+wh_expect "$wh holds the job-level bound '    timeout-minutes: 120' (4x the longest windows job seen in 40 green runs)" grep -q -x -F '    timeout-minutes: 120' "$wh"
+wh_expect "real ci.yml: from '$wh_first' to its first '$wh_end' it is $wh, byte for byte (R15)" \
+  bash -c 'cmp -s <(awk -v a="$3" -v b="$4" "\$0 == a { s = 1 } s { print } s && \$0 == b { exit }" "$1") "$2"' _ "$real/ci.yml" "$wh" "$wh_first" "$wh_end"
+for c in ok-release ok-contour; do
+  wh_expect "fixture $c/ci.yml: the windows head is the owned copy $wh (R15 holds on the ok fixtures)" \
+    bash -c 'cmp -s <(awk -v a="$3" -v b="$4" "\$0 == a { s = 1 } s { print } s && \$0 == b { exit }" "$1") "$2"' _ "$fx/$c/ci.yml" "$wh" "$wh_first" "$wh_end"
+done
+# AC 1: every step that runs cargo test has its own timeout-minutes of at most 30 (a hang is bounded by the step).
+cargo_bounded() { # <ci.yml>: at least two cargo test steps, each with its own timeout-minutes of 1 to 30
+  awk '
+    function chk(   m) {
+      if (blk ~ /cargo test/) {
+        n++
+        if (match(blk, /\n        timeout-minutes: [0-9]+(\n|$)/)) {
+          m = substr(blk, RSTART, RLENGTH); gsub(/[^0-9]/, "", m)
+          if (m + 0 < 1 || m + 0 > 30) bad++
+        } else bad++
+      }
+    }
+    /^      - / { chk(); blk = "" }
+    { blk = blk "\n" $0 }
+    END { chk(); exit !(n >= 2 && bad == 0) }' "$1"
+}
+expect "real ci.yml: at least two cargo test steps, each with its own timeout-minutes of 1 to 30 (a hang turns the run red within the bound)" cargo_bounded "$real/ci.yml"
+cpw() { # <name>: $tmp/<name> = the real workflows dir
+  mkdir -p "$tmp/$1" && cp -p "$real"/* "$tmp/$1/"
+}
+r15() { # <name> <label> <awk body over the windows job (inwin)>: the mutated ci.yml is refused by R15
+  if mutate "$1" "$3"; then
+    run "$2 [R15]" 1 'ci\.yml:[0-9]+: R15' "$tmp/$1"
+  fi
+}
+r15 win-bound-removed "real with the windows job's timeout-minutes removed" 'inwin && /^    timeout-minutes: / { next } { print }'
+r15 win-bound-360 "real with the windows job's timeout-minutes raised to 360" 'inwin && /^    timeout-minutes: / { $0 = "    timeout-minutes: 360" } { print }'
+r15 win-bound-comment "real with a comment added in the windows job head" 'inwin && /^    runs-on: / { print "    # head byte"; } { print }'
+r15 win-job-renamed "real with the windows job renamed (no line '  windows:': R15)" '/^  windows:[ \t]*$/ { $0 = "  winbuild:" } { print }'
+r15 win-job-twice "real with a second line '  windows:' (R15)" '/^jobs:$/ { print; print "  windows:"; print "    runs-on: x"; print "    steps: []"; next } { print }'
 # ---- (a) the scan step, run: its run: body extracted from the owned copy and executed ---------------
 # sc_prep reads the step 'Stage the session for upload' of the copy: its run: body, its env: (name: value
 # lines) and its shell:. The env values are the fakes below: the expression of secrets.CLAUDE_CODE_OAUTH_TOKEN
@@ -1468,22 +1603,22 @@ sc_prep() {
       sc_err="missing $cu (the owned copy of the contour's scan and upload tail; the developer creates it)"
     else
       mkdir -p "$tmp/sc/shim"
-      awk -v t="$cu_step" '
+      awk -v t="$cu_stage" '
         $0 == t { s = 1; next }
         s && /^      - / { exit }
         s && !r { if ($0 ~ /^        run: \|[-+]?$/) r = 1; next }
         s && r { if ($0 ~ /^          /) print substr($0, 11); else if ($0 ~ /^ *$/) print ""; else exit }' "$cu" > "$tmp/sc/body.sh"
-      awk -v t="$cu_step" '
+      awk -v t="$cu_stage" '
         $0 == t { s = 1; next }
         s && /^      - / { exit }
         s && $0 == "        env:" { e = 1; next }
         s && e { if ($0 ~ /^          [A-Za-z_][A-Za-z0-9_]*:/) { sub(/^          /, ""); print } else if ($0 ~ /^ *#/ || $0 ~ /^ *$/) next; else e = 0 }' "$cu" > "$tmp/sc/env.txt"
-      awk -v t="$cu_step" '
+      awk -v t="$cu_stage" '
         $0 == t { s = 1; next }
         s && /^      - / { exit }
         s && /^        shell: / { sub(/^        shell: /, ""); print; exit }' "$cu" > "$tmp/sc/shell.txt"
       if [ ! -s "$tmp/sc/body.sh" ]; then
-        sc_err="$cu: no step '${cu_step#      - name: }' with a 'run: |' body"
+        sc_err="$cu: no step '${cu_stage#      - name: }' with a 'run: |' body"
       elif ! grep -q -F 'secrets.CLAUDE_CODE_OAUTH_TOKEN' "$tmp/sc/env.txt"; then
         sc_err="$cu: the scan step's env: holds no \${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }} value"
       elif ! grep -q -F 'github.token' "$tmp/sc/env.txt"; then
@@ -2448,7 +2583,8 @@ cguard() {
   mkdir -p "$tmp/$1/contour-heads"
   if ! cp -p "$real_guard" scripts/ci/release-job.yml scripts/ci/release-header.yml "$upl" "$tgs" "$alines" "$tmp/$1/" ||
      ! cp -pR "$csd" "$tmp/$1/" || { [ -f "$cu" ] && ! cp -p "$cu" "$tmp/$1/"; } ||
-     { [ -f "$cpf" ] && ! cp -p "$cpf" "$tmp/$1/"; }; then
+     { [ -f "$cpf" ] && ! cp -p "$cpf" "$tmp/$1/"; } ||
+     { [ -f "$wh" ] && ! cp -p "$wh" "$tmp/$1/"; }; then
     echo "FAIL $1: cannot copy the guard and its owned copies (fix the test)" >&2
     failed=$((failed + 1))
     return 1
@@ -2521,6 +2657,30 @@ else
   echo "FAIL cannot-run cases of contour-push.yml: missing $cpf (the developer creates it)" >&2
   failed=$((failed + 1))
 fi
+# T-230: the owned copy windows-head.yml (R15) is a guard input too (preamble: cannot run, exit 3).
+wcan() { # <name> <label>: the guard next to a broken $wh is exit 3 naming windows-head
+  guard="$tmp/$1/release-guard.sh"
+  run "$2" 3 'cannot run.*windows-head' "$real"
+  guard="$real_guard"
+}
+if [ -f "$wh" ]; then
+  if cguard g-wh-missing; then
+    rm -f "$tmp/g-wh-missing/windows-head.yml"
+    wcan g-wh-missing "cannot run: owned copy windows-head.yml missing"
+  fi
+  if cguard g-wh-empty; then
+    : > "$tmp/g-wh-empty/windows-head.yml"
+    wcan g-wh-empty "cannot run: owned copy windows-head.yml empty"
+  fi
+  if cguard g-wh-no-steps; then
+    sed -i '$d' "$tmp/g-wh-no-steps/windows-head.yml"
+    wcan g-wh-no-steps "cannot run: owned copy windows-head.yml does not end in its only '    steps:' line"
+  fi
+else
+  echo "FAIL cannot-run cases of windows-head.yml: missing $wh (the developer creates it)" >&2
+  failed=$((failed + 1))
+fi
+
 if cguard g-contour-no-files; then
   rm -rf "$tmp/g-contour-no-files/contour-heads"
   guard="$tmp/g-contour-no-files/release-guard.sh"
