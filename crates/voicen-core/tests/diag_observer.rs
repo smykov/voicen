@@ -1249,10 +1249,14 @@ fn every_post_processing_result_reaches_its_line_and_none_gives_no_pp_key() {
             ],
         ),
         (
-            trace(PostProcessResult::Skipped(SkipKind::Http), 9),
+            trace(
+                PostProcessResult::Skipped(SkipKind::Http { status: 503 }),
+                9,
+            ),
             vec![
                 ("pp", "skipped".to_string()),
                 ("pp_reason", "http".to_string()),
+                ("pp_http_status", "503".to_string()),
                 ("pp_ms", s(9)),
             ],
         ),
@@ -1406,7 +1410,10 @@ fn interleaved_jobs_keep_their_own_trace() {
             OutcomeCode::Text,
             None,
             None,
-            trace(PostProcessResult::Skipped(SkipKind::Http), 250),
+            trace(
+                PostProcessResult::Skipped(SkipKind::Http { status: 429 }),
+                250,
+            ),
         ),
         finished_pp(
             2,
@@ -1431,6 +1438,12 @@ fn interleaved_jobs_keep_their_own_trace() {
     };
     assert_eq!(get(a, "pp").as_deref(), Some("skipped"), "{lines:#?}");
     assert_eq!(get(a, "pp_reason").as_deref(), Some("http"), "{lines:#?}");
+    assert_eq!(
+        get(a, "pp_http_status").as_deref(),
+        Some("429"),
+        "{lines:#?}"
+    );
+    assert_eq!(get(b, "pp_http_status"), None, "{lines:#?}");
     assert_eq!(get(a, "pp_ms").as_deref(), Some("250"), "{lines:#?}");
     assert_eq!(get(b, "pp").as_deref(), Some("off"), "{lines:#?}");
     assert_eq!(get(b, "pp_reason"), None, "{lines:#?}");

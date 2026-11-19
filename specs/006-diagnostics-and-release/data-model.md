@@ -70,7 +70,7 @@ T-008 shipped `DictationLine`, which `LogObserver` aggregates per `RecordingId` 
 | `stop_to_text_ms` | `Option<u64>` | `JobFinished` | T-008 |
 | `text_to_paste_ms` | `Option<u64>` | `Delivered` | T-008 |
 | `model` | — | — | not logged (T-008 Q1, decision #64; no `ModelName`) |
-| `post_processing` | `Option<PostProcessTrace>` (`events::PostProcessTrace { result: Off \| Applied \| Skipped(SkipKind), ms }`), written `pp=<off\|applied\|skipped>`, `pp_reason=<timeout\|unreachable\|invalid_key\|http\|invalid_response\|not_configured>` on a skip, `pp_ms=<n>` on applied / skipped; absent (no `pp*` key) when the job never called the stage | `JobFinished.post_processing` | T-076 |
+| `post_processing` | `Option<PostProcessTrace>` (`events::PostProcessTrace { result: Off \| Applied \| Skipped(SkipKind), ms }`), written `pp=<off\|applied\|skipped>`, `pp_reason=<timeout\|unreachable\|invalid_key\|http\|invalid_response\|not_configured>` on a skip, `pp_http_status=<u16>` right after `pp_reason=` exactly on `pp_reason=http` (`SkipKind::Http { status: u16 }`, T-190), `pp_ms=<n>` on applied / skipped; absent (no `pp*` key) when the job never called the stage | `JobFinished.post_processing` | T-076, T-190 |
 | `local`, `load_ms` | `Option<Warmth>` (`local_models::residency::Warmth { Cold { load_ms } \| Warm }`), written `local=cold load_ms=<n>` / `local=warm`; only on `engine=builtin` (absent otherwise, and absent when the built-in job failed before the model was acquired, e.g. `no_local_model`); `load_ms` exactly on `cold` | `JobFinished.local` | as built (T-098) |
 
 ## LogWriter state

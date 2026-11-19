@@ -604,6 +604,8 @@ struct PpScenario {
     /// `pp=`, `pp_reason=`; `pp_ms=` is required exactly for applied / skipped.
     pp: Option<&'static str>,
     pp_reason: Option<&'static str>,
+    /// `pp_http_status=` (T-190): the status integer, exactly on `pp_reason=http`.
+    pp_http_status: Option<&'static str>,
     /// pp_ms is at least this (the chat's delay or the stage's deadline).
     pp_ms_at_least: Duration,
 }
@@ -634,6 +636,7 @@ async fn post_processing_outcome_is_logged_without_prompt_reply_host_or_key() {
     let chat_delay = Duration::from_millis(5_500);
     let chat_ok = chat_with(chat_reply(PP_REPLY).set_delay(chat_delay)).await;
     let chat_500 = chat_with(ResponseTemplate::new(500).set_body_string(echo.clone())).await;
+    let chat_429 = chat_with(ResponseTemplate::new(429).set_body_string(echo.clone())).await;
     let chat_401 = chat_with(ResponseTemplate::new(401).set_body_string(echo.clone())).await;
     let chat_bad =
         chat_with(ResponseTemplate::new(200).set_body_json(json!({ "choices": [], "echo": echo })))
@@ -664,6 +667,7 @@ async fn post_processing_outcome_is_logged_without_prompt_reply_host_or_key() {
             outcome: "delivered",
             pp: Some("applied"),
             pp_reason: None,
+            pp_http_status: None,
             pp_ms_at_least: chat_delay,
         },
         PpScenario {
@@ -676,6 +680,20 @@ async fn post_processing_outcome_is_logged_without_prompt_reply_host_or_key() {
             outcome: "delivered",
             pp: Some("skipped"),
             pp_reason: Some("http"),
+            pp_http_status: Some("500"),
+            pp_ms_at_least: zero,
+        },
+        PpScenario {
+            label: "skipped http 429",
+            settings: pp_settings(&api, true, &pp_base(&chat_429)),
+            timeouts: t,
+            clipboard_fails: false,
+            end: skipped(SkipReason::Http { status: 429 }),
+            clipboard: Some(TRANSCRIPT),
+            outcome: "delivered",
+            pp: Some("skipped"),
+            pp_reason: Some("http"),
+            pp_http_status: Some("429"),
             pp_ms_at_least: zero,
         },
         PpScenario {
@@ -688,6 +706,7 @@ async fn post_processing_outcome_is_logged_without_prompt_reply_host_or_key() {
             outcome: "delivered",
             pp: Some("skipped"),
             pp_reason: Some("invalid_key"),
+            pp_http_status: None,
             pp_ms_at_least: zero,
         },
         PpScenario {
@@ -700,6 +719,7 @@ async fn post_processing_outcome_is_logged_without_prompt_reply_host_or_key() {
             outcome: "delivered",
             pp: Some("skipped"),
             pp_reason: Some("invalid_response"),
+            pp_http_status: None,
             pp_ms_at_least: zero,
         },
         PpScenario {
@@ -712,6 +732,7 @@ async fn post_processing_outcome_is_logged_without_prompt_reply_host_or_key() {
             outcome: "delivered",
             pp: Some("skipped"),
             pp_reason: Some("timeout"),
+            pp_http_status: None,
             pp_ms_at_least: pp_deadline,
         },
         PpScenario {
@@ -724,6 +745,7 @@ async fn post_processing_outcome_is_logged_without_prompt_reply_host_or_key() {
             outcome: "delivered",
             pp: Some("skipped"),
             pp_reason: Some("not_configured"),
+            pp_http_status: None,
             pp_ms_at_least: zero,
         },
         PpScenario {
@@ -738,6 +760,7 @@ async fn post_processing_outcome_is_logged_without_prompt_reply_host_or_key() {
             outcome: "delivered",
             pp: Some("skipped"),
             pp_reason: Some("unreachable"),
+            pp_http_status: None,
             pp_ms_at_least: zero,
         },
         PpScenario {
@@ -750,6 +773,7 @@ async fn post_processing_outcome_is_logged_without_prompt_reply_host_or_key() {
             outcome: "delivered",
             pp: Some("off"),
             pp_reason: None,
+            pp_http_status: None,
             pp_ms_at_least: zero,
         },
         PpScenario {
@@ -762,6 +786,7 @@ async fn post_processing_outcome_is_logged_without_prompt_reply_host_or_key() {
             outcome: "failed",
             pp: Some("applied"),
             pp_reason: None,
+            pp_http_status: None,
             pp_ms_at_least: chat_delay,
         },
         PpScenario {
@@ -774,6 +799,7 @@ async fn post_processing_outcome_is_logged_without_prompt_reply_host_or_key() {
             outcome: "failed",
             pp: None,
             pp_reason: None,
+            pp_http_status: None,
             pp_ms_at_least: zero,
         },
     ];
@@ -833,6 +859,7 @@ async fn post_processing_outcome_is_logged_without_prompt_reply_host_or_key() {
     );
     for (server, label) in [
         (&chat_500, "500"),
+        (&chat_429, "429"),
         (&chat_401, "401"),
         (&chat_bad, "bad body"),
     ] {
@@ -860,6 +887,10 @@ async fn post_processing_outcome_is_logged_without_prompt_reply_host_or_key() {
         assert_eq!(l.get("engine"), Some("api"), "{ctx}");
         assert_eq!(l.get("pp"), sc.pp, "{ctx}");
         assert_eq!(l.get("pp_reason"), sc.pp_reason, "{ctx}");
+        // T-190: the status integer exactly on pp_reason=http, the value the chat
+        // endpoint answered; no other pp_http_status anywhere (a timeout, a refused
+        // connection, a 401, a 2xx with a bad body, off, applied, no trace).
+        assert_eq!(l.get("pp_http_status"), sc.pp_http_status, "{ctx}");
         let timed = matches!(sc.pp, Some("applied" | "skipped"));
         assert_eq!(l.get("pp_ms").is_some(), timed, "pp_ms presence: {ctx}");
         if let Some(pp_ms) = l.get("pp_ms") {

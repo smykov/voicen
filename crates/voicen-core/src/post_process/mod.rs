@@ -88,14 +88,14 @@ impl SkipReason {
         }
     }
 
-    /// The closed kind for the log (T-076): the reason without its host or
-    /// status.
+    /// The closed kind for the log (T-076): the reason without its host; `Http`
+    /// keeps its status code (T-190, `pp_http_status=`).
     pub fn kind(&self) -> SkipKind {
         match self {
             SkipReason::Timeout => SkipKind::Timeout,
             SkipReason::Unreachable { .. } => SkipKind::Unreachable,
             SkipReason::InvalidKey => SkipKind::InvalidKey,
-            SkipReason::Http { .. } => SkipKind::Http,
+            SkipReason::Http { status } => SkipKind::Http { status: *status },
             SkipReason::InvalidResponse => SkipKind::InvalidResponse,
             SkipReason::NotConfigured => SkipKind::NotConfigured,
         }
@@ -242,17 +242,18 @@ mod tests {
 
     #[test]
     fn skip_kind_is_the_closed_copy_of_the_reason() {
-        // T-076: the log gets SkipReason::kind(), a Copy closed enum without the host
-        // or the status, one kind per reason, spelled like code() (the pp_reason
-        // literals). Bite: a shared kind, a kind that depends on the host or the
-        // status, a kind that disagrees with code().
+        // T-076: the log gets SkipReason::kind(), a Copy closed enum without the
+        // host, one kind per reason, spelled like code() (the pp_reason literals);
+        // T-190: Http keeps exactly its status. Bite: a shared kind, a kind that
+        // depends on the host, a lost or constant status, a kind that disagrees
+        // with code().
         use crate::events::SkipKind;
         fn literal(kind: SkipKind) -> &'static str {
             match kind {
                 SkipKind::Timeout => "timeout",
                 SkipKind::Unreachable => "unreachable",
                 SkipKind::InvalidKey => "invalid_key",
-                SkipKind::Http => "http",
+                SkipKind::Http { .. } => "http",
                 SkipKind::InvalidResponse => "invalid_response",
                 SkipKind::NotConfigured => "not_configured",
             }
@@ -276,7 +277,7 @@ mod tests {
         for status in [100, 404, 500, u16::MAX] {
             assert_eq!(
                 SkipReason::Http { status }.kind(),
-                SkipKind::Http,
+                SkipKind::Http { status },
                 "{status}"
             );
         }

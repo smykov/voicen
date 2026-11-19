@@ -55,7 +55,7 @@ Spec: `specs/003-llm-post-processing/` (contracts/core-post-process.md, data-mod
 ### Nothing secret in a skip
 
 - **Why:** FR-014, P-009.
-- **Where it is enforced:** `SkipReason` holds only `host[:port]` (`engine::openai::host_port` of the configured base URL) or a status; never the error text, URL query, body, prompt, transcript or key. The log gets less: only `SkipReason::kind()` (`events::SkipKind`, no host, no status) inside the `Copy` `events::PostProcessTrace` that `Pipeline::process` builds around its one call of the stage and puts on `JobFinished` (T-076): `pp=<off|applied|skipped> [pp_reason=<kind>] [pp_ms=<n>]` on the dictation line (`docs/decisions/diagnostics-log.md`).
+- **Where it is enforced:** `SkipReason` holds only `host[:port]` (`engine::openai::host_port` of the configured base URL) or a status; never the error text, URL query, body, prompt, transcript or key. The log gets less: only `SkipReason::kind()` (`events::SkipKind`, no host; `Http` carries only the `u16` status code, T-190) inside the `Copy` `events::PostProcessTrace` that `Pipeline::process` builds around its one call of the stage and puts on `JobFinished` (T-076): `pp=<off|applied|skipped> [pp_reason=<kind>] [pp_http_status=<code>, only with pp_reason=http] [pp_ms=<n>]` on the dictation line (`docs/decisions/diagnostics-log.md`).
 
 ### One overlay message per skip (decision #91(3))
 

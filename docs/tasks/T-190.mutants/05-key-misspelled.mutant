@@ -1,0 +1,8 @@
+guarantee: AC-1: the key is pp_http_status, next to pp_reason
+file: crates/voicen-core/src/diag/format.rs
+added_by: test-writer
+--- old
+                    pair(out, "pp_http_status", status);
+--- new
+                    pair(out, "http_status", status);
+--- end

@@ -1471,7 +1471,7 @@ mod tests {
             ),
             (
                 PostProcessOutcome::Skipped(SkipReason::Http { status: 502 }),
-                PostProcessResult::Skipped(SkipKind::Http),
+                PostProcessResult::Skipped(SkipKind::Http { status: 502 }),
             ),
             (
                 PostProcessOutcome::Skipped(SkipReason::InvalidResponse),
