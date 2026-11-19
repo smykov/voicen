@@ -1,0 +1,1 @@
+cargo test -p voicen-core -j2 --test dictation_session -- overlapping_dictations_are_delivered_each_to_its_own_window_in_order a_failing_first_dictation_does_not_block_the_queued_second a_no_speech_first_dictation_leaves_the_order_without_blocking_the_second

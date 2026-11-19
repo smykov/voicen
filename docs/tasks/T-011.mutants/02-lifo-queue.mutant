@@ -1,0 +1,17 @@
+guarantee: AC-1: A then B, delivered in recording order (FIFO, not LIFO among the queued jobs)
+file: crates/voicen-core/src/dictation.rs
+added_by: test-writer
+--- old
+    while let Ok(job) = jobs.recv() {
+--- new
+    let mut stack: Vec<Job> = Vec::new();
+    while let Some(job) = {
+        if stack.is_empty() {
+            if let Ok(first) = jobs.recv() {
+                stack.push(first);
+            }
+        }
+        stack.extend(jobs.try_iter());
+        stack.pop()
+    } {
+--- end
