@@ -8,6 +8,7 @@ areas:
     runner: docker
     image: "voicen-rust:1.99"        # built from docker/rust.Dockerfile (official rust:1.99-bookworm + cmake, clang); `make core-image`
     cache: ["/usr/local/cargo/registry", "/usr/local/cargo/git"]
+    shared_cache: ["/tw-sccache"]    # one sccache dir for every tree (T-217, decisions #304): mounted from <main>/.teamwright/cache/core/shared/_tw-sccache only when it exists
     test_command: "cargo test -p voicen-core"
     ci_workflow: ci.yml
     lint_command: "cargo fmt --check -p voicen-core && cargo clippy -p voicen-core --all-targets -- -D warnings"
