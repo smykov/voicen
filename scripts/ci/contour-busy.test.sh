@@ -174,14 +174,18 @@ if [ "$(grep -c . <<<"$defs")" = 1 ] && grep -q -E "^$nx:[0-9]+:      MAX_PARALL
 else
   fail "MAX_PARALLEL is set exactly once in .github/workflows, a positive integer in the job env of teamwright-next.yml" "$defs"
 fi
-for p in "teamwright-agent.yml:teamwright-agent" "teamwright-next.yml:teamwright-next"; do
-  cn="${p%%:*}" g="${p#*:}"
+# T-231: the dispatcher's group falls back to the Issue number for a label run (the relay job dispatches hop 0, so
+# every hop of a task is in teamwright-next-<ID>); the agent's group is unchanged.
+for p in "teamwright-agent.yml:teamwright-agent:\${{ inputs.task_id }}" \
+  "teamwright-next.yml:teamwright-next:\${{ inputs.task_id || format('issue-{0}', github.event.issue.number) }}"; do
+  cn="${p%%:*}"
+  rest="${p#*:}" g="${rest%%:*}" expr="${rest#*:}"
   h="$chd/$cn"
-  if [ -f "$h" ] && [ "$(grep -c -x -F "  group: $g-\${{ inputs.task_id }}" "$h")" = 1 ] &&
+  if [ -f "$h" ] && [ "$(grep -c -x -F "  group: $g-$expr" "$h")" = 1 ] &&
     [ "$(grep -c -E '^  group:' "$h")" = 1 ] && grep -q -x -F '  cancel-in-progress: false' "$h"; then
-    pass "owned head $cn holds the per-task group $g-\${{ inputs.task_id }}, cancel-in-progress false"
+    pass "owned head $cn holds the per-task group $g-$expr, cancel-in-progress false"
   else
-    fail "owned head $cn holds the per-task group $g-\${{ inputs.task_id }}, cancel-in-progress false"
+    fail "owned head $cn holds the per-task group $g-$expr, cancel-in-progress false"
   fi
 done
 if grep -q -x -F 'run-name: "teamwright agent ${{ inputs.task_id }} ${{ inputs.stage }} (hop ${{ inputs.hop }})"' "$ag" 2>/dev/null; then
