@@ -574,8 +574,9 @@ pub fn run() {
     )
     .ok();
     // The call part (T-128), after the tray exists: the one call session, its request
-    // worker and its tick thread. It starts no call; a failed start leaves the call
-    // entries no-ops. The first launch's `--call` switch is applied after it.
+    // worker and its tick thread. It starts no call; a failed start is logged where it
+    // failed (`call_start_failed`, T-220) and leaves the call entries no-ops. The first
+    // launch's `--call` switch is applied after it.
     let _ = call::start_calls(
         app.handle(),
         release_call_ports(
