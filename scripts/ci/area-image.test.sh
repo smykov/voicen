@@ -329,6 +329,12 @@ out="$(mk check-ui)"; got=$?; err=""
 if ! grep -qE 'scripts/e2e\.sh .*--workers=2( |$)' <<<"$out"; then fail "$c" "the e2e line has no --workers=2"
 else ok "$c"; fi
 
+c="the default-workers case ignores an outer make's WORKERS"
+out="$(MAKEFLAGS=' -- WORKERS=1' MAKEOVERRIDES='WORKERS=1' WORKERS=1 mk check-ui)"; got=$?; err=""
+if ! grep -qE 'scripts/e2e\.sh .*--workers=2( |$)' <<<"$out"; then fail "$c" "an outer make's WORKERS reached the nested make: no --workers=2"
+elif grep -q -- '--workers=1' <<<"$out"; then fail "$c" "--workers=1 leaked from the caller's make state"
+else ok "$c"; fi
+
 c="make check-ui WORKERS=1 overrides the worker count"
 out="$(mk check-ui WORKERS=1)"; got=$?; err=""
 if ! grep -qE 'scripts/e2e\.sh .*--workers=1( |$)' <<<"$out"; then fail "$c" "the e2e line has no --workers=1"
