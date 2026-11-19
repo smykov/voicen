@@ -1297,6 +1297,159 @@ expect "real agent: '$kp_title' holds no token (no github.token, GH_TOKEN, GITHU
 expect "real agent: the tail steps come after 'Did the stage commit?' (the job token appears only there)" \
   bash -c 'c="$(grep -n -m 1 -x -F "      - name: Did the stage commit?" "$1" | cut -d: -f1)"; s="$(grep -n -m 1 -x -F "$2" "$1" | cut -d: -f1)"; [ -n "$c" ] && [ -n "$s" ] && [ "$s" -gt "$c" ]' _ "$ag" "$cu_step"
 
+# ---- T-236 (rca, recurrence of T-217 T-171 T-165 T-130 T-145): the contour's owned push fragment -------------
+# contour: a timed-out stage still pushes its commits and keeps its uncommitted diff. The post-session steps of
+# teamwright-agent.yml, from 'Did the stage commit?' through the line before 'Chain: the next stage' (the count,
+# the push and the uncommitted-patch step), are a byte-identical copy of scripts/ci/contour-push.yml, and no
+# condition of them names steps.claude: a stage that ends by timeout, failure or cancel still pushes task/<ID>
+# and keeps its dirty tree as $OUT/uncommitted.patch. wip/<ID> stays behind the session outcome, inside the step.
+cpf=scripts/ci/contour-push.yml
+cpf_first='      - name: Did the stage commit?'
+cpf_next='      - name: "Chain: the next stage"'
+cp_expect() { # <label> <expect args...>
+  local l="$1"
+  shift
+  if [ ! -f "$cpf" ]; then
+    echo "FAIL $l: missing $cpf (the owned copy of the contour's count, push and uncommitted-patch steps; the developer creates it)" >&2
+    failed=$((failed + 1))
+  else
+    expect "$l" "$@"
+  fi
+}
+# cp_steps <file>: the steps of a fragment, one per block, separated by a line holding only "@@@@".
+cp_steps() { awk '/^      - name: / && n++ { print "@@@@" } { print }' "$1"; }
+# cp_step_of <file> <fixed text>: the one step block of the file that holds the text.
+cp_step_of() { cp_steps "$1" | awk -v t="$2" 'BEGIN { RS = "@@@@\n" } index($0, t) { printf "%s", $0 }'; }
+cp_ag_range() { awk -v a="$cpf_first" -v b="$cpf_next" '$0 == a { s = 1 } $0 == b { s = 0 } s { print }' "$ag"; }
+
+cp_expect "$cpf starts with the step line '$cpf_first'" test "$(head -n 1 "$cpf")" = "$cpf_first"
+cp_expect "$cpf ends before the chain step: it does not hold '$cpf_next'" bash -c '! grep -q -x -F "$2" "$1"' _ "$cpf" "$cpf_next"
+cp_expect "real agent: from the line '$cpf_first' to the line before '$cpf_next' it is $cpf, byte for byte" \
+  bash -c 'cmp -s <(awk -v a="$3" -v b="$4" "\$0 == a { s = 1 } \$0 == b { s = 0 } s { print }" "$1") "$2"' _ "$ag" "$cpf" "$cpf_first" "$cpf_next"
+cp_expect "real agent: the owned fragment is non-empty in the workflow (a deleted range does not pass)" test -n "$(cp_ag_range)"
+cp_expect "$cpf: three steps (the count, the push, the uncommitted patch), each under an if: that starts with always()" \
+  bash -c 'n="$(grep -c -E "^      - name: " "$1")"; i="$(grep -c -E "^        if: always\(\)( |$)" "$1")"; [ "$n" -ge 3 ] && [ "$n" = "$i" ]' _ "$cpf"
+# The token: no if: line of the fragment names the session outcome (a timed-out stage is not 'success').
+cp_expect "$cpf: no if: line names steps.claude (a timed-out or failed stage still counts, pushes and keeps)" \
+  bash -c '! grep -E "^ *if:" "$1" | grep -q -F "steps.claude"' _ "$cpf"
+cp_expect "$cpf: the count step counts BEFORE..HEAD and the push step runs only when the count is not 0" \
+  bash -c 'grep -q -F "git rev-list --count \"\$BEFORE..HEAD\"" "$1" && grep -q -x -F "        if: always() && steps.commits.outputs.count != '"'"'0'"'"'" "$1"' _ "$cpf"
+# wip/<ID> stays behind the session outcome: the outcome reaches the push step through an env var, and the
+# wip push sits in an if whose condition holds both the implement stage and that variable.
+cp_expect "$cpf: the session outcome reaches the push step as an env value (steps.claude.outcome on an env: line only)" \
+  bash -c '[ "$(grep -c -F "steps.claude" "$1")" = 1 ] && grep -q -E "^ +[A-Z_]*OUTCOME: \\$\{\{ steps\.claude\.outcome \}\}$" "$1"' _ "$cpf"
+cp_expect "$cpf: the wip/<ID> push is inside an if on the stage implement and the session outcome being success" \
+  bash -c 'v="$(grep -E "^ +[A-Z_]*OUTCOME: \\$\{\{ steps\.claude\.outcome \}\}$" "$1" | sed -E "s/^ +([A-Z_]*OUTCOME):.*/\1/")"; [ -n "$v" ] || exit 1
+    awk -v v="$v" "/^ *if \\[.*then\$/ { c = \$0 } /refs\\/heads\\/wip\\// { if (c ~ /implement/ && c ~ v && c ~ /success/) ok = 1; else bad = 1 } END { exit !(ok && !bad) }" "$1"' _ "$cpf"
+cp_expect "$cpf: the push of task/<ID> is not inside any if on the session outcome (it runs on every ending)" \
+  bash -c 'v="$(grep -E "^ +[A-Z_]*OUTCOME: " "$1" | sed -E "s/^ +([A-Z_]*OUTCOME):.*/\1/")"; [ -n "$v" ] || exit 1
+    awk -v v="$v" "/^ *if .*; then\$/ { d++; o[d] = (index(\$0, v) > 0) } /^ *fi\$/ { o[d] = 0; d-- } /refs\\/heads\\/task\\// && /push/ { f = 1; for (i = 1; i <= d; i++) if (o[i]) f = 2 } END { exit f != 1 }" "$1"' _ "$cpf"
+cp_expect "$cpf: the pause and the pre-push hooks still apply (TEAMWRIGHT_CONTOUR_PAUSE exit, hooks of the pre-session commit, one-shot token header)" \
+  bash -c 'grep -q -F "TEAMWRIGHT_CONTOUR_PAUSE" "$1" && grep -q -F "core.hooksPath=\"\$hooks/scripts/hooks\"" "$1" && grep -q -F "GIT_CONFIG_KEY_0=http.https://github.com/.extraheader" "$1" && grep -q -F "git archive \"\$BEFORE\" scripts/hooks" "$1"' _ "$cpf"
+# The uncommitted-patch step: in the fragment, a temp index, never the session's index, no push, no token.
+cp_patch() { cp_step_of "$cpf" 'uncommitted.patch'; }
+cp_expect "$cpf: one step writes uncommitted.patch into \$OUT, with a temp index (GIT_INDEX_FILE), git add -A and git diff --cached --binary HEAD" \
+  bash -c '[ "$(grep -c -F "uncommitted.patch" "$1")" -ge 1 ] && p="$2" && grep -q -F "GIT_INDEX_FILE" <<<"$p" && grep -q -F "git add -A" <<<"$p" && grep -q -F "git diff --cached --binary HEAD" <<<"$p" && grep -q -F "\$OUT" <<<"$p"' _ "$cpf" "$(cp_patch)"
+cp_expect "$cpf: the patch step holds no push, no token and no network (git push, PUSH_TOKEN, github.token, secrets., gh )" \
+  bash -c 'p="$1"; [ -n "$p" ] && ! grep -q -E "git .*push|PUSH_TOKEN|github\.token|GH_TOKEN|secrets\.|(^|[^a-z])gh |curl|git fetch" <<<"$p"' _ "$(cp_patch)"
+cp_expect "$cpf: the patch step has no silent failure ('|| true', '2>/dev/null' on git, a final exit 0)" \
+  bash -c 'p="$1"; [ -n "$p" ] && ! grep -E "(^|[^a-z])git " <<<"$p" | grep -q -E "\|\| *(true|:|exit 0)|2> */dev/null|&> */dev/null" && [ "$(grep -v -E "^ *(#.*)?$" <<<"$p" | tail -n 1 | sed "s/^ *//")" != "exit 0" ]' _ "$(cp_patch)"
+# Order in the real file: the patch step comes after the push step and before the keep step and the owned tail.
+cp_expect "real agent: the uncommitted-patch step comes before '${cu_step#      - name: }' (and so before the scan that covers \$OUT)" \
+  bash -c 'p="$(grep -n -m 1 -F "git diff --cached --binary HEAD" "$1" | cut -d: -f1)"; t="$(grep -n -m 1 -x -F "$2" "$1" | cut -d: -f1)"; k="$(grep -n -m 1 -x -F "      - name: Keep the session for analysis" "$1" | cut -d: -f1)"; [ -n "$p" ] && [ -n "$t" ] && [ -n "$k" ] && [ "$p" -lt "$t" ] && [ "$p" -lt "$k" ]' _ "$ag" "$cu_step"
+cp_expect "the patch goes to \$OUT/uncommitted.patch, the dir the staging step of $cu reads (\$OUT is named there)" \
+  bash -c 'grep -q -F "\$OUT/uncommitted.patch" "$1" && grep -q -F "OUT" "$2"' _ "$cpf" "$cu"
+cp_expect "real agent: 'Chain: the next stage' stays under if: always() && steps.claude.outcome == 'success' (a timed-out stage does not chain)" \
+  bash -c 'ag_s="$(awk -v t="      - name: \"Chain: the next stage\"" "\$0 == t { s = 1; print; next } s && /^      - / { exit } s { print }" "$1")"; grep -q -x -F "        if: always() && steps.claude.outcome == '"'"'success'"'"'" <<<"$ag_s"' _ "$ag"
+expect "real agent: 'Chain: the stage failed' says what was kept (task/<ID> commits and uncommitted.patch)" \
+  bash -c 's="$(awk -v t="      - name: \"Chain: the stage failed\"" "\$0 == t { s = 1; print; next } s && /^      - / { exit } s { print }" "$1")"; grep -q -F "uncommitted" <<<"$s" && grep -q -F "task/" <<<"$s" && grep -q -F "COMMITS" <<<"$s" && grep -q -F "PUSHED" <<<"$s"' _ "$ag"
+
+# ---- behaviour of the patch step: its run: body executed in a throwaway repository ------------------------
+# cp_run <name> <setup cmd(s) in the repo> -> $tmp/<name>/{repo,out,log}; sets cp_rc.
+cp_run() {
+  local d="$tmp/$1" body
+  mkdir -p "$d/out" && rm -rf "$d/repo" && git init -q "$d/repo" 2>/dev/null || return 1
+  body="$(cp_patch | awk '/^        run: \|[-+]?$/ { r = 1; next } r { if ($0 ~ /^          /) print substr($0, 11); else if ($0 ~ /^ *$/) print ""; else exit }')"
+  printf '%s\n' "$body" > "$d/step.sh"
+  (
+    cd "$d/repo" || exit 99
+    git config user.email t@example.com && git config user.name t
+    git config commit.gpgsign false
+    printf 'one\n' > tracked.txt && printf 'two\n' > gone.txt && git add -A && git commit -q -m base
+    eval "$2"
+    git status --porcelain > "$d/status.pre" 2>/dev/null
+    mkdir -p "$d/rt" && env -u GIT_INDEX_FILE OUT="$d/out" RUNNER_TEMP="$d/rt" GITHUB_WORKSPACE="$d/repo" bash -e "$d/step.sh" > "$d/log" 2>&1
+    rc=$?
+    git status --porcelain > "$d/status.post" 2>/dev/null
+    exit "$rc"
+  )
+  cp_rc=$?
+}
+cp_applies() { # <name>: the patch applies to the base tree in a fresh clone and reproduces the dirty tree
+  local d="$tmp/$1" r="$tmp/$1/replay"
+  rm -rf "$r" && git clone -q "$d/repo" "$r" 2>/dev/null || return 1
+  (cd "$r" && git apply --binary "$d/out/uncommitted.patch" && cmp -s tracked.txt "$d/repo/tracked.txt" && [ ! -e gone.txt ] \
+    && cmp -s new.txt "$d/repo/new.txt" && cmp -s blob.bin "$d/repo/blob.bin")
+}
+if [ ! -f "$cpf" ] || [ -z "$(cp_patch)" ]; then
+  echo "FAIL contour patch step: no uncommitted-patch step in $cpf (the developer creates it)" >&2
+  failed=$((failed + 3))
+else
+  cp_run cp-dirty 'printf "edited\n" >> tracked.txt; git rm -q gone.txt; printf "fresh\n" > new.txt; head -c 64 /dev/urandom > blob.bin; git add new.txt'
+  if [ "$cp_rc" = 0 ] && [ -s "$tmp/cp-dirty/out/uncommitted.patch" ] && cp_applies cp-dirty; then
+    echo "ok   patch step, dirty tree (staged, modified, deleted, untracked, binary): uncommitted.patch replays on the base commit"
+    passed=$((passed + 1))
+  else
+    echo "FAIL patch step, dirty tree: exit $cp_rc, uncommitted.patch missing, empty or not a replay of the tree" >&2
+    sed 's/^/       | /' "$tmp/cp-dirty/log" >&2 2>/dev/null
+    failed=$((failed + 1))
+  fi
+  if [ -s "$tmp/cp-dirty/status.pre" ] && cmp -s "$tmp/cp-dirty/status.pre" "$tmp/cp-dirty/status.post" && grep -q -F '?? blob.bin' "$tmp/cp-dirty/status.post"; then
+    echo "ok   patch step leaves the session's own index alone (git status before and after the step is identical, blob.bin still untracked)"
+    passed=$((passed + 1))
+  else
+    echo "FAIL patch step changed the session's index (temp index not used)" >&2
+    failed=$((failed + 1))
+  fi
+  cp_run cp-clean 'true'
+  if [ "$cp_rc" = 0 ] && [ ! -s "$tmp/cp-clean/out/uncommitted.patch" ]; then
+    echo "ok   patch step, a clean tree: exit 0, no non-empty uncommitted.patch"
+    passed=$((passed + 1))
+  else
+    echo "FAIL patch step, clean tree: exit $cp_rc, or a non-empty uncommitted.patch for nothing" >&2
+    failed=$((failed + 1))
+  fi
+  # failure branch: git cannot read the tree (HEAD is broken): the step must say so (non-zero exit or ::warning), and
+  # no patch that looks complete is left behind.
+  cp_run cp-broken 'printf "edited\n" >> tracked.txt; rm -f .git/HEAD'
+  if { [ "$cp_rc" != 0 ] || grep -q -F '::warning' "$tmp/cp-broken/log"; } && [ ! -s "$tmp/cp-broken/out/uncommitted.patch" ]; then
+    echo "ok   patch step, git failing (broken HEAD): not silent (exit $cp_rc or ::warning), no patch kept as if complete"
+    passed=$((passed + 1))
+  else
+    echo "FAIL patch step, git failing: exit $cp_rc, no ::warning, or an empty/partial uncommitted.patch kept" >&2
+    sed 's/^/       | /' "$tmp/cp-broken/log" >&2
+    failed=$((failed + 1))
+  fi
+fi
+
+# The guard (R9) holds the fragment as it holds contour-upload.yml: a changed range in the workflow is refused,
+# an owned copy that is missing is "cannot run" (exit 3), not a bash error.
+cpg() { # <name>: $tmp/<name> = the real workflows dir
+  mkdir -p "$tmp/$1" && cp -p "$real"/* "$tmp/$1/"
+}
+if cpg g-cp-push-gate-restored && [ -f "$cpf" ]; then
+  sed -i "s/^        if: always() \&\& steps.commits.outputs.count != '0'\$/        if: always() \&\& steps.claude.outcome == 'success' \&\& steps.commits.outputs.count != '0'/" "$tmp/g-cp-push-gate-restored/teamwright-agent.yml"
+  if cmp -s "$tmp/g-cp-push-gate-restored/teamwright-agent.yml" "$ag"; then
+    echo "FAIL g-cp-push-gate-restored: the mutation did not apply (no push-step if: line)" >&2
+    failed=$((failed + 1))
+  else
+    run "real with steps.claude.outcome == 'success' back in the push step's if: [R9, owned fragment contour-push.yml]" 1 'R9.*contour-push' "$tmp/g-cp-push-gate-restored"
+  fi
+else
+  echo "FAIL g-cp-push-gate-restored: missing $cpf (the developer creates it)" >&2
+  failed=$((failed + 1))
+fi
+
 # ---- (a) the scan step, run: its run: body extracted from the owned copy and executed ---------------
 # sc_prep reads the step 'Stage the session for upload' of the copy: its run: body, its env: (name: value
 # lines) and its shell:. The env values are the fakes below: the expression of secrets.CLAUDE_CODE_OAUTH_TOKEN
