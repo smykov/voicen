@@ -453,3 +453,98 @@ fn settings_get_is_still_refused_from_other_and_overlay_and_passes_from_calls() 
         "settings_get must pass from `calls`"
     );
 }
+
+/// The History window's label (T-022, `capabilities/history.json`).
+const HISTORY: &str = "history";
+
+/// The three commands of the History page (spec 005 contracts/ipc.md), each with args that have
+/// no side effect: a read, an id no list holds (`not_found`), a clear of an empty list.
+fn history_commands() -> Vec<(&'static str, Value)> {
+    vec![
+        ("history_get", json!({})),
+        ("history_copy", json!({ "id": 0 })),
+        ("history_clear", json!({})),
+    ]
+}
+
+#[test]
+fn the_history_window_reaches_its_commands_and_settings_get_past_the_acl() {
+    // T-022 (spec 005 T013; red today: no `history` capability, no history_* command; not run on
+    // Linux, Windows CI only): from a window labelled `history` at `/history`, each history_*
+    // command and `settings_get` (the page reads the UI language) reach their handler: a value or
+    // the command's own error, never an ACL refusal or "not found". Its other settings commands
+    // and the calls_* commands stay refused. Bite: `allow-history-*` missing from
+    // capabilities/history.json, a command missing from APP_COMMANDS or from
+    // `generate_handler!`, `allow-settings-get` not granted to `history`, or `history.json`
+    // granting `allow-settings-save` or `allow-calls-*`.
+    let _serial = serial();
+    let dir = TempDir::new();
+    let app = release_app(&load(dir.path()));
+    let window = window_at(&app, HISTORY, "history");
+
+    for (cmd, args) in history_commands() {
+        if let Err(rejection) = invoke(&window, cmd, args) {
+            assert!(
+                !is_acl_refusal(&rejection),
+                "{cmd} refused by the ACL for `{HISTORY}`: {rejection}"
+            );
+            assert!(
+                !is_not_found(&rejection),
+                "{cmd} is not registered: {rejection}"
+            );
+        }
+    }
+    let view = invoke(&window, "settings_get", json!({}))
+        .unwrap_or_else(|e| panic!("settings_get rejected for `{HISTORY}`: {e}"));
+    assert!(view.get("settings").is_some(), "settings_get: {view}");
+
+    for (cmd, args) in settings_commands() {
+        if cmd != "settings_get" {
+            assert_refused(&window, cmd, args);
+        }
+    }
+    for (cmd, args) in calls_commands() {
+        assert_refused(&window, cmd, args);
+    }
+}
+
+#[test]
+fn history_commands_are_refused_from_settings_overlay_calls_and_any_other_window() {
+    // T-022 (red today: the commands are not registered, so the refusal is "not found", not the
+    // ACL's; Windows CI only): each history_* command from `settings`, `overlay`, `calls` and a
+    // window labelled `other` is refused by the ACL before its handler (the history texts
+    // are not for any other page). Bite: `allow-history-*` also in default.json, overlay.json
+    // or calls.json, a window wildcard in history.json.
+    let _serial = serial();
+    let dir = TempDir::new();
+    let app = release_app(&load(dir.path()));
+    let settings = settings_window(&app);
+    let overlay = window_at(&app, OVERLAY, "overlay");
+    let calls = window_at(&app, CALLS, "calls");
+    let other = window_at(&app, OTHER, "history");
+
+    for window in [&settings, &overlay, &calls, &other] {
+        for (cmd, args) in history_commands() {
+            assert_refused(window, cmd, args);
+        }
+    }
+}
+
+#[test]
+fn settings_get_passes_from_the_history_window_and_stays_refused_from_other_and_overlay() {
+    // T-022: `settings_get` passes from `history` too (T-142 added `calls`); `overlay` and
+    // `other` stay refused. Windows CI only.
+    let _serial = serial();
+    let dir = TempDir::new();
+    let app = release_app(&load(dir.path()));
+    let overlay = window_at(&app, OVERLAY, "overlay");
+    let other = window_at(&app, OTHER, "settings");
+    let history = window_at(&app, HISTORY, "history");
+
+    assert_refused(&overlay, "settings_get", json!({}));
+    assert_refused(&other, "settings_get", json!({}));
+    assert!(
+        invoke(&history, "settings_get", json!({})).is_ok(),
+        "settings_get must pass from `history`"
+    );
+}

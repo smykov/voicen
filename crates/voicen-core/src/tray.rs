@@ -226,12 +226,13 @@ mod tests {
     }
 
     /// Every menu action, by a wildcard-free match (as above).
-    fn all_actions() -> [TrayAction; 7] {
+    fn all_actions() -> [TrayAction; 8] {
         let all = [
             TrayAction::CallRecord,
             TrayAction::CallStop,
             TrayAction::OpenCalls,
             TrayAction::OpenSettings,
+            TrayAction::OpenHistory,
             TrayAction::OpenLogs,
             TrayAction::Retry,
             TrayAction::Exit,
@@ -242,6 +243,7 @@ mod tests {
                 | TrayAction::CallStop
                 | TrayAction::OpenCalls
                 | TrayAction::OpenSettings
+                | TrayAction::OpenHistory
                 | TrayAction::OpenLogs
                 | TrayAction::Retry
                 | TrayAction::Exit => {}
@@ -285,6 +287,10 @@ mod tests {
                 enabled: true,
             },
             TrayRow::Item {
+                action: TrayAction::OpenHistory,
+                enabled: true,
+            },
+            TrayRow::Item {
                 action: TrayAction::OpenLogs,
                 enabled: true,
             },
@@ -303,7 +309,7 @@ mod tests {
     }
 
     #[test]
-    fn menu_is_call_submenu_calls_settings_open_logs_then_exit_for_every_input_pair() {
+    fn menu_is_call_submenu_calls_settings_history_open_logs_then_exit_for_every_input_pair() {
         // Spec 007 FR-003, decision #197 D2/D3: Submenu "Call" {Record = Check,
         // checked iff call_recording; Stop = Item, enabled iff call_recording},
         // "Calls", Settings, Open logs folder, Exit last; for both values of
@@ -348,7 +354,8 @@ mod tests {
             "logs",
             "Retry",
             "retry_last",
-            "history",
+            "History",
+            "open_history",
             "call",
             "record",
             "stop",
@@ -427,6 +434,71 @@ mod tests {
     }
 
     #[test]
+    fn the_history_item_has_id_history_and_sits_between_settings_and_open_logs() {
+        // T-022 (spec 005 FR-013, spec 001 FR-001, decision #197): the History item
+        // carries the MenuEvent id `history`, maps back to OpenHistory only, is an
+        // enabled item right after Settings and right before Open logs folder for
+        // every input pair, and its text is `tray.history` (History / История).
+        // Bite: another spelling, `ALL` without it (the click does nothing), the
+        // row missing, after Open logs, disabled, inside the Call submenu, a wrong
+        // catalog id or text.
+        assert_eq!(TrayAction::OpenHistory.as_str(), "history");
+        assert_eq!(
+            TrayAction::from_id("history"),
+            Some(TrayAction::OpenHistory)
+        );
+        assert_eq!(id_str(TrayAction::OpenHistory.label()), "tray.history");
+        assert!(MESSAGE_IDS.contains(&TrayAction::OpenHistory.label()));
+        assert_eq!(
+            i18n::text(UiLanguage::En, TrayAction::OpenHistory.label(), &[]),
+            "History"
+        );
+        assert_eq!(
+            i18n::text(UiLanguage::Ru, TrayAction::OpenHistory.label(), &[]),
+            "История"
+        );
+        for retry in [false, true] {
+            for call in [false, true] {
+                let rows = menu(retry, call);
+                let positions: Vec<usize> = rows
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, r)| {
+                        matches!(
+                            r,
+                            TrayRow::Item {
+                                action: TrayAction::OpenHistory,
+                                ..
+                            }
+                        )
+                    })
+                    .map(|(i, _)| i)
+                    .collect();
+                let Some(&at) = positions.first() else {
+                    panic!("no History row: {rows:?}")
+                };
+                assert_eq!(positions.len(), 1, "{rows:?}");
+                assert_eq!(
+                    rows.get(at.wrapping_sub(1)),
+                    Some(&TrayRow::Item {
+                        action: TrayAction::OpenSettings,
+                        enabled: true
+                    }),
+                    "retry = {retry}, call = {call}"
+                );
+                assert_eq!(
+                    rows.get(at + 1),
+                    Some(&TrayRow::Item {
+                        action: TrayAction::OpenLogs,
+                        enabled: true
+                    }),
+                    "retry = {retry}, call = {call}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn menu_item_labels_are_the_contract_ids_and_declared() {
         // contracts/messages.md:32, :36 and the tray.open_logs row (T-071). Declared in MESSAGE_IDS, so the catalog
         // test checks both catalogs. Bite: a wrong id (`tray.open_settings`), the
@@ -436,6 +508,7 @@ mod tests {
             (TrayAction::CallStop, "tray.call.stop"),
             (TrayAction::OpenCalls, "tray.calls"),
             (TrayAction::OpenSettings, "tray.settings"),
+            (TrayAction::OpenHistory, "tray.history"),
             (TrayAction::OpenLogs, "tray.open_logs"),
             (TrayAction::Retry, "tray.retry_last"),
             (TrayAction::Exit, "tray.exit"),
