@@ -137,7 +137,7 @@ crates/voicen-core/
 │   ├── failure.rs           # FailureReason classification
 │   ├── postprocess.rs       # PostProcessor trait + PassThrough (003 plugs in)
 │   ├── delivery.rs          # DeliveryDecision (paste / copy-only / manual)
-│   ├── queue.rs             # DeliveryQueue (recording order)
+│   ├── queue.rs             # DeliveryQueue (recording order) - not built, decision #310: the FIFO worker of `dictation.rs` is the queue
 │   ├── pending.rs           # PendingRecording (at most one)
 │   └── pipeline.rs          # Dictation orchestrator: ties the above together
 └── tests/

@@ -56,6 +56,8 @@ The stack is fixed by `docs/requirements.md` §9. This file decides only HOW to 
 
 ## R-10 Pipeline concurrency and ordering
 
+> Not built (decision #310, T-011): the single FIFO worker of T-051 was kept; no `DeliveryQueue`, no worker thread per job, no delivery thread. FR-029 order holds by channel order. The text below is the original design.
+
 - **Decision**: A `Pipeline` owns a `DeliveryQueue` keyed by a monotonically increasing sequence number assigned at recording stop, or at the Retry click for a retry (Clarification 3). Each job runs speech gate → engine → post-process on its own worker thread (std threads; ≤ a few concurrent jobs). Outcomes are posted back. The queue releases an outcome only when every lower sequence number has been released. A no-speech outcome is released as its notice (no clipboard change). A failure is released as its notification plus the pending update. Delivery itself (clipboard + paste) runs on one delivery thread, so pastes never interleave. Head-of-line waiting is bounded by the 30 s timeout (+15 s for 003).
 - **Rationale**: This puts FR-029 in one place. Assigning the sequence at stop closes the CHK024 overtake hole.
 - **Alternatives**: Delivering out of order with a reorder buffer in the shell (logic would leave the core); a single-job FIFO (it breaks FR-029's "start a new recording while processing" — that would still work, but stage parallelism would be lost and p90 would suffer).

@@ -5290,3 +5290,202 @@ fn a_retry_after_the_worker_died_offers_failure_internal_and_runs_nothing() {
     assert_eq!(rig.engine.transcribed(), transcribed, "the retry ran");
     assert!(rig.clipboard.texts().is_empty());
 }
+
+// ---- T-011: overlapping dictations (FR-23, decisions #310) -----------------------------
+//
+// Characterization tests of the existing FIFO worker (`dictation::run_worker`): they pass
+// on today's code and fail under their named bites (docs/tasks/T-011.mutants/). Ordering
+// is made by gates (the engine blocks the first job until the later ones are queued),
+// never by sleeps.
+
+/// Like [`gated`], but each reply is a `Result`: the job whose audio has `slow_len`
+/// samples signals `entered`, blocks until `go` (bounded by `BUDGET`) and then answers
+/// as scripted. An audio length not scripted answers with an `Ok` that names it.
+fn gated_results(slow_len: usize, replies: Vec<(usize, Result<String, FailureReason>)>) -> Gated {
+    let (entered_tx, entered) = mpsc::channel::<()>();
+    let (go, go_rx) = mpsc::channel::<()>();
+    let entered_tx = Mutex::new(entered_tx);
+    let go_rx = Mutex::new(go_rx);
+    let reply: Reply = Box::new(move |audio: &AudioBuffer| {
+        let n = audio.samples().len();
+        if n == slow_len {
+            let _ = lock(&entered_tx).send(());
+            let _ = lock(&go_rx).recv_timeout(BUDGET);
+        }
+        replies
+            .iter()
+            .find(|(len, _)| *len == n)
+            .map(|(_, r)| r.clone())
+            .unwrap_or_else(|| Ok(format!("unexpected audio of {n} samples")))
+    });
+    Gated { reply, entered, go }
+}
+
+/// The windows the paster found in front, one per paste attempt, in call order.
+fn fronts(calls: &[PasterCall]) -> Vec<WindowRef> {
+    calls
+        .iter()
+        .filter_map(|c| match c {
+            PasterCall::IsInFront(w) => Some(*w),
+            _ => None,
+        })
+        .collect()
+}
+
+fn ctrl_v_count(calls: &[PasterCall]) -> usize {
+    calls
+        .iter()
+        .filter(|c| matches!(c, PasterCall::SendCtrlV))
+        .count()
+}
+
+/// The `outcome` of every `JobFinished`, in event order.
+fn job_outcomes(events: &[DictationEvent]) -> Vec<OutcomeCode> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            DictationEvent::JobFinished { outcome, .. } => Some(*outcome),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn overlapping_dictations_are_delivered_each_to_its_own_window_in_order() {
+    // T-011 Acceptance 1 (FR-23; spec 001 FR-029). A is pressed in W1 and blocked in
+    // the engine; the foreground window becomes W2 and B is pressed and released
+    // while A is still there. A's text is pasted into W1, then B's into W2, the
+    // clipboard gets A then B. Bite: a thread per job or concurrent processing (B
+    // delivered before A: B answers at once, A is gated), LIFO (B first), the start
+    // window read at release or at delivery (W2 twice, or a delivery to the window
+    // in front then).
+    let [a, b, _] = three_recordings();
+    let g = gated(48_000, &[(48_000, "A"), (32_000, "B")]);
+    let rig = Rig::new(api_settings(), g.reply);
+    let t0 = past();
+
+    rig.hold(&a, t0, ms(3000));
+    assert!(
+        g.entered.recv_timeout(BUDGET).is_ok(),
+        "A's job never reached the engine"
+    );
+    rig.paster.set_start_window(Some(window(W2)));
+    rig.hold(&b, t0 + ms(4000), ms(2000));
+    g.go.send(()).expect("A's engine is waiting");
+    rig.wait_jobs(2);
+
+    assert_eq!(rig.clipboard.texts(), vec!["A", "B"]);
+    let calls = rig.paster.calls();
+    assert_eq!(fronts(&calls), vec![W1, W2], "paster calls {calls:?}");
+    assert_eq!(ctrl_v_count(&calls), 2, "paster calls {calls:?}");
+    assert_eq!(
+        delivery_events(&rig.events()),
+        vec![DeliveryResult::Pasted, DeliveryResult::Pasted]
+    );
+}
+
+#[test]
+fn a_failing_first_dictation_does_not_block_the_queued_second() {
+    // T-011 Acceptance 2 (FR-23, FR-11). A is blocked in the engine, B (another
+    // window, W2) is recorded and queued, then A's engine answers 503. A's failure
+    // is offered once with the pending id it left (FR-11), and B is then delivered
+    // into W2. B's recording is not the pending one: the store holds at most A's id.
+    // Bite: the queue halted on a failure (B never delivered), A's failure not
+    // offered or offered without its id, B's audio kept as pending (a second id) or
+    // B's text delivered into A's window.
+    let [a, b, _] = three_recordings();
+    let g = gated_results(
+        48_000,
+        vec![
+            (48_000, Err(FailureReason::ServerError { status: 503 })),
+            (32_000, Ok("B".to_string())),
+        ],
+    );
+    let rig = Rig::new(api_settings(), g.reply);
+    let t0 = past();
+
+    rig.hold(&a, t0, ms(3000));
+    assert!(
+        g.entered.recv_timeout(BUDGET).is_ok(),
+        "A's job never reached the engine"
+    );
+    rig.paster.set_start_window(Some(window(W2)));
+    rig.hold(&b, t0 + ms(4000), ms(2000));
+    g.go.send(()).expect("A's engine is waiting");
+    wait_offers(&rig, 1);
+    rig.wait_jobs(2);
+
+    let made = offers(&rig);
+    assert_eq!(made.len(), 1, "one offer, for A only: {made:?}");
+    let id = made[0].2;
+    assert!(id.is_some(), "A's failure carries its pending id: {made:?}");
+    assert_eq!(
+        made[0],
+        failure_offer(&FailureReason::ServerError { status: 503 }, id)
+    );
+    assert_eq!(rig.clipboard.texts(), vec!["B"], "only B is delivered");
+    let calls = rig.paster.calls();
+    assert_eq!(fronts(&calls), vec![W2], "paster calls {calls:?}");
+    assert_eq!(ctrl_v_count(&calls), 1, "paster calls {calls:?}");
+    assert_eq!(
+        job_outcomes(&rig.events()),
+        vec![OutcomeCode::Failed, OutcomeCode::Text]
+    );
+    assert_eq!(rig.engine.transcribed(), vec![48_000, 32_000]);
+    let stored = rig.store.stored_ids();
+    assert!(
+        stored.len() <= 1 && stored.iter().all(|s| Some(*s) == id),
+        "B's recording was stored as pending: {stored:?}, A's id {id:?}"
+    );
+}
+
+#[test]
+fn a_no_speech_first_dictation_leaves_the_order_without_blocking_the_second() {
+    // T-011 Acceptance 2 (FR-23). Z is blocked in the engine; a silent A and a speech
+    // B (W2) are recorded and queued behind it. Z is delivered, then A ends as
+    // notice.no_speech (offered once, no retry id, never reaching the engine), then B
+    // is delivered into W2. Bite: the queue halted at the no-speech job (B never
+    // delivered), A sent to the engine (a third transcribe), A's notice missing or
+    // after B, B before Z (LIFO / concurrent processing), B delivered into W1.
+    let z = fixtures::speech(11, 2.0, 0.0, -12.0);
+    let a = fixtures::silence_3s();
+    let b = fixtures::speech(12, 1.5, 0.0, -12.0);
+    assert!(!EnergyDetector::new().detect(&a), "premise: A is silence");
+    assert_eq!(
+        [z.samples().len(), a.samples().len(), b.samples().len()],
+        [32_000, 48_000, 24_000],
+        "premise: distinct lengths"
+    );
+    let g = gated(32_000, &[(32_000, "Z"), (24_000, "B")]);
+    let rig = Rig::new(api_settings(), g.reply);
+    let t0 = past();
+
+    rig.hold(&z, t0, ms(2000));
+    assert!(
+        g.entered.recv_timeout(BUDGET).is_ok(),
+        "Z's job never reached the engine"
+    );
+    rig.hold(&a, t0 + ms(3000), ms(3000));
+    rig.paster.set_start_window(Some(window(W2)));
+    rig.hold(&b, t0 + ms(7000), ms(1500));
+    g.go.send(()).expect("Z's engine is waiting");
+    rig.wait_jobs(3);
+
+    assert_eq!(
+        job_outcomes(&rig.events()),
+        vec![OutcomeCode::Text, OutcomeCode::NoSpeech, OutcomeCode::Text]
+    );
+    assert_eq!(rig.clipboard.texts(), vec!["Z", "B"]);
+    let calls = rig.paster.calls();
+    assert_eq!(fronts(&calls), vec![W1, W2], "paster calls {calls:?}");
+    assert_eq!(
+        rig.engine.transcribed(),
+        vec![32_000, 24_000],
+        "A never reaches the engine"
+    );
+    assert_eq!(
+        offers(&rig),
+        vec![(i18n::NOTICE_NO_SPEECH, vec![], None)],
+        "A's no-speech notice, offered once, without a retry id"
+    );
+}
