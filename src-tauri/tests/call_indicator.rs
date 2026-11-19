@@ -252,6 +252,11 @@ fn wry_rig(dir: &Path, page: Page) -> Rig {
     let mut context: Context<Wry> = tauri::generate_context!(test = true);
     context.config_mut().identifier = IDENTIFIER.to_string();
     context.config_mut().app.security.csp = None;
+    // Plain `cargo test` has no `custom-protocol` feature, so tauri is cfg(dev) and
+    // `WebviewUrl::App` resolves against `build.dev_url` (http://localhost:1420): without this the
+    // indicator would load the WebView2 error page, never `page`. Bite: with the line removed s4
+    // sees a white pixel and s5/s7 get no JS (no `start_dragging`).
+    context.config_mut().build.dev_url = None;
     context.set_assets(Box::new(page));
     let app = voicen_lib::build_app(
         tauri::Builder::default().any_thread(),
@@ -657,17 +662,20 @@ fn tick(elapsed_ms: u64) -> IndicatorTick {
 }
 
 /// What the driver saw of one published state: the thread's receipt and, read once after it, the
-/// indicator window's handle.
+/// indicator window's handle and its visibility, both read inside `shown()` while the window is
+/// alive (a later state may destroy it: a lazy read at assert time would see a dead handle).
 #[derive(Debug, Default, Clone, Copy)]
 struct Shown {
     receipt: Option<Settled>,
     hwnd: Option<isize>,
+    visible: bool,
 }
 
 impl Shown {
-    /// The thread settled on the state without a failed answer and a visible window exists.
+    /// The thread settled on the state without a failed answer and the window was visible when
+    /// `shown()` read it. Bite: a window never shown captures `visible = false`, so this is false.
     fn ok(&self) -> bool {
-        self.receipt.is_some_and(|r| r.window && !r.failed) && self.hwnd.is_some_and(is_visible)
+        self.receipt.is_some_and(|r| r.window && !r.failed) && self.visible
     }
 }
 
@@ -676,9 +684,11 @@ impl Shown {
 fn shown(handle: &AppHandle<Wry>) -> Shown {
     let (receipt, took) = measure(|| call_indicator::settled(handle, RECEIPT_HANG));
     eprintln!("call indicator: receipt {receipt:?} after {took:?}");
+    let hwnd = receipt.and_then(|_| indicator_hwnd(handle));
     Shown {
         receipt,
-        hwnd: receipt.and_then(|_| indicator_hwnd(handle)),
+        hwnd,
+        visible: hwnd.is_some_and(is_visible),
     }
 }
 
@@ -1087,7 +1097,10 @@ fn the_window_is_destroyed_when_the_call_stops_and_built_again_at_the_next_start
     // freed the label), the next recording state builds a new one. A start right after a stop (the
     // label may still be taken) builds exactly once and ends with a window. Bite: hiding instead
     // of destroying (the handle stays), a rebuild that fails with "label already exists" (a
-    // build while Destroying), no rebuild after the first call.
+    // build while Destroying), no rebuild after the first call. `first.ok()` reads the visibility
+    // captured by `shown()` while the window was alive, so it holds for a correct destroy; a stop
+    // that leaves the window alive turns `freed && gone` red, a window never shown turns
+    // `first.ok()` red (`visible` false).
     let _serial = serial();
     let _watchdog =
         watchdog("the_window_is_destroyed_when_the_call_stops_and_built_again_at_the_next_start");
