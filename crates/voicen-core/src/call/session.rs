@@ -67,7 +67,7 @@ use crate::local_models::download::DiskSpace;
 use crate::platform::{CaptureHandle, DeviceId};
 use crate::settings::roots::UnwritableReason;
 use crate::settings::service::{SettingsService, WarnedHostFailed};
-use crate::settings::url::{check_base_url, provider_host, ProviderHost};
+use crate::settings::url::{provider_host_of, ProviderHost};
 use crate::settings::Settings;
 use crate::vad::EnergyDetector;
 use rubato::audioadapter_buffers::direct::InterleavedSlice;
@@ -974,8 +974,7 @@ impl CallSession {
 
     /// The API host to announce: remote, and not in `calls.warned_hosts` (FR-031).
     fn new_provider_host(&self, settings: &Settings) -> Option<ProviderHost> {
-        let url = check_base_url(&settings.api.base_url).ok()?;
-        let host = provider_host(&url)?;
+        let host = provider_host_of(&settings.api.base_url)?;
         let known = settings
             .calls
             .warned_hosts

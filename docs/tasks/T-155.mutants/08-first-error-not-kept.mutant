@@ -1,0 +1,8 @@
+guarantee: AC-2/3: the first refusal of a field is the one shown
+file: src/lib/settings/draft.ts
+added_by: test-writer
+--- old
+    if (Object.hasOwn(byField, field)) continue;
+--- new
+    if (false) continue;
+--- end

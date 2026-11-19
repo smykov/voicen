@@ -1,0 +1,8 @@
+guarantee: AC-3: the storage field is highlighted
+file: src/lib/settings/tabs/Calls.svelte
+added_by: test-writer
+--- old
+    aria-invalid={draft.errors[storageRoot] ? "true" : undefined}
+--- new
+    aria-invalid={undefined}
+--- end
