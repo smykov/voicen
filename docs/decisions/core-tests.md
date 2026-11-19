@@ -152,4 +152,4 @@ A test-thread act that must come before a product timer or the end of a transfer
 ## Open
 
 - The ~2 s user-facing refusal on Windows: OQ-07 (non-blocking).
-- `src-tauri/tests/settings_ipc.rs` keeps one `took < 30 s` ceiling on its refused invoke. The shell tests are outside the I1 tripwire's and the I2 ban's scope; they have their own clock switch (T-201, `docs/decisions/windows-shell.md`).
+- The shell tests are outside the I1 tripwire's and the I2 ban's scope; they have their own clock switch (T-201, `docs/decisions/windows-shell.md`).
