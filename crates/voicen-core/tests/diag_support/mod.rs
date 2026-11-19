@@ -628,6 +628,10 @@ pub fn check_closed(line: &Line) -> Result<(), String> {
             ("dictation", "reason") => one_of(k, v, BLOCK_REASONS)?,
             ("dictation", "pp") => one_of(k, v, PP_RESULTS)?,
             ("dictation", "pp_reason") => one_of(k, v, PP_REASONS)?,
+            // T-190: the status code only, an integer that fits a u16.
+            ("dictation", "pp_http_status") => {
+                check(unsigned(v) && v.parse::<u16>().is_ok(), k, v)?;
+            }
             ("warning", "kind") => one_of(k, v, WARNING_KINDS)?,
             ("warning", "os_code") => check(signed(v), k, v)?,
             ("settings load", "outcome") => one_of(k, v, LOAD_OUTCOMES)?,
@@ -775,6 +779,14 @@ pub fn check_closed(line: &Line) -> Result<(), String> {
         if (pp == Some("skipped")) != line.get("pp_reason").is_some() {
             return Err(format!(
                 "pp_reason= exactly on pp=skipped lines: {:?}",
+                line.raw
+            ));
+        }
+        // T-190: pp_http_status exactly on pp_reason=http (a skip that came with an
+        // HTTP response); never on another reason, applied, off or no trace.
+        if (line.get("pp_reason") == Some("http")) != line.get("pp_http_status").is_some() {
+            return Err(format!(
+                "pp_http_status= exactly on pp_reason=http lines: {:?}",
                 line.raw
             ));
         }
