@@ -2524,9 +2524,11 @@ fn refused_cancel_key_keeps_recording_and_emits_esc_unavailable() {
     let t0 = past();
     rig.frames(&fixtures::speech_3s(), t0 + FIRST_FRAME);
     rig.session.hotkey_pressed(t0);
-    rig.session.cancel_key_result(true, t0 + ms(5));
+    rig.session.cancel_key_result(true, true, t0 + ms(5));
     assert_eq!(warnings(&rig.events()), vec![], "a granted claim warned");
-    rig.session.cancel_key_result(false, t0 + ms(10));
+    // T-212: a hold recording is cancelled by the claim under the hotkey's modifiers,
+    // so that claim refused (bare granted) is the refusal that warns.
+    rig.session.cancel_key_result(true, false, t0 + ms(10));
     assert_eq!(warnings(&rig.events()), vec![WarningCode::EscUnavailable]);
     assert_eq!(
         rig.audio.open_handles(),
@@ -2537,7 +2539,7 @@ fn refused_cancel_key_keeps_recording_and_emits_esc_unavailable() {
 
     rig.session.hotkey_released(t0 + ms(3000));
     rig.wait_jobs(1);
-    rig.session.cancel_key_result(false, t0 + ms(3010));
+    rig.session.cancel_key_result(false, false, t0 + ms(3010));
     assert_eq!(
         warnings(&rig.events()),
         vec![WarningCode::EscUnavailable],
@@ -2548,6 +2550,120 @@ fn refused_cancel_key_keeps_recording_and_emits_esc_unavailable() {
         recording_ends(&rig.events()),
         vec![(3000, RecordingEnd::Released)]
     );
+}
+
+// ---- T-212: the meaning of a refused Esc claim depends on the live recording's mode ----
+//
+// Pinned API: `DictationSession::cancel_key_result(bare: bool, modified: bool, at)`,
+// both claims' outcomes (true = granted). Only one claim can cancel a given recording:
+// Hold -> the claim under the hotkey's modifiers (`modified`), Toggle -> bare Esc
+// (`bare`). Red today: the old signature takes one bool, so these do not compile
+// (the contract change is the expected red); the shell tests of src-tauri/tests/hotkey.rs
+// cover the same on Windows CI.
+
+/// Starts a recording in `mode`, reports the claims' outcomes, returns the warnings.
+fn warnings_after_claims(mode: Mode, bare: bool, modified: bool) -> Vec<WarningCode> {
+    let mut s = api_settings();
+    s.mode = mode;
+    let rig = Rig::new(s, always(TEXT));
+    let t0 = past();
+    rig.frames(&fixtures::speech_3s(), t0 + FIRST_FRAME);
+    rig.session.hotkey_pressed(t0);
+    rig.session.cancel_key_result(bare, modified, t0 + ms(5));
+    let got = warnings(&rig.events());
+    assert_eq!(
+        rig.audio.open_handles(),
+        1,
+        "{mode:?}: the result stopped the recording"
+    );
+    got
+}
+
+#[test]
+fn hold_recording_does_not_warn_when_only_the_bare_claim_is_refused() {
+    // The owner's case: Esc under the held modifiers cancels the hold. Bite: warn on
+    // `!(bare && modified)` (today's behaviour), or on a bare refusal in hold mode.
+    assert_eq!(
+        warnings_after_claims(Mode::Hold, false, true),
+        vec![],
+        "hold: a refused bare claim warned although the modified one cancels"
+    );
+}
+
+#[test]
+fn hold_recording_warns_once_when_the_modified_claim_is_refused() {
+    // Bite: no warning for the modified refusal (the only real hold-mode failure),
+    // or the mode ignored (judging bare).
+    assert_eq!(
+        warnings_after_claims(Mode::Hold, true, false),
+        vec![WarningCode::EscUnavailable]
+    );
+}
+
+#[test]
+fn toggle_recording_does_not_warn_when_only_the_modified_claim_is_refused() {
+    // Bite: the modified claim judged in toggle mode, or today's `bare && modified`.
+    assert_eq!(
+        warnings_after_claims(Mode::Toggle, true, false),
+        vec![],
+        "toggle: a refused modified claim warned although bare Esc cancels"
+    );
+}
+
+#[test]
+fn toggle_recording_warns_once_when_the_bare_claim_is_refused() {
+    // Bite: no warning for the bare refusal in toggle mode, or the mode inverted.
+    assert_eq!(
+        warnings_after_claims(Mode::Toggle, false, true),
+        vec![WarningCode::EscUnavailable]
+    );
+}
+
+#[test]
+fn granted_claims_never_warn_in_either_mode() {
+    // Bite: a warning on a granted pair (inverted test).
+    for mode in [Mode::Hold, Mode::Toggle] {
+        assert_eq!(warnings_after_claims(mode, true, true), vec![], "{mode:?}");
+    }
+}
+
+#[test]
+fn both_claims_refused_warn_once_in_either_mode() {
+    // Esc cannot cancel at all. Bite: a warning per claim (two), or none.
+    for mode in [Mode::Hold, Mode::Toggle] {
+        assert_eq!(
+            warnings_after_claims(mode, false, false),
+            vec![WarningCode::EscUnavailable],
+            "{mode:?}"
+        );
+    }
+}
+
+#[test]
+fn a_refusal_reported_after_the_recording_ended_never_warns_in_either_mode() {
+    // A stale result (the recording is over): no live mode to judge by, no warning.
+    // Bite: a default mode judged when nothing is live.
+    for mode in [Mode::Hold, Mode::Toggle] {
+        let mut s = api_settings();
+        s.mode = mode;
+        let rig = Rig::new(s, always(TEXT));
+        let t0 = past();
+        rig.frames(&fixtures::speech_3s(), t0 + FIRST_FRAME);
+        rig.session.hotkey_pressed(t0);
+        match mode {
+            Mode::Hold => rig.session.hotkey_released(t0 + ms(3000)),
+            Mode::Toggle => rig.session.hotkey_pressed(t0 + ms(3000)),
+        }
+        rig.wait_jobs(1);
+        rig.session.cancel_key_result(false, true, t0 + ms(3010));
+        rig.session.cancel_key_result(true, false, t0 + ms(3011));
+        rig.session.cancel_key_result(false, false, t0 + ms(3012));
+        assert_eq!(
+            warnings(&rig.events()),
+            vec![],
+            "{mode:?}: a stale result warned"
+        );
+    }
 }
 
 #[test]
