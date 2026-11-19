@@ -1,0 +1,8 @@
+guarantee: Acceptance 1: the failed start writes one `warning kind=call_start_failed` line (closed literal)
+file: crates/voicen-core/src/diag/format.rs
+added_by: test-writer
+--- old
+        WarningKind::CallStartFailed => "call_start_failed",
+--- new
+        WarningKind::CallStartFailed => "call_start_fail",
+--- end
