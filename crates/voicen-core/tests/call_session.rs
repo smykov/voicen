@@ -1986,12 +1986,22 @@ fn advance(rig: &CallRig, d: Duration) {
 /// subtitles on.
 fn drained(rig: &CallRig, tracks: &[Track], upto_ms: u64) {
     let want = fed(0, upto_ms);
-    for track in tracks {
-        assert!(
-            wait(|| rig.subtitles.samples(*track) >= want),
-            "the writer took {track:?} up to {upto_ms} ms"
-        );
-    }
+    // T-239: a progress wait. The backlog (up to ~6 000 writer events for a 65 s burst)
+    // may take longer than BUDGET on a loaded host; the wait fails only when the
+    // consumer's summed sample counts stop growing for BUDGET, never on the total time.
+    let count = || -> usize { tracks.iter().map(|t| rig.subtitles.samples(*t)).sum() };
+    let ok = common::timing::eventually_progressing(BUDGET, count, || {
+        tracks.iter().all(|t| rig.subtitles.samples(*t) >= want)
+    });
+    let got: Vec<(Track, usize)> = tracks
+        .iter()
+        .map(|t| (*t, rig.subtitles.samples(*t)))
+        .collect();
+    assert!(
+        ok,
+        "the writer stopped consuming before {upto_ms} ms ({want} samples per track): no \
+         progress for {BUDGET:?}; consumed {got:?}"
+    );
 }
 
 /// A tick made after the blocks fed here: ticks are made when a block is handled once
