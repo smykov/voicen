@@ -40,8 +40,8 @@ interface IndicatorState { recording: boolean; reminderVisible: boolean; reminde
 |---|---|---|---|---|
 | `calls_list` | — | `CallList` | — | FR-033 |
 | `calls_get` | `{root, id}` | `CallDetail` | `notFound`, `ioFailed` | FR-034 |
-| `calls_rename` | `{root, id, title}` | `CallSummary` | `emptyName`, `ioFailed` | FR-035 |
-| `calls_rename_speaker` | `{root, id, speaker, name}` | `CallDetail` | `emptyName`, `ioFailed` | FR-035 |
+| `calls_rename` | `{root, id, title}` | `CallSummary` | `emptyName`, `recordingCall`, `notFound`, `ioFailed` | FR-035 (decisions #317) |
+| `calls_rename_speaker` | `{root, id, speaker, name}` | `CallDetail` | `emptyName`, `recordingCall`, `notFound` (call or speaker id), `ioFailed` | FR-035 (decisions #317) |
 | `calls_transcribe` | `{root, id}` | `CallSummary` (now `queued`) | `recordingCall`, `notFound`, `ioFailed` | FR-017, FR-027 |
 | `calls_copy_markdown` | `{root, id}` | `null` | `ioFailed` | FR-036 |
 | `calls_export` | `{root, id, format: "md" \| "json"}` | `{saved: boolean}` (false = dialog cancelled) | `ioFailed{reason}` | FR-036 |
