@@ -1,0 +1,11 @@
+guarantee: AC4: renaming the recording call is recordingCall
+file: crates/voicen-core/src/call/storage.rs
+added_by: test-writer
+--- old
+        if self.is_active(&dir) {
+            return Err(CallError::recording_call());
+        }
+        let (mut entry, dir) = self.open_call(calls, root, id)?;
+--- new
+        let (mut entry, dir) = self.open_call(calls, root, id)?;
+--- end

@@ -1,0 +1,8 @@
+guarantee: atomicity: on a meta.json failure the previous transcript bytes are put back
+file: crates/voicen-core/src/call/storage.rs
+added_by: test-writer
+--- old
+            for ((name, _), old) in files.iter().zip(&previous).take(done).rev() {
+--- new
+            for ((name, _), old) in files.iter().zip(&previous).take(0).rev() {
+--- end

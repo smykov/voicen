@@ -47,7 +47,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -372,6 +372,8 @@ struct Engine {
     gate: Option<Arc<Gate>>,
     log: Mutex<Vec<Track>>,
     entered: AtomicUsize,
+    /// Every request fails with the provider reason once its gate is open.
+    fail: AtomicBool,
 }
 
 impl Engine {
@@ -380,6 +382,7 @@ impl Engine {
             gate,
             log: Mutex::new(Vec::new()),
             entered: AtomicUsize::new(0),
+            fail: AtomicBool::new(false),
         })
     }
 
@@ -404,6 +407,9 @@ impl TimedTranscriber for Engine {
         self.entered.fetch_add(1, Ordering::SeqCst);
         if let Some(gate) = &self.gate {
             gate.wait();
+        }
+        if self.fail.load(Ordering::SeqCst) {
+            return Err(TimedFailure::Failed(FailReason::Provider));
         }
         let text = format!("{}-line", track.as_str());
         Ok(match shape {
@@ -436,6 +442,9 @@ struct TestRunner {
     asks: [Arc<AtomicUsize>; 2],
     /// Passes that have ended.
     ended: AtomicUsize,
+    /// Runs right after the pass-start meta was read, before the pass begins (a rename here
+    /// is the narrow window between the read and the `transcribing` write).
+    after_meta_read: Mutex<Option<Box<dyn Fn(&Path) + Send>>>,
 }
 
 impl TestRunner {
@@ -447,6 +456,7 @@ impl TestRunner {
             tokens: Mutex::new(Vec::new()),
             asks: [Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0))],
             ended: AtomicUsize::new(0),
+            after_meta_read: Mutex::new(None),
         })
     }
 
@@ -464,6 +474,9 @@ impl PassRunner for TestRunner {
     fn run(&self, dir: &Path, cancel: &CancelToken) -> PassOutcome {
         lock(&self.tokens).push(cancel.clone());
         let meta = read_meta(dir);
+        if let Some(hook) = lock(&self.after_meta_read).as_ref() {
+            hook(dir);
+        }
         let [mic_asks, system_asks] = &self.asks;
         let sources = PassSources {
             mic: Box::new(Dec {
@@ -1327,6 +1340,35 @@ fn delete_of_the_call_this_process_records_is_recording_call_and_changes_nothing
 }
 
 #[test]
+fn a_refused_delete_of_the_recording_call_leaves_its_queue_entry_alone() {
+    // T-152 Acceptance 4 (found by the failure-branch bite: nothing pinned the queue's own
+    // guard, the store's refusal alone passed). The refusal comes before the queue is
+    // touched: an entry of that folder stays queued. Bite: the is_active check of
+    // `PassQueue::delete` missing, so the entry is removed before the store refuses.
+    let w = world();
+    let files = w.recording();
+    let dir = files.dir().to_path_buf();
+    let other = w.call(|_| {});
+    let runner = PureRunner::new(false);
+    let q = queue_of(&w, &runner);
+    q.enqueue(&other);
+    wait_for("the other pass to start", || runner.started().len() == 1);
+    q.enqueue(&dir);
+    assert_eq!(q.position(&dir), QueuePosition::Queued);
+    let probe = Observer::new(String::new);
+    let (root, id) = wire_of(&dir);
+    let err = match q.delete(&calls(), &root, &id, &*probe) {
+        Err(e) => e,
+        Ok(()) => panic!("a recording call must not be deleted"),
+    };
+    assert_eq!(err.code, CallErrorCode::RecordingCall);
+    assert_eq!(q.position(&dir), QueuePosition::Queued, "still queued");
+    runner.gate.open();
+    q.wait_idle();
+    drop(files);
+}
+
+#[test]
 fn delete_of_a_call_that_is_not_there_or_not_listed_is_not_found() {
     // decisions #317: an unknown call is `notFound`. Bite: the guard skipped; a gone folder Ok.
     let w = world();
@@ -1510,6 +1552,70 @@ fn a_rename_made_while_the_pass_runs_survives_a_cancel_of_that_pass() {
     let names: Vec<&str> = meta.speakers.iter().map(|s| s.name.as_str()).collect();
     assert_eq!(names, vec!["Alice", "Other party"]);
     no_transcript(&dir);
+}
+
+#[test]
+fn a_rename_made_while_the_pass_runs_survives_a_pass_that_ends_failed() {
+    // T-152 invariant 1, the `write_failed` write (found by the failure-branch bite: nothing
+    // pinned it). The requests fail after the rename, so the pass ends `failed{provider}`
+    // through `write_failed` without reaching `write_ready`. Bite: `write_failed` writing the
+    // pass-start names.
+    let w = world();
+    let dir = w.call(|_| {});
+    let gate = Gate::new(false);
+    let engine = Engine::new(Some(gate.clone()));
+    let runner = TestRunner::new(&engine, CALL_MS);
+    let q = PassQueue::new(w.store.clone(), runner.clone());
+    q.enqueue(&dir);
+    let _open = OpenOnExit(gate.clone());
+    wait_for("a request in flight", || {
+        engine.entered.load(Ordering::SeqCst) >= 1
+    });
+    let (root, id) = wire_of(&dir);
+    ok(w.store.rename(&calls(), &root, &id, "Renamed call"));
+    ok(w.store
+        .rename_speaker(&calls(), &root, &id, "s1", "Colleague"));
+    engine.fail.store(true, Ordering::SeqCst);
+    gate.open();
+    q.wait_idle();
+
+    let meta = read_meta(&dir);
+    assert_eq!(meta.state, CallState::Failed, "the requests failed");
+    assert_eq!(meta.title, "Renamed call");
+    let names: Vec<&str> = meta.speakers.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(names, vec!["Me", "Colleague"]);
+}
+
+#[test]
+fn a_rename_between_the_pass_start_read_and_the_transcribing_write_is_kept() {
+    // T-152 invariant 1 (found by the failure-branch bite: nothing pinned it): the pass reads
+    // the meta, a rename lands before the pass writes `transcribing`. Bite: the `transcribing`
+    // write of the pass-start names.
+    let w = world();
+    let dir = w.call(|_| {});
+    let gate = Gate::new(false);
+    let engine = Engine::new(Some(gate.clone()));
+    let runner = TestRunner::new(&engine, CALL_MS);
+    let _open = OpenOnExit(gate.clone());
+    let (root, id) = wire_of(&dir);
+    {
+        let store = w.store.clone();
+        *lock(&runner.after_meta_read) = Some(Box::new(move |_| {
+            let _ = store.rename(&calls(), &root, &id, "Renamed at start");
+        }));
+    }
+    let q = PassQueue::new(w.store.clone(), runner.clone());
+    q.enqueue(&dir);
+    wait_for("a request in flight", || {
+        engine.entered.load(Ordering::SeqCst) >= 1
+    });
+    // The pass is running, before any end-of-pass write: the `transcribing` meta has the name.
+    let meta = read_meta(&dir);
+    assert_eq!(meta.state, CallState::Transcribing);
+    assert_eq!(meta.title, "Renamed at start");
+    gate.open();
+    q.wait_idle();
+    assert_eq!(read_meta(&dir).title, "Renamed at start");
 }
 
 #[test]
