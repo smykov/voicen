@@ -5,14 +5,14 @@
 	check-core-test-os-answer check-core-test-deadlines check-webview-data check-ci-wip check-telegram-send check-telegram-failure-branch \
 	check-version-stamp check-release-check check-release check-release-guard check-nsis-fork check-e2e-entry-fixtures check-area-image-fixtures \
 	check-whisper-cmake-cache check-opus-cmake-cache check-whisper-model-key check-crt-imports check-whisper \
-	check-shell-windows check-ban-canary check-role-tools check-guard-trigger check-wip-push check-wip-run check-contour-busy check-test-guard \
+	check-shell-windows check-ban-canary check-role-tools check-guard-trigger check-wip-push check-wip-run check-contour-busy check-contour-label check-test-guard \
 	check-ui core-image ui-image core-image-present \
 	licenses licenses-check licenses-unit licenses-fixture licenses-rust licenses-bundle \
 	licenses-npm licenses-generate licenses-stale licenses-stale-guard
 
 # check-ban-canary and check-shell-windows after check-core: both build voicen-core, so a core
 # error is reported first by the faster native check-core, before the slower runs.
-check: check-shell-layout check-shell-layout-fixtures check-helper-windows-fixtures check-ci-credentials check-role-tools check-guard-trigger check-wip-push check-wip-run check-contour-busy check-test-guard \
+check: check-shell-layout check-shell-layout-fixtures check-helper-windows-fixtures check-ci-credentials check-role-tools check-guard-trigger check-wip-push check-wip-run check-contour-busy check-contour-label check-test-guard \
 	check-clippy-lines \
 	check-core-test-os-answer check-core-test-deadlines check-webview-data check-ci-wip check-telegram-send check-telegram-failure-branch check-version-stamp check-release-check check-release check-release-guard check-nsis-fork check-whisper-cmake-cache check-opus-cmake-cache check-whisper-model-key check-crt-imports check-core check-whisper \
 	check-ban-canary check-shell-windows check-e2e-entry-fixtures check-area-image-fixtures check-ui \
@@ -124,6 +124,17 @@ check-wip-run:
 # .github/workflows and that both owned contour heads hold per-task concurrency groups. Host bash, jq.
 check-contour-busy:
 	scripts/ci/contour-busy.test.sh
+
+# check-contour-label (T-231): the label start of the contour. scripts/ci/contour-label.sh is the only parser
+# of a labelled Issue's title (LC_ALL=C, ^(T-[0-9]{3,}): ; prints start <T-NNN> or bad <why>, no title bytes).
+# The self-test runs its cases and pins teamwright-next.yml: the issues: labeled trigger and the per-task group
+# with its Issue fallback in the owned head, the relay job start (one if: with the label, open-state and owner
+# literals; the title only on an env: line; hop 0 dispatched on $MAIN; one comment and exit 0 on a bad title),
+# next gated on workflow_dispatch, hop 0 with an own stage ending exit 0, and the CODE_COMPLETE branch asking
+# git (task/<ID> exists, rev-list --count origin/$MAIN..) before ci.yml and the pull request, run against a
+# fake gh, git and sleep. Host bash, jq.
+check-contour-label:
+	scripts/ci/contour-label.test.sh
 
 # check-core-test-os-answer (T-080 rca, class os-answer-deadline-race; T-089, decides_on: token):
 # no core test outside crates/voicen-core/tests/common names an OS-answer target (.invalid,

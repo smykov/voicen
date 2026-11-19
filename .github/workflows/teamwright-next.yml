@@ -1,13 +1,18 @@
 # T-202 (decisions #249, #253): the contour's dispatcher. It reads the task record on task/<ID>,
 # picks the next stage and starts teamwright-agent.yml for it; after implement it starts the
 # P-016 run of ci.yml on wip/<ID> (a push with the job token starts no run); at CODE_COMPLETE it
-# opens the pull request of task/<ID>. The header, line 1 to the job map, is the owned copy
-# scripts/ci/contour-heads/teamwright-next.yml (make check, check-release-guard, R14). It runs
-# no session and pushes nothing (docs/decisions/ci-toolchain.md).
+# opens the pull request of task/<ID> when that branch has commits not on the default branch.
+# T-231: the owner's label `teamwright` on an open Issue titled "T-NNN: ..." starts the chain:
+# the relay job start dispatches hop 0 of this file for that task. The header, line 1 to the job
+# map, is the owned copy scripts/ci/contour-heads/teamwright-next.yml (make check,
+# check-release-guard, R14). It runs no session and pushes nothing (docs/decisions/ci-toolchain.md).
 name: teamwright next
-run-name: "teamwright next ${{ inputs.task_id }} (hop ${{ inputs.hop }})"
+run-name: "teamwright next ${{ inputs.task_id || format('label on Issue #{0}', github.event.issue.number) }} (hop ${{ inputs.hop || '0' }})"
 
 on:
+  # The label start (T-231); the relay job start turns it into a workflow_dispatch hop 0.
+  issues:
+    types: [labeled]
   workflow_dispatch:
     inputs:
       task_id:
@@ -31,8 +36,10 @@ on:
         default: ""
 
 # One dispatch of a task at a time: a group per task (decisions #292); the stage job has its own.
+# A label run has no task id yet (an expression cannot parse the title): its group is per Issue,
+# and the hop 0 it dispatches runs in the task's group, as a manual start does (T-231).
 concurrency:
-  group: teamwright-next-${{ inputs.task_id }}
+  group: teamwright-next-${{ inputs.task_id || format('issue-{0}', github.event.issue.number) }}
   cancel-in-progress: false
 
 permissions:
@@ -41,8 +48,45 @@ permissions:
   actions: write
   pull-requests: write
 jobs:
+  # T-231: the label relay. The owner's label `teamwright` on an open Issue becomes a
+  # workflow_dispatch hop 0 of this file, so every hop of a task runs in teamwright-next-<ID>. The
+  # condition is decided before a runner is taken: a label by anyone else never reaches it.
+  start:
+    if: github.event_name == 'issues' && github.event.label.name == 'teamwright' && github.event.issue.state == 'open' && github.actor == github.repository_owner
+    runs-on: [self-hosted, Linux, X64, claude]
+    timeout-minutes: 5
+    env:
+      # The title is untrusted text: an env value only, reduced to its task id by the parser.
+      TITLE: ${{ github.event.issue.title }}
+      ISSUE: ${{ github.event.issue.number }}
+      REPO: ${{ github.repository }}
+      MAIN: ${{ github.event.repository.default_branch }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Start the chain of the labelled Issue
+        shell: bash {0}
+        run: |
+          set -uo pipefail
+          [[ "$ISSUE" =~ ^[0-9]+$ ]] || { echo "::error::bad issue number"; exit 1; }
+          verdict="$(scripts/ci/contour-label.sh "$TITLE")"
+          case "$verdict" in
+            "start "*)
+              id="${verdict#start }"
+              gh workflow run teamwright-next.yml -R "$REPO" --ref "$MAIN" -f task_id="$id" -f issue="$ISSUE" -f hop=0 || { echo "::error::hop 0 of $id was not dispatched"; exit 1; }
+              echo "Issue #$ISSUE: hop 0 of $id dispatched." >> "$GITHUB_STEP_SUMMARY" ;;
+            "bad "*)
+              msg="No contour chain started: ${verdict#bad }. Rename the Issue to \"T-NNN: <title>\" and add the label again. $RUN_URL"
+              echo "$msg" >> "$GITHUB_STEP_SUMMARY"
+              gh issue comment "$ISSUE" -R "$REPO" --body "$msg" >/dev/null || echo "::warning::no comment on Issue #$ISSUE"
+              exit 0 ;;
+            *) echo "::error::scripts/ci/contour-label.sh gave no verdict"; exit 1 ;;
+          esac
+
   next:
-    if: github.actor == github.repository_owner || github.actor == 'github-actions[bot]'
+    if: github.event_name == 'workflow_dispatch' && (github.actor == github.repository_owner || github.actor == 'github-actions[bot]')
     runs-on: [self-hosted, Linux, X64, claude]
     timeout-minutes: 15
     env:
@@ -90,11 +134,16 @@ jobs:
 
           # Up to MAX_PARALLEL tasks at a time: scripts/ci/contour-busy.sh counts the other tasks with
           # an unfinished stage (full: this dispatch starts nothing and says so); the stage of this
-          # task that started it may still be ending (own: wait, up to 3 minutes).
+          # task that started it may still be ending (own: wait, up to 3 minutes). At hop 0 (a label
+          # or a manual start) an own stage means the chain is running: this start does nothing.
           for i in $(seq 1 18); do
             busy="$(gh run list -R "$REPO" --workflow teamwright-agent.yml --limit 50 --json status,displayTitle | scripts/ci/contour-busy.sh "$TASK_ID" "$MAX_PARALLEL")" || { say "**$TASK_ID**: the stage runs were not counted (gh run list or scripts/ci/contour-busy.sh failed). $RUN_URL"; exit 1; }
             case "$busy" in
-              own) sleep 10 ;;
+              own)
+                if [ "$HOP" = 0 ] && [ -z "$PREV_STAGE" ]; then
+                  say "**$TASK_ID**: a chain of $TASK_ID is already running; this start does nothing. $RUN_URL"; exit 0
+                fi
+                sleep 10 ;;
               "full "*) say "**$TASK_ID**: chain stopped: ${busy#full } other tasks have unfinished stages (the limit is $MAX_PARALLEL, MAX_PARALLEL in teamwright-next.yml); start teamwright-next.yml for $TASK_ID again when one ends. $RUN_URL"; exit 0 ;;
               "free "*) break ;;
               *) say "**$TASK_ID**: the stage runs were not counted (no verdict). $RUN_URL"; exit 1 ;;
@@ -121,6 +170,17 @@ jobs:
               case "$recstage" in red-tests | implement) next="$recstage" ;; *) next=red-tests ;; esac ;;
             NEEDS_REVIEW) next=review ;;
             CODE_COMPLETE | VERIFIED | DONE)
+              # Nothing to merge (no task/<ID>, or no commit on it that is not on the default branch):
+              # git answers, the chain ends without a ci.yml run or a pull request (T-231).
+              ahead=0
+              if [ "$ref" = FETCH_HEAD ]; then
+                ahead="$(git rev-list --count "origin/$MAIN..FETCH_HEAD")" || ahead=0
+              fi
+              [[ "$ahead" =~ ^[0-9]+$ ]] || ahead=0
+              if [ "$ahead" = 0 ]; then
+                say "**$TASK_ID**: $status, nothing to merge from task/$TASK_ID; the chain ends, verify locally (/teamwright:verify $TASK_ID). $RUN_URL"
+                exit 0
+              fi
               gh workflow run ci.yml -R "$REPO" --ref "task/$TASK_ID" || true
               pr="$(gh pr create -R "$REPO" --base "$MAIN" --head "task/$TASK_ID" --title "$TASK_ID" --body "Contour run of $TASK_ID, status $status. $RUN_URL" 2>&1)" || pr="no pull request: $pr"
               say "**$TASK_ID**: $status, the chain ends. $pr"
