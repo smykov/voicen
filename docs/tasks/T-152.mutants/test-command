@@ -1,0 +1,1 @@
+cargo test -j2 -p voicen-core --lib call::storage::tests::calls_wire_fixture_matches_core

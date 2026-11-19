@@ -2514,6 +2514,22 @@ mod tests {
             "ioFailed".to_string(),
             to_value(&io_failed(UnwritableReason::AccessDenied)),
         );
+        errors.insert(
+            "emptyName".to_string(),
+            to_value(&CallError {
+                code: CallErrorCode::EmptyName,
+                file: None,
+                reason: None,
+            }),
+        );
+        errors.insert(
+            "recordingCall".to_string(),
+            to_value(&CallError {
+                code: CallErrorCode::RecordingCall,
+                file: None,
+                reason: None,
+            }),
+        );
         let mut core = serde_json::Map::new();
         core.insert(
             "list".to_string(),
@@ -3195,5 +3211,662 @@ mod tests {
             b"fresh"
         );
         assert_eq!(names(dir.path()), vec!["meta.json".to_string()]);
+    }
+
+    // ---- T-152: rename and delete -----------------------------------------------------
+    // Assumed API (the analysis states the seam; these are the simplest consistent shapes):
+    //   CallStore::rename(&self, calls: &CallSettings, root: &str, id: &str, title: &str)
+    //       -> Result<CallSummary, CallError>
+    //   CallStore::rename_speaker(&self, calls, root, id, speaker: &str, name: &str)
+    //       -> Result<CallDetail, CallError>
+    //   CallStore::delete_folder(&self, calls, root, id, deleter: &dyn FolderDeleter)
+    //       -> Result<(), CallError>          (the guard of `folder`: a damaged call is allowed)
+    //   trait FolderDeleter: Send + Sync { fn claim(&self, file: &Path)
+    //       -> Result<Box<dyn Send>, InUse>; }   `file` is a file inside the call folder; the
+    //       returned box is the claim, held until dropped; `InUse(pub String)` names the bare file
+    //   struct StdFolderDeleter;               (the core impl: a claim that always succeeds)
+    // The store claims every file, and only when all claims are held removes the files, drops
+    // the claims and removes the folder.
+
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+    fn alice_bob() -> Vec<Speaker> {
+        speakers("Alice", "Bob")
+    }
+
+    fn speakers(me: &str, s1: &str) -> Vec<Speaker> {
+        vec![
+            Speaker {
+                id: "me".to_string(),
+                name: me.to_string(),
+            },
+            Speaker {
+                id: "s1".to_string(),
+                name: s1.to_string(),
+            },
+        ]
+    }
+
+    /// Every entry of `dir` with its bytes (a folder is its name with a slash, no bytes).
+    fn snapshot(dir: &Path) -> Vec<(String, Vec<u8>)> {
+        let mut out: Vec<(String, Vec<u8>)> = fs::read_dir(dir)
+            .expect("list")
+            .map(|e| {
+                let e = e.expect("entry");
+                let name = e.file_name().to_string_lossy().into_owned();
+                if e.path().is_dir() {
+                    (format!("{name}/"), Vec::new())
+                } else {
+                    (name, fs::read(e.path()).expect("read"))
+                }
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// The ready call of `plant_ready` with its `transcript.md` as the pass renders it from the
+    /// meta names: (settings, root, call folder).
+    fn plant_named(f: &Fixture) -> (CallSettings, PathBuf, PathBuf) {
+        let (calls, root) = plant_ready(f);
+        let dir = root.join(READY_ID);
+        fs::write(
+            dir.join("transcript.md"),
+            export_markdown(&transcript(), "Weekly sync", &alice_bob()),
+        )
+        .expect("transcript.md");
+        (calls, root, dir)
+    }
+
+    fn err_of<T: std::fmt::Debug>(r: Result<T, CallError>) -> CallError {
+        match r {
+            Err(e) => e,
+            Ok(v) => panic!("expected a refusal, got {v:?}"),
+        }
+    }
+
+    fn coded(code: CallErrorCode) -> CallError {
+        CallError {
+            code,
+            file: None,
+            reason: None,
+        }
+    }
+
+    fn in_use(file: &str) -> CallError {
+        CallError {
+            code: CallErrorCode::InUse,
+            file: Some(file.to_string()),
+            reason: None,
+        }
+    }
+
+    fn transcript_of(dir: &Path) -> TranscriptV1 {
+        let text = fs::read_to_string(dir.join("transcript.json")).expect("transcript.json");
+        TranscriptV1::from_json(&text).unwrap_or_else(|e| panic!("transcript.json parses: {e:?}"))
+    }
+
+    #[test]
+    fn rename_replaces_the_title_in_meta_markdown_and_json_and_keeps_the_rest() {
+        // T-152 Acceptance 1: the title reaches meta.json, transcript.json `title` and the
+        // Markdown heading, as given (a title is not trimmed). Bite: the title written to meta
+        // only; the transcript's own title kept; the Markdown not re-rendered; the title trimmed
+        // or folded in meta/json; a segment, a speaker or the call's other meta fields changed;
+        // a tmp file left; the returned summary not the new one.
+        let f = fixture();
+        let (calls, root, dir) = plant_named(&f);
+        let before_meta = read_json(&dir.join("meta.json"));
+        let got = f
+            .store
+            .rename(&calls, &wire_root(&root), READY_ID, "Q4  plan ")
+            .expect("rename");
+        assert_eq!(got.title, "Q4  plan ");
+        assert_eq!(got.id, READY_ID);
+        assert_eq!(got.root, wire_root(&root));
+        assert_eq!(got.state, WireState::Ready);
+        assert_eq!(got.duration_ms, Some(3_600_000));
+
+        let mut want_meta = before_meta;
+        want_meta["title"] = Value::String("Q4  plan ".to_string());
+        assert_eq!(read_json(&dir.join("meta.json")), want_meta);
+
+        let json = transcript_of(&dir);
+        assert_eq!(json.title, "Q4  plan ");
+        assert_eq!(json.speakers, alice_bob(), "the meta names, not X and Y");
+        assert_eq!(json.segments, transcript().segments);
+        assert_eq!(
+            fs::read_to_string(dir.join("transcript.md")).expect("md"),
+            export_markdown(&transcript(), "Q4  plan ", &alice_bob())
+        );
+        assert_eq!(
+            names(&dir),
+            vec![
+                "meta.json".to_string(),
+                "mic.opus".to_string(),
+                "system.opus".to_string(),
+                "transcript.json".to_string(),
+                "transcript.md".to_string()
+            ],
+            "no tmp file is left"
+        );
+    }
+
+    #[test]
+    fn rename_speaker_s1_re_renders_both_transcripts_and_allows_duplicate_names() {
+        // T-152 Acceptance 1 (T074, T075). Bite: meta.json only; the Markdown or JSON stale; the
+        // other speaker renamed; a uniqueness check (the second "Client" refused); the returned
+        // detail built from the old names; lines changed.
+        let f = fixture();
+        let (calls, root, dir) = plant_named(&f);
+        let text = wire_root(&root);
+        let detail = f
+            .store
+            .rename_speaker(&calls, &text, READY_ID, "s1", "Colleague")
+            .expect("rename s1");
+        assert_eq!(
+            detail.speakers,
+            vec![
+                WireSpeaker {
+                    id: "me".to_string(),
+                    name: "Alice".to_string()
+                },
+                WireSpeaker {
+                    id: "s1".to_string(),
+                    name: "Colleague".to_string()
+                }
+            ]
+        );
+        assert_eq!(detail.lines.len(), 2);
+        assert_eq!(detail.summary.title, "Weekly sync");
+        let want = speakers("Alice", "Colleague");
+        assert_eq!(
+            read_json(&dir.join("meta.json"))["speakers"],
+            to_value(&want)
+        );
+        assert_eq!(transcript_of(&dir).speakers, want);
+        assert_eq!(transcript_of(&dir).title, "Weekly sync");
+        assert_eq!(
+            fs::read_to_string(dir.join("transcript.md")).expect("md"),
+            export_markdown(&transcript(), "Weekly sync", &want)
+        );
+        assert!(fs::read_to_string(dir.join("transcript.md"))
+            .expect("md")
+            .contains("Colleague:"));
+
+        // Both speakers may carry one name.
+        f.store
+            .rename_speaker(&calls, &text, READY_ID, "me", "Client")
+            .expect("me");
+        let detail = f
+            .store
+            .rename_speaker(&calls, &text, READY_ID, "s1", "Client")
+            .expect("s1 again, same name");
+        let both = speakers("Client", "Client");
+        assert_eq!(
+            detail
+                .speakers
+                .iter()
+                .map(|s| s.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Client", "Client"]
+        );
+        assert_eq!(transcript_of(&dir).speakers, both);
+        assert_eq!(
+            fs::read_to_string(dir.join("transcript.md")).expect("md"),
+            export_markdown(&transcript(), "Weekly sync", &both)
+        );
+        // What the detail says is what a fresh read says.
+        assert_eq!(
+            f.store.get(&calls, &text, READY_ID, UiLanguage::En),
+            Ok(detail)
+        );
+    }
+
+    #[test]
+    fn an_empty_or_whitespace_title_or_name_is_empty_name_and_changes_no_file() {
+        // T-152 Acceptance 2 (failure branch, T074). meta.json, transcript.md and
+        // transcript.json are byte-identical. Bite: the check missing in rename or in
+        // rename_speaker; the check after a write; an ASCII-only trim; the error swallowed into
+        // Ok (a swallowed `?` at the name check).
+        let f = fixture();
+        let (calls, root, dir) = plant_named(&f);
+        let text = wire_root(&root);
+        let before = snapshot(&dir);
+        for bad in ["", "   ", "\t \n", "\u{a0}"] {
+            assert_eq!(
+                err_of(f.store.rename(&calls, &text, READY_ID, bad)),
+                coded(CallErrorCode::EmptyName),
+                "title {bad:?}"
+            );
+            assert_eq!(
+                err_of(f.store.rename_speaker(&calls, &text, READY_ID, "s1", bad)),
+                coded(CallErrorCode::EmptyName),
+                "name {bad:?}"
+            );
+            assert_eq!(snapshot(&dir), before, "{bad:?}");
+        }
+        assert_eq!(
+            serde_json::to_string(&coded(CallErrorCode::EmptyName)).expect("json"),
+            r#"{"code":"emptyName"}"#
+        );
+    }
+
+    #[test]
+    fn rename_refuses_the_call_this_process_records() {
+        // T-152 decisions #317: `recordingCall`, nothing written (the session owns meta.json
+        // while it records). Bite: the is_active check missing in either rename; the refusal
+        // swallowed; the check after the write.
+        let f = fixture();
+        let root = f.dir.path().join("calls");
+        fs::create_dir(&root).expect("root");
+        let calls = calls_in(Some(&root), &[]);
+        let files = f
+            .store
+            .create(&calls, &moscow_call())
+            .unwrap_or_else(|e| panic!("create: {e:?}"));
+        let dir = files.dir().to_path_buf();
+        let before = snapshot(&dir);
+        let text = wire_root(&root);
+        assert_eq!(
+            err_of(f.store.rename(&calls, &text, MOSCOW_ID, "New title")),
+            coded(CallErrorCode::RecordingCall)
+        );
+        assert_eq!(
+            err_of(
+                f.store
+                    .rename_speaker(&calls, &text, MOSCOW_ID, "s1", "Bob")
+            ),
+            coded(CallErrorCode::RecordingCall)
+        );
+        assert_eq!(snapshot(&dir), before);
+        assert_eq!(
+            serde_json::to_string(&coded(CallErrorCode::RecordingCall)).expect("json"),
+            r#"{"code":"recordingCall"}"#
+        );
+        drop(files);
+    }
+
+    #[test]
+    fn rename_of_an_unknown_speaker_a_gone_call_or_a_foreign_root_is_not_found_and_a_damaged_one_io_failed(
+    ) {
+        // T-152 decisions #317 (unknown call or speaker -> notFound); damaged -> ioFailed as
+        // `get` (open_call). Bite: an unknown speaker accepted as Ok (nothing renamed); a guard
+        // miss answered from the disk; a damaged call renamed through a default meta.
+        let f = fixture();
+        let (calls, root, dir) = plant_named(&f);
+        let text = wire_root(&root);
+        let before = snapshot(&dir);
+        assert_eq!(
+            err_of(f.store.rename_speaker(&calls, &text, READY_ID, "s9", "Bob")),
+            not_found()
+        );
+        assert_eq!(snapshot(&dir), before, "an unknown speaker changes nothing");
+        assert_eq!(
+            err_of(f.store.rename(&calls, &text, "2026-10-01_000000", "T")),
+            not_found()
+        );
+        assert_eq!(
+            err_of(
+                f.store
+                    .rename_speaker(&calls, &text, "2026-10-01_000000", "s1", "B")
+            ),
+            not_found()
+        );
+        let stranger = f.dir.path().join("stranger");
+        fs::create_dir(&stranger).expect("stranger");
+        plant(&stranger, READY_ID, CallState::Ready);
+        let foreign = wire_root(&stranger);
+        assert_eq!(
+            err_of(f.store.rename(&calls, &foreign, READY_ID, "T")),
+            not_found()
+        );
+        assert_eq!(
+            err_of(
+                f.store
+                    .rename_speaker(&calls, &foreign, READY_ID, "s1", "B")
+            ),
+            not_found()
+        );
+        // Damaged: meta.json is not there.
+        plant_value(&root, "2026-10-02_000000", None, true, true);
+        let damaged = snapshot(&root.join("2026-10-02_000000"));
+        assert_eq!(
+            err_of(f.store.rename(&calls, &text, "2026-10-02_000000", "T")).code,
+            CallErrorCode::IoFailed
+        );
+        assert_eq!(
+            err_of(
+                f.store
+                    .rename_speaker(&calls, &text, "2026-10-02_000000", "s1", "B")
+            )
+            .code,
+            CallErrorCode::IoFailed
+        );
+        assert_eq!(snapshot(&root.join("2026-10-02_000000")), damaged);
+    }
+
+    #[test]
+    fn rename_of_a_call_without_a_transcript_writes_only_meta_json() {
+        // T-152 seam: the transcript files are re-rendered "when transcript.json exists". A
+        // queued call keeps none and gets none. Bite: transcript.* created from nothing; a
+        // missing transcript.json reported as ioFailed.
+        let f = fixture();
+        let root = f.dir.path().join("calls");
+        fs::create_dir(&root).expect("root");
+        plant(&root, "2026-10-30_130000", CallState::ReadyToTranscribe);
+        let calls = calls_in(Some(&root), &[]);
+        let text = wire_root(&root);
+        let dir = root.join("2026-10-30_130000");
+        let got = f
+            .store
+            .rename(&calls, &text, "2026-10-30_130000", "Standup")
+            .expect("rename");
+        assert_eq!(got.state, WireState::Queued);
+        assert_eq!(read_json(&dir.join("meta.json"))["title"], "Standup");
+        assert_eq!(
+            names(&dir),
+            vec![
+                "meta.json".to_string(),
+                "mic.opus".to_string(),
+                "system.opus".to_string()
+            ]
+        );
+        let detail = f
+            .store
+            .rename_speaker(&calls, &text, "2026-10-30_130000", "me", "Alice")
+            .expect("speaker");
+        assert_eq!(
+            detail.speakers.first().map(|s| s.name.as_str()),
+            Some("Alice")
+        );
+        assert_eq!(names(&dir).len(), 3);
+    }
+
+    #[test]
+    fn a_write_fault_at_any_of_the_three_files_leaves_every_file_at_its_old_bytes() {
+        // T-152 Acceptance (atomicity): the write order is transcript.md, transcript.json,
+        // meta.json last (the commit point). A tmp name that is a folder fails exactly that one
+        // write; the others succeed (one fault, F-024), so the restore of the earlier files
+        // works. All three files stay as they were and the call answers ioFailed. Bite: the
+        // error swallowed at any one of the three writes (`let _ =`); a failed meta write that
+        // leaves the transcripts at the new names; the restore skipped; meta.json written first.
+        for fault in ["transcript.md.tmp", "transcript.json.tmp", "meta.json.tmp"] {
+            for speaker in [false, true] {
+                let f = fixture();
+                let (calls, root, dir) = plant_named(&f);
+                fs::create_dir(dir.join(fault)).expect("fault");
+                let before = snapshot(&dir);
+                let text = wire_root(&root);
+                let got = if speaker {
+                    f.store
+                        .rename_speaker(&calls, &text, READY_ID, "s1", "Colleague")
+                        .map(|_| ())
+                } else {
+                    f.store
+                        .rename(&calls, &text, READY_ID, "New title")
+                        .map(|_| ())
+                };
+                assert_eq!(
+                    err_of(got).code,
+                    CallErrorCode::IoFailed,
+                    "{fault} speaker={speaker}"
+                );
+                assert_eq!(snapshot(&dir), before, "{fault} speaker={speaker}");
+            }
+        }
+    }
+
+    // ---- delete ------------------------------------------------------------------------
+
+    /// A deleter that refuses one file name (or none), records what was claimed and how many
+    /// claims are alive; every claim sees the folder as it is when it is taken.
+    struct Probe {
+        refuse: Option<String>,
+        claimed: Mutex<Vec<String>>,
+        folder_sizes: Mutex<Vec<usize>>,
+        live: Arc<AtomicUsize>,
+    }
+
+    struct LiveClaim(Arc<AtomicUsize>);
+
+    impl Drop for LiveClaim {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, AtomicOrdering::SeqCst);
+        }
+    }
+
+    impl Probe {
+        fn new(refuse: Option<&str>) -> Probe {
+            Probe {
+                refuse: refuse.map(str::to_string),
+                claimed: Mutex::new(Vec::new()),
+                folder_sizes: Mutex::new(Vec::new()),
+                live: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+
+        fn claimed(&self) -> Vec<String> {
+            let mut v = self
+                .claimed
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            v.sort();
+            v
+        }
+
+        fn sizes(&self) -> Vec<usize> {
+            self.folder_sizes
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        }
+    }
+
+    impl FolderDeleter for Probe {
+        fn claim(&self, file: &Path) -> Result<Box<dyn Send>, InUse> {
+            let name = file
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            if let Some(dir) = file.parent() {
+                let size = fs::read_dir(dir).map(Iterator::count).unwrap_or(0);
+                self.folder_sizes
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(size);
+            }
+            if self.refuse.as_deref() == Some(name.as_str()) {
+                return Err(InUse(name));
+            }
+            self.claimed
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(name);
+            self.live.fetch_add(1, AtomicOrdering::SeqCst);
+            Ok(Box::new(LiveClaim(Arc::clone(&self.live))))
+        }
+    }
+
+    #[test]
+    fn delete_of_a_ready_call_removes_its_folder_whole_and_nothing_else() {
+        // T-152 Acceptance 3. Every file of the folder is claimed (the std deleter's claims are
+        // no-ops; the Probe's are counted), every claim is held before the first removal and
+        // dropped by the end. Bite: only meta.json or only the tracks removed; the folder
+        // removed without its files claimed; a claim taken after a removal (the folder is
+        // smaller than at the start); claims still alive after the call; a sibling call or the
+        // root removed; the folder left in place.
+        let f = fixture();
+        let (calls, root, dir) = plant_named(&f);
+        plant(&root, "2026-10-30_130000", CallState::ReadyToTranscribe);
+        let sibling = snapshot(&root.join("2026-10-30_130000"));
+        let all: Vec<String> = snapshot(&dir).into_iter().map(|(n, _)| n).collect();
+        assert_eq!(all.len(), 5);
+        let probe = Probe::new(None);
+        assert_eq!(
+            f.store
+                .delete_folder(&calls, &wire_root(&root), READY_ID, &probe),
+            Ok(())
+        );
+        assert!(!dir.exists(), "the folder is gone");
+        assert_eq!(probe.claimed(), all, "every file, by its bare name");
+        assert_eq!(
+            probe.sizes(),
+            vec![all.len(); all.len()],
+            "all claims are taken before anything is removed"
+        );
+        assert_eq!(
+            probe.live.load(AtomicOrdering::SeqCst),
+            0,
+            "claims released"
+        );
+        assert_eq!(snapshot(&root.join("2026-10-30_130000")), sibling);
+        assert!(root.is_dir());
+        // The core deleter does the same on its own.
+        plant_value(
+            &root,
+            "2026-10-01_000000",
+            Some(&meta_value("2026-10-01_000000", CallState::Ready)),
+            true,
+            true,
+        );
+        assert_eq!(
+            f.store.delete_folder(
+                &calls,
+                &wire_root(&root),
+                "2026-10-01_000000",
+                &StdFolderDeleter
+            ),
+            Ok(())
+        );
+        assert!(!root.join("2026-10-01_000000").exists());
+    }
+
+    #[test]
+    fn a_locked_file_gives_in_use_with_its_bare_name_and_the_folder_is_byte_identical() {
+        // T-152 Acceptance 4 (failure branch): `inUse{file: "mic.opus"}`, nothing removed. Each
+        // file in turn is the refused one, so the refusal comes first, in the middle and last
+        // whatever the directory order. Bite: files removed as they are claimed (a file gone when
+        // a later claim refuses); the refusal swallowed (Ok, or the claim skipped); the claims
+        // not released (live > 0); `file` a path or missing; the folder removed anyway.
+        let names_in_folder = {
+            let f = fixture();
+            let (_, _, dir) = plant_named(&f);
+            snapshot(&dir)
+                .into_iter()
+                .map(|(n, _)| n)
+                .collect::<Vec<_>>()
+        };
+        assert!(names_in_folder.contains(&"mic.opus".to_string()));
+        for refused in &names_in_folder {
+            let f = fixture();
+            let (calls, root, dir) = plant_named(&f);
+            let before = snapshot(&dir);
+            let probe = Probe::new(Some(refused));
+            let got = f
+                .store
+                .delete_folder(&calls, &wire_root(&root), READY_ID, &probe);
+            assert_eq!(err_of(got), in_use(refused), "{refused}");
+            assert_eq!(snapshot(&dir), before, "{refused}: byte-identical");
+            assert_eq!(probe.live.load(AtomicOrdering::SeqCst), 0, "{refused}");
+        }
+        assert_eq!(
+            serde_json::to_string(&in_use("mic.opus")).expect("json"),
+            r#"{"code":"inUse","file":"mic.opus"}"#
+        );
+    }
+
+    #[test]
+    fn delete_refuses_the_call_this_process_records_and_a_call_that_is_not_there() {
+        // T-152 Acceptance 4 (recordingCall) and decisions #317 (notFound). Nothing is claimed or
+        // removed. Bite: the is_active check missing; the guard skipped; a missing folder Ok.
+        let f = fixture();
+        let root = f.dir.path().join("calls");
+        fs::create_dir(&root).expect("root");
+        let calls = calls_in(Some(&root), &[]);
+        let files = f
+            .store
+            .create(&calls, &moscow_call())
+            .unwrap_or_else(|e| panic!("create: {e:?}"));
+        let before = snapshot(files.dir());
+        let text = wire_root(&root);
+        let probe = Probe::new(None);
+        assert_eq!(
+            err_of(f.store.delete_folder(&calls, &text, MOSCOW_ID, &probe)),
+            coded(CallErrorCode::RecordingCall)
+        );
+        assert_eq!(snapshot(files.dir()), before);
+        assert!(probe.claimed().is_empty() && probe.sizes().is_empty());
+        assert_eq!(
+            err_of(
+                f.store
+                    .delete_folder(&calls, &text, "2026-10-01_000000", &probe)
+            ),
+            not_found()
+        );
+        let stranger = f.dir.path().join("stranger");
+        fs::create_dir(&stranger).expect("stranger");
+        plant(&stranger, READY_ID, CallState::Ready);
+        assert_eq!(
+            err_of(
+                f.store
+                    .delete_folder(&calls, &wire_root(&stranger), READY_ID, &probe)
+            ),
+            not_found()
+        );
+        assert_eq!(
+            err_of(f.store.delete_folder(&calls, &text, "..", &probe)),
+            not_found()
+        );
+        assert!(
+            stranger.join(READY_ID).is_dir(),
+            "a foreign root is never touched"
+        );
+        assert!(probe.sizes().is_empty());
+        drop(files);
+    }
+
+    #[test]
+    fn a_damaged_folder_can_be_deleted() {
+        // T-152 Acceptance 5: a corrupt meta.json, no meta.json, a missing track, an unknown
+        // schema, and a stray file are all gone with the folder. Bite: delete_folder built on
+        // open_call (ioFailed for a damaged call); a missing track failing the claim.
+        let f = fixture();
+        let root = f.dir.path().join("calls");
+        fs::create_dir(&root).expect("root");
+        let calls = calls_in(Some(&root), &[]);
+        let text = wire_root(&root);
+        let corrupt = "2026-10-01_000001";
+        plant_value(&root, corrupt, None, true, true);
+        fs::write(root.join(corrupt).join("meta.json"), "{not json").expect("corrupt");
+        let no_meta = "2026-10-01_000002";
+        plant_value(&root, no_meta, None, true, true);
+        let no_track = "2026-10-01_000003";
+        plant_value(
+            &root,
+            no_track,
+            Some(&meta_value(no_track, CallState::Ready)),
+            true,
+            false,
+        );
+        let stray = "2026-10-01_000004";
+        plant_value(
+            &root,
+            stray,
+            Some(&meta_value(stray, CallState::Ready)),
+            true,
+            true,
+        );
+        fs::write(root.join(stray).join("notes.txt"), "mine").expect("stray");
+        for id in [corrupt, no_meta, no_track, stray] {
+            assert_eq!(
+                f.store.delete_folder(&calls, &text, id, &StdFolderDeleter),
+                Ok(()),
+                "{id}"
+            );
+            assert!(!root.join(id).exists(), "{id} is gone");
+        }
+        assert!(root.is_dir());
+        assert_eq!(names(&root), Vec::<String>::new());
     }
 }

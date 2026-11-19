@@ -1,5 +1,5 @@
 {
-  "_format": "Core-checked wire data of the Calls IPC (specs/007-call-mode-record contracts/ipc.md: calls_list, calls_get and the CallError of every calls_* command) for the Playwright IPC mock (T-143), the same pattern as overlay-wire.json and settings-wire.json. Each key except _format is serde_json of the builders in voicen_core::call::storage: list = list_wire(CallList of one entry per ListState incl. queued and one per FailReason, recovered, damaged, plus the unavailable root E:\\Gone, en); damagedRu = summary_of(the damaged entry, ru); detail = detail_of(the ready entry, its transcript, en); errors = CallError values (notFound, inUse with file, ioFailed with reason). The test storage::tests::calls_wire_fixture_matches_core pins it. Never edit by hand: change the builders or the test inputs, then regenerate.",
+  "_format": "Core-checked wire data of the Calls IPC (specs/007-call-mode-record contracts/ipc.md: calls_list, calls_get and the CallError of every calls_* command) for the Playwright IPC mock (T-143), the same pattern as overlay-wire.json and settings-wire.json. Each key except _format is serde_json of the builders in voicen_core::call::storage: list = list_wire(CallList of one entry per ListState incl. queued and one per FailReason, recovered, damaged, plus the unavailable root E:\\Gone, en); damagedRu = summary_of(the damaged entry, ru); detail = detail_of(the ready entry, its transcript, en); errors = CallError values (notFound, inUse with file, ioFailed with reason, emptyName, recordingCall). The test storage::tests::calls_wire_fixture_matches_core pins it. Never edit by hand: change the builders or the test inputs, then regenerate.",
   "list": {
     "calls": [
       {"id": "2026-10-30_140509", "root": "C:\\Calls", "title": "Call 30.10 14:05", "startedAt": "2026-10-30T14:05:09+03:00", "durationMs": null, "state": "recording"},
@@ -29,6 +29,8 @@
   "errors": {
     "notFound": {"code": "notFound"},
     "inUse": {"code": "inUse", "file": "mic.opus"},
-    "ioFailed": {"code": "ioFailed", "reason": "access_denied"}
+    "ioFailed": {"code": "ioFailed", "reason": "access_denied"},
+    "emptyName": {"code": "emptyName"},
+    "recordingCall": {"code": "recordingCall"}
   }
 }
