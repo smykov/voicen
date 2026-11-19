@@ -17,12 +17,15 @@
 //!   built again at the next call; "destroyed" comes from the window's own `Destroyed`
 //!   event, tagged with the reducer's generation.
 //! - The window is built hidden, undecorated, topmost, without a taskbar button and
-//!   non-activating (`focusable(false)`: `WS_EX_NOACTIVATE`, variant N of the spike). On
-//!   Windows the thread then writes the tool-window bits (`WS_EX_TOOLWINDOW` set,
-//!   `WS_EX_APPWINDOW` cleared), moves the hidden window to its placement with a raw
-//!   `SetWindowPos(SWP_NOACTIVATE)` and shows it once with `ShowWindow(SW_SHOWNOACTIVATE)`
-//!   ([`show_indicator`]). It is not click-through (Stop, Dismiss and the drag region take
-//!   clicks). No tao setter touches it afterwards (overlay.md §3).
+//!   non-activating (`focusable(false)`: `WS_EX_NOACTIVATE`, variant N of the spike). The
+//!   thread waits until its page finished loading (at most `PAGE_LOAD_WAIT`). On
+//!   Windows it then clears `WS_CAPTION` (tao keeps it on undecorated windows), writes the
+//!   tool-window bits (`WS_EX_TOOLWINDOW` set, `WS_EX_APPWINDOW` cleared), moves the hidden
+//!   window to its placement with a raw `SetWindowPos(SWP_NOACTIVATE)` and shows it once
+//!   with `ShowWindow(SW_SHOWNOACTIVATE)` ([`show_indicator`]). It is not click-through
+//!   (Stop, Dismiss and the drag region take clicks). No tao setter touches it afterwards
+//!   (overlay.md §3). At the stop the window is destroyed and its webview closed (the
+//!   label is freed at once).
 //! - Placement: core's `call::indicator::place_indicator` over the Win32 monitor work
 //!   areas (physical pixels, the primary first) and the stored `calls.indicator_position`.
 //!   The window's own `Moved` events are debounced to the drag's end; the window's
@@ -44,6 +47,7 @@ use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
+use tauri::webview::PageLoadEvent;
 use tauri::{
     AppHandle, Emitter, Manager, PhysicalPosition, Runtime, WebviewUrl, WebviewWindow,
     WebviewWindowBuilder, WindowEvent,
@@ -75,6 +79,10 @@ pub const TICK_INTERVAL: Duration = Duration::from_millis(100);
 /// (the end of a drag).
 const MOVE_SETTLE: Duration = Duration::from_millis(300);
 
+/// How long a freshly built, hidden window waits for its page to finish loading before it
+/// is shown anyway (a page that never reports its load still gets its window).
+const PAGE_LOAD_WAIT: Duration = Duration::from_secs(2);
+
 /// The page's app URL (`src/routes/call-indicator`).
 const URL: &str = "call-indicator";
 
@@ -99,6 +107,8 @@ struct Mailbox {
     /// The last `Moved` of a window not yet handled: its generation, the position and
     /// when it came.
     moved: Option<(u64, PhysicalPosition<i32>, Instant)>,
+    /// The generation of the newest window whose page finished loading.
+    loaded: Option<u64>,
     /// Something changed since the thread last looked.
     woken: bool,
     /// The thread's receipt: what it settled on after its last handled wake that did not
@@ -192,6 +202,26 @@ impl Shared {
                 None
             },
         }
+    }
+
+    /// Records that the page of the window built with `generation` finished loading and
+    /// wakes the thread if it waits for it ([`Shared::wait_loaded`]); not a wake of the
+    /// main loop (`woken` stays as it is).
+    fn mark_loaded(&self, generation: u64) {
+        self.lock().loaded = Some(generation);
+        self.wake.notify_one();
+    }
+
+    /// Waits until the page of the window built with `generation` finished loading, or
+    /// `hang` passed; returns whether it loaded. Other posts meanwhile stay in the mailbox
+    /// for the next wake.
+    fn wait_loaded(&self, generation: u64, hang: Duration) -> bool {
+        let mailbox = self.lock();
+        let (mailbox, _) = self
+            .wake
+            .wait_timeout_while(mailbox, hang, |m| m.loaded != Some(generation))
+            .unwrap_or_else(PoisonError::into_inner);
+        mailbox.loaded == Some(generation)
     }
 
     /// Stores the thread's receipt and wakes every [`settled`] caller.
@@ -413,8 +443,15 @@ impl<R: Runtime> IndicatorThread<R> {
             WindowAction::Destroy => {
                 let window = self.window.take();
                 self.placed = None;
+                // After the window's destroy, its webview is closed too: that frees the
+                // label in tauri's manager at once (`Webview::close`), on a runtime whose
+                // destroy posts no `Destroyed` (the mock) as on Wry, where the queued close
+                // finds the window gone and the window's own `Destroyed` follows. A failed
+                // destroy closes nothing, so the label stays until a real `Destroyed`.
                 let destroyed = std::panic::catch_unwind(AssertUnwindSafe(|| match &window {
-                    Some(window) => window.destroy(),
+                    Some(window) => window
+                        .destroy()
+                        .and_then(|()| AsRef::<tauri::Webview<R>>::as_ref(window).close()),
                     None => Ok(()),
                 }));
                 let failed = match destroyed {
@@ -462,10 +499,13 @@ impl<R: Runtime> IndicatorThread<R> {
     }
 
     /// Builds the window hidden and non-activating, registers its `Destroyed` and
-    /// `Moved` listeners (both tagged with this build's generation), places and shows it
-    /// without activation ([`IndicatorThread::reveal`]) and emits the current state (a
-    /// page not listening yet catches up through `call_indicator_state`).
+    /// `Moved` listeners (both tagged with this build's generation), waits for its page to
+    /// finish loading (at most [`PAGE_LOAD_WAIT`], so it never shows a blank page), places
+    /// and shows it without activation ([`IndicatorThread::reveal`]) and emits the current
+    /// state (a page not listening yet catches up through `call_indicator_state`).
     fn build(&mut self) -> tauri::Result<WebviewWindow<R>> {
+        let generation = self.lifecycle.generation();
+        let loads = Arc::clone(&self.shared);
         let window = WebviewWindowBuilder::new(&self.app, LABEL, WebviewUrl::App(URL.into()))
             .title(TITLE)
             .inner_size(WIDTH, HEIGHT)
@@ -477,9 +517,13 @@ impl<R: Runtime> IndicatorThread<R> {
             .focused(false)
             .focusable(false)
             .visible(false)
+            .on_page_load(move |_window, payload| {
+                if payload.event() == PageLoadEvent::Finished {
+                    loads.mark_loaded(generation);
+                }
+            })
             .build()?;
         let shared = Arc::clone(&self.shared);
-        let generation = self.lifecycle.generation();
         window.on_window_event(move |event| match event {
             WindowEvent::Destroyed => shared.post(|m| m.destroyed.push(generation)),
             WindowEvent::Moved(position) => {
@@ -488,6 +532,9 @@ impl<R: Runtime> IndicatorThread<R> {
             }
             _ => {}
         });
+        // A page that does not load in time is shown anyway (no failure: the window works
+        // once it loads).
+        let _loaded = self.shared.wait_loaded(generation, PAGE_LOAD_WAIT);
         self.placed = self.reveal(&window);
         if let Err(err) = self.app.emit_to(LABEL, STATE_EVENT, self.state()) {
             self.warn(io_os_code(&err));
@@ -580,7 +627,8 @@ fn clamp_window<R: Runtime>(
 /// placement and shows it without activating it (T-130). Runs on the `call-indicator`
 /// thread and makes no tao call:
 ///
-/// 1. reads `GWL_EXSTYLE`, ORs in `WS_EX_TOOLWINDOW` and clears `WS_EX_APPWINDOW` (the
+/// 1. clears `WS_CAPTION` in `GWL_STYLE` (tao sets it even without decorations), reads
+///    `GWL_EXSTYLE`, ORs in `WS_EX_TOOLWINDOW` and clears `WS_EX_APPWINDOW` (the
 ///    creation's `WS_EX_NOACTIVATE | WS_EX_TOPMOST` stay; no click-through bits);
 /// 2. writes it with `SetWindowLongPtrW` and applies it with `SetWindowPos(SWP_FRAMECHANGED
 ///    | SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER)`;
@@ -666,9 +714,9 @@ mod win32 {
         EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        GetWindowLongPtrW, GetWindowRect, SetWindowLongPtrW, SetWindowPos, GWL_EXSTYLE,
+        GetWindowLongPtrW, GetWindowRect, SetWindowLongPtrW, SetWindowPos, GWL_EXSTYLE, GWL_STYLE,
         MONITORINFOF_PRIMARY, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-        SWP_NOZORDER, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
+        SWP_NOZORDER, WS_CAPTION, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
     };
 
     /// The calling thread's last error as a log code; `None` when it is 0.
@@ -687,9 +735,34 @@ mod win32 {
             .filter(|code| *code != 0)
     }
 
-    /// `WS_EX_TOOLWINDOW` set and `WS_EX_APPWINDOW` cleared, applied with a frame change
-    /// that neither moves, sizes, reorders nor activates the window.
+    /// `WS_CAPTION` cleared, `WS_EX_TOOLWINDOW` set and `WS_EX_APPWINDOW` cleared, applied
+    /// with a frame change that neither moves, sizes, reorders nor activates the window.
     pub(super) fn restyle(hwnd: HWND) -> Result<(), Option<i32>> {
+        // tao writes `WS_CAPTION` on every top-level window, `decorations(false)` included
+        // (tao 0.37.1 window_state.rs `to_window_styles`; the frame is removed only through
+        // its `WM_NCCALCSIZE`): clear it so the window is undecorated in its style too. The
+        // drag's `WM_NCLBUTTONDOWN(HTCAPTION)` move loop needs no caption bit.
+        // SAFETY: clears the calling thread's last error.
+        unsafe { SetLastError(WIN32_ERROR(0)) };
+        // SAFETY: any handle; a stale one returns 0 with the last error set.
+        let style = unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) };
+        if style == 0 {
+            if let Some(code) = last_error() {
+                return Err(Some(code));
+            }
+        }
+        let wanted = style & !(WS_CAPTION.0 as isize);
+        if wanted != style {
+            // SAFETY: clears the calling thread's last error.
+            unsafe { SetLastError(WIN32_ERROR(0)) };
+            // SAFETY: any handle; a failure returns 0 with the last error set.
+            let previous = unsafe { SetWindowLongPtrW(hwnd, GWL_STYLE, wanted) };
+            if previous == 0 {
+                if let Some(code) = last_error() {
+                    return Err(Some(code));
+                }
+            }
+        }
         // SAFETY: clears the calling thread's last error.
         unsafe { SetLastError(WIN32_ERROR(0)) };
         // SAFETY: any handle; a stale one returns 0 with the last error set.
