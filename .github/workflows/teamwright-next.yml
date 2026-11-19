@@ -151,9 +151,14 @@ jobs:
           done
           [ "$busy" != own ] || { say "**$TASK_ID**: chain stopped: its previous stage did not end. $RUN_URL"; exit 1; }
 
+          # ls-remote --exit-code: 0 the branch exists, 2 it does not; any other code is a git failure
+          # (network, auth), never "no branch". fetched=no while the branch exists: the fetch failed.
           ref="origin/$MAIN"
-          if git ls-remote --exit-code --heads origin "task/$TASK_ID" >/dev/null; then
-            git fetch -q origin "task/$TASK_ID" && ref=FETCH_HEAD
+          lsrc=0
+          git ls-remote --exit-code --heads origin "task/$TASK_ID" >/dev/null || lsrc=$?
+          fetched=no
+          if [ "$lsrc" = 0 ]; then
+            git fetch -q origin "task/$TASK_ID" && ref=FETCH_HEAD && fetched=yes
           fi
           rec="$(git show "$ref:docs/tasks/$TASK_ID.md")" || { say "**$TASK_ID**: no task record. $RUN_URL"; exit 1; }
           status="$(sed -n 's/^status:[[:space:]]*//p' <<<"$rec" | head -n 1)"
@@ -170,13 +175,19 @@ jobs:
               case "$recstage" in red-tests | implement) next="$recstage" ;; *) next=red-tests ;; esac ;;
             NEEDS_REVIEW) next=review ;;
             CODE_COMPLETE | VERIFIED | DONE)
-              # Nothing to merge (no task/<ID>, or no commit on it that is not on the default branch):
-              # git answers, the chain ends without a ci.yml run or a pull request (T-231).
-              ahead=0
-              if [ "$ref" = FETCH_HEAD ]; then
-                ahead="$(git rev-list --count "origin/$MAIN..FETCH_HEAD")" || ahead=0
-              fi
-              [[ "$ahead" =~ ^[0-9]+$ ]] || ahead=0
+              # Nothing to merge only on git's positive answer (T-231): ls-remote exit 2 (no task/<ID>),
+              # or a numeric rev-list count of 0. Any other ls-remote code, a failed fetch, a failed
+              # rev-list or a non-numeric count ends red: the commits were not counted, no ci.yml run,
+              # no pull request.
+              uncounted="**$TASK_ID**: $status, the commits of task/$TASK_ID could not be counted"
+              case "$lsrc" in
+                2) ahead=0 ;;
+                0)
+                  [ "$fetched" = yes ] || { say "$uncounted (git fetch failed). $RUN_URL"; exit 1; }
+                  ahead="$(git rev-list --count "origin/$MAIN..FETCH_HEAD")" || { say "$uncounted (git rev-list failed). $RUN_URL"; exit 1; }
+                  [[ "$ahead" =~ ^[0-9]+$ ]] || { say "$uncounted (git rev-list gave no count). $RUN_URL"; exit 1; } ;;
+                *) say "$uncounted (git ls-remote exit $lsrc). $RUN_URL"; exit 1 ;;
+              esac
               if [ "$ahead" = 0 ]; then
                 say "**$TASK_ID**: $status, nothing to merge from task/$TASK_ID; the chain ends, verify locally (/teamwright:verify $TASK_ID). $RUN_URL"
                 exit 0
