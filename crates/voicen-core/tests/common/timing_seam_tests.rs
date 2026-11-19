@@ -6,9 +6,11 @@
 
 use std::cell::Cell;
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
-use crate::common::timing::{late_answer, skip, with_premise, M};
+use crate::common::timing::{eventually_progressing, late_answer, skip, with_premise, M};
 
 /// Set by the parent tests below; the two `child_*` tests do nothing without it, so
 /// a plain run of this binary only checks that they pass.
@@ -164,4 +166,69 @@ fn with_premise_budget_is_the_parameter_not_a_constant_of_the_helper() {
         "{} run(s) under a zero budget",
         runs.get()
     );
+}
+
+/// A counter that moves one step every `every` for `steps` steps (or until `stop`
+/// is set), on its own thread: a backlog processed at a steady, slow rate.
+fn slow_counter(every: Duration, steps: usize) -> (Arc<AtomicUsize>, std::thread::JoinHandle<()>) {
+    let count = Arc::new(AtomicUsize::new(0));
+    let c = Arc::clone(&count);
+    let h = std::thread::spawn(move || {
+        for _ in 0..steps {
+            std::thread::sleep(every);
+            c.fetch_add(1, Ordering::SeqCst);
+        }
+    });
+    (count, h)
+}
+
+#[test]
+fn a_progress_wait_passes_when_the_count_keeps_advancing_past_the_budget() {
+    // T-239 slow-progress leg: 60 steps of 20 ms take about 1.2 s in total, four
+    // times the 300 ms budget, but the count grows throughout, so the wait is not
+    // over: the verdict must not depend on how long the total work takes. Bite: a
+    // total-time wait (`eventually`), or a budget that is not reset by progress.
+    let (count, h) = slow_counter(Duration::from_millis(20), 60);
+    let ok = eventually_progressing(
+        Duration::from_millis(300),
+        || count.load(Ordering::SeqCst),
+        || count.load(Ordering::SeqCst) >= 60,
+    );
+    h.join().expect("counter thread");
+    assert!(ok, "the count advanced to the end, so the wait must pass");
+}
+
+#[test]
+fn a_progress_wait_fails_when_the_count_stops_before_done() {
+    // T-239 stopped-counter leg: the count advances a few steps, then stops short of
+    // `done`. The wait must end with `false` (a hang is still caught) and only after
+    // the budget has passed with no progress (a lower bound, never an upper one).
+    // Bite: a wait that never fails (no budget), or one that stops reading progress.
+    let (count, h) = slow_counter(Duration::from_millis(20), 5);
+    let budget = Duration::from_millis(300);
+    let (ok, took) = crate::common::timing::measure(|| {
+        eventually_progressing(
+            budget,
+            || count.load(Ordering::SeqCst),
+            || count.load(Ordering::SeqCst) >= 60,
+        )
+    });
+    h.join().expect("counter thread");
+    assert!(!ok, "the count stopped at 5 of 60, so the wait must fail");
+    crate::common::timing::at_least(took, budget);
+}
+
+#[test]
+fn a_progress_wait_fails_when_the_count_never_moves() {
+    // T-239: a hung consumer from the start (no step at all) fails as well. Bite: a
+    // wait that treats the first reading as progress forever.
+    let ok = eventually_progressing(Duration::from_millis(100), || 0, || false);
+    assert!(!ok, "no progress at all must fail");
+}
+
+#[test]
+fn a_progress_wait_passes_at_once_when_done_already_holds() {
+    // T-239: `done` is checked before any budget matters, so a zero budget with a
+    // finished backlog passes. Bite: a wait that fails first on an empty budget.
+    assert!(eventually_progressing(Duration::ZERO, || 7, || true));
 }
