@@ -1014,8 +1014,8 @@ for pm in "teamwright-agent.yml|$ag_push| push \"\$url\"" "teamwright-next.yml|$
     failed=$((failed + 1))
   fi
 done
-expect "real agent: the push step takes its token from its own env and the hooks from the pre-session commit, not install-hooks.sh" \
-  bash -c 'grep -q -x -F "          PUSH_TOKEN: \${{ github.token }}" <<<"$1" && grep -q -F "git archive \"\$BEFORE\" scripts/hooks" <<<"$1" && grep -q -F "core.hooksPath=" <<<"$1" && ! grep -q -F "install-hooks.sh" <<<"$1"' _ "$(ag_step "$ag_push")"
+expect "real agent: the push step takes its token from its own env and the hooks from the dispatched commit (HOOKS_FROM), not install-hooks.sh" \
+  bash -c 'grep -q -x -F "          PUSH_TOKEN: \${{ github.token }}" <<<"$1" && grep -q -F "git archive \"\$HOOKS_FROM\" scripts/hooks" <<<"$1" && grep -q -F "core.hooksPath=" <<<"$1" && ! grep -q -F "install-hooks.sh" <<<"$1"' _ "$(ag_step "$ag_push")"
 expect "real agent: the push step reads BEFORE from the branch step's output (an env file the session can write does not decide)" \
   bash -c 'grep -q -x -F "          BEFORE: \${{ steps.branch.outputs.before }}" <<<"$1"' _ "$(ag_step "$ag_push")"
 # A scope added to a real head is refused at the first changed header line (R14).
