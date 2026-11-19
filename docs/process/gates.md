@@ -800,7 +800,13 @@ read the log it prints):
    `npm|pnpm|yarn [run] test[:*]`, `vitest`, `jest`, `phpunit`, `pest`,
    `php artisan test`, `gradle(w) test|check`, `mvn test` — also behind `uv run`,
    `poetry run`, `npx`, `pnpm exec` and the like, inside `sh -c '…'`, `eval`,
-   `docker run|exec`, a wrapper script's arguments, and inside
+   `docker run|exec`, a wrapper script's arguments, behind `systemd-run` (local edit,
+   T-189: its options are read against two owned tables, `SD_FLAGS` and `SD_VALUE`;
+   after `--` or the first word without a dash the rest is judged as its own command, so
+   `systemd-run --scope -q --slice=agent-tests.slice -- make check` is refused like
+   `make check` and the same prefix before `scripts/tw-gate --top` passes; an option the
+   tables cannot read makes every later suffix count, refusal-biased; not read:
+   `systemd-run` through a variable or `$(…)`, `run0`, nesting deeper than 3), and inside
    `scripts/tw-run <area> -- <cmd>`; plus every command the config names: each area's
    `gate_command`, `test_command` and `test_select_command` and the top-level
    `gate_command` (a repository script such as `tool/gate.sh` by its name, a
