@@ -1,0 +1,10 @@
+guarantee: AC-4: scripted 429 writes pp_http_status=429
+file: crates/voicen-core/src/diag/format.rs
+added_by: test-writer
+--- old
+                    pair(out, "pp_http_status", status);
+--- new
+                    if status != 429 {
+                        pair(out, "pp_http_status", status);
+                    }
+--- end
