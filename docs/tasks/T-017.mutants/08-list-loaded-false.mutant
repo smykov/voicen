@@ -1,0 +1,8 @@
+guarantee: AC-6: list reports loaded for the held model
+file: crates/voicen-core/src/local_models/service.rs
+added_by: test-writer
+--- old
+                    loaded: in_memory == Some(id),
+--- new
+                    loaded: { let _ = in_memory; false },
+--- end

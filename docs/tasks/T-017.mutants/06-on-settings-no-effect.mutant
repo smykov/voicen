@@ -1,0 +1,8 @@
+guarantee: AC-5: a settings save unloads the model for another id / engine
+file: crates/voicen-core/src/local_models/residency.rs
+added_by: test-writer
+--- old
+        self.on_engine_or_model_changed(selected);
+--- new
+        let _ = selected;
+--- end

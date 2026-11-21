@@ -491,6 +491,37 @@ fn a_builtin_press_with_no_model_never_loads_and_keeps_the_audio_with_the_engine
     r.assert_no_load_ever();
 }
 
+#[test]
+fn a_builtin_press_with_a_selected_model_missing_on_disk_never_loads_and_fails_no_local_model() {
+    // The same failure branch with a model SELECTED but its file absent (the store
+    // answers `None`): no prewarm of a made-up path, and `transcribe` fails
+    // `NoLocalModel` at the missing file instead of delivering an empty text.
+    // Bite: a swallowed `NoLocalModel` at `path_if_downloaded` in
+    // `BuiltinEngine::transcribe` (an empty text delivered). A prewarm with a made-up
+    // path is not observable here: `ModelResidency::load` refuses a missing file
+    // (`check_file`) before the loader is called.
+    let r = rig(&builtin_settings(Some("tiny")), &[], &["tiny"], None);
+    r.hold();
+
+    match r.jobs().as_slice() {
+        [DictationEvent::JobFinished {
+            outcome: OutcomeCode::Failed,
+            failure: Some("NoLocalModel"),
+            local: None,
+            ..
+        }] => {}
+        other => panic!("jobs {other:?}"),
+    }
+    assert_eq!(r.clipboard.texts(), Vec::<String>::new(), "nothing copied");
+    assert!(
+        !r.paster.calls().contains(&PasterCall::SendCtrlV),
+        "nothing pasted: {:?}",
+        r.paster.calls()
+    );
+    assert_eq!(r.temp.stored_ids().len(), 1, "the audio is kept pending");
+    r.assert_no_load_ever();
+}
+
 // ---- 5. ModelResidency::on_settings ------------------------------------------------------
 
 fn residency() -> (Arc<ModelResidency>, Arc<FakeLoader>, Arc<FakeMono>, TempDir) {
