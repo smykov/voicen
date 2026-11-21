@@ -259,6 +259,66 @@ fn the_call_part_is_started_by_call_start_calls_not_by_build_app() {
 }
 
 #[test]
+fn a_second_start_calls_writes_one_call_start_failed_line() {
+    // T-220 failure branch (T-128 r1#2): `start_calls` on an app that already has the call part
+    // returns `Err(AlreadyExists)` (the one failure the public API can force: the rig always
+    // manages the Log and the settings service, and a thread spawn cannot be made to fail) and
+    // writes exactly one `warning kind=call_start_failed` line, written inside `start_calls`
+    // like dictation's `dictation_start_failed`. The first start (Ok) wrote none, the part
+    // already managed is neither removed nor replaced, and its worker still serves a request.
+    // Bite: no line on the Err (count 0), the line written twice (count 2), a line written on
+    // the Ok path too (count != 0 after the first start), the second start replacing the managed
+    // session (the `ptr_eq` check) or stopping the worker (no `call_requested`), a wrong kind
+    // literal (no whole-word match).
+    let _serial = serial();
+    let rig = CallRig::started(
+        WavSource::new(),
+        FakeDisk::with_available(100_000_000_000),
+        plain_opener(),
+    );
+    assert_eq!(
+        rig.count(&["warning", "kind=call_start_failed"]),
+        0,
+        "the Ok start wrote a call_start_failed line"
+    );
+    let first = rig
+        .session()
+        .expect("premise: the first start manages a session");
+
+    let second = rig.try_start(
+        WavSource::new(),
+        FakeDisk::with_available(100_000_000_000),
+        plain_opener(),
+    );
+
+    let err = second.expect_err("a second start_calls on the same app returned Ok");
+    assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+    assert!(
+        holds_for_a_while(|| rig.count(&["warning", "kind=call_start_failed"]) == 1),
+        "expected exactly one `warning kind=call_start_failed`, got {:?}",
+        rig.lines(&["call_start_failed"])
+    );
+    assert_eq!(
+        rig.count(&["warning", "kind=call_start_failed"]),
+        1,
+        "the failed start wrote no line, or more than one"
+    );
+    let still = rig
+        .session()
+        .expect("the failed start removed the call part");
+    assert!(
+        Arc::ptr_eq(&first, &still),
+        "the failed start replaced the managed session"
+    );
+    call::request(rig.handle(), CallRequest::Record(CallSource::Tray));
+    assert!(
+        eventually(|| rig.count(&["call_requested", "source=tray"]) == 1),
+        "the first part's worker did not serve a request after the failed start"
+    );
+    rig.stop_call();
+}
+
+#[test]
 fn a_refusal_reaches_the_notifier_once() {
     // AC6 (T029; I-d): a refused start (the system track has no device) offers the one shared
     // notifier exactly one message, the id of core's `refused_notice(System, NoDevice)`, no

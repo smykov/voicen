@@ -81,7 +81,7 @@ use voicen_core::call::{
     CallId, CallNotice, CallSource, CallStore, SwitchRefusal, Track, TrackSource,
 };
 use voicen_core::clock::{MonotonicClock, SystemClock};
-use voicen_core::diag::{Log, LogEvent};
+use voicen_core::diag::{Log, LogEvent, WarningKind};
 use voicen_core::local_models::download::DiskSpace;
 use voicen_core::platform::{Clipboard, Notifier};
 use voicen_core::secrets as key_store;
@@ -238,29 +238,38 @@ pub fn file_opener() -> TrackOpener {
 /// (`assemble`'s wiring) and, for the tray flag, the tray (`run()` calls this after
 /// `start_dictation`, so the tray exists). Starts no call. `Err` when a managed part is
 /// missing, the app already has a call part (then nothing is started) or a thread could
-/// not be started.
+/// not be started. Every `Err` after the managed log is found has written one
+/// `warning kind=call_start_failed [os_code=<n>]` line (T-220; the kind and the OS code
+/// only); without a managed log nothing can be written.
 pub fn start_calls<R: Runtime>(app: &AppHandle<R>, ports: CallPorts) -> io::Result<()> {
     let log = app
         .try_state::<Arc<Log>>()
         .map(|log| Arc::clone(&log))
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "the app manages no log"))?;
+    let failed = |err: io::Error| {
+        log.write(LogEvent::Warning {
+            kind: WarningKind::CallStartFailed,
+            os_code: err.raw_os_error(),
+        });
+        err
+    };
     let service = app
         .try_state::<Arc<SettingsService>>()
         .map(|service| Arc::clone(&service))
         .ok_or_else(|| {
-            io::Error::new(
+            failed(io::Error::new(
                 io::ErrorKind::NotFound,
                 "the app manages no settings service",
-            )
+            ))
         })?;
     if app.try_state::<CallPart>().is_some()
         || app.try_state::<Arc<CallSession>>().is_some()
         || app.try_state::<Arc<PassQueue>>().is_some()
     {
-        return Err(io::Error::new(
+        return Err(failed(io::Error::new(
             io::ErrorKind::AlreadyExists,
             "the app already has a call part",
-        ));
+        )));
     }
     let CallPorts {
         source,
@@ -315,16 +324,17 @@ pub fn start_calls<R: Runtime>(app: &AppHandle<R>, ports: CallPorts) -> io::Resu
     }));
     let wake = Arc::new(Wake::default());
     let (requests, received) = mpsc::channel();
-    spawn_tick(Arc::downgrade(&session), Arc::clone(&wake), mono)?;
+    spawn_tick(Arc::downgrade(&session), Arc::clone(&wake), mono).map_err(failed)?;
     spawn_worker(
         Arc::clone(&session),
         received,
         Arc::clone(&wake),
-        log,
+        Arc::clone(&log),
         notifier,
     )
-    .inspect_err(|_| wake.close())?;
-    let opener = spawn_opener::<R>()?;
+    .inspect_err(|_| wake.close())
+    .map_err(failed)?;
+    let opener = spawn_opener::<R>().map_err(failed)?;
     app.manage(store);
     app.manage(queue);
     app.manage(session);
