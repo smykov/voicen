@@ -2,7 +2,7 @@
 
 **Code:** `crates/voicen-core/src/dictation.rs` (`DictationSession`), the controller inputs in `crates/voicen-core/src/recording/mod.rs` (`hotkey_registration`, `notice`, `live_id`, `Release::held`), the ports and fakes in `crates/voicen-core/src/platform.rs`, `audio::mix_to_mono`, `crates/voicen-core/src/test_support/realtime.rs`, `crates/voicen-core/src/win32_data.rs`, `crates/voicen-core/src/microphone.rs` (T-012), `crates/voicen-core/src/pending.rs` (T-209) · **Tests that pin it:** `crates/voicen-core/tests/dictation_session.rs` (all), `crates/voicen-core/tests/audio_device.rs` (all, T-012), `microphone::tests::*`, `recording::tests::device_lost_*`, `recording::tests::suspend_*` (T-010), `recording::tests::{failed_hotkey_registration_is_tray_hotkey_error_above_every_state_until_registered, successful_registration_clears_only_hotkey_error, notice_*, press_drops_a_notice_and_it_is_not_reshown, live_id_is_the_recording_on_and_none_otherwise}`, `win32_data::tests::*`, `tests/fakes.rs` (the session fakes)
 
-Tasks: T-051 (split from T-006 by decision #64), T-009 (toggle, 10-minute maximum, Esc), T-012 (microphone choice, fallback notice, device loss), T-211 (dead worker). Decisions: #1, #274, #47, #48, #63 (superseded for the mode by T-009), #64. Class `dictation-session`; no `docs/failures.md` entry of this class yet, so the defects below are the risks the T-051 analysis named, not incidents.
+Tasks: T-051 (split from T-006 by decision #64), T-009 (toggle, 10-minute maximum, Esc), T-012 (microphone choice, fallback notice, device loss), T-211 (dead worker), T-017 (built-in prewarm and hold). Decisions: #1, #274, #47, #48, #63 (superseded for the mode by T-009), #64. Class `dictation-session`; no `docs/failures.md` entry of this class yet, so the defects below are the risks the T-051 analysis named, not incidents.
 
 ## Invariants
 
@@ -134,6 +134,13 @@ Tasks: T-051 (split from T-006 by decision #64), T-009 (toggle, 10-minute maximu
 - **What breaks if you violate it:** the shell computing modifier bits, virtual keys or "elevated" on its own is a second, Windows-only source: a wrong code or a reversed comparison is caught only on Windows CI, or not at all.
 - **Where it is enforced:** `hotkey_codes` (always `MOD_NOREPEAT`; Win polled as left or right), `released` (the first key found up releases), `target_elevated` (unknown own or target level = elevated, analysis Q4); tests against independent literal tables. T-006 cross-checks the values against `windows::Win32` constants on Windows CI.
 - **Don't:** poll only `VK_LWIN`; treat an unknown integrity level as safe.
+
+### A BuiltinLocal press holds the model's idle countdown for the capture's life; an Api press never touches the residency (T-017)
+
+- **Defect that produced it:** none in the failure log (design risk, spec 002 FR-013, FR-015: a recording longer than the idle limit would unload the model it is about to use, and a prewarm on every press would load a model for an Api user).
+- **What breaks if you violate it:** the hold taken before the capture opens outlives a failed open and keeps the model in memory; a hold tied to the job, not the capture, lets the idle timer unload the model during a long recording; a prewarm for a non-BuiltinLocal engine loads a model nobody asked for.
+- **Where it is enforced:** `hotkey_pressed` reads the engine from the press snapshot (`builtin_press`) and, only for `BuiltinLocal`, calls `prewarm_for` after the capture opens: `residency.recording_started()` (kept in the capture's `_builtin_hold`, dropped with it on stop, discard, cancel, loss or shutdown) and, when the selected model is downloaded, `prewarm`. A BuiltinLocal press with no model selected holds but never loads. Tests: `crates/voicen-core/tests/builtin_session.rs`.
+- **Don't:** take the hold before the capture opens; read the engine at `start`; prewarm for `Api` / `LocalServer`.
 
 ## Rejected approaches
 
