@@ -59,11 +59,15 @@ use std::time::{Duration, Instant};
 
 use crate::audio::{mix_to_mono, AudioBuffer};
 use crate::diag::{LogsNoticeSink, LogsUnwritableReason};
+use crate::engine::builtin::BuiltinDeps;
+use crate::engine::engine_for;
 use crate::events::{DeviceKind, DictationEvent, PipelineObserver, WarningCode};
 use crate::i18n::{
     MessageId, MIC_NAME_UNNAMED, NOTICE_HOTKEY_UNAVAILABLE, NOTICE_LOGS_UNWRITABLE,
     NOTICE_MIC_FALLBACK, NOTICE_RETRY_UNAVAILABLE,
 };
+use crate::local_models::catalog::ModelId;
+use crate::local_models::residency::RecordingGuard;
 use crate::microphone::{choose, Choice, MicrophoneState};
 use crate::pipeline::{
     EngineFactory, JobReport, Pipeline, PipelineDeps, PressContext, RetryOutcome,
@@ -79,16 +83,21 @@ use crate::recording::{
 use crate::settings::gate::{blocked_actions, dictation_gate, SettingsTab, ShellAction};
 use crate::settings::service::SettingsService;
 use crate::settings::FieldId;
-use crate::settings::Settings;
+use crate::settings::{EngineKind, Settings};
 
 /// Everything the session talks to. The session builds its one `Pipeline` from
 /// `pipeline` (so the observer and the paster it uses are the pipeline's own).
 pub struct SessionDeps {
     pub pipeline: PipelineDeps,
-    /// Replaces the pipeline's default factory (`engine::engine_for` without
-    /// built-in deps): the shell's closure over `engine_for` with its
-    /// `BuiltinDeps` (T-017), test fakes.
+    /// Replaces the pipeline's default factory (`engine::engine_for` over
+    /// `builtin`): test fakes only.
     pub engine_factory: Option<Box<EngineFactory>>,
+    /// The app's one built-in engine deps (T-017): the default factory is
+    /// `engine_for(settings, creds, builtin.as_ref())`, and a press whose snapshot
+    /// has `engine == BuiltinLocal` holds `residency.recording_started()` for the
+    /// recording's life and prewarms the snapshot's downloaded model. `None`: no
+    /// built-in engine (a BuiltinLocal job ends `EngineNotConfigured`).
+    pub builtin: Option<BuiltinDeps>,
     pub audio: Arc<dyn AudioSource>,
     pub indicator: Arc<dyn Indicator>,
     pub requests: Arc<dyn ShellRequests>,
@@ -162,6 +171,8 @@ struct Shared {
     /// The pipeline's own instances (cloned from `PipelineDeps` before the build).
     observer: Arc<dyn PipelineObserver>,
     paster: Arc<dyn Paster>,
+    /// The built-in engine deps the pipeline's default factory also uses.
+    builtin: Option<BuiltinDeps>,
     /// To the loss thread; every capture sink holds a clone.
     losses: mpsc::Sender<Loss>,
 }
@@ -199,6 +210,37 @@ struct LiveCapture {
     kind: DeviceKind,
     handle: Box<dyn CaptureHandle>,
     sink: Arc<CaptureSink>,
+    /// A BuiltinLocal recording's hold on the residency's idle countdown, dropped
+    /// with the capture (the recording ended: stop, discard, cancel, loss or
+    /// shutdown).
+    _builtin_hold: Option<RecordingGuard>,
+}
+
+/// What a press snapshot asks of the built-in engine: `None` when its engine is
+/// not BuiltinLocal (the residency is not touched), `Some(model)` otherwise, with
+/// the parsed `builtin_local.model_id` (`None`: no model selected).
+fn builtin_press(settings: &Settings) -> Option<Option<ModelId>> {
+    (settings.engine == EngineKind::BuiltinLocal).then(|| {
+        settings
+            .builtin_local
+            .model_id
+            .as_deref()
+            .and_then(ModelId::parse)
+    })
+}
+
+/// A BuiltinLocal recording's start (spec 002 FR-013, FR-015): holds the idle
+/// countdown for the recording and, when `model` is downloaded, starts its load
+/// while the user speaks. No deps: nothing to hold.
+fn prewarm_for(builtin: Option<&BuiltinDeps>, model: Option<ModelId>) -> Option<RecordingGuard> {
+    let deps = builtin?;
+    let hold = deps.residency.recording_started();
+    if let Some(id) = model {
+        if let Some(path) = deps.store.path_if_downloaded(id) {
+            deps.residency.prewarm(id, path);
+        }
+    }
+    Some(hold)
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -380,6 +422,7 @@ impl DictationSession {
         let SessionDeps {
             pipeline,
             engine_factory,
+            builtin,
             audio,
             indicator,
             requests,
@@ -389,10 +432,16 @@ impl DictationSession {
         } = deps;
         let observer = Arc::clone(&pipeline.observer);
         let paster = Arc::clone(&pipeline.paster);
-        let pipeline = match engine_factory {
-            Some(factory) => Pipeline::new(pipeline).with_engine_factory(factory),
-            None => Pipeline::new(pipeline),
+        let factory = match engine_factory {
+            Some(factory) => factory,
+            None => {
+                let deps = builtin.clone();
+                let factory: Box<EngineFactory> =
+                    Box::new(move |s, c| engine_for(s, c, deps.as_ref()));
+                factory
+            }
         };
+        let pipeline = Pipeline::new(pipeline).with_engine_factory(factory);
         let ctrl = RecordingController::new();
         let initial = ctrl.indicator().clone();
         let (queue, jobs) = mpsc::channel::<Job>();
@@ -422,6 +471,7 @@ impl DictationSession {
             notifier,
             observer,
             paster,
+            builtin,
             losses,
         });
 
@@ -506,6 +556,7 @@ impl DictationSession {
                 Ok(()) => {
                     let mode = settings.mode;
                     let selected = settings.microphone.as_ref().map(|m| m.id.clone());
+                    let builtin_model = builtin_press(&settings);
                     let ctx = PressContext {
                         start_window: shared.paster.capture_start_window(),
                         settings,
@@ -522,12 +573,15 @@ impl DictationSession {
                             });
                         match opened {
                             Ok((device, kind, name, handle)) => {
+                                let builtin_hold = builtin_model
+                                    .and_then(|model| prewarm_for(shared.builtin.as_ref(), model));
                                 st.capture = Some(LiveCapture {
                                     id,
                                     pressed_at: at,
                                     kind,
                                     handle,
                                     sink,
+                                    _builtin_hold: builtin_hold,
                                 });
                                 // After `press_with_mode`, which drops any message.
                                 if st.microphone.opened(&device, kind) {

@@ -720,6 +720,7 @@ impl Rig {
                 post_processor: Arc::new(PassThrough),
             },
             engine_factory: Some(engine_factory(&engine, reply)),
+            builtin: None,
             audio: audio_port,
             indicator: indicator_port,
             requests: requests_port,

@@ -131,6 +131,7 @@ fn start(
             clipboard: Arc::new(WinClipboard::new()),
             paster,
             engine_factory: Some(engine_factory(engine)),
+            builtin: None,
             indicator,
             credentials: Arc::clone(&rig.creds),
             hotkeys: Arc::clone(&rig.hotkeys),

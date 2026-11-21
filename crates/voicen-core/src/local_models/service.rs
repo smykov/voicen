@@ -19,6 +19,9 @@
 //! (refuse if in use), remove the final file, clear the transient state, reset the
 //! selection through `SettingsService::forget_model`, drop the release guard. It
 //! emits no event: the settings window re-lists after the command settles.
+//! The production delete is [`LocalModels::delete_resident`] (T-017): the same
+//! path released through the app's one `ModelResidency` set by
+//! [`LocalModels::with_residency`], which also fills `LocalModelView::loaded`.
 //!
 //! The shell (`src-tauri/src/local_models.rs`) is an adapter: it parses nothing,
 //! delegates the commands here and emits each event to the settings window.
@@ -33,6 +36,7 @@ use serde::Serialize;
 
 use super::catalog::{CatalogEntry, ModelId};
 use super::download::{DiskSpace, DownloadError, DownloadEvent, DownloadFailure, Downloader};
+use super::residency::ModelResidency;
 use super::store::{LocalModelState, ModelStore};
 use crate::i18n::{self, MessageId};
 use crate::settings::service::SettingsService;
@@ -52,7 +56,8 @@ pub struct LocalModelView {
     pub size_bytes: u64,
     pub recommended: bool,
     pub state: LocalModelState,
-    /// Always `false` until T-017 wires the residency (T-098's `ModelResidency`).
+    /// `true` for the one model the residency set by
+    /// [`LocalModels::with_residency`] holds in memory (always `false` without one).
     pub loaded: bool,
 }
 
@@ -154,8 +159,9 @@ pub trait ModelRelease {
     fn release_for_delete(&self, id: ModelId) -> Result<ReleaseGuard, InUse>;
 }
 
-/// The [`ModelRelease`] the shell passes until T-017 wires the residency: nothing is
-/// ever loaded or in use.
+/// The [`ModelRelease`] of a coordinator with no residency (T-019 tests, and
+/// [`LocalModels::delete_resident`] before [`LocalModels::with_residency`]):
+/// nothing is ever loaded or in use.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct NoResidency;
 
@@ -184,6 +190,9 @@ pub struct LocalModels {
     /// The removal of a final file: `std::fs::remove_file`, set in `open`; a unit
     /// test replaces it to reach `delete_failed` (the gate runs as uid 0).
     remove: fn(&Path) -> io::Result<()>,
+    /// The app's one residency (T-017): `list`'s `loaded`, `delete_resident`'s
+    /// release.
+    residency: Option<Arc<ModelResidency>>,
 }
 
 impl LocalModels {
@@ -205,8 +214,18 @@ impl LocalModels {
             downloader,
             transient: Arc::new(Mutex::new(HashMap::new())),
             remove: |path| std::fs::remove_file(path),
+            residency: None,
         };
         (models, cleanup)
+    }
+
+    /// Attaches the app's one residency (T-017): [`Self::list`] reports `loaded`
+    /// from it and [`Self::delete_resident`] releases through it.
+    pub fn with_residency(self, residency: Arc<ModelResidency>) -> LocalModels {
+        LocalModels {
+            residency: Some(residency),
+            ..self
+        }
     }
 
     /// The one store (settings validation, every command, later T-017 / T-019).
@@ -220,6 +239,7 @@ impl LocalModels {
     /// view is `Downloaded` and the stale `Failed` is dropped.
     pub fn list(&self) -> Vec<LocalModelView> {
         let transient = lock(&self.transient).clone();
+        let in_memory = self.residency.as_ref().and_then(|r| r.loaded());
         let mut stale = Vec::new();
         let views = self
             .store
@@ -243,7 +263,7 @@ impl LocalModels {
                     size_bytes: entry.size_bytes,
                     recommended: entry.recommended,
                     state,
-                    loaded: false,
+                    loaded: in_memory == Some(id),
                 }
             })
             .collect();
@@ -361,6 +381,22 @@ impl LocalModels {
         };
         drop(guard);
         Ok(outcome)
+    }
+
+    /// `local_model_delete { id }` in production: [`Self::delete`] released
+    /// through the residency set by [`Self::with_residency`] (a loaded, unheld
+    /// model is unloaded before its file is removed; a held one is
+    /// `model_in_use`). Without a residency nothing can be loaded, so the release
+    /// is [`NoResidency`].
+    pub fn delete_resident(
+        &self,
+        id: &str,
+        settings: &SettingsService,
+    ) -> Result<DeleteOutcome, ReasonView> {
+        match &self.residency {
+            Some(residency) => self.delete(id, residency.as_ref(), settings),
+            None => self.delete(id, &NoResidency, settings),
+        }
     }
 }
 
