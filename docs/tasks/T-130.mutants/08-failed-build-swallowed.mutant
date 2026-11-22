@@ -1,0 +1,10 @@
+guarantee: AC1 failure branch: a failed window build is retried only on a newer state (error not swallowed into Live)
+file: crates/voicen-core/src/overlay.rs
+added_by: test-writer
+--- old
+        if self.phase == WindowPhase::Live {
+            self.phase = WindowPhase::Absent;
+        }
+--- new
+        // swallowed: the failed build leaves the reducer Live
+--- end

@@ -1,0 +1,2 @@
+# Runs only the task's core lifecycle tests (the reducer generalisation); needs the developer's on_visible / on_wake_visible.
+cargo test -p voicen-core -j2 --test indicator_lifecycle

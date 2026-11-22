@@ -7,7 +7,7 @@ The UI talks to Rust only through these commands and events, and Playwright mock
 | Label | Route | Created | Focus | Product window (census) |
 |---|---|---|---|---|
 | `calls` | `/calls` | on tray "Calls", a "Transcript ready" → Open, or the indicator's "Open Calls" | normal window | yes |
-| `call-indicator` | `/call-indicator` | hidden at the first Record, shown at each Record start, hidden at stop | shown without activation (research R12) | yes, never in `helper-windows.txt`, never shown at app start |
+| `call-indicator` | `/call-indicator` | built hidden at each Record start, shown without activation, destroyed at stop (NFR-03; T-130) | shown without activation (research R12); its position is recorded by the shell from the window's own moves (`calls.indicator_position`, clamped to a monitor work area) | yes, never in `helper-windows.txt`, never shown at app start |
 | `settings` (exists) | `/settings` | — | — | yes; gains the Calls tab |
 
 Each window has its own label, capability file and opener thread (settings-ui.md).
@@ -49,7 +49,6 @@ interface IndicatorState { recording: boolean; reminderVisible: boolean; reminde
 | `calls_delete` | `{root, id}` | `null` | `recordingCall`, `inUse{file}`, `ioFailed` | FR-037 |
 | `call_indicator_stop` | — | `null` | — | FR-005 |
 | `call_indicator_dismiss` | `{warningId}` | `null` | — | FR-006 |
-| `call_indicator_moved` | `{x, y}` | `null` | — | FR-005 |
 | `call_indicator_state` | — | `IndicatorState` | — | FR-005 (on load) |
 
 `calls_transcribe` (T-146, `docs/decisions/call-final-pass.md` Q2–Q4): `ioFailed` when the meta change cannot be written (nothing is queued); a `recording` call that this process no longer records (listed Recovered) is recovered in place, then queued; a call already queued or transcribing is a no-op that returns `queued`.

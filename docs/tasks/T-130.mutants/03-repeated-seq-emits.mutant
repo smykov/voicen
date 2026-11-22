@@ -1,0 +1,8 @@
+guarantee: AC5: a repeated or stale state changes nothing
+file: crates/voicen-core/src/overlay.rs
+added_by: test-writer
+--- old
+self.wanted.is_none_or(|(seen, _)| seq > seen)
+--- new
+self.wanted.is_none_or(|(seen, _)| seq >= seen)
+--- end

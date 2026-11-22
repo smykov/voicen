@@ -260,6 +260,34 @@ impl OverlayLifecycle {
     /// run, and `window_gone`: the current window's `Destroyed` arrived while a
     /// window existed (the shell drops its handle exactly then).
     pub fn on_wake(&mut self, destroyed: &[u64], newest: Option<(u64, &OverlayState)>) -> Wake {
+        self.wake(
+            destroyed,
+            newest.map(|(seq, state)| (seq, !matches!(state, OverlayState::Hidden))),
+        )
+    }
+
+    /// The shown/hidden input of the same reducer (T-130): `visible = false` is what
+    /// `OverlayState::Hidden` is to [`on_state`](Self::on_state). For the call
+    /// indicator `visible` is the newest `IndicatorState.recording`.
+    pub fn on_visible(&mut self, seq: u64, visible: bool) -> WindowAction {
+        self.on_wake_visible(&[], Some((seq, visible)))
+    }
+
+    /// The same reducer with a shown/hidden input (T-130): [`on_wake`](Self::on_wake)
+    /// with `newest = Some((seq, state))` returns, as its `action`, what this returns
+    /// for `Some((seq, state is not Hidden))`; the overlay and the call indicator
+    /// share it.
+    pub fn on_wake_visible(
+        &mut self,
+        destroyed: &[u64],
+        newest: Option<(u64, bool)>,
+    ) -> WindowAction {
+        self.wake(destroyed, newest).action
+    }
+
+    /// The one rule behind [`on_wake`](Self::on_wake) and
+    /// [`on_wake_visible`](Self::on_wake_visible).
+    fn wake(&mut self, destroyed: &[u64], newest: Option<(u64, bool)>) -> Wake {
         // 1. The current window's Destroyed: the label is free.
         let gone = self.phase != WindowPhase::Absent && destroyed.contains(&self.generation);
         // A requested destroy that completed decides again from the wanted state; a
@@ -270,8 +298,8 @@ impl OverlayLifecycle {
         }
         // 2. The state, if newer than any seen.
         let newer = match newest {
-            Some((seq, state)) if self.wanted.is_none_or(|(seen, _)| seq > seen) => {
-                self.wanted = Some((seq, matches!(state, OverlayState::Hidden)));
+            Some((seq, visible)) if self.wanted.is_none_or(|(seen, _)| seq > seen) => {
+                self.wanted = Some((seq, !visible));
                 true
             }
             _ => false,
