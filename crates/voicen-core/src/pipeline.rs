@@ -32,8 +32,8 @@ use crate::timeouts::Timeouts;
 use crate::vad::SpeechGate;
 
 /// Builds the engine for one job from its settings snapshot (default
-/// [`engine_for`] without built-in deps; the shell passes a closure calling the
-/// same [`engine_for`] with its `BuiltinDeps`, T-017).
+/// [`engine_for`] without built-in deps; `DictationSession::start` passes a
+/// closure calling the same [`engine_for`] with `SessionDeps::builtin`, T-017).
 pub type EngineFactory =
     dyn Fn(&Settings, &dyn CredentialStore) -> Result<Box<dyn Engine>, FailureReason> + Send + Sync;
 
@@ -225,8 +225,8 @@ impl Pipeline {
         }
     }
 
-    /// Replaces the engine factory: the shell's closure over [`engine_for`] with
-    /// its `BuiltinDeps` (T-017), test fakes.
+    /// Replaces the engine factory: the session's closure over [`engine_for`]
+    /// with its `BuiltinDeps` (T-017), test fakes.
     pub fn with_engine_factory(self, factory: Box<EngineFactory>) -> Pipeline {
         Pipeline { factory, ..self }
     }

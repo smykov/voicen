@@ -1,0 +1,8 @@
+guarantee: AC-6: delete of the loaded model goes through the residency
+file: crates/voicen-core/src/local_models/service.rs
+added_by: test-writer
+--- old
+            Some(residency) => self.delete(id, residency.as_ref(), settings),
+--- new
+            Some(_residency) => self.delete(id, &NoResidency, settings),
+--- end

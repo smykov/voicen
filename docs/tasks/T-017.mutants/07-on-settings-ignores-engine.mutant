@@ -1,0 +1,8 @@
+guarantee: AC-5: engine away from BuiltinLocal unloads the model
+file: crates/voicen-core/src/local_models/residency.rs
+added_by: test-writer
+--- old
+        let selected = if settings.engine == EngineKind::BuiltinLocal {
+--- new
+        let selected = if true {
+--- end

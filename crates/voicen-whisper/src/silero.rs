@@ -163,8 +163,9 @@ pub fn vad_context_params_debug() -> String {
     format!("{:?}", vad_context_params())
 }
 
-/// Whether this CPU runs the whisper.cpp build (AVX2 baseline on x86, decision #142).
-fn cpu_supported() -> bool {
+/// Whether this CPU runs the whisper.cpp build (AVX2 baseline on x86, decision #142):
+/// asked before every Silero load and every whisper model load (`WhisperLoader`).
+pub(crate) fn cpu_supported() -> bool {
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     {
         std::arch::is_x86_feature_detected!("avx2")

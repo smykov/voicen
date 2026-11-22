@@ -160,6 +160,7 @@ impl Rig {
                 post_processor: Arc::new(PassThrough),
             },
             engine_factory: Some(engine_factory(&engine)),
+            builtin: None,
             audio: audio.clone(),
             indicator: match gate {
                 None => indicator.clone() as Arc<dyn Indicator>,

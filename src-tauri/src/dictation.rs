@@ -36,6 +36,7 @@ use voicen_core::diag::{
     DetectorTag, Log, LogEvent, LogObserver, LogsNotice, LogsNoticeSink, WarningKind,
 };
 use voicen_core::dictation::{DictationSession, SessionDeps};
+use voicen_core::engine::builtin::BuiltinDeps;
 use voicen_core::i18n::MessageId;
 use voicen_core::pending::{CallRootsFn, FsTempAudioStore};
 use voicen_core::pipeline::{EngineFactory, PipelineDeps};
@@ -63,8 +64,13 @@ pub struct DictationPorts {
     pub audio: Arc<dyn AudioSource>,
     pub clipboard: Arc<dyn Clipboard>,
     pub paster: Arc<dyn Paster>,
-    /// `None` in `run()` (`engine::engine_for`); a test engine in the tests.
+    /// `None` in `run()` (`engine::engine_for` over `builtin`); a test engine in the tests.
     pub engine_factory: Option<Box<EngineFactory>>,
+    /// The process's one built-in engine deps (T-017): `run()` passes the instance
+    /// [`crate::local_models::builtin_deps`] built over the `LocalModels` store, the
+    /// same residency `LocalModels` lists and deletes through; `None` in tests that
+    /// need no built-in engine.
+    pub builtin: Option<BuiltinDeps>,
     pub indicator: Arc<dyn Indicator>,
     /// The `SettingsService`'s own instance (`PipelineDeps::credentials`).
     pub credentials: Arc<dyn CredentialStore>,
@@ -164,6 +170,7 @@ pub fn start_dictation_with<R: Runtime>(
         clipboard,
         paster,
         engine_factory,
+        builtin,
         indicator,
         credentials,
         hotkeys,
@@ -198,6 +205,7 @@ pub fn start_dictation_with<R: Runtime>(
             post_processor: Arc::new(ChatPostProcessor::new()),
         },
         engine_factory,
+        builtin,
         audio,
         indicator,
         requests: Arc::new(SettingsRequests::new(app)),

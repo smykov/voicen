@@ -1,0 +1,11 @@
+guarantee: AC-failure: no model downloaded -> NoLocalModel, audio kept pending (swallowed at path_if_downloaded)
+file: crates/voicen-core/src/engine/builtin.rs
+added_by: test-writer
+--- old
+            .path_if_downloaded(id)
+            .ok_or(FailureReason::NoLocalModel)?;
+--- new
+            .path_if_downloaded(id)
+            .ok_or(FailureReason::NoLocalModel);
+        let Ok(path) = path else { return Ok(String::new()) };
+--- end
