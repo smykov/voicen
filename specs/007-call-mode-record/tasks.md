@@ -460,7 +460,7 @@
 - [ ] T080 [P] [US9] [area ui] Red tests: `src/lib/settings/` unit tests and `e2e/settings-calls.spec.ts` with the extended settings-wire fixture.
   - The tab offers the call hotkey, the reminder, the primary language and the storage folder.
   - The hotkey-equal refusal shows from either side on `callHotkey`; a conflict mark shows from a save error.
-  - An unwritable root shows "This folder can't be written: {reason}" with the field highlighted.
+  - An unwritable root shows its reason's own full message (one of six UI-only ids `settings.calls.unwritable.<reason>`, e.g. "This folder can't be written: access denied"; no `{reason}` template) with the field highlighted (decision #319 Q2).
   - The provider line "The other party's audio goes to provider {host}" shows for a non-loopback host and is absent for `http://localhost:8000/v1`.
   - A saved value persists across a reload; RU renders.
   - (spec FR-031, FR-038, FR-039, FR-040, FR-046; US9 #1–#6)

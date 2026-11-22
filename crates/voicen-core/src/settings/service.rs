@@ -10,7 +10,9 @@ use serde::{Deserialize, Serialize};
 use super::file::SettingsFile;
 use super::hotkey::parse_hotkey;
 use super::roots::{effective_root, CallRoots};
-use super::url::{check_base_url, is_insecure_remote, normalize_base_url, ProviderHost};
+use super::url::{
+    check_base_url, is_insecure_remote, normalize_base_url, provider_host_of, ProviderHost,
+};
 use super::validate::{validate, KeyEditsWithPresence};
 use super::{
     defaults, model_name, parse_file, CallSettings, EngineKind, ErrorCode, FieldError, FieldId,
@@ -63,6 +65,11 @@ pub struct SaveRequest {
 ///
 /// `unavailable` is true only when the load was `Unavailable` (decision #19): the
 /// window shows `notice.settings_unavailable` when it opens (decision #38).
+///
+/// `provider_host` is the host of `settings.api.base_url` by the one FR-031 rule
+/// ([`provider_host_of`]): JSON text for a remote host, null for a loopback host
+/// or an invalid URL; the key is always present (spec 007 FR-031, T-155). The
+/// window shows the provider line from it and never classifies a host itself.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SettingsView {
     pub settings: Settings,
@@ -70,6 +77,20 @@ pub struct SettingsView {
     pub first_run: bool,
     pub reset_notice: bool,
     pub unavailable: bool,
+    #[serde(serialize_with = "serialize_provider_host")]
+    pub provider_host: Option<ProviderHost>,
+}
+
+/// `ProviderHost` has no `Serialize` (its value reaches no log by accident); the
+/// view is the one wire that carries it, as text or null.
+fn serialize_provider_host<S: serde::Serializer>(
+    host: &Option<ProviderHost>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    match host {
+        Some(host) => serializer.serialize_some(host.as_str()),
+        None => serializer.serialize_none(),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -741,7 +762,9 @@ impl SettingsService {
     }
 
     fn view_with(&self, settings: Settings, keys: KeyPresence) -> SettingsView {
+        let provider_host = provider_host_of(&settings.api.base_url);
         SettingsView {
+            provider_host,
             settings,
             keys,
             first_run: self.load.first_run,
@@ -4135,6 +4158,7 @@ mod tests {
             first_run: false,
             reset_notice: true,
             unavailable: false,
+            provider_host: provider_host_of(&sample(EngineKind::Api).api.base_url),
         };
         let saved = SaveOutcome::Saved {
             view: view.clone(),
@@ -4331,6 +4355,7 @@ mod tests {
                 [
                     "first_run",
                     "keys",
+                    "provider_host",
                     "reset_notice",
                     "settings",
                     "unavailable"

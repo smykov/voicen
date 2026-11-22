@@ -1,0 +1,8 @@
+guarantee: AC-3: unwritable root shows its reason's own message
+file: src/lib/settings/draft.ts
+added_by: test-writer
+--- old
+    byField[field] = reason === undefined ? errorMessageId(code) : unwritableMessageId(reason);
+--- new
+    byField[field] = errorMessageId(code);
+--- end

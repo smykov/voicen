@@ -1,0 +1,8 @@
+guarantee: AC-4: provider line absent for a loopback host
+file: src/lib/settings/tabs/Calls.svelte
+added_by: test-writer
+--- old
+{#if providerHost !== null}
+--- new
+{#if true}
+--- end

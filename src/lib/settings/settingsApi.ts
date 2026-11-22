@@ -66,6 +66,12 @@ export interface SettingsView {
   first_run: boolean;
   reset_notice: boolean;
   unavailable: boolean;
+  /**
+   * T-155 (FR-031): the host the other party's audio goes to, computed by core from the
+   * saved `api.base_url` (`settings::url::provider_host`); null for a loopback or an
+   * invalid URL. The window shows it as given and parses no URL (settings-ui W).
+   */
+  provider_host: string | null;
 }
 
 /** One key slot's edit: keep, delete, or replace with the typed key (UI -> shell only). */
@@ -76,10 +82,21 @@ export interface SaveRequest {
   keys: Record<KeySlot, KeyEdit>;
 }
 
-/** A refused field: `field` is a FieldId, `code` an ErrorCode (both dotted strings). */
+/**
+ * Why a call-storage folder cannot be written (`voicen_core::settings::roots::UnwritableReason`,
+ * snake_case on the wire): a closed set, mapped to its message in one exhaustive switch
+ * (`draft.ts::unwritableMessageId`).
+ */
+export type UnwritableReason = "missing" | "not_a_folder" | "relative" | "access_denied" | "disk_full" | "other";
+
+/**
+ * A refused field: `field` is a FieldId, `code` an ErrorCode (both dotted strings).
+ * `reason` is present only where core sends one (`storage.unwritable`, T-120).
+ */
 export interface FieldError {
   field: string;
   code: string;
+  reason?: UnwritableReason;
 }
 
 /**

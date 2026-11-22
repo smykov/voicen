@@ -122,6 +122,7 @@ test("first run: the Post-processing tab sits between Output and History and sho
     "tab-output",
     "tab-post_processing",
     "tab-history",
+    "tab-calls",
     "tab-general",
   ]);
   await expect(tab(page, "post_processing")).toHaveText(en("settings.tab.post_processing"));
