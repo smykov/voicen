@@ -1,0 +1,8 @@
+guarantee: Acceptance 2: model "  gpt-x  " in settings -> request body model is "gpt-x"
+file: crates/voicen-core/src/post_process/chat.rs
+added_by: test-writer
+--- old
+        "model": model_name(&settings.model).unwrap_or(""),
+--- new
+        "model": settings.model.trim_start(),
+--- end

@@ -44,7 +44,7 @@ This is the one definition (P-010). 004's defaults function reads it.
 ## ChatRequest (wire, sent)
 
 ```json
-{ "model": "<snapshot.model>",
+{ "model": "<snapshot.model, trimmed; \"\" when blank>",
   "messages": [ { "role": "system", "content": "<snapshot.prompt>" },
                 { "role": "user",   "content": "<raw transcript>" } ],
   "stream": false }

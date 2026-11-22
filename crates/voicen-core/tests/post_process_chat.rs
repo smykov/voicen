@@ -222,6 +222,25 @@ async fn reply_is_applied_trimmed_from_one_chat_completions_request() {
 }
 
 #[tokio::test]
+async fn padded_model_is_sent_trimmed_in_the_chat_body() {
+    // T-223 (T-169 r1#2): a hand-edited `post_processing.model` with surrounding
+    // whitespace (spaces and a tab, a loaded file is not normalized) reaches the
+    // wire as `settings::model_name` gives it, trimmed, like the transcription
+    // model. Bite: the raw `settings.model`, a trim of one side only, a trim of
+    // spaces only.
+    let server = server_with(chat_reply(json!(REPLY))).await;
+    let creds = creds_with_key(KEY);
+    let mut settings = pp_settings(&format!("{}/v1", server.uri()));
+    settings.model = "  \tgpt-x \t ".to_string();
+    let got = run(&settings, &creds, in_time(), RAW);
+    assert_eq!(got, PostProcessOutcome::Applied(REPLY.to_string()));
+
+    let r = only_request(&server).await;
+    let body: Value = serde_json::from_slice(&r.body).expect("the request body is JSON");
+    assert_eq!(body["model"], json!("gpt-x"));
+}
+
+#[tokio::test]
 async fn trailing_slash_and_query_of_the_base_url_are_kept() {
     // spec 003 FR-001: {base}/chat/completions joined on the parsed URL; one empty
     // trailing segment dropped, a query (api-version) kept. Bite: string
