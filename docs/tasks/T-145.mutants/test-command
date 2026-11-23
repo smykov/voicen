@@ -1,0 +1,2 @@
+# the changed core test (call_session.rs), core area container
+cargo test -j 2 -p voicen-core --test call_session stop_closes_both_files_readable_and_reports_it

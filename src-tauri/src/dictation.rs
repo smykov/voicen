@@ -242,6 +242,8 @@ pub fn start_dictation_with<R: Runtime>(
         .map(|mark| Arc::clone(&mark))
         .unwrap_or_default();
     let press_app = app.clone();
+    let suspend_app = app.clone();
+    let resume_app = app.clone();
     let call_hotkey = service.snapshot().calls.hotkey.clone();
     hotkey.register_call(
         &call_hotkey,
@@ -249,6 +251,10 @@ pub fn start_dictation_with<R: Runtime>(
             on_press: Box::new(move || {
                 call::request(&press_app, CallRequest::Record(CallSource::Hotkey));
             }),
+            // T-145 (I4): a suspend stops the call with `Sleep`; a resume releases what the
+            // call shell held. Both only post to the call worker.
+            on_suspend: Box::new(move || call::request(&suspend_app, CallRequest::Sleep)),
+            on_resume: Box::new(move || call::request(&resume_app, CallRequest::Resumed)),
             notifier: call_notifier,
             mark,
         },

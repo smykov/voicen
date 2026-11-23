@@ -1035,9 +1035,18 @@ fn stop_closes_both_files_readable_and_reports_it() {
             .expect("stopped");
         assert!(started_at < stopped_at, "{name}: {heads:?}");
 
+        // T-145 D1: a Sleep stop reports `Stopped{Sleep}` (shown on wake), not
+        // `CallSavedTranscribing`.
+        let expected = if reason == StopReason::Sleep {
+            CallNotice::Stopped {
+                reason: StopReason::Sleep,
+            }
+        } else {
+            CallNotice::CallSavedTranscribing
+        };
         assert_eq!(
             rig.shell.calls(),
-            vec![ShellCall::Notice(CallNotice::CallSavedTranscribing)],
+            vec![ShellCall::Notice(expected)],
             "{name}"
         );
         assert_eq!(
