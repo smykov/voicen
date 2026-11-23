@@ -1,0 +1,8 @@
+guarantee: AC-1: builtin deps + no factory override transcribes through BuiltinEngine
+file: crates/voicen-core/src/dictation.rs
+added_by: test-writer
+--- old
+                    Box::new(move |s, c| engine_for(s, c, deps.as_ref()));
+--- new
+                    Box::new(move |s, c| engine_for(s, c, { let _ = &deps; None }));
+--- end

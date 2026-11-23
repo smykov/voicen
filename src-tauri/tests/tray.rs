@@ -352,6 +352,7 @@ fn start_session(rig: &Rig, audio: Arc<dyn AudioSource>) -> Arc<DictationSession
             post_processor: Arc::new(PassThrough),
         },
         engine_factory: None,
+        builtin: None,
         audio,
         indicator: Arc::new(TrayOnly(rig.part())),
         requests: Arc::new(FakeShellRequests::new()),

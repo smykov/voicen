@@ -289,6 +289,23 @@ impl CallNotice {
         };
         (id, Vec::new())
     }
+
+    /// The toast's one button for this notice (T-213; decisions #298, #312): Open of the
+    /// call with the root the pass found it under, for "Transcript ready" only; no other
+    /// call notice carries a button.
+    pub fn action(&self) -> Option<crate::platform::ToastAction> {
+        match self {
+            CallNotice::TranscriptReady { call, root } => {
+                Some(crate::platform::ToastAction::Open {
+                    call: call.clone(),
+                    root: root.clone(),
+                })
+            }
+            CallNotice::CallSavedTranscribing
+            | CallNotice::PassFailed { .. }
+            | CallNotice::Stopped { .. } => None,
+        }
+    }
 }
 
 /// The catalog id of the toast for a refused call start (`notice.call_refused.<part>.<reason>`;

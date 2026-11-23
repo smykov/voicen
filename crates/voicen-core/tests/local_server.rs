@@ -25,6 +25,7 @@ mod refused_addr_tests;
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
+use common::deadlines::{short_api_total, short_local_server_total, SHORT_LIMIT};
 use common::os_answer::{in_time, OsAnswer, OS_ANSWER_BUDGET};
 use common::timing::{ago, at_least, late_answer, measure, M};
 use serde_json::json;
@@ -67,16 +68,6 @@ fn audio() -> AudioBuffer {
     AudioBuffer::from_16k_mono((0..1600).map(|i| ((i % 64) as i16 - 32) * 512).collect())
 }
 
-/// Test durations: set explicitly, never the production defaults. The API and
-/// local-server deadlines differ, so a client that reads the wrong field shows.
-fn timeouts(api_transcription: Duration, local_server: Duration) -> Timeouts {
-    Timeouts {
-        api_transcription,
-        local_server,
-        ..in_time()
-    }
-}
-
 fn req_with(t: Timeouts) -> TranscribeRequest {
     TranscribeRequest {
         language: None,
@@ -91,23 +82,27 @@ fn in_time_total() -> Duration {
 }
 
 fn req() -> TranscribeRequest {
-    req_with(timeouts(in_time_total(), in_time_total()))
+    req_with(in_time())
 }
 
 #[test]
 fn the_helpers_connect_is_the_os_answer_budget() {
     // T-111: a loopback connect cannot be delayed, so the connect limit of the
-    // helper every test here takes is pinned by its value (the in-time connect,
-    // `common::os_answer::in_time()`). The two totals are the parameters. Bite: the
-    // old 2 s.
-    assert_eq!(
-        timeouts(Duration::ZERO, Duration::ZERO).connect,
-        OS_ANSWER_BUDGET
-    );
+    // deadlines every test here takes is pinned by its value (the in-time connect,
+    // `common::os_answer::in_time()`). The API and local-server totals differ per
+    // leg, so a client that reads the wrong field shows. Bite: the old 2 s.
+    for (name, t) in [
+        ("in time", in_time()),
+        ("short api total", short_api_total()),
+        ("short local-server total", short_local_server_total()),
+    ] {
+        assert_eq!(t.connect, OS_ANSWER_BUDGET, "{name}");
+    }
+    assert_eq!(short_api_total().local_server, in_time_total());
 }
 
-/// The local-server deadline of the injected timeout legs, and their server's answer.
-const SHORT_LIMIT: Duration = Duration::from_millis(300);
+/// The server's answer of the injected timeout legs, M after their local-server
+/// deadline (`common::deadlines::SHORT_LIMIT`).
 const SHORT_LATE_ANSWER: Duration = late_answer(SHORT_LIMIT);
 /// `configured_local_server_timeout_*`: the #99 minimum as the limit (seconds), a
 /// connect limit far from it, and the server's answer.
@@ -371,17 +366,14 @@ async fn empty_stored_key_sends_no_authorization() {
 
 #[tokio::test]
 async fn request_deadline_is_local_server_not_api_transcription() {
-    // FR-24: the local server gets `Timeouts::local_server` (60 s), not the API's
+    // FR-24: the local server gets the `local_server` deadline (60 s), not the API's
     // 30 s. The answer comes after 1.5 s: past the API deadline (300 ms), inside
     // the local-server one (5 s). Bite: the engine still uses api_transcription
     // (Timeout after 300 ms).
     let server =
         server_with(ok_text("late but in time").set_delay(Duration::from_millis(1500))).await;
     let engine = local_engine(&local_settings(&base(&server), ""), &creds(None));
-    let got = transcribe(
-        engine,
-        req_with(timeouts(Duration::from_millis(300), in_time_total())),
-    );
+    let got = transcribe(engine, req_with(short_api_total()));
     assert_eq!(got, Ok("late but in time".to_string()));
 }
 
@@ -394,10 +386,7 @@ async fn request_deadline_test_holds_when_the_answer_stalls_past_the_old_local_s
     let server =
         server_with(ok_text("late but in time").set_delay(Duration::from_millis(5500))).await;
     let engine = local_engine(&local_settings(&base(&server), ""), &creds(None));
-    let got = transcribe(
-        engine,
-        req_with(timeouts(Duration::from_millis(300), in_time_total())),
-    );
+    let got = transcribe(engine, req_with(short_api_total()));
     assert_eq!(got, Ok("late but in time".to_string()));
 }
 
@@ -406,18 +395,14 @@ async fn no_answer_within_local_server_deadline_is_timeout() {
     // Acceptance 2 "no answer in 60 s -> timeout", with the deadline injected: an
     // answer M after a 300 ms local-server deadline is Timeout, not the answer
     // (the API deadline is 10 s here). Bite: api_transcription or
-    // Timeouts::default() used (the call succeeds at the late answer), or the timeout
+    // the production defaults used (the call succeeds at the late answer), or the timeout
     // mapped to CannotReach. No upper bound (T-080 I2): the outcome catches every
     // longer limit.
     let server = server_with(ok_text("too late").set_delay(SHORT_LATE_ANSWER)).await;
     let engine = local_engine(&local_settings(&base(&server), ""), &creds(None));
-    let deadline = SHORT_LIMIT;
-    let (got, took) = measure(|| {
-        transcribe(
-            engine,
-            req_with(timeouts(Duration::from_secs(10), deadline)),
-        )
-    });
+    let t = short_local_server_total();
+    let deadline = t.local_server;
+    let (got, took) = measure(|| transcribe(engine, req_with(t)));
     assert_eq!(
         got,
         Err(FailureReason::Timeout {
@@ -436,11 +421,8 @@ async fn a_local_server_timeout_still_shows_the_server_did_not_answer_in_time() 
     // given the built-in text.
     let server = server_with(ok_text("too late").set_delay(SHORT_LATE_ANSWER)).await;
     let engine = local_engine(&local_settings(&base(&server), ""), &creds(None));
-    let reason = transcribe(
-        engine,
-        req_with(timeouts(Duration::from_secs(10), SHORT_LIMIT)),
-    )
-    .expect_err("past the local-server deadline");
+    let reason = transcribe(engine, req_with(short_local_server_total()))
+        .expect_err("past the local-server deadline");
     assert_eq!(reason.code(), "Timeout");
     assert_eq!(
         serde_json::to_value(reason.message_id()).expect("id serializes"),
@@ -629,7 +611,7 @@ async fn configured_local_server_timeout_fails_the_job_with_timeout() {
     // answering M later, about 5 s after the request started, failure=Timeout in
     // the job event, the audio kept; the API limit in the same snapshot is set long
     // (600 s) so reading it instead shows. The same server with the default
-    // snapshot (60 s) is delivered. Bite: the pipeline's fixed Timeouts::default(),
+    // snapshot (60 s) is delivered. Bite: the pipeline's fixed production defaults,
     // the API or connect value used for the local server, or milliseconds. No upper
     // bound (T-080 I2): every longer wrong limit is caught by the outcome (Delivered
     // at the late answer).

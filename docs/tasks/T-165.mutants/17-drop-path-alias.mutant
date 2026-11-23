@@ -1,0 +1,8 @@
+guarantee: AC-1: path-qualified alias (= a::b::Timeouts) refused
+file: scripts/ci/core-test-deadlines.sh
+added_by: test-writer
+--- old
+  else if (padded ~ /=[ \t]*([A-Za-z_][A-Za-z0-9_]*::)*Timeouts[^A-Za-z0-9_]/)
+--- new
+  else if (padded ~ /= Timeouts[^A-Za-z0-9_]/)
+--- end

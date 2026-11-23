@@ -33,8 +33,11 @@ use std::io;
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, UNIX_EPOCH};
 
+use common::deadlines::{
+    from_settings, held_lookup_connection_test, immediate_answer, short_api_total, SHORT_LIMIT,
+};
 use common::held::{returns_while_held, Held};
-use common::os_answer::{in_time, OsAnswer, OS_ANSWER_BUDGET};
+use common::os_answer::{OsAnswer, OS_ANSWER_BUDGET};
 use common::timing::{at_least, late_answer, measure, M};
 use serde_json::json;
 use voicen_core::autostart::FakeAutostart;
@@ -205,18 +208,13 @@ fn run_with(w: &World, req: ConnectionTestRequest, timeouts: Timeouts) -> Connec
         .expect("test_connection_with_timeouts must not panic")
 }
 
-/// Test durations for a mock that answers at once: the in-time deadlines (T-111),
-/// never the defaults.
-fn quick() -> Timeouts {
-    in_time()
-}
-
 #[test]
 fn quick_connect_is_the_os_answer_budget() {
     // T-111: a loopback connect cannot be delayed, so the connect limit of the
     // helper is pinned by its value (the in-time connect, the budget). Bite: the
     // old 2 s.
-    assert_eq!(quick().connect, OS_ANSWER_BUDGET);
+    assert_eq!(immediate_answer().connect, OS_ANSWER_BUDGET);
+    assert_eq!(short_api_total().connect, OS_ANSWER_BUDGET);
 }
 
 /// The form limit of the two "form's limit" timeout legs (the #99 minimum, seconds).
@@ -226,8 +224,8 @@ const FORM_LIMIT_S: u32 = 5;
 const FORM_CONNECT_S: u32 = 60;
 /// When their server answers.
 const FORM_LATE_ANSWER: Duration = late_answer(Duration::from_secs(FORM_LIMIT_S as u64));
-/// The injected limit of `injected_short_timeout_is_timeout`, and its server's answer.
-const SHORT_LIMIT: Duration = Duration::from_millis(300);
+/// The server's answer of `injected_short_timeout_is_timeout`, M after its injected
+/// limit (`common::deadlines::short_api_total`).
 const SHORT_LATE_ANSWER: Duration = late_answer(SHORT_LIMIT);
 
 #[test]
@@ -245,12 +243,16 @@ fn timeout_legs_answer_at_least_m_after_their_deadline() {
 
 #[tokio::test]
 async fn quick_totals_survive_an_answer_stalled_past_their_old_margin() {
-    // T-111: both whole-request limits of `quick()` are in-time ones: an answer
+    // T-111: both whole-request limits of `immediate_answer()` are in-time ones: an answer
     // 5.5 s late (past the old 5 s) is still `Ok`, for the API role and the local
     // server role. Bite: either total left at 5 s (Timeout).
     let server = server_with(ok_text("hi").set_delay(Duration::from_millis(5500))).await;
     let w = world(stored_keys());
-    let got = run_with(&w, api_req(&base(&server), KeyEdit::Untouched), quick());
+    let got = run_with(
+        &w,
+        api_req(&base(&server), KeyEdit::Untouched),
+        immediate_answer(),
+    );
     assert!(
         matches!(got, ConnectionTestResult::Ok { .. }),
         "api role: {got:?}"
@@ -258,7 +260,7 @@ async fn quick_totals_survive_an_answer_stalled_past_their_old_margin() {
     let got = run_with(
         &w,
         local_req(&base(&server), "", KeyEdit::Untouched),
-        quick(),
+        immediate_answer(),
     );
     assert!(
         matches!(got, ConnectionTestResult::Ok { .. }),
@@ -495,9 +497,9 @@ fn wav_info(wav: &[u8]) -> (u16, u32, u16, Vec<i16>) {
 #[test]
 fn request_timeouts_are_the_forms_values() {
     // FR-017 / R-9: the connect and request limits are the form's `timeouts`, as
-    // entered, through the one conversion `Timeouts::from_settings`. Distinct
-    // in-range values per role, none equal to a default or to another role. Bite:
-    // Timeouts::default() (5/30/60), the snapshot's values, two roles swapped,
+    // entered, through the one conversion (`common::deadlines::from_settings`).
+    // Distinct in-range values per role, none equal to a default or to another role.
+    // Bite: the production defaults (5/30/60), the snapshot's values, two roles swapped,
     // milliseconds instead of seconds, or a second conversion that skips a field.
     let form = TimeoutSettings {
         connect_s: 7,
@@ -518,13 +520,13 @@ fn request_timeouts_are_the_forms_values() {
         assert_eq!(t.connect, Duration::from_secs(7), "connect");
         assert_eq!(t.api_transcription, Duration::from_secs(45), "api");
         assert_eq!(t.local_server, Duration::from_secs(90), "local server");
-        assert_eq!(t, Timeouts::from_settings(&form), "one conversion site");
+        assert_eq!(t, from_settings(&form), "one conversion site");
     }
 }
 
 #[test]
 fn request_timeouts_clamp_like_from_settings() {
-    // R-9: "clamped by Timeouts::from_settings" (the guard behind choice (i)). A 0
+    // R-9: "clamped by the settings conversion" (the guard behind choice (i)). A 0
     // must not reach a request (every request would fail at once) and u32::MAX must
     // not wait forever. Bite: the raw seconds used without the clamp.
     let form = TimeoutSettings {
@@ -541,7 +543,7 @@ fn request_timeouts_clamp_like_from_settings() {
         timeouts: form,
     };
     let t = request_timeouts(&req);
-    assert_eq!(t, Timeouts::from_settings(&form));
+    assert_eq!(t, from_settings(&form));
     assert_eq!(t.connect, Duration::from_secs(1));
     assert_eq!(t.api_transcription, Duration::from_secs(600));
     assert_eq!(t.local_server, Duration::from_secs(5));
@@ -614,10 +616,7 @@ async fn injected_short_timeout_is_timeout() {
     // before 300 ms), or a timeout mapped to CannotReach / UnexpectedResponse.
     let server = server_with(ok_text("late").set_delay(SHORT_LATE_ANSWER)).await;
     let w = world(stored_keys());
-    let t = Timeouts {
-        api_transcription: SHORT_LIMIT,
-        ..quick()
-    };
+    let t = short_api_total();
     let (got, took) = measure(|| run_with(&w, api_req(&base(&server), KeyEdit::Untouched), t));
     assert_eq!(got, ConnectionTestResult::Timeout);
     at_least(took, t.api_transcription);
@@ -1303,12 +1302,7 @@ fn unanswered_lookup_is_cannot_reach_host_while_the_lookup_is_held() {
     // unconverted; the port dropped.
     let held = Held::install("form-held.t079.example.com", Vec::new());
     let w = world(stored_keys());
-    let t = Timeouts {
-        connect: Duration::from_millis(300),
-        api_transcription: OS_ANSWER_BUDGET,
-        local_server: OS_ANSWER_BUDGET,
-        ..Timeouts::default()
-    };
+    let t = held_lookup_connection_test();
     let req = api_req(
         &format!("http://{}:8443/v1?k={QUERY_SECRET}", held.host),
         replace(TYPED_KEY),

@@ -12,6 +12,7 @@ use std::sync::Arc;
 use tauri::{App, AppHandle, Builder, Context, Manager, RunEvent, Runtime};
 use voicen_core::autostart::Autostart;
 use voicen_core::diag::{Log, LogEvent, LogsNotice, WarningKind};
+use voicen_core::engine::builtin::BuiltinDeps;
 use voicen_core::hotkey_registrar::HotkeyRegistrar;
 use voicen_core::local_models::catalog::MODELS;
 use voicen_core::local_models::download::DiskSpace;
@@ -28,6 +29,7 @@ use voicen_core::BuildInfo;
 #[cfg(windows)]
 pub mod autostart;
 pub mod call;
+pub mod call_indicator;
 #[cfg(windows)]
 pub mod credentials;
 pub mod diag;
@@ -67,7 +69,10 @@ fn commands<R: Runtime>(builder: Builder<R>) -> Builder<R> {
         call::calls_get,
         call::calls_copy_markdown,
         call::calls_export,
-        call::calls_open_folder
+        call::calls_open_folder,
+        call_indicator::call_indicator_state,
+        call_indicator::call_indicator_stop,
+        call_indicator::call_indicator_dismiss
     ])
 }
 
@@ -323,7 +328,8 @@ fn release_launch_args() -> LaunchArgs {
 
 /// The release dictation ports (T-006): the microphones `wire` manages (T-012:
 /// the same source as `settings_list_microphones`), the process's one clipboard writer
-/// (`clipboard`, shared with the call part, T-142), the paster, the engine of the settings (`engine::engine_for`), the
+/// (`clipboard`, shared with the call part, T-142), the paster, the engine of the settings
+/// (`engine::engine_for` over `builtin`, the process's one `BuiltinDeps`, T-017), the
 /// tray and the overlay through [`dictation::ShellIndicator`], and the
 /// `SettingsService`'s own instances: `credentials`, its key store, and `hotkeys`,
 /// its hotkey registrar (T-055). `detector` is the dictation half of the one
@@ -335,12 +341,14 @@ fn release_ports<R: Runtime>(
     hotkeys: Arc<win::hotkey::HotkeyRegistrarHandle>,
     clipboard: Arc<dyn Clipboard>,
     detector: Result<Box<dyn SpeechDetector>, VadError>,
+    builtin: BuiltinDeps,
 ) -> dictation::DictationPorts {
     dictation::DictationPorts {
         audio: settings_ipc::managed_microphones(app),
         clipboard,
         paster: Arc::new(win::paste::WinPaster::new()),
         engine_factory: None,
+        builtin: Some(builtin),
         indicator: Arc::new(dictation::ShellIndicator::new(app)),
         credentials,
         hotkeys,
@@ -356,6 +364,7 @@ fn release_ports<R: Runtime>(
     _hotkeys: Arc<win::hotkey::HotkeyRegistrarHandle>,
     _clipboard: Arc<dyn Clipboard>,
     _detector: Result<Box<dyn SpeechDetector>, VadError>,
+    _builtin: BuiltinDeps,
 ) -> dictation::DictationPorts {
     compile_error!(
         "the Voicen app runs on Windows only: the hotkey, microphone, clipboard and paste \
@@ -444,18 +453,23 @@ fn install_logs_folder<R: Runtime>(_app: &AppHandle<R>) {}
 /// store and the one hotkey registrar (T-055: the save's hotkey step is served by
 /// the hotkey thread `start_dictation` attaches to it); and the one notifier the
 /// dictation session and the call part share (T-128): `win::toast::ShellNotifier` over
-/// the WinRT sink, on the service's language and the one log (T-210).
+/// the WinRT sink, on the service's language and the one log (T-210), kept concrete so
+/// `run()` can attach the toast activator to it (T-213); and the process's one
+/// `BuiltinDeps` (T-017), whose residency the `LocalModels` of the parts already holds,
+/// for the dictation session and the idle thread.
 struct SharedPorts {
     credentials: Arc<dyn CredentialStore>,
     hotkeys: Arc<win::hotkey::HotkeyRegistrarHandle>,
-    notifier: Arc<dyn Notifier>,
+    notifier: Arc<win::toast::ShellNotifier>,
+    builtin: BuiltinDeps,
 }
 
 /// The startup side effects of the primary, in this order (T-052 invariant 1:
 /// `assemble` calls this only after tauri's `build()`, so a second instance, which
 /// exits inside the single-instance plugin's setup, never runs it): the one log
 /// (`Started` first), the session and the crash records (`diag::begin_session`,
-/// T-024), the one `LocalModels` (its `.part` cleanup), the settings
+/// T-024), the one `LocalModels` (its `.part` cleanup) with the one `BuiltinDeps` over
+/// its store (T-017: its residency attached, nothing loaded), the settings
 /// load (a first run writes `settings.json`; the Run value is reconciled). Returns
 /// the parts, the load outcome for `Ready` and the instances the `SettingsService`
 /// was given that the dictation session shares (T-006 invariant 5, T-055).
@@ -486,7 +500,11 @@ fn release_parts() -> (Parts, LoadOutcome, SharedPorts) {
             os_code: err.raw_os_error(),
         });
     }
-    let local_models = Arc::new(local_models);
+    // The one BuiltinDeps (T-017): one residency over the coordinator's own store, shared
+    // by the coordinator (list's `loaded`, the delete's release), the dictation session
+    // and the idle thread. Nothing loads here.
+    let builtin = local_models::builtin_deps(local_models.store());
+    let local_models = Arc::new(local_models.with_residency(Arc::clone(&builtin.residency)));
     let os_language = locale::os_language();
     let credentials = release_credentials();
     let hotkeys = win::hotkey::HotkeyRegistrarHandle::new();
@@ -507,6 +525,7 @@ fn release_parts() -> (Parts, LoadOutcome, SharedPorts) {
             Arc::clone(&log),
             Arc::new(win::toast::WinRtSink),
         )),
+        builtin,
     };
     (
         Parts::new(service, local_models, log)
@@ -559,7 +578,14 @@ pub fn run() {
         credentials,
         hotkeys,
         notifier,
+        builtin,
     } = shared;
+    // The built-in model's idle unload and settings follower (T-017): `tick` every 5 s,
+    // every saved snapshot into `on_settings`. A spawn failure leaves a loaded model in
+    // memory until exit; dictation is unaffected.
+    if let Some(service) = app.try_state::<Arc<SettingsService>>() {
+        let _ = local_models::start_model_idle(Arc::clone(&builtin.residency), &service);
+    }
     // The one clipboard writer of the process (T-142, P-011): the dictation and the Calls
     // window's copy share this instance.
     let clipboard = release_clipboard();
@@ -572,16 +598,31 @@ pub fn run() {
         hotkeys,
         Arc::clone(&clipboard),
         detector,
+        builtin,
     );
-    let dictation =
-        dictation::start_dictation_with(app.handle(), ports, Arc::clone(&notifier)).ok();
+    let dictation = dictation::start_dictation_with(
+        app.handle(),
+        ports,
+        Arc::clone(&notifier) as Arc<dyn Notifier>,
+    )
+    .ok();
     // The call part (T-128), after the tray exists: the one call session, its request
-    // worker and its tick thread. It starts no call; a failed start leaves the call
-    // entries no-ops. The first launch's `--call` switch is applied after it.
+    // worker and its tick thread. It starts no call; a failed start is logged where it
+    // failed (`call_start_failed`, T-220) and leaves the call entries no-ops. The first
+    // launch's `--call` switch is applied after it.
     let _ = call::start_calls(
         app.handle(),
-        release_call_ports(notifier, clipboard, call_credentials, spans),
+        release_call_ports(
+            Arc::clone(&notifier) as Arc<dyn Notifier>,
+            clipboard,
+            call_credentials,
+            spans,
+        ),
     );
+    // The toast activator (T-213), once the session and the call part a click reaches
+    // exist: registered on the toast thread; offers after it carry their button. A cold
+    // COM start (`-Embedding`) gets here like any start and only starts the app.
+    notifier.attach(win::toast::app_route(app.handle()));
     call::apply_launch(app.handle(), &launch_args);
     app.run(move |app, event| {
         let _dictation = &dictation;

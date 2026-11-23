@@ -19,6 +19,8 @@ mod silero;
 
 pub use silero::{vad_context_params_debug, SileroDetector};
 
+use silero::cpu_supported;
+
 use std::collections::HashMap;
 use std::ffi::{c_int, c_void};
 use std::num::NonZero;
@@ -39,11 +41,26 @@ use whisper_rs::{
 /// a stronger PC stays at 2 threads.
 const BEST_THREADS: usize = 2;
 
-/// Loads a whisper model file (`ggml-*.bin`) for the CPU.
-#[derive(Debug, Default)]
+/// Loads a whisper model file (`ggml-*.bin`) for the CPU. Every load first asks whether
+/// this CPU runs the whisper.cpp build (AVX2 baseline, decision #142; T-017): a CPU
+/// without it is refused with `LocalEngineFailed` before any whisper.cpp call, instead of
+/// dying with an illegal instruction.
+#[derive(Debug)]
 pub struct WhisperLoader {
     /// Test-only override of the policy ([`WhisperLoader::with_threads`]); `None` = policy.
     threads: Option<NonZero<usize>>,
+    /// The CPU predicate asked at the start of every load: `silero::cpu_supported`
+    /// except through [`WhisperLoader::with_cpu_check`].
+    cpu_check: fn() -> bool,
+}
+
+impl Default for WhisperLoader {
+    fn default() -> WhisperLoader {
+        WhisperLoader {
+            threads: None,
+            cpu_check: cpu_supported,
+        }
+    }
 }
 
 impl WhisperLoader {
@@ -51,7 +68,21 @@ impl WhisperLoader {
     /// `install_logging_hooks`, once).
     pub fn new() -> WhisperLoader {
         whisper_rs::install_logging_hooks();
-        WhisperLoader { threads: None }
+        WhisperLoader::default()
+    }
+
+    /// Test-only (T-017): a loader that asks `check` instead of the real CPU predicate at
+    /// the start of every load (the CI runner has AVX2, so the refusal needs an injected
+    /// `false`). Not a user setting. Silences whisper.cpp like [`new`].
+    ///
+    /// [`new`]: WhisperLoader::new
+    #[doc(hidden)]
+    pub fn with_cpu_check(check: fn() -> bool) -> WhisperLoader {
+        whisper_rs::install_logging_hooks();
+        WhisperLoader {
+            cpu_check: check,
+            ..WhisperLoader::default()
+        }
     }
 
     /// Test-only (T-109, decision #200 D2): a loader whose models use `threads` ggml threads
@@ -63,6 +94,7 @@ impl WhisperLoader {
         whisper_rs::install_logging_hooks();
         WhisperLoader {
             threads: Some(threads),
+            ..WhisperLoader::default()
         }
     }
 
@@ -70,6 +102,11 @@ impl WhisperLoader {
     /// path), so a test can read [`WhisperModel`]'s thread and segment counts.
     #[doc(hidden)]
     pub fn load_whisper(&self, path: &Path) -> Result<WhisperModel, FailureReason> {
+        // First, before any whisper.cpp call (decision #142): a CPU without the build's
+        // baseline would die with an illegal instruction in the load.
+        if !(self.cpu_check)() {
+            return Err(FailureReason::LocalEngineFailed);
+        }
         // Also here: a loader built through `Default` has not installed the hooks.
         whisper_rs::install_logging_hooks();
         let threads = match self.threads {
@@ -93,6 +130,7 @@ impl WhisperLoader {
 }
 
 impl SpeechModelLoader for WhisperLoader {
+    /// [`WhisperLoader::load_whisper`], the one load path (its CPU check comes first).
     fn load(&self, path: &Path) -> Result<Box<dyn SpeechModel>, FailureReason> {
         Ok(Box::new(self.load_whisper(path)?))
     }

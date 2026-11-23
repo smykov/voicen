@@ -219,23 +219,27 @@ fn all_mic_causes() -> Vec<(MicCause, &'static str)> {
 }
 
 /// Every `SkipKind` with its `pp_reason` literal (T-076; the six
-/// `SkipReason::code()` spellings, written from format.rs's own table).
-fn all_skip_kinds() -> Vec<(SkipKind, &'static str)> {
+/// `SkipReason::code()` spellings, written from format.rs's own table) and, for the
+/// one kind that came with an HTTP response, its `pp_http_status` literal (T-190).
+/// `Http` is listed for three statuses (a throttle, a server error, the u16 limit).
+fn all_skip_kinds() -> Vec<(SkipKind, &'static str, Option<&'static str>)> {
     let all = vec![
-        (SkipKind::Timeout, "timeout"),
-        (SkipKind::Unreachable, "unreachable"),
-        (SkipKind::InvalidKey, "invalid_key"),
-        (SkipKind::Http, "http"),
-        (SkipKind::InvalidResponse, "invalid_response"),
-        (SkipKind::NotConfigured, "not_configured"),
+        (SkipKind::Timeout, "timeout", None),
+        (SkipKind::Unreachable, "unreachable", None),
+        (SkipKind::InvalidKey, "invalid_key", None),
+        (SkipKind::Http { status: 429 }, "http", Some("429")),
+        (SkipKind::Http { status: 500 }, "http", Some("500")),
+        (SkipKind::Http { status: u16::MAX }, "http", Some("65535")),
+        (SkipKind::InvalidResponse, "invalid_response", None),
+        (SkipKind::NotConfigured, "not_configured", None),
     ];
     let seen: BTreeSet<usize> = all
         .iter()
-        .map(|(k, _)| match k {
+        .map(|(k, _, _)| match k {
             SkipKind::Timeout => 0,
             SkipKind::Unreachable => 1,
             SkipKind::InvalidKey => 2,
-            SkipKind::Http => 3,
+            SkipKind::Http { .. } => 3,
             SkipKind::InvalidResponse => 4,
             SkipKind::NotConfigured => 5,
         })
@@ -245,18 +249,30 @@ fn all_skip_kinds() -> Vec<(SkipKind, &'static str)> {
 }
 
 /// Every `PostProcessResult` with its `pp` literal and, for a skip, its
-/// `pp_reason` literal (T-076).
-fn all_pp_results() -> Vec<(PostProcessResult, &'static str, Option<&'static str>)> {
+/// `pp_reason` and `pp_http_status` literals (T-076, T-190).
+type PpRow = (
+    PostProcessResult,
+    &'static str,
+    Option<&'static str>,
+    Option<&'static str>,
+);
+
+fn all_pp_results() -> Vec<PpRow> {
     let mut all = vec![
-        (PostProcessResult::Off, "off", None),
-        (PostProcessResult::Applied, "applied", None),
+        (PostProcessResult::Off, "off", None, None),
+        (PostProcessResult::Applied, "applied", None, None),
     ];
-    for (kind, reason) in all_skip_kinds() {
-        all.push((PostProcessResult::Skipped(kind), "skipped", Some(reason)));
+    for (kind, reason, status) in all_skip_kinds() {
+        all.push((
+            PostProcessResult::Skipped(kind),
+            "skipped",
+            Some(reason),
+            status,
+        ));
     }
     let seen: BTreeSet<usize> = all
         .iter()
-        .map(|(r, _, _)| match r {
+        .map(|(r, _, _, _)| match r {
             PostProcessResult::Off => 0,
             PostProcessResult::Applied => 1,
             PostProcessResult::Skipped(_) => 2,
@@ -320,6 +336,8 @@ fn all_warning_kinds() -> Vec<(WarningKind, &'static str)> {
             WarningKind::CallHotkeyRegisterFailed,
             "call_hotkey_register_failed",
         ),
+        // T-220: the call part could not be started (`start_calls` returned an Err).
+        (WarningKind::CallStartFailed, "call_start_failed"),
     ];
     let seen: BTreeSet<usize> = all
         .iter()
@@ -344,9 +362,10 @@ fn all_warning_kinds() -> Vec<(WarningKind, &'static str)> {
             WarningKind::PendingAudioUnreadable => 17,
             WarningKind::DictationWorkerStopped => 18,
             WarningKind::CallHotkeyRegisterFailed => 19,
+            WarningKind::CallStartFailed => 20,
         })
         .collect();
-    assert_eq!(seen.len(), 20, "every WarningKind once");
+    assert_eq!(seen.len(), 21, "every WarningKind once");
     all
 }
 
@@ -495,7 +514,7 @@ fn every_event() -> Vec<LogEvent> {
         )
     });
     for outcome in job_outcomes {
-        for (result, _, _) in all_pp_results() {
+        for (result, _, _, _) in all_pp_results() {
             for ms in [0, 15_004, u64::MAX] {
                 let mut l = line(
                     Some(EngineTag::Api),
@@ -1871,7 +1890,7 @@ fn dictation_line_carries_pp_keys_per_post_processing_result() {
     // an off line or missing on a skip, a skip raising the level to WARN.
     let mut pp_literals = BTreeSet::new();
     let mut reason_literals = BTreeSet::new();
-    for (result, pp, reason) in all_pp_results() {
+    for (result, pp, reason, status) in all_pp_results() {
         let raw = format_line(
             at(NOON_UTC, 0),
             0,
@@ -1883,7 +1902,12 @@ fn dictation_line_carries_pp_keys_per_post_processing_result() {
         want.push(("pp", pp.to_string()));
         if let Some(reason) = reason {
             want.push(("pp_reason", reason.to_string()));
-            assert!(reason_literals.insert(reason), "{reason} used twice");
+            reason_literals.insert(reason);
+        }
+        // T-190: the status integer right after pp_reason, only for Http{status},
+        // the code and nothing else (no reason phrase, no body, no header).
+        if let Some(status) = status {
+            want.push(("pp_http_status", status.to_string()));
         }
         if result != PostProcessResult::Off {
             want.push(("pp_ms", "15004".to_string()));
@@ -1972,7 +1996,7 @@ fn pp_keys_ride_on_failed_and_no_speech_lines_too() {
         stop_to_text_ms: Some(700),
         text_to_paste_ms: None,
         post_processing: Some(PostProcessTrace {
-            result: PostProcessResult::Skipped(SkipKind::Http),
+            result: PostProcessResult::Skipped(SkipKind::Http { status: 502 }),
             ms: 0,
         }),
         local: None,
@@ -1991,6 +2015,7 @@ fn pp_keys_ride_on_failed_and_no_speech_lines_too() {
             ("stop_to_text_ms", "700".to_string()),
             ("pp", "skipped".to_string()),
             ("pp_reason", "http".to_string()),
+            ("pp_http_status", "502".to_string()),
             ("pp_ms", "0".to_string()),
         ]),
         "{raw}"
@@ -2010,7 +2035,8 @@ fn the_pp_grammar_refuses_keys_outside_their_sets_and_pairings() {
         format!("{ts} INFO {base} pp=applied pp_ms=12"),
         format!("{ts} INFO {base} pp=skipped pp_reason=timeout pp_ms=15004"),
         format!("{ts} WARN dictation rec=3 outcome=failed failure=clipboard_unavailable pp=applied pp_ms=0"),
-        format!("{ts} INFO dictation rec=3 outcome=no_speech pp=skipped pp_reason=http pp_ms=9"),
+        format!("{ts} INFO dictation rec=3 outcome=no_speech pp=skipped pp_reason=http pp_http_status=429 pp_ms=9"),
+        format!("{ts} INFO {base} pp=skipped pp_reason=http pp_http_status=65535 pp_ms=1"),
         format!("{ts} INFO {base}"),
     ];
     for raw in &ok {
@@ -2021,6 +2047,17 @@ fn the_pp_grammar_refuses_keys_outside_their_sets_and_pairings() {
         format!("{ts} INFO {base} pp=bogus"),
         format!("{ts} INFO {base} pp=skipped pp_reason=api.example.com pp_ms=1"),
         format!("{ts} INFO {base} pp=skipped pp_reason=http_500 pp_ms=1"),
+        // T-190: pp_http_status exactly on pp_reason=http, an integer that fits a u16.
+        format!("{ts} INFO {base} pp=skipped pp_reason=http pp_ms=1"),
+        format!("{ts} INFO {base} pp=skipped pp_reason=timeout pp_http_status=429 pp_ms=1"),
+        format!("{ts} INFO {base} pp=skipped pp_reason=invalid_key pp_http_status=401 pp_ms=1"),
+        format!("{ts} INFO {base} pp=applied pp_http_status=200 pp_ms=1"),
+        format!("{ts} INFO {base} pp=off pp_http_status=200"),
+        format!("{ts} INFO {base} pp_http_status=500"),
+        format!("{ts} INFO {base} pp=skipped pp_reason=http pp_http_status=429_Too_Many pp_ms=1"),
+        format!("{ts} INFO {base} pp=skipped pp_reason=http pp_http_status=65536 pp_ms=1"),
+        format!("{ts} INFO {base} pp=skipped pp_reason=http pp_http_status=-1 pp_ms=1"),
+        format!("{ts} INFO {base} pp=skipped pp_reason=http pp_http_status= pp_ms=1"),
         format!("{ts} INFO {base} pp=skipped pp_ms=1"),
         format!("{ts} INFO {base} pp=applied pp_reason=timeout pp_ms=1"),
         format!("{ts} INFO {base} pp=off pp_ms=3"),
@@ -2039,7 +2076,7 @@ fn the_pp_grammar_refuses_keys_outside_their_sets_and_pairings() {
         assert!(refused_here, "the grammar accepted {raw:?}");
     }
     assert_eq!(PP_RESULTS.len(), 3);
-    assert_eq!(PP_REASONS.len(), all_skip_kinds().len());
+    assert_eq!(PP_REASONS.len(), 6);
 }
 
 // ---- T-170: the end= key ----------------------------------------------------------

@@ -30,7 +30,11 @@ mod refused_addr_tests;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use common::os_answer::{in_time, OsAnswer, OS_ANSWER_BUDGET};
+use common::deadlines::{
+    immediate_answer, post_processing_outcome, short_api_total, short_post_processing_total,
+    SHORT_LIMIT,
+};
+use common::os_answer::{OsAnswer, OS_ANSWER_BUDGET};
 use common::timing::{ago, at_least, late_answer, now, M};
 use diag_support::{
     all_lines, closed, contains, dictation_lines, files_under, open_log, utf16le, Line,
@@ -229,36 +233,22 @@ fn settings_service(stored: &Settings) -> (SettingsService, LoadOutcome) {
 
 // ---- the run ----------------------------------------------------------------------------
 
-/// The deadlines of the scenarios that expect an answer at once: the deadline is
-/// not their subject, so a host stall must not decide them (T-111).
-fn immediate_timeouts() -> Timeouts {
-    in_time()
-}
+// The deadlines of the scenarios (`common::deadlines`, T-165): the ones that expect
+// an answer at once take `immediate_answer()` (the deadline is not their subject, so a
+// host stall must not decide them, T-111); the post-processing outcome scenarios but
+// the timeout one take `post_processing_outcome()`; the "timeout" scenarios take
+// `short_api_total()` (the log test: only the total is short) and
+// `short_post_processing_total()` (only `post_processing` is short).
 
-/// The deadlines of the post-processing outcome scenarios except the timeout one
-/// (`t_pp_short` derives from it and only shortens `post_processing`).
-fn pp_outcome_timeouts() -> Timeouts {
-    in_time()
-}
-
-/// The short deadline of the "timeout" scenarios (transcription and post-processing),
-/// and their server's answer.
-const SHORT_LIMIT: Duration = Duration::from_millis(300);
+/// The server's answer of the "timeout" scenarios (transcription and post-processing),
+/// M after their short deadline (`common::deadlines::SHORT_LIMIT`).
 const SHORT_LATE_ANSWER: Duration = late_answer(SHORT_LIMIT);
-
-/// The deadlines of the "timeout" scenario of the log test: only the total is short.
-fn short_total() -> Timeouts {
-    Timeouts {
-        api_transcription: SHORT_LIMIT,
-        ..in_time()
-    }
-}
 
 #[test]
 fn short_timeout_legs_answer_at_least_m_after_their_deadline() {
     // T-111 review 1 #2, a value pin: kind (1) of the invariant. Bite: the old answers
     // at 5 s and 3 s, the old connect 2 s (of the leg itself, catalog entry 70).
-    let t = short_total();
+    let t = short_api_total();
     assert!(SHORT_LATE_ANSWER >= t.api_transcription + M, "answer");
     assert!(t.connect >= t.api_transcription + M, "connect");
 }
@@ -273,8 +263,8 @@ fn in_time_scenarios_of_the_log_tests_use_the_in_time_deadlines() {
     // `common::os_answer::in_time()`: connect = the budget, every total twice
     // the budget. Bite: the old 2 s connect, the 300 ms / 5 s totals.
     for (name, t) in [
-        ("immediate", immediate_timeouts()),
-        ("pp outcome", pp_outcome_timeouts()),
+        ("immediate", immediate_answer()),
+        ("pp outcome", post_processing_outcome()),
     ] {
         assert_eq!(t.connect, OS_ANSWER_BUDGET, "{name}: connect");
         assert_eq!(
@@ -284,7 +274,7 @@ fn in_time_scenarios_of_the_log_tests_use_the_in_time_deadlines() {
         );
     }
     assert_eq!(
-        pp_outcome_timeouts().post_processing,
+        post_processing_outcome().post_processing,
         2 * OS_ANSWER_BUDGET,
         "pp outcome: post_processing"
     );
@@ -334,10 +324,10 @@ async fn log_holds_no_key_query_or_transcript_on_any_path() {
     let with_query = |base: &str| format!("{base}?api-version={QUERY_SECRET}");
     let refused_case = OsAnswer::refused();
     let refused = format!("http://{}/v1", refused_case.host);
-    let ms = short_total();
+    let ms = short_api_total();
     // Every scenario that expects an answer takes `immediate` (T-111); only
     // "timeout" keeps `ms`.
-    let immediate = immediate_timeouts();
+    let immediate = immediate_answer();
     // As in api_pipeline (T-048): the refused scenario never runs under `ms`.
     let refused_t = refused_case.timeouts;
 
@@ -614,6 +604,8 @@ struct PpScenario {
     /// `pp=`, `pp_reason=`; `pp_ms=` is required exactly for applied / skipped.
     pp: Option<&'static str>,
     pp_reason: Option<&'static str>,
+    /// `pp_http_status=` (T-190): the status integer, exactly on `pp_reason=http`.
+    pp_http_status: Option<&'static str>,
     /// pp_ms is at least this (the chat's delay or the stage's deadline).
     pp_ms_at_least: Duration,
 }
@@ -644,6 +636,7 @@ async fn post_processing_outcome_is_logged_without_prompt_reply_host_or_key() {
     let chat_delay = Duration::from_millis(5_500);
     let chat_ok = chat_with(chat_reply(PP_REPLY).set_delay(chat_delay)).await;
     let chat_500 = chat_with(ResponseTemplate::new(500).set_body_string(echo.clone())).await;
+    let chat_429 = chat_with(ResponseTemplate::new(429).set_body_string(echo.clone())).await;
     let chat_401 = chat_with(ResponseTemplate::new(401).set_body_string(echo.clone())).await;
     let chat_bad =
         chat_with(ResponseTemplate::new(200).set_body_json(json!({ "choices": [], "echo": echo })))
@@ -655,12 +648,9 @@ async fn post_processing_outcome_is_logged_without_prompt_reply_host_or_key() {
     let refused = format!("http://{}/v1?api-version={PP_QUERY}", refused_case.host);
     let unparsable = format!("ftp://{PP_HOST}/v1?api-version={PP_QUERY}");
 
-    let t = pp_outcome_timeouts();
-    let pp_deadline = SHORT_LIMIT;
-    let t_pp_short = Timeouts {
-        post_processing: pp_deadline,
-        ..t
-    };
+    let t = post_processing_outcome();
+    let t_pp_short = short_post_processing_total();
+    let pp_deadline = t_pp_short.post_processing;
     let skipped = |reason: SkipReason| JobEnd::DeliveredSkipped {
         reason,
         delivery: DeliveryResult::Pasted,
@@ -677,6 +667,7 @@ async fn post_processing_outcome_is_logged_without_prompt_reply_host_or_key() {
             outcome: "delivered",
             pp: Some("applied"),
             pp_reason: None,
+            pp_http_status: None,
             pp_ms_at_least: chat_delay,
         },
         PpScenario {
@@ -689,6 +680,20 @@ async fn post_processing_outcome_is_logged_without_prompt_reply_host_or_key() {
             outcome: "delivered",
             pp: Some("skipped"),
             pp_reason: Some("http"),
+            pp_http_status: Some("500"),
+            pp_ms_at_least: zero,
+        },
+        PpScenario {
+            label: "skipped http 429",
+            settings: pp_settings(&api, true, &pp_base(&chat_429)),
+            timeouts: t,
+            clipboard_fails: false,
+            end: skipped(SkipReason::Http { status: 429 }),
+            clipboard: Some(TRANSCRIPT),
+            outcome: "delivered",
+            pp: Some("skipped"),
+            pp_reason: Some("http"),
+            pp_http_status: Some("429"),
             pp_ms_at_least: zero,
         },
         PpScenario {
@@ -701,6 +706,7 @@ async fn post_processing_outcome_is_logged_without_prompt_reply_host_or_key() {
             outcome: "delivered",
             pp: Some("skipped"),
             pp_reason: Some("invalid_key"),
+            pp_http_status: None,
             pp_ms_at_least: zero,
         },
         PpScenario {
@@ -713,6 +719,7 @@ async fn post_processing_outcome_is_logged_without_prompt_reply_host_or_key() {
             outcome: "delivered",
             pp: Some("skipped"),
             pp_reason: Some("invalid_response"),
+            pp_http_status: None,
             pp_ms_at_least: zero,
         },
         PpScenario {
@@ -725,6 +732,7 @@ async fn post_processing_outcome_is_logged_without_prompt_reply_host_or_key() {
             outcome: "delivered",
             pp: Some("skipped"),
             pp_reason: Some("timeout"),
+            pp_http_status: None,
             pp_ms_at_least: pp_deadline,
         },
         PpScenario {
@@ -737,6 +745,7 @@ async fn post_processing_outcome_is_logged_without_prompt_reply_host_or_key() {
             outcome: "delivered",
             pp: Some("skipped"),
             pp_reason: Some("not_configured"),
+            pp_http_status: None,
             pp_ms_at_least: zero,
         },
         PpScenario {
@@ -751,6 +760,7 @@ async fn post_processing_outcome_is_logged_without_prompt_reply_host_or_key() {
             outcome: "delivered",
             pp: Some("skipped"),
             pp_reason: Some("unreachable"),
+            pp_http_status: None,
             pp_ms_at_least: zero,
         },
         PpScenario {
@@ -763,6 +773,7 @@ async fn post_processing_outcome_is_logged_without_prompt_reply_host_or_key() {
             outcome: "delivered",
             pp: Some("off"),
             pp_reason: None,
+            pp_http_status: None,
             pp_ms_at_least: zero,
         },
         PpScenario {
@@ -775,6 +786,7 @@ async fn post_processing_outcome_is_logged_without_prompt_reply_host_or_key() {
             outcome: "failed",
             pp: Some("applied"),
             pp_reason: None,
+            pp_http_status: None,
             pp_ms_at_least: chat_delay,
         },
         PpScenario {
@@ -787,6 +799,7 @@ async fn post_processing_outcome_is_logged_without_prompt_reply_host_or_key() {
             outcome: "failed",
             pp: None,
             pp_reason: None,
+            pp_http_status: None,
             pp_ms_at_least: zero,
         },
     ];
@@ -846,6 +859,7 @@ async fn post_processing_outcome_is_logged_without_prompt_reply_host_or_key() {
     );
     for (server, label) in [
         (&chat_500, "500"),
+        (&chat_429, "429"),
         (&chat_401, "401"),
         (&chat_bad, "bad body"),
     ] {
@@ -873,6 +887,10 @@ async fn post_processing_outcome_is_logged_without_prompt_reply_host_or_key() {
         assert_eq!(l.get("engine"), Some("api"), "{ctx}");
         assert_eq!(l.get("pp"), sc.pp, "{ctx}");
         assert_eq!(l.get("pp_reason"), sc.pp_reason, "{ctx}");
+        // T-190: the status integer exactly on pp_reason=http, the value the chat
+        // endpoint answered; no other pp_http_status anywhere (a timeout, a refused
+        // connection, a 401, a 2xx with a bad body, off, applied, no trace).
+        assert_eq!(l.get("pp_http_status"), sc.pp_http_status, "{ctx}");
         let timed = matches!(sc.pp, Some("applied" | "skipped"));
         assert_eq!(l.get("pp_ms").is_some(), timed, "pp_ms presence: {ctx}");
         if let Some(pp_ms) = l.get("pp_ms") {

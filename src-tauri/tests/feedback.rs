@@ -32,6 +32,33 @@
 //! voicen_lib::win::toast::REFUSED_OS_CODE: i32 = 1223   // the logged code of a refused toast
 //! ```
 //!
+//! T-213 adds the toast's buttons and the COM activator behind them (spec 001 US2 FR-027,
+//! spec 007 FR-030; decisions #274 Q5, #279, #298, #312, #313). The API it assumes (the
+//! developer implements it; the first compile error on a missing item is the red):
+//!
+//! ```text
+//! voicen_core::platform::{ToastAction, ToastArg}              // tests/toast_support.rs (core)
+//! voicen_core::platform::Notifier::notify(id, params, action: Option<ToastAction>)
+//! voicen_lib::win::toast::
+//!   TOAST_ACTIVATOR_CLSID: windows::core::GUID                // the one CLSID; the NSIS `!define` equals it
+//!   type ToastRoute                                           // what an activation is handed to (opaque here)
+//!   app_route<R: Runtime>(app: &AppHandle<R>) -> ToastRoute   // Retry -> DictationSession::retry via
+//!       // spawn_blocking, Open -> call::open_calls(app, Some(CallRef { root: wire_root(root), id }))
+//!   type RegisterFn = fn(&IClassFactory) -> Result<(), windows::core::Error>
+//!   register_class_object: RegisterFn                         // the shipped one: CoRegisterClassObject
+//!   ShellNotifier::attach(&self, route: ToastRoute)           // = attach_with(route, register_class_object)
+//!   ShellNotifier::attach_with(&self, route: ToastRoute, register: RegisterFn)
+//!       // posts to the toast thread, which registers the activator through `register`; offers after
+//!       // it in the channel carry a button only when the register fn returned Ok
+//! ```
+//! The activator object is `IClassFactory::CreateInstance`d as `INotificationActivationCallback`
+//! (needs the `Win32_UI_Notifications` feature of `windows`, a normal dependency of the shell; the
+//! test binary sees the union of features). The logic tests take the factory from a fake
+//! `RegisterFn` and call `Activate` on the object directly; only the one registration test goes
+//! through `CoRegisterClassObject` + `CoCreateInstance(CLSCTX_LOCAL_SERVER)`, once per test
+//! binary (F-012). Whether the same-process local-server lookup works on the runner is proven only
+//! by the `wip/T-213` run.
+//!
 //! The toast thread is named `toast`. `ShellNotifier::new` over the WinRT sink is `release_ports`'
 //! constructor; here a fake sink stands in, so no toast reaches the runner's Action Center
 //! (the real `CreateToastNotifierWithId` needs the installed Start-menu shortcut: the owner's
@@ -40,13 +67,15 @@
 //! The clock is read only through `timing_support`; every wait is a state wait.
 #![cfg(windows)]
 
+mod call_shell_support;
 mod timing_support;
 mod win32_support;
 
 use std::io;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex, PoisonError};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, PoisonError};
 use std::thread::{self, ThreadId};
 use std::time::Duration;
 
@@ -54,6 +83,8 @@ use tauri::menu::{MenuEvent, MenuId};
 use tauri::test::MockRuntime;
 use tauri::Manager;
 use voicen_core::audio::AudioBuffer;
+use voicen_core::call::storage::wire_root;
+use voicen_core::call::CallId;
 use voicen_core::diag::Log;
 use voicen_core::dictation::{DictationSession, SessionDeps};
 use voicen_core::engine::{Engine, TranscribeRequest};
@@ -64,7 +95,7 @@ use voicen_core::pipeline::{EngineFactory, PipelineDeps};
 use voicen_core::platform::{
     AudioSource, CaptureHandle, DeviceId, FakeAudioSource, FakeCancelKey, FakeClipboard,
     FakeIndicator, FakePaster, FakeShellRequests, FakeTempAudioStore, FrameChunk, FrameSink,
-    Indicator, InputDevice, Notifier, StartWindow, WindowRef,
+    Indicator, InputDevice, Notifier, PendingId, StartWindow, ToastAction, ToastArg, WindowRef,
 };
 use voicen_core::post_process::PassThrough;
 use voicen_core::recording::{CaptureError, OverlayState, TrayState, MESSAGE_DURATION};
@@ -77,12 +108,19 @@ use voicen_core::vad::{EnergyDetector, SpeechDetector, SpeechGate};
 use voicen_lib::dictation::{start_dictation_with, DictationPorts};
 use voicen_lib::logs_folder::{self, FolderOpener};
 use voicen_lib::tray::{self, TrayPart};
-use voicen_lib::win::toast::{setting_gate, ShellNotifier, SpawnFn, ToastSink, REFUSED_OS_CODE};
+use voicen_lib::win::toast::{
+    app_route, setting_gate, RegisterFn, ShellNotifier, SpawnFn, ToastRoute, ToastSink,
+    REFUSED_OS_CODE, TOAST_ACTIVATOR_CLSID,
+};
 use win32_support::{
     assert_hotkey_free, eventually, holds_for, serial, AppRig, HOLD_LIMIT, SETTLE,
 };
-use windows::core::HRESULT;
+use windows::core::{w, Error as WinError, IUnknown, HRESULT, PCWSTR};
 use windows::Win32::Foundation::ERROR_CANCELLED;
+use windows::Win32::System::Com::{
+    CoCreateInstance, CoInitializeEx, IClassFactory, CLSCTX_LOCAL_SERVER, COINIT_MULTITHREADED,
+};
+use windows::Win32::UI::Notifications::INotificationActivationCallback;
 use windows::UI::Notifications::NotificationSetting;
 
 /// `E_ACCESSDENIED` as a Win32-facility HRESULT: the log's `os_code` is its Win32 code, 5.
@@ -436,6 +474,7 @@ fn start_session(
             post_processor: Arc::new(PassThrough),
         },
         engine_factory,
+        builtin: None,
         audio,
         indicator: recorder.clone(),
         requests: Arc::new(FakeShellRequests::new()),
@@ -769,6 +808,7 @@ fn the_dictation_ports_notifier_is_the_one_the_session_offers_to() {
             clipboard: Arc::new(FakeClipboard::new()),
             paster: Arc::new(FakePaster::new()),
             engine_factory: None,
+            builtin: None,
             indicator: indicator.clone(),
             credentials: Arc::clone(&rig.creds),
             hotkeys: Arc::clone(&rig.hotkeys),
@@ -1227,5 +1267,722 @@ fn a_toast_thread_that_cannot_start_drops_the_offers_with_one_line_and_no_crash(
         "toasts {:?}, toast_failed lines {:?}",
         sink.shown(),
         lines_of(&rig, "toast_failed")
+    );
+}
+
+// ---- T-213: the toast's buttons and the COM activator ------------------------------------------
+
+const CALL_ID: &str = "2026-11-14_101500";
+const OTHER_CALL_ID: &str = "2026-11-15_090000";
+
+/// A COM interface pointer moved across threads by the test.
+struct SendCom<T>(T);
+// SAFETY: the test only calls the free-threaded activator and the agile class factory (both
+// created in the multithreaded apartment), so using them from another thread is sound.
+unsafe impl<T> Send for SendCom<T> {}
+
+/// The class factories the fake register fn was handed, in order.
+static CAPTURED: Mutex<Vec<SendCom<IClassFactory>>> = Mutex::new(Vec::new());
+/// How often `failing_register` ran.
+static FAILING_REGISTERS: AtomicUsize = AtomicUsize::new(0);
+/// The one notifier that registered the activator through COM (once per test binary, F-012).
+static REGISTERED: OnceLock<Arc<ShellNotifier>> = OnceLock::new();
+
+/// A `RegisterFn` that succeeds without touching COM and keeps the factory for the test.
+fn capture_register(factory: &IClassFactory) -> Result<(), WinError> {
+    win32_support::lock(&CAPTURED).push(SendCom(factory.clone()));
+    Ok(())
+}
+
+/// A `RegisterFn` that fails the way a refused `CoRegisterClassObject` does (REGDB_E_CLASSNOTREG);
+/// it fails exactly the calls it gets, one per attach (F-024).
+fn failing_register(_factory: &IClassFactory) -> Result<(), WinError> {
+    FAILING_REGISTERS.fetch_add(1, Ordering::SeqCst);
+    Err(WinError::from_hresult(HRESULT(0x8004_0154_u32 as i32)))
+}
+
+/// Attaches `route` with the capturing register fn and waits until the toast thread called it.
+#[track_caller]
+fn attach_capturing(n: &ShellNotifier, route: ToastRoute) {
+    let before = win32_support::lock(&CAPTURED).len();
+    let register: RegisterFn = capture_register;
+    n.attach_with(route, register);
+    assert!(
+        eventually(|| win32_support::lock(&CAPTURED).len() > before),
+        "the toast thread did not register the activator after attach"
+    );
+}
+
+/// The activator object, made by the last captured factory: the COM interface a click reaches.
+#[track_caller]
+fn activator() -> INotificationActivationCallback {
+    let factory = win32_support::lock(&CAPTURED)
+        .last()
+        .map(|f| f.0.clone())
+        .expect("premise: a register fn was handed the class factory");
+    // SAFETY: a plain COM call on a live factory with no aggregation.
+    unsafe { factory.CreateInstance(None::<&IUnknown>) }
+        .expect("the class factory makes an INotificationActivationCallback")
+}
+
+/// `Activate` with the argument as Windows hands it: a NUL-terminated wide string that is valid
+/// only for the call, the user-input array empty.
+fn activate(cb: &INotificationActivationCallback, arg: &str) -> Result<(), WinError> {
+    let wide: Vec<u16> = arg.encode_utf16().chain(Some(0)).collect();
+    let aumid: PCWSTR = w!("dev.voicen.app");
+    // SAFETY: `wide` outlives the call and is NUL-terminated; the input data is empty.
+    unsafe { cb.Activate(aumid, PCWSTR(wide.as_ptr()), &[]) }
+}
+
+/// One attribute value of an XML start tag.
+fn attr(tag: &str, name: &str) -> String {
+    tag.split_once(&format!("{name}=\""))
+        .and_then(|(_, rest)| rest.split_once('"'))
+        .map(|(value, _)| value.to_string())
+        .unwrap_or_default()
+}
+
+/// `(content, arguments)` of every `<action>` element of a toast.
+fn actions(xml: &str) -> Vec<(String, String)> {
+    xml.split("<action ")
+        .skip(1)
+        .map(|segment| {
+            let tag = segment.split('>').next().unwrap_or_default();
+            (attr(tag, "content"), attr(tag, "arguments"))
+        })
+        .collect()
+}
+
+/// No button: no `<action>`, no launch argument.
+#[track_caller]
+fn assert_no_button(xml: &str) {
+    let lower = xml.to_lowercase();
+    for banned in ["<action", "launch=", "arguments="] {
+        assert!(
+            !lower.contains(banned),
+            "the toast carries `{banned}`: {xml}"
+        );
+    }
+}
+
+fn call_id() -> CallId {
+    CallId::parse(CALL_ID).expect("premise: a call id")
+}
+
+fn retry_of(n: u64) -> Option<ToastAction> {
+    let id = PendingId::from_toast_arg(&format!("retry:{n}")).expect("premise: a pending id");
+    Some(ToastAction::Retry(id))
+}
+
+fn network_down() -> (i18n::MessageId, Vec<(&'static str, String)>) {
+    let reason = FailureReason::NetworkUnavailable;
+    (reason.message_id(), reason.message_params())
+}
+
+/// A session whose first recording fails retryably, offered to a `ShellNotifier` whose
+/// activator is registered through the capturing fake.
+struct Retryable {
+    rig: AppRig,
+    sink: Arc<FakeSink>,
+    notifier: Arc<ShellNotifier>,
+    mic: Arc<GatedMic>,
+    engine: Arc<FlakyEngine>,
+    urls: Arc<Mutex<Vec<String>>>,
+    session: Arc<DictationSession>,
+    _release: ReleaseMicOnDrop,
+}
+
+/// Which register fn the fixture's notifier gets.
+#[derive(Clone, Copy, PartialEq)]
+enum Attach {
+    Capture,
+    /// `ShellNotifier::attach`: the shipped `CoRegisterClassObject`.
+    Com,
+}
+
+fn retryable(lang: UiLanguage, attach: Attach) -> Retryable {
+    let rig = AppRig::new(EngineKind::Api);
+    select_local_server(&rig);
+    if lang != UiLanguage::En {
+        save(&rig, |s| s.ui_language = lang);
+    }
+    let mic = GatedMic::new();
+    let release = ReleaseMicOnDrop(Arc::clone(&mic));
+    let engine = Arc::new(FlakyEngine {
+        calls: AtomicUsize::new(0),
+    });
+    let urls = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::new(FakeSink::default());
+    let n = notifier(&rig, &sink);
+    match attach {
+        Attach::Capture => attach_capturing(&n, app_route(rig.app.handle())),
+        Attach::Com => {
+            n.attach(app_route(rig.app.handle()));
+            assert!(
+                REGISTERED.set(Arc::clone(&n)).is_ok(),
+                "premise: the COM registration runs once per test binary"
+            );
+        }
+    }
+    let (session, _recorder) = start_session(
+        &rig,
+        mic.clone(),
+        n.clone(),
+        Some(flaky_factory(&engine, &urls)),
+    );
+    Retryable {
+        rig,
+        sink,
+        notifier: n,
+        mic,
+        engine,
+        urls,
+        session,
+        _release: release,
+    }
+}
+
+impl Retryable {
+    /// One recording that fails with the network off: pending, tray Error with Retry. Returns the
+    /// failure's toast XML.
+    #[track_caller]
+    fn fail_once(&self) -> String {
+        let t0 = ago(Duration::from_secs(10));
+        self.mic.inner.set_chunks(vec![FrameChunk::from_buffer(
+            &fixtures::speech_3s(),
+            t0 + Duration::from_millis(40),
+        )]);
+        self.session.hotkey_pressed(t0);
+        self.session.hotkey_released(t0 + Duration::from_secs(3));
+        assert!(
+            eventually(|| tray::applied(self.rig.app.handle())
+                .is_some_and(|a| a.state == TrayState::Error && a.retry_available)),
+            "premise: tray Error with Retry: {:?}",
+            tray::applied(self.rig.app.handle())
+        );
+        wait_toasts(&self.sink, 1);
+        self.sink.shown()[0].xml.clone()
+    }
+
+    /// The one button's arguments of the failure's toast.
+    #[track_caller]
+    fn offered_arg(&self, xml: &str) -> String {
+        let found = actions(xml);
+        assert_eq!(found.len(), 1, "exactly one action expected: {xml}");
+        found[0].1.clone()
+    }
+}
+
+#[test]
+fn a_retryable_failure_toast_has_exactly_one_retry_button_in_the_ui_language() {
+    // T-213 I10 / Acceptance 2: the failure's toast carries one `<action>` whose arguments are
+    // `retry:<the offered pending id>` (the core codec's output, parsed back by the one reader) and
+    // whose content is `action.retry` in the settings' ui_language (en, then ru), activationType
+    // foreground. Bite: no `<actions>` (the button never built), the content in a fixed language,
+    // two buttons, arguments other than the codec's (an id of 1, a launch argument), a background
+    // activation.
+    let _serial = serial();
+    for lang in [UiLanguage::En, UiLanguage::Ru] {
+        let t = retryable(lang, Attach::Capture);
+        let xml = t.fail_once();
+        let found = actions(&xml);
+        assert_eq!(found.len(), 1, "{lang:?}: exactly one action: {xml}");
+        assert_eq!(
+            found[0].0,
+            i18n::text(lang, i18n::ACTION_RETRY, &[]),
+            "{lang:?}: the button's text"
+        );
+        assert!(
+            matches!(ToastArg::parse(&found[0].1), Some(ToastArg::Retry(_))),
+            "{lang:?}: the arguments {:?} are not a retry argument",
+            found[0].1
+        );
+        assert!(
+            xml.contains("activationType=\"foreground\""),
+            "{lang:?}: the action is not a foreground activation: {xml}"
+        );
+        assert_eq!(
+            xml.matches("arguments=").count(),
+            1,
+            "{lang:?}: an argument besides the button's (a launch argument): {xml}"
+        );
+        drop(t);
+    }
+}
+
+#[test]
+fn toast_buttons_follow_the_offer_and_the_attach() {
+    // T-213 I10: a button only when the offer carries an action AND the activator is registered
+    // in this process. Before attach, a retry offer shows plain text (a dead button is never
+    // shown); after attach, a retry offer gets one `retry:<id>` button, an offer with no action
+    // none, an Open offer (transcript ready) one `open:<call id>` button whose arguments hold no
+    // root, with `action.open` in the ui_language. Bite: the action built whatever the
+    // registration state, the button built for `None`, Retry and Open sharing one label, the
+    // root written into the Open arguments.
+    let _serial = serial();
+    let rig = AppRig::new(EngineKind::Api);
+    let sink = Arc::new(FakeSink::default());
+    let n = notifier(&rig, &sink);
+    let (id, params) = network_down();
+    let open = || {
+        Some(ToastAction::Open {
+            call: call_id(),
+            root: PathBuf::from(r"C:\kept-root"),
+        })
+    };
+
+    n.notify(id, &params, retry_of(7));
+    wait_toasts(&sink, 1);
+    assert_no_button(&sink.shown()[0].xml);
+
+    attach_capturing(&n, app_route(rig.app.handle()));
+    n.notify(id, &params, retry_of(7));
+    n.notify(id, &params, None);
+    n.notify(i18n::NOTICE_TRANSCRIPT_READY, &[], open());
+    wait_toasts(&sink, 4);
+    let shown = sink.shown();
+    assert_eq!(
+        actions(&shown[1].xml),
+        vec![("Retry".to_string(), "retry:7".to_string())],
+        "{}",
+        shown[1].xml
+    );
+    assert_no_button(&shown[2].xml);
+    assert_eq!(
+        actions(&shown[3].xml),
+        vec![("Open".to_string(), format!("open:{CALL_ID}"))],
+        "{}",
+        shown[3].xml
+    );
+    assert!(
+        !shown[3].xml.contains("kept-root"),
+        "the root is in the toast: {}",
+        shown[3].xml
+    );
+
+    save(&rig, |s| s.ui_language = UiLanguage::Ru);
+    n.notify(id, &params, retry_of(7));
+    n.notify(i18n::NOTICE_TRANSCRIPT_READY, &[], open());
+    wait_toasts(&sink, 6);
+    let shown = sink.shown();
+    assert_eq!(actions(&shown[4].xml)[0].0, "Повторить", "{}", shown[4].xml);
+    assert_eq!(actions(&shown[5].xml)[0].0, "Открыть", "{}", shown[5].xml);
+}
+
+#[test]
+fn activating_the_offered_retry_argument_reruns_the_pending_recording_with_the_click_settings() {
+    // T-213 I6 / Acceptance 2: through the COM interface (`Activate` on the object the class
+    // factory makes), the argument the toast carried re-runs the pending recording with the
+    // settings saved after the failure (a second engine from the new base URL). `Activate` is
+    // called while a press holds the session lock inside `AudioSource::start`, and returns while
+    // that start has not (ordering, not a ceiling: it never takes the lock, it stamps the instant
+    // and hands off with `spawn_blocking`). Bite: the route empty (no second engine), the retry
+    // run inline in `Activate` (`returned` is 1 when it comes back), a snapshot of the settings
+    // taken at the failure (the old URL), an invented id.
+    let _serial = serial();
+    let t = retryable(UiLanguage::En, Attach::Capture);
+    let xml = t.fail_once();
+    let arg = t.offered_arg(&xml);
+    assert_eq!(*win32_support::lock(&t.urls), vec![URL_BEFORE.to_string()]);
+    let cb = activator();
+
+    save(&t.rig, |s| s.local_server.base_url = URL_AFTER.to_string());
+    t.mic.hold_next_start();
+    let pressing = {
+        let session = Arc::clone(&t.session);
+        thread::spawn(move || session.hotkey_pressed(timing_support::now()))
+    };
+    assert!(
+        eventually(|| t.mic.entered()),
+        "premise: the press did not reach the held start"
+    );
+    let done = Arc::new(AtomicBool::new(false));
+    let activating = {
+        let (cb, arg, done) = (SendCom(cb.clone()), arg.clone(), Arc::clone(&done));
+        thread::spawn(move || {
+            let cb = cb;
+            let result = activate(&cb.0, &arg);
+            done.store(true, Ordering::SeqCst);
+            result
+        })
+    };
+    assert!(
+        eventually(|| done.load(Ordering::SeqCst)),
+        "Activate did not return while the session lock was held"
+    );
+    let returned_before_release = t.mic.returned();
+    t.mic.release();
+    pressing.join().expect("the press thread");
+    activating
+        .join()
+        .expect("the activate thread did not panic")
+        .expect("Activate returns S_OK");
+
+    assert_eq!(
+        returned_before_release, 0,
+        "Activate returned only after the held start did (it took the session lock)"
+    );
+    assert!(
+        eventually(|| win32_support::lock(&t.urls).len() == 2),
+        "the retry did not run: engines built {:?}",
+        win32_support::lock(&t.urls)
+    );
+    assert_eq!(
+        *win32_support::lock(&t.urls),
+        vec![URL_BEFORE.to_string(), URL_AFTER.to_string()],
+        "the retry's engine is not built from the settings of the click"
+    );
+    assert!(
+        eventually(|| t.engine.calls.load(Ordering::SeqCst) == 2),
+        "the retry did not transcribe the pending recording"
+    );
+}
+
+#[test]
+fn stale_foreign_malformed_and_empty_arguments_run_nothing_and_do_not_panic() {
+    // T-213 I6 / Acceptance 3: with one recording pending, every argument but the offered one
+    // returns S_OK and runs nothing: no engine built, no request. That covers an empty argument
+    // (a click on the toast's body), a malformed one, another prefix or case, trailing text, a
+    // neighbouring id, `retry:1` (an id an earlier process's toast may carry: ids rise across
+    // processes), an `open:` argument for a call this process never offered, and a very long
+    // string. The offered argument then still runs (the route is live: the silence is the
+    // filter's), and once the recording is delivered the same argument runs nothing again.
+    // Bite: `Activate` retrying on any argument or on an empty one, the codec bypassed
+    // (`retry:` read as id 0, a prefix match), `retry(at, None)` (retries whatever is pending),
+    // a panic on a malformed argument, a non-S_OK answer.
+    let _serial = serial();
+    let t = retryable(UiLanguage::En, Attach::Capture);
+    let xml = t.fail_once();
+    let arg = t.offered_arg(&xml);
+    let Some(ToastArg::Retry(_)) = ToastArg::parse(&arg) else {
+        panic!("premise: a retry argument: {arg:?}")
+    };
+    let n: u64 = arg
+        .strip_prefix("retry:")
+        .and_then(|d| d.parse().ok())
+        .expect("premise: retry:<u64>");
+    let cb = activator();
+
+    let mut bad: Vec<String> = vec![
+        String::new(),
+        "retry:".into(),
+        "retry:x".into(),
+        "retry:-1".into(),
+        "retry:1".into(),
+        format!("retry:{}", n.wrapping_add(1)),
+        format!("retry:{}", n.wrapping_sub(1)),
+        format!("Retry:{n}"),
+        format!("retry:{n} "),
+        format!(" retry:{n}"),
+        format!("retry:{n}:{n}"),
+        "open:".into(),
+        "open:not-a-call-id".into(),
+        format!("open:{CALL_ID}"),
+        "garbage".into(),
+        "retry".into(),
+        "x".repeat(10_000),
+        "\u{0}".into(),
+    ];
+    bad.retain(|b| *b != arg);
+    for b in &bad {
+        activate(&cb, b).unwrap_or_else(|e| panic!("Activate({:.30?}) is not S_OK: {e:?}", b));
+    }
+    assert!(
+        holds_for(SETTLE, || t.engine.calls.load(Ordering::SeqCst) == 1
+            && win32_support::lock(&t.urls).len() == 1),
+        "an argument that must run nothing ran a retry: engines {:?}, calls {}",
+        win32_support::lock(&t.urls),
+        t.engine.calls.load(Ordering::SeqCst)
+    );
+
+    activate(&cb, &arg).expect("Activate of the offered argument");
+    assert!(
+        eventually(|| t.engine.calls.load(Ordering::SeqCst) == 2),
+        "the offered argument did not run after the silent ones: the route is dead"
+    );
+    assert!(
+        eventually(|| tray::applied(t.rig.app.handle()).is_some_and(|a| !a.retry_available)),
+        "premise: the delivered retry leaves nothing pending: {:?}",
+        tray::applied(t.rig.app.handle())
+    );
+    activate(&cb, &arg).expect("Activate of a consumed argument");
+    assert!(
+        holds_for(SETTLE, || t.engine.calls.load(Ordering::SeqCst) == 2),
+        "a consumed (stale) argument ran a retry again"
+    );
+}
+
+/// Every payload of `event` heard anywhere in the app, in order.
+fn any_payloads(app: &tauri::AppHandle<MockRuntime>, event: &str) -> Receiver<serde_json::Value> {
+    use tauri::Listener;
+    let (tx, rx) = mpsc::channel();
+    app.listen_any(event, move |e| {
+        let _ = tx.send(serde_json::from_str(e.payload()).expect("event payload is JSON"));
+    });
+    rx
+}
+
+fn drain(rx: &Receiver<serde_json::Value>, heard: &mut Vec<serde_json::Value>) {
+    loop {
+        match rx.try_recv() {
+            Ok(v) => heard.push(v),
+            Err(TryRecvError::Empty | TryRecvError::Disconnected) => return,
+        }
+    }
+}
+
+/// `calls_list` invoked from the Calls window, like its page does after registering its
+/// listeners.
+fn list_from(window: &tauri::WebviewWindow<MockRuntime>) {
+    use tauri::ipc::{CallbackFn, InvokeBody};
+    use tauri::test::get_ipc_response;
+    use tauri::webview::InvokeRequest;
+    get_ipc_response(
+        window,
+        InvokeRequest {
+            cmd: "calls_list".into(),
+            callback: CallbackFn(0),
+            error: CallbackFn(1),
+            url: window.url().expect("window url"),
+            body: InvokeBody::Json(serde_json::json!({})),
+            headers: Default::default(),
+            invoke_key: tauri::test::INVOKE_KEY.to_string(),
+        },
+    )
+    .unwrap_or_else(|e| panic!("calls_list rejected: {e:?}"));
+}
+
+#[test]
+fn activating_open_with_no_calls_window_builds_it_and_selects_the_call_under_the_notices_root() {
+    // T-213 I6 / Acceptance 4 (decisions #298, #312, #313; spec 007 FR-030): the "Transcript
+    // ready" toast carries `open:<call id>` only. With no Calls window (the usual case after a
+    // call), `Activate` of that argument builds the window through `call::open_calls` and, after
+    // the page's first `calls_list`, emits exactly one `calls://open {root, id}` with the root the
+    // TranscriptReady notice carried (a root that is not the settings' root). An `open:` for a call
+    // this process never offered builds nothing and emits nothing. Bite: `open_transcript` only
+    // (no window, nothing shown), the settings' root instead of the notice's, the root read from
+    // the argument, a second emit, an unoffered call opening a window.
+    let _serial = serial();
+    let (rig, _source) = call_shell_support::CallRig::with_wav();
+    let sink = Arc::new(FakeSink::default());
+    let dyn_sink: Arc<dyn ToastSink> = sink.clone();
+    let log = rig
+        .handle()
+        .try_state::<Arc<Log>>()
+        .expect("build_app manages the log");
+    let n = ShellNotifier::new(Arc::clone(&rig.service), Arc::clone(&log), dyn_sink);
+    attach_capturing(&n, app_route(rig.handle()));
+    let offered_root = rig.dir.path().join("kept-root");
+    let settings_root = rig.dir.path().join("calls");
+    assert_ne!(offered_root, settings_root, "premise: two roots");
+
+    n.notify(
+        i18n::NOTICE_TRANSCRIPT_READY,
+        &[],
+        Some(ToastAction::Open {
+            call: call_id(),
+            root: offered_root.clone(),
+        }),
+    );
+    wait_toasts(&sink, 1);
+    let found = actions(&sink.shown()[0].xml);
+    assert_eq!(found.len(), 1, "{}", sink.shown()[0].xml);
+    let arg = found[0].1.clone();
+    assert_eq!(arg, format!("open:{CALL_ID}"));
+    let cb = activator();
+    let heard_any = any_payloads(rig.handle(), "calls://open");
+    let mut heard = Vec::new();
+
+    activate(&cb, &format!("open:{OTHER_CALL_ID}")).expect("Activate of an unoffered call");
+    assert!(
+        call_shell_support::holds_for_a_while(|| {
+            drain(&heard_any, &mut heard);
+            heard.is_empty()
+                && voicen_lib::call::calls_opened(rig.handle()) == 0
+                && rig.handle().get_webview_window("calls").is_none()
+        }),
+        "an unoffered call opened the Calls window or emitted: {heard:?}"
+    );
+
+    activate(&cb, &arg).expect("Activate of the offered open argument");
+    assert!(
+        call_shell_support::eventually(|| rig.handle().get_webview_window("calls").is_some()),
+        "the Calls window was not built by the Open click"
+    );
+    let window = rig
+        .handle()
+        .get_webview_window("calls")
+        .expect("the calls window");
+    list_from(&window);
+    let want = serde_json::json!({ "root": wire_root(&offered_root), "id": CALL_ID });
+    assert!(
+        call_shell_support::eventually(|| {
+            drain(&heard_any, &mut heard);
+            heard.contains(&want)
+        }),
+        "no calls://open {want} after the page's first list; heard {heard:?}"
+    );
+    assert!(
+        call_shell_support::holds_for_a_while(|| {
+            drain(&heard_any, &mut heard);
+            heard == vec![want.clone()]
+        }),
+        "calls://open must be heard exactly once with the notice's root: {heard:?}"
+    );
+}
+
+#[test]
+fn the_registered_activator_is_reachable_through_com_and_runs_the_offered_retry() {
+    // T-213 Acceptance 2 (registration): `ShellNotifier::attach` registers the activator with
+    // `CoRegisterClassObject(CLSCTX_LOCAL_SERVER, REGCLS_MULTIPLEUSE)` on the toast thread; a
+    // `CoCreateInstance(TOAST_ACTIVATOR_CLSID, CLSCTX_LOCAL_SERVER)` in this process then yields
+    // the activator, and its `Activate` with the offered argument re-runs the pending recording.
+    // Registered once per test binary (the notifier is kept in a static, F-012). Bite: no
+    // registration (the class is not found), another CLSID than the const, a registration that
+    // is not multi-use or not local-server, the register call on the caller's thread, a factory
+    // that hands out an object whose `Activate` does nothing. Whether the same-process
+    // local-server lookup works on the runner is proven only by the `wip/T-213` run.
+    let _serial = serial();
+    let t = retryable(UiLanguage::En, Attach::Com);
+    // SAFETY: initialising COM for this thread; an already-initialised apartment is fine.
+    let _ = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+    let mut made: Option<INotificationActivationCallback> = None;
+    assert!(
+        eventually(|| {
+            // SAFETY: a plain COM call with no aggregation.
+            made = unsafe {
+                CoCreateInstance(
+                    &TOAST_ACTIVATOR_CLSID,
+                    None::<&IUnknown>,
+                    CLSCTX_LOCAL_SERVER,
+                )
+            }
+            .ok();
+            made.is_some()
+        }),
+        "CoCreateInstance(TOAST_ACTIVATOR_CLSID, CLSCTX_LOCAL_SERVER) never found the activator"
+    );
+    let cb = made.expect("the activator");
+    let xml = t.fail_once();
+    let arg = t.offered_arg(&xml);
+    save(&t.rig, |s| s.local_server.base_url = URL_AFTER.to_string());
+
+    activate(&cb, &arg).expect("Activate through the registered class");
+    assert!(
+        eventually(|| win32_support::lock(&t.urls).len() == 2),
+        "Activate through COM did not re-run the pending recording: {:?}",
+        win32_support::lock(&t.urls)
+    );
+    assert_eq!(
+        win32_support::lock(&t.urls)[1],
+        URL_AFTER,
+        "the retry is not built from the settings of the click"
+    );
+    assert!(REGISTERED
+        .get()
+        .is_some_and(|n| Arc::ptr_eq(n, &t.notifier)));
+}
+
+#[test]
+fn an_activator_that_cannot_be_registered_writes_one_line_and_toasts_show_without_buttons() {
+    // T-213 Acceptance 7 (#279): the register fn fails once (REGDB_E_CLASSNOTREG; one call, F-024).
+    // The toast thread writes exactly one new `warning` line (kind and `os_code=<code>`, no OS
+    // text) and keeps buttons off: a retry offer and an Open offer are still shown as plain
+    // toasts, the next offer is shown too, nothing crashes and no second line is written. Bite:
+    // the error swallowed (no line), a line per offer, an unwrap (the toast thread dies, the next
+    // offer is not shown), buttons built anyway (a dead Retry), the register fn retried on every
+    // offer.
+    let _serial = serial();
+    let rig = AppRig::new(EngineKind::Api);
+    let sink = Arc::new(FakeSink::default());
+    let n = notifier(&rig, &sink);
+    let warnings = |rig: &AppRig| -> Vec<String> {
+        rig.log_lines()
+            .into_iter()
+            .filter(|l| words(l).first() == Some(&"warning"))
+            .collect()
+    };
+    let before = warnings(&rig).len();
+    let calls_before = FAILING_REGISTERS.load(Ordering::SeqCst);
+
+    let register: RegisterFn = failing_register;
+    n.attach_with(app_route(rig.app.handle()), register);
+    assert!(
+        eventually(|| warnings(&rig).len() == before + 1),
+        "no warning line after the failed registration: {:?}",
+        rig.log_lines()
+    );
+    let lines = warnings(&rig);
+    let line = lines.last().expect("the new line");
+    let w = words(line);
+    assert!(
+        w.len() == 3 && w[2].starts_with("os_code="),
+        "the line is not `warning kind=<kind> os_code=<code>`: {line:?}"
+    );
+
+    let (id, params) = network_down();
+    n.notify(id, &params, retry_of(7));
+    n.notify(
+        i18n::NOTICE_TRANSCRIPT_READY,
+        &[],
+        Some(ToastAction::Open {
+            call: call_id(),
+            root: PathBuf::from(r"C:\kept-root"),
+        }),
+    );
+    mic_fallback(n.as_ref(), "Next Mic");
+    wait_toasts(&sink, 3);
+    let shown = sink.shown();
+    for toast in &shown {
+        assert_no_button(&toast.xml);
+    }
+    assert!(
+        shown[2].xml.contains("Using Next Mic"),
+        "the next offer is not shown: {}",
+        shown[2].xml
+    );
+    assert!(
+        holds_for(SETTLE, || warnings(&rig).len() == before + 1
+            && FAILING_REGISTERS.load(Ordering::SeqCst) == calls_before + 1),
+        "more than one line or one registration attempt: {:?}, attempts {}",
+        warnings(&rig),
+        FAILING_REGISTERS.load(Ordering::SeqCst) - calls_before
+    );
+}
+
+#[test]
+fn the_installer_hooks_define_exactly_the_clsid_the_activator_registers() {
+    // T-213 I7: one CLSID, a Rust const and one `!define VOICEN_TOAST_CLSID` in
+    // `src-tauri/windows/installer-hooks.nsh`, which the shortcut property and the HKCU key are
+    // written from. Bite: the define missing or twice, a CLSID in the hooks that is not the
+    // const (the installed shortcut then names a class nothing registers), a second literal.
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("windows")
+        .join("installer-hooks.nsh");
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+    let defines: Vec<Vec<&str>> = text
+        .lines()
+        .map(|l| l.split_whitespace().collect::<Vec<_>>())
+        .filter(|t| t.first() == Some(&"!define") && t.get(1) == Some(&"VOICEN_TOAST_CLSID"))
+        .collect();
+    assert_eq!(
+        defines.len(),
+        1,
+        "exactly one `!define VOICEN_TOAST_CLSID`: {defines:?}"
+    );
+    let hex = |s: &str| -> String {
+        s.chars()
+            .filter(char::is_ascii_hexdigit)
+            .collect::<String>()
+            .to_lowercase()
+    };
+    let in_hooks = hex(defines[0].get(2).copied().unwrap_or_default());
+    let in_rust = hex(&format!("{TOAST_ACTIVATOR_CLSID:?}"));
+    assert_eq!(in_hooks.len(), 32, "the define holds no GUID: {defines:?}");
+    assert_ne!(in_rust, "0".repeat(32), "the const is the zero GUID");
+    assert_eq!(
+        in_hooks, in_rust,
+        "the installer's CLSID is not TOAST_ACTIVATOR_CLSID"
     );
 }

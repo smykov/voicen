@@ -276,7 +276,11 @@ c="real config: the ui image tag is the installed @playwright/test version ($pwv
 if [ "$(cfg_image ui)" != "voicen-ui:$pwv" ]; then got=0; out="$(cfg_image ui)"; err=""; fail "$c" "the ui image is not voicen-ui:$pwv"
 else ok "$c"; fi
 
-mk() { make -n "$@" 2>&1; }
+# The nested make starts from a make state cleared of the caller's (T-235): an
+# outer `make ... WORKERS=1` exports MAKEFLAGS/MAKEOVERRIDES, and an environment
+# WORKERS satisfies `WORKERS ?= 2`; either would make the default case measure
+# the caller's override. Overrides a case asserts go on its own command line.
+mk() { env -u MAKEFLAGS -u MFLAGS -u MAKELEVEL -u MAKEOVERRIDES -u WORKERS make -n "$@" 2>&1; }
 
 c="Makefile ui-image builds the config's tag with the installed Playwright version as build-arg"
 out="$(mk ui-image)"; got=$?; err=""
@@ -327,6 +331,12 @@ else ok "$c"; fi
 c="make check-ui passes --workers=2 to the e2e run by default"
 out="$(mk check-ui)"; got=$?; err=""
 if ! grep -qE 'scripts/e2e\.sh .*--workers=2( |$)' <<<"$out"; then fail "$c" "the e2e line has no --workers=2"
+else ok "$c"; fi
+
+c="the default-workers case ignores an outer make's WORKERS"
+out="$(MAKEFLAGS=' -- WORKERS=1' MAKEOVERRIDES='WORKERS=1' WORKERS=1 mk check-ui)"; got=$?; err=""
+if ! grep -qE 'scripts/e2e\.sh .*--workers=2( |$)' <<<"$out"; then fail "$c" "an outer make's WORKERS reached the nested make: no --workers=2"
+elif grep -q -- '--workers=1' <<<"$out"; then fail "$c" "--workers=1 leaked from the caller's make state"
 else ok "$c"; fi
 
 c="make check-ui WORKERS=1 overrides the worker count"

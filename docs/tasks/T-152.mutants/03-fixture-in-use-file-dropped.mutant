@@ -1,0 +1,8 @@
+guarantee: Failure branch: a locked file gives `inUse{file: "mic.opus"}` -> wire keeps the bare file name
+file: e2e/fixtures/calls-wire.json
+added_by: test-writer
+--- old
+    "inUse": {"code": "inUse", "file": "mic.opus"},
+--- new
+    "inUse": {"code": "inUse"},
+--- end

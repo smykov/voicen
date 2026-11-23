@@ -24,6 +24,7 @@ Stable keys with English and Russian texts. `{x}` marks a parameter. The catalog
 | `mic_reason.other` | the device could not be opened | не удалось открыть устройство | parameter |
 | `mic_name.unnamed` | Microphone | Микрофон | parameter (T-188, decision #203): stands for an empty `InputDevice.name`; `{device}` of `notice.mic_fallback` in core, `t()` in the settings select |
 | `action.retry` | Retry | Повторить | toast button |
+| `action.open` | Open | Открыть | toast button on `notice.transcript_ready` (T-213) |
 | `notice.no_speech` | No speech detected | Речь не распознана | toast + overlay |
 | `notice.max_length` | Maximum length reached | Достигнута максимальная длительность | toast + overlay |
 | `notice.copied` | Copied to clipboard | Скопировано в буфер обмена | toast + overlay |
@@ -45,7 +46,7 @@ Stable keys with English and Russian texts. `{x}` marks a parameter. The catalog
 | `tray.tooltip.error` | Voicen — last dictation failed | Voicen — последняя диктовка не удалась | tray tooltip |
 | `tray.tooltip.hotkey_error` | Voicen — hotkey not registered | Voicen — сочетание клавиш не зарегистрировано | tray tooltip |
 
-Toast surface (T-210): the shell's `Notifier` shows a toast for every offered message except the overlay-only `notice.logs_unwritable` (`i18n::is_toast_surface`, the one filter; the session offers every shown message). A toast is one text line in the settings' `ui_language` and carries no button until T-213: the Retry button below is not shown yet, and the tray row `tray.retry_last` is the only Retry.
+Toast surface (T-210): the shell's `Notifier` shows a toast for every offered message except the overlay-only `notice.logs_unwritable` (`i18n::is_toast_surface`, the one filter; the session offers every shown message). A toast is one text line in the settings' `ui_language` and carries at most one button (T-213): `action.retry` on an offer with a Retry action, `action.open` on `notice.transcript_ready`, and only while the toast activator is registered in this process; the tray row `tray.retry_last` is the other Retry.
 
 The failure toasts for retryable reasons carry the `action.retry` button. The requirement text "network unavailable — Retry" (req FR-11) is rendered as the `failure.network_unavailable` text plus the Retry button.
 

@@ -1,0 +1,8 @@
+guarantee: FR-014: a model deselected while its prewarm loads is discarded, not installed
+file: crates/voicen-core/src/local_models/residency.rs
+added_by: test-writer
+--- old
+                let unused = if stale {
+--- new
+                let unused = if false {
+--- end

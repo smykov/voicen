@@ -13,7 +13,11 @@
   // draft is dirty (D); a not_restored field with no control on the page is named in the
   // form-level message by its label, `settings.field_label.<FieldId>` (L). T-178: so is a
   // field error whose control is not on the panel and that nothing else names (#201;
-  // T-120: e.g. a Refused calls.hotkey, whose Calls tab this window does not have yet).
+  // T-120: e.g. a Refused calls.hotkey while a tab other than Calls is shown).
+  //
+  // T-155: the Calls tab (between History and General) edits calls.hotkey, reminder,
+  // primary_language and storage_root; its provider line is the saved view's core-computed
+  // provider_host (no URL rule here).
   //
   // T-023, T-019: the discard prompt wins over every in-page modal (About, the delete
   // confirmation): onClose dismisses each one registered through $lib/settings/modals
@@ -63,6 +67,7 @@
   } from "$lib/settings/settingsApi";
   import { TEST_IPC_FAILED, testOutcome, type TestOutcome } from "$lib/settings/connectionTest";
   import { provideModalHost } from "$lib/settings/modals";
+  import Calls from "$lib/settings/tabs/Calls.svelte";
   import Engine from "$lib/settings/tabs/Engine.svelte";
   import General from "$lib/settings/tabs/General.svelte";
   import History from "$lib/settings/tabs/History.svelte";
@@ -70,13 +75,14 @@
   import PostProcessing from "$lib/settings/tabs/PostProcessing.svelte";
   import Recording from "$lib/settings/tabs/Recording.svelte";
 
-  type Tab = "engine" | "recording" | "output" | "post_processing" | "history" | "general";
+  type Tab = "engine" | "recording" | "output" | "post_processing" | "history" | "calls" | "general";
   const TABS: readonly { id: Tab; label: MessageId }[] = [
     { id: "engine", label: "settings.tab.engine" },
     { id: "recording", label: "settings.tab.recording" },
     { id: "output", label: "settings.tab.output" },
     { id: "post_processing", label: "settings.tab.post_processing" },
     { id: "history", label: "settings.tab.history" },
+    { id: "calls", label: "settings.tab.calls" },
     { id: "general", label: "settings.tab.general" },
   ];
 
@@ -427,6 +433,8 @@
           <PostProcessing bind:draft {warnings} />
         {:else if tab === "history"}
           <History bind:draft {warnings} />
+        {:else if tab === "calls"}
+          <Calls bind:draft {warnings} {languages} />
         {:else}
           <General bind:draft {warnings} />
         {/if}

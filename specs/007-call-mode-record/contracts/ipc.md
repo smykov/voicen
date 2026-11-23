@@ -7,7 +7,7 @@ The UI talks to Rust only through these commands and events, and Playwright mock
 | Label | Route | Created | Focus | Product window (census) |
 |---|---|---|---|---|
 | `calls` | `/calls` | on tray "Calls", a "Transcript ready" → Open, or the indicator's "Open Calls" | normal window | yes |
-| `call-indicator` | `/call-indicator` | hidden at the first Record, shown at each Record start, hidden at stop | shown without activation (research R12) | yes, never in `helper-windows.txt`, never shown at app start |
+| `call-indicator` | `/call-indicator` | built hidden at each Record start, shown without activation, destroyed at stop (NFR-03; T-130) | shown without activation (research R12); its position is recorded by the shell from the window's own moves (`calls.indicator_position`, clamped to a monitor work area) | yes, never in `helper-windows.txt`, never shown at app start |
 | `settings` (exists) | `/settings` | — | — | yes; gains the Calls tab |
 
 Each window has its own label, capability file and opener thread (settings-ui.md).
@@ -40,8 +40,8 @@ interface IndicatorState { recording: boolean; reminderVisible: boolean; reminde
 |---|---|---|---|---|
 | `calls_list` | — | `CallList` | — | FR-033 |
 | `calls_get` | `{root, id}` | `CallDetail` | `notFound`, `ioFailed` | FR-034 |
-| `calls_rename` | `{root, id, title}` | `CallSummary` | `emptyName`, `ioFailed` | FR-035 |
-| `calls_rename_speaker` | `{root, id, speaker, name}` | `CallDetail` | `emptyName`, `ioFailed` | FR-035 |
+| `calls_rename` | `{root, id, title}` | `CallSummary` | `emptyName`, `recordingCall`, `notFound`, `ioFailed` | FR-035 (decisions #317) |
+| `calls_rename_speaker` | `{root, id, speaker, name}` | `CallDetail` | `emptyName`, `recordingCall`, `notFound` (call or speaker id), `ioFailed` | FR-035 (decisions #317) |
 | `calls_transcribe` | `{root, id}` | `CallSummary` (now `queued`) | `recordingCall`, `notFound`, `ioFailed` | FR-017, FR-027 |
 | `calls_copy_markdown` | `{root, id}` | `null` | `ioFailed` | FR-036 |
 | `calls_export` | `{root, id, format: "md" \| "json"}` | `{saved: boolean}` (false = dialog cancelled) | `ioFailed{reason}` | FR-036 |
@@ -49,7 +49,6 @@ interface IndicatorState { recording: boolean; reminderVisible: boolean; reminde
 | `calls_delete` | `{root, id}` | `null` | `recordingCall`, `inUse{file}`, `ioFailed` | FR-037 |
 | `call_indicator_stop` | — | `null` | — | FR-005 |
 | `call_indicator_dismiss` | `{warningId}` | `null` | — | FR-006 |
-| `call_indicator_moved` | `{x, y}` | `null` | — | FR-005 |
 | `call_indicator_state` | — | `IndicatorState` | — | FR-005 (on load) |
 
 `calls_transcribe` (T-146, `docs/decisions/call-final-pass.md` Q2–Q4): `ioFailed` when the meta change cannot be written (nothing is queued); a `recording` call that this process no longer records (listed Recovered) is recovered in place, then queued; a call already queued or transcribing is a no-op that returns `queued`.
@@ -64,7 +63,7 @@ Built (T-141, `call/storage.rs`; fixture `e2e/fixtures/calls-wire.json`; `docs/d
 - **`ioFailed.reason` (D4)** is the `UnwritableReason` snake_case word of `reason_of(io error kind)` (`missing`, `not_a_folder`, `access_denied`, `disk_full`, `other`; never `relative`), the vocabulary of `FieldError.reason` above. `ioFailed` on an unusable call (damaged, broken transcript) has `reason: other`.
 - **Export bytes and write.** Copy and export share `CallStore::export_bytes(calls, root, id, Format::{Md, Json})` (the title and names of `meta.json`). A call with no transcript is `ioFailed{reason: missing}`. `export_to(target, bytes)` takes the full path from the save dialog: a target with no parent or no file name is `ioFailed{other}`; the bytes reach the target only by rename of a tmp reserved with `create_new` as `<file>.voicen-tmp`, `-1` … `-9` (a file already there is never opened or removed); all ten names taken is `ioFailed{other}`; on any failure no tmp of this call remains and the previous target is kept. A target that is a folder fails at rename as `ioFailed`.
 
-Settings commands are unchanged: the `calls` section is part of the existing settings wire (`settings_get` / `settings_save`, settings-wire fixture extended). Save errors add `FieldId`s `calls.hotkey` (code `hotkey.equals_dictation`; a registration conflict stays `hotkey.unavailable`), `calls.reminder`, `calls.primary_language` (unknown: `language.unsupported`), `calls.storage_root` (code `storage.unwritable`). `FieldError` gains an optional snake_case `reason`, present only for `storage.unwritable`, one of `missing`, `not_a_folder`, `relative`, `access_denied`, `disk_full`, `other`; omitted otherwise (decision #196, T-120).
+Settings commands are unchanged: the `calls` section is part of the existing settings wire (`settings_get` / `settings_save`, settings-wire fixture extended). Save errors add `FieldId`s `calls.hotkey` (code `hotkey.equals_dictation`; a registration conflict stays `hotkey.unavailable`), `calls.reminder`, `calls.primary_language` (unknown: `language.unsupported`), `calls.storage_root` (code `storage.unwritable`). `FieldError` gains an optional snake_case `reason`, present only for `storage.unwritable`, one of `missing`, `not_a_folder`, `relative`, `access_denied`, `disk_full`, `other`; omitted otherwise (decision #196, T-120). `SettingsView` gains `provider_host`, always present: core's FR-031 provider host of `settings.api.base_url` (`url::provider_host_of`, the call session's rule) as text, `null` for a loopback host or an invalid URL; the Calls tab's provider line reads it and never classifies a host (decision #319, T-155).
 
 Built (T-142, `src-tauri/src/call.rs`; `docs/decisions/calls-window.md`). Shell details the table above leaves open:
 
@@ -72,7 +71,7 @@ Built (T-142, `src-tauri/src/call.rs`; `docs/decisions/calls-window.md`). Shell 
 - **Copy.** Writes `export_bytes(Md)` once through the dictation's clipboard writer (FR-10 exclusion formats); a failed write is `ioFailed`.
 - **Export.** `export_bytes` (the guard) runs first, then the native save dialog (`IFileSaveDialog`, own STA thread, no owner window). A cancel is `{saved: false}` and writes nothing; a dialog failure is `ioFailed`, not a cancel; a pick is written only by `export_to`.
 - **`calls://changed`.** `{root, id}` with `root` as `wire_root`; sent with `emit_to("calls")` at a call's start and at every stop (user, hotkey, exit, system end, sleep, max length, low disk, storage), after the session lock. Pass progress, rename and delete emits are later tasks'.
-- **`calls://open`.** The shell entry is `call::open_calls(app, Some({root, id}))`. On a window just built it is emitted once, after the page's first `calls_list` (the page registers its listeners first); on a window that already listed, at once. `call::open_transcript(app, root, id)` (T-139) also emits it at once and does not open the window. Every emit goes through the one private `call::emit_open`. The toast "Open" trigger itself is T-139 and T-213.
+- **`calls://open`.** The shell entry is `call::open_calls(app, Some({root, id}))`. On a window just built it is emitted once, after the page's first `calls_list` (the page registers its listeners first); on a window that already listed, at once. `call::open_transcript(app, root, id)` (T-139) also emits it at once and does not open the window. Every emit goes through the one private `call::emit_open`. The toast "Open" button (T-213) calls `open_calls(app, Some({root, id}))` with the root the TranscriptReady notice carried, for a call this process offered; a click after a restart only starts the app (decisions #298).
 
 ## Events (Rust → UI)
 
@@ -150,6 +149,7 @@ The texts live in the one catalog at the repository root, `i18n/en.json` and `i1
 | `speaker.me` / `speaker.other` | Me / Other party (RU: Я / Собеседник) |
 | `settings.tab.calls` + one label per new `FieldId` | Calls / Call hotkey / Reminder / Primary language / Storage folder |
 | `settings.calls.provider_notice` | The other party's audio goes to provider {host} |
-| `error.storage.unwritable` (T-120, no placeholder) | An unwritable storage folder uses this id; there is no `settings.calls.storage_unwritable` (#198) |
+| `error.storage.unwritable` (T-120, no placeholder) | The generic refusal text; there is no `settings.calls.storage_unwritable` `{reason}` template (#198) |
+| `settings.calls.unwritable.<reason>` (T-155, UI-only, no placeholder) | One full message per `UnwritableReason`, chosen by the Calls tab from `FieldError.reason` (decision #319 Q2): missing / not_a_folder / relative / access_denied / disk_full / other, e.g. "This folder can't be written: access denied" |
 
 RU texts are added with the EN ones in the same task; the existing catalog checks (`Catalog::parity_problems` and the ids-exist-in-both-catalogs tests in `i18n.rs`) enforce parity. Byte counts use `formatSize`.

@@ -1,0 +1,10 @@
+guarantee: AC-1: a post-processing attempt that ended with an HTTP status writes pp_http_status
+file: crates/voicen-core/src/diag/format.rs
+added_by: test-writer
+--- old
+                if let SkipKind::Http { status } = kind {
+                    pair(out, "pp_http_status", status);
+                }
+--- new
+                if let SkipKind::Http { status: _ } = kind {}
+--- end

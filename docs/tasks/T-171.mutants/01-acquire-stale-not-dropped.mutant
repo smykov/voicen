@@ -1,0 +1,8 @@
+guarantee: T-098 v2#1 / FR-014: a model deselected while its acquire loads is dropped when the guard drops
+file: crates/voicen-core/src/local_models/residency.rs
+added_by: test-writer
+--- old
+            drop_on_release: stale,
+--- new
+            drop_on_release: false,
+--- end

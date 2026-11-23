@@ -1,0 +1,8 @@
+guarantee: AC3: deleting a transcribing call cancels the pass first
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: test-writer
+--- old
+                Some((d, token)) if *d == dir => {
+--- new
+                Some((d, token)) if false && *d == dir => {
+--- end

@@ -109,6 +109,7 @@ fn start(rig: AppRig) -> Started {
             clipboard: Arc::new(FakeClipboard::new()),
             paster: Arc::new(FakePaster::new()),
             engine_factory: Some(engine_factory(&engine)),
+            builtin: None,
             indicator: indicator.clone(),
             credentials: Arc::clone(&rig.creds),
             hotkeys: Arc::clone(&rig.hotkeys),

@@ -1,0 +1,2 @@
+# the lib unit tests of T-213 (core); the integration ones (toast_support, call_notice_map) run in the gate
+cargo test -p voicen-core --lib -- pending_ids embedding_is_exactly a_cold_com_activation second_launch_action_table

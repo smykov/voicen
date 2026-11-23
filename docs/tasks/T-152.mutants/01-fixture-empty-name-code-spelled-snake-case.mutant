@@ -1,0 +1,8 @@
+guarantee: Failure branch: an empty or whitespace-only title or speaker name is refused -> wire {"code":"emptyName"}
+file: e2e/fixtures/calls-wire.json
+added_by: test-writer
+--- old
+    "emptyName": {"code": "emptyName"},
+--- new
+    "emptyName": {"code": "empty_name"},
+--- end

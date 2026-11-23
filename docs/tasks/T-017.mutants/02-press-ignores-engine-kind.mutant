@@ -1,0 +1,8 @@
+guarantee: AC-3: an Api press never prewarms or loads
+file: crates/voicen-core/src/dictation.rs
+added_by: test-writer
+--- old
+    (settings.engine == EngineKind::BuiltinLocal).then(|| {
+--- new
+    true.then(|| {
+--- end

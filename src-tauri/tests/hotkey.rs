@@ -160,6 +160,7 @@ impl Rig {
                 post_processor: Arc::new(PassThrough),
             },
             engine_factory: Some(engine_factory(&engine)),
+            builtin: None,
             audio: audio.clone(),
             indicator: match gate {
                 None => indicator.clone() as Arc<dyn Indicator>,
@@ -234,6 +235,12 @@ impl Rig {
             "no press reached the session within {HANG:?} of the injected Ctrl+Alt+Space"
         );
         (keys, now())
+    }
+
+    /// T-212: the second press of a toggle recording (the first press's keys are up).
+    /// No start-call wait: the second press stops the recording, it starts nothing.
+    fn press_hotkey_again(&self) -> (Keys, Instant) {
+        (Keys::press(&HOTKEY_KEYS), now())
     }
 }
 
@@ -788,14 +795,120 @@ fn esc_is_released_after_a_max_length_stop() {
     assert_eq!(rig.ends(), vec![RecordingEnd::MaxLength]);
 }
 
+/// T-212: after this returns `Ok` the hotkey thread has run the recording's Esc claim
+/// (its `cancel_key_result` is in the observer), whatever the claim's outcome. The
+/// ordering of [`esc_claim`] (Recording indicator, then [`hotkey_round_trip`]) without
+/// its verdict, for tests that plant a refusal on purpose. No polling of registrations.
+fn esc_claim_ran(rig: &Rig) -> Result<(), String> {
+    let recording = || {
+        rig.indicator
+            .trays()
+            .iter()
+            .any(|(s, _)| *s == TrayState::Recording)
+    };
+    if !eventually(recording) {
+        return Err(format!(
+            "no Recording indicator within {HANG:?} of the press; observer events: {:?}",
+            rig.observer.events()
+        ));
+    }
+    hotkey_round_trip(rig)
+}
+
 #[test]
-fn a_refused_esc_claim_keeps_recording_and_warns_esc_unavailable() {
-    // T-009 Acceptance "Esc unavailable" (FR-22): with bare Esc already registered by
-    // another owner, the thread's claim fails; the session gets the result, emits one
-    // Warning{EscUnavailable}, and the recording goes on to its normal end at the
-    // release. Bite: the claim result never reported (no warning), the recording
-    // stopped or discarded on the refusal, the thread failing on the refused claim (no
-    // release handling afterwards).
+fn a_refused_bare_esc_claim_in_toggle_mode_keeps_recording_and_warns_esc_unavailable() {
+    // T-009 Acceptance "Esc unavailable" (FR-22), T-212 Acceptance line 2: in toggle
+    // mode bare Esc is the claim that cancels. With it registered by another owner the
+    // thread's claim fails; the session emits one Warning{EscUnavailable} and the
+    // recording goes on to its normal end at the second press (Toggled). Bite: the
+    // claim result never reported (no warning), the recording stopped or discarded on
+    // the refusal, a warning only for a bare refusal in hold mode (mode ignored).
+    let _serial = serial();
+    assert_hotkey_free();
+    assert_esc_free();
+    let _taken = TakenHotkey::take_esc(0).expect("premise: the test takes bare Esc");
+    let window = TestWindow::open(Shape::TopLevel);
+    window.front();
+    let rig = Rig::with_mode(Mode::Toggle);
+    let _hotkey = rig.start_hotkey();
+
+    let (mut keys, pressed_at) = rig.press_hotkey();
+    keys.release_all();
+    if let Err(why) = esc_claim_ran(&rig) {
+        panic!("{why}");
+    }
+    assert_eq!(
+        esc_unavailable_warnings(&rig),
+        1,
+        "want one Warning{{EscUnavailable}}: {:?}",
+        rig.observer.events()
+    );
+    assert!(
+        holds_for(SETTLE, || rig.audio.open_handles() == 1),
+        "the refused claim ended the recording"
+    );
+    wait_out(pressed_at);
+    let (mut second, _at) = rig.press_hotkey_again();
+    second.release_all();
+    assert!(
+        eventually(|| rig.jobs() == 1),
+        "the recording was not processed after the refused claim"
+    );
+    assert_eq!(rig.ends(), vec![RecordingEnd::Toggled]);
+    assert_eq!(
+        esc_unavailable_warnings(&rig),
+        1,
+        "{:?}",
+        rig.observer.events()
+    );
+}
+
+#[test]
+fn a_refused_modified_esc_claim_in_toggle_mode_does_not_warn_and_bare_esc_cancels() {
+    // T-212 Acceptance line 4 (red before the fix: the warning came from `bare &&
+    // modified`): in toggle mode Ctrl+Alt+Esc is held by another registration, bare
+    // Esc is granted and cancels. No Warning{EscUnavailable}; the recording ends
+    // Cancelled with no job. Bite: the claims reduced to one bool, the modified claim
+    // judged in toggle mode.
+    let _serial = serial();
+    assert_hotkey_free();
+    assert_esc_free();
+    let _taken = TakenHotkey::take_esc(HOTKEY_MODS).expect("premise: the test takes Ctrl+Alt+Esc");
+    let window = TestWindow::open(Shape::TopLevel);
+    window.front();
+    let rig = Rig::with_mode(Mode::Toggle);
+    let _hotkey = rig.start_hotkey();
+
+    let (mut keys, _pressed_at) = rig.press_hotkey();
+    keys.release_all();
+    if let Err(why) = esc_claim_ran(&rig) {
+        panic!("{why}");
+    }
+    assert_eq!(
+        esc_unavailable_warnings(&rig),
+        0,
+        "a refused Ctrl+Alt+Esc warned although bare Esc cancels: {:?}",
+        rig.observer.events()
+    );
+    let mut esc = Keys::press(&[VK_ESCAPE]);
+    esc.release_all();
+    assert!(
+        eventually(|| rig.audio.open_handles() == 0),
+        "the capture is still open {HANG:?} after bare Esc"
+    );
+    thread::sleep(SETTLE);
+    assert_eq!(rig.ends(), vec![RecordingEnd::Cancelled]);
+    assert_eq!(rig.jobs(), 0, "a job ran for the cancelled recording");
+    assert!(!esc_reached(&window), "the claimed Esc reached the window");
+    assert_eq!(esc_unavailable_warnings(&rig), 0);
+}
+
+#[test]
+fn a_refused_bare_esc_claim_in_hold_mode_does_not_warn_and_esc_with_the_hotkey_held_cancels() {
+    // T-212, the owner's case: hold mode, bare Esc held by another registration, the
+    // claim under Ctrl+Alt granted. Esc pressed with Ctrl+Alt+Space still held cancels;
+    // no Warning{EscUnavailable}. Bite: the claims reduced to one bool (warning), bare
+    // refusal judged in hold mode.
     let _serial = serial();
     assert_hotkey_free();
     assert_esc_free();
@@ -805,30 +918,63 @@ fn a_refused_esc_claim_keeps_recording_and_warns_esc_unavailable() {
     let rig = Rig::new();
     let _hotkey = rig.start_hotkey();
 
-    let (mut keys, pressed_at) = rig.press_hotkey();
-    let warned = || {
-        rig.observer
-            .events()
-            .iter()
-            .filter(|e| {
-                matches!(
-                    e,
-                    DictationEvent::Warning {
-                        code: WarningCode::EscUnavailable
-                    }
-                )
-            })
-            .count()
-    };
-    assert!(
-        eventually(|| warned() >= 1),
-        "no Warning{{EscUnavailable}}: {:?}",
+    let (mut keys, _pressed_at) = rig.press_hotkey();
+    if let Err(why) = esc_claim_ran(&rig) {
+        panic!("{why}");
+    }
+    assert_eq!(
+        esc_unavailable_warnings(&rig),
+        0,
+        "a refused bare Esc warned although Esc under the held hotkey cancels: {:?}",
         rig.observer.events()
     );
+    let mut esc = Keys::press(&[VK_ESCAPE]);
+    assert!(
+        eventually(|| rig.audio.open_handles() == 0),
+        "the capture is still open {HANG:?} after Esc with the hotkey held"
+    );
+    esc.release_all();
+    keys.release_all();
+    thread::sleep(SETTLE);
+    assert_eq!(rig.ends(), vec![RecordingEnd::Cancelled]);
+    assert_eq!(rig.jobs(), 0, "a job ran for the cancelled recording");
+    assert_eq!(esc_unavailable_warnings(&rig), 0);
+}
+
+#[test]
+fn a_refused_modified_esc_claim_in_hold_mode_warns_and_esc_with_the_hotkey_held_does_not_cancel() {
+    // T-212: hold mode, Ctrl+Alt+Esc held by another registration; bare Esc is granted
+    // but cannot fire with Ctrl+Alt held (RegisterHotKey matches the modifier state
+    // exactly, OQ-21 (1): this is the CI proof of that premise). One
+    // Warning{EscUnavailable}; Esc pressed with the hotkey held does not cancel; the
+    // recording ends Released and runs its job. Bite: no warning for the modified
+    // refusal in hold mode, the bare claim judged in hold mode. If the recording is
+    // cancelled here the premise is wrong (the developer reports back: T-212 hypothesis 3).
+    let _serial = serial();
+    assert_hotkey_free();
+    assert_esc_free();
+    let _taken = TakenHotkey::take_esc(HOTKEY_MODS).expect("premise: the test takes Ctrl+Alt+Esc");
+    let window = TestWindow::open(Shape::TopLevel);
+    window.front();
+    let rig = Rig::new();
+    let _hotkey = rig.start_hotkey();
+
+    let (mut keys, pressed_at) = rig.press_hotkey();
+    if let Err(why) = esc_claim_ran(&rig) {
+        panic!("{why}");
+    }
+    assert_eq!(
+        esc_unavailable_warnings(&rig),
+        1,
+        "want one Warning{{EscUnavailable}}: {:?}",
+        rig.observer.events()
+    );
+    let mut esc = Keys::press(&[VK_ESCAPE]);
     assert!(
         holds_for(SETTLE, || rig.audio.open_handles() == 1),
-        "the refused claim ended the recording"
+        "Esc with the hotkey held cancelled the hold although its claim was refused"
     );
+    esc.release_all();
     wait_out(pressed_at);
     keys.release_all();
     assert!(
@@ -836,7 +982,12 @@ fn a_refused_esc_claim_keeps_recording_and_warns_esc_unavailable() {
         "the recording was not processed after the refused claim"
     );
     assert_eq!(rig.ends(), vec![RecordingEnd::Released]);
-    assert_eq!(warned(), 1, "{:?}", rig.observer.events());
+    assert_eq!(
+        esc_unavailable_warnings(&rig),
+        1,
+        "{:?}",
+        rig.observer.events()
+    );
 }
 
 // ---- T-108: the Esc claim check never races the claim it checks ----------------------

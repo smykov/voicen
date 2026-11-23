@@ -519,6 +519,7 @@ fn write_dictation(out: &mut String, line: &DictationLine) {
         }
     }
     // pp exactly when the job called the stage; pp_reason exactly on a skip;
+    // pp_http_status exactly on pp_reason=http, the bare status integer (T-190);
     // pp_ms on applied and skipped only (off has no step to time).
     let pp_ms = post_processing.and_then(|trace| {
         pair(out, "pp", pp_result(trace.result));
@@ -527,6 +528,9 @@ fn write_dictation(out: &mut String, line: &DictationLine) {
             PostProcessResult::Applied => Some(trace.ms),
             PostProcessResult::Skipped(kind) => {
                 pair(out, "pp_reason", skip_kind(kind));
+                if let SkipKind::Http { status } = kind {
+                    pair(out, "pp_http_status", status);
+                }
                 Some(trace.ms)
             }
         }
@@ -705,13 +709,14 @@ fn pp_result(result: PostProcessResult) -> &'static str {
 }
 
 /// `pp_reason=<...>`: one literal per `SkipKind`, spelled like
-/// `SkipReason::code()` but from this table; never a host or a status.
+/// `SkipReason::code()` but from this table; never a host or a status (the
+/// status goes to its own `pp_http_status=`).
 fn skip_kind(kind: SkipKind) -> &'static str {
     match kind {
         SkipKind::Timeout => "timeout",
         SkipKind::Unreachable => "unreachable",
         SkipKind::InvalidKey => "invalid_key",
-        SkipKind::Http => "http",
+        SkipKind::Http { .. } => "http",
         SkipKind::InvalidResponse => "invalid_response",
         SkipKind::NotConfigured => "not_configured",
     }
@@ -741,6 +746,7 @@ fn warning_kind(kind: WarningKind) -> &'static str {
         WarningKind::HotkeyRegisterFailed => "hotkey_register_failed",
         WarningKind::CallHotkeyRegisterFailed => "call_hotkey_register_failed",
         WarningKind::DictationStartFailed => "dictation_start_failed",
+        WarningKind::CallStartFailed => "call_start_failed",
         WarningKind::OverlayFailed => "overlay_failed",
         WarningKind::LogsFolderFailed => "logs_folder_failed",
         WarningKind::TestConnectionFailed => "test_connection_failed",

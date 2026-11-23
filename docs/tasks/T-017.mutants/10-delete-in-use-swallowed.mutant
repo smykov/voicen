@@ -1,0 +1,13 @@
+guarantee: AC-6: delete of a held model is model_in_use (swallowed InUse at release_for_delete)
+file: crates/voicen-core/src/local_models/service.rs
+added_by: test-writer
+--- old
+        let Ok(guard) = residency.release_for_delete(id) else {
+            return refuse(DeleteError::ModelInUse);
+        };
+--- new
+        let guard = match residency.release_for_delete(id) {
+            Ok(g) => g,
+            Err(_) => ReleaseGuard::new(()),
+        };
+--- end

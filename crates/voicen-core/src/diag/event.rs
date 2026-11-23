@@ -274,6 +274,10 @@ pub enum WarningKind {
     /// The dictation session could not be started (T-006); the app runs on
     /// without dictation.
     DictationStartFailed,
+    /// The call part could not be started (T-220: a managed part missing, the app
+    /// already has a call part, or one of its threads could not be started); the app
+    /// runs on and every call entry is a no-op.
+    CallStartFailed,
     /// The overlay window could not be built, emitted to or destroyed, or the
     /// overlay thread could not be started (T-057); the dictation itself goes on.
     OverlayFailed,

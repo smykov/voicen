@@ -99,7 +99,7 @@ impl LocalModels {
 pub struct DeleteOutcome { pub engine_reset: bool, pub reset_failed: bool }   // wire { engineReset, resetFailed }
 
 // The port from the delete to whatever keeps a model loaded. Implemented by T-098's
-// ModelResidency; the shell passes `NoResidency` (never loaded, never in use) until T-017 wires it.
+// ModelResidency; the shell releases through it (`LocalModels::delete_resident`, T-017); `NoResidency` (never loaded, never in use) is the test-only fallback.
 pub trait ModelRelease {
     fn release_for_delete(&self, id: ModelId) -> Result<ReleaseGuard, InUse>; // unload if loaded; no load of `id` until the guard drops
 }

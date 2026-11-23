@@ -1,0 +1,11 @@
+guarantee: AC-3: no pp_http_status without an HTTP response (timeout, refused, not_configured, ...)
+file: crates/voicen-core/src/diag/format.rs
+added_by: test-writer
+--- old
+                if let SkipKind::Http { status } = kind {
+                    pair(out, "pp_http_status", status);
+                }
+--- new
+                let status = 500u16;
+                pair(out, "pp_http_status", status);
+--- end

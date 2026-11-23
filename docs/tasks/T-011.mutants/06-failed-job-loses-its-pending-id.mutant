@@ -1,0 +1,8 @@
+guarantee: AC-2: A fails -> A follows FR-11 (offered with its pending id)
+file: crates/voicen-core/src/dictation.rs
+added_by: test-writer
+--- old
+                    .job_finished_pending(id, report.end, report.pending, now)
+--- new
+                    .job_finished_pending(id, report.end, None, now)
+--- end

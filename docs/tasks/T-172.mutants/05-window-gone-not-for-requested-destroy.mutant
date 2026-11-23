@@ -1,0 +1,8 @@
+guarantee: r2#1: on_wake reports window_gone only for the current windows Destroyed
+file: crates/voicen-core/src/overlay.rs
+added_by: test-writer
+--- old
+            window_gone: gone,
+--- new
+            window_gone: gone && !rebuild_wanted,
+--- end

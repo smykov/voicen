@@ -64,11 +64,24 @@
 #      R14 (T-206, decisions #265, #266): a file whose basename is exactly teamwright-agent.yml
 #      is counted apart and holds the token exactly once, and its lines from that token line minus
 #      the token offset of the owned tail scripts/ci/contour-upload.yml to the end of the file
-#      are that copy byte for byte (the session's scan-and-upload tail: copy, two scan passes,
-#      the upload of the scanned dir, retention-days: 3), and going up from the tail's first line
+#      are that copy byte for byte (T-230: the session tail from `      - name: "Chain: the next
+#      stage"`: both chain steps, the runner host copy, the staging copy with its two scan passes,
+#      the upload of the scanned dir, retention-days: 3; each step holding a token pins BASH_ENV ''
+#      and a fixed PATH first, the chain steps a fresh GH_CONFIG_DIR), and going up from the tail's first line
 #      (lines of spaces only skipped) the first line with fewer than 6, 4, 2 leading spaces is
 #      `    steps:`, `  agent:`, `jobs:` (as R10). Zero tokens there is refused too. Every other
-#      file keeps the single installer upload above.
+#      file keeps the single installer upload above. Also by name (T-236, F-032): in
+#      teamwright-agent.yml the line `      - name: Did the stage commit?` occurs exactly once, the
+#      lines from it are the owned copy scripts/ci/contour-push.yml byte for byte (the commit
+#      count, the push of task/<ID> and the uncommitted-patch step, each under an if: free of the
+#      session outcome, so a timed-out stage still pushes and keeps; wip/<ID> stays behind the
+#      outcome inside the push step), the line after them starts the next step (`      - `), and
+#      going up from the first line the first line with fewer than 6, 4, 2 leading spaces is
+#      `    steps:`, `  agent:`, `jobs:`. No such line is refused too. The push step pins its
+#      environment in that text (T-230): BASH_ENV '', a fixed PATH, no user or system git config,
+#      an empty template, no python user site, and the hooks of the dispatched main commit (the
+#      step env HOOKS_FROM). The two copies abut (T-230): the tail starts on the line right after
+#      the push fragment, so no step sits between them and every line after the session is owned.
 #   R10 (T-087, decisions #93, #124; replaces telegram-guard.sh) the raw token secrets.telegram_
 #      (any case, comments included) occurs in the dir (files in glob order, then line order)
 #      exactly as often as in the guard's fourth owned copy, scripts/ci/telegram-send-step.yml
@@ -149,16 +162,22 @@
 #      `permissions:` block with write scopes, so for these two files R1 does not pin the read-only
 #      block (the word jobs still occurs only on the `jobs:` line) and R3 allows the copy line of
 #      `permissions:`; R4 allows secrets.CLAUDE_CODE_OAUTH_TOKEN in teamwright-agent.yml only (no
-#      secret in teamwright-next.yml) and vars.TEAMWRIGHT_AUTH in both (every other file: no vars);
+#      secret in teamwright-next.yml) and vars.TEAMWRIGHT_AUTH and vars.TEAMWRIGHT_CONTOUR_PAUSE in
+#      both (every other file: no vars);
 #      R5 does not apply to them (they run gh with the job token). R2, R6 and R8-R13 apply as to
 #      every file.
+#   R15 (T-230) in ci.yml the line `  windows:` occurs exactly once, and the lines from it to its
+#      first `    steps:` line are byte-identical to the owned copy scripts/ci/windows-head.yml
+#      (comments included; edit both together): the windows job head with its own
+#      `timeout-minutes: 120`, so no step of the job runs past that bound (the two test steps have
+#      their own, tighter bound; release-guard.test.sh checks those on the real ci.yml).
 # R1, R3 and R4 are the capability lock (GitHub enforces the token scope; it also covers gh api
 # and curl); R2 and R7 pin the release job and the header it inherits as two literals; R5 is the
 # early, fail-closed tripwire; R6 and R8 keep R3-R5's raw text the text a YAML reader sees; R9 and
 # R10 pin the upload step and the windows job's send step, the only step the Telegram secrets
 # reach, as literals; R11-R13 pin every action and every cache-saving step to owned text, and
 # R7 on ci.yml its trigger; R14 pins the two contour heads, the only write scopes outside the
-# release block, as literals.
+# release block, as literals; R15 pins the windows job head and its bound.
 # Not caught (deliberate only): a token written into the workflow as text (the gitleaks
 # pre-commit scan refuses it); release.sh itself exiting 0 on a refusal (release.test.sh covers
 # that); whether GitHub enforces `permissions:` as documented (platform semantics,
@@ -199,11 +218,13 @@
 # any command with the job token of its head (contents write in teamwright-agent.yml) and the
 # OAuth secret. The stage session holds no job token (the checkout sets persist-credentials:
 # false; only the push and chain steps after the session get it in their own env) and the push
-# step runs the pre-push of the pre-session commit with an owner pause file outside the checkout;
-# release-guard.test.sh pins these in the real file, this guard does not read them. Not caught:
-# a process the session leaves running as the runner's OS user (it can read a later step's
-# token) and the runner's env files written directly; what keeps main safe from a contour step
-# is the repository ruleset, not this guard (docs/decisions/ci-toolchain.md).
+# step runs the pre-push of the dispatched main commit (T-230) after the owner pause check;
+# release-guard.test.sh pins these in the real file, R9 per name pins the steps after the
+# session as text. Not caught: a process the session leaves running as the runner's OS user (it
+# can read a later step's token), the runner's env files written directly (whether a step's own
+# env: wins over GITHUB_ENV is not documented; loader variables and exported bash functions act
+# before any PATH pin), and Docker on the runner; what keeps main safe from a contour step is the
+# repository ruleset, not this guard (docs/decisions/ci-toolchain.md).
 #
 # Usage: scripts/ci/release-guard.sh <workflows-dir>
 # Exit 0: ok. Exit 1: a violation, each listed as "<workflows-dir>/<file>:<line>: R<n>: <why>"
@@ -219,7 +240,8 @@
 # `    steps:`, `  windows:` or `jobs:` as due (the step's first line when none is met), or, with
 # no token, the first file's jobs: line; R11: every token line outside the owned lines and
 # fragments; R12: the column-0 line; R13: the line of the occurrence; R14: the first header line
-# that differs from scripts/ci/contour-heads/<name>). Exit 2: usage
+# that differs from scripts/ci/contour-heads/<name>; R15: the second `  windows:` line of ci.yml,
+# with none its jobs: line, else the first head line that differs from windows-head.yml). Exit 2: usage
 # error. Exit 3: cannot run (the dir is missing or not a directory, holds no regular file, a file
 # is unreadable or has no `jobs:` line, an owned copy is missing or malformed: release-job.yml not
 # starting with `  release:`, release-header.yml not ending in its only `jobs:` line,
@@ -227,11 +249,13 @@
 # telegram-send-step.yml missing, empty, holding no secrets.TELEGRAM_ token or not starting with
 # `      - name: Send the installer to Telegram (main and v* tags only)`; action-lines.txt missing or
 # empty; cache-steps/ missing or holding no fragment, or a fragment failing R11's checks of its
-# own text; the dir holding no ci.yml (R7 pins its trigger); with a contour file present,
+# own text; windows-head.yml missing, empty, not starting with `  windows:` or not ending in its
+# only `    steps:` line; the dir holding no ci.yml (R7 pins its trigger); with a contour file present,
 # contour-heads/ missing or a head copy missing, unreadable, empty, not ending in its only `jobs:`
 # line or not holding exactly one `permissions:` line, or contour-upload.yml missing, empty, not
-# starting with `      - name: Stage the session for upload` or not naming upload-artifact exactly
-# once; awk failed);
+# starting with `      - name: "Chain: the next stage"` or not naming upload-artifact exactly
+# once, or contour-push.yml missing, empty, not starting with `      - name: Did the stage commit?`
+# or holding that line more than once; awk failed);
 # never a pass.
 # Host test: scripts/ci/release-guard.test.sh (make check-release-guard).
 set -uo pipefail
@@ -340,6 +364,13 @@ for fr in "${frags[@]}"; do
   esac
 done
 fraglist="$(printf '%s\n' "${frags[@]}")"
+# R15 (T-230): the owned windows job head of ci.yml, from '  windows:' to its only '    steps:' line.
+ownedw="$here/windows-head.yml"
+[ -f "$ownedw" ] && [ -r "$ownedw" ] || cannot_run "owned windows head copy $ownedw (windows-head.yml) not found or not readable"
+[ -s "$ownedw" ] || cannot_run "owned windows head copy $ownedw (windows-head.yml) is empty"
+[ "$(head -n 1 -- "$ownedw")" = "  windows:" ] || cannot_run "owned windows head copy $ownedw (windows-head.yml) does not start with the line '  windows:'"
+[ "$(tail -n 1 -- "$ownedw")" = "    steps:" ] && [ "$(grep -c -x -F -- "    steps:" "$ownedw")" = "1" ] ||
+  cannot_run "owned windows head copy $ownedw (windows-head.yml) does not end in its only line '    steps:'"
 
 shopt -s nullglob dotglob
 files=()
@@ -374,33 +405,46 @@ if [ "$contour" = 1 ]; then
     [ "$(grep -c -x 'permissions:' -- "$ch")" = "1" ] || cannot_run "owned contour head $ch does not hold exactly one line 'permissions:'"
   done
 fi
-# R9 per name (T-206): the owned scan-and-upload tail of teamwright-agent.yml, read only with a contour file.
+# R9 per name (T-206, T-230): the owned session tail of teamwright-agent.yml (from the chain step to the
+# end), read only with a contour file.
 ownedc="$here/contour-upload.yml"
 if [ "$contour" = 1 ]; then
   [ -f "$ownedc" ] && [ -r "$ownedc" ] || cannot_run "owned tail copy $ownedc (contour-upload.yml) not found or not readable"
   [ -s "$ownedc" ] || cannot_run "owned tail copy $ownedc (contour-upload.yml) is empty"
-  [ "$(head -n 1 -- "$ownedc")" = "      - name: Stage the session for upload" ] ||
-    cannot_run "owned tail copy $ownedc (contour-upload.yml) does not start with the line '      - name: Stage the session for upload'"
+  [ "$(head -n 1 -- "$ownedc")" = '      - name: "Chain: the next stage"' ] ||
+    cannot_run "owned tail copy $ownedc (contour-upload.yml) does not start with the line '      - name: \"Chain: the next stage\"'"
   [ "$(grep -i -o -F 'upload-artifact' -- "$ownedc" | wc -l)" -eq 1 ] ||
     cannot_run "owned tail copy $ownedc (contour-upload.yml) does not name upload-artifact exactly once (nothing to align on)"
 fi
+# R9 per name (T-236): the owned post-session fragment of teamwright-agent.yml (count, push, uncommitted
+# patch), read only with a contour file; it is aligned on its first line, which it holds once.
+ownedp="$here/contour-push.yml"
+if [ "$contour" = 1 ]; then
+  [ -f "$ownedp" ] && [ -r "$ownedp" ] || cannot_run "owned push copy $ownedp (contour-push.yml) not found or not readable"
+  [ -s "$ownedp" ] || cannot_run "owned push copy $ownedp (contour-push.yml) is empty"
+  [ "$(head -n 1 -- "$ownedp")" = "      - name: Did the stage commit?" ] ||
+    cannot_run "owned push copy $ownedp (contour-push.yml) does not start with the line '      - name: Did the stage commit?'"
+  [ "$(grep -c -x -F -- "      - name: Did the stage commit?" "$ownedp")" = "1" ] ||
+    cannot_run "owned push copy $ownedp (contour-push.yml) holds its first line more than once (nothing to align on)"
+fi
 
 # Output lines: "V <file>:<line>: R<n>: <why>"; awk exit 3 = an owned copy could not be read.
-report="$(RG_FRAGS="$fraglist" awk -v owned="$owned" -v ownedh="$ownedh" -v ownedu="$ownedu" -v ownedt="$ownedt" -v ownedl="$ownedl" -v contour="$contour" -v cha="$cha" -v chn="$chn" -v ownedc="$ownedc" '
+report="$(RG_FRAGS="$fraglist" awk -v owned="$owned" -v ownedh="$ownedh" -v ownedu="$ownedu" -v ownedt="$ownedt" -v ownedl="$ownedl" -v contour="$contour" -v cha="$cha" -v chn="$chn" -v ownedc="$ownedc" -v ownedp="$ownedp" -v ownedw="$ownedw" '
 function v(k, i, r, why) { print "V " F[k] ":" i ": " r ": " why; nv++ }
 # count(s, t): occurrences of t in s.
 function count(s, t,   n, p) { n = 0; while ((p = index(s, t)) > 0) { n++; s = substr(s, p + length(t)) } return n }
 # word(lo, w): the lower-case line lo holds w bounded by characters outside [a-z0-9_] or its ends.
 function word(lo, w) { return lo ~ ("(^|[^a-z0-9_])" w "([^a-z0-9_]|$)") }
-# varsok(s, ok): every occurrence of the word vars (any case) on line s is vars.TEAMWRIGHT_AUTH
-# ended by a character outside [A-Za-z0-9_] or the end of the line, and ok (the file may name it).
+# varsok(s, ok): every occurrence of the word vars (any case) on line s is vars.TEAMWRIGHT_AUTH or
+# vars.TEAMWRIGHT_CONTOUR_PAUSE ended by a character outside [A-Za-z0-9_] or the end of the
+# line, and ok (the file may name it).
 function varsok(s, ok,   t, c, q, pb, pa) {
   t = tolower(s); c = 0
   while ((q = index(t, "vars")) > 0) {
     pb = (c + q > 1) ? substr(tolower(s), c + q - 1, 1) : ""
     pa = substr(tolower(s), c + q + 4, 1)
     if (pb !~ /[a-z0-9_]/ && pa !~ /[a-z0-9_]/)
-      if (!ok || substr(s, c + q) !~ /^vars\.TEAMWRIGHT_AUTH([^A-Za-z0-9_]|$)/) return 0
+      if (!ok || substr(s, c + q) !~ /^vars\.TEAMWRIGHT_(AUTH|CONTOUR_PAUSE)([^A-Za-z0-9_]|$)/) return 0
     c += q; t = substr(t, q + 1)
   }
   return 1
@@ -462,7 +506,17 @@ BEGIN {
     }
     if (rc < 0 || nco == 0 || cco != 1) { bad = 1; exit 3 }
     close(ownedc)
+    # R9 per name (T-236): the owned push fragment OP[m], nop lines.
+    nop = 0
+    while ((rc = (getline line < ownedp)) > 0) OP[++nop] = line
+    if (rc < 0 || nop == 0) { bad = 1; exit 3 }
+    close(ownedp)
   }
+  # R15: the owned windows job head OW[m], nw lines.
+  nw = 0
+  while ((rc = (getline line < ownedw)) > 0) OW[++nw] = line
+  if (rc < 0 || nw == 0 || OW[1] != "  windows:" || OW[nw] != "    steps:") { bad = 1; exit 3 }
+  close(ownedw)
 }
 FNR == 1 { nf++; F[nf] = FILENAME }
 { N[nf] = FNR; L[nf, FNR] = $0 }
@@ -508,6 +562,26 @@ END {
       }
       if (i > N[k] || i > nh || L[k, i] != oh[i])
         v(k, i, "R7", "the workflow header, from line 1 to jobs:, differs from the owned copy scripts/ci/release-header.yml here (byte for byte; GitHub applies it to the release job)")
+    }
+    # R15: in ci.yml the line "  windows:" occurs once and the nw lines from it are the owned head
+    # copy, byte for byte (the copy ends in its only "    steps:" line, so they run to the first one).
+    if (F[k] ~ /(^|\/)ci\.yml$/) {
+      wn = 0; wf = 0; w2 = 0
+      for (i = 1; i <= N[k]; i++)
+        if (L[k, i] == "  windows:") { wn++; if (wn == 1) wf = i; else if (wn == 2) w2 = i }
+      if (wn == 0) {
+        for (i = 1; i <= N[k]; i++) if (L[k, i] == "jobs:") break
+        v(k, i, "R15", "no line \"  windows:\" in ci.yml (the windows job head is the owned copy scripts/ci/windows-head.yml, with its timeout-minutes)")
+      } else if (wn > 1)
+        v(k, w2, "R15", "a second line \"  windows:\" in ci.yml (the windows job occurs once, its head the owned copy scripts/ci/windows-head.yml)")
+      else
+        for (m = 1; m <= nw; m++) {
+          i = wf + m - 1
+          if (i > N[k] || L[k, i] != OW[m]) {
+            v(k, (i > N[k] ? N[k] : i), "R15", "the windows job head, from \"  windows:\" to its first \"    steps:\", differs from the owned copy scripts/ci/windows-head.yml here (byte for byte, its timeout-minutes included; edit both together)")
+            break
+          }
+        }
     }
     # R11: cov[k, i] = line i lies inside a byte-exact copy of an owned fragment, its last line
     # (the first line of the next step, or a job key) excluded: that line only pins the end.
@@ -575,7 +649,7 @@ END {
         c += q + 6; t = substr(t, q + 7)
       }
       if (!varsok(s, ck))
-        v(k, i, "R4", (ck ? "the word vars other than vars.TEAMWRIGHT_AUTH (the only repository variable of the contour files)" : "the word vars (a repository variable could hold a token from outside the job permissions)"))
+        v(k, i, "R4", (ck ? "the word vars other than vars.TEAMWRIGHT_AUTH / vars.TEAMWRIGHT_CONTOUR_PAUSE (the only repository variables of the contour files)" : "the word vars (a repository variable could hold a token from outside the job permissions)"))
       # R5 is waived for the two contour names only (their steps call gh with their own token).
       if (!inb && !ck && word(lo, "gh"))
         v(k, i, "R5", "the word gh outside the release job (only scripts/ci/release.sh in that job may call gh)")
@@ -673,15 +747,16 @@ END {
       for (i = 1; i <= N[ak]; i++) if (L[ak, i] == "jobs:") break
       v(ak, i, "R9", "no upload-artifact in teamwright-agent.yml (its scan-and-upload tail is the owned copy scripts/ci/contour-upload.yml)")
     } else if (atok == 1) {
-      s0 = atl - cto + 1; cbad = 0
+      s0 = atl - cto + 1; cbad = 0; ts0 = 0
       for (m = 1; m <= nco; m++) {
         i = s0 + m - 1
         if (i < 1 || i > N[ak] || L[ak, i] != OC[m]) { cbad = (i < 1 ? 1 : i); break }
       }
       if (!cbad && s0 + nco - 1 < N[ak]) cbad = s0 + nco
       if (cbad)
-        v(ak, cbad, "R9", "the scan-and-upload tail of teamwright-agent.yml, from \"      - name: Stage the session for upload\" to the end of the file, differs from the owned copy scripts/ci/contour-upload.yml here (byte for byte; edit both together)")
+        v(ak, cbad, "R9", "the session tail of teamwright-agent.yml, from \"" OC[1] "\" to the end of the file, differs from the owned copy scripts/ci/contour-upload.yml here (byte for byte; edit both together)")
       else {
+        ts0 = s0
         lim[1] = 6; want[1] = "    steps:"; lim[2] = 4; want[2] = "  agent:"; lim[3] = 2; want[3] = "jobs:"
         lv = 1
         for (i = s0 - 1; i >= 1 && lv <= 3; i--) {
@@ -696,6 +771,48 @@ END {
           v(ak, (i >= 1 ? i : s0), "R9", "the scan-and-upload tail is not a step of the agent job here: going up from it, the first line with fewer than " lim[lv] " leading spaces must be \"" want[lv] "\"")
       }
     }
+    # R9 per name (T-236): the line OP[1] ("      - name: Did the stage commit?") occurs once in
+    # teamwright-agent.yml, the nop lines from it are scripts/ci/contour-push.yml byte for byte, the
+    # line after them starts the next step ("      - "), so no key can be appended to the last
+    # step, and going up from it the first line with fewer than 6, 4, 2 leading spaces is
+    # "    steps:", "  agent:", "jobs:". No if: of these steps names the session outcome, so a
+    # timed-out stage still pushes task/<ID> and keeps its uncommitted tree (the copy holds it).
+    pf = 0; pn = 0; p2 = 0
+    for (i = 1; i <= N[ak]; i++)
+      if (L[ak, i] == OP[1]) { pn++; if (pn == 1) pf = i; else if (pn == 2) p2 = i }
+    if (pn == 0) {
+      for (i = 1; i <= N[ak]; i++) if (L[ak, i] == "jobs:") break
+      v(ak, i, "R9", "no line \"" OP[1] "\" in teamwright-agent.yml (its count, push and uncommitted-patch steps are the owned copy scripts/ci/contour-push.yml)")
+    } else if (pn > 1)
+      v(ak, p2, "R9", "a second line \"" OP[1] "\" in teamwright-agent.yml (the owned copy scripts/ci/contour-push.yml occurs once)")
+    else {
+      pbad = 0
+      for (m = 1; m <= nop; m++) {
+        i = pf + m - 1
+        if (i > N[ak] || L[ak, i] != OP[m]) { pbad = (i > N[ak] ? N[ak] : i); break }
+      }
+      if (!pbad && (pf + nop > N[ak] || L[ak, pf + nop] !~ /^      - /)) pbad = (pf + nop > N[ak] ? N[ak] : pf + nop)
+      if (pbad)
+        v(ak, pbad, "R9", "the count, push and uncommitted-patch steps of teamwright-agent.yml, from \"" OP[1] "\" to the next step, differ from the owned copy scripts/ci/contour-push.yml here (byte for byte, then a line starting the next step; edit both together)")
+      else {
+        lim[1] = 6; want[1] = "    steps:"; lim[2] = 4; want[2] = "  agent:"; lim[3] = 2; want[3] = "jobs:"
+        lv = 1
+        for (i = pf - 1; i >= 1 && lv <= 3; i--) {
+          s = L[ak, i]
+          if (s ~ /^ *$/) continue
+          match(s, /^ */)
+          if (RLENGTH >= lim[lv]) continue
+          if (s != want[lv]) break
+          lv++
+        }
+        if (lv <= 3)
+          v(ak, (i >= 1 ? i : pf), "R9", "the owned steps scripts/ci/contour-push.yml are not steps of the agent job here: going up from them, the first line with fewer than " lim[lv] " leading spaces must be \"" want[lv] "\"")
+        # T-230 (I2): the two owned copies abut: the tail starts on the line right after the push
+        # fragment, so no step sits between them (the own check of each copy passes such a step).
+        else if (ts0 && ts0 != pf + nop)
+          v(ak, pf + nop, "R9", "the owned copies scripts/ci/contour-push.yml and scripts/ci/contour-upload.yml do not abut here: the session tail must start on the line right after the push fragment (no step between them)")
+      }
+    }
   }
   exit (nv > 0 ? 1 : 0)
 }
@@ -708,7 +825,7 @@ case "$rc" in
     echo "release-guard: FAIL: a token other than the release job's could write contents, the release job or the ci.yml header is not the owned copy, the installer upload is not the owned tag-only step, the Telegram secrets reach a step other than the owned send step, or an action is not an owned line or step fragment (T-085, T-084, T-087, T-088, P-020)" >&2
     exit 1
     ;;
-  *) cannot_run "awk failed (exit $rc) on $dir or an owned copy ($owned, $ownedh, $ownedu, $ownedt, $ownedl, $csd, $ownedc)" ;;
+  *) cannot_run "awk failed (exit $rc) on $dir or an owned copy ($owned, $ownedh, $ownedu, $ownedt, $ownedl, $csd, $ownedc, $ownedp, $ownedw)" ;;
 esac
 grep -q '^V ' <<<"$report" && cannot_run "awk listed violations but exited 0"
-echo "release-guard: ok: $dir: ${#files[@]} file(s); token read-only but in the release job, which is the owned copy; no other secret, permissions or gh; one installer upload, the owned tag-only step; the Telegram secrets only in the owned send step of the windows job; every action an owned line or step fragment, no column-0 line after jobs:, no merge key"
+echo "release-guard: ok: $dir: ${#files[@]} file(s); token read-only but in the release job, which is the owned copy; no other secret, permissions or gh; one installer upload, the owned tag-only step; the Telegram secrets only in the owned send step of the windows job; every action an owned line or step fragment, no column-0 line after jobs:, no merge key; the windows job head the owned copy with its bound"

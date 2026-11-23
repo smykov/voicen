@@ -1,0 +1,59 @@
+# T-202 (decisions #249, #253): the contour's dispatcher. It reads the task record on task/<ID>,
+# picks the next stage and starts teamwright-agent.yml for it; after implement it starts the
+# P-016 run of ci.yml on wip/<ID> (a push with the job token starts no run); at CODE_COMPLETE it
+# opens the pull request of task/<ID> when that branch has commits not on the default branch.
+# T-231: the owner's label `teamwright` on an open Issue titled "T-NNN: ..." starts the chain:
+# the relay job start dispatches hop 0 of this file for that task. The header, line 1 to the job
+# map, is the owned copy scripts/ci/contour-heads/teamwright-next.yml (make check,
+# check-release-guard, R14). It runs no session and pushes nothing (docs/decisions/ci-toolchain.md).
+name: teamwright next
+run-name: "teamwright next ${{ inputs.task_id || format('label on Issue #{0}', github.event.issue.number) }} (hop ${{ inputs.hop || '0' }})"
+
+on:
+  # The label start (T-231); the relay job start turns it into a workflow_dispatch hop 0.
+  issues:
+    types: [labeled]
+  workflow_dispatch:
+    inputs:
+      task_id:
+        description: "Task, e.g. T-202"
+        required: true
+      hop:
+        description: "Chain step of the stage that ended (0: start)"
+        required: false
+        default: "0"
+      prev_stage:
+        description: "The stage that ended (empty: start)"
+        required: false
+        default: ""
+      prev_status:
+        description: "Task status before that stage"
+        required: false
+        default: ""
+      issue:
+        description: "Issue for reports (empty: no reports)"
+        required: false
+        default: ""
+
+# One dispatch of a task at a time: a group per task (decisions #292); the stage job has its own.
+# A label run has no task id yet (an expression cannot parse the title): its group is per Issue,
+# and the hop 0 it dispatches runs in the task's group, as a manual start does (T-231).
+concurrency:
+  group: teamwright-next-${{ inputs.task_id || format('issue-{0}', github.event.issue.number) }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: write
+  actions: write
+  pull-requests: write
+jobs:
+  next:
+    runs-on: [self-hosted, Linux, X64, claude]
+    steps:
+      - uses: actions/checkout@v5
+      - name: Open the pull request
+        env:
+          TEAMWRIGHT_AUTH: ${{ vars.TEAMWRIGHT_AUTH }}
+          GH_TOKEN: ${{ github.token }}
+        run: gh pr create --fill

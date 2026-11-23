@@ -1,6 +1,7 @@
 //! The call indicator model and its IPC wire (spec 007 contracts/ipc.md `IndicatorState`,
 //! `IndicatorTick`, `IndicatorWarning`; T-126). Pure values: every text is rendered here in
-//! Rust from the i18n catalog, so the UI shows what core decided.
+//! Rust from the i18n catalog, so the UI shows what core decided. [`place_indicator`] is
+//! the window's pure placement over the monitors' work areas (T-130).
 //!
 //! `e2e/fixtures/call-indicator-wire.json` is pinned against these values by
 //! `tests/call_indicator_wire.rs`.
@@ -15,6 +16,7 @@ use crate::i18n::{
     WARNING_LOW_DISK, WARNING_MIC_CHANGED, WARNING_PROVIDER_NOTICE, WARNING_TRACK_LOST_MIC,
     WARNING_TRACK_LOST_SYSTEM,
 };
+use crate::settings::IndicatorPosition;
 
 /// What the call indicator window shows (`indicator://state`, `call_indicator_state`).
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -195,6 +197,135 @@ impl WarningList {
             .iter()
             .map(|(id, w)| IndicatorWarning::of(*id, w, lang))
             .collect()
+    }
+}
+
+/// One monitor's work area in screen pixels (the monitor minus the taskbar); `right` and
+/// `bottom` are exclusive. In a slice given to [`place_indicator`] the first entry is the
+/// primary monitor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorkArea {
+    pub left: i32,
+    pub top: i32,
+    pub right: i32,
+    pub bottom: i32,
+}
+
+/// The inset of the default indicator placement from the primary work area's top-right.
+pub const INDICATOR_DEFAULT_MARGIN: i32 = 16;
+
+/// The window's top-left on screen for a window of `size` (width, height) pixels (T-130).
+///
+/// - `stored = None`: the top-right of the primary (first) work area, inset by
+///   [`INDICATOR_DEFAULT_MARGIN`].
+/// - `stored` fully inside some work area: returned unchanged.
+/// - Otherwise the window is moved the least that puts it fully inside one work area:
+///   the one it overlaps most (by pixels), or, when it overlaps none, the nearest one
+///   (rect-to-rect gap; ties go to the earlier entry). A window larger than that area is
+///   pinned to the area's left/top.
+///
+/// An empty `work_areas` keeps `stored` (or `(0, 0)` without one): nothing to clamp to.
+pub fn place_indicator(
+    stored: Option<IndicatorPosition>,
+    size: (i32, i32),
+    work_areas: &[WorkArea],
+) -> IndicatorPosition {
+    let Some(stored) = stored else {
+        let Some(primary) = work_areas.first() else {
+            return IndicatorPosition { x: 0, y: 0 };
+        };
+        let default = IndicatorPosition {
+            x: primary
+                .right
+                .saturating_sub(size.0)
+                .saturating_sub(INDICATOR_DEFAULT_MARGIN),
+            y: primary.top.saturating_add(INDICATOR_DEFAULT_MARGIN),
+        };
+        return clamp_into(default, size, primary);
+    };
+    let rect = Rect::of(stored, size);
+    if work_areas.iter().any(|a| rect.inside(a)) {
+        return stored;
+    }
+    let mut best: Option<(&WorkArea, i64)> = None;
+    for area in work_areas {
+        let overlap = rect.overlap(area);
+        if overlap > 0 && best.is_none_or(|(_, o)| overlap > o) {
+            best = Some((area, overlap));
+        }
+    }
+    let target = match best {
+        Some((area, _)) => Some(area),
+        None => {
+            let mut nearest: Option<(&WorkArea, i64)> = None;
+            for area in work_areas {
+                let gap = rect.gap(area);
+                if nearest.is_none_or(|(_, g)| gap < g) {
+                    nearest = Some((area, gap));
+                }
+            }
+            nearest.map(|(area, _)| area)
+        }
+    };
+    match target {
+        Some(area) => clamp_into(stored, size, area),
+        None => stored,
+    }
+}
+
+/// `p` moved the least that puts a `size` window inside `area`; pinned to its left/top
+/// when the window is larger than the area.
+fn clamp_into(p: IndicatorPosition, size: (i32, i32), area: &WorkArea) -> IndicatorPosition {
+    let axis = |v: i32, low: i32, high_exclusive: i32, len: i32| {
+        v.min(high_exclusive.saturating_sub(len)).max(low)
+    };
+    IndicatorPosition {
+        x: axis(p.x, area.left, area.right, size.0),
+        y: axis(p.y, area.top, area.bottom, size.1),
+    }
+}
+
+/// A window rectangle in i64, so sums and products of screen coordinates never overflow.
+struct Rect {
+    left: i64,
+    top: i64,
+    right: i64,
+    bottom: i64,
+}
+
+impl Rect {
+    fn of(p: IndicatorPosition, size: (i32, i32)) -> Rect {
+        Rect {
+            left: i64::from(p.x),
+            top: i64::from(p.y),
+            right: i64::from(p.x) + i64::from(size.0),
+            bottom: i64::from(p.y) + i64::from(size.1),
+        }
+    }
+
+    fn inside(&self, a: &WorkArea) -> bool {
+        self.left >= i64::from(a.left)
+            && self.top >= i64::from(a.top)
+            && self.right <= i64::from(a.right)
+            && self.bottom <= i64::from(a.bottom)
+    }
+
+    /// The shared area in pixels (0 when apart).
+    fn overlap(&self, a: &WorkArea) -> i64 {
+        let w = self.right.min(i64::from(a.right)) - self.left.max(i64::from(a.left));
+        let h = self.bottom.min(i64::from(a.bottom)) - self.top.max(i64::from(a.top));
+        w.max(0) * h.max(0)
+    }
+
+    /// The squared distance between the rectangles (0 when they touch or overlap).
+    fn gap(&self, a: &WorkArea) -> i64 {
+        let dx = (i64::from(a.left) - self.right)
+            .max(self.left - i64::from(a.right))
+            .max(0);
+        let dy = (i64::from(a.top) - self.bottom)
+            .max(self.top - i64::from(a.bottom))
+            .max(0);
+        dx.saturating_mul(dx).saturating_add(dy.saturating_mul(dy))
     }
 }
 

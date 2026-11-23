@@ -831,3 +831,228 @@ fn the_fixtures_first_run_view_carries_the_calls_section() {
         })
     );
 }
+
+// ---- T-155: the provider host on the settings view, and the Calls-tab wire samples ---
+//
+// The Calls tab shows "The other party's audio goes to provider {host}" (FR-031) from
+// a host core computed (the UI classifies no URL, P-010): `SettingsView.provider_host`,
+// text or null, from `check_base_url(api.base_url)` then `url::provider_host`, the one
+// rule `CallSession::new_provider_host` uses. Everything below reads the serialized
+// wire (`serde_json::Value`), so a missing field is an assertion failure.
+
+/// A first-run service as the fixture is made: no OS language, no downloaded models.
+fn fixture_service(world: &World) -> SettingsService {
+    let (service, outcome) = SettingsService::load_or_init(
+        SettingsDeps {
+            file: world.file.clone(),
+            credentials: world.creds.clone(),
+            autostart: world.autostart.clone(),
+            hotkeys: world.hotkeys.clone(),
+            local_models: Arc::new(FakeDownloadedModels::new(&[])),
+            clock: Arc::new(FakeClock::at(UNIX_EPOCH + Duration::from_secs(1))),
+            call_roots: world.roots.clone(),
+        },
+        None,
+    );
+    assert!(matches!(outcome, LoadOutcome::FirstRun(_)), "{outcome:?}");
+    service
+}
+
+/// The wire of the view after a save of defaults(None) with `api.base_url` = `url`
+/// (engine none, so the URL is not validated and the save goes through).
+fn view_wire_with_api_url(url: &str) -> Value {
+    let world = World::first_run();
+    let service = fixture_service(&world);
+    let mut d = defaults(None);
+    d.api.base_url = url.into();
+    let saved = service.save(req(d));
+    let SaveOutcome::Saved { view, .. } = saved else {
+        panic!("expected Saved for {url:?}, got {saved:?}");
+    };
+    let from_save = serde_json::to_value(view).expect("serializes");
+    let from_view = serde_json::to_value(service.view()).expect("serializes");
+    assert_eq!(
+        from_save["provider_host"], from_view["provider_host"],
+        "the Saved view and view() must carry the same provider_host"
+    );
+    from_view
+}
+
+#[test]
+fn view_carries_provider_host_for_a_remote_api_url() {
+    // FR-031 / I4: the default `https://api.openai.com/v1` gives the text
+    // "api.openai.com"; other remote hosts give their host text, whatever the scheme
+    // or port. Bite: the field missing, always null, taken from local_server.
+    for (url, host) in [
+        ("https://api.openai.com/v1", "api.openai.com"),
+        ("http://example.com/v1", "example.com"),
+        ("https://192.0.2.5:8443/v1", "192.0.2.5"),
+    ] {
+        let wire = view_wire_with_api_url(url);
+        assert_eq!(wire["provider_host"], json!(host), "{url}: {wire}");
+    }
+}
+
+#[test]
+fn view_provider_host_is_null_for_loopback_api_urls() {
+    // The line is absent for a loopback host (FR-031). The key must be present with a
+    // JSON null, not missing. Bite: no loopback check, loopback missing for one
+    // spelling (`localhost`, `127.0.0.1`, `[::1]`).
+    for url in [
+        "http://localhost:8000/v1",
+        "http://127.0.0.1:8000/v1",
+        "http://[::1]:8000/v1",
+    ] {
+        let wire = view_wire_with_api_url(url);
+        let object = wire.as_object().expect("view is an object");
+        assert!(object.contains_key("provider_host"), "{url}: {wire}");
+        assert_eq!(wire["provider_host"], Value::Null, "{url}: {wire}");
+    }
+}
+
+#[test]
+fn view_provider_host_is_null_when_the_api_url_is_not_a_valid_url() {
+    // A URL `check_base_url` refuses (empty, malformed, a scheme that is not http(s))
+    // gives no host: null, never the raw text. Bite: the raw base_url (or a naive
+    // split) used when the check fails.
+    for url in ["", "not a url", "ftp://files.example.com/v1"] {
+        let wire = view_wire_with_api_url(url);
+        let object = wire.as_object().expect("view is an object");
+        assert!(object.contains_key("provider_host"), "{url:?}: {wire}");
+        assert_eq!(wire["provider_host"], Value::Null, "{url:?}: {wire}");
+    }
+}
+
+#[test]
+fn view_provider_host_follows_the_api_url_not_the_local_server_url() {
+    // The line is for the API engine's host whatever `engine` is (the call session's
+    // final engine is always the API one): a remote api URL with a loopback
+    // local_server URL gives the api host, and the reverse gives null. Bite: computed
+    // from local_server.base_url, or from the selected engine's URL.
+    let world = World::first_run();
+    let service = fixture_service(&world);
+    let mut d = defaults(None);
+    d.api.base_url = "https://api.example.com/v1".into();
+    d.local_server.base_url = "http://localhost:8000/v1".into();
+    expect_saved(service.save(req(d.clone())));
+    let wire = serde_json::to_value(service.view()).expect("serializes");
+    assert_eq!(wire["provider_host"], json!("api.example.com"), "{wire}");
+
+    d.api.base_url = "http://localhost:8000/v1".into();
+    d.local_server.base_url = "https://remote.example.com/v1".into();
+    expect_saved(service.save(req(d)));
+    let wire = serde_json::to_value(service.view()).expect("serializes");
+    assert_eq!(wire["provider_host"], Value::Null, "{wire}");
+}
+
+#[test]
+fn the_fixtures_first_run_view_carries_the_provider_host() {
+    // The first-run view a window receives names the default API host. (The
+    // whole-view comparison is `service::tests::e2e_settings_wire_fixture_matches_core`;
+    // this one names the key so a failure says what is missing.) Bite: the fixture not
+    // regenerated, or a view without the field.
+    let fixture: Value = serde_json::from_str(FIXTURE).expect("settings-wire.json is valid JSON");
+    assert_eq!(
+        fixture["first_run_view"]["provider_host"],
+        json!("api.openai.com")
+    );
+    let world = World::first_run();
+    let service = fixture_service(&world);
+    let wire = serde_json::to_value(service.view()).expect("serializes");
+    assert_eq!(wire["provider_host"], json!("api.openai.com"), "{wire}");
+    assert_eq!(fixture["first_run_view"], wire);
+}
+
+#[test]
+fn e2e_settings_wire_fixture_loopback_api_view_matches_core() {
+    // T-155: the Playwright "no provider line" scenario scripts core's real view.
+    // `loopback_api_view` is the SettingsView wire (`service.view()`) of a first run
+    // with no OS language and no keys after a save of defaults(None) with
+    // api.base_url `http://localhost:8000/v1`: provider_host null. Bite: the key not
+    // in e2e/fixtures/settings-wire.json, a hand-edited host, a stale view shape.
+    let wire = view_wire_with_api_url("http://localhost:8000/v1");
+    assert_eq!(
+        wire["settings"]["api"]["base_url"],
+        "http://localhost:8000/v1"
+    );
+    assert_eq!(wire["provider_host"], Value::Null);
+    let fixture: Value = serde_json::from_str(FIXTURE).expect("settings-wire.json is valid JSON");
+    assert_eq!(
+        fixture["loopback_api_view"],
+        wire,
+        "e2e/fixtures/settings-wire.json loopback_api_view differs from core; core says:\n{}",
+        serde_json::to_string_pretty(&wire).expect("pretty")
+    );
+}
+
+/// The Refused wire of a first-run save of `defaults(None)` after `edit`, with the
+/// registrar set up by `setup`; the errors must be exactly `calls.hotkey` / `code`.
+fn refused_hotkey_wire(
+    edit: impl FnOnce(&mut Settings),
+    setup: impl FnOnce(&FakeHotkeyRegistrar),
+    code: &str,
+) -> Value {
+    let world = World::first_run();
+    setup(&world.hotkeys);
+    let service = fixture_service(&world);
+    let mut d = defaults(None);
+    edit(&mut d);
+    let wire = serde_json::to_value(service.save(req(d))).expect("serializes");
+    assert_eq!(
+        wire["Refused"]["errors"],
+        json!([ { "field": "calls.hotkey", "code": code } ]),
+        "{wire}"
+    );
+    assert_eq!(wire["Refused"]["form_error"], Value::Null, "{wire}");
+    wire
+}
+
+fn assert_fixture_key(key: &str, wire: &Value) {
+    let fixture: Value = serde_json::from_str(FIXTURE).expect("settings-wire.json is valid JSON");
+    assert_eq!(
+        fixture[key],
+        *wire,
+        "e2e/fixtures/settings-wire.json {key} differs from core; core says:\n{}",
+        serde_json::to_string_pretty(wire).expect("pretty")
+    );
+}
+
+#[test]
+fn e2e_settings_wire_fixture_refused_call_hotkey_equals_dictation_matches_core() {
+    // T-155 / FR-004: the call side changed to the dictation hotkey. Core's real
+    // refusal: calls.hotkey `hotkey.equals_dictation`, no form error. Bite: the error
+    // on `recording.hotkey`, another code, the key not in the fixture.
+    let wire = refused_hotkey_wire(
+        |d| d.calls.hotkey = d.hotkey.clone(),
+        |_| {},
+        "hotkey.equals_dictation",
+    );
+    assert_fixture_key("refused_call_hotkey_equals_dictation", &wire);
+}
+
+#[test]
+fn e2e_settings_wire_fixture_refused_dictation_hotkey_equals_call_matches_core() {
+    // T-155 / FR-004: the dictation side changed to the call hotkey (`Ctrl+Alt+R`).
+    // The error still sits on `calls.hotkey`, never on `recording.hotkey` (the Calls
+    // tab's field; on another tab it is listed at form level). Bite: the error moved
+    // to the dictation field, the key not in the fixture.
+    let wire = refused_hotkey_wire(
+        |d| d.hotkey = d.calls.hotkey.clone(),
+        |_| {},
+        "hotkey.equals_dictation",
+    );
+    assert_fixture_key("refused_dictation_hotkey_equals_call", &wire);
+}
+
+#[test]
+fn e2e_settings_wire_fixture_refused_call_hotkey_unavailable_matches_core() {
+    // T-155 / T-129: a save-time registration conflict on a changed call hotkey: the
+    // registrar refuses `prepare_call` -> calls.hotkey `hotkey.unavailable`. Bite: the
+    // error on `recording.hotkey`, another code, the key not in the fixture.
+    let wire = refused_hotkey_wire(
+        |d| d.calls.hotkey = "Ctrl+Alt+F10".into(),
+        |hotkeys| hotkeys.fail_prepare_call(true),
+        "hotkey.unavailable",
+    );
+    assert_fixture_key("refused_call_hotkey_unavailable", &wire);
+}

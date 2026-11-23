@@ -1,0 +1,11 @@
+guarantee: AC4: deleting the recording call is recordingCall, nothing changed
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: test-writer
+--- old
+        if self.store.is_active(&dir) {
+            return Err(CallError::recording_call());
+        }
+        let mut slots = self.shared.slots();
+--- new
+        let mut slots = self.shared.slots();
+--- end

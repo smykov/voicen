@@ -20,6 +20,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use common::deadlines::api_ten_seconds;
 use common::timing::{ago, now};
 use local_support::{local_catalog, place_models, FakeLoader, FakeMono, Script};
 use voicen_core::clock::MonotonicClock;
@@ -38,7 +39,7 @@ use voicen_core::secrets::{FakeCredentialStore, KeySlot};
 use voicen_core::settings::{defaults, EngineKind, Settings};
 use voicen_core::test_support::local_models::Server;
 use voicen_core::test_support::{fixtures, TempDir};
-use voicen_core::timeouts::{Timeouts, MODEL_IDLE_UNLOAD};
+use voicen_core::timeouts::MODEL_IDLE_UNLOAD;
 use voicen_core::vad::{EnergyDetector, SpeechDetector, SpeechGate};
 
 const KEY: &str = "sk-test-SECRET";
@@ -131,20 +132,15 @@ fn builtin_dictations_with_post_processing_off_make_no_request() {
     };
     let factory_residency = Arc::clone(&residency);
     let factory_store = Arc::clone(&store);
-    let pipeline = Pipeline::with_timeouts(
-        deps,
-        Timeouts {
-            api_transcription: Duration::from_secs(10),
-            ..Timeouts::default()
+    let pipeline = Pipeline::with_timeouts(deps, api_ten_seconds()).with_engine_factory(Box::new(
+        move |settings, creds| {
+            let builtin = BuiltinDeps {
+                residency: Arc::clone(&factory_residency),
+                store: Arc::clone(&factory_store),
+            };
+            engine_for(settings, creds, Some(&builtin))
         },
-    )
-    .with_engine_factory(Box::new(move |settings, creds| {
-        let builtin = BuiltinDeps {
-            residency: Arc::clone(&factory_residency),
-            store: Arc::clone(&factory_store),
-        };
-        engine_for(settings, creds, Some(&builtin))
-    }));
+    ));
 
     for n in 0..DICTATIONS {
         let report = dictate(&pipeline, settings(EngineKind::BuiltinLocal, &server));

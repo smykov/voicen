@@ -2,19 +2,19 @@
 .PHONY: check check-shell-layout check-shell-layout-fixtures check-helper-windows-fixtures check-core \
 	check-ci-credentials \
 	check-clippy-lines \
-	check-core-test-os-answer check-webview-data check-ci-wip check-telegram-send check-telegram-failure-branch \
+	check-core-test-os-answer check-core-test-deadlines check-webview-data check-ci-wip check-telegram-send check-telegram-failure-branch \
 	check-version-stamp check-release-check check-release check-release-guard check-nsis-fork check-e2e-entry-fixtures check-area-image-fixtures \
 	check-whisper-cmake-cache check-opus-cmake-cache check-whisper-model-key check-crt-imports check-whisper \
-	check-shell-windows check-ban-canary check-role-tools check-guard-trigger check-wip-push check-wip-run check-contour-busy \
+	check-shell-windows check-ban-canary check-role-tools check-guard-trigger check-wip-push check-wip-run check-contour-busy check-contour-label check-serena-pin check-test-guard \
 	check-ui core-image ui-image core-image-present \
 	licenses licenses-check licenses-unit licenses-fixture licenses-rust licenses-bundle \
 	licenses-npm licenses-generate licenses-stale licenses-stale-guard
 
 # check-ban-canary and check-shell-windows after check-core: both build voicen-core, so a core
 # error is reported first by the faster native check-core, before the slower runs.
-check: check-shell-layout check-shell-layout-fixtures check-helper-windows-fixtures check-ci-credentials check-role-tools check-guard-trigger check-wip-push check-wip-run check-contour-busy \
+check: check-shell-layout check-shell-layout-fixtures check-helper-windows-fixtures check-ci-credentials check-role-tools check-guard-trigger check-wip-push check-wip-run check-contour-busy check-contour-label check-serena-pin check-test-guard \
 	check-clippy-lines \
-	check-core-test-os-answer check-webview-data check-ci-wip check-telegram-send check-telegram-failure-branch check-version-stamp check-release-check check-release check-release-guard check-nsis-fork check-whisper-cmake-cache check-opus-cmake-cache check-whisper-model-key check-crt-imports check-core check-whisper \
+	check-core-test-os-answer check-core-test-deadlines check-webview-data check-ci-wip check-telegram-send check-telegram-failure-branch check-version-stamp check-release-check check-release check-release-guard check-nsis-fork check-whisper-cmake-cache check-opus-cmake-cache check-whisper-model-key check-crt-imports check-core check-whisper \
 	check-ban-canary check-shell-windows check-e2e-entry-fixtures check-area-image-fixtures check-ui \
 	licenses-check
 
@@ -98,6 +98,15 @@ check-guard-trigger:
 check-wip-push:
 	scripts/ci/tw-wip-push.test.sh
 
+# check-test-guard (T-189, decisions #201): the kit-managed PreToolUse hook scripts/hooks/test-guard.sh
+# judges a command behind the `systemd-run` scope prefix like the command it runs: a direct test or
+# gate run (cargo test, make check, pnpm test, tw-run <area> -- cargo test, a cut of tw-test output)
+# is refused with the same "Run instead" target, an unreadable option is judged by its suffixes, and
+# tw-test, tw-gate, a build and a find stay allowed. The self-test feeds the hook JSON payloads with
+# its log dir in a temporary directory. Host bash, python3.
+check-test-guard:
+	scripts/ci/test-guard.test.sh
+
 # check-wip-run (T-199, decisions #228, #241): scripts/tw-wip-run is the only CI read of a stage
 # session. Its gh argv is one of two owned templates (run list --branch wip/<ID> ..., run view <id>
 # ...), the ID from branch tw/<ID>; it prints CI: <url> @ <sha> on a green run of the commit, names the
@@ -116,6 +125,29 @@ check-wip-run:
 check-contour-busy:
 	scripts/ci/contour-busy.test.sh
 
+# check-contour-label (T-231): the label start of the contour. scripts/ci/contour-label.sh is the only parser
+# of a labelled Issue's title (LC_ALL=C, ^(T-[0-9]{3,}): ; prints start <T-NNN> or bad <why>, no title bytes).
+# The self-test runs its cases and pins teamwright-next.yml: the issues: labeled trigger and the per-task group
+# with its Issue fallback in the owned head, the relay job start (one if: with the label, open-state and owner
+# literals; the title only on an env: line; hop 0 dispatched on $MAIN; one comment and exit 0 on a bad title),
+# next gated on workflow_dispatch, hop 0 with an own stage ending exit 0, and the CODE_COMPLETE branch asking
+# git (task/<ID> exists, rev-list --count origin/$MAIN..) before ci.yml and the pull request, run against a
+# fake gh, git and sleep. Host bash, jq.
+check-contour-label:
+	scripts/ci/contour-label.test.sh
+
+# check-serena-pin (T-237, decisions #321, #327, #328; P-020 decides_on: literal + token): the contour
+# stage session reaches Serena only through the five owned read tools, and Serena starts with
+# --agent-interface tools. scripts/ci/serena-pin.sh: .mcp.json byte-equal to scripts/ci/mcp.json, whose
+# serena args hold the adjacent flag lines; the names of scripts/ci/serena-tools.txt joined once in
+# teamwright-agent.yml's allowlist and once in every role head naming mcp__serena; the two preflight jq
+# lines once each; raw mcp__serena exactly 5 times in .github/workflows/ and in each such head, none in
+# .claude/settings.json; allowedTools once and no other permission source in the workflows. The self-test
+# runs it on mutated throwaway copies, then the script runs on the real tree. Host bash.
+check-serena-pin:
+	scripts/ci/serena-pin.test.sh
+	scripts/ci/serena-pin.sh
+
 # check-core-test-os-answer (T-080 rca, class os-answer-deadline-race; T-089, decides_on: token):
 # no core test outside crates/voicen-core/tests/common names an OS-answer target (.invalid,
 # 127.0.0.1:1, 192.0.2.1), any case, comments included; targets come with their deadlines from
@@ -124,6 +156,16 @@ check-contour-busy:
 # tests dir. Host bash.
 check-core-test-os-answer:
 	scripts/ci/core-test-os-answer.test.sh
+
+# check-core-test-deadlines (T-165, class os-answer-deadline-race; decides_on: token): no core test
+# outside crates/voicen-core/tests/common builds a product deadline or a timed server plan
+# (`Timeouts {`, `Timeouts::`, `Timeouts as`, `= Timeouts`, `Default::default`, the words Stall,
+# Trickle, SilentHeaders), comments included; the constructors live in tests/common
+# (docs/decisions/core-tests.md). The self-test runs scripts/ci/core-test-deadlines.sh on
+# scripts/ci/fixtures/core-test-deadlines/ and the real tests dir. Host bash. A prerequisite of
+# `check:` since the guard script landed (T-165 implement).
+check-core-test-deadlines:
+	scripts/ci/core-test-deadlines.test.sh
 
 # T-062 (P-020, decides_on: token; docs/decisions/ci-toolchain.md guard table): every webview keeps
 # its WebView2 data under Voicen\webview through the one app-level override
@@ -186,7 +228,7 @@ check-release:
 # job (R5), no YAML escape that spells a character or joins two lines (R6), the header of the
 # file holding the release job, line 1 to jobs:, byte-identical to scripts/ci/release-header.yml
 # (R7; decisions #121), no YAML tag: the raw texts !!, !< and %TAG nowhere (R8; decisions
-# #122), the one installer upload byte-identical to scripts/ci/release-upload.yml (R9; per name, T-206: teamwright-agent.yml's one upload is the tail scripts/ci/contour-upload.yml, to EOF), and the
+# #122), the one installer upload byte-identical to scripts/ci/release-upload.yml (R9; per name, T-206: teamwright-agent.yml's one upload is the tail scripts/ci/contour-upload.yml, from the chain step to EOF since T-230; T-236: its post-session push steps are byte-identical to scripts/ci/contour-push.yml; T-230: the tail starts right after it, no gap), and the
 # raw token secrets.TELEGRAM_ (any case, comments included) only in the one Telegram send step,
 # byte-identical to scripts/ci/telegram-send-step.yml (R10; replaces telegram-guard, T-087:
 # T-070 validation 1 M6 and probes T1-T4 are its fixtures); and (T-088, replaces ci-wip and
@@ -197,7 +239,8 @@ check-release:
 # only, no setup-node cache) (R11), no column-0 line after jobs: (R12) and no YAML merge key
 # (R13); T-202 (decisions #253) R14: the files teamwright-agent.yml and teamwright-next.yml
 # (exact names) are the only others with a write token; their header is the owned copy
-# scripts/ci/contour-heads/<name>.
+# scripts/ci/contour-heads/<name>. T-230 R15: ci.yml's windows job head, from '  windows:' to its
+# first '    steps:', is byte-identical to scripts/ci/windows-head.yml (its timeout-minutes: 120).
 # The self-test runs the tripwire scripts/ci/release-guard.sh on
 # scripts/ci/fixtures/release-guard/ and the real workflows dir (also mutated). Host bash and awk.
 check-release-guard:

@@ -19,6 +19,14 @@
 ; No deletion descends through a reparse point (junction, symlink): see un.VoicenRemoveEntry.
 ; The Run value and the shortcuts are left to the stock template (removed unless /UPDATE).
 ;
+; Toast activator (T-213, invariant I7 in docs/decisions/installer.md): every install, silent and
+; /UPDATE ones included, stamps the Start-menu shortcut with
+; System.AppUserModel.ToastActivatorCLSID = VOICEN_TOAST_CLSID and writes
+; HKCU\Software\Classes\CLSID\{VOICEN_TOAST_CLSID}\LocalServer32 = "$INSTDIR\voicen.exe"; every
+; uninstall removes that CLSID key, whatever the data answer (an installer-started uninstall is
+; followed by the new install, which writes it again). The value must equal
+; win::toast::TOAST_ACTIVATOR_CLSID in src-tauri/src/win/toast.rs.
+;
 ; This file is included before MUI_LANGUAGE, so ${LANG_ENGLISH} / ${LANG_RUSSIAN} are not defined
 ; yet: the LangStrings use the numeric LANGIDs (1033 English, 1049 Russian).
 
@@ -93,8 +101,86 @@ FunctionEnd
 ; (English + Russian). MUI writes the value only from the instfiles page's leave function, which
 ; never runs in a silent install, so without this line the first uninstall started by a passive
 ; reinstall (/UPDATE /P) or a user's /P waits on that dialog (T-025, CI run 37765499554).
+;
+; The toast activator CLSID (T-213). Windows starts "$INSTDIR\voicen.exe -Embedding" through the
+; LocalServer32 key when a toast button is clicked while Voicen is not running, and finds the CLSID
+; through the shortcut that carries the app's AppUserModelID.
+!define VOICEN_TOAST_CLSID "{163266b0-4b55-446a-bbbe-e31cac2c713a}"
+
+; Stamps the shortcut on the stack (popped) with PKEY_AppUserModel_ToastActivatorCLSID
+; ({9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3}, 26) as a VT_CLSID PROPVARIANT. Raw vtable calls:
+; IUnknown 0 QueryInterface, 2 Release; IPersistFile 5 Load, 6 Save; IPropertyStore 6 SetValue,
+; 7 Commit. The x64 PROPVARIANT is 24 bytes: vt (2), three reserved WORDs, then the puuid pointer.
+; The GUID and PROPVARIANT buffers are System allocations, freed here (no PropVariantClear, which
+; would CoTaskMemFree them). A missing shortcut or a failing call changes nothing. Keeps every
+; register.
+Function VoicenStampToastShortcut
+  Exch $R0
+  Push $R1
+  Push $R2
+  Push $R3
+  Push $R4
+  Push $R5
+  Push $R6
+  Push $0
+  ${If} ${FileExists} "$R0"
+    System::Call 'ole32::CoCreateInstance(g "{00021401-0000-0000-C000-000000000046}", p 0, i 1, g "{000214F9-0000-0000-C000-000000000046}", *p .R1) i .R6'
+    ${If} $R6 = 0
+    ${AndIf} $R1 P<> 0
+      System::Call '$R1->0(g "{0000010b-0000-0000-C000-000000000046}", *p .R2) i .R6'
+      ${If} $R6 = 0
+      ${AndIf} $R2 P<> 0
+        System::Call '$R2->5(w R0, i 2) i .R6'
+        ${If} $R6 = 0
+          System::Call '$R1->0(g "{886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99}", *p .R3) i .R6'
+          ${If} $R6 = 0
+          ${AndIf} $R3 P<> 0
+            System::Call '*(&g16 "{9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3}", i 26) p .R4'
+            System::Call '*(&g16 "${VOICEN_TOAST_CLSID}") p .R5'
+            System::Call '*(&i2 72, &i2 0, &i2 0, &i2 0, p R5, p 0) p .R6'
+            System::Call '$R3->6(p R4, p R6) i .r0'
+            ${If} $0 = 0
+              System::Call '$R3->7() i .r0'
+              ${If} $0 = 0
+                System::Call '$R2->6(w R0, i 1)'
+              ${EndIf}
+            ${EndIf}
+            System::Free $R6
+            System::Free $R5
+            System::Free $R4
+            System::Call '$R3->2()'
+          ${EndIf}
+        ${EndIf}
+        System::Call '$R2->2()'
+      ${EndIf}
+      System::Call '$R1->2()'
+    ${EndIf}
+  ${EndIf}
+  Pop $0
+  Pop $R6
+  Pop $R5
+  Pop $R4
+  Pop $R3
+  Pop $R2
+  Pop $R1
+  Pop $R0
+FunctionEnd
+
+; Both places the stock template may put the Start-menu shortcut (CreateOrUpdateStartMenuShortcut);
+; the one that does not exist is skipped. Keeps every register.
+!macro VoicenToastActivator
+  Push "$SMPROGRAMS\${PRODUCTNAME}.lnk"
+  Call VoicenStampToastShortcut
+  ${If} $AppStartMenuFolder != ""
+    Push "$SMPROGRAMS\$AppStartMenuFolder\${PRODUCTNAME}.lnk"
+    Call VoicenStampToastShortcut
+  ${EndIf}
+  WriteRegStr HKCU "Software\Classes\CLSID\${VOICEN_TOAST_CLSID}\LocalServer32" "" "$INSTDIR\${MAINBINARYNAME}.exe"
+!macroend
+
 !macro NSIS_HOOK_POSTINSTALL
   WriteRegStr ${MUI_LANGDLL_REGISTRY_ROOT} "${MUI_LANGDLL_REGISTRY_KEY}" "${MUI_LANGDLL_REGISTRY_VALUENAME}" $LANGUAGE
+  !insertmacro VoicenToastActivator
 !macroend
 
 ; The installer-ended note (T-024; invariant 5, docs/decisions/diagnostics-log.md): written to
@@ -200,6 +286,10 @@ FunctionEnd
 !macroend
 
 !macro NSIS_HOOK_POSTUNINSTALL
+  ; The toast activator key, in every mode (I7): /KEEPDATA keeps data, not the registration of a
+  ; program that is gone.
+  DeleteRegKey HKCU "Software\Classes\CLSID\${VOICEN_TOAST_CLSID}"
+
   ${If} $VoicenPurgeData = 1
     ; Installer bookkeeping (install location, "Installer Language"), which the stock checkbox
     ; block removed before the fork dropped it (installer.nsi edit 2).

@@ -25,9 +25,8 @@ mod common;
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
-use common::download::timeouts;
+use common::os_answer::in_time;
 use common::{dir_entries, leak, model_bytes, Serve, Server, SHA256, SIZE};
 use sha2::{Digest, Sha256};
 use voicen_core::local_models::download::DownloadFailure;
@@ -320,7 +319,7 @@ fn fetch_exact_bytes_renames_into_the_final_file() {
     let server = Server::start(vec![Serve::Full]);
     let tmp = TempDir::new();
     let pin = served_pin(&server.url(TEST_FILE));
-    let got = fetch_against(tmp.path(), &pin, &timeouts(Duration::from_secs(5)));
+    let got = fetch_against(tmp.path(), &pin, &in_time());
     assert_eq!(
         got,
         Ok(tmp.path().join(TEST_FILE)),
@@ -351,7 +350,7 @@ fn fetch_creates_a_missing_directory() {
     let tmp = TempDir::new();
     let dir = tmp.path().join("voicen-silero");
     let pin = served_pin(&server.url(TEST_FILE));
-    let got = fetch_against(&dir, &pin, &timeouts(Duration::from_secs(5)));
+    let got = fetch_against(&dir, &pin, &in_time());
     assert_eq!(got, Ok(dir.join(TEST_FILE)), "fetch into a new directory");
 }
 
@@ -360,7 +359,7 @@ fn fetch_short_body_leaves_no_final_file() {
     let server = Server::start(vec![Serve::Short]);
     let tmp = TempDir::new();
     let pin = served_pin(&server.url(TEST_FILE));
-    let got = fetch_against(tmp.path(), &pin, &timeouts(Duration::from_secs(5)));
+    let got = fetch_against(tmp.path(), &pin, &in_time());
     assert_eq!(
         got,
         Err(DownloadFailure::DownloadInterrupted),
@@ -378,7 +377,7 @@ fn fetch_cut_off_body_leaves_no_final_file() {
     let server = Server::start(vec![Serve::CutOff]);
     let tmp = TempDir::new();
     let pin = served_pin(&server.url(TEST_FILE));
-    let got = fetch_against(tmp.path(), &pin, &timeouts(Duration::from_secs(5)));
+    let got = fetch_against(tmp.path(), &pin, &in_time());
     assert_eq!(
         got,
         Err(DownloadFailure::DownloadInterrupted),
@@ -392,7 +391,7 @@ fn fetch_wrong_hash_is_checksum_mismatch_and_leaves_no_part() {
     let server = Server::start(vec![Serve::Altered]);
     let tmp = TempDir::new();
     let pin = served_pin(&server.url(TEST_FILE));
-    let got = fetch_against(tmp.path(), &pin, &timeouts(Duration::from_secs(5)));
+    let got = fetch_against(tmp.path(), &pin, &in_time());
     assert_eq!(
         got,
         Err(DownloadFailure::ChecksumMismatch),
@@ -414,7 +413,7 @@ fn fetch_longer_body_is_checksum_mismatch() {
     let server = Server::start(vec![Serve::Long]);
     let tmp = TempDir::new();
     let pin = served_pin(&server.url(TEST_FILE));
-    let got = fetch_against(tmp.path(), &pin, &timeouts(Duration::from_secs(5)));
+    let got = fetch_against(tmp.path(), &pin, &in_time());
     assert_eq!(
         got,
         Err(DownloadFailure::ChecksumMismatch),
@@ -428,7 +427,7 @@ fn fetch_http_error_status_is_reported_and_leaves_nothing() {
     let server = Server::start(vec![Serve::Status(404)]);
     let tmp = TempDir::new();
     let pin = served_pin(&server.url(TEST_FILE));
-    let got = fetch_against(tmp.path(), &pin, &timeouts(Duration::from_secs(5)));
+    let got = fetch_against(tmp.path(), &pin, &in_time());
     assert_eq!(got, Err(DownloadFailure::HttpStatus { code: 404 }), "404");
     assert_eq!(dir_entries(tmp.path()), Vec::<String>::new(), "left a file");
 }

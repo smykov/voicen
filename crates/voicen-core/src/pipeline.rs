@@ -11,9 +11,10 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use crate::audio::AudioBuffer;
+use crate::clock::{Clock, SystemClock};
 use crate::delivery::deliver;
 use crate::engine::{engine_for, Engine, TranscribeRequest};
 use crate::events::{
@@ -31,8 +32,8 @@ use crate::timeouts::Timeouts;
 use crate::vad::SpeechGate;
 
 /// Builds the engine for one job from its settings snapshot (default
-/// [`engine_for`] without built-in deps; the shell passes a closure calling the
-/// same [`engine_for`] with its `BuiltinDeps`, T-017).
+/// [`engine_for`] without built-in deps; `DictationSession::start` passes a
+/// closure calling the same [`engine_for`] with `SessionDeps::builtin`, T-017).
 pub type EngineFactory =
     dyn Fn(&Settings, &dyn CredentialStore) -> Result<Box<dyn Engine>, FailureReason> + Send + Sync;
 
@@ -94,9 +95,12 @@ pub struct Pipeline {
     /// (FR-24, decision #97).
     timeouts: Option<Timeouts>,
     factory: Box<EngineFactory>,
-    /// `JobFinished.seq`, taken at `run_job` entry (T-011 moves it to the stop).
+    /// `JobFinished.seq`, taken at `run_job` entry on the one FIFO worker, so it
+    /// follows the stop order (decision #310).
     last_seq: AtomicU64,
-    /// The last [`PendingId`] handed out; ids are never reused.
+    /// The last [`PendingId`] handed out; ids are never reused, within this pipeline
+    /// or across processes: it starts at a per-pipeline seed (the wall clock in
+    /// microseconds, [`Pipeline::with_pending_id_seed`] in tests; T-213 I11).
     last_pending_id: AtomicU64,
     /// The one pending recording (data-model "PendingRecording": at most one).
     pending: Mutex<Option<PendingRecording>>,
@@ -178,6 +182,16 @@ fn is_blank(text: &str) -> bool {
     text.trim().is_empty()
 }
 
+/// The release seed of the pending ids: microseconds since the Unix epoch, so a later
+/// process starts above every id an earlier one handed out (an old toast in Action
+/// Center never names a new recording; T-213 I11). A clock before the epoch gives 0.
+fn wall_clock_seed() -> u64 {
+    SystemClock
+        .now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_micros()).unwrap_or(u64::MAX))
+}
+
 impl Pipeline {
     fn build(deps: PipelineDeps, timeouts: Option<Timeouts>) -> Pipeline {
         Pipeline {
@@ -185,7 +199,7 @@ impl Pipeline {
             timeouts,
             factory: Box::new(|settings, creds| engine_for(settings, creds, None)),
             last_seq: AtomicU64::new(0),
-            last_pending_id: AtomicU64::new(0),
+            last_pending_id: AtomicU64::new(wall_clock_seed()),
             pending: Mutex::new(None),
         }
     }
@@ -202,8 +216,17 @@ impl Pipeline {
         Pipeline::build(deps, Some(timeouts))
     }
 
-    /// Replaces the engine factory: the shell's closure over [`engine_for`] with
-    /// its `BuiltinDeps` (T-017), test fakes.
+    /// Starts this pipeline's [`PendingId`]s above `seed` instead of the wall clock
+    /// (tests: two pipelines with distinct seeds stand for two processes).
+    pub fn with_pending_id_seed(self, seed: u64) -> Pipeline {
+        Pipeline {
+            last_pending_id: AtomicU64::new(seed),
+            ..self
+        }
+    }
+
+    /// Replaces the engine factory: the session's closure over [`engine_for`]
+    /// with its `BuiltinDeps` (T-017), test fakes.
     pub fn with_engine_factory(self, factory: Box<EngineFactory>) -> Pipeline {
         Pipeline { factory, ..self }
     }
@@ -1194,6 +1217,84 @@ mod tests {
         );
     }
 
+    /// The ids of `n` consecutive retryable failures through `p`.
+    fn pending_ids(p: &Pipeline, n: usize) -> Vec<PendingId> {
+        (0..n)
+            .map(|i| {
+                let report = p.run_job(finished(fixtures::speech_3s(), settings()));
+                report
+                    .pending
+                    .unwrap_or_else(|| panic!("job {i}: a retryable failure keeps a pending id"))
+            })
+            .collect()
+    }
+
+    fn failing_pipeline(f: &Fakes) -> Pipeline {
+        let seen = Arc::new(Seen::default());
+        Pipeline::new(deps(f, Arc::new(PassThrough))).with_engine_factory(fake_factory(
+            Err(FailureReason::ServerError { status: 503 }),
+            &seen,
+        ))
+    }
+
+    #[test]
+    fn pending_ids_of_two_pipelines_with_different_seeds_are_disjoint() {
+        // T-213 I11: a desktop toast outlives the process in Action Center, so a PendingId
+        // is never handed out twice for the same user, across processes (two pipelines
+        // here) as well as within one. Pinned API: `Pipeline::with_pending_id_seed(self,
+        // seed: u64) -> Pipeline` (the injected seed; ids rise from it). Red today: no such
+        // seed, every pipeline starts at 1. Bite: the seed ignored (both start at 1), the
+        // seed used for one of two pipelines, an id repeated within one pipeline.
+        // Seeds far above any clock reading in microseconds, so a seed that is ignored (the
+        // wall-clock default stands) cannot pass for the injected one.
+        const SEED_A: u64 = 1 << 60;
+        const SEED_B: u64 = 1 << 61;
+        let (fa, fb) = (fakes(), fakes());
+        let a = failing_pipeline(&fa).with_pending_id_seed(SEED_A);
+        let b = failing_pipeline(&fb).with_pending_id_seed(SEED_B);
+        let (ids_a, ids_b) = (pending_ids(&a, 3), pending_ids(&b, 3));
+        for (label, ids, seed) in [("a", &ids_a, SEED_A), ("b", &ids_b, SEED_B)] {
+            let mut sorted = ids.clone();
+            sorted.sort();
+            sorted.dedup();
+            assert_eq!(&sorted, ids, "pipeline {label}: ids rise and never repeat");
+            let Some(first) = ids.first() else {
+                panic!("pipeline {label}: no ids");
+            };
+            assert!(first.0 >= seed, "pipeline {label}: ids start at the seed");
+        }
+        for id in &ids_a {
+            assert!(!ids_b.contains(id), "{id:?} handed out by both pipelines");
+        }
+    }
+
+    #[test]
+    fn pending_ids_of_a_later_production_pipeline_are_above_an_earlier_ones() {
+        // T-213 I11, release path: `Pipeline::new` seeds from the wall clock in
+        // microseconds, so a restart (a later pipeline) never reuses an id an old toast
+        // still carries. Red today: both start at 1. Bite: a constant seed, the seed in
+        // seconds (two pipelines built 5 ms apart get the same seed).
+        let (fa, fb) = (fakes(), fakes());
+        let a = failing_pipeline(&fa);
+        let Some(&first_a) = pending_ids(&a, 1).first() else {
+            panic!("pipeline a handed out no id");
+        };
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let b = failing_pipeline(&fb);
+        let Some(&first_b) = pending_ids(&b, 1).first() else {
+            panic!("pipeline b handed out no id");
+        };
+        assert!(
+            first_b > first_a,
+            "a later pipeline's first id {first_b:?} is not above the earlier one's {first_a:?}"
+        );
+        let more = pending_ids(&a, 3);
+        assert!(
+            !more.contains(&first_b),
+            "the earlier pipeline's later ids {more:?} reach the later pipeline's first id"
+        );
+    }
+
     #[test]
     fn non_retryable_failure_is_not_kept_pending() {
         // Only a retryable Failed creates a pending recording (data-model
@@ -1370,7 +1471,7 @@ mod tests {
             ),
             (
                 PostProcessOutcome::Skipped(SkipReason::Http { status: 502 }),
-                PostProcessResult::Skipped(SkipKind::Http),
+                PostProcessResult::Skipped(SkipKind::Http { status: 502 }),
             ),
             (
                 PostProcessOutcome::Skipped(SkipReason::InvalidResponse),

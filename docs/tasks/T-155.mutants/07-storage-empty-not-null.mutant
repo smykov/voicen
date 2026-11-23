@@ -1,0 +1,8 @@
+guarantee: R: a cleared storage entry is sent as null
+file: src/lib/settings/tabs/Calls.svelte
+added_by: test-writer
+--- old
+(draft.settings.calls.storage_root = value === "" ? null : value)
+--- new
+(draft.settings.calls.storage_root = value)
+--- end

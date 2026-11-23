@@ -1,0 +1,14 @@
+guarantee: AC4: a locked file gives inUse{file: mic.opus} and the folder is unchanged
+file: crates/voicen-core/src/call/storage.rs
+added_by: test-writer
+--- old
+            claims.push(
+                deleter
+                    .claim(file)
+                    .map_err(|InUse(name)| CallError::in_use(name))?,
+            );
+--- new
+            if let Ok(claim) = deleter.claim(file) {
+                claims.push(claim);
+            }
+--- end

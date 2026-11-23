@@ -1,0 +1,8 @@
+guarantee: AC-2: the model survives a long recording (no unload while recording)
+file: crates/voicen-core/src/dictation.rs
+added_by: test-writer
+--- old
+                                    _builtin_hold: builtin_hold,
+--- new
+                                    _builtin_hold: { drop(builtin_hold); None },
+--- end

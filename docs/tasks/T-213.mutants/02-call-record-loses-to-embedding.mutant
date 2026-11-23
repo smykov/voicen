@@ -1,0 +1,8 @@
+guarantee: I12: `--call record` still wins over -Embedding on a second launch
+file: crates/voicen-core/src/settings/gate.rs
+added_by: test-writer
+--- old
+        Some(CallSwitch::Record) => SecondLaunchAction::StartCallRecord,
+--- new
+        Some(CallSwitch::Record) => SecondLaunchAction::TrayOnly,
+--- end

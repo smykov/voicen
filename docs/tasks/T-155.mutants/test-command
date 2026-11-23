@@ -1,0 +1,2 @@
+# T-155: the task's unit file and e2e spec, as the ui area runs them (the unit file runs through pnpm test, which routes by file).
+pnpm test -- src/lib/settings/callsErrors.test.ts && pnpm e2e --workers=2 e2e/settings-calls.spec.ts

@@ -1,0 +1,8 @@
+guarantee: AC-3: a result after the recording ended never warns
+file: crates/voicen-core/src/dictation.rs
+added_by: test-writer
+--- old
+            None => false,
+--- new
+            None => true,
+--- end

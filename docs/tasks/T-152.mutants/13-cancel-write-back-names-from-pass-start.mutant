@@ -1,0 +1,8 @@
+guarantee: invariant 1: a rename survives a cancel of the pass
+file: crates/voicen-core/src/call/final_pass.rs
+added_by: test-writer
+--- old
+            carry_disk_names(&dir, &mut at_start);
+--- new
+            let _ = &at_start;
+--- end

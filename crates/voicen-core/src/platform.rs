@@ -11,10 +11,12 @@
 //! sit next to the traits.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::audio::AudioBuffer;
+use crate::call::CallId;
 use crate::i18n::MessageId;
 use crate::recording::{CaptureError, OverlayState, TrayState};
 use crate::settings::gate::SettingsTab;
@@ -35,7 +37,10 @@ pub struct StartWindow {
     pub elevated: bool,
 }
 
-/// The id of the one pending (failed, retryable) recording; monotonic per pipeline.
+/// The id of the one pending (failed, retryable) recording: it rises within a pipeline,
+/// and each pipeline starts from its own seed (the wall clock in microseconds in release,
+/// `Pipeline::with_pending_id_seed` in tests), so an id is never handed out twice for the
+/// same user, across processes as well (T-213 I11: a toast outlives its process).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PendingId(pub(crate) u64);
 
@@ -60,6 +65,51 @@ impl PendingId {
             return None;
         }
         digits.parse::<u64>().ok().map(PendingId)
+    }
+}
+
+/// The literal prefix of a toast's Open argument.
+const TOAST_OPEN_PREFIX: &str = "open:";
+
+/// The one button a toast may carry (T-213; decisions #298, #312): Retry of the pending
+/// recording, or Open of a call whose transcript is ready. `root` is the calls root the
+/// pass found the call under; it stays in the running app and is never written into the
+/// toast's argument.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToastAction {
+    Retry(PendingId),
+    Open { call: CallId, root: PathBuf },
+}
+
+impl ToastAction {
+    /// The toast's activation argument for this button: `retry:<u64>` or
+    /// `open:<call id>`, and nothing else (no path, no text; FR-20, NFR-04). The one
+    /// writer; [`ToastArg::parse`] is the one reader.
+    pub fn to_toast_arg(&self) -> String {
+        match self {
+            ToastAction::Retry(id) => id.to_toast_arg(),
+            ToastAction::Open { call, .. } => format!("{TOAST_OPEN_PREFIX}{}", call.as_str()),
+        }
+    }
+}
+
+/// A toast activation argument as read back: what [`ToastAction::to_toast_arg`] wrote,
+/// minus the root (which only the running app knows).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToastArg {
+    Retry(PendingId),
+    Open(CallId),
+}
+
+impl ToastArg {
+    /// The button of `arg`: exactly `retry:<u64>` ([`PendingId::from_toast_arg`]) or
+    /// `open:` followed by exactly a [`CallId`] ([`CallId::parse`]). Any other string
+    /// (empty, another prefix or case, whitespace, trailing text) is `None`.
+    pub fn parse(arg: &str) -> Option<ToastArg> {
+        if let Some(call) = arg.strip_prefix(TOAST_OPEN_PREFIX) {
+            return CallId::parse(call).map(ToastArg::Open);
+        }
+        PendingId::from_toast_arg(arg).map(ToastArg::Retry)
     }
 }
 
@@ -191,12 +241,14 @@ pub trait Indicator: Send + Sync {
 /// (a failure or a notice), exactly once, in the order shown, and calls it outside
 /// its lock, so an implementation may call back into the session; it must still not
 /// block (hand the toast to its own thread), because an input that ends a recording
-/// may be waiting behind it. `retry` is `Some(pending_id)` only for a retryable
-/// failure whose audio is the pending recording (the toast's Retry button carries
-/// it back to `DictationSession::retry`). A toast that cannot be shown is not an
-/// error for the session: the overlay and the tray carry the message.
+/// may be waiting behind it. `action` is the toast's one button: the session offers
+/// `Some(ToastAction::Retry(pending_id))` only for a retryable failure whose audio is the
+/// pending recording (the button carries it back to `DictationSession::retry`); the
+/// shell's call notices offer `ToastAction::Open` only for "Transcript ready"
+/// (`CallNotice::action`, T-213). A toast that cannot be shown is not an error for the
+/// session: the overlay and the tray carry the message.
 pub trait Notifier: Send + Sync {
-    fn notify(&self, id: MessageId, params: &[(&'static str, String)], retry: Option<PendingId>);
+    fn notify(&self, id: MessageId, params: &[(&'static str, String)], action: Option<ToastAction>);
 }
 
 /// What the session asks the shell to do (T-051: the open-settings action of
@@ -233,7 +285,7 @@ mod fakes {
         AudioBuffer, AudioSource, CancelKey, CaptureError, CaptureHandle, Clipboard,
         ClipboardError, DeviceId, FieldId, FrameSink, Indicator, InputDevice, MessageId, Notifier,
         OverlayState, PasteError, Paster, PendingId, SettingsTab, ShellRequests, StartWindow,
-        TempAudioStore, TrayState, WindowRef,
+        TempAudioStore, ToastAction, TrayState, WindowRef,
     };
 
     fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -757,7 +809,7 @@ mod fakes {
     pub struct NotifyCall {
         pub id: MessageId,
         pub params: Vec<(&'static str, String)>,
-        pub retry: Option<PendingId>,
+        pub action: Option<ToastAction>,
     }
 
     /// [`Notifier`] that records every offer in order.
@@ -782,12 +834,12 @@ mod fakes {
             &self,
             id: MessageId,
             params: &[(&'static str, String)],
-            retry: Option<PendingId>,
+            action: Option<ToastAction>,
         ) {
             lock(&self.calls).push(NotifyCall {
                 id,
                 params: params.to_vec(),
-                retry,
+                action,
             });
         }
     }

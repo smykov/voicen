@@ -13,6 +13,7 @@
 use voicen_core::call::events::refused_notice;
 use voicen_core::call::{CallId, CallNotice, FailReason, RefusedPart, RefusedReason, StopReason};
 use voicen_core::i18n::{MessageId, MESSAGE_IDS};
+use voicen_core::platform::ToastAction;
 
 fn id_text(id: MessageId) -> String {
     serde_json::to_string(&id)
@@ -67,6 +68,50 @@ fn message_id(notice: &CallNotice) -> String {
     let (id, _params) = notice.message();
     in_catalog(id);
     id_text(id)
+}
+
+#[test]
+fn only_the_transcript_ready_notice_carries_a_toast_action() {
+    // T-213 (decisions #298, #312): `CallNotice::action(&self) -> Option<ToastAction>` is
+    // `Some(ToastAction::Open { call, root })` for `TranscriptReady`, with the notice's own
+    // call and root (not a settings root), and `None` for every other variant. Bite: a
+    // wildcard `Some`, the root dropped or replaced, a button on a refusal or a stop.
+    let call = CallId::parse("2026-11-14_101500").unwrap_or_else(|| panic!("call id"));
+    let root = std::path::PathBuf::from("calls-root");
+    assert_eq!(
+        CallNotice::TranscriptReady {
+            call: call.clone(),
+            root: root.clone()
+        }
+        .action(),
+        Some(ToastAction::Open { call, root })
+    );
+    let mut others = vec![CallNotice::CallSavedTranscribing];
+    for reason in [
+        FailReason::Key,
+        FailReason::Network,
+        FailReason::Timeout,
+        FailReason::Provider,
+        FailReason::Storage,
+        FailReason::EngineNotSetUp,
+    ] {
+        others.push(CallNotice::PassFailed { reason });
+    }
+    for reason in [
+        StopReason::User,
+        StopReason::Hotkey,
+        StopReason::Exit,
+        StopReason::SystemEnd,
+        StopReason::Sleep,
+        StopReason::MaxLength,
+        StopReason::LowDisk,
+        StopReason::StorageError,
+    ] {
+        others.push(CallNotice::Stopped { reason });
+    }
+    for notice in others {
+        assert_eq!(notice.action(), None, "{notice:?}");
+    }
 }
 
 #[test]

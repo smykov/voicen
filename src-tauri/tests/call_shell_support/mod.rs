@@ -469,6 +469,41 @@ impl CallRig {
         save: Arc<dyn SaveDialog>,
         detector: Option<Arc<dyn SpeechSpans>>,
     ) {
+        self.try_start_ports(source, disk, open_track, clipboard, folder, save, detector)
+            .expect("the call part starts");
+    }
+
+    /// T-220: [`start`](Self::start) that returns what `start_calls` returned instead of
+    /// expecting `Ok` (a second start on a rig that already has the call part is `Err`).
+    pub fn try_start(
+        &self,
+        source: Arc<dyn TrackSource + Send + Sync>,
+        disk: Arc<dyn DiskSpace>,
+        open_track: TrackOpener,
+    ) -> io::Result<()> {
+        self.try_start_ports(
+            source,
+            disk,
+            open_track,
+            Arc::new(FakeClipboard::new()),
+            Arc::new(FakeFolder::default()),
+            Arc::new(FakeSave::default()),
+            None,
+        )
+    }
+
+    /// The call part started with every port given, the `io::Result` returned.
+    #[allow(clippy::too_many_arguments)]
+    fn try_start_ports(
+        &self,
+        source: Arc<dyn TrackSource + Send + Sync>,
+        disk: Arc<dyn DiskSpace>,
+        open_track: TrackOpener,
+        clipboard: Arc<dyn Clipboard>,
+        folder: Arc<dyn FolderOpener>,
+        save: Arc<dyn SaveDialog>,
+        detector: Option<Arc<dyn SpeechSpans>>,
+    ) -> io::Result<()> {
         let calls_root = self.dir.path().join("calls");
         fs::create_dir_all(&calls_root).expect("the calls root");
         voicen_lib::call::start_calls(
@@ -488,7 +523,6 @@ impl CallRig {
                 exit_confirm: self.exit.clone(),
             },
         )
-        .expect("the call part starts");
     }
 
     /// A rig whose tracks play the tone, with plenty of free disk.

@@ -12,10 +12,14 @@
 //! - [`timing`] (T-080, I2): the only place a core test reads the wall clock, with
 //!   `M`, `with_premise` and `skip` (T-111);
 //! - [`held`] (T-079): a lookup held without an answer until the test releases it,
-//!   and the ordering check "the call returned while the lookup was held".
+//!   and the ordering check "the call returned while the lookup was held";
+//! - [`deadlines`] (T-165): the named `Timeouts` constructors of the timeout,
+//!   held-lookup and production-default legs; the download ones, with the timed
+//!   server plans, are in [`download`].
 //!
 //! `scripts/ci/core-test-os-answer.sh` (in `make check`) refuses an OS-answer literal
-//! in any test file outside this directory, and the package's call ban (rustc's
+//! in any test file outside this directory, `scripts/ci/core-test-deadlines.sh` a
+//! deadline or a timed server plan built there (T-165), and the package's call ban (rustc's
 //! path resolution, T-089) refuses a clock reading there; the allow below exempts
 //! this directory (an owned line, T-089). These rules stay here,
 //! not in `test_support`: they are core-test-only (docs/decisions/core-tests.md).
@@ -26,6 +30,7 @@
 //! above all, runs none of its connect probes.
 #![allow(dead_code, clippy::disallowed_methods)]
 
+pub mod deadlines;
 pub mod download;
 pub mod held;
 pub mod os_answer;

@@ -6,7 +6,9 @@
         "start-mcp-server",
         "--context",
         "claude-code",
-        "--project-from-cwd"
+        "--project-from-cwd",
+        "--agent-interface",
+        "tools"
       ]
     },
     "context7": {

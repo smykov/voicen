@@ -131,14 +131,15 @@ pub trait Paster: Send + Sync {
 // the tray, the timer and job ends with it.
 
 pub trait Notifier: Send + Sync {                         // built in T-007, `voicen_core::platform`; fake FakeNotifier
-    /// Toast. `retry` is Some(pending_id) only for a retryable failure whose audio is the pending recording.
+    /// Toast. `action` is Some(ToastAction::Retry(pending_id)) only for a retryable failure whose audio is the
+    /// pending recording, Some(ToastAction::Open { call, root }) only for a call's transcript-ready notice (T-213).
     /// A failure to show is not an error for the session (the overlay and tray carry the message).
-    fn notify(&self, id: MessageId, params: &[(&'static str, String)], retry: Option<PendingId>);
+    fn notify(&self, id: MessageId, params: &[(&'static str, String)], action: Option<ToastAction>);
 }
 // The session offers every message `RecordingController::show` sets (a failure or a notice), once, in the order
 // shown, with its lock released (the controller appends to an outbox; the lock guard's drop drains it), so an
 // implementation may call back into the session; it must still not block (hand the toast to its own thread).
-// `FakeNotifier::calls() -> Vec<NotifyCall { id, params, retry }>`. Windows toast: `src-tauri` `win/toast.rs` `ShellNotifier` (T-210): it drops the overlay-only `notice.logs_unwritable` (`i18n::is_toast_surface`), posts the rest to its one `toast` thread and returns; it ignores `retry` until T-213 (no button).
+// `FakeNotifier::calls() -> Vec<NotifyCall { id, params, action }>`. Windows toast: `src-tauri` `win/toast.rs` `ShellNotifier` (T-210): it drops the overlay-only `notice.logs_unwritable` (`i18n::is_toast_surface`), posts the rest to its one `toast` thread and returns; since T-213 it adds the action's one button, only while its COM toast activator is registered.
 
 pub trait Indicator: Send + Sync {                        // built in T-051, `voicen_core::platform`
     fn set_tray(&self, state: TrayState, retry_available: bool);
@@ -173,8 +174,11 @@ pub trait ShellRequests: Send + Sync {                    // built in T-051, `vo
 // TempAudioStore is `voicen_core::pending::FsTempAudioStore` (T-209). ClipboardError and
 // PasteError are unit structs (no OS text, P-009).
 pub struct StartWindow { pub handle: WindowRef /* opaque HWND */, pub process_id: u32, pub elevated: bool }
-pub struct PendingId(/* u64, monotonic per Pipeline, never reused */);
-// The toast's activation argument (T-210; the button itself is T-213's): `id.to_toast_arg()` is `retry:<u64>` in decimal and
+pub struct PendingId(/* u64, monotonic per Pipeline, never reused; seeded per Pipeline from the wall clock in µs (T-213), so ids of a later process are above an earlier one's; `Pipeline::with_pending_id_seed(u64)` for tests */);
+// `ToastAction::{Retry(PendingId), Open { call: CallId, root: PathBuf }}::to_toast_arg()` writes a button's argument (T-213):
+// `retry:<u64>` or `open:<call id>`, the root never; `ToastArg::parse(&str) -> Option<ToastArg::{Retry(PendingId), Open(CallId)}>`
+// is the one reader (`open:` then `CallId::parse`, else `PendingId::from_toast_arg`).
+// The Retry argument (T-210): `id.to_toast_arg()` is `retry:<u64>` in decimal and
 // nothing else (no text, FR-20); `PendingId::from_toast_arg(&str) -> Option<PendingId>` is the one reader: the exact prefix
 // `retry:` and one or more ASCII digits that fit a u64, else `None` (sign, space, other case or prefix, trailing text, overflow).
 // `LogsUnwritableReason::of(dir: &Path, err: &io::Error)` (`voicen_core::diag`, public since T-210) is the one `io::Error` -> reason
@@ -263,7 +267,7 @@ impl DictationSession {                                    // Send + Sync; input
     pub fn hotkey_registration(&self, registered: bool, at: Instant);   // T-010: notice + OpenSettings only on working → failed (decision #131)
     pub fn suspended(&self, at: Instant);                  // T-010: the machine is going to sleep; ends the recording that is on (Suspended)
     pub fn esc_pressed(&self, at: Instant);                // T-009: cancels the recording that is on
-    pub fn cancel_key_result(&self, claimed: bool, at: Instant);   // T-009: false while live → Warning{EscUnavailable}
+    pub fn cancel_key_result(&self, bare: bool, modified: bool, at: Instant);   // T-009, T-212: true = claim granted; the live recording's mode picks the claim, its refusal while live → Warning{EscUnavailable}
     pub fn tick(&self, at: Instant);                       // T-009: the timer's input (message expiry, max length)
     pub fn retry(&self, at: Instant, id: Option<PendingId>);   // T-007: the toast's button (Some) or the tray row (None = whatever is pending)
 }
@@ -277,7 +281,7 @@ impl Drop for DictationSession { /* the job in flight finishes, queued recording
 - **Suspend (T-010).** The hotkey thread's `PBT_APMSUSPEND` calls `suspended(at)`, which runs `stop_recording` with `controller.suspend(at)`: the live recording, any id and either mode, ends with a ticket (end `Suspended`, `stopped_at = at`, no `MIN_HOLD`), so the audio so far becomes a job, like a device loss; idle changes nothing. The later key-up is decided from idle (ignored).
 - **Hotkey registration (T-010, decision #131).** `hotkey_registration(false, at)` always keeps the tray `HotkeyError`; `notice.hotkey_unavailable` and `open_settings(Recording, RecordingHotkey)` come only when the controller was not already in `HotkeyError` (read under the same lock before the update). A failed retry while failing is silent; a success clears the error, so the next failure notifies again.
 - **Timer.** One std thread calls `tick(now)` once `now >= next_deadline()` (the message expiry or the recording's `MAX_LENGTH`), and re-reads the deadline after every change. It ticks with the lock released, through the stop path, so a max-length stop is queued in recording order.
-- **Esc (T-009).** `esc_pressed`: `cancel` under the lock; the capture is closed outside it before the input returns (NFR-02), the audio dropped unread, `RecordingEnded{Cancelled}` emitted; nothing with no recording on (idle, or a stop in flight). The claim (`CancelKey::set`) follows `live_id().is_some()` from `publish`, not held back by a stop in flight. `cancel_key_result(false)` while a recording is on emits one `Warning{EscUnavailable}`; the recording goes on.
+- **Esc (T-009).** `esc_pressed`: `cancel` under the lock; the capture is closed outside it before the input returns (NFR-02), the audio dropped unread, `RecordingEnded{Cancelled}` emitted; nothing with no recording on (idle, or a stop in flight). The claim (`CancelKey::set`) follows `live_id().is_some()` from `publish`, not held back by a stop in flight. `cancel_key_result(bare, modified, at)` reports whether each claim was granted (T-212); while a recording is on, core judges the claim that can cancel it under its mode (hold: the one under the hotkey's modifiers; toggle: bare Esc) and a refusal of that claim emits one `Warning{EscUnavailable}`, the recording goes on; a refusal of the other claim, or any result with no recording on, emits nothing.
 - **Publication.** `(indicator.tray, retry_available)` and `indicator.overlay` reach the `Indicator` port from inside the session lock, right after the controller call that changed them, only when they differ from what was last sent; nothing at start. Between a stop's `release` and its `finish` nothing is sent (from any thread): the `finish` sends what changed meanwhile, so the overlay goes Recording → Processing, never through Hidden. If the release path panics in between (an adapter's `stop`, the observer, the conversion), a drop guard ends that hold and publishes what the controller shows, and the panic reaches the caller.
 - The shell implements the hotkey thread (research R-1, R-2, R-17) and turns OS messages into these calls. The `RegisterHotKey` modifiers and virtual key, the release poll groups and rule, and the "target is elevated" rule come from `voicen_core::win32_data` (pure data: `hotkey_codes`, `released`, `target_elevated` over `IntegrityLevel` RIDs; T-051), which T-006 cross-checks against the `windows` crate constants on Windows CI.
 - **Notifier offers (T-007).** Each lock section is a guard whose drop takes the controller's outbox, unlocks, then calls `Notifier::notify` per entry; so the toast is offered once per `show`, also for a message a later press drops before it is published, and never under the lock.

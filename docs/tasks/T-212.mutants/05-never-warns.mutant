@@ -1,0 +1,8 @@
+guarantee: AC-2: refusal of the live mode's own claim warns once, recording goes on
+file: crates/voicen-core/src/dictation.rs
+added_by: test-writer
+--- old
+        if refused {
+--- new
+        if refused && false {
+--- end

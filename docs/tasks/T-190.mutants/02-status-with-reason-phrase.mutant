@@ -1,0 +1,8 @@
+guarantee: AC-2: the value is the status code only, no reason phrase
+file: crates/voicen-core/src/diag/format.rs
+added_by: test-writer
+--- old
+                    pair(out, "pp_http_status", status);
+--- new
+                    pair(out, "pp_http_status", format!("{status} Too Many Requests"));
+--- end

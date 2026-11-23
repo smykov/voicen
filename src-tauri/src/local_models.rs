@@ -9,10 +9,15 @@
 //! parses it, an unknown id is `not_in_catalog` / `false`), and no reqwest call runs
 //! or is dropped here. `LocalModels::download` does a file metadata read, the disk
 //! probe and a thread spawn on the command thread; the transfer runs on core's
-//! download thread. `local_model_delete` passes the managed `SettingsService` and
-//! [`NoResidency`] (nothing is loaded until T-017 wires T-098's `ModelResidency` in) and emits
-//! nothing itself: a selection reset reaches the window as `settings://changed`
+//! download thread. `local_model_delete` is `LocalModels::delete_resident` with the
+//! managed `SettingsService`: the release goes through the process's one
+//! `ModelResidency` (T-017, [`builtin_deps`]), which `run()` attached to the coordinator.
+//! It emits nothing itself: a selection reset reaches the window as `settings://changed`
 //! through the change bridge.
+//!
+//! [`builtin_deps`] is the one constructor of the process's `BuiltinDeps` (T-017):
+//! `run()` calls it once and hands the result to the dictation session, the
+//! coordinator and the idle thread ([`start_model_idle`]).
 //!
 //! Events: every `local-model://progress|state` is emitted from the download thread
 //! through [`emit_to_settings`], with `emit_to(EventTarget::webview_window(LABEL))`, so
@@ -24,21 +29,30 @@
 //! Nothing is printed or logged here (logging waits for T-008); an emit error is
 //! ignored, it never changes a download's outcome.
 
-#[cfg(windows)]
 use std::io;
 #[cfg(windows)]
 use std::os::windows::ffi::OsStrExt;
 #[cfg(windows)]
 use std::path::Path;
+use std::sync::mpsc::RecvTimeoutError;
 use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
 
 use tauri::{AppHandle, Emitter, EventTarget, Runtime, State};
+use voicen_core::clock::{MonotonicClock, SystemMonotonic};
+use voicen_core::engine::builtin::BuiltinDeps;
+use voicen_core::engine::speech_model::SpeechModelLoader;
 #[cfg(windows)]
 use voicen_core::local_models::download::DiskSpace;
+use voicen_core::local_models::residency::ModelResidency;
 use voicen_core::local_models::service::{
-    DeleteOutcome, LocalModelEvent, LocalModelView, LocalModels, NoResidency, ReasonView,
+    DeleteOutcome, LocalModelEvent, LocalModelView, LocalModels, ReasonView,
 };
+use voicen_core::local_models::store::ModelStore;
 use voicen_core::settings::service::SettingsService;
+use voicen_core::timeouts::MODEL_IDLE_UNLOAD;
+use voicen_whisper::WhisperLoader;
 #[cfg(windows)]
 use windows::core::PCWSTR;
 #[cfg(windows)]
@@ -81,7 +95,49 @@ pub fn local_model_delete(
     settings: State<'_, Arc<SettingsService>>,
     id: String,
 ) -> Result<DeleteOutcome, ReasonView> {
-    models.delete(&id, &NoResidency, &settings)
+    models.delete_resident(&id, &settings)
+}
+
+/// The process's one built-in engine deps (T-017): one `ModelResidency` over
+/// [`WhisperLoader`] and the system monotonic clock, idle `MODEL_IDLE_UNLOAD`, and
+/// `store` (the `LocalModels` store). Loads nothing: a model is loaded only by a
+/// BuiltinLocal recording's prewarm or job.
+pub fn builtin_deps(store: Arc<ModelStore>) -> BuiltinDeps {
+    BuiltinDeps {
+        residency: Arc::new(ModelResidency::new(
+            Arc::new(WhisperLoader::new()) as Arc<dyn SpeechModelLoader>,
+            Arc::new(SystemMonotonic) as Arc<dyn MonotonicClock>,
+            MODEL_IDLE_UNLOAD,
+        )),
+        store,
+    }
+}
+
+/// How often the idle thread asks the residency to unload (spec 002 T027's periodic
+/// fallback; the unload point itself is the residency's `MODEL_IDLE_UNLOAD` deadline).
+pub const MODEL_IDLE_TICK: Duration = Duration::from_secs(5);
+
+/// Starts the `voicen-model-idle` thread over `residency`: `tick` every
+/// [`MODEL_IDLE_TICK`], and every settings snapshot `settings` publishes (each save,
+/// each written `forget_model`) goes to `on_settings` at once (spec 002 FR-012). It
+/// never loads. The thread ends when the service is gone (its channel closes); a
+/// spawn error is returned and nothing runs (the model then stays until exit).
+pub fn start_model_idle(
+    residency: Arc<ModelResidency>,
+    settings: &SettingsService,
+) -> io::Result<()> {
+    let changes = settings.subscribe();
+    thread::Builder::new()
+        .name("voicen-model-idle".to_string())
+        .spawn(move || loop {
+            match changes.recv_timeout(MODEL_IDLE_TICK) {
+                Ok(snapshot) => residency.on_settings(&snapshot),
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => return,
+            }
+            residency.tick();
+        })
+        .map(|_| ())
 }
 
 /// The emit adapter: the core callback, called on the download thread with no lock

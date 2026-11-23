@@ -37,6 +37,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use common::deadlines::{builtin_limit, BUILTIN_LIMIT};
 use common::timing::{ago, now};
 use diag_support::{
     all_lines, at, contains, dictation_lines, files_under, open_log, utf16le, NOON_UTC,
@@ -68,7 +69,7 @@ use voicen_core::recording::{
 use voicen_core::secrets::{FakeCredentialStore, KeySlot};
 use voicen_core::settings::{defaults, EngineKind, Settings};
 use voicen_core::test_support::{fixtures, TempDir};
-use voicen_core::timeouts::{Timeouts, MODEL_IDLE_UNLOAD};
+use voicen_core::timeouts::MODEL_IDLE_UNLOAD;
 use voicen_core::vad::{EnergyDetector, SpeechDetector, SpeechGate};
 
 const OS: Option<&str> = Some("en-US");
@@ -77,7 +78,7 @@ const KEY: &str = "sk-test-SECRET";
 const TRANSCRIPT: &str = "TRANSCRIPT-MARKER local words";
 /// A built-in limit other than the 120 s default, so a hard-coded constant or
 /// another endpoint's limit gives another outcome.
-const LIMIT: Duration = Duration::from_secs(45);
+const LIMIT: Duration = BUILTIN_LIMIT;
 const STEP: Duration = Duration::from_secs(1);
 
 // ---- rig -----------------------------------------------------------------------------
@@ -135,10 +136,7 @@ fn builtin(model_id: Option<&str>) -> Settings {
 fn request(language: Option<&str>) -> TranscribeRequest {
     TranscribeRequest {
         language: language.map(str::to_string),
-        timeouts: Timeouts {
-            builtin: LIMIT,
-            ..Timeouts::default()
-        },
+        timeouts: builtin_limit(),
     }
 }
 
@@ -191,20 +189,15 @@ impl Rig {
         };
         let residency = Arc::clone(&self.residency);
         let store = Arc::clone(&self.store);
-        Pipeline::with_timeouts(
-            deps,
-            Timeouts {
-                builtin: LIMIT,
-                ..Timeouts::default()
+        Pipeline::with_timeouts(deps, builtin_limit()).with_engine_factory(Box::new(
+            move |settings, creds| {
+                let builtin = BuiltinDeps {
+                    residency: Arc::clone(&residency),
+                    store: Arc::clone(&store),
+                };
+                engine_for(settings, creds, Some(&builtin))
             },
-        )
-        .with_engine_factory(Box::new(move |settings, creds| {
-            let builtin = BuiltinDeps {
-                residency: Arc::clone(&residency),
-                store: Arc::clone(&store),
-            };
-            engine_for(settings, creds, Some(&builtin))
-        }))
+        ))
     }
 }
 

@@ -17,7 +17,9 @@
 //! measurements: [`now`] / [`ago`] (timestamps a product API takes as input, e.g.
 //! `hotkey_pressed(at)`), and [`deadline`] / [`left`] / [`eventually`] (how long a
 //! test waits for something that should already have happened; the verdict is the
-//! awaited outcome, the wait only ends a hung test).
+//! awaited outcome, the wait only ends a hung test). [`eventually_progressing`] is the
+//! wait on a backlog of product work (T-239): its budget ends only a stall, never the
+//! total work.
 //!
 //! T-111 adds what a test needs when a verdict could depend on a clock it does not
 //! control: [`M`], the minimum in-time margin of a bite-bound deadline; [`with_premise`],
@@ -198,6 +200,36 @@ pub fn eventually(budget: Duration, mut cond: impl FnMut() -> bool) -> bool {
             return true;
         }
         if Instant::now() >= end {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// Polls every 5 ms until `done` holds (`true`) or `progress` has not grown for
+/// `budget` (`false`): the wait on a backlog of product work (a writer, a consumer, a
+/// queue) whose size the test chose (T-239). `done` is checked first; every reading of
+/// `progress` above the highest seen so far restarts the stall clock. So a slow but
+/// moving worker always passes, however long the whole backlog takes, and a stalled
+/// one fails once `budget` has passed with no growth (I2: the clock ends only a stall,
+/// it never caps the total work). `progress` is a count (blocks, samples, events),
+/// never content.
+pub fn eventually_progressing(
+    budget: Duration,
+    mut progress: impl FnMut() -> usize,
+    mut done: impl FnMut() -> bool,
+) -> bool {
+    let mut seen = progress();
+    let mut since = Instant::now();
+    loop {
+        if done() {
+            return true;
+        }
+        let now = progress();
+        if now > seen {
+            seen = now;
+            since = Instant::now();
+        } else if passed(since, budget) {
             return false;
         }
         thread::sleep(Duration::from_millis(5));

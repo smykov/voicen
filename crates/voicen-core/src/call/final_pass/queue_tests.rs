@@ -20,7 +20,8 @@
 //!     creds: Arc<dyn CredentialStore>, primary: Option<Arc<dyn SpeechSpans>>,
 //!     events: Arc<dyn PassEvents>, clock: Arc<dyn MonotonicClock>)   the production runner
 //! PassQueue::new(store: Arc<CallStore>, runner: Arc<dyn PassRunner>)  one worker thread; Drop
-//!                                  lets the running pass end and drops what is still queued
+//!                                  drops what is still queued, cancels the running pass and
+//!                                  joins: it returns once the requests in flight answer (T-221)
 //!   enqueue(&self, dir: &Path)                    the stop path / start-up `Recovery.queue`:
 //!                                                  no meta change; a call queued or running is
 //!                                                  not queued twice
@@ -46,7 +47,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -371,6 +372,8 @@ struct Engine {
     gate: Option<Arc<Gate>>,
     log: Mutex<Vec<Track>>,
     entered: AtomicUsize,
+    /// Every request fails with the provider reason once its gate is open.
+    fail: AtomicBool,
 }
 
 impl Engine {
@@ -379,6 +382,7 @@ impl Engine {
             gate,
             log: Mutex::new(Vec::new()),
             entered: AtomicUsize::new(0),
+            fail: AtomicBool::new(false),
         })
     }
 
@@ -403,6 +407,9 @@ impl TimedTranscriber for Engine {
         self.entered.fetch_add(1, Ordering::SeqCst);
         if let Some(gate) = &self.gate {
             gate.wait();
+        }
+        if self.fail.load(Ordering::SeqCst) {
+            return Err(TimedFailure::Failed(FailReason::Provider));
         }
         let text = format!("{}-line", track.as_str());
         Ok(match shape {
@@ -435,7 +442,13 @@ struct TestRunner {
     asks: [Arc<AtomicUsize>; 2],
     /// Passes that have ended.
     ended: AtomicUsize,
+    /// Runs right after the pass-start meta was read, before the pass begins (a rename here
+    /// is the narrow window between the read and the `transcribing` write).
+    after_meta_read: Mutex<Option<MetaReadHook>>,
 }
+
+/// The `after_meta_read` hook of [`TestRunner`].
+type MetaReadHook = Box<dyn Fn(&Path) + Send>;
 
 impl TestRunner {
     fn new(engine: &Arc<Engine>, length_ms: u64) -> Arc<TestRunner> {
@@ -446,6 +459,7 @@ impl TestRunner {
             tokens: Mutex::new(Vec::new()),
             asks: [Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0))],
             ended: AtomicUsize::new(0),
+            after_meta_read: Mutex::new(None),
         })
     }
 
@@ -463,6 +477,9 @@ impl PassRunner for TestRunner {
     fn run(&self, dir: &Path, cancel: &CancelToken) -> PassOutcome {
         lock(&self.tokens).push(cancel.clone());
         let meta = read_meta(dir);
+        if let Some(hook) = lock(&self.after_meta_read).as_ref() {
+            hook(dir);
+        }
         let [mic_asks, system_asks] = &self.asks;
         let sources = PassSources {
             mic: Box::new(Dec {
@@ -979,6 +996,147 @@ fn cancel_during_a_blocked_chunk_sends_nothing_more_writes_no_transcript_and_ret
     assert_eq!(q.position(&dir), QueuePosition::Absent);
 }
 
+// ---- guarantee: dropping the queue cancels the running pass (T-221, decisions #307) ------------------
+
+/// Opens its gate when it goes out of scope, so a test that fails while the engine is blocked
+/// does not leave the queue's worker waiting for the gate's 20 s limit.
+struct OpenOnExit(Arc<Gate>);
+
+impl Drop for OpenOnExit {
+    fn drop(&mut self) {
+        self.0.open();
+    }
+}
+
+/// A queue with one 600 s call whose three first requests are blocked on a shut gate.
+struct BlockedPass {
+    w: World,
+    dir: PathBuf,
+    gate: Arc<Gate>,
+    engine: Arc<Engine>,
+    runner: Arc<TestRunner>,
+    q: PassQueue,
+}
+
+fn blocked_pass() -> BlockedPass {
+    let w = world();
+    let dir = w.call(|meta| meta.duration_ms = Some(600_000));
+    let gate = Gate::new(false);
+    let engine = Engine::new(Some(gate.clone()));
+    // Ten minutes per track: far more chunks than the three that fit in flight.
+    let runner = TestRunner::new(&engine, 600_000);
+    let q = PassQueue::new(w.store.clone(), runner.clone());
+    q.enqueue(&dir);
+    let guard = OpenOnExit(gate.clone());
+    wait_for("three requests in flight", || {
+        engine.entered.load(Ordering::SeqCst) == 3
+    });
+    // The wait passed: the gate stays shut for the test body.
+    std::mem::forget(guard);
+    BlockedPass {
+        w,
+        dir,
+        gate,
+        engine,
+        runner,
+        q,
+    }
+}
+
+#[test]
+fn dropping_the_queue_with_a_running_pass_cancels_it_and_the_next_start_queues_it_again() {
+    let BlockedPass {
+        w,
+        dir,
+        gate,
+        engine,
+        runner,
+        q,
+    } = blocked_pass();
+    let _open = OpenOnExit(gate.clone());
+
+    let dropper = thread::spawn(move || drop(q));
+    // The token is set while the requests are still blocked; only then they are answered.
+    wait_for("the cancel token", || runner.cancelled());
+    gate.open();
+    ok(dropper.join().map_err(|_| "drop thread panicked"));
+
+    assert_eq!(engine.sent().len(), 3, "no request after the token was set");
+    no_transcript(&dir);
+    let meta = read_meta(&dir);
+    assert_eq!(meta.state, CallState::ReadyToTranscribe);
+    assert_eq!(meta.results.mic, TrackResult::Pending);
+    assert_eq!(meta.results.system, TrackResult::Pending);
+    assert!(lock(&runner.rec.logs).iter().any(|e| matches!(
+        e,
+        LogEvent::FinalPassFinished {
+            outcome: FinalOutcome::Cancelled,
+            ..
+        }
+    )));
+    assert!(
+        lock(&runner.rec.notices).is_empty(),
+        "a cancelled pass sends no notice"
+    );
+
+    // The next start: recovery queues the call, a fresh queue over an open engine finishes it.
+    let logs = TempDir::new();
+    let log = open_log(logs.path());
+    let recovery = w.store.recover(&defaults(None).calls, &log);
+    assert_eq!(
+        recovery.queue.len(),
+        1,
+        "the cancelled call is queued again"
+    );
+    let engine = Engine::new(None);
+    let runner = TestRunner::new(&engine, CALL_MS);
+    let q = PassQueue::new(w.store.clone(), runner.clone());
+    for entry in &recovery.queue {
+        q.enqueue(&entry.root.join(entry.id.as_str()));
+    }
+    q.wait_idle();
+    assert_eq!(read_meta(&dir).state, CallState::Ready);
+    assert!(transcript_of(&dir).is_some(), "the transcript is written");
+}
+
+#[test]
+fn drop_while_the_engine_call_is_blocked_dispatches_nothing_more_and_returns_when_it_answers() {
+    // `w` owns the call folder's TempDir: it stays bound until the end of the test.
+    let BlockedPass {
+        w: _w,
+        dir,
+        gate,
+        engine,
+        runner,
+        q,
+    } = blocked_pass();
+    let _open = OpenOnExit(gate.clone());
+
+    let returned = Arc::new(AtomicUsize::new(0));
+    let dropper = {
+        let returned = returned.clone();
+        thread::spawn(move || {
+            drop(q);
+            returned.store(1, Ordering::SeqCst);
+        })
+    };
+    wait_for("the cancel token", || runner.cancelled());
+    // The three requests are still blocked in the engine: drop waits for them, sends no more.
+    assert_eq!(
+        returned.load(Ordering::SeqCst),
+        0,
+        "drop returned while the engine call was blocked"
+    );
+    assert_eq!(engine.sent().len(), 3, "nothing more dispatched");
+
+    gate.open();
+    ok(dropper.join().map_err(|_| "drop thread panicked"));
+    assert_eq!(returned.load(Ordering::SeqCst), 1);
+    assert_eq!(engine.sent().len(), 3, "no request after the token was set");
+    no_transcript(&dir);
+    assert_eq!(read_meta(&dir).state, CallState::ReadyToTranscribe);
+}
+
 // ---- guarantee: restart after exit or crash ---------------------------------------------------------
 
 struct Wall;
@@ -1067,4 +1225,417 @@ fn the_calls_of_the_start_up_queue_run_oldest_first() {
     }
     q.wait_idle();
     assert_eq!(runner.started(), vec![name_of(&older), name_of(&newer)]);
+}
+
+// ---- T-152: delete through the queue, rename during a pass ------------------------------------
+//
+// Assumed API (decisions #317 and the analysis; the shapes are the test-writer's):
+//   PassQueue::delete(&self, calls: &CallSettings, root: &str, id: &str,
+//       deleter: &dyn FolderDeleter) -> Result<(), CallError>
+//     the guard of `CallStore::folder` (notFound); a call this store records -> `recordingCall`,
+//     nothing changed; otherwise a queued or running pass of the call is cancelled and waited
+//     for (as `cancel`), and then `CallStore::delete_folder` removes the folder;
+//   CallStore::rename / rename_speaker (storage.rs tests pin their own contract): the pass's
+//   meta writes carry the on-disk title and speakers, so a rename made while it runs survives.
+// `FolderDeleter`, `InUse` and `StdFolderDeleter` are in `call::storage`.
+
+use crate::call::storage::{wire_root, FolderDeleter, InUse, StdFolderDeleter};
+use crate::settings::CallSettings;
+
+/// The wire `(root, id)` of a call folder made by `World`.
+fn wire_of(dir: &Path) -> (String, String) {
+    let root = dir.parent().map(wire_root).unwrap_or_default();
+    (root, name_of(dir))
+}
+
+fn calls() -> CallSettings {
+    defaults(None).calls
+}
+
+/// Every entry of `dir` with its bytes, sorted.
+fn folder_bytes(dir: &Path) -> Vec<(String, Vec<u8>)> {
+    let mut out: Vec<(String, Vec<u8>)> = ok(fs::read_dir(dir))
+        .map(|e| {
+            let e = ok(e);
+            (
+                e.file_name().to_string_lossy().into_owned(),
+                fs::read(e.path()).unwrap_or_default(),
+            )
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// A deleter that takes every claim and, at the first one, records what `look` sees.
+struct Observer {
+    look: Box<dyn Fn() -> String + Send + Sync>,
+    first: Mutex<Option<String>>,
+    claims: AtomicUsize,
+}
+
+impl Observer {
+    fn new(look: impl Fn() -> String + Send + Sync + 'static) -> Arc<Observer> {
+        Arc::new(Observer {
+            look: Box::new(look),
+            first: Mutex::new(None),
+            claims: AtomicUsize::new(0),
+        })
+    }
+}
+
+impl FolderDeleter for Observer {
+    fn claim(&self, _file: &Path) -> Result<Box<dyn Send>, InUse> {
+        self.claims.fetch_add(1, Ordering::SeqCst);
+        lock(&self.first).get_or_insert_with(|| (self.look)());
+        Ok(Box::new(()))
+    }
+}
+
+#[test]
+fn delete_of_a_ready_call_removes_the_folder_and_leaves_the_others() {
+    // T-152 Acceptance 3. Bite: the pass queue's delete not reaching the store; a sibling call
+    // or the root removed.
+    let w = world();
+    let (a, b) = (w.call(|_| {}), w.call(|_| {}));
+    let mut meta = read_meta(&a);
+    ready_with_files(&a, &mut meta);
+    ok(write_meta(&a, &meta));
+    let sibling = folder_bytes(&b);
+    let runner = PureRunner::new(true);
+    let q = queue_of(&w, &runner);
+    let (root, id) = wire_of(&a);
+    assert_eq!(q.delete(&calls(), &root, &id, &StdFolderDeleter), Ok(()));
+    assert!(!a.exists(), "the folder is gone");
+    assert_eq!(folder_bytes(&b), sibling);
+    assert_eq!(q.position(&a), QueuePosition::Absent);
+    assert!(runner.started().is_empty(), "no pass was started");
+}
+
+#[test]
+fn delete_of_the_call_this_process_records_is_recording_call_and_changes_nothing() {
+    // T-152 Acceptance 4 (failure branch). No claim is taken, nothing is removed. Bite: the
+    // is_active check missing; the check after the cancel or after the claims; the refusal
+    // swallowed into Ok.
+    let w = world();
+    let files = w.recording();
+    let dir = files.dir().to_path_buf();
+    let before = folder_bytes(&dir);
+    let runner = PureRunner::new(true);
+    let q = queue_of(&w, &runner);
+    let probe = Observer::new(String::new);
+    let (root, id) = wire_of(&dir);
+    let err = match q.delete(&calls(), &root, &id, &*probe) {
+        Err(e) => e,
+        Ok(()) => panic!("a recording call must not be deleted"),
+    };
+    assert_eq!(err.code, CallErrorCode::RecordingCall);
+    assert_eq!((err.file, err.reason), (None, None));
+    assert_eq!(folder_bytes(&dir), before, "the folder is unchanged");
+    assert_eq!(
+        probe.claims.load(Ordering::SeqCst),
+        0,
+        "nothing was claimed"
+    );
+    q.wait_idle();
+    assert_eq!(q.position(&dir), QueuePosition::Absent);
+    drop(files);
+}
+
+#[test]
+fn a_refused_delete_of_the_recording_call_leaves_its_queue_entry_alone() {
+    // T-152 Acceptance 4 (found by the failure-branch bite: nothing pinned the queue's own
+    // guard, the store's refusal alone passed). The refusal comes before the queue is
+    // touched: an entry of that folder stays queued. Bite: the is_active check of
+    // `PassQueue::delete` missing, so the entry is removed before the store refuses.
+    let w = world();
+    let files = w.recording();
+    let dir = files.dir().to_path_buf();
+    let other = w.call(|_| {});
+    let runner = PureRunner::new(false);
+    let q = queue_of(&w, &runner);
+    q.enqueue(&other);
+    wait_for("the other pass to start", || runner.started().len() == 1);
+    q.enqueue(&dir);
+    assert_eq!(q.position(&dir), QueuePosition::Queued);
+    let probe = Observer::new(String::new);
+    let (root, id) = wire_of(&dir);
+    let err = match q.delete(&calls(), &root, &id, &*probe) {
+        Err(e) => e,
+        Ok(()) => panic!("a recording call must not be deleted"),
+    };
+    assert_eq!(err.code, CallErrorCode::RecordingCall);
+    assert_eq!(q.position(&dir), QueuePosition::Queued, "still queued");
+    runner.gate.open();
+    q.wait_idle();
+    drop(files);
+}
+
+#[test]
+fn delete_of_a_call_that_is_not_there_or_not_listed_is_not_found() {
+    // decisions #317: an unknown call is `notFound`. Bite: the guard skipped; a gone folder Ok.
+    let w = world();
+    let a = w.call(|_| {});
+    let gone = w.call(|_| {});
+    ok(fs::remove_dir_all(&gone));
+    let runner = PureRunner::new(true);
+    let q = queue_of(&w, &runner);
+    let (root, id) = wire_of(&gone);
+    for (root, id) in [
+        (root.clone(), id),
+        (root.clone(), "..".to_string()),
+        ("/not/a/root".to_string(), name_of(&a)),
+    ] {
+        let err = match q.delete(&calls(), &root, &id, &StdFolderDeleter) {
+            Err(e) => e,
+            Ok(()) => panic!("{root} {id}: must be refused"),
+        };
+        assert_eq!(err.code, CallErrorCode::NotFound, "{root} {id}");
+    }
+    assert!(a.is_dir(), "a call that was not named is untouched");
+}
+
+#[test]
+fn delete_of_a_queued_call_takes_it_out_of_the_queue_and_it_never_runs() {
+    // T-152 Acceptance 3 (cancel first, queued case). Bite: the call left in the queue so its
+    // pass starts on a folder that is gone; the queued call removed from disk but not from the
+    // queue.
+    let w = world();
+    let (a, b) = (w.call(|_| {}), w.call(|_| {}));
+    let runner = PureRunner::new(false);
+    let q = queue_of(&w, &runner);
+    q.enqueue(&a);
+    wait_for("A to start", || runner.started().len() == 1);
+    q.enqueue(&b);
+    let (root, id) = wire_of(&b);
+    assert_eq!(q.delete(&calls(), &root, &id, &StdFolderDeleter), Ok(()));
+    assert!(!b.exists());
+    assert_eq!(q.position(&b), QueuePosition::Absent);
+    runner.gate.open();
+    q.wait_idle();
+    assert_eq!(runner.started(), vec![name_of(&a)], "B never ran");
+    assert!(a.is_dir());
+}
+
+#[test]
+fn delete_of_a_transcribing_call_cancels_the_pass_first_and_then_removes_the_folder() {
+    // T-152 Acceptance 3: the pass is cancelled and has ended (it wrote its
+    // `ready-to-transcribe` meta, no transcript, one pass over) when the first file is claimed;
+    // delete returns only then and the folder is gone. Bite: the folder removed while the pass
+    // still runs (claimed before the pass ended); the cancel token never set (the pass runs to
+    // its end and writes transcript.*); delete not waiting for the pass end; a transcript
+    // written after the delete.
+    let BlockedPass {
+        w,
+        dir,
+        gate,
+        engine,
+        runner,
+        q,
+    } = blocked_pass();
+    let _open = OpenOnExit(gate.clone());
+    let q = Arc::new(q);
+    let seen = {
+        let (dir, runner) = (dir.clone(), runner.clone());
+        Observer::new(move || {
+            format!(
+                "ended={} transcript={} state={:?}",
+                runner.ended.load(Ordering::SeqCst),
+                dir.join("transcript.json").exists() || dir.join("transcript.md").exists(),
+                read_meta(&dir).state
+            )
+        })
+    };
+    let (root, id) = wire_of(&dir);
+    let deleter = {
+        let (q, seen) = (q.clone(), seen.clone());
+        thread::spawn(move || q.delete(&calls(), &root, &id, &*seen))
+    };
+    // The token is set while the requests are still blocked; only then they are answered.
+    wait_for("the cancel token", || runner.cancelled());
+    assert!(dir.is_dir(), "the folder stays while the pass is blocked");
+    assert_eq!(seen.claims.load(Ordering::SeqCst), 0, "nothing claimed yet");
+    gate.open();
+    let got = ok(deleter.join().map_err(|_| "delete thread panicked"));
+    assert_eq!(got, Ok(()));
+
+    assert!(!dir.exists(), "the folder is gone");
+    assert_eq!(
+        lock(&seen.first).clone().as_deref(),
+        Some("ended=1 transcript=false state=ReadyToTranscribe"),
+        "the pass had ended, cancelled, with no transcript"
+    );
+    assert_eq!(engine.sent().len(), 3, "no request after the token was set");
+    assert!(lock(&runner.rec.logs).iter().any(|e| matches!(
+        e,
+        LogEvent::FinalPassFinished {
+            outcome: FinalOutcome::Cancelled,
+            ..
+        }
+    )));
+    assert_eq!(q.position(&dir), QueuePosition::Absent);
+    drop(w);
+}
+
+#[test]
+fn a_rename_made_while_the_pass_runs_survives_the_pass_end() {
+    // T-152 invariant 1 (the Known gap of docs/decisions/call-final-pass.md): the pass wrote
+    // the meta it read at its start, so a rename between that read and the pass end was lost.
+    // The title and the speaker name of the disk win in meta.json, transcript.json and
+    // transcript.md. Bite: write_ready (or the transcribing/write_failed write) writing the
+    // pass-start meta; the Markdown rendered from the pass-start names; the transcript's title
+    // taken from the pass-start copy; the names merged into the transcript at the pass start.
+    let w = world();
+    let dir = w.call(|_| {});
+    let gate = Gate::new(false);
+    let engine = Engine::new(Some(gate.clone()));
+    let runner = TestRunner::new(&engine, CALL_MS);
+    let q = PassQueue::new(w.store.clone(), runner.clone());
+    q.enqueue(&dir);
+    let _open = OpenOnExit(gate.clone());
+    wait_for("a request in flight", || {
+        engine.entered.load(Ordering::SeqCst) >= 1
+    });
+    assert_eq!(read_meta(&dir).state, CallState::Transcribing);
+    let (root, id) = wire_of(&dir);
+    ok(w.store.rename(&calls(), &root, &id, "Renamed call"));
+    ok(w.store
+        .rename_speaker(&calls(), &root, &id, "s1", "Colleague"));
+    assert_eq!(read_meta(&dir).title, "Renamed call", "written at once");
+    gate.open();
+    q.wait_idle();
+
+    let meta = read_meta(&dir);
+    assert_eq!(meta.state, CallState::Ready);
+    assert_eq!(meta.title, "Renamed call");
+    let names: Vec<&str> = meta.speakers.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(names, vec!["Me", "Colleague"]);
+    let t = match transcript_of(&dir) {
+        Some(t) => t,
+        None => panic!("the pass wrote no transcript.json"),
+    };
+    assert_eq!(t.title, "Renamed call");
+    assert_eq!(t.speakers, meta.speakers);
+    let md = ok(fs::read_to_string(dir.join("transcript.md")));
+    assert!(md.starts_with("# Renamed call\n"), "{md}");
+    assert!(md.contains("Colleague:"), "{md}");
+    assert!(!md.contains("Other party"), "{md}");
+}
+
+#[test]
+fn a_rename_made_while_the_pass_runs_survives_a_cancel_of_that_pass() {
+    // T-152 invariant 1: the cancel path wrote back the meta "as found at pass start"; it must
+    // keep the renamed title and speakers and still restore the pass-start state and results.
+    // Bite: the cancel write-back of the pass-start copy whole.
+    let BlockedPass {
+        w,
+        dir,
+        gate,
+        runner,
+        q,
+        ..
+    } = blocked_pass();
+    let _open = OpenOnExit(gate.clone());
+    let q = Arc::new(q);
+    let (root, id) = wire_of(&dir);
+    ok(w.store.rename(&calls(), &root, &id, "Renamed call"));
+    ok(w.store.rename_speaker(&calls(), &root, &id, "me", "Alice"));
+    let canceller = {
+        let (q, dir) = (q.clone(), dir.clone());
+        thread::spawn(move || q.cancel(&dir))
+    };
+    wait_for("the cancel token", || runner.cancelled());
+    gate.open();
+    ok(canceller.join().map_err(|_| "cancel thread panicked"));
+
+    let meta = read_meta(&dir);
+    assert_eq!(meta.state, CallState::ReadyToTranscribe);
+    assert_eq!(meta.results.mic, TrackResult::Pending);
+    assert_eq!(meta.title, "Renamed call");
+    let names: Vec<&str> = meta.speakers.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(names, vec!["Alice", "Other party"]);
+    no_transcript(&dir);
+}
+
+#[test]
+fn a_rename_made_while_the_pass_runs_survives_a_pass_that_ends_failed() {
+    // T-152 invariant 1, the `write_failed` write (found by the failure-branch bite: nothing
+    // pinned it). The requests fail after the rename, so the pass ends `failed{provider}`
+    // through `write_failed` without reaching `write_ready`. Bite: `write_failed` writing the
+    // pass-start names.
+    let w = world();
+    let dir = w.call(|_| {});
+    let gate = Gate::new(false);
+    let engine = Engine::new(Some(gate.clone()));
+    let runner = TestRunner::new(&engine, CALL_MS);
+    let q = PassQueue::new(w.store.clone(), runner.clone());
+    q.enqueue(&dir);
+    let _open = OpenOnExit(gate.clone());
+    wait_for("a request in flight", || {
+        engine.entered.load(Ordering::SeqCst) >= 1
+    });
+    let (root, id) = wire_of(&dir);
+    ok(w.store.rename(&calls(), &root, &id, "Renamed call"));
+    ok(w.store
+        .rename_speaker(&calls(), &root, &id, "s1", "Colleague"));
+    engine.fail.store(true, Ordering::SeqCst);
+    gate.open();
+    q.wait_idle();
+
+    let meta = read_meta(&dir);
+    assert_eq!(meta.state, CallState::Failed, "the requests failed");
+    assert_eq!(meta.title, "Renamed call");
+    let names: Vec<&str> = meta.speakers.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(names, vec!["Me", "Colleague"]);
+}
+
+#[test]
+fn a_rename_between_the_pass_start_read_and_the_transcribing_write_is_kept() {
+    // T-152 invariant 1 (found by the failure-branch bite: nothing pinned it): the pass reads
+    // the meta, a rename lands before the pass writes `transcribing`. Bite: the `transcribing`
+    // write of the pass-start names.
+    let w = world();
+    let dir = w.call(|_| {});
+    let gate = Gate::new(false);
+    let engine = Engine::new(Some(gate.clone()));
+    let runner = TestRunner::new(&engine, CALL_MS);
+    let _open = OpenOnExit(gate.clone());
+    let (root, id) = wire_of(&dir);
+    {
+        let store = w.store.clone();
+        *lock(&runner.after_meta_read) = Some(Box::new(move |_| {
+            let _ = store.rename(&calls(), &root, &id, "Renamed at start");
+        }));
+    }
+    let q = PassQueue::new(w.store.clone(), runner.clone());
+    q.enqueue(&dir);
+    wait_for("a request in flight", || {
+        engine.entered.load(Ordering::SeqCst) >= 1
+    });
+    // The pass is running, before any end-of-pass write: the `transcribing` meta has the name.
+    let meta = read_meta(&dir);
+    assert_eq!(meta.state, CallState::Transcribing);
+    assert_eq!(meta.title, "Renamed at start");
+    gate.open();
+    q.wait_idle();
+    assert_eq!(read_meta(&dir).title, "Renamed at start");
+}
+
+#[test]
+fn a_rename_of_a_call_with_a_queued_pass_is_kept_when_the_pass_starts() {
+    // T-152 invariant 1, the start side: the pass's `transcribing` write reads the folder at
+    // its start, after a rename of a queued call. Bite: names cached from the enqueue or the
+    // list.
+    let w = world();
+    let (a, b) = (w.call(|_| {}), w.call(|_| {}));
+    let runner = PureRunner::new(false);
+    let q = queue_of(&w, &runner);
+    q.enqueue(&a);
+    wait_for("A to start", || runner.started().len() == 1);
+    q.enqueue(&b);
+    let (root, id) = wire_of(&b);
+    ok(w.store.rename(&calls(), &root, &id, "Queued and renamed"));
+    runner.gate.open();
+    q.wait_idle();
+    assert_eq!(read_meta(&b).title, "Queued and renamed");
 }

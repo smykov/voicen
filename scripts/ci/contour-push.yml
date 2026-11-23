@@ -1,0 +1,116 @@
+      - name: Did the stage commit?
+        id: commits
+        if: always()
+        env:
+          BEFORE: ${{ steps.branch.outputs.before }}
+        run: |
+          set -euo pipefail
+          # No pre-session commit (the branch step did not run): no stage commit to count or push.
+          if [ -z "${BEFORE:-}" ]; then
+            echo "count=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          n="$(git rev-list --count "$BEFORE..HEAD")"
+          echo "count=$n" >> "$GITHUB_OUTPUT"
+
+      - name: Push task/<ID>, and wip/<ID> after implement
+        id: push
+        if: always() && steps.commits.outputs.count != '0'
+        timeout-minutes: 30
+        env:
+          # decisions #253 (OQ-79 a): a contour push of task/<ID> or wip/<ID> is not a delivery,
+          # so pre-push skips DRAIN for it; its pause check runs first all the same. This step only.
+          TEAMWRIGHT_WIP_REFS_RE: '^refs/heads/(wip|task)/'
+          # The owner's pause (decisions #288, docs/process/gates.md): non-empty when this job
+          # started = nothing is pushed.
+          TEAMWRIGHT_CONTOUR_PAUSE: ${{ vars.TEAMWRIGHT_CONTOUR_PAUSE }}
+          TEAMWRIGHT_ALLOW_PUSH: ""
+          BASH_ENV: ""
+          # T-230: no git config, template or python user site the session can write (it runs as
+          # the same OS user and can write HOME): git reads neither the global nor the system file,
+          # and pre-push runs python3 without the user site.
+          GIT_CONFIG_GLOBAL: /dev/null
+          GIT_CONFIG_NOSYSTEM: "1"
+          PYTHONNOUSERSITE: "1"
+          # The hooks come from the dispatched main commit, never from a commit a stage wrote.
+          HOOKS_FROM: ${{ github.sha }}
+          # The job token, in this step only (the checkout does not persist it).
+          PUSH_TOKEN: ${{ github.token }}
+          BEFORE: ${{ steps.branch.outputs.before }}
+          TASK_ID: ${{ inputs.task_id }}
+          STAGE: ${{ inputs.stage }}
+          REPO: ${{ github.repository }}
+          # The session's outcome: task/<ID> is pushed on every ending, wip/<ID> only after success.
+          SESSION_OUTCOME: ${{ steps.claude.outcome }}
+        run: |
+          set -euo pipefail
+          if [ -n "${TEAMWRIGHT_CONTOUR_PAUSE:-}" ]; then
+            echo "paused=1" >> "$GITHUB_OUTPUT"
+            echo "::notice::the contour is paused (repository variable TEAMWRIGHT_CONTOUR_PAUSE): nothing is pushed"
+            exit 0
+          fi
+          export PATH=/usr/local/bin:/usr/bin:/bin GIT_NO_REPLACE_OBJECTS=1
+          [[ "$TASK_ID" =~ ^T-[0-9]{3,}$ ]] || { echo "::error::bad task id"; exit 1; }
+          [[ "$BEFORE" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::bad pre-session commit"; exit 1; }
+          [[ "$HOOKS_FROM" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::bad hooks commit"; exit 1; }
+          # A fresh repository with an empty template: no config, hook or replace ref of the
+          # session's tree takes part. The hooks are those of the dispatched main commit
+          # (HOOKS_FROM), fetched from GitHub, so no stage commit, of this stage or an earlier
+          # one on task/<ID>, changes the check of a push.
+          pub="$(mktemp -d "$RUNNER_TEMP/push.XXXXXX")"
+          hooks="$(mktemp -d "$RUNNER_TEMP/hooks.XXXXXX")"
+          url="https://github.com/$REPO.git"
+          git init -q --template= "$pub"
+          cd "$pub"
+          git fetch -q "$url" "$BEFORE"
+          git fetch -q "$url" "$HOOKS_FROM"
+          git fetch -q "$GITHUB_WORKSPACE" "+HEAD:refs/heads/stage"
+          git merge-base --is-ancestor "$BEFORE" stage || { echo "::error::the stage commits do not descend from $BEFORE"; exit 1; }
+          git archive "$HOOKS_FROM" scripts/hooks | tar -x -C "$hooks"
+          [ -x "$hooks/scripts/hooks/pre-push" ] || { echo "::error::no pre-push hook in $HOOKS_FROM"; exit 1; }
+          # The token as a one-shot extraheader from the environment: no git config file holds it.
+          auth="$(printf 'x-access-token:%s' "$PUSH_TOKEN" | base64 -w0)"
+          unset PUSH_TOKEN
+          export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $auth"
+          git -c core.hooksPath="$hooks/scripts/hooks" push "$url" "stage:refs/heads/task/$TASK_ID"
+          # wip/<ID> starts the ci.yml run of a finished implementation: only after a successful session.
+          if [ "$STAGE" = implement ] && [ "$SESSION_OUTCOME" = success ]; then
+            git -c core.hooksPath="$hooks/scripts/hooks" push --force "$url" "stage:refs/heads/wip/$TASK_ID"
+          fi
+          echo "pushed=1" >> "$GITHUB_OUTPUT"
+
+      - name: Keep the uncommitted tree as a patch
+        id: patch
+        if: always()
+        # A failure here is a warning, not a red job: the chain steps after it still decide.
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          trap 'echo "::warning::the uncommitted tree of the stage was not kept (git failed, see the log above)"' ERR
+          cd -- "$GITHUB_WORKSPACE"
+          # The session's tree beyond HEAD (staged, unstaged, untracked; binary files kept), read
+          # through a temporary index so the session's own index stays as it was. $OUT itself is
+          # left out when it lies in the tree. The owned tail after the chain steps scans and keeps
+          # $OUT; a clean tree writes no file.
+          idx="$RUNNER_TEMP/uncommitted.index"
+          part="$RUNNER_TEMP/uncommitted.part"
+          rm -f -- "$idx" "$part"
+          ex=()
+          case "$OUT" in
+            /*) ;;
+            *) ex=(":(exclude)$OUT") ;;
+          esac
+          export GIT_INDEX_FILE="$idx"
+          git read-tree HEAD
+          git add -A -- . "${ex[@]}"
+          git diff --cached --binary HEAD > "$part"
+          rm -f -- "$idx"
+          if [ -s "$part" ]; then
+            mkdir -p -- "$OUT"
+            mv -- "$part" "$OUT/uncommitted.patch"
+            echo "::notice::the stage left uncommitted changes: kept as uncommitted.patch in the session artifact (agent/)"
+          else
+            rm -f -- "$part"
+            echo "The tree is clean: nothing uncommitted to keep."
+          fi
+

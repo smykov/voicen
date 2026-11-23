@@ -1,9 +1,116 @@
+      - name: "Chain: the next stage"
+        # T-230: from this step to the end of the file the job is the owned copy
+        # scripts/ci/contour-upload.yml (release-guard.sh R9; edit both together), on the line right
+        # after the owned copy scripts/ci/contour-push.yml. Each step here that holds a token pins
+        # BASH_ENV '' and sets a fixed PATH first; gh reads a fresh config dir, not the session's HOME.
+        if: always() && steps.claude.outcome == 'success'
+        shell: bash {0}
+        env:
+          BASH_ENV: ""
+          GH_TOKEN: ${{ github.token }}
+          COMMITS: ${{ steps.commits.outputs.count }}
+          PUSHED: ${{ steps.push.outputs.pushed }}
+          PAUSED: ${{ steps.push.outputs.paused }}
+        run: |
+          export PATH=/usr/local/bin:/usr/bin:/bin
+          GH_CONFIG_DIR="$(mktemp -d "$RUNNER_TEMP/gh-config.XXXXXX")" || { echo "::error::no fresh gh config dir"; exit 1; }
+          export GH_CONFIG_DIR
+          say() {
+            echo "$1" >> "$GITHUB_STEP_SUMMARY"
+            [ -z "$ISSUE" ] || gh issue comment "$ISSUE" -R "$REPO" --body "$1" >/dev/null || echo "::warning::no comment on Issue #$ISSUE"
+          }
+          if [ -f "$OUT/questions.md" ]; then
+            say "**$TASK_ID**: chain stopped after $STAGE: questions for the owner in $RUN_URL (step summary)."
+            { echo; echo "**Questions for the owner:**"; cat "$OUT/questions.md"; } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if [ "${COMMITS:-0}" = 0 ]; then
+            say "**$TASK_ID**: chain stopped: stage $STAGE made no commit. $RUN_URL"
+            exit 0
+          fi
+          if [ "${PAUSED:-}" = 1 ]; then
+            say "**$TASK_ID**: chain stopped: the contour is paused (repository variable TEAMWRIGHT_CONTOUR_PAUSE); task/$TASK_ID was not pushed. $RUN_URL"
+            exit 0
+          fi
+          if [ "${PUSHED:-}" != 1 ]; then
+            say "**$TASK_ID**: chain stopped: task/$TASK_ID was not pushed (pre-push refused). $RUN_URL"
+            exit 1
+          fi
+          gh workflow run teamwright-next.yml -R "$REPO" --ref "$MAIN" -f task_id="$TASK_ID" -f hop="$HOP" -f prev_stage="$STAGE" -f prev_status="${START_STATUS:-}" -f issue="$ISSUE" || { say "**$TASK_ID**: the dispatcher was not started. $RUN_URL"; exit 1; }
+          exit 0
+
+      - name: "Chain: the stage failed"
+        if: failure() || steps.claude.outcome != 'success'
+        shell: bash {0}
+        env:
+          BASH_ENV: ""
+          GH_TOKEN: ${{ github.token }}
+          COMMITS: ${{ steps.commits.outputs.count }}
+          PUSHED: ${{ steps.push.outputs.pushed }}
+          PAUSED: ${{ steps.push.outputs.paused }}
+        run: |
+          export PATH=/usr/local/bin:/usr/bin:/bin
+          GH_CONFIG_DIR="$(mktemp -d "$RUNNER_TEMP/gh-config.XXXXXX")" || { echo "::error::no fresh gh config dir"; exit 1; }
+          export GH_CONFIG_DIR
+          msg="**$TASK_ID**: stage $STAGE failed: $RUN_URL. To continue, start teamwright-next.yml for $TASK_ID by hand."
+          [ ! -f "$OUT/preflight.md" ] || msg="$msg $(cat "$OUT/preflight.md")"
+          # What the failed stage kept (T-236): its commits on task/<ID>, its uncommitted tree as a patch.
+          if [ "${PUSHED:-}" = 1 ]; then
+            kept="its ${COMMITS:-0} commit(s) are pushed to task/$TASK_ID"
+          elif [ "${PAUSED:-}" = 1 ]; then
+            kept="its ${COMMITS:-0} commit(s) are not pushed to task/$TASK_ID (the contour is paused)"
+          elif [ "${COMMITS:-0}" != 0 ]; then
+            kept="its ${COMMITS} commit(s) were NOT pushed to task/$TASK_ID (see the push step)"
+          else
+            kept="no commit of the stage on task/$TASK_ID"
+          fi
+          if [ -f "$OUT/uncommitted.patch" ]; then
+            kept="$kept; its uncommitted tree is uncommitted.patch in the session artifact"
+          else
+            kept="$kept; no uncommitted change kept"
+          fi
+          msg="$msg Kept: $kept."
+          echo "$msg" >> "$GITHUB_STEP_SUMMARY"
+          # This step also runs when the input check failed: an unchecked ISSUE gets no comment.
+          [[ "$ISSUE" =~ ^[0-9]+$ ]] && { gh issue comment "$ISSUE" -R "$REPO" --body "$msg" >/dev/null || true; }
+          exit 0
+
+      - name: Keep the session for analysis
+        if: always()
+        shell: bash {0}
+        run: |
+          # Decision #267 ("keep both"): the runner host's copy, in RUNS_DIR/<run id> on the runner
+          # host, readable only there; the copy GitHub keeps is the artifact of the owned tail below.
+          # The step never turns the job red, and never stays silent: a missing RUNS_DIR, a missing
+          # source or a failed copy is a ::warning naming what was not kept.
+          keep() { # <source> <dest> <label>
+            if [ ! -e "$1" ]; then
+              echo "::warning::runner host copy: $3 not kept (it does not exist)"
+            elif ! cp -R -P -- "$1" "$2"; then
+              echo "::warning::runner host copy: $3 not kept (the copy into $2 failed)"
+            fi
+          }
+          if [ -z "${RUNS_DIR:-}" ] || [ ! -d "$RUNS_DIR" ]; then
+            echo "::warning::runner host copy: nothing kept, RUNS_DIR '${RUNS_DIR:-}' is not a directory"
+          elif ! mkdir -p -- "$RUNS_DIR/$RUN_ID"; then
+            echo "::warning::runner host copy: nothing kept, $RUNS_DIR/$RUN_ID (under RUNS_DIR) cannot be created"
+          else
+            dest="$RUNS_DIR/$RUN_ID"
+            keep .teamwright/logs "$dest/logs" "the journal .teamwright/logs"
+            keep "$OUT" "$dest/agent" "the session files $OUT (agent)"
+            keep "$HOME/.claude/projects" "$dest/projects" "the Claude CLI projects ~/.claude/projects"
+            if ! git --no-pager log --format='%H %an %aI %s' "origin/$MAIN..HEAD" > "$dest/commits.txt"; then
+              echo "::warning::runner host copy: commits.txt not kept (git log origin/$MAIN..HEAD failed)"
+            fi
+          fi
+
       - name: Stage the session for upload
         id: staged
         if: always()
         timeout-minutes: 30
         shell: bash
         env:
+          BASH_ENV: ""
           # The values pass 1 of the scan looks for; they reach the scan only here.
           OAUTH_VALUE: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           JOB_TOKEN: ${{ github.token }}
@@ -15,6 +122,7 @@
           # line of manifest.txt. A match of a value of the job or of a known key format deletes the
           # staging dir and fails the step; only counts are printed, never a name or a line.
           set -u
+          export PATH=/usr/local/bin:/usr/bin:/bin
           cd -- "$GITHUB_WORKSPACE"
           stage="$RUNNER_TEMP/session-upload"
           rm -rf -- "$stage"
