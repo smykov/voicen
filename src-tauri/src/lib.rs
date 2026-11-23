@@ -211,19 +211,19 @@ fn wire<R: Runtime>(app: &AppHandle<R>, parts: Parts) {
 
 /// The run-loop callback of `run()` and the real-runtime tests (T-052 invariant 4):
 /// - `Ready`: `settings_window::on_ready(app, outcome, launched_by_autostart)`
-///   (the opener carries it out and logs a failed open);
+///   (the opener carries it out and logs a failed open); then, on Windows, the loop
+///   thread's session-end hook (`win::end_session::install`, T-145 I1): the first
+///   `WM_ENDSESSION(TRUE)` to a window of this thread runs `end_of_process` before
+///   tao's handler, which ends the process and skips `RunEvent::Exit` when the message
+///   comes inside a nested pump of the loop (a webview being built);
 /// - `ExitRequested { code: None }` (in tauri 2.12.1 only the last window's
 ///   `Destroyed`) while the tray exists: `prevent_exit`, so closing the settings
 ///   window, or the overlay's destroy on `Hidden` (T-057), keeps the app;
 ///   `ExitRequested { code: Some(_) }` (`AppHandle::exit`, the
 ///   tray "Exit" item) passes, and without a tray nothing is prevented;
 /// - `Exit` (the loop ended: after the tray "Exit" item, and on `WM_ENDSESSION(TRUE)`
-///   through tao, also the installer's Restart Manager close): first
-///   `call::finalize_on_exit` (a recording call stops with `system_end`; T-145), then the
-///   managed `diag::SessionEnd`, if any, ends the session once
-///   (marker deleted, one `exited` line; T-024 invariant 2, the only clean end),
-///   then the managed `dictation::PendingAudio`, if any, deletes its files
-///   (FR-032, T-209);
+///   through tao, also the installer's Restart Manager close): `end_of_process`
+///   (a no-op when the session-end hook already ran it), then the hook is removed;
 /// - everything else: nothing.
 pub fn on_run_event<R: Runtime>(
     app: &AppHandle<R>,
@@ -237,6 +237,11 @@ pub fn on_run_event<R: Runtime>(
             // (`settings_window_failed`). The user's way back is the tray "Settings"
             // item or a second launch; there is no notice for it yet.
             let _ = settings_window::on_ready(app, outcome, launched_by_autostart);
+            #[cfg(windows)]
+            {
+                let handle = app.clone();
+                win::end_session::install(Arc::new(move || end_of_process(&handle)));
+            }
         }
         RunEvent::ExitRequested {
             code: None, api, ..
@@ -247,19 +252,29 @@ pub fn on_run_event<R: Runtime>(
             }
         }
         RunEvent::Exit => {
-            // T-145 (I1): a recording call is finalized first (`stop(SystemEnd)`, the
-            // delivery gate exiting), so its `call_stopped` line precedes `exited`.
-            call::finalize_on_exit(app);
-            if let Some(session_end) = app.try_state::<diag::SessionEnd>() {
-                session_end.end();
-            }
-            // FR-032 (T-209): this session's pending audio. A failure is ignored; the
-            // next start's cleanup retries.
-            if let Some(pending) = app.try_state::<dictation::PendingAudio>() {
-                let _ = pending.0.delete_all();
-            }
+            end_of_process(app);
+            #[cfg(windows)]
+            win::end_session::uninstall();
         }
         _ => {}
+    }
+}
+
+/// The end of the process, the one body of the `RunEvent::Exit` arm and of the session-end
+/// hook (`win::end_session`); every step is a no-op the second time:
+/// - first `call::finalize_on_exit` (T-145 I1: the delivery gate exiting, a recording call
+///   stopped with `system_end`), so its `call_stopped` line precedes `exited`;
+/// - then the managed `diag::SessionEnd`, if any, ends the session once (marker deleted,
+///   one `exited` line; T-024 invariant 2, the only clean end);
+/// - then the managed `dictation::PendingAudio`, if any, deletes its files (FR-032,
+///   T-209); a failure is ignored, the next start's cleanup retries.
+fn end_of_process<R: Runtime>(app: &AppHandle<R>) {
+    call::finalize_on_exit(app);
+    if let Some(session_end) = app.try_state::<diag::SessionEnd>() {
+        session_end.end();
+    }
+    if let Some(pending) = app.try_state::<dictation::PendingAudio>() {
+        let _ = pending.0.delete_all();
     }
 }
 

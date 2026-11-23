@@ -14,12 +14,15 @@
 //! window's `call::SaveDialog`: `IFileSaveDialog` on its own STA thread per pick (T-142,
 //! `src-tauri/tests/save_dialog.rs` for the cancel mapping). `exit_dialog` is the tray Exit's
 //! `call::ExitConfirm`: the system Yes / No `MessageBoxW` (T-145, `src-tauri/tests/call_lifecycle.rs`
-//! drives the port with a fake).
+//! drives the port with a fake). `end_session` is the loop thread's `WM_ENDSESSION(TRUE)` hook
+//! that ends the process (the call finalized, the session ended) before tao's own handler
+//! (T-145, `src-tauri/tests/call_lifecycle.rs`).
 
 pub mod audio_notify;
 pub mod capture;
 pub mod clipboard;
 pub mod crash;
+pub mod end_session;
 pub mod exit_dialog;
 pub mod hotkey;
 pub mod paste;

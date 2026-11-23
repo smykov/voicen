@@ -688,7 +688,8 @@ fn lifecycle_child() {
     let dir = PathBuf::from(dir);
     match mode.to_str() {
         Some("recording") => child_recording(&dir),
-        Some("endsession") => child_endsession(&dir),
+        Some("endsession") => child_endsession(&dir, false),
+        Some("endsession_nested") => child_endsession(&dir, true),
         other => panic!("unknown child mode {other:?}"),
     }
 }
@@ -717,7 +718,10 @@ fn child_recording(dir: &Path) {
 /// A real-runtime app (`App::run`, as `run()` runs it: the process ends inside the exit) with the
 /// session managed and a WAV-backed call recording; `ready.txt` once both tracks play. The loop
 /// ends only through the parent's WM_ENDSESSION. Prints `finalize=<time>` from the Exit arm.
-fn child_endsession(dir: &Path) {
+/// `nested`: `ready.txt` is written from a main-thread task that then pumps the thread's messages
+/// inside the event handler (what wry's WebView2 wait does while a window is built), so the
+/// message reaches tao's procedure with the handler taken.
+fn child_endsession(dir: &Path, nested: bool) {
     let logs = dir.join("logs");
     let log = voicen_lib::diag::start(logs.clone(), Box::new(|_| {}));
     let end = voicen_lib::diag::begin_session(logs, &log);
@@ -734,7 +738,16 @@ fn child_endsession(dir: &Path) {
     let ready = dir.join("ready.txt");
     let mut driver = Some(move |handle: AppHandle<Wry>| {
         if record(&handle, &source).is_some() {
-            fs::write(&ready, b"ready").expect("ready.txt");
+            if nested {
+                let ready = ready.clone();
+                let _ = handle.run_on_main_thread(move || {
+                    fs::write(&ready, b"ready").expect("ready.txt");
+                    // Bounded by the hang bound; the process ends inside a message meanwhile.
+                    let _ = pumping_eventually(|| false);
+                });
+            } else {
+                fs::write(&ready, b"ready").expect("ready.txt");
+            }
         }
         thread::sleep(Duration::from_secs(60));
         end_loop(&handle, FALLBACK_CODE);
@@ -922,10 +935,18 @@ fn wm_endsession_finalizes_a_recording_call_before_the_exited_line() {
     assert_eq!(ran.code, Some(0), "{ran:#?}");
     let dir = only_folder(&tmp.path().join("calls"));
     let meta = meta_of(&dir);
-    assert_eq!(meta.state, CallState::ReadyToTranscribe, "{meta:?}");
-    assert_eq!(meta.stop_reason, Some(StopReason::SystemEnd), "{meta:?}");
-    assert_tracks_complete(&dir);
     let lines = log_lines(&tmp.path().join("logs"));
+    assert_eq!(
+        meta.state,
+        CallState::ReadyToTranscribe,
+        "{meta:?}\n{ran:#?}\n{lines:#?}"
+    );
+    assert_eq!(
+        meta.stop_reason,
+        Some(StopReason::SystemEnd),
+        "{meta:?}\n{ran:#?}\n{lines:#?}"
+    );
+    assert_tracks_complete(&dir);
     let stopped = headed(&lines, "call_stopped");
     assert_eq!(stopped.len(), 1, "one call_stopped: {lines:#?}");
     assert!(
@@ -933,6 +954,80 @@ fn wm_endsession_finalizes_a_recording_call_before_the_exited_line() {
             .split_whitespace()
             .any(|t| t == "reason=system_end"),
         "{stopped:?}"
+    );
+    assert_eq!(
+        headed(&lines, "exited").len(),
+        1,
+        "one exited line: {lines:#?}"
+    );
+    assert!(
+        head_index(&lines, "call_stopped") < head_index(&lines, "exited"),
+        "the call was stopped after the exited line: {lines:#?}"
+    );
+    assert!(
+        headed(&lines, "final_finished").is_empty(),
+        "a pass ran on the way out: {lines:#?}"
+    );
+}
+
+#[test]
+fn wm_endsession_inside_a_nested_pump_still_finalizes_the_call_before_the_exited_line() {
+    // Acceptance 2, I1 (the defect of CI run 45102866589): the same child, but the message
+    // arrives while the loop's thread pumps inside its event handler (a window being built), where
+    // tao's handler ends the process without `RunEvent::Exit`. Only the loop thread's
+    // WM_ENDSESSION hook runs the end of the process then: meta `ready-to-transcribe` with
+    // `system_end`, one `call_stopped` before the one `exited` line, no pass. Unlike the test
+    // above this does not depend on a window being under construction at that moment.
+    let _serial = serial();
+    let tmp = TempDir::new();
+    let (mut child, readers) = spawn_child("endsession_nested", tmp.path());
+    let ready = tmp.path().join("ready.txt");
+    let up =
+        timing_support::eventually(|| ready.exists() || matches!(child.try_wait(), Ok(Some(_))));
+    if !up || !ready.exists() {
+        let _ = child.kill();
+        let ran = finish(child, readers, CHILD_BUDGET);
+        panic!("the child never started recording: {ran:#?}");
+    }
+    let pid = child.id();
+    let mut target = None;
+    timing_support::eventually(|| {
+        target = window_of(pid, TAO_TARGET);
+        target.is_some()
+    });
+    let Some(raw) = target else {
+        let _ = child.kill();
+        let ran = finish(child, readers, CHILD_BUDGET);
+        panic!("premise: no `{TAO_TARGET}` window of the child: {ran:#?}");
+    };
+    assert!(
+        timing_support::within_hang(move || send_end_session(raw)).is_some(),
+        "HANG: the end-session messages were not answered"
+    );
+    let ran = finish(child, readers, CHILD_BUDGET);
+
+    assert!(
+        !ran.timed_out,
+        "the child did not end after WM_ENDSESSION: {ran:#?}"
+    );
+    let dir = only_folder(&tmp.path().join("calls"));
+    let meta = meta_of(&dir);
+    let lines = log_lines(&tmp.path().join("logs"));
+    assert_eq!(
+        meta.state,
+        CallState::ReadyToTranscribe,
+        "{meta:?}\n{ran:#?}\n{lines:#?}"
+    );
+    assert_eq!(
+        meta.stop_reason,
+        Some(StopReason::SystemEnd),
+        "{meta:?}\n{ran:#?}\n{lines:#?}"
+    );
+    assert_tracks_complete(&dir);
+    assert_eq!(
+        headed(&lines, "call_stopped").len(),
+        1,
+        "one call_stopped: {lines:#?}"
     );
     assert_eq!(
         headed(&lines, "exited").len(),

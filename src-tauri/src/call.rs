@@ -66,7 +66,8 @@
 //!   posts `ExitConfirmed` (gate exiting, `stop(Exit)`, then the loop ends). A suspend posts
 //!   `Sleep` (gate held, `stop(Sleep)`), a resume `Resumed` (held items delivered in stop
 //!   order; any other request releases them too). `on_run_event`'s `RunEvent::Exit` arm
-//!   calls [`finalize_on_exit`] first (gate exiting, `stop(SystemEnd)`). Every session
+//!   and the `WM_ENDSESSION(TRUE)` hook (`win::end_session`) call [`finalize_on_exit`]
+//!   first (gate exiting, `stop(SystemEnd)`). Every session
 //!   notice and stop hand-off goes through the one `DeliveryGate` of [`ShellCallShell`].
 
 use std::io;
@@ -569,12 +570,15 @@ pub fn request_exit<R: Runtime>(app: &AppHandle<R>) -> bool {
         .is_some_and(|part| part.requests.send(CallRequest::Exit).is_ok())
 }
 
-/// The call part's end of the process (T-145, I1, I2; `on_run_event`'s `RunEvent::Exit`
-/// arm, before the session end): the delivery gate turns to exiting (no notice, no pass
-/// enqueue from here on; the next start queues the call), then a recording call stops with
-/// `system_end` (EOS, sync, meta `ready-to-transcribe`). Runs on the main thread and takes
-/// the session lock there: nothing inside the lock waits on the main thread. A no-op
-/// without a call part, and a stop that finds no recording call does nothing.
+/// The call part's end of the process (T-145, I1, I2; the lib's `end_of_process`, run by
+/// `on_run_event`'s `RunEvent::Exit` arm and by the `WM_ENDSESSION(TRUE)` hook
+/// `win::end_session`, before the session end): the delivery gate turns to exiting (no
+/// notice, no pass enqueue from here on; the next start queues the call), then a recording
+/// call stops with `system_end` (EOS, sync, meta `ready-to-transcribe`). From the Exit arm
+/// it runs on the main thread and takes the session lock there; from the hook it runs on
+/// the `end-session` thread while the main thread waits for it. Either way nothing inside
+/// the lock waits on the main thread. A no-op without a call part, and a stop that finds
+/// no recording call does nothing, so a second call changes nothing.
 pub fn finalize_on_exit<R: Runtime>(app: &AppHandle<R>) {
     let Some(part) = app.try_state::<CallPart>() else {
         return;
