@@ -87,7 +87,7 @@ Tasks: T-126; T-144 (I12); T-145 (I12 Sleep notice, D1-D5); T-149 (device change
 
 Task T-145 (spec 007 FR-007, FR-008, FR-017). Not owner decisions; recorded here and in `docs/decisions/windows-shell.md`.
 
-- **D1.** A `Sleep` stop gives `CallNotice::Stopped{Sleep}` (I12). The shell holds it and the pass hand-off until the next `PBT_APMRESUMEAUTOMATIC`, so no toast and no pass before sleep. With no resume, the next call request releases what is held. A `Sleep` with no call recording still turns the gate to held, which the same resume or request releases.
+- **D1.** A `Sleep` stop gives `CallNotice::Stopped{Sleep}` (I12). The shell holds it and the pass hand-off until the next `PBT_APMRESUMEAUTOMATIC`, so no toast and no pass before sleep. With no resume, the next call request releases what is held: every request except `Sleep`, the indicator's Stop (`IndicatorStop`) and Dismiss included. A `Sleep` with no call recording still turns the gate to held, which the same resume or request releases.
 - **D2.** The exit question runs on its own thread, not on the call worker, so a hotkey or tray stop works while it is shown. A second Exit while it is shown asks nothing. A Yes after the call already stopped just exits.
 - **D3.** From a confirmed Yes, and at `RunEvent::Exit`, notices and pass enqueues are dropped. The next start queues the call through `recover` (spec FR-007: the pass starts "at the next start"). An idle Exit and a late Yes turn the gate to exiting too.
 - **D4.** T-145 owns the start-up `CallStore::recover` and the enqueue of `Recovery.queue` (on the call worker, before its first request). T-147 keeps `calls_transcribe` and its relaunch test and adds no second recover.
