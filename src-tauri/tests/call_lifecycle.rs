@@ -1248,6 +1248,43 @@ fn the_next_call_request_releases_a_held_sleep_notice_without_a_resume() {
 }
 
 #[test]
+fn the_indicator_stop_and_dismiss_also_release_a_held_sleep_notice() {
+    // D1 after the merge of T-130: the indicator's Stop and Dismiss are call requests too, so
+    // each releases what the shell holds since a suspend (the stopped call's
+    // `notice.stopped.sleep` offered, its folder enqueued), even though neither has a call to
+    // stop or a warning to dismiss here. Bite: either arm without its `gate.release()` (the
+    // notice stays held until some other request or a resume, lost if none comes).
+    let _serial = serial();
+    for request in [CallRequest::IndicatorStop, CallRequest::Dismiss(1)] {
+        let hot = start_hot();
+        hot.start_call();
+        let hwnd = hotkey_window();
+        suspend(hwnd);
+        assert!(
+            eventually(|| !hot.recording()),
+            "{request:?}: the suspend did not stop the call"
+        );
+        let first = only_folder(&hot.root());
+        assert!(
+            holds_for(SETTLE, || hot.offered().is_empty()),
+            "{request:?}: a notice was offered before any request: {:?}",
+            hot.offered()
+        );
+
+        call::request(hot.rig.app.handle(), request);
+        assert!(
+            eventually(|| hot.offered().first() == Some(&NOTICE_STOPPED_SLEEP)),
+            "{request:?} did not release the held notice: {:?}",
+            hot.offered()
+        );
+        assert!(
+            eventually(|| meta_of(&first).state != CallState::ReadyToTranscribe),
+            "{request:?} did not release the held hand-off"
+        );
+    }
+}
+
+#[test]
 fn an_unlock_after_a_suspend_releases_nothing_that_the_shell_holds() {
     // I4: only PBT_APMRESUMEAUTOMATIC releases the held sleep notice and hand-off; a WTS unlock
     // of this session between the suspend and the resume must not (the unlock arm re-registers
