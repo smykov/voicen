@@ -1,6 +1,6 @@
 # Contract: History IPC (UI ↔ `src-tauri`) and shell hooks
 
-The UI talks to Rust only through these commands and one event (architecture "Seams"). Playwright mocks exactly these. Shapes use camelCase on the wire (`#[serde(rename_all = "camelCase")]`).
+The UI talks to Rust only through these commands and one event (architecture "Seams"). Playwright mocks exactly these. Shapes use camelCase on the wire (`#[serde(rename_all = "camelCase")]`): core's `HistoryView` is converted by the shell's `HistoryWire` / `HistoryEntryWire` (`src-tauri/src/history.rs`); core and the stored file stay snake_case.
 
 ## Wire types
 
@@ -21,7 +21,7 @@ interface HistoryView { enabled: boolean; entries: HistoryEntry[]; notice: Histo
 | `history_copy` | `{ id: number }` | `null` | `{ code: "not_found" }` entry no longer in the list (the UI shows the same "Could not copy — try again" alert; the next `history://changed` already removed the entry); `{ code: "clipboard_unavailable" }` clipboard write failed | FR-006, FR-018 |
 | `history_clear` | — | `HistoryView` (after clearing; `notice` may be `delete_failed`) | — | FR-007, FR-009 |
 
-Opening settings at the History tab uses **004's** open-settings request with the History tab; 004 defines no UI command for it yet, so T-022's e2e pins the IPC form `settings_open { tab: "history" }` (granted to the `history` label; the shell routes it to `ShellRequests::open_settings(SettingsTab::History, None)`). Copy uses **001's** clipboard writer (exclusion marks), never a paste.
+Opening settings at the History tab uses **004's** open-settings request with the History tab; 004 defines no UI command for it, so T-022 added `settings_open { tab }` -> `null` (`settings_window::settings_open`, in `APP_COMMANDS`, granted to the `history` label only): `tab` is a `SettingsTab::as_str` token, an unknown one answers `{ code: "unknown_tab" }` and posts nothing, otherwise it posts `request(OpenTarget::Tab(tab, None))` (the path of `ShellRequests::open_settings`) and returns at once. Copy uses **001's** clipboard writer (exclusion marks), never a paste.
 
 ## Event
 
@@ -31,14 +31,16 @@ Opening settings at the History tab uses **004's** open-settings request with th
 
 The UI replaces its whole state with each payload (no merging).
 
-## Shell hooks (Rust, `src-tauri`, Windows CI only)
+## Shell hooks (Rust, `src-tauri`, Windows CI only; as built, T-022)
+
+The planned `history_on_delivered` / `history_on_settings_applied` functions do not exist: delivery and the settings follower are core (`TranscriptSink`, `follow_settings`; core-history.md), and the shell only wires them.
 
 | Function | Called by | Does | Req |
 |---|---|---|---|
-| `show_history_window(app)` | 001's tray item "History" | create `WebviewWindow` label `history`, route `/history`; if it exists: unminimize, show, focus | FR-005, FR-015 |
-| `history_on_delivered(app, text, ready_at_ms, engine)` | 001's delivery step, once per job with outcome delivered/copied-only, after the clipboard/paste attempt | `History::record`, log error kind if any, emit `history://changed` | FR-001, FR-010 |
-| `history_on_settings_applied(app, enabled, size)` | 004's settings apply (subscriber) | `History::apply_settings`, emit | FR-003, FR-008 |
-| startup | app setup | `History::open(FileHistoryStore::new(data_dir()), …)` with the data dir from the single resolver | FR-004, FR-009, FR-016 |
+| `history::open_history(app)` | the tray item "History" (`TrayAction::OpenHistory`, id `history`, between Settings and Open logs) | posts to the "history-window" opener thread and returns at once; that thread builds `WebviewWindow` label `history` at `/history`, or unminimizes, shows and focuses the existing one; closing destroys it | FR-005, FR-015 |
+| `history::start_history(app, dir, clipboard)` | `run()`, before the dictation session | `History::open(FileHistoryStore::new(dir), enabled, size)` from the settings snapshot (read after the follower's `subscribe()`), a `HistoryRecorder` whose `on_change` is `emit_to("history", "history://changed", HistoryWire)` and whose `on_error` writes `history_failed op=.. kind=..`, the "history-settings" thread running `follow_settings`, the opener thread; manages the part. `dir` is `paths::data_dir()`. An open error is logged the same way | FR-004, FR-009, FR-016, FR-010 |
+| `history::transcript_sink(app)` | `dictation::start_dictation_with`, into `PipelineDeps::transcript_sink` | the managed recorder, or a sink that keeps nothing when the app has no history part (test apps) | FR-001 |
+| `history_get` / `history_copy` / `history_clear` | the History page | memory read; `text_of` then the process's one `Clipboard::set_text_excluded_from_history` (errors: code only); `clear`. Without a history part: an empty view (`enabled` from the settings), `not_found` | FR-005, FR-006, FR-007 |
 
 ## UI contract (Playwright selectors)
 
