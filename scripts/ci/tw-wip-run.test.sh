@@ -929,6 +929,13 @@ repo q-prefix-contour xtask/T-999
 CGHA=true CTID=T-999 refused "refused: xtask/T-999 under the contour env"
 unset CGHA CTID
 
+repo q-nested-contour feature/refs/heads/task/T-999
+CGHA=true CTID=T-999 refused "refused: feature/refs/heads/task/T-999 under the contour env (left anchor)"
+unset CGHA CTID
+
+repo q-nested-tw feature/refs/heads/tw/T-999
+refused "refused: feature/refs/heads/tw/T-999 (left anchor)"
+
 repo q-notid-contour task/not-an-id
 CGHA=true CTID=not-an-id refused "refused: task/not-an-id under the contour env"
 unset CGHA CTID

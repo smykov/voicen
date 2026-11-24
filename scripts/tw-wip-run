@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
 # tw-wip-run [<commit>] - the only CI read of a stage session: the ci.yml run of the wip/<ID> push of
-# P-016 (T-199, decisions #228, #241; contract: scripts/ci/tw-wip-run.test.sh).
+# P-016 (T-199, T-205, decisions #228, #241, #350; contract: scripts/ci/tw-wip-run.test.sh).
 #
-# <ID> comes from the current branch tw/<ID>, never from an argument or the environment. <commit>
+# <ID> comes from the current branch, never from an argument or the environment: tw/<ID> always
+# (GITHUB_ACTIONS and TASK_ID ignored), task/<ID> only in contour mode = GITHUB_ACTIONS is exactly
+# "true" and TASK_ID is byte-equal to the branch's <ID>; any other branch is refused. <commit>
 # (default HEAD) is the pushed commit, resolved to a full sha. The program runs no gh command but its
-# two templates (the launch keeps Bash(gh:*) denied; the session runs this program by name):
+# three templates (the launch keeps Bash(gh:*) denied; the session runs this program by name):
 #   gh run list --branch wip/<ID> --workflow ci.yml --json databaseId,headSha,status,conclusion,url,createdAt --limit 20
 #   gh run view <databaseId> --json jobs,status,conclusion,headSha,url   (a completed run, not green)
+#   gh run view <databaseId> --log-failed   (the same run, once, after the view)
 # The run of the commit is the first listed run whose headSha is the full sha.
 #
 # It waits in the foreground: TW_WIP_RUN_WINDOW seconds per call (whole seconds, default 540, under
@@ -19,12 +22,13 @@
 # ceiling before now ends the call at once with exit 6. A completed run is green or red at any age.
 #
 # Exit 0  green; stdout: CI: <url> @ <full sha>
-#      1  red (completed, not success); stdout: one FAILED JOB: <name> per failed job, no CI: line
-#      2  refused (branch, argument, pause, not a commit, not a git tree, a TW_WIP_RUN_WINDOW,
+#      1  red (completed, not success); stdout: RED: <url> @ <sha>, one FAILED JOB: <name> per failed
+#         job, then the last 200 lines of the failed-step log, each as LOG: <line>; no CI: line
+#      2  refused (branch, contour mode, argument, pause, not a commit, not a git tree, a TW_WIP_RUN_WINDOW,
 #         TW_WIP_RUN_POLL or TW_WIP_RUN_CEILING of the wrong form); gh is not called
 #      3  the run is still pending at the window's end (its url is printed): call again
 #      4  no run for the sha at the window's end (the sha is printed; e.g. a docs/tasks-only push)
-#      5  gh failed, or its answer is not the expected JSON shape (the run of the sha without a
+#      5  gh failed (the log call included; nothing is printed then), or its answer is not the expected JSON shape (the run of the sha without a
 #         parsable createdAt included)
 #      6  the run of the sha is not completed and passed the wait ceiling (its url is printed)
 # A failed job without a name is printed as FAILED JOB: <unnamed job>.
@@ -68,9 +72,16 @@ for pause in "${TEAMWRIGHT_PAUSE_FILE:-}" "$top/TEAMWRIGHT_PAUSE" "$main_tree/TE
   [ -z "$pause" ] || [ ! -e "$pause" ] || refuse "team is paused ($pause exists)"
 done
 
-branch="$(git symbolic-ref -q HEAD)" || refuse "detached HEAD, not on a tw/<ID> branch"
-[[ "$branch" =~ ^refs/heads/tw/([A-Z][A-Z0-9]*-[0-9]+)$ ]] || refuse "not on a tw/<ID> branch: $branch"
-id="${BASH_REMATCH[1]}"
+branch="$(git symbolic-ref -q HEAD)" || refuse "detached HEAD, not on a tw/<ID> or task/<ID> branch"
+if [[ "$branch" =~ ^refs/heads/tw/([A-Z][A-Z0-9]*-[0-9]+)$ ]]; then
+  id="${BASH_REMATCH[1]}"
+elif [[ "$branch" =~ ^refs/heads/task/([A-Z][A-Z0-9]*-[0-9]+)$ ]]; then
+  id="${BASH_REMATCH[1]}"
+  [ "${GITHUB_ACTIONS-}" = "true" ] || refuse "task/<ID> only in contour mode (GITHUB_ACTIONS)"
+  [ "${TASK_ID-}" = "$id" ] || refuse "TASK_ID does not name $id"
+else
+  refuse "not on a tw/<ID> or task/<ID> branch: $branch"
+fi
 
 sha="$(git rev-parse --verify -q "$arg^{commit}")" || refuse "not a commit: $arg"
 
@@ -148,12 +159,14 @@ while :; do
       view="$(gh run view "$rid" --json jobs,status,conclusion,headSha,url)" \
         || gh_failed "gh run view $rid exited non-zero"
       jobs="$(failed_jobs <<<"$view")" || gh_failed "gh run view $rid did not answer a run with jobs"
+      logtxt="$(gh run view "$rid" --log-failed)" || gh_failed "gh run view $rid --log-failed exited non-zero"
       echo "RED: $url @ $sha (conclusion: ${concl:-none})"
       if [ -n "$jobs" ]; then
         while IFS= read -r job; do echo "FAILED JOB: $job"; done <<<"$jobs"
       else
         echo "no job failed by name; read the run: $url"
       fi
+      if [ -n "$logtxt" ]; then printf '%s\n' "$logtxt" | tail -n 200 | sed 's/^/LOG: /'; fi
       exit 1
     fi
     if [ "$age" -ge $((10#$ceiling * 60)) ]; then

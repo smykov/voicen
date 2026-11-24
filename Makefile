@@ -107,12 +107,13 @@ check-wip-push:
 check-test-guard:
 	scripts/ci/test-guard.test.sh
 
-# check-wip-run (T-199, decisions #228, #241): scripts/tw-wip-run is the only CI read of a stage
-# session. Its gh argv is one of two owned templates (run list --branch wip/<ID> ..., run view <id>
-# ...), the ID from branch tw/<ID>; it prints CI: <url> @ <sha> on a green run of the commit, names the
-# failed jobs on a red one, waits inside its window, has a distinct exit for pending, no run and a gh
-# failure, and refuses off a tw/<ID> branch, with an option or a second argument, and under
-# TEAMWRIGHT_PAUSE, gh never called. The self-test puts a fake gh first on PATH; no network. Host bash, git.
+# check-wip-run (T-199, T-205, decisions #228, #241, #350): scripts/tw-wip-run is the only CI read of a
+# stage session. Its gh argv is one of three owned templates (run list --branch wip/<ID> ..., run view
+# <id> --json ..., run view <id> --log-failed), the ID from branch tw/<ID>, or task/<ID> only with
+# GITHUB_ACTIONS=true and TASK_ID equal to the ID; it prints CI: <url> @ <sha> on a green run of the
+# commit, names the failed jobs and the last 200 failed-step log lines (LOG: <line>) on a red one,
+# waits inside its window, has a distinct exit for pending, no run and a gh failure, and refuses off
+# those branches, with an option or a second argument, and under TEAMWRIGHT_PAUSE, gh never called. The self-test puts a fake gh first on PATH; no network. Host bash, git.
 check-wip-run:
 	scripts/ci/tw-wip-run.test.sh
 
