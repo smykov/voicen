@@ -40,7 +40,7 @@ Tasks: T-126; T-144 (I12); T-145 (I12 Sleep notice, D1-D5); T-149 (device change
 
 ### I6. No Esc input and no shared state with `DictationSession`
 
-- **Where it is enforced:** the session takes no Esc; test `dictation_and_esc_never_change_a_running_call` runs both directions.
+- **Where it is enforced:** the session takes no Esc; test `dictation_and_esc_never_change_a_running_call` runs both directions. Through the composed shell (real tray, paste, Esc, two sessions at once) it is pinned on Windows by `src-tauri/tests/call_dictation.rs` (T-151).
 
 ### I7. A channel drop is one log line and one `drops[]` entry; a stall gap is neither (#244)
 
