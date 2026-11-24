@@ -5,14 +5,14 @@
 	check-core-test-os-answer check-core-test-deadlines check-webview-data check-ci-wip check-telegram-send check-telegram-failure-branch \
 	check-version-stamp check-release-check check-release check-release-guard check-nsis-fork check-e2e-entry-fixtures check-area-image-fixtures \
 	check-whisper-cmake-cache check-opus-cmake-cache check-whisper-model-key check-crt-imports check-whisper \
-	check-shell-windows check-ban-canary check-role-tools check-guard-trigger check-wip-push check-wip-run check-contour-busy check-contour-label check-serena-pin check-test-guard \
+	check-shell-windows check-ban-canary check-role-tools check-guard-trigger check-wip-push check-wip-run check-contour-busy check-contour-prebuild check-contour-label check-serena-pin check-test-guard \
 	check-ui core-image ui-image core-image-present \
 	licenses licenses-check licenses-unit licenses-fixture licenses-rust licenses-bundle \
 	licenses-npm licenses-generate licenses-stale licenses-stale-guard
 
 # check-ban-canary and check-shell-windows after check-core: both build voicen-core, so a core
 # error is reported first by the faster native check-core, before the slower runs.
-check: check-shell-layout check-shell-layout-fixtures check-helper-windows-fixtures check-ci-credentials check-role-tools check-guard-trigger check-wip-push check-wip-run check-contour-busy check-contour-label check-serena-pin check-test-guard \
+check: check-shell-layout check-shell-layout-fixtures check-helper-windows-fixtures check-ci-credentials check-role-tools check-guard-trigger check-wip-push check-wip-run check-contour-busy check-contour-prebuild check-contour-label check-serena-pin check-test-guard \
 	check-clippy-lines \
 	check-core-test-os-answer check-core-test-deadlines check-webview-data check-ci-wip check-telegram-send check-telegram-failure-branch check-version-stamp check-release-check check-release check-release-guard check-nsis-fork check-whisper-cmake-cache check-opus-cmake-cache check-whisper-model-key check-crt-imports check-core check-whisper \
 	check-ban-canary check-shell-windows check-e2e-entry-fixtures check-area-image-fixtures check-ui \
@@ -125,6 +125,15 @@ check-wip-run:
 # .github/workflows and that both owned contour heads hold per-task concurrency groups. Host bash, jq.
 check-contour-busy:
 	scripts/ci/contour-busy.test.sh
+
+# check-contour-prebuild (T-261, decisions #361): the contour's background prebuild. scripts/ci/contour-prebuild.sh runs
+# the gate's own `scripts/tw-run core -- ...` lines of check-core, check-whisper and check-shell-windows (the cargo
+# test line with --no-run appended) under one timeout, writes $RUNNER_TEMP/prebuild.rc and never exits non-zero. The
+# self-test compares those lines with this file's recipe lines byte for byte, runs the script against a stub
+# TW_DOCKER (argv, exit codes, timeout and docker rm -f) and runs the report step's run: block of
+# scripts/ci/contour-prebuild-report.yml (one ::warning:: unless the rc is 0, exit 0). Host bash.
+check-contour-prebuild:
+	scripts/ci/contour-prebuild.test.sh
 
 # check-contour-label (T-231): the label start of the contour. scripts/ci/contour-label.sh is the only parser
 # of a labelled Issue's title (LC_ALL=C, ^(T-[0-9]{3,}): ; prints start <T-NNN> or bad <why>, no title bytes).
