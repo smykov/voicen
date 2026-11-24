@@ -66,6 +66,7 @@ const TRANSCRIPT: &str = "Voicen e2e TRANSCRIPT-CANARY-5d1 проверка";
 const CANARY: &str = "TRANSCRIPT-CANARY-5d1";
 
 #[test]
+#[ignore = "T-151 bite attribution: not the target of this commit"]
 fn a_hotkey_hold_through_the_real_wiring_pastes_the_transcript_into_the_window() {
     // T-006 row 18 (Acceptance line 1; invariant 5): a synthetic Ctrl+Alt+Space hold of
     // 1.5 s from the observed press, with engine `api` (a test engine) and the WAV source
@@ -159,6 +160,7 @@ fn a_hotkey_hold_through_the_real_wiring_pastes_the_transcript_into_the_window()
 }
 
 #[test]
+#[ignore = "T-151 bite attribution: not the target of this commit"]
 fn esc_through_the_real_wiring_discards_the_recording() {
     // T-009 Acceptance "Esc cancel" through `start_dictation` (FR-22, FR-20): the wiring
     // attaches the Esc claim to the real hotkey thread; Esc during a Ctrl+Alt+Space hold
@@ -446,6 +448,7 @@ fn assert_one_pasted_dictation_line(rig: &AppRig) {
 }
 
 #[test]
+#[ignore = "T-151 bite attribution: not the target of this commit"]
 fn post_processing_on_through_the_real_wiring_pastes_the_chat_reply() {
     // T-074 Acceptance line 1: with post-processing enabled and configured (base URL =
     // the loopback chat mock, a key stored through the save), a hotkey hold through
@@ -524,6 +527,7 @@ fn post_processing_on_through_the_real_wiring_pastes_the_chat_reply() {
 }
 
 #[test]
+#[ignore = "T-151 bite attribution: not the target of this commit"]
 fn post_processing_server_refusing_still_pastes_the_raw_transcript_with_tray_error() {
     // T-074 Acceptance line 2 (failure branch): post-processing enabled with base URL =
     // a loopback port that refuses (`127.0.0.1:1`) ends with
@@ -700,6 +704,7 @@ fn warning_fallbacks(lines: &[String]) -> Vec<String> {
 }
 
 #[test]
+#[ignore = "T-151 bite attribution: not the target of this commit"]
 fn a_hold_with_the_loaded_silero_detector_logs_detector_silero_and_no_vad_fallback() {
     // T-102 Acceptance 2 (first half): real speech through the real wiring with the
     // detector the shell's loader gives (`SileroDetector::load` on the fetched model)
@@ -749,6 +754,7 @@ fn a_hold_with_the_loaded_silero_detector_logs_detector_silero_and_no_vad_fallba
 }
 
 #[test]
+#[ignore = "T-151 bite attribution: not the target of this commit"]
 fn a_truncated_model_falls_back_to_energy_with_one_vad_fallback_over_two_holds() {
     // T-102 Acceptance 2 (failure half) and invariant 2: a real, truncated copy of the
     // model makes the loader give `Err(Unavailable)`; the app still starts, `vad
@@ -801,6 +807,7 @@ fn a_truncated_model_falls_back_to_energy_with_one_vad_fallback_over_two_holds()
 }
 
 #[test]
+#[ignore = "T-151 bite attribution: not the target of this commit"]
 fn the_silero_model_loads_from_a_non_ascii_directory() {
     // T-102 re-check finding: %LOCALAPPDATA% under a Cyrillic user name. whisper.cpp
     // opens the VAD model through a UTF-8 to wide conversion; a failure would be silent

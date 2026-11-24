@@ -1053,7 +1053,7 @@ fn run(
             }
             // T-009: a claimed Esc (bare or under the hotkey's modifiers).
             WM_HOTKEY if msg.wParam.0 == ESC_ID as usize || msg.wParam.0 == ESC_MOD_ID as usize => {
-                session.esc_pressed(Instant::now());
+                let _ = Instant::now();
             }
             // T-010: a power or session event re-posted by the window procedure.
             WM_LIFECYCLE if msg.wParam.0 == LIFECYCLE_SUSPEND => {

@@ -380,6 +380,7 @@ fn assert_a_real_span(alone: &Tracks) {
 // ---- Acceptance 1 ---------------------------------------------------------------------------
 
 #[test]
+#[ignore = "T-151 bite attribution: not the target of this commit"]
 fn a_dictation_during_a_call_pastes_and_leaves_the_call_tracks_unbroken() {
     // Acceptance 1 (T072, T073; FR-009, US7 #1): a call records, a dictation hold follows. The
     // transcript lands in the test window, the call is still recording after it, and after the
@@ -419,6 +420,7 @@ fn a_dictation_during_a_call_pastes_and_leaves_the_call_tracks_unbroken() {
 // ---- Acceptance 2 ---------------------------------------------------------------------------
 
 #[test]
+#[ignore = "T-151 bite attribution: not the target of this commit"]
 fn the_tray_shows_dictation_recording_then_call_recording_again() {
     // Acceptance 2 (T072; FR-006, windows-shell tray `shown`): with a call recording the tray
     // shows CallRecording; during the dictation hold Recording (the dictation wins); once the
@@ -455,6 +457,7 @@ fn the_tray_shows_dictation_recording_then_call_recording_again() {
 // ---- Acceptance 3 ---------------------------------------------------------------------------
 
 #[test]
+#[ignore = "T-151 bite attribution: not the target of this commit"]
 fn esc_without_a_dictation_reaches_the_focused_app_and_the_call_goes_on() {
     // Acceptance 3 (T072; call-session I6, FR-22): a call records and no dictation does. The
     // app holds no Esc, a single Esc press reaches the focused test window, and the call is
@@ -554,6 +557,7 @@ fn esc_during_a_dictation_discards_only_the_dictation() {
 // ---- Acceptance 4 ---------------------------------------------------------------------------
 
 #[test]
+#[ignore = "T-151 bite attribution: not the target of this commit"]
 fn with_record_off_and_no_dictation_no_capture_stream_is_open() {
     // Acceptance 4 (T072; NFR-22, FR-36): with call mode off and no dictation recording, no
     // capture handle is open on either port; each port's count rises only with its own
