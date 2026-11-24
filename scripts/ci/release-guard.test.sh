@@ -485,6 +485,8 @@ check v-vars-index             1 R4 "@VARS['RELEASE_PAT']"      # the word vars,
 # part of the value, so the PAT expression is live).
 check v-secrets-after-allowed   1 R4 '@}}${{ secrets.RELEASE_PAT' # S1: ${{ secrets.TELEGRAM_CHAT_ID }}${{ secrets.RELEASE_PAT }}
 check v-secrets-in-comment-line 1 R4 '@# ${{ secrets.RELEASE_PAT' # S2: T: "x / # ${{ secrets.RELEASE_PAT }}"
+# T-179 (T-085 v2): R4 holds past the second allowed occurrence on a line (BOT_TOKEN, CHAT_ID, then an unlisted secret).
+check v-secret-third-on-line    1 R4 '@}}${{ secrets.RELEASE_PAT' # T: ${{ secrets.TELEGRAM_BOT_TOKEN }}${{ secrets.TELEGRAM_CHAT_ID }}${{ secrets.RELEASE_PAT }}
 
 # ---- R6: no YAML escape that spells a character or joins two lines ----------------------------
 # Review 1 finding 3 (probes P3, P4): each reads, to a YAML reader, as text R3-R5 refuse.
@@ -2605,6 +2607,10 @@ frag_case g-frag-alias-value gate-setup-node.yml "cannot run: setup-node fragmen
   '      VOICEN_V: &v "20.19"'
 frag_case g-frag-anchor-sn gate-setup-node.yml "cannot run: setup-node fragment holding an anchor (node-version: &v ...)" \
   's/^          node-version: "20.19"$/          node-version: \&v "20.19"/'
+# T-179 (T-088 r4#1): an anchor name starting with `&` (`&&v`) is not an `&&` of an if: line; only `&& `
+# (two ampersands and a space) is allowed in a fragment body.
+frag_case g-frag-anchor-ampersand-name gate-setup-node.yml "cannot run: setup-node fragment holding an anchor named &v spelled &&v (node-version: &&v ...)" \
+  's/^          node-version: "20.19"$/          node-version: \&\&v "20.19"/'
 frag_case g-frag-anchor-save-beside-and gate-cargo-save.yml "cannot run: cache/save fragment holding an anchor (key: &k ...) beside the && of its if: line" \
   's/^          key: /          key: \&k /'
 frag_ok g-frag-ok-save-if-second-and windows-pnpm-save.yml "ok: cache/save fragment whose if: holds a second && (&& is not an anchor)" \

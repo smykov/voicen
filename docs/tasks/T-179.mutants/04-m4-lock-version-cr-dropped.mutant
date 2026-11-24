@@ -1,0 +1,10 @@
+guarantee: I-4: version-stamp.sh stamps a CRLF tree without losing a CR (T-077 r1#1)
+file: scripts/ci/version-stamp.sh
+added_by: test-writer
+--- old
+      if (FNR in target) line = "version = \"" new "\""
+      printf "%s%s\n", line, cr
+--- new
+      if (FNR in target) line = "version = \"" new "\""
+      printf "%s\n", line
+--- end
