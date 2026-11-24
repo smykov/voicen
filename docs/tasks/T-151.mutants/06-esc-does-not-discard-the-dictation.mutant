@@ -1,0 +1,12 @@
+guarantee: AC-3 failure branch: Esc during a dictation discards the dictation (swallowed at the Esc arm)
+file: src-tauri/src/win/hotkey.rs
+added_by: test-writer
+--- old
+                session.esc_pressed(Instant::now());
+            }
+            // T-010: a power or session event re-posted by the window procedure.
+--- new
+                let _ = Instant::now();
+            }
+            // T-010: a power or session event re-posted by the window procedure.
+--- end

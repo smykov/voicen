@@ -1,0 +1,13 @@
+guarantee: AC-3 failure branch: Esc during a dictation discards only the dictation (the call keeps recording)
+file: src-tauri/src/win/hotkey.rs
+added_by: test-writer
+--- old
+            WM_HOTKEY if msg.wParam.0 == ESC_ID as usize || msg.wParam.0 == ESC_MOD_ID as usize => {
+                session.esc_pressed(Instant::now());
+--- new
+            WM_HOTKEY if msg.wParam.0 == ESC_ID as usize || msg.wParam.0 == ESC_MOD_ID as usize => {
+                if let Some(port) = &regs.call_port {
+                    (port.on_press)();
+                }
+                session.esc_pressed(Instant::now());
+--- end
