@@ -16,7 +16,12 @@
 ;     (same as /P /PURGECALLS: the fork's "/P" also matches it, NSIS FileFunc.nsh GetOptions)
 ;   interactive                      ask, default Yes                  ask if the folder exists, default No
 ; The only calls folder ever touched is the literal $LOCALAPPDATA\Voicen\calls.
-; No deletion descends through a reparse point (junction, symlink): see un.VoicenRemoveEntry.
+; No deletion descends through a reparse point (junction, symlink): every one outside $INSTDIR goes
+; through the walker VoicenRemoveEntry (one body; an installer and an un. instance).
+; The only other root is the literal pre-T-062 WebView2 profile %LOCALAPPDATA%\dev.voicen.app
+; (T-207, decisions #271, #345): removed by every install (NSIS_HOOK_POSTINSTALL) and by an
+; uninstall only when it removes the data ($VoicenPurgeData = 1); a locked remainder is left
+; silently and retried by the next install or uninstall.
 ; The Run value and the shortcuts are left to the stock template (removed unless /UPDATE).
 ;
 ; Toast activator (T-213, invariant I7 in docs/decisions/installer.md): every install, silent and
@@ -50,8 +55,10 @@ Var VoicenScratch
 ; already. x64.nsh brings it in too; the include is guarded, so this repeats nothing.
 !include LogicLib.nsh
 
-; The one way anything under the data folder is removed (T-156, decisions #197). Takes a path on
-; the stack and pops it; keeps every register. The attributes are the entry's own (GetFileAttributes
+; The one way anything outside $INSTDIR is removed (T-156, decisions #197; T-207, decisions #345).
+; One body, inserted twice right below: VoicenRemoveEntry for the installer and un.VoicenRemoveEntry
+; for the uninstaller (an install section cannot call an un. function). Takes a path on the stack
+; and pops it; keeps every register. The attributes are the entry's own (GetFileAttributes
 ; does not follow a link):
 ;   - invalid: nothing;
 ;   - no directory bit: Delete, which for a file symlink removes the link;
@@ -61,7 +68,8 @@ Var VoicenScratch
 ;     folder still holding something and so leaves it for the files-left check.
 ; NSIS's own recursive form of that removal follows junctions at any depth (3.11 util.c myDelete),
 ; so it is never used: the owned list of make check-nsis-fork holds the line below byte for byte.
-Function un.VoicenRemoveEntry
+!macro VoicenRemoveEntryFunction VOICEN_UN
+Function ${VOICEN_UN}VoicenRemoveEntry
   Exch $R0
   Push $R1
   Push $R2
@@ -80,7 +88,7 @@ Function un.VoicenRemoveEntry
         ${If} $R3 != "."
         ${AndIf} $R3 != ".."
           Push "$R0\$R3"
-          Call un.VoicenRemoveEntry
+          Call ${VOICEN_UN}VoicenRemoveEntry
         ${EndIf}
         FindNext $R2 $R3
       ${Loop}
@@ -93,6 +101,25 @@ Function un.VoicenRemoveEntry
   Pop $R1
   Pop $R0
 FunctionEnd
+!macroend
+!insertmacro VoicenRemoveEntryFunction ""
+!insertmacro VoicenRemoveEntryFunction "un."
+
+; The pre-T-062 WebView2 profile, the literal %LOCALAPPDATA%\dev.voicen.app (T-207, decisions #271,
+; #345), through the walker of the side given as VOICEN_UN ("" installer, "un." uninstaller); its
+; only root, never a pattern, so a sibling such as dev.voicen.app.keep is never matched. An empty
+; $LOCALAPPDATA would turn the path into "\dev.voicen.app", so nothing is removed then. A part that
+; cannot be removed (a locked file) stays without a message and the error flag is cleared, so the
+; run neither stops nor fails; the next install or uninstall tries again. Keeps every register;
+; leaves the shell context at current (per-user install: the context it already has).
+!macro VoicenRemoveLegacyWebView VOICEN_UN
+  SetShellVarContext current
+  ${If} $LOCALAPPDATA != ""
+    Push "$LOCALAPPDATA\dev.voicen.app"
+    Call ${VOICEN_UN}VoicenRemoveEntry
+  ${EndIf}
+  ClearErrors
+!macroend
 
 ; Every install records its language, silent ones included. The uninstaller's un.onInit runs
 ; MUI_UNGETLANGUAGE (installer.nsi): with no "Installer Language" value under
@@ -181,6 +208,9 @@ FunctionEnd
 !macro NSIS_HOOK_POSTINSTALL
   WriteRegStr ${MUI_LANGDLL_REGISTRY_ROOT} "${MUI_LANGDLL_REGISTRY_KEY}" "${MUI_LANGDLL_REGISTRY_VALUENAME}" $LANGUAGE
   !insertmacro VoicenToastActivator
+  ; Every install (silent, /P, /UPDATE, interactive), after CheckIfAppIsRunning closed the app; last,
+  ; so the shortcut paths above are read in the context the template set.
+  !insertmacro VoicenRemoveLegacyWebView ""
 !macroend
 
 ; The installer-ended note (T-024; invariant 5, docs/decisions/diagnostics-log.md): written to
@@ -369,5 +399,11 @@ FunctionEnd
         MessageBox MB_OK|MB_ICONEXCLAMATION "$(VoicenFilesLeft)" /SD IDOK
       ${EndIf}
     ${EndIf}
+  ${EndIf}
+
+  ; The pre-T-062 WebView2 profile goes with the data only (decisions #345 Q2), after the files-left
+  ; check, which does not count it.
+  ${If} $VoicenPurgeData = 1
+    !insertmacro VoicenRemoveLegacyWebView "un."
   ${EndIf}
 !macroend
