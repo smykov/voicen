@@ -147,7 +147,7 @@ test("refused: a file that ends inside the head, without a closing bracket", () 
 });
 
 test("refused: a byte-order mark before the head", () => {
-  assert.throws(() => readAcceptedList(`﻿${file(HEAD)}`), REFUSED);
+  assert.throws(() => readAcceptedList(`\uFEFF${file(HEAD)}`), REFUSED);
 });
 
 test("refused: a lone CR anywhere in the head", () => {
