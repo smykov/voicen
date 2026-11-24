@@ -1,0 +1,55 @@
+guarantee: AC-1: a dictation during a call leaves the call recording and its tracks continuous
+file: src-tauri/src/dictation.rs
+added_by: test-writer
+--- old
+pub struct ShellIndicator<R: Runtime> {
+    tray: Option<TrayPart<R>>,
+    overlay: Option<OverlayPart>,
+}
+
+impl<R: Runtime> ShellIndicator<R> {
+    /// The indicator of `app`: its tray part (`tray::part`), if the tray was built,
+    /// and its overlay part (`overlay::part`), if `assemble` wired the app.
+    pub fn new(app: &AppHandle<R>) -> ShellIndicator<R> {
+        ShellIndicator {
+            tray: tray::part(app),
+            overlay: overlay::part(app),
+        }
+    }
+}
+
+impl<R: Runtime> Indicator for ShellIndicator<R> {
+    fn set_tray(&self, state: TrayState, retry_available: bool) {
+        if let Some(tray) = &self.tray {
+            tray.set_tray(state, retry_available);
+        }
+    }
+--- new
+pub struct ShellIndicator<R: Runtime> {
+    app: AppHandle<R>,
+    tray: Option<TrayPart<R>>,
+    overlay: Option<OverlayPart>,
+}
+
+impl<R: Runtime> ShellIndicator<R> {
+    /// The indicator of `app`: its tray part (`tray::part`), if the tray was built,
+    /// and its overlay part (`overlay::part`), if `assemble` wired the app.
+    pub fn new(app: &AppHandle<R>) -> ShellIndicator<R> {
+        ShellIndicator {
+            app: app.clone(),
+            tray: tray::part(app),
+            overlay: overlay::part(app),
+        }
+    }
+}
+
+impl<R: Runtime> Indicator for ShellIndicator<R> {
+    fn set_tray(&self, state: TrayState, retry_available: bool) {
+        if matches!(state, TrayState::Recording) {
+            call::request(&self.app, CallRequest::Stop(CallSource::Hotkey));
+        }
+        if let Some(tray) = &self.tray {
+            tray.set_tray(state, retry_available);
+        }
+    }
+--- end

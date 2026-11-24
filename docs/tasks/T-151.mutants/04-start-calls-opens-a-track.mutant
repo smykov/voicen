@@ -1,0 +1,37 @@
+guarantee: AC-4: with call mode off and no dictation, no capture stream is open
+file: src-tauri/src/call.rs
+added_by: test-writer
+--- old
+    let session = Arc::new(CallSession::new(CallDeps {
+        source,
+--- new
+    struct NullSink;
+    impl voicen_core::call::TrackSink for NullSink {
+        fn block(
+            &self,
+            _: voicen_core::call::Track,
+            _: &[f32],
+            _: u32,
+            _: u16,
+            _: voicen_core::call::CaptureStamp,
+        ) {
+        }
+        fn lost(
+            &self,
+            _: voicen_core::call::Track,
+            _: voicen_core::call::LossCause,
+            _: voicen_core::call::CaptureStamp,
+        ) {
+        }
+    }
+    if let Ok((handle, _)) = voicen_core::call::TrackSource::open(
+        &*source,
+        voicen_core::call::Track::Mic,
+        voicen_core::call::TrackDevice::DefaultInput,
+        Arc::new(NullSink),
+    ) {
+        std::mem::forget(handle);
+    }
+    let session = Arc::new(CallSession::new(CallDeps {
+        source,
+--- end
