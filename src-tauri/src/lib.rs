@@ -38,6 +38,7 @@ pub mod local_models;
 pub mod locale;
 pub mod logs_folder;
 pub mod overlay;
+pub mod overlay_class;
 pub mod paths;
 pub mod settings_ipc;
 pub mod settings_window;

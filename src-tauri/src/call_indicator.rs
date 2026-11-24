@@ -22,7 +22,9 @@
 //!   Windows it then clears `WS_CAPTION` (tao keeps it on undecorated windows), writes the
 //!   tool-window bits (`WS_EX_TOOLWINDOW` set, `WS_EX_APPWINDOW` cleared), moves the hidden
 //!   window to its placement with a raw `SetWindowPos(SWP_NOACTIVATE)` and shows it once
-//!   with `ShowWindow(SW_SHOWNOACTIVATE)` ([`show_indicator`]). It is not click-through
+//!   with `ShowWindow(SW_SHOWNOACTIVATE)` ([`show_indicator`], through the shared
+//!   `overlay_class::show_no_activate`, T-247; every reducer answer runs through the shared
+//!   `overlay_class::execute`). It is not click-through
 //!   (Stop, Dismiss and the drag region take clicks). No tao setter touches it afterwards
 //!   (overlay.md §3). At the stop the window is destroyed and its webview closed (the
 //!   label is freed at once).
@@ -43,7 +45,6 @@
 //! - After each wake's window call returned, the thread stores its receipt ([`Settled`])
 //!   unless the wake left the phase `Destroying`; [`settled`] waits on it (a test seam).
 
-use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -61,6 +62,7 @@ use voicen_core::settings::IndicatorPosition;
 
 use crate::call::{self, CallRequest};
 use crate::diag::io_os_code;
+use crate::overlay_class::{self, overlay_failed, OverlayClassThread};
 
 /// The label of the one indicator window; `capabilities/call-indicator.json` is granted
 /// to it only.
@@ -392,88 +394,63 @@ struct IndicatorThread<R: Runtime> {
     last_tick: Option<Instant>,
 }
 
-impl<R: Runtime> IndicatorThread<R> {
-    fn warn(&self, os_code: Option<i32>) {
-        // The kind and the OS code only: no state, no error text (#45, FR-20).
-        self.log.write(LogEvent::Warning {
-            kind: WarningKind::OverlayFailed,
-            os_code,
-        });
+impl<R: Runtime> OverlayClassThread<R> for IndicatorThread<R> {
+    const LABEL: &'static str = LABEL;
+
+    fn app(&self) -> &AppHandle<R> {
+        &self.app
     }
 
-    /// Runs one reducer answer and returns whether it failed (each failure writes one
-    /// `overlay_failed` line). A panic inside a window call (where panics unwind: tests,
-    /// dev) is caught and written like a failure; release aborts.
+    fn log(&self) -> &Log {
+        &self.log
+    }
+
+    fn lifecycle(&mut self) -> &mut OverlayLifecycle {
+        &mut self.lifecycle
+    }
+
+    fn window(&mut self) -> &mut Option<WebviewWindow<R>> {
+        &mut self.window
+    }
+
+    fn build(&mut self) -> tauri::Result<WebviewWindow<R>> {
+        self.build_window()
+    }
+
+    fn emit(&self) -> tauri::Result<()> {
+        self.app.emit_to(LABEL, STATE_EVENT, self.state())
+    }
+
+    /// After the window's destroy, its webview is closed too: that frees the label in
+    /// tauri's manager at once (`Webview::close`), on a runtime whose destroy posts no
+    /// `Destroyed` (the mock) as on Wry, where the queued close finds the window gone and
+    /// the window's own `Destroyed` follows. A failed destroy closes nothing, so the label
+    /// stays until a real `Destroyed`.
+    fn destroy(window: &WebviewWindow<R>) -> tauri::Result<()> {
+        window
+            .destroy()
+            .and_then(|()| AsRef::<tauri::Webview<R>>::as_ref(window).close())
+    }
+
+    /// The thread's placement belongs to the window being destroyed.
+    fn on_destroy_start(&mut self) {
+        self.placed = None;
+    }
+
+    fn post_destroyed(&self, generation: u64) {
+        self.shared.post(|m| m.destroyed.push(generation));
+    }
+}
+
+impl<R: Runtime> IndicatorThread<R> {
+    fn warn(&self, os_code: Option<i32>) {
+        overlay_failed(&self.log, os_code);
+    }
+
+    /// Runs one reducer answer through the overlay-class executor
+    /// ([`overlay_class::execute`]) and returns whether it failed.
     fn execute(&mut self, action: WindowAction) -> bool {
-        match action {
-            WindowAction::Nothing => false,
-            WindowAction::Build(_) => {
-                let built = std::panic::catch_unwind(AssertUnwindSafe(|| self.build()));
-                match built {
-                    Ok(Ok(window)) => {
-                        self.window = Some(window);
-                        false
-                    }
-                    Ok(Err(err)) => {
-                        self.warn(io_os_code(&err));
-                        self.lifecycle.on_build_failed();
-                        true
-                    }
-                    Err(_panic) => {
-                        self.warn(None);
-                        self.lifecycle.on_build_failed();
-                        true
-                    }
-                }
-            }
-            WindowAction::Emit(_) => {
-                let emitted = std::panic::catch_unwind(AssertUnwindSafe(|| self.emit_state()));
-                match emitted {
-                    Ok(Ok(())) => false,
-                    Ok(Err(err)) => {
-                        self.warn(io_os_code(&err));
-                        true
-                    }
-                    Err(_panic) => {
-                        self.warn(None);
-                        true
-                    }
-                }
-            }
-            WindowAction::Destroy => {
-                let window = self.window.take();
-                self.placed = None;
-                // After the window's destroy, its webview is closed too: that frees the
-                // label in tauri's manager at once (`Webview::close`), on a runtime whose
-                // destroy posts no `Destroyed` (the mock) as on Wry, where the queued close
-                // finds the window gone and the window's own `Destroyed` follows. A failed
-                // destroy closes nothing, so the label stays until a real `Destroyed`.
-                let destroyed = std::panic::catch_unwind(AssertUnwindSafe(|| match &window {
-                    Some(window) => window
-                        .destroy()
-                        .and_then(|()| AsRef::<tauri::Webview<R>>::as_ref(window).close()),
-                    None => Ok(()),
-                }));
-                let failed = match destroyed {
-                    Ok(Ok(())) => None,
-                    Ok(Err(err)) => Some(io_os_code(&err)),
-                    Err(_panic) => Some(None),
-                };
-                if let Some(os_code) = failed {
-                    self.warn(os_code);
-                    // A window already gone may post no Destroyed: hand the reducer one
-                    // for this generation so the next call can build again; one that
-                    // still exists stays until its own Destroyed.
-                    if self.app.get_webview_window(LABEL).is_none() {
-                        let generation = self.lifecycle.generation();
-                        self.shared.post(|m| m.destroyed.push(generation));
-                    } else {
-                        self.window = window;
-                    }
-                }
-                failed.is_some()
-            }
-        }
+        overlay_class::execute(self, action)
     }
 
     /// The mailbox's newest state; idle in the settings language before the first.
@@ -481,10 +458,6 @@ impl<R: Runtime> IndicatorThread<R> {
         self.shared
             .newest()
             .unwrap_or_else(|| IndicatorState::idle(self.service.snapshot().ui_language))
-    }
-
-    fn emit_state(&self) -> tauri::Result<()> {
-        self.app.emit_to(LABEL, STATE_EVENT, self.state())
     }
 
     /// Emits `tick` to a live window; a failure writes one line and drops it.
@@ -503,7 +476,7 @@ impl<R: Runtime> IndicatorThread<R> {
     /// finish loading (at most [`PAGE_LOAD_WAIT`], so it never shows a blank page), places
     /// and shows it without activation ([`IndicatorThread::reveal`]) and emits the current
     /// state (a page not listening yet catches up through `call_indicator_state`).
-    fn build(&mut self) -> tauri::Result<WebviewWindow<R>> {
+    fn build_window(&mut self) -> tauri::Result<WebviewWindow<R>> {
         let generation = self.lifecycle.generation();
         let loads = Arc::clone(&self.shared);
         let window = WebviewWindowBuilder::new(&self.app, LABEL, WebviewUrl::App(URL.into()))
@@ -543,20 +516,19 @@ impl<R: Runtime> IndicatorThread<R> {
     }
 
     /// Places and shows the freshly built, hidden `window` through [`show_indicator`],
-    /// the one place that shows the indicator; returns where it was placed. A handle that
-    /// cannot be read leaves the window hidden and writes one `overlay_failed` line.
+    /// the one place that shows the indicator, with the overlay-class
+    /// [`overlay_class::reveal_with`] and the real handle reader; returns where it was
+    /// placed. A handle that cannot be read leaves the window hidden and writes one
+    /// `overlay_failed` line.
     #[cfg(windows)]
     fn reveal(&self, window: &WebviewWindow<R>) -> Option<IndicatorPosition> {
-        match window.hwnd() {
-            Ok(hwnd) => {
-                let stored = self.service.snapshot().calls.indicator_position;
-                show_indicator(hwnd, stored, &self.log)
-            }
-            Err(err) => {
-                self.warn(io_os_code(&err));
-                None
-            }
-        }
+        let stored = self.service.snapshot().calls.indicator_position;
+        overlay_class::reveal_with(
+            window,
+            WebviewWindow::hwnd,
+            |hwnd| show_indicator(hwnd, stored, &self.log),
+            &self.log,
+        )
     }
 
     /// The shell runs only on Windows; elsewhere the window stays hidden.
@@ -623,18 +595,28 @@ fn clamp_window<R: Runtime>(
     })
 }
 
+/// The indicator's styles: a tool window (`WS_EX_TOOLWINDOW` set, `WS_EX_APPWINDOW`
+/// cleared; the creation's `WS_EX_NOACTIVATE | WS_EX_TOPMOST` stay; no click-through
+/// bits), and the class's `WS_CAPTION` cleared.
+#[cfg(windows)]
+const TOOL_WINDOW: overlay_class::StyleSpec = overlay_class::StyleSpec::new(
+    windows::Win32::UI::WindowsAndMessaging::WS_EX_TOOLWINDOW,
+    windows::Win32::UI::WindowsAndMessaging::WS_EX_APPWINDOW,
+);
+
 /// Writes the tool-window bits on the hidden indicator window `hwnd`, moves it to its
-/// placement and shows it without activating it (T-130). Runs on the `call-indicator`
-/// thread and makes no tao call:
+/// placement and shows it without activating it (T-130), through the overlay-class
+/// [`overlay_class::show_no_activate`] (T-247). Runs on the `call-indicator` thread and
+/// makes no tao call:
 ///
 /// 1. clears `WS_CAPTION` in `GWL_STYLE` (tao sets it even without decorations), reads
 ///    `GWL_EXSTYLE`, ORs in `WS_EX_TOOLWINDOW` and clears `WS_EX_APPWINDOW` (the
 ///    creation's `WS_EX_NOACTIVATE | WS_EX_TOPMOST` stay; no click-through bits);
 /// 2. writes it with `SetWindowLongPtrW` and applies it with `SetWindowPos(SWP_FRAMECHANGED
 ///    | SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER)`;
-/// 3. reads the window's size and the monitor work areas, places it with core's
-///    `place_indicator(stored, ..)` and moves it there with `SetWindowPos(SWP_NOACTIVATE |
-///    SWP_NOSIZE | SWP_NOZORDER)`;
+/// 3. only when 1-2 succeeded: reads the window's size and the monitor work areas, places
+///    it with core's `place_indicator(stored, ..)` and moves it there with
+///    `SetWindowPos(SWP_NOACTIVATE | SWP_NOSIZE | SWP_NOZORDER)`;
 /// 4. shows it with `ShowWindow(SW_SHOWNOACTIVATE)`.
 ///
 /// Returns the placement, or `None` when it could not be made. On the first failure it
@@ -646,156 +628,54 @@ pub fn show_indicator(
     stored: Option<IndicatorPosition>,
     log: &Log,
 ) -> Option<IndicatorPosition> {
-    use voicen_core::call::indicator::place_indicator;
-    use windows::Win32::UI::WindowsAndMessaging::{
-        IsWindow, SetWindowPos, ShowWindow, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
-        SW_SHOWNOACTIVATE,
-    };
-
-    /// Steps 1-3; `Err` carries the code of the first failure.
-    fn prepare(
-        hwnd: windows::Win32::Foundation::HWND,
-        stored: Option<IndicatorPosition>,
-    ) -> Result<IndicatorPosition, Option<i32>> {
-        win32::restyle(hwnd)?;
-        let rect = win32::window_rect(hwnd).ok_or_else(win32::last_error)?;
-        let size = (rect.right - rect.left, rect.bottom - rect.top);
-        let areas = win32::work_areas();
-        if areas.is_empty() {
-            return Err(None);
-        }
-        let at = place_indicator(stored, size, &areas);
-        // SAFETY: any handle; no size, z-order change or activation.
-        unsafe {
-            SetWindowPos(
-                hwnd,
-                None,
-                at.x,
-                at.y,
-                0,
-                0,
-                SWP_NOACTIVATE | SWP_NOSIZE | SWP_NOZORDER,
-            )
-        }
-        .map_err(|err| win32::win32_code(&err))?;
-        Ok(at)
-    }
-
-    let prepared = prepare(hwnd, stored);
-
-    // SAFETY: any handle; `IsWindow` only answers whether it names a window.
-    if unsafe { IsWindow(Some(hwnd)) }.as_bool() {
-        // SAFETY: `hwnd` names a window; the return is the previous visibility, not an
-        // error. `SW_SHOWNOACTIVATE` never activates it.
-        let _was_visible = unsafe { ShowWindow(hwnd, SW_SHOWNOACTIVATE) };
-    }
-
-    match prepared {
-        Ok(at) => Some(at),
-        Err(os_code) => {
-            // The kind and the OS code only: no handle, no error text (#45, FR-20).
-            log.write(LogEvent::Warning {
-                kind: WarningKind::OverlayFailed,
-                os_code,
-            });
-            None
-        }
-    }
+    overlay_class::show_no_activate(hwnd, &TOOL_WINDOW, |hwnd| place(hwnd, stored), log)
 }
 
-/// Raw Win32 reads and writes of the indicator thread (no tao call, no main-thread
-/// round trip of tauri's).
+/// Step 3 of [`show_indicator`]; `Err` carries the code of the first failure.
+#[cfg(windows)]
+fn place(
+    hwnd: windows::Win32::Foundation::HWND,
+    stored: Option<IndicatorPosition>,
+) -> Result<IndicatorPosition, Option<i32>> {
+    use voicen_core::call::indicator::place_indicator;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SetWindowPos, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
+    };
+
+    let rect = win32::window_rect(hwnd).ok_or_else(overlay_class::last_error)?;
+    let size = (rect.right - rect.left, rect.bottom - rect.top);
+    let areas = win32::work_areas();
+    if areas.is_empty() {
+        return Err(None);
+    }
+    let at = place_indicator(stored, size, &areas);
+    // SAFETY: any handle; no size, z-order change or activation.
+    unsafe {
+        SetWindowPos(
+            hwnd,
+            None,
+            at.x,
+            at.y,
+            0,
+            0,
+            SWP_NOACTIVATE | SWP_NOSIZE | SWP_NOZORDER,
+        )
+    }
+    .map_err(|err| overlay_class::win32_code(&err))?;
+    Ok(at)
+}
+
+/// Raw Win32 reads of the indicator's placement (no tao call, no main-thread round trip of
+/// tauri's).
 #[cfg(windows)]
 mod win32 {
     use voicen_core::call::indicator::WorkArea;
     use windows::core::BOOL;
-    use windows::Win32::Foundation::{GetLastError, SetLastError, HWND, LPARAM, RECT, WIN32_ERROR};
+    use windows::Win32::Foundation::{HWND, LPARAM, RECT};
     use windows::Win32::Graphics::Gdi::{
         EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO,
     };
-    use windows::Win32::UI::WindowsAndMessaging::{
-        GetWindowLongPtrW, GetWindowRect, SetWindowLongPtrW, SetWindowPos, GWL_EXSTYLE, GWL_STYLE,
-        MONITORINFOF_PRIMARY, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-        SWP_NOZORDER, WS_CAPTION, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
-    };
-
-    /// The calling thread's last error as a log code; `None` when it is 0.
-    pub(super) fn last_error() -> Option<i32> {
-        // SAFETY: reads the calling thread's last-error value.
-        let WIN32_ERROR(code) = unsafe { GetLastError() };
-        i32::try_from(code).ok().filter(|code| *code != 0)
-    }
-
-    /// The Win32 code inside a `windows` error (an `HRESULT_FROM_WIN32`); `None` for any
-    /// other `HRESULT`.
-    pub(super) fn win32_code(err: &windows::core::Error) -> Option<i32> {
-        let hresult = err.code().0 as u32;
-        ((hresult >> 16) & 0x1FFF == 7)
-            .then_some((hresult & 0xFFFF) as i32)
-            .filter(|code| *code != 0)
-    }
-
-    /// `WS_CAPTION` cleared, `WS_EX_TOOLWINDOW` set and `WS_EX_APPWINDOW` cleared, applied
-    /// with a frame change that neither moves, sizes, reorders nor activates the window.
-    pub(super) fn restyle(hwnd: HWND) -> Result<(), Option<i32>> {
-        // tao writes `WS_CAPTION` on every top-level window, `decorations(false)` included
-        // (tao 0.37.1 window_state.rs `to_window_styles`; the frame is removed only through
-        // its `WM_NCCALCSIZE`): clear it so the window is undecorated in its style too. The
-        // drag's `WM_NCLBUTTONDOWN(HTCAPTION)` move loop needs no caption bit.
-        // SAFETY: clears the calling thread's last error.
-        unsafe { SetLastError(WIN32_ERROR(0)) };
-        // SAFETY: any handle; a stale one returns 0 with the last error set.
-        let style = unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) };
-        if style == 0 {
-            if let Some(code) = last_error() {
-                return Err(Some(code));
-            }
-        }
-        let wanted = style & !(WS_CAPTION.0 as isize);
-        if wanted != style {
-            // SAFETY: clears the calling thread's last error.
-            unsafe { SetLastError(WIN32_ERROR(0)) };
-            // SAFETY: any handle; a failure returns 0 with the last error set.
-            let previous = unsafe { SetWindowLongPtrW(hwnd, GWL_STYLE, wanted) };
-            if previous == 0 {
-                if let Some(code) = last_error() {
-                    return Err(Some(code));
-                }
-            }
-        }
-        // SAFETY: clears the calling thread's last error.
-        unsafe { SetLastError(WIN32_ERROR(0)) };
-        // SAFETY: any handle; a stale one returns 0 with the last error set.
-        let style = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) };
-        if style == 0 {
-            if let Some(code) = last_error() {
-                return Err(Some(code));
-            }
-        }
-        let wanted = (style | WS_EX_TOOLWINDOW.0 as isize) & !(WS_EX_APPWINDOW.0 as isize);
-        // SAFETY: clears the calling thread's last error.
-        unsafe { SetLastError(WIN32_ERROR(0)) };
-        // SAFETY: any handle; a failure returns 0 with the last error set.
-        let previous = unsafe { SetWindowLongPtrW(hwnd, GWL_EXSTYLE, wanted) };
-        if previous == 0 {
-            if let Some(code) = last_error() {
-                return Err(Some(code));
-            }
-        }
-        // SAFETY: any handle; no move, size, z-order change or activation.
-        unsafe {
-            SetWindowPos(
-                hwnd,
-                None,
-                0,
-                0,
-                0,
-                0,
-                SWP_FRAMECHANGED | SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER,
-            )
-        }
-        .map_err(|err| win32_code(&err))
-    }
+    use windows::Win32::UI::WindowsAndMessaging::{GetWindowRect, MONITORINFOF_PRIMARY};
 
     /// The window's rect in physical screen pixels; `None` for a stale handle.
     pub(super) fn window_rect(hwnd: HWND) -> Option<RECT> {

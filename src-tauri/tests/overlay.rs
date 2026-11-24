@@ -84,8 +84,9 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetAncestor, GetWindow, GetWindowLongPtrW, GetWindowRect,
     GetWindowThreadProcessId, IsWindow, IsWindowVisible, SetWindowPos, ShowWindow, WindowFromPoint,
-    GA_ROOT, GWL_EXSTYLE, GW_OWNER, SWP_NOACTIVATE, SWP_NOZORDER, SW_HIDE, WS_EX_APPWINDOW,
-    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
+    GA_ROOT, GWL_EXSTYLE, GWL_STYLE, GW_OWNER, SWP_NOACTIVATE, SWP_NOZORDER, SW_HIDE, WS_CAPTION,
+    WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    WS_EX_TRANSPARENT,
 };
 
 /// The overlay window's label (spec 001 contracts/ipc.md: the page at `/overlay`
@@ -366,6 +367,12 @@ fn ex_style(raw: isize) -> u32 {
     value as u32
 }
 
+fn style(raw: isize) -> u32 {
+    // SAFETY: GetWindowLongPtrW reads the window's style; no message is sent.
+    let value = unsafe { GetWindowLongPtrW(to_hwnd(raw), GWL_STYLE) };
+    value as u32
+}
+
 /// The raw facts of the overlay window at one moment.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct Facts {
@@ -382,6 +389,9 @@ struct Facts {
     appwindow: bool,
     owned: bool,
     top_level: bool,
+    /// T-247: tao sets `WS_CAPTION` on every top-level window; the shared overlay-class
+    /// helper clears it (decisions #347), as it does for the call indicator.
+    captioned: bool,
 }
 
 fn facts(raw: isize) -> Facts {
@@ -399,6 +409,7 @@ fn facts(raw: isize) -> Facts {
         // SAFETY: both calls only read the window's relations; no message is sent.
         owned: unsafe { GetWindow(hwnd, GW_OWNER) }.is_ok_and(|o| !o.is_invalid()),
         top_level: unsafe { GetAncestor(hwnd, GA_ROOT) } == hwnd,
+        captioned: style(raw) & WS_CAPTION.0 == WS_CAPTION.0,
     }
 }
 
@@ -430,6 +441,9 @@ fn shape_errors(f: &Facts) -> Vec<&'static str> {
     }
     if !f.top_level {
         missing.push("not top-level");
+    }
+    if f.captioned {
+        missing.push("WS_CAPTION set (decorated; the shared helper clears it, T-247)");
     }
     missing
 }
