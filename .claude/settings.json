@@ -6,7 +6,8 @@
   "permissions": {
     "allow": [
       "Bash(scripts/tw-wip-push)",
-      "Bash(scripts/tw-wip-push *)"
+      "Bash(scripts/tw-wip-push *)",
+      "Bash(scripts/tw-task-push *)"
     ],
     "deny": [
       "Bash(git checkout -- *)",
