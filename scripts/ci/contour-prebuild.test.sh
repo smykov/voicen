@@ -161,9 +161,9 @@ cp .teamwright/config.yml "$fxt/.teamwright/config.yml"
 stub="$tmp/docker-stub"
 cat > "$stub" <<'EOF'
 #!/usr/bin/env bash
-# Records one line of argv per call; STUB_MODE: ok (exit 0), fail (exit 1), sleep (sleeps; a kill ends it).
+# Records one line of argv per call; STUB_MODE: ok (exit 0), fail (exit 1, also for rm), sleep (sleeps; a kill ends it).
 printf '%s\n' "$*" >> "$STUB_LOG"
-[ "${1:-}" = rm ] && exit 0
+[ "${1:-}" = rm ] && [ "${STUB_MODE:-ok}" != fail ] && exit 0
 case "${STUB_MODE:-ok}" in
   fail) exit 1 ;;
   sleep) exec sleep 30 ;;
