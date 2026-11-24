@@ -67,7 +67,6 @@ use voicen_core::secrets::{FakeCredentialStore, KeySlot};
 use voicen_core::settings::{defaults, Microphone, Settings};
 use voicen_core::test_support::fixtures::speech_3s;
 use voicen_core::test_support::TempDir;
-use voicen_core::timeouts::Timeouts;
 use voicen_core::vad::{SpeechSpan, SpeechSpans, VadError};
 
 // ---- the planted values ---------------------------------------------------------------------
@@ -676,7 +675,8 @@ impl Fx {
             engine,
             &TranscribeRequest {
                 language: None,
-                timeouts: Timeouts::from_settings(&defaults(None).timeouts),
+                // The fake engine never reaches a timer.
+                timeouts: common::deadlines::production_defaults(),
             },
             EngineRef::new("api", "m1"),
             PassSources {
