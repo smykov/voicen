@@ -1,0 +1,9 @@
+guarantee: Acceptance 4 / data loss: the start-up recover never marks a call this process is recording as recovered
+file: crates/voicen-core/src/call/storage.rs
+added_by: task-validator round 1
+test: cargo test -j 2 -p voicen-core --test call_recovery recover_skips_the_active_call_and_only_the_active_call_lists_as_recording
+--- old
+                CallState::Recording if !self.is_active(&dir) => {
+--- new
+                CallState::Recording => {
+--- end
