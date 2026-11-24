@@ -11,7 +11,9 @@
 //! the store is managed as
 //! [`PendingAudio`] for the `RunEvent::Exit` cleanup), the given notifier
 //! ([`start_dictation_with`]: `run()` passes the process's one `win::toast::ShellNotifier`,
-//! T-210, which the call part shares, T-128) and [`SettingsRequests`];
+//! T-210, which the call part shares, T-128), [`SettingsRequests`] and the app's
+//! transcript-history sink (`history::transcript_sink`, T-022: the managed recorder,
+//! or one that keeps nothing when the app has no history part);
 //! manages it as
 //! `Arc<DictationSession>` (the type the tray's menu-open handler looks up),
 //! starts the hotkey thread for the settings' hotkey and attaches it to the
@@ -196,6 +198,7 @@ pub fn start_dictation_with<R: Runtime>(
             temp_audio,
             observer: Arc::new(LogObserver::new(Arc::clone(&log))),
             post_processor: Arc::new(ChatPostProcessor::new()),
+            transcript_sink: crate::history::transcript_sink(app),
         },
         engine_factory,
         audio,

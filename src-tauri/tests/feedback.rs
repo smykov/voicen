@@ -434,6 +434,7 @@ fn start_session(
             temp_audio: Arc::new(FakeTempAudioStore::new()),
             observer: Arc::new(RecordingObserver::new()),
             post_processor: Arc::new(PassThrough),
+            transcript_sink: Arc::new(voicen_core::pipeline::DiscardTranscripts),
         },
         engine_factory,
         audio,

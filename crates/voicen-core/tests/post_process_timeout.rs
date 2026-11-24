@@ -207,6 +207,7 @@ fn dictate(settings: Settings) -> Run {
         temp_audio: Arc::new(FakeTempAudioStore::new()),
         observer: observer.clone(),
         post_processor: Arc::new(ChatPostProcessor::new()),
+        transcript_sink: Arc::new(voicen_core::pipeline::DiscardTranscripts),
     });
     let mut ctrl = RecordingController::<PressContext>::new();
     let t0 = ago(Duration::from_secs(4));

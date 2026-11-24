@@ -167,6 +167,7 @@ fn dictate_with(
         temp_audio: Arc::new(FakeTempAudioStore::new()),
         observer: observer.clone(),
         post_processor,
+        transcript_sink: Arc::new(voicen_core::pipeline::DiscardTranscripts),
     };
     let pipeline = Pipeline::with_timeouts(deps, timeouts);
     let mut ctrl = RecordingController::<PressContext>::new();

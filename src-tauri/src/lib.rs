@@ -32,6 +32,7 @@ pub mod call;
 pub mod credentials;
 pub mod diag;
 pub mod dictation;
+pub mod history;
 pub mod local_models;
 pub mod locale;
 pub mod logs_folder;
@@ -67,7 +68,11 @@ fn commands<R: Runtime>(builder: Builder<R>) -> Builder<R> {
         call::calls_get,
         call::calls_copy_markdown,
         call::calls_export,
-        call::calls_open_folder
+        call::calls_open_folder,
+        history::history_get,
+        history::history_copy,
+        history::history_clear,
+        settings_window::settings_open
     ])
 }
 
@@ -556,6 +561,11 @@ pub fn run() {
     // The one clipboard writer of the process (T-142, P-011): the dictation and the Calls
     // window's copy share this instance.
     let clipboard = release_clipboard();
+    // The transcript history (T-022), before the dictation: the session's pipeline takes
+    // its recorder as the `TranscriptSink` (`history::transcript_sink`). Its file is in the
+    // one data dir; copy uses the one clipboard writer. A failed start is logged where it
+    // failed, if at all, and the app runs on without a history (nothing is recorded).
+    let _ = history::start_history(app.handle(), paths::data_dir(), Arc::clone(&clipboard));
     // The one detector load (T-139): one half to dictation, one to the call pass worker.
     let (detector, spans) = release_detector(app.handle());
     let call_credentials = Arc::clone(&credentials);

@@ -20,6 +20,7 @@ use crate::events::{
     DictationEvent, OutcomeCode, PipelineObserver, PostProcessResult, PostProcessTrace, WarningCode,
 };
 use crate::failure::FailureReason;
+use crate::history::EngineLabel;
 use crate::i18n;
 use crate::local_models::residency::Warmth;
 use crate::platform::{Clipboard, ClipboardError, Paster, PendingId, StartWindow, TempAudioStore};
@@ -56,6 +57,30 @@ pub struct PipelineDeps {
     pub temp_audio: Arc<dyn TempAudioStore>,
     pub observer: Arc<dyn PipelineObserver>,
     pub post_processor: Arc<dyn PostProcessor>,
+    /// Where a delivered text goes besides the clipboard (spec 005, T-022): the
+    /// history's `HistoryRecorder` in the app. Required, so no wiring can forget it.
+    pub transcript_sink: Arc<dyn TranscriptSink>,
+}
+
+/// The port a delivered final text takes into the transcript history (spec 005 FR-001,
+/// T-022). [`Pipeline`] calls it exactly once per job whose text was delivered (pasted,
+/// copied only, or copied for a manual paste), after the delivery, with the text as
+/// delivered (post-processed, or raw when the stage was off or skipped) and the label
+/// of the job's engine. A job that failed, found no speech, could not write the
+/// clipboard or was cancelled never reaches it. It is not a `PipelineObserver`: its
+/// text never reaches the log (FR-20). It must not fail or block the job.
+pub trait TranscriptSink: Send + Sync {
+    fn delivered(&self, text: &str, engine: EngineLabel);
+}
+
+/// A sink that keeps nothing, for tests whose subject is not the history.
+#[cfg(any(test, feature = "test-fakes"))]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DiscardTranscripts;
+
+#[cfg(any(test, feature = "test-fakes"))]
+impl TranscriptSink for DiscardTranscripts {
+    fn delivered(&self, _text: &str, _engine: EngineLabel) {}
 }
 
 /// How a job ended, for `RecordingController::job_finished`, and the pending
@@ -449,6 +474,12 @@ impl Pipeline {
                         if let Some(id) = job.retry_of {
                             self.drop_pending(id);
                         }
+                        // The one entry into the history (T-022): once, after the
+                        // delivery, with the delivered text. `EngineKind::None` never
+                        // gets here (`engine_for` refuses it).
+                        if let Some(engine) = EngineLabel::of(job.settings) {
+                            self.deps.transcript_sink.delivered(&text, engine);
+                        }
                         let end = match skipped {
                             Some(reason) => JobEnd::DeliveredSkipped {
                                 reason,
@@ -688,6 +719,7 @@ mod tests {
             temp_audio: f.store.clone(),
             observer: f.observer.clone(),
             post_processor,
+            transcript_sink: Arc::new(DiscardTranscripts),
         }
     }
 

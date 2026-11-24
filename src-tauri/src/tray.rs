@@ -22,7 +22,8 @@
 //!   `logs_folder::request` (its own thread, T-071); "Exit" calls
 //!   `AppHandle::exit(0)`, the only user exit. "Record" and "Stop" post a
 //!   `call::CallRequest` to the call worker (T-128; nothing without a call part) and
-//!   "Calls" calls `call::open_calls`; "Record" also rebuilds the menu, because muda
+//!   "Calls" calls `call::open_calls`, "History" `history::open_history` (T-022); "Record"
+//!   also rebuilds the menu, because muda
 //!   flips a check item's native mark on a click and only the table may decide it
 //!   (decision #223).
 //! - Only tauri keeps the `TrayIcon` (in its resources), so tauri's exit cleanup
@@ -49,6 +50,7 @@ use voicen_core::tray::{self as table, TrayAction, TrayIconKind, TrayRow};
 
 use crate::call::{self, CallRequest};
 use crate::diag::io_os_code;
+use crate::history;
 use crate::logs_folder;
 use crate::settings_window::{self, OpenTarget, Receipt};
 
@@ -558,6 +560,8 @@ pub fn live_menu<R: Runtime>(app: &AppHandle<R>) -> Option<Menu<R>> {
 /// call worker reads from the session; `CallStop` posts `CallRequest::Stop(Tray)`;
 /// `OpenCalls` calls `call::open_calls(app, None)` (posts to the Calls window's opener
 /// thread and returns at once). Without a call part the posts do nothing.
+/// `OpenHistory` calls `history::open_history(app)` (posts to the History window's opener
+/// thread and returns at once; T-022); without a history part it does nothing.
 /// `Retry` stamps the click and runs `DictationSession::retry(at, None)` on another
 /// thread (T-210).
 pub fn on_menu_event<R: Runtime>(app: &AppHandle<R>, event: MenuEvent) {
@@ -574,6 +578,7 @@ pub fn on_menu_event<R: Runtime>(app: &AppHandle<R>, event: MenuEvent) {
         Some(TrayAction::OpenSettings) => {
             let _ = settings_window::request(app, OpenTarget::Front);
         }
+        Some(TrayAction::OpenHistory) => history::open_history(app),
         Some(TrayAction::OpenLogs) => logs_folder::request(app),
         Some(TrayAction::Retry) => retry(app),
         Some(TrayAction::Exit) => app.exit(0),

@@ -598,6 +598,8 @@ pub fn check_closed(line: &Line) -> Result<(), String> {
         "transcript_invalid" => &["rule", "segment"],
         // T-102: the start line naming the detector the gate holds.
         "vad" => &["detector"],
+        // T-022: a history disk error, the op and a closed kind only.
+        "history_failed" => &["op", "kind"],
         other => return Err(format!("unknown head {other:?} in {:?}", line.raw)),
     };
     for k in required {
@@ -681,6 +683,8 @@ pub fn check_closed(line: &Line) -> Result<(), String> {
             ("vad_fallback", "cause") => one_of(k, v, &["unavailable", "error"])?,
             ("transcript_invalid", "rule") => one_of(k, v, INVALID_RULES)?,
             ("transcript_invalid", "segment") => check(unsigned(v), k, v)?,
+            ("history_failed", "op") => one_of(k, v, HISTORY_OPS)?,
+            ("history_failed", "kind") => one_of(k, v, HISTORY_FAIL_KINDS)?,
             (head, key) => {
                 return Err(format!(
                     "unknown key {key:?} on a {head:?} line: {:?}",
@@ -828,6 +832,17 @@ pub const STOP_REASONS: &[&str] = &[
     "max_length",
     "low_disk",
     "storage_error",
+];
+/// T-022: the `history_failed` line's closed values.
+pub const HISTORY_OPS: &[&str] = &["load", "save", "delete"];
+pub const HISTORY_FAIL_KINDS: &[&str] = &[
+    "corrupt",
+    "not_found",
+    "permission_denied",
+    "not_a_directory",
+    "read_only",
+    "storage_full",
+    "other",
 ];
 pub const STORAGE_KINDS: &[&str] = &["write", "flush", "sync", "meta", "transcript", "low_disk"];
 pub const FINAL_STAGES: &[&str] = &["decode", "vad", "upload", "merge", "write"];

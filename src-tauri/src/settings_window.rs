@@ -278,3 +278,39 @@ pub fn on_ready<R: Runtime>(
         StartupAction::TrayOnly => None,
     }
 }
+
+/// Every settings tab, so `settings_open` maps back exactly the tokens
+/// `SettingsTab::as_str` gives.
+const TABS: [SettingsTab; 7] = [
+    SettingsTab::Engine,
+    SettingsTab::Recording,
+    SettingsTab::Output,
+    SettingsTab::PostProcessing,
+    SettingsTab::History,
+    SettingsTab::General,
+    SettingsTab::Calls,
+];
+
+/// The error of `settings_open`: a code only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct OpenSettingsError {
+    pub code: &'static str,
+}
+
+/// `settings_open { tab }` → `null` (T-022; spec 005 contracts/ipc.md: the History
+/// window's "Open settings" sends `tab: "history"`): posts
+/// [`request`]`(OpenTarget::Tab(tab, None))`, as T-006's `ShellRequests::open_settings`
+/// does, and returns at once (the receipt is dropped). A token that is not a
+/// `SettingsTab::as_str` is `{code: "unknown_tab"}` and posts nothing. Granted to the
+/// `history` label only (`capabilities/history.json`).
+#[tauri::command]
+pub fn settings_open<R: Runtime>(app: AppHandle<R>, tab: String) -> Result<(), OpenSettingsError> {
+    let tab = TABS
+        .into_iter()
+        .find(|known| known.as_str() == tab)
+        .ok_or(OpenSettingsError {
+            code: "unknown_tab",
+        })?;
+    let _ = request(&app, OpenTarget::Tab(tab, None));
+    Ok(())
+}

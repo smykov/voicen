@@ -548,3 +548,41 @@ fn settings_get_passes_from_the_history_window_and_stays_refused_from_other_and_
         "settings_get must pass from `history`"
     );
 }
+
+#[test]
+fn settings_open_passes_from_the_history_window_only() {
+    // T-022 (the History page's "Open settings" sends `settings_open { tab: "history" }`,
+    // pinned by e2e/history.spec.ts; Windows CI only): from `history` the command reaches its
+    // handler (a token outside the tabs answers the handler's own `unknown_tab`, so nothing
+    // opens), from `settings`, `overlay`, `calls` and `other` the ACL refuses it. Bite:
+    // `allow-settings-open` missing from capabilities/history.json, `settings_open` missing
+    // from APP_COMMANDS or `generate_handler!`, or granted to another label.
+    let _serial = serial();
+    let dir = TempDir::new();
+    let app = release_app(&load(dir.path()));
+    let history = window_at(&app, HISTORY, "history");
+    let args = json!({ "tab": "not-a-tab" });
+
+    let rejection = invoke(&history, "settings_open", args.clone())
+        .expect_err("an unknown tab is the handler's own error");
+    assert!(
+        !is_acl_refusal(&rejection),
+        "settings_open refused by the ACL for `{HISTORY}`: {rejection}"
+    );
+    assert!(
+        !is_not_found(&rejection),
+        "settings_open is not registered: {rejection}"
+    );
+    assert!(
+        rejection.to_string().contains("unknown_tab"),
+        "settings_open: {rejection}"
+    );
+
+    let settings = settings_window(&app);
+    let overlay = window_at(&app, OVERLAY, "overlay");
+    let calls = window_at(&app, CALLS, "calls");
+    let other = window_at(&app, OTHER, "history");
+    for window in [&settings, &overlay, &calls, &other] {
+        assert_refused(window, "settings_open", args.clone());
+    }
+}

@@ -128,6 +128,7 @@ fn builtin_dictations_with_post_processing_off_make_no_request() {
         temp_audio: Arc::new(FakeTempAudioStore::new()),
         observer: Arc::new(RecordingObserver::new()),
         post_processor: Arc::new(ChatPostProcessor::new()),
+        transcript_sink: Arc::new(voicen_core::pipeline::DiscardTranscripts),
     };
     let factory_residency = Arc::clone(&residency);
     let factory_store = Arc::clone(&store);

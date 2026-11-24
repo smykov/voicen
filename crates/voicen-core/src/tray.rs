@@ -18,7 +18,7 @@
 use crate::i18n::{self, MessageId};
 use crate::recording::TrayState;
 
-/// An item of the tray menu. Feature 005 adds History.
+/// An item of the tray menu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TrayAction {
     /// "Call" > "Record": the check item that starts or stops recording a call
@@ -31,6 +31,9 @@ pub enum TrayAction {
     /// "Settings": the settings window to the front on the tab it shows, or opened
     /// on Engine when none is open (OQ-11 Q2 default).
     OpenSettings,
+    /// "History": opens the transcript history window (spec 005 FR-005, FR-013;
+    /// T-022). The shell builds it on its own opener thread.
+    OpenHistory,
     /// "Open logs folder": the logs folder in Explorer, created when missing
     /// (T-071; spec 006 FR-017). The shell opens it off the main thread.
     OpenLogs,
@@ -51,6 +54,7 @@ impl TrayAction {
             TrayAction::CallStop => "call_stop",
             TrayAction::OpenCalls => "calls",
             TrayAction::OpenSettings => "settings",
+            TrayAction::OpenHistory => "history",
             TrayAction::OpenLogs => "open_logs",
             TrayAction::Retry => "retry",
             TrayAction::Exit => "exit",
@@ -69,6 +73,7 @@ impl TrayAction {
             TrayAction::CallStop => i18n::TRAY_CALL_STOP,
             TrayAction::OpenCalls => i18n::TRAY_CALLS,
             TrayAction::OpenSettings => i18n::TRAY_SETTINGS,
+            TrayAction::OpenHistory => i18n::TRAY_HISTORY,
             TrayAction::OpenLogs => i18n::TRAY_OPEN_LOGS,
             TrayAction::Retry => i18n::TRAY_RETRY_LAST,
             TrayAction::Exit => i18n::TRAY_EXIT,
@@ -78,11 +83,12 @@ impl TrayAction {
 
 /// Every action, so [`TrayAction::from_id`] maps back exactly the ids
 /// [`TrayAction::as_str`] gives (a new variant is added here and to `as_str`).
-const ALL: [TrayAction; 7] = [
+const ALL: [TrayAction; 8] = [
     TrayAction::CallRecord,
     TrayAction::CallStop,
     TrayAction::OpenCalls,
     TrayAction::OpenSettings,
+    TrayAction::OpenHistory,
     TrayAction::OpenLogs,
     TrayAction::Retry,
     TrayAction::Exit,
@@ -119,7 +125,7 @@ pub enum TrayRow {
 
 /// The menu rows, top to bottom (decision #197 D2, D3): "Call" > {"Record", checked
 /// iff `call_recording`; "Stop", enabled iff `call_recording`}, "Calls", Settings,
-/// Open logs folder, Retry (enabled, only while `retry_available`; T-007), Exit last.
+/// History (spec 005, T-022), Open logs folder, Retry (enabled, only while `retry_available`; T-007), Exit last.
 /// `retry_available` is the session's (the pending slot, dictation-session.md). Pure.
 pub fn menu(retry_available: bool, call_recording: bool) -> Vec<TrayRow> {
     let item = |action| TrayRow::Item {
@@ -143,6 +149,7 @@ pub fn menu(retry_available: bool, call_recording: bool) -> Vec<TrayRow> {
         },
         item(TrayAction::OpenCalls),
         item(TrayAction::OpenSettings),
+        item(TrayAction::OpenHistory),
         item(TrayAction::OpenLogs),
     ];
     if retry_available {
