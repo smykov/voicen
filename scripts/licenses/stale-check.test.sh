@@ -106,9 +106,21 @@ for p in $prereqs; do
   mutant "licenses-check without $p" "$p" "$lc_line" "licenses-check:$rest"
 done
 
+# `check` absent as a target, and `licenses-check` only as an order-only prerequisite (T-181 bite).
+mutant "check with no prerequisite at all" check "check: licenses-check" ""
+mutant "check has licenses-check only order-only" licenses-check "check: licenses-check" "check: | licenses-check"
+mutant "licenses-check has licenses-unit only order-only" licenses-unit "$lc_line" "licenses-check: | $prereqs"
+
 # --- cannot run is not a refusal ---
 dbc "$tmp/absent/Makefile"
 [ "$status" -eq 3 ] || fail "a missing Makefile: want exit 3; $(detail)"
+# make not on PATH: exit 3
+mkdir -p "$tmp/nomake"
+for t in dirname env grep; do ln -sf "$(command -v "$t")" "$tmp/nomake/$t"; done
+out="$(PATH="$tmp/nomake" "$BASH" "$script" --db-check "$db/ok/Makefile" 2>"$tmp/err.txt")"
+status=$?
+err="$(<"$tmp/err.txt")"
+[ "$status" -eq 3 ] || fail "make not on PATH: want exit 3; $(detail)"
 
 # --- the normal run lists every stale-db case ---
 for c in "$db"/*/; do

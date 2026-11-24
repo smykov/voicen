@@ -2,7 +2,7 @@ guarantee: T-094 r1#2: a byte-order mark before the head is refused
 file: scripts/licenses/accepted.mjs
 added_by: test-writer
 --- old
-  if (tomlText.startsWith("﻿")) throw refuse("a byte-order mark before the head");
+  if (tomlText.startsWith("\uFEFF")) throw refuse("a byte-order mark before the head");
 --- new
   if (false) throw refuse("a byte-order mark before the head");
 --- end

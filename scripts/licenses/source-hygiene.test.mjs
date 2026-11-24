@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 
 const DIR = fileURLToPath(new URL("./", import.meta.url));
 
-for (const name of ["accepted.mjs", "accepted.test.mjs"]) {
+for (const name of ["accepted.mjs", "accepted.test.mjs", "check.test.mjs"]) {
   test(`${name} holds no raw U+FEFF byte sequence`, () => {
     const bytes = readFileSync(DIR + name);
     assert.equal(bytes.indexOf(Buffer.from([0xef, 0xbb, 0xbf])), -1, `${name} has a raw byte-order mark; write \\uFEFF`);

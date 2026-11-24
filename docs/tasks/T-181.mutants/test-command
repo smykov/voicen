@@ -1,2 +1,2 @@
-# T-181: the licenses unit tests that are green today (the red ones need the developer's change)
-node --test scripts/licenses/check.test.mjs scripts/licenses/accepted.test.mjs
+# T-181: the licenses node tests that run in the ui image (stale-check.sh needs make: host bash, run by hand)
+node --test scripts/licenses/check.test.mjs scripts/licenses/accepted.test.mjs scripts/licenses/fixture-check.test.mjs scripts/licenses/source-hygiene.test.mjs

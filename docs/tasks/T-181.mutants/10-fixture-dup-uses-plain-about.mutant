@@ -1,0 +1,8 @@
+guarantee: T-094 r1#3 / I-5: cargo-about on about.toml plus a later top-level accepted must fail naming duplicate key (the duplicate run is handed the real about.toml, not the duplicate config)
+file: scripts/licenses/fixture-check.sh
+added_by: test-writer
+--- old
+--manifest-path licenses/fixtures/gpl/Cargo.toml -c "$dup" \
+--- new
+--manifest-path licenses/fixtures/gpl/Cargo.toml -c about.toml \
+--- end

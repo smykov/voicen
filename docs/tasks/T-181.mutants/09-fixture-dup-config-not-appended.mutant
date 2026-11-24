@@ -1,0 +1,8 @@
+guarantee: T-094 r1#3 / I-5: cargo-about on about.toml plus a later top-level accepted must fail naming duplicate key (the duplicate config is the plain about.toml (no second accepted))
+file: scripts/licenses/fixture-check.sh
+added_by: test-writer
+--- old
+{ cat about.toml && printf '%s\n' 'accepted = ["MIT"]'; } >"$dup"
+--- new
+{ cat about.toml; } >"$dup"
+--- end

@@ -223,7 +223,7 @@ test("check.mjs exits 2 and says about.toml is not in the owned shape for a head
 });
 
 test("check.mjs exits 2 for a byte-order mark before the head", (t) => {
-  const p = project(t, { aboutText: `﻿accepted = [\n    "MIT",\n]\n`, packages: [OK_PKG], manual: [OK_MANUAL] });
+  const p = project(t, { aboutText: `\uFEFFaccepted = [\n    "MIT",\n]\n`, packages: [OK_PKG], manual: [OK_MANUAL] });
   const r = run(p);
   assert.equal(r.status, 2, r.stderr);
   assert.match(r.stderr, /byte-order mark/);

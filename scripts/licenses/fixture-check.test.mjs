@@ -84,6 +84,10 @@ test("fixture-check fails (1) naming `duplicate key` when cargo-about accepts th
   const x = runIn(t, "passes");
   assert.equal(x.r.status, 1, detail(x));
   assert.match(x.r.stderr, /duplicate key/);
+  // The refusal is named as an acceptance (status 0), not as a missing message: a guard that
+  // ignored the status would still exit 1 through the message check, with the other words.
+  assert.match(x.r.stderr, /cargo-about accepted \S*about-dup\.toml/, detail(x));
+  assert.doesNotMatch(x.r.stderr, /did not say/, detail(x));
 });
 
 test("fixture-check fails (1) when cargo-about rejects the duplicate config without saying duplicate key", (t) => {
