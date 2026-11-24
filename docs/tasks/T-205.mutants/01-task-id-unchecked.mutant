@@ -1,0 +1,8 @@
+guarantee: AC-3/AC-4: task/<ID> without TASK_ID equal to the branch ID is refused
+file: scripts/tw-wip-run
+added_by: test-writer
+--- old
+  [ "${TASK_ID-}" = "$id" ] || refuse "TASK_ID does not name $id"
+--- new
+  :
+--- end
