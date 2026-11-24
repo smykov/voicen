@@ -1,0 +1,9 @@
+guarantee: AC-2: order LIST, VIEW, LOG (LOG once)
+file: scripts/tw-wip-run
+added_by: test-writer
+--- old
+      view="$(gh run view "$rid" --json jobs,status,conclusion,headSha,url)" \
+--- new
+      gh run view "$rid" --log-failed >/dev/null || gh_failed "early log"
+      view="$(gh run view "$rid" --json jobs,status,conclusion,headSha,url)" \
+--- end

@@ -1,0 +1,8 @@
+guarantee: AC-2: the failed-step log is cut to the last 200 lines
+file: scripts/tw-wip-run
+added_by: test-writer
+--- old
+printf '%s\n' "$logtxt" | tail -n 200 | sed 's/^/LOG: /'
+--- new
+printf '%s\n' "$logtxt" | sed 's/^/LOG: /'
+--- end

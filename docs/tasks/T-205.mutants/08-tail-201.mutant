@@ -1,0 +1,8 @@
+guarantee: AC-2: the failed-step log is cut to the last 200 lines
+file: scripts/tw-wip-run
+added_by: test-writer
+--- old
+tail -n 200 |
+--- new
+tail -n 201 |
+--- end

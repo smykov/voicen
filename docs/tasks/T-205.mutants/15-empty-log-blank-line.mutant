@@ -1,0 +1,8 @@
+guarantee: AC-2: an empty log prints no LOG line
+file: scripts/tw-wip-run
+added_by: test-writer
+--- old
+      if [ -n "$logtxt" ]; then printf
+--- new
+      if true; then printf
+--- end

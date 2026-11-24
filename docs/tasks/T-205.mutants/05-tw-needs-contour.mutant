@@ -1,0 +1,11 @@
+guarantee: AC-3: the worktree path tw/<ID> is unchanged (GITHUB_ACTIONS and TASK_ID ignored)
+file: scripts/tw-wip-run
+added_by: test-writer
+--- old
+if [[ "$branch" =~ ^refs/heads/tw/([A-Z][A-Z0-9]*-[0-9]+)$ ]]; then
+  id="${BASH_REMATCH[1]}"
+--- new
+if [[ "$branch" =~ ^refs/heads/tw/([A-Z][A-Z0-9]*-[0-9]+)$ ]]; then
+  id="${BASH_REMATCH[1]}"
+  [ "${TASK_ID-}" = "$id" ] || refuse "TASK_ID does not name $id"
+--- end

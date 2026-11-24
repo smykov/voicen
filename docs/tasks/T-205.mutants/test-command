@@ -1,0 +1,2 @@
+# Bash self-test outside tw-test's core/ui, run in the core area's container by tw-mutants. RUNNABLE ONLY AFTER THE IMPLEMENT STAGE: the entries' old text is the shape of the reference sketch of scripts/tw-wip-run that the test-writer's bite check used (see ## Tests of T-205); at the implement stage, fix any entry whose old text the finished script does not hold exactly once (tw-mutants exit 2), keep its guarantee.
+bash scripts/ci/tw-wip-run.test.sh
