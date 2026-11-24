@@ -1781,7 +1781,7 @@ impl Writer {
         // A stop comes after the start returned, so the call was announced: a declaration
         // the writer had no round to make yet is made now (T-222).
         for (track, cause) in std::mem::take(&mut self.declare) {
-            self.outcome(Outcome::Silent { track, cause });
+            self.declare_silent(track, cause);
         }
         for track in [Track::Mic, Track::System] {
             if let Some(at) = self.seen.get(other(track)).last_end {
@@ -2028,6 +2028,7 @@ impl Writer {
             return;
         };
         match outcome {
+            Outcome::Silent { track, cause } => self.declare_silent(track, cause),
             Outcome::Reopened { track, cause, to } => {
                 if track == Track::Mic {
                     // The mic is on the default input now.
@@ -2046,18 +2047,27 @@ impl Writer {
                     .reopened = Some((cause, to, now));
                 self.settle(track);
             }
-            Outcome::Silent { track, cause } => {
-                let lane = rec.lane(track);
-                let now_ms = lane.timeline.written() / SAMPLES_PER_MS;
-                let at_ms = lane.gap.as_ref().map_or(now_ms, |g| g.at_ms);
-                self.log.write(LogEvent::CallTrackSilent {
-                    track,
-                    rule: SilentRule::Lost,
-                });
-                self.device_change(track, cause, None, at_ms, now_ms.saturating_sub(at_ms));
-                self.pending.push(CallWarning::TrackLost { track });
-            }
         }
+    }
+
+    /// The call's side of a silent declaration: one `call_track_silent rule=lost` line, one
+    /// `call_device` line and entry with no device (from the open gap, else from where the
+    /// track stands) and one `TrackLost` warning. The device state is not touched: the
+    /// replay of a declaration queued at attach (T-222) comes through here too, and the
+    /// track may have reopened since.
+    fn declare_silent(&mut self, track: Track, cause: DeviceCause) {
+        let Some(rec) = self.rec.as_mut() else {
+            return;
+        };
+        let lane = rec.lane(track);
+        let now_ms = lane.timeline.written() / SAMPLES_PER_MS;
+        let at_ms = lane.gap.as_ref().map_or(now_ms, |g| g.at_ms);
+        self.log.write(LogEvent::CallTrackSilent {
+            track,
+            rule: SilentRule::Lost,
+        });
+        self.device_change(track, cause, None, at_ms, now_ms.saturating_sub(at_ms));
+        self.pending.push(CallWarning::TrackLost { track });
     }
 
     /// A reopen whose audio has landed: one `call_device` line and one entry (D3).
@@ -2209,8 +2219,9 @@ impl Writer {
         };
         for (track, cause) in std::mem::take(&mut self.declare) {
             // The device thread's own declaration, made for this call (its gap is open
-            // from position 0, so the entry is at 0).
-            self.outcome(Outcome::Silent { track, cause });
+            // from position 0, so the entry is at 0). Only the call's side: the device
+            // state stays what the device thread reported since.
+            self.declare_silent(track, cause);
         }
         let mut added = false;
         for warning in self.pending.drain(..) {

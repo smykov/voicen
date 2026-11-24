@@ -2,12 +2,12 @@ guarantee: AC-3: the warning and the line appear once
 file: crates/voicen-core/src/call/session.rs
 added_by: test-writer
 --- old
-            self.outcome(Outcome::Silent { track, cause });
+            self.declare_silent(track, cause);
         }
         let mut added = false;
 --- new
-            self.outcome(Outcome::Silent { track, cause });
-            self.outcome(Outcome::Silent { track, cause });
+            self.declare_silent(track, cause);
+            self.declare_silent(track, cause);
         }
         let mut added = false;
 --- end

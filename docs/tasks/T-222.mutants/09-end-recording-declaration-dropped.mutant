@@ -3,7 +3,7 @@ file: crates/voicen-core/src/call/session.rs
 added_by: test-writer
 --- old
         for (track, cause) in std::mem::take(&mut self.declare) {
-            self.outcome(Outcome::Silent { track, cause });
+            self.declare_silent(track, cause);
         }
         for track in [Track::Mic, Track::System] {
 --- new
