@@ -327,7 +327,8 @@ fn release_launch_args() -> LaunchArgs {
 /// tray and the overlay through [`dictation::ShellIndicator`], and the
 /// `SettingsService`'s own instances: `credentials`, its key store, and `hotkeys`,
 /// its hotkey registrar (T-055). `detector` is the dictation half of the one
-/// [`release_detector`] load (T-102, T-139).
+/// [`release_detector`] load (T-102, T-139). `history` is `run()`'s choice of the
+/// transcript sink (T-022).
 #[cfg(windows)]
 fn release_ports<R: Runtime>(
     app: &AppHandle<R>,
@@ -335,6 +336,7 @@ fn release_ports<R: Runtime>(
     hotkeys: Arc<win::hotkey::HotkeyRegistrarHandle>,
     clipboard: Arc<dyn Clipboard>,
     detector: Result<Box<dyn SpeechDetector>, VadError>,
+    history: dictation::HistorySink,
 ) -> dictation::DictationPorts {
     dictation::DictationPorts {
         audio: settings_ipc::managed_microphones(app),
@@ -346,6 +348,7 @@ fn release_ports<R: Runtime>(
         hotkeys,
         detector,
         temp_audio: dictation::pending_store(app, paths::temp_audio_dir()),
+        history,
     }
 }
 
@@ -356,6 +359,7 @@ fn release_ports<R: Runtime>(
     _hotkeys: Arc<win::hotkey::HotkeyRegistrarHandle>,
     _clipboard: Arc<dyn Clipboard>,
     _detector: Result<Box<dyn SpeechDetector>, VadError>,
+    _history: dictation::HistorySink,
 ) -> dictation::DictationPorts {
     compile_error!(
         "the Voicen app runs on Windows only: the hotkey, microphone, clipboard and paste \
@@ -561,11 +565,16 @@ pub fn run() {
     // The one clipboard writer of the process (T-142, P-011): the dictation and the Calls
     // window's copy share this instance.
     let clipboard = release_clipboard();
-    // The transcript history (T-022), before the dictation: the session's pipeline takes
-    // its recorder as the `TranscriptSink` (`history::transcript_sink`). Its file is in the
-    // one data dir; copy uses the one clipboard writer. A failed start is logged where it
-    // failed, if at all, and the app runs on without a history (nothing is recorded).
-    let _ = history::start_history(app.handle(), paths::data_dir(), Arc::clone(&clipboard));
+    // The transcript history (T-022), before the dictation: the session's pipeline records
+    // into its recorder (`HistorySink::Managed`). Its file is in the one data dir; copy
+    // uses the one clipboard writer. A failed start is logged where it failed
+    // (`history_start_failed`, inside `start_history`); the app then runs on without a
+    // history and the dictation gets the explicit keep-nothing sink (NFR-07).
+    let history_sink =
+        match history::start_history(app.handle(), paths::data_dir(), Arc::clone(&clipboard)) {
+            Ok(()) => dictation::HistorySink::Managed,
+            Err(_) => dictation::HistorySink::Discard,
+        };
     // The one detector load (T-139): one half to dictation, one to the call pass worker.
     let (detector, spans) = release_detector(app.handle());
     let call_credentials = Arc::clone(&credentials);
@@ -575,6 +584,7 @@ pub fn run() {
         hotkeys,
         Arc::clone(&clipboard),
         detector,
+        history_sink,
     );
     let dictation =
         dictation::start_dictation_with(app.handle(), ports, Arc::clone(&notifier)).ok();

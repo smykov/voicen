@@ -775,6 +775,7 @@ fn the_dictation_ports_notifier_is_the_one_the_session_offers_to() {
             hotkeys: Arc::clone(&rig.hotkeys),
             detector: Err(voicen_core::vad::VadError::Unavailable),
             temp_audio: Arc::new(FakeTempAudioStore::new()),
+            history: voicen_lib::dictation::HistorySink::Discard,
         },
         notifier(&rig, &sink),
     )

@@ -11,9 +11,10 @@
 //! the store is managed as
 //! [`PendingAudio`] for the `RunEvent::Exit` cleanup), the given notifier
 //! ([`start_dictation_with`]: `run()` passes the process's one `win::toast::ShellNotifier`,
-//! T-210, which the call part shares, T-128), [`SettingsRequests`] and the app's
-//! transcript-history sink (`history::transcript_sink`, T-022: the managed recorder,
-//! or one that keeps nothing when the app has no history part);
+//! T-210, which the call part shares, T-128), [`SettingsRequests`] and the caller's
+//! transcript-history sink ([`HistorySink`], T-022: the app's managed recorder, or the
+//! explicit keep-nothing sink; `Managed` on an app without a history part refuses the
+//! start);
 //! manages it as
 //! `Arc<DictationSession>` (the type the tray's menu-open handler looks up),
 //! starts the hotkey thread for the settings' hotkey and attaches it to the
@@ -80,6 +81,22 @@ pub struct DictationPorts {
     /// The pending recording's audio (T-209, FR-032): [`pending_store`] over
     /// `paths::temp_audio_dir()` in `run()`.
     pub temp_audio: Arc<dyn TempAudioStore>,
+    /// Where the pipeline records each delivered text (T-022, FR-16): required, the
+    /// caller's choice (P-013).
+    pub history: HistorySink,
+}
+
+/// The transcript-history sink of the dictation pipeline (T-022): a required choice of
+/// the caller of [`start_dictation`], never a fallback of the app's state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HistorySink {
+    /// The app's managed history part (`history::start_history` ran and succeeded before
+    /// the start). Without one, the start is refused (`NotFound`,
+    /// `dictation_start_failed`).
+    Managed,
+    /// Keep nothing: `run()` after a failed `history::start_history` (dictation goes on,
+    /// NFR-07) and the tests that look at no history.
+    Discard,
 }
 
 /// The pending-audio store of `app` (T-209, FR-032): `FsTempAudioStore` over `dir`,
@@ -115,7 +132,9 @@ pub struct DictationHandle {
 /// managed `Arc<LogsNotice>`, if any (T-054: a logs failure latched at start is
 /// shown then, before the hotkey thread can raise its own notice). Needs the managed `Arc<SettingsService>` and `Arc<Log>`
 /// (`assemble`'s wiring). `Err` when the session or the hotkey thread could not be
-/// started, or when the app already has a session (then nothing is started): a
+/// started, when the app already has a session, or when `ports.history` is
+/// [`HistorySink::Managed`] and the app has no history part (`NotFound`; then nothing is
+/// started): a
 /// failed session start (or a second one) writes `dictation_start_failed`, a failed
 /// hotkey thread `hotkey_thread_failed`. The session's notifier drops every offer
 /// ([`start_dictation_with`] takes one).
@@ -171,7 +190,19 @@ pub fn start_dictation_with<R: Runtime>(
         hotkeys,
         detector,
         temp_audio,
+        history,
     } = ports;
+    // T-022: the sink is resolved before any side effect, so a refused `Managed` starts
+    // nothing (no cleanup, no session, no hotkey thread).
+    let transcript_sink = match history {
+        HistorySink::Managed => crate::history::managed_sink(app).ok_or_else(|| {
+            failed(io::Error::new(
+                io::ErrorKind::NotFound,
+                "the app has no history part",
+            ))
+        })?,
+        HistorySink::Discard => crate::history::discard_sink(),
+    };
     // FR-032: the stale files of an earlier session go before the session exists, so
     // no put can race it. A failure (the calls-roots guard refused, an I/O error) is
     // not fatal: one warning line with the kind and the OS code only (no path, no OS
@@ -198,7 +229,7 @@ pub fn start_dictation_with<R: Runtime>(
             temp_audio,
             observer: Arc::new(LogObserver::new(Arc::clone(&log))),
             post_processor: Arc::new(ChatPostProcessor::new()),
-            transcript_sink: crate::history::transcript_sink(app),
+            transcript_sink,
         },
         engine_factory,
         audio,

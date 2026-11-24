@@ -247,8 +247,8 @@ pub enum SaveLine {
 
 /// The kinds of a `Warning` line: the pipeline's `WarningCode`s and the shell's
 /// start, settings-window, tray, hotkey, dictation-start, overlay and
-/// logs-folder failures, a hotkey-thread request timeout and a call-hotkey
-/// registration failure.
+/// logs-folder failures, a hotkey-thread request timeout, a call-hotkey
+/// registration failure and a failed history start.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WarningKind {
     /// `events::WarningCode::VadFallback`.
@@ -309,6 +309,10 @@ pub enum WarningKind {
     /// dictation started (T-209, FR-032): an I/O error or the calls-roots guard
     /// refused; the next start retries.
     PendingAudioCleanupFailed,
+    /// The transcript history could not be started (T-022): the app already had a
+    /// history part, or one of its threads could not be started. The app runs on
+    /// without a history (nothing is recorded); dictation is unaffected.
+    HistoryStartFailed,
 }
 
 /// One dictation: the engine, the outcome and the FR-20 timings plus the

@@ -753,6 +753,7 @@ fn warning_kind(kind: WarningKind) -> &'static str {
         WarningKind::TestConnectionFailed => "test_connection_failed",
         WarningKind::HotkeyRequestTimeout => "hotkey_request_timeout",
         WarningKind::PendingAudioCleanupFailed => "pending_audio_cleanup_failed",
+        WarningKind::HistoryStartFailed => "history_start_failed",
     }
 }
 

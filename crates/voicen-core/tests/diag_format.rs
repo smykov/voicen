@@ -322,6 +322,8 @@ fn all_warning_kinds() -> Vec<(WarningKind, &'static str)> {
             WarningKind::CallHotkeyRegisterFailed,
             "call_hotkey_register_failed",
         ),
+        // T-022: the transcript history could not be started.
+        (WarningKind::HistoryStartFailed, "history_start_failed"),
     ];
     let seen: BTreeSet<usize> = all
         .iter()
@@ -346,9 +348,10 @@ fn all_warning_kinds() -> Vec<(WarningKind, &'static str)> {
             WarningKind::PendingAudioUnreadable => 17,
             WarningKind::DictationWorkerStopped => 18,
             WarningKind::CallHotkeyRegisterFailed => 19,
+            WarningKind::HistoryStartFailed => 20,
         })
         .collect();
-    assert_eq!(seen.len(), 20, "every WarningKind once");
+    assert_eq!(seen.len(), 21, "every WarningKind once");
     all
 }
 

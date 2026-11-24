@@ -8,13 +8,18 @@
 //!   settings of the managed `SettingsService`'s snapshot, read after the follower's own
 //!   `subscribe()` so no saved change is missed. It starts the settings follower thread
 //!   ("history-settings", core's `follow_settings`) and the History window's opener
-//!   thread ("history-window"), then manages the part. A start error and every later
-//!   disk error are one `history_failed` line (the op and a closed kind, never text).
+//!   thread ("history-window"), then manages the part. A load error of the file and
+//!   every later disk error are one `history_failed` line (the op and a closed kind,
+//!   never text); a start that fails after the managed `Log` is found is one
+//!   `warning kind=history_start_failed [os_code=<n>]` line (no path, no error text).
 //!   Sibling of `call::start_calls`, outside `build_app`: an app `build_app` built has no
 //!   history part, so nothing is recorded there and the commands answer an empty list.
-//! - [`transcript_sink`] is the pipeline's `TranscriptSink` (`dictation::start_dictation`
-//!   passes it in `PipelineDeps`): the managed recorder, or a sink that keeps nothing on
-//!   an app without a history part. `run()` starts the history before the dictation.
+//! - The pipeline's `TranscriptSink` is the caller's required choice
+//!   (`dictation::DictationPorts::history`): `HistorySink::Managed` takes the managed
+//!   recorder ([`managed_sink`]; no part is a refused dictation start, never a silent
+//!   keep-nothing sink), `HistorySink::Discard` the explicit keep-nothing sink
+//!   ([`discard_sink`]). `run()` starts the history before the dictation and passes
+//!   `Managed` when the start succeeded, `Discard` after its logged failure.
 //! - Each change of the view is emitted as `history://changed` to the window labelled
 //!   [`LABEL`] only (`emit_to`), in camelCase ([`HistoryWire`]).
 //! - The History window: at most one window labelled [`LABEL`] at `/history`, built only
@@ -38,7 +43,7 @@ use tauri::{
     AppHandle, Emitter, Manager, Runtime, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
 };
 use voicen_core::clock::SystemClock;
-use voicen_core::diag::{Log, LogEvent};
+use voicen_core::diag::{Log, LogEvent, WarningKind};
 use voicen_core::history::{
     follow_settings, size_of, EngineLabel, FileHistoryStore, History, HistoryNotice,
     HistoryRecorder, HistoryView,
@@ -127,7 +132,8 @@ impl HistoryCopyError {
 /// threads and manages it. Needs the managed `Arc<SettingsService>` and `Arc<Log>`
 /// (`assemble`'s wiring). `Err` when a managed part is missing, the app already has a
 /// history part, or a thread could not be started; then nothing is managed and the app
-/// records nothing.
+/// records nothing. Every `Err` after the managed `Log` is found writes one
+/// `warning kind=history_start_failed` line, with the OS code when the error has one.
 pub fn start_history<R: Runtime>(
     app: &AppHandle<R>,
     dir: PathBuf,
@@ -137,6 +143,22 @@ pub fn start_history<R: Runtime>(
         .try_state::<Arc<Log>>()
         .map(|log| Arc::clone(&log))
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "the app manages no log"))?;
+    start_logged(app, dir, clipboard, &log).inspect_err(|err| {
+        // The kind and the OS code only: no path, no error text (P-009).
+        log.write(LogEvent::Warning {
+            kind: WarningKind::HistoryStartFailed,
+            os_code: err.raw_os_error(),
+        });
+    })
+}
+
+/// [`start_history`] after the `Log` is found; its every `Err` is logged by the caller.
+fn start_logged<R: Runtime>(
+    app: &AppHandle<R>,
+    dir: PathBuf,
+    clipboard: Arc<dyn Clipboard>,
+    log: &Arc<Log>,
+) -> io::Result<()> {
     let service = app
         .try_state::<Arc<SettingsService>>()
         .map(|service| Arc::clone(&service))
@@ -165,7 +187,7 @@ pub fn start_history<R: Runtime>(
         log.write(LogEvent::history_failed(&error));
     }
     let emit_app = app.clone();
-    let error_log = Arc::clone(&log);
+    let error_log = Arc::clone(log);
     let recorder = Arc::new(
         HistoryRecorder::new(
             history,
@@ -193,20 +215,30 @@ pub fn start_history<R: Runtime>(
     Ok(())
 }
 
-/// A sink that keeps nothing: the pipeline's sink on an app without a history part.
+/// A sink that keeps nothing: the explicit `HistorySink::Discard` choice.
 struct NoHistory;
 
 impl TranscriptSink for NoHistory {
     fn delivered(&self, _text: &str, _engine: EngineLabel) {}
 }
 
-/// The pipeline's `TranscriptSink` of `app`: the managed recorder, or [`NoHistory`] when
-/// [`start_history`] did not run (the tests' apps, a failed start).
+/// The managed recorder of `app` as a `TranscriptSink`, or `None` when [`start_history`]
+/// did not run or failed (`HistorySink::Managed` then refuses the dictation start).
+pub(crate) fn managed_sink<R: Runtime>(app: &AppHandle<R>) -> Option<Arc<dyn TranscriptSink>> {
+    app.try_state::<HistoryPart>()
+        .map(|part| Arc::clone(&part.recorder) as Arc<dyn TranscriptSink>)
+}
+
+/// The keep-nothing sink of `HistorySink::Discard`.
+pub(crate) fn discard_sink() -> Arc<dyn TranscriptSink> {
+    Arc::new(NoHistory)
+}
+
+/// The `TranscriptSink` of `app` for a caller outside the dictation wiring (the tests):
+/// the managed recorder, or the keep-nothing sink when [`start_history`] did not run.
+/// The dictation does not use it: its sink is `DictationPorts::history`.
 pub fn transcript_sink<R: Runtime>(app: &AppHandle<R>) -> Arc<dyn TranscriptSink> {
-    match app.try_state::<HistoryPart>() {
-        Some(part) => Arc::clone(&part.recorder) as Arc<dyn TranscriptSink>,
-        None => Arc::new(NoHistory),
-    }
+    managed_sink(app).unwrap_or_else(discard_sink)
 }
 
 /// Opens the History window (the tray "History"): posts the request to the opener

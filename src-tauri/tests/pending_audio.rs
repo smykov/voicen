@@ -65,6 +65,7 @@ fn start(rig: &AppRig, store: Arc<dyn TempAudioStore>) -> DictationHandle {
             hotkeys: Arc::clone(&rig.hotkeys),
             detector: Err(voicen_core::vad::VadError::Unavailable),
             temp_audio: store,
+            history: voicen_lib::dictation::HistorySink::Discard,
         },
     )
     .expect("start_dictation")
