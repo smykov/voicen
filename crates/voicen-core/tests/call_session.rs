@@ -26,7 +26,7 @@ use serde_json::{json, Value};
 use voicen_core::autostart::FakeAutostart;
 use voicen_core::call::codec::{scan, OpusOggReader, ReadEnd, TrackDecoder};
 use voicen_core::call::indicator::{IndicatorState, IndicatorTick, WarningKind};
-use voicen_core::call::session::{CallSettingsPort, Toggled};
+use voicen_core::call::session::{CallSettingsPort, Toggled, WriterPause};
 use voicen_core::call::{
     CallNotice, CallSource, DeviceEvent, ListState, LossCause, OpenError, RefusedPart,
     RefusedReason, StopReason, Track, TrackDevice,
@@ -3292,6 +3292,91 @@ fn reopen_after_record_on_over_a_lost_track_records_the_gap_from_call_start() {
         .expect("a reopened line");
     assert_eq!(line.get("gap_ms"), Some(gap.to_string().as_str()));
     assert_eq!(line.get("to"), Some(new_id.as_str()));
+}
+
+/// Holds the writer parked right after a record start, while the queued declaration of a
+/// track down at the start has had no round, and lets it go from another thread after
+/// `after`, so a `stop` (which waits for the writer) can run meanwhile. Best effort: if the
+/// writer's round got in first the declaration is already made and the tests below still
+/// pass; they bite when the pause wins, which it does unless the host stalls the thread
+/// for more than the writer's 2 ms idle.
+fn release_later(pause: WriterPause, after: Duration) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        std::thread::sleep(after);
+        drop(pause);
+    })
+}
+
+#[test]
+fn record_on_then_a_stop_before_the_writers_next_round_still_declares_the_track_that_was_down() {
+    // T-222 AC-1 / AC-3 (failure branch, stop side): the declaration queued at attach is
+    // made by the writer's next round after `call_started`; a stop that reaches the writer
+    // first makes it in `end_recording`, so the call still has its `to=none` line, entry
+    // at 0 and `call_track_silent rule=lost`, each once.
+    // Bite: `Writer::end_recording` not making the queued declaration.
+    let rig = subtitles_with_a_lost_system_track();
+    advance(&rig, ms(2_000));
+    polled(&rig);
+    started(&rig, CallSource::Tray);
+    let pause = rig.session.pause_writer();
+    let release = release_later(pause, Duration::from_millis(150));
+    rig.session.stop(StopReason::User);
+    release.join().expect("release thread");
+
+    let lines = rig.call_lines();
+    let started_at = lines_with(&rig, "call_started");
+    assert_eq!(started_at.len(), 1, "{lines:?}");
+    let device = lines_with(&rig, "call_device");
+    assert_eq!(device.len(), 1, "one call_device line: {lines:?}");
+    assert_eq!(lines[device[0]].get("to"), Some("none"));
+    assert!(device[0] > started_at[0], "after call_started");
+    let silent = lines_with(&rig, "call_track_silent");
+    assert_eq!(silent.len(), 1, "once: {lines:?}");
+    assert_eq!(lines[silent[0]].get("rule"), Some("lost"));
+    let changes = meta_changes(&rig);
+    assert_eq!(changes.len(), 1, "{changes:?}");
+    assert_eq!(changes[0]["to"], Value::Null);
+    assert_eq!(changes[0]["at_ms"], json!(0));
+}
+
+#[test]
+fn record_on_then_a_reopen_before_the_writers_next_round_follows_the_declaration() {
+    // T-222 AC-2 (line order): record on over a declared-silent track, the writer held; the
+    // track reopens and its audio is queued meanwhile. When the writer runs it handles the
+    // reopen before it has made the call's declaration: the declaration still comes first
+    // (`to=none` line, entry at 0), then the reopen with its gap from position 0.
+    // Bite: `Writer::settle` settling a track whose declaration is still queued (the
+    // reopen line before the `to=none` one, and the declaration's entry no longer at 0).
+    let rig = subtitles_with_a_lost_system_track();
+    advance(&rig, ms(2_000));
+    polled(&rig);
+    started(&rig, CallSource::Tray);
+    let pause = rig.session.pause_writer();
+    rig.source.heal(Track::System);
+    advance(&rig, ms(2_000));
+    assert!(
+        wait(|| rig.source.ok_opens(Track::System) == 2),
+        "the 4 s attempt reopens it"
+    );
+    rig.source.feed(Track::Mic, 1_000, 5_000, 0.3);
+    rig.source.feed_tone(Track::System, 5_000, 5_200, 0.2);
+    rig.source.feed(Track::Mic, 5_000, 6_000, 0.3);
+    rig.source.feed_tone(Track::System, 5_200, 6_000, 0.2);
+    let release = release_later(pause, Duration::from_millis(150));
+    rig.session.stop(StopReason::User);
+    release.join().expect("release thread");
+
+    let lines = rig.call_lines();
+    let device = lines_with(&rig, "call_device");
+    assert_eq!(device.len(), 2, "{lines:?}");
+    assert_eq!(lines[device[0]].get("to"), Some("none"), "first: {lines:?}");
+    assert_eq!(lines[device[1]].get("cause"), Some("reopened"));
+    let changes = meta_changes(&rig);
+    assert_eq!(changes.len(), 2, "{changes:?}");
+    assert_eq!(changes[0]["to"], Value::Null);
+    assert_eq!(changes[0]["at_ms"], json!(0), "{changes:?}");
+    assert_eq!(changes[1]["cause"], json!("reopened"));
+    assert_eq!(changes[1]["at_ms"], json!(0), "{changes:?}");
 }
 
 #[test]

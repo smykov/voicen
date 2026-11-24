@@ -1,0 +1,8 @@
+guarantee: AC-1: a Silent seen with record off is remembered for the next call
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+                state.silent = Some(cause);
+--- new
+                let _ = cause;
+--- end

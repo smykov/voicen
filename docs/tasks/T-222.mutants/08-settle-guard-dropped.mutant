@@ -1,0 +1,8 @@
+guarantee: AC-2: a reopen before the queued declaration does not settle the gap first (line order, entry at 0)
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+        if self.declare.iter().any(|(t, _)| *t == track) {
+--- new
+        if false {
+--- end

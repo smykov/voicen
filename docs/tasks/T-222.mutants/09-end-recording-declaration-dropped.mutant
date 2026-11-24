@@ -1,0 +1,11 @@
+guarantee: AC-3: a queued declaration is made at the stop when no round made it
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+        for (track, cause) in std::mem::take(&mut self.declare) {
+            self.outcome(Outcome::Silent { track, cause });
+        }
+        for track in [Track::Mic, Track::System] {
+--- new
+        for track in [Track::Mic, Track::System] {
+--- end
