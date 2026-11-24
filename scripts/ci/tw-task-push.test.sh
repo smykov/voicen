@@ -340,6 +340,16 @@ refuse_args r-arg-id-path "T-900/../T-901"
 refuse_args r-arg-id-glob "T-90*"
 refuse_args r-arg-id-no-branch T-901
 
+# A short ID with everything else in place (branch, worktree, record): only the ID check refuses it.
+fixture r-arg-short-id-complete
+w branch -m tw/T-900 tw/T-90
+cp "$main/docs/tasks/T-900.md" "$wt/docs/tasks/T-90.md"
+w add docs/tasks/T-90.md
+w commit -q -m "T-90 record"
+before="$(refs "$bare")"
+push_run "$main" T-90
+want_refused r-arg-short-id-with-branch-worktree-and-record "$before"
+
 # ---- Refused: where it runs, and which branch --------------------------------------------------
 fixture r-from-linked-worktree
 before="$(refs "$bare")"
@@ -351,6 +361,17 @@ before="$(refs "$bare")"
 out="$(cd "$wt/scripts" && timeout 60 ../scripts/tw-task-push T-900 2>&1 </dev/null)"
 got=$?
 want_refused r-run-from-a-subdirectory-of-the-worktree "$before"
+
+# Run from another linked worktree (not the one on tw/T-900): still not the main tree, so refused;
+# the branch's own worktree is left alone, which only the main-tree check can tell apart.
+fixture r-from-other-worktree
+other="$tmp/r-from-other-worktree/other"
+m worktree add -q -b tw/T-902 "$other" main
+mkdir -p "$other/scripts"
+[ ! -e "$script" ] || cp -p "$script" "$other/scripts/tw-task-push"
+before="$(refs "$bare")"
+push_run "$other" T-900
+want_refused r-run-from-another-linked-worktree "$before"
 
 fixture r-no-worktree
 m worktree remove --force "$wt"
