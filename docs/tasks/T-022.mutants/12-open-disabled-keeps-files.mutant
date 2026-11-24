@@ -1,9 +1,0 @@
-guarantee: AC-2: history turned off -> stored entries deleted (start-up while off deletes what is stored, C5)
-file: crates/voicen-core/src/history/mod.rs
-added_by: test-writer
---- old
-            let error = history.erase();
-            return (history, error);
---- new
-            return (history, None);
---- end

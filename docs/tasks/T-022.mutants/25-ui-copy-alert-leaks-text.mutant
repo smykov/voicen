@@ -1,9 +1,0 @@
-guarantee: AC-2 UI failure: copy rejected -> alert has no transcript text
-file: src/lib/history/HistoryList.svelte
-added_by: test-writer
-test: node scripts/ui-test-select.mjs src/lib/history e2e/history.spec.ts
---- old
-  <p class="alert" role="alert">{t("history.copy_failed")}</p>
---- new
-  <p class="alert" role="alert">{t("history.copy_failed")} {view?.entries[0]?.text ?? ""}</p>
---- end

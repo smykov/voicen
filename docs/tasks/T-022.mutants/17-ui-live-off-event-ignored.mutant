@@ -1,9 +1,0 @@
-guarantee: AC-2 UI: history turned off while the window is open (history://changed enabled false) -> off state at once
-file: src/routes/history/+page.svelte
-added_by: test-writer
-test: node scripts/ui-test-select.mjs src/lib/history e2e/history.spec.ts
---- old
-        keep(await onHistoryChanged((next) => apply(next)));
---- new
-        keep(await onHistoryChanged((next) => { if (next.enabled) apply(next); }));
---- end

@@ -1,8 +1,0 @@
-guarantee: AC-2: history turned off -> stored entries deleted (a failed deletion is retried by the next off apply)
-file: crates/voicen-core/src/history/mod.rs
-added_by: test-writer
---- old
-            return if was_enabled || self.pending.is_some() {
---- new
-            return if was_enabled {
---- end

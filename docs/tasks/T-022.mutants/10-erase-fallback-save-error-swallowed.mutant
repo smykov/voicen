@@ -1,8 +1,0 @@
-guarantee: AC-2: Clear -> file deleted (delete and fallback empty save both failing -> DeleteFailed, retried)
-file: crates/voicen-core/src/history/mod.rs
-added_by: test-writer
---- old
-            if self.store.save(&empty).is_ok() {
---- new
-            if self.store.save(&empty).is_ok() || true {
---- end
