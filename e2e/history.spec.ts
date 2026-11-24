@@ -243,6 +243,7 @@ test("AC-2: history off shows 'History is off' and no entries; Open settings ope
   await expect(items(page)).toHaveCount(0);
   await expect(page.getByText(EN.empty)).toHaveCount(0);
   await expect(page.getByRole("button", { name: EN.copy })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: EN.clear, exact: true })).toHaveCount(0); // off: no Clear
   await page.getByRole("button", { name: EN.openSettings, exact: true }).click();
   await expect.poll(async () => (await historyCalls(page, OPEN_SETTINGS)).length).toBe(1);
   expect((await historyCalls(page, OPEN_SETTINGS))[0].args).toEqual({ tab: "history" });
@@ -259,6 +260,7 @@ test("AC-2: a history://changed with enabled false switches an open window to th
   await expect(page.getByText(EN.off)).toBeVisible();
   await expect(items(page)).toHaveCount(0);
   await expect(page.getByText("Entry text 0005", { exact: false })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: EN.clear, exact: true })).toHaveCount(0); // off: no Clear
   await emit(page, HISTORY_CHANGED, { ...emptyView(), entries: [entry(9)] });
   await expect(page.getByText(EN.off)).toHaveCount(0);
   await expect(items(page)).toHaveCount(1);

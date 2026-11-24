@@ -1,0 +1,14 @@
+guarantee: AC-2 UI failure: copy rejected -> list unchanged
+file: src/routes/history/+page.svelte
+added_by: test-writer
+test: node scripts/ui-test-select.mjs src/lib/history e2e/history.spec.ts
+--- old
+      copyFailed = true;
+    }
+  }
+--- new
+      copyFailed = true;
+      if (view) view = { ...view, entries: view.entries.filter((e) => e.id !== entry.id) };
+    }
+  }
+--- end
