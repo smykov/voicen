@@ -36,6 +36,7 @@ use voicen_core::diag::Log;
 use voicen_core::dictation::DictationSession;
 use voicen_core::engine::{Engine, TranscribeRequest};
 use voicen_core::failure::FailureReason;
+use voicen_core::hotkey_registrar::HotkeyRegistrar;
 use voicen_core::local_models::catalog::MODELS;
 use voicen_core::local_models::service::LocalModels;
 use voicen_core::local_models::store::ModelStore;
@@ -44,7 +45,7 @@ use voicen_core::recording::OverlayState;
 use voicen_core::secrets::{CredentialStore, FakeCredentialStore, KeyEdits, KeySlot};
 use voicen_core::settings::hotkey::parse_hotkey;
 use voicen_core::settings::service::{SaveOutcome, SaveRequest, SettingsService};
-use voicen_core::settings::{EngineKind, Settings};
+use voicen_core::settings::{EngineKind, Mode, Settings};
 use voicen_core::test_support::local_models::FakeDisk;
 use voicen_core::test_support::TempDir;
 use voicen_core::timeouts::Timeouts;
@@ -357,6 +358,124 @@ impl Drop for TakenHotkey {
     fn drop(&mut self) {
         // SAFETY: the id this thread registered.
         let _ = unsafe { UnregisterHotKey(None, self.id) };
+    }
+}
+
+// ---- Esc probes (T-009, T-108; moved here from `hotkey.rs` by T-151, shared with
+// `call_dictation.rs`) ---------------------------------------------------------------
+
+/// The default hotkey's modifiers as `MOD_*` bits (Ctrl+Alt for Ctrl+Alt+Space).
+pub const HOTKEY_MODS: u32 = MOD_CONTROL.0 | MOD_ALT.0;
+
+/// The hotkey thread holds Esc both bare and under the hotkey's modifiers (OQ-21 (1)).
+///
+/// A registration probe: it takes and frees each combination, so it must never overlap a
+/// claim still pending on the hotkey thread (T-108). Call it only through [`esc_claim`]
+/// (which orders it after the claim), or after `esc_claim` returned `Ok`.
+pub fn esc_claimed() -> bool {
+    !esc_is_free(0) && !esc_is_free(HOTKEY_MODS)
+}
+
+/// Esc is free both bare and under the hotkey's modifiers. Polling it is safe on the
+/// release side: a probe cannot block an unregistration, only a registration (T-108).
+pub fn esc_released() -> bool {
+    esc_is_free(0) && esc_is_free(HOTKEY_MODS)
+}
+
+/// The window saw an Esc key-down (WM_KEYDOWN / WM_SYSKEYDOWN with VK_ESCAPE).
+pub fn esc_reached(window: &TestWindow) -> bool {
+    window
+        .messages()
+        .iter()
+        .any(|(m, w)| (*m == WM_KEYDOWN || *m == WM_SYSKEYDOWN) && *w == usize::from(VK_ESCAPE))
+}
+
+/// The unused combination of [`hotkey_round_trip`] (never the app's hotkey, never Esc).
+pub const ROUND_TRIP_COMBO: &str = "Ctrl+Alt+F9";
+
+/// T-108: one synchronous round trip on the hotkey thread's request channel: a registrar
+/// `prepare` of [`ROUND_TRIP_COMBO`] under the spare id, then its `abort`. When it returns
+/// `Ok`, every request queued before it (an Esc claim or release included) has run.
+/// Prepare and abort touch only the spare id, so the active hotkey and the Esc ids stay as
+/// they were; the check reads back that Ctrl+Alt+Space is still held and the spare
+/// combination free again (neither probe is an Esc registration). `context` renders what the
+/// caller knows (observer events, indicator calls) into every `Err`.
+pub fn hotkey_round_trip(
+    registrar: &HotkeyRegistrarHandle,
+    context: &dyn Fn() -> String,
+) -> Result<(), String> {
+    let spare = parse_hotkey(ROUND_TRIP_COMBO)
+        .map_err(|e| format!("premise: {ROUND_TRIP_COMBO} does not parse: {e:?}"))?;
+    let prepared = registrar.prepare(spare, Mode::Hold).map_err(|e| {
+        format!(
+            "no round trip on the hotkey thread's request channel: prepare of \
+             {ROUND_TRIP_COMBO} was {e:?} (refused, or not answered in the budget); {}",
+            context()
+        )
+    })?;
+    registrar.abort(prepared);
+    if TakenHotkey::take().is_ok() {
+        return Err(format!(
+            "Ctrl+Alt+Space is free after the round trip (a reassert queued before it, or \
+             the round trip, released it); {}",
+            context()
+        ));
+    }
+    if !combo_is_free(ROUND_TRIP_COMBO) {
+        return Err(format!(
+            "{ROUND_TRIP_COMBO} is still registered after the round trip's abort; {}",
+            context()
+        ));
+    }
+    Ok(())
+}
+
+/// T-212: after this returns `Ok` the hotkey thread has run the recording's Esc claim,
+/// whatever its outcome: it waits for the Recording indicator (`recording`, a memory read of
+/// a fake: polling it races nothing), then makes one [`hotkey_round_trip`]. No registration
+/// probe.
+pub fn esc_claim_ran(
+    recording: impl FnMut() -> bool,
+    registrar: &HotkeyRegistrarHandle,
+    context: &dyn Fn() -> String,
+) -> Result<(), String> {
+    if !eventually(recording) {
+        return Err(format!(
+            "no Recording indicator within {HANG:?} of the press; {}",
+            context()
+        ));
+    }
+    hotkey_round_trip(registrar, context)
+}
+
+/// T-108: the claim check of the Esc tests, for the recording just pressed. `Ok(())` only
+/// when the hotkey thread has run this recording's claim, `refused` reads false (the
+/// caller's record of a refused claim) and the thread holds Esc bare and under the hotkey's
+/// modifiers. The check orders itself after the claim ([`esc_claim_ran`]) and probes once,
+/// never by polling registrations (F-020).
+pub fn esc_claim(
+    recording: impl FnMut() -> bool,
+    registrar: &HotkeyRegistrarHandle,
+    refused: &dyn Fn() -> bool,
+    context: &dyn Fn() -> String,
+) -> Result<(), String> {
+    esc_claim_ran(recording, registrar, context)?;
+    if refused() {
+        return Err(format!(
+            "the hotkey thread's Esc claim was refused; {}",
+            context()
+        ));
+    }
+    if esc_claimed() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Esc not claimed bare and under the hotkey's modifiers after the claim ran \
+             (bare free: {}, Ctrl+Alt free: {}); {}",
+            esc_is_free(0),
+            esc_is_free(HOTKEY_MODS),
+            context()
+        ))
     }
 }
 

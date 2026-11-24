@@ -49,7 +49,7 @@
 use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, TryRecvError};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread;
@@ -71,6 +71,7 @@ use voicen_core::local_models::download::DiskSpace;
 use voicen_core::local_models::service::LocalModels;
 use voicen_core::local_models::store::ModelStore;
 use voicen_core::platform::{CaptureHandle, Clipboard, FakeClipboard, FakeNotifier};
+use voicen_core::recording::CaptureError;
 use voicen_core::secrets::{CredentialStore, FakeCredentialStore};
 use voicen_core::settings::service::SettingsService;
 use voicen_core::test_support::local_models::FakeDisk;
@@ -179,6 +180,8 @@ fn wav_of(samples: &[i16]) -> Vec<u8> {
 pub struct WavSource {
     opened: Mutex<Vec<Arc<WavTrackSource>>>,
     wav: Vec<u8>,
+    /// T-151: opens not yet stopped or dropped (core's `WavHandle` counts nothing).
+    open_handles: Arc<AtomicUsize>,
 }
 
 impl Default for WavSource {
@@ -186,6 +189,7 @@ impl Default for WavSource {
         WavSource {
             opened: Mutex::new(Vec::new()),
             wav: tone_wav(),
+            open_handles: Arc::new(AtomicUsize::new(0)),
         }
     }
 }
@@ -200,6 +204,7 @@ impl WavSource {
         Arc::new(WavSource {
             opened: Mutex::new(Vec::new()),
             wav: wav_of(samples),
+            open_handles: Arc::new(AtomicUsize::new(0)),
         })
     }
 
@@ -221,6 +226,52 @@ impl WavSource {
     pub fn opens(&self) -> usize {
         lock(&self.opened).len()
     }
+
+    /// T-151: track handles opened and not yet stopped or dropped (a track capture is open).
+    pub fn open_handles(&self) -> usize {
+        self.open_handles.load(Ordering::SeqCst)
+    }
+}
+
+/// T-151: a handle that counts itself in `WavSource::open_handles` from the open until its
+/// `stop` returns or it is dropped, whichever comes first (once).
+pub struct CountedHandle {
+    inner: Option<Box<dyn CaptureHandle>>,
+    open: Arc<AtomicUsize>,
+}
+
+impl CountedHandle {
+    /// Counts `inner` as open in `open` (one more now, one less when it is stopped or dropped).
+    pub fn open(inner: Box<dyn CaptureHandle>, open: &Arc<AtomicUsize>) -> Box<dyn CaptureHandle> {
+        open.fetch_add(1, Ordering::SeqCst);
+        Box::new(CountedHandle {
+            inner: Some(inner),
+            open: Arc::clone(open),
+        })
+    }
+
+    fn close(&mut self) {
+        if self.inner.take().is_some() {
+            self.open.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+}
+
+impl CaptureHandle for CountedHandle {
+    fn stop(mut self: Box<Self>) -> Result<(), CaptureError> {
+        let Some(inner) = self.inner.take() else {
+            return Ok(());
+        };
+        let result = inner.stop();
+        self.open.fetch_sub(1, Ordering::SeqCst);
+        result
+    }
+}
+
+impl Drop for CountedHandle {
+    fn drop(&mut self) {
+        self.close();
+    }
 }
 
 impl TrackSource for WavSource {
@@ -235,9 +286,9 @@ impl TrackSource for WavSource {
             .with_block_ms(20)
             .with_start(CaptureStamp::from_ms(START_MS));
         let source = Arc::new(source);
-        let opened = source.open(track, device, sink)?;
+        let (inner, endpoint) = source.open(track, device, sink)?;
         lock(&self.opened).push(source);
-        Ok(opened)
+        Ok((CountedHandle::open(inner, &self.open_handles), endpoint))
     }
 
     fn now(&self) -> CaptureStamp {

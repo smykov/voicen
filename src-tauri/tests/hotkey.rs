@@ -58,10 +58,10 @@ use voicen_core::vad::{EnergyDetector, SpeechDetector, SpeechGate};
 use voicen_core::win32_data::{hotkey_codes, modifier_wait_keys};
 use voicen_lib::win::hotkey::{CancelKeyHandle, HotkeyRegistrarHandle, HotkeyThread};
 use win32_support::{
-    assert_hotkey_free, combo_is_free, engine_factory, esc_is_free, eventually, has_pair, headed,
-    holds_for, is_down, keyed_store, log_lines, precondition, serial, settings, Gate, Keys,
-    OpenOnDrop, Shape, TakenHotkey, TestWindow, TextEngine, HOLD, HOTKEY_KEYS, SETTLE, VK_CONTROL,
-    VK_ESCAPE, VK_MASK, VK_MENU, VK_SPACE, WAIT,
+    assert_hotkey_free, engine_factory, esc_claimed, esc_reached, esc_released, eventually,
+    has_pair, headed, holds_for, is_down, keyed_store, log_lines, precondition, serial, settings,
+    Gate, Keys, OpenOnDrop, Shape, TakenHotkey, TestWindow, TextEngine, HOLD, HOTKEY_KEYS,
+    HOTKEY_MODS, ROUND_TRIP_COMBO, SETTLE, VK_CONTROL, VK_ESCAPE, VK_MASK, VK_MENU, VK_SPACE, WAIT,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN, VIRTUAL_KEY, VK_0, VK_1, VK_2, VK_3,
@@ -604,32 +604,6 @@ fn dropping_the_hotkey_thread_frees_the_hotkey() {
 
 // ---- T-009: Esc cancel (FR-22), claimed only while recording -------------------------
 
-/// The hotkey's modifiers as `MOD_*` bits (Ctrl+Alt for the default Ctrl+Alt+Space).
-const HOTKEY_MODS: u32 = MOD_CONTROL.0 | MOD_ALT.0;
-
-/// The thread holds Esc both bare and under the hotkey's modifiers (OQ-21 (1)).
-///
-/// A registration probe: it takes and frees each combination, so it must never overlap
-/// a claim still pending on the hotkey thread (T-108). Call it only through
-/// [`esc_claim`] (which orders it after the claim), or after `esc_claim` returned `Ok`.
-fn esc_claimed() -> bool {
-    !esc_is_free(0) && !esc_is_free(HOTKEY_MODS)
-}
-
-/// Esc is free both bare and under the hotkey's modifiers. Polling it is safe on the
-/// release side: a probe cannot block an unregistration, only a registration (T-108).
-fn esc_released() -> bool {
-    esc_is_free(0) && esc_is_free(HOTKEY_MODS)
-}
-
-/// The window saw an Esc key-down (WM_KEYDOWN / WM_SYSKEYDOWN with VK_ESCAPE).
-fn esc_reached(window: &TestWindow) -> bool {
-    window
-        .messages()
-        .iter()
-        .any(|(m, w)| (*m == WM_KEYDOWN || *m == WM_SYSKEYDOWN) && *w == usize::from(VK_ESCAPE))
-}
-
 #[track_caller]
 fn assert_esc_free() {
     precondition(
@@ -796,23 +770,29 @@ fn esc_is_released_after_a_max_length_stop() {
 }
 
 /// T-212: after this returns `Ok` the hotkey thread has run the recording's Esc claim
-/// (its `cancel_key_result` is in the observer), whatever the claim's outcome. The
-/// ordering of [`esc_claim`] (Recording indicator, then [`hotkey_round_trip`]) without
-/// its verdict, for tests that plant a refusal on purpose. No polling of registrations.
+/// (its `cancel_key_result` is in the observer), whatever the claim's outcome; the shared
+/// ordering of `win32_support::esc_claim_ran` over this rig. No polling of registrations.
 fn esc_claim_ran(rig: &Rig) -> Result<(), String> {
-    let recording = || {
-        rig.indicator
-            .trays()
-            .iter()
-            .any(|(s, _)| *s == TrayState::Recording)
-    };
-    if !eventually(recording) {
-        return Err(format!(
-            "no Recording indicator within {HANG:?} of the press; observer events: {:?}",
-            rig.observer.events()
-        ));
-    }
-    hotkey_round_trip(rig)
+    win32_support::esc_claim_ran(|| recording_shown(rig), &rig.registrar, &|| {
+        rig_context(rig)
+    })
+}
+
+/// The rig's Recording indicator was set (a memory read of the fake).
+fn recording_shown(rig: &Rig) -> bool {
+    rig.indicator
+        .trays()
+        .iter()
+        .any(|(s, _)| *s == TrayState::Recording)
+}
+
+/// What the failure messages of the probes print for this rig.
+fn rig_context(rig: &Rig) -> String {
+    format!(
+        "indicator calls: {:?}; observer events: {:?}",
+        rig.indicator.calls(),
+        rig.observer.events()
+    )
 }
 
 #[test]
@@ -1037,81 +1017,17 @@ impl Indicator for GatedIndicator {
 /// `prepare` is answered the claim has run and its `cancel_key_result` (the warning,
 /// emitted on the hotkey thread) is in the observer.
 fn esc_claim(rig: &Rig) -> Result<(), String> {
-    let recording = || {
-        rig.indicator
-            .trays()
-            .iter()
-            .any(|(s, _)| *s == TrayState::Recording)
-    };
-    // A memory read of the fake, not a registration probe: polling it races nothing.
-    if !eventually(recording) {
-        return Err(format!(
-            "Esc not claimed: no Recording indicator within {HANG:?} of the press \
-             (indicator calls: {:?}); observer events: {:?}",
-            rig.indicator.calls(),
-            rig.observer.events()
-        ));
-    }
-    hotkey_round_trip(rig)?;
-    if esc_unavailable_warnings(rig) > 0 {
-        return Err(format!(
-            "the hotkey thread's Esc claim was refused (Warning{{EscUnavailable}}); \
-             observer events: {:?}",
-            rig.observer.events()
-        ));
-    }
-    if esc_claimed() {
-        Ok(())
-    } else {
-        Err(format!(
-            "Esc not claimed bare and under the hotkey's modifiers after the claim ran \
-             (bare free: {}, Ctrl+Alt free: {}); observer events: {:?}",
-            esc_is_free(0),
-            esc_is_free(HOTKEY_MODS),
-            rig.observer.events()
-        ))
-    }
+    win32_support::esc_claim(
+        || recording_shown(rig),
+        &rig.registrar,
+        &|| esc_unavailable_warnings(rig) > 0,
+        &|| rig_context(rig),
+    )
 }
 
-/// The unused combination of [`hotkey_round_trip`] (never the rig's hotkey, never Esc).
-const ROUND_TRIP_COMBO: &str = "Ctrl+Alt+F9";
-
-/// T-108: one synchronous round trip on the hotkey thread's request channel: a
-/// registrar `prepare` of [`ROUND_TRIP_COMBO`] under the spare id, then its `abort`.
-/// When it returns `Ok`, every request queued before it (an Esc claim or release
-/// included) has run. Prepare and abort touch only the spare id (`Registrations::
-/// handle`), so the active hotkey and the Esc ids stay as they were; the check reads
-/// back that the hotkey is still held and the spare combination free again (neither
-/// probe is an Esc registration). `Err` (with the observer's events) when the thread
-/// did not answer within the registrar's budget, refused the spare combination, or
-/// the round trip changed a registration.
+/// T-108: [`win32_support::hotkey_round_trip`] over this rig's registrar.
 fn hotkey_round_trip(rig: &Rig) -> Result<(), String> {
-    let spare = parse_hotkey(ROUND_TRIP_COMBO)
-        .map_err(|e| format!("premise: {ROUND_TRIP_COMBO} does not parse: {e:?}"))?;
-    let prepared = rig.registrar.prepare(spare, Mode::Hold).map_err(|e| {
-        format!(
-            "no round trip on the hotkey thread's request channel: prepare of \
-             {ROUND_TRIP_COMBO} was {e:?} (refused, or not answered in the budget); \
-             observer events: {:?}",
-            rig.observer.events()
-        )
-    })?;
-    rig.registrar.abort(prepared);
-    if TakenHotkey::take().is_ok() {
-        return Err(format!(
-            "Ctrl+Alt+Space is free after the round trip (a reassert queued before it, or \
-             the round trip, released it); observer events: {:?}",
-            rig.observer.events()
-        ));
-    }
-    if !combo_is_free(ROUND_TRIP_COMBO) {
-        return Err(format!(
-            "{ROUND_TRIP_COMBO} is still registered after the round trip's abort; \
-             observer events: {:?}",
-            rig.observer.events()
-        ));
-    }
-    Ok(())
+    win32_support::hotkey_round_trip(&rig.registrar, &|| rig_context(rig))
 }
 
 /// The observer's `Warning{EscUnavailable}` count.
