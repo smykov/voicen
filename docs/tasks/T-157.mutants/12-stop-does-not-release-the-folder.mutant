@@ -1,0 +1,9 @@
+guarantee: Acceptance 2 / (S): after a stop the folder is released, so every later step and a next call work
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+        self.deps.store.release(&dir);
+        let bytes = |track: Track| {
+--- new
+        let bytes = |track: Track| {
+--- end

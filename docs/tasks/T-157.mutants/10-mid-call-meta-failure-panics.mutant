@@ -1,0 +1,24 @@
+guarantee: Acceptance 2 / (S): a mid-call meta write failure lets the call go on
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+        if rec.failed {
+            // After a failed track write the call's folder is not written again (I-d).
+            return;
+        }
+        if let Err(e) = write_meta(&rec.dir, &rec.meta) {
+            // The call goes on; the stop writes the full list again.
+            self.log.write(LogEvent::CallStorageFailed {
+                kind: StorageKind::Meta,
+                os: e.raw_os_error(),
+            });
+        }
+--- new
+        if rec.failed {
+            // After a failed track write the call's folder is not written again (I-d).
+            return;
+        }
+        if let Err(e) = write_meta(&rec.dir, &rec.meta) {
+            panic!("meta {e}");
+        }
+--- end

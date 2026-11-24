@@ -1,0 +1,14 @@
+guarantee: Acceptance 2 / (S): a failed track write stops the call (StorageError)
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+        if failed {
+            return Some(StopReason::StorageError);
+        }
+        let now = self.deps.mono.now();
+--- new
+        if false && failed {
+            return Some(StopReason::StorageError);
+        }
+        let now = self.deps.mono.now();
+--- end

@@ -1114,7 +1114,10 @@ fn rows() -> Vec<Row> {
                 "the write failure is logged"
             );
             assert_eq!(storage_failed_kinds(fx)[0], "write");
+            // FR-016: the audio of both tracks ends at the fault, nothing more is written.
+            let at_fault = fx.audio_of(&fx.dir());
             fx.router.pump(7_000);
+            fx.drained(7_000);
             assert!(
                 wait(|| {
                     fx.rig.session.tick();
@@ -1124,6 +1127,10 @@ fn rows() -> Vec<Row> {
             );
             fx.rig.session.toggle_subtitles(false, CallSource::Switch);
             fx.assert_prefix(&before, "after the write failure");
+            assert!(
+                fx.audio_of(&fx.dir()) == at_fault,
+                "a track was written after the failed write"
+            );
             fx.hold();
             assert!(both.iter().all(|_| true));
             assert_eq!(fx.rig.only_meta()["state"], serde_json::json!("recording"));
