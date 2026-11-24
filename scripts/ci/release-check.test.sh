@@ -148,7 +148,9 @@ mk_dir() {
 
 failed=0
 passed=0
-fail() { echo "FAIL $label: $1" >&2; sed 's/^/       | /' <<<"$out" >&2; failed=$((failed + 1)); ok=0; }
+# T-179 (I-6): a case counts once however many of its assertions fail (every assertion is still
+# printed); `ok` is the case's own flag, set by `call`.
+fail() { echo "FAIL $label: $1" >&2; sed 's/^/       | /' <<<"$out" >&2; [ "$ok" = 1 ] && failed=$((failed + 1)); ok=0; }
 done_case() { [ "$ok" = 1 ] && { echo "ok   $label"; passed=$((passed + 1)); }; }
 
 # tree_state <dir>: every path under <dir> and the bytes of every file (S4 of validation 3:
@@ -166,12 +168,15 @@ call() {
   local view="$2" tok="$3"
   shift 3
   : > "$tmp/gh.log"
+  # T-179 (I-3): GITHUB_ENV points to a seeded file in every case; release-check.sh never writes it.
+  printf 'SEED_KEY=seed-value\n' > "$tmp/github_env.seed"
+  cp "$tmp/github_env.seed" "$tmp/github_env"
   local root_arg="${3:-}" before=""
   [ -n "$root_arg" ] && before="$(tree_state "$root_arg")"
   if [ "$tok" = - ]; then
-    out="$(env -u GH_TOKEN -u GITHUB_TOKEN PATH="$tmp/bin:$PATH" STUB_DIR="$tmp" STUB_VIEW="$view" "$script" "$@" 2>&1)"
+    out="$(env -u GH_TOKEN -u GITHUB_TOKEN PATH="$tmp/bin:$PATH" STUB_DIR="$tmp" STUB_VIEW="$view" GITHUB_ENV="$tmp/github_env" "$script" "$@" 2>&1)"
   else
-    out="$(env -u GITHUB_TOKEN PATH="$tmp/bin:$PATH" STUB_DIR="$tmp" STUB_VIEW="$view" GH_TOKEN="$tok" "$script" "$@" 2>&1)"
+    out="$(env -u GITHUB_TOKEN PATH="$tmp/bin:$PATH" STUB_DIR="$tmp" STUB_VIEW="$view" GITHUB_ENV="$tmp/github_env" GH_TOKEN="$tok" "$script" "$@" 2>&1)"
   fi
   rc=$?
   common
@@ -185,6 +190,8 @@ common() {
     fail "a gh write subcommand was called: $(tr '\n' '|' < "$tmp/gh.log")"
   fi
   ! grep -qF -- "$token" <<<"$out" || fail "the output contains GH_TOKEN"
+  cmp -s "$tmp/github_env.seed" "$tmp/github_env" ||
+    fail "GITHUB_ENV changed (release-check.sh never writes it): $(tr '\n' '|' < "$tmp/github_env")"
 }
 want_rc() { [ "$rc" = "$1" ] || fail "exit $rc, want $1"; }
 # names <number>: the number stands alone in the output (not inside a longer dotted number).
@@ -213,6 +220,16 @@ call pass-v0.1.200-run-100 missing "$token" v0.1.200 100 "$tmp/repo" "$tmp/i"
 want_rc 0
 says "$tmp/i/Voicen_0.1.200_x64-setup.exe" "the installer path"
 gh_viewed v0.1.200
+done_case
+
+# T-179 (I-3, T-026 r1#3, N12): with GITHUB_ENV set, the pass path leaves the file byte-identical
+# (the premise of the windows job must not overwrite VOICEN_VERSION).
+mk_dir "$tmp/i" Voicen_0.1.200_x64-setup.exe
+call pass-github-env-untouched missing "$token" v0.1.200 100 "$tmp/repo" "$tmp/i"
+want_rc 0
+[ -s "$tmp/github_env" ] || fail "the seeded GITHUB_ENV file was emptied"
+cmp -s "$tmp/github_env.seed" "$tmp/github_env" || fail "GITHUB_ENV differs from its seed"
+! grep -q VOICEN_VERSION "$tmp/github_env" || fail "VOICEN_VERSION was written to GITHUB_ENV"
 done_case
 
 # #103 boundary: patch = run number passes (no earlier build had it).
@@ -323,6 +340,16 @@ mk_dir "$tmp/i" Voicen_10.1.8_x64-setup.exe
 call refuse-installer-10.1.8-under-v0.1.8 missing "$token" v0.1.8 5 "$tmp/repo" "$tmp/i"
 want_rc 1; names 10.1.8 "the installer's version"; names 0.1.8 "the tag's version"
 done_case
+# T-179 (I-1, T-026 r6#3): the installer's FIRST _N.N.N_ must be the tag's version; a later one is
+# not enough. nozip=1 plus the explicit zip: mk_dir would derive voicen-0.1.7-symbols.zip from the
+# leftmost version and the case would be refused for the wrong reason.
+nozip=1
+mk_dir "$tmp/i" Voicen_0.1.7_0.1.200_x64-setup.exe
+printf 'not a zip, never read\n' > "$tmp/i/voicen-0.1.200-symbols.zip"
+nozip=0
+call refuse-installer-first-version-other missing "$token" v0.1.200 100 "$tmp/repo" "$tmp/i"
+want_rc 1; names 0.1.7 "the installer's first version"; names 0.1.200 "the tag's version"
+done_case
 mk_dir "$tmp/i" Voicen_0.1.80_x64-setup.exe
 call refuse-installer-0.1.80-under-v0.1.8 missing "$token" v0.1.8 5 "$tmp/repo" "$tmp/i"
 want_rc 1
@@ -346,7 +373,7 @@ done_case
 
 # The tag is not vX.Y.Z.
 mk_dir "$tmp/i" Voicen_0.1.200_x64-setup.exe
-for t in 0.1.200 v0.1 v0.1.200-rc.1 v0.01.200 v0.1.0200 refs/tags/v0.1.200 'v0.1.200 '; do
+for t in 0.1.200 v0.1 v0.1.200-rc.1 v0.01.200 v0.1.0200 refs/tags/v0.1.200 'v0.1.200 ' v0x1x200 v0-1-200; do
   call "refuse-tag-$t" missing "$token" "$t" 100 "$tmp/repo" "$tmp/i"
   want_rc 1; says "$t" "the bad tag"
   done_case

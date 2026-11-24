@@ -1,0 +1,8 @@
+guarantee: I-2: release-check.sh refuses a tag whose separators are not dots (T-026 v6 X3)
+file: scripts/ci/release-check.sh
+added_by: test-writer
+--- old
+if [[ "$tag" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+--- new
+if [[ "$tag" =~ ^v([0-9]+).([0-9]+).([0-9]+)$ ]]; then
+--- end
