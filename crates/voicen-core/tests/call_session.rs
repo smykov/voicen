@@ -3040,6 +3040,260 @@ fn subtitles_only_reopens_a_lost_track_silently() {
     rig.session.toggle_subtitles(false, CallSource::Switch);
 }
 
+// ---- T-222: a track down under subtitles stays down when record is turned on ------------
+
+/// Subtitles run, both tracks delivered 1 s, then the system stream dies at 1 s and every
+/// open fails with `NoDevice`: the device thread's reopen is pending (I8). The source clock
+/// stands at 1 s, which is where a record start will place the call's position 0.
+fn subtitles_with_a_lost_system_track() -> CallRig {
+    let rig = CallRig::with_capacity(16_384, quiet);
+    assert_eq!(
+        rig.session.toggle_subtitles(true, CallSource::Switch),
+        Toggled::Started
+    );
+    rig.source.feed_both(0, 1_000, 0.3, 0.1);
+    assert!(
+        consumer_has(&rig, fed(0, 1_000)),
+        "premise: both tracks flow"
+    );
+    rig.source.set_stamp_ms(1_000);
+    rig.source.fail_all(Track::System, OpenError::NoDevice);
+    rig.source
+        .lose(Track::System, LossCause::NotAvailable, 1_000);
+    assert!(
+        wait(|| rig.source.attempts(Track::System) >= 2),
+        "premise: the first reopen attempt comes at once"
+    );
+    rig
+}
+
+fn lines_with(rig: &CallRig, head: &str) -> Vec<usize> {
+    rig.call_lines()
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| l.head == head)
+        .map(|(i, _)| i)
+        .collect()
+}
+
+#[test]
+fn record_on_after_a_track_declared_silent_under_subtitles_marks_the_call_lost() {
+    // T-222 Acceptance 1 and the failure branch (I10, I8): subtitles on, the system stream
+    // dies and every open fails (`NoDevice`); the device thread declares it silent at 2 s
+    // while record is off (D6: nothing logged, stored or shown, and never sent again). Then
+    // record is turned on and the mic speaks for more than 60 s. The new call is marked
+    // lost as if the loss had happened at its start: exactly one `TrackLost{system}`
+    // warning, one `call_track_silent rule=lost` line and one `call_device cause=no_device
+    // to=none` line plus one meta entry at position 0, all after `call_started`; and no
+    // `cant_hear_*` warning or line for the dead track.
+    // Bite: the Silent outcome still dropped with record off (no warning, line or entry);
+    // the lost timeline not seeded (the dead track padded as a live one, `cant_hear` fires);
+    // the declaration raised twice (a second warning entry, line or meta entry); the
+    // declaration emitted before `call_started`; the entry not at position 0.
+    let rig = subtitles_with_a_lost_system_track();
+    advance(&rig, ms(2_000));
+    polled(&rig);
+    assert!(
+        rig.call_lines().is_empty(),
+        "premise (D6): the declaration under subtitles is silent: {:?}",
+        rig.call_lines()
+    );
+    started(&rig, CallSource::Tray);
+    rig.source.feed(Track::Mic, 1_000, 64_000, 0.3);
+    drained(&rig, &[Track::Mic], 64_000);
+    let lost_listed = wait(|| kind_count(&rig, WarningKind::TrackLost) == 1);
+    let warnings = warnings_but_provider(&rig);
+    rig.session.stop(StopReason::User);
+
+    let lines = rig.call_lines();
+    let started_at = lines_with(&rig, "call_started");
+    assert_eq!(started_at.len(), 1, "{lines:?}");
+    let silent = lines_with(&rig, "call_track_silent");
+    let silent_lost: Vec<_> = silent
+        .iter()
+        .filter(|i| lines[**i].get("rule") == Some("lost"))
+        .collect();
+    assert_eq!(
+        silent_lost.len(),
+        1,
+        "one call_track_silent rule=lost for the new call: {lines:?}"
+    );
+    assert_eq!(lines[*silent_lost[0]].get("track"), Some("system"));
+    assert!(*silent_lost[0] > started_at[0], "after call_started");
+    let device = lines_with(&rig, "call_device");
+    assert_eq!(device.len(), 1, "one call_device line: {lines:?}");
+    let line = &lines[device[0]];
+    assert_eq!(line.get("track"), Some("system"));
+    assert_eq!(line.get("cause"), Some("no_device"));
+    assert_eq!(line.get("to"), Some("none"));
+    assert!(device[0] > started_at[0], "after call_started");
+
+    let changes = meta_changes(&rig);
+    assert_eq!(changes.len(), 1, "one entry: {changes:?}");
+    assert_eq!(changes[0]["track"], json!("system"));
+    assert_eq!(changes[0]["cause"], json!("no_device"));
+    assert_eq!(changes[0]["to"], Value::Null);
+    assert_eq!(
+        changes[0]["at_ms"],
+        json!(0),
+        "lost from the call's start: {changes:?}"
+    );
+
+    assert!(lost_listed, "one TrackLost warning is listed: {warnings:?}");
+    assert_eq!(
+        warnings
+            .iter()
+            .filter(|k| **k == WarningKind::TrackLost)
+            .count(),
+        1,
+        "once: {warnings:?}"
+    );
+    assert!(
+        !warnings.iter().any(|k| matches!(
+            k,
+            WarningKind::CantHearOtherParty | WarningKind::CantHearYou
+        )),
+        "a track with no device is never 'cannot hear': {warnings:?}"
+    );
+    assert!(
+        cant_hear_lines(&rig).is_empty(),
+        "{:?}",
+        cant_hear_lines(&rig)
+    );
+}
+
+#[test]
+fn record_on_while_a_reopen_is_pending_declares_the_loss_from_call_start() {
+    // T-222 Acceptance 1, the other sub-case (I10): the system stream died under subtitles
+    // and the reopen is pending, not yet declared (1 s of 2 s); record is turned on; the
+    // mic speaks 2 s (the dead track follows it with zeros), then the 2 s mark passes and
+    // the device thread declares it. The declaration is for the whole call: its entry is at
+    // position 0 (not where the zeros stand), one TrackLost, no `cant_hear` for that track
+    // after more than 60 s of mic speech.
+    // Bite: the timeline not marked lost at attach (the entry at where the zeros stand, and
+    // `cant_hear` fires); the declaration made twice; the declaration dropped.
+    let rig = subtitles_with_a_lost_system_track();
+    advance(&rig, ms(500));
+    assert!(rig.call_lines().is_empty(), "premise: nothing declared yet");
+    started(&rig, CallSource::Tray);
+    // The dead track is stalled for the writer once the monotonic clock moved on (500 ms),
+    // so it follows the mic's 2 s with zeros before the 2 s mark declares it.
+    advance(&rig, ms(500));
+    rig.source.feed(Track::Mic, 1_000, 3_000, 0.3);
+    drained(&rig, &[Track::Mic], 3_000);
+    advance(&rig, ms(1_000));
+    assert!(
+        wait(|| rig.lines_named("call_track_silent").len() == 1),
+        "the declaration at 2 s is logged for this call: {:?}",
+        rig.call_lines()
+    );
+    assert!(wait(|| meta_changes(&rig).len() == 1), "and stored");
+    let entry = &meta_changes(&rig)[0];
+    assert_eq!(entry["track"], json!("system"));
+    assert_eq!(entry["to"], Value::Null);
+    assert_eq!(
+        entry["at_ms"],
+        json!(0),
+        "declared from the call's start: {entry}"
+    );
+
+    rig.source.feed(Track::Mic, 3_000, 64_000, 0.3);
+    drained(&rig, &[Track::Mic], 64_000);
+    let lost_listed = wait(|| kind_count(&rig, WarningKind::TrackLost) == 1);
+    let warnings = warnings_but_provider(&rig);
+    rig.session.stop(StopReason::User);
+
+    assert!(lost_listed, "one TrackLost warning: {warnings:?}");
+    assert_eq!(
+        warnings
+            .iter()
+            .filter(|k| **k == WarningKind::TrackLost)
+            .count(),
+        1,
+        "{warnings:?}"
+    );
+    assert!(
+        !warnings.iter().any(|k| matches!(
+            k,
+            WarningKind::CantHearOtherParty | WarningKind::CantHearYou
+        )),
+        "{warnings:?}"
+    );
+    assert!(
+        cant_hear_lines(&rig).is_empty(),
+        "{:?}",
+        cant_hear_lines(&rig)
+    );
+    assert_eq!(rig.lines_named("call_track_silent").len(), 1, "once");
+    assert_eq!(device_lines(&rig).len(), 1, "once");
+    assert_eq!(meta_changes(&rig).len(), 1, "once");
+}
+
+#[test]
+fn reopen_after_record_on_over_a_lost_track_records_the_gap_from_call_start() {
+    // T-222 Acceptance 2 (decisions #344 Q1 (a), I9): the track was down when record
+    // started (declared silent under subtitles). When it reopens at 4 s, its device change
+    // records the whole silence of this call, from position 0 to where the new audio lands
+    // (new audio is stamped 5 s, the call started at 1 s: about 4 000 ms), not gap 0; the
+    // call also holds the earlier to=none entry, so two entries and two lines.
+    // Bite: the gap kept at 0 for a record started after the loss; the gap measured from
+    // the attach or from the reopen instead of position 0; the reopen entry missing.
+    let rig = subtitles_with_a_lost_system_track();
+    advance(&rig, ms(2_000));
+    polled(&rig);
+    started(&rig, CallSource::Tray);
+    rig.source.feed(Track::Mic, 1_000, 5_000, 0.3);
+    drained(&rig, &[Track::Mic], 5_000);
+    rig.source.heal(Track::System);
+    advance(&rig, ms(2_000));
+    assert!(
+        wait(|| rig.source.ok_opens(Track::System) == 2),
+        "the 4 s attempt reopens it"
+    );
+    rig.source.feed_tone(Track::System, 5_000, 5_200, 0.2);
+    rig.source.feed(Track::Mic, 5_000, 6_000, 0.3);
+    rig.source.feed_tone(Track::System, 5_200, 6_000, 0.2);
+    let reopen_stored = wait(|| {
+        meta_changes(&rig)
+            .iter()
+            .any(|c| c["cause"] == json!("reopened"))
+    });
+    rig.session.stop(StopReason::User);
+
+    assert!(
+        reopen_stored,
+        "the reopen is stored: {:?} / {:?}",
+        device_lines(&rig),
+        meta_changes(&rig)
+    );
+    assert_eq!(
+        device_lines(&rig).len(),
+        2,
+        "the declaration and the reopen, each once: {:?}",
+        device_lines(&rig)
+    );
+    assert_eq!(meta_changes(&rig).len(), 2, "{:?}", meta_changes(&rig));
+    let changes = meta_changes(&rig);
+    let back = changes
+        .iter()
+        .find(|c| c["cause"] == json!("reopened"))
+        .unwrap_or_else(|| panic!("a reopened entry: {changes:?}"));
+    let new_id = reopened_id(Track::System, 2);
+    assert_eq!(back["to"], json!(new_id));
+    assert_eq!(back["at_ms"], json!(0), "from position 0: {back}");
+    let gap = back["gap_ms"].as_u64().expect("gap_ms");
+    assert!(
+        (3_750..=4_250).contains(&gap),
+        "the whole silence of this call, 0 to where the audio lands: {gap}"
+    );
+    let line = device_lines(&rig)
+        .into_iter()
+        .find(|l| l.get("cause") == Some("reopened"))
+        .expect("a reopened line");
+    assert_eq!(line.get("gap_ms"), Some(gap.to_string().as_str()));
+    assert_eq!(line.get("to"), Some(new_id.as_str()));
+}
+
 #[test]
 fn closing_while_a_reopen_is_pending_leaves_no_handle_open() {
     // D1: a stop that comes while a reopen is running (the open is held like a slow
