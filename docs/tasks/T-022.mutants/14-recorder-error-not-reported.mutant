@@ -1,0 +1,8 @@
+guarantee: FR-011: every history disk error reaches the log (history_failed), the recorder's error callback
+file: crates/voicen-core/src/history/recorder.rs
+added_by: test-writer
+--- old
+            (self.on_error)(&error);
+--- new
+            let _ = &error;
+--- end

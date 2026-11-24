@@ -1,0 +1,9 @@
+guarantee: AC-2: Clear / off -> file deleted (the file store reports a failed deletion)
+file: crates/voicen-core/src/history/store.rs
+added_by: test-writer
+--- old
+        doc.and(tmp).map_err(failed)
+--- new
+        let _ = doc.and(tmp).map_err(failed);
+        Ok(())
+--- end

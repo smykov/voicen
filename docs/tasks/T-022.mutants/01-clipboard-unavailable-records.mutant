@@ -1,0 +1,13 @@
+guarantee: AC-2: failed/empty/cancelled dictations create no entry (clipboard unavailable records nothing)
+file: crates/voicen-core/src/pipeline.rs
+added_by: test-writer
+--- old
+                    Err(ClipboardError) => FailureReason::ClipboardUnavailable,
+--- new
+                    Err(ClipboardError) => {
+                        if let Some(engine) = EngineLabel::of(job.settings) {
+                            self.deps.transcript_sink.delivered(&text, engine);
+                        }
+                        FailureReason::ClipboardUnavailable
+                    }
+--- end

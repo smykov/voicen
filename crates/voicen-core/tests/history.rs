@@ -443,6 +443,32 @@ fn c3_delete_failure_on_off_keeps_the_notice_and_the_next_operation_retries() {
     assert_eq!(h.view().notice, None);
 }
 
+#[test]
+fn c3_a_failed_deletion_on_off_is_retried_by_the_next_settings_apply_while_off() {
+    // FR-009 (T-022 failure-branch bite, mutant 07): history is already off and its
+    // deletion failed once; the next settings apply (still off, e.g. a size change
+    // saved while off) is the next change and must retry the deletion, not skip it
+    // because history "was already off".
+    let store = FakeStore::new().failing_delete(&[1]);
+    let (mut h, _) = History::open(store.clone(), true, 10);
+    record_n(&mut h, 2);
+    assert!(
+        h.apply_settings(false, 10).is_some(),
+        "premise: delete #1 fails"
+    );
+    assert_eq!(
+        store.stored_entries().len(),
+        2,
+        "premise: text still stored"
+    );
+
+    assert_eq!(h.apply_settings(false, 5), None);
+    assert_eq!(store.deletes(), 2, "the off apply retried the deletion");
+    assert_eq!(store.doc(), None, "the stored text is gone");
+    assert_eq!(h.view().notice, None);
+    assert_eq!(store.saves(), 2, "nothing written while off");
+}
+
 // ---- C4: clear -----------------------------------------------------------------------
 
 #[test]

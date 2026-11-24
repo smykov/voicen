@@ -24,7 +24,7 @@ use voicen_core::autostart::FakeAutostart;
 use voicen_core::clock::FakeClock;
 use voicen_core::history::{
     follow_settings, EngineKind as HistoryEngine, EngineLabel, FileHistoryStore, History,
-    HistoryNotice, HistoryRecorder, HistoryView,
+    HistoryError, HistoryErrorKind, HistoryNotice, HistoryOp, HistoryRecorder, HistoryView,
 };
 use voicen_core::hotkey_registrar::FakeHotkeyRegistrar;
 use voicen_core::models::FakeDownloadedModels;
@@ -279,4 +279,59 @@ fn the_recorder_survives_a_disk_failure_and_shows_the_notice() {
     let view = recorder.view();
     assert_eq!(texts(&view), vec![SENTINEL.to_string()], "kept in memory");
     assert_eq!(view.notice, Some(HistoryNotice::SaveFailed));
+}
+
+#[test]
+fn the_recorder_hands_every_disk_error_to_its_error_sink_without_text() {
+    // FR-011 (T-022 failure-branch bite, mutant 14): the shell logs `history_failed`
+    // from the recorder's error callback, so a disk error that never reaches it is a
+    // silent failure. One callback call per failed operation, op and kind only.
+    let dir = TempDir::new();
+    let blocker = dir.path().join("blocker");
+    std::fs::write(&blocker, b"x").expect("blocker");
+    let (history, _) = History::open(FileHistoryStore::new(blocker.join("data")), true, 20);
+    let errors: Arc<Mutex<Vec<HistoryError>>> = Arc::default();
+    let seen = errors.clone();
+    let recorder = HistoryRecorder::new(
+        history,
+        Arc::new(FakeClock::at(
+            UNIX_EPOCH + Duration::from_secs(1_790_000_000),
+        )),
+        Box::new(|_| {}),
+    )
+    .with_errors(Box::new(move |error| {
+        seen.lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(error.clone())
+    }));
+
+    recorder.delivered(SENTINEL, label());
+    let got = errors
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone();
+    assert_eq!(got.len(), 1, "one error for the one failed save: {got:?}");
+    assert_eq!(got[0].op, HistoryOp::Save);
+    assert!(matches!(got[0].kind, HistoryErrorKind::Io(_)), "{got:?}");
+    for error in &got {
+        assert!(!error.to_string().contains(SENTINEL));
+        assert!(!format!("{error:?}").contains(SENTINEL));
+    }
+
+    // A successful operation reports nothing more.
+    let ok = TempDir::new();
+    let (history, _) = History::open(FileHistoryStore::new(ok.path().to_path_buf()), true, 20);
+    let quiet: Arc<Mutex<usize>> = Arc::default();
+    let count = quiet.clone();
+    let recorder = HistoryRecorder::new(
+        history,
+        Arc::new(FakeClock::at(UNIX_EPOCH)),
+        Box::new(|_| {}),
+    )
+    .with_errors(Box::new(move |_| {
+        *count.lock().unwrap_or_else(PoisonError::into_inner) += 1
+    }));
+    recorder.delivered(SENTINEL, label());
+    recorder.clear();
+    assert_eq!(*quiet.lock().unwrap_or_else(PoisonError::into_inner), 0);
 }

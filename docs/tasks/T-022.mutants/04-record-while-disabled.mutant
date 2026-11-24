@@ -1,0 +1,8 @@
+guarantee: AC-2: history turned off -> nothing more written (record is a no-op while disabled)
+file: crates/voicen-core/src/history/mod.rs
+added_by: test-writer
+--- old
+        if !self.enabled || text.trim().is_empty() {
+--- new
+        if text.trim().is_empty() {
+--- end

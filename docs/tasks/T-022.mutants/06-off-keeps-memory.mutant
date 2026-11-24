@@ -1,0 +1,9 @@
+guarantee: AC-2: history turned off -> stored entries deleted (the shown list empties too)
+file: crates/voicen-core/src/history/mod.rs
+added_by: test-writer
+--- old
+            let was_enabled = std::mem::replace(&mut self.enabled, false);
+            self.entries.clear();
+--- new
+            let was_enabled = std::mem::replace(&mut self.enabled, false);
+--- end

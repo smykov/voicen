@@ -1,0 +1,12 @@
+guarantee: AC-2: Clear -> list empty and file deleted
+file: crates/voicen-core/src/history/mod.rs
+added_by: test-writer
+--- old
+        self.entries.clear();
+        self.erase()
+    }
+--- new
+        self.entries.clear();
+        None
+    }
+--- end

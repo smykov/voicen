@@ -1,0 +1,2 @@
+# T-022: the core history tests only (history store/list, pipeline sink, recorder + settings follower).
+cargo test -j 2 -p voicen-core --no-fail-fast --test history --test history_pipeline --test history_follower
