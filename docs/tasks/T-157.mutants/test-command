@@ -1,0 +1,2 @@
+# the task's tests (own test binary, panic hook installed only there), core area container
+cargo test -j 2 -p voicen-core --test call_privacy
