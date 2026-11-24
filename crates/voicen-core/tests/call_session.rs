@@ -3380,6 +3380,91 @@ fn record_on_then_a_reopen_before_the_writers_next_round_follows_the_declaration
 }
 
 #[test]
+fn a_reopen_before_the_declaration_replay_leaves_the_next_call_live() {
+    // T-222 review r1 #1 (I9/I10): record on over a declared-silent track, the writer held;
+    // the track reopens and its audio is queued meanwhile, so the writer handles the reopen
+    // before it replays the call's queued declaration. The replay must only make the
+    // call-side declaration: the device state of the (now live) track stays live. Record
+    // off with subtitles kept, the system track fed, record on again: the second call has
+    // no `call_device` line, no `call_track_silent` line, no meta entry and no new
+    // `TrackLost` warning for the system track.
+    // Bite: the replay (`flush_warnings` / `end_recording` through `outcome`) rewriting the
+    // writer's device state of a live track (down, silent) so the next attach seeds it lost.
+    // Best effort like the two tests above: it bites when `pause_writer` wins the race.
+    let rig = subtitles_with_a_lost_system_track();
+    advance(&rig, ms(2_000));
+    polled(&rig);
+    started(&rig, CallSource::Tray);
+    let pause = rig.session.pause_writer();
+    rig.source.heal(Track::System);
+    advance(&rig, ms(2_000));
+    assert!(
+        wait(|| rig.source.ok_opens(Track::System) == 2),
+        "the 4 s attempt reopens it"
+    );
+    rig.source.feed(Track::Mic, 1_000, 5_000, 0.3);
+    rig.source.feed_tone(Track::System, 5_000, 5_200, 0.2);
+    rig.source.feed(Track::Mic, 5_000, 6_000, 0.3);
+    rig.source.feed_tone(Track::System, 5_200, 6_000, 0.2);
+    // The record off reaches the writer while it is held, so the writer handles the reopen
+    // and then makes the queued declaration in `end_recording`, under the session's lock.
+    let release = release_later(pause, Duration::from_millis(150));
+    assert_eq!(
+        rig.session.toggle_record(false, CallSource::Tray),
+        Toggled::Stopped
+    );
+    release.join().expect("release thread");
+    assert_eq!(
+        device_lines(&rig).len(),
+        2,
+        "premise: the first call has its declaration and its reopen: {:?}",
+        rig.call_lines()
+    );
+    assert!(rig.session.is_subtitles(), "record off keeps subtitles");
+    let lines_before = rig.call_lines().len();
+    let lost_before = warning_ids(&rig, WarningKind::TrackLost);
+
+    rig.source.set_stamp_ms(6_000);
+    started(&rig, CallSource::Tray);
+    rig.source.feed(Track::Mic, 6_000, 8_000, 0.3);
+    rig.source.feed_tone(Track::System, 6_000, 8_000, 0.2);
+    drained(&rig, &[Track::Mic], 8_000);
+    let _ = barrier(&rig, &[(Track::Mic, 0.3), (Track::System, 0.2)], 8_000);
+    rig.session.stop(StopReason::User);
+
+    let lines = rig.call_lines();
+    let second = &lines[lines_before..];
+    assert!(
+        second.iter().any(|l| l.head == "call_started"),
+        "premise: the second call started: {second:?}"
+    );
+    assert!(
+        !second.iter().any(|l| l.head == "call_device"),
+        "a live track has no device line in the second call: {second:?}"
+    );
+    assert!(
+        !second.iter().any(|l| l.head == "call_track_silent"),
+        "a live track is not declared silent in the second call: {second:?}"
+    );
+    let folders = rig.folders();
+    assert_eq!(folders.len(), 2, "two call folders: {folders:?}");
+    let meta: Value =
+        serde_json::from_slice(&std::fs::read(folders[1].join("meta.json")).expect("meta.json"))
+            .expect("meta.json is JSON");
+    assert!(
+        meta["device_changes"]
+            .as_array()
+            .is_none_or(|changes| changes.is_empty()),
+        "no device entry in the second call: {meta}"
+    );
+    let lost_after = warning_ids(&rig, WarningKind::TrackLost);
+    assert!(
+        lost_after.iter().all(|id| lost_before.contains(id)),
+        "no new TrackLost warning: before {lost_before:?}, after {lost_after:?}"
+    );
+}
+
+#[test]
 fn closing_while_a_reopen_is_pending_leaves_no_handle_open() {
     // D1: a stop that comes while a reopen is running (the open is held like a slow
     // device) waits for it, stops the handle it produced and joins the device thread: no
