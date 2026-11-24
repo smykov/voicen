@@ -1,0 +1,8 @@
+guarantee: AC-1: the declaration of a track down at record start is at position 0 (not where the zeros stand)
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+        let at_ms = lane.gap.as_ref().map_or(now_ms, |g| g.at_ms);
+--- new
+        let at_ms = now_ms;
+--- end

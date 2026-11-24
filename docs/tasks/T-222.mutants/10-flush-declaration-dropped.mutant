@@ -1,0 +1,10 @@
+guarantee: AC-1/AC-3: the queued declaration is emitted after call_started from the writer round
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+        for (track, cause) in std::mem::take(&mut self.declare) {
+            // The device thread's own declaration
+--- new
+        for (track, cause) in Vec::<(Track, DeviceCause)>::new() {
+            // The device thread's own declaration
+--- end

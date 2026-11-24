@@ -1,0 +1,16 @@
+guarantee: AC-2: the gap of a track down at record start opens at position 0
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+                        at_ms: 0,
+                        landed_ms: None,
+                        reopened: None,
+                    });
+                    if let Some(cause) = state.silent {
+--- new
+                        at_ms: lane.timeline.written() / SAMPLES_PER_MS + 1,
+                        landed_ms: None,
+                        reopened: None,
+                    });
+                    if let Some(cause) = state.silent {
+--- end

@@ -1,0 +1,15 @@
+guarantee: I9/I10 (review r1 #1): a declaration replayed for the call leaves the writer's device state alone, so a track that reopened before the replay is live at the next record start
+file: crates/voicen-core/src/call/session.rs
+added_by: developer round 2
+test: cargo test -j 2 -p voicen-core --test call_session leaves_the_next_call_live
+--- old
+        for (track, cause) in std::mem::take(&mut self.declare) {
+            self.declare_silent(track, cause);
+        }
+        for track in [Track::Mic, Track::System] {
+--- new
+        for (track, cause) in std::mem::take(&mut self.declare) {
+            self.outcome(Outcome::Silent { track, cause });
+        }
+        for track in [Track::Mic, Track::System] {
+--- end

@@ -1,0 +1,8 @@
+guarantee: AC-2: the reopen of such a track records the gap from position 0 to where the audio lands (not 0)
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+        let (at_ms, gap_ms) = (*at_ms, landed.saturating_sub(*at_ms));
+--- new
+        let (at_ms, gap_ms) = (*at_ms, 0);
+--- end
