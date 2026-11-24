@@ -3381,6 +3381,18 @@ fn record_on_then_a_reopen_before_the_writers_next_round_follows_the_declaration
 
 #[test]
 fn a_reopen_before_the_declaration_replay_leaves_the_next_call_live() {
+    reopen_before_the_replay_then_the_next_call(false);
+}
+
+#[test]
+fn a_reopen_before_the_writers_round_replay_leaves_the_next_call_live() {
+    reopen_before_the_replay_then_the_next_call(true);
+}
+
+/// `round_replay`: the held writer is let go and makes the replay in its own round
+/// (`flush_warnings`) before the record off; else the record off comes first and the
+/// replay is `end_recording`'s.
+fn reopen_before_the_replay_then_the_next_call(round_replay: bool) {
     // T-222 review r1 #1 (I9/I10): record on over a declared-silent track, the writer held;
     // the track reopens and its audio is queued meanwhile, so the writer handles the reopen
     // before it replays the call's queued declaration. The replay must only make the
@@ -3408,12 +3420,26 @@ fn a_reopen_before_the_declaration_replay_leaves_the_next_call_live() {
     rig.source.feed_tone(Track::System, 5_200, 6_000, 0.2);
     // The record off reaches the writer while it is held, so the writer handles the reopen
     // and then makes the queued declaration in `end_recording`, under the session's lock.
-    let release = release_later(pause, Duration::from_millis(150));
-    assert_eq!(
-        rig.session.toggle_record(false, CallSource::Tray),
-        Toggled::Stopped
-    );
-    release.join().expect("release thread");
+    if round_replay {
+        // Bite: `Writer::flush_warnings` making the replay through `outcome`.
+        drop(pause);
+        assert!(
+            wait(|| !device_lines(&rig).is_empty()),
+            "the round made the declaration: {:?}",
+            rig.call_lines()
+        );
+        assert_eq!(
+            rig.session.toggle_record(false, CallSource::Tray),
+            Toggled::Stopped
+        );
+    } else {
+        let release = release_later(pause, Duration::from_millis(150));
+        assert_eq!(
+            rig.session.toggle_record(false, CallSource::Tray),
+            Toggled::Stopped
+        );
+        release.join().expect("release thread");
+    }
     assert_eq!(
         device_lines(&rig).len(),
         2,
