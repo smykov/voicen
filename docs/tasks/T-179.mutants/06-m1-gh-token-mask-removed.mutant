@@ -1,5 +1,5 @@
 guarantee: Failure branch: a stub gh that echoes the token is masked (T-026 r1#2)
-file: scripts/ci/release-check.sh
+file: scripts/ci/gh-mask.sh
 added_by: test-writer
 --- old
   out="${out//"$GH_TOKEN"/***}"

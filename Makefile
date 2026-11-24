@@ -218,9 +218,10 @@ check-version-stamp:
 
 # T-026 (decisions #102, #103): "release job version check". scripts/ci/release-check.sh, the one
 # release verdict of ci.yml (release job and the windows job's premise / failure branch), accepts
-# a tag vX.Y.Z only when X.Y is the committed MAJOR.MINOR, Z >= the run number, exactly one
-# installer carries _X.Y.Z_ and (with GH_TOKEN) no release exists; every refusal exits 1 naming
-# both values, and it never calls a gh write subcommand. Stub gh on PATH, offline. Host bash.
+# a tag vX.Y.Z only when X.Y is the committed MAJOR.MINOR, Z >= the run number, there is exactly
+# one installer and the leftmost _N.N.N_ of its name equals X.Y.Z (T-179) and (with GH_TOKEN) no
+# release exists; every refusal exits 1 naming both values, it never calls a gh write subcommand
+# and never writes GITHUB_ENV. Stub gh on PATH, offline. Host bash.
 check-release-check:
 	scripts/ci/release-check.test.sh
 
