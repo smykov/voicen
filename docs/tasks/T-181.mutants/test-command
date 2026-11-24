@@ -1,0 +1,2 @@
+# T-181: the licenses unit tests that are green today (the red ones need the developer's change)
+node --test scripts/licenses/check.test.mjs scripts/licenses/accepted.test.mjs

@@ -35,9 +35,11 @@ test("the committed about.toml holds exactly the list of decisions #9 + #24", ()
 test("reads the owned head shape: comments, ids with WITH, in file order", () => {
   const toml = file([
     "# header comment",
+    "#",
     "# second header line",
     "accepted = [",
     "    # decision #9",
+    "    #",
     '    "MIT",',
     '    "Apache-2.0 WITH LLVM-exception",',
     '    # "GPL-3.0-only" was here once',
