@@ -216,6 +216,49 @@ impl Assets<Wry> for Page {
     }
 }
 
+/// T-267: a page whose first frame is late. The body starts white (unpainted, as WebView2's
+/// surface is before its first composition) and turns [`PAGE_RGB`] `paint_after` later from a
+/// `setTimeout`; `None` never turns it. It reacts to mousedown like [`Page`].
+struct LatePage {
+    paint_after: Option<Duration>,
+}
+
+impl LatePage {
+    fn html(&self) -> String {
+        let (r, g, b) = PAGE_RGB;
+        let (dr, dg, db) = DOWN_RGB;
+        let paint = self.paint_after.map_or_else(String::new, |after| {
+            format!(
+                "setTimeout(function(){{document.body.style.background='rgb({r},{g},{b})';}},{});",
+                after.as_millis()
+            )
+        });
+        format!(
+            "<!doctype html><html><head><meta charset=\"utf-8\"></head>\
+             <body style=\"margin:0;width:100vw;height:100vh;background:rgb(255,255,255)\">\
+             <script>{paint}document.addEventListener('mousedown',function(){{\
+             document.body.style.background='rgb({dr},{dg},{db})';}});</script>\
+             </body></html>"
+        )
+    }
+}
+
+impl Assets<Wry> for LatePage {
+    fn get(&self, key: &AssetKey) -> Option<Cow<'_, [u8]>> {
+        key.as_ref()
+            .ends_with(".html")
+            .then(|| Cow::Owned(self.html().into_bytes()))
+    }
+
+    fn iter(&self) -> Box<AssetsIter<'_>> {
+        Box::new(std::iter::empty())
+    }
+
+    fn csp_hashes(&self, _html_path: &AssetKey) -> Box<dyn Iterator<Item = CspHash<'_>> + '_> {
+        Box::new(std::iter::empty())
+    }
+}
+
 /// What a Wry test app hands its driver.
 struct Rig {
     app: App<Wry>,
@@ -227,7 +270,7 @@ struct Rig {
 /// The app as `run()` builds it (`build_app`) on the real Wry runtime, on a loaded settings.json
 /// (so `Ready` opens no settings window), with the release context's capabilities and `page` as
 /// the only asset.
-fn wry_rig(dir: &Path, page: Page) -> Rig {
+fn wry_rig(dir: &Path, page: impl Assets<Wry> + 'static) -> Rig {
     let log = voicen_lib::diag::start(dir.join("logs"), Box::new(|_| {}));
     let load = || {
         load_settings(
@@ -864,11 +907,47 @@ fn s4_a_click_reaches_the_page_and_the_target_keeps_or_regains_the_foreground() 
     // lost (`away` empty, recorded as evidence); under F the shell restored it. Bite: a
     // click-through window (the click lands on the target, the pixel stays), a window that takes
     // the activation and never gives it back.
+    s4_driver(
+        "s4_a_click_reaches_the_page_and_the_target_keeps_or_regains_the_foreground",
+        Page { drag: false },
+    );
+}
+
+#[test]
+fn s4_a_slow_first_paint_does_not_fail_the_page_premise() {
+    // T-267 Acceptance 1 and 3: the page paints PAGE_RGB 1.5 s after load (the shell's receipt
+    // only proves shown, not composed). The S4 driver must wait for the paint before it clicks.
+    // Red on a single-sample premise: `premise: ... not painted before the click: Some((255, 255,
+    // 255))`. Bite: a premise that samples once, or a fixed sleep shorter than the delay.
+    s4_driver(
+        "s4_a_slow_first_paint_does_not_fail_the_page_premise",
+        LatePage {
+            paint_after: Some(Duration::from_millis(1500)),
+        },
+    );
+}
+
+#[test]
+#[should_panic(expected = "premise: the indicator's page is not painted before the click")]
+fn s4_a_page_that_never_paints_fails_with_the_premise_not_the_watchdog() {
+    // T-267 Acceptance 2: the page stays white. The S4 driver ends with the premise message after
+    // the poll's HANG bound (120 s), not by the 240 s watchdog (exit code 3, which would not be
+    // this panic) and not by a later message (`the click did not reach the page`). This passes on
+    // a single sample too (it fails at once); it bites a poll that skips the premise, swallows
+    // its failure, or runs the click and later waits (3 x 120 s) after it failed.
+    s4_driver(
+        "s4_a_page_that_never_paints_fails_with_the_premise_not_the_watchdog",
+        LatePage { paint_after: None },
+    );
+}
+
+/// The S4 driver and its verdict over `page`: one click at the indicator's centre.
+#[track_caller]
+fn s4_driver(name: &'static str, page: impl Assets<Wry> + 'static) {
     let _serial = serial();
-    let _watchdog =
-        watchdog("s4_a_click_reaches_the_page_and_the_target_keeps_or_regains_the_foreground");
+    let _watchdog = watchdog(name);
     let dir = TempDir::new();
-    let rig = wry_rig(dir.path(), Page { drag: false });
+    let rig = wry_rig(dir.path(), page);
     let report = run_with_driver(rig, move |handle, _service| {
         let front = front();
         let (_indicator, shown_state) = show_recording(&handle);
