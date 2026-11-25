@@ -298,7 +298,8 @@ fn wry_rig(dir: &Path, page: impl Assets<Wry> + 'static) -> Rig {
     // Plain `cargo test` has no `custom-protocol` feature, so tauri is cfg(dev) and
     // `WebviewUrl::App` resolves against `build.dev_url` (http://localhost:1420): without this the
     // indicator would load the WebView2 error page, never `page`. Bite: with the line removed s4
-    // sees a white pixel and s5/s7 get no JS (no `start_dragging`).
+    // never sees its page pixel and fails its premise after the poll's HANG bound, and s5/s7 get
+    // no JS (no `start_dragging`).
     context.config_mut().build.dev_url = None;
     context.set_assets(Box::new(page));
     let app = voicen_lib::build_app(
@@ -955,22 +956,36 @@ fn s4_driver(name: &'static str, page: impl Assets<Wry> + 'static) {
         let rect = window_rect(raw).expect("the indicator's rect");
         let at = centre(&rect);
         let hit = hit_root(at);
-        let before = screen_pixel(at);
+        // The receipt proves the window shown, never its first frame composed (T-267): wait for
+        // the page's pixel, keeping the last sample for the premise. Not painted within HANG →
+        // no click and no later waits, so the premise (not the watchdog) ends the test.
+        let mut last = None;
+        let before = eventually(|| {
+            last = screen_pixel(at);
+            last.is_some_and(|p| near(p, PAGE_RGB))
+        });
+        if !before {
+            return (raw, hit, last, None);
+        }
         click(at);
         let painted = eventually(|| screen_pixel(at).is_some_and(|p| near(p, DOWN_RGB)));
         let regained = eventually(|| foreground().0 as isize == front.raw);
         let kept = holds_for(SETTLE, || foreground().0 as isize == front.raw);
-        (raw, hit, before, painted, regained, kept, front.finish())
+        (
+            raw,
+            hit,
+            last,
+            Some((painted, regained, kept, front.finish())),
+        )
     });
-    let (raw, hit, before, painted, regained, kept, fg) = report;
+    let (raw, hit, last, after) = report;
     assert_eq!(
         hit.0, raw,
         "premise: a click at the centre reaches {hit:?}, not the indicator"
     );
-    assert!(
-        before.is_some_and(|p| near(p, PAGE_RGB)),
-        "premise: the indicator's page is not painted before the click: {before:?}"
-    );
+    let Some((painted, regained, kept, fg)) = after else {
+        panic!("premise: the indicator's page is not painted before the click: {last:?}");
+    };
     assert!(
         painted,
         "the click did not reach the page (its mousedown pixel never showed)"
