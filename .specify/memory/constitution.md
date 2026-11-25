@@ -1,6 +1,6 @@
 # Voicen Constitution
 
-The engineering principles are defined in `PRINCIPLES.md` (P-001 … P-020), the single source.
+The engineering principles are defined in `PRINCIPLES.md` (P-001 … P-022), the single source.
 This constitution references them and does not restate them; it adds the product-level
 principles that follow from the approved requirements (`docs/requirements.md` v7). A change to
 `PRINCIPLES.md` updates this file in the same commit.
