@@ -28,6 +28,7 @@ use crate::engine::speech_model::{Abort, SpeechModel, SpeechModelLoader};
 use crate::failure::{FailureReason, TimeoutOrigin};
 use crate::local_models::catalog::ModelId;
 use crate::local_models::service::{InUse, ModelRelease, ReleaseGuard};
+use crate::settings::{EngineKind, Settings};
 
 /// Whether a transcription found its model loaded (spec FR-015; the dictation
 /// log's `local=cold|warm`, `load_ms`).
@@ -348,6 +349,22 @@ impl ModelResidency {
         }
         drop(st);
         drop(unloaded);
+    }
+
+    /// A settings save (spec 002 FR-012, T027): the selected model is the parsed
+    /// `builtin_local.model_id` iff `engine == BuiltinLocal` (otherwise none), then
+    /// [`Self::on_engine_or_model_changed`]. Never loads.
+    pub fn on_settings(&self, settings: &Settings) {
+        let selected = if settings.engine == EngineKind::BuiltinLocal {
+            settings
+                .builtin_local
+                .model_id
+                .as_deref()
+                .and_then(ModelId::parse)
+        } else {
+            None
+        };
+        self.on_engine_or_model_changed(selected);
     }
 
     /// The idle timer: unloads the model when nothing holds it, no recording runs

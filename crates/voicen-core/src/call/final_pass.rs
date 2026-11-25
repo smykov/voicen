@@ -56,9 +56,11 @@ use std::time::{Duration, Instant};
 use crate::audio::{AudioBuffer, SAMPLE_RATE};
 use crate::call::codec::{OpusOggReader, TrackDecoder};
 use crate::call::storage::{
-    mark_recovered, read_folder_meta, write_atomic, write_meta, CallError, CallErrorCode,
-    CallStore, Failure, ListState, Results, META_FILE, TRANSCRIPT_FILE, TRANSCRIPT_MD_FILE,
+    carry_disk_names, mark_recovered, meta_lock, read_folder_meta, write_atomic, write_meta,
+    CallError, CallErrorCode, CallStore, Failure, FolderDeleter, ListState, Results, META_FILE,
+    TRANSCRIPT_FILE, TRANSCRIPT_MD_FILE,
 };
+use crate::call::transcript::export_json;
 use crate::call::{
     merge, render_markdown, CallId, CallMeta, CallNotice, CallState, ChunkInput, DecodeEnd,
     EngineRef, FailReason, FinalOutcome, FinalStage, MergeInput, PassMode, SegmentV1, StorageKind,
@@ -70,7 +72,7 @@ use crate::engine::openai::{OpenAiCompatibleEngine, ResponseShape, Timed, TimedF
 use crate::engine::TranscribeRequest;
 use crate::secrets::{CredentialStore, KeySlot};
 use crate::settings::url::check_base_url;
-use crate::settings::Settings;
+use crate::settings::{CallSettings, Settings};
 use crate::timeouts::Timeouts;
 use crate::vad::{EnergyDetector, SpeechSpan, SpeechSpans, VadError};
 
@@ -745,8 +747,9 @@ fn storage_failed(events: &dyn PassEvents, kind: StorageKind, error: &io::Error)
     });
 }
 
-/// Writes `meta` as `failed{reason, track}`; returns the reason the pass ends with:
-/// `reason`, or `storage` when this write fails too (logged, never swallowed).
+/// Writes `meta` as `failed{reason, track}`, with the title and speakers on disk (under the
+/// meta lock, T-152); returns the reason the pass ends with: `reason`, or `storage` when this
+/// write fails too (logged, never swallowed).
 fn write_failed(
     dir: &Path,
     mut meta: CallMeta,
@@ -758,7 +761,12 @@ fn write_failed(
     meta.state = CallState::Failed;
     meta.failure = Some(Failure { reason, track });
     meta.pass_mode = Some(mode);
-    match write_meta(dir, &meta) {
+    let written = {
+        let _names = meta_lock();
+        carry_disk_names(dir, &mut meta);
+        write_meta(dir, &meta)
+    };
+    match written {
         Ok(()) => reason,
         Err(e) => {
             storage_failed(events, StorageKind::Meta, &e);
@@ -1214,12 +1222,20 @@ fn pass(
             PassMode::Timed,
         );
     }
-    // What a cancel writes back: the meta as the pass found it, `ready-to-transcribe`.
+    // What a cancel writes back: the meta as the pass found it, `ready-to-transcribe` (with
+    // the names on disk at that time).
     let mut at_start = meta.clone();
     at_start.state = CallState::ReadyToTranscribe;
     meta.state = CallState::Transcribing;
     meta.engines.transcription = Some(engine_ref.clone());
-    if let Err(e) = write_meta(&dir, &meta) {
+    // Every meta write of the pass takes the title and speakers from disk under the meta lock
+    // (T-152): a rename made while the pass runs is kept.
+    let written = {
+        let _names = meta_lock();
+        carry_disk_names(&dir, &mut meta);
+        write_meta(&dir, &meta)
+    };
+    if let Err(e) = written {
         storage_failed(events, StorageKind::Meta, &e);
         let _ = write_failed(
             &dir,
@@ -1273,8 +1289,13 @@ fn pass(
         lane.log_stage(events, FinalStage::Upload, lane.upload);
     }
     if cancel.is_cancelled() {
-        // Q1: no transcript, the meta back as it was, no notice.
-        if let Err(e) = write_meta(&dir, &at_start) {
+        // Q1: no transcript, the meta back as it was (its names as on disk), no notice.
+        let written = {
+            let _names = meta_lock();
+            carry_disk_names(&dir, &mut at_start);
+            write_meta(&dir, &at_start)
+        };
+        if let Err(e) = written {
             storage_failed(events, StorageKind::Meta, &e);
         }
         return conclude(&deps, started, &dir, id, FinalOutcome::Cancelled, mode);
@@ -1377,7 +1398,8 @@ fn splice_kept(merged: &mut TranscriptV1, lanes: [&Lane; 2]) {
     }
 }
 
-/// Both tracks are done (D6): validate, render, then `transcript.md`, `transcript.json` and
+/// Both tracks are done (D6): validate, then under the meta lock take the title and speakers
+/// on disk (T-152), render with them and write `transcript.md`, `transcript.json` and
 /// `meta.json` (`ready`), each whole through `write_atomic`. Any failure is logged and gives
 /// `failed: storage` with a best-effort failed `meta.json`.
 fn write_ready(
@@ -1397,26 +1419,42 @@ fn write_ready(
         events.log(LogEvent::TranscriptInvalid { rule, segment });
         return failed(meta);
     }
+    // The lock is released before `failed`, whose write takes it again.
+    let written = {
+        let _names = meta_lock();
+        carry_disk_names(dir, &mut meta);
+        write_ready_files(dir, &mut meta, transcript, mode)
+    };
+    match written {
+        Ok(()) => FinalOutcome::Ready,
+        Err((kind, e)) => {
+            storage_failed(events, kind, &e);
+            failed(meta)
+        }
+    }
+}
+
+/// The writes of [`write_ready`], with `meta`'s names: `transcript.md`, `transcript.json`
+/// (the transcript with `meta`'s title and speakers), then `meta.json` as `ready`. The first
+/// failure stops it with the storage kind of the file.
+fn write_ready_files(
+    dir: &Path,
+    meta: &mut CallMeta,
+    transcript: &TranscriptV1,
+    mode: PassMode,
+) -> Result<(), (StorageKind, io::Error)> {
     let markdown = render_markdown(transcript, &meta.title, &meta.speakers);
+    let json = export_json(transcript, &meta.title, &meta.speakers);
     for (name, bytes) in [
         (TRANSCRIPT_MD_FILE, markdown.into_bytes()),
-        (TRANSCRIPT_FILE, transcript.to_json().into_bytes()),
+        (TRANSCRIPT_FILE, json.into_bytes()),
     ] {
-        if let Err(e) = write_atomic(dir, name, &bytes) {
-            storage_failed(events, StorageKind::Transcript, &e);
-            return failed(meta);
-        }
+        write_atomic(dir, name, &bytes).map_err(|e| (StorageKind::Transcript, e))?;
     }
     meta.state = CallState::Ready;
     meta.failure = None;
     meta.pass_mode = Some(mode);
-    match write_meta(dir, &meta) {
-        Ok(()) => FinalOutcome::Ready,
-        Err(e) => {
-            storage_failed(events, StorageKind::Meta, &e);
-            failed(meta)
-        }
-    }
+    write_meta(dir, meta).map_err(|e| (StorageKind::Meta, e))
 }
 
 // ---- the queue (T-146) ----------------------------------------------------------------
@@ -1627,6 +1665,42 @@ impl PassQueue {
         }
     }
 
+    /// Deletes a call (FR-037): the guard of [`CallStore::folder`] (`notFound`), a call this
+    /// process records `recordingCall` with nothing changed; otherwise the call is taken out
+    /// of the queue, a running pass of it is cancelled and waited for (it writes its
+    /// `ready-to-transcribe` meta and no transcript), and [`CallStore::delete_folder`] removes
+    /// the folder. The queue lock is held from then until the folder is gone (released only
+    /// while the cancelled pass ends), so nothing queues or starts the call meanwhile. The wait
+    /// is bounded by the requests in flight (FR-24): call it off the UI thread.
+    pub fn delete(
+        &self,
+        calls: &CallSettings,
+        root: &str,
+        id: &str,
+        deleter: &dyn FolderDeleter,
+    ) -> Result<(), CallError> {
+        let dir = self.store.folder(calls, root, id)?;
+        if self.store.is_active(&dir) {
+            return Err(CallError::recording_call());
+        }
+        let mut slots = self.shared.slots();
+        loop {
+            // Again after every wait: a request may have queued the call meanwhile.
+            slots.queued.retain(|d| *d != dir);
+            match &slots.running {
+                Some((d, token)) if *d == dir => {
+                    token.cancel();
+                    slots = self.shared.wait(slots);
+                }
+                _ => break,
+            }
+        }
+        let deleted = self.store.delete_folder(calls, root, id, deleter);
+        drop(slots);
+        self.shared.changed.notify_all();
+        deleted
+    }
+
     /// Returns when nothing is queued or running.
     pub fn wait_idle(&self) {
         let mut slots = self.shared.slots();
@@ -1712,6 +1786,8 @@ fn work(shared: &Shared, runner: &dyn PassRunner) {
 /// Speakers and title are kept. A folder that is not a call is `notFound`, a damaged one or a
 /// failed write `ioFailed` (Q4).
 fn transcribe_transition(dir: &Path, active: bool) -> Result<(), CallError> {
+    // The read and the write of the meta under the meta lock (T-152): no rename in between.
+    let _names = meta_lock();
     let (mut meta, state) = read_folder_meta(dir, active)?;
     let pending_unless_done = |r: &TrackResult| match r {
         TrackResult::Done { .. } => r.clone(),

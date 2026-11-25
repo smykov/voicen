@@ -14,8 +14,9 @@
 #   - <run_number> must be a decimal number (github.run_number), else exit 1 naming it. Z must be
 #     >= it as a number (#103; Z = run number passes: no earlier run had it), else exit 1 naming
 #     Z and the run number.
-#   - <installer dir> must hold exactly one *-setup.exe whose name contains _X.Y.Z_, else exit 1
-#     (a wrong version names the installer's version and the tag's).
+#   - <installer dir> must hold exactly one *-setup.exe, and the leftmost _N.N.N_ in its name must
+#     equal X.Y.Z as a string (a later _X.Y.Z_ part does not count), else exit 1 (a wrong version
+#     names the installer's version and the tag's; no _N.N.N_ at all names the tag's).
 #   - <installer dir> must hold a non-empty voicen-X.Y.Z-symbols.zip (X.Y.Z from the tag, the name
 #     case-sensitive) and no other voicen-*-symbols.zip, else exit 1 naming it (T-101, #135, #200).
 #     Its contents are not read: the windows job's zip step names its two files.
@@ -24,7 +25,8 @@
 #     found" -> no release; any other failure -> exit 1 (cannot tell, never a pass). Without
 #     GH_TOKEN (the windows premise) gh is not called and the output says so.
 #   - gh is asked only after every other check passed; no gh write subcommand is ever called and
-#     GH_TOKEN is never printed (masked in gh's own output).
+#     GH_TOKEN is never printed (masked in gh's own output by gh_mask_out, scripts/ci/gh-mask.sh,
+#     the one mask shared with release.sh).
 #   - Exit 0: the release may be published; prints "installer: <dir>/<file>" and
 #     "symbols: <dir>/<zip>".
 # Every refusal reason is printed as a ::error:: line; all reasons found are listed.
@@ -42,6 +44,9 @@ root="$3"
 dir="${4%/}"
 [ -n "$dir" ] || dir="$4"
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# gh_mask_out: the one GH_TOKEN mask, shared with release.sh (T-179).
+# shellcheck source=scripts/ci/gh-mask.sh
+. "$here/gh-mask.sh" || { echo "::error::release-check: cannot read $here/gh-mask.sh" >&2; exit 1; }
 
 refused=0
 refuse() { echo "::error::release-check: $*" >&2; refused=1; }
@@ -109,9 +114,12 @@ else
   else
     installer="${files[0]}"
     name="$(basename "$installer")"
-    if [ -n "$tx" ] && [[ "$name" != *"_$tx.$ty.${tz}_"* ]]; then
+    # T-179 (r6#3): the leftmost _N.N.N_ is the installer's version (bash ERE takes the leftmost
+    # match); it must equal the tag's X.Y.Z as a string. A later _X.Y.Z_ part does not count.
+    if [ -n "$tx" ]; then
       if [[ "$name" =~ _([0-9]+\.[0-9]+\.[0-9]+)_ ]]; then
-        refuse "installer $name has version ${BASH_REMATCH[1]}, the tag $tag wants $tx.$ty.$tz"
+        [ "${BASH_REMATCH[1]}" = "$tx.$ty.$tz" ] ||
+          refuse "installer $name has version ${BASH_REMATCH[1]}, the tag $tag wants $tx.$ty.$tz"
       else
         refuse "installer $name does not contain _${tx}.${ty}.${tz}_ (the tag $tag)"
       fi
@@ -148,8 +156,7 @@ if [ -z "${GH_TOKEN:-}" ]; then
   echo "release-check: release-exists check not made: GH_TOKEN is not set (the windows premise has no token; the release job sets it)"
 else
   rc=0
-  out="$(gh release view "$tag" 2>&1)" || rc=$?
-  out="${out//"$GH_TOKEN"/***}"
+  out="$(gh_mask_out release view "$tag")" || rc=$?
   if [ "$rc" = 0 ]; then
     echo "::error::release-check: a release for tag $tag already exists; it is never overwritten" >&2
     exit 1

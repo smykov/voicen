@@ -186,7 +186,10 @@ description: "Task list for feature 001 — dictation via an OpenAI-compatible A
   - pastes never interleave
 
   In `crates/voicen-core/src/queue.rs` and `crates/voicen-core/tests/pipeline.rs` [core] [req FR-23]
+
+  Done by the FIFO worker (T-051) per decision #310; no `DeliveryQueue` (R-10) is built. T-011 pins the order with characterization tests in `crates/voicen-core/tests/dictation_session.rs` (`overlapping_dictations_are_delivered_each_to_its_own_window_in_order`, `a_failing_first_dictation_does_not_block_the_queued_second`, `a_no_speech_first_dictation_leaves_the_order_without_blocking_the_second`).
 - [ ] T052 [US5] Implement `DeliveryQueue` ("an outcome with seq n is released only after every seq < n is released") and the pipeline concurrency (a worker thread per job, one delivery thread) in `crates/voicen-core/src/queue.rs` and `pipeline.rs`; make T051 green [core] [req FR-23]
+  - ~~replaced~~ — decision #310: the single FIFO worker (`dictation::run_worker`, T-051) is the queue; `queue.rs`, a worker thread per job and a delivery thread are not built
 
 ---
 

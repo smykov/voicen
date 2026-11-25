@@ -83,9 +83,10 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetAncestor, GetWindow, GetWindowLongPtrW, GetWindowRect,
-    GetWindowThreadProcessId, IsWindow, IsWindowVisible, SetWindowPos, WindowFromPoint, GA_ROOT,
-    GWL_EXSTYLE, GW_OWNER, SWP_NOACTIVATE, SWP_NOZORDER, WS_EX_APPWINDOW, WS_EX_LAYERED,
-    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
+    GetWindowThreadProcessId, IsWindow, IsWindowVisible, SetWindowPos, ShowWindow, WindowFromPoint,
+    GA_ROOT, GWL_EXSTYLE, GWL_STYLE, GW_OWNER, SWP_NOACTIVATE, SWP_NOZORDER, SW_HIDE, WS_CAPTION,
+    WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    WS_EX_TRANSPARENT,
 };
 
 /// The overlay window's label (spec 001 contracts/ipc.md: the page at `/overlay`
@@ -366,6 +367,12 @@ fn ex_style(raw: isize) -> u32 {
     value as u32
 }
 
+fn style(raw: isize) -> u32 {
+    // SAFETY: GetWindowLongPtrW reads the window's style; no message is sent.
+    let value = unsafe { GetWindowLongPtrW(to_hwnd(raw), GWL_STYLE) };
+    value as u32
+}
+
 /// The raw facts of the overlay window at one moment.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct Facts {
@@ -382,6 +389,9 @@ struct Facts {
     appwindow: bool,
     owned: bool,
     top_level: bool,
+    /// T-247: tao sets `WS_CAPTION` on every top-level window; the shared overlay-class
+    /// helper clears it (decisions #347), as it does for the call indicator.
+    captioned: bool,
 }
 
 fn facts(raw: isize) -> Facts {
@@ -399,6 +409,7 @@ fn facts(raw: isize) -> Facts {
         // SAFETY: both calls only read the window's relations; no message is sent.
         owned: unsafe { GetWindow(hwnd, GW_OWNER) }.is_ok_and(|o| !o.is_invalid()),
         top_level: unsafe { GetAncestor(hwnd, GA_ROOT) } == hwnd,
+        captioned: style(raw) & WS_CAPTION.0 == WS_CAPTION.0,
     }
 }
 
@@ -430,6 +441,9 @@ fn shape_errors(f: &Facts) -> Vec<&'static str> {
     }
     if !f.top_level {
         missing.push("not top-level");
+    }
+    if f.captioned {
+        missing.push("WS_CAPTION set (decorated; the shared helper clears it, T-247)");
     }
     missing
 }
@@ -1446,5 +1460,197 @@ fn show_click_through_on_a_destroyed_window_returns_false_and_writes_one_overlay
     assert_eq!(
         shown_after, shown_before,
         "the failed show changed the process's shown windows"
+    );
+}
+
+/// What the driver saw of one `overlay::reveal_with` call on a hidden window.
+#[derive(Debug, Default)]
+struct RevealReport {
+    /// The window was built and is hidden (premise).
+    hidden_before: bool,
+    shown_before: Vec<(isize, String)>,
+    revealed: Option<bool>,
+    /// The window stayed hidden for `SETTLE` after the call.
+    hidden_held: bool,
+    shown_after: Vec<(isize, String)>,
+    new_lines: Vec<String>,
+}
+
+#[test]
+fn reveal_with_a_handle_error_leaves_the_window_hidden_and_writes_one_overlay_failed_line() {
+    // T-172 (T-067 r1#2; FR-20, #45): the `hwnd()` error branch of the overlay's
+    // reveal. `overlay::reveal_with` gets a freshly built, hidden webview window and a
+    // reader that fails its one call with an OS error (1400). It returns false, writes
+    // exactly one line `warning kind=overlay_failed os_code=1400` (no handle, no text)
+    // and leaves the window hidden: no show of any kind. The window has its own label
+    // (not `overlay`), so the overlay thread and its receipt are not involved. Bite:
+    // the error swallowed (no line), two lines (one per call or one more from a caller),
+    // a fallback `window.show()` (visible, a new shown window), true returned.
+    let _serial = serial();
+    let _watchdog = watchdog(
+        "reveal_with_a_handle_error_leaves_the_window_hidden_and_writes_one_overlay_failed_line",
+    );
+    let dir = TempDir::new();
+    let (app, outcome) = wry_app(dir.path());
+    // Its own log: the app's lines (and its overlay thread's) are not counted.
+    let probe_dir = dir.path().join("probe");
+
+    let (code, report) = run_with_driver(app, outcome, move |handle| {
+        let mut report = RevealReport::default();
+        let log = test_log(&probe_dir);
+        let window = tauri::WebviewWindowBuilder::new(
+            &handle,
+            "reveal-probe",
+            tauri::WebviewUrl::App("index.html".into()),
+        )
+        .visible(false)
+        .build()
+        .expect("premise: the hidden probe window builds");
+        let raw = window
+            .hwnd()
+            .expect("premise: the probe window has a handle");
+        report.hidden_before = !is_visible(raw.0 as isize);
+        report.shown_before = shown_windows(&[]);
+        let lines_before = logged(&probe_dir).len();
+
+        // Fails its one call (the n-th = the first), like a real `hwnd()` error.
+        let failing = |_: &tauri::WebviewWindow<Wry>| -> tauri::Result<HWND> {
+            Err(tauri::Error::Io(std::io::Error::from_raw_os_error(1400)))
+        };
+        report.revealed = Some(voicen_lib::overlay::reveal_with(&window, failing, &log));
+
+        report.hidden_held = holds_for(SETTLE, || !is_visible(raw.0 as isize));
+        report.shown_after = shown_windows(&[]);
+        report.new_lines = logged(&probe_dir)
+            .get(lines_before..)
+            .map(<[_]>::to_vec)
+            .unwrap_or_default();
+        report
+    });
+
+    assert!(
+        report.hidden_before,
+        "premise: the probe window was visible before the call: {report:#?}"
+    );
+    assert_eq!(
+        report.revealed,
+        Some(false),
+        "reveal_with reported the window shown after a handle error: {report:#?}"
+    );
+    assert_eq!(
+        report.new_lines.len(),
+        1,
+        "want exactly one log line for the unreadable handle: {:#?}",
+        report.new_lines
+    );
+    assert_eq!(
+        message_words(&report.new_lines[0]),
+        vec!["warning", "kind=overlay_failed", "os_code=1400"],
+        "{:?}",
+        report.new_lines[0]
+    );
+    assert!(
+        report.hidden_held,
+        "the probe window became visible after a handle error (for {SETTLE:?}): {report:#?}"
+    );
+    assert_eq!(
+        report.shown_after, report.shown_before,
+        "the failed reveal changed the process's shown windows"
+    );
+    assert_eq!(code, 0, "run_return code after end_loop(0)");
+}
+
+#[test]
+fn show_click_through_with_a_failed_restyle_on_a_live_window_still_shows_it_without_activation() {
+    // T-172 (T-067 r1#3; FR-20, #45): the restyle (style read, write or SetWindowPos)
+    // fails on a window that exists. `overlay::show_click_through_with` returns false,
+    // writes exactly one line `warning kind=overlay_failed os_code=5` and still shows
+    // the window, without activating it: the target in front keeps the foreground and
+    // its focus. The restyle is a fake failing its one call (a real style write cannot
+    // be made to fail on a live window of this process, T-067 review 1 #3). Bite: no
+    // show on Err (the window stays hidden), `SW_SHOW` (activates: the target loses the
+    // foreground), no line or two lines, true returned.
+    let _serial = serial();
+    let dir = TempDir::new();
+    let log = test_log(dir.path());
+
+    // A live top-level window of this process, hidden: the stand-in for the overlay
+    // window that `reveal` hands over hidden.
+    let stand_in = TestWindow::open(Shape::TopLevel);
+    let stand_in_raw = stand_in.hwnd().0 as isize;
+    // SAFETY: the handle names the live test window; hiding it sends no activation.
+    let _was_visible = unsafe { ShowWindow(stand_in.hwnd(), SW_HIDE) };
+    assert!(
+        holds_for(SETTLE, || !is_visible(stand_in_raw)),
+        "premise: the stand-in window is hidden"
+    );
+    let target = TestWindow::open(Shape::TopLevel);
+    target.front();
+    let target_raw = target.hwnd().0 as isize;
+    let losses_before = target.focus_losses().len();
+    let shown_before = shown_windows(&[]);
+    let lines_before = logged(dir.path()).len();
+    let sampler = ForegroundSampler::start(target_raw);
+
+    // Fails its one call; a second call would panic the test (not a quiet `Err`).
+    let mut calls = 0u32;
+    let failing = |_: HWND| -> Result<(), Option<i32>> {
+        calls += 1;
+        assert_eq!(calls, 1, "the restyle was called twice");
+        Err(Some(5))
+    };
+    let applied = voicen_lib::overlay::show_click_through_with(stand_in.hwnd(), failing, &log);
+
+    let foreground_kept = holds_for(SETTLE, || foreground().0 as isize == target_raw);
+    let (samples, away) = sampler.stop();
+    let visible = is_visible(stand_in_raw);
+    let new_lines: Vec<String> = logged(dir.path())
+        .get(lines_before..)
+        .map(<[_]>::to_vec)
+        .unwrap_or_default();
+    let focus_losses: Vec<(u32, usize)> = target
+        .focus_losses()
+        .get(losses_before..)
+        .map(<[_]>::to_vec)
+        .unwrap_or_default();
+    let shown_after = shown_windows(&[]);
+
+    assert!(
+        !applied,
+        "show_click_through_with reported the bits applied after a failed restyle"
+    );
+    assert_eq!(
+        new_lines.len(),
+        1,
+        "want exactly one log line for the failed restyle: {new_lines:#?}"
+    );
+    assert_eq!(
+        message_words(&new_lines[0]),
+        vec!["warning", "kind=overlay_failed", "os_code=5"],
+        "{:?}",
+        new_lines[0]
+    );
+    assert!(
+        visible,
+        "the window was not shown after a failed restyle (a live window is still shown)"
+    );
+    let mut want_shown = shown_before.clone();
+    want_shown.push((stand_in_raw, class_of(stand_in.hwnd())));
+    want_shown.sort();
+    let mut got_shown = shown_after.clone();
+    got_shown.sort();
+    assert_eq!(
+        got_shown, want_shown,
+        "the show changed the shown windows by more than the stand-in"
+    );
+    assert!(samples > 0, "premise: the foreground sampler ran");
+    assert!(
+        foreground_kept && away.is_empty(),
+        "the target lost the foreground to the shown window (an activating show); in front \
+         instead: {away:?} (target {target_raw:#x})"
+    );
+    assert!(
+        focus_losses.is_empty(),
+        "the target got focus/activation-loss messages during the show: {focus_losses:?}"
     );
 }

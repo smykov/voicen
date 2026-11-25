@@ -104,9 +104,11 @@ One worker thread owns the `Pipeline` (the only caller of `run_job` and `job_fin
 - `NoSpeech` — the gate found no speech, the engine returned empty text, or the post-processed text is blank
 - `Failed(FailureReason)`
 
-Built (T-001): `Pipeline::run_job(FinishedRecording<PressContext>) -> JobReport { end: JobEnd, pending: Option<PendingId> }`; the job view is private, `seq` is taken at `run_job` entry until T-011 moves it to the stop, and `origin: Retry` comes with T-007.
+Built (T-001): `Pipeline::run_job(FinishedRecording<PressContext>) -> JobReport { end: JobEnd, pending: Option<PendingId> }`; the job view is private, `seq` is taken at `run_job` entry on the one FIFO worker (decision #310: it is not moved to the stop; recording order is the order jobs are pushed on the worker's channel at stop, under the session lock), and `origin: Retry` comes with T-007.
 
 ## DeliveryQueue
+
+> Not built (decision #310). The single FIFO worker (`dictation::run_worker`) gives the same order; the invariants below are met by its channel order and pinned by the T-011 tests in `crates/voicen-core/tests/dictation_session.rs`. Kept as the original design.
 
 - An ordered map `seq → slot`. A slot is `Waiting` or `Done(JobOutcome)`.
 - Invariant: an outcome with seq *n* is released only after every seq < *n* is released (FR-029).

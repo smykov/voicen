@@ -1,0 +1,88 @@
+guarantee: AC-1: A then B, each delivered in recording order to its own window (no thread per job: jobs processed concurrently)
+file: crates/voicen-core/src/dictation.rs
+added_by: test-writer
+--- old
+    while let Ok(job) = jobs.recv() {
+        if shared.lock().shutdown {
+            return;
+        }
+        let done = match job {
+            Job::Recording(job) => {
+                let id = job.id();
+                Done::Recording(id, pipeline.run_job(job))
+            }
+            Job::Retry {
+                key,
+                id,
+                settings,
+                at,
+            } => Done::Retry(key, pipeline.retry(id, &settings, at)),
+        };
+        // The slot itself, read here: only this thread changes it.
+        let retry_available = pipeline.pending().is_some();
+        let mut st = shared.lock();
+        let now = crate::clock::instant();
+        match done {
+            Done::Recording(id, report) => {
+                st.ctrl
+                    .job_finished_pending(id, report.end, report.pending, now)
+            }
+            Done::Retry(key, RetryOutcome::Ran(report)) => {
+                st.ctrl.retry_finished(key, report.end, report.pending, now)
+            }
+            Done::Retry(key, RetryOutcome::Nothing) => st.ctrl.retry_dropped(key, now),
+            Done::Retry(key, RetryOutcome::Unreadable) => {
+                // The tray as after any dropped retry (not `retry_finished`, whose
+                // `JobEnd::Notice` would clear tray Error), then the notice.
+                st.ctrl.retry_dropped(key, now);
+                st.ctrl.notice_with(NOTICE_RETRY_UNAVAILABLE, vec![], now);
+            }
+        }
+        st.retry_available = retry_available;
+        shared.publish(&mut st);
+    }
+--- new
+    thread::scope(|scope| {
+    while let Ok(job) = jobs.recv() {
+        if shared.lock().shutdown {
+            return;
+        }
+        scope.spawn(move || {
+        let done = match job {
+            Job::Recording(job) => {
+                let id = job.id();
+                Done::Recording(id, pipeline.run_job(job))
+            }
+            Job::Retry {
+                key,
+                id,
+                settings,
+                at,
+            } => Done::Retry(key, pipeline.retry(id, &settings, at)),
+        };
+        // The slot itself, read here: only this thread changes it.
+        let retry_available = pipeline.pending().is_some();
+        let mut st = shared.lock();
+        let now = crate::clock::instant();
+        match done {
+            Done::Recording(id, report) => {
+                st.ctrl
+                    .job_finished_pending(id, report.end, report.pending, now)
+            }
+            Done::Retry(key, RetryOutcome::Ran(report)) => {
+                st.ctrl.retry_finished(key, report.end, report.pending, now)
+            }
+            Done::Retry(key, RetryOutcome::Nothing) => st.ctrl.retry_dropped(key, now),
+            Done::Retry(key, RetryOutcome::Unreadable) => {
+                // The tray as after any dropped retry (not `retry_finished`, whose
+                // `JobEnd::Notice` would clear tray Error), then the notice.
+                st.ctrl.retry_dropped(key, now);
+                st.ctrl.notice_with(NOTICE_RETRY_UNAVAILABLE, vec![], now);
+            }
+        }
+        st.retry_available = retry_available;
+        shared.publish(&mut st);
+        });
+    }
+    });
+--- end

@@ -22,6 +22,12 @@
 #                              so a copy neither builds from cold nor tramples the working
 #                              tree's build dir. `{cache}` = .teamwright/cache/<area>/copy of
 #                              the main checkout (mounted at /tw-copy-cache for docker)
+#   shared_cache: [<abs dir>]  docker caches shared by the main checkout, every worktree and
+#                              every copy: mounted from <main checkout>/.teamwright/cache/
+#                              <area>/shared/<dir mangled> only when that host dir exists
+#                              (opt-in per machine: create it once; never created here).
+#                              Main checkout = parent of the git common dir. Local edit
+#                              (T-217, decisions #304; upstream request in docs/kit-feedback.md)
 #
 # Docker: docker run --rm -u $(id -u):$(id -g) -v <root>:/work -w /work/<workdir>
 #   -e HOME=/tw-home -v <cache>:/tw-home <image> sh -c '<cmd> "$@"' sh <args>
@@ -68,21 +74,27 @@ if area is None:
 cache = area.get("cache") or []
 if isinstance(cache, str):
     cache = [cache]
+shared = area.get("shared_cache") or []
+if isinstance(shared, str):
+    shared = [shared]
 env = area.get("copy_env") or {}
 env = ["%s=%s" % (k, v) for k, v in sorted(env.items())] if isinstance(env, dict) else []
 out = [str(area.get("runner") or "host"), str(area.get("image") or ""),
-       str(area.get("workdir") or "").strip("/"), str(len(cache))] + [str(c) for c in cache] + env
+       str(area.get("workdir") or "").strip("/"), str(len(cache))] + [str(c) for c in cache] + \
+      [str(len(shared))] + [str(c) for c in shared] + env
 sys.stdout.write("".join(x + "\0" for x in out))
 PY
 fields=()
 while IFS= read -r -d '' f; do fields+=("$f"); done < <(
   python3 -c "$_tw_py" "$CONFIG_PY" "$CFG" "$AREA"
 ) || exit 2
-[ "${#fields[@]}" -ge 4 ] || exit 2
+[ "${#fields[@]}" -ge 5 ] || exit 2
 RUNNER="${fields[0]}"; IMAGE="${fields[1]}"; WORKDIR="${fields[2]}"; NCACHE="${fields[3]}"
-CACHE=(); COPY_ENV=()
+CACHE=(); SHARED=(); COPY_ENV=()
 [ "$NCACHE" -gt 0 ] && CACHE=("${fields[@]:4:$NCACHE}")
-[ "${#fields[@]}" -gt $((4 + NCACHE)) ] && COPY_ENV=("${fields[@]:$((4 + NCACHE))}")
+NSHARED="${fields[$((4 + NCACHE))]}"; o=$((5 + NCACHE))
+[ "$NSHARED" -gt 0 ] && SHARED=("${fields[@]:$o:$NSHARED}")
+[ "${#fields[@]}" -gt $((o + NSHARED)) ] && COPY_ENV=("${fields[@]:$((o + NSHARED))}")
 [ "${TW_RUN_COPY:-}" = 1 ] || COPY_ENV=()
 CROOT="${TW_CACHE_ROOT:-$ROOT}/.teamwright/cache/$AREA"
 case "$WORKDIR" in *..*) die "workdir must stay inside the project: $WORKDIR" ;; esac
@@ -122,6 +134,15 @@ case "$RUNNER" in
         *) mkdir -p "$c/home/$d" 2>/dev/null || true ;;   # lives in the persisted $HOME
       esac
     done
+    if [ "${#SHARED[@]}" -gt 0 ]; then
+      gcd="$(git -C "${TW_CACHE_ROOT:-$ROOT}" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"
+      main="$(dirname "${gcd:-${TW_CACHE_ROOT:-$ROOT}/.git}")"
+      for d in "${SHARED[@]}"; do
+        case "$d" in /*) ;; *) die "area '$AREA': shared_cache entries must be absolute: $d" ;; esac
+        h="$main/.teamwright/cache/$AREA/shared/$(printf '%s' "$d" | tr -c 'A-Za-z0-9._-' '_')"
+        [ -d "$h" ] && args+=(-v "$h:$d")
+      done
+    fi
     if [ "${#COPY_ENV[@]}" -gt 0 ]; then
       mkdir -p "$c/copy" 2>/dev/null || true
       args+=(-v "$c/copy:/tw-copy-cache")

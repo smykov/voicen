@@ -60,6 +60,7 @@ fn start(rig: &AppRig, store: Arc<dyn TempAudioStore>) -> DictationHandle {
             clipboard: Arc::new(FakeClipboard::new()),
             paster: Arc::new(FakePaster::new()),
             engine_factory: Some(engine_factory(&engine)),
+            builtin: None,
             indicator: Arc::new(FakeIndicator::new()),
             credentials: Arc::clone(&rig.creds),
             hotkeys: Arc::clone(&rig.hotkeys),

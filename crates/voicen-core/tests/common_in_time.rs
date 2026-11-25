@@ -4,6 +4,8 @@
 
 mod common;
 
+#[path = "common/deadlines_tests.rs"]
+mod deadlines_tests;
 #[path = "common/in_time_tests.rs"]
 mod in_time_tests;
 #[path = "common/timing_seam_tests.rs"]

@@ -1,0 +1,8 @@
+      - name: Prebuild before the stage
+        id: prebuild
+        run: |
+          set -euo pipefail
+          # T-261 (decisions #361): the gate's Rust builds start in the background while the session
+          # reads; the step ends at once, "Prebuild report" after the stage reports the outcome.
+          nohup bash scripts/ci/contour-prebuild.sh > /dev/null 2>&1 &
+          echo "Prebuild started; its log is $RUNNER_TEMP/prebuild.log on the runner."

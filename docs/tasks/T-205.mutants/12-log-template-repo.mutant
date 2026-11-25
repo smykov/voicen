@@ -1,0 +1,8 @@
+guarantee: AC-4: a gh argv outside the three owned templates (here --repo added)
+file: scripts/tw-wip-run
+added_by: test-writer
+--- old
+gh run view "$rid" --log-failed)"
+--- new
+gh run view "$rid" --log-failed --repo other/repo)"
+--- end

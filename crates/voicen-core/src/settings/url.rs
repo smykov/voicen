@@ -120,6 +120,15 @@ pub fn provider_host(url: &NormalizedUrl) -> Option<ProviderHost> {
     parsed.host_str().map(|text| ProviderHost(text.to_string()))
 }
 
+/// The provider host of a stored base URL: [`check_base_url`], then
+/// [`provider_host`]. `None` when the text is not a valid base URL (never the raw
+/// text) or its host is loopback. The one rule for the call session's notice and
+/// the settings view's `provider_host` (spec 007 FR-031, T-155).
+pub fn provider_host_of(raw: &str) -> Option<ProviderHost> {
+    let url = check_base_url(raw).ok()?;
+    provider_host(&url)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

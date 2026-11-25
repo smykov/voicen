@@ -11,17 +11,27 @@ denials here. If the kit no longer has that sentence or one of the denials, this
 nothing: a launch with the wrong prompt or without a denial is worse than no launch.
 
   scripts/tw-launch <ID> [<ID> ...]   run the kit's `tw-parallel.py launch` for these worktrees
+  scripts/tw-launch --prepare <ID>... copy the main tree's Serena config in, then the kit's `prepare`
   scripts/tw-launch --print-args      print the value of TEAMWRIGHT_CLAUDE_ARGS and exit
 
 Run it from the main tree's copy; the project is the tree this file is in. The kit is the version in
 .teamwright/installed.json under ~/.claude/plugins/cache/teamwright/teamwright/, or
 $TEAMWRIGHT_KIT_DIR. A launch without this entry falls back to the kit's defaults: the session is told
 not to push, and stops as before.
+
+With the kit's context provider `serena` (T-196, decisions #216): `.serena/project.yml` is untracked
+(#16), so a new worktree has none and Serena would autogenerate one with other language servers.
+`--prepare` copies the main tree's `.serena/project.yml`, `project.local.yml` and `memories/` files
+into each worktree (absent or different; an overwrite is reported) before the kit's `prepare` indexes,
+and a launch refuses a worktree whose project.yml is not byte-equal to the main tree's. A main tree
+without project.yml stops both. Other providers: no copy, no check.
 """
+import filecmp
 import importlib.util
 import json
 import os
 import shlex
+import shutil
 import sys
 
 sys.dont_write_bytecode = True
@@ -39,6 +49,11 @@ OUR_SENTENCE = ("Do not merge. Do not push, with one exception: the CI-only wip/
                 "90-minute wait ceiling); "
                 "never with a note that CI is unread.")
 KIT_DENIALS = ("Bash(git push:*)", "Bash(git merge:*)", "Bash(gh:*)")
+# T-196: the provider whose untracked project config each worktree must share with the main tree.
+SERENA = "serena"
+SERENA_YML = os.path.join(".serena", "project.yml")
+SERENA_COPIED = (SERENA_YML, os.path.join(".serena", "project.local.yml"))
+SERENA_MEMORIES = os.path.join(".serena", "memories")
 
 
 def refuse(reason):
@@ -61,10 +76,65 @@ def kit_script():
     return path
 
 
-def launch_args(script):
+def load_kit(script):
     spec = importlib.util.spec_from_file_location("tw_parallel", script)
     kit = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(kit)
+    return kit
+
+
+def serena_worktrees(kit, ids):
+    """[(id, worktree path)] of these ids when the provider is serena (else []); refuses a main
+    tree without .serena/project.yml. An id with no worktree is left to the kit, which reports it."""
+    if kit.context_provider(ROOT) != SERENA:
+        return []
+    if not os.path.isfile(os.path.join(ROOT, SERENA_YML)):
+        refuse("the main tree has no %s (Serena would autogenerate one in each worktree)"
+               % os.path.join(ROOT, SERENA_YML))
+    wts = kit.worktrees(ROOT)
+    return [(t, wts[t]["path"]) for t in ids if t in wts]
+
+
+def same(a, b):
+    return os.path.isfile(b) and filecmp.cmp(a, b, shallow=False)
+
+
+def copy_in(tid, src, dst):
+    """Copy src over dst unless they are byte-equal; an overwrite is reported."""
+    if same(src, dst):
+        return
+    existed = os.path.exists(dst)
+    try:
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        tmp = dst + ".tw-launch.tmp"
+        shutil.copy2(src, tmp)
+        os.replace(tmp, dst)
+    except OSError as e:
+        refuse("cannot copy %s to %s (%s)" % (src, dst, e))
+    if existed:
+        print("tw-launch: %s: overwrote %s (it differed from the main tree's)" % (tid, dst), file=sys.stderr)
+
+
+def prepare_serena(kit, ids):
+    for tid, wt in serena_worktrees(kit, ids):
+        files = [rel for rel in SERENA_COPIED if os.path.isfile(os.path.join(ROOT, rel))]
+        for base, _dirs, names in os.walk(os.path.join(ROOT, SERENA_MEMORIES)):
+            files += [os.path.relpath(os.path.join(base, n), ROOT) for n in sorted(names)]
+        for rel in files:
+            copy_in(tid, os.path.join(ROOT, rel), os.path.join(wt, rel))
+
+
+def check_serena(kit, ids):
+    main_yml = os.path.join(ROOT, SERENA_YML)
+    for tid, wt in serena_worktrees(kit, ids):
+        dst = os.path.join(wt, SERENA_YML)
+        if not same(main_yml, dst):
+            refuse("%s: %s is %s the main tree's %s; run scripts/tw-launch --prepare %s"
+                   % (tid, dst, "not byte-equal to" if os.path.exists(dst) else "missing, unlike",
+                      main_yml, tid))
+
+
+def launch_args(kit):
     args = list(kit.DEFAULT_ARGS)
     denied = " ".join(a for prev, a in zip(args, args[1:]) if prev == "--disallowedTools")
     missing = [d for d in KIT_DENIALS if d not in denied]
@@ -76,16 +146,23 @@ def launch_args(script):
 
 
 def main(argv):
-    if not argv or (argv != ["--print-args"] and any(a.startswith("-") for a in argv)):
+    prep = argv[:1] == ["--prepare"]
+    ids = argv[1:] if prep else argv
+    if not ids or (argv != ["--print-args"] and any(a.startswith("-") for a in ids)):
         print(__doc__.split("\n\n")[3], file=sys.stderr)
         return 2
     script = kit_script()
-    value = shlex.join(launch_args(script))
+    kit = load_kit(script)
+    if prep:
+        prepare_serena(kit, ids)
+        os.execv(sys.executable, [sys.executable, script, "prepare", *ids, "--project", ROOT])
+    value = shlex.join(launch_args(kit))
     if argv == ["--print-args"]:
         print(value)
         return 0
+    check_serena(kit, ids)
     os.environ["TEAMWRIGHT_CLAUDE_ARGS"] = value
-    os.execv(sys.executable, [sys.executable, script, "launch", *argv, "--project", ROOT])
+    os.execv(sys.executable, [sys.executable, script, "launch", *ids, "--project", ROOT])
 
 
 if __name__ == "__main__":

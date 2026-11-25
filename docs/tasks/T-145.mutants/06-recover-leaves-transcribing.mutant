@@ -1,0 +1,10 @@
+guarantee: FR-028 / I5: a pass cut at exit (transcribing) is reset to ready-to-transcribe and queued at the next start
+file: crates/voicen-core/src/call/storage.rs
+added_by: task-validator round 1
+test: cargo test -j 2 -p voicen-core --test call_recovery recover_requeues_transcribing_and_queues_ready_to_transcribe_oldest_first
+--- old
+                    meta.state = CallState::ReadyToTranscribe;
+                    ListState::Queued
+--- new
+                    ListState::Queued
+--- end

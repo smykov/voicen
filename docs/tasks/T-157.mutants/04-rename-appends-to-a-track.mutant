@@ -1,0 +1,14 @@
+guarantee: Acceptance 2 / (A): rename leaves both .opus byte-identical
+file: crates/voicen-core/src/call/storage.rs
+added_by: test-writer
+--- old
+        replace_all(&dir, &files)?;
+        Ok((entry, transcript))
+--- new
+        replace_all(&dir, &files)?;
+        let _ = std::fs::OpenOptions::new()
+            .append(true)
+            .open(dir.join("mic.opus"))
+            .and_then(|mut f| std::io::Write::write_all(&mut f, b"x"));
+        Ok((entry, transcript))
+--- end

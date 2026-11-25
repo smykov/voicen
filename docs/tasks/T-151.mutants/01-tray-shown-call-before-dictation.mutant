@@ -1,0 +1,10 @@
+guarantee: AC-2: the tray shows dictation recording during the hold, then call recording again
+file: crates/voicen-core/src/tray.rs
+added_by: test-writer
+--- old
+        (TrayState::Recording, _) => TrayState::Recording,
+        (_, true) => TrayState::CallRecording,
+--- new
+        (_, true) => TrayState::CallRecording,
+        (TrayState::Recording, _) => TrayState::Recording,
+--- end

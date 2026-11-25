@@ -25,6 +25,7 @@ mod mock_http;
 use std::sync::Arc;
 use std::time::Duration;
 
+use common::deadlines::{generous_post_processing, production_defaults};
 use common::held::{returns_while_held, Held};
 use common::timing::{ago, at_least, late_answer, measure, Took, M};
 
@@ -104,7 +105,7 @@ fn process_timed(base: String, timeouts: Timeouts) -> (PostProcessOutcome, Took)
 #[tokio::test]
 async fn default_deadline_skips_a_silent_server_at_15_s() {
     // FR-24 / spec 003 FR-004, SC-003 (15 s +- 0.5 s), checked by its outcome
-    // (decision #149, T-110): with the production durations (Timeouts::default(),
+    // (decision #149, T-110): with the production durations (the production defaults,
     // post_processing 15 s) a server that stays silent until 15.5 s, the end of the
     // tolerance, and then answers 200 with a valid body ends the stage as
     // Skipped(Timeout), and not before 15 s. The sibling leg sends the same server
@@ -119,7 +120,7 @@ async fn default_deadline_skips_a_silent_server_at_15_s() {
     let server = chat_answering_after(want + TOLERANCE).await;
     let base = format!("{}/v1", server.uri());
 
-    let (got, took) = process_timed(base.clone(), Timeouts::default());
+    let (got, took) = process_timed(base.clone(), production_defaults());
     assert_eq!(
         got,
         PostProcessOutcome::Skipped(SkipReason::Timeout),
@@ -128,11 +129,7 @@ async fn default_deadline_skips_a_silent_server_at_15_s() {
     );
     at_least(took, want);
 
-    let generous = Timeouts {
-        post_processing: Duration::from_secs(60),
-        ..Timeouts::default()
-    };
-    let (got, _) = process_timed(base, generous);
+    let (got, _) = process_timed(base, generous_post_processing());
     assert_eq!(
         got,
         PostProcessOutcome::Applied(PROCESSED.to_string()),
@@ -250,7 +247,7 @@ const PP_LIMIT_S: u32 = 10;
 const PP_CONNECT_S: u32 = 5;
 /// When the server of `configured_post_processing_timeout_*` answers. M after the limit
 /// (kind (1) of the T-111 invariant), plus SC-003's tolerance so the answer also comes
-/// after the 15 s default: a processor on `Timeouts::default()` ends the same test's
+/// after the 15 s default: a processor on the production defaults ends the same test's
 /// control leg as Skipped(Timeout).
 const PP_LATE_ANSWER: Duration =
     late_answer(Duration::from_secs(PP_LIMIT_S as u64)).saturating_add(TOLERANCE);
@@ -283,7 +280,7 @@ fn configured_timeout_legs_keep_the_in_time_margin_m() {
         "answer {PP_LATE_ANSWER:?} is not M above limit {limit:?}"
     );
     assert!(
-        PP_LATE_ANSWER > Timeouts::default().post_processing,
+        PP_LATE_ANSWER > production_defaults().post_processing,
         "answer {PP_LATE_ANSWER:?} does not come after the default limit"
     );
 }
@@ -316,7 +313,7 @@ async fn configured_post_processing_timeout_delivers_the_raw_transcript() {
     // and takes at least 10 s; no wall-clock ceiling (F-021). connect_s = 5, so
     // the connect value read as the request limit would end it at about 5 s
     // (at_least). The same server with post_processing_s = 60 is applied, so
-    // the server does answer. Bite: the processor on Timeouts::default() (its 15 s
+    // the server does answer. Bite: the processor on the production defaults (its 15 s
     // ends the control leg as Skipped), on any limit past 15.5 s (the answer applied),
     // on the pipeline's test override field (None in production), on the connect
     // value, or the pipeline deriving a second Timeouts for the processor that ignores

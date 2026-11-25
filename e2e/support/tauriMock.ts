@@ -247,7 +247,23 @@ interface WireFixture {
    * (T-013; pinned by core's e2e_settings_wire_fixture_test_connection_invalid_off_tab_matches_core).
    */
   test_connection_invalid_off_tab: ConnectionTestResult;
+  /**
+   * T-155 keys, pinned by core's tests/call_settings.rs (the `e2e_settings_wire_fixture_*`
+   * tests): the view of an api.base_url `http://localhost:8000/v1` (provider_host null) and
+   * the Refused outcomes on `calls.hotkey` (equal to the dictation hotkey from the call side
+   * and from the dictation side; unavailable). Optional here: a fixture that lacks one is
+   * reported by name by the accessor, not by a missing property.
+   */
+  loopback_api_view?: SettingsView;
+  refused_call_hotkey_equals_dictation?: SaveOutcome;
+  refused_dictation_hotkey_equals_call?: SaveOutcome;
+  refused_call_hotkey_unavailable?: SaveOutcome;
+  /** Core's Refused outcome of an unwritable calls.storage_root, reason access_denied (T-120). */
+  refused_storage_unwritable?: SaveOutcome;
 }
+
+/** The Refused outcomes of `calls.hotkey` the fixture holds (T-155). */
+export type CallHotkeyRefusal = "equals_dictation_call_side" | "equals_dictation_dictation_side" | "unavailable";
 
 /**
  * The kinds of `ConnectionTestResult` (the wire type, declared once in settingsApi.ts);
@@ -314,6 +330,42 @@ export function testConnectionInvalidOffTab(): ConnectionTestResult {
   const result = fixture.test_connection_invalid_off_tab;
   if (result === undefined) throw new Error("settings-wire.json has no test_connection_invalid_off_tab");
   return structuredClone(result);
+}
+
+/**
+ * Core's view with api.base_url `http://localhost:8000/v1`: `provider_host` null (T-155; a
+ * fresh copy). A fixture without the key fails here, by name.
+ */
+export function loopbackApiView(): SettingsView {
+  const view = fixture.loopback_api_view;
+  if (view === undefined) throw new Error("settings-wire.json has no loopback_api_view");
+  return structuredClone(view);
+}
+
+/**
+ * Core's Refused outcome on `calls.hotkey` (T-155; a fresh copy, for `queueSaveOutcome`):
+ * `hotkey.equals_dictation` after a change on the call side or on the dictation side, or
+ * `hotkey.unavailable` from a registration conflict. A fixture without the key fails here, by name.
+ */
+export function refusedCallHotkey(kind: CallHotkeyRefusal): Extract<SaveOutcome, { Refused: unknown }> {
+  const key = {
+    equals_dictation_call_side: "refused_call_hotkey_equals_dictation",
+    equals_dictation_dictation_side: "refused_dictation_hotkey_equals_call",
+    unavailable: "refused_call_hotkey_unavailable",
+  }[kind] as "refused_call_hotkey_equals_dictation" | "refused_dictation_hotkey_equals_call" | "refused_call_hotkey_unavailable";
+  const outcome = fixture[key];
+  if (outcome === undefined) throw new Error(`settings-wire.json has no ${key}`);
+  return structuredClone(outcome) as Extract<SaveOutcome, { Refused: unknown }>;
+}
+
+/**
+ * Core's Refused outcome of an unwritable calls.storage_root (field calls.storage_root, code
+ * storage.unwritable, reason access_denied; pinned by core's tests/call_settings.rs; a fresh copy).
+ */
+export function refusedStorageUnwritable(): Extract<SaveOutcome, { Refused: unknown }> {
+  const outcome = fixture.refused_storage_unwritable;
+  if (outcome === undefined) throw new Error("settings-wire.json has no refused_storage_unwritable");
+  return structuredClone(outcome) as Extract<SaveOutcome, { Refused: unknown }>;
 }
 
 /** Core's `WHISPER_ISO_639_1` in core order (a fresh copy). */

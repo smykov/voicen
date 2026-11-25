@@ -1,0 +1,11 @@
+guarantee: Acceptance 2 / (S): a failed reopen is retried at the next mark, no panic
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+                    reopen.last = Some(e);
+                }
+--- new
+                    reopen.last = Some(e);
+                    panic!("reopen failed");
+                }
+--- end

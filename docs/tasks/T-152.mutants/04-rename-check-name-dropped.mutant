@@ -1,0 +1,9 @@
+guarantee: AC2: empty or whitespace title is refused -> emptyName
+file: crates/voicen-core/src/call/storage.rs
+added_by: test-writer
+--- old
+            check_name(title)?;
+            meta.title = title.to_string();
+--- new
+            meta.title = title.to_string();
+--- end

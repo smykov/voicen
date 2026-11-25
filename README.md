@@ -2,7 +2,7 @@
 
 Dictation into any text field on Windows. Press a hotkey, speak, and the text is pasted into the field you were typing in — a chat, an AI prompt, a document, a code editor.
 
-**Status: in development, no release yet.** Version 0.1.0; the dictation loop through an API engine works and is verified on Windows CI. The first public build will be published in GitHub Releases.
+**Status: in development.** The dictation loop through an API engine works and is verified on Windows CI. Builds are published in [GitHub Releases](https://github.com/smykov/voicen/releases); the latest release there is the current version.
 
 ## How it works
 
@@ -75,7 +75,7 @@ Details: [`docs/architecture.md`](docs/architecture.md).
 
 ## Build from source
 
-On Windows 10/11 with Rust (stable, MSVC toolchain), Node.js, pnpm, CMake, LLVM (libclang) and the [Tauri prerequisites](https://tauri.app/start/prerequisites/):
+On Windows 10/11 with Rust (stable, MSVC toolchain), Node.js, pnpm, CMake (on `PATH`), LLVM (libclang) and the [Tauri prerequisites](https://tauri.app/start/prerequisites/):
 
 ```powershell
 pnpm install

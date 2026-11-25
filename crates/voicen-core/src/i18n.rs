@@ -239,6 +239,9 @@ messages! {
     TRAY_RETRY_LAST = "tray.retry_last",
     /// The toast's Retry button (T-007, FR-11; the toast itself is T-210's).
     ACTION_RETRY = "action.retry",
+    /// The "Transcript ready" toast's Open button (T-213; spec 007 FR-030, decisions
+    /// #298, #312).
+    ACTION_OPEN = "action.open",
     /// The tray's "Open logs folder" failed (spec 006 FR-017, contracts/ipc.md);
     /// placeholder `{reason}` = a `logs_reason.*` id. Declared by T-007, raised by
     /// T-210 through `DictationSession::notice_with`.
@@ -1116,6 +1119,23 @@ mod tests {
         let ru = own_text(&c, UiLanguage::Ru, id).expect("error.open_logs_folder has a ru text");
         assert!(ru.contains("{reason}"), "ru text without {{reason}}: {ru}");
         assert_ne!(ru, "Cannot open the logs folder: {reason}");
+    }
+
+    #[test]
+    fn the_open_button_label_is_declared_with_its_texts_in_both_catalogs() {
+        // T-213 (decisions #298, #312): the toast's Open button on "Transcript ready" is
+        // `action.open`, in the pattern of `action.retry`. The generic parity tests cannot
+        // fail for an id nobody declared, so it is named. Bite: the id missing from
+        // `messages!` (no button label), from en.json or from ru.json, ru falling back to
+        // English, another text.
+        let c = catalog(EN_JSON, RU_JSON);
+        let id = "action.open";
+        assert!(
+            MESSAGE_IDS.iter().any(|m| m.0 == id),
+            "{id} not in MESSAGE_IDS"
+        );
+        assert_eq!(own_text(&c, UiLanguage::En, id), Some("Open"), "en");
+        assert_eq!(own_text(&c, UiLanguage::Ru, id), Some("Открыть"), "ru");
     }
 
     #[test]

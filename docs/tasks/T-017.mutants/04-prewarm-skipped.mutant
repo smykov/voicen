@@ -1,0 +1,8 @@
+guarantee: AC-2: a press prewarms the downloaded model
+file: crates/voicen-core/src/dictation.rs
+added_by: test-writer
+--- old
+            deps.residency.prewarm(id, path);
+--- new
+            let _ = (id, path);
+--- end

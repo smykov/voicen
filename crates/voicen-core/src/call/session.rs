@@ -67,7 +67,7 @@ use crate::local_models::download::DiskSpace;
 use crate::platform::{CaptureHandle, DeviceId};
 use crate::settings::roots::UnwritableReason;
 use crate::settings::service::{SettingsService, WarnedHostFailed};
-use crate::settings::url::{check_base_url, provider_host, ProviderHost};
+use crate::settings::url::{provider_host_of, ProviderHost};
 use crate::settings::Settings;
 use crate::vad::EnergyDetector;
 use rubato::audioadapter_buffers::direct::InterleavedSlice;
@@ -521,14 +521,13 @@ impl CallSession {
     /// and tick stops alike announce it.
     fn notice_stopped(&self, reason: StopReason, dir: &Path) {
         let notice = match reason {
-            StopReason::MaxLength | StopReason::LowDisk | StopReason::StorageError => {
-                CallNotice::Stopped { reason }
+            StopReason::MaxLength
+            | StopReason::LowDisk
+            | StopReason::StorageError
+            | StopReason::Sleep => CallNotice::Stopped { reason },
+            StopReason::User | StopReason::Hotkey | StopReason::Exit | StopReason::SystemEnd => {
+                CallNotice::CallSavedTranscribing
             }
-            StopReason::User
-            | StopReason::Hotkey
-            | StopReason::Exit
-            | StopReason::SystemEnd
-            | StopReason::Sleep => CallNotice::CallSavedTranscribing,
         };
         self.deps.shell.notice(notice);
         self.announce(dir);
@@ -974,8 +973,7 @@ impl CallSession {
 
     /// The API host to announce: remote, and not in `calls.warned_hosts` (FR-031).
     fn new_provider_host(&self, settings: &Settings) -> Option<ProviderHost> {
-        let url = check_base_url(&settings.api.base_url).ok()?;
-        let host = provider_host(&url)?;
+        let host = provider_host_of(&settings.api.base_url)?;
         let known = settings
             .calls
             .warned_hosts
@@ -1043,6 +1041,11 @@ impl CallSession {
                 mic: Seen::new(now),
                 system: Seen::new(now),
             },
+            device: Pair {
+                mic: DeviceState::default(),
+                system: DeviceState::default(),
+            },
+            declare: Vec::new(),
             pending: Vec::new(),
             sub: subtitles.then(Box::default),
             rec,
@@ -1514,6 +1517,7 @@ fn recording(
         system: lane(Track::System, system),
         meta,
         dir,
+        start,
         mono_start,
         last_tick: None,
         failed: false,
@@ -1651,6 +1655,8 @@ struct Recording {
     system: RecLane,
     meta: CallMeta,
     dir: PathBuf,
+    /// The call's position 0 on the capture clock.
+    start: CaptureStamp,
     mono_start: Instant,
     last_tick: Option<Instant>,
     /// A track write failed: both encoders are gone and no mid-call `write_meta` follows
@@ -1691,6 +1697,16 @@ impl Seen {
     }
 }
 
+/// What the writer knows of one track's device, record on or off (T-222): a call attached
+/// to running captures starts from it.
+#[derive(Clone, Copy, Default)]
+struct DeviceState {
+    /// A `Lost` came and the device thread has not reported a reopen since.
+    down: bool,
+    /// The device thread declared the track silent (with this cause), no reopen since.
+    silent: Option<DeviceCause>,
+}
+
 struct Writer {
     shared: Arc<Shared>,
     log: Arc<Log>,
@@ -1704,6 +1720,11 @@ struct Writer {
     mic_rx: TrackReceiver,
     system_rx: TrackReceiver,
     seen: Pair<Seen>,
+    /// Each track's device state, kept with record off too (T-222).
+    device: Pair<DeviceState>,
+    /// Silent declarations of tracks that were already declared when this call attached:
+    /// logged, stored and raised for it once it is announced (after `call_started`).
+    declare: Vec<(Track, DeviceCause)>,
     /// Warnings raised on this thread, not yet in the call's list (D4).
     pending: Vec<CallWarning>,
     /// `Some` while subtitles is on: the mic feed, then the system feed.
@@ -1757,6 +1778,11 @@ impl Writer {
     /// reopen is written, and both timelines hand over what their resamplers still hold, so
     /// the files keep the audio up to the last block.
     fn end_recording(&mut self) {
+        // A stop comes after the start returned, so the call was announced: a declaration
+        // the writer had no round to make yet is made now (T-222).
+        for (track, cause) in std::mem::take(&mut self.declare) {
+            self.declare_silent(track, cause);
+        }
         for track in [Track::Mic, Track::System] {
             if let Some(at) = self.seen.get(other(track)).last_end {
                 self.advance_track(track, at);
@@ -1791,15 +1817,39 @@ impl Writer {
             self.outcome(outcome);
         }
         let answer = match envelope.command {
-            Command::Attach(rec) => {
+            Command::Attach(mut rec) => {
                 self.control.failed.store(false, Ordering::SeqCst);
-                self.rec = Some(rec);
                 self.pending.clear();
+                self.declare.clear();
+                // The call starts from the captures' device state (T-222): a track that is
+                // down is lost from position 0, with its device change open from there
+                // (#344); one already declared silent gets its declaration for this call
+                // once the call is announced (`flush_warnings`).
+                for track in [Track::Mic, Track::System] {
+                    let state = *self.device.get(track);
+                    if !state.down {
+                        continue;
+                    }
+                    let start = rec.start;
+                    let lane = rec.lane(track);
+                    // A fresh timeline: nothing to flush and no zeros up to position 0.
+                    let _ = lane.timeline.lost(LossCause::Other, start);
+                    lane.gap = Some(DeviceGap {
+                        at_ms: 0,
+                        landed_ms: None,
+                        reopened: None,
+                    });
+                    if let Some(cause) = state.silent {
+                        self.declare.push((track, cause));
+                    }
+                }
+                self.rec = Some(rec);
                 None
             }
             Command::Detach => {
                 self.end_recording();
                 self.pending.clear();
+                self.declare.clear();
                 self.rec.take()
             }
             Command::Subtitles(on) => {
@@ -1865,6 +1915,10 @@ impl Writer {
             if !samples.is_empty() {
                 self.consumer.audio(track, samples);
             }
+        }
+        if matches!(event, TrackEvent::Lost { .. }) {
+            // Every `Lost` starts a reopen on the device thread; kept with record off too.
+            self.device.get_mut(track).down = true;
         }
         let Some(rec) = self.rec.as_mut() else {
             return;
@@ -1959,13 +2013,22 @@ impl Writer {
         }
     }
 
-    /// What the device thread reported. Without a recording call nothing is logged,
-    /// stored or shown (D6).
+    /// What the device thread reported. The track's device state is kept either way;
+    /// without a recording call nothing is logged, stored or shown (D6).
     fn outcome(&mut self, outcome: Outcome) {
+        match outcome {
+            Outcome::Reopened { track, .. } => *self.device.get_mut(track) = DeviceState::default(),
+            Outcome::Silent { track, cause } => {
+                let state = self.device.get_mut(track);
+                state.down = true;
+                state.silent = Some(cause);
+            }
+        }
         let Some(rec) = self.rec.as_mut() else {
             return;
         };
         match outcome {
+            Outcome::Silent { track, cause } => self.declare_silent(track, cause),
             Outcome::Reopened { track, cause, to } => {
                 if track == Track::Mic {
                     // The mic is on the default input now.
@@ -1973,32 +2036,46 @@ impl Writer {
                 }
                 let lane = rec.lane(track);
                 let now = self.mono.now();
-                match lane.gap.as_mut() {
-                    Some(gap) => gap.reopened = Some((cause, to, now)),
-                    None => {
-                        // Record started after the loss: no silence of this call.
-                        let at_ms = lane.timeline.written() / SAMPLES_PER_MS;
-                        self.device_change(track, cause, Some(to), at_ms, 0);
-                    }
-                }
+                // No gap open: the loss came before this call (the attach opens its gap at
+                // position 0), so the silence is the call's from its start (#344).
+                lane.gap
+                    .get_or_insert(DeviceGap {
+                        at_ms: 0,
+                        landed_ms: None,
+                        reopened: None,
+                    })
+                    .reopened = Some((cause, to, now));
                 self.settle(track);
-            }
-            Outcome::Silent { track, cause } => {
-                let lane = rec.lane(track);
-                let now_ms = lane.timeline.written() / SAMPLES_PER_MS;
-                let at_ms = lane.gap.as_ref().map_or(now_ms, |g| g.at_ms);
-                self.log.write(LogEvent::CallTrackSilent {
-                    track,
-                    rule: SilentRule::Lost,
-                });
-                self.device_change(track, cause, None, at_ms, now_ms.saturating_sub(at_ms));
-                self.pending.push(CallWarning::TrackLost { track });
             }
         }
     }
 
+    /// The call's side of a silent declaration: one `call_track_silent rule=lost` line, one
+    /// `call_device` line and entry with no device (from the open gap, else from where the
+    /// track stands) and one `TrackLost` warning. The device state is not touched: the
+    /// replay of a declaration queued at attach (T-222) comes through here too, and the
+    /// track may have reopened since.
+    fn declare_silent(&mut self, track: Track, cause: DeviceCause) {
+        let Some(rec) = self.rec.as_mut() else {
+            return;
+        };
+        let lane = rec.lane(track);
+        let now_ms = lane.timeline.written() / SAMPLES_PER_MS;
+        let at_ms = lane.gap.as_ref().map_or(now_ms, |g| g.at_ms);
+        self.log.write(LogEvent::CallTrackSilent {
+            track,
+            rule: SilentRule::Lost,
+        });
+        self.device_change(track, cause, None, at_ms, now_ms.saturating_sub(at_ms));
+        self.pending.push(CallWarning::TrackLost { track });
+    }
+
     /// A reopen whose audio has landed: one `call_device` line and one entry (D3).
     fn settle(&mut self, track: Track) {
+        if self.declare.iter().any(|(t, _)| *t == track) {
+            // Its declaration for this call comes first (T-222); the gap stays open.
+            return;
+        }
         let Some(rec) = self.rec.as_mut() else {
             return;
         };
@@ -2119,22 +2196,33 @@ impl Writer {
     /// Moves the warnings raised here into the call's list and republishes the state,
     /// under the session lock (D4). A session that holds the lock (or waits for this
     /// thread) keeps them pending for the next round.
+    ///
+    /// The declarations queued at attach (T-222) are made here too, under the same lock:
+    /// a call in the session's state was announced, so they follow `call_started`.
     fn flush_warnings(&mut self) {
-        if self.pending.is_empty()
+        if (self.pending.is_empty() && self.declare.is_empty())
             || self.control.stop.load(Ordering::SeqCst)
             || self.control.hold.load(Ordering::SeqCst)
         {
             return;
         }
-        let mut inner = match self.shared.inner.try_lock() {
+        let shared = Arc::clone(&self.shared);
+        let mut inner = match shared.inner.try_lock() {
             Ok(inner) => inner,
             Err(TryLockError::Poisoned(p)) => p.into_inner(),
             Err(TryLockError::WouldBlock) => return,
         };
         let Some(call) = inner.call.as_mut() else {
             self.pending.clear();
+            self.declare.clear();
             return;
         };
+        for (track, cause) in std::mem::take(&mut self.declare) {
+            // The device thread's own declaration, made for this call (its gap is open
+            // from position 0, so the entry is at 0). Only the call's side: the device
+            // state stays what the device thread reported since.
+            self.declare_silent(track, cause);
+        }
         let mut added = false;
         for warning in self.pending.drain(..) {
             added |= call.warnings.raise(warning).is_some();

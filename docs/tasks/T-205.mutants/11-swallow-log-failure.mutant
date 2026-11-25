@@ -1,0 +1,8 @@
+guarantee: AC-2: a failing log call is exit 5, no FAILED JOB or LOG line
+file: scripts/tw-wip-run
+added_by: test-writer
+--- old
+      logtxt="$(gh run view "$rid" --log-failed)" || gh_failed "gh run view $rid --log-failed exited non-zero"
+--- new
+      logtxt="$(gh run view "$rid" --log-failed)" || logtxt=""
+--- end

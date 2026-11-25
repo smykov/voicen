@@ -41,8 +41,9 @@ pub fn start(logs_dir: PathBuf, on_unwritable: OnUnwritable) -> Arc<Log> {
 }
 
 /// This process's session (T-024): ended cleanly at most once, by
-/// [`SessionEnd::end`] from `on_run_event`'s `RunEvent::Exit` arm (tray Exit, and
-/// `WM_ENDSESSION(TRUE)` through tao). Dropping it ends nothing: only `end` deletes
+/// [`SessionEnd::end`] from the lib's `end_of_process` (`on_run_event`'s `RunEvent::Exit`
+/// arm: tray Exit, and `WM_ENDSESSION(TRUE)` through tao; or the `WM_ENDSESSION(TRUE)`
+/// hook of `win::end_session`, when the message comes inside a nested pump). Dropping it ends nothing: only `end` deletes
 /// the marker, so every other way out of the process leaves it for the next start.
 pub struct SessionEnd(Mutex<Option<(Session, Arc<Log>)>>);
 

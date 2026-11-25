@@ -1,0 +1,2 @@
+# the shell tests of the task, as the Windows CI job runs the area's shell tests (cargo test -p voicen --no-fail-fast), narrowed to the one file; Windows only: not runnable by tw-mutants on the Linux gate
+cargo test -j 2 -p voicen --test call_dictation --no-fail-fast

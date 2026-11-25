@@ -1,0 +1,17 @@
+      - name: Prebuild report
+        if: always() && steps.prebuild.outcome == 'success'
+        run: |
+          # T-261: inline, runs nothing of the tree (the session can edit it); never fails the job.
+          # A sequence still running is stopped (its process group), then its container removed.
+          pid="$(cat "$RUNNER_TEMP/prebuild.pid" 2>/dev/null || true)"
+          if [[ "$pid" =~ ^[0-9]+$ ]]; then
+            kill -TERM -- "-$pid" 2>/dev/null || true
+            sleep 2
+          fi
+          docker rm -f "tw-prebuild-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >/dev/null 2>&1 || true
+          rc="$(cat "$RUNNER_TEMP/prebuild.rc" 2>/dev/null || true)"
+          rc="${rc//[[:space:]]/}"
+          if [ "$rc" != 0 ]; then
+            echo "::warning::the prebuild did not finish cleanly (exit code '${rc:-none}'; $RUNNER_TEMP/prebuild.log on the runner): the session's first gate built more itself"
+          fi
+          exit 0

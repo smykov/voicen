@@ -1,0 +1,8 @@
+guarantee: AC-1/AC-4: the provider status (429) reaches the dictation line
+file: crates/voicen-core/src/post_process/mod.rs
+added_by: test-writer
+--- old
+            SkipReason::Http { status } => SkipKind::Http { status: *status },
+--- new
+            SkipReason::Http { status: _ } => SkipKind::Http { status: 500 },
+--- end

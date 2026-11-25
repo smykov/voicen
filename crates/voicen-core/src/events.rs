@@ -31,7 +31,10 @@ pub enum OutcomeCode {
 }
 
 /// The code of a `Warning`: `vad_fallback`, `esc_unavailable`, `toast_failed`,
-/// `pending_audio_unreadable`, `dictation_worker_stopped`.
+/// `pending_audio_unreadable`, `dictation_worker_stopped`. `esc_unavailable`
+/// means Esc cannot cancel the recording that is on: the shell reports each Esc
+/// claim's outcome and the session judges it by the recording's mode (T-212:
+/// hold needs the claim under the hotkey's modifiers, toggle the bare one).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WarningCode {
     VadFallback,
@@ -70,14 +73,15 @@ pub enum PostProcessResult {
     Skipped(SkipKind),
 }
 
-/// `SkipReason` without its host or status (`SkipReason::kind()`): one kind per
-/// reason.
+/// `SkipReason` without its host (`SkipReason::kind()`): one kind per reason.
+/// Only `Http` carries data, the response's status code as an integer (T-190,
+/// written as `pp_http_status=`); no kind carries text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SkipKind {
     Timeout,
     Unreachable,
     InvalidKey,
-    Http,
+    Http { status: u16 },
     InvalidResponse,
     NotConfigured,
 }

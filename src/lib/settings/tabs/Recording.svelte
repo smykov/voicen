@@ -12,7 +12,13 @@
   const mode = "recording.mode";
 </script>
 
-<HotkeyField bind:draft {warnings} />
+<HotkeyField
+  bind:value={draft.settings.hotkey}
+  field="recording.hotkey"
+  label="settings.field.hotkey"
+  errors={draft.errors}
+  {warnings}
+/>
 
 <MicrophoneField bind:draft {warnings} />
 

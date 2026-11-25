@@ -51,4 +51,4 @@ The Calls window is the shell half of FR-033, FR-034 and FR-036. The invariants 
 
 ## Open
 
-- The toast "Transcript ready → Open" is not wired: `open_calls(app, Some(CallRef))` is the entry T-139 will call, after T-213's activator (`toast.rs`: a toast has no action yet).
+- The toast "Transcript ready → Open" (T-213) calls `open_calls(app, Some(CallRef))` through the toast activator (`win/toast.rs` `app_route`), with the root the notice carried; the argument holds only the call id, so a click after a restart only starts the app.

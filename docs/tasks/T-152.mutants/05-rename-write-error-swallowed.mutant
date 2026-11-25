@@ -1,0 +1,8 @@
+guarantee: AC1/atomicity: a write fault at transcript.md / transcript.json / meta.json is ioFailed with every file at its old bytes
+file: crates/voicen-core/src/call/storage.rs
+added_by: test-writer
+--- old
+        if let Err(e) = write_atomic(dir, name, bytes) {
+--- new
+        if let Err(e) = write_atomic(dir, name, bytes).or_else(|_| Ok::<(), io::Error>(())) {
+--- end

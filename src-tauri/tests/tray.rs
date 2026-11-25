@@ -353,6 +353,7 @@ fn start_session(rig: &Rig, audio: Arc<dyn AudioSource>) -> Arc<DictationSession
             transcript_sink: Arc::new(voicen_core::pipeline::DiscardTranscripts),
         },
         engine_factory: None,
+        builtin: None,
         audio,
         indicator: Arc::new(TrayOnly(rig.part())),
         requests: Arc::new(FakeShellRequests::new()),

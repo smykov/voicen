@@ -1,0 +1,13 @@
+guarantee: I9/I10 (review r1 #1): the replay in flush_warnings leaves the writer's device state alone, so a track that reopened before the replay is live at the next record start
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+test: cargo test -j 2 -p voicen-core --test call_session leaves_the_next_call_live
+--- old
+            self.declare_silent(track, cause);
+        }
+        let mut added = false;
+--- new
+            self.outcome(Outcome::Silent { track, cause });
+        }
+        let mut added = false;
+--- end

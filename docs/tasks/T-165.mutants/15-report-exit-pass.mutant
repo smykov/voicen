@@ -1,0 +1,10 @@
+guarantee: AC-1: offending lines exit 1
+file: scripts/ci/core-test-deadlines.sh
+added_by: test-writer
+--- old
+  echo "core-test-deadlines: FAIL: $n line(s) build a deadline or a timed server plan outside tests/common (T-165, docs/decisions/core-tests.md)" >&2
+  exit 1
+--- new
+  echo "core-test-deadlines: FAIL: $n line(s) build a deadline or a timed server plan outside tests/common (T-165, docs/decisions/core-tests.md)" >&2
+  exit 0
+--- end

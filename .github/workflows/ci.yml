@@ -2,8 +2,8 @@ name: CI
 
 on:
   # wip/** (T-066, P-016, decisions #90; check-ci-wip): a task's CI-only head push (pre-push: not
-  # a delivery) runs this workflow before review; workflow_dispatch (T-202, #253) lets the contour
-  # start that run (a job-token push starts none); release, upload and Telegram stay push-only.
+  # a delivery) runs this workflow before review unless it changes only task records; the contour
+  # starts it by workflow_dispatch (T-202, #253: a job-token push starts none); release, upload and Telegram stay push-only.
   push:
     branches: [main, "wip/**"]
     tags: ["v*"]
@@ -81,6 +81,9 @@ jobs:
     name: Windows build, install and smoke test
     needs: gate
     runs-on: windows-latest
+    # T-230: the job's own bound, 4x the longest windows job of 40 green runs (no step runs past it);
+    # this head is the owned copy scripts/ci/windows-head.yml (release-guard.sh R15; edit both together).
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v5
       # No cache in the node setup action: its post step saves on every ref and has no switch to
@@ -183,14 +186,20 @@ jobs:
       # search path; cargo gives every build script's search dirs (native_dirs) to every doctest
       # of the same invocation, so other crates' doctests must not share a run with `voicen` (T-033, F-001).
       # --no-fail-fast: one red test binary must not hide the others; the step still fails at the end (T-048, T-044).
-      - run: cargo test --workspace --exclude voicen --no-fail-fast
+      # T-230: each test step has its own bound (the longest of 40 green runs: 10 min), so a hanging test turns
+      # the run red within 30 min instead of the job's bound.
+      - name: Test the workspace except the shell
+        timeout-minutes: 30
+        run: cargo test --workspace --exclude voicen --no-fail-fast
       - name: Save the tiny whisper model (main only)
         if: ${{ github.ref == 'refs/heads/main' && steps.whisper-tiny.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@v6
         with:
           path: ${{ runner.temp }}/voicen-whisper-models
           key: ${{ steps.whisper-tiny.outputs.cache-primary-key }}
-      - run: cargo test -p voicen --no-fail-fast
+      - name: Test the shell
+        timeout-minutes: 30
+        run: cargo test -p voicen --no-fail-fast
       # T-102 (invariant 4): the model reaches the installer only through this overlay; a merge
       # patch that adds one key to bundle.resources, so tauri.conf.json never names the model.
       - run: pnpm tauri build --config src-tauri/tauri.bundle-vad.json
@@ -243,7 +252,7 @@ jobs:
           }
           if ($missing) { throw "no line information in voicen.pdb for: $($missing -join ', ')" }
       # T-099 (decisions #142, invariant 3): the effective whisper.cpp configuration cmake wrote,
-      # in every whisper-rs-sys build dir under target/ (debug for cargo test, release for the
+      # in every whisper-rs-sys build dir under target/ (debug for the test steps, release for the
       # installer; a restored build cache can hold an older one). !cancelled(): runs after a red
       # build or test step too, so the configuration is reported in the same run. make check:
       # check-whisper-cmake-cache.
@@ -251,7 +260,7 @@ jobs:
         if: ${{ !cancelled() }}
         shell: bash
         run: bash scripts/ci/whisper-cmake-cache.sh target
-      # T-117 (decisions #197): every libopus under target/ (debug for cargo test, release for the
+      # T-117 (decisions #197): every libopus under target/ (debug for the test steps, release for the
       # installer) was configured with OPUS_STATIC_RUNTIME ON and Release, and each opus.lib names
       # the static CRT (dumpbin -directives: LIBCMT, never MSVCRT). !cancelled(): as above.
       # make check: check-opus-cmake-cache.
@@ -306,6 +315,17 @@ jobs:
             else { $missing += "$($p[0]) not found at $($p[1])" }
           }
           if ($missing) { throw ($missing -join '; ') }
+          # T-213 (I7, Acceptance 6): the shortcut carries the toast activator CLSID and the HKCU class key
+          # points at the installed voicen.exe. Red until the installer hooks write both.
+          $clsid = '{163266b0-4b55-446a-bbbe-e31cac2c713a}'
+          $clsidKey = 'HKCU:\Software\Classes\CLSID\' + $clsid
+          $lnkItem = (New-Object -ComObject Shell.Application).Namespace((Split-Path -Parent $shortcut)).ParseName('Voicen.lnk')
+          $lnkClsid = "$($lnkItem.ExtendedProperty('System.AppUserModel.ToastActivatorCLSID'))"
+          if ($lnkClsid -ine $clsid) { throw "Voicen.lnk property System.AppUserModel.ToastActivatorCLSID is '$lnkClsid' after the silent install, expected '$clsid'" }
+          $serverKey = Get-Item -LiteralPath ($clsidKey + '\LocalServer32') -ErrorAction SilentlyContinue
+          if (-not $serverKey) { throw "registry key $clsidKey\LocalServer32 not found after the silent install" }
+          if ($serverKey.GetValue('') -ine $exe) { throw "$clsidKey\LocalServer32 default value is '$($serverKey.GetValue(''))' after the silent install, expected '$exe'" }
+          Write-Output "found the toast activator CLSID $clsid on $shortcut and $clsidKey\LocalServer32 = $exe"
           # T-025 (NFR-09, spec 006 FR-019): the installed size is measured before the first
           # launch (no settings, logs or WebView2 data yet) and is at most 100 MB (binary units,
           # OQ-08); the committed THIRD-PARTY-NOTICES.txt (T-027) is installed next to voicen.exe
@@ -431,6 +451,94 @@ jobs:
             }
             if ($closedAlive -and -not $gone) { $closedAlive = $false; $closeSeen = "the settings window did not close ($closeSeen)" }
           }
+          # T-132 (spec 007 FR-043, FR-002, FR-042): the installed app on the runner (no render
+          # endpoint, run 43598234999) gets `voicen.exe --call record` as a second launch: the
+          # primary logs one call_requested source=switch and one call_refused part=system
+          # reason=no_device, keeps running, shows no new window, leaves no call folder and logs no
+          # planted value. Raw facts are collected here; one throw per failed fact follows the
+          # existing throws. The planted fake key is tripwire-only (a refused start reads no key) and
+          # is removed in the finally, so the purge step starts from its own plants.
+          . ./scripts/ci/credentials.ps1
+          $callFails = @()
+          $callRan = 'not run (no running app with no shown window after the close)'
+          $callLines = 'none'
+          $callExit = 'not run'
+          $callSw = $null
+          $callFacts = @()
+          if ($closedAlive) {
+            $callRan = 'ran'
+            $fakeKey = 'sk-test-ci-callswitch-0000-not-a-real-key'
+            $keyTarget = 'Voicen/transcription-api'
+            $callsDir = Join-Path $env:LOCALAPPDATA 'Voicen\calls'
+            $reqLine = 'call_requested source=switch'
+            $refLine = 'call_refused part=system reason=no_device'
+            $planted = @($fakeKey)
+            try {
+              Add-VoicenCredential -Target $keyTarget -Secret $fakeKey
+              if (-not (Test-VoicenCredential -Target $keyTarget)) { throw "premise: the planted fake key at $keyTarget is not readable back" }
+              # The runner's audio endpoints as observed values (may be none; the count is printed).
+              $endpoints = @(Get-CimInstance Win32_SoundDevice -ErrorAction SilentlyContinue | ForEach-Object { $_.Name } | Where-Object { $_ })
+              $planted += $endpoints
+              Write-Output "--call record: runner audio devices (Win32_SoundDevice): $($endpoints.Count)"
+              $before = Get-ShownWindows $proc.Id
+              $beforeKey = (($before | ForEach-Object { $_.Handle.ToInt64() }) -join ',')
+              $callSw = Start-Process -FilePath $exe -ArgumentList '--call', 'record' -PassThru
+              $null = $callSw.Handle
+              if ($callSw.WaitForExit(30000)) { $callExit = "exit code $($callSw.ExitCode)" }
+              else { Stop-Process -Id $callSw.Id -Force -ErrorAction SilentlyContinue; $callExit = 'did not exit within 30 s' }
+              $reqCount = 0
+              $refCount = 0
+              for ($i = 0; $i -lt 20; $i++) {
+                $reqCount = if (Test-Path $logs) { @(Select-String -Path $logs -SimpleMatch $reqLine).Count } else { 0 }
+                $refCount = if (Test-Path $logs) { @(Select-String -Path $logs -SimpleMatch $refLine).Count } else { 0 }
+                if ($reqCount -ge 1 -and $refCount -ge 1) { break }
+                Start-Sleep -Seconds 1
+              }
+              # 5 s after the lines: the primary stays, no window appears.
+              $aliveSeen = $true
+              $winSeen = 'unchanged'
+              for ($i = 0; $i -lt 5; $i++) {
+                Start-Sleep -Seconds 1
+                if ($proc.HasExited) { $aliveSeen = $false; break }
+                $nowShown = Get-ShownWindows $proc.Id
+                if ((($nowShown | ForEach-Object { $_.Handle.ToInt64() }) -join ',') -cne $beforeKey) { $winSeen = "changed: $(Format-ShownWindows $nowShown) (before: $(Format-ShownWindows $before))" }
+              }
+              $callDrift = @()
+              if ($aliveSeen) {
+                for ($i = 0; $i -lt 10; $i++) {
+                  $callDrift = @(Get-HelperDrift $proc.Id)
+                  if ($callDrift.Count -eq 0 -or $proc.HasExited) { break }
+                  Start-Sleep -Seconds 1
+                }
+              }
+              $reqCount = if (Test-Path $logs) { @(Select-String -Path $logs -SimpleMatch $reqLine).Count } else { 0 }
+              $refCount = if (Test-Path $logs) { @(Select-String -Path $logs -SimpleMatch $refLine).Count } else { 0 }
+              $callChildren = @()
+              if (Test-Path -LiteralPath $callsDir) { $callChildren = @(Get-ChildItem -LiteralPath $callsDir -Force | ForEach-Object { $_.Name }) }
+              $leaks = @()
+              if (Test-Path $logs) { foreach ($v in $planted) { if (@(Select-String -Path $logs -SimpleMatch $v).Count -gt 0) { $leaks += 'a planted value' } } }
+              $callLinesAll = @()
+              if (Test-Path $logs) { $callLinesAll = @(Select-String -Path $logs -SimpleMatch 'call_' | ForEach-Object { $_.Line }) }
+              foreach ($v in $planted) { $callLinesAll = @($callLinesAll | ForEach-Object { $_.Replace($v, '<planted>') }) }
+              $callLines = if ($callLinesAll.Count -gt 0) { $callLinesAll -join ' | ' } else { 'none' }
+              if ($callExit -cne 'exit code 0') { $callFacts += "the second process: $callExit (expected exit code 0 within 30 s)" }
+              if ($reqCount -ne 1) { $callFacts += "'$reqLine' occurs $reqCount times in voicen*.log, expected 1" }
+              if ($refCount -ne 1) { $callFacts += "'$refLine' occurs $refCount times in voicen*.log, expected 1" }
+              if (-not $aliveSeen) { $callFacts += "the primary (pid $($proc.Id)) exited (code $($proc.ExitCode)) within 5 s of the refusal" }
+              if ($winSeen -cne 'unchanged') { $callFacts += "shown windows after the switch $winSeen" }
+              if ($callDrift.Count -gt 0) { $callFacts += (Format-HelperDrift $callDrift) }
+              if ($callChildren.Count -gt 0) { $callFacts += "$callsDir has $($callChildren.Count) entries, expected none: $($callChildren -join ', ')" }
+              if ($leaks.Count -gt 0) { $callFacts += "voicen*.log holds $($leaks.Count) planted value(s) (the fake key or a runner audio device name)" }
+            } catch {
+              $callFacts += "error: $($_.Exception.Message)"
+            } finally {
+              try {
+                Remove-VoicenCredential -Target $keyTarget
+                if (Test-VoicenCredential -Target $keyTarget) { $callFacts += "the planted fake key at $keyTarget is still present after Remove-VoicenCredential" }
+              } catch { $callFacts += "cleanup error: $($_.Exception.Message)" }
+              if ($callSw -and -not $callSw.HasExited) { Stop-Process -Id $callSw.Id -Force -ErrorAction SilentlyContinue }
+            }
+          }
           Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
           if (-not $found) { if (Test-Path $logs) { Get-Content $logs }; throw "start log line '$expected' (version $env:VOICEN_VERSION, commit $env:VOICEN_COMMIT) not found" }
           Get-Content $logs
@@ -465,6 +573,9 @@ jobs:
           Write-Output "found the tray window after the first launch"
           if (-not $closedAlive) { throw "closing the first-run settings window did not leave the app running with no shown window: $closeSeen" }
           Write-Output "WM_CLOSE to the first-run settings window: $closeSeen, for 10 s"
+          if ($callFacts.Count -gt 0) { throw "--call record: $($callFacts -join '; '). call_* log lines: $callLines" }
+          if ($callRan -cne 'ran') { throw "--call record: $callRan" }
+          Write-Output "--call record: one call_requested source=switch and one call_refused part=system reason=no_device, second process $callExit, primary running, shown windows unchanged, no helper drift, no call folder, no planted value in the log; call_* lines: $callLines"
       - name: Start with Windows on writes the Run value, off removes it (T-014 reconcile at start)
         shell: pwsh
         run: |
@@ -1009,7 +1120,7 @@ jobs:
           Write-Output "first launch: one blocked hold, one blocked line after $([int]$seenAt) s, no dictation rec= line, voicen.exe still running"
       # T-062 (FR-28 v4, decisions #76): the WebView2 data of every window lives under
       # %LOCALAPPDATA%\Voicen\webview, never in tauri's default %LOCALAPPDATA%\dev.voicen.app. A
-      # leftover dev.voicen.app (the earlier cargo test step builds windows on the mock runtime) is
+      # leftover dev.voicen.app (the earlier shell test step builds windows on the mock runtime) is
       # removed first and its earlier existence is logged, so the verdict speaks only about the
       # installed app. Loaded launch with engine local_server at a refused loopback endpoint (as the
       # loaded hold above): a 3 s hold of Ctrl+Alt+Space makes the overlay window, a second launch
@@ -1102,12 +1213,20 @@ jobs:
           $runValue = '"' + $exe + '" --autostart'
           $fake = 'sk-test-ci-uninstall-0000-not-a-real-key'
           $kept = @('Voicen/ci-uninstall', 'VoicenOther/ci-uninstall-keep')
+          # T-207: the pre-T-062 WebView2 folder and a sibling next to it (the failure branch).
+          $legacy = Join-Path $env:LOCALAPPDATA 'dev.voicen.app'
+          $legacyFile = Join-Path $legacy 'EBWebView\ci-legacy.txt'
+          $sibling = Join-Path $env:LOCALAPPDATA 'dev.voicen.app.keep'
+          $siblingFile = Join-Path $sibling 'ci-keep.txt'
           function Get-RunValue { (Get-ItemProperty -Path $run -Name 'Voicen' -ErrorAction SilentlyContinue).Voicen }
-          function Remove-All { $failed = 0; foreach ($t in $kept) { try { Remove-VoicenCredential -Target $t } catch { $failed++; Write-Host "cleanup: $($_.Exception.Message)" } }; Remove-ItemProperty -Path $run -Name 'Voicen' -ErrorAction SilentlyContinue; $failed }
+          function Remove-All { $failed = 0; foreach ($t in $kept) { try { Remove-VoicenCredential -Target $t } catch { $failed++; Write-Host "cleanup: $($_.Exception.Message)" } }; Remove-ItemProperty -Path $run -Name 'Voicen' -ErrorAction SilentlyContinue; Remove-Item -LiteralPath $legacy, $sibling -Recurse -Force -ErrorAction SilentlyContinue; $failed }
           Stop-AllVoicen
           if (-not (Test-Path -LiteralPath $settings -PathType Leaf)) { throw "premise: settings.json not found at $settings before the reinstall" }
           $settingsHash = (Get-FileHash -LiteralPath $settings -Algorithm SHA256).Hash
           $markerText = "ci-keep $env:VOICEN_COMMIT"
+          $shortcut = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Voicen.lnk'
+          $clsid = '{163266b0-4b55-446a-bbbe-e31cac2c713a}'
+          $clsidKey = 'HKCU:\Software\Classes\CLSID\' + $clsid
           Set-Content -LiteralPath $marker -Value $markerText -NoNewline
           New-ItemProperty -Path $run -Name 'Voicen' -PropertyType String -Value $runValue -Force | Out-Null
           if ((Get-RunValue) -ne $runValue) { [void](Remove-All); throw "premise: the HKCU Run value Voicen reads '$(Get-RunValue)' after writing '$runValue'" }
@@ -1118,6 +1237,13 @@ jobs:
             }
           } catch { [void](Remove-All); throw }
           Write-Output "premise: settings.json, ci-keep.txt, the Run value '$runValue' and $($kept -join ', ') in place"
+          # T-207 (decisions #345 Q1): plant the pre-T-062 folder and a sibling; the /P reinstall (the
+          # old uninstaller with /UPDATE /P, then the installer) must remove the folder and only it.
+          Remove-Item -LiteralPath $legacy, $sibling -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path (Split-Path -Parent $legacyFile), $sibling | Out-Null
+          Set-Content -LiteralPath $legacyFile -Value 'ci legacy webview2 data' -NoNewline
+          Set-Content -LiteralPath $siblingFile -Value 'ci sibling, must survive' -NoNewline
+          foreach ($q in @($legacyFile, $siblingFile)) { if (-not (Test-Path -LiteralPath $q -PathType Leaf)) { [void](Remove-All); throw "premise: T-207 planted file $q not found" } }
           $setup = Get-ChildItem target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
           $p = Start-Process $setup.FullName -ArgumentList '/P' -PassThru
           $null = $p.Handle
@@ -1137,6 +1263,13 @@ jobs:
           $bad = @()
           if ($p.ExitCode -ne 0) { $bad += "the /P reinstall exited with $($p.ExitCode), expected 0" }
           if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { $bad += "voicen.exe not found at $exe after the reinstall" }
+          # T-213 (I7, Acceptance 6): an update-mode reinstall leaves the CLSID on the shortcut and the class key at this exe.
+          $lnkItem = (New-Object -ComObject Shell.Application).Namespace((Split-Path -Parent $shortcut)).ParseName('Voicen.lnk')
+          if (-not $lnkItem) { $bad += "Voicen.lnk not found at $shortcut after the /P reinstall" }
+          else { $lnkClsid = "$($lnkItem.ExtendedProperty('System.AppUserModel.ToastActivatorCLSID'))"; if ($lnkClsid -ine $clsid) { $bad += "Voicen.lnk property System.AppUserModel.ToastActivatorCLSID is '$lnkClsid' after the /P reinstall, expected '$clsid'" } }
+          $serverKey = Get-Item -LiteralPath ($clsidKey + '\LocalServer32') -ErrorAction SilentlyContinue
+          if (-not $serverKey) { $bad += "registry key $clsidKey\LocalServer32 not found after the /P reinstall" }
+          elseif ($serverKey.GetValue('') -ine $exe) { $bad += "$clsidKey\LocalServer32 default value is '$($serverKey.GetValue(''))' after the /P reinstall, expected '$exe'" }
           if (-not (Test-Path -LiteralPath $marker -PathType Leaf)) { $bad += "the data marker $marker was deleted by the reinstall" }
           elseif ((Get-Content -LiteralPath $marker -Raw) -ne $markerText) { $bad += "the data marker $marker changed during the reinstall" }
           if (-not (Test-Path -LiteralPath $settings -PathType Leaf)) { $bad += "settings.json was deleted by the reinstall" }
@@ -1144,6 +1277,10 @@ jobs:
           foreach ($t in $kept) { if (-not (Test-VoicenCredential -Target $t)) { $bad += "$t was deleted by the reinstall" } }
           $after = Get-RunValue
           if ($after -ne $runValue) { $bad += "the HKCU Run value Voicen is '$after' after the reinstall, expected '$runValue' (kept on an installer-started uninstall)" }
+          # T-207 (Acceptance 1, red on today's hooks: nothing removes the folder).
+          if (Test-Path -LiteralPath $legacy) { $bad += "T-207: $legacy is still present after the /P reinstall (left: $((@(Get-ChildItem -LiteralPath $legacy -Recurse -Force -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName.Substring($legacy.Length) }) | Select-Object -First 20) -join ', '))" }
+          # T-207 (Acceptance 4, failure branch, green today): only the folder itself is removed.
+          if (-not (Test-Path -LiteralPath $siblingFile -PathType Leaf)) { $bad += "T-207: the sibling $siblingFile was deleted by the /P reinstall (a removal matched more than $legacy)" }
           $cleanup = Remove-All
           if ($bad) { throw ($bad -join '; ') }
           if ($cleanup -ne 0) { throw "cleanup: a Remove-VoicenCredential above failed (Win32 error printed)" }
@@ -1393,11 +1530,26 @@ jobs:
           $shortcut = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Voicen.lnk'
           $uninstKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Voicen'
           $run = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+          $clsidKey = 'HKCU:\Software\Classes\CLSID\{163266b0-4b55-446a-bbbe-e31cac2c713a}'
           $fake = 'sk-test-ci-keepdata-0000-not-a-real-key'
           $target = 'Voicen/ci-keepdata'
+          # T-207: the pre-T-062 WebView2 folder (with a junction to a sentinel outside it and, later, a
+          # locked file) and a sibling next to it.
+          $legacy = Join-Path $env:LOCALAPPDATA 'dev.voicen.app'
+          $legacyFile = Join-Path $legacy 'EBWebView\ci-legacy.txt'
+          $legacyLink = Join-Path $legacy 'link'
+          $lockedFile = Join-Path $legacy 'locked\ci-locked.bin'
+          $sibling = Join-Path $env:LOCALAPPDATA 'dev.voicen.app.keep'
+          $siblingFile = Join-Path $sibling 'ci-keep.txt'
+          $elsewhere = Join-Path $env:RUNNER_TEMP 'legacy-elsewhere'
+          $elsewhereFile = Join-Path $elsewhere 'sentinel.txt'
+          $lock = $null
           function Get-RunValue { (Get-ItemProperty -Path $run -Name 'Voicen' -ErrorAction SilentlyContinue).Voicen }
           function Get-UninstallerCopies { @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path.StartsWith([IO.Path]::GetTempPath(), [StringComparison]::OrdinalIgnoreCase) -and $_.Path -like '*\~nsu*' }) }
-          function Remove-All { $failed = 0; try { Remove-VoicenCredential -Target $target } catch { $failed++; Write-Host "cleanup: $($_.Exception.Message)" }; $failed }
+          function Remove-Link([string]$p) { if (Test-Path -LiteralPath $p) { $i = Get-Item -LiteralPath $p -Force; if ($i.LinkType) { $i.Delete() } } }
+          function Remove-Legacy { if ($lock) { $lock.Dispose() }; Remove-Link $legacyLink; Remove-Item -LiteralPath $legacy, $sibling, $elsewhere -Recurse -Force -ErrorAction SilentlyContinue }
+          function Invoke-Setup { $sp = Start-Process $setup.FullName -ArgumentList '/S' -PassThru; $null = $sp.Handle; if (-not $sp.WaitForExit(120000)) { Stop-Process -Id $sp.Id -Force -ErrorAction SilentlyContinue; throw "the silent install did not finish within 120 s" }; $sp.ExitCode }
+          function Remove-All { $failed = 0; try { Remove-VoicenCredential -Target $target } catch { $failed++; Write-Host "cleanup: $($_.Exception.Message)" }; Remove-Legacy; $failed }
           Stop-AllVoicen
           foreach ($p in @($exe, $uninstaller, $settings, $shortcut)) { if (-not (Test-Path -LiteralPath $p -PathType Leaf)) { throw "premise: $p not found before the uninstall" } }
           if (-not (Test-Path -LiteralPath $uninstKey)) { throw "premise: the uninstall key $uninstKey not found before the uninstall" }
@@ -1409,6 +1561,18 @@ jobs:
             if (-not (Test-VoicenCredential -Target $target)) { throw "premise: $target was written but Test-VoicenCredential does not find it" }
           } catch { [void](Remove-All); throw }
           Write-Output "premise: installed, settings.json, ci-keep.txt, the Run value and $target in place"
+          # T-207 (decisions #345 Q2): plant the folder, a junction inside it to a sentinel outside it, a
+          # file to lock later, and the sibling; /KEEPDATA keeps the folder with the data.
+          Remove-Link $legacyLink
+          Remove-Item -LiteralPath $legacy, $sibling, $elsewhere -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path (Split-Path -Parent $legacyFile), (Split-Path -Parent $lockedFile), $sibling, $elsewhere | Out-Null
+          Set-Content -LiteralPath $legacyFile -Value 'ci legacy webview2 data' -NoNewline
+          Set-Content -LiteralPath $lockedFile -Value 'ci locked legacy file' -NoNewline
+          Set-Content -LiteralPath $siblingFile -Value 'ci sibling, must survive' -NoNewline
+          Set-Content -LiteralPath $elsewhereFile -Value 'ci sentinel behind the junction' -NoNewline
+          New-Item -ItemType Junction -Path $legacyLink -Target $elsewhere | Out-Null
+          if ((Get-Item -LiteralPath $legacyLink -Force).LinkType -cne 'Junction') { [void](Remove-All); throw "premise: T-207 $legacyLink is not a junction" }
+          foreach ($q in @($legacyFile, $lockedFile, $siblingFile, $elsewhereFile, (Join-Path $legacyLink 'sentinel.txt'))) { if (-not (Test-Path -LiteralPath $q -PathType Leaf)) { [void](Remove-All); throw "premise: T-207 planted file $q not found" } }
           $p = Start-Process -FilePath $uninstaller -ArgumentList '/S', '/KEEPDATA' -PassThru
           $done = $false
           $clock = [Diagnostics.Stopwatch]::StartNew()
@@ -1426,14 +1590,42 @@ jobs:
           if (-not (Test-VoicenCredential -Target $target)) { $bad += "/KEEPDATA: $target was deleted" }
           if ($null -ne (Get-RunValue)) { $bad += "the HKCU Run value Voicen ('$(Get-RunValue)') is still present after the uninstall" }
           if (Test-Path -LiteralPath $shortcut) { $bad += "the shortcut $shortcut is still present after the uninstall" }
+          # T-213 (I7, Acceptance 8): /KEEPDATA keeps data, not the toast activator registration.
+          if (Test-Path -LiteralPath $clsidKey) { $bad += "the registry key $clsidKey is still present after uninstall.exe /S /KEEPDATA" }
+          # T-207 (Acceptance 2, green today and guards a removal keyed on the uninstall alone): /KEEPDATA keeps the legacy folder with the data.
+          if (-not (Test-Path -LiteralPath $legacyFile -PathType Leaf)) { $bad += "T-207: /KEEPDATA removed $legacyFile (the uninstall removes the legacy folder only when it removes the data)" }
+          if (-not (Test-Path -LiteralPath $siblingFile -PathType Leaf)) { $bad += "T-207: the sibling $siblingFile was deleted by uninstall.exe /S /KEEPDATA" }
           if ($bad) { [void](Remove-All); Remove-ItemProperty -Path $run -Name 'Voicen' -ErrorAction SilentlyContinue; throw ($bad -join '; ') }
           Write-Output "uninstall /S /KEEPDATA: data folder, settings.json, ci-keep.txt and $target kept; Run value, shortcut, uninstall key, voicen.exe and uninstall.exe gone"
           # Reinstall for W4: a silent install over the kept data folder.
           $setup = Get-ChildItem target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
-          Start-Process $setup.FullName -ArgumentList '/S' -Wait
+          # T-207 (decisions #345 Q1, Q3): this silent install runs no uninstaller, so the installer alone must
+          # remove the legacy folder. A file of it is held open exclusively across the install: the install
+          # still exits 0, the rest of the folder is removed without a message, and the locked file is left.
+          try {
+            $lock = [System.IO.File]::Open($lockedFile, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+            $exit1 = Invoke-Setup
+          } catch { [void](Remove-All); throw }
           foreach ($q in @($exe, $uninstaller, $shortcut, $marker)) { if (-not (Test-Path -LiteralPath $q -PathType Leaf)) { [void](Remove-All); throw "after the silent reinstall: $q not found" } }
-          if ((Remove-All) -ne 0) { throw "cleanup: a Remove-VoicenCredential above failed (Win32 error printed)" }
-          Write-Output "silent reinstall over the kept data: voicen.exe, uninstall.exe, the shortcut and ci-keep.txt present"
+          $bad = @()
+          if ($exit1 -ne 0) { $bad += "T-207: the silent reinstall with a locked file in $legacy exited with $exit1, expected 0 (a locked file must not fail the install)" }
+          if (-not (Test-Path -LiteralPath $lockedFile -PathType Leaf)) { $bad += "T-207 premise: the locked file $lockedFile is gone while it was held open" }
+          if (Test-Path -LiteralPath $legacyFile) { $bad += "T-207: $legacyFile is still present after the silent reinstall (only the locked file may remain)" }
+          if (-not (Test-Path -LiteralPath $elsewhereFile -PathType Leaf)) { $bad += "T-207: the sentinel $elsewhereFile behind the junction $legacyLink was deleted: the installer's removal went through a reparse point" }
+          if (-not (Test-Path -LiteralPath $siblingFile -PathType Leaf)) { $bad += "T-207: the sibling $siblingFile was deleted by the silent reinstall" }
+          # Released, the next install retries the remainder.
+          $lock.Dispose()
+          $lock = $null
+          try { $exit2 = Invoke-Setup } catch { [void](Remove-All); throw }
+          if ($exit2 -ne 0) { $bad += "T-207: the second silent reinstall exited with $exit2, expected 0" }
+          if (Test-Path -LiteralPath $legacy) { $bad += "T-207: $legacy is still present after the second silent reinstall, the first one's locked remainder was not retried (left: $((@(Get-ChildItem -LiteralPath $legacy -Recurse -Force -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName.Substring($legacy.Length) }) | Select-Object -First 20) -join ', '))" }
+          if (-not (Test-Path -LiteralPath $elsewhereFile -PathType Leaf)) { $bad += "T-207: the sentinel $elsewhereFile behind the junction $legacyLink was deleted by the second silent reinstall" }
+          if (-not (Test-Path -LiteralPath $siblingFile -PathType Leaf)) { $bad += "T-207: the sibling $siblingFile was deleted by the second silent reinstall" }
+          foreach ($q in @($exe, $uninstaller, $shortcut, $marker)) { if (-not (Test-Path -LiteralPath $q -PathType Leaf)) { $bad += "after the second silent reinstall: $q not found" } }
+          $cleanup = Remove-All
+          if ($bad) { throw ($bad -join '; ') }
+          if ($cleanup -ne 0) { throw "cleanup: a Remove-VoicenCredential above failed (Win32 error printed)" }
+          Write-Output "silent reinstall over the kept data: voicen.exe, uninstall.exe, the shortcut and ci-keep.txt present; $legacy emptied around a locked file (exit 0), removed by the next install, sentinel and sibling kept"
       # W4: a user-started silent uninstall (the default answer Yes) removes the program and the
       # data in %LOCALAPPDATA%\Voicen except calls\ (a planted calls\2026-01-01_000000\meta.json
       # must survive, T-156 / FR-041) and every Voicen/ credential (voicen.exe --purge-credentials
@@ -1453,6 +1645,7 @@ jobs:
           $shortcut = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Voicen.lnk'
           $uninstKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Voicen'
           $run = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+          $clsidKey = 'HKCU:\Software\Classes\CLSID\{163266b0-4b55-446a-bbbe-e31cac2c713a}'
           $fake = 'sk-test-ci-uninstall-0000-not-a-real-key'
           $gone = 'Voicen/ci-uninstall'
           $outsider = 'VoicenOther/ci-uninstall-keep'
@@ -1461,7 +1654,12 @@ jobs:
           function Get-RunValue { (Get-ItemProperty -Path $run -Name 'Voicen' -ErrorAction SilentlyContinue).Voicen }
           function Get-UninstallerCopies { @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path.StartsWith([IO.Path]::GetTempPath(), [StringComparison]::OrdinalIgnoreCase) -and $_.Path -like '*\~nsu*' }) }
           function Format-Listed { (@(Get-VoicenCredentials -Prefix 'Voicen/') | ForEach-Object { "$($_.Target) (type $($_.Type))" }) -join ', ' }
-          function Remove-All { $failed = 0; foreach ($t in @($gone, $outsider)) { try { Remove-VoicenCredential -Target $t } catch { $failed++; Write-Host "cleanup: $($_.Exception.Message)" } }; Remove-ItemProperty -Path $run -Name 'Voicen' -ErrorAction SilentlyContinue; $failed }
+          # T-207: the pre-T-062 WebView2 folder and a sibling next to it (decisions #345 Q2: this uninstall removes the data).
+          $legacy = Join-Path $env:LOCALAPPDATA 'dev.voicen.app'
+          $legacyFile = Join-Path $legacy 'EBWebView\ci-legacy.txt'
+          $sibling = Join-Path $env:LOCALAPPDATA 'dev.voicen.app.keep'
+          $siblingFile = Join-Path $sibling 'ci-keep.txt'
+          function Remove-All { $failed = 0; foreach ($t in @($gone, $outsider)) { try { Remove-VoicenCredential -Target $t } catch { $failed++; Write-Host "cleanup: $($_.Exception.Message)" } }; Remove-ItemProperty -Path $run -Name 'Voicen' -ErrorAction SilentlyContinue; Remove-Item -LiteralPath $legacy, $sibling -Recurse -Force -ErrorAction SilentlyContinue; $failed }
           Stop-AllVoicen
           foreach ($p in @($exe, $uninstaller, $settings, $marker, $shortcut)) { if (-not (Test-Path -LiteralPath $p -PathType Leaf)) { throw "premise: $p not found before the uninstall" } }
           if (-not (Test-Path -LiteralPath $uninstKey)) { throw "premise: the uninstall key $uninstKey not found before the uninstall" }
@@ -1478,6 +1676,11 @@ jobs:
             if (@(Get-VoicenCredentials -Prefix 'Voicen/' | Where-Object { $_.Target -ceq $gone }).Count -ne 1) { throw "premise: Get-VoicenCredentials 'Voicen/' does not list $gone (listed: $(Format-Listed))" }
           } catch { [void](Remove-All); throw }
           Write-Output "premise: installed, settings.json, ci-keep.txt, planted $meta, the Run value, $gone and $outsider in place"
+          Remove-Item -LiteralPath $legacy, $sibling -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path (Split-Path -Parent $legacyFile), $sibling | Out-Null
+          Set-Content -LiteralPath $legacyFile -Value 'ci legacy webview2 data' -NoNewline
+          Set-Content -LiteralPath $siblingFile -Value 'ci sibling, must survive' -NoNewline
+          foreach ($q in @($legacyFile, $siblingFile)) { if (-not (Test-Path -LiteralPath $q -PathType Leaf)) { [void](Remove-All); throw "premise: T-207 planted file $q not found" } }
           $p = Start-Process -FilePath $uninstaller -ArgumentList '/S' -PassThru
           $done = $false
           $clock = [Diagnostics.Stopwatch]::StartNew()
@@ -1495,10 +1698,16 @@ jobs:
           $left = @(Get-VoicenCredentials -Prefix 'Voicen/')
           if ($left.Count -ne 0) { $bad += "Voicen/ credentials left after uninstall.exe /S: $(Format-Listed)" }
           if (-not (Test-VoicenCredential -Target $outsider)) { $bad += "$outsider (outside Voicen/) was deleted by the uninstall" }
+          # T-213 (I7, Acceptance 8): the toast activator registration is gone after uninstall.exe /S.
+          if (Test-Path -LiteralPath $clsidKey) { $bad += "the registry key $clsidKey is still present after uninstall.exe /S" }
           if ($null -ne (Get-RunValue)) { $bad += "the HKCU Run value Voicen ('$(Get-RunValue)') is still present after the uninstall" }
           if (Test-Path -LiteralPath $shortcut) { $bad += "the shortcut $shortcut is still present after the uninstall" }
           if (Test-Path -LiteralPath $uninstKey) { $bad += "the uninstall key $uninstKey is still present after the uninstall" }
           if ((Get-UninstallerCopies).Count -gt 0) { $bad += "an uninstaller copy in %TEMP% is still running 60 s after the start" }
+          # T-207 (Acceptance 2, red on today's hooks: nothing removes the folder, also with calls\ kept).
+          if (Test-Path -LiteralPath $legacy) { $bad += "T-207: $legacy is still present after uninstall.exe /S (left: $((@(Get-ChildItem -LiteralPath $legacy -Recurse -Force -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName.Substring($legacy.Length) }) | Select-Object -First 20) -join ', '))" }
+          # T-207 (Acceptance 4, failure branch, green today): the sibling survives.
+          if (-not (Test-Path -LiteralPath $siblingFile -PathType Leaf)) { $bad += "T-207: the sibling $siblingFile was deleted by uninstall.exe /S (a removal matched more than $legacy)" }
           $cleanup = Remove-All
           if ($bad) { throw ($bad -join '; ') }
           if ($cleanup -ne 0) { throw "cleanup: a Remove-VoicenCredential above failed (Win32 error printed)" }
@@ -1894,7 +2103,7 @@ jobs:
       # A missing capability is a result line, never a red step; red only when the probe is defective:
       # its test fails (pipefail), there is not exactly one end line, or the number of well-formed fact
       # lines (or of all runner-probe lines but the end line) differs from it. The test is #[ignore], so
-      # the cargo test -p voicen step above only starts its exe; --no-capture because libtest swallows
+      # the shell test step above only starts its exe; --no-capture because libtest swallows
       # what a passing test prints. Last and !cancelled(): a probe defect cannot skip the deploy steps,
       # and the facts print even when an earlier step failed.
       - name: Runner capability probe (T-059; facts only, a missing capability is a result; docs/decisions/windows-ci-runner.md)

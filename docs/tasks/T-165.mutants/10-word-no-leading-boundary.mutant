@@ -1,0 +1,8 @@
+guarantee: AC-3: word tokens at identifier boundaries (BigTrickle ok)
+file: scripts/ci/core-test-deadlines.sh
+added_by: test-writer
+--- old
+/[^A-Za-z0-9_](Stall|Trickle
+--- new
+/(Stall|Trickle
+--- end

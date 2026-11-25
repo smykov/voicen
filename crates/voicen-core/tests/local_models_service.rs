@@ -24,6 +24,7 @@ use std::sync::mpsc::{channel, Receiver, RecvTimeoutError};
 use std::sync::Arc;
 use std::time::Duration;
 
+use common::download::{slow_trickle, trickle_lasts};
 use common::os_answer::{in_time, OS_ANSWER_BUDGET};
 use common::timing::{deadline, left};
 use serde_json::{json, Value};
@@ -41,7 +42,6 @@ use voicen_core::test_support::local_models::{
     NEEDED, SIZE,
 };
 use voicen_core::test_support::TempDir;
-use voicen_core::timeouts::Timeouts;
 
 /// Long enough for any local end event; a hang (a lock held across `emit`) fails
 /// the test instead of the run.
@@ -51,16 +51,12 @@ const QUIET: Duration = Duration::from_millis(300);
 /// `Downloader::start`'s worker thread name (download.rs).
 const DOWNLOAD_THREAD: &str = "voicen-model-download";
 
-fn timeouts() -> Timeouts {
-    in_time()
-}
-
 #[test]
 fn helper_deadlines_and_end_wait_are_at_the_budget_scale() {
     // T-111: connect and no-data limits are in-time ones (a loopback connect cannot be
     // delayed, so the value is pinned) and the hang-ender wait is far above what any
     // awaited end needs. Bite: the old connect 2 s, no-data 5 s, END_WAIT 10 s.
-    let t = timeouts();
+    let t = in_time();
     assert_eq!(t.connect, OS_ANSWER_BUDGET, "connect");
     assert!(
         t.download_no_data >= 2 * OS_ANSWER_BUDGET,
@@ -74,25 +70,11 @@ fn the_trickle_outlasts_end_wait() {
     // T-111: no test thread races the end of the transfer, and a cancel that does not
     // reach the downloader ends in "no end event". Bite: the old 1 KiB every 50 ms
     // (~3.2 s).
-    let Serve::Trickle { chunk, every } = trickle() else {
-        panic!("trickle() is not a Serve::Trickle");
-    };
-    let chunks = SIZE.div_ceil(chunk as u64) as u32;
+    let lasts = trickle_lasts(&slow_trickle()).expect("slow_trickle() is a trickle");
     assert!(
-        every * chunks > END_WAIT,
-        "the trickle lasts {:?}, END_WAIT {END_WAIT:?}",
-        every * chunks
+        lasts > END_WAIT,
+        "the trickle lasts {lasts:?}, END_WAIT {END_WAIT:?}"
     );
-}
-
-/// Slow enough to look at and cancel mid-body: 1 KiB every second (~64 s, past
-/// `END_WAIT`), so no test thread races the end of the transfer (T-111) and a cancel
-/// that does not reach the downloader shows as "no end event".
-fn trickle() -> Serve {
-    Serve::Trickle {
-        chunk: 1024,
-        every: Duration::from_secs(1),
-    }
 }
 
 // ---- harness ------------------------------------------------------------------
@@ -129,7 +111,7 @@ fn world_on(
     let server = Server::start(plan);
     let catalog = catalog_for(&server);
     let probe: Arc<dyn DiskSpace> = disk;
-    let (models, cleanup) = LocalModels::open(dir.clone(), probe, timeouts(), catalog);
+    let (models, cleanup) = LocalModels::open(dir.clone(), probe, in_time(), catalog);
     if let Err(e) = cleanup {
         panic!("cleanup_at_start failed at open: {e}");
     }
@@ -383,7 +365,7 @@ fn open_reports_a_cleanup_error_and_still_lists() {
     std::fs::write(&dir, b"not a dir").expect("file at the models dir path");
     let probe: Arc<dyn DiskSpace> = FakeDisk::with_available(10 * NEEDED);
 
-    let (models, cleanup) = LocalModels::open(dir.clone(), probe, timeouts(), MODELS);
+    let (models, cleanup) = LocalModels::open(dir.clone(), probe, in_time(), MODELS);
 
     assert!(cleanup.is_err(), "cleanup over a file reported Ok");
     assert_eq!(states(&models), all_not_downloaded());
@@ -452,7 +434,7 @@ fn name_keys_are_declared_message_ids() {
     // built with format! (not a declared MessageId), or one for another id.
     let tmp = TempDir::new();
     let probe: Arc<dyn DiskSpace> = FakeDisk::with_available(u64::MAX);
-    let (models, _) = LocalModels::open(tmp.path().join("models"), probe, timeouts(), MODELS);
+    let (models, _) = LocalModels::open(tmp.path().join("models"), probe, in_time(), MODELS);
     let declared: BTreeSet<String> = MESSAGE_IDS
         .iter()
         .map(|id| wire(id).as_str().expect("an id string").to_string())
@@ -548,7 +530,7 @@ fn list_shows_downloading_from_start_until_cancel_then_not_downloaded() {
     // no `.part`. Bite: Downloading only after the first progress, Cancelled mapped
     // to Failed, the transient state left behind, cancel not reaching the
     // downloader, cancel true twice.
-    let w = world(vec![trickle()]);
+    let w = world(vec![slow_trickle()]);
     let mut ev = start(&w, "base");
 
     let now = state_of(&w.models, ModelId::Base);
@@ -613,7 +595,7 @@ fn failed_keeps_its_reason_until_a_retry_and_a_new_open_forgets_it() {
     assert_eq!(states(&w.models), expected, "Failed did not stay");
 
     let probe: Arc<dyn DiskSpace> = FakeDisk::with_available(10 * NEEDED);
-    let (reopened, cleanup) = LocalModels::open(w.dir.clone(), probe, timeouts(), w.catalog);
+    let (reopened, cleanup) = LocalModels::open(w.dir.clone(), probe, in_time(), w.catalog);
     assert!(cleanup.is_ok(), "{cleanup:?}");
     assert_eq!(states(&reopened), all_not_downloaded(), "a new open");
     assert_eq!(states(&w.models), expected, "the first coordinator");
@@ -675,7 +657,7 @@ fn a_refused_start_changes_no_state_and_emits_nothing() {
     // refusal reported through emit. This holds for busy, not_enough_disk_space,
     // not_in_catalog and download_cannot_start; already_downloaded is the one
     // exception (a_failed_never_hides_a_model_downloaded_on_disk_...).
-    let w = world(vec![Serve::Status(500), trickle()]);
+    let w = world(vec![Serve::Status(500), slow_trickle()]);
     let mut first = start(&w, "base");
     first.wait_state();
     let mut running = start(&w, "tiny");
@@ -1029,7 +1011,7 @@ fn e2e_local_models_wire_fixture_matches_core() {
         serde_json::from_str(E2E_WIRE_FIXTURE).expect("local-models-wire.json is valid JSON");
     let tmp = TempDir::new();
     let probe: Arc<dyn DiskSpace> = FakeDisk::with_available(u64::MAX);
-    let (models, _) = LocalModels::open(tmp.path().join("models"), probe, timeouts(), MODELS);
+    let (models, _) = LocalModels::open(tmp.path().join("models"), probe, in_time(), MODELS);
 
     let mut core = serde_json::Map::new();
     core.insert(

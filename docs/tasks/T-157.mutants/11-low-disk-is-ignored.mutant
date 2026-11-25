@@ -1,0 +1,8 @@
+guarantee: Acceptance 2 / (S): below 200 MB the call stops and saves
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+            return Some(StopReason::LowDisk);
+--- new
+            return None;
+--- end

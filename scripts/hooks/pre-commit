@@ -141,8 +141,8 @@ PY
 # Guard trigger (P-020 "How checked", T-113, decisions #154, #155). A staged guard change belongs
 # to a task with `checker: true` and a non-empty analysis.decides_on. Guard change (decides_on
 # token, #155): a path listed by `git diff --cached --name-only --no-renames -z` (any status; a
-# rename is its old and its new path) that starts with scripts/ci/ or scripts/licenses/, is the
-# path Makefile, or ends in .mk. Nothing else decides: no Make, shell or file-content reading, so
+# rename is its old and its new path) that starts with scripts/ci/, scripts/licenses/ or
+# scripts/hooks/ (T-193, decisions #215), is the path Makefile, or ends in .mk. Nothing else decides: no Make, shell or file-content reading, so
 # every change to such a path counts, even one unrelated to any check. Not caught: a root
 # GNUmakefile or makefile (docs/process/gates.md › Guard trigger). Active task: $TEAMWRIGHT_TASK,
 # else the first word of .teamwright/current-task; its record docs/tasks/<ID>.md (front matter,
@@ -155,7 +155,7 @@ guard_trigger() {
   # -z: raw path bytes, no C-style quoting that would hide the prefix.
   while IFS= read -r -d '' p; do
     case "$p" in
-      scripts/ci/* | scripts/licenses/* | Makefile | *.mk) guards+=("$p") ;;
+      scripts/ci/* | scripts/licenses/* | scripts/hooks/* | Makefile | *.mk) guards+=("$p") ;;
     esac
   done < <(git diff --cached --name-only --no-renames -z)
   [ "${#guards[@]}" -gt 0 ] || return 0
@@ -206,8 +206,9 @@ print("pre-commit: REFUSED - guard change without the P-020 design step: %s." % 
       file=sys.stderr)
 for p in changed:
     print("  guard change: %s" % p, file=sys.stderr)
-print("  A staged path under scripts/ci/ or scripts/licenses/, the Makefile or a *.mk file is a\n"
-      "  guard change; it is committed only in a task with `checker: true` and analysis.decides_on\n"
+print("  A staged path under scripts/ci/, scripts/licenses/ or scripts/hooks/, the Makefile or a\n"
+      "  *.mk file is a guard change; it is committed only in a task with `checker: true` and\n"
+      "  analysis.decides_on\n"
       "  naming the switch, owned literal or raw token it decides on (PRINCIPLES.md P-020;\n"
       "  docs/process/gates.md).",
       file=sys.stderr)

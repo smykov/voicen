@@ -1,0 +1,17 @@
+guarantee: Acceptance 2 / (S): a final meta write failure still completes the stop
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+                Err(e) => self.deps.log.write(LogEvent::CallStorageFailed {
+                    kind: StorageKind::Meta,
+                    os: e.raw_os_error(),
+                }),
+            }
+        }
+        self.deps.store.release(&dir);
+--- new
+                Err(e) => panic!("meta {e}"),
+            }
+        }
+        self.deps.store.release(&dir);
+--- end

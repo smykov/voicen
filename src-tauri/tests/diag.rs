@@ -598,6 +598,7 @@ fn a_write_denied_logs_folder_shows_one_notice_and_the_dictation_still_delivers(
             clipboard: clipboard.clone(),
             paster: Arc::new(FakePaster::new()),
             engine_factory: Some(engine_factory(&engine)),
+            builtin: None,
             indicator: indicator.clone(),
             credentials: Arc::clone(&creds),
             hotkeys: Arc::clone(&hotkeys),

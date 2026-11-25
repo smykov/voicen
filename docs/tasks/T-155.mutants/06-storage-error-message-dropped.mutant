@@ -1,0 +1,8 @@
+guarantee: AC-3: the storage message is shown
+file: src/lib/settings/tabs/Calls.svelte
+added_by: test-writer
+--- old
+  <FieldMessage errors={draft.errors} {warnings} field={storageRoot} />
+--- new
+  <!-- dropped -->
+--- end

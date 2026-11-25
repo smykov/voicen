@@ -19,8 +19,11 @@ mod refused_addr_tests;
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
+use common::deadlines::{
+    held_lookup_api, immediate_answer, refused_connect_past_total, short_api_total, SHORT_LIMIT,
+};
 use common::held::{returns_while_held, Held};
-use common::os_answer::{in_time, OsAnswer, Unanswered, OS_ANSWER_BUDGET};
+use common::os_answer::{OsAnswer, Unanswered, OS_ANSWER_BUDGET};
 use common::timing::{ago, at_least, late_answer, measure, now, Took, M};
 use serde_json::json;
 use voicen_core::audio::{wav, AudioBuffer};
@@ -721,11 +724,11 @@ async fn status_401_is_invalid_api_key_nothing_pasted_audio_pending() {
 #[tokio::test]
 async fn no_answer_within_timeout_is_timeout() {
     // FR-24 through the pipeline: the pipeline's Timeouts reach the request (a
-    // 300 ms limit against an answer M later). Bite: run_job using Timeouts::default()
+    // 300 ms limit against an answer M later). Bite: run_job using the production defaults
     // (the late answer would arrive and be delivered), Timeout not kept pending.
     // No upper bound (T-080 I2): the outcome catches every longer limit.
     let server = server_with(ok_text("late").set_delay(SHORT_LATE_ANSWER)).await;
-    let t = short_total();
+    let t = short_api_total();
     let mut h = harness_with(energy_gate(), Some(t), creds_with_key());
     let rec = h.record(
         fixtures::speech_3s(),
@@ -744,24 +747,16 @@ async fn no_answer_within_timeout_is_timeout() {
     assert_eq!(h.paster.calls(), vec![]);
 }
 
-/// The whole-request limit of the short timeout legs, and their server's answer.
-const SHORT_LIMIT: Duration = Duration::from_millis(300);
+/// The server's answer of the short timeout legs, M after their whole-request limit
+/// (`common::deadlines::short_api_total`: only the total is short, so no other timer
+/// lies within M of it, T-111).
 const SHORT_LATE_ANSWER: Duration = late_answer(SHORT_LIMIT);
-
-/// The deadlines of a short timeout leg: only the total is short, so no other timer
-/// lies within M of it (T-111).
-fn short_total() -> Timeouts {
-    Timeouts {
-        api_transcription: SHORT_LIMIT,
-        ..in_time()
-    }
-}
 
 #[test]
 fn short_timeout_legs_answer_at_least_m_after_their_deadline() {
     // T-111 review 1 #2, a value pin: kind (1) of the invariant. Bite: the old answer
     // at 5 s, the old connect 2 s.
-    let t = short_total();
+    let t = short_api_total();
     assert!(SHORT_LATE_ANSWER >= t.api_transcription + M, "answer");
     assert!(t.connect >= t.api_transcription + M, "connect");
 }
@@ -808,7 +803,7 @@ async fn configured_api_timeout_fails_the_job_with_timeout() {
     // event and the audio kept; the same server with the default snapshot (30 s)
     // is delivered. connect_s = 5 (M below the limit) so that the connect value
     // read as the request limit ends the job at about 5 s, outside the window.
-    // Bite: the pipeline's fixed Timeouts::default() (the 15 s answer arrives and
+    // Bite: the pipeline's fixed production defaults (the 15 s answer arrives and
     // is delivered), the local-server value used for the API request (60 s:
     // delivered), the connect value used for it (5 s: too early), or
     // milliseconds. No upper bound (T-080 I2): every longer wrong limit is
@@ -870,11 +865,7 @@ fn refused_host_is_cannot_reach() {
     // I2; before it, "took < connect - 1 s" decided this and raced the ~2.17 s
     // Windows refusal, T-047/F-005).
     let case = OsAnswer::refused();
-    let t = Timeouts {
-        connect: 2 * OS_ANSWER_BUDGET,
-        api_transcription: OS_ANSWER_BUDGET,
-        ..case.timeouts
-    };
+    let t = refused_connect_past_total(&case);
     let mut h = harness_with(energy_gate(), Some(t), creds_with_key());
     let rec = h.record(
         fixtures::speech_3s(),
@@ -1128,12 +1119,9 @@ async fn pending_store_failure_reports_without_pending() {
 
 // ---- redaction ----------------------------------------------------------------------
 
-/// The deadlines of the redaction scenarios that expect an answer at once (pasted,
-/// copied only, clipboard fails, 401, 500, bad body): the deadline is not their
-/// subject, so a host stall must not decide them (T-111).
-fn immediate_timeouts() -> Timeouts {
-    in_time()
-}
+// The redaction scenarios that expect an answer at once (pasted, copied only,
+// clipboard fails, 401, 500, bad body) take `common::deadlines::immediate_answer()`:
+// the deadline is not their subject, so a host stall must not decide them (T-111).
 
 #[tokio::test]
 async fn immediate_scenarios_hold_when_the_server_stalls_past_their_old_margin() {
@@ -1141,7 +1129,7 @@ async fn immediate_scenarios_hold_when_the_server_stalls_past_their_old_margin()
     // the 300 ms deadline of the "timeout" scenario, so a server (or host) stall of
     // 300 ms turned correct code red. Injected here: every answer comes 700 ms late,
     // and each scenario must still end as it does at once. A timeout leg is not
-    // affected (it waits for the deadline anyway). Bite: `immediate_timeouts()` left
+    // affected (it waits for the deadline anyway). Bite: `immediate_answer()` left
     // at the 300 ms total (Timeout instead of the end below).
     let stall = Duration::from_millis(700);
     let marker_body = format!("{TRANSCRIPT} {KEY}");
@@ -1175,7 +1163,7 @@ async fn immediate_scenarios_hold_when_the_server_stalls_past_their_old_margin()
     ];
     for (label, template, want) in cases {
         let server = server_with(template).await;
-        let mut h = harness_with(energy_gate(), Some(immediate_timeouts()), creds_with_key());
+        let mut h = harness_with(energy_gate(), Some(immediate_answer()), creds_with_key());
         let mut s = api_settings(&base(&server));
         s.auto_paste = true;
         let (_, report) = h.dictate(fixtures::speech_3s(), s);
@@ -1188,7 +1176,7 @@ fn immediate_scenarios_connect_is_the_os_answer_budget() {
     // T-111: a loopback connect cannot be delayed, so the connect leg of the
     // immediate scenarios is pinned by its value: the in-time connect, the budget
     // (`common::os_answer::in_time()`). Bite: the 2 s of the old `ms`.
-    assert_eq!(immediate_timeouts().connect, OS_ANSWER_BUDGET);
+    assert_eq!(immediate_answer().connect, OS_ANSWER_BUDGET);
 }
 
 #[tokio::test]
@@ -1227,8 +1215,8 @@ async fn no_event_or_failure_carries_key_query_or_transcript() {
     let refused = format!("http://{}/v1", refused_case.host);
     // Only the "timeout" scenario keeps the short deadline (300 ms against an answer
     // M later); every scenario that expects an answer takes `immediate` (T-111).
-    let ms = short_total();
-    let immediate = immediate_timeouts();
+    let ms = short_api_total();
+    let immediate = immediate_answer();
     // The refused scenario must not run under `ms`: on windows-latest the refusal
     // takes ~2.17 s, so the 300 ms total would fire first and end it `Timeout`
     // (T-048, CI run 37204170764): it takes the case's deadlines (T-080 I1). The
@@ -1374,12 +1362,8 @@ fn unanswered_lookup_fails_the_job_network_unavailable_and_keeps_the_audio() {
     // CannotReach, and the job returns only after the release. Bite: no lookup
     // record (CannotReach); the lookup joined at drop; the audio not kept.
     let held = Held::install("api-held.t079.example.com", Vec::new());
-    let connect = Duration::from_millis(300);
-    let t = Timeouts {
-        connect,
-        api_transcription: OS_ANSWER_BUDGET,
-        ..Timeouts::default()
-    };
+    let t = held_lookup_api();
+    let connect = t.connect;
     let mut h = harness_with(energy_gate(), Some(t), creds_with_key());
     let rec = h.record(
         fixtures::speech_3s(),

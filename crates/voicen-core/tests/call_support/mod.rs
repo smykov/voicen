@@ -1092,6 +1092,25 @@ impl CallRig {
     }
 
     pub fn with_capacity(capacity: usize, edit: impl FnOnce(&mut Settings)) -> CallRig {
+        CallRig::build(capacity, edit, None)
+    }
+
+    /// T-157: like `with_capacity`, but the session opens its tracks from `source` (a WAV
+    /// router, say) instead of the scripted `FakeSource`. `rig.source` is still a
+    /// `FakeSource`, left unused: the session never sees it.
+    pub fn with_source(
+        capacity: usize,
+        edit: impl FnOnce(&mut Settings),
+        source: Arc<dyn TrackSource + Send + Sync>,
+    ) -> CallRig {
+        CallRig::build(capacity, edit, Some(source))
+    }
+
+    fn build(
+        capacity: usize,
+        edit: impl FnOnce(&mut Settings),
+        custom: Option<Arc<dyn TrackSource + Send + Sync>>,
+    ) -> CallRig {
         let tmp = TempDir::new();
         let root = tmp.path().join("calls");
         std::fs::create_dir_all(&root).expect("the calls root");
@@ -1122,7 +1141,10 @@ impl CallRig {
         );
         let open_with = opener.clone();
         let session = Arc::new(CallSession::new(CallDeps {
-            source: source.clone(),
+            source: match custom {
+                Some(custom) => custom,
+                None => source.clone(),
+            },
             store: store.clone(),
             settings: port.clone(),
             indicator: indicator.clone(),

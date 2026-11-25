@@ -1,0 +1,8 @@
+guarantee: AC1/NFR-03: a start right after a stop builds once, after Destroyed
+file: crates/voicen-core/src/overlay.rs
+added_by: test-writer
+--- old
+            (WindowPhase::Absent, Some((seq, false))) if newer || rebuild_wanted => {
+--- new
+            (WindowPhase::Absent, Some((seq, false))) if newer => {
+--- end

@@ -19,9 +19,13 @@
 //!   `CallSession::next_deadline` (measured on [`CallPorts::mono`]) or until the worker
 //!   wakes it after a request, then calls `CallSession::tick` and reads the deadline
 //!   again (#278). While no call records it waits for a request only.
-//! - [`ShellCallIndicator`] forwards `set_call_recording` to the tray part; `set_state` /
-//!   `set_tick` are no-ops until T-130's indicator window (#277: a call shows only the
-//!   tray icon until then). [`ShellCallShell`] maps each `CallNotice` through core's
+//! - [`ShellCallIndicator`] forwards `set_call_recording` to the tray part and
+//!   `set_state` / `set_tick` to the indicator part (`call_indicator::IndicatorPart`,
+//!   T-130: store and notify only; the `call-indicator` thread does every window call).
+//!   [`start_calls`] starts that part (`call_indicator::start`) before it builds the
+//!   session. The indicator page's stop and dismiss are [`CallRequest::IndicatorStop`]
+//!   and [`CallRequest::Dismiss`] on the worker (`CallSession::stop(StopReason::User)`,
+//!   `CallSession::dismiss_warning`). [`ShellCallShell`] maps each `CallNotice` through core's
 //!   `CallNotice::message` to the shared notifier and opens Settings on its Calls tab.
 //! - The Calls window (T-142; contracts/ipc.md "Windows", FR-033, FR-034, FR-036): at
 //!   most one window labelled [`LABEL`] at `/calls`, created only on the call part's own
@@ -49,15 +53,27 @@
 //!   core's energy fallback). Every folder a stop leaves ready-to-transcribe reaches it
 //!   through `CallShell::call_ready` ([`ShellCallShell`] enqueues it); the pass's notices
 //!   go to the shared notifier as the session's do ([`ShellPassEvents`]).
-//! - [`open_transcript`] (T-139; T-213's toast button calls it with the root and id of
-//!   core's `TranscriptReady` notice) emits `calls://open` at once. Every `calls://open`,
-//!   its and the Calls window's held or immediate target alike, goes out through the one
-//!   private `emit_open` (decisions #298).
+//! - [`open_transcript`] (T-139) emits `calls://open` at once to an open Calls window. The
+//!   "Transcript ready" toast's Open button does not use it: it calls [`open_calls`] with
+//!   the notice's root and id (T-213; decisions #312, #313), which builds or focuses the
+//!   window and selects the call. Every `calls://open`, held or immediate, goes out through
+//!   the one private `emit_open` (decisions #298).
+//! - The app's end, sleep and the next start (T-145; spec 007 FR-007, FR-008, FR-017):
+//!   the worker's first job is the one start-up `CallStore::recover` over the managed store,
+//!   every `Recovery.queue` folder enqueued oldest first. The tray's Exit posts
+//!   `CallRequest::Exit` ([`request_exit`]): with no call recording it ends the loop; with
+//!   one, the [`ExitConfirm`] port asks on its own question thread (at most one), and a Yes
+//!   posts `ExitConfirmed` (gate exiting, `stop(Exit)`, then the loop ends). A suspend posts
+//!   `Sleep` (gate held, `stop(Sleep)`), a resume `Resumed` (held items delivered in stop
+//!   order; any other request releases them too). `on_run_event`'s `RunEvent::Exit` arm
+//!   and the `WM_ENDSESSION(TRUE)` hook (`win::end_session`) call [`finalize_on_exit`]
+//!   first (gate exiting, `stop(SystemEnd)`). Every session
+//!   notice and stop hand-off goes through the one `DeliveryGate` of [`ShellCallShell`].
 
 use std::io;
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, Weak};
 use std::thread;
@@ -70,17 +86,18 @@ use voicen_core::call::events::refused_notice;
 use voicen_core::call::final_pass::{ApiPassRunner, PassEvents, PassQueue};
 use voicen_core::call::indicator::{IndicatorState, IndicatorTick};
 use voicen_core::call::session::{
-    CallDeps, CallIndicator, CallSession, CallShell, SubtitleConsumer, Toggled, TrackFile,
-    TrackOpener,
+    CallDeps, CallIndicator, CallSession, CallSettingsPort, CallShell, SubtitleConsumer, Toggled,
+    TrackFile, TrackOpener,
 };
 use voicen_core::call::storage::{
     export_to, list_wire, wire_root, CallDetail, CallError, CallListWire, Format,
 };
 use voicen_core::call::{
-    CallId, CallNotice, CallSource, CallStore, SwitchRefusal, Track, TrackSource,
+    CallId, CallNotice, CallSource, CallStore, StopReason, SwitchRefusal, Track, TrackSource,
 };
 use voicen_core::clock::{MonotonicClock, SystemClock};
-use voicen_core::diag::{Log, LogEvent};
+use voicen_core::diag::{Log, LogEvent, WarningKind};
+use voicen_core::i18n::{self, EXIT_RECORDING_QUESTION};
 use voicen_core::local_models::download::DiskSpace;
 use voicen_core::platform::{Clipboard, Notifier};
 use voicen_core::secrets as key_store;
@@ -90,6 +107,7 @@ use voicen_core::settings::service::SettingsService;
 use voicen_core::settings::Settings;
 use voicen_core::vad::SpeechSpans;
 
+use crate::call_indicator::{self, IndicatorPart};
 use crate::logs_folder::FolderOpener;
 use crate::settings_window::{self, OpenTarget};
 use crate::tray::{self, TrayPart};
@@ -136,6 +154,18 @@ pub struct CallPorts {
     /// The pass's primary detector: the pass half of `vad::load_shared` in `run()`; `None`
     /// makes core's energy detector decide (`vad_fallback cause=unavailable` per track).
     pub detector: Option<Arc<dyn SpeechSpans>>,
+    /// The tray Exit question while a call records (T-145; `win::exit_dialog::WinExitConfirm`
+    /// in `run()`).
+    pub exit_confirm: Arc<dyn ExitConfirm>,
+}
+
+/// The Yes / No question of the tray's Exit while a call records (T-145, FR-008; the
+/// [`SaveDialog`] pattern). Called on the call part's own short-lived question thread,
+/// never on the main thread or the call worker; it may block until the user answers.
+pub trait ExitConfirm: Send + Sync {
+    /// Shows `text` (`exit.recording.question` in the UI language) and answers `true` for
+    /// Yes; No, a closed box or a box that could not be shown is `false`.
+    fn ask(&self, text: &str) -> bool;
 }
 
 /// The `{root, id}` of a call on the wire (`calls://open`, `calls://changed`): `root` is an
@@ -168,12 +198,28 @@ pub enum CallRequest {
     Stop(CallSource),
     /// An unknown `--call` value: one `call_switch_refused reason=unknown_value`.
     RefuseSwitch,
+    /// The tray's Exit (T-145): no call recording ends the loop; a recording one asks
+    /// [`ExitConfirm`] on the question thread (at most one question at a time).
+    Exit,
+    /// The Yes of the exit question: the shell stops delivering, the call (if one still
+    /// records) stops with `exit`, then the loop ends.
+    ExitConfirmed,
+    /// A suspend (`PBT_APMSUSPEND`): the shell holds its notices and hand-offs, then the
+    /// recording call stops with `sleep`.
+    Sleep,
+    /// A resume (`PBT_APMRESUMEAUTOMATIC`): what the shell held is delivered in stop order.
+    Resumed,
+    /// The indicator's Stop (`call_indicator_stop`, T-130): `call_stopped reason=user`.
+    IndicatorStop,
+    /// The indicator's Dismiss of the warning with this id (`call_indicator_dismiss`).
+    Dismiss(u32),
 }
 
-/// The call part of an app: the worker's queue, the "Calls" route's counter, the Calls
-/// window's state and the ports of its commands.
+/// The call part of an app: the worker's queue, the delivery gate, the "Calls" route's
+/// counter, the Calls window's state and the ports of its commands.
 struct CallPart {
     requests: Sender<CallRequest>,
+    gate: Arc<DeliveryGate>,
     opened: AtomicU32,
     window: Mutex<WindowState>,
     clipboard: Arc<dyn Clipboard>,
@@ -233,33 +279,43 @@ pub fn file_opener() -> TrackOpener {
 /// Builds the one call session of `app` over `ports`, manages it as `Arc<CallSession>`,
 /// its store as `Arc<CallStore>` and the one pass queue over that store as
 /// `Arc<PassQueue>` (T-139), and starts the `call-requests` worker and the `call-tick`
-/// thread. Needs the managed `Arc<SettingsService>` and `Arc<Log>`
+/// thread; before the session it starts the indicator part (`call_indicator::start`:
+/// its mailbox and the `call-indicator` thread, no window). Needs the managed `Arc<SettingsService>` and `Arc<Log>`
 /// (`assemble`'s wiring) and, for the tray flag, the tray (`run()` calls this after
 /// `start_dictation`, so the tray exists). Starts no call. `Err` when a managed part is
 /// missing, the app already has a call part (then nothing is started) or a thread could
-/// not be started.
+/// not be started. Every `Err` after the managed log is found has written one
+/// `warning kind=call_start_failed [os_code=<n>]` line (T-220; the kind and the OS code
+/// only); without a managed log nothing can be written.
 pub fn start_calls<R: Runtime>(app: &AppHandle<R>, ports: CallPorts) -> io::Result<()> {
     let log = app
         .try_state::<Arc<Log>>()
         .map(|log| Arc::clone(&log))
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "the app manages no log"))?;
+    let failed = |err: io::Error| {
+        log.write(LogEvent::Warning {
+            kind: WarningKind::CallStartFailed,
+            os_code: err.raw_os_error(),
+        });
+        err
+    };
     let service = app
         .try_state::<Arc<SettingsService>>()
         .map(|service| Arc::clone(&service))
         .ok_or_else(|| {
-            io::Error::new(
+            failed(io::Error::new(
                 io::ErrorKind::NotFound,
                 "the app manages no settings service",
-            )
+            ))
         })?;
     if app.try_state::<CallPart>().is_some()
         || app.try_state::<Arc<CallSession>>().is_some()
         || app.try_state::<Arc<PassQueue>>().is_some()
     {
-        return Err(io::Error::new(
+        return Err(failed(io::Error::new(
             io::ErrorKind::AlreadyExists,
             "the app already has a call part",
-        ));
+        )));
     }
     let CallPorts {
         source,
@@ -273,6 +329,7 @@ pub fn start_calls<R: Runtime>(app: &AppHandle<R>, ports: CallPorts) -> io::Resu
         save,
         credentials,
         detector,
+        exit_confirm,
     } = ports;
     let store = Arc::new(CallStore::new(
         Arc::new(FsCallRoots::new(calls_root)),
@@ -290,16 +347,14 @@ pub fn start_calls<R: Runtime>(app: &AppHandle<R>, ports: CallPorts) -> io::Resu
         Arc::clone(&mono),
     );
     let queue = Arc::new(PassQueue::new(Arc::clone(&store), Arc::new(runner)));
+    let gate = Arc::new(DeliveryGate::new(Arc::clone(&notifier), Arc::clone(&queue)));
+    call_indicator::start(app, Arc::clone(&service), Arc::clone(&log));
     let session = Arc::new(CallSession::new(CallDeps {
         source,
         store: Arc::clone(&store),
-        settings: service,
+        settings: Arc::clone(&service) as Arc<dyn CallSettingsPort>,
         indicator: Arc::new(ShellCallIndicator::new(app)),
-        shell: Arc::new(ShellCallShell::new(
-            app,
-            Arc::clone(&notifier),
-            Arc::clone(&queue),
-        )),
+        shell: Arc::new(ShellCallShell::new(app, Arc::clone(&gate))),
         log: Arc::clone(&log),
         clock: Arc::new(SystemClock),
         offset: Arc::new(crate::diag::OsLocalOffset),
@@ -314,22 +369,33 @@ pub fn start_calls<R: Runtime>(app: &AppHandle<R>, ports: CallPorts) -> io::Resu
     }));
     let wake = Arc::new(Wake::default());
     let (requests, received) = mpsc::channel();
-    spawn_tick(Arc::downgrade(&session), Arc::clone(&wake), mono)?;
+    spawn_tick(Arc::downgrade(&session), Arc::clone(&wake), mono).map_err(failed)?;
     spawn_worker(
-        Arc::clone(&session),
+        Worker {
+            app: app.clone(),
+            session: Arc::clone(&session),
+            store: Arc::clone(&store),
+            service,
+            queue: Arc::clone(&queue),
+            gate: Arc::clone(&gate),
+            log: Arc::clone(&log),
+            notifier,
+            exit_confirm,
+            asking: Arc::new(AtomicBool::new(false)),
+        },
         received,
         Arc::clone(&wake),
-        log,
-        notifier,
     )
-    .inspect_err(|_| wake.close())?;
-    let opener = spawn_opener::<R>()?;
+    .inspect_err(|_| wake.close())
+    .map_err(failed)?;
+    let opener = spawn_opener::<R>().map_err(failed)?;
     app.manage(store);
     app.manage(queue);
     app.manage(session);
     app.manage(opener);
     app.manage(CallPart {
         requests,
+        gate,
         opened: AtomicU32::new(0),
         window: Mutex::new(WindowState::default()),
         clipboard,
@@ -339,21 +405,38 @@ pub fn start_calls<R: Runtime>(app: &AppHandle<R>, ports: CallPorts) -> io::Resu
     Ok(())
 }
 
-/// The `call-requests` worker: the only caller of `CallSession::toggle_record` in the
-/// shell. After each request it wakes the `call-tick` thread (a start makes a deadline).
-/// Ends when the queue's sender is gone, and then closes the tick thread.
-fn spawn_worker(
+/// What the `call-requests` worker serves with.
+struct Worker<R: Runtime> {
+    app: AppHandle<R>,
     session: Arc<CallSession>,
-    queue: Receiver<CallRequest>,
-    wake: Arc<Wake>,
+    store: Arc<CallStore>,
+    service: Arc<SettingsService>,
+    queue: Arc<PassQueue>,
+    gate: Arc<DeliveryGate>,
     log: Arc<Log>,
     notifier: Arc<dyn Notifier>,
+    exit_confirm: Arc<dyn ExitConfirm>,
+    /// Set while the exit question is shown (D2: at most one at a time).
+    asking: Arc<AtomicBool>,
+}
+
+/// The `call-requests` worker: the only caller of `CallSession::toggle_record` in the
+/// shell. Its first job, before any request, is the one start-up recovery (T-145, I5):
+/// `CallStore::recover` over the managed store and the current settings, then every
+/// `Recovery.queue` folder to the pass queue, oldest first; `recovered` folders are only
+/// listed. After each request it wakes the `call-tick` thread (a start makes a deadline).
+/// Ends when the queue's sender is gone, and then closes the tick thread.
+fn spawn_worker<R: Runtime>(
+    worker: Worker<R>,
+    queue: Receiver<CallRequest>,
+    wake: Arc<Wake>,
 ) -> io::Result<()> {
     thread::Builder::new()
         .name("call-requests".into())
         .spawn(move || {
+            worker.recover();
             for request in queue {
-                serve(&session, request, &log, notifier.as_ref());
+                worker.serve(request);
                 wake.wake();
             }
             wake.close();
@@ -361,22 +444,148 @@ fn spawn_worker(
         .map(|_| ())
 }
 
-/// One request on the worker. A refusal offers its notice here, after the session lock
-/// (the session's own lines name the part and the reason).
-fn serve(session: &CallSession, request: CallRequest, log: &Log, notifier: &dyn Notifier) {
-    let toggled = match request {
-        CallRequest::Record(CallSource::Switch) => session.toggle_record(true, CallSource::Switch),
-        CallRequest::Record(source) => session.toggle_record(!session.is_recording(), source),
-        CallRequest::Stop(source) => session.toggle_record(false, source),
-        CallRequest::RefuseSwitch => {
-            log.write(LogEvent::CallSwitchRefused {
-                reason: SwitchRefusal::UnknownValue,
-            });
+impl<R: Runtime> Worker<R> {
+    /// The start-up recovery (I5): the only `CallStore::recover` and the only start-up
+    /// enqueue of the shell.
+    fn recover(&self) {
+        let settings = self.service.snapshot();
+        let recovery = self.store.recover(&settings.calls, &self.log);
+        for entry in &recovery.queue {
+            self.queue.enqueue(&entry.root.join(entry.id.as_str()));
+        }
+    }
+
+    /// One request on the worker. A refusal offers its notice here, after the session lock
+    /// (the session's own lines name the part and the reason). Any request but a suspend
+    /// first releases what the shell holds since a suspend (D1: a lost resume does not
+    /// lose the notice).
+    fn serve(&self, request: CallRequest) {
+        let toggled = match request {
+            CallRequest::Sleep => {
+                self.gate.hold();
+                self.session.stop(StopReason::Sleep);
+                return;
+            }
+            CallRequest::Resumed => {
+                self.gate.release();
+                return;
+            }
+            CallRequest::Exit => {
+                if self.session.is_recording() {
+                    self.gate.release();
+                    self.ask_exit();
+                } else {
+                    self.gate.exiting();
+                    end_loop(&self.app);
+                }
+                return;
+            }
+            CallRequest::ExitConfirmed => {
+                // I2: from the confirmed exit on nothing is offered or enqueued; the next
+                // start queues the call (D3). A call already stopped just exits (D2).
+                self.gate.exiting();
+                self.session.stop(StopReason::Exit);
+                end_loop(&self.app);
+                return;
+            }
+            CallRequest::Record(CallSource::Switch) => {
+                self.gate.release();
+                self.session.toggle_record(true, CallSource::Switch)
+            }
+            CallRequest::Record(source) => {
+                self.gate.release();
+                self.session
+                    .toggle_record(!self.session.is_recording(), source)
+            }
+            CallRequest::Stop(source) => {
+                self.gate.release();
+                self.session.toggle_record(false, source)
+            }
+            CallRequest::IndicatorStop => {
+                self.gate.release();
+                self.session.stop(StopReason::User);
+                return;
+            }
+            CallRequest::Dismiss(id) => {
+                self.gate.release();
+                self.session.dismiss_warning(id);
+                return;
+            }
+            CallRequest::RefuseSwitch => {
+                self.gate.release();
+                self.log.write(LogEvent::CallSwitchRefused {
+                    reason: SwitchRefusal::UnknownValue,
+                });
+                return;
+            }
+        };
+        if let Toggled::Refused { part, reason } = toggled {
+            self.notifier
+                .notify(refused_notice(part, reason), &[], None);
+        }
+    }
+
+    /// Shows the exit question on its own short-lived thread (D2: neither the main thread
+    /// nor this worker waits for it); a Yes posts `ExitConfirmed`. While one is shown, a
+    /// further Exit asks nothing. A thread that cannot start asks nothing (the call goes on).
+    fn ask_exit(&self) {
+        if self.asking.swap(true, Ordering::SeqCst) {
             return;
         }
+        let text = i18n::text(
+            self.service.snapshot().ui_language,
+            EXIT_RECORDING_QUESTION,
+            &[],
+        );
+        let confirm = Arc::clone(&self.exit_confirm);
+        let asking = Arc::clone(&self.asking);
+        let app = self.app.clone();
+        let spawned = thread::Builder::new()
+            .name("call-exit-question".into())
+            .spawn(move || {
+                let yes = confirm.ask(&text);
+                asking.store(false, Ordering::SeqCst);
+                if yes {
+                    request(&app, CallRequest::ExitConfirmed);
+                }
+            });
+        if spawned.is_err() {
+            self.asking.store(false, Ordering::SeqCst);
+        }
+    }
+}
+
+/// Ends the loop of `app` with code 0 from a main-thread task (the tray Exit's own end);
+/// a loop that already ended runs no task, so nothing happens.
+fn end_loop<R: Runtime>(app: &AppHandle<R>) {
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || handle.exit(0));
+}
+
+/// The tray's Exit (T-145): posts `CallRequest::Exit` to the call worker and answers
+/// `true`; `false` when the app has no call part or its worker is gone (the caller then
+/// ends the loop itself).
+pub fn request_exit<R: Runtime>(app: &AppHandle<R>) -> bool {
+    app.try_state::<CallPart>()
+        .is_some_and(|part| part.requests.send(CallRequest::Exit).is_ok())
+}
+
+/// The call part's end of the process (T-145, I1, I2; the lib's `end_of_process`, run by
+/// `on_run_event`'s `RunEvent::Exit` arm and by the `WM_ENDSESSION(TRUE)` hook
+/// `win::end_session`, before the session end): the delivery gate turns to exiting (no
+/// notice, no pass enqueue from here on; the next start queues the call), then a recording
+/// call stops with `system_end` (EOS, sync, meta `ready-to-transcribe`). From the Exit arm
+/// it runs on the main thread and takes the session lock there; from the hook it runs on
+/// the `end-session` thread while the main thread waits for it. Either way nothing inside
+/// the lock waits on the main thread. A no-op without a call part, and a stop that finds
+/// no recording call does nothing, so a second call changes nothing.
+pub fn finalize_on_exit<R: Runtime>(app: &AppHandle<R>) {
+    let Some(part) = app.try_state::<CallPart>() else {
+        return;
     };
-    if let Toggled::Refused { part, reason } = toggled {
-        notifier.notify(refused_notice(part, reason), &[], None);
+    part.gate.exiting();
+    if let Some(session) = app.try_state::<Arc<CallSession>>() {
+        session.stop(StopReason::SystemEnd);
     }
 }
 
@@ -575,27 +784,38 @@ fn emit_open<R: Runtime>(app: &AppHandle<R>, target: CallRef) {
 }
 
 /// `run()`'s `CallIndicator` (called inside the call session lock): the call flag goes
-/// to the tray part (store and post only); `set_state` and `set_tick` do nothing until
-/// T-130's indicator window forwards them (#277).
+/// to the tray part, the state and the tick to the indicator part (T-130); each only
+/// stores and notifies.
 pub struct ShellCallIndicator<R: Runtime> {
     tray: Option<TrayPart<R>>,
+    indicator: Option<Arc<IndicatorPart>>,
 }
 
 impl<R: Runtime> ShellCallIndicator<R> {
-    /// The indicator of `app`: its tray part (`tray::part`), if the tray was built.
+    /// The indicator of `app`: its tray part (`tray::part`), if the tray was built, and
+    /// its indicator part (`call_indicator::part`), if `call_indicator::start` ran.
     pub fn new(app: &AppHandle<R>) -> ShellCallIndicator<R> {
         ShellCallIndicator {
             tray: tray::part(app),
+            indicator: call_indicator::part(app),
         }
     }
 }
 
 impl<R: Runtime> CallIndicator for ShellCallIndicator<R> {
-    /// No indicator window until T-130 (#277).
-    fn set_state(&self, _state: &IndicatorState) {}
+    /// Stores `state` in the indicator mailbox and wakes its thread; never blocks.
+    fn set_state(&self, state: &IndicatorState) {
+        if let Some(indicator) = &self.indicator {
+            indicator.set_state(state);
+        }
+    }
 
-    /// No indicator window until T-130 (#277).
-    fn set_tick(&self, _tick: &IndicatorTick) {}
+    /// Stores `tick` in the indicator mailbox and wakes its thread; never blocks.
+    fn set_tick(&self, tick: &IndicatorTick) {
+        if let Some(indicator) = &self.indicator {
+            indicator.set_tick(tick);
+        }
+    }
 
     fn set_call_recording(&self, recording: bool) {
         if let Some(tray) = &self.tray {
@@ -604,40 +824,113 @@ impl<R: Runtime> CallIndicator for ShellCallIndicator<R> {
     }
 }
 
-/// A call notice to the shared notifier: core's `CallNotice::message` id, `retry: None`.
+/// A call notice to the shared notifier: core's `CallNotice::message` id and its button,
+/// `CallNotice::action` (Open for "Transcript ready" only, T-213).
 fn offer(notifier: &dyn Notifier, notice: &CallNotice) {
     let (id, params) = notice.message();
-    notifier.notify(id, &params, None);
+    notifier.notify(id, &params, notice.action());
 }
 
-/// `run()`'s `CallShell` (called after the call session lock): a notice goes to the
-/// shared notifier ([`offer`]); the Calls tab request posts
-/// `settings_window::request(Tab(Calls, None))` and drops the receipt; a folder a stop
-/// left ready-to-transcribe is enqueued on the one pass queue (T-139), the only enqueue
-/// on a stop.
-pub struct ShellCallShell<R: Runtime> {
-    app: AppHandle<R>,
+/// What the delivery gate holds since a suspend, in stop order.
+enum Held {
+    Notice(CallNotice),
+    Ready(PathBuf),
+}
+
+/// The delivery state of the call shell (T-145, I2, I4).
+enum Delivery {
+    /// Every notice is offered and every ready folder enqueued at once.
+    Normal,
+    /// Since a suspend: kept in order until a resume or the next call request.
+    Held(Vec<Held>),
+    /// Since the exit began: dropped (the next start queues the call through recover).
+    Exiting,
+}
+
+/// The one place the call session's notices and stop hand-offs are delivered (T-145 seam
+/// (c)): a notice to the shared notifier ([`offer`]), a ready-to-transcribe folder to the
+/// one pass queue (T-139), each through the current [`Delivery`]. Delivery runs under the
+/// gate's own lock (never the session lock), so a release keeps stop order. Exiting is
+/// final.
+struct DeliveryGate {
+    state: Mutex<Delivery>,
     notifier: Arc<dyn Notifier>,
     queue: Arc<PassQueue>,
 }
 
-impl<R: Runtime> ShellCallShell<R> {
-    pub fn new(
-        app: &AppHandle<R>,
-        notifier: Arc<dyn Notifier>,
-        queue: Arc<PassQueue>,
-    ) -> ShellCallShell<R> {
-        ShellCallShell {
-            app: app.clone(),
+impl DeliveryGate {
+    fn new(notifier: Arc<dyn Notifier>, queue: Arc<PassQueue>) -> DeliveryGate {
+        DeliveryGate {
+            state: Mutex::new(Delivery::Normal),
             notifier,
             queue,
+        }
+    }
+
+    fn deliver(&self, item: Held) {
+        match item {
+            Held::Notice(notice) => offer(self.notifier.as_ref(), &notice),
+            Held::Ready(dir) => self.queue.enqueue(&dir),
+        }
+    }
+
+    fn pass(&self, item: Held) {
+        let mut state = lock(&self.state);
+        match &mut *state {
+            Delivery::Normal => self.deliver(item),
+            Delivery::Held(items) => items.push(item),
+            Delivery::Exiting => {}
+        }
+    }
+
+    /// A suspend: hold from now on (an exiting gate stays exiting).
+    fn hold(&self) {
+        let mut state = lock(&self.state);
+        if matches!(*state, Delivery::Normal) {
+            *state = Delivery::Held(Vec::new());
+        }
+    }
+
+    /// A resume or the next request: what was held is delivered in order, then delivery
+    /// is normal again (an exiting gate stays exiting).
+    fn release(&self) {
+        let mut state = lock(&self.state);
+        if let Delivery::Held(items) = &mut *state {
+            let items = std::mem::take(items);
+            *state = Delivery::Normal;
+            for item in items {
+                self.deliver(item);
+            }
+        }
+    }
+
+    /// The exit began: what was held and everything later is dropped.
+    fn exiting(&self) {
+        *lock(&self.state) = Delivery::Exiting;
+    }
+}
+
+/// `run()`'s `CallShell` (called after the call session lock): a notice and a folder a
+/// stop left ready-to-transcribe go through the one `DeliveryGate` (offered and
+/// enqueued at once, held since a suspend, dropped since the exit began); the Calls tab
+/// request posts `settings_window::request(Tab(Calls, None))` and drops the receipt.
+pub struct ShellCallShell<R: Runtime> {
+    app: AppHandle<R>,
+    gate: Arc<DeliveryGate>,
+}
+
+impl<R: Runtime> ShellCallShell<R> {
+    fn new(app: &AppHandle<R>, gate: Arc<DeliveryGate>) -> ShellCallShell<R> {
+        ShellCallShell {
+            app: app.clone(),
+            gate,
         }
     }
 }
 
 impl<R: Runtime> CallShell for ShellCallShell<R> {
     fn notice(&self, notice: CallNotice) {
-        offer(self.notifier.as_ref(), &notice);
+        self.gate.pass(Held::Notice(notice));
     }
 
     fn open_calls_tab(&self) {
@@ -658,7 +951,7 @@ impl<R: Runtime> CallShell for ShellCallShell<R> {
     }
 
     fn call_ready(&self, dir: &Path) {
-        self.queue.enqueue(dir);
+        self.gate.pass(Held::Ready(dir.to_path_buf()));
     }
 }
 

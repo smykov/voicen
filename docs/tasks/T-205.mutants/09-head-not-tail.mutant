@@ -1,0 +1,8 @@
+guarantee: AC-2: the last 200 lines, not the first
+file: scripts/tw-wip-run
+added_by: test-writer
+--- old
+tail -n 200 |
+--- new
+head -n 200 |
+--- end

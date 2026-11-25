@@ -1,0 +1,8 @@
+guarantee: AC1: every window has its own generation (stale Destroyed ignored)
+file: crates/voicen-core/src/overlay.rs
+added_by: test-writer
+--- old
+                self.generation += 1;
+--- new
+                self.generation += 0;
+--- end

@@ -7,7 +7,8 @@
 //   window builds no defaults, no validation rule and no language list of its own
 //   (docs/decisions/settings-ui.md).
 // - U2: a refusal maps each FieldError to its field as message id `error.<code>`
-//   (`errorMessageId`, the one helper; no list of codes here), and each field of a
+//   (`errorMessageId`, the one helper; no list of codes here), or, when it carries a
+//   `reason` (T-155), to that reason's own id (`unwritableMessageId`), and each field of a
 //   partially_restored form error that has no FieldError of its own to
 //   `NOT_RESTORED_ID`.
 // - U3: a typed key lives only in `keys` until the next Saved, which resets every
@@ -22,6 +23,7 @@ import type {
   SaveRequest,
   Settings,
   SettingsView,
+  UnwritableReason,
   Warning,
 } from "./settingsApi";
 import { KEY_SLOTS } from "./settingsApi";
@@ -38,7 +40,8 @@ export interface Draft {
   /** One edit per key slot; "Untouched" until the user types or clears. */
   keys: Record<KeySlot, KeyEdit>;
   /**
-   * FieldId -> message id of the last refusal: `error.<code>` for a FieldError, else
+   * FieldId -> message id of the last refusal: `error.<code>` for a FieldError (its
+   * reason's id when it carries one, `unwritableMessageId`), else
    * `NOT_RESTORED_ID` for a field named in a partially_restored form error.
    */
   errors: Record<string, MessageId>;
@@ -180,13 +183,44 @@ export function applyOutcome(draft: Draft, outcome: SaveOutcome): Draft {
   };
 }
 
-/** FieldId -> `error.<code>`; the first error of a field wins. */
+/**
+ * FieldId -> message id; the first error of a field wins. An error that carries a
+ * `reason` (core sends one only for `storage.unwritable`) maps to that reason's own
+ * message (`unwritableMessageId`); every other error to `error.<code>`.
+ */
 export function errorsByField(errors: readonly FieldError[]): Record<string, MessageId> {
   const byField: Record<string, MessageId> = {};
-  for (const { field, code } of errors) {
-    if (!Object.hasOwn(byField, field)) byField[field] = errorMessageId(code);
+  for (const { field, code, reason } of errors) {
+    if (Object.hasOwn(byField, field)) continue;
+    byField[field] = reason === undefined ? errorMessageId(code) : unwritableMessageId(reason);
   }
   return byField;
+}
+
+/**
+ * The UI-only full message of an `UnwritableReason` (T-155, decision #319 Q2): one id per
+ * reason, no placeholder. Exhaustive over the closed union: a new reason is a type error
+ * here until it has its id (and its EN and RU text).
+ */
+export function unwritableMessageId(reason: UnwritableReason): MessageId {
+  switch (reason) {
+    case "missing":
+      return "settings.calls.unwritable.missing";
+    case "not_a_folder":
+      return "settings.calls.unwritable.not_a_folder";
+    case "relative":
+      return "settings.calls.unwritable.relative";
+    case "access_denied":
+      return "settings.calls.unwritable.access_denied";
+    case "disk_full":
+      return "settings.calls.unwritable.disk_full";
+    case "other":
+      return "settings.calls.unwritable.other";
+    default: {
+      const unknown: never = reason;
+      return unknown;
+    }
+  }
 }
 
 /**

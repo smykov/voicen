@@ -1,0 +1,8 @@
+guarantee: AC-3: unwritable root shows its reason's own message (access_denied)
+file: src/lib/settings/draft.ts
+added_by: test-writer
+--- old
+      return "settings.calls.unwritable.access_denied";
+--- new
+      return "settings.calls.unwritable.other";
+--- end

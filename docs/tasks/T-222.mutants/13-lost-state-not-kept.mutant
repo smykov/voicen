@@ -1,0 +1,11 @@
+guarantee: AC-1: a Lost seen with record off marks the track down for the next call
+file: crates/voicen-core/src/call/session.rs
+added_by: test-writer
+--- old
+            self.device.get_mut(track).down = true;
+        }
+        let Some(rec) = self.rec.as_mut() else {
+--- new
+        }
+        let Some(rec) = self.rec.as_mut() else {
+--- end

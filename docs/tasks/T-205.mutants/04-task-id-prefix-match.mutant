@@ -1,0 +1,8 @@
+guarantee: AC-3/AC-4: TASK_ID must be byte-equal to the branch ID
+file: scripts/tw-wip-run
+added_by: test-writer
+--- old
+  [ "${TASK_ID-}" = "$id" ] || refuse "TASK_ID does not name $id"
+--- new
+  [[ "${TASK_ID-}" == "$id"* ]] || refuse "TASK_ID does not name $id"
+--- end

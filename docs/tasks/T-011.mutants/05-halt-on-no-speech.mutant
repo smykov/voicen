@@ -1,0 +1,18 @@
+guarantee: AC-2: A with no speech leaves the order without blocking B
+file: crates/voicen-core/src/dictation.rs
+added_by: test-writer
+--- old
+            Done::Recording(id, report) => {
+                st.ctrl
+                    .job_finished_pending(id, report.end, report.pending, now)
+            }
+--- new
+            Done::Recording(id, report) => {
+                let silent = matches!(report.end, crate::recording::JobEnd::Notice(_));
+                st.ctrl
+                    .job_finished_pending(id, report.end, report.pending, now);
+                if silent {
+                    return;
+                }
+            }
+--- end

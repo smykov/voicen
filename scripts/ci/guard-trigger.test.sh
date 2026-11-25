@@ -108,6 +108,10 @@ MK
   mkdir -p "$repo/scripts/licenses"
   printf '// fixture license allowlist\nexport const accepted = ["MIT"];\n' \
     >"$repo/scripts/licenses/accepted.mjs"
+  mkdir -p "$repo/scripts/hooks"
+  printf '#!/usr/bin/env bash\n# fixture hook\nexit 0\n' >"$repo/scripts/hooks/pre-commit"
+  printf '# fixture task parser\n' >"$repo/scripts/hooks/_task.py"
+  printf '#!/usr/bin/env bash\n# fixture hook\nexit 0\n' >"$repo/scripts/hooks/wip-push-guard.sh"
   printf 'fn main() {}\n' >"$repo/src/app.rs"
   printf '# Notes\n' >"$repo/docs/notes.md"
   task "$repo/docs/tasks/T-900.md" "$2" "$3" "${4:-}" "${5:-}"
@@ -282,6 +286,11 @@ printf 'x\n' >"$repo/docs/scripts/ci/b.md"
 printf 'x\n' >"$repo/docs/scripts/licenses/c.md"
 printf 'x\n' >"$repo/docs/Makefile.md"
 printf 'x\n' >"$repo/docs/rules.mkd"
+# T-193: siblings and a nested prefix of the hooks directory are not under scripts/hooks/.
+mkdir -p "$repo/scripts/hooks-notes" "$repo/scripts/hook" "$repo/docs/scripts/hooks"
+printf 'x\n' >"$repo/scripts/hooks-notes/a.md"
+printf 'x\n' >"$repo/scripts/hook/b.md"
+printf 'x\n' >"$repo/docs/scripts/hooks/c.md"
 g add -A
 run none-near-miss allow
 
@@ -390,6 +399,51 @@ printf 'lint:\n\ttrue\n' >"$repo/rules.mk"
 printf '\nlint:\n\ttrue\n' >>"$repo/Makefile"
 g add rules.mk Makefile
 run allow-mk-checker allow
+
+# ---- T-193 (decisions #215, #329, #330): scripts/hooks/ joins the token ----------------------
+repo refuse-hooks-precommit - -
+printf '# loosened\n' >>"$repo/scripts/hooks/pre-commit"
+g add scripts/hooks/pre-commit
+run refuse-hooks-precommit refuse "scripts/hooks/pre-commit" "checker"
+repo refuse-hooks-task-parser - -
+printf '# changed\n' >>"$repo/scripts/hooks/_task.py"
+g add scripts/hooks/_task.py
+run refuse-hooks-task-parser refuse "scripts/hooks/_task.py" "checker"
+repo refuse-hooks-new-nested - -
+mkdir -p "$repo/scripts/hooks/sub"
+printf 'x\n' >"$repo/scripts/hooks/sub/x"
+g add scripts/hooks/sub/x
+run refuse-hooks-new-nested refuse "scripts/hooks/sub/x" "checker"
+repo refuse-hooks-deleted - -
+g rm -q scripts/hooks/wip-push-guard.sh
+run refuse-hooks-deleted refuse "scripts/hooks/wip-push-guard.sh" "checker"
+# Moved out: with rename detection only the new path src/x.sh would be listed.
+repo refuse-hooks-moved-out - -
+g mv scripts/hooks/wip-push-guard.sh src/x.sh
+run refuse-hooks-moved-out refuse "scripts/hooks/wip-push-guard.sh" "checker"
+repo allow-hooks-checker "$ok_checker" "$ok_decides"
+printf '# changed\n' >>"$repo/scripts/hooks/pre-commit"
+g add scripts/hooks/pre-commit
+run allow-hooks-checker allow
+
+# Permanent bite: a copy of the hook directory without the fifth form must let the
+# refuse-hooks-precommit shape through, else that case does not depend on the form.
+mutant="$tmp/mutant"
+mkdir -p "$mutant"
+cp "$root"/scripts/hooks/* "$mutant"/
+sed -i 's#scripts/hooks/\* | ##' "$mutant/pre-commit"
+changed="$(diff "$hook" "$mutant/pre-commit" | grep -c '^<' || true)"
+if [ "$changed" -ne 1 ]; then
+  fail "bite-hooks-mutant: dropping the hooks form changed $changed lines (want exactly 1)"
+else
+  real_hook="$hook"
+  hook="$mutant/pre-commit"
+  repo bite-hooks-mutant - -
+  printf '# loosened\n' >>"$repo/scripts/hooks/pre-commit"
+  g add scripts/hooks/pre-commit
+  run bite-hooks-mutant allow
+  hook="$real_hook"
+fi
 
 echo "guard-trigger.test: $passed passed, $failed failed"
 [ "$failed" -eq 0 ] || exit 1

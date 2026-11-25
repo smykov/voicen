@@ -1,0 +1,8 @@
+guarantee: AC-2: each log line is printed as LOG: <line> (no stdout line starts with CI:)
+file: scripts/tw-wip-run
+added_by: test-writer
+--- old
+| sed 's/^/LOG: /'
+--- new
+| cat
+--- end

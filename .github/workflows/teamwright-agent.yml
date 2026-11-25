@@ -79,8 +79,15 @@ jobs:
         env:
           AUTH_VAR: ${{ vars.TEAMWRIGHT_AUTH }}
           OAUTH_SET: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
+          # The owner's pause (decisions #288): no session runs for a push that cannot happen.
+          TEAMWRIGHT_CONTOUR_PAUSE: ${{ vars.TEAMWRIGHT_CONTOUR_PAUSE }}
         run: |
           set -euo pipefail
+          if [ -n "${TEAMWRIGHT_CONTOUR_PAUSE:-}" ]; then
+            mkdir -p "$OUT"
+            echo "The contour is paused (repository variable TEAMWRIGHT_CONTOUR_PAUSE): no session ran, nothing was pushed." > "$OUT/preflight.md"
+            exit 1
+          fi
           [ "${AUTH_VAR:-}" = subscription ] || { echo "::error::repository variable TEAMWRIGHT_AUTH is not 'subscription', the only mode of this contour"; exit 1; }
           [ "$OAUTH_SET" = true ] || { echo "::error::the repository has no CLAUDE_CODE_OAUTH_TOKEN"; exit 1; }
           [[ "$TASK_ID" =~ ^T-[0-9]{3,}$ ]] || { echo "::error::task_id must look like T-202"; exit 1; }
@@ -167,6 +174,15 @@ jobs:
             echo "::warning::no pnpm on the runner: the ui area cannot run here"
           fi
 
+      - name: Prebuild before the stage
+        id: prebuild
+        run: |
+          set -euo pipefail
+          # T-261 (decisions #361): the gate's Rust builds start in the background while the session
+          # reads; the step ends at once, "Prebuild report" after the stage reports the outcome.
+          nohup bash scripts/ci/contour-prebuild.sh > /dev/null 2>&1 &
+          echo "Prebuild started; its log is $RUNNER_TEMP/prebuild.log on the runner."
+
       - name: The stage
         id: claude
         timeout-minutes: 240
@@ -192,71 +208,165 @@ jobs:
           command -v claude >/dev/null 2>&1 || { echo "No claude CLI on the runner" > "$OUT/preflight.md"; exit 1; }
           # Without the paths of the runner's environment files: the session sets nothing for the
           # steps after it (the push step pins its own env).
-          env -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_OUTPUT -u GITHUB_STATE claude -p "/teamwright:$STAGE $TASK_ID" --model "$MODEL" --max-turns 200 --plugin-dir "$TEAMWRIGHT_PLUGIN_DIR" --mcp-config "$RUNNER_TEMP/mcp.json" --strict-mcp-config --permission-mode acceptEdits --allowedTools "Bash,Read,Edit,Write,Glob,Grep,Agent,Task,TodoWrite,Skill,mcp__serena,mcp__context7" --append-system-prompt "$SYSTEM_PROMPT" --output-format stream-json --verbose > "$OUT/session.jsonl"
+          env -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_OUTPUT -u GITHUB_STATE claude -p "/teamwright:$STAGE $TASK_ID" --model "$MODEL" --max-turns 200 --plugin-dir "$TEAMWRIGHT_PLUGIN_DIR" --mcp-config "$RUNNER_TEMP/mcp.json" --strict-mcp-config --permission-mode acceptEdits --allowedTools "Bash,Read,Edit,Write,Glob,Grep,Agent,Task,TodoWrite,Skill,mcp__serena__get_symbols_overview,mcp__serena__find_symbol,mcp__serena__find_referencing_symbols,mcp__serena__find_implementations,mcp__serena__find_declaration,mcp__context7" --append-system-prompt "$SYSTEM_PROMPT" --output-format stream-json --verbose > "$OUT/session.jsonl"
           echo "The session ended; its stream is in $OUT/session.jsonl on the runner."
 
+      - name: Prebuild report
+        if: always() && steps.prebuild.outcome == 'success'
+        run: |
+          # T-261: inline, runs nothing of the tree (the session can edit it); never fails the job.
+          # A sequence still running is stopped (its process group), then its container removed.
+          pid="$(cat "$RUNNER_TEMP/prebuild.pid" 2>/dev/null || true)"
+          if [[ "$pid" =~ ^[0-9]+$ ]]; then
+            kill -TERM -- "-$pid" 2>/dev/null || true
+            sleep 2
+          fi
+          docker rm -f "tw-prebuild-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >/dev/null 2>&1 || true
+          rc="$(cat "$RUNNER_TEMP/prebuild.rc" 2>/dev/null || true)"
+          rc="${rc//[[:space:]]/}"
+          if [ "$rc" != 0 ]; then
+            echo "::warning::the prebuild did not finish cleanly (exit code '${rc:-none}'; $RUNNER_TEMP/prebuild.log on the runner): the session's first gate built more itself"
+          fi
+          exit 0
+
+      # T-236 (F-032): the count, the push of task/<ID> and the uncommitted patch run on every
+      # ending of the session (success, failure, timeout, cancel), so a stage that runs out of time
+      # keeps its work; wip/<ID> stays behind a successful implement, inside the push step. From
+      # this step to the line before "Chain: the next stage" the file is the owned copy
+      # scripts/ci/contour-push.yml (release-guard.sh R9; edit both together).
       - name: Did the stage commit?
         id: commits
-        if: always() && steps.claude.outcome == 'success'
+        if: always()
         env:
           BEFORE: ${{ steps.branch.outputs.before }}
-        run: echo "count=$(git rev-list --count "$BEFORE..HEAD")" >> "$GITHUB_OUTPUT"
+        run: |
+          set -euo pipefail
+          # No pre-session commit (the branch step did not run): no stage commit to count or push.
+          if [ -z "${BEFORE:-}" ]; then
+            echo "count=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          n="$(git rev-list --count "$BEFORE..HEAD")"
+          echo "count=$n" >> "$GITHUB_OUTPUT"
 
       - name: Push task/<ID>, and wip/<ID> after implement
         id: push
-        if: always() && steps.claude.outcome == 'success' && steps.commits.outputs.count != '0'
+        if: always() && steps.commits.outputs.count != '0'
         timeout-minutes: 30
         env:
           # decisions #253 (OQ-79 a): a contour push of task/<ID> or wip/<ID> is not a delivery,
           # so pre-push skips DRAIN for it; its pause check runs first all the same. This step only.
           TEAMWRIGHT_WIP_REFS_RE: '^refs/heads/(wip|task)/'
-          # The owner's pause (docs/process/gates.md): a file on the runner host, in a root-owned
-          # dir outside the checkout, so neither git clean nor the session removes it.
-          TEAMWRIGHT_PAUSE_FILE: /etc/teamwright/voicen.pause
+          # The owner's pause (decisions #288, docs/process/gates.md): non-empty when this job
+          # started = nothing is pushed.
+          TEAMWRIGHT_CONTOUR_PAUSE: ${{ vars.TEAMWRIGHT_CONTOUR_PAUSE }}
           TEAMWRIGHT_ALLOW_PUSH: ""
           BASH_ENV: ""
+          # T-230: no git config, template or python user site the session can write (it runs as
+          # the same OS user and can write HOME): git reads neither the global nor the system file,
+          # and pre-push runs python3 without the user site.
+          GIT_CONFIG_GLOBAL: /dev/null
+          GIT_CONFIG_NOSYSTEM: "1"
+          PYTHONNOUSERSITE: "1"
+          # The hooks come from the dispatched main commit, never from a commit a stage wrote.
+          HOOKS_FROM: ${{ github.sha }}
           # The job token, in this step only (the checkout does not persist it).
           PUSH_TOKEN: ${{ github.token }}
           BEFORE: ${{ steps.branch.outputs.before }}
           TASK_ID: ${{ inputs.task_id }}
           STAGE: ${{ inputs.stage }}
           REPO: ${{ github.repository }}
+          # The session's outcome: task/<ID> is pushed on every ending, wip/<ID> only after success.
+          SESSION_OUTCOME: ${{ steps.claude.outcome }}
         run: |
           set -euo pipefail
+          if [ -n "${TEAMWRIGHT_CONTOUR_PAUSE:-}" ]; then
+            echo "paused=1" >> "$GITHUB_OUTPUT"
+            echo "::notice::the contour is paused (repository variable TEAMWRIGHT_CONTOUR_PAUSE): nothing is pushed"
+            exit 0
+          fi
           export PATH=/usr/local/bin:/usr/bin:/bin GIT_NO_REPLACE_OBJECTS=1
           [[ "$TASK_ID" =~ ^T-[0-9]{3,}$ ]] || { echo "::error::bad task id"; exit 1; }
           [[ "$BEFORE" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::bad pre-session commit"; exit 1; }
-          # A fresh repository: no config, hook or replace ref of the session's tree takes part.
-          # The hooks are the pre-session commit's, fetched from GitHub, so a session commit that
-          # edits scripts/hooks/pre-push does not change the check of its own push.
+          [[ "$HOOKS_FROM" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::bad hooks commit"; exit 1; }
+          # A fresh repository with an empty template: no config, hook or replace ref of the
+          # session's tree takes part. The hooks are those of the dispatched main commit
+          # (HOOKS_FROM), fetched from GitHub, so no stage commit, of this stage or an earlier
+          # one on task/<ID>, changes the check of a push.
           pub="$(mktemp -d "$RUNNER_TEMP/push.XXXXXX")"
           hooks="$(mktemp -d "$RUNNER_TEMP/hooks.XXXXXX")"
           url="https://github.com/$REPO.git"
-          git init -q "$pub"
+          git init -q --template= "$pub"
           cd "$pub"
           git fetch -q "$url" "$BEFORE"
+          git fetch -q "$url" "$HOOKS_FROM"
           git fetch -q "$GITHUB_WORKSPACE" "+HEAD:refs/heads/stage"
           git merge-base --is-ancestor "$BEFORE" stage || { echo "::error::the stage commits do not descend from $BEFORE"; exit 1; }
-          git archive "$BEFORE" scripts/hooks | tar -x -C "$hooks"
-          [ -x "$hooks/scripts/hooks/pre-push" ] || { echo "::error::no pre-push hook in $BEFORE"; exit 1; }
+          git archive "$HOOKS_FROM" scripts/hooks | tar -x -C "$hooks"
+          [ -x "$hooks/scripts/hooks/pre-push" ] || { echo "::error::no pre-push hook in $HOOKS_FROM"; exit 1; }
           # The token as a one-shot extraheader from the environment: no git config file holds it.
           auth="$(printf 'x-access-token:%s' "$PUSH_TOKEN" | base64 -w0)"
           unset PUSH_TOKEN
           export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $auth"
           git -c core.hooksPath="$hooks/scripts/hooks" push "$url" "stage:refs/heads/task/$TASK_ID"
-          if [ "$STAGE" = implement ]; then
+          # wip/<ID> starts the ci.yml run of a finished implementation: only after a successful session.
+          if [ "$STAGE" = implement ] && [ "$SESSION_OUTCOME" = success ]; then
             git -c core.hooksPath="$hooks/scripts/hooks" push --force "$url" "stage:refs/heads/wip/$TASK_ID"
           fi
           echo "pushed=1" >> "$GITHUB_OUTPUT"
 
+      - name: Keep the uncommitted tree as a patch
+        id: patch
+        if: always()
+        # A failure here is a warning, not a red job: the chain steps after it still decide.
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          trap 'echo "::warning::the uncommitted tree of the stage was not kept (git failed, see the log above)"' ERR
+          cd -- "$GITHUB_WORKSPACE"
+          # The session's tree beyond HEAD (staged, unstaged, untracked; binary files kept), read
+          # through a temporary index so the session's own index stays as it was. $OUT itself is
+          # left out when it lies in the tree. The owned tail after the chain steps scans and keeps
+          # $OUT; a clean tree writes no file.
+          idx="$RUNNER_TEMP/uncommitted.index"
+          part="$RUNNER_TEMP/uncommitted.part"
+          rm -f -- "$idx" "$part"
+          ex=()
+          case "$OUT" in
+            /*) ;;
+            *) ex=(":(exclude)$OUT") ;;
+          esac
+          export GIT_INDEX_FILE="$idx"
+          git read-tree HEAD
+          git add -A -- . "${ex[@]}"
+          git diff --cached --binary HEAD > "$part"
+          rm -f -- "$idx"
+          if [ -s "$part" ]; then
+            mkdir -p -- "$OUT"
+            mv -- "$part" "$OUT/uncommitted.patch"
+            echo "::notice::the stage left uncommitted changes: kept as uncommitted.patch in the session artifact (agent/)"
+          else
+            rm -f -- "$part"
+            echo "The tree is clean: nothing uncommitted to keep."
+          fi
+
       - name: "Chain: the next stage"
+        # T-230: from this step to the end of the file the job is the owned copy
+        # scripts/ci/contour-upload.yml (release-guard.sh R9; edit both together), on the line right
+        # after the owned copy scripts/ci/contour-push.yml. Each step here that holds a token pins
+        # BASH_ENV '' and sets a fixed PATH first; gh reads a fresh config dir, not the session's HOME.
         if: always() && steps.claude.outcome == 'success'
         shell: bash {0}
         env:
+          BASH_ENV: ""
           GH_TOKEN: ${{ github.token }}
           COMMITS: ${{ steps.commits.outputs.count }}
           PUSHED: ${{ steps.push.outputs.pushed }}
+          PAUSED: ${{ steps.push.outputs.paused }}
         run: |
+          export PATH=/usr/local/bin:/usr/bin:/bin
+          GH_CONFIG_DIR="$(mktemp -d "$RUNNER_TEMP/gh-config.XXXXXX")" || { echo "::error::no fresh gh config dir"; exit 1; }
+          export GH_CONFIG_DIR
           say() {
             echo "$1" >> "$GITHUB_STEP_SUMMARY"
             [ -z "$ISSUE" ] || gh issue comment "$ISSUE" -R "$REPO" --body "$1" >/dev/null || echo "::warning::no comment on Issue #$ISSUE"
@@ -270,8 +380,12 @@ jobs:
             say "**$TASK_ID**: chain stopped: stage $STAGE made no commit. $RUN_URL"
             exit 0
           fi
+          if [ "${PAUSED:-}" = 1 ]; then
+            say "**$TASK_ID**: chain stopped: the contour is paused (repository variable TEAMWRIGHT_CONTOUR_PAUSE); task/$TASK_ID was not pushed. $RUN_URL"
+            exit 0
+          fi
           if [ "${PUSHED:-}" != 1 ]; then
-            say "**$TASK_ID**: chain stopped: task/$TASK_ID was not pushed (a pause, or pre-push refused). $RUN_URL"
+            say "**$TASK_ID**: chain stopped: task/$TASK_ID was not pushed (pre-push refused). $RUN_URL"
             exit 1
           fi
           gh workflow run teamwright-next.yml -R "$REPO" --ref "$MAIN" -f task_id="$TASK_ID" -f hop="$HOP" -f prev_stage="$STAGE" -f prev_status="${START_STATUS:-}" -f issue="$ISSUE" || { say "**$TASK_ID**: the dispatcher was not started. $RUN_URL"; exit 1; }
@@ -281,10 +395,33 @@ jobs:
         if: failure() || steps.claude.outcome != 'success'
         shell: bash {0}
         env:
+          BASH_ENV: ""
           GH_TOKEN: ${{ github.token }}
+          COMMITS: ${{ steps.commits.outputs.count }}
+          PUSHED: ${{ steps.push.outputs.pushed }}
+          PAUSED: ${{ steps.push.outputs.paused }}
         run: |
+          export PATH=/usr/local/bin:/usr/bin:/bin
+          GH_CONFIG_DIR="$(mktemp -d "$RUNNER_TEMP/gh-config.XXXXXX")" || { echo "::error::no fresh gh config dir"; exit 1; }
+          export GH_CONFIG_DIR
           msg="**$TASK_ID**: stage $STAGE failed: $RUN_URL. To continue, start teamwright-next.yml for $TASK_ID by hand."
           [ ! -f "$OUT/preflight.md" ] || msg="$msg $(cat "$OUT/preflight.md")"
+          # What the failed stage kept (T-236): its commits on task/<ID>, its uncommitted tree as a patch.
+          if [ "${PUSHED:-}" = 1 ]; then
+            kept="its ${COMMITS:-0} commit(s) are pushed to task/$TASK_ID"
+          elif [ "${PAUSED:-}" = 1 ]; then
+            kept="its ${COMMITS:-0} commit(s) are not pushed to task/$TASK_ID (the contour is paused)"
+          elif [ "${COMMITS:-0}" != 0 ]; then
+            kept="its ${COMMITS} commit(s) were NOT pushed to task/$TASK_ID (see the push step)"
+          else
+            kept="no commit of the stage on task/$TASK_ID"
+          fi
+          if [ -f "$OUT/uncommitted.patch" ]; then
+            kept="$kept; its uncommitted tree is uncommitted.patch in the session artifact"
+          else
+            kept="$kept; no uncommitted change kept"
+          fi
+          msg="$msg Kept: $kept."
           echo "$msg" >> "$GITHUB_STEP_SUMMARY"
           # This step also runs when the input check failed: an unchecked ISSUE gets no comment.
           [[ "$ISSUE" =~ ^[0-9]+$ ]] && { gh issue comment "$ISSUE" -R "$REPO" --body "$msg" >/dev/null || true; }
@@ -325,6 +462,7 @@ jobs:
         timeout-minutes: 30
         shell: bash
         env:
+          BASH_ENV: ""
           # The values pass 1 of the scan looks for; they reach the scan only here.
           OAUTH_VALUE: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           JOB_TOKEN: ${{ github.token }}
@@ -336,6 +474,7 @@ jobs:
           # line of manifest.txt. A match of a value of the job or of a known key format deletes the
           # staging dir and fails the step; only counts are printed, never a name or a line.
           set -u
+          export PATH=/usr/local/bin:/usr/bin:/bin
           cd -- "$GITHUB_WORKSPACE"
           stage="$RUNNER_TEMP/session-upload"
           rm -rf -- "$stage"

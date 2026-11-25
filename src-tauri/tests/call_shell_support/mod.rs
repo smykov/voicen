@@ -34,6 +34,10 @@
 //! voicen_lib::tray::TrayPart::set_call_recording(&self, bool)
 //! voicen_core::call::events::{refused_notice, CallNotice::message}   // tests/call_notice_map.rs (core)
 //!
+//! T-145 adds to `CallPorts`: `exit_confirm: Arc<dyn ExitConfirm>` (`voicen_lib::call::ExitConfirm`:
+//! `trait ExitConfirm: Send + Sync { fn ask(&self, text: &str) -> bool }`, true = Yes; the
+//! native Yes/No box of the tray's Exit while a call records). The rig's [`FakeExit`] is it.
+//!
 //! T-139 adds to `CallPorts`: `credentials: Arc<dyn CredentialStore>` (the store the settings
 //! service writes; the rig's [`CallRig::creds`]) and `detector: Option<Arc<dyn SpeechSpans>>`
 //! (`None`: core's energy fallback); `start_calls` then also manages the one
@@ -45,9 +49,9 @@
 use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, TryRecvError};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread;
 
 use tauri::test::{mock_builder, mock_context, noop_assets, MockRuntime};
@@ -67,13 +71,14 @@ use voicen_core::local_models::download::DiskSpace;
 use voicen_core::local_models::service::LocalModels;
 use voicen_core::local_models::store::ModelStore;
 use voicen_core::platform::{CaptureHandle, Clipboard, FakeClipboard, FakeNotifier};
+use voicen_core::recording::CaptureError;
 use voicen_core::secrets::{CredentialStore, FakeCredentialStore};
 use voicen_core::settings::service::SettingsService;
 use voicen_core::test_support::local_models::FakeDisk;
 use voicen_core::test_support::TempDir;
 use voicen_core::timeouts::Timeouts;
 use voicen_core::vad::SpeechSpans;
-use voicen_lib::call::{CallPorts, SaveDialog};
+use voicen_lib::call::{CallPorts, ExitConfirm, SaveDialog};
 use voicen_lib::logs_folder::FolderOpener;
 use voicen_lib::settings_ipc::load_settings;
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -175,6 +180,8 @@ fn wav_of(samples: &[i16]) -> Vec<u8> {
 pub struct WavSource {
     opened: Mutex<Vec<Arc<WavTrackSource>>>,
     wav: Vec<u8>,
+    /// T-151: opens not yet stopped or dropped (core's `WavHandle` counts nothing).
+    open_handles: Arc<AtomicUsize>,
 }
 
 impl Default for WavSource {
@@ -182,6 +189,7 @@ impl Default for WavSource {
         WavSource {
             opened: Mutex::new(Vec::new()),
             wav: tone_wav(),
+            open_handles: Arc::new(AtomicUsize::new(0)),
         }
     }
 }
@@ -196,6 +204,7 @@ impl WavSource {
         Arc::new(WavSource {
             opened: Mutex::new(Vec::new()),
             wav: wav_of(samples),
+            open_handles: Arc::new(AtomicUsize::new(0)),
         })
     }
 
@@ -217,6 +226,52 @@ impl WavSource {
     pub fn opens(&self) -> usize {
         lock(&self.opened).len()
     }
+
+    /// T-151: track handles opened and not yet stopped or dropped (a track capture is open).
+    pub fn open_handles(&self) -> usize {
+        self.open_handles.load(Ordering::SeqCst)
+    }
+}
+
+/// T-151: a handle that counts itself in `WavSource::open_handles` from the open until its
+/// `stop` returns or it is dropped, whichever comes first (once).
+pub struct CountedHandle {
+    inner: Option<Box<dyn CaptureHandle>>,
+    open: Arc<AtomicUsize>,
+}
+
+impl CountedHandle {
+    /// Counts `inner` as open in `open` (one more now, one less when it is stopped or dropped).
+    pub fn open(inner: Box<dyn CaptureHandle>, open: &Arc<AtomicUsize>) -> Box<dyn CaptureHandle> {
+        open.fetch_add(1, Ordering::SeqCst);
+        Box::new(CountedHandle {
+            inner: Some(inner),
+            open: Arc::clone(open),
+        })
+    }
+
+    fn close(&mut self) {
+        if self.inner.take().is_some() {
+            self.open.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+}
+
+impl CaptureHandle for CountedHandle {
+    fn stop(mut self: Box<Self>) -> Result<(), CaptureError> {
+        let Some(inner) = self.inner.take() else {
+            return Ok(());
+        };
+        let result = inner.stop();
+        self.open.fetch_sub(1, Ordering::SeqCst);
+        result
+    }
+}
+
+impl Drop for CountedHandle {
+    fn drop(&mut self) {
+        self.close();
+    }
 }
 
 impl TrackSource for WavSource {
@@ -231,9 +286,9 @@ impl TrackSource for WavSource {
             .with_block_ms(20)
             .with_start(CaptureStamp::from_ms(START_MS));
         let source = Arc::new(source);
-        let opened = source.open(track, device, sink)?;
+        let (inner, endpoint) = source.open(track, device, sink)?;
         lock(&self.opened).push(source);
-        Ok(opened)
+        Ok((CountedHandle::open(inner, &self.open_handles), endpoint))
     }
 
     fn now(&self) -> CaptureStamp {
@@ -342,6 +397,8 @@ pub struct CallRig {
     /// T-139: the credential store the service writes and the call part's passes read.
     pub creds: Arc<dyn CredentialStore>,
     pub notifier: Arc<FakeNotifier>,
+    /// T-145: the exit question's port; answers No until told otherwise.
+    pub exit: Arc<FakeExit>,
     /// Ends the process with a named message when the test outlives `2 * HANG` (a build, a join
     /// or a drop that never returns). Declared last so it is dropped after the app.
     _watch: timing_support::HangWatch,
@@ -383,6 +440,7 @@ impl CallRig {
             service,
             creds,
             notifier: Arc::new(FakeNotifier::new()),
+            exit: Arc::new(FakeExit::default()),
             _watch: watch,
         }
     }
@@ -462,6 +520,41 @@ impl CallRig {
         save: Arc<dyn SaveDialog>,
         detector: Option<Arc<dyn SpeechSpans>>,
     ) {
+        self.try_start_ports(source, disk, open_track, clipboard, folder, save, detector)
+            .expect("the call part starts");
+    }
+
+    /// T-220: [`start`](Self::start) that returns what `start_calls` returned instead of
+    /// expecting `Ok` (a second start on a rig that already has the call part is `Err`).
+    pub fn try_start(
+        &self,
+        source: Arc<dyn TrackSource + Send + Sync>,
+        disk: Arc<dyn DiskSpace>,
+        open_track: TrackOpener,
+    ) -> io::Result<()> {
+        self.try_start_ports(
+            source,
+            disk,
+            open_track,
+            Arc::new(FakeClipboard::new()),
+            Arc::new(FakeFolder::default()),
+            Arc::new(FakeSave::default()),
+            None,
+        )
+    }
+
+    /// The call part started with every port given, the `io::Result` returned.
+    #[allow(clippy::too_many_arguments)]
+    fn try_start_ports(
+        &self,
+        source: Arc<dyn TrackSource + Send + Sync>,
+        disk: Arc<dyn DiskSpace>,
+        open_track: TrackOpener,
+        clipboard: Arc<dyn Clipboard>,
+        folder: Arc<dyn FolderOpener>,
+        save: Arc<dyn SaveDialog>,
+        detector: Option<Arc<dyn SpeechSpans>>,
+    ) -> io::Result<()> {
         let calls_root = self.dir.path().join("calls");
         fs::create_dir_all(&calls_root).expect("the calls root");
         voicen_lib::call::start_calls(
@@ -478,9 +571,9 @@ impl CallRig {
                 save,
                 credentials: Arc::clone(&self.creds),
                 detector,
+                exit_confirm: self.exit.clone(),
             },
         )
-        .expect("the call part starts");
     }
 
     /// A rig whose tracks play the tone, with plenty of free disk.
@@ -630,5 +723,65 @@ impl SaveDialog for FakeSave {
             return Err(io::Error::from(kind));
         }
         Ok(lock(&self.answer).clone())
+    }
+}
+
+// ---- the T-145 exit question --------------------------------------------------------------
+
+#[derive(Default)]
+struct ExitState {
+    asked: Vec<String>,
+    answer: bool,
+    hold: bool,
+    released: bool,
+}
+
+/// An [`ExitConfirm`] that shows no box: it records every ask (the question text) and answers
+/// `false` (No) unless told otherwise. [`hold`](Self::hold) makes an ask block, like the real
+/// box does, until [`release`](Self::release) answers it (bounded by the hang bound).
+#[derive(Default)]
+pub struct FakeExit {
+    state: Mutex<ExitState>,
+    changed: Condvar,
+}
+
+impl FakeExit {
+    /// The next and every later ask answers `yes` at once.
+    pub fn answer(&self, yes: bool) {
+        lock(&self.state).answer = yes;
+    }
+
+    /// Every later ask blocks until [`release`](Self::release).
+    pub fn hold(&self) {
+        lock(&self.state).hold = true;
+    }
+
+    /// Answers the held ask (and any later one) with `yes`.
+    pub fn release(&self, yes: bool) {
+        let mut state = lock(&self.state);
+        state.answer = yes;
+        state.released = true;
+        drop(state);
+        self.changed.notify_all();
+    }
+
+    /// The text of every ask, in order.
+    pub fn asked(&self) -> Vec<String> {
+        lock(&self.state).asked.clone()
+    }
+}
+
+impl ExitConfirm for FakeExit {
+    fn ask(&self, text: &str) -> bool {
+        let mut state = lock(&self.state);
+        state.asked.push(text.to_string());
+        if state.hold {
+            let (guard, _) = self
+                .changed
+                .wait_timeout_while(state, crate::timing_support::HANG, |s| !s.released)
+                .unwrap_or_else(PoisonError::into_inner);
+            state = guard;
+        }
+        state.answer
     }
 }

@@ -13,7 +13,9 @@
 #      scripts/tw-mutants: pytest, python -m pytest|unittest, make test|tests|check|test-*,
 #      flutter|dart|deno|bun|go test, cargo test|nextest, npm|pnpm|yarn [run] test,
 #      vitest, jest, phpunit, pest, php artisan test, gradle(w) test|check, mvn test —
-#      also behind uv/poetry/npx/... run, sh -c, eval, docker run|exec, and inside
+#      also behind uv/poetry/npx/... run, sh -c, eval, docker run|exec, systemd-run
+#      (local edit, T-189: options read against SD_FLAGS / SD_VALUE; an option it cannot
+#      read makes every later suffix count), and inside
 #      `scripts/tw-run <area> -- <cmd>`; plus every command the config names as an area's
 #      gate_command, test_command or test_select_command, the top-level gate_command
 #      (a repository script such as tool/gate.sh by its name, `make check`-style commands
@@ -73,6 +75,14 @@ areas = [a for a in cfg.get("areas") or [] if isinstance(a, dict) and a.get("nam
 WRAPPERS = ("tw-test", "tw-gate", "tw-mutants")
 SHELLS = ("sh", "bash", "zsh", "dash", "ksh")
 RUNNERS = ("docker", "podman", "nerdctl", "kubectl", "ssh")
+# systemd-run options (T-189, decisions #201/#324). SD_FLAGS take no value: only names confirmed
+# to take none (a value option listed here would let its value pass as the command). SD_VALUE take
+# the next word, or for a long name `--name=value`. Any other dash word stops the reading and every
+# later suffix is judged (refusal-biased); a name missing here can only over-refuse.
+SD_FLAGS = ("--scope", "--user", "--system", "-q", "--quiet", "-P", "--pipe", "-G", "--collect", "--wait",
+            "--no-block", "-r", "--remain-after-exit", "--slice-inherit")
+SD_VALUE = ("--slice", "-p", "--property", "-u", "--unit", "--description", "-E", "--setenv",
+            "--service-type")
 FILTERS = ("grep", "egrep", "fgrep", "rg", "ag", "tail", "head", "sed", "awk", "gawk", "mawk", "nawk",
            "cut", "wc", "less", "more", "sort", "uniq")
 PREFIX = ("sudo", "doas", "command", "builtin", "exec", "nohup", "time", "nice", "ionice", "stdbuf",
@@ -251,6 +261,27 @@ def allowed_in_run(area, code):
     return False
 
 findings = []   # dicts: kind direct|cut, label, words, area, cd, what
+kept = {}       # tuple(words of a systemd-run command) -> words of the command it runs (for the cut finding)
+
+def sd_commands(w):
+    """Commands a systemd-run word list may run: [the command] when its options read with
+    SD_FLAGS / SD_VALUE, else every suffix after the first option they cannot read."""
+    i = 1
+    while i < len(w):
+        x = w[i]
+        if x == "--":
+            return [w[i + 1:]] if i + 1 < len(w) else []
+        if not x.startswith("-"):
+            return [w[i:]]
+        if x in SD_FLAGS:
+            i += 1
+        elif x in SD_VALUE:
+            i += 2
+        elif x.startswith("--") and "=" in x and x.split("=", 1)[0] in SD_VALUE:
+            i += 1
+        else:
+            return [w[j:] for j in range(i + 1, len(w))]
+    return []
 
 def classify(words, cd, depth):
     """'test' | 'wrapper' | None; nested direct runs are added to findings."""
@@ -260,6 +291,20 @@ def classify(words, cd, depth):
     b = base(w[0])
     if b in WRAPPERS:
         return "wrapper"
+    if b == "systemd-run":
+        if depth > 3:
+            return None
+        result, inner = None, None
+        for sub in sd_commands(w):
+            r = classify(sub, cd, depth + 1)
+            if r == "test":
+                result, inner = r, sub
+                break
+            if r == "wrapper" and result is None:
+                result, inner = r, sub
+        if inner is not None:
+            kept[tuple(words)] = kept.get(tuple(inner), strip(inner))
+        return result
     if b == "tw-run":
         area = w[1] if len(w) > 1 else ""
         rest = w[w.index("--") + 1:] if "--" in w else w[2:]
@@ -324,7 +369,7 @@ def check(text, depth=0, area=None, cd=""):
                 continue
             cut = next((strip(x)[0] for x in pipe[i + 1:] if strip(x) and base(strip(x)[0]) in FILTERS), None)
             if cut:
-                findings.append({"kind": "cut", "filter": base(cut), "words": strip(pipe[i]), "cd": cd,
+                findings.append({"kind": "cut", "filter": base(cut), "words": kept.get(tuple(pipe[i]), strip(pipe[i])), "cd": cd,
                                  "area": area})
                 break
 

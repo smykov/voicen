@@ -1,0 +1,16 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "call-indicator",
+  "description": "Capability for the call indicator window (label `call-indicator`, created and destroyed only by the call-indicator thread, src-tauri/src/call_indicator.rs, T-130): listen to and stop listening to indicator://state and indicator://tick, invoke the three call_indicator_* commands its page uses, and start_dragging (the page's data-tauri-drag-region). Nothing else: the page never shows, focuses, moves, closes or destroys its window (a tao setter on the raw-shown window would hide or activate it, docs/decisions/overlay.md); least privilege, decision #45; app commands are ACL-checked per label, T-049, docs/decisions/ipc-acl.md.",
+  "windows": [
+    "call-indicator"
+  ],
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "allow-call-indicator-state",
+    "allow-call-indicator-stop",
+    "allow-call-indicator-dismiss",
+    "core:window:allow-start-dragging"
+  ]
+}

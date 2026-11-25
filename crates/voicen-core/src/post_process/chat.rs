@@ -32,6 +32,7 @@ use crate::engine::http;
 use crate::engine::openai::host_port;
 use crate::failure::{classify, TransportError};
 use crate::secrets::{KeySlot, Secret};
+use crate::settings::model_name;
 use crate::settings::url::check_base_url;
 use crate::timeouts::Timeouts;
 
@@ -101,7 +102,7 @@ fn send(
     let authorization = http::authorization(key)?;
     let client = http::client(timeouts.connect)?;
     let body = serde_json::to_vec(&json!({
-        "model": settings.model,
+        "model": model_name(&settings.model).unwrap_or(""),
         "messages": [
             { "role": "system", "content": settings.prompt },
             { "role": "user", "content": raw },

@@ -1,0 +1,8 @@
+guarantee: AC-3/AC-4: GITHUB_ACTIONS must be exactly true
+file: scripts/tw-wip-run
+added_by: test-writer
+--- old
+  [ "${GITHUB_ACTIONS-}" = "true" ] || refuse "task/<ID> only in contour mode (GITHUB_ACTIONS)"
+--- new
+  [ -n "${GITHUB_ACTIONS-}" ] || refuse "task/<ID> only in contour mode (GITHUB_ACTIONS)"
+--- end

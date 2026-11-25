@@ -374,6 +374,37 @@ pub fn export_json(transcript: &TranscriptV1, title: &str, names: &[Speaker]) ->
     named.to_json()
 }
 
+/// Why a call title or a speaker name was refused (T-152, FR-035).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenameError {
+    /// The name is empty or Unicode whitespace only.
+    EmptyName,
+    /// No speaker has the id.
+    UnknownSpeaker,
+}
+
+/// A call title or speaker name must hold at least one character that is not Unicode
+/// whitespace; nothing else is checked (duplicates and edge spaces are allowed, the name is
+/// stored as given).
+pub fn check_name(name: &str) -> Result<(), RenameError> {
+    if name.trim().is_empty() {
+        return Err(RenameError::EmptyName);
+    }
+    Ok(())
+}
+
+/// Sets the name of the speaker `id` to `name`, as given. An empty or whitespace-only `name`
+/// is `EmptyName`, an `id` no speaker has `UnknownSpeaker`; a refused call changes nothing.
+pub fn rename_speaker(speakers: &mut [Speaker], id: &str, name: &str) -> Result<(), RenameError> {
+    check_name(name)?;
+    let speaker = speakers
+        .iter_mut()
+        .find(|s| s.id == id)
+        .ok_or(RenameError::UnknownSpeaker)?;
+    speaker.name = name.to_string();
+    Ok(())
+}
+
 fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
@@ -1787,6 +1818,107 @@ mod tests {
             text,
             want.to_json(),
             "compact schema-1 text in section 7 order"
+        );
+    }
+
+    // ---- T-152: the name check and the speaker rename ----------------------------------
+    // Assumed API (the simplest shapes consistent with the module): `RenameError` with
+    // `EmptyName` and `UnknownSpeaker`; `check_name(name: &str) -> Result<(), RenameError>`
+    // (only `EmptyName` comes out of it); `rename_speaker(speakers: &mut [Speaker],
+    // id: &str, name: &str) -> Result<(), RenameError>`. Pure: no fs, a refused call changes
+    // nothing, a name is stored as given (not trimmed).
+
+    fn named(me: &str, s1: &str) -> Vec<Speaker> {
+        vec![
+            Speaker {
+                id: "me".to_string(),
+                name: me.to_string(),
+            },
+            Speaker {
+                id: "s1".to_string(),
+                name: s1.to_string(),
+            },
+        ]
+    }
+
+    fn pair() -> Vec<Speaker> {
+        named("Me", "Other party")
+    }
+
+    #[test]
+    fn check_name_refuses_empty_and_whitespace_only_names_of_any_kind() {
+        // T-152 Acceptance 2 (failure branch). Bite: a bare `is_empty()`; an ASCII-only trim
+        // (the no-break space and the em space are whitespace too); a check that always passes.
+        for bad in [
+            "",
+            " ",
+            "   ",
+            "\t",
+            "\n",
+            " \t\r\n ",
+            "\u{a0}",
+            "\u{2003}\u{a0} ",
+        ] {
+            assert_eq!(check_name(bad), Err(RenameError::EmptyName), "{bad:?}");
+        }
+        for good in ["a", " a ", "Client", "Ж", "0", "a b", "-"] {
+            assert_eq!(check_name(good), Ok(()), "{good:?}");
+        }
+    }
+
+    #[test]
+    fn rename_speaker_changes_only_the_named_speaker_and_stores_the_name_as_given() {
+        // T-152 Acceptance 1. Bite: the wrong speaker renamed (first, last, every one); the name
+        // trimmed or folded; the id changed instead of the name.
+        let mut speakers = pair();
+        assert_eq!(rename_speaker(&mut speakers, "s1", " Col  league "), Ok(()));
+        assert_eq!(speakers, named("Me", " Col  league "));
+        assert_eq!(rename_speaker(&mut speakers, "me", "Alice"), Ok(()));
+        assert_eq!(speakers, named("Alice", " Col  league "));
+    }
+
+    #[test]
+    fn rename_speaker_allows_duplicate_names() {
+        // T-152 Acceptance 1 (T075). Bite: a uniqueness check across speakers, including one
+        // that compares case-insensitively.
+        let mut speakers = pair();
+        assert_eq!(rename_speaker(&mut speakers, "me", "Client"), Ok(()));
+        assert_eq!(rename_speaker(&mut speakers, "s1", "Client"), Ok(()));
+        assert_eq!(
+            speakers.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+            vec!["Client", "Client"]
+        );
+        assert_eq!(rename_speaker(&mut speakers, "s1", "CLIENT"), Ok(()));
+        assert_eq!(
+            speakers.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+            vec!["me", "s1"],
+            "ids are untouched"
+        );
+    }
+
+    #[test]
+    fn rename_speaker_refuses_an_empty_name_or_an_unknown_id_and_changes_nothing() {
+        // T-152 Acceptance 2 and decisions #317 (unknown speaker). Bite: the name written before
+        // the check; an unknown id ignored as Ok; an empty list renamed.
+        let mut speakers = pair();
+        for bad in ["", "   ", "\t\n"] {
+            assert_eq!(
+                rename_speaker(&mut speakers, "s1", bad),
+                Err(RenameError::EmptyName),
+                "{bad:?}"
+            );
+        }
+        for unknown in ["s2", "", "ME", "me ", "Other party"] {
+            assert_eq!(
+                rename_speaker(&mut speakers, unknown, "Client"),
+                Err(RenameError::UnknownSpeaker),
+                "{unknown:?}"
+            );
+        }
+        assert_eq!(speakers, pair(), "a refused call changes nothing");
+        assert_eq!(
+            rename_speaker(&mut [], "me", "Client"),
+            Err(RenameError::UnknownSpeaker)
         );
     }
 }

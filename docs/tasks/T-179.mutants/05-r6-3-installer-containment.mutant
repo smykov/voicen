@@ -1,0 +1,8 @@
+guarantee: Failure branch: an installer named with the version only as a later `_X.Y.Z_` part is refused (T-026 r6#3)
+file: scripts/ci/release-check.sh
+added_by: test-writer
+--- old
+        [ "${BASH_REMATCH[1]}" = "$tx.$ty.$tz" ] ||
+--- new
+        [[ "$name" == *"_${tx}.${ty}.${tz}_"* ]] ||
+--- end

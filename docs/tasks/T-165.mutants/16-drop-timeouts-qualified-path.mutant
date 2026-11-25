@@ -1,0 +1,8 @@
+guarantee: AC-1: <Timeouts>:: qualified-path call refused
+file: scripts/ci/core-test-deadlines.sh
+added_by: test-writer
+--- old
+  else if (index(line, "Timeouts>::") > 0)
+--- new
+  else if (0)
+--- end

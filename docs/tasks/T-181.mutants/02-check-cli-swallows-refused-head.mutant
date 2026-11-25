@@ -1,0 +1,8 @@
+guarantee: T-094 r1#1: a refused about.toml head is never read as a list (swallowed error at readAcceptedList in check.mjs main)
+file: scripts/licenses/check.mjs
+added_by: test-writer
+--- old
+    accepted = readAcceptedList(readFileSync(args.about[0], "utf8"));
+--- new
+    try { accepted = readAcceptedList(readFileSync(args.about[0], "utf8")); } catch { accepted = ["MIT", "Apache-2.0"]; }
+--- end

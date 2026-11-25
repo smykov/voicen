@@ -1,0 +1,8 @@
+guarantee: Failure branch: deleting the recording call is `recordingCall` -> wire {"code":"recordingCall"}
+file: e2e/fixtures/calls-wire.json
+added_by: test-writer
+--- old
+    "recordingCall": {"code": "recordingCall"}
+--- new
+    "recordingCall": {"code": "notFound"}
+--- end

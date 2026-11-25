@@ -7,8 +7,9 @@
 
 use std::io;
 
+use voicen_core::call::CallId;
 use voicen_core::diag::LogsUnwritableReason;
-use voicen_core::platform::PendingId;
+use voicen_core::platform::{PendingId, ToastAction, ToastArg};
 use voicen_core::test_support::TempDir;
 
 fn parse(arg: &str) -> Option<PendingId> {
@@ -60,6 +61,78 @@ fn every_other_string_parses_to_none() {
         "retry\u{0}:1",
     ] {
         assert_eq!(parse(bad), None, "{bad:?} must not parse");
+    }
+}
+
+// ---- T-213: the one toast-argument codec over both buttons ------------------------------
+//
+// Pinned API (docs/tasks/T-213.md): `platform::ToastAction { Retry(PendingId), Open { call:
+// CallId, root: PathBuf } }` (`Debug + Clone + PartialEq + Eq`) with
+// `ToastAction::to_toast_arg(&self) -> String` (`retry:<u64>` | `open:<call id>`; the root is
+// never in the argument), and `platform::ToastArg { Retry(PendingId), Open(CallId) }`
+// (`Debug + PartialEq`) with `ToastArg::parse(&str) -> Option<ToastArg>`, the only reader.
+
+const CALL: &str = "2026-11-14_101500";
+const CALL_N: &str = "2026-11-14_101500-2";
+
+fn call(text: &str) -> CallId {
+    CallId::parse(text).unwrap_or_else(|| panic!("premise: {text} is a call id"))
+}
+
+#[test]
+fn both_toast_actions_round_trip_through_the_one_codec() {
+    // Bite: `to_toast_arg` and `parse` disagreeing on a prefix, the root written into the
+    // `open:` argument, the call id changed or lowercased, an arm parsed as the other.
+    let root = std::path::PathBuf::from("calls-root");
+    for text in [CALL, CALL_N] {
+        let open = ToastAction::Open {
+            call: call(text),
+            root: root.clone(),
+        };
+        let arg = open.to_toast_arg();
+        assert_eq!(
+            arg,
+            format!("open:{text}"),
+            "the argument holds the call id only"
+        );
+        assert!(!arg.contains("calls-root"), "the root leaked into {arg:?}");
+        assert_eq!(ToastArg::parse(&arg), Some(ToastArg::Open(call(text))));
+    }
+    for n in [0_u64, 1, 7, u64::MAX] {
+        let id = PendingId::from_toast_arg(&format!("retry:{n}")).expect("premise: parses");
+        let arg = ToastAction::Retry(id).to_toast_arg();
+        assert_eq!(arg, format!("retry:{n}"));
+        assert_eq!(ToastArg::parse(&arg), Some(ToastArg::Retry(id)));
+    }
+}
+
+#[test]
+fn the_codec_reader_rejects_every_other_string() {
+    // The invariant is "any other string is None". Bite: a `trim`, a case-insensitive
+    // prefix, an empty tail accepted, an `open:` tail that is not a `CallId` (a path, a
+    // `..`), trailing text accepted, one arm's prefix routed to the other's parser.
+    for bad in [
+        "",
+        "retry:",
+        "open:",
+        "open:not-a-call-id",
+        "open:2026-11-14_101500 ",
+        " open:2026-11-14_101500",
+        "open:2026-11-14_101500\n",
+        "open:2026-11-14_101500/x",
+        "open:..",
+        "open:2026-13-40_101500",
+        "Open:2026-11-14_101500",
+        "OPEN:2026-11-14_101500",
+        "Retry:1",
+        "retry:1 ",
+        "retry:2026-11-14_101500",
+        "open:1",
+        "other:1",
+        "retry",
+        "open",
+    ] {
+        assert_eq!(ToastArg::parse(bad), None, "{bad:?} must not parse");
     }
 }
 

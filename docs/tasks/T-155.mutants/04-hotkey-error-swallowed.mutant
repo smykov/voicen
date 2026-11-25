@@ -1,0 +1,10 @@
+guarantee: AC-2: calls.hotkey refusal shows on the field
+file: src/lib/settings/tabs/Calls.svelte
+added_by: test-writer
+--- old
+  label="settings.field_label.calls.hotkey"
+  errors={draft.errors}
+--- new
+  label="settings.field_label.calls.hotkey"
+  errors={{}}
+--- end

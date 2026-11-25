@@ -19,6 +19,10 @@ use std::net::{IpAddr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
 use std::time::Duration;
 
+use common::deadlines::{
+    held_lookup_api, held_lookup_total_below_connect, short_api_total, stall_mid_body_api_total,
+    SHORT_LIMIT, STALL_LIMIT,
+};
 use common::held::{returns_while_held, Held};
 use common::os_answer::{in_time, OsAnswer, Unanswered, OS_ANSWER_BUDGET};
 use common::timing::{at_least, late_answer, measure, Took, M};
@@ -50,12 +54,6 @@ fn audio() -> AudioBuffer {
     AudioBuffer::from_16k_mono((0..1600).map(|i| ((i % 64) as i16 - 32) * 512).collect())
 }
 
-/// Test durations: the in-time deadlines (T-111), never the production defaults; a
-/// timeout leg overrides only its own field.
-fn timeouts() -> Timeouts {
-    in_time()
-}
-
 /// The whole-request limit of the cases that expect an answer and whose deadline is
 /// not the subject (`no_failure_contains_query_key_or_transcript`'s http cases but
 /// the delayed one; T-111).
@@ -67,11 +65,10 @@ fn in_time_total() -> Duration {
 /// test-owned deadline (T-111: the same kind as the in-time limits).
 const SERVER_READ_TIMEOUT: Duration = OS_ANSWER_BUDGET;
 
-/// The whole-request limit of the short timeout legs, and their server's answer.
-const SHORT_LIMIT: Duration = Duration::from_millis(300);
+/// The server's answer of the short timeout legs (`common::deadlines::short_api_total`),
+/// and how long the server of the mid-body stall
+/// (`common::deadlines::stall_mid_body_api_total`) holds the body back.
 const SHORT_LATE_ANSWER: Duration = late_answer(SHORT_LIMIT);
-/// The limit of the mid-body stall, and how long the server holds the body back.
-const STALL_LIMIT: Duration = Duration::from_millis(500);
 const STALL_HOLD: Duration = late_answer(STALL_LIMIT);
 
 #[test]
@@ -89,7 +86,17 @@ fn in_time_deadlines_of_this_file_are_at_the_budget_scale() {
     // in-time total of the http cases and the partial-body server's read timeout
     // (a test-owned deadline: the request must reach it in time) are twice / once
     // the budget. Bite: the old 2 s connect, the 5 s totals, the 5 s server read.
-    assert_eq!(timeouts().connect, OS_ANSWER_BUDGET, "helper connect");
+    assert_eq!(in_time().connect, OS_ANSWER_BUDGET, "helper connect");
+    assert_eq!(
+        short_api_total().connect,
+        OS_ANSWER_BUDGET,
+        "short total connect"
+    );
+    assert_eq!(
+        stall_mid_body_api_total().connect,
+        OS_ANSWER_BUDGET,
+        "stall total connect"
+    );
     assert_eq!(in_time_total(), 2 * OS_ANSWER_BUDGET, "http cases total");
     assert!(
         SERVER_READ_TIMEOUT >= OS_ANSWER_BUDGET,
@@ -114,7 +121,7 @@ async fn the_helper_total_survives_an_answer_stalled_past_its_old_margin() {
 fn req(language: Option<&str>) -> TranscribeRequest {
     TranscribeRequest {
         language: language.map(str::to_string),
-        timeouts: timeouts(),
+        timeouts: in_time(),
     }
 }
 
@@ -128,10 +135,12 @@ fn req_os_answer(case: &OsAnswer) -> TranscribeRequest {
     }
 }
 
-fn req_with_total(total: Duration) -> TranscribeRequest {
-    let mut r = req(None);
-    r.timeouts.api_transcription = total;
-    r
+/// A request under the named deadlines `t` (`common::deadlines`).
+fn req_with(t: Timeouts) -> TranscribeRequest {
+    TranscribeRequest {
+        language: None,
+        timeouts: t,
+    }
 }
 
 fn api_engine(base: &str, key: Option<&str>) -> Box<OpenAiCompatibleEngine> {
@@ -761,17 +770,18 @@ async fn same_origin_redirect_loop_stops_at_the_hop_limit() {
 async fn delay_past_ms_timeout_is_timeout() {
     // FR-24: the whole-request duration comes from the request's Timeouts.
     // An answer M after a 300 ms limit is Timeout, well before the answer.
-    // Bite: the client's 30 s default or Timeouts::default() used instead of
+    // Bite: the client's 30 s default or the production defaults used instead of
     // req.timeouts (the call then succeeds at the late answer), or a timeout mapped to
     // CannotReach.
     let server = server_with(ok_text("late").set_delay(SHORT_LATE_ANSWER)).await;
     // No upper bound (T-080 I2): a longer wrong limit lets the late answer through
     // as Ok, which the Timeout assertion catches.
-    let total = SHORT_LIMIT;
+    let t = short_api_total();
+    let total = t.api_transcription;
     let (got, took) = measure(|| {
         transcribe(
             api_engine(&format!("{}/v1", server.uri()), Some(KEY)),
-            req_with_total(total),
+            req_with(t),
         )
     });
     assert_eq!(
@@ -793,7 +803,7 @@ async fn an_api_timeout_still_shows_the_server_did_not_answer_in_time() {
     let server = server_with(ok_text("late").set_delay(SHORT_LATE_ANSWER)).await;
     let reason = transcribe(
         api_engine(&format!("{}/v1", server.uri()), Some(KEY)),
-        req_with_total(SHORT_LIMIT),
+        req_with(short_api_total()),
     )
     .expect_err("past the deadline");
     assert_eq!(reason.code(), "Timeout");
@@ -935,11 +945,12 @@ fn stall_mid_body_is_timeout_and_cut_mid_body_is_unexpected_response() {
     // (stall -> UnexpectedResponse), or treating every body error as Timeout.
     // No upper bound (T-080 I2): a longer wrong limit lets the stall end as
     // the closed body (UnexpectedResponse), which the Timeout assertion catches.
-    let total = STALL_LIMIT;
+    let t = stall_mid_body_api_total();
+    let total = t.api_transcription;
     let (got, took) = measure(|| {
         transcribe(
             api_engine(&partial_body_server(STALL_HOLD), Some(KEY)),
-            req_with_total(total),
+            req_with(t),
         )
     });
     assert_eq!(
@@ -974,23 +985,23 @@ async fn no_failure_contains_query_key_or_transcript() {
     let leaky = format!("{{\"error\":\"{TRANSCRIPT} {KEY} api-version={QUERY_SECRET}\"}}");
     let mut outcomes: Vec<(String, Result<String, FailureReason>, FailureReason)> = Vec::new();
 
-    let http_cases: Vec<(&str, ResponseTemplate, Duration, FailureReason)> = vec![
+    let http_cases: Vec<(&str, ResponseTemplate, Timeouts, FailureReason)> = vec![
         (
             "401",
             ResponseTemplate::new(401).set_body_string(leaky.clone()),
-            in_time_total(),
+            in_time(),
             FailureReason::InvalidApiKey,
         ),
         (
             "500",
             ResponseTemplate::new(500).set_body_string(leaky.clone()),
-            in_time_total(),
+            in_time(),
             FailureReason::ServerError { status: 500 },
         ),
         (
             "200 without text",
             ResponseTemplate::new(200).set_body_string(leaky.clone()),
-            in_time_total(),
+            in_time(),
             FailureReason::UnexpectedResponse,
         ),
         (
@@ -999,22 +1010,22 @@ async fn no_failure_contains_query_key_or_transcript() {
                 "{{\"text\":\"{}\"}}",
                 TRANSCRIPT.repeat(MIB / TRANSCRIPT.len() + 1)
             )),
-            in_time_total(),
+            in_time(),
             FailureReason::UnexpectedResponse,
         ),
         (
             "delay",
             ok_text(TRANSCRIPT).set_delay(SHORT_LATE_ANSWER),
-            SHORT_LIMIT,
+            short_api_total(),
             FailureReason::Timeout {
                 origin: TimeoutOrigin::Server,
             },
         ),
     ];
-    for (name, template, total, expected) in http_cases {
+    for (name, template, t, expected) in http_cases {
         let server = server_with(template).await;
         let base = format!("{}/v1?api-version={QUERY_SECRET}", server.uri());
-        let got = transcribe(api_engine(&base, Some(KEY)), req_with_total(total));
+        let got = transcribe(api_engine(&base, Some(KEY)), req_with(t));
         outcomes.push((name.to_string(), got, expected));
     }
 
@@ -1165,16 +1176,9 @@ async fn engine_for_stored_key_with_control_char_is_invalid_api_key_and_sends_no
 // the reason plus the ordering "returned while the lookup was held" (T-080 I1, I2).
 // The only clock reading is the lower bound `at_least`.
 
-/// The deadlines of a held-lookup case: `connect` and the whole-request limit.
-fn held_req(connect: Duration, total: Duration) -> TranscribeRequest {
-    TranscribeRequest {
-        language: None,
-        timeouts: Timeouts {
-            connect,
-            api_transcription: total,
-            ..Timeouts::default()
-        },
-    }
+/// A held-lookup case's request: its named deadlines (`common::deadlines::held_lookup_*`).
+fn held_req(t: Timeouts) -> TranscribeRequest {
+    req_with(t)
 }
 
 /// `transcribe` while `held` holds the lookup of the engine's host (see
@@ -1206,11 +1210,12 @@ fn unanswered_lookup_is_network_unavailable_at_the_connect_deadline() {
     // (no return while held); a resolver that fails every lookup at once (the
     // lower bound).
     let held = Held::install("engine-held.t079.example.com", Vec::new());
-    let connect = Duration::from_millis(300);
+    let t = held_lookup_api();
+    let connect = t.connect;
     let (got, took) = transcribe_while_held(
         &held,
         api_engine(&format!("http://{}/v1", held.host), Some(KEY)),
-        held_req(connect, OS_ANSWER_BUDGET),
+        held_req(t),
     );
     assert_eq!(got, Err(FailureReason::NetworkUnavailable));
     at_least(took, connect);
@@ -1226,7 +1231,7 @@ fn lookup_error_at_once_is_network_unavailable() {
     let _installed = install("lookup-error.t079.example.com", fixed.clone());
     let got = transcribe(
         api_engine("http://lookup-error.t079.example.com/v1", Some(KEY)),
-        held_req(Duration::from_millis(300), OS_ANSWER_BUDGET),
+        held_req(held_lookup_api()),
     );
     assert_eq!(got, Err(FailureReason::NetworkUnavailable));
     assert_eq!(
@@ -1251,7 +1256,7 @@ async fn lookup_answered_after_the_connect_deadline_is_network_unavailable_not_a
             &format!("http://{}:{}/v1", held.host, server.address().port()),
             Some(KEY),
         ),
-        held_req(Duration::from_millis(300), OS_ANSWER_BUDGET),
+        held_req(held_lookup_api()),
     );
     assert_eq!(got, Err(FailureReason::NetworkUnavailable));
     let sent = server
@@ -1334,11 +1339,12 @@ fn unanswered_lookup_cut_by_a_total_deadline_below_connect_is_network_unavailabl
     // Timeout, and the call returns only after the release. Bite: the record read
     // only for errors with the connect flag (Timeout).
     let held = Held::install("total-held.t079.example.com", Vec::new());
-    let total = Duration::from_millis(300);
+    let t = held_lookup_total_below_connect();
+    let total = t.api_transcription;
     let (got, took) = transcribe_while_held(
         &held,
         api_engine(&format!("http://{}/v1", held.host), Some(KEY)),
-        held_req(OS_ANSWER_BUDGET, total),
+        held_req(t),
     );
     assert_eq!(got, Err(FailureReason::NetworkUnavailable));
     at_least(took, total);
@@ -1761,7 +1767,7 @@ async fn a_late_answer_is_timeout() {
                 .await;
         let got = timed(
             api_engine(&format!("{}/v1", server.uri()), Some(KEY)),
-            req_with_total(SHORT_LIMIT),
+            req_with(short_api_total()),
             shape,
         );
         assert!(

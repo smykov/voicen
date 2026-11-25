@@ -32,7 +32,9 @@
 //! claim or release runs on the thread that owns the window and in queue order with
 //! `WM_HOTKEY`, whichever thread ended the recording. A claim registers Esc bare and
 //! under the active hotkey's modifiers (the hotkey's keys are held during a hold) and
-//! reports the result with `DictationSession::cancel_key_result`; a release
+//! reports each claim's outcome with `DictationSession::cancel_key_result(bare,
+//! modified, at)`; core judges a refusal by the live recording's mode (T-212: hold
+//! needs the modified claim, toggle the bare one), the thread reads no mode; a release
 //! unregisters both. `WM_HOTKEY` on an Esc id calls `esc_pressed`. The thread does
 //! not decide when a recording is on: the session asks (it follows
 //! `RecordingController::live_id`). Premise (T-174): a recording starts only in
@@ -50,6 +52,9 @@
 //! the result with `DictationSession::hotkey_registration` (the only retry besides a
 //! save); at a suspend it stops the release poll and calls
 //! `DictationSession::suspended`, so the recording that is on ends `Suspended`.
+//! T-145 (spec 007 US4): once the call slot's port is set, a suspend also runs its
+//! `on_suspend` (the shell posts `CallRequest::Sleep`) and a resume, never an unlock,
+//! its `on_resume` (`CallRequest::Resumed`); both only post.
 //!
 //! T-129 (spec 007 FR-004, FR-040): the thread owns a second registration slot, the
 //! call hotkey's, with its own two ids ([`CALL_ID`], [`CALL_SPARE_ID`]). It is
@@ -188,6 +193,13 @@ pub struct CallPort {
     /// Runs on the hotkey thread for each press of the call hotkey; must not block
     /// (the shell posts `CallRequest::Record(CallSource::Hotkey)`).
     pub on_press: Box<dyn Fn() + Send>,
+    /// Runs on the hotkey thread at a suspend (`PBT_APMSUSPEND`, T-145), next to
+    /// `DictationSession::suspended`; must not block (the shell posts `CallRequest::Sleep`).
+    pub on_suspend: Box<dyn Fn() + Send>,
+    /// Runs on the hotkey thread at a resume (`PBT_APMRESUMEAUTOMATIC` only, never an
+    /// unlock, T-145), next to the reassert; must not block (the shell posts
+    /// `CallRequest::Resumed`).
+    pub on_resume: Box<dyn Fn() + Send>,
     /// Offered `notice.call_hotkey_conflict` once per transition to failing.
     pub notifier: Arc<dyn Notifier>,
     /// Set while the call slot is failing, cleared by a success.
@@ -864,15 +876,15 @@ impl Registrations<'_> {
     }
 
     /// The session's Esc claim (T-009). A claim registers Esc bare and under the
-    /// active hotkey's modifiers and reports to the session whether both hold (a
-    /// refusal is not logged here: the session's `Warning{EscUnavailable}` is its
-    /// line; what was registered stays, so bare Esc still cancels when only the
-    /// modified one is taken). A release unregisters what is registered and
-    /// reports nothing.
+    /// active hotkey's modifiers and reports to the session each one's outcome,
+    /// separately (T-212). The session decides what a refusal means by the live
+    /// recording's mode (hold: only the modified claim can cancel; toggle: only
+    /// the bare one); this thread reads no mode. A refusal is not logged here: the
+    /// session's `Warning{EscUnavailable}` is its line, and what was registered
+    /// stays. A release unregisters what is registered and reports nothing.
     ///
-    /// Premise (T-009, T-174): `cancel_key_result` warns while *any* recording is
-    /// live, and that equals "while the claim's own recording is live" only
-    /// because a recording starts only in `hotkey_pressed`, which is called only
+    /// Premise (T-009, T-174): `cancel_key_result` judges *any* live recording,
+    /// and that equals "the claim's own recording" only because a recording starts only in `hotkey_pressed`, which is called only
     /// on this thread (the `WM_HOTKEY` arm of `run`); while this thread serves
     /// a claim no later recording can start. T-129 re-checked it for the call
     /// hotkey: its press only runs the call port's callback (a call recording, not
@@ -892,7 +904,7 @@ impl Registrations<'_> {
             });
         }
         self.session
-            .cancel_key_result(self.esc && self.esc_mod, Instant::now());
+            .cancel_key_result(self.esc, self.esc_mod, Instant::now());
     }
 
     /// Unregisters the Esc claims that are registered.
@@ -1052,10 +1064,20 @@ fn run(
                 }
                 hold_codes = None;
                 session.suspended(Instant::now());
+                // T-145 (I4): the call stops with `Sleep` (a post, never a wait).
+                if let Some(port) = &regs.call_port {
+                    (port.on_suspend)();
+                }
             }
-            WM_LIFECYCLE
-                if msg.wParam.0 == LIFECYCLE_RESUME || msg.wParam.0 == LIFECYCLE_UNLOCK =>
-            {
+            WM_LIFECYCLE if msg.wParam.0 == LIFECYCLE_RESUME => {
+                regs.reassert();
+                // T-145 (I4): what the call shell held since the suspend is released.
+                if let Some(port) = &regs.call_port {
+                    (port.on_resume)();
+                }
+            }
+            // An unlock re-registers the hotkeys only; it never touches a call (T-145 I4).
+            WM_LIFECYCLE if msg.wParam.0 == LIFECYCLE_UNLOCK => {
                 regs.reassert();
             }
             WM_TIMER if msg.wParam.0 == POLL_TIMER_ID => {

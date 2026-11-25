@@ -2,8 +2,8 @@ name: CI
 
 on:
   # wip/** (T-066, P-016, decisions #90; check-ci-wip): a task's CI-only head push (pre-push: not
-  # a delivery) runs this workflow before review; workflow_dispatch (T-202, #253) lets the contour
-  # start that run (a job-token push starts none); release, upload and Telegram stay push-only.
+  # a delivery) runs this workflow before review unless it changes only task records; the contour
+  # starts it by workflow_dispatch (T-202, #253: a job-token push starts none); release, upload and Telegram stay push-only.
   push:
     branches: [main, "wip/**"]
     tags: ["v*"]
@@ -31,10 +31,14 @@ jobs:
       - uses: actions/checkout@v5
       - run: make check
   windows:
-    runs-on: windows-2025
     "permi\x73sions":
       contents: write
+    name: Windows build, install and smoke test
     needs: gate
+    runs-on: windows-latest
+    # T-230: the job's own bound, 4x the longest windows job of 40 green runs (no step runs past it);
+    # this head is the owned copy scripts/ci/windows-head.yml (release-guard.sh R15; edit both together).
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v5
       - name: Premise - release-check on every ref (no token)

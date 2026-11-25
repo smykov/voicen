@@ -39,11 +39,12 @@ use voicen_core::diag::{
     DetectorTag, Log, LogEvent, LogObserver, LogsNotice, LogsNoticeSink, WarningKind,
 };
 use voicen_core::dictation::{DictationSession, SessionDeps};
+use voicen_core::engine::builtin::BuiltinDeps;
 use voicen_core::i18n::MessageId;
 use voicen_core::pending::{CallRootsFn, FsTempAudioStore};
 use voicen_core::pipeline::{EngineFactory, PipelineDeps};
 use voicen_core::platform::{
-    AudioSource, Clipboard, Indicator, Notifier, Paster, PendingId, ShellRequests, TempAudioStore,
+    AudioSource, Clipboard, Indicator, Notifier, Paster, ShellRequests, TempAudioStore, ToastAction,
 };
 use voicen_core::post_process::chat::ChatPostProcessor;
 use voicen_core::recording::{OverlayState, TrayState};
@@ -66,8 +67,13 @@ pub struct DictationPorts {
     pub audio: Arc<dyn AudioSource>,
     pub clipboard: Arc<dyn Clipboard>,
     pub paster: Arc<dyn Paster>,
-    /// `None` in `run()` (`engine::engine_for`); a test engine in the tests.
+    /// `None` in `run()` (`engine::engine_for` over `builtin`); a test engine in the tests.
     pub engine_factory: Option<Box<EngineFactory>>,
+    /// The process's one built-in engine deps (T-017): `run()` passes the instance
+    /// [`crate::local_models::builtin_deps`] built over the `LocalModels` store, the
+    /// same residency `LocalModels` lists and deletes through; `None` in tests that
+    /// need no built-in engine.
+    pub builtin: Option<BuiltinDeps>,
     pub indicator: Arc<dyn Indicator>,
     /// The `SettingsService`'s own instance (`PipelineDeps::credentials`).
     pub credentials: Arc<dyn CredentialStore>,
@@ -185,6 +191,7 @@ pub fn start_dictation_with<R: Runtime>(
         clipboard,
         paster,
         engine_factory,
+        builtin,
         indicator,
         credentials,
         hotkeys,
@@ -232,6 +239,7 @@ pub fn start_dictation_with<R: Runtime>(
             transcript_sink,
         },
         engine_factory,
+        builtin,
         audio,
         indicator,
         requests: Arc::new(SettingsRequests::new(app)),
@@ -268,6 +276,8 @@ pub fn start_dictation_with<R: Runtime>(
         .map(|mark| Arc::clone(&mark))
         .unwrap_or_default();
     let press_app = app.clone();
+    let suspend_app = app.clone();
+    let resume_app = app.clone();
     let call_hotkey = service.snapshot().calls.hotkey.clone();
     hotkey.register_call(
         &call_hotkey,
@@ -275,6 +285,10 @@ pub fn start_dictation_with<R: Runtime>(
             on_press: Box::new(move || {
                 call::request(&press_app, CallRequest::Record(CallSource::Hotkey));
             }),
+            // T-145 (I4): a suspend stops the call with `Sleep`; a resume releases what the
+            // call shell held. Both only post to the call worker.
+            on_suspend: Box::new(move || call::request(&suspend_app, CallRequest::Sleep)),
+            on_resume: Box::new(move || call::request(&resume_app, CallRequest::Resumed)),
             notifier: call_notifier,
             mark,
         },
@@ -303,7 +317,7 @@ impl Notifier for NoToasts {
         &self,
         _id: MessageId,
         _params: &[(&'static str, String)],
-        _retry: Option<PendingId>,
+        _action: Option<ToastAction>,
     ) {
     }
 }

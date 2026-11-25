@@ -1,0 +1,13 @@
+guarantee: AC-failure: no model selected -> NoLocalModel (swallowed at the id parse)
+file: crates/voicen-core/src/engine/builtin.rs
+added_by: test-writer
+--- old
+            .and_then(ModelId::parse)
+            .ok_or(FailureReason::NoLocalModel)?;
+        let path = self
+--- new
+            .and_then(ModelId::parse)
+            .ok_or(FailureReason::NoLocalModel);
+        let Ok(id) = id else { return Ok(String::new()) };
+        let path = self
+--- end

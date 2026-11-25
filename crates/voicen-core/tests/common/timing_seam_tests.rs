@@ -6,9 +6,10 @@
 
 use std::cell::Cell;
 use std::process::Command;
+use std::rc::Rc;
 use std::time::Duration;
 
-use crate::common::timing::{late_answer, skip, with_premise, M};
+use crate::common::timing::{eventually_progressing, late_answer, skip, with_premise, M};
 
 /// Set by the parent tests below; the two `child_*` tests do nothing without it, so
 /// a plain run of this binary only checks that they pass.
@@ -130,15 +131,16 @@ fn with_premise_reruns_a_missed_premise_until_it_holds() {
 #[test]
 fn with_premise_gives_up_when_the_budget_has_passed_since_the_first_start() {
     // The budget is a parameter now (dictation_session's is 10 s, local_download
-    // needs more). Every run misses; each takes 40 ms; the budget is 100 ms. The
-    // call returns after a few runs (no panic: a missed premise is no verdict, never
+    // needs more). Every run misses; each takes 300 ms; the budget is 1 s (a first run
+    // starved past a short budget would end the loop after one run: a verdict on host
+    // load). The call returns after a few runs (no panic: a missed premise is no verdict, never
     // a red) and not after a single one (it re-runs while the budget allows). Bite:
     // a budget fixed inside the helper (it would loop for seconds, the hang
     // ends the test run), the first miss skipped.
     let runs = Cell::new(0);
-    with_premise("budget", Duration::from_millis(100), || {
+    with_premise("budget", Duration::from_secs(1), || {
         runs.set(runs.get() + 1);
-        std::thread::sleep(Duration::from_millis(40));
+        std::thread::sleep(Duration::from_millis(300));
         false
     });
     assert!(
@@ -164,4 +166,67 @@ fn with_premise_budget_is_the_parameter_not_a_constant_of_the_helper() {
         "{} run(s) under a zero budget",
         runs.get()
     );
+}
+
+/// A backlog that moves one step every `every` readings of `progress` (the wait's own
+/// polls, 5 ms apart) for `steps` steps, then stops. No second thread: the count
+/// advances only when the wait reads it, so no verdict depends on a thread being
+/// scheduled in time (F-033). Returns the `progress` reading and the count itself.
+fn polled_counter(every: usize, steps: usize) -> (impl FnMut() -> usize, Rc<Cell<usize>>) {
+    let count = Rc::new(Cell::new(0usize));
+    let reads = Cell::new(0usize);
+    let c = Rc::clone(&count);
+    let progress = move || {
+        reads.set(reads.get() + 1);
+        if reads.get().is_multiple_of(every) && c.get() < steps {
+            c.set(c.get() + 1);
+        }
+        c.get()
+    };
+    (progress, count)
+}
+
+#[test]
+fn a_progress_wait_passes_when_the_count_keeps_advancing_past_the_budget() {
+    // T-239 slow-progress leg: a step every 20 polls (about 100 ms), 30 steps, about
+    // 3 s in total, more than the 2 s stall budget, but the count grows throughout, so
+    // the wait is not over: the verdict must not depend on how long the total work
+    // takes. The count moves on the wait's own polls (no counter thread), and the gap
+    // between steps is 20x smaller than the budget. Bite: a total-time wait
+    // (`eventually`), or a budget that is not reset by progress.
+    let (progress, count) = polled_counter(20, 30);
+    let ok = eventually_progressing(Duration::from_secs(2), progress, || count.get() >= 30);
+    assert!(ok, "the count advanced to the end, so the wait must pass");
+}
+
+#[test]
+fn a_progress_wait_fails_when_the_count_stops_before_done() {
+    // T-239 stopped-counter leg: the count advances a few steps, then stops short of
+    // `done`. The wait must end with `false` (a hang is still caught) and only after
+    // the budget has passed with no progress (a lower bound, never an upper one).
+    // Host load can only delay the end, never turn this verdict. Bite: a wait that
+    // never fails (no budget), or one that stops reading progress.
+    let (progress, count) = polled_counter(2, 5);
+    let budget = Duration::from_millis(300);
+    let (ok, took) = crate::common::timing::measure(|| {
+        eventually_progressing(budget, progress, || count.get() >= 60)
+    });
+    assert!(!ok, "the count stopped at 5 of 60, so the wait must fail");
+    assert_eq!(count.get(), 5, "the count advanced to its stop first");
+    crate::common::timing::at_least(took, budget);
+}
+
+#[test]
+fn a_progress_wait_fails_when_the_count_never_moves() {
+    // T-239: a hung consumer from the start (no step at all) fails as well. Bite: a
+    // wait that treats the first reading as progress forever.
+    let ok = eventually_progressing(Duration::from_millis(100), || 0, || false);
+    assert!(!ok, "no progress at all must fail");
+}
+
+#[test]
+fn a_progress_wait_passes_at_once_when_done_already_holds() {
+    // T-239: `done` is checked before any budget matters, so a zero budget with a
+    // finished backlog passes. Bite: a wait that fails first on an empty budget.
+    assert!(eventually_progressing(Duration::ZERO, || 7, || true));
 }

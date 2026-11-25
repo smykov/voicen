@@ -1,6 +1,6 @@
 # Call storage (call folders on disk)
 
-**Code:** `crates/voicen-core/src/call/storage.rs` (`CallStore`, `write_meta`, `write_atomic`, `storage_kind`, `CallMeta`), `crates/voicen-core/src/settings/roots.rs` (`effective_root`, `CallRoots::probe`, `reason_of`) · **Tests that pin it:** `call::storage` unit tests (`create_*`, `a_failed_*`, `write_meta_*`, `list_*`, `damaged_*`, `missing_*`, `storage_kind_maps_every_op_encode_to_write`)
+**Code:** `crates/voicen-core/src/call/storage.rs` (`CallStore`, `write_meta`, `write_atomic`, `fill_and_rename`, `storage_kind`, `CallMeta`; T-141: `resolve_call`, `CallStore::get`, `export_bytes`, `export_to`), `crates/voicen-core/src/settings/roots.rs` (`effective_root`, `CallRoots::probe`, `reason_of`), `crates/voicen-core/src/call/events.rs` (`CallId::parse`), `crates/voicen-core/src/call/transcript.rs` (`render_markdown`, `export_markdown`, `export_json`) · **Tests that pin it:** `call::storage` unit tests (`create_*`, `a_failed_*`, `write_meta_*`, `list_*`, `damaged_*`, `missing_*`, `storage_kind_maps_every_op_encode_to_write`; T-141: `get_*`, `export_*`), `call::transcript` `export_markdown_is_render_markdown_with_meta_names`, `export_json_carries_meta_title_and_names_and_validates`
 
 Tasks: T-125, T-141, T-144 (recovery, ownership) (wire, guard, export; `ipc.md` › Built T-141). Contract: `specs/007-call-mode-record/contracts/core-call.md` "Built (T-125)". Decisions: #195, #196, #242 (D1–D5). Class `call-storage` in `docs/failures.md` has no entry yet (first sighting).
 
@@ -72,11 +72,25 @@ Tasks: T-125, T-141, T-144 (recovery, ownership) (wire, guard, export; `ipc.md` 
   - `call_recovered calls=<n>` is logged always, `0` included.
 - **Don't:** recover an active folder, open a track for writing, rewrite anything but `meta.json`, or count a folder whose rewrite failed.
 
+### Rename, delete and the meta lock (T-152, decisions #317)
+
+- **Defect that produced it:** none yet (found in analysis, T-152). The nearest known one is the pass overwriting a rename made during `transcribing` (`docs/decisions/call-final-pass.md`, formerly a Known gap).
+- **What breaks if you violate it:** a rename is lost when a pass, a "Transcribe again" transition or recovery writes the `meta.json` it read earlier; a rename leaves `transcript.md`, `transcript.json` and `meta.json` with different names; a delete stops half way (on Windows a sharing violation on `mic.opus`) and leaves a half-deleted folder; the recording call is renamed or deleted under the session.
+- **Where it is enforced:**
+  - Meta lock: one process-wide `static META_LOCK` in `storage.rs` (`meta_lock()`), not a `CallStore` field, because the pass functions get a folder, not a store; a process has one store. Every `meta.json` read-modify-write of a call that is not recording runs under it: `rename`, `rename_speaker`, the four writes of a pass (start `transcribing`, the cancel write-back, `write_failed`, `write_ready` with its Markdown render), `transcribe_transition` and `recover`; delete runs under it as well. A writer that holds a meta read from earlier calls `carry_disk_names(dir, &mut meta)` right before its write, so the on-disk title and speakers win; `transcribe_transition` reads under the lock and needs no carry. The session writes its own meta only while the call is active, which rename refuses. Lock order: the queue's slots lock, then the meta lock; the meta lock is held only around file reads and writes, never while another lock is taken.
+  - Rename (`CallStore::rename`, `rename_speaker`): `guard`, then `recordingCall` for an active call, `ioFailed` for a damaged one (`open_call`), `notFound` for a gone call, a foreign root or an unknown speaker id, `emptyName` for an empty or whitespace-only title or name (`transcript::check_name`); a name is stored as typed, duplicates are allowed. Write order: render every file's bytes first (no fs call), then `transcript.md`, `transcript.json` (only when it exists), `meta.json` last as the commit point, each through `write_atomic`. A failure restores the previous transcript bytes best effort and returns `ioFailed`; no file changes on `emptyName`.
+  - Delete (`CallStore::delete_folder(calls, root, id, &dyn FolderDeleter)`): `folder`'s guard (a damaged call is allowed), `recordingCall` for an active call. The port claims every file of the folder by path (`claim(&Path) -> Result<Box<dyn Send>, InUse>`, `InUse` carries the bare file name, never a path); only when all claims are held are the files removed, the claims dropped and the folder removed. A refused claim drops every claim taken and returns `inUse{file}`; the folder is byte-identical. `StdFolderDeleter` never refuses (Linux, tests). The Windows impl (share mode) and its real-lock proof belong to T-153 (G39 T076) in `src-tauri`; until then the lock is unverified. The queue part (`PassQueue::delete`) is in `docs/decisions/call-final-pass.md`.
+- **Don't:** write a non-session `meta.json` outside `meta_lock()`, write a meta read earlier without `carry_disk_names`, take the slots lock while holding the meta lock, remove any file of a call folder before every file is claimed, or delete through `remove_dir_all` directly.
+- **Tests:** `rename_*`, `a_write_fault_at_any_of_the_three_files_…`, `a_locked_file_gives_in_use_…`, `a_damaged_folder_can_be_deleted` in `storage.rs`; the pass side in `final_pass/queue_tests.rs`. Known untested: the `recover` carry (no seam to place a rename between its read and write; review item).
+
 ## Reused, not copied
 
 | Concern | The one place |
 |---|---|
-| Write probe and its reason | `settings::roots::CallRoots::probe`, `reason_of` |
+| Write probe and its reason | `settings::roots::CallRoots::probe`, `reason_of` (also the `ioFailed` reason of T-141's get and export) |
+| Call id grammar | `call::events::CallId::parse` (the listing and T-141's `resolve_call`) |
+| Transcript Markdown | `call::transcript::render_markdown` (T-141's `export_markdown` is it with the `meta.json` title and names) |
+| tmp + sync + rename | `storage::fill_and_rename`, the one tail of `write_atomic` and T-141's `export_to` |
 | Current root | `settings::roots::effective_root` (moved here from `settings/service.rs`, T-125) |
 | Local time for the folder stamp, `started_at` and the default title | `diag::format::LocalTime::of` |
 | `.opus` writing | `OpusOgg::create` only (T-116) |

@@ -19,7 +19,8 @@
 #     non-zero. The repository is GH_REPO's (or the checkout's).
 #   - GH_TOKEN is never printed: release-check.sh masks it in gh's output, and the output of
 #     `gh --version` and `gh release create` (stdout and stderr, success or failure) is captured
-#     and printed with GH_TOKEN replaced by `***` (gh_masked); gh's own exit status, not the
+#     and printed with GH_TOKEN replaced by `***` (gh_masked, through gh_mask_out of
+#     scripts/ci/gh-mask.sh, the mask release-check.sh uses too); gh's own exit status, not the
 #     masking's, decides (a failed create is never reported ok).
 #
 # Usage: scripts/ci/release.sh <tag> <run_number> <root> <installer dir>
@@ -76,13 +77,14 @@ notes="$dist/release-notes.md"
 } > "$notes"
 cat -- "$notes"
 
-# gh_masked <args...>: run gh with stdout and stderr captured, print that output with GH_TOKEN
-# masked as *** (stdout on success, stderr on failure), return gh's exit status. No pipe, so the
-# mask cannot hide gh's status.
+# gh_masked <args...>: run gh through gh_mask_out (scripts/ci/gh-mask.sh, the one mask shared with
+# release-check.sh), print its output with GH_TOKEN masked as *** (stdout on success, stderr on
+# failure), return gh's exit status. No pipe, so the mask cannot hide gh's status.
+# shellcheck source=scripts/ci/gh-mask.sh
+. "$here/gh-mask.sh"
 gh_masked() {
   local out rc=0
-  out="$(gh "$@" 2>&1)" || rc=$?
-  out="${out//"$GH_TOKEN"/***}"
+  out="$(gh_mask_out "$@")" || rc=$?
   if [ -n "$out" ]; then
     if [ "$rc" = 0 ]; then printf '%s\n' "$out"; else printf '%s\n' "$out" >&2; fi
   fi

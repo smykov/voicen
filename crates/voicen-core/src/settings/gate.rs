@@ -92,6 +92,9 @@ pub struct LaunchArgs {
     /// it, whatever that is; later occurrences are ignored. `--call=record` and
     /// `--CALL` are not occurrences: unknown arguments are ignored.
     pub call: Option<CallSwitch>,
+    /// An argument exactly equal to `-Embedding`, at any position: COM's cold or second
+    /// launch of the toast activator's local server (T-213 I12). Opens no window.
+    pub embedding: bool,
 }
 
 impl LaunchArgs {
@@ -107,6 +110,7 @@ impl LaunchArgs {
         for arg in args {
             let arg = arg.as_ref();
             parsed.autostart |= arg == OsStr::new("--autostart");
+            parsed.embedding |= arg == OsStr::new("-Embedding");
             if value_expected {
                 value_expected = false;
                 parsed.call = Some(if arg == OsStr::new("record") {
@@ -126,13 +130,13 @@ impl LaunchArgs {
 }
 
 /// The second-launch decision, from the second process's arguments: `--call record`
-/// wins over `--autostart`, an unknown `--call` value is no action, and otherwise a
-/// start by the Run value opens nothing. Pure.
+/// wins over `--autostart` and `-Embedding`, an unknown `--call` value is no action, and
+/// otherwise a start by the Run value or by COM (`-Embedding`, T-213) opens nothing. Pure.
 pub fn second_launch_action(args: &LaunchArgs) -> SecondLaunchAction {
     match args.call {
         Some(CallSwitch::Record) => SecondLaunchAction::StartCallRecord,
         Some(CallSwitch::Unknown) => SecondLaunchAction::TrayOnly,
-        None if args.autostart => SecondLaunchAction::TrayOnly,
+        None if args.autostart || args.embedding => SecondLaunchAction::TrayOnly,
         None => SecondLaunchAction::FrontSettings,
     }
 }
@@ -384,9 +388,76 @@ mod tests {
             ),
         ];
         for (label, autostart, call, want) in rows {
-            let args = LaunchArgs { autostart, call };
+            let args = LaunchArgs {
+                autostart,
+                call,
+                embedding: false,
+            };
             assert_eq!(second_launch_action(&args), want, "row {label}");
         }
+    }
+
+    #[test]
+    fn embedding_is_exactly_the_argument_minus_embedding() {
+        // T-213 I12: COM starts the server as `voicen.exe -Embedding`; a second launch with
+        // it opens no window (TrayOnly) and `LaunchArgs::embedding` is exactly that argument,
+        // compared as `OsStr`, case-sensitively, at any position. Bite: `/Embedding` or
+        // `-embedding` accepted (a case-insensitive or prefix match), `embedding` ignored by
+        // `second_launch_action` (FrontSettings opens a window), `--call record` losing to it.
+        let embedded = LaunchArgs::parse([EXE, "-Embedding"]);
+        assert!(embedded.embedding, "-Embedding");
+        assert_eq!(
+            second_launch_action(&embedded),
+            SecondLaunchAction::TrayOnly
+        );
+        assert!(
+            LaunchArgs::parse(["-Embedding"]).embedding,
+            "argv[0] position"
+        );
+        for not in [
+            "/Embedding",
+            "-embedding",
+            "-EMBEDDING",
+            "--Embedding",
+            "-Embedding ",
+            "-Embedding=1",
+            "Embedding",
+            "-Embeddings",
+        ] {
+            let parsed = LaunchArgs::parse([EXE, not]);
+            assert!(!parsed.embedding, "{not:?} is not -Embedding");
+            assert_eq!(
+                second_launch_action(&parsed),
+                SecondLaunchAction::FrontSettings,
+                "{not:?}"
+            );
+        }
+        assert!(!LaunchArgs::parse([EXE]).embedding, "a plain launch");
+        let both = LaunchArgs::parse([EXE, "--call", "record", "-Embedding"]);
+        assert!(both.embedding);
+        assert_eq!(
+            second_launch_action(&both),
+            SecondLaunchAction::StartCallRecord,
+            "--call record still wins"
+        );
+        let unknown = LaunchArgs::parse([EXE, "-Embedding", "--call", "bogus"]);
+        assert_eq!(second_launch_action(&unknown), SecondLaunchAction::TrayOnly);
+    }
+
+    #[test]
+    fn a_cold_com_activation_only_starts_the_app() {
+        // T-213 (#274 Q5): `startup_action` takes no arguments and is unchanged: a first run
+        // still opens Engine settings, a loaded start stays in the tray; `-Embedding` is a
+        // second-launch matter only. Pinned so the change cannot thread `embedding` into it.
+        let s = sample(EngineKind::Api);
+        assert_eq!(
+            startup_action(&LoadOutcome::Loaded(s.clone()), false),
+            StartupAction::TrayOnly
+        );
+        assert_eq!(
+            startup_action(&LoadOutcome::FirstRun(s), false),
+            StartupAction::OpenSettings(SettingsTab::Engine)
+        );
     }
 
     const EXE: &str = r"C:\Program Files\Voicen\voicen.exe";

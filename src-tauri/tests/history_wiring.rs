@@ -95,6 +95,7 @@ fn start(
                 elevated: false,
             }))),
             engine_factory: Some(engine_factory(engine)),
+            builtin: None,
             indicator: Arc::new(FakeIndicator::new()),
             credentials: Arc::clone(&rig.rig.creds),
             hotkeys: Arc::clone(&rig.rig.hotkeys),

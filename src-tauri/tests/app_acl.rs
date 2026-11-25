@@ -454,6 +454,170 @@ fn settings_get_is_still_refused_from_other_and_overlay_and_passes_from_calls() 
     );
 }
 
+// ---- T-130: the call indicator window (`call-indicator`, capabilities/call-indicator.json) ----
+
+/// The call indicator window's label (spec 007 contracts/ipc.md; created only by the
+/// `call-indicator` thread, src-tauri/src/call_indicator.rs).
+const CALL_INDICATOR: &str = "call-indicator";
+
+/// The three commands of the indicator page (T-131 as built, contracts/ipc.md; `call_indicator_moved`
+/// is dropped, decisions #314), each with args that have no side effect: the app has no call part
+/// here, so a stop or a dismiss is a request nobody serves.
+fn indicator_commands() -> Vec<(&'static str, Value)> {
+    vec![
+        ("call_indicator_state", json!({})),
+        ("call_indicator_stop", json!({})),
+        ("call_indicator_dismiss", json!({ "warningId": 999 })),
+    ]
+}
+
+#[test]
+fn the_call_indicator_window_reaches_its_three_commands_past_the_acl() {
+    // T-130 I1, pass branch (red today: no `call-indicator` capability, no call_indicator_*
+    // command): from a window labelled `call-indicator` at `/call-indicator`, each of the three
+    // commands reaches its handler: a value or the command's own error, never an ACL refusal or
+    // "not found". Every other app command stays refused for it (least privilege: it reads no
+    // settings, opens nothing). Bite: `allow-call-indicator-*` missing from
+    // capabilities/call-indicator.json, a command missing from APP_COMMANDS (16 -> 19) or from
+    // `generate_handler!`, or call-indicator.json granting `allow-settings-get` and the rest.
+    let _serial = serial();
+    let dir = TempDir::new();
+    let app = release_app(&load(dir.path()));
+    let window = window_at(&app, CALL_INDICATOR, "call-indicator");
+
+    for (cmd, args) in indicator_commands() {
+        if let Err(rejection) = invoke(&window, cmd, args) {
+            assert!(
+                !is_acl_refusal(&rejection),
+                "{cmd} refused by the ACL for `{CALL_INDICATOR}`: {rejection}"
+            );
+            assert!(
+                !is_not_found(&rejection),
+                "{cmd} is not registered: {rejection}"
+            );
+        }
+    }
+    let state = invoke(&window, "call_indicator_state", json!({}))
+        .unwrap_or_else(|e| panic!("call_indicator_state rejected for `{CALL_INDICATOR}`: {e}"));
+    assert!(state.is_object(), "call_indicator_state: {state}");
+
+    let others = settings_commands()
+        .into_iter()
+        .chain(calls_commands())
+        .chain(history_commands())
+        .chain([
+            ("overlay_ready", json!({})),
+            ("settings_open", json!({ "tab": "not-a-tab" })),
+        ]);
+    for (cmd, args) in others {
+        assert_refused(&window, cmd, args);
+    }
+}
+
+#[test]
+fn call_indicator_commands_are_refused_from_settings_overlay_calls_and_any_other_window() {
+    // T-130 I1, refusal branch (red today: the commands are not registered, so the refusal is
+    // "not found", not the ACL's): each of the three commands from `settings`, `overlay`, `calls`
+    // and a window labelled `other` is refused by the ACL before its handler, so a settings or
+    // calls page cannot stop a call or dismiss a warning. Bite: `allow-call-indicator-*` also in
+    // default.json, overlay.json or calls.json, a window wildcard in call-indicator.json.
+    let _serial = serial();
+    let dir = TempDir::new();
+    let app = release_app(&load(dir.path()));
+    let settings = settings_window(&app);
+    let overlay = window_at(&app, OVERLAY, "overlay");
+    let calls = window_at(&app, CALLS, "calls");
+    let history = window_at(&app, HISTORY, "history");
+    let other = window_at(&app, OTHER, "call-indicator");
+
+    for window in [&settings, &overlay, &calls, &history, &other] {
+        for (cmd, args) in indicator_commands() {
+            assert_refused(window, cmd, args);
+        }
+    }
+}
+
+#[test]
+fn a_refused_call_indicator_stop_changes_nothing_and_start_dragging_is_granted_to_it_alone() {
+    // T-130 I1, the effect and the one core grant: a `call_indicator_stop` from `other` is
+    // refused before its handler (no `call_stopped` request is posted: the part-less app logs no
+    // call line), and `plugin:window|start_dragging` (the page's drag region) is not refused for
+    // `call-indicator` but is refused for `overlay` and `other`. Bite: `core:window:allow-start-dragging`
+    // in default.json / overlay.json or with a wildcard window list, a stop that ran before the ACL.
+    let _serial = serial();
+    let dir = TempDir::new();
+    let app = release_app(&load(dir.path()));
+    let indicator = window_at(&app, CALL_INDICATOR, "call-indicator");
+    let overlay = window_at(&app, OVERLAY, "overlay");
+    let other = window_at(&app, OTHER, "call-indicator");
+
+    assert_refused(&other, "call_indicator_stop", json!({}));
+    if let Err(rejection) = invoke(&indicator, "plugin:window|start_dragging", json!({})) {
+        assert!(
+            !is_acl_refusal(&rejection),
+            "start_dragging refused by the ACL for `{CALL_INDICATOR}`: {rejection}"
+        );
+    }
+    assert_refused(&overlay, "plugin:window|start_dragging", json!({}));
+    assert_refused(&other, "plugin:window|start_dragging", json!({}));
+}
+
+#[test]
+fn the_call_indicator_capability_grants_exactly_the_indicator_set_to_its_label_only() {
+    // T-130 I1, "exactly its grants": capabilities/call-indicator.json names the label
+    // `call-indicator` alone and exactly: core:event:allow-listen / allow-unlisten, the three
+    // allow-call-indicator-* grants and core:window:allow-start-dragging. Nothing else: no
+    // show/hide/close/destroy/set_position (the page never touches its window; a tao setter on
+    // the raw-shown window would hide it, overlay.md §3), no settings or calls command. Bite: any
+    // extra permission, a second window label or a wildcard, a missing grant. APP_COMMANDS
+    // (build.rs) lists the three commands: 23 in all with T-022's four (history_* and
+    // settings_open).
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let text = std::fs::read_to_string(root.join("capabilities").join("call-indicator.json"))
+        .expect("capabilities/call-indicator.json exists");
+    let capability: Value = serde_json::from_str(&text).expect("the capability is JSON");
+    assert_eq!(capability["identifier"], json!("call-indicator"));
+    assert_eq!(capability["windows"], json!([CALL_INDICATOR]));
+    let mut granted: Vec<String> = capability["permissions"]
+        .as_array()
+        .expect("permissions")
+        .iter()
+        .map(|p| p.as_str().expect("a permission id").to_string())
+        .collect();
+    granted.sort();
+    let mut expected = vec![
+        "core:event:allow-listen",
+        "core:event:allow-unlisten",
+        "allow-call-indicator-state",
+        "allow-call-indicator-stop",
+        "allow-call-indicator-dismiss",
+        "core:window:allow-start-dragging",
+    ];
+    expected.sort_unstable();
+    assert_eq!(granted, expected);
+
+    let build = std::fs::read_to_string(root.join("build.rs")).expect("build.rs");
+    assert!(
+        build.contains("const APP_COMMANDS: [&str; 23]"),
+        "APP_COMMANDS holds 23 commands (16 + the three call_indicator_* + T-022's history_get, \
+         history_copy, history_clear and settings_open)"
+    );
+    for cmd in [
+        "call_indicator_state",
+        "call_indicator_stop",
+        "call_indicator_dismiss",
+    ] {
+        assert!(
+            build.contains(&format!("\"{cmd}\"")),
+            "build.rs APP_COMMANDS lacks {cmd}"
+        );
+    }
+    assert!(
+        !build.contains("call_indicator_moved"),
+        "call_indicator_moved is dropped (decisions #314)"
+    );
+}
+
 /// The History window's label (T-022, `capabilities/history.json`).
 const HISTORY: &str = "history";
 
@@ -503,7 +667,7 @@ fn the_history_window_reaches_its_commands_and_settings_get_past_the_acl() {
             assert_refused(&window, cmd, args);
         }
     }
-    for (cmd, args) in calls_commands() {
+    for (cmd, args) in calls_commands().into_iter().chain(indicator_commands()) {
         assert_refused(&window, cmd, args);
     }
 }
@@ -521,9 +685,10 @@ fn history_commands_are_refused_from_settings_overlay_calls_and_any_other_window
     let settings = settings_window(&app);
     let overlay = window_at(&app, OVERLAY, "overlay");
     let calls = window_at(&app, CALLS, "calls");
+    let indicator = window_at(&app, CALL_INDICATOR, "call-indicator");
     let other = window_at(&app, OTHER, "history");
 
-    for window in [&settings, &overlay, &calls, &other] {
+    for window in [&settings, &overlay, &calls, &indicator, &other] {
         for (cmd, args) in history_commands() {
             assert_refused(window, cmd, args);
         }
@@ -581,8 +746,9 @@ fn settings_open_passes_from_the_history_window_only() {
     let settings = settings_window(&app);
     let overlay = window_at(&app, OVERLAY, "overlay");
     let calls = window_at(&app, CALLS, "calls");
+    let indicator = window_at(&app, CALL_INDICATOR, "call-indicator");
     let other = window_at(&app, OTHER, "history");
-    for window in [&settings, &overlay, &calls, &other] {
+    for window in [&settings, &overlay, &calls, &indicator, &other] {
         assert_refused(window, "settings_open", args.clone());
     }
 }
