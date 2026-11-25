@@ -698,14 +698,34 @@ fn c8_display_and_debug_of_every_produced_error_hold_no_entry_text() {
             History::open(FileHistoryStore::new(dir.path().to_path_buf()), true, 20);
         errors.extend(warning);
     }
-    // Io: a store directory that cannot exist (its parent is a file).
+    // Io, save: a store directory that cannot exist (its parent is a file); the
+    // create_dir_all under a file fails on Linux (ENOTDIR) and Windows alike.
     let dir = TempDir::new();
     let blocker = dir.path().join("blocker");
     std::fs::write(&blocker, b"x").expect("blocker file");
     let (mut h, _) = History::open(FileHistoryStore::new(blocker.join("data")), true, 20);
     errors.extend(h.record(SENTINEL.to_string(), 1, label()));
-    errors.extend(h.clear());
-    errors.extend(h.apply_settings(false, 20));
+    // Io, load and delete: `history.json` is a non-empty directory. Reading it fails
+    // (Linux EISDIR, Windows access denied), as does removing it with remove_file
+    // (EISDIR / access denied): neither is NotFound, which the store treats as "no file,
+    // nothing to delete" (a missing parent path is NotFound on Windows, so the blocker
+    // above cannot drive the delete paths).
+    let dir = TempDir::new();
+    let doc_dir = dir.path().join("history.json");
+    std::fs::create_dir(&doc_dir).expect("history.json as a directory");
+    std::fs::write(doc_dir.join("inner"), b"x").expect("make it non-empty");
+    let (mut h, warning) = History::open(FileHistoryStore::new(dir.path().to_path_buf()), true, 20);
+    assert!(warning.is_some(), "premise: loading a directory fails");
+    errors.extend(warning);
+    let cleared = h.clear();
+    assert!(
+        cleared.is_some(),
+        "premise: clear cannot remove a directory"
+    );
+    errors.extend(cleared);
+    let applied = h.apply_settings(false, 20);
+    assert!(applied.is_some(), "premise: switching off cannot remove it");
+    errors.extend(applied);
     // Fake-store failures of every operation, with the sentinel in memory.
     let store = FakeStore::new().failing_save(&[1]).failing_delete(&[1]);
     let (mut h, _) = History::open(store, true, 20);
@@ -713,7 +733,7 @@ fn c8_display_and_debug_of_every_produced_error_hold_no_entry_text() {
     errors.extend(h.clear());
 
     assert!(
-        errors.len() >= 8,
+        errors.len() >= 10,
         "premise: the scenarios produced errors, got {}",
         errors.len()
     );
