@@ -1,0 +1,14 @@
+{
+ "agent_id": "a981a10122a99bf88",
+ "agent_type": "task-validator",
+ "commit": "e590894840591303defa3a3239198b725634aa82",
+ "gate": "verify",
+ "kind": "manual",
+ "path": "docs/tasks/T-207.verify/1.md",
+ "result": "PASS",
+ "round": 1,
+ "session_id": "c076ba22-370e-4996-aba9-f62116eb2003",
+ "sha256": "af78bf3a3462a9357a618e396bdf66897596637ad589a29de96b64ae1deb512f",
+ "task": "T-207",
+ "ts": "2026-11-25T02:53:06Z"
+}
