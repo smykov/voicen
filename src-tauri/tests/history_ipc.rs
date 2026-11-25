@@ -14,7 +14,8 @@
 //!   in the given dir and a later delivery writes none; a save of `false` after the start
 //!   reaches the follower thread (the shell half of P-013).
 //! - (d) `open_history` twice gives one window labelled `history` at `/history`; the tray
-//!   `OpenHistory` id routes to it; a closed window is built again.
+//!   `OpenHistory` id routes to it. A closed window built again is `lifecycle.rs` (real
+//!   runtime: the mock one never removes a destroyed window from tauri's manager).
 //! - #3: a failed `start_history` writes one closed-tag line (below).
 //!
 //! Entries are made through the pipeline's own `TranscriptSink` (`history::transcript_sink`);
@@ -347,26 +348,11 @@ fn the_tray_history_item_opens_the_history_window_and_no_other() {
     );
 }
 
-#[test]
-fn a_closed_history_window_is_built_again_by_the_next_open() {
-    // Acceptance 1 (T013 "close destroys it"): after the window is destroyed the label is
-    // free and the next `open_history` builds a fresh one at `/history`, still one. Bite: an
-    // opener that keeps a handle of the dead window and focuses it (no window ever again), or
-    // one that refuses a label it has seen.
-    let _serial = serial();
-    let rig = HistoryRig::started();
-    let first = rig.open_window();
-    first.destroy().expect("destroy the history window");
-    assert!(
-        eventually(|| rig.handle().get_webview_window(LABEL).is_none()),
-        "the destroyed window is still listed"
-    );
-
-    let second = rig.open_window();
-
-    assert_eq!(second.url().expect("url").path(), "/history");
-    assert_eq!(rig.history_windows(), 1);
-}
+// "A closed window is built again" (T013 "close destroys it") is
+// `lifecycle.rs::a_destroyed_history_window_is_built_again_by_the_next_open`, on the real Wry
+// runtime: tauri drops a window from its manager only on the loop's `WindowEvent::Destroyed`,
+// which the mock runtime never emits, so a destroyed mock window stays listed for good
+// (Windows CI run 45649199635).
 
 // ---- an app without a history part (characterization) ---------------------------------------
 
