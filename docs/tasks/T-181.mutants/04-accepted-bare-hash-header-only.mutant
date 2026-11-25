@@ -1,0 +1,8 @@
+guarantee: T-094 r2#1: a bare `    #` line inside the list is a comment (list-level isComment call)
+file: scripts/licenses/accepted.mjs
+added_by: test-writer
+--- old
+    if (isComment(line, "    ")) continue;
+--- new
+    if (line.startsWith("     # ") || line.startsWith("    # ")) continue;
+--- end

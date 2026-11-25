@@ -37,7 +37,7 @@ function refuse(why) {
  * @returns {string[]}
  */
 export function readAcceptedList(tomlText) {
-  if (tomlText.startsWith("﻿")) throw refuse("a byte-order mark before the head");
+  if (tomlText.startsWith("\uFEFF")) throw refuse("a byte-order mark before the head");
   const text = tomlText.replace(/\r\n/g, "\n");
   if (text.includes("\r")) throw refuse("a lone CR");
   const lines = text.split("\n");

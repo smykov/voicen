@@ -1,0 +1,8 @@
+guarantee: T-094 r1#1: check.mjs exits 2 (cannot check) through the CLI on an about.toml head outside the owned shape
+file: scripts/licenses/check.mjs
+added_by: test-writer
+--- old
+    return 2;
+--- new
+    return 1;
+--- end

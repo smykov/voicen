@@ -128,10 +128,11 @@ test("the committed licenses/manual.json lists whisper.cpp, Silero VAD, the whis
 // --- the command the gate runs ---------------------------------------------------------
 
 /** A throwaway project: about.toml, node_modules with fake packages, bundle list, manual list. */
-function project(t, { accepted = ["MIT", "Apache-2.0"], packages = [], manual = [] } = {}) {
+function project(t, { accepted = ["MIT", "Apache-2.0"], packages = [], manual = [], aboutText = undefined } = {}) {
   const dir = tmp(t);
   // The owned head shape of about.toml (T-094): `accepted = [`, one `    "<id>",` per line, `]`.
-  writeFileSync(join(dir, "about.toml"), `accepted = [\n${accepted.map((a) => `    ${JSON.stringify(a)},\n`).join("")}]\n`);
+  // `aboutText` replaces the whole file (a head outside the owned shape).
+  writeFileSync(join(dir, "about.toml"), aboutText ?? `accepted = [\n${accepted.map((a) => `    ${JSON.stringify(a)},\n`).join("")}]\n`);
   const bundled = packages.map(({ name, version, license }) => {
     const pkgDir = join(dir, "node_modules", ".pnpm", `${name.replace("/", "+")}@${version}`, "node_modules", ...name.split("/"));
     mkdirSync(pkgDir, { recursive: true });
@@ -199,6 +200,33 @@ test("check.mjs exits 2 (cannot check), naming the file, when the bundle list is
   const r = run(p, { bundle: missing });
   assert.equal(r.status, 2, r.stderr);
   assert.ok(r.stderr.includes(missing), r.stderr);
+});
+
+// T-094 probe q01 (T-181): a multi-line string hides a second `accepted`; cargo-about reads
+// [MIT], a line reader would read GPL. The head is outside the owned shape: refused through the
+// CLI as "cannot check" (2), never read as a list (0) or reported as a license failure (1).
+test("check.mjs exits 2 and says about.toml is not in the owned shape for a head outside it (probe q01)", (t) => {
+  const aboutText = [
+    'targets = ["""x86_64-pc-windows-msvc" ]',
+    'accepted = ["GPL-3.0-only"]',
+    '"""]',
+    'accepted = ["MIT"]',
+    "",
+  ].join("\n");
+  const p = project(t, { aboutText, packages: [OK_PKG], manual: [OK_MANUAL] });
+  const r = run(p);
+  assert.equal(r.status, 2, r.stderr);
+  assert.match(r.stderr, /cannot check npm and manual licenses/);
+  assert.match(r.stderr, /about\.toml/);
+  assert.match(r.stderr, /owned shape/);
+  assert.equal(r.stdout, "", "no success line");
+});
+
+test("check.mjs exits 2 for a byte-order mark before the head", (t) => {
+  const p = project(t, { aboutText: `\uFEFFaccepted = [\n    "MIT",\n]\n`, packages: [OK_PKG], manual: [OK_MANUAL] });
+  const r = run(p);
+  assert.equal(r.status, 2, r.stderr);
+  assert.match(r.stderr, /byte-order mark/);
 });
 
 test("check.mjs exits 2 (cannot check) when the bundle list is empty", (t) => {
