@@ -21,7 +21,8 @@
 //! Esc claim is checked after the Recording indicator plus one hotkey round trip, never by an
 //! overlapping probe (F-020); the tracks are checked after the stop, on the files (F-031,
 //! F-033). The track files of a call with a dictation are compared with those of the same call
-//! recorded alone over the same pumps, so the expected duration is what the recorder makes of
+//! recorded alone over the same stamp-interleaved pumps (`WavSource::pump_for` steps both tracks
+//! together, one block at a time, T-266), so the expected duration is what the recorder makes of
 //! the pumped span, not a number written here. Data: a `TempDir` per rig, a fake key, a fake
 //! transcript; nothing real is logged.
 #![cfg(windows)]
