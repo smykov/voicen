@@ -243,6 +243,15 @@ pub fn refused_loopback(budget: Duration) -> SocketAddr {
     }
 }
 
+/// RED STUB (test-writer, T-175): the record writer. It must write `line` and a newline to the
+/// real stderr through `std::io::stderr().write_all` (never a print macro: libtest captures
+/// those for a passing test, and a spawned thread's capture is lost at `process::exit`), as core's
+/// `common::timing::skip` does. This stub is the `eprintln!` shape on purpose, so the two child
+/// tests in `dictation_e2e.rs` are red against it; the developer replaces the body.
+pub fn report(line: &str) {
+    eprintln!("{line}");
+}
+
 /// Compiles only while `T` does NOT implement the trait in the second impl: with it,
 /// `<T as NotImpl<_>>::check` matches both impls and the type parameter cannot be inferred
 /// (the `static_assertions::assert_not_impl_any` trick, written out, as in core's

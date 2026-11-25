@@ -26,6 +26,7 @@
 //! reply, the prompt and the key must never reach the log.
 #![cfg(windows)]
 
+mod loopback_support;
 mod timing_support;
 mod win32_support;
 
@@ -33,6 +34,7 @@ use std::fs;
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -521,6 +523,115 @@ fn post_processing_on_through_the_real_wiring_pastes_the_chat_reply() {
     );
     assert_eq!(engine.calls(), 1, "engine calls");
     assert_no_canary(&rig.log_lines());
+}
+
+#[test]
+fn loopback_server_stops_on_drop() {
+    // T-175 (T-074 r1 Low): the accept thread of the shared loopback server ends when its
+    // owner drops it (ChatMock and call_chain's Mock both run on it). Observed through the
+    // accept thread's own exit flag, a clone taken before the drop. Deliberately NOT "the
+    // port is refused afterwards": a released port may be taken by another process (F-004,
+    // class test-port-race). Bite: a loop with no stop, a Drop that does not wake the blocked
+    // accept, a flag set before the thread has returned its listener.
+    let server = loopback_support::LoopbackServer::start(|_stream| {});
+    let exited = server.exit_flag();
+    assert!(
+        !exited.load(Ordering::SeqCst),
+        "premise: the accept thread is running before the drop"
+    );
+    drop(server);
+    assert!(
+        timing_support::eventually(|| exited.load(Ordering::SeqCst)),
+        "the accept thread was still running {HANG:?} after its server was dropped"
+    );
+}
+
+/// Set by the parent tests below; the `child_report_*` tests do nothing without it, so a plain
+/// run of this binary only checks that they pass.
+const REPORT_CHILD_ENV: &str = "VOICEN_T175_REPORT_CHILD";
+const REPORT_MARK: &str = "T175-REPORT-LINE-MARK";
+/// The exit code of the watchdog-shape child; the parent's positive control that the child ran
+/// its exit path and not something else.
+const REPORT_EXIT: i32 = 7;
+
+/// Runs the named `child_report_*` test of this binary as its own process, under libtest's
+/// default capture (no `--nocapture`); returns its status and stderr.
+fn report_child(mode: &str, test: &str) -> (std::process::ExitStatus, String, String) {
+    let exe = std::env::current_exe().expect("this test binary's path");
+    let out = std::process::Command::new(exe)
+        .args([test, "--exact", "--test-threads=1"])
+        .env(REPORT_CHILD_ENV, mode)
+        .output()
+        .expect("run the child test process");
+    (
+        out.status,
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+    )
+}
+
+#[test]
+fn child_report_writes_one_line() {
+    if std::env::var(REPORT_CHILD_ENV).as_deref() == Ok("line") {
+        timing_support::report(REPORT_MARK);
+    }
+}
+
+#[test]
+fn child_report_from_a_thread_then_exits() {
+    if std::env::var(REPORT_CHILD_ENV).as_deref() == Ok("exit") {
+        let _keep_alive = {
+            let (tx, rx) = std::sync::mpsc::channel::<()>();
+            thread::spawn(move || {
+                // The watchdog shape: a spawned thread writes its message, then ends the process.
+                timing_support::report(REPORT_MARK);
+                std::process::exit(REPORT_EXIT);
+            });
+            // The test thread waits for the watchdog thread to end the process.
+            let _ = rx.recv_timeout(HANG);
+            tx
+        };
+    }
+}
+
+#[test]
+fn a_report_line_reaches_the_real_stderr_under_libtest_capture() {
+    // T-175 (T-097 r2#3): a record line written with a print macro is captured by libtest for
+    // a passing test, so the job log never carried it. `timing_support::report` writes to
+    // `std::io::stderr()` raw. Checked in a child process: inside this process the captured and
+    // the real stderr look the same to the test. Bite: the writer using `eprintln!` / `println!`,
+    // the line dropped, no newline.
+    let (status, stderr, stdout) = report_child("line", "child_report_writes_one_line");
+    assert!(
+        status.success(),
+        "the child failed ({status:?}): {stderr:?} {stdout:?}"
+    );
+    assert!(
+        stdout.contains("1 passed"),
+        "the child did not run exactly its test: {stdout}"
+    );
+    assert!(
+        stderr.lines().any(|l| l.contains(REPORT_MARK)),
+        "the report line is not on the child's stderr: {stderr:?}"
+    );
+}
+
+#[test]
+fn a_report_line_from_a_thread_survives_process_exit() {
+    // T-175 (the watchdog shape, proved 2026-11-18): a spawned thread inherits the test's
+    // capture, so a print macro there is dropped when the thread then calls `process::exit`.
+    // The three-plus watchdogs (`lifecycle`, `overlay`, `watch_for_hang`, ...) report a hang
+    // this way. Bite: `eprintln!`, a buffered writer not flushed before the exit.
+    let (status, stderr, _stdout) = report_child("exit", "child_report_from_a_thread_then_exits");
+    assert_eq!(
+        status.code(),
+        Some(REPORT_EXIT),
+        "positive control: the child ended through its thread's exit ({stderr:?})"
+    );
+    assert!(
+        stderr.lines().any(|l| l.contains(REPORT_MARK)),
+        "the thread's report line is lost at process exit; the child's stderr: {stderr:?}"
+    );
 }
 
 #[test]

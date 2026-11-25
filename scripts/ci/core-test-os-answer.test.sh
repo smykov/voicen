@@ -108,6 +108,11 @@ run c-no-rs-files 3 "cannot run" "$tmp/no-rs"
 # naming a target outside tests/common are reworded (T-089 §7).
 run "real tree (crates/voicen-core/tests)" 0 "ok:"
 
+# T-175 (option B, shell I1): the same token rule over the shell tests, every *.rs recursively,
+# no exempt dir. Red until dictation_e2e.rs takes OsAnswer::refused() (its REFUSAL_BUDGET and
+# timing_support::refused_loopback go) and the comments name the constructor, not the literal.
+run "real tree (src-tauri/tests)" 0 "ok:" src-tauri/tests
+
 # Every committed fixture dir is in the table.
 for d in "$fx"/*/; do
   c="$(basename "$d")"
