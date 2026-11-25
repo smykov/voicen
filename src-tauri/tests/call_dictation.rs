@@ -642,3 +642,38 @@ fn with_record_off_and_no_dictation_no_capture_stream_is_open() {
     rig.stop_call();
     idle("after the call stopped");
 }
+
+// ---- T-266: the comparison still catches a broken track ---------------------------------------
+
+#[test]
+fn a_call_missing_the_last_100_ms_of_both_tracks_differs_from_the_call_recorded_alone() {
+    // T-266 Acceptance 2 (failure branch): the exact `Tracks` comparison of Acceptance 1 is not
+    // loosened by the interleaved pump. A call whose three pumps end 100 ms short (a gap at
+    // the end of both tracks, what a drop or a stall leaves) reads back different from the call
+    // recorded alone: both durations are shorter, so `assert_eq!` on `Tracks` fails. Bite: a
+    // tolerance on the durations wider than 100 ms, a comparison that ignores a track.
+    let _serial = serial();
+    let alone = recorded_alone();
+    assert_a_real_span(&alone);
+
+    let (rig, source) = CallRig::with_wav();
+    call::request(rig.handle(), CallRequest::Record(CallSource::Switch));
+    assert!(
+        call_shell_support::eventually(|| rig.recording()),
+        "the short call did not start"
+    );
+    source.pump_for(BEFORE_MS);
+    source.pump_for(DURING_MS);
+    source.pump_for(PUMP_MS - 100);
+    rig.stop_call();
+    let short = read_tracks(&only_folder(&rig.dir.path().join("calls")));
+
+    assert_ne!(
+        short, alone,
+        "a call 100 ms short read back as the baseline"
+    );
+    assert!(
+        short.mic < alone.mic && short.system < alone.system,
+        "both tracks are shorter than the baseline: {short:?} vs {alone:?}"
+    );
+}
