@@ -106,7 +106,7 @@ A refused start (`Refused { part, reason }`) leaves no track open and no folder,
 | `ratio_adj` | `f64` | Clamped to ±500 ppm. |
 | `reanchor_threshold` | 40 ms | Above it, zeros are inserted or overlap is dropped at once. |
 
-Invariant: after any sequence of blocks and gaps, `|written_mic − written_system|` measured at the same stamp is ≤ 20 ms (tested, FR-011 allows 100 ms).
+Invariant: after any sequence of blocks and gaps, `|written_mic − written_system|` measured at the same stamp is under 40 ms: an offset below `reanchor_threshold` is left to the slow loop for tens of seconds, so one track can sit up to 39 ms off (`a_block_39_ms_ahead_is_left_to_the_slow_loop`); under steady ±50 ppm drift it is ≤ 20 ms per track and between tracks (tested). FR-011 allows 100 ms.
 
 ## Chunk (final pass, in memory only)
 

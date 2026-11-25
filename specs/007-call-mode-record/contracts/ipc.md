@@ -147,7 +147,7 @@ The texts live in the one catalog at the repository root, `i18n/en.json` and `i1
 | `calls.error.io.disk_full` (T-143) | Could not complete the action: the disk is full |
 | `calls.error.io.other` (T-143) | Could not complete the action: the file could not be read or written |
 | `speaker.me` / `speaker.other` | Me / Other party (RU: Я / Собеседник) |
-| `settings.tab.calls` + one label per new `FieldId` | Calls / Call hotkey / Reminder / Primary language / Storage folder |
+| `settings.tab.calls`; `settings.field_label.calls.hotkey` / `.reminder` / `.primary_language` / `.storage_root` (T-120) | Calls / Call recording shortcut / Remind me to record calls / Primary call language / Folder for call recordings |
 | `settings.calls.provider_notice` | The other party's audio goes to provider {host} |
 | `error.storage.unwritable` (T-120, no placeholder) | The generic refusal text; there is no `settings.calls.storage_unwritable` `{reason}` template (#198) |
 | `settings.calls.unwritable.<reason>` (T-155, UI-only, no placeholder) | One full message per `UnwritableReason`, chosen by the Calls tab from `FieldError.reason` (decision #319 Q2): missing / not_a_folder / relative / access_denied / disk_full / other, e.g. "This folder can't be written: access denied" |

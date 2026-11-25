@@ -1,6 +1,6 @@
 # Call storage (call folders on disk)
 
-**Code:** `crates/voicen-core/src/call/storage.rs` (`CallStore`, `write_meta`, `write_atomic`, `storage_kind`, `CallMeta`), `crates/voicen-core/src/settings/roots.rs` (`effective_root`, `CallRoots::probe`, `reason_of`) · **Tests that pin it:** `call::storage` unit tests (`create_*`, `a_failed_*`, `write_meta_*`, `list_*`, `damaged_*`, `missing_*`, `storage_kind_maps_every_op_encode_to_write`)
+**Code:** `crates/voicen-core/src/call/storage.rs` (`CallStore`, `write_meta`, `write_atomic`, `fill_and_rename`, `storage_kind`, `CallMeta`; T-141: `resolve_call`, `CallStore::get`, `export_bytes`, `export_to`), `crates/voicen-core/src/settings/roots.rs` (`effective_root`, `CallRoots::probe`, `reason_of`), `crates/voicen-core/src/call/events.rs` (`CallId::parse`), `crates/voicen-core/src/call/transcript.rs` (`render_markdown`, `export_markdown`, `export_json`) · **Tests that pin it:** `call::storage` unit tests (`create_*`, `a_failed_*`, `write_meta_*`, `list_*`, `damaged_*`, `missing_*`, `storage_kind_maps_every_op_encode_to_write`; T-141: `get_*`, `export_*`), `call::transcript` `export_markdown_is_render_markdown_with_meta_names`, `export_json_carries_meta_title_and_names_and_validates`
 
 Tasks: T-125, T-141, T-144 (recovery, ownership) (wire, guard, export; `ipc.md` › Built T-141). Contract: `specs/007-call-mode-record/contracts/core-call.md` "Built (T-125)". Decisions: #195, #196, #242 (D1–D5). Class `call-storage` in `docs/failures.md` has no entry yet (first sighting).
 
@@ -87,7 +87,10 @@ Tasks: T-125, T-141, T-144 (recovery, ownership) (wire, guard, export; `ipc.md` 
 
 | Concern | The one place |
 |---|---|
-| Write probe and its reason | `settings::roots::CallRoots::probe`, `reason_of` |
+| Write probe and its reason | `settings::roots::CallRoots::probe`, `reason_of` (also the `ioFailed` reason of T-141's get and export) |
+| Call id grammar | `call::events::CallId::parse` (the listing and T-141's `resolve_call`) |
+| Transcript Markdown | `call::transcript::render_markdown` (T-141's `export_markdown` is it with the `meta.json` title and names) |
+| tmp + sync + rename | `storage::fill_and_rename`, the one tail of `write_atomic` and T-141's `export_to` |
 | Current root | `settings::roots::effective_root` (moved here from `settings/service.rs`, T-125) |
 | Local time for the folder stamp, `started_at` and the default title | `diag::format::LocalTime::of` |
 | `.opus` writing | `OpusOgg::create` only (T-116) |
