@@ -44,7 +44,7 @@ Every overlay-class window (the overlay and the call indicator) is restyled and 
 
 - **Defect that produced it:** none (T-057 analysis hypothesis 2(b)): a second copy of the state would break the seq rule on the page.
 - **What breaks if you violate it:** a page that catches up through `overlay_ready` shows an older state than the last emit.
-- **Where it is enforced:** one producer, core `overlay_payload`, fed with the mailbox entry and `SettingsService::snapshot().ui_language`, read on the overlay thread or in the command. Tests: `overlay_ipc.rs::overlay_ready_returns_the_newest_published_state_as_the_last_emit_carries_it`; the capability test `overlay_window_gets_nothing_beyond_listen_and_unlisten`.
+- **Where it is enforced:** one producer, core `overlay_payload`, fed with the mailbox entry and `SettingsService::snapshot().ui_language`, read on the overlay thread or in the command. Tests: `overlay_ipc.rs::overlay_ready_returns_the_newest_published_state_as_the_last_emit_carries_it`; the capability test `overlay_window_gets_no_plugin_permission_beyond_listen_and_unlisten` (plugin permissions only: the window also has app command grants, T-175).
 - **Don't:** read the settings or the session under the session lock; keep a second state copy.
 
 ### 5. The install smoke counts every visible, unowned, top-level window of the process, tool windows included; it excludes a window only by a visible-helper class of the one helper-window manifest AND helper shape, and that manifest is checked against the dependency graph and the real process

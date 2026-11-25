@@ -123,10 +123,10 @@ fn register_and_unregister_on_the_device_thread_with_no_event_on_the_runner() {
     }) else {
         panic!("open / next / drop did not return within {HANG:?}");
     };
-    println!(
+    timing_support::report(&format!(
         "T-150 fact: IMMNotificationClient registration on the runner: registered() = {registered}; \
          no event in 300 ms = {quiet}; no event through the factory in 100 ms = {factory_quiet}"
-    );
+    ));
     assert!(
         registered,
         "the registration did not succeed on this runner"
@@ -279,7 +279,9 @@ fn the_communications_check_returns_a_value_or_none_without_error() {
     else {
         panic!("cpal's default output lookup did not return within {HANG:?}");
     };
-    println!("T-150 fact: eConsole render default present (cpal) = {has_render_default}");
+    timing_support::report(&format!(
+        "T-150 fact: eConsole render default present (cpal) = {has_render_default}"
+    ));
     if !has_render_default {
         assert!(
             answer.is_err(),
@@ -289,11 +291,13 @@ fn the_communications_check_returns_a_value_or_none_without_error() {
     }
     match answer {
         Ok(differs) => {
-            println!("T-150 fact: communications check: Ok({differs}) (the runner has a render endpoint)");
+            timing_support::report(&format!("T-150 fact: communications check: Ok({differs}) (the runner has a render endpoint)"));
         }
         Err(code) => {
             assert_ne!(code, 0, "a failed check carries no OS code");
-            println!("T-150 fact: communications check: Err({code} = {code:#x}) (core: none)");
+            timing_support::report(&format!(
+                "T-150 fact: communications check: Err({code} = {code:#x}) (core: none)"
+            ));
         }
     }
 }

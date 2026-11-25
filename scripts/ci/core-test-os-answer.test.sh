@@ -109,8 +109,8 @@ run c-no-rs-files 3 "cannot run" "$tmp/no-rs"
 run "real tree (crates/voicen-core/tests)" 0 "ok:"
 
 # T-175 (option B, shell I1): the same token rule over the shell tests, every *.rs recursively,
-# no exempt dir. Red until dictation_e2e.rs takes OsAnswer::refused() (its REFUSAL_BUDGET and
-# timing_support::refused_loopback go) and the comments name the constructor, not the literal.
+# no exempt dir. The shell's refused case comes from OsAnswer::refused() (settings_ipc.rs,
+# dictation_e2e.rs), and comments name the constructor, not the literal.
 run "real tree (src-tauri/tests)" 0 "ok:" src-tauri/tests
 
 # Every committed fixture dir is in the table.

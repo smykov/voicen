@@ -14,9 +14,12 @@
 #   192.0.2.1      not followed by a digit (the blackhole; 192.0.2.10 is another value).
 # The wall-clock rule I2 is not this guard's: rustc decides it (clippy disallowed-methods in
 # crates/voicen-core/clippy.toml, proven by make check-ban-canary).
+# The shell tests are caught too (T-175, option B): the self-test core-test-os-answer.test.sh also
+# runs this guard over src-tauri/tests (every *.rs recursively; that tree has no common/ dir, so
+# nothing there is exempt), where a target comes from core's tests/common by #[path] include.
 # Not caught (T1 review, decisions #112, T-089 §7): the array form SocketAddr::from(([127, 0, 0,
-# 1], 1)), Ipv4Addr::LOCALHOST, 127.1, :01, an address built at run time from other parts, the
-# #[cfg(test)] unit tests under crates/voicen-core/src and the shell tests (src-tauri/tests).
+# 1], 1)), Ipv4Addr::LOCALHOST, 127.1, :01, an address built at run time from other parts, and
+# the #[cfg(test)] unit tests under crates/voicen-core/src and src-tauri/src.
 #
 # Usage: scripts/ci/core-test-os-answer.sh [tests-dir]   (default crates/voicen-core/tests)
 # Exit 0: "ok: <n> file(s) outside common". Exit 1: one "<file>:<line>: os-answer ..." per

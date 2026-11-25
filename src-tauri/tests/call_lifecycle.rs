@@ -195,7 +195,9 @@ fn watchdog(test: &'static str) -> Watchdog {
     let (tx, rx) = mpsc::channel::<()>();
     thread::spawn(move || {
         if let Err(RecvTimeoutError::Timeout) = rx.recv_timeout(WATCHDOG) {
-            eprintln!("call_lifecycle watchdog: `{test}`: the loop did not return; ending the exe");
+            timing_support::report(&format!(
+                "call_lifecycle watchdog: `{test}`: the loop did not return; ending the exe"
+            ));
             std::process::exit(3);
         }
     });
@@ -350,7 +352,9 @@ fn run_with_driver<T: Send + 'static>(
             let (_, took) = timing_support::measure(|| {
                 voicen_lib::on_run_event(handle, event, &outcome, false);
             });
-            eprintln!("call_lifecycle: finalize took {took:?} (RunEvent::Exit arm)");
+            timing_support::report(&format!(
+                "call_lifecycle: finalize took {took:?} (RunEvent::Exit arm)"
+            ));
             return;
         }
         voicen_lib::on_run_event(handle, event, &outcome, false);
@@ -926,7 +930,10 @@ fn wm_endsession_finalizes_a_recording_call_before_the_exited_line() {
         "HANG: the end-session messages were not answered"
     );
     let ran = finish(child, readers, CHILD_BUDGET);
-    eprintln!("call_lifecycle: the child's {}", ran.stdout.trim());
+    timing_support::report(&format!(
+        "call_lifecycle: the child's {}",
+        ran.stdout.trim()
+    ));
 
     assert!(
         !ran.timed_out,

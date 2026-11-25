@@ -1,5 +1,6 @@
 //! Shared helpers of the voicen-core test binaries (and of
-//! `src-tauri/tests/settings_ipc.rs`, which includes this file by `#[path]`):
+//! `src-tauri/tests/settings_ipc.rs` and `src-tauri/tests/dictation_e2e.rs`, which include
+//! this file by `#[path]`):
 //! - for `tests/local_download.rs`, `tests/local_download_refused.rs` and
 //!   `tests/local_store.rs` (T-016) the fake model, test catalog entries, a fake disk
 //!   probe and a raw-TCP mock model server, re-exported from

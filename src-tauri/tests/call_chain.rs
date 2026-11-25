@@ -22,7 +22,8 @@
 //!                        // round 2 (review 1 #2): load_shared over an injectable opener
 //! ```
 //!
-//! The mock server is a hand-rolled `TcpListener` (as `dictation_e2e.rs`: no new dependency);
+//! The mock server is a hand-rolled raw-TCP answer on the shared stoppable
+//! `loopback_support::LoopbackServer` (as `dictation_e2e.rs`: no new dependency; T-175);
 //! the key is saved through the settings service into the product `WinCredentialStore` under a
 //! throwaway target prefix, under `cred_support::serial()` (decisions #298 Q2). No verdict is a
 //! ceiling on a measured time (T-201): every wait is a positive wait or a named hang bound.
@@ -40,16 +41,16 @@
 
 mod call_shell_support;
 mod cred_support;
+mod loopback_support;
 mod timing_support;
 
 use std::fs;
 use std::io::{self, Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::TcpStream;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::thread;
 
 use call_shell_support::{
     eventually, holds_for_a_while, plain_opener, CallRig, WavSource, PUMP_MS,
@@ -103,34 +104,27 @@ struct Seen {
 
 /// A loopback server over raw TCP: every connection is read (head plus `Content-Length` body),
 /// recorded and answered with `status`; a `200` carries a timed transcription of one line.
+/// Runs on the shared [`loopback_support::LoopbackServer`], so it stops when dropped (T-175).
 struct Mock {
-    addr: SocketAddr,
+    server: loopback_support::LoopbackServer,
     seen: Arc<Mutex<Vec<Seen>>>,
 }
 
 impl Mock {
     fn start(status: u16) -> Mock {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind 127.0.0.1:0");
-        let addr = listener.local_addr().expect("local addr");
         let seen = Arc::new(Mutex::new(Vec::new()));
         let record = Arc::clone(&seen);
-        thread::spawn(move || {
-            for stream in listener.incoming() {
-                let Ok(stream) = stream else { continue };
-                let record = Arc::clone(&record);
-                thread::spawn(move || {
-                    if let Ok(request) = answer(stream, status) {
-                        lock(&record).push(request);
-                    }
-                });
+        let server = loopback_support::LoopbackServer::start(move |stream| {
+            if let Ok(request) = answer(stream, status) {
+                lock(&record).push(request);
             }
         });
-        Mock { addr, seen }
+        Mock { server, seen }
     }
 
     /// What the settings store: `http://127.0.0.1:<port>/v1`.
     fn base_url(&self) -> String {
-        format!("http://{}/v1", self.addr)
+        format!("http://{}/v1", self.server.addr())
     }
 
     fn requests(&self) -> Vec<Seen> {

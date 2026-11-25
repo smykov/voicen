@@ -165,7 +165,7 @@ fn overlay_window_may_listen_and_unlisten_its_state_event() {
 }
 
 #[test]
-fn overlay_window_gets_nothing_beyond_listen_and_unlisten() {
+fn overlay_window_gets_no_plugin_permission_beyond_listen_and_unlisten() {
     // Decision #45, row 5: the page cannot destroy (or otherwise drive) its own
     // window: the overlay thread is the window's only owner (analysis hypothesis
     // 2(a)). Guard (green before T-057: no capability at all; must stay green after).
