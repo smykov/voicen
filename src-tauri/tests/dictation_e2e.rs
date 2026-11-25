@@ -538,7 +538,15 @@ fn loopback_server_stops_on_drop() {
         !exited.load(Ordering::SeqCst),
         "premise: the accept thread is running before the drop"
     );
-    drop(server);
+    // `Drop` joins the accept thread, so a Drop that loses the stop flag (the wake-up connect is
+    // accepted, the loop does not break) or the wake-up (no accept returns) blocks for good.
+    // The drop runs on its own thread under the hang bound, so that is a named red, not a hung
+    // test. The thread of a hung drop is left behind (`within_hang`).
+    assert!(
+        timing_support::within_hang(move || drop(server)).is_some(),
+        "dropping the loopback server did not return within {HANG:?}: its Drop joins the \
+         accept thread, which was never told to stop (the stop flag, or the wake-up connect)"
+    );
     assert!(
         timing_support::eventually(|| exited.load(Ordering::SeqCst)),
         "the accept thread was still running {HANG:?} after its server was dropped"
