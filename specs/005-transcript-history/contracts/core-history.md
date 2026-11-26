@@ -20,7 +20,7 @@ pub enum HistoryOp { Load, Save, Delete }
 pub enum HistoryErrorKind { Io(std::io::ErrorKind), Corrupt }
 ```
 
-`EngineKind` may become a re-export of 004/001's engine enum when that exists (P-010); the serialized names above are the contract.
+`EngineKind` may become a re-export of 004/001's engine enum when that exists (P-010); the serialized names above are the contract. As built (T-022): `history::EngineKind` is its own three-variant enum and `EngineLabel::of(&Settings) -> Option<EngineLabel>` maps the settings' engine (`Api` -> `api` + `api.model`, `BuiltinLocal` -> `local` + `builtin_local.model_id`, `LocalServer` -> `server` + `local_server.model`; `None` for `EngineKind::None`, which never delivers). The stored file and the view serialize as written above (snake_case); the IPC wire is camelCase and is converted in the shell (ipc.md).
 
 ## Store trait (the platform/disk seam)
 
@@ -70,6 +70,41 @@ impl<S: HistoryStore> History<S> {
     pub fn view(&self) -> HistoryView;
 }
 ```
+
+## Sink, recorder and follower (as built, T-022)
+
+```rust
+// voicen_core::pipeline
+pub trait TranscriptSink: Send + Sync {
+    /// Called once per job whose text was delivered (Pasted | CopiedOnly | CopyManual), after
+    /// `delivery::deliver` returned Ok, with the text as delivered. Never for Failed, NoSpeech,
+    /// ClipboardUnavailable or a cancelled recording. Must not fail or block the job.
+    fn delivered(&self, text: &str, engine: EngineLabel);
+}
+pub struct PipelineDeps { /* ... */ pub transcript_sink: Arc<dyn TranscriptSink> }  // required, no default
+// test-fakes: pipeline::DiscardTranscripts keeps nothing
+
+// voicen_core::history
+pub type OnChange = Box<dyn Fn(HistoryView) + Send + Sync>;
+pub type OnError  = Box<dyn Fn(&HistoryError) + Send + Sync>;
+pub struct HistoryRecorder<S: HistoryStore> { /* Mutex<History<S>>, Arc<dyn Clock>, callbacks */ }
+impl<S: HistoryStore> HistoryRecorder<S> {
+    pub fn new(history: History<S>, clock: Arc<dyn Clock>, on_change: OnChange) -> Self; // errors dropped
+    pub fn with_errors(self, on_error: OnError) -> Self;       // called for every disk error
+    pub fn view(&self) -> HistoryView;                         // memory only
+    pub fn text_of(&self, id: u64) -> Option<String>;
+    pub fn clear(&self) -> HistoryView;
+    pub fn apply_settings(&self, enabled: bool, size: u32) -> HistoryView;
+}
+impl<S: HistoryStore> TranscriptSink for HistoryRecorder<S> { /* stamps clock.now() as UTC ms */ }
+
+/// Applies history.enabled / history.size of every snapshot from `SettingsService::subscribe()`;
+/// blocks until the channel closes (the shell runs it on its own thread).
+pub fn follow_settings<S: HistoryStore>(recorder: Arc<HistoryRecorder<S>>, rx: mpsc::Receiver<Arc<Settings>>);
+pub fn size_of(size: u32) -> u8;                               // settings size (1..=100) as u8, saturating
+```
+
+`on_change` runs with the new view after every operation that changed the view or its notice; `on_error` with each disk error. Both run under the recorder's lock (views arrive in order) and must not call back into the recorder. A disk error never reaches the caller of `delivered`: the shell logs it as `history_failed` (diagnostics contract). Why and the invariants: `docs/decisions/history.md`.
 
 ### Behavioural guarantees (each has a red test first, P-004)
 

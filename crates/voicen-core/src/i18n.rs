@@ -230,6 +230,8 @@ messages! {
     LOCAL_MODEL_NAME_LARGE_V3_TURBO_Q5_0 = "local_model.name.large-v3-turbo-q5_0",
     /// Tray menu item `TrayAction::OpenSettings` (T-052).
     TRAY_SETTINGS = "tray.settings",
+    /// Tray menu item `TrayAction::OpenHistory` (T-022, spec 005 FR-013).
+    TRAY_HISTORY = "tray.history",
     /// Tray menu item `TrayAction::OpenLogs` (T-071).
     TRAY_OPEN_LOGS = "tray.open_logs",
     /// Tray menu item `TrayAction::Retry`, shown while a retry is available (T-007,

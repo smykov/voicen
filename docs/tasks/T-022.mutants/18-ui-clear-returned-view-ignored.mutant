@@ -1,0 +1,13 @@
+guarantee: AC-2 UI: Clear -> list empty, the view history_clear returns is shown
+file: src/routes/history/+page.svelte
+added_by: test-writer
+test: node scripts/ui-test-select.mjs src/lib/history e2e/history.spec.ts
+--- old
+      const next = await clearHistory();
+      copyFailed = false;
+      apply(next);
+--- new
+      const next = await clearHistory();
+      copyFailed = false;
+      void next;
+--- end

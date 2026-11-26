@@ -1,0 +1,8 @@
+guarantee: AC-2: empty dictations create no entry (C9 blank never recorded)
+file: crates/voicen-core/src/history/mod.rs
+added_by: test-writer
+--- old
+        if !self.enabled || text.trim().is_empty() {
+--- new
+        if !self.enabled {
+--- end

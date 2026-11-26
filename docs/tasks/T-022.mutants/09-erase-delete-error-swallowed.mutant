@@ -1,0 +1,14 @@
+guarantee: AC-2: Clear / off -> file deleted (a failed deletion is not reported as done)
+file: crates/voicen-core/src/history/mod.rs
+added_by: test-writer
+--- old
+            Err(error) => error,
+        };
+--- new
+            Err(_) => {
+                self.pending = None;
+                self.notice = None;
+                return None;
+            }
+        };
+--- end

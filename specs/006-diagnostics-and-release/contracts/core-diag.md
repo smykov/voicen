@@ -51,6 +51,7 @@ pub enum LogEvent {
     AutostartReconcile(ReconcileAction),
     LogsRecovered,                                          // written by the log itself
     VadDetector { detector: DetectorTag },                  // `vad detector=<silero|energy|other>`, INFO (T-102, decisions #198): the one start line of a process that starts dictation, written by `src-tauri` `dictation::start_dictation`; a closed tag, never a path
+    HistoryFailed { op: HistoryOp, kind: HistoryFailKind },  // `history_failed op=<load|save|delete> kind=<corrupt|not_found|permission_denied|not_a_directory|read_only|storage_full|other>`, WARN (T-022, spec 005 FR-010/FR-011): a history disk operation failed; op and a closed kind only, never a path, OS text or entry text
 }   // later tasks add variants (data-model.md "LogEvent"); a variant is the only way to log something new
 
 pub struct DictationLine { pub recording: u64, /* T-170: pub end: Option<EndTag> */ pub engine: Option<EngineTag>, pub outcome: DictationOutcome,
