@@ -1,0 +1,2 @@
+# T-251: the green characterizations only (the red tests need the fix, so they are not in the baseline).
+cargo test -j 2 -p voicen-core --lib --test toast_support -- a_segment_without_a_lang_key write_atomic_removes_the_tmp probe_refuses_a_root export_under_a_file a_file_two_levels_up_the_path

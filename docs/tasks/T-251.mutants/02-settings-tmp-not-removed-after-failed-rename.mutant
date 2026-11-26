@@ -1,0 +1,8 @@
+guarantee: I4: a tmp this write created is removed when the rename fails (settings tail)
+file: crates/voicen-core/src/settings/file.rs
+added_by: test-writer
+--- old
+        if result.is_err() {
+--- new
+        if false {
+--- end

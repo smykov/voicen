@@ -384,6 +384,51 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn settings_write_atomic_leaves_a_tmp_it_could_not_open_as_found() {
+        // T-251 I4: one tmp+sync+rename tail with the call side's rule: a tmp path the write
+        // could not create is not ours, so it is left as found (the call side's
+        // `write_atomic` doc). `settings.json.tmp` is a dangling symlink into a folder that
+        // does not exist: File::create fails (as root too) and remove_file would succeed in
+        // deleting the link. Bite: the cleanup after a failed create kept (the link is gone);
+        // the failure swallowed (Ok); settings.json touched.
+        let dir = TempDir::new();
+        let file = FsSettingsFile::new(dir.path().to_path_buf());
+        file.write_atomic(b"{\"old\":true}").expect("first");
+        let tmp = dir.path().join(TMP_FILE);
+        let void = dir.path().join("no-such-folder").join("target");
+        std::os::unix::fs::symlink(&void, &tmp).expect("dangling tmp");
+        file.write_atomic(b"{\"new\":true}")
+            .expect_err("the tmp cannot be opened");
+        assert!(
+            fs::symlink_metadata(&tmp)
+                .expect("the tmp is still there")
+                .file_type()
+                .is_symlink(),
+            "the tmp it could not open was removed"
+        );
+        assert_eq!(fs::read_link(&tmp).expect("link"), void);
+        assert_eq!(
+            fs::read(dir.path().join(SETTINGS_FILE)).expect("settings.json"),
+            b"{\"old\":true}"
+        );
+        assert!(!void.exists(), "nothing was created behind the link");
+    }
+
+    #[test]
+    fn write_atomic_removes_the_tmp_it_created_when_the_rename_fails() {
+        // T-251 I4 characterization (green before and after): a tmp this write created is
+        // removed when the rename fails (settings.json is a folder, so the rename cannot
+        // replace it). Bite: no cleanup after the tail's failure.
+        let dir = TempDir::new();
+        fs::create_dir(dir.path().join(SETTINGS_FILE)).expect("folder at settings.json");
+        let file = FsSettingsFile::new(dir.path().to_path_buf());
+        file.write_atomic(b"{}")
+            .expect_err("the rename onto a folder fails");
+        assert_eq!(entries(dir.path()), vec![SETTINGS_FILE.to_string()]);
+    }
+
     #[test]
     fn move_aside_with_every_name_taken_fails_and_keeps_file() {
         // Bite: a plain rename into a taken name (overwrites an earlier backup), a

@@ -200,3 +200,19 @@ fn a_path_through_a_regular_file_is_not_a_directory_whatever_the_error_says() {
         LogsUnwritableReason::NotADirectory
     );
 }
+
+#[test]
+fn a_file_two_levels_up_the_path_is_not_a_directory_too() {
+    // T-251 I3 characterization (green before and after, the shared ancestor helper must
+    // keep it): the walk reaches the file wherever it is on the path, not only at the
+    // parent. Bite: the check reduced to the immediate parent.
+    let tmp = TempDir::new();
+    let file = tmp.path().join("plain");
+    std::fs::write(&file, b"x").expect("plant a file");
+    let under = file.join("a").join("logs");
+    let denied = io::Error::new(io::ErrorKind::PermissionDenied, "x");
+    assert_eq!(
+        LogsUnwritableReason::of(&under, &denied),
+        LogsUnwritableReason::NotADirectory
+    );
+}

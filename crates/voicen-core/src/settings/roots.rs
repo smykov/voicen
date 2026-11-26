@@ -251,18 +251,29 @@ mod tests {
         let under = file.join("calls");
         let got = fs_roots.probe(&under);
         // Unix says "not a directory" for a path below a file; Windows says "path not
-        // found". Either way the root is refused, never created.
-        #[cfg(unix)]
+        // found" and the nearest existing ancestor decides (T-251 I3, decision #372): the
+        // answer is `NotAFolder` on every OS, never `Missing`.
         assert_eq!(got, Err(UnwritableReason::NotAFolder));
-        #[cfg(not(unix))]
-        assert!(
-            matches!(
-                got,
-                Err(UnwritableReason::NotAFolder | UnwritableReason::Missing)
-            ),
-            "{got:?}"
-        );
         assert!(file.is_file(), "the file is still a file");
+    }
+
+    #[test]
+    fn probe_refuses_a_root_two_levels_under_a_regular_file_as_not_a_folder() {
+        // T-251 I3: the file is not the root's parent but higher up. Windows reports
+        // "path not found" for it (red on Windows CI before the fix; Unix answers ENOTDIR
+        // already). Bite: the immediate-parent rule; a walk that stops at the first missing
+        // part; the root created below the file.
+        let dir = TempDir::new();
+        let (fs_roots, _) = roots(&dir);
+        let file = dir.path().join("a-file");
+        fs::write(&file, b"x").expect("write");
+        let under = file.join("sub").join("calls");
+        assert_eq!(fs_roots.probe(&under), Err(UnwritableReason::NotAFolder));
+        assert!(file.is_file(), "the file is still a file");
+        // A root whose nearest existing ancestor is a folder is only missing.
+        let gone = dir.path().join("nope").join("calls");
+        assert_eq!(fs_roots.probe(&gone), Err(UnwritableReason::Missing));
+        assert!(!dir.path().join("nope").exists(), "nothing created");
     }
 
     #[test]
