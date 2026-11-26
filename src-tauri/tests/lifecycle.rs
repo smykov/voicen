@@ -1012,10 +1012,18 @@ fn a_destroyed_history_window_is_built_again_by_the_next_open() {
         if report.gone {
             voicen_lib::history::open_history(&handle);
             report.second = eventually(|| handle.get_webview_window(label).is_some());
-            report.second_path = handle
-                .get_webview_window(label)
-                .and_then(|w| w.url().ok())
-                .map(|url| url.path().to_string());
+            // On Wry `url()` is WebView2's `Source`: `about:blank` (path `blank`) until the
+            // build's asynchronous `Navigate` updates it (wry 0.57.0 webview2 `url_from_webview`,
+            // Windows CI run 45657766119), so the path is awaited, and the last one read is
+            // what the assertion sees.
+            let path_now = || {
+                handle
+                    .get_webview_window(label)
+                    .and_then(|w| w.url().ok())
+                    .map(|url| url.path().to_string())
+            };
+            eventually(|| path_now().as_deref() == Some("/history"));
+            report.second_path = path_now();
             report.history_windows = handle
                 .webview_windows()
                 .keys()
