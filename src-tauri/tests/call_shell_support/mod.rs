@@ -95,6 +95,9 @@ pub const CWD: &str = r"C:\Users\fake-user";
 pub const START_MS: u64 = 5_000;
 pub const PUMP_MS: u64 = 2_000;
 
+/// The length of one WAV track block (ms), and the step of `WavSource::pump_for` (T-266).
+const BLOCK_MS: u64 = 20;
+
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
 }
@@ -209,17 +212,30 @@ impl WavSource {
     }
 
     /// T-139: pushes the due blocks of every track opened so far, up to `START_MS + ms`.
+    ///
+    /// T-266: the tracks are fed in stamp order: every opened track is stepped together, one
+    /// block (`BLOCK_MS`) at a time, so the latest stamp fed to one track never leads another
+    /// track's by more than one block (below the writer's 200 ms hold-off; a whole span per
+    /// track in turn let `Writer::advance` zero-fill the lagging live track, F-037).
     pub fn pump_for(&self, ms: u64) {
-        for source in lock(&self.opened).iter() {
-            source.pump(CaptureStamp::from_ms(START_MS + ms));
+        let opened = lock(&self.opened);
+        let mut step: u64 = 0;
+        loop {
+            let to = step.min(ms);
+            for source in opened.iter() {
+                source.pump(CaptureStamp::from_ms(START_MS + to));
+            }
+            if to == ms {
+                break;
+            }
+            step += BLOCK_MS;
         }
     }
 
-    /// Pushes the due blocks of every track opened so far, up to `START_MS + PUMP_MS`.
+    /// Pushes the due blocks of every track opened so far, up to `START_MS + PUMP_MS`, in stamp
+    /// order (`pump_for(PUMP_MS)`).
     pub fn pump(&self) {
-        for source in lock(&self.opened).iter() {
-            source.pump(CaptureStamp::from_ms(START_MS + PUMP_MS));
-        }
+        self.pump_for(PUMP_MS);
     }
 
     /// How many tracks were opened.
@@ -283,7 +299,7 @@ impl TrackSource for WavSource {
     ) -> Result<(Box<dyn CaptureHandle>, EndpointId), OpenError> {
         let source = WavTrackSource::from_bytes(&self.wav)
             .map_err(|_| OpenError::Other)?
-            .with_block_ms(20)
+            .with_block_ms(BLOCK_MS)
             .with_start(CaptureStamp::from_ms(START_MS));
         let source = Arc::new(source);
         let (inner, endpoint) = source.open(track, device, sink)?;
