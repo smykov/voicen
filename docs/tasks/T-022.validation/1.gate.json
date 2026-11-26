@@ -1,0 +1,13 @@
+{
+ "agent_id": "a8f2994536519a1b7",
+ "agent_type": "task-validator",
+ "commit": "bd8c34ec06cb2e6bc1e2c8e033d99cd61287e767",
+ "gate": "validation",
+ "path": "docs/tasks/T-022.validation/1.md",
+ "round": 1,
+ "session_id": "c076ba22-370e-4996-aba9-f62116eb2003",
+ "sha256": "2725efc8d2241cefebde8dd1edd509972a679c82636974d9e148dc659e183393",
+ "task": "T-022",
+ "ts": "2026-11-26T06:07:15Z",
+ "verdict": "NEEDS_OWNER"
+}
