@@ -1,0 +1,8 @@
+guarantee: AC-1: settings_get returns the registrar's call-slot failure
+file: crates/voicen-core/src/settings/service.rs
+added_by: test-writer
+--- old
+            call_hotkey_unavailable: self.deps.hotkeys.call_hotkey_unavailable(),
+--- new
+            call_hotkey_unavailable: false,
+--- end

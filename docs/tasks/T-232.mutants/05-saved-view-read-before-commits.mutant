@@ -1,0 +1,23 @@
+guarantee: AC-3: the Saved view reads the cleared state
+file: crates/voicen-core/src/settings/service.rs
+added_by: test-writer
+--- old
+        for prepared in [prepared, prepared_call].into_iter().flatten() {
+            self.deps.hotkeys.commit(prepared);
+        }
+        let warnings = save_warnings(&settings);
+        let snapshot = self.swap_and_publish(settings);
+        SaveOutcome::Saved {
+            view: self.view_with((*snapshot).clone(), presence_after),
+--- new
+        let before = self.deps.hotkeys.call_hotkey_unavailable();
+        for prepared in [prepared, prepared_call].into_iter().flatten() {
+            self.deps.hotkeys.commit(prepared);
+        }
+        let warnings = save_warnings(&settings);
+        let snapshot = self.swap_and_publish(settings);
+        let mut stale = self.view_with((*snapshot).clone(), presence_after);
+        stale.call_hotkey_unavailable = before;
+        SaveOutcome::Saved {
+            view: stale,
+--- end

@@ -1,0 +1,16 @@
+guarantee: AC-3: mark clears after a call-slot save registers
+file: crates/voicen-core/src/hotkey_registrar.rs
+added_by: test-writer
+--- old
+            state.call_hotkey_unavailable = false;
+        }
+    }
+
+    fn call_hotkey_unavailable
+--- new
+            let _ = 0;
+        }
+    }
+
+    fn call_hotkey_unavailable
+--- end
